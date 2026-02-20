@@ -179,3 +179,12 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# Local runtime artifacts
+data/
+.DS_Store
+
+# PlatformIO / embedded build output
+.pio/
+.pioenvs/
+.piolibdeps/

@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "minimappr"
+version = "0.1.0"
+description = "Realtime environmental awareness: distributed sound localization + classification + common operating picture"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.116,<1.0",
+    "uvicorn[standard]>=0.35,<1.0",
+    "numpy>=1.26,<2.3",
+    "scipy>=1.11,<1.17",
+    "pydantic>=2.8,<3.0",
+    "aiosqlite>=0.21,<1.0",
+    "httpx>=0.28,<1.0",
+]
+
+[project.optional-dependencies]
+yamnet = [
+    "tensorflow>=2.19,<3.0",
+    "tensorflow-hub>=0.16,<1.0",
+]
+dev = [
+    "pytest>=8.2,<9.0",
+    "pytest-asyncio>=0.23,<2.0",
+]
+
+[project.scripts]
+minimappr-demo = "minimappr.sim.run_demo:main"
+
+[tool.setuptools.packages.find]
+include = ["minimappr*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

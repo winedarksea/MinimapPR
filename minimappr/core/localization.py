@@ -1,0 +1,166 @@
+"""TDOA-based source localization using GCC-PHAT and least squares."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+from scipy.optimize import least_squares
+
+from minimappr.models import LocalizationResult
+from minimappr.utils.audio import rms
+
+
+class LocalizationError(RuntimeError):
+    pass
+
+
+def speed_of_sound_mps(temperature_c: float, humidity_fraction: float) -> float:
+    humidity_percent = max(0.0, min(1.0, humidity_fraction)) * 100.0
+    return 331.3 + (0.606 * temperature_c) + (0.0124 * humidity_percent)
+
+
+def gcc_phat(
+    signal: np.ndarray,
+    reference_signal: np.ndarray,
+    sample_rate_hz: int,
+    max_tau_s: float,
+    interp: int = 4,
+) -> tuple[float, float]:
+    n = signal.size + reference_signal.size
+    if n <= 0:
+        return 0.0, 0.0
+
+    sig = np.fft.rfft(signal, n=n)
+    ref = np.fft.rfft(reference_signal, n=n)
+    response = sig * np.conj(ref)
+
+    denom = np.abs(response)
+    denom[denom < 1e-12] = 1e-12
+    cross_corr = np.fft.irfft(response / denom, n=interp * n)
+
+    max_shift = int(interp * sample_rate_hz * max_tau_s)
+    max_shift = max(1, min(max_shift, cross_corr.size // 2))
+
+    cross_corr = np.concatenate((cross_corr[-max_shift:], cross_corr[: max_shift + 1]))
+    peak_index = int(np.argmax(np.abs(cross_corr)))
+    shift = peak_index - max_shift
+    tau = shift / float(interp * sample_rate_hz)
+
+    peak = float(np.abs(cross_corr[peak_index]))
+    return tau, peak
+
+
+@dataclass(slots=True)
+class LocalizationEngine:
+    max_tau_s: float = 0.02
+
+    def localize(
+        self,
+        sensor_positions: dict[str, np.ndarray],
+        sensor_windows: dict[str, np.ndarray],
+        sample_rate_hz: int,
+        temperature_c: float,
+        humidity_fraction: float,
+    ) -> LocalizationResult:
+        if len(sensor_windows) < 4:
+            raise LocalizationError("Need at least 4 active sensors for 3D TDOA localization")
+
+        sensor_ids = sorted(sensor_windows.keys())
+        energies = {sensor_id: rms(sensor_windows[sensor_id]) for sensor_id in sensor_ids}
+        reference_sensor = max(energies.items(), key=lambda item: item[1])[0]
+        reference_signal = sensor_windows[reference_sensor]
+        ref_pos = sensor_positions[reference_sensor]
+
+        tdoa_s: dict[str, float] = {}
+        peaks: list[float] = []
+        meas_ids: list[str] = []
+
+        for sensor_id in sensor_ids:
+            if sensor_id == reference_sensor:
+                continue
+            tau_s, peak = gcc_phat(
+                signal=sensor_windows[sensor_id],
+                reference_signal=reference_signal,
+                sample_rate_hz=sample_rate_hz,
+                max_tau_s=self.max_tau_s,
+            )
+            tdoa_s[sensor_id] = tau_s
+            peaks.append(peak)
+            meas_ids.append(sensor_id)
+
+        if len(meas_ids) < 3:
+            raise LocalizationError("Insufficient independent TDOA measurements")
+
+        sound_speed = speed_of_sound_mps(temperature_c=temperature_c, humidity_fraction=humidity_fraction)
+
+        points = np.vstack([sensor_positions[sid] for sid in sensor_ids])
+        x0 = np.mean(points, axis=0)
+
+        def residuals(position: np.ndarray) -> np.ndarray:
+            dist_ref = np.linalg.norm(position - ref_pos) + 1e-9
+            rows = []
+            for sid in meas_ids:
+                dist_i = np.linalg.norm(position - sensor_positions[sid]) + 1e-9
+                predicted = (dist_i - dist_ref) / sound_speed
+                rows.append(predicted - tdoa_s[sid])
+            return np.asarray(rows, dtype=np.float64)
+
+        solved = least_squares(residuals, x0=x0, method="trf", loss="soft_l1")
+        if not solved.success:
+            raise LocalizationError("TDOA least-squares solve failed")
+
+        position = solved.x
+        residual = residuals(position)
+        rmse_s = float(np.sqrt(np.mean(np.square(residual))))
+        tau_scale = max(max(abs(v) for v in tdoa_s.values()), 1e-5)
+        confidence = max(0.0, min(1.0, 1.0 - (rmse_s / tau_scale)))
+
+        gdop = self._gdop(
+            position=position,
+            meas_ids=meas_ids,
+            sensor_positions=sensor_positions,
+            reference_sensor=reference_sensor,
+            sound_speed=sound_speed,
+        )
+
+        # Correlation peak quality can significantly degrade when SNR is poor.
+        if peaks:
+            confidence *= float(np.clip(np.mean(peaks), 0.0, 1.0))
+
+        return LocalizationResult(
+            position_m=(float(position[0]), float(position[1]), float(position[2])),
+            confidence=float(np.clip(confidence, 0.0, 1.0)),
+            gdop=gdop,
+            reference_sensor=reference_sensor,
+            tdoa_s=tdoa_s,
+        )
+
+    @staticmethod
+    def _gdop(
+        position: np.ndarray,
+        meas_ids: list[str],
+        sensor_positions: dict[str, np.ndarray],
+        reference_sensor: str,
+        sound_speed: float,
+    ) -> float:
+        ref_pos = sensor_positions[reference_sensor]
+        dist_ref = np.linalg.norm(position - ref_pos) + 1e-9
+
+        jacobian_rows: list[np.ndarray] = []
+        for sid in meas_ids:
+            pos_i = sensor_positions[sid]
+            dist_i = np.linalg.norm(position - pos_i) + 1e-9
+
+            grad = ((position - pos_i) / (dist_i * sound_speed)) - (
+                (position - ref_pos) / (dist_ref * sound_speed)
+            )
+            jacobian_rows.append(grad)
+
+        jacobian = np.vstack(jacobian_rows)
+        info = jacobian.T @ jacobian
+        if np.linalg.cond(info) > 1e12:
+            return float("inf")
+
+        covariance = np.linalg.pinv(info)
+        return float(np.sqrt(np.trace(covariance)))

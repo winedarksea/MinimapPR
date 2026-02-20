@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MinimapPR</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>MinimapPR</h1>
+      <p>Realtime acoustic localization and classification</p>
+      <div id="status">Connecting...</div>
+    </header>
+
+    <main>
+      <section class="panel map-panel">
+        <canvas id="map" width="980" height="520"></canvas>
+        <div class="legend">
+          <span><i class="dot node"></i> Nodes</span>
+          <span><i class="dot track"></i> Tracks</span>
+          <span><i class="dot det"></i> Detections</span>
+        </div>
+      </section>
+
+      <section class="panel metrics">
+        <div><strong id="nodeCount">0</strong><small>Nodes</small></div>
+        <div><strong id="trackCount">0</strong><small>Tracks</small></div>
+        <div><strong id="detCount">0</strong><small>Detections</small></div>
+      </section>
+
+      <section class="panel table-panel">
+        <h2>Recent Detections</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Label</th>
+              <th>Confidence</th>
+              <th>Track</th>
+              <th>Position (m)</th>
+            </tr>
+          </thead>
+          <tbody id="detectionsTable"></tbody>
+        </table>
+      </section>
+    </main>
+
+    <script src="/static/app.js" type="module"></script>
+  </body>
+</html>

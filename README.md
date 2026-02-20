@@ -1,2 +1,171 @@
 # MinimapPR
-Realtime sensor awareness
+Realtime environmental awareness: distributed sound localization + classification + common operating picture.
+
+This repository now includes a complete first-delivery MVP focused on the base case you asked for:
+- functional two-node ingestion model (point node + Sirith tetrahedral array node)
+- functional sound localization backend (TDOA with GCC-PHAT)
+- basic classifier subsystem with pluggable backend design
+- real-time track updates and persistent event storage
+- minimal frontend map/COP view
+
+## First Delivery Scope (Implemented)
+- `FastAPI` backend for node ingestion, localization, classification, tracking, and APIs
+- queue-driven fusion node runtime (ingest stage decoupled from localization/classification workers)
+- `SQLite` persistence for nodes, detections, and tracks
+- automatic snippet retention cleanup (self-cleaning raw audio extracts)
+- live websocket feed to frontend
+- minimal frontend dashboard for nodes/tracks/detections
+- deterministic simulation stream with both required node types
+
+## Project Layout
+- `minimappr/main.py`: API server + lifecycle
+- `minimappr/core/`: buffering, localization, tracking, fusion-node orchestration
+- `minimappr/classifiers/`: classifier interface, heuristic backend, optional YAMNet backend
+- `minimappr/storage/db.py`: SQLite schema + persistence
+- `minimappr/frontend/`: basic web UI
+- `minimappr/sim/run_demo.py`: realtime two-node simulator (point + Sirith tetra)
+- `firmware/`: shared embedded node runtime + Sirith/point firmware targets
+- `tests/`: localization and classifier tests
+
+## Quick Start
+1. Create environment and install dependencies.
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+2. Start server.
+```bash
+uvicorn minimappr.main:app --host 0.0.0.0 --port 8080 --reload
+```
+
+3. In a second terminal, run two-node live demo stream.
+```bash
+source .venv/bin/activate
+python -m minimappr.sim.run_demo --server http://127.0.0.1:8080
+```
+
+4. Open UI.
+- `http://127.0.0.1:8080`
+
+You should see nodes appear, detections populate, and tracks move on the map.
+
+## Node Types in MVP
+### 1) Point node (ESP32-style stream node)
+- Single-channel microphone stream
+- Node type: `point`
+- Intended for GPS/PPS-timestamped network localization
+
+### 2) Sirith tetrahedral node
+- Four-channel array stream
+- Node type: `sirith_tetra`
+- Default geometry: regular tetrahedron with 50 mm edge (`schematics` kept for hardware reference)
+- In this MVP it contributes 4 independent channels to the backend solver
+
+## Firmware (ESP32)
+Firmware projects are in `firmware/`:
+- `firmware/lib/minimap_node_core`: shared node runtime/protocol/transport
+- `firmware/lib/minimap_audio_esp32`: ESP32 I2S audio sources
+- `firmware/nodes/sirith_tetra`: Sirith tetrahedral node firmware (dual-I2S -> 4 channels)
+- `firmware/nodes/point_single_mic`: reference point node firmware
+
+Full firmware setup and build instructions are in `firmware/README.md`.
+
+## Ingestion Protocol (Current)
+Endpoint: `POST /api/v1/ingest/frame`
+
+Payload:
+```json
+{
+  "node": {
+    "id": "point-node-01",
+    "node_type": "point",
+    "position_m": [0.0, 0.0, 2.0],
+    "sensor_offsets_m": [[0.0, 0.0, 0.0]],
+    "capabilities": ["audio", "gps_pps"],
+    "metadata": {}
+  },
+  "frame": {
+    "start_time_ns": 1739810000000000000,
+    "sample_rate_hz": 16000,
+    "channels": 1,
+    "encoding": "pcm16le",
+    "samples_b64": "...",
+    "sequence": 42
+  }
+}
+```
+
+Notes:
+- audio payload is interleaved `pcm16le`, base64 encoded
+- `frame.channels` must match `len(node.sensor_offsets_m)`
+- timestamps are per-frame start timestamps in `ns`
+- response `triggered=true` means an event candidate was queued for fusion workers; detection emission is asynchronous
+
+## Processing Pipeline
+1. Ingest timestamped audio frames.
+2. Append channel streams to rolling per-sensor buffers.
+3. Trigger candidate events from frame RMS threshold.
+4. Enqueue trigger candidates to fusion workers.
+5. Build synchronized multi-sensor windows.
+6. Run GCC-PHAT TDOA measurement and nonlinear 3D solve.
+7. Classify event audio (heuristic baseline, pluggable backend).
+8. Associate/update track.
+9. Persist detection + track and emit live websocket event.
+10. Save mono snippet for retention window; periodic cleanup removes expired snippets.
+
+## Classifier System
+Implemented classifier architecture is pluggable:
+- default: `heuristic` (fast baseline labels: `bird_like`, `speech_like`, `impulse`, `machine_hum`, `ambient`, `unknown`)
+- optional: `yamnet` (if TensorFlow dependencies are installed)
+
+Set backend with:
+```bash
+export MINIMAPPR_CLASSIFIER=heuristic
+# or
+export MINIMAPPR_CLASSIFIER=yamnet
+```
+
+## API Endpoints
+- `GET /health`
+- `GET /api/v1/config`
+- `GET /api/v1/fusion/status`
+- `POST /api/v1/ingest/frame`
+- `GET /api/v1/nodes`
+- `GET /api/v1/detections?limit=100`
+- `GET /api/v1/tracks?limit=200`
+- `WS /ws/live`
+
+## Runtime Configuration
+Key env vars:
+- `MINIMAPPR_HOST` (default `0.0.0.0`)
+- `MINIMAPPR_PORT` (default `8080`)
+- `MINIMAPPR_DB_PATH` (default `data/minimappr.db`)
+- `MINIMAPPR_SNIPPET_DIR` (default `data/snippets`)
+- `MINIMAPPR_SNIPPET_RETENTION_SECONDS` (default `3600`)
+- `MINIMAPPR_TRIGGER_RMS` (default `0.015`)
+- `MINIMAPPR_TRIGGER_COOLDOWN_SECONDS` (default `0.8`)
+- `MINIMAPPR_LOCALIZATION_WINDOW_SECONDS` (default `0.08`)
+- `MINIMAPPR_CLASSIFIER` (`heuristic` or `yamnet`)
+- `MINIMAPPR_TRACKING_FILTER` (`linear` default, or `kalman`)
+- `MINIMAPPR_KALMAN_PROCESS_NOISE` (default `2.0`)
+- `MINIMAPPR_KALMAN_MEASUREMENT_NOISE` (default `1.5`)
+- `MINIMAPPR_KALMAN_INITIAL_POSITION_VARIANCE` (default `4.0`)
+- `MINIMAPPR_KALMAN_INITIAL_VELOCITY_VARIANCE` (default `16.0`)
+- `MINIMAPPR_FUSION_WORKER_COUNT` (default `1`)
+- `MINIMAPPR_FUSION_EVENT_QUEUE_SIZE` (default `256`)
+
+## Testing
+```bash
+source .venv/bin/activate
+pytest -q
+```
+
+## Roadmap Foundation Included
+This MVP lays groundwork for the broader goals in your notes/proposals:
+- additional sensor modalities
+- richer model chaining (speech/STT/Home Assistant integration)
+- federated fusion server topology
+- richer COP layers (GDOP overlays, zones, alerting policies)
+- advanced tracking and multi-hypothesis association
