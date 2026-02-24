@@ -1,0 +1,8 @@
+{
+  "name": "minimap_audio_esp32",
+  "version": "0.1.0",
+  "description": "ESP32 audio source implementations for MinimapPR nodes",
+  "keywords": ["esp32", "i2s", "audio", "minimappr"],
+  "frameworks": ["arduino"],
+  "platforms": ["espressif32"]
+}

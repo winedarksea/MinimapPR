@@ -5,7 +5,9 @@ This directory contains embedded firmware projects and shared libraries for Mini
 ## Layout
 - `lib/minimap_node_core`: shared runtime used by all node types
 - `lib/minimap_audio_esp32`: ESP32 audio source drivers
+- `lib/minimap_audio_pico`: RP2040/RP2350 Pico audio source drivers
 - `nodes/sirith_tetra`: Sirith tetrahedral firmware target (4-channel, dual I2S)
+- `nodes/sirith_tetra_pico`: Sirith tetrahedral Pico W firmware target (4-channel, TDM)
 - `nodes/point_single_mic`: reference point-node firmware target
 
 ## Shared Runtime (`minimap_node_core`)
@@ -40,6 +42,39 @@ pio run
 pio run -t upload
 pio device monitor
 ```
+
+## Sirith Pico Firmware (`nodes/sirith_tetra_pico`)
+Pico W / Pico 2 W target for Sirith in **TDM-4 mode** using RP2040/RP2350 PIO:
+- Pico drives `BCLK` and `FSYNC` (master mode)
+- Pico samples `SDATA` and reconstructs four 32-bit slots per frame
+- default slot map expects top microphone (MK4) in Slot 3
+
+### Default pin map
+- `TX` (GPS optional): `GP12`
+- `RX` (GPS optional): `GP13`
+- `PPS` (GPS optional): `GP10`
+- `SCL`: `GP19`
+- `SDA`: `GP18`
+- `TDM SDATA`: `GP7`
+- `TDM BCLK`: `GP8`
+- `TDM WS/FSYNC`: `GP9`
+
+### Configure
+Edit `nodes/sirith_tetra_pico/include/node_config.h`:
+- WiFi credentials and backend endpoint
+- TDM slot/channel mapping
+- optional GPS and I2C pins
+- base-plane rotation (`kBasePlaneRotationSteps`) for manual orientation calibration
+- optional LIS2MDLTR auto-orientation smoothing and stability thresholds
+
+### Build and Upload
+From `firmware/nodes/sirith_tetra_pico`:
+```bash
+pio run -e sirith_tetra_pico_w_rp2040
+pio run -e sirith_tetra_pico_w_rp2040 -t upload
+pio device monitor
+```
+This target uses the `maxgerhardt/platform-raspberrypi` PlatformIO platform in `platformio.ini` for Pico W / Pico 2 W board definitions.
 
 ## Point Node Reference (`nodes/point_single_mic`)
 A single-mic ESP32 target built on the same shared runtime and protocol.

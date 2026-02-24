@@ -63,11 +63,13 @@ You should see nodes appear, detections populate, and tracks move on the map.
 - Default geometry: regular tetrahedron with 50 mm edge (`schematics` kept for hardware reference)
 - In this MVP it contributes 4 independent channels to the backend solver
 
-## Firmware (ESP32)
+## Firmware (ESP32 + Pico)
 Firmware projects are in `firmware/`:
 - `firmware/lib/minimap_node_core`: shared node runtime/protocol/transport
 - `firmware/lib/minimap_audio_esp32`: ESP32 I2S audio sources
+- `firmware/lib/minimap_audio_pico`: RP2040/RP2350 Pico TDM audio sources
 - `firmware/nodes/sirith_tetra`: Sirith tetrahedral node firmware (dual-I2S -> 4 channels)
+- `firmware/nodes/sirith_tetra_pico`: Sirith tetrahedral Pico W / Pico 2 W firmware (TDM-4)
 - `firmware/nodes/point_single_mic`: reference point node firmware
 
 Full firmware setup and build instructions are in `firmware/README.md`.

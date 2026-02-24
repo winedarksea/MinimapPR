@@ -1,0 +1,8 @@
+{
+  "name": "minimap_audio_pico",
+  "version": "0.1.0",
+  "description": "RP2040/RP2350 Pico audio source implementations for MinimapPR nodes",
+  "keywords": ["rp2040", "rp2350", "pico", "tdm", "audio", "minimappr"],
+  "frameworks": ["arduino"],
+  "platforms": ["raspberrypi"]
+}
