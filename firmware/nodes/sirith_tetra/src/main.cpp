@@ -1,9 +1,11 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <Wire.h>
 
 #include "node_config.h"
 
 #include "mmpr/HttpFramePublisher.h"
+#include "mmpr/Lsm6TemperatureSource.h"
 #include "mmpr/NodeClock.h"
 #include "mmpr/NodeRunner.h"
 #include "mmpr/SirithDualI2SSource.h"
@@ -29,8 +31,20 @@ const mmpr::NodeDescriptor kNodeDescriptor = {
 
 mmpr::SirithDualI2SSource gAudioSource(nodecfg::kI2sPins, nodecfg::kAudioConfig);
 mmpr::HttpFramePublisher gPublisher(nodecfg::kServerBaseUrl, nodecfg::kIngestPath, nodecfg::kHttpTimeoutMs);
+mmpr::Lsm6TemperatureSourceConfig gImuTempConfig = {
+    nodecfg::kImuI2cAddressPrimary7Bit,
+    nodecfg::kImuI2cAddressSecondary7Bit,
+    nodecfg::kImuTemperatureSampleIntervalMs,
+};
+mmpr::Lsm6TemperatureSource gImuTempSource(Wire, gImuTempConfig);
 mmpr::NodeClock gClock;
-mmpr::NodeRunner gRunner(kNodeDescriptor, gAudioSource, gPublisher, gClock, nodecfg::kLogEveryFrames);
+mmpr::NodeRunner gRunner(
+    kNodeDescriptor,
+    gAudioSource,
+    gPublisher,
+    gClock,
+    nodecfg::kLogEveryFrames,
+    nodecfg::kEnableImuTemperature ? static_cast<mmpr::IEnvironmentalSource*>(&gImuTempSource) : nullptr);
 
 }  // namespace
 
@@ -39,6 +53,13 @@ void setup() {
   delay(250);
 
   Serial.println("[sirith] booting");
+
+  if (nodecfg::kEnableImuTemperature) {
+    Wire.setSDA(nodecfg::kI2cSdaPin);
+    Wire.setSCL(nodecfg::kI2cSclPin);
+    Wire.begin();
+    Serial.println("[sirith] IMU temperature telemetry enabled (optional)");
+  }
 
   const bool wifiConnected = mmpr::connectWiFiBlocking(
       nodecfg::kWifiSsid,

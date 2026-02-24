@@ -30,6 +30,7 @@ static constexpr mmpr::Vec3 kSensorOffsetsM[] = {
 static constexpr const char* kCapabilities[] = {
     "audio",
     "array_localization",
+    "temperature",
 };
 
 static constexpr const char* kHardwareName = "sirith_tetra_dual_i2s";
@@ -54,6 +55,15 @@ static constexpr mmpr::SirithDualI2SConfig kAudioConfig = {
     256,
     false,
 };
+
+// --- Optional IMU temperature telemetry (LSM6 family) ---
+// Update I2C pin mapping for your ESP32-S3 board wiring.
+static constexpr bool kEnableImuTemperature = true;
+static constexpr int kI2cSdaPin = 3;
+static constexpr int kI2cSclPin = 4;
+static constexpr uint8_t kImuI2cAddressPrimary7Bit = 0x6A;
+static constexpr uint8_t kImuI2cAddressSecondary7Bit = 0x6B;
+static constexpr uint32_t kImuTemperatureSampleIntervalMs = 2000;
 
 // --- Time sync ---
 static constexpr bool kEnableNtpSync = true;

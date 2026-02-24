@@ -60,6 +60,14 @@ bool HttpFramePublisher::parseEndpoint() {
 }
 
 PublishResult HttpFramePublisher::publish(const NodeDescriptor& node, const AudioFrame& frame, bool keepResponseBody) {
+  return publish(node, frame, nullptr, keepResponseBody);
+}
+
+PublishResult HttpFramePublisher::publish(
+    const NodeDescriptor& node,
+    const AudioFrame& frame,
+    const EnvironmentalSample* environment,
+    bool keepResponseBody) {
   PublishResult result = {false, -1, String()};
 
   if (!endpointValid_) {
@@ -73,7 +81,7 @@ PublishResult HttpFramePublisher::publish(const NodeDescriptor& node, const Audi
   }
 
   String payload;
-  if (!buildIngestPayload(node, frame, payload)) {
+  if (!buildIngestPayload(node, frame, environment, payload)) {
     result.statusCode = -2;
     return result;
   }

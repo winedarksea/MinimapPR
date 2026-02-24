@@ -44,6 +44,12 @@ struct AudioFrame {
   size_t samplesPerChannel;
 };
 
+struct EnvironmentalSample {
+  bool hasTemperatureC = false;
+  float temperatureC = 0.0f;
+  const char* temperatureSource = nullptr;
+};
+
 struct PublishResult {
   bool ok;
   int statusCode;

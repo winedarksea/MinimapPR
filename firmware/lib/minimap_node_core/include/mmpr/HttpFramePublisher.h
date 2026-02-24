@@ -11,6 +11,11 @@ class HttpFramePublisher {
   HttpFramePublisher(const char* serverBaseUrl, const char* ingestPath, uint32_t timeoutMs);
 
   PublishResult publish(const NodeDescriptor& node, const AudioFrame& frame, bool keepResponseBody = false);
+  PublishResult publish(
+      const NodeDescriptor& node,
+      const AudioFrame& frame,
+      const EnvironmentalSample* environment,
+      bool keepResponseBody = false);
 
   const String& endpointUrl() const { return endpointUrl_; }
 

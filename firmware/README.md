@@ -18,6 +18,7 @@ Common pieces used by every node:
 - node frame clock / timestamping
 - WiFi connectivity helpers
 - generic node runner (`IAudioSource` + publisher loop)
+- optional environmental telemetry hook (non-fatal if unavailable)
 
 This is the extension point for future node families.
 
@@ -34,6 +35,7 @@ Edit `nodes/sirith_tetra/include/node_config.h`:
 - backend URL
 - node position and sensor offsets
 - I2S pin mapping
+- optional LSM6 IMU temperature telemetry (`metadata.temperature_c`, `metadata.temperature_source`)
 
 ### Build and Upload
 From `firmware/nodes/sirith_tetra`:
@@ -66,6 +68,7 @@ Edit `nodes/sirith_tetra_pico/include/node_config.h`:
 - optional GPS and I2C pins
 - base-plane rotation (`kBasePlaneRotationSteps`) for manual orientation calibration
 - optional LIS2MDLTR auto-orientation smoothing and stability thresholds
+- optional LSM6 IMU temperature telemetry (`metadata.temperature_c`, `metadata.temperature_source`)
 
 ### Build and Upload
 From `firmware/nodes/sirith_tetra_pico`:

@@ -83,6 +83,14 @@ const char* nodeTypeToWire(NodeType type) {
 }
 
 bool buildIngestPayload(const NodeDescriptor& node, const AudioFrame& frame, String& outPayload) {
+  return buildIngestPayload(node, frame, nullptr, outPayload);
+}
+
+bool buildIngestPayload(
+    const NodeDescriptor& node,
+    const AudioFrame& frame,
+    const EnvironmentalSample* environment,
+    String& outPayload) {
   if (node.id == nullptr || node.sensorOffsetsM == nullptr || node.sensorCount == 0 || frame.interleavedSamples == nullptr) {
     return false;
   }
@@ -138,6 +146,14 @@ bool buildIngestPayload(const NodeDescriptor& node, const AudioFrame& frame, Str
   appendQuoted(outPayload, node.hardwareName != nullptr ? node.hardwareName : "unknown");
   outPayload += ",\"firmware\":";
   appendQuoted(outPayload, node.firmwareVersion != nullptr ? node.firmwareVersion : "dev");
+  if (environment != nullptr && environment->hasTemperatureC) {
+    outPayload += ",\"temperature_c\":";
+    appendFloat(outPayload, environment->temperatureC);
+    if (environment->temperatureSource != nullptr) {
+      outPayload += ",\"temperature_source\":";
+      appendQuoted(outPayload, environment->temperatureSource);
+    }
+  }
   outPayload += "}}";
 
   outPayload += ",\"frame\":{";

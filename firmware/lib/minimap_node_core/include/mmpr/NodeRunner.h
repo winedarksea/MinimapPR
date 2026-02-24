@@ -4,6 +4,7 @@
 #include <cstdint>
 
 #include "mmpr/HttpFramePublisher.h"
+#include "mmpr/IEnvironmentalSource.h"
 #include "mmpr/IAudioSource.h"
 #include "mmpr/NodeClock.h"
 #include "mmpr/Types.h"
@@ -24,7 +25,8 @@ class NodeRunner {
       IAudioSource& audioSource,
       HttpFramePublisher& publisher,
       NodeClock& clock,
-      uint32_t logEveryFrames = 100);
+      uint32_t logEveryFrames = 100,
+      IEnvironmentalSource* environmentalSource = nullptr);
 
   bool begin(
       bool syncNtp,
@@ -40,6 +42,8 @@ class NodeRunner {
   const NodeDescriptor& descriptor_;
   IAudioSource& audioSource_;
   HttpFramePublisher& publisher_;
+  IEnvironmentalSource* environmentalSource_ = nullptr;
+  bool environmentalSourceReady_ = false;
   NodeClock& clock_;
 
   int16_t* frameBuffer_ = nullptr;

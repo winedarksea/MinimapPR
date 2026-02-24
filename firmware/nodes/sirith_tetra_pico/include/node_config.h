@@ -46,6 +46,7 @@ static constexpr const char* kCapabilities[] = {
     "audio",
     "array_localization",
     "gps_optional",
+    "temperature",
 };
 
 static constexpr const char* kHardwareName = "sirith_tetra_pico_tdm";
@@ -85,6 +86,12 @@ static constexpr float kCompassSmoothingAlpha = 0.03f;
 static constexpr float kCompassHeadingOffsetDeg = 0.0f;
 static constexpr float kCompassMinHorizontalFieldLsb = 50.0f;
 static constexpr uint16_t kCompassStableSamplesRequired = 18;
+
+// --- Optional IMU temperature telemetry (LSM6 family) ---
+static constexpr bool kEnableImuTemperature = true;
+static constexpr uint8_t kImuI2cAddressPrimary7Bit = 0x6A;
+static constexpr uint8_t kImuI2cAddressSecondary7Bit = 0x6B;
+static constexpr uint32_t kImuTemperatureSampleIntervalMs = 2000;
 
 // --- Time sync ---
 // For standalone arrays, strict absolute UTC is optional; GPS/NTP can be enabled later.

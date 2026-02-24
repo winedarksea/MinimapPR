@@ -6,6 +6,7 @@
 
 #include "mmpr/HttpFramePublisher.h"
 #include "mmpr/Lis2mdlAutoOrientation.h"
+#include "mmpr/Lsm6TemperatureSource.h"
 #include "mmpr/NodeClock.h"
 #include "mmpr/NodeRunner.h"
 #include "mmpr/SirithPicoTdmSource.h"
@@ -24,6 +25,13 @@ uint8_t gActiveBaseRotationSteps = static_cast<uint8_t>(nodecfg::kBasePlaneRotat
 
 mmpr::Lis2mdlAutoOrientation gAutoOrientation;
 bool gAutoOrientationEnabled = false;
+
+mmpr::Lsm6TemperatureSourceConfig gImuTempConfig = {
+    nodecfg::kImuI2cAddressPrimary7Bit,
+    nodecfg::kImuI2cAddressSecondary7Bit,
+    nodecfg::kImuTemperatureSampleIntervalMs,
+};
+mmpr::Lsm6TemperatureSource gImuTempSource(Wire, gImuTempConfig);
 
 uint8_t rotateBaseMic(uint8_t micIndex, uint8_t baseRotationSteps) {
   if (micIndex >= 3) {
@@ -82,9 +90,22 @@ mmpr::NodeDescriptor gNodeDescriptor = {
 mmpr::SirithPicoTdmSource gAudioSource(nodecfg::kTdmPins, nodecfg::kAudioConfig);
 mmpr::HttpFramePublisher gPublisher(nodecfg::kServerBaseUrl, nodecfg::kIngestPath, nodecfg::kHttpTimeoutMs);
 mmpr::NodeClock gClock;
-mmpr::NodeRunner gRunner(gNodeDescriptor, gAudioSource, gPublisher, gClock, nodecfg::kLogEveryFrames);
+mmpr::NodeRunner gRunner(
+    gNodeDescriptor,
+    gAudioSource,
+    gPublisher,
+    gClock,
+    nodecfg::kLogEveryFrames,
+    nodecfg::kEnableImuTemperature ? static_cast<mmpr::IEnvironmentalSource*>(&gImuTempSource) : nullptr);
 
 void setupOptionalPeripherals() {
+  const bool useI2c = nodecfg::kEnableCompassAutoOrientation || nodecfg::kEnableImuTemperature;
+  if (useI2c) {
+    Wire.setSDA(nodecfg::kI2cSdaPin);
+    Wire.setSCL(nodecfg::kI2cSclPin);
+    Wire.begin();
+  }
+
   if (nodecfg::kEnableGpsUart) {
     Serial1.setTX(nodecfg::kGpsTxPin);
     Serial1.setRX(nodecfg::kGpsRxPin);
@@ -94,10 +115,6 @@ void setupOptionalPeripherals() {
   }
 
   if (nodecfg::kEnableCompassAutoOrientation) {
-    Wire.setSDA(nodecfg::kI2cSdaPin);
-    Wire.setSCL(nodecfg::kI2cSclPin);
-    Wire.begin();
-
     mmpr::Lis2mdlAutoOrientationConfig cfg = {};
     cfg.i2cAddress7Bit = nodecfg::kCompassI2cAddress7Bit;
     cfg.outputDataRateBits = nodecfg::kCompassOutputDataRateBits;
@@ -113,6 +130,10 @@ void setupOptionalPeripherals() {
     } else {
       Serial.println("[sirith-pico] LIS2MDLTR auto-orientation unavailable; manual rotation retained");
     }
+  }
+
+  if (nodecfg::kEnableImuTemperature) {
+    Serial.println("[sirith-pico] IMU temperature telemetry enabled (optional)");
   }
 }
 

@@ -9,10 +9,12 @@ NodeRunner::NodeRunner(
     IAudioSource& audioSource,
     HttpFramePublisher& publisher,
     NodeClock& clock,
-    uint32_t logEveryFrames)
+    uint32_t logEveryFrames,
+    IEnvironmentalSource* environmentalSource)
     : descriptor_(descriptor),
       audioSource_(audioSource),
       publisher_(publisher),
+      environmentalSource_(environmentalSource),
       clock_(clock),
       logEveryFrames_(logEveryFrames) {}
 
@@ -36,6 +38,15 @@ bool NodeRunner::begin(bool syncNtp, const char* ntpServer, long gmtOffsetSecond
       ntpServer,
       gmtOffsetSeconds,
       daylightOffsetSeconds);
+
+  if (environmentalSource_ != nullptr) {
+    environmentalSourceReady_ = environmentalSource_->begin();
+    if (!environmentalSourceReady_) {
+      Serial.println("[node] environmental source unavailable; continuing without environmental telemetry");
+    } else {
+      Serial.println("[node] environmental source enabled");
+    }
+  }
 
   Serial.printf(
       "[node] started id=%s channels=%u sample_rate=%lu frame_samples=%u endpoint=%s\n",
@@ -69,7 +80,15 @@ void NodeRunner::loopOnce() {
       audioSource_.frameSamples(),
   };
 
-  const PublishResult result = publisher_.publish(descriptor_, frame, false);
+  EnvironmentalSample environmental = {};
+  const EnvironmentalSample* environmentalPtr = nullptr;
+  if (environmentalSourceReady_ && environmentalSource_ != nullptr) {
+    if (environmentalSource_->read(environmental)) {
+      environmentalPtr = &environmental;
+    }
+  }
+
+  const PublishResult result = publisher_.publish(descriptor_, frame, environmentalPtr, false);
 
   ++stats_.framesCaptured;
   if (result.ok) {
