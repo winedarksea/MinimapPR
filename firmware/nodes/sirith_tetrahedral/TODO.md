@@ -43,6 +43,14 @@
 - [ ] Hardware-in-the-loop: verify end-to-end POST ingest to a reachable MinimapPR backend.
 - [ ] Hardware-in-the-loop: verify optional LIS2MDLTR/LSM6/GPS behavior on real hardware.
 
+## Phase 6: Modularization and Shared Library Reuse
+- [x] Split monolithic node implementation into runtime modules (`NodeRunner`, protocol, publisher, clock, Wi-Fi support).
+- [x] Reuse upstream shared audio source (`firmware/lib/minimap_audio_pico/src/SirithPicoTdmSource.cpp`) in this build.
+- [x] Add generic temperature sensor interface (`ITemperatureSensor`) decoupled from specific IMU chips.
+- [x] Adapt generic temperature sensors into node environmental telemetry via `TemperatureEnvironmentalSource`.
+- [x] Keep optional LIS2 auto-orientation and GPS setup integrated in thin node entrypoint wiring.
+- [x] Update CMake target to compile modular sources and shared audio library source/include paths.
+
 ## Notes / Calibration
 - Manual base-plane rotation must remain configurable for installation alignment.
 - Auto-orientation is optional and should gracefully fall back to manual rotation if unhealthy.

@@ -4,7 +4,6 @@
 #include <cstdlib>
 #include <cstring>
 
-#include "cyw43.h"
 #include "lwip/dns.h"
 #include "lwip/ip_addr.h"
 #include "lwip/pbuf.h"
@@ -18,7 +17,7 @@ namespace mmpr {
 namespace {
 
 bool isWiFiConnected() {
-  return cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) == CYW43_LINK_UP;
+  return cyw43_wifi_link_status(&cyw43_state, CYW43_ITF_STA) == CYW43_LINK_UP;
 }
 
 class RawHttpPostClient {

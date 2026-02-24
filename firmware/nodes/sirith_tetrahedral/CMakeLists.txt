@@ -35,10 +35,22 @@ set(PICO_CXX_ENABLE_EXCEPTIONS 1)
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
 
+set(MMPR_AUDIO_PICO_DIR ${CMAKE_CURRENT_LIST_DIR}/../../lib/minimap_audio_pico)
+
 # Add executable. Default name is the project name, version 0.1
 
 add_executable(sirith_tetrahedral
         sirith_tetrahedral.cpp
+        src/Base64.cpp
+        src/HttpFramePublisher.cpp
+        src/Lis2mdlAutoOrientation.cpp
+        src/Lsm6TemperatureSensor.cpp
+        src/NodeClock.cpp
+        src/NodeProtocol.cpp
+        src/NodeRunner.cpp
+        src/TemperatureEnvironmentalSource.cpp
+        src/WiFiSupport.cpp
+        ${MMPR_AUDIO_PICO_DIR}/src/SirithPicoTdmSource.cpp
         )
 
 pico_set_program_name(sirith_tetrahedral "sirith_tetrahedral")
@@ -56,6 +68,7 @@ target_link_libraries(sirith_tetrahedral
 target_include_directories(sirith_tetrahedral PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
         ${CMAKE_CURRENT_LIST_DIR}/include
+        ${MMPR_AUDIO_PICO_DIR}/include
 )
 
 # Add any user requested libraries

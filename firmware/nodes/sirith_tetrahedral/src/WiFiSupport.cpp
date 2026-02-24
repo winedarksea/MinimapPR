@@ -2,7 +2,6 @@
 
 #include <cstdio>
 
-#include "cyw43.h"
 #include "pico/cyw43_arch.h"
 #include "pico/time.h"
 
@@ -14,7 +13,7 @@ uint32_t millis32() {
 }
 
 bool isWiFiConnected() {
-  return cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) == CYW43_LINK_UP;
+  return cyw43_wifi_link_status(&cyw43_state, CYW43_ITF_STA) == CYW43_LINK_UP;
 }
 
 }  // namespace

@@ -1,10 +1,18 @@
 #include "mmpr/SirithPicoTdmSource.h"
 
-#if !defined(ARDUINO_ARCH_RP2040)
-#error "SirithPicoTdmSource requires the RP2040/RP2350 Arduino core"
+#if !defined(ARDUINO_ARCH_RP2040) && !defined(PICO_RP2040) && !defined(PICO_RP2350)
+#error "SirithPicoTdmSource requires RP2040 or RP2350"
 #endif
 
+#if defined(ARDUINO)
 #include <Arduino.h>
+#define MMPR_PICO_LOG(...) Serial.printf(__VA_ARGS__)
+#define MMPR_PICO_LOG_LINE(msg) Serial.println(msg)
+#else
+#include <cstdio>
+#define MMPR_PICO_LOG(...) std::printf(__VA_ARGS__)
+#define MMPR_PICO_LOG_LINE(msg) std::puts(msg)
+#endif
 
 #include <hardware/clocks.h>
 #include <hardware/gpio.h>
@@ -20,11 +28,11 @@ namespace {
 // - Uses a one-bit positive FSYNC pulse at frame start (ADAU7112 TDM requirement)
 // - Auto-pushes every 32 bits -> one slot per FIFO word
 static const uint16_t kSirithTdmMasterRxInstructions[] = {
-    pio_encode_set(pio_x, 127) | pio_encode_sideset(2, 0x2),      // FSYNC high, BCLK low
-    pio_encode_in(pio_pins, 1) | pio_encode_sideset(2, 0x3),       // First rising edge sample
-    pio_encode_jmp_x_dec(3) | pio_encode_sideset(2, 0x0),          // FSYNC pulse ends, jump into steady loop
-    pio_encode_in(pio_pins, 1) | pio_encode_sideset(2, 0x1),       // BCLK high, sample SDATA
-    pio_encode_jmp_x_dec(3) | pio_encode_sideset(2, 0x0),          // BCLK low
+    static_cast<uint16_t>(pio_encode_set(pio_x, 127) | pio_encode_sideset(2, 0x2)),      // FSYNC high, BCLK low
+    static_cast<uint16_t>(pio_encode_in(pio_pins, 1) | pio_encode_sideset(2, 0x3)),       // First rising edge sample
+    static_cast<uint16_t>(pio_encode_jmp_x_dec(3) | pio_encode_sideset(2, 0x0)),          // FSYNC pulse ends, jump into steady loop
+    static_cast<uint16_t>(pio_encode_in(pio_pins, 1) | pio_encode_sideset(2, 0x1)),       // BCLK high, sample SDATA
+    static_cast<uint16_t>(pio_encode_jmp_x_dec(3) | pio_encode_sideset(2, 0x0)),          // BCLK low
 };
 
 static const pio_program kSirithTdmMasterRxProgram = {
@@ -83,17 +91,17 @@ bool SirithPicoTdmSource::initPioStateMachine() {
   PIO selectedPio = pio0;
   int selectedSm = pio_claim_unused_sm(selectedPio, false);
   if (selectedSm < 0) {
-    selectedPio = pio1;
-    selectedSm = pio_claim_unused_sm(selectedPio, false);
-    if (selectedSm < 0) {
-      Serial.println("[sirith-pico] no free PIO state machine");
+      selectedPio = pio1;
+      selectedSm = pio_claim_unused_sm(selectedPio, false);
+      if (selectedSm < 0) {
+      MMPR_PICO_LOG_LINE("[sirith-pico] no free PIO state machine");
       return false;
     }
   }
 
   if (!pio_can_add_program(selectedPio, &kSirithTdmMasterRxProgram)) {
     pio_sm_unclaim(selectedPio, selectedSm);
-    Serial.println("[sirith-pico] no room for PIO TDM program");
+    MMPR_PICO_LOG_LINE("[sirith-pico] no room for PIO TDM program");
     return false;
   }
 
@@ -107,7 +115,7 @@ bool SirithPicoTdmSource::initPioStateMachine() {
 
   if (!(clkDiv >= 1.0f && clkDiv <= 65535.0f)) {
     pio_sm_unclaim(selectedPio, selectedSm);
-    Serial.println("[sirith-pico] unsupported sample rate for PIO clock divider");
+    MMPR_PICO_LOG_LINE("[sirith-pico] unsupported sample rate for PIO clock divider");
     return false;
   }
 
@@ -158,7 +166,7 @@ bool SirithPicoTdmSource::initPioStateMachine() {
   offset_ = programOffset;
   programInstalled_ = true;
 
-  Serial.printf(
+  MMPR_PICO_LOG(
       "[sirith-pico] TDM started pio=%d sm=%d sr=%lu bclk=%luHz ws=%luHz\n",
       (selectedPio == pio0) ? 0 : 1,
       selectedSm,
@@ -200,7 +208,7 @@ bool SirithPicoTdmSource::begin() {
   deinitPioStateMachine();
 
   if (!validateConfig()) {
-    Serial.println("[sirith-pico] invalid TDM config");
+    MMPR_PICO_LOG_LINE("[sirith-pico] invalid TDM config");
     return false;
   }
 
