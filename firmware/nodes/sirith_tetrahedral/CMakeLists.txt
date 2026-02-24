@@ -37,17 +37,16 @@ pico_sdk_init()
 
 # Add executable. Default name is the project name, version 0.1
 
-add_executable(sirith_tetrahedral sirith_tetrahedral.cpp )
+add_executable(sirith_tetrahedral
+        sirith_tetrahedral.cpp
+        )
 
 pico_set_program_name(sirith_tetrahedral "sirith_tetrahedral")
 pico_set_program_version(sirith_tetrahedral "0.1")
 
-# Generate PIO header
-pico_generate_pio_header(sirith_tetrahedral ${CMAKE_CURRENT_LIST_DIR}/blink.pio)
-
 # Modify the below lines to enable/disable output over UART/USB
 pico_enable_stdio_uart(sirith_tetrahedral 0)
-pico_enable_stdio_usb(sirith_tetrahedral 0)
+pico_enable_stdio_usb(sirith_tetrahedral 1)
 
 # Add the standard library to the build
 target_link_libraries(sirith_tetrahedral
@@ -56,18 +55,16 @@ target_link_libraries(sirith_tetrahedral
 # Add the standard include files to the build
 target_include_directories(sirith_tetrahedral PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
+        ${CMAKE_CURRENT_LIST_DIR}/include
 )
 
 # Add any user requested libraries
 target_link_libraries(sirith_tetrahedral 
-        hardware_spi
         hardware_i2c
-        hardware_dma
         hardware_pio
-        hardware_interp
+        hardware_uart
         hardware_clocks
-        pico_cyw43_arch_lwip_threadsafe_background
+        pico_cyw43_arch_lwip_poll
         )
 
 pico_add_extra_outputs(sirith_tetrahedral)
-

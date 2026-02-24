@@ -1,15 +1,49 @@
 # Sirith Tetrahedral Pi Pico 2 W Firmware TODO
-## Description of Hardware
-It is a four microphone array with the array shape of a tetrahedron (configurable, but here each microphone is exactly 50 mm from the others). The high quality MEMs microphones are processed by the ADAU7112. This will be using TDM This optionally has a GPS connection, but should be able to run standalone as a single node without GPS (with all four microphones hardwired, the need for 'perfect' timing across a network is not critical).
-TX = GP12 (GPS such as M10Q, optional)
-RX = GP13 (GPS, optional)
-PPS = GP10 (optional)
-SCL = GP19
-SDA = GP18
-tdm sdata = GP7
-tdm bclk = GP8
-tdm ws = GP9
-MK4 is the top of the pyramid, above the plane of the others, and is the Left of the pair fed to the second ADAU7112. DIP switches mean either ADAU7112 can be either i2s, 1/2 or 3/4 slots, but the expected default here is TDM slot 3 is the top of the pyramid mic.
-Likely the code needs to be designed to easily "rotate" the configured orientation of microphones during manual calibration. Although it would be useful to have an optional auto-orientation from the onboard LIS2MDLTR (not installation is expected to be fixed, so can filter or smooth heavily readings to make up for usual high noise in these digital compasses).
-Design should generally be configured "safe" so that bugs cannot destroy the board.
 
+## Hardware Profile (Target)
+- 4-mic tetrahedral array, regular tetrahedron geometry, 50 mm edge length.
+- MEMS mics through ADAU7112 in TDM mode.
+- Optional GPS (M10Q-style): TX=`GP12`, RX=`GP13`, PPS=`GP10`.
+- I2C: SDA=`GP18`, SCL=`GP19` (LIS2MDLTR + optional LSM6 temp).
+- TDM: SDATA=`GP7`, BCLK=`GP8`, WS=`GP9`.
+- MK4 is the top mic (expected default TDM slot 3).
+
+## Phase 1: Project and Build Foundation
+- [x] Replace generated demo firmware with Sirith tetra node firmware entrypoint.
+- [x] Add local node configuration header for pinout, network, geometry, and feature flags.
+- [x] Update CMake target to include required Pico SDK networking/peripheral libraries.
+- [x] Ensure debug logging is enabled on a usable stdio transport for bring-up.
+
+## Phase 2: Core Runtime Port (PlatformIO -> Pico SDK)
+- [x] Port frame/data model types from `minimap_node_core` to Pico-SDK-compatible C++ (`std::string`, no Arduino deps).
+- [x] Port JSON protocol encoder and Base64 frame encoding.
+- [x] Port node clock behavior for frame timestamps (monotonic baseline, GPS/NTP hook-ready).
+- [x] Port runner loop: capture frame, attach metadata/environmental sample, publish, collect stats.
+
+## Phase 3: Sirith Audio + Peripherals
+- [x] Port `SirithPicoTdmSource` to Pico SDK build (PIO-based TDM master receive).
+- [x] Keep safe electrical defaults (low drive + slow slew where available on BCLK/WS).
+- [x] Implement slot->physical mic mapping + base-plane rotation support.
+- [x] Implement optional LIS2MDLTR auto-orientation polling with smoothing/stability logic.
+- [x] Implement optional LSM6 temperature telemetry source on I2C.
+- [x] Initialize optional GPS UART/PPS pins non-destructively.
+
+## Phase 4: Pico W Networking + Ingest Publish
+- [x] Implement Wi-Fi connect/reconnect utilities for Pico W (`cyw43`).
+- [x] Implement HTTP POST publisher for `/api/v1/ingest/frame` without Arduino networking stack.
+- [x] Support endpoint parsing (`http://host[:port]/path`) with hostname/IP resolution.
+- [x] Return publish status + optional response text for diagnostics.
+
+## Phase 5: Bring-Up and Verification
+- [x] Build successfully for `pico2_w` in this folder using the Raspberry Pi VS Code CMake flow.
+- [x] Verify no compile-time dependency on PlatformIO/Arduino headers.
+- [x] Verify runtime loop sequencing (boot, optional peripheral init, Wi-Fi, runner start, loop/publish).
+- [x] Document what remains hardware-in-the-loop only (mic/gps/imu/live backend tests).
+- [ ] Hardware-in-the-loop: verify live TDM capture from ADAU7112 wiring/slot straps.
+- [ ] Hardware-in-the-loop: verify end-to-end POST ingest to a reachable MinimapPR backend.
+- [ ] Hardware-in-the-loop: verify optional LIS2MDLTR/LSM6/GPS behavior on real hardware.
+
+## Notes / Calibration
+- Manual base-plane rotation must remain configurable for installation alignment.
+- Auto-orientation is optional and should gracefully fall back to manual rotation if unhealthy.
+- Design emphasis: safe defaults and non-destructive GPIO behavior.
