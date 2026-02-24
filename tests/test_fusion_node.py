@@ -105,7 +105,9 @@ async def test_fusion_node_ingest_and_status(tmp_path: Path) -> None:
 
     status = await fusion.status()
     assert status["started"] is True
-    assert status["workers"]["running"] == 1
+    assert status["workers"]["localization_running"] == 1
+    assert status["workers"]["classification_running"] == 1
+    assert status["workers"]["rules_running"] == 1
     assert status["metrics"]["ingest_requests"] == 1
     assert status["metrics"]["frames_accepted"] == 1
     assert status["metrics"]["triggers_enqueued"] == 1

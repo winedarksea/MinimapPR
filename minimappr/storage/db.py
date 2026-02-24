@@ -130,6 +130,7 @@ class Storage:
                 tdoa_json TEXT NOT NULL,
                 classifier_scores_json TEXT NOT NULL,
                 feature_summary_json TEXT NOT NULL,
+                retention_tier TEXT NOT NULL DEFAULT 'short',
                 snippet_path TEXT,
                 snippet_expires_ns INTEGER
             );
@@ -158,6 +159,7 @@ class Storage:
                 confidence REAL NOT NULL,
                 update_count INTEGER NOT NULL,
                 status TEXT NOT NULL,
+                capability_tier TEXT NOT NULL DEFAULT 'full_3d',
                 tqi REAL NOT NULL DEFAULT 0.0
             );
             CREATE INDEX IF NOT EXISTS idx_tracks_last_seen ON tracks(last_seen_ns DESC);
@@ -198,9 +200,45 @@ class Storage:
                 destination TEXT NOT NULL,
                 priority TEXT NOT NULL,
                 status TEXT NOT NULL,
+                updated_ns INTEGER NOT NULL,
                 payload_json TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts(timestamp_ns DESC);
+
+            CREATE TABLE IF NOT EXISTS pings (
+                id TEXT PRIMARY KEY,
+                timestamp_ns INTEGER NOT NULL,
+                lat REAL,
+                lon REAL,
+                alt REAL,
+                x REAL,
+                y REAL,
+                z REAL,
+                ping_type TEXT NOT NULL,
+                label_id TEXT,
+                label TEXT,
+                spl_db REAL,
+                source_detection_id TEXT,
+                source_observation_id TEXT,
+                source_track_id TEXT,
+                retention_tier TEXT NOT NULL,
+                metadata_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_pings_ts ON pings(timestamp_ns DESC);
+            CREATE INDEX IF NOT EXISTS idx_pings_type ON pings(ping_type, timestamp_ns DESC);
+
+            CREATE TABLE IF NOT EXISTS large_artifacts (
+                id TEXT PRIMARY KEY,
+                artifact_type TEXT NOT NULL,
+                path TEXT NOT NULL,
+                retention_tier TEXT NOT NULL,
+                source_detection_id TEXT,
+                source_track_id TEXT,
+                metadata_json TEXT NOT NULL,
+                created_ns INTEGER NOT NULL,
+                expires_ns INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_large_artifacts_expires ON large_artifacts(expires_ns);
 
             CREATE TABLE IF NOT EXISTS zones (
                 id TEXT PRIMARY KEY,
@@ -257,6 +295,13 @@ class Storage:
                 "spl_db": "REAL",
                 "source_observation_ids_json": "TEXT NOT NULL DEFAULT '[]'",
                 "zone_ids_json": "TEXT NOT NULL DEFAULT '[]'",
+                "retention_tier": "TEXT NOT NULL DEFAULT 'short'",
+            },
+        )
+        await self._ensure_columns(
+            "alerts",
+            {
+                "updated_ns": "INTEGER NOT NULL DEFAULT 0",
             },
         )
         await self._ensure_columns(
@@ -269,6 +314,7 @@ class Storage:
                 "label_id": "TEXT",
                 "label_category": "TEXT NOT NULL DEFAULT 'unknown'",
                 "iff_category": "TEXT NOT NULL DEFAULT 'unknown'",
+                "capability_tier": "TEXT NOT NULL DEFAULT 'full_3d'",
             },
         )
         await self._db.commit()
@@ -441,6 +487,7 @@ class Storage:
         detection: DetectionEvent,
         snippet_path: str | None,
         snippet_expires_ns: int | None,
+        retention_tier: str = "short",
     ) -> None:
         db = self._require_db()
         async with self._lock:
@@ -454,9 +501,9 @@ class Storage:
                     label_confidence, spl_db, track_id,
                     reference_sensor, source_sensors_json, source_observation_ids_json,
                     zone_ids_json, tdoa_json, classifier_scores_json, feature_summary_json,
-                    snippet_path, snippet_expires_ns
+                    retention_tier, snippet_path, snippet_expires_ns
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     detection.id,
@@ -493,6 +540,7 @@ class Storage:
                     _json_dumps(detection.tdoa_s),
                     _json_dumps(detection.classifier_scores),
                     _json_dumps(detection.feature_summary),
+                    retention_tier,
                     snippet_path,
                     snippet_expires_ns,
                 ),
@@ -564,9 +612,9 @@ class Storage:
                     x, y, z, lat, lon, alt, covariance_json,
                     vx, vy, vz,
                     label_id, label, label_category, iff_category,
-                    confidence, update_count, status, tqi
+                    confidence, update_count, status, capability_tier, tqi
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     last_seen_ns=excluded.last_seen_ns,
                     x=excluded.x,
@@ -586,6 +634,7 @@ class Storage:
                     confidence=excluded.confidence,
                     update_count=excluded.update_count,
                     status=excluded.status,
+                    capability_tier=excluded.capability_tier,
                     tqi=excluded.tqi
                 """,
                 (
@@ -611,6 +660,7 @@ class Storage:
                     track.confidence,
                     track.update_count,
                     track.status,
+                    track.capability_tier,
                     track.tqi,
                 ),
             )
@@ -687,6 +737,7 @@ class Storage:
                     "tdoa_s": _json_loads(row["tdoa_json"], {}),
                     "classifier_scores": _json_loads(row["classifier_scores_json"], {}),
                     "feature_summary": _json_loads(row["feature_summary_json"], {}),
+                    "retention_tier": row["retention_tier"] or "short",
                     "snippet_path": row["snippet_path"],
                 }
             )
@@ -720,6 +771,7 @@ class Storage:
                     "confidence": row["confidence"],
                     "update_count": row["update_count"],
                     "status": row["status"],
+                    "capability_tier": row["capability_tier"] or "full_3d",
                     "tqi": row["tqi"],
                 }
             )
@@ -741,8 +793,186 @@ class Storage:
         for row in rows:
             item = dict(row)
             item["payload"] = _json_loads(item.pop("payload_json"), {})
+            if "updated_ns" not in item or item["updated_ns"] is None:
+                item["updated_ns"] = item["timestamp_ns"]
             result.append(item)
         return result
+
+    async def insert_alert(
+        self,
+        *,
+        timestamp_ns: int,
+        rule_id: str | None,
+        detection_id: str | None,
+        track_id: str | None,
+        destination: str,
+        priority: str,
+        status: str,
+        payload: dict[str, Any] | None = None,
+        alert_id: str | None = None,
+    ) -> str:
+        db = self._require_db()
+        final_id = alert_id or f"alr-{uuid.uuid4().hex[:16]}"
+        async with self._lock:
+            await db.execute(
+                """
+                INSERT INTO alerts (
+                    id, timestamp_ns, rule_id, detection_id, track_id,
+                    destination, priority, status, updated_ns, payload_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    final_id,
+                    timestamp_ns,
+                    rule_id,
+                    detection_id,
+                    track_id,
+                    destination,
+                    priority,
+                    status,
+                    timestamp_ns,
+                    _json_dumps(payload or {}),
+                ),
+            )
+            await db.commit()
+        return final_id
+
+    async def update_alert_status(
+        self,
+        *,
+        alert_id: str,
+        status: str,
+        updated_ns: int,
+        payload_patch: dict[str, Any] | None = None,
+    ) -> bool:
+        db = self._require_db()
+        async with self._lock:
+            row = await (
+                await db.execute("SELECT payload_json FROM alerts WHERE id = ? LIMIT 1", (alert_id,))
+            ).fetchone()
+            if row is None:
+                return False
+            payload = _json_loads(row["payload_json"], {})
+            if payload_patch:
+                payload.update(payload_patch)
+            await db.execute(
+                """
+                UPDATE alerts
+                SET status = ?, updated_ns = ?, payload_json = ?
+                WHERE id = ?
+                """,
+                (status, updated_ns, _json_dumps(payload), alert_id),
+            )
+            await db.commit()
+        return True
+
+    async def list_pings(self, limit: int = 500) -> list[dict]:
+        db = self._require_db()
+        async with self._lock:
+            rows = await (
+                await db.execute("SELECT * FROM pings ORDER BY timestamp_ns DESC LIMIT ?", (limit,))
+            ).fetchall()
+        result: list[dict] = []
+        for row in rows:
+            item = dict(row)
+            item["metadata"] = _json_loads(item.pop("metadata_json"), {})
+            result.append(item)
+        return result
+
+    async def insert_ping(
+        self,
+        *,
+        timestamp_ns: int,
+        ping_type: str,
+        label: str | None,
+        label_id: str | None,
+        spl_db: float | None,
+        position_m: tuple[float, float, float] | None,
+        position_geo: GeoPoint | None,
+        source_detection_id: str | None,
+        source_observation_id: str | None,
+        source_track_id: str | None,
+        retention_tier: str,
+        metadata: dict[str, Any] | None = None,
+        ping_id: str | None = None,
+    ) -> str:
+        db = self._require_db()
+        final_id = ping_id or f"png-{uuid.uuid4().hex[:16]}"
+        x = y = z = None
+        if position_m is not None:
+            x, y, z = position_m
+        async with self._lock:
+            await db.execute(
+                """
+                INSERT INTO pings (
+                    id, timestamp_ns, lat, lon, alt, x, y, z, ping_type,
+                    label_id, label, spl_db, source_detection_id, source_observation_id,
+                    source_track_id, retention_tier, metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    final_id,
+                    timestamp_ns,
+                    position_geo.lat if position_geo is not None else None,
+                    position_geo.lon if position_geo is not None else None,
+                    position_geo.alt_m if position_geo is not None else None,
+                    x,
+                    y,
+                    z,
+                    ping_type,
+                    label_id,
+                    label,
+                    spl_db,
+                    source_detection_id,
+                    source_observation_id,
+                    source_track_id,
+                    retention_tier,
+                    _json_dumps(metadata or {}),
+                ),
+            )
+            await db.commit()
+        return final_id
+
+    async def insert_large_artifact(
+        self,
+        *,
+        artifact_type: str,
+        path: str,
+        retention_tier: str,
+        source_detection_id: str | None,
+        source_track_id: str | None,
+        created_ns: int,
+        expires_ns: int | None,
+        metadata: dict[str, Any] | None = None,
+        artifact_id: str | None = None,
+    ) -> str:
+        db = self._require_db()
+        final_id = artifact_id or f"lar-{uuid.uuid4().hex[:16]}"
+        async with self._lock:
+            await db.execute(
+                """
+                INSERT INTO large_artifacts (
+                    id, artifact_type, path, retention_tier, source_detection_id,
+                    source_track_id, metadata_json, created_ns, expires_ns
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    final_id,
+                    artifact_type,
+                    path,
+                    retention_tier,
+                    source_detection_id,
+                    source_track_id,
+                    _json_dumps(metadata or {}),
+                    created_ns,
+                    expires_ns,
+                ),
+            )
+            await db.commit()
+        return final_id
 
     async def list_zones(self) -> list[dict]:
         db = self._require_db()
@@ -788,6 +1018,13 @@ class Storage:
             )
             await db.commit()
 
+    async def delete_zone(self, zone_id: str) -> bool:
+        db = self._require_db()
+        async with self._lock:
+            cursor = await db.execute("DELETE FROM zones WHERE id = ?", (zone_id,))
+            await db.commit()
+            return cursor.rowcount > 0
+
     async def recent_alert_count(self, since_ns: int) -> int:
         db = self._require_db()
         async with self._lock:
@@ -811,6 +1048,8 @@ class Storage:
         raw["tdoa_s"] = _json_loads(raw.pop("tdoa_json"), {})
         raw["classifier_scores"] = _json_loads(raw.pop("classifier_scores_json"), {})
         raw["feature_summary"] = _json_loads(raw.pop("feature_summary_json"), {})
+        if not raw.get("retention_tier"):
+            raw["retention_tier"] = "short"
         return raw
 
     async def snippet_path_for_detection(self, detection_id: str) -> str | None:
@@ -857,6 +1096,100 @@ class Storage:
 
             await db.commit()
         return len(rows)
+
+    async def cleanup_retention(self, *, now_ns: int, tier_ttls_seconds: dict[str, int]) -> dict[str, int]:
+        db = self._require_db()
+        summary = {
+            "observations": 0,
+            "detections": 0,
+            "pings": 0,
+            "large_artifacts": 0,
+        }
+        protected_tiers = {"config", "permanent"}
+
+        async with self._lock:
+            for tier, ttl_s in tier_ttls_seconds.items():
+                if tier in protected_tiers or ttl_s < 0:
+                    continue
+                threshold_ns = now_ns - int(ttl_s * 1_000_000_000)
+
+                obs_cursor = await db.execute(
+                    """
+                    DELETE FROM observations
+                    WHERE retention_tier = ?
+                    AND created_ns <= ?
+                    """,
+                    (tier, threshold_ns),
+                )
+                summary["observations"] += max(0, obs_cursor.rowcount)
+
+                det_rows = await (
+                    await db.execute(
+                        """
+                        SELECT id, snippet_path
+                        FROM detections
+                        WHERE retention_tier = ?
+                        AND timestamp_ns <= ?
+                        """,
+                        (tier, threshold_ns),
+                    )
+                ).fetchall()
+                for row in det_rows:
+                    snippet_path = row["snippet_path"]
+                    if snippet_path:
+                        try:
+                            Path(snippet_path).unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                det_cursor = await db.execute(
+                    """
+                    DELETE FROM detections
+                    WHERE retention_tier = ?
+                    AND timestamp_ns <= ?
+                    """,
+                    (tier, threshold_ns),
+                )
+                summary["detections"] += max(0, det_cursor.rowcount)
+
+                ping_cursor = await db.execute(
+                    """
+                    DELETE FROM pings
+                    WHERE retention_tier = ?
+                    AND timestamp_ns <= ?
+                    """,
+                    (tier, threshold_ns),
+                )
+                summary["pings"] += max(0, ping_cursor.rowcount)
+
+                artifact_rows = await (
+                    await db.execute(
+                        """
+                        SELECT id, path
+                        FROM large_artifacts
+                        WHERE retention_tier = ?
+                        AND (expires_ns IS NOT NULL AND expires_ns <= ? OR created_ns <= ?)
+                        """,
+                        (tier, now_ns, threshold_ns),
+                    )
+                ).fetchall()
+                for row in artifact_rows:
+                    try:
+                        Path(row["path"]).unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                artifact_cursor = await db.execute(
+                    """
+                    DELETE FROM large_artifacts
+                    WHERE retention_tier = ?
+                    AND (expires_ns IS NOT NULL AND expires_ns <= ? OR created_ns <= ?)
+                    """,
+                    (tier, now_ns, threshold_ns),
+                )
+                summary["large_artifacts"] += max(0, artifact_cursor.rowcount)
+
+            await db.commit()
+
+        return summary
 
     def _require_db(self) -> aiosqlite.Connection:
         if self._db is None:

@@ -17,6 +17,15 @@ class TimeQuality(str, Enum):
     FREERUNNING = "freerunning"
 
 
+class RetentionTier(str, Enum):
+    EPHEMERAL = "ephemeral"
+    SHORT = "short"
+    LONG = "long"
+    CONFIG = "config"
+    EXPERIMENT = "experiment"
+    PERMANENT = "permanent"
+
+
 class NodeType(str, Enum):
     POINT = "point"
     SIRITH_TETRA = "sirith_tetra"
@@ -93,7 +102,7 @@ class ClassificationResult(BaseModel):
     label: str
     confidence: float = Field(ge=0.0, le=1.0)
     scores: dict[str, float] = Field(default_factory=dict)
-    features: dict[str, float] = Field(default_factory=dict)
+    features: dict[str, Any] = Field(default_factory=dict)
 
 
 class LocalizationResult(BaseModel):
@@ -132,7 +141,8 @@ class DetectionEvent(BaseModel):
     reference_sensor: str
     tdoa_s: dict[str, float] = Field(default_factory=dict)
     classifier_scores: dict[str, float] = Field(default_factory=dict)
-    feature_summary: dict[str, float] = Field(default_factory=dict)
+    feature_summary: dict[str, Any] = Field(default_factory=dict)
+    retention_tier: RetentionTier = RetentionTier.SHORT
     snippet_path: str | None = None
 
     @model_validator(mode="after")
@@ -169,3 +179,39 @@ class TrackState(BaseModel):
     update_count: int = 0
     status: str = TrackStatus.TENTATIVE.value
     tqi: float = Field(default=0.0, ge=0.0, description="Track Quality Index")
+    capability_tier: Literal["full_3d", "2d", "classification_only", "alerting_only"] = "full_3d"
+
+
+class ZoneType(str, Enum):
+    ALERT = "alert_zone"
+    EXCLUSION = "exclusion_zone"
+    COVERAGE = "coverage_zone"
+    INTEREST = "interest_zone"
+
+
+class ZoneSpec(BaseModel):
+    id: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    zone_type: ZoneType
+    polygon_geo: list[list[float]] = Field(min_length=3)
+    properties: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _validate_polygon(self) -> "ZoneSpec":
+        for point in self.polygon_geo:
+            if not isinstance(point, list) or len(point) < 2:
+                raise ValueError("polygon_geo points must be [lat, lon]")
+            lat = float(point[0])
+            lon = float(point[1])
+            if lat < -90.0 or lat > 90.0:
+                raise ValueError("zone latitude must be in [-90, 90]")
+            if lon < -180.0 or lon > 180.0:
+                raise ValueError("zone longitude must be in [-180, 180]")
+        return self
+
+
+class AlertStatus(str, Enum):
+    SENT = "sent"
+    ACKNOWLEDGED = "acknowledged"
+    DISMISSED = "dismissed"
+    ESCALATED = "escalated"

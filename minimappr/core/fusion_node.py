@@ -1,4 +1,4 @@
-"""Fusion node runtime for staged ingest/localization/classification/tracking."""
+"""Fusion node runtime for staged ingest/localization/classification/rules."""
 
 from __future__ import annotations
 
@@ -9,18 +9,43 @@ import time
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
+
+import numpy as np
 
 from minimappr.classifiers.base import AudioClassifier
 from minimappr.config import Settings
 from minimappr.core.audio_buffer import MultiSensorBuffer
+from minimappr.core.degradation import CapabilityDegradationModel
+from minimappr.core.environment import StaticEnvironmentProvider
 from minimappr.core.geo import LocalCoordinateFrame
-from minimappr.core.localization import LocalizationEngine, LocalizationError
+from minimappr.core.localization import LocalizationError
 from minimappr.core.node_registry import NodeRegistry
-from minimappr.core.taxonomy import iff_for_category, label_category_for_name
+from minimappr.core.preprocessing import NodePreprocessorFactory
+from minimappr.core.rules import ConfigRuleEngine, LoggingRuleActionHandler, WebsocketRuleActionHandler
+from minimappr.core.taxonomy import RuntimeTaxonomyProvider
 from minimappr.core.tracking import TrackManager
 from minimappr.core.zones import ZoneMatcher
-from minimappr.models import DetectionEvent, GeoPoint, IngestFrameRequest, IngestFrameResponse, NodeSpec, TimeQuality
-from minimappr.storage.db import Storage
+from minimappr.interfaces import (
+    ActionDescriptor,
+    AudioPreprocessor,
+    EnvironmentProvider,
+    Localizer,
+    RuleActionHandler,
+    RuleEngine,
+    StorageBackend,
+    TaxonomyProvider,
+)
+from minimappr.models import (
+    DetectionEvent,
+    GeoPoint,
+    IngestFrameRequest,
+    IngestFrameResponse,
+    NodeSpec,
+    RetentionTier,
+    TimeQuality,
+    TrackState,
+)
 from minimappr.utils.audio import decode_pcm16le_b64, mono_mix, rms, write_wav_mono
 
 
@@ -35,17 +60,45 @@ class EventCandidate:
 
 
 @dataclass(slots=True)
+class LocalizedCandidate:
+    candidate: EventCandidate
+    localization_position_m: tuple[float, float, float]
+    localization_confidence: float
+    localization_gdop: float
+    reference_sensor: str
+    tdoa_s: dict[str, float]
+    selected_sensor_ids: list[str]
+    reference_signal: np.ndarray
+    capability_tier: str
+
+
+@dataclass(slots=True)
+class DetectionProduct:
+    detection: DetectionEvent
+    track: TrackState | None
+    suppressed_by_zone: bool
+    suppression_reasons: list[str]
+
+
+@dataclass(slots=True)
 class FusionMetrics:
     ingest_requests: int = 0
     frames_accepted: int = 0
     frames_rejected: int = 0
     triggers_enqueued: int = 0
     triggers_dropped_queue_full: int = 0
-    events_dequeued: int = 0
-    events_processed: int = 0
-    events_failed: int = 0
+    localization_stage_in: int = 0
+    localization_stage_out: int = 0
     localization_failures: int = 0
+    classification_stage_in: int = 0
+    classification_stage_out: int = 0
+    classification_failures: int = 0
+    rules_stage_in: int = 0
+    rules_stage_out: int = 0
+    rules_failures: int = 0
     detections_emitted: int = 0
+    detections_suppressed_by_zone: int = 0
+    stage_drops_backpressure: int = 0
 
 
 class FusionNode:
@@ -54,13 +107,20 @@ class FusionNode:
         settings: Settings,
         registry: NodeRegistry,
         buffer: MultiSensorBuffer,
-        localizer: LocalizationEngine,
+        localizer: Localizer,
         classifier: AudioClassifier,
         tracker: TrackManager,
-        storage: Storage,
+        storage: StorageBackend,
         live_callback,
         coordinate_frame: LocalCoordinateFrame,
         zone_matcher: ZoneMatcher,
+        *,
+        taxonomy_provider: TaxonomyProvider | None = None,
+        rules_engine: RuleEngine | None = None,
+        action_handlers: dict[str, RuleActionHandler] | None = None,
+        environment_provider: EnvironmentProvider | None = None,
+        preprocessor_factory: NodePreprocessorFactory | None = None,
+        degradation_model: CapabilityDegradationModel | None = None,
     ) -> None:
         self.settings = settings
         self.registry = registry
@@ -72,13 +132,39 @@ class FusionNode:
         self.live_callback = live_callback
         self.coordinate_frame = coordinate_frame
         self.zone_matcher = zone_matcher
+        self.taxonomy_provider = taxonomy_provider or RuntimeTaxonomyProvider.from_config_file(settings.taxonomy_config_path)
+        self.rules_engine = rules_engine or ConfigRuleEngine(settings.rules_config_path)
+        self.environment_provider = environment_provider or StaticEnvironmentProvider(
+            temperature_c=settings.default_temperature_c,
+            humidity_fraction=settings.default_humidity,
+        )
+        self.preprocessor_factory = preprocessor_factory or NodePreprocessorFactory(settings)
+        self.degradation_model = degradation_model or CapabilityDegradationModel(
+            min_sensors_for_3d=settings.min_sensors_for_3d,
+            min_sensors_for_2d=settings.min_sensors_for_2d,
+        )
+        self._action_handlers = action_handlers or {
+            "cop": WebsocketRuleActionHandler(live_callback),
+            "log": LoggingRuleActionHandler(),
+        }
 
         self._last_trigger_ns = 0
         self._candidate_counter = itertools.count(1)
+        self._taxonomy_refresh_ns = 0
 
-        queue_size = max(1, settings.fusion_event_queue_size)
-        self._queue: asyncio.Queue[EventCandidate | None] = asyncio.Queue(maxsize=queue_size)
-        self._workers: list[asyncio.Task] = []
+        self._localization_queue: asyncio.Queue[EventCandidate | None] = asyncio.Queue(
+            maxsize=max(1, settings.fusion_localization_queue_size)
+        )
+        self._classification_queue: asyncio.Queue[LocalizedCandidate | None] = asyncio.Queue(
+            maxsize=max(1, settings.fusion_classification_queue_size)
+        )
+        self._rules_queue: asyncio.Queue[DetectionProduct | None] = asyncio.Queue(
+            maxsize=max(1, settings.fusion_rules_queue_size)
+        )
+
+        self._localization_workers: list[asyncio.Task] = []
+        self._classification_workers: list[asyncio.Task] = []
+        self._rules_workers: list[asyncio.Task] = []
         self._metrics = FusionMetrics()
         self._last_error: str | None = None
         self._started = False
@@ -87,10 +173,19 @@ class FusionNode:
         if self._started:
             return
 
+        await self._refresh_taxonomy(force=True)
         worker_count = max(1, self.settings.fusion_worker_count)
-        self._workers = [
-            asyncio.create_task(self._worker_loop(worker_id=index), name=f"fusion-worker-{index}")
+        self._localization_workers = [
+            asyncio.create_task(self._localization_worker_loop(index), name=f"fusion-localize-{index}")
             for index in range(worker_count)
+        ]
+        self._classification_workers = [
+            asyncio.create_task(self._classification_worker_loop(index), name=f"fusion-classify-{index}")
+            for index in range(worker_count)
+        ]
+        self._rules_workers = [
+            asyncio.create_task(self._rules_worker_loop(index), name=f"fusion-rules-{index}")
+            for index in range(1)
         ]
         self._started = True
 
@@ -98,20 +193,31 @@ class FusionNode:
         if not self._started:
             return
 
-        await self._queue.join()
+        await self._localization_queue.join()
+        await self._classification_queue.join()
+        await self._rules_queue.join()
 
-        for _ in self._workers:
-            await self._queue.put(None)
+        for _ in self._localization_workers:
+            await self._localization_queue.put(None)
+        for _ in self._classification_workers:
+            await self._classification_queue.put(None)
+        for _ in self._rules_workers:
+            await self._rules_queue.put(None)
 
-        if self._workers:
-            await asyncio.gather(*self._workers, return_exceptions=True)
+        if self._localization_workers:
+            await asyncio.gather(*self._localization_workers, return_exceptions=True)
+        if self._classification_workers:
+            await asyncio.gather(*self._classification_workers, return_exceptions=True)
+        if self._rules_workers:
+            await asyncio.gather(*self._rules_workers, return_exceptions=True)
 
-        self._workers.clear()
+        self._localization_workers.clear()
+        self._classification_workers.clear()
+        self._rules_workers.clear()
         self._started = False
 
     async def ingest(self, request: IngestFrameRequest) -> IngestFrameResponse:
         self._metrics.ingest_requests += 1
-
         raw_node = request.node
         frame = request.frame
 
@@ -126,6 +232,14 @@ class FusionNode:
             raise ValueError("Decoded channel count does not match frame.channels")
 
         normalized_node, geo_position = self._normalize_node_spec(raw_node)
+        preprocessor: AudioPreprocessor = self.preprocessor_factory.for_node(normalized_node)
+        processed = np.zeros_like(audio, dtype=np.float32)
+        for channel_idx in range(audio.shape[0]):
+            processed[channel_idx] = preprocessor.process(
+                audio[channel_idx],
+                frame.sample_rate_hz,
+                node_id=normalized_node.id,
+            )
 
         runtime = await self.registry.upsert(normalized_node, frame.start_time_ns)
         tor_ns = frame.tor_ns if frame.tor_ns is not None else time.time_ns()
@@ -136,9 +250,8 @@ class FusionNode:
                 sensor_id=sensor_id,
                 sample_rate_hz=frame.sample_rate_hz,
                 start_time_ns=frame.start_time_ns,
-                samples=audio[channel_index],
+                samples=processed[channel_index],
             )
-
             observation_id = await self.storage.insert_observation(
                 node_id=normalized_node.id,
                 sensor_id=sensor_id,
@@ -154,21 +267,18 @@ class FusionNode:
                     "frame_start_ns": frame.start_time_ns,
                     "frame_channels": frame.channels,
                     "encoding": frame.encoding,
+                    "preprocess": normalized_node.properties.get("preprocess", {}),
                 },
             )
             observation_ids.append(observation_id)
             await self.registry.record_observation(sensor_id=sensor_id, observation_id=observation_id)
 
         await self.storage.upsert_node(spec=normalized_node, last_seen_ns=frame.start_time_ns, position_geo=geo_position)
-
         self._metrics.frames_accepted += 1
 
-        frame_energy = rms(mono_mix(audio))
-        frame_duration_ns = int((audio.shape[1] / frame.sample_rate_hz) * 1_000_000_000)
+        frame_energy = rms(mono_mix(processed))
+        frame_duration_ns = int((processed.shape[1] / frame.sample_rate_hz) * 1_000_000_000)
         half_window_ns = int(self.settings.localization_window_seconds * 0.5 * 1_000_000_000)
-
-        # Bias event center slightly earlier than frame midpoint so the requested
-        # localization window is available immediately after appending this frame.
         center_offset_ns = max(0, frame_duration_ns - half_window_ns)
         center_time_ns = frame.start_time_ns + center_offset_ns
 
@@ -185,13 +295,12 @@ class FusionNode:
                 time_quality=frame.time_quality,
                 source_observation_ids=observation_ids,
             )
-            try:
-                self._queue.put_nowait(candidate)
+            if await self._enqueue_stage(self._localization_queue, candidate):
                 self._last_trigger_ns = center_time_ns
                 self._metrics.triggers_enqueued += 1
                 triggered = True
                 queued_event_id = candidate.id
-            except asyncio.QueueFull:
+            else:
                 self._metrics.triggers_dropped_queue_full += 1
 
         return IngestFrameResponse(
@@ -200,59 +309,101 @@ class FusionNode:
             frame_energy=frame_energy,
             detection_id=None,
             queued_event_id=queued_event_id,
-            queue_depth=self._queue.qsize(),
+            queue_depth=self._localization_queue.qsize(),
         )
 
-    async def status(self) -> dict:
+    async def status(self) -> dict[str, Any]:
         nodes = await self.registry.list_nodes()
         return {
             "started": self._started,
             "queue": {
-                "depth": self._queue.qsize(),
-                "max_depth": self._queue.maxsize,
+                "localization_depth": self._localization_queue.qsize(),
+                "classification_depth": self._classification_queue.qsize(),
+                "rules_depth": self._rules_queue.qsize(),
+                "localization_max": self._localization_queue.maxsize,
+                "classification_max": self._classification_queue.maxsize,
+                "rules_max": self._rules_queue.maxsize,
             },
             "workers": {
                 "configured": max(1, self.settings.fusion_worker_count),
-                "running": sum(1 for task in self._workers if not task.done()),
+                "localization_running": sum(1 for task in self._localization_workers if not task.done()),
+                "classification_running": sum(1 for task in self._classification_workers if not task.done()),
+                "rules_running": sum(1 for task in self._rules_workers if not task.done()),
             },
             "last_trigger_ns": self._last_trigger_ns,
             "last_error": self._last_error,
             "registered_nodes": len(nodes),
             "metrics": asdict(self._metrics),
+            "offline_replay_mode": self.settings.fusion_offline_replay_mode,
         }
 
     async def housekeeping_tick(self, now_ns: int) -> None:
         await self.zone_matcher.refresh_if_due(now_ns=now_ns)
+        await self._refresh_taxonomy(now_ns=now_ns)
         tracks = await self.tracker.snapshot(now_ns=now_ns)
         for track in tracks:
             track.position_geo = self.coordinate_frame.local_to_geo(track.position_m)
             await self.storage.upsert_track(track)
 
-    async def _worker_loop(self, worker_id: int) -> None:
+    async def _localization_worker_loop(self, worker_id: int) -> None:
         del worker_id
         while True:
-            candidate = await self._queue.get()
+            candidate = await self._localization_queue.get()
             if candidate is None:
-                self._queue.task_done()
+                self._localization_queue.task_done()
                 return
-
-            self._metrics.events_dequeued += 1
-
+            self._metrics.localization_stage_in += 1
             try:
-                detection = await self._process_candidate(candidate)
-                self._metrics.events_processed += 1
-                if detection is not None:
-                    self._metrics.detections_emitted += 1
+                product = await self._localize_candidate(candidate)
+                if product is not None:
+                    if await self._enqueue_stage(self._classification_queue, product):
+                        self._metrics.localization_stage_out += 1
             except Exception as exc:  # pragma: no cover - resilience path
-                self._metrics.events_failed += 1
+                self._metrics.localization_failures += 1
                 self._last_error = f"{type(exc).__name__}: {exc}"
             finally:
-                self._queue.task_done()
+                self._localization_queue.task_done()
 
-    async def _process_candidate(self, candidate: EventCandidate) -> DetectionEvent | None:
+    async def _classification_worker_loop(self, worker_id: int) -> None:
+        del worker_id
+        while True:
+            product = await self._classification_queue.get()
+            if product is None:
+                self._classification_queue.task_done()
+                return
+            self._metrics.classification_stage_in += 1
+            try:
+                detection_product = await self._classify_and_track(product)
+                if detection_product is not None:
+                    if await self._enqueue_stage(self._rules_queue, detection_product):
+                        self._metrics.classification_stage_out += 1
+            except Exception as exc:  # pragma: no cover - resilience path
+                self._metrics.classification_failures += 1
+                self._last_error = f"{type(exc).__name__}: {exc}"
+            finally:
+                self._classification_queue.task_done()
+
+    async def _rules_worker_loop(self, worker_id: int) -> None:
+        del worker_id
+        while True:
+            product = await self._rules_queue.get()
+            if product is None:
+                self._rules_queue.task_done()
+                return
+            self._metrics.rules_stage_in += 1
+            try:
+                await self._process_rules_and_delivery(product)
+                self._metrics.rules_stage_out += 1
+            except Exception as exc:  # pragma: no cover - resilience path
+                self._metrics.rules_failures += 1
+                self._last_error = f"{type(exc).__name__}: {exc}"
+            finally:
+                self._rules_queue.task_done()
+
+    async def _localize_candidate(self, candidate: EventCandidate) -> LocalizedCandidate | None:
         sensor_positions = await self.registry.sensor_positions()
         sensor_ids = sorted(sensor_positions.keys())
-        if len(sensor_ids) < 4:
+        if not sensor_ids:
             return None
 
         windows = await self.buffer.get_synchronized_window(
@@ -261,125 +412,254 @@ class FusionNode:
             window_seconds=self.settings.localization_window_seconds,
             sample_rate_hz=candidate.sample_rate_hz,
         )
-        if len(windows) < 4:
+        if not windows:
             return None
 
         energies = {sensor_id: rms(sig) for sensor_id, sig in windows.items()}
-        selected_ids = [sensor_id for sensor_id, energy in energies.items() if energy > (self.settings.trigger_rms * 0.45)]
-        if len(selected_ids) < 4:
-            selected_ids = [sid for sid, _ in sorted(energies.items(), key=lambda item: item[1], reverse=True)[:4]]
+        selected_ids = [sid for sid, energy in energies.items() if energy > (self.settings.trigger_rms * 0.45)]
+        if len(selected_ids) < 1:
+            return None
 
+        tier = self.degradation_model.tier_for_sensor_count(len(selected_ids))
         selected_windows = {sensor_id: windows[sensor_id] for sensor_id in selected_ids}
         selected_positions = {sensor_id: sensor_positions[sensor_id] for sensor_id in selected_ids}
 
-        try:
-            localization = await asyncio.to_thread(
-                self.localizer.localize,
-                selected_positions,
-                selected_windows,
-                candidate.sample_rate_hz,
-                self.settings.default_temperature_c,
-                self.settings.default_humidity,
-            )
-        except LocalizationError:
-            self._metrics.localization_failures += 1
-            return None
+        conditions = self.environment_provider.get_conditions()
+        if tier == "full_3d":
+            try:
+                localization = await asyncio.to_thread(
+                    self.localizer.localize,
+                    selected_positions,
+                    selected_windows,
+                    candidate.sample_rate_hz,
+                    conditions.temperature_c,
+                    conditions.humidity_fraction,
+                )
+                reference_signal = selected_windows[localization.reference_sensor]
+                return LocalizedCandidate(
+                    candidate=candidate,
+                    localization_position_m=localization.position_m,
+                    localization_confidence=localization.confidence,
+                    localization_gdop=localization.gdop,
+                    reference_sensor=localization.reference_sensor,
+                    tdoa_s=localization.tdoa_s,
+                    selected_sensor_ids=selected_ids,
+                    reference_signal=reference_signal,
+                    capability_tier=tier,
+                )
+            except LocalizationError:
+                self._metrics.localization_failures += 1
+                return None
 
-        reference_signal = selected_windows[localization.reference_sensor]
-        classification = await asyncio.to_thread(self.classifier.classify, reference_signal, candidate.sample_rate_hz)
-        label_category = label_category_for_name(classification.label)
-        iff_category = iff_for_category(label_category)
+        if tier == "2d" and hasattr(self.localizer, "localize_2d"):
+            try:
+                mean_z = float(np.mean([pos[2] for pos in selected_positions.values()]))
+                localization = await asyncio.to_thread(
+                    self.localizer.localize_2d,
+                    selected_positions,
+                    selected_windows,
+                    candidate.sample_rate_hz,
+                    conditions.temperature_c,
+                    conditions.humidity_fraction,
+                    mean_z,
+                )
+                reference_signal = selected_windows[localization.reference_sensor]
+                return LocalizedCandidate(
+                    candidate=candidate,
+                    localization_position_m=localization.position_m,
+                    localization_confidence=localization.confidence,
+                    localization_gdop=localization.gdop,
+                    reference_sensor=localization.reference_sensor,
+                    tdoa_s=localization.tdoa_s,
+                    selected_sensor_ids=selected_ids,
+                    reference_signal=reference_signal,
+                    capability_tier=tier,
+                )
+            except LocalizationError:
+                self._metrics.localization_failures += 1
+                return None
+
+        reference_sensor = max(energies.items(), key=lambda item: item[1])[0]
+        ref_signal = windows[reference_sensor]
+        ref_pos = sensor_positions[reference_sensor]
+        return LocalizedCandidate(
+            candidate=candidate,
+            localization_position_m=(float(ref_pos[0]), float(ref_pos[1]), float(ref_pos[2])),
+            localization_confidence=0.25,
+            localization_gdop=float("inf"),
+            reference_sensor=reference_sensor,
+            tdoa_s={},
+            selected_sensor_ids=selected_ids,
+            reference_signal=ref_signal,
+            capability_tier=tier,
+        )
+
+    async def _classify_and_track(self, product: LocalizedCandidate) -> DetectionProduct | None:
+        classification = await asyncio.to_thread(
+            self.classifier.classify,
+            product.reference_signal,
+            product.candidate.sample_rate_hz,
+        )
+        label_category = self.taxonomy_provider.category_for_label(classification.label)
+        iff_category = self.taxonomy_provider.iff_for_category(label_category)
         label_id = await self.storage.upsert_label(
             name=classification.label,
             category=label_category,
             source=self.settings.classifier_backend,
-            created_ns=candidate.event_time_ns,
+            created_ns=product.candidate.event_time_ns,
         )
+        if hasattr(self.taxonomy_provider, "register_label"):
+            self.taxonomy_provider.register_label(classification.label, label_category)
 
-        track = await self.tracker.update(
-            timestamp_ns=candidate.event_time_ns,
-            position_m=localization.position_m,
-            label=classification.label,
-            label_category=label_category,
-            iff_category=iff_category,
-            label_id=label_id,
-            confidence=classification.confidence,
-            sensor_count=len(selected_ids),
-        )
-        track.position_geo = self.coordinate_frame.local_to_geo(track.position_m)
+        track: TrackState | None = None
+        if product.capability_tier != "alerting_only":
+            track = await self.tracker.update(
+                timestamp_ns=product.candidate.event_time_ns,
+                position_m=product.localization_position_m,
+                label=classification.label,
+                label_category=label_category,
+                iff_category=iff_category,
+                label_id=label_id,
+                confidence=classification.confidence,
+                sensor_count=len(product.selected_sensor_ids),
+            )
+            track.position_geo = self.coordinate_frame.local_to_geo(track.position_m)
+            track.capability_tier = product.capability_tier
 
-        detection_geo = self.coordinate_frame.local_to_geo(localization.position_m)
+        detection_geo = self.coordinate_frame.local_to_geo(product.localization_position_m)
         zone_ids = await self.zone_matcher.match_geo_point(
             lat=detection_geo.lat,
             lon=detection_geo.lon,
-            now_ns=candidate.event_time_ns,
+            now_ns=product.candidate.event_time_ns,
+        )
+        suppressed_by_zone, suppression_reasons = await self.zone_matcher.evaluate_detection_policies(
+            zone_ids=zone_ids,
+            label=classification.label,
+            label_category=label_category,
+            now_ns=product.candidate.event_time_ns,
         )
 
-        latest_observation_ids = await self.registry.latest_observation_ids(selected_ids)
-        source_observation_ids = list(dict.fromkeys([*candidate.source_observation_ids, *latest_observation_ids]))
-
-        source_node_id = await self.registry.node_id_for_sensor(localization.reference_sensor)
+        latest_observation_ids = await self.registry.latest_observation_ids(product.selected_sensor_ids)
+        source_observation_ids = list(
+            dict.fromkeys([*product.candidate.source_observation_ids, *latest_observation_ids])
+        )
+        source_node_id = await self.registry.node_id_for_sensor(product.reference_sensor)
         tor_ns = time.time_ns()
-        stale_ns = candidate.event_time_ns + int(self.settings.event_stale_seconds * 1_000_000_000)
+        stale_ns = product.candidate.event_time_ns + int(self.settings.event_stale_seconds * 1_000_000_000)
 
-        ref_rms = max(rms(reference_signal), 1e-9)
-        spl_db = float(20.0 * math.log10(ref_rms))
+        gain_offset_db = await self.registry.gain_offset_db_for_sensor(product.reference_sensor)
+        ref_rms = max(rms(product.reference_signal), 1e-9)
+        spl_db = float(20.0 * math.log10(ref_rms)) + gain_offset_db
+        retention_tier = self._retention_tier_for_detection(
+            label=classification.label,
+            label_category=label_category,
+            confidence=classification.confidence,
+            suppressed_by_zone=suppressed_by_zone,
+        )
+        feature_summary = dict(classification.features)
+        feature_summary["capability_tier"] = product.capability_tier
+        if suppression_reasons:
+            feature_summary["zone_suppression"] = suppression_reasons
 
         detection = DetectionEvent(
             id=f"det-{uuid.uuid4().hex[:12]}",
-            source_type=candidate.source_type,
+            source_type=product.candidate.source_type,
             source_node_id=source_node_id,
-            timestamp_ns=candidate.event_time_ns,
-            toa_ns=candidate.event_time_ns,
+            timestamp_ns=product.candidate.event_time_ns,
+            toa_ns=product.candidate.event_time_ns,
             tor_ns=tor_ns,
-            time_quality=candidate.time_quality,
+            time_quality=product.candidate.time_quality,
             stale_ns=stale_ns,
-            position_m=localization.position_m,
+            position_m=product.localization_position_m,
             position_geo=detection_geo,
-            position_covariance_m2=track.position_covariance_m2,
-            confidence=localization.confidence,
-            gdop=localization.gdop,
+            position_covariance_m2=track.position_covariance_m2 if track is not None else None,
+            confidence=product.localization_confidence,
+            gdop=product.localization_gdop,
             label_id=label_id,
             label=classification.label,
             label_category=label_category,
             iff_category=iff_category,
             label_confidence=classification.confidence,
             spl_db=spl_db,
-            track_id=track.id,
-            source_sensors=sorted(selected_ids),
+            track_id=track.id if track is not None and not suppressed_by_zone else None,
+            source_sensors=sorted(product.selected_sensor_ids),
             source_observation_ids=source_observation_ids,
             zone_ids=zone_ids,
-            reference_sensor=localization.reference_sensor,
-            tdoa_s=localization.tdoa_s,
+            reference_sensor=product.reference_sensor,
+            tdoa_s=product.tdoa_s,
             classifier_scores=classification.scores,
-            feature_summary=classification.features,
+            feature_summary=feature_summary,
+            retention_tier=RetentionTier(retention_tier),
             snippet_path=None,
         )
 
         snippet_path: str | None = None
         snippet_expires_ns: int | None = None
-        if self.settings.snippet_retention_seconds > 0:
+        if self.settings.snippet_retention_seconds > 0 and retention_tier not in {"ephemeral", "experiment"}:
             snippet_file = Path(self.settings.snippet_dir) / f"{detection.id}.wav"
-            await asyncio.to_thread(write_wav_mono, snippet_file, reference_signal, candidate.sample_rate_hz)
+            await asyncio.to_thread(write_wav_mono, snippet_file, product.reference_signal, product.candidate.sample_rate_hz)
             snippet_path = str(snippet_file)
-            snippet_expires_ns = candidate.event_time_ns + int(self.settings.snippet_retention_seconds * 1_000_000_000)
+            snippet_expires_ns = product.candidate.event_time_ns + int(
+                self.settings.snippet_retention_seconds * 1_000_000_000
+            )
             detection.snippet_path = snippet_path
 
         await self.storage.insert_detection(
             detection=detection,
             snippet_path=snippet_path,
             snippet_expires_ns=snippet_expires_ns,
+            retention_tier=retention_tier,
         )
-        await self.storage.upsert_track(track)
-        await self.storage.insert_track_update(
+        await self.storage.insert_ping(
+            timestamp_ns=detection.timestamp_ns,
+            ping_type="acoustic",
+            label=detection.label,
+            label_id=detection.label_id,
+            spl_db=detection.spl_db,
+            position_m=detection.position_m,
+            position_geo=detection.position_geo,
+            source_detection_id=detection.id,
+            source_observation_id=detection.source_observation_ids[0] if detection.source_observation_ids else None,
+            source_track_id=detection.track_id,
+            retention_tier=retention_tier,
+            metadata={
+                "label_category": detection.label_category,
+                "confidence": detection.label_confidence,
+                "zone_ids": detection.zone_ids,
+                "capability_tier": product.capability_tier,
+            },
+        )
+
+        if track is not None and not suppressed_by_zone:
+            await self.storage.upsert_track(track)
+            await self.storage.insert_track_update(
+                track=track,
+                timestamp_ns=product.candidate.event_time_ns,
+                event_id=detection.event_id,
+                update_type="detection",
+                detection_id=detection.id,
+                observation_ids=source_observation_ids,
+                metadata={
+                    "gdop": detection.gdop,
+                    "reference_sensor": detection.reference_sensor,
+                    "capability_tier": product.capability_tier,
+                },
+            )
+        if suppressed_by_zone:
+            self._metrics.detections_suppressed_by_zone += 1
+        return DetectionProduct(
+            detection=detection,
             track=track,
-            timestamp_ns=candidate.event_time_ns,
-            event_id=detection.event_id,
-            update_type="detection",
-            detection_id=detection.id,
-            observation_ids=source_observation_ids,
-            metadata={"gdop": detection.gdop, "reference_sensor": detection.reference_sensor},
+            suppressed_by_zone=suppressed_by_zone,
+            suppression_reasons=suppression_reasons,
         )
+
+    async def _process_rules_and_delivery(self, product: DetectionProduct) -> None:
+        detection = product.detection
+        track = product.track
+
+        if product.suppressed_by_zone:
+            return
 
         payload = {
             "event_id": detection.event_id,
@@ -398,14 +678,110 @@ class FusionNode:
                 "source_observation_ids": detection.source_observation_ids,
                 "track_id": detection.track_id,
             },
-            # Backward-compatible fields for existing clients.
             "type": "detection",
             "detection": detection.model_dump(mode="json"),
-            "track": track.model_dump(mode="json"),
+            "track": track.model_dump(mode="json") if track is not None else None,
             "server_time_ns": time.time_ns(),
         }
         await self.live_callback(payload)
-        return detection
+        self._metrics.detections_emitted += 1
+
+        evaluations = await self.rules_engine.evaluate(detection=detection, track=track)
+        for evaluation in evaluations:
+            if not evaluation.matched:
+                continue
+            for descriptor in evaluation.descriptors:
+                await self._dispatch_rule_action(
+                    descriptor=descriptor,
+                    rule_id=evaluation.rule_id,
+                    detection=detection,
+                    track=track,
+                )
+
+    async def _dispatch_rule_action(
+        self,
+        *,
+        descriptor: ActionDescriptor,
+        rule_id: str,
+        detection: DetectionEvent | None,
+        track: TrackState | None,
+    ) -> None:
+        timestamp_ns = time.time_ns()
+        payload = {
+            "action_type": descriptor.action_type,
+            "destination": descriptor.destination,
+            "priority": descriptor.priority,
+            "payload": descriptor.payload,
+        }
+        alert_id = await self.storage.insert_alert(
+            timestamp_ns=timestamp_ns,
+            rule_id=rule_id,
+            detection_id=detection.id if detection else None,
+            track_id=track.id if track else None,
+            destination=descriptor.destination,
+            priority=descriptor.priority,
+            status="sent",
+            payload=payload,
+        )
+        handler = self._action_handlers.get(descriptor.destination)
+        if handler is None:
+            handler = self._action_handlers.get("log")
+        if handler is None:
+            return
+        status = "sent"
+        patch: dict[str, Any] = {}
+        try:
+            result = await handler.handle(descriptor, detection=detection, track=track)
+            patch = result if isinstance(result, dict) else {}
+            delivered = bool(patch.get("delivered", True))
+            if not delivered:
+                status = "escalated"
+        except Exception as exc:  # pragma: no cover - resilience path
+            status = "escalated"
+            patch = {"error": f"{type(exc).__name__}: {exc}"}
+        await self.storage.update_alert_status(
+            alert_id=alert_id,
+            status=status,
+            updated_ns=time.time_ns(),
+            payload_patch=patch,
+        )
+
+    async def _refresh_taxonomy(self, now_ns: int | None = None, force: bool = False) -> None:
+        now = now_ns if now_ns is not None else time.time_ns()
+        if not force and now - self._taxonomy_refresh_ns < 10_000_000_000:
+            return
+        rows = await self.storage.list_labels()
+        if hasattr(self.taxonomy_provider, "merge_labels"):
+            self.taxonomy_provider.merge_labels(rows)
+        self._taxonomy_refresh_ns = now
+
+    async def _enqueue_stage(self, queue: asyncio.Queue, item: Any) -> bool:
+        if self.settings.fusion_offline_replay_mode or not self.settings.fusion_drop_on_backpressure:
+            await queue.put(item)
+            return True
+        try:
+            queue.put_nowait(item)
+            return True
+        except asyncio.QueueFull:
+            self._metrics.stage_drops_backpressure += 1
+            return False
+
+    def _retention_tier_for_detection(
+        self,
+        *,
+        label: str,
+        label_category: str,
+        confidence: float,
+        suppressed_by_zone: bool,
+    ) -> str:
+        if suppressed_by_zone:
+            return RetentionTier.EPHEMERAL.value
+        key = label.strip().lower()
+        if any(token in key for token in ("gunshot", "explosion", "artillery", "fusillade")):
+            return RetentionTier.PERMANENT.value
+        if label_category == "security" and confidence >= 0.6:
+            return RetentionTier.LONG.value
+        return RetentionTier.SHORT.value
 
     def _normalize_node_spec(self, spec: NodeSpec) -> tuple[NodeSpec, GeoPoint]:
         if spec.position_m is not None:

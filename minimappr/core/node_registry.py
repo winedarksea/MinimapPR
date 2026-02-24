@@ -83,3 +83,20 @@ class NodeRegistry:
             if descriptor is None:
                 return None
             return descriptor.node_id
+
+    async def gain_offset_db_for_sensor(self, sensor_id: str) -> float:
+        async with self._lock:
+            descriptor = self._sensors.get(sensor_id)
+            if descriptor is None:
+                return 0.0
+            runtime = self._nodes.get(descriptor.node_id)
+            if runtime is None:
+                return 0.0
+            properties = runtime.spec.properties if isinstance(runtime.spec.properties, dict) else {}
+            raw = properties.get("gain_offset_db")
+            if raw is None and isinstance(properties.get("audio"), dict):
+                raw = properties["audio"].get("gain_offset_db")
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                return 0.0

@@ -3,6 +3,7 @@ const state = {
   nodes: [],
   tracks: [],
   detections: [],
+  zones: [],
   copStatus: null,
   selectedTrackId: null,
   trackSort: { key: "tqi", dir: "desc" },
@@ -38,6 +39,7 @@ const layers = {
   detections: L.layerGroup().addTo(map),
   vectors: L.layerGroup().addTo(map),
   ellipses: L.layerGroup().addTo(map),
+  zones: L.layerGroup().addTo(map),
   tracks: L.layerGroup().addTo(map),
   nodes: L.layerGroup().addTo(map),
 };
@@ -270,10 +272,38 @@ function renderMap() {
   layers.gdop.clearLayers();
   layers.vectors.clearLayers();
   layers.ellipses.clearLayers();
+  layers.zones.clearLayers();
   trackMarkerById.clear();
 
   const bounds = [];
   const nowNs = Date.now() * 1e6;
+
+  for (const zone of state.zones) {
+    const polygon = Array.isArray(zone.polygon_geo) ? zone.polygon_geo : [];
+    if (polygon.length < 3) continue;
+    const latLngs = polygon.map((point) => [parseNumber(point[0]), parseNumber(point[1])]);
+    latLngs.forEach((latLng) => bounds.push(latLng));
+
+    const zoneType = String(zone.zone_type || "").toLowerCase();
+    const style =
+      zoneType === "exclusion_zone"
+        ? { color: "#8d5e2b", fillColor: "#d8b17a", fillOpacity: 0.16 }
+        : zoneType === "coverage_zone"
+          ? { color: "#316f8d", fillColor: "#8ebdd7", fillOpacity: 0.12 }
+          : zoneType === "alert_zone"
+            ? { color: "#8d2b2b", fillColor: "#d78e8e", fillOpacity: 0.13 }
+            : { color: "#4b6d6c", fillColor: "#a2c2c0", fillOpacity: 0.1 };
+
+    L.polygon(latLngs, {
+      color: style.color,
+      fillColor: style.fillColor,
+      fillOpacity: style.fillOpacity,
+      weight: 2,
+      opacity: 0.8,
+    })
+      .bindTooltip(`${zone.name} (${zone.zone_type})`)
+      .addTo(layers.zones);
+  }
 
   for (const node of state.nodes) {
     const latLng = toLatLng(node);
@@ -527,16 +557,18 @@ function connectLive() {
 }
 
 async function refreshSnapshot() {
-  const [nodes, detections, tracks, copStatus] = await Promise.all([
+  const [nodes, detections, tracks, zones, copStatus] = await Promise.all([
     fetchJSON("/api/v1/nodes"),
     fetchJSON("/api/v1/detections?limit=200"),
     fetchJSON("/api/v1/tracks?limit=400"),
+    fetchJSON("/api/v1/zones"),
     fetchJSON("/api/v1/cop/status"),
   ]);
 
   state.nodes = nodes;
   state.detections = detections;
   state.tracks = tracks;
+  state.zones = zones;
   state.copStatus = copStatus;
 }
 

@@ -188,6 +188,18 @@ body {
   background: var(--gdop-poor);
 }
 
+.zone-alert {
+  background: #c67d7d;
+}
+
+.zone-exclusion {
+  background: #c9a16f;
+}
+
+.zone-coverage {
+  background: #7ca7c0;
+}
+
 .side-panel {
   display: grid;
   grid-template-rows: minmax(260px, 1fr) minmax(240px, 1fr);

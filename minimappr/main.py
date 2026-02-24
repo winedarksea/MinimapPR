@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from minimappr.api.live import LiveEventHub
+from minimappr.api.transports import HttpIngestTransport
 from minimappr.classifiers.factory import create_classifier
 from minimappr.config import Settings
 from minimappr.core.audio_buffer import MultiSensorBuffer
@@ -24,7 +25,7 @@ from minimappr.core.localization import LocalizationEngine
 from minimappr.core.node_registry import NodeRegistry
 from minimappr.core.tracking import TrackManager
 from minimappr.core.zones import ZoneMatcher
-from minimappr.models import GeoPoint, IngestFrameRequest, IngestFrameResponse
+from minimappr.models import AlertStatus, GeoPoint, IngestFrameRequest, IngestFrameResponse, ZoneSpec
 from minimappr.storage.db import Storage
 
 
@@ -57,6 +58,7 @@ fusion_node = FusionNode(
     coordinate_frame=coordinate_frame,
     zone_matcher=zone_matcher,
 )
+ingest_transport = HttpIngestTransport(fusion_node)
 
 cleanup_task: asyncio.Task | None = None
 
@@ -65,6 +67,15 @@ async def _cleanup_loop() -> None:
     while True:
         now_ns = time.time_ns()
         await storage.cleanup_expired_snippets(now_ns=now_ns)
+        await storage.cleanup_retention(
+            now_ns=now_ns,
+            tier_ttls_seconds={
+                "ephemeral": settings.retention_ephemeral_seconds,
+                "short": settings.retention_short_seconds,
+                "long": settings.retention_long_seconds,
+                "experiment": settings.retention_experiment_seconds,
+            },
+        )
         await fusion_node.housekeeping_tick(now_ns=now_ns)
         await asyncio.sleep(settings.cleanup_interval_seconds)
 
@@ -108,19 +119,23 @@ async def root() -> FileResponse:
 @app.get("/health")
 async def health() -> dict:
     status = await fusion_node.status()
+    workers = status.get("workers", {})
+    running = int(workers.get("localization_running", 0)) + int(workers.get("classification_running", 0)) + int(
+        workers.get("rules_running", 0)
+    )
     return {
         "status": "ok",
         "time_ns": time.time_ns(),
         "classifier": settings.classifier_backend,
-        "fusion_queue_depth": status["queue"]["depth"],
-        "fusion_workers_running": status["workers"]["running"],
+        "fusion_queue_depth": status["queue"]["localization_depth"],
+        "fusion_workers_running": running,
     }
 
 
 @app.post("/api/v1/ingest/frame", response_model=IngestFrameResponse)
 async def ingest_frame(payload: IngestFrameRequest) -> IngestFrameResponse:
     try:
-        return await fusion_node.ingest(payload)
+        return await ingest_transport.deliver_frame(payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -177,11 +192,30 @@ async def get_config() -> dict:
         "trigger_cooldown_seconds": settings.trigger_cooldown_seconds,
         "localization_window_seconds": settings.localization_window_seconds,
         "snippet_retention_seconds": settings.snippet_retention_seconds,
+        "retention": {
+            "ephemeral_seconds": settings.retention_ephemeral_seconds,
+            "short_seconds": settings.retention_short_seconds,
+            "long_seconds": settings.retention_long_seconds,
+            "experiment_seconds": settings.retention_experiment_seconds,
+        },
         "default_temperature_c": settings.default_temperature_c,
         "default_humidity": settings.default_humidity,
+        "preprocess_enabled": settings.preprocess_enabled,
+        "audio_highpass_hz": settings.audio_highpass_hz,
+        "audio_lowpass_hz": settings.audio_lowpass_hz,
+        "min_sensors_for_3d": settings.min_sensors_for_3d,
+        "min_sensors_for_2d": settings.min_sensors_for_2d,
         "tracking_filter": settings.tracking_filter,
         "fusion_worker_count": settings.fusion_worker_count,
         "fusion_event_queue_size": settings.fusion_event_queue_size,
+        "fusion_localization_queue_size": settings.fusion_localization_queue_size,
+        "fusion_classification_queue_size": settings.fusion_classification_queue_size,
+        "fusion_rules_queue_size": settings.fusion_rules_queue_size,
+        "fusion_drop_on_backpressure": settings.fusion_drop_on_backpressure,
+        "fusion_offline_replay_mode": settings.fusion_offline_replay_mode,
+        "rules_config_path": str(settings.rules_config_path),
+        "taxonomy_config_path": str(settings.taxonomy_config_path),
+        "model_chain_config_path": str(settings.model_chain_config_path),
         "site_origin": {
             "lat": settings.site_origin_lat,
             "lon": settings.site_origin_lon,
@@ -217,6 +251,56 @@ async def cop_status() -> dict:
 @app.get("/api/v1/alerts")
 async def list_alerts(limit: int = Query(default=100, ge=1, le=1000)) -> list[dict]:
     return await storage.list_alerts(limit=limit)
+
+
+@app.patch("/api/v1/alerts/{alert_id}")
+async def update_alert_status(
+    alert_id: str,
+    status: AlertStatus,
+    reason: str | None = Query(default=None),
+) -> dict:
+    ok = await storage.update_alert_status(
+        alert_id=alert_id,
+        status=status.value,
+        updated_ns=time.time_ns(),
+        payload_patch={"operator_reason": reason} if reason else None,
+    )
+    if not ok:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    return {"ok": True, "alert_id": alert_id, "status": status.value}
+
+
+@app.get("/api/v1/pings")
+async def list_pings(limit: int = Query(default=500, ge=1, le=5000)) -> list[dict]:
+    return await storage.list_pings(limit=limit)
+
+
+@app.get("/api/v1/zones")
+async def list_zones() -> list[dict]:
+    return await storage.list_zones()
+
+
+@app.put("/api/v1/zones/{zone_id}")
+async def upsert_zone(zone_id: str, payload: ZoneSpec) -> dict:
+    if payload.id != zone_id:
+        raise HTTPException(status_code=400, detail="zone_id path must match payload.id")
+    await storage.upsert_zone(
+        zone_id=payload.id,
+        name=payload.name,
+        zone_type=payload.zone_type.value,
+        polygon_geo=payload.polygon_geo,
+        properties=payload.properties,
+        created_ns=time.time_ns(),
+    )
+    return {"ok": True, "zone_id": zone_id}
+
+
+@app.delete("/api/v1/zones/{zone_id}")
+async def delete_zone(zone_id: str) -> dict:
+    deleted = await storage.delete_zone(zone_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Zone not found")
+    return {"ok": True, "zone_id": zone_id}
 
 
 @app.get("/api/v1/detections/{detection_id}/audio")

@@ -84,6 +84,7 @@ class TrackManager:
         iff_category: str = "unknown",
         sensor_count: int = 1,
         label_id: str | None = None,
+        capability_tier: str = "full_3d",
     ) -> TrackState:
         async with self._lock:
             self._age_tracks(timestamp_ns)
@@ -122,6 +123,7 @@ class TrackManager:
                     update_count=1,
                     status=TrackStatus.TENTATIVE.value,
                     tqi=self._compute_tqi(confidence, 1, 0.0, sensor_count),
+                    capability_tier=capability_tier,
                 )
                 self._tracks[track_id] = created
                 if self._tracking_filter == "kalman":
@@ -145,6 +147,7 @@ class TrackManager:
             )
             best_track.confidence = float(max(best_track.confidence, confidence))
             best_track.update_count += 1
+            best_track.capability_tier = capability_tier
 
             # Lifecycle: tentative -> confirmed after enough detections
             if best_track.status in (TrackStatus.TENTATIVE.value, TrackStatus.COASTING.value):
