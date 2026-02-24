@@ -633,6 +633,8 @@ Systematic testing is critical for validating hardware and algorithm choices:
 ## Implementation Status & Roadmap (TODO)
 
 ### 🟢 Phase 1: Core Localization & Tracking (Current Focus)
+- [ ] **Canonical Event Envelope** — standardize event/message shape across pipeline stages with stable IDs and timestamps (`event_id`, `source_type`, `node_id`, TOA, TOR, `time_quality`, provenance refs).
+- [ ] **Core Schema Freeze (Phase 1)** — prioritize first-class persistence for `nodes`, `observations`, `detections`, `tracks`, `alerts`, and `labels` (`zones` when exclusion rules are enabled); defer non-core tables to later phases unless required for core behavior.
 - [x] **Project initialization** — basic FastAPI structure, Pydantic models, SQLite persistence with WAL mode.
 - [x] **Sensor Node Protocol** — JSON-over-WebSocket audio/meta streams from ESP32 clients.
 - [x] **TDOA Localization** — GCC-PHAT cross-correlation and Least Squares position solving.
@@ -647,21 +649,21 @@ Systematic testing is critical for validating hardware and algorithm choices:
 - [ ] **Graceful Degradation Model** — define and enforce capability tiers as nodes drop: full 3D localization → 2D → classification-only → alerting-only (Phase 1 item #8).
 - [ ] **Storage Retention Tiers** — implement full ephemeral/short/long/config tier model with automatic promotion (e.g., gunshot → permanent retention) beyond current snippet-expiry-only logic (Phase 1 item #7).
 - [ ] **Observations Table & Retention** — persist raw observation metadata (audio and non-audio) with TOA/TOR timestamps, sensor type, source node, and retention tier support.
-- [ ] **Pings Table & Extraction** — implement the pings data model and extraction from detections, BLE sightings, and motion events; foundation for heatmaps and long-term analytics.
-- [ ] **Labels Table** — implement the hierarchical labels taxonomy (AudioSet ontology base) with category, parent label, and source fields; referenced by rules, alerts, IFF, and fingerprints.
+- [ ] **Pings Derivation Path (Not Authoritative in Phase 1)** — generate pings as derived rollups/materialized outputs from detections/tracks; avoid making `pings` a primary write path until heatmaps/analytics are active.
+- [ ] **Labels Table (Flat Runtime, Hierarchy-Ready Schema)** — implement labels with category/source and optional `parent_label_id`, but keep runtime logic flat in Phase 1 to reduce complexity while preserving forward compatibility.
 - [ ] **Track Updates Table & Provenance Chain** — persist per-update track state transitions and detection references to complete replay lineage: observation → detection → track update → track → alert.
 - [ ] **Store-and-Forward Buffering** — nodes buffer data locally during brief connectivity loss and sync on reconnect (Phase 1 item #8).
 - [ ] **Timestamp Quality & Latency Modeling** — propagate and persist time quality (`gps_locked`/`ntp_sync`/`freerunning`) plus TOA vs TOR to support fusion weighting and network diagnostics.
-- [ ] **Node Schema Expansion** — extend node registry/storage with mobility, explicit status, heartbeat timestamp, and hardware metadata fields from the architecture.
+- [ ] **Node Schema Expansion (Stable Core + Properties Bag)** — keep core node fields minimal (identity/location/capabilities/mobility/status/heartbeat/firmware), and place extra hardware details in a versioned `properties` JSON object.
 - [ ] **Bandpass Filtering** — configurable preprocessing chain options (from no filter to multiple filters in series), starting with highpass (default 50 Hz) and lowpass filter options before localization. Configurable separately per node.
 - [ ] **Pipeline Stage Isolation & Backpressure** — separate ingest/localization/classification/rules with bounded queues and stage metrics so slow classifiers cannot block localization or ingestion. Option to drop frames to stay in real time (defaults to on).
-- [ ] **Ambisonic Output** — generating spatial audio streams for remote listening, with voice/vehicle removal for privacy-safe public streaming.
 
 ### 🟡 Phase 2: Mesh Extensions & Federated Fusion
 - [ ] **Federated Fusion** — peer-to-peer links for distributed processing across multiple fusion servers, with Track Quality-based deconfliction.
-- [ ] **Spectral Fingerprinting** — matching recurring signature sounds (e.g., local pump noise) to specific emitters.
-- [ ] **BLE/WiFi Gateway** — integrating RF presence for Blue Force Tracking (BFT) via ESP32-Paxcounter / BLE-Scanner patterns.
-- [ ] **Known Entities & IFF Gating** — blue force registry (BLE MAC, WiFi MAC, spectral fingerprints), IFF categories (friendly → hostile), and alert suppression for known friendlies.
+- [ ] **Identity & Continuity Layer (Blue Force + Recurring Emitters)** — unify known-friendly identity and recurring-source re-identification in one registry: phones/devices (BLE/WiFi) plus spectral fingerprints for static or repeated emitters (e.g., HVAC, pumps, neighbor dog).
+- [ ] **BLE/WiFi Gateway** — integrate RF presence feeds as identity evidence (initially smartphone-centric) via ESP32-Paxcounter / BLE-Scanner patterns.
+- [ ] **Fingerprinting & Annotation Loop** — use user annotations to seed and refine spectral fingerprints; fingerprints feed entity confidence and IFF gating.
+- [ ] **Intermittent Source Reacquisition** — track continuity logic for stop/start emitters across long temporal gaps, using location priors, spectral fingerprints, and confidence decay/rebuild.
 - [ ] **Output Privacy Filtering** — Removal of voice and vehicle for privacy-safe public streaming of output audio streams.
 - [ ] **Additional Localization Algorithms** — SRP-PHAT, MUSIC, ESPRIT, MVDR beamforming as pluggable alternatives to GCC-PHAT.
 - [ ] **TAK / CoT Integration** — export tracks and detections as Cursor on Target events for interoperability with ATAK/WinTAK/iTAK.
@@ -672,6 +674,7 @@ Systematic testing is critical for validating hardware and algorithm choices:
 - [ ] **COP Map: GDOP Overlay** — render computed GDOP values on the frontend map as a coverage-quality layer (Phase 1 item #6). GDOP is already computed and stored but not displayed.
 - [ ] **COP Map: Altitude Annotation** — display Z/altitude for tracks and detections in the 2D COP view as documented in the architecture.
 - [ ] **COP Map: Sensor Health Indicators** — show node online/degraded/offline status on the map with visual indicators for staleness.
+- [ ] **Ambisonic Output** — generate spatial audio streams for remote listening, with voice/vehicle removal support for privacy-safe public streaming.
 - [ ] **Network Health Monitoring** — real-time latency and jitter visualization across the mesh; heartbeat staleness detection with configurable thresholds and degraded-sensor alerts on the COP.
 - [ ] **Hardened Time Sync** — verify and stress-test GPS PPS alignment across heterogeneous node types.
 
@@ -687,7 +690,7 @@ Systematic testing is critical for validating hardware and algorithm choices:
 - [ ] **Voice Assistant Integration** — wake word detection → STT → Home Assistant Voice (via Rhasspy/Wyoming protocol).
 - [ ] **MAVLink Node Control** — autonomous platform integration for drone/rover-carried nodes.
 - [ ] **Advanced Tracking** — Multi-Hypothesis Tracking (MHT), JPDA for complex multi-target scenarios with occlusion and track splitting.
-- [ ] **User Annotations** — frontend/API for annotating tracks and detections; feeds fingerprint database, known entity registry, and training labels. Note generally the front end should be clean and minimal, just the minimum to be effective.
+- [ ] **User Annotations** — frontend/API for annotating tracks and detections; feeds identity/fingerprint continuity, known-entity confidence, and training labels. Note generally the front end should be clean and minimal, just the minimum to be effective.
 
 ### 🔵 Unprioritized / Potential Features
 Items worth tracking but not yet assigned to a phase. May be incorporated as priorities clarify.
