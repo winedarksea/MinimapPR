@@ -21,7 +21,7 @@ from minimappr.config import Settings
 from minimappr.core.audio_buffer import MultiSensorBuffer
 from minimappr.core.fusion_node import FusionNode
 from minimappr.core.geo import LocalCoordinateFrame
-from minimappr.core.localization import LocalizationEngine
+from minimappr.core.localization_dispatch import build_localizer_from_settings
 from minimappr.core.node_registry import NodeRegistry
 from minimappr.core.tracking import TrackManager
 from minimappr.core.zones import ZoneMatcher
@@ -33,7 +33,7 @@ settings = Settings.from_env()
 storage = Storage(settings.db_path)
 registry = NodeRegistry()
 audio_buffer = MultiSensorBuffer(max_duration_seconds=settings.max_sensor_buffer_seconds)
-localizer = LocalizationEngine()
+localizer = build_localizer_from_settings(settings)
 classifier = create_classifier(settings)
 tracker = TrackManager(settings)
 live_hub = LiveEventHub()
@@ -205,6 +205,22 @@ async def get_config() -> dict:
         "audio_lowpass_hz": settings.audio_lowpass_hz,
         "min_sensors_for_3d": settings.min_sensors_for_3d,
         "min_sensors_for_2d": settings.min_sensors_for_2d,
+        "localization_max_tau_s": settings.localization_max_tau_s,
+        "localization_algorithm": settings.localization_algorithm,
+        "localization_strategy": settings.localization_strategy,
+        "localization_srp_grid_resolution_m": settings.localization_srp_grid_resolution_m,
+        "localization_search_padding_m": settings.localization_search_padding_m,
+        "localization_music_azimuth_step_deg": settings.localization_music_azimuth_step_deg,
+        "localization_music_elevation_step_deg": settings.localization_music_elevation_step_deg,
+        "localization_subspace_freq_min_hz": settings.localization_subspace_freq_min_hz,
+        "localization_subspace_freq_max_hz": settings.localization_subspace_freq_max_hz,
+        "localization_refine_confidence_threshold": settings.localization_refine_confidence_threshold,
+        "localization_tight_array_aperture_m": settings.localization_tight_array_aperture_m,
+        "beamformed_classification_enabled": settings.beamformed_classification_enabled,
+        "beamformer_type": settings.beamformer_type,
+        "beamformed_classification_min_sensor_count": settings.beamformed_classification_min_sensor_count,
+        "beamformed_classification_confidence_margin": settings.beamformed_classification_confidence_margin,
+        "mvdr_diagonal_loading": settings.mvdr_diagonal_loading,
         "tracking_filter": settings.tracking_filter,
         "fusion_worker_count": settings.fusion_worker_count,
         "fusion_event_queue_size": settings.fusion_event_queue_size,

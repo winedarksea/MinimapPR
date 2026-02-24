@@ -42,6 +42,22 @@ class LocalizationConfig:
     preprocess_enabled: bool
     min_sensors_for_3d: int
     min_sensors_for_2d: int
+    localization_max_tau_s: float
+    localization_algorithm: str
+    localization_strategy: str
+    localization_srp_grid_resolution_m: float
+    localization_search_padding_m: float
+    localization_music_azimuth_step_deg: float
+    localization_music_elevation_step_deg: float
+    localization_subspace_freq_min_hz: float
+    localization_subspace_freq_max_hz: float
+    localization_refine_confidence_threshold: float
+    localization_tight_array_aperture_m: float
+    beamformed_classification_enabled: bool
+    beamformer_type: str
+    beamformed_classification_min_sensor_count: int
+    beamformed_classification_confidence_margin: float
+    mvdr_diagonal_loading: float
 
 
 @dataclass(slots=True)
@@ -112,6 +128,22 @@ class Settings:
     audio_lowpass_hz: float = 0.0
     min_sensors_for_3d: int = 4
     min_sensors_for_2d: int = 3
+    localization_max_tau_s: float = 0.02
+    localization_algorithm: str = "gcc_phat"
+    localization_strategy: str = "fixed"
+    localization_srp_grid_resolution_m: float = 0.5
+    localization_search_padding_m: float = 2.0
+    localization_music_azimuth_step_deg: float = 6.0
+    localization_music_elevation_step_deg: float = 8.0
+    localization_subspace_freq_min_hz: float = 300.0
+    localization_subspace_freq_max_hz: float = 3500.0
+    localization_refine_confidence_threshold: float = 0.45
+    localization_tight_array_aperture_m: float = 0.35
+    beamformed_classification_enabled: bool = False
+    beamformer_type: str = "delay_and_sum"
+    beamformed_classification_min_sensor_count: int = 2
+    beamformed_classification_confidence_margin: float = 0.0
+    mvdr_diagonal_loading: float = 1e-3
 
     default_temperature_c: float = 20.0
     default_humidity: float = 0.5
@@ -169,6 +201,31 @@ class Settings:
             audio_lowpass_hz=_env_float("MINIMAPPR_AUDIO_LOWPASS_HZ", 0.0),
             min_sensors_for_3d=_env_int("MINIMAPPR_MIN_SENSORS_FOR_3D", 4),
             min_sensors_for_2d=_env_int("MINIMAPPR_MIN_SENSORS_FOR_2D", 3),
+            localization_max_tau_s=_env_float("MINIMAPPR_LOCALIZATION_MAX_TAU_S", 0.02),
+            localization_algorithm=_env_str("MINIMAPPR_LOCALIZATION_ALGORITHM", "gcc_phat"),
+            localization_strategy=_env_str("MINIMAPPR_LOCALIZATION_STRATEGY", "fixed"),
+            localization_srp_grid_resolution_m=_env_float("MINIMAPPR_LOCALIZATION_SRP_GRID_RESOLUTION_M", 0.5),
+            localization_search_padding_m=_env_float("MINIMAPPR_LOCALIZATION_SEARCH_PADDING_M", 2.0),
+            localization_music_azimuth_step_deg=_env_float("MINIMAPPR_LOCALIZATION_MUSIC_AZ_STEP_DEG", 6.0),
+            localization_music_elevation_step_deg=_env_float("MINIMAPPR_LOCALIZATION_MUSIC_EL_STEP_DEG", 8.0),
+            localization_subspace_freq_min_hz=_env_float("MINIMAPPR_LOCALIZATION_SUBSPACE_FREQ_MIN_HZ", 300.0),
+            localization_subspace_freq_max_hz=_env_float("MINIMAPPR_LOCALIZATION_SUBSPACE_FREQ_MAX_HZ", 3500.0),
+            localization_refine_confidence_threshold=_env_float(
+                "MINIMAPPR_LOCALIZATION_REFINE_CONFIDENCE_THRESHOLD",
+                0.45,
+            ),
+            localization_tight_array_aperture_m=_env_float("MINIMAPPR_LOCALIZATION_TIGHT_ARRAY_APERTURE_M", 0.35),
+            beamformed_classification_enabled=_env_bool("MINIMAPPR_BEAMFORMED_CLASSIFICATION_ENABLED", False),
+            beamformer_type=_env_str("MINIMAPPR_BEAMFORMER_TYPE", "delay_and_sum"),
+            beamformed_classification_min_sensor_count=_env_int(
+                "MINIMAPPR_BEAMFORMED_CLASSIFICATION_MIN_SENSOR_COUNT",
+                2,
+            ),
+            beamformed_classification_confidence_margin=_env_float(
+                "MINIMAPPR_BEAMFORMED_CLASSIFICATION_CONFIDENCE_MARGIN",
+                0.0,
+            ),
+            mvdr_diagonal_loading=_env_float("MINIMAPPR_MVDR_DIAGONAL_LOADING", 1e-3),
             default_temperature_c=_env_float("MINIMAPPR_DEFAULT_TEMPERATURE_C", 20.0),
             default_humidity=_env_float("MINIMAPPR_DEFAULT_HUMIDITY", 0.5),
             site_origin_lat=_env_float("MINIMAPPR_SITE_ORIGIN_LAT", 37.7749),
@@ -219,6 +276,35 @@ class Settings:
             raise ValueError("MINIMAPPR_MIN_SENSORS_FOR_2D must be >= 2")
         if settings.min_sensors_for_3d < settings.min_sensors_for_2d:
             raise ValueError("MINIMAPPR_MIN_SENSORS_FOR_3D must be >= MINIMAPPR_MIN_SENSORS_FOR_2D")
+        if settings.localization_max_tau_s <= 0.0:
+            raise ValueError("MINIMAPPR_LOCALIZATION_MAX_TAU_S must be > 0")
+        settings.localization_algorithm = settings.localization_algorithm.strip().lower()
+        if settings.localization_algorithm not in {"gcc_phat", "srp_phat", "music", "esprit"}:
+            raise ValueError("MINIMAPPR_LOCALIZATION_ALGORITHM must be one of gcc_phat/srp_phat/music/esprit")
+        settings.localization_strategy = settings.localization_strategy.strip().lower()
+        if settings.localization_strategy not in {"fixed", "geometry_aware", "cascade"}:
+            raise ValueError("MINIMAPPR_LOCALIZATION_STRATEGY must be fixed, geometry_aware, or cascade")
+        if settings.localization_srp_grid_resolution_m <= 0.0:
+            raise ValueError("MINIMAPPR_LOCALIZATION_SRP_GRID_RESOLUTION_M must be > 0")
+        if settings.localization_search_padding_m <= 0.0:
+            raise ValueError("MINIMAPPR_LOCALIZATION_SEARCH_PADDING_M must be > 0")
+        if settings.localization_subspace_freq_min_hz <= 0.0:
+            raise ValueError("MINIMAPPR_LOCALIZATION_SUBSPACE_FREQ_MIN_HZ must be > 0")
+        if settings.localization_subspace_freq_max_hz <= settings.localization_subspace_freq_min_hz:
+            raise ValueError("MINIMAPPR_LOCALIZATION_SUBSPACE_FREQ_MAX_HZ must be > MIN frequency")
+        if settings.localization_refine_confidence_threshold < 0.0 or settings.localization_refine_confidence_threshold > 1.0:
+            raise ValueError("MINIMAPPR_LOCALIZATION_REFINE_CONFIDENCE_THRESHOLD must be in [0,1]")
+        if settings.localization_tight_array_aperture_m <= 0.0:
+            raise ValueError("MINIMAPPR_LOCALIZATION_TIGHT_ARRAY_APERTURE_M must be > 0")
+        settings.beamformer_type = settings.beamformer_type.strip().lower()
+        if settings.beamformer_type not in {"delay_and_sum", "mvdr"}:
+            raise ValueError("MINIMAPPR_BEAMFORMER_TYPE must be delay_and_sum or mvdr")
+        if settings.beamformed_classification_min_sensor_count < 1:
+            raise ValueError("MINIMAPPR_BEAMFORMED_CLASSIFICATION_MIN_SENSOR_COUNT must be >= 1")
+        if settings.beamformed_classification_confidence_margin < 0.0:
+            raise ValueError("MINIMAPPR_BEAMFORMED_CLASSIFICATION_CONFIDENCE_MARGIN must be >= 0")
+        if settings.mvdr_diagonal_loading <= 0.0:
+            raise ValueError("MINIMAPPR_MVDR_DIAGONAL_LOADING must be > 0")
         settings.db_path.parent.mkdir(parents=True, exist_ok=True)
         settings.snippet_dir.mkdir(parents=True, exist_ok=True)
         settings.large_artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -237,6 +323,22 @@ class Settings:
             preprocess_enabled=self.preprocess_enabled,
             min_sensors_for_3d=self.min_sensors_for_3d,
             min_sensors_for_2d=self.min_sensors_for_2d,
+            localization_max_tau_s=self.localization_max_tau_s,
+            localization_algorithm=self.localization_algorithm,
+            localization_strategy=self.localization_strategy,
+            localization_srp_grid_resolution_m=self.localization_srp_grid_resolution_m,
+            localization_search_padding_m=self.localization_search_padding_m,
+            localization_music_azimuth_step_deg=self.localization_music_azimuth_step_deg,
+            localization_music_elevation_step_deg=self.localization_music_elevation_step_deg,
+            localization_subspace_freq_min_hz=self.localization_subspace_freq_min_hz,
+            localization_subspace_freq_max_hz=self.localization_subspace_freq_max_hz,
+            localization_refine_confidence_threshold=self.localization_refine_confidence_threshold,
+            localization_tight_array_aperture_m=self.localization_tight_array_aperture_m,
+            beamformed_classification_enabled=self.beamformed_classification_enabled,
+            beamformer_type=self.beamformer_type,
+            beamformed_classification_min_sensor_count=self.beamformed_classification_min_sensor_count,
+            beamformed_classification_confidence_margin=self.beamformed_classification_confidence_margin,
+            mvdr_diagonal_loading=self.mvdr_diagonal_loading,
         )
 
     def tracking_config(self) -> TrackingConfig:

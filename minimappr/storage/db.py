@@ -1167,7 +1167,7 @@ class Storage:
                         SELECT id, path
                         FROM large_artifacts
                         WHERE retention_tier = ?
-                        AND (expires_ns IS NOT NULL AND expires_ns <= ? OR created_ns <= ?)
+                        AND ((expires_ns IS NOT NULL AND expires_ns <= ?) OR created_ns <= ?)
                         """,
                         (tier, now_ns, threshold_ns),
                     )
@@ -1181,7 +1181,7 @@ class Storage:
                     """
                     DELETE FROM large_artifacts
                     WHERE retention_tier = ?
-                    AND (expires_ns IS NOT NULL AND expires_ns <= ? OR created_ns <= ?)
+                    AND ((expires_ns IS NOT NULL AND expires_ns <= ?) OR created_ns <= ?)
                     """,
                     (tier, now_ns, threshold_ns),
                 )

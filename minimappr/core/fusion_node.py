@@ -16,6 +16,7 @@ import numpy as np
 from minimappr.classifiers.base import AudioClassifier
 from minimappr.config import Settings
 from minimappr.core.audio_buffer import MultiSensorBuffer
+from minimappr.core.beamforming import DelayAndSumBeamformer, MVDRBeamformer
 from minimappr.core.degradation import CapabilityDegradationModel
 from minimappr.core.environment import StaticEnvironmentProvider
 from minimappr.core.geo import LocalCoordinateFrame
@@ -29,6 +30,7 @@ from minimappr.core.zones import ZoneMatcher
 from minimappr.interfaces import (
     ActionDescriptor,
     AudioPreprocessor,
+    Beamformer,
     EnvironmentProvider,
     Localizer,
     RuleActionHandler,
@@ -68,7 +70,10 @@ class LocalizedCandidate:
     reference_sensor: str
     tdoa_s: dict[str, float]
     selected_sensor_ids: list[str]
+    selected_windows: dict[str, np.ndarray]
+    selected_positions: dict[str, np.ndarray]
     reference_signal: np.ndarray
+    localization_method: str
     capability_tier: str
 
 
@@ -121,6 +126,7 @@ class FusionNode:
         environment_provider: EnvironmentProvider | None = None,
         preprocessor_factory: NodePreprocessorFactory | None = None,
         degradation_model: CapabilityDegradationModel | None = None,
+        beamformer: Beamformer | None = None,
     ) -> None:
         self.settings = settings
         self.registry = registry
@@ -143,6 +149,7 @@ class FusionNode:
             min_sensors_for_3d=settings.min_sensors_for_3d,
             min_sensors_for_2d=settings.min_sensors_for_2d,
         )
+        self.beamformer = beamformer or self._create_beamformer()
         self._action_handlers = action_handlers or {
             "cop": WebsocketRuleActionHandler(live_callback),
             "log": LoggingRuleActionHandler(),
@@ -436,6 +443,7 @@ class FusionNode:
                     conditions.humidity_fraction,
                 )
                 reference_signal = selected_windows[localization.reference_sensor]
+                localization_method = self._current_localizer_name()
                 return LocalizedCandidate(
                     candidate=candidate,
                     localization_position_m=localization.position_m,
@@ -444,7 +452,10 @@ class FusionNode:
                     reference_sensor=localization.reference_sensor,
                     tdoa_s=localization.tdoa_s,
                     selected_sensor_ids=selected_ids,
+                    selected_windows=selected_windows,
+                    selected_positions=selected_positions,
                     reference_signal=reference_signal,
+                    localization_method=localization_method,
                     capability_tier=tier,
                 )
             except LocalizationError:
@@ -464,6 +475,7 @@ class FusionNode:
                     mean_z,
                 )
                 reference_signal = selected_windows[localization.reference_sensor]
+                localization_method = self._current_localizer_name()
                 return LocalizedCandidate(
                     candidate=candidate,
                     localization_position_m=localization.position_m,
@@ -472,7 +484,10 @@ class FusionNode:
                     reference_sensor=localization.reference_sensor,
                     tdoa_s=localization.tdoa_s,
                     selected_sensor_ids=selected_ids,
+                    selected_windows=selected_windows,
+                    selected_positions=selected_positions,
                     reference_signal=reference_signal,
+                    localization_method=localization_method,
                     capability_tier=tier,
                 )
             except LocalizationError:
@@ -490,16 +505,53 @@ class FusionNode:
             reference_sensor=reference_sensor,
             tdoa_s={},
             selected_sensor_ids=selected_ids,
+            selected_windows=selected_windows,
+            selected_positions=selected_positions,
             reference_signal=ref_signal,
+            localization_method="fallback_reference_sensor",
             capability_tier=tier,
         )
 
     async def _classify_and_track(self, product: LocalizedCandidate) -> DetectionProduct | None:
-        classification = await asyncio.to_thread(
+        omni_classification = await asyncio.to_thread(
             self.classifier.classify,
             product.reference_signal,
             product.candidate.sample_rate_hz,
         )
+        classification = omni_classification
+        classification_signal = product.reference_signal
+        classification_path = "omni"
+        beamformed_classification = None
+        beamforming_error: str | None = None
+
+        if (
+            self.beamformer is not None
+            and product.capability_tier != "alerting_only"
+            and len(product.selected_sensor_ids) >= self.settings.beamformed_classification_min_sensor_count
+        ):
+            try:
+                sound_speed = self.environment_provider.get_speed_of_sound(product.localization_position_m)
+                beamformed_signal = await asyncio.to_thread(
+                    self.beamformer.beamform,
+                    product.selected_positions,
+                    product.selected_windows,
+                    product.candidate.sample_rate_hz,
+                    product.localization_position_m,
+                    sound_speed,
+                )
+                beamformed_classification = await asyncio.to_thread(
+                    self.classifier.classify,
+                    beamformed_signal,
+                    product.candidate.sample_rate_hz,
+                )
+                margin = max(0.0, self.settings.beamformed_classification_confidence_margin)
+                if beamformed_classification.confidence > (omni_classification.confidence + margin):
+                    classification = beamformed_classification
+                    classification_signal = beamformed_signal
+                    classification_path = f"beamformed:{self.settings.beamformer_type}"
+            except Exception as exc:  # pragma: no cover - resilience path
+                beamforming_error = f"{type(exc).__name__}: {exc}"
+
         label_category = self.taxonomy_provider.category_for_label(classification.label)
         iff_category = self.taxonomy_provider.iff_for_category(label_category)
         label_id = await self.storage.upsert_label(
@@ -510,21 +562,6 @@ class FusionNode:
         )
         if hasattr(self.taxonomy_provider, "register_label"):
             self.taxonomy_provider.register_label(classification.label, label_category)
-
-        track: TrackState | None = None
-        if product.capability_tier != "alerting_only":
-            track = await self.tracker.update(
-                timestamp_ns=product.candidate.event_time_ns,
-                position_m=product.localization_position_m,
-                label=classification.label,
-                label_category=label_category,
-                iff_category=iff_category,
-                label_id=label_id,
-                confidence=classification.confidence,
-                sensor_count=len(product.selected_sensor_ids),
-            )
-            track.position_geo = self.coordinate_frame.local_to_geo(track.position_m)
-            track.capability_tier = product.capability_tier
 
         detection_geo = self.coordinate_frame.local_to_geo(product.localization_position_m)
         zone_ids = await self.zone_matcher.match_geo_point(
@@ -538,6 +575,21 @@ class FusionNode:
             label_category=label_category,
             now_ns=product.candidate.event_time_ns,
         )
+
+        track: TrackState | None = None
+        if not suppressed_by_zone and product.capability_tier != "alerting_only":
+            track = await self.tracker.update(
+                timestamp_ns=product.candidate.event_time_ns,
+                position_m=product.localization_position_m,
+                label=classification.label,
+                label_category=label_category,
+                iff_category=iff_category,
+                label_id=label_id,
+                confidence=classification.confidence,
+                sensor_count=len(product.selected_sensor_ids),
+                capability_tier=product.capability_tier,
+            )
+            track.position_geo = self.coordinate_frame.local_to_geo(track.position_m)
 
         latest_observation_ids = await self.registry.latest_observation_ids(product.selected_sensor_ids)
         source_observation_ids = list(
@@ -558,6 +610,14 @@ class FusionNode:
         )
         feature_summary = dict(classification.features)
         feature_summary["capability_tier"] = product.capability_tier
+        feature_summary["localization_method"] = product.localization_method
+        feature_summary["classification_path"] = classification_path
+        feature_summary["omni_confidence"] = omni_classification.confidence
+        if beamformed_classification is not None:
+            feature_summary["beamformed_confidence"] = beamformed_classification.confidence
+            feature_summary["beamformed_label"] = beamformed_classification.label
+        if beamforming_error:
+            feature_summary["beamforming_error"] = beamforming_error
         if suppression_reasons:
             feature_summary["zone_suppression"] = suppression_reasons
 
@@ -597,7 +657,7 @@ class FusionNode:
         snippet_expires_ns: int | None = None
         if self.settings.snippet_retention_seconds > 0 and retention_tier not in {"ephemeral", "experiment"}:
             snippet_file = Path(self.settings.snippet_dir) / f"{detection.id}.wav"
-            await asyncio.to_thread(write_wav_mono, snippet_file, product.reference_signal, product.candidate.sample_rate_hz)
+            await asyncio.to_thread(write_wav_mono, snippet_file, classification_signal, product.candidate.sample_rate_hz)
             snippet_path = str(snippet_file)
             snippet_expires_ns = product.candidate.event_time_ns + int(
                 self.settings.snippet_retention_seconds * 1_000_000_000
@@ -745,6 +805,25 @@ class FusionNode:
             updated_ns=time.time_ns(),
             payload_patch=patch,
         )
+
+    def _create_beamformer(self) -> Beamformer | None:
+        if not self.settings.beamformed_classification_enabled:
+            return None
+        beamformer_name = str(self.settings.beamformer_type).strip().lower()
+        if beamformer_name == "mvdr":
+            return MVDRBeamformer(diagonal_loading=self.settings.mvdr_diagonal_loading)
+        return DelayAndSumBeamformer()
+
+    def _current_localizer_name(self) -> str:
+        getter = getattr(self.localizer, "last_algorithm_name", None)
+        if callable(getter):
+            try:
+                value = getter()
+            except Exception:  # pragma: no cover - resilience path
+                value = None
+            if isinstance(value, str) and value:
+                return value
+        return type(self.localizer).__name__
 
     async def _refresh_taxonomy(self, now_ns: int | None = None, force: bool = False) -> None:
         now = now_ns if now_ns is not None else time.time_ns()

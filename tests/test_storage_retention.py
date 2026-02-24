@@ -64,6 +64,18 @@ async def test_storage_retention_cleanup_removes_expired_records(tmp_path: Path)
         expires_ns=old_ns + 1_000_000_000,
         metadata={},
     )
+    protected_artifact = tmp_path / "protected.bin"
+    protected_artifact.write_bytes(b"protected")
+    await storage.insert_large_artifact(
+        artifact_type="audit",
+        path=str(protected_artifact),
+        retention_tier="permanent",
+        source_detection_id=None,
+        source_track_id=None,
+        created_ns=old_ns,
+        expires_ns=None,
+        metadata={},
+    )
 
     summary = await storage.cleanup_retention(
         now_ns=now_ns,
@@ -74,6 +86,7 @@ async def test_storage_retention_cleanup_removes_expired_records(tmp_path: Path)
     assert summary["large_artifacts"] >= 1
     assert snippet_file.exists() is False
     assert artifact.exists() is False
+    assert protected_artifact.exists() is True
     assert await storage.list_detections(limit=10) == []
     assert await storage.list_pings(limit=10) == []
 

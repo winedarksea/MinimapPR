@@ -136,6 +136,20 @@ class AudioPreprocessor(Protocol):
 
 
 @runtime_checkable
+class Beamformer(Protocol):
+    def beamform(
+        self,
+        sensor_positions: dict[str, Vec3Array],
+        sensor_windows: dict[str, np.ndarray],
+        sample_rate_hz: int,
+        steer_position_m: tuple[float, float, float],
+        sound_speed_mps: float = 343.2,
+        frequency_weights: np.ndarray | None = None,
+    ) -> np.ndarray:
+        ...
+
+
+@runtime_checkable
 class TaxonomyProvider(Protocol):
     def category_for_label(self, label: str) -> str:
         ...
