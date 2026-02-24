@@ -1,20 +1,21 @@
 # MinimapPR
 Realtime environmental awareness: distributed sound localization + classification + common operating picture.
 
-This repository now includes a complete first-delivery MVP focused on the base case you asked for:
+This repository now includes a complete Phase 1 core build focused on the base case:
 - functional two-node ingestion model (point node + Sirith tetrahedral array node)
-- functional sound localization backend (TDOA with GCC-PHAT)
-- basic classifier subsystem with pluggable backend design
-- real-time track updates and persistent event storage
-- minimal frontend map/COP view
+- TDOA localization backend (GCC-PHAT + least-squares solve)
+- canonical event envelope (`event_id`, `source_type`, TOA/TOR, `time_quality`, provenance refs)
+- core schema persistence for nodes, observations, detections, tracks, labels, alerts, and track updates
+- geographic COP frontend with node health, GDOP overlay, symbology, uncertainty ellipses, velocity vectors, track table, and detection feed
 
 ## First Delivery Scope (Implemented)
 - `FastAPI` backend for node ingestion, localization, classification, tracking, and APIs
 - queue-driven fusion node runtime (ingest stage decoupled from localization/classification workers)
-- `SQLite` persistence for nodes, detections, and tracks
+- `SQLite` persistence for Phase 1 core tables (`nodes`, `observations`, `detections`, `tracks`, `labels`, `alerts`, `track_updates`) plus `environment` schema stub
 - automatic snippet retention cleanup (self-cleaning raw audio extracts)
-- live websocket feed to frontend
-- minimal frontend dashboard for nodes/tracks/detections
+- snippet serving endpoint (`/api/v1/detections/{id}/audio`)
+- live websocket feed with server-side subscription filtering (zone/category/confidence/track status)
+- geographic Leaflet COP dashboard
 - deterministic simulation stream with both required node types
 
 ## Project Layout
@@ -103,6 +104,7 @@ Notes:
 - audio payload is interleaved `pcm16le`, base64 encoded
 - `frame.channels` must match `len(node.sensor_offsets_m)`
 - timestamps are per-frame start timestamps in `ns`
+- optional per-frame timing quality metadata supported: `time_quality`, `toa_ns`, `tor_ns`
 - response `triggered=true` means an event candidate was queued for fusion workers; detection emission is asynchronous
 
 ## Processing Pipeline
@@ -137,6 +139,9 @@ export MINIMAPPR_CLASSIFIER=yamnet
 - `GET /api/v1/nodes`
 - `GET /api/v1/detections?limit=100`
 - `GET /api/v1/tracks?limit=200`
+- `GET /api/v1/cop/status`
+- `GET /api/v1/alerts?limit=100`
+- `GET /api/v1/detections/{detection_id}/audio`
 - `WS /ws/live`
 
 ## Runtime Configuration
@@ -149,6 +154,12 @@ Key env vars:
 - `MINIMAPPR_TRIGGER_RMS` (default `0.015`)
 - `MINIMAPPR_TRIGGER_COOLDOWN_SECONDS` (default `0.8`)
 - `MINIMAPPR_LOCALIZATION_WINDOW_SECONDS` (default `0.08`)
+- `MINIMAPPR_DEFAULT_TEMPERATURE_C` (default `20.0`)
+- `MINIMAPPR_DEFAULT_HUMIDITY` (default `0.5`)
+- `MINIMAPPR_SITE_ORIGIN_LAT` (default `37.7749`)
+- `MINIMAPPR_SITE_ORIGIN_LON` (default `-122.4194`)
+- `MINIMAPPR_SITE_ORIGIN_ALT_M` (default `0.0`)
+- `MINIMAPPR_COORDINATE_MODE` (`flat` or `geodetic`; default `flat`)
 - `MINIMAPPR_CLASSIFIER` (`heuristic` or `yamnet`)
 - `MINIMAPPR_TRACKING_FILTER` (`linear` default, or `kalman`)
 - `MINIMAPPR_KALMAN_PROCESS_NOISE` (default `2.0`)
@@ -157,6 +168,9 @@ Key env vars:
 - `MINIMAPPR_KALMAN_INITIAL_VELOCITY_VARIANCE` (default `16.0`)
 - `MINIMAPPR_FUSION_WORKER_COUNT` (default `1`)
 - `MINIMAPPR_FUSION_EVENT_QUEUE_SIZE` (default `256`)
+- `MINIMAPPR_NODE_DEGRADED_AFTER_SECONDS` (default `15.0`)
+- `MINIMAPPR_NODE_OFFLINE_AFTER_SECONDS` (default `45.0`)
+- `MINIMAPPR_EVENT_STALE_SECONDS` (default `30.0`)
 
 ## Testing
 ```bash

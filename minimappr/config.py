@@ -37,6 +37,10 @@ class Settings:
 
     default_temperature_c: float = 20.0
     default_humidity: float = 0.5
+    site_origin_lat: float = 37.7749
+    site_origin_lon: float = -122.4194
+    site_origin_alt_m: float = 0.0
+    coordinate_mode: str = "flat"
 
     classifier_backend: str = "heuristic"
     yamnet_min_confidence: float = 0.25
@@ -53,6 +57,9 @@ class Settings:
     fusion_event_queue_size: int = 256
 
     cleanup_interval_seconds: float = 15.0
+    node_degraded_after_seconds: float = 15.0
+    node_offline_after_seconds: float = 45.0
+    event_stale_seconds: float = 30.0
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -68,6 +75,10 @@ class Settings:
             max_sensor_buffer_seconds=_env_float("MINIMAPPR_MAX_SENSOR_BUFFER_SECONDS", 8.0),
             default_temperature_c=_env_float("MINIMAPPR_DEFAULT_TEMPERATURE_C", 20.0),
             default_humidity=_env_float("MINIMAPPR_DEFAULT_HUMIDITY", 0.5),
+            site_origin_lat=_env_float("MINIMAPPR_SITE_ORIGIN_LAT", 37.7749),
+            site_origin_lon=_env_float("MINIMAPPR_SITE_ORIGIN_LON", -122.4194),
+            site_origin_alt_m=_env_float("MINIMAPPR_SITE_ORIGIN_ALT_M", 0.0),
+            coordinate_mode=_env_str("MINIMAPPR_COORDINATE_MODE", "flat"),
             classifier_backend=_env_str("MINIMAPPR_CLASSIFIER", "heuristic"),
             yamnet_min_confidence=_env_float("MINIMAPPR_YAMNET_MIN_CONFIDENCE", 0.25),
             association_distance_m=_env_float("MINIMAPPR_ASSOCIATION_DISTANCE_M", 8.0),
@@ -86,7 +97,19 @@ class Settings:
             fusion_worker_count=_env_int("MINIMAPPR_FUSION_WORKER_COUNT", 1),
             fusion_event_queue_size=_env_int("MINIMAPPR_FUSION_EVENT_QUEUE_SIZE", 256),
             cleanup_interval_seconds=_env_float("MINIMAPPR_CLEANUP_INTERVAL_SECONDS", 15.0),
+            node_degraded_after_seconds=_env_float("MINIMAPPR_NODE_DEGRADED_AFTER_SECONDS", 15.0),
+            node_offline_after_seconds=_env_float("MINIMAPPR_NODE_OFFLINE_AFTER_SECONDS", 45.0),
+            event_stale_seconds=_env_float("MINIMAPPR_EVENT_STALE_SECONDS", 30.0),
         )
+        settings.coordinate_mode = settings.coordinate_mode.strip().lower()
+        if settings.coordinate_mode not in {"flat", "geodetic"}:
+            raise ValueError("MINIMAPPR_COORDINATE_MODE must be 'flat' or 'geodetic'")
+        if settings.node_degraded_after_seconds <= 0.0:
+            raise ValueError("MINIMAPPR_NODE_DEGRADED_AFTER_SECONDS must be > 0")
+        if settings.node_offline_after_seconds <= settings.node_degraded_after_seconds:
+            raise ValueError("MINIMAPPR_NODE_OFFLINE_AFTER_SECONDS must be > degraded threshold")
+        if settings.event_stale_seconds <= 0.0:
+            raise ValueError("MINIMAPPR_EVENT_STALE_SECONDS must be > 0")
         settings.db_path.parent.mkdir(parents=True, exist_ok=True)
         settings.snippet_dir.mkdir(parents=True, exist_ok=True)
         return settings

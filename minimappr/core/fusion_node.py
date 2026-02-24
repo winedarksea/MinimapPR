@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import math
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -12,10 +13,13 @@ from pathlib import Path
 from minimappr.classifiers.base import AudioClassifier
 from minimappr.config import Settings
 from minimappr.core.audio_buffer import MultiSensorBuffer
+from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.localization import LocalizationEngine, LocalizationError
 from minimappr.core.node_registry import NodeRegistry
+from minimappr.core.taxonomy import iff_for_category, label_category_for_name
 from minimappr.core.tracking import TrackManager
-from minimappr.models import DetectionEvent, IngestFrameRequest, IngestFrameResponse
+from minimappr.core.zones import ZoneMatcher
+from minimappr.models import DetectionEvent, GeoPoint, IngestFrameRequest, IngestFrameResponse, NodeSpec, TimeQuality
 from minimappr.storage.db import Storage
 from minimappr.utils.audio import decode_pcm16le_b64, mono_mix, rms, write_wav_mono
 
@@ -25,6 +29,9 @@ class EventCandidate:
     id: str
     event_time_ns: int
     sample_rate_hz: int
+    source_type: str
+    time_quality: TimeQuality
+    source_observation_ids: list[str]
 
 
 @dataclass(slots=True)
@@ -52,6 +59,8 @@ class FusionNode:
         tracker: TrackManager,
         storage: Storage,
         live_callback,
+        coordinate_frame: LocalCoordinateFrame,
+        zone_matcher: ZoneMatcher,
     ) -> None:
         self.settings = settings
         self.registry = registry
@@ -61,6 +70,8 @@ class FusionNode:
         self.tracker = tracker
         self.storage = storage
         self.live_callback = live_callback
+        self.coordinate_frame = coordinate_frame
+        self.zone_matcher = zone_matcher
 
         self._last_trigger_ns = 0
         self._candidate_counter = itertools.count(1)
@@ -101,7 +112,7 @@ class FusionNode:
     async def ingest(self, request: IngestFrameRequest) -> IngestFrameResponse:
         self._metrics.ingest_requests += 1
 
-        node = request.node
+        raw_node = request.node
         frame = request.frame
 
         try:
@@ -114,7 +125,12 @@ class FusionNode:
             self._metrics.frames_rejected += 1
             raise ValueError("Decoded channel count does not match frame.channels")
 
-        runtime = await self.registry.upsert(node, frame.start_time_ns)
+        normalized_node, geo_position = self._normalize_node_spec(raw_node)
+
+        runtime = await self.registry.upsert(normalized_node, frame.start_time_ns)
+        tor_ns = frame.tor_ns if frame.tor_ns is not None else time.time_ns()
+        observation_ids: list[str] = []
+
         for channel_index, sensor_id in enumerate(runtime.sensor_ids):
             await self.buffer.append(
                 sensor_id=sensor_id,
@@ -123,7 +139,27 @@ class FusionNode:
                 samples=audio[channel_index],
             )
 
-        await self.storage.upsert_node(spec=node, last_seen_ns=frame.start_time_ns)
+            observation_id = await self.storage.insert_observation(
+                node_id=normalized_node.id,
+                sensor_id=sensor_id,
+                sensor_type="audio",
+                source_type=frame.source_type,
+                toa_ns=frame.toa_ns or frame.start_time_ns,
+                tor_ns=tor_ns,
+                time_quality=frame.time_quality.value,
+                sample_rate_hz=frame.sample_rate_hz,
+                channel_index=channel_index,
+                frame_sequence=frame.sequence,
+                metadata={
+                    "frame_start_ns": frame.start_time_ns,
+                    "frame_channels": frame.channels,
+                    "encoding": frame.encoding,
+                },
+            )
+            observation_ids.append(observation_id)
+            await self.registry.record_observation(sensor_id=sensor_id, observation_id=observation_id)
+
+        await self.storage.upsert_node(spec=normalized_node, last_seen_ns=frame.start_time_ns, position_geo=geo_position)
 
         self._metrics.frames_accepted += 1
 
@@ -145,6 +181,9 @@ class FusionNode:
                 id=f"evt-{next(self._candidate_counter):08d}",
                 event_time_ns=center_time_ns,
                 sample_rate_hz=frame.sample_rate_hz,
+                source_type=frame.source_type,
+                time_quality=frame.time_quality,
+                source_observation_ids=observation_ids,
             )
             try:
                 self._queue.put_nowait(candidate)
@@ -183,8 +222,10 @@ class FusionNode:
         }
 
     async def housekeeping_tick(self, now_ns: int) -> None:
+        await self.zone_matcher.refresh_if_due(now_ns=now_ns)
         tracks = await self.tracker.snapshot(now_ns=now_ns)
         for track in tracks:
+            track.position_geo = self.coordinate_frame.local_to_geo(track.position_m)
             await self.storage.upsert_track(track)
 
     async def _worker_loop(self, worker_id: int) -> None:
@@ -246,25 +287,68 @@ class FusionNode:
 
         reference_signal = selected_windows[localization.reference_sensor]
         classification = await asyncio.to_thread(self.classifier.classify, reference_signal, candidate.sample_rate_hz)
+        label_category = label_category_for_name(classification.label)
+        iff_category = iff_for_category(label_category)
+        label_id = await self.storage.upsert_label(
+            name=classification.label,
+            category=label_category,
+            source=self.settings.classifier_backend,
+            created_ns=candidate.event_time_ns,
+        )
 
         track = await self.tracker.update(
             timestamp_ns=candidate.event_time_ns,
             position_m=localization.position_m,
             label=classification.label,
+            label_category=label_category,
+            iff_category=iff_category,
+            label_id=label_id,
             confidence=classification.confidence,
             sensor_count=len(selected_ids),
         )
+        track.position_geo = self.coordinate_frame.local_to_geo(track.position_m)
+
+        detection_geo = self.coordinate_frame.local_to_geo(localization.position_m)
+        zone_ids = await self.zone_matcher.match_geo_point(
+            lat=detection_geo.lat,
+            lon=detection_geo.lon,
+            now_ns=candidate.event_time_ns,
+        )
+
+        latest_observation_ids = await self.registry.latest_observation_ids(selected_ids)
+        source_observation_ids = list(dict.fromkeys([*candidate.source_observation_ids, *latest_observation_ids]))
+
+        source_node_id = await self.registry.node_id_for_sensor(localization.reference_sensor)
+        tor_ns = time.time_ns()
+        stale_ns = candidate.event_time_ns + int(self.settings.event_stale_seconds * 1_000_000_000)
+
+        ref_rms = max(rms(reference_signal), 1e-9)
+        spl_db = float(20.0 * math.log10(ref_rms))
 
         detection = DetectionEvent(
             id=f"det-{uuid.uuid4().hex[:12]}",
+            source_type=candidate.source_type,
+            source_node_id=source_node_id,
             timestamp_ns=candidate.event_time_ns,
+            toa_ns=candidate.event_time_ns,
+            tor_ns=tor_ns,
+            time_quality=candidate.time_quality,
+            stale_ns=stale_ns,
             position_m=localization.position_m,
+            position_geo=detection_geo,
+            position_covariance_m2=track.position_covariance_m2,
             confidence=localization.confidence,
             gdop=localization.gdop,
+            label_id=label_id,
             label=classification.label,
+            label_category=label_category,
+            iff_category=iff_category,
             label_confidence=classification.confidence,
+            spl_db=spl_db,
             track_id=track.id,
             source_sensors=sorted(selected_ids),
+            source_observation_ids=source_observation_ids,
+            zone_ids=zone_ids,
             reference_sensor=localization.reference_sensor,
             tdoa_s=localization.tdoa_s,
             classifier_scores=classification.scores,
@@ -287,12 +371,52 @@ class FusionNode:
             snippet_expires_ns=snippet_expires_ns,
         )
         await self.storage.upsert_track(track)
+        await self.storage.insert_track_update(
+            track=track,
+            timestamp_ns=candidate.event_time_ns,
+            event_id=detection.event_id,
+            update_type="detection",
+            detection_id=detection.id,
+            observation_ids=source_observation_ids,
+            metadata={"gdop": detection.gdop, "reference_sensor": detection.reference_sensor},
+        )
 
         payload = {
+            "event_id": detection.event_id,
+            "event_type": "detection",
+            "source_type": detection.source_type,
+            "node_id": detection.source_node_id,
+            "toa_ns": detection.toa_ns,
+            "tor_ns": detection.tor_ns,
+            "time_quality": detection.time_quality.value,
+            "stale_ns": detection.stale_ns,
+            "position": {
+                "local_m": list(detection.position_m),
+                "geo": detection.position_geo.model_dump(mode="json") if detection.position_geo else None,
+            },
+            "provenance": {
+                "source_observation_ids": detection.source_observation_ids,
+                "track_id": detection.track_id,
+            },
+            # Backward-compatible fields for existing clients.
             "type": "detection",
-            "detection": detection.model_dump(),
-            "track": track.model_dump(),
+            "detection": detection.model_dump(mode="json"),
+            "track": track.model_dump(mode="json"),
             "server_time_ns": time.time_ns(),
         }
         await self.live_callback(payload)
         return detection
+
+    def _normalize_node_spec(self, spec: NodeSpec) -> tuple[NodeSpec, GeoPoint]:
+        if spec.position_m is not None:
+            local_pos = spec.position_m
+            geo = spec.position_geo or self.coordinate_frame.local_to_geo(local_pos)
+            normalized = spec.model_copy(update={"position_m": local_pos, "position_geo": geo})
+            return normalized, geo
+
+        if spec.position_geo is None:
+            raise ValueError("NodeSpec must include position_m or position_geo")
+
+        local_pos = self.coordinate_frame.geo_to_local(spec.position_geo)
+        normalized = spec.model_copy(update={"position_m": local_pos})
+        return normalized, spec.position_geo

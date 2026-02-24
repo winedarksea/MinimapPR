@@ -29,9 +29,12 @@ class NodeRegistry:
     def __init__(self) -> None:
         self._nodes: dict[str, NodeRuntime] = {}
         self._sensors: dict[str, SensorDescriptor] = {}
+        self._latest_observations: dict[str, str] = {}
         self._lock = asyncio.Lock()
 
     async def upsert(self, spec: NodeSpec, last_seen_ns: int) -> NodeRuntime:
+        if spec.position_m is None:
+            raise ValueError("NodeSpec.position_m must be present for runtime registration")
         base = np.asarray(spec.position_m, dtype=np.float64)
         sensor_ids: list[str] = []
         sensor_descriptors: dict[str, SensorDescriptor] = {}
@@ -64,3 +67,19 @@ class NodeRegistry:
     async def sensors_for_node(self, node_id: str) -> list[SensorDescriptor]:
         async with self._lock:
             return [descriptor for descriptor in self._sensors.values() if descriptor.node_id == node_id]
+
+    async def record_observation(self, sensor_id: str, observation_id: str) -> None:
+        async with self._lock:
+            self._latest_observations[sensor_id] = observation_id
+
+    async def latest_observation_ids(self, sensor_ids: list[str]) -> list[str]:
+        async with self._lock:
+            values = [self._latest_observations.get(sensor_id) for sensor_id in sensor_ids]
+        return [value for value in values if value is not None]
+
+    async def node_id_for_sensor(self, sensor_id: str) -> str | None:
+        async with self._lock:
+            descriptor = self._sensors.get(sensor_id)
+            if descriptor is None:
+                return None
+            return descriptor.node_id

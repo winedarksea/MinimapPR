@@ -11,23 +11,42 @@ from pydantic import BaseModel, Field, model_validator
 Vec3 = tuple[float, float, float]
 
 
+class TimeQuality(str, Enum):
+    GPS_LOCKED = "gps_locked"
+    NTP_SYNC = "ntp_sync"
+    FREERUNNING = "freerunning"
+
+
 class NodeType(str, Enum):
     POINT = "point"
     SIRITH_TETRA = "sirith_tetra"
+    ARRAY = "array"
+    GATEWAY = "gateway"
+
+
+class GeoPoint(BaseModel):
+    lat: float = Field(ge=-90.0, le=90.0)
+    lon: float = Field(ge=-180.0, le=180.0)
+    alt_m: float = 0.0
 
 
 class NodeSpec(BaseModel):
     id: str = Field(min_length=1)
     node_type: NodeType
-    position_m: Vec3
+    position_m: Vec3 | None = None
+    position_geo: GeoPoint | None = None
     sensor_offsets_m: list[Vec3] = Field(default_factory=lambda: [(0.0, 0.0, 0.0)])
     capabilities: list[str] = Field(default_factory=list)
+    mobility: Literal["stationary", "mobile"] = "stationary"
     metadata: dict[str, Any] = Field(default_factory=dict)
+    properties: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _validate(self) -> "NodeSpec":
         if not self.sensor_offsets_m:
             raise ValueError("sensor_offsets_m cannot be empty")
+        if self.position_m is None and self.position_geo is None:
+            raise ValueError("Either position_m or position_geo must be provided")
         return self
 
 
@@ -38,6 +57,16 @@ class AudioFrameIn(BaseModel):
     encoding: Literal["pcm16le"] = "pcm16le"
     samples_b64: str = Field(min_length=1)
     sequence: int | None = None
+    time_quality: TimeQuality = TimeQuality.FREERUNNING
+    toa_ns: int | None = None
+    tor_ns: int | None = None
+    source_type: Literal["raw_sensor", "local_track", "peer_track"] = "raw_sensor"
+
+    @model_validator(mode="after")
+    def _defaults(self) -> "AudioFrameIn":
+        if self.toa_ns is None:
+            self.toa_ns = self.start_time_ns
+        return self
 
 
 class IngestFrameRequest(BaseModel):
@@ -77,19 +106,44 @@ class LocalizationResult(BaseModel):
 
 class DetectionEvent(BaseModel):
     id: str
+    event_id: str | None = None
+    source_type: Literal["raw_sensor", "local_track", "peer_track"] = "raw_sensor"
+    source_node_id: str | None = None
     timestamp_ns: int
+    toa_ns: int | None = None
+    tor_ns: int | None = None
+    time_quality: TimeQuality = TimeQuality.FREERUNNING
+    stale_ns: int | None = None
     position_m: Vec3
+    position_geo: GeoPoint | None = None
+    position_covariance_m2: list[list[float]] | None = None
     confidence: float
     gdop: float
+    label_id: str | None = None
     label: str
+    label_category: str = "unknown"
+    iff_category: Literal["friendly", "unknown", "hostile"] = "unknown"
     label_confidence: float
+    spl_db: float | None = None
     track_id: str | None = None
     source_sensors: list[str] = Field(default_factory=list)
+    source_observation_ids: list[str] = Field(default_factory=list)
+    zone_ids: list[str] = Field(default_factory=list)
     reference_sensor: str
     tdoa_s: dict[str, float] = Field(default_factory=dict)
     classifier_scores: dict[str, float] = Field(default_factory=dict)
     feature_summary: dict[str, float] = Field(default_factory=dict)
     snippet_path: str | None = None
+
+    @model_validator(mode="after")
+    def _defaults(self) -> "DetectionEvent":
+        if self.event_id is None:
+            self.event_id = self.id
+        if self.toa_ns is None:
+            self.toa_ns = self.timestamp_ns
+        if self.tor_ns is None:
+            self.tor_ns = self.timestamp_ns
+        return self
 
 
 class TrackStatus(str, Enum):
@@ -104,8 +158,13 @@ class TrackState(BaseModel):
     first_seen_ns: int
     last_seen_ns: int
     position_m: Vec3
+    position_geo: GeoPoint | None = None
+    position_covariance_m2: list[list[float]] | None = None
     velocity_mps: Vec3 = (0.0, 0.0, 0.0)
+    label_id: str | None = None
     label: str = "unknown"
+    label_category: str = "unknown"
+    iff_category: Literal["friendly", "unknown", "hostile"] = "unknown"
     confidence: float = 0.0
     update_count: int = 0
     status: str = TrackStatus.TENTATIVE.value

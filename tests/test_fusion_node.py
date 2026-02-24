@@ -10,10 +10,12 @@ from minimappr.classifiers.heuristic import HeuristicClassifier
 from minimappr.config import Settings
 from minimappr.core.audio_buffer import MultiSensorBuffer
 from minimappr.core.fusion_node import FusionNode
+from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.localization import LocalizationEngine
 from minimappr.core.node_registry import NodeRegistry
 from minimappr.core.tracking import TrackManager
-from minimappr.models import IngestFrameRequest, NodeSpec, NodeType
+from minimappr.core.zones import ZoneMatcher
+from minimappr.models import GeoPoint, IngestFrameRequest, NodeSpec, NodeType
 from minimappr.storage.db import Storage
 from minimappr.utils.audio import encode_pcm16le_b64
 
@@ -42,6 +44,8 @@ async def test_fusion_node_ingest_and_status(tmp_path: Path) -> None:
     localizer = LocalizationEngine(max_tau_s=0.03)
     classifier = HeuristicClassifier()
     tracker = TrackManager(settings)
+    coordinate_frame = LocalCoordinateFrame(origin=GeoPoint(lat=37.0, lon=-122.0, alt_m=0.0), mode="flat")
+    zone_matcher = ZoneMatcher(storage=storage)
 
     async def _live(payload: dict) -> None:
         _ = payload
@@ -55,6 +59,8 @@ async def test_fusion_node_ingest_and_status(tmp_path: Path) -> None:
         tracker=tracker,
         storage=storage,
         live_callback=_live,
+        coordinate_frame=coordinate_frame,
+        zone_matcher=zone_matcher,
     )
 
     await fusion.start()

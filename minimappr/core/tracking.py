@@ -80,7 +80,10 @@ class TrackManager:
         position_m: tuple[float, float, float],
         label: str,
         confidence: float,
+        label_category: str = "unknown",
+        iff_category: str = "unknown",
         sensor_count: int = 1,
+        label_id: str | None = None,
     ) -> TrackState:
         async with self._lock:
             self._age_tracks(timestamp_ns)
@@ -105,8 +108,16 @@ class TrackManager:
                     first_seen_ns=timestamp_ns,
                     last_seen_ns=timestamp_ns,
                     position_m=(float(pos[0]), float(pos[1]), float(pos[2])),
+                    position_covariance_m2=[
+                        [self._kalman_initial_position_variance, 0.0, 0.0],
+                        [0.0, self._kalman_initial_position_variance, 0.0],
+                        [0.0, 0.0, self._kalman_initial_position_variance],
+                    ],
                     velocity_mps=(0.0, 0.0, 0.0),
+                    label_id=label_id,
                     label=label,
+                    label_category=label_category,
+                    iff_category=iff_category if iff_category in {"friendly", "unknown", "hostile"} else "unknown",
                     confidence=float(confidence),
                     update_count=1,
                     status=TrackStatus.TENTATIVE.value,
@@ -118,14 +129,20 @@ class TrackManager:
                 return created
 
             if self._tracking_filter == "kalman":
-                smoothed_position, smoothed_velocity = self._update_kalman(best_track, timestamp_ns, pos)
+                smoothed_position, smoothed_velocity, covariance = self._update_kalman(best_track, timestamp_ns, pos)
             else:
-                smoothed_position, smoothed_velocity = self._update_linear(best_track, timestamp_ns, pos)
+                smoothed_position, smoothed_velocity, covariance = self._update_linear(best_track, timestamp_ns, pos)
 
             best_track.last_seen_ns = timestamp_ns
             best_track.position_m = smoothed_position
             best_track.velocity_mps = smoothed_velocity
+            best_track.position_covariance_m2 = covariance
+            best_track.label_id = label_id
             best_track.label = label
+            best_track.label_category = label_category
+            best_track.iff_category = (
+                iff_category if iff_category in {"friendly", "unknown", "hostile"} else "unknown"
+            )
             best_track.confidence = float(max(best_track.confidence, confidence))
             best_track.update_count += 1
 
@@ -208,7 +225,7 @@ class TrackManager:
         track: TrackState,
         timestamp_ns: int,
         measured_position: np.ndarray,
-    ) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    ) -> tuple[tuple[float, float, float], tuple[float, float, float], list[list[float]]]:
         dt_s = max((timestamp_ns - track.last_seen_ns) / 1_000_000_000.0, 1e-3)
         previous_position = np.asarray(track.position_m, dtype=np.float64)
         previous_velocity = np.asarray(track.velocity_mps, dtype=np.float64)
@@ -217,9 +234,14 @@ class TrackManager:
         smooth_position = (0.4 * previous_position) + (0.6 * measured_position)
         smooth_velocity = (0.5 * previous_velocity) + (0.5 * measured_velocity)
 
+        # Linear mode does not estimate covariance; expose a conservative diagonal.
+        diag = max(1e-3, self._assoc_distance_m * 0.5) ** 2
+        covariance = [[diag, 0.0, 0.0], [0.0, diag, 0.0], [0.0, 0.0, diag]]
+
         return (
             (float(smooth_position[0]), float(smooth_position[1]), float(smooth_position[2])),
             (float(smooth_velocity[0]), float(smooth_velocity[1]), float(smooth_velocity[2])),
+            covariance,
         )
 
     def _init_kalman_state(self, track_id: str, position: np.ndarray) -> None:
@@ -242,7 +264,7 @@ class TrackManager:
         track: TrackState,
         timestamp_ns: int,
         measured_position: np.ndarray,
-    ) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    ) -> tuple[tuple[float, float, float], tuple[float, float, float], list[list[float]]]:
         state = self._kalman_states.get(track.id)
         if state is None:
             self._init_kalman_state(track.id, np.asarray(track.position_m, dtype=np.float64))
@@ -274,9 +296,15 @@ class TrackManager:
 
         position = posterior_mean[:3]
         velocity = posterior_mean[3:]
+        covariance = posterior_covariance[:3, :3]
         return (
             (float(position[0]), float(position[1]), float(position[2])),
             (float(velocity[0]), float(velocity[1]), float(velocity[2])),
+            [
+                [float(covariance[0, 0]), float(covariance[0, 1]), float(covariance[0, 2])],
+                [float(covariance[1, 0]), float(covariance[1, 1]), float(covariance[1, 2])],
+                [float(covariance[2, 0]), float(covariance[2, 1]), float(covariance[2, 2])],
+            ],
         )
 
     def _kalman_transition(self, dt_s: float) -> np.ndarray:
