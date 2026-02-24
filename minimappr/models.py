@@ -182,6 +182,25 @@ class TrackState(BaseModel):
     capability_tier: Literal["full_3d", "2d", "classification_only", "alerting_only"] = "full_3d"
 
 
+class FederationHeartbeat(BaseModel):
+    server_id: str = Field(min_length=1)
+    sent_ns: int = Field(gt=0)
+
+
+class FederationTrackSnapshot(BaseModel):
+    server_id: str = Field(min_length=1)
+    generated_ns: int = Field(gt=0)
+    source_type: Literal["local_track", "peer_track"] = "local_track"
+    tracks: list[TrackState] = Field(default_factory=list)
+
+
+class FederationAck(BaseModel):
+    ok: bool = True
+    server_id: str = Field(min_length=1)
+    received_ns: int = Field(gt=0)
+    peer_state: str = "active"
+
+
 class ZoneType(str, Enum):
     ALERT = "alert_zone"
     EXCLUSION = "exclusion_zone"

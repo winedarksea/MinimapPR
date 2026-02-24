@@ -9,7 +9,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -19,13 +19,24 @@ from minimappr.api.transports import HttpIngestTransport
 from minimappr.classifiers.factory import create_classifier
 from minimappr.config import Settings
 from minimappr.core.audio_buffer import MultiSensorBuffer
+from minimappr.core.federation import FederationCoordinator
 from minimappr.core.fusion_node import FusionNode
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.localization_dispatch import build_localizer_from_settings
 from minimappr.core.node_registry import NodeRegistry
 from minimappr.core.tracking import TrackManager
 from minimappr.core.zones import ZoneMatcher
-from minimappr.models import AlertStatus, GeoPoint, IngestFrameRequest, IngestFrameResponse, ZoneSpec
+from minimappr.models import (
+    AlertStatus,
+    FederationAck,
+    FederationHeartbeat,
+    FederationTrackSnapshot,
+    GeoPoint,
+    IngestFrameRequest,
+    IngestFrameResponse,
+    TrackState,
+    ZoneSpec,
+)
 from minimappr.storage.db import Storage
 
 
@@ -60,6 +71,24 @@ fusion_node = FusionNode(
 )
 ingest_transport = HttpIngestTransport(fusion_node)
 
+
+async def _federation_local_tracks(now_ns: int) -> list[TrackState]:
+    tracks = await tracker.snapshot(now_ns=now_ns)
+    active: list[TrackState] = []
+    for track in tracks:
+        if track.status not in {"tentative", "confirmed", "coasting"}:
+            continue
+        track.position_geo = coordinate_frame.local_to_geo(track.position_m)
+        active.append(track)
+    return active
+
+
+federation = FederationCoordinator(
+    settings=settings,
+    track_supplier=_federation_local_tracks,
+    live_callback=live_hub.broadcast,
+)
+
 cleanup_task: asyncio.Task | None = None
 
 
@@ -85,6 +114,7 @@ async def lifespan(app: FastAPI):
     global cleanup_task
     await storage.initialize()
     await fusion_node.start()
+    await federation.start()
     cleanup_task = asyncio.create_task(_cleanup_loop())
     try:
         yield
@@ -93,6 +123,7 @@ async def lifespan(app: FastAPI):
             cleanup_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await cleanup_task
+        await federation.stop()
         await fusion_node.stop()
         await storage.close()
 
@@ -123,12 +154,15 @@ async def health() -> dict:
     running = int(workers.get("localization_running", 0)) + int(workers.get("classification_running", 0)) + int(
         workers.get("rules_running", 0)
     )
+    federation_status = await federation.status()
     return {
         "status": "ok",
         "time_ns": time.time_ns(),
         "classifier": settings.classifier_backend,
         "fusion_queue_depth": status["queue"]["localization_depth"],
         "fusion_workers_running": running,
+        "federation_enabled": federation_status["enabled"],
+        "federation_peer_count": federation_status["peer_count"],
     }
 
 
@@ -173,10 +207,25 @@ async def list_detections(limit: int = Query(default=100, ge=1, le=1000)) -> lis
 
 
 @app.get("/api/v1/tracks")
-async def list_tracks(limit: int = Query(default=200, ge=1, le=1000)) -> list[dict]:
+async def list_tracks(
+    limit: int = Query(default=200, ge=1, le=1000),
+    include_standby: bool = Query(default=False),
+) -> list[dict]:
     now_ns = time.time_ns()
     _ = await tracker.snapshot(now_ns=now_ns)
     tracks = await storage.list_tracks(limit=limit)
+    for track in tracks:
+        if track.get("position_geo") is None and track.get("position_m"):
+            local = track["position_m"]
+            geo = coordinate_frame.local_to_geo((float(local[0]), float(local[1]), float(local[2])))
+            track["position_geo"] = geo.model_dump(mode="json")
+    if federation.enabled:
+        tracks = await federation.merged_tracks(
+            local_tracks=tracks,
+            now_ns=now_ns,
+            limit=limit,
+            include_standby=include_standby,
+        )
     for track in tracks:
         if track.get("position_geo") is None and track.get("position_m"):
             local = track["position_m"]
@@ -240,12 +289,76 @@ async def get_config() -> dict:
         "coordinate_mode": settings.coordinate_mode,
         "node_degraded_after_seconds": settings.node_degraded_after_seconds,
         "node_offline_after_seconds": settings.node_offline_after_seconds,
+        "federation": {
+            "enabled": settings.federation_enabled and bool(settings.federation_peers),
+            "server_id": settings.federation_server_id,
+            "peer_count": len(settings.federation_peers),
+            "publish_interval_seconds": settings.federation_publish_interval_seconds,
+            "heartbeat_interval_seconds": settings.federation_heartbeat_interval_seconds,
+            "link_timeout_seconds": settings.federation_link_timeout_seconds,
+            "track_ttl_seconds": settings.federation_track_ttl_seconds,
+            "deconflict_mahalanobis_gate": settings.federation_deconflict_mahalanobis_gate,
+            "tqi_hysteresis": settings.federation_tqi_hysteresis,
+        },
     }
 
 
 @app.get("/api/v1/fusion/status")
 async def fusion_status() -> dict:
     return await fusion_node.status()
+
+
+@app.get("/api/v1/federation/status")
+async def federation_status() -> dict:
+    return await federation.status()
+
+
+def _federation_headers(request: Request) -> tuple[str | None, str | None]:
+    return request.headers.get("authorization"), request.headers.get("x-minimappr-token")
+
+
+@app.post("/api/v1/federation/heartbeat", response_model=FederationAck)
+async def federation_heartbeat(payload: FederationHeartbeat, request: Request) -> FederationAck:
+    if not federation.enabled:
+        raise HTTPException(status_code=503, detail="Federation is disabled")
+    authorization, token_header = _federation_headers(request)
+    if not await federation.validate_inbound_auth(
+        peer_id=payload.server_id,
+        authorization_header=authorization,
+        token_header=token_header,
+    ):
+        raise HTTPException(status_code=401, detail="Invalid federation credentials")
+    accepted = await federation.handle_incoming_heartbeat(payload)
+    if not accepted:
+        raise HTTPException(status_code=403, detail="Unknown federation peer")
+    return FederationAck(
+        ok=True,
+        server_id=settings.federation_server_id,
+        received_ns=time.time_ns(),
+        peer_state="active",
+    )
+
+
+@app.post("/api/v1/federation/snapshot", response_model=FederationAck)
+async def federation_snapshot(payload: FederationTrackSnapshot, request: Request) -> FederationAck:
+    if not federation.enabled:
+        raise HTTPException(status_code=503, detail="Federation is disabled")
+    authorization, token_header = _federation_headers(request)
+    if not await federation.validate_inbound_auth(
+        peer_id=payload.server_id,
+        authorization_header=authorization,
+        token_header=token_header,
+    ):
+        raise HTTPException(status_code=401, detail="Invalid federation credentials")
+    accepted = await federation.handle_incoming_snapshot(payload)
+    if not accepted:
+        raise HTTPException(status_code=403, detail="Unknown federation peer")
+    return FederationAck(
+        ok=True,
+        server_id=settings.federation_server_id,
+        received_ns=time.time_ns(),
+        peer_state="active",
+    )
 
 
 @app.get("/api/v1/cop/status")

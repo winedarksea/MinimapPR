@@ -135,13 +135,16 @@ export MINIMAPPR_CLASSIFIER=yamnet
 - `GET /health`
 - `GET /api/v1/config`
 - `GET /api/v1/fusion/status`
+- `GET /api/v1/federation/status`
 - `POST /api/v1/ingest/frame`
 - `GET /api/v1/nodes`
 - `GET /api/v1/detections?limit=100`
-- `GET /api/v1/tracks?limit=200`
+- `GET /api/v1/tracks?limit=200&include_standby=false`
 - `GET /api/v1/cop/status`
 - `GET /api/v1/alerts?limit=100`
 - `GET /api/v1/detections/{detection_id}/audio`
+- `POST /api/v1/federation/heartbeat` (peer-to-peer)
+- `POST /api/v1/federation/snapshot` (peer-to-peer)
 - `WS /ws/live`
 
 ## Runtime Configuration
@@ -171,6 +174,18 @@ Key env vars:
 - `MINIMAPPR_NODE_DEGRADED_AFTER_SECONDS` (default `15.0`)
 - `MINIMAPPR_NODE_OFFLINE_AFTER_SECONDS` (default `45.0`)
 - `MINIMAPPR_EVENT_STALE_SECONDS` (default `30.0`)
+- `MINIMAPPR_FEDERATION_ENABLED` (`false` default)
+- `MINIMAPPR_FEDERATION_SERVER_ID` (`srv-local` default)
+- `MINIMAPPR_FEDERATION_PEERS_CONFIG_PATH` (`data/federation_peers.json` default)
+- `MINIMAPPR_FEDERATION_PEERS_JSON` (optional inline JSON peer config override)
+- `MINIMAPPR_FEDERATION_AUTH_TOKEN` (optional shared token/fallback peer auth token)
+- `MINIMAPPR_FEDERATION_PUBLISH_INTERVAL_SECONDS` (default `1.0`)
+- `MINIMAPPR_FEDERATION_HEARTBEAT_INTERVAL_SECONDS` (default `2.0`)
+- `MINIMAPPR_FEDERATION_LINK_TIMEOUT_SECONDS` (default `8.0`)
+- `MINIMAPPR_FEDERATION_REQUEST_TIMEOUT_SECONDS` (default `2.5`)
+- `MINIMAPPR_FEDERATION_TRACK_TTL_SECONDS` (default `20.0`)
+- `MINIMAPPR_FEDERATION_DECONFLICT_MAHALANOBIS_GATE` (default `4.5`)
+- `MINIMAPPR_FEDERATION_TQI_HYSTERESIS` (default `0.05`)
 
 ## Testing
 ```bash

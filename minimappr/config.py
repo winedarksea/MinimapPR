@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -108,6 +109,98 @@ class RulesConfig:
 
 
 @dataclass(slots=True)
+class FederationPeerConfig:
+    peer_id: str
+    base_url: str
+    api_key: str | None = None
+    enabled: bool = True
+
+
+@dataclass(slots=True)
+class FederationConfig:
+    enabled: bool
+    server_id: str
+    peers: tuple[FederationPeerConfig, ...]
+    publish_interval_seconds: float
+    heartbeat_interval_seconds: float
+    link_timeout_seconds: float
+    request_timeout_seconds: float
+    track_ttl_seconds: float
+    deconflict_mahalanobis_gate: float
+    tqi_hysteresis: float
+    auth_token: str | None = None
+
+
+def _coerce_peer_enabled(value: object, default: bool = True) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _normalize_base_url(value: str) -> str:
+    text = value.strip()
+    while text.endswith("/"):
+        text = text[:-1]
+    return text
+
+
+def _load_federation_peers(*, raw_json: str | None, config_path: Path) -> tuple[FederationPeerConfig, ...]:
+    text: str | None = None
+    if raw_json is not None and raw_json.strip():
+        text = raw_json
+    elif config_path.exists():
+        text = config_path.read_text(encoding="utf-8")
+    if not text:
+        return ()
+
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        source = "MINIMAPPR_FEDERATION_PEERS_JSON" if raw_json else str(config_path)
+        raise ValueError(f"Invalid federation peer JSON from {source}: {exc}") from exc
+
+    if not isinstance(payload, list):
+        raise ValueError("Federation peer config must be a JSON list")
+
+    peers: list[FederationPeerConfig] = []
+    seen_ids: set[str] = set()
+    for idx, item in enumerate(payload):
+        if not isinstance(item, dict):
+            raise ValueError(f"Federation peer entry at index {idx} must be an object")
+        peer_id = str(item.get("peer_id", "")).strip()
+        base_url = _normalize_base_url(str(item.get("base_url", "")).strip())
+        if not peer_id:
+            raise ValueError(f"Federation peer entry at index {idx} is missing peer_id")
+        if not base_url:
+            raise ValueError(f"Federation peer '{peer_id}' is missing base_url")
+        if peer_id in seen_ids:
+            raise ValueError(f"Federation peer_id '{peer_id}' is duplicated")
+        seen_ids.add(peer_id)
+        api_key_raw = item.get("api_key")
+        api_key = str(api_key_raw).strip() if api_key_raw is not None else None
+        if api_key == "":
+            api_key = None
+        peers.append(
+            FederationPeerConfig(
+                peer_id=peer_id,
+                base_url=base_url,
+                api_key=api_key,
+                enabled=_coerce_peer_enabled(item.get("enabled"), True),
+            )
+        )
+    return tuple(peers)
+
+
+@dataclass(slots=True)
 class Settings:
     host: str = "0.0.0.0"
     port: int = 8080
@@ -179,6 +272,18 @@ class Settings:
     retention_short_seconds: int = 86_400
     retention_long_seconds: int = 2_592_000
     retention_experiment_seconds: int = 21_600
+    federation_enabled: bool = False
+    federation_server_id: str = "srv-local"
+    federation_peers_config_path: Path = Path("data/federation_peers.json")
+    federation_peers: tuple[FederationPeerConfig, ...] = ()
+    federation_publish_interval_seconds: float = 1.0
+    federation_heartbeat_interval_seconds: float = 2.0
+    federation_link_timeout_seconds: float = 8.0
+    federation_request_timeout_seconds: float = 2.5
+    federation_track_ttl_seconds: float = 20.0
+    federation_deconflict_mahalanobis_gate: float = 4.5
+    federation_tqi_hysteresis: float = 0.05
+    federation_auth_token: str = ""
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -262,6 +367,27 @@ class Settings:
             retention_short_seconds=_env_int("MINIMAPPR_RETENTION_SHORT_SECONDS", 86_400),
             retention_long_seconds=_env_int("MINIMAPPR_RETENTION_LONG_SECONDS", 2_592_000),
             retention_experiment_seconds=_env_int("MINIMAPPR_RETENTION_EXPERIMENT_SECONDS", 21_600),
+            federation_enabled=_env_bool("MINIMAPPR_FEDERATION_ENABLED", False),
+            federation_server_id=_env_str("MINIMAPPR_FEDERATION_SERVER_ID", "srv-local"),
+            federation_peers_config_path=Path(
+                _env_str("MINIMAPPR_FEDERATION_PEERS_CONFIG_PATH", "data/federation_peers.json")
+            ),
+            federation_publish_interval_seconds=_env_float("MINIMAPPR_FEDERATION_PUBLISH_INTERVAL_SECONDS", 1.0),
+            federation_heartbeat_interval_seconds=_env_float("MINIMAPPR_FEDERATION_HEARTBEAT_INTERVAL_SECONDS", 2.0),
+            federation_link_timeout_seconds=_env_float("MINIMAPPR_FEDERATION_LINK_TIMEOUT_SECONDS", 8.0),
+            federation_request_timeout_seconds=_env_float("MINIMAPPR_FEDERATION_REQUEST_TIMEOUT_SECONDS", 2.5),
+            federation_track_ttl_seconds=_env_float("MINIMAPPR_FEDERATION_TRACK_TTL_SECONDS", 20.0),
+            federation_deconflict_mahalanobis_gate=_env_float(
+                "MINIMAPPR_FEDERATION_DECONFLICT_MAHALANOBIS_GATE",
+                4.5,
+            ),
+            federation_tqi_hysteresis=_env_float("MINIMAPPR_FEDERATION_TQI_HYSTERESIS", 0.05),
+            federation_auth_token=_env_str("MINIMAPPR_FEDERATION_AUTH_TOKEN", ""),
+        )
+        settings.federation_peers_config_path.parent.mkdir(parents=True, exist_ok=True)
+        settings.federation_peers = _load_federation_peers(
+            raw_json=os.getenv("MINIMAPPR_FEDERATION_PEERS_JSON"),
+            config_path=settings.federation_peers_config_path,
         )
         settings.coordinate_mode = settings.coordinate_mode.strip().lower()
         if settings.coordinate_mode not in {"flat", "geodetic"}:
@@ -305,6 +431,26 @@ class Settings:
             raise ValueError("MINIMAPPR_BEAMFORMED_CLASSIFICATION_CONFIDENCE_MARGIN must be >= 0")
         if settings.mvdr_diagonal_loading <= 0.0:
             raise ValueError("MINIMAPPR_MVDR_DIAGONAL_LOADING must be > 0")
+        settings.federation_server_id = settings.federation_server_id.strip()
+        if not settings.federation_server_id:
+            raise ValueError("MINIMAPPR_FEDERATION_SERVER_ID must not be empty")
+        if settings.federation_publish_interval_seconds <= 0.0:
+            raise ValueError("MINIMAPPR_FEDERATION_PUBLISH_INTERVAL_SECONDS must be > 0")
+        if settings.federation_heartbeat_interval_seconds <= 0.0:
+            raise ValueError("MINIMAPPR_FEDERATION_HEARTBEAT_INTERVAL_SECONDS must be > 0")
+        if settings.federation_link_timeout_seconds <= 0.0:
+            raise ValueError("MINIMAPPR_FEDERATION_LINK_TIMEOUT_SECONDS must be > 0")
+        if settings.federation_request_timeout_seconds <= 0.0:
+            raise ValueError("MINIMAPPR_FEDERATION_REQUEST_TIMEOUT_SECONDS must be > 0")
+        if settings.federation_track_ttl_seconds <= 0.0:
+            raise ValueError("MINIMAPPR_FEDERATION_TRACK_TTL_SECONDS must be > 0")
+        if settings.federation_deconflict_mahalanobis_gate <= 0.0:
+            raise ValueError("MINIMAPPR_FEDERATION_DECONFLICT_MAHALANOBIS_GATE must be > 0")
+        if settings.federation_tqi_hysteresis < 0.0:
+            raise ValueError("MINIMAPPR_FEDERATION_TQI_HYSTERESIS must be >= 0")
+        for peer in settings.federation_peers:
+            if peer.peer_id == settings.federation_server_id:
+                raise ValueError("Federation peer_id cannot match MINIMAPPR_FEDERATION_SERVER_ID")
         settings.db_path.parent.mkdir(parents=True, exist_ok=True)
         settings.snippet_dir.mkdir(parents=True, exist_ok=True)
         settings.large_artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -386,4 +532,20 @@ class Settings:
             rules_config_path=self.rules_config_path,
             taxonomy_config_path=self.taxonomy_config_path,
             model_chain_config_path=self.model_chain_config_path,
+        )
+
+    def federation_config(self) -> FederationConfig:
+        token = self.federation_auth_token.strip()
+        return FederationConfig(
+            enabled=self.federation_enabled and bool(self.federation_peers),
+            server_id=self.federation_server_id,
+            peers=self.federation_peers,
+            publish_interval_seconds=self.federation_publish_interval_seconds,
+            heartbeat_interval_seconds=self.federation_heartbeat_interval_seconds,
+            link_timeout_seconds=self.federation_link_timeout_seconds,
+            request_timeout_seconds=self.federation_request_timeout_seconds,
+            track_ttl_seconds=self.federation_track_ttl_seconds,
+            deconflict_mahalanobis_gate=self.federation_deconflict_mahalanobis_gate,
+            tqi_hysteresis=self.federation_tqi_hysteresis,
+            auth_token=token or None,
         )
