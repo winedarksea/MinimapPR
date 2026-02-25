@@ -43,8 +43,9 @@ add_executable(sirith_tetrahedral
         sirith_tetrahedral.cpp
         src/Base64.cpp
         src/HttpFramePublisher.cpp
-        src/Lis2mdlAutoOrientation.cpp
+        src/Lis2mdlMagnetometer.cpp
         src/Lsm6TemperatureSensor.cpp
+        src/MagAutoOrientation.cpp
         src/NodeClock.cpp
         src/NodeProtocol.cpp
         src/NodeRunner.cpp

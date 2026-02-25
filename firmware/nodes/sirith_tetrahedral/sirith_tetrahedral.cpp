@@ -8,8 +8,9 @@
 #include "node_config.h"
 
 #include "mmpr/HttpFramePublisher.h"
-#include "mmpr/Lis2mdlAutoOrientation.h"
+#include "mmpr/Lis2mdlMagnetometer.h"
 #include "mmpr/Lsm6TemperatureSensor.h"
+#include "mmpr/MagAutoOrientation.h"
 #include "mmpr/NodeClock.h"
 #include "mmpr/NodeRunner.h"
 #include "mmpr/SirithPicoTdmSource.h"
@@ -28,7 +29,17 @@ mmpr::Vec3 gSensorOffsetsOrdered[4] = {};
 uint8_t gActiveBaseRotationSteps = static_cast<uint8_t>(nodecfg::kBasePlaneRotationSteps % 3u);
 
 mmpr::I2cBus gI2c;
-mmpr::Lis2mdlAutoOrientation gAutoOrientation;
+mmpr::Lis2mdlMagnetometer gMagnetometer(gI2c, mmpr::Lis2mdlMagConfig{
+    nodecfg::kCompassI2cAddress7Bit,
+    nodecfg::kCompassOdrBits,
+    nodecfg::kCompassEnableTempComp,
+    nodecfg::kCompassEnableLpf,
+    nodecfg::kCompassEnableOffsetCancel,
+    nodecfg::kCompassHardIronX,
+    nodecfg::kCompassHardIronY,
+    nodecfg::kCompassHardIronZ,
+});
+mmpr::MagAutoOrientation gAutoOrientation;
 bool gAutoOrientationEnabled = false;
 
 mmpr::Lsm6TemperatureSensorConfig gImuTempConfig = {
@@ -155,20 +166,24 @@ void setupOptionalPeripherals() {
   }
 
   if (nodecfg::kEnableCompassAutoOrientation && i2cReady) {
-    mmpr::Lis2mdlAutoOrientationConfig cfg = {};
-    cfg.i2cAddress7Bit = nodecfg::kCompassI2cAddress7Bit;
-    cfg.outputDataRateBits = nodecfg::kCompassOutputDataRateBits;
+    mmpr::MagAutoOrientationConfig cfg = {};
+    cfg.mode = mmpr::OrientationMode::kAuto;
     cfg.sampleIntervalMs = nodecfg::kCompassSampleIntervalMs;
-    cfg.smoothingAlpha = nodecfg::kCompassSmoothingAlpha;
     cfg.headingOffsetDeg = nodecfg::kCompassHeadingOffsetDeg;
-    cfg.minHorizontalFieldLsb = nodecfg::kCompassMinHorizontalFieldLsb;
+    cfg.minFieldMagnitude = nodecfg::kCompassMinFieldMagnitude;
     cfg.stableSamplesRequired = nodecfg::kCompassStableSamplesRequired;
+    cfg.kalmanQ = nodecfg::kCompassKalmanQ;
+    cfg.kalmanR = nodecfg::kCompassKalmanR;
+    cfg.kalmanInitialP = nodecfg::kCompassKalmanInitP;
 
-    gAutoOrientationEnabled = gAutoOrientation.begin(gI2c, cfg, gActiveBaseRotationSteps);
+    gAutoOrientationEnabled = gAutoOrientation.begin(
+        gMagnetometer, cfg, gActiveBaseRotationSteps);
     if (gAutoOrientationEnabled) {
-      std::printf("[sirith-pico] LIS2MDLTR auto-orientation enabled\n");
+      std::printf("[sirith-pico] auto-orientation enabled (Kalman Q=%.4f R=%.1f)\n",
+                  static_cast<double>(cfg.kalmanQ),
+                  static_cast<double>(cfg.kalmanR));
     } else {
-      std::printf("[sirith-pico] LIS2MDLTR auto-orientation unavailable; manual rotation retained\n");
+      std::printf("[sirith-pico] magnetometer unavailable; manual rotation retained\n");
     }
   }
 
@@ -237,7 +252,7 @@ int main() {
         buildOrderedOffsetsFromSlotMap(gActiveBaseRotationSteps);
       } else if (!gAutoOrientation.healthy()) {
         gAutoOrientationEnabled = false;
-        std::printf("[sirith-pico] LIS2MDLTR read fault; holding current manual rotation\n");
+        std::printf("[sirith-pico] magnetometer read fault; holding current manual rotation\n");
       }
     }
 

@@ -475,6 +475,17 @@ class FusionNode:
             window_seconds=self.localization_config.localization_window_seconds,
             sample_rate_hz=candidate.sample_rate_hz,
         )
+        min_localization_sensors = max(2, int(self.localization_config.min_sensors_for_2d))
+        if len(windows) < min_localization_sensors and len(sensor_ids) >= min_localization_sensors:
+            # Ingest arrives per-node; a short grace period captures sibling node frames for the same event time.
+            grace_s = min(0.05, max(0.005, self.localization_config.localization_window_seconds * 0.5))
+            await asyncio.sleep(grace_s)
+            windows = await self.buffer.get_synchronized_window(
+                sensor_ids=sensor_ids,
+                center_time_ns=candidate.event_time_ns,
+                window_seconds=self.localization_config.localization_window_seconds,
+                sample_rate_hz=candidate.sample_rate_hz,
+            )
         if not windows:
             return None
 
@@ -482,7 +493,6 @@ class FusionNode:
         threshold = self.localization_config.trigger_rms * self.fusion_config.sensor_energy_threshold_multiplier
         selected_ids = [sid for sid, energy in energies.items() if energy > threshold]
         # If thresholding under-selects, keep the strongest sensors needed for a localization attempt.
-        min_localization_sensors = max(2, int(self.localization_config.min_sensors_for_2d))
         if len(selected_ids) < min_localization_sensors and len(energies) >= min_localization_sensors:
             ranked = sorted(energies.items(), key=lambda item: item[1], reverse=True)
             selected_ids = [sensor_id for sensor_id, _ in ranked[:min_localization_sensors]]

@@ -185,6 +185,10 @@ Key env vars:
 - `MINIMAPPR_NODE_DEGRADED_AFTER_SECONDS` (default `15.0`)
 - `MINIMAPPR_NODE_OFFLINE_AFTER_SECONDS` (default `45.0`)
 - `MINIMAPPR_EVENT_STALE_SECONDS` (default `30.0`)
+- `MINIMAPPR_RETENTION_TRACK_UPDATES_SECONDS` (default `604800`, set `-1` to disable cleanup)
+- `MINIMAPPR_RETENTION_ALERTS_SECONDS` (default `2592000`, set `-1` to disable cleanup)
+- `MINIMAPPR_RETENTION_ENVIRONMENT_SECONDS` (default `604800`, set `-1` to disable cleanup)
+- `MINIMAPPR_RETENTION_DROPPED_TRACKS_SECONDS` (default `604800`, set `-1` to disable cleanup)
 - `MINIMAPPR_FEDERATION_ENABLED` (`false` default)
 - `MINIMAPPR_FEDERATION_SERVER_ID` (`srv-local` default)
 - `MINIMAPPR_FEDERATION_PEERS_CONFIG_PATH` (`data/federation_peers.json` default)
@@ -202,6 +206,12 @@ Key env vars:
 ```bash
 source .venv/bin/activate
 pytest -q
+```
+
+5-minute soak harness:
+```bash
+source .venv/bin/activate
+python scripts/run_soak.py --duration 300
 ```
 
 ## Roadmap Foundation Included
