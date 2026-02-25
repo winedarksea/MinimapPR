@@ -54,6 +54,7 @@ def gcc_phat(
 @dataclass(slots=True)
 class LocalizationEngine:
     max_tau_s: float = 0.02
+    interp_factor: int = 4
 
     def localize(
         self,
@@ -84,6 +85,7 @@ class LocalizationEngine:
                 reference_signal=reference_signal,
                 sample_rate_hz=sample_rate_hz,
                 max_tau_s=self.max_tau_s,
+                interp=max(1, self.interp_factor),
             )
             tdoa_s[sensor_id] = tau_s
             peaks.append(peak)
@@ -166,6 +168,7 @@ class LocalizationEngine:
                 reference_signal=reference_signal,
                 sample_rate_hz=sample_rate_hz,
                 max_tau_s=self.max_tau_s,
+                interp=max(1, self.interp_factor),
             )
             tdoa_s[sensor_id] = tau_s
             peaks.append(peak)
@@ -244,7 +247,8 @@ class LocalizationEngine:
             return float("inf")
 
         covariance = np.linalg.pinv(info)
-        return float(np.sqrt(np.trace(covariance)))
+        trace = float(np.trace(covariance))
+        return float(np.sqrt(max(0.0, trace)))
 
     @staticmethod
     def _gdop_2d(
@@ -270,4 +274,5 @@ class LocalizationEngine:
         if np.linalg.cond(info) > 1e12:
             return float("inf")
         covariance = np.linalg.pinv(info)
-        return float(np.sqrt(np.trace(covariance)))
+        trace = float(np.trace(covariance))
+        return float(np.sqrt(max(0.0, trace)))

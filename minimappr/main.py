@@ -5,13 +5,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from minimappr.api.live import LiveEventHub
@@ -28,9 +28,12 @@ from minimappr.core.tracking import TrackManager
 from minimappr.core.zones import ZoneMatcher
 from minimappr.models import (
     AlertStatus,
+    CopStatusResponse,
     FederationAck,
     FederationHeartbeat,
+    FederationStatusResponse,
     FederationTrackSnapshot,
+    FusionStatusResponse,
     GeoPoint,
     IngestFrameRequest,
     IngestFrameResponse,
@@ -40,63 +43,29 @@ from minimappr.models import (
 from minimappr.storage.db import Storage
 
 
-settings = Settings.from_env()
-storage = Storage(settings.db_path)
-registry = NodeRegistry()
-audio_buffer = MultiSensorBuffer(max_duration_seconds=settings.max_sensor_buffer_seconds)
-localizer = build_localizer_from_settings(settings)
-classifier = create_classifier(settings)
-tracker = TrackManager(settings)
-live_hub = LiveEventHub()
-coordinate_frame = LocalCoordinateFrame(
-    origin=GeoPoint(
-        lat=settings.site_origin_lat,
-        lon=settings.site_origin_lon,
-        alt_m=settings.site_origin_alt_m,
-    ),
-    mode=settings.coordinate_mode,
-)
-zone_matcher = ZoneMatcher(storage=storage)
-fusion_node = FusionNode(
-    settings=settings,
-    registry=registry,
-    buffer=audio_buffer,
-    localizer=localizer,
-    classifier=classifier,
-    tracker=tracker,
-    storage=storage,
-    live_callback=live_hub.broadcast,
-    coordinate_frame=coordinate_frame,
-    zone_matcher=zone_matcher,
-)
-ingest_transport = HttpIngestTransport(fusion_node)
+logger = logging.getLogger(__name__)
+frontend_dir = Path(__file__).parent / "frontend"
 
 
-async def _federation_local_tracks(now_ns: int) -> list[TrackState]:
-    tracks = await tracker.snapshot(now_ns=now_ns)
-    active: list[TrackState] = []
-    for track in tracks:
-        if track.status not in {"tentative", "confirmed", "coasting"}:
-            continue
-        track.position_geo = coordinate_frame.local_to_geo(track.position_m)
-        active.append(track)
-    return active
+def _require_state(request: Request):
+    if not hasattr(request.app.state, "storage"):
+        raise RuntimeError("Storage is not initialized")
+    return request.app.state
 
 
-federation = FederationCoordinator(
-    settings=settings,
-    track_supplier=_federation_local_tracks,
-    live_callback=live_hub.broadcast,
-)
-
-cleanup_task: asyncio.Task | None = None
+def _require_ws_state(websocket: WebSocket):
+    if not hasattr(websocket.app.state, "storage"):
+        raise RuntimeError("Storage is not initialized")
+    return websocket.app.state
 
 
-async def _cleanup_loop() -> None:
+async def _cleanup_loop(app: FastAPI) -> None:
     while True:
+        state = app.state
+        settings: Settings = state.settings
         now_ns = time.time_ns()
-        await storage.cleanup_expired_snippets(now_ns=now_ns)
-        await storage.cleanup_retention(
+        await state.storage.cleanup_expired_snippets(now_ns=now_ns)
+        await state.storage.cleanup_retention(
             now_ns=now_ns,
             tier_ttls_seconds={
                 "ephemeral": settings.retention_ephemeral_seconds,
@@ -105,17 +74,88 @@ async def _cleanup_loop() -> None:
                 "experiment": settings.retention_experiment_seconds,
             },
         )
-        await fusion_node.housekeeping_tick(now_ns=now_ns)
+        await state.fusion_node.housekeeping_tick(now_ns=now_ns)
         await asyncio.sleep(settings.cleanup_interval_seconds)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global cleanup_task
+    settings = Settings.from_env()
+    settings.federation_peers_config_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.snippet_dir.mkdir(parents=True, exist_ok=True)
+    settings.large_artifact_dir.mkdir(parents=True, exist_ok=True)
+
+    storage_cfg = settings.storage_config()
+    localization_cfg = settings.localization_config()
+    tracking_cfg = settings.tracking_config()
+
+    storage = Storage(storage_cfg.db_path)
+    registry = NodeRegistry()
+    audio_buffer = MultiSensorBuffer(max_duration_seconds=localization_cfg.max_sensor_buffer_seconds)
+    localizer = build_localizer_from_settings(localization_cfg)
+    classifier = create_classifier(settings)
+    tracker = TrackManager(tracking_cfg)
+    live_hub = LiveEventHub()
+    coordinate_frame = LocalCoordinateFrame(
+        origin=GeoPoint(
+            lat=settings.site_origin_lat,
+            lon=settings.site_origin_lon,
+            alt_m=settings.site_origin_alt_m,
+        ),
+        mode=settings.coordinate_mode,
+    )
+    zone_matcher = ZoneMatcher(storage=storage)
+    fusion_node = FusionNode(
+        settings=settings,
+        registry=registry,
+        buffer=audio_buffer,
+        localizer=localizer,
+        classifier=classifier,
+        tracker=tracker,
+        storage=storage,
+        live_callback=live_hub.broadcast,
+        coordinate_frame=coordinate_frame,
+        zone_matcher=zone_matcher,
+    )
+    ingest_transport = HttpIngestTransport(fusion_node)
+
+    async def _federation_local_tracks(now_ns: int) -> list[TrackState]:
+        tracks = await tracker.snapshot(now_ns=now_ns)
+        active: list[TrackState] = []
+        for track in tracks:
+            if track.status not in {"tentative", "confirmed", "coasting"}:
+                continue
+            track.position_geo = coordinate_frame.local_to_geo(track.position_m)
+            active.append(track)
+        return active
+
+    federation = FederationCoordinator(
+        settings=settings,
+        track_supplier=_federation_local_tracks,
+        live_callback=live_hub.broadcast,
+    )
+
+    app.state.settings = settings
+    app.state.storage = storage
+    app.state.registry = registry
+    app.state.audio_buffer = audio_buffer
+    app.state.localizer = localizer
+    app.state.classifier = classifier
+    app.state.tracker = tracker
+    app.state.live_hub = live_hub
+    app.state.coordinate_frame = coordinate_frame
+    app.state.zone_matcher = zone_matcher
+    app.state.fusion_node = fusion_node
+    app.state.ingest_transport = ingest_transport
+    app.state.federation = federation
+
+    cleanup_task: asyncio.Task | None = None
     await storage.initialize()
     await fusion_node.start()
     await federation.start()
-    cleanup_task = asyncio.create_task(_cleanup_loop())
+    cleanup_task = asyncio.create_task(_cleanup_loop(app))
+    app.state.cleanup_task = cleanup_task
+
     try:
         yield
     finally:
@@ -129,17 +169,46 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="MinimapPR", version="0.1.0", lifespan=lifespan)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-frontend_dir = Path(__file__).parent / "frontend"
 app.mount("/static", StaticFiles(directory=frontend_dir), name="static")
+
+
+@app.middleware("http")
+async def dynamic_cors_headers(request: Request, call_next):
+    settings: Settings | None = getattr(request.app.state, "settings", None)
+    allowed_origins = settings.cors_allow_origins if settings is not None else ("http://localhost:8080", "http://127.0.0.1:8080")
+    allow_credentials = bool(settings.cors_allow_credentials) if settings is not None else False
+    origin = request.headers.get("origin")
+    is_preflight = request.method == "OPTIONS" and "access-control-request-method" in request.headers
+
+    if is_preflight:
+        response = Response(status_code=204)
+    else:
+        response = await call_next(request)
+
+    if origin and ("*" in allowed_origins or origin in allowed_origins):
+        response.headers["Access-Control-Allow-Origin"] = "*" if "*" in allowed_origins else origin
+        response.headers.setdefault("Vary", "Origin")
+        response.headers["Access-Control-Allow-Methods"] = request.headers.get("access-control-request-method", "*")
+        request_headers = request.headers.get("access-control-request-headers")
+        response.headers["Access-Control-Allow-Headers"] = request_headers if request_headers else "*"
+        if allow_credentials and "*" not in allowed_origins:
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+
+    return response
+
+
+@app.exception_handler(RuntimeError)
+async def runtime_error_handler(request: Request, exc: RuntimeError):
+    if str(exc) == "Storage is not initialized":
+        return JSONResponse(status_code=503, content={"detail": "Service unavailable"})
+    logger.exception("Runtime error for %s", request.url.path, exc_info=exc)
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+
+
+@app.exception_handler(Exception)
+async def unhandled_error_handler(request: Request, exc: Exception):
+    logger.exception("Unhandled error for %s", request.url.path, exc_info=exc)
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
 
 @app.get("/")
@@ -148,13 +217,15 @@ async def root() -> FileResponse:
 
 
 @app.get("/health")
-async def health() -> dict:
-    status = await fusion_node.status()
+async def health(request: Request) -> dict:
+    state = _require_state(request)
+    settings: Settings = state.settings
+    status = await state.fusion_node.status()
     workers = status.get("workers", {})
     running = int(workers.get("localization_running", 0)) + int(workers.get("classification_running", 0)) + int(
         workers.get("rules_running", 0)
     )
-    federation_status = await federation.status()
+    federation_status = await state.federation.status()
     return {
         "status": "ok",
         "time_ns": time.time_ns(),
@@ -167,60 +238,69 @@ async def health() -> dict:
 
 
 @app.post("/api/v1/ingest/frame", response_model=IngestFrameResponse)
-async def ingest_frame(payload: IngestFrameRequest) -> IngestFrameResponse:
+async def ingest_frame(payload: IngestFrameRequest, request: Request) -> IngestFrameResponse:
+    state = _require_state(request)
     try:
-        return await ingest_transport.deliver_frame(payload)
+        return await state.ingest_transport.deliver_frame(payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/v1/nodes")
-async def list_nodes() -> list[dict]:
+async def list_nodes(
+    request: Request,
+    limit: int = Query(default=500, ge=1, le=5000),
+) -> list[dict]:
+    state = _require_state(request)
+    settings: Settings = state.settings
     now_ns = time.time_ns()
-    nodes = await storage.list_nodes()
+    nodes = await state.storage.list_nodes(limit=limit)
     for node in nodes:
         if node.get("position_geo") is None and node.get("position_m"):
             local = node["position_m"]
-            geo = coordinate_frame.local_to_geo((float(local[0]), float(local[1]), float(local[2])))
+            geo = state.coordinate_frame.local_to_geo((float(local[0]), float(local[1]), float(local[2])))
             node["position_geo"] = geo.model_dump(mode="json")
 
         age_s = max(0.0, (now_ns - int(node["last_seen_ns"])) / 1_000_000_000.0)
         if age_s >= settings.node_offline_after_seconds:
-            health = "offline"
+            health_status = "offline"
         elif age_s >= settings.node_degraded_after_seconds:
-            health = "degraded"
+            health_status = "degraded"
         else:
-            health = "online"
-        node["health_status"] = health
+            health_status = "online"
+        node["health_status"] = health_status
     return nodes
 
 
 @app.get("/api/v1/detections")
-async def list_detections(limit: int = Query(default=100, ge=1, le=1000)) -> list[dict]:
-    detections = await storage.list_detections(limit=limit)
+async def list_detections(request: Request, limit: int = Query(default=100, ge=1, le=1000)) -> list[dict]:
+    state = _require_state(request)
+    detections = await state.storage.list_detections(limit=limit)
     for detection in detections:
         if detection.get("position_geo") is None and detection.get("position_m"):
             local = detection["position_m"]
-            geo = coordinate_frame.local_to_geo((float(local[0]), float(local[1]), float(local[2])))
+            geo = state.coordinate_frame.local_to_geo((float(local[0]), float(local[1]), float(local[2])))
             detection["position_geo"] = geo.model_dump(mode="json")
     return detections
 
 
 @app.get("/api/v1/tracks")
 async def list_tracks(
+    request: Request,
     limit: int = Query(default=200, ge=1, le=1000),
     include_standby: bool = Query(default=False),
 ) -> list[dict]:
+    state = _require_state(request)
     now_ns = time.time_ns()
-    _ = await tracker.snapshot(now_ns=now_ns)
-    tracks = await storage.list_tracks(limit=limit)
+    _ = await state.tracker.snapshot(now_ns=now_ns)
+    tracks = await state.storage.list_tracks(limit=limit)
     for track in tracks:
         if track.get("position_geo") is None and track.get("position_m"):
             local = track["position_m"]
-            geo = coordinate_frame.local_to_geo((float(local[0]), float(local[1]), float(local[2])))
+            geo = state.coordinate_frame.local_to_geo((float(local[0]), float(local[1]), float(local[2])))
             track["position_geo"] = geo.model_dump(mode="json")
-    if federation.enabled:
-        tracks = await federation.merged_tracks(
+    if state.federation.enabled:
+        tracks = await state.federation.merged_tracks(
             local_tracks=tracks,
             now_ns=now_ns,
             limit=limit,
@@ -229,13 +309,15 @@ async def list_tracks(
     for track in tracks:
         if track.get("position_geo") is None and track.get("position_m"):
             local = track["position_m"]
-            geo = coordinate_frame.local_to_geo((float(local[0]), float(local[1]), float(local[2])))
+            geo = state.coordinate_frame.local_to_geo((float(local[0]), float(local[1]), float(local[2])))
             track["position_geo"] = geo.model_dump(mode="json")
     return tracks
 
 
 @app.get("/api/v1/config")
-async def get_config() -> dict:
+async def get_config(request: Request) -> dict:
+    state = _require_state(request)
+    settings: Settings = state.settings
     return {
         "trigger_rms": settings.trigger_rms,
         "trigger_cooldown_seconds": settings.trigger_cooldown_seconds,
@@ -303,14 +385,16 @@ async def get_config() -> dict:
     }
 
 
-@app.get("/api/v1/fusion/status")
-async def fusion_status() -> dict:
-    return await fusion_node.status()
+@app.get("/api/v1/fusion/status", response_model=FusionStatusResponse)
+async def fusion_status(request: Request) -> dict:
+    state = _require_state(request)
+    return await state.fusion_node.status()
 
 
-@app.get("/api/v1/federation/status")
-async def federation_status() -> dict:
-    return await federation.status()
+@app.get("/api/v1/federation/status", response_model=FederationStatusResponse)
+async def federation_status(request: Request) -> dict:
+    state = _require_state(request)
+    return await state.federation.status()
 
 
 def _federation_headers(request: Request) -> tuple[str | None, str | None]:
@@ -319,16 +403,18 @@ def _federation_headers(request: Request) -> tuple[str | None, str | None]:
 
 @app.post("/api/v1/federation/heartbeat", response_model=FederationAck)
 async def federation_heartbeat(payload: FederationHeartbeat, request: Request) -> FederationAck:
-    if not federation.enabled:
+    state = _require_state(request)
+    settings: Settings = state.settings
+    if not state.federation.enabled:
         raise HTTPException(status_code=503, detail="Federation is disabled")
     authorization, token_header = _federation_headers(request)
-    if not await federation.validate_inbound_auth(
+    if not await state.federation.validate_inbound_auth(
         peer_id=payload.server_id,
         authorization_header=authorization,
         token_header=token_header,
     ):
         raise HTTPException(status_code=401, detail="Invalid federation credentials")
-    accepted = await federation.handle_incoming_heartbeat(payload)
+    accepted = await state.federation.handle_incoming_heartbeat(payload)
     if not accepted:
         raise HTTPException(status_code=403, detail="Unknown federation peer")
     return FederationAck(
@@ -341,16 +427,18 @@ async def federation_heartbeat(payload: FederationHeartbeat, request: Request) -
 
 @app.post("/api/v1/federation/snapshot", response_model=FederationAck)
 async def federation_snapshot(payload: FederationTrackSnapshot, request: Request) -> FederationAck:
-    if not federation.enabled:
+    state = _require_state(request)
+    settings: Settings = state.settings
+    if not state.federation.enabled:
         raise HTTPException(status_code=503, detail="Federation is disabled")
     authorization, token_header = _federation_headers(request)
-    if not await federation.validate_inbound_auth(
+    if not await state.federation.validate_inbound_auth(
         peer_id=payload.server_id,
         authorization_header=authorization,
         token_header=token_header,
     ):
         raise HTTPException(status_code=401, detail="Invalid federation credentials")
-    accepted = await federation.handle_incoming_snapshot(payload)
+    accepted = await state.federation.handle_incoming_snapshot(payload)
     if not accepted:
         raise HTTPException(status_code=403, detail="Unknown federation peer")
     return FederationAck(
@@ -361,34 +449,43 @@ async def federation_snapshot(payload: FederationTrackSnapshot, request: Request
     )
 
 
-@app.get("/api/v1/cop/status")
-async def cop_status() -> dict:
+@app.get("/api/v1/cop/status", response_model=CopStatusResponse)
+async def cop_status(request: Request) -> CopStatusResponse:
+    state = _require_state(request)
+    settings: Settings = state.settings
     now_ns = time.time_ns()
-    nodes = await list_nodes()
-    tracks = await list_tracks(limit=500)
+    node_counts = await state.storage.count_nodes_by_status(
+        now_ns=now_ns,
+        degraded_after_seconds=settings.node_degraded_after_seconds,
+        offline_after_seconds=settings.node_offline_after_seconds,
+    )
+    active_tracks = await state.storage.count_active_tracks()
     recent_window_ns = now_ns - 300_000_000_000
-    recent_alert_count = await storage.recent_alert_count(since_ns=recent_window_ns)
-    return {
-        "active_nodes": sum(1 for node in nodes if node["health_status"] == "online"),
-        "degraded_nodes": sum(1 for node in nodes if node["health_status"] == "degraded"),
-        "offline_nodes": sum(1 for node in nodes if node["health_status"] == "offline"),
-        "active_tracks": sum(1 for track in tracks if track["status"] in {"tentative", "confirmed", "coasting"}),
-        "recent_alert_count": recent_alert_count,
-    }
+    recent_alert_count = await state.storage.recent_alert_count(since_ns=recent_window_ns)
+    return CopStatusResponse(
+        active_nodes=node_counts["online_nodes"],
+        degraded_nodes=node_counts["degraded_nodes"],
+        offline_nodes=node_counts["offline_nodes"],
+        active_tracks=active_tracks,
+        recent_alert_count=recent_alert_count,
+    )
 
 
 @app.get("/api/v1/alerts")
-async def list_alerts(limit: int = Query(default=100, ge=1, le=1000)) -> list[dict]:
-    return await storage.list_alerts(limit=limit)
+async def list_alerts(request: Request, limit: int = Query(default=100, ge=1, le=1000)) -> list[dict]:
+    state = _require_state(request)
+    return await state.storage.list_alerts(limit=limit)
 
 
 @app.patch("/api/v1/alerts/{alert_id}")
 async def update_alert_status(
     alert_id: str,
     status: AlertStatus,
+    request: Request,
     reason: str | None = Query(default=None),
 ) -> dict:
-    ok = await storage.update_alert_status(
+    state = _require_state(request)
+    ok = await state.storage.update_alert_status(
         alert_id=alert_id,
         status=status.value,
         updated_ns=time.time_ns(),
@@ -400,20 +497,23 @@ async def update_alert_status(
 
 
 @app.get("/api/v1/pings")
-async def list_pings(limit: int = Query(default=500, ge=1, le=5000)) -> list[dict]:
-    return await storage.list_pings(limit=limit)
+async def list_pings(request: Request, limit: int = Query(default=500, ge=1, le=5000)) -> list[dict]:
+    state = _require_state(request)
+    return await state.storage.list_pings(limit=limit)
 
 
 @app.get("/api/v1/zones")
-async def list_zones() -> list[dict]:
-    return await storage.list_zones()
+async def list_zones(request: Request) -> list[dict]:
+    state = _require_state(request)
+    return await state.storage.list_zones()
 
 
 @app.put("/api/v1/zones/{zone_id}")
-async def upsert_zone(zone_id: str, payload: ZoneSpec) -> dict:
+async def upsert_zone(zone_id: str, payload: ZoneSpec, request: Request) -> dict:
+    state = _require_state(request)
     if payload.id != zone_id:
         raise HTTPException(status_code=400, detail="zone_id path must match payload.id")
-    await storage.upsert_zone(
+    await state.storage.upsert_zone(
         zone_id=payload.id,
         name=payload.name,
         zone_type=payload.zone_type.value,
@@ -425,16 +525,19 @@ async def upsert_zone(zone_id: str, payload: ZoneSpec) -> dict:
 
 
 @app.delete("/api/v1/zones/{zone_id}")
-async def delete_zone(zone_id: str) -> dict:
-    deleted = await storage.delete_zone(zone_id)
+async def delete_zone(zone_id: str, request: Request) -> dict:
+    state = _require_state(request)
+    deleted = await state.storage.delete_zone(zone_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Zone not found")
     return {"ok": True, "zone_id": zone_id}
 
 
 @app.get("/api/v1/detections/{detection_id}/audio")
-async def get_detection_audio(detection_id: str) -> FileResponse:
-    snippet_path = await storage.snippet_path_for_detection(detection_id)
+async def get_detection_audio(detection_id: str, request: Request) -> FileResponse:
+    state = _require_state(request)
+    settings: Settings = state.settings
+    snippet_path = await state.storage.snippet_path_for_detection(detection_id)
     if not snippet_path:
         raise HTTPException(status_code=404, detail="Snippet not found for detection")
 
@@ -443,7 +546,7 @@ async def get_detection_audio(detection_id: str) -> FileResponse:
         raise HTTPException(status_code=404, detail="Snippet file no longer exists")
 
     snippet_root = settings.snippet_dir.resolve()
-    if snippet_root not in snippet_file.parents:
+    if not snippet_file.is_relative_to(snippet_root):
         raise HTTPException(status_code=403, detail="Snippet path is outside snippet directory")
 
     return FileResponse(
@@ -455,6 +558,8 @@ async def get_detection_audio(detection_id: str) -> FileResponse:
 
 @app.websocket("/ws/live")
 async def live_events(websocket: WebSocket) -> None:
+    state = _require_ws_state(websocket)
+    live_hub: LiveEventHub = state.live_hub
     await live_hub.connect(websocket)
     await websocket.send_json(
         {

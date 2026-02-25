@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 from scipy.signal import butter, sosfiltfilt
 
-from minimappr.config import Settings
+from minimappr.config import LocalizationConfig, Settings
 from minimappr.interfaces import AudioPreprocessor
 from minimappr.models import NodeSpec
 
@@ -78,8 +78,8 @@ class AudioPreprocessingChain(AudioPreprocessor):
 class NodePreprocessorFactory:
     """Build per-node preprocessing chains from Settings and node properties."""
 
-    def __init__(self, settings: Settings) -> None:
-        self._settings = settings
+    def __init__(self, settings: Settings | LocalizationConfig) -> None:
+        self._settings = settings.localization_config() if isinstance(settings, Settings) else settings
 
     def for_node(self, node: NodeSpec) -> AudioPreprocessor:
         if not self._settings.preprocess_enabled:
@@ -105,4 +105,3 @@ class NodePreprocessorFactory:
         if isinstance(raw, dict):
             return raw
         return {}
-

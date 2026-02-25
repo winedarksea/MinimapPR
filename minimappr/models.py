@@ -201,6 +201,38 @@ class FederationAck(BaseModel):
     peer_state: str = "active"
 
 
+class FusionStatusResponse(BaseModel):
+    started: bool
+    queue: dict[str, int]
+    workers: dict[str, int]
+    last_trigger_ns: int
+    last_error: str | None = None
+    registered_nodes: int
+    metrics: dict[str, float | int]
+    offline_replay_mode: bool
+
+
+class FederationStatusResponse(BaseModel):
+    enabled: bool
+    server_id: str
+    peer_count: int
+    peer_track_count: int
+    peers: list[dict[str, Any]]
+    metrics: dict[str, int]
+    publish_interval_seconds: float
+    heartbeat_interval_seconds: float
+    link_timeout_seconds: float
+    track_ttl_seconds: float
+
+
+class CopStatusResponse(BaseModel):
+    active_nodes: int
+    degraded_nodes: int
+    offline_nodes: int
+    active_tracks: int
+    recent_alert_count: int
+
+
 class ZoneType(str, Enum):
     ALERT = "alert_zone"
     EXCLUSION = "exclusion_zone"

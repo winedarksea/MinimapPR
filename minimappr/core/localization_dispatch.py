@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from minimappr.config import Settings
+from minimappr.config import LocalizationConfig, Settings
 from minimappr.core.advanced_localization import EspritLocalizer, MusicLocalizer, SRPPhatLocalizer
 from minimappr.core.localization import LocalizationEngine, LocalizationError
 from minimappr.interfaces import Localizer
@@ -203,32 +203,39 @@ class LocalizationDispatcher:
             return result
 
 
-def build_localizer_from_settings(settings: Settings) -> Localizer:
-    gcc = LocalizationEngine(max_tau_s=settings.localization_max_tau_s)
+def build_localizer_from_settings(settings: Settings | LocalizationConfig) -> Localizer:
+    cfg = settings.localization_config() if isinstance(settings, Settings) else settings
+    gcc = LocalizationEngine(
+        max_tau_s=cfg.localization_max_tau_s,
+        interp_factor=cfg.gcc_phat_interp_factor,
+    )
     algorithms: dict[str, Localizer] = {
         "gcc_phat": gcc,
         "srp_phat": SRPPhatLocalizer(
-            max_tau_s=settings.localization_max_tau_s,
-            grid_resolution_m=settings.localization_srp_grid_resolution_m,
-            search_padding_m=settings.localization_search_padding_m,
+            max_tau_s=cfg.localization_max_tau_s,
+            grid_resolution_m=cfg.localization_srp_grid_resolution_m,
+            search_padding_m=cfg.localization_search_padding_m,
+            interp=cfg.gcc_phat_interp_factor,
         ),
         "music": MusicLocalizer(
-            max_tau_s=settings.localization_max_tau_s,
-            azimuth_step_deg=settings.localization_music_azimuth_step_deg,
-            elevation_step_deg=settings.localization_music_elevation_step_deg,
-            freq_min_hz=settings.localization_subspace_freq_min_hz,
-            freq_max_hz=settings.localization_subspace_freq_max_hz,
+            max_tau_s=cfg.localization_max_tau_s,
+            azimuth_step_deg=cfg.localization_music_azimuth_step_deg,
+            elevation_step_deg=cfg.localization_music_elevation_step_deg,
+            freq_min_hz=cfg.localization_subspace_freq_min_hz,
+            freq_max_hz=cfg.localization_subspace_freq_max_hz,
+            interp=cfg.gcc_phat_interp_factor,
         ),
         "esprit": EspritLocalizer(
-            max_tau_s=settings.localization_max_tau_s,
-            freq_min_hz=settings.localization_subspace_freq_min_hz,
-            freq_max_hz=settings.localization_subspace_freq_max_hz,
+            max_tau_s=cfg.localization_max_tau_s,
+            freq_min_hz=cfg.localization_subspace_freq_min_hz,
+            freq_max_hz=cfg.localization_subspace_freq_max_hz,
+            interp=cfg.gcc_phat_interp_factor,
         ),
     }
     return LocalizationDispatcher(
-        strategy=settings.localization_strategy,
-        default_algorithm=settings.localization_algorithm,
-        refine_confidence_threshold=settings.localization_refine_confidence_threshold,
-        tight_array_aperture_m=settings.localization_tight_array_aperture_m,
+        strategy=cfg.localization_strategy,
+        default_algorithm=cfg.localization_algorithm,
+        refine_confidence_threshold=cfg.localization_refine_confidence_threshold,
+        tight_array_aperture_m=cfg.localization_tight_array_aperture_m,
         algorithms=algorithms,
     )

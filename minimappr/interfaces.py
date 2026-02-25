@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, AsyncContextManager, Protocol, runtime_checkable
 
 import numpy as np
 
-from minimappr.models import ClassificationResult, DetectionEvent, IngestFrameRequest, LocalizationResult, TrackState
+from minimappr.models import (
+    ClassificationResult,
+    DetectionEvent,
+    GeoPoint,
+    IngestFrameRequest,
+    LocalizationResult,
+    NodeSpec,
+    TrackState,
+)
 
 
 Vec3Array = np.ndarray
@@ -80,31 +88,119 @@ class StorageBackend(Protocol):
     async def close(self) -> None:
         ...
 
-    async def upsert_node(self, *args: Any, **kwargs: Any) -> None:
+    async def upsert_node(
+        self,
+        spec: NodeSpec,
+        last_seen_ns: int,
+        position_geo: GeoPoint | None = None,
+    ) -> None:
         ...
 
-    async def insert_observation(self, *args: Any, **kwargs: Any) -> str:
+    async def insert_observation(
+        self,
+        *,
+        node_id: str,
+        sensor_id: str,
+        sensor_type: str,
+        source_type: str,
+        toa_ns: int,
+        tor_ns: int,
+        time_quality: str,
+        sample_rate_hz: int | None,
+        channel_index: int | None,
+        frame_sequence: int | None,
+        retention_tier: str = "short",
+        metadata: dict[str, Any] | None = None,
+        event_id: str | None = None,
+    ) -> str:
         ...
 
-    async def insert_detection(self, *args: Any, **kwargs: Any) -> None:
+    async def upsert_label(
+        self,
+        *,
+        name: str,
+        category: str,
+        source: str,
+        parent_label_id: str | None = None,
+        external_taxonomy: str | None = None,
+        external_label_id: str | None = None,
+        created_ns: int,
+    ) -> str:
         ...
 
-    async def upsert_track(self, *args: Any, **kwargs: Any) -> None:
+    async def insert_detection(
+        self,
+        detection: DetectionEvent,
+        snippet_path: str | None,
+        snippet_expires_ns: int | None,
+        retention_tier: str = "short",
+    ) -> None:
         ...
 
-    async def insert_track_update(self, *args: Any, **kwargs: Any) -> str:
+    async def upsert_track(self, track: TrackState) -> None:
         ...
 
-    async def insert_alert(self, *args: Any, **kwargs: Any) -> str:
+    async def insert_track_update(
+        self,
+        *,
+        track: TrackState,
+        timestamp_ns: int,
+        event_id: str | None,
+        update_type: str,
+        detection_id: str | None,
+        observation_ids: list[str],
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
         ...
 
-    async def update_alert_status(self, *args: Any, **kwargs: Any) -> bool:
+    async def insert_alert(
+        self,
+        *,
+        timestamp_ns: int,
+        rule_id: str | None,
+        detection_id: str | None,
+        track_id: str | None,
+        destination: str,
+        priority: str,
+        status: str,
+        payload: dict[str, Any] | None = None,
+        alert_id: str | None = None,
+    ) -> str:
         ...
 
-    async def insert_ping(self, *args: Any, **kwargs: Any) -> str:
+    async def update_alert_status(
+        self,
+        *,
+        alert_id: str,
+        status: str,
+        updated_ns: int,
+        payload_patch: dict[str, Any] | None = None,
+    ) -> bool:
         ...
 
-    async def list_labels(self) -> list[dict]:
+    async def insert_ping(
+        self,
+        *,
+        timestamp_ns: int,
+        ping_type: str,
+        label: str | None,
+        label_id: str | None,
+        spl_db: float | None,
+        position_m: tuple[float, float, float] | None,
+        position_geo: GeoPoint | None,
+        source_detection_id: str | None,
+        source_observation_id: str | None,
+        source_track_id: str | None,
+        retention_tier: str,
+        metadata: dict[str, Any] | None = None,
+        ping_id: str | None = None,
+    ) -> str:
+        ...
+
+    async def list_labels(self) -> list[dict[str, Any]]:
+        ...
+
+    def begin_batch(self) -> AsyncContextManager[None]:
         ...
 
 

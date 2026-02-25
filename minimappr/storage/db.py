@@ -6,6 +6,7 @@ import asyncio
 import json
 import re
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -37,12 +38,15 @@ class Storage:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
         self._db: aiosqlite.Connection | None = None
-        self._lock = asyncio.Lock()
+        self._write_lock = asyncio.Lock()
+        self._write_owner: asyncio.Task[Any] | None = None
+        self._batch_depth = 0
 
     async def initialize(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._db = await aiosqlite.connect(self.db_path)
         self._db.row_factory = aiosqlite.Row
+        await self._db.execute("PRAGMA foreign_keys=ON;")
         await self._db.execute("PRAGMA journal_mode=WAL;")
         await self._db.execute("PRAGMA synchronous=NORMAL;")
 
@@ -80,10 +84,13 @@ class Storage:
                 frame_sequence INTEGER,
                 retention_tier TEXT NOT NULL,
                 metadata_json TEXT NOT NULL,
-                created_ns INTEGER NOT NULL
+                created_ns INTEGER NOT NULL,
+                FOREIGN KEY(node_id) REFERENCES nodes(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_observations_toa ON observations(toa_ns DESC);
             CREATE INDEX IF NOT EXISTS idx_observations_sensor ON observations(sensor_id, toa_ns DESC);
+            CREATE INDEX IF NOT EXISTS idx_observations_event_id ON observations(event_id);
+            CREATE INDEX IF NOT EXISTS idx_observations_node_id ON observations(node_id);
 
             CREATE TABLE IF NOT EXISTS labels (
                 id TEXT PRIMARY KEY,
@@ -101,7 +108,7 @@ class Storage:
                 id TEXT PRIMARY KEY,
                 event_id TEXT NOT NULL,
                 source_type TEXT NOT NULL,
-                source_node_id TEXT,
+                source_node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL,
                 timestamp_ns INTEGER NOT NULL,
                 toa_ns INTEGER NOT NULL,
                 tor_ns INTEGER NOT NULL,
@@ -116,13 +123,13 @@ class Storage:
                 covariance_json TEXT,
                 confidence REAL NOT NULL,
                 gdop REAL NOT NULL,
-                label_id TEXT,
+                label_id TEXT REFERENCES labels(id) ON DELETE SET NULL,
                 label TEXT NOT NULL,
                 label_category TEXT NOT NULL DEFAULT 'unknown',
                 iff_category TEXT NOT NULL DEFAULT 'unknown',
                 label_confidence REAL NOT NULL,
                 spl_db REAL,
-                track_id TEXT,
+                track_id TEXT REFERENCES tracks(id) ON DELETE SET NULL,
                 reference_sensor TEXT NOT NULL,
                 source_sensors_json TEXT NOT NULL,
                 source_observation_ids_json TEXT NOT NULL DEFAULT '[]',
@@ -166,7 +173,7 @@ class Storage:
 
             CREATE TABLE IF NOT EXISTS track_updates (
                 id TEXT PRIMARY KEY,
-                track_id TEXT NOT NULL,
+                track_id TEXT NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
                 timestamp_ns INTEGER NOT NULL,
                 event_id TEXT,
                 update_type TEXT NOT NULL,
@@ -185,7 +192,7 @@ class Storage:
                 confidence REAL NOT NULL,
                 label TEXT NOT NULL,
                 label_category TEXT NOT NULL,
-                detection_id TEXT,
+                detection_id TEXT REFERENCES detections(id) ON DELETE SET NULL,
                 observation_ids_json TEXT NOT NULL,
                 metadata_json TEXT NOT NULL
             );
@@ -195,8 +202,8 @@ class Storage:
                 id TEXT PRIMARY KEY,
                 timestamp_ns INTEGER NOT NULL,
                 rule_id TEXT,
-                detection_id TEXT,
-                track_id TEXT,
+                detection_id TEXT REFERENCES detections(id) ON DELETE SET NULL,
+                track_id TEXT REFERENCES tracks(id) ON DELETE SET NULL,
                 destination TEXT NOT NULL,
                 priority TEXT NOT NULL,
                 status TEXT NOT NULL,
@@ -215,12 +222,12 @@ class Storage:
                 y REAL,
                 z REAL,
                 ping_type TEXT NOT NULL,
-                label_id TEXT,
+                label_id TEXT REFERENCES labels(id) ON DELETE SET NULL,
                 label TEXT,
                 spl_db REAL,
-                source_detection_id TEXT,
-                source_observation_id TEXT,
-                source_track_id TEXT,
+                source_detection_id TEXT REFERENCES detections(id) ON DELETE SET NULL,
+                source_observation_id TEXT REFERENCES observations(id) ON DELETE SET NULL,
+                source_track_id TEXT REFERENCES tracks(id) ON DELETE SET NULL,
                 retention_tier TEXT NOT NULL,
                 metadata_json TEXT NOT NULL
             );
@@ -232,8 +239,8 @@ class Storage:
                 artifact_type TEXT NOT NULL,
                 path TEXT NOT NULL,
                 retention_tier TEXT NOT NULL,
-                source_detection_id TEXT,
-                source_track_id TEXT,
+                source_detection_id TEXT REFERENCES detections(id) ON DELETE SET NULL,
+                source_track_id TEXT REFERENCES tracks(id) ON DELETE SET NULL,
                 metadata_json TEXT NOT NULL,
                 created_ns INTEGER NOT NULL,
                 expires_ns INTEGER
@@ -251,7 +258,7 @@ class Storage:
 
             CREATE TABLE IF NOT EXISTS environment (
                 id TEXT PRIMARY KEY,
-                node_id TEXT NOT NULL,
+                node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
                 timestamp_ns INTEGER NOT NULL,
                 temperature_k REAL,
                 pressure_pa REAL,
@@ -332,6 +339,42 @@ class Storage:
                 continue
             await db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
 
+    @asynccontextmanager
+    async def _write_guard(self):
+        current = asyncio.current_task()
+        if current is not None and self._write_owner is current:
+            yield
+            return
+        async with self._write_lock:
+            self._write_owner = asyncio.current_task()
+            try:
+                yield
+            finally:
+                self._write_owner = None
+
+    async def _commit_if_needed(self, db: aiosqlite.Connection) -> None:
+        if self._batch_depth == 0:
+            await db.commit()
+
+    @asynccontextmanager
+    async def begin_batch(self):
+        db = self._require_db()
+        async with self._write_guard():
+            if self._batch_depth == 0:
+                await db.execute("BEGIN")
+            self._batch_depth += 1
+            try:
+                yield
+            except Exception:
+                self._batch_depth = max(0, self._batch_depth - 1)
+                if self._batch_depth == 0:
+                    await db.rollback()
+                raise
+            else:
+                self._batch_depth = max(0, self._batch_depth - 1)
+                if self._batch_depth == 0:
+                    await db.commit()
+
     async def close(self) -> None:
         if self._db is not None:
             await self._db.close()
@@ -346,7 +389,7 @@ class Storage:
         db = self._require_db()
         if spec.position_m is None:
             raise ValueError("NodeSpec.position_m is required for persistence")
-        async with self._lock:
+        async with self._write_guard():
             await db.execute(
                 """
                 INSERT INTO nodes (
@@ -387,7 +430,7 @@ class Storage:
                     last_seen_ns,
                 ),
             )
-            await db.commit()
+            await self._commit_if_needed(db)
 
     async def insert_observation(
         self,
@@ -409,7 +452,7 @@ class Storage:
         db = self._require_db()
         observation_id = event_id or f"obs-{uuid.uuid4().hex[:16]}"
         payload = metadata or {}
-        async with self._lock:
+        async with self._write_guard():
             await db.execute(
                 """
                 INSERT INTO observations (
@@ -437,7 +480,7 @@ class Storage:
                     tor_ns,
                 ),
             )
-            await db.commit()
+            await self._commit_if_needed(db)
         return observation_id
 
     async def upsert_label(
@@ -453,7 +496,7 @@ class Storage:
     ) -> str:
         db = self._require_db()
         label_id = f"lbl-{_slugify(name)[:48]}"
-        async with self._lock:
+        async with self._write_guard():
             await db.execute(
                 """
                 INSERT INTO labels (
@@ -479,7 +522,7 @@ class Storage:
                     created_ns,
                 ),
             )
-            await db.commit()
+            await self._commit_if_needed(db)
         return label_id
 
     async def insert_detection(
@@ -490,7 +533,7 @@ class Storage:
         retention_tier: str = "short",
     ) -> None:
         db = self._require_db()
-        async with self._lock:
+        async with self._write_guard():
             await db.execute(
                 """
                 INSERT INTO detections (
@@ -545,7 +588,7 @@ class Storage:
                     snippet_expires_ns,
                 ),
             )
-            await db.commit()
+            await self._commit_if_needed(db)
 
     async def insert_track_update(
         self,
@@ -560,7 +603,7 @@ class Storage:
     ) -> str:
         db = self._require_db()
         update_id = f"tup-{uuid.uuid4().hex[:16]}"
-        async with self._lock:
+        async with self._write_guard():
             await db.execute(
                 """
                 INSERT INTO track_updates (
@@ -599,12 +642,12 @@ class Storage:
                     _json_dumps(metadata or {}),
                 ),
             )
-            await db.commit()
+            await self._commit_if_needed(db)
         return update_id
 
     async def upsert_track(self, track: TrackState) -> None:
         db = self._require_db()
-        async with self._lock:
+        async with self._write_guard():
             await db.execute(
                 """
                 INSERT INTO tracks (
@@ -664,11 +707,13 @@ class Storage:
                     track.tqi,
                 ),
             )
-            await db.commit()
+            await self._commit_if_needed(db)
 
-    async def list_nodes(self) -> list[dict]:
+    async def list_nodes(self, limit: int | None = None) -> list[dict]:
         db = self._require_db()
-        async with self._lock:
+        if limit is not None and limit > 0:
+            rows = await (await db.execute("SELECT * FROM nodes ORDER BY id ASC LIMIT ?", (limit,))).fetchall()
+        else:
             rows = await (await db.execute("SELECT * FROM nodes ORDER BY id ASC")).fetchall()
 
         result = []
@@ -694,101 +739,31 @@ class Storage:
 
     async def list_detections(self, limit: int = 100) -> list[dict]:
         db = self._require_db()
-        async with self._lock:
-            rows = await (
-                await db.execute(
-                    "SELECT * FROM detections ORDER BY timestamp_ns DESC LIMIT ?",
-                    (limit,),
-                )
-            ).fetchall()
-
-        result = []
-        for row in rows:
-            position_geo = None
-            if row["lat"] is not None and row["lon"] is not None:
-                position_geo = {"lat": row["lat"], "lon": row["lon"], "alt_m": row["alt"] or 0.0}
-            result.append(
-                {
-                    "id": row["id"],
-                    "event_id": row["event_id"] or row["id"],
-                    "source_type": row["source_type"] or "raw_sensor",
-                    "source_node_id": row["source_node_id"],
-                    "timestamp_ns": row["timestamp_ns"],
-                    "toa_ns": row["toa_ns"] or row["timestamp_ns"],
-                    "tor_ns": row["tor_ns"] or row["timestamp_ns"],
-                    "time_quality": row["time_quality"] or "freerunning",
-                    "stale_ns": row["stale_ns"],
-                    "position_m": [row["x"], row["y"], row["z"]],
-                    "position_geo": position_geo,
-                    "position_covariance_m2": _json_loads(row["covariance_json"], None),
-                    "confidence": row["confidence"],
-                    "gdop": row["gdop"],
-                    "label_id": row["label_id"],
-                    "label": row["label"],
-                    "label_category": row["label_category"] or "unknown",
-                    "iff_category": row["iff_category"] or "unknown",
-                    "label_confidence": row["label_confidence"],
-                    "spl_db": row["spl_db"],
-                    "track_id": row["track_id"],
-                    "reference_sensor": row["reference_sensor"],
-                    "source_sensors": _json_loads(row["source_sensors_json"], []),
-                    "source_observation_ids": _json_loads(row["source_observation_ids_json"], []),
-                    "zone_ids": _json_loads(row["zone_ids_json"], []),
-                    "tdoa_s": _json_loads(row["tdoa_json"], {}),
-                    "classifier_scores": _json_loads(row["classifier_scores_json"], {}),
-                    "feature_summary": _json_loads(row["feature_summary_json"], {}),
-                    "retention_tier": row["retention_tier"] or "short",
-                    "snippet_path": row["snippet_path"],
-                }
+        rows = await (
+            await db.execute(
+                "SELECT * FROM detections ORDER BY timestamp_ns DESC LIMIT ?",
+                (limit,),
             )
-        return result
+        ).fetchall()
+        return [self._row_to_detection(row).model_dump(mode="json") for row in rows]
 
     async def list_tracks(self, limit: int = 200) -> list[dict]:
         db = self._require_db()
-        async with self._lock:
-            rows = await (
-                await db.execute("SELECT * FROM tracks ORDER BY last_seen_ns DESC LIMIT ?", (limit,))
-            ).fetchall()
-
-        result = []
-        for row in rows:
-            position_geo = None
-            if row["lat"] is not None and row["lon"] is not None:
-                position_geo = {"lat": row["lat"], "lon": row["lon"], "alt_m": row["alt"] or 0.0}
-            result.append(
-                {
-                    "id": row["id"],
-                    "first_seen_ns": row["first_seen_ns"],
-                    "last_seen_ns": row["last_seen_ns"],
-                    "position_m": [row["x"], row["y"], row["z"]],
-                    "position_geo": position_geo,
-                    "position_covariance_m2": _json_loads(row["covariance_json"], None),
-                    "velocity_mps": [row["vx"], row["vy"], row["vz"]],
-                    "label_id": row["label_id"],
-                    "label": row["label"],
-                    "label_category": row["label_category"] or "unknown",
-                    "iff_category": row["iff_category"] or "unknown",
-                    "confidence": row["confidence"],
-                    "update_count": row["update_count"],
-                    "status": row["status"],
-                    "capability_tier": row["capability_tier"] or "full_3d",
-                    "tqi": row["tqi"],
-                }
-            )
-        return result
+        rows = await (
+            await db.execute("SELECT * FROM tracks ORDER BY last_seen_ns DESC LIMIT ?", (limit,))
+        ).fetchall()
+        return [self._row_to_track(row).model_dump(mode="json") for row in rows]
 
     async def list_labels(self) -> list[dict]:
         db = self._require_db()
-        async with self._lock:
-            rows = await (await db.execute("SELECT * FROM labels ORDER BY name ASC")).fetchall()
+        rows = await (await db.execute("SELECT * FROM labels ORDER BY name ASC")).fetchall()
         return [dict(row) for row in rows]
 
     async def list_alerts(self, limit: int = 100) -> list[dict]:
         db = self._require_db()
-        async with self._lock:
-            rows = await (
-                await db.execute("SELECT * FROM alerts ORDER BY timestamp_ns DESC LIMIT ?", (limit,))
-            ).fetchall()
+        rows = await (
+            await db.execute("SELECT * FROM alerts ORDER BY timestamp_ns DESC LIMIT ?", (limit,))
+        ).fetchall()
         result: list[dict] = []
         for row in rows:
             item = dict(row)
@@ -813,7 +788,7 @@ class Storage:
     ) -> str:
         db = self._require_db()
         final_id = alert_id or f"alr-{uuid.uuid4().hex[:16]}"
-        async with self._lock:
+        async with self._write_guard():
             await db.execute(
                 """
                 INSERT INTO alerts (
@@ -835,7 +810,7 @@ class Storage:
                     _json_dumps(payload or {}),
                 ),
             )
-            await db.commit()
+            await self._commit_if_needed(db)
         return final_id
 
     async def update_alert_status(
@@ -847,7 +822,7 @@ class Storage:
         payload_patch: dict[str, Any] | None = None,
     ) -> bool:
         db = self._require_db()
-        async with self._lock:
+        async with self._write_guard():
             row = await (
                 await db.execute("SELECT payload_json FROM alerts WHERE id = ? LIMIT 1", (alert_id,))
             ).fetchone()
@@ -864,15 +839,14 @@ class Storage:
                 """,
                 (status, updated_ns, _json_dumps(payload), alert_id),
             )
-            await db.commit()
+            await self._commit_if_needed(db)
         return True
 
     async def list_pings(self, limit: int = 500) -> list[dict]:
         db = self._require_db()
-        async with self._lock:
-            rows = await (
-                await db.execute("SELECT * FROM pings ORDER BY timestamp_ns DESC LIMIT ?", (limit,))
-            ).fetchall()
+        rows = await (
+            await db.execute("SELECT * FROM pings ORDER BY timestamp_ns DESC LIMIT ?", (limit,))
+        ).fetchall()
         result: list[dict] = []
         for row in rows:
             item = dict(row)
@@ -902,7 +876,7 @@ class Storage:
         x = y = z = None
         if position_m is not None:
             x, y, z = position_m
-        async with self._lock:
+        async with self._write_guard():
             await db.execute(
                 """
                 INSERT INTO pings (
@@ -932,7 +906,7 @@ class Storage:
                     _json_dumps(metadata or {}),
                 ),
             )
-            await db.commit()
+            await self._commit_if_needed(db)
         return final_id
 
     async def insert_large_artifact(
@@ -950,7 +924,7 @@ class Storage:
     ) -> str:
         db = self._require_db()
         final_id = artifact_id or f"lar-{uuid.uuid4().hex[:16]}"
-        async with self._lock:
+        async with self._write_guard():
             await db.execute(
                 """
                 INSERT INTO large_artifacts (
@@ -971,13 +945,12 @@ class Storage:
                     expires_ns,
                 ),
             )
-            await db.commit()
+            await self._commit_if_needed(db)
         return final_id
 
     async def list_zones(self) -> list[dict]:
         db = self._require_db()
-        async with self._lock:
-            rows = await (await db.execute("SELECT * FROM zones ORDER BY id ASC")).fetchall()
+        rows = await (await db.execute("SELECT * FROM zones ORDER BY id ASC")).fetchall()
         result: list[dict] = []
         for row in rows:
             result.append(
@@ -1003,7 +976,7 @@ class Storage:
         created_ns: int,
     ) -> None:
         db = self._require_db()
-        async with self._lock:
+        async with self._write_guard():
             await db.execute(
                 """
                 INSERT INTO zones (id, name, zone_type, polygon_geo_json, properties_json, created_ns)
@@ -1016,58 +989,98 @@ class Storage:
                 """,
                 (zone_id, name, zone_type, _json_dumps(polygon_geo), _json_dumps(properties or {}), created_ns),
             )
-            await db.commit()
+            await self._commit_if_needed(db)
 
     async def delete_zone(self, zone_id: str) -> bool:
         db = self._require_db()
-        async with self._lock:
+        async with self._write_guard():
             cursor = await db.execute("DELETE FROM zones WHERE id = ?", (zone_id,))
-            await db.commit()
+            await self._commit_if_needed(db)
             return cursor.rowcount > 0
 
     async def recent_alert_count(self, since_ns: int) -> int:
         db = self._require_db()
-        async with self._lock:
-            row = await (
-                await db.execute("SELECT COUNT(1) AS c FROM alerts WHERE timestamp_ns >= ?", (since_ns,))
-            ).fetchone()
+        row = await (
+            await db.execute("SELECT COUNT(1) AS c FROM alerts WHERE timestamp_ns >= ?", (since_ns,))
+        ).fetchone()
+        return int(row["c"] if row is not None else 0)
+
+    async def count_nodes_by_status(
+        self,
+        *,
+        now_ns: int,
+        degraded_after_seconds: float,
+        offline_after_seconds: float,
+    ) -> dict[str, int]:
+        db = self._require_db()
+        degraded_ns = int(degraded_after_seconds * 1_000_000_000)
+        offline_ns = int(offline_after_seconds * 1_000_000_000)
+        row = await (
+            await db.execute(
+                """
+                SELECT
+                    SUM(CASE WHEN (? - last_seen_ns) < ? THEN 1 ELSE 0 END) AS online_nodes,
+                    SUM(CASE WHEN (? - last_seen_ns) >= ? AND (? - last_seen_ns) < ? THEN 1 ELSE 0 END) AS degraded_nodes,
+                    SUM(CASE WHEN (? - last_seen_ns) >= ? THEN 1 ELSE 0 END) AS offline_nodes
+                FROM nodes
+                """,
+                (
+                    now_ns,
+                    degraded_ns,
+                    now_ns,
+                    degraded_ns,
+                    now_ns,
+                    offline_ns,
+                    now_ns,
+                    offline_ns,
+                ),
+            )
+        ).fetchone()
+        if row is None:
+            return {"online_nodes": 0, "degraded_nodes": 0, "offline_nodes": 0}
+        return {
+            "online_nodes": int(row["online_nodes"] or 0),
+            "degraded_nodes": int(row["degraded_nodes"] or 0),
+            "offline_nodes": int(row["offline_nodes"] or 0),
+        }
+
+    async def count_active_tracks(self) -> int:
+        db = self._require_db()
+        row = await (
+            await db.execute(
+                """
+                SELECT COUNT(1) AS c
+                FROM tracks
+                WHERE status IN ('tentative', 'confirmed', 'coasting')
+                """,
+            )
+        ).fetchone()
         return int(row["c"] if row is not None else 0)
 
     async def get_detection(self, detection_id: str) -> dict | None:
         db = self._require_db()
-        async with self._lock:
-            row = await (
-                await db.execute("SELECT * FROM detections WHERE id = ? LIMIT 1", (detection_id,))
-            ).fetchone()
+        row = await (
+            await db.execute("SELECT * FROM detections WHERE id = ? LIMIT 1", (detection_id,))
+        ).fetchone()
         if row is None:
             return None
-        raw = dict(row)
-        raw["source_sensors"] = _json_loads(raw.pop("source_sensors_json"), [])
-        raw["source_observation_ids"] = _json_loads(raw.pop("source_observation_ids_json"), [])
-        raw["zone_ids"] = _json_loads(raw.pop("zone_ids_json"), [])
-        raw["tdoa_s"] = _json_loads(raw.pop("tdoa_json"), {})
-        raw["classifier_scores"] = _json_loads(raw.pop("classifier_scores_json"), {})
-        raw["feature_summary"] = _json_loads(raw.pop("feature_summary_json"), {})
-        if not raw.get("retention_tier"):
-            raw["retention_tier"] = "short"
-        return raw
+        return self._row_to_detection(row).model_dump(mode="json")
 
     async def snippet_path_for_detection(self, detection_id: str) -> str | None:
         db = self._require_db()
-        async with self._lock:
-            row = await (
-                await db.execute(
-                    "SELECT snippet_path FROM detections WHERE id = ? LIMIT 1",
-                    (detection_id,),
-                )
-            ).fetchone()
+        row = await (
+            await db.execute(
+                "SELECT snippet_path FROM detections WHERE id = ? LIMIT 1",
+                (detection_id,),
+            )
+        ).fetchone()
         if row is None:
             return None
         return row["snippet_path"]
 
     async def cleanup_expired_snippets(self, now_ns: int) -> int:
         db = self._require_db()
-        async with self._lock:
+        async with self._write_guard():
             rows = await (
                 await db.execute(
                     """
@@ -1094,7 +1107,7 @@ class Storage:
                     (row["id"],),
                 )
 
-            await db.commit()
+            await self._commit_if_needed(db)
         return len(rows)
 
     async def cleanup_retention(self, *, now_ns: int, tier_ttls_seconds: dict[str, int]) -> dict[str, int]:
@@ -1107,7 +1120,7 @@ class Storage:
         }
         protected_tiers = {"config", "permanent"}
 
-        async with self._lock:
+        async with self._write_guard():
             for tier, ttl_s in tier_ttls_seconds.items():
                 if tier in protected_tiers or ttl_s < 0:
                     continue
@@ -1187,9 +1200,69 @@ class Storage:
                 )
                 summary["large_artifacts"] += max(0, artifact_cursor.rowcount)
 
-            await db.commit()
+            await self._commit_if_needed(db)
 
         return summary
+
+    @staticmethod
+    def _row_to_geo(row: aiosqlite.Row) -> GeoPoint | None:
+        if row["lat"] is None or row["lon"] is None:
+            return None
+        return GeoPoint(lat=float(row["lat"]), lon=float(row["lon"]), alt_m=float(row["alt"] or 0.0))
+
+    def _row_to_detection(self, row: aiosqlite.Row) -> DetectionEvent:
+        return DetectionEvent(
+            id=row["id"],
+            event_id=row["event_id"] or row["id"],
+            source_type=row["source_type"] or "raw_sensor",
+            source_node_id=row["source_node_id"],
+            timestamp_ns=int(row["timestamp_ns"]),
+            toa_ns=int(row["toa_ns"] or row["timestamp_ns"]),
+            tor_ns=int(row["tor_ns"] or row["timestamp_ns"]),
+            time_quality=row["time_quality"] or "freerunning",
+            stale_ns=row["stale_ns"],
+            position_m=(float(row["x"]), float(row["y"]), float(row["z"])),
+            position_geo=self._row_to_geo(row),
+            position_covariance_m2=_json_loads(row["covariance_json"], None),
+            confidence=float(row["confidence"]),
+            gdop=float(row["gdop"]),
+            label_id=row["label_id"],
+            label=row["label"],
+            label_category=row["label_category"] or "unknown",
+            iff_category=row["iff_category"] or "unknown",
+            label_confidence=float(row["label_confidence"]),
+            spl_db=row["spl_db"],
+            track_id=row["track_id"],
+            reference_sensor=row["reference_sensor"],
+            source_sensors=_json_loads(row["source_sensors_json"], []),
+            source_observation_ids=_json_loads(row["source_observation_ids_json"], []),
+            zone_ids=_json_loads(row["zone_ids_json"], []),
+            tdoa_s=_json_loads(row["tdoa_json"], {}),
+            classifier_scores=_json_loads(row["classifier_scores_json"], {}),
+            feature_summary=_json_loads(row["feature_summary_json"], {}),
+            retention_tier=row["retention_tier"] or "short",
+            snippet_path=row["snippet_path"],
+        )
+
+    def _row_to_track(self, row: aiosqlite.Row) -> TrackState:
+        return TrackState(
+            id=row["id"],
+            first_seen_ns=int(row["first_seen_ns"]),
+            last_seen_ns=int(row["last_seen_ns"]),
+            position_m=(float(row["x"]), float(row["y"]), float(row["z"])),
+            position_geo=self._row_to_geo(row),
+            position_covariance_m2=_json_loads(row["covariance_json"], None),
+            velocity_mps=(float(row["vx"]), float(row["vy"]), float(row["vz"])),
+            label_id=row["label_id"],
+            label=row["label"],
+            label_category=row["label_category"] or "unknown",
+            iff_category=row["iff_category"] or "unknown",
+            confidence=float(row["confidence"]),
+            update_count=int(row["update_count"]),
+            status=row["status"],
+            capability_tier=row["capability_tier"] or "full_3d",
+            tqi=float(row["tqi"]),
+        )
 
     def _require_db(self) -> aiosqlite.Connection:
         if self._db is None:

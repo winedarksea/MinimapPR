@@ -26,9 +26,9 @@ def create_classifier(settings: Settings) -> AudioClassifier:
             base_classifier = YAMNetClassifier(min_confidence=settings.yamnet_min_confidence)
         except Exception as exc:  # pragma: no cover - optional runtime backend
             logger.warning("YAMNet unavailable (%s). Falling back to heuristic classifier.", exc)
-            base_classifier = HeuristicClassifier()
+            base_classifier = _create_heuristic(settings)
     else:
-        base_classifier = HeuristicClassifier()
+        base_classifier = _create_heuristic(settings)
 
     stages = _load_chain_stages(settings.model_chain_config_path, settings)
     if not stages:
@@ -72,7 +72,7 @@ def _build_stage(raw: dict[str, Any], settings: Settings) -> ChainStage | None:
         except Exception:
             return None
     else:
-        classifier = HeuristicClassifier()
+        classifier = _create_heuristic(settings)
 
     labels = _to_set(raw.get("trigger_labels"))
     categories = _to_set(raw.get("trigger_categories"))
@@ -100,3 +100,23 @@ def _to_set(value: Any) -> set[str]:
                 out.add(text)
         return out
     return set()
+
+
+def _create_heuristic(settings: Settings) -> HeuristicClassifier:
+    cfg = settings.classifier_config()
+    return HeuristicClassifier(
+        ambient_rms_threshold=cfg.heuristic_ambient_rms_threshold,
+        impulse_crest_threshold=cfg.heuristic_impulse_crest_threshold,
+        impulse_bandwidth_threshold_hz=cfg.heuristic_impulse_bandwidth_threshold_hz,
+        bird_centroid_min_hz=cfg.heuristic_bird_centroid_min_hz,
+        bird_zcr_min=cfg.heuristic_bird_zcr_min,
+        speech_centroid_min_hz=cfg.heuristic_speech_centroid_min_hz,
+        speech_centroid_max_hz=cfg.heuristic_speech_centroid_max_hz,
+        speech_zcr_min=cfg.heuristic_speech_zcr_min,
+        speech_zcr_max=cfg.heuristic_speech_zcr_max,
+        speech_flatness_max=cfg.heuristic_speech_flatness_max,
+        machine_centroid_max_hz=cfg.heuristic_machine_centroid_max_hz,
+        machine_flatness_max=cfg.heuristic_machine_flatness_max,
+        unknown_min_score=cfg.heuristic_unknown_min_score,
+        unknown_score=cfg.heuristic_unknown_score,
+    )

@@ -26,6 +26,7 @@ The system is designed to serve a wide range of acoustic and multi-sensor awaren
 - **Gunfire and artillery localization** — with passive/active localization using echoes to map terrain.
 - **Speech detection by language** — classify detected speech by language for intelligence gathering.
 - **Integration with ATAK/TAK ecosystem** — CoT interchange for interoperability with existing military COP systems.
+- **Mil-Spec Readiness** — Native MGRS support, Built-In Test (BIT) reporting, and tamper-evident data provenance for certification and interoperability.
 
 ### Retail & Commercial
 - **Activity and foot traffic mapping** — sound-based occupancy heatmaps for retail spaces, parks, museums.
@@ -504,6 +505,7 @@ All physical effectors share a common safety interlock model enforced at the rul
 5. **Human-in-the-loop option** — configurable per effector class: fully automatic, confirm-to-fire (push notification with 10-second countdown), or manual-only
 6. **Audit trail** — every effector activation is logged as an Alert with full provenance (detection → track → rule → effector command → result) for legal and safety review
 7. **Master arm switch** — physical hardware safety on each effector platform, plus a software master arm in the COP UI
+8. **Hardware Failsafe / Watchdog** — physical effectors must require a continuous heartbeat from the control system; loss of signal forces an immediate return to the safe (off) state.
 
 From the software perspective, all of these are identical: the rules engine evaluates a condition, selects an effector, computes a bearing/coordinate, checks safety interlocks, and sends a command (GPIO relay, HTTP webhook, MAVLink waypoint, or MQTT message).
 

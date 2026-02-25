@@ -58,6 +58,7 @@ def _tdoa_measurements(
     reference_sensor: str,
     sample_rate_hz: int,
     max_tau_s: float,
+    interp: int,
 ) -> tuple[dict[str, float], list[float]]:
     ref_signal = sensor_windows[reference_sensor]
     tdoa_s: dict[str, float] = {}
@@ -70,6 +71,7 @@ def _tdoa_measurements(
             reference_signal=ref_signal,
             sample_rate_hz=sample_rate_hz,
             max_tau_s=max_tau_s,
+            interp=max(1, interp),
         )
         tdoa_s[sensor_id] = float(tau_s)
         peaks.append(float(peak))
@@ -136,7 +138,8 @@ def _gdop(
     if np.linalg.cond(info) > 1e12:
         return float("inf")
     covariance = np.linalg.pinv(info)
-    return float(np.sqrt(np.trace(covariance)))
+    trace = float(np.trace(covariance))
+    return float(np.sqrt(max(0.0, trace)))
 
 
 def _confidence_from_fit(
@@ -322,6 +325,7 @@ class SRPPhatLocalizer:
             reference_sensor=reference_sensor,
             sample_rate_hz=sample_rate_hz,
             max_tau_s=self.max_tau_s,
+            interp=self.interp,
         )
         meas_ids = sorted(measured_tdoa.keys())
 
@@ -415,6 +419,7 @@ class MusicLocalizer:
     freq_min_hz: float = 300.0
     freq_max_hz: float = 3500.0
     source_count: int | None = None
+    interp: int = 4
 
     def localize(
         self,
@@ -433,6 +438,7 @@ class MusicLocalizer:
             reference_sensor=reference_sensor,
             sample_rate_hz=sample_rate_hz,
             max_tau_s=self.max_tau_s,
+            interp=self.interp,
         )
         meas_ids = sorted(measured_tdoa.keys())
 
@@ -531,6 +537,7 @@ class EspritLocalizer:
     max_tau_s: float = 0.02
     freq_min_hz: float = 300.0
     freq_max_hz: float = 3500.0
+    interp: int = 4
 
     def localize(
         self,
@@ -549,6 +556,7 @@ class EspritLocalizer:
             reference_sensor=reference_sensor,
             sample_rate_hz=sample_rate_hz,
             max_tau_s=self.max_tau_s,
+            interp=self.interp,
         )
         meas_ids = sorted(measured_tdoa.keys())
 

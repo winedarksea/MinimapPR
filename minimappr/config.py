@@ -30,6 +30,27 @@ def _env_str(key: str, default: str) -> str:
     return raw if raw is not None else default
 
 
+def _env_list(key: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    raw = os.getenv(key)
+    if raw is None:
+        return default
+    text = raw.strip()
+    if not text:
+        return default
+
+    if text.startswith("["):
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, list):
+            values = [str(item).strip() for item in parsed if str(item).strip()]
+            return tuple(values) if values else default
+
+    values = [item.strip() for item in text.split(",") if item.strip()]
+    return tuple(values) if values else default
+
+
 @dataclass(slots=True)
 class LocalizationConfig:
     trigger_rms: float
@@ -59,6 +80,7 @@ class LocalizationConfig:
     beamformed_classification_min_sensor_count: int
     beamformed_classification_confidence_margin: float
     mvdr_diagonal_loading: float
+    gcc_phat_interp_factor: int
 
 
 @dataclass(slots=True)
@@ -70,12 +92,34 @@ class TrackingConfig:
     kalman_measurement_noise: float
     kalman_initial_position_variance: float
     kalman_initial_velocity_variance: float
+    linear_position_alpha: float
+    linear_velocity_alpha: float
+    tqi_weight_confidence: float
+    tqi_weight_corroboration: float
+    tqi_weight_recency: float
+    tqi_weight_sensor: float
+    track_drop_multiplier: float
+    track_reap_multiplier: float
 
 
 @dataclass(slots=True)
 class ClassifierConfig:
     backend: str
     yamnet_min_confidence: float
+    heuristic_ambient_rms_threshold: float
+    heuristic_impulse_crest_threshold: float
+    heuristic_impulse_bandwidth_threshold_hz: float
+    heuristic_bird_centroid_min_hz: float
+    heuristic_bird_zcr_min: float
+    heuristic_speech_centroid_min_hz: float
+    heuristic_speech_centroid_max_hz: float
+    heuristic_speech_zcr_min: float
+    heuristic_speech_zcr_max: float
+    heuristic_speech_flatness_max: float
+    heuristic_machine_centroid_max_hz: float
+    heuristic_machine_flatness_max: float
+    heuristic_unknown_min_score: float
+    heuristic_unknown_score: float
 
 
 @dataclass(slots=True)
@@ -99,6 +143,11 @@ class FusionConfig:
     rules_queue_size: int
     drop_on_backpressure: bool
     offline_replay_mode: bool
+    sensor_energy_threshold_multiplier: float
+    fallback_localization_confidence: float
+    taxonomy_refresh_interval_seconds: float
+    retention_permanent_labels: tuple[str, ...]
+    retention_long_security_confidence: float
 
 
 @dataclass(slots=True)
@@ -211,6 +260,8 @@ class Settings:
     taxonomy_config_path: Path = Path("data/taxonomy.json")
     model_chain_config_path: Path = Path("data/model_chain.json")
     large_artifact_dir: Path = Path("data/artifacts")
+    cors_allow_origins: tuple[str, ...] = ("http://localhost:8080", "http://127.0.0.1:8080")
+    cors_allow_credentials: bool = False
 
     trigger_rms: float = 0.015
     trigger_cooldown_seconds: float = 0.8
@@ -237,6 +288,7 @@ class Settings:
     beamformed_classification_min_sensor_count: int = 2
     beamformed_classification_confidence_margin: float = 0.0
     mvdr_diagonal_loading: float = 1e-3
+    gcc_phat_interp_factor: int = 4
 
     default_temperature_c: float = 20.0
     default_humidity: float = 0.5
@@ -247,6 +299,20 @@ class Settings:
 
     classifier_backend: str = "heuristic"
     yamnet_min_confidence: float = 0.25
+    heuristic_ambient_rms_threshold: float = 0.01
+    heuristic_impulse_crest_threshold: float = 10.0
+    heuristic_impulse_bandwidth_threshold_hz: float = 1200.0
+    heuristic_bird_centroid_min_hz: float = 2200.0
+    heuristic_bird_zcr_min: float = 0.12
+    heuristic_speech_centroid_min_hz: float = 200.0
+    heuristic_speech_centroid_max_hz: float = 2200.0
+    heuristic_speech_zcr_min: float = 0.04
+    heuristic_speech_zcr_max: float = 0.2
+    heuristic_speech_flatness_max: float = 0.75
+    heuristic_machine_centroid_max_hz: float = 450.0
+    heuristic_machine_flatness_max: float = 0.55
+    heuristic_unknown_min_score: float = 0.2
+    heuristic_unknown_score: float = 0.6
 
     association_distance_m: float = 8.0
     track_stale_seconds: float = 20.0
@@ -255,6 +321,14 @@ class Settings:
     kalman_measurement_noise: float = 1.5
     kalman_initial_position_variance: float = 4.0
     kalman_initial_velocity_variance: float = 16.0
+    linear_position_alpha: float = 0.4
+    linear_velocity_alpha: float = 0.5
+    tqi_weight_confidence: float = 0.3
+    tqi_weight_corroboration: float = 0.3
+    tqi_weight_recency: float = 0.2
+    tqi_weight_sensor: float = 0.2
+    track_drop_multiplier: float = 3.0
+    track_reap_multiplier: float = 5.0
 
     fusion_worker_count: int = 1
     fusion_event_queue_size: int = 256
@@ -263,6 +337,11 @@ class Settings:
     fusion_rules_queue_size: int = 256
     fusion_drop_on_backpressure: bool = True
     fusion_offline_replay_mode: bool = False
+    sensor_energy_threshold_multiplier: float = 0.45
+    fallback_localization_confidence: float = 0.25
+    taxonomy_refresh_interval_seconds: float = 10.0
+    retention_permanent_labels: tuple[str, ...] = ("gunshot", "explosion", "artillery", "fusillade")
+    retention_long_security_confidence: float = 0.6
 
     cleanup_interval_seconds: float = 15.0
     node_degraded_after_seconds: float = 15.0
@@ -285,9 +364,140 @@ class Settings:
     federation_tqi_hysteresis: float = 0.05
     federation_auth_token: str = ""
 
+    def __post_init__(self) -> None:
+        self.db_path = Path(self.db_path)
+        self.snippet_dir = Path(self.snippet_dir)
+        self.rules_config_path = Path(self.rules_config_path)
+        self.taxonomy_config_path = Path(self.taxonomy_config_path)
+        self.model_chain_config_path = Path(self.model_chain_config_path)
+        self.large_artifact_dir = Path(self.large_artifact_dir)
+        self.federation_peers_config_path = Path(self.federation_peers_config_path)
+
+        self.coordinate_mode = self.coordinate_mode.strip().lower()
+        if self.coordinate_mode not in {"flat", "geodetic"}:
+            raise ValueError("MINIMAPPR_COORDINATE_MODE must be 'flat' or 'geodetic'")
+
+        if self.node_degraded_after_seconds <= 0.0:
+            raise ValueError("MINIMAPPR_NODE_DEGRADED_AFTER_SECONDS must be > 0")
+        if self.node_offline_after_seconds <= self.node_degraded_after_seconds:
+            raise ValueError("MINIMAPPR_NODE_OFFLINE_AFTER_SECONDS must be > degraded threshold")
+        if self.event_stale_seconds <= 0.0:
+            raise ValueError("MINIMAPPR_EVENT_STALE_SECONDS must be > 0")
+        if self.cleanup_interval_seconds <= 0.0:
+            raise ValueError("MINIMAPPR_CLEANUP_INTERVAL_SECONDS must be > 0")
+        if self.min_sensors_for_2d < 2:
+            raise ValueError("MINIMAPPR_MIN_SENSORS_FOR_2D must be >= 2")
+        if self.min_sensors_for_3d < self.min_sensors_for_2d:
+            raise ValueError("MINIMAPPR_MIN_SENSORS_FOR_3D must be >= MINIMAPPR_MIN_SENSORS_FOR_2D")
+
+        if self.localization_max_tau_s <= 0.0:
+            raise ValueError("MINIMAPPR_LOCALIZATION_MAX_TAU_S must be > 0")
+        self.localization_algorithm = self.localization_algorithm.strip().lower()
+        if self.localization_algorithm not in {"gcc_phat", "srp_phat", "music", "esprit"}:
+            raise ValueError("MINIMAPPR_LOCALIZATION_ALGORITHM must be one of gcc_phat/srp_phat/music/esprit")
+        self.localization_strategy = self.localization_strategy.strip().lower()
+        if self.localization_strategy not in {"fixed", "geometry_aware", "cascade"}:
+            raise ValueError("MINIMAPPR_LOCALIZATION_STRATEGY must be fixed, geometry_aware, or cascade")
+        if self.localization_srp_grid_resolution_m <= 0.0:
+            raise ValueError("MINIMAPPR_LOCALIZATION_SRP_GRID_RESOLUTION_M must be > 0")
+        if self.localization_search_padding_m <= 0.0:
+            raise ValueError("MINIMAPPR_LOCALIZATION_SEARCH_PADDING_M must be > 0")
+        if self.localization_subspace_freq_min_hz <= 0.0:
+            raise ValueError("MINIMAPPR_LOCALIZATION_SUBSPACE_FREQ_MIN_HZ must be > 0")
+        if self.localization_subspace_freq_max_hz <= self.localization_subspace_freq_min_hz:
+            raise ValueError("MINIMAPPR_LOCALIZATION_SUBSPACE_FREQ_MAX_HZ must be > MIN frequency")
+        if self.localization_refine_confidence_threshold < 0.0 or self.localization_refine_confidence_threshold > 1.0:
+            raise ValueError("MINIMAPPR_LOCALIZATION_REFINE_CONFIDENCE_THRESHOLD must be in [0,1]")
+        if self.localization_tight_array_aperture_m <= 0.0:
+            raise ValueError("MINIMAPPR_LOCALIZATION_TIGHT_ARRAY_APERTURE_M must be > 0")
+        if self.gcc_phat_interp_factor < 1:
+            raise ValueError("MINIMAPPR_GCC_PHAT_INTERP_FACTOR must be >= 1")
+        self.beamformer_type = self.beamformer_type.strip().lower()
+        if self.beamformer_type not in {"delay_and_sum", "mvdr"}:
+            raise ValueError("MINIMAPPR_BEAMFORMER_TYPE must be delay_and_sum or mvdr")
+        if self.beamformed_classification_min_sensor_count < 1:
+            raise ValueError("MINIMAPPR_BEAMFORMED_CLASSIFICATION_MIN_SENSOR_COUNT must be >= 1")
+        if self.beamformed_classification_confidence_margin < 0.0:
+            raise ValueError("MINIMAPPR_BEAMFORMED_CLASSIFICATION_CONFIDENCE_MARGIN must be >= 0")
+        if self.mvdr_diagonal_loading <= 0.0:
+            raise ValueError("MINIMAPPR_MVDR_DIAGONAL_LOADING must be > 0")
+        if self.sensor_energy_threshold_multiplier <= 0.0:
+            raise ValueError("MINIMAPPR_SENSOR_ENERGY_THRESHOLD_MULTIPLIER must be > 0")
+        if self.fallback_localization_confidence < 0.0 or self.fallback_localization_confidence > 1.0:
+            raise ValueError("MINIMAPPR_FALLBACK_LOCALIZATION_CONFIDENCE must be in [0,1]")
+        if self.taxonomy_refresh_interval_seconds <= 0.0:
+            raise ValueError("MINIMAPPR_TAXONOMY_REFRESH_INTERVAL_SECONDS must be > 0")
+        if self.retention_long_security_confidence < 0.0 or self.retention_long_security_confidence > 1.0:
+            raise ValueError("MINIMAPPR_RETENTION_LONG_SECURITY_CONFIDENCE must be in [0,1]")
+
+        self.cors_allow_origins = tuple(origin.strip() for origin in self.cors_allow_origins if origin.strip())
+        if not self.cors_allow_origins:
+            raise ValueError("MINIMAPPR_CORS_ALLOW_ORIGINS must include at least one origin")
+        if "*" in self.cors_allow_origins and self.cors_allow_credentials:
+            raise ValueError("CORS allow_credentials cannot be true when allow_origins includes '*'")
+
+        self.retention_permanent_labels = tuple(
+            sorted({label.strip().lower() for label in self.retention_permanent_labels if label.strip()})
+        )
+        if not self.retention_permanent_labels:
+            raise ValueError("MINIMAPPR_RETENTION_PERMANENT_LABELS must include at least one label")
+
+        if self.kalman_process_noise < 0.0:
+            raise ValueError("kalman_process_noise must be >= 0 (MINIMAPPR_KALMAN_PROCESS_NOISE)")
+        if self.kalman_measurement_noise <= 0.0:
+            raise ValueError("kalman_measurement_noise must be > 0 (MINIMAPPR_KALMAN_MEASUREMENT_NOISE)")
+        if self.kalman_initial_position_variance <= 0.0:
+            raise ValueError("kalman_initial_position_variance must be > 0 (MINIMAPPR_KALMAN_INITIAL_POSITION_VARIANCE)")
+        if self.kalman_initial_velocity_variance <= 0.0:
+            raise ValueError("kalman_initial_velocity_variance must be > 0 (MINIMAPPR_KALMAN_INITIAL_VELOCITY_VARIANCE)")
+        if not (0.0 <= self.linear_position_alpha <= 1.0):
+            raise ValueError("MINIMAPPR_LINEAR_POSITION_ALPHA must be in [0,1]")
+        if not (0.0 <= self.linear_velocity_alpha <= 1.0):
+            raise ValueError("MINIMAPPR_LINEAR_VELOCITY_ALPHA must be in [0,1]")
+        if self.track_drop_multiplier <= 1.0:
+            raise ValueError("MINIMAPPR_TRACK_DROP_MULTIPLIER must be > 1")
+        if self.track_reap_multiplier <= self.track_drop_multiplier:
+            raise ValueError("MINIMAPPR_TRACK_REAP_MULTIPLIER must be > MINIMAPPR_TRACK_DROP_MULTIPLIER")
+        tqi_weights = (
+            self.tqi_weight_confidence,
+            self.tqi_weight_corroboration,
+            self.tqi_weight_recency,
+            self.tqi_weight_sensor,
+        )
+        if any(weight < 0.0 for weight in tqi_weights):
+            raise ValueError("TQI weights must be >= 0")
+        if sum(tqi_weights) <= 0.0:
+            raise ValueError("TQI weights must sum to > 0")
+
+        self.federation_server_id = self.federation_server_id.strip()
+        if not self.federation_server_id:
+            raise ValueError("MINIMAPPR_FEDERATION_SERVER_ID must not be empty")
+        if self.federation_publish_interval_seconds <= 0.0:
+            raise ValueError("MINIMAPPR_FEDERATION_PUBLISH_INTERVAL_SECONDS must be > 0")
+        if self.federation_heartbeat_interval_seconds <= 0.0:
+            raise ValueError("MINIMAPPR_FEDERATION_HEARTBEAT_INTERVAL_SECONDS must be > 0")
+        if self.federation_link_timeout_seconds <= 0.0:
+            raise ValueError("MINIMAPPR_FEDERATION_LINK_TIMEOUT_SECONDS must be > 0")
+        if self.federation_request_timeout_seconds <= 0.0:
+            raise ValueError("MINIMAPPR_FEDERATION_REQUEST_TIMEOUT_SECONDS must be > 0")
+        if self.federation_track_ttl_seconds <= 0.0:
+            raise ValueError("MINIMAPPR_FEDERATION_TRACK_TTL_SECONDS must be > 0")
+        if self.federation_deconflict_mahalanobis_gate <= 0.0:
+            raise ValueError("MINIMAPPR_FEDERATION_DECONFLICT_MAHALANOBIS_GATE must be > 0")
+        if self.federation_tqi_hysteresis < 0.0:
+            raise ValueError("MINIMAPPR_FEDERATION_TQI_HYSTERESIS must be >= 0")
+        for peer in self.federation_peers:
+            if peer.peer_id == self.federation_server_id:
+                raise ValueError("Federation peer_id cannot match MINIMAPPR_FEDERATION_SERVER_ID")
+
     @classmethod
     def from_env(cls) -> "Settings":
-        settings = cls(
+        peers_config_path = Path(_env_str("MINIMAPPR_FEDERATION_PEERS_CONFIG_PATH", "data/federation_peers.json"))
+        peers = _load_federation_peers(
+            raw_json=os.getenv("MINIMAPPR_FEDERATION_PEERS_JSON"),
+            config_path=peers_config_path,
+        )
+        return cls(
             host=_env_str("MINIMAPPR_HOST", "0.0.0.0"),
             port=_env_int("MINIMAPPR_PORT", 8080),
             db_path=Path(_env_str("MINIMAPPR_DB_PATH", "data/minimappr.db")),
@@ -297,6 +507,11 @@ class Settings:
             taxonomy_config_path=Path(_env_str("MINIMAPPR_TAXONOMY_CONFIG_PATH", "data/taxonomy.json")),
             model_chain_config_path=Path(_env_str("MINIMAPPR_MODEL_CHAIN_CONFIG_PATH", "data/model_chain.json")),
             large_artifact_dir=Path(_env_str("MINIMAPPR_LARGE_ARTIFACT_DIR", "data/artifacts")),
+            cors_allow_origins=_env_list(
+                "MINIMAPPR_CORS_ALLOW_ORIGINS",
+                ("http://localhost:8080", "http://127.0.0.1:8080"),
+            ),
+            cors_allow_credentials=_env_bool("MINIMAPPR_CORS_ALLOW_CREDENTIALS", False),
             trigger_rms=_env_float("MINIMAPPR_TRIGGER_RMS", 0.015),
             trigger_cooldown_seconds=_env_float("MINIMAPPR_TRIGGER_COOLDOWN_SECONDS", 0.8),
             localization_window_seconds=_env_float("MINIMAPPR_LOCALIZATION_WINDOW_SECONDS", 0.08),
@@ -331,6 +546,7 @@ class Settings:
                 0.0,
             ),
             mvdr_diagonal_loading=_env_float("MINIMAPPR_MVDR_DIAGONAL_LOADING", 1e-3),
+            gcc_phat_interp_factor=_env_int("MINIMAPPR_GCC_PHAT_INTERP_FACTOR", 4),
             default_temperature_c=_env_float("MINIMAPPR_DEFAULT_TEMPERATURE_C", 20.0),
             default_humidity=_env_float("MINIMAPPR_DEFAULT_HUMIDITY", 0.5),
             site_origin_lat=_env_float("MINIMAPPR_SITE_ORIGIN_LAT", 37.7749),
@@ -339,6 +555,23 @@ class Settings:
             coordinate_mode=_env_str("MINIMAPPR_COORDINATE_MODE", "flat"),
             classifier_backend=_env_str("MINIMAPPR_CLASSIFIER", "heuristic"),
             yamnet_min_confidence=_env_float("MINIMAPPR_YAMNET_MIN_CONFIDENCE", 0.25),
+            heuristic_ambient_rms_threshold=_env_float("MINIMAPPR_HEURISTIC_AMBIENT_RMS_THRESHOLD", 0.01),
+            heuristic_impulse_crest_threshold=_env_float("MINIMAPPR_HEURISTIC_IMPULSE_CREST_THRESHOLD", 10.0),
+            heuristic_impulse_bandwidth_threshold_hz=_env_float(
+                "MINIMAPPR_HEURISTIC_IMPULSE_BANDWIDTH_THRESHOLD_HZ",
+                1200.0,
+            ),
+            heuristic_bird_centroid_min_hz=_env_float("MINIMAPPR_HEURISTIC_BIRD_CENTROID_MIN_HZ", 2200.0),
+            heuristic_bird_zcr_min=_env_float("MINIMAPPR_HEURISTIC_BIRD_ZCR_MIN", 0.12),
+            heuristic_speech_centroid_min_hz=_env_float("MINIMAPPR_HEURISTIC_SPEECH_CENTROID_MIN_HZ", 200.0),
+            heuristic_speech_centroid_max_hz=_env_float("MINIMAPPR_HEURISTIC_SPEECH_CENTROID_MAX_HZ", 2200.0),
+            heuristic_speech_zcr_min=_env_float("MINIMAPPR_HEURISTIC_SPEECH_ZCR_MIN", 0.04),
+            heuristic_speech_zcr_max=_env_float("MINIMAPPR_HEURISTIC_SPEECH_ZCR_MAX", 0.2),
+            heuristic_speech_flatness_max=_env_float("MINIMAPPR_HEURISTIC_SPEECH_FLATNESS_MAX", 0.75),
+            heuristic_machine_centroid_max_hz=_env_float("MINIMAPPR_HEURISTIC_MACHINE_CENTROID_MAX_HZ", 450.0),
+            heuristic_machine_flatness_max=_env_float("MINIMAPPR_HEURISTIC_MACHINE_FLATNESS_MAX", 0.55),
+            heuristic_unknown_min_score=_env_float("MINIMAPPR_HEURISTIC_UNKNOWN_MIN_SCORE", 0.2),
+            heuristic_unknown_score=_env_float("MINIMAPPR_HEURISTIC_UNKNOWN_SCORE", 0.6),
             association_distance_m=_env_float("MINIMAPPR_ASSOCIATION_DISTANCE_M", 8.0),
             track_stale_seconds=_env_float("MINIMAPPR_TRACK_STALE_SECONDS", 20.0),
             tracking_filter=_env_str("MINIMAPPR_TRACKING_FILTER", "linear"),
@@ -352,6 +585,14 @@ class Settings:
                 "MINIMAPPR_KALMAN_INITIAL_VELOCITY_VARIANCE",
                 16.0,
             ),
+            linear_position_alpha=_env_float("MINIMAPPR_LINEAR_POSITION_ALPHA", 0.4),
+            linear_velocity_alpha=_env_float("MINIMAPPR_LINEAR_VELOCITY_ALPHA", 0.5),
+            tqi_weight_confidence=_env_float("MINIMAPPR_TQI_WEIGHT_CONFIDENCE", 0.3),
+            tqi_weight_corroboration=_env_float("MINIMAPPR_TQI_WEIGHT_CORROBORATION", 0.3),
+            tqi_weight_recency=_env_float("MINIMAPPR_TQI_WEIGHT_RECENCY", 0.2),
+            tqi_weight_sensor=_env_float("MINIMAPPR_TQI_WEIGHT_SENSOR", 0.2),
+            track_drop_multiplier=_env_float("MINIMAPPR_TRACK_DROP_MULTIPLIER", 3.0),
+            track_reap_multiplier=_env_float("MINIMAPPR_TRACK_REAP_MULTIPLIER", 5.0),
             fusion_worker_count=_env_int("MINIMAPPR_FUSION_WORKER_COUNT", 1),
             fusion_event_queue_size=_env_int("MINIMAPPR_FUSION_EVENT_QUEUE_SIZE", 256),
             fusion_localization_queue_size=_env_int("MINIMAPPR_FUSION_LOCALIZATION_QUEUE_SIZE", 256),
@@ -359,6 +600,14 @@ class Settings:
             fusion_rules_queue_size=_env_int("MINIMAPPR_FUSION_RULES_QUEUE_SIZE", 256),
             fusion_drop_on_backpressure=_env_bool("MINIMAPPR_FUSION_DROP_ON_BACKPRESSURE", True),
             fusion_offline_replay_mode=_env_bool("MINIMAPPR_FUSION_OFFLINE_REPLAY_MODE", False),
+            sensor_energy_threshold_multiplier=_env_float("MINIMAPPR_SENSOR_ENERGY_THRESHOLD_MULTIPLIER", 0.45),
+            fallback_localization_confidence=_env_float("MINIMAPPR_FALLBACK_LOCALIZATION_CONFIDENCE", 0.25),
+            taxonomy_refresh_interval_seconds=_env_float("MINIMAPPR_TAXONOMY_REFRESH_INTERVAL_SECONDS", 10.0),
+            retention_permanent_labels=_env_list(
+                "MINIMAPPR_RETENTION_PERMANENT_LABELS",
+                ("gunshot", "explosion", "artillery", "fusillade"),
+            ),
+            retention_long_security_confidence=_env_float("MINIMAPPR_RETENTION_LONG_SECURITY_CONFIDENCE", 0.6),
             cleanup_interval_seconds=_env_float("MINIMAPPR_CLEANUP_INTERVAL_SECONDS", 15.0),
             node_degraded_after_seconds=_env_float("MINIMAPPR_NODE_DEGRADED_AFTER_SECONDS", 15.0),
             node_offline_after_seconds=_env_float("MINIMAPPR_NODE_OFFLINE_AFTER_SECONDS", 45.0),
@@ -369,9 +618,8 @@ class Settings:
             retention_experiment_seconds=_env_int("MINIMAPPR_RETENTION_EXPERIMENT_SECONDS", 21_600),
             federation_enabled=_env_bool("MINIMAPPR_FEDERATION_ENABLED", False),
             federation_server_id=_env_str("MINIMAPPR_FEDERATION_SERVER_ID", "srv-local"),
-            federation_peers_config_path=Path(
-                _env_str("MINIMAPPR_FEDERATION_PEERS_CONFIG_PATH", "data/federation_peers.json")
-            ),
+            federation_peers_config_path=peers_config_path,
+            federation_peers=peers,
             federation_publish_interval_seconds=_env_float("MINIMAPPR_FEDERATION_PUBLISH_INTERVAL_SECONDS", 1.0),
             federation_heartbeat_interval_seconds=_env_float("MINIMAPPR_FEDERATION_HEARTBEAT_INTERVAL_SECONDS", 2.0),
             federation_link_timeout_seconds=_env_float("MINIMAPPR_FEDERATION_LINK_TIMEOUT_SECONDS", 8.0),
@@ -384,77 +632,6 @@ class Settings:
             federation_tqi_hysteresis=_env_float("MINIMAPPR_FEDERATION_TQI_HYSTERESIS", 0.05),
             federation_auth_token=_env_str("MINIMAPPR_FEDERATION_AUTH_TOKEN", ""),
         )
-        settings.federation_peers_config_path.parent.mkdir(parents=True, exist_ok=True)
-        settings.federation_peers = _load_federation_peers(
-            raw_json=os.getenv("MINIMAPPR_FEDERATION_PEERS_JSON"),
-            config_path=settings.federation_peers_config_path,
-        )
-        settings.coordinate_mode = settings.coordinate_mode.strip().lower()
-        if settings.coordinate_mode not in {"flat", "geodetic"}:
-            raise ValueError("MINIMAPPR_COORDINATE_MODE must be 'flat' or 'geodetic'")
-        if settings.node_degraded_after_seconds <= 0.0:
-            raise ValueError("MINIMAPPR_NODE_DEGRADED_AFTER_SECONDS must be > 0")
-        if settings.node_offline_after_seconds <= settings.node_degraded_after_seconds:
-            raise ValueError("MINIMAPPR_NODE_OFFLINE_AFTER_SECONDS must be > degraded threshold")
-        if settings.event_stale_seconds <= 0.0:
-            raise ValueError("MINIMAPPR_EVENT_STALE_SECONDS must be > 0")
-        if settings.min_sensors_for_2d < 2:
-            raise ValueError("MINIMAPPR_MIN_SENSORS_FOR_2D must be >= 2")
-        if settings.min_sensors_for_3d < settings.min_sensors_for_2d:
-            raise ValueError("MINIMAPPR_MIN_SENSORS_FOR_3D must be >= MINIMAPPR_MIN_SENSORS_FOR_2D")
-        if settings.localization_max_tau_s <= 0.0:
-            raise ValueError("MINIMAPPR_LOCALIZATION_MAX_TAU_S must be > 0")
-        settings.localization_algorithm = settings.localization_algorithm.strip().lower()
-        if settings.localization_algorithm not in {"gcc_phat", "srp_phat", "music", "esprit"}:
-            raise ValueError("MINIMAPPR_LOCALIZATION_ALGORITHM must be one of gcc_phat/srp_phat/music/esprit")
-        settings.localization_strategy = settings.localization_strategy.strip().lower()
-        if settings.localization_strategy not in {"fixed", "geometry_aware", "cascade"}:
-            raise ValueError("MINIMAPPR_LOCALIZATION_STRATEGY must be fixed, geometry_aware, or cascade")
-        if settings.localization_srp_grid_resolution_m <= 0.0:
-            raise ValueError("MINIMAPPR_LOCALIZATION_SRP_GRID_RESOLUTION_M must be > 0")
-        if settings.localization_search_padding_m <= 0.0:
-            raise ValueError("MINIMAPPR_LOCALIZATION_SEARCH_PADDING_M must be > 0")
-        if settings.localization_subspace_freq_min_hz <= 0.0:
-            raise ValueError("MINIMAPPR_LOCALIZATION_SUBSPACE_FREQ_MIN_HZ must be > 0")
-        if settings.localization_subspace_freq_max_hz <= settings.localization_subspace_freq_min_hz:
-            raise ValueError("MINIMAPPR_LOCALIZATION_SUBSPACE_FREQ_MAX_HZ must be > MIN frequency")
-        if settings.localization_refine_confidence_threshold < 0.0 or settings.localization_refine_confidence_threshold > 1.0:
-            raise ValueError("MINIMAPPR_LOCALIZATION_REFINE_CONFIDENCE_THRESHOLD must be in [0,1]")
-        if settings.localization_tight_array_aperture_m <= 0.0:
-            raise ValueError("MINIMAPPR_LOCALIZATION_TIGHT_ARRAY_APERTURE_M must be > 0")
-        settings.beamformer_type = settings.beamformer_type.strip().lower()
-        if settings.beamformer_type not in {"delay_and_sum", "mvdr"}:
-            raise ValueError("MINIMAPPR_BEAMFORMER_TYPE must be delay_and_sum or mvdr")
-        if settings.beamformed_classification_min_sensor_count < 1:
-            raise ValueError("MINIMAPPR_BEAMFORMED_CLASSIFICATION_MIN_SENSOR_COUNT must be >= 1")
-        if settings.beamformed_classification_confidence_margin < 0.0:
-            raise ValueError("MINIMAPPR_BEAMFORMED_CLASSIFICATION_CONFIDENCE_MARGIN must be >= 0")
-        if settings.mvdr_diagonal_loading <= 0.0:
-            raise ValueError("MINIMAPPR_MVDR_DIAGONAL_LOADING must be > 0")
-        settings.federation_server_id = settings.federation_server_id.strip()
-        if not settings.federation_server_id:
-            raise ValueError("MINIMAPPR_FEDERATION_SERVER_ID must not be empty")
-        if settings.federation_publish_interval_seconds <= 0.0:
-            raise ValueError("MINIMAPPR_FEDERATION_PUBLISH_INTERVAL_SECONDS must be > 0")
-        if settings.federation_heartbeat_interval_seconds <= 0.0:
-            raise ValueError("MINIMAPPR_FEDERATION_HEARTBEAT_INTERVAL_SECONDS must be > 0")
-        if settings.federation_link_timeout_seconds <= 0.0:
-            raise ValueError("MINIMAPPR_FEDERATION_LINK_TIMEOUT_SECONDS must be > 0")
-        if settings.federation_request_timeout_seconds <= 0.0:
-            raise ValueError("MINIMAPPR_FEDERATION_REQUEST_TIMEOUT_SECONDS must be > 0")
-        if settings.federation_track_ttl_seconds <= 0.0:
-            raise ValueError("MINIMAPPR_FEDERATION_TRACK_TTL_SECONDS must be > 0")
-        if settings.federation_deconflict_mahalanobis_gate <= 0.0:
-            raise ValueError("MINIMAPPR_FEDERATION_DECONFLICT_MAHALANOBIS_GATE must be > 0")
-        if settings.federation_tqi_hysteresis < 0.0:
-            raise ValueError("MINIMAPPR_FEDERATION_TQI_HYSTERESIS must be >= 0")
-        for peer in settings.federation_peers:
-            if peer.peer_id == settings.federation_server_id:
-                raise ValueError("Federation peer_id cannot match MINIMAPPR_FEDERATION_SERVER_ID")
-        settings.db_path.parent.mkdir(parents=True, exist_ok=True)
-        settings.snippet_dir.mkdir(parents=True, exist_ok=True)
-        settings.large_artifact_dir.mkdir(parents=True, exist_ok=True)
-        return settings
 
     def localization_config(self) -> LocalizationConfig:
         return LocalizationConfig(
@@ -485,6 +662,7 @@ class Settings:
             beamformed_classification_min_sensor_count=self.beamformed_classification_min_sensor_count,
             beamformed_classification_confidence_margin=self.beamformed_classification_confidence_margin,
             mvdr_diagonal_loading=self.mvdr_diagonal_loading,
+            gcc_phat_interp_factor=self.gcc_phat_interp_factor,
         )
 
     def tracking_config(self) -> TrackingConfig:
@@ -496,12 +674,34 @@ class Settings:
             kalman_measurement_noise=self.kalman_measurement_noise,
             kalman_initial_position_variance=self.kalman_initial_position_variance,
             kalman_initial_velocity_variance=self.kalman_initial_velocity_variance,
+            linear_position_alpha=self.linear_position_alpha,
+            linear_velocity_alpha=self.linear_velocity_alpha,
+            tqi_weight_confidence=self.tqi_weight_confidence,
+            tqi_weight_corroboration=self.tqi_weight_corroboration,
+            tqi_weight_recency=self.tqi_weight_recency,
+            tqi_weight_sensor=self.tqi_weight_sensor,
+            track_drop_multiplier=self.track_drop_multiplier,
+            track_reap_multiplier=self.track_reap_multiplier,
         )
 
     def classifier_config(self) -> ClassifierConfig:
         return ClassifierConfig(
             backend=self.classifier_backend,
             yamnet_min_confidence=self.yamnet_min_confidence,
+            heuristic_ambient_rms_threshold=self.heuristic_ambient_rms_threshold,
+            heuristic_impulse_crest_threshold=self.heuristic_impulse_crest_threshold,
+            heuristic_impulse_bandwidth_threshold_hz=self.heuristic_impulse_bandwidth_threshold_hz,
+            heuristic_bird_centroid_min_hz=self.heuristic_bird_centroid_min_hz,
+            heuristic_bird_zcr_min=self.heuristic_bird_zcr_min,
+            heuristic_speech_centroid_min_hz=self.heuristic_speech_centroid_min_hz,
+            heuristic_speech_centroid_max_hz=self.heuristic_speech_centroid_max_hz,
+            heuristic_speech_zcr_min=self.heuristic_speech_zcr_min,
+            heuristic_speech_zcr_max=self.heuristic_speech_zcr_max,
+            heuristic_speech_flatness_max=self.heuristic_speech_flatness_max,
+            heuristic_machine_centroid_max_hz=self.heuristic_machine_centroid_max_hz,
+            heuristic_machine_flatness_max=self.heuristic_machine_flatness_max,
+            heuristic_unknown_min_score=self.heuristic_unknown_min_score,
+            heuristic_unknown_score=self.heuristic_unknown_score,
         )
 
     def storage_config(self) -> StorageConfig:
@@ -525,6 +725,11 @@ class Settings:
             rules_queue_size=self.fusion_rules_queue_size,
             drop_on_backpressure=self.fusion_drop_on_backpressure,
             offline_replay_mode=self.fusion_offline_replay_mode,
+            sensor_energy_threshold_multiplier=self.sensor_energy_threshold_multiplier,
+            fallback_localization_confidence=self.fallback_localization_confidence,
+            taxonomy_refresh_interval_seconds=self.taxonomy_refresh_interval_seconds,
+            retention_permanent_labels=self.retention_permanent_labels,
+            retention_long_security_confidence=self.retention_long_security_confidence,
         )
 
     def rules_config(self) -> RulesConfig:

@@ -21,7 +21,7 @@ from typing import Iterable
 
 import numpy as np
 
-from minimappr.config import Settings
+from minimappr.config import Settings, TrackingConfig
 from minimappr.models import TrackState, TrackStatus
 
 
@@ -35,25 +35,27 @@ class TrackManager:
     CONFIRM_THRESHOLD: int = 2  # detections needed to confirm a track
     SUPPORTED_FILTERS: tuple[str, ...] = ("linear", "kalman")
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings | TrackingConfig) -> None:
+        cfg = settings.tracking_config() if isinstance(settings, Settings) else settings
         self._tracks: dict[str, TrackState] = {}
         self._kalman_states: dict[str, _KalmanTrackState] = {}
         self._id_counter = itertools.count(1)
-        self._assoc_distance_m = settings.association_distance_m
-        self._stale_ns = int(settings.track_stale_seconds * 1_000_000_000)
-        self._drop_ns = int(settings.track_stale_seconds * 3_000_000_000)  # 3x stale = drop
-        self._tracking_filter = settings.tracking_filter.strip().lower()
+        self._assoc_distance_m = cfg.association_distance_m
+        self._stale_ns = int(cfg.track_stale_seconds * 1_000_000_000)
+        self._drop_ns = int(cfg.track_stale_seconds * cfg.track_drop_multiplier * 1_000_000_000)
+        self._reap_ns = int(cfg.track_stale_seconds * cfg.track_reap_multiplier * 1_000_000_000)
+        self._tracking_filter = cfg.tracking_filter.strip().lower()
         if self._tracking_filter not in self.SUPPORTED_FILTERS:
             supported = ", ".join(self.SUPPORTED_FILTERS)
             raise ValueError(
-                f"Unsupported tracking_filter '{settings.tracking_filter}'. "
+                f"Unsupported tracking_filter '{cfg.tracking_filter}'. "
                 f"Supported values: {supported}"
             )
 
-        self._kalman_process_noise = float(settings.kalman_process_noise)
-        self._kalman_measurement_noise = float(settings.kalman_measurement_noise)
-        self._kalman_initial_position_variance = float(settings.kalman_initial_position_variance)
-        self._kalman_initial_velocity_variance = float(settings.kalman_initial_velocity_variance)
+        self._kalman_process_noise = float(cfg.kalman_process_noise)
+        self._kalman_measurement_noise = float(cfg.kalman_measurement_noise)
+        self._kalman_initial_position_variance = float(cfg.kalman_initial_position_variance)
+        self._kalman_initial_velocity_variance = float(cfg.kalman_initial_velocity_variance)
         if self._kalman_process_noise < 0.0:
             raise ValueError("kalman_process_noise must be >= 0.0")
         if self._kalman_measurement_noise <= 0.0:
@@ -62,6 +64,30 @@ class TrackManager:
             raise ValueError("kalman_initial_position_variance must be > 0.0")
         if self._kalman_initial_velocity_variance <= 0.0:
             raise ValueError("kalman_initial_velocity_variance must be > 0.0")
+
+        self._linear_position_alpha = float(cfg.linear_position_alpha)
+        self._linear_velocity_alpha = float(cfg.linear_velocity_alpha)
+        if self._linear_position_alpha < 0.0 or self._linear_position_alpha > 1.0:
+            raise ValueError("linear_position_alpha must be in [0, 1]")
+        if self._linear_velocity_alpha < 0.0 or self._linear_velocity_alpha > 1.0:
+            raise ValueError("linear_velocity_alpha must be in [0, 1]")
+
+        raw_tqi_weights = np.asarray(
+            [
+                float(cfg.tqi_weight_confidence),
+                float(cfg.tqi_weight_corroboration),
+                float(cfg.tqi_weight_recency),
+                float(cfg.tqi_weight_sensor),
+            ],
+            dtype=np.float64,
+        )
+        if np.any(raw_tqi_weights < 0.0):
+            raise ValueError("TQI weights must be >= 0")
+        weight_total = float(np.sum(raw_tqi_weights))
+        if weight_total <= 0.0:
+            raise ValueError("TQI weights must sum to > 0")
+        self._tqi_weights = tuple(float(value / weight_total) for value in raw_tqi_weights)
+
         self._kalman_obs_model = np.asarray(
             [
                 [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
@@ -150,12 +176,12 @@ class TrackManager:
             best_track.capability_tier = capability_tier
 
             # Lifecycle: tentative -> confirmed after enough detections
-            if best_track.status in (TrackStatus.TENTATIVE.value, TrackStatus.COASTING.value):
+            if best_track.status == TrackStatus.COASTING.value:
+                # A previously confirmed track that re-associates exits coasting as confirmed.
+                best_track.status = TrackStatus.CONFIRMED.value
+            elif best_track.status == TrackStatus.TENTATIVE.value:
                 if best_track.update_count >= self.CONFIRM_THRESHOLD:
                     best_track.status = TrackStatus.CONFIRMED.value
-                elif best_track.status == TrackStatus.COASTING.value:
-                    # Re-associated while coasting but not enough updates yet
-                    best_track.status = TrackStatus.TENTATIVE.value
             else:
                 best_track.status = TrackStatus.CONFIRMED.value
 
@@ -172,16 +198,22 @@ class TrackManager:
             return list(self._tracks.values())
 
     def _age_tracks(self, now_ns: int) -> None:
+        reap_ids: list[str] = []
         for track in self._tracks.values():
-            if track.status == TrackStatus.DROPPED.value:
-                continue
             gap_ns = now_ns - track.last_seen_ns
+            if track.status == TrackStatus.DROPPED.value:
+                if gap_ns > self._reap_ns:
+                    reap_ids.append(track.id)
+                continue
             if gap_ns > self._drop_ns:
                 track.status = TrackStatus.DROPPED.value
                 self._kalman_states.pop(track.id, None)
             elif gap_ns > self._stale_ns:
                 if track.status in (TrackStatus.TENTATIVE.value, TrackStatus.CONFIRMED.value):
                     track.status = TrackStatus.COASTING.value
+        for track_id in reap_ids:
+            self._tracks.pop(track_id, None)
+            self._kalman_states.pop(track_id, None)
 
     async def active_ids(self, now_ns: int) -> Iterable[str]:
         async with self._lock:
@@ -191,8 +223,8 @@ class TrackManager:
                 if track.status in (TrackStatus.TENTATIVE.value, TrackStatus.CONFIRMED.value)
             ]
 
-    @staticmethod
     def _compute_tqi(
+        self,
         confidence: float,
         update_count: int,
         age_s: float,
@@ -209,7 +241,8 @@ class TrackManager:
         corroboration = min(1.0, update_count / 5.0)
         recency = 1.0 / (1.0 + age_s / 30.0)
         sensor_factor = min(1.0, sensor_count / 4.0)
-        tqi = 0.3 * confidence + 0.3 * corroboration + 0.2 * recency + 0.2 * sensor_factor
+        w_conf, w_corr, w_rec, w_sensor = self._tqi_weights
+        tqi = (w_conf * confidence) + (w_corr * corroboration) + (w_rec * recency) + (w_sensor * sensor_factor)
         return float(np.clip(tqi, 0.0, 1.0))
 
     def _association_position(self, track: TrackState, timestamp_ns: int) -> np.ndarray:
@@ -234,8 +267,12 @@ class TrackManager:
         previous_velocity = np.asarray(track.velocity_mps, dtype=np.float64)
 
         measured_velocity = (measured_position - previous_position) / dt_s
-        smooth_position = (0.4 * previous_position) + (0.6 * measured_position)
-        smooth_velocity = (0.5 * previous_velocity) + (0.5 * measured_velocity)
+        smooth_position = (self._linear_position_alpha * previous_position) + (
+            (1.0 - self._linear_position_alpha) * measured_position
+        )
+        smooth_velocity = (self._linear_velocity_alpha * previous_velocity) + (
+            (1.0 - self._linear_velocity_alpha) * measured_velocity
+        )
 
         # Linear mode does not estimate covariance; expose a conservative diagonal.
         diag = max(1e-3, self._assoc_distance_m * 0.5) ** 2
@@ -285,7 +322,31 @@ class TrackManager:
             self._kalman_obs_model @ prior_covariance @ self._kalman_obs_model.T
         ) + self._kalman_measurement_cov
         prior_cov_observation = prior_covariance @ self._kalman_obs_model.T
-        kalman_gain = np.linalg.solve(innovation_covariance, prior_cov_observation.T).T
+        try:
+            kalman_gain = np.linalg.solve(innovation_covariance, prior_cov_observation.T).T
+        except np.linalg.LinAlgError:
+            try:
+                kalman_gain = np.linalg.lstsq(
+                    innovation_covariance,
+                    prior_cov_observation.T,
+                    rcond=None,
+                )[0].T
+            except np.linalg.LinAlgError:
+                # Preserve continuity if update algebra is singular.
+                state.mean = prior_mean
+                state.covariance = prior_covariance
+                position = prior_mean[:3]
+                velocity = prior_mean[3:]
+                covariance = prior_covariance[:3, :3]
+                return (
+                    (float(position[0]), float(position[1]), float(position[2])),
+                    (float(velocity[0]), float(velocity[1]), float(velocity[2])),
+                    [
+                        [float(covariance[0, 0]), float(covariance[0, 1]), float(covariance[0, 2])],
+                        [float(covariance[1, 0]), float(covariance[1, 1]), float(covariance[1, 2])],
+                        [float(covariance[2, 0]), float(covariance[2, 1]), float(covariance[2, 2])],
+                    ],
+                )
 
         posterior_mean = prior_mean + (kalman_gain @ innovation)
         residual_projection = self._kalman_identity - (kalman_gain @ self._kalman_obs_model)
