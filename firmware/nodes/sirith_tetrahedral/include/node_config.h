@@ -50,6 +50,12 @@ static constexpr const char* kCapabilities[] = {
 
 static constexpr const char* kHardwareName = "sirith_tetra_pico2w_tdm";
 
+// --- LED / status indicator ---
+// P-channel FET on GP26 controls LED + switchable 3V3 power header.
+// LOW = FET on (LED lit), HIGH = FET off (LED dark).
+static constexpr uint8_t kLedPin = 26;
+static constexpr uint32_t kLedBlinkFrames = 8;  // Toggle every N frames (~0.5s at 16kHz/1024)
+
 // --- Audio capture (TDM master) ---
 static constexpr uint8_t kTdmDataPin = 7;  // SDATA input
 static constexpr uint8_t kTdmBclkPin = 8;  // BCLK output

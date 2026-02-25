@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from minimappr.models import DetectionEvent
+from minimappr.models import DetectionEvent, NodeSpec, NodeType, TrackState
 from minimappr.storage.db import Storage
 
 
@@ -15,6 +15,17 @@ async def test_storage_retention_cleanup_removes_expired_records(tmp_path: Path)
 
     now_ns = 2_000_000_000_000_000_000
     old_ns = now_ns - 10_000_000_000
+
+    await storage.upsert_node(
+        NodeSpec(
+            id="node-1",
+            node_type=NodeType.POINT,
+            position_m=(0.0, 0.0, 0.0),
+            sensor_offsets_m=[(0.0, 0.0, 0.0)],
+            capabilities=["audio"],
+        ),
+        last_seen_ns=old_ns,
+    )
 
     snippet_file = tmp_path / "old_snippet.wav"
     snippet_file.write_bytes(b"wav")
@@ -51,6 +62,65 @@ async def test_storage_retention_cleanup_removes_expired_records(tmp_path: Path)
         retention_tier="short",
         metadata={},
     )
+    await storage.insert_environment(
+        node_id="node-1",
+        timestamp_ns=old_ns,
+        temperature_c=20.0,
+        pressure_pa=101325.0,
+        humidity_fraction=0.5,
+        wind_speed_mps=None,
+        wind_dir_deg=None,
+        solar_lux=None,
+        metadata={"source": "test"},
+    )
+
+    track = TrackState(
+        id="trk-old",
+        first_seen_ns=old_ns,
+        last_seen_ns=old_ns,
+        position_m=(0.0, 0.0, 0.0),
+        velocity_mps=(0.0, 0.0, 0.0),
+        label="bird_like",
+        label_category="wildlife",
+        confidence=0.8,
+        update_count=2,
+        status="confirmed",
+        tqi=0.6,
+    )
+    await storage.upsert_track(track)
+    await storage.insert_track_update(
+        track=track,
+        timestamp_ns=old_ns,
+        event_id="evt-old",
+        update_type="detection",
+        detection_id="det-old",
+        observation_ids=["obs-old"],
+        metadata={"from_test": True},
+    )
+    dropped_track = TrackState(
+        id="trk-dropped-old",
+        first_seen_ns=old_ns,
+        last_seen_ns=old_ns,
+        position_m=(3.0, 2.0, 1.0),
+        velocity_mps=(0.0, 0.0, 0.0),
+        label="ambient",
+        label_category="unknown",
+        confidence=0.3,
+        update_count=1,
+        status="dropped",
+        tqi=0.1,
+    )
+    await storage.upsert_track(dropped_track)
+    await storage.insert_alert(
+        timestamp_ns=old_ns,
+        rule_id="rule-test",
+        detection_id="det-old",
+        track_id="trk-old",
+        destination="log",
+        priority="normal",
+        status="sent",
+        payload={"message": "old"},
+    )
 
     artifact = tmp_path / "artifact.bin"
     artifact.write_bytes(b"artifact")
@@ -80,14 +150,28 @@ async def test_storage_retention_cleanup_removes_expired_records(tmp_path: Path)
     summary = await storage.cleanup_retention(
         now_ns=now_ns,
         tier_ttls_seconds={"short": 1, "experiment": 1},
+        operational_ttls_seconds={
+            "track_updates": 1,
+            "alerts": 1,
+            "environment": 1,
+            "dropped_tracks": 1,
+        },
     )
     assert summary["detections"] >= 1
     assert summary["pings"] >= 1
     assert summary["large_artifacts"] >= 1
+    assert summary["track_updates"] >= 1
+    assert summary["alerts"] >= 1
+    assert summary["environment"] >= 1
+    assert summary["dropped_tracks"] >= 1
     assert snippet_file.exists() is False
     assert artifact.exists() is False
     assert protected_artifact.exists() is True
     assert await storage.list_detections(limit=10) == []
     assert await storage.list_pings(limit=10) == []
+    assert await storage.list_alerts(limit=10) == []
+    assert await storage.list_environment(limit=10) == []
+    tracks = await storage.list_tracks(limit=20)
+    assert all(track["id"] != "trk-dropped-old" for track in tracks)
 
     await storage.close()

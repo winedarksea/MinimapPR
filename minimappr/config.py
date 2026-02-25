@@ -131,6 +131,10 @@ class StorageConfig:
     retention_short_seconds: int
     retention_long_seconds: int
     retention_experiment_seconds: int
+    retention_track_updates_seconds: int
+    retention_alerts_seconds: int
+    retention_environment_seconds: int
+    retention_dropped_tracks_seconds: int
     large_artifact_dir: Path
 
 
@@ -292,6 +296,7 @@ class Settings:
 
     default_temperature_c: float = 20.0
     default_humidity: float = 0.5
+    environment_reading_max_age_seconds: float = 300.0
     site_origin_lat: float = 37.7749
     site_origin_lon: float = -122.4194
     site_origin_alt_m: float = 0.0
@@ -351,6 +356,10 @@ class Settings:
     retention_short_seconds: int = 86_400
     retention_long_seconds: int = 2_592_000
     retention_experiment_seconds: int = 21_600
+    retention_track_updates_seconds: int = 604_800
+    retention_alerts_seconds: int = 2_592_000
+    retention_environment_seconds: int = 604_800
+    retention_dropped_tracks_seconds: int = 604_800
     federation_enabled: bool = False
     federation_server_id: str = "srv-local"
     federation_peers_config_path: Path = Path("data/federation_peers.json")
@@ -389,6 +398,8 @@ class Settings:
             raise ValueError("MINIMAPPR_MIN_SENSORS_FOR_2D must be >= 2")
         if self.min_sensors_for_3d < self.min_sensors_for_2d:
             raise ValueError("MINIMAPPR_MIN_SENSORS_FOR_3D must be >= MINIMAPPR_MIN_SENSORS_FOR_2D")
+        if self.environment_reading_max_age_seconds < 0.0:
+            raise ValueError("MINIMAPPR_ENVIRONMENT_READING_MAX_AGE_SECONDS must be >= 0")
 
         if self.localization_max_tau_s <= 0.0:
             raise ValueError("MINIMAPPR_LOCALIZATION_MAX_TAU_S must be > 0")
@@ -441,6 +452,19 @@ class Settings:
         )
         if not self.retention_permanent_labels:
             raise ValueError("MINIMAPPR_RETENTION_PERMANENT_LABELS must include at least one label")
+        for field_name in (
+            "retention_ephemeral_seconds",
+            "retention_short_seconds",
+            "retention_long_seconds",
+            "retention_experiment_seconds",
+            "retention_track_updates_seconds",
+            "retention_alerts_seconds",
+            "retention_environment_seconds",
+            "retention_dropped_tracks_seconds",
+        ):
+            value = getattr(self, field_name)
+            if value < -1:
+                raise ValueError(f"{field_name} must be >= -1")
 
         if self.kalman_process_noise < 0.0:
             raise ValueError("kalman_process_noise must be >= 0 (MINIMAPPR_KALMAN_PROCESS_NOISE)")
@@ -549,6 +573,7 @@ class Settings:
             gcc_phat_interp_factor=_env_int("MINIMAPPR_GCC_PHAT_INTERP_FACTOR", 4),
             default_temperature_c=_env_float("MINIMAPPR_DEFAULT_TEMPERATURE_C", 20.0),
             default_humidity=_env_float("MINIMAPPR_DEFAULT_HUMIDITY", 0.5),
+            environment_reading_max_age_seconds=_env_float("MINIMAPPR_ENVIRONMENT_READING_MAX_AGE_SECONDS", 300.0),
             site_origin_lat=_env_float("MINIMAPPR_SITE_ORIGIN_LAT", 37.7749),
             site_origin_lon=_env_float("MINIMAPPR_SITE_ORIGIN_LON", -122.4194),
             site_origin_alt_m=_env_float("MINIMAPPR_SITE_ORIGIN_ALT_M", 0.0),
@@ -616,6 +641,10 @@ class Settings:
             retention_short_seconds=_env_int("MINIMAPPR_RETENTION_SHORT_SECONDS", 86_400),
             retention_long_seconds=_env_int("MINIMAPPR_RETENTION_LONG_SECONDS", 2_592_000),
             retention_experiment_seconds=_env_int("MINIMAPPR_RETENTION_EXPERIMENT_SECONDS", 21_600),
+            retention_track_updates_seconds=_env_int("MINIMAPPR_RETENTION_TRACK_UPDATES_SECONDS", 604_800),
+            retention_alerts_seconds=_env_int("MINIMAPPR_RETENTION_ALERTS_SECONDS", 2_592_000),
+            retention_environment_seconds=_env_int("MINIMAPPR_RETENTION_ENVIRONMENT_SECONDS", 604_800),
+            retention_dropped_tracks_seconds=_env_int("MINIMAPPR_RETENTION_DROPPED_TRACKS_SECONDS", 604_800),
             federation_enabled=_env_bool("MINIMAPPR_FEDERATION_ENABLED", False),
             federation_server_id=_env_str("MINIMAPPR_FEDERATION_SERVER_ID", "srv-local"),
             federation_peers_config_path=peers_config_path,
@@ -713,6 +742,10 @@ class Settings:
             retention_short_seconds=self.retention_short_seconds,
             retention_long_seconds=self.retention_long_seconds,
             retention_experiment_seconds=self.retention_experiment_seconds,
+            retention_track_updates_seconds=self.retention_track_updates_seconds,
+            retention_alerts_seconds=self.retention_alerts_seconds,
+            retention_environment_seconds=self.retention_environment_seconds,
+            retention_dropped_tracks_seconds=self.retention_dropped_tracks_seconds,
             large_artifact_dir=self.large_artifact_dir,
         )
 

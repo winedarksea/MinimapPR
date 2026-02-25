@@ -19,6 +19,7 @@ from minimappr.api.transports import HttpIngestTransport
 from minimappr.classifiers.factory import create_classifier
 from minimappr.config import Settings
 from minimappr.core.audio_buffer import MultiSensorBuffer
+from minimappr.core.environment import LiveEnvironmentProvider
 from minimappr.core.federation import FederationCoordinator
 from minimappr.core.fusion_node import FusionNode
 from minimappr.core.geo import LocalCoordinateFrame
@@ -73,6 +74,12 @@ async def _cleanup_loop(app: FastAPI) -> None:
                 "long": settings.retention_long_seconds,
                 "experiment": settings.retention_experiment_seconds,
             },
+            operational_ttls_seconds={
+                "track_updates": settings.retention_track_updates_seconds,
+                "alerts": settings.retention_alerts_seconds,
+                "environment": settings.retention_environment_seconds,
+                "dropped_tracks": settings.retention_dropped_tracks_seconds,
+            },
         )
         await state.fusion_node.housekeeping_tick(now_ns=now_ns)
         await asyncio.sleep(settings.cleanup_interval_seconds)
@@ -105,6 +112,11 @@ async def lifespan(app: FastAPI):
         mode=settings.coordinate_mode,
     )
     zone_matcher = ZoneMatcher(storage=storage)
+    environment_provider = LiveEnvironmentProvider(
+        fallback_temperature_c=settings.default_temperature_c,
+        fallback_humidity_fraction=settings.default_humidity,
+        max_reading_age_seconds=settings.environment_reading_max_age_seconds,
+    )
     fusion_node = FusionNode(
         settings=settings,
         registry=registry,
@@ -116,6 +128,7 @@ async def lifespan(app: FastAPI):
         live_callback=live_hub.broadcast,
         coordinate_frame=coordinate_frame,
         zone_matcher=zone_matcher,
+        environment_provider=environment_provider,
     )
     ingest_transport = HttpIngestTransport(fusion_node)
 
@@ -145,12 +158,14 @@ async def lifespan(app: FastAPI):
     app.state.live_hub = live_hub
     app.state.coordinate_frame = coordinate_frame
     app.state.zone_matcher = zone_matcher
+    app.state.environment_provider = environment_provider
     app.state.fusion_node = fusion_node
     app.state.ingest_transport = ingest_transport
     app.state.federation = federation
 
     cleanup_task: asyncio.Task | None = None
     await storage.initialize()
+    environment_provider.bootstrap(await storage.list_latest_environment_per_node(limit=1024))
     await fusion_node.start()
     await federation.start()
     cleanup_task = asyncio.create_task(_cleanup_loop(app))
@@ -328,9 +343,14 @@ async def get_config(request: Request) -> dict:
             "short_seconds": settings.retention_short_seconds,
             "long_seconds": settings.retention_long_seconds,
             "experiment_seconds": settings.retention_experiment_seconds,
+            "track_updates_seconds": settings.retention_track_updates_seconds,
+            "alerts_seconds": settings.retention_alerts_seconds,
+            "environment_seconds": settings.retention_environment_seconds,
+            "dropped_tracks_seconds": settings.retention_dropped_tracks_seconds,
         },
         "default_temperature_c": settings.default_temperature_c,
         "default_humidity": settings.default_humidity,
+        "environment_reading_max_age_seconds": settings.environment_reading_max_age_seconds,
         "preprocess_enabled": settings.preprocess_enabled,
         "audio_highpass_hz": settings.audio_highpass_hz,
         "audio_lowpass_hz": settings.audio_lowpass_hz,
@@ -500,6 +520,39 @@ async def update_alert_status(
 async def list_pings(request: Request, limit: int = Query(default=500, ge=1, le=5000)) -> list[dict]:
     state = _require_state(request)
     return await state.storage.list_pings(limit=limit)
+
+
+@app.get("/api/v1/environment")
+async def list_environment(
+    request: Request,
+    limit: int = Query(default=500, ge=1, le=5000),
+    node_id: str | None = Query(default=None),
+) -> list[dict]:
+    state = _require_state(request)
+    return await state.storage.list_environment(limit=limit, node_id=node_id)
+
+
+@app.get("/api/v1/environment/current")
+async def current_environment(
+    request: Request,
+    x: float | None = Query(default=None),
+    y: float | None = Query(default=None),
+    z: float | None = Query(default=None),
+) -> dict:
+    state = _require_state(request)
+    if any(value is None for value in (x, y, z)) and any(value is not None for value in (x, y, z)):
+        raise HTTPException(status_code=400, detail="x, y, and z must all be provided together")
+    location = (float(x), float(y), float(z)) if x is not None and y is not None and z is not None else None
+    conditions = state.environment_provider.get_conditions(location_m=location)
+    return {
+        "temperature_c": conditions.temperature_c,
+        "humidity_fraction": conditions.humidity_fraction,
+        "pressure_pa": conditions.pressure_pa,
+        "wind_speed_mps": conditions.wind_speed_mps,
+        "wind_dir_deg": conditions.wind_dir_deg,
+        "speed_of_sound_mps": state.environment_provider.get_speed_of_sound(location_m=location),
+        "metadata": conditions.metadata,
+    }
 
 
 @app.get("/api/v1/zones")

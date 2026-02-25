@@ -78,9 +78,42 @@ class AudioFrameIn(BaseModel):
         return self
 
 
+class EnvironmentSampleIn(BaseModel):
+    timestamp_ns: int | None = Field(default=None, gt=0)
+    temperature_c: float | None = None
+    humidity_fraction: float | None = Field(default=None, ge=0.0, le=1.0)
+    humidity_percent: float | None = Field(default=None, ge=0.0, le=100.0)
+    pressure_pa: float | None = Field(default=None, gt=0.0)
+    wind_speed_mps: float | None = Field(default=None, ge=0.0)
+    wind_dir_deg: float | None = Field(default=None, ge=0.0, le=360.0)
+    solar_lux: float | None = Field(default=None, ge=0.0)
+    source: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _normalize(self) -> "EnvironmentSampleIn":
+        if self.humidity_fraction is None and self.humidity_percent is not None:
+            self.humidity_fraction = self.humidity_percent / 100.0
+        return self
+
+    def has_any_measurement(self) -> bool:
+        return any(
+            value is not None
+            for value in (
+                self.temperature_c,
+                self.humidity_fraction,
+                self.pressure_pa,
+                self.wind_speed_mps,
+                self.wind_dir_deg,
+                self.solar_lux,
+            )
+        )
+
+
 class IngestFrameRequest(BaseModel):
     node: NodeSpec
     frame: AudioFrameIn
+    environment: EnvironmentSampleIn | None = None
 
     @model_validator(mode="after")
     def _validate(self) -> "IngestFrameRequest":

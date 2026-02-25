@@ -147,14 +147,6 @@ bool buildIngestPayload(
   appendQuoted(outPayload, node.hardwareName != nullptr ? node.hardwareName : "unknown");
   outPayload += ",\"firmware\":";
   appendQuoted(outPayload, node.firmwareVersion != nullptr ? node.firmwareVersion : "dev");
-  if (environment != nullptr && environment->hasTemperatureC) {
-    outPayload += ",\"temperature_c\":";
-    appendFloat(outPayload, environment->temperatureC);
-    if (environment->temperatureSource != nullptr) {
-      outPayload += ",\"temperature_source\":";
-      appendQuoted(outPayload, environment->temperatureSource);
-    }
-  }
   outPayload += "}}";
 
   outPayload += ",\"frame\":{";
@@ -176,7 +168,20 @@ bool buildIngestPayload(
   outPayload += ",\"sequence\":";
   appendUint64(outPayload, frame.sequence);
 
-  outPayload += "}}";
+  outPayload += "}";
+
+  if (environment != nullptr && environment->hasTemperatureC) {
+    outPayload += ",\"environment\":{";
+    outPayload += "\"temperature_c\":";
+    appendFloat(outPayload, environment->temperatureC);
+    if (environment->temperatureSource != nullptr) {
+      outPayload += ",\"source\":";
+      appendQuoted(outPayload, environment->temperatureSource);
+    }
+    outPayload += "}";
+  }
+
+  outPayload += "}";
 
   return true;
 }

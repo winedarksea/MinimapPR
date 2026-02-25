@@ -197,6 +197,28 @@ class StorageBackend(Protocol):
     ) -> str:
         ...
 
+    async def insert_environment(
+        self,
+        *,
+        node_id: str,
+        timestamp_ns: int,
+        temperature_c: float | None,
+        pressure_pa: float | None,
+        humidity_fraction: float | None,
+        wind_speed_mps: float | None,
+        wind_dir_deg: float | None,
+        solar_lux: float | None,
+        metadata: dict[str, Any] | None = None,
+        environment_id: str | None = None,
+    ) -> str:
+        ...
+
+    async def list_environment(self, limit: int = 500, node_id: str | None = None) -> list[dict[str, Any]]:
+        ...
+
+    async def list_latest_environment_per_node(self, limit: int = 500) -> list[dict[str, Any]]:
+        ...
+
     async def list_labels(self) -> list[dict[str, Any]]:
         ...
 

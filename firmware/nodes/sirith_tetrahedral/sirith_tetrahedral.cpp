@@ -183,6 +183,11 @@ int main() {
   stdio_init_all();
   sleep_ms(300);
 
+  // LED / status FET on GP26: LOW = FET on (LED lit).
+  gpio_init(nodecfg::kLedPin);
+  gpio_set_dir(nodecfg::kLedPin, GPIO_OUT);
+  gpio_put(nodecfg::kLedPin, 0);  // LED on at boot
+
   std::printf("[sirith-pico] booting\n");
 
   if (cyw43_arch_init()) {
@@ -242,6 +247,16 @@ int main() {
         nodecfg::kWiFiConnectTimeoutMs);
 
     gRunner.loopOnce();
+
+    // Heartbeat blink on GP26 (P-channel FET: LOW=on, HIGH=off).
+    static uint32_t ledCounter = 0;
+    static bool ledState = false;
+    if (++ledCounter >= nodecfg::kLedBlinkFrames) {
+      ledCounter = 0;
+      ledState = !ledState;
+      gpio_put(nodecfg::kLedPin, ledState ? 1 : 0);
+    }
+
     cyw43_arch_poll();
   }
 }

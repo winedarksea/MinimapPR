@@ -41,6 +41,7 @@ from minimappr.interfaces import (
 )
 from minimappr.models import (
     DetectionEvent,
+    EnvironmentSampleIn,
     GeoPoint,
     IngestFrameRequest,
     IngestFrameResponse,
@@ -76,6 +77,7 @@ class LocalizedCandidate:
     reference_signal: np.ndarray
     localization_method: str
     capability_tier: str
+    environment: dict[str, Any]
 
 
 @dataclass(slots=True)
@@ -106,6 +108,8 @@ class FusionMetrics:
     detections_suppressed_by_zone: int = 0
     stage_drops_backpressure: int = 0
     beamforming_failures: int = 0
+    environment_samples_ingested: int = 0
+    environment_samples_persisted: int = 0
 
 
 @dataclass(slots=True)
@@ -281,10 +285,31 @@ class FusionNode:
 
         runtime = await self.registry.upsert(normalized_node, frame.start_time_ns)
         tor_ns = frame.tor_ns if frame.tor_ns is not None else time.time_ns()
+        environment_sample = self._extract_environment_sample(
+            request=request,
+            node=normalized_node,
+            toa_ns=frame.toa_ns or frame.start_time_ns,
+            tor_ns=tor_ns,
+        )
         observation_ids: list[str] = []
 
         async with self._storage_batch():
             await self.storage.upsert_node(spec=normalized_node, last_seen_ns=frame.start_time_ns, position_geo=geo_position)
+            if environment_sample is not None:
+                self._metrics.environment_samples_ingested += 1
+                await self.storage.insert_environment(
+                    node_id=normalized_node.id,
+                    timestamp_ns=environment_sample["timestamp_ns"],
+                    temperature_c=environment_sample["temperature_c"],
+                    pressure_pa=environment_sample["pressure_pa"],
+                    humidity_fraction=environment_sample["humidity_fraction"],
+                    wind_speed_mps=environment_sample["wind_speed_mps"],
+                    wind_dir_deg=environment_sample["wind_dir_deg"],
+                    solar_lux=environment_sample["solar_lux"],
+                    metadata=environment_sample["metadata"],
+                )
+                self._metrics.environment_samples_persisted += 1
+                self._update_environment_provider(environment_sample)
             for channel_index, sensor_id in enumerate(runtime.sensor_ids):
                 await self.buffer.append(
                     sensor_id=sensor_id,
@@ -456,6 +481,11 @@ class FusionNode:
         energies = {sensor_id: rms(sig) for sensor_id, sig in windows.items()}
         threshold = self.localization_config.trigger_rms * self.fusion_config.sensor_energy_threshold_multiplier
         selected_ids = [sid for sid, energy in energies.items() if energy > threshold]
+        # If thresholding under-selects, keep the strongest sensors needed for a localization attempt.
+        min_localization_sensors = max(2, int(self.localization_config.min_sensors_for_2d))
+        if len(selected_ids) < min_localization_sensors and len(energies) >= min_localization_sensors:
+            ranked = sorted(energies.items(), key=lambda item: item[1], reverse=True)
+            selected_ids = [sensor_id for sensor_id, _ in ranked[:min_localization_sensors]]
         if len(selected_ids) < 1:
             return None
 
@@ -463,7 +493,16 @@ class FusionNode:
         selected_windows = {sensor_id: windows[sensor_id] for sensor_id in selected_ids}
         selected_positions = {sensor_id: sensor_positions[sensor_id] for sensor_id in selected_ids}
 
-        conditions = self.environment_provider.get_conditions()
+        environment_location = self._sensor_centroid(selected_positions)
+        conditions = self.environment_provider.get_conditions(environment_location)
+        environment_summary = {
+            "temperature_c": conditions.temperature_c,
+            "humidity_fraction": conditions.humidity_fraction,
+            "pressure_pa": conditions.pressure_pa,
+            "wind_speed_mps": conditions.wind_speed_mps,
+            "wind_dir_deg": conditions.wind_dir_deg,
+            "metadata": dict(conditions.metadata or {}),
+        }
         if tier == "full_3d":
             try:
                 localization = await asyncio.to_thread(
@@ -489,6 +528,7 @@ class FusionNode:
                     reference_signal=reference_signal,
                     localization_method=localization_method,
                     capability_tier=tier,
+                    environment=environment_summary,
                 )
             except LocalizationError:
                 self._metrics.localization_failures += 1
@@ -521,6 +561,7 @@ class FusionNode:
                     reference_signal=reference_signal,
                     localization_method=localization_method,
                     capability_tier=tier,
+                    environment=environment_summary,
                 )
             except LocalizationError:
                 self._metrics.localization_failures += 1
@@ -542,6 +583,7 @@ class FusionNode:
             reference_signal=ref_signal,
             localization_method="fallback_reference_sensor",
             capability_tier=tier,
+            environment=environment_summary,
         )
 
     async def _classify_and_track(self, product: LocalizedCandidate) -> DetectionProduct | None:
@@ -650,6 +692,7 @@ class FusionNode:
         feature_summary["localization_method"] = product.localization_method
         feature_summary["classification_path"] = classification_path
         feature_summary["omni_confidence"] = omni_classification.confidence
+        feature_summary["environment"] = product.environment
         if beamformed_classification is not None:
             feature_summary["beamformed_confidence"] = beamformed_classification.confidence
             feature_summary["beamformed_label"] = beamformed_classification.label
@@ -894,6 +937,174 @@ class FusionNode:
                 yield
             return
         yield
+
+    def _extract_environment_sample(
+        self,
+        *,
+        request: IngestFrameRequest,
+        node: NodeSpec,
+        toa_ns: int,
+        tor_ns: int,
+    ) -> dict[str, Any] | None:
+        environment: EnvironmentSampleIn | None = request.environment
+        timestamp_ns = toa_ns
+        temperature_c: float | None = None
+        humidity_fraction: float | None = None
+        pressure_pa: float | None = None
+        wind_speed_mps: float | None = None
+        wind_dir_deg: float | None = None
+        solar_lux: float | None = None
+        metadata: dict[str, Any] = {}
+
+        if environment is not None and environment.has_any_measurement():
+            timestamp_ns = environment.timestamp_ns or toa_ns
+            temperature_c = environment.temperature_c
+            humidity_fraction = environment.humidity_fraction
+            pressure_pa = environment.pressure_pa
+            wind_speed_mps = environment.wind_speed_mps
+            wind_dir_deg = environment.wind_dir_deg
+            solar_lux = environment.solar_lux
+            if environment.source:
+                metadata["source"] = environment.source
+            if environment.metadata:
+                metadata.update(environment.metadata)
+        else:
+            from_metadata = self._extract_environment_from_node_metadata(node.metadata)
+            if from_metadata is None:
+                return None
+            temperature_c = from_metadata.get("temperature_c")
+            humidity_fraction = from_metadata.get("humidity_fraction")
+            pressure_pa = from_metadata.get("pressure_pa")
+            wind_speed_mps = from_metadata.get("wind_speed_mps")
+            wind_dir_deg = from_metadata.get("wind_dir_deg")
+            solar_lux = from_metadata.get("solar_lux")
+            metadata = from_metadata.get("metadata", {})
+
+        if all(
+            value is None
+            for value in (
+                temperature_c,
+                humidity_fraction,
+                pressure_pa,
+                wind_speed_mps,
+                wind_dir_deg,
+                solar_lux,
+            )
+        ):
+            return None
+
+        if humidity_fraction is not None:
+            humidity_fraction = max(0.0, min(1.0, float(humidity_fraction)))
+        metadata.setdefault("tor_ns", tor_ns)
+
+        return {
+            "node_id": node.id,
+            "timestamp_ns": timestamp_ns,
+            "temperature_c": temperature_c,
+            "humidity_fraction": humidity_fraction,
+            "pressure_pa": pressure_pa,
+            "wind_speed_mps": wind_speed_mps,
+            "wind_dir_deg": wind_dir_deg,
+            "solar_lux": solar_lux,
+            "metadata": metadata,
+            "location_m": node.position_m,
+        }
+
+    def _extract_environment_from_node_metadata(self, metadata: dict[str, Any]) -> dict[str, Any] | None:
+        root = metadata if isinstance(metadata, dict) else {}
+        nested = root.get("environment")
+        env = nested if isinstance(nested, dict) else {}
+
+        def _value(keys: tuple[str, ...]) -> float | None:
+            for key in keys:
+                candidate = self._coerce_float(env.get(key))
+                if candidate is not None:
+                    return candidate
+            for key in keys:
+                candidate = self._coerce_float(root.get(key))
+                if candidate is not None:
+                    return candidate
+            return None
+
+        temperature_c = _value(("temperature_c", "temp_c"))
+        humidity_fraction = _value(("humidity_fraction",))
+        if humidity_fraction is None:
+            humidity_raw = _value(("humidity", "humidity_percent"))
+            if humidity_raw is not None:
+                humidity_fraction = humidity_raw / 100.0 if humidity_raw > 1.0 else humidity_raw
+
+        pressure_pa = _value(("pressure_pa",))
+        wind_speed_mps = _value(("wind_speed_mps",))
+        wind_dir_deg = _value(("wind_dir_deg",))
+        solar_lux = _value(("solar_lux",))
+
+        if all(
+            value is None
+            for value in (
+                temperature_c,
+                humidity_fraction,
+                pressure_pa,
+                wind_speed_mps,
+                wind_dir_deg,
+                solar_lux,
+            )
+        ):
+            return None
+
+        source = (
+            env.get("temperature_source")
+            or root.get("temperature_source")
+            or env.get("source")
+            or root.get("source")
+        )
+        out_meta = {"ingest": "node_metadata"}
+        if isinstance(source, str) and source.strip():
+            out_meta["source"] = source.strip()
+        return {
+            "temperature_c": temperature_c,
+            "humidity_fraction": humidity_fraction,
+            "pressure_pa": pressure_pa,
+            "wind_speed_mps": wind_speed_mps,
+            "wind_dir_deg": wind_dir_deg,
+            "solar_lux": solar_lux,
+            "metadata": out_meta,
+        }
+
+    def _update_environment_provider(self, sample: dict[str, Any]) -> None:
+        ingest_fn = getattr(self.environment_provider, "ingest_sample", None)
+        if not callable(ingest_fn):
+            return
+        ingest_fn(
+            node_id=sample["node_id"],
+            timestamp_ns=sample["timestamp_ns"],
+            temperature_c=sample["temperature_c"],
+            humidity_fraction=sample["humidity_fraction"],
+            pressure_pa=sample["pressure_pa"],
+            wind_speed_mps=sample["wind_speed_mps"],
+            wind_dir_deg=sample["wind_dir_deg"],
+            solar_lux=sample["solar_lux"],
+            location_m=sample["location_m"],
+            metadata=sample["metadata"],
+        )
+
+    @staticmethod
+    def _sensor_centroid(
+        selected_positions: dict[str, np.ndarray],
+    ) -> tuple[float, float, float] | None:
+        if not selected_positions:
+            return None
+        stacked = np.stack([np.asarray(pos, dtype=np.float64) for pos in selected_positions.values()], axis=0)
+        centroid = np.mean(stacked, axis=0)
+        return (float(centroid[0]), float(centroid[1]), float(centroid[2]))
+
+    @staticmethod
+    def _coerce_float(value: Any) -> float | None:
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
     def _normalize_node_spec(self, spec: NodeSpec) -> tuple[NodeSpec, GeoPoint]:
         if spec.position_m is not None:

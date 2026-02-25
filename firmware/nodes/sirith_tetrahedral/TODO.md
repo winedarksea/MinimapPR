@@ -1,12 +1,13 @@
 # Sirith Tetrahedral Pi Pico 2 W Firmware TODO
 
 ## Hardware Profile (Target)
-- 4-mic tetrahedral array, regular tetrahedron geometry, 50 mm edge length.
+- 4-mic tetrahedral array, regular tetrahedron geometry, 50 mm edge length (40.82 mm height, minus 1.6 mm pcb).
 - MEMS mics through ADAU7112 in TDM mode.
 - Optional GPS (M10Q-style): TX=`GP12`, RX=`GP13`, PPS=`GP10`.
 - I2C: SDA=`GP18`, SCL=`GP19` (LIS2MDLTR + optional LSM6 temp).
 - TDM: SDATA=`GP7`, BCLK=`GP8`, WS=`GP9`.
 - MK4 is the top mic (expected default TDM slot 3).
+- FET (p-channel connected to LED and switchable 3V3 power header) is `GP26` (blink while running)
 
 ## Phase 1: Project and Build Foundation
 - [x] Replace generated demo firmware with Sirith tetra node firmware entrypoint.

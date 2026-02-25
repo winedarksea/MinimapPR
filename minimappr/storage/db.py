@@ -268,6 +268,8 @@ class Storage:
                 solar_lux REAL,
                 metadata_json TEXT NOT NULL
             );
+            CREATE INDEX IF NOT EXISTS idx_environment_ts ON environment(timestamp_ns DESC);
+            CREATE INDEX IF NOT EXISTS idx_environment_node_ts ON environment(node_id, timestamp_ns DESC);
             """
         )
 
@@ -322,6 +324,18 @@ class Storage:
                 "label_category": "TEXT NOT NULL DEFAULT 'unknown'",
                 "iff_category": "TEXT NOT NULL DEFAULT 'unknown'",
                 "capability_tier": "TEXT NOT NULL DEFAULT 'full_3d'",
+            },
+        )
+        await self._ensure_columns(
+            "environment",
+            {
+                "temperature_k": "REAL",
+                "pressure_pa": "REAL",
+                "humidity": "REAL",
+                "wind_speed_mps": "REAL",
+                "wind_dir_deg": "REAL",
+                "solar_lux": "REAL",
+                "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
             },
         )
         await self._db.commit()
@@ -909,6 +923,102 @@ class Storage:
             await self._commit_if_needed(db)
         return final_id
 
+    async def insert_environment(
+        self,
+        *,
+        node_id: str,
+        timestamp_ns: int,
+        temperature_c: float | None,
+        pressure_pa: float | None,
+        humidity_fraction: float | None,
+        wind_speed_mps: float | None,
+        wind_dir_deg: float | None,
+        solar_lux: float | None,
+        metadata: dict[str, Any] | None = None,
+        environment_id: str | None = None,
+    ) -> str:
+        db = self._require_db()
+        final_id = environment_id or f"env-{uuid.uuid4().hex[:16]}"
+        temperature_k = (float(temperature_c) + 273.15) if temperature_c is not None else None
+        humidity_value = None if humidity_fraction is None else max(0.0, min(1.0, float(humidity_fraction)))
+        async with self._write_guard():
+            await db.execute(
+                """
+                INSERT INTO environment (
+                    id, node_id, timestamp_ns, temperature_k, pressure_pa, humidity,
+                    wind_speed_mps, wind_dir_deg, solar_lux, metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    final_id,
+                    node_id,
+                    timestamp_ns,
+                    temperature_k,
+                    pressure_pa,
+                    humidity_value,
+                    wind_speed_mps,
+                    wind_dir_deg,
+                    solar_lux,
+                    _json_dumps(metadata or {}),
+                ),
+            )
+            await self._commit_if_needed(db)
+        return final_id
+
+    async def list_environment(self, limit: int = 500, node_id: str | None = None) -> list[dict]:
+        db = self._require_db()
+        if node_id:
+            rows = await (
+                await db.execute(
+                    """
+                    SELECT e.*, n.x AS x, n.y AS y, n.z AS z
+                    FROM environment e
+                    LEFT JOIN nodes n ON n.id = e.node_id
+                    WHERE e.node_id = ?
+                    ORDER BY e.timestamp_ns DESC
+                    LIMIT ?
+                    """,
+                    (node_id, limit),
+                )
+            ).fetchall()
+        else:
+            rows = await (
+                await db.execute(
+                    """
+                    SELECT e.*, n.x AS x, n.y AS y, n.z AS z
+                    FROM environment e
+                    LEFT JOIN nodes n ON n.id = e.node_id
+                    ORDER BY e.timestamp_ns DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                )
+            ).fetchall()
+        return [self._row_to_environment(row) for row in rows]
+
+    async def list_latest_environment_per_node(self, limit: int = 500) -> list[dict[str, Any]]:
+        db = self._require_db()
+        rows = await (
+            await db.execute(
+                """
+                SELECT e.*, n.x AS x, n.y AS y, n.z AS z
+                FROM environment e
+                INNER JOIN (
+                    SELECT node_id, MAX(timestamp_ns) AS latest_ts
+                    FROM environment
+                    GROUP BY node_id
+                ) latest
+                ON latest.node_id = e.node_id AND latest.latest_ts = e.timestamp_ns
+                LEFT JOIN nodes n ON n.id = e.node_id
+                ORDER BY e.timestamp_ns DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+        ).fetchall()
+        return [self._row_to_environment(row) for row in rows]
+
     async def insert_large_artifact(
         self,
         *,
@@ -1110,13 +1220,23 @@ class Storage:
             await self._commit_if_needed(db)
         return len(rows)
 
-    async def cleanup_retention(self, *, now_ns: int, tier_ttls_seconds: dict[str, int]) -> dict[str, int]:
+    async def cleanup_retention(
+        self,
+        *,
+        now_ns: int,
+        tier_ttls_seconds: dict[str, int],
+        operational_ttls_seconds: dict[str, int] | None = None,
+    ) -> dict[str, int]:
         db = self._require_db()
         summary = {
             "observations": 0,
             "detections": 0,
             "pings": 0,
             "large_artifacts": 0,
+            "track_updates": 0,
+            "alerts": 0,
+            "environment": 0,
+            "dropped_tracks": 0,
         }
         protected_tiers = {"config", "permanent"}
 
@@ -1200,6 +1320,45 @@ class Storage:
                 )
                 summary["large_artifacts"] += max(0, artifact_cursor.rowcount)
 
+            operational_ttls = operational_ttls_seconds or {}
+            for key, sql in (
+                (
+                    "track_updates",
+                    """
+                    DELETE FROM track_updates
+                    WHERE timestamp_ns <= ?
+                    """,
+                ),
+                (
+                    "alerts",
+                    """
+                    DELETE FROM alerts
+                    WHERE timestamp_ns <= ?
+                    """,
+                ),
+                (
+                    "environment",
+                    """
+                    DELETE FROM environment
+                    WHERE timestamp_ns <= ?
+                    """,
+                ),
+                (
+                    "dropped_tracks",
+                    """
+                    DELETE FROM tracks
+                    WHERE status = 'dropped'
+                    AND last_seen_ns <= ?
+                    """,
+                ),
+            ):
+                ttl_s = operational_ttls.get(key)
+                if ttl_s is None or ttl_s < 0:
+                    continue
+                threshold_ns = now_ns - int(ttl_s * 1_000_000_000)
+                cursor = await db.execute(sql, (threshold_ns,))
+                summary[key] += max(0, cursor.rowcount)
+
             await self._commit_if_needed(db)
 
         return summary
@@ -1209,6 +1368,28 @@ class Storage:
         if row["lat"] is None or row["lon"] is None:
             return None
         return GeoPoint(lat=float(row["lat"]), lon=float(row["lon"]), alt_m=float(row["alt"] or 0.0))
+
+    @staticmethod
+    def _row_to_environment(row: aiosqlite.Row) -> dict[str, Any]:
+        position_m = None
+        if row["x"] is not None and row["y"] is not None and row["z"] is not None:
+            position_m = [float(row["x"]), float(row["y"]), float(row["z"])]
+        temperature_c = None
+        if row["temperature_k"] is not None:
+            temperature_c = float(row["temperature_k"]) - 273.15
+        return {
+            "id": row["id"],
+            "node_id": row["node_id"],
+            "timestamp_ns": int(row["timestamp_ns"]),
+            "temperature_c": temperature_c,
+            "pressure_pa": float(row["pressure_pa"]) if row["pressure_pa"] is not None else None,
+            "humidity_fraction": float(row["humidity"]) if row["humidity"] is not None else None,
+            "wind_speed_mps": float(row["wind_speed_mps"]) if row["wind_speed_mps"] is not None else None,
+            "wind_dir_deg": float(row["wind_dir_deg"]) if row["wind_dir_deg"] is not None else None,
+            "solar_lux": float(row["solar_lux"]) if row["solar_lux"] is not None else None,
+            "position_m": position_m,
+            "metadata": _json_loads(row["metadata_json"], {}),
+        }
 
     def _row_to_detection(self, row: aiosqlite.Row) -> DetectionEvent:
         return DetectionEvent(

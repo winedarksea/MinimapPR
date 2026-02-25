@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+import pytest
 from fastapi.testclient import TestClient
 
 from minimappr.main import app
@@ -26,7 +27,13 @@ def _configure_env(monkeypatch, tmp_path: Path, *, snippet_retention_seconds: in
     return db_path
 
 
-def _ingest_single_frame(client: TestClient, *, start_time_ns: int) -> None:
+def _ingest_single_frame(
+    client: TestClient,
+    *,
+    start_time_ns: int,
+    metadata: dict | None = None,
+    environment: dict | None = None,
+) -> None:
     samples = np.random.default_rng(1234).normal(0.0, 0.5, size=(1, 1024)).astype(np.float32)
     payload = {
         "node": {
@@ -35,7 +42,7 @@ def _ingest_single_frame(client: TestClient, *, start_time_ns: int) -> None:
             "position_m": [0.0, 0.0, 0.0],
             "sensor_offsets_m": [[0.0, 0.0, 0.0]],
             "capabilities": ["audio"],
-            "metadata": {},
+            "metadata": metadata or {},
             "properties": {},
         },
         "frame": {
@@ -48,6 +55,8 @@ def _ingest_single_frame(client: TestClient, *, start_time_ns: int) -> None:
             "source_type": "raw_sensor",
         },
     }
+    if environment is not None:
+        payload["environment"] = environment
     response = client.post("/api/v1/ingest/frame", json=payload)
     assert response.status_code == 200
     body = response.json()
@@ -107,3 +116,50 @@ def test_detection_audio_rejects_paths_outside_snippet_root(monkeypatch, tmp_pat
         response = client.get(f"/api/v1/detections/{detection_id}/audio")
         assert response.status_code == 403
         assert "outside snippet directory" in response.text
+
+
+def test_environment_ingest_from_node_metadata(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    monkeypatch.setenv("MINIMAPPR_DEFAULT_TEMPERATURE_C", "7.5")
+    monkeypatch.setenv("MINIMAPPR_DEFAULT_HUMIDITY", "0.41")
+
+    with TestClient(app) as client:
+        _ingest_single_frame(
+            client,
+            start_time_ns=time.time_ns(),
+            metadata={"temperature_c": 29.25, "temperature_source": "board_sensor"},
+        )
+
+        rows_response = client.get("/api/v1/environment", params={"limit": 10})
+        assert rows_response.status_code == 200
+        rows = rows_response.json()
+        assert rows
+        assert rows[0]["node_id"] == "http-node-1"
+        assert rows[0]["temperature_c"] == pytest.approx(29.25, abs=1e-3)
+
+        current_response = client.get("/api/v1/environment/current")
+        assert current_response.status_code == 200
+        current = current_response.json()
+        assert current["temperature_c"] == pytest.approx(29.25, abs=1e-3)
+        assert current["metadata"]["source"] == "live"
+
+
+def test_environment_current_falls_back_when_no_live_temperature(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    monkeypatch.setenv("MINIMAPPR_DEFAULT_TEMPERATURE_C", "12.0")
+    monkeypatch.setenv("MINIMAPPR_DEFAULT_HUMIDITY", "0.35")
+
+    with TestClient(app) as client:
+        _ingest_single_frame(
+            client,
+            start_time_ns=time.time_ns(),
+            environment={"pressure_pa": 101420.0, "source": "pressure_only"},
+        )
+
+        current_response = client.get("/api/v1/environment/current")
+        assert current_response.status_code == 200
+        current = current_response.json()
+        assert current["temperature_c"] == pytest.approx(12.0, abs=1e-6)
+        assert current["humidity_fraction"] == pytest.approx(0.35, abs=1e-6)
+        assert current["pressure_pa"] == pytest.approx(101420.0, abs=1e-3)
+        assert current["metadata"]["source"] == "static_fallback"

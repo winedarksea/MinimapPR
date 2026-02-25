@@ -366,6 +366,15 @@ A simple ESP32 point node (extensible to Raspberry Pi Pico W) with a single I2S 
 
 For stationary point nodes, the GPS should use a high degree of location smoothing. Mobile nodes must disable location smoothing and stream GPS location continuously (see Moving Nodes).
 
+### High-Fidelity Point Node
+
+A custom design optimized for maximum SNR and timing precision:
+- **MCU**: Raspberry Pi Pico 2 W (RP2350) — PIO subsystem enables <1 µs timing precision by syncing audio clock domains with GPS PPS.
+- **Microphone**: Infineon IM73A135 (PDM) — 73 dB SNR, 135 dBSPL AOP. PDM decoded via PIO.
+- **GPS**: u-blox SAM-M10Q — PPS signal for timing, "Stationary" dynamic model.
+- **Environment**: Bosch BME280 — Temperature/Humidity for speed-of-sound correction.
+- **Power**: CN3791 MPPT Solar Charger + 21700 LiPo cell.
+
 ### Array Node: Sirith Tetrahedral
 
 A four-microphone array in a tetrahedral geometry (configurable spacing, default 50 mm between microphones). At 50 mm spacing, the spatial aliasing limit is ~3.4 kHz. While some target sounds (bird vocalizations, alarms) have harmonics well above this, the dominant spectral energy for most targets of interest — including most bird song fundamentals — falls within the localizable range, which should provide adequate localization accuracy for the primary use cases. Wider spacing can be configured for lower-frequency-only applications; tighter spacing can extend coverage to higher frequencies at the cost of reduced aperture. High quality MEMS microphones processed by the ADAU7112 ([datasheet](https://www.analog.com/media/en/technical-documentation/data-sheets/ADAU7112.pdf)), configurable via jumpers to output 2 separate I2S streams or a single TDM stream. Connects to any AdaFruit Feather or Raspberry Pi Pico 2 W.

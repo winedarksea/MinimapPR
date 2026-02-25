@@ -11,7 +11,7 @@ This repository now includes a complete Phase 1 core build focused on the base c
 ## First Delivery Scope (Implemented)
 - `FastAPI` backend for node ingestion, localization, classification, tracking, and APIs
 - queue-driven fusion node runtime (ingest stage decoupled from localization/classification workers)
-- `SQLite` persistence for Phase 1 core tables (`nodes`, `observations`, `detections`, `tracks`, `labels`, `alerts`, `track_updates`) plus `environment` schema stub
+- `SQLite` persistence for Phase 1 core tables (`nodes`, `observations`, `detections`, `tracks`, `labels`, `alerts`, `track_updates`) plus active `environment` ingestion/persistence
 - automatic snippet retention cleanup (self-cleaning raw audio extracts)
 - snippet serving endpoint (`/api/v1/detections/{id}/audio`)
 - live websocket feed with server-side subscription filtering (zone/category/confidence/track status)
@@ -96,6 +96,12 @@ Payload:
     "encoding": "pcm16le",
     "samples_b64": "...",
     "sequence": 42
+  },
+  "environment": {
+    "temperature_c": 21.4,
+    "humidity_fraction": 0.52,
+    "pressure_pa": 101325.0,
+    "source": "onboard_sensor"
   }
 }
 ```
@@ -105,6 +111,8 @@ Notes:
 - `frame.channels` must match `len(node.sensor_offsets_m)`
 - timestamps are per-frame start timestamps in `ns`
 - optional per-frame timing quality metadata supported: `time_quality`, `toa_ns`, `tor_ns`
+- optional environmental payload supported: `environment.temperature_c` (minimum), humidity/pressure/wind/lux optional
+- firmware-compatible fallback: if `node.metadata.temperature_c` is provided, it is ingested into `environment` even without an explicit `environment` object
 - response `triggered=true` means an event candidate was queued for fusion workers; detection emission is asynchronous
 
 ## Processing Pipeline
@@ -142,6 +150,8 @@ export MINIMAPPR_CLASSIFIER=yamnet
 - `GET /api/v1/tracks?limit=200&include_standby=false`
 - `GET /api/v1/cop/status`
 - `GET /api/v1/alerts?limit=100`
+- `GET /api/v1/environment?limit=500&node_id=...`
+- `GET /api/v1/environment/current?x=...&y=...&z=...`
 - `GET /api/v1/detections/{detection_id}/audio`
 - `POST /api/v1/federation/heartbeat` (peer-to-peer)
 - `POST /api/v1/federation/snapshot` (peer-to-peer)
@@ -159,6 +169,7 @@ Key env vars:
 - `MINIMAPPR_LOCALIZATION_WINDOW_SECONDS` (default `0.08`)
 - `MINIMAPPR_DEFAULT_TEMPERATURE_C` (default `20.0`)
 - `MINIMAPPR_DEFAULT_HUMIDITY` (default `0.5`)
+- `MINIMAPPR_ENVIRONMENT_READING_MAX_AGE_SECONDS` (default `300.0`, `0` disables staleness cutoff)
 - `MINIMAPPR_SITE_ORIGIN_LAT` (default `37.7749`)
 - `MINIMAPPR_SITE_ORIGIN_LON` (default `-122.4194`)
 - `MINIMAPPR_SITE_ORIGIN_ALT_M` (default `0.0`)
