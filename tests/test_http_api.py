@@ -33,7 +33,7 @@ def _ingest_single_frame(
     start_time_ns: int,
     metadata: dict | None = None,
     environment: dict | None = None,
-) -> None:
+) -> dict:
     samples = np.random.default_rng(1234).normal(0.0, 0.5, size=(1, 1024)).astype(np.float32)
     payload = {
         "node": {
@@ -61,6 +61,7 @@ def _ingest_single_frame(
     assert response.status_code == 200
     body = response.json()
     assert body["accepted"] is True
+    return body
 
 
 def _wait_for_detections(client: TestClient, *, timeout_s: float = 2.0) -> list[dict]:
@@ -93,6 +94,131 @@ def test_http_ingest_and_cop_status(monkeypatch, tmp_path: Path) -> None:
         cop = cop_response.json()
         assert cop["active_nodes"] >= 1
         assert cop["active_tracks"] >= 0
+
+
+def test_http_ingest_duplicate_frame_is_idempotent(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    start_time_ns = time.time_ns()
+    samples = np.random.default_rng(55).normal(0.0, 0.45, size=(1, 1024)).astype(np.float32)
+    payload = {
+        "node": {
+            "id": "http-node-duplicate",
+            "node_type": "point",
+            "position_m": [0.0, 0.0, 0.0],
+            "sensor_offsets_m": [[0.0, 0.0, 0.0]],
+            "capabilities": ["audio"],
+            "metadata": {},
+            "properties": {},
+        },
+        "frame": {
+            "start_time_ns": start_time_ns,
+            "sample_rate_hz": 16000,
+            "channels": 1,
+            "encoding": "pcm16le",
+            "samples_b64": encode_pcm16le_b64(samples),
+            "sequence": 11,
+            "source_type": "raw_sensor",
+        },
+    }
+
+    with TestClient(app) as client:
+        first = client.post("/api/v1/ingest/frame", json=payload)
+        assert first.status_code == 200
+        first_body = first.json()
+        assert first_body["duplicate"] is False
+
+        second = client.post("/api/v1/ingest/frame", json=payload)
+        assert second.status_code == 200
+        second_body = second.json()
+        assert second_body["accepted"] is True
+        assert second_body["duplicate"] is True
+        assert second_body["triggered"] is False
+
+
+def test_http_store_forward_deduplicates_and_preserves_last_seen(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    latest_live_start_ns = time.time_ns()
+    older_start_ns = latest_live_start_ns - 4_000_000_000
+    oldest_start_ns = latest_live_start_ns - 5_000_000_000
+    oldest_toa_ns = oldest_start_ns - 1_000_000
+    older_toa_ns = older_start_ns - 1_000_000
+
+    with TestClient(app) as client:
+        _ingest_single_frame(client, start_time_ns=latest_live_start_ns)
+
+        buffered_payload = {
+            "node": {
+                "id": "http-node-1",
+                "node_type": "point",
+                "position_m": [0.0, 0.0, 0.0],
+                "sensor_offsets_m": [[0.0, 0.0, 0.0]],
+                "capabilities": ["audio"],
+                "metadata": {},
+                "properties": {},
+            },
+            "sort_by_toa": True,
+            "buffered_frames": [
+                {
+                    "frame": {
+                        "start_time_ns": older_start_ns,
+                        "sample_rate_hz": 16000,
+                        "channels": 1,
+                        "encoding": "pcm16le",
+                        "samples_b64": encode_pcm16le_b64(
+                            np.random.default_rng(1).normal(0.0, 0.4, size=(1, 1024)).astype(np.float32)
+                        ),
+                        "sequence": 102,
+                        "source_type": "raw_sensor",
+                        "toa_ns": older_toa_ns,
+                    }
+                },
+                {
+                    "frame": {
+                        "start_time_ns": oldest_start_ns,
+                        "sample_rate_hz": 16000,
+                        "channels": 1,
+                        "encoding": "pcm16le",
+                        "samples_b64": encode_pcm16le_b64(
+                            np.random.default_rng(2).normal(0.0, 0.42, size=(1, 1024)).astype(np.float32)
+                        ),
+                        "sequence": 101,
+                        "source_type": "raw_sensor",
+                        "toa_ns": oldest_toa_ns,
+                    }
+                },
+                {
+                    "frame": {
+                        "start_time_ns": oldest_start_ns,
+                        "sample_rate_hz": 16000,
+                        "channels": 1,
+                        "encoding": "pcm16le",
+                        "samples_b64": encode_pcm16le_b64(
+                            np.random.default_rng(2).normal(0.0, 0.42, size=(1, 1024)).astype(np.float32)
+                        ),
+                        "sequence": 101,
+                        "source_type": "raw_sensor",
+                        "toa_ns": oldest_toa_ns,
+                    }
+                },
+            ],
+        }
+
+        response = client.post("/api/v1/ingest/store-forward", json=buffered_payload)
+        assert response.status_code == 200
+        body = response.json()
+        assert body["accepted"] is True
+        assert body["total_frames"] == 3
+        assert body["accepted_frames"] == 3
+        assert body["duplicate_frames"] == 1
+        assert body["rejected_frames"] == 0
+        assert body["results"][0]["start_time_ns"] == oldest_start_ns
+        assert sum(1 for row in body["results"] if row["duplicate"]) == 1
+
+        nodes_response = client.get("/api/v1/nodes", params={"limit": 10})
+        assert nodes_response.status_code == 200
+        nodes = nodes_response.json()
+        node = next(row for row in nodes if row["id"] == "http-node-1")
+        assert node["last_seen_ns"] >= latest_live_start_ns
 
 
 def test_detection_audio_rejects_paths_outside_snippet_root(monkeypatch, tmp_path: Path) -> None:

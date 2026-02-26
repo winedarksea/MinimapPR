@@ -49,8 +49,11 @@ class NodeRegistry:
                 position_m=base + np.asarray(offset, dtype=np.float64),
             )
 
-        runtime = NodeRuntime(spec=spec, sensor_ids=sensor_ids, last_seen_ns=last_seen_ns)
         async with self._lock:
+            existing = self._nodes.get(spec.id)
+            if existing is not None and last_seen_ns < existing.last_seen_ns:
+                return existing
+            runtime = NodeRuntime(spec=spec, sensor_ids=sensor_ids, last_seen_ns=last_seen_ns)
             self._nodes[spec.id] = runtime
             for sensor_id, descriptor in sensor_descriptors.items():
                 self._sensors[sensor_id] = descriptor

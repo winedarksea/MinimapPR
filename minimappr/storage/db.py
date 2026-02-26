@@ -34,6 +34,17 @@ def _slugify(text: str) -> str:
     return cleaned or "unknown"
 
 
+def _ingested_frame_key(
+    *,
+    node_id: str,
+    frame_sequence: int | None,
+    start_time_ns: int,
+    source_type: str,
+) -> str:
+    sequence_token = str(frame_sequence) if frame_sequence is not None else "none"
+    return f"{node_id}:{source_type}:{start_time_ns}:{sequence_token}"
+
+
 class Storage:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
@@ -91,6 +102,19 @@ class Storage:
             CREATE INDEX IF NOT EXISTS idx_observations_sensor ON observations(sensor_id, toa_ns DESC);
             CREATE INDEX IF NOT EXISTS idx_observations_event_id ON observations(event_id);
             CREATE INDEX IF NOT EXISTS idx_observations_node_id ON observations(node_id);
+
+            CREATE TABLE IF NOT EXISTS ingested_frames (
+                frame_key TEXT PRIMARY KEY,
+                node_id TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                start_time_ns INTEGER NOT NULL,
+                frame_sequence INTEGER,
+                toa_ns INTEGER NOT NULL,
+                tor_ns INTEGER NOT NULL,
+                created_ns INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_ingested_frames_node_start ON ingested_frames(node_id, start_time_ns DESC);
+            CREATE INDEX IF NOT EXISTS idx_ingested_frames_node_seq ON ingested_frames(node_id, frame_sequence, start_time_ns DESC);
 
             CREATE TABLE IF NOT EXISTS labels (
                 id TEXT PRIMARY KEY,
@@ -413,19 +437,58 @@ class Storage:
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
-                    node_type=excluded.node_type,
-                    x=excluded.x,
-                    y=excluded.y,
-                    z=excluded.z,
-                    lat=excluded.lat,
-                    lon=excluded.lon,
-                    alt=excluded.alt,
-                    sensor_offsets_json=excluded.sensor_offsets_json,
-                    capabilities_json=excluded.capabilities_json,
-                    mobility=excluded.mobility,
-                    metadata_json=excluded.metadata_json,
-                    properties_json=excluded.properties_json,
-                    last_seen_ns=excluded.last_seen_ns
+                    node_type=CASE
+                        WHEN excluded.last_seen_ns >= nodes.last_seen_ns THEN excluded.node_type
+                        ELSE nodes.node_type
+                    END,
+                    x=CASE
+                        WHEN excluded.last_seen_ns >= nodes.last_seen_ns THEN excluded.x
+                        ELSE nodes.x
+                    END,
+                    y=CASE
+                        WHEN excluded.last_seen_ns >= nodes.last_seen_ns THEN excluded.y
+                        ELSE nodes.y
+                    END,
+                    z=CASE
+                        WHEN excluded.last_seen_ns >= nodes.last_seen_ns THEN excluded.z
+                        ELSE nodes.z
+                    END,
+                    lat=CASE
+                        WHEN excluded.last_seen_ns >= nodes.last_seen_ns THEN excluded.lat
+                        ELSE nodes.lat
+                    END,
+                    lon=CASE
+                        WHEN excluded.last_seen_ns >= nodes.last_seen_ns THEN excluded.lon
+                        ELSE nodes.lon
+                    END,
+                    alt=CASE
+                        WHEN excluded.last_seen_ns >= nodes.last_seen_ns THEN excluded.alt
+                        ELSE nodes.alt
+                    END,
+                    sensor_offsets_json=CASE
+                        WHEN excluded.last_seen_ns >= nodes.last_seen_ns THEN excluded.sensor_offsets_json
+                        ELSE nodes.sensor_offsets_json
+                    END,
+                    capabilities_json=CASE
+                        WHEN excluded.last_seen_ns >= nodes.last_seen_ns THEN excluded.capabilities_json
+                        ELSE nodes.capabilities_json
+                    END,
+                    mobility=CASE
+                        WHEN excluded.last_seen_ns >= nodes.last_seen_ns THEN excluded.mobility
+                        ELSE nodes.mobility
+                    END,
+                    metadata_json=CASE
+                        WHEN excluded.last_seen_ns >= nodes.last_seen_ns THEN excluded.metadata_json
+                        ELSE nodes.metadata_json
+                    END,
+                    properties_json=CASE
+                        WHEN excluded.last_seen_ns >= nodes.last_seen_ns THEN excluded.properties_json
+                        ELSE nodes.properties_json
+                    END,
+                    last_seen_ns=CASE
+                        WHEN excluded.last_seen_ns > nodes.last_seen_ns THEN excluded.last_seen_ns
+                        ELSE nodes.last_seen_ns
+                    END
                 """,
                 (
                     spec.id,
@@ -496,6 +559,75 @@ class Storage:
             )
             await self._commit_if_needed(db)
         return observation_id
+
+    async def has_ingested_frame(
+        self,
+        *,
+        node_id: str,
+        frame_sequence: int | None,
+        start_time_ns: int,
+        source_type: str,
+    ) -> bool:
+        db = self._require_db()
+        frame_key = _ingested_frame_key(
+            node_id=node_id,
+            frame_sequence=frame_sequence,
+            start_time_ns=start_time_ns,
+            source_type=source_type,
+        )
+        row = await (
+            await db.execute(
+                """
+                SELECT 1
+                FROM ingested_frames
+                WHERE frame_key = ?
+                LIMIT 1
+                """,
+                (frame_key,),
+            )
+        ).fetchone()
+        return row is not None
+
+    async def register_ingested_frame(
+        self,
+        *,
+        node_id: str,
+        frame_sequence: int | None,
+        start_time_ns: int,
+        toa_ns: int,
+        tor_ns: int,
+        source_type: str,
+    ) -> bool:
+        db = self._require_db()
+        frame_key = _ingested_frame_key(
+            node_id=node_id,
+            frame_sequence=frame_sequence,
+            start_time_ns=start_time_ns,
+            source_type=source_type,
+        )
+        async with self._write_guard():
+            cursor = await db.execute(
+                """
+                INSERT INTO ingested_frames (
+                    frame_key, node_id, source_type, start_time_ns,
+                    frame_sequence, toa_ns, tor_ns, created_ns
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(frame_key) DO NOTHING
+                """,
+                (
+                    frame_key,
+                    node_id,
+                    source_type,
+                    start_time_ns,
+                    frame_sequence,
+                    toa_ns,
+                    tor_ns,
+                    tor_ns,
+                ),
+            )
+            await self._commit_if_needed(db)
+            return cursor.rowcount > 0
 
     async def upsert_label(
         self,
@@ -1233,6 +1365,7 @@ class Storage:
             "detections": 0,
             "pings": 0,
             "large_artifacts": 0,
+            "ingested_frames": 0,
             "track_updates": 0,
             "alerts": 0,
             "environment": 0,
@@ -1319,6 +1452,19 @@ class Storage:
                     (tier, now_ns, threshold_ns),
                 )
                 summary["large_artifacts"] += max(0, artifact_cursor.rowcount)
+
+            # Frame receipt dedupe state tracks recent ingest only; align its TTL to short retention.
+            ingest_receipt_ttl_seconds = max(0, int(tier_ttls_seconds.get("short", 0)))
+            if ingest_receipt_ttl_seconds > 0:
+                ingest_threshold_ns = now_ns - int(ingest_receipt_ttl_seconds * 1_000_000_000)
+                ingested_frames_cursor = await db.execute(
+                    """
+                    DELETE FROM ingested_frames
+                    WHERE created_ns <= ?
+                    """,
+                    (ingest_threshold_ns,),
+                )
+                summary["ingested_frames"] += max(0, ingested_frames_cursor.rowcount)
 
             operational_ttls = operational_ttls_seconds or {}
             for key, sql in (

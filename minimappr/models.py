@@ -124,11 +124,51 @@ class IngestFrameRequest(BaseModel):
 
 class IngestFrameResponse(BaseModel):
     accepted: bool
+    duplicate: bool = False
     triggered: bool
     frame_energy: float
     detection_id: str | None = None
     queued_event_id: str | None = None
     queue_depth: int | None = None
+
+
+class StoreForwardBufferedFrameRequest(BaseModel):
+    frame: AudioFrameIn
+    environment: EnvironmentSampleIn | None = None
+
+
+class StoreForwardIngestRequest(BaseModel):
+    node: NodeSpec
+    buffered_frames: list[StoreForwardBufferedFrameRequest] = Field(min_length=1, max_length=2048)
+    sort_by_toa: bool = True
+
+    @model_validator(mode="after")
+    def _validate(self) -> "StoreForwardIngestRequest":
+        for item in self.buffered_frames:
+            if item.frame.channels != len(self.node.sensor_offsets_m):
+                raise ValueError("buffered frame.channels must equal len(node.sensor_offsets_m)")
+        return self
+
+
+class StoreForwardBufferedFrameResponse(BaseModel):
+    sequence: int | None = None
+    start_time_ns: int
+    accepted: bool
+    duplicate: bool = False
+    triggered: bool = False
+    frame_energy: float = 0.0
+    queued_event_id: str | None = None
+    detail: str | None = None
+
+
+class StoreForwardIngestResponse(BaseModel):
+    accepted: bool
+    total_frames: int
+    accepted_frames: int
+    duplicate_frames: int
+    rejected_frames: int
+    queued_events: int
+    results: list[StoreForwardBufferedFrameResponse] = Field(default_factory=list)
 
 
 class ClassificationResult(BaseModel):

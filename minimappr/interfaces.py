@@ -12,8 +12,11 @@ from minimappr.models import (
     DetectionEvent,
     GeoPoint,
     IngestFrameRequest,
+    IngestFrameResponse,
     LocalizationResult,
     NodeSpec,
+    StoreForwardIngestRequest,
+    StoreForwardIngestResponse,
     TrackState,
 )
 
@@ -222,6 +225,28 @@ class StorageBackend(Protocol):
     async def list_labels(self) -> list[dict[str, Any]]:
         ...
 
+    async def has_ingested_frame(
+        self,
+        *,
+        node_id: str,
+        frame_sequence: int | None,
+        start_time_ns: int,
+        source_type: str,
+    ) -> bool:
+        ...
+
+    async def register_ingested_frame(
+        self,
+        *,
+        node_id: str,
+        frame_sequence: int | None,
+        start_time_ns: int,
+        toa_ns: int,
+        tor_ns: int,
+        source_type: str,
+    ) -> bool:
+        ...
+
     def begin_batch(self) -> AsyncContextManager[None]:
         ...
 
@@ -237,7 +262,10 @@ class EnvironmentProvider(Protocol):
 
 @runtime_checkable
 class IngestTransport(Protocol):
-    async def deliver_frame(self, payload: IngestFrameRequest) -> Any:
+    async def deliver_frame(self, payload: IngestFrameRequest) -> IngestFrameResponse:
+        ...
+
+    async def deliver_store_forward(self, payload: StoreForwardIngestRequest) -> StoreForwardIngestResponse:
         ...
 
 

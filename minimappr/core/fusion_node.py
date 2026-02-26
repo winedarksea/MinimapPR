@@ -262,6 +262,33 @@ class FusionNode:
         self._metrics.ingest_requests += 1
         raw_node = request.node
         frame = request.frame
+        normalized_node, geo_position = self._normalize_node_spec(raw_node)
+        runtime = await self.registry.upsert(normalized_node, frame.start_time_ns)
+        toa_ns = frame.toa_ns or frame.start_time_ns
+        tor_ns = frame.tor_ns if frame.tor_ns is not None else time.time_ns()
+
+        duplicate_ingest = await self.storage.has_ingested_frame(
+            node_id=normalized_node.id,
+            frame_sequence=frame.sequence,
+            start_time_ns=frame.start_time_ns,
+            source_type=frame.source_type,
+        )
+        if duplicate_ingest:
+            await self.storage.upsert_node(
+                spec=normalized_node,
+                last_seen_ns=frame.start_time_ns,
+                position_geo=geo_position,
+            )
+            self._metrics.frames_accepted += 1
+            return IngestFrameResponse(
+                accepted=True,
+                duplicate=True,
+                triggered=False,
+                frame_energy=0.0,
+                detection_id=None,
+                queued_event_id=None,
+                queue_depth=self._localization_queue.qsize(),
+            )
 
         try:
             audio = decode_pcm16le_b64(frame.samples_b64, frame.channels)
@@ -273,7 +300,6 @@ class FusionNode:
             self._metrics.frames_rejected += 1
             raise ValueError("Decoded channel count does not match frame.channels")
 
-        normalized_node, geo_position = self._normalize_node_spec(raw_node)
         preprocessor: AudioPreprocessor = self.preprocessor_factory.for_node(normalized_node)
         processed = np.zeros_like(audio, dtype=np.float32)
         for channel_idx in range(audio.shape[0]):
@@ -283,60 +309,82 @@ class FusionNode:
                 node_id=normalized_node.id,
             )
 
-        runtime = await self.registry.upsert(normalized_node, frame.start_time_ns)
-        tor_ns = frame.tor_ns if frame.tor_ns is not None else time.time_ns()
         environment_sample = self._extract_environment_sample(
             request=request,
             node=normalized_node,
-            toa_ns=frame.toa_ns or frame.start_time_ns,
+            toa_ns=toa_ns,
             tor_ns=tor_ns,
         )
         observation_ids: list[str] = []
+        frame_registered = False
 
         async with self._storage_batch():
             await self.storage.upsert_node(spec=normalized_node, last_seen_ns=frame.start_time_ns, position_geo=geo_position)
-            if environment_sample is not None:
-                self._metrics.environment_samples_ingested += 1
-                await self.storage.insert_environment(
-                    node_id=normalized_node.id,
-                    timestamp_ns=environment_sample["timestamp_ns"],
-                    temperature_c=environment_sample["temperature_c"],
-                    pressure_pa=environment_sample["pressure_pa"],
-                    humidity_fraction=environment_sample["humidity_fraction"],
-                    wind_speed_mps=environment_sample["wind_speed_mps"],
-                    wind_dir_deg=environment_sample["wind_dir_deg"],
-                    solar_lux=environment_sample["solar_lux"],
-                    metadata=environment_sample["metadata"],
-                )
-                self._metrics.environment_samples_persisted += 1
-                self._update_environment_provider(environment_sample)
-            for channel_index, sensor_id in enumerate(runtime.sensor_ids):
-                await self.buffer.append(
-                    sensor_id=sensor_id,
-                    sample_rate_hz=frame.sample_rate_hz,
-                    start_time_ns=frame.start_time_ns,
-                    samples=processed[channel_index],
-                )
-                observation_id = await self.storage.insert_observation(
-                    node_id=normalized_node.id,
-                    sensor_id=sensor_id,
-                    sensor_type="audio",
-                    source_type=frame.source_type,
-                    toa_ns=frame.toa_ns or frame.start_time_ns,
-                    tor_ns=tor_ns,
-                    time_quality=frame.time_quality.value,
-                    sample_rate_hz=frame.sample_rate_hz,
-                    channel_index=channel_index,
-                    frame_sequence=frame.sequence,
-                    metadata={
-                        "frame_start_ns": frame.start_time_ns,
-                        "frame_channels": frame.channels,
-                        "encoding": frame.encoding,
-                        "preprocess": normalized_node.properties.get("preprocess", {}),
-                    },
-                )
-                observation_ids.append(observation_id)
-                await self.registry.record_observation(sensor_id=sensor_id, observation_id=observation_id)
+            frame_registered = await self.storage.register_ingested_frame(
+                node_id=normalized_node.id,
+                frame_sequence=frame.sequence,
+                start_time_ns=frame.start_time_ns,
+                toa_ns=toa_ns,
+                tor_ns=tor_ns,
+                source_type=frame.source_type,
+            )
+            if frame_registered:
+                if environment_sample is not None:
+                    self._metrics.environment_samples_ingested += 1
+                    await self.storage.insert_environment(
+                        node_id=normalized_node.id,
+                        timestamp_ns=environment_sample["timestamp_ns"],
+                        temperature_c=environment_sample["temperature_c"],
+                        pressure_pa=environment_sample["pressure_pa"],
+                        humidity_fraction=environment_sample["humidity_fraction"],
+                        wind_speed_mps=environment_sample["wind_speed_mps"],
+                        wind_dir_deg=environment_sample["wind_dir_deg"],
+                        solar_lux=environment_sample["solar_lux"],
+                        metadata=environment_sample["metadata"],
+                    )
+                    self._metrics.environment_samples_persisted += 1
+                    self._update_environment_provider(environment_sample)
+                for channel_index, sensor_id in enumerate(runtime.sensor_ids):
+                    observation_id = await self.storage.insert_observation(
+                        node_id=normalized_node.id,
+                        sensor_id=sensor_id,
+                        sensor_type="audio",
+                        source_type=frame.source_type,
+                        toa_ns=toa_ns,
+                        tor_ns=tor_ns,
+                        time_quality=frame.time_quality.value,
+                        sample_rate_hz=frame.sample_rate_hz,
+                        channel_index=channel_index,
+                        frame_sequence=frame.sequence,
+                        metadata={
+                            "frame_start_ns": frame.start_time_ns,
+                            "frame_channels": frame.channels,
+                            "encoding": frame.encoding,
+                            "preprocess": normalized_node.properties.get("preprocess", {}),
+                        },
+                    )
+                    observation_ids.append(observation_id)
+
+        if not frame_registered:
+            self._metrics.frames_accepted += 1
+            return IngestFrameResponse(
+                accepted=True,
+                duplicate=True,
+                triggered=False,
+                frame_energy=0.0,
+                detection_id=None,
+                queued_event_id=None,
+                queue_depth=self._localization_queue.qsize(),
+            )
+
+        for channel_index, sensor_id in enumerate(runtime.sensor_ids):
+            await self.buffer.append(
+                sensor_id=sensor_id,
+                sample_rate_hz=frame.sample_rate_hz,
+                start_time_ns=frame.start_time_ns,
+                samples=processed[channel_index],
+            )
+            await self.registry.record_observation(sensor_id=sensor_id, observation_id=observation_ids[channel_index])
         self._metrics.frames_accepted += 1
 
         frame_energy = rms(mono_mix(processed))
@@ -368,6 +416,7 @@ class FusionNode:
 
         return IngestFrameResponse(
             accepted=True,
+            duplicate=False,
             triggered=triggered,
             frame_energy=frame_energy,
             detection_id=None,

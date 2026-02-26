@@ -38,6 +38,8 @@ from minimappr.models import (
     GeoPoint,
     IngestFrameRequest,
     IngestFrameResponse,
+    StoreForwardIngestRequest,
+    StoreForwardIngestResponse,
     TrackState,
     ZoneSpec,
 )
@@ -257,6 +259,15 @@ async def ingest_frame(payload: IngestFrameRequest, request: Request) -> IngestF
     state = _require_state(request)
     try:
         return await state.ingest_transport.deliver_frame(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/ingest/store-forward", response_model=StoreForwardIngestResponse)
+async def ingest_store_forward(payload: StoreForwardIngestRequest, request: Request) -> StoreForwardIngestResponse:
+    state = _require_state(request)
+    try:
+        return await state.ingest_transport.deliver_store_forward(payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
