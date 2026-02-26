@@ -266,6 +266,29 @@ class WebsocketRuleActionHandler(RuleActionHandler):
         return {"delivered": True, "handler": "websocket"}
 
 
+class HassRuleActionHandler(RuleActionHandler):
+    """Stub for Home Assistant action delivery via MQTT or Webhook."""
+
+    def __init__(self, mqtt_client: Any | None = None) -> None:
+        self._mqtt_client = mqtt_client
+
+    async def handle(
+        self,
+        descriptor: ActionDescriptor,
+        *,
+        detection: DetectionEvent | None = None,
+        track: TrackState | None = None,
+    ) -> dict[str, Any]:
+        # Log planned integration point
+        logger.info(
+            "HassAction planned: type=%s destination=hass payload=%s",
+            descriptor.action_type,
+            descriptor.payload,
+        )
+        # TODO: Implement MQTT publish or REST webhook call
+        return {"delivered": False, "handler": "hass", "status": "stub_not_implemented"}
+
+
 def default_rules() -> list[RuleDef]:
     return [
         RuleDef(

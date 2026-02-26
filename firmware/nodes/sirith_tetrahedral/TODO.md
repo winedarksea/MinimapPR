@@ -10,6 +10,7 @@
 - FET (p-channel connected to LED and switchable 3V3 power header) is `GP26` (blink while running)
 - Expected channels, MK1 is DATA2 (Right) of i2s1 (TDM2 likely), MK2 is DATA1 (Left) of i2s1 (TDM1 likely), MK3 is DATA2 (Right) of i2s2 (TDM4 likely), MK4 is DATA1 (Left) of i2s2 (TDM3 likely)
 - Using the same X/Y/Z as the LIS2MDLTR and LSM6DSV16X, MK3 is (0, 0, 0), MK1 is (0, 50, 0), MK2 is (43.3, 25, 0), MK4 is (21.65, 25, 40.82)
+- Possibly an I2C connection to an SHT45 temperature and humidity sensor
 
 ## Phase 1: Project and Build Foundation
 - [x] Replace generated demo firmware with Sirith tetra node firmware entrypoint.
