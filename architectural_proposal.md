@@ -130,7 +130,7 @@ A classified event tied to a localization and (optionally) a source audio extrac
 - **Source observation references** — provenance link to raw observations that produced this detection
 - **SPL** (sound pressure level in dB)
 - **Label ID** — foreign key to Labels table
-- **Classification confidence**
+- **Classification confidence** — If no classifier produces a result above a configured threshold, a default `Unknown` label can be assigned, allowing the event to be tracked without a specific class.
 - **Audio extract reference** — file path or blob reference to the extracted clip (if retained)
 - **Track ID** — foreign key to assigned track, if any (NULL for unassociated detections)
 - **Retention class** — `default`, `promoted`, `permanent` — controls cleanup behavior. Maps to storage tiers: `default` → Short (~1 month), `promoted` → Long, `permanent` → Long/permanent. See Storage & Retention section for tier definitions.

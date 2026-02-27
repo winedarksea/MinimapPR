@@ -80,6 +80,9 @@ class LocalizationConfig:
     beamformed_classification_min_sensor_count: int
     beamformed_classification_confidence_margin: float
     mvdr_diagonal_loading: float
+    classifier_diagonal_loading_scale: float
+    pre_classification_highpass_hz: float
+    pre_classification_lowpass_hz: float
     gcc_phat_interp_factor: int
 
 
@@ -292,6 +295,9 @@ class Settings:
     beamformed_classification_min_sensor_count: int = 2
     beamformed_classification_confidence_margin: float = 0.0
     mvdr_diagonal_loading: float = 1e-3
+    classifier_diagonal_loading_scale: float = 10.0
+    pre_classification_highpass_hz: float = 0.0
+    pre_classification_lowpass_hz: float = 0.0
     gcc_phat_interp_factor: int = 4
 
     default_temperature_c: float = 20.0
@@ -424,8 +430,17 @@ class Settings:
         if self.gcc_phat_interp_factor < 1:
             raise ValueError("MINIMAPPR_GCC_PHAT_INTERP_FACTOR must be >= 1")
         self.beamformer_type = self.beamformer_type.strip().lower()
-        if self.beamformer_type not in {"delay_and_sum", "mvdr"}:
-            raise ValueError("MINIMAPPR_BEAMFORMER_TYPE must be delay_and_sum or mvdr")
+        _valid_beamformers = {"delay_and_sum", "freq_domain_das", "mvdr", "superdirective", "gevd"}
+        if self.beamformer_type not in _valid_beamformers:
+            raise ValueError(
+                f"MINIMAPPR_BEAMFORMER_TYPE must be one of {sorted(_valid_beamformers)}"
+            )
+        if self.classifier_diagonal_loading_scale < 1.0:
+            raise ValueError("MINIMAPPR_CLASSIFIER_DIAGONAL_LOADING_SCALE must be >= 1.0")
+        if self.pre_classification_highpass_hz < 0.0:
+            raise ValueError("MINIMAPPR_PRE_CLASSIFICATION_HIGHPASS_HZ must be >= 0")
+        if self.pre_classification_lowpass_hz < 0.0:
+            raise ValueError("MINIMAPPR_PRE_CLASSIFICATION_LOWPASS_HZ must be >= 0")
         if self.beamformed_classification_min_sensor_count < 1:
             raise ValueError("MINIMAPPR_BEAMFORMED_CLASSIFICATION_MIN_SENSOR_COUNT must be >= 1")
         if self.beamformed_classification_confidence_margin < 0.0:
@@ -570,6 +585,9 @@ class Settings:
                 0.0,
             ),
             mvdr_diagonal_loading=_env_float("MINIMAPPR_MVDR_DIAGONAL_LOADING", 1e-3),
+            classifier_diagonal_loading_scale=_env_float("MINIMAPPR_CLASSIFIER_DIAGONAL_LOADING_SCALE", 10.0),
+            pre_classification_highpass_hz=_env_float("MINIMAPPR_PRE_CLASSIFICATION_HIGHPASS_HZ", 0.0),
+            pre_classification_lowpass_hz=_env_float("MINIMAPPR_PRE_CLASSIFICATION_LOWPASS_HZ", 0.0),
             gcc_phat_interp_factor=_env_int("MINIMAPPR_GCC_PHAT_INTERP_FACTOR", 4),
             default_temperature_c=_env_float("MINIMAPPR_DEFAULT_TEMPERATURE_C", 20.0),
             default_humidity=_env_float("MINIMAPPR_DEFAULT_HUMIDITY", 0.5),
@@ -691,6 +709,9 @@ class Settings:
             beamformed_classification_min_sensor_count=self.beamformed_classification_min_sensor_count,
             beamformed_classification_confidence_margin=self.beamformed_classification_confidence_margin,
             mvdr_diagonal_loading=self.mvdr_diagonal_loading,
+            classifier_diagonal_loading_scale=self.classifier_diagonal_loading_scale,
+            pre_classification_highpass_hz=self.pre_classification_highpass_hz,
+            pre_classification_lowpass_hz=self.pre_classification_lowpass_hz,
             gcc_phat_interp_factor=self.gcc_phat_interp_factor,
         )
 

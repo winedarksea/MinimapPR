@@ -17,13 +17,20 @@ import numpy as np
 from minimappr.classifiers.base import AudioClassifier
 from minimappr.config import Settings
 from minimappr.core.audio_buffer import MultiSensorBuffer
-from minimappr.core.beamforming import DelayAndSumBeamformer, MVDRBeamformer
+from minimappr.core.beamforming import (
+    DelayAndSumBeamformer,
+    FrequencyDomainDelayAndSumBeamformer,
+    GEVDBeamformer,
+    MVDRBeamformer,
+    SuperdirectiveBeamformer,
+    create_beamformer,
+)
 from minimappr.core.degradation import CapabilityDegradationModel
 from minimappr.core.environment import StaticEnvironmentProvider
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.localization import LocalizationError
 from minimappr.core.node_registry import NodeRegistry
-from minimappr.core.preprocessing import NodePreprocessorFactory
+from minimappr.core.preprocessing import NodePreprocessorFactory, create_classification_preprocessor
 from minimappr.core.rules import ConfigRuleEngine, LoggingRuleActionHandler, WebsocketRuleActionHandler
 from minimappr.core.taxonomy import RuntimeTaxonomyProvider
 from minimappr.core.tracking import TrackManager
@@ -181,6 +188,7 @@ class FusionNode:
             min_sensors_for_2d=settings.min_sensors_for_2d,
         )
         self.beamformer = beamformer or self._create_beamformer()
+        self.classification_preprocessor = create_classification_preprocessor(self.localization_config)
         self.retention_policy = RetentionPolicy(
             permanent_labels=set(self.fusion_config.retention_permanent_labels),
             security_long_confidence=self.fusion_config.retention_long_security_confidence,
@@ -646,9 +654,16 @@ class FusionNode:
         )
 
     async def _classify_and_track(self, product: LocalizedCandidate) -> DetectionProduct | None:
-        """Classify and track a localized candidate.
+        """Run the classification pipeline on a localized candidate.
 
-        Beamforming is skipped for `alerting_only` capability tier or when there are not enough sensors.
+        Pipeline flow:
+          1. Classify the omnidirectional (reference sensor) signal.
+          2. If beamforming is available, beamform toward the localized
+             position with recall-biased settings, optionally apply
+             pre-classification preprocessing, then classify again.
+          3. Pick the higher-confidence result — this feeds through
+             the full classifier chain (including any secondary stages).
+          4. Track the detection and assemble provenance metadata.
         """
         omni_classification = await asyncio.to_thread(
             self.classifier.classify,
@@ -676,6 +691,14 @@ class FusionNode:
                     product.localization_position_m,
                     sound_speed,
                 )
+
+                # Optional pre-classification preprocessing (bandpass, etc.)
+                if self.classification_preprocessor is not None:
+                    beamformed_signal = self.classification_preprocessor.process(
+                        beamformed_signal,
+                        product.candidate.sample_rate_hz,
+                    )
+
                 beamformed_classification = await asyncio.to_thread(
                     self.classifier.classify,
                     beamformed_signal,
@@ -949,12 +972,20 @@ class FusionNode:
         )
 
     def _create_beamformer(self) -> Beamformer | None:
+        """Create the classification beamformer with recall-biased settings.
+
+        Uses the ``create_beamformer`` factory from the beamforming module,
+        applying ``classifier_diagonal_loading_scale`` so that MVDR widens
+        its main lobe for higher recall — preferable when the output feeds
+        a classifier that benefits from capturing more target energy.
+        """
         if not self.settings.beamformed_classification_enabled:
             return None
-        beamformer_name = str(self.settings.beamformer_type).strip().lower()
-        if beamformer_name == "mvdr":
-            return MVDRBeamformer(diagonal_loading=self.settings.mvdr_diagonal_loading)
-        return DelayAndSumBeamformer()
+        return create_beamformer(
+            beamformer_type=self.settings.beamformer_type,
+            diagonal_loading=self.settings.mvdr_diagonal_loading,
+            classifier_diagonal_loading_scale=self.localization_config.classifier_diagonal_loading_scale,
+        )
 
     def _current_localizer_name(self) -> str:
         getter = getattr(self.localizer, "last_algorithm_name", None)
