@@ -77,9 +77,38 @@ class TrackAssociator(Protocol):
 @runtime_checkable
 class TrackFilter(Protocol):
     def predict(self, state: TrackState, dt_s: float) -> TrackState:
+        """Return predicted state extrapolated by *dt_s*.
+
+        Non-destructive — internal filter state must not be modified.
+        Used by TrackManager for association gating (the predicted
+        position is compared against new measurements).
+        """
         ...
 
-    def update(self, state: TrackState, measurement_m: tuple[float, float, float]) -> TrackState:
+    def update(
+        self,
+        state: TrackState,
+        measurement_m: tuple[float, float, float],
+        dt_s: float,
+    ) -> TrackState:
+        """Apply measurement update and return the updated state.
+
+        For filters with internal state (e.g. Kalman), this performs
+        the full predict-then-correct cycle.  Returns a TrackState copy
+        with updated position, velocity, and covariance fields.
+        """
+        ...
+
+    def initialize_track(
+        self,
+        track_id: str,
+        position_m: tuple[float, float, float],
+    ) -> None:
+        """Initialize internal filter state for a newly created track."""
+        ...
+
+    def remove_track(self, track_id: str) -> None:
+        """Clean up internal filter state for a dropped/reaped track."""
         ...
 
 

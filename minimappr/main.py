@@ -19,6 +19,7 @@ from minimappr.api.transports import HttpIngestTransport
 from minimappr.classifiers.factory import create_classifier
 from minimappr.config import Settings
 from minimappr.core.audio_buffer import MultiSensorBuffer
+from minimappr.core.bit_report import BITReportEvaluator
 from minimappr.core.environment import LiveEnvironmentProvider
 from minimappr.core.federation import FederationCoordinator
 from minimappr.core.fusion_node import FusionNode
@@ -29,6 +30,9 @@ from minimappr.core.tracking import TrackManager
 from minimappr.core.zones import ZoneMatcher
 from minimappr.models import (
     AlertStatus,
+    BITReport,
+    BITReportIn,
+    BITType,
     CopStatusResponse,
     FederationAck,
     FederationHeartbeat,
@@ -133,6 +137,7 @@ async def lifespan(app: FastAPI):
         environment_provider=environment_provider,
     )
     ingest_transport = HttpIngestTransport(fusion_node)
+    bit_evaluator = BITReportEvaluator()
 
     async def _federation_local_tracks(now_ns: int) -> list[TrackState]:
         tracks = await tracker.snapshot(now_ns=now_ns)
@@ -164,6 +169,7 @@ async def lifespan(app: FastAPI):
     app.state.fusion_node = fusion_node
     app.state.ingest_transport = ingest_transport
     app.state.federation = federation
+    app.state.bit_evaluator = bit_evaluator
 
     cleanup_task: asyncio.Task | None = None
     await storage.initialize()
@@ -279,6 +285,7 @@ async def list_nodes(
 ) -> list[dict]:
     state = _require_state(request)
     settings: Settings = state.settings
+    bit_evaluator: BITReportEvaluator = state.bit_evaluator
     now_ns = time.time_ns()
     nodes = await state.storage.list_nodes(limit=limit)
     for node in nodes:
@@ -289,13 +296,117 @@ async def list_nodes(
 
         age_s = max(0.0, (now_ns - int(node["last_seen_ns"])) / 1_000_000_000.0)
         if age_s >= settings.node_offline_after_seconds:
-            health_status = "offline"
+            heartbeat_health = "offline"
         elif age_s >= settings.node_degraded_after_seconds:
-            health_status = "degraded"
+            heartbeat_health = "degraded"
         else:
-            health_status = "online"
-        node["health_status"] = health_status
+            heartbeat_health = "online"
+
+        # Merge BIT status with heartbeat staleness
+        node["health_status"] = await bit_evaluator.derive_health_status(
+            node_id=node["id"],
+            heartbeat_health=heartbeat_health,
+            now_ns=now_ns,
+        )
+
+        # Attach latest BIT failure codes for UI consumption
+        bit_reports = await bit_evaluator.latest_reports_for_node(node["id"])
+        failure_codes: list[str] = []
+        for report in bit_reports:
+            failure_codes.extend(report.failure_codes)
+        if failure_codes:
+            node["bit_failure_codes"] = failure_codes
     return nodes
+
+
+# ------------------------------------------------------------------
+# BIT (Built-In Test) Endpoints
+# ------------------------------------------------------------------
+
+
+@app.post("/api/v1/nodes/{node_id}/bit", response_model=BITReport)
+async def submit_bit_report(
+    node_id: str,
+    report_in: BITReportIn,
+    request: Request,
+) -> BITReport:
+    """Accept a BIT report from a sensor node.
+
+    Evaluates the overall pass/fail status, persists to storage, and
+    caches in the in-memory evaluator for real-time health derivation.
+    """
+    state = _require_state(request)
+    bit_evaluator: BITReportEvaluator = state.bit_evaluator
+    now_ns = time.time_ns()
+
+    report = await bit_evaluator.submit_report(
+        node_id=node_id,
+        report_in=report_in,
+        received_ns=now_ns,
+    )
+
+    # Persist to durable storage
+    await state.storage.insert_bit_report(
+        report_id=report.id,
+        node_id=report.node_id,
+        report_type=report.report_type.value,
+        overall_status=report.overall_status.value,
+        timestamp_ns=report.timestamp_ns,
+        received_ns=report.received_ns,
+        results_json=json.dumps([r.model_dump(mode="json") for r in report.results]),
+        failure_codes_json=json.dumps(report.failure_codes),
+        firmware_version=report.firmware_version,
+        uptime_seconds=report.uptime_seconds,
+        metadata_json=json.dumps(report.metadata),
+    )
+
+    # Broadcast BIT report via WebSocket for live dashboard
+    await state.live_hub.broadcast(
+        {
+            "type": "bit_report",
+            "node_id": node_id,
+            "report_type": report.report_type.value,
+            "overall_status": report.overall_status.value,
+            "failure_codes": report.failure_codes,
+            "timestamp_ns": report.timestamp_ns,
+        }
+    )
+
+    return report
+
+
+@app.get("/api/v1/nodes/{node_id}/bit", response_model=list[BITReport])
+async def get_node_bit_reports(
+    node_id: str,
+    request: Request,
+    report_type: BITType | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=500),
+) -> list[dict]:
+    """Retrieve BIT report history for a specific node."""
+    state = _require_state(request)
+    return await state.storage.list_bit_reports(
+        node_id=node_id,
+        report_type=report_type.value if report_type else None,
+        limit=limit,
+    )
+
+
+@app.get("/api/v1/nodes/{node_id}/bit/latest")
+async def get_node_latest_bit(
+    node_id: str,
+    request: Request,
+) -> list[dict]:
+    """Return the latest BIT report per type (PBIT/CBIT/IBIT) for a node."""
+    state = _require_state(request)
+    return await state.storage.latest_bit_report_per_type(node_id)
+
+
+@app.get("/api/v1/bit/failures")
+async def list_bit_failures(request: Request) -> dict[str, list[str]]:
+    """Return all nodes with active BIT failures and their failure codes."""
+    state = _require_state(request)
+    bit_evaluator: BITReportEvaluator = state.bit_evaluator
+    return await bit_evaluator.all_nodes_with_bit_failures()
 
 
 @app.get("/api/v1/detections")

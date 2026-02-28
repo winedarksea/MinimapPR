@@ -294,6 +294,22 @@ class Storage:
             );
             CREATE INDEX IF NOT EXISTS idx_environment_ts ON environment(timestamp_ns DESC);
             CREATE INDEX IF NOT EXISTS idx_environment_node_ts ON environment(node_id, timestamp_ns DESC);
+
+            CREATE TABLE IF NOT EXISTS bit_reports (
+                id TEXT PRIMARY KEY,
+                node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+                report_type TEXT NOT NULL,
+                overall_status TEXT NOT NULL,
+                timestamp_ns INTEGER NOT NULL,
+                received_ns INTEGER NOT NULL,
+                results_json TEXT NOT NULL,
+                failure_codes_json TEXT NOT NULL DEFAULT '[]',
+                firmware_version TEXT,
+                uptime_seconds REAL,
+                metadata_json TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE INDEX IF NOT EXISTS idx_bit_reports_node_ts ON bit_reports(node_id, timestamp_ns DESC);
+            CREATE INDEX IF NOT EXISTS idx_bit_reports_type ON bit_reports(report_type, timestamp_ns DESC);
             """
         )
 
@@ -508,6 +524,130 @@ class Storage:
                 ),
             )
             await self._commit_if_needed(db)
+
+    # ------------------------------------------------------------------
+    # BIT Reports
+    # ------------------------------------------------------------------
+
+    async def insert_bit_report(
+        self,
+        *,
+        report_id: str,
+        node_id: str,
+        report_type: str,
+        overall_status: str,
+        timestamp_ns: int,
+        received_ns: int,
+        results_json: str,
+        failure_codes_json: str,
+        firmware_version: str | None,
+        uptime_seconds: float | None,
+        metadata_json: str,
+    ) -> None:
+        db = self._require_db()
+        async with self._write_guard():
+            await db.execute(
+                """
+                INSERT INTO bit_reports (
+                    id, node_id, report_type, overall_status,
+                    timestamp_ns, received_ns, results_json,
+                    failure_codes_json, firmware_version,
+                    uptime_seconds, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    report_id,
+                    node_id,
+                    report_type,
+                    overall_status,
+                    timestamp_ns,
+                    received_ns,
+                    results_json,
+                    failure_codes_json,
+                    firmware_version,
+                    uptime_seconds,
+                    metadata_json,
+                ),
+            )
+            await self._commit_if_needed(db)
+
+    async def list_bit_reports(
+        self,
+        node_id: str | None = None,
+        report_type: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        db = self._require_db()
+        clauses: list[str] = []
+        params: list[object] = []
+        if node_id is not None:
+            clauses.append("node_id = ?")
+            params.append(node_id)
+        if report_type is not None:
+            clauses.append("report_type = ?")
+            params.append(report_type)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        rows = await (
+            await db.execute(
+                f"SELECT * FROM bit_reports{where} ORDER BY timestamp_ns DESC LIMIT ?",
+                (*params, limit),
+            )
+        ).fetchall()
+        result: list[dict] = []
+        for row in rows:
+            result.append(
+                {
+                    "id": row["id"],
+                    "node_id": row["node_id"],
+                    "report_type": row["report_type"],
+                    "overall_status": row["overall_status"],
+                    "timestamp_ns": row["timestamp_ns"],
+                    "received_ns": row["received_ns"],
+                    "results": _json_loads(row["results_json"], []),
+                    "failure_codes": _json_loads(row["failure_codes_json"], []),
+                    "firmware_version": row["firmware_version"],
+                    "uptime_seconds": row["uptime_seconds"],
+                    "metadata": _json_loads(row["metadata_json"], {}),
+                }
+            )
+        return result
+
+    async def latest_bit_report_per_type(self, node_id: str) -> list[dict]:
+        """Return the single newest BIT report per report_type for a node."""
+        db = self._require_db()
+        rows = await (
+            await db.execute(
+                """
+                SELECT b.* FROM bit_reports b
+                INNER JOIN (
+                    SELECT report_type, MAX(timestamp_ns) AS max_ts
+                    FROM bit_reports
+                    WHERE node_id = ?
+                    GROUP BY report_type
+                ) latest ON b.report_type = latest.report_type
+                    AND b.timestamp_ns = latest.max_ts
+                    AND b.node_id = ?
+                ORDER BY b.report_type
+                """,
+                (node_id, node_id),
+            )
+        ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "node_id": row["node_id"],
+                "report_type": row["report_type"],
+                "overall_status": row["overall_status"],
+                "timestamp_ns": row["timestamp_ns"],
+                "received_ns": row["received_ns"],
+                "results": _json_loads(row["results_json"], []),
+                "failure_codes": _json_loads(row["failure_codes_json"], []),
+                "firmware_version": row["firmware_version"],
+                "uptime_seconds": row["uptime_seconds"],
+                "metadata": _json_loads(row["metadata_json"], {}),
+            }
+            for row in rows
+        ]
 
     async def insert_observation(
         self,

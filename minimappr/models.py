@@ -339,3 +339,82 @@ class AlertStatus(str, Enum):
     ACKNOWLEDGED = "acknowledged"
     DISMISSED = "dismissed"
     ESCALATED = "escalated"
+
+
+# ---------------------------------------------------------------------------
+# Built-In Test (BIT) Reporting
+# ---------------------------------------------------------------------------
+
+
+class BITType(str, Enum):
+    """Category of Built-In Test."""
+
+    PBIT = "pbit"   # Power-On BIT — executed at node startup
+    CBIT = "cbit"   # Continuous BIT — periodic self-test during operation
+    IBIT = "ibit"   # Initiated BIT — on-demand test triggered by operator
+
+
+class BITStatus(str, Enum):
+    """Aggregate outcome of a BIT report or individual test."""
+
+    PASS = "pass"
+    FAIL = "fail"
+    DEGRADED = "degraded"
+
+
+class BITTestResult(BaseModel):
+    """Single sub-test within a BIT report.
+
+    Failure codes follow the convention ``<BIT_TYPE>_FAIL: <SUBSYSTEM>_<SYMPTOM>``
+    e.g. ``CBIT_FAIL: MIC_CH3_CLIP``, ``PBIT_FAIL: LORA_CORE_TIMEOUT``.
+    """
+
+    test_name: str = Field(min_length=1, description="Human-readable test identifier")
+    status: BITStatus
+    failure_code: str | None = Field(
+        default=None,
+        description="Structured failure code for fault isolation, e.g. CBIT_FAIL: MIC_CH3_CLIP",
+    )
+    detail: str | None = Field(default=None, description="Free-form diagnostic detail")
+    measured_value: float | None = Field(default=None, description="Observed metric value")
+    threshold: float | None = Field(default=None, description="Pass/fail threshold for measured_value")
+    subsystem: str | None = Field(default=None, description="Subsystem under test, e.g. audio, lora, gps")
+
+
+class BITReportIn(BaseModel):
+    """Inbound BIT report submitted by a sensor node."""
+
+    report_type: BITType
+    timestamp_ns: int | None = Field(default=None, gt=0)
+    results: list[BITTestResult] = Field(min_length=1)
+    firmware_version: str | None = None
+    uptime_seconds: float | None = Field(default=None, ge=0.0)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class BITReport(BaseModel):
+    """Stored / returned BIT report with server-assigned fields."""
+
+    id: str
+    node_id: str
+    report_type: BITType
+    overall_status: BITStatus
+    timestamp_ns: int
+    received_ns: int
+    results: list[BITTestResult]
+    failure_codes: list[str] = Field(
+        default_factory=list,
+        description="Convenience list of all non-null failure_code values from results",
+    )
+    firmware_version: str | None = None
+    uptime_seconds: float | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class NodeHealthStatus(str, Enum):
+    """Unified node health incorporating heartbeat staleness and BIT status."""
+
+    ONLINE = "online"
+    DEGRADED = "degraded"
+    OFFLINE = "offline"
+    BIT_FAIL = "bit_fail"  # BIT failure overrides heartbeat-based status

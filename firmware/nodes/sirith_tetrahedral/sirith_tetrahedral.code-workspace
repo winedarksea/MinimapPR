@@ -5,6 +5,9 @@
 		},
 		{
 			"path": "../../.."
+		},
+		{
+			"path": "../../../../house/catlin-house"
 		}
 	],
 	"settings": {

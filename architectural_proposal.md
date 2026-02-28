@@ -655,3 +655,101 @@ Systematic testing is critical for validating hardware and algorithm choices:
 - Accelerometer/barometer subtraction from audio to remove vibration artifacts
 - Time sync validation: known-pattern streaming across all nodes to verify alignment
 - Localization accuracy: known source positions, measure angular and distance error
+
+---
+
+## Home Assistant Integration Contract
+
+### Core Design Principle
+
+**HA is a device I/O bus. MinimapPR is a perception and spatial reasoning engine.**
+
+HA is the authoritative source for physical device state, actuator commands, and notification delivery. It has deep integrations with Zigbee, Z-Wave, Matter, and virtually every consumer smart home protocol. MinimapPR owns signal processing, spatial localization, track management, probabilistic rule evaluation, building spatial knowledge (IFC), and the COP. Neither system replicates the other's core capabilities.
+
+The integration is bidirectional but asymmetric: MinimapPR publishes semantic state that HA consumes; HA provides sensor and presence data that MinimapPR consumes. Complex spatial reasoning and probabilistic conditions always happen inside MinimapPR before anything is published. HA automations stay simple.
+
+### Division of Responsibility
+
+| Concern | Owner | Rationale |
+|---------|-------|-----------|
+| Device I/O (lights, locks, HVAC, switches) | HA | HA has the protocol integrations |
+| Physical device state persistence | HA | HA's entity registry is authoritative |
+| Notification delivery (push, SMS, email) | HA (triggered by MinimapPR MQTT) | HA has the notification integrations |
+| Simple device automations | HA | State machine style, HA's strength |
+| Acoustic signal processing, localization | MinimapPR | HA cannot do DSP/TDOA |
+| Track management and fusion | MinimapPR | Probabilistic, spatial — HA cannot |
+| Room detection (which room is event in) | MinimapPR (from IFC) | HA has no building geometry |
+| Equipment proximity queries | MinimapPR (from IFC) | Same reason |
+| Complex multi-condition probabilistic rules | MinimapPR | Confidence thresholds, covariance — HA cannot |
+| Semantic state publishing | MinimapPR → MQTT → HA | MinimapPR controls the contract |
+| Environmental sensor data (temp, humidity) | HA (source) → MinimapPR (consumer) | HA already has these devices deployed |
+| Person presence context | HA (source) → MinimapPR (consumer) | HA `person` entities are authoritative |
+| COP visualization | MinimapPR frontend | HA Lovelace cannot do spatial COP |
+| Building spatial knowledge (rooms, equipment) | IFC → MinimapPR | Single source of truth is the IFC model |
+| LLM analysis and anomaly synthesis | Above both systems | Consumes from MinimapPR + HA |
+
+### MQTT Semantic State Contract (MinimapPR → HA)
+
+MinimapPR publishes **named semantic state** rather than raw detection payloads. HA treats these topics as standard sensors via MQTT Auto-Discovery. `ActionDescriptor.payload["topic"]` controls which topic a rule fires to — the `HassRuleActionHandler` is a thin transport; all reasoning happens in the rules engine before publish.
+
+```
+minimappr/rooms/{room_id}/occupancy
+    Payload:  "occupied" | "vacant"
+    HA type:  binary_sensor (device_class: occupancy)
+
+minimappr/rooms/{room_id}/activity
+    Payload:  {"label": str, "confidence": float, "timestamp_s": int}
+    HA type:  event entity (event_type: minimappr_room_activity)
+
+minimappr/equipment/{equip_id}/anomaly
+    Payload:  {"type": str, "severity": "low"|"medium"|"high", "timestamp_s": int}
+    HA type:  event entity (event_type: minimappr_equipment_anomaly)
+
+minimappr/alerts/high
+    Payload:  {"room": str, "label": str, "message": str, "track_id": str|null}
+    HA type:  event entity (event_type: minimappr_alert)
+
+minimappr/alerts/normal
+    Payload:  {"room": str, "label": str, "message": str}
+    HA type:  event entity (event_type: minimappr_alert)
+
+minimappr/system/health
+    Payload:  {"active_nodes": int, "degraded_nodes": int, "active_tracks": int}
+    HA type:  sensor (diagnostic), periodic heartbeat
+
+minimappr/device_tracker/{track_id}
+    Payload:  {"room_id": str, "lat": float, "lon": float, "accuracy": float}
+    HA type:  device_tracker (confirmed human-class tracks only)
+```
+
+### Data Enrichment Contract (HA → MinimapPR)
+
+MinimapPR optionally reads from HA to enrich situational awareness. No HA modifications required — read-only via long-lived access token.
+
+**Environmental enrichment**: Poll `GET /api/states/{entity_id}` for temperature/humidity from Zigbee/Z-Wave sensors and push to MinimapPR's `/api/v1/ingest/environment`. The `EnvironmentProvider` then uses real measured values rather than static defaults, improving TDOA speed-of-sound accuracy.
+
+**Presence enrichment**: Subscribe to HA `person` entity state (home/away) and expose as a rule-evaluable context field (`ha_persons_home: bool`). Enables adaptive rule priority — glass break when `ha_persons_home: false` is critical; the same event with occupants home may be lower priority.
+
+### Anti-Patterns to Avoid
+
+- **Do not** push raw `DetectionEvent` payloads to HA expecting automations to parse position/confidence — HA cannot reason about this and automations become fragile
+- **Do not** replicate MinimapPR's spatial rule logic in HA — single source of truth for spatial reasoning
+- **Do not** try to make HA maintain track lifecycle state
+- **Do not** make MinimapPR depend on HA being available for core operation — enrichment is optional, pipeline runs in degraded mode without it
+- **Do not** put the LLM inside either MinimapPR or HA — it sits above both, consuming from MinimapPR's API and HA's state endpoint to synthesize context neither system has alone
+
+### IFC ↔ MinimapPR Coordinate Alignment
+
+The IFC model and MinimapPR share the same flat-XYZ meter convention:
+
+| System | Origin | X | Y | Z |
+|--------|--------|---|---|---|
+| MinimapPR (`flat` mode) | `MINIMAPPR_SITE_ORIGIN_LAT/LON` | East | North | Up |
+| catlin-house IFC | SW corner of foundation exterior | East | North | Up |
+
+Alignment requires only a one-time origin offset in config:
+```
+MINIMAPPR_COORDINATE_MODE=flat
+MINIMAPPR_IFC_MODEL_PATH=data/catlin_house.ifc
+MINIMAPPR_IFC_ORIGIN_OFFSET_M=[0.0, 0.0, 0.0]
+```
