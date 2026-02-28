@@ -10,7 +10,7 @@ Before examining applications, it is worth naming precisely what these three sys
 
 | System | Core Capability | What It Cannot Do Alone |
 |--------|-----------------|--------------------------|
-| **MinimapPR** | Perceives events in physical space — acoustic localization, tracking, classification, rules, COP | Does not know what physically exists at event locations. Cannot control devices. |
+| **MinimapPR** | Perceives events in physical space and maintains a live dynamic world model — acoustic localization, tracking, probabilistic track state, classification, rules engine, COP | Carries no *static* building knowledge: what rooms exist, what equipment is installed, where permanent structures are. Does not directly control consumer devices (lights, locks, HVAC). |
 | **IFC Digital Twin** | Knows what physically exists and exactly where — rooms, equipment, structures, building geometry, equipment lifecycle data | Cannot perceive events. Does not change. Is a static knowledge base. |
 | **Home Assistant** | Controls physical devices and delivers information — the actuator layer for the physical world | Cannot reason spatially. No building geometry. No probabilistic state. Cannot do signal processing. |
 
@@ -21,6 +21,27 @@ The combination forms a **complete perception → knowledge → action triad**:
 - *Turn on the relevant HA notification, log the maintenance ticket, adjust the zone alert* — Home Assistant
 
 None of the three pairs achieves this. All three together do. This is the fundamental multiplier.
+
+### 1.1 The Spatial Device and Spatial Automation Distinction
+
+The key asymmetry between MinimapPR's dynamic knowledge and IFC's static knowledge is what makes the triad necessary. But it also clarifies a critical design boundary: MinimapPR's "does not control consumer devices" is a deliberate architectural choice, not a capability limit. Two distinct categories of device control exist.
+
+**Consumer Devices (controlled by HA):**
+Lights, locks, HVAC thermostats, appliances, sensors, and switches — devices whose operation does not depend on real-time spatial track state. HA controls these via its extensive protocol integrations (Z-Wave, Zigbee, Matter, cloud APIs). MinimapPR's role is to *inform* HA of spatial state (room occupied, anomaly at equipment, person detected) via the MQTT semantic state contract. HA then decides what to do with its devices. This boundary must not be crossed — HA has years of protocol integration work that cannot and should not be replicated.
+
+**Spatial Devices (controlled by MinimapPR):**
+Drones, PTZ cameras, directed speaker arrays, steerable spotlights, and other effectors whose meaningful operation depends on real-time track state and 3D position. These cannot be delegated to HA because HA has no concept of track state or probabilistic spatial position. A PTZ camera that must track a moving object through a room cannot be controlled by an HA automation — it needs the live track feed from MinimapPR. Drones may have no HA integration at all; they communicate via MAVLink or ROS2.
+
+MinimapPR's `SpatialDevice` abstraction manages spatial devices directly under a **Rules of Engagement (RoE)** contract:
+- Device receives updated pointing or routing commands when a track enters its zone of responsibility
+- Device operations are constrained by exclusion zones, priority rules, and safety checks defined in the zone schema
+- Device state feeds back into the COP as a tracked effector node — the COP shows where the PTZ is aimed, where the drone is, and what is being monitored
+
+**Spatial Automations vs. HA Automations:**
+- *HA automation*: "When motion sensor fires in kitchen, turn on kitchen light" — positionally fixed device, binary trigger, no spatial reasoning needed
+- *Spatial automation* (MinimapPR rules engine): "When a track enters the boiler equipment proximity zone, begin acoustic baseline comparison; if anomaly score exceeds threshold, dispatch inspection drone to the boiler IFC position and alert HA notification service" — this requires live track state, 3D equipment positions, the equipment registry, and spatial device commands that HA cannot provide
+
+The rules engine is the spatial automation engine. HA automations respond to MinimapPR's MQTT semantic state outputs the same way they respond to any sensor. The two systems compose cleanly without either needing to understand the other's internal data model.
 
 ---
 
@@ -449,7 +470,341 @@ This service is the bridge between structured sensor data and human-readable int
 
 ---
 
-## Part 7: The Recommended Roadmap
+## Part 7: Spatial Data Import and Environment Modeling
+
+### 7.1 The Multi-Format Spatial Data Problem
+
+The IFC digital twin and GeoJSON outdoor model provide *design intent* spatial knowledge — what was planned or constructed. Real deployments require additional layers of spatial truth: how a space was actually built (as-built laser scan), the exact 3D geometry of equipment for acoustic shadow and bounding-volume computation, and terrain data for outdoor acoustic propagation. The platform needs a unified **Spatial Asset Registry** that ingests from multiple sources and normalizes into a shared 3D scene representation used for visualization, acoustic modeling, and navigation mesh generation.
+
+### 7.2 Supported Data Sources
+
+**Structured Building and Site Models**
+- IFC (`.ifc`): Rooms, equipment, structure — design intent, authoritative for static building data
+- GeoJSON (`.geojson`): Outdoor parcels, field boundaries, site-scale features and equipment positions
+
+**Equipment and Object Models (3D Geometry)**
+- STEP (`.stp` / `.step`): Mechanical CAD format; precise manufacturing geometry for industrial equipment and appliances
+- OBJ + MTL (`.obj`): General mesh format for furniture, equipment, terrain models
+- glTF / GLB (`.gltf` / `.glb`): Web-native 3D format, optimized for the COP visualization layer (`@thatopen/components`, Three.js)
+
+These allow a combine harvester, industrial press, or kitchen appliance to exist not just as a point in space but as a volumetric geometry — enabling acoustic shadow computation, proximity detection with actual bounding volumes, and true COP visualization. A 3D equipment model loaded alongside the IFC room geometry gives the acoustic engine an accurate model of how sound propagates around and through the object.
+
+**As-Built and Survey Data (Point Clouds)**
+- LAS / LAZ (`.las` / `.laz`): Industry-standard point clouds from terrestrial and aerial LIDAR scans
+- PLY (`.ply`): Triangulated surface meshes from photogrammetry or structured-light scanning
+- E57 (`.e57`): Professional scan interoperability format (Leica, FARO, NavVis scanners)
+- PCD (`.pcd`): ROS2-native point cloud format for direct robotics integration
+
+Point cloud data resolves the gap between design intent (IFC) and as-built reality: walls that shifted during construction, terrain that differs from the survey, equipment relocated after installation. For acoustic localization, room geometry must match physical reality — not the plans.
+
+**Photogrammetry / Structure from Motion**
+- Drone image sequences → dense point cloud via Colmap, ODM, or RealityCapture
+- Particularly relevant for outdoor farm-scale terrain and large equipment site mapping
+- Output: georeferenced point cloud (LAS/LAZ) and/or mesh (OBJ/glTF) at centimeter-level accuracy
+- Enables sub-centimeter reconstruction of grain bins, barns, and field terrain from drone overflights
+
+**Room Impulse Response (RIR) Measurements**
+- Measured impulse response profiles (swept sine or MLS signal) at known speaker/microphone positions
+- Capture the direct acoustic truth of how sound propagates in a specific space — reflection patterns, absorption, reverberation time (RT60) per room
+- Uses: calibrate TDOA localization for multipath correction; improve classification in highly reverberant spaces; generate per-room acoustic maps for sensor placement optimization
+- Can be computed by simulation (FDTD, image-source method) from point cloud geometry when direct measurement is impractical
+
+### 7.3 The Acoustic Calibration and Labeling Interface
+
+The combine harvester example illustrates a general challenge: when new equipment is registered in the spatial model, its acoustic signature at various operating states is unknown. No downloadable database exists for most industrial or agricultural equipment. A physical calibration process is required.
+
+The **Acoustic Calibration UI** is critical infrastructure for all equipment health monitoring use cases:
+
+**Guided Collection Mode:**
+- Technician positions a microphone node near a piece of equipment
+- System records acoustic data while equipment runs through defined operating states (idle, load, high-load, fault simulation if safe)
+- Equipment position recorded from IFC model, GPS, or manual entry on floor plan
+- Session saved as a labeled calibration dataset: `{equip_id, operating_state, position_m, timestamp, spectral_features[]}`
+
+**Acoustic Profile Management:**
+- Per-equipment acoustic profiles covering all defined operating states
+- Baseline stored as statistical model: mean spectral features per band per state, covariance matrix for Mahalanobis anomaly scoring
+- Calibration provenance metadata: when collected, by whom, equipment firmware/model at time of capture, environmental conditions
+- Re-calibration workflow: flag profile as stale after service events or equipment changes, collect new data, merge or replace baseline
+
+**Ground Truth Data for Comparative Analysis:**
+- When an anomaly is detected, the agentic workflow (Part 8) can search for reference audio: manufacturer service documentation, equipment-specific forums, or audio analysis databases
+- Collected reference data can be ingested as labeled comparison examples to refine local classifier thresholds
+
+**Integration Points:**
+- Calibration profiles stored alongside equipment entries in the zone/equipment JSON schema
+- `acoustic_baseline_id` field in `Pset_ifcPlot_EquipmentLifecycle` references the calibration record
+- Queryable via: `GET /api/v1/equipment/{equip_id}/calibration`
+
+### 7.4 Point Cloud Integration for Acoustic Modeling and Navigation
+
+Point cloud data serves two distinct purposes beyond visualization:
+
+**Acoustic Space Modeling:**
+Real room geometry significantly affects TDOA accuracy through multipath reflections. A point cloud of the actual space enables:
+- Acoustic impulse response computation via image-source method or FDTD simulation
+- Reflection-aware localization corrections for highly reverberant spaces (concrete warehouses, tile bathrooms, metal barns)
+- Identification of acoustic dead zones where sensor coverage is poor due to geometry
+- Optimal sensor placement simulation for new deployments before any hardware is installed
+
+**Navigation Mesh Generation:**
+For drone and robot deployment planning:
+- Voxelize the point cloud (OctoMap or similar) to create obstacle representation
+- Generate passable corridors from room geometry with configurable clearance envelopes per robot/drone size
+- Export in standard formats: NavMesh (JSON), MAVLink polygon fences, or VDA 5050 node-edge graph
+
+The platform does not need to perform all these computations internally. Its role is to be the data hub: aggregate point clouds, IFC models, and equipment geometry, and provide export APIs for specialized downstream tools (Blender, Isaac Sim, RViz2, NavMesh generators) to consume.
+
+---
+
+## Part 8: Agentic Integration Architecture
+
+### 8.1 Design Principles
+
+The agentic ecosystem in 2025–2026 is evolving rapidly, but several guiding principles are already clear:
+
+1. **Real-time alerting and agentic reasoning are separate paths.** The rules engine fires in milliseconds; agents reason in seconds to minutes. Events requiring immediate action (fire, intrusion, safety zone violation) never wait for an agent. Events that benefit from contextual analysis (acoustic anomaly below hard threshold, unusual occupancy pattern, equipment degradation trend) enter the **Agentic Review Queue** for asynchronous processing.
+
+2. **Agents do not have authority over life-safety systems.** An agent can recommend, summarize, and dispatch non-critical notifications. Only the rules engine — with explicit, human-authored Rules of Engagement — can command spatial devices or trigger safety relays.
+
+3. **MinimapPR exposes structured data, not raw audio.** Agents receive labeled events, spectral feature vectors, track state, equipment context, and IFC spatial metadata. Raw audio streams route to the STT/classification layer; only the output (classified events, transcript fragments, spectral anomaly data) enters the agentic path.
+
+4. **MCP is the agent-to-tool protocol.** MinimapPR implements an MCP (Model Context Protocol) server so that any MCP-compatible agent framework — Claude, LangGraph, AutoGen, custom — can query MinimapPR, the IFC model, and HA state in a standardized way without bespoke integration per agent type.
+
+### 8.2 MinimapPR as MCP Server
+
+MinimapPR exposes an MCP server as an additive layer alongside its REST API. MCP is an open JSON-RPC 2.0 standard for agent-to-tool communication — no changes to existing endpoints required.
+
+**Exposed Resources (read-only context for agent reasoning):**
+- `minimappr://context/current` — live operational snapshot: active tracks with room labels, equipment health summaries, recent alerts, HA state snapshot
+- `minimappr://zones/{zone_id}` — zone definition with equipment list and current occupancy state
+- `minimappr://equipment/{equip_id}` — equipment metadata, lifecycle data, acoustic baseline, anomaly history
+- `minimappr://alerts/recent` — alert history with full spatial context, configurable lookback
+- `minimappr://ifc/query` — parameterized spatial query: "what IFC elements are within 2 m of position X?"
+
+**Exposed Tools (agent-callable actions):**
+- `query_spatial_context(position_m, radius_m)` → returns IFC elements, zones, and equipment near a 3D position
+- `get_equipment_health(equip_id)` → current anomaly score, trend direction, recent spectral observations
+- `get_zone_occupancy(zone_id)` → current occupancy state, confidence, and recent track events
+- `submit_review_result(event_id, finding, recommended_action)` → agent posts findings back to MinimapPR review queue; high-confidence findings may trigger a rules engine re-evaluation, but agents do not directly dispatch alerts
+- `request_calibration_session(equip_id)` → schedules a technician-guided calibration collection
+
+### 8.3 The Agentic Review Queue
+
+The Agentic Review Queue is a buffer between MinimapPR's real-time event stream and agent-based analysis. It lets agents add contextual intelligence without being in the critical path.
+
+**Queue Trigger Conditions** (rules engine disposition: "watch and evaluate"):
+- Acoustic anomaly detected but below the hard alert threshold
+- Equipment anomaly score in the "concern" band but not yet "critical"
+- Unusual occupancy pattern (unusual hour, unusual duration, no matching rules)
+- Voice event with moderate confidence: "help" heard but context is ambiguous
+
+**Acoustic Anomaly Workflow (LangGraph orchestration):**
+```
+AnomalyEvent → AnomalyReviewGraph:
+  1. fetch_context(event.position, event.equip_id)
+       → MinimapPR MCP spatial query + IFC equipment lookup
+  2. fetch_equipment_history(equip_id)
+       → lifecycle record, service history, previous anomaly events
+  3. [conditional] search_reference_audio(equip_type, anomaly_type)
+       → web search: manufacturer service docs, equipment forums, audio analysis sources
+  4. [conditional] compare_spectral_features(event.features, reference)
+       → cosine similarity / Mahalanobis distance vs. reference profiles
+  5. synthesize_finding(all_context)
+       → LLM reasoning: what is the most probable cause given equipment age,
+         anomaly signature, operating history, and reference comparison?
+  6. route_finding(finding.severity):
+       LOW    → log, no notification
+       MEDIUM → HA advisory notification (informational)
+       HIGH   → HA priority notification + MinimapPR alert entry
+       CRITICAL → immediate escalation, spatial device dispatch if applicable
+```
+
+**Emergency Triage Workflow ("Help" Detection Example):**
+```
+VoiceEvent("help", confidence=0.72, zone="bedroom") → HelpTriageGraph:
+  1. fetch_zone_context(zone_id)
+       → occupancy, recent acoustic events, time of day, expected occupants
+  2. fetch_ha_presence(zone_id)
+       → HA person entities, last motion sensor activity, recent device interactions
+  3. assess_urgency(combined_context):
+       - Is the zone occupied? By whom? At what time?
+       - Are there corroborating signals (distress audio pattern, elevated acoustic energy)?
+       - Is this a known false positive source in this zone?
+  4. LLM decision (extended thinking for complex cases):
+       "Normal" disposition   → log, no notification sent
+       "Uncertain" disposition → gentle check-in notification to occupant/caregiver
+       "Emergency" disposition → immediate HA priority alert, optional spatial device dispatch
+```
+
+The critical principle: both workflows are fully asynchronous. The real-time rules engine has already evaluated each event and determined "not an immediate hard alert" before the queue receives it. Agent workflows complete in seconds to minutes with no impact on real-time responsiveness.
+
+### 8.4 Audio and Language Capabilities
+
+**Current state (2025–2026):**
+- GPT-4o has native multimodal audio capability — can process audio frames directly alongside text in a single API call
+- Claude (claude-sonnet-4-6, claude-opus-4-6) currently requires a transcription bridge: audio → Whisper → text + spectral metadata → Claude. This architectural limitation is expected to change
+- For acoustic anomaly analysis, spectral feature vectors (MFCC, mel-spectrogram, per-band energy) are the correct representation for LLM reasoning — not raw waveforms. "Given this spectral anomaly signature and equipment context, what is the most likely failure mode?" is answerable; "analyze this WAV" is not (yet)
+- Claude's extended thinking (internal reasoning up to 60 seconds for complex decisions) is well-suited to the emergency triage workflow where an unhurried but thorough contextual analysis is exactly what is needed
+
+**Practical design:**
+- Speech events: Whisper → transcript text → LLM for intent and context classification
+- Acoustic anomalies: MinimapPR spectral features + anomaly score + IFC context → LLM for failure mode reasoning
+- Reference comparison: agent fetches manufacturer documentation, forum discussions, or audio databases via MCP web search tool; compares against local spectral features
+- Future native audio: tool interfaces should be designed to accept audio passthrough when available — the architecture should not assume transcription will always be required
+
+### 8.5 Library Changes Required for Agentic Integration
+
+**MinimapPR:**
+- MCP server module (`minimappr/mcp/server.py`) — additive, no existing API changes
+- Agentic review queue (`minimappr/core/review_queue.py`) — async queue with LangGraph-compatible event schema
+- Event payloads extended with `agent_context` field: pre-assembled LLM-ready context bundle for each event
+- Existing WebSocket extended with event type filter for "agentic-eligible" events (queue consumers subscribe to this filter)
+- `GET /api/v1/context/current` endpoint (Part 6, already planned) is the primary MCP resource backing
+
+**catlin-house / ifcplot:**
+- Structured IFC spatial query function: `query_elements_near(position_m, radius_m, model)` → JSON list of IFC elements with type, name, GUID, property sets
+- Exposed as both a Python API and an MCP tool so agents can call it without ifcopenshell knowledge
+
+**New LLM Synthesis Service** (Part 6, new cross-system component):
+- Implements LangGraph workflows for the Agentic Review Queue
+- Hosts MCP client connections to MinimapPR, catlin-house IFC query API, and optionally HA
+- Manages review queue consumer process — subscribes to MinimapPR WebSocket, dispatches to appropriate workflow graph per event type
+- Maintains rolling context window of current operational state for proactive synthesis queries
+
+---
+
+## Part 9: Robotics and Autonomous Equipment Zone Routing
+
+### 9.1 Extending Zone Logic for Autonomous Systems
+
+MinimapPR's zone system already handles arbitrary 3D polygons for acoustic event attribution, occupancy tracking, and rule triggering. The same infrastructure is the correct foundation for autonomous equipment routing and access control — no parallel system needed. The zone schema requires only an extended `zone_type` taxonomy and associated behavioral contracts.
+
+**Extended Zone Type Taxonomy:**
+
+| Zone Type | Description | Relevant Standards |
+|-----------|-------------|-------------------|
+| `interior_space` | Room or area — occupancy and acoustic attribution | All |
+| `equipment_proximity` | Acoustic health and anomaly attribution radius | All |
+| `privacy_zone` | Privacy-mode region, restricted data retention | All |
+| `robot_exclusion` | Hard exclusion — no autonomous ground robots may enter | VDA 5050, OpenRMF |
+| `robot_slow` | Speed-reduced zone for ground robots (near humans, fragile items) | VDA 5050 |
+| `robot_corridor` | Preferred routing path with inbound/outbound designation | VDA 5050, OpenRMF |
+| `robot_reservation` | Dynamically reserved by an active robot, released on exit | VDA 5050, OpenRMF |
+| `agri_section` | Field section for ISOBUS section control (crop row, treatment zone) | ISOBUS ISO 11783 |
+| `agri_exclusion` | No-entry zone for agricultural equipment (habitat, drainage, sensitive terrain) | ISOBUS |
+| `drone_exclusion` | Hard exclusion — no autonomous aerial systems may enter | MAVLink, UTM |
+| `drone_slow` | Reduced-speed zone for drones (near structures, people, livestock) | MAVLink |
+| `drone_corridor` | Preferred flight corridor with inbound/outbound designation | MAVLink, U-Space |
+| `drone_inspection_point` | Named waypoint for inspection tasks | MAVLink |
+| `utm_corridor` | Airspace corridor with altitude bounds, shared with UTM/U-Space services | ASTM F3411, U-Space |
+
+The same zone polygon engine that handles acoustic occupancy also exports these zones to the appropriate robotics protocol — no separate spatial database is required.
+
+### 9.2 Indoor Ground Robots — VDA 5050
+
+VDA 5050 is the most mature standard for autonomous mobile robot (AMR) and automated guided vehicle (AGV) fleet management in indoor environments. It is widely adopted in warehousing and manufacturing, with open-source client libraries available in Python and Go.
+
+**What VDA 5050 provides:**
+- JSON/MQTT protocol between the Fleet Management System (FMS) and each robot
+- Node-edge graph topology: robots navigate between named nodes via named edges — the navigation graph maps directly to a simplified zone/corridor layout
+- Zone reservation and release: robot requests a zone segment before entering, holds it during transit, releases on exit — prevents collisions between robots
+- Action system: pick, place, dock, wait, and custom actions as parameterized task sequences
+- State reporting: position, velocity, battery state, errors, currently occupied zone
+
+**MinimapPR integration:**
+- Zone geometry → VDA 5050 node-edge graph export (zones become nodes, `robot_corridor` entries become edges)
+- `robot_exclusion` and `robot_slow` zones → VDA 5050 zone blocking and speed override rules
+- MinimapPR acoustic track detection in a `robot_corridor` → dynamic zone block message to FMS (human detected → robot hold)
+- Robot position telemetry from VDA 5050 FMS → MinimapPR COP as `TELEMETRY` mobile nodes (same node type used for drones)
+
+**OpenRMF** (Open Robotics Middleware Framework) provides a higher-level multi-robot coordination layer built on ROS2, covering space-time conflict scheduling and building-graph navigation. Appropriate for complex multi-robot environments where simple zone reservation is insufficient — OpenRMF and VDA 5050 are complementary, not competing.
+
+### 9.3 Agricultural Equipment — ISOBUS
+
+ISOBUS (ISO 11783) is the agricultural CAN bus standard governing how tractors and implements communicate: GPS receivers, section controllers, variable-rate application systems, and field terminals all use it. It is fundamentally a **physical bus**, not an IP network — integration with MinimapPR requires a gateway device.
+
+**ISOBUS capabilities relevant to this architecture:**
+- **Section control** (ISO 11783-7): Divide an implement boom into sections; the ISOBUS controller turns sections on/off based on GPS position and an application prescription map — direct field zone analog
+- **Task data** (ISO 11783-11): Structured field operation records — what was applied, where, when, at what rate (ISOBUS XML task file format)
+- **Telematics** (ISO 11783-10): Machine telemetry over cellular or satellite: GPS position, engine hours, fuel, fault codes
+- **Variable Rate Application**: GIS prescription maps (shapefiles or GeoJSON) drive variable rate of seed, fertilizer, or chemical per GPS polygon
+
+**Gateway integration strategy:**
+ISOBUS is CAN-based and not IP-native. A certified gateway (Topcon, Trimble, or AEF-compliant ISOBUS bridge) translates to MQTT or REST:
+- ISOBUS telematics → MQTT → MinimapPR `TELEMETRY` node (machine position, speed, status on COP)
+- MinimapPR `agri_section` zones → ISOBUS prescription map format (zone polygons → application zone file)
+- MinimapPR zone boundary crossing events → ISOBUS section control input (entering boundary → section on)
+- ISOBUS task data exports → catlin-house `Pset_ifcPlot_EquipmentLifecycle` (operational history enrichment: hours, fuel, application records)
+
+The priority is telemetry ingest (machine positions on COP) and field zone export (prescription map generation). Direct real-time ISOBUS command from MinimapPR is an advanced integration requiring farm-specific gateway hardware.
+
+### 9.4 Aerial Drones — MAVLink and Flight Tube Routing
+
+**MAVLink Protocol:**
+MAVLink is the dominant protocol for small UAV control — ArduPilot, PX4, and most drone autopilots natively speak it. It is binary (not JSON), transported over UDP or serial, with a comprehensive message set covering navigation, telemetry, commands, and fences.
+
+Relevant features:
+- **Polygon geofences** (`FENCE_POINT` messages): define exclusion zones (no-fly), inclusion zones (must-stay-within), and altitude bounds — map directly to `drone_exclusion`, `drone_corridor`, and `utm_corridor` zone types
+- **Waypoint navigation**: mission sequences as geo-referenced waypoints with altitude, action, and acceptance radius
+- **Telemetry**: position, battery, attitude, flight mode at 4–10 Hz — suitable for COP display as `TELEMETRY` nodes
+- **COMMAND_LONG**: command dispatch for takeoff, land, return-to-launch, mission start, and emergency stop
+
+**MinimapPR ↔ MAVLink integration:**
+- Drone position telemetry → MinimapPR COP as `TELEMETRY` nodes, zone-matched in real time
+- MinimapPR `drone_exclusion` zones → MAVLink exclusion fence upload to autopilot
+- Inspection task dispatch: rules engine identifies inspection need → generates waypoint mission sequence with IFC equipment position as target → uploads via MAVLink → monitors via telemetry
+- Safety override: MinimapPR track detected in drone operating zone → `COMMAND_LONG` hold or RTL command
+
+**Flight Tube Calculation:**
+A flight tube is a 3D corridor — a swept volume along a path — through which a drone is cleared to navigate. Unlike a simple waypoint sequence, a flight tube defines the lateral and vertical clearance envelope around the intended path, enabling conformance monitoring and airspace deconfliction.
+
+MinimapPR's approach to flight tubes:
+
+1. **Static flight tubes**: defined in the zone schema as `drone_corridor` or `utm_corridor` with polygon cross-section and altitude bounds. These are the "outbound highway" and "inbound highway" corridors for routine routes (loading dock → charging station → inspection point).
+
+2. **Dynamic flight tubes**: computed on-demand from current obstacle state (MinimapPR acoustic tracks, zone reservations, live telemetry of other drones) plus the IFC/point cloud navigation mesh. Path planning algorithms (RRT*, A* on voxel grid) produce a centerline; the clearance envelope is added based on drone size and wind margin.
+
+3. **UTM/U-Space integration**: for beyond-visual-line-of-sight (BVLOS) operations, computed flight tubes are submitted to a UTM service as flight authorization requests.
+
+**UTM and Airspace Standards:**
+- **ASTM F3411 / F3548** (US): FAA Remote ID and UTM framework — REST/JSON API for drone flight intent, conflict detection, and airspace authorization
+- **U-Space (EU EASA)**: European equivalent — UAS Flight Authorization Requests with flight tube geometry; real-time conformance monitoring via REST/SOAP services
+- **SAE J3216** (Cooperative Driving Automation taxonomy): describes multi-agent intent sharing and coordination levels — its cooperative intent model is a useful architectural reference for how MinimapPR zones can express "this corridor is in use by agent X with priority Y," though J3216 itself is not a UAV-specific protocol
+
+For farm and residential contexts: UTM registration may not be required for sub-250g drones operating within visual line of sight on private property. UTM integration is an optional advanced capability for larger or BVLOS-capable platforms.
+
+### 9.5 The Outbound/Inbound Highway Corridor Concept
+
+In any environment with regular autonomous equipment movement, ad-hoc path planning creates congestion and collision risk. Designated corridors with traffic flow direction — analogous to road lanes — are the proven solution.
+
+MinimapPR zone schema extension for corridor routing:
+
+```json
+{
+  "zone_id": "main_corridor_outbound",
+  "zone_type": "robot_corridor",
+  "corridor_direction": "outbound",
+  "paired_corridor": "main_corridor_inbound",
+  "priority": "high",
+  "max_speed_mps": 2.0,
+  "polygon_xy": [[...], [...]],
+  "z_floor": 0.0,
+  "z_ceiling": 2.5
+}
+```
+
+**Behavioral contracts:**
+- Outbound corridors carry traffic toward task areas (loading docks, inspection points, field sections)
+- Inbound corridors carry return traffic toward home base, charging stations, or staging areas
+- Intersection zones use priority rules based on corridor priority field, analogous to VDA 5050 zone reservation
+- MinimapPR acoustic tracking detects humans in corridor zones → dynamic speed reduction or hold command to FMS/autopilot
+
+The corridor system uses the same zone infrastructure as acoustic occupancy detection. The `zone_type` field determines which subsystems act: acoustic tracking, VDA 5050 node-edge export, MAVLink fence upload, or UTM corridor submission. No parallel spatial database needed.
+
+---
+
+## Part 10: The Recommended Roadmap
 
 ### Tier 1 — Foundation (Enables All Verticals)
 *These items have no conflicts, build on existing architecture, and are prerequisites for everything else.*
@@ -473,17 +828,26 @@ This service is the bridge between structured sensor data and human-readable int
 *Each item extends the platform to a new deployment context.*
 
 11. **MAVLink telemetry node type** — tractor, drone, robot COP integration
-12. **LLM synthesis service** — intelligence layer above MinimapPR + HA
-13. **Farm/outdoor IFC extension module** — agricultural facility modeling
-14. **Versioned zone export contract** — stable interface between spatial model and MinimapPR
+12. **MCP server module** — MinimapPR as MCP server for agentic tool access
+13. **Agentic review queue** — async event queue with LangGraph orchestration for contextual anomaly analysis
+14. **LLM synthesis service** — intelligence layer; hosts review queue workflows and MCP client connections
+15. **Acoustic calibration UI** — guided collection mode for per-equipment operating-state acoustic profiles
+16. **Farm/outdoor IFC extension module** — agricultural facility and field modeling
+17. **Versioned zone export contract** — stable interface between spatial model and MinimapPR
+18. **Extended zone type taxonomy** — `robot_corridor`, `drone_exclusion`, `utm_corridor`, `agri_section`, and related types
 
 ### Tier 4 — Future Capabilities (Architecturally Supported)
 *These require external platforms (robot hardware, city-scale deployment) but the architecture should not prevent them.*
 
-15. **IFC navigation mesh export** — for drone/robot path planning
-16. **Satellite/cellular MQTT** — conservation and remote farm deployments
-17. **Multi-site federation** — retail chains, large farms, military area operations
-18. **Full LLM-IFC query interface** — LLM agent makes `ifcopenshell` tool calls for spatial queries
+19. **IFC navigation mesh export** — voxelized point-cloud-derived navigation mesh for drone/robot path planning
+20. **Point cloud ingest pipeline** — LAS/LAZ/E57 import, voxelization, acoustic space simulation
+21. **VDA 5050 node-edge graph export** — zone geometry → robot FMS navigation graph
+22. **ISOBUS gateway integration** — agricultural machine telemetry ingest and prescription map export
+23. **MAVLink geofence sync** — automatic `drone_exclusion`/`drone_corridor` zone upload to drone autopilots
+24. **UTM/U-Space flight tube submission** — dynamic flight tube computation and BVLOS airspace authorization
+25. **Satellite/cellular MQTT** — conservation and remote farm deployments
+26. **Multi-site federation** — retail chains, large farms, military area operations
+27. **Full LLM-IFC query interface** — LLM agent makes `ifcopenshell` spatial query tool calls
 
 ---
 
