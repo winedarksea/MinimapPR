@@ -30,7 +30,7 @@ from minimappr.config import Settings, TrackingConfig
 from minimappr.core.track_associators import NearestNeighborAssociator
 from minimappr.core.track_filters import KalmanTrackFilter, LinearTrackFilter
 from minimappr.interfaces import TrackAssociator, TrackFilter
-from minimappr.models import TrackState, TrackStatus
+from minimappr.models import LabelId, TrackState, TrackStatus
 
 
 class TrackManager:
@@ -124,7 +124,7 @@ class TrackManager:
         label_category: str = "unknown",
         iff_category: str = "unknown",
         sensor_count: int = 1,
-        label_id: str | None = None,
+        label_id: LabelId | None = None,
         capability_tier: str = "full_3d",
     ) -> TrackState:
         async with self._lock:
@@ -266,4 +266,3 @@ class TrackManager:
         w_conf, w_corr, w_rec, w_sensor = self._tqi_weights
         tqi = (w_conf * confidence) + (w_corr * corroboration) + (w_rec * recency) + (w_sensor * sensor_factor)
         return float(np.clip(tqi, 0.0, 1.0))
-

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Literal
+from typing import Any, Literal, TypeAlias
 
 from pydantic import BaseModel, Field, model_validator
 
 
 Vec3 = tuple[float, float, float]
+LabelId: TypeAlias = str
 
 
 class TimeQuality(str, Enum):
@@ -201,7 +202,7 @@ class DetectionEvent(BaseModel):
     position_covariance_m2: list[list[float]] | None = None
     confidence: float
     gdop: float
-    label_id: str | None = None
+    label_id: LabelId | None = None
     label: str
     label_category: str = "unknown"
     iff_category: Literal["friendly", "unknown", "hostile"] = "unknown"
@@ -244,7 +245,7 @@ class TrackState(BaseModel):
     position_geo: GeoPoint | None = None
     position_covariance_m2: list[list[float]] | None = None
     velocity_mps: Vec3 = (0.0, 0.0, 0.0)
-    label_id: str | None = None
+    label_id: LabelId | None = None
     label: str = "unknown"
     label_category: str = "unknown"
     iff_category: Literal["friendly", "unknown", "hostile"] = "unknown"

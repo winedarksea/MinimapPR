@@ -1,6 +1,6 @@
 # The Synthesis Vision: MinimapPR + IFC Digital Twin + Home Assistant
 
-*A strategic analysis of the convergence of real-time spatial awareness, parametric building models, and smart home integration across residential, agricultural, retail, industrial, and conservation deployments.*
+*A strategic analysis of the convergence of real-time spatial awareness, parametric building models, and smart home integration across residential, agricultural, retail, conservation, event, and defense deployments.*
 
 ---
 
@@ -57,6 +57,8 @@ This is categorically different from conventional HA automation, which has no co
 ### Synergy 2: Equipment Acoustic Health Monitoring
 The IFC model contains the 3D position of every piece of equipment. MinimapPR localizes acoustic events to within ~1 m. A sound localized near equipment position X, classified as mechanical anomaly, can be attributed to a *specific piece of equipment* — not just "unusual noise in the basement" but "compressor bearing noise, unit 2 of 3, installed 22 months ago, 6 months past service interval." HA triggers a maintenance workflow with full context. This is predictive maintenance at zero additional hardware cost beyond the existing acoustic sensor network.
 
+**Important caveat on false positives:** Equipment acoustic anomaly detection is architecturally sound but practically difficult to make alert-worthy out of the box. Generic anomaly models produce high false positive rates — the same bearing-wear signature in a basement HVAC unit looks very different from the same failure mode in a barn ventilation fan, because the room acoustics, ambient noise floor, and equipment age profile all differ. The reliable path to effective alerting is a *data collection → human labeling → classifier training* pipeline (see Part 7.3), not direct deployment of a generic alert threshold. This synergy is real and high-value; it simply requires a deliberate data collection phase at each installation before confident alerting is warranted.
+
 ### Synergy 3: Presence-Adaptive Physical Environment
 MinimapPR produces room-level acoustic occupancy (confirmed human tracks in zone X). HA controls HVAC and lighting per zone. IFC defines the zones. The result: true presence-based building management — not schedule-based, not PIR-snap, but probabilistic track-based occupancy that follows people through rooms and adapts the physical environment accordingly. Commercial building energy studies consistently show 20–40% savings from true occupancy-based control vs. schedule-based.
 
@@ -74,66 +76,68 @@ When an LLM is reasoning about a situation, it needs to know what physical thing
 ## Part 3: Application Verticals — The Full Vision
 
 ### 3.1 Smart Home / Residential
-*The primary deployment. The reference architecture for all other verticals.*
+*The most frequently expected deployment type and the reference architecture for all other verticals.*
 
-**Acoustic Security:**
+The core residential mission is monitoring the home for incidents (accidents, security intrusions) to raise alerts, while coordinating smart home elements that benefit from spatial awareness. Energy savings come from turning off systems in unoccupied rooms. In the longer term this application coordinates repair and maintenance drones as well as air and ground traffic control for home delivery and services.
+
+**Incident Monitoring and Security:**
 - Glass break, intrusion, fire alarm, smoke detector T3 pattern detection with room-level localization
-- Acoustic fingerprinting of known sounds (neighbor's dog, specific car) for suppression
+- Acoustic fingerprinting of known sounds (neighbor's dog, specific car) for alert suppression
+- Fall detection and distress call monitoring — priority elevated when home is occupied but caregivers are absent
 - When-nobody-home priority elevation via HA presence enrichment
 
-**Equipment Health & Maintenance:**
-- HVAC compressor, air handler, heat pump acoustic baseline → anomaly scoring → maintenance dispatch
-- Appliance fault detection (dishwasher pump, washer bearing, refrigerator compressor)
-- Water sounds near plumbing fixtures → cross-validate with HA moisture sensors → leak detection
+**Equipment Health (Data Collection Phase → Alert Phase):**
+- HVAC compressor, air handler, heat pump: acoustic baseline collection during known-good operation; anomaly scoring after sufficient labeled data; maintenance dispatch when classifier is confident
+- Appliance fault detection (dishwasher pump, washer bearing, refrigerator compressor) follows the same pipeline
+- Water sounds near plumbing fixtures → cross-validate with HA moisture sensors → leak detection (high confidence event, alerts immediately)
 
-**Presence-Adaptive Automation:**
-- Room-level acoustic occupancy → HA HVAC zone control, lighting, security arming
-- Guest/occupant tracking for multi-zone climate and energy optimization
+**Presence-Adaptive Automation and Energy:**
+- Room-level acoustic occupancy → HA HVAC zone control and lighting — rooms with no active tracks shut down
 - "Last person out" acoustic confirmation before security arming
+- Guest/occupant tracking for multi-zone climate optimization; system adapts as people move through rooms
 
 **Voice & Intelligence:**
 - Wake word detection from any room → beamformed audio to STT → HA Voice (Wyoming)
-- Conversational memory from detected speech
-- LLM synthesis of daily home health: equipment, security, energy
+- LLM synthesis of daily home health: equipment status, security events, energy summary
 
-**Future — Drone/Robot Dispatch:**
-- Detected water leak near water heater → dispatch inspection drone to IFC-registered equipment position
+**Future — Drone/Robot Dispatch and Traffic Coordination:**
+- Detected water leak near water heater → dispatch inspection drone to IFC-registered equipment position; robot reports back visual confirmation
 - IFC provides navigation mesh (walls, openings, floor transitions)
-- Robot reports back visual confirmation; LLM assesses severity and next action
+- Air and ground traffic coordination for delivery drones and maintenance robots operating on the property; UTM-style corridor management for the home airspace
 
 ---
 
 ### 3.2 Agriculture / Family Farm
-*Highest ROI per dollar of deployment after residential. Equipment failure and livestock loss have immediate, large financial consequences.*
+*At a farm, this system becomes the awareness hub for a fully automated agricultural business. Highest ROI per dollar of deployment after residential — equipment failure and livestock loss have immediate, large financial consequences.*
 
-**Livestock Safety:**
+**Livestock Safety and Threat Response:**
 - Acoustic detection of livestock distress calls (cattle, pigs, poultry) with localization to barn/pen zone in the IFC/GeoJSON farm model
 - Predator intrusion detection: coyote calls, hawk screams, large animal approach — localized and cross-referenced with perimeter zone breaches
-- Automated deterrent response via HA-connected devices (strobe, speaker, sprinkler)
+- Automated deterrent response: the system can activate noise, sprinkler, or dispatch a deterrent drone directly; HA-connected devices provide the actuator layer
 - Birthing monitoring: unusual nighttime acoustic activity in calving zone → farmer alert
 - Sick animal acoustic signature change over time (behavioral acoustic change precedes physical symptoms by hours to days)
 - Poultry flock stress monitoring: crowding, heat stress, disease spread all have acoustic signatures in aggregate
 
-**Agricultural Equipment Health (Highest Single ROI Item):**
-- Combine, tractor, grain dryer, irrigation pump, auger, aeration fan — all have acoustic baselines
-- A bearing about to fail sounds different from a healthy bearing by days to weeks before failure
-- Preventing a combine breakdown at harvest easily justifies an entire deployment
-- IFC/GeoJSON farm model registers each piece of equipment at its nominal storage/operation position
-- MinimapPR builds per-equipment acoustic baseline during normal operation → anomaly scoring → HA maintenance alert
+**Autonomous Equipment Coordination and Worker Safety:**
+- GPS/MAVLink telemetry from autonomous tractors and field robots into MinimapPR as mobile nodes
+- COP shows tractor and drone positions relative to field boundaries, buildings, livestock, and workers at all times
+- Worker safety: tractor or equipment approach to a pedestrian zone → stop command sent to equipment AND HA-connected warning; people must not wander into active equipment zones undetected
+- Drone scouting data fed as environmental observations into MinimapPR
+- Tractor route planning against IFC/GeoJSON field model (crop zones, obstacle positions, exclusion areas)
+
+**Agricultural Equipment Health (Data Collection Phase → Alert Phase):**
+- Combine, tractor, grain dryer, irrigation pump, auger, aeration fan — all have acoustic baselines that must be established per-equipment before alerts are meaningful
+- A bearing about to fail sounds different from a healthy bearing by days to weeks before failure — but the signature is equipment- and installation-specific; generic models produce false positives
+- Initial deployment: data collection mode only; human technician labels acoustic events during operation
+- After sufficient labeled data, classifier training produces per-equipment thresholds; only then do maintenance alerts fire
+- Preventing a combine breakdown at harvest easily justifies an entire deployment — this motivates the investment in the data collection phase
 - Alert includes: which equipment, location, anomaly type, equipment age, last maintenance (from IFC equipment lifecycle property set)
 
-**Autonomous Equipment Integration:**
-- GPS/MAVLink telemetry from autonomous tractors and field robots into MinimapPR as mobile nodes
-- COP shows tractor and drone positions relative to field boundaries, buildings, livestock, workers
-- Worker safety: tractor approach to pedestrian zone → HA-connected warning
-- Tractor route planning against IFC/GeoJSON field model (crop zones, obstacle positions)
-- Drone scouting data fed as environmental observations into MinimapPR
-
-**Crop / Field Operations:**
+**Microclimate and Field Operations:**
 - IFC-extended GeoJSON spatial model of farm: field parcel boundaries, crop zones, irrigation grid, drainage
-- Soil moisture sensors, weather stations via HA → MinimapPR environmental enrichment → better outdoor acoustic compensation
-- Irrigation system acoustic monitoring: pump sounds, pipe anomalies, valve chatter
-- Crop zone states (growth stage, moisture level) as context for automation rules
+- Environmental sensor overlays (soil moisture, temperature, humidity via HA) → microclimate maps overlaid on the COP
+- Low-lying areas most at risk of frost identified by terrain model; automated frost alerts and irrigation control to protect crops in at-risk zones
+- Crop zone states (growth stage, moisture level, frost risk) as spatial context for automation rules
 - Multi-site farm federation: each building and field sector as a MinimapPR zone; federated COP for the whole farm
 
 **Farm Security:**
@@ -144,85 +148,60 @@ When an LLM is reasoning about a situation, it needs to know what physical thing
 ---
 
 ### 3.3 Retail
-*Most directly monetizable of the non-residential verticals. Occupancy intelligence, loss prevention, and HVAC optimization all have clear line-item value.*
+*Expected to be just one of many systems a retailer uses. The two primary MinimapPR contributions are security and experience analytics.*
 
-**Customer Experience & Operations:**
-- Zone occupancy density tracking → real-time staffing allocation signal to HA-connected display system
+**Experience Analytics:**
+The experience analytics use case is about using conversation energy and flow data to model engagement spatially. A museum is the clearest example: general patterns of satisfaction or dissatisfaction with sections of the museum — how long visitors dwell, their ambient voice energy (animated discussion vs. quiet disengagement), and traffic flow direction — can be assessed without recording individual conversations. This produces actionable data: which exhibits hold attention, which are skipped, where visitors cluster and where they rush through. The same capability in a retail store measures product placement effectiveness, dead zone identification, and queue formation.
+- Zone occupancy density tracking and dwell time distribution → product placement optimization and layout feedback
+- Ambient voice energy patterns by zone → engagement proxy (excited crowd vs. disengaged crowd) without content recording
 - Queue formation detection at checkout → automatic register-opening alert
-- Dwell time distribution by zone → product placement optimization data
-- "Dead zone" identification (zones with low dwell and low traffic despite good location) → layout feedback
-- Customer sentiment proxy from ambient voice energy levels and patterns by zone
+- "Dead zone" identification (low dwell and low traffic despite good location) → layout and display feedback
 
 **Energy (Large-Scale Impact):**
-- HVAC zone control from MinimapPR occupancy tracking vs. schedule-based control → 25–35% energy savings in large retail footprints, which have very high HVAC costs
+- HVAC zone control from MinimapPR occupancy tracking vs. schedule-based control → 25–35% energy savings in large retail footprints
 - Lighting control by zone occupancy in back-of-house, warehousing, service corridors
-- Refrigeration case monitoring (compressor acoustic anomaly detection) → reduce spoilage from undetected failures
+- Refrigeration case monitoring → reduce spoilage from undetected failures (uses the same data collection pipeline as equipment health; see Part 7.3)
 
-**Loss Prevention:**
-- Acoustic glass break localization → security camera cue to exact zone (not just "glass break somewhere in store")
+**Security:**
+- Acoustic glass break localization → security camera cue to exact zone
 - After-hours intrusion detection with room-level granularity
 - Acoustic altercation detection → staff dispatch + camera focus
 - High-value zone extended dwell monitoring (suspicious behavior pattern)
 
-**Inventory & Operations:**
-- IFC shelf/fixture positions as spatial model — stocking activity detected acoustically (box sounds, cart movement near specific shelf locations) correlates with inventory events
-- Integration with WMS: equipment POIs in IFC carry inventory location IDs from warehouse management system
-- Delivery/receiving zone acoustic monitoring → automated receiving workflow triggers
-- Equipment maintenance: refrigeration units, escalators, HVAC — all acoustic health monitoring
-
-**Privacy Note:** All retail applications require explicit privacy policy — acoustic event data only (no voice recording in commercial mode), anonymized occupancy counts, short retention on raw data, and zone-level aggregation rather than individual tracking.
+**Privacy Note:** All retail applications require explicit privacy policy — acoustic energy levels and event classification only (no voice content recording in analytics mode), anonymized zone-level occupancy counts, short retention on raw data. Individual tracking is explicitly out of scope for the analytics use case; zone-level aggregate data is the correct output.
 
 ---
 
-### 3.4 Industrial / Warehouse / Manufacturing
-*Single highest ROI application category overall: predictive acoustic maintenance on industrial machinery prevents catastrophic downtime.*
+### 3.4 Event
+*Movement monitoring, emergency response, audio capture, and spatial entertainment for concerts, weddings, conferences, and public gatherings.*
 
-**Predictive Maintenance:**
-- Conveyor belts, motors, compressors, presses, CNC machines, cooling towers — all have distinctive healthy and unhealthy acoustic signatures
-- Baseline profiling during commissioning → continuous comparison → maintenance alert at first anomaly, weeks before failure
-- Combined acoustic + vibration sensor nodes for industrial equipment → richer failure signatures
-- IFC registers every machine at its exact position; equipment property sets carry model, age, maintenance history
-- LLM synthesis: "Press #4 has shown elevated spectral energy in the 2–4 kHz band for 5 days. Historical data suggests this pattern precedes roller bearing failure. Recommended action: schedule inspection within 48 hours."
+For an event, the primary goals are monitoring crowd movements and emergencies. This should be compatible with police integration for incident response coordination — acoustic localization of distress, altercations, or gunfire provides precise vector data to help integrate incident response resources arriving on scene.
 
-**Worker Safety:**
-- Hazard zone entry detection: acoustic detection of people in robot operating zones, press safety zones, chemical zones → HA emergency stop relay
-- Forklift approach warning: forklifts have distinctive acoustic signatures; pedestrian approach to forklift zone → warning
-- Emergency event detection: alarm classification + localization → evacuation route optimization on COP
-- PPE monitoring: certain protective equipment has acoustic signatures (respirator breathing sounds, hard hat interactions)
+**Emergency Monitoring and Incident Response:**
+- Acoustic altercation and distress detection with localization → security staff dispatch + police-compatible alert with spatial coordinates
+- Gunshot detection with room- or zone-level position → immediate incident response coordination (CoT export to ATAK for police/security tactical systems)
+- Crowd density monitoring for crush prevention — zones exceeding occupancy thresholds trigger automated alerts to event management
+- Missing person or separated child: acoustic pattern plus occupancy flow to identify unusual movement
 
-**Production Operations:**
-- Production line COP: real-time view of production floor with equipment health indicators
-- Line stoppage detection: sudden silence in normally-active zone → immediate alert
-- Quality control: defective parts on certain production processes have detectable acoustic signatures
-- AGV/robot tracking via acoustic or MAVLink telemetry
+**Audio Recording for Distribution:**
+Audio recordings are a major event use case. A high-quality spatial view of the ambiance — the sound of a concert, the ambient murmur of a wedding reception, the acoustic environment of a keynote — is valuable for post-event distribution and memory.
+- Multi-node acoustic capture provides a spatial perspective on the event soundscape; beamforming selects optimal listening position
+- Synchronized with IFC spatial model of the venue → spatial audio rendering of the event for immersive playback
+- Recording metadata (zone positions, track counts, acoustic energy timeline) preserves a searchable index of event moments
 
----
+**Spatial Entertainment Features:**
+- Activation of spatial entertainment as guests move: lights, music, or effects triggered by track presence in specific zones (e.g., activating pathway lighting as guests walk down an entrance corridor)
+- Sound system beamforming directed at event activity zones
+- Interactive spatial features: performers or exhibits that respond to audience proximity via acoustic track state
 
-### 3.5 Healthcare / Hospital
-*High value and technically feasible, but requires careful privacy architecture. HIPAA compliance and anonymization are prerequisites, not afterthoughts.*
-
-**Patient Safety:**
-- Fall detection: falls produce a distinctive acoustic signature (rapid thud + absence of normal movement sounds); MinimapPR localizes to specific room → instant nurse call
-- Patient distress detection in rooms not under direct observation
-- Wandering patient monitoring (acoustic room presence tracking) → alert when patient leaves designated zone at night
-- Code blue: COP shows which staff are acoustically present nearest the event → fastest possible dispatch
-
-**Equipment Alarms:**
-- Medical device alarm classification is a significant clinical problem — alarms are routinely ignored because alarm fatigue is pervasive
-- MinimapPR can classify IV pump, ventilator, cardiac monitor alarm patterns and localize them to the specific room
-- Priority scoring (how long has this alarm been active, is there acoustic evidence of a human in the room responding?)
-- HA routes to the right nurse workstation with room and alarm type
-
-**Operations:**
-- Room occupancy for bed-turn and housekeeping scheduling
-- High-touch zone occupancy for infection control and disinfection scheduling
-- Equipment location tracking (infusion pumps, medication carts) via acoustic identification and MinimapPR tracking
-- Noise level monitoring per zone — patient recovery floors have clinical noise level requirements
+**Deployment Notes:** Event deployments are temporary — the spatial model (IFC or GeoJSON site map of the venue) is loaded for the event duration and may be a simplified floor plan rather than a full construction model. Node placement must be planned against the venue model before setup.
 
 ---
 
-### 3.6 Conservation / Wildlife Management
-*Technically straightforward extension of MinimapPR's core. Very high value for conservation outcomes and uniquely differentiated from existing tools.*
+### 3.5 Conservation and Biodiversity
+*Localization and mapping generate a clear view of the environment. Audio recordings serve both scientific purposes and public engagement.*
+
+Campsites, nature centers, and managed wildlife areas represent an ideal combination of event, conservation, and farm capabilities: managing biodiversity, detecting and responding to incidents, and managing cultivated nature sections. The conservation vertical is technically straightforward — a natural extension of MinimapPR's core acoustic capabilities into outdoor environments.
 
 **Anti-Poaching:**
 - Gunshot detection and localization in protected areas — already in MinimapPR's core capability
@@ -237,6 +216,11 @@ When an LLM is reasoning about a situation, it needs to know what physical thing
 - Species interaction events (predator-prey acoustic signatures)
 - Long-term acoustic ecology baselines for habitat health assessment
 
+**Audio Recording for Science and Entertainment:**
+- Scientific acoustic archive: time-indexed species detections with position for ecological research
+- Public engagement: a continuously recorded and curated nature stream — the ambient soundscape of the reserve available as a relaxing audio or video feed, with metadata tagging of notable acoustic events (dawn chorus, owl call, stream flow change)
+- Acoustic tourism: high-quality spatial recordings of the environment for visitor memories and engagement programs
+
 **Ecosystem Management:**
 - Acoustic monitoring of water features (stream flow levels, pump health in managed reserves)
 - Invasive species detection by acoustic signature (certain invasive species have distinctive calls)
@@ -246,20 +230,53 @@ When an LLM is reasoning about a situation, it needs to know what physical thing
 
 ---
 
-### 3.7 Military / Tactical
-*Already the conceptual origin of MinimapPR's COP design. IFC + HA provide new layers for base operations.*
+### 3.6 Smart City Parks and Facilities
+*Similar to nature centers but with greater focus on public safety, crime detection, and drone traffic control.*
 
-**Forward Base Operations:**
-- IFC model of FOB → optimal sensor placement planning, coverage analysis
+Smart city parks, transit plazas, and public facilities combine elements of event, conservation, and residential deployments at a civic scale. The deployment focus shifts toward public safety and infrastructure coordination.
+
+**Public Safety:**
+- Gunshot detection with precise zone attribution → immediate emergency service dispatch with location
+- Altercation detection and acoustic distress monitoring → security patrol dispatch
+- Crowd density monitoring in public spaces → proactive safety management during large gatherings
+- Perimeter and access monitoring for public infrastructure after hours
+
+**Drone Traffic Control:**
+- Parks and urban green spaces are natural drone corridors and landing zones; MinimapPR UTM corridor management coordinates this airspace
+- Drone detection: unauthorized drone acoustic signatures localized and flagged
+- Coordination of inspection and delivery drones operating within civic zones
+
+**Nature and Recreation Management:**
+- Biodiversity monitoring in urban parks (BirdNET species identification)
+- Acoustic environment quality monitoring for park health and visitor experience
+- Equipment health monitoring for park infrastructure (pumps, HVAC in facility buildings)
+
+**Deployment Notes:** Smart city deployments require federation across multiple zones managed by different departments. Privacy regulation is most stringent here — ANALYTICS mode is the maximum for public-space zones, OPERATIONAL only for secured back-of-house infrastructure.
+
+---
+
+### 3.7 Defense (Civilian Critical Infrastructure)
+*The military itself is not a primary user, but civilian corporations could run this application at defense manufacturing, energy, and other critical infrastructure sites, and integrate with military defense systems to help protect those nodes.*
+
+This is a specialized vertical for civilian operators of defense-adjacent critical infrastructure: defense manufacturing facilities, power generation, water treatment, fuel storage, and similar sites. The use case is protection from drone threats, vehicle intrusion, and — during periods of conflict — gunfire and physical attack. These operators may integrate with military defense systems to provide situational awareness data for area defense.
+
+**Perimeter and Airspace Monitoring:**
+- Acoustic drone detection and localization — small UAV acoustic signatures are distinctive and localizable
+- Vehicle approach detection on access roads — engine sounds, tire noise patterns
+- Gunfire detection and localization → immediate incident response coordination
+- Perimeter sensor health monitoring — degradation or tampering detection in real time via COP
+
+**Integration with Military Defense Systems:**
+- CoT export to ATAK/TAK Server: MinimapPR COP tracks available to military tactical picture
+- Drone telemetry via MAVLink into MinimapPR as mobile nodes — COP integrates authorized UAS and acoustic threat tracks
+- IFF analog: known authorized vehicles and personnel registered in the IFC-linked entity registry; unregistered contacts are flagged
+- Federated COP across multiple facilities for area protection picture
+
+**Facility Operations:**
+- IFC model of facility → optimal sensor placement planning, coverage analysis
 - Equipment and supplies spatial registry (IFC equipment POI at logistics positions)
-- Perimeter sensor health COP → degradation detection in real time
-- EMCON mode: node-level acoustic recording without RF transmission
-
-**Tactical Integration:**
-- CoT export to ATAK/TAK Server from MinimapPR COP
-- Drone telemetry via MAVLink into MinimapPR as mobile nodes — COP integrates UAS and acoustic tracks
-- IFF integration: known friendly vehicles/personnel in IFC-linked known entity registry
-- Multi-FOB federation for operational area COP
+- Equipment health monitoring for critical facility infrastructure using the same acoustic baseline pipeline as other verticals
+- EMCON-compatible mode: node-level acoustic recording without RF transmission when required
 
 ---
 
@@ -271,28 +288,31 @@ When an LLM is reasoning about a situation, it needs to know what physical thing
 |-------------|-------|----------------------|---------------|---------------------|
 | **Residential smart home** | High | High (designed for this) | None | IFC bridge, MQTT contract |
 | **Farm livestock acoustic safety** | High | High (same pipeline, new labels) | None | Outdoor GeoJSON model, livestock labels |
-| **Farm equipment health monitoring** | Very High | High (same pattern as home HVAC) | None | Acoustic baseline profiling module |
+| **Farm equipment health (data collection phase)** | High | High (baseline collection is straightforward) | None | Acoustic baseline profiling module + labeling UI |
+| **Farm equipment health (alert phase)** | Very High | Medium (requires per-equipment labeled data) | None | Classifier training pipeline, alert graduation |
 | **Autonomous tractor/drone COP** | Medium-High | Medium (MAVLink node type needed) | None | MAVLink telemetry node type |
-| **Retail occupancy & energy** | High | High (room occupancy already produced) | Privacy policy | Deployment profiles, privacy modes |
+| **Retail experience analytics** | High | High (zone occupancy + energy already produced) | Privacy policy | Deployment profiles, analytics privacy mode |
 | **Retail loss prevention** | Medium | High (core acoustic capabilities) | None | Retail-specific rules/labels |
-| **Industrial predictive maintenance** | Very High | High (same baseline pattern) | None | Acoustic baseline profiling module |
-| **Industrial worker safety** | High | High | Privacy policy | Safety zone types |
-| **Healthcare fall detection** | High | High (falls have clear signature) | HIPAA privacy | Healthcare privacy mode, fall model |
-| **Healthcare alarm localization** | High | High | HIPAA privacy | Medical device label taxonomy |
+| **Event emergency monitoring** | High | High (gunshot, altercation already core) | Privacy policy (recording) | Event deployment profile, CoT export |
+| **Event audio recording** | Medium-High | High (multi-node capture already planned) | None | Recording pipeline, spatial audio export |
+| **Event spatial entertainment** | Medium | Medium (spatial device control needed) | None | SpatialDevice zone triggers |
 | **Conservation anti-poaching** | High | High (gunshot already core) | None | Outdoor model, satellite MQTT |
 | **Biodiversity monitoring** | High | High (BirdNET already planned) | None | GeoJSON spatial model |
+| **Conservation audio archive** | Medium-High | High (same recording pipeline as event) | None | Long-term recording storage, tagging |
+| **Smart city public safety** | High | High (gunshot/altercation core) | Regulatory/privacy | Federation, ANALYTICS-only public zones |
+| **Smart city drone traffic control** | Medium | Medium (UTM integration needed) | Regulatory | UTM corridor submission |
+| **Defense perimeter monitoring** | High | High (gunshot, vehicle detection core) | None | Defense deployment profile, EMCON mode |
+| **Defense military integration** | Medium | Medium (CoT/ATAK already planned) | None | IFF entity registry, federation |
 | **LLM synthesis layer** | Very High | Medium (needs context API) | None (sits above both) | Context aggregation API |
 | **Drone/robot navigation** | High | Low (requires robot platform) | None | IFC navigation mesh export |
-| **Retail inventory correlation** | Medium | Medium (speculative) | None | WMS integration |
-| **Smart city infrastructure** | Medium | Low (requires city-scale deployment) | Regulatory/privacy | Federation at city scale |
 
 ### Highest-Value, Lowest-Conflict Cluster (Build These First)
 
-1. **Acoustic baseline profiling** — single new capability that unlocks predictive maintenance across all verticals (farm equipment, industrial machinery, home appliances). No conflict with any existing function.
-2. **Outdoor GeoJSON spatial model** — enables farm, conservation, and outdoor deployments without changing the indoor IFC path. The zone system already handles arbitrary polygons.
-3. **Deployment configuration profiles** — enables the same codebase to serve residential, farm, retail, and industrial without code branching. Each profile sets: label taxonomy, default rules, privacy mode, spatial model source, COP display style.
+1. **Acoustic baseline profiling (data collection)** — the first step toward predictive maintenance across all verticals; this phase has no false positive risk because it produces no alerts, only labeled data. No conflict with any existing function.
+2. **Outdoor GeoJSON spatial model** — enables farm, conservation, event (outdoor venues), and outdoor deployments without changing the indoor IFC path. The zone system already handles arbitrary polygons.
+3. **Deployment configuration profiles** — enables the same codebase to serve residential, farm, retail, event, and defense without code branching. Each profile sets: label taxonomy, default rules, privacy mode, spatial model source, COP display style.
 4. **Context aggregation API** — a single new endpoint that makes the LLM layer possible for all verticals. Zero conflict with existing functions.
-5. **Privacy modes** — prerequisite for commercial/retail/healthcare deployments. Clean architecture: privacy mode is a data retention and anonymization policy applied at the zone level, not a different code path.
+5. **Privacy modes** — prerequisite for commercial/retail/event deployments. Clean architecture: privacy mode is a data retention and anonymization policy applied at the zone level, not a different code path.
 
 ---
 
@@ -301,15 +321,14 @@ When an LLM is reasoning about a situation, it needs to know what physical thing
 ### Real Conflicts (Design Choices Required)
 
 **1. Privacy vs. Detailed Analytics**
-Retail occupancy analytics, healthcare patient tracking, and industrial worker monitoring are in tension with privacy expectations and regulations (GDPR, HIPAA, CCPA). This is not a technical conflict — it is a deployment policy conflict that must be explicitly resolved in the architecture.
+Retail occupancy analytics and event monitoring are in tension with privacy expectations and regulations (GDPR, CCPA). This is not a technical conflict — it is a deployment policy conflict that must be explicitly resolved in the architecture. With industrial and healthcare verticals out of scope, the regulatory surface is significantly reduced.
 
-*Resolution:* Tiered privacy modes applied per-zone:
-- `PRIVATE`: No audio storage, anonymized occupancy counts only, 60-second retention
-- `ANALYTICS`: Aggregated zone occupancy, no individual tracking, configurable retention
-- `OPERATIONAL`: Full tracking with appropriate data governance controls
-- `HEALTHCARE`: HIPAA-specific anonymization, audit logging, access controls
+*Resolution:* Three tiered privacy modes applied per-zone:
+- `PRIVATE`: No audio storage, anonymized occupancy counts only, 60-second retention — default for any zone with unknown occupants
+- `ANALYTICS`: Aggregated zone occupancy and acoustic energy levels, no individual tracking, configurable retention — appropriate for retail sales floor, event public areas, smart city public spaces
+- `OPERATIONAL`: Full tracking with appropriate data governance controls — appropriate for secured equipment zones, private property, and back-of-house areas where occupants are known
 
-Privacy mode is a first-class zone property, not a global setting — a retail store can have `ANALYTICS` in sales floor zones and `OPERATIONAL` in back-of-house equipment zones.
+Privacy mode is a first-class zone property, not a global setting — a retail store can have `ANALYTICS` in sales floor zones and `OPERATIONAL` in back-of-house equipment zones. A smart city park is `ANALYTICS` throughout; a farm is `OPERATIONAL` throughout since it is private property with known occupants.
 
 **2. Indoor Precision vs. Outdoor Scale**
 MinimapPR's TDOA acoustic localization is calibrated for indoor/small-area use (meter-level precision over 10s of meters with 50mm arrays). Agricultural and conservation deployments span 100s to 1000s of meters. GPS-based node positioning, larger inter-node spacing, and different propagation models are required.
@@ -346,9 +365,26 @@ Adding sensor positions, HA entity IDs, maintenance history, and acoustic baseli
 
 **1. Acoustic Baseline Profiling** *(New module — unlocks the single highest-value capability across all verticals)*
 
-A `minimappr/core/acoustic_baseline.py` module that builds per-location time-windowed statistical baselines of acoustic features (spectral centroid, energy, band-specific levels) and produces anomaly scores via Mahalanobis distance from baseline. Configurable per-equipment sensitivity thresholds. This is what transforms MinimapPR from an event detector into a predictive health monitor. Every equipment-monitoring use case across home, farm, industrial, and healthcare depends on this.
+**Critical distinction: known events vs. learned anomalies.** Acoustic detection should be understood as two fundamentally different capabilities with different false positive profiles:
 
-Required: baseline building phase, baseline querying API, anomaly event generation, `GET /api/v1/equipment/{equip_id}/health` endpoint.
+- **Known event detection** (gunshot, glass break, smoke alarm T3, distress call): High confidence immediately. These events are narrowband, distinctive, and have large training datasets available. They can fire alerts from day one with low false positive rates. This is the strong, reliable half of acoustic awareness.
+- **Equipment health deviation** (bearing wear, pump cavitation, compressor stress, appliance faults): Requires per-equipment, per-installation training. Generic anomaly thresholds will produce many false positives because the same fault signature sounds different in every physical context (room acoustics, ambient noise floor, equipment model variant). Alerts from this capability must be earned through a data collection pipeline, not assumed from day one.
+
+A `minimappr/core/acoustic_baseline.py` module implements both:
+
+**Phase 1 — Data Collection (deployed immediately, no alerts):**
+Builds per-location time-windowed statistical baselines of acoustic features (spectral centroid, energy, band-specific levels) during known-good operation. Collects and stores labeled acoustic observations associated with each registered equipment item. All anomaly-candidate events are queued for human review only — no alerts fire. The system is accumulating training data.
+
+**Phase 2 — Human Labeling (via Calibration UI):**
+A technician reviews queued acoustic events alongside the equipment context and labels them: normal variation, environmental interference, equipment anomaly, confirmed fault (see Part 7.3). This ground truth converts raw acoustic data into a training dataset.
+
+**Phase 3 — Classifier Training:**
+Once sufficient labeled data exists for a specific equipment item, a per-equipment classifier is trained. Alert thresholds are established based on the labeled data, not generic heuristics. Confidence intervals are computed so the system knows when to alert vs. when to continue collecting.
+
+**Phase 4 — Graduated Alerting:**
+Only at this stage do equipment health alerts fire. The alert includes: which equipment, location, anomaly type, confidence score, equipment age, last maintenance. Low-confidence detections continue to feed human review rather than generating noise.
+
+Required: baseline building phase, labeled observation storage, anomaly queue, classifier training interface, `GET /api/v1/equipment/{equip_id}/health` endpoint, alert graduation logic (phase 1-4 state per equipment).
 
 **2. Outdoor / GeoJSON Spatial Model**
 
@@ -356,11 +392,11 @@ Add a `GeoJSONBridge` alongside the planned `IFCBridge` that reads GeoJSON Featu
 
 **3. Deployment Configuration Profiles**
 
-A `DeploymentProfile` configuration object that presets: label taxonomy, default rules, zone source (IFC or GeoJSON), privacy mode defaults, COP display style (indoor floor plan vs. outdoor map), and acoustic thresholds for the deployment context. Profiles: `residential`, `farm`, `retail`, `industrial`, `conservation`, `tactical`. This enables the same binary to serve all verticals with appropriate behavior out of the box.
+A `DeploymentProfile` configuration object that presets: label taxonomy, default rules, zone source (IFC or GeoJSON), privacy mode defaults, COP display style (indoor floor plan vs. outdoor map), and acoustic thresholds for the deployment context. Profiles: `residential`, `farm`, `retail`, `event`, `conservation`, `smart_city`, `defense`. This enables the same binary to serve all verticals with appropriate behavior out of the box.
 
 **4. MAVLink / Telemetry Node Type**
 
-A `TELEMETRY` node type that receives position and state from MAVLink, ROS2, or MQTT telemetry streams rather than audio frames. Tracked as mobile nodes on the COP — the same track management, zone matching, and rules engine applies. This enables autonomous tractor, drone, and robot integration. Implements `IngestTransport` protocol.
+A `TELEMETRY` node type (or track type) that receives position and state from MAVLink, ROS2, or MQTT telemetry streams rather than audio frames. Tracked as mobile nodes on the COP — the same track management, zone matching, and rules engine applies. This enables autonomous tractor, drone, and robot integration. Implements `IngestTransport` protocol.
 
 **5. Context Aggregation API** *(Prerequisite for the LLM layer)*
 
@@ -368,7 +404,7 @@ A `TELEMETRY` node type that receives position and state from MAVLink, ROS2, or 
 
 **6. Privacy Mode Architecture**
 
-Per-zone `privacy_mode` property (`private`, `analytics`, `operational`, `healthcare`) that controls: audio retention, track granularity (individual vs. anonymized count), data export eligibility, and audit logging requirements. Privacy mode is evaluated at the zone-matching stage before any persistence.
+Per-zone `privacy_mode` property (`private`, `analytics`, `operational`) that controls: audio retention, track granularity (individual vs. anonymized count), data export eligibility, and audit logging requirements. Privacy mode is evaluated at the zone-matching stage before any persistence.
 
 **7. Equipment Health API**
 
@@ -395,14 +431,32 @@ These become first-class schema elements with versioned backward compatibility.
 
 The zone and equipment export scripts become a versioned interface (`v1.x`) that MinimapPR depends on. Schema changes follow a compatibility policy: additive changes only in minor versions; breaking changes require a major version bump with migration documentation. This prevents the spatial model and the perception system from drifting out of sync silently.
 
-**4. Lightweight CMMS in IFC**
+**4. Equipment Identity, Documentation, and the Distributed Metadata Architecture**
 
-The `Pset_ifcPlot_EquipmentLifecycle` property set, combined with MinimapPR's acoustic health data, creates a lightweight Computerized Maintenance Management System where:
-- The IFC model records what equipment exists, where, and its lifecycle metadata
-- MinimapPR records what acoustic health signals have been observed
-- The context API exposes both together for LLM or maintenance dashboard consumption
+Equipment metadata is naturally distributed across three stores with different roles — the architecture should make the boundaries explicit rather than forcing one store to do everything:
 
-No separate CMMS software required for a residential or agricultural deployment.
+| Store | Owns | Does NOT own |
+|-------|------|--------------|
+| **IFC `Pset_ifcPlot_EquipmentLifecycle`** | Physical identity: make, model, serial number, installation date, service intervals, physical location in the building | Real-time device state; retrieved documentation; acoustic data |
+| **Home Assistant device registry** | Real-time device state for *connected* devices: firmware version, online/offline, integration-specific attributes | Non-smart equipment (no HA entry exists for an unnetworked dishwasher or a grain dryer) |
+| **LLM Synthesis Service documentation cache** | Retrieved and cached manufacturer documentation, service manuals, known issue bulletins, indexed by model number | Equipment identity or real-time state |
+
+The IFC record is the superset — every piece of physical equipment should be registered here, smart or not. HA is a subset: connected devices appear in both IFC and HA; the IFC record carries the `ha_entity_id` as a link, not as the source of truth for identity.
+
+**LLM Documentation Lookup Pattern:**
+When an acoustic anomaly triggers agentic review, the model number in the IFC record is the lookup key. The LLM agent:
+1. Retrieves `model` from `Pset_ifcPlot_EquipmentLifecycle` via MCP tool call
+2. Searches for manufacturer documentation, service bulletins, known failure modes for that model
+3. Caches the retrieved documentation in the LLM service, keyed by model number — future queries for the same model skip the web search
+4. Reasons about the anomaly in the context of the model's known failure modes
+
+For equipment not yet in the IFC model, or where model is listed as `"unknown"`, the LLM agent can flag the equipment for identification — which leads to the drone inspection workflow (see Part 8.6).
+
+**Lightweight CMMS in IFC:**
+The `Pset_ifcPlot_EquipmentLifecycle` property set should be extended to include a documentation reference field:
+- `Pset_ifcPlot_EquipmentLifecycle`: `model`, `serial`, `manufacturer`, `install_date`, `service_interval_months`, `last_service_date`, `acoustic_baseline_id`, `model_doc_url` (optional: a stable URL to the manufacturer service manual, set once when the equipment is identified and unlikely to change)
+
+The combination of IFC + MinimapPR acoustic health data creates a lightweight CMMS requiring no separate software for residential or agricultural deployments. The LLM documentation cache adds the technical knowledge layer without polluting the geometric/lifecycle model with volatile retrieved content.
 
 **5. Farm / Outdoor Extension Module**
 
@@ -472,6 +526,46 @@ This service is the bridge between structured sensor data and human-readable int
 
 ## Part 7: Spatial Data Import and Environment Modeling
 
+### 7.0 How the Spatial Data Layers Work Together
+
+The document enumerates many data formats — IFC, STEP, GeoJSON, point clouds, impulse response profiles, and more. The practical question is: how do all these come together into something usable? The answer is a layered sequence where each data type serves a specific role, and they compose into a coherent operational picture.
+
+**Layer 1: The Zone and Equipment Registry (IFC / GeoJSON)**
+IFC (indoors) and GeoJSON (outdoors) define *what exists and where it is supposed to be*: rooms, zones, equipment positions, structural boundaries. This is the authoritative spatial skeleton. Everything else is referenced to it. When MinimapPR asks "what room is this event in?" or "what equipment is near position X?", it is querying this layer. This is the layer you build first — without it, acoustic events are anonymous points in space.
+
+**Layer 2: As-Built Reality (Point Cloud)**
+IFC describes design intent. Point cloud data (from LIDAR or photogrammetry) captures the space as it actually exists. Walls that moved during construction, equipment relocated after installation, terrain that differs from the survey drawing — all of these affect acoustic localization accuracy. The point cloud is registered (aligned) to the IFC model to produce a corrected spatial model. In practice, for a residential deployment, this may simply be a smartphone photogrammetry scan of each room; for a large farm, a drone overflight. *You do not need a point cloud to get started* — IFC geometry alone enables basic localization. The point cloud improves accuracy for difficult spaces (concrete barns, tile-heavy homes, irregular terrain).
+
+**Layer 3: Equipment Geometry (STEP / OBJ / glTF)**
+IFC registers an equipment item as a point in space with a bounding box. STEP or mesh geometry gives it a precise 3D shape — the actual form of a combine harvester, HVAC unit, or refrigerator. This enables two things: (1) accurate acoustic shadow computation (the equipment itself blocks and reflects sound, which matters for localization), and (2) realistic COP visualization where you can see the equipment's actual shape rather than a generic icon. This layer is optional for most deployments — it adds fidelity but is not required for basic operation.
+
+**Layer 4: Acoustic Space Calibration (Impulse Response Profiles)**
+The room impulse response tells the system how sound actually propagates in a specific space — where reflections arrive, how long reverberation persists, which paths are dominant. This is used to correct TDOA localization for multipath errors in reverberant spaces (concrete, tile, metal). In most residential rooms, the default propagation model is sufficient. In a concrete dairy barn, a reverberant industrial hall, or a tile bathroom, impulse response calibration significantly improves localization accuracy. These can be measured (swept sine at known positions) or simulated from the point cloud geometry (via image-source method).
+
+**Layer 5: Equipment Acoustic Profiles (Calibration Data)**
+Per the detailed discussion in 7.3: the acoustic profile for each piece of equipment is built through guided collection during known-good operation, then refined through human labeling of observed anomalies. This layer is built incrementally after deployment — it is the foundation of equipment health monitoring.
+
+**How They Compose Into Operational Value:**
+
+```
+IFC model loaded          → zone/equipment registry populated
+Point cloud registered    → localization accuracy improved for this space
+Equipment geometry loaded → acoustic shadow map built, COP visualization accurate
+Impulse response measured → TDOA corrections applied per room
+Equipment profiles built  → anomaly scoring against per-equipment baseline enabled
+Human labeling complete   → classifier trained, health alerts graduate to operational
+```
+
+**The practical deployment sequence:**
+1. Load IFC or GeoJSON → system is operational for event detection (glass break, gunshot, occupancy)
+2. Conduct photogrammetry scan → localization accuracy improves; acoustic dead zones identified
+3. Run guided collection on key equipment → baseline established; data collection mode begins
+4. Review observation queue weekly → labeled data accumulates
+5. After 60–90 days, per-equipment classifiers available → equipment health alerting goes live
+6. Add impulse response calibration for problem spaces → localization improves further in reverberant zones
+
+At each step the system adds value. Steps 1 and 2 can be completed in a day. Steps 3–5 take weeks to months. Step 6 is optional enhancement. No step blocks the others from delivering value independently.
+
 ### 7.1 The Multi-Format Spatial Data Problem
 
 The IFC digital twin and GeoJSON outdoor model provide *design intent* spatial knowledge — what was planned or constructed. Real deployments require additional layers of spatial truth: how a space was actually built (as-built laser scan), the exact 3D geometry of equipment for acoustic shadow and bounding-volume computation, and terrain data for outdoor acoustic propagation. The platform needs a unified **Spatial Asset Registry** that ingests from multiple sources and normalizes into a shared 3D scene representation used for visualization, acoustic modeling, and navigation mesh generation.
@@ -511,30 +605,44 @@ Point cloud data resolves the gap between design intent (IFC) and as-built reali
 
 ### 7.3 The Acoustic Calibration and Labeling Interface
 
-The combine harvester example illustrates a general challenge: when new equipment is registered in the spatial model, its acoustic signature at various operating states is unknown. No downloadable database exists for most industrial or agricultural equipment. A physical calibration process is required.
+The combine harvester example illustrates a general challenge: when new equipment is registered in the spatial model, its acoustic signature at various operating states is unknown. No downloadable database exists for most agricultural equipment, and even when manufacturer service documentation exists, the acoustic signature varies by installation (room acoustics, mounting, load conditions, age). A per-installation calibration and labeling process is required before reliable equipment health alerting is possible.
 
-The **Acoustic Calibration UI** is critical infrastructure for all equipment health monitoring use cases:
+**The false positive challenge.** Generic anomaly thresholds applied without per-equipment labeled data will produce many false positives. "The HVAC sounds louder than usual" is easily caused by a window opening, a door left ajar, or ambient weather — not a failing bearing. The architecture must not alert until it has earned the right to alert through a data collection and labeling pipeline. The **Acoustic Calibration UI** is critical infrastructure for making this transition.
 
-**Guided Collection Mode:**
+**Stage 1 — Guided Collection Mode (day 0 deployment):**
 - Technician positions a microphone node near a piece of equipment
 - System records acoustic data while equipment runs through defined operating states (idle, load, high-load, fault simulation if safe)
 - Equipment position recorded from IFC model, GPS, or manual entry on floor plan
 - Session saved as a labeled calibration dataset: `{equip_id, operating_state, position_m, timestamp, spectral_features[]}`
+- This establishes the known-good baseline. No alerts fire from this dataset; it is purely reference material.
 
-**Acoustic Profile Management:**
-- Per-equipment acoustic profiles covering all defined operating states
-- Baseline stored as statistical model: mean spectral features per band per state, covariance matrix for Mahalanobis anomaly scoring
-- Calibration provenance metadata: when collected, by whom, equipment firmware/model at time of capture, environmental conditions
-- Re-calibration workflow: flag profile as stale after service events or equipment changes, collect new data, merge or replace baseline
+**Stage 2 — Ongoing Observation Queue:**
+- During normal operation, MinimapPR continuously computes Mahalanobis distance from the established baseline
+- Observations above a configurable deviation threshold are queued for human review — not alerted
+- The review queue is the primary interface: "Here are 12 acoustic observations from your HVAC this week that deviated from baseline. Please label them."
+- Technician reviews each observation with audio playback (where permitted), spectral visualization, and equipment context; labels: `normal_variation`, `environmental_interference`, `equipment_anomaly`, `confirmed_fault`
 
-**Ground Truth Data for Comparative Analysis:**
-- When an anomaly is detected, the agentic workflow (Part 8) can search for reference audio: manufacturer service documentation, equipment-specific forums, or audio analysis databases
-- Collected reference data can be ingested as labeled comparison examples to refine local classifier thresholds
+**Stage 3 — Classifier Training:**
+- Once sufficient labeled observations exist (target: 30+ labeled anomaly events per equipment), a per-equipment classifier is trained on the local dataset
+- The classifier learns the specific signature of anomalies vs. normal variation *for this equipment in this installation* — which is fundamentally different from a generic model
+- Training produces a confidence model: the system now knows how similar a new observation must be to a labeled anomaly before it qualifies as an alert-worthy event
+
+**Stage 4 — Alert Graduation:**
+- Only at this stage does the equipment health alert fire proactively
+- Alert includes: which equipment, location, anomaly type, confidence score, similarity to labeled fault examples, equipment age, last maintenance date
+- Observations that remain below the alert confidence threshold continue feeding the review queue for ongoing label refinement
+- Re-calibration workflow: flag profile as stale after service events or equipment changes, re-enter Stage 1 for that equipment
+
+**Ground Truth from External Sources:**
+- The agentic workflow (Part 8) can search for reference audio from manufacturer service documentation, equipment-specific forums, or acoustic databases when a new anomaly type is encountered
+- External reference data is ingested as additional labeled examples to accelerate classifier training for a new fault mode
+- This is particularly valuable for rare fault modes (a specific bearing failure) where local examples may take months to accumulate
 
 **Integration Points:**
 - Calibration profiles stored alongside equipment entries in the zone/equipment JSON schema
-- `acoustic_baseline_id` field in `Pset_ifcPlot_EquipmentLifecycle` references the calibration record
+- `acoustic_baseline_id` and `alert_phase` (1–4) fields in `Pset_ifcPlot_EquipmentLifecycle` track calibration state
 - Queryable via: `GET /api/v1/equipment/{equip_id}/calibration`
+- Alert phase exposed in the Equipment Health API so the COP can display which equipment items are in data-collection vs. alerting mode
 
 ### 7.4 Point Cloud Integration for Acoustic Modeling and Navigation
 
@@ -642,14 +750,11 @@ The critical principle: both workflows are fully asynchronous. The real-time rul
 ### 8.4 Audio and Language Capabilities
 
 **Current state (2025–2026):**
-- GPT-4o has native multimodal audio capability — can process audio frames directly alongside text in a single API call
-- Claude (claude-sonnet-4-6, claude-opus-4-6) currently requires a transcription bridge: audio → Whisper → text + spectral metadata → Claude. This architectural limitation is expected to change
 - For acoustic anomaly analysis, spectral feature vectors (MFCC, mel-spectrogram, per-band energy) are the correct representation for LLM reasoning — not raw waveforms. "Given this spectral anomaly signature and equipment context, what is the most likely failure mode?" is answerable; "analyze this WAV" is not (yet)
-- Claude's extended thinking (internal reasoning up to 60 seconds for complex decisions) is well-suited to the emergency triage workflow where an unhurried but thorough contextual analysis is exactly what is needed
 
 **Practical design:**
-- Speech events: Whisper → transcript text → LLM for intent and context classification
-- Acoustic anomalies: MinimapPR spectral features + anomaly score + IFC context → LLM for failure mode reasoning
+- Speech events: speech to text → transcript text → LLM for intent and context classification
+- Acoustic anomalies: MinimapPR spectral features + anomaly score + IFC context with device details (model number, URL to manual) → LLM for failure mode reasoning
 - Reference comparison: agent fetches manufacturer documentation, forum discussions, or audio databases via MCP web search tool; compares against local spectral features
 - Future native audio: tool interfaces should be designed to accept audio passthrough when available — the architecture should not assume transcription will always be required
 
@@ -671,6 +776,38 @@ The critical principle: both workflows are fully asynchronous. The real-time rul
 - Hosts MCP client connections to MinimapPR, catlin-house IFC query API, and optionally HA
 - Manages review queue consumer process — subscribes to MinimapPR WebSocket, dispatches to appropriate workflow graph per event type
 - Maintains rolling context window of current operational state for proactive synthesis queries
+
+### 8.6 Equipment Identification Workflow (Drone-Assisted Knowledge Base Population)
+
+When equipment is registered in the IFC model with `model = "unknown"` — newly installed appliances, inherited equipment without documentation, or items added to the spatial model without manual data entry — the system has a gap in its ability to retrieve documentation for LLM reasoning. An agentic drone inspection workflow can close this gap:
+
+```
+EquipmentIdentificationRequest(equip_id) → IdentificationGraph:
+  1. fetch_equipment(equip_id)
+       → IFC record: position_m, zone_id, equip_type, model="unknown"
+  2. plan_inspection_mission(equipment.position_m)
+       → compute approach path to equipment nameplate viewing position
+       → check corridor availability, safety zone clearance
+  3. dispatch_drone(waypoint_mission)
+       → MAVLink mission upload; drone navigates to nameplate position
+  4. capture_images()
+       → drone hovers, captures nameplate/label photos
+       → images returned via drone telemetry or onboard storage
+  5. identify_model(images, equip_type)
+       → vision model (multimodal LLM): extract make, model, serial from photos
+       → cross-reference against manufacturer product databases if needed
+  6. update_ifc_record(equip_id, model, serial, manufacturer)
+       → PATCH /api/v1/equipment/{equip_id}
+       → Pset_ifcPlot_EquipmentLifecycle updated with identified values
+  7. retrieve_documentation(model)
+       → agent searches manufacturer documentation, service manuals
+       → cached in LLM service keyed by model number
+  8. notify(equip_id, "identification complete, documentation available")
+```
+
+This workflow transforms the equipment identification problem from a manual data entry task into an autonomous capability. The drone inspection serves two purposes simultaneously: identifying the equipment *and* providing the initial visual inspection that confirms the physical condition matches what the IFC model records.
+
+The same workflow can be triggered proactively on new deployments (inspect all equipment with unknown model numbers) or reactively (acoustic anomaly detected, model unknown → identify before attempting documentation-aided diagnosis).
 
 ---
 
@@ -771,8 +908,23 @@ MinimapPR's approach to flight tubes:
 - **ASTM F3411 / F3548** (US): FAA Remote ID and UTM framework — REST/JSON API for drone flight intent, conflict detection, and airspace authorization
 - **U-Space (EU EASA)**: European equivalent — UAS Flight Authorization Requests with flight tube geometry; real-time conformance monitoring via REST/SOAP services
 - **SAE J3216** (Cooperative Driving Automation taxonomy): describes multi-agent intent sharing and coordination levels — its cooperative intent model is a useful architectural reference for how MinimapPR zones can express "this corridor is in use by agent X with priority Y," though J3216 itself is not a UAV-specific protocol
+- **GUTMA Geographic Zones**: Global UTM Association specification for publicly discoverable, persistent UAS geographic zones (restrictions, conditional zones, authorized corridors). The closest existing standard to "published airspace features" that any operator can query.
 
 For farm and residential contexts: UTM registration may not be required for sub-250g drones operating within visual line of sight on private property. UTM integration is an optional advanced capability for larger or BVLOS-capable platforms.
+
+**Gap: Publicly Advertised, Real-Time-Status Corridors (Future Standard)**
+
+No current standard provides what would be the most operationally useful primitive: a *publicly advertised drone corridor* — a named, geographically fixed flight path published to any operator, with real-time occupancy and clearance status, analogous to a road with traffic data. A delivery service could publish "approach corridor alpha for drop zone 12: altitude 25–40m, inbound only, check status before entry." Any cooperating operator — including MinimapPR nodes at the delivery destination — could query its current status and contribute occupancy data.
+
+The technical components for this exist in pieces:
+- U-Space static geozones handle the published geometry
+- Remote ID (ASTM F3411) handles broadcasting who is in the corridor right now
+- MinimapPR's `utm_corridor` zone type already maintains acoustic-derived occupancy (whether the corridor volume has detected traffic)
+- UTM services already do per-flight conflict detection
+
+What is missing is a standard API for a site operator (MinimapPR) to *publish* real-time corridor occupancy to a shared infrastructure that external operators can subscribe to before filing a flight authorization. Urban Air Mobility route networks (vertiport-to-vertiport lanes) are driving development of this concept for larger aircraft, and the same infrastructure would logically extend to delivery drone lane management.
+
+MinimapPR's corridor zone design should be architected to support future participation in such a standard: corridor occupancy state is already computed (acoustic track presence in `drone_corridor` zones), and the `utm_corridor` zone type is already designed for UTM submission. The addition is a publication endpoint — "this corridor is currently clear / occupied / blocked" — that a future shared lane infrastructure could query. This note is worth tracking as a future capability once standards crystallize.
 
 ### 9.5 The Outbound/Inbound Highway Corridor Concept
 
@@ -818,10 +970,10 @@ The corridor system uses the same zone infrastructure as acoustic occupancy dete
 ### Tier 2 — Value Multiplication (Highest ROI New Capabilities)
 *These items add new capability categories that serve multiple verticals simultaneously.*
 
-6. **Acoustic baseline profiling module** — predictive maintenance for home, farm, industrial, healthcare
-7. **Deployment configuration profiles** — residential, farm, retail, industrial, conservation
+6. **Acoustic baseline profiling module** — data collection → labeling → classifier training pipeline for equipment health monitoring across home, farm, and retail verticals
+7. **Deployment configuration profiles** — residential, farm, retail, event, conservation, smart_city, defense
 8. **Context aggregation API** — prerequisite for the LLM synthesis service
-9. **Privacy mode architecture** — prerequisite for commercial/healthcare deployments
+9. **Privacy mode architecture** — prerequisite for commercial/retail/event/smart city deployments
 10. **Equipment health API** — surfaces baseline profiling data to COP and LLM
 
 ### Tier 3 — Extended Verticals (Specific New Infrastructure)
@@ -846,7 +998,7 @@ The corridor system uses the same zone infrastructure as acoustic occupancy dete
 23. **MAVLink geofence sync** — automatic `drone_exclusion`/`drone_corridor` zone upload to drone autopilots
 24. **UTM/U-Space flight tube submission** — dynamic flight tube computation and BVLOS airspace authorization
 25. **Satellite/cellular MQTT** — conservation and remote farm deployments
-26. **Multi-site federation** — retail chains, large farms, military area operations
+26. **Multi-site federation** — retail chains, large farms, defense facility clusters
 27. **Full LLM-IFC query interface** — LLM agent makes `ifcopenshell` spatial query tool calls
 
 ---
@@ -857,6 +1009,6 @@ The most important insight from this analysis is that **the three systems form a
 
 The immediate practical priority is Tier 1: getting the IFC knowledge base connected to MinimapPR's spatial reasoning and the MQTT semantic state contract connected to HA. This alone produces the full residential smart home synthesis.
 
-The highest-leverage single new capability is **acoustic baseline profiling**. It is technically straightforward (statistical modeling of spectral features over time), has zero conflict with any existing function, and unlocks predictive maintenance value in every vertical — from protecting a combine at harvest, to catching a failing hospital ventilator, to flagging a compressor a week before it shuts down a cold storage warehouse.
+The highest-leverage single new capability is **acoustic baseline profiling** — specifically, the data collection and human labeling pipeline that eventually produces reliable per-equipment classifiers. It is technically achievable (statistical modeling of spectral features, refined by labeled observations), has zero conflict with any existing function, and unlocks predictive maintenance value in every vertical — from protecting a combine at harvest, to catching a farm irrigation pump failure before a crop dries out, to flagging a compressor a week before it shuts down a cold storage unit. The key architectural shift is treating this capability as a *data pipeline that earns its alerts* rather than a threshold that fires from day one.
 
 The LLM synthesis service is the emergent intelligence layer that becomes possible once the other pieces are in place. Its value compounds with the quality of the underlying structured context — and the structured context (IFC spatial model + MinimapPR event history + HA device state) is uniquely rich precisely because of how these three systems complement each other.

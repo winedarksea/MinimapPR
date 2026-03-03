@@ -13,6 +13,7 @@ from minimappr.models import (
     GeoPoint,
     IngestFrameRequest,
     IngestFrameResponse,
+    LabelId,
     LocalizationResult,
     NodeSpec,
     StoreForwardIngestRequest,
@@ -153,11 +154,11 @@ class StorageBackend(Protocol):
         name: str,
         category: str,
         source: str,
-        parent_label_id: str | None = None,
+        parent_label_id: LabelId | None = None,
         external_taxonomy: str | None = None,
         external_label_id: str | None = None,
         created_ns: int,
-    ) -> str:
+    ) -> LabelId:
         ...
 
     async def insert_detection(
@@ -216,7 +217,7 @@ class StorageBackend(Protocol):
         timestamp_ns: int,
         ping_type: str,
         label: str | None,
-        label_id: str | None,
+        label_id: LabelId | None,
         spl_db: float | None,
         position_m: tuple[float, float, float] | None,
         position_geo: GeoPoint | None,

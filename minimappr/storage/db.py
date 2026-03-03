@@ -12,7 +12,7 @@ from typing import Any
 
 import aiosqlite
 
-from minimappr.models import DetectionEvent, GeoPoint, NodeSpec, TrackState
+from minimappr.models import DetectionEvent, GeoPoint, LabelId, NodeSpec, TrackState
 
 
 def _json_dumps(value: Any) -> str:
@@ -775,11 +775,11 @@ class Storage:
         name: str,
         category: str,
         source: str = "runtime",
-        parent_label_id: str | None = None,
+        parent_label_id: LabelId | None = None,
         external_taxonomy: str | None = None,
         external_label_id: str | None = None,
         created_ns: int,
-    ) -> str:
+    ) -> LabelId:
         db = self._require_db()
         label_id = f"lbl-{_slugify(name)[:48]}"
         async with self._write_guard():
@@ -1146,7 +1146,7 @@ class Storage:
         timestamp_ns: int,
         ping_type: str,
         label: str | None,
-        label_id: str | None,
+        label_id: LabelId | None,
         spl_db: float | None,
         position_m: tuple[float, float, float] | None,
         position_geo: GeoPoint | None,
