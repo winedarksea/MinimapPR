@@ -5,13 +5,7 @@ import numpy as np
 from minimappr.core.localization import LocalizationEngine
 from minimappr.sim.benchmark import EventRecord, compute_event_metrics
 from minimappr.sim.geometry import regular_tetrahedron_offsets_m
-
-
-def _shift_signal(signal: np.ndarray, sample_rate_hz: int, delay_s: float) -> np.ndarray:
-    n = signal.size
-    t = np.arange(n, dtype=np.float64) / sample_rate_hz
-    shifted_t = t - delay_s
-    return np.interp(shifted_t, t, signal, left=0.0, right=0.0).astype(np.float32)
+from tests.helpers import shift_signal
 
 
 def test_localization_benchmark_tight_geometry_tetra_case() -> None:
@@ -30,7 +24,7 @@ def test_localization_benchmark_tight_geometry_tetra_case() -> None:
     windows = {}
     for sensor_id, position in sensor_positions.items():
         distance = float(np.linalg.norm(source - position))
-        windows[sensor_id] = _shift_signal(excitation, sample_rate_hz, distance / sound_speed)
+        windows[sensor_id] = shift_signal(excitation, sample_rate_hz, distance / sound_speed)
 
     engine = LocalizationEngine(max_tau_s=0.003)
     result = engine.localize(

@@ -1,15 +1,10 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
-from minimappr.core.localization import LocalizationEngine
-
-
-def _shift_signal(signal: np.ndarray, sample_rate_hz: int, delay_s: float) -> np.ndarray:
-    n = signal.size
-    t = np.arange(n, dtype=np.float64) / sample_rate_hz
-    shifted_t = t - delay_s
-    return np.interp(shifted_t, t, signal, left=0.0, right=0.0).astype(np.float32)
+from minimappr.core.localization import LocalizationEngine, LocalizationError
+from tests.helpers import shift_signal
 
 
 def test_tdoa_localization_recovers_source_position() -> None:
@@ -34,7 +29,7 @@ def test_tdoa_localization_recovers_source_position() -> None:
     distances = {sensor_id: float(np.linalg.norm(source - pos)) for sensor_id, pos in sensor_positions.items()}
     windows = {}
     for sensor_id, distance in distances.items():
-        windows[sensor_id] = _shift_signal(excitation, sample_rate_hz, distance / sound_speed)
+        windows[sensor_id] = shift_signal(excitation, sample_rate_hz, distance / sound_speed)
 
     engine = LocalizationEngine(max_tau_s=0.03)
     result = engine.localize(
@@ -51,3 +46,29 @@ def test_tdoa_localization_recovers_source_position() -> None:
     assert error < 0.9
     assert result.confidence > 0.1
     assert np.isfinite(result.gdop)
+
+
+def test_localization_rejects_non_finite_windows() -> None:
+    sample_rate_hz = 16_000
+    sensor_positions = {
+        "s0": np.array([0.0, 0.0, 0.0]),
+        "s1": np.array([1.0, 0.0, 0.0]),
+        "s2": np.array([0.0, 1.0, 0.0]),
+        "s3": np.array([0.0, 0.0, 1.0]),
+    }
+    windows = {
+        "s0": np.array([0.0, 1.0, np.nan, 0.0], dtype=np.float32),
+        "s1": np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32),
+        "s2": np.array([0.0, 1.0, np.inf, 0.0], dtype=np.float32),
+        "s3": np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32),
+    }
+
+    engine = LocalizationEngine(max_tau_s=0.03)
+    with pytest.raises(LocalizationError):
+        _ = engine.localize(
+            sensor_positions=sensor_positions,
+            sensor_windows=windows,
+            sample_rate_hz=sample_rate_hz,
+            temperature_c=20.0,
+            humidity_fraction=0.5,
+        )

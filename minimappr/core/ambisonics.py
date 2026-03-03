@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import math
 import wave
 from dataclasses import dataclass
@@ -103,6 +104,20 @@ def write_wav_multichannel(path: Path, channels_first: np.ndarray, sample_rate_h
         wav.setsampwidth(2)
         wav.setframerate(int(sample_rate_hz))
         wav.writeframes(pcm.tobytes())
+
+
+def wav_multichannel_bytes(channels_first: np.ndarray, sample_rate_hz: int) -> bytes:
+    if channels_first.ndim != 2:
+        raise ValueError("Expected channels-first audio data")
+    interleaved = np.clip(channels_first.T, -1.0, 1.0)
+    pcm = (interleaved * 32767.0).astype("<i2")
+    out = io.BytesIO()
+    with wave.open(out, "wb") as wav:
+        wav.setnchannels(int(channels_first.shape[0]))
+        wav.setsampwidth(2)
+        wav.setframerate(int(sample_rate_hz))
+        wav.writeframes(pcm.tobytes())
+    return out.getvalue()
 
 
 @dataclass(slots=True)

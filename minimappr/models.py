@@ -185,6 +185,8 @@ class LocalizationResult(BaseModel):
     gdop: float = Field(ge=0.0)
     reference_sensor: str
     tdoa_s: dict[str, float] = Field(default_factory=dict)
+    attempted_algorithm: str | None = None
+    resolved_algorithm: str | None = None
 
 
 class DetectionEvent(BaseModel):
@@ -333,6 +335,26 @@ class ZoneSpec(BaseModel):
             if lon < -180.0 or lon > 180.0:
                 raise ValueError("zone longitude must be in [-180, 180]")
         return self
+
+
+class ZoneOccupancyState(BaseModel):
+    zone_id: str
+    zone_name: str
+    zone_type: str
+    occupied: bool
+    occupying_track_ids: list[str] = Field(default_factory=list)
+    occupying_labels: list[str] = Field(default_factory=list)
+    updated_ns: int
+
+
+class ContextSnapshot(BaseModel):
+    generated_ns: int
+    active_tracks: list[dict[str, Any]] = Field(default_factory=list)
+    zone_occupancy: list[ZoneOccupancyState] = Field(default_factory=list)
+    recent_alerts: list[dict[str, Any]] = Field(default_factory=list)
+    node_health: dict[str, int] = Field(default_factory=dict)
+    environment: dict[str, Any] = Field(default_factory=dict)
+    system_health: str = "ok"
 
 
 class AlertStatus(str, Enum):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -173,5 +174,64 @@ async def test_storage_retention_cleanup_removes_expired_records(tmp_path: Path)
     assert await storage.list_environment(limit=10) == []
     tracks = await storage.list_tracks(limit=20)
     assert all(track["id"] != "trk-dropped-old" for track in tracks)
+
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_storage_concurrent_read_write_stress(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "concurrency.db")
+    await storage.initialize()
+
+    base_ns = 2_100_000_000_000_000_000
+    node = NodeSpec(
+        id="node-concurrent",
+        node_type=NodeType.POINT,
+        position_m=(0.0, 0.0, 0.0),
+        sensor_offsets_m=[(0.0, 0.0, 0.0)],
+        capabilities=["audio"],
+    )
+    await storage.upsert_node(node, last_seen_ns=base_ns)
+
+    async def writer(worker_id: int) -> None:
+        for index in range(24):
+            timestamp_ns = base_ns + (worker_id * 1_000_000_000) + (index * 10_000_000)
+            await storage.upsert_node(node, last_seen_ns=timestamp_ns)
+            await storage.insert_detection(
+                detection=DetectionEvent(
+                    id=f"det-{worker_id}-{index}",
+                    timestamp_ns=timestamp_ns,
+                    position_m=(float(worker_id), float(index % 5), 0.0),
+                    confidence=0.65,
+                    gdop=1.2,
+                    label="test_signal",
+                    label_category="unknown",
+                    label_confidence=0.65,
+                    reference_sensor="node-concurrent:ch0",
+                ),
+                snippet_path=None,
+                snippet_expires_ns=None,
+                retention_tier="short",
+            )
+            await asyncio.sleep(0)
+
+    async def reader() -> None:
+        for _ in range(64):
+            detections = await storage.list_detections(limit=256)
+            nodes = await storage.list_nodes(limit=16)
+            assert nodes
+            assert all("id" in row for row in detections)
+            await asyncio.sleep(0)
+
+    await asyncio.gather(
+        writer(0),
+        writer(1),
+        writer(2),
+        reader(),
+        reader(),
+    )
+
+    detections = await storage.list_detections(limit=512)
+    assert len(detections) >= 72
 
     await storage.close()

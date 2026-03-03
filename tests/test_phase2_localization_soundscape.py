@@ -22,13 +22,7 @@ from minimappr.core.zones import ZoneMatcher
 from minimappr.models import ClassificationResult, GeoPoint, IngestFrameRequest, LocalizationResult, NodeSpec, NodeType
 from minimappr.storage.db import Storage
 from minimappr.utils.audio import encode_pcm16le_b64, rms
-
-
-def _shift_signal(signal: np.ndarray, sample_rate_hz: int, delay_s: float) -> np.ndarray:
-    n = signal.size
-    t = np.arange(n, dtype=np.float64) / sample_rate_hz
-    shifted_t = t - delay_s
-    return np.interp(shifted_t, t, signal, left=0.0, right=0.0).astype(np.float32)
+from tests.helpers import StubLocalizer, shift_signal
 
 
 @pytest.mark.parametrize(
@@ -58,7 +52,7 @@ def test_phase2_localizers_return_reasonable_solution(localizer, max_error_m: fl
     windows = {}
     for sensor_id, position in sensor_positions.items():
         distance = float(np.linalg.norm(source - position))
-        windows[sensor_id] = _shift_signal(excitation, sample_rate_hz, distance / sound_speed)
+        windows[sensor_id] = shift_signal(excitation, sample_rate_hz, distance / sound_speed)
 
     result = localizer.localize(
         sensor_positions=sensor_positions,
@@ -75,38 +69,12 @@ def test_phase2_localizers_return_reasonable_solution(localizer, max_error_m: fl
     assert np.isfinite(result.gdop) or np.isinf(result.gdop)
 
 
-class _StubLocalizer:
-    def __init__(self, name: str, confidence: float) -> None:
-        self.name = name
-        self.confidence = confidence
-        self.calls = 0
-
-    def localize(
-        self,
-        sensor_positions: dict[str, np.ndarray],
-        sensor_windows: dict[str, np.ndarray],
-        sample_rate_hz: int,
-        temperature_c: float,
-        humidity_fraction: float,
-    ) -> LocalizationResult:
-        del sensor_windows, sample_rate_hz, temperature_c, humidity_fraction
-        self.calls += 1
-        reference_sensor = sorted(sensor_positions.keys())[0]
-        return LocalizationResult(
-            position_m=(0.0, 0.0, 0.0),
-            confidence=self.confidence,
-            gdop=1.0,
-            reference_sensor=reference_sensor,
-            tdoa_s={},
-        )
-
-
 def test_localization_dispatch_geometry_aware_and_cascade() -> None:
     stubs = {
-        "gcc_phat": _StubLocalizer("gcc", 0.2),
-        "srp_phat": _StubLocalizer("srp", 0.5),
-        "music": _StubLocalizer("music", 0.8),
-        "esprit": _StubLocalizer("esprit", 0.7),
+        "gcc_phat": StubLocalizer("gcc", 0.2),
+        "srp_phat": StubLocalizer("srp", 0.5),
+        "music": StubLocalizer("music", 0.8),
+        "esprit": StubLocalizer("esprit", 0.7),
     }
     dispatcher = LocalizationDispatcher(
         strategy="geometry_aware",
@@ -169,12 +137,12 @@ def test_beamformers_improve_target_correlation() -> None:
     for sensor_id, position in sensor_positions.items():
         target_delay = float(np.linalg.norm(target_pos - position) / sound_speed)
         int_delay = float(np.linalg.norm(interferer_pos - position) / sound_speed)
-        mix = _shift_signal(clean, sample_rate_hz, target_delay)
-        mix += _shift_signal(interferer, sample_rate_hz, int_delay)
+        mix = shift_signal(clean, sample_rate_hz, target_delay)
+        mix += shift_signal(interferer, sample_rate_hz, int_delay)
         mix += rng.normal(0.0, 0.03, size=n).astype(np.float32)
         windows[sensor_id] = mix
 
-    target_ref = _shift_signal(
+    target_ref = shift_signal(
         clean,
         sample_rate_hz,
         min(float(np.linalg.norm(target_pos - p) / sound_speed) for p in sensor_positions.values()),

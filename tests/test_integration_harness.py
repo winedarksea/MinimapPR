@@ -18,13 +18,7 @@ from minimappr.core.zones import ZoneMatcher
 from minimappr.models import GeoPoint, IngestFrameRequest, NodeSpec, NodeType
 from minimappr.storage.db import Storage
 from minimappr.utils.audio import encode_pcm16le_b64
-
-
-def _shift_signal(signal: np.ndarray, sample_rate_hz: int, delay_s: float) -> np.ndarray:
-    n = signal.size
-    t = np.arange(n, dtype=np.float64) / sample_rate_hz
-    shifted_t = t - delay_s
-    return np.interp(shifted_t, t, signal, left=0.0, right=0.0).astype(np.float32)
+from tests.helpers import shift_signal
 
 
 @pytest.mark.asyncio
@@ -81,7 +75,7 @@ async def test_integration_harness_multi_node_tdoa_pipeline(tmp_path: Path) -> N
         for idx, position in enumerate(node_positions):
             pos_arr = np.asarray(position, dtype=np.float64)
             distance = float(np.linalg.norm(source - pos_arr))
-            signal = _shift_signal(excitation, sample_rate_hz, distance / sound_speed)
+            signal = shift_signal(excitation, sample_rate_hz, distance / sound_speed)
             request = IngestFrameRequest(
                 node=NodeSpec(
                     id=f"point-node-{idx}",
@@ -164,7 +158,7 @@ async def test_integration_harness_three_node_degrades_to_2d(tmp_path: Path) -> 
     for sequence in (1, 2):
         for idx, position in enumerate(positions):
             distance = float(np.linalg.norm(source - np.asarray(position, dtype=np.float64)))
-            signal = _shift_signal(excitation, sample_rate_hz, distance / sound_speed)
+            signal = shift_signal(excitation, sample_rate_hz, distance / sound_speed)
             response = await fusion.ingest(
                 IngestFrameRequest(
                     node=NodeSpec(

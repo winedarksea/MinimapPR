@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import io
 import sqlite3
 import time
+import wave
 from pathlib import Path
 
 import numpy as np
@@ -289,3 +291,98 @@ def test_environment_current_falls_back_when_no_live_temperature(monkeypatch, tm
         assert current["humidity_fraction"] == pytest.approx(0.35, abs=1e-6)
         assert current["pressure_pa"] == pytest.approx(101420.0, abs=1e-3)
         assert current["metadata"]["source"] == "static_fallback"
+
+
+def test_http_ingest_rejects_invalid_base64_payload(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    payload = {
+        "node": {
+            "id": "http-node-bad-b64",
+            "node_type": "point",
+            "position_m": [0.0, 0.0, 0.0],
+            "sensor_offsets_m": [[0.0, 0.0, 0.0]],
+            "capabilities": ["audio"],
+            "metadata": {},
+            "properties": {},
+        },
+        "frame": {
+            "start_time_ns": time.time_ns(),
+            "sample_rate_hz": 16000,
+            "channels": 1,
+            "encoding": "pcm16le",
+            "samples_b64": "%%%not_base64%%%",
+            "sequence": 1,
+            "source_type": "raw_sensor",
+        },
+    }
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/ingest/frame", json=payload)
+        assert response.status_code == 400
+        assert "Invalid base64 audio payload" in response.text
+
+
+def test_http_ingest_rejects_odd_byte_length_pcm(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    payload = {
+        "node": {
+            "id": "http-node-odd-pcm",
+            "node_type": "point",
+            "position_m": [0.0, 0.0, 0.0],
+            "sensor_offsets_m": [[0.0, 0.0, 0.0]],
+            "capabilities": ["audio"],
+            "metadata": {},
+            "properties": {},
+        },
+        "frame": {
+            "start_time_ns": time.time_ns(),
+            "sample_rate_hz": 16000,
+            "channels": 1,
+            "encoding": "pcm16le",
+            "samples_b64": "AA==",  # one byte payload, invalid for pcm16le
+            "sequence": 1,
+            "source_type": "raw_sensor",
+        },
+    }
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/ingest/frame", json=payload)
+        assert response.status_code == 400
+        assert "byte length must be even" in response.text
+
+
+def test_soundscape_render_endpoint_returns_bformat_and_surround(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=3600)
+
+    with TestClient(app) as client:
+        _ingest_single_frame(client, start_time_ns=time.time_ns())
+        detections = _wait_for_detections(client)
+        assert detections
+
+        bformat_response = client.get("/api/v1/soundscape/render", params={"limit": 16, "render_format": "bformat"})
+        assert bformat_response.status_code == 200
+        assert bformat_response.headers["content-type"].startswith("audio/wav")
+        assert int(bformat_response.headers["x-minimappr-rendered-sources"]) >= 1
+        with wave.open(io.BytesIO(bformat_response.content), "rb") as wav:
+            assert wav.getnchannels() == 4
+            assert wav.getframerate() == 16000
+
+        surround_response = client.get(
+            "/api/v1/soundscape/render",
+            params={"limit": 16, "render_format": "surround_5_1"},
+        )
+        assert surround_response.status_code == 200
+        with wave.open(io.BytesIO(surround_response.content), "rb") as wav:
+            assert wav.getnchannels() == 6
+            assert wav.getframerate() == 16000
+
+
+def test_soundscape_render_returns_404_without_snippets(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+
+    with TestClient(app) as client:
+        _ingest_single_frame(client, start_time_ns=time.time_ns())
+        _ = _wait_for_detections(client)
+        response = client.get("/api/v1/soundscape/render", params={"limit": 16})
+        assert response.status_code == 404
+        assert "No compatible detection snippets" in response.text

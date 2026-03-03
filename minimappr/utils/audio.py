@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import wave
 from pathlib import Path
 
@@ -13,7 +14,14 @@ EPSILON = 1e-12
 
 
 def decode_pcm16le_b64(samples_b64: str, channels: int) -> np.ndarray:
-    raw = base64.b64decode(samples_b64)
+    try:
+        raw = base64.b64decode(samples_b64, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("Invalid base64 audio payload") from exc
+    if not raw:
+        raise ValueError("Decoded PCM payload is empty")
+    if len(raw) % 2 != 0:
+        raise ValueError("Decoded PCM payload byte length must be even for pcm16le")
     data = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
     if data.size % channels != 0:
         raise ValueError("Decoded PCM sample count is not divisible by channels")
@@ -86,3 +94,31 @@ def write_wav_mono(path: Path, samples: np.ndarray, sample_rate_hz: int) -> None
         wav.setsampwidth(2)
         wav.setframerate(sample_rate_hz)
         wav.writeframes(pcm.tobytes())
+
+
+def read_wav_mono(path: Path) -> tuple[np.ndarray, int]:
+    with wave.open(str(path), "rb") as wav:
+        channels = int(wav.getnchannels())
+        sample_width = int(wav.getsampwidth())
+        sample_rate_hz = int(wav.getframerate())
+        frame_count = int(wav.getnframes())
+        raw = wav.readframes(frame_count)
+
+    if channels <= 0:
+        raise ValueError("WAV must have at least one channel")
+
+    if sample_width == 1:
+        data = (np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
+    elif sample_width == 2:
+        data = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+    elif sample_width == 4:
+        data = np.frombuffer(raw, dtype="<i4").astype(np.float32) / 2147483648.0
+    else:
+        raise ValueError(f"Unsupported WAV sample width: {sample_width}")
+
+    if data.size % channels != 0:
+        raise ValueError("WAV payload does not align to channel count")
+
+    frames = data.reshape(-1, channels)
+    mono = np.mean(frames, axis=1, dtype=np.float32)
+    return mono.astype(np.float32), sample_rate_hz

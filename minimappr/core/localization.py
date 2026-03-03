@@ -56,6 +56,25 @@ class LocalizationEngine:
     max_tau_s: float = 0.02
     interp_factor: int = 4
 
+    def _validate_inputs(
+        self,
+        sensor_positions: dict[str, np.ndarray],
+        sensor_windows: dict[str, np.ndarray],
+    ) -> None:
+        for sensor_id, position in sensor_positions.items():
+            pos = np.asarray(position, dtype=np.float64)
+            if pos.shape != (3,):
+                raise LocalizationError(f"Sensor position for {sensor_id} must be a 3-vector")
+            if not np.all(np.isfinite(pos)):
+                raise LocalizationError(f"Sensor position for {sensor_id} contains non-finite values")
+
+        for sensor_id, window in sensor_windows.items():
+            samples = np.asarray(window, dtype=np.float64)
+            if samples.ndim != 1 or samples.size == 0:
+                raise LocalizationError(f"Sensor window for {sensor_id} must be a non-empty 1-D array")
+            if not np.all(np.isfinite(samples)):
+                raise LocalizationError(f"Sensor window for {sensor_id} contains NaN/Inf values")
+
     def localize(
         self,
         sensor_positions: dict[str, np.ndarray],
@@ -66,6 +85,7 @@ class LocalizationEngine:
     ) -> LocalizationResult:
         if len(sensor_windows) < 4:
             raise LocalizationError("Need at least 4 active sensors for 3D TDOA localization")
+        self._validate_inputs(sensor_positions=sensor_positions, sensor_windows=sensor_windows)
 
         sensor_ids = sorted(sensor_windows.keys())
         energies = {sensor_id: rms(sensor_windows[sensor_id]) for sensor_id in sensor_ids}
@@ -87,6 +107,8 @@ class LocalizationEngine:
                 max_tau_s=self.max_tau_s,
                 interp=max(1, self.interp_factor),
             )
+            if not np.isfinite(tau_s) or not np.isfinite(peak):
+                raise LocalizationError(f"Non-finite GCC-PHAT output for sensor {sensor_id}")
             tdoa_s[sensor_id] = tau_s
             peaks.append(peak)
             meas_ids.append(sensor_id)
@@ -113,7 +135,11 @@ class LocalizationEngine:
             raise LocalizationError("TDOA least-squares solve failed")
 
         position = solved.x
+        if not np.all(np.isfinite(position)):
+            raise LocalizationError("Localization solver returned non-finite position")
         residual = residuals(position)
+        if not np.all(np.isfinite(residual)):
+            raise LocalizationError("Localization residual contains non-finite values")
         rmse_s = float(np.sqrt(np.mean(np.square(residual))))
         tau_scale = max(max(abs(v) for v in tdoa_s.values()), 1e-5)
         confidence = max(0.0, min(1.0, 1.0 - (rmse_s / tau_scale)))
@@ -125,6 +151,8 @@ class LocalizationEngine:
             reference_sensor=reference_sensor,
             sound_speed=sound_speed,
         )
+        if np.isnan(gdop):
+            raise LocalizationError("GDOP computation produced NaN")
 
         # Correlation peak quality can significantly degrade when SNR is poor.
         if peaks:
@@ -149,6 +177,7 @@ class LocalizationEngine:
     ) -> LocalizationResult:
         if len(sensor_windows) < 3:
             raise LocalizationError("Need at least 3 active sensors for 2D TDOA localization")
+        self._validate_inputs(sensor_positions=sensor_positions, sensor_windows=sensor_windows)
 
         sensor_ids = sorted(sensor_windows.keys())
         energies = {sensor_id: rms(sensor_windows[sensor_id]) for sensor_id in sensor_ids}
@@ -170,6 +199,8 @@ class LocalizationEngine:
                 max_tau_s=self.max_tau_s,
                 interp=max(1, self.interp_factor),
             )
+            if not np.isfinite(tau_s) or not np.isfinite(peak):
+                raise LocalizationError(f"Non-finite GCC-PHAT output for sensor {sensor_id}")
             tdoa_s[sensor_id] = tau_s
             peaks.append(peak)
             meas_ids.append(sensor_id)
@@ -197,8 +228,12 @@ class LocalizationEngine:
             raise LocalizationError("2D TDOA least-squares solve failed")
 
         xy = solved.x
+        if not np.all(np.isfinite(xy)):
+            raise LocalizationError("2D localization solver returned non-finite position")
         position = np.asarray([xy[0], xy[1], z_m], dtype=np.float64)
         residual = residuals_xy(xy)
+        if not np.all(np.isfinite(residual)):
+            raise LocalizationError("2D localization residual contains non-finite values")
         rmse_s = float(np.sqrt(np.mean(np.square(residual))))
         tau_scale = max(max(abs(v) for v in tdoa_s.values()), 1e-5)
         confidence = max(0.0, min(1.0, 1.0 - (rmse_s / tau_scale)))
@@ -212,6 +247,8 @@ class LocalizationEngine:
             reference_sensor=reference_sensor,
             sound_speed=sound_speed,
         )
+        if np.isnan(gdop):
+            raise LocalizationError("2D GDOP computation produced NaN")
         return LocalizationResult(
             position_m=(float(position[0]), float(position[1]), float(position[2])),
             confidence=float(np.clip(confidence, 0.0, 1.0)),

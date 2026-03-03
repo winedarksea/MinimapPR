@@ -126,6 +126,9 @@ class FusionMetrics:
     beamforming_failures: int = 0
     environment_samples_ingested: int = 0
     environment_samples_persisted: int = 0
+    localization_fallback_count: int = 0
+    last_localization_algorithm: str = "gcc_phat"
+    last_attempted_algorithm: str = "gcc_phat"
 
 
 # ---------------------------------------------------------------------------
@@ -507,6 +510,11 @@ class FusionNode:
                 )
                 reference_signal = selected_windows[localization.reference_sensor]
                 localization_method = self._current_localizer_name()
+                self._metrics.last_localization_algorithm = localization.resolved_algorithm or localization_method
+                self._metrics.last_attempted_algorithm = localization.attempted_algorithm or localization_method
+                if (localization.attempted_algorithm and localization.resolved_algorithm
+                        and localization.attempted_algorithm != localization.resolved_algorithm):
+                    self._metrics.localization_fallback_count += 1
                 return LocalizedCandidate(
                     candidate=candidate,
                     localization_position_m=localization.position_m,
@@ -540,6 +548,8 @@ class FusionNode:
                 )
                 reference_signal = selected_windows[localization.reference_sensor]
                 localization_method = self._current_localizer_name()
+                self._metrics.last_localization_algorithm = localization.resolved_algorithm or localization_method
+                self._metrics.last_attempted_algorithm = localization.attempted_algorithm or localization_method
                 return LocalizedCandidate(
                     candidate=candidate,
                     localization_position_m=localization.position_m,

@@ -18,6 +18,13 @@ from minimappr.api.live import LiveEventHub
 from minimappr.api.transports import HttpIngestTransport
 from minimappr.classifiers.factory import create_classifier
 from minimappr.config import Settings
+from minimappr.core.ambisonics import (
+    AmbisonicSpatialEncoder,
+    SoundscapeRenderer,
+    SpatialSourceFrame,
+    foa_to_5_1,
+    wav_multichannel_bytes,
+)
 from minimappr.core.audio_buffer import MultiSensorBuffer
 from minimappr.core.bit_report import BITReportEvaluator
 from minimappr.core.environment import LiveEnvironmentProvider
@@ -33,6 +40,7 @@ from minimappr.models import (
     BITReport,
     BITReportIn,
     BITType,
+    ContextSnapshot,
     CopStatusResponse,
     FederationAck,
     FederationHeartbeat,
@@ -45,9 +53,11 @@ from minimappr.models import (
     StoreForwardIngestRequest,
     StoreForwardIngestResponse,
     TrackState,
+    ZoneOccupancyState,
     ZoneSpec,
 )
 from minimappr.storage.db import Storage
+from minimappr.utils.audio import read_wav_mono
 
 
 logger = logging.getLogger(__name__)
@@ -708,6 +718,116 @@ async def delete_zone(zone_id: str, request: Request) -> dict:
     return {"ok": True, "zone_id": zone_id}
 
 
+@app.get("/api/v1/zones/occupancy", response_model=list[ZoneOccupancyState])
+async def get_zone_occupancy(request: Request) -> list[ZoneOccupancyState]:
+    """Return occupancy state for all zones based on the current active track snapshot."""
+    state = _require_state(request)
+    now_ns = time.time_ns()
+    tracks = await state.tracker.snapshot(now_ns=now_ns)
+    for track in tracks:
+        if track.position_geo is None:
+            track.position_geo = state.coordinate_frame.local_to_geo(track.position_m)
+    return await state.zone_matcher.compute_occupancy(
+        tracks=tracks,
+        coordinate_frame=state.coordinate_frame,
+        now_ns=now_ns,
+    )
+
+
+@app.get("/api/v1/context/current", response_model=ContextSnapshot)
+async def get_context_current(
+    request: Request,
+    recent_alert_window_seconds: float = Query(default=300.0, ge=10.0, le=3600.0),
+    track_limit: int = Query(default=200, ge=1, le=1000),
+    alert_limit: int = Query(default=50, ge=1, le=500),
+) -> ContextSnapshot:
+    """Return a unified operational snapshot for downstream automation and reasoning.
+
+    Combines active tracks, zone occupancy, recent alerts, node health, and
+    environment conditions into a single structured response.
+    """
+    state = _require_state(request)
+    settings: Settings = state.settings
+    now_ns = time.time_ns()
+
+    # Active tracks with geographic positions
+    tracks = await state.tracker.snapshot(now_ns=now_ns)
+    for track in tracks:
+        if track.position_geo is None:
+            track.position_geo = state.coordinate_frame.local_to_geo(track.position_m)
+    active_tracks = [
+        t.model_dump(mode="json")
+        for t in tracks
+        if t.status in {"tentative", "confirmed", "coasting"}
+    ][:track_limit]
+
+    # Zone occupancy
+    zone_occupancy = await state.zone_matcher.compute_occupancy(
+        tracks=tracks,
+        coordinate_frame=state.coordinate_frame,
+        now_ns=now_ns,
+    )
+
+    # Recent alerts
+    recent_window_ns = now_ns - int(recent_alert_window_seconds * 1_000_000_000)
+    all_alerts = await state.storage.list_alerts(limit=alert_limit)
+    recent_alerts = [a for a in all_alerts if int(a.get("timestamp_ns", 0)) >= recent_window_ns]
+
+    # Node health counts
+    node_counts = await state.storage.count_nodes_by_status(
+        now_ns=now_ns,
+        degraded_after_seconds=settings.node_degraded_after_seconds,
+        offline_after_seconds=settings.node_offline_after_seconds,
+    )
+
+    # Environment snapshot at origin
+    conditions = state.environment_provider.get_conditions(location_m=None)
+    environment = {
+        "temperature_c": conditions.temperature_c,
+        "humidity_fraction": conditions.humidity_fraction,
+        "pressure_pa": conditions.pressure_pa,
+        "wind_speed_mps": conditions.wind_speed_mps,
+        "wind_dir_deg": conditions.wind_dir_deg,
+        "speed_of_sound_mps": state.environment_provider.get_speed_of_sound(location_m=None),
+    }
+
+    # Derive system health from node and track state
+    offline_nodes = node_counts.get("offline_nodes", 0)
+    degraded_nodes = node_counts.get("degraded_nodes", 0)
+    total_nodes = offline_nodes + degraded_nodes + node_counts.get("online_nodes", 0)
+    if total_nodes > 0 and offline_nodes == total_nodes:
+        system_health = "error"
+    elif degraded_nodes > 0 or offline_nodes > 0:
+        system_health = "degraded"
+    else:
+        system_health = "ok"
+
+    return ContextSnapshot(
+        generated_ns=now_ns,
+        active_tracks=active_tracks,
+        zone_occupancy=zone_occupancy,
+        recent_alerts=recent_alerts,
+        node_health={
+            "online": node_counts.get("online_nodes", 0),
+            "degraded": degraded_nodes,
+            "offline": offline_nodes,
+        },
+        environment=environment,
+        system_health=system_health,
+    )
+
+
+def _resolve_snippet_file(snippet_path: str | None, snippet_root: Path) -> Path | None:
+    if not snippet_path:
+        return None
+    snippet_file = Path(snippet_path).resolve()
+    if not snippet_file.exists():
+        return None
+    if not snippet_file.is_relative_to(snippet_root):
+        raise HTTPException(status_code=403, detail="Snippet path is outside snippet directory")
+    return snippet_file
+
+
 @app.get("/api/v1/detections/{detection_id}/audio")
 async def get_detection_audio(detection_id: str, request: Request) -> FileResponse:
     state = _require_state(request)
@@ -716,18 +836,99 @@ async def get_detection_audio(detection_id: str, request: Request) -> FileRespon
     if not snippet_path:
         raise HTTPException(status_code=404, detail="Snippet not found for detection")
 
-    snippet_file = Path(snippet_path).resolve()
-    if not snippet_file.exists():
+    snippet_file = _resolve_snippet_file(snippet_path, settings.snippet_dir.resolve())
+    if snippet_file is None:
         raise HTTPException(status_code=404, detail="Snippet file no longer exists")
-
-    snippet_root = settings.snippet_dir.resolve()
-    if not snippet_file.is_relative_to(snippet_root):
-        raise HTTPException(status_code=403, detail="Snippet path is outside snippet directory")
 
     return FileResponse(
         path=snippet_file,
         media_type="audio/wav",
         filename=f"{detection_id}.wav",
+    )
+
+
+@app.get("/api/v1/soundscape/render")
+async def render_soundscape(
+    request: Request,
+    limit: int = Query(default=32, ge=1, le=256),
+    render_format: str = Query(default="bformat", pattern="^(bformat|surround_5_1)$"),
+    listener_x: float = Query(default=0.0),
+    listener_y: float = Query(default=0.0),
+    listener_z: float = Query(default=0.0),
+    suppress_label: list[str] | None = Query(default=None),
+) -> Response:
+    state = _require_state(request)
+    settings: Settings = state.settings
+    detections = await state.storage.list_detections(limit=limit)
+    snippet_root = settings.snippet_dir.resolve()
+
+    sample_rate_hz: int | None = None
+    sources: list[SpatialSourceFrame] = []
+    skipped_sources = 0
+    for detection in detections:
+        snippet_file = _resolve_snippet_file(detection.get("snippet_path"), snippet_root)
+        if snippet_file is None:
+            skipped_sources += 1
+            continue
+
+        position = detection.get("position_m")
+        if not isinstance(position, list) or len(position) != 3:
+            skipped_sources += 1
+            continue
+
+        try:
+            samples, snippet_rate_hz = read_wav_mono(snippet_file)
+        except Exception:
+            skipped_sources += 1
+            continue
+        if samples.size == 0:
+            skipped_sources += 1
+            continue
+
+        if sample_rate_hz is None:
+            sample_rate_hz = snippet_rate_hz
+        elif snippet_rate_hz != sample_rate_hz:
+            skipped_sources += 1
+            continue
+
+        sources.append(
+            SpatialSourceFrame(
+                samples=samples,
+                position_m=(float(position[0]), float(position[1]), float(position[2])),
+                label=str(detection.get("label") or ""),
+                gain=max(0.0, min(1.0, float(detection.get("label_confidence") or 1.0))),
+                source_id=str(detection.get("id") or ""),
+            )
+        )
+
+    if not sources or sample_rate_hz is None:
+        raise HTTPException(status_code=404, detail="No compatible detection snippets available for rendering")
+
+    blocked_labels = {label.strip().lower() for label in (suppress_label or []) if label.strip()}
+    renderer = SoundscapeRenderer(
+        encoder=AmbisonicSpatialEncoder(),
+        suppress_labels=blocked_labels if blocked_labels else None,
+    )
+    rendered = renderer.render(
+        sources,
+        listener_position_m=(float(listener_x), float(listener_y), float(listener_z)),
+    )
+    channels_first = rendered.bformat
+    if render_format == "surround_5_1":
+        channels_first = foa_to_5_1(channels_first)
+
+    wav_bytes = wav_multichannel_bytes(channels_first, sample_rate_hz=sample_rate_hz)
+    filename_suffix = "surround_5_1" if render_format == "surround_5_1" else "bformat"
+    return Response(
+        content=wav_bytes,
+        media_type="audio/wav",
+        headers={
+            "Content-Disposition": f'attachment; filename=\"soundscape_{filename_suffix}.wav\"',
+            "X-Minimappr-Rendered-Sources": str(rendered.rendered_sources),
+            "X-Minimappr-Suppressed-Sources": str(rendered.suppressed_sources),
+            "X-Minimappr-Skipped-Sources": str(skipped_sources),
+            "X-Minimappr-Sample-Rate": str(sample_rate_hz),
+        },
     )
 
 
