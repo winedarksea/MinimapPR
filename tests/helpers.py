@@ -20,6 +20,7 @@ class StubLocalizer:
         self.name = name
         self.confidence = confidence
         self.calls = 0
+        self.localize_2d_calls = 0
 
     def localize(
         self,
@@ -39,3 +40,44 @@ class StubLocalizer:
             reference_sensor=reference_sensor,
             tdoa_s={},
         )
+
+    def localize_2d(
+        self,
+        sensor_positions: dict[str, np.ndarray],
+        sensor_windows: dict[str, np.ndarray],
+        sample_rate_hz: int,
+        temperature_c: float,
+        humidity_fraction: float,
+        fixed_z_m: float | None = None,
+    ) -> LocalizationResult:
+        del sensor_windows, sample_rate_hz, temperature_c, humidity_fraction, fixed_z_m
+        self.localize_2d_calls += 1
+        reference_sensor = sorted(sensor_positions.keys())[0]
+        return LocalizationResult(
+            position_m=(0.0, 0.0, 0.0),
+            confidence=self.confidence,
+            gdop=1.0,
+            reference_sensor=reference_sensor,
+            tdoa_s={},
+        )
+
+
+class FailingLocalizer:
+    """Localizer that always raises LocalizationError."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.calls = 0
+
+    def localize(
+        self,
+        sensor_positions: dict[str, np.ndarray],
+        sensor_windows: dict[str, np.ndarray],
+        sample_rate_hz: int,
+        temperature_c: float,
+        humidity_fraction: float,
+    ) -> LocalizationResult:
+        from minimappr.core.localization import LocalizationError
+
+        self.calls += 1
+        raise LocalizationError(f"{self.name} always fails")

@@ -7,8 +7,26 @@ name = "minimappr"
 version = "0.1.0"
 description = "Realtime environmental awareness: distributed sound localization + classification + common operating picture"
 readme = "README.md"
-license = {file = "LICENSE"}
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
+authors = [
+    {name = "Colin Catlin", email = "colin.catlin@gmail.com"},
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Multimedia :: Sound/Audio :: Analysis",
+]
 dependencies = [
     "fastapi>=0.116,<1.0",
     "uvicorn[standard]>=0.35,<1.0",
@@ -29,11 +47,20 @@ dev = [
     "pytest-asyncio>=0.23,<2.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/colincatlin/MinimapPR"
+Repository = "https://github.com/colincatlin/MinimapPR"
+Issues = "https://github.com/colincatlin/MinimapPR/issues"
+
 [project.scripts]
+minimappr = "minimappr.__main__:main"
 minimappr-demo = "minimappr.sim.run_demo:main"
 
 [tool.setuptools.packages.find]
 include = ["minimappr*"]
+
+[tool.setuptools.package-data]
+minimappr = ["frontend/*.html", "frontend/*.css", "frontend/*.js"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

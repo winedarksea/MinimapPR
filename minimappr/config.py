@@ -184,6 +184,7 @@ class FederationConfig:
     track_ttl_seconds: float
     deconflict_mahalanobis_gate: float
     tqi_hysteresis: float
+    deconflict_use_3d: bool = False
     auth_token: str | None = None
 
 
@@ -377,6 +378,7 @@ class Settings:
     federation_track_ttl_seconds: float = 20.0
     federation_deconflict_mahalanobis_gate: float = 4.5
     federation_tqi_hysteresis: float = 0.05
+    federation_deconflict_use_3d: bool = False
     federation_auth_token: str = ""
 
     def __post_init__(self) -> None:
@@ -677,6 +679,7 @@ class Settings:
                 4.5,
             ),
             federation_tqi_hysteresis=_env_float("MINIMAPPR_FEDERATION_TQI_HYSTERESIS", 0.05),
+            federation_deconflict_use_3d=_env_bool("MINIMAPPR_FEDERATION_DECONFLICT_USE_3D", False),
             federation_auth_token=_env_str("MINIMAPPR_FEDERATION_AUTH_TOKEN", ""),
         )
 
@@ -806,5 +809,6 @@ class Settings:
             track_ttl_seconds=self.federation_track_ttl_seconds,
             deconflict_mahalanobis_gate=self.federation_deconflict_mahalanobis_gate,
             tqi_hysteresis=self.federation_tqi_hysteresis,
+            deconflict_use_3d=self.federation_deconflict_use_3d,
             auth_token=token or None,
         )

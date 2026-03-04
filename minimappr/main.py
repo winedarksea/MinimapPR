@@ -26,6 +26,7 @@ from minimappr.core.ambisonics import (
     wav_multichannel_bytes,
 )
 from minimappr.core.audio_buffer import MultiSensorBuffer
+from minimappr.core.auth import extract_federation_token
 from minimappr.core.bit_report import BITReportEvaluator
 from minimappr.core.environment import LiveEnvironmentProvider
 from minimappr.core.federation import FederationCoordinator
@@ -202,7 +203,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="MinimapPR", version="0.1.0", lifespan=lifespan)
-app.mount("/static", StaticFiles(directory=frontend_dir), name="static")
+if frontend_dir.is_dir():
+    app.mount("/static", StaticFiles(directory=frontend_dir), name="static")
 
 
 @app.middleware("http")
@@ -244,9 +246,12 @@ async def unhandled_error_handler(request: Request, exc: Exception):
     return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
 
-@app.get("/")
-async def root() -> FileResponse:
-    return FileResponse(frontend_dir / "index.html")
+@app.get("/", response_model=None)
+async def root() -> Response:
+    index = frontend_dir / "index.html"
+    if index.is_file():
+        return FileResponse(index)
+    return JSONResponse({"status": "ok", "message": "MinimapPR API is running. No frontend installed."})
 
 
 @app.get("/health")
@@ -549,20 +554,20 @@ async def federation_status(request: Request) -> dict:
     return await state.federation.status()
 
 
-def _federation_headers(request: Request) -> tuple[str | None, str | None]:
-    return request.headers.get("authorization"), request.headers.get("x-minimappr-token")
-
-
 @app.post("/api/v1/federation/heartbeat", response_model=FederationAck)
 async def federation_heartbeat(payload: FederationHeartbeat, request: Request) -> FederationAck:
     state = _require_state(request)
     settings: Settings = state.settings
     if not state.federation.enabled:
         raise HTTPException(status_code=503, detail="Federation is disabled")
-    authorization, token_header = _federation_headers(request)
+    
+    # Extract headers for validation by the coordinator
+    auth_header = request.headers.get("authorization")
+    token_header = request.headers.get("x-minimappr-token")
+    
     if not await state.federation.validate_inbound_auth(
         peer_id=payload.server_id,
-        authorization_header=authorization,
+        authorization_header=auth_header,
         token_header=token_header,
     ):
         raise HTTPException(status_code=401, detail="Invalid federation credentials")
@@ -583,10 +588,14 @@ async def federation_snapshot(payload: FederationTrackSnapshot, request: Request
     settings: Settings = state.settings
     if not state.federation.enabled:
         raise HTTPException(status_code=503, detail="Federation is disabled")
-    authorization, token_header = _federation_headers(request)
+
+    # Extract headers for validation by the coordinator
+    auth_header = request.headers.get("authorization")
+    token_header = request.headers.get("x-minimappr-token")
+
     if not await state.federation.validate_inbound_auth(
         peer_id=payload.server_id,
-        authorization_header=authorization,
+        authorization_header=auth_header,
         token_header=token_header,
     ):
         raise HTTPException(status_code=401, detail="Invalid federation credentials")

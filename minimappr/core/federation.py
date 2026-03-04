@@ -6,18 +6,23 @@ import asyncio
 import contextlib
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
 import httpx
 import numpy as np
 from pydantic import ValidationError
+from scipy.optimize import linear_sum_assignment  # type: ignore[import-untyped]
 
 from minimappr.config import FederationConfig, FederationPeerConfig, Settings
+from minimappr.core.auth import extract_federation_token, verify_constant_time
 from minimappr.models import FederationHeartbeat, FederationTrackSnapshot, TrackState
 
 
 ACTIVE_TRACK_STATUSES = {"tentative", "confirmed", "coasting"}
+
+# Maximum number of pair ownership entries to retain.
+_PAIR_OWNERS_MAX_SIZE = 10_000
 
 
 TrackSupplier = Callable[[int], Awaitable[list[TrackState]]]
@@ -59,6 +64,38 @@ class FederationMetrics:
     deconflict_pairs_evaluated: int = 0
     deconflict_standby_local: int = 0
     deconflict_standby_peer: int = 0
+    # Timestamp (time.time_ns()) when metrics were last reset.
+    last_reset_ns: int = field(default_factory=time.time_ns)
+
+    def reset(self) -> None:
+        """Reset all counters and record the reset timestamp."""
+        self.heartbeats_sent = 0
+        self.heartbeat_failures = 0
+        self.snapshots_sent = 0
+        self.snapshot_failures = 0
+        self.snapshots_received = 0
+        self.unknown_peer_messages = 0
+        self.auth_rejections = 0
+        self.peer_tracks_stale_dropped = 0
+        self.deconflict_pairs_evaluated = 0
+        self.deconflict_standby_local = 0
+        self.deconflict_standby_peer = 0
+        self.last_reset_ns = time.time_ns()
+
+    def rates(self, *, now_ns: int | None = None) -> dict[str, float]:
+        """Return per-second rates for key counters since last reset."""
+        now = now_ns if now_ns is not None else time.time_ns()
+        elapsed_s = max((now - self.last_reset_ns) / 1_000_000_000.0, 0.001)
+        return {
+            "heartbeats_sent_per_s": self.heartbeats_sent / elapsed_s,
+            "heartbeat_failures_per_s": self.heartbeat_failures / elapsed_s,
+            "snapshots_sent_per_s": self.snapshots_sent / elapsed_s,
+            "snapshot_failures_per_s": self.snapshot_failures / elapsed_s,
+            "snapshots_received_per_s": self.snapshots_received / elapsed_s,
+            "auth_rejections_per_s": self.auth_rejections / elapsed_s,
+            "peer_tracks_stale_dropped_per_s": self.peer_tracks_stale_dropped / elapsed_s,
+            "elapsed_seconds": elapsed_s,
+        }
 
 
 class FederationCoordinator:
@@ -84,7 +121,7 @@ class FederationCoordinator:
         self._metrics = FederationMetrics()
         self._lock = asyncio.Lock()
         self._task: asyncio.Task[None] | None = None
-        self._client = httpx.AsyncClient(timeout=self._config.request_timeout_seconds)
+        self._client: httpx.AsyncClient | None = None
 
     @property
     def enabled(self) -> bool:
@@ -94,11 +131,19 @@ class FederationCoordinator:
     def server_id(self) -> str:
         return self._config.server_id
 
+    def _ensure_client(self) -> httpx.AsyncClient:
+        """Return the current httpx client, creating one if needed."""
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=self._config.request_timeout_seconds)
+        return self._client
+
     async def start(self) -> None:
         if not self.enabled:
             return
         if self._task is not None and not self._task.done():
             return
+        # Ensure a fresh client (handles restart after stop).
+        self._ensure_client()
         self._task = asyncio.create_task(self._loop(), name="federation-coordinator")
 
     async def stop(self) -> None:
@@ -108,7 +153,8 @@ class FederationCoordinator:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
-        await self._client.aclose()
+        if self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
 
     async def status(self, *, now_ns: int | None = None) -> dict:
         now = now_ns if now_ns is not None else time.time_ns()
@@ -135,6 +181,7 @@ class FederationCoordinator:
                         "received_track_count": runtime.received_track_count,
                     }
                 )
+            now_for_rates = now
             metrics = {
                 "heartbeats_sent": self._metrics.heartbeats_sent,
                 "heartbeat_failures": self._metrics.heartbeat_failures,
@@ -147,6 +194,8 @@ class FederationCoordinator:
                 "deconflict_pairs_evaluated": self._metrics.deconflict_pairs_evaluated,
                 "deconflict_standby_local": self._metrics.deconflict_standby_local,
                 "deconflict_standby_peer": self._metrics.deconflict_standby_peer,
+                "last_reset_ns": self._metrics.last_reset_ns,
+                "rates": self._metrics.rates(now_ns=now_for_rates),
             }
         return {
             "enabled": self.enabled,
@@ -161,6 +210,11 @@ class FederationCoordinator:
             "track_ttl_seconds": self._config.track_ttl_seconds,
         }
 
+    async def reset_metrics(self) -> None:
+        """Reset all federation metrics counters."""
+        async with self._lock:
+            self._metrics.reset()
+
     async def validate_inbound_auth(
         self,
         *,
@@ -169,10 +223,8 @@ class FederationCoordinator:
         token_header: str | None,
     ) -> bool:
         expected = self._expected_token_for_peer(peer_id)
-        if expected is None:
-            return True
-        provided = _extract_token(authorization_header, token_header)
-        if provided == expected:
+        provided = extract_federation_token(authorization_header, token_header)
+        if verify_constant_time(provided, expected):
             return True
         async with self._lock:
             self._metrics.auth_rejections += 1
@@ -319,9 +371,10 @@ class FederationCoordinator:
             return
         url = f"{runtime.config.base_url}/api/v1/federation/heartbeat"
         headers = self._auth_headers_for_peer(peer_id)
+        client = self._ensure_client()
         start = time.perf_counter()
         try:
-            response = await self._client.post(url, json=payload, headers=headers)
+            response = await client.post(url, json=payload, headers=headers)
             response.raise_for_status()
         except Exception as exc:
             await self._record_peer_failure(peer_id=peer_id, now_ns=now_ns, error=f"{type(exc).__name__}: {exc}")
@@ -345,9 +398,10 @@ class FederationCoordinator:
             return
         url = f"{runtime.config.base_url}/api/v1/federation/snapshot"
         headers = self._auth_headers_for_peer(peer_id)
+        client = self._ensure_client()
         start = time.perf_counter()
         try:
-            response = await self._client.post(url, json=payload, headers=headers)
+            response = await client.post(url, json=payload, headers=headers)
             response.raise_for_status()
         except Exception as exc:
             await self._record_peer_failure(peer_id=peer_id, now_ns=now_ns, error=f"{type(exc).__name__}: {exc}")
@@ -438,11 +492,14 @@ class FederationCoordinator:
         peer_owner_reason: dict[tuple[str, str], str] = {}
         active_pairs: set[str] = set()
 
-        for peer_id, peer_track in peer_tracks:
-            match = self._best_local_match(local_tracks=local_tracks, peer_track=peer_track)
-            if match is None:
-                continue
-            local_track, _distance = match
+        # Build optimal assignment via Hungarian algorithm.
+        assignments = self._optimal_assignment(
+            local_tracks=local_tracks, peer_tracks=peer_tracks
+        )
+
+        for peer_idx, local_idx in assignments:
+            peer_id, peer_track = peer_tracks[peer_idx]
+            local_track = local_tracks[local_idx]
             pair_key = f"{peer_id}|{peer_track.id}|{local_track.id}"
             active_pairs.add(pair_key)
             self._metrics.deconflict_pairs_evaluated += 1
@@ -479,6 +536,12 @@ class FederationCoordinator:
         for key in stale_pairs:
             self._pair_owners.pop(key, None)
 
+        # Hard cap to prevent unbounded growth in long-running sessions.
+        if len(self._pair_owners) > _PAIR_OWNERS_MAX_SIZE:
+            excess = len(self._pair_owners) - _PAIR_OWNERS_MAX_SIZE
+            for key in list(self._pair_owners)[:excess]:
+                self._pair_owners.pop(key, None)
+
         merged: list[dict] = []
         for track_id, track in local_by_id.items():
             is_standby = track_id in standby_local_ids
@@ -508,24 +571,49 @@ class FederationCoordinator:
         merged.sort(key=lambda row: int(row.get("last_seen_ns") or 0), reverse=True)
         return merged
 
-    def _best_local_match(
+    def _optimal_assignment(
         self,
         *,
         local_tracks: list[TrackState],
-        peer_track: TrackState,
-    ) -> tuple[TrackState, float] | None:
-        best: tuple[TrackState, float] | None = None
-        for local_track in local_tracks:
-            distance = _mahalanobis_distance(
-                local_track=local_track,
-                peer_track=peer_track,
-                default_variance=max(self._config.deconflict_mahalanobis_gate, 1.0) ** 2,
-            )
-            if distance > self._config.deconflict_mahalanobis_gate:
-                continue
-            if best is None or distance < best[1]:
-                best = (local_track, distance)
-        return best
+        peer_tracks: list[tuple[str, TrackState]],
+    ) -> list[tuple[int, int]]:
+        """Return (peer_index, local_index) pairs via Hungarian assignment.
+
+        Builds a cost matrix of Mahalanobis distances between every peer track
+        and every local track, masks entries above the gate threshold, and
+        solves for the globally optimal one-to-one assignment.
+        """
+        if not local_tracks or not peer_tracks:
+            return []
+
+        gate = self._config.deconflict_mahalanobis_gate
+        default_var = max(gate, 1.0) ** 2
+        use_3d = self._config.deconflict_use_3d
+        n_peer = len(peer_tracks)
+        n_local = len(local_tracks)
+
+        # Build the full cost matrix.
+        cost = np.full((n_peer, n_local), gate + 1.0, dtype=np.float64)
+        for pi in range(n_peer):
+            _pid, pt = peer_tracks[pi]
+            for li in range(n_local):
+                d = _mahalanobis_distance(
+                    local_track=local_tracks[li],
+                    peer_track=pt,
+                    default_variance=default_var,
+                    use_3d=use_3d,
+                )
+                cost[pi, li] = d
+
+        # Solve optimal assignment (minimizes total distance).
+        row_idx, col_idx = linear_sum_assignment(cost)
+
+        # Keep only assignments within the gate.
+        return [
+            (int(r), int(c))
+            for r, c in zip(row_idx, col_idx)
+            if cost[r, c] <= gate
+        ]
 
 
 def _coerce_track(value: dict | TrackState) -> TrackState | None:
@@ -544,59 +632,56 @@ def _mahalanobis_distance(
     local_track: TrackState,
     peer_track: TrackState,
     default_variance: float,
+    use_3d: bool = False,
 ) -> float:
-    local_xy = np.asarray([float(local_track.position_m[0]), float(local_track.position_m[1])], dtype=np.float64)
-    peer_xy = np.asarray([float(peer_track.position_m[0]), float(peer_track.position_m[1])], dtype=np.float64)
-    delta = peer_xy - local_xy
-    local_cov = _covariance_2d(local_track.position_covariance_m2, default_variance)
-    peer_cov = _covariance_2d(peer_track.position_covariance_m2, default_variance)
-    joint_cov = local_cov + peer_cov + np.eye(2, dtype=np.float64) * 1e-6
+    ndim = 3 if use_3d else 2
+    local_pos = np.asarray(
+        [float(local_track.position_m[i]) for i in range(ndim)],
+        dtype=np.float64,
+    )
+    peer_pos = np.asarray(
+        [float(peer_track.position_m[i]) for i in range(ndim)],
+        dtype=np.float64,
+    )
+    delta = peer_pos - local_pos
+    local_cov = _extract_covariance(local_track.position_covariance_m2, default_variance, ndim)
+    peer_cov = _extract_covariance(peer_track.position_covariance_m2, default_variance, ndim)
+    joint_cov = local_cov + peer_cov + np.eye(ndim, dtype=np.float64) * 1e-6
     try:
         inv_cov = np.linalg.pinv(joint_cov)
     except np.linalg.LinAlgError:
-        inv_cov = np.eye(2, dtype=np.float64) * (1.0 / max(default_variance, 1e-6))
+        inv_cov = np.eye(ndim, dtype=np.float64) * (1.0 / max(default_variance, 1e-6))
     d2 = float(delta.T @ inv_cov @ delta)
     if d2 <= 0.0:
         return 0.0
     return math.sqrt(d2)
 
 
-def _covariance_2d(matrix: list[list[float]] | None, default_variance: float) -> np.ndarray:
-    fallback = np.diag([default_variance, default_variance]).astype(np.float64)
-    if not matrix or len(matrix) < 2:
+def _extract_covariance(
+    matrix: list[list[float]] | None,
+    default_variance: float,
+    ndim: int = 2,
+) -> np.ndarray:
+    """Extract an ndim×ndim covariance sub-matrix, falling back to diagonal."""
+    fallback = np.diag([default_variance] * ndim).astype(np.float64)
+    if not matrix or len(matrix) < ndim:
         return fallback
     try:
-        c00 = float(matrix[0][0])
-        c01 = float(matrix[0][1])
-        c10 = float(matrix[1][0]) if len(matrix[1]) > 0 else c01
-        c11 = float(matrix[1][1])
+        rows: list[list[float]] = []
+        for i in range(ndim):
+            row = []
+            for j in range(ndim):
+                row.append(float(matrix[i][j]))
+            rows.append(row)
     except (TypeError, ValueError, IndexError):
         return fallback
-    if not np.isfinite(c00) or not np.isfinite(c11):
+    cov = np.asarray(rows, dtype=np.float64)
+    if not np.all(np.isfinite(cov)):
         return fallback
-    c00 = max(c00, 1e-6)
-    c11 = max(c11, 1e-6)
-    cov = np.asarray(
-        [
-            [c00, c01],
-            [c10, c11],
-        ],
-        dtype=np.float64,
-    )
+    # Enforce minimum diagonal values.
+    for i in range(ndim):
+        cov[i, i] = max(cov[i, i], 1e-6)
+    # Symmetrize.
     return 0.5 * (cov + cov.T)
 
 
-def _extract_token(authorization_header: str | None, token_header: str | None) -> str | None:
-    if authorization_header:
-        raw = authorization_header.strip()
-        if raw.lower().startswith("bearer "):
-            token = raw[7:].strip()
-            if token:
-                return token
-        if raw:
-            return raw
-    if token_header:
-        token = token_header.strip()
-        if token:
-            return token
-    return None
