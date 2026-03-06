@@ -14,6 +14,7 @@ The system is designed to serve a wide range of acoustic and multi-sensor awaren
 - **Bird and wildlife monitoring** — BirdNET-style classification with added localization, tracking birds as they sing and fly. Track predator/prey interactions (e.g., coyotes approaching livestock, hawks approaching poultry).
 - **Environmental research** — long-term acoustic ecology monitoring, biodiversity surveys, habitat usage mapping.
 - **Noise pollution monitoring** — industrial equipment, construction sites, events, traffic. Generate sound intensity heatmaps with localized source attribution.
+- **Gardening** - long term microclimate mapping, tracking of pests (birds, deer), potentially a local wind map and temperature risks (frost warning)
 
 ### Security & Safety
 - **Gunshot / explosion detection** — with localization, confidence scoring, and immediate alerting. Includes artillery fire, fusillade, and fireworks discrimination.
@@ -753,3 +754,25 @@ MINIMAPPR_COORDINATE_MODE=flat
 MINIMAPPR_IFC_MODEL_PATH=data/catlin_house.ifc
 MINIMAPPR_IFC_ORIGIN_OFFSET_M=[0.0, 0.0, 0.0]
 ```
+
+### The Complete S.P.E.E.D. Agentic Architecture
+
+| S.P.E.E.D. Phase | AEGIS Equivalents | Agentic AI Function | Workflow Action |
+| :--- | :--- | :--- | :--- |
+| **S - SENSOR** | IDS, RSC, EWS | **Ingest & Fuse** | Processes messy raw data (RF, radar, acoustics) into clean, classified track objects. |
+| **P - PLANNER** | AWC, SUWC, ASWC | **Evaluate & Recommend** | Simulates enemy intent, prioritizes threats, and drafts Requests for Action (e.g., "Recommend SM-6 intercept"). |
+| **E - EXECUTIVE** | TAO | **Authorize & Orchestrate** | Validates Planner requests against hardcoded Rules of Engagement/Policy and approves the strike. |
+| **E - EFFECTOR** | MSS, GFCS | **Execute & Actuate** | Calculates the physical physics/kinematics, takes control of hardware, and launches the weapon. |
+| **D - DISTRIBUTOR** | TIC (Link 16/CEC) | **Synchronize & Update** | Broadcasts the engagement state to the wider swarm network so the fleet can update their own *Sensor* loops. |
+
+This gives a **Sense $\rightarrow$ Think $\rightarrow$ Command $\rightarrow$ Act $\rightarrow$ Share** process, grounded in proven naval doctrine.
+In technical reality, the architecture is a "star" pattern with the Agent Ledger at the center. An agent ledger database is necessary, every agent on creation, taking action, or termination logs to this table (Blackboard Pattern as well as Distributed Locks and Leases). The this blackboard ledger coordinates agent action while the COP stores the spatial awareness (tracks). Agents sit above the rules and policy engines. LLM might say "activate sprinklers" in the backyard area, but hard coded rules prevent activation if people are present in the area with high confidence tracks. Agents are also above real time systems like TDOA localization, so both LLM and deterministic processes (like fast Kalman tracking) contribute to the COP together.
+
+Agentic User Story:
+An example MinimapPR setup has two zones: an inner most "secure area", a wider "identification zone" and beyond that open zone space which may be have tracks but has no defined rules. The system has a single PTZ Camera with speaker as an effector (technically two effectors, PTZ camera and speaker, on one node).
+This scenario starts with a track in the secure area. This is identified as friendly because of the recognized localization of the WiFI signal of a known smartphone. No agentic actions or alerts are active due to this track, although the track is updated by deterministic processes as the friendly track moves around the secure area.
+A sound localization identfies using deterministic processes a human track, deterministic tracking updates and after a few seconds the track resolves to be heading towards the secure zone (but not yet in the identification or secure areas). A deterministic process queues a low priority request to direct the PTZ camera towards the incoming track.
+A second human track is identified approach from the opposite direction, heading towards the secure area at a faster pace. This track enters the identification zone and remains on track towards the secure area. Deterministic processes have not successfully identified the track, so an identification agent is activated, which requests the PTZ camera to pan to this track with higher priority than the previous request. The unidentified track enters the secure area before it can be identified. This (high confidence human track, unidentified, in secure area) triggers a deterministic process, the speaker on the PTZ camera plays a loud warning beeping. Meanwhile, the identification agent has pulled calendar information and run image processing, and together assessed this is likely an expected maintenance technician. The executive agent uses this and decides to suppress the alarm (the friendly track, a human operator, could also have accessed the system to suppress it, but the agentic suppress command came in before that was necessary). The now-deemed-neutral track being in the secure zone undergoes routine agentic review for potential hostile actions. In a future software state, information sourced about the technician's tasks would build an expected operations profile for this neutral agent in the secure zone, triggering immediate reviews if the track goes to areas they are not expected to need to access.
+Meanwhile, the first human track never entered the identification zone and no agentic processes activated for it. If it had entered, the executive agent would need to consider this track as well as it decides which actions to take and prioritize.
+In this example, the identification agent has direct access to the PTZ camera, but not the speaker. The executive agent or human-coded deterministic processes are the only ways to activate the speaker. The executive agent can also override identification agents use of the PTZ camera with higher priority. The speaker may have hard-coded rules of engagement (for example, do not activate at night unless system is in a higher alert mode (ie homeowners are on vacation), and only then at lower volume with high confidence tracks, or unless an approved human operator approves the request for activation).
+
