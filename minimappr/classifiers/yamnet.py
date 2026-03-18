@@ -4,13 +4,22 @@ from __future__ import annotations
 
 import csv
 import io
+import logging
 import urllib.request
+from pathlib import Path
 
 import numpy as np
 from scipy.signal import resample_poly
 
 from minimappr.classifiers.base import AudioClassifier
 from minimappr.models import ClassificationResult
+
+
+logger = logging.getLogger(__name__)
+
+# Local fallback path for the class map so the server starts offline after the
+# first successful fetch.  Relative to CWD (the project root when run normally).
+_CLASS_MAP_CACHE_PATH = Path("data/yamnet_class_map.csv")
 
 
 class YAMNetClassifier(AudioClassifier):
@@ -62,11 +71,39 @@ class YAMNetClassifier(AudioClassifier):
         return f"class_{index}"
 
     def _load_class_names(self) -> list[str]:
+        # 1. Try the local disk cache written by a previous successful fetch.
+        if _CLASS_MAP_CACHE_PATH.exists():
+            try:
+                text = _CLASS_MAP_CACHE_PATH.read_text(encoding="utf-8")
+                names = _parse_class_map_csv(text)
+                if names:
+                    return names
+            except Exception:
+                pass  # Fall through to network fetch.
+
+        # 2. Fetch from upstream and persist to disk for future offline starts.
         try:
             with urllib.request.urlopen(self.CLASS_MAP_URL, timeout=10) as response:  # nosec B310
                 text = response.read().decode("utf-8")
-        except Exception:
+            names = _parse_class_map_csv(text)
+            if names:
+                try:
+                    _CLASS_MAP_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+                    _CLASS_MAP_CACHE_PATH.write_text(text, encoding="utf-8")
+                except Exception:
+                    pass  # Cache write failure is non-fatal.
+            return names
+        except Exception as exc:
+            logger.warning(
+                "YAMNet class map unavailable (network: %s; cache: %s). "
+                "Class names will fall back to 'class_N' indices.",
+                exc,
+                _CLASS_MAP_CACHE_PATH,
+            )
             return []
 
-        rows = csv.DictReader(io.StringIO(text))
-        return [row["display_name"] for row in rows if "display_name" in row]
+
+def _parse_class_map_csv(text: str) -> list[str]:
+    rows = csv.DictReader(io.StringIO(text))
+    return [row["display_name"] for row in rows if "display_name" in row]
+

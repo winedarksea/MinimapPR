@@ -19,6 +19,8 @@ const activeTracksEl = document.getElementById("activeTracks");
 const recentAlertsEl = document.getElementById("recentAlerts");
 const tracksTableEl = document.getElementById("tracksTable");
 const detectionFeedEl = document.getElementById("detectionFeed");
+const alertFeedEl = document.getElementById("alertFeed");
+const alertToastContainerEl = document.getElementById("alertToastContainer");
 const audioPlayerEl = document.getElementById("audioPlayer");
 
 const filterCategoryEl = document.getElementById("filterCategory");
@@ -517,6 +519,34 @@ function mergeLiveDetection(payload) {
   }
 }
 
+function showAlertToast(alert) {
+  const priority = (alert.priority || "normal").toLowerCase();
+  const message =
+    alert.payload?.message ||
+    `Rule alert (${alert.action_type || "alert"})`;
+  const toast = document.createElement("div");
+  toast.className = `alert-toast alert-toast--${priority}`;
+  toast.textContent = message;
+  alertToastContainerEl.appendChild(toast);
+  setTimeout(() => toast.remove(), priority === "high" ? 8000 : 5000);
+}
+
+function addAlertToFeed(alert) {
+  const priority = (alert.priority || "normal").toLowerCase();
+  const message =
+    alert.payload?.message ||
+    `Rule alert (${alert.action_type || "alert"})`;
+  const li = document.createElement("li");
+  li.className = `alert-item alert-item--${priority}`;
+  const time = new Date().toLocaleTimeString();
+  li.textContent = `[${time}] ${message}`;
+  alertFeedEl.prepend(li);
+  // Keep feed bounded
+  while (alertFeedEl.children.length > 50) {
+    alertFeedEl.lastElementChild?.remove();
+  }
+}
+
 function connectLive() {
   const scheme = window.location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(`${scheme}://${window.location.host}/ws/live`);
@@ -542,6 +572,11 @@ function connectLive() {
     if (payload?.event_type === "detection" || payload?.type === "detection") {
       mergeLiveDetection(payload);
       renderAll();
+    }
+
+    if (payload?.event_type === "alert" && payload.alert) {
+      addAlertToFeed(payload.alert);
+      showAlertToast(payload.alert);
     }
   });
 

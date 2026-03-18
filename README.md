@@ -29,6 +29,11 @@ This repository now includes a complete Phase 1 core build focused on the base c
 - `tests/`: localization and classifier tests
 
 ## Quick Start
+```bash
+pip install minimappr[full]   # installs birdnet + tensorflow + tensorflow-hub
+minimappr                      # starts server at :8080
+```
+
 1. Create environment and install dependencies.
 ```bash
 python3 -m venv .venv

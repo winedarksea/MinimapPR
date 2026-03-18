@@ -309,7 +309,7 @@ class Settings:
     site_origin_alt_m: float = 0.0
     coordinate_mode: str = "flat"
 
-    classifier_backend: str = "heuristic"
+    classifier_backend: str = "yamnet"
     yamnet_min_confidence: float = 0.25
     heuristic_ambient_rms_threshold: float = 0.01
     heuristic_impulse_crest_threshold: float = 10.0
@@ -564,7 +564,7 @@ class Settings:
             min_sensors_for_2d=_env_int("MINIMAPPR_MIN_SENSORS_FOR_2D", 3),
             localization_max_tau_s=_env_float("MINIMAPPR_LOCALIZATION_MAX_TAU_S", 0.02),
             localization_algorithm=_env_str("MINIMAPPR_LOCALIZATION_ALGORITHM", "gcc_phat"),
-            localization_strategy=_env_str("MINIMAPPR_LOCALIZATION_STRATEGY", "fixed"),
+            localization_strategy=_env_str("MINIMAPPR_LOCALIZATION_STRATEGY", "geometry_aware"),
             localization_srp_grid_resolution_m=_env_float("MINIMAPPR_LOCALIZATION_SRP_GRID_RESOLUTION_M", 0.5),
             localization_search_padding_m=_env_float("MINIMAPPR_LOCALIZATION_SEARCH_PADDING_M", 2.0),
             localization_music_azimuth_step_deg=_env_float("MINIMAPPR_LOCALIZATION_MUSIC_AZ_STEP_DEG", 6.0),
@@ -598,7 +598,7 @@ class Settings:
             site_origin_lon=_env_float("MINIMAPPR_SITE_ORIGIN_LON", -122.4194),
             site_origin_alt_m=_env_float("MINIMAPPR_SITE_ORIGIN_ALT_M", 0.0),
             coordinate_mode=_env_str("MINIMAPPR_COORDINATE_MODE", "flat"),
-            classifier_backend=_env_str("MINIMAPPR_CLASSIFIER", "heuristic"),
+            classifier_backend=_env_str("MINIMAPPR_CLASSIFIER", "yamnet"),
             yamnet_min_confidence=_env_float("MINIMAPPR_YAMNET_MIN_CONFIDENCE", 0.25),
             heuristic_ambient_rms_threshold=_env_float("MINIMAPPR_HEURISTIC_AMBIENT_RMS_THRESHOLD", 0.01),
             heuristic_impulse_crest_threshold=_env_float("MINIMAPPR_HEURISTIC_IMPULSE_CREST_THRESHOLD", 10.0),

@@ -310,5 +310,24 @@ def default_rules() -> list[RuleDef]:
             actions=[ActionDescriptor(action_type="alert", destination="cop", priority="normal")],
             cooldown_seconds=2.0,
         ),
+        # YAMNet class index 72 is "Howl" in the AudioSet taxonomy, covering
+        # coyote and wolf vocalizations.  30-second cooldown avoids alert flooding
+        # during a prolonged howling bout.
+        RuleDef(
+            rule_id="coyote_howl_alert",
+            enabled=True,
+            scope="detection",
+            condition=RuleCondition(labels={"howl"}, min_confidence=0.4),
+            actions=[
+                ActionDescriptor(
+                    action_type="alert",
+                    destination="cop",
+                    priority="high",
+                    payload={"message": "Coyote howl detected", "yamnet_class": 72},
+                ),
+                ActionDescriptor(action_type="alert", destination="log", priority="high"),
+            ],
+            cooldown_seconds=30.0,
+        ),
     ]
 
