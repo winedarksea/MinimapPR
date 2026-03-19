@@ -55,9 +55,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/colincatlin/MinimapPR"
-Repository = "https://github.com/colincatlin/MinimapPR"
-Issues = "https://github.com/colincatlin/MinimapPR/issues"
+Homepage = "https://github.com/winedarksea/MinimapPR"
+Repository = "https://github.com/winedarksea/MinimapPR"
+Issues = "https://github.com/winedarksea/MinimapPR/issues"
 
 [project.scripts]
 minimappr = "minimappr.__main__:main"
