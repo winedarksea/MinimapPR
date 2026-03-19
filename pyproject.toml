@@ -7,7 +7,7 @@ name = "minimappr"
 version = "0.1.0"
 description = "Realtime environmental awareness: distributed sound localization + classification + common operating picture"
 readme = "README.md"
-license = "GPL-3.0-or-later"
+license = "GPL-3.0"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
 authors = [
