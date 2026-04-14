@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import sys
+import types
+
 import numpy as np
 
 from minimappr.classifiers.base import AudioClassifier
 from minimappr.classifiers.chaining import ChainStage, ChainedClassifier
+from minimappr.classifiers import factory
 from minimappr.classifiers.heuristic import HeuristicClassifier
+from minimappr.config import Settings
 from minimappr.models import ClassificationResult
 
 
@@ -95,3 +100,24 @@ def test_chained_classifier_skips_non_matching_stage() -> None:
     assert result.label == "vehicle"
     assert result.confidence == 0.7
     assert result.features["chain_stage_count"] == 0.0
+
+
+def test_default_yamnet_to_birdnet_chain_uses_recall_biased_threshold(monkeypatch) -> None:
+    class _StubBirdNETClassifier(AudioClassifier):
+        def __init__(self, min_confidence: float = 0.1) -> None:
+            self.min_confidence = min_confidence
+
+        def classify(self, samples: np.ndarray, sample_rate_hz: int) -> ClassificationResult:
+            del samples, sample_rate_hz
+            return ClassificationResult(label="robin", confidence=0.9, scores={"robin": 0.9})
+
+    stub_module = types.ModuleType("minimappr.classifiers.birdnet")
+    stub_module.BirdNETClassifier = _StubBirdNETClassifier
+    monkeypatch.setitem(sys.modules, "minimappr.classifiers.birdnet", stub_module)
+
+    settings = Settings(birdnet_trigger_min_confidence=0.05)
+    stages = factory._default_chain_stages(settings)
+
+    assert len(stages) == 1
+    assert stages[0].stage_id == "birdnet_species"
+    assert stages[0].min_confidence == 0.05

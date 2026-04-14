@@ -36,7 +36,7 @@ def create_classifier(settings: Settings) -> AudioClassifier:
     if not stages and yamnet_active:
         # When no explicit chain config exists and YAMNet is active, apply the
         # default beta chain: bird-like detections trigger BirdNET for species ID.
-        stages = _default_chain_stages()
+        stages = _default_chain_stages(settings)
     if not stages:
         return base_classifier
     return ChainedClassifier(
@@ -101,11 +101,11 @@ def _build_stage(raw: dict[str, Any], settings: Settings) -> ChainStage | None:
     )
 
 
-def _default_chain_stages() -> list[ChainStage]:
+def _default_chain_stages(settings: Settings) -> list[ChainStage]:
     """Return the default beta chain when no model_chain.json config file exists.
 
     Triggers BirdNET species identification whenever YAMNet classifies audio
-    in the 'bird' category with at least 30 % confidence.  BirdNET is loaded
+    in the 'bird' category with configurable recall-biased confidence. BirdNET is loaded
     lazily — the stage is silently omitted if the birdnet package is not installed.
     """
     try:
@@ -126,7 +126,7 @@ def _default_chain_stages() -> list[ChainStage]:
             # Trigger on YAMNet 'bird' category OR common bird labels.
             trigger_categories={"bird"},
             trigger_labels={"bird", "bird_like", "bird sound", "bird vocalization", "songbird"},
-            min_confidence=0.3,
+            min_confidence=settings.birdnet_trigger_min_confidence,
             score_weight=1.2,  # Prefer species-level label over coarse 'bird_like'.
         )
     ]

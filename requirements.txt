@@ -1,3 +1,7 @@
+# Use Python 3.11+ for this project. The local server will not run correctly on
+# older interpreters such as the system Python 3.9 on macOS.
+
+# Core runtime
 fastapi>=0.116,<1.0
 uvicorn[standard]>=0.35,<1.0
 numpy>=1.26,<2.3
@@ -5,8 +9,14 @@ scipy>=1.11,<1.17
 pydantic>=2.8,<3.0
 aiosqlite>=0.21,<1.0
 httpx>=0.28,<1.0
+
+# Local bird-audio classification runtime
+# YAMNet is the default classifier backend. BirdNET enables the default
+# species-ID chain when YAMNet reports a bird-related label.
+tensorflow>=2.19,<3.0
+tensorflow-hub>=0.16,<1.0
+birdnet>=0.2.12,<1.0
+
+# Dev / test
 pytest>=8.2,<9.0
 pytest-asyncio>=0.23,<2.0
-# Optional classifier backend:
-# tensorflow==2.19.0
-# tensorflow-hub==0.16.1

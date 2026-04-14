@@ -109,6 +109,7 @@ class TrackingConfig:
 class ClassifierConfig:
     backend: str
     yamnet_min_confidence: float
+    birdnet_trigger_min_confidence: float
     heuristic_ambient_rms_threshold: float
     heuristic_impulse_crest_threshold: float
     heuristic_impulse_bandwidth_threshold_hz: float
@@ -311,6 +312,7 @@ class Settings:
 
     classifier_backend: str = "yamnet"
     yamnet_min_confidence: float = 0.25
+    birdnet_trigger_min_confidence: float = 0.05
     heuristic_ambient_rms_threshold: float = 0.01
     heuristic_impulse_crest_threshold: float = 10.0
     heuristic_impulse_bandwidth_threshold_hz: float = 1200.0
@@ -457,6 +459,10 @@ class Settings:
             raise ValueError("MINIMAPPR_TAXONOMY_REFRESH_INTERVAL_SECONDS must be > 0")
         if self.retention_long_security_confidence < 0.0 or self.retention_long_security_confidence > 1.0:
             raise ValueError("MINIMAPPR_RETENTION_LONG_SECURITY_CONFIDENCE must be in [0,1]")
+        if self.yamnet_min_confidence < 0.0 or self.yamnet_min_confidence > 1.0:
+            raise ValueError("MINIMAPPR_YAMNET_MIN_CONFIDENCE must be in [0,1]")
+        if self.birdnet_trigger_min_confidence < 0.0 or self.birdnet_trigger_min_confidence > 1.0:
+            raise ValueError("MINIMAPPR_BIRDNET_TRIGGER_MIN_CONFIDENCE must be in [0,1]")
 
         self.cors_allow_origins = tuple(origin.strip() for origin in self.cors_allow_origins if origin.strip())
         if not self.cors_allow_origins:
@@ -600,6 +606,7 @@ class Settings:
             coordinate_mode=_env_str("MINIMAPPR_COORDINATE_MODE", "flat"),
             classifier_backend=_env_str("MINIMAPPR_CLASSIFIER", "yamnet"),
             yamnet_min_confidence=_env_float("MINIMAPPR_YAMNET_MIN_CONFIDENCE", 0.25),
+            birdnet_trigger_min_confidence=_env_float("MINIMAPPR_BIRDNET_TRIGGER_MIN_CONFIDENCE", 0.05),
             heuristic_ambient_rms_threshold=_env_float("MINIMAPPR_HEURISTIC_AMBIENT_RMS_THRESHOLD", 0.01),
             heuristic_impulse_crest_threshold=_env_float("MINIMAPPR_HEURISTIC_IMPULSE_CREST_THRESHOLD", 10.0),
             heuristic_impulse_bandwidth_threshold_hz=_env_float(
@@ -741,6 +748,7 @@ class Settings:
         return ClassifierConfig(
             backend=self.classifier_backend,
             yamnet_min_confidence=self.yamnet_min_confidence,
+            birdnet_trigger_min_confidence=self.birdnet_trigger_min_confidence,
             heuristic_ambient_rms_threshold=self.heuristic_ambient_rms_threshold,
             heuristic_impulse_crest_threshold=self.heuristic_impulse_crest_threshold,
             heuristic_impulse_bandwidth_threshold_hz=self.heuristic_impulse_bandwidth_threshold_hz,
