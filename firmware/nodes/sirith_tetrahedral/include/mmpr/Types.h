@@ -15,7 +15,8 @@ enum class NodeType {
 enum class TimeQuality {
   kGpsLocked,
   kNtpSync,
-  kFreerunning,
+  kBuildTimestamp,  // Anchored to compile-time clock; ~seconds accurate, drifts at RP2350 ROSC rate
+  kFreerunning,     // No wall-clock anchor; timestamps are monotonic from boot only
 };
 
 struct GeoPoint {

@@ -48,6 +48,7 @@ add_executable(sirith_tetrahedral
         src/Lsm6TemperatureSensor.cpp
         src/MagAutoOrientation.cpp
         src/NmeaGpsSource.cpp
+        src/NtpClient.cpp
         src/NodeClock.cpp
         src/NodeProtocol.cpp
         src/NodeRunner.cpp

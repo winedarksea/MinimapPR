@@ -88,6 +88,8 @@ const char* timeQualityToWire(TimeQuality quality) {
       return "gps_locked";
     case TimeQuality::kNtpSync:
       return "ntp_sync";
+    case TimeQuality::kBuildTimestamp:
+      return "build_timestamp";
     case TimeQuality::kFreerunning:
     default:
       return "freerunning";

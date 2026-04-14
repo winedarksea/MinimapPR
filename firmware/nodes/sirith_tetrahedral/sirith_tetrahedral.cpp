@@ -8,6 +8,7 @@
 #include "node_config.h"
 
 #include "mmpr/HttpFramePublisher.h"
+#include "mmpr/NtpClient.h"
 #include "mmpr/FallbackEnvironmentalSource.h"
 #include "mmpr/Lis2mdlMagnetometer.h"
 #include "mmpr/Lsm6TemperatureSensor.h"
@@ -182,6 +183,8 @@ mmpr::IEnvironmentalSource* gEnvironmentalSource =
     ? static_cast<mmpr::IEnvironmentalSource*>(&gCombinedEnvironmentSource)
     : nullptr;
 
+mmpr::NtpClient gNtpClient;
+
 mmpr::NodeRunner gRunner(
     gNodeDescriptor,
     gSelectedAudioSource,
@@ -307,6 +310,11 @@ int main() {
     }
   }
 
+  if (nodecfg::kEnableNtpSync) {
+    gNtpClient.begin(nodecfg::kNtpServer, gClock);
+    std::printf("[sirith-pico] NTP client started, server=%s\n", nodecfg::kNtpServer);
+  }
+
   while (true) {
     if (gAutoOrientationEnabled) {
       uint8_t changedRotation = 0;
@@ -329,6 +337,10 @@ int main() {
         nodecfg::kWiFiConnectTimeoutMs);
 
     gRunner.loopOnce();
+
+    if (nodecfg::kEnableNtpSync) {
+      gNtpClient.poll();
+    }
 
     if (nodecfg::kEnableGpsUart) {
       gGpsSource.poll(gNodeDescriptor, &gClock);

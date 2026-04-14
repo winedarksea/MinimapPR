@@ -4,6 +4,8 @@
 
 #include "pico/time.h"
 
+#include "mmpr/BuildTimestamp.h"
+
 namespace mmpr {
 
 void NodeClock::begin(
@@ -17,13 +19,18 @@ void NodeClock::begin(
   (void)gmtOffsetSeconds;
   (void)daylightOffsetSeconds;
 
-  if (syncNtp) {
-    std::printf("[node] NTP sync requested but not enabled in this no-OS build; using monotonic clock\n");
-  }
+  // NTP is handled externally by NtpClient; the syncNtp parameter is retained
+  // for API compatibility but has no effect here.
+  (void)syncNtp;
 
-  hasWallClock_ = false;
-  timeQuality_ = TimeQuality::kFreerunning;
-  streamStartNs_ = nowUtcNs();
+  // Anchor the freerunning clock to the compile-time timestamp so frame
+  // timestamps are approximately correct even without GPS or NTP.  The wall
+  // clock will be upgraded to kNtpSync or kGpsLocked if a better source
+  // becomes available later.
+  setUtcNs(kBuildEpochNs, TimeQuality::kBuildTimestamp);
+  std::printf(
+      "[node] clock anchored to build timestamp %llu ns (build_timestamp quality)\n",
+      static_cast<unsigned long long>(kBuildEpochNs));
   frameDurationNs_ =
       static_cast<uint64_t>((static_cast<double>(frameSamples) * 1000000000.0) / static_cast<double>(sampleRateHz));
   frameIndex_ = 0;
@@ -43,6 +50,13 @@ uint64_t NodeClock::nowUtcNs() const {
 }
 
 void NodeClock::setUtcNs(uint64_t utcNs, TimeQuality quality) {
+  // Enforce priority: GPS > NTP > build_timestamp > freerunning.
+  // Lower enum value = better quality.  Equal quality is allowed so that GPS
+  // can keep refreshing its own anchor after the initial lock.
+  if (hasWallClock_ && static_cast<int>(quality) > static_cast<int>(timeQuality_)) {
+    return;
+  }
+
   wallClockNs_ = utcNs;
   wallClockSetUs_ = time_us_64();
   hasWallClock_ = true;
