@@ -17,6 +17,10 @@ static constexpr uint32_t kHttpTimeoutMs = 2500;
 static constexpr const char* kNodeId = "sirith-tetra-pico2w-01";
 static constexpr const char* kNodeTypeWire = "sirith_tetra";
 static constexpr float kNodePositionM[3] = {6.0f, 0.0f, 2.0f};
+static constexpr bool kNodeHasFallbackGeoPosition = true;
+static constexpr float kNodeFallbackLatitudeDeg = 44.98698840878797f;
+static constexpr float kNodeFallbackLongitudeDeg = -93.2579197515542f;
+static constexpr float kNodeFallbackAltitudeM = 0.0f;
 
 // Physical microphone geometry â€” centroid-centred, metres.
 // Positions derived from the LIS2MDLTR / LSM6DSV16X sensor frame:
@@ -51,15 +55,19 @@ static constexpr const char* kCapabilities[] = {
     "array_localization",
     "gps_optional",
     "temperature",
+    "humidity",
 };
 
 static constexpr const char* kHardwareName = "sirith_tetra_pico2w_tdm";
 
 // --- Bring-up mode ---
-// Bare-board validation keeps the switched 3V3 rail off and avoids driving
-// any external buses so firmware can be verified without risking the mic array.
+// Bare-board validation avoids driving external buses so firmware can be
+// verified without risking the mic array.
 static constexpr bool kBareBoardValidationMode = true;
-static constexpr bool kEnableExternal3v3Rail = !kBareBoardValidationMode;
+// GP26 controls a switched Vin rail through a FET and also drives the board LED.
+// Keep it disabled by default until that path is needed for a validated
+// hardware configuration.
+static constexpr bool kEnableExternalVFetRail = false;
 static constexpr bool kEnableExternalAudioHardware = !kBareBoardValidationMode;
 static constexpr bool kEnableExternalPeripheralBuses = !kBareBoardValidationMode;
 
@@ -84,11 +92,15 @@ static constexpr uint8_t kOutputChannelToSlot[4] = {1, 0, 3, 2};
 static constexpr bool kUseSafeDriveStrength = true;
 
 // --- Optional GPS/PPS (M10Q style) ---
-static constexpr bool kEnableGpsUart = false;
+static constexpr bool kEnableGpsUart = true;
 static constexpr uint32_t kGpsUartBaud = 9600;
 static constexpr int kGpsTxPin = 12;
 static constexpr int kGpsRxPin = 13;
 static constexpr int kGpsPpsPin = 10;
+static constexpr uint32_t kGpsMissingSentenceTimeoutMs = 5000;
+static constexpr uint32_t kGpsStaleFixTimeoutMs = 5000;
+static constexpr const char* kGpsSignalStatus = "missing";
+static constexpr const char* kGpsPositionSource = "fallback_static";
 
 // --- Optional compass and IMU bus wiring ---
 // GP18/GP19 map to I2C1 on RP2040/RP2350 pin mux.
@@ -121,6 +133,11 @@ static constexpr float kCompassKalmanInitP = 400.0f; // initial covariance (degÂ
 static constexpr uint8_t kImuI2cAddressPrimary7Bit = 0x6A;
 static constexpr uint8_t kImuI2cAddressSecondary7Bit = 0x6B;
 static constexpr uint32_t kImuTemperatureSampleIntervalMs = 2000;
+
+// Sensirion SHT4x family environmental sensor (SHT45 on SparkFun SAM-M10Q carrier)
+static constexpr bool kEnableSht45Environment = true;
+static constexpr uint8_t kSht4xI2cAddress7Bit = 0x44;
+static constexpr uint32_t kSht4xSampleIntervalMs = 2000;
 
 // --- Time sync ---
 // For standalone arrays, strict absolute UTC is optional; GPS/NTP can be enabled later.

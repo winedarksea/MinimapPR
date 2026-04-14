@@ -263,8 +263,8 @@ int main() {
   stdio_init_all();
   sleep_ms(300);
 
-  // GP26 controls a switched 3V3 rail; keep it off unless explicitly enabled.
-  setExternalRailEnabled(nodecfg::kEnableExternal3v3Rail);
+  // GP26 controls the external Vin FET rail; keep it off unless explicitly enabled.
+  setExternalRailEnabled(nodecfg::kEnableExternalVFetRail);
 
   std::printf("[sirith-pico] booting\n");
   if (nodecfg::kBareBoardValidationMode) {

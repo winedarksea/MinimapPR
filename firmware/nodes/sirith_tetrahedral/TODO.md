@@ -8,7 +8,8 @@
 - TDM: SDATA=`GP7`, BCLK=`GP8`, WS=`GP9`.
 - MK4 is the top mic (expected default TDM slot 3).
 - FET (p-channel connected to LED and switchable Vin power header which can be used to send power off board) is `GP26`. This could be used as a status LED (in addition to Pico onboard LED) as most deployments won't use the offboard power connection.
-- Expected channels, MK1 is DATA2 (Right) of i2s1 (TDM2 likely), MK2 is DATA1 (Left) of i2s1 (TDM1 likely), MK3 is DATA2 (Right) of i2s2 (TDM4 likely), MK4 is DATA1 (Left) of i2s2 (TDM3 likely)
+- Expected channels, MK1 is DATA2 (Right) of i2s1 (TDM2 likely), MK2 is DATA1 (Left) of i2s1 (TDM1 likely), MK3 is DATA2 (Right) of i2s2 (TDM4 likely), MK4 is DATA1 (Left) of i2s2 (TDM3 likely).
+- Microphones and ADAU7112 are at 1.8V, talking to the MCU via a TXS0108E level shifter.
 - Using the same X/Y/Z as the LIS2MDLTR and LSM6DSV16X, MK3 is (0, 0, 0), MK1 is (0, 50, 0), MK2 is (43.3, 25, 0), MK4 is (21.65, 25, 40.82)
 - An optional I2C connection (qwiic) to an SHT45 temperature and humidity sensor board
 - Note the Pico 2 W has an erratum 9 on gpio to be aware of. The board also has its own LED wired to WL_GPIO0.
