@@ -22,6 +22,7 @@ const detectionFeedEl = document.getElementById("detectionFeed");
 const alertFeedEl = document.getElementById("alertFeed");
 const alertToastContainerEl = document.getElementById("alertToastContainer");
 const audioPlayerEl = document.getElementById("audioPlayer");
+const nodeAudioListEl = document.getElementById("nodeAudioList");
 
 const filterCategoryEl = document.getElementById("filterCategory");
 const filterStatusEl = document.getElementById("filterStatus");
@@ -226,6 +227,61 @@ function renderTrackTable() {
 function playDetectionSnippet(detectionId) {
   audioPlayerEl.src = `/api/v1/detections/${encodeURIComponent(detectionId)}/audio`;
   audioPlayerEl.play().catch(() => {});
+}
+
+function playNodeAudioDebug(nodeId) {
+  const requestedAt = Date.now();
+  audioPlayerEl.src = `/api/v1/nodes/${encodeURIComponent(nodeId)}/audio/recent?seconds=10&requested_at=${requestedAt}`;
+  audioPlayerEl
+    .play()
+    .then(() => {
+      statusEl.textContent = `Listening to ${nodeId} debug audio`;
+    })
+    .catch(() => {
+      statusEl.textContent = `No recent audio available for ${nodeId}`;
+    });
+}
+
+function formatAudioDebugMeta(audioDebug) {
+  if (!audioDebug) return "No audio telemetry";
+  const status = String(audioDebug.status || "no_audio");
+  const age = Number(audioDebug.age_seconds);
+  const sampleRateHz = Number(audioDebug.sample_rate_hz);
+  const rmsValue = Number(audioDebug.rms);
+  const ageText = Number.isFinite(age) ? `${fmtNum(age, 1)}s ago` : "n/a";
+  const sampleText = Number.isFinite(sampleRateHz) && sampleRateHz > 0 ? `${Math.round(sampleRateHz)} Hz` : "n/a";
+  const rmsText = Number.isFinite(rmsValue) ? fmtNum(rmsValue, 3) : "n/a";
+  return `${status} | age ${ageText} | ${sampleText} | rms ${rmsText}`;
+}
+
+function renderNodeAudioPanel() {
+  const sortedNodes = state.nodes.slice().sort((a, b) => String(a.id || "").localeCompare(String(b.id || "")));
+  nodeAudioListEl.innerHTML = sortedNodes
+    .map((node) => {
+      const audioDebug = node.audio_debug || {};
+      const sensorCount = Number(audioDebug.sensor_count || 0);
+      const activeSensorCount = Number(audioDebug.active_sensor_count || 0);
+      const status = String(audioDebug.status || "no_audio");
+      const disabled = status === "no_audio" ? "disabled" : "";
+      return `<li data-node-id="${node.id}">
+        <div>
+          <div><strong>${node.id}</strong> <span>(${node.health_status || "unknown"})</span></div>
+          <div class="node-audio-meta">${formatAudioDebugMeta(audioDebug)} | sensors ${activeSensorCount}/${sensorCount}</div>
+        </div>
+        <div class="node-audio-actions">
+          <button type="button" data-play-node-audio="${node.id}" ${disabled}>Listen</button>
+        </div>
+      </li>`;
+    })
+    .join("");
+
+  nodeAudioListEl.querySelectorAll("button[data-play-node-audio]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const nodeId = button.dataset.playNodeAudio;
+      if (!nodeId) return;
+      playNodeAudioDebug(nodeId);
+    });
+  });
 }
 
 function renderDetectionFeed() {
@@ -440,6 +496,7 @@ function renderMap() {
 
 function renderAll() {
   renderSystemStatus();
+  renderNodeAudioPanel();
   renderTrackTable();
   renderDetectionFeed();
   renderMap();

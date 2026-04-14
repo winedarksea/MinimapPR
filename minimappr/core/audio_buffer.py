@@ -103,3 +103,90 @@ class MultiSensorBuffer:
                 if window is not None:
                     result[sensor_id] = window
             return result
+
+    async def get_recent_window_for_sensors(
+        self,
+        sensor_ids: list[str],
+        window_seconds: float,
+    ) -> tuple[dict[str, np.ndarray], int, int] | None:
+        async with self._lock:
+            available: list[tuple[str, SensorStreamBuffer]] = []
+            sample_rate_counts: dict[int, int] = {}
+            for sensor_id in sensor_ids:
+                buffer = self._buffers.get(sensor_id)
+                if buffer is None or buffer.start_time_ns is None or buffer.samples.size == 0:
+                    continue
+                available.append((sensor_id, buffer))
+                sample_rate_counts[buffer.sample_rate_hz] = sample_rate_counts.get(buffer.sample_rate_hz, 0) + 1
+
+            if not available:
+                return None
+
+            dominant_sample_rate_hz = min(sample_rate_counts.keys())
+            best_count = -1
+            for sample_rate_hz, count in sample_rate_counts.items():
+                if count > best_count or (count == best_count and sample_rate_hz > dominant_sample_rate_hz):
+                    dominant_sample_rate_hz = sample_rate_hz
+                    best_count = count
+
+            window_samples = max(1, int(round(window_seconds * dominant_sample_rate_hz)))
+            latest_end_ns = 0
+            recent: dict[str, np.ndarray] = {}
+            for sensor_id, buffer in available:
+                if buffer.sample_rate_hz != dominant_sample_rate_hz:
+                    continue
+                tail = buffer.samples[-window_samples:].copy()
+                if tail.size == 0:
+                    continue
+                recent[sensor_id] = tail
+                end_ns = buffer.start_time_ns + buffer.samples.size * buffer.ns_per_sample
+                latest_end_ns = max(latest_end_ns, end_ns)
+
+            if not recent:
+                return None
+
+            common_samples = min(window.size for window in recent.values())
+            if common_samples <= 0:
+                return None
+            aligned = {sensor_id: window[-common_samples:] for sensor_id, window in recent.items()}
+            return aligned, dominant_sample_rate_hz, latest_end_ns
+
+    async def summarize_sensors(self, sensor_ids: list[str], now_ns: int) -> dict[str, float | int | None]:
+        async with self._lock:
+            active_sensor_count = 0
+            sample_rate_counts: dict[int, int] = {}
+            rms_values: list[float] = []
+            latest_sample_time_ns: int | None = None
+            for sensor_id in sensor_ids:
+                buffer = self._buffers.get(sensor_id)
+                if buffer is None or buffer.start_time_ns is None or buffer.samples.size == 0:
+                    continue
+
+                active_sensor_count += 1
+                sample_rate_counts[buffer.sample_rate_hz] = sample_rate_counts.get(buffer.sample_rate_hz, 0) + 1
+                end_ns = buffer.start_time_ns + buffer.samples.size * buffer.ns_per_sample
+                latest_sample_time_ns = end_ns if latest_sample_time_ns is None else max(latest_sample_time_ns, end_ns)
+
+                tail_samples = max(1, min(buffer.samples.size, buffer.sample_rate_hz // 2))
+                tail = buffer.samples[-tail_samples:]
+                rms_values.append(float(np.sqrt(np.mean(np.square(tail)) + 1e-12)))
+
+            dominant_sample_rate_hz: int | None = None
+            if sample_rate_counts:
+                dominant_sample_rate_hz = max(sample_rate_counts.items(), key=lambda item: (item[1], item[0]))[0]
+
+            age_seconds: float | None = None
+            if latest_sample_time_ns is not None:
+                age_seconds = max(0.0, (now_ns - latest_sample_time_ns) / 1_000_000_000.0)
+
+            rms_value: float | None = None
+            if rms_values:
+                rms_value = float(np.mean(np.asarray(rms_values, dtype=np.float64)))
+
+            return {
+                "active_sensor_count": active_sensor_count,
+                "sample_rate_hz": dominant_sample_rate_hz,
+                "last_sample_time_ns": latest_sample_time_ns,
+                "age_seconds": age_seconds,
+                "rms": rms_value,
+            }

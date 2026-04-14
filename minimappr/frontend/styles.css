@@ -202,7 +202,7 @@ body {
 
 .side-panel {
   display: grid;
-  grid-template-rows: minmax(260px, 1fr) minmax(200px, 1fr) minmax(160px, auto);
+  grid-template-rows: minmax(150px, auto) minmax(240px, 1fr) minmax(180px, 1fr) minmax(140px, auto);
   gap: 0.6rem;
   padding: 0.7rem;
 }
@@ -220,6 +220,42 @@ body {
   border-bottom: 1px solid #d7e2db;
   font-family: "Bitter", Georgia, serif;
   font-size: 0.95rem;
+}
+
+.node-panel {
+  display: grid;
+  grid-template-rows: auto 1fr;
+}
+
+#nodeAudioList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+}
+
+#nodeAudioList li {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.35rem 0.55rem;
+  align-items: center;
+  padding: 0.45rem 0.65rem;
+  border-bottom: 1px solid #e2ebe5;
+  font-size: 0.79rem;
+}
+
+.node-audio-meta {
+  color: #4e6371;
+  font-size: 0.72rem;
+}
+
+.node-audio-actions button {
+  font-size: 0.73rem;
+  border: 1px solid #b8c6be;
+  border-radius: 7px;
+  background: #f8fbf9;
+  padding: 0.18rem 0.45rem;
+  cursor: pointer;
 }
 
 .track-panel {

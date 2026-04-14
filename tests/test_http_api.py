@@ -253,6 +253,67 @@ def test_detection_audio_rejects_paths_outside_snippet_root(monkeypatch, tmp_pat
         assert "outside snippet directory" in response.text
 
 
+def test_node_recent_audio_endpoint_returns_wav(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+
+    with TestClient(app) as client:
+        _ingest_single_frame(client, start_time_ns=time.time_ns())
+
+        response = client.get("/api/v1/nodes/http-node-1/audio/recent", params={"seconds": 10})
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("audio/wav")
+        with wave.open(io.BytesIO(response.content), "rb") as wav:
+            assert wav.getnchannels() == 1
+            assert wav.getframerate() == 16000
+            assert wav.getnframes() > 0
+
+
+def test_node_recent_audio_endpoint_rejects_unknown_node(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/nodes/unknown-node/audio/recent")
+        assert response.status_code == 404
+
+
+def test_node_recent_audio_endpoint_rejects_stale_audio(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+
+    with TestClient(app) as client:
+        stale_start_time_ns = time.time_ns() - 60_000_000_000
+        _ingest_single_frame(client, start_time_ns=stale_start_time_ns)
+
+        response = client.get("/api/v1/nodes/http-node-1/audio/recent")
+        assert response.status_code == 404
+        assert "No recent audio available" in response.text
+
+
+def test_node_recent_audio_endpoint_validates_seconds(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+
+    with TestClient(app) as client:
+        _ingest_single_frame(client, start_time_ns=time.time_ns())
+
+        response = client.get("/api/v1/nodes/http-node-1/audio/recent", params={"seconds": 0.5})
+        assert response.status_code == 422
+
+
+def test_nodes_include_audio_debug_summary(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+
+    with TestClient(app) as client:
+        _ingest_single_frame(client, start_time_ns=time.time_ns())
+
+        response = client.get("/api/v1/nodes", params={"limit": 10})
+        assert response.status_code == 200
+        rows = response.json()
+        node = next(row for row in rows if row["id"] == "http-node-1")
+        audio_debug = node.get("audio_debug")
+        assert isinstance(audio_debug, dict)
+        assert audio_debug["status"] in {"recent", "stale", "no_audio"}
+        assert int(audio_debug["sensor_count"]) >= 1
+
+
 def test_environment_ingest_from_node_metadata(monkeypatch, tmp_path: Path) -> None:
     _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
     monkeypatch.setenv("MINIMAPPR_DEFAULT_TEMPERATURE_C", "7.5")

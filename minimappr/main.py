@@ -10,6 +10,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import numpy as np
 from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -58,7 +59,7 @@ from minimappr.models import (
     ZoneSpec,
 )
 from minimappr.storage.db import Storage
-from minimappr.utils.audio import read_wav_mono
+from minimappr.utils.audio import mono_mix, read_wav_mono
 
 
 logger = logging.getLogger(__name__)
@@ -331,6 +332,28 @@ async def list_nodes(
             failure_codes.extend(report.failure_codes)
         if failure_codes:
             node["bit_failure_codes"] = failure_codes
+
+        sensor_descriptors = await state.registry.sensors_for_node(node["id"])
+        sensor_ids = [descriptor.sensor_id for descriptor in sensor_descriptors]
+        audio_summary = await state.audio_buffer.summarize_sensors(sensor_ids=sensor_ids, now_ns=now_ns)
+
+        age_seconds = audio_summary["age_seconds"]
+        if age_seconds is None:
+            audio_status = "no_audio"
+        elif age_seconds <= settings.node_degraded_after_seconds:
+            audio_status = "recent"
+        else:
+            audio_status = "stale"
+
+        node["audio_debug"] = {
+            "sensor_count": len(sensor_ids),
+            "active_sensor_count": int(audio_summary["active_sensor_count"] or 0),
+            "sample_rate_hz": audio_summary["sample_rate_hz"],
+            "last_sample_time_ns": audio_summary["last_sample_time_ns"],
+            "age_seconds": age_seconds,
+            "rms": audio_summary["rms"],
+            "status": audio_status,
+        }
     return nodes
 
 
@@ -853,6 +876,64 @@ async def get_detection_audio(detection_id: str, request: Request) -> FileRespon
         path=snippet_file,
         media_type="audio/wav",
         filename=f"{detection_id}.wav",
+    )
+
+
+@app.get("/api/v1/nodes/{node_id}/audio/recent")
+async def get_recent_node_audio(
+    node_id: str,
+    request: Request,
+    seconds: float = Query(default=10.0, ge=1.0, le=30.0),
+) -> Response:
+    state = _require_state(request)
+    settings: Settings = state.settings
+
+    sensor_descriptors = await state.registry.sensors_for_node(node_id)
+    if not sensor_descriptors:
+        raise HTTPException(status_code=404, detail="Node has no live sensors available for audio debug")
+
+    sensor_ids = [descriptor.sensor_id for descriptor in sensor_descriptors]
+    recent = await state.audio_buffer.get_recent_window_for_sensors(
+        sensor_ids=sensor_ids,
+        window_seconds=float(seconds),
+    )
+    if recent is None:
+        raise HTTPException(status_code=404, detail="No recent audio available for node")
+
+    windows, sample_rate_hz, latest_sample_time_ns = recent
+    age_seconds = max(0.0, (time.time_ns() - latest_sample_time_ns) / 1_000_000_000.0)
+    if age_seconds > settings.node_degraded_after_seconds:
+        raise HTTPException(status_code=404, detail="No recent audio available for node")
+
+    ordered_descriptors = sorted(sensor_descriptors, key=lambda descriptor: descriptor.channel_index)
+    channels: list[np.ndarray] = []
+    for descriptor in ordered_descriptors:
+        channel = windows.get(descriptor.sensor_id)
+        if channel is None:
+            continue
+        channels.append(channel)
+    if not channels:
+        raise HTTPException(status_code=404, detail="No recent audio available for node")
+
+    common_samples = min(channel.size for channel in channels)
+    if common_samples <= 0:
+        raise HTTPException(status_code=404, detail="No recent audio available for node")
+
+    channels_first = np.vstack([channel[-common_samples:] for channel in channels])
+    mono = mono_mix(channels_first)[None, :]
+    wav_bytes = wav_multichannel_bytes(mono, sample_rate_hz=sample_rate_hz)
+
+    return Response(
+        content=wav_bytes,
+        media_type="audio/wav",
+        headers={
+            "Content-Disposition": f'inline; filename="{node_id}_recent.wav"',
+            "X-Minimappr-Node-Id": node_id,
+            "X-Minimappr-Sample-Rate": str(sample_rate_hz),
+            "X-Minimappr-Source-Channels": str(len(channels)),
+            "X-Minimappr-Clip-Seconds": f"{common_samples / float(sample_rate_hz):.3f}",
+            "X-Minimappr-Audio-Age-Seconds": f"{age_seconds:.3f}",
+        },
     )
 
 

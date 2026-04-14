@@ -14,6 +14,7 @@ This repository now includes a complete Phase 1 core build focused on the base c
 - `SQLite` persistence for Phase 1 core tables (`nodes`, `observations`, `detections`, `tracks`, `labels`, `alerts`, `track_updates`) plus active `environment` ingestion/persistence
 - automatic snippet retention cleanup (self-cleaning raw audio extracts)
 - snippet serving endpoint (`/api/v1/detections/{id}/audio`)
+- node audio debug endpoint for recent per-node listen checks (`/api/v1/nodes/{node_id}/audio/recent`)
 - live websocket feed with server-side subscription filtering (zone/category/confidence/track status)
 - geographic Leaflet COP dashboard
 - deterministic simulation stream with both required node types
@@ -158,9 +159,23 @@ export MINIMAPPR_CLASSIFIER=yamnet
 - `GET /api/v1/environment?limit=500&node_id=...`
 - `GET /api/v1/environment/current?x=...&y=...&z=...`
 - `GET /api/v1/detections/{detection_id}/audio`
+- `GET /api/v1/nodes/{node_id}/audio/recent?seconds=10`
 - `POST /api/v1/federation/heartbeat` (peer-to-peer)
 - `POST /api/v1/federation/snapshot` (peer-to-peer)
 - `WS /ws/live`
+
+### Audio Path Validation (Developer)
+Use node-level debug audio playback when detections are absent and you need to verify that audio ingest is healthy.
+
+1. Open the COP dashboard and use the `Node Audio Debug` panel.
+2. Click `Listen` on a node to request the most recent buffered clip.
+3. Confirm it sounds reasonable; if not, inspect node health and ingest transport before classifier tuning.
+
+Equivalent API call:
+
+```bash
+curl "http://127.0.0.1:8080/api/v1/nodes/http-node-1/audio/recent?seconds=10" --output node_recent.wav
+```
 
 ## Runtime Configuration
 Key env vars:
