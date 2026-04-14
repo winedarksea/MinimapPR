@@ -68,15 +68,18 @@ void NodeRunner::loopOnce() {
     return;
   }
 
-  const bool frameOk = audioSource_.readFrame(frameBuffer_, audioSource_.frameSamples());
+  AudioCaptureTimestamp captureTimestamp = {};
+  const bool frameOk =
+      audioSource_.readFrame(frameBuffer_, audioSource_.frameSamples(), &captureTimestamp);
   if (!frameOk) {
     ++stats_.framesDropped;
     sleep_ms(1);
     return;
   }
 
-  const uint64_t frameStartNs = clock_.nextFrameStartNs();
-  const uint64_t receiptNs = clock_.nowUtcNs();
+  const uint64_t frameStartNs = clock_.utcAtMonotonicUs(captureTimestamp.frameStartMonotonicUs);
+  const uint64_t receiptMonotonicUs = time_us_64();
+  const uint64_t receiptNs = clock_.utcAtMonotonicUs(receiptMonotonicUs);
   AudioFrame frame = {
       frameStartNs,
       audioSource_.sampleRateHz(),

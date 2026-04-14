@@ -18,6 +18,7 @@
 #include <hardware/gpio.h>
 #include <hardware/pio.h>
 #include <hardware/pio_instructions.h>
+#include <pico/time.h>
 
 namespace mmpr {
 namespace {
@@ -168,6 +169,7 @@ bool SirithPicoTdmSource::initPioStateMachine() {
   pio_sm_init(selectedPio, selectedSm, programOffset, &smCfg);
   pio_sm_clear_fifos(selectedPio, selectedSm);
   pio_sm_restart(selectedPio, selectedSm);
+  streamStartMonotonicUs_ = time_us_64();
   pio_sm_set_enabled(selectedPio, selectedSm, true);
 
   pio_ = selectedPio;
@@ -226,6 +228,9 @@ bool SirithPicoTdmSource::begin() {
     return false;
   }
 
+  frameDurationUs_ =
+      static_cast<uint64_t>((static_cast<double>(config_.frameSamples) * 1000000.0) / static_cast<double>(config_.sampleRateHz));
+  nextFrameStartMonotonicUs_ = streamStartMonotonicUs_;
   initialized_ = true;
   return true;
 }
@@ -240,12 +245,16 @@ int16_t SirithPicoTdmSource::toPcm16(int32_t raw) const {
   return static_cast<int16_t>(shifted);
 }
 
-bool SirithPicoTdmSource::readFrame(int16_t* interleavedOut, size_t samplesPerChannel) {
+bool SirithPicoTdmSource::readFrame(
+    int16_t* interleavedOut,
+    size_t samplesPerChannel,
+    AudioCaptureTimestamp* captureTimestamp) {
   if (!initialized_ || interleavedOut == nullptr || samplesPerChannel != config_.frameSamples || pio_ == nullptr || sm_ < 0) {
     return false;
   }
 
   PIO pio = reinterpret_cast<PIO>(pio_);
+  const uint64_t frameStartUs = nextFrameStartMonotonicUs_;
   for (size_t i = 0; i < config_.frameSamples; ++i) {
     int32_t slotWords[4] = {0, 0, 0, 0};
     for (uint8_t slot = 0; slot < 4; ++slot) {
@@ -258,6 +267,11 @@ bool SirithPicoTdmSource::readFrame(int16_t* interleavedOut, size_t samplesPerCh
     }
   }
 
+  nextFrameStartMonotonicUs_ += frameDurationUs_;
+  if (captureTimestamp != nullptr) {
+    captureTimestamp->frameStartMonotonicUs = frameStartUs;
+    captureTimestamp->frameEndMonotonicUs = nextFrameStartMonotonicUs_;
+  }
   return true;
 }
 

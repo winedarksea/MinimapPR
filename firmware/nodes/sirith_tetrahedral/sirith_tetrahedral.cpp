@@ -336,14 +336,14 @@ int main() {
         nodecfg::kWifiPassword,
         nodecfg::kWiFiConnectTimeoutMs);
 
+    if (nodecfg::kEnableGpsUart) {
+      gGpsSource.poll(gNodeDescriptor, &gClock);
+    }
+
     gRunner.loopOnce();
 
     if (nodecfg::kEnableNtpSync) {
       gNtpClient.poll();
-    }
-
-    if (nodecfg::kEnableGpsUart) {
-      gGpsSource.poll(gNodeDescriptor, &gClock);
     }
 
     // Heartbeat blink on GP26 (P-channel FET: LOW=on, HIGH=off).

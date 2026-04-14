@@ -33,6 +33,8 @@ class NmeaGpsSource {
   bool hasFix() const { return hasFix_; }
 
  private:
+  static void gpioIrqCallback(uint gpio, uint32_t events);
+
   struct ParsedSentence {
     bool hasFix = false;
     bool hasLocation = false;
@@ -53,6 +55,7 @@ class NmeaGpsSource {
   };
 
   void updateDescriptor(NodeDescriptor& descriptor) const;
+  void consumePendingPps(NodeClock* clock);
   void consumeLine(const char* line, NodeClock* clock);
   bool parseSentence(const char* line, ParsedSentence& outSentence) const;
   bool parseGgaSentence(const char* body, ParsedSentence& outSentence) const;
@@ -94,10 +97,18 @@ class NmeaGpsSource {
   bool hasDateTime_ = false;
   bool hasAltitude_ = false;
   bool haveSeenSentences_ = false;
+  bool ppsConfigured_ = false;
+  bool haveUtcForNextPps_ = false;
   uint8_t activeFixDimension_ = 0;
   GeoPoint activeGeoPosition_ = {};
   uint64_t lastSentenceUs_ = 0;
   uint64_t lastFixUs_ = 0;
+  uint64_t nextPpsUtcNs_ = 0;
+  uint32_t processedPpsEdgeCount_ = 0;
+  volatile uint32_t observedPpsEdgeCount_ = 0;
+  volatile uint64_t latestPpsEdgeUs_ = 0;
+
+  static NmeaGpsSource* activeInstance_;
 };
 
 }  // namespace mmpr

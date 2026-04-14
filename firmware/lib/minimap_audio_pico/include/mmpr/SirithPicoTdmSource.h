@@ -37,7 +37,10 @@ class SirithPicoTdmSource final : public IAudioSource {
   uint32_t sampleRateHz() const override { return config_.sampleRateHz; }
   uint8_t channels() const override { return 4; }
   size_t frameSamples() const override { return config_.frameSamples; }
-  bool readFrame(int16_t* interleavedOut, size_t samplesPerChannel) override;
+  bool readFrame(
+      int16_t* interleavedOut,
+      size_t samplesPerChannel,
+      AudioCaptureTimestamp* captureTimestamp = nullptr) override;
 
  private:
   bool validateConfig() const;
@@ -49,6 +52,9 @@ class SirithPicoTdmSource final : public IAudioSource {
   SirithPicoTdmConfig config_;
 
   bool initialized_ = false;
+  uint64_t frameDurationUs_ = 0;
+  uint64_t streamStartMonotonicUs_ = 0;
+  uint64_t nextFrameStartMonotonicUs_ = 0;
 
   void* pio_ = nullptr;
   int sm_ = -1;

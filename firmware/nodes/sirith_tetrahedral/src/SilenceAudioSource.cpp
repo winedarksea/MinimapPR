@@ -27,7 +27,10 @@ bool SilenceAudioSource::begin() {
   return true;
 }
 
-bool SilenceAudioSource::readFrame(int16_t* interleavedOut, size_t samplesPerChannel) {
+bool SilenceAudioSource::readFrame(
+    int16_t* interleavedOut,
+    size_t samplesPerChannel,
+    AudioCaptureTimestamp* captureTimestamp) {
   if (interleavedOut == nullptr || samplesPerChannel != frameSamples_) {
     return false;
   }
@@ -39,8 +42,13 @@ bool SilenceAudioSource::readFrame(int16_t* interleavedOut, size_t samplesPerCha
     nextFrameAtUs_ = nowUs;
   }
 
+  const uint64_t frameStartUs = static_cast<uint64_t>(nextFrameAtUs_);
   std::memset(interleavedOut, 0, frameSamples_ * channels_ * sizeof(int16_t));
   nextFrameAtUs_ += static_cast<int64_t>(frameDurationUs_);
+  if (captureTimestamp != nullptr) {
+    captureTimestamp->frameStartMonotonicUs = frameStartUs;
+    captureTimestamp->frameEndMonotonicUs = static_cast<uint64_t>(nextFrameAtUs_);
+  }
   return true;
 }
 

@@ -27,6 +27,7 @@ void NodeClock::begin(
   // timestamps are approximately correct even without GPS or NTP.  The wall
   // clock will be upgraded to kNtpSync or kGpsLocked if a better source
   // becomes available later.
+  streamStartMonotonicUs_ = time_us_64();
   setUtcNs(kBuildEpochNs, TimeQuality::kBuildTimestamp);
   std::printf(
       "[node] clock anchored to build timestamp %llu ns (build_timestamp quality)\n",
@@ -43,13 +44,21 @@ uint64_t NodeClock::nextFrameStartNs() {
 }
 
 uint64_t NodeClock::nowUtcNs() const {
+  return utcAtMonotonicUs(time_us_64());
+}
+
+uint64_t NodeClock::utcAtMonotonicUs(uint64_t monotonicUs) const {
   if (hasWallClock_) {
-    return wallClockNs_ + (time_us_64() - wallClockSetUs_) * 1000ULL;
+    return wallClockNs_ + (monotonicUs - wallClockSetUs_) * 1000ULL;
   }
-  return static_cast<uint64_t>(time_us_64()) * 1000ULL;
+  return monotonicUs * 1000ULL;
 }
 
 void NodeClock::setUtcNs(uint64_t utcNs, TimeQuality quality) {
+  setUtcAtMonotonicUs(utcNs, time_us_64(), quality);
+}
+
+void NodeClock::setUtcAtMonotonicUs(uint64_t utcNs, uint64_t monotonicUs, TimeQuality quality) {
   // Enforce priority: GPS > NTP > build_timestamp > freerunning.
   // Lower enum value = better quality.  Equal quality is allowed so that GPS
   // can keep refreshing its own anchor after the initial lock.
@@ -58,13 +67,15 @@ void NodeClock::setUtcNs(uint64_t utcNs, TimeQuality quality) {
   }
 
   wallClockNs_ = utcNs;
-  wallClockSetUs_ = time_us_64();
+  wallClockSetUs_ = monotonicUs;
   hasWallClock_ = true;
   timeQuality_ = quality;
 
-  // Preserve frame cadence when wall-clock lock arrives after streaming starts.
-  const uint64_t elapsedFrameNs = frameIndex_ * frameDurationNs_;
-  streamStartNs_ = (utcNs >= elapsedFrameNs) ? (utcNs - elapsedFrameNs) : 0;
+  // Preserve frame cadence against the monotonic capture timeline instead of
+  // the frame counter so delayed sync handling still lands on the true stream.
+  const uint64_t elapsedSinceStreamStartNs =
+      (monotonicUs >= streamStartMonotonicUs_) ? (monotonicUs - streamStartMonotonicUs_) * 1000ULL : 0ULL;
+  streamStartNs_ = (utcNs >= elapsedSinceStreamStartNs) ? (utcNs - elapsedSinceStreamStartNs) : 0;
 }
 
 }  // namespace mmpr

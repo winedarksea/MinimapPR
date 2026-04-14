@@ -6,6 +6,7 @@
 #include <cstring>
 
 #include "hardware/gpio.h"
+#include "hardware/sync.h"
 #include "pico/time.h"
 
 namespace mmpr {
@@ -33,6 +34,8 @@ int64_t daysFromCivil(int year, unsigned month, unsigned day) {
 
 }  // namespace
 
+NmeaGpsSource* NmeaGpsSource::activeInstance_ = nullptr;
+
 NmeaGpsSource::NmeaGpsSource(const NmeaGpsSourceConfig& config)
     : config_(config), activeGeoPosition_(config.fallbackGeoPosition) {}
 
@@ -43,9 +46,14 @@ bool NmeaGpsSource::begin() {
   gpio_pull_up(config_.rxPin);
 
   if (config_.ppsPin >= 0) {
+    activeInstance_ = this;
     gpio_init(config_.ppsPin);
     gpio_set_dir(config_.ppsPin, GPIO_IN);
     gpio_pull_down(config_.ppsPin);
+    gpio_set_irq_enabled_with_callback(config_.ppsPin, GPIO_IRQ_EDGE_RISE, true, &NmeaGpsSource::gpioIrqCallback);
+    ppsConfigured_ = true;
+  } else {
+    ppsConfigured_ = false;
   }
 
   uartStarted_ = true;
@@ -54,11 +62,16 @@ bool NmeaGpsSource::begin() {
   hasDateTime_ = false;
   hasAltitude_ = false;
   haveSeenSentences_ = false;
+  haveUtcForNextPps_ = false;
   activeFixDimension_ = 0;
   activeGeoPosition_ = config_.fallbackGeoPosition;
   lineLength_ = 0;
   lastSentenceUs_ = 0;
   lastFixUs_ = 0;
+  nextPpsUtcNs_ = 0;
+  processedPpsEdgeCount_ = 0;
+  observedPpsEdgeCount_ = 0;
+  latestPpsEdgeUs_ = 0;
   return true;
 }
 
@@ -67,6 +80,8 @@ void NmeaGpsSource::poll(NodeDescriptor& descriptor, NodeClock* clock) {
     updateDescriptor(descriptor);
     return;
   }
+
+  consumePendingPps(clock);
 
   size_t bytesConsumed = 0;
   while (uart_is_readable(config_.uart) && bytesConsumed < config_.maxBytesPerPoll) {
@@ -100,6 +115,7 @@ void NmeaGpsSource::poll(NodeDescriptor& descriptor, NodeClock* clock) {
     hasFix_ = false;
     hasAltitude_ = false;
     hasDateTime_ = false;
+    haveUtcForNextPps_ = false;
     activeFixDimension_ = 0;
     activeGeoPosition_ = config_.fallbackGeoPosition;
   } else if (hasFix_ && fixAgeUs > (static_cast<uint64_t>(config_.staleFixTimeoutMs) * kUsPerMs)) {
@@ -110,6 +126,44 @@ void NmeaGpsSource::poll(NodeDescriptor& descriptor, NodeClock* clock) {
   }
 
   updateDescriptor(descriptor);
+}
+
+void NmeaGpsSource::gpioIrqCallback(uint gpio, uint32_t events) {
+  if ((events & GPIO_IRQ_EDGE_RISE) == 0 || activeInstance_ == nullptr || gpio != static_cast<uint>(activeInstance_->config_.ppsPin)) {
+    return;
+  }
+
+  activeInstance_->latestPpsEdgeUs_ = time_us_64();
+  ++activeInstance_->observedPpsEdgeCount_;
+}
+
+void NmeaGpsSource::consumePendingPps(NodeClock* clock) {
+  if (!ppsConfigured_) {
+    return;
+  }
+
+  uint32_t edgeCount = 0;
+  uint64_t latestEdgeUs = 0;
+  const uint32_t interruptState = save_and_disable_interrupts();
+  edgeCount = observedPpsEdgeCount_;
+  latestEdgeUs = latestPpsEdgeUs_;
+  restore_interrupts(interruptState);
+
+  if (edgeCount == processedPpsEdgeCount_) {
+    return;
+  }
+
+  if (clock == nullptr || !haveUtcForNextPps_) {
+    processedPpsEdgeCount_ = edgeCount;
+    return;
+  }
+
+  const uint32_t pendingEdges = edgeCount - processedPpsEdgeCount_;
+  const uint64_t latestEdgeUtcNs = nextPpsUtcNs_ + (static_cast<uint64_t>(pendingEdges - 1U) * kNsPerSecond);
+  clock->setUtcAtMonotonicUs(latestEdgeUtcNs, latestEdgeUs, TimeQuality::kGpsLocked);
+
+  nextPpsUtcNs_ += static_cast<uint64_t>(pendingEdges) * kNsPerSecond;
+  processedPpsEdgeCount_ = edgeCount;
 }
 
 void NmeaGpsSource::updateDescriptor(NodeDescriptor& descriptor) const {
@@ -162,7 +216,18 @@ void NmeaGpsSource::consumeLine(const char* line, NodeClock* clock) {
 
   if (parsed.hasUtcDateTime) {
     hasDateTime_ = true;
-    if (clock != nullptr) {
+    if (ppsConfigured_) {
+      const uint64_t parsedUtcNs = unixEpochNs(
+          parsed.year,
+          parsed.month,
+          parsed.day,
+          parsed.hour,
+          parsed.minute,
+          parsed.second,
+          0);
+      nextPpsUtcNs_ = parsedUtcNs + kNsPerSecond;
+      haveUtcForNextPps_ = true;
+    } else if (clock != nullptr) {
       clock->setUtcNs(
           unixEpochNs(
               parsed.year,
