@@ -13,6 +13,7 @@
 #include "mmpr/MagAutoOrientation.h"
 #include "mmpr/NodeClock.h"
 #include "mmpr/NodeRunner.h"
+#include "mmpr/SilenceAudioSource.h"
 #include "mmpr/SirithPicoTdmSource.h"
 #include "mmpr/TemperatureEnvironmentalSource.h"
 #include "mmpr/WiFiSupport.h"
@@ -129,22 +130,50 @@ mmpr::SirithPicoTdmConfig gTdmConfig = {
 };
 
 mmpr::SirithPicoTdmSource gAudioSource(gTdmPins, gTdmConfig);
+mmpr::SilenceAudioSource gSilenceAudioSource(
+    nodecfg::kAudioSampleRateHz,
+    nodecfg::kAudioFrameSamples,
+    kMicCount);
 mmpr::HttpFramePublisher gPublisher(nodecfg::kServerBaseUrl, nodecfg::kIngestPath, nodecfg::kHttpTimeoutMs);
 mmpr::NodeClock gClock;
 
-mmpr::IEnvironmentalSource* gEnvironmentalSource = nodecfg::kEnableImuTemperature
+mmpr::IAudioSource& gSelectedAudioSource = nodecfg::kEnableExternalAudioHardware
+    ? static_cast<mmpr::IAudioSource&>(gAudioSource)
+    : static_cast<mmpr::IAudioSource&>(gSilenceAudioSource);
+
+mmpr::IEnvironmentalSource* gEnvironmentalSource = (
+    nodecfg::kEnableExternalPeripheralBuses && nodecfg::kEnableImuTemperature)
     ? static_cast<mmpr::IEnvironmentalSource*>(&gImuEnvironmentSource)
     : nullptr;
 
 mmpr::NodeRunner gRunner(
     gNodeDescriptor,
-    gAudioSource,
+    gSelectedAudioSource,
     gPublisher,
     gClock,
     nodecfg::kLogEveryFrames,
     gEnvironmentalSource);
 
+void setExternalRailEnabled(bool enabled) {
+  gpio_init(nodecfg::kLedPin);
+  gpio_set_dir(nodecfg::kLedPin, GPIO_OUT);
+  gpio_put(nodecfg::kLedPin, enabled ? 0 : 1);
+}
+
+void setStatusLed(bool enabled) {
+#ifdef CYW43_WL_GPIO_LED_PIN
+  cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, enabled ? 1 : 0);
+#else
+  (void)enabled;
+#endif
+}
+
 void setupOptionalPeripherals() {
+  if (!nodecfg::kEnableExternalPeripheralBuses) {
+    std::printf("[sirith-pico] bare-board mode: external buses disabled\n");
+    return;
+  }
+
   const bool useI2c = nodecfg::kEnableCompassAutoOrientation || nodecfg::kEnableImuTemperature;
   bool i2cReady = false;
   if (useI2c) {
@@ -198,12 +227,13 @@ int main() {
   stdio_init_all();
   sleep_ms(300);
 
-  // LED / status FET on GP26: LOW = FET on (LED lit).
-  gpio_init(nodecfg::kLedPin);
-  gpio_set_dir(nodecfg::kLedPin, GPIO_OUT);
-  gpio_put(nodecfg::kLedPin, 0);  // LED on at boot
+  // GP26 controls a switched 3V3 rail; keep it off unless explicitly enabled.
+  setExternalRailEnabled(nodecfg::kEnableExternal3v3Rail);
 
   std::printf("[sirith-pico] booting\n");
+  if (nodecfg::kBareBoardValidationMode) {
+    std::printf("[sirith-pico] bare-board validation mode enabled\n");
+  }
 
   if (cyw43_arch_init()) {
     std::printf("[sirith-pico] fatal: Wi-Fi init failed\n");
@@ -212,6 +242,7 @@ int main() {
     }
   }
 
+  setStatusLed(true);
   buildOrderedOffsetsFromSlotMap(gActiveBaseRotationSteps);
   setupOptionalPeripherals();
 
@@ -269,7 +300,7 @@ int main() {
     if (++ledCounter >= nodecfg::kLedBlinkFrames) {
       ledCounter = 0;
       ledState = !ledState;
-      gpio_put(nodecfg::kLedPin, ledState ? 1 : 0);
+      setStatusLed(ledState);
     }
 
     cyw43_arch_poll();

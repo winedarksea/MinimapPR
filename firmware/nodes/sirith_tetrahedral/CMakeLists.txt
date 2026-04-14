@@ -49,6 +49,7 @@ add_executable(sirith_tetrahedral
         src/NodeClock.cpp
         src/NodeProtocol.cpp
         src/NodeRunner.cpp
+        src/SilenceAudioSource.cpp
         src/TemperatureEnvironmentalSource.cpp
         src/WiFiSupport.cpp
         ${MMPR_AUDIO_PICO_DIR}/src/SirithPicoTdmSource.cpp

@@ -55,6 +55,14 @@ static constexpr const char* kCapabilities[] = {
 
 static constexpr const char* kHardwareName = "sirith_tetra_pico2w_tdm";
 
+// --- Bring-up mode ---
+// Bare-board validation keeps the switched 3V3 rail off and avoids driving
+// any external buses so firmware can be verified without risking the mic array.
+static constexpr bool kBareBoardValidationMode = true;
+static constexpr bool kEnableExternal3v3Rail = !kBareBoardValidationMode;
+static constexpr bool kEnableExternalAudioHardware = !kBareBoardValidationMode;
+static constexpr bool kEnableExternalPeripheralBuses = !kBareBoardValidationMode;
+
 // --- LED / status indicator ---
 // P-channel FET on GP26 controls LED + switchable 3V3 power header.
 // LOW = FET on (LED lit), HIGH = FET off (LED dark).
@@ -85,7 +93,7 @@ static constexpr int kGpsPpsPin = 10;
 // --- Optional compass and IMU bus wiring ---
 // GP18/GP19 map to I2C1 on RP2040/RP2350 pin mux.
 static constexpr bool kEnableCompassAutoOrientation = false;
-static constexpr bool kEnableImuTemperature = true;
+static constexpr bool kEnableImuTemperature = false;
 static constexpr int kI2cSdaPin = 18;
 static constexpr int kI2cSclPin = 19;
 static constexpr uint32_t kI2cBaudHz = 400000;
