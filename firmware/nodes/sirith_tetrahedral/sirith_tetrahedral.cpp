@@ -3,6 +3,7 @@
 
 #include "pico/cyw43_arch.h"
 #include "pico/stdlib.h"
+#include "hardware/pwm.h"
 #include "hardware/uart.h"
 
 #include "node_config.h"
@@ -29,6 +30,47 @@
 namespace {
 
 constexpr uint8_t kMicCount = 4;
+
+// --- GP27 I2C activity LED ---
+// PWM wrap gives 100 duty steps; hardware runs the carrier autonomously.
+constexpr uint32_t kActivityLedWrap = 99;
+constexpr uint32_t kActivityLedDimLevel =
+    (static_cast<uint32_t>(nodecfg::kActivityLedDimPercent) * (kActivityLedWrap + 1)) / 100;
+
+volatile uint32_t gActivityLastReadMs = 0;
+volatile bool gActivityPulsed = false;
+
+void setupActivityLed() {
+  gpio_set_function(nodecfg::kActivityLedPin, GPIO_FUNC_PWM);
+  const uint slice = pwm_gpio_to_slice_num(nodecfg::kActivityLedPin);
+  const uint channel = pwm_gpio_to_channel(nodecfg::kActivityLedPin);
+  pwm_set_wrap(slice, kActivityLedWrap);
+  pwm_set_chan_level(slice, channel, kActivityLedDimLevel);
+  pwm_set_enabled(slice, true);
+}
+
+// Called from I2cBus::read() on each successful read — keeps to a few cycles.
+void onI2cRead() {
+  const uint slice = pwm_gpio_to_slice_num(nodecfg::kActivityLedPin);
+  const uint channel = pwm_gpio_to_channel(nodecfg::kActivityLedPin);
+  pwm_set_chan_level(slice, channel, kActivityLedWrap);  // full brightness
+  gActivityLastReadMs = to_ms_since_boot(get_absolute_time());
+  gActivityPulsed = true;
+}
+
+// Call once per main loop iteration — one timestamp comparison, no I/O unless dimming.
+void pollActivityLed() {
+  if (!gActivityPulsed) {
+    return;
+  }
+  const uint32_t nowMs = to_ms_since_boot(get_absolute_time());
+  if ((nowMs - gActivityLastReadMs) >= nodecfg::kActivityLedPulseMs) {
+    const uint slice = pwm_gpio_to_slice_num(nodecfg::kActivityLedPin);
+    const uint channel = pwm_gpio_to_channel(nodecfg::kActivityLedPin);
+    pwm_set_chan_level(slice, channel, kActivityLedDimLevel);
+    gActivityPulsed = false;
+  }
+}
 
 mmpr::Vec3 gSensorOffsetsOrdered[4] = {};
 uint8_t gActiveBaseRotationSteps = static_cast<uint8_t>(nodecfg::kBasePlaneRotationSteps % 3u);
@@ -216,6 +258,8 @@ void setupOptionalPeripherals() {
     i2cReady = gI2c.begin(i2c1, nodecfg::kI2cSdaPin, nodecfg::kI2cSclPin, nodecfg::kI2cBaudHz);
     if (!i2cReady) {
       std::printf("[sirith-pico] I2C init failed\n");
+    } else {
+      gI2c.setReadCallback(onI2cRead);
     }
   } else if (useI2c) {
     std::printf("[sirith-pico] bare-board mode: I2C peripherals disabled\n");
@@ -268,6 +312,9 @@ int main() {
 
   // GP26 controls the external Vin FET rail; keep it off unless explicitly enabled.
   setExternalRailEnabled(nodecfg::kEnableExternalVFetRail);
+
+  // GP27 activity LED: hardware PWM dims it to ~kActivityLedDimPercent% duty.
+  setupActivityLed();
 
   std::printf("[sirith-pico] booting\n");
   if (nodecfg::kBareBoardValidationMode) {
@@ -341,6 +388,7 @@ int main() {
     }
 
     gRunner.loopOnce();
+    pollActivityLed();
 
     if (nodecfg::kEnableNtpSync) {
       gNtpClient.poll();

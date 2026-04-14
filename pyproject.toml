@@ -38,14 +38,18 @@ dependencies = [
 
 [project.optional-dependencies]
 yamnet = [
-    "tensorflow>=2.19,<3.0",
+    # tensorflow-metal 1.2.0 on Apple Silicon requires tensorflow==2.18.*;
+    # loosen the lower bound so Mac installs are not blocked.
+    "tensorflow>=2.18,<3.0",
+    "tf-keras>=2.18,<3.0",
     "tensorflow-hub>=0.16,<1.0",
 ]
 birdnet = [
     "birdnet>=0.2.12,<1.0",
 ]
 full = [
-    "tensorflow>=2.19,<3.0",
+    "tensorflow>=2.18,<3.0",
+    "tf-keras>=2.18,<3.0",
     "tensorflow-hub>=0.16,<1.0",
     "birdnet>=0.2.12,<1.0",
 ]

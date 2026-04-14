@@ -14,6 +14,10 @@ class I2cBus {
 
   bool initialized() const { return initialized_; }
 
+  // Optional callback invoked after each successful bus read.  Intended for
+  // lightweight notification (e.g. an activity LED pulse); must not block.
+  void setReadCallback(void (*cb)()) { readCallback_ = cb; }
+
   bool write(uint8_t address7Bit, const uint8_t* data, size_t length, bool noStop);
   bool read(uint8_t address7Bit, uint8_t* data, size_t length, bool noStop);
 
@@ -23,6 +27,7 @@ class I2cBus {
  private:
   i2c_inst_t* inst_ = nullptr;
   bool initialized_ = false;
+  void (*readCallback_)() = nullptr;
 };
 
 inline bool I2cBus::begin(i2c_inst_t* inst, uint sdaPin, uint sclPin, uint32_t baudHz) {
@@ -55,7 +60,13 @@ inline bool I2cBus::read(uint8_t address7Bit, uint8_t* data, size_t length, bool
   }
 
   const int readCount = i2c_read_blocking(inst_, address7Bit, data, length, noStop);
-  return readCount == static_cast<int>(length);
+  if (readCount == static_cast<int>(length)) {
+    if (readCallback_ != nullptr) {
+      readCallback_();
+    }
+    return true;
+  }
+  return false;
 }
 
 inline bool I2cBus::readReg(uint8_t address7Bit, uint8_t reg, uint8_t* outData, size_t outLen) {

@@ -15,6 +15,7 @@ LabelId: TypeAlias = str
 class TimeQuality(str, Enum):
     GPS_LOCKED = "gps_locked"
     NTP_SYNC = "ntp_sync"
+    BUILD_TIMESTAMP = "build_timestamp"
     FREERUNNING = "freerunning"
 
 

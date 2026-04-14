@@ -77,6 +77,14 @@ static constexpr bool kEnableExternalPeripheralBuses = !kBareBoardValidationMode
 static constexpr uint8_t kLedPin = 26;
 static constexpr uint32_t kLedBlinkFrames = 8;  // Toggle every N frames (~0.5s at 16kHz/1024)
 
+// GP27 I2C activity LED.
+// Hardware PWM dims average current (kActivityLedDimPercent% duty = ~2.6 mA at 33 mA full).
+// Each I2C bus read triggers a brief full-brightness pulse; PWM resets to dim after
+// kActivityLedPulseMs.  The PWM peripheral runs autonomously — no CPU cost at steady state.
+static constexpr uint8_t kActivityLedPin = 27;
+static constexpr uint8_t kActivityLedDimPercent = 8;  // 8/100 duty => ~2.6 mA
+static constexpr uint32_t kActivityLedPulseMs = 80;   // visible flash duration
+
 // --- Audio capture (TDM master) ---
 static constexpr uint8_t kTdmDataPin = 7;  // SDATA input
 static constexpr uint8_t kTdmBclkPin = 8;  // BCLK output

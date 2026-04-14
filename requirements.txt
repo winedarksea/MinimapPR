@@ -13,7 +13,16 @@ httpx>=0.28,<1.0
 # Local bird-audio classification runtime
 # YAMNet is the default classifier backend. BirdNET enables the default
 # species-ID chain when YAMNet reports a bird-related label.
-tensorflow>=2.19,<3.0
+# TensorFlow — Mac Apple Silicon (Metal GPU) constraint:
+#   tensorflow-metal 1.2.0 is officially compatible only with tensorflow 2.18.x.
+#   Versions 2.19+ break the Metal dylib at import on macOS.
+#   Required pinned versions for this machine:
+#     tensorflow==2.18.1
+#     tensorflow-metal==1.2.0  (install separately: pip install tensorflow-metal==1.2.0)
+#     tf-keras==2.18.0         (must match TF; required by tensorflow-hub internals)
+#     setuptools<81            (newer setuptools drops pkg_resources used by tensorflow-hub)
+tensorflow==2.18.*
+tf-keras==2.18.*
 tensorflow-hub>=0.16,<1.0
 birdnet>=0.2.12,<1.0
 
