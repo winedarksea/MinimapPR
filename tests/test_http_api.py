@@ -97,6 +97,13 @@ def test_http_ingest_and_cop_status(monkeypatch, tmp_path: Path) -> None:
         assert cop["active_nodes"] >= 1
         assert cop["active_tracks"] >= 0
 
+        fusion_response = client.get("/api/v1/fusion/status")
+        assert fusion_response.status_code == 200
+        fusion = fusion_response.json()
+        assert fusion["started"] is True
+        assert "metrics" in fusion
+        assert isinstance(fusion["metrics"].get("last_localization_algorithm"), str)
+
 
 def test_http_ingest_duplicate_frame_is_idempotent(monkeypatch, tmp_path: Path) -> None:
     _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)

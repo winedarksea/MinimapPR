@@ -71,11 +71,16 @@ void NodeRunner::loopOnce() {
     return;
   }
 
+  const uint64_t frameStartNs = clock_.nextFrameStartNs();
+  const uint64_t receiptNs = clock_.nowUtcNs();
   AudioFrame frame = {
-      clock_.nextFrameStartNs(),
+      frameStartNs,
       audioSource_.sampleRateHz(),
       audioSource_.channels(),
       sequence_,
+      frameStartNs,
+      receiptNs,
+      clock_.hasWallClock() ? TimeQuality::kNtpSync : TimeQuality::kFreerunning,
       frameBuffer_,
       audioSource_.frameSamples(),
   };

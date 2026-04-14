@@ -98,11 +98,15 @@ Node firmware target: **Sirith tetrahedral** (`firmware/nodes/sirith_tetrahedral
 
 Flash and configure each node so that it POSTs audio frames to:
 ```
-http://<server-ip>:8000/api/v1/ingest/audio
+http://<server-ip>:8000/api/v1/ingest/frame
 ```
-with the `node_id`, `sample_rate`, and `position` fields populated from the node's
-own configuration. See `minimappr/models.py` (`AudioIngestRequest`) for the full
-schema.
+with the current `IngestFrameRequest` schema:
+- `node.id`, `node.node_type`, `node.position_m`, and `node.sensor_offsets_m`
+- `frame.start_time_ns`, `frame.sample_rate_hz`, `frame.channels`, `frame.encoding`, `frame.samples_b64`
+- optional `frame.sequence`, `frame.toa_ns`, `frame.tor_ns`, and `frame.time_quality`
+- optional `environment` payload for temperature and other environmental measurements
+
+The checked-in firmware already targets this endpoint and schema.
 
 ---
 

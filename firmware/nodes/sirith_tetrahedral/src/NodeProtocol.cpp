@@ -82,6 +82,18 @@ const char* nodeTypeToWire(NodeType type) {
   }
 }
 
+const char* timeQualityToWire(TimeQuality quality) {
+  switch (quality) {
+    case TimeQuality::kGpsLocked:
+      return "gps_locked";
+    case TimeQuality::kNtpSync:
+      return "ntp_sync";
+    case TimeQuality::kFreerunning:
+    default:
+      return "freerunning";
+  }
+}
+
 bool buildIngestPayload(const NodeDescriptor& node, const AudioFrame& frame, std::string& outPayload) {
   return buildIngestPayload(node, frame, nullptr, outPayload);
 }
@@ -167,6 +179,15 @@ bool buildIngestPayload(
 
   outPayload += ",\"sequence\":";
   appendUint64(outPayload, frame.sequence);
+
+  outPayload += ",\"toa_ns\":";
+  appendUint64(outPayload, frame.toaNs);
+
+  outPayload += ",\"tor_ns\":";
+  appendUint64(outPayload, frame.torNs);
+
+  outPayload += ",\"time_quality\":";
+  appendQuoted(outPayload, timeQualityToWire(frame.timeQuality));
 
   outPayload += "}";
 

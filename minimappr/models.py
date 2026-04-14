@@ -284,7 +284,7 @@ class FusionStatusResponse(BaseModel):
     last_trigger_ns: int
     last_error: str | None = None
     registered_nodes: int
-    metrics: dict[str, float | int]
+    metrics: dict[str, Any]
     offline_replay_mode: bool
 
 

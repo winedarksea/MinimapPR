@@ -12,6 +12,12 @@ enum class NodeType {
   kUnknown,
 };
 
+enum class TimeQuality {
+  kGpsLocked,
+  kNtpSync,
+  kFreerunning,
+};
+
 struct Vec3 {
   float x;
   float y;
@@ -38,6 +44,9 @@ struct AudioFrame {
   uint32_t sampleRateHz;
   uint8_t channels;
   uint64_t sequence;
+  uint64_t toaNs;
+  uint64_t torNs;
+  TimeQuality timeQuality;
 
   const int16_t* interleavedSamples;
   size_t samplesPerChannel;
