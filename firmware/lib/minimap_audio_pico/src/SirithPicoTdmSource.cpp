@@ -121,6 +121,15 @@ bool SirithPicoTdmSource::initPioStateMachine() {
 
   const uint programOffset = pio_add_program(selectedPio, &kSirithTdmMasterRxProgram);
 
+  // The jmp-x-- instructions encode an absolute PIO instruction-memory address.
+  // Patch instructions 2 and 4 to jump to programOffset+3 (the inner sample
+  // instruction) now that the actual load address is known.
+  const uint jmpTarget = programOffset + 3u;
+  selectedPio->instr_mem[programOffset + 2u] =
+      (kSirithTdmMasterRxInstructions[2] & ~0x1Fu) | (jmpTarget & 0x1Fu);
+  selectedPio->instr_mem[programOffset + 4u] =
+      (kSirithTdmMasterRxInstructions[4] & ~0x1Fu) | (jmpTarget & 0x1Fu);
+
   pio_gpio_init(selectedPio, pins_.dataIn);
   pio_gpio_init(selectedPio, pins_.bclk);
   pio_gpio_init(selectedPio, pins_.ws);
@@ -167,9 +176,10 @@ bool SirithPicoTdmSource::initPioStateMachine() {
   programInstalled_ = true;
 
   MMPR_PICO_LOG(
-      "[sirith-pico] TDM started pio=%d sm=%d sr=%lu bclk=%luHz ws=%luHz\n",
+      "[sirith-pico] TDM started pio=%d sm=%d offset=%u sr=%lu bclk=%luHz ws=%luHz\n",
       (selectedPio == pio0) ? 0 : 1,
       selectedSm,
+      programOffset,
       static_cast<unsigned long>(config_.sampleRateHz),
       static_cast<unsigned long>(bitRateHz),
       static_cast<unsigned long>(config_.sampleRateHz));
