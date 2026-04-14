@@ -255,6 +255,34 @@ class StorageBackend(Protocol):
     async def list_labels(self) -> list[dict[str, Any]]:
         ...
 
+    async def get_node_by_id(self, node_id: str) -> dict[str, Any] | None:
+        ...
+
+    async def get_detection_by_event_id(self, event_id: str) -> dict[str, Any] | None:
+        ...
+
+    async def list_observations_by_ids(self, observation_ids: list[str]) -> list[dict[str, Any]]:
+        ...
+
+    async def list_track_updates(
+        self,
+        *,
+        track_id: str | None = None,
+        detection_id: str | None = None,
+        event_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        ...
+
+    async def list_alerts(
+        self,
+        limit: int = 100,
+        *,
+        detection_id: str | None = None,
+        track_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        ...
+
     async def has_ingested_frame(
         self,
         *,

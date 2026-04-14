@@ -1023,6 +1023,44 @@ class Storage:
             )
         return result
 
+    async def get_node_by_id(self, node_id: str) -> dict | None:
+        db = self._require_db()
+        row = await (await db.execute("SELECT * FROM nodes WHERE id = ? LIMIT 1", (node_id,))).fetchone()
+        if row is None:
+            return None
+        position_geo = None
+        if row["lat"] is not None and row["lon"] is not None:
+            position_geo = {"lat": row["lat"], "lon": row["lon"], "alt_m": row["alt"] or 0.0}
+        return {
+            "id": row["id"],
+            "node_type": row["node_type"],
+            "position_m": [row["x"], row["y"], row["z"]],
+            "position_geo": position_geo,
+            "sensor_offsets_m": _json_loads(row["sensor_offsets_json"], []),
+            "capabilities": _json_loads(row["capabilities_json"], []),
+            "mobility": row["mobility"] or "stationary",
+            "metadata": _json_loads(row["metadata_json"], {}),
+            "properties": _json_loads(row["properties_json"], {}),
+            "last_seen_ns": row["last_seen_ns"],
+        }
+
+    async def get_detection_by_event_id(self, event_id: str) -> dict | None:
+        db = self._require_db()
+        row = await (
+            await db.execute(
+                """
+                SELECT * FROM detections
+                WHERE event_id = ? OR id = ?
+                ORDER BY timestamp_ns DESC
+                LIMIT 1
+                """,
+                (event_id, event_id),
+            )
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_detection(row).model_dump(mode="json")
+
     async def list_detections(self, limit: int = 100) -> list[dict]:
         db = self._require_db()
         rows = await (
@@ -1045,10 +1083,28 @@ class Storage:
         rows = await (await db.execute("SELECT * FROM labels ORDER BY name ASC")).fetchall()
         return [dict(row) for row in rows]
 
-    async def list_alerts(self, limit: int = 100) -> list[dict]:
+    async def list_alerts(
+        self,
+        limit: int = 100,
+        *,
+        detection_id: str | None = None,
+        track_id: str | None = None,
+    ) -> list[dict]:
         db = self._require_db()
+        clauses: list[str] = []
+        params: list[object] = []
+        if detection_id is not None:
+            clauses.append("detection_id = ?")
+            params.append(detection_id)
+        if track_id is not None:
+            clauses.append("track_id = ?")
+            params.append(track_id)
+        where = f" WHERE {' OR '.join(clauses)}" if clauses else ""
         rows = await (
-            await db.execute("SELECT * FROM alerts ORDER BY timestamp_ns DESC LIMIT ?", (limit,))
+            await db.execute(
+                f"SELECT * FROM alerts{where} ORDER BY timestamp_ns DESC LIMIT ?",
+                (*params, limit),
+            )
         ).fetchall()
         result: list[dict] = []
         for row in rows:
@@ -1058,6 +1114,89 @@ class Storage:
                 item["updated_ns"] = item["timestamp_ns"]
             result.append(item)
         return result
+
+    async def list_observations_by_ids(self, observation_ids: list[str]) -> list[dict]:
+        db = self._require_db()
+        if not observation_ids:
+            return []
+        placeholders = ",".join("?" for _ in observation_ids)
+        rows = await (
+            await db.execute(
+                f"SELECT * FROM observations WHERE id IN ({placeholders})",
+                tuple(observation_ids),
+            )
+        ).fetchall()
+        by_id = {
+            row["id"]: {
+                "id": row["id"],
+                "event_id": row["event_id"],
+                "node_id": row["node_id"],
+                "sensor_id": row["sensor_id"],
+                "sensor_type": row["sensor_type"],
+                "source_type": row["source_type"],
+                "toa_ns": row["toa_ns"],
+                "tor_ns": row["tor_ns"],
+                "time_quality": row["time_quality"],
+                "sample_rate_hz": row["sample_rate_hz"],
+                "channel_index": row["channel_index"],
+                "frame_sequence": row["frame_sequence"],
+                "retention_tier": row["retention_tier"],
+                "metadata": _json_loads(row["metadata_json"], {}),
+                "created_ns": row["created_ns"],
+            }
+            for row in rows
+        }
+        return [by_id[observation_id] for observation_id in observation_ids if observation_id in by_id]
+
+    async def list_track_updates(
+        self,
+        *,
+        track_id: str | None = None,
+        detection_id: str | None = None,
+        event_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        db = self._require_db()
+        clauses: list[str] = []
+        params: list[object] = []
+        if track_id is not None:
+            clauses.append("track_id = ?")
+            params.append(track_id)
+        if detection_id is not None:
+            clauses.append("detection_id = ?")
+            params.append(detection_id)
+        if event_id is not None:
+            clauses.append("event_id = ?")
+            params.append(event_id)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = await (
+            await db.execute(
+                f"SELECT * FROM track_updates{where} ORDER BY timestamp_ns DESC LIMIT ?",
+                (*params, limit),
+            )
+        ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "track_id": row["track_id"],
+                "timestamp_ns": row["timestamp_ns"],
+                "event_id": row["event_id"],
+                "update_type": row["update_type"],
+                "status": row["status"],
+                "position_m": [row["x"], row["y"], row["z"]],
+                "position_geo": self._row_to_geo(row).model_dump(mode="json") if self._row_to_geo(row) else None,
+                "velocity_mps": [row["vx"], row["vy"], row["vz"]],
+                "covariance": _json_loads(row["covariance_json"], None),
+                "tqi": row["tqi"],
+                "confidence": row["confidence"],
+                "label": row["label"],
+                "label_category": row["label_category"],
+                "detection_id": row["detection_id"],
+                "observation_ids": _json_loads(row["observation_ids_json"], []),
+                "metadata": _json_loads(row["metadata_json"], {}),
+            }
+            for row in rows
+        ]
 
     async def insert_alert(
         self,

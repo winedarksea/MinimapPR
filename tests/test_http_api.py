@@ -105,6 +105,40 @@ def test_http_ingest_and_cop_status(monkeypatch, tmp_path: Path) -> None:
         assert isinstance(fusion["metrics"].get("last_localization_algorithm"), str)
 
 
+def test_debug_endpoints_expose_runtime_and_event_provenance(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=3600)
+
+    with TestClient(app) as client:
+        ingest = _ingest_single_frame(client, start_time_ns=time.time_ns())
+        assert ingest["queued_event_id"] is not None
+
+        detections = _wait_for_detections(client)
+        assert detections
+        detection = detections[0]
+
+        config_response = client.get("/api/v1/debug/config")
+        assert config_response.status_code == 200
+        config_body = config_response.json()
+        assert config_body["runtime"]["classifier"]["requested_backend"] == "yamnet"
+        assert "python_version" in config_body["runtime"]
+
+        selftest_response = client.get("/api/v1/debug/selftest")
+        assert selftest_response.status_code == 200
+        selftest_body = selftest_response.json()
+        assert selftest_body["summary"]["total"] >= 1
+        assert any(check["name"] == "fusion_workers_running" for check in selftest_body["checks"])
+
+        event_response = client.get(f"/api/v1/debug/event/{detection['event_id']}")
+        assert event_response.status_code == 200
+        event_body = event_response.json()
+        assert event_body["event_id"] == detection["event_id"]
+        assert event_body["classification"]["label"] == detection["label"]
+        assert event_body["selection"]["selected_sensor_ids"] == detection["source_sensors"]
+        assert event_body["provenance"]["source_observation_ids"] == detection["source_observation_ids"]
+        assert len(event_body["ingest"]["observations"]) == len(detection["source_observation_ids"])
+        assert event_body["tracking"]["updates"][0]["detection_id"] == detection["id"]
+
+
 def test_http_ingest_duplicate_frame_is_idempotent(monkeypatch, tmp_path: Path) -> None:
     _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
     start_time_ns = time.time_ns()

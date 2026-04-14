@@ -29,6 +29,7 @@ from minimappr.core.ambisonics import (
 from minimappr.core.audio_buffer import MultiSensorBuffer
 from minimappr.core.auth import extract_federation_token
 from minimappr.core.bit_report import BITReportEvaluator
+from minimappr.core.diagnostics import DiagnosticsService
 from minimappr.core.environment import LiveEnvironmentProvider
 from minimappr.core.federation import FederationCoordinator
 from minimappr.core.fusion_node import FusionNode
@@ -150,6 +151,12 @@ async def lifespan(app: FastAPI):
     )
     ingest_transport = HttpIngestTransport(fusion_node)
     bit_evaluator = BITReportEvaluator()
+    diagnostics = DiagnosticsService(
+        settings=settings,
+        storage=storage,
+        fusion_node=fusion_node,
+        classifier=classifier,
+    )
 
     async def _federation_local_tracks(now_ns: int) -> list[TrackState]:
         tracks = await tracker.snapshot(now_ns=now_ns)
@@ -182,6 +189,7 @@ async def lifespan(app: FastAPI):
     app.state.ingest_transport = ingest_transport
     app.state.federation = federation
     app.state.bit_evaluator = bit_evaluator
+    app.state.diagnostics = diagnostics
 
     cleanup_task: asyncio.Task | None = None
     await storage.initialize()
@@ -569,6 +577,27 @@ async def get_config(request: Request) -> dict:
 async def fusion_status(request: Request) -> dict:
     state = _require_state(request)
     return await state.fusion_node.status()
+
+
+@app.get("/api/v1/debug/config")
+async def debug_config(request: Request) -> dict:
+    state = _require_state(request)
+    return await state.diagnostics.config_snapshot()
+
+
+@app.get("/api/v1/debug/event/{event_id}")
+async def debug_event_snapshot(event_id: str, request: Request) -> dict:
+    state = _require_state(request)
+    snapshot = await state.diagnostics.event_snapshot(event_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="Event not found")
+    return snapshot
+
+
+@app.get("/api/v1/debug/selftest")
+async def debug_selftest(request: Request) -> dict:
+    state = _require_state(request)
+    return await state.diagnostics.selftest()
 
 
 @app.get("/api/v1/federation/status", response_model=FederationStatusResponse)
