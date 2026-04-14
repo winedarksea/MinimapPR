@@ -8,6 +8,7 @@ namespace mmpr {
 struct AudioCaptureTimestamp {
   uint64_t frameStartMonotonicUs = 0;
   uint64_t frameEndMonotonicUs = 0;
+  uint32_t droppedFramesBeforeCapture = 0;
 };
 
 class IAudioSource {

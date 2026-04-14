@@ -103,6 +103,7 @@ void NodeRunner::loopOnce() {
   const PublishResult result = publisher_.publish(descriptor_, frame, environmentalPtr, false);
 
   ++stats_.framesCaptured;
+  stats_.framesDropped += captureTimestamp.droppedFramesBeforeCapture;
   if (result.ok) {
     ++stats_.framesPublished;
   } else {

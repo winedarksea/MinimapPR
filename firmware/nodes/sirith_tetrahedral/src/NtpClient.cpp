@@ -157,13 +157,20 @@ void NtpClient::onUdpRecv(struct pbuf* p) {
   uint8_t buf[48];
   pbuf_copy_partial(p, buf, sizeof(buf), 0);
   closeUdp();
+  const uint64_t receiptMonotonicUs = time_us_64();
 
-  // Transmit Timestamp field: bytes 40–43 = seconds since 1 Jan 1900, big-endian.
+  // Transmit Timestamp field: bytes 40–47 = seconds and fractional seconds
+  // since 1 Jan 1900, big-endian.
   const uint32_t secsSince1900 =
       (static_cast<uint32_t>(buf[40]) << 24) |
       (static_cast<uint32_t>(buf[41]) << 16) |
       (static_cast<uint32_t>(buf[42]) <<  8) |
        static_cast<uint32_t>(buf[43]);
+  const uint32_t fractionalSeconds =
+      (static_cast<uint32_t>(buf[44]) << 24) |
+      (static_cast<uint32_t>(buf[45]) << 16) |
+      (static_cast<uint32_t>(buf[46]) <<  8) |
+       static_cast<uint32_t>(buf[47]);
 
   if (secsSince1900 == 0) {
     std::printf("[ntp] zero transmit timestamp — server not ready\n");
@@ -173,12 +180,16 @@ void NtpClient::onUdpRecv(struct pbuf* p) {
   }
 
   const uint64_t secsSinceUnix = static_cast<uint64_t>(secsSince1900) - kNtpToUnixSeconds;
-  const uint64_t utcNs         = secsSinceUnix * 1'000'000'000ULL;
+  const uint64_t fractionalNs =
+      (static_cast<uint64_t>(fractionalSeconds) * 1'000'000'000ULL) >> 32;
+  const uint64_t utcNs = (secsSinceUnix * 1'000'000'000ULL) + fractionalNs;
 
-  std::printf("[ntp] sync ok — %llu s since Unix epoch\n",
-              static_cast<unsigned long long>(secsSinceUnix));
+  std::printf(
+      "[ntp] sync ok — %llu s + %llu ns since Unix epoch\n",
+      static_cast<unsigned long long>(secsSinceUnix),
+      static_cast<unsigned long long>(fractionalNs));
 
-  clock_->setUtcNs(utcNs, TimeQuality::kNtpSync);
+  clock_->setUtcAtMonotonicUs(utcNs, receiptMonotonicUs, TimeQuality::kNtpSync);
 
   state_          = State::kDone;
   stateEnteredUs_ = time_us_64();

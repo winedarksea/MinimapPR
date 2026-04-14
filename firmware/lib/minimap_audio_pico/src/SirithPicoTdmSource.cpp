@@ -15,10 +15,15 @@
 #endif
 
 #include <hardware/clocks.h>
+#include <hardware/dma.h>
 #include <hardware/gpio.h>
+#include <hardware/irq.h>
 #include <hardware/pio.h>
 #include <hardware/pio_instructions.h>
+#include <hardware/sync.h>
 #include <pico/time.h>
+
+#include <new>
 
 namespace mmpr {
 namespace {
@@ -48,12 +53,15 @@ bool pinIsValid(uint8_t pin) {
   return pin <= kPicoMaxGpio;
 }
 
+SirithPicoTdmSource* gActiveDmaSource = nullptr;
+
 }  // namespace
 
 SirithPicoTdmSource::SirithPicoTdmSource(const SirithPicoTdmPins& pins, const SirithPicoTdmConfig& config)
     : pins_(pins), config_(config) {}
 
 SirithPicoTdmSource::~SirithPicoTdmSource() {
+  deinitDmaCapture();
   deinitPioStateMachine();
 }
 
@@ -169,8 +177,6 @@ bool SirithPicoTdmSource::initPioStateMachine() {
   pio_sm_init(selectedPio, selectedSm, programOffset, &smCfg);
   pio_sm_clear_fifos(selectedPio, selectedSm);
   pio_sm_restart(selectedPio, selectedSm);
-  streamStartMonotonicUs_ = time_us_64();
-  pio_sm_set_enabled(selectedPio, selectedSm, true);
 
   pio_ = selectedPio;
   sm_ = selectedSm;
@@ -186,6 +192,57 @@ bool SirithPicoTdmSource::initPioStateMachine() {
       static_cast<unsigned long>(bitRateHz),
       static_cast<unsigned long>(config_.sampleRateHz));
 
+  return true;
+}
+
+bool SirithPicoTdmSource::initDmaCapture() {
+  if (pio_ == nullptr || sm_ < 0 || wordsPerFrame_ == 0) {
+    return false;
+  }
+
+  dmaFrameWords_ = new (std::nothrow) uint32_t[wordsPerFrame_ * kBufferedFrames];
+  if (dmaFrameWords_ == nullptr) {
+    MMPR_PICO_LOG_LINE("[sirith-pico] unable to allocate DMA frame ring");
+    return false;
+  }
+
+  dmaChannel_ = dma_claim_unused_channel(false);
+  if (dmaChannel_ < 0) {
+    MMPR_PICO_LOG_LINE("[sirith-pico] no free DMA channel");
+    delete[] dmaFrameWords_;
+    dmaFrameWords_ = nullptr;
+    return false;
+  }
+
+  dma_channel_config dmaCfg = dma_channel_get_default_config(static_cast<uint>(dmaChannel_));
+  channel_config_set_transfer_data_size(&dmaCfg, DMA_SIZE_32);
+  channel_config_set_read_increment(&dmaCfg, false);
+  channel_config_set_write_increment(&dmaCfg, true);
+  channel_config_set_dreq(
+      &dmaCfg,
+      PIO_DREQ_NUM(reinterpret_cast<PIO>(pio_), sm_, false));
+
+  dmaWriteFrameIndex_ = 0;
+  dmaReadFrameIndex_ = 0;
+  completedFrameCount_ = 0;
+  droppedFrameCount_ = 0;
+  reportedDroppedFrameCount_ = 0;
+
+  dma_channel_configure(
+      static_cast<uint>(dmaChannel_),
+      &dmaCfg,
+      dmaFrameWords_,
+      &reinterpret_cast<PIO>(pio_)->rxf[sm_],
+      static_cast<uint32_t>(wordsPerFrame_),
+      false);
+
+  gActiveDmaSource = this;
+  irq_set_exclusive_handler(DMA_IRQ_0, sDmaIrq);
+  dma_channel_acknowledge_irq0(static_cast<uint>(dmaChannel_));
+  dma_channel_set_irq0_enabled(static_cast<uint>(dmaChannel_), true);
+  irq_set_enabled(DMA_IRQ_0, true);
+  dma_channel_start(static_cast<uint>(dmaChannel_));
+  pio_sm_set_enabled(reinterpret_cast<PIO>(pio_), sm_, true);
   return true;
 }
 
@@ -216,7 +273,31 @@ void SirithPicoTdmSource::deinitPioStateMachine() {
   initialized_ = false;
 }
 
+void SirithPicoTdmSource::deinitDmaCapture() {
+  if (dmaChannel_ >= 0) {
+    irq_set_enabled(DMA_IRQ_0, false);
+    dma_channel_set_irq0_enabled(static_cast<uint>(dmaChannel_), false);
+    dma_channel_acknowledge_irq0(static_cast<uint>(dmaChannel_));
+    dma_channel_abort(static_cast<uint>(dmaChannel_));
+    dma_channel_unclaim(static_cast<uint>(dmaChannel_));
+    dmaChannel_ = -1;
+  }
+
+  if (gActiveDmaSource == this) {
+    gActiveDmaSource = nullptr;
+  }
+
+  delete[] dmaFrameWords_;
+  dmaFrameWords_ = nullptr;
+  dmaWriteFrameIndex_ = 0;
+  dmaReadFrameIndex_ = 0;
+  completedFrameCount_ = 0;
+  droppedFrameCount_ = 0;
+  reportedDroppedFrameCount_ = 0;
+}
+
 bool SirithPicoTdmSource::begin() {
+  deinitDmaCapture();
   deinitPioStateMachine();
 
   if (!validateConfig()) {
@@ -228,9 +309,13 @@ bool SirithPicoTdmSource::begin() {
     return false;
   }
 
+  wordsPerFrame_ = config_.frameSamples * 4u;
   frameDurationUs_ =
       static_cast<uint64_t>((static_cast<double>(config_.frameSamples) * 1000000.0) / static_cast<double>(config_.sampleRateHz));
-  nextFrameStartMonotonicUs_ = streamStartMonotonicUs_;
+  if (!initDmaCapture()) {
+    deinitPioStateMachine();
+    return false;
+  }
   initialized_ = true;
   return true;
 }
@@ -249,30 +334,82 @@ bool SirithPicoTdmSource::readFrame(
     int16_t* interleavedOut,
     size_t samplesPerChannel,
     AudioCaptureTimestamp* captureTimestamp) {
-  if (!initialized_ || interleavedOut == nullptr || samplesPerChannel != config_.frameSamples || pio_ == nullptr || sm_ < 0) {
+  if (!initialized_ || interleavedOut == nullptr || samplesPerChannel != config_.frameSamples || dmaFrameWords_ == nullptr) {
     return false;
   }
 
-  PIO pio = reinterpret_cast<PIO>(pio_);
-  const uint64_t frameStartUs = nextFrameStartMonotonicUs_;
-  for (size_t i = 0; i < config_.frameSamples; ++i) {
-    int32_t slotWords[4] = {0, 0, 0, 0};
-    for (uint8_t slot = 0; slot < 4; ++slot) {
-      slotWords[slot] = static_cast<int32_t>(pio_sm_get_blocking(pio, sm_));
+  uint32_t readFrameIndex = 0;
+  uint64_t frameEndUs = 0;
+  uint32_t droppedFramesBeforeCapture = 0;
+  while (true) {
+    const uint32_t irqState = save_and_disable_interrupts();
+    if (completedFrameCount_ == 0) {
+      restore_interrupts(irqState);
+      tight_loop_contents();
+      continue;
     }
 
-    for (uint8_t channel = 0; channel < 4; ++channel) {
-      const uint8_t slot = config_.outputChannelToSlot[channel];
-      interleavedOut[(i * 4) + channel] = toPcm16(slotWords[slot]);
+    readFrameIndex = dmaReadFrameIndex_;
+    frameEndUs = frameEndMonotonicUs_[readFrameIndex];
+    droppedFramesBeforeCapture = droppedFrameCount_ - reportedDroppedFrameCount_;
+    reportedDroppedFrameCount_ = droppedFrameCount_;
+
+    const uint32_t* frameWords = dmaFrameWords_ + (readFrameIndex * wordsPerFrame_);
+    for (size_t i = 0; i < config_.frameSamples; ++i) {
+      const int32_t slotWords[4] = {
+          static_cast<int32_t>(frameWords[(i * 4u) + 0u]),
+          static_cast<int32_t>(frameWords[(i * 4u) + 1u]),
+          static_cast<int32_t>(frameWords[(i * 4u) + 2u]),
+          static_cast<int32_t>(frameWords[(i * 4u) + 3u]),
+      };
+
+      for (uint8_t channel = 0; channel < 4; ++channel) {
+        const uint8_t slot = config_.outputChannelToSlot[channel];
+        interleavedOut[(i * 4) + channel] = toPcm16(slotWords[slot]);
+      }
     }
+
+    dmaReadFrameIndex_ = (dmaReadFrameIndex_ + 1u) % kBufferedFrames;
+    --completedFrameCount_;
+    restore_interrupts(irqState);
+    break;
   }
 
-  nextFrameStartMonotonicUs_ += frameDurationUs_;
   if (captureTimestamp != nullptr) {
-    captureTimestamp->frameStartMonotonicUs = frameStartUs;
-    captureTimestamp->frameEndMonotonicUs = nextFrameStartMonotonicUs_;
+    captureTimestamp->frameEndMonotonicUs = frameEndUs;
+    captureTimestamp->frameStartMonotonicUs =
+        (frameEndUs >= frameDurationUs_) ? (frameEndUs - frameDurationUs_) : 0;
+    captureTimestamp->droppedFramesBeforeCapture = droppedFramesBeforeCapture;
   }
   return true;
+}
+
+void SirithPicoTdmSource::onDmaIrq() {
+  if (dmaChannel_ < 0 || !dma_channel_get_irq0_status(static_cast<uint>(dmaChannel_))) {
+    return;
+  }
+
+  dma_channel_acknowledge_irq0(static_cast<uint>(dmaChannel_));
+  frameEndMonotonicUs_[dmaWriteFrameIndex_] = time_us_64();
+  if (completedFrameCount_ == kBufferedFrames) {
+    dmaReadFrameIndex_ = (dmaReadFrameIndex_ + 1u) % kBufferedFrames;
+    ++droppedFrameCount_;
+  } else {
+    ++completedFrameCount_;
+  }
+
+  dmaWriteFrameIndex_ = (dmaWriteFrameIndex_ + 1u) % kBufferedFrames;
+  dma_channel_set_write_addr(
+      static_cast<uint>(dmaChannel_),
+      dmaFrameWords_ + (dmaWriteFrameIndex_ * wordsPerFrame_),
+      false);
+  dma_channel_set_trans_count(static_cast<uint>(dmaChannel_), static_cast<uint32_t>(wordsPerFrame_), true);
+}
+
+void SirithPicoTdmSource::sDmaIrq() {
+  if (gActiveDmaSource != nullptr) {
+    gActiveDmaSource->onDmaIrq();
+  }
 }
 
 }  // namespace mmpr

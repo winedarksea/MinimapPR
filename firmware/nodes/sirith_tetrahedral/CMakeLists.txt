@@ -79,7 +79,9 @@ target_include_directories(sirith_tetrahedral PRIVATE
 
 # Add any user requested libraries
 target_link_libraries(sirith_tetrahedral 
+        hardware_dma
         hardware_i2c
+        hardware_pwm
         hardware_pio
         hardware_uart
         hardware_clocks

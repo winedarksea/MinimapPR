@@ -48,6 +48,7 @@ bool SilenceAudioSource::readFrame(
   if (captureTimestamp != nullptr) {
     captureTimestamp->frameStartMonotonicUs = frameStartUs;
     captureTimestamp->frameEndMonotonicUs = static_cast<uint64_t>(nextFrameAtUs_);
+    captureTimestamp->droppedFramesBeforeCapture = 0;
   }
   return true;
 }

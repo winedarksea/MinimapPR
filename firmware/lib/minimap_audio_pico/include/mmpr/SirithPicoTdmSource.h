@@ -43,9 +43,15 @@ class SirithPicoTdmSource final : public IAudioSource {
       AudioCaptureTimestamp* captureTimestamp = nullptr) override;
 
  private:
+  static constexpr uint32_t kBufferedFrames = 4;
+
   bool validateConfig() const;
   bool initPioStateMachine();
+  bool initDmaCapture();
+  void deinitDmaCapture();
   void deinitPioStateMachine();
+  void onDmaIrq();
+  static void sDmaIrq();
   int16_t toPcm16(int32_t raw) const;
 
   SirithPicoTdmPins pins_;
@@ -53,13 +59,20 @@ class SirithPicoTdmSource final : public IAudioSource {
 
   bool initialized_ = false;
   uint64_t frameDurationUs_ = 0;
-  uint64_t streamStartMonotonicUs_ = 0;
-  uint64_t nextFrameStartMonotonicUs_ = 0;
+  size_t wordsPerFrame_ = 0;
 
   void* pio_ = nullptr;
   int sm_ = -1;
   uint32_t offset_ = 0;
   bool programInstalled_ = false;
+  int dmaChannel_ = -1;
+  uint32_t* dmaFrameWords_ = nullptr;
+  uint64_t frameEndMonotonicUs_[kBufferedFrames] = {};
+  volatile uint32_t dmaWriteFrameIndex_ = 0;
+  volatile uint32_t dmaReadFrameIndex_ = 0;
+  volatile uint32_t completedFrameCount_ = 0;
+  volatile uint32_t droppedFrameCount_ = 0;
+  uint32_t reportedDroppedFrameCount_ = 0;
 };
 
 }  // namespace mmpr

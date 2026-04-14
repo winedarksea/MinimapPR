@@ -41,6 +41,26 @@ bool isWiFiConnected() {
   return linkStatus() == CYW43_LINK_UP;
 }
 
+struct AsyncConnectState {
+  bool inFlight = false;
+  uint32_t startedAtMs = 0;
+  uint32_t lastAttemptFinishedAtMs = 0;
+};
+
+AsyncConnectState& asyncConnectState() {
+  static AsyncConnectState state = {};
+  return state;
+}
+
+bool startWiFiConnectAsync(const char* ssid, const char* password, uint32_t auth) {
+  const int rc = cyw43_arch_wifi_connect_async(ssid, password, auth);
+  if (rc != PICO_OK) {
+    std::printf("[wifi] async connect start failed rc=%d\n", rc);
+    return false;
+  }
+  return true;
+}
+
 }  // namespace
 
 bool connectWiFiBlocking(const char* ssid, const char* password, uint32_t timeoutMs, uint32_t retryDelayMs) {
@@ -78,6 +98,7 @@ bool connectWiFiBlocking(const char* ssid, const char* password, uint32_t timeou
 }
 
 void ensureWiFiConnected(const char* ssid, const char* password, uint32_t timeoutMs, uint32_t checkIntervalMs) {
+  AsyncConnectState& asyncState = asyncConnectState();
   static uint32_t lastCheckMs = 0;
   static int lastLoggedStatus = 999;
   const uint32_t nowMs = millis32();
@@ -92,8 +113,43 @@ void ensureWiFiConnected(const char* ssid, const char* password, uint32_t timeou
     std::printf("[wifi] link status=%s(%d)\n", linkStatusName(status), status);
   }
 
-  if (status != CYW43_LINK_UP) {
-    (void)connectWiFiBlocking(ssid, password, timeoutMs);
+  if (status == CYW43_LINK_UP) {
+    asyncState.inFlight = false;
+    return;
+  }
+
+  if (asyncState.inFlight) {
+    if ((nowMs - asyncState.startedAtMs) >= timeoutMs ||
+        status == CYW43_LINK_FAIL ||
+        status == CYW43_LINK_NONET ||
+        status == CYW43_LINK_BADAUTH) {
+      std::printf("[wifi] async connect timed out or failed status=%s(%d)\n",
+                  linkStatusName(status),
+                  status);
+      asyncState.inFlight = false;
+      asyncState.lastAttemptFinishedAtMs = nowMs;
+    }
+    return;
+  }
+
+  if ((nowMs - asyncState.lastAttemptFinishedAtMs) < checkIntervalMs) {
+    return;
+  }
+
+  cyw43_arch_enable_sta_mode();
+  const uint32_t auth = (password == nullptr || password[0] == '\0')
+      ? CYW43_AUTH_OPEN
+      : CYW43_AUTH_WPA2_AES_PSK;
+  std::printf(
+      "[wifi] starting async reconnect ssid=%s auth=%s timeout_ms=%lu\n",
+      ssid,
+      auth == CYW43_AUTH_OPEN ? "open" : "wpa2-aes-psk",
+      static_cast<unsigned long>(timeoutMs));
+  if (startWiFiConnectAsync(ssid, password, auth)) {
+    asyncState.inFlight = true;
+    asyncState.startedAtMs = nowMs;
+  } else {
+    asyncState.lastAttemptFinishedAtMs = nowMs;
   }
 }
 
