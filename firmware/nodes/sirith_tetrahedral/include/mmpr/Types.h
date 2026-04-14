@@ -18,6 +18,12 @@ enum class TimeQuality {
   kFreerunning,
 };
 
+struct GeoPoint {
+  float lat;
+  float lon;
+  float altM;
+};
+
 struct Vec3 {
   float x;
   float y;
@@ -28,6 +34,8 @@ struct NodeDescriptor {
   const char* id;
   NodeType type;
   Vec3 positionM;
+  bool hasGeoPosition;
+  GeoPoint geoPosition;
 
   const Vec3* sensorOffsetsM;
   size_t sensorCount;
@@ -37,7 +45,13 @@ struct NodeDescriptor {
 
   const char* hardwareName;
   const char* firmwareVersion;
+  const char* gpsSignalStatus;
+  const char* positionSource;
 };
+
+inline constexpr GeoPoint makeGeoPoint(float lat, float lon, float altM) {
+  return GeoPoint{lat, lon, altM};
+}
 
 struct AudioFrame {
   uint64_t startTimeNs;
@@ -55,6 +69,8 @@ struct AudioFrame {
 struct EnvironmentalSample {
   bool hasTemperatureC = false;
   float temperatureC = 0.0f;
+  bool hasHumidityFraction = false;
+  float humidityFraction = 0.0f;
   const char* temperatureSource = nullptr;
 };
 

@@ -130,6 +130,17 @@ bool buildIngestPayload(
   appendFloat(outPayload, node.positionM.z);
   outPayload += ']';
 
+  if (node.hasGeoPosition) {
+    outPayload += ",\"position_geo\":{";
+    outPayload += "\"lat\":";
+    appendFloat(outPayload, node.geoPosition.lat);
+    outPayload += ",\"lon\":";
+    appendFloat(outPayload, node.geoPosition.lon);
+    outPayload += ",\"alt_m\":";
+    appendFloat(outPayload, node.geoPosition.altM);
+    outPayload += '}';
+  }
+
   outPayload += ",\"sensor_offsets_m\":[";
   for (size_t i = 0; i < node.sensorCount; ++i) {
     if (i > 0) {
@@ -159,6 +170,23 @@ bool buildIngestPayload(
   appendQuoted(outPayload, node.hardwareName != nullptr ? node.hardwareName : "unknown");
   outPayload += ",\"firmware\":";
   appendQuoted(outPayload, node.firmwareVersion != nullptr ? node.firmwareVersion : "dev");
+  if (node.gpsSignalStatus != nullptr || node.positionSource != nullptr) {
+    outPayload += ",\"gps\":{";
+    bool needComma = false;
+    if (node.gpsSignalStatus != nullptr) {
+      outPayload += "\"signal\":";
+      appendQuoted(outPayload, node.gpsSignalStatus);
+      needComma = true;
+    }
+    if (node.positionSource != nullptr) {
+      if (needComma) {
+        outPayload += ',';
+      }
+      outPayload += "\"position_source\":";
+      appendQuoted(outPayload, node.positionSource);
+    }
+    outPayload += '}';
+  }
   outPayload += "}}";
 
   outPayload += ",\"frame\":{";
@@ -191,12 +219,27 @@ bool buildIngestPayload(
 
   outPayload += "}";
 
-  if (environment != nullptr && environment->hasTemperatureC) {
+  if (environment != nullptr && (environment->hasTemperatureC || environment->hasHumidityFraction)) {
     outPayload += ",\"environment\":{";
-    outPayload += "\"temperature_c\":";
-    appendFloat(outPayload, environment->temperatureC);
+    bool needComma = false;
+    if (environment->hasTemperatureC) {
+      outPayload += "\"temperature_c\":";
+      appendFloat(outPayload, environment->temperatureC);
+      needComma = true;
+    }
+    if (environment->hasHumidityFraction) {
+      if (needComma) {
+        outPayload += ',';
+      }
+      outPayload += "\"humidity_fraction\":";
+      appendFloat(outPayload, environment->humidityFraction);
+      needComma = true;
+    }
     if (environment->temperatureSource != nullptr) {
-      outPayload += ",\"source\":";
+      if (needComma) {
+        outPayload += ',';
+      }
+      outPayload += "\"source\":";
       appendQuoted(outPayload, environment->temperatureSource);
     }
     outPayload += "}";

@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "mmpr/Types.h"
+
 namespace mmpr {
 
 class NodeClock {
@@ -18,8 +20,9 @@ class NodeClock {
   uint64_t nextFrameStartNs();
   uint64_t nowUtcNs() const;
   bool hasWallClock() const { return hasWallClock_; }
+  TimeQuality timeQuality() const { return timeQuality_; }
 
-  void setUtcNs(uint64_t utcNs);
+  void setUtcNs(uint64_t utcNs, TimeQuality quality = TimeQuality::kNtpSync);
 
  private:
   uint64_t streamStartNs_ = 0;
@@ -27,6 +30,7 @@ class NodeClock {
   uint64_t frameIndex_ = 0;
 
   bool hasWallClock_ = false;
+  TimeQuality timeQuality_ = TimeQuality::kFreerunning;
   uint64_t wallClockNs_ = 0;
   uint64_t wallClockSetUs_ = 0;
 };

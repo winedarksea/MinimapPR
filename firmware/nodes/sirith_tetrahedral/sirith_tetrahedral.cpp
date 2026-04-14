@@ -8,11 +8,14 @@
 #include "node_config.h"
 
 #include "mmpr/HttpFramePublisher.h"
+#include "mmpr/FallbackEnvironmentalSource.h"
 #include "mmpr/Lis2mdlMagnetometer.h"
 #include "mmpr/Lsm6TemperatureSensor.h"
 #include "mmpr/MagAutoOrientation.h"
+#include "mmpr/NmeaGpsSource.h"
 #include "mmpr/NodeClock.h"
 #include "mmpr/NodeRunner.h"
+#include "mmpr/Sht4xEnvironmentalSource.h"
 #include "mmpr/SilenceAudioSource.h"
 #include "mmpr/SirithPicoTdmSource.h"
 #include "mmpr/TemperatureEnvironmentalSource.h"
@@ -50,6 +53,30 @@ mmpr::Lsm6TemperatureSensorConfig gImuTempConfig = {
 };
 mmpr::Lsm6TemperatureSensor gImuTempSensor(gI2c, gImuTempConfig);
 mmpr::TemperatureEnvironmentalSource gImuEnvironmentSource(gImuTempSensor);
+mmpr::Sht4xEnvironmentalSourceConfig gSht4xEnvironmentConfig = {
+    nodecfg::kSht4xI2cAddress7Bit,
+    nodecfg::kSht4xSampleIntervalMs,
+};
+mmpr::Sht4xEnvironmentalSource gSht4xEnvironmentSource(gI2c, gSht4xEnvironmentConfig);
+mmpr::FallbackEnvironmentalSource gCombinedEnvironmentSource(
+    nodecfg::kEnableSht45Environment ? static_cast<mmpr::IEnvironmentalSource*>(&gSht4xEnvironmentSource) : nullptr,
+    nodecfg::kEnableImuTemperature ? static_cast<mmpr::IEnvironmentalSource*>(&gImuEnvironmentSource) : nullptr);
+mmpr::NmeaGpsSourceConfig gGpsConfig = {
+    uart0,
+    nodecfg::kGpsUartBaud,
+    nodecfg::kGpsTxPin,
+    nodecfg::kGpsRxPin,
+    nodecfg::kGpsPpsPin,
+    {
+        nodecfg::kNodeFallbackLatitudeDeg,
+        nodecfg::kNodeFallbackLongitudeDeg,
+        nodecfg::kNodeFallbackAltitudeM,
+    },
+    128,
+    nodecfg::kGpsMissingSentenceTimeoutMs,
+    nodecfg::kGpsStaleFixTimeoutMs,
+};
+mmpr::NmeaGpsSource gGpsSource(gGpsConfig);
 
 uint8_t rotateBaseMic(uint8_t micIndex, uint8_t baseRotationSteps) {
   if (micIndex >= 3) {
@@ -100,12 +127,20 @@ mmpr::NodeDescriptor gNodeDescriptor = {
     nodecfg::kNodeId,
     mmpr::NodeType::kSirithTetra,
     {nodecfg::kNodePositionM[0], nodecfg::kNodePositionM[1], nodecfg::kNodePositionM[2]},
+    nodecfg::kNodeHasFallbackGeoPosition,
+    {
+        nodecfg::kNodeFallbackLatitudeDeg,
+        nodecfg::kNodeFallbackLongitudeDeg,
+        nodecfg::kNodeFallbackAltitudeM,
+    },
     gSensorOffsetsOrdered,
     sizeof(gSensorOffsetsOrdered) / sizeof(gSensorOffsetsOrdered[0]),
     nodecfg::kCapabilities,
     sizeof(nodecfg::kCapabilities) / sizeof(nodecfg::kCapabilities[0]),
     nodecfg::kHardwareName,
     MMPR_FW_VERSION,
+    nodecfg::kGpsSignalStatus,
+    nodecfg::kGpsPositionSource,
 };
 
 mmpr::SirithPicoTdmPins gTdmPins = {
@@ -141,9 +176,10 @@ mmpr::IAudioSource& gSelectedAudioSource = nodecfg::kEnableExternalAudioHardware
     ? static_cast<mmpr::IAudioSource&>(gAudioSource)
     : static_cast<mmpr::IAudioSource&>(gSilenceAudioSource);
 
-mmpr::IEnvironmentalSource* gEnvironmentalSource = (
-    nodecfg::kEnableExternalPeripheralBuses && nodecfg::kEnableImuTemperature)
-    ? static_cast<mmpr::IEnvironmentalSource*>(&gImuEnvironmentSource)
+mmpr::IEnvironmentalSource* gEnvironmentalSource =
+    (nodecfg::kEnableExternalPeripheralBuses &&
+     (nodecfg::kEnableSht45Environment || nodecfg::kEnableImuTemperature))
+    ? static_cast<mmpr::IEnvironmentalSource*>(&gCombinedEnvironmentSource)
     : nullptr;
 
 mmpr::NodeRunner gRunner(
@@ -169,29 +205,26 @@ void setStatusLed(bool enabled) {
 }
 
 void setupOptionalPeripherals() {
-  if (!nodecfg::kEnableExternalPeripheralBuses) {
-    std::printf("[sirith-pico] bare-board mode: external buses disabled\n");
-    return;
-  }
-
-  const bool useI2c = nodecfg::kEnableCompassAutoOrientation || nodecfg::kEnableImuTemperature;
+  const bool useI2c = nodecfg::kEnableCompassAutoOrientation ||
+      nodecfg::kEnableImuTemperature ||
+      nodecfg::kEnableSht45Environment;
   bool i2cReady = false;
-  if (useI2c) {
+  if (useI2c && nodecfg::kEnableExternalPeripheralBuses) {
     i2cReady = gI2c.begin(i2c1, nodecfg::kI2cSdaPin, nodecfg::kI2cSclPin, nodecfg::kI2cBaudHz);
     if (!i2cReady) {
       std::printf("[sirith-pico] I2C init failed\n");
     }
+  } else if (useI2c) {
+    std::printf("[sirith-pico] bare-board mode: I2C peripherals disabled\n");
   }
 
   if (nodecfg::kEnableGpsUart) {
-    uart_init(uart0, nodecfg::kGpsUartBaud);
-    gpio_set_function(nodecfg::kGpsTxPin, GPIO_FUNC_UART);
-    gpio_set_function(nodecfg::kGpsRxPin, GPIO_FUNC_UART);
-
-    gpio_init(nodecfg::kGpsPpsPin);
-    gpio_set_dir(nodecfg::kGpsPpsPin, GPIO_IN);
-    gpio_pull_down(nodecfg::kGpsPpsPin);
-    std::printf("[sirith-pico] GPS UART enabled\n");
+    gGpsSource.begin();
+    gGpsSource.poll(gNodeDescriptor, &gClock);
+    std::printf("[sirith-pico] GPS UART enabled on uart0 tx=GP%d rx=GP%d pps=GP%d\n",
+                nodecfg::kGpsTxPin,
+                nodecfg::kGpsRxPin,
+                nodecfg::kGpsPpsPin);
   }
 
   if (nodecfg::kEnableCompassAutoOrientation && i2cReady) {
@@ -218,6 +251,9 @@ void setupOptionalPeripherals() {
 
   if (nodecfg::kEnableImuTemperature) {
     std::printf("[sirith-pico] IMU temperature telemetry enabled (generic source interface)\n");
+  }
+  if (nodecfg::kEnableSht45Environment) {
+    std::printf("[sirith-pico] SHT4x environmental telemetry enabled (temperature + humidity)\n");
   }
 }
 
@@ -293,6 +329,10 @@ int main() {
         nodecfg::kWiFiConnectTimeoutMs);
 
     gRunner.loopOnce();
+
+    if (nodecfg::kEnableGpsUart) {
+      gGpsSource.poll(gNodeDescriptor, &gClock);
+    }
 
     // Heartbeat blink on GP26 (P-channel FET: LOW=on, HIGH=off).
     static uint32_t ledCounter = 0;

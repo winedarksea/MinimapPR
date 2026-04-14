@@ -84,7 +84,7 @@ void NodeRunner::loopOnce() {
       sequence_,
       frameStartNs,
       receiptNs,
-      clock_.hasWallClock() ? TimeQuality::kNtpSync : TimeQuality::kFreerunning,
+      clock_.timeQuality(),
       frameBuffer_,
       audioSource_.frameSamples(),
   };

@@ -42,13 +42,16 @@ set(MMPR_AUDIO_PICO_DIR ${CMAKE_CURRENT_LIST_DIR}/../../lib/minimap_audio_pico)
 add_executable(sirith_tetrahedral
         sirith_tetrahedral.cpp
         src/Base64.cpp
+        src/FallbackEnvironmentalSource.cpp
         src/HttpFramePublisher.cpp
         src/Lis2mdlMagnetometer.cpp
         src/Lsm6TemperatureSensor.cpp
         src/MagAutoOrientation.cpp
+        src/NmeaGpsSource.cpp
         src/NodeClock.cpp
         src/NodeProtocol.cpp
         src/NodeRunner.cpp
+        src/Sht4xEnvironmentalSource.cpp
         src/SilenceAudioSource.cpp
         src/TemperatureEnvironmentalSource.cpp
         src/WiFiSupport.cpp
