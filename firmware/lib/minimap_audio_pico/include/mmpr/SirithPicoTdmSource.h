@@ -43,7 +43,10 @@ class SirithPicoTdmSource final : public IAudioSource {
       AudioCaptureTimestamp* captureTimestamp = nullptr) override;
 
  private:
-  static constexpr uint32_t kBufferedFrames = 4;
+  // With kHttpTimeoutMs=500 and 64 ms/frame, up to ~8 frames can accumulate
+  // during one HTTP POST.  Keep 10 slots to absorb the worst-case burst
+  // without dropping frames (10 × 16 KB = 160 KB on RP2350).
+  static constexpr uint32_t kBufferedFrames = 10;
 
   bool validateConfig() const;
   bool initPioStateMachine();

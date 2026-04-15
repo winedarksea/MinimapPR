@@ -167,10 +167,14 @@ bool SirithPicoTdmSource::initPioStateMachine() {
   sm_config_set_sideset(&smCfg, 2, false, false);
   sm_config_set_sideset_pins(&smCfg, pins_.bclk);
   sm_config_set_in_pins(&smCfg, pins_.dataIn);
-  // The ADAU7112 shifts out MSB-first. Shift the ISR right so the first
-  // sampled sign bit enters bit 31 and subsequent bits fill the rest of the
-  // word instead of collapsing the slot to a sign-only 0x80000000/0 pattern.
-  sm_config_set_in_shift(&smCfg, true, true, config_.slotBits);
+  // The ADAU7112 shifts out MSB-first. Use shift-LEFT (false) so each new bit
+  // enters at ISR[0] and accumulates toward ISR[31]. After 32 bits the first
+  // received bit (audio sign/MSB) sits at ISR[31], giving a natural int32_t
+  // value that can be arithmetically right-shifted by sampleShiftBits to
+  // produce a correctly-signed PCM16 sample.
+  // (Shift-right places the first received bit at ISR[0] — audio sign at the
+  // LSB — which breaks sign extension and maps typical mic levels to zero.)
+  sm_config_set_in_shift(&smCfg, false, true, config_.slotBits);
   sm_config_set_fifo_join(&smCfg, PIO_FIFO_JOIN_RX);
   sm_config_set_clkdiv(&smCfg, clkDiv);
 
@@ -365,6 +369,21 @@ bool SirithPicoTdmSource::readFrame(
     // which always lags dmaReadFrameIndex_ by at least one slot while the ring
     // has capacity, so there is no write conflict on slot readFrameIndex.
     const uint32_t* frameWords = dmaFrameWords_ + (readFrameIndex * wordsPerFrame_);
+
+    // ---- DIAGNOSTIC: log first 8 raw slot words every 200 frames ----
+    // Remove once SDATA signal is confirmed non-zero.
+    {
+      static uint32_t sDiagFrameCount = 0;
+      if ((++sDiagFrameCount % 200u) == 0u) {
+        MMPR_PICO_LOG("[tdm-diag] raw[0..7]: %08lX %08lX %08lX %08lX  %08lX %08lX %08lX %08lX\n",
+            static_cast<unsigned long>(frameWords[0]), static_cast<unsigned long>(frameWords[1]),
+            static_cast<unsigned long>(frameWords[2]), static_cast<unsigned long>(frameWords[3]),
+            static_cast<unsigned long>(frameWords[4]), static_cast<unsigned long>(frameWords[5]),
+            static_cast<unsigned long>(frameWords[6]), static_cast<unsigned long>(frameWords[7]));
+      }
+    }
+    // ---- END DIAGNOSTIC ----
+
     for (size_t i = 0; i < config_.frameSamples; ++i) {
       const int32_t slotWords[4] = {
           static_cast<int32_t>(frameWords[(i * 4u) + 0u]),

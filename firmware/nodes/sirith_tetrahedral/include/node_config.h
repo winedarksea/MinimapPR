@@ -11,7 +11,9 @@ static constexpr const char* kServerBaseUrl = "http://192.168.1.50:8080";
 static constexpr const char* kIngestPath = "/api/v1/ingest/frame";
 
 static constexpr uint32_t kWiFiConnectTimeoutMs = 15000;
-static constexpr uint32_t kHttpTimeoutMs = 2500;
+// On a local LAN a full frame POST (≈11 KB) completes in < 100 ms.
+// Keeping this tight limits DMA ring-buffer back-pressure and frame drops.
+static constexpr uint32_t kHttpTimeoutMs = 500;
 
 // --- Node identity ---
 static constexpr const char* kNodeId = "sirith-tetra-pico2w-01";
@@ -63,10 +65,9 @@ static constexpr const char* kHardwareName = "sirith_tetra_pico2w_tdm";
 // --- Bring-up mode ---
 // Bare-board validation avoids driving external buses so firmware can be
 // verified without risking the mic array.
-static constexpr bool kBareBoardValidationMode = true;
-// GP26 controls a switched Vin rail through a FET and also drives the board LED.
-// Keep it disabled by default until that path is needed for a validated
-// hardware configuration.
+static constexpr bool kBareBoardValidationMode = false;
+// GP26 controls a switched Vin rail through a FET and also drives an board LED.
+// This rail does not power anything right now, and is optional
 static constexpr bool kEnableExternalVFetRail = false;
 static constexpr bool kEnableExternalAudioHardware = !kBareBoardValidationMode;
 static constexpr bool kEnableExternalPeripheralBuses = !kBareBoardValidationMode;
@@ -100,7 +101,7 @@ static constexpr uint8_t kOutputChannelToSlot[4] = {1, 0, 3, 2};
 static constexpr bool kUseSafeDriveStrength = true;
 
 // --- Optional GPS/PPS (M10Q style) ---
-static constexpr bool kEnableGpsUart = true;
+static constexpr bool kEnableGpsUart = false;
 static constexpr uint32_t kGpsUartBaud = 9600;
 static constexpr int kGpsTxPin = 12;
 static constexpr int kGpsRxPin = 13;
@@ -143,7 +144,7 @@ static constexpr uint8_t kImuI2cAddressSecondary7Bit = 0x6B;
 static constexpr uint32_t kImuTemperatureSampleIntervalMs = 2000;
 
 // Sensirion SHT4x family environmental sensor (SHT45 on SparkFun SAM-M10Q carrier)
-static constexpr bool kEnableSht45Environment = true;
+static constexpr bool kEnableSht45Environment = false;
 static constexpr uint8_t kSht4xI2cAddress7Bit = 0x44;
 static constexpr uint32_t kSht4xSampleIntervalMs = 2000;
 
