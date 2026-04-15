@@ -608,11 +608,22 @@ class GEVDBeamformer:
 # ---------------------------------------------------------------------------
 
 _BEAMFORMER_TYPES = {
+    "delay_and_sum": "Time-domain delay-and-sum (linear interpolation)",
     "das": "Time-domain delay-and-sum (linear interpolation)",
     "freq_domain_das": "FFT-based delay-and-sum (exact fractional delays)",
     "mvdr": "Minimum Variance Distortionless Response",
     "superdirective": "Superdirective (analytical diffuse-noise model)",
     "gevd": "Generalized Eigenvalue Decomposition / MaxSNR",
+}
+
+_BEAMFORMER_TYPE_ALIASES = {
+    "": "delay_and_sum",
+    "das": "delay_and_sum",
+    "delay_and_sum": "delay_and_sum",
+    "freq_domain_das": "freq_domain_das",
+    "mvdr": "mvdr",
+    "superdirective": "superdirective",
+    "gevd": "gevd",
 }
 
 
@@ -636,10 +647,10 @@ def create_beamformer(
     main lobe for higher recall — preferable when the output feeds a
     classifier.
 
-    Available types: ``das``, ``freq_domain_das``, ``mvdr``,
-    ``superdirective``, ``gevd``.
+    Available types: ``delay_and_sum``/``das``, ``freq_domain_das``,
+    ``mvdr``, ``superdirective``, ``gevd``.
     """
-    name = beamformer_type.strip().lower()
+    name = _BEAMFORMER_TYPE_ALIASES.get(beamformer_type.strip().lower())
     effective_loading = diagonal_loading * max(classifier_diagonal_loading_scale, 1.0)
 
     if name == "freq_domain_das":
@@ -662,7 +673,9 @@ def create_beamformer(
             freq_min_hz=freq_min_hz,
             freq_max_hz=freq_max_hz,
         )
-    if name not in ("das", ""):
+    if name == "delay_and_sum":
+        return DelayAndSumBeamformer()
+    if name is None:
         logger.warning(
             "Unknown beamformer type %r; falling back to time-domain DAS. "
             "Available: %s",

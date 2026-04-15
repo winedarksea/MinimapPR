@@ -434,7 +434,11 @@ class Settings:
         if self.gcc_phat_interp_factor < 1:
             raise ValueError("MINIMAPPR_GCC_PHAT_INTERP_FACTOR must be >= 1")
         self.beamformer_type = self.beamformer_type.strip().lower()
-        _valid_beamformers = {"delay_and_sum", "freq_domain_das", "mvdr", "superdirective", "gevd"}
+        if self.beamformer_type == "das":
+            # Preserve the more descriptive config name internally while
+            # still accepting the historical shorthand.
+            self.beamformer_type = "delay_and_sum"
+        _valid_beamformers = {"delay_and_sum", "das", "freq_domain_das", "mvdr", "superdirective", "gevd"}
         if self.beamformer_type not in _valid_beamformers:
             raise ValueError(
                 f"MINIMAPPR_BEAMFORMER_TYPE must be one of {sorted(_valid_beamformers)}"

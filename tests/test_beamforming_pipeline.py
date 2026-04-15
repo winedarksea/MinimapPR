@@ -276,6 +276,15 @@ class TestBeamformerFactory:
         bf = create_beamformer("delay_and_sum")
         assert isinstance(bf, DelayAndSumBeamformer)
 
+    def test_delay_and_sum_name_uses_time_domain_das_without_warning(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        with caplog.at_level("WARNING", logger="minimappr.core.beamforming"):
+            bf = create_beamformer("delay_and_sum")
+        assert isinstance(bf, DelayAndSumBeamformer)
+        assert "Unknown beamformer type" not in caplog.text
+
     def test_freq_domain_das(self) -> None:
         bf = create_beamformer("freq_domain_das")
         assert isinstance(bf, FrequencyDomainDelayAndSumBeamformer)
@@ -297,6 +306,10 @@ class TestBeamformerFactory:
     def test_unknown_type_falls_back_to_das(self) -> None:
         bf = create_beamformer("nonexistent")
         assert isinstance(bf, DelayAndSumBeamformer)
+
+    def test_settings_normalize_das_alias_to_delay_and_sum(self) -> None:
+        settings = Settings(beamformer_type="das")
+        assert settings.beamformer_type == "delay_and_sum"
 
 
 # ---------------------------------------------------------------------------
@@ -748,6 +761,7 @@ class TestBeamformerFactoryExtended:
 
     def test_available_beamformers_includes_all(self) -> None:
         avail = available_beamformers()
+        assert "delay_and_sum" in avail
         assert "das" in avail
         assert "mvdr" in avail
         assert "superdirective" in avail
