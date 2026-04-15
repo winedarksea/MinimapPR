@@ -130,12 +130,14 @@ void NtpClient::sendRequest() {
   // LI=0 (no warning), VN=4 (NTPv4), Mode=3 (client) → 0b00100011 = 0x23
   static_cast<uint8_t*>(p->payload)[0] = 0x23;
 
+  requestSentMonotonicUs_ = time_us_64();
   const err_t err = udp_sendto(pcb_, p, &serverAddr_, kNtpPort);
   pbuf_free(p);
 
   if (err != ERR_OK) {
     std::printf("[ntp] udp_sendto err=%d\n", static_cast<int>(err));
     closeUdp();
+    requestSentMonotonicUs_ = 0;
     state_          = State::kFailed;
     stateEnteredUs_ = time_us_64();
     return;
@@ -182,14 +184,32 @@ void NtpClient::onUdpRecv(struct pbuf* p) {
   const uint64_t secsSinceUnix = static_cast<uint64_t>(secsSince1900) - kNtpToUnixSeconds;
   const uint64_t fractionalNs =
       (static_cast<uint64_t>(fractionalSeconds) * 1'000'000'000ULL) >> 32;
-  const uint64_t utcNs = (secsSinceUnix * 1'000'000'000ULL) + fractionalNs;
+  // T3 = server transmit time in UTC nanoseconds.
+  const uint64_t utcNsT3 = (secsSinceUnix * 1'000'000'000ULL) + fractionalNs;
+
+  // SNTP single-packet round-trip correction (RFC 4330 §5):
+  //   best_utc ≈ T3 + one_way_delay  ≈ T3 + (T4 - T1) / 2
+  // Anchor that estimate to the midpoint of the round trip on the monotonic
+  // clock so the NodeClock interpolation starts from the most accurate point.
+  // Guard against T1 not being set (e.g. called without a prior sendRequest).
+  uint64_t anchorUtcNs = utcNsT3;
+  uint64_t anchorMonotonicUs = receiptMonotonicUs;
+  uint64_t rttUs = 0;
+  if (requestSentMonotonicUs_ > 0 && receiptMonotonicUs >= requestSentMonotonicUs_) {
+    rttUs = receiptMonotonicUs - requestSentMonotonicUs_;
+    const uint64_t oneWayNs = (rttUs * 1'000ULL) / 2ULL;
+    anchorUtcNs = utcNsT3 + oneWayNs;
+    anchorMonotonicUs = requestSentMonotonicUs_ + (rttUs / 2ULL);
+  }
+  requestSentMonotonicUs_ = 0;
 
   std::printf(
-      "[ntp] sync ok — %llu s + %llu ns since Unix epoch\n",
+      "[ntp] sync ok — %llu s + %llu ns utcT3  rtt=%llu us\n",
       static_cast<unsigned long long>(secsSinceUnix),
-      static_cast<unsigned long long>(fractionalNs));
+      static_cast<unsigned long long>(fractionalNs),
+      static_cast<unsigned long long>(rttUs));
 
-  clock_->setUtcAtMonotonicUs(utcNs, receiptMonotonicUs, TimeQuality::kNtpSync);
+  clock_->setUtcAtMonotonicUs(anchorUtcNs, anchorMonotonicUs, TimeQuality::kNtpSync);
 
   state_          = State::kDone;
   stateEnteredUs_ = time_us_64();

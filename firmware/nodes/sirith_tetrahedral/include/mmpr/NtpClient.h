@@ -63,6 +63,7 @@ class NtpClient {
   ip_addr_t   serverAddr_ = {};
   State       state_  = State::kIdle;
   uint64_t    stateEnteredUs_ = 0;
+  uint64_t    requestSentMonotonicUs_ = 0;  // T1: monotonic time when UDP request was sent
 
   static constexpr uint64_t kDnsTimeoutUs     = 10'000'000ULL;  //  10 s
   static constexpr uint64_t kResponseTimeoutUs =  5'000'000ULL;  //   5 s

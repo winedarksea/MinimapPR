@@ -167,7 +167,10 @@ bool SirithPicoTdmSource::initPioStateMachine() {
   sm_config_set_sideset(&smCfg, 2, false, false);
   sm_config_set_sideset_pins(&smCfg, pins_.bclk);
   sm_config_set_in_pins(&smCfg, pins_.dataIn);
-  sm_config_set_in_shift(&smCfg, false, true, config_.slotBits);
+  // The ADAU7112 shifts out MSB-first. Shift the ISR right so the first
+  // sampled sign bit enters bit 31 and subsequent bits fill the rest of the
+  // word instead of collapsing the slot to a sign-only 0x80000000/0 pattern.
+  sm_config_set_in_shift(&smCfg, true, true, config_.slotBits);
   sm_config_set_fifo_join(&smCfg, PIO_FIFO_JOIN_RX);
   sm_config_set_clkdiv(&smCfg, clkDiv);
 
@@ -342,18 +345,25 @@ bool SirithPicoTdmSource::readFrame(
   uint64_t frameEndUs = 0;
   uint32_t droppedFramesBeforeCapture = 0;
   while (true) {
-    const uint32_t irqState = save_and_disable_interrupts();
-    if (completedFrameCount_ == 0) {
+    // Critical section 1: snapshot availability, index, and timestamp only.
+    // Keep this window as short as possible so the DMA IRQ is not delayed.
+    {
+      const uint32_t irqState = save_and_disable_interrupts();
+      if (completedFrameCount_ == 0) {
+        restore_interrupts(irqState);
+        tight_loop_contents();
+        continue;
+      }
+      readFrameIndex = dmaReadFrameIndex_;
+      frameEndUs = frameEndMonotonicUs_[readFrameIndex];
+      droppedFramesBeforeCapture = droppedFrameCount_ - reportedDroppedFrameCount_;
+      reportedDroppedFrameCount_ = droppedFrameCount_;
       restore_interrupts(irqState);
-      tight_loop_contents();
-      continue;
     }
 
-    readFrameIndex = dmaReadFrameIndex_;
-    frameEndUs = frameEndMonotonicUs_[readFrameIndex];
-    droppedFramesBeforeCapture = droppedFrameCount_ - reportedDroppedFrameCount_;
-    reportedDroppedFrameCount_ = droppedFrameCount_;
-
+    // Copy with interrupts enabled.  The DMA is writing to dmaWriteFrameIndex_
+    // which always lags dmaReadFrameIndex_ by at least one slot while the ring
+    // has capacity, so there is no write conflict on slot readFrameIndex.
     const uint32_t* frameWords = dmaFrameWords_ + (readFrameIndex * wordsPerFrame_);
     for (size_t i = 0; i < config_.frameSamples; ++i) {
       const int32_t slotWords[4] = {
@@ -369,9 +379,14 @@ bool SirithPicoTdmSource::readFrame(
       }
     }
 
-    dmaReadFrameIndex_ = (dmaReadFrameIndex_ + 1u) % kBufferedFrames;
-    --completedFrameCount_;
-    restore_interrupts(irqState);
+    // Critical section 2: advance the read pointer using the locally snapshotted
+    // index so ISR changes to dmaReadFrameIndex_ during the copy do not skew it.
+    {
+      const uint32_t irqState = save_and_disable_interrupts();
+      dmaReadFrameIndex_ = (readFrameIndex + 1u) % kBufferedFrames;
+      --completedFrameCount_;
+      restore_interrupts(irqState);
+    }
     break;
   }
 
