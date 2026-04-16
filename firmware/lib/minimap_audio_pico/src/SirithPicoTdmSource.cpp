@@ -33,12 +33,40 @@ namespace {
 // - Samples one SDATA bit per BCLK rising edge
 // - Uses a one-bit positive FSYNC pulse at frame start (ADAU7112 TDM requirement)
 // - Auto-pushes every 32 bits -> one slot per FIFO word
+//
+// PIO SET data field is 5 bits (0-31); 127 cannot be loaded directly.
+// Nested-loop design: Y = outer slot counter (3..0 = 4 slots),
+//                     X = inner bit counter (30 or 31 remaining bits per slot).
+//
+// Instruction layout (8 instructions, wrap top = [5], bottom = [0]):
+//  [0] Frame start (wrap entry): FSYNC rises, Y=3.
+//  [1] First bit of frame: BCLK rises with FSYNC still high, sample SDATA.
+//  [2] FSYNC falls, BCLK falls; X=30 (31 more bits to complete slot 0, total 32).
+//  [3] Inner bit loop: BCLK rises, sample SDATA.          <-- shared by all slots
+//  [4] BCLK falls; loop to [3] while X!=0. Autopush fires at 32 bits.
+//  [5] Slot done: Y-- and jump to [6] if slots remain; else wrap to [0].
+//  [6] Next-slot setup: X=31 (all 32 bits go through inner loop).
+//  [7] Enter inner bit loop at [3].
+//
+// JMP targets [3] in [4] and [7], and [6] in [5] are patched after load.
+// Cycles per audio frame: 267  (vs the original intended 257 for the 5-instr design).
 static const uint16_t kSirithTdmMasterRxInstructions[] = {
-    static_cast<uint16_t>(pio_encode_set(pio_x, 127) | pio_encode_sideset(2, 0x2)),      // FSYNC high, BCLK low
-    static_cast<uint16_t>(pio_encode_in(pio_pins, 1) | pio_encode_sideset(2, 0x3)),       // First rising edge sample
-    static_cast<uint16_t>(pio_encode_jmp_x_dec(3) | pio_encode_sideset(2, 0x0)),          // FSYNC pulse ends, jump into steady loop
-    static_cast<uint16_t>(pio_encode_in(pio_pins, 1) | pio_encode_sideset(2, 0x1)),       // BCLK high, sample SDATA
-    static_cast<uint16_t>(pio_encode_jmp_x_dec(3) | pio_encode_sideset(2, 0x0)),          // BCLK low
+    // [0] SET Y=3, FSYNC=1, BCLK=0
+    static_cast<uint16_t>(pio_encode_set(pio_y, 3)    | pio_encode_sideset(2, 0x2)),
+    // [1] IN PINS 1, FSYNC=1, BCLK=1 — first sample; BCLK rises while FSYNC is high
+    static_cast<uint16_t>(pio_encode_in(pio_pins, 1)  | pio_encode_sideset(2, 0x3)),
+    // [2] SET X=30, FSYNC=0, BCLK=0 — FSYNC falls; 31 more bits remain in slot 0
+    static_cast<uint16_t>(pio_encode_set(pio_x, 30)   | pio_encode_sideset(2, 0x0)),
+    // [3] IN PINS 1, BCLK=1 — inner loop: sample on rising BCLK  (target of JMPs in [4],[7])
+    static_cast<uint16_t>(pio_encode_in(pio_pins, 1)  | pio_encode_sideset(2, 0x1)),
+    // [4] JMP X-- [3], BCLK=0 — inner loop back; autopush fires after 32nd bit
+    static_cast<uint16_t>(pio_encode_jmp_x_dec(0)     | pio_encode_sideset(2, 0x0)),  // patched to [3]
+    // [5] JMP Y-- [6], BCLK=0 — slot done; more slots -> [6]; Y=0 -> wrap to [0]
+    static_cast<uint16_t>(pio_encode_jmp_y_dec(0)     | pio_encode_sideset(2, 0x0)),  // patched to [6]
+    // [6] SET X=31, BCLK=0 — next-slot setup: all 32 bits via inner loop
+    static_cast<uint16_t>(pio_encode_set(pio_x, 31)   | pio_encode_sideset(2, 0x0)),
+    // [7] JMP [3], BCLK=0 — enter inner bit loop
+    static_cast<uint16_t>(pio_encode_jmp(0)            | pio_encode_sideset(2, 0x0)),  // patched to [3]
 };
 
 static const pio_program kSirithTdmMasterRxProgram = {
@@ -116,8 +144,8 @@ bool SirithPicoTdmSource::initPioStateMachine() {
 
   const uint32_t bitsPerFrame = static_cast<uint32_t>(config_.slotBits) * static_cast<uint32_t>(config_.tdmSlots);
   const uint32_t bitRateHz = config_.sampleRateHz * bitsPerFrame;
-  // This program uses 2 cycles/bit plus one setup cycle at each frame boundary.
-  const uint32_t smCyclesPerFrame = (bitsPerFrame * 2u) + 1u;
+  // 2 cycles/bit + 11 cycles of nested-loop overhead per frame (3 setup + 4 slot-checks + 6 next-slot setup).
+  const uint32_t smCyclesPerFrame = (bitsPerFrame * 2u) + 11u;
   const float smClockHz = static_cast<float>(config_.sampleRateHz) * static_cast<float>(smCyclesPerFrame);
   const float clkSysHz = static_cast<float>(clock_get_hz(clk_sys));
   const float clkDiv = clkSysHz / smClockHz;
@@ -130,14 +158,19 @@ bool SirithPicoTdmSource::initPioStateMachine() {
 
   const uint programOffset = pio_add_program(selectedPio, &kSirithTdmMasterRxProgram);
 
-  // The jmp-x-- instructions encode an absolute PIO instruction-memory address.
-  // Patch instructions 2 and 4 to jump to programOffset+3 (the inner sample
-  // instruction) now that the actual load address is known.
-  const uint jmpTarget = programOffset + 3u;
-  selectedPio->instr_mem[programOffset + 2u] =
-      (kSirithTdmMasterRxInstructions[2] & ~0x1Fu) | (jmpTarget & 0x1Fu);
+  // JMP instructions use absolute PIO instruction-memory addresses; patch them
+  // now that the actual load offset is known.
+  const uint innerLoopTarget = programOffset + 3u;  // instr [3]: inner bit loop
+  const uint nextSlotTarget  = programOffset + 6u;  // instr [6]: next-slot setup
+  // instr [4]: JMP X-- -> inner bit loop
   selectedPio->instr_mem[programOffset + 4u] =
-      (kSirithTdmMasterRxInstructions[4] & ~0x1Fu) | (jmpTarget & 0x1Fu);
+      (kSirithTdmMasterRxInstructions[4] & ~0x1Fu) | (innerLoopTarget & 0x1Fu);
+  // instr [5]: JMP Y-- -> next-slot setup
+  selectedPio->instr_mem[programOffset + 5u] =
+      (kSirithTdmMasterRxInstructions[5] & ~0x1Fu) | (nextSlotTarget & 0x1Fu);
+  // instr [7]: JMP -> inner bit loop
+  selectedPio->instr_mem[programOffset + 7u] =
+      (kSirithTdmMasterRxInstructions[7] & ~0x1Fu) | (innerLoopTarget & 0x1Fu);
 
   pio_gpio_init(selectedPio, pins_.dataIn);
   pio_gpio_init(selectedPio, pins_.bclk);
@@ -163,7 +196,8 @@ bool SirithPicoTdmSource::initPioStateMachine() {
   }
 
   pio_sm_config smCfg = pio_get_default_sm_config();
-  sm_config_set_wrap(&smCfg, programOffset + 0u, programOffset + 4u);
+  // Wrap top = instr [5] (JMP Y-- slot check): when Y=0 it falls through and wraps to [0].
+  sm_config_set_wrap(&smCfg, programOffset + 0u, programOffset + 5u);
   sm_config_set_sideset(&smCfg, 2, false, false);
   sm_config_set_sideset_pins(&smCfg, pins_.bclk);
   sm_config_set_in_pins(&smCfg, pins_.dataIn);
