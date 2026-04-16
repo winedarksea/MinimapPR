@@ -56,6 +56,7 @@ add_executable(sirith_tetrahedral
         src/SilenceAudioSource.cpp
         src/TemperatureEnvironmentalSource.cpp
         src/WiFiSupport.cpp
+        ${MMPR_AUDIO_PICO_DIR}/src/PicoI2SMonoSource.cpp
         ${MMPR_AUDIO_PICO_DIR}/src/SirithPicoTdmSource.cpp
         )
 

@@ -17,6 +17,7 @@
 #include "mmpr/NmeaGpsSource.h"
 #include "mmpr/NodeClock.h"
 #include "mmpr/NodeRunner.h"
+#include "mmpr/PicoI2SMonoSource.h"
 #include "mmpr/Sht4xEnvironmentalSource.h"
 #include "mmpr/SilenceAudioSource.h"
 #include "mmpr/SirithPicoTdmSource.h"
@@ -29,7 +30,7 @@
 
 namespace {
 
-constexpr uint8_t kMicCount = 4;
+constexpr uint8_t kTetraMicCount = 4;
 
 // --- GP27 I2C activity LED ---
 // PWM wrap gives 100 duty steps; hardware runs the carrier autonomously.
@@ -72,7 +73,7 @@ void pollActivityLed() {
   }
 }
 
-mmpr::Vec3 gSensorOffsetsOrdered[4] = {};
+mmpr::Vec3 gTetraSensorOffsetsOrdered[kTetraMicCount] = {};
 uint8_t gActiveBaseRotationSteps = static_cast<uint8_t>(nodecfg::kBasePlaneRotationSteps % 3u);
 
 mmpr::I2cBus gI2c;
@@ -130,9 +131,9 @@ uint8_t rotateBaseMic(uint8_t micIndex, uint8_t baseRotationSteps) {
 }
 
 void buildOrderedOffsetsFromSlotMap(uint8_t baseRotationSteps) {
-  for (uint8_t channel = 0; channel < kMicCount; ++channel) {
+  for (uint8_t channel = 0; channel < kTetraMicCount; ++channel) {
     uint8_t slot = nodecfg::kOutputChannelToSlot[channel];
-    if (slot >= kMicCount) {
+    if (slot >= kTetraMicCount) {
       std::printf(
           "[sirith-pico] invalid slot map outputChannelToSlot[%u]=%u, using slot 0\n",
           static_cast<unsigned>(channel),
@@ -141,7 +142,7 @@ void buildOrderedOffsetsFromSlotMap(uint8_t baseRotationSteps) {
     }
 
     uint8_t rawMicIndex = nodecfg::kSlotToPhysicalMic[slot];
-    if (rawMicIndex >= kMicCount) {
+    if (rawMicIndex >= kTetraMicCount) {
       std::printf(
           "[sirith-pico] invalid mic map slotToPhysicalMic[%u]=%u, using mic 0\n",
           static_cast<unsigned>(slot),
@@ -150,11 +151,7 @@ void buildOrderedOffsetsFromSlotMap(uint8_t baseRotationSteps) {
     }
 
     const uint8_t rotatedMicIndex = rotateBaseMic(rawMicIndex, baseRotationSteps);
-    gSensorOffsetsOrdered[channel] = mmpr::Vec3{
-        nodecfg::kPhysicalSensorOffsetsM[rotatedMicIndex][0],
-        nodecfg::kPhysicalSensorOffsetsM[rotatedMicIndex][1],
-        nodecfg::kPhysicalSensorOffsetsM[rotatedMicIndex][2],
-    };
+    gTetraSensorOffsetsOrdered[channel] = nodecfg::kPhysicalSensorOffsetsM[rotatedMicIndex];
 
     std::printf(
         "[sirith-pico] ch%u <- slot%u <- mic%u (rot=%u base=%u)\n",
@@ -166,20 +163,30 @@ void buildOrderedOffsetsFromSlotMap(uint8_t baseRotationSteps) {
   }
 }
 
+const mmpr::Vec3* selectedSensorOffsets() {
+  return nodecfg::kUseTdmAudio ? gTetraSensorOffsetsOrdered : nodecfg::kPointSensorOffsetsM;
+}
+
+size_t selectedSensorCount() {
+  return nodecfg::kUseTdmAudio
+      ? (sizeof(gTetraSensorOffsetsOrdered) / sizeof(gTetraSensorOffsetsOrdered[0]))
+      : (sizeof(nodecfg::kPointSensorOffsetsM) / sizeof(nodecfg::kPointSensorOffsetsM[0]));
+}
+
 mmpr::NodeDescriptor gNodeDescriptor = {
     nodecfg::kNodeId,
-    mmpr::NodeType::kSirithTetra,
-    {nodecfg::kNodePositionM[0], nodecfg::kNodePositionM[1], nodecfg::kNodePositionM[2]},
+    nodecfg::kNodeType,
+    nodecfg::kNodePositionM,
     nodecfg::kNodeHasFallbackGeoPosition,
     {
         nodecfg::kNodeFallbackLatitudeDeg,
         nodecfg::kNodeFallbackLongitudeDeg,
         nodecfg::kNodeFallbackAltitudeM,
     },
-    gSensorOffsetsOrdered,
-    sizeof(gSensorOffsetsOrdered) / sizeof(gSensorOffsetsOrdered[0]),
+    selectedSensorOffsets(),
+    selectedSensorCount(),
     nodecfg::kCapabilities,
-    sizeof(nodecfg::kCapabilities) / sizeof(nodecfg::kCapabilities[0]),
+    nodecfg::kCapabilityCount,
     nodecfg::kHardwareName,
     MMPR_FW_VERSION,
     nodecfg::kGpsSignalStatus,
@@ -207,16 +214,38 @@ mmpr::SirithPicoTdmConfig gTdmConfig = {
     nodecfg::kUseSafeDriveStrength,
 };
 
-mmpr::SirithPicoTdmSource gAudioSource(gTdmPins, gTdmConfig);
+mmpr::PicoI2SMonoPins gI2sMonoPins = {
+    nodecfg::kI2sMonoDataPin,
+    nodecfg::kI2sMonoBclkPin,
+    nodecfg::kI2sMonoWsPin,
+};
+
+mmpr::PicoI2SMonoConfig gI2sMonoConfig = {
+    nodecfg::kI2sMonoSampleRateHz,
+    nodecfg::kI2sMonoFrameSamples,
+    nodecfg::kI2sMonoSampleShiftBits,
+    nodecfg::kI2sMonoSlotBits,
+    nodecfg::kI2sMonoChannelSide == nodecfg::I2sMonoChannelSide::kRight
+        ? mmpr::PicoI2SChannelSide::kRight
+        : mmpr::PicoI2SChannelSide::kLeft,
+    nodecfg::kUseSafeDriveStrength,
+};
+
+mmpr::SirithPicoTdmSource gTdmAudioSource(gTdmPins, gTdmConfig);
+mmpr::PicoI2SMonoSource gI2sMonoAudioSource(gI2sMonoPins, gI2sMonoConfig);
 mmpr::SilenceAudioSource gSilenceAudioSource(
-    nodecfg::kAudioSampleRateHz,
-    nodecfg::kAudioFrameSamples,
-    kMicCount);
+    nodecfg::kActiveAudioSampleRateHz,
+    nodecfg::kActiveAudioFrameSamples,
+    nodecfg::kActiveAudioChannels);
 mmpr::HttpFramePublisher gPublisher(nodecfg::kServerBaseUrl, nodecfg::kIngestPath, nodecfg::kHttpTimeoutMs);
 mmpr::NodeClock gClock;
 
+mmpr::IAudioSource& gConfiguredAudioSource = nodecfg::kUseTdmAudio
+    ? static_cast<mmpr::IAudioSource&>(gTdmAudioSource)
+    : static_cast<mmpr::IAudioSource&>(gI2sMonoAudioSource);
+
 mmpr::IAudioSource& gSelectedAudioSource = nodecfg::kEnableExternalAudioHardware
-    ? static_cast<mmpr::IAudioSource&>(gAudioSource)
+    ? gConfiguredAudioSource
     : static_cast<mmpr::IAudioSource&>(gSilenceAudioSource);
 
 mmpr::IEnvironmentalSource* gEnvironmentalSource =
@@ -250,7 +279,8 @@ void setStatusLed(bool enabled) {
 }
 
 void setupOptionalPeripherals() {
-  const bool useI2c = nodecfg::kEnableCompassAutoOrientation ||
+  const bool useAutoOrientation = nodecfg::kUseTdmAudio && nodecfg::kEnableCompassAutoOrientation;
+  const bool useI2c = useAutoOrientation ||
       nodecfg::kEnableImuTemperature ||
       nodecfg::kEnableSht45Environment;
   bool i2cReady = false;
@@ -274,7 +304,11 @@ void setupOptionalPeripherals() {
                 nodecfg::kGpsPpsPin);
   }
 
-  if (nodecfg::kEnableCompassAutoOrientation && i2cReady) {
+  if (nodecfg::kEnableCompassAutoOrientation && !nodecfg::kUseTdmAudio) {
+    std::printf("[sirith-pico] auto-orientation ignored in mono-I2S point mode\n");
+  }
+
+  if (useAutoOrientation && i2cReady) {
     mmpr::MagAutoOrientationConfig cfg = {};
     cfg.mode = mmpr::OrientationMode::kAuto;
     cfg.sampleIntervalMs = nodecfg::kCompassSampleIntervalMs;
@@ -316,7 +350,11 @@ int main() {
   // GP27 activity LED: hardware PWM dims it to ~kActivityLedDimPercent% duty.
   setupActivityLed();
 
-  std::printf("[sirith-pico] booting\n");
+  std::printf(
+      "[sirith-pico] booting mode=%s hardware=%s channels=%u\n",
+      nodecfg::kUseTdmAudio ? "tdm4" : "i2s_mono",
+      nodecfg::kHardwareName,
+      static_cast<unsigned>(nodecfg::kActiveAudioChannels));
   if (nodecfg::kBareBoardValidationMode) {
     std::printf("[sirith-pico] bare-board validation mode enabled\n");
   }
@@ -329,7 +367,21 @@ int main() {
   }
 
   setStatusLed(true);
-  buildOrderedOffsetsFromSlotMap(gActiveBaseRotationSteps);
+  if (nodecfg::kUseTdmAudio) {
+    buildOrderedOffsetsFromSlotMap(gActiveBaseRotationSteps);
+  } else {
+    std::printf(
+        "[sirith-pico] mono-I2S point mode channel=%s offset=[0,0,0]\n",
+        nodecfg::kI2sMonoChannelSide == nodecfg::I2sMonoChannelSide::kRight ? "right" : "left");
+    if (nodecfg::kI2sMonoPinsAliasTdmPins) {
+      std::printf(
+          "[sirith-pico] warning: mono-I2S pins still alias TDM pins (data=GP%u bclk=GP%u ws=GP%u); "
+          "set board-specific I2S lane pins before using mono mode for hardware validation\n",
+          static_cast<unsigned>(nodecfg::kI2sMonoDataPin),
+          static_cast<unsigned>(nodecfg::kI2sMonoBclkPin),
+          static_cast<unsigned>(nodecfg::kI2sMonoWsPin));
+    }
+  }
   setupOptionalPeripherals();
 
   const bool wifiConnected = mmpr::connectWiFiBlocking(
@@ -363,7 +415,7 @@ int main() {
   }
 
   while (true) {
-    if (gAutoOrientationEnabled) {
+    if (nodecfg::kUseTdmAudio && gAutoOrientationEnabled) {
       uint8_t changedRotation = 0;
       if (gAutoOrientation.poll(&changedRotation)) {
         gActiveBaseRotationSteps = changedRotation;

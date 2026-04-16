@@ -2,7 +2,42 @@
 
 #include <cstdint>
 
+#include "mmpr/Types.h"
+
 namespace nodecfg {
+
+enum class AudioInputMode : uint8_t {
+  kTdm4Mic = 0,
+  kI2sMono = 1,
+};
+
+enum class I2sMonoChannelSide : uint8_t {
+  kLeft = 0,
+  kRight = 1,
+};
+
+#ifndef MMPR_NODECFG_AUDIO_INPUT_MODE
+#define MMPR_NODECFG_AUDIO_INPUT_MODE 0
+#endif
+
+#ifndef MMPR_NODECFG_I2S_MONO_CHANNEL_SIDE
+#define MMPR_NODECFG_I2S_MONO_CHANNEL_SIDE 0
+#endif
+
+static_assert(
+    MMPR_NODECFG_AUDIO_INPUT_MODE == 0 || MMPR_NODECFG_AUDIO_INPUT_MODE == 1,
+    "MMPR_NODECFG_AUDIO_INPUT_MODE must be 0 (TDM) or 1 (I2S mono)");
+static_assert(
+    MMPR_NODECFG_I2S_MONO_CHANNEL_SIDE == 0 || MMPR_NODECFG_I2S_MONO_CHANNEL_SIDE == 1,
+    "MMPR_NODECFG_I2S_MONO_CHANNEL_SIDE must be 0 (left) or 1 (right)");
+
+static constexpr AudioInputMode kAudioInputMode = (MMPR_NODECFG_AUDIO_INPUT_MODE == 1)
+    ? AudioInputMode::kI2sMono
+    : AudioInputMode::kTdm4Mic;
+static constexpr I2sMonoChannelSide kI2sMonoChannelSide = (MMPR_NODECFG_I2S_MONO_CHANNEL_SIDE == 1)
+    ? I2sMonoChannelSide::kRight
+    : I2sMonoChannelSide::kLeft;
+static constexpr bool kUseTdmAudio = kAudioInputMode == AudioInputMode::kTdm4Mic;
 
 // --- Network and backend ---
 static constexpr const char* kWifiSsid = "REPLACE_WIFI_SSID";
@@ -17,8 +52,10 @@ static constexpr uint32_t kHttpTimeoutMs = 500;
 
 // --- Node identity ---
 static constexpr const char* kNodeId = "sirith-tetra-pico2w-01";
-static constexpr const char* kNodeTypeWire = "sirith_tetra";
-static constexpr float kNodePositionM[3] = {6.0f, 0.0f, 2.0f};
+// Audio mode is expected to be chosen per board/configuration, not switched on
+// one deployed node identity at runtime.
+static constexpr mmpr::NodeType kNodeType = kUseTdmAudio ? mmpr::NodeType::kSirithTetra : mmpr::NodeType::kPoint;
+static constexpr mmpr::Vec3 kNodePositionM = {6.0f, 0.0f, 2.0f};
 static constexpr bool kNodeHasFallbackGeoPosition = true;
 static constexpr float kNodeFallbackLatitudeDeg = 44.98698840878797f;
 static constexpr float kNodeFallbackLongitudeDeg = -93.2579197515542f;
@@ -33,11 +70,15 @@ static constexpr float kNodeFallbackAltitudeM = 0.0f;
 // Mic indices: 0 = MK1, 1 = MK2, 2 = MK3 (base), 3 = MK4 (top).
 // Base-mic bearings from centroid in sensor frame:
 //   MK2 ≈ 0°,  MK1 ≈ 120°,  MK3 ≈ 240°.
-static constexpr float kPhysicalSensorOffsetsM[4][3] = {
-    {-0.016238f,  0.025000f, -0.010205f},   // MK1
-    { 0.027063f,  0.000000f, -0.010205f},   // MK2
-    {-0.016238f, -0.025000f, -0.010205f},   // MK3
-    { 0.005413f,  0.000000f,  0.030615f},   // MK4 (top)
+static constexpr mmpr::Vec3 kPhysicalSensorOffsetsM[4] = {
+    {-0.016238f,  0.025000f, -0.010205f},  // MK1
+    { 0.027063f,  0.000000f, -0.010205f},  // MK2
+    {-0.016238f, -0.025000f, -0.010205f},  // MK3
+    { 0.005413f,  0.000000f,  0.030615f},  // MK4 (top)
+};
+
+static constexpr mmpr::Vec3 kPointSensorOffsetsM[1] = {
+    {0.0f, 0.0f, 0.0f},
 };
 
 // For calibration: rotate only the base plane indexing while keeping MK4 fixed.
@@ -52,7 +93,7 @@ static constexpr uint8_t kBasePlaneRotationSteps = 0;
 //   TDM4 (slot 3) = MK3 = mic 2   (DATA2-Right, i2s2)
 static constexpr uint8_t kSlotToPhysicalMic[4] = {1, 0, 3, 2};
 
-static constexpr const char* kCapabilities[] = {
+static constexpr const char* kTdmCapabilities[] = {
     "audio",
     "array_localization",
     "gps_optional",
@@ -60,7 +101,25 @@ static constexpr const char* kCapabilities[] = {
     "humidity",
 };
 
-static constexpr const char* kHardwareName = "sirith_tetra_pico2w_tdm";
+static constexpr const char* kI2sMonoCapabilities[] = {
+    "audio",
+    "gps_optional",
+    "temperature",
+    "humidity",
+};
+
+static constexpr const char* const* kCapabilities = kUseTdmAudio ? kTdmCapabilities : kI2sMonoCapabilities;
+static constexpr size_t kCapabilityCount = kUseTdmAudio
+    ? (sizeof(kTdmCapabilities) / sizeof(kTdmCapabilities[0]))
+    : (sizeof(kI2sMonoCapabilities) / sizeof(kI2sMonoCapabilities[0]));
+
+static constexpr const char* kHardwareName = kUseTdmAudio
+    ? "sirith_tetra_pico2w_tdm"
+    : "sirith_tetra_pico2w_i2s_mono";
+static constexpr const mmpr::Vec3* kSensorOffsetsM = kUseTdmAudio ? kPhysicalSensorOffsetsM : kPointSensorOffsetsM;
+static constexpr size_t kSensorOffsetCount = kUseTdmAudio
+    ? (sizeof(kPhysicalSensorOffsetsM) / sizeof(kPhysicalSensorOffsetsM[0]))
+    : (sizeof(kPointSensorOffsetsM) / sizeof(kPointSensorOffsetsM[0]));
 
 // --- Bring-up mode ---
 // Bare-board validation avoids driving external buses so firmware can be
@@ -99,6 +158,28 @@ static constexpr uint8_t kAudioSlotBits = 32;
 // Output channel order: MK1, MK2, MK3, MK4.
 static constexpr uint8_t kOutputChannelToSlot[4] = {1, 0, 3, 2};
 static constexpr bool kUseSafeDriveStrength = true;
+
+// --- Audio capture (mono I2S master) ---
+// Mono-I2S pin routing is board-specific. These defaults intentionally mirror
+// the current audio bring-up wiring so the firmware compiles, but they do not
+// guarantee a true separate I2S lane on this PCB. Update them per board when
+// enabling kI2sMono so the selected lane matches the intended microphone path.
+static constexpr uint8_t kI2sMonoDataPin = kTdmDataPin;
+static constexpr uint8_t kI2sMonoBclkPin = kTdmBclkPin;
+static constexpr uint8_t kI2sMonoWsPin = kTdmWsPin;
+static constexpr uint32_t kI2sMonoSampleRateHz = 16000;
+static constexpr uint32_t kI2sMonoFrameSamples = 1024;
+static constexpr int32_t kI2sMonoSampleShiftBits = 16;
+static constexpr uint8_t kI2sMonoSlotBits = 32;
+static constexpr bool kI2sMonoPinsAliasTdmPins =
+    (kI2sMonoDataPin == kTdmDataPin) &&
+    (kI2sMonoBclkPin == kTdmBclkPin) &&
+    (kI2sMonoWsPin == kTdmWsPin);
+
+static constexpr uint32_t kActiveAudioSampleRateHz = kUseTdmAudio ? kAudioSampleRateHz : kI2sMonoSampleRateHz;
+static constexpr uint32_t kActiveAudioFrameSamples = kUseTdmAudio ? kAudioFrameSamples : kI2sMonoFrameSamples;
+static constexpr int32_t kActiveAudioSampleShiftBits = kUseTdmAudio ? kAudioSampleShiftBits : kI2sMonoSampleShiftBits;
+static constexpr uint8_t kActiveAudioChannels = kUseTdmAudio ? 4u : 1u;
 
 // --- Optional GPS/PPS (M10Q style) ---
 static constexpr bool kEnableGpsUart = false;
