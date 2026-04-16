@@ -107,6 +107,10 @@ class NmeaGpsSource {
   uint32_t processedPpsEdgeCount_ = 0;
   volatile uint32_t observedPpsEdgeCount_ = 0;
   volatile uint64_t latestPpsEdgeUs_ = 0;
+  bool loggedFirstSentence_ = false;
+  bool loggedHealthyState_ = false;
+  bool loggedFixState_ = false;
+  uint32_t loggedPpsEdgeCount_ = 0;
 
   static NmeaGpsSource* activeInstance_;
 };

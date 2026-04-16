@@ -312,6 +312,10 @@ async def list_nodes(
     bit_evaluator: BITReportEvaluator = state.bit_evaluator
     now_ns = time.time_ns()
     nodes = await state.storage.list_nodes(limit=limit)
+    latest_environment_rows = await state.storage.list_latest_environment_per_node(limit=limit)
+    latest_environment_by_node = {
+        row["node_id"]: row for row in latest_environment_rows if row.get("node_id") is not None
+    }
     for node in nodes:
         if node.get("position_geo") is None and node.get("position_m"):
             local = node["position_m"]
@@ -362,6 +366,10 @@ async def list_nodes(
             "rms": audio_summary["rms"],
             "status": audio_status,
         }
+
+        latest_environment = latest_environment_by_node.get(node["id"])
+        if latest_environment is not None:
+            node["latest_environment"] = latest_environment
     return nodes
 
 

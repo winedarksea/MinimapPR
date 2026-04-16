@@ -25,6 +25,10 @@ class I2cBus {
   bool writeReg(uint8_t address7Bit, uint8_t reg, uint8_t value);
 
  private:
+  // Bound each transfer so an optional peripheral cannot wedge the node if the
+  // bus is held or a device stretches forever during bring-up.
+  static constexpr uint32_t kTransferTimeoutUs = 20000;
+
   i2c_inst_t* inst_ = nullptr;
   bool initialized_ = false;
   void (*readCallback_)() = nullptr;
@@ -50,7 +54,7 @@ inline bool I2cBus::write(uint8_t address7Bit, const uint8_t* data, size_t lengt
     return false;
   }
 
-  const int written = i2c_write_blocking(inst_, address7Bit, data, length, noStop);
+  const int written = i2c_write_timeout_us(inst_, address7Bit, data, length, noStop, kTransferTimeoutUs);
   return written == static_cast<int>(length);
 }
 
@@ -59,7 +63,7 @@ inline bool I2cBus::read(uint8_t address7Bit, uint8_t* data, size_t length, bool
     return false;
   }
 
-  const int readCount = i2c_read_blocking(inst_, address7Bit, data, length, noStop);
+  const int readCount = i2c_read_timeout_us(inst_, address7Bit, data, length, noStop, kTransferTimeoutUs);
   if (readCount == static_cast<int>(length)) {
     if (readCallback_ != nullptr) {
       readCallback_();

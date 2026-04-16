@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 
 #include "pico/time.h"
 
@@ -40,6 +41,7 @@ bool Sht4xEnvironmentalSource::begin() {
   float temperatureC = 0.0f;
   float humidityFraction = 0.0f;
   if (!readMeasurement(temperatureC, humidityFraction)) {
+    std::printf("[sht4x] startup probe failed addr=0x%02x\n", config_.address7Bit);
     return false;
   }
 
@@ -68,6 +70,9 @@ bool Sht4xEnvironmentalSource::read(EnvironmentalSample& outSample) {
       hasReading_ = true;
       healthy_ = true;
     } else {
+      if (healthy_) {
+        std::printf("[sht4x] measurement failed addr=0x%02x; keeping last sample\n", config_.address7Bit);
+      }
       healthy_ = false;
       if (!hasReading_) {
         return false;

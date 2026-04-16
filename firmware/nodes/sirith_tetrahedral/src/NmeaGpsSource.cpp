@@ -72,6 +72,10 @@ bool NmeaGpsSource::begin() {
   processedPpsEdgeCount_ = 0;
   observedPpsEdgeCount_ = 0;
   latestPpsEdgeUs_ = 0;
+  loggedFirstSentence_ = false;
+  loggedHealthyState_ = false;
+  loggedFixState_ = false;
+  loggedPpsEdgeCount_ = 0;
   return true;
 }
 
@@ -123,6 +127,39 @@ void NmeaGpsSource::poll(NodeDescriptor& descriptor, NodeClock* clock) {
     hasAltitude_ = false;
     activeFixDimension_ = 0;
     activeGeoPosition_ = config_.fallbackGeoPosition;
+  }
+
+  if (haveSeenSentences_ && !loggedFirstSentence_) {
+    std::printf("[gps] received first NMEA sentence on uart\n");
+    loggedFirstSentence_ = true;
+  }
+
+  if (observedPpsEdgeCount_ > loggedPpsEdgeCount_) {
+    loggedPpsEdgeCount_ = observedPpsEdgeCount_;
+    std::printf("[gps] observed PPS edges=%u\n", static_cast<unsigned>(loggedPpsEdgeCount_));
+  }
+
+  if (healthy_ != loggedHealthyState_) {
+    loggedHealthyState_ = healthy_;
+    if (healthy_) {
+      std::printf("[gps] sentence stream healthy\n");
+    } else {
+      std::printf("[gps] sentence stream missing; using fallback position\n");
+    }
+  }
+
+  if (hasFix_ != loggedFixState_) {
+    loggedFixState_ = hasFix_;
+    if (hasFix_) {
+      std::printf(
+          "[gps] fix acquired dim=%u lat=%.6f lon=%.6f alt=%.1f\n",
+          static_cast<unsigned>(activeFixDimension_),
+          static_cast<double>(activeGeoPosition_.lat),
+          static_cast<double>(activeGeoPosition_.lon),
+          static_cast<double>(activeGeoPosition_.altM));
+    } else {
+      std::printf("[gps] no active fix; position source reverted to fallback\n");
+    }
   }
 
   updateDescriptor(descriptor);

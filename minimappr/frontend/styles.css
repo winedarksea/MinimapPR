@@ -238,10 +238,33 @@ body {
   display: grid;
   grid-template-columns: 1fr auto;
   gap: 0.35rem 0.55rem;
-  align-items: center;
+  align-items: start;
   padding: 0.45rem 0.65rem;
   border-bottom: 1px solid #e2ebe5;
   font-size: 0.79rem;
+}
+
+.node-audio-header {
+  display: flex;
+  gap: 0.45rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.node-health-chip,
+.node-gps-chip {
+  font-size: 0.68rem;
+  line-height: 1.2;
+  padding: 0.12rem 0.4rem;
+  border-radius: 999px;
+  border: 1px solid #c7d3cc;
+  background: #f3f7f4;
+  color: #415661;
+}
+
+.node-meta-block {
+  display: grid;
+  gap: 0.12rem;
 }
 
 .node-audio-meta {
