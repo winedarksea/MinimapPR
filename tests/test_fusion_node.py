@@ -199,6 +199,79 @@ async def test_fusion_backpressure_drops_when_queue_full(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+async def test_single_sensor_classification_only_detection_does_not_create_track(tmp_path: Path) -> None:
+    settings = Settings(
+        db_path=tmp_path / "fusion_single_sensor.db",
+        snippet_dir=tmp_path / "snippets",
+        snippet_retention_seconds=0,
+        trigger_rms=0.001,
+        trigger_cooldown_seconds=0.0,
+        localization_window_seconds=0.04,
+        max_sensor_buffer_seconds=2.0,
+        fusion_worker_count=1,
+    )
+    settings.db_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.snippet_dir.mkdir(parents=True, exist_ok=True)
+
+    storage = Storage(settings.db_path)
+    await storage.initialize()
+
+    fusion = FusionNode(
+        settings=settings,
+        registry=NodeRegistry(),
+        buffer=MultiSensorBuffer(max_duration_seconds=settings.max_sensor_buffer_seconds),
+        localizer=LocalizationEngine(max_tau_s=0.03),
+        classifier=HeuristicClassifier(),
+        tracker=TrackManager(settings),
+        storage=storage,
+        live_callback=lambda payload: asyncio.sleep(0, result=None),
+        coordinate_frame=LocalCoordinateFrame(origin=GeoPoint(lat=37.0, lon=-122.0, alt_m=0.0), mode="flat"),
+        zone_matcher=ZoneMatcher(storage=storage),
+    )
+    await fusion.start()
+
+    node = NodeSpec(
+        id="point-single-sensor",
+        node_type=NodeType.POINT,
+        position_m=(0.0, 0.0, 0.0),
+        sensor_offsets_m=[(0.0, 0.0, 0.0)],
+        capabilities=["audio"],
+        metadata={},
+    )
+    samples = np.random.default_rng(31415).normal(0.0, 0.2, size=(1, 1024)).astype(np.float32)
+
+    response = await fusion.ingest(
+        IngestFrameRequest(
+            node=node,
+            frame={
+                "start_time_ns": 1_739_810_250_000_000_000,
+                "sample_rate_hz": 16000,
+                "channels": 1,
+                "encoding": "pcm16le",
+                "samples_b64": encode_pcm16le_b64(samples),
+                "sequence": 1,
+            },
+        )
+    )
+
+    assert response.accepted is True
+    assert response.triggered is True
+
+    await asyncio.sleep(0.15)
+
+    detections = await storage.list_detections(limit=10)
+    assert len(detections) == 1
+    assert detections[0]["track_id"] is None
+    assert detections[0]["feature_summary"]["capability_tier"] == "classification_only"
+
+    tracks = await storage.list_tracks(limit=10)
+    assert tracks == []
+
+    await fusion.stop()
+    await storage.close()
+
+
+@pytest.mark.asyncio
 async def test_fusion_ingest_deduplicates_replayed_frame(tmp_path: Path) -> None:
     settings = Settings(
         db_path=tmp_path / "fusion_dedupe.db",

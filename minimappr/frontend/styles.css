@@ -267,6 +267,22 @@ body {
   gap: 0.12rem;
 }
 
+.node-status-summary {
+  display: flex;
+  gap: 0.28rem;
+  flex-wrap: wrap;
+}
+
+.node-status-pill {
+  font-size: 0.68rem;
+  line-height: 1.2;
+  padding: 0.12rem 0.38rem;
+  border-radius: 999px;
+  border: 1px solid #d5dfd8;
+  background: #f7faf8;
+  color: #42545f;
+}
+
 .node-audio-meta {
   color: #4e6371;
   font-size: 0.72rem;

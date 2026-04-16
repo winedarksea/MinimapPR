@@ -130,7 +130,8 @@ class DetectionAssembler:
 
         # -- track update ------------------------------------------------------
         track: TrackState | None = None
-        if not suppressed_by_zone and capability_tier != "alerting_only":
+        localizable_capability_tiers = {"2d", "full_3d"}
+        if not suppressed_by_zone and capability_tier in localizable_capability_tiers:
             track = await tracker.update(
                 timestamp_ns=event_time_ns,
                 position_m=localization_position_m,

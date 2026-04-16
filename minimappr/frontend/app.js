@@ -277,10 +277,44 @@ function formatNodeEnvironmentMeta(node) {
   return `Env ${temperatureText} | ${humidityText} | ${ageText} | ${source}`;
 }
 
+function nodeGpsSummary(node) {
+  const gps = node?.metadata?.gps || {};
+  const signal = String(gps.signal || "unknown");
+  const positionSource = String(gps.position_source || "unknown");
+  return { signal, positionSource };
+}
+
+function nodeEnvironmentSummary(node) {
+  const env = node?.latest_environment;
+  if (!env) {
+    return {
+      available: false,
+      temperatureText: "Temp -",
+      humidityText: "RH -",
+      ageText: "Env unavailable",
+    };
+  }
+
+  const temperatureValue = Number(env.temperature_c);
+  const humidityFraction = Number(env.humidity_fraction);
+  return {
+    available: Number.isFinite(temperatureValue) || Number.isFinite(humidityFraction),
+    temperatureText: Number.isFinite(temperatureValue) ? `Temp ${fmtNum(temperatureValue, 1)} C` : "Temp -",
+    humidityText: Number.isFinite(humidityFraction) ? `RH ${fmtNum(humidityFraction * 100.0, 1)}%` : "RH -",
+    ageText: env.timestamp_ns ? `Updated ${nsToAge(env.timestamp_ns)}` : "Updated -",
+  };
+}
+
 function formatNodePositionMeta(node) {
+  const local = Array.isArray(node?.position_m) ? node.position_m : null;
   const geo = node?.position_geo;
-  if (!geo) return "Geo unavailable";
-  return `Lat ${fmtNum(geo.lat, 5)} | Lon ${fmtNum(geo.lon, 5)} | Alt ${fmtNum(geo.alt_m, 1)} m`;
+  const localText = local
+    ? `Local [${fmtNum(local[0], 2)}, ${fmtNum(local[1], 2)}, ${fmtNum(local[2], 2)}] m`
+    : "Local unavailable";
+  const geoText = geo
+    ? `Geo ${fmtNum(geo.lat, 5)}, ${fmtNum(geo.lon, 5)}, ${fmtNum(geo.alt_m, 1)} m`
+    : "Geo unavailable";
+  return `${localText} | ${geoText}`;
 }
 
 function renderNodeAudioPanel() {
@@ -292,13 +326,21 @@ function renderNodeAudioPanel() {
       const activeSensorCount = Number(audioDebug.active_sensor_count || 0);
       const status = String(audioDebug.status || "no_audio");
       const disabled = status === "no_audio" ? "disabled" : "";
-      const gpsSignal = String(node?.metadata?.gps?.signal || "unknown");
+      const gps = nodeGpsSummary(node);
+      const environment = nodeEnvironmentSummary(node);
       return `<li data-node-id="${node.id}">
         <div class="node-meta-block">
           <div class="node-audio-header">
             <strong>${node.id}</strong>
             <span class="node-health-chip">${node.health_status || "unknown"}</span>
-            <span class="node-gps-chip">${gpsSignal}</span>
+            <span class="node-gps-chip">${gps.signal}</span>
+          </div>
+          <div class="node-status-summary">
+            <span class="node-status-pill">GPS ${gps.signal}</span>
+            <span class="node-status-pill">Pos ${gps.positionSource}</span>
+            <span class="node-status-pill">${environment.temperatureText}</span>
+            <span class="node-status-pill">${environment.humidityText}</span>
+            <span class="node-status-pill">${environment.ageText}</span>
           </div>
           <div class="node-audio-meta">${formatNodeGpsMeta(node)}</div>
           <div class="node-audio-meta">${formatNodePositionMeta(node)}</div>
