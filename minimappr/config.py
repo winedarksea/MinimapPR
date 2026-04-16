@@ -305,8 +305,8 @@ class Settings:
     default_temperature_c: float = 20.0
     default_humidity: float = 0.5
     environment_reading_max_age_seconds: float = 300.0
-    site_origin_lat: float = 37.7749
-    site_origin_lon: float = -122.4194
+    site_origin_lat: float = 44.98698840878797
+    site_origin_lon: float = -93.2579197515542
     site_origin_alt_m: float = 0.0
     coordinate_mode: str = "flat"
 
@@ -604,8 +604,8 @@ class Settings:
             default_temperature_c=_env_float("MINIMAPPR_DEFAULT_TEMPERATURE_C", 20.0),
             default_humidity=_env_float("MINIMAPPR_DEFAULT_HUMIDITY", 0.5),
             environment_reading_max_age_seconds=_env_float("MINIMAPPR_ENVIRONMENT_READING_MAX_AGE_SECONDS", 300.0),
-            site_origin_lat=_env_float("MINIMAPPR_SITE_ORIGIN_LAT", 37.7749),
-            site_origin_lon=_env_float("MINIMAPPR_SITE_ORIGIN_LON", -122.4194),
+            site_origin_lat=_env_float("MINIMAPPR_SITE_ORIGIN_LAT", 44.98698840878797),
+            site_origin_lon=_env_float("MINIMAPPR_SITE_ORIGIN_LON", -93.2579197515542),
             site_origin_alt_m=_env_float("MINIMAPPR_SITE_ORIGIN_ALT_M", 0.0),
             coordinate_mode=_env_str("MINIMAPPR_COORDINATE_MODE", "flat"),
             classifier_backend=_env_str("MINIMAPPR_CLASSIFIER", "yamnet"),

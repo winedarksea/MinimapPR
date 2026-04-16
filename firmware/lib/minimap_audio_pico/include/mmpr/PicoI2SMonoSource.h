@@ -44,7 +44,9 @@ class PicoI2SMonoSource final : public IAudioSource {
       AudioCaptureTimestamp* captureTimestamp = nullptr) override;
 
  private:
-  static constexpr uint32_t kBufferedFrames = 10;
+  // Keep >1 s of capture slack in mono mode so short Wi-Fi stalls do not
+  // immediately overflow the DMA ring while the main loop is publishing.
+  static constexpr uint32_t kBufferedFrames = 16;
 
   bool validateConfig() const;
   bool initPioStateMachine();

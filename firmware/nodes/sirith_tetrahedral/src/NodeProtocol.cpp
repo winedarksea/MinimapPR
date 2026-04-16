@@ -111,10 +111,10 @@ bool buildIngestPayload(
   }
 
   const size_t bytes = frame.samplesPerChannel * static_cast<size_t>(frame.channels) * sizeof(int16_t);
-  const std::string encoded = encodeBase64(reinterpret_cast<const uint8_t*>(frame.interleavedSamples), bytes);
+  const size_t encodedBytes = 4 * ((bytes + 2) / 3);
 
   outPayload.clear();
-  outPayload.reserve(640 + encoded.size());
+  outPayload.reserve(640 + encodedBytes);
 
   outPayload += "{\"node\":{";
 
@@ -204,8 +204,9 @@ bool buildIngestPayload(
 
   outPayload += ",\"encoding\":\"pcm16le\"";
 
-  outPayload += ",\"samples_b64\":";
-  appendQuoted(outPayload, encoded.c_str());
+  outPayload += ",\"samples_b64\":\"";
+  appendBase64(outPayload, reinterpret_cast<const uint8_t*>(frame.interleavedSamples), bytes);
+  outPayload += '"';
 
   outPayload += ",\"sequence\":";
   appendUint64(outPayload, frame.sequence);

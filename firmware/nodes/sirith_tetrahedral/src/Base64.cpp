@@ -10,14 +10,13 @@ constexpr char kAlphabet[] =
 
 }  // namespace
 
-std::string encodeBase64(const uint8_t* data, size_t length) {
+void appendBase64(std::string& out, const uint8_t* data, size_t length) {
   if (data == nullptr || length == 0) {
-    return std::string();
+    return;
   }
 
   const size_t outputLength = 4 * ((length + 2) / 3);
-  std::string out;
-  out.reserve(outputLength);
+  out.reserve(out.size() + outputLength);
 
   size_t index = 0;
   while (index + 3 <= length) {
@@ -49,7 +48,11 @@ std::string encodeBase64(const uint8_t* data, size_t length) {
     out.push_back(kAlphabet[(chunk >> 6) & 0x3F]);
     out.push_back('=');
   }
+}
 
+std::string encodeBase64(const uint8_t* data, size_t length) {
+  std::string out;
+  appendBase64(out, data, length);
   return out;
 }
 

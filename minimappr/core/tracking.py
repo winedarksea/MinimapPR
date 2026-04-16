@@ -197,14 +197,18 @@ class TrackManager:
             best_track.update_count += 1
             best_track.capability_tier = capability_tier
 
-            # Lifecycle: tentative -> confirmed after enough detections
+            # Lifecycle: tentative -> confirmed after enough detections.
+            # Tracks at non-localizable tiers are capped at tentative — the
+            # position is just the sensor location so "confirmed" would be
+            # misleading.
+            can_confirm = capability_tier not in {"classification_only", "alerting_only"}
             if best_track.status == TrackStatus.COASTING.value:
-                # A previously confirmed track that re-associates exits coasting as confirmed.
-                best_track.status = TrackStatus.CONFIRMED.value
+                # A previously confirmed track that re-associates exits coasting.
+                best_track.status = TrackStatus.CONFIRMED.value if can_confirm else TrackStatus.TENTATIVE.value
             elif best_track.status == TrackStatus.TENTATIVE.value:
-                if best_track.update_count >= self.CONFIRM_THRESHOLD:
+                if can_confirm and best_track.update_count >= self.CONFIRM_THRESHOLD:
                     best_track.status = TrackStatus.CONFIRMED.value
-            else:
+            elif can_confirm:
                 best_track.status = TrackStatus.CONFIRMED.value
 
             age_s = (timestamp_ns - best_track.first_seen_ns) / 1_000_000_000.0
