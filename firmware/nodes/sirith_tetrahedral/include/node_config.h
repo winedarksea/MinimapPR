@@ -55,7 +55,7 @@ enum class AudioDataPinBias : uint8_t {
 #endif
 
 #ifndef MMPR_NODECFG_TDM_CAPTURE_BIT_OFFSET
-#define MMPR_NODECFG_TDM_CAPTURE_BIT_OFFSET -1
+#define MMPR_NODECFG_TDM_CAPTURE_BIT_OFFSET 1
 #endif
 
 #ifndef MMPR_NODECFG_TDM_DATA_PIN_BIAS
@@ -239,9 +239,9 @@ static constexpr uint32_t kAudioFrameSamples = 1024;
 static constexpr uint8_t kAudioValidBits = 24;  // ADAU7112 emits 24-bit PCM in 32-bit slots.
 static constexpr uint8_t kAudioTdmSlots = 4;
 static constexpr uint8_t kAudioSlotBits = 32;
-// ADAU7112 data is launched from the falling-edge side of BCLK, so sampling on
-// the rising half-cycle is the nominal choice. The current TDM receiver needs
-// a one-bit right shift to realign the 24-bit payload within each 32-bit slot.
+// ADAU7112 TDM output typically has a 1-bit delay (I2S-style TDM). The first BCLK is High-Z,
+// followed by 24 data bits (MSB first). To align the 24-bit payload's MSB to the sign bit (bit 31)
+// of the 32-bit PIO word, a 1-bit left shift is required rather than a right shift.
 static constexpr AudioSerialSampleEdge kAudioTdmSampleEdge = kTdmSampleEdge;
 static constexpr int8_t kAudioTdmCaptureBitOffset = kTdmCaptureBitOffset;
 static constexpr AudioDataPinBias kAudioTdmDataPinBias = kTdmDataPinBias;
