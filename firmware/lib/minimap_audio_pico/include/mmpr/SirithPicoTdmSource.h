@@ -4,6 +4,7 @@
 #include <cstdint>
 
 #include "mmpr/IAudioSource.h"
+#include "mmpr/PicoSerialAudioTiming.h"
 
 namespace mmpr {
 
@@ -19,6 +20,10 @@ struct SirithPicoTdmConfig {
   uint8_t tdmSlots = 4;
   uint8_t slotBits = 32;
   uint8_t validBits = 24;
+  PicoSerialSampleEdge sampleEdge = PicoSerialSampleEdge::kRising;
+  int8_t captureBitOffset = 0;
+  PicoSerialDataPinBias dataPinBias = PicoSerialDataPinBias::kDisabled;
+  bool enableWordDiagnostics = false;
 
   // Output channel index -> TDM slot index (0-based).
   uint8_t outputChannelToSlot[4] = {0, 1, 3, 2};

@@ -31,12 +31,39 @@ namespace mmpr {
 namespace {
 
 constexpr uint32_t kPicoMaxGpio = 47;
+constexpr uint32_t kDiagnosticLogEveryFrames = 200;
 
 bool pinIsValid(uint8_t pin) {
   return pin <= kPicoMaxGpio;
 }
 
-int16_t decodeLeftJustifiedSlotToPcm16(uint32_t rawWord, uint8_t slotBits, uint8_t validBits) {
+const char* sampleEdgeName(PicoSerialSampleEdge sampleEdge) {
+  return sampleEdge == PicoSerialSampleEdge::kFalling ? "falling" : "rising";
+}
+
+const char* dataPinBiasName(PicoSerialDataPinBias dataPinBias) {
+  return dataPinBias == PicoSerialDataPinBias::kPullDown ? "pull_down" : "disabled";
+}
+
+void applyDataPinBias(uint8_t pin, PicoSerialDataPinBias dataPinBias) {
+  gpio_disable_pulls(pin);
+  if (dataPinBias == PicoSerialDataPinBias::kPullDown) {
+    gpio_pull_down(pin);
+  }
+}
+
+uint32_t applyCaptureBitOffset(uint32_t rawWord, int8_t captureBitOffset) {
+  if (captureBitOffset > 0) {
+    return rawWord << static_cast<uint8_t>(captureBitOffset);
+  }
+  if (captureBitOffset < 0) {
+    return rawWord >> static_cast<uint8_t>(-captureBitOffset);
+  }
+  return rawWord;
+}
+
+int16_t decodeLeftJustifiedSlotToPcm16(uint32_t rawWord, uint8_t slotBits, uint8_t validBits, int8_t captureBitOffset) {
+  rawWord = applyCaptureBitOffset(rawWord, captureBitOffset);
   const uint8_t paddingBits = static_cast<uint8_t>(slotBits - validBits);
   // ICS-43434 drives 24 valid I2S bits then releases SD for the remaining pad
   // clocks in the 32-bit slot. Force the pad region low so decode does not
@@ -53,6 +80,29 @@ int16_t decodeLeftJustifiedSlotToPcm16(uint32_t rawWord, uint8_t slotBits, uint8
     pcm16 = -32768;
   }
   return static_cast<int16_t>(pcm16);
+}
+
+void logI2sWordDiagnostics(const uint32_t* frameWords, const PicoI2SMonoConfig& config) {
+  static uint32_t sDiagFrameCount = 0;
+  if (!config.enableWordDiagnostics || (++sDiagFrameCount % kDiagnosticLogEveryFrames) != 0u) {
+    return;
+  }
+
+  const size_t channelWordIndex = (config.channelSide == PicoI2SChannelSide::kRight) ? 1u : 0u;
+  const uint32_t rawWord = frameWords[channelWordIndex];
+  const int16_t pcmMinusOne = decodeLeftJustifiedSlotToPcm16(rawWord, config.slotBits, config.validBits, -1);
+  const int16_t pcmNominal =
+      decodeLeftJustifiedSlotToPcm16(rawWord, config.slotBits, config.validBits, config.captureBitOffset);
+  const int16_t pcmPlusOne = decodeLeftJustifiedSlotToPcm16(rawWord, config.slotBits, config.validBits, 1);
+
+  MMPR_PICO_LOG(
+      "[pico-i2s-diag] raw=%08lX edge=%s offset=%d pcm[-1]=%d pcm[cur]=%d pcm[+1]=%d\n",
+      static_cast<unsigned long>(rawWord),
+      sampleEdgeName(config.sampleEdge),
+      static_cast<int>(config.captureBitOffset),
+      static_cast<int>(pcmMinusOne),
+      static_cast<int>(pcmNominal),
+      static_cast<int>(pcmPlusOne));
 }
 
 PicoI2SMonoSource* gActiveDmaSource = nullptr;
@@ -73,6 +123,12 @@ bool PicoI2SMonoSource::validateConfig() const {
   }
 
   if (config_.slotBits != 32 || config_.validBits == 0 || config_.validBits > config_.slotBits) {
+    return false;
+  }
+
+  const int captureBitOffset = static_cast<int>(config_.captureBitOffset);
+  if (captureBitOffset <= -static_cast<int>(config_.slotBits) ||
+      captureBitOffset >= static_cast<int>(config_.slotBits)) {
     return false;
   }
 
@@ -103,7 +159,12 @@ bool PicoI2SMonoSource::initPioStateMachine() {
     }
   }
 
-  if (!pio_can_add_program(selectedPio, &mmpr_pico_i2s_in_program)) {
+  const pio_program* selectedProgram =
+      config_.sampleEdge == PicoSerialSampleEdge::kFalling
+          ? &mmpr_pico_i2s_in_falling_program
+          : &mmpr_pico_i2s_in_program;
+
+  if (!pio_can_add_program(selectedPio, selectedProgram)) {
     pio_sm_unclaim(selectedPio, selectedSm);
     MMPR_PICO_LOG_LINE("[pico-i2s] no room for PIO I2S program");
     return false;
@@ -122,17 +183,17 @@ bool PicoI2SMonoSource::initPioStateMachine() {
     return false;
   }
 
-  const uint programOffset = pio_add_program(selectedPio, &mmpr_pico_i2s_in_program);
+  const uint programOffset = pio_add_program(selectedPio, selectedProgram);
 
   pio_gpio_init(selectedPio, pins_.dataIn);
   pio_gpio_init(selectedPio, pins_.bclk);
   pio_gpio_init(selectedPio, pins_.ws);
 
   gpio_set_dir(pins_.dataIn, GPIO_IN);
-  // Leave the serial data line unbiased. The ICS-43434 tri-states SD outside
-  // its active channel word, and forcing a pull through the level shifter can
-  // skew the driven edges we actually care about.
-  gpio_disable_pulls(pins_.dataIn);
+  // ICS-43434 tri-states SD outside its active channel word, so allow the node
+  // config to choose whether the inactive half-frame is weakly pulled down or
+  // left unbiased.
+  applyDataPinBias(pins_.dataIn, config_.dataPinBias);
 
   gpio_set_dir(pins_.bclk, GPIO_OUT);
   gpio_set_dir(pins_.ws, GPIO_OUT);
@@ -150,7 +211,9 @@ bool PicoI2SMonoSource::initPioStateMachine() {
 #endif
   }
 
-  pio_sm_config smCfg = mmpr_pico_i2s_in_program_get_default_config(programOffset);
+  pio_sm_config smCfg = config_.sampleEdge == PicoSerialSampleEdge::kFalling
+      ? mmpr_pico_i2s_in_falling_program_get_default_config(programOffset)
+      : mmpr_pico_i2s_in_program_get_default_config(programOffset);
   sm_config_set_sideset_pins(&smCfg, pins_.bclk);
   sm_config_set_in_pins(&smCfg, pins_.dataIn);
   sm_config_set_in_shift(&smCfg, false, true, config_.slotBits);
@@ -176,7 +239,7 @@ bool PicoI2SMonoSource::initPioStateMachine() {
   programInstalled_ = true;
 
   MMPR_PICO_LOG(
-      "[pico-i2s] started pio=%d sm=%d offset=%u sr=%lu bclk=%luHz ws=%luHz channel=%s valid_bits=%u\n",
+      "[pico-i2s] started pio=%d sm=%d offset=%u sr=%lu bclk=%luHz ws=%luHz channel=%s valid_bits=%u edge=%s bit_offset=%d bias=%s diag=%u\n",
       (selectedPio == pio0) ? 0 : 1,
       selectedSm,
       programOffset,
@@ -184,7 +247,11 @@ bool PicoI2SMonoSource::initPioStateMachine() {
       static_cast<unsigned long>(bitRateHz),
       static_cast<unsigned long>(config_.sampleRateHz),
       (config_.channelSide == PicoI2SChannelSide::kRight) ? "right" : "left",
-      static_cast<unsigned>(config_.validBits));
+      static_cast<unsigned>(config_.validBits),
+      sampleEdgeName(config_.sampleEdge),
+      static_cast<int>(config_.captureBitOffset),
+      dataPinBiasName(config_.dataPinBias),
+      static_cast<unsigned>(config_.enableWordDiagnostics ? 1u : 0u));
 
   return true;
 }
@@ -250,7 +317,11 @@ void PicoI2SMonoSource::deinitPioStateMachine() {
   }
 
   if (pio != nullptr && programInstalled_) {
-    pio_remove_program(pio, &mmpr_pico_i2s_in_program, offset_);
+    if (config_.sampleEdge == PicoSerialSampleEdge::kFalling) {
+      pio_remove_program(pio, &mmpr_pico_i2s_in_falling_program, offset_);
+    } else {
+      pio_remove_program(pio, &mmpr_pico_i2s_in_program, offset_);
+    }
   }
 
   gpio_put(pins_.bclk, 0);
@@ -314,7 +385,8 @@ bool PicoI2SMonoSource::begin() {
 }
 
 int16_t PicoI2SMonoSource::toPcm16(int32_t raw) const {
-  return decodeLeftJustifiedSlotToPcm16(static_cast<uint32_t>(raw), config_.slotBits, config_.validBits);
+  return decodeLeftJustifiedSlotToPcm16(
+      static_cast<uint32_t>(raw), config_.slotBits, config_.validBits, config_.captureBitOffset);
 }
 
 bool PicoI2SMonoSource::readFrame(
@@ -345,6 +417,7 @@ bool PicoI2SMonoSource::readFrame(
     }
 
     const uint32_t* frameWords = dmaFrameWords_ + (readFrameIndex * wordsPerFrame_);
+    logI2sWordDiagnostics(frameWords, config_);
     const size_t channelWordIndex = (config_.channelSide == PicoI2SChannelSide::kRight) ? 1u : 0u;
     for (size_t i = 0; i < config_.frameSamples; ++i) {
       const int32_t raw = static_cast<int32_t>(frameWords[(i * 2u) + channelWordIndex]);

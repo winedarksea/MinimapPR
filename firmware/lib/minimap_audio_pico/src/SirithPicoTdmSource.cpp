@@ -31,12 +31,39 @@ namespace mmpr {
 namespace {
 
 constexpr uint32_t kPicoMaxGpio = 47;
+constexpr uint32_t kDiagnosticLogEveryFrames = 200;
 
 bool pinIsValid(uint8_t pin) {
   return pin <= kPicoMaxGpio;
 }
 
-int16_t decodeLeftJustifiedSlotToPcm16(uint32_t rawWord, uint8_t slotBits, uint8_t validBits) {
+const char* sampleEdgeName(PicoSerialSampleEdge sampleEdge) {
+  return sampleEdge == PicoSerialSampleEdge::kFalling ? "falling" : "rising";
+}
+
+const char* dataPinBiasName(PicoSerialDataPinBias dataPinBias) {
+  return dataPinBias == PicoSerialDataPinBias::kPullDown ? "pull_down" : "disabled";
+}
+
+void applyDataPinBias(uint8_t pin, PicoSerialDataPinBias dataPinBias) {
+  gpio_disable_pulls(pin);
+  if (dataPinBias == PicoSerialDataPinBias::kPullDown) {
+    gpio_pull_down(pin);
+  }
+}
+
+uint32_t applyCaptureBitOffset(uint32_t rawWord, int8_t captureBitOffset) {
+  if (captureBitOffset > 0) {
+    return rawWord << static_cast<uint8_t>(captureBitOffset);
+  }
+  if (captureBitOffset < 0) {
+    return rawWord >> static_cast<uint8_t>(-captureBitOffset);
+  }
+  return rawWord;
+}
+
+int16_t decodeLeftJustifiedSlotToPcm16(uint32_t rawWord, uint8_t slotBits, uint8_t validBits, int8_t captureBitOffset) {
+  rawWord = applyCaptureBitOffset(rawWord, captureBitOffset);
   const uint8_t paddingBits = static_cast<uint8_t>(slotBits - validBits);
   // ADAU7112 drives 24 valid PCM bits within each 32-bit TDM slot, then SDATA
   // is no longer valid for the remaining clocks. Clamp the pad region low so
@@ -53,6 +80,36 @@ int16_t decodeLeftJustifiedSlotToPcm16(uint32_t rawWord, uint8_t slotBits, uint8
     pcm16 = -32768;
   }
   return static_cast<int16_t>(pcm16);
+}
+
+void logTdmWordDiagnostics(const uint32_t* frameWords, const SirithPicoTdmConfig& config) {
+  static uint32_t sDiagFrameCount = 0;
+  if (!config.enableWordDiagnostics || (++sDiagFrameCount % kDiagnosticLogEveryFrames) != 0u) {
+    return;
+  }
+
+  MMPR_PICO_LOG(
+      "[tdm-diag] raw[0..3]=%08lX %08lX %08lX %08lX edge=%s offset=%d\n",
+      static_cast<unsigned long>(frameWords[0]),
+      static_cast<unsigned long>(frameWords[1]),
+      static_cast<unsigned long>(frameWords[2]),
+      static_cast<unsigned long>(frameWords[3]),
+      sampleEdgeName(config.sampleEdge),
+      static_cast<int>(config.captureBitOffset));
+
+  for (uint8_t slot = 0; slot < config.tdmSlots; ++slot) {
+    const uint32_t rawWord = frameWords[slot];
+    const int16_t pcmMinusOne = decodeLeftJustifiedSlotToPcm16(rawWord, config.slotBits, config.validBits, -1);
+    const int16_t pcmNominal =
+        decodeLeftJustifiedSlotToPcm16(rawWord, config.slotBits, config.validBits, config.captureBitOffset);
+    const int16_t pcmPlusOne = decodeLeftJustifiedSlotToPcm16(rawWord, config.slotBits, config.validBits, 1);
+    MMPR_PICO_LOG(
+        "[tdm-diag] slot=%u pcm[-1]=%d pcm[cur]=%d pcm[+1]=%d\n",
+        static_cast<unsigned>(slot),
+        static_cast<int>(pcmMinusOne),
+        static_cast<int>(pcmNominal),
+        static_cast<int>(pcmPlusOne));
+  }
 }
 
 SirithPicoTdmSource* gActiveDmaSource = nullptr;
@@ -74,6 +131,12 @@ bool SirithPicoTdmSource::validateConfig() const {
 
   if (config_.tdmSlots != 4 || config_.slotBits != 32 || config_.validBits == 0 ||
       config_.validBits > config_.slotBits) {
+    return false;
+  }
+
+  const int captureBitOffset = static_cast<int>(config_.captureBitOffset);
+  if (captureBitOffset <= -static_cast<int>(config_.slotBits) ||
+      captureBitOffset >= static_cast<int>(config_.slotBits)) {
     return false;
   }
 
@@ -110,7 +173,12 @@ bool SirithPicoTdmSource::initPioStateMachine() {
     }
   }
 
-  if (!pio_can_add_program(selectedPio, &mmpr_sirith_tdm_in_program)) {
+  const pio_program* selectedProgram =
+      config_.sampleEdge == PicoSerialSampleEdge::kFalling
+          ? &mmpr_sirith_tdm_in_falling_program
+          : &mmpr_sirith_tdm_in_program;
+
+  if (!pio_can_add_program(selectedPio, selectedProgram)) {
     pio_sm_unclaim(selectedPio, selectedSm);
     MMPR_PICO_LOG_LINE("[sirith-pico] no room for PIO TDM program");
     return false;
@@ -130,17 +198,17 @@ bool SirithPicoTdmSource::initPioStateMachine() {
     return false;
   }
 
-  const uint programOffset = pio_add_program(selectedPio, &mmpr_sirith_tdm_in_program);
+  const uint programOffset = pio_add_program(selectedPio, selectedProgram);
 
   pio_gpio_init(selectedPio, pins_.dataIn);
   pio_gpio_init(selectedPio, pins_.bclk);
   pio_gpio_init(selectedPio, pins_.ws);
 
   gpio_set_dir(pins_.dataIn, GPIO_IN);
-  // ADAU7112 only drives SDATA during its active TDM slot payload. Keep the
-  // receiver input unbiased so the inactive portions of the bus do not fight
-  // the line driver or leak into the captured payload bits.
-  gpio_disable_pulls(pins_.dataIn);
+  // ADAU7112 only drives SDATA during the active portion of each TDM slot, so
+  // the node config controls whether the idle bus is weakly biased or left
+  // floating.
+  applyDataPinBias(pins_.dataIn, config_.dataPinBias);
 
   gpio_set_dir(pins_.bclk, GPIO_OUT);
   gpio_set_dir(pins_.ws, GPIO_OUT);
@@ -158,7 +226,9 @@ bool SirithPicoTdmSource::initPioStateMachine() {
 #endif
   }
 
-  pio_sm_config smCfg = mmpr_sirith_tdm_in_program_get_default_config(programOffset);
+  pio_sm_config smCfg = config_.sampleEdge == PicoSerialSampleEdge::kFalling
+      ? mmpr_sirith_tdm_in_falling_program_get_default_config(programOffset)
+      : mmpr_sirith_tdm_in_program_get_default_config(programOffset);
   sm_config_set_sideset_pins(&smCfg, pins_.bclk);
   sm_config_set_in_pins(&smCfg, pins_.dataIn);
   sm_config_set_in_shift(&smCfg, false, true, config_.slotBits);
@@ -184,14 +254,18 @@ bool SirithPicoTdmSource::initPioStateMachine() {
   programInstalled_ = true;
 
   MMPR_PICO_LOG(
-      "[sirith-pico] TDM started pio=%d sm=%d offset=%u sr=%lu bclk=%luHz ws=%luHz valid_bits=%u\n",
+      "[sirith-pico] TDM started pio=%d sm=%d offset=%u sr=%lu bclk=%luHz ws=%luHz valid_bits=%u edge=%s bit_offset=%d bias=%s diag=%u\n",
       (selectedPio == pio0) ? 0 : 1,
       selectedSm,
       programOffset,
       static_cast<unsigned long>(config_.sampleRateHz),
       static_cast<unsigned long>(bitRateHz),
       static_cast<unsigned long>(config_.sampleRateHz),
-      static_cast<unsigned>(config_.validBits));
+      static_cast<unsigned>(config_.validBits),
+      sampleEdgeName(config_.sampleEdge),
+      static_cast<int>(config_.captureBitOffset),
+      dataPinBiasName(config_.dataPinBias),
+      static_cast<unsigned>(config_.enableWordDiagnostics ? 1u : 0u));
 
   return true;
 }
@@ -257,7 +331,11 @@ void SirithPicoTdmSource::deinitPioStateMachine() {
   }
 
   if (pio != nullptr && programInstalled_) {
-    pio_remove_program(pio, &mmpr_sirith_tdm_in_program, offset_);
+    if (config_.sampleEdge == PicoSerialSampleEdge::kFalling) {
+      pio_remove_program(pio, &mmpr_sirith_tdm_in_falling_program, offset_);
+    } else {
+      pio_remove_program(pio, &mmpr_sirith_tdm_in_program, offset_);
+    }
   }
 
   gpio_put(pins_.bclk, 0);
@@ -321,7 +399,8 @@ bool SirithPicoTdmSource::begin() {
 }
 
 int16_t SirithPicoTdmSource::toPcm16(int32_t raw) const {
-  return decodeLeftJustifiedSlotToPcm16(static_cast<uint32_t>(raw), config_.slotBits, config_.validBits);
+  return decodeLeftJustifiedSlotToPcm16(
+      static_cast<uint32_t>(raw), config_.slotBits, config_.validBits, config_.captureBitOffset);
 }
 
 bool SirithPicoTdmSource::readFrame(
@@ -352,17 +431,7 @@ bool SirithPicoTdmSource::readFrame(
     }
 
     const uint32_t* frameWords = dmaFrameWords_ + (readFrameIndex * wordsPerFrame_);
-
-    {
-      static uint32_t sDiagFrameCount = 0;
-      if ((++sDiagFrameCount % 200u) == 0u) {
-        MMPR_PICO_LOG("[tdm-diag] raw[0..7]: %08lX %08lX %08lX %08lX  %08lX %08lX %08lX %08lX\n",
-            static_cast<unsigned long>(frameWords[0]), static_cast<unsigned long>(frameWords[1]),
-            static_cast<unsigned long>(frameWords[2]), static_cast<unsigned long>(frameWords[3]),
-            static_cast<unsigned long>(frameWords[4]), static_cast<unsigned long>(frameWords[5]),
-            static_cast<unsigned long>(frameWords[6]), static_cast<unsigned long>(frameWords[7]));
-      }
-    }
+    logTdmWordDiagnostics(frameWords, config_);
 
     for (size_t i = 0; i < config_.frameSamples; ++i) {
       const int32_t slotWords[4] = {

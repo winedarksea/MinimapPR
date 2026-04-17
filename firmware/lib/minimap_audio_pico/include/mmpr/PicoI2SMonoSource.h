@@ -4,6 +4,7 @@
 #include <cstdint>
 
 #include "mmpr/IAudioSource.h"
+#include "mmpr/PicoSerialAudioTiming.h"
 
 namespace mmpr {
 
@@ -24,6 +25,10 @@ struct PicoI2SMonoConfig {
   uint8_t slotBits = 32;
   uint8_t validBits = 24;
   PicoI2SChannelSide channelSide = PicoI2SChannelSide::kLeft;
+  PicoSerialSampleEdge sampleEdge = PicoSerialSampleEdge::kRising;
+  int8_t captureBitOffset = 0;
+  PicoSerialDataPinBias dataPinBias = PicoSerialDataPinBias::kPullDown;
+  bool enableWordDiagnostics = false;
   bool useSafeDriveStrength = true;
 };
 

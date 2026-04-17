@@ -42,6 +42,26 @@ constexpr uint32_t kActivityLedDimLevel =
 volatile uint32_t gActivityLastReadMs = 0;
 volatile bool gActivityPulsed = false;
 
+mmpr::PicoSerialSampleEdge toPicoSerialSampleEdge(nodecfg::AudioSerialSampleEdge sampleEdge) {
+  return sampleEdge == nodecfg::AudioSerialSampleEdge::kFalling
+      ? mmpr::PicoSerialSampleEdge::kFalling
+      : mmpr::PicoSerialSampleEdge::kRising;
+}
+
+mmpr::PicoSerialDataPinBias toPicoSerialDataPinBias(nodecfg::AudioDataPinBias dataPinBias) {
+  return dataPinBias == nodecfg::AudioDataPinBias::kPullDown
+      ? mmpr::PicoSerialDataPinBias::kPullDown
+      : mmpr::PicoSerialDataPinBias::kDisabled;
+}
+
+const char* sampleEdgeName(nodecfg::AudioSerialSampleEdge sampleEdge) {
+  return sampleEdge == nodecfg::AudioSerialSampleEdge::kFalling ? "falling" : "rising";
+}
+
+const char* dataPinBiasName(nodecfg::AudioDataPinBias dataPinBias) {
+  return dataPinBias == nodecfg::AudioDataPinBias::kPullDown ? "pull_down" : "disabled";
+}
+
 void setupActivityLed() {
   gpio_set_function(nodecfg::kActivityLedPin, GPIO_FUNC_PWM);
   const uint slice = pwm_gpio_to_slice_num(nodecfg::kActivityLedPin);
@@ -220,6 +240,10 @@ mmpr::SirithPicoTdmConfig gTdmConfig = {
     nodecfg::kAudioTdmSlots,
     nodecfg::kAudioSlotBits,
     nodecfg::kAudioValidBits,
+    toPicoSerialSampleEdge(nodecfg::kAudioTdmSampleEdge),
+    nodecfg::kAudioTdmCaptureBitOffset,
+    toPicoSerialDataPinBias(nodecfg::kAudioTdmDataPinBias),
+    nodecfg::kAudioTdmEnableWordDiagnostics,
     {
         nodecfg::kOutputChannelToSlot[0],
         nodecfg::kOutputChannelToSlot[1],
@@ -243,6 +267,10 @@ mmpr::PicoI2SMonoConfig gI2sMonoConfig = {
     nodecfg::kI2sMonoChannelSide == nodecfg::I2sMonoChannelSide::kRight
         ? mmpr::PicoI2SChannelSide::kRight
         : mmpr::PicoI2SChannelSide::kLeft,
+    toPicoSerialSampleEdge(nodecfg::kAudioI2sMonoSampleEdge),
+    nodecfg::kAudioI2sMonoCaptureBitOffset,
+    toPicoSerialDataPinBias(nodecfg::kAudioI2sMonoDataPinBias),
+    nodecfg::kAudioI2sMonoEnableWordDiagnostics,
     nodecfg::kUseSafeDriveStrength,
 };
 
@@ -386,10 +414,20 @@ int main() {
   setStatusLed(true);
   if (nodecfg::kUseTdmAudio) {
     buildOrderedOffsetsFromSlotMap(gActiveBaseRotationSteps);
+    std::printf(
+        "[sirith-pico] tdm timing edge=%s bit_offset=%d bias=%s diag=%u\n",
+        sampleEdgeName(nodecfg::kAudioTdmSampleEdge),
+        static_cast<int>(nodecfg::kAudioTdmCaptureBitOffset),
+        dataPinBiasName(nodecfg::kAudioTdmDataPinBias),
+        static_cast<unsigned>(nodecfg::kAudioTdmEnableWordDiagnostics ? 1u : 0u));
   } else {
     std::printf(
-        "[sirith-pico] mono-I2S point mode channel=%s offset=[0,0,0]\n",
-        nodecfg::kI2sMonoChannelSide == nodecfg::I2sMonoChannelSide::kRight ? "right" : "left");
+        "[sirith-pico] mono-I2S point mode channel=%s offset=[0,0,0] edge=%s bit_offset=%d bias=%s diag=%u\n",
+        nodecfg::kI2sMonoChannelSide == nodecfg::I2sMonoChannelSide::kRight ? "right" : "left",
+        sampleEdgeName(nodecfg::kAudioI2sMonoSampleEdge),
+        static_cast<int>(nodecfg::kAudioI2sMonoCaptureBitOffset),
+        dataPinBiasName(nodecfg::kAudioI2sMonoDataPinBias),
+        static_cast<unsigned>(nodecfg::kAudioI2sMonoEnableWordDiagnostics ? 1u : 0u));
     if (nodecfg::kI2sMonoPinsAliasTdmPins) {
       std::printf(
           "[sirith-pico] warning: mono-I2S pins still alias TDM pins (data=GP%u bclk=GP%u ws=GP%u); "

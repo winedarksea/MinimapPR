@@ -19,6 +19,27 @@ right_channel:
 .wrap
 
 
+.program mmpr_pico_i2s_in_falling
+.side_set 2
+
+; Stereo I2S input with the same LRCLK framing as above, but sampled on the
+; opposite BCLK half-cycle. This lets the firmware choose the edge that matches
+; the board-level data path without changing the PCM decode path.
+
+.wrap_target
+    mov x, y         side 0b01
+left_channel:
+    in pins, 1       side 0b00
+    jmp x--, left_channel side 0b01
+    in pins, 1       side 0b00
+    mov x, y         side 0b11
+right_channel:
+    in pins, 1       side 0b10
+    jmp x--, right_channel side 0b11
+    in pins, 1       side 0b10
+.wrap
+
+
 .program mmpr_sirith_tdm_in
 .side_set 2
 
@@ -34,4 +55,21 @@ right_channel:
 frame_bits:
     in pins, 1       side 0b01
     jmp x--, frame_bits side 0b00
+.wrap
+
+
+.program mmpr_sirith_tdm_in_falling
+.side_set 2
+
+; Four-slot TDM input for the ADAU7112, sampled on the opposite BCLK
+; half-cycle from mmpr_sirith_tdm_in so the firmware can select the cleaner
+; edge on real hardware.
+
+.wrap_target
+    mov x, y         side 0b11
+    in pins, 1       side 0b10
+    jmp x--, frame_bits side 0b01
+frame_bits:
+    in pins, 1       side 0b00
+    jmp x--, frame_bits side 0b01
 .wrap
