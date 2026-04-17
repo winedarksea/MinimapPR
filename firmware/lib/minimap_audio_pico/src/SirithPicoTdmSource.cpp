@@ -57,7 +57,9 @@ uint32_t applyCaptureBitOffset(uint32_t rawWord, int8_t captureBitOffset) {
     return rawWord << static_cast<uint8_t>(captureBitOffset);
   }
   if (captureBitOffset < 0) {
-    return rawWord >> static_cast<uint8_t>(-captureBitOffset);
+    // Right-shifting a left-justified PCM word must preserve the sign bit.
+    return static_cast<uint32_t>(
+        static_cast<int32_t>(rawWord) >> static_cast<uint8_t>(-captureBitOffset));
   }
   return rawWord;
 }
