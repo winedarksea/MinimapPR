@@ -24,7 +24,11 @@ def create_classifier(settings: Settings) -> AudioClassifier:
     yamnet_active = False
     if backend == "yamnet":
         try:
-            base_classifier = YAMNetClassifier(min_confidence=settings.yamnet_min_confidence)
+            base_classifier = YAMNetClassifier(
+                min_confidence=settings.yamnet_min_confidence,
+                target_rms=settings.yamnet_input_target_rms,
+                max_input_gain=settings.yamnet_max_input_gain,
+            )
             yamnet_active = True
         except Exception as exc:  # pragma: no cover - optional runtime backend
             logger.warning("YAMNet unavailable (%s). Falling back to heuristic classifier.", exc)
@@ -74,7 +78,11 @@ def _build_stage(raw: dict[str, Any], settings: Settings) -> ChainStage | None:
     classifier: AudioClassifier
     if backend == "yamnet":
         try:
-            classifier = YAMNetClassifier(min_confidence=settings.yamnet_min_confidence)
+            classifier = YAMNetClassifier(
+                min_confidence=settings.yamnet_min_confidence,
+                target_rms=settings.yamnet_input_target_rms,
+                max_input_gain=settings.yamnet_max_input_gain,
+            )
         except Exception:
             return None
     elif backend == "birdnet":

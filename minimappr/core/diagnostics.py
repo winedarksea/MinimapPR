@@ -62,6 +62,8 @@ class DiagnosticsService:
                 "sensor_energy_threshold_multiplier": self._settings.sensor_energy_threshold_multiplier,
                 "fallback_localization_confidence": self._settings.fallback_localization_confidence,
                 "yamnet_min_confidence": self._settings.yamnet_min_confidence,
+                "yamnet_input_target_rms": self._settings.yamnet_input_target_rms,
+                "yamnet_max_input_gain": self._settings.yamnet_max_input_gain,
                 "birdnet_trigger_min_confidence": self._settings.birdnet_trigger_min_confidence,
             },
             "queues": {

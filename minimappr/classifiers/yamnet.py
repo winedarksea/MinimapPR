@@ -20,6 +20,38 @@ logger = logging.getLogger(__name__)
 # Local fallback path for the class map so the server starts offline after the
 # first successful fetch.  Relative to CWD (the project root when run normally).
 _CLASS_MAP_CACHE_PATH = Path("data/yamnet_class_map.csv")
+_YAMNET_TARGET_RMS = 0.10
+_YAMNET_MAX_INPUT_GAIN = 32.0
+_EPSILON = 1e-12
+
+
+def _prepare_waveform_for_yamnet(
+    waveform: np.ndarray,
+    *,
+    target_rms: float = _YAMNET_TARGET_RMS,
+    max_input_gain: float = _YAMNET_MAX_INPUT_GAIN,
+) -> np.ndarray:
+    """Normalize low-level waveforms so YAMNet sees stable input energy.
+
+    YAMNet can over-predict "Silence" when valid events are well below typical
+    training loudness. We keep this conditioning conservative by only boosting
+    when RMS is low, capping the gain, and preserving peak headroom.
+    """
+    if waveform.size == 0:
+        return waveform.astype(np.float32, copy=False)
+
+    centered = waveform.astype(np.float32, copy=False) - np.mean(waveform, dtype=np.float32)
+    rms = float(np.sqrt(np.mean(np.square(centered), dtype=np.float64) + _EPSILON))
+    peak = float(np.max(np.abs(centered)) + _EPSILON)
+
+    # Gain floor is 1.0 so we avoid attenuating normal signals unless headroom
+    # would otherwise clip after prior preprocessing.
+    gain_from_rms = max(1.0, float(target_rms) / max(rms, _EPSILON))
+    gain_from_headroom = 0.98 / peak
+    gain = min(float(max_input_gain), gain_from_rms, gain_from_headroom)
+    gain = max(gain, min(1.0, gain_from_headroom))
+
+    return (centered * gain).astype(np.float32)
 
 
 class YAMNetClassifier(AudioClassifier):
@@ -28,7 +60,13 @@ class YAMNetClassifier(AudioClassifier):
         "research/audioset/yamnet/yamnet_class_map.csv"
     )
 
-    def __init__(self, min_confidence: float = 0.25) -> None:
+    def __init__(
+        self,
+        min_confidence: float = 0.25,
+        *,
+        target_rms: float = _YAMNET_TARGET_RMS,
+        max_input_gain: float = _YAMNET_MAX_INPUT_GAIN,
+    ) -> None:
         try:
             import tensorflow as tf
             import tensorflow_hub as hub
@@ -40,11 +78,18 @@ class YAMNetClassifier(AudioClassifier):
         self._model = hub.load("https://tfhub.dev/google/yamnet/1")
         self._class_names = self._load_class_names()
         self._min_confidence = min_confidence
+        self._target_rms = float(target_rms)
+        self._max_input_gain = float(max_input_gain)
 
     def classify(self, samples: np.ndarray, sample_rate_hz: int) -> ClassificationResult:
         waveform = samples.astype(np.float32)
         if sample_rate_hz != 16000:
             waveform = resample_poly(waveform, up=16000, down=sample_rate_hz).astype(np.float32)
+        waveform = _prepare_waveform_for_yamnet(
+            waveform,
+            target_rms=self._target_rms,
+            max_input_gain=self._max_input_gain,
+        )
 
         scores, _, _ = self._model(waveform)
         mean_scores = np.mean(scores.numpy(), axis=0)

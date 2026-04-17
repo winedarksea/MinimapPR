@@ -914,6 +914,25 @@ class TestIngestGainValidation:
             Settings(ingest_gain_multiplier=float("nan"))
 
 
+class TestYamnetConditioningSettings:
+    def test_settings_reject_non_positive_yamnet_target_rms(self) -> None:
+        with pytest.raises(ValueError, match="MINIMAPPR_YAMNET_INPUT_TARGET_RMS"):
+            Settings(yamnet_input_target_rms=0.0)
+
+    def test_settings_reject_non_positive_yamnet_max_input_gain(self) -> None:
+        with pytest.raises(ValueError, match="MINIMAPPR_YAMNET_MAX_INPUT_GAIN"):
+            Settings(yamnet_max_input_gain=0.0)
+
+    def test_settings_from_env_reads_yamnet_conditioning_knobs(self, monkeypatch) -> None:
+        monkeypatch.setenv("MINIMAPPR_YAMNET_INPUT_TARGET_RMS", "0.18")
+        monkeypatch.setenv("MINIMAPPR_YAMNET_MAX_INPUT_GAIN", "14.0")
+
+        settings = Settings.from_env()
+
+        assert settings.yamnet_input_target_rms == pytest.approx(0.18)
+        assert settings.yamnet_max_input_gain == pytest.approx(14.0)
+
+
 class TestPreprocessingRegistry:
     """Test the stage registry and build_preprocessing_chain."""
 

@@ -83,31 +83,42 @@
           <ul id="nodeAudioList"></ul>
         </section>
 
-        <section class="subpanel track-panel">
-          <h2>Track Table</h2>
-          <table>
-            <thead>
-              <tr>
-                <th data-sort="id">Track</th>
-                <th data-sort="label">Label</th>
-                <th data-sort="label_category">Category</th>
-                <th data-sort="status">Status</th>
-                <th data-sort="tqi">TQI</th>
-                <th data-sort="last_seen_ns">Last Seen</th>
-              </tr>
-            </thead>
-            <tbody id="tracksTable"></tbody>
-          </table>
+        <section class="subpanel settings-panel">
+          <h2>Runtime Settings</h2>
+          <dl id="settingsGrid" class="settings-grid"></dl>
         </section>
 
-        <section class="subpanel feed-panel">
-          <h2>Detection Feed</h2>
-          <ul id="detectionFeed"></ul>
-        </section>
+        <section class="side-data-grid">
+          <section class="subpanel track-panel">
+            <h2>Track Table</h2>
+            <div class="track-table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th data-sort="id">Track</th>
+                    <th data-sort="label">Label</th>
+                    <th data-sort="label_category">Category</th>
+                    <th data-sort="status">Status</th>
+                    <th data-sort="tqi">TQI</th>
+                    <th data-sort="last_seen_ns">Last Seen</th>
+                  </tr>
+                </thead>
+                <tbody id="tracksTable"></tbody>
+              </table>
+            </div>
+          </section>
 
-        <section class="subpanel alert-panel">
-          <h2>Alert Feed</h2>
-          <ul id="alertFeed"></ul>
+          <section class="feed-stack">
+            <section class="subpanel feed-panel">
+              <h2>Detection Feed</h2>
+              <ul id="detectionFeed"></ul>
+            </section>
+
+            <section class="subpanel alert-panel">
+              <h2>Alert Feed</h2>
+              <ul id="alertFeed"></ul>
+            </section>
+          </section>
         </section>
       </section>
     </main>

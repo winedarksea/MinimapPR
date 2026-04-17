@@ -4,11 +4,13 @@ import sys
 import types
 
 import numpy as np
+import pytest
 
 from minimappr.classifiers.base import AudioClassifier
 from minimappr.classifiers.chaining import ChainStage, ChainedClassifier
 from minimappr.classifiers import factory
 from minimappr.classifiers.heuristic import HeuristicClassifier
+from minimappr.classifiers.yamnet import _prepare_waveform_for_yamnet
 from minimappr.config import Settings
 from minimappr.models import ClassificationResult
 
@@ -121,3 +123,75 @@ def test_default_yamnet_to_birdnet_chain_uses_recall_biased_threshold(monkeypatc
     assert len(stages) == 1
     assert stages[0].stage_id == "birdnet_species"
     assert stages[0].min_confidence == 0.05
+
+
+def test_prepare_waveform_for_yamnet_boosts_low_level_audio() -> None:
+    sample_rate_hz = 16_000
+    t = np.arange(sample_rate_hz, dtype=np.float32) / sample_rate_hz
+    low_level_tone = 0.0015 * np.sin(2.0 * np.pi * 440.0 * t)
+
+    conditioned = _prepare_waveform_for_yamnet(low_level_tone)
+
+    input_rms = float(np.sqrt(np.mean(np.square(low_level_tone), dtype=np.float64)))
+    output_rms = float(np.sqrt(np.mean(np.square(conditioned), dtype=np.float64)))
+    assert output_rms > (input_rms * 10.0)
+    assert np.max(np.abs(conditioned)) <= 1.0
+
+
+def test_prepare_waveform_for_yamnet_preserves_headroom_for_hot_audio() -> None:
+    sample_rate_hz = 16_000
+    t = np.arange(sample_rate_hz, dtype=np.float32) / sample_rate_hz
+    hot_tone = 0.95 * np.sin(2.0 * np.pi * 880.0 * t)
+
+    conditioned = _prepare_waveform_for_yamnet(hot_tone)
+
+    assert np.max(np.abs(conditioned)) <= 0.981
+    assert np.max(np.abs(conditioned)) >= 0.90
+
+
+def test_prepare_waveform_for_yamnet_respects_max_input_gain_cap() -> None:
+    sample_rate_hz = 16_000
+    t = np.arange(sample_rate_hz, dtype=np.float32) / sample_rate_hz
+    low_level_tone = 0.001 * np.sin(2.0 * np.pi * 440.0 * t)
+
+    conditioned = _prepare_waveform_for_yamnet(low_level_tone, target_rms=0.5, max_input_gain=4.0)
+
+    input_rms = float(np.sqrt(np.mean(np.square(low_level_tone), dtype=np.float64)))
+    output_rms = float(np.sqrt(np.mean(np.square(conditioned), dtype=np.float64)))
+    assert output_rms / input_rms <= 4.05
+
+
+def test_create_classifier_passes_yamnet_conditioning_settings(monkeypatch, tmp_path) -> None:
+    captured: dict[str, float] = {}
+
+    class _StubYAMNetClassifier(AudioClassifier):
+        def __init__(
+            self,
+            min_confidence: float = 0.25,
+            *,
+            target_rms: float = 0.10,
+            max_input_gain: float = 32.0,
+        ) -> None:
+            captured["min_confidence"] = min_confidence
+            captured["target_rms"] = target_rms
+            captured["max_input_gain"] = max_input_gain
+
+        def classify(self, samples: np.ndarray, sample_rate_hz: int) -> ClassificationResult:
+            del samples, sample_rate_hz
+            return ClassificationResult(label="unknown", confidence=0.0, scores={})
+
+    monkeypatch.setattr(factory, "YAMNetClassifier", _StubYAMNetClassifier)
+
+    settings = Settings(
+        classifier_backend="yamnet",
+        yamnet_min_confidence=0.31,
+        yamnet_input_target_rms=0.22,
+        yamnet_max_input_gain=11.0,
+        model_chain_config_path=tmp_path / "missing_model_chain.json",
+    )
+
+    _ = factory.create_classifier(settings)
+
+    assert captured["min_confidence"] == pytest.approx(0.31)
+    assert captured["target_rms"] == pytest.approx(0.22)
+    assert captured["max_input_gain"] == pytest.approx(11.0)

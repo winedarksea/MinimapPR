@@ -120,6 +120,8 @@ def test_debug_endpoints_expose_runtime_and_event_provenance(monkeypatch, tmp_pa
         assert config_response.status_code == 200
         config_body = config_response.json()
         assert config_body["runtime"]["classifier"]["requested_backend"] == "yamnet"
+        assert "yamnet_input_target_rms" in config_body["thresholds"]
+        assert "yamnet_max_input_gain" in config_body["thresholds"]
         assert "python_version" in config_body["runtime"]
 
         selftest_response = client.get("/api/v1/debug/selftest")

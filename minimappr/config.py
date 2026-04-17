@@ -111,6 +111,8 @@ class TrackingConfig:
 class ClassifierConfig:
     backend: str
     yamnet_min_confidence: float
+    yamnet_input_target_rms: float
+    yamnet_max_input_gain: float
     birdnet_trigger_min_confidence: float
     heuristic_ambient_rms_threshold: float
     heuristic_impulse_crest_threshold: float
@@ -315,6 +317,8 @@ class Settings:
 
     classifier_backend: str = "yamnet"
     yamnet_min_confidence: float = 0.25
+    yamnet_input_target_rms: float = 0.10
+    yamnet_max_input_gain: float = 32.0
     birdnet_trigger_min_confidence: float = 0.05
     heuristic_ambient_rms_threshold: float = 0.01
     heuristic_impulse_crest_threshold: float = 10.0
@@ -470,6 +474,10 @@ class Settings:
             raise ValueError("MINIMAPPR_RETENTION_LONG_SECURITY_CONFIDENCE must be in [0,1]")
         if self.yamnet_min_confidence < 0.0 or self.yamnet_min_confidence > 1.0:
             raise ValueError("MINIMAPPR_YAMNET_MIN_CONFIDENCE must be in [0,1]")
+        if not math.isfinite(self.yamnet_input_target_rms) or self.yamnet_input_target_rms <= 0.0:
+            raise ValueError("MINIMAPPR_YAMNET_INPUT_TARGET_RMS must be finite and > 0")
+        if not math.isfinite(self.yamnet_max_input_gain) or self.yamnet_max_input_gain <= 0.0:
+            raise ValueError("MINIMAPPR_YAMNET_MAX_INPUT_GAIN must be finite and > 0")
         if self.birdnet_trigger_min_confidence < 0.0 or self.birdnet_trigger_min_confidence > 1.0:
             raise ValueError("MINIMAPPR_BIRDNET_TRIGGER_MIN_CONFIDENCE must be in [0,1]")
 
@@ -568,12 +576,12 @@ class Settings:
                 ("http://localhost:8080", "http://127.0.0.1:8080"),
             ),
             cors_allow_credentials=_env_bool("MINIMAPPR_CORS_ALLOW_CREDENTIALS", False),
-            trigger_rms=_env_float("MINIMAPPR_TRIGGER_RMS", 0.015),
+            trigger_rms=_env_float("MINIMAPPR_TRIGGER_RMS", 0.001),
             trigger_cooldown_seconds=_env_float("MINIMAPPR_TRIGGER_COOLDOWN_SECONDS", 0.8),
             localization_window_seconds=_env_float("MINIMAPPR_LOCALIZATION_WINDOW_SECONDS", 0.08),
             max_sensor_buffer_seconds=_env_float("MINIMAPPR_MAX_SENSOR_BUFFER_SECONDS", 8.0),
             preprocess_enabled=_env_bool("MINIMAPPR_PREPROCESS_ENABLED", True),
-            ingest_gain_multiplier=_env_float("MINIMAPPR_INGEST_GAIN_MULTIPLIER", 1.0),
+            ingest_gain_multiplier=_env_float("MINIMAPPR_INGEST_GAIN_MULTIPLIER", 4.0),
             audio_highpass_hz=_env_float("MINIMAPPR_AUDIO_HIGHPASS_HZ", 50.0),
             audio_lowpass_hz=_env_float("MINIMAPPR_AUDIO_LOWPASS_HZ", 0.0),
             min_sensors_for_3d=_env_int("MINIMAPPR_MIN_SENSORS_FOR_3D", 4),
@@ -616,6 +624,8 @@ class Settings:
             coordinate_mode=_env_str("MINIMAPPR_COORDINATE_MODE", "flat"),
             classifier_backend=_env_str("MINIMAPPR_CLASSIFIER", "yamnet"),
             yamnet_min_confidence=_env_float("MINIMAPPR_YAMNET_MIN_CONFIDENCE", 0.25),
+            yamnet_input_target_rms=_env_float("MINIMAPPR_YAMNET_INPUT_TARGET_RMS", 0.10),
+            yamnet_max_input_gain=_env_float("MINIMAPPR_YAMNET_MAX_INPUT_GAIN", 32.0),
             birdnet_trigger_min_confidence=_env_float("MINIMAPPR_BIRDNET_TRIGGER_MIN_CONFIDENCE", 0.05),
             heuristic_ambient_rms_threshold=_env_float("MINIMAPPR_HEURISTIC_AMBIENT_RMS_THRESHOLD", 0.01),
             heuristic_impulse_crest_threshold=_env_float("MINIMAPPR_HEURISTIC_IMPULSE_CREST_THRESHOLD", 10.0),
@@ -759,6 +769,8 @@ class Settings:
         return ClassifierConfig(
             backend=self.classifier_backend,
             yamnet_min_confidence=self.yamnet_min_confidence,
+            yamnet_input_target_rms=self.yamnet_input_target_rms,
+            yamnet_max_input_gain=self.yamnet_max_input_gain,
             birdnet_trigger_min_confidence=self.birdnet_trigger_min_confidence,
             heuristic_ambient_rms_threshold=self.heuristic_ambient_rms_threshold,
             heuristic_impulse_crest_threshold=self.heuristic_impulse_crest_threshold,

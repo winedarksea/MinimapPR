@@ -97,13 +97,20 @@ class ClassificationOrchestrator:
         event_time_ns: int,
     ) -> ClassifiedResult:
         """Run classification pipeline and return the best result with taxonomy."""
+        omni_signal = reference_signal
+        if self._classification_preprocessor is not None:
+            omni_signal = self._classification_preprocessor.process(
+                omni_signal,
+                sample_rate_hz,
+            )
+
         omni_classification = await asyncio.to_thread(
             self._classifier.classify,
-            reference_signal,
+            omni_signal,
             sample_rate_hz,
         )
         classification = omni_classification
-        classification_signal = reference_signal
+        classification_signal = omni_signal
         classification_path = "omni"
         beamformed_classification: ClassificationResult | None = None
         beamforming_error: str | None = None

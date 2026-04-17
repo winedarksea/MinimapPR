@@ -20,6 +20,7 @@ const recentAlertsEl = document.getElementById("recentAlerts");
 const tracksTableEl = document.getElementById("tracksTable");
 const detectionFeedEl = document.getElementById("detectionFeed");
 const alertFeedEl = document.getElementById("alertFeed");
+const settingsGridEl = document.getElementById("settingsGrid");
 const alertToastContainerEl = document.getElementById("alertToastContainer");
 const audioPlayerEl = document.getElementById("audioPlayer");
 const nodeAudioListEl = document.getElementById("nodeAudioList");
@@ -222,6 +223,59 @@ function renderTrackTable() {
       focusTrack(trackId);
     });
   });
+}
+
+function formatSettingValue(value) {
+  if (value === null || value === undefined) return "-";
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return "-";
+    return Number.isInteger(value) ? String(value) : value.toFixed(3).replace(/\.0+$/, "").replace(/(\.\d*[1-9])0+$/, "$1");
+  }
+  return String(value);
+}
+
+function pickConfig(path, fallback = null) {
+  const keys = path.split(".");
+  let current = state.config;
+  for (const key of keys) {
+    if (current == null || typeof current !== "object") return fallback;
+    current = current[key];
+  }
+  return current ?? fallback;
+}
+
+function renderSettingsPanel() {
+  if (!settingsGridEl) return;
+  if (!state.config) {
+    settingsGridEl.innerHTML = "<div><dt>Status</dt><dd>Loading</dd></div>";
+    return;
+  }
+
+  const settingsToDisplay = [
+    ["Trigger RMS", "trigger_rms"],
+    ["Trigger Cooldown (s)", "trigger_cooldown_seconds"],
+    ["Localization Window (s)", "localization_window_seconds"],
+    ["Preprocess Enabled", "preprocess_enabled"],
+    ["Highpass (Hz)", "audio_highpass_hz"],
+    ["Lowpass (Hz)", "audio_lowpass_hz"],
+    ["Classifier", "classifier_backend"],
+    ["YAMNet Min Confidence", "yamnet_min_confidence"],
+    ["YAMNet Target RMS", "yamnet_input_target_rms"],
+    ["YAMNet Max Input Gain", "yamnet_max_input_gain"],
+    ["Beamformer", "beamformer_type"],
+    ["Tracking Filter", "tracking_filter"],
+    ["Fusion Workers", "fusion_worker_count"],
+    ["Coordinate Mode", "coordinate_mode"],
+    ["Federation Enabled", "federation.enabled"],
+  ];
+
+  settingsGridEl.innerHTML = settingsToDisplay
+    .map(([label, path]) => {
+      const value = formatSettingValue(pickConfig(path));
+      return `<div><dt>${label}</dt><dd>${value}</dd></div>`;
+    })
+    .join("");
 }
 
 function playDetectionSnippet(detectionId) {
@@ -591,6 +645,7 @@ function renderMap() {
 function renderAll() {
   renderSystemStatus();
   renderNodeAudioPanel();
+  renderSettingsPanel();
   renderTrackTable();
   renderDetectionFeed();
   renderMap();
