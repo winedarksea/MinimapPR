@@ -354,10 +354,13 @@ def test_node_recent_audio_endpoint_can_render_single_channel(monkeypatch, tmp_p
 
         assert mix_response.status_code == 200
         assert mix_response.headers["x-minimappr-rendered-channel"] == "mix"
+        assert mix_response.headers["x-minimappr-render-mode"] == "auto_mix"
         assert channel0_response.status_code == 200
         assert channel0_response.headers["x-minimappr-rendered-channel"] == "0"
+        assert channel0_response.headers["x-minimappr-render-mode"] == "single_channel"
         assert channel1_response.status_code == 200
         assert channel1_response.headers["x-minimappr-rendered-channel"] == "1"
+        assert channel1_response.headers["x-minimappr-render-mode"] == "single_channel"
 
         mix_pcm = _read_pcm_mono(mix_response.content)
         channel0_pcm = _read_pcm_mono(channel0_response.content)
@@ -374,6 +377,91 @@ def test_node_recent_audio_endpoint_can_render_single_channel(monkeypatch, tmp_p
             params={"seconds": 10, "channel": 2},
         )
         assert missing_channel.status_code == 404
+
+
+def test_node_recent_audio_endpoint_defaults_array_nodes_to_first_channel(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+
+    channels = np.vstack(
+        [
+            np.linspace(-0.9, 0.9, 1024, dtype=np.float32),
+            (0.25 * np.sin(np.linspace(0.0, 8.0 * np.pi, 1024, dtype=np.float32))).astype(np.float32),
+            (0.2 * np.cos(np.linspace(0.0, 11.0 * np.pi, 1024, dtype=np.float32))).astype(np.float32),
+            np.full(1024, 0.05, dtype=np.float32),
+        ]
+    )
+    payload = {
+        "node": {
+            "id": "http-node-array",
+            "node_type": "sirith_tetra",
+            "position_m": [0.0, 0.0, 0.0],
+            "sensor_offsets_m": [
+                [0.0, 0.0, 0.0],
+                [0.05, 0.0, 0.0],
+                [0.0, 0.05, 0.0],
+                [0.0, 0.0, 0.05],
+            ],
+            "capabilities": ["audio", "array_localization"],
+            "metadata": {},
+            "properties": {},
+        },
+        "frame": {
+            "start_time_ns": time.time_ns(),
+            "sample_rate_hz": 16000,
+            "channels": 4,
+            "encoding": "pcm16le",
+            "samples_b64": encode_pcm16le_b64(channels),
+            "sequence": 1,
+            "source_type": "raw_sensor",
+        },
+    }
+
+    def _read_pcm_channels(wav_bytes: bytes) -> np.ndarray:
+        with wave.open(io.BytesIO(wav_bytes), "rb") as wav:
+            channel_count = wav.getnchannels()
+            assert wav.getframerate() == 16000
+            pcm = np.frombuffer(wav.readframes(wav.getnframes()), dtype="<i2")
+        return pcm.reshape(-1, channel_count).T
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/ingest/frame", json=payload)
+        assert response.status_code == 200
+
+        auto_response = client.get("/api/v1/nodes/http-node-array/audio/recent", params={"seconds": 10})
+        mix_response = client.get(
+            "/api/v1/nodes/http-node-array/audio/recent",
+            params={"seconds": 10, "render": "mix"},
+        )
+        multichannel_response = client.get(
+            "/api/v1/nodes/http-node-array/audio/recent",
+            params={"seconds": 10, "render": "multichannel"},
+        )
+        channel0_response = client.get(
+            "/api/v1/nodes/http-node-array/audio/recent",
+            params={"seconds": 10, "channel": 0},
+        )
+
+        assert auto_response.status_code == 200
+        assert auto_response.headers["x-minimappr-rendered-channel"] == "0"
+        assert auto_response.headers["x-minimappr-render-mode"] == "auto_first_channel"
+        assert mix_response.status_code == 200
+        assert mix_response.headers["x-minimappr-rendered-channel"] == "mix"
+        assert mix_response.headers["x-minimappr-render-mode"] == "mix"
+        assert multichannel_response.status_code == 200
+        assert multichannel_response.headers["x-minimappr-rendered-channel"] == "all"
+        assert multichannel_response.headers["x-minimappr-render-mode"] == "multichannel"
+        assert channel0_response.status_code == 200
+
+        auto_pcm = _read_pcm_channels(auto_response.content)
+        mix_pcm = _read_pcm_channels(mix_response.content)
+        multichannel_pcm = _read_pcm_channels(multichannel_response.content)
+        channel0_pcm = _read_pcm_channels(channel0_response.content)
+
+        assert auto_pcm.shape[0] == 1
+        assert mix_pcm.shape[0] == 1
+        assert multichannel_pcm.shape[0] == 4
+        assert np.array_equal(auto_pcm, channel0_pcm)
+        assert not np.array_equal(auto_pcm, mix_pcm)
 
 
 def test_node_recent_audio_endpoint_rejects_unknown_node(monkeypatch, tmp_path: Path) -> None:

@@ -9,6 +9,7 @@ import logging
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
@@ -922,6 +923,7 @@ async def get_recent_node_audio(
     request: Request,
     seconds: float = Query(default=10.0, ge=1.0, le=30.0),
     channel: int | None = Query(default=None, ge=0),
+    render: Literal["auto", "mix", "multichannel"] = Query(default="auto"),
 ) -> Response:
     state = _require_state(request)
     settings: Settings = state.settings
@@ -958,14 +960,31 @@ async def get_recent_node_audio(
         raise HTTPException(status_code=404, detail="No recent audio available for node")
 
     channels_first = np.vstack([channel[-common_samples:] for channel in channels])
+    render_mode = "mix"
     if channel is not None:
         if channel >= channels_first.shape[0]:
             raise HTTPException(status_code=404, detail="Requested audio channel is unavailable for node")
         rendered = channels_first[channel : channel + 1]
-        selected_channel = channel
+        selected_channel = str(channel)
+        render_mode = "single_channel"
+    elif render == "multichannel":
+        rendered = channels_first
+        selected_channel = "all"
+        render_mode = "multichannel"
+    elif render == "mix":
+        rendered = mono_mix(channels_first)[None, :]
+        selected_channel = "mix"
+    elif channels_first.shape[0] > 2:
+        # Blindly summing a compact array's raw channels adds comb filtering to
+        # listen-check audio. Default multichannel arrays to ch0 unless the
+        # caller explicitly requests a mix or multichannel WAV.
+        rendered = channels_first[0:1]
+        selected_channel = "0"
+        render_mode = "auto_first_channel"
     else:
         rendered = mono_mix(channels_first)[None, :]
-        selected_channel = None
+        selected_channel = "mix"
+        render_mode = "auto_mix"
     wav_bytes = wav_multichannel_bytes(rendered, sample_rate_hz=sample_rate_hz)
 
     return Response(
@@ -976,7 +995,8 @@ async def get_recent_node_audio(
             "X-Minimappr-Node-Id": node_id,
             "X-Minimappr-Sample-Rate": str(sample_rate_hz),
             "X-Minimappr-Source-Channels": str(len(channels)),
-            "X-Minimappr-Rendered-Channel": "mix" if selected_channel is None else str(selected_channel),
+            "X-Minimappr-Rendered-Channel": selected_channel,
+            "X-Minimappr-Render-Mode": render_mode,
             "X-Minimappr-Clip-Seconds": f"{common_samples / float(sample_rate_hz):.3f}",
             "X-Minimappr-Audio-Age-Seconds": f"{age_seconds:.3f}",
         },
