@@ -16,6 +16,16 @@ enum class I2sMonoChannelSide : uint8_t {
   kRight = 1,
 };
 
+enum class AudioSerialSampleEdge : uint8_t {
+  kRising = 0,
+  kFalling = 1,
+};
+
+enum class AudioDataPinBias : uint8_t {
+  kDisabled = 0,
+  kPullDown = 1,
+};
+
 #ifndef MMPR_NODECFG_AUDIO_INPUT_MODE
 #define MMPR_NODECFG_AUDIO_INPUT_MODE 0
 #endif
@@ -24,12 +34,68 @@ enum class I2sMonoChannelSide : uint8_t {
 #define MMPR_NODECFG_I2S_MONO_CHANNEL_SIDE 0
 #endif
 
+#ifndef MMPR_NODECFG_I2S_MONO_SAMPLE_EDGE
+#define MMPR_NODECFG_I2S_MONO_SAMPLE_EDGE 0
+#endif
+
+#ifndef MMPR_NODECFG_I2S_MONO_CAPTURE_BIT_OFFSET
+#define MMPR_NODECFG_I2S_MONO_CAPTURE_BIT_OFFSET 0
+#endif
+
+#ifndef MMPR_NODECFG_I2S_MONO_DATA_PIN_BIAS
+#define MMPR_NODECFG_I2S_MONO_DATA_PIN_BIAS 0
+#endif
+
+#ifndef MMPR_NODECFG_I2S_MONO_ENABLE_WORD_DIAGNOSTICS
+#define MMPR_NODECFG_I2S_MONO_ENABLE_WORD_DIAGNOSTICS 0
+#endif
+
+#ifndef MMPR_NODECFG_TDM_SAMPLE_EDGE
+#define MMPR_NODECFG_TDM_SAMPLE_EDGE 0
+#endif
+
+#ifndef MMPR_NODECFG_TDM_CAPTURE_BIT_OFFSET
+#define MMPR_NODECFG_TDM_CAPTURE_BIT_OFFSET 0
+#endif
+
+#ifndef MMPR_NODECFG_TDM_DATA_PIN_BIAS
+#define MMPR_NODECFG_TDM_DATA_PIN_BIAS 1
+#endif
+
+#ifndef MMPR_NODECFG_TDM_ENABLE_WORD_DIAGNOSTICS
+#define MMPR_NODECFG_TDM_ENABLE_WORD_DIAGNOSTICS 0
+#endif
+
 static_assert(
     MMPR_NODECFG_AUDIO_INPUT_MODE == 0 || MMPR_NODECFG_AUDIO_INPUT_MODE == 1,
     "MMPR_NODECFG_AUDIO_INPUT_MODE must be 0 (TDM) or 1 (I2S mono)");
 static_assert(
     MMPR_NODECFG_I2S_MONO_CHANNEL_SIDE == 0 || MMPR_NODECFG_I2S_MONO_CHANNEL_SIDE == 1,
     "MMPR_NODECFG_I2S_MONO_CHANNEL_SIDE must be 0 (left) or 1 (right)");
+static_assert(
+    MMPR_NODECFG_I2S_MONO_SAMPLE_EDGE == 0 || MMPR_NODECFG_I2S_MONO_SAMPLE_EDGE == 1,
+    "MMPR_NODECFG_I2S_MONO_SAMPLE_EDGE must be 0 (rising) or 1 (falling)");
+static_assert(
+    MMPR_NODECFG_I2S_MONO_CAPTURE_BIT_OFFSET >= -8 && MMPR_NODECFG_I2S_MONO_CAPTURE_BIT_OFFSET <= 8,
+    "MMPR_NODECFG_I2S_MONO_CAPTURE_BIT_OFFSET must be in [-8, 8]");
+static_assert(
+    MMPR_NODECFG_I2S_MONO_DATA_PIN_BIAS == 0 || MMPR_NODECFG_I2S_MONO_DATA_PIN_BIAS == 1,
+    "MMPR_NODECFG_I2S_MONO_DATA_PIN_BIAS must be 0 (disabled) or 1 (pull-down)");
+static_assert(
+    MMPR_NODECFG_I2S_MONO_ENABLE_WORD_DIAGNOSTICS == 0 || MMPR_NODECFG_I2S_MONO_ENABLE_WORD_DIAGNOSTICS == 1,
+    "MMPR_NODECFG_I2S_MONO_ENABLE_WORD_DIAGNOSTICS must be 0 or 1");
+static_assert(
+    MMPR_NODECFG_TDM_SAMPLE_EDGE == 0 || MMPR_NODECFG_TDM_SAMPLE_EDGE == 1,
+    "MMPR_NODECFG_TDM_SAMPLE_EDGE must be 0 (rising) or 1 (falling)");
+static_assert(
+    MMPR_NODECFG_TDM_CAPTURE_BIT_OFFSET >= -8 && MMPR_NODECFG_TDM_CAPTURE_BIT_OFFSET <= 8,
+    "MMPR_NODECFG_TDM_CAPTURE_BIT_OFFSET must be in [-8, 8]");
+static_assert(
+    MMPR_NODECFG_TDM_DATA_PIN_BIAS == 0 || MMPR_NODECFG_TDM_DATA_PIN_BIAS == 1,
+    "MMPR_NODECFG_TDM_DATA_PIN_BIAS must be 0 (disabled) or 1 (pull-down)");
+static_assert(
+    MMPR_NODECFG_TDM_ENABLE_WORD_DIAGNOSTICS == 0 || MMPR_NODECFG_TDM_ENABLE_WORD_DIAGNOSTICS == 1,
+    "MMPR_NODECFG_TDM_ENABLE_WORD_DIAGNOSTICS must be 0 or 1");
 
 static constexpr AudioInputMode kAudioInputMode = (MMPR_NODECFG_AUDIO_INPUT_MODE == 1)
     ? AudioInputMode::kI2sMono
@@ -37,6 +103,22 @@ static constexpr AudioInputMode kAudioInputMode = (MMPR_NODECFG_AUDIO_INPUT_MODE
 static constexpr I2sMonoChannelSide kI2sMonoChannelSide = (MMPR_NODECFG_I2S_MONO_CHANNEL_SIDE == 1)
     ? I2sMonoChannelSide::kRight
     : I2sMonoChannelSide::kLeft;
+static constexpr AudioSerialSampleEdge kI2sMonoSampleEdge = (MMPR_NODECFG_I2S_MONO_SAMPLE_EDGE == 1)
+    ? AudioSerialSampleEdge::kFalling
+    : AudioSerialSampleEdge::kRising;
+static constexpr int8_t kI2sMonoCaptureBitOffset = MMPR_NODECFG_I2S_MONO_CAPTURE_BIT_OFFSET;
+static constexpr AudioDataPinBias kI2sMonoDataPinBias = (MMPR_NODECFG_I2S_MONO_DATA_PIN_BIAS == 1)
+    ? AudioDataPinBias::kPullDown
+    : AudioDataPinBias::kDisabled;
+static constexpr bool kI2sMonoEnableWordDiagnostics = MMPR_NODECFG_I2S_MONO_ENABLE_WORD_DIAGNOSTICS == 1;
+static constexpr AudioSerialSampleEdge kTdmSampleEdge = (MMPR_NODECFG_TDM_SAMPLE_EDGE == 1)
+    ? AudioSerialSampleEdge::kFalling
+    : AudioSerialSampleEdge::kRising;
+static constexpr int8_t kTdmCaptureBitOffset = MMPR_NODECFG_TDM_CAPTURE_BIT_OFFSET;
+static constexpr AudioDataPinBias kTdmDataPinBias = (MMPR_NODECFG_TDM_DATA_PIN_BIAS == 1)
+    ? AudioDataPinBias::kPullDown
+    : AudioDataPinBias::kDisabled;
+static constexpr bool kTdmEnableWordDiagnostics = MMPR_NODECFG_TDM_ENABLE_WORD_DIAGNOSTICS == 1;
 static constexpr bool kUseTdmAudio = kAudioInputMode == AudioInputMode::kTdm4Mic;
 
 // --- Network and backend ---
@@ -51,7 +133,9 @@ static constexpr uint32_t kWiFiConnectTimeoutMs = 15000;
 static constexpr uint32_t kHttpTimeoutMs = 500;
 
 // --- Node identity ---
-static constexpr const char* kNodeId = "sirith-tetra-pico2w-01";
+// Prefix only — the full node ID is built at runtime by appending the chip's
+// unique board ID (last 4 hex digits) so each physical device is distinct.
+static constexpr const char* kNodeIdPrefix = "sirith-tetra-";
 // Audio mode is expected to be chosen per board/configuration, not switched on
 // one deployed node identity at runtime.
 static constexpr mmpr::NodeType kNodeType = kUseTdmAudio ? mmpr::NodeType::kSirithTetra : mmpr::NodeType::kPoint;
@@ -152,9 +236,16 @@ static constexpr uint8_t kTdmWsPin = 9;    // FSYNC/WS output (must be BCLK + 1)
 
 static constexpr uint32_t kAudioSampleRateHz = 16000;
 static constexpr uint32_t kAudioFrameSamples = 1024;
-static constexpr int32_t kAudioSampleShiftBits = 16;  // 32-bit slot -> 16-bit PCM
+static constexpr uint8_t kAudioValidBits = 24;  // ADAU7112 emits 24-bit PCM in 32-bit slots.
 static constexpr uint8_t kAudioTdmSlots = 4;
 static constexpr uint8_t kAudioSlotBits = 32;
+// ADAU7112 data is launched from the falling-edge side of BCLK, so sampling on
+// the rising half-cycle is the nominal choice. Bit offset stays at zero unless
+// board-level routing proves the slot payload is shifted.
+static constexpr AudioSerialSampleEdge kAudioTdmSampleEdge = kTdmSampleEdge;
+static constexpr int8_t kAudioTdmCaptureBitOffset = kTdmCaptureBitOffset;
+static constexpr AudioDataPinBias kAudioTdmDataPinBias = kTdmDataPinBias;
+static constexpr bool kAudioTdmEnableWordDiagnostics = kTdmEnableWordDiagnostics;
 // Output channel order: MK1, MK2, MK3, MK4.
 static constexpr uint8_t kOutputChannelToSlot[4] = {1, 0, 3, 2};
 static constexpr bool kUseSafeDriveStrength = true;
@@ -169,8 +260,15 @@ static constexpr uint8_t kI2sMonoBclkPin = kTdmBclkPin;
 static constexpr uint8_t kI2sMonoWsPin = kTdmWsPin;
 static constexpr uint32_t kI2sMonoSampleRateHz = 16000;
 static constexpr uint32_t kI2sMonoFrameSamples = 1024;
-static constexpr int32_t kI2sMonoSampleShiftBits = 16;
 static constexpr uint8_t kI2sMonoSlotBits = 32;
+static constexpr uint8_t kI2sMonoValidBits = 24;
+// ICS-43434 uses standard I2S timing with the MSB delayed by one BCLK after
+// LRCLK changes. It tri-states SD outside the active slot, so keep a weak
+// pulldown available unless the board already provides one.
+static constexpr AudioSerialSampleEdge kAudioI2sMonoSampleEdge = kI2sMonoSampleEdge;
+static constexpr int8_t kAudioI2sMonoCaptureBitOffset = kI2sMonoCaptureBitOffset;
+static constexpr AudioDataPinBias kAudioI2sMonoDataPinBias = kI2sMonoDataPinBias;
+static constexpr bool kAudioI2sMonoEnableWordDiagnostics = kI2sMonoEnableWordDiagnostics;
 static constexpr bool kI2sMonoPinsAliasTdmPins =
     (kI2sMonoDataPin == kTdmDataPin) &&
     (kI2sMonoBclkPin == kTdmBclkPin) &&
@@ -178,11 +276,10 @@ static constexpr bool kI2sMonoPinsAliasTdmPins =
 
 static constexpr uint32_t kActiveAudioSampleRateHz = kUseTdmAudio ? kAudioSampleRateHz : kI2sMonoSampleRateHz;
 static constexpr uint32_t kActiveAudioFrameSamples = kUseTdmAudio ? kAudioFrameSamples : kI2sMonoFrameSamples;
-static constexpr int32_t kActiveAudioSampleShiftBits = kUseTdmAudio ? kAudioSampleShiftBits : kI2sMonoSampleShiftBits;
 static constexpr uint8_t kActiveAudioChannels = kUseTdmAudio ? 4u : 1u;
 
 // --- Optional GPS/PPS (M10Q style) ---
-static constexpr bool kEnableGpsUart = false;
+static constexpr bool kEnableGpsUart = true;
 static constexpr uint32_t kGpsUartBaud = 9600;
 static constexpr int kGpsTxPin = 12;
 static constexpr int kGpsRxPin = 13;
@@ -225,7 +322,7 @@ static constexpr uint8_t kImuI2cAddressSecondary7Bit = 0x6B;
 static constexpr uint32_t kImuTemperatureSampleIntervalMs = 2000;
 
 // Sensirion SHT4x family environmental sensor (SHT45 on SparkFun SAM-M10Q carrier)
-static constexpr bool kEnableSht45Environment = false;
+static constexpr bool kEnableSht45Environment = true;
 static constexpr uint8_t kSht4xI2cAddress7Bit = 0x44;
 static constexpr uint32_t kSht4xSampleIntervalMs = 2000;
 

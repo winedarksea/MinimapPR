@@ -187,10 +187,10 @@ bool SirithPicoTdmSource::initPioStateMachine() {
   const uint32_t bitsPerFrame =
       static_cast<uint32_t>(config_.slotBits) * static_cast<uint32_t>(config_.tdmSlots);
   const uint32_t bitRateHz = config_.sampleRateHz * bitsPerFrame;
-  // Input-only TDM capture uses one setup instruction plus two instructions
-  // per bit. That preserves ADAU7112's one-bit FSYNC pulse without needing an
-  // unused data-out phase.
-  const uint32_t smCyclesPerFrame = (bitsPerFrame * 2u) + 1u;
+  // Input-only TDM capture uses two cycles per steady-state bit plus two extra
+  // frame-start cycles to emit a single valid FSYNC pulse and sample slot 0
+  // bit 0 away from the frame boundary.
+  const uint32_t smCyclesPerFrame = (bitsPerFrame * 2u) + 2u;
   const float smClockHz = static_cast<float>(config_.sampleRateHz) * static_cast<float>(smCyclesPerFrame);
   const float clkSysHz = static_cast<float>(clock_get_hz(clk_sys));
   const float clkDiv = clkSysHz / smClockHz;
