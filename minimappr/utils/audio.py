@@ -42,6 +42,22 @@ def mono_mix(channels_first: np.ndarray) -> np.ndarray:
     return np.mean(channels_first, axis=0)
 
 
+def trigger_rms(channels_first: np.ndarray) -> float:
+    """Estimate trigger energy without inter-channel cancellation.
+
+    Array microphones capture the same source with small phase offsets. Averaging
+    channels before RMS can cancel narrowband content, especially birdsong, and
+    hide real events from the trigger gate. Use the strongest per-channel RMS
+    instead so multichannel arrays trigger on audible events the same way a
+    single hot sensor would.
+    """
+    if channels_first.ndim != 2:
+        raise ValueError("Expected channels-first array")
+    if channels_first.shape[0] == 0:
+        return 0.0
+    return max(rms(channel) for channel in channels_first)
+
+
 def rms(samples: np.ndarray) -> float:
     return float(np.sqrt(np.mean(np.square(samples)) + EPSILON))
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -412,6 +413,8 @@ class Settings:
             raise ValueError("MINIMAPPR_MIN_SENSORS_FOR_3D must be >= MINIMAPPR_MIN_SENSORS_FOR_2D")
         if self.environment_reading_max_age_seconds < 0.0:
             raise ValueError("MINIMAPPR_ENVIRONMENT_READING_MAX_AGE_SECONDS must be >= 0")
+        if not math.isfinite(self.ingest_gain_multiplier) or self.ingest_gain_multiplier <= 0.0:
+            raise ValueError("MINIMAPPR_INGEST_GAIN_MULTIPLIER must be finite and > 0")
 
         if self.localization_max_tau_s <= 0.0:
             raise ValueError("MINIMAPPR_LOCALIZATION_MAX_TAU_S must be > 0")

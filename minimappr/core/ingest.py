@@ -27,7 +27,7 @@ from minimappr.models import (
     NodeSpec,
     TimeQuality,
 )
-from minimappr.utils.audio import decode_pcm16le_b64, mono_mix, rms
+from minimappr.utils.audio import decode_pcm16le_b64, trigger_rms
 
 
 # ---------------------------------------------------------------------------
@@ -271,7 +271,7 @@ class IngestProcessor:
             )
 
         # -- trigger evaluation ------------------------------------------------
-        frame_energy = rms(mono_mix(processed))
+        frame_energy = trigger_rms(processed)
         frame_duration_ns = int((processed.shape[1] / frame.sample_rate_hz) * 1_000_000_000)
         half_window_ns = int(self._localization_config.localization_window_seconds * 0.5 * 1_000_000_000)
         center_offset_ns = max(0, frame_duration_ns - half_window_ns)

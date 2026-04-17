@@ -40,8 +40,10 @@ from minimappr.core.preprocessing import (
     AudioPreprocessingChain,
     BandpassFilterStage,
     DCRemovalStage,
+    GainStage,
     HighpassFilterStage,
     LowpassFilterStage,
+    NodePreprocessorFactory,
     NormalizationStage,
     SpectralGateStage,
     available_stages,
@@ -330,6 +332,7 @@ class TestClassificationPreprocessor:
             audio_highpass_hz=50.0,
             audio_lowpass_hz=0.0,
             preprocess_enabled=True,
+            ingest_gain_multiplier=1.0,
             min_sensors_for_3d=4,
             min_sensors_for_2d=3,
             localization_max_tau_s=0.02,
@@ -368,6 +371,7 @@ class TestClassificationPreprocessor:
             audio_highpass_hz=50.0,
             audio_lowpass_hz=0.0,
             preprocess_enabled=True,
+            ingest_gain_multiplier=1.0,
             min_sensors_for_3d=4,
             min_sensors_for_2d=3,
             localization_max_tau_s=0.02,
@@ -846,13 +850,76 @@ class TestPreprocessingStages:
         out = stage.process(signal, 16_000)
         np.testing.assert_array_equal(out, signal)
 
+    def test_gain_stage_multiplies_signal(self) -> None:
+        signal = np.array([0.25, -0.5, 0.75], dtype=np.float32)
+        stage = GainStage(multiplier=2.0)
+        out = stage.process(signal, 16_000)
+        np.testing.assert_allclose(out, signal * 2.0, atol=1e-7)
+        assert out.dtype == np.float32
+
+    def test_gain_stage_unity_passthrough(self) -> None:
+        signal = np.array([0.25, -0.5, 0.75], dtype=np.float32)
+        stage = GainStage(multiplier=1.0)
+        out = stage.process(signal, 16_000)
+        np.testing.assert_array_equal(out, signal)
+
+
+class TestNodePreprocessorFactory:
+    def _make_node(self, properties: dict[str, object] | None = None) -> NodeSpec:
+        return NodeSpec(
+            id="node-preprocess",
+            node_type=NodeType.SIRITH_TETRA,
+            position_m=(0.0, 0.0, 0.0),
+            sensor_offsets_m=[(0.0, 0.0, 0.0)],
+            properties=properties or {},
+        )
+
+    def test_global_ingest_gain_applies_gain_stage(self) -> None:
+        settings = Settings(
+            preprocess_enabled=True,
+            ingest_gain_multiplier=2.0,
+            audio_highpass_hz=0.0,
+            audio_lowpass_hz=0.0,
+        )
+        factory = NodePreprocessorFactory(settings)
+        chain = factory.for_node(self._make_node())
+        assert isinstance(chain, AudioPreprocessingChain)
+        assert len(chain.stages) == 1
+        assert isinstance(chain.stages[0], GainStage)
+        assert chain.stages[0].multiplier == pytest.approx(2.0)
+
+    def test_node_gain_override_takes_precedence(self) -> None:
+        settings = Settings(
+            preprocess_enabled=True,
+            ingest_gain_multiplier=2.0,
+            audio_highpass_hz=0.0,
+            audio_lowpass_hz=0.0,
+        )
+        node = self._make_node(properties={"preprocess": {"gain_multiplier": 3.5}})
+        factory = NodePreprocessorFactory(settings)
+        chain = factory.for_node(node)
+        assert isinstance(chain, AudioPreprocessingChain)
+        assert len(chain.stages) == 1
+        assert isinstance(chain.stages[0], GainStage)
+        assert chain.stages[0].multiplier == pytest.approx(3.5)
+
+
+class TestIngestGainValidation:
+    def test_settings_reject_non_positive_ingest_gain(self) -> None:
+        with pytest.raises(ValueError, match="MINIMAPPR_INGEST_GAIN_MULTIPLIER"):
+            Settings(ingest_gain_multiplier=0.0)
+
+    def test_settings_reject_non_finite_ingest_gain(self) -> None:
+        with pytest.raises(ValueError, match="MINIMAPPR_INGEST_GAIN_MULTIPLIER"):
+            Settings(ingest_gain_multiplier=float("nan"))
+
 
 class TestPreprocessingRegistry:
     """Test the stage registry and build_preprocessing_chain."""
 
     def test_available_stages_has_all_builtins(self) -> None:
         names = available_stages()
-        for expected in ["highpass", "lowpass", "bandpass", "dc_remove", "normalize", "spectral_gate"]:
+        for expected in ["highpass", "lowpass", "bandpass", "dc_remove", "gain", "normalize", "spectral_gate"]:
             assert expected in names, f"{expected} not in {names}"
 
     def test_create_stage_by_name(self) -> None:
@@ -920,6 +987,7 @@ class TestClassificationPreprocessorExtended:
             default_temperature_c=20.0, default_humidity=0.5,
             audio_highpass_hz=50.0, audio_lowpass_hz=7500.0,
             preprocess_enabled=True,
+            ingest_gain_multiplier=1.0,
             min_sensors_for_3d=4, min_sensors_for_2d=3,
             localization_max_tau_s=0.01,
             localization_algorithm="gcc_phat",
@@ -959,6 +1027,7 @@ class TestClassificationPreprocessorExtended:
             default_temperature_c=20.0, default_humidity=0.5,
             audio_highpass_hz=50.0, audio_lowpass_hz=7500.0,
             preprocess_enabled=True,
+            ingest_gain_multiplier=1.0,
             min_sensors_for_3d=4, min_sensors_for_2d=3,
             localization_max_tau_s=0.01,
             localization_algorithm="gcc_phat",
@@ -995,6 +1064,7 @@ class TestClassificationPreprocessorExtended:
             default_temperature_c=20.0, default_humidity=0.5,
             audio_highpass_hz=50.0, audio_lowpass_hz=7500.0,
             preprocess_enabled=True,
+            ingest_gain_multiplier=1.0,
             min_sensors_for_3d=4, min_sensors_for_2d=3,
             localization_max_tau_s=0.01,
             localization_algorithm="gcc_phat",
