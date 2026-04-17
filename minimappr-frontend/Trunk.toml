@@ -1,0 +1,11 @@
+[[proxy]]
+rewrite = "/api"
+backend = "http://127.0.0.1:8000/api"
+
+[[proxy]]
+rewrite = "/ws"
+backend = "ws://127.0.0.1:8000/ws"
+
+[build]
+dist = "../minimappr/frontend"
+public_url = "/"

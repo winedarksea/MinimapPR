@@ -248,6 +248,41 @@ source .venv/bin/activate
 python scripts/run_soak.py --duration 300
 ```
 
+## Frontend Development (Leptos/WASM)
+
+The operator UI lives in `minimappr-frontend/` (Rust → WASM via Leptos 0.8 + Trunk).
+**End users** who `pip install minimappr` get the pre-built WASM bundle — no Rust toolchain needed.
+**Contributors** editing the UI need `cargo`, `trunk`, and the `wasm32-unknown-unknown` target.
+
+### One-time contributor setup
+```bash
+cargo install trunk
+rustup target add wasm32-unknown-unknown
+```
+
+### Dev loop (live-reload)
+```bash
+# Terminal 1: FastAPI backend
+.venv/bin/python -m minimappr
+
+# Terminal 2: Trunk dev server (proxies /api and /ws to :8000)
+cd minimappr-frontend && trunk serve
+# Open http://localhost:8080 in a browser
+```
+
+### Release build (required before `python -m build`)
+```bash
+scripts/build_frontend.sh
+# Outputs: minimappr/frontend/{index.html,*.js,*.wasm,*.css}
+```
+
+### Pre-publish check
+```bash
+ls minimappr/frontend/*.wasm   # must exist before packaging
+python -m build
+unzip -l dist/minimappr-*.whl | grep frontend   # confirm wasm is included
+```
+
 ## Roadmap Foundation Included
 This MVP lays groundwork for the broader goals in your notes/proposals:
 - additional sensor modalities
