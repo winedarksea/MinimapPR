@@ -44,15 +44,13 @@ right_channel:
 .side_set 2
 
 ; Four-slot TDM input for the ADAU7112 positive-pulse frame sync format.
-; Emit one real frame-start pulse instead of relying on sub-bit WS blips being
-; ignored. The first BCLK falling edge after FSYNC rises launches slot 0 bit 0,
-; then the PIO waits one more state-machine cycle before sampling so the first
-; captured bit is stable. The host initializes Y = (slot_bits * channels) - 1.
+; Emit one frame-start pulse, then keep FSYNC low for the rest of the frame.
+; This keeps the waveform inside the datasheet model instead of relying on
+; short WS blips being ignored. The host initializes
+; Y = (slot_bits * channels) - 1.
 
 .wrap_target
-    mov x, y         side 0b11
-    nop              side 0b10
-first_bit:
+    mov x, y         side 0b10
     in pins, 1       side 0b11
     jmp x--, bitloop side 0b00
 bitloop:
@@ -69,9 +67,7 @@ bitloop:
 ; if the board-level data path requires it.
 
 .wrap_target
-    mov x, y         side 0b10
-    nop              side 0b11
-first_bit:
+    mov x, y         side 0b11
     in pins, 1       side 0b10
     jmp x--, bitloop side 0b01
 bitloop:
