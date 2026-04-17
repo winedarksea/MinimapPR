@@ -44,32 +44,37 @@ right_channel:
 .side_set 2
 
 ; Four-slot TDM input for the ADAU7112 positive-pulse frame sync format.
-; The host initializes Y = (slot_bits * channels) - 1.
-; FSYNC is driven high for the first bit of the frame and low for the
-; remaining bits. Autopush at 32 bits yields one FIFO word per slot.
+; This mirrors the timing cadence used by Arduino Pico's pio_tdm_inout: one
+; low half-cycle to launch/sample data, then one high half-cycle to complete
+; the BCLK period. The host initializes Y = (slot_bits * channels) - 2.
+; FSYNC is asserted for the first slot boundary and remains low for the rest of
+; the frame. Autopush at 32 bits yields one FIFO word per slot.
 
 .wrap_target
-    mov x, y         side 0b10
-    in pins, 1       side 0b11
-    jmp x--, frame_bits side 0b00
-frame_bits:
-    in pins, 1       side 0b01
-    jmp x--, frame_bits side 0b00
+    mov x, y         side 0b01 [1]
+bitloop:
+    nop              side 0b00
+    in pins, 1       side 0b00
+    jmp x--, bitloop side 0b11 [1]
+lastbit:
+    in pins, 1       side 0b10
+    nop              side 0b10
 .wrap
 
 
 .program mmpr_sirith_tdm_in_falling
 .side_set 2
 
-; Four-slot TDM input for the ADAU7112, sampled on the opposite BCLK
-; half-cycle from mmpr_sirith_tdm_in so the firmware can select the cleaner
-; edge on real hardware.
+; Same frame timing as mmpr_sirith_tdm_in, but samples on the opposite half-
+; cycle so the firmware can try the alternate data-capture phase if needed.
 
 .wrap_target
-    mov x, y         side 0b11
-    in pins, 1       side 0b10
-    jmp x--, frame_bits side 0b01
-frame_bits:
-    in pins, 1       side 0b00
-    jmp x--, frame_bits side 0b01
+    mov x, y         side 0b10 [1]
+bitloop:
+    in pins, 1       side 0b11
+    nop              side 0b11
+    jmp x--, bitloop side 0b00 [1]
+lastbit:
+    nop              side 0b01
+    in pins, 1       side 0b01
 .wrap

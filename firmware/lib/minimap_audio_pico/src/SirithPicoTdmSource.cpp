@@ -187,7 +187,9 @@ bool SirithPicoTdmSource::initPioStateMachine() {
   const uint32_t bitsPerFrame =
       static_cast<uint32_t>(config_.slotBits) * static_cast<uint32_t>(config_.tdmSlots);
   const uint32_t bitRateHz = config_.sampleRateHz * bitsPerFrame;
-  const uint32_t smCyclesPerFrame = (bitsPerFrame * 2u) + 1u;
+  // The PIO program mirrors the Arduino Pico reference cadence: four state-
+  // machine cycles per TDM bit once the frame-start bookkeeping is included.
+  const uint32_t smCyclesPerFrame = bitsPerFrame * 4u;
   const float smClockHz = static_cast<float>(config_.sampleRateHz) * static_cast<float>(smCyclesPerFrame);
   const float clkSysHz = static_cast<float>(clock_get_hz(clk_sys));
   const float clkDiv = clkSysHz / smClockHz;
@@ -244,7 +246,7 @@ bool SirithPicoTdmSource::initPioStateMachine() {
   pio_sm_clear_fifos(selectedPio, selectedSm);
   pio_sm_restart(selectedPio, selectedSm);
 
-  pio_sm_put_blocking(selectedPio, selectedSm, bitsPerFrame - 1u);
+  pio_sm_put_blocking(selectedPio, selectedSm, bitsPerFrame - 2u);
   pio_sm_exec(selectedPio, selectedSm, pio_encode_pull(false, false));
   pio_sm_exec(selectedPio, selectedSm, pio_encode_mov(pio_y, pio_osr));
 

@@ -27,7 +27,7 @@ struct PicoI2SMonoConfig {
   PicoI2SChannelSide channelSide = PicoI2SChannelSide::kLeft;
   PicoSerialSampleEdge sampleEdge = PicoSerialSampleEdge::kRising;
   int8_t captureBitOffset = 0;
-  PicoSerialDataPinBias dataPinBias = PicoSerialDataPinBias::kPullDown;
+  PicoSerialDataPinBias dataPinBias = PicoSerialDataPinBias::kDisabled;
   bool enableWordDiagnostics = false;
   bool useSafeDriveStrength = true;
 };
