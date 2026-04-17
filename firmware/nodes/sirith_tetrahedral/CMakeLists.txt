@@ -87,6 +87,7 @@ target_link_libraries(sirith_tetrahedral
         hardware_uart
         hardware_clocks
         pico_cyw43_arch_lwip_poll
+        pico_unique_id
         )
 
 pico_add_extra_outputs(sirith_tetrahedral)

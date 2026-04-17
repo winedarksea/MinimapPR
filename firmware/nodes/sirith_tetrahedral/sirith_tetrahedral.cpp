@@ -3,6 +3,7 @@
 
 #include "pico/cyw43_arch.h"
 #include "pico/stdlib.h"
+#include "pico/unique_id.h"
 #include "hardware/pwm.h"
 #include "hardware/uart.h"
 
@@ -173,8 +174,22 @@ size_t selectedSensorCount() {
       : (sizeof(nodecfg::kPointSensorOffsetsM) / sizeof(nodecfg::kPointSensorOffsetsM[0]));
 }
 
+// Runtime node ID: prefix + last 4 hex digits of the Pico's unique board ID.
+// Filled by initNodeId() before anything references gNodeDescriptor.
+static char gNodeIdBuf[64] = {};
+
+void initNodeId() {
+  pico_unique_board_id_t uid;
+  pico_get_unique_board_id(&uid);
+  // Use last 2 bytes (4 hex chars) for a short but unique suffix.
+  std::snprintf(gNodeIdBuf, sizeof(gNodeIdBuf), "%s%02x%02x",
+                nodecfg::kNodeIdPrefix,
+                uid.id[PICO_UNIQUE_BOARD_ID_SIZE_BYTES - 2],
+                uid.id[PICO_UNIQUE_BOARD_ID_SIZE_BYTES - 1]);
+}
+
 mmpr::NodeDescriptor gNodeDescriptor = {
-    nodecfg::kNodeId,
+    gNodeIdBuf,  // populated by initNodeId() at boot
     nodecfg::kNodeType,
     nodecfg::kNodePositionM,
     nodecfg::kNodeHasFallbackGeoPosition,
@@ -341,6 +356,7 @@ void setupOptionalPeripherals() {
 }  // namespace
 
 int main() {
+  initNodeId();
   stdio_init_all();
   sleep_ms(300);
 
@@ -351,7 +367,8 @@ int main() {
   setupActivityLed();
 
   std::printf(
-      "[sirith-pico] booting mode=%s hardware=%s channels=%u\n",
+      "[sirith-pico] booting id=%s mode=%s hardware=%s channels=%u\n",
+      gNodeDescriptor.id,
       nodecfg::kUseTdmAudio ? "tdm4" : "i2s_mono",
       nodecfg::kHardwareName,
       static_cast<unsigned>(nodecfg::kActiveAudioChannels));
