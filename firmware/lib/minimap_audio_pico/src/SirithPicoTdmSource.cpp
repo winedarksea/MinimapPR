@@ -38,7 +38,12 @@ bool pinIsValid(uint8_t pin) {
 
 int16_t decodeLeftJustifiedSlotToPcm16(uint32_t rawWord, uint8_t slotBits, uint8_t validBits) {
   const uint8_t paddingBits = static_cast<uint8_t>(slotBits - validBits);
-  int32_t signedPayload = static_cast<int32_t>(rawWord) >> paddingBits;
+  // ADAU7112 drives 24 valid PCM bits within each 32-bit TDM slot, then SDATA
+  // is no longer valid for the remaining clocks. Clamp the pad region low so
+  // decode does not depend on bus float or external bias between active slots.
+  const uint32_t maskedWord =
+      paddingBits == 0 ? rawWord : (rawWord & (~((1u << paddingBits) - 1u)));
+  int32_t signedPayload = static_cast<int32_t>(maskedWord) >> paddingBits;
 
   const int shiftToPcm16 = static_cast<int>(validBits) - 16;
   int32_t pcm16 = shiftToPcm16 > 0 ? (signedPayload >> shiftToPcm16) : (signedPayload << (-shiftToPcm16));
@@ -132,7 +137,10 @@ bool SirithPicoTdmSource::initPioStateMachine() {
   pio_gpio_init(selectedPio, pins_.ws);
 
   gpio_set_dir(pins_.dataIn, GPIO_IN);
-  gpio_pull_down(pins_.dataIn);
+  // ADAU7112 only drives SDATA during its active TDM slot payload. Keep the
+  // receiver input unbiased so the inactive portions of the bus do not fight
+  // the line driver or leak into the captured payload bits.
+  gpio_disable_pulls(pins_.dataIn);
 
   gpio_set_dir(pins_.bclk, GPIO_OUT);
   gpio_set_dir(pins_.ws, GPIO_OUT);

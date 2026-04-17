@@ -38,7 +38,12 @@ bool pinIsValid(uint8_t pin) {
 
 int16_t decodeLeftJustifiedSlotToPcm16(uint32_t rawWord, uint8_t slotBits, uint8_t validBits) {
   const uint8_t paddingBits = static_cast<uint8_t>(slotBits - validBits);
-  int32_t signedPayload = static_cast<int32_t>(rawWord) >> paddingBits;
+  // ICS-43434 drives 24 valid I2S bits then releases SD for the remaining pad
+  // clocks in the 32-bit slot. Force the pad region low so decode does not
+  // depend on board-level pull state or line float during the tri-stated tail.
+  const uint32_t maskedWord =
+      paddingBits == 0 ? rawWord : (rawWord & (~((1u << paddingBits) - 1u)));
+  int32_t signedPayload = static_cast<int32_t>(maskedWord) >> paddingBits;
 
   const int shiftToPcm16 = static_cast<int>(validBits) - 16;
   int32_t pcm16 = shiftToPcm16 > 0 ? (signedPayload >> shiftToPcm16) : (signedPayload << (-shiftToPcm16));
@@ -124,7 +129,10 @@ bool PicoI2SMonoSource::initPioStateMachine() {
   pio_gpio_init(selectedPio, pins_.ws);
 
   gpio_set_dir(pins_.dataIn, GPIO_IN);
-  gpio_pull_down(pins_.dataIn);
+  // Leave the serial data line unbiased. The ICS-43434 tri-states SD outside
+  // its active channel word, and forcing a pull through the level shifter can
+  // skew the driven edges we actually care about.
+  gpio_disable_pulls(pins_.dataIn);
 
   gpio_set_dir(pins_.bclk, GPIO_OUT);
   gpio_set_dir(pins_.ws, GPIO_OUT);
