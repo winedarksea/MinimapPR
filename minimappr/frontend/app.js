@@ -255,7 +255,7 @@ function formatAudioDebugMeta(audioDebug) {
   const rmsValue = Number(audioDebug.rms);
   const ageText = Number.isFinite(age) ? `${fmtNum(age, 1)}s ago` : "n/a";
   const sampleText = Number.isFinite(sampleRateHz) && sampleRateHz > 0 ? `${Math.round(sampleRateHz)} Hz` : "n/a";
-  const rmsText = Number.isFinite(rmsValue) ? fmtNum(rmsValue, 3) : "n/a";
+  const rmsText = Number.isFinite(rmsValue) ? fmtNum(rmsValue, 5) : "n/a";
   return `${status} | age ${ageText} | ${sampleText} | rms ${rmsText}`;
 }
 

@@ -62,6 +62,7 @@ class LocalizationConfig:
     audio_highpass_hz: float
     audio_lowpass_hz: float
     preprocess_enabled: bool
+    ingest_gain_multiplier: float
     min_sensors_for_3d: int
     min_sensors_for_2d: int
     localization_max_tau_s: float
@@ -277,6 +278,7 @@ class Settings:
     localization_window_seconds: float = 0.08
     max_sensor_buffer_seconds: float = 8.0
     preprocess_enabled: bool = True
+    ingest_gain_multiplier: float = 1.0
     audio_highpass_hz: float = 50.0
     audio_lowpass_hz: float = 0.0
     min_sensors_for_3d: int = 4
@@ -568,6 +570,7 @@ class Settings:
             localization_window_seconds=_env_float("MINIMAPPR_LOCALIZATION_WINDOW_SECONDS", 0.08),
             max_sensor_buffer_seconds=_env_float("MINIMAPPR_MAX_SENSOR_BUFFER_SECONDS", 8.0),
             preprocess_enabled=_env_bool("MINIMAPPR_PREPROCESS_ENABLED", True),
+            ingest_gain_multiplier=_env_float("MINIMAPPR_INGEST_GAIN_MULTIPLIER", 1.0),
             audio_highpass_hz=_env_float("MINIMAPPR_AUDIO_HIGHPASS_HZ", 50.0),
             audio_lowpass_hz=_env_float("MINIMAPPR_AUDIO_LOWPASS_HZ", 0.0),
             min_sensors_for_3d=_env_int("MINIMAPPR_MIN_SENSORS_FOR_3D", 4),
@@ -705,6 +708,7 @@ class Settings:
             audio_highpass_hz=self.audio_highpass_hz,
             audio_lowpass_hz=self.audio_lowpass_hz,
             preprocess_enabled=self.preprocess_enabled,
+            ingest_gain_multiplier=self.ingest_gain_multiplier,
             min_sensors_for_3d=self.min_sensors_for_3d,
             min_sensors_for_2d=self.min_sensors_for_2d,
             localization_max_tau_s=self.localization_max_tau_s,

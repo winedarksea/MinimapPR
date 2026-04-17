@@ -207,6 +207,28 @@ class SpectralGateStage(AudioPreprocessor):
         return np.fft.irfft(gated_spectrum, n=samples.size).astype(np.float32)
 
 
+@dataclass(slots=True)
+class GainStage(AudioPreprocessor):
+    """Apply a simple amplitude multiplier.
+
+    Useful for scaling up faint signals prior to feature extraction.
+    """
+
+    multiplier: float = 1.0
+
+    def process(
+        self,
+        samples: np.ndarray,
+        sample_rate_hz: int,
+        *,
+        node_id: str | None = None,
+    ) -> np.ndarray:
+        del node_id, sample_rate_hz
+        if samples.size == 0 or self.multiplier == 1.0:
+            return samples
+        return (samples * self.multiplier).astype(np.float32)
+
+
 # ---------------------------------------------------------------------------
 # Chain — composes arbitrary stages into a single AudioPreprocessor
 # ---------------------------------------------------------------------------
@@ -247,6 +269,7 @@ _STAGE_REGISTRY: dict[str, type] = {
     "lowpass": LowpassFilterStage,
     "bandpass": BandpassFilterStage,
     "dc_remove": DCRemovalStage,
+    "gain": GainStage,
     "normalize": NormalizationStage,
     "spectral_gate": SpectralGateStage,
 }
@@ -324,8 +347,11 @@ class NodePreprocessorFactory:
 
         highpass = float(cfg.get("highpass_hz", self._settings.audio_highpass_hz))
         lowpass = float(cfg.get("lowpass_hz", self._settings.audio_lowpass_hz))
+        gain = float(cfg.get("gain_multiplier", self._settings.ingest_gain_multiplier))
 
         stages: list[AudioPreprocessor] = []
+        if gain != 1.0:
+            stages.append(GainStage(multiplier=gain))
         if highpass > 0.0:
             stages.append(HighpassFilterStage(cutoff_hz=highpass))
         if lowpass > 0.0:
