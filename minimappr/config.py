@@ -57,6 +57,7 @@ class LocalizationConfig:
     trigger_rms: float
     trigger_cooldown_seconds: float
     localization_window_seconds: float
+    classification_window_seconds: float
     max_sensor_buffer_seconds: float
     default_temperature_c: float
     default_humidity: float
@@ -77,6 +78,7 @@ class LocalizationConfig:
     localization_subspace_freq_max_hz: float
     localization_refine_confidence_threshold: float
     localization_tight_array_aperture_m: float
+    skip_localization_for_classification: bool
     beamformed_classification_enabled: bool
     beamformer_type: str
     beamformed_classification_min_sensor_count: int
@@ -264,6 +266,7 @@ def _load_federation_peers(*, raw_json: str | None, config_path: Path) -> tuple[
 
 @dataclass(slots=True)
 class Settings:
+    runtime_profile: str = "default"
     host: str = "0.0.0.0"
     port: int = 8080
     db_path: Path = Path("data/minimappr.db")
@@ -279,6 +282,7 @@ class Settings:
     trigger_rms: float = 0.015
     trigger_cooldown_seconds: float = 0.8
     localization_window_seconds: float = 0.08
+    classification_window_seconds: float = 0.0
     max_sensor_buffer_seconds: float = 8.0
     preprocess_enabled: bool = True
     ingest_gain_multiplier: float = 1.0
@@ -297,6 +301,7 @@ class Settings:
     localization_subspace_freq_max_hz: float = 3500.0
     localization_refine_confidence_threshold: float = 0.45
     localization_tight_array_aperture_m: float = 0.35
+    skip_localization_for_classification: bool = False
     beamformed_classification_enabled: bool = False
     beamformer_type: str = "delay_and_sum"
     beamformed_classification_min_sensor_count: int = 2
@@ -402,6 +407,8 @@ class Settings:
         self.coordinate_mode = self.coordinate_mode.strip().lower()
         if self.coordinate_mode not in {"flat", "geodetic"}:
             raise ValueError("MINIMAPPR_COORDINATE_MODE must be 'flat' or 'geodetic'")
+        self.runtime_profile = self.runtime_profile.strip().lower() or "default"
+        self._apply_runtime_profile()
 
         if self.node_degraded_after_seconds <= 0.0:
             raise ValueError("MINIMAPPR_NODE_DEGRADED_AFTER_SECONDS must be > 0")
@@ -422,6 +429,18 @@ class Settings:
 
         if self.localization_max_tau_s <= 0.0:
             raise ValueError("MINIMAPPR_LOCALIZATION_MAX_TAU_S must be > 0")
+        if self.localization_window_seconds <= 0.0:
+            raise ValueError("MINIMAPPR_LOCALIZATION_WINDOW_SECONDS must be > 0")
+        if self.classification_window_seconds <= 0.0:
+            self.classification_window_seconds = self.localization_window_seconds
+        if self.classification_window_seconds < self.localization_window_seconds:
+            raise ValueError(
+                "MINIMAPPR_CLASSIFICATION_WINDOW_SECONDS must be >= MINIMAPPR_LOCALIZATION_WINDOW_SECONDS"
+            )
+        if self.max_sensor_buffer_seconds < self.classification_window_seconds:
+            raise ValueError(
+                "MINIMAPPR_MAX_SENSOR_BUFFER_SECONDS must be >= MINIMAPPR_CLASSIFICATION_WINDOW_SECONDS"
+            )
         self.localization_algorithm = self.localization_algorithm.strip().lower()
         if self.localization_algorithm not in {"gcc_phat", "srp_phat", "music", "esprit"}:
             raise ValueError("MINIMAPPR_LOCALIZATION_ALGORITHM must be one of gcc_phat/srp_phat/music/esprit")
@@ -562,6 +581,7 @@ class Settings:
             config_path=peers_config_path,
         )
         return cls(
+            runtime_profile=_env_str("MINIMAPPR_RUNTIME_PROFILE", "default"),
             host=_env_str("MINIMAPPR_HOST", "0.0.0.0"),
             port=_env_int("MINIMAPPR_PORT", 8080),
             db_path=Path(_env_str("MINIMAPPR_DB_PATH", "data/minimappr.db")),
@@ -579,6 +599,7 @@ class Settings:
             trigger_rms=_env_float("MINIMAPPR_TRIGGER_RMS", 0.001),
             trigger_cooldown_seconds=_env_float("MINIMAPPR_TRIGGER_COOLDOWN_SECONDS", 0.8),
             localization_window_seconds=_env_float("MINIMAPPR_LOCALIZATION_WINDOW_SECONDS", 0.08),
+            classification_window_seconds=_env_float("MINIMAPPR_CLASSIFICATION_WINDOW_SECONDS", 0.0),
             max_sensor_buffer_seconds=_env_float("MINIMAPPR_MAX_SENSOR_BUFFER_SECONDS", 8.0),
             preprocess_enabled=_env_bool("MINIMAPPR_PREPROCESS_ENABLED", True),
             ingest_gain_multiplier=_env_float("MINIMAPPR_INGEST_GAIN_MULTIPLIER", 4.0),
@@ -600,6 +621,10 @@ class Settings:
                 0.45,
             ),
             localization_tight_array_aperture_m=_env_float("MINIMAPPR_LOCALIZATION_TIGHT_ARRAY_APERTURE_M", 0.35),
+            skip_localization_for_classification=_env_bool(
+                "MINIMAPPR_SKIP_LOCALIZATION_FOR_CLASSIFICATION",
+                False,
+            ),
             beamformed_classification_enabled=_env_bool("MINIMAPPR_BEAMFORMED_CLASSIFICATION_ENABLED", False),
             beamformer_type=_env_str("MINIMAPPR_BEAMFORMER_TYPE", "delay_and_sum"),
             beamformed_classification_min_sensor_count=_env_int(
@@ -715,6 +740,7 @@ class Settings:
             trigger_rms=self.trigger_rms,
             trigger_cooldown_seconds=self.trigger_cooldown_seconds,
             localization_window_seconds=self.localization_window_seconds,
+            classification_window_seconds=self.classification_window_seconds,
             max_sensor_buffer_seconds=self.max_sensor_buffer_seconds,
             default_temperature_c=self.default_temperature_c,
             default_humidity=self.default_humidity,
@@ -735,6 +761,7 @@ class Settings:
             localization_subspace_freq_max_hz=self.localization_subspace_freq_max_hz,
             localization_refine_confidence_threshold=self.localization_refine_confidence_threshold,
             localization_tight_array_aperture_m=self.localization_tight_array_aperture_m,
+            skip_localization_for_classification=self.skip_localization_for_classification,
             beamformed_classification_enabled=self.beamformed_classification_enabled,
             beamformer_type=self.beamformer_type,
             beamformed_classification_min_sensor_count=self.beamformed_classification_min_sensor_count,
@@ -842,4 +869,22 @@ class Settings:
             tqi_hysteresis=self.federation_tqi_hysteresis,
             deconflict_use_3d=self.federation_deconflict_use_3d,
             auth_token=token or None,
+        )
+
+    def _apply_runtime_profile(self) -> None:
+        if self.runtime_profile == "default":
+            return
+        if self.runtime_profile != "birdnet_omni_testing":
+            raise ValueError(
+                "MINIMAPPR_RUNTIME_PROFILE must be 'default' or 'birdnet_omni_testing'"
+            )
+
+        # BirdNET needs a much longer omni clip than the TDOA/localization path.
+        self.classifier_backend = "birdnet"
+        self.beamformed_classification_enabled = False
+        self.skip_localization_for_classification = True
+        self.classification_window_seconds = max(self.classification_window_seconds, 30.0)
+        self.max_sensor_buffer_seconds = max(
+            self.max_sensor_buffer_seconds,
+            self.classification_window_seconds + 2.0,
         )

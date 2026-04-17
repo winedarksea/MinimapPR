@@ -71,6 +71,19 @@ class SensorStreamBuffer:
 
         return self.samples[offset_samples:end_samples].copy()
 
+    def get_window_ending_at(self, end_time_ns: int, window_seconds: float) -> np.ndarray | None:
+        if self.start_time_ns is None or self.samples.size == 0:
+            return None
+
+        window_samples = max(1, int(round(window_seconds * self.sample_rate_hz)))
+        end_offset_samples = int(round((end_time_ns - self.start_time_ns) / self.ns_per_sample))
+        start_offset_samples = end_offset_samples - window_samples
+
+        if start_offset_samples < 0 or end_offset_samples > self.samples.size:
+            return None
+
+        return self.samples[start_offset_samples:end_offset_samples].copy()
+
 
 class MultiSensorBuffer:
     def __init__(self, max_duration_seconds: float) -> None:
@@ -100,6 +113,24 @@ class MultiSensorBuffer:
                 if buffer is None or buffer.sample_rate_hz != sample_rate_hz:
                     continue
                 window = buffer.get_window(center_time_ns=center_time_ns, window_seconds=window_seconds)
+                if window is not None:
+                    result[sensor_id] = window
+            return result
+
+    async def get_synchronized_window_ending_at(
+        self,
+        sensor_ids: list[str],
+        end_time_ns: int,
+        window_seconds: float,
+        sample_rate_hz: int,
+    ) -> dict[str, np.ndarray]:
+        async with self._lock:
+            result: dict[str, np.ndarray] = {}
+            for sensor_id in sensor_ids:
+                buffer = self._buffers.get(sensor_id)
+                if buffer is None or buffer.sample_rate_hz != sample_rate_hz:
+                    continue
+                window = buffer.get_window_ending_at(end_time_ns=end_time_ns, window_seconds=window_seconds)
                 if window is not None:
                     result[sensor_id] = window
             return result

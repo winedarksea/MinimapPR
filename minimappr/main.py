@@ -586,6 +586,112 @@ async def get_config(request: Request) -> dict:
     }
 
 
+_CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
+    "trigger_rms": float,
+    "trigger_cooldown_seconds": float,
+    "localization_window_seconds": float,
+    "preprocess_enabled": bool,
+    "audio_highpass_hz": float,
+    "audio_lowpass_hz": float,
+    "localization_algorithm": str,
+    "localization_strategy": str,
+    "classifier_backend": str,
+    "yamnet_min_confidence": float,
+    "beamformer_type": str,
+    "tracking_filter": str,
+    "fusion_worker_count": int,
+    "coordinate_mode": str,
+}
+
+_LOCALIZATION_ALGORITHMS = {"gcc_phat", "srp_phat", "music", "esprit"}
+_LOCALIZATION_STRATEGIES = {"fixed", "geometry_aware", "cascade"}
+_BEAMFORMER_TYPES = {"delay_and_sum", "das", "freq_domain_das", "mvdr", "superdirective", "gevd"}
+_CLASSIFIER_BACKENDS = {"yamnet", "birdnet", "heuristic"}
+_TRACKING_FILTERS = {"linear", "kalman"}
+_COORDINATE_MODES = {"flat", "geodetic"}
+
+
+@app.patch("/api/v1/config")
+async def patch_config(request: Request) -> dict:
+    state = _require_state(request)
+    body: dict = await request.json()
+
+    unknown = set(body) - set(_CONFIG_PATCH_ALLOWLIST)
+    if unknown:
+        raise HTTPException(status_code=422, detail=f"Unknown or read-only fields: {sorted(unknown)}")
+
+    errors: list[str] = []
+    coerced: dict[str, object] = {}
+
+    for key, raw in body.items():
+        target_type = _CONFIG_PATCH_ALLOWLIST[key]
+        try:
+            if target_type is bool:
+                if not isinstance(raw, bool):
+                    raise ValueError("must be a boolean")
+                value: object = raw
+            elif target_type is float:
+                value = float(raw)
+            elif target_type is int:
+                value = int(raw)
+            else:
+                value = str(raw)
+        except (TypeError, ValueError) as exc:
+            errors.append(f"{key}: {exc}")
+            continue
+
+        if key == "trigger_rms" and value <= 0.0:  # type: ignore[operator]
+            errors.append("trigger_rms: must be > 0")
+        elif key == "trigger_cooldown_seconds" and value < 0.0:  # type: ignore[operator]
+            errors.append("trigger_cooldown_seconds: must be >= 0")
+        elif key == "localization_window_seconds" and value <= 0.0:  # type: ignore[operator]
+            errors.append("localization_window_seconds: must be > 0")
+        elif key == "audio_highpass_hz" and value < 0.0:  # type: ignore[operator]
+            errors.append("audio_highpass_hz: must be >= 0")
+        elif key == "audio_lowpass_hz" and value < 0.0:  # type: ignore[operator]
+            errors.append("audio_lowpass_hz: must be >= 0")
+        elif key == "yamnet_min_confidence" and not (0.0 <= value <= 1.0):  # type: ignore[operator]
+            errors.append("yamnet_min_confidence: must be in [0, 1]")
+        elif key == "fusion_worker_count" and value < 1:  # type: ignore[operator]
+            errors.append("fusion_worker_count: must be >= 1")
+        elif key == "localization_algorithm" and value not in _LOCALIZATION_ALGORITHMS:
+            errors.append(f"localization_algorithm: must be one of {sorted(_LOCALIZATION_ALGORITHMS)}")
+        elif key == "localization_strategy" and value not in _LOCALIZATION_STRATEGIES:
+            errors.append(f"localization_strategy: must be one of {sorted(_LOCALIZATION_STRATEGIES)}")
+        elif key == "beamformer_type":
+            v = str(value).strip().lower()
+            if v == "das":
+                v = "delay_and_sum"
+            if v not in _BEAMFORMER_TYPES:
+                errors.append(f"beamformer_type: must be one of {sorted(_BEAMFORMER_TYPES)}")
+            else:
+                value = v
+        elif key == "classifier_backend" and value not in _CLASSIFIER_BACKENDS:
+            errors.append(f"classifier_backend: must be one of {sorted(_CLASSIFIER_BACKENDS)}")
+        elif key == "tracking_filter" and value not in _TRACKING_FILTERS:
+            errors.append(f"tracking_filter: must be one of {sorted(_TRACKING_FILTERS)}")
+        elif key == "coordinate_mode":
+            v = str(value).strip().lower()
+            if v not in _COORDINATE_MODES:
+                errors.append(f"coordinate_mode: must be one of {sorted(_COORDINATE_MODES)}")
+            else:
+                value = v
+
+        if not errors or key not in {e.split(":")[0] for e in errors}:
+            coerced[key] = value
+
+    if errors:
+        raise HTTPException(status_code=422, detail=errors)
+
+    settings: Settings = state.settings
+    for key, value in coerced.items():
+        object.__setattr__(settings, key, value)
+
+    snapshot = await get_config(request)
+    await state.live_hub.broadcast({"type": "config_updated", "config": snapshot})
+    return snapshot
+
+
 @app.get("/api/v1/fusion/status", response_model=FusionStatusResponse)
 async def fusion_status(request: Request) -> dict:
     state = _require_state(request)

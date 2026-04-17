@@ -34,6 +34,7 @@ class DiagnosticsService:
             "runtime": {
                 "python_version": platform.python_version(),
                 "platform": platform.platform(),
+                "runtime_profile": self._settings.runtime_profile,
                 "classifier": classifier_runtime,
                 "beamforming": {
                     "enabled": self._settings.beamformed_classification_enabled,
@@ -45,7 +46,11 @@ class DiagnosticsService:
                     "algorithm": self._settings.localization_algorithm,
                     "strategy": self._settings.localization_strategy,
                     "window_seconds": self._settings.localization_window_seconds,
+                    "classification_window_seconds": self._settings.classification_window_seconds,
                     "max_tau_s": self._settings.localization_max_tau_s,
+                    "skip_localization_for_classification": (
+                        self._settings.skip_localization_for_classification
+                    ),
                 },
                 "paths": {
                     "db_path": str(self._settings.db_path),

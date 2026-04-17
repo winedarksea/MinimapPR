@@ -195,3 +195,31 @@ def test_create_classifier_passes_yamnet_conditioning_settings(monkeypatch, tmp_
     assert captured["min_confidence"] == pytest.approx(0.31)
     assert captured["target_rms"] == pytest.approx(0.22)
     assert captured["max_input_gain"] == pytest.approx(11.0)
+
+
+def test_create_classifier_uses_birdnet_as_primary_backend(monkeypatch, tmp_path) -> None:
+    captured: dict[str, float] = {}
+
+    class _StubBirdNETClassifier(AudioClassifier):
+        def __init__(self, min_confidence: float = 0.1) -> None:
+            captured["min_confidence"] = min_confidence
+
+        def classify(self, samples: np.ndarray, sample_rate_hz: int) -> ClassificationResult:
+            del samples, sample_rate_hz
+            return ClassificationResult(label="american robin", confidence=0.91, scores={"american robin": 0.91})
+
+    stub_module = types.ModuleType("minimappr.classifiers.birdnet")
+    stub_module.BirdNETClassifier = _StubBirdNETClassifier
+    monkeypatch.setitem(sys.modules, "minimappr.classifiers.birdnet", stub_module)
+
+    settings = Settings(
+        classifier_backend="birdnet",
+        birdnet_trigger_min_confidence=0.07,
+        model_chain_config_path=tmp_path / "missing_model_chain.json",
+    )
+
+    classifier = factory.create_classifier(settings)
+    result = classifier.classify(np.zeros(64, dtype=np.float32), 16_000)
+
+    assert captured["min_confidence"] == pytest.approx(0.07)
+    assert result.label == "american robin"

@@ -91,6 +91,8 @@ class LocalizedCandidate:
     selected_windows: dict[str, np.ndarray]
     selected_positions: dict[str, np.ndarray]
     reference_signal: np.ndarray
+    classification_selected_windows: dict[str, np.ndarray]
+    classification_reference_signal: np.ndarray
     localization_method: str
     capability_tier: str
     environment: dict[str, Any]
@@ -487,6 +489,11 @@ class FusionNode:
         tier = self.degradation_model.tier_for_sensor_count(len(selected_ids))
         selected_windows = {sensor_id: windows[sensor_id] for sensor_id in selected_ids}
         selected_positions = {sensor_id: sensor_positions[sensor_id] for sensor_id in selected_ids}
+        classification_windows = await self._classification_windows_for_event(
+            candidate=candidate,
+            selected_sensor_ids=selected_ids,
+            fallback_windows=selected_windows,
+        )
 
         environment_location = self._sensor_centroid(selected_positions)
         conditions = self.environment_provider.get_conditions(environment_location)
@@ -498,6 +505,18 @@ class FusionNode:
             "wind_dir_deg": conditions.wind_dir_deg,
             "metadata": dict(conditions.metadata or {}),
         }
+        if self.localization_config.skip_localization_for_classification:
+            return self._build_reference_sensor_candidate(
+                candidate=candidate,
+                energies=energies,
+                sensor_positions=sensor_positions,
+                selected_ids=selected_ids,
+                selected_windows=selected_windows,
+                classification_windows=classification_windows,
+                environment_summary=environment_summary,
+                localization_method="classification_reference_sensor_only",
+            )
+
         if tier == "full_3d":
             try:
                 localization = await asyncio.to_thread(
@@ -526,6 +545,11 @@ class FusionNode:
                     selected_windows=selected_windows,
                     selected_positions=selected_positions,
                     reference_signal=reference_signal,
+                    classification_selected_windows=classification_windows,
+                    classification_reference_signal=classification_windows.get(
+                        localization.reference_sensor,
+                        reference_signal,
+                    ),
                     localization_method=localization_method,
                     capability_tier=tier,
                     environment=environment_summary,
@@ -561,6 +585,11 @@ class FusionNode:
                     selected_windows=selected_windows,
                     selected_positions=selected_positions,
                     reference_signal=reference_signal,
+                    classification_selected_windows=classification_windows,
+                    classification_reference_signal=classification_windows.get(
+                        localization.reference_sensor,
+                        reference_signal,
+                    ),
                     localization_method=localization_method,
                     capability_tier=tier,
                     environment=environment_summary,
@@ -569,23 +598,15 @@ class FusionNode:
                 self._metrics.localization_failures += 1
                 return None
 
-        reference_sensor = max(energies.items(), key=lambda item: item[1])[0]
-        ref_signal = windows[reference_sensor]
-        ref_pos = sensor_positions[reference_sensor]
-        return LocalizedCandidate(
+        return self._build_reference_sensor_candidate(
             candidate=candidate,
-            localization_position_m=(float(ref_pos[0]), float(ref_pos[1]), float(ref_pos[2])),
-            localization_confidence=self.fusion_config.fallback_localization_confidence,
-            localization_gdop=float("inf"),
-            reference_sensor=reference_sensor,
-            tdoa_s={},
-            selected_sensor_ids=selected_ids,
+            energies=energies,
+            sensor_positions=sensor_positions,
+            selected_ids=selected_ids,
             selected_windows=selected_windows,
-            selected_positions=selected_positions,
-            reference_signal=ref_signal,
+            classification_windows=classification_windows,
+            environment_summary=environment_summary,
             localization_method="fallback_reference_sensor",
-            capability_tier=tier,
-            environment=environment_summary,
         )
 
     # ------------------------------------------------------------------
@@ -599,12 +620,12 @@ class FusionNode:
         detection building/persistence to ``DetectionAssembler``.
         """
         classified = await self._classification_orchestrator.classify(
-            reference_signal=product.reference_signal,
+            reference_signal=product.classification_reference_signal,
             sample_rate_hz=product.candidate.sample_rate_hz,
             capability_tier=product.capability_tier,
             selected_sensor_ids=product.selected_sensor_ids,
             selected_positions=product.selected_positions,
-            selected_windows=product.selected_windows,
+            selected_windows=product.classification_selected_windows,
             localization_position_m=product.localization_position_m,
             event_time_ns=product.candidate.event_time_ns,
         )
@@ -661,6 +682,62 @@ class FusionNode:
             track=assembly.track,
             suppressed_by_zone=assembly.suppressed_by_zone,
             suppression_reasons=assembly.suppression_reasons,
+        )
+
+    async def _classification_windows_for_event(
+        self,
+        *,
+        candidate: EventCandidate,
+        selected_sensor_ids: list[str],
+        fallback_windows: dict[str, np.ndarray],
+    ) -> dict[str, np.ndarray]:
+        if (
+            self.localization_config.classification_window_seconds
+            <= self.localization_config.localization_window_seconds
+        ):
+            return fallback_windows
+
+        trailing_windows = await self.buffer.get_synchronized_window_ending_at(
+            sensor_ids=selected_sensor_ids,
+            end_time_ns=candidate.event_time_ns,
+            window_seconds=self.localization_config.classification_window_seconds,
+            sample_rate_hz=candidate.sample_rate_hz,
+        )
+        if len(trailing_windows) == len(selected_sensor_ids):
+            return trailing_windows
+        return fallback_windows
+
+    def _build_reference_sensor_candidate(
+        self,
+        *,
+        candidate: EventCandidate,
+        energies: dict[str, float],
+        sensor_positions: dict[str, np.ndarray],
+        selected_ids: list[str],
+        selected_windows: dict[str, np.ndarray],
+        classification_windows: dict[str, np.ndarray],
+        environment_summary: dict[str, Any],
+        localization_method: str,
+    ) -> LocalizedCandidate:
+        reference_sensor = max(energies.items(), key=lambda item: item[1])[0]
+        ref_signal = selected_windows[reference_sensor]
+        ref_pos = sensor_positions[reference_sensor]
+        return LocalizedCandidate(
+            candidate=candidate,
+            localization_position_m=(float(ref_pos[0]), float(ref_pos[1]), float(ref_pos[2])),
+            localization_confidence=self.fusion_config.fallback_localization_confidence,
+            localization_gdop=float("inf"),
+            reference_sensor=reference_sensor,
+            tdoa_s={},
+            selected_sensor_ids=selected_ids,
+            selected_windows=selected_windows,
+            selected_positions={sensor_id: sensor_positions[sensor_id] for sensor_id in selected_ids},
+            reference_signal=ref_signal,
+            classification_selected_windows=classification_windows,
+            classification_reference_signal=classification_windows.get(reference_sensor, ref_signal),
+            localization_method=localization_method,
+            capability_tier=self.degradation_model.tier_for_sensor_count(len(selected_ids)),
+            environment=environment_summary,
         )
 
     # ------------------------------------------------------------------

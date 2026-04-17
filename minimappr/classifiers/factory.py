@@ -33,6 +33,14 @@ def create_classifier(settings: Settings) -> AudioClassifier:
         except Exception as exc:  # pragma: no cover - optional runtime backend
             logger.warning("YAMNet unavailable (%s). Falling back to heuristic classifier.", exc)
             base_classifier = _create_heuristic(settings)
+    elif backend == "birdnet":
+        try:
+            from minimappr.classifiers.birdnet import BirdNETClassifier  # noqa: PLC0415
+
+            base_classifier = BirdNETClassifier(min_confidence=settings.birdnet_trigger_min_confidence)
+        except Exception as exc:  # pragma: no cover - optional runtime backend
+            logger.warning("BirdNET unavailable (%s). Falling back to heuristic classifier.", exc)
+            base_classifier = _create_heuristic(settings)
     else:
         base_classifier = _create_heuristic(settings)
 

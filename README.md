@@ -137,13 +137,24 @@ Notes:
 Implemented classifier architecture is pluggable:
 - default: `heuristic` (fast baseline labels: `bird_like`, `speech_like`, `impulse`, `machine_hum`, `ambient`, `unknown`)
 - optional: `yamnet` (if TensorFlow dependencies are installed)
+- optional: `birdnet` (direct bird species classifier, better suited to bird-focused testing with longer clips)
 
 Set backend with:
 ```bash
 export MINIMAPPR_CLASSIFIER=heuristic
 # or
 export MINIMAPPR_CLASSIFIER=yamnet
+# or
+export MINIMAPPR_CLASSIFIER=birdnet
 ```
+
+For bird-focused testing, there is also a bundled runtime preset:
+
+```bash
+export MINIMAPPR_RUNTIME_PROFILE=birdnet_omni_testing
+```
+
+That preset switches to direct BirdNET, disables beamformed classification, skips localization before classification, and expands the classification clip to a 30 s trailing omni window while keeping the short localization trigger window intact.
 
 ## API Endpoints
 - `GET /health`
@@ -187,6 +198,7 @@ Key env vars:
 - `MINIMAPPR_TRIGGER_RMS` (default `0.015`)
 - `MINIMAPPR_TRIGGER_COOLDOWN_SECONDS` (default `0.8`)
 - `MINIMAPPR_LOCALIZATION_WINDOW_SECONDS` (default `0.08`)
+- `MINIMAPPR_CLASSIFICATION_WINDOW_SECONDS` (default `0`, inherits `MINIMAPPR_LOCALIZATION_WINDOW_SECONDS`)
 - `MINIMAPPR_DEFAULT_TEMPERATURE_C` (default `20.0`)
 - `MINIMAPPR_DEFAULT_HUMIDITY` (default `0.5`)
 - `MINIMAPPR_ENVIRONMENT_READING_MAX_AGE_SECONDS` (default `300.0`, `0` disables staleness cutoff)
@@ -194,7 +206,9 @@ Key env vars:
 - `MINIMAPPR_SITE_ORIGIN_LON` (default `-122.4194`)
 - `MINIMAPPR_SITE_ORIGIN_ALT_M` (default `0.0`)
 - `MINIMAPPR_COORDINATE_MODE` (`flat` or `geodetic`; default `flat`)
-- `MINIMAPPR_CLASSIFIER` (`heuristic` or `yamnet`)
+- `MINIMAPPR_RUNTIME_PROFILE` (`default` or `birdnet_omni_testing`)
+- `MINIMAPPR_CLASSIFIER` (`heuristic`, `yamnet`, or `birdnet`)
+- `MINIMAPPR_SKIP_LOCALIZATION_FOR_CLASSIFICATION` (`false` default)
 - `MINIMAPPR_TRACKING_FILTER` (`linear` default, or `kalman`)
 - `MINIMAPPR_KALMAN_PROCESS_NOISE` (default `2.0`)
 - `MINIMAPPR_KALMAN_MEASUREMENT_NOISE` (default `1.5`)

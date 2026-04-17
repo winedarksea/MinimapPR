@@ -60,6 +60,21 @@ export MINIMAPPR_MODEL_CHAIN_CONFIG_PATH=data/model_chain.json
 # export MINIMAPPR_FEDERATION_TOKEN=your-secret-token
 ```
 
+### Bird-Focused Test Mode
+
+When you want to test bird detections without the YAMNet gate and without beamformed classification, use the built-in BirdNET omni profile instead:
+
+```bash
+export MINIMAPPR_RUNTIME_PROFILE=birdnet_omni_testing
+export MINIMAPPR_BIRDNET_TRIGGER_MIN_CONFIDENCE=0.05
+```
+
+That profile:
+- switches the primary classifier to `birdnet`
+- disables beamformed classification
+- skips localization before classification
+- uses a 30 s trailing omni classification clip instead of the short localization window
+
 ---
 
 ## Startup
