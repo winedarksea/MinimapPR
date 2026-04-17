@@ -229,13 +229,18 @@ function playDetectionSnippet(detectionId) {
   audioPlayerEl.play().catch(() => {});
 }
 
-function playNodeAudioDebug(nodeId) {
+function playNodeAudioDebug(nodeId, channel = null) {
   const requestedAt = Date.now();
-  audioPlayerEl.src = `/api/v1/nodes/${encodeURIComponent(nodeId)}/audio/recent?seconds=10&requested_at=${requestedAt}`;
+  const query = new URLSearchParams({ seconds: "10", requested_at: String(requestedAt) });
+  if (Number.isInteger(channel) && channel >= 0) {
+    query.set("channel", String(channel));
+  }
+  audioPlayerEl.src = `/api/v1/nodes/${encodeURIComponent(nodeId)}/audio/recent?${query.toString()}`;
   audioPlayerEl
     .play()
     .then(() => {
-      statusEl.textContent = `Listening to ${nodeId} debug audio`;
+      const suffix = Number.isInteger(channel) && channel >= 0 ? ` channel ${channel + 1}` : " mix";
+      statusEl.textContent = `Listening to ${nodeId}${suffix} debug audio`;
     })
     .catch(() => {
       statusEl.textContent = `No recent audio available for ${nodeId}`;
@@ -328,6 +333,14 @@ function renderNodeAudioPanel() {
       const disabled = status === "no_audio" ? "disabled" : "";
       const gps = nodeGpsSummary(node);
       const environment = nodeEnvironmentSummary(node);
+      const buttons = [
+        `<button type="button" data-play-node-audio="${node.id}" ${disabled}>Mix</button>`,
+      ];
+      for (let channelIndex = 0; channelIndex < sensorCount; channelIndex += 1) {
+        buttons.push(
+          `<button type="button" data-play-node-audio="${node.id}" data-play-node-channel="${channelIndex}" ${disabled}>Ch ${channelIndex + 1}</button>`,
+        );
+      }
       return `<li data-node-id="${node.id}">
         <div class="node-meta-block">
           <div class="node-audio-header">
@@ -348,7 +361,7 @@ function renderNodeAudioPanel() {
           <div class="node-audio-meta">${formatAudioDebugMeta(audioDebug)} | sensors ${activeSensorCount}/${sensorCount}</div>
         </div>
         <div class="node-audio-actions">
-          <button type="button" data-play-node-audio="${node.id}" ${disabled}>Listen</button>
+          ${buttons.join("")}
         </div>
       </li>`;
     })
@@ -358,7 +371,9 @@ function renderNodeAudioPanel() {
     button.addEventListener("click", () => {
       const nodeId = button.dataset.playNodeAudio;
       if (!nodeId) return;
-      playNodeAudioDebug(nodeId);
+      const channelText = button.dataset.playNodeChannel;
+      const channel = channelText === undefined ? null : Number.parseInt(channelText, 10);
+      playNodeAudioDebug(nodeId, Number.isInteger(channel) ? channel : null);
     });
   });
 }

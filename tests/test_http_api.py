@@ -302,6 +302,80 @@ def test_node_recent_audio_endpoint_returns_wav(monkeypatch, tmp_path: Path) -> 
             assert wav.getnframes() > 0
 
 
+def test_node_recent_audio_endpoint_can_render_single_channel(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+
+    channels = np.vstack(
+        [
+            np.linspace(-0.75, 0.75, 1024, dtype=np.float32),
+            (0.35 * np.sin(np.linspace(0.0, 12.0 * np.pi, 1024, dtype=np.float32))).astype(np.float32),
+        ]
+    )
+    payload = {
+        "node": {
+            "id": "http-node-stereo",
+            "node_type": "point",
+            "position_m": [0.0, 0.0, 0.0],
+            "sensor_offsets_m": [[0.0, 0.0, 0.0], [0.1, 0.0, 0.0]],
+            "capabilities": ["audio"],
+            "metadata": {},
+            "properties": {},
+        },
+        "frame": {
+            "start_time_ns": time.time_ns(),
+            "sample_rate_hz": 16000,
+            "channels": 2,
+            "encoding": "pcm16le",
+            "samples_b64": encode_pcm16le_b64(channels),
+            "sequence": 1,
+            "source_type": "raw_sensor",
+        },
+    }
+
+    def _read_pcm_mono(wav_bytes: bytes) -> np.ndarray:
+        with wave.open(io.BytesIO(wav_bytes), "rb") as wav:
+            assert wav.getnchannels() == 1
+            assert wav.getframerate() == 16000
+            return np.frombuffer(wav.readframes(wav.getnframes()), dtype="<i2")
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/ingest/frame", json=payload)
+        assert response.status_code == 200
+
+        mix_response = client.get("/api/v1/nodes/http-node-stereo/audio/recent", params={"seconds": 10})
+        channel0_response = client.get(
+            "/api/v1/nodes/http-node-stereo/audio/recent",
+            params={"seconds": 10, "channel": 0},
+        )
+        channel1_response = client.get(
+            "/api/v1/nodes/http-node-stereo/audio/recent",
+            params={"seconds": 10, "channel": 1},
+        )
+
+        assert mix_response.status_code == 200
+        assert mix_response.headers["x-minimappr-rendered-channel"] == "mix"
+        assert channel0_response.status_code == 200
+        assert channel0_response.headers["x-minimappr-rendered-channel"] == "0"
+        assert channel1_response.status_code == 200
+        assert channel1_response.headers["x-minimappr-rendered-channel"] == "1"
+
+        mix_pcm = _read_pcm_mono(mix_response.content)
+        channel0_pcm = _read_pcm_mono(channel0_response.content)
+        channel1_pcm = _read_pcm_mono(channel1_response.content)
+        assert mix_pcm.size > 0
+        assert channel0_pcm.size == mix_pcm.size
+        assert channel1_pcm.size == mix_pcm.size
+        assert not np.array_equal(channel0_pcm, channel1_pcm)
+        assert not np.array_equal(mix_pcm, channel0_pcm)
+        assert not np.array_equal(mix_pcm, channel1_pcm)
+
+        missing_channel = client.get(
+            "/api/v1/nodes/http-node-stereo/audio/recent",
+            params={"seconds": 10, "channel": 2},
+        )
+        assert missing_channel.status_code == 404
+
+
 def test_node_recent_audio_endpoint_rejects_unknown_node(monkeypatch, tmp_path: Path) -> None:
     _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
 

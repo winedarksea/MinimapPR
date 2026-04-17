@@ -921,6 +921,7 @@ async def get_recent_node_audio(
     node_id: str,
     request: Request,
     seconds: float = Query(default=10.0, ge=1.0, le=30.0),
+    channel: int | None = Query(default=None, ge=0),
 ) -> Response:
     state = _require_state(request)
     settings: Settings = state.settings
@@ -945,10 +946,10 @@ async def get_recent_node_audio(
     ordered_descriptors = sorted(sensor_descriptors, key=lambda descriptor: descriptor.channel_index)
     channels: list[np.ndarray] = []
     for descriptor in ordered_descriptors:
-        channel = windows.get(descriptor.sensor_id)
-        if channel is None:
+        source_channel = windows.get(descriptor.sensor_id)
+        if source_channel is None:
             continue
-        channels.append(channel)
+        channels.append(source_channel)
     if not channels:
         raise HTTPException(status_code=404, detail="No recent audio available for node")
 
@@ -957,8 +958,15 @@ async def get_recent_node_audio(
         raise HTTPException(status_code=404, detail="No recent audio available for node")
 
     channels_first = np.vstack([channel[-common_samples:] for channel in channels])
-    mono = mono_mix(channels_first)[None, :]
-    wav_bytes = wav_multichannel_bytes(mono, sample_rate_hz=sample_rate_hz)
+    if channel is not None:
+        if channel >= channels_first.shape[0]:
+            raise HTTPException(status_code=404, detail="Requested audio channel is unavailable for node")
+        rendered = channels_first[channel : channel + 1]
+        selected_channel = channel
+    else:
+        rendered = mono_mix(channels_first)[None, :]
+        selected_channel = None
+    wav_bytes = wav_multichannel_bytes(rendered, sample_rate_hz=sample_rate_hz)
 
     return Response(
         content=wav_bytes,
@@ -968,6 +976,7 @@ async def get_recent_node_audio(
             "X-Minimappr-Node-Id": node_id,
             "X-Minimappr-Sample-Rate": str(sample_rate_hz),
             "X-Minimappr-Source-Channels": str(len(channels)),
+            "X-Minimappr-Rendered-Channel": "mix" if selected_channel is None else str(selected_channel),
             "X-Minimappr-Clip-Seconds": f"{common_samples / float(sample_rate_hz):.3f}",
             "X-Minimappr-Audio-Age-Seconds": f"{age_seconds:.3f}",
         },

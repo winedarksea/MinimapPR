@@ -60,6 +60,11 @@ add_executable(sirith_tetrahedral
         ${MMPR_AUDIO_PICO_DIR}/src/SirithPicoTdmSource.cpp
         )
 
+pico_generate_pio_header(
+        sirith_tetrahedral
+        ${MMPR_AUDIO_PICO_DIR}/src/mmpr_audio_rx.pio
+)
+
 pico_set_program_name(sirith_tetrahedral "sirith_tetrahedral")
 pico_set_program_version(sirith_tetrahedral "0.1")
 

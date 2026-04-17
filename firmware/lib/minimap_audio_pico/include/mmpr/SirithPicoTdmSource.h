@@ -16,10 +16,9 @@ struct SirithPicoTdmPins {
 struct SirithPicoTdmConfig {
   uint32_t sampleRateHz = 16000;
   size_t frameSamples = 1024;
-  int32_t sampleShiftBits = 16;
-
   uint8_t tdmSlots = 4;
   uint8_t slotBits = 32;
+  uint8_t validBits = 24;
 
   // Output channel index -> TDM slot index (0-based).
   uint8_t outputChannelToSlot[4] = {0, 1, 3, 2};

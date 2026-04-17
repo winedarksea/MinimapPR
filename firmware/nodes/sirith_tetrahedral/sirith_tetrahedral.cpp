@@ -217,9 +217,9 @@ mmpr::SirithPicoTdmPins gTdmPins = {
 mmpr::SirithPicoTdmConfig gTdmConfig = {
     nodecfg::kAudioSampleRateHz,
     nodecfg::kAudioFrameSamples,
-    nodecfg::kAudioSampleShiftBits,
     nodecfg::kAudioTdmSlots,
     nodecfg::kAudioSlotBits,
+    nodecfg::kAudioValidBits,
     {
         nodecfg::kOutputChannelToSlot[0],
         nodecfg::kOutputChannelToSlot[1],
@@ -238,8 +238,8 @@ mmpr::PicoI2SMonoPins gI2sMonoPins = {
 mmpr::PicoI2SMonoConfig gI2sMonoConfig = {
     nodecfg::kI2sMonoSampleRateHz,
     nodecfg::kI2sMonoFrameSamples,
-    nodecfg::kI2sMonoSampleShiftBits,
     nodecfg::kI2sMonoSlotBits,
+    nodecfg::kI2sMonoValidBits,
     nodecfg::kI2sMonoChannelSide == nodecfg::I2sMonoChannelSide::kRight
         ? mmpr::PicoI2SChannelSide::kRight
         : mmpr::PicoI2SChannelSide::kLeft,

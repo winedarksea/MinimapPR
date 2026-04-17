@@ -1,0 +1,37 @@
+.program mmpr_pico_i2s_in
+.side_set 2
+
+; Stereo I2S input with the standard one-bit LRCLK->MSB delay.
+; The host initializes Y = slot_bits - 2 and primes the shifter with two
+; EXEC'd IN instructions to align the first real left/right slot words.
+
+.wrap_target
+    mov x, y         side 0b00
+left_channel:
+    in pins, 1       side 0b01
+    jmp x--, left_channel side 0b00
+    in pins, 1       side 0b01
+    mov x, y         side 0b10
+right_channel:
+    in pins, 1       side 0b11
+    jmp x--, right_channel side 0b10
+    in pins, 1       side 0b11
+.wrap
+
+
+.program mmpr_sirith_tdm_in
+.side_set 2
+
+; Four-slot TDM input for the ADAU7112 positive-pulse frame sync format.
+; The host initializes Y = (slot_bits * channels) - 1.
+; FSYNC is driven high for the first bit of the frame and low for the
+; remaining bits. Autopush at 32 bits yields one FIFO word per slot.
+
+.wrap_target
+    mov x, y         side 0b10
+    in pins, 1       side 0b11
+    jmp x--, frame_bits side 0b00
+frame_bits:
+    in pins, 1       side 0b01
+    jmp x--, frame_bits side 0b00
+.wrap

@@ -21,8 +21,8 @@ struct PicoI2SMonoPins {
 struct PicoI2SMonoConfig {
   uint32_t sampleRateHz = 16000;
   size_t frameSamples = 1024;
-  int32_t sampleShiftBits = 16;
   uint8_t slotBits = 32;
+  uint8_t validBits = 24;
   PicoI2SChannelSide channelSide = PicoI2SChannelSide::kLeft;
   bool useSafeDriveStrength = true;
 };

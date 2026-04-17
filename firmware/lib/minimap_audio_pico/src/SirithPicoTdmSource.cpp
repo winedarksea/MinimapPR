@@ -25,60 +25,29 @@
 
 #include <new>
 
+#include "mmpr_audio_rx.pio.h"
+
 namespace mmpr {
 namespace {
-
-// Master TDM receiver.
-// - Generates BCLK/FSYNC on side-set pins (BCLK = side bit 0, FSYNC = side bit 1)
-// - Samples one SDATA bit per BCLK rising edge
-// - Uses a one-bit positive FSYNC pulse at frame start (ADAU7112 TDM requirement)
-// - Auto-pushes every 32 bits -> one slot per FIFO word
-//
-// PIO SET data field is 5 bits (0-31); 127 cannot be loaded directly.
-// Nested-loop design: Y = outer slot counter (3..0 = 4 slots),
-//                     X = inner bit counter (30 or 31 remaining bits per slot).
-//
-// Instruction layout (8 instructions, wrap top = [5], bottom = [0]):
-//  [0] Frame start (wrap entry): FSYNC rises, Y=3.
-//  [1] First bit of frame: BCLK rises with FSYNC still high, sample SDATA.
-//  [2] FSYNC falls, BCLK falls; X=30 (31 more bits to complete slot 0, total 32).
-//  [3] Inner bit loop: BCLK rises, sample SDATA.          <-- shared by all slots
-//  [4] BCLK falls; loop to [3] while X!=0. Autopush fires at 32 bits.
-//  [5] Slot done: Y-- and jump to [6] if slots remain; else wrap to [0].
-//  [6] Next-slot setup: X=31 (all 32 bits go through inner loop).
-//  [7] Enter inner bit loop at [3].
-//
-// JMP targets [3] in [4] and [7], and [6] in [5] are patched after load.
-// Cycles per audio frame: 267  (vs the original intended 257 for the 5-instr design).
-static const uint16_t kSirithTdmMasterRxInstructions[] = {
-    // [0] SET Y=3, FSYNC=1, BCLK=0
-    static_cast<uint16_t>(pio_encode_set(pio_y, 3)    | pio_encode_sideset(2, 0x2)),
-    // [1] IN PINS 1, FSYNC=1, BCLK=1 — first sample; BCLK rises while FSYNC is high
-    static_cast<uint16_t>(pio_encode_in(pio_pins, 1)  | pio_encode_sideset(2, 0x3)),
-    // [2] SET X=30, FSYNC=0, BCLK=0 — FSYNC falls; 31 more bits remain in slot 0
-    static_cast<uint16_t>(pio_encode_set(pio_x, 30)   | pio_encode_sideset(2, 0x0)),
-    // [3] IN PINS 1, BCLK=1 — inner loop: sample on rising BCLK  (target of JMPs in [4],[7])
-    static_cast<uint16_t>(pio_encode_in(pio_pins, 1)  | pio_encode_sideset(2, 0x1)),
-    // [4] JMP X-- [3], BCLK=0 — inner loop back; autopush fires after 32nd bit
-    static_cast<uint16_t>(pio_encode_jmp_x_dec(0)     | pio_encode_sideset(2, 0x0)),  // patched to [3]
-    // [5] JMP Y-- [6], BCLK=0 — slot done; more slots -> [6]; Y=0 -> wrap to [0]
-    static_cast<uint16_t>(pio_encode_jmp_y_dec(0)     | pio_encode_sideset(2, 0x0)),  // patched to [6]
-    // [6] SET X=31, BCLK=0 — next-slot setup: all 32 bits via inner loop
-    static_cast<uint16_t>(pio_encode_set(pio_x, 31)   | pio_encode_sideset(2, 0x0)),
-    // [7] JMP [3], BCLK=0 — enter inner bit loop
-    static_cast<uint16_t>(pio_encode_jmp(0)            | pio_encode_sideset(2, 0x0)),  // patched to [3]
-};
-
-static const pio_program kSirithTdmMasterRxProgram = {
-    kSirithTdmMasterRxInstructions,
-    static_cast<uint>(sizeof(kSirithTdmMasterRxInstructions) / sizeof(kSirithTdmMasterRxInstructions[0])),
-    -1,
-};
 
 constexpr uint32_t kPicoMaxGpio = 47;
 
 bool pinIsValid(uint8_t pin) {
   return pin <= kPicoMaxGpio;
+}
+
+int16_t decodeLeftJustifiedSlotToPcm16(uint32_t rawWord, uint8_t slotBits, uint8_t validBits) {
+  const uint8_t paddingBits = static_cast<uint8_t>(slotBits - validBits);
+  int32_t signedPayload = static_cast<int32_t>(rawWord) >> paddingBits;
+
+  const int shiftToPcm16 = static_cast<int>(validBits) - 16;
+  int32_t pcm16 = shiftToPcm16 > 0 ? (signedPayload >> shiftToPcm16) : (signedPayload << (-shiftToPcm16));
+  if (pcm16 > 32767) {
+    pcm16 = 32767;
+  } else if (pcm16 < -32768) {
+    pcm16 = -32768;
+  }
+  return static_cast<int16_t>(pcm16);
 }
 
 SirithPicoTdmSource* gActiveDmaSource = nullptr;
@@ -98,7 +67,8 @@ bool SirithPicoTdmSource::validateConfig() const {
     return false;
   }
 
-  if (config_.tdmSlots != 4 || config_.slotBits != 32) {
+  if (config_.tdmSlots != 4 || config_.slotBits != 32 || config_.validBits == 0 ||
+      config_.validBits > config_.slotBits) {
     return false;
   }
 
@@ -110,7 +80,6 @@ bool SirithPicoTdmSource::validateConfig() const {
     return false;
   }
 
-  // Side-set requires consecutive output pins.
   if (pins_.ws != (pins_.bclk + 1)) {
     return false;
   }
@@ -128,24 +97,24 @@ bool SirithPicoTdmSource::initPioStateMachine() {
   PIO selectedPio = pio0;
   int selectedSm = pio_claim_unused_sm(selectedPio, false);
   if (selectedSm < 0) {
-      selectedPio = pio1;
-      selectedSm = pio_claim_unused_sm(selectedPio, false);
-      if (selectedSm < 0) {
+    selectedPio = pio1;
+    selectedSm = pio_claim_unused_sm(selectedPio, false);
+    if (selectedSm < 0) {
       MMPR_PICO_LOG_LINE("[sirith-pico] no free PIO state machine");
       return false;
     }
   }
 
-  if (!pio_can_add_program(selectedPio, &kSirithTdmMasterRxProgram)) {
+  if (!pio_can_add_program(selectedPio, &mmpr_sirith_tdm_in_program)) {
     pio_sm_unclaim(selectedPio, selectedSm);
     MMPR_PICO_LOG_LINE("[sirith-pico] no room for PIO TDM program");
     return false;
   }
 
-  const uint32_t bitsPerFrame = static_cast<uint32_t>(config_.slotBits) * static_cast<uint32_t>(config_.tdmSlots);
+  const uint32_t bitsPerFrame =
+      static_cast<uint32_t>(config_.slotBits) * static_cast<uint32_t>(config_.tdmSlots);
   const uint32_t bitRateHz = config_.sampleRateHz * bitsPerFrame;
-  // 2 cycles/bit + 11 cycles of nested-loop overhead per frame (3 setup + 4 slot-checks + 6 next-slot setup).
-  const uint32_t smCyclesPerFrame = (bitsPerFrame * 2u) + 11u;
+  const uint32_t smCyclesPerFrame = (bitsPerFrame * 2u) + 1u;
   const float smClockHz = static_cast<float>(config_.sampleRateHz) * static_cast<float>(smCyclesPerFrame);
   const float clkSysHz = static_cast<float>(clock_get_hz(clk_sys));
   const float clkDiv = clkSysHz / smClockHz;
@@ -156,21 +125,7 @@ bool SirithPicoTdmSource::initPioStateMachine() {
     return false;
   }
 
-  const uint programOffset = pio_add_program(selectedPio, &kSirithTdmMasterRxProgram);
-
-  // JMP instructions use absolute PIO instruction-memory addresses; patch them
-  // now that the actual load offset is known.
-  const uint innerLoopTarget = programOffset + 3u;  // instr [3]: inner bit loop
-  const uint nextSlotTarget  = programOffset + 6u;  // instr [6]: next-slot setup
-  // instr [4]: JMP X-- -> inner bit loop
-  selectedPio->instr_mem[programOffset + 4u] =
-      (kSirithTdmMasterRxInstructions[4] & ~0x1Fu) | (innerLoopTarget & 0x1Fu);
-  // instr [5]: JMP Y-- -> next-slot setup
-  selectedPio->instr_mem[programOffset + 5u] =
-      (kSirithTdmMasterRxInstructions[5] & ~0x1Fu) | (nextSlotTarget & 0x1Fu);
-  // instr [7]: JMP -> inner bit loop
-  selectedPio->instr_mem[programOffset + 7u] =
-      (kSirithTdmMasterRxInstructions[7] & ~0x1Fu) | (innerLoopTarget & 0x1Fu);
+  const uint programOffset = pio_add_program(selectedPio, &mmpr_sirith_tdm_in_program);
 
   pio_gpio_init(selectedPio, pins_.dataIn);
   pio_gpio_init(selectedPio, pins_.bclk);
@@ -195,21 +150,13 @@ bool SirithPicoTdmSource::initPioStateMachine() {
 #endif
   }
 
-  pio_sm_config smCfg = pio_get_default_sm_config();
-  // Wrap top = instr [5] (JMP Y-- slot check): when Y=0 it falls through and wraps to [0].
-  sm_config_set_wrap(&smCfg, programOffset + 0u, programOffset + 5u);
-  sm_config_set_sideset(&smCfg, 2, false, false);
+  pio_sm_config smCfg = mmpr_sirith_tdm_in_program_get_default_config(programOffset);
   sm_config_set_sideset_pins(&smCfg, pins_.bclk);
   sm_config_set_in_pins(&smCfg, pins_.dataIn);
-  // The ADAU7112 shifts out MSB-first. Use shift-LEFT (false) so each new bit
-  // enters at ISR[0] and accumulates toward ISR[31]. After 32 bits the first
-  // received bit (audio sign/MSB) sits at ISR[31], giving a natural int32_t
-  // value that can be arithmetically right-shifted by sampleShiftBits to
-  // produce a correctly-signed PCM16 sample.
-  // (Shift-right places the first received bit at ISR[0] — audio sign at the
-  // LSB — which breaks sign extension and maps typical mic levels to zero.)
   sm_config_set_in_shift(&smCfg, false, true, config_.slotBits);
-  sm_config_set_fifo_join(&smCfg, PIO_FIFO_JOIN_RX);
+  // Leave TX enabled so the host can push the frame-bit count into Y before
+  // capture starts. DMA still services RX only.
+  sm_config_set_fifo_join(&smCfg, PIO_FIFO_JOIN_NONE);
   sm_config_set_clkdiv(&smCfg, clkDiv);
 
   pio_sm_set_consecutive_pindirs(selectedPio, selectedSm, pins_.dataIn, 1, false);
@@ -219,19 +166,24 @@ bool SirithPicoTdmSource::initPioStateMachine() {
   pio_sm_clear_fifos(selectedPio, selectedSm);
   pio_sm_restart(selectedPio, selectedSm);
 
+  pio_sm_put_blocking(selectedPio, selectedSm, bitsPerFrame - 1u);
+  pio_sm_exec(selectedPio, selectedSm, pio_encode_pull(false, false));
+  pio_sm_exec(selectedPio, selectedSm, pio_encode_mov(pio_y, pio_osr));
+
   pio_ = selectedPio;
   sm_ = selectedSm;
   offset_ = programOffset;
   programInstalled_ = true;
 
   MMPR_PICO_LOG(
-      "[sirith-pico] TDM started pio=%d sm=%d offset=%u sr=%lu bclk=%luHz ws=%luHz\n",
+      "[sirith-pico] TDM started pio=%d sm=%d offset=%u sr=%lu bclk=%luHz ws=%luHz valid_bits=%u\n",
       (selectedPio == pio0) ? 0 : 1,
       selectedSm,
       programOffset,
       static_cast<unsigned long>(config_.sampleRateHz),
       static_cast<unsigned long>(bitRateHz),
-      static_cast<unsigned long>(config_.sampleRateHz));
+      static_cast<unsigned long>(config_.sampleRateHz),
+      static_cast<unsigned>(config_.validBits));
 
   return true;
 }
@@ -259,9 +211,7 @@ bool SirithPicoTdmSource::initDmaCapture() {
   channel_config_set_transfer_data_size(&dmaCfg, DMA_SIZE_32);
   channel_config_set_read_increment(&dmaCfg, false);
   channel_config_set_write_increment(&dmaCfg, true);
-  channel_config_set_dreq(
-      &dmaCfg,
-      PIO_DREQ_NUM(reinterpret_cast<PIO>(pio_), sm_, false));
+  channel_config_set_dreq(&dmaCfg, PIO_DREQ_NUM(reinterpret_cast<PIO>(pio_), sm_, false));
 
   dmaWriteFrameIndex_ = 0;
   dmaReadFrameIndex_ = 0;
@@ -299,7 +249,7 @@ void SirithPicoTdmSource::deinitPioStateMachine() {
   }
 
   if (pio != nullptr && programInstalled_) {
-    pio_remove_program(pio, &kSirithTdmMasterRxProgram, offset_);
+    pio_remove_program(pio, &mmpr_sirith_tdm_in_program, offset_);
   }
 
   gpio_put(pins_.bclk, 0);
@@ -350,9 +300,10 @@ bool SirithPicoTdmSource::begin() {
     return false;
   }
 
-  wordsPerFrame_ = config_.frameSamples * 4u;
+  wordsPerFrame_ = config_.frameSamples * config_.tdmSlots;
   frameDurationUs_ =
-      static_cast<uint64_t>((static_cast<double>(config_.frameSamples) * 1000000.0) / static_cast<double>(config_.sampleRateHz));
+      static_cast<uint64_t>((static_cast<double>(config_.frameSamples) * 1000000.0) /
+                            static_cast<double>(config_.sampleRateHz));
   if (!initDmaCapture()) {
     deinitPioStateMachine();
     return false;
@@ -362,20 +313,15 @@ bool SirithPicoTdmSource::begin() {
 }
 
 int16_t SirithPicoTdmSource::toPcm16(int32_t raw) const {
-  int32_t shifted = raw >> config_.sampleShiftBits;
-  if (shifted > 32767) {
-    shifted = 32767;
-  } else if (shifted < -32768) {
-    shifted = -32768;
-  }
-  return static_cast<int16_t>(shifted);
+  return decodeLeftJustifiedSlotToPcm16(static_cast<uint32_t>(raw), config_.slotBits, config_.validBits);
 }
 
 bool SirithPicoTdmSource::readFrame(
     int16_t* interleavedOut,
     size_t samplesPerChannel,
     AudioCaptureTimestamp* captureTimestamp) {
-  if (!initialized_ || interleavedOut == nullptr || samplesPerChannel != config_.frameSamples || dmaFrameWords_ == nullptr) {
+  if (!initialized_ || interleavedOut == nullptr || samplesPerChannel != config_.frameSamples ||
+      dmaFrameWords_ == nullptr) {
     return false;
   }
 
@@ -383,8 +329,6 @@ bool SirithPicoTdmSource::readFrame(
   uint64_t frameEndUs = 0;
   uint32_t droppedFramesBeforeCapture = 0;
   while (true) {
-    // Critical section 1: snapshot availability, index, and timestamp only.
-    // Keep this window as short as possible so the DMA IRQ is not delayed.
     {
       const uint32_t irqState = save_and_disable_interrupts();
       if (completedFrameCount_ == 0) {
@@ -399,13 +343,8 @@ bool SirithPicoTdmSource::readFrame(
       restore_interrupts(irqState);
     }
 
-    // Copy with interrupts enabled.  The DMA is writing to dmaWriteFrameIndex_
-    // which always lags dmaReadFrameIndex_ by at least one slot while the ring
-    // has capacity, so there is no write conflict on slot readFrameIndex.
     const uint32_t* frameWords = dmaFrameWords_ + (readFrameIndex * wordsPerFrame_);
 
-    // ---- DIAGNOSTIC: log first 8 raw slot words every 200 frames ----
-    // Remove once SDATA signal is confirmed non-zero.
     {
       static uint32_t sDiagFrameCount = 0;
       if ((++sDiagFrameCount % 200u) == 0u) {
@@ -416,7 +355,6 @@ bool SirithPicoTdmSource::readFrame(
             static_cast<unsigned long>(frameWords[6]), static_cast<unsigned long>(frameWords[7]));
       }
     }
-    // ---- END DIAGNOSTIC ----
 
     for (size_t i = 0; i < config_.frameSamples; ++i) {
       const int32_t slotWords[4] = {
@@ -428,12 +366,10 @@ bool SirithPicoTdmSource::readFrame(
 
       for (uint8_t channel = 0; channel < 4; ++channel) {
         const uint8_t slot = config_.outputChannelToSlot[channel];
-        interleavedOut[(i * 4) + channel] = toPcm16(slotWords[slot]);
+        interleavedOut[(i * 4u) + channel] = toPcm16(slotWords[slot]);
       }
     }
 
-    // Critical section 2: advance the read pointer using the locally snapshotted
-    // index so ISR changes to dmaReadFrameIndex_ during the copy do not skew it.
     {
       const uint32_t irqState = save_and_disable_interrupts();
       dmaReadFrameIndex_ = (readFrameIndex + 1u) % kBufferedFrames;

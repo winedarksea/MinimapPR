@@ -25,33 +25,29 @@
 
 #include <new>
 
+#include "mmpr_audio_rx.pio.h"
+
 namespace mmpr {
 namespace {
-
-// Master stereo I2S receiver.
-// - Generates BCLK / WS on side-set pins (BCLK = side bit 0, WS = side bit 1)
-// - Samples one SDATA bit per BCLK rising edge
-// - Emits 32-bit FIFO words for left then right slots
-// - WS is low during the left slot and high during the right slot
-static const uint16_t kPicoI2SMasterRxInstructions[] = {
-    static_cast<uint16_t>(pio_encode_set(pio_x, 31) | pio_encode_sideset(2, 0x0)),
-    static_cast<uint16_t>(pio_encode_in(pio_pins, 1) | pio_encode_sideset(2, 0x1)),
-    static_cast<uint16_t>(pio_encode_jmp_x_dec(1) | pio_encode_sideset(2, 0x0)),
-    static_cast<uint16_t>(pio_encode_set(pio_x, 31) | pio_encode_sideset(2, 0x2)),
-    static_cast<uint16_t>(pio_encode_in(pio_pins, 1) | pio_encode_sideset(2, 0x3)),
-    static_cast<uint16_t>(pio_encode_jmp_x_dec(4) | pio_encode_sideset(2, 0x2)),
-};
-
-static const pio_program kPicoI2SMasterRxProgram = {
-    kPicoI2SMasterRxInstructions,
-    static_cast<uint>(sizeof(kPicoI2SMasterRxInstructions) / sizeof(kPicoI2SMasterRxInstructions[0])),
-    -1,
-};
 
 constexpr uint32_t kPicoMaxGpio = 47;
 
 bool pinIsValid(uint8_t pin) {
   return pin <= kPicoMaxGpio;
+}
+
+int16_t decodeLeftJustifiedSlotToPcm16(uint32_t rawWord, uint8_t slotBits, uint8_t validBits) {
+  const uint8_t paddingBits = static_cast<uint8_t>(slotBits - validBits);
+  int32_t signedPayload = static_cast<int32_t>(rawWord) >> paddingBits;
+
+  const int shiftToPcm16 = static_cast<int>(validBits) - 16;
+  int32_t pcm16 = shiftToPcm16 > 0 ? (signedPayload >> shiftToPcm16) : (signedPayload << (-shiftToPcm16));
+  if (pcm16 > 32767) {
+    pcm16 = 32767;
+  } else if (pcm16 < -32768) {
+    pcm16 = -32768;
+  }
+  return static_cast<int16_t>(pcm16);
 }
 
 PicoI2SMonoSource* gActiveDmaSource = nullptr;
@@ -71,7 +67,7 @@ bool PicoI2SMonoSource::validateConfig() const {
     return false;
   }
 
-  if (config_.slotBits != 32) {
+  if (config_.slotBits != 32 || config_.validBits == 0 || config_.validBits > config_.slotBits) {
     return false;
   }
 
@@ -102,7 +98,7 @@ bool PicoI2SMonoSource::initPioStateMachine() {
     }
   }
 
-  if (!pio_can_add_program(selectedPio, &kPicoI2SMasterRxProgram)) {
+  if (!pio_can_add_program(selectedPio, &mmpr_pico_i2s_in_program)) {
     pio_sm_unclaim(selectedPio, selectedSm);
     MMPR_PICO_LOG_LINE("[pico-i2s] no room for PIO I2S program");
     return false;
@@ -121,12 +117,7 @@ bool PicoI2SMonoSource::initPioStateMachine() {
     return false;
   }
 
-  const uint programOffset = pio_add_program(selectedPio, &kPicoI2SMasterRxProgram);
-
-  selectedPio->instr_mem[programOffset + 2u] =
-      (kPicoI2SMasterRxInstructions[2] & ~0x1Fu) | ((programOffset + 1u) & 0x1Fu);
-  selectedPio->instr_mem[programOffset + 5u] =
-      (kPicoI2SMasterRxInstructions[5] & ~0x1Fu) | ((programOffset + 4u) & 0x1Fu);
+  const uint programOffset = pio_add_program(selectedPio, &mmpr_pico_i2s_in_program);
 
   pio_gpio_init(selectedPio, pins_.dataIn);
   pio_gpio_init(selectedPio, pins_.bclk);
@@ -151,9 +142,7 @@ bool PicoI2SMonoSource::initPioStateMachine() {
 #endif
   }
 
-  pio_sm_config smCfg = pio_get_default_sm_config();
-  sm_config_set_wrap(&smCfg, programOffset + 0u, programOffset + 5u);
-  sm_config_set_sideset(&smCfg, 2, false, false);
+  pio_sm_config smCfg = mmpr_pico_i2s_in_program_get_default_config(programOffset);
   sm_config_set_sideset_pins(&smCfg, pins_.bclk);
   sm_config_set_in_pins(&smCfg, pins_.dataIn);
   sm_config_set_in_shift(&smCfg, false, true, config_.slotBits);
@@ -167,20 +156,27 @@ bool PicoI2SMonoSource::initPioStateMachine() {
   pio_sm_clear_fifos(selectedPio, selectedSm);
   pio_sm_restart(selectedPio, selectedSm);
 
+  // Match the reference driver: preload the loop counter and compensate for
+  // I2S's LRCLK-to-MSB one-bit delay before DMA starts consuming words.
+  pio_sm_exec(selectedPio, selectedSm, pio_encode_set(pio_y, config_.slotBits - 2));
+  pio_sm_exec(selectedPio, selectedSm, pio_encode_in(pio_pins, config_.slotBits));
+  pio_sm_exec(selectedPio, selectedSm, pio_encode_in(pio_pins, config_.slotBits - 1));
+
   pio_ = selectedPio;
   sm_ = selectedSm;
   offset_ = programOffset;
   programInstalled_ = true;
 
   MMPR_PICO_LOG(
-      "[pico-i2s] started pio=%d sm=%d offset=%u sr=%lu bclk=%luHz ws=%luHz channel=%s\n",
+      "[pico-i2s] started pio=%d sm=%d offset=%u sr=%lu bclk=%luHz ws=%luHz channel=%s valid_bits=%u\n",
       (selectedPio == pio0) ? 0 : 1,
       selectedSm,
       programOffset,
       static_cast<unsigned long>(config_.sampleRateHz),
       static_cast<unsigned long>(bitRateHz),
       static_cast<unsigned long>(config_.sampleRateHz),
-      (config_.channelSide == PicoI2SChannelSide::kRight) ? "right" : "left");
+      (config_.channelSide == PicoI2SChannelSide::kRight) ? "right" : "left",
+      static_cast<unsigned>(config_.validBits));
 
   return true;
 }
@@ -246,7 +242,7 @@ void PicoI2SMonoSource::deinitPioStateMachine() {
   }
 
   if (pio != nullptr && programInstalled_) {
-    pio_remove_program(pio, &kPicoI2SMasterRxProgram, offset_);
+    pio_remove_program(pio, &mmpr_pico_i2s_in_program, offset_);
   }
 
   gpio_put(pins_.bclk, 0);
@@ -310,13 +306,7 @@ bool PicoI2SMonoSource::begin() {
 }
 
 int16_t PicoI2SMonoSource::toPcm16(int32_t raw) const {
-  int32_t shifted = raw >> config_.sampleShiftBits;
-  if (shifted > 32767) {
-    shifted = 32767;
-  } else if (shifted < -32768) {
-    shifted = -32768;
-  }
-  return static_cast<int16_t>(shifted);
+  return decodeLeftJustifiedSlotToPcm16(static_cast<uint32_t>(raw), config_.slotBits, config_.validBits);
 }
 
 bool PicoI2SMonoSource::readFrame(
