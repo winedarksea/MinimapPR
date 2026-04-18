@@ -12,6 +12,7 @@ from typing import Any
 
 import aiosqlite
 
+from minimappr.cleanup_policy import CleanupPolicy
 from minimappr.models import DetectionEvent, GeoPoint, LabelId, NodeSpec, TrackState
 
 
@@ -1339,28 +1340,6 @@ class Storage:
         self,
         *,
         track_id: str | None = None,
-
-    async def latest_detection_audio_for_track(self, track_id: str) -> tuple[str, str] | None:
-        db = self._require_db()
-        row = await (
-            await db.execute(
-                """
-                SELECT id, snippet_path
-                FROM detections
-                WHERE track_id = ? AND snippet_path IS NOT NULL
-                ORDER BY timestamp_ns DESC
-                LIMIT 1
-                """,
-                (track_id,),
-            )
-        ).fetchone()
-        if row is None:
-            return None
-        detection_id = str(row["id"])
-        snippet_path = row["snippet_path"]
-        if not snippet_path:
-            return None
-        return detection_id, str(snippet_path)
         detection_id: str | None = None,
         event_id: str | None = None,
         limit: int = 100,
@@ -1406,6 +1385,28 @@ class Storage:
             }
             for row in rows
         ]
+
+    async def latest_detection_audio_for_track(self, track_id: str) -> tuple[str, str] | None:
+        db = self._require_db()
+        row = await (
+            await db.execute(
+                """
+                SELECT id, snippet_path
+                FROM detections
+                WHERE track_id = ? AND snippet_path IS NOT NULL
+                ORDER BY timestamp_ns DESC
+                LIMIT 1
+                """,
+                (track_id,),
+            )
+        ).fetchone()
+        if row is None:
+            return None
+        detection_id = str(row["id"])
+        snippet_path = row["snippet_path"]
+        if not snippet_path:
+            return None
+        return detection_id, str(snippet_path)
 
     async def insert_alert(
         self,
@@ -1839,6 +1840,99 @@ class Storage:
 
             await self._commit_if_needed(db)
         return len(rows)
+
+    async def cleanup_policy_managed_files(
+        self,
+        *,
+        now_ns: int,
+        policy: CleanupPolicy,
+        dry_run: bool = False,
+    ) -> dict[str, int]:
+        db = self._require_db()
+        summary = {
+            "snippet_files_deleted": 0,
+            "snippet_records_cleared": 0,
+            "artifact_files_deleted": 0,
+            "artifact_rows_deleted": 0,
+        }
+        protected_tiers = {"config", "permanent"}
+
+        async with self._write_guard():
+            snippet_rows = await (
+                await db.execute(
+                    """
+                    SELECT id, snippet_path, timestamp_ns, label, retention_tier
+                    FROM detections
+                    WHERE snippet_path IS NOT NULL
+                    """
+                )
+            ).fetchall()
+            snippet_ids_to_clear: list[str] = []
+            for row in snippet_rows:
+                if row["retention_tier"] in protected_tiers:
+                    continue
+                max_age_seconds = policy.snippet_max_age_seconds_for_label(row["label"])
+                if max_age_seconds is None:
+                    continue
+                threshold_ns = now_ns - int(max_age_seconds * 1_000_000_000)
+                if int(row["timestamp_ns"]) > threshold_ns:
+                    continue
+                snippet_ids_to_clear.append(str(row["id"]))
+                snippet_path = row["snippet_path"]
+                if snippet_path and Path(snippet_path).exists():
+                    summary["snippet_files_deleted"] += 1
+                    if not dry_run:
+                        try:
+                            Path(snippet_path).unlink(missing_ok=True)
+                        except OSError:
+                            pass
+            summary["snippet_records_cleared"] = len(snippet_ids_to_clear)
+            if snippet_ids_to_clear and not dry_run:
+                await db.executemany(
+                    "UPDATE detections SET snippet_path = NULL, snippet_expires_ns = NULL WHERE id = ?",
+                    ((detection_id,) for detection_id in snippet_ids_to_clear),
+                )
+
+            artifact_rows = await (
+                await db.execute(
+                    """
+                    SELECT la.id, la.path, la.created_ns, la.retention_tier,
+                           COALESCE(d.label, t.label) AS label
+                    FROM large_artifacts la
+                    LEFT JOIN detections d ON d.id = la.source_detection_id
+                    LEFT JOIN tracks t ON t.id = la.source_track_id
+                    """
+                )
+            ).fetchall()
+            artifact_ids_to_delete: list[str] = []
+            for row in artifact_rows:
+                if row["retention_tier"] in protected_tiers:
+                    continue
+                max_age_seconds = policy.artifact_max_age_seconds_for_label(row["label"])
+                if max_age_seconds is None:
+                    continue
+                threshold_ns = now_ns - int(max_age_seconds * 1_000_000_000)
+                if int(row["created_ns"]) > threshold_ns:
+                    continue
+                artifact_ids_to_delete.append(str(row["id"]))
+                artifact_path = row["path"]
+                if artifact_path and Path(artifact_path).exists():
+                    summary["artifact_files_deleted"] += 1
+                    if not dry_run:
+                        try:
+                            Path(artifact_path).unlink(missing_ok=True)
+                        except OSError:
+                            pass
+            summary["artifact_rows_deleted"] = len(artifact_ids_to_delete)
+            if artifact_ids_to_delete and not dry_run:
+                await db.executemany(
+                    "DELETE FROM large_artifacts WHERE id = ?",
+                    ((artifact_id,) for artifact_id in artifact_ids_to_delete),
+                )
+
+            if not dry_run:
+                await self._commit_if_needed(db)
+        return summary
 
     async def cleanup_retention(
         self,

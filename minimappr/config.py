@@ -139,6 +139,7 @@ class StorageConfig:
     db_path: Path
     snippet_dir: Path
     snippet_retention_seconds: int
+    retention_policy_path: Path
     retention_ephemeral_seconds: int
     retention_short_seconds: int
     retention_long_seconds: int
@@ -275,6 +276,7 @@ class Settings:
     db_path: Path = Path("data/minimappr.db")
     snippet_dir: Path = Path("data/snippets")
     snippet_retention_seconds: int = 3600
+    retention_policy_path: Path = Path("data/retention_policy.json")
     rules_config_path: Path = Path("data/rules.json")
     taxonomy_config_path: Path = Path("data/taxonomy.json")
     model_chain_config_path: Path = Path("data/model_chain.json")
@@ -405,6 +407,7 @@ class Settings:
     def __post_init__(self) -> None:
         self.db_path = Path(self.db_path)
         self.snippet_dir = Path(self.snippet_dir)
+        self.retention_policy_path = Path(self.retention_policy_path)
         self.rules_config_path = Path(self.rules_config_path)
         self.taxonomy_config_path = Path(self.taxonomy_config_path)
         self.model_chain_config_path = Path(self.model_chain_config_path)
@@ -604,6 +607,7 @@ class Settings:
             db_path=Path(_env_str("MINIMAPPR_DB_PATH", "data/minimappr.db")),
             snippet_dir=Path(_env_str("MINIMAPPR_SNIPPET_DIR", "data/snippets")),
             snippet_retention_seconds=_env_int("MINIMAPPR_SNIPPET_RETENTION_SECONDS", 3600),
+            retention_policy_path=Path(_env_str("MINIMAPPR_RETENTION_POLICY_PATH", "data/retention_policy.json")),
             rules_config_path=Path(_env_str("MINIMAPPR_RULES_CONFIG_PATH", "data/rules.json")),
             taxonomy_config_path=Path(_env_str("MINIMAPPR_TAXONOMY_CONFIG_PATH", "data/taxonomy.json")),
             model_chain_config_path=Path(_env_str("MINIMAPPR_MODEL_CHAIN_CONFIG_PATH", "data/model_chain.json")),
@@ -843,6 +847,7 @@ class Settings:
             db_path=self.db_path,
             snippet_dir=self.snippet_dir,
             snippet_retention_seconds=self.snippet_retention_seconds,
+            retention_policy_path=self.retention_policy_path,
             retention_ephemeral_seconds=self.retention_ephemeral_seconds,
             retention_short_seconds=self.retention_short_seconds,
             retention_long_seconds=self.retention_long_seconds,

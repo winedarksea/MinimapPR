@@ -61,6 +61,8 @@ pub fn DetectionsPane() -> impl IntoView {
                                 let conf  = d.label_confidence.or(d.confidence).map(|c| format!("{:.0}%", c * 100.0)).unwrap_or_else(|| "—".to_string());
                                 let has_audio = d.has_audio.unwrap_or(false) || d.snippet_path.is_some();
                                 let eid = d.event_id.clone();
+                                let play_eid = eid.clone();
+                                let download_eid = eid.clone();
 
                                 view! {
                                     <tr>
@@ -70,10 +72,10 @@ pub fn DetectionsPane() -> impl IntoView {
                                         <td>
                                             {if has_audio {
                                                 view! {
-                                                    <button class="play-btn" on:click=move |_| play_detection(&eid)>
+                                                    <button class="play-btn" on:click=move |_| play_detection(&play_eid)>
                                                         "▶"
                                                     </button>
-                                                    <button class="btn-sm" on:click=move |_| download_detection(&eid)>
+                                                    <button class="btn-sm" on:click=move |_| download_detection(&download_eid)>
                                                         "Download"
                                                     </button>
                                                 }.into_any()

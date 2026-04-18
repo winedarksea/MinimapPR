@@ -7,6 +7,7 @@ from typing import Any, AsyncContextManager, Protocol, runtime_checkable
 
 import numpy as np
 
+from minimappr.cleanup_policy import CleanupPolicy
 from minimappr.models import (
     ClassificationResult,
     DetectionEvent,
@@ -325,6 +326,15 @@ class StorageBackend(Protocol):
         tor_ns: int,
         source_type: str,
     ) -> bool:
+        ...
+
+    async def cleanup_policy_managed_files(
+        self,
+        *,
+        now_ns: int,
+        policy: CleanupPolicy,
+        dry_run: bool = False,
+    ) -> dict[str, int]:
         ...
 
     def begin_batch(self) -> AsyncContextManager[None]:

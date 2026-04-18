@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from minimappr.api.live import LiveEventHub
 from minimappr.api.transports import HttpIngestTransport
 from minimappr.classifiers.factory import create_classifier
+from minimappr.cleanup_service import CleanupService
 from minimappr.config import Settings
 from minimappr.core.ambisonics import (
     AmbisonicSpatialEncoder,
@@ -85,22 +86,9 @@ async def _cleanup_loop(app: FastAPI) -> None:
         state = app.state
         settings: Settings = state.settings
         now_ns = time.time_ns()
-        await state.storage.cleanup_expired_snippets(now_ns=now_ns)
-        await state.storage.cleanup_retention(
-            now_ns=now_ns,
-            tier_ttls_seconds={
-                "ephemeral": settings.retention_ephemeral_seconds,
-                "short": settings.retention_short_seconds,
-                "long": settings.retention_long_seconds,
-                "experiment": settings.retention_experiment_seconds,
-            },
-            operational_ttls_seconds={
-                "track_updates": settings.retention_track_updates_seconds,
-                "alerts": settings.retention_alerts_seconds,
-                "environment": settings.retention_environment_seconds,
-                "dropped_tracks": settings.retention_dropped_tracks_seconds,
-            },
-        )
+        cleanup_summary = await state.cleanup_service.run_housekeeping_cycle(now_ns=now_ns)
+        if any(cleanup_summary["partial_cleanup"].values()) or any(cleanup_summary["retention_cleanup"].values()):
+            logger.info("Cleanup cycle removed data: %s", cleanup_summary)
         await state.fusion_node.housekeeping_tick(now_ns=now_ns)
         await asyncio.sleep(settings.cleanup_interval_seconds)
 
@@ -158,6 +146,7 @@ async def lifespan(app: FastAPI):
         fusion_node=fusion_node,
         classifier=classifier,
     )
+    cleanup_service = CleanupService(settings=settings, storage=storage)
 
     async def _federation_local_tracks(now_ns: int) -> list[TrackState]:
         tracks = await tracker.snapshot(now_ns=now_ns)
@@ -191,6 +180,7 @@ async def lifespan(app: FastAPI):
     app.state.federation = federation
     app.state.bit_evaluator = bit_evaluator
     app.state.diagnostics = diagnostics
+    app.state.cleanup_service = cleanup_service
 
     cleanup_task: asyncio.Task | None = None
     await storage.initialize()
@@ -517,6 +507,7 @@ async def get_config(request: Request) -> dict:
         "trigger_cooldown_seconds": settings.trigger_cooldown_seconds,
         "localization_window_seconds": settings.localization_window_seconds,
         "snippet_retention_seconds": settings.snippet_retention_seconds,
+        "retention_policy_path": str(settings.retention_policy_path),
         "retention": {
             "ephemeral_seconds": settings.retention_ephemeral_seconds,
             "short_seconds": settings.retention_short_seconds,

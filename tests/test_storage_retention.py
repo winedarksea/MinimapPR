@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from minimappr.cleanup_policy import CleanupPolicy
 from minimappr.models import DetectionEvent, NodeSpec, NodeType, TrackState
 from minimappr.storage.db import Storage
 
@@ -233,5 +234,227 @@ async def test_storage_concurrent_read_write_stress(tmp_path: Path) -> None:
 
     detections = await storage.list_detections(limit=512)
     assert len(detections) >= 72
+
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_policy_cleanup_respects_label_overrides_and_keeps_metadata(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "policy-cleanup.db")
+    await storage.initialize()
+
+    now_ns = 5_000_000_000_000_000_000
+    old_ns = now_ns - 200_000_000_000
+
+    await storage.upsert_node(
+        NodeSpec(
+            id="cleanup-node",
+            node_type=NodeType.POINT,
+            position_m=(0.0, 0.0, 0.0),
+            sensor_offsets_m=[(0.0, 0.0, 0.0)],
+            capabilities=["audio"],
+        ),
+        last_seen_ns=old_ns,
+    )
+
+    old_common_snippet = tmp_path / "common.wav"
+    old_common_snippet.write_bytes(b"wav")
+    old_rare_snippet = tmp_path / "rare.wav"
+    old_rare_snippet.write_bytes(b"wav")
+    missing_snippet_path = tmp_path / "missing.wav"
+
+    await storage.insert_detection(
+        detection=DetectionEvent(
+            id="det-common",
+            timestamp_ns=old_ns,
+            position_m=(0.0, 0.0, 0.0),
+            confidence=0.6,
+            gdop=1.5,
+            label="common_bird",
+            label_category="wildlife",
+            label_confidence=0.7,
+            reference_sensor="cleanup-node:ch0",
+        ),
+        snippet_path=str(old_common_snippet),
+        snippet_expires_ns=None,
+        retention_tier="short",
+    )
+    await storage.insert_detection(
+        detection=DetectionEvent(
+            id="det-rare",
+            timestamp_ns=old_ns,
+            position_m=(0.0, 0.0, 0.0),
+            confidence=0.7,
+            gdop=1.4,
+            label="rare_bird_species",
+            label_category="wildlife",
+            label_confidence=0.9,
+            reference_sensor="cleanup-node:ch0",
+        ),
+        snippet_path=str(old_rare_snippet),
+        snippet_expires_ns=None,
+        retention_tier="short",
+    )
+    await storage.insert_detection(
+        detection=DetectionEvent(
+            id="det-missing",
+            timestamp_ns=old_ns,
+            position_m=(0.0, 0.0, 0.0),
+            confidence=0.4,
+            gdop=2.1,
+            label="common_bird",
+            label_category="wildlife",
+            label_confidence=0.4,
+            reference_sensor="cleanup-node:ch0",
+        ),
+        snippet_path=str(missing_snippet_path),
+        snippet_expires_ns=None,
+        retention_tier="short",
+    )
+    await storage.insert_detection(
+        detection=DetectionEvent(
+            id="det-permanent",
+            timestamp_ns=old_ns,
+            position_m=(0.0, 0.0, 0.0),
+            confidence=0.95,
+            gdop=1.0,
+            label="gunshot",
+            label_category="security",
+            label_confidence=0.98,
+            reference_sensor="cleanup-node:ch0",
+        ),
+        snippet_path=None,
+        snippet_expires_ns=None,
+        retention_tier="permanent",
+    )
+
+    old_artifact = tmp_path / "common.bin"
+    old_artifact.write_bytes(b"artifact")
+    rare_artifact = tmp_path / "rare.bin"
+    rare_artifact.write_bytes(b"artifact")
+    permanent_artifact = tmp_path / "permanent.bin"
+    permanent_artifact.write_bytes(b"artifact")
+
+    common_artifact_id = await storage.insert_large_artifact(
+        artifact_type="spectrogram",
+        path=str(old_artifact),
+        retention_tier="experiment",
+        source_detection_id="det-common",
+        source_track_id=None,
+        created_ns=old_ns,
+        expires_ns=None,
+        metadata={},
+    )
+    rare_artifact_id = await storage.insert_large_artifact(
+        artifact_type="spectrogram",
+        path=str(rare_artifact),
+        retention_tier="experiment",
+        source_detection_id="det-rare",
+        source_track_id=None,
+        created_ns=old_ns,
+        expires_ns=None,
+        metadata={},
+    )
+    permanent_artifact_id = await storage.insert_large_artifact(
+        artifact_type="audit",
+        path=str(permanent_artifact),
+        retention_tier="permanent",
+        source_detection_id="det-permanent",
+        source_track_id=None,
+        created_ns=old_ns,
+        expires_ns=None,
+        metadata={},
+    )
+
+    policy = CleanupPolicy.from_dict(
+        {
+            "default_snippet_max_age_seconds": 60,
+            "default_artifact_max_age_seconds": 60,
+            "keep_labels": {
+                "rare_bird_species": {
+                    "snippet_max_age_seconds": 500,
+                    "keep_artifacts": True,
+                }
+            },
+        },
+        default_snippet_max_age_seconds=60,
+        default_artifact_max_age_seconds=60,
+    )
+
+    summary = await storage.cleanup_policy_managed_files(now_ns=now_ns, policy=policy)
+    assert summary == {
+        "snippet_files_deleted": 1,
+        "snippet_records_cleared": 2,
+        "artifact_files_deleted": 1,
+        "artifact_rows_deleted": 1,
+    }
+    assert old_common_snippet.exists() is False
+    assert old_rare_snippet.exists() is True
+    assert old_artifact.exists() is False
+    assert rare_artifact.exists() is True
+    assert permanent_artifact.exists() is True
+
+    detections = {row["id"]: row for row in await storage.list_detections(limit=10)}
+    assert detections["det-common"]["snippet_path"] is None
+    assert detections["det-missing"]["snippet_path"] is None
+    assert detections["det-rare"]["snippet_path"] == str(old_rare_snippet)
+    assert detections["det-common"]["label"] == "common_bird"
+    artifact_rows = await (
+        await storage._require_db().execute("SELECT id, path FROM large_artifacts ORDER BY id")
+    ).fetchall()
+    artifact_ids = {row["id"] for row in artifact_rows}
+    assert artifact_ids == {rare_artifact_id, permanent_artifact_id}
+    assert common_artifact_id not in artifact_ids
+
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_policy_cleanup_dry_run_does_not_mutate_storage(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "policy-dry-run.db")
+    await storage.initialize()
+
+    now_ns = 6_000_000_000_000_000_000
+    old_ns = now_ns - 120_000_000_000
+    await storage.upsert_node(
+        NodeSpec(
+            id="dry-run-node",
+            node_type=NodeType.POINT,
+            position_m=(0.0, 0.0, 0.0),
+            sensor_offsets_m=[(0.0, 0.0, 0.0)],
+            capabilities=["audio"],
+        ),
+        last_seen_ns=old_ns,
+    )
+
+    snippet_file = tmp_path / "dry-run.wav"
+    snippet_file.write_bytes(b"wav")
+    await storage.insert_detection(
+        detection=DetectionEvent(
+            id="det-dry-run",
+            timestamp_ns=old_ns,
+            position_m=(0.0, 0.0, 0.0),
+            confidence=0.6,
+            gdop=1.2,
+            label="common_sound",
+            label_category="unknown",
+            label_confidence=0.6,
+            reference_sensor="dry-run-node:ch0",
+        ),
+        snippet_path=str(snippet_file),
+        snippet_expires_ns=None,
+        retention_tier="short",
+    )
+
+    policy = CleanupPolicy(
+        default_snippet_max_age_seconds=60,
+        default_artifact_max_age_seconds=60,
+    )
+    summary = await storage.cleanup_policy_managed_files(now_ns=now_ns, policy=policy, dry_run=True)
+    assert summary["snippet_files_deleted"] == 1
+    assert summary["snippet_records_cleared"] == 1
+    assert snippet_file.exists() is True
+    detections = {row["id"]: row for row in await storage.list_detections(limit=10)}
+    assert detections["det-dry-run"]["snippet_path"] == str(snippet_file)
 
     await storage.close()
