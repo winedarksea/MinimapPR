@@ -22,6 +22,16 @@ fn play_detection(event_id: &str) {
     }
 }
 
+fn download_detection(event_id: &str) {
+    let url = format!(
+        "/api/v1/detections/{}/audio",
+        js_sys::encode_uri_component(event_id)
+    );
+    if let Some(window) = web_sys::window() {
+        let _ = window.open_with_url(&url);
+    }
+}
+
 #[component]
 pub fn DetectionsPane() -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState");
@@ -49,7 +59,7 @@ pub fn DetectionsPane() -> impl IntoView {
                                 let label = d.label.clone().unwrap_or_else(|| "—".to_string());
                                 let node  = d.node_id.clone().unwrap_or_else(|| "—".to_string());
                                 let conf  = d.label_confidence.or(d.confidence).map(|c| format!("{:.0}%", c * 100.0)).unwrap_or_else(|| "—".to_string());
-                                let has_audio = d.has_audio.unwrap_or(false);
+                                let has_audio = d.has_audio.unwrap_or(false) || d.snippet_path.is_some();
                                 let eid = d.event_id.clone();
 
                                 view! {
@@ -62,6 +72,9 @@ pub fn DetectionsPane() -> impl IntoView {
                                                 view! {
                                                     <button class="play-btn" on:click=move |_| play_detection(&eid)>
                                                         "▶"
+                                                    </button>
+                                                    <button class="btn-sm" on:click=move |_| download_detection(&eid)>
+                                                        "Download"
                                                     </button>
                                                 }.into_any()
                                             } else {

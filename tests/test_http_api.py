@@ -297,6 +297,31 @@ def test_detection_audio_rejects_paths_outside_snippet_root(monkeypatch, tmp_pat
         assert "outside snippet directory" in response.text
 
 
+def test_track_audio_endpoint_returns_latest_detection_snippet(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=3600)
+
+    with TestClient(app) as client:
+        _ingest_single_frame(client, start_time_ns=time.time_ns())
+        detections = _wait_for_detections(client)
+        assert detections
+        track_id = detections[0].get("track_id")
+        assert isinstance(track_id, str) and track_id
+
+        response = client.get(f"/api/v1/tracks/{track_id}/audio")
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("audio/wav")
+        disposition = response.headers.get("content-disposition", "")
+        assert "inline" in disposition
+        assert track_id in disposition
+
+        download_response = client.get(f"/api/v1/tracks/{track_id}/audio", params={"download": True})
+        assert download_response.status_code == 200
+        download_disposition = download_response.headers.get("content-disposition", "")
+        assert "attachment" in download_disposition
+        assert "track_" in download_disposition
+        assert "detection_" in download_disposition
+
+
 def test_node_recent_audio_endpoint_returns_wav(monkeypatch, tmp_path: Path) -> None:
     _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
 

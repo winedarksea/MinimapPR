@@ -1033,6 +1033,33 @@ async def get_detection_audio(detection_id: str, request: Request) -> FileRespon
     )
 
 
+@app.get("/api/v1/tracks/{track_id}/audio")
+async def get_track_audio(
+    track_id: str,
+    request: Request,
+    download: bool = Query(default=False),
+) -> FileResponse:
+    state = _require_state(request)
+    settings: Settings = state.settings
+    latest = await state.storage.latest_detection_audio_for_track(track_id)
+    if latest is None:
+        raise HTTPException(status_code=404, detail="No audio snippet is available for this track")
+
+    detection_id, snippet_path = latest
+    snippet_file = _resolve_snippet_file(snippet_path, settings.snippet_dir.resolve())
+    if snippet_file is None:
+        raise HTTPException(status_code=404, detail="Snippet file no longer exists")
+
+    filename = f"track_{track_id}__detection_{detection_id}.wav"
+    content_disposition = "attachment" if download else "inline"
+    return FileResponse(
+        path=snippet_file,
+        media_type="audio/wav",
+        filename=filename,
+        headers={"Content-Disposition": f'{content_disposition}; filename="{filename}"'},
+    )
+
+
 @app.get("/api/v1/nodes/{node_id}/audio/recent")
 async def get_recent_node_audio(
     node_id: str,

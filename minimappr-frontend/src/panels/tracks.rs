@@ -1,10 +1,43 @@
 use crate::state::AppState;
 use leptos::prelude::*;
+use wasm_bindgen::JsCast;
+use web_sys::{HtmlAudioElement, Window};
+
+fn audio_element() -> Option<HtmlAudioElement> {
+    web_sys::window()?
+        .document()?
+        .get_element_by_id("audio-player")?
+        .dyn_into::<HtmlAudioElement>()
+        .ok()
+}
+
+fn play_track_audio(track_id: &str) {
+    let url = format!(
+        "/api/v1/tracks/{}/audio",
+        js_sys::encode_uri_component(track_id),
+    );
+    if let Some(audio) = audio_element() {
+        audio.set_src(&url);
+        let _ = audio.play();
+    }
+}
+
+fn trigger_track_download(track_id: &str) {
+    let url = format!(
+        "/api/v1/tracks/{}/audio?download=true",
+        js_sys::encode_uri_component(track_id),
+    );
+    let window: Option<Window> = web_sys::window();
+    if let Some(win) = window {
+        let _ = win.open_with_url(&url);
+    }
+}
 
 #[component]
 pub fn TracksPane() -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState");
     let tracks = state.tracks;
+    let detections = state.detections;
 
     view! {
         <div class="tab-pane">
@@ -23,6 +56,7 @@ pub fn TracksPane() -> impl IntoView {
                                 <th>"TQI"</th>
                                 <th>"Sensors"</th>
                                 <th>"Pos (m)"</th>
+                                <th>"Audio"</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -40,6 +74,11 @@ pub fn TracksPane() -> impl IntoView {
                                         _          => "—".to_string(),
                                     }
                                 }).unwrap_or_else(|| "—".to_string());
+                                let track_id = t.track_id.clone();
+                                let has_audio = detections
+                                    .get()
+                                    .iter()
+                                    .any(|d| d.track_id.as_deref() == Some(track_id.as_str()) && d.snippet_path.is_some());
 
                                 view! {
                                     <tr>
@@ -51,6 +90,22 @@ pub fn TracksPane() -> impl IntoView {
                                         </td>
                                         <td>{sensors}</td>
                                         <td style="font-size:0.7rem">{pos}</td>
+                                        <td>
+                                            {if has_audio {
+                                                let play_id = track_id.clone();
+                                                let download_id = track_id.clone();
+                                                view! {
+                                                    <button class="play-btn" on:click=move |_| play_track_audio(&play_id)>
+                                                        "▶"
+                                                    </button>
+                                                    <button class="btn-sm" on:click=move |_| trigger_track_download(&download_id)>
+                                                        "Download"
+                                                    </button>
+                                                }.into_any()
+                                            } else {
+                                                view! { <span style="color:var(--text-muted)">"-"</span> }.into_any()
+                                            }}
+                                        </td>
                                     </tr>
                                 }
                             }).collect_view()}

@@ -35,6 +35,7 @@ fn default_node_health() -> String {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Track {
+    #[serde(alias = "id")]
     pub track_id: String,
     pub label: Option<String>,
     pub confidence: Option<f64>,
@@ -42,8 +43,11 @@ pub struct Track {
     pub position_m: Option<Vec<f64>>,
     pub position_geo: Option<GeoPoint>,
     pub velocity_mps: Option<Vec<f64>>,
+    #[serde(alias = "last_seen_ns")]
     pub last_update_ns: Option<i64>,
+    #[serde(alias = "update_count")]
     pub sensor_count: Option<u32>,
+    pub status: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -55,24 +59,34 @@ pub struct GeoPoint {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Detection {
+    #[serde(alias = "id")]
     pub event_id: String,
+    #[serde(alias = "source_node_id")]
     pub node_id: Option<String>,
     pub label: Option<String>,
     pub confidence: Option<f64>,
     pub label_confidence: Option<f64>,
+    #[serde(alias = "tor_ns")]
     pub received_ns: Option<i64>,
     pub position_m: Option<Vec<f64>>,
     pub position_geo: Option<GeoPoint>,
     pub has_audio: Option<bool>,
+    pub snippet_path: Option<String>,
+    pub track_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Alert {
+    #[serde(alias = "id")]
     pub alert_id: String,
+    #[serde(alias = "rule_id")]
     pub rule_name: Option<String>,
+    #[serde(default)]
     pub message: Option<String>,
+    #[serde(alias = "priority")]
     pub severity: Option<String>,
     pub status: Option<String>,
+    #[serde(alias = "timestamp_ns")]
     pub triggered_ns: Option<i64>,
 }
 
@@ -82,7 +96,9 @@ pub struct CopStatus {
     pub degraded_nodes: u32,
     pub offline_nodes: u32,
     pub active_tracks: u32,
+    #[serde(default, alias = "recent_alert_count")]
     pub open_alerts: u32,
+    #[serde(default)]
     pub detections_last_60s: u32,
 }
 

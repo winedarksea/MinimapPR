@@ -275,6 +275,7 @@ class FusionNode:
         self._metrics = FusionMetrics()
         self._last_error: str | None = None
         self._started = False
+        self._stopping = False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -284,6 +285,7 @@ class FusionNode:
         if self._started:
             return
 
+        self._stopping = False
         await self._refresh_taxonomy(force=True)
         worker_count = max(1, self.fusion_config.worker_count)
         self._localization_workers = [
@@ -304,34 +306,55 @@ class FusionNode:
         if not self._started:
             return
 
-        await self._localization_queue.join()
-        await self._classification_queue.join()
-        await self._rules_queue.join()
+        self._stopping = True
+        self._started = False
 
-        for _ in self._localization_workers:
-            await self._localization_queue.put(None)
-        for _ in self._classification_workers:
-            await self._classification_queue.put(None)
-        for _ in self._rules_workers:
-            await self._rules_queue.put(None)
+        # Bound shutdown wait time so lifespan teardown cannot hang indefinitely
+        # if in-flight work stalls inside an external backend.
+        join_timeout_s = 5.0
+        try:
+            await asyncio.wait_for(self._localization_queue.join(), timeout=join_timeout_s)
+            await asyncio.wait_for(self._classification_queue.join(), timeout=join_timeout_s)
+            await asyncio.wait_for(self._rules_queue.join(), timeout=join_timeout_s)
+        except asyncio.TimeoutError:
+            self._last_error = "Timeout waiting for pipeline queues to drain during shutdown"
 
-        if self._localization_workers:
-            await asyncio.gather(*self._localization_workers, return_exceptions=True)
-        if self._classification_workers:
-            await asyncio.gather(*self._classification_workers, return_exceptions=True)
-        if self._rules_workers:
-            await asyncio.gather(*self._rules_workers, return_exceptions=True)
+        try:
+            for _ in self._localization_workers:
+                await asyncio.wait_for(self._localization_queue.put(None), timeout=join_timeout_s)
+            for _ in self._classification_workers:
+                await asyncio.wait_for(self._classification_queue.put(None), timeout=join_timeout_s)
+            for _ in self._rules_workers:
+                await asyncio.wait_for(self._rules_queue.put(None), timeout=join_timeout_s)
+        except asyncio.TimeoutError:
+            self._last_error = "Timeout enqueueing worker shutdown sentinels"
+
+        workers = [
+            *self._localization_workers,
+            *self._classification_workers,
+            *self._rules_workers,
+        ]
+        if workers:
+            try:
+                await asyncio.wait_for(asyncio.gather(*workers, return_exceptions=True), timeout=join_timeout_s)
+            except asyncio.TimeoutError:
+                for task in workers:
+                    task.cancel()
+                await asyncio.gather(*workers, return_exceptions=True)
+                self._last_error = "Timeout waiting for worker tasks during shutdown; cancelled remaining workers"
 
         self._localization_workers.clear()
         self._classification_workers.clear()
         self._rules_workers.clear()
-        self._started = False
+        self._stopping = False
 
     # ------------------------------------------------------------------
     # Ingest — delegates to IngestProcessor
     # ------------------------------------------------------------------
 
     async def ingest(self, request: IngestFrameRequest) -> IngestFrameResponse:
+        if not self._started or self._stopping:
+            raise ValueError("Fusion node is stopping")
         self._metrics.ingest_requests += 1
         try:
             result = await self._ingest_processor.process_frame(

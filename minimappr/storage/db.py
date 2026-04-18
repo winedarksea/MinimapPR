@@ -1339,6 +1339,28 @@ class Storage:
         self,
         *,
         track_id: str | None = None,
+
+    async def latest_detection_audio_for_track(self, track_id: str) -> tuple[str, str] | None:
+        db = self._require_db()
+        row = await (
+            await db.execute(
+                """
+                SELECT id, snippet_path
+                FROM detections
+                WHERE track_id = ? AND snippet_path IS NOT NULL
+                ORDER BY timestamp_ns DESC
+                LIMIT 1
+                """,
+                (track_id,),
+            )
+        ).fetchone()
+        if row is None:
+            return None
+        detection_id = str(row["id"])
+        snippet_path = row["snippet_path"]
+        if not snippet_path:
+            return None
+        return detection_id, str(snippet_path)
         detection_id: str | None = None,
         event_id: str | None = None,
         limit: int = 100,
