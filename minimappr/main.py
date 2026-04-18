@@ -465,7 +465,11 @@ async def list_bit_failures(request: Request) -> dict[str, list[str]]:
 @app.get("/api/v1/detections")
 async def list_detections(request: Request, limit: int = Query(default=100, ge=1, le=1000)) -> list[dict]:
     state = _require_state(request)
-    detections = await state.storage.list_detections(limit=limit)
+    settings: Settings = state.settings
+    detections = await state.storage.list_detections(
+        limit=limit,
+        min_label_confidence=settings.detection_min_confidence,
+    )
     for detection in detections:
         if detection.get("position_geo") is None and detection.get("position_m"):
             local = detection["position_m"]
@@ -544,6 +548,7 @@ async def get_config(request: Request) -> dict:
         "localization_tight_array_aperture_m": settings.localization_tight_array_aperture_m,
         "classifier_backend": settings.classifier_backend,
         "yamnet_min_confidence": settings.yamnet_min_confidence,
+        "detection_min_confidence": settings.detection_min_confidence,
         "yamnet_input_target_rms": settings.yamnet_input_target_rms,
         "yamnet_max_input_gain": settings.yamnet_max_input_gain,
         "beamformed_classification_enabled": settings.beamformed_classification_enabled,
@@ -595,6 +600,7 @@ _CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     "localization_strategy": str,
     "classifier_backend": str,
     "yamnet_min_confidence": float,
+    "detection_min_confidence": float,
     "beamformer_type": str,
     "tracking_filter": str,
     "fusion_worker_count": int,
@@ -650,6 +656,8 @@ async def patch_config(request: Request) -> dict:
             errors.append("audio_lowpass_hz: must be >= 0")
         elif key == "yamnet_min_confidence" and not (0.0 <= value <= 1.0):  # type: ignore[operator]
             errors.append("yamnet_min_confidence: must be in [0, 1]")
+        elif key == "detection_min_confidence" and not (0.0 <= value <= 1.0):  # type: ignore[operator]
+            errors.append("detection_min_confidence: must be in [0, 1]")
         elif key == "fusion_worker_count" and value < 1:  # type: ignore[operator]
             errors.append("fusion_worker_count: must be >= 1")
         elif key == "localization_algorithm" and value not in _LOCALIZATION_ALGORITHMS:
@@ -1123,7 +1131,10 @@ async def render_soundscape(
 ) -> Response:
     state = _require_state(request)
     settings: Settings = state.settings
-    detections = await state.storage.list_detections(limit=limit)
+    detections = await state.storage.list_detections(
+        limit=limit,
+        min_label_confidence=settings.detection_min_confidence,
+    )
     snippet_root = settings.snippet_dir.resolve()
 
     sample_rate_hz: int | None = None

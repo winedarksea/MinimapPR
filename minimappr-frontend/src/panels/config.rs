@@ -41,6 +41,7 @@ pub fn ConfigPane() -> impl IntoView {
                         <ClassificationGroup
                             classifier_backend=c.classifier_backend.clone()
                             yamnet_min_confidence=c.yamnet_min_confidence
+                            detection_min_confidence=c.detection_min_confidence
                             beamformer_type=c.beamformer_type.clone()
                         />
                         <TrackingFusionGroup
@@ -260,11 +261,13 @@ fn LocalizationGroup(
 fn ClassificationGroup(
     classifier_backend: String,
     yamnet_min_confidence: f64,
+    detection_min_confidence: f64,
     beamformer_type: String,
 ) -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState");
     let backend  = RwSignal::new(classifier_backend);
     let yamnet   = RwSignal::new(yamnet_min_confidence.to_string());
+    let detection = RwSignal::new(detection_min_confidence.to_string());
     let beamform = RwSignal::new(beamformer_type);
     let gs = RwSignal::new(GroupState::default());
 
@@ -274,6 +277,7 @@ fn ClassificationGroup(
         let body = json!({
             "classifier_backend": backend.get(),
             "yamnet_min_confidence": yamnet.get().parse::<f64>().unwrap_or(0.25),
+            "detection_min_confidence": detection.get().parse::<f64>().unwrap_or(0.05),
             "beamformer_type": beamform.get(),
         });
         gs.update(|s| { s.saving = true; s.error = None; });
@@ -300,6 +304,7 @@ fn ClassificationGroup(
             <div class="config-fields">
                 {select_input("Backend", backend, gs, &["yamnet", "birdnet", "heuristic"])}
                 {num_input("YAMNet Min Confidence", yamnet, gs, 0.0, 1.0, 0.01)}
+                {num_input("Detection Min Confidence", detection, gs, 0.0, 1.0, 0.01)}
                 {select_input("Beamformer", beamform, gs, &["delay_and_sum", "freq_domain_das", "mvdr", "superdirective", "gevd"])}
             </div>
             {group_footer(gs, save)}

@@ -14,7 +14,9 @@ pub enum WsStatus {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct NodeStatus {
+    #[serde(default, alias = "id")]
     pub node_id: String,
+    #[serde(default = "default_node_health", alias = "health_status")]
     pub health: String,
     pub last_seen_seconds_ago: Option<f64>,
     pub position_m: Option<Vec<f64>>,
@@ -25,6 +27,10 @@ pub struct NodeStatus {
     pub rms_history: Option<Vec<f64>>,
     pub channel_count: Option<u32>,
     pub firmware_version: Option<String>,
+}
+
+fn default_node_health() -> String {
+    "unknown".to_string()
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -94,6 +100,7 @@ pub struct ConfigSnapshot {
     pub localization_strategy: String,
     pub classifier_backend: String,
     pub yamnet_min_confidence: f64,
+    pub detection_min_confidence: f64,
     pub beamformer_type: String,
     pub tracking_filter: String,
     pub fusion_worker_count: u32,

@@ -23,6 +23,7 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from typing import Any
 
+import aiosqlite
 import numpy as np
 
 from minimappr.classifiers.base import AudioClassifier
@@ -800,52 +801,58 @@ class FusionNode:
             return None
 
         persist_mode = "update" if decision.action == "upgrade_existing" else "insert"
-        assembly = await self._detection_assembler.assemble(
-            localization_position_m=localization_position_m,
-            localization_confidence=localization_confidence,
-            localization_gdop=localization_gdop,
-            reference_sensor=reference_sensor,
-            tdoa_s=tdoa_s,
-            selected_sensor_ids=product.selected_sensor_ids,
-            reference_signal=reference_signal,
-            capability_tier=capability_tier,
-            localization_method=localization_method,
-            environment=product.environment,
-            classification_label=classified.classification.label,
-            classification_confidence=classified.classification.confidence,
-            classification_scores=classified.classification.scores,
-            classification_features=dict(classified.classification.features),
-            classification_path=classified.classification_path,
-            omni_confidence=classified.omni_classification.confidence,
-            beamformed_classification_confidence=(
-                classified.beamformed_classification.confidence
-                if classified.beamformed_classification is not None
-                else None
-            ),
-            beamformed_classification_label=(
-                classified.beamformed_classification.label
-                if classified.beamformed_classification is not None
-                else None
-            ),
-            beamforming_error=classified.beamforming_error,
-            classification_signal=classified.classification_signal,
-            label_category=classified.label_category,
-            iff_category=classified.iff_category,
-            label_id=classified.label_id,
-            report_window_start_ns=decision.report_window_start_ns,
-            report_window_end_ns=decision.report_window_end_ns,
-            reporting_modality=decision.reporting_modality,
-            branch_evidence=decision.branch_evidence,
-            event_time_ns=product.candidate.event_time_ns,
-            source_type=product.candidate.source_type,
-            time_quality=product.candidate.time_quality,
-            source_observation_ids=product.candidate.source_observation_ids,
-            sample_rate_hz=product.candidate.sample_rate_hz,
-            existing_detection=decision.existing_detection,
-            persist_mode=persist_mode,
-            tracker=self.tracker,
-            storage_batch_ctx=self._storage_batch,
-        )
+        try:
+            assembly = await self._detection_assembler.assemble(
+                localization_position_m=localization_position_m,
+                localization_confidence=localization_confidence,
+                localization_gdop=localization_gdop,
+                reference_sensor=reference_sensor,
+                tdoa_s=tdoa_s,
+                selected_sensor_ids=product.selected_sensor_ids,
+                reference_signal=reference_signal,
+                capability_tier=capability_tier,
+                localization_method=localization_method,
+                environment=product.environment,
+                classification_label=classified.classification.label,
+                classification_confidence=classified.classification.confidence,
+                classification_scores=classified.classification.scores,
+                classification_features=dict(classified.classification.features),
+                classification_path=classified.classification_path,
+                omni_confidence=classified.omni_classification.confidence,
+                beamformed_classification_confidence=(
+                    classified.beamformed_classification.confidence
+                    if classified.beamformed_classification is not None
+                    else None
+                ),
+                beamformed_classification_label=(
+                    classified.beamformed_classification.label
+                    if classified.beamformed_classification is not None
+                    else None
+                ),
+                beamforming_error=classified.beamforming_error,
+                classification_signal=classified.classification_signal,
+                label_category=classified.label_category,
+                iff_category=classified.iff_category,
+                label_id=classified.label_id,
+                report_window_start_ns=decision.report_window_start_ns,
+                report_window_end_ns=decision.report_window_end_ns,
+                reporting_modality=decision.reporting_modality,
+                branch_evidence=decision.branch_evidence,
+                event_time_ns=product.candidate.event_time_ns,
+                source_type=product.candidate.source_type,
+                time_quality=product.candidate.time_quality,
+                source_observation_ids=product.candidate.source_observation_ids,
+                sample_rate_hz=product.candidate.sample_rate_hz,
+                existing_detection=decision.existing_detection,
+                persist_mode=persist_mode,
+                tracker=self.tracker,
+                storage_batch_ctx=self._storage_batch,
+            )
+        except aiosqlite.IntegrityError as exc:
+            # A concurrent worker won the canonical insert for this reporting window.
+            if "uq_detections_reporting_window_canonical" in str(exc):
+                return None
+            raise
         if assembly.suppressed_by_zone:
             self._metrics.detections_suppressed_by_zone += 1
         return DetectionProduct(

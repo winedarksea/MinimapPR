@@ -216,6 +216,7 @@ Key env vars:
 - `MINIMAPPR_COORDINATE_MODE` (`flat` or `geodetic`; default `flat`)
 - `MINIMAPPR_RUNTIME_PROFILE` (`default`, `birdnet_omni_testing`, or `birdnet_hybrid_production`)
 - `MINIMAPPR_CLASSIFIER` (`heuristic`, `yamnet`, or `birdnet`)
+- `MINIMAPPR_DETECTION_MIN_CONFIDENCE` (default `0.05`; hides lower-confidence detections from detection APIs/UI and soundscape rendering)
 - `MINIMAPPR_SKIP_LOCALIZATION_FOR_CLASSIFICATION` (`false` default)
 - `MINIMAPPR_LOCALIZATION_BAND_MIN_HZ` / `MINIMAPPR_LOCALIZATION_BAND_MAX_HZ` (optional localization-only bandpass)
 - `MINIMAPPR_REPORTING_WINDOW_SECONDS` (canonical detection dedupe window; default `30`)

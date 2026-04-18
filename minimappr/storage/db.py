@@ -386,7 +386,56 @@ class Storage:
                 "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
             },
         )
+        await self._deduplicate_reporting_window_canonicals()
+        await self._ensure_reporting_window_uniqueness_index()
         await self._db.commit()
+
+    async def _deduplicate_reporting_window_canonicals(self) -> None:
+        """Keep one canonical row per reporting key before enforcing uniqueness."""
+        db = self._require_db()
+        await db.execute(
+            """
+            WITH ranked AS (
+                SELECT
+                    rowid,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY
+                            COALESCE(source_node_id, '__none__'),
+                            lower(label),
+                            report_window_start_ns,
+                            report_window_end_ns
+                        ORDER BY
+                            CASE WHEN reporting_modality = 'localized' THEN 1 ELSE 0 END DESC,
+                            timestamp_ns DESC,
+                            rowid DESC
+                    ) AS duplicate_rank
+                FROM detections
+                WHERE report_window_start_ns IS NOT NULL
+                  AND report_window_end_ns IS NOT NULL
+            )
+            DELETE FROM detections
+            WHERE rowid IN (
+                SELECT rowid FROM ranked WHERE duplicate_rank > 1
+            )
+            """
+        )
+
+    async def _ensure_reporting_window_uniqueness_index(self) -> None:
+        """Enforce one canonical detection per node/label/reporting window."""
+        db = self._require_db()
+        await db.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_detections_reporting_window_canonical
+                ON detections(
+                    COALESCE(source_node_id, '__none__'),
+                    lower(label),
+                    report_window_start_ns,
+                    report_window_end_ns
+                )
+            WHERE report_window_start_ns IS NOT NULL
+              AND report_window_end_ns IS NOT NULL
+            """
+        )
 
     async def _table_columns(self, table: str) -> set[str]:
         db = self._require_db()
@@ -1186,14 +1235,27 @@ class Storage:
             return None
         return self._row_to_detection(row).model_dump(mode="json")
 
-    async def list_detections(self, limit: int = 100) -> list[dict]:
+    async def list_detections(
+        self,
+        limit: int = 100,
+        *,
+        min_label_confidence: float | None = None,
+    ) -> list[dict]:
         db = self._require_db()
-        rows = await (
-            await db.execute(
-                "SELECT * FROM detections ORDER BY timestamp_ns DESC LIMIT ?",
-                (limit,),
-            )
-        ).fetchall()
+        if min_label_confidence is None:
+            rows = await (
+                await db.execute(
+                    "SELECT * FROM detections ORDER BY timestamp_ns DESC LIMIT ?",
+                    (limit,),
+                )
+            ).fetchall()
+        else:
+            rows = await (
+                await db.execute(
+                    "SELECT * FROM detections WHERE label_confidence >= ? ORDER BY timestamp_ns DESC LIMIT ?",
+                    (float(min_label_confidence), limit),
+                )
+            ).fetchall()
         return [self._row_to_detection(row).model_dump(mode="json") for row in rows]
 
     async def list_tracks(self, limit: int = 200) -> list[dict]:

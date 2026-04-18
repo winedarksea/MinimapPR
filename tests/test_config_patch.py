@@ -70,6 +70,7 @@ def test_patch_multiple_fields(monkeypatch, tmp_path: Path) -> None:
                 "trigger_rms": 0.02,
                 "trigger_cooldown_seconds": 1.5,
                 "yamnet_min_confidence": 0.4,
+                "detection_min_confidence": 0.55,
                 "fusion_worker_count": 2,
             },
         )
@@ -78,6 +79,7 @@ def test_patch_multiple_fields(monkeypatch, tmp_path: Path) -> None:
         assert abs(body["trigger_rms"] - 0.02) < 1e-9
         assert abs(body["trigger_cooldown_seconds"] - 1.5) < 1e-9
         assert abs(body["yamnet_min_confidence"] - 0.4) < 1e-9
+        assert abs(body["detection_min_confidence"] - 0.55) < 1e-9
         assert body["fusion_worker_count"] == 2
 
 
@@ -117,6 +119,16 @@ def test_patch_yamnet_confidence_out_of_range(monkeypatch, tmp_path: Path) -> No
         assert resp.status_code == 422
 
         resp2 = client.patch("/api/v1/config", json={"yamnet_min_confidence": -0.1})
+        assert resp2.status_code == 422
+
+
+def test_patch_detection_confidence_out_of_range(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        resp = client.patch("/api/v1/config", json={"detection_min_confidence": 1.5})
+        assert resp.status_code == 422
+
+        resp2 = client.patch("/api/v1/config", json={"detection_min_confidence": -0.1})
         assert resp2.status_code == 422
 
 
