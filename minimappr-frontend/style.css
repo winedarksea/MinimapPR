@@ -296,11 +296,14 @@ body {
 }
 .topbar-brand::before {
   content: "";
-  width: 10px;
-  height: 10px;
-  border-radius: 2px;
-  background: var(--md-sys-color-primary);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--md-sys-color-primary) 25%, transparent);
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background-image: url("favicon.svg");
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: contain;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--md-sys-color-primary) 35%, transparent);
 }
 
 .topbar-nav {

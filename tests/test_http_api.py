@@ -105,6 +105,23 @@ def test_http_ingest_and_cop_status(monkeypatch, tmp_path: Path) -> None:
         assert isinstance(fusion["metrics"].get("last_localization_algorithm"), str)
 
 
+def test_spa_refresh_fallback_serves_index_for_frontend_routes(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    frontend_dir = tmp_path / "frontend"
+    frontend_dir.mkdir(parents=True, exist_ok=True)
+    (frontend_dir / "index.html").write_text("<html><body>spa-ok</body></html>", encoding="utf-8")
+    monkeypatch.setattr("minimappr.main.frontend_dir", frontend_dir)
+
+    with TestClient(app) as client:
+        browser_refresh = client.get("/analysis/labels")
+        assert browser_refresh.status_code == 200
+        assert "spa-ok" in browser_refresh.text
+
+        api_not_found = client.get("/api/v1/does-not-exist")
+        assert api_not_found.status_code == 404
+        assert api_not_found.json() == {"detail": "Not Found"}
+
+
 def test_debug_endpoints_expose_runtime_and_event_provenance(monkeypatch, tmp_path: Path) -> None:
     _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=3600)
 

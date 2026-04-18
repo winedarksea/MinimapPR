@@ -1,5 +1,6 @@
 use leptos::prelude::*;
 use leptos_router::components::A;
+use wasm_bindgen::JsCast;
 use crate::state::AppState;
 
 pub fn detection_audio_url(event_id: &str) -> String {
@@ -7,6 +8,16 @@ pub fn detection_audio_url(event_id: &str) -> String {
         "/api/v1/detections/{}/audio",
         js_sys::encode_uri_component(event_id)
     )
+}
+
+fn play_detection_audio(url: &str) {
+    let Some(window) = web_sys::window() else { return };
+    let Some(doc) = window.document() else { return };
+    let Some(el) = doc.get_element_by_id("audio-player") else { return };
+    if let Ok(audio) = el.dyn_into::<web_sys::HtmlAudioElement>() {
+        audio.set_src(url);
+        let _ = audio.play();
+    }
 }
 
 pub fn detection_audio_download_url(event_id: &str) -> String {
@@ -33,17 +44,17 @@ pub fn DetectionAudioActions(event_id: String) -> impl IntoView {
     let drawer_open = state.audio_drawer_open;
     let drawer_detection_id = state.audio_drawer_detection_id;
 
-    let inspect_eid = event_id.clone();
+    let play_eid = event_id.clone();
     let download_eid = event_id.clone();
     let analysis_href = audio_analysis_href(&event_id);
+    let inspect_eid = event_id.clone();
 
     view! {
         <button
             class="play-btn"
-            title="Open audio analysis drawer"
+            title="Play detection audio"
             on:click=move |_| {
-                drawer_detection_id.set(Some(inspect_eid.clone()));
-                drawer_open.set(true);
+                play_detection_audio(&detection_audio_url(&play_eid));
             }
         >
             "▶"
@@ -51,8 +62,14 @@ pub fn DetectionAudioActions(event_id: String) -> impl IntoView {
         <button class="btn-sm" on:click=move |_| download_detection(&download_eid)>
             "Download"
         </button>
+        <button class="btn-sm" on:click=move |_| {
+            drawer_detection_id.set(Some(inspect_eid.clone()));
+            drawer_open.set(true);
+        }>
+            "Analyze"
+        </button>
         <A href=analysis_href>
-            <span class="btn-sm">"Analyze"</span>
+            <span class="btn-sm">"⤢"</span>
         </A>
     }
 }

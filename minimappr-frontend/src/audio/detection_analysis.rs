@@ -5,6 +5,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::components::A;
 use serde::Deserialize;
+use wasm_bindgen::JsCast;
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 struct LabelHit {
@@ -58,6 +59,7 @@ pub fn DetectionAudioAnalysisView(
     let player_id = format!("{instance_prefix}-player");
     let audio_url = detection_audio_url(&detection_id);
     let download_url = detection_audio_download_url(&detection_id);
+    let is_playing: RwSignal<bool> = RwSignal::new(false);
     let expand_href = audio_analysis_href(&detection_id);
 
     // Fetch metadata panel details for the selected detection.
@@ -118,6 +120,33 @@ pub fn DetectionAudioAnalysisView(
                     <h2 style="margin:0">"Detection " <code>{detection_id.clone()}</code></h2>
                     <span class="muted">{move || info.get().unwrap_or_default()}</span>
                     <span class="daily-error">{move || error.get().unwrap_or_default()}</span>
+                    {
+                        let player_id_play = player_id.clone();
+                        view! {
+                            <button
+                                class="play-btn"
+                                title="Play / Pause audio"
+                                on:click=move |_| {
+                                    if let Some(el) = web_sys::window()
+                                        .and_then(|w| w.document())
+                                        .and_then(|d| d.get_element_by_id(&player_id_play))
+                                    {
+                                        if let Ok(audio) = el.dyn_into::<web_sys::HtmlAudioElement>() {
+                                            if audio.paused() {
+                                                let _ = audio.play();
+                                                is_playing.set(true);
+                                            } else {
+                                                audio.pause().unwrap_or(());
+                                                is_playing.set(false);
+                                            }
+                                        }
+                                    }
+                                }
+                            >
+                                {move || if is_playing.get() { "⏸" } else { "▶" }}
+                            </button>
+                        }
+                    }
                     <a class="btn-sm" href=download_url download=format!("{}.wav", detection_id.clone())>
                         "Download WAV"
                     </a>
@@ -141,7 +170,15 @@ pub fn DetectionAudioAnalysisView(
                         <label class="muted">"Spectrogram"</label>
                         <canvas id=spectrogram_id></canvas>
                     </div>
-                    <audio id=player_id controls=true src=audio_url style="width:100%;margin-top:8px" />
+                    <audio
+                        id=player_id
+                        controls=true
+                        src=audio_url
+                        style="width:100%;margin-top:8px"
+                        on:ended=move |_| is_playing.set(false)
+                        on:pause=move |_| is_playing.set(false)
+                        on:play=move |_| is_playing.set(true)
+                    />
                 </div>
 
                 <DetectionMetaPanel detection=detection />

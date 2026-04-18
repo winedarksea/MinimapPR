@@ -53,16 +53,6 @@
     return canvas.toDataURL("image/png");
   }
 
-  function lonToTileX(lonDeg, zoom) {
-    return Math.floor(((lonDeg + 180) / 360) * (1 << zoom));
-  }
-
-  function latToTileY(latDeg, zoom) {
-    const latRad = (latDeg * Math.PI) / 180;
-    const n = Math.log(Math.tan(Math.PI / 4 + latRad / 2));
-    return Math.floor(((1 - n / Math.PI) / 2) * (1 << zoom));
-  }
-
   function getTileCache() {
     if (!globalThis.caches || !globalThis.caches.open) return Promise.resolve(null);
     return globalThis.caches.open(TILE_CACHE_NAME).catch(() => null);
@@ -78,147 +68,83 @@
     });
   }
 
+  // Intercepts tile load errors at the L.TileLayer level.
+  // Normal (non-error) tiles take the fast path: Leaflet sets img.src directly
+  // via the inherited createTile, avoiding any async overhead.  Only on error
+  // do we check the persistent cache and then fall back to the generated
+  // placeholder canvas tile so the map stays usable even when OSM is down.
   function createResilientOsmTileLayer() {
-    const GenericTileLayer = L.TileLayer.extend({
+    const ResilientTileLayer = L.TileLayer.extend({
       createTile: function (coords, done) {
-        const tile = document.createElement("img");
+        // Call the standard Leaflet createTile so the img.src is set
+        // immediately, giving tiles the fastest possible happy-path load.
+        const tile = L.TileLayer.prototype.createTile.call(this, coords, done);
+        const url = this.getTileUrl(coords);
         const tileSize = this.getTileSize();
         const width = (tileSize && tileSize.x) || 256;
-        const height = (tileSize && tileSize.y) || 256;
-        tile.alt = "";
-        tile.setAttribute("role", "presentation");
-        tile.width = width;
-        tile.height = height;
-        tile.decoding = "async";
 
-        const url = this.getTileUrl(coords);
-        const genericFallback = makeGenericFallbackTileDataUrl(width);
-        let completed = false;
-
-        function completeOnce(err) {
-          if (completed) return;
-          completed = true;
-          done(err || null, tile);
-        }
-
-        function loadGenericFallback() {
-          tile.onload = function () {
-            completeOnce(null);
-          };
-          tile.onerror = function () {
-            completeOnce(new Error("generic fallback tile failed"));
-          };
-          tile.src = genericFallback;
-        }
-
-        tile.onload = function () {
-          completeOnce(null);
-        };
-
-        tile.onerror = function () {
-          loadGenericFallback();
-        };
-
-        (async () => {
-          const cache = await getTileCache();
-          const req = requestFromUrl(url);
-
-          try {
-            const networkResp = await fetch(req, {
-              mode: "cors",
-              credentials: "omit",
-              cache: "no-store",
-            });
-
-            if (networkResp.ok) {
+        // Intercept tile errors: try persistent cache first, then render
+        // a labelled placeholder canvas tile so the overlay layer (markers,
+        // heatmap, tracks) is still visible on a non-blank background.
+        tile.addEventListener("error", function onTileError() {
+          tile.removeEventListener("error", onTileError);
+          (async () => {
+            try {
+              const cache = await getTileCache();
               if (cache) {
-                cache.put(req, networkResp.clone()).catch(() => {});
+                const cachedResp = await cache.match(requestFromUrl(url));
+                if (cachedResp) {
+                  const blobUrl = await responseToObjectUrl(cachedResp);
+                  tile.onload = function () { URL.revokeObjectURL(blobUrl); };
+                  tile.src = blobUrl;
+                  return;
+                }
               }
-              const objectUrl = await responseToObjectUrl(networkResp);
-              tile.onload = function () {
-                URL.revokeObjectURL(objectUrl);
-                completeOnce(null);
-              };
-              tile.onerror = function () {
-                URL.revokeObjectURL(objectUrl);
-                loadGenericFallback();
-              };
-              tile.src = objectUrl;
-              return;
+            } catch (_) {
+              // Cache unavailable (non-secure context, quota, etc.) — fall through.
             }
-          } catch (_) {
-            // Network failure falls through to cache and then generic fallback.
-          }
+            tile.src = makeGenericFallbackTileDataUrl(width);
+          })();
+        }, { once: true });
 
-          try {
-            if (cache) {
-              const cachedResp = await cache.match(req);
-              if (cachedResp) {
-                const cachedObjectUrl = await responseToObjectUrl(cachedResp);
-                tile.onload = function () {
-                  URL.revokeObjectURL(cachedObjectUrl);
-                  completeOnce(null);
-                };
-                tile.onerror = function () {
-                  URL.revokeObjectURL(cachedObjectUrl);
-                  loadGenericFallback();
-                };
-                tile.src = cachedObjectUrl;
-                return;
+        // After a successful network load, opportunistically cache the tile
+        // so it survives future rate-limit or offline periods.
+        tile.addEventListener("load", function onTileLoad() {
+          tile.removeEventListener("load", onTileLoad);
+          (async () => {
+            try {
+              const cache = await getTileCache();
+              if (!cache) return;
+              // Skip if already cached to avoid redundant writes.
+              const alreadyCached = await cache.match(requestFromUrl(url));
+              if (alreadyCached) return;
+              const resp = await fetch(requestFromUrl(url), {
+                mode: "cors",
+                credentials: "omit",
+              });
+              if (resp.ok) {
+                await cache.put(requestFromUrl(url), resp);
               }
+            } catch (_) {
+              // Best-effort write; failure is non-fatal.
             }
-          } catch (_) {
-            // If cache read fails, use generic fallback tile.
-          }
-
-          loadGenericFallback();
-        })();
+          })();
+        }, { once: true });
 
         return tile;
       },
     });
 
-    return new GenericTileLayer(OSM_TEMPLATE, {
+    return new ResilientTileLayer(OSM_TEMPLATE, {
       attribution: "© OpenStreetMap contributors",
       maxZoom: 18,
       maxNativeZoom: 18,
       updateWhenIdle: true,
-      keepBuffer: 1,
+      keepBuffer: 2,
       subdomains: "abc",
     });
   }
 
-  function prewarmPrimaryBasemapTile(lat, lon, zoom) {
-    (async () => {
-      if (!Number.isFinite(lat) || !Number.isFinite(lon) || !Number.isFinite(zoom)) return;
-      const z = Math.max(0, Math.min(18, Math.round(zoom)));
-      const x = lonToTileX(lon, z);
-      const y = latToTileY(lat, z);
-      const url = OSM_TEMPLATE
-        .replace("{s}", "a")
-        .replace("{z}", String(z))
-        .replace("{x}", String(x))
-        .replace("{y}", String(y));
-      const cache = await getTileCache();
-      if (!cache) return;
-      const req = requestFromUrl(url);
-      const alreadyCached = await cache.match(req);
-      if (alreadyCached) return;
-
-      try {
-        const resp = await fetch(req, {
-          mode: "cors",
-          credentials: "omit",
-          cache: "no-store",
-        });
-        if (resp.ok) {
-          await cache.put(req, resp.clone());
-        }
-      } catch (_) {
-        // Best-effort warm cache; failure is fine.
-      }
-    })();
-  }
 
   // ── Init ──────────────────────────────────────────────────────
   function init(lat, lon, zoom) {
@@ -247,7 +173,9 @@
     // updateWhenIdle defers tile fetches until panning stops, reducing OSM load.
     // maxZoom 18 = OSM's nominal limit (19+ just upscales the same tiles).
     createResilientOsmTileLayer().addTo(_map);
-    prewarmPrimaryBasemapTile(lat, lon, zoom ?? 17);
+    // Deferred invalidateSize handles cases where the map container's flex
+    // dimensions settle after the initial paint (e.g. WASM hydration timing).
+    setTimeout(function () { if (_map) _map.invalidateSize(); }, 100);
   }
 
   // ── Node markers ──────────────────────────────────────────────

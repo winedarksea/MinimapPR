@@ -26,8 +26,9 @@
     if (!canvas) return { ok: false, error: "no canvas #" + canvasId };
     const buf = await fetchAndDecode(url);
     const ch = buf.getChannelData(0);
-    const w = canvas.clientWidth * (window.devicePixelRatio || 1);
-    const h = canvas.clientHeight * (window.devicePixelRatio || 1);
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.max(1, canvas.clientWidth * dpr);
+    const h = Math.max(1, canvas.clientHeight * dpr);
     canvas.width = w; canvas.height = h;
     const g = canvas.getContext("2d");
     g.fillStyle = cssVar("--md-sys-color-surface-container-low", "#111");
@@ -35,10 +36,20 @@
     g.strokeStyle = cssVar("--md-sys-color-primary", "#58a6ff");
     g.lineWidth = 1;
     const mid = h / 2;
+
+    // Find peak to auto-scale amplitude to fill canvas height.
+    let peak = 0;
+    for (let i = 0; i < ch.length; i++) {
+      const abs = Math.abs(ch[i]);
+      if (abs > peak) peak = abs;
+    }
+    if (peak < 1e-6) peak = 1.0;
+    const scale = (mid * 0.92) / peak;
+
     const step = Math.max(1, Math.floor(ch.length / w));
     g.beginPath();
     for (let x = 0; x < w; x++) {
-      let min = 1.0, max = -1.0;
+      let min = peak, max = -peak;
       const start = x * step;
       const end = Math.min(ch.length, start + step);
       for (let i = start; i < end; i++) {
@@ -46,8 +57,8 @@
         if (v < min) min = v;
         if (v > max) max = v;
       }
-      g.moveTo(x + 0.5, mid + min * mid);
-      g.lineTo(x + 0.5, mid + max * mid);
+      g.moveTo(x + 0.5, mid + min * scale);
+      g.lineTo(x + 0.5, mid + max * scale);
     }
     g.stroke();
     // Center line
@@ -127,20 +138,32 @@
     // Clip to sensible dB range below gmax.
     const floor = Math.max(gmin, gmax - 80);
 
-    const w = canvas.clientWidth * (window.devicePixelRatio || 1);
-    const h = canvas.clientHeight * (window.devicePixelRatio || 1);
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.max(1, canvas.clientWidth * dpr);
+    const h = Math.max(1, canvas.clientHeight * dpr);
     canvas.width = w; canvas.height = h;
     const img = new ImageData(w, h);
     const data = img.data;
 
+    // Bilinear interpolation helper: sample mags at fractional (frame, bin) coords.
+    function sampleMag(fPos, kPos) {
+      const f0 = Math.max(0, Math.min(frames - 1, Math.floor(fPos)));
+      const f1 = Math.min(frames - 1, f0 + 1);
+      const k0 = Math.max(0, Math.min(bins - 1, Math.floor(kPos)));
+      const k1 = Math.min(bins - 1, k0 + 1);
+      const ff = fPos - f0, kf = kPos - k0;
+      return (mags[f0 * bins + k0] * (1 - ff) + mags[f1 * bins + k0] * ff) * (1 - kf)
+           + (mags[f0 * bins + k1] * (1 - ff) + mags[f1 * bins + k1] * ff) * kf;
+    }
+
     for (let x = 0; x < w; x++) {
-      const fIdx = Math.min(frames - 1, Math.floor((x / w) * frames));
+      const fPos = (x / (w - 1)) * (frames - 1);
       for (let y = 0; y < h; y++) {
-        // y=0 top = highest freq; invert
-        const kIdx = Math.min(bins - 1, Math.floor(((h - 1 - y) / h) * bins));
-        const db = mags[fIdx * bins + kIdx];
+        // y=0 top = highest freq; invert for spectrogram orientation
+        const kPos = ((h - 1 - y) / (h - 1)) * (bins - 1);
+        const db = sampleMag(fPos, kPos);
         const t = Math.max(0, Math.min(1, (db - floor) / (gmax - floor + 1e-9)));
-        // Simple perceptual ramp: dark blue → magenta → yellow
+        // Perceptual ramp: dark blue → cyan → green → yellow → red
         const r = Math.round(255 * Math.min(1, Math.max(0, t * 2 - 0.2)));
         const gg = Math.round(255 * Math.min(1, Math.max(0, t * 2 - 1)));
         const b = Math.round(255 * Math.min(1, Math.max(0, 1 - t * 1.5)));

@@ -15,6 +15,7 @@ import numpy as np
 from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from minimappr.api.live import LiveEventHub
 from minimappr.api.transports import HttpIngestTransport
@@ -295,6 +296,32 @@ async def runtime_error_handler(request: Request, exc: RuntimeError):
 async def unhandled_error_handler(request: Request, exc: Exception):
     logger.exception("Unhandled error for %s", request.url.path, exc_info=exc)
     return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+
+
+@app.exception_handler(StarletteHTTPException)
+async def spa_fallback_404_handler(request: Request, exc: StarletteHTTPException):
+    """Serve the SPA entrypoint for non-API browser navigations.
+
+    StaticFiles does not automatically map arbitrary history-routed paths
+    (for example "/analysis/labels") to index.html, so refresh on nested
+    routes can otherwise return FastAPI's JSON 404 response.
+    """
+    if exc.status_code != 404:
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+    index = frontend_dir / "index.html"
+    request_path = request.url.path
+    is_frontend_navigation = (
+        request.method == "GET"
+        and index.is_file()
+        and not request_path.startswith("/api/")
+        and not request_path.startswith("/ws/")
+        and "." not in Path(request_path).name
+    )
+    if is_frontend_navigation:
+        return FileResponse(index)
+
+    return JSONResponse(status_code=404, content={"detail": exc.detail})
 
 
 @app.get("/", response_model=None)
