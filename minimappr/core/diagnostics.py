@@ -45,8 +45,11 @@ class DiagnosticsService:
                 "localization": {
                     "algorithm": self._settings.localization_algorithm,
                     "strategy": self._settings.localization_strategy,
+                    "band_min_hz": self._settings.localization_band_min_hz,
+                    "band_max_hz": self._settings.localization_band_max_hz,
                     "window_seconds": self._settings.localization_window_seconds,
                     "classification_window_seconds": self._settings.classification_window_seconds,
+                    "reporting_window_seconds": self._settings.reporting_window_seconds,
                     "max_tau_s": self._settings.localization_max_tau_s,
                     "skip_localization_for_classification": (
                         self._settings.skip_localization_for_classification
@@ -152,6 +155,12 @@ class DiagnosticsService:
                 "path": detection.get("feature_summary", {}).get("classification_path"),
                 "scores": detection.get("classifier_scores", {}),
                 "features": detection.get("feature_summary", {}),
+            },
+            "reporting": {
+                "modality": detection.get("reporting_modality"),
+                "report_window_start_ns": detection.get("report_window_start_ns"),
+                "report_window_end_ns": detection.get("report_window_end_ns"),
+                "branch_evidence": detection.get("feature_summary", {}).get("branch_evidence", {}),
             },
             "tracking": {
                 "track_id": track_id,

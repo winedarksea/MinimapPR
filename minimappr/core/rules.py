@@ -34,6 +34,7 @@ def _as_set(value: Any) -> set[str]:
 class RuleCondition:
     label_categories: set[str] = field(default_factory=set)
     labels: set[str] = field(default_factory=set)
+    reporting_modalities: set[str] = field(default_factory=set)
     zone_ids: set[str] = field(default_factory=set)
     track_statuses: set[str] = field(default_factory=set)
     source_types: set[str] = field(default_factory=set)
@@ -50,6 +51,7 @@ class RuleCondition:
         return cls(
             label_categories=_as_set(raw.get("label_categories")),
             labels=_as_set(raw.get("labels")),
+            reporting_modalities=_as_set(raw.get("reporting_modalities")),
             zone_ids=_as_set(raw.get("zone_ids")),
             track_statuses=_as_set(raw.get("track_statuses")),
             source_types=_as_set(raw.get("source_types")),
@@ -189,6 +191,7 @@ def _matches(
     status = ""
     confidence: float | None = None
     source_type = ""
+    reporting_modality = ""
 
     if detection is not None:
         label = detection.label.strip().lower()
@@ -196,6 +199,7 @@ def _matches(
         zone_ids = {zone.strip().lower() for zone in detection.zone_ids}
         confidence = float(detection.label_confidence)
         source_type = detection.source_type.strip().lower()
+        reporting_modality = detection.reporting_modality.strip().lower()
     if track is not None:
         if not label:
             label = track.label.strip().lower()
@@ -208,6 +212,8 @@ def _matches(
         return False, "label"
     if cond.label_categories and category not in cond.label_categories:
         return False, "category"
+    if cond.reporting_modalities and reporting_modality not in cond.reporting_modalities:
+        return False, "reporting_modality"
     if cond.zone_ids and zone_ids.isdisjoint(cond.zone_ids):
         return False, "zone"
     if cond.track_statuses and status not in cond.track_statuses:
@@ -310,24 +316,27 @@ def default_rules() -> list[RuleDef]:
             actions=[ActionDescriptor(action_type="alert", destination="cop", priority="normal")],
             cooldown_seconds=2.0,
         ),
-        # YAMNet class index 72 is "Howl" in the AudioSet taxonomy, covering
-        # coyote and wolf vocalizations.  30-second cooldown avoids alert flooding
-        # during a prolonged howling bout.
+        # BirdNET exposes a direct "coyote" label for wildlife deployments.
+        # Alerts are limited to canonical localized detections so omni-only
+        # BirdNET hits are still stored for review without paging operators.
         RuleDef(
-            rule_id="coyote_howl_alert",
+            rule_id="coyote_alert",
             enabled=True,
             scope="detection",
-            condition=RuleCondition(labels={"howl"}, min_confidence=0.4),
+            condition=RuleCondition(
+                labels={"coyote"},
+                reporting_modalities={"localized"},
+                min_confidence=0.4,
+            ),
             actions=[
                 ActionDescriptor(
                     action_type="alert",
                     destination="cop",
                     priority="high",
-                    payload={"message": "Coyote howl detected", "yamnet_class": 72},
+                    payload={"message": "Coyote detected"},
                 ),
                 ActionDescriptor(action_type="alert", destination="log", priority="high"),
             ],
             cooldown_seconds=30.0,
         ),
     ]
-

@@ -156,6 +156,14 @@ export MINIMAPPR_RUNTIME_PROFILE=birdnet_omni_testing
 
 That preset switches to direct BirdNET, disables beamformed classification, skips localization before classification, and expands the classification clip to a 30 s trailing omni window while keeping the short localization trigger window intact.
 
+For production wildlife deployment, use the hybrid preset:
+
+```bash
+export MINIMAPPR_RUNTIME_PROFILE=birdnet_hybrid_production
+```
+
+That preset uses direct BirdNET, keeps omnidirectional classification on a 30 s reporting window, runs SRP-PHAT localization on a low-frequency band for the sirith tetrahedral array, and emits one canonical detection per label/reporting window with localized detections preferred over omni-only detections.
+
 ## API Endpoints
 - `GET /health`
 - `GET /api/v1/config`
@@ -206,9 +214,11 @@ Key env vars:
 - `MINIMAPPR_SITE_ORIGIN_LON` (default `-122.4194`)
 - `MINIMAPPR_SITE_ORIGIN_ALT_M` (default `0.0`)
 - `MINIMAPPR_COORDINATE_MODE` (`flat` or `geodetic`; default `flat`)
-- `MINIMAPPR_RUNTIME_PROFILE` (`default` or `birdnet_omni_testing`)
+- `MINIMAPPR_RUNTIME_PROFILE` (`default`, `birdnet_omni_testing`, or `birdnet_hybrid_production`)
 - `MINIMAPPR_CLASSIFIER` (`heuristic`, `yamnet`, or `birdnet`)
 - `MINIMAPPR_SKIP_LOCALIZATION_FOR_CLASSIFICATION` (`false` default)
+- `MINIMAPPR_LOCALIZATION_BAND_MIN_HZ` / `MINIMAPPR_LOCALIZATION_BAND_MAX_HZ` (optional localization-only bandpass)
+- `MINIMAPPR_REPORTING_WINDOW_SECONDS` (canonical detection dedupe window; default `30`)
 - `MINIMAPPR_TRACKING_FILTER` (`linear` default, or `kalman`)
 - `MINIMAPPR_KALMAN_PROCESS_NOISE` (default `2.0`)
 - `MINIMAPPR_KALMAN_MEASUREMENT_NOISE` (default `1.5`)

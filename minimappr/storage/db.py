@@ -138,6 +138,9 @@ class Storage:
                 tor_ns INTEGER NOT NULL,
                 time_quality TEXT NOT NULL,
                 stale_ns INTEGER,
+                report_window_start_ns INTEGER,
+                report_window_end_ns INTEGER,
+                reporting_modality TEXT NOT NULL DEFAULT 'localized',
                 x REAL NOT NULL,
                 y REAL NOT NULL,
                 z REAL NOT NULL,
@@ -168,6 +171,8 @@ class Storage:
             CREATE INDEX IF NOT EXISTS idx_detections_ts ON detections(timestamp_ns DESC);
             CREATE INDEX IF NOT EXISTS idx_detections_track ON detections(track_id, timestamp_ns DESC);
             CREATE INDEX IF NOT EXISTS idx_detections_label ON detections(label_category, timestamp_ns DESC);
+            CREATE INDEX IF NOT EXISTS idx_detections_reporting_window
+                ON detections(source_node_id, label, report_window_start_ns DESC);
 
             CREATE TABLE IF NOT EXISTS tracks (
                 id TEXT PRIMARY KEY,
@@ -334,6 +339,9 @@ class Storage:
                 "tor_ns": "INTEGER",
                 "time_quality": "TEXT NOT NULL DEFAULT 'freerunning'",
                 "stale_ns": "INTEGER",
+                "report_window_start_ns": "INTEGER",
+                "report_window_end_ns": "INTEGER",
+                "reporting_modality": "TEXT NOT NULL DEFAULT 'localized'",
                 "lat": "REAL",
                 "lon": "REAL",
                 "alt": "REAL",
@@ -825,6 +833,7 @@ class Storage:
                 INSERT INTO detections (
                     id, event_id, source_type, source_node_id,
                     timestamp_ns, toa_ns, tor_ns, time_quality, stale_ns,
+                    report_window_start_ns, report_window_end_ns, reporting_modality,
                     x, y, z, lat, lon, alt, covariance_json,
                     confidence, gdop, label_id, label, label_category, iff_category,
                     label_confidence, spl_db, track_id,
@@ -832,7 +841,7 @@ class Storage:
                     zone_ids_json, tdoa_json, classifier_scores_json, feature_summary_json,
                     retention_tier, snippet_path, snippet_expires_ns
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     detection.id,
@@ -844,6 +853,9 @@ class Storage:
                     detection.tor_ns,
                     detection.time_quality.value,
                     detection.stale_ns,
+                    detection.report_window_start_ns,
+                    detection.report_window_end_ns,
+                    detection.reporting_modality,
                     detection.position_m[0],
                     detection.position_m[1],
                     detection.position_m[2],
@@ -875,6 +887,119 @@ class Storage:
                 ),
             )
             await self._commit_if_needed(db)
+
+    async def update_detection(
+        self,
+        detection: DetectionEvent,
+        snippet_path: str | None,
+        snippet_expires_ns: int | None,
+        retention_tier: str = "short",
+    ) -> bool:
+        db = self._require_db()
+        async with self._write_guard():
+            cursor = await db.execute(
+                """
+                UPDATE detections
+                SET event_id = ?, source_type = ?, source_node_id = ?,
+                    timestamp_ns = ?, toa_ns = ?, tor_ns = ?, time_quality = ?, stale_ns = ?,
+                    report_window_start_ns = ?, report_window_end_ns = ?, reporting_modality = ?,
+                    x = ?, y = ?, z = ?, lat = ?, lon = ?, alt = ?, covariance_json = ?,
+                    confidence = ?, gdop = ?, label_id = ?, label = ?, label_category = ?, iff_category = ?,
+                    label_confidence = ?, spl_db = ?, track_id = ?,
+                    reference_sensor = ?, source_sensors_json = ?, source_observation_ids_json = ?,
+                    zone_ids_json = ?, tdoa_json = ?, classifier_scores_json = ?, feature_summary_json = ?,
+                    retention_tier = ?, snippet_path = COALESCE(?, snippet_path),
+                    snippet_expires_ns = COALESCE(?, snippet_expires_ns)
+                WHERE id = ?
+                """,
+                (
+                    detection.event_id or detection.id,
+                    detection.source_type,
+                    detection.source_node_id,
+                    detection.timestamp_ns,
+                    detection.toa_ns,
+                    detection.tor_ns,
+                    detection.time_quality.value,
+                    detection.stale_ns,
+                    detection.report_window_start_ns,
+                    detection.report_window_end_ns,
+                    detection.reporting_modality,
+                    detection.position_m[0],
+                    detection.position_m[1],
+                    detection.position_m[2],
+                    detection.position_geo.lat if detection.position_geo else None,
+                    detection.position_geo.lon if detection.position_geo else None,
+                    detection.position_geo.alt_m if detection.position_geo else None,
+                    _json_dumps(detection.position_covariance_m2)
+                    if detection.position_covariance_m2 is not None
+                    else None,
+                    detection.confidence,
+                    detection.gdop,
+                    detection.label_id,
+                    detection.label,
+                    detection.label_category,
+                    detection.iff_category,
+                    detection.label_confidence,
+                    detection.spl_db,
+                    detection.track_id,
+                    detection.reference_sensor,
+                    _json_dumps(detection.source_sensors),
+                    _json_dumps(detection.source_observation_ids),
+                    _json_dumps(detection.zone_ids),
+                    _json_dumps(detection.tdoa_s),
+                    _json_dumps(detection.classifier_scores),
+                    _json_dumps(detection.feature_summary),
+                    retention_tier,
+                    snippet_path,
+                    snippet_expires_ns,
+                    detection.id,
+                ),
+            )
+            await self._commit_if_needed(db)
+        return bool(cursor.rowcount)
+
+    async def find_detection_for_reporting_window(
+        self,
+        *,
+        source_node_id: str | None,
+        label: str,
+        report_window_start_ns: int,
+        report_window_end_ns: int,
+    ) -> dict[str, Any] | None:
+        db = self._require_db()
+        if source_node_id is None:
+            row = await (
+                await db.execute(
+                    """
+                    SELECT * FROM detections
+                    WHERE source_node_id IS NULL
+                      AND label = ?
+                      AND report_window_start_ns = ?
+                      AND report_window_end_ns = ?
+                    ORDER BY timestamp_ns DESC
+                    LIMIT 1
+                    """,
+                    (label, report_window_start_ns, report_window_end_ns),
+                )
+            ).fetchone()
+        else:
+            row = await (
+                await db.execute(
+                    """
+                    SELECT * FROM detections
+                    WHERE source_node_id = ?
+                      AND label = ?
+                      AND report_window_start_ns = ?
+                      AND report_window_end_ns = ?
+                    ORDER BY timestamp_ns DESC
+                    LIMIT 1
+                    """,
+                    (source_node_id, label, report_window_start_ns, report_window_end_ns),
+                )
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_detection(row).model_dump(mode="json")
 
     async def insert_track_update(
         self,
@@ -1827,6 +1952,9 @@ class Storage:
             tor_ns=int(row["tor_ns"] or row["timestamp_ns"]),
             time_quality=row["time_quality"] or "freerunning",
             stale_ns=row["stale_ns"],
+            report_window_start_ns=row["report_window_start_ns"],
+            report_window_end_ns=row["report_window_end_ns"],
+            reporting_modality=row["reporting_modality"] or "localized",
             position_m=(float(row["x"]), float(row["y"]), float(row["z"])),
             position_geo=self._row_to_geo(row),
             position_covariance_m2=_json_loads(row["covariance_json"], None),

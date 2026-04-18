@@ -37,7 +37,12 @@ from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.ingest import EnvironmentUpdater, IngestProcessor
 from minimappr.core.localization import LocalizationError
 from minimappr.core.node_registry import NodeRegistry
-from minimappr.core.preprocessing import NodePreprocessorFactory, create_classification_preprocessor
+from minimappr.core.preprocessing import (
+    NodePreprocessorFactory,
+    create_classification_preprocessor,
+    create_localization_preprocessor,
+)
+from minimappr.core.reporting_fusion import ReportingFusionPolicy
 from minimappr.core.retention import RetentionPolicy
 from minimappr.core.rules import ConfigRuleEngine, LoggingRuleActionHandler, WebsocketRuleActionHandler
 from minimappr.core.taxonomy import RuntimeTaxonomyProvider
@@ -82,19 +87,15 @@ class EventCandidate:
 @dataclass(slots=True)
 class LocalizedCandidate:
     candidate: EventCandidate
-    localization_position_m: tuple[float, float, float]
-    localization_confidence: float
-    localization_gdop: float
-    reference_sensor: str
-    tdoa_s: dict[str, float]
+    localization_branch: LocalizationBranch | None
     selected_sensor_ids: list[str]
     selected_windows: dict[str, np.ndarray]
     selected_positions: dict[str, np.ndarray]
-    reference_signal: np.ndarray
     classification_selected_windows: dict[str, np.ndarray]
-    classification_reference_signal: np.ndarray
-    localization_method: str
-    capability_tier: str
+    omni_reference_sensor: str
+    omni_reference_signal: np.ndarray
+    omni_position_m: tuple[float, float, float]
+    omni_classification_reference_signal: np.ndarray
     environment: dict[str, Any]
 
 
@@ -104,6 +105,19 @@ class DetectionProduct:
     track: TrackState | None
     suppressed_by_zone: bool
     suppression_reasons: list[str]
+
+
+@dataclass(slots=True)
+class LocalizationBranch:
+    localization_position_m: tuple[float, float, float]
+    localization_confidence: float
+    localization_gdop: float
+    reference_sensor: str
+    reference_signal: np.ndarray
+    classification_reference_signal: np.ndarray
+    tdoa_s: dict[str, float]
+    localization_method: str
+    capability_tier: str
 
 
 @dataclass(slots=True)
@@ -194,9 +208,14 @@ class FusionNode:
         )
         self.beamformer = beamformer or self._create_beamformer()
         self.classification_preprocessor = create_classification_preprocessor(self.localization_config)
+        self.localization_preprocessor = create_localization_preprocessor(self.localization_config)
         self.retention_policy = RetentionPolicy(
             permanent_labels=set(self.fusion_config.retention_permanent_labels),
             security_long_confidence=self.fusion_config.retention_long_security_confidence,
+        )
+        self.reporting_policy = ReportingFusionPolicy(
+            storage=storage,
+            reporting_window_seconds=self.fusion_config.reporting_window_seconds,
         )
         self._action_handlers = action_handlers or {
             "cop": WebsocketRuleActionHandler(live_callback),
@@ -419,8 +438,8 @@ class FusionNode:
                 return
             self._metrics.classification_stage_in += 1
             try:
-                detection_product = await self._classify_and_assemble(product)
-                if detection_product is not None:
+                detection_products = await self._classify_and_assemble(product)
+                for detection_product in detection_products:
                     if await self._enqueue_stage(self._rules_queue, detection_product):
                         self._metrics.classification_stage_out += 1
             except Exception as exc:  # pragma: no cover - resilience path
@@ -505,100 +524,7 @@ class FusionNode:
             "wind_dir_deg": conditions.wind_dir_deg,
             "metadata": dict(conditions.metadata or {}),
         }
-        if self.localization_config.skip_localization_for_classification:
-            return self._build_reference_sensor_candidate(
-                candidate=candidate,
-                energies=energies,
-                sensor_positions=sensor_positions,
-                selected_ids=selected_ids,
-                selected_windows=selected_windows,
-                classification_windows=classification_windows,
-                environment_summary=environment_summary,
-                localization_method="classification_reference_sensor_only",
-            )
-
-        if tier == "full_3d":
-            try:
-                localization = await asyncio.to_thread(
-                    self.localizer.localize,
-                    selected_positions,
-                    selected_windows,
-                    candidate.sample_rate_hz,
-                    conditions.temperature_c,
-                    conditions.humidity_fraction,
-                )
-                reference_signal = selected_windows[localization.reference_sensor]
-                localization_method = self._current_localizer_name()
-                self._metrics.last_localization_algorithm = localization.resolved_algorithm or localization_method
-                self._metrics.last_attempted_algorithm = localization.attempted_algorithm or localization_method
-                if (localization.attempted_algorithm and localization.resolved_algorithm
-                        and localization.attempted_algorithm != localization.resolved_algorithm):
-                    self._metrics.localization_fallback_count += 1
-                return LocalizedCandidate(
-                    candidate=candidate,
-                    localization_position_m=localization.position_m,
-                    localization_confidence=localization.confidence,
-                    localization_gdop=localization.gdop,
-                    reference_sensor=localization.reference_sensor,
-                    tdoa_s=localization.tdoa_s,
-                    selected_sensor_ids=selected_ids,
-                    selected_windows=selected_windows,
-                    selected_positions=selected_positions,
-                    reference_signal=reference_signal,
-                    classification_selected_windows=classification_windows,
-                    classification_reference_signal=classification_windows.get(
-                        localization.reference_sensor,
-                        reference_signal,
-                    ),
-                    localization_method=localization_method,
-                    capability_tier=tier,
-                    environment=environment_summary,
-                )
-            except LocalizationError:
-                self._metrics.localization_failures += 1
-                return None
-
-        if tier == "2d" and hasattr(self.localizer, "localize_2d"):
-            try:
-                mean_z = float(np.mean([pos[2] for pos in selected_positions.values()]))
-                localization = await asyncio.to_thread(
-                    self.localizer.localize_2d,
-                    selected_positions,
-                    selected_windows,
-                    candidate.sample_rate_hz,
-                    conditions.temperature_c,
-                    conditions.humidity_fraction,
-                    mean_z,
-                )
-                reference_signal = selected_windows[localization.reference_sensor]
-                localization_method = self._current_localizer_name()
-                self._metrics.last_localization_algorithm = localization.resolved_algorithm or localization_method
-                self._metrics.last_attempted_algorithm = localization.attempted_algorithm or localization_method
-                return LocalizedCandidate(
-                    candidate=candidate,
-                    localization_position_m=localization.position_m,
-                    localization_confidence=localization.confidence,
-                    localization_gdop=localization.gdop,
-                    reference_sensor=localization.reference_sensor,
-                    tdoa_s=localization.tdoa_s,
-                    selected_sensor_ids=selected_ids,
-                    selected_windows=selected_windows,
-                    selected_positions=selected_positions,
-                    reference_signal=reference_signal,
-                    classification_selected_windows=classification_windows,
-                    classification_reference_signal=classification_windows.get(
-                        localization.reference_sensor,
-                        reference_signal,
-                    ),
-                    localization_method=localization_method,
-                    capability_tier=tier,
-                    environment=environment_summary,
-                )
-            except LocalizationError:
-                self._metrics.localization_failures += 1
-                return None
-
-        return self._build_reference_sensor_candidate(
+        fallback_candidate = self._build_reference_sensor_candidate(
             candidate=candidate,
             energies=energies,
             sensor_positions=sensor_positions,
@@ -606,83 +532,128 @@ class FusionNode:
             selected_windows=selected_windows,
             classification_windows=classification_windows,
             environment_summary=environment_summary,
-            localization_method="fallback_reference_sensor",
+        )
+        if self.localization_config.skip_localization_for_classification:
+            return fallback_candidate
+
+        localization_windows = selected_windows
+        if self.localization_preprocessor is not None:
+            localization_windows = {
+                sensor_id: self.localization_preprocessor.process(window, candidate.sample_rate_hz)
+                for sensor_id, window in selected_windows.items()
+            }
+
+        localization_branch: LocalizationBranch | None = None
+        if tier == "full_3d":
+            try:
+                localization = await asyncio.to_thread(
+                    self.localizer.localize,
+                    selected_positions,
+                    localization_windows,
+                    candidate.sample_rate_hz,
+                    conditions.temperature_c,
+                    conditions.humidity_fraction,
+                )
+                localization_branch = self._build_localization_branch(
+                    localization=localization,
+                    selected_windows=selected_windows,
+                    classification_windows=classification_windows,
+                    capability_tier=tier,
+                )
+            except LocalizationError:
+                self._metrics.localization_failures += 1
+        elif tier == "2d" and hasattr(self.localizer, "localize_2d"):
+            try:
+                mean_z = float(np.mean([pos[2] for pos in selected_positions.values()]))
+                localization = await asyncio.to_thread(
+                    self.localizer.localize_2d,
+                    selected_positions,
+                    localization_windows,
+                    candidate.sample_rate_hz,
+                    conditions.temperature_c,
+                    conditions.humidity_fraction,
+                    mean_z,
+                )
+                localization_branch = self._build_localization_branch(
+                    localization=localization,
+                    selected_windows=selected_windows,
+                    classification_windows=classification_windows,
+                    capability_tier=tier,
+                )
+            except LocalizationError:
+                self._metrics.localization_failures += 1
+
+        return LocalizedCandidate(
+            candidate=candidate,
+            localization_branch=localization_branch,
+            selected_sensor_ids=selected_ids,
+            selected_windows=selected_windows,
+            selected_positions=selected_positions,
+            classification_selected_windows=classification_windows,
+            omni_reference_sensor=fallback_candidate.omni_reference_sensor,
+            omni_reference_signal=fallback_candidate.omni_reference_signal,
+            omni_position_m=fallback_candidate.omni_position_m,
+            omni_classification_reference_signal=fallback_candidate.omni_classification_reference_signal,
+            environment=environment_summary,
         )
 
     # ------------------------------------------------------------------
     # Classification + assembly — delegates to orchestrator and assembler
     # ------------------------------------------------------------------
 
-    async def _classify_and_assemble(self, product: LocalizedCandidate) -> DetectionProduct | None:
-        """Classify a localized candidate and assemble a DetectionProduct.
+    async def _classify_and_assemble(self, product: LocalizedCandidate) -> list[DetectionProduct]:
+        """Classify localized and omni branches, then apply reporting fusion."""
+        detection_products: list[DetectionProduct] = []
 
-        Delegates classification to ``ClassificationOrchestrator`` and
-        detection building/persistence to ``DetectionAssembler``.
-        """
-        classified = await self._classification_orchestrator.classify(
-            reference_signal=product.classification_reference_signal,
+        if product.localization_branch is not None:
+            localized = await self._classification_orchestrator.classify(
+                reference_signal=product.localization_branch.classification_reference_signal,
+                sample_rate_hz=product.candidate.sample_rate_hz,
+                capability_tier=product.localization_branch.capability_tier,
+                selected_sensor_ids=product.selected_sensor_ids,
+                selected_positions=product.selected_positions,
+                selected_windows=product.classification_selected_windows,
+                localization_position_m=product.localization_branch.localization_position_m,
+                event_time_ns=product.candidate.event_time_ns,
+            )
+            maybe_detection = await self._assemble_reporting_branch(
+                product=product,
+                classified=localized,
+                reporting_modality="localized",
+                localization_position_m=product.localization_branch.localization_position_m,
+                localization_confidence=product.localization_branch.localization_confidence,
+                localization_gdop=product.localization_branch.localization_gdop,
+                reference_sensor=product.localization_branch.reference_sensor,
+                reference_signal=product.localization_branch.reference_signal,
+                tdoa_s=product.localization_branch.tdoa_s,
+                capability_tier=product.localization_branch.capability_tier,
+                localization_method=product.localization_branch.localization_method,
+            )
+            if maybe_detection is not None:
+                detection_products.append(maybe_detection)
+
+        omni = await self._classification_orchestrator.classify_omni_only(
+            reference_signal=product.omni_classification_reference_signal,
             sample_rate_hz=product.candidate.sample_rate_hz,
-            capability_tier=product.capability_tier,
-            selected_sensor_ids=product.selected_sensor_ids,
-            selected_positions=product.selected_positions,
-            selected_windows=product.classification_selected_windows,
-            localization_position_m=product.localization_position_m,
             event_time_ns=product.candidate.event_time_ns,
         )
-
-        if classified.beamforming_error:
-            self._metrics.beamforming_failures += 1
-
-        assembly = await self._detection_assembler.assemble(
-            localization_position_m=product.localization_position_m,
-            localization_confidence=product.localization_confidence,
-            localization_gdop=product.localization_gdop,
-            reference_sensor=product.reference_sensor,
-            tdoa_s=product.tdoa_s,
-            selected_sensor_ids=product.selected_sensor_ids,
-            reference_signal=product.reference_signal,
-            capability_tier=product.capability_tier,
-            localization_method=product.localization_method,
-            environment=product.environment,
-            classification_label=classified.classification.label,
-            classification_confidence=classified.classification.confidence,
-            classification_scores=classified.classification.scores,
-            classification_features=dict(classified.classification.features),
-            classification_path=classified.classification_path,
-            omni_confidence=classified.omni_classification.confidence,
-            beamformed_classification_confidence=(
-                classified.beamformed_classification.confidence
-                if classified.beamformed_classification is not None
-                else None
-            ),
-            beamformed_classification_label=(
-                classified.beamformed_classification.label
-                if classified.beamformed_classification is not None
-                else None
-            ),
-            beamforming_error=classified.beamforming_error,
-            classification_signal=classified.classification_signal,
-            label_category=classified.label_category,
-            iff_category=classified.iff_category,
-            label_id=classified.label_id,
-            event_time_ns=product.candidate.event_time_ns,
-            source_type=product.candidate.source_type,
-            time_quality=product.candidate.time_quality,
-            source_observation_ids=product.candidate.source_observation_ids,
-            sample_rate_hz=product.candidate.sample_rate_hz,
-            tracker=self.tracker,
-            storage_batch_ctx=self._storage_batch,
+        maybe_detection = await self._assemble_reporting_branch(
+            product=product,
+            classified=omni,
+            reporting_modality="omni",
+            localization_position_m=product.omni_position_m,
+            localization_confidence=self.fusion_config.fallback_localization_confidence,
+            localization_gdop=float("inf"),
+            reference_sensor=product.omni_reference_sensor,
+            reference_signal=product.omni_reference_signal,
+            tdoa_s={},
+            capability_tier="classification_only",
+            localization_method="omni_reporting_window",
         )
+        if maybe_detection is not None:
+            detection_products.append(maybe_detection)
 
-        if assembly.suppressed_by_zone:
-            self._metrics.detections_suppressed_by_zone += 1
-
-        return DetectionProduct(
-            detection=assembly.detection,
-            track=assembly.track,
-            suppressed_by_zone=assembly.suppressed_by_zone,
-            suppression_reasons=assembly.suppression_reasons,
-        )
+        return detection_products
 
     async def _classification_windows_for_event(
         self,
@@ -717,27 +688,171 @@ class FusionNode:
         selected_windows: dict[str, np.ndarray],
         classification_windows: dict[str, np.ndarray],
         environment_summary: dict[str, Any],
-        localization_method: str,
     ) -> LocalizedCandidate:
         reference_sensor = max(energies.items(), key=lambda item: item[1])[0]
         ref_signal = selected_windows[reference_sensor]
         ref_pos = sensor_positions[reference_sensor]
         return LocalizedCandidate(
             candidate=candidate,
-            localization_position_m=(float(ref_pos[0]), float(ref_pos[1]), float(ref_pos[2])),
-            localization_confidence=self.fusion_config.fallback_localization_confidence,
-            localization_gdop=float("inf"),
-            reference_sensor=reference_sensor,
-            tdoa_s={},
+            localization_branch=None,
             selected_sensor_ids=selected_ids,
             selected_windows=selected_windows,
             selected_positions={sensor_id: sensor_positions[sensor_id] for sensor_id in selected_ids},
-            reference_signal=ref_signal,
             classification_selected_windows=classification_windows,
-            classification_reference_signal=classification_windows.get(reference_sensor, ref_signal),
-            localization_method=localization_method,
-            capability_tier=self.degradation_model.tier_for_sensor_count(len(selected_ids)),
+            omni_reference_sensor=reference_sensor,
+            omni_reference_signal=ref_signal,
+            omni_position_m=(float(ref_pos[0]), float(ref_pos[1]), float(ref_pos[2])),
+            omni_classification_reference_signal=classification_windows.get(reference_sensor, ref_signal),
             environment=environment_summary,
+        )
+
+    def _build_localization_branch(
+        self,
+        *,
+        localization,
+        selected_windows: dict[str, np.ndarray],
+        classification_windows: dict[str, np.ndarray],
+        capability_tier: str,
+    ) -> LocalizationBranch:
+        reference_signal = selected_windows[localization.reference_sensor]
+        localization_method = self._current_localizer_name()
+        self._metrics.last_localization_algorithm = localization.resolved_algorithm or localization_method
+        self._metrics.last_attempted_algorithm = localization.attempted_algorithm or localization_method
+        if (
+            localization.attempted_algorithm
+            and localization.resolved_algorithm
+            and localization.attempted_algorithm != localization.resolved_algorithm
+        ):
+            self._metrics.localization_fallback_count += 1
+        return LocalizationBranch(
+            localization_position_m=localization.position_m,
+            localization_confidence=localization.confidence,
+            localization_gdop=localization.gdop,
+            reference_sensor=localization.reference_sensor,
+            reference_signal=reference_signal,
+            classification_reference_signal=classification_windows.get(
+                localization.reference_sensor,
+                reference_signal,
+            ),
+            tdoa_s=localization.tdoa_s,
+            localization_method=localization_method,
+            capability_tier=capability_tier,
+        )
+
+    async def _assemble_reporting_branch(
+        self,
+        *,
+        product: LocalizedCandidate,
+        classified,
+        reporting_modality: str,
+        localization_position_m: tuple[float, float, float],
+        localization_confidence: float,
+        localization_gdop: float,
+        reference_sensor: str,
+        reference_signal: np.ndarray,
+        tdoa_s: dict[str, float],
+        capability_tier: str,
+        localization_method: str,
+    ) -> DetectionProduct | None:
+        if classified.beamforming_error:
+            self._metrics.beamforming_failures += 1
+
+        source_node_id = await self.registry.node_id_for_sensor(reference_sensor)
+        branch_details = {
+            "label": classified.classification.label,
+            "confidence": classified.classification.confidence,
+            "classification_path": classified.classification_path,
+            "capability_tier": capability_tier,
+            "event_time_ns": product.candidate.event_time_ns,
+            "localization_method": localization_method,
+            "localization_confidence": localization_confidence,
+            "gdop": localization_gdop,
+            "suppressed": False,
+        }
+        decision = await self.reporting_policy.decide(
+            event_time_ns=product.candidate.event_time_ns,
+            source_node_id=source_node_id,
+            label=classified.classification.label,
+            reporting_modality=reporting_modality,
+            branch_details=branch_details,
+        )
+        if decision.action == "suppress":
+            return None
+        if decision.action == "enrich_existing":
+            existing_detection = DetectionEvent.model_validate(decision.existing_detection)
+            existing_feature_summary = dict(existing_detection.feature_summary)
+            existing_feature_summary["branch_evidence"] = decision.branch_evidence
+            existing_detection.feature_summary = existing_feature_summary
+            existing_detection.source_observation_ids = list(
+                dict.fromkeys(
+                    [
+                        *existing_detection.source_observation_ids,
+                        *product.candidate.source_observation_ids,
+                    ]
+                )
+            )
+            await self.storage.update_detection(
+                detection=existing_detection,
+                snippet_path=existing_detection.snippet_path,
+                snippet_expires_ns=None,
+                retention_tier=existing_detection.retention_tier.value,
+            )
+            return None
+
+        persist_mode = "update" if decision.action == "upgrade_existing" else "insert"
+        assembly = await self._detection_assembler.assemble(
+            localization_position_m=localization_position_m,
+            localization_confidence=localization_confidence,
+            localization_gdop=localization_gdop,
+            reference_sensor=reference_sensor,
+            tdoa_s=tdoa_s,
+            selected_sensor_ids=product.selected_sensor_ids,
+            reference_signal=reference_signal,
+            capability_tier=capability_tier,
+            localization_method=localization_method,
+            environment=product.environment,
+            classification_label=classified.classification.label,
+            classification_confidence=classified.classification.confidence,
+            classification_scores=classified.classification.scores,
+            classification_features=dict(classified.classification.features),
+            classification_path=classified.classification_path,
+            omni_confidence=classified.omni_classification.confidence,
+            beamformed_classification_confidence=(
+                classified.beamformed_classification.confidence
+                if classified.beamformed_classification is not None
+                else None
+            ),
+            beamformed_classification_label=(
+                classified.beamformed_classification.label
+                if classified.beamformed_classification is not None
+                else None
+            ),
+            beamforming_error=classified.beamforming_error,
+            classification_signal=classified.classification_signal,
+            label_category=classified.label_category,
+            iff_category=classified.iff_category,
+            label_id=classified.label_id,
+            report_window_start_ns=decision.report_window_start_ns,
+            report_window_end_ns=decision.report_window_end_ns,
+            reporting_modality=decision.reporting_modality,
+            branch_evidence=decision.branch_evidence,
+            event_time_ns=product.candidate.event_time_ns,
+            source_type=product.candidate.source_type,
+            time_quality=product.candidate.time_quality,
+            source_observation_ids=product.candidate.source_observation_ids,
+            sample_rate_hz=product.candidate.sample_rate_hz,
+            existing_detection=decision.existing_detection,
+            persist_mode=persist_mode,
+            tracker=self.tracker,
+            storage_batch_ctx=self._storage_batch,
+        )
+        if assembly.suppressed_by_zone:
+            self._metrics.detections_suppressed_by_zone += 1
+        return DetectionProduct(
+            detection=assembly.detection,
+            track=assembly.track,
+            suppressed_by_zone=assembly.suppressed_by_zone,
+            suppression_reasons=assembly.suppression_reasons,
         )
 
     # ------------------------------------------------------------------

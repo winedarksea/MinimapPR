@@ -200,6 +200,9 @@ class DetectionEvent(BaseModel):
     tor_ns: int | None = None
     time_quality: TimeQuality = TimeQuality.FREERUNNING
     stale_ns: int | None = None
+    report_window_start_ns: int | None = None
+    report_window_end_ns: int | None = None
+    reporting_modality: Literal["localized", "omni"] = "localized"
     position_m: Vec3
     position_geo: GeoPoint | None = None
     position_covariance_m2: list[list[float]] | None = None

@@ -401,3 +401,27 @@ def create_classification_preprocessor(
     if not stages:
         return None
     return AudioPreprocessingChain(stages=stages)
+
+
+def create_localization_preprocessor(
+    config: LocalizationConfig,
+    *,
+    extra_stages: list[AudioPreprocessor] | None = None,
+) -> AudioPreprocessor | None:
+    """Build an optional preprocessing chain applied only on the localization path."""
+    stages: list[AudioPreprocessor] = []
+    if (
+        config.localization_band_min_hz > 0.0
+        and config.localization_band_max_hz > config.localization_band_min_hz
+    ):
+        stages.append(
+            BandpassFilterStage(
+                low_hz=config.localization_band_min_hz,
+                high_hz=config.localization_band_max_hz,
+            )
+        )
+    if extra_stages:
+        stages.extend(extra_stages)
+    if not stages:
+        return None
+    return AudioPreprocessingChain(stages=stages)

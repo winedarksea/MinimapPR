@@ -115,6 +115,9 @@ def test_debug_endpoints_expose_runtime_and_event_provenance(monkeypatch, tmp_pa
         detections = _wait_for_detections(client)
         assert detections
         detection = detections[0]
+        assert detection["reporting_modality"] in {"localized", "omni"}
+        assert detection["report_window_start_ns"] is not None
+        assert detection["report_window_end_ns"] is not None
 
         config_response = client.get("/api/v1/debug/config")
         assert config_response.status_code == 200
@@ -135,6 +138,9 @@ def test_debug_endpoints_expose_runtime_and_event_provenance(monkeypatch, tmp_pa
         event_body = event_response.json()
         assert event_body["event_id"] == detection["event_id"]
         assert event_body["classification"]["label"] == detection["label"]
+        assert event_body["reporting"]["modality"] == detection["reporting_modality"]
+        assert event_body["reporting"]["report_window_start_ns"] == detection["report_window_start_ns"]
+        assert event_body["reporting"]["report_window_end_ns"] == detection["report_window_end_ns"]
         assert event_body["selection"]["selected_sensor_ids"] == detection["source_sensors"]
         assert event_body["provenance"]["source_observation_ids"] == detection["source_observation_ids"]
         assert len(event_body["ingest"]["observations"]) == len(detection["source_observation_ids"])

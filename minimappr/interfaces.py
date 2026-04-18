@@ -170,6 +170,25 @@ class StorageBackend(Protocol):
     ) -> None:
         ...
 
+    async def update_detection(
+        self,
+        detection: DetectionEvent,
+        snippet_path: str | None,
+        snippet_expires_ns: int | None,
+        retention_tier: str = "short",
+    ) -> bool:
+        ...
+
+    async def find_detection_for_reporting_window(
+        self,
+        *,
+        source_node_id: str | None,
+        label: str,
+        report_window_start_ns: int,
+        report_window_end_ns: int,
+    ) -> dict[str, Any] | None:
+        ...
+
     async def upsert_track(self, track: TrackState) -> None:
         ...
 

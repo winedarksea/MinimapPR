@@ -70,6 +70,8 @@ class LocalizationConfig:
     localization_max_tau_s: float
     localization_algorithm: str
     localization_strategy: str
+    localization_band_min_hz: float
+    localization_band_max_hz: float
     localization_srp_grid_resolution_m: float
     localization_search_padding_m: float
     localization_music_azimuth_step_deg: float
@@ -159,6 +161,7 @@ class FusionConfig:
     offline_replay_mode: bool
     sensor_energy_threshold_multiplier: float
     fallback_localization_confidence: float
+    reporting_window_seconds: float
     taxonomy_refresh_interval_seconds: float
     retention_permanent_labels: tuple[str, ...]
     retention_long_security_confidence: float
@@ -293,6 +296,8 @@ class Settings:
     localization_max_tau_s: float = 0.02
     localization_algorithm: str = "gcc_phat"
     localization_strategy: str = "fixed"
+    localization_band_min_hz: float = 0.0
+    localization_band_max_hz: float = 0.0
     localization_srp_grid_resolution_m: float = 0.5
     localization_search_padding_m: float = 2.0
     localization_music_azimuth_step_deg: float = 6.0
@@ -365,6 +370,7 @@ class Settings:
     fusion_offline_replay_mode: bool = False
     sensor_energy_threshold_multiplier: float = 0.45
     fallback_localization_confidence: float = 0.25
+    reporting_window_seconds: float = 30.0
     taxonomy_refresh_interval_seconds: float = 10.0
     retention_permanent_labels: tuple[str, ...] = ("gunshot", "explosion", "artillery", "fusillade")
     retention_long_security_confidence: float = 0.6
@@ -447,6 +453,12 @@ class Settings:
         self.localization_strategy = self.localization_strategy.strip().lower()
         if self.localization_strategy not in {"fixed", "geometry_aware", "cascade"}:
             raise ValueError("MINIMAPPR_LOCALIZATION_STRATEGY must be fixed, geometry_aware, or cascade")
+        if self.localization_band_min_hz < 0.0:
+            raise ValueError("MINIMAPPR_LOCALIZATION_BAND_MIN_HZ must be >= 0")
+        if self.localization_band_max_hz < 0.0:
+            raise ValueError("MINIMAPPR_LOCALIZATION_BAND_MAX_HZ must be >= 0")
+        if self.localization_band_max_hz > 0.0 and self.localization_band_max_hz <= self.localization_band_min_hz:
+            raise ValueError("MINIMAPPR_LOCALIZATION_BAND_MAX_HZ must be > MIN when enabled")
         if self.localization_srp_grid_resolution_m <= 0.0:
             raise ValueError("MINIMAPPR_LOCALIZATION_SRP_GRID_RESOLUTION_M must be > 0")
         if self.localization_search_padding_m <= 0.0:
@@ -487,6 +499,8 @@ class Settings:
             raise ValueError("MINIMAPPR_SENSOR_ENERGY_THRESHOLD_MULTIPLIER must be > 0")
         if self.fallback_localization_confidence < 0.0 or self.fallback_localization_confidence > 1.0:
             raise ValueError("MINIMAPPR_FALLBACK_LOCALIZATION_CONFIDENCE must be in [0,1]")
+        if self.reporting_window_seconds <= 0.0:
+            raise ValueError("MINIMAPPR_REPORTING_WINDOW_SECONDS must be > 0")
         if self.taxonomy_refresh_interval_seconds <= 0.0:
             raise ValueError("MINIMAPPR_TAXONOMY_REFRESH_INTERVAL_SECONDS must be > 0")
         if self.retention_long_security_confidence < 0.0 or self.retention_long_security_confidence > 1.0:
@@ -610,6 +624,8 @@ class Settings:
             localization_max_tau_s=_env_float("MINIMAPPR_LOCALIZATION_MAX_TAU_S", 0.02),
             localization_algorithm=_env_str("MINIMAPPR_LOCALIZATION_ALGORITHM", "gcc_phat"),
             localization_strategy=_env_str("MINIMAPPR_LOCALIZATION_STRATEGY", "geometry_aware"),
+            localization_band_min_hz=_env_float("MINIMAPPR_LOCALIZATION_BAND_MIN_HZ", 0.0),
+            localization_band_max_hz=_env_float("MINIMAPPR_LOCALIZATION_BAND_MAX_HZ", 0.0),
             localization_srp_grid_resolution_m=_env_float("MINIMAPPR_LOCALIZATION_SRP_GRID_RESOLUTION_M", 0.5),
             localization_search_padding_m=_env_float("MINIMAPPR_LOCALIZATION_SEARCH_PADDING_M", 2.0),
             localization_music_azimuth_step_deg=_env_float("MINIMAPPR_LOCALIZATION_MUSIC_AZ_STEP_DEG", 6.0),
@@ -699,6 +715,7 @@ class Settings:
             fusion_offline_replay_mode=_env_bool("MINIMAPPR_FUSION_OFFLINE_REPLAY_MODE", False),
             sensor_energy_threshold_multiplier=_env_float("MINIMAPPR_SENSOR_ENERGY_THRESHOLD_MULTIPLIER", 0.45),
             fallback_localization_confidence=_env_float("MINIMAPPR_FALLBACK_LOCALIZATION_CONFIDENCE", 0.25),
+            reporting_window_seconds=_env_float("MINIMAPPR_REPORTING_WINDOW_SECONDS", 30.0),
             taxonomy_refresh_interval_seconds=_env_float("MINIMAPPR_TAXONOMY_REFRESH_INTERVAL_SECONDS", 10.0),
             retention_permanent_labels=_env_list(
                 "MINIMAPPR_RETENTION_PERMANENT_LABELS",
@@ -753,6 +770,8 @@ class Settings:
             localization_max_tau_s=self.localization_max_tau_s,
             localization_algorithm=self.localization_algorithm,
             localization_strategy=self.localization_strategy,
+            localization_band_min_hz=self.localization_band_min_hz,
+            localization_band_max_hz=self.localization_band_max_hz,
             localization_srp_grid_resolution_m=self.localization_srp_grid_resolution_m,
             localization_search_padding_m=self.localization_search_padding_m,
             localization_music_azimuth_step_deg=self.localization_music_azimuth_step_deg,
@@ -842,6 +861,7 @@ class Settings:
             offline_replay_mode=self.fusion_offline_replay_mode,
             sensor_energy_threshold_multiplier=self.sensor_energy_threshold_multiplier,
             fallback_localization_confidence=self.fallback_localization_confidence,
+            reporting_window_seconds=self.reporting_window_seconds,
             taxonomy_refresh_interval_seconds=self.taxonomy_refresh_interval_seconds,
             retention_permanent_labels=self.retention_permanent_labels,
             retention_long_security_confidence=self.retention_long_security_confidence,
@@ -874,17 +894,32 @@ class Settings:
     def _apply_runtime_profile(self) -> None:
         if self.runtime_profile == "default":
             return
-        if self.runtime_profile != "birdnet_omni_testing":
-            raise ValueError(
-                "MINIMAPPR_RUNTIME_PROFILE must be 'default' or 'birdnet_omni_testing'"
+        if self.runtime_profile == "birdnet_omni_testing":
+            # BirdNET needs a much longer omni clip than the TDOA/localization path.
+            self.classifier_backend = "birdnet"
+            self.beamformed_classification_enabled = False
+            self.skip_localization_for_classification = True
+            self.classification_window_seconds = max(self.classification_window_seconds, 30.0)
+            self.max_sensor_buffer_seconds = max(
+                self.max_sensor_buffer_seconds,
+                self.classification_window_seconds + 2.0,
             )
-
-        # BirdNET needs a much longer omni clip than the TDOA/localization path.
-        self.classifier_backend = "birdnet"
-        self.beamformed_classification_enabled = False
-        self.skip_localization_for_classification = True
-        self.classification_window_seconds = max(self.classification_window_seconds, 30.0)
-        self.max_sensor_buffer_seconds = max(
-            self.max_sensor_buffer_seconds,
-            self.classification_window_seconds + 2.0,
+            return
+        if self.runtime_profile == "birdnet_hybrid_production":
+            self.classifier_backend = "birdnet"
+            self.localization_algorithm = "srp_phat"
+            self.localization_strategy = "fixed"
+            self.beamformed_classification_enabled = False
+            self.skip_localization_for_classification = False
+            self.classification_window_seconds = max(self.classification_window_seconds, 30.0)
+            self.max_sensor_buffer_seconds = max(
+                self.max_sensor_buffer_seconds,
+                self.classification_window_seconds + 2.0,
+            )
+            self.localization_band_min_hz = 300.0
+            self.localization_band_max_hz = 3500.0
+            self.reporting_window_seconds = max(self.reporting_window_seconds, 30.0)
+            return
+        raise ValueError(
+            "MINIMAPPR_RUNTIME_PROFILE must be 'default', 'birdnet_omni_testing', or 'birdnet_hybrid_production'"
         )

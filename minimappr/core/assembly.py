@@ -101,12 +101,18 @@ class DetectionAssembler:
         label_category: str,
         iff_category: str,
         label_id: LabelId | None,
+        report_window_start_ns: int | None,
+        report_window_end_ns: int | None,
+        reporting_modality: str,
+        branch_evidence: dict[str, Any] | None,
         # Event metadata
         event_time_ns: int,
         source_type: str,
         time_quality,
         source_observation_ids: list[str],
         sample_rate_hz: int,
+        existing_detection: dict[str, Any] | None = None,
+        persist_mode: str = "insert",
         # Tracker
         tracker,
         # Storage batch context
@@ -150,6 +156,10 @@ class DetectionAssembler:
         all_observation_ids = list(
             dict.fromkeys([*source_observation_ids, *latest_observation_ids])
         )
+        if existing_detection is not None:
+            all_observation_ids = list(
+                dict.fromkeys([*existing_detection.get("source_observation_ids", []), *all_observation_ids])
+            )
         source_node_id = await self._registry.node_id_for_sensor(reference_sensor)
 
         # -- SPL ---------------------------------------------------------------
@@ -166,12 +176,16 @@ class DetectionAssembler:
         )
 
         # -- feature summary ---------------------------------------------------
-        feature_summary = dict(classification_features)
+        feature_summary = {}
+        if existing_detection is not None and isinstance(existing_detection.get("feature_summary"), dict):
+            feature_summary.update(existing_detection["feature_summary"])
+        feature_summary.update(classification_features)
         feature_summary["capability_tier"] = capability_tier
         feature_summary["localization_method"] = localization_method
         feature_summary["classification_path"] = classification_path
         feature_summary["omni_confidence"] = omni_confidence
         feature_summary["environment"] = environment
+        feature_summary["branch_evidence"] = branch_evidence or {}
         if beamformed_classification_confidence is not None:
             feature_summary["beamformed_confidence"] = beamformed_classification_confidence
             feature_summary["beamformed_label"] = beamformed_classification_label
@@ -185,7 +199,11 @@ class DetectionAssembler:
         stale_ns = event_time_ns + int(self._event_stale_seconds * 1_000_000_000)
 
         detection = DetectionEvent(
-            id=f"det-{uuid.uuid4().hex[:12]}",
+            id=(
+                existing_detection["id"]
+                if existing_detection is not None and isinstance(existing_detection.get("id"), str)
+                else f"det-{uuid.uuid4().hex[:12]}"
+            ),
             source_type=source_type,
             source_node_id=source_node_id,
             timestamp_ns=event_time_ns,
@@ -193,6 +211,9 @@ class DetectionAssembler:
             tor_ns=tor_ns,
             time_quality=time_quality,
             stale_ns=stale_ns,
+            report_window_start_ns=report_window_start_ns,
+            report_window_end_ns=report_window_end_ns,
+            reporting_modality=reporting_modality,
             position_m=localization_position_m,
             position_geo=detection_geo,
             position_covariance_m2=track.position_covariance_m2 if track is not None else None,
@@ -235,35 +256,43 @@ class DetectionAssembler:
             if track is not None and not suppressed_by_zone:
                 await self._storage.upsert_track(track)
 
-            await self._storage.insert_detection(
-                detection=detection,
-                snippet_path=snippet_path,
-                snippet_expires_ns=snippet_expires_ns,
-                retention_tier=retention_tier,
-            )
-            await self._storage.insert_ping(
-                timestamp_ns=detection.timestamp_ns,
-                ping_type="acoustic",
-                label=detection.label,
-                label_id=detection.label_id,
-                spl_db=detection.spl_db,
-                position_m=detection.position_m,
-                position_geo=detection.position_geo,
-                source_detection_id=detection.id,
-                source_observation_id=(
-                    detection.source_observation_ids[0]
-                    if detection.source_observation_ids
-                    else None
-                ),
-                source_track_id=detection.track_id,
-                retention_tier=retention_tier,
-                metadata={
-                    "label_category": detection.label_category,
-                    "confidence": detection.label_confidence,
-                    "zone_ids": detection.zone_ids,
-                    "capability_tier": capability_tier,
-                },
-            )
+            if persist_mode == "update":
+                await self._storage.update_detection(
+                    detection=detection,
+                    snippet_path=snippet_path,
+                    snippet_expires_ns=snippet_expires_ns,
+                    retention_tier=retention_tier,
+                )
+            else:
+                await self._storage.insert_detection(
+                    detection=detection,
+                    snippet_path=snippet_path,
+                    snippet_expires_ns=snippet_expires_ns,
+                    retention_tier=retention_tier,
+                )
+                await self._storage.insert_ping(
+                    timestamp_ns=detection.timestamp_ns,
+                    ping_type="acoustic",
+                    label=detection.label,
+                    label_id=detection.label_id,
+                    spl_db=detection.spl_db,
+                    position_m=detection.position_m,
+                    position_geo=detection.position_geo,
+                    source_detection_id=detection.id,
+                    source_observation_id=(
+                        detection.source_observation_ids[0]
+                        if detection.source_observation_ids
+                        else None
+                    ),
+                    source_track_id=detection.track_id,
+                    retention_tier=retention_tier,
+                    metadata={
+                        "label_category": detection.label_category,
+                        "confidence": detection.label_confidence,
+                        "zone_ids": detection.zone_ids,
+                        "capability_tier": capability_tier,
+                    },
+                )
             if track is not None and not suppressed_by_zone:
                 await self._storage.insert_track_update(
                     track=track,

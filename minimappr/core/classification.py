@@ -153,7 +153,57 @@ class ClassificationOrchestrator:
             except Exception as exc:  # pragma: no cover - resilience path
                 beamforming_error = f"{type(exc).__name__}: {exc}"
 
-        # -- taxonomy resolution -----------------------------------------------
+        return await self._build_result(
+            classification=classification,
+            omni_classification=omni_classification,
+            beamformed_classification=beamformed_classification,
+            classification_path=classification_path,
+            classification_signal=classification_signal,
+            beamforming_error=beamforming_error,
+            event_time_ns=event_time_ns,
+        )
+
+    async def classify_omni_only(
+        self,
+        *,
+        reference_signal: np.ndarray,
+        sample_rate_hz: int,
+        event_time_ns: int,
+    ) -> ClassifiedResult:
+        """Classify a full-band omni signal without beamforming."""
+        omni_signal = reference_signal
+        if self._classification_preprocessor is not None:
+            omni_signal = self._classification_preprocessor.process(
+                omni_signal,
+                sample_rate_hz,
+            )
+
+        omni_classification = await asyncio.to_thread(
+            self._classifier.classify,
+            omni_signal,
+            sample_rate_hz,
+        )
+        return await self._build_result(
+            classification=omni_classification,
+            omni_classification=omni_classification,
+            beamformed_classification=None,
+            classification_path="omni",
+            classification_signal=omni_signal,
+            beamforming_error=None,
+            event_time_ns=event_time_ns,
+        )
+
+    async def _build_result(
+        self,
+        *,
+        classification: ClassificationResult,
+        omni_classification: ClassificationResult,
+        beamformed_classification: ClassificationResult | None,
+        classification_path: str,
+        classification_signal: np.ndarray,
+        beamforming_error: str | None,
+        event_time_ns: int,
+    ) -> ClassifiedResult:
         label_category = self._taxonomy_provider.category_for_label(classification.label)
         iff_category = self._taxonomy_provider.iff_for_category(label_category)
         label_id = await self._storage.upsert_label(
@@ -164,7 +214,6 @@ class ClassificationOrchestrator:
         )
         if hasattr(self._taxonomy_provider, "register_label"):
             self._taxonomy_provider.register_label(classification.label, label_category)
-
         return ClassifiedResult(
             classification=classification,
             omni_classification=omni_classification,
