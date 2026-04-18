@@ -1,4 +1,4 @@
-use crate::state::{AppState, CopStatus, Detection, NodeStatus, Track, MAX_FEED_LEN};
+use crate::state::{Alert, AppState, CopStatus, Detection, NodeStatus, Track, MAX_FEED_LEN};
 use leptos::prelude::*;
 use gloo_net::http::Request;
 use gloo_timers::future::IntervalStream;
@@ -27,6 +27,13 @@ async fn poll_once(state: AppState) {
     }
     if let Some(cop) = fetch_json::<CopStatus>("/api/v1/cop/status").await {
         state.cop_status.set(Some(cop));
+    }
+    if let Some(als) = fetch_json::<Vec<Alert>>("/api/v1/alerts?limit=50").await {
+        state.alerts.update(|a| {
+            a.clear();
+            for alert in als { a.push_back(alert); }
+            while a.len() > MAX_FEED_LEN { a.pop_front(); }
+        });
     }
     if state.config.get_untracked().is_none() {
         if let Some(cfg) = fetch_json("/api/v1/config").await {

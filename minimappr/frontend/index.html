@@ -1,137 +1,31 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>MinimapPR COP</title>
-    <link
-      rel="stylesheet"
-      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
-      crossorigin=""
-    />
-    <link rel="stylesheet" href="/static/styles.css" />
-  </head>
-  <body>
-    <header class="app-header">
-      <div>
-        <h1>MinimapPR COP</h1>
-        <p>Geographic acoustic common operating picture</p>
-      </div>
-      <div class="status-stack">
-        <div id="status" class="status-pill">Connecting...</div>
-        <div id="siteOrigin" class="origin-pill">Site origin: -</div>
-      </div>
-    </header>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MinimapPR COP</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha384-sHL9NAb7lN7rfvG5lfHpm643Xkcjzp4jFvuavGOndn6pjVqS6ny56CAt3nsEVT4H"
+        crossorigin="anonymous" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha384-cxOPjt7s7Iz04uaHJceBmS+qpjv2JkIHNVcuOrM+YHwZOmJGBXI00mdUXEq65HTH"
+          crossorigin="anonymous"></script>
+  <link rel="stylesheet" href="/style-81f78ac31a158b55.css" integrity="sha384-Wg6MyWJ+sRq71pluajdB9Jt3q07cuRssJw8hDB+qAD8CoUbyAOICkyZ4q647dAy2"/>
+  
+  
+<script type="module">
+import init, * as bindings from '/minimappr-frontend-7f40becdbc8abc57.js';
+const wasm = await init({ module_or_path: '/minimappr-frontend-7f40becdbc8abc57_bg.wasm' });
 
-    <section class="system-strip" id="systemStrip">
-      <div><strong id="activeNodes">0</strong><span>active nodes</span></div>
-      <div><strong id="degradedNodes">0</strong><span>degraded nodes</span></div>
-      <div><strong id="activeTracks">0</strong><span>active tracks</span></div>
-      <div><strong id="recentAlerts">0</strong><span>recent alerts</span></div>
-    </section>
 
-    <main class="layout">
-      <section class="panel map-panel">
-        <div class="map-toolbar">
-          <label>
-            Category
-            <select id="filterCategory">
-              <option value="">All</option>
-              <option value="wildlife">Wildlife</option>
-              <option value="human">Human</option>
-              <option value="vehicle">Vehicle</option>
-              <option value="security">Security</option>
-              <option value="unknown">Unknown</option>
-            </select>
-          </label>
-          <label>
-            Track status
-            <select id="filterStatus">
-              <option value="">Any</option>
-              <option value="confirmed">Confirmed</option>
-              <option value="tentative">Tentative</option>
-              <option value="coasting">Coasting</option>
-            </select>
-          </label>
-          <label>
-            Min confidence
-            <input id="filterConfidence" type="range" min="0" max="1" step="0.05" value="0" />
-            <span id="filterConfidenceValue">0.00</span>
-          </label>
-          <label>
-            Zone IDs
-            <input id="filterZones" type="text" placeholder="zone-a,zone-b" />
-          </label>
-        </div>
-        <div id="map"></div>
-        <div class="legend">
-          <span><i class="swatch health-online"></i> Node online</span>
-          <span><i class="swatch health-degraded"></i> Node degraded</span>
-          <span><i class="swatch health-offline"></i> Node offline</span>
-          <span><i class="swatch gdop-good"></i> Good GDOP</span>
-          <span><i class="swatch gdop-poor"></i> Poor GDOP</span>
-          <span><i class="swatch zone-alert"></i> Alert zone</span>
-          <span><i class="swatch zone-exclusion"></i> Exclusion zone</span>
-          <span><i class="swatch zone-coverage"></i> Coverage zone</span>
-        </div>
-      </section>
+window.wasmBindings = bindings;
 
-      <section class="panel side-panel">
-        <section class="subpanel node-panel">
-          <h2>Node Status</h2>
-          <ul id="nodeAudioList"></ul>
-        </section>
 
-        <section class="subpanel settings-panel">
-          <h2>Runtime Settings</h2>
-          <dl id="settingsGrid" class="settings-grid"></dl>
-        </section>
+dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
 
-        <section class="side-data-grid">
-          <section class="subpanel track-panel">
-            <h2>Track Table</h2>
-            <div class="track-table-scroll">
-              <table>
-                <thead>
-                  <tr>
-                    <th data-sort="id">Track</th>
-                    <th data-sort="label">Label</th>
-                    <th data-sort="label_category">Category</th>
-                    <th data-sort="status">Status</th>
-                    <th data-sort="tqi">TQI</th>
-                    <th data-sort="last_seen_ns">Last Seen</th>
-                  </tr>
-                </thead>
-                <tbody id="tracksTable"></tbody>
-              </table>
-            </div>
-          </section>
-
-          <section class="feed-stack">
-            <section class="subpanel feed-panel">
-              <h2>Detection Feed</h2>
-              <ul id="detectionFeed"></ul>
-            </section>
-
-            <section class="subpanel alert-panel">
-              <h2>Alert Feed</h2>
-              <ul id="alertFeed"></ul>
-            </section>
-          </section>
-        </section>
-      </section>
-    </main>
-
-    <div id="alertToastContainer" aria-live="assertive" aria-atomic="false"></div>
-
-    <audio id="audioPlayer" preload="none"></audio>
-
-    <script
-      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
-      crossorigin=""
-    ></script>
-    <script src="/static/app.js" type="module"></script>
-  </body>
+</script>
+<link rel="modulepreload" href="/minimappr-frontend-7f40becdbc8abc57.js" crossorigin="anonymous" integrity="sha384-jDQRHb3Dz6p8yNONhPzTEWLVvkUPiPNukEo7wTqf1OvO/YY2Kr/I4VyeVjMCDyTF"><link rel="preload" href="/minimappr-frontend-7f40becdbc8abc57_bg.wasm" crossorigin="anonymous" integrity="sha384-0OtAO24OjHmc7Olg481lOlkFv8tDqT2X2yPMowuX7tqx/daLiJID4gTqgNfHJteO" as="fetch" type="application/wasm"></head>
+<body>
+  <script src="leaflet-interop.js"></script>
+</body>
 </html>

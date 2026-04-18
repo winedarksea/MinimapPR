@@ -109,14 +109,13 @@ fn select_input(
         <div class="config-field">
             <label>{label}</label>
             <select
-                prop:value=move || sig.get()
                 on:change=move |ev| {
                     sig.set(event_target_value(&ev));
                     gs.update(|s| { s.dirty = true; s.saved = false; });
                 }
             >
                 {options.iter().map(|&opt| view! {
-                    <option value=opt>{opt}</option>
+                    <option value=opt selected=move || sig.get() == opt>{opt}</option>
                 }).collect_view()}
             </select>
         </div>

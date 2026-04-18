@@ -48,7 +48,7 @@ pub fn DetectionsPane() -> impl IntoView {
                             {dets.into_iter().map(|d| {
                                 let label = d.label.clone().unwrap_or_else(|| "—".to_string());
                                 let node  = d.node_id.clone().unwrap_or_else(|| "—".to_string());
-                                let conf  = d.confidence.map(|c| format!("{:.0}%", c * 100.0)).unwrap_or_else(|| "—".to_string());
+                                let conf  = d.label_confidence.or(d.confidence).map(|c| format!("{:.0}%", c * 100.0)).unwrap_or_else(|| "—".to_string());
                                 let has_audio = d.has_audio.unwrap_or(false);
                                 let eid = d.event_id.clone();
 

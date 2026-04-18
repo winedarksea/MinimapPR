@@ -213,8 +213,6 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="MinimapPR", version="0.1.0", lifespan=lifespan)
-if frontend_dir.is_dir():
-    app.mount("/static", StaticFiles(directory=frontend_dir), name="static")
 
 
 @app.middleware("http")
@@ -1249,3 +1247,7 @@ async def live_events(websocket: WebSocket) -> None:
         pass
     finally:
         await live_hub.disconnect(websocket)
+
+
+if frontend_dir.is_dir():
+    app.mount("/", StaticFiles(directory=frontend_dir), name="static")

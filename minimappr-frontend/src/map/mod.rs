@@ -16,7 +16,7 @@ pub fn LeafletMapPanel() -> impl IntoView {
         true
     });
 
-    // Sync nodes → map markers (geodetic mode only)
+    // Sync nodes → map markers (geodetic mode only; position_m is local-frame, use position_geo)
     {
         let nodes = state.nodes;
         let config = state.config;
@@ -27,10 +27,8 @@ pub fn LeafletMapPanel() -> impl IntoView {
                 .unwrap_or(false);
             if is_geo {
                 for n in &ns {
-                    if let Some(pos) = &n.position_m {
-                        if pos.len() >= 2 {
-                            set_node_marker(&n.node_id, pos[0], pos[1], &n.health);
-                        }
+                    if let Some(geo) = &n.position_geo {
+                        set_node_marker(&n.node_id, geo.lat, geo.lon, &n.health);
                     }
                 }
             }
