@@ -14,6 +14,11 @@ from minimappr.config import Settings
 from minimappr.interfaces import StorageBackend
 
 
+_KNOWN_RUNTIME_CACHE_PATHS: tuple[Path, ...] = (
+    Path("data/yamnet_class_map.csv"),
+)
+
+
 class CleanupService:
     """Coordinates destructive and policy-driven cleanup operations."""
 
@@ -123,12 +128,17 @@ class CleanupService:
             db_removed = True
         snippet_summary = _remove_tree(self._settings.snippet_dir, dry_run=dry_run)
         artifact_summary = _remove_tree(self._settings.large_artifact_dir, dry_run=dry_run)
+        cache_summaries = [
+            _remove_path(path, dry_run=dry_run)
+            for path in _KNOWN_RUNTIME_CACHE_PATHS
+        ]
         return {
             "mode": "full",
             "dry_run": dry_run,
             "db_removed": db_removed,
             "snippet_dir": snippet_summary,
             "artifact_dir": artifact_summary,
+            "cache_paths": cache_summaries,
         }
 
 
@@ -139,3 +149,16 @@ def _remove_tree(path: Path, *, dry_run: bool) -> dict[str, Any]:
     if not dry_run:
         shutil.rmtree(path)
     return {"path": str(path), "removed": True, "file_count": file_count}
+
+
+def _remove_path(path: Path, *, dry_run: bool) -> dict[str, Any]:
+    if not path.exists():
+        return {"path": str(path), "removed": False, "kind": "missing"}
+    if path.is_dir():
+        file_count = sum(1 for child in path.rglob("*") if child.is_file())
+        if not dry_run:
+            shutil.rmtree(path)
+        return {"path": str(path), "removed": True, "kind": "directory", "file_count": file_count}
+    if not dry_run:
+        path.unlink(missing_ok=True)
+    return {"path": str(path), "removed": True, "kind": "file"}

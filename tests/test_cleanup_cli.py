@@ -74,6 +74,28 @@ def test_cleanup_full_yes_removes_db_and_managed_directories(
     assert artifact_dir.exists() is False
 
 
+def test_cleanup_full_yes_removes_known_runtime_cache_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cache_file = tmp_path / "data" / "yamnet_class_map.csv"
+    cache_file.parent.mkdir(parents=True)
+    cache_file.write_text("display_name,index\\nBird,1\\n", encoding="utf-8")
+
+    monkeypatch.setattr("minimappr.__main__.uvicorn.run", lambda *args, **kwargs: None)
+    monkeypatch.chdir(tmp_path)
+    main(["cleanup", "full", "--yes"])
+
+    output = json.loads(capsys.readouterr().out)
+    cache_paths = output.get("cache_paths", [])
+    yamnet_cache_rows = [row for row in cache_paths if row.get("path") == "data/yamnet_class_map.csv"]
+
+    assert cache_file.exists() is False
+    assert yamnet_cache_rows
+    assert yamnet_cache_rows[0]["removed"] is True
+
+
 def test_cleanup_partial_dry_run_reports_candidates_without_mutation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

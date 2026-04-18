@@ -19,6 +19,207 @@
     gdop:      "rgba(88,166,255,0.12)",
   };
 
+  const TILE_CACHE_NAME = "mmpr-osm-tiles-v1";
+  const OSM_TEMPLATE = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
+
+  function makeGenericFallbackTileDataUrl(tileSize) {
+    const size = tileSize || 256;
+    const canvas = document.createElement("canvas");
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return "";
+
+    ctx.fillStyle = "#0f172a";
+    ctx.fillRect(0, 0, size, size);
+
+    ctx.strokeStyle = "rgba(148, 163, 184, 0.25)";
+    ctx.lineWidth = 1;
+    const step = size / 4;
+    for (let i = 1; i < 4; i += 1) {
+      const p = i * step;
+      ctx.beginPath(); ctx.moveTo(p, 0); ctx.lineTo(p, size); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, p); ctx.lineTo(size, p); ctx.stroke();
+    }
+
+    ctx.fillStyle = "rgba(226, 232, 240, 0.9)";
+    ctx.font = "600 14px ui-monospace, Menlo, monospace";
+    ctx.textAlign = "center";
+    ctx.fillText("Basemap unavailable", size / 2, size / 2 - 4);
+    ctx.fillStyle = "rgba(148, 163, 184, 0.95)";
+    ctx.font = "12px ui-monospace, Menlo, monospace";
+    ctx.fillText("markers still live", size / 2, size / 2 + 16);
+
+    return canvas.toDataURL("image/png");
+  }
+
+  function lonToTileX(lonDeg, zoom) {
+    return Math.floor(((lonDeg + 180) / 360) * (1 << zoom));
+  }
+
+  function latToTileY(latDeg, zoom) {
+    const latRad = (latDeg * Math.PI) / 180;
+    const n = Math.log(Math.tan(Math.PI / 4 + latRad / 2));
+    return Math.floor(((1 - n / Math.PI) / 2) * (1 << zoom));
+  }
+
+  function getTileCache() {
+    if (!globalThis.caches || !globalThis.caches.open) return Promise.resolve(null);
+    return globalThis.caches.open(TILE_CACHE_NAME).catch(() => null);
+  }
+
+  function requestFromUrl(url) {
+    return new Request(url, { mode: "cors", credentials: "omit" });
+  }
+
+  function responseToObjectUrl(response) {
+    return response.blob().then(function (blob) {
+      return URL.createObjectURL(blob);
+    });
+  }
+
+  function createResilientOsmTileLayer() {
+    const GenericTileLayer = L.TileLayer.extend({
+      createTile: function (coords, done) {
+        const tile = document.createElement("img");
+        const tileSize = this.getTileSize();
+        const width = (tileSize && tileSize.x) || 256;
+        const height = (tileSize && tileSize.y) || 256;
+        tile.alt = "";
+        tile.setAttribute("role", "presentation");
+        tile.width = width;
+        tile.height = height;
+        tile.decoding = "async";
+
+        const url = this.getTileUrl(coords);
+        const genericFallback = makeGenericFallbackTileDataUrl(width);
+        let completed = false;
+
+        function completeOnce(err) {
+          if (completed) return;
+          completed = true;
+          done(err || null, tile);
+        }
+
+        function loadGenericFallback() {
+          tile.onload = function () {
+            completeOnce(null);
+          };
+          tile.onerror = function () {
+            completeOnce(new Error("generic fallback tile failed"));
+          };
+          tile.src = genericFallback;
+        }
+
+        tile.onload = function () {
+          completeOnce(null);
+        };
+
+        tile.onerror = function () {
+          loadGenericFallback();
+        };
+
+        (async () => {
+          const cache = await getTileCache();
+          const req = requestFromUrl(url);
+
+          try {
+            const networkResp = await fetch(req, {
+              mode: "cors",
+              credentials: "omit",
+              cache: "no-store",
+            });
+
+            if (networkResp.ok) {
+              if (cache) {
+                cache.put(req, networkResp.clone()).catch(() => {});
+              }
+              const objectUrl = await responseToObjectUrl(networkResp);
+              tile.onload = function () {
+                URL.revokeObjectURL(objectUrl);
+                completeOnce(null);
+              };
+              tile.onerror = function () {
+                URL.revokeObjectURL(objectUrl);
+                loadGenericFallback();
+              };
+              tile.src = objectUrl;
+              return;
+            }
+          } catch (_) {
+            // Network failure falls through to cache and then generic fallback.
+          }
+
+          try {
+            if (cache) {
+              const cachedResp = await cache.match(req);
+              if (cachedResp) {
+                const cachedObjectUrl = await responseToObjectUrl(cachedResp);
+                tile.onload = function () {
+                  URL.revokeObjectURL(cachedObjectUrl);
+                  completeOnce(null);
+                };
+                tile.onerror = function () {
+                  URL.revokeObjectURL(cachedObjectUrl);
+                  loadGenericFallback();
+                };
+                tile.src = cachedObjectUrl;
+                return;
+              }
+            }
+          } catch (_) {
+            // If cache read fails, use generic fallback tile.
+          }
+
+          loadGenericFallback();
+        })();
+
+        return tile;
+      },
+    });
+
+    return new GenericTileLayer(OSM_TEMPLATE, {
+      attribution: "© OpenStreetMap contributors",
+      maxZoom: 18,
+      maxNativeZoom: 18,
+      updateWhenIdle: true,
+      keepBuffer: 1,
+      subdomains: "abc",
+    });
+  }
+
+  function prewarmPrimaryBasemapTile(lat, lon, zoom) {
+    (async () => {
+      if (!Number.isFinite(lat) || !Number.isFinite(lon) || !Number.isFinite(zoom)) return;
+      const z = Math.max(0, Math.min(18, Math.round(zoom)));
+      const x = lonToTileX(lon, z);
+      const y = latToTileY(lat, z);
+      const url = OSM_TEMPLATE
+        .replace("{s}", "a")
+        .replace("{z}", String(z))
+        .replace("{x}", String(x))
+        .replace("{y}", String(y));
+      const cache = await getTileCache();
+      if (!cache) return;
+      const req = requestFromUrl(url);
+      const alreadyCached = await cache.match(req);
+      if (alreadyCached) return;
+
+      try {
+        const resp = await fetch(req, {
+          mode: "cors",
+          credentials: "omit",
+          cache: "no-store",
+        });
+        if (resp.ok) {
+          await cache.put(req, resp.clone());
+        }
+      } catch (_) {
+        // Best-effort warm cache; failure is fine.
+      }
+    })();
+  }
+
   // ── Init ──────────────────────────────────────────────────────
   function init(lat, lon, zoom) {
     // If a previous map exists but its container was removed (e.g. page nav
@@ -45,13 +246,8 @@
     });
     // updateWhenIdle defers tile fetches until panning stops, reducing OSM load.
     // maxZoom 18 = OSM's nominal limit (19+ just upscales the same tiles).
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      attribution: "© OpenStreetMap contributors",
-      maxZoom: 18,
-      maxNativeZoom: 18,
-      updateWhenIdle: true,
-      keepBuffer: 1,
-    }).addTo(_map);
+    createResilientOsmTileLayer().addTo(_map);
+    prewarmPrimaryBasemapTile(lat, lon, zoom ?? 17);
   }
 
   // ── Node markers ──────────────────────────────────────────────
