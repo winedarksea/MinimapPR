@@ -698,9 +698,17 @@ class FusionNode:
             window_seconds=self.localization_config.classification_window_seconds,
             sample_rate_hz=candidate.sample_rate_hz,
         )
-        if len(trailing_windows) == len(selected_sensor_ids):
-            return trailing_windows
-        return fallback_windows
+        # Use trailing windows per-sensor where available so that sensors with
+        # sufficient buffered history give BirdNET longer audio.  Previously the
+        # all-or-nothing count check caused every sensor to fall back to the short
+        # localization window whenever any single sensor lacked a full trailing window.
+        merged: dict[str, np.ndarray] = {}
+        for sensor_id in selected_sensor_ids:
+            if sensor_id in trailing_windows:
+                merged[sensor_id] = trailing_windows[sensor_id]
+            elif sensor_id in fallback_windows:
+                merged[sensor_id] = fallback_windows[sensor_id]
+        return merged
 
     def _build_reference_sensor_candidate(
         self,
@@ -894,6 +902,13 @@ class FusionNode:
         track = product.track
 
         if product.suppressed_by_zone:
+            return
+
+        # Skip broadcasting unknown/0% confidence detections — they provide no
+        # actionable information for the operator and clutter the live feed.
+        # The DB row is still written so the reporting-window policy can track
+        # it and upgrade to a real species label if one arrives later.
+        if detection.label == "unknown" and detection.label_confidence == 0.0:
             return
 
         payload = {

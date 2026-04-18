@@ -79,8 +79,16 @@ class SensorStreamBuffer:
         end_offset_samples = int(round((end_time_ns - self.start_time_ns) / self.ns_per_sample))
         start_offset_samples = end_offset_samples - window_samples
 
-        if start_offset_samples < 0 or end_offset_samples > self.samples.size:
+        # Clamp the start to the beginning of the buffer so partial windows (e.g.
+        # when the buffer has less than classification_window_seconds of history) return
+        # whatever audio IS available rather than None.  Returning None here caused every
+        # sensor to fall back to the 80 ms localization window, which is far too short
+        # for BirdNET and produced only "unknown" (0.0) classifications.
+        # We still return None when the end is beyond what has been buffered because
+        # that would require future samples.
+        if end_offset_samples > self.samples.size:
             return None
+        start_offset_samples = max(0, start_offset_samples)
 
         return self.samples[start_offset_samples:end_offset_samples].copy()
 
