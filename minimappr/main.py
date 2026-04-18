@@ -193,13 +193,26 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        shutdown_timeout_s = 5.0
         if cleanup_task is not None:
             cleanup_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await cleanup_task
-        await federation.stop()
-        await fusion_node.stop()
-        await storage.close()
+            with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+                await asyncio.wait_for(cleanup_task, timeout=shutdown_timeout_s)
+
+        try:
+            await asyncio.wait_for(federation.stop(), timeout=shutdown_timeout_s)
+        except Exception as exc:
+            logger.warning("Federation stop failed during shutdown: %s", exc)
+
+        try:
+            await asyncio.wait_for(fusion_node.stop(), timeout=shutdown_timeout_s)
+        except Exception as exc:
+            logger.warning("Fusion node stop failed during shutdown: %s", exc)
+
+        try:
+            await asyncio.wait_for(storage.close(), timeout=shutdown_timeout_s)
+        except Exception as exc:
+            logger.warning("Storage close failed during shutdown: %s", exc)
 
 
 app = FastAPI(title="MinimapPR", version="0.1.0", lifespan=lifespan)

@@ -340,8 +340,16 @@ class FusionNode:
             except asyncio.TimeoutError:
                 for task in workers:
                     task.cancel()
-                await asyncio.gather(*workers, return_exceptions=True)
-                self._last_error = "Timeout waiting for worker tasks during shutdown; cancelled remaining workers"
+                try:
+                    await asyncio.wait_for(asyncio.gather(*workers, return_exceptions=True), timeout=join_timeout_s)
+                except asyncio.TimeoutError:
+                    # If workers still do not acknowledge cancellation, continue shutdown.
+                    self._last_error = (
+                        "Timed out waiting for worker tasks during shutdown; "
+                        "proceeded after cancellation"
+                    )
+                else:
+                    self._last_error = "Timeout waiting for worker tasks during shutdown; cancelled remaining workers"
 
         self._localization_workers.clear()
         self._classification_workers.clear()

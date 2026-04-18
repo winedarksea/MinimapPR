@@ -18,19 +18,63 @@ pub struct NodeStatus {
     pub node_id: String,
     #[serde(default = "default_node_health", alias = "health_status")]
     pub health: String,
+    #[serde(alias = "last_seen_ns")]
+    pub last_seen_ns: Option<i64>,
     pub last_seen_seconds_ago: Option<f64>,
+    pub node_type: Option<String>,
+    pub mobility: Option<String>,
+    pub capabilities: Option<Vec<String>>,
     pub position_m: Option<Vec<f64>>,
     pub position_geo: Option<GeoPoint>,
     pub gps_fix: Option<bool>,
     pub temperature_c: Option<f64>,
+    #[serde(alias = "humidity_fraction")]
     pub humidity: Option<f64>,
     pub rms_history: Option<Vec<f64>>,
     pub channel_count: Option<u32>,
     pub firmware_version: Option<String>,
+    pub bit_failure_codes: Option<Vec<String>>,
+    pub audio_debug: Option<NodeAudioDebug>,
+    pub latest_environment: Option<NodeEnvironment>,
+    pub metadata: Option<NodeMetadata>,
 }
 
 fn default_node_health() -> String {
     "unknown".to_string()
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct NodeAudioDebug {
+    pub sensor_count: Option<u32>,
+    pub active_sensor_count: Option<u32>,
+    pub sample_rate_hz: Option<f64>,
+    pub last_sample_time_ns: Option<i64>,
+    pub age_seconds: Option<f64>,
+    pub rms: Option<f64>,
+    pub status: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct NodeEnvironment {
+    pub timestamp_ns: Option<i64>,
+    pub temperature_c: Option<f64>,
+    pub pressure_pa: Option<f64>,
+    pub humidity_fraction: Option<f64>,
+    pub wind_speed_mps: Option<f64>,
+    pub wind_dir_deg: Option<f64>,
+    pub solar_lux: Option<f64>,
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct NodeMetadata {
+    pub gps: Option<NodeGpsMeta>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct NodeGpsMeta {
+    pub signal: Option<String>,
+    pub position_source: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

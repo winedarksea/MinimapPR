@@ -144,6 +144,11 @@ body {
 .sparkline-line { fill: none; stroke: var(--accent); stroke-width: 1.5; }
 
 .node-actions { display: flex; gap: 0.4rem; margin-top: 0.4rem; flex-wrap: wrap; }
+.node-action-hint {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  align-self: center;
+}
 .btn-sm {
   font-size: 0.7rem;
   padding: 2px 8px;
@@ -155,6 +160,39 @@ body {
   white-space: nowrap;
 }
 .btn-sm:hover { border-color: var(--accent); color: var(--accent); }
+
+.node-details {
+  margin-top: 0.45rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.35rem;
+}
+.node-details summary {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+}
+.node-details[open] summary {
+  color: var(--text);
+  margin-bottom: 0.35rem;
+}
+.node-details-grid {
+  display: grid;
+  grid-template-columns: minmax(84px, 110px) minmax(0, 1fr);
+  gap: 0.25rem 0.45rem;
+  font-size: 0.72rem;
+}
+.node-detail-label {
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+.node-channel-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
 
 /* ── Map column ───────────────────────────────────────────────── */
 .map-column { display: flex; flex-direction: column; }
