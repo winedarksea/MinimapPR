@@ -21,7 +21,7 @@ struct HeatmapResponse {
 
 #[component]
 pub fn GeoHeatmapView() -> impl IntoView {
-    let window = RwSignal::new("24h".to_string());
+    let window = RwSignal::new("1h".to_string());
     let error: RwSignal<Option<String>> = RwSignal::new(None);
     let count = RwSignal::new(0usize);
 

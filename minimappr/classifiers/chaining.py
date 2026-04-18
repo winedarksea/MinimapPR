@@ -34,6 +34,11 @@ class ChainedClassifier(AudioClassifier):
         self._stages = stages or []
         self._category_for_label = category_for_label or (lambda _: "unknown")
 
+    def close(self) -> None:
+        self._base.close()
+        for stage in self._stages:
+            stage.classifier.close()
+
     def classify(self, samples: np.ndarray, sample_rate_hz: int) -> ClassificationResult:
         base = self._base.classify(samples, sample_rate_hz)
         combined_scores = dict(base.scores)

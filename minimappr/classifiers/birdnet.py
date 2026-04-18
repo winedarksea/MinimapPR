@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import multiprocessing
+import threading
 
 import numpy as np
 from scipy.signal import resample_poly
@@ -39,10 +41,21 @@ class BirdNETClassifier(AudioClassifier):
             ) from exc
 
         self._min_confidence = min_confidence
-        # Model weights are downloaded here on first run if not cached.
-        self._model = model_loader.load("acoustic", "2.4", "pb")
+        # The protobuf SavedModel backend can hang during model initialization on
+        # macOS/Python 3.12 when BirdNET spins up multiprocessing helpers. Use the
+        # official TF/TFLite backend instead so test and runtime classification stay
+        # on a real BirdNET model without wedging before the first prediction.
+        self._model = model_loader.load("acoustic", "2.4", "tf", library="tflite")
+        # Tracks the active prediction session so close() can cancel it from
+        # another thread during server shutdown without waiting for subprocess I/O.
+        self._session_lock: threading.Lock = threading.Lock()
+        self._current_session = None
+        self._closed: bool = False
 
     def classify(self, samples: np.ndarray, sample_rate_hz: int) -> ClassificationResult:
+        if self._closed:
+            raise RuntimeError("BirdNETClassifier has been closed")
+
         audio = samples.astype(np.float32)
         if sample_rate_hz != _BIRDNET_SAMPLE_RATE_HZ:
             audio = resample_poly(
@@ -51,17 +64,27 @@ class BirdNETClassifier(AudioClassifier):
                 down=sample_rate_hz,
             ).astype(np.float32)
 
-        # predict_arrays handles audio chunking internally; no manual batching needed.
-        result = self._model.predict_arrays(
-            (audio, _BIRDNET_SAMPLE_RATE_HZ),
+        # Use predict_session so we can store the session reference and call
+        # cancel() from close() if shutdown interrupts an in-flight prediction.
+        # Without this, a SIGINT that kills BirdNET worker subprocesses leaves
+        # the Consumer blocked on queue.get() with no timeout, hanging the thread.
+        with self._model.predict_session(
             top_k=_SCORES_MAP_TOP_K,
             default_confidence_threshold=self._min_confidence,
             apply_sigmoid=True,
-        )
+            n_workers=1,
+        ) as session:
+            with self._session_lock:
+                self._current_session = session
+            try:
+                result = session.run_arrays([(audio, _BIRDNET_SAMPLE_RATE_HZ)])
+            finally:
+                with self._session_lock:
+                    self._current_session = None
 
         # to_structured_array() yields rows with fields: species_name, confidence,
         # start_time, end_time — sorted by confidence descending, above-threshold only.
-        detections = result.to_structured_array()
+        detections = result.to_structured_array()  # type: ignore[union-attr]
 
         if len(detections) == 0:
             return ClassificationResult(
@@ -93,6 +116,32 @@ class BirdNETClassifier(AudioClassifier):
             scores=scores_map,
             features={"model": "birdnet_v2m4", "raw_species": top_raw_label},
         )
+
+    def close(self) -> None:
+        """Cancel any in-flight prediction and terminate BirdNET worker subprocesses.
+
+        BirdNET spawns multiprocessing workers that load TensorFlow models.  On
+        SIGINT those workers die without signalling the result queue, leaving the
+        Consumer thread blocked forever.  Calling cancel() on the active session
+        unblocks the Consumer; terminating active_children() ensures stale
+        processes do not prevent the thread pool from draining.
+        """
+        self._closed = True
+        with self._session_lock:
+            session = self._current_session
+        if session is not None:
+            try:
+                session.cancel()
+            except Exception:  # noqa: BLE001
+                pass
+
+        # Terminate any BirdNET worker/producer subprocesses that received
+        # SIGINT and may be mid-init (stuck in tf.saved_model.load), preventing
+        # their finish_signals from ever being set.
+        for child in multiprocessing.active_children():
+            child.terminate()
+        for child in multiprocessing.active_children():
+            child.join(timeout=1.0)
 
 
 # ---------------------------------------------------------------------------

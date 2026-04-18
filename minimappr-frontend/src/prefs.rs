@@ -6,15 +6,10 @@
 use wasm_bindgen::JsCast;
 use web_sys::{HtmlElement, Storage};
 
-pub const KEY_THEME:   &str = "mmp.theme";
-pub const KEY_DENSITY: &str = "mmp.density";
+pub const KEY_THEME: &str = "mmp.theme";
 
 fn storage() -> Option<Storage> {
     web_sys::window()?.local_storage().ok().flatten()
-}
-
-pub fn get(key: &str) -> Option<String> {
-    storage()?.get_item(key).ok().flatten()
 }
 
 pub fn set(key: &str, value: &str) {
@@ -26,11 +21,6 @@ pub fn set(key: &str, value: &str) {
 /// Read the current `data-theme` attribute on `<html>`; defaults to `"dark"`.
 pub fn current_theme() -> String {
     root_attr("data-theme").unwrap_or_else(|| "dark".into())
-}
-
-/// Read the current `data-density` attribute on `<html>`; defaults to `"comfortable"`.
-pub fn current_density() -> String {
-    root_attr("data-density").unwrap_or_else(|| "comfortable".into())
 }
 
 fn root_attr(name: &str) -> Option<String> {

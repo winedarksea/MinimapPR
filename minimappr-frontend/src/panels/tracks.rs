@@ -37,7 +37,6 @@ fn trigger_track_download(track_id: &str) {
 pub fn TracksPane() -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState");
     let tracks = state.tracks;
-    let detections = state.detections;
 
     view! {
         <div class="tab-pane">
@@ -75,10 +74,6 @@ pub fn TracksPane() -> impl IntoView {
                                     }
                                 }).unwrap_or_else(|| "—".to_string());
                                 let track_id = t.track_id.clone();
-                                let has_audio = detections
-                                    .get()
-                                    .iter()
-                                    .any(|d| d.track_id.as_deref() == Some(track_id.as_str()) && d.snippet_path.is_some());
 
                                 view! {
                                     <tr>
@@ -91,7 +86,7 @@ pub fn TracksPane() -> impl IntoView {
                                         <td>{sensors}</td>
                                         <td style="font-size:0.7rem">{pos}</td>
                                         <td>
-                                            {if has_audio {
+                                            {
                                                 let play_id = track_id.clone();
                                                 let download_id = track_id.clone();
                                                 view! {
@@ -102,9 +97,7 @@ pub fn TracksPane() -> impl IntoView {
                                                         "Download"
                                                     </button>
                                                 }.into_any()
-                                            } else {
-                                                view! { <span style="color:var(--text-muted)">"-"</span> }.into_any()
-                                            }}
+                                            }
                                         </td>
                                     </tr>
                                 }

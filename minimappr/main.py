@@ -235,6 +235,15 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.warning("Federation stop failed during shutdown: %s", exc)
 
+        # Cancel any in-flight BirdNET predictions and terminate their worker
+        # subprocesses BEFORE stopping the fusion node.  If a SIGINT kills BirdNET
+        # workers mid-init, the Consumer blocks on queue.get() indefinitely; closing
+        # the classifier first lets the thread unblock and the queue to drain.
+        try:
+            classifier.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Classifier close failed during shutdown: %s", exc)
+
         try:
             await asyncio.wait_for(fusion_node.stop(), timeout=shutdown_timeout_s)
         except Exception as exc:
@@ -1526,4 +1535,4 @@ async def live_events(websocket: WebSocket) -> None:
 
 
 if frontend_dir.is_dir():
-    app.mount("/", StaticFiles(directory=frontend_dir), name="static")
+    app.mount("/", StaticFiles(directory=frontend_dir, html=True), name="static")

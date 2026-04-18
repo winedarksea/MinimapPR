@@ -1,5 +1,5 @@
 use leptos::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::VecDeque;
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -101,22 +101,59 @@ pub struct GeoPoint {
     pub alt_m: Option<f64>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct Detection {
-    #[serde(alias = "id")]
     pub event_id: String,
-    #[serde(alias = "source_node_id")]
     pub node_id: Option<String>,
     pub label: Option<String>,
     pub confidence: Option<f64>,
     pub label_confidence: Option<f64>,
-    #[serde(alias = "tor_ns")]
     pub received_ns: Option<i64>,
     pub position_m: Option<Vec<f64>>,
     pub position_geo: Option<GeoPoint>,
     pub has_audio: Option<bool>,
     pub snippet_path: Option<String>,
     pub track_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DetectionWire {
+    event_id: Option<String>,
+    id: Option<String>,
+    #[serde(alias = "source_node_id")]
+    node_id: Option<String>,
+    label: Option<String>,
+    confidence: Option<f64>,
+    label_confidence: Option<f64>,
+    #[serde(alias = "tor_ns")]
+    received_ns: Option<i64>,
+    position_m: Option<Vec<f64>>,
+    position_geo: Option<GeoPoint>,
+    has_audio: Option<bool>,
+    snippet_path: Option<String>,
+    track_id: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for Detection {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = DetectionWire::deserialize(deserializer)?;
+        Ok(Self {
+            event_id: wire.event_id.or(wire.id).unwrap_or_default(),
+            node_id: wire.node_id,
+            label: wire.label,
+            confidence: wire.confidence,
+            label_confidence: wire.label_confidence,
+            received_ns: wire.received_ns,
+            position_m: wire.position_m,
+            position_geo: wire.position_geo,
+            has_audio: wire.has_audio,
+            snippet_path: wire.snippet_path,
+            track_id: wire.track_id,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
