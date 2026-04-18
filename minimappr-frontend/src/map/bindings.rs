@@ -37,4 +37,13 @@ extern "C" {
 
     #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "panTo")]
     pub fn pan_to(lat: f64, lon: f64);
+
+    #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "setHeatmapPoints")]
+    pub fn set_heatmap_points(points: &JsValue, max_intensity: f64);
+
+    #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "clearHeatmap")]
+    pub fn clear_heatmap();
+
+    #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "fitBoundsLatLons")]
+    pub fn fit_bounds_latlons(points: &JsValue);
 }

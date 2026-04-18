@@ -21,7 +21,23 @@
 
   // ── Init ──────────────────────────────────────────────────────
   function init(lat, lon, zoom) {
-    if (_map) return;
+    // If a previous map exists but its container was removed (e.g. page nav
+    // unmounted and remounted the #leaflet-map div), drop the old map and
+    // rebuild against the fresh DOM node. Keeps soft-navigation safe.
+    if (_map) {
+      const prev = _map.getContainer ? _map.getContainer() : null;
+      if (!prev || !document.body.contains(prev)) {
+        try { _map.remove(); } catch (_) {}
+        _map = null;
+        for (const k in _markers)  delete _markers[k];
+        for (const k in _vectors)  delete _vectors[k];
+        for (const k in _ellipses) delete _ellipses[k];
+        for (const k in _zones)    delete _zones[k];
+        for (const k in _gdop)     delete _gdop[k];
+      } else {
+        return;
+      }
+    }
     _map = L.map("leaflet-map", {
       center: [lat, lon],
       zoom: zoom ?? 17,
@@ -139,6 +155,39 @@
     if (_map) _map.panTo([lat, lon]);
   }
 
+  // ── Heatmap (Leaflet.heat plugin) ────────────────────────────
+  let _heatLayer = null;
+
+  function initHeatmap(lat, lon, zoom) {
+    init(lat, lon, zoom);
+  }
+
+  function setHeatmapPoints(points, maxIntensity) {
+    if (!_map) return;
+    if (!L.heatLayer) return; // plugin not loaded
+    if (_heatLayer) {
+      _heatLayer.setLatLngs(points);
+      if (maxIntensity) _heatLayer.setOptions({ max: maxIntensity });
+    } else {
+      _heatLayer = L.heatLayer(points, {
+        radius: 22,
+        blur: 18,
+        max: maxIntensity || 10,
+        minOpacity: 0.35,
+      }).addTo(_map);
+    }
+  }
+
+  function clearHeatmap() {
+    if (_heatLayer) { _heatLayer.remove(); _heatLayer = null; }
+  }
+
+  function fitBoundsLatLons(points) {
+    if (!_map || !points || points.length === 0) return;
+    const ll = points.map(function (p) { return [p[0], p[1]]; });
+    _map.fitBounds(ll, { padding: [40, 40], maxZoom: 18 });
+  }
+
   // ── Public API ────────────────────────────────────────────────
   globalThis.leafletInterop = {
     init,
@@ -148,5 +197,6 @@
     setZone, removeZone,
     setGdopCircle, removeGdopCircle,
     panTo,
+    initHeatmap, setHeatmapPoints, clearHeatmap, fitBoundsLatLons,
   };
 })();

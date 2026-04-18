@@ -178,6 +178,9 @@ pub struct FilterState {
 
 // ── AppState ────────────────────────────────────────────────────
 
+/// **LiveState** — signals fed by WS + periodic polling. Always live.
+/// **QueryCache** is a separate concern (see `query_cache.rs` / page-local).
+/// The router owns the "active page" — no `active_tab` lives here anymore.
 #[derive(Clone)]
 pub struct AppState {
     pub nodes:      RwSignal<Vec<NodeStatus>>,
@@ -187,17 +190,8 @@ pub struct AppState {
     pub config:     RwSignal<Option<ConfigSnapshot>>,
     pub cop_status: RwSignal<Option<CopStatus>>,
     pub ws_status:  RwSignal<WsStatus>,
-    pub active_tab: RwSignal<Tab>,
     pub filter:     RwSignal<FilterState>,
-}
-
-#[derive(Clone, Debug, PartialEq, Default)]
-pub enum Tab {
-    #[default]
-    Tracks,
-    Detections,
-    Alerts,
-    Config,
+    pub theme:      RwSignal<String>,
 }
 
 impl AppState {
@@ -210,8 +204,8 @@ impl AppState {
             config:     RwSignal::new(None),
             cop_status: RwSignal::new(None),
             ws_status:  RwSignal::new(WsStatus::Disconnected),
-            active_tab: RwSignal::new(Tab::Tracks),
             filter:     RwSignal::new(FilterState::default()),
+            theme:      RwSignal::new(crate::prefs::current_theme()),
         }
     }
 }

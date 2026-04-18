@@ -35,6 +35,17 @@ def _slugify(text: str) -> str:
     return cleaned or "unknown"
 
 
+def _round_digits(bin_deg: float) -> int:
+    """Decimal places for SQLite ROUND() given a bin resolution in degrees.
+
+    e.g. 0.0001° → 4, 0.01° → 2, 1° → 0. Clamped to [0, 6].
+    """
+    import math
+    if bin_deg <= 0:
+        return 4
+    return max(0, min(6, int(round(-math.log10(bin_deg)))))
+
+
 def _ingested_frame_key(
     *,
     node_id: str,
@@ -1258,6 +1269,286 @@ class Storage:
                 )
             ).fetchall()
         return [self._row_to_detection(row).model_dump(mode="json") for row in rows]
+
+    async def detection_matrix(
+        self,
+        *,
+        start_ns: int,
+        end_ns: int,
+        bucket_ns: int,
+        min_label_confidence: float | None = None,
+        max_labels: int = 64,
+    ) -> tuple[list[str], list[list[int]], list[int]]:
+        """Aggregate detections into a (label × hour-bucket) count matrix.
+
+        Returns (labels, counts[label_idx][bucket_idx], bucket_totals[bucket_idx]).
+        Buckets are [start_ns, end_ns) divided into fixed-width intervals of
+        `bucket_ns` — typically 3600 * 1e9 ns (one hour). Labels are selected
+        from the top `max_labels` by total count in the window.
+        """
+        db = self._require_db()
+        if bucket_ns <= 0 or end_ns <= start_ns:
+            return ([], [], [])
+        num_buckets = max(1, int((end_ns - start_ns) // bucket_ns))
+
+        clauses = ["timestamp_ns >= ?", "timestamp_ns < ?"]
+        params: list[object] = [int(start_ns), int(end_ns)]
+        if min_label_confidence is not None:
+            clauses.append("label_confidence >= ?")
+            params.append(float(min_label_confidence))
+        where = " AND ".join(clauses)
+
+        # Pick top-N labels by count in window — keeps payload small for "noisy" days.
+        top_rows = await (
+            await db.execute(
+                f"""
+                SELECT COALESCE(label, 'unknown') AS lbl, COUNT(*) AS c
+                FROM detections
+                WHERE {where}
+                GROUP BY lbl
+                ORDER BY c DESC
+                LIMIT ?
+                """,
+                (*params, int(max_labels)),
+            )
+        ).fetchall()
+        if not top_rows:
+            return ([], [[0] * num_buckets for _ in ()], [0] * num_buckets)
+
+        labels = [row["lbl"] for row in top_rows]
+        label_to_idx = {lbl: i for i, lbl in enumerate(labels)}
+        counts = [[0] * num_buckets for _ in labels]
+        bucket_totals = [0] * num_buckets
+
+        placeholders = ",".join("?" for _ in labels)
+        rows = await (
+            await db.execute(
+                f"""
+                SELECT
+                    CAST((timestamp_ns - ?) / ? AS INTEGER) AS bucket,
+                    COALESCE(label, 'unknown') AS lbl,
+                    COUNT(*) AS c
+                FROM detections
+                WHERE {where} AND COALESCE(label, 'unknown') IN ({placeholders})
+                GROUP BY bucket, lbl
+                """,
+                (int(start_ns), int(bucket_ns), *params, *labels),
+            )
+        ).fetchall()
+        for row in rows:
+            b = int(row["bucket"])
+            if b < 0 or b >= num_buckets:
+                continue
+            idx = label_to_idx.get(row["lbl"])
+            if idx is None:
+                continue
+            c = int(row["c"])
+            counts[idx][b] = c
+            bucket_totals[b] += c
+        return labels, counts, bucket_totals
+
+    async def label_summaries(
+        self,
+        *,
+        now_ns: int,
+        window_ns: int,
+        min_label_confidence: float | None = None,
+    ) -> list[dict]:
+        """Return one row per label: count, first_seen, last_seen, distinct-node count.
+
+        Window = `[now_ns - window_ns, now_ns]`. Cheap aggregate query — one pass
+        over the timestamp index; no heavy joins.
+        """
+        db = self._require_db()
+        start_ns = int(now_ns - window_ns)
+        clauses = ["timestamp_ns >= ?", "timestamp_ns <= ?"]
+        params: list[object] = [start_ns, int(now_ns)]
+        if min_label_confidence is not None:
+            clauses.append("label_confidence >= ?")
+            params.append(float(min_label_confidence))
+        where = " AND ".join(clauses)
+        rows = await (
+            await db.execute(
+                f"""
+                SELECT
+                    COALESCE(label, 'unknown')         AS label,
+                    COUNT(*)                           AS count,
+                    MIN(timestamp_ns)                  AS first_seen_ns,
+                    MAX(timestamp_ns)                  AS last_seen_ns,
+                    COUNT(DISTINCT source_node_id)     AS node_count,
+                    COALESCE(label_category, 'unknown') AS category
+                FROM detections
+                WHERE {where}
+                GROUP BY label
+                ORDER BY count DESC
+                """,
+                tuple(params),
+            )
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    async def label_detail(
+        self,
+        label: str,
+        *,
+        now_ns: int,
+        window_ns: int,
+        recent_limit: int = 50,
+        min_label_confidence: float | None = None,
+    ) -> dict:
+        """Per-label: hour-of-day histogram, day-of-week histogram, recent detections.
+
+        Returned ints cover labels matching SQL `COALESCE(label, 'unknown') = ?`,
+        so callers can pass `"unknown"` to query the bucket for detections without
+        a label.
+        """
+        db = self._require_db()
+        start_ns = int(now_ns - window_ns)
+        clauses = ["timestamp_ns >= ?", "timestamp_ns <= ?", "COALESCE(label, 'unknown') = ?"]
+        params: list[object] = [start_ns, int(now_ns), label]
+        if min_label_confidence is not None:
+            clauses.append("label_confidence >= ?")
+            params.append(float(min_label_confidence))
+        where = " AND ".join(clauses)
+
+        # strftime on unix-seconds (converted from ns). SQLite handles this natively.
+        hour_rows = await (
+            await db.execute(
+                f"""
+                SELECT
+                    CAST(strftime('%H', timestamp_ns / 1000000000, 'unixepoch') AS INTEGER) AS h,
+                    COUNT(*) AS c
+                FROM detections
+                WHERE {where}
+                GROUP BY h
+                """,
+                tuple(params),
+            )
+        ).fetchall()
+        hours = [0] * 24
+        for row in hour_rows:
+            h = int(row["h"] or 0)
+            if 0 <= h < 24:
+                hours[h] = int(row["c"])
+
+        dow_rows = await (
+            await db.execute(
+                f"""
+                SELECT
+                    CAST(strftime('%w', timestamp_ns / 1000000000, 'unixepoch') AS INTEGER) AS d,
+                    COUNT(*) AS c
+                FROM detections
+                WHERE {where}
+                GROUP BY d
+                """,
+                tuple(params),
+            )
+        ).fetchall()
+        dow = [0] * 7
+        for row in dow_rows:
+            d = int(row["d"] or 0)
+            if 0 <= d < 7:
+                dow[d] = int(row["c"])
+
+        month_rows = await (
+            await db.execute(
+                f"""
+                SELECT
+                    CAST(strftime('%m', timestamp_ns / 1000000000, 'unixepoch') AS INTEGER) AS m,
+                    COUNT(*) AS c
+                FROM detections
+                WHERE {where}
+                GROUP BY m
+                """,
+                tuple(params),
+            )
+        ).fetchall()
+        months = [0] * 12
+        for row in month_rows:
+            m = int(row["m"] or 0)
+            if 1 <= m <= 12:
+                months[m - 1] = int(row["c"])
+
+        recent = await (
+            await db.execute(
+                f"SELECT * FROM detections WHERE {where} ORDER BY timestamp_ns DESC LIMIT ?",
+                tuple([*params, int(recent_limit)]),
+            )
+        ).fetchall()
+        recent_out = [self._row_to_detection(row).model_dump(mode="json") for row in recent]
+
+        total_row = await (
+            await db.execute(
+                f"SELECT COUNT(*) AS c, MIN(timestamp_ns) AS first_ns, MAX(timestamp_ns) AS last_ns FROM detections WHERE {where}",
+                tuple(params),
+            )
+        ).fetchone()
+        total = int(total_row["c"]) if total_row else 0
+        first_ns = total_row["first_ns"] if total_row else None
+        last_ns = total_row["last_ns"] if total_row else None
+
+        return {
+            "label": label,
+            "total": total,
+            "first_seen_ns": first_ns,
+            "last_seen_ns": last_ns,
+            "hour_histogram": hours,
+            "dow_histogram": dow,
+            "month_histogram": months,
+            "recent": recent_out,
+        }
+
+    async def heatmap_bins(
+        self,
+        *,
+        now_ns: int,
+        window_ns: int,
+        bin_deg: float = 0.0001,
+        labels: list[str] | None = None,
+        min_label_confidence: float | None = None,
+        max_bins: int = 5000,
+    ) -> list[dict]:
+        """Pre-binned lat/lon/weight triplets for the geo heatmap view.
+
+        `bin_deg` = rounding resolution in degrees (0.0001 ≈ 11 m at the equator).
+        Hard `max_bins` cap on the payload — we fall back to larger bins if needed.
+        """
+        db = self._require_db()
+        start_ns = int(now_ns - window_ns)
+        clauses = [
+            "timestamp_ns >= ?",
+            "timestamp_ns <= ?",
+            "lat IS NOT NULL",
+            "lon IS NOT NULL",
+        ]
+        params: list[object] = [start_ns, int(now_ns)]
+        if min_label_confidence is not None:
+            clauses.append("label_confidence >= ?")
+            params.append(float(min_label_confidence))
+        if labels:
+            placeholders = ",".join("?" for _ in labels)
+            clauses.append(f"label IN ({placeholders})")
+            params.extend(labels)
+        where = " AND ".join(clauses)
+
+        # Single grouped query; SQLite handles ROUND efficiently.
+        rows = await (
+            await db.execute(
+                f"""
+                SELECT
+                    ROUND(lat, ?) AS lat,
+                    ROUND(lon, ?) AS lon,
+                    COUNT(*) AS weight
+                FROM detections
+                WHERE {where}
+                GROUP BY lat, lon
+                ORDER BY weight DESC
+                LIMIT ?
+                """,
+                (_round_digits(bin_deg), _round_digits(bin_deg), *params, int(max_bins)),
+            )
+        ).fetchall()
+        return [{"lat": float(row["lat"]), "lon": float(row["lon"]), "weight": int(row["weight"])} for row in rows]
 
     async def list_tracks(self, limit: int = 200) -> list[dict]:
         db = self._require_db()

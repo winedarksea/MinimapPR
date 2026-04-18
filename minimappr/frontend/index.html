@@ -4,18 +4,36 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>MinimapPR COP</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+
+  <!-- Material Symbols (Rounded, variable) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet"
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" />
+  <link rel="stylesheet"
+        href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..24,300..700,0..1,-25..200" />
+
+  <!-- Leaflet core -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha384-sHL9NAb7lN7rfvG5lfHpm643Xkcjzp4jFvuavGOndn6pjVqS6ny56CAt3nsEVT4H"
         crossorigin="anonymous" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
           integrity="sha384-cxOPjt7s7Iz04uaHJceBmS+qpjv2JkIHNVcuOrM+YHwZOmJGBXI00mdUXEq65HTH"
           crossorigin="anonymous"></script>
-  <link rel="stylesheet" href="/style-1e22a3f92100d9d2.css" integrity="sha384-H5xgBoaAbHyM/KwtwCkOrbuDhUOT9Y7x1x/uK+d9DwlVf3Yzx9MgJulDYo40n8Oo"/>
+
+  <!-- Leaflet.heat for geo-heatmap view (phase 5) -->
+  <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"
+          crossorigin="anonymous"></script>
+
+  <link rel="stylesheet" href="/style-d370ece10c4ba510.css" integrity="sha384-De2Vsnx8aCpyMTM49p7gq5m2y+XnFjoenvplnQPM6xjO99uTYqfjr8hCRmEWiwxX"/>
+  
+  
   
   
 <script type="module">
-import init, * as bindings from '/minimappr-frontend-d255c3a496148565.js';
-const wasm = await init({ module_or_path: '/minimappr-frontend-d255c3a496148565_bg.wasm' });
+import init, * as bindings from '/minimappr-frontend-940edbea6f599bc3.js';
+const wasm = await init({ module_or_path: '/minimappr-frontend-940edbea6f599bc3_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -24,8 +42,39 @@ window.wasmBindings = bindings;
 dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
 
 </script>
-<link rel="modulepreload" href="/minimappr-frontend-d255c3a496148565.js" crossorigin="anonymous" integrity="sha384-hnC+YpVSpei8h7ZWRoOWdL+R4BOjOU7D4VCUyAdMnAhqgVM/rs/M5vBsfzT17yIp"><link rel="preload" href="/minimappr-frontend-d255c3a496148565_bg.wasm" crossorigin="anonymous" integrity="sha384-rCFRJHcgTm/kCE7NqirCL3elclXOUjmOeWUFjLg+kyNxPn6+6RTqiySnrJ3UY2YI" as="fetch" type="application/wasm"></head>
+
+  <!-- Theme + density bootstrap — runs before CSR hydrates so there's no flash. -->
+  <script>
+    (function () {
+      try {
+        var theme = localStorage.getItem('mmp.theme');
+        var density = localStorage.getItem('mmp.density');
+        var root = document.documentElement;
+        if (theme === 'light' || theme === 'dark') {
+          root.setAttribute('data-theme', theme);
+        } else {
+          root.setAttribute('data-theme', 'dark');
+        }
+        if (density === 'compact' || density === 'comfortable') {
+          root.setAttribute('data-density', density);
+        } else {
+          root.setAttribute('data-density', 'comfortable');
+        }
+      } catch (_) { /* localStorage may be unavailable */ }
+    })();
+  </script>
+
+  <style>
+    .material-symbols-rounded {
+      font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 20;
+      font-size: 20px;
+      user-select: none;
+      line-height: 1;
+    }
+  </style>
+<link rel="modulepreload" href="/minimappr-frontend-940edbea6f599bc3.js" crossorigin="anonymous" integrity="sha384-tQB6r1txICRBrb/T2SRvq2phznThPmS+njkM+CX49EQKHS0mgWA2tg7W5DcSNH+J"><link rel="preload" href="/minimappr-frontend-940edbea6f599bc3_bg.wasm" crossorigin="anonymous" integrity="sha384-l/q6mOm9zz4oHVW5aystspGiv8ji1LB9GDEeWrqXx9ws0L5ogH4J/VVMSjXJGBPF" as="fetch" type="application/wasm"></head>
 <body>
   <script src="leaflet-interop.js"></script>
+  <script src="audio-interop.js"></script>
 </body>
 </html>

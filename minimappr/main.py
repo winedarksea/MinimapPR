@@ -37,6 +37,8 @@ from minimappr.core.federation import FederationCoordinator
 from minimappr.core.fusion_node import FusionNode
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.localization_dispatch import build_localizer_from_settings
+from minimappr.core.logging_ring import install_global as install_log_ring, process_start_ns
+from minimappr.core import system_info
 from minimappr.core.node_registry import NodeRegistry
 from minimappr.core.tracking import TrackManager
 from minimappr.core.zones import ZoneMatcher
@@ -69,6 +71,34 @@ logger = logging.getLogger(__name__)
 frontend_dir = Path(__file__).parent / "frontend"
 
 
+def _parse_window_ns(window: str) -> int:
+    """Parse a compact window string (e.g. '24h', '7d', '30m', '1y') into nanoseconds."""
+    if not window:
+        raise HTTPException(status_code=400, detail="Empty window")
+    unit = window[-1].lower()
+    if unit.isdigit():
+        # Bare seconds
+        try:
+            return int(window) * 1_000_000_000
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid window '{window}'") from exc
+    try:
+        amount = int(window[:-1])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid window '{window}'") from exc
+    multipliers = {
+        "s": 1_000_000_000,
+        "m": 60 * 1_000_000_000,
+        "h": 3600 * 1_000_000_000,
+        "d": 86400 * 1_000_000_000,
+        "w": 7 * 86400 * 1_000_000_000,
+        "y": 365 * 86400 * 1_000_000_000,
+    }
+    if unit not in multipliers:
+        raise HTTPException(status_code=400, detail=f"Unknown window unit '{unit}'")
+    return amount * multipliers[unit]
+
+
 def _require_state(request: Request):
     if not hasattr(request.app.state, "storage"):
         raise RuntimeError("Storage is not initialized")
@@ -95,6 +125,7 @@ async def _cleanup_loop(app: FastAPI) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    install_log_ring()
     settings = Settings.from_env()
     settings.federation_peers_config_path.parent.mkdir(parents=True, exist_ok=True)
     settings.snippet_dir.mkdir(parents=True, exist_ok=True)
@@ -908,6 +939,196 @@ async def delete_zone(zone_id: str, request: Request) -> dict:
     return {"ok": True, "zone_id": zone_id}
 
 
+@app.get("/api/v1/analytics/daily")
+async def get_analytics_daily(
+    request: Request,
+    end: str | None = Query(default=None, description="ISO 8601 end timestamp (rolling mode)"),
+    date: str | None = Query(default=None, description="YYYY-MM-DD local calendar date"),
+    hours: int = Query(default=24, ge=1, le=168),
+    tz: str = Query(default="UTC", description="IANA tz for bucket edges and 'calendar' mode"),
+    max_labels: int = Query(default=64, ge=1, le=256),
+) -> dict:
+    """Daily detection activity matrix.
+
+    Two modes:
+    - rolling (default): `[end-hours, end]` snapped to hour boundaries;
+      `end` defaults to now.
+    - calendar: `date=YYYY-MM-DD` → 00:00 to 24:00 local on that date.
+
+    Response cache-control: 30s (set by the client via frontend `fetch`).
+    """
+    from datetime import datetime, timedelta, timezone as _tz
+    try:
+        from zoneinfo import ZoneInfo
+        tz_info = ZoneInfo(tz)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid tz '{tz}': {exc}") from exc
+
+    state = _require_state(request)
+    settings: Settings = state.settings
+
+    bucket_ns = 3600 * 1_000_000_000
+    mode: Literal["rolling", "calendar"]
+    if date is not None:
+        mode = "calendar"
+        try:
+            y, m, d = (int(p) for p in date.split("-"))
+            start_local = datetime(y, m, d, tzinfo=tz_info)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid date '{date}': {exc}") from exc
+        end_local = start_local + timedelta(hours=24)
+        num_buckets = 24
+    else:
+        mode = "rolling"
+        now_utc = datetime.now(tz=_tz.utc)
+        if end is None:
+            end_local = now_utc.astimezone(tz_info)
+        else:
+            try:
+                parsed = datetime.fromisoformat(end.replace("Z", "+00:00"))
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=f"Invalid end '{end}': {exc}") from exc
+            end_local = parsed.astimezone(tz_info) if parsed.tzinfo else parsed.replace(tzinfo=tz_info)
+        # Snap end up to the next hour boundary (rolling window ends at "current hour").
+        end_local = end_local.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        num_buckets = hours
+        start_local = end_local - timedelta(hours=num_buckets)
+
+    start_ns = int(start_local.astimezone(_tz.utc).timestamp() * 1e9)
+    end_ns = int(end_local.astimezone(_tz.utc).timestamp() * 1e9)
+
+    labels, counts, bucket_totals = await state.storage.detection_matrix(
+        start_ns=start_ns,
+        end_ns=end_ns,
+        bucket_ns=bucket_ns,
+        min_label_confidence=settings.detection_min_confidence,
+        max_labels=max_labels,
+    )
+
+    # Back-fill empty matrix shape when there's nothing to show, so the client
+    # still gets a 24-wide row of zeros rather than length-0 arrays.
+    if not labels:
+        counts = []
+        bucket_totals = [0] * num_buckets
+
+    # Generate bucket_starts (ISO in the requested tz for display).
+    bucket_starts = [
+        (start_local + timedelta(hours=i)).isoformat(timespec="seconds")
+        for i in range(num_buckets)
+    ]
+    label_totals = [sum(row) for row in counts]
+
+    return {
+        "mode": mode,
+        "tz": tz,
+        "hours": num_buckets,
+        "start": start_local.isoformat(timespec="seconds"),
+        "end": end_local.isoformat(timespec="seconds"),
+        "bucket_starts": bucket_starts,
+        "labels": labels,
+        "counts": counts,
+        "label_totals": label_totals,
+        "bucket_totals": bucket_totals,
+    }
+
+
+@app.get("/api/v1/analytics/labels")
+async def get_analytics_labels(
+    request: Request,
+    window: str = Query(default="30d", description="Window: e.g. 1h, 24h, 7d, 30d, 365d"),
+) -> dict:
+    """List of labels seen within `window`, with counts + first/last-seen."""
+    state = _require_state(request)
+    settings: Settings = state.settings
+    window_ns = _parse_window_ns(window)
+    now_ns = time.time_ns()
+    rows = await state.storage.label_summaries(
+        now_ns=now_ns,
+        window_ns=window_ns,
+        min_label_confidence=settings.detection_min_confidence,
+    )
+    return {"window": window, "now_ns": now_ns, "labels": rows}
+
+
+@app.get("/api/v1/analytics/labels/{label}")
+async def get_analytics_label_detail(
+    request: Request,
+    label: str,
+    window: str = Query(default="30d"),
+    recent_limit: int = Query(default=50, ge=1, le=500),
+) -> dict:
+    """Per-label aggregates: hour-of-day, day-of-week, month, recent detections."""
+    state = _require_state(request)
+    settings: Settings = state.settings
+    window_ns = _parse_window_ns(window)
+    now_ns = time.time_ns()
+    return await state.storage.label_detail(
+        label,
+        now_ns=now_ns,
+        window_ns=window_ns,
+        recent_limit=recent_limit,
+        min_label_confidence=settings.detection_min_confidence,
+    )
+
+
+@app.get("/api/v1/analytics/heatmap")
+async def get_analytics_heatmap(
+    request: Request,
+    window: str = Query(default="24h"),
+    labels: str | None = Query(default=None, description="comma-separated label list"),
+    bin: float = Query(default=0.0001, ge=0.00001, le=0.1, description="lat/lon rounding resolution in deg"),
+    max_bins: int = Query(default=5000, ge=1, le=20000),
+) -> dict:
+    """Pre-binned geo density for the heatmap view — `[lat, lon, weight]` triplets."""
+    state = _require_state(request)
+    settings: Settings = state.settings
+    window_ns = _parse_window_ns(window)
+    now_ns = time.time_ns()
+    label_list = [s.strip() for s in labels.split(",") if s.strip()] if labels else None
+    bins = await state.storage.heatmap_bins(
+        now_ns=now_ns,
+        window_ns=window_ns,
+        bin_deg=float(bin),
+        labels=label_list,
+        min_label_confidence=settings.detection_min_confidence,
+        max_bins=max_bins,
+    )
+    return {"window": window, "bin_deg": float(bin), "now_ns": now_ns, "bins": bins}
+
+
+@app.get("/api/v1/system/diagnostics")
+async def get_system_diagnostics(request: Request) -> dict:
+    """Runtime facts (uptime, CPU, memory, disk, load) for the Server page."""
+    state = _require_state(request)
+    settings: Settings = state.settings
+    return system_info.collect(db_path=settings.db_path, start_ns=process_start_ns())
+
+
+@app.get("/api/v1/system/logs")
+async def get_system_logs(
+    request: Request,
+    limit: int = Query(default=500, ge=1, le=5000),
+    level: str = Query(default="INFO", description="Min level: DEBUG/INFO/WARNING/ERROR/CRITICAL"),
+    logger_prefix: str | None = Query(default=None),
+    since_seq: int | None = Query(default=None, description="Tail: records with seq > since_seq"),
+) -> dict:
+    """Recent log records from the in-process ring buffer."""
+    from minimappr.core.logging_ring import global_handler
+    handler = global_handler()
+    if handler is None:
+        return {"records": [], "capacity": 0}
+    level_no = logging.getLevelName(level.upper()) if isinstance(level, str) else logging.INFO
+    if not isinstance(level_no, int):
+        level_no = logging.INFO
+    records = handler.snapshot(
+        limit=limit,
+        min_level=level_no,
+        logger_prefix=logger_prefix,
+        since_seq=since_seq,
+    )
+    return {"records": records, "capacity": handler._buffer.maxlen or 0}
+
+
 @app.get("/api/v1/zones/occupancy", response_model=list[ZoneOccupancyState])
 async def get_zone_occupancy(request: Request) -> list[ZoneOccupancyState]:
     """Return occupancy state for all zones based on the current active track snapshot."""
@@ -1016,6 +1237,19 @@ def _resolve_snippet_file(snippet_path: str | None, snippet_root: Path) -> Path 
     if not snippet_file.is_relative_to(snippet_root):
         raise HTTPException(status_code=403, detail="Snippet path is outside snippet directory")
     return snippet_file
+
+
+@app.get("/api/v1/detections/{detection_id}")
+async def get_detection_by_id(detection_id: str, request: Request) -> dict:
+    state = _require_state(request)
+    detection = await state.storage.get_detection(detection_id)
+    if detection is None:
+        raise HTTPException(status_code=404, detail="Detection not found")
+    if detection.get("position_geo") is None and detection.get("position_m"):
+        local = detection["position_m"]
+        geo = state.coordinate_frame.local_to_geo((float(local[0]), float(local[1]), float(local[2])))
+        detection["position_geo"] = geo.model_dump(mode="json")
+    return detection
 
 
 @app.get("/api/v1/detections/{detection_id}/audio")

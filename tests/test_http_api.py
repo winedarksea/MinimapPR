@@ -693,3 +693,100 @@ def test_soundscape_render_returns_404_without_snippets(monkeypatch, tmp_path: P
         response = client.get("/api/v1/soundscape/render", params={"limit": 16})
         assert response.status_code == 404
         assert "No compatible detection snippets" in response.text
+
+
+def test_analytics_daily_returns_matrix_shape(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+
+    with TestClient(app) as client:
+        # Ingest a frame so at least one detection exists to bucket.
+        _ingest_single_frame(client, start_time_ns=time.time_ns())
+        _ = _wait_for_detections(client)
+
+        # Rolling 24h default.
+        response = client.get("/api/v1/analytics/daily", params={"tz": "UTC"})
+        assert response.status_code == 200
+        body = response.json()
+        assert body["mode"] == "rolling"
+        assert body["tz"] == "UTC"
+        assert body["hours"] == 24
+        assert len(body["bucket_starts"]) == 24
+        assert len(body["bucket_totals"]) == 24
+        # counts is a list of rows (one per label); each row must match bucket width.
+        for row in body["counts"]:
+            assert len(row) == 24
+        # Label totals match per-row sums.
+        for idx, row in enumerate(body["counts"]):
+            assert sum(row) == body["label_totals"][idx]
+
+        # Calendar mode (today in UTC).
+        from datetime import datetime, timezone
+        today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+        cal_response = client.get(
+            "/api/v1/analytics/daily", params={"date": today, "tz": "UTC"}
+        )
+        assert cal_response.status_code == 200
+        cal_body = cal_response.json()
+        assert cal_body["mode"] == "calendar"
+        assert cal_body["hours"] == 24
+        assert len(cal_body["bucket_starts"]) == 24
+
+        # Bad tz → 400.
+        bad = client.get("/api/v1/analytics/daily", params={"tz": "Not/A_Zone"})
+        assert bad.status_code == 400
+
+
+def test_analytics_labels_and_detail(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+
+    with TestClient(app) as client:
+        _ingest_single_frame(client, start_time_ns=time.time_ns())
+        dets = _wait_for_detections(client)
+        assert dets
+        label = dets[0].get("label") or "unknown"
+
+        summary = client.get("/api/v1/analytics/labels", params={"window": "24h"})
+        assert summary.status_code == 200
+        body = summary.json()
+        assert body["window"] == "24h"
+        assert isinstance(body["labels"], list)
+        assert any(row["label"] == label for row in body["labels"])
+
+        detail = client.get(
+            f"/api/v1/analytics/labels/{label}",
+            params={"window": "24h", "recent_limit": 10},
+        )
+        assert detail.status_code == 200
+        detail_body = detail.json()
+        assert detail_body["label"] == label
+        assert len(detail_body["hour_histogram"]) == 24
+        assert len(detail_body["dow_histogram"]) == 7
+        assert len(detail_body["month_histogram"]) == 12
+        assert detail_body["total"] >= 1
+        assert detail_body["recent"]
+
+
+def test_analytics_heatmap_returns_binned_points(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+
+    with TestClient(app) as client:
+        _ingest_single_frame(
+            client,
+            start_time_ns=time.time_ns(),
+            metadata={"gps": {"lat": 44.987, "lon": -93.258, "alt_m": 0.0}},
+        )
+        _ = _wait_for_detections(client)
+
+        response = client.get(
+            "/api/v1/analytics/heatmap",
+            params={"window": "24h", "bin": 0.001, "max_bins": 100},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["window"] == "24h"
+        assert abs(body["bin_deg"] - 0.001) < 1e-9
+        assert isinstance(body["bins"], list)
+        # Each bin has lat/lon/weight; weight >= 1.
+        for b in body["bins"]:
+            assert "lat" in b and "lon" in b and "weight" in b
+            assert b["weight"] >= 1

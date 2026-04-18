@@ -1,10 +1,16 @@
 mod api;
+mod audio;
 mod map;
+mod pages;
 mod panels;
+mod prefs;
+mod shell;
 mod state;
 mod ws;
 
 use leptos::prelude::*;
+use leptos_router::components::{ParentRoute, Redirect, Route, Router, Routes};
+use leptos_router::path;
 use state::AppState;
 
 fn main() {
@@ -18,66 +24,51 @@ fn App() -> impl IntoView {
     let state = AppState::new();
     provide_context(state.clone());
 
-    // Bootstrap polls + WS
+    // Bootstrap WS + polling — live data flows regardless of which page is active.
     ws::start_ws(state.clone());
     api::start_polling(state.clone());
 
     view! {
-        <Header state=state.clone() />
-        <SystemStrip state=state.clone() />
-        <main class="main-grid">
-            <panels::node_status::NodeStatusPanel />
-            <map::LeafletMapPanel />
-            <panels::tabs::TabPanel />
-        </main>
-        <audio id="audio-player" />
+        <Router>
+            <div class="app-shell">
+                <shell::TopBar />
+                <shell::StatusStrip />
+                <Routes fallback=NotFound>
+                    // Root → /cop
+                    <Route path=path!("") view=|| view! { <Redirect path="/cop" /> } />
+
+                    <Route path=path!("/cop") view=pages::cop::CopPage />
+
+                    <ParentRoute path=path!("/analysis") view=pages::analysis::AnalysisLayout>
+                        <Route path=path!("")         view=pages::analysis::daily::DailyDetectionsView />
+                        <Route path=path!("daily")    view=pages::analysis::daily::DailyDetectionsView />
+                        <Route path=path!("labels")   view=pages::analysis::labels::LabelSummaryView />
+                        <Route path=path!("labels/:id") view=pages::analysis::labels::LabelDetailView />
+                        <Route path=path!("heatmap")  view=pages::analysis::heatmap::GeoHeatmapView />
+                    </ParentRoute>
+
+                    <Route path=path!("/audio")       view=pages::audio::AudioAnalysisPage />
+                    <Route path=path!("/audio/d/:id") view=pages::audio::AudioAnalysisPage />
+
+                    <ParentRoute path=path!("/settings") view=pages::settings::SettingsLayout>
+                        <Route path=path!("")       view=pages::settings::config::ConfigView />
+                        <Route path=path!("config") view=pages::settings::config::ConfigView />
+                        <Route path=path!("server") view=pages::settings::server::ServerDiagnosticsView />
+                        <Route path=path!("logs")   view=pages::settings::logs::ServerLogsView />
+                    </ParentRoute>
+                </Routes>
+            </div>
+            <audio id="audio-player" />
+        </Router>
     }
 }
 
 #[component]
-fn Header(state: AppState) -> impl IntoView {
-    let ws_status = state.ws_status;
-    let pill_class = move || match ws_status.get() {
-        state::WsStatus::Connected    => "ws-pill connected",
-        state::WsStatus::Reconnecting => "ws-pill reconnecting",
-        state::WsStatus::Disconnected => "ws-pill disconnected",
-    };
-    let pill_text = move || match ws_status.get() {
-        state::WsStatus::Connected    => "Live",
-        state::WsStatus::Reconnecting => "Reconnecting…",
-        state::WsStatus::Disconnected => "Disconnected",
-    };
-
+fn NotFound() -> impl IntoView {
     view! {
-        <header class="header">
-            <span class="header-title">"MinimapPR COP"</span>
-            <span class=pill_class>{pill_text}</span>
-        </header>
-    }
-}
-
-#[component]
-fn SystemStrip(state: AppState) -> impl IntoView {
-    let cop = state.cop_status;
-
-    view! {
-        <div class="system-strip">
-            <span class="strip-stat">
-                <span class="label">"Nodes"</span>
-                <span class="value">{move || cop.get().map(|c| c.active_nodes).unwrap_or(0)}</span>
-            </span>
-            <span class="strip-stat">
-                <span class="label">"Degraded"</span>
-                <span class="value">{move || cop.get().map(|c| c.degraded_nodes).unwrap_or(0)}</span>
-            </span>
-            <span class="strip-stat">
-                <span class="label">"Tracks"</span>
-                <span class="value">{move || cop.get().map(|c| c.active_tracks).unwrap_or(0)}</span>
-            </span>
-            <span class="strip-stat">
-                <span class="label">"Alerts"</span>
-                <span class="value">{move || cop.get().map(|c| c.open_alerts).unwrap_or(0)}</span>
-            </span>
+        <div class="page-stub">
+            <h2>"Page not found"</h2>
+            <p>"That route doesn't exist — try COP, Analysis, Audio, or Settings above."</p>
         </div>
     }
 }
