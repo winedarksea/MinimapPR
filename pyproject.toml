@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "minimappr"
-version = "0.1.0"
+version = "0.1.1"
 description = "Realtime environmental awareness: distributed sound localization + classification + common operating picture"
 readme = "README.md"
 license = "GPL-3.0"
@@ -71,7 +71,7 @@ minimappr-demo = "minimappr.sim.run_demo:main"
 include = ["minimappr*"]
 
 [tool.setuptools.package-data]
-minimappr = ["frontend/*.html", "frontend/*.css", "frontend/*.js"]
+minimappr = ["frontend/*.html", "frontend/*.css", "frontend/*.js", "frontend/*.wasm", "frontend/*.ts"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

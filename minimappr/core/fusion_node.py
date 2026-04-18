@@ -353,7 +353,7 @@ class FusionNode:
     # ------------------------------------------------------------------
 
     async def ingest(self, request: IngestFrameRequest) -> IngestFrameResponse:
-        if not self._started or self._stopping:
+        if self._stopping:
             raise ValueError("Fusion node is stopping")
         self._metrics.ingest_requests += 1
         try:

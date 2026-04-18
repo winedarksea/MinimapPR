@@ -134,8 +134,11 @@ def test_cleanup_partial_dry_run_reports_candidates_without_mutation(
     policy_path.write_text(
         json.dumps(
             {
-                "default_snippet_max_age_seconds": 60,
-                "default_artifact_max_age_seconds": 60,
+                "version": 1,
+                "defaults": {
+                    "snippet_max_age_seconds": 60,
+                    "artifact_max_age_seconds": 60,
+                },
             }
         ),
         encoding="utf-8",

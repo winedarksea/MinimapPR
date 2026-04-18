@@ -182,7 +182,10 @@ pub enum LiveEvent {
     TrackUpdate(Track),
     ConfigUpdated { config: ConfigSnapshot },
     SetFilter,
-    BitReport { node_id: String },
+    BitReport {
+        #[serde(rename = "node_id")]
+        _node_id: String,
+    },
 }
 
 pub const MAX_FEED_LEN: usize = 50;

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from minimappr.cleanup_policy import CleanupPolicy
+from minimappr.cleanup_policy import CleanupDefaults, CleanupPolicy, RetentionActions, RetentionMatchCriteria, RetentionRule
 from minimappr.models import DetectionEvent, NodeSpec, NodeType, TrackState
 from minimappr.storage.db import Storage
 
@@ -368,14 +368,24 @@ async def test_policy_cleanup_respects_label_overrides_and_keeps_metadata(tmp_pa
 
     policy = CleanupPolicy.from_dict(
         {
-            "default_snippet_max_age_seconds": 60,
-            "default_artifact_max_age_seconds": 60,
-            "keep_labels": {
-                "rare_bird_species": {
-                    "snippet_max_age_seconds": 500,
-                    "keep_artifacts": True,
-                }
+            "version": 1,
+            "defaults": {
+                "snippet_max_age_seconds": 60,
+                "artifact_max_age_seconds": 60,
             },
+            "rules": [
+                {
+                    "id": "rare-bird-preserve-artifacts",
+                    "priority": 10,
+                    "match": {
+                        "label": "rare_bird_species",
+                    },
+                    "actions": {
+                        "snippet_max_age_seconds": 500,
+                        "keep_artifacts": True,
+                    },
+                }
+            ],
         },
         default_snippet_max_age_seconds=60,
         default_artifact_max_age_seconds=60,
@@ -447,8 +457,11 @@ async def test_policy_cleanup_dry_run_does_not_mutate_storage(tmp_path: Path) ->
     )
 
     policy = CleanupPolicy(
-        default_snippet_max_age_seconds=60,
-        default_artifact_max_age_seconds=60,
+        version=1,
+        defaults=CleanupDefaults(
+            snippet_max_age_seconds=60,
+            artifact_max_age_seconds=60,
+        ),
     )
     summary = await storage.cleanup_policy_managed_files(now_ns=now_ns, policy=policy, dry_run=True)
     assert summary["snippet_files_deleted"] == 1
@@ -458,3 +471,46 @@ async def test_policy_cleanup_dry_run_does_not_mutate_storage(tmp_path: Path) ->
     assert detections["det-dry-run"]["snippet_path"] == str(snippet_file)
 
     await storage.close()
+
+
+def test_cleanup_policy_rule_priority_and_legacy_keep_labels_compatibility() -> None:
+    policy = CleanupPolicy(
+        version=1,
+        defaults=CleanupDefaults(
+            snippet_max_age_seconds=60,
+            artifact_max_age_seconds=60,
+        ),
+        rules=[
+            RetentionRule(
+                rule_id="all-birds",
+                priority=10,
+                match=RetentionMatchCriteria(label="bird"),
+                actions=RetentionActions(keep_snippets=True),
+            ),
+            RetentionRule(
+                rule_id="specific-bird-override",
+                priority=20,
+                match=RetentionMatchCriteria(label="bird"),
+                actions=RetentionActions(keep_snippets=False, snippet_max_age_seconds=600),
+            ),
+        ],
+    )
+    assert policy.snippet_max_age_seconds_for_label("bird") == 600
+
+    legacy_policy = CleanupPolicy.from_dict(
+        {
+            "default_snippet_max_age_seconds": 90,
+            "default_artifact_max_age_seconds": 45,
+            "keep_labels": {
+                "gunshot": {
+                    "keep_snippets": True,
+                    "keep_artifacts": True,
+                }
+            },
+        },
+        default_snippet_max_age_seconds=90,
+        default_artifact_max_age_seconds=45,
+    )
+    assert legacy_policy.snippet_max_age_seconds_for_label("gunshot") is None
+    assert legacy_policy.artifact_max_age_seconds_for_label("gunshot") is None
+    assert legacy_policy.snippet_max_age_seconds_for_label("ambient") == 90

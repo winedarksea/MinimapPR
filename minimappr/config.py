@@ -57,7 +57,6 @@ class LocalizationConfig:
     trigger_rms: float
     trigger_cooldown_seconds: float
     localization_window_seconds: float
-    classification_window_seconds: float
     max_sensor_buffer_seconds: float
     default_temperature_c: float
     default_humidity: float
@@ -70,8 +69,6 @@ class LocalizationConfig:
     localization_max_tau_s: float
     localization_algorithm: str
     localization_strategy: str
-    localization_band_min_hz: float
-    localization_band_max_hz: float
     localization_srp_grid_resolution_m: float
     localization_search_padding_m: float
     localization_music_azimuth_step_deg: float
@@ -80,7 +77,6 @@ class LocalizationConfig:
     localization_subspace_freq_max_hz: float
     localization_refine_confidence_threshold: float
     localization_tight_array_aperture_m: float
-    skip_localization_for_classification: bool
     beamformed_classification_enabled: bool
     beamformer_type: str
     beamformed_classification_min_sensor_count: int
@@ -90,6 +86,10 @@ class LocalizationConfig:
     pre_classification_highpass_hz: float
     pre_classification_lowpass_hz: float
     gcc_phat_interp_factor: int
+    classification_window_seconds: float = 0.0
+    localization_band_min_hz: float = 0.0
+    localization_band_max_hz: float = 0.0
+    skip_localization_for_classification: bool = False
 
 
 @dataclass(slots=True)
