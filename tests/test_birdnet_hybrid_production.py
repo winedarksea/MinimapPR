@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from scipy.signal import correlate
 
 pytest.importorskip("birdnet")
 
@@ -23,11 +24,14 @@ from minimappr.storage.db import Storage
 from minimappr.utils.audio import encode_pcm16le_b64
 from tests.helpers import (
     SIRITH_TETRA_SENSOR_OFFSETS_M,
+    geometric_array_propagation_delays_s,
+    load_sensor_wav_files,
     load_wav_fixture_mono,
     prepend_noise_padding_to_duration,
     resample_signal,
     split_channels_into_frames,
     synthesize_delayed_array_channels,
+    write_delayed_array_wav_files,
 )
 
 
@@ -74,6 +78,30 @@ def _resampled_fixture(
 ) -> np.ndarray:
     samples, fixture_sample_rate_hz = fixture
     return resample_signal(samples, fixture_sample_rate_hz, sample_rate_hz)
+
+
+def _synthesized_sensor_wav_paths(
+    tmp_path: Path,
+    fixture: tuple[np.ndarray, int],
+    *,
+    sample_rate_hz: int,
+    classification_window_seconds: float,
+) -> dict[str, Path]:
+    bird_signal = _resampled_fixture(fixture, sample_rate_hz)
+    padded_signal = prepend_noise_padding_to_duration(
+        bird_signal,
+        sample_rate_hz,
+        total_duration_seconds=(classification_window_seconds + (bird_signal.size / sample_rate_hz)),
+        noise_rms=0.002,
+        seed=sample_rate_hz,
+    )
+    return write_delayed_array_wav_files(
+        tmp_path / f"house_finch_array_{sample_rate_hz}",
+        mono_signal=padded_signal,
+        sample_rate_hz=sample_rate_hz,
+        source_position_m=HOUSE_FINCH_SOURCE_POSITION_M,
+        filename_prefix="sirith-house-finch_ch",
+    )
 
 
 def _build_profile_settings(
@@ -161,36 +189,35 @@ async def _stream_fixture_into_fusion(
     classification_window_seconds: float,
     start_time_ns: int,
 ) -> int:
-    bird_signal = _resampled_fixture(fixture, sample_rate_hz)
-    padded_signal = prepend_noise_padding_to_duration(
-        bird_signal,
-        sample_rate_hz,
-        total_duration_seconds=(classification_window_seconds + (bird_signal.size / sample_rate_hz)),
-        noise_rms=0.002,
-        seed=sample_rate_hz,
+    sensor_paths = _synthesized_sensor_wav_paths(
+        Path(fusion.settings.snippet_dir).parent,
+        fixture,
+        sample_rate_hz=sample_rate_hz,
+        classification_window_seconds=classification_window_seconds,
     )
-    return await _stream_signal_into_fusion(
+    windows, loaded_sample_rate_hz = load_sensor_wav_files(sensor_paths)
+    assert loaded_sample_rate_hz == sample_rate_hz
+    channels = np.stack(
+        [windows[f"sirith-house-finch_ch{index}"] for index in range(len(SIRITH_TETRA_SENSOR_OFFSETS_M))],
+        axis=0,
+    )
+    return await _stream_channels_into_fusion(
         fusion,
         sample_rate_hz=sample_rate_hz,
         frame_samples=frame_samples,
-        mono_signal=padded_signal,
+        channels=channels,
         start_time_ns=start_time_ns,
     )
 
 
-async def _stream_signal_into_fusion(
+async def _stream_channels_into_fusion(
     fusion: FusionNode,
     *,
     sample_rate_hz: int,
     frame_samples: int,
-    mono_signal: np.ndarray,
+    channels: np.ndarray,
     start_time_ns: int,
 ) -> int:
-    channels = synthesize_delayed_array_channels(
-        mono_signal,
-        sample_rate_hz,
-        source_position_m=HOUSE_FINCH_SOURCE_POSITION_M,
-    )
     triggered_frames = 0
     for sequence, (frame_start_ns, frame) in enumerate(
         split_channels_into_frames(
@@ -254,6 +281,11 @@ def _geo_error_m(
     return _localization_error_m(coordinate_frame.geo_to_local(geo))
 
 
+def _estimate_integer_sample_lag(reference: np.ndarray, candidate: np.ndarray) -> int:
+    correlation = correlate(candidate, reference, mode="full", method="fft")
+    return int(np.argmax(correlation) - (reference.size - 1))
+
+
 def test_house_finch_fixture_classifies_with_birdnet(
     birdnet_classifier: BirdNETClassifier,
     house_finch_fixture_48khz: tuple[np.ndarray, int],
@@ -304,6 +336,78 @@ def test_synthesized_house_finch_localizes_with_tight_srp(
     error_m = float(np.linalg.norm(estimate - np.asarray(HOUSE_FINCH_SOURCE_POSITION_M, dtype=np.float64)))
     assert error_m < TIGHT_LOCALIZATION_MAX_ERROR_M
     assert result.attempted_algorithm == "srp_phat"
+    assert result.resolved_algorithm == "srp_phat"
+
+
+@pytest.mark.parametrize("sample_rate_hz", [16_000, 48_000])
+def test_house_finch_fixture_expands_to_four_sensor_wavs_with_expected_relative_delays(
+    tmp_path: Path,
+    house_finch_fixture_48khz: tuple[np.ndarray, int],
+    sample_rate_hz: int,
+) -> None:
+    sensor_paths = _synthesized_sensor_wav_paths(
+        tmp_path,
+        house_finch_fixture_48khz,
+        sample_rate_hz=sample_rate_hz,
+        classification_window_seconds=30.0,
+    )
+
+    assert sorted(sensor_paths.keys()) == [
+        "sirith-house-finch_ch0",
+        "sirith-house-finch_ch1",
+        "sirith-house-finch_ch2",
+        "sirith-house-finch_ch3",
+    ]
+    assert all(path.exists() for path in sensor_paths.values())
+
+    windows, loaded_sample_rate_hz = load_sensor_wav_files(sensor_paths)
+    assert loaded_sample_rate_hz == sample_rate_hz
+
+    stacked_windows = np.stack(
+        [windows[f"sirith-house-finch_ch{index}"] for index in range(len(SIRITH_TETRA_SENSOR_OFFSETS_M))],
+        axis=0,
+    )
+    assert stacked_windows.shape[0] == 4
+    assert not np.allclose(stacked_windows[0], stacked_windows[1])
+
+    expected_delays_s = geometric_array_propagation_delays_s(
+        source_position_m=HOUSE_FINCH_SOURCE_POSITION_M,
+        sensor_offsets_m=SIRITH_TETRA_SENSOR_OFFSETS_M,
+    )
+    expected_relative_samples = np.round(
+        (expected_delays_s - expected_delays_s.min()) * sample_rate_hz
+    ).astype(np.int64)
+    earliest_sensor_index = int(np.argmin(expected_delays_s))
+    observed_relative_samples = np.asarray(
+        [
+            _estimate_integer_sample_lag(
+                stacked_windows[earliest_sensor_index],
+                stacked_windows[index],
+            )
+            for index in range(stacked_windows.shape[0])
+        ],
+        dtype=np.int64,
+    )
+    assert np.max(np.abs(observed_relative_samples - expected_relative_samples)) <= 1
+
+    result = build_localizer_from_settings(
+        Settings(
+            runtime_profile="birdnet_hybrid_production",
+            localization_srp_grid_resolution_m=TIGHT_SRP_GRID_RESOLUTION_M,
+            localization_search_padding_m=TIGHT_SRP_SEARCH_PADDING_M,
+            model_chain_config_path=Path("missing_model_chain.json"),
+        )
+    ).localize(
+        sensor_positions=_sensor_positions(),
+        sensor_windows={
+            sensor_id.replace("_", ":"): windows[sensor_id]
+            for sensor_id in sensor_paths
+        },
+        sample_rate_hz=sample_rate_hz,
+        temperature_c=20.0,
+        humidity_fraction=0.5,
+    )
+    assert _localization_error_m(result.position_m) < TIGHT_LOCALIZATION_MAX_ERROR_M
     assert result.resolved_algorithm == "srp_phat"
 
 

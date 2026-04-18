@@ -297,6 +297,33 @@ def test_detection_audio_rejects_paths_outside_snippet_root(monkeypatch, tmp_pat
         assert "outside snippet directory" in response.text
 
 
+def test_detection_audio_endpoint_supports_explicit_download(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=3600)
+
+    with TestClient(app) as client:
+        _ingest_single_frame(client, start_time_ns=time.time_ns())
+        detections = _wait_for_detections(client)
+        assert detections
+        detection_id = detections[0]["id"]
+
+        inline_response = client.get(f"/api/v1/detections/{detection_id}/audio")
+        assert inline_response.status_code == 200
+        assert inline_response.headers["content-type"].startswith("audio/wav")
+        inline_disposition = inline_response.headers.get("content-disposition", "")
+        assert "inline" in inline_disposition
+        assert detection_id in inline_disposition
+
+        download_response = client.get(
+            f"/api/v1/detections/{detection_id}/audio",
+            params={"download": True},
+        )
+        assert download_response.status_code == 200
+        assert download_response.headers["content-type"].startswith("audio/wav")
+        download_disposition = download_response.headers.get("content-disposition", "")
+        assert "attachment" in download_disposition
+        assert detection_id in download_disposition
+
+
 def test_track_audio_endpoint_returns_latest_detection_snippet(monkeypatch, tmp_path: Path) -> None:
     db_path = _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=3600)
 
@@ -328,6 +355,69 @@ def test_track_audio_endpoint_returns_latest_detection_snippet(monkeypatch, tmp_
         assert "attachment" in download_disposition
         assert "track_" in download_disposition
         assert "detection_" in download_disposition
+
+
+def test_config_exposes_updated_detection_threshold_and_cop_defaults(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/config")
+        assert response.status_code == 200
+        body = response.json()
+        assert abs(float(body["detection_min_confidence"]) - 0.4) < 1e-9
+        assert body["cop"]["detections_max_items"] == 150
+        assert body["cop"]["tracks_max_items"] == 150
+        assert abs(float(body["cop"]["detections_max_age_seconds"]) - 86_400.0) < 1e-9
+        assert abs(float(body["cop"]["tracks_max_age_seconds"]) - 86_400.0) < 1e-9
+
+
+def test_cop_detections_and_tracks_apply_configured_caps(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    monkeypatch.setenv("MINIMAPPR_COP_DETECTIONS_MAX_ITEMS", "7")
+    monkeypatch.setenv("MINIMAPPR_COP_TRACKS_MAX_ITEMS", "9")
+    monkeypatch.setenv("MINIMAPPR_COP_DETECTIONS_MAX_AGE_SECONDS", "123")
+    monkeypatch.setenv("MINIMAPPR_COP_TRACKS_MAX_AGE_SECONDS", "456")
+
+    with TestClient(app) as client:
+        state = app.state
+        captured = {}
+
+        original_list_detections = state.storage.list_detections
+        original_list_tracks = state.storage.list_tracks
+
+        async def _capture_list_detections(*args, **kwargs):
+            captured["detections_limit"] = kwargs.get("limit")
+            captured["detections_since_ns"] = kwargs.get("since_ns")
+            return await original_list_detections(*args, **kwargs)
+
+        async def _capture_list_tracks(*args, **kwargs):
+            captured["tracks_limit"] = kwargs.get("limit")
+            captured["tracks_since_ns"] = kwargs.get("since_ns")
+            return await original_list_tracks(*args, **kwargs)
+
+        state.storage.list_detections = _capture_list_detections
+        state.storage.list_tracks = _capture_list_tracks
+        try:
+            before_detections_ns = time.time_ns()
+            detections_response = client.get("/api/v1/detections", params={"limit": 1000})
+            after_detections_ns = time.time_ns()
+            assert detections_response.status_code == 200
+            assert captured["detections_limit"] == 7
+            expected_detection_cutoff_start = before_detections_ns - int(123 * 1_000_000_000)
+            expected_detection_cutoff_end = after_detections_ns - int(123 * 1_000_000_000)
+            assert expected_detection_cutoff_start <= int(captured["detections_since_ns"]) <= expected_detection_cutoff_end
+
+            before_tracks_ns = time.time_ns()
+            tracks_response = client.get("/api/v1/tracks", params={"limit": 1000})
+            after_tracks_ns = time.time_ns()
+            assert tracks_response.status_code == 200
+            assert captured["tracks_limit"] == 9
+            expected_track_cutoff_start = before_tracks_ns - int(456 * 1_000_000_000)
+            expected_track_cutoff_end = after_tracks_ns - int(456 * 1_000_000_000)
+            assert expected_track_cutoff_start <= int(captured["tracks_since_ns"]) <= expected_track_cutoff_end
+        finally:
+            state.storage.list_detections = original_list_detections
+            state.storage.list_tracks = original_list_tracks
 
 
 def test_node_recent_audio_endpoint_returns_wav(monkeypatch, tmp_path: Path) -> None:

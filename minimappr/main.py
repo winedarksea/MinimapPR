@@ -509,8 +509,11 @@ async def list_bit_failures(request: Request) -> dict[str, list[str]]:
 async def list_detections(request: Request, limit: int = Query(default=100, ge=1, le=1000)) -> list[dict]:
     state = _require_state(request)
     settings: Settings = state.settings
+    effective_limit = min(limit, settings.cop_detections_max_items)
+    cutoff_ns = time.time_ns() - int(settings.cop_detections_max_age_seconds * 1_000_000_000)
     detections = await state.storage.list_detections(
-        limit=limit,
+        limit=effective_limit,
+        since_ns=cutoff_ns,
         min_label_confidence=settings.detection_min_confidence,
     )
     for detection in detections:
@@ -530,7 +533,9 @@ async def list_tracks(
     state = _require_state(request)
     now_ns = time.time_ns()
     _ = await state.tracker.snapshot(now_ns=now_ns)
-    tracks = await state.storage.list_tracks(limit=limit)
+    effective_limit = min(limit, state.settings.cop_tracks_max_items)
+    cutoff_ns = now_ns - int(state.settings.cop_tracks_max_age_seconds * 1_000_000_000)
+    tracks = await state.storage.list_tracks(limit=effective_limit, since_ns=cutoff_ns)
     for track in tracks:
         if track.get("position_geo") is None and track.get("position_m"):
             local = track["position_m"]
@@ -540,7 +545,7 @@ async def list_tracks(
         tracks = await state.federation.merged_tracks(
             local_tracks=tracks,
             now_ns=now_ns,
-            limit=limit,
+            limit=effective_limit,
             include_standby=include_standby,
         )
     for track in tracks:
@@ -593,6 +598,12 @@ async def get_config(request: Request) -> dict:
         "classifier_backend": settings.classifier_backend,
         "yamnet_min_confidence": settings.yamnet_min_confidence,
         "detection_min_confidence": settings.detection_min_confidence,
+        "cop": {
+            "detections_max_items": settings.cop_detections_max_items,
+            "tracks_max_items": settings.cop_tracks_max_items,
+            "detections_max_age_seconds": settings.cop_detections_max_age_seconds,
+            "tracks_max_age_seconds": settings.cop_tracks_max_age_seconds,
+        },
         "yamnet_input_target_rms": settings.yamnet_input_target_rms,
         "yamnet_max_input_gain": settings.yamnet_max_input_gain,
         "beamformed_classification_enabled": settings.beamformed_classification_enabled,
@@ -645,6 +656,10 @@ _CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     "classifier_backend": str,
     "yamnet_min_confidence": float,
     "detection_min_confidence": float,
+    "cop_detections_max_items": int,
+    "cop_tracks_max_items": int,
+    "cop_detections_max_age_seconds": float,
+    "cop_tracks_max_age_seconds": float,
     "beamformer_type": str,
     "tracking_filter": str,
     "fusion_worker_count": int,
@@ -702,6 +717,10 @@ async def patch_config(request: Request) -> dict:
             errors.append("yamnet_min_confidence: must be in [0, 1]")
         elif key == "detection_min_confidence" and not (0.0 <= value <= 1.0):  # type: ignore[operator]
             errors.append("detection_min_confidence: must be in [0, 1]")
+        elif key in {"cop_detections_max_items", "cop_tracks_max_items"} and value < 1:  # type: ignore[operator]
+            errors.append(f"{key}: must be >= 1")
+        elif key in {"cop_detections_max_age_seconds", "cop_tracks_max_age_seconds"} and value <= 0.0:  # type: ignore[operator]
+            errors.append(f"{key}: must be > 0")
         elif key == "fusion_worker_count" and value < 1:  # type: ignore[operator]
             errors.append("fusion_worker_count: must be >= 1")
         elif key == "localization_algorithm" and value not in _LOCALIZATION_ALGORITHMS:
@@ -1262,7 +1281,11 @@ async def get_detection_by_id(detection_id: str, request: Request) -> dict:
 
 
 @app.get("/api/v1/detections/{detection_id}/audio")
-async def get_detection_audio(detection_id: str, request: Request) -> FileResponse:
+async def get_detection_audio(
+    detection_id: str,
+    request: Request,
+    download: bool = Query(default=False),
+) -> FileResponse:
     state = _require_state(request)
     settings: Settings = state.settings
     snippet_path = await state.storage.snippet_path_for_detection(detection_id)
@@ -1273,10 +1296,13 @@ async def get_detection_audio(detection_id: str, request: Request) -> FileRespon
     if snippet_file is None:
         raise HTTPException(status_code=404, detail="Snippet file no longer exists")
 
+    filename = f"{detection_id}.wav"
+    content_disposition = "attachment" if download else "inline"
     return FileResponse(
         path=snippet_file,
         media_type="audio/wav",
-        filename=f"{detection_id}.wav",
+        filename=filename,
+        headers={"Content-Disposition": f'{content_disposition}; filename="{filename}"'},
     )
 
 

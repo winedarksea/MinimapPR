@@ -1,4 +1,5 @@
 use gloo_net::http::Request;
+use crate::audio::detection_actions::DetectionAudioActions;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::components::A;
@@ -293,7 +294,7 @@ fn RecentDetList(detections: Vec<crate::state::Detection>) -> impl IntoView {
                             <td>
                                 {if has_audio {
                                     view! {
-                                        <button class="play-btn" on:click=move |_| play_detection(&eid)>"▶"</button>
+                                        <DetectionAudioActions event_id=eid.clone() />
                                     }.into_any()
                                 } else {
                                     view! { <span style="color:var(--text-muted)">"-"</span> }.into_any()
@@ -304,22 +305,6 @@ fn RecentDetList(detections: Vec<crate::state::Detection>) -> impl IntoView {
                 }).collect_view()}
             </tbody>
         </table>
-    }
-}
-
-fn play_detection(event_id: &str) {
-    use wasm_bindgen::JsCast;
-    let url = format!(
-        "/api/v1/detections/{}/audio",
-        js_sys::encode_uri_component(event_id)
-    );
-    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
-        if let Some(el) = doc.get_element_by_id("audio-player") {
-            if let Ok(audio) = el.dyn_into::<web_sys::HtmlAudioElement>() {
-                audio.set_src(&url);
-                let _ = audio.play();
-            }
-        }
     }
 }
 

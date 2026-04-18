@@ -57,6 +57,7 @@ fn App() -> impl IntoView {
                         <Route path=path!("logs")   view=pages::settings::logs::ServerLogsView />
                     </ParentRoute>
                 </Routes>
+                <audio::drawer::AudioAnalysisDrawer />
             </div>
             <audio id="audio-player" />
         </Router>

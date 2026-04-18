@@ -332,7 +332,11 @@ class Settings:
     yamnet_input_target_rms: float = 0.10
     yamnet_max_input_gain: float = 32.0
     birdnet_trigger_min_confidence: float = 0.05
-    detection_min_confidence: float = 0.05
+    detection_min_confidence: float = 0.4
+    cop_detections_max_items: int = 150
+    cop_tracks_max_items: int = 150
+    cop_detections_max_age_seconds: float = 86_400.0
+    cop_tracks_max_age_seconds: float = 86_400.0
     heuristic_ambient_rms_threshold: float = 0.01
     heuristic_impulse_crest_threshold: float = 10.0
     heuristic_impulse_bandwidth_threshold_hz: float = 1200.0
@@ -519,6 +523,14 @@ class Settings:
             raise ValueError("MINIMAPPR_BIRDNET_TRIGGER_MIN_CONFIDENCE must be in [0,1]")
         if self.detection_min_confidence < 0.0 or self.detection_min_confidence > 1.0:
             raise ValueError("MINIMAPPR_DETECTION_MIN_CONFIDENCE must be in [0,1]")
+        if self.cop_detections_max_items < 1:
+            raise ValueError("MINIMAPPR_COP_DETECTIONS_MAX_ITEMS must be >= 1")
+        if self.cop_tracks_max_items < 1:
+            raise ValueError("MINIMAPPR_COP_TRACKS_MAX_ITEMS must be >= 1")
+        if self.cop_detections_max_age_seconds <= 0.0:
+            raise ValueError("MINIMAPPR_COP_DETECTIONS_MAX_AGE_SECONDS must be > 0")
+        if self.cop_tracks_max_age_seconds <= 0.0:
+            raise ValueError("MINIMAPPR_COP_TRACKS_MAX_AGE_SECONDS must be > 0")
 
         self.cors_allow_origins = tuple(origin.strip() for origin in self.cors_allow_origins if origin.strip())
         if not self.cors_allow_origins:
@@ -675,7 +687,11 @@ class Settings:
             yamnet_input_target_rms=_env_float("MINIMAPPR_YAMNET_INPUT_TARGET_RMS", 0.10),
             yamnet_max_input_gain=_env_float("MINIMAPPR_YAMNET_MAX_INPUT_GAIN", 32.0),
             birdnet_trigger_min_confidence=_env_float("MINIMAPPR_BIRDNET_TRIGGER_MIN_CONFIDENCE", 0.05),
-            detection_min_confidence=_env_float("MINIMAPPR_DETECTION_MIN_CONFIDENCE", 0.05),
+            detection_min_confidence=_env_float("MINIMAPPR_DETECTION_MIN_CONFIDENCE", 0.4),
+            cop_detections_max_items=_env_int("MINIMAPPR_COP_DETECTIONS_MAX_ITEMS", 150),
+            cop_tracks_max_items=_env_int("MINIMAPPR_COP_TRACKS_MAX_ITEMS", 150),
+            cop_detections_max_age_seconds=_env_float("MINIMAPPR_COP_DETECTIONS_MAX_AGE_SECONDS", 86_400.0),
+            cop_tracks_max_age_seconds=_env_float("MINIMAPPR_COP_TRACKS_MAX_AGE_SECONDS", 86_400.0),
             heuristic_ambient_rms_threshold=_env_float("MINIMAPPR_HEURISTIC_AMBIENT_RMS_THRESHOLD", 0.01),
             heuristic_impulse_crest_threshold=_env_float("MINIMAPPR_HEURISTIC_IMPULSE_CREST_THRESHOLD", 10.0),
             heuristic_impulse_bandwidth_threshold_hz=_env_float(

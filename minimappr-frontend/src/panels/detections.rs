@@ -1,36 +1,6 @@
 use crate::state::AppState;
+use crate::audio::detection_actions::DetectionAudioActions;
 use leptos::prelude::*;
-use wasm_bindgen::JsCast;
-use web_sys::HtmlAudioElement;
-
-fn audio_element() -> Option<HtmlAudioElement> {
-    web_sys::window()?
-        .document()?
-        .get_element_by_id("audio-player")?
-        .dyn_into::<HtmlAudioElement>()
-        .ok()
-}
-
-fn play_detection(event_id: &str) {
-    let url = format!(
-        "/api/v1/detections/{}/audio",
-        js_sys::encode_uri_component(event_id)
-    );
-    if let Some(audio) = audio_element() {
-        audio.set_src(&url);
-        let _ = audio.play();
-    }
-}
-
-fn download_detection(event_id: &str) {
-    let url = format!(
-        "/api/v1/detections/{}/audio",
-        js_sys::encode_uri_component(event_id)
-    );
-    if let Some(window) = web_sys::window() {
-        let _ = window.open_with_url(&url);
-    }
-}
 
 #[component]
 pub fn DetectionsPane() -> impl IntoView {
@@ -61,8 +31,6 @@ pub fn DetectionsPane() -> impl IntoView {
                                 let conf  = d.label_confidence.or(d.confidence).map(|c| format!("{:.0}%", c * 100.0)).unwrap_or_else(|| "—".to_string());
                                 let has_audio = d.has_audio.unwrap_or(false) || d.snippet_path.is_some();
                                 let eid = d.event_id.clone();
-                                let play_eid = eid.clone();
-                                let download_eid = eid.clone();
 
                                 view! {
                                     <tr>
@@ -72,12 +40,7 @@ pub fn DetectionsPane() -> impl IntoView {
                                         <td>
                                             {if has_audio {
                                                 view! {
-                                                    <button class="play-btn" on:click=move |_| play_detection(&play_eid)>
-                                                        "▶"
-                                                    </button>
-                                                    <button class="btn-sm" on:click=move |_| download_detection(&download_eid)>
-                                                        "Download"
-                                                    </button>
+                                                    <DetectionAudioActions event_id=eid.clone() />
                                                 }.into_any()
                                             } else {
                                                 view! { <span style="color:var(--text-muted)">"-"</span> }.into_any()

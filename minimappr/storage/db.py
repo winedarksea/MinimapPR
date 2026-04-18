@@ -1251,21 +1251,41 @@ class Storage:
         self,
         limit: int = 100,
         *,
+        since_ns: int | None = None,
         min_label_confidence: float | None = None,
     ) -> list[dict]:
         db = self._require_db()
-        if min_label_confidence is None:
+        if since_ns is None and min_label_confidence is None:
             rows = await (
                 await db.execute(
                     "SELECT * FROM detections ORDER BY timestamp_ns DESC LIMIT ?",
                     (limit,),
                 )
             ).fetchall()
-        else:
+        elif since_ns is None and min_label_confidence is not None:
             rows = await (
                 await db.execute(
                     "SELECT * FROM detections WHERE label_confidence >= ? ORDER BY timestamp_ns DESC LIMIT ?",
                     (float(min_label_confidence), limit),
+                )
+            ).fetchall()
+        elif since_ns is not None and min_label_confidence is None:
+            rows = await (
+                await db.execute(
+                    "SELECT * FROM detections WHERE timestamp_ns >= ? ORDER BY timestamp_ns DESC LIMIT ?",
+                    (int(since_ns), limit),
+                )
+            ).fetchall()
+        else:
+            rows = await (
+                await db.execute(
+                    """
+                    SELECT * FROM detections
+                    WHERE timestamp_ns >= ? AND label_confidence >= ?
+                    ORDER BY timestamp_ns DESC
+                    LIMIT ?
+                    """,
+                    (int(since_ns), float(min_label_confidence), limit),
                 )
             ).fetchall()
         return [self._row_to_detection(row).model_dump(mode="json") for row in rows]
@@ -1550,11 +1570,19 @@ class Storage:
         ).fetchall()
         return [{"lat": float(row["lat"]), "lon": float(row["lon"]), "weight": int(row["weight"])} for row in rows]
 
-    async def list_tracks(self, limit: int = 200) -> list[dict]:
+    async def list_tracks(self, limit: int = 200, *, since_ns: int | None = None) -> list[dict]:
         db = self._require_db()
-        rows = await (
-            await db.execute("SELECT * FROM tracks ORDER BY last_seen_ns DESC LIMIT ?", (limit,))
-        ).fetchall()
+        if since_ns is None:
+            rows = await (
+                await db.execute("SELECT * FROM tracks ORDER BY last_seen_ns DESC LIMIT ?", (limit,))
+            ).fetchall()
+        else:
+            rows = await (
+                await db.execute(
+                    "SELECT * FROM tracks WHERE last_seen_ns >= ? ORDER BY last_seen_ns DESC LIMIT ?",
+                    (int(since_ns), limit),
+                )
+            ).fetchall()
         return [self._row_to_track(row).model_dump(mode="json") for row in rows]
 
     async def list_labels(self) -> list[dict]:

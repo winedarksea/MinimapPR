@@ -229,6 +229,8 @@ pub struct AppState {
     pub ws_status:  RwSignal<WsStatus>,
     pub filter:     RwSignal<FilterState>,
     pub theme:      RwSignal<String>,
+    pub audio_drawer_open: RwSignal<bool>,
+    pub audio_drawer_detection_id: RwSignal<Option<String>>,
 }
 
 impl AppState {
@@ -243,6 +245,8 @@ impl AppState {
             ws_status:  RwSignal::new(WsStatus::Disconnected),
             filter:     RwSignal::new(FilterState::default()),
             theme:      RwSignal::new(crate::prefs::current_theme()),
+            audio_drawer_open: RwSignal::new(false),
+            audio_drawer_detection_id: RwSignal::new(None),
         }
     }
 }

@@ -6,7 +6,7 @@ import numpy as np
 from scipy.signal import resample_poly
 
 from minimappr.models import LocalizationResult
-from minimappr.utils.audio import read_wav_mono, rms
+from minimappr.utils.audio import read_wav_mono, rms, write_wav_mono
 
 
 # Mirrored from firmware/nodes/sirith_tetrahedral/include/node_config.h.
@@ -61,6 +61,71 @@ def synthesize_delayed_array_channels(
         propagation_delay_s = float(np.linalg.norm(source - sensor_position) / sound_speed_mps)
         channels.append(shift_signal(mono_signal, sample_rate_hz, propagation_delay_s))
     return np.stack(channels, axis=0).astype(np.float32)
+
+
+def geometric_array_propagation_delays_s(
+    *,
+    source_position_m: tuple[float, float, float],
+    sensor_offsets_m: tuple[tuple[float, float, float], ...] = SIRITH_TETRA_SENSOR_OFFSETS_M,
+    array_origin_m: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    sound_speed_mps: float = 343.2,
+) -> np.ndarray:
+    """Return absolute propagation delays from the source to each array sensor."""
+    source = np.asarray(source_position_m, dtype=np.float64)
+    origin = np.asarray(array_origin_m, dtype=np.float64)
+    return np.asarray(
+        [
+            float(np.linalg.norm(source - (origin + np.asarray(offset, dtype=np.float64))) / sound_speed_mps)
+            for offset in sensor_offsets_m
+        ],
+        dtype=np.float64,
+    )
+
+
+def write_delayed_array_wav_files(
+    output_dir: Path,
+    *,
+    mono_signal: np.ndarray,
+    sample_rate_hz: int,
+    source_position_m: tuple[float, float, float],
+    sensor_offsets_m: tuple[tuple[float, float, float], ...] = SIRITH_TETRA_SENSOR_OFFSETS_M,
+    array_origin_m: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    sound_speed_mps: float = 343.2,
+    filename_prefix: str = "sensor",
+) -> dict[str, Path]:
+    """Materialize one mono WAV file per microphone for realistic array-fixture tests."""
+    channels = synthesize_delayed_array_channels(
+        mono_signal,
+        sample_rate_hz,
+        source_position_m=source_position_m,
+        sensor_offsets_m=sensor_offsets_m,
+        array_origin_m=array_origin_m,
+        sound_speed_mps=sound_speed_mps,
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    sensor_paths: dict[str, Path] = {}
+    for index, channel in enumerate(channels):
+        sensor_id = f"{filename_prefix}{index}"
+        path = output_dir / f"{sensor_id}.wav"
+        write_wav_mono(path, channel, sample_rate_hz)
+        sensor_paths[sensor_id] = path
+    return sensor_paths
+
+
+def load_sensor_wav_files(sensor_paths: dict[str, Path]) -> tuple[dict[str, np.ndarray], int]:
+    """Load per-sensor mono WAVs and enforce a shared sample rate."""
+    windows: dict[str, np.ndarray] = {}
+    sample_rate_hz: int | None = None
+    for sensor_id, path in sensor_paths.items():
+        samples, current_sample_rate_hz = read_wav_mono(path)
+        if sample_rate_hz is None:
+            sample_rate_hz = current_sample_rate_hz
+        elif current_sample_rate_hz != sample_rate_hz:
+            raise ValueError("All sensor WAV files must share the same sample rate")
+        windows[sensor_id] = samples
+    if sample_rate_hz is None:
+        raise ValueError("Expected at least one sensor WAV file")
+    return windows, sample_rate_hz
 
 
 def prepend_noise_padding_to_duration(
