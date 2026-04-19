@@ -149,6 +149,48 @@ def test_get_window_ending_at_returns_none_when_end_is_beyond_buffer() -> None:
     assert result is None
 
 
+def test_sensor_stream_buffer_resets_on_large_forward_jump() -> None:
+    """Large forward jump (e.g. NTP sync correcting a stale build-timestamp epoch) must
+    not allocate a huge zeros array.  The buffer should reset cleanly at the new position
+    so subsequent frames resume without a minutes-long silence gap."""
+    sample_rate_hz = 16_000
+    samples_per_chunk = 1024
+    buf = SensorStreamBuffer(sample_rate_hz=sample_rate_hz, max_duration_seconds=30.0)
+
+    t0 = 1_000_000_000_000_000_000
+    buf.append(start_time_ns=t0, samples=np.ones(samples_per_chunk, dtype=np.float32))
+
+    # Simulate NTP sync: timestamp jumps forward by 1 hour.
+    one_hour_ns = 3_600 * 1_000_000_000
+    t_post_ntp = t0 + one_hour_ns
+    new_audio = np.full(samples_per_chunk, 2.0, dtype=np.float32)
+    buf.append(start_time_ns=t_post_ntp, samples=new_audio)
+
+    # Buffer should have reset to the new position — no huge zeros, no crash.
+    assert buf.samples.size <= samples_per_chunk
+    assert np.all(buf.samples == 2.0)
+    assert buf.start_time_ns == t_post_ntp
+
+
+def test_sensor_stream_buffer_resets_on_large_backward_jump() -> None:
+    """Large backward jump (severe clock regression) also resets cleanly."""
+    sample_rate_hz = 16_000
+    samples_per_chunk = 1024
+    buf = SensorStreamBuffer(sample_rate_hz=sample_rate_hz, max_duration_seconds=30.0)
+
+    t0 = 1_000_000_000_000_000_000
+    buf.append(start_time_ns=t0, samples=np.ones(samples_per_chunk, dtype=np.float32))
+
+    # Clock jumps backward by 10 minutes.
+    t_before = t0 - 10 * 60 * 1_000_000_000
+    new_audio = np.full(samples_per_chunk, 3.0, dtype=np.float32)
+    buf.append(start_time_ns=t_before, samples=new_audio)
+
+    assert buf.samples.size <= samples_per_chunk
+    assert np.all(buf.samples == 3.0)
+    assert buf.start_time_ns == t_before
+
+
 @pytest.mark.asyncio
 async def test_classification_windows_use_per_sensor_fallback_when_some_sensors_have_partial_audio() -> None:
     """With a short buffer, sensors that have any audio should use their trailing window;

@@ -42,6 +42,20 @@ class SensorStreamBuffer:
         incoming_start_sample_index = self._time_to_sample_index(start_time_ns)
         incoming_end_sample_index = incoming_start_sample_index + samples.size
 
+        # If the incoming frame is more than max_samples away from the current buffer
+        # (either far ahead or far behind), reset the timeline rather than allocating
+        # a huge zeros array. The common cause is an NTP sync that corrects a stale
+        # build-timestamp epoch by hours, which would otherwise produce a multi-minute
+        # silence gap and a potentially enormous intermediate allocation.
+        if (incoming_start_sample_index > current_end_sample_index + self.max_samples
+                or incoming_start_sample_index < current_start_sample_index - self.max_samples):
+            self._timeline_origin_ns = start_time_ns
+            self._buffer_start_sample_index = 0
+            self.start_time_ns = start_time_ns
+            self.samples = samples.copy()
+            self._prune()
+            return
+
         merged_start_sample_index = min(current_start_sample_index, incoming_start_sample_index)
         merged_end_sample_index = max(current_end_sample_index, incoming_end_sample_index)
         merged = np.zeros(merged_end_sample_index - merged_start_sample_index, dtype=np.float32)
