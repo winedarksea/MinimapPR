@@ -42,6 +42,7 @@ set(MMPR_AUDIO_PICO_DIR ${CMAKE_CURRENT_LIST_DIR}/../../lib/minimap_audio_pico)
 add_executable(sirith_tetrahedral
         sirith_tetrahedral.cpp
         src/Base64.cpp
+        src/FailureSnapshot.cpp
         src/FallbackEnvironmentalSource.cpp
         src/HttpFramePublisher.cpp
         src/Lis2mdlMagnetometer.cpp
@@ -91,6 +92,7 @@ target_link_libraries(sirith_tetrahedral
         hardware_pio
         hardware_uart
         hardware_clocks
+        hardware_watchdog
         pico_cyw43_arch_lwip_poll
         pico_unique_id
         )

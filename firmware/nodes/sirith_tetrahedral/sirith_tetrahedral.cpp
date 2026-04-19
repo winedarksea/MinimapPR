@@ -12,6 +12,7 @@
 #include "mmpr/HttpFramePublisher.h"
 #include "mmpr/NtpClient.h"
 #include "mmpr/FallbackEnvironmentalSource.h"
+#include "mmpr/FailureSnapshot.h"
 #include "mmpr/Lis2mdlMagnetometer.h"
 #include "mmpr/Lsm6TemperatureSensor.h"
 #include "mmpr/MagAutoOrientation.h"
@@ -387,6 +388,8 @@ int main() {
   initNodeId();
   stdio_init_all();
   sleep_ms(300);
+  mmpr::FailureSnapshot::initializeForBoot();
+  mmpr::FailureSnapshot::feedWatchdog();
 
   // GP26 controls the external Vin FET rail; keep it off unless explicitly enabled.
   setExternalRailEnabled(nodecfg::kEnableExternalVFetRail);
@@ -404,6 +407,7 @@ int main() {
     std::printf("[sirith-pico] bare-board validation mode enabled\n");
   }
 
+  mmpr::FailureSnapshot::updatePhase(mmpr::FatalLifecyclePhase::kWiFiInit);
   if (cyw43_arch_init()) {
     std::printf("[sirith-pico] fatal: Wi-Fi init failed\n");
     while (true) {
@@ -411,6 +415,8 @@ int main() {
     }
   }
 
+  mmpr::FailureSnapshot::updatePhase(mmpr::FatalLifecyclePhase::kPeripheralInit);
+  mmpr::FailureSnapshot::feedWatchdog();
   setStatusLed(true);
   if (nodecfg::kUseTdmAudio) {
     buildOrderedOffsetsFromSlotMap(gActiveBaseRotationSteps);
@@ -438,11 +444,14 @@ int main() {
     }
   }
   setupOptionalPeripherals();
+  mmpr::FailureSnapshot::feedWatchdog();
 
+  mmpr::FailureSnapshot::updatePhase(mmpr::FatalLifecyclePhase::kStartupWiFiConnect);
   const bool wifiConnected = mmpr::connectWiFiBlocking(
       nodecfg::kWifiSsid,
       nodecfg::kWifiPassword,
       nodecfg::kWiFiConnectTimeoutMs);
+  mmpr::FailureSnapshot::feedWatchdog();
 
   if (!wifiConnected) {
     std::printf("[sirith-pico] WiFi not connected at startup, will keep retrying\n");
@@ -450,11 +459,13 @@ int main() {
     std::printf("[sirith-pico] WiFi connected\n");
   }
 
+  mmpr::FailureSnapshot::updatePhase(mmpr::FatalLifecyclePhase::kRunnerStart);
   const bool started = gRunner.begin(
       nodecfg::kEnableNtpSync,
       nodecfg::kNtpServer,
       nodecfg::kGmtOffsetSeconds,
       nodecfg::kDaylightOffsetSeconds);
+  mmpr::FailureSnapshot::feedWatchdog();
 
   if (!started) {
     std::printf("[sirith-pico] fatal: runner failed to start\n");
@@ -465,10 +476,13 @@ int main() {
   }
 
   if (nodecfg::kEnableNtpSync) {
+    mmpr::FailureSnapshot::updatePhase(mmpr::FatalLifecyclePhase::kNtpStart);
     gNtpClient.begin(nodecfg::kNtpServer, gClock);
     std::printf("[sirith-pico] NTP client started, server=%s\n", nodecfg::kNtpServer);
+    mmpr::FailureSnapshot::feedWatchdog();
   }
 
+  mmpr::FailureSnapshot::updatePhase(mmpr::FatalLifecyclePhase::kMainLoop);
   while (true) {
     if (nodecfg::kUseTdmAudio && gAutoOrientationEnabled) {
       uint8_t changedRotation = 0;
@@ -495,6 +509,7 @@ int main() {
     }
 
     gRunner.loopOnce();
+    mmpr::FailureSnapshot::updateProgressMarker(static_cast<uint32_t>(gRunner.stats().framesCaptured));
     pollActivityLed();
 
     if (nodecfg::kEnableNtpSync) {
@@ -511,5 +526,6 @@ int main() {
     }
 
     cyw43_arch_poll();
+    mmpr::FailureSnapshot::feedWatchdog();
   }
 }
