@@ -1,5 +1,7 @@
 use crate::audio::bindings as aud;
-use crate::audio::detection_actions::{audio_analysis_href, detection_audio_download_url, detection_audio_url};
+use crate::audio::detection_actions::{
+    audio_analysis_href, detection_audio_download_url, detection_audio_url,
+};
 use gloo_net::http::Request;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -98,10 +100,18 @@ pub fn DetectionAudioAnalysisView(
             spawn_local(async move {
                 match aud::render_waveform(&waveform_id, &audio_url).await {
                     Ok(v) => {
-                        let dur = js_sys::Reflect::get(&v, &wasm_bindgen::JsValue::from_str("duration_s"))
-                            .ok().and_then(|x| x.as_f64());
-                        let sr = js_sys::Reflect::get(&v, &wasm_bindgen::JsValue::from_str("sample_rate"))
-                            .ok().and_then(|x| x.as_f64());
+                        let dur = js_sys::Reflect::get(
+                            &v,
+                            &wasm_bindgen::JsValue::from_str("duration_s"),
+                        )
+                        .ok()
+                        .and_then(|x| x.as_f64());
+                        let sr = js_sys::Reflect::get(
+                            &v,
+                            &wasm_bindgen::JsValue::from_str("sample_rate"),
+                        )
+                        .ok()
+                        .and_then(|x| x.as_f64());
                         if let (Some(dur), Some(sr)) = (dur, sr) {
                             info.set(Some(format!("{dur:.2}s · {} Hz", sr as u32)));
                         }

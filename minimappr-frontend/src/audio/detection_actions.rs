@@ -1,7 +1,7 @@
+use crate::state::AppState;
 use leptos::prelude::*;
 use leptos_router::components::A;
 use wasm_bindgen::JsCast;
-use crate::state::AppState;
 
 pub fn detection_audio_url(event_id: &str) -> String {
     format!(
@@ -11,9 +11,13 @@ pub fn detection_audio_url(event_id: &str) -> String {
 }
 
 fn play_detection_audio(url: &str) {
-    let Some(window) = web_sys::window() else { return };
+    let Some(window) = web_sys::window() else {
+        return;
+    };
     let Some(doc) = window.document() else { return };
-    let Some(el) = doc.get_element_by_id("audio-player") else { return };
+    let Some(el) = doc.get_element_by_id("audio-player") else {
+        return;
+    };
     if let Ok(audio) = el.dyn_into::<web_sys::HtmlAudioElement>() {
         audio.set_src(url);
         let _ = audio.play();

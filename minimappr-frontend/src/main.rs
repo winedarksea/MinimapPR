@@ -6,6 +6,7 @@ mod panels;
 mod prefs;
 mod shell;
 mod state;
+mod ui;
 mod ws;
 
 use leptos::prelude::*;

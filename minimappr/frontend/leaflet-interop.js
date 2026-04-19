@@ -11,16 +11,83 @@
   const _zones = {};     // zone_id → L.Polygon
   const _gdop = {};      // key → L.Circle
 
-  const COLORS = {
-    node:      "#58a6ff",
-    track:     "#3fb950",
-    detection: "#f78166",
-    zone:      "rgba(255,214,0,0.15)",
-    gdop:      "rgba(88,166,255,0.12)",
-  };
-
   const TILE_CACHE_NAME = "mmpr-osm-tiles-v1";
   const OSM_TEMPLATE = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
+
+  function readCssColor(name, fallback) {
+    const root = document.documentElement;
+    if (!root || !globalThis.getComputedStyle) return fallback;
+    const value = globalThis.getComputedStyle(root).getPropertyValue(name).trim();
+    return value || fallback;
+  }
+
+  function palette() {
+    return {
+      node: readCssColor("--mmp-sys-color-map-node", "#58a6ff"),
+      track: readCssColor("--mmp-sys-color-map-track", "#5fd6c4"),
+      detection: readCssColor("--mmp-sys-color-map-detection", "#f78166"),
+      warn: readCssColor("--mmp-sys-color-warn", "#d29922"),
+      danger: readCssColor("--mmp-sys-color-danger", "#f85149"),
+      surface: readCssColor("--md-sys-color-surface-container-low", "#161b22"),
+      outline: readCssColor("--md-sys-color-outline-variant", "#30363d"),
+    };
+  }
+
+  function divIcon(html, size, className) {
+    return L.divIcon({
+      className: className || "mmpr-map-icon",
+      html,
+      iconSize: [size, size],
+      iconAnchor: [size / 2, size / 2],
+      tooltipAnchor: [0, -(size / 2) + 2],
+    });
+  }
+
+  function makeNodeIcon(color) {
+    const colors = palette();
+    return divIcon(
+      '<div style="width:34px;height:34px;filter:drop-shadow(0 2px 6px rgba(0,0,0,.42));">' +
+        '<svg viewBox="0 0 34 34" width="34" height="34" aria-hidden="true">' +
+          '<rect x="6" y="6" width="22" height="22" rx="7" fill="' + colors.surface + '" stroke="' + color + '" stroke-width="2.4"></rect>' +
+          '<circle cx="17" cy="17" r="4.2" fill="' + color + '"></circle>' +
+        "</svg>" +
+      "</div>",
+      34,
+      "mmpr-map-icon mmpr-map-icon-node"
+    );
+  }
+
+  function makeTrackIcon(color, tqi) {
+    const colors = palette();
+    const size = 34 + Math.round((tqi || 0) * 6);
+    const offset = (size - 34) / 2;
+    return divIcon(
+      '<div style="width:' + size + "px;height:" + size + 'px;filter:drop-shadow(0 2px 7px rgba(0,0,0,.46));">' +
+        '<svg viewBox="0 0 34 34" width="' + size + '" height="' + size + '" aria-hidden="true">' +
+          '<g transform="translate(' + offset + "," + offset + ')">' +
+            '<polygon points="17,4 30,17 17,30 4,17" fill="' + colors.surface + '" stroke="' + color + '" stroke-width="2.2"></polygon>' +
+            '<circle cx="17" cy="17" r="4.4" fill="' + color + '"></circle>' +
+          "</g>" +
+        "</svg>" +
+      "</div>",
+      size,
+      "mmpr-map-icon mmpr-map-icon-track"
+    );
+  }
+
+  function makeDetectionIcon(color) {
+    return divIcon(
+      '<div style="width:28px;height:28px;filter:drop-shadow(0 2px 6px rgba(0,0,0,.42));">' +
+        '<svg viewBox="0 0 28 28" width="28" height="28" aria-hidden="true">' +
+          '<circle cx="14" cy="14" r="8.4" fill="' + color + '" opacity="0.18"></circle>' +
+          '<circle cx="14" cy="14" r="6.2" fill="none" stroke="' + color + '" stroke-width="1.8" opacity="0.92"></circle>' +
+          '<circle cx="14" cy="14" r="3.4" fill="' + color + '"></circle>' +
+        "</svg>" +
+      "</div>",
+      28,
+      "mmpr-map-icon mmpr-map-icon-detection"
+    );
+  }
 
   function makeGenericFallbackTileDataUrl(tileSize) {
     const size = tileSize || 256;
@@ -180,16 +247,17 @@
 
   // ── Node markers ──────────────────────────────────────────────
   function setNodeMarker(nodeId, lat, lon, healthClass) {
-    const color = healthClass === "online" ? COLORS.node
-                : healthClass === "degraded" ? "#d29922"
-                : "#f85149";
+    const colors = palette();
+    const color = healthClass === "online" ? colors.node
+                : healthClass === "degraded" ? colors.warn
+                : colors.danger;
     const key = "node:" + nodeId;
     if (_markers[key]) {
       _markers[key].setLatLng([lat, lon]);
-      _markers[key].setStyle({ color });
+      _markers[key].setIcon(makeNodeIcon(color));
     } else {
-      _markers[key] = L.circleMarker([lat, lon], {
-        radius: 8, color, fillColor: color, fillOpacity: 0.9, weight: 2,
+      _markers[key] = L.marker([lat, lon], {
+        icon: makeNodeIcon(color),
       }).bindTooltip(nodeId, { permanent: false }).addTo(_map);
     }
   }
@@ -201,10 +269,11 @@
 
   // ── Detection markers ─────────────────────────────────────────
   function addDetectionMarker(eventId, lat, lon, label) {
+    const colors = palette();
     const key = "det:" + eventId;
     if (_markers[key]) return;
-    _markers[key] = L.circleMarker([lat, lon], {
-      radius: 5, color: COLORS.detection, fillColor: COLORS.detection, fillOpacity: 0.7, weight: 1,
+    _markers[key] = L.marker([lat, lon], {
+      icon: makeDetectionIcon(colors.detection),
     }).bindTooltip(label || "detection", { permanent: false }).addTo(_map);
     // Auto-remove after 30s
     setTimeout(() => {
@@ -214,25 +283,28 @@
 
   // ── Track markers + velocity vectors ─────────────────────────
   function setTrackMarker(trackId, lat, lon, label, tqi) {
+    const colors = palette();
     const key = "track:" + trackId;
-    const r = 6 + Math.round((tqi ?? 0) * 4);
     if (_markers[key]) {
       _markers[key].setLatLng([lat, lon]);
+      _markers[key].setIcon(makeTrackIcon(colors.track, tqi));
     } else {
-      _markers[key] = L.circleMarker([lat, lon], {
-        radius: r, color: COLORS.track, fillColor: COLORS.track, fillOpacity: 0.75, weight: 2,
+      _markers[key] = L.marker([lat, lon], {
+        icon: makeTrackIcon(colors.track, tqi),
       }).bindTooltip(label || trackId.slice(0, 8), { permanent: false }).addTo(_map);
     }
   }
 
   function setTrackVelocityVector(trackId, lat, lon, velLat, velLon) {
+    const colors = palette();
     const endLat = lat + velLat * 3;
     const endLon = lon + velLon * 3;
     if (_vectors[trackId]) {
       _vectors[trackId].setLatLngs([[lat, lon], [endLat, endLon]]);
+      _vectors[trackId].setStyle({ color: colors.track });
     } else {
       _vectors[trackId] = L.polyline([[lat, lon], [endLat, endLon]], {
-        color: COLORS.track, weight: 1.5, opacity: 0.7, dashArray: "4,4",
+        color: colors.track, weight: 1.5, opacity: 0.72, dashArray: "5,4",
       }).addTo(_map);
     }
   }
@@ -246,11 +318,12 @@
 
   // ── Zone polygons ─────────────────────────────────────────────
   function setZone(zoneId, latlngs, label) {
+    const colors = palette();
     if (_zones[zoneId]) {
       _zones[zoneId].setLatLngs(latlngs);
     } else {
       _zones[zoneId] = L.polygon(latlngs, {
-        color: "#d29922", weight: 1.5, fillColor: COLORS.zone, fillOpacity: 1,
+        color: colors.warn, weight: 1.5, fillColor: colors.warn, fillOpacity: 0.16,
       }).bindTooltip(label || zoneId).addTo(_map);
     }
   }
@@ -261,11 +334,12 @@
 
   // ── GDOP circles ─────────────────────────────────────────────
   function setGdopCircle(key, lat, lon, radiusM) {
+    const colors = palette();
     if (_gdop[key]) {
       _gdop[key].setLatLng([lat, lon]).setRadius(radiusM);
     } else {
       _gdop[key] = L.circle([lat, lon], {
-        radius: radiusM, color: COLORS.gdop, fillColor: COLORS.gdop, fillOpacity: 1, weight: 0,
+        radius: radiusM, color: colors.node, fillColor: colors.node, fillOpacity: 0.12, weight: 1,
       }).addTo(_map);
     }
   }

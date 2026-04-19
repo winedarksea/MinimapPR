@@ -18,7 +18,13 @@ extern "C" {
     pub fn set_track_marker(track_id: &str, lat: f64, lon: f64, label: &str, tqi: f64);
 
     #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "setTrackVelocityVector")]
-    pub fn set_track_velocity_vector(track_id: &str, lat: f64, lon: f64, vel_lat: f64, vel_lon: f64);
+    pub fn set_track_velocity_vector(
+        track_id: &str,
+        lat: f64,
+        lon: f64,
+        vel_lat: f64,
+        vel_lon: f64,
+    );
 
     #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "removeTrack")]
     pub fn remove_track(track_id: &str);

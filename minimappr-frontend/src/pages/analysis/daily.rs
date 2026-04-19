@@ -66,9 +66,15 @@ pub fn DailyDetectionsView() -> impl IntoView {
         fetch_data(offset);
     });
 
-    let on_prev  = move |_| day_offset.update(|v| *v += 1);
+    let on_prev = move |_| day_offset.update(|v| *v += 1);
     let on_today = move |_| day_offset.set(0);
-    let on_next  = move |_| day_offset.update(|v| if *v > 0 { *v -= 1 });
+    let on_next = move |_| {
+        day_offset.update(|v| {
+            if *v > 0 {
+                *v -= 1
+            }
+        })
+    };
 
     view! {
         <div class="daily-view">

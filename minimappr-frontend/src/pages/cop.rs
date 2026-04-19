@@ -1,6 +1,7 @@
 use crate::map::LeafletMapPanel;
 use crate::panels::{
-    alerts::AlertsPane, detections::DetectionsPane, node_status::NodeStatusPanel, tracks::TracksPane,
+    alerts::AlertsPane, detections::DetectionsPane, node_status::NodeStatusPanel,
+    tracks::TracksPane,
 };
 use leptos::prelude::*;
 
@@ -18,7 +19,11 @@ pub fn CopPage() -> impl IntoView {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum CopTab { Tracks, Detections, Alerts }
+enum CopTab {
+    Tracks,
+    Detections,
+    Alerts,
+}
 
 #[component]
 fn CopTabs() -> impl IntoView {

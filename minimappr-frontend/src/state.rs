@@ -220,15 +220,16 @@ pub struct FilterState {
 /// The router owns the "active page" — no `active_tab` lives here anymore.
 #[derive(Clone)]
 pub struct AppState {
-    pub nodes:      RwSignal<Vec<NodeStatus>>,
-    pub tracks:     RwSignal<Vec<Track>>,
+    pub nodes: RwSignal<Vec<NodeStatus>>,
+    pub tracks: RwSignal<Vec<Track>>,
     pub detections: RwSignal<VecDeque<Detection>>,
-    pub alerts:     RwSignal<VecDeque<Alert>>,
-    pub config:     RwSignal<Option<ConfigSnapshot>>,
+    pub alerts: RwSignal<VecDeque<Alert>>,
+    pub config: RwSignal<Option<ConfigSnapshot>>,
     pub cop_status: RwSignal<Option<CopStatus>>,
-    pub ws_status:  RwSignal<WsStatus>,
-    pub filter:     RwSignal<FilterState>,
-    pub theme:      RwSignal<String>,
+    pub ws_status: RwSignal<WsStatus>,
+    pub filter: RwSignal<FilterState>,
+    pub theme: RwSignal<String>,
+    pub density: RwSignal<String>,
     pub audio_drawer_open: RwSignal<bool>,
     pub audio_drawer_detection_id: RwSignal<Option<String>>,
 }
@@ -236,15 +237,16 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         Self {
-            nodes:      RwSignal::new(vec![]),
-            tracks:     RwSignal::new(vec![]),
+            nodes: RwSignal::new(vec![]),
+            tracks: RwSignal::new(vec![]),
             detections: RwSignal::new(VecDeque::new()),
-            alerts:     RwSignal::new(VecDeque::new()),
-            config:     RwSignal::new(None),
+            alerts: RwSignal::new(VecDeque::new()),
+            config: RwSignal::new(None),
             cop_status: RwSignal::new(None),
-            ws_status:  RwSignal::new(WsStatus::Disconnected),
-            filter:     RwSignal::new(FilterState::default()),
-            theme:      RwSignal::new(crate::prefs::current_theme()),
+            ws_status: RwSignal::new(WsStatus::Disconnected),
+            filter: RwSignal::new(FilterState::default()),
+            theme: RwSignal::new(crate::prefs::current_theme()),
+            density: RwSignal::new(crate::prefs::current_density()),
             audio_drawer_open: RwSignal::new(false),
             audio_drawer_detection_id: RwSignal::new(None),
         }
@@ -259,7 +261,9 @@ pub enum LiveEvent {
     Detection(Detection),
     Alert(Alert),
     TrackUpdate(Track),
-    ConfigUpdated { config: ConfigSnapshot },
+    ConfigUpdated {
+        config: ConfigSnapshot,
+    },
     SetFilter,
     BitReport {
         #[serde(rename = "node_id")]

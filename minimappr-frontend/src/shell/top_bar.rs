@@ -9,14 +9,15 @@ pub fn TopBar() -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState");
     let ws_status = state.ws_status;
     let theme = state.theme;
+    let density = state.density;
 
     let pill_class = move || match ws_status.get() {
-        WsStatus::Connected    => "ws-pill connected",
+        WsStatus::Connected => "ws-pill connected",
         WsStatus::Reconnecting => "ws-pill reconnecting",
         WsStatus::Disconnected => "ws-pill disconnected",
     };
     let pill_text = move || match ws_status.get() {
-        WsStatus::Connected    => "Live",
+        WsStatus::Connected => "Live",
         WsStatus::Reconnecting => "Reconnect…",
         WsStatus::Disconnected => "Offline",
     };
@@ -31,21 +32,52 @@ pub fn TopBar() -> impl IntoView {
         }
     });
 
-    let clock_utc   = move || format_hms_utc(now_ms.get());
+    let clock_utc = move || format_hms_utc(now_ms.get());
     let clock_local = move || format_hms_local(now_ms.get());
 
     let on_theme_click = move |_| {
         let next = prefs::toggle_theme();
         theme.set(next);
     };
-    let theme_icon = move || if theme.get() == "light" { "dark_mode" } else { "light_mode" };
+    let on_density_click = move |_| {
+        let next = prefs::toggle_density();
+        density.set(next);
+    };
+    let theme_icon = move || {
+        if theme.get() == "light" {
+            "dark_mode"
+        } else {
+            "light_mode"
+        }
+    };
     let theme_title = move || {
-        if theme.get() == "light" { "Switch to dark theme" } else { "Switch to light theme" }
+        if theme.get() == "light" {
+            "Switch to dark theme"
+        } else {
+            "Switch to light theme"
+        }
+    };
+    let density_label = move || {
+        if density.get() == "compact" {
+            "Dense"
+        } else {
+            "Comfort"
+        }
+    };
+    let density_title = move || {
+        if density.get() == "compact" {
+            "Switch to comfortable density"
+        } else {
+            "Switch to compact density"
+        }
     };
 
     view! {
         <header class="topbar">
-            <span class="topbar-brand">"MinimapPR"</span>
+            <span class="topbar-brand">
+                "MinimapPR"
+                <span class="topbar-brand-tag">"COP"</span>
+            </span>
 
             <nav class="topbar-nav" aria-label="Primary">
                 <NavLink href="/cop"      label="COP" />
@@ -58,6 +90,15 @@ pub fn TopBar() -> impl IntoView {
 
             <div class="topbar-tools">
                 <span class=pill_class>{pill_text}</span>
+                <button
+                    class="topbar-toggle"
+                    title=density_title
+                    aria-label=density_title
+                    on:click=on_density_click
+                >
+                    <span class="topbar-toggle-label">"Density"</span>
+                    <span class="topbar-toggle-value">{density_label}</span>
+                </button>
                 <div class="topbar-clock" aria-label="Clock">
                     <div class="utc">{clock_utc}" UTC"</div>
                     <div class="local">{clock_local}" local"</div>

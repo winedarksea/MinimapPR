@@ -1,5 +1,5 @@
-use gloo_net::http::Request;
 use crate::audio::detection_actions::DetectionAudioActions;
+use gloo_net::http::Request;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::components::A;
@@ -149,7 +149,9 @@ pub fn LabelDetailView() -> impl IntoView {
 
     Effect::new(move |_| {
         let lbl = label();
-        if lbl.is_empty() { return; }
+        if lbl.is_empty() {
+            return;
+        }
         let url = format!(
             "/api/v1/analytics/labels/{}?window=30d&recent_limit=50",
             js_sys::encode_uri_component(&lbl),
@@ -188,13 +190,21 @@ pub fn LabelDetailView() -> impl IntoView {
 
 #[component]
 fn LabelDetailBody(data: LabelDetailResponse) -> impl IntoView {
-    let last_seen = data.last_seen_ns.map(format_age_ns).unwrap_or_else(|| "—".into());
-    let first_seen = data.first_seen_ns.map(format_age_ns).unwrap_or_else(|| "—".into());
+    let last_seen = data
+        .last_seen_ns
+        .map(format_age_ns)
+        .unwrap_or_else(|| "—".into());
+    let first_seen = data
+        .first_seen_ns
+        .map(format_age_ns)
+        .unwrap_or_else(|| "—".into());
     let hour_max = *data.hour_histogram.iter().max().unwrap_or(&1).max(&1);
-    let dow_max  = *data.dow_histogram.iter().max().unwrap_or(&1).max(&1);
+    let dow_max = *data.dow_histogram.iter().max().unwrap_or(&1).max(&1);
     let month_max = *data.month_histogram.iter().max().unwrap_or(&1).max(&1);
     let dow_names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-    let month_names = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+    let month_names = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
 
     view! {
         <div class="label-detail-grid">

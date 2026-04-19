@@ -1,9 +1,9 @@
 pub mod daily;
-pub mod labels;
 pub mod heatmap;
+pub mod labels;
 
 use leptos::prelude::*;
-use leptos_router::components::{A, Outlet};
+use leptos_router::components::{Outlet, A};
 use leptos_router::hooks::use_location;
 
 #[component]

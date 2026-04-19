@@ -1,9 +1,9 @@
 pub mod config;
-pub mod server;
 pub mod logs;
+pub mod server;
 
 use leptos::prelude::*;
-use leptos_router::components::{A, Outlet};
+use leptos_router::components::{Outlet, A};
 use leptos_router::hooks::use_location;
 
 #[component]

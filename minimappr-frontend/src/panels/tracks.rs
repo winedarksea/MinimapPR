@@ -1,4 +1,5 @@
 use crate::state::AppState;
+use crate::ui::{classify_age_from_ns, short_id, track_status_chip_class, track_status_label};
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{HtmlAudioElement, Window};
@@ -33,54 +34,6 @@ fn trigger_track_download(track_id: &str) {
     }
 }
 
-fn age_from_ns(ns: Option<i64>) -> (String, &'static str) {
-    let Some(ns) = ns else {
-        return ("—".to_string(), "age-unknown");
-    };
-    let age_secs = (js_sys::Date::now() * 1_000_000.0 - ns as f64) / 1_000_000_000.0;
-    if age_secs < 0.0 {
-        return ("0s".to_string(), "age-fresh");
-    }
-    let class = if age_secs < 30.0 {
-        "age-fresh"
-    } else if age_secs < 120.0 {
-        "age-stale"
-    } else {
-        "age-lost"
-    };
-    (format_age_secs(age_secs as u64), class)
-}
-
-fn format_age_secs(s: u64) -> String {
-    if s < 60 {
-        format!("{}s", s)
-    } else if s < 3600 {
-        format!("{}m {:02}s", s / 60, s % 60)
-    } else {
-        format!("{}h {:02}m", s / 3600, (s % 3600) / 60)
-    }
-}
-
-fn track_status_class(status: Option<&str>) -> &'static str {
-    match status {
-        Some("active") | Some("confirmed") => "health-chip online",
-        Some("coasting") => "health-chip degraded",
-        Some("lost") | Some("dropped") => "health-chip offline",
-        _ => "health-chip unknown",
-    }
-}
-
-fn track_status_label(status: Option<&str>) -> &'static str {
-    match status {
-        Some("active") => "ACT",
-        Some("confirmed") => "CFM",
-        Some("coasting") => "CST",
-        Some("lost") => "LST",
-        Some("dropped") => "DRP",
-        _ => "UNK",
-    }
-}
-
 #[component]
 pub fn TracksPane() -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState");
@@ -108,7 +61,7 @@ pub fn TracksPane() -> impl IntoView {
                         </thead>
                         <tbody>
                             {ts.into_iter().map(|t| {
-                                let id_short = t.track_id[..8.min(t.track_id.len())].to_string();
+                                let id_short = short_id(&t.track_id, 8);
                                 let label = t.label.clone().unwrap_or_else(|| "—".to_string());
                                 let conf = t.confidence
                                     .map(|c| format!("{:.0}%", c * 100.0))
@@ -116,9 +69,9 @@ pub fn TracksPane() -> impl IntoView {
                                 let tqi_val = t.tqi.unwrap_or(0.0);
                                 let tqi_w = format!("{}px", (tqi_val * 60.0) as u32);
                                 let tqi_pct = format!("{:.0}%", tqi_val * 100.0);
-                                let (age_text, age_class) = age_from_ns(t.last_update_ns);
+                                let (age_text, age_class) = classify_age_from_ns(t.last_update_ns, 30.0, 120.0);
                                 let status_str = t.status.as_deref();
-                                let st_class = track_status_class(status_str);
+                                let st_class = track_status_chip_class(status_str);
                                 let st_label = track_status_label(status_str);
 
                                 // Geo tooltip: show on ID hover if available

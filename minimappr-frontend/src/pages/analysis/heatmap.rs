@@ -41,7 +41,8 @@ pub fn GeoHeatmapView() -> impl IntoView {
                 match Request::get(&url).send().await {
                     Ok(resp) if resp.ok() => match resp.json::<HeatmapResponse>().await {
                         Ok(d) => {
-                            let max_weight = d.bins.iter().map(|b| b.weight).max().unwrap_or(1).max(1);
+                            let max_weight =
+                                d.bins.iter().map(|b| b.weight).max().unwrap_or(1).max(1);
                             let points = js_sys::Array::new();
                             for b in &d.bins {
                                 let triple = js_sys::Array::new();

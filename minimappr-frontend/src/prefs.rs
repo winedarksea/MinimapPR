@@ -7,6 +7,7 @@ use wasm_bindgen::JsCast;
 use web_sys::{HtmlElement, Storage};
 
 pub const KEY_THEME: &str = "mmp.theme";
+pub const KEY_DENSITY: &str = "mmp.density";
 
 fn storage() -> Option<Storage> {
     web_sys::window()?.local_storage().ok().flatten()
@@ -21,6 +22,10 @@ pub fn set(key: &str, value: &str) {
 /// Read the current `data-theme` attribute on `<html>`; defaults to `"dark"`.
 pub fn current_theme() -> String {
     root_attr("data-theme").unwrap_or_else(|| "dark".into())
+}
+
+pub fn current_density() -> String {
+    root_attr("data-density").unwrap_or_else(|| "comfortable".into())
 }
 
 fn root_attr(name: &str) -> Option<String> {
@@ -49,7 +54,26 @@ pub fn apply_theme(theme: &str) {
 
 /// Toggle between dark and light; returns the new theme string.
 pub fn toggle_theme() -> String {
-    let next = if current_theme() == "light" { "dark" } else { "light" };
+    let next = if current_theme() == "light" {
+        "dark"
+    } else {
+        "light"
+    };
     apply_theme(next);
+    next.to_string()
+}
+
+pub fn apply_density(density: &str) {
+    set_root_attr("data-density", density);
+    set(KEY_DENSITY, density);
+}
+
+pub fn toggle_density() -> String {
+    let next = if current_density() == "compact" {
+        "comfortable"
+    } else {
+        "compact"
+    };
+    apply_density(next);
     next.to_string()
 }

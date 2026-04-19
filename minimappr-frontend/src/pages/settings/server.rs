@@ -1,6 +1,6 @@
+use futures::StreamExt;
 use gloo_net::http::Request;
 use gloo_timers::future::IntervalStream;
-use futures::StreamExt;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::Deserialize;
@@ -97,7 +97,13 @@ fn fmt_uptime(ns: i64) -> String {
     let h = s / 3600;
     let m = (s % 3600) / 60;
     let sec = s % 60;
-    if h > 0 { format!("{h}h {m}m {sec}s") } else if m > 0 { format!("{m}m {sec}s") } else { format!("{sec}s") }
+    if h > 0 {
+        format!("{h}h {m}m {sec}s")
+    } else if m > 0 {
+        format!("{m}m {sec}s")
+    } else {
+        format!("{sec}s")
+    }
 }
 
 #[component]
@@ -109,7 +115,10 @@ pub fn ServerDiagnosticsView() -> impl IntoView {
         spawn_local(async move {
             match Request::get("/api/v1/system/diagnostics").send().await {
                 Ok(resp) if resp.ok() => match resp.json::<Diagnostics>().await {
-                    Ok(d) => { data.set(Some(d)); error.set(None); }
+                    Ok(d) => {
+                        data.set(Some(d));
+                        error.set(None);
+                    }
                     Err(e) => error.set(Some(format!("parse: {e}"))),
                 },
                 Ok(resp) => error.set(Some(format!("HTTP {}", resp.status()))),

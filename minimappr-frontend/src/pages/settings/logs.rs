@@ -37,11 +37,17 @@ fn fmt_ts(ns: i64) -> String {
 
 fn level_class(level_no: i32) -> &'static str {
     // Python logging: DEBUG=10, INFO=20, WARNING=30, ERROR=40, CRITICAL=50
-    if level_no >= 50 { "log-critical" }
-    else if level_no >= 40 { "log-error" }
-    else if level_no >= 30 { "log-warn" }
-    else if level_no >= 20 { "log-info" }
-    else { "log-debug" }
+    if level_no >= 50 {
+        "log-critical"
+    } else if level_no >= 40 {
+        "log-error"
+    } else if level_no >= 30 {
+        "log-warn"
+    } else if level_no >= 20 {
+        "log-info"
+    } else {
+        "log-debug"
+    }
 }
 
 #[component]
@@ -61,7 +67,9 @@ pub fn ServerLogsView() -> impl IntoView {
             match Request::get(&url).send().await {
                 Ok(resp) if resp.ok() => match resp.json::<LogResponse>().await {
                     Ok(d) => {
-                        if let Some(last) = d.records.last() { since.set(last.seq); }
+                        if let Some(last) = d.records.last() {
+                            since.set(last.seq);
+                        }
                         capacity.set(d.capacity);
                         records.set(d.records);
                         error.set(None);
@@ -75,7 +83,9 @@ pub fn ServerLogsView() -> impl IntoView {
     };
 
     let tail = move || {
-        if paused.get() { return; }
+        if paused.get() {
+            return;
+        }
         let lvl = level.get();
         let s = since.get();
         let url = format!("/api/v1/system/logs?limit=500&level={lvl}&since_seq={s}");
@@ -84,11 +94,15 @@ pub fn ServerLogsView() -> impl IntoView {
                 if resp.ok() {
                     if let Ok(d) = resp.json::<LogResponse>().await {
                         if !d.records.is_empty() {
-                            if let Some(last) = d.records.last() { since.set(last.seq); }
+                            if let Some(last) = d.records.last() {
+                                since.set(last.seq);
+                            }
                             records.update(|r| {
                                 r.extend(d.records);
                                 let len = r.len();
-                                if len > 2000 { r.drain(0..len - 2000); }
+                                if len > 2000 {
+                                    r.drain(0..len - 2000);
+                                }
                             });
                         }
                     }
@@ -115,9 +129,13 @@ pub fn ServerLogsView() -> impl IntoView {
     let filtered = move || {
         let f = filter.get().to_lowercase();
         let rs = records.get();
-        if f.is_empty() { rs } else {
+        if f.is_empty() {
+            rs
+        } else {
             rs.into_iter()
-                .filter(|r| r.message.to_lowercase().contains(&f) || r.logger.to_lowercase().contains(&f))
+                .filter(|r| {
+                    r.message.to_lowercase().contains(&f) || r.logger.to_lowercase().contains(&f)
+                })
                 .collect()
         }
     };

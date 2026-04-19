@@ -152,11 +152,11 @@ fn AudioTriggerGroup(
     audio_lowpass_hz: f64,
 ) -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState");
-    let rms       = RwSignal::new(trigger_rms.to_string());
-    let cooldown  = RwSignal::new(trigger_cooldown_seconds.to_string());
+    let rms = RwSignal::new(trigger_rms.to_string());
+    let cooldown = RwSignal::new(trigger_cooldown_seconds.to_string());
     let preprocess = RwSignal::new(preprocess_enabled);
-    let highpass  = RwSignal::new(audio_highpass_hz.to_string());
-    let lowpass   = RwSignal::new(audio_lowpass_hz.to_string());
+    let highpass = RwSignal::new(audio_highpass_hz.to_string());
+    let lowpass = RwSignal::new(audio_lowpass_hz.to_string());
     let gs = RwSignal::new(GroupState::default());
 
     let dirty = move || gs.get().dirty;
@@ -169,16 +169,26 @@ fn AudioTriggerGroup(
             "audio_highpass_hz": highpass.get().parse::<f64>().unwrap_or(50.0),
             "audio_lowpass_hz": lowpass.get().parse::<f64>().unwrap_or(0.0),
         });
-        gs.update(|s| { s.saving = true; s.error = None; });
+        gs.update(|s| {
+            s.saving = true;
+            s.error = None;
+        });
         let s = state.clone();
         spawn_local(async move {
             match patch_config(body).await {
                 Ok(cfg) => {
                     s.config.set(Some(cfg));
-                    gs.update(|st| { st.saving = false; st.dirty = false; st.saved = true; });
+                    gs.update(|st| {
+                        st.saving = false;
+                        st.dirty = false;
+                        st.saved = true;
+                    });
                 }
                 Err(e) => {
-                    gs.update(|st| { st.saving = false; st.error = Some(e); });
+                    gs.update(|st| {
+                        st.saving = false;
+                        st.error = Some(e);
+                    });
                 }
             }
         });
@@ -212,8 +222,8 @@ fn LocalizationGroup(
 ) -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState");
     let window = RwSignal::new(localization_window_seconds.to_string());
-    let algo   = RwSignal::new(localization_algorithm);
-    let strat  = RwSignal::new(localization_strategy);
+    let algo = RwSignal::new(localization_algorithm);
+    let strat = RwSignal::new(localization_strategy);
     let gs = RwSignal::new(GroupState::default());
 
     let dirty = move || gs.get().dirty;
@@ -224,16 +234,26 @@ fn LocalizationGroup(
             "localization_algorithm": algo.get(),
             "localization_strategy": strat.get(),
         });
-        gs.update(|s| { s.saving = true; s.error = None; });
+        gs.update(|s| {
+            s.saving = true;
+            s.error = None;
+        });
         let s = state.clone();
         spawn_local(async move {
             match patch_config(body).await {
                 Ok(cfg) => {
                     s.config.set(Some(cfg));
-                    gs.update(|st| { st.saving = false; st.dirty = false; st.saved = true; });
+                    gs.update(|st| {
+                        st.saving = false;
+                        st.dirty = false;
+                        st.saved = true;
+                    });
                 }
                 Err(e) => {
-                    gs.update(|st| { st.saving = false; st.error = Some(e); });
+                    gs.update(|st| {
+                        st.saving = false;
+                        st.error = Some(e);
+                    });
                 }
             }
         });
@@ -265,8 +285,8 @@ fn ClassificationGroup(
     beamformer_type: String,
 ) -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState");
-    let backend  = RwSignal::new(classifier_backend);
-    let yamnet   = RwSignal::new(yamnet_min_confidence.to_string());
+    let backend = RwSignal::new(classifier_backend);
+    let yamnet = RwSignal::new(yamnet_min_confidence.to_string());
     let detection = RwSignal::new(detection_min_confidence.to_string());
     let beamform = RwSignal::new(beamformer_type);
     let gs = RwSignal::new(GroupState::default());
@@ -280,16 +300,26 @@ fn ClassificationGroup(
             "detection_min_confidence": detection.get().parse::<f64>().unwrap_or(0.05),
             "beamformer_type": beamform.get(),
         });
-        gs.update(|s| { s.saving = true; s.error = None; });
+        gs.update(|s| {
+            s.saving = true;
+            s.error = None;
+        });
         let s = state.clone();
         spawn_local(async move {
             match patch_config(body).await {
                 Ok(cfg) => {
                     s.config.set(Some(cfg));
-                    gs.update(|st| { st.saving = false; st.dirty = false; st.saved = true; });
+                    gs.update(|st| {
+                        st.saving = false;
+                        st.dirty = false;
+                        st.saved = true;
+                    });
                 }
                 Err(e) => {
-                    gs.update(|st| { st.saving = false; st.error = Some(e); });
+                    gs.update(|st| {
+                        st.saving = false;
+                        st.error = Some(e);
+                    });
                 }
             }
         });
@@ -321,9 +351,9 @@ fn TrackingFusionGroup(
     coordinate_mode: String,
 ) -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState");
-    let filter  = RwSignal::new(tracking_filter);
+    let filter = RwSignal::new(tracking_filter);
     let workers = RwSignal::new(fusion_worker_count.to_string());
-    let coord   = RwSignal::new(coordinate_mode);
+    let coord = RwSignal::new(coordinate_mode);
     let gs = RwSignal::new(GroupState::default());
 
     let dirty = move || gs.get().dirty;
@@ -334,16 +364,26 @@ fn TrackingFusionGroup(
             "fusion_worker_count": workers.get().parse::<u64>().unwrap_or(1),
             "coordinate_mode": coord.get(),
         });
-        gs.update(|s| { s.saving = true; s.error = None; });
+        gs.update(|s| {
+            s.saving = true;
+            s.error = None;
+        });
         let s = state.clone();
         spawn_local(async move {
             match patch_config(body).await {
                 Ok(cfg) => {
                     s.config.set(Some(cfg));
-                    gs.update(|st| { st.saving = false; st.dirty = false; st.saved = true; });
+                    gs.update(|st| {
+                        st.saving = false;
+                        st.dirty = false;
+                        st.saved = true;
+                    });
                 }
                 Err(e) => {
-                    gs.update(|st| { st.saving = false; st.error = Some(e); });
+                    gs.update(|st| {
+                        st.saving = false;
+                        st.error = Some(e);
+                    });
                 }
             }
         });

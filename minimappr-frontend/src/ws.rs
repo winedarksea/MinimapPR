@@ -1,6 +1,6 @@
 use crate::state::{AppState, LiveEvent, WsStatus, MAX_FEED_LEN};
-use leptos::prelude::*;
 use gloo_timers::future::TimeoutFuture;
+use leptos::prelude::*;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 use web_sys::{CloseEvent, ErrorEvent, MessageEvent, WebSocket};
@@ -8,7 +8,11 @@ use web_sys::{CloseEvent, ErrorEvent, MessageEvent, WebSocket};
 fn ws_url() -> String {
     let window = web_sys::window().unwrap();
     let location = window.location();
-    let proto = if location.protocol().unwrap_or_default() == "https:" { "wss" } else { "ws" };
+    let proto = if location.protocol().unwrap_or_default() == "https:" {
+        "wss"
+    } else {
+        "ws"
+    };
     let host = location.host().unwrap_or_default();
     format!("{proto}://{host}/ws/live")
 }
@@ -48,19 +52,26 @@ fn connect(state: AppState) -> WebSocket {
 fn handle_message(state: &AppState, text: &str) {
     let event: LiveEvent = match serde_json::from_str(text) {
         Ok(e) => e,
-        Err(e) => { log::warn!("WS parse error: {e}: {text}"); return; }
+        Err(e) => {
+            log::warn!("WS parse error: {e}: {text}");
+            return;
+        }
     };
     match event {
         LiveEvent::Detection(det) => {
             state.detections.update(|d| {
                 d.push_front(det);
-                while d.len() > MAX_FEED_LEN { d.pop_back(); }
+                while d.len() > MAX_FEED_LEN {
+                    d.pop_back();
+                }
             });
         }
         LiveEvent::Alert(alert) => {
             state.alerts.update(|a| {
                 a.push_front(alert);
-                while a.len() > MAX_FEED_LEN { a.pop_back(); }
+                while a.len() > MAX_FEED_LEN {
+                    a.pop_back();
+                }
             });
         }
         LiveEvent::TrackUpdate(track) => {
@@ -110,7 +121,9 @@ pub fn start_ws(state: AppState) {
             // Wait for close by polling
             loop {
                 TimeoutFuture::new(200).await;
-                if closed.get() { break; }
+                if closed.get() {
+                    break;
+                }
             }
 
             state.ws_status.set(WsStatus::Disconnected);

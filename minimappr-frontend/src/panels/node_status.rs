@@ -1,26 +1,28 @@
 use crate::state::{AppState, NodeStatus};
+use crate::ui::health_chip_class;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::HtmlAudioElement;
 
-fn health_chip_class(health: &str) -> &'static str {
-    match health {
-        "online"   => "health-chip online",
-        "degraded" => "health-chip degraded",
-        "offline"  => "health-chip offline",
-        _          => "health-chip unknown",
-    }
-}
-
 fn sparkline_path(rms: &[f64], width: f64, height: f64) -> String {
-    if rms.is_empty() { return String::new(); }
-    let max = rms.iter().cloned().fold(f64::NEG_INFINITY, f64::max).max(1e-6);
+    if rms.is_empty() {
+        return String::new();
+    }
+    let max = rms
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max)
+        .max(1e-6);
     let n = rms.len();
-    let points: Vec<String> = rms.iter().enumerate().map(|(i, &v)| {
-        let x = i as f64 / (n - 1).max(1) as f64 * width;
-        let y = height - (v / max) * height;
-        format!("{x:.1},{y:.1}")
-    }).collect();
+    let points: Vec<String> = rms
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| {
+            let x = i as f64 / (n - 1).max(1) as f64 * width;
+            let y = height - (v / max) * height;
+            format!("{x:.1},{y:.1}")
+        })
+        .collect();
     format!("M {}", points.join(" L "))
 }
 
@@ -87,7 +89,13 @@ fn NodeCard(node: NodeStatus) -> impl IntoView {
         format!("GPS {signal}")
     } else {
         node.gps_fix
-            .map(|v| if v { "GPS fix".to_string() } else { "GPS no-fix".to_string() })
+            .map(|v| {
+                if v {
+                    "GPS fix".to_string()
+                } else {
+                    "GPS no-fix".to_string()
+                }
+            })
             .unwrap_or_default()
     };
 
@@ -102,11 +110,13 @@ fn NodeCard(node: NodeStatus) -> impl IntoView {
         .and_then(|e| e.humidity_fraction)
         .or(node.humidity);
 
-    let temp = effective_temp_c.map(|t| format!("{t:.1}°C")).unwrap_or_default();
+    let temp = effective_temp_c
+        .map(|t| format!("{t:.1}°C"))
+        .unwrap_or_default();
     let hum = effective_humidity_fraction
         .map(|h| format!("{:.0}% RH", h * 100.0))
         .unwrap_or_default();
-    let fw   = node.firmware_version.clone().unwrap_or_default();
+    let fw = node.firmware_version.clone().unwrap_or_default();
 
     let channel_total = node
         .audio_debug
@@ -142,15 +152,22 @@ fn NodeCard(node: NodeStatus) -> impl IntoView {
 
     let local_position_text = node.position_m.as_ref().and_then(|position| {
         if position.len() >= 3 {
-            Some(format!("[{:.2}, {:.2}, {:.2}] m", position[0], position[1], position[2]))
+            Some(format!(
+                "[{:.2}, {:.2}, {:.2}] m",
+                position[0], position[1], position[2]
+            ))
         } else {
             None
         }
     });
-    let geo_position_text = node
-        .position_geo
-        .as_ref()
-        .map(|geo| format!("{:.5}, {:.5}, {:.1} m", geo.lat, geo.lon, geo.alt_m.unwrap_or(0.0)));
+    let geo_position_text = node.position_geo.as_ref().map(|geo| {
+        format!(
+            "{:.5}, {:.5}, {:.1} m",
+            geo.lat,
+            geo.lon,
+            geo.alt_m.unwrap_or(0.0)
+        )
+    });
 
     let audio_status = node
         .audio_debug
