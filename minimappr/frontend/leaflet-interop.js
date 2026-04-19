@@ -215,24 +215,29 @@
 
   // ── Init ──────────────────────────────────────────────────────
   function init(lat, lon, zoom) {
-    // If a previous map exists but its container was removed (e.g. page nav
-    // unmounted and remounted the #leaflet-map div), drop the old map and
-    // rebuild against the fresh DOM node. Keeps soft-navigation safe.
+    const target = document.getElementById("leaflet-map");
+    if (!target) return; // container not yet in DOM
+
     if (_map) {
       const prev = _map.getContainer ? _map.getContainer() : null;
-      if (!prev || !document.body.contains(prev)) {
-        try { _map.remove(); } catch (_) {}
-        _map = null;
-        for (const k in _markers)  delete _markers[k];
-        for (const k in _vectors)  delete _vectors[k];
-        for (const k in _ellipses) delete _ellipses[k];
-        for (const k in _zones)    delete _zones[k];
-        for (const k in _gdop)     delete _gdop[k];
-      } else {
+      // Reuse only when the existing map is bound to THIS element. During a
+      // Leptos route transition the old element can remain in the DOM briefly
+      // while a new #leaflet-map is already mounted — prev !== target detects
+      // that case and forces a rebuild so we don't stay bound to the stale node.
+      if (prev && prev === target && document.body.contains(prev)) {
+        _map.invalidateSize();
         return;
       }
+      try { _map.remove(); } catch (_) {}
+      _map = null;
+      for (const k in _markers)  delete _markers[k];
+      for (const k in _vectors)  delete _vectors[k];
+      for (const k in _ellipses) delete _ellipses[k];
+      for (const k in _zones)    delete _zones[k];
+      for (const k in _gdop)     delete _gdop[k];
     }
-    _map = L.map("leaflet-map", {
+    // Pass the element directly to avoid duplicate-id ambiguity during transitions.
+    _map = L.map(target, {
       center: [lat, lon],
       zoom: zoom ?? 17,
       zoomControl: true,

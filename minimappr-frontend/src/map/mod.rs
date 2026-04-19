@@ -3,6 +3,7 @@ pub mod bindings;
 use crate::state::AppState;
 use bindings::*;
 use leptos::prelude::*;
+use leptos::task::spawn_local;
 
 #[component]
 pub fn LeafletMapPanel() -> impl IntoView {
@@ -16,6 +17,11 @@ pub fn LeafletMapPanel() -> impl IntoView {
     Effect::new(move |init_done: Option<bool>| {
         if init_done.is_none() {
             init(44.987, -93.258, 17);
+            // Second invalidateSize after flex layout settles, matching heatmap timing.
+            spawn_local(async move {
+                gloo_timers::future::TimeoutFuture::new(250).await;
+                invalidate_map_size();
+            });
         }
         true
     });
