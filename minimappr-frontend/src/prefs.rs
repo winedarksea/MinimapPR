@@ -7,7 +7,6 @@ use wasm_bindgen::JsCast;
 use web_sys::{HtmlElement, Storage};
 
 pub const KEY_THEME: &str = "mmp.theme";
-pub const KEY_DENSITY: &str = "mmp.density";
 
 fn storage() -> Option<Storage> {
     web_sys::window()?.local_storage().ok().flatten()
@@ -24,9 +23,6 @@ pub fn current_theme() -> String {
     root_attr("data-theme").unwrap_or_else(|| "dark".into())
 }
 
-pub fn current_density() -> String {
-    root_attr("data-density").unwrap_or_else(|| "comfortable".into())
-}
 
 fn root_attr(name: &str) -> Option<String> {
     let doc = web_sys::window()?.document()?;
@@ -63,17 +59,3 @@ pub fn toggle_theme() -> String {
     next.to_string()
 }
 
-pub fn apply_density(density: &str) {
-    set_root_attr("data-density", density);
-    set(KEY_DENSITY, density);
-}
-
-pub fn toggle_density() -> String {
-    let next = if current_density() == "compact" {
-        "comfortable"
-    } else {
-        "compact"
-    };
-    apply_density(next);
-    next.to_string()
-}

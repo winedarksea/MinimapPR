@@ -9,7 +9,6 @@ pub fn TopBar() -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState");
     let ws_status = state.ws_status;
     let theme = state.theme;
-    let density = state.density;
 
     let pill_class = move || match ws_status.get() {
         WsStatus::Connected => "ws-pill connected",
@@ -39,10 +38,6 @@ pub fn TopBar() -> impl IntoView {
         let next = prefs::toggle_theme();
         theme.set(next);
     };
-    let on_density_click = move |_| {
-        let next = prefs::toggle_density();
-        density.set(next);
-    };
     let theme_icon = move || {
         if theme.get() == "light" {
             "dark_mode"
@@ -57,21 +52,6 @@ pub fn TopBar() -> impl IntoView {
             "Switch to light theme"
         }
     };
-    let density_label = move || {
-        if density.get() == "compact" {
-            "Dense"
-        } else {
-            "Comfort"
-        }
-    };
-    let density_title = move || {
-        if density.get() == "compact" {
-            "Switch to comfortable density"
-        } else {
-            "Switch to compact density"
-        }
-    };
-
     view! {
         <header class="topbar">
             <span class="topbar-brand">
@@ -90,15 +70,6 @@ pub fn TopBar() -> impl IntoView {
 
             <div class="topbar-tools">
                 <span class=pill_class>{pill_text}</span>
-                <button
-                    class="topbar-toggle"
-                    title=density_title
-                    aria-label=density_title
-                    on:click=on_density_click
-                >
-                    <span class="topbar-toggle-label">"Density"</span>
-                    <span class="topbar-toggle-value">{density_label}</span>
-                </button>
                 <div class="topbar-clock" aria-label="Clock">
                     <div class="utc">{clock_utc}" UTC"</div>
                     <div class="local">{clock_local}" local"</div>

@@ -38,6 +38,7 @@ from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.ingest import EnvironmentUpdater, IngestProcessor
 from minimappr.core.localization import LocalizationError
 from minimappr.core.node_registry import NodeRegistry
+from minimappr.core.pipeline_realtime import PipelineRealtimeTracker
 from minimappr.core.preprocessing import (
     NodePreprocessorFactory,
     create_classification_preprocessor,
@@ -106,6 +107,8 @@ class DetectionProduct:
     track: TrackState | None
     suppressed_by_zone: bool
     suppression_reasons: list[str]
+    pipeline_item_id: str
+    event_time_ns: int
 
 
 @dataclass(slots=True)
@@ -146,6 +149,7 @@ class FusionMetrics:
     localization_fallback_count: int = 0
     last_localization_algorithm: str = "gcc_phat"
     last_attempted_algorithm: str = "gcc_phat"
+    classification_reuse_hits: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +277,9 @@ class FusionNode:
         self._classification_workers: list[asyncio.Task] = []
         self._rules_workers: list[asyncio.Task] = []
         self._metrics = FusionMetrics()
+        self._realtime_tracker = PipelineRealtimeTracker(
+            ("localization", "classification", "rules")
+        )
         self._last_error: str | None = None
         self._started = False
         self._stopping = False
@@ -407,6 +414,7 @@ class FusionNode:
 
     async def status(self) -> dict[str, Any]:
         nodes = await self.registry.list_nodes()
+        realtime = self._realtime_tracker.snapshot(now_ns=time.time_ns())
         return {
             "started": self._started,
             "queue": {
@@ -427,7 +435,9 @@ class FusionNode:
             "last_error": self._last_error,
             "registered_nodes": len(nodes),
             "metrics": asdict(self._metrics),
+            "realtime": realtime,
             "offline_replay_mode": self.fusion_config.offline_replay_mode,
+            "drop_on_backpressure": self.fusion_config.drop_on_backpressure,
         }
 
     async def housekeeping_tick(self, now_ns: int) -> None:
@@ -449,6 +459,7 @@ class FusionNode:
             if candidate is None:
                 self._localization_queue.task_done()
                 return
+            self._realtime_tracker.mark_started(stage_name="localization", item_id=candidate.id)
             self._metrics.localization_stage_in += 1
             try:
                 product = await self._localize_candidate(candidate)
@@ -459,6 +470,7 @@ class FusionNode:
                 self._metrics.localization_failures += 1
                 self._last_error = f"{type(exc).__name__}: {exc}"
             finally:
+                self._realtime_tracker.mark_finished(stage_name="localization", item_id=candidate.id)
                 self._localization_queue.task_done()
 
     async def _classification_worker_loop(self, worker_id: int) -> None:
@@ -468,6 +480,10 @@ class FusionNode:
             if product is None:
                 self._classification_queue.task_done()
                 return
+            self._realtime_tracker.mark_started(
+                stage_name="classification",
+                item_id=product.candidate.id,
+            )
             self._metrics.classification_stage_in += 1
             try:
                 detection_products = await self._classify_and_assemble(product)
@@ -478,6 +494,10 @@ class FusionNode:
                 self._metrics.classification_failures += 1
                 self._last_error = f"{type(exc).__name__}: {exc}"
             finally:
+                self._realtime_tracker.mark_finished(
+                    stage_name="classification",
+                    item_id=product.candidate.id,
+                )
                 self._classification_queue.task_done()
 
     async def _rules_worker_loop(self, worker_id: int) -> None:
@@ -487,6 +507,10 @@ class FusionNode:
             if product is None:
                 self._rules_queue.task_done()
                 return
+            self._realtime_tracker.mark_started(
+                stage_name="rules",
+                item_id=product.pipeline_item_id,
+            )
             self._metrics.rules_stage_in += 1
             try:
                 await self._process_rules_and_delivery(product)
@@ -495,6 +519,10 @@ class FusionNode:
                 self._metrics.rules_failures += 1
                 self._last_error = f"{type(exc).__name__}: {exc}"
             finally:
+                self._realtime_tracker.mark_finished(
+                    stage_name="rules",
+                    item_id=product.pipeline_item_id,
+                )
                 self._rules_queue.task_done()
 
     # ------------------------------------------------------------------
@@ -664,10 +692,9 @@ class FusionNode:
             if maybe_detection is not None:
                 detection_products.append(maybe_detection)
 
-        omni = await self._classification_orchestrator.classify_omni_only(
-            reference_signal=product.omni_classification_reference_signal,
-            sample_rate_hz=product.candidate.sample_rate_hz,
-            event_time_ns=product.candidate.event_time_ns,
+        omni = await self._classify_omni_branch(
+            product=product,
+            localized_result=localized if product.localization_branch is not None else None,
         )
         maybe_detection = await self._assemble_reporting_branch(
             product=product,
@@ -686,6 +713,38 @@ class FusionNode:
             detection_products.append(maybe_detection)
 
         return detection_products
+
+    async def _classify_omni_branch(
+        self,
+        *,
+        product: LocalizedCandidate,
+        localized_result,
+    ):
+        if localized_result is not None and self._can_reuse_localized_result_for_omni(
+            product=product,
+            localized_result=localized_result,
+        ):
+            self._metrics.classification_reuse_hits += 1
+            return localized_result
+        return await self._classification_orchestrator.classify_omni_only(
+            reference_signal=product.omni_classification_reference_signal,
+            sample_rate_hz=product.candidate.sample_rate_hz,
+            event_time_ns=product.candidate.event_time_ns,
+        )
+
+    @staticmethod
+    def _can_reuse_localized_result_for_omni(
+        *,
+        product: LocalizedCandidate,
+        localized_result,
+    ) -> bool:
+        if product.localization_branch is None:
+            return False
+        if localized_result.beamformed_classification is not None:
+            return False
+        if localized_result.classification_path != "omni":
+            return False
+        return product.localization_branch.reference_sensor == product.omni_reference_sensor
 
     async def _classification_windows_for_event(
         self,
@@ -899,6 +958,8 @@ class FusionNode:
             track=assembly.track,
             suppressed_by_zone=assembly.suppressed_by_zone,
             suppression_reasons=assembly.suppression_reasons,
+            pipeline_item_id=assembly.detection.id,
+            event_time_ns=assembly.detection.timestamp_ns,
         )
 
     # ------------------------------------------------------------------
@@ -943,6 +1004,7 @@ class FusionNode:
         }
         await self.live_callback(payload)
         self._metrics.detections_emitted += 1
+        self._realtime_tracker.record_completed(event_time_ns=product.event_time_ns)
 
         evaluations = await self.rules_engine.evaluate(detection=detection, track=track)
         for evaluation in evaluations:
@@ -1046,15 +1108,56 @@ class FusionNode:
         self._taxonomy_refresh_ns = now
 
     async def _enqueue_stage(self, queue: asyncio.Queue, item: Any) -> bool:
+        tracker_stage_name = self._queue_stage_name(queue)
+        tracker_item_id = self._stage_item_id(item)
+        tracker_event_time_ns = self._stage_item_event_time_ns(item)
         if self.fusion_config.offline_replay_mode or not self.fusion_config.drop_on_backpressure:
             await queue.put(item)
+            self._realtime_tracker.mark_enqueued(
+                stage_name=tracker_stage_name,
+                item_id=tracker_item_id,
+                event_time_ns=tracker_event_time_ns,
+            )
             return True
         try:
             queue.put_nowait(item)
+            self._realtime_tracker.mark_enqueued(
+                stage_name=tracker_stage_name,
+                item_id=tracker_item_id,
+                event_time_ns=tracker_event_time_ns,
+            )
             return True
         except asyncio.QueueFull:
             self._metrics.stage_drops_backpressure += 1
             return False
+
+    def _queue_stage_name(self, queue: asyncio.Queue) -> str:
+        stage_map: dict[asyncio.Queue, str] = {
+            self._localization_queue: "localization",
+            self._classification_queue: "classification",
+            self._rules_queue: "rules",
+        }
+        return stage_map[queue]
+
+    @staticmethod
+    def _stage_item_id(item: Any) -> str:
+        if isinstance(item, EventCandidate):
+            return item.id
+        if isinstance(item, LocalizedCandidate):
+            return item.candidate.id
+        if isinstance(item, DetectionProduct):
+            return item.pipeline_item_id
+        raise TypeError(f"Unsupported pipeline item type: {type(item).__name__}")
+
+    @staticmethod
+    def _stage_item_event_time_ns(item: Any) -> int:
+        if isinstance(item, EventCandidate):
+            return item.event_time_ns
+        if isinstance(item, LocalizedCandidate):
+            return item.candidate.event_time_ns
+        if isinstance(item, DetectionProduct):
+            return item.event_time_ns
+        raise TypeError(f"Unsupported pipeline item type: {type(item).__name__}")
 
     @asynccontextmanager
     async def _storage_batch(self):

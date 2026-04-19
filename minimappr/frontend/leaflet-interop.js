@@ -386,6 +386,10 @@
     _map.fitBounds(ll, { padding: [40, 40], maxZoom: 18 });
   }
 
+  function invalidateMapSize() {
+    if (_map) _map.invalidateSize();
+  }
+
   // ── Public API ────────────────────────────────────────────────
   globalThis.leafletInterop = {
     init,
@@ -396,5 +400,6 @@
     setGdopCircle, removeGdopCircle,
     panTo,
     initHeatmap, setHeatmapPoints, clearHeatmap, fitBoundsLatLons,
+    invalidateMapSize,
   };
 })();

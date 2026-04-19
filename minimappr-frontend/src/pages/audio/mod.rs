@@ -24,12 +24,22 @@ pub fn AudioAnalysisPage() -> impl IntoView {
                 }.into_any(),
                 Some(id) => {
                     view! {
-                        <DetectionAudioAnalysisView
-                            detection_id=id
-                            show_expand_link=false
-                            container_class="audio-page".to_string()
-                            instance_prefix="page".to_string()
-                        />
+                        <div style="display:flex;flex-direction:column;gap:8px;height:100%">
+                            <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+                                <A href="/cop">
+                                    <span class="btn-sm">"← COP detections"</span>
+                                </A>
+                                <A href="/audio">
+                                    <span class="btn-sm">"← Audio"</span>
+                                </A>
+                            </div>
+                            <DetectionAudioAnalysisView
+                                detection_id=id
+                                show_expand_link=false
+                                container_class="audio-page".to_string()
+                                instance_prefix="page".to_string()
+                            />
+                        </div>
                     }.into_any()
                 }
             }}

@@ -52,4 +52,7 @@ extern "C" {
 
     #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "fitBoundsLatLons")]
     pub fn fit_bounds_latlons(points: &JsValue);
+
+    #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "invalidateMapSize")]
+    pub fn invalidate_map_size();
 }

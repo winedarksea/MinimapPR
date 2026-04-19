@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from minimappr.config import Settings
 
 
@@ -28,6 +30,17 @@ def test_birdnet_hybrid_production_profile_sets_hybrid_defaults() -> None:
     assert settings.localization_band_min_hz == 300.0
     assert settings.localization_band_max_hz == 3500.0
     assert settings.reporting_window_seconds == 30.0
+    assert settings.rules_config_path == Path("data/rules_birdnet_hybrid_production.json")
+
+
+def test_birdnet_hybrid_production_respects_explicit_rules_path_override() -> None:
+    explicit_rules_path = Path("data/custom_rules.json")
+    settings = Settings(
+        runtime_profile="birdnet_hybrid_production",
+        rules_config_path=explicit_rules_path,
+    )
+
+    assert settings.rules_config_path == explicit_rules_path
 
 
 def test_classification_window_defaults_to_localization_window() -> None:

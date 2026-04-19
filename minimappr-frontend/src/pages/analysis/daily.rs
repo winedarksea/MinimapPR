@@ -141,7 +141,7 @@ fn DailyMatrix(data: DailyResponse) -> impl IntoView {
         .map(|iso| extract_hour_label(iso))
         .collect();
 
-    let grid_cols = format!("repeat({}, minmax(0, 1fr))", num_buckets);
+    let grid_cols = format!("repeat({}, minmax(28px, 1fr))", num_buckets);
     let counts = data.counts.clone();
     let labels = data.labels.clone();
     let label_totals = data.label_totals.clone();

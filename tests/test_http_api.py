@@ -102,7 +102,15 @@ def test_http_ingest_and_cop_status(monkeypatch, tmp_path: Path) -> None:
         fusion = fusion_response.json()
         assert fusion["started"] is True
         assert "metrics" in fusion
+        assert "realtime" in fusion
         assert isinstance(fusion["metrics"].get("last_localization_algorithm"), str)
+
+        diagnostics_response = client.get("/api/v1/system/diagnostics")
+        assert diagnostics_response.status_code == 200
+        diagnostics = diagnostics_response.json()
+        assert "pipeline" in diagnostics
+        assert "realtime" in diagnostics["pipeline"]
+        assert "metrics" in diagnostics["pipeline"]
 
 
 def test_spa_refresh_fallback_serves_index_for_frontend_routes(monkeypatch, tmp_path: Path) -> None:

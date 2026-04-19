@@ -9,6 +9,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+DEFAULT_RULES_CONFIG_PATH = Path("data/rules.json")
+DEFAULT_BIRDNET_HYBRID_RULES_CONFIG_PATH = Path("data/rules_birdnet_hybrid_production.json")
+
+
 def _env_bool(key: str, default: bool) -> bool:
     raw = os.getenv(key)
     if raw is None:
@@ -277,7 +281,7 @@ class Settings:
     snippet_dir: Path = Path("data/snippets")
     snippet_retention_seconds: int = 3600
     retention_policy_path: Path = Path("data/retention_policy.json")
-    rules_config_path: Path = Path("data/rules.json")
+    rules_config_path: Path = DEFAULT_RULES_CONFIG_PATH
     taxonomy_config_path: Path = Path("data/taxonomy.json")
     model_chain_config_path: Path = Path("data/model_chain.json")
     large_artifact_dir: Path = Path("data/artifacts")
@@ -331,7 +335,7 @@ class Settings:
     yamnet_min_confidence: float = 0.25
     yamnet_input_target_rms: float = 0.10
     yamnet_max_input_gain: float = 32.0
-    birdnet_trigger_min_confidence: float = 0.05
+    birdnet_trigger_min_confidence: float = 0.40
     detection_min_confidence: float = 0.4
     cop_detections_max_items: int = 150
     cop_tracks_max_items: int = 150
@@ -686,7 +690,7 @@ class Settings:
             yamnet_min_confidence=_env_float("MINIMAPPR_YAMNET_MIN_CONFIDENCE", 0.25),
             yamnet_input_target_rms=_env_float("MINIMAPPR_YAMNET_INPUT_TARGET_RMS", 0.10),
             yamnet_max_input_gain=_env_float("MINIMAPPR_YAMNET_MAX_INPUT_GAIN", 32.0),
-            birdnet_trigger_min_confidence=_env_float("MINIMAPPR_BIRDNET_TRIGGER_MIN_CONFIDENCE", 0.05),
+            birdnet_trigger_min_confidence=_env_float("MINIMAPPR_BIRDNET_TRIGGER_MIN_CONFIDENCE", 0.40),
             detection_min_confidence=_env_float("MINIMAPPR_DETECTION_MIN_CONFIDENCE", 0.4),
             cop_detections_max_items=_env_int("MINIMAPPR_COP_DETECTIONS_MAX_ITEMS", 150),
             cop_tracks_max_items=_env_int("MINIMAPPR_COP_TRACKS_MAX_ITEMS", 150),
@@ -936,6 +940,10 @@ class Settings:
             self.localization_strategy = "fixed"
             self.beamformed_classification_enabled = False
             self.skip_localization_for_classification = False
+            if self.rules_config_path == DEFAULT_RULES_CONFIG_PATH:
+                # Wildlife deployments should not page on generic human/security
+                # categories unless operators explicitly provide a broader rules file.
+                self.rules_config_path = DEFAULT_BIRDNET_HYBRID_RULES_CONFIG_PATH
             self.classification_window_seconds = max(self.classification_window_seconds, 30.0)
             self.max_sensor_buffer_seconds = max(
                 self.max_sensor_buffer_seconds,

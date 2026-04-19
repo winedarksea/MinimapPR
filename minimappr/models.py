@@ -289,7 +289,9 @@ class FusionStatusResponse(BaseModel):
     last_error: str | None = None
     registered_nodes: int
     metrics: dict[str, Any]
+    realtime: dict[str, Any]
     offline_replay_mode: bool
+    drop_on_backpressure: bool
 
 
 class FederationStatusResponse(BaseModel):

@@ -1156,7 +1156,22 @@ async def get_system_diagnostics(request: Request) -> dict:
     """Runtime facts (uptime, CPU, memory, disk, load) for the Server page."""
     state = _require_state(request)
     settings: Settings = state.settings
-    return system_info.collect(db_path=settings.db_path, start_ns=process_start_ns())
+    diagnostics = system_info.collect(db_path=settings.db_path, start_ns=process_start_ns())
+    fusion_status = await state.fusion_node.status()
+    diagnostics["pipeline"] = {
+        "queue": fusion_status["queue"],
+        "workers": fusion_status["workers"],
+        "realtime": fusion_status["realtime"],
+        "drop_on_backpressure": fusion_status["drop_on_backpressure"],
+        "metrics": {
+            "triggers_enqueued": fusion_status["metrics"].get("triggers_enqueued", 0),
+            "triggers_dropped_queue_full": fusion_status["metrics"].get("triggers_dropped_queue_full", 0),
+            "stage_drops_backpressure": fusion_status["metrics"].get("stage_drops_backpressure", 0),
+            "classification_reuse_hits": fusion_status["metrics"].get("classification_reuse_hits", 0),
+            "detections_emitted": fusion_status["metrics"].get("detections_emitted", 0),
+        },
+    }
+    return diagnostics
 
 
 @app.get("/api/v1/system/logs")

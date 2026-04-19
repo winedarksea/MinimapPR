@@ -25,10 +25,15 @@ pub fn GeoHeatmapView() -> impl IntoView {
     let error: RwSignal<Option<String>> = RwSignal::new(None);
     let count = RwSignal::new(0usize);
 
-    // Init the Leaflet map (same singleton; init is idempotent now).
+    // Init the Leaflet map then invalidate size so flex layout dimensions settle.
     Effect::new(move |init_done: Option<bool>| {
         if init_done.is_none() {
             lfi::init(44.987, -93.258, 13);
+            // Delay longer than the 100ms in init() to catch post-flex-layout sizing.
+            spawn_local(async move {
+                gloo_timers::future::TimeoutFuture::new(250).await;
+                lfi::invalidate_map_size();
+            });
         }
         true
     });
@@ -41,29 +46,27 @@ pub fn GeoHeatmapView() -> impl IntoView {
                 match Request::get(&url).send().await {
                     Ok(resp) if resp.ok() => match resp.json::<HeatmapResponse>().await {
                         Ok(d) => {
-                            let max_weight =
-                                d.bins.iter().map(|b| b.weight).max().unwrap_or(1).max(1);
-                            let points = js_sys::Array::new();
-                            for b in &d.bins {
-                                let triple = js_sys::Array::new();
-                                triple.push(&wasm_bindgen::JsValue::from_f64(b.lat));
-                                triple.push(&wasm_bindgen::JsValue::from_f64(b.lon));
-                                triple.push(&wasm_bindgen::JsValue::from_f64(b.weight as f64));
-                                points.push(&triple);
-                            }
                             lfi::clear_heatmap();
-                            lfi::set_heatmap_points(&points.into(), max_weight as f64);
-                            // Fit bounds on first non-empty load.
                             if !d.bins.is_empty() {
+                                let max_weight =
+                                    d.bins.iter().map(|b| b.weight).max().unwrap_or(1).max(1);
+                                let points = js_sys::Array::new();
                                 let fit_points = js_sys::Array::new();
                                 for b in &d.bins {
+                                    let triple = js_sys::Array::new();
+                                    triple.push(&wasm_bindgen::JsValue::from_f64(b.lat));
+                                    triple.push(&wasm_bindgen::JsValue::from_f64(b.lon));
+                                    triple.push(&wasm_bindgen::JsValue::from_f64(b.weight as f64));
+                                    points.push(&triple);
                                     let pair = js_sys::Array::new();
                                     pair.push(&wasm_bindgen::JsValue::from_f64(b.lat));
                                     pair.push(&wasm_bindgen::JsValue::from_f64(b.lon));
                                     fit_points.push(&pair);
                                 }
+                                lfi::set_heatmap_points(&points.into(), max_weight as f64);
                                 lfi::fit_bounds_latlons(&fit_points.into());
                             }
+                            lfi::invalidate_map_size();
                             count.set(d.bins.len());
                         }
                         Err(e) => error.set(Some(format!("parse: {e}"))),
@@ -98,8 +101,19 @@ pub fn GeoHeatmapView() -> impl IntoView {
                 </span>
                 <span class="daily-error">{move || error.get().unwrap_or_default()}</span>
             </div>
-            <div class="leaflet-container-wrap" style="flex:1;min-height:400px">
+            <div class="leaflet-container-wrap" style="flex:1;min-height:400px;position:relative">
                 <div id="leaflet-map"></div>
+                {move || if count.get() == 0 && error.get().is_none() {
+                    Some(view! {
+                        <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:500">
+                            <span class="muted" style="background:var(--md-sys-color-surface-container);padding:8px 16px;border-radius:8px;font-size:13px">
+                                "No geolocated detections in this window"
+                            </span>
+                        </div>
+                    })
+                } else {
+                    None
+                }}
             </div>
         </div>
     }
