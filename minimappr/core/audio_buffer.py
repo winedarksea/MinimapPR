@@ -12,13 +12,13 @@ import numpy as np
 class SensorStreamBuffer:
     sample_rate_hz: int
     max_duration_seconds: float
-    ns_per_sample: int = field(init=False)
     max_samples: int = field(init=False)
     start_time_ns: int | None = field(init=False, default=None)
     samples: np.ndarray = field(init=False, default_factory=lambda: np.zeros(0, dtype=np.float32))
+    _timeline_origin_ns: int | None = field(init=False, default=None)
+    _buffer_start_sample_index: int = field(init=False, default=0)
 
     def __post_init__(self) -> None:
-        self.ns_per_sample = int(round(1_000_000_000 / self.sample_rate_hz))
         self.max_samples = max(1, int(round(self.max_duration_seconds * self.sample_rate_hz)))
 
     def append(self, start_time_ns: int, samples: np.ndarray) -> None:
@@ -27,25 +27,36 @@ class SensorStreamBuffer:
             raise ValueError("SensorStreamBuffer expects mono samples")
 
         if self.start_time_ns is None:
+            self._timeline_origin_ns = start_time_ns
+            self._buffer_start_sample_index = 0
             self.start_time_ns = start_time_ns
             self.samples = samples.copy()
             self._prune()
             return
 
-        end_time_ns = self.start_time_ns + self.samples.size * self.ns_per_sample
+        if samples.size == 0:
+            return
 
-        if start_time_ns > end_time_ns + self.ns_per_sample:
-            gap_samples = int(round((start_time_ns - end_time_ns) / self.ns_per_sample))
-            if gap_samples > 0:
-                self.samples = np.concatenate([self.samples, np.zeros(gap_samples, dtype=np.float32)])
-        elif start_time_ns < end_time_ns:
-            overlap_samples = int(round((end_time_ns - start_time_ns) / self.ns_per_sample))
-            if overlap_samples >= samples.size:
-                return
-            samples = samples[overlap_samples:]
+        current_start_sample_index = self._buffer_start_sample_index
+        current_end_sample_index = current_start_sample_index + self.samples.size
+        incoming_start_sample_index = self._time_to_sample_index(start_time_ns)
+        incoming_end_sample_index = incoming_start_sample_index + samples.size
 
-        if samples.size:
-            self.samples = np.concatenate([self.samples, samples])
+        merged_start_sample_index = min(current_start_sample_index, incoming_start_sample_index)
+        merged_end_sample_index = max(current_end_sample_index, incoming_end_sample_index)
+        merged = np.zeros(merged_end_sample_index - merged_start_sample_index, dtype=np.float32)
+
+        existing_offset = current_start_sample_index - merged_start_sample_index
+        merged[existing_offset : existing_offset + self.samples.size] = self.samples
+
+        incoming_offset = incoming_start_sample_index - merged_start_sample_index
+        # Late-arriving frames should overwrite previously padded zeros rather than
+        # being discarded as overlap when HTTP delivery is slightly out of order.
+        merged[incoming_offset : incoming_offset + samples.size] = samples
+
+        self.samples = merged
+        self._buffer_start_sample_index = merged_start_sample_index
+        self._refresh_start_time_ns()
         self._prune()
 
     def _prune(self) -> None:
@@ -54,30 +65,35 @@ class SensorStreamBuffer:
 
         drop = self.samples.size - self.max_samples
         self.samples = self.samples[drop:]
-        if self.start_time_ns is not None:
-            self.start_time_ns += drop * self.ns_per_sample
+        self._buffer_start_sample_index += drop
+        self._refresh_start_time_ns()
 
     def get_window(self, center_time_ns: int, window_seconds: float) -> np.ndarray | None:
         if self.start_time_ns is None or self.samples.size == 0:
             return None
 
         window_samples = max(1, int(round(window_seconds * self.sample_rate_hz)))
-        start_time_ns = center_time_ns - (window_samples // 2) * self.ns_per_sample
-        offset_samples = int(round((start_time_ns - self.start_time_ns) / self.ns_per_sample))
-        end_samples = offset_samples + window_samples
+        center_sample_index = self._time_to_sample_index(center_time_ns)
+        start_sample_index = center_sample_index - (window_samples // 2)
+        end_sample_index = start_sample_index + window_samples
 
-        if offset_samples < 0 or end_samples > self.samples.size:
+        relative_start_index = start_sample_index - self._buffer_start_sample_index
+        relative_end_index = end_sample_index - self._buffer_start_sample_index
+
+        if relative_start_index < 0 or relative_end_index > self.samples.size:
             return None
 
-        return self.samples[offset_samples:end_samples].copy()
+        return self.samples[relative_start_index:relative_end_index].copy()
 
     def get_window_ending_at(self, end_time_ns: int, window_seconds: float) -> np.ndarray | None:
         if self.start_time_ns is None or self.samples.size == 0:
             return None
 
         window_samples = max(1, int(round(window_seconds * self.sample_rate_hz)))
-        end_offset_samples = int(round((end_time_ns - self.start_time_ns) / self.ns_per_sample))
-        start_offset_samples = end_offset_samples - window_samples
+        end_sample_index = self._time_to_sample_index(end_time_ns)
+        start_sample_index = end_sample_index - window_samples
+        end_offset_samples = end_sample_index - self._buffer_start_sample_index
+        start_offset_samples = start_sample_index - self._buffer_start_sample_index
 
         # Clamp the start to the beginning of the buffer so partial windows (e.g.
         # when the buffer has less than classification_window_seconds of history) return
@@ -91,6 +107,34 @@ class SensorStreamBuffer:
         start_offset_samples = max(0, start_offset_samples)
 
         return self.samples[start_offset_samples:end_offset_samples].copy()
+
+    def end_time_ns(self) -> int | None:
+        if self.start_time_ns is None or self.samples.size == 0:
+            return None
+        return self._sample_index_to_time_ns(self._buffer_start_sample_index + self.samples.size)
+
+    def _refresh_start_time_ns(self) -> None:
+        if self._timeline_origin_ns is None:
+            self.start_time_ns = None
+            return
+        self.start_time_ns = self._sample_index_to_time_ns(self._buffer_start_sample_index)
+
+    def _time_to_sample_index(self, time_ns: int) -> int:
+        if self._timeline_origin_ns is None:
+            raise ValueError("SensorStreamBuffer timeline origin is not initialized")
+        delta_ns = time_ns - self._timeline_origin_ns
+        return self._round_divide(delta_ns * self.sample_rate_hz, 1_000_000_000)
+
+    def _sample_index_to_time_ns(self, sample_index: int) -> int:
+        if self._timeline_origin_ns is None:
+            raise ValueError("SensorStreamBuffer timeline origin is not initialized")
+        return self._timeline_origin_ns + self._round_divide(sample_index * 1_000_000_000, self.sample_rate_hz)
+
+    @staticmethod
+    def _round_divide(numerator: int, denominator: int) -> int:
+        if numerator >= 0:
+            return (numerator + denominator // 2) // denominator
+        return -((-numerator + denominator // 2) // denominator)
 
 
 class MultiSensorBuffer:
@@ -178,7 +222,9 @@ class MultiSensorBuffer:
                 if tail.size == 0:
                     continue
                 recent[sensor_id] = tail
-                end_ns = buffer.start_time_ns + buffer.samples.size * buffer.ns_per_sample
+                end_ns = buffer.end_time_ns()
+                if end_ns is None:
+                    continue
                 latest_end_ns = max(latest_end_ns, end_ns)
 
             if not recent:
@@ -203,7 +249,9 @@ class MultiSensorBuffer:
 
                 active_sensor_count += 1
                 sample_rate_counts[buffer.sample_rate_hz] = sample_rate_counts.get(buffer.sample_rate_hz, 0) + 1
-                end_ns = buffer.start_time_ns + buffer.samples.size * buffer.ns_per_sample
+                end_ns = buffer.end_time_ns()
+                if end_ns is None:
+                    continue
                 latest_sample_time_ns = end_ns if latest_sample_time_ns is None else max(latest_sample_time_ns, end_ns)
 
                 tail_samples = max(1, min(buffer.samples.size, buffer.sample_rate_hz // 2))

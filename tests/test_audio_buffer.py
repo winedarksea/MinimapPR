@@ -61,6 +61,57 @@ async def test_multi_sensor_buffer_can_fetch_trailing_window() -> None:
     assert np.array_equal(trailing["s16k"], samples[-4_000:])
 
 
+def test_sensor_stream_buffer_replaces_padded_gap_when_late_frame_arrives() -> None:
+    sample_rate_hz = 16_000
+    samples_per_chunk = 4
+    chunk_duration_ns = int(round((samples_per_chunk / sample_rate_hz) * 1_000_000_000))
+    start_time_ns = 1_000_000_000_000_000_000
+
+    buf = SensorStreamBuffer(sample_rate_hz=sample_rate_hz, max_duration_seconds=5.0)
+    buf.append(start_time_ns=start_time_ns, samples=np.ones(samples_per_chunk, dtype=np.float32))
+    buf.append(
+        start_time_ns=start_time_ns + (2 * chunk_duration_ns),
+        samples=np.full(samples_per_chunk, 3.0, dtype=np.float32),
+    )
+
+    assert np.array_equal(
+        buf.samples,
+        np.array([1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 3.0, 3.0, 3.0, 3.0], dtype=np.float32),
+    )
+
+    buf.append(
+        start_time_ns=start_time_ns + chunk_duration_ns,
+        samples=np.full(samples_per_chunk, 2.0, dtype=np.float32),
+    )
+
+    assert np.array_equal(
+        buf.samples,
+        np.array([1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 3.0], dtype=np.float32),
+    )
+
+
+def test_sensor_stream_buffer_prune_uses_exact_sample_time_at_48khz() -> None:
+    sample_rate_hz = 48_000
+    max_samples = 3
+    start_time_ns = 1_000_000_000_000_000_000
+    buf = SensorStreamBuffer(
+        sample_rate_hz=sample_rate_hz,
+        max_duration_seconds=max_samples / sample_rate_hz,
+    )
+
+    def sample_time(sample_index: int) -> int:
+        return start_time_ns + int(round((sample_index / sample_rate_hz) * 1_000_000_000))
+
+    for sample_index in range(5):
+        buf.append(
+            start_time_ns=sample_time(sample_index),
+            samples=np.array([float(sample_index)], dtype=np.float32),
+        )
+
+    assert np.array_equal(buf.samples, np.array([2.0, 3.0, 4.0], dtype=np.float32))
+    assert buf.start_time_ns == sample_time(2)
+
+
 def test_get_window_ending_at_returns_partial_audio_when_buffer_shorter_than_window() -> None:
     """Regression: previously returned None when start_offset_samples < 0.
 
