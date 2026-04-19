@@ -183,6 +183,19 @@ pub struct CopStatus {
     pub detections_last_60s: u32,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
+pub struct FusionStatus {
+    #[serde(default)]
+    pub realtime: FusionRealtime,
+    #[serde(default)]
+    pub metrics: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
+pub struct FusionRealtime {
+    pub pipeline_seconds_behind_realtime: Option<f64>,
+}
+
 // ── Config snapshot ─────────────────────────────────────────────
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -226,6 +239,7 @@ pub struct AppState {
     pub alerts: RwSignal<VecDeque<Alert>>,
     pub config: RwSignal<Option<ConfigSnapshot>>,
     pub cop_status: RwSignal<Option<CopStatus>>,
+    pub fusion_status: RwSignal<Option<FusionStatus>>,
     pub ws_status: RwSignal<WsStatus>,
     pub filter: RwSignal<FilterState>,
     pub theme: RwSignal<String>,
@@ -242,6 +256,7 @@ impl AppState {
             alerts: RwSignal::new(VecDeque::new()),
             config: RwSignal::new(None),
             cop_status: RwSignal::new(None),
+            fusion_status: RwSignal::new(None),
             ws_status: RwSignal::new(WsStatus::Disconnected),
             filter: RwSignal::new(FilterState::default()),
             theme: RwSignal::new(crate::prefs::current_theme()),

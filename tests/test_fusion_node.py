@@ -403,6 +403,95 @@ async def test_fusion_reuses_localized_classification_for_matching_omni_referenc
 
 
 @pytest.mark.asyncio
+async def test_birdnet_chunked_dispatch_suppresses_overlapping_candidates(tmp_path: Path) -> None:
+    settings = Settings(
+        db_path=tmp_path / "fusion_chunking.db",
+        snippet_dir=tmp_path / "snippets",
+        snippet_retention_seconds=0,
+        trigger_rms=0.001,
+        trigger_cooldown_seconds=0.0,
+        localization_window_seconds=0.04,
+        classification_window_seconds=30.0,
+        max_sensor_buffer_seconds=32.0,
+        classifier_backend="birdnet",
+        birdnet_chunked_dispatch_enabled=True,
+        birdnet_chunk_overlap_seconds=3.0,
+        preprocess_enabled=False,
+        fusion_worker_count=1,
+    )
+    settings.db_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.snippet_dir.mkdir(parents=True, exist_ok=True)
+
+    storage = Storage(settings.db_path)
+    await storage.initialize()
+
+    classifier = _CountingClassifier()
+    fusion = FusionNode(
+        settings=settings,
+        registry=NodeRegistry(),
+        buffer=MultiSensorBuffer(max_duration_seconds=settings.max_sensor_buffer_seconds),
+        localizer=LocalizationEngine(max_tau_s=0.03),
+        classifier=classifier,
+        tracker=TrackManager(settings),
+        storage=storage,
+        live_callback=lambda payload: asyncio.sleep(0, result=None),
+        coordinate_frame=LocalCoordinateFrame(origin=GeoPoint(lat=37.0, lon=-122.0, alt_m=0.0), mode="flat"),
+        zone_matcher=ZoneMatcher(storage=storage),
+    )
+    await fusion.start()
+
+    node = NodeSpec(
+        id="chunk-node",
+        node_type=NodeType.POINT,
+        position_m=(0.0, 0.0, 0.0),
+        sensor_offsets_m=[(0.0, 0.0, 0.0)],
+        capabilities=["audio"],
+        metadata={},
+    )
+    t = np.arange(1024, dtype=np.float32) / 16000.0
+    samples = (0.4 * np.sin(2.0 * np.pi * 1200.0 * t)).reshape(1, -1).astype(np.float32)
+
+    first = await fusion.ingest(
+        IngestFrameRequest(
+            node=node,
+            frame={
+                "start_time_ns": 1_739_810_400_000_000_000,
+                "sample_rate_hz": 16000,
+                "channels": 1,
+                "encoding": "pcm16le",
+                "samples_b64": encode_pcm16le_b64(samples),
+                "sequence": 1,
+            },
+        )
+    )
+    second = await fusion.ingest(
+        IngestFrameRequest(
+            node=node,
+            frame={
+                "start_time_ns": 1_739_810_405_000_000_000,
+                "sample_rate_hz": 16000,
+                "channels": 1,
+                "encoding": "pcm16le",
+                "samples_b64": encode_pcm16le_b64(samples),
+                "sequence": 2,
+            },
+        )
+    )
+
+    assert first.triggered is True
+    assert second.triggered is True
+
+    await asyncio.sleep(0.25)
+
+    status = await fusion.status()
+    assert classifier.calls == 1
+    assert status["metrics"]["birdnet_chunk_dispatches_suppressed"] == 1
+
+    await fusion.stop()
+    await storage.close()
+
+
+@pytest.mark.asyncio
 async def test_single_sensor_classification_only_detection_does_not_create_track(tmp_path: Path) -> None:
     settings = Settings(
         db_path=tmp_path / "fusion_single_sensor.db",

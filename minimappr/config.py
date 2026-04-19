@@ -162,6 +162,8 @@ class FusionConfig:
     localization_queue_size: int
     classification_queue_size: int
     rules_queue_size: int
+    birdnet_chunked_dispatch_enabled: bool
+    birdnet_chunk_overlap_seconds: float
     drop_on_backpressure: bool
     offline_replay_mode: bool
     sensor_energy_threshold_multiplier: float
@@ -377,6 +379,8 @@ class Settings:
     fusion_localization_queue_size: int = 256
     fusion_classification_queue_size: int = 256
     fusion_rules_queue_size: int = 256
+    birdnet_chunked_dispatch_enabled: bool = False
+    birdnet_chunk_overlap_seconds: float = 3.0
     fusion_drop_on_backpressure: bool = True
     fusion_offline_replay_mode: bool = False
     sensor_energy_threshold_multiplier: float = 0.45
@@ -513,6 +517,16 @@ class Settings:
             raise ValueError("MINIMAPPR_FALLBACK_LOCALIZATION_CONFIDENCE must be in [0,1]")
         if self.reporting_window_seconds <= 0.0:
             raise ValueError("MINIMAPPR_REPORTING_WINDOW_SECONDS must be > 0")
+        if self.birdnet_chunk_overlap_seconds < 0.0:
+            raise ValueError("MINIMAPPR_BIRDNET_CHUNK_OVERLAP_SECONDS must be >= 0")
+        if (
+            self.birdnet_chunked_dispatch_enabled
+            and self.classifier_backend == "birdnet"
+            and self.birdnet_chunk_overlap_seconds >= self.classification_window_seconds
+        ):
+            raise ValueError(
+                "MINIMAPPR_BIRDNET_CHUNK_OVERLAP_SECONDS must be < MINIMAPPR_CLASSIFICATION_WINDOW_SECONDS"
+            )
         if self.taxonomy_refresh_interval_seconds <= 0.0:
             raise ValueError("MINIMAPPR_TAXONOMY_REFRESH_INTERVAL_SECONDS must be > 0")
         if self.retention_long_security_confidence < 0.0 or self.retention_long_security_confidence > 1.0:
@@ -739,6 +753,8 @@ class Settings:
             fusion_localization_queue_size=_env_int("MINIMAPPR_FUSION_LOCALIZATION_QUEUE_SIZE", 256),
             fusion_classification_queue_size=_env_int("MINIMAPPR_FUSION_CLASSIFICATION_QUEUE_SIZE", 256),
             fusion_rules_queue_size=_env_int("MINIMAPPR_FUSION_RULES_QUEUE_SIZE", 256),
+            birdnet_chunked_dispatch_enabled=_env_bool("MINIMAPPR_BIRDNET_CHUNKED_DISPATCH_ENABLED", False),
+            birdnet_chunk_overlap_seconds=_env_float("MINIMAPPR_BIRDNET_CHUNK_OVERLAP_SECONDS", 3.0),
             fusion_drop_on_backpressure=_env_bool("MINIMAPPR_FUSION_DROP_ON_BACKPRESSURE", True),
             fusion_offline_replay_mode=_env_bool("MINIMAPPR_FUSION_OFFLINE_REPLAY_MODE", False),
             sensor_energy_threshold_multiplier=_env_float("MINIMAPPR_SENSOR_ENERGY_THRESHOLD_MULTIPLIER", 0.45),
@@ -886,6 +902,8 @@ class Settings:
             localization_queue_size=self.fusion_localization_queue_size,
             classification_queue_size=self.fusion_classification_queue_size,
             rules_queue_size=self.fusion_rules_queue_size,
+            birdnet_chunked_dispatch_enabled=self.birdnet_chunked_dispatch_enabled,
+            birdnet_chunk_overlap_seconds=self.birdnet_chunk_overlap_seconds,
             drop_on_backpressure=self.fusion_drop_on_backpressure,
             offline_replay_mode=self.fusion_offline_replay_mode,
             sensor_energy_threshold_multiplier=self.sensor_energy_threshold_multiplier,
@@ -928,6 +946,7 @@ class Settings:
             self.classifier_backend = "birdnet"
             self.beamformed_classification_enabled = False
             self.skip_localization_for_classification = True
+            self.birdnet_chunked_dispatch_enabled = True
             self.classification_window_seconds = max(self.classification_window_seconds, 30.0)
             self.max_sensor_buffer_seconds = max(
                 self.max_sensor_buffer_seconds,
@@ -940,6 +959,7 @@ class Settings:
             self.localization_strategy = "fixed"
             self.beamformed_classification_enabled = False
             self.skip_localization_for_classification = False
+            self.birdnet_chunked_dispatch_enabled = True
             if self.rules_config_path == DEFAULT_RULES_CONFIG_PATH:
                 # Wildlife deployments should not page on generic human/security
                 # categories unless operators explicitly provide a broader rules file.

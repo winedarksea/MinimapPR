@@ -158,6 +158,8 @@ struct PipelineMetrics {
     #[serde(default)]
     classification_reuse_hits: u64,
     #[serde(default)]
+    birdnet_chunk_dispatches_suppressed: u64,
+    #[serde(default)]
     detections_emitted: u64,
 }
 
@@ -330,6 +332,10 @@ pub fn ServerDiagnosticsView() -> impl IntoView {
                                     <DiagRow
                                         k="Stage drops".into()
                                         v=pipeline.metrics.stage_drops_backpressure.to_string()
+                                    />
+                                    <DiagRow
+                                        k="Chunked skips".into()
+                                        v=pipeline.metrics.birdnet_chunk_dispatches_suppressed.to_string()
                                     />
                                 </DiagCard>
 

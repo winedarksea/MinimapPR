@@ -6,6 +6,7 @@ use leptos::prelude::*;
 pub fn StatusStrip() -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState");
     let cop = state.cop_status;
+    let fusion = state.fusion_status;
     let tracks = state.tracks;
     let dets = state.detections;
     let alerts = state.alerts;
@@ -60,11 +61,43 @@ pub fn StatusStrip() -> impl IntoView {
                 tone=Signal::derive(move || "neutral")
             />
             <StatusChipText
+                label="Pipeline Lag"
+                value=Signal::derive(move || pipeline_lag_text(&fusion))
+                tone=Signal::derive(move || pipeline_lag_tone(&fusion))
+            />
+            <StatusChipText
                 label="Last Detection"
                 value=Signal::derive(move || last_detection_age(&dets))
                 tone=Signal::derive(move || last_detection_tone(&dets))
             />
         </div>
+    }
+}
+
+fn pipeline_lag_tone(
+    fusion: &RwSignal<Option<crate::state::FusionStatus>>,
+) -> &'static str {
+    let lag_seconds = fusion
+        .get()
+        .and_then(|status| status.realtime.pipeline_seconds_behind_realtime);
+    match lag_seconds {
+        Some(seconds) if seconds >= 30.0 => "danger",
+        Some(seconds) if seconds >= 5.0 => "warn",
+        Some(_) => "ok",
+        None => "neutral",
+    }
+}
+
+fn pipeline_lag_text(
+    fusion: &RwSignal<Option<crate::state::FusionStatus>>,
+) -> String {
+    let lag_seconds = fusion
+        .get()
+        .and_then(|status| status.realtime.pipeline_seconds_behind_realtime);
+    match lag_seconds {
+        Some(seconds) if seconds < 60.0 => format!("{seconds:.1}s"),
+        Some(seconds) => format!("{:.1}m", seconds / 60.0),
+        None => "—".into(),
     }
 }
 

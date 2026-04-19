@@ -1168,6 +1168,9 @@ async def get_system_diagnostics(request: Request) -> dict:
             "triggers_dropped_queue_full": fusion_status["metrics"].get("triggers_dropped_queue_full", 0),
             "stage_drops_backpressure": fusion_status["metrics"].get("stage_drops_backpressure", 0),
             "classification_reuse_hits": fusion_status["metrics"].get("classification_reuse_hits", 0),
+            "birdnet_chunk_dispatches_suppressed": (
+                fusion_status["metrics"].get("birdnet_chunk_dispatches_suppressed", 0)
+            ),
             "detections_emitted": fusion_status["metrics"].get("detections_emitted", 0),
         },
     }

@@ -31,6 +31,7 @@ from minimappr.config import Settings
 from minimappr.core.assembly import DetectionAssembler
 from minimappr.core.audio_buffer import MultiSensorBuffer
 from minimappr.core.beamforming import create_beamformer
+from minimappr.core.classification_chunking import ClassificationChunkingPolicy
 from minimappr.core.classification import ClassificationOrchestrator
 from minimappr.core.degradation import CapabilityDegradationModel
 from minimappr.core.environment import StaticEnvironmentProvider
@@ -79,6 +80,7 @@ from minimappr.utils.audio import rms
 @dataclass(slots=True)
 class EventCandidate:
     id: str
+    source_node_id: str
     event_time_ns: int
     sample_rate_hz: int
     source_type: str
@@ -150,6 +152,7 @@ class FusionMetrics:
     last_localization_algorithm: str = "gcc_phat"
     last_attempted_algorithm: str = "gcc_phat"
     classification_reuse_hits: int = 0
+    birdnet_chunk_dispatches_suppressed: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -280,6 +283,7 @@ class FusionNode:
         self._realtime_tracker = PipelineRealtimeTracker(
             ("localization", "classification", "rules")
         )
+        self._classification_chunking_policy = self._build_classification_chunking_policy()
         self._last_error: str | None = None
         self._started = False
         self._stopping = False
@@ -391,6 +395,7 @@ class FusionNode:
         if result.triggered:
             candidate = EventCandidate(
                 id=f"evt-{next(self._candidate_counter):08d}",
+                source_node_id=request.node.id,
                 event_time_ns=result.event_time_ns,
                 sample_rate_hz=result.sample_rate_hz,
                 source_type=result.source_type,
@@ -486,6 +491,9 @@ class FusionNode:
             )
             self._metrics.classification_stage_in += 1
             try:
+                if self._should_suppress_chunked_classification(product):
+                    self._metrics.birdnet_chunk_dispatches_suppressed += 1
+                    continue
                 detection_products = await self._classify_and_assemble(product)
                 for detection_product in detection_products:
                     if await self._enqueue_stage(self._rules_queue, detection_product):
@@ -1084,6 +1092,25 @@ class FusionNode:
             beamformer_type=self.settings.beamformer_type,
             diagonal_loading=self.settings.mvdr_diagonal_loading,
             classifier_diagonal_loading_scale=self.localization_config.classifier_diagonal_loading_scale,
+        )
+
+    def _build_classification_chunking_policy(self) -> ClassificationChunkingPolicy | None:
+        if not self.fusion_config.birdnet_chunked_dispatch_enabled:
+            return None
+        if self.settings.classifier_backend.strip().lower() != "birdnet":
+            return None
+        stride_seconds = max(
+            self.localization_config.localization_window_seconds,
+            self.localization_config.classification_window_seconds - self.fusion_config.birdnet_chunk_overlap_seconds,
+        )
+        return ClassificationChunkingPolicy(stride_seconds=stride_seconds)
+
+    def _should_suppress_chunked_classification(self, product: LocalizedCandidate) -> bool:
+        if self._classification_chunking_policy is None:
+            return False
+        return not self._classification_chunking_policy.should_dispatch(
+            source_node_id=product.candidate.source_node_id,
+            event_time_ns=product.candidate.event_time_ns,
         )
 
     def _current_localizer_name(self) -> str:

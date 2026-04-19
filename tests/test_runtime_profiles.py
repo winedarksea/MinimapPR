@@ -12,6 +12,7 @@ def test_birdnet_omni_testing_profile_sets_direct_birdnet_defaults() -> None:
     assert settings.classifier_backend == "birdnet"
     assert settings.beamformed_classification_enabled is False
     assert settings.skip_localization_for_classification is True
+    assert settings.birdnet_chunked_dispatch_enabled is True
     assert settings.classification_window_seconds == 30.0
     assert settings.max_sensor_buffer_seconds >= 32.0
 
@@ -25,6 +26,7 @@ def test_birdnet_hybrid_production_profile_sets_hybrid_defaults() -> None:
     assert settings.localization_strategy == "fixed"
     assert settings.beamformed_classification_enabled is False
     assert settings.skip_localization_for_classification is False
+    assert settings.birdnet_chunked_dispatch_enabled is True
     assert settings.classification_window_seconds == 30.0
     assert settings.max_sensor_buffer_seconds >= 32.0
     assert settings.localization_band_min_hz == 300.0

@@ -1,4 +1,4 @@
-use crate::state::{Alert, AppState, CopStatus, Detection, NodeStatus, Track, MAX_FEED_LEN};
+use crate::state::{Alert, AppState, CopStatus, Detection, FusionStatus, NodeStatus, Track, MAX_FEED_LEN};
 use futures::StreamExt;
 use gloo_net::http::Request;
 use gloo_timers::future::IntervalStream;
@@ -35,6 +35,9 @@ async fn poll_once(state: AppState) {
     }
     if let Some(cop) = fetch_json::<CopStatus>("/api/v1/cop/status").await {
         state.cop_status.set(Some(cop));
+    }
+    if let Some(fusion) = fetch_json::<FusionStatus>("/api/v1/fusion/status").await {
+        state.fusion_status.set(Some(fusion));
     }
     if let Some(als) = fetch_json::<Vec<Alert>>("/api/v1/alerts?limit=50").await {
         state.alerts.update(|a| {
