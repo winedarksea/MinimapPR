@@ -191,6 +191,62 @@ def test_sensor_stream_buffer_resets_on_large_backward_jump() -> None:
     assert buf.start_time_ns == t_before
 
 
+def test_sensor_stream_buffer_snaps_subframe_jitter_to_contiguous_audio() -> None:
+    """Regression: the firmware derives each frame's start_time_ns from a monotonic
+    timer captured at DMA-IRQ time, so consecutive frames carry sub-millisecond
+    timing jitter even when the audio is sample-contiguous.  Without snap-to-end
+    every jittered frame whose timestamp rounds to >=1 sample past the previous
+    frame's end leaves a 1+ sample zero hole in the buffer that surfaces as a
+    click in the snippet/debug WAV.  Over a multi-second clip these accumulate
+    into the scattered <1s gaps users hear in the UI.
+    """
+    sample_rate_hz = 16_000
+    frame_samples = 1024
+    frame_duration_ns = int(round(frame_samples * 1_000_000_000 / sample_rate_hz))
+
+    rng = np.random.default_rng(7)
+    buf = SensorStreamBuffer(sample_rate_hz=sample_rate_hz, max_duration_seconds=20.0)
+    origin = 1_000_000_000_000_000_000
+    # Use an all-nonzero pattern so any zero in the resulting buffer is a true
+    # gap rather than a recorded silence.
+    content = np.linspace(0.1, 1.0, frame_samples, dtype=np.float32)
+    n_frames = 200
+
+    for i in range(n_frames):
+        # +/- 2 ms jitter is realistic for a single-core firmware that interleaves
+        # DMA-IRQ servicing, HTTP publishing, NTP poll, and Wi-Fi housekeeping.
+        jitter_ns = int(rng.integers(-2_000_000, 2_000_001))
+        start = origin + i * frame_duration_ns + jitter_ns
+        buf.append(start_time_ns=start, samples=content.copy())
+
+    assert buf.samples.size == n_frames * frame_samples
+    assert int(np.sum(buf.samples == 0.0)) == 0
+
+
+def test_sensor_stream_buffer_preserves_real_gap_from_dropped_frames() -> None:
+    """Snap-to-contiguous must NOT mask genuine missing frames — when the firmware's
+    DMA overruns or a publish fails, the resulting multi-frame gap must still be
+    zero-padded so downstream timing stays anchored to wall-clock event times.
+    """
+    sample_rate_hz = 16_000
+    frame_samples = 1024
+    frame_duration_ns = int(round(frame_samples * 1_000_000_000 / sample_rate_hz))
+
+    buf = SensorStreamBuffer(sample_rate_hz=sample_rate_hz, max_duration_seconds=10.0)
+    origin = 1_000_000_000_000_000_000
+    content = np.full(frame_samples, 0.5, dtype=np.float32)
+
+    buf.append(start_time_ns=origin, samples=content.copy())
+    # Five frames missing between these two (DMA overrun while publish was slow).
+    buf.append(start_time_ns=origin + 6 * frame_duration_ns, samples=content.copy())
+
+    # Buffer covers the full 7-frame span; the middle 5 frames must be zeros.
+    assert buf.samples.size == 7 * frame_samples
+    assert np.all(buf.samples[:frame_samples] == 0.5)
+    assert np.all(buf.samples[6 * frame_samples :] == 0.5)
+    assert int(np.sum(buf.samples == 0.0)) == 5 * frame_samples
+
+
 @pytest.mark.asyncio
 async def test_classification_windows_use_per_sensor_fallback_when_some_sensors_have_partial_audio() -> None:
     """With a short buffer, sensors that have any audio should use their trailing window;

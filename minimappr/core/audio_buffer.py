@@ -40,7 +40,6 @@ class SensorStreamBuffer:
         current_start_sample_index = self._buffer_start_sample_index
         current_end_sample_index = current_start_sample_index + self.samples.size
         incoming_start_sample_index = self._time_to_sample_index(start_time_ns)
-        incoming_end_sample_index = incoming_start_sample_index + samples.size
 
         # If the incoming frame is more than max_samples away from the current buffer
         # (either far ahead or far behind), reset the timeline rather than allocating
@@ -55,6 +54,22 @@ class SensorStreamBuffer:
             self.samples = samples.copy()
             self._prune()
             return
+
+        # Snap to sample-contiguous when the apparent gap or overlap is smaller than
+        # half a frame. The firmware derives each frame's start_time_ns from a
+        # monotonic timer captured at DMA-IRQ time, so consecutive frames arrive with
+        # sub-millisecond timing jitter. Without this snap, every frame whose jitter
+        # rounds to >=1 sample later than the previous frame's end leaves a 1+ sample
+        # zero hole that is audible as a click — and over a multi-second clip these
+        # accumulate into the "scattered <1s gaps" reported in the UI snippet audio.
+        # Drifts larger than half a frame indicate a genuine missing frame (DMA
+        # overrun on the node, dropped HTTP publish, etc.) and are still zero-padded.
+        drift = incoming_start_sample_index - current_end_sample_index
+        snap_tolerance = max(1, samples.size // 2)
+        if -snap_tolerance < drift < snap_tolerance:
+            incoming_start_sample_index = current_end_sample_index
+
+        incoming_end_sample_index = incoming_start_sample_index + samples.size
 
         merged_start_sample_index = min(current_start_sample_index, incoming_start_sample_index)
         merged_end_sample_index = max(current_end_sample_index, incoming_end_sample_index)
