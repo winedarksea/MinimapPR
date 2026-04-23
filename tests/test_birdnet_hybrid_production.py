@@ -13,6 +13,7 @@ from minimappr.classifiers.birdnet import BirdNETClassifier
 from minimappr.classifiers.factory import create_classifier
 from minimappr.config import Settings
 from minimappr.core.audio_buffer import MultiSensorBuffer
+from minimappr.core.beamforming import create_beamformer
 from minimappr.core.fusion_node import FusionNode
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.localization_dispatch import build_localizer_from_settings
@@ -21,13 +22,13 @@ from minimappr.core.tracking import TrackManager
 from minimappr.core.zones import ZoneMatcher
 from minimappr.models import GeoPoint, IngestFrameRequest, NodeSpec, NodeType
 from minimappr.storage.db import Storage
-from minimappr.utils.audio import encode_pcm16le_b64
+from minimappr.utils.audio import encode_pcm16le_b64, read_wav_mono, rms
 from tests.helpers import (
     SIRITH_TETRA_SENSOR_OFFSETS_M,
     geometric_array_propagation_delays_s,
     load_sensor_wav_files,
     load_wav_fixture_mono,
-    prepend_noise_padding_to_duration,
+    prepend_noise_padding,
     resample_signal,
     split_channels_into_frames,
     synthesize_delayed_array_channels,
@@ -42,6 +43,8 @@ DEFAULT_SITE_ORIGIN = GeoPoint(lat=37.0, lon=-122.0, alt_m=0.0)
 TIGHT_SRP_GRID_RESOLUTION_M = 0.05
 TIGHT_SRP_SEARCH_PADDING_M = 0.3
 TIGHT_LOCALIZATION_MAX_ERROR_M = 0.14
+PRODUCTION_BIRDNET_CHUNK_OVERLAP_SECONDS = 3.0
+BIRDNET_TEST_TARGET_CONTEXT_SECONDS = 3.0
 
 
 @pytest.fixture(scope="module")
@@ -86,12 +89,13 @@ def _synthesized_sensor_wav_paths(
     *,
     sample_rate_hz: int,
     classification_window_seconds: float,
+    leading_padding_seconds: float,
 ) -> dict[str, Path]:
     bird_signal = _resampled_fixture(fixture, sample_rate_hz)
-    padded_signal = prepend_noise_padding_to_duration(
+    del classification_window_seconds
+    padded_signal = prepend_noise_padding(
         bird_signal,
-        sample_rate_hz,
-        total_duration_seconds=(classification_window_seconds + (bird_signal.size / sample_rate_hz)),
+        pad_samples=max(1, int(round(leading_padding_seconds * sample_rate_hz))),
         noise_rms=0.002,
         seed=sample_rate_hz,
     )
@@ -108,6 +112,7 @@ def _build_profile_settings(
     tmp_path: Path,
     *,
     sample_rate_hz: int,
+    snippet_retention_seconds: int = 0,
     coordinate_mode: str = "flat",
     trigger_rms: float = 0.006,
     trigger_cooldown_seconds: float = 1.0,
@@ -118,7 +123,7 @@ def _build_profile_settings(
         runtime_profile="birdnet_hybrid_production",
         db_path=tmp_path / f"birdnet_hybrid_{sample_rate_hz}.db",
         snippet_dir=tmp_path / f"snippets_{sample_rate_hz}",
-        snippet_retention_seconds=0,
+        snippet_retention_seconds=snippet_retention_seconds,
         trigger_rms=trigger_rms,
         trigger_cooldown_seconds=trigger_cooldown_seconds,
         fusion_worker_count=1,
@@ -131,6 +136,7 @@ def _build_profile_settings(
         coordinate_mode=coordinate_mode,
         model_chain_config_path=tmp_path / "missing_model_chain.json",
         birdnet_trigger_min_confidence=0.05,
+        birdnet_chunk_overlap_seconds=PRODUCTION_BIRDNET_CHUNK_OVERLAP_SECONDS,
     )
     if localization_srp_grid_resolution_m is not None:
         settings_kwargs["localization_srp_grid_resolution_m"] = localization_srp_grid_resolution_m
@@ -146,6 +152,7 @@ async def _start_fusion_with_profile(
     tmp_path: Path,
     *,
     sample_rate_hz: int,
+    snippet_retention_seconds: int = 0,
     coordinate_mode: str = "flat",
     trigger_rms: float = 0.006,
     trigger_cooldown_seconds: float = 1.0,
@@ -155,6 +162,7 @@ async def _start_fusion_with_profile(
     settings = _build_profile_settings(
         tmp_path,
         sample_rate_hz=sample_rate_hz,
+        snippet_retention_seconds=snippet_retention_seconds,
         coordinate_mode=coordinate_mode,
         trigger_rms=trigger_rms,
         trigger_cooldown_seconds=trigger_cooldown_seconds,
@@ -189,11 +197,20 @@ async def _stream_fixture_into_fusion(
     classification_window_seconds: float,
     start_time_ns: int,
 ) -> int:
+    birdnet_chunk_stride_seconds = max(
+        fusion.settings.localization_window_seconds,
+        fusion.settings.classification_window_seconds - fusion.settings.birdnet_chunk_overlap_seconds,
+    )
+    leading_padding_seconds = max(
+        fusion.settings.localization_window_seconds,
+        birdnet_chunk_stride_seconds - BIRDNET_TEST_TARGET_CONTEXT_SECONDS,
+    )
     sensor_paths = _synthesized_sensor_wav_paths(
         Path(fusion.settings.snippet_dir).parent,
         fixture,
         sample_rate_hz=sample_rate_hz,
         classification_window_seconds=classification_window_seconds,
+        leading_padding_seconds=leading_padding_seconds,
     )
     windows, loaded_sample_rate_hz = load_sensor_wav_files(sensor_paths)
     assert loaded_sample_rate_hz == sample_rate_hz
@@ -286,6 +303,204 @@ def _estimate_integer_sample_lag(reference: np.ndarray, candidate: np.ndarray) -
     return int(np.argmax(correlation) - (reference.size - 1))
 
 
+def _align_start_time_to_birdnet_chunk(start_time_ns: int, settings: Settings) -> int:
+    stride_ns = max(
+        1,
+        int(
+            max(
+                settings.localization_window_seconds,
+                settings.classification_window_seconds - settings.birdnet_chunk_overlap_seconds,
+            )
+            * 1_000_000_000
+        ),
+    )
+    return int(start_time_ns) - (int(start_time_ns) % stride_ns)
+
+
+def _best_contiguous_subsegment_metrics(
+    reference: np.ndarray,
+    candidate: np.ndarray,
+) -> tuple[float, float, int, bool]:
+    reference = np.asarray(reference, dtype=np.float32)
+    candidate = np.asarray(candidate, dtype=np.float32)
+    if reference.size == 0 or candidate.size == 0:
+        raise AssertionError("Signals must be non-empty")
+
+    if reference.size <= candidate.size:
+        shorter = reference
+        longer = candidate
+        reference_is_shorter = True
+    else:
+        shorter = candidate
+        longer = reference
+        reference_is_shorter = False
+
+    if shorter.size == longer.size:
+        offset = 0
+    else:
+        correlation = correlate(longer, shorter, mode="valid", method="fft")
+        offset = int(np.argmax(correlation))
+
+    aligned = longer[offset : offset + shorter.size]
+    centered_shorter = shorter - np.mean(shorter, dtype=np.float32)
+    centered_aligned = aligned - np.mean(aligned, dtype=np.float32)
+    denominator = float(
+        np.linalg.norm(centered_shorter.astype(np.float64))
+        * np.linalg.norm(centered_aligned.astype(np.float64))
+    )
+    normalized_correlation = 0.0
+    if denominator > 0.0:
+        normalized_correlation = float(
+            np.dot(centered_shorter.astype(np.float64), centered_aligned.astype(np.float64))
+            / denominator
+        )
+    normalized_rms_error = float(
+        rms(aligned - shorter) / max(rms(shorter), 1e-9)
+    )
+    return normalized_correlation, normalized_rms_error, offset, reference_is_shorter
+
+
+def _dominant_active_region(
+    samples: np.ndarray,
+    sample_rate_hz: int,
+    *,
+    analysis_window_ms: float = 25.0,
+    edge_padding_ms: float = 75.0,
+) -> np.ndarray:
+    samples = np.asarray(samples, dtype=np.float32)
+    if samples.size == 0:
+        raise AssertionError("Expected non-empty samples")
+
+    window_samples = max(8, int(round((analysis_window_ms / 1000.0) * sample_rate_hz)))
+    power = np.square(samples.astype(np.float64))
+    window = np.ones(window_samples, dtype=np.float64) / float(window_samples)
+    rolling_rms = np.sqrt(np.convolve(power, window, mode="same"))
+
+    peak_rms = float(np.max(rolling_rms))
+    noise_floor_rms = float(np.percentile(rolling_rms, 60))
+    threshold_rms = max(noise_floor_rms * 3.0, peak_rms * 0.2, 1e-5)
+    active_indices = np.flatnonzero(rolling_rms >= threshold_rms)
+    if active_indices.size == 0:
+        return samples.copy()
+
+    gap_tolerance_samples = max(1, int(round(0.15 * sample_rate_hz)))
+    segment_start = int(active_indices[0])
+    segment_end = int(active_indices[0])
+    best_start = segment_start
+    best_end = segment_end
+    best_energy = float(np.sum(power[segment_start : segment_end + 1]))
+
+    for index in active_indices[1:]:
+        current_index = int(index)
+        if current_index - segment_end <= gap_tolerance_samples:
+            segment_end = current_index
+            continue
+
+        current_energy = float(np.sum(power[segment_start : segment_end + 1]))
+        if current_energy > best_energy:
+            best_start = segment_start
+            best_end = segment_end
+            best_energy = current_energy
+        segment_start = current_index
+        segment_end = current_index
+
+    current_energy = float(np.sum(power[segment_start : segment_end + 1]))
+    if current_energy > best_energy:
+        best_start = segment_start
+        best_end = segment_end
+
+    edge_padding_samples = max(1, int(round((edge_padding_ms / 1000.0) * sample_rate_hz)))
+    trimmed_start = max(0, best_start - edge_padding_samples)
+    trimmed_end = min(samples.size, best_end + edge_padding_samples)
+    return samples[trimmed_start:trimmed_end].copy()
+
+
+def _longest_internal_quiet_gap_seconds(
+    samples: np.ndarray,
+    sample_rate_hz: int,
+    *,
+    analysis_window_ms: float = 25.0,
+) -> float:
+    samples = np.asarray(samples, dtype=np.float32)
+    if samples.size == 0:
+        return 0.0
+
+    window_samples = max(8, int(round((analysis_window_ms / 1000.0) * sample_rate_hz)))
+    power = np.square(samples.astype(np.float64))
+    window = np.ones(window_samples, dtype=np.float64) / float(window_samples)
+    rolling_rms = np.sqrt(np.convolve(power, window, mode="same"))
+
+    peak_rms = float(np.max(rolling_rms))
+    if peak_rms <= 1e-8:
+        return float(samples.size) / float(sample_rate_hz)
+
+    quiet_threshold_rms = max(peak_rms * 0.08, 1e-6)
+    quiet_mask = rolling_rms < quiet_threshold_rms
+    if quiet_mask.size <= 2:
+        return 0.0
+
+    # Ignore leading/trailing quiet padding and only measure holes inside the
+    # already-isolated active region.
+    active_indices = np.flatnonzero(~quiet_mask)
+    if active_indices.size == 0:
+        return float(samples.size) / float(sample_rate_hz)
+    interior_quiet = quiet_mask[active_indices[0] : active_indices[-1] + 1]
+
+    longest_quiet_run = 0
+    current_quiet_run = 0
+    for is_quiet in interior_quiet:
+        if bool(is_quiet):
+            current_quiet_run += 1
+            longest_quiet_run = max(longest_quiet_run, current_quiet_run)
+        else:
+            current_quiet_run = 0
+    return float(longest_quiet_run) / float(sample_rate_hz)
+
+
+async def _reconstruct_expected_classification_signal(
+    fusion: FusionNode,
+    detection: dict,
+    *,
+    sample_rate_hz: int,
+    classification_window_seconds: float,
+) -> np.ndarray:
+    selected_sensor_ids = [str(sensor_id) for sensor_id in detection["source_sensors"]]
+    classification_windows = await fusion.buffer.get_synchronized_window_ending_at(
+        sensor_ids=selected_sensor_ids,
+        end_time_ns=int(detection["timestamp_ns"]),
+        window_seconds=classification_window_seconds,
+        sample_rate_hz=sample_rate_hz,
+    )
+    assert classification_windows
+
+    reference_sensor = str(detection["reference_sensor"])
+    classification_path = str(detection["feature_summary"]["classification_path"])
+    if classification_path == "omni":
+        expected_signal = classification_windows[reference_sensor]
+    elif classification_path.startswith("beamformed:"):
+        selected_positions = {
+            sensor_id: _sensor_positions()[sensor_id]
+            for sensor_id in selected_sensor_ids
+        }
+        localization_position_m = tuple(float(value) for value in detection["position_m"])
+        expected_signal = fusion.beamformer.beamform(
+            selected_positions,
+            classification_windows,
+            sample_rate_hz,
+            localization_position_m,
+            fusion.environment_provider.get_speed_of_sound(localization_position_m),
+        )
+    else:
+        raise AssertionError(f"Unsupported classification path: {classification_path}")
+
+    if fusion.classification_preprocessor is not None:
+        expected_signal = fusion.classification_preprocessor.process(
+            expected_signal,
+            sample_rate_hz,
+        )
+    return np.asarray(expected_signal, dtype=np.float32)
+
+
 def test_house_finch_fixture_classifies_with_birdnet(
     birdnet_classifier: BirdNETClassifier,
     house_finch_fixture_48khz: tuple[np.ndarray, int],
@@ -340,6 +555,48 @@ def test_synthesized_house_finch_localizes_with_tight_srp(
 
 
 @pytest.mark.parametrize("sample_rate_hz", [16_000, 48_000])
+def test_synthesized_house_finch_beamforming_recovers_source_waveform(
+    house_finch_fixture_48khz: tuple[np.ndarray, int],
+    sample_rate_hz: int,
+) -> None:
+    source_signal = _resampled_fixture(house_finch_fixture_48khz, sample_rate_hz)
+    sensor_positions = _sensor_positions()
+    sensor_windows = {
+        sensor_id: channel
+        for sensor_id, channel in zip(
+            sensor_positions.keys(),
+            synthesize_delayed_array_channels(
+                source_signal,
+                sample_rate_hz,
+                source_position_m=HOUSE_FINCH_SOURCE_POSITION_M,
+            ),
+            strict=True,
+        )
+    }
+
+    # Use FFT delay-and-sum to avoid interpolation artifacts in this fidelity test.
+    beamformer = create_beamformer("freq_domain_das")
+    beamformed_signal = beamformer.beamform(
+        sensor_positions=sensor_positions,
+        sensor_windows=sensor_windows,
+        sample_rate_hz=sample_rate_hz,
+        steer_position_m=HOUSE_FINCH_SOURCE_POSITION_M,
+        sound_speed_mps=343.2,
+    )
+
+    source_active_region = _dominant_active_region(source_signal, sample_rate_hz)
+    beamformed_active_region = _dominant_active_region(beamformed_signal, sample_rate_hz)
+    correlation, normalized_error, _, _ = _best_contiguous_subsegment_metrics(
+        source_active_region,
+        beamformed_active_region,
+    )
+
+    assert _longest_internal_quiet_gap_seconds(beamformed_active_region, sample_rate_hz) <= 0.15
+    assert correlation >= 0.80
+    assert normalized_error <= 0.55
+
+
+@pytest.mark.parametrize("sample_rate_hz", [16_000, 48_000])
 def test_house_finch_fixture_expands_to_four_sensor_wavs_with_expected_relative_delays(
     tmp_path: Path,
     house_finch_fixture_48khz: tuple[np.ndarray, int],
@@ -350,6 +607,7 @@ def test_house_finch_fixture_expands_to_four_sensor_wavs_with_expected_relative_
         house_finch_fixture_48khz,
         sample_rate_hz=sample_rate_hz,
         classification_window_seconds=30.0,
+        leading_padding_seconds=24.0,
     )
 
     assert sorted(sensor_paths.keys()) == [
@@ -424,7 +682,7 @@ async def test_birdnet_hybrid_production_detects_localized_house_finch(
             frame_samples=1024,
             fixture=house_finch_fixture_48khz,
             classification_window_seconds=settings.classification_window_seconds,
-            start_time_ns=1_739_910_000_000_000_000,
+            start_time_ns=_align_start_time_to_birdnet_chunk(1_739_910_000_000_000_000, settings),
         )
         assert triggered_frames >= 1
 
@@ -452,7 +710,7 @@ async def test_birdnet_hybrid_production_detects_house_finch_at_native_48k(
             frame_samples=8192,
             fixture=house_finch_fixture_48khz,
             classification_window_seconds=settings.classification_window_seconds,
-            start_time_ns=1_739_920_000_000_000_000,
+            start_time_ns=_align_start_time_to_birdnet_chunk(1_739_920_000_000_000_000, settings),
         )
         assert triggered_frames >= 1
 
@@ -462,6 +720,76 @@ async def test_birdnet_hybrid_production_detects_house_finch_at_native_48k(
         assert detection["feature_summary"]["capability_tier"] == "full_3d"
         assert detection["feature_summary"]["localization_method"] == "srp_phat"
         assert detection["label_confidence"] >= settings.birdnet_trigger_min_confidence
+    finally:
+        await fusion.stop()
+        await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_birdnet_hybrid_production_persists_contiguous_classification_audio_snippet(
+    tmp_path: Path,
+    house_finch_fixture_48khz: tuple[np.ndarray, int],
+) -> None:
+    sample_rate_hz = 16_000
+    fusion, storage, settings = await _start_fusion_with_profile(
+        tmp_path,
+        sample_rate_hz=sample_rate_hz,
+        snippet_retention_seconds=3600,
+    )
+    try:
+        triggered_frames = await _stream_fixture_into_fusion(
+            fusion,
+            sample_rate_hz=sample_rate_hz,
+            frame_samples=1024,
+            fixture=house_finch_fixture_48khz,
+            classification_window_seconds=settings.classification_window_seconds,
+            start_time_ns=_align_start_time_to_birdnet_chunk(1_739_930_000_000_000_000, settings),
+        )
+        assert triggered_frames >= 1
+
+        detection = await _wait_for_localized_house_finch(storage)
+        assert detection["snippet_path"] is not None
+
+        snippet_path = Path(detection["snippet_path"])
+        assert snippet_path.exists()
+
+        snippet_signal, snippet_sample_rate_hz = read_wav_mono(snippet_path)
+        assert snippet_sample_rate_hz == sample_rate_hz
+        assert snippet_signal.size > 0
+
+        expected_signal = await _reconstruct_expected_classification_signal(
+            fusion,
+            detection,
+            sample_rate_hz=sample_rate_hz,
+            classification_window_seconds=settings.classification_window_seconds,
+        )
+        expected_correlation, expected_error, _, _ = _best_contiguous_subsegment_metrics(
+            expected_signal,
+            snippet_signal,
+        )
+        assert expected_correlation >= 0.995
+        assert expected_error <= 0.02
+
+        # The attached snippet may include front padding and classifier-oriented
+        # conditioning, so compare the dominant active region rather than the
+        # entire stored clip. This still catches obvious gaps or severe damage.
+        fixture_signal = _dominant_active_region(
+            _resampled_fixture(house_finch_fixture_48khz, sample_rate_hz),
+            sample_rate_hz,
+        )
+        snippet_active_region = _dominant_active_region(
+            snippet_signal,
+            sample_rate_hz,
+        )
+        fixture_correlation, _, _, _ = _best_contiguous_subsegment_metrics(
+            fixture_signal,
+            snippet_active_region,
+        )
+        assert _longest_internal_quiet_gap_seconds(snippet_active_region, sample_rate_hz) <= 0.15
+        # This integration test validates contiguous snippet persistence and signal identity against
+        # the exact classification input reconstruction. Beamformer fidelity against the true source
+        # waveform is covered by test_synthesized_house_finch_beamforming_recovers_source_waveform.
+        assert fixture_correlation >= 0.20
     finally:
         await fusion.stop()
         await storage.close()

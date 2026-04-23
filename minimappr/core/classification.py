@@ -10,6 +10,7 @@ resolves taxonomy metadata for the winning result.
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -26,6 +27,10 @@ from minimappr.interfaces import (
     TaxonomyProvider,
 )
 from minimappr.models import LabelId
+
+logger = logging.getLogger(__name__)
+
+_CLASSIFICATION_TIMEOUT_S = 30.0
 
 
 @dataclass(slots=True)
@@ -104,11 +109,7 @@ class ClassificationOrchestrator:
                 sample_rate_hz,
             )
 
-        omni_classification = await asyncio.to_thread(
-            self._classifier.classify,
-            omni_signal,
-            sample_rate_hz,
-        )
+        omni_classification = await self._classify_with_timeout(omni_signal, sample_rate_hz)
         classification = omni_classification
         classification_signal = omni_signal
         classification_path = "omni"
@@ -139,10 +140,8 @@ class ClassificationOrchestrator:
                         sample_rate_hz,
                     )
 
-                beamformed_classification = await asyncio.to_thread(
-                    self._classifier.classify,
-                    beamformed_signal,
-                    sample_rate_hz,
+                beamformed_classification = await self._classify_with_timeout(
+                    beamformed_signal, sample_rate_hz
                 )
                 if beamformed_classification.confidence > (
                     omni_classification.confidence + self._confidence_margin
@@ -178,11 +177,7 @@ class ClassificationOrchestrator:
                 sample_rate_hz,
             )
 
-        omni_classification = await asyncio.to_thread(
-            self._classifier.classify,
-            omni_signal,
-            sample_rate_hz,
-        )
+        omni_classification = await self._classify_with_timeout(omni_signal, sample_rate_hz)
         return await self._build_result(
             classification=omni_classification,
             omni_classification=omni_classification,
@@ -192,6 +187,25 @@ class ClassificationOrchestrator:
             beamforming_error=None,
             event_time_ns=event_time_ns,
         )
+
+    async def _classify_with_timeout(
+        self, signal: np.ndarray, sample_rate_hz: int
+    ) -> ClassificationResult:
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(self._classifier.classify, signal, sample_rate_hz),
+                timeout=_CLASSIFICATION_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Classification timed out after %.0fs", _CLASSIFICATION_TIMEOUT_S
+            )
+            return ClassificationResult(
+                label="timeout",
+                confidence=0.0,
+                scores={},
+                features={"reason": "classification_timeout"},
+            )
 
     async def _build_result(
         self,

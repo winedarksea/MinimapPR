@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import logging
 import multiprocessing
+import queue
 import threading
+from typing import Any
 
 import numpy as np
 from scipy.signal import resample_poly
@@ -32,7 +34,7 @@ class BirdNETClassifier(AudioClassifier):
     The model files are downloaded on first instantiation (~125 MB).
     """
 
-    def __init__(self, min_confidence: float = 0.1) -> None:
+    def __init__(self, min_confidence: float = 0.1, pool_size: int = 1) -> None:
         try:
             from birdnet import model_loader
         except Exception as exc:  # pragma: no cover - optional dependency
@@ -49,8 +51,23 @@ class BirdNETClassifier(AudioClassifier):
         # Tracks the active prediction session so close() can cancel it from
         # another thread during server shutdown without waiting for subprocess I/O.
         self._session_lock: threading.Lock = threading.Lock()
-        self._current_session = None
+        self._current_session: Any = None
         self._closed: bool = False
+
+        # Pre-create a pool of predict_sessions so the TFLite model worker
+        # subprocess is only spawned once, amortizing ~125 MB load overhead
+        # across all classify() calls.
+        self._session_ctxs: list[Any] = []
+        self._session_pool: queue.Queue[Any] = queue.Queue()
+        for _ in range(pool_size):
+            ctx = self._model.predict_session(
+                top_k=_SCORES_MAP_TOP_K,
+                default_confidence_threshold=self._min_confidence,
+                apply_sigmoid=True,
+                n_workers=1,
+            )
+            self._session_ctxs.append(ctx)
+            self._session_pool.put(ctx.__enter__())
 
     def classify(self, samples: np.ndarray, sample_rate_hz: int) -> ClassificationResult:
         if self._closed:
@@ -64,23 +81,22 @@ class BirdNETClassifier(AudioClassifier):
                 down=sample_rate_hz,
             ).astype(np.float32)
 
-        # Use predict_session so we can store the session reference and call
-        # cancel() from close() if shutdown interrupts an in-flight prediction.
-        # Without this, a SIGINT that kills BirdNET worker subprocesses leaves
-        # the Consumer blocked on queue.get() with no timeout, hanging the thread.
-        with self._model.predict_session(
-            top_k=_SCORES_MAP_TOP_K,
-            default_confidence_threshold=self._min_confidence,
-            apply_sigmoid=True,
-            n_workers=1,
-        ) as session:
+        # Acquire a pooled session; blocks until one is free (timeout guards
+        # against permanent deadlock if a session is never returned).
+        try:
+            session = self._session_pool.get(timeout=120.0)
+        except queue.Empty as exc:
+            raise RuntimeError("BirdNETClassifier: no session available in pool") from exc
+
+        with self._session_lock:
+            self._current_session = session
+        try:
+            result = session.run_arrays([(audio, _BIRDNET_SAMPLE_RATE_HZ)])
+        finally:
             with self._session_lock:
-                self._current_session = session
-            try:
-                result = session.run_arrays([(audio, _BIRDNET_SAMPLE_RATE_HZ)])
-            finally:
-                with self._session_lock:
-                    self._current_session = None
+                self._current_session = None
+            if not self._closed:
+                self._session_pool.put(session)
 
         # to_structured_array() yields rows with fields: species_name, confidence,
         # start_time, end_time — sorted by confidence descending, above-threshold only.
@@ -106,9 +122,10 @@ class BirdNETClassifier(AudioClassifier):
         top_raw_label, top_conf = sorted_species[0]
         label = _extract_common_name(top_raw_label)
 
-        scores_map: dict[str, float] = {
-            _extract_common_name(sp): conf for sp, conf in sorted_species[:_SCORES_MAP_TOP_K]
-        }
+        scores_map: dict[str, float] = {}
+        for sp, conf in sorted_species[:_SCORES_MAP_TOP_K]:
+            common = _extract_common_name(sp)
+            scores_map[common] = max(scores_map.get(common, 0.0), conf)
 
         return ClassificationResult(
             label=label,
@@ -132,6 +149,14 @@ class BirdNETClassifier(AudioClassifier):
         if session is not None:
             try:
                 session.cancel()
+            except Exception:  # noqa: BLE001
+                pass
+
+        # Exit all pooled session context managers to cleanly shut down their
+        # underlying predict worker subprocesses.
+        for ctx in self._session_ctxs:
+            try:
+                ctx.__exit__(None, None, None)
             except Exception:  # noqa: BLE001
                 pass
 
