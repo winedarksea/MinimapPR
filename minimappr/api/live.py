@@ -89,13 +89,14 @@ class LiveEventHub:
         if not clients:
             return
 
+        _SEND_TIMEOUT_S = 2.0
         stale: list[WebSocket] = []
         for client in clients:
             if not self._matches_filter(payload, filters.get(client, LiveSubscriptionFilter())):
                 continue
             try:
-                await client.send_json(payload)
-            except Exception:
+                await asyncio.wait_for(client.send_json(payload), timeout=_SEND_TIMEOUT_S)
+            except (Exception, asyncio.TimeoutError):
                 stale.append(client)
 
         if stale:

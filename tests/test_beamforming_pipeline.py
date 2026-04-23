@@ -180,8 +180,8 @@ class TestFrequencyDomainDAS:
         out = FrequencyDomainDelayAndSumBeamformer().beamform(
             positions, windows, 16_000, steer, frequency_weights=weights,
         )
-        # Zeroed frequency weights → essentially silent output
-        assert rms(out) < 1e-6
+        # rms() applies an epsilon floor, so assert on the actual waveform.
+        np.testing.assert_array_equal(out, np.zeros_like(out))
 
 
 # ---------------------------------------------------------------------------

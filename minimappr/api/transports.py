@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from minimappr.core.fusion_node import FusionNode
 from minimappr.interfaces import IngestTransport
 from minimappr.models import (
@@ -60,11 +62,14 @@ class HttpIngestTransport(IngestTransport):
                         detail=str(exc),
                     )
                 )
+                await asyncio.sleep(0)
                 continue
 
             accepted_frames += 1
             duplicate_frames += 1 if frame_response.duplicate else 0
             queued_events += 1 if frame_response.queued_event_id is not None else 0
+            # Yield after each frame so the pipeline event loop can run between deliveries.
+            await asyncio.sleep(0)
             results.append(
                 StoreForwardBufferedFrameResponse(
                     sequence=buffered.frame.sequence,

@@ -439,6 +439,9 @@ async def list_nodes(
         latest_environment = latest_environment_by_node.get(node["id"])
         if latest_environment is not None:
             node["latest_environment"] = latest_environment
+        # Yield after each node so pipeline lock holders (NodeRegistry, MultiSensorBuffer)
+        # get a chance to run between per-node awaits.
+        await asyncio.sleep(0)
     return nodes
 
 
@@ -1407,58 +1410,69 @@ async def get_recent_node_audio(
         raise HTTPException(status_code=404, detail="No recent audio available for node")
 
     ordered_descriptors = sorted(sensor_descriptors, key=lambda descriptor: descriptor.channel_index)
-    channels: list[np.ndarray] = []
-    for descriptor in ordered_descriptors:
-        source_channel = windows.get(descriptor.sensor_id)
-        if source_channel is None:
-            continue
-        channels.append(source_channel)
-    if not channels:
+    raw_channels: list[np.ndarray] = [
+        windows[d.sensor_id]
+        for d in ordered_descriptors
+        if d.sensor_id in windows
+    ]
+    if not raw_channels:
         raise HTTPException(status_code=404, detail="No recent audio available for node")
 
-    common_samples = min(channel.size for channel in channels)
+    common_samples = min(ch.size for ch in raw_channels)
     if common_samples <= 0:
         raise HTTPException(status_code=404, detail="No recent audio available for node")
 
-    channels_first = np.vstack([channel[-common_samples:] for channel in channels])
-    render_mode = "mix"
-    if channel is not None:
-        if channel >= channels_first.shape[0]:
-            raise HTTPException(status_code=404, detail="Requested audio channel is unavailable for node")
-        rendered = channels_first[channel : channel + 1]
-        selected_channel = str(channel)
-        render_mode = "single_channel"
-    elif render == "multichannel":
-        rendered = channels_first
-        selected_channel = "all"
-        render_mode = "multichannel"
-    elif render == "mix":
-        rendered = mono_mix(channels_first)[None, :]
-        selected_channel = "mix"
-    elif channels_first.shape[0] > 2:
-        # Blindly summing a compact array's raw channels adds comb filtering to
-        # listen-check audio. Default multichannel arrays to ch0 unless the
-        # caller explicitly requests a mix or multichannel WAV.
-        rendered = channels_first[0:1]
-        selected_channel = "0"
-        render_mode = "auto_first_channel"
-    else:
-        rendered = mono_mix(channels_first)[None, :]
-        selected_channel = "mix"
-        render_mode = "auto_mix"
-    wav_bytes = wav_multichannel_bytes(rendered, sample_rate_hz=sample_rate_hz)
+    _channel = channel
+    _render = render
+    _sample_rate_hz = sample_rate_hz
+    _node_id = node_id
+
+    # numpy stacking and WAV encoding are CPU-bound; run them off the event loop.
+    def _encode_audio():
+        channels_first = np.vstack([ch[-common_samples:] for ch in raw_channels])
+        if _channel is not None:
+            if _channel >= channels_first.shape[0]:
+                return None, None, None, None
+            r_mode = "single_channel"
+            rendered = channels_first[_channel : _channel + 1]
+            sel_ch = str(_channel)
+        elif _render == "multichannel":
+            r_mode = "multichannel"
+            rendered = channels_first
+            sel_ch = "all"
+        elif _render == "mix":
+            r_mode = "mix"
+            rendered = mono_mix(channels_first)[None, :]
+            sel_ch = "mix"
+        elif channels_first.shape[0] > 2:
+            # Blindly summing a compact array's raw channels adds comb filtering to
+            # listen-check audio. Default multichannel arrays to ch0 unless the
+            # caller explicitly requests a mix or multichannel WAV.
+            r_mode = "auto_first_channel"
+            rendered = channels_first[0:1]
+            sel_ch = "0"
+        else:
+            r_mode = "auto_mix"
+            rendered = mono_mix(channels_first)[None, :]
+            sel_ch = "mix"
+        return wav_multichannel_bytes(rendered, sample_rate_hz=_sample_rate_hz), r_mode, sel_ch, len(raw_channels)
+
+    wav_bytes, render_mode, selected_channel, n_channels = await asyncio.to_thread(_encode_audio)
+
+    if wav_bytes is None:
+        raise HTTPException(status_code=404, detail="Requested audio channel is unavailable for node")
 
     return Response(
         content=wav_bytes,
         media_type="audio/wav",
         headers={
-            "Content-Disposition": f'inline; filename="{node_id}_recent.wav"',
-            "X-Minimappr-Node-Id": node_id,
-            "X-Minimappr-Sample-Rate": str(sample_rate_hz),
-            "X-Minimappr-Source-Channels": str(len(channels)),
+            "Content-Disposition": f'inline; filename="{_node_id}_recent.wav"',
+            "X-Minimappr-Node-Id": _node_id,
+            "X-Minimappr-Sample-Rate": str(_sample_rate_hz),
+            "X-Minimappr-Source-Channels": str(n_channels),
             "X-Minimappr-Rendered-Channel": selected_channel,
             "X-Minimappr-Render-Mode": render_mode,
-            "X-Minimappr-Clip-Seconds": f"{common_samples / float(sample_rate_hz):.3f}",
+            "X-Minimappr-Clip-Seconds": f"{common_samples / float(_sample_rate_hz):.3f}",
             "X-Minimappr-Audio-Age-Seconds": f"{age_seconds:.3f}",
         },
     )
@@ -1481,63 +1495,70 @@ async def render_soundscape(
         min_label_confidence=settings.detection_min_confidence,
     )
     snippet_root = settings.snippet_dir.resolve()
+    blocked_labels = {label.strip().lower() for label in (suppress_label or []) if label.strip()}
+    _render_format = render_format
+    _listener = (float(listener_x), float(listener_y), float(listener_z))
 
-    sample_rate_hz: int | None = None
-    sources: list[SpatialSourceFrame] = []
-    skipped_sources = 0
-    for detection in detections:
-        snippet_file = _resolve_snippet_file(detection.get("snippet_path"), snippet_root)
-        if snippet_file is None:
-            skipped_sources += 1
-            continue
+    # WAV reads (blocking file I/O) and all numpy/encoding work run in a thread
+    # so the event loop stays free for the pipeline during this potentially slow operation.
+    def _load_and_render():
+        sample_rate_hz: int | None = None
+        sources: list[SpatialSourceFrame] = []
+        n_skipped = 0
+        for detection in detections:
+            snippet_file = _resolve_snippet_file(detection.get("snippet_path"), snippet_root)
+            if snippet_file is None:
+                n_skipped += 1
+                continue
 
-        position = detection.get("position_m")
-        if not isinstance(position, list) or len(position) != 3:
-            skipped_sources += 1
-            continue
+            position = detection.get("position_m")
+            if not isinstance(position, list) or len(position) != 3:
+                n_skipped += 1
+                continue
 
-        try:
-            samples, snippet_rate_hz = read_wav_mono(snippet_file)
-        except Exception:
-            skipped_sources += 1
-            continue
-        if samples.size == 0:
-            skipped_sources += 1
-            continue
+            try:
+                samples, snippet_rate_hz = read_wav_mono(snippet_file)
+            except Exception:
+                n_skipped += 1
+                continue
+            if samples.size == 0:
+                n_skipped += 1
+                continue
 
-        if sample_rate_hz is None:
-            sample_rate_hz = snippet_rate_hz
-        elif snippet_rate_hz != sample_rate_hz:
-            skipped_sources += 1
-            continue
+            if sample_rate_hz is None:
+                sample_rate_hz = snippet_rate_hz
+            elif snippet_rate_hz != sample_rate_hz:
+                n_skipped += 1
+                continue
 
-        sources.append(
-            SpatialSourceFrame(
-                samples=samples,
-                position_m=(float(position[0]), float(position[1]), float(position[2])),
-                label=str(detection.get("label") or ""),
-                gain=max(0.0, min(1.0, float(detection.get("label_confidence") or 1.0))),
-                source_id=str(detection.get("id") or ""),
+            sources.append(
+                SpatialSourceFrame(
+                    samples=samples,
+                    position_m=(float(position[0]), float(position[1]), float(position[2])),
+                    label=str(detection.get("label") or ""),
+                    gain=max(0.0, min(1.0, float(detection.get("label_confidence") or 1.0))),
+                    source_id=str(detection.get("id") or ""),
+                )
             )
-        )
 
-    if not sources or sample_rate_hz is None:
+        if not sources or sample_rate_hz is None:
+            return None, None, n_skipped, None
+
+        renderer = SoundscapeRenderer(
+            encoder=AmbisonicSpatialEncoder(),
+            suppress_labels=blocked_labels if blocked_labels else None,
+        )
+        result = renderer.render(sources, listener_position_m=_listener)
+        ch = result.bformat
+        if _render_format == "surround_5_1":
+            ch = foa_to_5_1(ch)
+        return wav_multichannel_bytes(ch, sample_rate_hz=sample_rate_hz), sample_rate_hz, n_skipped, result
+
+    wav_bytes, sample_rate_hz, skipped_sources, rendered = await asyncio.to_thread(_load_and_render)
+
+    if wav_bytes is None or rendered is None:
         raise HTTPException(status_code=404, detail="No compatible detection snippets available for rendering")
 
-    blocked_labels = {label.strip().lower() for label in (suppress_label or []) if label.strip()}
-    renderer = SoundscapeRenderer(
-        encoder=AmbisonicSpatialEncoder(),
-        suppress_labels=blocked_labels if blocked_labels else None,
-    )
-    rendered = renderer.render(
-        sources,
-        listener_position_m=(float(listener_x), float(listener_y), float(listener_z)),
-    )
-    channels_first = rendered.bformat
-    if render_format == "surround_5_1":
-        channels_first = foa_to_5_1(channels_first)
-
-    wav_bytes = wav_multichannel_bytes(channels_first, sample_rate_hz=sample_rate_hz)
     filename_suffix = "surround_5_1" if render_format == "surround_5_1" else "bformat"
     return Response(
         content=wav_bytes,
