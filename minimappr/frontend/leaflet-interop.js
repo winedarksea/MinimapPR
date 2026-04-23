@@ -11,7 +11,7 @@
   const _zones = {};     // zone_id → L.Polygon
   const _gdop = {};      // key → L.Circle
 
-  const TILE_CACHE_NAME = "mmpr-osm-tiles-v1";
+  const TILE_CACHE_NAME = "mmpr-osm-tiles-v2";
   const OSM_TEMPLATE = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
 
   function readCssColor(name, fallback) {
@@ -153,8 +153,9 @@
         // Intercept tile errors: try persistent cache first, then render
         // a labelled placeholder canvas tile so the overlay layer (markers,
         // heatmap, tracks) is still visible on a non-blank background.
+        let _usedFallback = false;
         tile.addEventListener("error", function onTileError() {
-          tile.removeEventListener("error", onTileError);
+          _usedFallback = true;
           (async () => {
             try {
               const cache = await getTileCache();
@@ -176,8 +177,9 @@
 
         // After a successful network load, opportunistically cache the tile
         // so it survives future rate-limit or offline periods.
+        // Skip if the load was triggered by the error fallback path.
         tile.addEventListener("load", function onTileLoad() {
-          tile.removeEventListener("load", onTileLoad);
+          if (_usedFallback) return;
           (async () => {
             try {
               const cache = await getTileCache();
@@ -215,15 +217,22 @@
 
   // ── Init ──────────────────────────────────────────────────────
   function init(lat, lon, zoom) {
-    const target = document.getElementById("leaflet-map");
+    // During a Leptos route transition both the old and new #leaflet-map divs
+    // can briefly coexist in the DOM. getElementById returns only the first
+    // match, which is the OLD (already-initialised) element. querySelectorAll
+    // gives us all matches so we can prefer the uninitialised (new) one.
+    const candidates = document.querySelectorAll("[id='leaflet-map']");
+    let target = null;
+    for (const el of candidates) {
+      if (!el._leaflet_id) { target = el; break; }
+    }
+    if (!target) target = candidates[0] || null;
     if (!target) return; // container not yet in DOM
 
     if (_map) {
       const prev = _map.getContainer ? _map.getContainer() : null;
-      // Reuse only when the existing map is bound to THIS element. During a
-      // Leptos route transition the old element can remain in the DOM briefly
-      // while a new #leaflet-map is already mounted — prev !== target detects
-      // that case and forces a rebuild so we don't stay bound to the stale node.
+      // Reuse only when the existing map is already bound to this exact element
+      // and that element is still live. Any other state means a rebuild is needed.
       if (prev && prev === target && document.body.contains(prev)) {
         _map.invalidateSize();
         return;
@@ -236,12 +245,18 @@
       for (const k in _zones)    delete _zones[k];
       for (const k in _gdop)     delete _gdop[k];
     }
-    // Pass the element directly to avoid duplicate-id ambiguity during transitions.
-    _map = L.map(target, {
-      center: [lat, lon],
-      zoom: zoom ?? 17,
-      zoomControl: true,
-    });
+    try {
+      _map = L.map(target, {
+        center: [lat, lon],
+        zoom: zoom ?? 17,
+        zoomControl: true,
+      });
+    } catch (err) {
+      // "Map container is already initialized." — element still has _leaflet_id
+      // from a previous session. Remove the stale state and retry once.
+      try { delete target._leaflet_id; _map = L.map(target, { center: [lat, lon], zoom: zoom ?? 17, zoomControl: true }); }
+      catch (_) { return; }
+    }
     // updateWhenIdle defers tile fetches until panning stops, reducing OSM load.
     // maxZoom 18 = OSM's nominal limit (19+ just upscales the same tiles).
     createResilientOsmTileLayer().addTo(_map);
