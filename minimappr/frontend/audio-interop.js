@@ -1,5 +1,12 @@
 // Audio decoding + canvas rendering for the Audio Analysis page.
-// Exposes globalThis.audioInterop.{renderWaveform, renderSpectrogram, peakMeter}.
+// Exposes globalThis.audioInterop.{renderWaveform, renderSpectrogram,
+//   renderWaveformAndSpectrogram}.
+//
+// renderWaveformAndSpectrogram is the preferred call site: it decodes the audio
+// file exactly once and paints both canvases from the shared buffer.  It also
+// stamps a URL token on each canvas element before the async decode so that a
+// later render starting on the same canvas ID can be detected and discarded
+// (stale-render guard).
 (function () {
   "use strict";
 
@@ -21,10 +28,42 @@
     return v || fallback;
   }
 
-  async function renderWaveform(canvasId, url) {
-    const canvas = document.getElementById(canvasId);
-    if (!canvas) return { ok: false, error: "no canvas #" + canvasId };
-    const buf = await fetchAndDecode(url);
+  // Cooley-Tukey radix-2 FFT operating in-place on Float64 re/im arrays.
+  // Kept at module scope so it is shared between the waveform and spectrogram
+  // paint paths without re-allocating closures on every call.
+  function fft(re, im) {
+    const n = re.length;
+    let j = 0;
+    for (let i = 1; i < n; i++) {
+      let bit = n >> 1;
+      for (; j & bit; bit >>= 1) j ^= bit;
+      j ^= bit;
+      if (i < j) { [re[i], re[j]] = [re[j], re[i]]; [im[i], im[j]] = [im[j], im[i]]; }
+    }
+    for (let len = 2; len <= n; len <<= 1) {
+      const ang = -2 * Math.PI / len;
+      const wRe = Math.cos(ang), wIm = Math.sin(ang);
+      for (let i = 0; i < n; i += len) {
+        let curRe = 1, curIm = 0;
+        for (let k = 0; k < len / 2; k++) {
+          const aRe = re[i + k], aIm = im[i + k];
+          const bRe = re[i + k + len / 2] * curRe - im[i + k + len / 2] * curIm;
+          const bIm = re[i + k + len / 2] * curIm + im[i + k + len / 2] * curRe;
+          re[i + k] = aRe + bRe; im[i + k] = aIm + bIm;
+          re[i + k + len / 2] = aRe - bRe; im[i + k + len / 2] = aIm - bIm;
+          const nxtRe = curRe * wRe - curIm * wIm;
+          const nxtIm = curRe * wIm + curIm * wRe;
+          curRe = nxtRe; curIm = nxtIm;
+        }
+      }
+    }
+  }
+
+  // ── Buffer-level paint functions ─────────────────────────────────────────
+  // These accept an already-decoded AudioBuffer so the caller controls when
+  // decoding happens (once per renderWaveformAndSpectrogram call).
+
+  function paintWaveformFromBuf(canvas, buf) {
     const ch = buf.getChannelData(0);
     const dpr = window.devicePixelRatio || 1;
     const w = Math.max(1, canvas.clientWidth * dpr);
@@ -64,19 +103,9 @@
     // Center line
     g.strokeStyle = cssVar("--md-sys-color-outline-variant", "#333");
     g.beginPath(); g.moveTo(0, mid); g.lineTo(w, mid); g.stroke();
-    return {
-      ok: true,
-      duration_s: buf.duration,
-      sample_rate: buf.sampleRate,
-      channels: buf.numberOfChannels,
-      samples: ch.length,
-    };
   }
 
-  async function renderSpectrogram(canvasId, url, fftSize) {
-    const canvas = document.getElementById(canvasId);
-    if (!canvas) return { ok: false, error: "no canvas #" + canvasId };
-    const buf = await fetchAndDecode(url);
+  function paintSpectrogramFromBuf(canvas, buf, fftSize) {
     const ch = buf.getChannelData(0);
     const N = fftSize || 512;
     const hop = N / 2;
@@ -87,38 +116,7 @@
     const win = new Float32Array(N);
     for (let i = 0; i < N; i++) win[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (N - 1)));
 
-    // Naive DFT is too slow for large N; use OfflineAudioContext + AnalyserNode is not ideal either.
-    // Instead: use Web Audio AnalyserNode.getFloatFrequencyData over an OfflineAudioContext render isn't real-time.
-    // We do a simple real DFT via the Cooley-Tukey radix-2 implementation.
-    function fft(re, im) {
-      const n = re.length;
-      let j = 0;
-      for (let i = 1; i < n; i++) {
-        let bit = n >> 1;
-        for (; j & bit; bit >>= 1) j ^= bit;
-        j ^= bit;
-        if (i < j) { [re[i], re[j]] = [re[j], re[i]]; [im[i], im[j]] = [im[j], im[i]]; }
-      }
-      for (let len = 2; len <= n; len <<= 1) {
-        const ang = -2 * Math.PI / len;
-        const wRe = Math.cos(ang), wIm = Math.sin(ang);
-        for (let i = 0; i < n; i += len) {
-          let curRe = 1, curIm = 0;
-          for (let k = 0; k < len / 2; k++) {
-            const aRe = re[i + k], aIm = im[i + k];
-            const bRe = re[i + k + len / 2] * curRe - im[i + k + len / 2] * curIm;
-            const bIm = re[i + k + len / 2] * curIm + im[i + k + len / 2] * curRe;
-            re[i + k] = aRe + bRe; im[i + k] = aIm + bIm;
-            re[i + k + len / 2] = aRe - bRe; im[i + k + len / 2] = aIm - bIm;
-            const nxtRe = curRe * wRe - curIm * wIm;
-            const nxtIm = curRe * wIm + curIm * wRe;
-            curRe = nxtRe; curIm = nxtIm;
-          }
-        }
-      }
-    }
-
-    // Compute magnitude matrix (frames × bins) in dB, clipped.
+    // Compute magnitude matrix (frames × bins) in dB.
     const mags = new Float32Array(frames * bins);
     const re = new Float64Array(N);
     const im = new Float64Array(N);
@@ -145,7 +143,7 @@
     const img = new ImageData(w, h);
     const data = img.data;
 
-    // Bilinear interpolation helper: sample mags at fractional (frame, bin) coords.
+    // Bilinear interpolation: sample mags at fractional (frame, bin) coords.
     function sampleMag(fPos, kPos) {
       const f0 = Math.max(0, Math.min(frames - 1, Math.floor(fPos)));
       const f1 = Math.min(frames - 1, f0 + 1);
@@ -172,13 +170,67 @@
       }
     }
     canvas.getContext("2d").putImageData(img, 0, 0);
+    return { frames, bins, db_min: floor, db_max: gmax };
+  }
+
+  // ── Public API ───────────────────────────────────────────────────────────
+
+  // Preferred entry point: decodes once, renders both canvases.
+  // Uses the audio URL as a render token stamped on each canvas element before
+  // the async fetch so that a later call on the same canvas ID can detect and
+  // discard the stale result.
+  async function renderWaveformAndSpectrogram(waveformId, spectrogramId, url, fftSize) {
+    const wCanvas = document.getElementById(waveformId);
+    const sCanvas = document.getElementById(spectrogramId);
+    if (!wCanvas) return { ok: false, error: "no canvas #" + waveformId };
+    if (!sCanvas) return { ok: false, error: "no canvas #" + spectrogramId };
+
+    // Stamp the token before the async boundary so any later caller on the same
+    // canvas ID will overwrite it, allowing us to detect staleness on return.
+    wCanvas.dataset.renderToken = url;
+    sCanvas.dataset.renderToken = url;
+
+    const buf = await fetchAndDecode(url);
+
+    // Discard results if a newer render has claimed these canvases.
+    if (wCanvas.dataset.renderToken !== url || sCanvas.dataset.renderToken !== url) {
+      return { ok: false, error: "stale" };
+    }
+
+    paintWaveformFromBuf(wCanvas, buf);
+    const spectInfo = paintSpectrogramFromBuf(sCanvas, buf, fftSize);
     return {
       ok: true,
       duration_s: buf.duration,
       sample_rate: buf.sampleRate,
-      frames, bins, db_min: floor, db_max: gmax,
+      channels: buf.numberOfChannels,
+      samples: buf.getChannelData(0).length,
+      ...spectInfo,
     };
   }
 
-  globalThis.audioInterop = { renderWaveform, renderSpectrogram };
+  // Single-canvas wrappers kept for backwards compatibility.
+  async function renderWaveform(canvasId, url) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) return { ok: false, error: "no canvas #" + canvasId };
+    const buf = await fetchAndDecode(url);
+    paintWaveformFromBuf(canvas, buf);
+    return {
+      ok: true,
+      duration_s: buf.duration,
+      sample_rate: buf.sampleRate,
+      channels: buf.numberOfChannels,
+      samples: buf.getChannelData(0).length,
+    };
+  }
+
+  async function renderSpectrogram(canvasId, url, fftSize) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) return { ok: false, error: "no canvas #" + canvasId };
+    const buf = await fetchAndDecode(url);
+    const spectInfo = paintSpectrogramFromBuf(canvas, buf, fftSize);
+    return { ok: true, duration_s: buf.duration, sample_rate: buf.sampleRate, ...spectInfo };
+  }
+
+  globalThis.audioInterop = { renderWaveform, renderSpectrogram, renderWaveformAndSpectrogram };
 })();

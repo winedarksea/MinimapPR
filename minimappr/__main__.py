@@ -65,6 +65,9 @@ def _run_server() -> None:
         "minimappr.main:app",
         host=settings.host,
         port=settings.port,
+        # High-frequency ingest frames would flood the access log; application
+        # code emits periodic summaries instead via IngestProcessor.
+        access_log=False,
     )
 
 

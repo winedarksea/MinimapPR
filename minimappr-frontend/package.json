@@ -1,0 +1,7 @@
+{
+  "name": "minimappr-frontend-js",
+  "private": true,
+  "scripts": {
+    "test": "node --test tests/test-audio-interop.js"
+  }
+}

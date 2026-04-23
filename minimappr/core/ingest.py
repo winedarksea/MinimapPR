@@ -7,9 +7,15 @@ independently testable component.
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from typing import Any
+
+_logger = logging.getLogger(__name__)
+
+# Log a summary after this many accepted (non-duplicate) frames.
+_INGEST_LOG_INTERVAL_FRAMES = 5000
 
 import numpy as np
 
@@ -112,6 +118,7 @@ class IngestProcessor:
         self._environment_updater = environment_updater
 
         self._last_trigger_ns = 0
+        self._accepted_frame_count = 0
 
     @property
     def last_trigger_ns(self) -> int:
@@ -292,6 +299,16 @@ class IngestProcessor:
             ingested=1 if environment_sample is not None else 0,
             persisted=1 if environment_sample is not None and frame_registered else 0,
         )
+
+        self._accepted_frame_count += 1
+        if self._accepted_frame_count % _INGEST_LOG_INTERVAL_FRAMES == 0:
+            _logger.info(
+                "Ingest summary: %d frames accepted; last node=%s energy=%.4f triggered=%s",
+                self._accepted_frame_count,
+                normalized_node.id,
+                frame_energy,
+                triggered,
+            )
 
         return IngestResult(
             response=IngestFrameResponse(

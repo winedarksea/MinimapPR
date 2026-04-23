@@ -45,6 +45,98 @@ fn fmt_ts_ns(ns: i64) -> String {
     d.to_iso_string().as_string().unwrap_or_default()
 }
 
+// ── Subcomponents ────────────────────────────────────────────────────────────
+
+/// Header bar: detection title, info/error spans, play/pause, download, expand.
+#[component]
+fn AudioAnalysisHeader(
+    detection_id: String,
+    info: RwSignal<Option<String>>,
+    error: RwSignal<Option<String>>,
+    is_playing: RwSignal<bool>,
+    player_id: String,
+    download_url: String,
+    expand_href: String,
+    show_expand_link: bool,
+) -> impl IntoView {
+    let player_id_play = player_id.clone();
+    view! {
+        <div class="audio-header">
+            <h2 style="margin:0">"Detection " <code>{detection_id.clone()}</code></h2>
+            <span class="muted">{move || info.get().unwrap_or_default()}</span>
+            <span class="daily-error">{move || error.get().unwrap_or_default()}</span>
+            <button
+                class="play-btn"
+                title="Play / Pause audio"
+                on:click=move |_| {
+                    if let Some(el) = web_sys::window()
+                        .and_then(|w| w.document())
+                        .and_then(|d| d.get_element_by_id(&player_id_play))
+                    {
+                        if let Ok(audio) = el.dyn_into::<web_sys::HtmlAudioElement>() {
+                            if audio.paused() {
+                                let _ = audio.play();
+                                is_playing.set(true);
+                            } else {
+                                audio.pause().unwrap_or(());
+                                is_playing.set(false);
+                            }
+                        }
+                    }
+                }
+            >
+                {move || if is_playing.get() { "⏸" } else { "▶" }}
+            </button>
+            <a class="btn-sm" href=download_url download=format!("{}.wav", detection_id)>
+                "Download WAV"
+            </a>
+            {if show_expand_link {
+                view! {
+                    <A href=expand_href>
+                        <span class="btn-sm">"Expand"</span>
+                    </A>
+                }.into_any()
+            } else {
+                view! { <></> }.into_any()
+            }}
+        </div>
+    }
+}
+
+/// Canvas area: waveform, spectrogram, and the native audio player element.
+#[component]
+fn AudioCanvasPanel(
+    waveform_id: String,
+    spectrogram_id: String,
+    player_id: String,
+    audio_url: String,
+    is_playing: RwSignal<bool>,
+) -> impl IntoView {
+    view! {
+        <div class="audio-canvases">
+            <div class="audio-canvas-row">
+                <label class="muted">"Waveform"</label>
+                <canvas id=waveform_id></canvas>
+            </div>
+            <div class="audio-canvas-row">
+                <label class="muted">"Spectrogram"</label>
+                <canvas id=spectrogram_id></canvas>
+            </div>
+            <audio
+                id=player_id
+                controls=true
+                src=audio_url
+                style="width:100%;margin-top:8px"
+                on:ended=move |_| is_playing.set(false)
+                on:pause=move |_| is_playing.set(false)
+                on:play=move |_| is_playing.set(true)
+            />
+        </div>
+    }
+}
+
+// ── Main view ────────────────────────────────────────────────────────────────
+
 #[component]
 pub fn DetectionAudioAnalysisView(
     detection_id: String,
@@ -55,6 +147,14 @@ pub fn DetectionAudioAnalysisView(
     let detection: RwSignal<Option<Detection>> = RwSignal::new(None);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
     let info: RwSignal<Option<String>> = RwSignal::new(None);
+
+    // Monotonically-increasing generation counter used as a stale-render guard.
+    // Incremented at the start of each async cycle.  Async tasks capture the
+    // generation value at launch and discard their results if a newer cycle has
+    // started by the time they resume.  This prevents a delayed response from a
+    // superseded detection (or a reused canvas ID from a previous drawer
+    // instance) from overwriting the current view.
+    let render_gen: RwSignal<u32> = RwSignal::new(0);
 
     let waveform_id = format!("{instance_prefix}-waveform");
     let spectrogram_id = format!("{instance_prefix}-spectrogram");
@@ -68,24 +168,50 @@ pub fn DetectionAudioAnalysisView(
     Effect::new({
         let detection_id = detection_id.clone();
         move |_| {
+            let gen = render_gen.get_untracked().wrapping_add(1);
+            render_gen.set(gen);
             detection.set(None);
             error.set(None);
             info.set(None);
             let det_url = format!("/api/v1/detections/{detection_id}");
             spawn_local(async move {
-                match Request::get(&det_url).send().await {
+                let result = Request::get(&det_url).send().await;
+                // Abort if a newer cycle started while we were awaiting.
+                if render_gen.get_untracked() != gen {
+                    return;
+                }
+                match result {
                     Ok(r) if r.ok() => match r.json::<Detection>().await {
-                        Ok(d) => detection.set(Some(d)),
-                        Err(e) => error.set(Some(format!("parse: {e}"))),
+                        Ok(d) => {
+                            if render_gen.get_untracked() == gen {
+                                detection.set(Some(d));
+                            }
+                        }
+                        Err(e) => {
+                            if render_gen.get_untracked() == gen {
+                                error.set(Some(format!("parse: {e}")));
+                            }
+                        }
                     },
-                    Ok(r) => error.set(Some(format!("HTTP {}", r.status()))),
-                    Err(e) => error.set(Some(e.to_string())),
+                    Ok(r) => {
+                        if render_gen.get_untracked() == gen {
+                            error.set(Some(format!("HTTP {}", r.status())));
+                        }
+                    }
+                    Err(e) => {
+                        if render_gen.get_untracked() == gen {
+                            error.set(Some(e.to_string()));
+                        }
+                    }
                 }
             });
         }
     });
 
-    // Render waveform/spectrogram once the metadata is loaded.
+    // Render waveform and spectrogram from a single decode pass once metadata
+    // is loaded.  The JS-side renderWaveformAndSpectrogram also stamps a URL
+    // token on each canvas element before the async fetch, providing an
+    // additional layer of stale detection at the DOM level.
     Effect::new({
         let audio_url = audio_url.clone();
         let waveform_id = waveform_id.clone();
@@ -94,12 +220,24 @@ pub fn DetectionAudioAnalysisView(
             if detection.get().is_none() {
                 return;
             }
+            let gen = render_gen.get_untracked();
             let waveform_id = waveform_id.clone();
             let spectrogram_id = spectrogram_id.clone();
             let audio_url = audio_url.clone();
             spawn_local(async move {
-                match aud::render_waveform(&waveform_id, &audio_url).await {
+                match aud::render_waveform_and_spectrogram(
+                    &waveform_id,
+                    &spectrogram_id,
+                    &audio_url,
+                    512,
+                )
+                .await
+                {
                     Ok(v) => {
+                        // Discard if a newer render cycle has taken over.
+                        if render_gen.get_untracked() != gen {
+                            return;
+                        }
                         let dur = js_sys::Reflect::get(
                             &v,
                             &wasm_bindgen::JsValue::from_str("duration_s"),
@@ -116,9 +254,12 @@ pub fn DetectionAudioAnalysisView(
                             info.set(Some(format!("{dur:.2}s · {} Hz", sr as u32)));
                         }
                     }
-                    Err(e) => error.set(Some(format!("waveform: {e:?}"))),
+                    Err(e) => {
+                        if render_gen.get_untracked() == gen {
+                            error.set(Some(format!("render: {e:?}")));
+                        }
+                    }
                 }
-                let _ = aud::render_spectrogram(&spectrogram_id, &audio_url, 512).await;
             });
         }
     });
@@ -126,71 +267,23 @@ pub fn DetectionAudioAnalysisView(
     view! {
         <div class=container_class>
             <div class="audio-layout">
-                <div class="audio-header">
-                    <h2 style="margin:0">"Detection " <code>{detection_id.clone()}</code></h2>
-                    <span class="muted">{move || info.get().unwrap_or_default()}</span>
-                    <span class="daily-error">{move || error.get().unwrap_or_default()}</span>
-                    {
-                        let player_id_play = player_id.clone();
-                        view! {
-                            <button
-                                class="play-btn"
-                                title="Play / Pause audio"
-                                on:click=move |_| {
-                                    if let Some(el) = web_sys::window()
-                                        .and_then(|w| w.document())
-                                        .and_then(|d| d.get_element_by_id(&player_id_play))
-                                    {
-                                        if let Ok(audio) = el.dyn_into::<web_sys::HtmlAudioElement>() {
-                                            if audio.paused() {
-                                                let _ = audio.play();
-                                                is_playing.set(true);
-                                            } else {
-                                                audio.pause().unwrap_or(());
-                                                is_playing.set(false);
-                                            }
-                                        }
-                                    }
-                                }
-                            >
-                                {move || if is_playing.get() { "⏸" } else { "▶" }}
-                            </button>
-                        }
-                    }
-                    <a class="btn-sm" href=download_url download=format!("{}.wav", detection_id.clone())>
-                        "Download WAV"
-                    </a>
-                    {if show_expand_link {
-                        view! {
-                            <A href=expand_href>
-                                <span class="btn-sm">"Expand"</span>
-                            </A>
-                        }.into_any()
-                    } else {
-                        view! { <></> }.into_any()
-                    }}
-                </div>
-
-                <div class="audio-canvases">
-                    <div class="audio-canvas-row">
-                        <label class="muted">"Waveform"</label>
-                        <canvas id=waveform_id></canvas>
-                    </div>
-                    <div class="audio-canvas-row">
-                        <label class="muted">"Spectrogram"</label>
-                        <canvas id=spectrogram_id></canvas>
-                    </div>
-                    <audio
-                        id=player_id
-                        controls=true
-                        src=audio_url
-                        style="width:100%;margin-top:8px"
-                        on:ended=move |_| is_playing.set(false)
-                        on:pause=move |_| is_playing.set(false)
-                        on:play=move |_| is_playing.set(true)
-                    />
-                </div>
-
+                <AudioAnalysisHeader
+                    detection_id=detection_id.clone()
+                    info=info
+                    error=error
+                    is_playing=is_playing
+                    player_id=player_id.clone()
+                    download_url=download_url
+                    expand_href=expand_href
+                    show_expand_link=show_expand_link
+                />
+                <AudioCanvasPanel
+                    waveform_id=waveform_id
+                    spectrogram_id=spectrogram_id
+                    player_id=player_id
+                    audio_url=audio_url
+                    is_playing=is_playing
+                />
                 <DetectionMetaPanel detection=detection />
             </div>
         </div>
