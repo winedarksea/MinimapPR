@@ -34,7 +34,15 @@ class BirdNETClassifier(AudioClassifier):
     The model files are downloaded on first instantiation (~125 MB).
     """
 
-    def __init__(self, min_confidence: float = 0.1, pool_size: int = 1) -> None:
+    def __init__(
+        self,
+        min_confidence: float = 0.1,
+        *,
+        pool_size: int = 1,
+        latitude: float | None = None,
+        longitude: float | None = None,
+        geo_min_confidence: float = 0.03,
+    ) -> None:
         try:
             from birdnet import model_loader
         except Exception as exc:  # pragma: no cover - optional dependency
@@ -43,6 +51,12 @@ class BirdNETClassifier(AudioClassifier):
             ) from exc
 
         self._min_confidence = min_confidence
+        self._custom_species_list = _predict_site_species_list(
+            model_loader=model_loader,
+            latitude=latitude,
+            longitude=longitude,
+            geo_min_confidence=geo_min_confidence,
+        )
         # The protobuf SavedModel backend can hang during model initialization on
         # macOS/Python 3.12 when BirdNET spins up multiprocessing helpers. Use the
         # official TF/TFLite backend instead so test and runtime classification stay
@@ -65,6 +79,7 @@ class BirdNETClassifier(AudioClassifier):
                 default_confidence_threshold=self._min_confidence,
                 apply_sigmoid=True,
                 n_workers=1,
+                custom_species_list=self._custom_species_list,
             )
             self._session_ctxs.append(ctx)
             self._session_pool.put(ctx.__enter__())
@@ -184,3 +199,42 @@ def _extract_common_name(species_label: str) -> str:
     if "_" in species_label:
         return species_label.split("_", 1)[1].strip().lower()
     return species_label.strip().lower()
+
+
+def _predict_site_species_list(
+    *,
+    model_loader: Any,
+    latitude: float | None,
+    longitude: float | None,
+    geo_min_confidence: float,
+) -> list[str] | None:
+    if latitude is None or longitude is None:
+        return None
+
+    try:
+        geo_model = model_loader.load("geo", "2.4", "tf", library="tflite")
+        geo_result = geo_model.predict(
+            float(latitude),
+            float(longitude),
+            week=None,
+            min_confidence=float(geo_min_confidence),
+        )
+        species_list = [str(species) for species in geo_result.to_set()]
+    except Exception as exc:  # pragma: no cover - optional refinement
+        logger.warning(
+            "BirdNET geo filter unavailable for lat=%s lon=%s (%s); using unconstrained species list.",
+            latitude,
+            longitude,
+            exc,
+        )
+        return None
+
+    if not species_list:
+        logger.warning(
+            "BirdNET geo filter returned no species for lat=%s lon=%s threshold=%.3f; using unconstrained species list.",
+            latitude,
+            longitude,
+            geo_min_confidence,
+        )
+        return None
+    return species_list

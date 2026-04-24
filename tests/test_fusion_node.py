@@ -158,6 +158,108 @@ async def test_fusion_node_ingest_and_status(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_fusion_ingest_accepts_explicit_packet_coverage_metadata(tmp_path: Path) -> None:
+    settings = Settings(
+        db_path=tmp_path / "fusion_explicit_coverage.db",
+        snippet_dir=tmp_path / "snippets",
+        snippet_retention_seconds=0,
+        trigger_rms=0.001,
+        trigger_cooldown_seconds=0.0,
+        localization_window_seconds=0.04,
+        max_sensor_buffer_seconds=2.0,
+        fusion_worker_count=1,
+        fusion_event_queue_size=8,
+    )
+    settings.db_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.snippet_dir.mkdir(parents=True, exist_ok=True)
+
+    storage = Storage(settings.db_path)
+    await storage.initialize()
+
+    fusion = FusionNode(
+        settings=settings,
+        registry=NodeRegistry(),
+        buffer=MultiSensorBuffer(max_duration_seconds=settings.max_sensor_buffer_seconds),
+        localizer=LocalizationEngine(max_tau_s=0.03),
+        classifier=HeuristicClassifier(),
+        tracker=TrackManager(settings),
+        storage=storage,
+        live_callback=lambda payload: asyncio.sleep(0, result=None),
+        coordinate_frame=LocalCoordinateFrame(origin=GeoPoint(lat=37.0, lon=-122.0, alt_m=0.0), mode="flat"),
+        zone_matcher=ZoneMatcher(storage=storage),
+    )
+    await fusion.start()
+
+    node = NodeSpec(
+        id="sirith-explicit-coverage",
+        node_type=NodeType.SIRITH_TETRA,
+        position_m=(0.0, 0.0, 0.0),
+        sensor_offsets_m=[
+            (-0.02, -0.01, 0.0),
+            (0.02, -0.01, 0.0),
+            (0.0, 0.02, 0.0),
+            (0.0, 0.0, 0.03),
+        ],
+        capabilities=["audio", "array_localization"],
+        metadata={},
+    )
+
+    channels_first = np.ones((4, 1024), dtype=np.float32) * 0.1
+    response = await fusion.ingest(
+        IngestFrameRequest(
+            node=node,
+            frame={
+                "start_time_ns": 1_739_810_000_000_000_000,
+                "utc_end_ns": 1_739_810_000_064_000_000,
+                "start_sample_index": 32_000,
+                "end_sample_index": 33_024,
+                "sample_rate_hz": 16_000,
+                "channels": 4,
+                "encoding": "pcm16le",
+                "samples_per_channel": 1024,
+                "samples_b64": encode_pcm16le_b64(channels_first),
+                "sequence": 1,
+                "time_quality": "gps_locked",
+            },
+        )
+    )
+
+    assert response.accepted is True
+    assert response.frame_energy > 0.0
+
+    await fusion.stop()
+    await storage.close()
+
+
+def test_ingest_model_rejects_negative_utc_coverage() -> None:
+    with pytest.raises(ValueError, match="utc_end_ns must be >= start_time_ns"):
+        IngestFrameRequest(
+            node=NodeSpec(
+                id="bad-coverage",
+                node_type=NodeType.SIRITH_TETRA,
+                position_m=(0.0, 0.0, 0.0),
+                sensor_offsets_m=[
+                    (-0.02, -0.01, 0.0),
+                    (0.02, -0.01, 0.0),
+                    (0.0, 0.02, 0.0),
+                    (0.0, 0.0, 0.03),
+                ],
+                capabilities=["audio"],
+                metadata={},
+            ),
+            frame={
+                "start_time_ns": 100,
+                "utc_end_ns": 99,
+                "sample_rate_hz": 16_000,
+                "channels": 4,
+                "encoding": "pcm16le",
+                "samples_per_channel": 1,
+                "samples_b64": encode_pcm16le_b64(np.zeros((4, 1), dtype=np.float32)),
+            },
+        )
+
+
+@pytest.mark.asyncio
 async def test_multichannel_trigger_avoids_phase_cancellation(tmp_path: Path) -> None:
     settings = Settings(
         db_path=tmp_path / "fusion_phase_cancel.db",

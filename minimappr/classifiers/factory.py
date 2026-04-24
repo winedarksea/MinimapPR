@@ -37,7 +37,12 @@ def create_classifier(settings: Settings) -> AudioClassifier:
         try:
             from minimappr.classifiers.birdnet import BirdNETClassifier  # noqa: PLC0415
 
-            base_classifier = BirdNETClassifier(min_confidence=settings.birdnet_trigger_min_confidence)
+            base_classifier = BirdNETClassifier(
+                min_confidence=settings.birdnet_trigger_min_confidence,
+                latitude=settings.site_origin_lat,
+                longitude=settings.site_origin_lon,
+                geo_min_confidence=settings.birdnet_geo_min_confidence,
+            )
         except Exception as exc:  # pragma: no cover - optional runtime backend
             logger.warning("BirdNET unavailable (%s). Falling back to heuristic classifier.", exc)
             base_classifier = _create_heuristic(settings)
@@ -96,7 +101,12 @@ def _build_stage(raw: dict[str, Any], settings: Settings) -> ChainStage | None:
     elif backend == "birdnet":
         try:
             from minimappr.classifiers.birdnet import BirdNETClassifier  # noqa: PLC0415
-            classifier = BirdNETClassifier(min_confidence=float(raw.get("min_confidence", 0.1) or 0.1))
+            classifier = BirdNETClassifier(
+                min_confidence=float(raw.get("min_confidence", 0.1) or 0.1),
+                latitude=settings.site_origin_lat,
+                longitude=settings.site_origin_lon,
+                geo_min_confidence=settings.birdnet_geo_min_confidence,
+            )
         except Exception as exc:
             logger.warning("BirdNET backend unavailable (%s). Skipping chain stage '%s'.", exc, stage_id)
             return None
@@ -126,7 +136,12 @@ def _default_chain_stages(settings: Settings) -> list[ChainStage]:
     """
     try:
         from minimappr.classifiers.birdnet import BirdNETClassifier  # noqa: PLC0415
-        birdnet_classifier: AudioClassifier = BirdNETClassifier(min_confidence=0.1)
+        birdnet_classifier: AudioClassifier = BirdNETClassifier(
+            min_confidence=0.1,
+            latitude=settings.site_origin_lat,
+            longitude=settings.site_origin_lon,
+            geo_min_confidence=settings.birdnet_geo_min_confidence,
+        )
     except Exception as exc:
         logger.info(
             "BirdNET package not available (%s). Default chain will omit species ID stage."

@@ -8,6 +8,7 @@ import json
 import logging
 import time
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Literal
 
@@ -39,6 +40,10 @@ from minimappr.core.fusion_node import FusionNode
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.localization_dispatch import build_localizer_from_settings
 from minimappr.core.logging_ring import install_global as install_log_ring, process_start_ns
+from minimappr.core.site_origin import (
+    resolve_site_origin_from_nodes,
+    should_schedule_deferred_site_origin_reconciliation,
+)
 from minimappr.core import system_info
 from minimappr.core.node_registry import NodeRegistry
 from minimappr.core.tracking import TrackManager
@@ -124,6 +129,88 @@ async def _cleanup_loop(app: FastAPI) -> None:
         await asyncio.sleep(settings.cleanup_interval_seconds)
 
 
+def _apply_site_origin_resolution(state, resolved_site_origin) -> None:
+    settings: Settings = state.settings
+    settings.site_origin_lat = resolved_site_origin.origin.lat
+    settings.site_origin_lon = resolved_site_origin.origin.lon
+    settings.site_origin_alt_m = resolved_site_origin.origin.alt_m
+    state.site_origin_resolution_source = resolved_site_origin.source
+    state.site_origin_contributing_node_ids = resolved_site_origin.contributing_node_ids
+
+
+async def _reconcile_site_origin_after_startup(app: FastAPI) -> None:
+    state = app.state
+    settings: Settings = state.settings
+    delay_seconds = settings.site_origin_reconcile_delay_seconds
+    if delay_seconds <= 0.0:
+        return
+
+    await asyncio.sleep(delay_seconds)
+
+    if state.fusion_node.accepted_frame_count > 0:
+        logger.info(
+            "Skipping delayed site-origin reconciliation after %.1fs because ingest already accepted %d frames",
+            delay_seconds,
+            state.fusion_node.accepted_frame_count,
+        )
+        return
+
+    resolved_site_origin = resolve_site_origin_from_nodes(
+        settings,
+        nodes=await state.storage.list_nodes(limit=4096),
+        now_ns=time.time_ns(),
+    )
+    current_origin = (
+        settings.site_origin_lat,
+        settings.site_origin_lon,
+        settings.site_origin_alt_m,
+        getattr(state, "site_origin_resolution_source", settings.site_origin_source),
+    )
+    next_origin = (
+        resolved_site_origin.origin.lat,
+        resolved_site_origin.origin.lon,
+        resolved_site_origin.origin.alt_m,
+        resolved_site_origin.source,
+    )
+    if next_origin == current_origin:
+        logger.info("Delayed site-origin reconciliation after %.1fs found no change", delay_seconds)
+        return
+
+    candidate_settings = replace(
+        settings,
+        site_origin_lat=resolved_site_origin.origin.lat,
+        site_origin_lon=resolved_site_origin.origin.lon,
+        site_origin_alt_m=resolved_site_origin.origin.alt_m,
+    )
+    new_classifier = create_classifier(candidate_settings)
+    new_coordinate_frame = LocalCoordinateFrame(
+        origin=resolved_site_origin.origin,
+        mode=settings.coordinate_mode,
+    )
+    previous_classifier = state.classifier
+    state.fusion_node.rebind_runtime_dependencies(
+        classifier=new_classifier,
+        coordinate_frame=new_coordinate_frame,
+    )
+    state.classifier = new_classifier
+    state.coordinate_frame = new_coordinate_frame
+    state.diagnostics.replace_classifier(new_classifier)
+    _apply_site_origin_resolution(state, resolved_site_origin)
+    logger.info(
+        "Reconciled site origin after %.1fs via %s: lat=%.6f lon=%.6f alt=%.2f nodes=%s",
+        delay_seconds,
+        resolved_site_origin.source,
+        resolved_site_origin.origin.lat,
+        resolved_site_origin.origin.lon,
+        resolved_site_origin.origin.alt_m,
+        list(resolved_site_origin.contributing_node_ids),
+    )
+    try:
+        previous_classifier.close()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Previous classifier close failed after site-origin reconciliation: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     install_log_ring()
@@ -137,6 +224,24 @@ async def lifespan(app: FastAPI):
     tracking_cfg = settings.tracking_config()
 
     storage = Storage(storage_cfg.db_path)
+    await storage.initialize()
+    resolved_site_origin = resolve_site_origin_from_nodes(
+        settings,
+        nodes=await storage.list_nodes(limit=4096),
+        now_ns=time.time_ns(),
+    )
+    settings.site_origin_lat = resolved_site_origin.origin.lat
+    settings.site_origin_lon = resolved_site_origin.origin.lon
+    settings.site_origin_alt_m = resolved_site_origin.origin.alt_m
+    logger.info(
+        "Resolved site origin via %s: lat=%.6f lon=%.6f alt=%.2f nodes=%s",
+        resolved_site_origin.source,
+        settings.site_origin_lat,
+        settings.site_origin_lon,
+        settings.site_origin_alt_m,
+        list(resolved_site_origin.contributing_node_ids),
+    )
+
     registry = NodeRegistry()
     audio_buffer = MultiSensorBuffer(max_duration_seconds=localization_cfg.max_sensor_buffer_seconds)
     localizer = build_localizer_from_settings(localization_cfg)
@@ -186,7 +291,7 @@ async def lifespan(app: FastAPI):
         for track in tracks:
             if track.status not in {"tentative", "confirmed", "coasting"}:
                 continue
-            track.position_geo = coordinate_frame.local_to_geo(track.position_m)
+            track.position_geo = app.state.coordinate_frame.local_to_geo(track.position_m)
             active.append(track)
         return active
 
@@ -213,19 +318,30 @@ async def lifespan(app: FastAPI):
     app.state.bit_evaluator = bit_evaluator
     app.state.diagnostics = diagnostics
     app.state.cleanup_service = cleanup_service
+    _apply_site_origin_resolution(app.state, resolved_site_origin)
 
     cleanup_task: asyncio.Task | None = None
-    await storage.initialize()
+    site_origin_reconcile_task: asyncio.Task | None = None
     environment_provider.bootstrap(await storage.list_latest_environment_per_node(limit=1024))
     await fusion_node.start()
     await federation.start()
     cleanup_task = asyncio.create_task(_cleanup_loop(app))
     app.state.cleanup_task = cleanup_task
+    if should_schedule_deferred_site_origin_reconciliation(
+        settings,
+        initial_resolution_source=resolved_site_origin.source,
+    ):
+        site_origin_reconcile_task = asyncio.create_task(_reconcile_site_origin_after_startup(app))
+    app.state.site_origin_reconcile_task = site_origin_reconcile_task
 
     try:
         yield
     finally:
         shutdown_timeout_s = 5.0
+        if site_origin_reconcile_task is not None:
+            site_origin_reconcile_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+                await asyncio.wait_for(site_origin_reconcile_task, timeout=shutdown_timeout_s)
         if cleanup_task is not None:
             cleanup_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
@@ -590,6 +706,7 @@ async def list_tracks(
 async def get_config(request: Request) -> dict:
     state = _require_state(request)
     settings: Settings = state.settings
+    site_origin_resolution_source = getattr(state, "site_origin_resolution_source", settings.site_origin_source)
     return {
         "trigger_rms": settings.trigger_rms,
         "trigger_cooldown_seconds": settings.trigger_cooldown_seconds,
@@ -656,6 +773,9 @@ async def get_config(request: Request) -> dict:
             "lat": settings.site_origin_lat,
             "lon": settings.site_origin_lon,
             "alt_m": settings.site_origin_alt_m,
+            "reconcile_delay_seconds": settings.site_origin_reconcile_delay_seconds,
+            "mode": settings.site_origin_source,
+            "source": site_origin_resolution_source,
         },
         "coordinate_mode": settings.coordinate_mode,
         "node_degraded_after_seconds": settings.node_degraded_after_seconds,

@@ -51,8 +51,16 @@ def _ingested_frame_key(
     node_id: str,
     frame_sequence: int | None,
     start_time_ns: int,
+    utc_end_ns: int | None,
+    start_sample_index: int | None,
+    end_sample_index: int | None,
     source_type: str,
 ) -> str:
+    if start_sample_index is not None and end_sample_index is not None and utc_end_ns is not None:
+        return (
+            f"{node_id}:{source_type}:{start_sample_index}:{end_sample_index}:"
+            f"{start_time_ns}:{utc_end_ns}"
+        )
     sequence_token = str(frame_sequence) if frame_sequence is not None else "none"
     return f"{node_id}:{source_type}:{start_time_ns}:{sequence_token}"
 
@@ -120,6 +128,9 @@ class Storage:
                 node_id TEXT NOT NULL,
                 source_type TEXT NOT NULL,
                 start_time_ns INTEGER NOT NULL,
+                end_time_ns INTEGER,
+                start_sample_index INTEGER,
+                end_sample_index INTEGER,
                 frame_sequence INTEGER,
                 toa_ns INTEGER NOT NULL,
                 tor_ns INTEGER NOT NULL,
@@ -342,6 +353,14 @@ class Storage:
             },
         )
         await self._ensure_columns(
+            "ingested_frames",
+            {
+                "end_time_ns": "INTEGER",
+                "start_sample_index": "INTEGER",
+                "end_sample_index": "INTEGER",
+            },
+        )
+        await self._ensure_columns(
             "detections",
             {
                 "event_id": "TEXT",
@@ -349,7 +368,7 @@ class Storage:
                 "source_node_id": "TEXT",
                 "toa_ns": "INTEGER",
                 "tor_ns": "INTEGER",
-                "time_quality": "TEXT NOT NULL DEFAULT 'freerunning'",
+                "time_quality": "TEXT NOT NULL DEFAULT 'free_running'",
                 "stale_ns": "INTEGER",
                 "report_window_start_ns": "INTEGER",
                 "report_window_end_ns": "INTEGER",
@@ -775,6 +794,9 @@ class Storage:
         node_id: str,
         frame_sequence: int | None,
         start_time_ns: int,
+        utc_end_ns: int | None,
+        start_sample_index: int | None,
+        end_sample_index: int | None,
         source_type: str,
     ) -> bool:
         db = self._require_db()
@@ -782,6 +804,9 @@ class Storage:
             node_id=node_id,
             frame_sequence=frame_sequence,
             start_time_ns=start_time_ns,
+            utc_end_ns=utc_end_ns,
+            start_sample_index=start_sample_index,
+            end_sample_index=end_sample_index,
             source_type=source_type,
         )
         row = await (
@@ -803,6 +828,9 @@ class Storage:
         node_id: str,
         frame_sequence: int | None,
         start_time_ns: int,
+        utc_end_ns: int | None,
+        start_sample_index: int | None,
+        end_sample_index: int | None,
         toa_ns: int,
         tor_ns: int,
         source_type: str,
@@ -812,6 +840,9 @@ class Storage:
             node_id=node_id,
             frame_sequence=frame_sequence,
             start_time_ns=start_time_ns,
+            utc_end_ns=utc_end_ns,
+            start_sample_index=start_sample_index,
+            end_sample_index=end_sample_index,
             source_type=source_type,
         )
         async with self._write_guard():
@@ -819,9 +850,10 @@ class Storage:
                 """
                 INSERT INTO ingested_frames (
                     frame_key, node_id, source_type, start_time_ns,
+                    end_time_ns, start_sample_index, end_sample_index,
                     frame_sequence, toa_ns, tor_ns, created_ns
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(frame_key) DO NOTHING
                 """,
                 (
@@ -829,6 +861,9 @@ class Storage:
                     node_id,
                     source_type,
                     start_time_ns,
+                    utc_end_ns,
+                    start_sample_index,
+                    end_sample_index,
                     frame_sequence,
                     toa_ns,
                     tor_ns,
@@ -2447,7 +2482,7 @@ class Storage:
             timestamp_ns=int(row["timestamp_ns"]),
             toa_ns=int(row["toa_ns"] or row["timestamp_ns"]),
             tor_ns=int(row["tor_ns"] or row["timestamp_ns"]),
-            time_quality=row["time_quality"] or "freerunning",
+            time_quality=row["time_quality"] or "free_running",
             stale_ns=row["stale_ns"],
             report_window_start_ns=row["report_window_start_ns"],
             report_window_end_ns=row["report_window_end_ns"],

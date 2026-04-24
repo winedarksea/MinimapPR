@@ -122,6 +122,7 @@ class ClassifierConfig:
     yamnet_input_target_rms: float
     yamnet_max_input_gain: float
     birdnet_trigger_min_confidence: float
+    birdnet_geo_min_confidence: float
     heuristic_ambient_rms_threshold: float
     heuristic_impulse_crest_threshold: float
     heuristic_impulse_bandwidth_threshold_hz: float
@@ -328,6 +329,8 @@ class Settings:
     default_temperature_c: float = 20.0
     default_humidity: float = 0.5
     environment_reading_max_age_seconds: float = 300.0
+    site_origin_source: str = "auto"
+    site_origin_reconcile_delay_seconds: float = 30.0
     site_origin_lat: float = 44.98698840878797
     site_origin_lon: float = -93.2579197515542
     site_origin_alt_m: float = 0.0
@@ -338,6 +341,7 @@ class Settings:
     yamnet_input_target_rms: float = 0.10
     yamnet_max_input_gain: float = 32.0
     birdnet_trigger_min_confidence: float = 0.40
+    birdnet_geo_min_confidence: float = 0.03
     detection_min_confidence: float = 0.4
     cop_detections_max_items: int = 150
     cop_tracks_max_items: int = 150
@@ -446,6 +450,11 @@ class Settings:
             raise ValueError("MINIMAPPR_MIN_SENSORS_FOR_3D must be >= MINIMAPPR_MIN_SENSORS_FOR_2D")
         if self.environment_reading_max_age_seconds < 0.0:
             raise ValueError("MINIMAPPR_ENVIRONMENT_READING_MAX_AGE_SECONDS must be >= 0")
+        self.site_origin_source = self.site_origin_source.strip().lower() or "auto"
+        if self.site_origin_source not in {"auto", "manual"}:
+            raise ValueError("MINIMAPPR_SITE_ORIGIN_SOURCE must be 'auto' or 'manual'")
+        if self.site_origin_reconcile_delay_seconds < 0.0:
+            raise ValueError("MINIMAPPR_SITE_ORIGIN_RECONCILE_DELAY_SECONDS must be >= 0")
         if not math.isfinite(self.ingest_gain_multiplier) or self.ingest_gain_multiplier <= 0.0:
             raise ValueError("MINIMAPPR_INGEST_GAIN_MULTIPLIER must be finite and > 0")
 
@@ -539,6 +548,8 @@ class Settings:
             raise ValueError("MINIMAPPR_YAMNET_MAX_INPUT_GAIN must be finite and > 0")
         if self.birdnet_trigger_min_confidence < 0.0 or self.birdnet_trigger_min_confidence > 1.0:
             raise ValueError("MINIMAPPR_BIRDNET_TRIGGER_MIN_CONFIDENCE must be in [0,1]")
+        if self.birdnet_geo_min_confidence < 0.0 or self.birdnet_geo_min_confidence > 1.0:
+            raise ValueError("MINIMAPPR_BIRDNET_GEO_MIN_CONFIDENCE must be in [0,1]")
         if self.detection_min_confidence < 0.0 or self.detection_min_confidence > 1.0:
             raise ValueError("MINIMAPPR_DETECTION_MIN_CONFIDENCE must be in [0,1]")
         if self.cop_detections_max_items < 1:
@@ -696,6 +707,11 @@ class Settings:
             default_temperature_c=_env_float("MINIMAPPR_DEFAULT_TEMPERATURE_C", 20.0),
             default_humidity=_env_float("MINIMAPPR_DEFAULT_HUMIDITY", 0.5),
             environment_reading_max_age_seconds=_env_float("MINIMAPPR_ENVIRONMENT_READING_MAX_AGE_SECONDS", 300.0),
+            site_origin_source=_env_str("MINIMAPPR_SITE_ORIGIN_SOURCE", "auto"),
+            site_origin_reconcile_delay_seconds=_env_float(
+                "MINIMAPPR_SITE_ORIGIN_RECONCILE_DELAY_SECONDS",
+                30.0,
+            ),
             site_origin_lat=_env_float("MINIMAPPR_SITE_ORIGIN_LAT", 44.98698840878797),
             site_origin_lon=_env_float("MINIMAPPR_SITE_ORIGIN_LON", -93.2579197515542),
             site_origin_alt_m=_env_float("MINIMAPPR_SITE_ORIGIN_ALT_M", 0.0),
@@ -705,6 +721,7 @@ class Settings:
             yamnet_input_target_rms=_env_float("MINIMAPPR_YAMNET_INPUT_TARGET_RMS", 0.10),
             yamnet_max_input_gain=_env_float("MINIMAPPR_YAMNET_MAX_INPUT_GAIN", 32.0),
             birdnet_trigger_min_confidence=_env_float("MINIMAPPR_BIRDNET_TRIGGER_MIN_CONFIDENCE", 0.40),
+            birdnet_geo_min_confidence=_env_float("MINIMAPPR_BIRDNET_GEO_MIN_CONFIDENCE", 0.03),
             detection_min_confidence=_env_float("MINIMAPPR_DETECTION_MIN_CONFIDENCE", 0.4),
             cop_detections_max_items=_env_int("MINIMAPPR_COP_DETECTIONS_MAX_ITEMS", 150),
             cop_tracks_max_items=_env_int("MINIMAPPR_COP_TRACKS_MAX_ITEMS", 150),
@@ -862,6 +879,7 @@ class Settings:
             yamnet_input_target_rms=self.yamnet_input_target_rms,
             yamnet_max_input_gain=self.yamnet_max_input_gain,
             birdnet_trigger_min_confidence=self.birdnet_trigger_min_confidence,
+            birdnet_geo_min_confidence=self.birdnet_geo_min_confidence,
             heuristic_ambient_rms_threshold=self.heuristic_ambient_rms_threshold,
             heuristic_impulse_crest_threshold=self.heuristic_impulse_crest_threshold,
             heuristic_impulse_bandwidth_threshold_hz=self.heuristic_impulse_bandwidth_threshold_hz,

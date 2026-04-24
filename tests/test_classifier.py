@@ -106,8 +106,18 @@ def test_chained_classifier_skips_non_matching_stage() -> None:
 
 def test_default_yamnet_to_birdnet_chain_uses_recall_biased_threshold(monkeypatch) -> None:
     class _StubBirdNETClassifier(AudioClassifier):
-        def __init__(self, min_confidence: float = 0.1) -> None:
+        def __init__(
+            self,
+            min_confidence: float = 0.1,
+            *,
+            latitude: float | None = None,
+            longitude: float | None = None,
+            geo_min_confidence: float = 0.03,
+        ) -> None:
             self.min_confidence = min_confidence
+            self.latitude = latitude
+            self.longitude = longitude
+            self.geo_min_confidence = geo_min_confidence
 
         def classify(self, samples: np.ndarray, sample_rate_hz: int) -> ClassificationResult:
             del samples, sample_rate_hz
@@ -201,8 +211,18 @@ def test_create_classifier_uses_birdnet_as_primary_backend(monkeypatch, tmp_path
     captured: dict[str, float] = {}
 
     class _StubBirdNETClassifier(AudioClassifier):
-        def __init__(self, min_confidence: float = 0.1) -> None:
+        def __init__(
+            self,
+            min_confidence: float = 0.1,
+            *,
+            latitude: float | None = None,
+            longitude: float | None = None,
+            geo_min_confidence: float = 0.03,
+        ) -> None:
             captured["min_confidence"] = min_confidence
+            captured["latitude"] = latitude or 0.0
+            captured["longitude"] = longitude or 0.0
+            captured["geo_min_confidence"] = geo_min_confidence
 
         def classify(self, samples: np.ndarray, sample_rate_hz: int) -> ClassificationResult:
             del samples, sample_rate_hz
@@ -222,4 +242,7 @@ def test_create_classifier_uses_birdnet_as_primary_backend(monkeypatch, tmp_path
     result = classifier.classify(np.zeros(64, dtype=np.float32), 16_000)
 
     assert captured["min_confidence"] == pytest.approx(0.07)
+    assert captured["latitude"] == pytest.approx(settings.site_origin_lat)
+    assert captured["longitude"] == pytest.approx(settings.site_origin_lon)
+    assert captured["geo_min_confidence"] == pytest.approx(settings.birdnet_geo_min_confidence)
     assert result.label == "american robin"

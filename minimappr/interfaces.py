@@ -312,6 +312,9 @@ class StorageBackend(Protocol):
         node_id: str,
         frame_sequence: int | None,
         start_time_ns: int,
+        utc_end_ns: int | None,
+        start_sample_index: int | None,
+        end_sample_index: int | None,
         source_type: str,
     ) -> bool:
         ...
@@ -322,6 +325,9 @@ class StorageBackend(Protocol):
         node_id: str,
         frame_sequence: int | None,
         start_time_ns: int,
+        utc_end_ns: int | None,
+        start_sample_index: int | None,
+        end_sample_index: int | None,
         toa_ns: int,
         tor_ns: int,
         source_type: str,

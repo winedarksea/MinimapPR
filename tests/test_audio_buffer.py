@@ -247,6 +247,56 @@ def test_sensor_stream_buffer_preserves_real_gap_from_dropped_frames() -> None:
     assert int(np.sum(buf.samples == 0.0)) == 5 * frame_samples
 
 
+def test_sensor_stream_buffer_uses_explicit_sample_coverage_without_jitter_snapping() -> None:
+    sample_rate_hz = 16_000
+    start_time_ns = 1_000_000_000_000_000_000
+    buf = SensorStreamBuffer(sample_rate_hz=sample_rate_hz, max_duration_seconds=5.0)
+
+    buf.append(
+        start_time_ns=start_time_ns,
+        samples=np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float32),
+        start_sample_index=100,
+        end_sample_index=104,
+    )
+    # Timestamp is slightly late, but explicit sample coverage should still place this
+    # chunk immediately after the previous one with no snapped gap or overlap.
+    buf.append(
+        start_time_ns=start_time_ns + 300_000,
+        samples=np.array([2.0, 2.0, 2.0, 2.0], dtype=np.float32),
+        start_sample_index=104,
+        end_sample_index=108,
+    )
+
+    assert np.array_equal(
+        buf.samples,
+        np.array([1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0], dtype=np.float32),
+    )
+    assert buf.start_time_ns == start_time_ns
+
+
+def test_sensor_stream_buffer_preserves_explicit_sample_origin_after_large_reset() -> None:
+    sample_rate_hz = 16_000
+    start_time_ns = 1_000_000_000_000_000_000
+    buf = SensorStreamBuffer(sample_rate_hz=sample_rate_hz, max_duration_seconds=1.0)
+
+    buf.append(
+        start_time_ns=start_time_ns,
+        samples=np.ones(16_000, dtype=np.float32),
+        start_sample_index=0,
+        end_sample_index=16_000,
+    )
+    # Force the reset path with explicit sample coverage far in the future.
+    buf.append(
+        start_time_ns=start_time_ns + 10_000_000_000,
+        samples=np.full(4, 2.0, dtype=np.float32),
+        start_sample_index=320_000,
+        end_sample_index=320_004,
+    )
+
+    assert np.array_equal(buf.samples, np.full(4, 2.0, dtype=np.float32))
+    assert buf.start_time_ns == start_time_ns + 10_000_000_000
+
+
 @pytest.mark.asyncio
 async def test_classification_windows_use_per_sensor_fallback_when_some_sensors_have_partial_audio() -> None:
     """With a short buffer, sensors that have any audio should use their trailing window;

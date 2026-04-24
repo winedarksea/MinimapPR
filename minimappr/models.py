@@ -14,9 +14,12 @@ LabelId: TypeAlias = str
 
 class TimeQuality(str, Enum):
     GPS_LOCKED = "gps_locked"
-    NTP_SYNC = "ntp_sync"
-    BUILD_TIMESTAMP = "build_timestamp"
-    FREERUNNING = "freerunning"
+    GPS_HOLDOVER = "gps_holdover"
+    NTP_DISCIPLINED = "ntp_disciplined"
+    FREE_RUNNING = "free_running"
+    NTP_SYNC = "ntp_disciplined"
+    BUILD_TIMESTAMP = "free_running"
+    FREERUNNING = "free_running"
 
 
 class RetentionTier(str, Enum):
@@ -63,20 +66,44 @@ class NodeSpec(BaseModel):
 
 class AudioFrameIn(BaseModel):
     start_time_ns: int = Field(gt=0)
+    utc_start_ns: int | None = Field(default=None, gt=0)
+    utc_end_ns: int | None = Field(default=None, gt=0)
+    start_sample_index: int | None = Field(default=None, ge=0)
+    end_sample_index: int | None = Field(default=None, ge=0)
     sample_rate_hz: int = Field(ge=8000, le=192000)
     channels: int = Field(ge=1, le=32)
     encoding: Literal["pcm16le"] = "pcm16le"
+    samples_per_channel: int | None = Field(default=None, gt=0)
     samples_b64: str = Field(min_length=1)
     sequence: int | None = None
-    time_quality: TimeQuality = TimeQuality.FREERUNNING
+    time_quality: TimeQuality = TimeQuality.FREE_RUNNING
     toa_ns: int | None = None
     tor_ns: int | None = None
     source_type: Literal["raw_sensor", "local_track", "peer_track"] = "raw_sensor"
 
     @model_validator(mode="after")
     def _defaults(self) -> "AudioFrameIn":
+        if self.utc_start_ns is None:
+            self.utc_start_ns = self.start_time_ns
+        self.start_time_ns = self.utc_start_ns
         if self.toa_ns is None:
             self.toa_ns = self.start_time_ns
+        if self.samples_per_channel is not None:
+            if self.end_sample_index is None and self.start_sample_index is not None:
+                self.end_sample_index = self.start_sample_index + self.samples_per_channel
+            if self.utc_end_ns is None:
+                duration_ns = int(round((self.samples_per_channel / self.sample_rate_hz) * 1_000_000_000))
+                self.utc_end_ns = self.start_time_ns + duration_ns
+        if self.end_sample_index is not None and self.start_sample_index is not None:
+            if self.end_sample_index < self.start_sample_index:
+                raise ValueError("end_sample_index must be >= start_sample_index")
+            expected_samples = self.end_sample_index - self.start_sample_index
+            if self.samples_per_channel is None:
+                self.samples_per_channel = expected_samples
+            elif self.samples_per_channel != expected_samples:
+                raise ValueError("samples_per_channel must match sample index coverage")
+        if self.utc_end_ns is not None and self.utc_end_ns < self.start_time_ns:
+            raise ValueError("utc_end_ns must be >= start_time_ns")
         return self
 
 
@@ -198,7 +225,7 @@ class DetectionEvent(BaseModel):
     timestamp_ns: int
     toa_ns: int | None = None
     tor_ns: int | None = None
-    time_quality: TimeQuality = TimeQuality.FREERUNNING
+    time_quality: TimeQuality = TimeQuality.FREE_RUNNING
     stale_ns: int | None = None
     report_window_start_ns: int | None = None
     report_window_end_ns: int | None = None
