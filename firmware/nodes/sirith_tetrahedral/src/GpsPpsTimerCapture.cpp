@@ -15,6 +15,12 @@ namespace {
 GpsPpsTimerCapture* gPio0Capture = nullptr;
 GpsPpsTimerCapture* gPio1Capture = nullptr;
 
+bool runningInExceptionContext() {
+  uint32_t ipsr = 0;
+  __asm volatile("mrs %0, ipsr" : "=r"(ipsr));
+  return ipsr != 0;
+}
+
 }  // namespace
 
 GpsPpsTimerCapture::~GpsPpsTimerCapture() {
@@ -138,8 +144,10 @@ void GpsPpsTimerCapture::deinitPioStateMachine() {
         false);
   }
   if (pio == pio0 && gPio0Capture == this) {
+    irq_remove_handler(PIO0_IRQ_0, pio0IrqHandler);
     gPio0Capture = nullptr;
   } else if (pio == pio1 && gPio1Capture == this) {
+    irq_remove_handler(PIO1_IRQ_0, pio1IrqHandler);
     gPio1Capture = nullptr;
   }
   pio_sm_set_enabled(pio, static_cast<uint>(sm_), false);
@@ -178,10 +186,11 @@ void GpsPpsTimerCapture::onIrq() {
 
     GpsPpsCaptureEvent nextEvent = {};
     nextEvent.edgeCount = observedEdgeCount_;
-    nextEvent.monotonicUs = monotonicBaseUs_ + ticksToUs(accumulatedTickCycles_, clkSysHz_);
+    nextEvent.monotonicUs = monotonicBaseUs_ + ticksToUs(accumulatedTickCycles_ + kFixedEdgePipelineCycles, clkSysHz_);
     nextEvent.tickCycles = accumulatedTickCycles_;
     if (audioSource_ != nullptr) {
-      audioSource_->snapshotProducerState(nextEvent.audioProducerSnapshot);
+      nextEvent.audioProducerSnapshot.valid =
+          audioSource_->snapshotProducerState(nextEvent.audioProducerSnapshot, runningInExceptionContext());
     }
 
     const uint32_t nextHead = (queueHead_ + 1u) % kQueuedEvents;

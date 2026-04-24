@@ -17,9 +17,7 @@ class TimeQuality(str, Enum):
     GPS_HOLDOVER = "gps_holdover"
     NTP_DISCIPLINED = "ntp_disciplined"
     FREE_RUNNING = "free_running"
-    NTP_SYNC = "ntp_disciplined"
-    BUILD_TIMESTAMP = "free_running"
-    FREERUNNING = "free_running"
+    NTP_SYNC = "ntp_sync"  # Legacy database values; converted to NTP_DISCIPLINED on load
 
 
 class RetentionTier(str, Enum):
@@ -260,6 +258,9 @@ class DetectionEvent(BaseModel):
             self.toa_ns = self.timestamp_ns
         if self.tor_ns is None:
             self.tor_ns = self.timestamp_ns
+        # Normalize legacy "ntp_sync" to canonical "ntp_disciplined"
+        if self.time_quality == TimeQuality.NTP_SYNC:
+            self.time_quality = TimeQuality.NTP_DISCIPLINED
         return self
 
 

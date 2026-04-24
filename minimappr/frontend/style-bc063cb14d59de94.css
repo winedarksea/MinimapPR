@@ -15,11 +15,11 @@
 :root {
   color-scheme: dark;
 
-  /* Primary role (key/brand) */
-  --md-sys-color-primary:              #b3c5ff;
-  --md-sys-color-on-primary:           #002d6f;
-  --md-sys-color-primary-container:    #1b438f;
-  --md-sys-color-on-primary-container: #dbe1ff;
+  /* Primary role — tactical steel-blue (shifted from lavender toward C2 electric blue) */
+  --md-sys-color-primary:              #9ecaff;
+  --md-sys-color-on-primary:           #003260;
+  --md-sys-color-primary-container:    #004881;
+  --md-sys-color-on-primary-container: #d1e4ff;
 
   /* Secondary role (supporting) */
   --md-sys-color-secondary:              #bbc6dc;
@@ -294,6 +294,13 @@ body {
   background: var(--md-sys-color-surface-container);
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
   flex-shrink: 0;
+  background-image: repeating-linear-gradient(
+    0deg,
+    transparent 0px,
+    transparent 3px,
+    rgba(0, 0, 0, 0.05) 3px,
+    rgba(0, 0, 0, 0.05) 4px
+  );
 }
 .topbar-brand {
   font-weight: 700;
@@ -401,6 +408,14 @@ body {
 }
 .topbar-clock .utc { color: var(--md-sys-color-on-surface); font-weight: 600; }
 .topbar-clock .local { font-size: 10px; }
+
+.topbar-nav .material-symbols-rounded {
+  font-size: 16px;
+  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 20;
+}
+.topbar-nav a.active .material-symbols-rounded {
+  font-variation-settings: 'FILL' 1, 'wght' 500, 'GRAD' 0, 'opsz' 20;
+}
 
 .topbar-iconbtn {
   width: 32px; height: 32px;
@@ -522,6 +537,9 @@ body {
   0%, 100% { box-shadow: 0 0 0 0 transparent; }
   50% { box-shadow: 0 0 0 1px color-mix(in srgb, var(--mmp-sys-color-danger) 55%, transparent); }
 }
+.strip-chip.danger .value {
+  text-shadow: 0 0 6px color-mix(in srgb, var(--mmp-sys-color-danger) 50%, transparent);
+}
 
 /* ═══ Main grid (COP page — three columns) ══════════════════════ */
 .main-grid {
@@ -548,9 +566,11 @@ body {
   display: flex;
   align-items: center;
   gap: var(--mmp-density-gap-sm);
-  padding: var(--mmp-density-pad-cell) var(--mmp-density-pad-panel);
+  padding: var(--mmp-density-pad-cell) var(--mmp-density-pad-panel)
+           var(--mmp-density-pad-cell) calc(var(--mmp-density-pad-panel) - 3px);
   background: var(--md-sys-color-surface-container-low);
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  border-left: 3px solid var(--md-sys-color-primary);
   font-size: var(--md-sys-typescale-label-medium-size);
   font-weight: 700;
   text-transform: uppercase;
@@ -695,6 +715,12 @@ body {
   position: absolute;
   inset: 0;
   background: var(--md-sys-color-surface-dim);
+}
+#leaflet-map .leaflet-tile-pane {
+  filter: grayscale(0.88) brightness(0.52) hue-rotate(195deg);
+}
+[data-theme="light"] #leaflet-map .leaflet-tile-pane {
+  filter: saturate(0.65) brightness(0.88);
 }
 .map-overlay-stack {
   position: absolute;
@@ -870,7 +896,7 @@ body {
 /* ═══ Track / detection age staleness ══════════════════════════ */
 .age-fresh   { color: var(--mmp-sys-color-ok);   font-family: var(--md-sys-typescale-mono); font-variant-numeric: tabular-nums; font-size: var(--md-sys-typescale-label-small-size); font-weight: 700; }
 .age-stale   { color: var(--mmp-sys-color-warn);  font-family: var(--md-sys-typescale-mono); font-variant-numeric: tabular-nums; font-size: var(--md-sys-typescale-label-small-size); font-weight: 700; }
-.age-lost    { color: var(--mmp-sys-color-danger); font-family: var(--md-sys-typescale-mono); font-variant-numeric: tabular-nums; font-size: var(--md-sys-typescale-label-small-size); font-weight: 700; }
+.age-lost    { color: var(--mmp-sys-color-danger); font-family: var(--md-sys-typescale-mono); font-variant-numeric: tabular-nums; font-size: var(--md-sys-typescale-label-small-size); font-weight: 700; text-shadow: 0 0 8px color-mix(in srgb, var(--mmp-sys-color-danger) 55%, transparent); }
 .age-unknown { color: var(--md-sys-color-on-surface-variant); font-family: var(--md-sys-typescale-mono); font-size: var(--md-sys-typescale-label-small-size); }
 
 /* Entire row dims when track is truly lost */
@@ -1013,6 +1039,9 @@ body {
   font-size: var(--md-sys-typescale-title-small-size);
   font-weight: 700;
   color: var(--md-sys-color-on-surface);
+}
+.alert-card.severity-danger .alert-card-title {
+  text-shadow: 0 0 10px color-mix(in srgb, var(--mmp-sys-color-danger) 40%, transparent);
 }
 .alert-card-age {
   font-size: var(--md-sys-typescale-label-medium-size);
@@ -1611,7 +1640,7 @@ audio { display: none; }
 .audio-drawer-root {
   position: fixed;
   inset: 0;
-  z-index: 70;
+  z-index: 1000;
   display: flex;
   justify-content: flex-end;
 }

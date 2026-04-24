@@ -60,10 +60,10 @@ pub fn TopBar() -> impl IntoView {
             </span>
 
             <nav class="topbar-nav" aria-label="Primary">
-                <NavLink href="/cop"      label="COP" />
-                <NavLink href="/analysis" label="Analysis" />
-                <NavLink href="/audio"    label="Audio" />
-                <NavLink href="/settings" label="Settings" />
+                <NavLink href="/cop"      label="COP"      icon="radar" />
+                <NavLink href="/analysis" label="Analysis" icon="analytics" />
+                <NavLink href="/audio"    label="Audio"    icon="graphic_eq" />
+                <NavLink href="/settings" label="Settings" icon="settings" />
             </nav>
 
             <span class="topbar-spacer"></span>
@@ -88,7 +88,7 @@ pub fn TopBar() -> impl IntoView {
 }
 
 #[component]
-fn NavLink(href: &'static str, label: &'static str) -> impl IntoView {
+fn NavLink(href: &'static str, label: &'static str, icon: &'static str) -> impl IntoView {
     let loc = use_location();
     let href_owned = href.to_string();
     let is_active = move || {
@@ -105,6 +105,7 @@ fn NavLink(href: &'static str, label: &'static str) -> impl IntoView {
             href=href
             attr:class=move || if is_active() { "active" } else { "" }
         >
+            <span class="material-symbols-rounded">{icon}</span>
             {label}
         </A>
     }

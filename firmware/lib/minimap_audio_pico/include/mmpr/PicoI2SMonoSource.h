@@ -47,7 +47,9 @@ class PicoI2SMonoSource final : public IAudioSource {
       int16_t* interleavedOut,
       size_t samplesPerChannel,
       AudioCaptureTimestamp* captureTimestamp = nullptr) override;
-  bool snapshotProducerState(AudioProducerSnapshot& producerSnapshot) const override;
+  bool snapshotProducerState(
+      AudioProducerSnapshot& producerSnapshot,
+      bool callerAlreadyInIrqContext = false) const override;
 
  private:
   // Keep >1 s of capture slack in mono mode so short Wi-Fi stalls do not

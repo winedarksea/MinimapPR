@@ -202,6 +202,8 @@ bool buildIngestPayload(
   outPayload += "\"start_time_ns\":";
   appendUint64(outPayload, frame.startTimeNs);
 
+  // Keep the legacy field until all server deployments consume utc_start_ns as
+  // the canonical name. Both currently carry the same UTC anchor.
   outPayload += ",\"utc_start_ns\":";
   appendUint64(outPayload, frame.startTimeNs);
 

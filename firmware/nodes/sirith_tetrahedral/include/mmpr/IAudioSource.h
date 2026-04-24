@@ -39,7 +39,10 @@ class IAudioSource {
       size_t samplesPerChannel,
       AudioCaptureTimestamp* captureTimestamp = nullptr) = 0;
 
-  virtual bool snapshotProducerState(AudioProducerSnapshot& producerSnapshot) const {
+  virtual bool snapshotProducerState(
+      AudioProducerSnapshot& producerSnapshot,
+      bool callerAlreadyInIrqContext = false) const {
+    (void)callerAlreadyInIrqContext;
     (void)producerSnapshot;
     return false;
   }

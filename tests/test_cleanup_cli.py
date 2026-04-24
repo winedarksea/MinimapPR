@@ -14,7 +14,7 @@ from minimappr.storage.db import Storage
 def test_plain_minimappr_routes_to_serve(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
-    def fake_run(app: str, *, host: str, port: int) -> None:
+    def fake_run(app: str, *, host: str, port: int, **kwargs: object) -> None:
         captured["app"] = app
         captured["host"] = host
         captured["port"] = port

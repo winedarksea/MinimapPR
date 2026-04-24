@@ -44,6 +44,7 @@ async def run_soak(config: SoakConfig, expectations: SoakExpectations) -> int:
             "MINIMAPPR_TRIGGER_COOLDOWN_SECONDS": str(config.trigger_cooldown_seconds),
             "MINIMAPPR_FUSION_WORKER_COUNT": str(config.worker_count),
             "MINIMAPPR_SNIPPET_RETENTION_SECONDS": "0",
+            "MINIMAPPR_REPORTING_WINDOW_SECONDS": "1.0",
         }
     )
 

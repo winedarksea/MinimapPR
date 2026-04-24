@@ -454,19 +454,23 @@ bool PicoI2SMonoSource::readFrame(
   return true;
 }
 
-bool PicoI2SMonoSource::snapshotProducerState(AudioProducerSnapshot& producerSnapshot) const {
+bool PicoI2SMonoSource::snapshotProducerState(
+    AudioProducerSnapshot& producerSnapshot,
+    bool callerAlreadyInIrqContext) const {
   producerSnapshot = {};
   if (!initialized_ || dmaChannel_ < 0 || wordsPerFrame_ == 0) {
     return false;
   }
 
-  const uint32_t irqState = save_and_disable_interrupts();
+  const uint32_t irqState = callerAlreadyInIrqContext ? 0u : save_and_disable_interrupts();
   const uint64_t activeBlockStartSampleIndex = nextProducedStartSampleIndex_;
   const uint64_t completedBlockCount = nextCompletedBlockCount_;
   const uint32_t dmaRingSlotIndex = dmaWriteFrameIndex_;
   dma_channel_hw_t* channelHw = dma_channel_hw_addr(static_cast<uint>(dmaChannel_));
   const uint32_t wordsRemaining = channelHw->transfer_count;
-  restore_interrupts(irqState);
+  if (!callerAlreadyInIrqContext) {
+    restore_interrupts(irqState);
+  }
 
   const uint32_t clampedWordsRemaining = std::min<uint32_t>(wordsRemaining, static_cast<uint32_t>(wordsPerFrame_));
   const uint32_t wordsTransferred = static_cast<uint32_t>(wordsPerFrame_) - clampedWordsRemaining;

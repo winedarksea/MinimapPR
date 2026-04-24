@@ -34,6 +34,11 @@ class GpsPpsTimerCapture {
 
   static constexpr uint32_t kCounterReload = 0xffffffffu;
   static constexpr uint32_t kCyclesPerLoop = 2u;
+  // The PIO edge path spends a fixed 3 extra cycles in mov/push/mov after the
+  // rising edge before the loop resumes. We do not compensate for that here
+  // because it is a constant offset across nodes, so it cancels in PPS interval
+  // estimation and inter-node TDOA comparisons.
+  static constexpr uint32_t kFixedEdgePipelineCycles = 3u;
 
   int gpioPin_ = -1;
   bool configured_ = false;

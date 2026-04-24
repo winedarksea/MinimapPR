@@ -45,7 +45,9 @@ class SirithPicoTdmSource final : public IAudioSource {
       int16_t* interleavedOut,
       size_t samplesPerChannel,
       AudioCaptureTimestamp* captureTimestamp = nullptr) override;
-  bool snapshotProducerState(AudioProducerSnapshot& producerSnapshot) const override;
+  bool snapshotProducerState(
+      AudioProducerSnapshot& producerSnapshot,
+      bool callerAlreadyInIrqContext = false) const override;
 
  private:
   // Leave about 1 s of capture slack so a single slow publish does not

@@ -21,6 +21,11 @@ constexpr const char* kGpsPositionSourceUart = "gps_nmea_uart";
 constexpr uint64_t kUsPerMs = 1000ULL;
 constexpr uint64_t kNsPerSecond = 1000000000ULL;
 constexpr uint64_t kNsPerMillisecond = 1000000ULL;
+// UART-delivered NMEA time-of-day trails the actual UTC instant because the
+// sentence has to be serialized on-wire before we parse it. Use a fixed
+// correction in no-PPS mode so the fallback discipline does not carry a
+// systematic ~100-200 ms late bias. PPS remains the high-precision path.
+constexpr uint64_t kNmeaSerialLatencyUs = 150000ULL;
 
 int64_t daysFromCivil(int year, unsigned month, unsigned day) {
   year -= month <= 2;
@@ -267,6 +272,8 @@ void NmeaGpsSource::consumeLine(const char* line, NodeClock* clock) {
       nextPpsUtcNs_ = parsedUtcNs + kNsPerSecond;
       haveUtcForNextPps_ = true;
     } else if (clock != nullptr) {
+      const uint64_t sentenceMonotonicUs =
+          lastSentenceUs_ > kNmeaSerialLatencyUs ? (lastSentenceUs_ - kNmeaSerialLatencyUs) : 0ULL;
       clock->applyNtpObservation(
           unixEpochNs(
               parsed.year,
@@ -276,7 +283,9 @@ void NmeaGpsSource::consumeLine(const char* line, NodeClock* clock) {
               parsed.minute,
               parsed.second,
               parsed.millisecond),
-          time_us_64(),
+          sentenceMonotonicUs,
+          // NMEA sentences do not have an RTT measurement; pass zero to mark
+          // the observation as a one-way serial fallback discipline source.
           0);
     }
   }

@@ -26,6 +26,8 @@ def _configure_env(monkeypatch, tmp_path: Path, *, snippet_retention_seconds: in
     monkeypatch.setenv("MINIMAPPR_LOCALIZATION_WINDOW_SECONDS", "0.02")
     monkeypatch.setenv("MINIMAPPR_FUSION_WORKER_COUNT", "1")
     monkeypatch.setenv("MINIMAPPR_SNIPPET_RETENTION_SECONDS", str(snippet_retention_seconds))
+    monkeypatch.setenv("MINIMAPPR_DETECTION_MIN_CONFIDENCE", "0.0")
+    monkeypatch.setenv("MINIMAPPR_REPORTING_WINDOW_SECONDS", "1.0")
     return db_path
 
 
