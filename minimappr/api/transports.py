@@ -28,9 +28,11 @@ class HttpIngestTransport(IngestTransport):
             ordered_frames = sorted(
                 payload.buffered_frames,
                 key=lambda item: (
+                    item.frame.utc_start_ns if item.frame.utc_start_ns is not None else item.frame.start_time_ns,
+                    item.frame.start_sample_index if item.frame.start_sample_index is not None else -1,
                     item.frame.toa_ns if item.frame.toa_ns is not None else item.frame.start_time_ns,
-                    item.frame.sequence if item.frame.sequence is not None else -1,
                     item.frame.start_time_ns,
+                    item.frame.sequence if item.frame.sequence is not None else -1,
                 ),
             )
 

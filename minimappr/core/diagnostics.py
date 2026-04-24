@@ -28,6 +28,9 @@ class DiagnosticsService:
         self._fusion_node = fusion_node
         self._classifier = classifier
 
+    def replace_classifier(self, classifier) -> None:
+        self._classifier = classifier
+
     async def config_snapshot(self) -> dict[str, Any]:
         classifier_runtime = self._classifier_runtime()
         return {

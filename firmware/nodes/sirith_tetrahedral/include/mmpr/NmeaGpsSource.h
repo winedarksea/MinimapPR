@@ -5,6 +5,7 @@
 
 #include "hardware/uart.h"
 
+#include "mmpr/GpsPpsTimerCapture.h"
 #include "mmpr/NodeClock.h"
 #include "mmpr/Types.h"
 
@@ -27,14 +28,13 @@ class NmeaGpsSource {
   explicit NmeaGpsSource(const NmeaGpsSourceConfig& config);
 
   bool begin();
+  void bindAudioSource(IAudioSource* audioSource);
   void poll(NodeDescriptor& descriptor, NodeClock* clock = nullptr);
 
   bool healthy() const { return healthy_; }
   bool hasFix() const { return hasFix_; }
 
  private:
-  static void gpioIrqCallback(uint gpio, uint32_t events);
-
   struct ParsedSentence {
     bool hasFix = false;
     bool hasLocation = false;
@@ -104,15 +104,13 @@ class NmeaGpsSource {
   uint64_t lastSentenceUs_ = 0;
   uint64_t lastFixUs_ = 0;
   uint64_t nextPpsUtcNs_ = 0;
-  uint32_t processedPpsEdgeCount_ = 0;
-  volatile uint32_t observedPpsEdgeCount_ = 0;
-  volatile uint64_t latestPpsEdgeUs_ = 0;
+  GpsPpsTimerCapture ppsCapture_;
   bool loggedFirstSentence_ = false;
   bool loggedHealthyState_ = false;
   bool loggedFixState_ = false;
   uint32_t loggedPpsEdgeCount_ = 0;
-
-  static NmeaGpsSource* activeInstance_;
+  bool haveAlignedPpsEpoch_ = false;
+  uint32_t lastAppliedPpsEdgeCount_ = 0;
 };
 
 }  // namespace mmpr

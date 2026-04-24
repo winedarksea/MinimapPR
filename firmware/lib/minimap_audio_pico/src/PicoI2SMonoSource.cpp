@@ -20,9 +20,11 @@
 #include <hardware/irq.h>
 #include <hardware/pio.h>
 #include <hardware/pio_instructions.h>
+#include <hardware/structs/dma.h>
 #include <hardware/sync.h>
 #include <pico/time.h>
 
+#include <algorithm>
 #include <new>
 
 #include "mmpr_audio_rx.pio.h"
@@ -357,6 +359,8 @@ void PicoI2SMonoSource::deinitDmaCapture() {
   completedFrameCount_ = 0;
   droppedFrameCount_ = 0;
   reportedDroppedFrameCount_ = 0;
+  nextProducedStartSampleIndex_ = 0;
+  nextCompletedBlockCount_ = 0;
 }
 
 bool PicoI2SMonoSource::begin() {
@@ -399,7 +403,9 @@ bool PicoI2SMonoSource::readFrame(
   }
 
   uint32_t readFrameIndex = 0;
-  uint64_t frameEndUs = 0;
+  uint64_t blockEndUs = 0;
+  uint64_t blockStartSampleIndex = 0;
+  uint64_t completedBlockCount = 0;
   uint32_t droppedFramesBeforeCapture = 0;
   while (true) {
     {
@@ -410,7 +416,9 @@ bool PicoI2SMonoSource::readFrame(
         continue;
       }
       readFrameIndex = dmaReadFrameIndex_;
-      frameEndUs = frameEndMonotonicUs_[readFrameIndex];
+      blockStartSampleIndex = blockStartSampleIndex_[readFrameIndex];
+      blockEndUs = blockEndMonotonicUs_[readFrameIndex];
+      completedBlockCount = completedBlockCountBySlot_[readFrameIndex];
       droppedFramesBeforeCapture = droppedFrameCount_ - reportedDroppedFrameCount_;
       reportedDroppedFrameCount_ = droppedFrameCount_;
       restore_interrupts(irqState);
@@ -434,11 +442,43 @@ bool PicoI2SMonoSource::readFrame(
   }
 
   if (captureTimestamp != nullptr) {
-    captureTimestamp->frameEndMonotonicUs = frameEndUs;
-    captureTimestamp->frameStartMonotonicUs =
-        (frameEndUs >= frameDurationUs_) ? (frameEndUs - frameDurationUs_) : 0;
-    captureTimestamp->droppedFramesBeforeCapture = droppedFramesBeforeCapture;
+    captureTimestamp->startSampleIndex = blockStartSampleIndex;
+    captureTimestamp->endSampleIndex = blockStartSampleIndex + config_.frameSamples;
+    captureTimestamp->blockEndMonotonicUs = blockEndUs;
+    captureTimestamp->blockStartMonotonicUs =
+        (blockEndUs >= frameDurationUs_) ? (blockEndUs - frameDurationUs_) : 0;
+    captureTimestamp->completedBlockCount = completedBlockCount;
+    captureTimestamp->dmaRingSlotIndex = readFrameIndex;
+    captureTimestamp->droppedBlocksBeforeCapture = droppedFramesBeforeCapture;
   }
+  return true;
+}
+
+bool PicoI2SMonoSource::snapshotProducerState(AudioProducerSnapshot& producerSnapshot) const {
+  producerSnapshot = {};
+  if (!initialized_ || dmaChannel_ < 0 || wordsPerFrame_ == 0) {
+    return false;
+  }
+
+  const uint32_t irqState = save_and_disable_interrupts();
+  const uint64_t activeBlockStartSampleIndex = nextProducedStartSampleIndex_;
+  const uint64_t completedBlockCount = nextCompletedBlockCount_;
+  const uint32_t dmaRingSlotIndex = dmaWriteFrameIndex_;
+  dma_channel_hw_t* channelHw = dma_channel_hw_addr(static_cast<uint>(dmaChannel_));
+  const uint32_t wordsRemaining = channelHw->transfer_count;
+  restore_interrupts(irqState);
+
+  const uint32_t clampedWordsRemaining = std::min<uint32_t>(wordsRemaining, static_cast<uint32_t>(wordsPerFrame_));
+  const uint32_t wordsTransferred = static_cast<uint32_t>(wordsPerFrame_) - clampedWordsRemaining;
+  const double sampleOffset = static_cast<double>(wordsTransferred) / 2.0;
+
+  producerSnapshot.valid = true;
+  producerSnapshot.capturedMonotonicUs = time_us_64();
+  producerSnapshot.samplePosition = static_cast<double>(activeBlockStartSampleIndex) + sampleOffset;
+  producerSnapshot.completedBlockCount = completedBlockCount;
+  producerSnapshot.dmaRingSlotIndex = dmaRingSlotIndex;
+  producerSnapshot.wordsTransferredInActiveBlock = wordsTransferred;
+  producerSnapshot.wordsRemainingInActiveBlock = clampedWordsRemaining;
   return true;
 }
 
@@ -448,7 +488,10 @@ void PicoI2SMonoSource::onDmaIrq() {
   }
 
   dma_channel_acknowledge_irq0(static_cast<uint>(dmaChannel_));
-  frameEndMonotonicUs_[dmaWriteFrameIndex_] = time_us_64();
+  blockStartSampleIndex_[dmaWriteFrameIndex_] = nextProducedStartSampleIndex_;
+  nextProducedStartSampleIndex_ += config_.frameSamples;
+  blockEndMonotonicUs_[dmaWriteFrameIndex_] = time_us_64();
+  completedBlockCountBySlot_[dmaWriteFrameIndex_] = ++nextCompletedBlockCount_;
   if (completedFrameCount_ == kBufferedFrames) {
     dmaReadFrameIndex_ = (dmaReadFrameIndex_ + 1u) % kBufferedFrames;
     ++droppedFrameCount_;

@@ -1,0 +1,23 @@
+.program gps_pps_capture
+
+; Count PPS input time using a dedicated PIO state machine clocked at clk_sys.
+; X decrements once per two-instruction loop and is copied into RX FIFO on each
+; rising edge. The host reconstructs elapsed cycles from (reload - pushed_x).
+
+.wrap_target
+low_state:
+    jmp pin rising_edge
+    jmp x-- low_state
+
+rising_edge:
+    mov isr, x
+    push noblock
+    mov x, y
+
+high_state:
+    jmp pin high_count
+    jmp x-- low_state
+
+high_count:
+    jmp x-- high_state
+.wrap

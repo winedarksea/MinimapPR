@@ -124,6 +124,13 @@ class IngestProcessor:
     def last_trigger_ns(self) -> int:
         return self._last_trigger_ns
 
+    @property
+    def accepted_frame_count(self) -> int:
+        return self._accepted_frame_count
+
+    def replace_coordinate_frame(self, coordinate_frame: LocalCoordinateFrame) -> None:
+        self._coordinate_frame = coordinate_frame
+
     def confirm_trigger(self, event_time_ns: int) -> None:
         """Commit the cooldown timestamp after a trigger was successfully enqueued."""
         self._last_trigger_ns = event_time_ns
@@ -152,6 +159,9 @@ class IngestProcessor:
             node_id=normalized_node.id,
             frame_sequence=frame.sequence,
             start_time_ns=frame.start_time_ns,
+            utc_end_ns=frame.utc_end_ns,
+            start_sample_index=frame.start_sample_index,
+            end_sample_index=frame.end_sample_index,
             source_type=frame.source_type,
         )
         if duplicate_ingest:
@@ -177,6 +187,8 @@ class IngestProcessor:
         audio = decode_pcm16le_b64(frame.samples_b64, frame.channels)
         if audio.shape[0] != frame.channels:
             raise ValueError("Decoded channel count does not match frame.channels")
+        if frame.samples_per_channel is not None and audio.shape[1] != frame.samples_per_channel:
+            raise ValueError("Decoded sample count does not match frame.samples_per_channel")
 
         # -- preprocess --------------------------------------------------------
         preprocessor: AudioPreprocessor = self._preprocessor_factory.for_node(normalized_node)
@@ -210,6 +222,9 @@ class IngestProcessor:
                 node_id=normalized_node.id,
                 frame_sequence=frame.sequence,
                 start_time_ns=frame.start_time_ns,
+                utc_end_ns=frame.utc_end_ns,
+                start_sample_index=frame.start_sample_index,
+                end_sample_index=frame.end_sample_index,
                 toa_ns=toa_ns,
                 tor_ns=tor_ns,
                 source_type=frame.source_type,
@@ -243,7 +258,11 @@ class IngestProcessor:
                         frame_sequence=frame.sequence,
                         metadata={
                             "frame_start_ns": frame.start_time_ns,
+                            "frame_end_ns": frame.utc_end_ns,
+                            "start_sample_index": frame.start_sample_index,
+                            "end_sample_index": frame.end_sample_index,
                             "frame_channels": frame.channels,
+                            "samples_per_channel": audio.shape[1],
                             "encoding": frame.encoding,
                             "preprocess": normalized_node.properties.get("preprocess", {}),
                         },
@@ -271,6 +290,9 @@ class IngestProcessor:
                 sample_rate_hz=frame.sample_rate_hz,
                 start_time_ns=frame.start_time_ns,
                 samples=processed[channel_index],
+                start_sample_index=frame.start_sample_index,
+                end_sample_index=frame.end_sample_index,
+                end_time_ns=frame.utc_end_ns,
             )
             await self._registry.record_observation(
                 sensor_id=sensor_id,

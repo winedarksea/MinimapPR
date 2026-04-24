@@ -14,9 +14,9 @@ enum class NodeType {
 
 enum class TimeQuality {
   kGpsLocked,
-  kNtpSync,
-  kBuildTimestamp,  // Anchored to compile-time clock; ~seconds accurate, drifts at RP2350 ROSC rate
-  kFreerunning,     // No wall-clock anchor; timestamps are monotonic from boot only
+  kGpsHoldover,
+  kNtpDisciplined,
+  kFreeRunning,
 };
 
 struct GeoPoint {
@@ -56,12 +56,20 @@ inline constexpr GeoPoint makeGeoPoint(float lat, float lon, float altM) {
 
 struct AudioFrame {
   uint64_t startTimeNs;
+  uint64_t endTimeNs;
+  uint64_t startSampleIndex;
+  uint64_t endSampleIndex;
   uint32_t sampleRateHz;
   uint8_t channels;
   uint64_t sequence;
   uint64_t toaNs;
   uint64_t torNs;
   TimeQuality timeQuality;
+  bool hasTimingDiagnostics;
+  uint32_t ppsEdgeCount;
+  uint32_t dmaRingSlotIndex;
+  int64_t ppsPhaseErrorNs;
+  double estimatedPpm;
 
   const int16_t* interleavedSamples;
   size_t samplesPerChannel;

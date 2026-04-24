@@ -19,6 +19,7 @@ bool SilenceAudioSource::begin() {
   frameDurationUs_ =
       static_cast<uint64_t>((static_cast<double>(frameSamples_) * 1000000.0) / static_cast<double>(sampleRateHz_));
   nextFrameAtUs_ = time_us_64();
+  nextSampleIndex_ = 0;
   std::printf(
       "[node] silence audio source enabled channels=%u sample_rate=%lu frame_samples=%u\n",
       static_cast<unsigned>(channels_),
@@ -43,12 +44,18 @@ bool SilenceAudioSource::readFrame(
   }
 
   const uint64_t frameStartUs = static_cast<uint64_t>(nextFrameAtUs_);
+  const uint64_t startSampleIndex = nextSampleIndex_;
   std::memset(interleavedOut, 0, frameSamples_ * channels_ * sizeof(int16_t));
   nextFrameAtUs_ += static_cast<int64_t>(frameDurationUs_);
+  nextSampleIndex_ += frameSamples_;
   if (captureTimestamp != nullptr) {
-    captureTimestamp->frameStartMonotonicUs = frameStartUs;
-    captureTimestamp->frameEndMonotonicUs = static_cast<uint64_t>(nextFrameAtUs_);
-    captureTimestamp->droppedFramesBeforeCapture = 0;
+    captureTimestamp->startSampleIndex = startSampleIndex;
+    captureTimestamp->endSampleIndex = startSampleIndex + frameSamples_;
+    captureTimestamp->blockStartMonotonicUs = frameStartUs;
+    captureTimestamp->blockEndMonotonicUs = static_cast<uint64_t>(nextFrameAtUs_);
+    captureTimestamp->completedBlockCount = startSampleIndex / frameSamples_;
+    captureTimestamp->dmaRingSlotIndex = 0;
+    captureTimestamp->droppedBlocksBeforeCapture = 0;
   }
   return true;
 }

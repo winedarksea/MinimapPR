@@ -6,7 +6,6 @@
 #include <cstring>
 
 #include "hardware/gpio.h"
-#include "hardware/sync.h"
 #include "pico/time.h"
 
 namespace mmpr {
@@ -34,8 +33,6 @@ int64_t daysFromCivil(int year, unsigned month, unsigned day) {
 
 }  // namespace
 
-NmeaGpsSource* NmeaGpsSource::activeInstance_ = nullptr;
-
 NmeaGpsSource::NmeaGpsSource(const NmeaGpsSourceConfig& config)
     : config_(config), activeGeoPosition_(config.fallbackGeoPosition) {}
 
@@ -46,12 +43,7 @@ bool NmeaGpsSource::begin() {
   gpio_pull_up(config_.rxPin);
 
   if (config_.ppsPin >= 0) {
-    activeInstance_ = this;
-    gpio_init(config_.ppsPin);
-    gpio_set_dir(config_.ppsPin, GPIO_IN);
-    gpio_pull_down(config_.ppsPin);
-    gpio_set_irq_enabled_with_callback(config_.ppsPin, GPIO_IRQ_EDGE_RISE, true, &NmeaGpsSource::gpioIrqCallback);
-    ppsConfigured_ = true;
+    ppsConfigured_ = ppsCapture_.begin(config_.ppsPin);
   } else {
     ppsConfigured_ = false;
   }
@@ -69,14 +61,20 @@ bool NmeaGpsSource::begin() {
   lastSentenceUs_ = 0;
   lastFixUs_ = 0;
   nextPpsUtcNs_ = 0;
-  processedPpsEdgeCount_ = 0;
-  observedPpsEdgeCount_ = 0;
-  latestPpsEdgeUs_ = 0;
   loggedFirstSentence_ = false;
   loggedHealthyState_ = false;
   loggedFixState_ = false;
   loggedPpsEdgeCount_ = 0;
+  haveAlignedPpsEpoch_ = false;
+  lastAppliedPpsEdgeCount_ = 0;
   return true;
+}
+
+void NmeaGpsSource::bindAudioSource(IAudioSource* audioSource) {
+  if (!ppsConfigured_) {
+    return;
+  }
+  ppsCapture_.bindAudioSource(audioSource);
 }
 
 void NmeaGpsSource::poll(NodeDescriptor& descriptor, NodeClock* clock) {
@@ -120,6 +118,7 @@ void NmeaGpsSource::poll(NodeDescriptor& descriptor, NodeClock* clock) {
     hasAltitude_ = false;
     hasDateTime_ = false;
     haveUtcForNextPps_ = false;
+    haveAlignedPpsEpoch_ = false;
     activeFixDimension_ = 0;
     activeGeoPosition_ = config_.fallbackGeoPosition;
   } else if (hasFix_ && fixAgeUs > (static_cast<uint64_t>(config_.staleFixTimeoutMs) * kUsPerMs)) {
@@ -132,11 +131,6 @@ void NmeaGpsSource::poll(NodeDescriptor& descriptor, NodeClock* clock) {
   if (haveSeenSentences_ && !loggedFirstSentence_) {
     std::printf("[gps] received first NMEA sentence on uart\n");
     loggedFirstSentence_ = true;
-  }
-
-  if (observedPpsEdgeCount_ > loggedPpsEdgeCount_) {
-    loggedPpsEdgeCount_ = observedPpsEdgeCount_;
-    std::printf("[gps] observed PPS edges=%u\n", static_cast<unsigned>(loggedPpsEdgeCount_));
   }
 
   if (healthy_ != loggedHealthyState_) {
@@ -165,42 +159,50 @@ void NmeaGpsSource::poll(NodeDescriptor& descriptor, NodeClock* clock) {
   updateDescriptor(descriptor);
 }
 
-void NmeaGpsSource::gpioIrqCallback(uint gpio, uint32_t events) {
-  if ((events & GPIO_IRQ_EDGE_RISE) == 0 || activeInstance_ == nullptr || gpio != static_cast<uint>(activeInstance_->config_.ppsPin)) {
-    return;
-  }
-
-  activeInstance_->latestPpsEdgeUs_ = time_us_64();
-  ++activeInstance_->observedPpsEdgeCount_;
-}
-
 void NmeaGpsSource::consumePendingPps(NodeClock* clock) {
   if (!ppsConfigured_) {
     return;
   }
 
-  uint32_t edgeCount = 0;
-  uint64_t latestEdgeUs = 0;
-  const uint32_t interruptState = save_and_disable_interrupts();
-  edgeCount = observedPpsEdgeCount_;
-  latestEdgeUs = latestPpsEdgeUs_;
-  restore_interrupts(interruptState);
-
-  if (edgeCount == processedPpsEdgeCount_) {
-    return;
-  }
-
+  GpsPpsCaptureEvent ppsEvent = {};
   if (clock == nullptr || !haveUtcForNextPps_) {
-    processedPpsEdgeCount_ = edgeCount;
+    bool discardedEvent = false;
+    uint32_t latestDiscardedEdgeCount = 0;
+    while (ppsCapture_.consumeNext(ppsEvent)) {
+      discardedEvent = true;
+      latestDiscardedEdgeCount = ppsEvent.edgeCount;
+    }
+    if (discardedEvent && latestDiscardedEdgeCount > loggedPpsEdgeCount_) {
+      loggedPpsEdgeCount_ = latestDiscardedEdgeCount;
+      std::printf(
+          "[gps] discarded unlabeled PPS edges through=%u while awaiting UTC\n",
+          static_cast<unsigned>(loggedPpsEdgeCount_));
+    }
+    haveAlignedPpsEpoch_ = false;
     return;
   }
 
-  const uint32_t pendingEdges = edgeCount - processedPpsEdgeCount_;
-  const uint64_t latestEdgeUtcNs = nextPpsUtcNs_ + (static_cast<uint64_t>(pendingEdges - 1U) * kNsPerSecond);
-  clock->setUtcAtMonotonicUs(latestEdgeUtcNs, latestEdgeUs, TimeQuality::kGpsLocked);
-
-  nextPpsUtcNs_ += static_cast<uint64_t>(pendingEdges) * kNsPerSecond;
-  processedPpsEdgeCount_ = edgeCount;
+  while (ppsCapture_.consumeNext(ppsEvent)) {
+    if (haveAlignedPpsEpoch_ &&
+        ppsEvent.edgeCount > lastAppliedPpsEdgeCount_ &&
+        ppsEvent.edgeCount != (lastAppliedPpsEdgeCount_ + 1u)) {
+      const uint32_t skippedEdges = ppsEvent.edgeCount - lastAppliedPpsEdgeCount_ - 1u;
+      nextPpsUtcNs_ += static_cast<uint64_t>(skippedEdges) * kNsPerSecond;
+      std::printf(
+          "[gps] skipped %u PPS edges before=%u current=%u; advancing UTC labeling\n",
+          static_cast<unsigned>(skippedEdges),
+          static_cast<unsigned>(lastAppliedPpsEdgeCount_),
+          static_cast<unsigned>(ppsEvent.edgeCount));
+    }
+    clock->applyGpsPpsObservation(nextPpsUtcNs_, ppsEvent);
+    haveAlignedPpsEpoch_ = true;
+    lastAppliedPpsEdgeCount_ = ppsEvent.edgeCount;
+    nextPpsUtcNs_ += kNsPerSecond;
+    if (ppsEvent.edgeCount > loggedPpsEdgeCount_) {
+      loggedPpsEdgeCount_ = ppsEvent.edgeCount;
+      std::printf("[gps] observed PPS edges=%u\n", static_cast<unsigned>(loggedPpsEdgeCount_));
+    }
+  }
 }
 
 void NmeaGpsSource::updateDescriptor(NodeDescriptor& descriptor) const {
@@ -265,7 +267,7 @@ void NmeaGpsSource::consumeLine(const char* line, NodeClock* clock) {
       nextPpsUtcNs_ = parsedUtcNs + kNsPerSecond;
       haveUtcForNextPps_ = true;
     } else if (clock != nullptr) {
-      clock->setUtcNs(
+      clock->applyNtpObservation(
           unixEpochNs(
               parsed.year,
               parsed.month,
@@ -274,7 +276,8 @@ void NmeaGpsSource::consumeLine(const char* line, NodeClock* clock) {
               parsed.minute,
               parsed.second,
               parsed.millisecond),
-          TimeQuality::kGpsLocked);
+          time_us_64(),
+          0);
     }
   }
 }

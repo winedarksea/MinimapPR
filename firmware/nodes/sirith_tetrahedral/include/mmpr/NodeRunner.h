@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 #include "mmpr/HttpFramePublisher.h"
 #include "mmpr/IAudioSource.h"
@@ -16,6 +17,7 @@ struct RunnerStats {
   uint64_t framesPublished = 0;
   uint64_t framesDropped = 0;
   uint64_t publishErrors = 0;
+  uint64_t packetContinuityViolations = 0;
 };
 
 class NodeRunner {
@@ -39,6 +41,12 @@ class NodeRunner {
   const RunnerStats& stats() const { return stats_; }
 
  private:
+  bool publishCurrentPacket(
+      uint64_t packetEndSampleIndex,
+      uint64_t packetEndUtcNs,
+      const EnvironmentalSample* environmentalSample,
+      int& lastPublishStatus);
+
   const NodeDescriptor& descriptor_;
   IAudioSource& audioSource_;
   HttpFramePublisher& publisher_;
@@ -48,6 +56,13 @@ class NodeRunner {
 
   int16_t* frameBuffer_ = nullptr;
   size_t frameBufferSamples_ = 0;
+  std::vector<int16_t> packetInterleavedSamples_;
+  bool packetOpen_ = false;
+  uint64_t packetStartSampleIndex_ = 0;
+  uint64_t packetStartUtcNs_ = 0;
+  uint64_t packetTargetEndUtcNs_ = 0;
+  bool haveExpectedNextSampleIndex_ = false;
+  uint64_t expectedNextSampleIndex_ = 0;
   uint64_t sequence_ = 0;
   uint32_t logEveryFrames_ = 100;
 

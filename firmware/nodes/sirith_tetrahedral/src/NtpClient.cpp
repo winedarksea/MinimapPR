@@ -61,8 +61,7 @@ void NtpClient::poll() {
       break;
 
     case State::kDone:
-      // Only re-sync if a better source (GPS) hasn't taken over.
-      if (clock_->timeQuality() == TimeQuality::kNtpSync &&
+      if (clock_->timeQuality() != TimeQuality::kGpsLocked &&
           (nowUs - stateEnteredUs_) >= kResyncIntervalUs) {
         state_ = State::kIdle;
       }
@@ -209,7 +208,7 @@ void NtpClient::onUdpRecv(struct pbuf* p) {
       static_cast<unsigned long long>(fractionalNs),
       static_cast<unsigned long long>(rttUs));
 
-  clock_->setUtcAtMonotonicUs(anchorUtcNs, anchorMonotonicUs, TimeQuality::kNtpSync);
+  clock_->applyNtpObservation(anchorUtcNs, anchorMonotonicUs, rttUs);
 
   state_          = State::kDone;
   stateEnteredUs_ = time_us_64();

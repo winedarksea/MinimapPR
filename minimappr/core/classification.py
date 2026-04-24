@@ -89,6 +89,9 @@ class ClassificationOrchestrator:
         self._confidence_margin = max(0.0, beamformed_classification_confidence_margin)
         self._classifier_backend_name = classifier_backend_name
 
+    def replace_classifier(self, classifier: AudioClassifier) -> None:
+        self._classifier = classifier
+
     async def classify(
         self,
         *,

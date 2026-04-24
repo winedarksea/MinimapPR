@@ -475,6 +475,10 @@ int main() {
     }
   }
 
+  if (nodecfg::kEnableGpsUart) {
+    gGpsSource.bindAudioSource(&gSelectedAudioSource);
+  }
+
   if (nodecfg::kEnableNtpSync) {
     mmpr::FailureSnapshot::updatePhase(mmpr::FatalLifecyclePhase::kNtpStart);
     gNtpClient.begin(nodecfg::kNtpServer, gClock);
@@ -504,13 +508,13 @@ int main() {
         nodecfg::kWifiPassword,
         nodecfg::kWiFiConnectTimeoutMs);
 
-    if (nodecfg::kEnableGpsUart) {
-      gGpsSource.poll(gNodeDescriptor, &gClock);
-    }
-
     gRunner.loopOnce();
     mmpr::FailureSnapshot::updateProgressMarker(static_cast<uint32_t>(gRunner.stats().framesCaptured));
     pollActivityLed();
+
+    if (nodecfg::kEnableGpsUart) {
+      gGpsSource.poll(gNodeDescriptor, &gClock);
+    }
 
     if (nodecfg::kEnableNtpSync) {
       gNtpClient.poll();

@@ -47,6 +47,7 @@ class PicoI2SMonoSource final : public IAudioSource {
       int16_t* interleavedOut,
       size_t samplesPerChannel,
       AudioCaptureTimestamp* captureTimestamp = nullptr) override;
+  bool snapshotProducerState(AudioProducerSnapshot& producerSnapshot) const override;
 
  private:
   // Keep >1 s of capture slack in mono mode so short Wi-Fi stalls do not
@@ -75,7 +76,11 @@ class PicoI2SMonoSource final : public IAudioSource {
   bool programInstalled_ = false;
   int dmaChannel_ = -1;
   uint32_t* dmaFrameWords_ = nullptr;
-  uint64_t frameEndMonotonicUs_[kBufferedFrames] = {};
+  uint64_t blockStartSampleIndex_[kBufferedFrames] = {};
+  uint64_t blockEndMonotonicUs_[kBufferedFrames] = {};
+  uint64_t completedBlockCountBySlot_[kBufferedFrames] = {};
+  uint64_t nextProducedStartSampleIndex_ = 0;
+  uint64_t nextCompletedBlockCount_ = 0;
   volatile uint32_t dmaWriteFrameIndex_ = 0;
   volatile uint32_t dmaReadFrameIndex_ = 0;
   volatile uint32_t completedFrameCount_ = 0;

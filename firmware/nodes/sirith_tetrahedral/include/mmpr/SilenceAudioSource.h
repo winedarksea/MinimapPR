@@ -26,6 +26,7 @@ class SilenceAudioSource final : public IAudioSource {
   uint8_t channels_;
   uint64_t frameDurationUs_ = 0;
   int64_t nextFrameAtUs_ = 0;
+  uint64_t nextSampleIndex_ = 0;
 };
 
 }  // namespace mmpr

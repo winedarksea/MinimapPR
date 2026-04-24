@@ -69,6 +69,12 @@ void appendUint32(std::string& out, uint32_t value) {
   out += buffer;
 }
 
+void appendInt64(std::string& out, int64_t value) {
+  char buffer[32];
+  std::snprintf(buffer, sizeof(buffer), "%" PRId64, value);
+  out += buffer;
+}
+
 }  // namespace
 
 const char* nodeTypeToWire(NodeType type) {
@@ -86,13 +92,13 @@ const char* timeQualityToWire(TimeQuality quality) {
   switch (quality) {
     case TimeQuality::kGpsLocked:
       return "gps_locked";
-    case TimeQuality::kNtpSync:
-      return "ntp_sync";
-    case TimeQuality::kBuildTimestamp:
-      return "build_timestamp";
-    case TimeQuality::kFreerunning:
+    case TimeQuality::kGpsHoldover:
+      return "gps_holdover";
+    case TimeQuality::kNtpDisciplined:
+      return "ntp_disciplined";
+    case TimeQuality::kFreeRunning:
     default:
-      return "freerunning";
+      return "free_running";
   }
 }
 
@@ -196,6 +202,18 @@ bool buildIngestPayload(
   outPayload += "\"start_time_ns\":";
   appendUint64(outPayload, frame.startTimeNs);
 
+  outPayload += ",\"utc_start_ns\":";
+  appendUint64(outPayload, frame.startTimeNs);
+
+  outPayload += ",\"utc_end_ns\":";
+  appendUint64(outPayload, frame.endTimeNs);
+
+  outPayload += ",\"start_sample_index\":";
+  appendUint64(outPayload, frame.startSampleIndex);
+
+  outPayload += ",\"end_sample_index\":";
+  appendUint64(outPayload, frame.endSampleIndex);
+
   outPayload += ",\"sample_rate_hz\":";
   appendUint32(outPayload, frame.sampleRateHz);
 
@@ -203,6 +221,9 @@ bool buildIngestPayload(
   outPayload += std::to_string(static_cast<unsigned>(frame.channels));
 
   outPayload += ",\"encoding\":\"pcm16le\"";
+
+  outPayload += ",\"samples_per_channel\":";
+  appendUint64(outPayload, static_cast<uint64_t>(frame.samplesPerChannel));
 
   outPayload += ",\"samples_b64\":\"";
   appendBase64(outPayload, reinterpret_cast<const uint8_t*>(frame.interleavedSamples), bytes);
@@ -219,6 +240,21 @@ bool buildIngestPayload(
 
   outPayload += ",\"time_quality\":";
   appendQuoted(outPayload, timeQualityToWire(frame.timeQuality));
+
+  if (frame.hasTimingDiagnostics) {
+    outPayload += ",\"timing_diagnostics\":{";
+    outPayload += "\"pps_edge_count\":";
+    appendUint32(outPayload, frame.ppsEdgeCount);
+    outPayload += ",\"dma_ring_slot_index\":";
+    appendUint32(outPayload, frame.dmaRingSlotIndex);
+    outPayload += ",\"pps_phase_error_ns\":";
+    appendInt64(outPayload, frame.ppsPhaseErrorNs);
+    outPayload += ",\"estimated_ppm\":";
+    char ppmBuffer[32];
+    std::snprintf(ppmBuffer, sizeof(ppmBuffer), "%.6f", frame.estimatedPpm);
+    outPayload += ppmBuffer;
+    outPayload += "}";
+  }
 
   outPayload += "}";
 

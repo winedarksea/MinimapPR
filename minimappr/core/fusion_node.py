@@ -313,6 +313,17 @@ class FusionNode:
         ]
         self._started = True
 
+    @property
+    def accepted_frame_count(self) -> int:
+        return self._ingest_processor.accepted_frame_count
+
+    def rebind_runtime_dependencies(self, *, classifier: AudioClassifier, coordinate_frame: LocalCoordinateFrame) -> None:
+        self.classifier = classifier
+        self.coordinate_frame = coordinate_frame
+        self._ingest_processor.replace_coordinate_frame(coordinate_frame)
+        self._classification_orchestrator.replace_classifier(classifier)
+        self._detection_assembler.replace_coordinate_frame(coordinate_frame)
+
     async def stop(self) -> None:
         if not self._started:
             return

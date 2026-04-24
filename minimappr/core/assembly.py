@@ -73,6 +73,9 @@ class DetectionAssembler:
         self._snippet_retention_seconds = snippet_retention_seconds
         self._event_stale_seconds = event_stale_seconds
 
+    def replace_coordinate_frame(self, coordinate_frame: LocalCoordinateFrame) -> None:
+        self._coordinate_frame = coordinate_frame
+
     async def assemble(
         self,
         *,

@@ -16,19 +16,37 @@ class SensorStreamBuffer:
     start_time_ns: int | None = field(init=False, default=None)
     samples: np.ndarray = field(init=False, default_factory=lambda: np.zeros(0, dtype=np.float32))
     _timeline_origin_ns: int | None = field(init=False, default=None)
+    _timeline_origin_sample_index: int = field(init=False, default=0)
     _buffer_start_sample_index: int = field(init=False, default=0)
 
     def __post_init__(self) -> None:
         self.max_samples = max(1, int(round(self.max_duration_seconds * self.sample_rate_hz)))
 
-    def append(self, start_time_ns: int, samples: np.ndarray) -> None:
+    def append(
+        self,
+        start_time_ns: int,
+        samples: np.ndarray,
+        *,
+        start_sample_index: int | None = None,
+        end_sample_index: int | None = None,
+        end_time_ns: int | None = None,
+    ) -> None:
         samples = np.asarray(samples, dtype=np.float32)
         if samples.ndim != 1:
             raise ValueError("SensorStreamBuffer expects mono samples")
+        explicit_sample_coverage = start_sample_index is not None
+        if explicit_sample_coverage and end_sample_index is None:
+            end_sample_index = start_sample_index + samples.size
+        if explicit_sample_coverage and end_sample_index is not None:
+            if end_sample_index < start_sample_index:
+                raise ValueError("end_sample_index must be >= start_sample_index")
+            if (end_sample_index - start_sample_index) != samples.size:
+                raise ValueError("Explicit sample coverage must match appended sample count")
 
         if self.start_time_ns is None:
             self._timeline_origin_ns = start_time_ns
-            self._buffer_start_sample_index = 0
+            self._timeline_origin_sample_index = start_sample_index or 0
+            self._buffer_start_sample_index = start_sample_index or 0
             self.start_time_ns = start_time_ns
             self.samples = samples.copy()
             self._prune()
@@ -39,7 +57,9 @@ class SensorStreamBuffer:
 
         current_start_sample_index = self._buffer_start_sample_index
         current_end_sample_index = current_start_sample_index + self.samples.size
-        incoming_start_sample_index = self._time_to_sample_index(start_time_ns)
+        incoming_start_sample_index = (
+            start_sample_index if explicit_sample_coverage else self._time_to_sample_index(start_time_ns)
+        )
 
         # If the incoming frame is more than max_samples away from the current buffer
         # (either far ahead or far behind), reset the timeline rather than allocating
@@ -49,7 +69,8 @@ class SensorStreamBuffer:
         if (incoming_start_sample_index > current_end_sample_index + self.max_samples
                 or incoming_start_sample_index < current_start_sample_index - self.max_samples):
             self._timeline_origin_ns = start_time_ns
-            self._buffer_start_sample_index = 0
+            self._timeline_origin_sample_index = start_sample_index or 0
+            self._buffer_start_sample_index = start_sample_index or 0
             self.start_time_ns = start_time_ns
             self.samples = samples.copy()
             self._prune()
@@ -64,12 +85,13 @@ class SensorStreamBuffer:
         # accumulate into the "scattered <1s gaps" reported in the UI snippet audio.
         # Drifts larger than half a frame indicate a genuine missing frame (DMA
         # overrun on the node, dropped HTTP publish, etc.) and are still zero-padded.
-        drift = incoming_start_sample_index - current_end_sample_index
-        snap_tolerance = max(1, samples.size // 2)
-        if -snap_tolerance < drift < snap_tolerance:
-            incoming_start_sample_index = current_end_sample_index
+        if not explicit_sample_coverage:
+            drift = incoming_start_sample_index - current_end_sample_index
+            snap_tolerance = max(1, samples.size // 2)
+            if -snap_tolerance < drift < snap_tolerance:
+                incoming_start_sample_index = current_end_sample_index
 
-        incoming_end_sample_index = incoming_start_sample_index + samples.size
+        incoming_end_sample_index = end_sample_index if explicit_sample_coverage else incoming_start_sample_index + samples.size
 
         merged_start_sample_index = min(current_start_sample_index, incoming_start_sample_index)
         merged_end_sample_index = max(current_end_sample_index, incoming_end_sample_index)
@@ -152,12 +174,15 @@ class SensorStreamBuffer:
         if self._timeline_origin_ns is None:
             raise ValueError("SensorStreamBuffer timeline origin is not initialized")
         delta_ns = time_ns - self._timeline_origin_ns
-        return self._round_divide(delta_ns * self.sample_rate_hz, 1_000_000_000)
+        return self._timeline_origin_sample_index + self._round_divide(delta_ns * self.sample_rate_hz, 1_000_000_000)
 
     def _sample_index_to_time_ns(self, sample_index: int) -> int:
         if self._timeline_origin_ns is None:
             raise ValueError("SensorStreamBuffer timeline origin is not initialized")
-        return self._timeline_origin_ns + self._round_divide(sample_index * 1_000_000_000, self.sample_rate_hz)
+        return self._timeline_origin_ns + self._round_divide(
+            (sample_index - self._timeline_origin_sample_index) * 1_000_000_000,
+            self.sample_rate_hz,
+        )
 
     @staticmethod
     def _round_divide(numerator: int, denominator: int) -> int:
@@ -172,13 +197,29 @@ class MultiSensorBuffer:
         self._buffers: dict[str, SensorStreamBuffer] = {}
         self._lock = asyncio.Lock()
 
-    async def append(self, sensor_id: str, sample_rate_hz: int, start_time_ns: int, samples: np.ndarray) -> None:
+    async def append(
+        self,
+        sensor_id: str,
+        sample_rate_hz: int,
+        start_time_ns: int,
+        samples: np.ndarray,
+        *,
+        start_sample_index: int | None = None,
+        end_sample_index: int | None = None,
+        end_time_ns: int | None = None,
+    ) -> None:
         async with self._lock:
             buffer = self._buffers.get(sensor_id)
             if buffer is None or buffer.sample_rate_hz != sample_rate_hz:
                 buffer = SensorStreamBuffer(sample_rate_hz=sample_rate_hz, max_duration_seconds=self.max_duration_seconds)
                 self._buffers[sensor_id] = buffer
-            buffer.append(start_time_ns=start_time_ns, samples=samples)
+            buffer.append(
+                start_time_ns=start_time_ns,
+                samples=samples,
+                start_sample_index=start_sample_index,
+                end_sample_index=end_sample_index,
+                end_time_ns=end_time_ns,
+            )
 
     async def get_synchronized_window(
         self,

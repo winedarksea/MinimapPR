@@ -44,6 +44,7 @@ add_executable(sirith_tetrahedral
         src/Base64.cpp
         src/FailureSnapshot.cpp
         src/FallbackEnvironmentalSource.cpp
+        src/GpsPpsTimerCapture.cpp
         src/HttpFramePublisher.cpp
         src/Lis2mdlMagnetometer.cpp
         src/Lsm6TemperatureSensor.cpp
@@ -64,6 +65,11 @@ add_executable(sirith_tetrahedral
 pico_generate_pio_header(
         sirith_tetrahedral
         ${MMPR_AUDIO_PICO_DIR}/src/mmpr_audio_rx.pio
+)
+
+pico_generate_pio_header(
+        sirith_tetrahedral
+        ${CMAKE_CURRENT_LIST_DIR}/src/gps_pps_capture.pio
 )
 
 pico_set_program_name(sirith_tetrahedral "sirith_tetrahedral")

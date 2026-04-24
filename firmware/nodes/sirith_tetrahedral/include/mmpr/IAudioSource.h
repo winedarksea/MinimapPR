@@ -5,10 +5,24 @@
 
 namespace mmpr {
 
+struct AudioProducerSnapshot {
+  bool valid = false;
+  uint64_t capturedMonotonicUs = 0;
+  double samplePosition = 0.0;
+  uint64_t completedBlockCount = 0;
+  uint32_t dmaRingSlotIndex = 0;
+  uint32_t wordsTransferredInActiveBlock = 0;
+  uint32_t wordsRemainingInActiveBlock = 0;
+};
+
 struct AudioCaptureTimestamp {
-  uint64_t frameStartMonotonicUs = 0;
-  uint64_t frameEndMonotonicUs = 0;
-  uint32_t droppedFramesBeforeCapture = 0;
+  uint64_t startSampleIndex = 0;
+  uint64_t endSampleIndex = 0;
+  uint64_t blockStartMonotonicUs = 0;
+  uint64_t blockEndMonotonicUs = 0;
+  uint64_t completedBlockCount = 0;
+  uint32_t dmaRingSlotIndex = 0;
+  uint32_t droppedBlocksBeforeCapture = 0;
 };
 
 class IAudioSource {
@@ -24,6 +38,11 @@ class IAudioSource {
       int16_t* interleavedOut,
       size_t samplesPerChannel,
       AudioCaptureTimestamp* captureTimestamp = nullptr) = 0;
+
+  virtual bool snapshotProducerState(AudioProducerSnapshot& producerSnapshot) const {
+    (void)producerSnapshot;
+    return false;
+  }
 };
 
 }  // namespace mmpr
