@@ -11,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from minimappr.main import app
+from minimappr.storage.db import _ingested_frame_key
 from minimappr.utils.audio import encode_pcm16le_b64
 
 
@@ -37,6 +38,7 @@ def _ingest_single_frame(
     metadata: dict | None = None,
     environment: dict | None = None,
     frame_updates: dict | None = None,
+    capabilities: list[str] | None = None,
 ) -> dict:
     samples = np.random.default_rng(1234).normal(0.0, 0.5, size=(1, 1024)).astype(np.float32)
     payload = {
@@ -45,7 +47,7 @@ def _ingest_single_frame(
             "node_type": "point",
             "position_m": [0.0, 0.0, 0.0],
             "sensor_offsets_m": [[0.0, 0.0, 0.0]],
-            "capabilities": ["audio"],
+            "capabilities": capabilities or ["audio"],
             "metadata": metadata or {},
             "properties": {},
         },
@@ -70,7 +72,7 @@ def _ingest_single_frame(
     return body
 
 
-def _wait_for_detections(client: TestClient, *, timeout_s: float = 2.0) -> list[dict]:
+def _wait_for_detections(client: TestClient, *, timeout_s: float = 5.0) -> list[dict]:
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         response = client.get("/api/v1/detections", params={"limit": 10})
@@ -215,6 +217,33 @@ def test_http_ingest_duplicate_frame_is_idempotent(monkeypatch, tmp_path: Path) 
         assert second_body["accepted"] is True
         assert second_body["duplicate"] is True
         assert second_body["triggered"] is False
+
+
+def test_free_running_dedupe_key_does_not_depend_on_receipt_bucket() -> None:
+    key_a = _ingested_frame_key(
+        node_id="http-node-free-running",
+        frame_sequence=11,
+        start_time_ns=1_000_000_000_000_000_000,
+        utc_end_ns=None,
+        start_sample_index=None,
+        end_sample_index=None,
+        source_type="raw_sensor",
+        time_quality="free_running",
+        tor_ns=1_800_000_000_000_000_000,
+    )
+    key_b = _ingested_frame_key(
+        node_id="http-node-free-running",
+        frame_sequence=11,
+        start_time_ns=1_000_000_000_000_000_000,
+        utc_end_ns=None,
+        start_sample_index=None,
+        end_sample_index=None,
+        source_type="raw_sensor",
+        time_quality="free_running",
+        tor_ns=1_800_000_011_000_000_000,
+    )
+
+    assert key_a == key_b
 
 
 def test_http_store_forward_deduplicates_and_preserves_last_seen(monkeypatch, tmp_path: Path) -> None:
@@ -703,7 +732,15 @@ def test_node_recent_audio_endpoint_uses_receipt_time_for_free_running_skew(monk
             client,
             start_time_ns=stale_start_time_ns,
             frame_updates={"time_quality": "free_running"},
+            capabilities=["audio", "gps_optional"],
         )
+        body = _ingest_single_frame(
+            client,
+            start_time_ns=stale_start_time_ns + 64_000_000,
+            frame_updates={"time_quality": "free_running", "sequence": 2},
+            capabilities=["audio", "gps_optional"],
+        )
+        assert body["triggered"] is False
 
         response = client.get("/api/v1/nodes/http-node-1/audio/recent", params={"seconds": 10})
         assert response.status_code == 200

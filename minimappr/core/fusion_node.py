@@ -506,10 +506,12 @@ class FusionNode:
                     self._metrics.birdnet_chunk_dispatches_suppressed += 1
                     continue
                 detection_products = await self._classify_and_assemble(product)
+                self._record_chunk_dispatch_outcome(product=product, detection_products=detection_products)
                 for detection_product in detection_products:
                     if await self._enqueue_stage(self._rules_queue, detection_product):
                         self._metrics.classification_stage_out += 1
             except Exception as exc:  # pragma: no cover - resilience path
+                self._record_chunk_dispatch_outcome(product=product, detection_products=[])
                 self._metrics.classification_failures += 1
                 self._last_error = f"{type(exc).__name__}: {exc}"
             finally:
@@ -1122,6 +1124,25 @@ class FusionNode:
         return not self._classification_chunking_policy.should_dispatch(
             source_node_id=product.candidate.source_node_id,
             event_time_ns=product.candidate.event_time_ns,
+        )
+
+    def _record_chunk_dispatch_outcome(
+        self,
+        *,
+        product: LocalizedCandidate,
+        detection_products: list[DetectionProduct],
+    ) -> None:
+        if self._classification_chunking_policy is None:
+            return
+        produced_actionable_detection = any(
+            detection_product.detection.label != "unknown"
+            or detection_product.detection.label_confidence > 0.0
+            for detection_product in detection_products
+        )
+        self._classification_chunking_policy.record_dispatch_outcome(
+            source_node_id=product.candidate.source_node_id,
+            event_time_ns=product.candidate.event_time_ns,
+            produced_actionable_detection=produced_actionable_detection,
         )
 
     def _current_localizer_name(self) -> str:
