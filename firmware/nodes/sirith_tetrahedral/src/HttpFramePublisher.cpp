@@ -3,6 +3,8 @@
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <new>
+#include <utility>
 
 #include "lwip/dns.h"
 #include "lwip/ip_addr.h"
@@ -11,6 +13,7 @@
 #include "pico/cyw43_arch.h"
 #include "pico/time.h"
 
+#include "mmpr/Base64.h"
 #include "mmpr/NodeProtocol.h"
 
 namespace mmpr {
@@ -79,32 +82,39 @@ void appendResponseChunk(std::string& response, bool keepResponse, size_t respon
   response.append(data, appendLen);
 }
 
-std::string buildRequest(
+std::string buildRequestHeader(
     const std::string& host,
     uint16_t port,
     const std::string& path,
-    const std::string& payload) {
-  std::string request;
-  request.reserve(payload.size() + 256);
+    size_t payloadSize) {
+  std::string header;
+  header.reserve(256);
 
-  request += "POST ";
-  request += path;
-  request += " HTTP/1.1\r\nHost: ";
-  request += host;
+  header += "POST ";
+  header += path;
+  header += " HTTP/1.1\r\nHost: ";
+  header += host;
   if (port != 80) {
-    request += ':';
-    request += std::to_string(port);
+    header += ':';
+    header += std::to_string(port);
   }
-  request += "\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nContent-Length: ";
-  request += std::to_string(payload.size());
-  request += "\r\n\r\n";
-  request += payload;
-  return request;
+  header += "\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: ";
+  header += std::to_string(payloadSize);
+  header += "\r\n\r\n";
+  return header;
 }
 
 }  // namespace
 
 struct HttpFramePublisher::TransportState {
+  enum class SendPhase {
+    kHeader,
+    kPayloadPrefix,
+    kAudio,
+    kPayloadSuffix,
+    kDone,
+  };
+
   tcp_pcb* pcb = nullptr;
   ip_addr_t remoteAddr = {};
   bool remoteAddrValid = false;
@@ -117,8 +127,15 @@ struct HttpFramePublisher::TransportState {
 
   err_t err = ERR_OK;
 
-  std::string request;
-  size_t requestOffset = 0;
+  std::string requestHeader;
+  std::string payloadPrefix;
+  std::string payloadSuffix;
+  std::string base64Chunk;
+  SendPhase sendPhase = SendPhase::kHeader;
+  size_t sendOffset = 0;
+  const uint8_t* audioData = nullptr;
+  size_t audioBytes = 0;
+  size_t audioOffset = 0;
 
   std::string response;
   std::string headerBuffer;
@@ -158,8 +175,15 @@ void closeConnection(HttpFramePublisher::TransportState& state) {
 }
 
 void resetRequestState(HttpFramePublisher::TransportState& state, bool keepResponseBody) {
-  state.request.clear();
-  state.requestOffset = 0;
+  state.requestHeader.clear();
+  state.payloadPrefix.clear();
+  state.payloadSuffix.clear();
+  state.base64Chunk.clear();
+  state.sendPhase = HttpFramePublisher::TransportState::SendPhase::kHeader;
+  state.sendOffset = 0;
+  state.audioData = nullptr;
+  state.audioBytes = 0;
+  state.audioOffset = 0;
   state.response.clear();
   state.headerBuffer.clear();
   state.keepResponse = keepResponseBody;
@@ -220,19 +244,17 @@ bool resolveHost(const std::string& host, uint32_t timeoutMs, HttpFramePublisher
   return state.remoteAddrValid;
 }
 
-void flushTx(HttpFramePublisher::TransportState& state, tcp_pcb* tpcb) {
-  if (tpcb == nullptr) {
-    return;
-  }
-
-  while (state.requestOffset < state.request.size()) {
+bool writeStringSegment(
+    HttpFramePublisher::TransportState& state,
+    tcp_pcb* tpcb,
+    const std::string& segment) {
+  while (state.sendOffset < segment.size()) {
     const uint16_t sndbuf = tcp_sndbuf(tpcb);
     if (sndbuf == 0) {
-      break;
+      return false;
     }
 
-    size_t remaining = state.request.size() - state.requestOffset;
-    size_t chunk = remaining;
+    size_t chunk = segment.size() - state.sendOffset;
     if (chunk > sndbuf) {
       chunk = sndbuf;
     }
@@ -242,22 +264,129 @@ void flushTx(HttpFramePublisher::TransportState& state, tcp_pcb* tpcb) {
 
     const err_t writeErr = tcp_write(
         tpcb,
-        state.request.data() + state.requestOffset,
+        segment.data() + state.sendOffset,
         static_cast<u16_t>(chunk),
         TCP_WRITE_FLAG_COPY);
     if (writeErr == ERR_OK) {
-      state.requestOffset += chunk;
+      state.sendOffset += chunk;
     } else if (writeErr == ERR_MEM) {
-      break;
+      return false;
     } else {
       state.err = writeErr;
       state.requestDone = true;
       closeConnection(state);
-      return;
+      return false;
     }
   }
 
-  if (state.requestOffset > 0) {
+  state.sendOffset = 0;
+  return true;
+}
+
+bool refillBase64AudioChunk(HttpFramePublisher::TransportState& state) {
+  if (state.audioOffset >= state.audioBytes) {
+    return false;
+  }
+
+  constexpr size_t kRawAudioChunkBytes = 768;
+  const size_t remaining = state.audioBytes - state.audioOffset;
+  size_t rawChunkBytes = remaining;
+  if (rawChunkBytes > kRawAudioChunkBytes) {
+    rawChunkBytes = kRawAudioChunkBytes;
+  }
+  if (rawChunkBytes < remaining) {
+    rawChunkBytes -= rawChunkBytes % 3;
+  }
+  if (rawChunkBytes == 0) {
+    rawChunkBytes = remaining;
+  }
+
+  state.base64Chunk.clear();
+  appendBase64(state.base64Chunk, state.audioData + state.audioOffset, rawChunkBytes);
+  state.audioOffset += rawChunkBytes;
+  state.sendOffset = 0;
+  return true;
+}
+
+void advanceSendPhase(HttpFramePublisher::TransportState& state) {
+  using SendPhase = HttpFramePublisher::TransportState::SendPhase;
+  switch (state.sendPhase) {
+    case SendPhase::kHeader:
+      state.sendPhase = SendPhase::kPayloadPrefix;
+      break;
+    case SendPhase::kPayloadPrefix:
+      state.sendPhase = SendPhase::kAudio;
+      break;
+    case SendPhase::kAudio:
+      state.sendPhase = SendPhase::kPayloadSuffix;
+      break;
+    case SendPhase::kPayloadSuffix:
+      state.sendPhase = SendPhase::kDone;
+      break;
+    case SendPhase::kDone:
+      break;
+  }
+  state.sendOffset = 0;
+}
+
+void flushTx(HttpFramePublisher::TransportState& state, tcp_pcb* tpcb) {
+  if (tpcb == nullptr) {
+    return;
+  }
+
+  using SendPhase = HttpFramePublisher::TransportState::SendPhase;
+  bool wroteAny = false;
+  while (state.sendPhase != SendPhase::kDone) {
+    const SendPhase phaseBefore = state.sendPhase;
+    bool segmentDone = false;
+    bool continueSamePhase = false;
+    switch (state.sendPhase) {
+      case SendPhase::kHeader:
+        segmentDone = writeStringSegment(state, tpcb, state.requestHeader);
+        break;
+      case SendPhase::kPayloadPrefix:
+        segmentDone = writeStringSegment(state, tpcb, state.payloadPrefix);
+        break;
+      case SendPhase::kAudio:
+        if (state.sendOffset >= state.base64Chunk.size() && !refillBase64AudioChunk(state)) {
+          segmentDone = true;
+        } else {
+          const bool chunkDone = writeStringSegment(state, tpcb, state.base64Chunk);
+          if (!chunkDone) {
+            segmentDone = false;
+          } else if (state.audioOffset >= state.audioBytes) {
+            state.base64Chunk.clear();
+            segmentDone = true;
+          } else {
+            state.base64Chunk.clear();
+            continueSamePhase = true;
+          }
+        }
+        break;
+      case SendPhase::kPayloadSuffix:
+        segmentDone = writeStringSegment(state, tpcb, state.payloadSuffix);
+        break;
+      case SendPhase::kDone:
+        segmentDone = true;
+        break;
+    }
+    if (state.requestDone) {
+      return;
+    }
+    if (continueSamePhase) {
+      wroteAny = true;
+      continue;
+    }
+    if (!segmentDone) {
+      break;
+    }
+    if (phaseBefore == state.sendPhase) {
+      advanceSendPhase(state);
+      wroteAny = true;
+    }
+  }
+
+  if (wroteAny || state.sendOffset > 0) {
     (void)tcp_output(tpcb);
   }
 }
@@ -465,10 +594,6 @@ bool ensureConnected(
     uint16_t port,
     uint32_t timeoutMs,
     HttpFramePublisher::TransportState& state) {
-  if (state.connected && state.pcb != nullptr) {
-    return true;
-  }
-
   closeConnection(state);
   if (!resolveHost(host, timeoutMs, state)) {
     return false;
@@ -512,7 +637,8 @@ PublishResult post(
     const std::string& host,
     uint16_t port,
     const std::string& path,
-    const std::string& payload,
+    IngestPayloadParts payloadParts,
+    const uint8_t* audioData,
     uint32_t timeoutMs,
     bool keepResponseBody,
     HttpFramePublisher::TransportState& state) {
@@ -530,7 +656,13 @@ PublishResult post(
   }
 
   resetRequestState(state, keepResponseBody);
-  state.request = buildRequest(host, port, path, payload);
+  const size_t payloadSize =
+      payloadParts.prefix.size() + payloadParts.encodedAudioBytes + payloadParts.suffix.size();
+  state.requestHeader = buildRequestHeader(host, port, path, payloadSize);
+  state.payloadPrefix = std::move(payloadParts.prefix);
+  state.payloadSuffix = std::move(payloadParts.suffix);
+  state.audioData = audioData;
+  state.audioBytes = payloadParts.rawAudioBytes;
   flushTx(state, state.pcb);
 
   const absolute_time_t deadline = make_timeout_time_ms(timeoutMs);
@@ -553,6 +685,7 @@ PublishResult post(
     result.responseBody = state.response;
   }
   result.ok = (result.statusCode >= 200 && result.statusCode < 300);
+  closeConnection(state);
   return result;
 }
 
@@ -596,16 +729,32 @@ PublishResult HttpFramePublisher::publish(
     return result;
   }
 
-  std::string payload;
-  if (!buildIngestPayload(node, frame, environment, payload)) {
-    result.statusCode = -2;
+  IngestPayloadParts payloadParts;
+  try {
+    if (!buildIngestPayloadParts(node, frame, environment, payloadParts)) {
+      result.statusCode = -2;
+      return result;
+    }
+
+    result = post(
+        host_,
+        port_,
+        path_,
+        std::move(payloadParts),
+        reinterpret_cast<const uint8_t*>(frame.interleavedSamples),
+        timeoutMs_,
+        keepResponseBody,
+        *transportState_);
+  } catch (const std::bad_alloc&) {
+    result.statusCode = -6;
     return result;
   }
-
-  result = post(host_, port_, path_, payload, timeoutMs_, keepResponseBody, *transportState_);
   if (!result.ok && result.statusCode < 0 && transportState_ != nullptr) {
+    // Do not retry synchronously here. A timed-out POST already consumed the
+    // real-time budget for the audio loop; a second immediate attempt can hold
+    // loopOnce() long enough for the DMA ring to overrun or the watchdog path
+    // to look like a reboot loop. NodeRunner owns retry cadence via backoff.
     closeConnection(*transportState_);
-    result = post(host_, port_, path_, payload, timeoutMs_, keepResponseBody, *transportState_);
   }
   return result;
 }

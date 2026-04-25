@@ -16,6 +16,10 @@ _logger = logging.getLogger(__name__)
 
 # Log a summary after this many accepted (non-duplicate) frames.
 _INGEST_LOG_INTERVAL_FRAMES = 5000
+# Free-running firmware can be anchored to a stale or timezone-shifted build
+# timestamp. Use receipt-aligned buffering for large skews so debug audio and
+# recent-node health remain usable until GPS/NTP lock is available.
+_MAX_TRUSTED_NODE_CLOCK_SKEW_NS = 300_000_000_000
 
 import numpy as np
 
@@ -150,9 +154,10 @@ class IngestProcessor:
         frame = request.frame
         raw_node = request.node
         normalized_node, geo_position = self._normalize_node_spec(raw_node)
-        runtime = await self._registry.upsert(normalized_node, frame.start_time_ns)
+        server_received_ns = time.time_ns()
+        runtime = await self._registry.upsert(normalized_node, server_received_ns)
         toa_ns = frame.toa_ns or frame.start_time_ns
-        tor_ns = frame.tor_ns if frame.tor_ns is not None else time.time_ns()
+        tor_ns = frame.tor_ns if frame.tor_ns is not None else server_received_ns
 
         # -- duplicate check --------------------------------------------------
         duplicate_ingest = await self._storage.has_ingested_frame(
@@ -163,11 +168,13 @@ class IngestProcessor:
             start_sample_index=frame.start_sample_index,
             end_sample_index=frame.end_sample_index,
             source_type=frame.source_type,
+            time_quality=frame.time_quality.value,
+            tor_ns=tor_ns,
         )
         if duplicate_ingest:
             await self._storage.upsert_node(
                 spec=normalized_node,
-                last_seen_ns=frame.start_time_ns,
+                last_seen_ns=server_received_ns,
                 position_geo=geo_position,
             )
             return IngestResult(
@@ -215,7 +222,7 @@ class IngestProcessor:
         async with storage_batch_ctx():
             await self._storage.upsert_node(
                 spec=normalized_node,
-                last_seen_ns=frame.start_time_ns,
+                last_seen_ns=server_received_ns,
                 position_geo=geo_position,
             )
             frame_registered = await self._storage.register_ingested_frame(
@@ -228,6 +235,7 @@ class IngestProcessor:
                 toa_ns=toa_ns,
                 tor_ns=tor_ns,
                 source_type=frame.source_type,
+                time_quality=frame.time_quality.value,
             )
             if frame_registered:
                 if environment_sample is not None:
@@ -284,15 +292,23 @@ class IngestProcessor:
             )
 
         # -- buffer insertion --------------------------------------------------
+        buffer_start_time_ns, buffer_end_time_ns, buffer_uses_receipt_time = _buffer_timestamps_for_frame(
+            frame_start_time_ns=frame.start_time_ns,
+            frame_end_time_ns=frame.utc_end_ns,
+            sample_count=processed.shape[1],
+            sample_rate_hz=frame.sample_rate_hz,
+            time_quality=frame.time_quality,
+            server_received_ns=server_received_ns,
+        )
         for channel_index, sensor_id in enumerate(runtime.sensor_ids):
             await self._buffer.append(
                 sensor_id=sensor_id,
                 sample_rate_hz=frame.sample_rate_hz,
-                start_time_ns=frame.start_time_ns,
+                start_time_ns=buffer_start_time_ns,
                 samples=processed[channel_index],
                 start_sample_index=frame.start_sample_index,
                 end_sample_index=frame.end_sample_index,
-                end_time_ns=frame.utc_end_ns,
+                end_time_ns=buffer_end_time_ns,
             )
             await self._registry.record_observation(
                 sensor_id=sensor_id,
@@ -304,7 +320,8 @@ class IngestProcessor:
         frame_duration_ns = int((processed.shape[1] / frame.sample_rate_hz) * 1_000_000_000)
         half_window_ns = int(self._localization_config.localization_window_seconds * 0.5 * 1_000_000_000)
         center_offset_ns = max(0, frame_duration_ns - half_window_ns)
-        center_time_ns = frame.start_time_ns + center_offset_ns
+        center_timeline_start_ns = buffer_start_time_ns if buffer_uses_receipt_time else frame.start_time_ns
+        center_time_ns = center_timeline_start_ns + center_offset_ns
         cooldown_ns = int(self._localization_config.trigger_cooldown_seconds * 1_000_000_000)
 
         triggered = False
@@ -520,3 +537,20 @@ def _coerce_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _buffer_timestamps_for_frame(
+    *,
+    frame_start_time_ns: int,
+    frame_end_time_ns: int | None,
+    sample_count: int,
+    sample_rate_hz: int,
+    time_quality: TimeQuality,
+    server_received_ns: int,
+) -> tuple[int, int | None, bool]:
+    duration_ns = int(round((sample_count / sample_rate_hz) * 1_000_000_000))
+    node_clock_skew_ns = abs(frame_start_time_ns - server_received_ns)
+    if time_quality == TimeQuality.FREE_RUNNING and node_clock_skew_ns > _MAX_TRUSTED_NODE_CLOCK_SKEW_NS:
+        start_ns = max(1, server_received_ns - duration_ns)
+        return start_ns, server_received_ns, True
+    return frame_start_time_ns, frame_end_time_ns, False

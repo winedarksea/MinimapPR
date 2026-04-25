@@ -14,7 +14,9 @@ namespace {
 constexpr double kPpmScale = 1000000.0;
 constexpr double kNtpSlewAlpha = 0.15;
 constexpr double kGpsSlewAlpha = 0.35;
-constexpr uint64_t kMaxAcceptedNtpRttUs = 200000ULL;
+constexpr uint64_t kMaxAcceptedNtpRttUs = 2000000ULL;
+constexpr uint64_t kMinimumPpsIntervalUs = 900000ULL;
+constexpr uint64_t kMaximumPpsIntervalUs = 1100000ULL;
 
 double clampScale(double scale) {
   return std::clamp(scale, 0.9995, 1.0005);
@@ -134,7 +136,18 @@ TimeQuality NodeClock::timeQuality() const {
 }
 
 void NodeClock::applyNtpObservation(uint64_t utcNs, uint64_t monotonicUs, uint64_t roundTripUs) {
-  if (gpsDisciplineAvailable(monotonicUs) || roundTripUs > kMaxAcceptedNtpRttUs) {
+  const bool gpsPpsIsFresh =
+      gpsStablePulseCount_ >= kGpsStablePulseTarget &&
+      lastGpsSyncMonotonicUs_ > 0 &&
+      monotonicUs >= lastGpsSyncMonotonicUs_ &&
+      (monotonicUs - lastGpsSyncMonotonicUs_) <= kGpsFreshUs;
+  if (gpsPpsIsFresh) {
+    return;
+  }
+  if (roundTripUs > kMaxAcceptedNtpRttUs) {
+    std::printf(
+        "[node] ignored NTP observation with high RTT=%llu us\n",
+        static_cast<unsigned long long>(roundTripUs));
     return;
   }
 
@@ -168,7 +181,11 @@ void NodeClock::applyNtpObservation(uint64_t utcNs, uint64_t monotonicUs, uint64
   previousNtpUtcNs_ = utcNs;
   previousNtpMonotonicUs_ = monotonicUs;
   lastNtpSyncMonotonicUs_ = monotonicUs;
-  setSampleAnchor(estimateSamplePositionAtMonotonicUs(monotonicUs), utcNs);
+  // Intentionally do NOT call setSampleAnchor() here. After the first NTP
+  // lock the anchor is correct; the slew filter above (updateEffectiveSamplePeriod)
+  // absorbs ongoing drift via rate correction. Re-anchoring on every NTP
+  // observation jumps anchorWallNs_ under any in-flight packet in NodeRunner
+  // and was the root cause of utc_end < utc_start rejections at the server.
   setWallReference(utcNs, monotonicUs);
 }
 
@@ -210,7 +227,21 @@ void NodeClock::applyGpsPpsObservation(uint64_t utcSecondNs, const GpsPpsCapture
   const bool gpsWasFresh = gpsAgeUs <= kGpsHoldoverUs;
 
   if (haveGpsInterval_ && monotonicUs > previousGpsMonotonicUs_) {
-    const double localIntervalNs = static_cast<double>(monotonicUs - previousGpsMonotonicUs_) * 1000.0;
+    const uint64_t localIntervalUs = monotonicUs - previousGpsMonotonicUs_;
+    if (localIntervalUs < kMinimumPpsIntervalUs || localIntervalUs > kMaximumPpsIntervalUs) {
+      haveGpsInterval_ = true;
+      previousGpsMonotonicUs_ = monotonicUs;
+      gpsStablePulseCount_ = 1;
+      latestPpsEdgeCount_ = ppsEvent.edgeCount;
+      latestPpsPhaseErrorNs_ = 0;
+      std::printf(
+          "[timing] PPS interval out of range interval_us=%llu edge=%u; waiting for stable 1 Hz PPS\n",
+          static_cast<unsigned long long>(localIntervalUs),
+          static_cast<unsigned>(ppsEvent.edgeCount));
+      return;
+    }
+
+    const double localIntervalNs = static_cast<double>(localIntervalUs) * 1000.0;
     const double localToUtcScale = clampScale(static_cast<double>(kNsPerSecond) / localIntervalNs);
     updateEffectiveSamplePeriod(localToUtcScale, true);
     gpsStablePulseCount_ = std::min<uint32_t>(gpsStablePulseCount_ + 1U, kGpsStablePulseTarget);

@@ -111,6 +111,27 @@ bool buildIngestPayload(
     const AudioFrame& frame,
     const EnvironmentalSample* environment,
     std::string& outPayload) {
+  IngestPayloadParts parts;
+  if (!buildIngestPayloadParts(node, frame, environment, parts)) {
+    return false;
+  }
+
+  outPayload.clear();
+  outPayload.reserve(parts.prefix.size() + parts.encodedAudioBytes + parts.suffix.size());
+  outPayload += parts.prefix;
+  appendBase64(
+      outPayload,
+      reinterpret_cast<const uint8_t*>(frame.interleavedSamples),
+      parts.rawAudioBytes);
+  outPayload += parts.suffix;
+  return true;
+}
+
+bool buildIngestPayloadParts(
+    const NodeDescriptor& node,
+    const AudioFrame& frame,
+    const EnvironmentalSample* environment,
+    IngestPayloadParts& outParts) {
   if (node.id == nullptr || node.sensorOffsetsM == nullptr || node.sensorCount == 0 ||
       frame.interleavedSamples == nullptr) {
     return false;
@@ -119,8 +140,13 @@ bool buildIngestPayload(
   const size_t bytes = frame.samplesPerChannel * static_cast<size_t>(frame.channels) * sizeof(int16_t);
   const size_t encodedBytes = 4 * ((bytes + 2) / 3);
 
-  outPayload.clear();
-  outPayload.reserve(640 + encodedBytes);
+  outParts.prefix.clear();
+  outParts.suffix.clear();
+  outParts.rawAudioBytes = bytes;
+  outParts.encodedAudioBytes = encodedBytes;
+
+  std::string& outPayload = outParts.prefix;
+  outPayload.reserve(640);
 
   outPayload += "{\"node\":{";
 
@@ -228,65 +254,67 @@ bool buildIngestPayload(
   appendUint64(outPayload, static_cast<uint64_t>(frame.samplesPerChannel));
 
   outPayload += ",\"samples_b64\":\"";
-  appendBase64(outPayload, reinterpret_cast<const uint8_t*>(frame.interleavedSamples), bytes);
-  outPayload += '"';
 
-  outPayload += ",\"sequence\":";
-  appendUint64(outPayload, frame.sequence);
+  std::string& suffix = outParts.suffix;
+  suffix.reserve(256);
+  suffix += '"';
 
-  outPayload += ",\"toa_ns\":";
-  appendUint64(outPayload, frame.toaNs);
+  suffix += ",\"sequence\":";
+  appendUint64(suffix, frame.sequence);
 
-  outPayload += ",\"tor_ns\":";
-  appendUint64(outPayload, frame.torNs);
+  suffix += ",\"toa_ns\":";
+  appendUint64(suffix, frame.toaNs);
 
-  outPayload += ",\"time_quality\":";
-  appendQuoted(outPayload, timeQualityToWire(frame.timeQuality));
+  suffix += ",\"tor_ns\":";
+  appendUint64(suffix, frame.torNs);
+
+  suffix += ",\"time_quality\":";
+  appendQuoted(suffix, timeQualityToWire(frame.timeQuality));
 
   if (frame.hasTimingDiagnostics) {
-    outPayload += ",\"timing_diagnostics\":{";
-    outPayload += "\"pps_edge_count\":";
-    appendUint32(outPayload, frame.ppsEdgeCount);
-    outPayload += ",\"dma_ring_slot_index\":";
-    appendUint32(outPayload, frame.dmaRingSlotIndex);
-    outPayload += ",\"pps_phase_error_ns\":";
-    appendInt64(outPayload, frame.ppsPhaseErrorNs);
-    outPayload += ",\"estimated_ppm\":";
+    suffix += ",\"timing_diagnostics\":{";
+    suffix += "\"pps_edge_count\":";
+    appendUint32(suffix, frame.ppsEdgeCount);
+    suffix += ",\"dma_ring_slot_index\":";
+    appendUint32(suffix, frame.dmaRingSlotIndex);
+    suffix += ",\"pps_phase_error_ns\":";
+    appendInt64(suffix, frame.ppsPhaseErrorNs);
+    suffix += ",\"estimated_ppm\":";
     char ppmBuffer[32];
     std::snprintf(ppmBuffer, sizeof(ppmBuffer), "%.6f", frame.estimatedPpm);
-    outPayload += ppmBuffer;
-    outPayload += "}";
+    suffix += ppmBuffer;
+    suffix += "}";
   }
 
-  outPayload += "}";
+  suffix += "}";
 
   if (environment != nullptr && (environment->hasTemperatureC || environment->hasHumidityFraction)) {
-    outPayload += ",\"environment\":{";
+    suffix += ",\"environment\":{";
     bool needComma = false;
     if (environment->hasTemperatureC) {
-      outPayload += "\"temperature_c\":";
-      appendFloat(outPayload, environment->temperatureC);
+      suffix += "\"temperature_c\":";
+      appendFloat(suffix, environment->temperatureC);
       needComma = true;
     }
     if (environment->hasHumidityFraction) {
       if (needComma) {
-        outPayload += ',';
+        suffix += ',';
       }
-      outPayload += "\"humidity_fraction\":";
-      appendFloat(outPayload, environment->humidityFraction);
+      suffix += "\"humidity_fraction\":";
+      appendFloat(suffix, environment->humidityFraction);
       needComma = true;
     }
     if (environment->temperatureSource != nullptr) {
       if (needComma) {
-        outPayload += ',';
+        suffix += ',';
       }
-      outPayload += "\"source\":";
-      appendQuoted(outPayload, environment->temperatureSource);
+      suffix += "\"source\":";
+      appendQuoted(suffix, environment->temperatureSource);
     }
-    outPayload += "}";
+    suffix += "}";
   }
 
-  outPayload += "}";
+  suffix += "}";
 
   return true;
 }

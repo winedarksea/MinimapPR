@@ -21,6 +21,7 @@ constexpr const char* kGpsPositionSourceUart = "gps_nmea_uart";
 constexpr uint64_t kUsPerMs = 1000ULL;
 constexpr uint64_t kNsPerSecond = 1000000000ULL;
 constexpr uint64_t kNsPerMillisecond = 1000000ULL;
+constexpr uint64_t kPpsFallbackTimeoutUs = 3000000ULL;
 // UART-delivered NMEA time-of-day trails the actual UTC instant because the
 // sentence has to be serialized on-wire before we parse it. Use a fixed
 // correction in no-PPS mode so the fallback discipline does not carry a
@@ -47,11 +48,10 @@ bool NmeaGpsSource::begin() {
   gpio_set_function(config_.rxPin, GPIO_FUNC_UART);
   gpio_pull_up(config_.rxPin);
 
-  if (config_.ppsPin >= 0) {
-    ppsConfigured_ = ppsCapture_.begin(config_.ppsPin);
-  } else {
-    ppsConfigured_ = false;
-  }
+  // Do not claim PPS PIO/IRQ resources until a GPS receiver is actually
+  // speaking NMEA. With no receiver attached, an exposed PPS pin can be noisy
+  // enough to create an IRQ storm before the node reaches the audio loop.
+  ppsConfigured_ = false;
 
   uartStarted_ = true;
   healthy_ = false;
@@ -67,19 +67,44 @@ bool NmeaGpsSource::begin() {
   lastFixUs_ = 0;
   nextPpsUtcNs_ = 0;
   loggedFirstSentence_ = false;
+  loggedPpsCaptureState_ = false;
   loggedHealthyState_ = false;
   loggedFixState_ = false;
   loggedPpsEdgeCount_ = 0;
+  loggedNoPpsFallback_ = false;
   haveAlignedPpsEpoch_ = false;
+  ppsSignalCurrentlyObserved_ = false;
   lastAppliedPpsEdgeCount_ = 0;
+  lastPpsEdgeUs_ = 0;
   return true;
 }
 
 void NmeaGpsSource::bindAudioSource(IAudioSource* audioSource) {
+  audioSourceForPps_ = audioSource;
   if (!ppsConfigured_) {
     return;
   }
   ppsCapture_.bindAudioSource(audioSource);
+}
+
+void NmeaGpsSource::ensurePpsCaptureStarted() {
+  if (ppsConfigured_ || config_.ppsPin < 0) {
+    return;
+  }
+
+  ppsConfigured_ = ppsCapture_.begin(config_.ppsPin);
+  if (ppsConfigured_ && audioSourceForPps_ != nullptr) {
+    ppsCapture_.bindAudioSource(audioSourceForPps_);
+  }
+
+  if (!loggedPpsCaptureState_) {
+    loggedPpsCaptureState_ = true;
+    if (ppsConfigured_) {
+      std::printf("[gps] PPS capture armed on GP%d after NMEA detected\n", config_.ppsPin);
+    } else {
+      std::printf("[gps] PPS capture unavailable on GP%d; using NMEA/NTP fallback\n", config_.ppsPin);
+    }
+  }
 }
 
 void NmeaGpsSource::poll(NodeDescriptor& descriptor, NodeClock* clock) {
@@ -116,6 +141,16 @@ void NmeaGpsSource::poll(NodeDescriptor& descriptor, NodeClock* clock) {
   const uint64_t nowUs = time_us_64();
   const uint64_t sentenceAgeUs = (lastSentenceUs_ > 0) ? (nowUs - lastSentenceUs_) : UINT64_MAX;
   const uint64_t fixAgeUs = (lastFixUs_ > 0) ? (nowUs - lastFixUs_) : UINT64_MAX;
+  const bool ppsRecentlyObserved =
+      ppsConfigured_ &&
+      lastPpsEdgeUs_ > 0 &&
+      nowUs >= lastPpsEdgeUs_ &&
+      (nowUs - lastPpsEdgeUs_) <= kPpsFallbackTimeoutUs;
+  if (ppsConfigured_ && ppsSignalCurrentlyObserved_ && !ppsRecentlyObserved) {
+    ppsSignalCurrentlyObserved_ = false;
+    haveAlignedPpsEpoch_ = false;
+    std::printf("[gps] PPS signal stale; falling back to NMEA/NTP discipline until edges resume\n");
+  }
 
   if (!haveSeenSentences_ || sentenceAgeUs > (static_cast<uint64_t>(config_.missingSentenceTimeoutMs) * kUsPerMs)) {
     healthy_ = false;
@@ -176,6 +211,12 @@ void NmeaGpsSource::consumePendingPps(NodeClock* clock) {
     while (ppsCapture_.consumeNext(ppsEvent)) {
       discardedEvent = true;
       latestDiscardedEdgeCount = ppsEvent.edgeCount;
+      lastPpsEdgeUs_ = time_us_64();
+      if (!ppsSignalCurrentlyObserved_) {
+        ppsSignalCurrentlyObserved_ = true;
+        loggedNoPpsFallback_ = false;
+        std::printf("[gps] PPS edges observed; waiting for UTC sentence before locking\n");
+      }
     }
     if (discardedEvent && latestDiscardedEdgeCount > loggedPpsEdgeCount_) {
       loggedPpsEdgeCount_ = latestDiscardedEdgeCount;
@@ -188,6 +229,11 @@ void NmeaGpsSource::consumePendingPps(NodeClock* clock) {
   }
 
   while (ppsCapture_.consumeNext(ppsEvent)) {
+    if (!ppsSignalCurrentlyObserved_) {
+      ppsSignalCurrentlyObserved_ = true;
+      loggedNoPpsFallback_ = false;
+      std::printf("[gps] PPS edges resumed; attempting GPS PPS discipline\n");
+    }
     if (haveAlignedPpsEpoch_ &&
         ppsEvent.edgeCount > lastAppliedPpsEdgeCount_ &&
         ppsEvent.edgeCount != (lastAppliedPpsEdgeCount_ + 1u)) {
@@ -202,6 +248,7 @@ void NmeaGpsSource::consumePendingPps(NodeClock* clock) {
     clock->applyGpsPpsObservation(nextPpsUtcNs_, ppsEvent);
     haveAlignedPpsEpoch_ = true;
     lastAppliedPpsEdgeCount_ = ppsEvent.edgeCount;
+    lastPpsEdgeUs_ = time_us_64();
     nextPpsUtcNs_ += kNsPerSecond;
     if (ppsEvent.edgeCount > loggedPpsEdgeCount_) {
       loggedPpsEdgeCount_ = ppsEvent.edgeCount;
@@ -234,6 +281,7 @@ void NmeaGpsSource::consumeLine(const char* line, NodeClock* clock) {
   haveSeenSentences_ = true;
   healthy_ = true;
   lastSentenceUs_ = time_us_64();
+  ensurePpsCaptureStarted();
 
   if (parsed.hasFix && parsed.hasLocation) {
     hasFix_ = true;
@@ -260,6 +308,13 @@ void NmeaGpsSource::consumeLine(const char* line, NodeClock* clock) {
 
   if (parsed.hasUtcDateTime) {
     hasDateTime_ = true;
+    const uint64_t sentenceMonotonicUs =
+        lastSentenceUs_ > kNmeaSerialLatencyUs ? (lastSentenceUs_ - kNmeaSerialLatencyUs) : 0ULL;
+    const bool ppsRecentlyObserved =
+        ppsConfigured_ &&
+        lastPpsEdgeUs_ > 0 &&
+        lastSentenceUs_ >= lastPpsEdgeUs_ &&
+        (lastSentenceUs_ - lastPpsEdgeUs_) <= kPpsFallbackTimeoutUs;
     if (ppsConfigured_) {
       const uint64_t parsedUtcNs = unixEpochNs(
           parsed.year,
@@ -271,9 +326,13 @@ void NmeaGpsSource::consumeLine(const char* line, NodeClock* clock) {
           0);
       nextPpsUtcNs_ = parsedUtcNs + kNsPerSecond;
       haveUtcForNextPps_ = true;
-    } else if (clock != nullptr) {
-      const uint64_t sentenceMonotonicUs =
-          lastSentenceUs_ > kNmeaSerialLatencyUs ? (lastSentenceUs_ - kNmeaSerialLatencyUs) : 0ULL;
+    }
+
+    if (clock != nullptr && !ppsRecentlyObserved) {
+      if (ppsConfigured_ && !loggedNoPpsFallback_) {
+        loggedNoPpsFallback_ = true;
+        std::printf("[gps] PPS configured but no recent edge observed; using NMEA UTC fallback\n");
+      }
       clock->applyNtpObservation(
           unixEpochNs(
               parsed.year,

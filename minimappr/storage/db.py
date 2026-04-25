@@ -55,14 +55,24 @@ def _ingested_frame_key(
     start_sample_index: int | None,
     end_sample_index: int | None,
     source_type: str,
+    time_quality: str = "",
+    tor_ns: int | None = None,
 ) -> str:
+    receipt_bucket = ""
+    if (
+        source_type == "raw_sensor"
+        and time_quality == "free_running"
+        and tor_ns is not None
+        and abs(start_time_ns - tor_ns) > 300_000_000_000
+    ):
+        receipt_bucket = f":rx{tor_ns // 10_000_000_000}"
     if start_sample_index is not None and end_sample_index is not None and utc_end_ns is not None:
         return (
             f"{node_id}:{source_type}:{start_sample_index}:{end_sample_index}:"
-            f"{start_time_ns}:{utc_end_ns}"
+            f"{start_time_ns}:{utc_end_ns}{receipt_bucket}"
         )
     sequence_token = str(frame_sequence) if frame_sequence is not None else "none"
-    return f"{node_id}:{source_type}:{start_time_ns}:{sequence_token}"
+    return f"{node_id}:{source_type}:{start_time_ns}:{sequence_token}{receipt_bucket}"
 
 
 class Storage:
@@ -798,6 +808,8 @@ class Storage:
         start_sample_index: int | None,
         end_sample_index: int | None,
         source_type: str,
+        time_quality: str = "",
+        tor_ns: int | None = None,
     ) -> bool:
         db = self._require_db()
         frame_key = _ingested_frame_key(
@@ -808,6 +820,8 @@ class Storage:
             start_sample_index=start_sample_index,
             end_sample_index=end_sample_index,
             source_type=source_type,
+            time_quality=time_quality,
+            tor_ns=tor_ns,
         )
         row = await (
             await db.execute(
@@ -834,6 +848,7 @@ class Storage:
         toa_ns: int,
         tor_ns: int,
         source_type: str,
+        time_quality: str = "",
     ) -> bool:
         db = self._require_db()
         frame_key = _ingested_frame_key(
@@ -844,6 +859,8 @@ class Storage:
             start_sample_index=start_sample_index,
             end_sample_index=end_sample_index,
             source_type=source_type,
+            time_quality=time_quality,
+            tor_ns=tor_ns,
         )
         async with self._write_guard():
             cursor = await db.execute(

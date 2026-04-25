@@ -28,7 +28,9 @@ class NodeRunner {
       HttpFramePublisher& publisher,
       NodeClock& clock,
       uint32_t logEveryFrames = 100,
-      IEnvironmentalSource* environmentalSource = nullptr);
+      IEnvironmentalSource* environmentalSource = nullptr,
+      size_t maxPacketSamplesPerChannel = 0,
+      uint32_t publishFailureBackoffMs = 0);
 
   bool begin(
       bool syncNtp,
@@ -43,7 +45,6 @@ class NodeRunner {
  private:
   bool publishCurrentPacket(
       uint64_t packetEndSampleIndex,
-      uint64_t packetEndUtcNs,
       const EnvironmentalSample* environmentalSample,
       int& lastPublishStatus);
 
@@ -59,12 +60,14 @@ class NodeRunner {
   std::vector<int16_t> packetInterleavedSamples_;
   bool packetOpen_ = false;
   uint64_t packetStartSampleIndex_ = 0;
-  uint64_t packetStartUtcNs_ = 0;
-  uint64_t packetTargetEndUtcNs_ = 0;
+  uint64_t packetTargetEndSampleIndex_ = 0;
   bool haveExpectedNextSampleIndex_ = false;
   uint64_t expectedNextSampleIndex_ = 0;
   uint64_t sequence_ = 0;
   uint32_t logEveryFrames_ = 100;
+  size_t maxPacketSamplesPerChannel_ = 0;
+  uint32_t publishFailureBackoffMs_ = 0;
+  uint32_t nextPublishAttemptMs_ = 0;
 
   RunnerStats stats_ = {};
 };

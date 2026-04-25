@@ -26,7 +26,6 @@ def _configure_env(monkeypatch, tmp_path: Path, *, snippet_retention_seconds: in
     monkeypatch.setenv("MINIMAPPR_LOCALIZATION_WINDOW_SECONDS", "0.02")
     monkeypatch.setenv("MINIMAPPR_FUSION_WORKER_COUNT", "1")
     monkeypatch.setenv("MINIMAPPR_SNIPPET_RETENTION_SECONDS", str(snippet_retention_seconds))
-    monkeypatch.setenv("MINIMAPPR_DETECTION_MIN_CONFIDENCE", "0.0")
     monkeypatch.setenv("MINIMAPPR_REPORTING_WINDOW_SECONDS", "1.0")
     return db_path
 
@@ -37,6 +36,7 @@ def _ingest_single_frame(
     start_time_ns: int,
     metadata: dict | None = None,
     environment: dict | None = None,
+    frame_updates: dict | None = None,
 ) -> dict:
     samples = np.random.default_rng(1234).normal(0.0, 0.5, size=(1, 1024)).astype(np.float32)
     payload = {
@@ -59,6 +59,8 @@ def _ingest_single_frame(
             "source_type": "raw_sensor",
         },
     }
+    if frame_updates:
+        payload["frame"].update(frame_updates)
     if environment is not None:
         payload["environment"] = environment
     response = client.post("/api/v1/ingest/frame", json=payload)
@@ -299,6 +301,50 @@ def test_http_store_forward_deduplicates_and_preserves_last_seen(monkeypatch, tm
         nodes = nodes_response.json()
         node = next(row for row in nodes if row["id"] == "http-node-1")
         assert node["last_seen_ns"] >= latest_live_start_ns
+
+
+def test_http_ingest_preserves_last_seen_for_timestamped_packets(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    samples = np.random.default_rng(77).normal(0.0, 0.4, size=(1, 1024)).astype(np.float32)
+    stale_packet_start_ns = 1_739_810_000_000_000_000
+    request_started_ns = time.time_ns()
+    payload = {
+        "node": {
+            "id": "http-node-timestamped",
+            "node_type": "point",
+            "position_m": [0.0, 0.0, 0.0],
+            "sensor_offsets_m": [[0.0, 0.0, 0.0]],
+            "capabilities": ["audio", "gps_optional"],
+            "metadata": {},
+            "properties": {},
+        },
+        "frame": {
+            "start_time_ns": stale_packet_start_ns,
+            "utc_end_ns": stale_packet_start_ns + 64_000_000,
+            "start_sample_index": 32_000,
+            "end_sample_index": 33_024,
+            "sample_rate_hz": 16000,
+            "channels": 1,
+            "encoding": "pcm16le",
+            "samples_per_channel": 1024,
+            "samples_b64": encode_pcm16le_b64(samples),
+            "sequence": 21,
+            "time_quality": "gps_locked",
+            "source_type": "raw_sensor",
+        },
+    }
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/ingest/frame", json=payload)
+        assert response.status_code == 200
+        body = response.json()
+        assert body["accepted"] is True
+
+        nodes_response = client.get("/api/v1/nodes", params={"limit": 10})
+        assert nodes_response.status_code == 200
+        nodes = nodes_response.json()
+        node = next(row for row in nodes if row["id"] == "http-node-timestamped")
+        assert node["last_seen_ns"] >= request_started_ns
 
 
 def test_detection_audio_rejects_paths_outside_snippet_root(monkeypatch, tmp_path: Path) -> None:
@@ -637,11 +683,31 @@ def test_node_recent_audio_endpoint_rejects_stale_audio(monkeypatch, tmp_path: P
 
     with TestClient(app) as client:
         stale_start_time_ns = time.time_ns() - 60_000_000_000
-        _ingest_single_frame(client, start_time_ns=stale_start_time_ns)
+        _ingest_single_frame(
+            client,
+            start_time_ns=stale_start_time_ns,
+            frame_updates={"time_quality": "gps_locked"},
+        )
 
         response = client.get("/api/v1/nodes/http-node-1/audio/recent")
         assert response.status_code == 404
         assert "No recent audio available" in response.text
+
+
+def test_node_recent_audio_endpoint_uses_receipt_time_for_free_running_skew(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+
+    with TestClient(app) as client:
+        stale_start_time_ns = time.time_ns() - 21_600_000_000_000
+        _ingest_single_frame(
+            client,
+            start_time_ns=stale_start_time_ns,
+            frame_updates={"time_quality": "free_running"},
+        )
+
+        response = client.get("/api/v1/nodes/http-node-1/audio/recent", params={"seconds": 10})
+        assert response.status_code == 200
+        assert float(response.headers["x-minimappr-audio-age-seconds"]) < 5.0
 
 
 def test_node_recent_audio_endpoint_validates_seconds(monkeypatch, tmp_path: Path) -> None:

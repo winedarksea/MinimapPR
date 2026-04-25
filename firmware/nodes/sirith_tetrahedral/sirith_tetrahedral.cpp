@@ -306,7 +306,9 @@ mmpr::NodeRunner gRunner(
     gPublisher,
     gClock,
     nodecfg::kLogEveryFrames,
-    gEnvironmentalSource);
+    gEnvironmentalSource,
+    nodecfg::kMaxPacketSamplesPerChannel,
+    nodecfg::kPublishFailureBackoffMs);
 
 void setExternalRailEnabled(bool enabled) {
   gpio_init(nodecfg::kLedPin);
@@ -342,10 +344,18 @@ void setupOptionalPeripherals() {
   if (nodecfg::kEnableGpsUart) {
     gGpsSource.begin();
     gGpsSource.poll(gNodeDescriptor, &gClock);
-    std::printf("[sirith-pico] GPS UART enabled on uart0 tx=GP%d rx=GP%d pps=GP%d\n",
-                nodecfg::kGpsTxPin,
-                nodecfg::kGpsRxPin,
-                nodecfg::kGpsPpsPin);
+    if (nodecfg::kGpsPpsPin >= 0) {
+      std::printf(
+          "[sirith-pico] GPS UART enabled on uart0 tx=GP%d rx=GP%d pps=GP%d\n",
+          nodecfg::kGpsTxPin,
+          nodecfg::kGpsRxPin,
+          nodecfg::kGpsPpsPin);
+    } else {
+      std::printf(
+          "[sirith-pico] GPS UART enabled on uart0 tx=GP%d rx=GP%d pps=disabled\n",
+          nodecfg::kGpsTxPin,
+          nodecfg::kGpsRxPin);
+    }
   }
 
   if (nodecfg::kEnableCompassAutoOrientation && !nodecfg::kUseTdmAudio) {

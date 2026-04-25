@@ -107,12 +107,17 @@ bool GpsPpsTimerCapture::initPioStateMachine() {
 
   irqIndex_ = 0;
   irqNumber_ = (selectedPio == pio0) ? PIO0_IRQ_0 : PIO1_IRQ_0;
+  // Use a SHARED handler. PIO IRQ vectors are shared across all SMs on that
+  // PIO, and the CYW43 WiFi driver and audio capture drivers may also install
+  // handlers on the same vector. irq_set_exclusive_handler hard_assert()s if
+  // anything else is already registered, which would lead to a panic and a
+  // watchdog reset on boot.
   if (selectedPio == pio0) {
     gPio0Capture = this;
-    irq_set_exclusive_handler(PIO0_IRQ_0, pio0IrqHandler);
+    irq_add_shared_handler(PIO0_IRQ_0, pio0IrqHandler, PICO_SHARED_IRQ_HANDLER_DEFAULT_ORDER_PRIORITY);
   } else {
     gPio1Capture = this;
-    irq_set_exclusive_handler(PIO1_IRQ_0, pio1IrqHandler);
+    irq_add_shared_handler(PIO1_IRQ_0, pio1IrqHandler, PICO_SHARED_IRQ_HANDLER_DEFAULT_ORDER_PRIORITY);
   }
   pio_set_irq0_source_enabled(
       selectedPio,
@@ -169,7 +174,14 @@ uint64_t GpsPpsTimerCapture::ticksToUs(uint64_t tickCycles, uint32_t clkSysHz) {
   if (clkSysHz == 0) {
     return 0;
   }
-  return (tickCycles * 1000000ULL) / static_cast<uint64_t>(clkSysHz);
+  // Split into seconds + remainder to avoid 64-bit overflow on long uptimes.
+  // The naive form (tickCycles * 1e6) / clkSysHz overflows around tickCycles
+  // ~= 1.84e13, which at 125 MHz happens after ~40.9 hours, causing
+  // monotonic timestamps to wrap and PPS interval math to break silently.
+  const uint64_t clk = static_cast<uint64_t>(clkSysHz);
+  const uint64_t seconds = tickCycles / clk;
+  const uint64_t remainder = tickCycles % clk;
+  return seconds * 1000000ULL + (remainder * 1000000ULL) / clk;
 }
 
 void GpsPpsTimerCapture::onIrq() {

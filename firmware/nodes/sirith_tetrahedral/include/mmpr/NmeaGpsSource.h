@@ -55,6 +55,7 @@ class NmeaGpsSource {
   };
 
   void updateDescriptor(NodeDescriptor& descriptor) const;
+  void ensurePpsCaptureStarted();
   void consumePendingPps(NodeClock* clock);
   void consumeLine(const char* line, NodeClock* clock);
   bool parseSentence(const char* line, ParsedSentence& outSentence) const;
@@ -105,12 +106,17 @@ class NmeaGpsSource {
   uint64_t lastFixUs_ = 0;
   uint64_t nextPpsUtcNs_ = 0;
   GpsPpsTimerCapture ppsCapture_;
+  IAudioSource* audioSourceForPps_ = nullptr;
   bool loggedFirstSentence_ = false;
+  bool loggedPpsCaptureState_ = false;
   bool loggedHealthyState_ = false;
   bool loggedFixState_ = false;
   uint32_t loggedPpsEdgeCount_ = 0;
+  bool loggedNoPpsFallback_ = false;
   bool haveAlignedPpsEpoch_ = false;
+  bool ppsSignalCurrentlyObserved_ = false;
   uint32_t lastAppliedPpsEdgeCount_ = 0;
+  uint64_t lastPpsEdgeUs_ = 0;
 };
 
 }  // namespace mmpr

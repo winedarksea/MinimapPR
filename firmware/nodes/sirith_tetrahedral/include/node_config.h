@@ -66,6 +66,10 @@ enum class AudioDataPinBias : uint8_t {
 #define MMPR_NODECFG_TDM_ENABLE_WORD_DIAGNOSTICS 0
 #endif
 
+#ifndef MMPR_NODECFG_GPS_PPS_PIN
+#define MMPR_NODECFG_GPS_PPS_PIN 10
+#endif
+
 static_assert(
     MMPR_NODECFG_AUDIO_INPUT_MODE == 0 || MMPR_NODECFG_AUDIO_INPUT_MODE == 1,
     "MMPR_NODECFG_AUDIO_INPUT_MODE must be 0 (TDM) or 1 (I2S mono)");
@@ -128,9 +132,19 @@ static constexpr const char* kServerBaseUrl = "http://192.168.1.50:8080";
 static constexpr const char* kIngestPath = "/api/v1/ingest/frame";
 
 static constexpr uint32_t kWiFiConnectTimeoutMs = 15000;
-// On a local LAN a full frame POST (≈11 KB) completes in < 100 ms.
-// Keeping this tight limits DMA ring-buffer back-pressure and frame drops.
-static constexpr uint32_t kHttpTimeoutMs = 500;
+// Keep this below the DMA ring slack. At 16 kHz / 1024 samples / 16 buffered
+// blocks, the capture ring holds about 1.0 s; longer synchronous publishes
+// overrun capture and make the heartbeat look randomly slow.
+static constexpr uint32_t kHttpTimeoutMs = 750;
+// After a failed publish, skip network attempts briefly so capture and Wi-Fi
+// polling recover. Keep this short: a multi-second backoff discards dozens of
+// audio packets and makes the debug stream sparse even after transient stalls.
+static constexpr uint32_t kPublishFailureBackoffMs = 250;
+
+// Max samples per channel in a single published packet. Keep diagnostic HTTP
+// POSTs near one TCP send window so a timeout does not leave body bytes that
+// uvicorn parses as a malformed follow-up request.
+static constexpr size_t kMaxPacketSamplesPerChannel = 1024;
 
 // --- Node identity ---
 // Prefix only — the full node ID is built at runtime by appending the chip's
@@ -226,7 +240,7 @@ static constexpr uint32_t kLedBlinkFrames = 8;  // Toggle every N frames (~0.5s 
 // Each I2C bus read triggers a brief full-brightness pulse; PWM resets to dim after
 // kActivityLedPulseMs.  The PWM peripheral runs autonomously — no CPU cost at steady state.
 static constexpr uint8_t kActivityLedPin = 27;
-static constexpr uint8_t kActivityLedDimPercent = 8;  // 8/100 duty => ~2.6 mA
+static constexpr uint8_t kActivityLedDimPercent = 2;  // 2/100 duty => <1.0 mA
 static constexpr uint32_t kActivityLedPulseMs = 80;   // visible flash duration
 
 // --- Audio capture (TDM master) ---
@@ -283,7 +297,9 @@ static constexpr bool kEnableGpsUart = true;
 static constexpr uint32_t kGpsUartBaud = 9600;
 static constexpr int kGpsTxPin = 12;
 static constexpr int kGpsRxPin = 13;
-static constexpr int kGpsPpsPin = 10;
+// Configures the PPS-capable GPIO. Runtime clock discipline still tolerates no
+// PPS at boot, stale PPS during a run, and later PPS recovery.
+static constexpr int kGpsPpsPin = MMPR_NODECFG_GPS_PPS_PIN;
 static constexpr uint32_t kGpsMissingSentenceTimeoutMs = 5000;
 static constexpr uint32_t kGpsStaleFixTimeoutMs = 5000;
 static constexpr const char* kGpsSignalStatus = "missing";
@@ -328,7 +344,7 @@ static constexpr uint32_t kSht4xSampleIntervalMs = 2000;
 
 // --- Time sync ---
 // For standalone arrays, strict absolute UTC is optional; GPS/NTP can be enabled later.
-static constexpr bool kEnableNtpSync = true;
+static constexpr bool kEnableNtpSync = false;
 static constexpr const char* kNtpServer = "pool.ntp.org";
 static constexpr long kGmtOffsetSeconds = 0;
 static constexpr int kDaylightOffsetSeconds = 0;

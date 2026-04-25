@@ -316,6 +316,8 @@ class StorageBackend(Protocol):
         start_sample_index: int | None,
         end_sample_index: int | None,
         source_type: str,
+        time_quality: str = "",
+        tor_ns: int | None = None,
     ) -> bool:
         ...
 
@@ -331,6 +333,7 @@ class StorageBackend(Protocol):
         toa_ns: int,
         tor_ns: int,
         source_type: str,
+        time_quality: str = "",
     ) -> bool:
         ...
 
