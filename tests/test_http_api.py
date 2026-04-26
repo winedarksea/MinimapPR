@@ -222,6 +222,7 @@ def test_http_ingest_duplicate_frame_is_idempotent(monkeypatch, tmp_path: Path) 
 def test_free_running_dedupe_key_does_not_depend_on_receipt_bucket() -> None:
     key_a = _ingested_frame_key(
         node_id="http-node-free-running",
+        boot_session="boot-11",
         frame_sequence=11,
         start_time_ns=1_000_000_000_000_000_000,
         utc_end_ns=None,
@@ -233,6 +234,7 @@ def test_free_running_dedupe_key_does_not_depend_on_receipt_bucket() -> None:
     )
     key_b = _ingested_frame_key(
         node_id="http-node-free-running",
+        boot_session="boot-11",
         frame_sequence=11,
         start_time_ns=1_000_000_000_000_000_000,
         utc_end_ns=None,
@@ -244,6 +246,35 @@ def test_free_running_dedupe_key_does_not_depend_on_receipt_bucket() -> None:
     )
 
     assert key_a == key_b
+
+
+def test_free_running_dedupe_key_distinguishes_reboots() -> None:
+    key_a = _ingested_frame_key(
+        node_id="http-node-free-running",
+        boot_session="boot-11",
+        frame_sequence=11,
+        start_time_ns=1_000_000_000_000_000_000,
+        utc_end_ns=1_000_000_000_064_000_000,
+        start_sample_index=0,
+        end_sample_index=1024,
+        source_type="raw_sensor",
+        time_quality="free_running",
+        tor_ns=1_800_000_000_000_000_000,
+    )
+    key_b = _ingested_frame_key(
+        node_id="http-node-free-running",
+        boot_session="boot-12",
+        frame_sequence=11,
+        start_time_ns=1_000_000_000_000_000_000,
+        utc_end_ns=1_000_000_000_064_000_000,
+        start_sample_index=0,
+        end_sample_index=1024,
+        source_type="raw_sensor",
+        time_quality="free_running",
+        tor_ns=1_800_000_011_000_000_000,
+    )
+
+    assert key_a != key_b
 
 
 def test_http_store_forward_deduplicates_and_preserves_last_seen(monkeypatch, tmp_path: Path) -> None:
@@ -374,6 +405,10 @@ def test_http_ingest_preserves_last_seen_for_timestamped_packets(monkeypatch, tm
         nodes = nodes_response.json()
         node = next(row for row in nodes if row["id"] == "http-node-timestamped")
         assert node["last_seen_ns"] >= request_started_ns
+        assert node["audio_debug"]["status"] == "recent"
+
+        audio_response = client.get("/api/v1/nodes/http-node-timestamped/audio/recent", params={"seconds": 10})
+        assert audio_response.status_code == 200
 
 
 def test_detection_audio_rejects_paths_outside_snippet_root(monkeypatch, tmp_path: Path) -> None:

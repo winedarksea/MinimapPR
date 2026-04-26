@@ -93,7 +93,12 @@ bool GpsPpsTimerCapture::initPioStateMachine() {
   sm_config_set_jmp_pin(&smConfig, static_cast<uint>(gpioPin_));
   sm_config_set_in_pins(&smConfig, static_cast<uint>(gpioPin_));
   sm_config_set_clkdiv(&smConfig, 1.0f);
-  sm_config_set_fifo_join(&smConfig, PIO_FIFO_JOIN_RX);
+  // Keep TX and RX FIFOs separate. The setup below uses pio_sm_put_blocking()
+  // to load kCounterReload into Y via the TX FIFO; PIO_FIFO_JOIN_RX would
+  // leave zero TX entries and TXFULL would read 1 forever, hanging the SM
+  // initialization and tripping the watchdog. PPS edges arrive at 1 Hz so the
+  // default 4-entry RX FIFO is more than enough capacity.
+  sm_config_set_fifo_join(&smConfig, PIO_FIFO_JOIN_NONE);
 
   pio_sm_set_consecutive_pindirs(selectedPio, static_cast<uint>(selectedSm), static_cast<uint>(gpioPin_), 1, false);
   pio_sm_init(selectedPio, static_cast<uint>(selectedSm), programOffset, &smConfig);

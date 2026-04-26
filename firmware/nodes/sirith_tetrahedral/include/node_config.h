@@ -344,7 +344,7 @@ static constexpr uint32_t kSht4xSampleIntervalMs = 2000;
 
 // --- Time sync ---
 // For standalone arrays, strict absolute UTC is optional; GPS/NTP can be enabled later.
-static constexpr bool kEnableNtpSync = false;
+static constexpr bool kEnableNtpSync = true;
 static constexpr const char* kNtpServer = "pool.ntp.org";
 static constexpr long kGmtOffsetSeconds = 0;
 static constexpr int kDaylightOffsetSeconds = 0;

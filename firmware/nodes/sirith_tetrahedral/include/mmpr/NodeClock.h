@@ -36,6 +36,7 @@ class NodeClock {
   bool currentPacketTimingDiagnostics(PacketTimingDiagnostics& outDiagnostics) const;
 
   void applyNtpObservation(uint64_t utcNs, uint64_t monotonicUs, uint64_t roundTripUs);
+  void applyNmeaUtcObservation(uint64_t utcNs, uint64_t monotonicUs);
   void applyGpsPpsObservation(uint64_t utcSecondNs, const GpsPpsCaptureEvent& ppsEvent);
 
  private:
@@ -82,6 +83,10 @@ class NodeClock {
   uint64_t previousNtpUtcNs_ = 0;
   uint64_t previousNtpMonotonicUs_ = 0;
   uint64_t lastNtpSyncMonotonicUs_ = 0;
+
+  bool haveNmeaObservation_ = false;
+  uint64_t previousNmeaUtcNs_ = 0;
+  uint64_t previousNmeaMonotonicUs_ = 0;
 
   bool haveGpsInterval_ = false;
   uint64_t previousGpsMonotonicUs_ = 0;

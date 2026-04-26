@@ -37,6 +37,7 @@ pub struct NodeStatus {
     pub audio_debug: Option<NodeAudioDebug>,
     pub latest_environment: Option<NodeEnvironment>,
     pub metadata: Option<NodeMetadata>,
+    pub latest_time_quality: Option<String>,
 }
 
 fn default_node_health() -> String {

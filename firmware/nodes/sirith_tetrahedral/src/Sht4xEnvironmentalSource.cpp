@@ -73,6 +73,9 @@ bool Sht4xEnvironmentalSource::read(EnvironmentalSample& outSample) {
       if (healthy_) {
         std::printf("[sht4x] measurement failed addr=0x%02x; keeping last sample\n", config_.address7Bit);
       }
+      // Back off failed probes too. Retrying every audio frame would spend
+      // 10 ms in the measurement delay on each pass and overrun the DMA ring.
+      lastSampleMs_ = nowMs;
       healthy_ = false;
       if (!hasReading_) {
         return false;

@@ -421,6 +421,12 @@ bool PicoI2SMonoSource::readFrame(
       completedBlockCount = completedBlockCountBySlot_[readFrameIndex];
       droppedFramesBeforeCapture = droppedFrameCount_ - reportedDroppedFrameCount_;
       reportedDroppedFrameCount_ = droppedFrameCount_;
+      // Reserve this slot before re-enabling interrupts. Otherwise an overrun
+      // IRQ can advance dmaReadFrameIndex_ while we are copying, and the
+      // consumer can later write an older index back, re-reading stale slots
+      // and breaking sample-index monotonicity.
+      dmaReadFrameIndex_ = (readFrameIndex + 1u) % kBufferedFrames;
+      --completedFrameCount_;
       restore_interrupts(irqState);
     }
 
@@ -432,12 +438,6 @@ bool PicoI2SMonoSource::readFrame(
       interleavedOut[i] = toPcm16(raw);
     }
 
-    {
-      const uint32_t irqState = save_and_disable_interrupts();
-      dmaReadFrameIndex_ = (readFrameIndex + 1u) % kBufferedFrames;
-      --completedFrameCount_;
-      restore_interrupts(irqState);
-    }
     break;
   }
 

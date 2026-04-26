@@ -204,6 +204,8 @@ bool buildIngestPayloadParts(
   appendQuoted(outPayload, node.hardwareName != nullptr ? node.hardwareName : "unknown");
   outPayload += ",\"firmware\":";
   appendQuoted(outPayload, node.firmwareVersion != nullptr ? node.firmwareVersion : "dev");
+  outPayload += ",\"boot_count\":";
+  appendUint32(outPayload, node.bootCount);
   if (node.gpsSignalStatus != nullptr || node.positionSource != nullptr) {
     outPayload += ",\"gps\":{";
     bool needComma = false;

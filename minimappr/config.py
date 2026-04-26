@@ -165,6 +165,9 @@ class FusionConfig:
     rules_queue_size: int
     birdnet_chunked_dispatch_enabled: bool
     birdnet_chunk_overlap_seconds: float
+    birdnet_chunk_max_retries_per_chunk: int
+    birdnet_chunk_min_retry_progress_seconds: float
+    birdnet_chunk_retry_on_classifier_error: bool
     drop_on_backpressure: bool
     offline_replay_mode: bool
     sensor_energy_threshold_multiplier: float
@@ -384,7 +387,10 @@ class Settings:
     fusion_classification_queue_size: int = 256
     fusion_rules_queue_size: int = 256
     birdnet_chunked_dispatch_enabled: bool = False
-    birdnet_chunk_overlap_seconds: float = 3.0
+    birdnet_chunk_overlap_seconds: float = 2.0
+    birdnet_chunk_max_retries_per_chunk: int = 1
+    birdnet_chunk_min_retry_progress_seconds: float = 8.0
+    birdnet_chunk_retry_on_classifier_error: bool = False
     fusion_drop_on_backpressure: bool = True
     fusion_offline_replay_mode: bool = False
     sensor_energy_threshold_multiplier: float = 0.45
@@ -528,6 +534,10 @@ class Settings:
             raise ValueError("MINIMAPPR_REPORTING_WINDOW_SECONDS must be > 0")
         if self.birdnet_chunk_overlap_seconds < 0.0:
             raise ValueError("MINIMAPPR_BIRDNET_CHUNK_OVERLAP_SECONDS must be >= 0")
+        if self.birdnet_chunk_max_retries_per_chunk < 0:
+            raise ValueError("MINIMAPPR_BIRDNET_CHUNK_MAX_RETRIES_PER_CHUNK must be >= 0")
+        if self.birdnet_chunk_min_retry_progress_seconds < 0.0:
+            raise ValueError("MINIMAPPR_BIRDNET_CHUNK_MIN_RETRY_PROGRESS_SECONDS must be >= 0")
         if (
             self.birdnet_chunked_dispatch_enabled
             and self.classifier_backend == "birdnet"
@@ -535,6 +545,14 @@ class Settings:
         ):
             raise ValueError(
                 "MINIMAPPR_BIRDNET_CHUNK_OVERLAP_SECONDS must be < MINIMAPPR_CLASSIFICATION_WINDOW_SECONDS"
+            )
+        if (
+            self.birdnet_chunked_dispatch_enabled
+            and self.classifier_backend == "birdnet"
+            and self.birdnet_chunk_overlap_seconds > 2.0
+        ):
+            raise ValueError(
+                "MINIMAPPR_BIRDNET_CHUNK_OVERLAP_SECONDS must be <= 2.0 for BirdNET chunked dispatch"
             )
         if self.taxonomy_refresh_interval_seconds <= 0.0:
             raise ValueError("MINIMAPPR_TAXONOMY_REFRESH_INTERVAL_SECONDS must be > 0")
@@ -771,7 +789,16 @@ class Settings:
             fusion_classification_queue_size=_env_int("MINIMAPPR_FUSION_CLASSIFICATION_QUEUE_SIZE", 256),
             fusion_rules_queue_size=_env_int("MINIMAPPR_FUSION_RULES_QUEUE_SIZE", 256),
             birdnet_chunked_dispatch_enabled=_env_bool("MINIMAPPR_BIRDNET_CHUNKED_DISPATCH_ENABLED", False),
-            birdnet_chunk_overlap_seconds=_env_float("MINIMAPPR_BIRDNET_CHUNK_OVERLAP_SECONDS", 3.0),
+            birdnet_chunk_overlap_seconds=_env_float("MINIMAPPR_BIRDNET_CHUNK_OVERLAP_SECONDS", 2.0),
+            birdnet_chunk_max_retries_per_chunk=_env_int("MINIMAPPR_BIRDNET_CHUNK_MAX_RETRIES_PER_CHUNK", 1),
+            birdnet_chunk_min_retry_progress_seconds=_env_float(
+                "MINIMAPPR_BIRDNET_CHUNK_MIN_RETRY_PROGRESS_SECONDS",
+                8.0,
+            ),
+            birdnet_chunk_retry_on_classifier_error=_env_bool(
+                "MINIMAPPR_BIRDNET_CHUNK_RETRY_ON_CLASSIFIER_ERROR",
+                False,
+            ),
             fusion_drop_on_backpressure=_env_bool("MINIMAPPR_FUSION_DROP_ON_BACKPRESSURE", True),
             fusion_offline_replay_mode=_env_bool("MINIMAPPR_FUSION_OFFLINE_REPLAY_MODE", False),
             sensor_energy_threshold_multiplier=_env_float("MINIMAPPR_SENSOR_ENERGY_THRESHOLD_MULTIPLIER", 0.45),
@@ -922,6 +949,9 @@ class Settings:
             rules_queue_size=self.fusion_rules_queue_size,
             birdnet_chunked_dispatch_enabled=self.birdnet_chunked_dispatch_enabled,
             birdnet_chunk_overlap_seconds=self.birdnet_chunk_overlap_seconds,
+            birdnet_chunk_max_retries_per_chunk=self.birdnet_chunk_max_retries_per_chunk,
+            birdnet_chunk_min_retry_progress_seconds=self.birdnet_chunk_min_retry_progress_seconds,
+            birdnet_chunk_retry_on_classifier_error=self.birdnet_chunk_retry_on_classifier_error,
             drop_on_backpressure=self.fusion_drop_on_backpressure,
             offline_replay_mode=self.fusion_offline_replay_mode,
             sensor_energy_threshold_multiplier=self.sensor_energy_threshold_multiplier,
@@ -965,6 +995,7 @@ class Settings:
             self.beamformed_classification_enabled = False
             self.skip_localization_for_classification = True
             self.birdnet_chunked_dispatch_enabled = True
+            self.birdnet_chunk_overlap_seconds = min(self.birdnet_chunk_overlap_seconds, 2.0)
             self.classification_window_seconds = max(self.classification_window_seconds, 30.0)
             self.max_sensor_buffer_seconds = max(
                 self.max_sensor_buffer_seconds,
@@ -978,6 +1009,7 @@ class Settings:
             self.beamformed_classification_enabled = False
             self.skip_localization_for_classification = False
             self.birdnet_chunked_dispatch_enabled = True
+            self.birdnet_chunk_overlap_seconds = min(self.birdnet_chunk_overlap_seconds, 2.0)
             if self.rules_config_path == DEFAULT_RULES_CONFIG_PATH:
                 # Wildlife deployments should not page on generic human/security
                 # categories unless operators explicitly provide a broader rules file.

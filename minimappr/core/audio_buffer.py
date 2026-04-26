@@ -60,6 +60,20 @@ class SensorStreamBuffer:
         incoming_start_sample_index = (
             start_sample_index if explicit_sample_coverage else self._time_to_sample_index(start_time_ns)
         )
+        if explicit_sample_coverage:
+            expected_start_time_ns = self._sample_index_to_time_ns(incoming_start_sample_index)
+            timestamp_correction_ns = abs(start_time_ns - expected_start_time_ns)
+            reset_threshold_ns = int(round(self.max_duration_seconds * 1_000_000_000))
+            if timestamp_correction_ns > reset_threshold_ns:
+                # NTP/GPS lock can correct wall time while sample indices stay contiguous.
+                # Re-anchor so recent-audio age follows the corrected node clock.
+                self._timeline_origin_ns = start_time_ns
+                self._timeline_origin_sample_index = start_sample_index or 0
+                self._buffer_start_sample_index = start_sample_index or 0
+                self.start_time_ns = start_time_ns
+                self.samples = samples.copy()
+                self._prune()
+                return
 
         # If the incoming frame is more than max_samples away from the current buffer
         # (either far ahead or far behind), reset the timeline rather than allocating

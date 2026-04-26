@@ -9,6 +9,14 @@ from scipy.signal import correlate
 
 pytest.importorskip("birdnet")
 
+try:
+    from birdnet import model_loader as _birdnet_model_loader  # type: ignore[attr-defined]
+except Exception as exc:  # pragma: no cover - environment-dependent optional dependency
+    pytest.skip(
+        f"BirdNET integration tests require compatible birdnet package (missing model_loader): {exc}",
+        allow_module_level=True,
+    )
+
 from minimappr.classifiers.birdnet import BirdNETClassifier
 from minimappr.classifiers.factory import create_classifier
 from minimappr.config import Settings
@@ -43,7 +51,7 @@ DEFAULT_SITE_ORIGIN = GeoPoint(lat=37.0, lon=-122.0, alt_m=0.0)
 TIGHT_SRP_GRID_RESOLUTION_M = 0.05
 TIGHT_SRP_SEARCH_PADDING_M = 0.3
 TIGHT_LOCALIZATION_MAX_ERROR_M = 0.14
-PRODUCTION_BIRDNET_CHUNK_OVERLAP_SECONDS = 3.0
+PRODUCTION_BIRDNET_CHUNK_OVERLAP_SECONDS = 2.0
 BIRDNET_TEST_TARGET_CONTEXT_SECONDS = 3.0
 
 
@@ -54,7 +62,10 @@ def house_finch_fixture_48khz() -> tuple[np.ndarray, int]:
 
 @pytest.fixture(scope="module")
 def birdnet_classifier() -> BirdNETClassifier:
-    return BirdNETClassifier(min_confidence=0.05)
+    try:
+        return BirdNETClassifier(min_confidence=0.05)
+    except RuntimeError as exc:
+        pytest.skip(f"BirdNET backend unavailable in this environment: {exc}")
 
 
 def _node_spec() -> NodeSpec:

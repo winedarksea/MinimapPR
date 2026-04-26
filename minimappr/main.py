@@ -498,6 +498,7 @@ async def list_nodes(
     now_ns = time.time_ns()
     nodes = await state.storage.list_nodes(limit=limit)
     latest_environment_rows = await state.storage.list_latest_environment_per_node(limit=limit)
+    latest_time_quality_by_node = await state.storage.list_latest_time_quality_per_node()
     latest_environment_by_node = {
         row["node_id"]: row for row in latest_environment_rows if row.get("node_id") is not None
     }
@@ -555,6 +556,10 @@ async def list_nodes(
         latest_environment = latest_environment_by_node.get(node["id"])
         if latest_environment is not None:
             node["latest_environment"] = latest_environment
+
+        tq = latest_time_quality_by_node.get(node["id"])
+        if tq is not None:
+            node["latest_time_quality"] = tq
         # Yield after each node so pipeline lock holders (NodeRegistry, MultiSensorBuffer)
         # get a chance to run between per-node awaits.
         await asyncio.sleep(0)

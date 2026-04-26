@@ -48,6 +48,7 @@ struct NodeDescriptor {
   const char* firmwareVersion;
   const char* gpsSignalStatus;
   const char* positionSource;
+  uint32_t bootCount;
 };
 
 inline constexpr GeoPoint makeGeoPoint(float lat, float lon, float altM) {

@@ -16,9 +16,10 @@ _logger = logging.getLogger(__name__)
 
 # Log a summary after this many accepted (non-duplicate) frames.
 _INGEST_LOG_INTERVAL_FRAMES = 5000
-# Free-running firmware can be anchored to a stale or timezone-shifted build
-# timestamp. Use receipt-aligned buffering for large skews so debug audio and
-# recent-node health remain usable until GPS/NTP lock is available.
+# Firmware clock labels can be stale during GPS/NTP acquisition or while
+# recovering from a rejected discipline source. Use receipt-aligned buffering
+# for large skews so debug audio remains usable; TDOA triggering stays disabled
+# on receipt-time fallback.
 _MAX_TRUSTED_NODE_CLOCK_SKEW_NS = 300_000_000_000
 
 import numpy as np
@@ -156,12 +157,14 @@ class IngestProcessor:
         normalized_node, geo_position = self._normalize_node_spec(raw_node)
         server_received_ns = time.time_ns()
         runtime = await self._registry.upsert(normalized_node, server_received_ns)
+        boot_session = _node_boot_session(normalized_node)
         toa_ns = frame.toa_ns or frame.start_time_ns
         tor_ns = frame.tor_ns if frame.tor_ns is not None else server_received_ns
 
         # -- duplicate check --------------------------------------------------
         duplicate_ingest = await self._storage.has_ingested_frame(
             node_id=normalized_node.id,
+            boot_session=boot_session,
             frame_sequence=frame.sequence,
             start_time_ns=frame.start_time_ns,
             utc_end_ns=frame.utc_end_ns,
@@ -227,6 +230,7 @@ class IngestProcessor:
             )
             frame_registered = await self._storage.register_ingested_frame(
                 node_id=normalized_node.id,
+                boot_session=boot_session,
                 frame_sequence=frame.sequence,
                 start_time_ns=frame.start_time_ns,
                 utc_end_ns=frame.utc_end_ns,
@@ -299,6 +303,9 @@ class IngestProcessor:
             sample_rate_hz=frame.sample_rate_hz,
             time_quality=frame.time_quality,
             server_received_ns=server_received_ns,
+            # Firmware nodes advertise GPS optional; only they need receipt-time
+            # debug audio while waiting for a real NTP/GPS discipline source.
+            allow_receipt_time_fallback="gps_optional" in normalized_node.capabilities,
         )
         for channel_index, sensor_id in enumerate(runtime.sensor_ids):
             await self._buffer.append(
@@ -320,13 +327,13 @@ class IngestProcessor:
         frame_duration_ns = int((processed.shape[1] / frame.sample_rate_hz) * 1_000_000_000)
         half_window_ns = int(self._localization_config.localization_window_seconds * 0.5 * 1_000_000_000)
         center_offset_ns = max(0, frame_duration_ns - half_window_ns)
-        center_timeline_start_ns = buffer_start_time_ns if buffer_uses_receipt_time else frame.start_time_ns
-        center_time_ns = center_timeline_start_ns + center_offset_ns
+        center_time_ns = frame.start_time_ns + center_offset_ns
         cooldown_ns = int(self._localization_config.trigger_cooldown_seconds * 1_000_000_000)
 
         triggered = False
         if (
-            frame_energy >= self._localization_config.trigger_rms
+            not buffer_uses_receipt_time
+            and frame_energy >= self._localization_config.trigger_rms
             and center_time_ns - self._last_trigger_ns >= cooldown_ns
         ):
             # Don't update _last_trigger_ns here — the caller decides whether
@@ -547,10 +554,22 @@ def _buffer_timestamps_for_frame(
     sample_rate_hz: int,
     time_quality: TimeQuality,
     server_received_ns: int,
+    allow_receipt_time_fallback: bool = False,
 ) -> tuple[int, int | None, bool]:
     duration_ns = int(round((sample_count / sample_rate_hz) * 1_000_000_000))
     node_clock_skew_ns = abs(frame_start_time_ns - server_received_ns)
-    if time_quality == TimeQuality.FREE_RUNNING and node_clock_skew_ns > _MAX_TRUSTED_NODE_CLOCK_SKEW_NS:
+    if allow_receipt_time_fallback and node_clock_skew_ns > _MAX_TRUSTED_NODE_CLOCK_SKEW_NS:
         start_ns = max(1, server_received_ns - duration_ns)
         return start_ns, server_received_ns, True
     return frame_start_time_ns, frame_end_time_ns, False
+
+
+def _node_boot_session(node: NodeSpec) -> str:
+    boot_count = node.metadata.get("boot_count")
+    if isinstance(boot_count, bool):
+        return ""
+    if isinstance(boot_count, int):
+        return f"boot-{boot_count}"
+    if isinstance(boot_count, str) and boot_count.strip():
+        return boot_count.strip()
+    return ""

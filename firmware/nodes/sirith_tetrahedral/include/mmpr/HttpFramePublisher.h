@@ -10,6 +10,7 @@ namespace mmpr {
 class HttpFramePublisher {
  public:
   struct TransportState;
+  using BackgroundPollCallback = void (*)(void*);
 
   HttpFramePublisher(const char* serverBaseUrl, const char* ingestPath, uint32_t timeoutMs);
   ~HttpFramePublisher();
@@ -25,6 +26,7 @@ class HttpFramePublisher {
       bool keepResponseBody = false);
 
   const std::string& endpointUrl() const { return endpointUrl_; }
+  void setBackgroundPollCallback(BackgroundPollCallback callback, void* context);
 
  private:
   bool parseEndpoint();

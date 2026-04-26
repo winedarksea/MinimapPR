@@ -506,12 +506,20 @@ class FusionNode:
                     self._metrics.birdnet_chunk_dispatches_suppressed += 1
                     continue
                 detection_products = await self._classify_and_assemble(product)
-                self._record_chunk_dispatch_outcome(product=product, detection_products=detection_products)
+                self._record_chunk_dispatch_outcome(
+                    product=product,
+                    detection_products=detection_products,
+                    classification_failed=False,
+                )
                 for detection_product in detection_products:
                     if await self._enqueue_stage(self._rules_queue, detection_product):
                         self._metrics.classification_stage_out += 1
             except Exception as exc:  # pragma: no cover - resilience path
-                self._record_chunk_dispatch_outcome(product=product, detection_products=[])
+                self._record_chunk_dispatch_outcome(
+                    product=product,
+                    detection_products=[],
+                    classification_failed=True,
+                )
                 self._metrics.classification_failures += 1
                 self._last_error = f"{type(exc).__name__}: {exc}"
             finally:
@@ -1116,7 +1124,11 @@ class FusionNode:
             self.localization_config.localization_window_seconds,
             self.localization_config.classification_window_seconds - self.fusion_config.birdnet_chunk_overlap_seconds,
         )
-        return ClassificationChunkingPolicy(stride_seconds=stride_seconds)
+        return ClassificationChunkingPolicy(
+            stride_seconds=stride_seconds,
+            max_retries_per_chunk=self.fusion_config.birdnet_chunk_max_retries_per_chunk,
+            min_retry_progress_seconds=self.fusion_config.birdnet_chunk_min_retry_progress_seconds,
+        )
 
     def _should_suppress_chunked_classification(self, product: LocalizedCandidate) -> bool:
         if self._classification_chunking_policy is None:
@@ -1131,18 +1143,23 @@ class FusionNode:
         *,
         product: LocalizedCandidate,
         detection_products: list[DetectionProduct],
+        classification_failed: bool,
     ) -> None:
         if self._classification_chunking_policy is None:
             return
         produced_actionable_detection = any(
             detection_product.detection.label != "unknown"
-            or detection_product.detection.label_confidence > 0.0
+            and detection_product.detection.label_confidence > 0.0
             for detection_product in detection_products
         )
         self._classification_chunking_policy.record_dispatch_outcome(
             source_node_id=product.candidate.source_node_id,
             event_time_ns=product.candidate.event_time_ns,
             produced_actionable_detection=produced_actionable_detection,
+            allow_retry_for_non_actionable=(
+                not classification_failed
+                or self.fusion_config.birdnet_chunk_retry_on_classifier_error
+            ),
         )
 
     def _current_localizer_name(self) -> str:

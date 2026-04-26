@@ -438,6 +438,14 @@ bool SirithPicoTdmSource::readFrame(
       completedBlockCount = completedBlockCountBySlot_[readFrameIndex];
       droppedFramesBeforeCapture = droppedFrameCount_ - reportedDroppedFrameCount_;
       reportedDroppedFrameCount_ = droppedFrameCount_;
+      // Reserve this slot before re-enabling interrupts. If the DMA producer
+      // overruns while we are deinterleaving the captured words, its IRQ path
+      // may advance dmaReadFrameIndex_ to drop old frames. The previous design
+      // advanced the read index only AFTER the copy, which let the consumer
+      // write an older index back and re-read stale slots, producing backward
+      // sample-index jumps and repeated packet ranges at the node layer.
+      dmaReadFrameIndex_ = (readFrameIndex + 1u) % kBufferedFrames;
+      --completedFrameCount_;
       restore_interrupts(irqState);
     }
 
@@ -458,12 +466,6 @@ bool SirithPicoTdmSource::readFrame(
       }
     }
 
-    {
-      const uint32_t irqState = save_and_disable_interrupts();
-      dmaReadFrameIndex_ = (readFrameIndex + 1u) % kBufferedFrames;
-      --completedFrameCount_;
-      restore_interrupts(irqState);
-    }
     break;
   }
 

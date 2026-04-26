@@ -80,6 +80,31 @@ class _UnknownThenSparrowClassifier(AudioClassifier):
         )
 
 
+class _AlwaysUnknownClassifier(AudioClassifier):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def classify(self, samples: np.ndarray, sample_rate_hz: int) -> ClassificationResult:
+        del samples, sample_rate_hz
+        self.calls += 1
+        return ClassificationResult(
+            label="unknown",
+            confidence=0.0,
+            scores={"unknown": 0.0},
+            features={},
+        )
+
+
+class _AlwaysRaisingClassifier(AudioClassifier):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def classify(self, samples: np.ndarray, sample_rate_hz: int) -> ClassificationResult:
+        del samples, sample_rate_hz
+        self.calls += 1
+        raise RuntimeError("classifier unavailable")
+
+
 @pytest.mark.asyncio
 async def test_fusion_node_ingest_and_status(tmp_path: Path) -> None:
     settings = Settings(
@@ -539,7 +564,7 @@ async def test_birdnet_chunked_dispatch_suppresses_overlapping_candidates(tmp_pa
         max_sensor_buffer_seconds=32.0,
         classifier_backend="birdnet",
         birdnet_chunked_dispatch_enabled=True,
-        birdnet_chunk_overlap_seconds=3.0,
+        birdnet_chunk_overlap_seconds=2.0,
         preprocess_enabled=False,
         fusion_worker_count=1,
     )
@@ -574,12 +599,15 @@ async def test_birdnet_chunked_dispatch_suppresses_overlapping_candidates(tmp_pa
     )
     t = np.arange(1024, dtype=np.float32) / 16000.0
     samples = (0.4 * np.sin(2.0 * np.pi * 1200.0 * t)).reshape(1, -1).astype(np.float32)
+    stride_ns = int((settings.classification_window_seconds - settings.birdnet_chunk_overlap_seconds) * 1_000_000_000)
+    aligned_start_ns = 1_739_810_400_000_000_000
+    aligned_start_ns -= aligned_start_ns % stride_ns
 
     first = await fusion.ingest(
         IngestFrameRequest(
             node=node,
             frame={
-                "start_time_ns": 1_739_810_400_000_000_000,
+                "start_time_ns": aligned_start_ns,
                 "sample_rate_hz": 16000,
                 "channels": 1,
                 "encoding": "pcm16le",
@@ -592,7 +620,7 @@ async def test_birdnet_chunked_dispatch_suppresses_overlapping_candidates(tmp_pa
         IngestFrameRequest(
             node=node,
             frame={
-                "start_time_ns": 1_739_810_405_000_000_000,
+                "start_time_ns": aligned_start_ns + 5_000_000_000,
                 "sample_rate_hz": 16000,
                 "channels": 1,
                 "encoding": "pcm16le",
@@ -628,7 +656,8 @@ async def test_birdnet_chunked_dispatch_retries_after_non_actionable_result(tmp_
         max_sensor_buffer_seconds=32.0,
         classifier_backend="birdnet",
         birdnet_chunked_dispatch_enabled=True,
-        birdnet_chunk_overlap_seconds=3.0,
+        birdnet_chunk_overlap_seconds=2.0,
+        birdnet_chunk_min_retry_progress_seconds=0.0,
         preprocess_enabled=False,
         fusion_worker_count=1,
     )
@@ -663,12 +692,15 @@ async def test_birdnet_chunked_dispatch_retries_after_non_actionable_result(tmp_
     )
     t = np.arange(1024, dtype=np.float32) / 16000.0
     samples = (0.4 * np.sin(2.0 * np.pi * 900.0 * t)).reshape(1, -1).astype(np.float32)
+    stride_ns = int((settings.classification_window_seconds - settings.birdnet_chunk_overlap_seconds) * 1_000_000_000)
+    aligned_start_ns = 1_739_810_500_000_000_000
+    aligned_start_ns -= aligned_start_ns % stride_ns
 
     first = await fusion.ingest(
         IngestFrameRequest(
             node=node,
             frame={
-                "start_time_ns": 1_739_810_500_000_000_000,
+                "start_time_ns": aligned_start_ns,
                 "sample_rate_hz": 16000,
                 "channels": 1,
                 "encoding": "pcm16le",
@@ -681,7 +713,7 @@ async def test_birdnet_chunked_dispatch_retries_after_non_actionable_result(tmp_
         IngestFrameRequest(
             node=node,
             frame={
-                "start_time_ns": 1_739_810_505_000_000_000,
+                "start_time_ns": aligned_start_ns + 5_000_000_000,
                 "sample_rate_hz": 16000,
                 "channels": 1,
                 "encoding": "pcm16le",
@@ -699,6 +731,179 @@ async def test_birdnet_chunked_dispatch_retries_after_non_actionable_result(tmp_
     status = await fusion.status()
     assert classifier.calls == 2
     assert status["metrics"]["birdnet_chunk_dispatches_suppressed"] == 0
+
+    await fusion.stop()
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_birdnet_chunked_dispatch_limits_same_chunk_retries(tmp_path: Path) -> None:
+    settings = Settings(
+        db_path=tmp_path / "fusion_chunk_retry_limited.db",
+        snippet_dir=tmp_path / "snippets",
+        snippet_retention_seconds=0,
+        trigger_rms=0.001,
+        trigger_cooldown_seconds=0.0,
+        localization_window_seconds=0.04,
+        classification_window_seconds=30.0,
+        max_sensor_buffer_seconds=32.0,
+        classifier_backend="birdnet",
+        birdnet_chunked_dispatch_enabled=True,
+        birdnet_chunk_overlap_seconds=2.0,
+        birdnet_chunk_max_retries_per_chunk=1,
+        birdnet_chunk_min_retry_progress_seconds=0.0,
+        preprocess_enabled=False,
+        fusion_worker_count=1,
+    )
+    settings.db_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.snippet_dir.mkdir(parents=True, exist_ok=True)
+
+    storage = Storage(settings.db_path)
+    await storage.initialize()
+
+    classifier = _AlwaysUnknownClassifier()
+    fusion = FusionNode(
+        settings=settings,
+        registry=NodeRegistry(),
+        buffer=MultiSensorBuffer(max_duration_seconds=settings.max_sensor_buffer_seconds),
+        localizer=LocalizationEngine(max_tau_s=0.03),
+        classifier=classifier,
+        tracker=TrackManager(settings),
+        storage=storage,
+        live_callback=lambda payload: asyncio.sleep(0, result=None),
+        coordinate_frame=LocalCoordinateFrame(origin=GeoPoint(lat=37.0, lon=-122.0, alt_m=0.0), mode="flat"),
+        zone_matcher=ZoneMatcher(storage=storage),
+    )
+    await fusion.start()
+
+    node = NodeSpec(
+        id="chunk-retry-limit-node",
+        node_type=NodeType.POINT,
+        position_m=(0.0, 0.0, 0.0),
+        sensor_offsets_m=[(0.0, 0.0, 0.0)],
+        capabilities=["audio"],
+        metadata={},
+    )
+    t = np.arange(1024, dtype=np.float32) / 16000.0
+    samples = (0.4 * np.sin(2.0 * np.pi * 800.0 * t)).reshape(1, -1).astype(np.float32)
+    stride_ns = int((settings.classification_window_seconds - settings.birdnet_chunk_overlap_seconds) * 1_000_000_000)
+    aligned_start_ns = 1_739_810_700_000_000_000
+    aligned_start_ns -= aligned_start_ns % stride_ns
+
+    for sequence, start_time_ns in enumerate(
+        (
+            aligned_start_ns,
+            aligned_start_ns + 10_000_000_000,
+            aligned_start_ns + 20_000_000_000,
+        ),
+        start=1,
+    ):
+        response = await fusion.ingest(
+            IngestFrameRequest(
+                node=node,
+                frame={
+                    "start_time_ns": start_time_ns,
+                    "sample_rate_hz": 16000,
+                    "channels": 1,
+                    "encoding": "pcm16le",
+                    "samples_b64": encode_pcm16le_b64(samples),
+                    "sequence": sequence,
+                },
+            )
+        )
+        assert response.triggered is True
+
+    await asyncio.sleep(0.25)
+
+    status = await fusion.status()
+    assert classifier.calls == 2
+    assert status["metrics"]["birdnet_chunk_dispatches_suppressed"] == 1
+
+    await fusion.stop()
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_birdnet_chunked_dispatch_does_not_retry_after_classifier_error(tmp_path: Path) -> None:
+    settings = Settings(
+        db_path=tmp_path / "fusion_chunk_error_no_retry.db",
+        snippet_dir=tmp_path / "snippets",
+        snippet_retention_seconds=0,
+        trigger_rms=0.001,
+        trigger_cooldown_seconds=0.0,
+        localization_window_seconds=0.04,
+        classification_window_seconds=30.0,
+        max_sensor_buffer_seconds=32.0,
+        classifier_backend="birdnet",
+        birdnet_chunked_dispatch_enabled=True,
+        birdnet_chunk_overlap_seconds=2.0,
+        birdnet_chunk_retry_on_classifier_error=False,
+        preprocess_enabled=False,
+        fusion_worker_count=1,
+    )
+    settings.db_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.snippet_dir.mkdir(parents=True, exist_ok=True)
+
+    storage = Storage(settings.db_path)
+    await storage.initialize()
+
+    classifier = _AlwaysRaisingClassifier()
+    fusion = FusionNode(
+        settings=settings,
+        registry=NodeRegistry(),
+        buffer=MultiSensorBuffer(max_duration_seconds=settings.max_sensor_buffer_seconds),
+        localizer=LocalizationEngine(max_tau_s=0.03),
+        classifier=classifier,
+        tracker=TrackManager(settings),
+        storage=storage,
+        live_callback=lambda payload: asyncio.sleep(0, result=None),
+        coordinate_frame=LocalCoordinateFrame(origin=GeoPoint(lat=37.0, lon=-122.0, alt_m=0.0), mode="flat"),
+        zone_matcher=ZoneMatcher(storage=storage),
+    )
+    await fusion.start()
+
+    node = NodeSpec(
+        id="chunk-error-no-retry-node",
+        node_type=NodeType.POINT,
+        position_m=(0.0, 0.0, 0.0),
+        sensor_offsets_m=[(0.0, 0.0, 0.0)],
+        capabilities=["audio"],
+        metadata={},
+    )
+    t = np.arange(1024, dtype=np.float32) / 16000.0
+    samples = (0.4 * np.sin(2.0 * np.pi * 1000.0 * t)).reshape(1, -1).astype(np.float32)
+    stride_ns = int((settings.classification_window_seconds - settings.birdnet_chunk_overlap_seconds) * 1_000_000_000)
+    aligned_start_ns = 1_739_810_800_000_000_000
+    aligned_start_ns -= aligned_start_ns % stride_ns
+
+    for sequence, start_time_ns in enumerate(
+        (
+            aligned_start_ns,
+            aligned_start_ns + 5_000_000_000,
+        ),
+        start=1,
+    ):
+        response = await fusion.ingest(
+            IngestFrameRequest(
+                node=node,
+                frame={
+                    "start_time_ns": start_time_ns,
+                    "sample_rate_hz": 16000,
+                    "channels": 1,
+                    "encoding": "pcm16le",
+                    "samples_b64": encode_pcm16le_b64(samples),
+                    "sequence": sequence,
+                },
+            )
+        )
+        assert response.triggered is True
+
+    await asyncio.sleep(0.25)
+
+    status = await fusion.status()
+    assert classifier.calls == 1
+    assert status["metrics"]["classification_failures"] == 1
+    assert status["metrics"]["birdnet_chunk_dispatches_suppressed"] == 1
 
     await fusion.stop()
     await storage.close()

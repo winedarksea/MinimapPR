@@ -26,6 +26,16 @@ fn sparkline_path(rms: &[f64], width: f64, height: f64) -> String {
     format!("M {}", points.join(" L "))
 }
 
+fn time_quality_label_and_color(tq: &str) -> (&'static str, &'static str) {
+    match tq {
+        "gps_locked" => ("GPS PPS Lock", "var(--mmp-sys-color-ok)"),
+        "gps_holdover" => ("GPS Holdover", "var(--mmp-sys-color-warn)"),
+        "ntp_disciplined" | "ntp_sync" => ("NTP Sync", "var(--md-sys-color-tertiary)"),
+        "free_running" => ("Server Receipt", "var(--mmp-sys-color-danger)"),
+        _ => ("Unknown", "var(--md-sys-color-on-surface-variant)"),
+    }
+}
+
 fn age_text_from_seconds(age_seconds: f64) -> String {
     if age_seconds < 60.0 {
         format!("{:.0}s", age_seconds)
@@ -226,6 +236,11 @@ fn NodeCard(node: NodeStatus) -> impl IntoView {
         .map(ToString::to_string)
         .unwrap_or_else(|| "-".to_string());
 
+    let time_quality_display = node
+        .latest_time_quality
+        .as_deref()
+        .map(time_quality_label_and_color);
+
     let node_type_text = node.node_type.clone().unwrap_or_else(|| "-".to_string());
     let mobility_text = node.mobility.clone().unwrap_or_else(|| "-".to_string());
     let capabilities_text = node
@@ -290,6 +305,15 @@ fn NodeCard(node: NodeStatus) -> impl IntoView {
                     <div>{local_position_text.unwrap_or_else(|| "-".to_string())}</div>
                     <div class="node-detail-label">"GPS source"</div>
                     <div>{gps_source.unwrap_or_else(|| "-".to_string())}</div>
+                    <div class="node-detail-label">"Time precision"</div>
+                    <div>
+                        {match time_quality_display {
+                            Some((label, color)) => view! {
+                                <span style=format!("color: {color}; font-weight: 600")>{label}</span>
+                            }.into_any(),
+                            None => view! { <span>"-"</span> }.into_any(),
+                        }}
+                    </div>
                     <div class="node-detail-label">"Type"</div>
                     <div>{node_type_text}</div>
                     <div class="node-detail-label">"Mobility"</div>

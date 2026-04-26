@@ -11,6 +11,7 @@ namespace {
 constexpr uint32_t kFailureSnapshotMagic = 0x4d4d5052u;  // "MMPR"
 constexpr uint8_t kFailureSnapshotVersion = 1;
 constexpr uint32_t kWatchdogTimeoutMs = 16000;
+constexpr uint32_t kBootCountMask = 0x00ffffffu;
 
 constexpr size_t kMagicScratchIndex = 0;
 constexpr size_t kMetadataScratchIndex = 1;
@@ -50,8 +51,12 @@ const char* phaseName(FatalLifecyclePhase phase) {
 void writeSnapshotWords(uint32_t metadata, uint32_t bootCount, uint32_t progressMarker) {
   watchdog_hw->scratch[kMagicScratchIndex] = kFailureSnapshotMagic;
   watchdog_hw->scratch[kMetadataScratchIndex] = metadata;
-  watchdog_hw->scratch[kBootCountScratchIndex] = bootCount;
+  watchdog_hw->scratch[kBootCountScratchIndex] = (bootCount & kBootCountMask);
   watchdog_hw->scratch[kProgressScratchIndex] = progressMarker;
+}
+
+uint32_t sanitizedBootCount(uint32_t rawBootCount) {
+  return rawBootCount & kBootCountMask;
 }
 
 }  // namespace
@@ -61,14 +66,19 @@ PreviousFatalFailureSnapshot FailureSnapshot::initializeForBoot() {
 
   if (watchdog_enable_caused_reboot() && hasValidSnapshotHeader()) {
     previous.valid = true;
-    previous.bootCount = watchdog_hw->scratch[kBootCountScratchIndex];
+    previous.bootCount = sanitizedBootCount(watchdog_hw->scratch[kBootCountScratchIndex]);
     previous.phase = unpackPhase(watchdog_hw->scratch[kMetadataScratchIndex]);
     previous.progressMarker = watchdog_hw->scratch[kProgressScratchIndex];
   }
 
-  const uint32_t nextBootCount = hasValidSnapshotHeader()
-      ? (watchdog_hw->scratch[kBootCountScratchIndex] + 1u)
-      : 1u;
+  uint32_t nextBootCount = 1u;
+  if (hasValidSnapshotHeader()) {
+    nextBootCount = sanitizedBootCount(watchdog_hw->scratch[kBootCountScratchIndex]) + 1u;
+    nextBootCount &= kBootCountMask;
+    if (nextBootCount == 0u) {
+      nextBootCount = 1u;
+    }
+  }
   writeSnapshotWords(packMetadata(FatalLifecyclePhase::kBootStart), nextBootCount, 0u);
   watchdog_enable(kWatchdogTimeoutMs, false);
   watchdog_update();
@@ -87,6 +97,10 @@ PreviousFatalFailureSnapshot FailureSnapshot::initializeForBoot() {
       static_cast<unsigned long>(kWatchdogTimeoutMs));
 
   return previous;
+}
+
+uint32_t FailureSnapshot::currentBootCount() {
+  return hasValidSnapshotHeader() ? sanitizedBootCount(watchdog_hw->scratch[kBootCountScratchIndex]) : 0u;
 }
 
 void FailureSnapshot::updatePhase(FatalLifecyclePhase phase) {

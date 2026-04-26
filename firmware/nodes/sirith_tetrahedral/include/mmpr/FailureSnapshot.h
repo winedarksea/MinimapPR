@@ -24,6 +24,7 @@ struct PreviousFatalFailureSnapshot {
 class FailureSnapshot {
  public:
   static PreviousFatalFailureSnapshot initializeForBoot();
+  static uint32_t currentBootCount();
   static void updatePhase(FatalLifecyclePhase phase);
   static void updateProgressMarker(uint32_t progressMarker);
   static void feedWatchdog();

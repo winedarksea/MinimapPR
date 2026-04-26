@@ -49,6 +49,7 @@ def _round_digits(bin_deg: float) -> int:
 def _ingested_frame_key(
     *,
     node_id: str,
+    boot_session: str = "",
     frame_sequence: int | None,
     start_time_ns: int,
     utc_end_ns: int | None,
@@ -58,21 +59,15 @@ def _ingested_frame_key(
     time_quality: str = "",
     tor_ns: int | None = None,
 ) -> str:
-    receipt_bucket = ""
-    if (
-        source_type == "raw_sensor"
-        and time_quality == "free_running"
-        and tor_ns is not None
-        and abs(start_time_ns - tor_ns) > 300_000_000_000
-    ):
-        receipt_bucket = f":rx{tor_ns // 10_000_000_000}"
+    _ = (time_quality, tor_ns)
+    boot_prefix = f"{node_id}:{boot_session or 'boot-unknown'}:{source_type}:"
     if start_sample_index is not None and end_sample_index is not None and utc_end_ns is not None:
         return (
-            f"{node_id}:{source_type}:{start_sample_index}:{end_sample_index}:"
-            f"{start_time_ns}:{utc_end_ns}{receipt_bucket}"
+            f"{boot_prefix}{start_sample_index}:{end_sample_index}:"
+            f"{start_time_ns}:{utc_end_ns}"
         )
     sequence_token = str(frame_sequence) if frame_sequence is not None else "none"
-    return f"{node_id}:{source_type}:{start_time_ns}:{sequence_token}{receipt_bucket}"
+    return f"{boot_prefix}{start_time_ns}:{sequence_token}"
 
 
 class Storage:
@@ -802,6 +797,7 @@ class Storage:
         self,
         *,
         node_id: str,
+        boot_session: str = "",
         frame_sequence: int | None,
         start_time_ns: int,
         utc_end_ns: int | None,
@@ -814,6 +810,7 @@ class Storage:
         db = self._require_db()
         frame_key = _ingested_frame_key(
             node_id=node_id,
+            boot_session=boot_session,
             frame_sequence=frame_sequence,
             start_time_ns=start_time_ns,
             utc_end_ns=utc_end_ns,
@@ -840,6 +837,7 @@ class Storage:
         self,
         *,
         node_id: str,
+        boot_session: str = "",
         frame_sequence: int | None,
         start_time_ns: int,
         utc_end_ns: int | None,
@@ -853,6 +851,7 @@ class Storage:
         db = self._require_db()
         frame_key = _ingested_frame_key(
             node_id=node_id,
+            boot_session=boot_session,
             frame_sequence=frame_sequence,
             start_time_ns=start_time_ns,
             utc_end_ns=utc_end_ns,
@@ -1988,6 +1987,24 @@ class Storage:
                 )
             ).fetchall()
         return [self._row_to_environment(row) for row in rows]
+
+    async def list_latest_time_quality_per_node(self) -> dict[str, str]:
+        db = self._require_db()
+        rows = await (
+            await db.execute(
+                """
+                SELECT o.node_id, o.time_quality
+                FROM observations o
+                INNER JOIN (
+                    SELECT node_id, MAX(toa_ns) AS max_toa
+                    FROM observations
+                    GROUP BY node_id
+                ) latest
+                ON o.node_id = latest.node_id AND o.toa_ns = latest.max_toa
+                """
+            )
+        ).fetchall()
+        return {row["node_id"]: row["time_quality"] for row in rows}
 
     async def list_latest_environment_per_node(self, limit: int = 500) -> list[dict[str, Any]]:
         db = self._require_db()

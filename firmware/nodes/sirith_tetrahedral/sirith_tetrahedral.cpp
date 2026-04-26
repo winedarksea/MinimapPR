@@ -138,7 +138,7 @@ mmpr::NmeaGpsSourceConfig gGpsConfig = {
         nodecfg::kNodeFallbackLongitudeDeg,
         nodecfg::kNodeFallbackAltitudeM,
     },
-    128,
+    512,
     nodecfg::kGpsMissingSentenceTimeoutMs,
     nodecfg::kGpsStaleFixTimeoutMs,
 };
@@ -227,6 +227,7 @@ mmpr::NodeDescriptor gNodeDescriptor = {
     MMPR_FW_VERSION,
     nodecfg::kGpsSignalStatus,
     nodecfg::kGpsPositionSource,
+    0u,
 };
 
 mmpr::SirithPicoTdmPins gTdmPins = {
@@ -309,6 +310,15 @@ mmpr::NodeRunner gRunner(
     gEnvironmentalSource,
     nodecfg::kMaxPacketSamplesPerChannel,
     nodecfg::kPublishFailureBackoffMs);
+
+void pollTimingSourcesDuringNetworkWait(void*) {
+  if (nodecfg::kEnableGpsUart) {
+    gGpsSource.poll(gNodeDescriptor, &gClock);
+  }
+  if (nodecfg::kEnableNtpSync) {
+    gNtpClient.poll();
+  }
+}
 
 void setExternalRailEnabled(bool enabled) {
   gpio_init(nodecfg::kLedPin);
@@ -399,6 +409,7 @@ int main() {
   stdio_init_all();
   sleep_ms(300);
   mmpr::FailureSnapshot::initializeForBoot();
+  gNodeDescriptor.bootCount = mmpr::FailureSnapshot::currentBootCount();
   mmpr::FailureSnapshot::feedWatchdog();
 
   // GP26 controls the external Vin FET rail; keep it off unless explicitly enabled.
@@ -495,6 +506,7 @@ int main() {
     std::printf("[sirith-pico] NTP client started, server=%s\n", nodecfg::kNtpServer);
     mmpr::FailureSnapshot::feedWatchdog();
   }
+  gPublisher.setBackgroundPollCallback(pollTimingSourcesDuringNetworkWait, nullptr);
 
   mmpr::FailureSnapshot::updatePhase(mmpr::FatalLifecyclePhase::kMainLoop);
   while (true) {
@@ -517,6 +529,14 @@ int main() {
         nodecfg::kWifiSsid,
         nodecfg::kWifiPassword,
         nodecfg::kWiFiConnectTimeoutMs);
+
+    if (nodecfg::kEnableGpsUart) {
+      gGpsSource.poll(gNodeDescriptor, &gClock);
+    }
+
+    if (nodecfg::kEnableNtpSync) {
+      gNtpClient.poll();
+    }
 
     gRunner.loopOnce();
     mmpr::FailureSnapshot::updateProgressMarker(static_cast<uint32_t>(gRunner.stats().framesCaptured));

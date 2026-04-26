@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from minimappr.config import Settings
 
 
@@ -13,6 +15,7 @@ def test_birdnet_omni_testing_profile_sets_direct_birdnet_defaults() -> None:
     assert settings.beamformed_classification_enabled is False
     assert settings.skip_localization_for_classification is True
     assert settings.birdnet_chunked_dispatch_enabled is True
+    assert settings.birdnet_chunk_overlap_seconds == 2.0
     assert settings.classification_window_seconds == 30.0
     assert settings.max_sensor_buffer_seconds >= 32.0
 
@@ -27,6 +30,7 @@ def test_birdnet_hybrid_production_profile_sets_hybrid_defaults() -> None:
     assert settings.beamformed_classification_enabled is False
     assert settings.skip_localization_for_classification is False
     assert settings.birdnet_chunked_dispatch_enabled is True
+    assert settings.birdnet_chunk_overlap_seconds == 2.0
     assert settings.classification_window_seconds == 30.0
     assert settings.max_sensor_buffer_seconds >= 32.0
     assert settings.localization_band_min_hz == 300.0
@@ -49,3 +53,14 @@ def test_classification_window_defaults_to_localization_window() -> None:
     settings = Settings(localization_window_seconds=0.12, classification_window_seconds=0.0)
 
     assert settings.classification_window_seconds == 0.12
+
+
+def test_birdnet_chunked_dispatch_rejects_large_overlap() -> None:
+    with pytest.raises(ValueError, match="BIRDNET_CHUNK_OVERLAP_SECONDS"):
+        Settings(
+            classifier_backend="birdnet",
+            birdnet_chunked_dispatch_enabled=True,
+            classification_window_seconds=30.0,
+            max_sensor_buffer_seconds=32.0,
+            birdnet_chunk_overlap_seconds=3.0,
+        )

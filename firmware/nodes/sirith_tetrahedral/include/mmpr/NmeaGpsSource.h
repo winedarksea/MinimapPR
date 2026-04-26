@@ -54,15 +54,25 @@ class NmeaGpsSource {
     uint16_t millisecond = 0;
   };
 
+  // Pre-tokenized view of an NMEA sentence body. The tokenizer rewrites commas
+  // in the source buffer to '\0' once, then exposes each field as a
+  // null-terminated pointer into that buffer. Callers must keep the source
+  // buffer alive for the lifetime of the view.
+  struct TokenizedSentence {
+    static constexpr size_t kMaxFields = 24;
+    const char* fields[kMaxFields] = {};
+    size_t fieldCount = 0;
+  };
+
   void updateDescriptor(NodeDescriptor& descriptor) const;
   void ensurePpsCaptureStarted();
   void consumePendingPps(NodeClock* clock);
   void consumeLine(const char* line, NodeClock* clock);
   bool parseSentence(const char* line, ParsedSentence& outSentence) const;
-  bool parseGgaSentence(const char* body, ParsedSentence& outSentence) const;
-  bool parseRmcSentence(const char* body, ParsedSentence& outSentence) const;
-  bool parseGllSentence(const char* body, ParsedSentence& outSentence) const;
-  bool parseZdaSentence(const char* body, ParsedSentence& outSentence) const;
+  bool parseGgaSentence(char* body, ParsedSentence& outSentence) const;
+  bool parseRmcSentence(char* body, ParsedSentence& outSentence) const;
+  bool parseGllSentence(char* body, ParsedSentence& outSentence) const;
+  bool parseZdaSentence(char* body, ParsedSentence& outSentence) const;
 
   static bool validateChecksum(const char* line);
   static bool sentenceTypeMatches(const char* body, const char* sentenceType);
@@ -79,7 +89,8 @@ class NmeaGpsSource {
       uint16_t& millisecond);
   static bool parseRmcDateField(const char* field, uint16_t& year, uint8_t& month, uint8_t& day);
   static bool isFieldEmpty(const char* field);
-  static const char* fieldAt(char* body, size_t fieldIndex);
+  static void tokenizeBody(char* body, TokenizedSentence& outTokens);
+  static const char* fieldAt(const TokenizedSentence& tokens, size_t fieldIndex);
   static uint64_t unixEpochNs(
       uint16_t year,
       uint8_t month,
@@ -111,12 +122,12 @@ class NmeaGpsSource {
   bool loggedPpsCaptureState_ = false;
   bool loggedHealthyState_ = false;
   bool loggedFixState_ = false;
-  uint32_t loggedPpsEdgeCount_ = 0;
   bool loggedNoPpsFallback_ = false;
   bool haveAlignedPpsEpoch_ = false;
   bool ppsSignalCurrentlyObserved_ = false;
   uint32_t lastAppliedPpsEdgeCount_ = 0;
   uint64_t lastPpsEdgeUs_ = 0;
+  uint64_t ppsUtcLabelValidAfterMonotonicUs_ = 0;
 };
 
 }  // namespace mmpr
