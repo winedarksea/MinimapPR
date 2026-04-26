@@ -67,6 +67,7 @@ struct AudioFrame {
   uint64_t torNs;
   TimeQuality timeQuality;
   bool hasTimingDiagnostics;
+  bool timingHasGpsAnchor;
   uint32_t ppsEdgeCount;
   uint32_t dmaRingSlotIndex;
   int64_t ppsPhaseErrorNs;

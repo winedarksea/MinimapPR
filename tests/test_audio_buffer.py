@@ -297,6 +297,31 @@ def test_sensor_stream_buffer_preserves_explicit_sample_origin_after_large_reset
     assert buf.start_time_ns == start_time_ns + 10_000_000_000
 
 
+def test_sensor_stream_buffer_reanchors_explicit_contiguous_samples_after_ntp_jump() -> None:
+    sample_rate_hz = 16_000
+    frame_samples = 1024
+    stale_start_time_ns = 1_000_000_000_000_000_000
+    corrected_start_time_ns = stale_start_time_ns + 600_000_000_000
+    buf = SensorStreamBuffer(sample_rate_hz=sample_rate_hz, max_duration_seconds=30.0)
+
+    buf.append(
+        start_time_ns=stale_start_time_ns,
+        samples=np.ones(frame_samples, dtype=np.float32),
+        start_sample_index=0,
+        end_sample_index=frame_samples,
+    )
+    buf.append(
+        start_time_ns=corrected_start_time_ns,
+        samples=np.full(frame_samples, 2.0, dtype=np.float32),
+        start_sample_index=frame_samples,
+        end_sample_index=frame_samples * 2,
+    )
+
+    assert np.array_equal(buf.samples, np.full(frame_samples, 2.0, dtype=np.float32))
+    assert buf.start_time_ns == corrected_start_time_ns
+    assert buf.end_time_ns() == corrected_start_time_ns + int(round(frame_samples * 1_000_000_000 / sample_rate_hz))
+
+
 @pytest.mark.asyncio
 async def test_classification_windows_use_per_sensor_fallback_when_some_sensors_have_partial_audio() -> None:
     """With a short buffer, sensors that have any audio should use their trailing window;

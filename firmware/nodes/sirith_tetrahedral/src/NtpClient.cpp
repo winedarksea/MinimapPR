@@ -61,8 +61,7 @@ void NtpClient::poll() {
       break;
 
     case State::kDone:
-      if (clock_->timeQuality() != TimeQuality::kGpsLocked &&
-          (nowUs - stateEnteredUs_) >= kResyncIntervalUs) {
+      if ((nowUs - stateEnteredUs_) >= kResyncIntervalUs) {
         state_ = State::kIdle;
       }
       break;

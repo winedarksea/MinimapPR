@@ -107,21 +107,32 @@ bool NodeRunner::publishCurrentPacket(
     packetOpen_ = false;
     packetInterleavedSamples_.clear();
     packetTargetEndSampleIndex_ = 0;
+    packetStartMonotonicUs_ = 0;
     return false;
   }
 
-  // Stamp both endpoints from the current clock anchor. If a discipline update
-  // still yields a non-monotonic interval, keep the packet valid using its
-  // sample-count duration; the server rejects frames where end < start.
-  uint64_t utcStartNs = clock_.utcAtSampleIndex(packetStartSampleIndex_);
-  uint64_t utcEndNs = clock_.utcAtSampleIndex(packetEndSampleIndex);
-  if (utcEndNs < utcStartNs) {
-    const uint64_t elapsedSamples = packetEndSampleIndex - packetStartSampleIndex_;
-    const uint64_t durationNs =
-        (elapsedSamples * kNsPerSecond) / static_cast<uint64_t>(audioSource_.sampleRateHz());
+  // Stamp TOA from the current UTC epoch plus the DMA-captured monotonic age of
+  // the packet. This keeps recent audio tied to the clock correction that is
+  // valid at publish time while preserving the precise capture offset.
+  const uint64_t elapsedSamples = packetEndSampleIndex - packetStartSampleIndex_;
+  const uint64_t durationNs =
+      (elapsedSamples * kNsPerSecond) / static_cast<uint64_t>(audioSource_.sampleRateHz());
+  const uint64_t publishMonotonicUs = time_us_64();
+  const uint64_t receiptNs = clock_.utcAtMonotonicUs(publishMonotonicUs);
+  uint64_t packetAgeNs = 0;
+  uint64_t utcStartNs = 0;
+  uint64_t utcEndNs = 0;
+  if (packetStartMonotonicUs_ > 0 && publishMonotonicUs >= packetStartMonotonicUs_) {
+    packetAgeNs = (publishMonotonicUs - packetStartMonotonicUs_) * 1000ULL;
+    utcStartNs = receiptNs > packetAgeNs ? receiptNs - packetAgeNs : 0;
     utcEndNs = utcStartNs + durationNs;
+  } else {
+    utcStartNs = clock_.utcAtSampleIndex(packetStartSampleIndex_);
+    utcEndNs = clock_.utcAtSampleIndex(packetEndSampleIndex);
+    if (utcEndNs < utcStartNs) {
+      utcEndNs = utcStartNs + durationNs;
+    }
   }
-  const uint64_t receiptNs = clock_.utcAtMonotonicUs(time_us_64());
   PacketTimingDiagnostics timingDiagnostics = {};
   const bool haveTimingDiagnostics = clock_.currentPacketTimingDiagnostics(timingDiagnostics);
   const AudioFrame frame = {
@@ -136,6 +147,7 @@ bool NodeRunner::publishCurrentPacket(
       receiptNs,
       clock_.timeQuality(),
       haveTimingDiagnostics,
+      timingDiagnostics.hasGpsAnchor,
       timingDiagnostics.ppsEdgeCount,
       timingDiagnostics.dmaRingSlotIndex,
       timingDiagnostics.ppsPhaseErrorNs,
@@ -166,12 +178,16 @@ bool NodeRunner::publishCurrentPacket(
       nextPublishAttemptMs_ = nowMs + publishFailureBackoffMs_;
     }
     std::printf(
-        "[node] publish failed status=%d seq=%" PRIu64 " samples=%lu utc_start=%" PRIu64 " utc_end=%" PRIu64 "\n",
+        "[node] publish failed status=%d seq=%" PRIu64
+        " samples=%lu utc_start=%" PRIu64 " utc_end=%" PRIu64
+        " receipt=%" PRIu64 " packet_age_us=%" PRIu64 "\n",
         result.statusCode,
         sequence_,
         static_cast<unsigned long>(frame.samplesPerChannel),
         utcStartNs,
-        utcEndNs);
+        utcEndNs,
+        receiptNs,
+        packetAgeNs / 1000ULL);
   }
   ++sequence_;
   packetOpen_ = false;
@@ -223,6 +239,7 @@ void NodeRunner::loopOnce() {
       packetOpen_ = false;
       packetInterleavedSamples_.clear();
       packetTargetEndSampleIndex_ = 0;
+      packetStartMonotonicUs_ = 0;
     }
   }
   haveExpectedNextSampleIndex_ = true;
@@ -234,6 +251,9 @@ void NodeRunner::loopOnce() {
     if (!packetOpen_) {
       packetOpen_ = true;
       packetStartSampleIndex_ = chunkStartSampleIndex;
+      packetStartMonotonicUs_ =
+          captureTimestamp.blockStartMonotonicUs +
+          ((frameSampleOffset * 1000000ULL) / static_cast<uint64_t>(audioSource_.sampleRateHz()));
       // Compute the target end-sample-index ONCE at packet open from the
       // current anchor. Storing it as a sample index (not a UTC ns value)
       // makes packet length stable across NTP/GPS anchor jumps. The previous
@@ -285,6 +305,7 @@ void NodeRunner::loopOnce() {
       publishCurrentPacket(packetEndSampleIndex, environmentalPtr, lastPublishStatus);
       packetOpen_ = false;
       packetStartSampleIndex_ = packetEndSampleIndex;
+      packetStartMonotonicUs_ = 0;
       packetTargetEndSampleIndex_ = 0;
     }
   }

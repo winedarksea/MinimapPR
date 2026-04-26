@@ -9,6 +9,7 @@ namespace mmpr {
 struct GpsPpsCaptureEvent {
   uint32_t edgeCount = 0;
   uint64_t monotonicUs = 0;
+  uint64_t monotonicNs = 0;
   uint64_t tickCycles = 0;
   AudioProducerSnapshot audioProducerSnapshot = {};
 };
@@ -29,6 +30,7 @@ class GpsPpsTimerCapture {
   void deinitPioStateMachine();
   void onIrq();
   static uint64_t ticksToUs(uint64_t tickCycles, uint32_t clkSysHz);
+  static uint64_t ticksToNs(uint64_t tickCycles, uint32_t clkSysHz);
   static void pio0IrqHandler();
   static void pio1IrqHandler();
 

@@ -189,6 +189,16 @@ uint64_t GpsPpsTimerCapture::ticksToUs(uint64_t tickCycles, uint32_t clkSysHz) {
   return seconds * 1000000ULL + (remainder * 1000000ULL) / clk;
 }
 
+uint64_t GpsPpsTimerCapture::ticksToNs(uint64_t tickCycles, uint32_t clkSysHz) {
+  if (clkSysHz == 0) {
+    return 0;
+  }
+  const uint64_t clk = static_cast<uint64_t>(clkSysHz);
+  const uint64_t seconds = tickCycles / clk;
+  const uint64_t remainder = tickCycles % clk;
+  return seconds * 1000000000ULL + (remainder * 1000000000ULL) / clk;
+}
+
 void GpsPpsTimerCapture::onIrq() {
   if (!configured_ || pio_ == nullptr || sm_ < 0) {
     return;
@@ -203,8 +213,10 @@ void GpsPpsTimerCapture::onIrq() {
 
     GpsPpsCaptureEvent nextEvent = {};
     nextEvent.edgeCount = observedEdgeCount_;
-    nextEvent.monotonicUs = monotonicBaseUs_ + ticksToUs(accumulatedTickCycles_ + kFixedEdgePipelineCycles, clkSysHz_);
-    nextEvent.tickCycles = accumulatedTickCycles_;
+    nextEvent.tickCycles = accumulatedTickCycles_ + kFixedEdgePipelineCycles;
+    nextEvent.monotonicNs =
+        (monotonicBaseUs_ * 1000ULL) + ticksToNs(nextEvent.tickCycles, clkSysHz_);
+    nextEvent.monotonicUs = nextEvent.monotonicNs / 1000ULL;
     if (audioSource_ != nullptr) {
       nextEvent.audioProducerSnapshot.valid =
           audioSource_->snapshotProducerState(nextEvent.audioProducerSnapshot, runningInExceptionContext());

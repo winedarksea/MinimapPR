@@ -77,6 +77,7 @@ class AudioFrameIn(BaseModel):
     time_quality: TimeQuality = TimeQuality.FREE_RUNNING
     toa_ns: int | None = None
     tor_ns: int | None = None
+    timing_diagnostics: dict[str, Any] = Field(default_factory=dict)
     source_type: Literal["raw_sensor", "local_track", "peer_track"] = "raw_sensor"
 
     @model_validator(mode="after")

@@ -218,6 +218,18 @@ class IngestProcessor:
             tor_ns=tor_ns,
         )
 
+        buffer_start_time_ns, buffer_end_time_ns, buffer_uses_receipt_time = _buffer_timestamps_for_frame(
+            frame_start_time_ns=frame.start_time_ns,
+            frame_end_time_ns=frame.utc_end_ns,
+            sample_count=processed.shape[1],
+            sample_rate_hz=frame.sample_rate_hz,
+            time_quality=frame.time_quality,
+            server_received_ns=server_received_ns,
+            # Firmware nodes advertise GPS optional; only they need receipt-time
+            # debug audio while waiting for a real NTP/GPS discipline source.
+            allow_receipt_time_fallback="gps_optional" in normalized_node.capabilities,
+        )
+
         # -- persist observations ---------------------------------------------
         observation_ids: list[str] = []
         frame_registered = False
@@ -238,6 +250,7 @@ class IngestProcessor:
                 end_sample_index=frame.end_sample_index,
                 toa_ns=toa_ns,
                 tor_ns=tor_ns,
+                created_ns=server_received_ns,
                 source_type=frame.source_type,
                 time_quality=frame.time_quality.value,
             )
@@ -276,6 +289,9 @@ class IngestProcessor:
                             "frame_channels": frame.channels,
                             "samples_per_channel": audio.shape[1],
                             "encoding": frame.encoding,
+                            "server_received_ns": server_received_ns,
+                            "buffer_uses_receipt_time": buffer_uses_receipt_time,
+                            "timing_diagnostics": frame.timing_diagnostics,
                             "preprocess": normalized_node.properties.get("preprocess", {}),
                         },
                     )
@@ -296,17 +312,6 @@ class IngestProcessor:
             )
 
         # -- buffer insertion --------------------------------------------------
-        buffer_start_time_ns, buffer_end_time_ns, buffer_uses_receipt_time = _buffer_timestamps_for_frame(
-            frame_start_time_ns=frame.start_time_ns,
-            frame_end_time_ns=frame.utc_end_ns,
-            sample_count=processed.shape[1],
-            sample_rate_hz=frame.sample_rate_hz,
-            time_quality=frame.time_quality,
-            server_received_ns=server_received_ns,
-            # Firmware nodes advertise GPS optional; only they need receipt-time
-            # debug audio while waiting for a real NTP/GPS discipline source.
-            allow_receipt_time_fallback="gps_optional" in normalized_node.capabilities,
-        )
         for channel_index, sensor_id in enumerate(runtime.sensor_ids):
             await self._buffer.append(
                 sensor_id=sensor_id,
@@ -376,6 +381,22 @@ class IngestProcessor:
         )
 
     def _normalize_node_spec(self, spec: NodeSpec) -> tuple[NodeSpec, GeoPoint]:
+        gps_metadata = spec.metadata.get("gps") if isinstance(spec.metadata, dict) else None
+        gps_position_source = (
+            gps_metadata.get("position_source")
+            if isinstance(gps_metadata, dict)
+            else spec.metadata.get("position_source") if isinstance(spec.metadata, dict) else None
+        )
+        has_trusted_gps_position = (
+            isinstance(gps_position_source, str)
+            and gps_position_source.startswith("gps")
+            and gps_position_source != "gps_fallback"
+        )
+        if spec.position_geo is not None and (spec.position_m is None or has_trusted_gps_position):
+            local_pos = self._coordinate_frame.geo_to_local(spec.position_geo)
+            normalized = spec.model_copy(update={"position_m": local_pos})
+            return normalized, spec.position_geo
+
         if spec.position_m is not None:
             local_pos = spec.position_m
             geo = spec.position_geo or self._coordinate_frame.local_to_geo(local_pos)

@@ -60,6 +60,7 @@ class NodeRunner {
   std::vector<int16_t> packetInterleavedSamples_;
   bool packetOpen_ = false;
   uint64_t packetStartSampleIndex_ = 0;
+  uint64_t packetStartMonotonicUs_ = 0;
   uint64_t packetTargetEndSampleIndex_ = 0;
   bool haveExpectedNextSampleIndex_ = false;
   uint64_t expectedNextSampleIndex_ = 0;

@@ -22,7 +22,6 @@ constexpr uint64_t kUsPerMs = 1000ULL;
 constexpr uint64_t kNsPerSecond = 1000000000ULL;
 constexpr uint64_t kNsPerMillisecond = 1000000ULL;
 constexpr uint64_t kPpsFallbackTimeoutUs = 3000000ULL;
-constexpr int64_t kUtcSentenceSanityLimitNs = 2LL * 1000000000LL;
 // UART-delivered NMEA time-of-day trails the actual UTC instant because the
 // sentence has to be serialized on-wire before we parse it. Use a fixed
 // correction in no-PPS mode so the fallback discipline does not carry a
@@ -336,21 +335,6 @@ void NmeaGpsSource::consumeLine(const char* line, NodeClock* clock) {
         parsed.second,
         parsed.millisecond);
     bool utcSentencePlausible = true;
-    if (clock != nullptr && clock->timeQuality() != TimeQuality::kFreeRunning) {
-      const uint64_t estimatedNowNs = clock->nowUtcNs();
-      const int64_t sentenceAgeNs =
-          static_cast<int64_t>(estimatedNowNs) - static_cast<int64_t>(parsedUtcNs);
-      if (std::llabs(sentenceAgeNs) > kUtcSentenceSanityLimitNs) {
-        utcSentencePlausible = false;
-        haveUtcForNextPps_ = false;
-        haveAlignedPpsEpoch_ = false;
-        ppsUtcLabelValidAfterMonotonicUs_ = 0;
-        std::printf(
-            "[gps] ignored stale/implausible UTC sentence age_ns=%lld while clock=%u\n",
-            static_cast<long long>(sentenceAgeNs),
-            static_cast<unsigned>(clock->timeQuality()));
-      }
-    }
     if (ppsConfigured_ && hasFix_) {
       if (utcSentencePlausible) {
         nextPpsUtcNs_ = (parsedUtcNs / kNsPerSecond + 1ULL) * kNsPerSecond;

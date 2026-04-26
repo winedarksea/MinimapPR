@@ -845,6 +845,7 @@ class Storage:
         end_sample_index: int | None,
         toa_ns: int,
         tor_ns: int,
+        created_ns: int | None = None,
         source_type: str,
         time_quality: str = "",
     ) -> bool:
@@ -883,7 +884,7 @@ class Storage:
                     frame_sequence,
                     toa_ns,
                     tor_ns,
-                    tor_ns,
+                    created_ns if created_ns is not None else tor_ns,
                 ),
             )
             await self._commit_if_needed(db)

@@ -50,7 +50,7 @@ class NodeClock {
   double estimateSamplePositionAtMonotonicUs(uint64_t monotonicUs) const;
   uint64_t utcAtSamplePosition(double samplePosition) const;
   void setSampleAnchor(double samplePosition, uint64_t utcNs);
-  void setWallReference(uint64_t utcNs, uint64_t monotonicUs);
+  void setWallReference(uint64_t utcNs, uint64_t monotonicUs, const char* source = nullptr);
   void updateEffectiveSamplePeriod(double localToUtcScale, bool preferImmediateLock);
   bool gpsDisciplineAvailable(uint64_t monotonicUs) const;
 
@@ -90,7 +90,11 @@ class NodeClock {
 
   bool haveGpsInterval_ = false;
   uint64_t previousGpsMonotonicUs_ = 0;
+  uint64_t previousGpsMonotonicNs_ = 0;
   uint64_t lastGpsSyncMonotonicUs_ = 0;
+  uint64_t lastGpsSyncMonotonicNs_ = 0;
+  uint64_t lastRejectedGpsEpochLogMonotonicUs_ = 0;
+  uint64_t lastRejectedNmeaEpochLogMonotonicUs_ = 0;
   uint32_t gpsStablePulseCount_ = 0;
   uint32_t latestPpsEdgeCount_ = 0;
   int64_t latestPpsPhaseErrorNs_ = 0;

@@ -19,6 +19,7 @@ constexpr uint64_t kMinimumPpsIntervalUs = 900000ULL;
 constexpr uint64_t kMaximumPpsIntervalUs = 1100000ULL;
 constexpr int64_t kLargeNtpPhaseCorrectionNs = 2LL * 1000000000LL;
 constexpr int64_t kGpsNtpSanityLimitNs = 2LL * 1000000000LL;
+constexpr uint64_t kRejectedGpsEpochLogIntervalUs = 10000000ULL;
 
 double clampScale(double scale) {
   return std::clamp(scale, 0.9995, 1.0005);
@@ -29,6 +30,19 @@ double nsToPpm(double nominalNs, double effectiveNs) {
     return 0.0;
   }
   return ((effectiveNs / nominalNs) - 1.0) * kPpmScale;
+}
+
+uint64_t addRoundedDeltaNs(uint64_t referenceNs, double deltaNs) {
+  if (!std::isfinite(deltaNs)) {
+    return referenceNs;
+  }
+  if (deltaNs >= 0.0) {
+    const uint64_t roundedDeltaNs = static_cast<uint64_t>(std::llround(deltaNs));
+    return UINT64_MAX - referenceNs < roundedDeltaNs ? UINT64_MAX : referenceNs + roundedDeltaNs;
+  }
+
+  const uint64_t roundedDeltaNs = static_cast<uint64_t>(std::llround(-deltaNs));
+  return referenceNs > roundedDeltaNs ? referenceNs - roundedDeltaNs : 0ULL;
 }
 
 }  // namespace
@@ -75,7 +89,11 @@ void NodeClock::begin(
   previousNmeaUtcNs_ = 0;
   previousNmeaMonotonicUs_ = 0;
   previousGpsMonotonicUs_ = 0;
+  previousGpsMonotonicNs_ = 0;
   lastGpsSyncMonotonicUs_ = 0;
+  lastGpsSyncMonotonicNs_ = 0;
+  lastRejectedGpsEpochLogMonotonicUs_ = 0;
+  lastRejectedNmeaEpochLogMonotonicUs_ = 0;
   gpsStablePulseCount_ = 0;
   latestPpsEdgeCount_ = 0;
   latestPpsPhaseErrorNs_ = 0;
@@ -118,6 +136,12 @@ uint64_t NodeClock::nowUtcNs() const {
 }
 
 uint64_t NodeClock::utcAtMonotonicUs(uint64_t monotonicUs) const {
+  if (wallReferenceUtcNs_ > 0 && wallReferenceMonotonicUs_ > 0) {
+    const int64_t deltaUs =
+        static_cast<int64_t>(monotonicUs) - static_cast<int64_t>(wallReferenceMonotonicUs_);
+    const double deltaNs = static_cast<double>(deltaUs) * 1000.0 * localToUtcScale_;
+    return addRoundedDeltaNs(wallReferenceUtcNs_, deltaNs);
+  }
   return utcAtSamplePosition(estimateSamplePositionAtMonotonicUs(monotonicUs));
 }
 
@@ -167,6 +191,8 @@ void NodeClock::applyNtpObservation(uint64_t utcNs, uint64_t monotonicUs, uint64
     }
     haveGpsInterval_ = false;
     gpsStablePulseCount_ = 0;
+    lastGpsSyncMonotonicUs_ = 0;
+    lastGpsSyncMonotonicNs_ = 0;
     latestPpsPhaseErrorNs_ = phaseErrorNs;
     std::printf(
         "[node] NTP sanity check rejected GPS PPS epoch error_ns=%lld; recovering with NTP\n",
@@ -179,7 +205,7 @@ void NodeClock::applyNtpObservation(uint64_t utcNs, uint64_t monotonicUs, uint64
     previousNtpMonotonicUs_ = monotonicUs;
     lastNtpSyncMonotonicUs_ = monotonicUs;
     setSampleAnchor(estimateSamplePositionAtMonotonicUs(monotonicUs), utcNs);
-    setWallReference(utcNs, monotonicUs);
+    setWallReference(utcNs, monotonicUs, "ntp-first");
     std::printf("[node] first NTP anchor established\n");
     return;
   }
@@ -213,15 +239,31 @@ void NodeClock::applyNtpObservation(uint64_t utcNs, uint64_t monotonicUs, uint64
         "[node] applied large NTP phase correction error_ns=%lld\n",
         static_cast<long long>(phaseErrorNs));
   }
-  setWallReference(utcNs, monotonicUs);
+  setWallReference(utcNs, monotonicUs, "ntp");
 }
 
 void NodeClock::applyNmeaUtcObservation(uint64_t utcNs, uint64_t monotonicUs) {
-  const uint64_t nowUs = time_us_64();
-  if (gpsDisciplineAvailable(monotonicUs) ||
-      (lastNtpSyncMonotonicUs_ > 0 &&
-       nowUs >= lastNtpSyncMonotonicUs_ &&
-       (nowUs - lastNtpSyncMonotonicUs_) <= kNtpFreshUs)) {
+  if (gpsDisciplineAvailable(monotonicUs)) {
+    return;
+  }
+
+  const double samplePositionAtObservation = estimateSamplePositionAtMonotonicUs(monotonicUs);
+  const uint64_t estimatedUtcNs = utcAtSamplePosition(samplePositionAtObservation);
+  const int64_t phaseErrorNs =
+      static_cast<int64_t>(utcNs) - static_cast<int64_t>(estimatedUtcNs);
+  const bool ntpEpochIsFresh =
+      lastNtpSyncMonotonicUs_ > 0 &&
+      monotonicUs >= lastNtpSyncMonotonicUs_ &&
+      (monotonicUs - lastNtpSyncMonotonicUs_) <= kNtpFreshUs;
+  if (ntpEpochIsFresh && std::llabs(phaseErrorNs) > kGpsNtpSanityLimitNs) {
+    if (lastRejectedNmeaEpochLogMonotonicUs_ == 0 ||
+        monotonicUs < lastRejectedNmeaEpochLogMonotonicUs_ ||
+        (monotonicUs - lastRejectedNmeaEpochLogMonotonicUs_) >= kRejectedGpsEpochLogIntervalUs) {
+      lastRejectedNmeaEpochLogMonotonicUs_ = monotonicUs;
+      std::printf(
+          "[node] rejected NMEA UTC fallback error_ns=%lld while NTP epoch is fresh\n",
+          static_cast<long long>(phaseErrorNs));
+    }
     return;
   }
 
@@ -229,8 +271,8 @@ void NodeClock::applyNmeaUtcObservation(uint64_t utcNs, uint64_t monotonicUs) {
     haveNmeaObservation_ = true;
     previousNmeaUtcNs_ = utcNs;
     previousNmeaMonotonicUs_ = monotonicUs;
-    setSampleAnchor(estimateSamplePositionAtMonotonicUs(monotonicUs), utcNs);
-    setWallReference(utcNs, monotonicUs);
+    setSampleAnchor(samplePositionAtObservation, utcNs);
+    setWallReference(utcNs, monotonicUs, "nmea-first");
     std::printf("[node] first NMEA UTC fallback anchor established\n");
     return;
   }
@@ -250,13 +292,22 @@ void NodeClock::applyNmeaUtcObservation(uint64_t utcNs, uint64_t monotonicUs) {
   previousNmeaUtcNs_ = utcNs;
   previousNmeaMonotonicUs_ = monotonicUs;
   // NMEA is a coarse fallback source with serial-delivery jitter. After the
-  // first fallback anchor, keep phase continuity and use later sentences only
-  // to trim rate until PPS or NTP takes over.
-  setWallReference(utcNs, monotonicUs);
+  // first fallback anchor, keep phase continuity for small corrections. If
+  // NTP has left the clock seconds away from GPS time, GPS must be allowed to
+  // re-anchor so PPS can take over with the correct UTC label.
+  if (std::llabs(phaseErrorNs) >= kLargeNtpPhaseCorrectionNs) {
+    setSampleAnchor(samplePositionAtObservation, utcNs);
+    std::printf(
+        "[node] applied large NMEA UTC phase correction error_ns=%lld\n",
+        static_cast<long long>(phaseErrorNs));
+  }
+  setWallReference(utcNs, monotonicUs, "nmea");
 }
 
 void NodeClock::applyGpsPpsObservation(uint64_t utcSecondNs, const GpsPpsCaptureEvent& ppsEvent) {
   const uint64_t monotonicUs = ppsEvent.monotonicUs;
+  const uint64_t monotonicNs =
+      ppsEvent.monotonicNs > 0 ? ppsEvent.monotonicNs : (monotonicUs * 1000ULL);
   const bool missedPpsEdges =
       latestPpsEdgeCount_ > 0 &&
       ppsEvent.edgeCount > latestPpsEdgeCount_ &&
@@ -273,15 +324,19 @@ void NodeClock::applyGpsPpsObservation(uint64_t utcSecondNs, const GpsPpsCapture
 
   double samplePosition = estimateSamplePositionAtMonotonicUs(monotonicUs);
   if (ppsEvent.audioProducerSnapshot.valid) {
-    const double samplePeriodUs =
-        effectiveSamplePeriodNs_ > 0.0 ? (effectiveSamplePeriodNs_ / 1000.0) : nominalSamplePeriodUs_;
+    const double samplePeriodNs =
+        effectiveSamplePeriodNs_ > 0.0 ? effectiveSamplePeriodNs_ : nominalSamplePeriodNs_;
+    const uint64_t snapshotMonotonicNs = ppsEvent.audioProducerSnapshot.capturedMonotonicUs * 1000ULL;
     const uint64_t snapshotDelayUs =
-        ppsEvent.audioProducerSnapshot.capturedMonotonicUs > monotonicUs
-            ? (ppsEvent.audioProducerSnapshot.capturedMonotonicUs - monotonicUs)
+        snapshotMonotonicNs > monotonicNs
+            ? ((snapshotMonotonicNs - monotonicNs) / 1000ULL)
             : 0ULL;
-    const double delaySamples = samplePeriodUs > 0.0
-        ? (static_cast<double>(snapshotDelayUs) / samplePeriodUs)
+    const uint64_t snapshotDelayNs =
+        snapshotMonotonicNs > monotonicNs ? (snapshotMonotonicNs - monotonicNs) : 0ULL;
+    const double delaySamples = samplePeriodNs > 0.0
+        ? (static_cast<double>(snapshotDelayNs) / samplePeriodNs)
         : 0.0;
+    (void)snapshotDelayUs;
     samplePosition = std::max<double>(0.0, ppsEvent.audioProducerSnapshot.samplePosition - delaySamples);
     lastObservedCompletedBlockCount_ = ppsEvent.audioProducerSnapshot.completedBlockCount;
     lastObservedDmaRingSlotIndex_ = ppsEvent.audioProducerSnapshot.dmaRingSlotIndex;
@@ -293,10 +348,15 @@ void NodeClock::applyGpsPpsObservation(uint64_t utcSecondNs, const GpsPpsCapture
   const bool gpsWasFresh = gpsAgeUs <= kGpsHoldoverUs;
 
   if (haveGpsInterval_ && monotonicUs > previousGpsMonotonicUs_) {
-    const uint64_t localIntervalUs = monotonicUs - previousGpsMonotonicUs_;
+    const uint64_t localIntervalNs =
+        (monotonicNs > previousGpsMonotonicNs_ && previousGpsMonotonicNs_ > 0)
+            ? (monotonicNs - previousGpsMonotonicNs_)
+            : ((monotonicUs - previousGpsMonotonicUs_) * 1000ULL);
+    const uint64_t localIntervalUs = localIntervalNs / 1000ULL;
     if (localIntervalUs < kMinimumPpsIntervalUs || localIntervalUs > kMaximumPpsIntervalUs) {
       haveGpsInterval_ = true;
       previousGpsMonotonicUs_ = monotonicUs;
+      previousGpsMonotonicNs_ = monotonicNs;
       gpsStablePulseCount_ = 1;
       latestPpsEdgeCount_ = ppsEvent.edgeCount;
       latestPpsPhaseErrorNs_ = 0;
@@ -307,8 +367,7 @@ void NodeClock::applyGpsPpsObservation(uint64_t utcSecondNs, const GpsPpsCapture
       return;
     }
 
-    const double localIntervalNs = static_cast<double>(localIntervalUs) * 1000.0;
-    const double localToUtcScale = clampScale(static_cast<double>(kNsPerSecond) / localIntervalNs);
+    const double localToUtcScale = clampScale(static_cast<double>(kNsPerSecond) / static_cast<double>(localIntervalNs));
     updateEffectiveSamplePeriod(localToUtcScale, true);
     gpsStablePulseCount_ = std::min<uint32_t>(gpsStablePulseCount_ + 1U, kGpsStablePulseTarget);
   } else {
@@ -317,7 +376,32 @@ void NodeClock::applyGpsPpsObservation(uint64_t utcSecondNs, const GpsPpsCapture
   }
 
   previousGpsMonotonicUs_ = monotonicUs;
+  previousGpsMonotonicNs_ = monotonicNs;
+  const uint64_t estimatedUtcAtPpsNs = utcAtSamplePosition(samplePosition);
+  const int64_t gpsEpochErrorNs =
+      static_cast<int64_t>(utcSecondNs) - static_cast<int64_t>(estimatedUtcAtPpsNs);
+  const bool ntpEpochIsFresh =
+      lastNtpSyncMonotonicUs_ > 0 &&
+      monotonicUs >= lastNtpSyncMonotonicUs_ &&
+      (monotonicUs - lastNtpSyncMonotonicUs_) <= kNtpFreshUs;
+  if (ntpEpochIsFresh && std::llabs(gpsEpochErrorNs) > kGpsNtpSanityLimitNs) {
+    latestPpsEdgeCount_ = ppsEvent.edgeCount;
+    latestPpsPhaseErrorNs_ = gpsEpochErrorNs;
+    lastGpsSyncMonotonicUs_ = 0;
+    lastGpsSyncMonotonicNs_ = 0;
+    if (lastRejectedGpsEpochLogMonotonicUs_ == 0 ||
+        monotonicUs < lastRejectedGpsEpochLogMonotonicUs_ ||
+        (monotonicUs - lastRejectedGpsEpochLogMonotonicUs_) >= kRejectedGpsEpochLogIntervalUs) {
+      lastRejectedGpsEpochLogMonotonicUs_ = monotonicUs;
+      std::printf(
+          "[node] rejected GPS PPS UTC label error_ns=%lld while NTP epoch is fresh; keeping PPS cadence only\n",
+          static_cast<long long>(gpsEpochErrorNs));
+    }
+    return;
+  }
+
   lastGpsSyncMonotonicUs_ = monotonicUs;
+  lastGpsSyncMonotonicNs_ = monotonicNs;
   const uint64_t anchorSampleIndex =
       samplePosition <= 0.0 ? 0ULL : static_cast<uint64_t>(std::llround(samplePosition));
   if (!gpsWasFresh || !haveSampleAnchor_ || gpsStablePulseCount_ == 1) {
@@ -348,8 +432,7 @@ double NodeClock::estimateSamplePositionAtMonotonicUs(uint64_t monotonicUs) cons
 
 uint64_t NodeClock::utcAtSamplePosition(double samplePosition) const {
   const double sampleDelta = samplePosition - anchorSamplePosition_;
-  const double utcNs = static_cast<double>(anchorWallNs_) + (sampleDelta * effectiveSamplePeriodNs_);
-  return utcNs <= 0.0 ? 0ULL : static_cast<uint64_t>(std::llround(utcNs));
+  return addRoundedDeltaNs(anchorWallNs_, sampleDelta * effectiveSamplePeriodNs_);
 }
 
 void NodeClock::setSampleAnchor(double samplePosition, uint64_t utcNs) {
@@ -358,9 +441,20 @@ void NodeClock::setSampleAnchor(double samplePosition, uint64_t utcNs) {
   haveSampleAnchor_ = true;
 }
 
-void NodeClock::setWallReference(uint64_t utcNs, uint64_t monotonicUs) {
+void NodeClock::setWallReference(uint64_t utcNs, uint64_t monotonicUs, const char* source) {
   wallReferenceUtcNs_ = utcNs;
   wallReferenceMonotonicUs_ = monotonicUs;
+  if (source != nullptr) {
+    const uint64_t nowUs = time_us_64();
+    std::printf(
+        "[node] wall reference source=%s utc=%llu mono=%llu now_us=%llu scale=%.9f now_utc=%llu\n",
+        source,
+        static_cast<unsigned long long>(utcNs),
+        static_cast<unsigned long long>(monotonicUs),
+        static_cast<unsigned long long>(nowUs),
+        static_cast<double>(localToUtcScale_),
+        static_cast<unsigned long long>(utcAtMonotonicUs(nowUs)));
+  }
 }
 
 void NodeClock::updateEffectiveSamplePeriod(double localToUtcScale, bool preferImmediateLock) {

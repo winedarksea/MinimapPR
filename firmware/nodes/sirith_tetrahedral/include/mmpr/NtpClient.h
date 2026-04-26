@@ -17,14 +17,15 @@ class NodeClock;
 // Priority contract:
 //   GPS PPS  >  NTP discipline  >  free-running boot anchor
 //
-// NtpClient only feeds slew observations into NodeClock; it never steps the
-// frame anchor after the first accepted observation, and it is ignored while a
-// fresh GPS PPS discipline is active.
+// NtpClient feeds occasional epoch observations into NodeClock. Fresh GPS PPS
+// remains the preferred cadence source, but NTP still runs as a low-rate sanity
+// check so a bad GPS UTC label cannot leave the node minutes off forever.
 //
 // Retry behaviour:
 //   - On failure: retries every kRetryIntervalMs until it succeeds.
-//   - On success: periodically refreshes discipline unless PPS is currently
-//     locked, so NTP can take over again after PPS holdover expires.
+//   - On success: periodically refreshes discipline. NodeClock ignores normal
+//     small NTP phase while GPS PPS is fresh, and uses large NTP disagreement
+//     only to recover from an implausible GPS epoch.
 class NtpClient {
  public:
   // Store server hostname and clock reference.  Does not initiate any network

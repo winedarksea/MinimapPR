@@ -182,6 +182,25 @@ void closeConnection(HttpFramePublisher::TransportState& state) {
   state.connectDone = true;
 }
 
+void abortConnection(HttpFramePublisher::TransportState& state) {
+  if (state.pcb == nullptr) {
+    state.connected = false;
+    state.connectDone = true;
+    return;
+  }
+
+  tcp_arg(state.pcb, nullptr);
+  tcp_recv(state.pcb, nullptr);
+  tcp_sent(state.pcb, nullptr);
+  tcp_poll(state.pcb, nullptr, 0);
+  tcp_err(state.pcb, nullptr);
+  tcp_abort(state.pcb);
+
+  state.pcb = nullptr;
+  state.connected = false;
+  state.connectDone = true;
+}
+
 void resetRequestState(HttpFramePublisher::TransportState& state, bool keepResponseBody) {
   state.requestHeader.clear();
   state.payloadPrefix.clear();
@@ -636,7 +655,7 @@ bool ensureConnected(
 
   if (!state.connected) {
     state.err = state.err == ERR_OK ? ERR_TIMEOUT : state.err;
-    closeConnection(state);
+    abortConnection(state);
     return false;
   }
 
@@ -685,7 +704,7 @@ PublishResult post(
 
   if (!state.requestDone) {
     state.err = ERR_TIMEOUT;
-    closeConnection(state);
+    abortConnection(state);
     result.statusCode = -4;
   } else if (state.statusCode > 0) {
     result.statusCode = state.statusCode;

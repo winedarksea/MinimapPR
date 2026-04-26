@@ -275,7 +275,9 @@ bool buildIngestPayloadParts(
 
   if (frame.hasTimingDiagnostics) {
     suffix += ",\"timing_diagnostics\":{";
-    suffix += "\"pps_edge_count\":";
+    suffix += "\"gps_anchor\":";
+    suffix += frame.timingHasGpsAnchor ? "true" : "false";
+    suffix += ",\"pps_edge_count\":";
     appendUint32(suffix, frame.ppsEdgeCount);
     suffix += ",\"dma_ring_slot_index\":";
     appendUint32(suffix, frame.dmaRingSlotIndex);

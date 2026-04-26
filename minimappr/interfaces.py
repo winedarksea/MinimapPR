@@ -325,6 +325,7 @@ class StorageBackend(Protocol):
         self,
         *,
         node_id: str,
+        boot_session: str = "",
         frame_sequence: int | None,
         start_time_ns: int,
         utc_end_ns: int | None,
@@ -332,6 +333,7 @@ class StorageBackend(Protocol):
         end_sample_index: int | None,
         toa_ns: int,
         tor_ns: int,
+        created_ns: int | None = None,
         source_type: str,
         time_quality: str = "",
     ) -> bool:
