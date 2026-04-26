@@ -147,9 +147,17 @@ struct HttpFramePublisher::TransportState {
   size_t bodyBytesReceived = 0;
   bool responseMustClose = false;
   bool sawResponseClose = false;
+  HttpFramePublisher::BackgroundPollCallback backgroundPollCallback = nullptr;
+  void* backgroundPollContext = nullptr;
 };
 
 namespace {
+
+void runBackgroundPoll(HttpFramePublisher::TransportState& state) {
+  if (state.backgroundPollCallback != nullptr) {
+    state.backgroundPollCallback(state.backgroundPollContext);
+  }
+}
 
 void closeConnection(HttpFramePublisher::TransportState& state) {
   if (state.pcb == nullptr) {
@@ -237,6 +245,7 @@ bool resolveHost(const std::string& host, uint32_t timeoutMs, HttpFramePublisher
   const absolute_time_t deadline = make_timeout_time_ms(timeoutMs);
   while (!state.dnsDone && !time_reached(deadline)) {
     cyw43_arch_poll();
+    runBackgroundPoll(state);
     sleep_ms(1);
   }
 
@@ -621,6 +630,7 @@ bool ensureConnected(
   const absolute_time_t deadline = make_timeout_time_ms(timeoutMs);
   while (!state.connectDone && !time_reached(deadline)) {
     cyw43_arch_poll();
+    runBackgroundPoll(state);
     sleep_ms(1);
   }
 
@@ -650,11 +660,6 @@ PublishResult post(
     return result;
   }
 
-  if (!ensureConnected(host, port, timeoutMs, state)) {
-    result.statusCode = (state.err == ERR_TIMEOUT) ? -4 : -3;
-    return result;
-  }
-
   resetRequestState(state, keepResponseBody);
   const size_t payloadSize =
       payloadParts.prefix.size() + payloadParts.encodedAudioBytes + payloadParts.suffix.size();
@@ -663,11 +668,18 @@ PublishResult post(
   state.payloadSuffix = std::move(payloadParts.suffix);
   state.audioData = audioData;
   state.audioBytes = payloadParts.rawAudioBytes;
+
+  if (!ensureConnected(host, port, timeoutMs, state)) {
+    result.statusCode = (state.err == ERR_TIMEOUT) ? -4 : -3;
+    return result;
+  }
+
   flushTx(state, state.pcb);
 
   const absolute_time_t deadline = make_timeout_time_ms(timeoutMs);
   while (!state.requestDone && !time_reached(deadline)) {
     cyw43_arch_poll();
+    runBackgroundPoll(state);
     sleep_ms(1);
   }
 
@@ -705,6 +717,14 @@ HttpFramePublisher::~HttpFramePublisher() {
     delete transportState_;
     transportState_ = nullptr;
   }
+}
+
+void HttpFramePublisher::setBackgroundPollCallback(BackgroundPollCallback callback, void* context) {
+  if (transportState_ == nullptr) {
+    return;
+  }
+  transportState_->backgroundPollCallback = callback;
+  transportState_->backgroundPollContext = context;
 }
 
 PublishResult HttpFramePublisher::publish(const NodeDescriptor& node, const AudioFrame& frame, bool keepResponseBody) {

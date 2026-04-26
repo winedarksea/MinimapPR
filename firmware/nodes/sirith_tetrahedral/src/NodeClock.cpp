@@ -14,9 +14,11 @@ namespace {
 constexpr double kPpmScale = 1000000.0;
 constexpr double kNtpSlewAlpha = 0.15;
 constexpr double kGpsSlewAlpha = 0.35;
-constexpr uint64_t kMaxAcceptedNtpRttUs = 2000000ULL;
+constexpr uint64_t kMaxAcceptedNtpRttUs = 200000ULL;
 constexpr uint64_t kMinimumPpsIntervalUs = 900000ULL;
 constexpr uint64_t kMaximumPpsIntervalUs = 1100000ULL;
+constexpr int64_t kLargeNtpPhaseCorrectionNs = 2LL * 1000000000LL;
+constexpr int64_t kGpsNtpSanityLimitNs = 2LL * 1000000000LL;
 
 double clampScale(double scale) {
   return std::clamp(scale, 0.9995, 1.0005);
@@ -69,6 +71,9 @@ void NodeClock::begin(
   previousNtpUtcNs_ = 0;
   previousNtpMonotonicUs_ = 0;
   lastNtpSyncMonotonicUs_ = 0;
+  haveNmeaObservation_ = false;
+  previousNmeaUtcNs_ = 0;
+  previousNmeaMonotonicUs_ = 0;
   previousGpsMonotonicUs_ = 0;
   lastGpsSyncMonotonicUs_ = 0;
   gpsStablePulseCount_ = 0;
@@ -141,9 +146,6 @@ void NodeClock::applyNtpObservation(uint64_t utcNs, uint64_t monotonicUs, uint64
       lastGpsSyncMonotonicUs_ > 0 &&
       monotonicUs >= lastGpsSyncMonotonicUs_ &&
       (monotonicUs - lastGpsSyncMonotonicUs_) <= kGpsFreshUs;
-  if (gpsPpsIsFresh) {
-    return;
-  }
   if (roundTripUs > kMaxAcceptedNtpRttUs) {
     std::printf(
         "[node] ignored NTP observation with high RTT=%llu us\n",
@@ -153,6 +155,22 @@ void NodeClock::applyNtpObservation(uint64_t utcNs, uint64_t monotonicUs, uint64
 
   if (!haveSampleAnchor_) {
     setSampleAnchor(estimateSamplePositionAtMonotonicUs(monotonicUs), utcNs);
+  }
+
+  if (gpsPpsIsFresh) {
+    const double samplePositionAtObservation = estimateSamplePositionAtMonotonicUs(monotonicUs);
+    const uint64_t estimatedUtcNs = utcAtSamplePosition(samplePositionAtObservation);
+    const int64_t phaseErrorNs =
+        static_cast<int64_t>(utcNs) - static_cast<int64_t>(estimatedUtcNs);
+    if (std::llabs(phaseErrorNs) <= kGpsNtpSanityLimitNs) {
+      return;
+    }
+    haveGpsInterval_ = false;
+    gpsStablePulseCount_ = 0;
+    latestPpsPhaseErrorNs_ = phaseErrorNs;
+    std::printf(
+        "[node] NTP sanity check rejected GPS PPS epoch error_ns=%lld; recovering with NTP\n",
+        static_cast<long long>(phaseErrorNs));
   }
 
   if (!haveNtpObservation_) {
@@ -181,11 +199,59 @@ void NodeClock::applyNtpObservation(uint64_t utcNs, uint64_t monotonicUs, uint64
   previousNtpUtcNs_ = utcNs;
   previousNtpMonotonicUs_ = monotonicUs;
   lastNtpSyncMonotonicUs_ = monotonicUs;
-  // Intentionally do NOT call setSampleAnchor() here. After the first NTP
-  // lock the anchor is correct; the slew filter above (updateEffectiveSamplePeriod)
-  // absorbs ongoing drift via rate correction. Re-anchoring on every NTP
-  // observation jumps anchorWallNs_ under any in-flight packet in NodeRunner
-  // and was the root cause of utc_end < utc_start rejections at the server.
+  // Most refreshes should only discipline rate, but if the current phase is
+  // still off by seconds then the node is effectively stuck on its boot/build
+  // anchor. In that state, preserving continuity is less important than
+  // converging to real UTC so the server can treat incoming audio as recent.
+  const double samplePositionAtObservation = estimateSamplePositionAtMonotonicUs(monotonicUs);
+  const uint64_t estimatedUtcNs = utcAtSamplePosition(samplePositionAtObservation);
+  const int64_t phaseErrorNs =
+      static_cast<int64_t>(utcNs) - static_cast<int64_t>(estimatedUtcNs);
+  if (std::llabs(phaseErrorNs) >= kLargeNtpPhaseCorrectionNs) {
+    setSampleAnchor(samplePositionAtObservation, utcNs);
+    std::printf(
+        "[node] applied large NTP phase correction error_ns=%lld\n",
+        static_cast<long long>(phaseErrorNs));
+  }
+  setWallReference(utcNs, monotonicUs);
+}
+
+void NodeClock::applyNmeaUtcObservation(uint64_t utcNs, uint64_t monotonicUs) {
+  const uint64_t nowUs = time_us_64();
+  if (gpsDisciplineAvailable(monotonicUs) ||
+      (lastNtpSyncMonotonicUs_ > 0 &&
+       nowUs >= lastNtpSyncMonotonicUs_ &&
+       (nowUs - lastNtpSyncMonotonicUs_) <= kNtpFreshUs)) {
+    return;
+  }
+
+  if (!haveNmeaObservation_) {
+    haveNmeaObservation_ = true;
+    previousNmeaUtcNs_ = utcNs;
+    previousNmeaMonotonicUs_ = monotonicUs;
+    setSampleAnchor(estimateSamplePositionAtMonotonicUs(monotonicUs), utcNs);
+    setWallReference(utcNs, monotonicUs);
+    std::printf("[node] first NMEA UTC fallback anchor established\n");
+    return;
+  }
+
+  if (monotonicUs <= previousNmeaMonotonicUs_ || utcNs <= previousNmeaUtcNs_) {
+    return;
+  }
+
+  const double localElapsedNs = static_cast<double>(monotonicUs - previousNmeaMonotonicUs_) * 1000.0;
+  const double utcElapsedNs = static_cast<double>(utcNs - previousNmeaUtcNs_);
+  if (localElapsedNs <= 0.0 || utcElapsedNs <= 0.0) {
+    return;
+  }
+
+  const double localToUtcScale = clampScale(utcElapsedNs / localElapsedNs);
+  updateEffectiveSamplePeriod(localToUtcScale, false);
+  previousNmeaUtcNs_ = utcNs;
+  previousNmeaMonotonicUs_ = monotonicUs;
+  // NMEA is a coarse fallback source with serial-delivery jitter. After the
+  // first fallback anchor, keep phase continuity and use later sentences only
+  // to trim rate until PPS or NTP takes over.
   setWallReference(utcNs, monotonicUs);
 }
 
@@ -264,16 +330,6 @@ void NodeClock::applyGpsPpsObservation(uint64_t utcSecondNs, const GpsPpsCapture
   }
   latestPpsEdgeCount_ = ppsEvent.edgeCount;
   setWallReference(utcSecondNs, monotonicUs);
-  std::printf(
-      "[timing] pps utc=%llu sample=%llu edge=%u dma_slot=%u block=%llu phase_ns=%lld ppm=%.3f cycles=%llu\n",
-      static_cast<unsigned long long>(utcSecondNs),
-      static_cast<unsigned long long>(anchorSampleIndex),
-      static_cast<unsigned>(ppsEvent.edgeCount),
-      static_cast<unsigned>(lastObservedDmaRingSlotIndex_),
-      static_cast<unsigned long long>(lastObservedCompletedBlockCount_),
-      static_cast<long long>(latestPpsPhaseErrorNs_),
-      filteredFrequencyPpm_,
-      static_cast<unsigned long long>(ppsEvent.tickCycles));
 }
 
 double NodeClock::estimateSamplePositionAtMonotonicUs(uint64_t monotonicUs) const {

@@ -22,6 +22,7 @@ constexpr uint64_t kUsPerMs = 1000ULL;
 constexpr uint64_t kNsPerSecond = 1000000000ULL;
 constexpr uint64_t kNsPerMillisecond = 1000000ULL;
 constexpr uint64_t kPpsFallbackTimeoutUs = 3000000ULL;
+constexpr int64_t kUtcSentenceSanityLimitNs = 2LL * 1000000000LL;
 // UART-delivered NMEA time-of-day trails the actual UTC instant because the
 // sentence has to be serialized on-wire before we parse it. Use a fixed
 // correction in no-PPS mode so the fallback discipline does not carry a
@@ -70,12 +71,12 @@ bool NmeaGpsSource::begin() {
   loggedPpsCaptureState_ = false;
   loggedHealthyState_ = false;
   loggedFixState_ = false;
-  loggedPpsEdgeCount_ = 0;
   loggedNoPpsFallback_ = false;
   haveAlignedPpsEpoch_ = false;
   ppsSignalCurrentlyObserved_ = false;
   lastAppliedPpsEdgeCount_ = 0;
   lastPpsEdgeUs_ = 0;
+  ppsUtcLabelValidAfterMonotonicUs_ = 0;
   return true;
 }
 
@@ -159,11 +160,15 @@ void NmeaGpsSource::poll(NodeDescriptor& descriptor, NodeClock* clock) {
     hasDateTime_ = false;
     haveUtcForNextPps_ = false;
     haveAlignedPpsEpoch_ = false;
+    ppsUtcLabelValidAfterMonotonicUs_ = 0;
     activeFixDimension_ = 0;
     activeGeoPosition_ = config_.fallbackGeoPosition;
   } else if (hasFix_ && fixAgeUs > (static_cast<uint64_t>(config_.staleFixTimeoutMs) * kUsPerMs)) {
     hasFix_ = false;
     hasAltitude_ = false;
+    haveUtcForNextPps_ = false;
+    haveAlignedPpsEpoch_ = false;
+    ppsUtcLabelValidAfterMonotonicUs_ = 0;
     activeFixDimension_ = 0;
     activeGeoPosition_ = config_.fallbackGeoPosition;
   }
@@ -205,12 +210,8 @@ void NmeaGpsSource::consumePendingPps(NodeClock* clock) {
   }
 
   GpsPpsCaptureEvent ppsEvent = {};
-  if (clock == nullptr || !haveUtcForNextPps_) {
-    bool discardedEvent = false;
-    uint32_t latestDiscardedEdgeCount = 0;
+  if (clock == nullptr || !hasFix_ || !haveUtcForNextPps_) {
     while (ppsCapture_.consumeNext(ppsEvent)) {
-      discardedEvent = true;
-      latestDiscardedEdgeCount = ppsEvent.edgeCount;
       lastPpsEdgeUs_ = time_us_64();
       if (!ppsSignalCurrentlyObserved_) {
         ppsSignalCurrentlyObserved_ = true;
@@ -218,13 +219,8 @@ void NmeaGpsSource::consumePendingPps(NodeClock* clock) {
         std::printf("[gps] PPS edges observed; waiting for UTC sentence before locking\n");
       }
     }
-    if (discardedEvent && latestDiscardedEdgeCount > loggedPpsEdgeCount_) {
-      loggedPpsEdgeCount_ = latestDiscardedEdgeCount;
-      std::printf(
-          "[gps] discarded unlabeled PPS edges through=%u while awaiting UTC\n",
-          static_cast<unsigned>(loggedPpsEdgeCount_));
-    }
     haveAlignedPpsEpoch_ = false;
+    ppsUtcLabelValidAfterMonotonicUs_ = 0;
     return;
   }
 
@@ -233,6 +229,16 @@ void NmeaGpsSource::consumePendingPps(NodeClock* clock) {
       ppsSignalCurrentlyObserved_ = true;
       loggedNoPpsFallback_ = false;
       std::printf("[gps] PPS edges resumed; attempting GPS PPS discipline\n");
+    }
+    if (ppsUtcLabelValidAfterMonotonicUs_ > 0 &&
+        ppsEvent.monotonicUs <= ppsUtcLabelValidAfterMonotonicUs_) {
+      lastPpsEdgeUs_ = time_us_64();
+      lastAppliedPpsEdgeCount_ = ppsEvent.edgeCount;
+      haveAlignedPpsEpoch_ = false;
+      std::printf(
+          "[gps] discarded PPS edge=%u captured before UTC sentence; waiting for next PPS boundary\n",
+          static_cast<unsigned>(ppsEvent.edgeCount));
+      continue;
     }
     if (haveAlignedPpsEpoch_ &&
         ppsEvent.edgeCount > lastAppliedPpsEdgeCount_ &&
@@ -250,10 +256,6 @@ void NmeaGpsSource::consumePendingPps(NodeClock* clock) {
     lastAppliedPpsEdgeCount_ = ppsEvent.edgeCount;
     lastPpsEdgeUs_ = time_us_64();
     nextPpsUtcNs_ += kNsPerSecond;
-    if (ppsEvent.edgeCount > loggedPpsEdgeCount_) {
-      loggedPpsEdgeCount_ = ppsEvent.edgeCount;
-      std::printf("[gps] observed PPS edges=%u\n", static_cast<unsigned>(loggedPpsEdgeCount_));
-    }
   }
 }
 
@@ -281,8 +283,6 @@ void NmeaGpsSource::consumeLine(const char* line, NodeClock* clock) {
   haveSeenSentences_ = true;
   healthy_ = true;
   lastSentenceUs_ = time_us_64();
-  ensurePpsCaptureStarted();
-
   if (parsed.hasFix && parsed.hasLocation) {
     hasFix_ = true;
     activeGeoPosition_.lat = parsed.latitudeDeg;
@@ -303,7 +303,18 @@ void NmeaGpsSource::consumeLine(const char* line, NodeClock* clock) {
     hasFix_ = false;
     activeFixDimension_ = 0;
     hasAltitude_ = false;
+    haveUtcForNextPps_ = false;
+    haveAlignedPpsEpoch_ = false;
+    ppsUtcLabelValidAfterMonotonicUs_ = 0;
     activeGeoPosition_ = config_.fallbackGeoPosition;
+  }
+
+  // Only arm PPS once the receiver reports an active fix. Modules commonly
+  // emit UART time/date before their PPS output is trustworthy; starting PPS
+  // capture earlier lets a floating or pre-lock PPS line suppress the NMEA
+  // fallback path and destabilize packet timestamps.
+  if (hasFix_) {
+    ensurePpsCaptureStarted();
   }
 
   if (parsed.hasUtcDateTime) {
@@ -311,41 +322,58 @@ void NmeaGpsSource::consumeLine(const char* line, NodeClock* clock) {
     const uint64_t sentenceMonotonicUs =
         lastSentenceUs_ > kNmeaSerialLatencyUs ? (lastSentenceUs_ - kNmeaSerialLatencyUs) : 0ULL;
     const bool ppsRecentlyObserved =
+        hasFix_ &&
         ppsConfigured_ &&
         lastPpsEdgeUs_ > 0 &&
         lastSentenceUs_ >= lastPpsEdgeUs_ &&
         (lastSentenceUs_ - lastPpsEdgeUs_) <= kPpsFallbackTimeoutUs;
-    if (ppsConfigured_) {
-      const uint64_t parsedUtcNs = unixEpochNs(
-          parsed.year,
-          parsed.month,
-          parsed.day,
-          parsed.hour,
-          parsed.minute,
-          parsed.second,
-          0);
-      nextPpsUtcNs_ = parsedUtcNs + kNsPerSecond;
-      haveUtcForNextPps_ = true;
+    const uint64_t parsedUtcNs = unixEpochNs(
+        parsed.year,
+        parsed.month,
+        parsed.day,
+        parsed.hour,
+        parsed.minute,
+        parsed.second,
+        parsed.millisecond);
+    bool utcSentencePlausible = true;
+    if (clock != nullptr && clock->timeQuality() != TimeQuality::kFreeRunning) {
+      const uint64_t estimatedNowNs = clock->nowUtcNs();
+      const int64_t sentenceAgeNs =
+          static_cast<int64_t>(estimatedNowNs) - static_cast<int64_t>(parsedUtcNs);
+      if (std::llabs(sentenceAgeNs) > kUtcSentenceSanityLimitNs) {
+        utcSentencePlausible = false;
+        haveUtcForNextPps_ = false;
+        haveAlignedPpsEpoch_ = false;
+        ppsUtcLabelValidAfterMonotonicUs_ = 0;
+        std::printf(
+            "[gps] ignored stale/implausible UTC sentence age_ns=%lld while clock=%u\n",
+            static_cast<long long>(sentenceAgeNs),
+            static_cast<unsigned>(clock->timeQuality()));
+      }
+    }
+    if (ppsConfigured_ && hasFix_) {
+      if (utcSentencePlausible) {
+        nextPpsUtcNs_ = (parsedUtcNs / kNsPerSecond + 1ULL) * kNsPerSecond;
+        haveUtcForNextPps_ = true;
+        ppsUtcLabelValidAfterMonotonicUs_ = lastSentenceUs_;
+      }
+    } else {
+      haveUtcForNextPps_ = false;
+      haveAlignedPpsEpoch_ = false;
+      ppsUtcLabelValidAfterMonotonicUs_ = 0;
     }
 
-    if (clock != nullptr && !ppsRecentlyObserved) {
+    // Only trust NMEA UTC as an absolute time source once the receiver has an
+    // active fix. In no-fix mode many modules still emit syntactically valid
+    // RMC/ZDA date/time fields, but they can be stale or otherwise not tied to
+    // the current epoch. Using them here makes fresh audio look "stale" on the
+    // server because packets are timestamped minutes in the past.
+    if (clock != nullptr && hasFix_ && utcSentencePlausible && !ppsRecentlyObserved) {
       if (ppsConfigured_ && !loggedNoPpsFallback_) {
         loggedNoPpsFallback_ = true;
         std::printf("[gps] PPS configured but no recent edge observed; using NMEA UTC fallback\n");
       }
-      clock->applyNtpObservation(
-          unixEpochNs(
-              parsed.year,
-              parsed.month,
-              parsed.day,
-              parsed.hour,
-              parsed.minute,
-              parsed.second,
-              parsed.millisecond),
-          sentenceMonotonicUs,
-          // NMEA sentences do not have an RTT measurement; pass zero to mark
-          // the observation as a one-way serial fallback discipline source.
-          0);
+      clock->applyNmeaUtcObservation(parsedUtcNs, sentenceMonotonicUs);
     }
   }
 }
@@ -380,16 +408,16 @@ bool NmeaGpsSource::parseSentence(const char* line, ParsedSentence& outSentence)
   return false;
 }
 
-bool NmeaGpsSource::parseGgaSentence(const char* body, ParsedSentence& outSentence) const {
-  char mutableBody[96] = {};
-  std::snprintf(mutableBody, sizeof(mutableBody), "%s", body);
+bool NmeaGpsSource::parseGgaSentence(char* body, ParsedSentence& outSentence) const {
+  TokenizedSentence tokens;
+  tokenizeBody(body, tokens);
 
-  const char* latitudeField = fieldAt(mutableBody, 2);
-  const char* latitudeHemisphere = fieldAt(mutableBody, 3);
-  const char* longitudeField = fieldAt(mutableBody, 4);
-  const char* longitudeHemisphere = fieldAt(mutableBody, 5);
-  const char* fixQualityField = fieldAt(mutableBody, 6);
-  const char* altitudeField = fieldAt(mutableBody, 9);
+  const char* latitudeField = fieldAt(tokens, 2);
+  const char* latitudeHemisphere = fieldAt(tokens, 3);
+  const char* longitudeField = fieldAt(tokens, 4);
+  const char* longitudeHemisphere = fieldAt(tokens, 5);
+  const char* fixQualityField = fieldAt(tokens, 6);
+  const char* altitudeField = fieldAt(tokens, 9);
 
   int fixQuality = 0;
   if (!parseIntField(fixQualityField, fixQuality) || fixQuality <= 0) {
@@ -417,18 +445,18 @@ bool NmeaGpsSource::parseGgaSentence(const char* body, ParsedSentence& outSenten
   return true;
 }
 
-bool NmeaGpsSource::parseRmcSentence(const char* body, ParsedSentence& outSentence) const {
-  char mutableBody[96] = {};
-  std::snprintf(mutableBody, sizeof(mutableBody), "%s", body);
+bool NmeaGpsSource::parseRmcSentence(char* body, ParsedSentence& outSentence) const {
+  TokenizedSentence tokens;
+  tokenizeBody(body, tokens);
 
-  const char* timeField = fieldAt(mutableBody, 1);
-  const char* statusField = fieldAt(mutableBody, 2);
-  const char* latitudeField = fieldAt(mutableBody, 3);
-  const char* latitudeHemisphere = fieldAt(mutableBody, 4);
-  const char* longitudeField = fieldAt(mutableBody, 5);
-  const char* longitudeHemisphere = fieldAt(mutableBody, 6);
-  const char* dateField = fieldAt(mutableBody, 9);
-  const char* modeField = fieldAt(mutableBody, 12);
+  const char* timeField = fieldAt(tokens, 1);
+  const char* statusField = fieldAt(tokens, 2);
+  const char* latitudeField = fieldAt(tokens, 3);
+  const char* latitudeHemisphere = fieldAt(tokens, 4);
+  const char* longitudeField = fieldAt(tokens, 5);
+  const char* longitudeHemisphere = fieldAt(tokens, 6);
+  const char* dateField = fieldAt(tokens, 9);
+  const char* modeField = fieldAt(tokens, 12);
 
   const bool active = (statusField != nullptr && statusField[0] == 'A');
   outSentence.hasFixDimension = true;
@@ -457,15 +485,15 @@ bool NmeaGpsSource::parseRmcSentence(const char* body, ParsedSentence& outSenten
   return true;
 }
 
-bool NmeaGpsSource::parseGllSentence(const char* body, ParsedSentence& outSentence) const {
-  char mutableBody[96] = {};
-  std::snprintf(mutableBody, sizeof(mutableBody), "%s", body);
+bool NmeaGpsSource::parseGllSentence(char* body, ParsedSentence& outSentence) const {
+  TokenizedSentence tokens;
+  tokenizeBody(body, tokens);
 
-  const char* latitudeField = fieldAt(mutableBody, 1);
-  const char* latitudeHemisphere = fieldAt(mutableBody, 2);
-  const char* longitudeField = fieldAt(mutableBody, 3);
-  const char* longitudeHemisphere = fieldAt(mutableBody, 4);
-  const char* statusField = fieldAt(mutableBody, 6);
+  const char* latitudeField = fieldAt(tokens, 1);
+  const char* latitudeHemisphere = fieldAt(tokens, 2);
+  const char* longitudeField = fieldAt(tokens, 3);
+  const char* longitudeHemisphere = fieldAt(tokens, 4);
+  const char* statusField = fieldAt(tokens, 6);
 
   const bool active = (statusField != nullptr && statusField[0] == 'A');
   outSentence.hasFixDimension = true;
@@ -484,14 +512,14 @@ bool NmeaGpsSource::parseGllSentence(const char* body, ParsedSentence& outSenten
   return true;
 }
 
-bool NmeaGpsSource::parseZdaSentence(const char* body, ParsedSentence& outSentence) const {
-  char mutableBody[96] = {};
-  std::snprintf(mutableBody, sizeof(mutableBody), "%s", body);
+bool NmeaGpsSource::parseZdaSentence(char* body, ParsedSentence& outSentence) const {
+  TokenizedSentence tokens;
+  tokenizeBody(body, tokens);
 
-  const char* timeField = fieldAt(mutableBody, 1);
-  const char* dayField = fieldAt(mutableBody, 2);
-  const char* monthField = fieldAt(mutableBody, 3);
-  const char* yearField = fieldAt(mutableBody, 4);
+  const char* timeField = fieldAt(tokens, 1);
+  const char* dayField = fieldAt(tokens, 2);
+  const char* monthField = fieldAt(tokens, 3);
+  const char* yearField = fieldAt(tokens, 4);
 
   int day = 0;
   int month = 0;
@@ -679,24 +707,25 @@ bool NmeaGpsSource::isFieldEmpty(const char* field) {
   return field == nullptr || field[0] == '\0';
 }
 
-const char* NmeaGpsSource::fieldAt(char* body, size_t fieldIndex) {
-  size_t currentField = 0;
-  char* field = body;
-  for (char* cursor = body; ; ++cursor) {
-    if (*cursor == ',' || *cursor == '\0') {
-      if (currentField == fieldIndex) {
-        if (*cursor != '\0') {
-          *cursor = '\0';
-        }
-        return field;
+void NmeaGpsSource::tokenizeBody(char* body, TokenizedSentence& outTokens) {
+  outTokens.fieldCount = 0;
+  if (body == nullptr) {
+    return;
+  }
+  outTokens.fields[outTokens.fieldCount++] = body;
+  for (char* cursor = body; *cursor != '\0'; ++cursor) {
+    if (*cursor == ',') {
+      *cursor = '\0';
+      if (outTokens.fieldCount >= TokenizedSentence::kMaxFields) {
+        return;
       }
-      if (*cursor == '\0') {
-        return nullptr;
-      }
-      ++currentField;
-      field = cursor + 1;
+      outTokens.fields[outTokens.fieldCount++] = cursor + 1;
     }
   }
+}
+
+const char* NmeaGpsSource::fieldAt(const TokenizedSentence& tokens, size_t fieldIndex) {
+  return (fieldIndex < tokens.fieldCount) ? tokens.fields[fieldIndex] : nullptr;
 }
 
 uint64_t NmeaGpsSource::unixEpochNs(
