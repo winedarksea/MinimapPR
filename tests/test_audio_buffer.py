@@ -88,6 +88,43 @@ def test_sensor_stream_buffer_replaces_padded_gap_when_late_frame_arrives() -> N
         buf.samples,
         np.array([1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 3.0], dtype=np.float32),
     )
+    stats = buf.get_window_coverage_stats(
+        center_time_ns=start_time_ns + int(round((6 / sample_rate_hz) * 1_000_000_000)),
+        window_seconds=(12 / sample_rate_hz),
+    )
+    assert stats is not None
+    assert stats.coverage_ratio == 1.0
+    assert stats.missing_samples == 0
+
+
+def test_sensor_stream_buffer_marks_explicit_sample_index_gaps_as_missing() -> None:
+    sample_rate_hz = 16_000
+    start_time_ns = 1_000_000_000_000_000_000
+    buf = SensorStreamBuffer(sample_rate_hz=sample_rate_hz, max_duration_seconds=5.0)
+    buf.append(
+        start_time_ns=start_time_ns,
+        samples=np.ones(4, dtype=np.float32),
+        start_sample_index=0,
+        end_sample_index=4,
+    )
+    buf.append(
+        start_time_ns=start_time_ns + int(round((8 / sample_rate_hz) * 1_000_000_000)),
+        samples=np.full(4, 2.0, dtype=np.float32),
+        start_sample_index=8,
+        end_sample_index=12,
+    )
+
+    assert np.array_equal(buf.samples, np.array([1, 1, 1, 1, 0, 0, 0, 0, 2, 2, 2, 2], dtype=np.float32))
+    stats = buf.get_window_coverage_stats(
+        center_time_ns=start_time_ns + int(round((6 / sample_rate_hz) * 1_000_000_000)),
+        window_seconds=(12 / sample_rate_hz),
+    )
+    assert stats is not None
+    assert stats.covered_samples == 8
+    assert stats.missing_samples == 4
+    assert stats.max_gap_samples == 4
+    assert stats.warning is True
+    assert stats.degraded is True
 
 
 def test_sensor_stream_buffer_prune_uses_exact_sample_time_at_48khz() -> None:

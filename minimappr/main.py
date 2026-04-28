@@ -17,7 +17,9 @@ from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket,
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.requests import ClientDisconnect
 
+from minimappr.api.binary_ingest import parse_binary_ingest_payload
 from minimappr.api.live import LiveEventHub
 from minimappr.api.transports import HttpIngestTransport
 from minimappr.classifiers.factory import create_classifier
@@ -483,6 +485,18 @@ async def ingest_store_forward(payload: StoreForwardIngestRequest, request: Requ
     state = _require_state(request)
     try:
         return await state.ingest_transport.deliver_store_forward(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/ingest/binary", response_model=StoreForwardIngestResponse)
+async def ingest_binary(request: Request) -> StoreForwardIngestResponse:
+    state = _require_state(request)
+    try:
+        payload = parse_binary_ingest_payload(await request.body())
+        return await state.ingest_transport.deliver_binary(payload)
+    except ClientDisconnect as exc:
+        raise HTTPException(status_code=499, detail="Client disconnected while uploading binary ingest payload") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

@@ -65,11 +65,8 @@ def _ingested_frame_key(
 ) -> str:
     _ = (time_quality, tor_ns)
     boot_prefix = f"{node_id}:{boot_session or 'boot-unknown'}:{source_type}:"
-    if start_sample_index is not None and end_sample_index is not None and utc_end_ns is not None:
-        return (
-            f"{boot_prefix}{start_sample_index}:{end_sample_index}:"
-            f"{start_time_ns}:{utc_end_ns}"
-        )
+    if start_sample_index is not None and end_sample_index is not None:
+        return f"{boot_prefix}{start_sample_index}:{end_sample_index}"
     sequence_token = str(frame_sequence) if frame_sequence is not None else "none"
     return f"{boot_prefix}{start_time_ns}:{sequence_token}"
 

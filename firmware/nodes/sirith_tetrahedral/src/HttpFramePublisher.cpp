@@ -5,6 +5,7 @@
 #include <cstring>
 #include <new>
 #include <utility>
+#include <vector>
 
 #include "lwip/dns.h"
 #include "lwip/ip_addr.h"
@@ -86,7 +87,8 @@ std::string buildRequestHeader(
     const std::string& host,
     uint16_t port,
     const std::string& path,
-    size_t payloadSize) {
+    size_t payloadSize,
+    const char* contentType) {
   std::string header;
   header.reserve(256);
 
@@ -98,7 +100,9 @@ std::string buildRequestHeader(
     header += ':';
     header += std::to_string(port);
   }
-  header += "\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: ";
+  header += "\r\nConnection: keep-alive\r\nContent-Type: ";
+  header += contentType != nullptr ? contentType : "application/octet-stream";
+  header += "\r\nContent-Length: ";
   header += std::to_string(payloadSize);
   header += "\r\n\r\n";
   return header;
@@ -109,9 +113,9 @@ std::string buildRequestHeader(
 struct HttpFramePublisher::TransportState {
   enum class SendPhase {
     kHeader,
-    kPayloadPrefix,
+    kSegmentPrefix,
     kAudio,
-    kPayloadSuffix,
+    kSegmentSuffix,
     kDone,
   };
 
@@ -128,13 +132,13 @@ struct HttpFramePublisher::TransportState {
   err_t err = ERR_OK;
 
   std::string requestHeader;
-  std::string payloadPrefix;
-  std::string payloadSuffix;
+  std::vector<IngestPayloadParts> payloadParts;
+  std::vector<const uint8_t*> audioSegments;
   std::string base64Chunk;
+  bool binaryAudio = false;
   SendPhase sendPhase = SendPhase::kHeader;
+  size_t segmentIndex = 0;
   size_t sendOffset = 0;
-  const uint8_t* audioData = nullptr;
-  size_t audioBytes = 0;
   size_t audioOffset = 0;
 
   std::string response;
@@ -205,13 +209,13 @@ void abortConnection(HttpFramePublisher::TransportState& state) {
 
 void resetRequestState(HttpFramePublisher::TransportState& state, bool keepResponseBody) {
   state.requestHeader.clear();
-  state.payloadPrefix.clear();
-  state.payloadSuffix.clear();
+  state.payloadParts.clear();
+  state.audioSegments.clear();
   state.base64Chunk.clear();
+  state.binaryAudio = false;
   state.sendPhase = HttpFramePublisher::TransportState::SendPhase::kHeader;
+  state.segmentIndex = 0;
   state.sendOffset = 0;
-  state.audioData = nullptr;
-  state.audioBytes = 0;
   state.audioOffset = 0;
   state.response.clear();
   state.headerBuffer.clear();
@@ -317,13 +321,35 @@ bool writeStringSegment(
   return true;
 }
 
-bool refillBase64AudioChunk(HttpFramePublisher::TransportState& state) {
-  if (state.audioOffset >= state.audioBytes) {
+bool refillAudioChunk(HttpFramePublisher::TransportState& state) {
+  if (state.segmentIndex >= state.payloadParts.size() ||
+      state.segmentIndex >= state.audioSegments.size()) {
+    return false;
+  }
+
+  const IngestPayloadParts& segment = state.payloadParts[state.segmentIndex];
+  const uint8_t* audioData = state.audioSegments[state.segmentIndex];
+  if (audioData == nullptr || state.audioOffset >= segment.rawAudioBytes) {
     return false;
   }
 
   constexpr size_t kRawAudioChunkBytes = 768;
-  const size_t remaining = state.audioBytes - state.audioOffset;
+  constexpr size_t kBinaryAudioChunkBytes = 2048;
+  if (state.binaryAudio) {
+    const size_t remaining = segment.rawAudioBytes - state.audioOffset;
+    size_t rawChunkBytes = remaining;
+    if (rawChunkBytes > kBinaryAudioChunkBytes) {
+      rawChunkBytes = kBinaryAudioChunkBytes;
+    }
+    state.base64Chunk.assign(
+        reinterpret_cast<const char*>(audioData + state.audioOffset),
+        rawChunkBytes);
+    state.audioOffset += rawChunkBytes;
+    state.sendOffset = 0;
+    return true;
+  }
+
+  const size_t remaining = segment.rawAudioBytes - state.audioOffset;
   size_t rawChunkBytes = remaining;
   if (rawChunkBytes > kRawAudioChunkBytes) {
     rawChunkBytes = kRawAudioChunkBytes;
@@ -336,7 +362,7 @@ bool refillBase64AudioChunk(HttpFramePublisher::TransportState& state) {
   }
 
   state.base64Chunk.clear();
-  appendBase64(state.base64Chunk, state.audioData + state.audioOffset, rawChunkBytes);
+  appendBase64(state.base64Chunk, audioData + state.audioOffset, rawChunkBytes);
   state.audioOffset += rawChunkBytes;
   state.sendOffset = 0;
   return true;
@@ -346,16 +372,20 @@ void advanceSendPhase(HttpFramePublisher::TransportState& state) {
   using SendPhase = HttpFramePublisher::TransportState::SendPhase;
   switch (state.sendPhase) {
     case SendPhase::kHeader:
-      state.sendPhase = SendPhase::kPayloadPrefix;
+      state.sendPhase = SendPhase::kSegmentPrefix;
       break;
-    case SendPhase::kPayloadPrefix:
+    case SendPhase::kSegmentPrefix:
       state.sendPhase = SendPhase::kAudio;
       break;
     case SendPhase::kAudio:
-      state.sendPhase = SendPhase::kPayloadSuffix;
+      state.sendPhase = SendPhase::kSegmentSuffix;
       break;
-    case SendPhase::kPayloadSuffix:
-      state.sendPhase = SendPhase::kDone;
+    case SendPhase::kSegmentSuffix:
+      ++state.segmentIndex;
+      state.audioOffset = 0;
+      state.base64Chunk.clear();
+      state.sendPhase =
+          state.segmentIndex < state.payloadParts.size() ? SendPhase::kSegmentPrefix : SendPhase::kDone;
       break;
     case SendPhase::kDone:
       break;
@@ -378,17 +408,22 @@ void flushTx(HttpFramePublisher::TransportState& state, tcp_pcb* tpcb) {
       case SendPhase::kHeader:
         segmentDone = writeStringSegment(state, tpcb, state.requestHeader);
         break;
-      case SendPhase::kPayloadPrefix:
-        segmentDone = writeStringSegment(state, tpcb, state.payloadPrefix);
+      case SendPhase::kSegmentPrefix:
+        if (state.segmentIndex >= state.payloadParts.size()) {
+          segmentDone = true;
+        } else {
+          segmentDone = writeStringSegment(state, tpcb, state.payloadParts[state.segmentIndex].prefix);
+        }
         break;
       case SendPhase::kAudio:
-        if (state.sendOffset >= state.base64Chunk.size() && !refillBase64AudioChunk(state)) {
+        if (state.sendOffset >= state.base64Chunk.size() && !refillAudioChunk(state)) {
           segmentDone = true;
         } else {
           const bool chunkDone = writeStringSegment(state, tpcb, state.base64Chunk);
           if (!chunkDone) {
             segmentDone = false;
-          } else if (state.audioOffset >= state.audioBytes) {
+          } else if (state.segmentIndex >= state.payloadParts.size() ||
+                     state.audioOffset >= state.payloadParts[state.segmentIndex].rawAudioBytes) {
             state.base64Chunk.clear();
             segmentDone = true;
           } else {
@@ -397,8 +432,12 @@ void flushTx(HttpFramePublisher::TransportState& state, tcp_pcb* tpcb) {
           }
         }
         break;
-      case SendPhase::kPayloadSuffix:
-        segmentDone = writeStringSegment(state, tpcb, state.payloadSuffix);
+      case SendPhase::kSegmentSuffix:
+        if (state.segmentIndex >= state.payloadParts.size()) {
+          segmentDone = true;
+        } else {
+          segmentDone = writeStringSegment(state, tpcb, state.payloadParts[state.segmentIndex].suffix);
+        }
         break;
       case SendPhase::kDone:
         segmentDone = true;
@@ -628,7 +667,12 @@ bool ensureConnected(
     uint16_t port,
     absolute_time_t deadline,
     HttpFramePublisher::TransportState& state) {
-  closeConnection(state);
+  if (state.connected && state.pcb != nullptr) {
+    return true;
+  }
+  if (state.pcb != nullptr) {
+    closeConnection(state);
+  }
   if (!resolveHostUntil(host, deadline, state)) {
     return false;
   }
@@ -671,7 +715,13 @@ bool beginConnection(
     const std::string& host,
     uint16_t port,
     HttpFramePublisher::TransportState& state) {
-  closeConnection(state);
+  if (state.connected && state.pcb != nullptr) {
+    flushTx(state, state.pcb);
+    return true;
+  }
+  if (state.pcb != nullptr) {
+    closeConnection(state);
+  }
   if (!resolveHostUntil(host, make_timeout_time_ms(0), state)) {
     return false;
   }
@@ -710,7 +760,9 @@ PublishResult finishRequestResult(HttpFramePublisher::TransportState& state, boo
     result.responseBody = state.response;
   }
   result.ok = (result.statusCode >= 200 && result.statusCode < 300);
-  closeConnection(state);
+  if (state.responseMustClose) {
+    closeConnection(state);
+  }
   state.asyncPublishActive = false;
   return result;
 }
@@ -719,8 +771,9 @@ PublishResult post(
     const std::string& host,
     uint16_t port,
     const std::string& path,
-    IngestPayloadParts payloadParts,
-    const uint8_t* audioData,
+    std::vector<IngestPayloadParts> payloadParts,
+    std::vector<const uint8_t*> audioSegments,
+    bool binaryAudio,
     uint32_t timeoutMs,
     bool keepResponseBody,
     HttpFramePublisher::TransportState& state) {
@@ -733,13 +786,19 @@ PublishResult post(
   }
 
   resetRequestState(state, keepResponseBody);
-  const size_t payloadSize =
-      payloadParts.prefix.size() + payloadParts.encodedAudioBytes + payloadParts.suffix.size();
-  state.requestHeader = buildRequestHeader(host, port, path, payloadSize);
-  state.payloadPrefix = std::move(payloadParts.prefix);
-  state.payloadSuffix = std::move(payloadParts.suffix);
-  state.audioData = audioData;
-  state.audioBytes = payloadParts.rawAudioBytes;
+  size_t payloadSize = 0;
+  for (const IngestPayloadParts& segment : payloadParts) {
+    payloadSize += segment.prefix.size() + segment.encodedAudioBytes + segment.suffix.size();
+  }
+  state.requestHeader = buildRequestHeader(
+      host,
+      port,
+      path,
+      payloadSize,
+      binaryAudio ? "application/octet-stream" : "application/json");
+  state.payloadParts = std::move(payloadParts);
+  state.audioSegments = std::move(audioSegments);
+  state.binaryAudio = binaryAudio;
 
   const absolute_time_t deadline = make_timeout_time_ms(timeoutMs);
   if (!ensureConnected(host, port, deadline, state)) {
@@ -843,11 +902,181 @@ bool HttpFramePublisher::beginPublish(
   resetRequestState(*transportState_, keepResponseBody);
   const size_t payloadSize =
       payloadParts.prefix.size() + payloadParts.encodedAudioBytes + payloadParts.suffix.size();
-  transportState_->requestHeader = buildRequestHeader(host_, port_, path_, payloadSize);
-  transportState_->payloadPrefix = std::move(payloadParts.prefix);
-  transportState_->payloadSuffix = std::move(payloadParts.suffix);
-  transportState_->audioData = reinterpret_cast<const uint8_t*>(frame.interleavedSamples);
-  transportState_->audioBytes = payloadParts.rawAudioBytes;
+  transportState_->requestHeader = buildRequestHeader(host_, port_, path_, payloadSize, "application/json");
+  transportState_->payloadParts.clear();
+  transportState_->payloadParts.push_back(std::move(payloadParts));
+  transportState_->audioSegments.clear();
+  transportState_->audioSegments.push_back(reinterpret_cast<const uint8_t*>(frame.interleavedSamples));
+  transportState_->binaryAudio = false;
+  transportState_->requestDeadline = make_timeout_time_ms(timeoutMs_);
+
+  if (!beginConnection(host_, port_, *transportState_)) {
+    immediateResult.statusCode = -3;
+    closeConnection(*transportState_);
+    return false;
+  }
+
+  transportState_->asyncPublishActive = true;
+  return true;
+}
+
+bool HttpFramePublisher::beginStoreForwardPublish(
+    const NodeDescriptor& node,
+    const std::vector<AudioFrame>& frames,
+    const std::vector<const EnvironmentalSample*>& environments,
+    bool sortByToa,
+    bool keepResponseBody,
+    PublishResult& immediateResult) {
+  immediateResult = {};
+  immediateResult.ok = false;
+  immediateResult.statusCode = -1;
+
+  if (transportState_ == nullptr || transportState_->asyncPublishActive) {
+    immediateResult.statusCode = -7;
+    return false;
+  }
+  if (!endpointValid_) {
+    immediateResult.statusCode = -3;
+    return false;
+  }
+  if (!isWiFiConnected()) {
+    immediateResult.statusCode = -1;
+    return false;
+  }
+  if (frames.empty()) {
+    immediateResult.statusCode = -2;
+    return false;
+  }
+
+  std::vector<IngestPayloadParts> payloadParts;
+  std::vector<const EnvironmentalSample*> environmentPtrs = environments;
+  if (environmentPtrs.size() < frames.size()) {
+    environmentPtrs.resize(frames.size(), nullptr);
+  }
+  try {
+    if (!buildStoreForwardPayloadParts(
+            node,
+            frames.data(),
+            environmentPtrs.data(),
+            frames.size(),
+            sortByToa,
+            payloadParts)) {
+      immediateResult.statusCode = -2;
+      return false;
+    }
+  } catch (const std::bad_alloc&) {
+    immediateResult.statusCode = -6;
+    return false;
+  }
+
+  size_t payloadSize = 0;
+  std::vector<const uint8_t*> audioSegments;
+  try {
+    audioSegments.reserve(frames.size());
+    for (size_t i = 0; i < frames.size(); ++i) {
+      payloadSize +=
+          payloadParts[i].prefix.size() +
+          payloadParts[i].encodedAudioBytes +
+          payloadParts[i].suffix.size();
+      audioSegments.push_back(reinterpret_cast<const uint8_t*>(frames[i].interleavedSamples));
+    }
+  } catch (const std::bad_alloc&) {
+    immediateResult.statusCode = -6;
+    return false;
+  }
+
+  resetRequestState(*transportState_, keepResponseBody);
+  transportState_->requestHeader = buildRequestHeader(host_, port_, path_, payloadSize, "application/json");
+  transportState_->payloadParts = std::move(payloadParts);
+  transportState_->audioSegments = std::move(audioSegments);
+  transportState_->binaryAudio = false;
+  transportState_->requestDeadline = make_timeout_time_ms(timeoutMs_);
+
+  if (!beginConnection(host_, port_, *transportState_)) {
+    immediateResult.statusCode = -3;
+    closeConnection(*transportState_);
+    return false;
+  }
+
+  transportState_->asyncPublishActive = true;
+  return true;
+}
+
+bool HttpFramePublisher::beginBinaryStoreForwardPublish(
+    const NodeDescriptor& node,
+    const std::vector<AudioFrame>& frames,
+    const std::vector<const EnvironmentalSample*>& environments,
+    bool sortByToa,
+    bool keepResponseBody,
+    PublishResult& immediateResult) {
+  immediateResult = {};
+  immediateResult.ok = false;
+  immediateResult.statusCode = -1;
+
+  if (transportState_ == nullptr || transportState_->asyncPublishActive) {
+    immediateResult.statusCode = -7;
+    return false;
+  }
+  if (!endpointValid_) {
+    immediateResult.statusCode = -3;
+    return false;
+  }
+  if (!isWiFiConnected()) {
+    immediateResult.statusCode = -1;
+    return false;
+  }
+  if (frames.empty()) {
+    immediateResult.statusCode = -2;
+    return false;
+  }
+
+  std::vector<IngestPayloadParts> payloadParts;
+  std::vector<const EnvironmentalSample*> environmentPtrs = environments;
+  if (environmentPtrs.size() < frames.size()) {
+    environmentPtrs.resize(frames.size(), nullptr);
+  }
+  try {
+    if (!buildBinaryStoreForwardPayloadParts(
+            node,
+            frames.data(),
+            environmentPtrs.data(),
+            frames.size(),
+            sortByToa,
+            payloadParts)) {
+      immediateResult.statusCode = -2;
+      return false;
+    }
+  } catch (const std::bad_alloc&) {
+    immediateResult.statusCode = -6;
+    return false;
+  }
+
+  size_t payloadSize = 0;
+  std::vector<const uint8_t*> audioSegments;
+  try {
+    audioSegments.reserve(frames.size());
+    for (size_t i = 0; i < frames.size(); ++i) {
+      payloadSize +=
+          payloadParts[i].prefix.size() +
+          payloadParts[i].encodedAudioBytes +
+          payloadParts[i].suffix.size();
+      audioSegments.push_back(reinterpret_cast<const uint8_t*>(frames[i].interleavedSamples));
+    }
+  } catch (const std::bad_alloc&) {
+    immediateResult.statusCode = -6;
+    return false;
+  }
+
+  resetRequestState(*transportState_, keepResponseBody);
+  transportState_->requestHeader = buildRequestHeader(
+      host_,
+      port_,
+      path_,
+      payloadSize,
+      "application/octet-stream");
+  transportState_->payloadParts = std::move(payloadParts);
+  transportState_->audioSegments = std::move(audioSegments);
+  transportState_->binaryAudio = true;
   transportState_->requestDeadline = make_timeout_time_ms(timeoutMs_);
 
   if (!beginConnection(host_, port_, *transportState_)) {
@@ -923,12 +1152,17 @@ PublishResult HttpFramePublisher::publish(
       return result;
     }
 
+    std::vector<IngestPayloadParts> payloadSegments;
+    std::vector<const uint8_t*> audioSegments;
+    payloadSegments.push_back(std::move(payloadParts));
+    audioSegments.push_back(reinterpret_cast<const uint8_t*>(frame.interleavedSamples));
     result = post(
         host_,
         port_,
         path_,
-        std::move(payloadParts),
-        reinterpret_cast<const uint8_t*>(frame.interleavedSamples),
+        std::move(payloadSegments),
+        std::move(audioSegments),
+        false,
         timeoutMs_,
         keepResponseBody,
         *transportState_);

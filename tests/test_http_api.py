@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import sqlite3
+import struct
 import time
 import wave
 from pathlib import Path
@@ -13,6 +14,93 @@ from fastapi.testclient import TestClient
 from minimappr.main import app
 from minimappr.storage.db import _ingested_frame_key
 from minimappr.utils.audio import encode_pcm16le_b64
+
+
+def _binary_string(value: str) -> bytes:
+    encoded = value.encode("utf-8")
+    assert len(encoded) <= 255
+    return struct.pack("<B", len(encoded)) + encoded
+
+
+def _binary_node(*, node_id: str = "binary-node-1", sensor_count: int = 1) -> bytes:
+    payload = bytearray()
+    payload += _binary_string(node_id)
+    payload += struct.pack("<B", 0)
+    payload += struct.pack("<fff", 0.0, 0.0, 0.0)
+    payload += struct.pack("<B", 0)
+    payload += struct.pack("<B", sensor_count)
+    for _ in range(sensor_count):
+        payload += struct.pack("<fff", 0.0, 0.0, 0.0)
+    capabilities = ["audio", "gps_optional"]
+    payload += struct.pack("<B", len(capabilities))
+    for capability in capabilities:
+        payload += _binary_string(capability)
+    payload += _binary_string("test-hardware")
+    payload += _binary_string("test-firmware")
+    payload += _binary_string("gps_locked")
+    payload += _binary_string("test")
+    payload += struct.pack("<I", 3)
+    return bytes(payload)
+
+
+def _binary_frame(
+    samples: np.ndarray,
+    *,
+    start_time_ns: int,
+    sequence: int,
+    start_sample_index: int,
+    sample_rate_hz: int = 16000,
+) -> bytes:
+    channels, samples_per_channel = samples.shape
+    end_sample_index = start_sample_index + samples_per_channel
+    end_time_ns = start_time_ns + int(round(samples_per_channel / sample_rate_hz * 1_000_000_000))
+    pcm = np.clip(samples.T, -1.0, 0.9999695)
+    pcm16 = (pcm * 32768.0).astype("<i2").tobytes()
+    payload = bytearray()
+    payload += struct.pack(
+        "<QQQQIBQQQB",
+        start_time_ns,
+        end_time_ns,
+        start_sample_index,
+        end_sample_index,
+        sample_rate_hz,
+        channels,
+        sequence,
+        start_time_ns,
+        start_time_ns + 1_000_000,
+        0,
+    )
+    payload += struct.pack("<B", 1)
+    payload += struct.pack(
+        "<BIiqdQQQQIQiQ",
+        1,
+        123,
+        2,
+        -17,
+        0.25,
+        sequence,
+        0,
+        0,
+        0,
+        1,
+        0,
+        200,
+        2500,
+    )
+    payload += struct.pack("<B", 0)
+    payload += struct.pack("<I", samples_per_channel)
+    payload += pcm16
+    return bytes(payload)
+
+
+def _binary_ingest_payload(frames: list[bytes], *, sort_by_toa: bool = False) -> bytes:
+    payload = bytearray()
+    payload += b"MMB1"
+    payload += struct.pack("<BBH", 1, 1 if sort_by_toa else 0, len(frames))
+    payload += _binary_node()
+    for frame in frames:
+        payload += frame
+    return bytes(payload)
 
 
 def _configure_env(monkeypatch, tmp_path: Path, *, snippet_retention_seconds: int) -> Path:
@@ -117,6 +205,53 @@ def test_http_ingest_and_cop_status(monkeypatch, tmp_path: Path) -> None:
         assert "pipeline" in diagnostics
         assert "realtime" in diagnostics["pipeline"]
         assert "metrics" in diagnostics["pipeline"]
+
+
+def test_binary_ingest_accepts_raw_pcm_batch(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    samples = np.random.default_rng(42).normal(0.0, 0.35, size=(1, 512)).astype(np.float32)
+    start_time_ns = time.time_ns()
+    payload = _binary_ingest_payload(
+        [
+            _binary_frame(
+                samples,
+                start_time_ns=start_time_ns,
+                sequence=10,
+                start_sample_index=0,
+            )
+        ]
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/ingest/binary",
+            content=payload,
+            headers={"content-type": "application/octet-stream"},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["accepted"] is True
+        assert body["total_frames"] == 1
+        assert body["accepted_frames"] == 1
+        assert body["rejected_frames"] == 0
+
+        nodes_response = client.get("/api/v1/nodes", params={"limit": 10})
+        assert nodes_response.status_code == 200
+        nodes = nodes_response.json()
+        node = next(row for row in nodes if row["id"] == "binary-node-1")
+        assert node["metadata"]["firmware"] == "test-firmware"
+
+
+def test_binary_ingest_rejects_invalid_magic(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/ingest/binary",
+            content=b"BAD!",
+            headers={"content-type": "application/octet-stream"},
+        )
+        assert response.status_code == 400
+        assert "magic" in response.json()["detail"]
 
 
 def test_spa_refresh_fallback_serves_index_for_frontend_routes(monkeypatch, tmp_path: Path) -> None:
@@ -275,6 +410,35 @@ def test_free_running_dedupe_key_distinguishes_reboots() -> None:
     )
 
     assert key_a != key_b
+
+
+def test_sample_index_dedupe_key_ignores_retry_timestamp_correction() -> None:
+    key_a = _ingested_frame_key(
+        node_id="http-node-free-running",
+        boot_session="boot-11",
+        frame_sequence=11,
+        start_time_ns=1_000_000_000_000_000_000,
+        utc_end_ns=1_000_000_000_032_000_000,
+        start_sample_index=5120,
+        end_sample_index=5632,
+        source_type="raw_sensor",
+        time_quality="ntp_disciplined",
+        tor_ns=1_800_000_000_000_000_000,
+    )
+    key_b = _ingested_frame_key(
+        node_id="http-node-free-running",
+        boot_session="boot-11",
+        frame_sequence=11,
+        start_time_ns=1_000_000_100_000_000_000,
+        utc_end_ns=1_000_000_100_032_000_000,
+        start_sample_index=5120,
+        end_sample_index=5632,
+        source_type="raw_sensor",
+        time_quality="ntp_disciplined",
+        tor_ns=1_800_000_011_000_000_000,
+    )
+
+    assert key_a == key_b
 
 
 def test_http_store_forward_deduplicates_and_preserves_last_seen(monkeypatch, tmp_path: Path) -> None:

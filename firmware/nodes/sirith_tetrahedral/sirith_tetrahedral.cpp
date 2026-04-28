@@ -309,7 +309,8 @@ mmpr::NodeRunner gRunner(
     nodecfg::kLogEveryFrames,
     gEnvironmentalSource,
     nodecfg::kMaxPacketSamplesPerChannel,
-    nodecfg::kPublishFailureBackoffMs);
+    nodecfg::kPublishFailureBackoffMs,
+    nodecfg::kStoreForwardBatchFrames);
 
 void pollTimingSourcesDuringNetworkWait(void*) {
   if (nodecfg::kEnableGpsUart) {

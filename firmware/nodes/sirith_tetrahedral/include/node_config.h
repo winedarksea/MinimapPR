@@ -135,16 +135,19 @@ static constexpr uint32_t kWiFiConnectTimeoutMs = 15000;
 // Keep this below the DMA ring slack. At 16 kHz / 1024 samples / 16 buffered
 // blocks, the capture ring holds about 1.0 s; longer synchronous publishes
 // overrun capture and make the heartbeat look randomly slow.
-static constexpr uint32_t kHttpTimeoutMs = 750;
+static constexpr uint32_t kHttpTimeoutMs = 400;
 // After a failed publish, skip network attempts briefly so capture and Wi-Fi
 // polling recover. Keep this short: a multi-second backoff discards dozens of
 // audio packets and makes the debug stream sparse even after transient stalls.
-static constexpr uint32_t kPublishFailureBackoffMs = 250;
+static constexpr uint32_t kPublishFailureBackoffMs = 0;
+// ingest control
+static constexpr const char* kIngestPath = "/api/v1/ingest/binary";
+static constexpr size_t kStoreForwardBatchFrames = 4;
 
 // Max samples per channel in a single published packet. Keep diagnostic HTTP
 // POSTs near one TCP send window so a timeout does not leave body bytes that
 // uvicorn parses as a malformed follow-up request.
-static constexpr size_t kMaxPacketSamplesPerChannel = 1024;
+static constexpr size_t kMaxPacketSamplesPerChannel = 512;
 
 // --- Node identity ---
 // Prefix only — the full node ID is built at runtime by appending the chip's
@@ -249,7 +252,7 @@ static constexpr uint8_t kTdmBclkPin = 8;  // BCLK output
 static constexpr uint8_t kTdmWsPin = 9;    // FSYNC/WS output (must be BCLK + 1)
 
 static constexpr uint32_t kAudioSampleRateHz = 16000;
-static constexpr uint32_t kAudioFrameSamples = 1024;
+static constexpr uint32_t kAudioFrameSamples = 512;
 static constexpr uint8_t kAudioValidBits = 24;  // ADAU7112 emits 24-bit PCM in 32-bit slots.
 static constexpr uint8_t kAudioTdmSlots = 4;
 static constexpr uint8_t kAudioSlotBits = 32;

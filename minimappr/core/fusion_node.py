@@ -29,7 +29,7 @@ import numpy as np
 from minimappr.classifiers.base import AudioClassifier
 from minimappr.config import Settings
 from minimappr.core.assembly import DetectionAssembler
-from minimappr.core.audio_buffer import MultiSensorBuffer
+from minimappr.core.audio_buffer import AudioCoverageStats, MultiSensorBuffer
 from minimappr.core.beamforming import create_beamformer
 from minimappr.core.classification_chunking import ClassificationChunkingPolicy
 from minimappr.core.classification import ClassificationOrchestrator
@@ -100,6 +100,9 @@ class LocalizedCandidate:
     omni_reference_signal: np.ndarray
     omni_position_m: tuple[float, float, float]
     omni_classification_reference_signal: np.ndarray
+    localization_audio_quality: dict[str, AudioCoverageStats]
+    classification_audio_quality: dict[str, AudioCoverageStats]
+    classification_audio_quality_source: str
     environment: dict[str, Any]
 
 
@@ -383,6 +386,17 @@ class FusionNode:
     # ------------------------------------------------------------------
 
     async def ingest(self, request: IngestFrameRequest) -> IngestFrameResponse:
+        return await self._ingest_request(request, decoded_audio=None)
+
+    async def ingest_decoded(self, request: IngestFrameRequest, decoded_audio: np.ndarray) -> IngestFrameResponse:
+        return await self._ingest_request(request, decoded_audio=decoded_audio)
+
+    async def _ingest_request(
+        self,
+        request: IngestFrameRequest,
+        *,
+        decoded_audio: np.ndarray | None,
+    ) -> IngestFrameResponse:
         if self._stopping:
             raise ValueError("Fusion node is stopping")
         self._metrics.ingest_requests += 1
@@ -390,6 +404,7 @@ class FusionNode:
             result = await self._ingest_processor.process_frame(
                 request,
                 storage_batch_ctx=self._storage_batch,
+                decoded_audio=decoded_audio,
             )
         except ValueError:
             self._metrics.frames_rejected += 1
@@ -597,10 +612,22 @@ class FusionNode:
         tier = self.degradation_model.tier_for_sensor_count(len(selected_ids))
         selected_windows = {sensor_id: windows[sensor_id] for sensor_id in selected_ids}
         selected_positions = {sensor_id: sensor_positions[sensor_id] for sensor_id in selected_ids}
+        localization_audio_quality = await self.buffer.get_synchronized_window_coverage_stats(
+            sensor_ids=selected_ids,
+            center_time_ns=candidate.event_time_ns,
+            window_seconds=self.localization_config.localization_window_seconds,
+            sample_rate_hz=candidate.sample_rate_hz,
+        )
         classification_windows = await self._classification_windows_for_event(
             candidate=candidate,
             selected_sensor_ids=selected_ids,
             fallback_windows=selected_windows,
+        )
+        classification_audio_quality, classification_audio_quality_source = await self._classification_quality_for_event(
+            candidate=candidate,
+            selected_sensor_ids=selected_ids,
+            localization_audio_quality=localization_audio_quality,
+            classification_windows=classification_windows,
         )
 
         environment_location = self._sensor_centroid(selected_positions)
@@ -683,6 +710,9 @@ class FusionNode:
             omni_reference_signal=fallback_candidate.omni_reference_signal,
             omni_position_m=fallback_candidate.omni_position_m,
             omni_classification_reference_signal=fallback_candidate.omni_classification_reference_signal,
+            localization_audio_quality=localization_audio_quality,
+            classification_audio_quality=classification_audio_quality,
+            classification_audio_quality_source=classification_audio_quality_source,
             environment=environment_summary,
         )
 
@@ -806,6 +836,42 @@ class FusionNode:
                 merged[sensor_id] = fallback_windows[sensor_id]
         return merged
 
+    async def _classification_quality_for_event(
+        self,
+        *,
+        candidate: EventCandidate,
+        selected_sensor_ids: list[str],
+        localization_audio_quality: dict[str, AudioCoverageStats],
+        classification_windows: dict[str, np.ndarray],
+    ) -> tuple[dict[str, AudioCoverageStats], str]:
+        if (
+            self.localization_config.classification_window_seconds
+            <= self.localization_config.localization_window_seconds
+        ):
+            return localization_audio_quality, "localization_centered"
+
+        trailing_quality = await self.buffer.get_synchronized_window_ending_at_coverage_stats(
+            sensor_ids=selected_sensor_ids,
+            end_time_ns=candidate.event_time_ns,
+            window_seconds=self.localization_config.classification_window_seconds,
+            sample_rate_hz=candidate.sample_rate_hz,
+        )
+        merged: dict[str, AudioCoverageStats] = {}
+        trailing_count = 0
+        for sensor_id in selected_sensor_ids:
+            if sensor_id in classification_windows and sensor_id in trailing_quality:
+                merged[sensor_id] = trailing_quality[sensor_id]
+                trailing_count += 1
+            elif sensor_id in localization_audio_quality:
+                merged[sensor_id] = localization_audio_quality[sensor_id]
+        if trailing_count == 0:
+            source = "localization_centered"
+        elif trailing_count == len(merged):
+            source = "classification_trailing"
+        else:
+            source = "mixed"
+        return merged, source
+
     def _build_reference_sensor_candidate(
         self,
         *,
@@ -831,6 +897,9 @@ class FusionNode:
             omni_reference_signal=ref_signal,
             omni_position_m=(float(ref_pos[0]), float(ref_pos[1]), float(ref_pos[2])),
             omni_classification_reference_signal=classification_windows.get(reference_sensor, ref_signal),
+            localization_audio_quality={},
+            classification_audio_quality={},
+            classification_audio_quality_source="localization_centered",
             environment=environment_summary,
         )
 
@@ -886,6 +955,7 @@ class FusionNode:
             self._metrics.beamforming_failures += 1
 
         source_node_id = await self.registry.node_id_for_sensor(reference_sensor)
+        audio_quality = self._audio_quality_for_detection(product, reference_sensor)
         branch_details = {
             "label": classified.classification.label,
             "confidence": classified.classification.confidence,
@@ -970,6 +1040,7 @@ class FusionNode:
                 time_quality=product.candidate.time_quality,
                 source_observation_ids=product.candidate.source_observation_ids,
                 sample_rate_hz=product.candidate.sample_rate_hz,
+                audio_quality=audio_quality,
                 existing_detection=decision.existing_detection,
                 persist_mode=persist_mode,
                 tracker=self.tracker,
@@ -990,6 +1061,27 @@ class FusionNode:
             pipeline_item_id=assembly.detection.id,
             event_time_ns=assembly.detection.timestamp_ns,
         )
+
+    @staticmethod
+    def _audio_quality_for_detection(product: LocalizedCandidate, reference_sensor: str) -> dict[str, Any]:
+        stats = product.classification_audio_quality.get(reference_sensor)
+        source_window_type = product.classification_audio_quality_source
+        if stats is None:
+            stats = product.localization_audio_quality.get(reference_sensor)
+            source_window_type = "localization_centered"
+        if stats is None:
+            return {
+                "source_window_type": source_window_type,
+                "degraded": False,
+                "warning": False,
+                "coverage_ratio": 1.0,
+                "missing_ratio": 0.0,
+                "max_gap_seconds": 0.0,
+                "sample_count": 0,
+                "covered_samples": 0,
+                "missing_samples": 0,
+            }
+        return stats.to_feature_summary(source_window_type=source_window_type)
 
     # ------------------------------------------------------------------
     # Rules & delivery stage

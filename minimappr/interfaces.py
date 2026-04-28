@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, AsyncContextManager, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, AsyncContextManager, Protocol, runtime_checkable
 
 import numpy as np
 
@@ -21,6 +21,9 @@ from minimappr.models import (
     StoreForwardIngestResponse,
     TrackState,
 )
+
+if TYPE_CHECKING:
+    from minimappr.api.binary_ingest import BinaryIngestPayload
 
 
 Vec3Array = np.ndarray
@@ -370,6 +373,9 @@ class IngestTransport(Protocol):
         ...
 
     async def deliver_store_forward(self, payload: StoreForwardIngestRequest) -> StoreForwardIngestResponse:
+        ...
+
+    async def deliver_binary(self, payload: "BinaryIngestPayload") -> StoreForwardIngestResponse:
         ...
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
+from minimappr.api.binary_ingest import BinaryIngestPayload
 from minimappr.core.fusion_node import FusionNode
 from minimappr.interfaces import IngestTransport
 from minimappr.models import (
@@ -23,10 +24,24 @@ class HttpIngestTransport(IngestTransport):
         return await self._fusion_node.ingest(payload)
 
     async def deliver_store_forward(self, payload: StoreForwardIngestRequest) -> StoreForwardIngestResponse:
-        ordered_frames = payload.buffered_frames
-        if payload.sort_by_toa:
+        return await self._deliver_buffered_frames(
+            node=payload.node,
+            buffered_frames=payload.buffered_frames,
+            sort_by_toa=payload.sort_by_toa,
+        )
+
+    async def deliver_binary(self, payload: BinaryIngestPayload) -> StoreForwardIngestResponse:
+        return await self._deliver_buffered_frames(
+            node=payload.node,
+            buffered_frames=payload.buffered_frames,
+            sort_by_toa=payload.sort_by_toa,
+        )
+
+    async def _deliver_buffered_frames(self, *, node, buffered_frames, sort_by_toa: bool) -> StoreForwardIngestResponse:
+        ordered_frames = buffered_frames
+        if sort_by_toa:
             ordered_frames = sorted(
-                payload.buffered_frames,
+                buffered_frames,
                 key=lambda item: (
                     item.frame.utc_start_ns if item.frame.utc_start_ns is not None else item.frame.start_time_ns,
                     item.frame.start_sample_index if item.frame.start_sample_index is not None else -1,
@@ -44,13 +59,16 @@ class HttpIngestTransport(IngestTransport):
 
         for buffered in ordered_frames:
             try:
-                frame_response = await self.deliver_frame(
-                    IngestFrameRequest(
-                        node=payload.node,
-                        frame=buffered.frame,
-                        environment=buffered.environment,
-                    )
+                request = IngestFrameRequest(
+                    node=node,
+                    frame=buffered.frame,
+                    environment=buffered.environment,
                 )
+                decoded_audio = getattr(buffered, "decoded_audio", None)
+                if decoded_audio is None:
+                    frame_response = await self.deliver_frame(request)
+                else:
+                    frame_response = await self._fusion_node.ingest_decoded(request, decoded_audio)
             except ValueError as exc:
                 rejected_frames += 1
                 results.append(
@@ -87,7 +105,7 @@ class HttpIngestTransport(IngestTransport):
 
         return StoreForwardIngestResponse(
             accepted=rejected_frames == 0,
-            total_frames=len(ordered_frames),
+            total_frames=len(buffered_frames),
             accepted_frames=accepted_frames,
             duplicate_frames=duplicate_frames,
             rejected_frames=rejected_frames,

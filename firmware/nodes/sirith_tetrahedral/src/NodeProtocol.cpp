@@ -2,6 +2,8 @@
 
 #include <inttypes.h>
 #include <cstdio>
+#include <cstring>
+#include <utility>
 
 #include "mmpr/Base64.h"
 
@@ -75,6 +77,184 @@ void appendInt64(std::string& out, int64_t value) {
   out += buffer;
 }
 
+void appendLeU8(std::string& out, uint8_t value) {
+  out.push_back(static_cast<char>(value));
+}
+
+void appendLeU16(std::string& out, uint16_t value) {
+  out.push_back(static_cast<char>(value & 0xffu));
+  out.push_back(static_cast<char>((value >> 8) & 0xffu));
+}
+
+void appendLeU32(std::string& out, uint32_t value) {
+  for (unsigned shift = 0; shift < 32; shift += 8) {
+    out.push_back(static_cast<char>((value >> shift) & 0xffu));
+  }
+}
+
+void appendLeU64(std::string& out, uint64_t value) {
+  for (unsigned shift = 0; shift < 64; shift += 8) {
+    out.push_back(static_cast<char>((value >> shift) & 0xffu));
+  }
+}
+
+void appendLeI32(std::string& out, int32_t value) {
+  appendLeU32(out, static_cast<uint32_t>(value));
+}
+
+void appendLeI64(std::string& out, int64_t value) {
+  appendLeU64(out, static_cast<uint64_t>(value));
+}
+
+void appendLeF32(std::string& out, float value) {
+  uint32_t bits = 0;
+  static_assert(sizeof(bits) == sizeof(value), "float must be 32 bits");
+  std::memcpy(&bits, &value, sizeof(bits));
+  appendLeU32(out, bits);
+}
+
+void appendLeF64(std::string& out, double value) {
+  uint64_t bits = 0;
+  static_assert(sizeof(bits) == sizeof(value), "double must be 64 bits");
+  std::memcpy(&bits, &value, sizeof(bits));
+  appendLeU64(out, bits);
+}
+
+bool appendBinaryString(std::string& out, const char* value) {
+  const char* safeValue = value != nullptr ? value : "";
+  const size_t length = std::strlen(safeValue);
+  if (length > 255) {
+    return false;
+  }
+  appendLeU8(out, static_cast<uint8_t>(length));
+  out.append(safeValue, length);
+  return true;
+}
+
+uint8_t nodeTypeToBinary(NodeType type) {
+  switch (type) {
+    case NodeType::kSirithTetra:
+      return 1;
+    case NodeType::kPoint:
+    case NodeType::kUnknown:
+    default:
+      return 0;
+  }
+}
+
+uint8_t timeQualityToBinary(TimeQuality quality) {
+  switch (quality) {
+    case TimeQuality::kGpsLocked:
+      return 0;
+    case TimeQuality::kGpsHoldover:
+      return 1;
+    case TimeQuality::kNtpDisciplined:
+      return 2;
+    case TimeQuality::kFreeRunning:
+    default:
+      return 3;
+  }
+}
+
+bool appendBinaryNode(std::string& out, const NodeDescriptor& node) {
+  if (node.id == nullptr || node.sensorOffsetsM == nullptr || node.sensorCount == 0 ||
+      node.sensorCount > 255 || node.capabilityCount > 255) {
+    return false;
+  }
+
+  if (!appendBinaryString(out, node.id)) {
+    return false;
+  }
+  appendLeU8(out, nodeTypeToBinary(node.type));
+  appendLeF32(out, node.positionM.x);
+  appendLeF32(out, node.positionM.y);
+  appendLeF32(out, node.positionM.z);
+
+  appendLeU8(out, node.hasGeoPosition ? 1 : 0);
+  if (node.hasGeoPosition) {
+    appendLeF32(out, node.geoPosition.lat);
+    appendLeF32(out, node.geoPosition.lon);
+    appendLeF32(out, node.geoPosition.altM);
+  }
+
+  appendLeU8(out, static_cast<uint8_t>(node.sensorCount));
+  for (size_t i = 0; i < node.sensorCount; ++i) {
+    appendLeF32(out, node.sensorOffsetsM[i].x);
+    appendLeF32(out, node.sensorOffsetsM[i].y);
+    appendLeF32(out, node.sensorOffsetsM[i].z);
+  }
+
+  appendLeU8(out, static_cast<uint8_t>(node.capabilityCount));
+  for (size_t i = 0; i < node.capabilityCount; ++i) {
+    if (!appendBinaryString(out, node.capabilities[i])) {
+      return false;
+    }
+  }
+  return appendBinaryString(out, node.hardwareName != nullptr ? node.hardwareName : "unknown") &&
+         appendBinaryString(out, node.firmwareVersion != nullptr ? node.firmwareVersion : "dev") &&
+         appendBinaryString(out, node.gpsSignalStatus != nullptr ? node.gpsSignalStatus : "") &&
+         appendBinaryString(out, node.positionSource != nullptr ? node.positionSource : "") &&
+         (appendLeU32(out, node.bootCount), true);
+}
+
+bool appendBinaryFrameHeader(
+    std::string& out,
+    const AudioFrame& frame,
+    const EnvironmentalSample* environment) {
+  if (frame.interleavedSamples == nullptr || frame.channels == 0 ||
+      frame.samplesPerChannel == 0 || frame.samplesPerChannel > UINT32_MAX) {
+    return false;
+  }
+
+  appendLeU64(out, frame.startTimeNs);
+  appendLeU64(out, frame.endTimeNs);
+  appendLeU64(out, frame.startSampleIndex);
+  appendLeU64(out, frame.endSampleIndex);
+  appendLeU32(out, frame.sampleRateHz);
+  appendLeU8(out, frame.channels);
+  appendLeU64(out, frame.sequence);
+  appendLeU64(out, frame.toaNs);
+  appendLeU64(out, frame.torNs);
+  appendLeU8(out, timeQualityToBinary(frame.timeQuality));
+
+  appendLeU8(out, frame.hasTimingDiagnostics ? 1 : 0);
+  if (frame.hasTimingDiagnostics) {
+    appendLeU8(out, frame.timingHasGpsAnchor ? 1 : 0);
+    appendLeU32(out, frame.ppsEdgeCount);
+    appendLeU32(out, frame.dmaRingSlotIndex);
+    appendLeI64(out, frame.ppsPhaseErrorNs);
+    appendLeF64(out, frame.estimatedPpm);
+    appendLeU64(out, frame.runnerFramesCaptured);
+    appendLeU64(out, frame.runnerFramesDropped);
+    appendLeU64(out, frame.runnerContinuityViolations);
+    appendLeU64(out, frame.runnerPublishErrors);
+    appendLeU32(out, frame.runnerQueueDepth);
+    appendLeU64(out, frame.runnerQueueOverflows);
+    appendLeI32(out, static_cast<int32_t>(frame.runnerLastPublishStatus));
+    appendLeU64(out, frame.packetAgeUs);
+  }
+
+  uint8_t environmentFlags = 0;
+  if (environment != nullptr) {
+    environmentFlags |= environment->hasTemperatureC ? 0x01 : 0;
+    environmentFlags |= environment->hasHumidityFraction ? 0x02 : 0;
+    environmentFlags |= environment->temperatureSource != nullptr ? 0x04 : 0;
+  }
+  appendLeU8(out, environmentFlags);
+  if ((environmentFlags & 0x01) != 0) {
+    appendLeF32(out, environment->temperatureC);
+  }
+  if ((environmentFlags & 0x02) != 0) {
+    appendLeF32(out, environment->humidityFraction);
+  }
+  if ((environmentFlags & 0x04) != 0 && !appendBinaryString(out, environment->temperatureSource)) {
+    return false;
+  }
+
+  appendLeU32(out, static_cast<uint32_t>(frame.samplesPerChannel));
+  return true;
+}
+
 }  // namespace
 
 const char* nodeTypeToWire(NodeType type) {
@@ -127,28 +307,15 @@ bool buildIngestPayload(
   return true;
 }
 
-bool buildIngestPayloadParts(
-    const NodeDescriptor& node,
-    const AudioFrame& frame,
-    const EnvironmentalSample* environment,
-    IngestPayloadParts& outParts) {
-  if (node.id == nullptr || node.sensorOffsetsM == nullptr || node.sensorCount == 0 ||
-      frame.interleavedSamples == nullptr) {
+bool buildNodePayloadJson(const NodeDescriptor& node, std::string& outPayload) {
+  if (node.id == nullptr || node.sensorOffsetsM == nullptr || node.sensorCount == 0) {
     return false;
   }
 
-  const size_t bytes = frame.samplesPerChannel * static_cast<size_t>(frame.channels) * sizeof(int16_t);
-  const size_t encodedBytes = 4 * ((bytes + 2) / 3);
-
-  outParts.prefix.clear();
-  outParts.suffix.clear();
-  outParts.rawAudioBytes = bytes;
-  outParts.encodedAudioBytes = encodedBytes;
-
-  std::string& outPayload = outParts.prefix;
+  outPayload.clear();
   outPayload.reserve(640);
 
-  outPayload += "{\"node\":{";
+  outPayload += '{';
 
   outPayload += "\"id\":";
   appendQuoted(outPayload, node.id);
@@ -225,7 +392,29 @@ bool buildIngestPayloadParts(
   }
   outPayload += "}}";
 
-  outPayload += ",\"frame\":{";
+  return true;
+}
+
+bool buildFramePayloadParts(
+    const AudioFrame& frame,
+    const EnvironmentalSample* environment,
+    IngestPayloadParts& outParts) {
+  if (frame.interleavedSamples == nullptr) {
+    return false;
+  }
+
+  const size_t bytes = frame.samplesPerChannel * static_cast<size_t>(frame.channels) * sizeof(int16_t);
+  const size_t encodedBytes = 4 * ((bytes + 2) / 3);
+
+  outParts.prefix.clear();
+  outParts.suffix.clear();
+  outParts.rawAudioBytes = bytes;
+  outParts.encodedAudioBytes = encodedBytes;
+
+  std::string& outPayload = outParts.prefix;
+  outPayload.reserve(512);
+
+  outPayload += "{\"frame\":{";
 
   outPayload += "\"start_time_ns\":";
   appendUint64(outPayload, frame.startTimeNs);
@@ -336,6 +525,125 @@ bool buildIngestPayloadParts(
 
   suffix += "}";
 
+  return true;
+}
+
+bool buildIngestPayloadParts(
+    const NodeDescriptor& node,
+    const AudioFrame& frame,
+    const EnvironmentalSample* environment,
+    IngestPayloadParts& outParts) {
+  std::string nodeJson;
+  IngestPayloadParts frameParts;
+  if (!buildNodePayloadJson(node, nodeJson) ||
+      !buildFramePayloadParts(frame, environment, frameParts)) {
+    return false;
+  }
+
+  outParts.rawAudioBytes = frameParts.rawAudioBytes;
+  outParts.encodedAudioBytes = frameParts.encodedAudioBytes;
+  outParts.prefix.clear();
+  outParts.suffix.clear();
+  outParts.prefix.reserve(16 + nodeJson.size() + frameParts.prefix.size());
+  outParts.prefix += "{\"node\":";
+  outParts.prefix += nodeJson;
+  outParts.prefix += ',';
+  outParts.prefix += frameParts.prefix.substr(1);
+  outParts.suffix = std::move(frameParts.suffix);
+  return true;
+}
+
+bool buildStoreForwardPayloadParts(
+    const NodeDescriptor& node,
+    const AudioFrame* frames,
+    const EnvironmentalSample* const* environments,
+    size_t frameCount,
+    bool sortByToa,
+    std::vector<IngestPayloadParts>& outParts) {
+  if (frames == nullptr || frameCount == 0) {
+    return false;
+  }
+
+  std::string nodeJson;
+  if (!buildNodePayloadJson(node, nodeJson)) {
+    return false;
+  }
+
+  outParts.clear();
+  outParts.resize(frameCount);
+
+  for (size_t i = 0; i < frameCount; ++i) {
+    const EnvironmentalSample* environment =
+        environments != nullptr ? environments[i] : nullptr;
+    IngestPayloadParts frameParts;
+    if (!buildFramePayloadParts(frames[i], environment, frameParts)) {
+      outParts.clear();
+      return false;
+    }
+
+    if (i == 0) {
+      outParts[i].prefix.reserve(nodeJson.size() + frameParts.prefix.size() + 96);
+      outParts[i].prefix += "{\"node\":";
+      outParts[i].prefix += nodeJson;
+      outParts[i].prefix += ",\"sort_by_toa\":";
+      outParts[i].prefix += sortByToa ? "true" : "false";
+      outParts[i].prefix += ",\"buffered_frames\":[";
+    }
+    outParts[i].prefix += frameParts.prefix;
+    outParts[i].suffix = std::move(frameParts.suffix);
+    if (i + 1 < frameCount) {
+      outParts[i].suffix += ',';
+    } else {
+      outParts[i].suffix += "]}";
+    }
+    outParts[i].rawAudioBytes = frameParts.rawAudioBytes;
+    outParts[i].encodedAudioBytes = frameParts.encodedAudioBytes;
+  }
+  return true;
+}
+
+bool buildBinaryStoreForwardPayloadParts(
+    const NodeDescriptor& node,
+    const AudioFrame* frames,
+    const EnvironmentalSample* const* environments,
+    size_t frameCount,
+    bool sortByToa,
+    std::vector<IngestPayloadParts>& outParts) {
+  if (frames == nullptr || frameCount == 0 || frameCount > UINT16_MAX) {
+    return false;
+  }
+
+  outParts.clear();
+  outParts.resize(frameCount);
+
+  for (size_t i = 0; i < frameCount; ++i) {
+    const EnvironmentalSample* environment =
+        environments != nullptr ? environments[i] : nullptr;
+    IngestPayloadParts& part = outParts[i];
+    part.prefix.clear();
+    part.suffix.clear();
+    part.rawAudioBytes =
+        frames[i].samplesPerChannel * static_cast<size_t>(frames[i].channels) * sizeof(int16_t);
+    part.encodedAudioBytes = part.rawAudioBytes;
+
+    if (i == 0) {
+      part.prefix.reserve(256);
+      part.prefix.append("MMB1", 4);
+      appendLeU8(part.prefix, 1);
+      appendLeU8(part.prefix, sortByToa ? 1 : 0);
+      appendLeU16(part.prefix, static_cast<uint16_t>(frameCount));
+      if (!appendBinaryNode(part.prefix, node)) {
+        outParts.clear();
+        return false;
+      }
+    } else {
+      part.prefix.reserve(128);
+    }
+    if (!appendBinaryFrameHeader(part.prefix, frames[i], environment)) {
+      outParts.clear();
+      return false;
+    }
+  }
   return true;
 }
 

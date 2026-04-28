@@ -20,6 +20,28 @@ struct LabelHit {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
+struct AudioQuality {
+    #[serde(default)]
+    source_window_type: Option<String>,
+    #[serde(default)]
+    coverage_ratio: Option<f64>,
+    #[serde(default)]
+    missing_ratio: Option<f64>,
+    #[serde(default)]
+    max_gap_seconds: Option<f64>,
+    #[serde(default)]
+    warning: Option<bool>,
+    #[serde(default)]
+    degraded: Option<bool>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+struct FeatureSummary {
+    #[serde(default)]
+    audio_quality: Option<AudioQuality>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 struct Detection {
     #[serde(default)]
     event_id: String,
@@ -37,6 +59,8 @@ struct Detection {
     label_hits: Vec<LabelHit>,
     #[serde(default)]
     classification_label_hits: Option<Vec<LabelHit>>,
+    #[serde(default)]
+    feature_summary: Option<FeatureSummary>,
 }
 
 fn fmt_ts_ns(ns: i64) -> String {
@@ -308,6 +332,7 @@ fn DetectionMetaPanel(detection: RwSignal<Option<Detection>>) -> impl IntoView {
                     } else {
                         d.classification_label_hits.clone().unwrap_or_default()
                     };
+                    let audio_quality = d.feature_summary.as_ref().and_then(|f| f.audio_quality.clone());
                     view! {
                         <h3>"Metadata"</h3>
                         <dl class="audio-meta-dl">
@@ -316,6 +341,27 @@ fn DetectionMetaPanel(detection: RwSignal<Option<Detection>>) -> impl IntoView {
                             <dt>"Node"</dt><dd>{node}</dd>
                             <dt>"Primary label"</dt><dd>{primary} " " <span class="muted">{primary_conf}</span></dd>
                         </dl>
+                        {audio_quality.map(|q| {
+                            let missing = q.missing_ratio.unwrap_or(0.0);
+                            let gap_ms = q.max_gap_seconds.unwrap_or(0.0) * 1000.0;
+                            let status = if q.degraded.unwrap_or(false) {
+                                "Degraded"
+                            } else if q.warning.unwrap_or(false) || missing > 0.0 || gap_ms > 0.0 {
+                                "Warning"
+                            } else {
+                                "Clean"
+                            };
+                            let source = q.source_window_type.unwrap_or_else(|| "-".into());
+                            view! {
+                                <h3>"Audio quality"</h3>
+                                <dl class="audio-meta-dl">
+                                    <dt>"Status"</dt><dd>{status}</dd>
+                                    <dt>"Missing"</dt><dd>{format!("{:.1}%", missing * 100.0)}</dd>
+                                    <dt>"Max gap"</dt><dd>{format!("{:.0} ms", gap_ms)}</dd>
+                                    <dt>"Window"</dt><dd>{source}</dd>
+                                </dl>
+                            }
+                        })}
                         <h3>"Classifier hits"</h3>
                         {if hits.is_empty() {
                             view! { <p class="muted">"No additional hits."</p> }.into_any()

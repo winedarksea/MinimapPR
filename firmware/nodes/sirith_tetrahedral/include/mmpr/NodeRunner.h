@@ -33,7 +33,8 @@ class NodeRunner {
       uint32_t logEveryFrames = 100,
       IEnvironmentalSource* environmentalSource = nullptr,
       size_t maxPacketSamplesPerChannel = 0,
-      uint32_t publishFailureBackoffMs = 0);
+      uint32_t publishFailureBackoffMs = 0,
+      size_t storeForwardBatchFrames = 1);
 
   bool begin(
       bool syncNtp,
@@ -62,6 +63,8 @@ class NodeRunner {
   void dropOldestQueuedPacket();
   bool popQueuedPacket(QueuedAudioPacket& packet);
   AudioFrame buildFrameForPacket(const QueuedAudioPacket& packet, uint64_t publishMonotonicUs) const;
+  bool fillActivePublishBatch();
+  void clearActivePublishBatch();
   void drainAvailableAudioFrames();
   void processCapturedFrame(
       const AudioCaptureTimestamp& captureTimestamp,
@@ -91,12 +94,14 @@ class NodeRunner {
   uint64_t lastLoggedFrameCount_ = 0;
   size_t maxPacketSamplesPerChannel_ = 0;
   uint32_t publishFailureBackoffMs_ = 0;
+  size_t storeForwardBatchFrames_ = 1;
   uint32_t nextPublishAttemptMs_ = 0;
   std::vector<QueuedAudioPacket> queuedPackets_;
   size_t queueHead_ = 0;
   size_t queueDepth_ = 0;
-  QueuedAudioPacket activePublishPacket_;
-  bool activePublishPacketValid_ = false;
+  std::vector<QueuedAudioPacket> activePublishPackets_;
+  size_t activePublishBatchSize_ = 0;
+  bool activePublishBatchValid_ = false;
 
   RunnerStats stats_ = {};
 };

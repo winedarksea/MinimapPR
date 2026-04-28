@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "mmpr/Types.h"
 
@@ -29,6 +30,20 @@ class HttpFramePublisher {
       const NodeDescriptor& node,
       const AudioFrame& frame,
       const EnvironmentalSample* environment,
+      bool keepResponseBody,
+      PublishResult& immediateResult);
+  bool beginStoreForwardPublish(
+      const NodeDescriptor& node,
+      const std::vector<AudioFrame>& frames,
+      const std::vector<const EnvironmentalSample*>& environments,
+      bool sortByToa,
+      bool keepResponseBody,
+      PublishResult& immediateResult);
+  bool beginBinaryStoreForwardPublish(
+      const NodeDescriptor& node,
+      const std::vector<AudioFrame>& frames,
+      const std::vector<const EnvironmentalSample*>& environments,
+      bool sortByToa,
       bool keepResponseBody,
       PublishResult& immediateResult);
   bool pollPublish(PublishResult& result);

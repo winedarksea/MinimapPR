@@ -13,7 +13,7 @@ namespace {
 
 constexpr uint64_t kNsPerSecond = 1000000000ULL;
 constexpr int kPublishSkippedForBackoffStatus = -5;
-constexpr size_t kQueuedPacketSlots = 8;
+constexpr size_t kQueuedPacketSlots = 40;
 
 uint64_t nextUtcSecondBoundary(uint64_t utcNs) {
   return ((utcNs / kNsPerSecond) + 1ULL) * kNsPerSecond;
@@ -33,7 +33,8 @@ NodeRunner::NodeRunner(
     uint32_t logEveryFrames,
     IEnvironmentalSource* environmentalSource,
     size_t maxPacketSamplesPerChannel,
-    uint32_t publishFailureBackoffMs)
+    uint32_t publishFailureBackoffMs,
+    size_t storeForwardBatchFrames)
     : descriptor_(descriptor),
       audioSource_(audioSource),
       publisher_(publisher),
@@ -41,7 +42,8 @@ NodeRunner::NodeRunner(
       clock_(clock),
       logEveryFrames_(logEveryFrames),
       maxPacketSamplesPerChannel_(maxPacketSamplesPerChannel),
-      publishFailureBackoffMs_(publishFailureBackoffMs) {}
+      publishFailureBackoffMs_(publishFailureBackoffMs),
+      storeForwardBatchFrames_(std::max<size_t>(1, storeForwardBatchFrames)) {}
 
 bool NodeRunner::begin(bool syncNtp, const char* ntpServer, long gmtOffsetSeconds, int daylightOffsetSeconds) {
   if (!audioSource_.begin()) {
@@ -92,8 +94,11 @@ bool NodeRunner::begin(bool syncNtp, const char* ntpServer, long gmtOffsetSecond
       packet.interleavedSamples.reserve(
           maxSamplesPerChannel * static_cast<size_t>(audioSource_.channels()));
     }
-    activePublishPacket_.interleavedSamples.reserve(
-        maxSamplesPerChannel * static_cast<size_t>(audioSource_.channels()));
+    activePublishPackets_.resize(storeForwardBatchFrames_);
+    for (QueuedAudioPacket& packet : activePublishPackets_) {
+      packet.interleavedSamples.reserve(
+          maxSamplesPerChannel * static_cast<size_t>(audioSource_.channels()));
+    }
   }
 
   std::printf(
@@ -173,7 +178,7 @@ bool NodeRunner::popQueuedPacket(QueuedAudioPacket& packet) {
 }
 
 uint32_t NodeRunner::effectiveQueueDepth() const {
-  return static_cast<uint32_t>(queueDepth_ + (activePublishPacketValid_ ? 1u : 0u));
+  return static_cast<uint32_t>(queueDepth_ + (activePublishBatchValid_ ? activePublishBatchSize_ : 0u));
 }
 
 AudioFrame NodeRunner::buildFrameForPacket(const QueuedAudioPacket& packet, uint64_t publishMonotonicUs) const {
@@ -231,28 +236,64 @@ AudioFrame NodeRunner::buildFrameForPacket(const QueuedAudioPacket& packet, uint
   return frame;
 }
 
+bool NodeRunner::fillActivePublishBatch() {
+  if (activePublishBatchValid_) {
+    return true;
+  }
+  if (queueDepth_ == 0) {
+    activePublishBatchSize_ = 0;
+    return false;
+  }
+  if (storeForwardBatchFrames_ > 1 && queueDepth_ < storeForwardBatchFrames_) {
+    stats_.queueDepth = effectiveQueueDepth();
+    return false;
+  }
+
+  activePublishBatchSize_ = 0;
+  const size_t targetCount = std::min(storeForwardBatchFrames_, queueDepth_);
+  while (activePublishBatchSize_ < targetCount) {
+    QueuedAudioPacket& packet = activePublishPackets_[activePublishBatchSize_];
+    if (!popQueuedPacket(packet)) {
+      break;
+    }
+    ++activePublishBatchSize_;
+  }
+  activePublishBatchValid_ = activePublishBatchSize_ > 0;
+  stats_.queueDepth = effectiveQueueDepth();
+  return activePublishBatchValid_;
+}
+
+void NodeRunner::clearActivePublishBatch() {
+  for (size_t i = 0; i < activePublishBatchSize_ && i < activePublishPackets_.size(); ++i) {
+    activePublishPackets_[i].interleavedSamples.clear();
+    activePublishPackets_[i].hasEnvironmentalSample = false;
+  }
+  activePublishBatchSize_ = 0;
+  activePublishBatchValid_ = false;
+  stats_.queueDepth = effectiveQueueDepth();
+}
+
 void NodeRunner::pumpPublisher() {
   PublishResult result = {};
   if (publisher_.pollPublish(result)) {
     stats_.lastPublishStatus = result.statusCode;
     if (result.ok) {
-      ++stats_.framesPublished;
+      stats_.framesPublished += activePublishBatchSize_;
       nextPublishAttemptMs_ = 0;
-      activePublishPacketValid_ = false;
-      activePublishPacket_.interleavedSamples.clear();
-      stats_.queueDepth = effectiveQueueDepth();
+      clearActivePublishBatch();
     } else {
       ++stats_.publishErrors;
       if (publishFailureBackoffMs_ > 0) {
         nextPublishAttemptMs_ = to_ms_since_boot(get_absolute_time()) + publishFailureBackoffMs_;
       }
+      const uint64_t firstSequence =
+          activePublishBatchSize_ > 0 ? activePublishPackets_[0].sequence : 0;
       std::printf(
           "[node] publish failed status=%d seq=%" PRIu64
-          " samples=%lu queue=%u\n",
+          " batch=%lu queue=%u\n",
           result.statusCode,
-          activePublishPacket_.sequence,
-          static_cast<unsigned long>(
-              activePublishPacket_.interleavedSamples.size() / static_cast<size_t>(audioSource_.channels())),
+          firstSequence,
+          static_cast<unsigned long>(activePublishBatchSize_),
           static_cast<unsigned>(effectiveQueueDepth()));
       stats_.queueDepth = effectiveQueueDepth();
     }
@@ -271,37 +312,51 @@ void NodeRunner::startNextPublishIfPossible() {
     return;
   }
 
-  if (!activePublishPacketValid_ && !popQueuedPacket(activePublishPacket_)) {
+  if (!fillActivePublishBatch()) {
     stats_.queueDepth = effectiveQueueDepth();
     return;
   }
-  activePublishPacketValid_ = true;
-
-  const AudioFrame frame = buildFrameForPacket(activePublishPacket_, time_us_64());
+  const uint64_t publishMonotonicUs = time_us_64();
+  std::vector<AudioFrame> frames;
+  std::vector<const EnvironmentalSample*> environments;
+  try {
+    frames.reserve(activePublishBatchSize_);
+    environments.reserve(activePublishBatchSize_);
+    for (size_t i = 0; i < activePublishBatchSize_; ++i) {
+      frames.push_back(buildFrameForPacket(activePublishPackets_[i], publishMonotonicUs));
+      environments.push_back(
+          activePublishPackets_[i].hasEnvironmentalSample
+              ? &activePublishPackets_[i].environmentalSample
+              : nullptr);
+    }
+  } catch (const std::bad_alloc&) {
+    stats_.lastPublishStatus = -6;
+    ++stats_.publishErrors;
+    return;
+  }
   PublishResult immediateResult = {};
-  const EnvironmentalSample* environmentalSample =
-      activePublishPacket_.hasEnvironmentalSample ? &activePublishPacket_.environmentalSample : nullptr;
-  if (publisher_.beginPublish(descriptor_, frame, environmentalSample, false, immediateResult)) {
+  if (publisher_.beginBinaryStoreForwardPublish(descriptor_, frames, environments, false, false, immediateResult)) {
     stats_.queueDepth = effectiveQueueDepth();
     return;
   }
 
   stats_.lastPublishStatus = immediateResult.statusCode;
   if (immediateResult.ok) {
-    ++stats_.framesPublished;
-    activePublishPacketValid_ = false;
-    activePublishPacket_.interleavedSamples.clear();
+    stats_.framesPublished += activePublishBatchSize_;
+    clearActivePublishBatch();
   } else {
     ++stats_.publishErrors;
     if (publishFailureBackoffMs_ > 0) {
       nextPublishAttemptMs_ = nowMs + publishFailureBackoffMs_;
     }
+    const uint64_t firstSequence =
+        activePublishBatchSize_ > 0 ? activePublishPackets_[0].sequence : 0;
     std::printf(
         "[node] publish failed status=%d seq=%" PRIu64
-        " samples=%lu queue=%u\n",
+        " batch=%lu queue=%u\n",
         immediateResult.statusCode,
-        activePublishPacket_.sequence,
-        static_cast<unsigned long>(frame.samplesPerChannel),
+        firstSequence,
+        static_cast<unsigned long>(activePublishBatchSize_),
         static_cast<unsigned>(effectiveQueueDepth()));
   }
   stats_.queueDepth = effectiveQueueDepth();

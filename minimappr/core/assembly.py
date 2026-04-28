@@ -114,6 +114,7 @@ class DetectionAssembler:
         time_quality,
         source_observation_ids: list[str],
         sample_rate_hz: int,
+        audio_quality: dict[str, Any] | None = None,
         existing_detection: dict[str, Any] | None = None,
         persist_mode: str = "insert",
         # Tracker
@@ -189,6 +190,8 @@ class DetectionAssembler:
         feature_summary["omni_confidence"] = omni_confidence
         feature_summary["environment"] = environment
         feature_summary["branch_evidence"] = branch_evidence or {}
+        if audio_quality is not None:
+            feature_summary["audio_quality"] = audio_quality
         if beamformed_classification_confidence is not None:
             feature_summary["beamformed_confidence"] = beamformed_classification_confidence
             feature_summary["beamformed_label"] = beamformed_classification_label

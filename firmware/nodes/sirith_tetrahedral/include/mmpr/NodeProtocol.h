@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <string>
+#include <vector>
 
 #include "mmpr/Types.h"
 
@@ -27,5 +28,24 @@ bool buildIngestPayloadParts(
     const AudioFrame& frame,
     const EnvironmentalSample* environment,
     IngestPayloadParts& outParts);
+bool buildNodePayloadJson(const NodeDescriptor& node, std::string& outPayload);
+bool buildFramePayloadParts(
+    const AudioFrame& frame,
+    const EnvironmentalSample* environment,
+    IngestPayloadParts& outParts);
+bool buildStoreForwardPayloadParts(
+    const NodeDescriptor& node,
+    const AudioFrame* frames,
+    const EnvironmentalSample* const* environments,
+    size_t frameCount,
+    bool sortByToa,
+    std::vector<IngestPayloadParts>& outParts);
+bool buildBinaryStoreForwardPayloadParts(
+    const NodeDescriptor& node,
+    const AudioFrame* frames,
+    const EnvironmentalSample* const* environments,
+    size_t frameCount,
+    bool sortByToa,
+    std::vector<IngestPayloadParts>& outParts);
 
 }  // namespace mmpr

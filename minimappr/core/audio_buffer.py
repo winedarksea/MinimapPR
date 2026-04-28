@@ -8,6 +8,76 @@ from dataclasses import dataclass, field
 import numpy as np
 
 
+@dataclass(frozen=True, slots=True)
+class AudioCoverageStats:
+    sample_count: int
+    covered_samples: int
+    missing_samples: int
+    coverage_ratio: float
+    missing_ratio: float
+    max_gap_samples: int
+    max_gap_seconds: float
+    warning: bool
+    degraded: bool
+
+    def to_feature_summary(self, *, source_window_type: str) -> dict[str, float | int | bool | str]:
+        return {
+            "source_window_type": source_window_type,
+            "sample_count": self.sample_count,
+            "covered_samples": self.covered_samples,
+            "missing_samples": self.missing_samples,
+            "coverage_ratio": self.coverage_ratio,
+            "missing_ratio": self.missing_ratio,
+            "max_gap_seconds": self.max_gap_seconds,
+            "warning": self.warning,
+            "degraded": self.degraded,
+        }
+
+
+def _coverage_stats(coverage: np.ndarray, sample_rate_hz: int) -> AudioCoverageStats:
+    coverage = np.asarray(coverage, dtype=np.bool_)
+    sample_count = int(coverage.size)
+    if sample_count <= 0:
+        return AudioCoverageStats(
+            sample_count=0,
+            covered_samples=0,
+            missing_samples=0,
+            coverage_ratio=0.0,
+            missing_ratio=1.0,
+            max_gap_samples=0,
+            max_gap_seconds=0.0,
+            warning=True,
+            degraded=True,
+        )
+
+    missing = ~coverage
+    missing_samples = int(np.count_nonzero(missing))
+    covered_samples = sample_count - missing_samples
+    max_gap_samples = 0
+    current_gap = 0
+    for is_missing in missing:
+        if bool(is_missing):
+            current_gap += 1
+            max_gap_samples = max(max_gap_samples, current_gap)
+        else:
+            current_gap = 0
+    max_gap_seconds = max_gap_samples / float(sample_rate_hz)
+    missing_ratio = missing_samples / float(sample_count)
+    warning = missing_ratio > 0.01 or max_gap_seconds > 0.100
+    degraded = missing_ratio > 0.05 or max_gap_seconds > 0.250
+    return AudioCoverageStats(
+        sample_count=sample_count,
+        covered_samples=covered_samples,
+        missing_samples=missing_samples,
+        coverage_ratio=covered_samples / float(sample_count),
+        missing_ratio=missing_ratio,
+        max_gap_samples=max_gap_samples,
+        max_gap_seconds=max_gap_seconds,
+        warning=warning,
+        degraded=degraded,
+    )
+
+
 @dataclass(slots=True)
 class SensorStreamBuffer:
     sample_rate_hz: int
@@ -15,6 +85,7 @@ class SensorStreamBuffer:
     max_samples: int = field(init=False)
     start_time_ns: int | None = field(init=False, default=None)
     samples: np.ndarray = field(init=False, default_factory=lambda: np.zeros(0, dtype=np.float32))
+    coverage: np.ndarray = field(init=False, default_factory=lambda: np.zeros(0, dtype=np.bool_))
     _timeline_origin_ns: int | None = field(init=False, default=None)
     _timeline_origin_sample_index: int = field(init=False, default=0)
     _buffer_start_sample_index: int = field(init=False, default=0)
@@ -49,6 +120,7 @@ class SensorStreamBuffer:
             self._buffer_start_sample_index = start_sample_index or 0
             self.start_time_ns = start_time_ns
             self.samples = samples.copy()
+            self.coverage = np.ones(samples.size, dtype=np.bool_)
             self._prune()
             return
 
@@ -72,6 +144,7 @@ class SensorStreamBuffer:
                 self._buffer_start_sample_index = start_sample_index or 0
                 self.start_time_ns = start_time_ns
                 self.samples = samples.copy()
+                self.coverage = np.ones(samples.size, dtype=np.bool_)
                 self._prune()
                 return
 
@@ -87,6 +160,7 @@ class SensorStreamBuffer:
             self._buffer_start_sample_index = start_sample_index or 0
             self.start_time_ns = start_time_ns
             self.samples = samples.copy()
+            self.coverage = np.ones(samples.size, dtype=np.bool_)
             self._prune()
             return
 
@@ -110,16 +184,20 @@ class SensorStreamBuffer:
         merged_start_sample_index = min(current_start_sample_index, incoming_start_sample_index)
         merged_end_sample_index = max(current_end_sample_index, incoming_end_sample_index)
         merged = np.zeros(merged_end_sample_index - merged_start_sample_index, dtype=np.float32)
+        merged_coverage = np.zeros(merged_end_sample_index - merged_start_sample_index, dtype=np.bool_)
 
         existing_offset = current_start_sample_index - merged_start_sample_index
         merged[existing_offset : existing_offset + self.samples.size] = self.samples
+        merged_coverage[existing_offset : existing_offset + self.coverage.size] = self.coverage
 
         incoming_offset = incoming_start_sample_index - merged_start_sample_index
         # Late-arriving frames should overwrite previously padded zeros rather than
         # being discarded as overlap when HTTP delivery is slightly out of order.
         merged[incoming_offset : incoming_offset + samples.size] = samples
+        merged_coverage[incoming_offset : incoming_offset + samples.size] = True
 
         self.samples = merged
+        self.coverage = merged_coverage
         self._buffer_start_sample_index = merged_start_sample_index
         self._refresh_start_time_ns()
         self._prune()
@@ -130,6 +208,7 @@ class SensorStreamBuffer:
 
         drop = self.samples.size - self.max_samples
         self.samples = self.samples[drop:]
+        self.coverage = self.coverage[drop:]
         self._buffer_start_sample_index += drop
         self._refresh_start_time_ns()
 
@@ -149,6 +228,12 @@ class SensorStreamBuffer:
             return None
 
         return self.samples[relative_start_index:relative_end_index].copy()
+
+    def get_window_coverage_stats(self, center_time_ns: int, window_seconds: float) -> AudioCoverageStats | None:
+        coverage = self._coverage_window(center_time_ns=center_time_ns, window_seconds=window_seconds)
+        if coverage is None:
+            return None
+        return _coverage_stats(coverage, self.sample_rate_hz)
 
     def get_window_ending_at(self, end_time_ns: int, window_seconds: float) -> np.ndarray | None:
         if self.start_time_ns is None or self.samples.size == 0:
@@ -173,6 +258,16 @@ class SensorStreamBuffer:
 
         return self.samples[start_offset_samples:end_offset_samples].copy()
 
+    def get_window_ending_at_coverage_stats(
+        self,
+        end_time_ns: int,
+        window_seconds: float,
+    ) -> AudioCoverageStats | None:
+        coverage = self._coverage_window_ending_at(end_time_ns=end_time_ns, window_seconds=window_seconds)
+        if coverage is None:
+            return None
+        return _coverage_stats(coverage, self.sample_rate_hz)
+
     def end_time_ns(self) -> int | None:
         if self.start_time_ns is None or self.samples.size == 0:
             return None
@@ -183,6 +278,32 @@ class SensorStreamBuffer:
             self.start_time_ns = None
             return
         self.start_time_ns = self._sample_index_to_time_ns(self._buffer_start_sample_index)
+
+    def _coverage_window(self, center_time_ns: int, window_seconds: float) -> np.ndarray | None:
+        if self.start_time_ns is None or self.coverage.size == 0:
+            return None
+        window_samples = max(1, int(round(window_seconds * self.sample_rate_hz)))
+        center_sample_index = self._time_to_sample_index(center_time_ns)
+        start_sample_index = center_sample_index - (window_samples // 2)
+        end_sample_index = start_sample_index + window_samples
+        relative_start_index = start_sample_index - self._buffer_start_sample_index
+        relative_end_index = end_sample_index - self._buffer_start_sample_index
+        if relative_start_index < 0 or relative_end_index > self.coverage.size:
+            return None
+        return self.coverage[relative_start_index:relative_end_index].copy()
+
+    def _coverage_window_ending_at(self, end_time_ns: int, window_seconds: float) -> np.ndarray | None:
+        if self.start_time_ns is None or self.coverage.size == 0:
+            return None
+        window_samples = max(1, int(round(window_seconds * self.sample_rate_hz)))
+        end_sample_index = self._time_to_sample_index(end_time_ns)
+        start_sample_index = end_sample_index - window_samples
+        end_offset_samples = end_sample_index - self._buffer_start_sample_index
+        start_offset_samples = start_sample_index - self._buffer_start_sample_index
+        if end_offset_samples > self.coverage.size:
+            return None
+        start_offset_samples = max(0, start_offset_samples)
+        return self.coverage[start_offset_samples:end_offset_samples].copy()
 
     def _time_to_sample_index(self, time_ns: int) -> int:
         if self._timeline_origin_ns is None:
@@ -253,6 +374,27 @@ class MultiSensorBuffer:
                     result[sensor_id] = window
             return result
 
+    async def get_synchronized_window_coverage_stats(
+        self,
+        sensor_ids: list[str],
+        center_time_ns: int,
+        window_seconds: float,
+        sample_rate_hz: int,
+    ) -> dict[str, AudioCoverageStats]:
+        async with self._lock:
+            result: dict[str, AudioCoverageStats] = {}
+            for sensor_id in sensor_ids:
+                buffer = self._buffers.get(sensor_id)
+                if buffer is None or buffer.sample_rate_hz != sample_rate_hz:
+                    continue
+                stats = buffer.get_window_coverage_stats(
+                    center_time_ns=center_time_ns,
+                    window_seconds=window_seconds,
+                )
+                if stats is not None:
+                    result[sensor_id] = stats
+            return result
+
     async def get_synchronized_window_ending_at(
         self,
         sensor_ids: list[str],
@@ -269,6 +411,27 @@ class MultiSensorBuffer:
                 window = buffer.get_window_ending_at(end_time_ns=end_time_ns, window_seconds=window_seconds)
                 if window is not None:
                     result[sensor_id] = window
+            return result
+
+    async def get_synchronized_window_ending_at_coverage_stats(
+        self,
+        sensor_ids: list[str],
+        end_time_ns: int,
+        window_seconds: float,
+        sample_rate_hz: int,
+    ) -> dict[str, AudioCoverageStats]:
+        async with self._lock:
+            result: dict[str, AudioCoverageStats] = {}
+            for sensor_id in sensor_ids:
+                buffer = self._buffers.get(sensor_id)
+                if buffer is None or buffer.sample_rate_hz != sample_rate_hz:
+                    continue
+                stats = buffer.get_window_ending_at_coverage_stats(
+                    end_time_ns=end_time_ns,
+                    window_seconds=window_seconds,
+                )
+                if stats is not None:
+                    result[sensor_id] = stats
             return result
 
     async def get_recent_window_for_sensors(

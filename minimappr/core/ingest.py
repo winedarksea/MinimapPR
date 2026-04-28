@@ -145,6 +145,7 @@ class IngestProcessor:
         request: IngestFrameRequest,
         *,
         storage_batch_ctx,
+        decoded_audio: np.ndarray | None = None,
     ) -> IngestResult:
         """Decode, preprocess, persist observations, and evaluate trigger.
 
@@ -194,7 +195,13 @@ class IngestProcessor:
             )
 
         # -- decode PCM --------------------------------------------------------
-        audio = decode_pcm16le_b64(frame.samples_b64, frame.channels)
+        audio = (
+            decode_pcm16le_b64(frame.samples_b64, frame.channels)
+            if decoded_audio is None
+            else np.asarray(decoded_audio, dtype=np.float32)
+        )
+        if audio.ndim != 2:
+            raise ValueError("Decoded audio must be channels-first")
         if audio.shape[0] != frame.channels:
             raise ValueError("Decoded channel count does not match frame.channels")
         if frame.samples_per_channel is not None and audio.shape[1] != frame.samples_per_channel:
