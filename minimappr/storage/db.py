@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
+import sqlite3
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -14,6 +16,8 @@ import aiosqlite
 
 from minimappr.cleanup_policy import CleanupPolicy
 from minimappr.models import DetectionEvent, GeoPoint, LabelId, NodeSpec, TrackState
+
+logger = logging.getLogger(__name__)
 
 
 def _json_dumps(value: Any) -> str:
@@ -80,11 +84,8 @@ class Storage:
 
     async def initialize(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._db = await aiosqlite.connect(self.db_path)
-        self._db.row_factory = aiosqlite.Row
-        await self._db.execute("PRAGMA foreign_keys=ON;")
-        await self._db.execute("PRAGMA journal_mode=WAL;")
-        await self._db.execute("PRAGMA synchronous=NORMAL;")
+        await self._open_connection()
+        await self._configure_connection()
 
         await self._db.executescript(
             """
@@ -425,6 +426,44 @@ class Storage:
         await self._deduplicate_reporting_window_canonicals()
         await self._ensure_reporting_window_uniqueness_index()
         await self._db.commit()
+
+    async def _open_connection(self) -> None:
+        self._db = await aiosqlite.connect(self.db_path)
+        self._db.row_factory = aiosqlite.Row
+
+    async def _configure_connection(self) -> None:
+        db = self._require_db()
+        await db.execute("PRAGMA foreign_keys=ON;")
+        try:
+            await db.execute("PRAGMA journal_mode=WAL;")
+        except sqlite3.OperationalError as exc:
+            if "disk I/O error" not in str(exc) or not await self._recover_empty_wal_sidecars():
+                raise
+            logger.warning("Recovered stale SQLite WAL sidecars for %s; retrying database open", self.db_path)
+            await self._open_connection()
+            db = self._require_db()
+            await db.execute("PRAGMA foreign_keys=ON;")
+            await db.execute("PRAGMA journal_mode=WAL;")
+        await db.execute("PRAGMA synchronous=NORMAL;")
+
+    async def _recover_empty_wal_sidecars(self) -> bool:
+        db = self._db
+        if db is not None:
+            await db.close()
+            self._db = None
+
+        wal_path = Path(f"{self.db_path}-wal")
+        shm_path = Path(f"{self.db_path}-shm")
+        if not self.db_path.exists() or not wal_path.exists():
+            return False
+        try:
+            if wal_path.stat().st_size != 0:
+                return False
+            wal_path.unlink(missing_ok=True)
+            shm_path.unlink(missing_ok=True)
+        except OSError:
+            return False
+        return True
 
     async def _deduplicate_reporting_window_canonicals(self) -> None:
         """Keep one canonical row per reporting key before enforcing uniqueness."""
@@ -2006,6 +2045,27 @@ class Storage:
             )
         ).fetchall()
         return {row["node_id"]: row["time_quality"] for row in rows}
+
+    async def list_latest_observation_metadata_per_node(self) -> dict[str, dict[str, Any]]:
+        db = self._require_db()
+        rows = await (
+            await db.execute(
+                """
+                SELECT o.node_id, o.metadata_json
+                FROM observations o
+                INNER JOIN (
+                    SELECT node_id, MAX(toa_ns) AS max_toa
+                    FROM observations
+                    GROUP BY node_id
+                ) latest
+                ON o.node_id = latest.node_id AND o.toa_ns = latest.max_toa
+                """
+            )
+        ).fetchall()
+        return {
+            row["node_id"]: _json_loads(row["metadata_json"], {})
+            for row in rows
+        }
 
     async def list_latest_environment_per_node(self, limit: int = 500) -> list[dict[str, Any]]:
         db = self._require_db()

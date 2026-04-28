@@ -39,6 +39,18 @@ class IAudioSource {
       size_t samplesPerChannel,
       AudioCaptureTimestamp* captureTimestamp = nullptr) = 0;
 
+  virtual uint32_t availableFrames() const { return 0; }
+
+  virtual bool readFrameNonblocking(
+      int16_t* interleavedOut,
+      size_t samplesPerChannel,
+      AudioCaptureTimestamp* captureTimestamp = nullptr) {
+    if (availableFrames() == 0) {
+      return false;
+    }
+    return readFrame(interleavedOut, samplesPerChannel, captureTimestamp);
+  }
+
   virtual bool snapshotProducerState(
       AudioProducerSnapshot& producerSnapshot,
       bool callerAlreadyInIrqContext = false) const {

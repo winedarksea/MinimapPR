@@ -782,6 +782,34 @@ def test_node_recent_audio_endpoint_uses_receipt_time_for_free_running_skew(monk
         assert float(response.headers["x-minimappr-audio-age-seconds"]) < 5.0
 
 
+def test_nodes_endpoint_exposes_latest_firmware_timing_diagnostics(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+
+    diagnostics = {
+        "runner_frames_captured": 120,
+        "runner_frames_dropped": 0,
+        "runner_continuity_violations": 0,
+        "runner_publish_errors": 2,
+        "runner_queue_depth": 1,
+        "runner_queue_overflows": 0,
+        "runner_last_publish_status": -4,
+        "packet_age_us": 64000,
+    }
+
+    with TestClient(app) as client:
+        _ingest_single_frame(
+            client,
+            start_time_ns=time.time_ns(),
+            frame_updates={"timing_diagnostics": diagnostics},
+        )
+
+        response = client.get("/api/v1/nodes", params={"limit": 1})
+        assert response.status_code == 200
+        node = response.json()[0]
+        assert node["latest_timing_diagnostics"]["runner_frames_captured"] == 120
+        assert node["latest_timing_diagnostics"]["runner_last_publish_status"] == -4
+
+
 def test_node_recent_audio_endpoint_validates_seconds(monkeypatch, tmp_path: Path) -> None:
     _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
 

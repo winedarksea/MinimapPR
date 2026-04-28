@@ -284,6 +284,9 @@ class StorageBackend(Protocol):
     async def list_observations_by_ids(self, observation_ids: list[str]) -> list[dict[str, Any]]:
         ...
 
+    async def list_latest_observation_metadata_per_node(self) -> dict[str, dict[str, Any]]:
+        ...
+
     async def latest_detection_audio_for_track(self, track_id: str) -> tuple[str, str] | None:
         ...
 

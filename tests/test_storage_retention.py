@@ -11,6 +11,38 @@ from minimappr.storage.db import Storage
 
 
 @pytest.mark.asyncio
+async def test_storage_recovery_removes_empty_wal_and_stale_shm(tmp_path: Path) -> None:
+    db_path = tmp_path / "stale.db"
+    db_path.write_bytes(b"SQLite format 3\x00" + bytes(100))
+    wal_path = Path(f"{db_path}-wal")
+    shm_path = Path(f"{db_path}-shm")
+    wal_path.write_bytes(b"")
+    shm_path.write_bytes(b"stale-shm")
+
+    storage = Storage(db_path)
+
+    assert await storage._recover_empty_wal_sidecars() is True
+    assert wal_path.exists() is False
+    assert shm_path.exists() is False
+
+
+@pytest.mark.asyncio
+async def test_storage_recovery_preserves_nonempty_wal(tmp_path: Path) -> None:
+    db_path = tmp_path / "active.db"
+    db_path.write_bytes(b"SQLite format 3\x00" + bytes(100))
+    wal_path = Path(f"{db_path}-wal")
+    shm_path = Path(f"{db_path}-shm")
+    wal_path.write_bytes(b"pending-wal")
+    shm_path.write_bytes(b"active-shm")
+
+    storage = Storage(db_path)
+
+    assert await storage._recover_empty_wal_sidecars() is False
+    assert wal_path.read_bytes() == b"pending-wal"
+    assert shm_path.read_bytes() == b"active-shm"
+
+
+@pytest.mark.asyncio
 async def test_storage_retention_cleanup_removes_expired_records(tmp_path: Path) -> None:
     storage = Storage(tmp_path / "retention.db")
     await storage.initialize()

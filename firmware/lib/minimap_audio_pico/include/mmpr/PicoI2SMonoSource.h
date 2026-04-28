@@ -47,6 +47,11 @@ class PicoI2SMonoSource final : public IAudioSource {
       int16_t* interleavedOut,
       size_t samplesPerChannel,
       AudioCaptureTimestamp* captureTimestamp = nullptr) override;
+  uint32_t availableFrames() const override;
+  bool readFrameNonblocking(
+      int16_t* interleavedOut,
+      size_t samplesPerChannel,
+      AudioCaptureTimestamp* captureTimestamp = nullptr) override;
   bool snapshotProducerState(
       AudioProducerSnapshot& producerSnapshot,
       bool callerAlreadyInIrqContext = false) const override;

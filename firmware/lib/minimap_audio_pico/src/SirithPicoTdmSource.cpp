@@ -482,6 +482,26 @@ bool SirithPicoTdmSource::readFrame(
   return true;
 }
 
+uint32_t SirithPicoTdmSource::availableFrames() const {
+  if (!initialized_) {
+    return 0;
+  }
+  const uint32_t irqState = save_and_disable_interrupts();
+  const uint32_t completedFrames = completedFrameCount_;
+  restore_interrupts(irqState);
+  return completedFrames;
+}
+
+bool SirithPicoTdmSource::readFrameNonblocking(
+    int16_t* interleavedOut,
+    size_t samplesPerChannel,
+    AudioCaptureTimestamp* captureTimestamp) {
+  if (availableFrames() == 0) {
+    return false;
+  }
+  return readFrame(interleavedOut, samplesPerChannel, captureTimestamp);
+}
+
 bool SirithPicoTdmSource::snapshotProducerState(
     AudioProducerSnapshot& producerSnapshot,
     bool callerAlreadyInIrqContext) const {

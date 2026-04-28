@@ -60,4 +60,19 @@ bool SilenceAudioSource::readFrame(
   return true;
 }
 
+uint32_t SilenceAudioSource::availableFrames() const {
+  const int64_t nowUs = static_cast<int64_t>(time_us_64());
+  return nowUs >= nextFrameAtUs_ ? 1u : 0u;
+}
+
+bool SilenceAudioSource::readFrameNonblocking(
+    int16_t* interleavedOut,
+    size_t samplesPerChannel,
+    AudioCaptureTimestamp* captureTimestamp) {
+  if (availableFrames() == 0) {
+    return false;
+  }
+  return readFrame(interleavedOut, samplesPerChannel, captureTimestamp);
+}
+
 }  // namespace mmpr

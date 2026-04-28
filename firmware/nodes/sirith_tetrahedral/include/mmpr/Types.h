@@ -72,9 +72,16 @@ struct AudioFrame {
   uint32_t dmaRingSlotIndex;
   int64_t ppsPhaseErrorNs;
   double estimatedPpm;
-
   const int16_t* interleavedSamples;
   size_t samplesPerChannel;
+  uint64_t runnerFramesCaptured = 0;
+  uint64_t runnerFramesDropped = 0;
+  uint64_t runnerContinuityViolations = 0;
+  uint64_t runnerPublishErrors = 0;
+  uint32_t runnerQueueDepth = 0;
+  uint64_t runnerQueueOverflows = 0;
+  int runnerLastPublishStatus = 0;
+  uint64_t packetAgeUs = 0;
 };
 
 struct EnvironmentalSample {

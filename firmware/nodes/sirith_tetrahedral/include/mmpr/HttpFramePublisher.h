@@ -25,6 +25,16 @@ class HttpFramePublisher {
       const EnvironmentalSample* environment,
       bool keepResponseBody = false);
 
+  bool beginPublish(
+      const NodeDescriptor& node,
+      const AudioFrame& frame,
+      const EnvironmentalSample* environment,
+      bool keepResponseBody,
+      PublishResult& immediateResult);
+  bool pollPublish(PublishResult& result);
+  bool publishInProgress() const;
+  void cancelPublish();
+
   const std::string& endpointUrl() const { return endpointUrl_; }
   void setBackgroundPollCallback(BackgroundPollCallback callback, void* context);
 

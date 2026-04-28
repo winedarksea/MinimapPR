@@ -454,6 +454,26 @@ bool PicoI2SMonoSource::readFrame(
   return true;
 }
 
+uint32_t PicoI2SMonoSource::availableFrames() const {
+  if (!initialized_) {
+    return 0;
+  }
+  const uint32_t irqState = save_and_disable_interrupts();
+  const uint32_t completedFrames = completedFrameCount_;
+  restore_interrupts(irqState);
+  return completedFrames;
+}
+
+bool PicoI2SMonoSource::readFrameNonblocking(
+    int16_t* interleavedOut,
+    size_t samplesPerChannel,
+    AudioCaptureTimestamp* captureTimestamp) {
+  if (availableFrames() == 0) {
+    return false;
+  }
+  return readFrame(interleavedOut, samplesPerChannel, captureTimestamp);
+}
+
 bool PicoI2SMonoSource::snapshotProducerState(
     AudioProducerSnapshot& producerSnapshot,
     bool callerAlreadyInIrqContext) const {

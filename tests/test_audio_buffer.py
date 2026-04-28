@@ -112,6 +112,24 @@ def test_sensor_stream_buffer_prune_uses_exact_sample_time_at_48khz() -> None:
     assert buf.start_time_ns == sample_time(2)
 
 
+def test_sensor_stream_buffer_preserves_large_absolute_nanoseconds_as_integers() -> None:
+    sample_rate_hz = 16_000
+    frame_samples = 1024
+    start_time_ns = 1_777_212_345_678_901_123
+    expected_duration_ns = (frame_samples * 1_000_000_000 + sample_rate_hz // 2) // sample_rate_hz
+    buf = SensorStreamBuffer(sample_rate_hz=sample_rate_hz, max_duration_seconds=5.0)
+
+    buf.append(
+        start_time_ns=start_time_ns,
+        samples=np.ones(frame_samples, dtype=np.float32),
+        start_sample_index=9_000_000_000_000,
+        end_sample_index=9_000_000_000_000 + frame_samples,
+    )
+
+    assert buf.start_time_ns == start_time_ns
+    assert buf.end_time_ns() == start_time_ns + expected_duration_ns
+
+
 def test_get_window_ending_at_returns_partial_audio_when_buffer_shorter_than_window() -> None:
     """Regression: previously returned None when start_offset_samples < 0.
 

@@ -18,6 +18,9 @@ struct RunnerStats {
   uint64_t framesDropped = 0;
   uint64_t publishErrors = 0;
   uint64_t packetContinuityViolations = 0;
+  uint64_t queueOverflows = 0;
+  uint32_t queueDepth = 0;
+  int lastPublishStatus = 0;
 };
 
 class NodeRunner {
@@ -43,10 +46,29 @@ class NodeRunner {
   const RunnerStats& stats() const { return stats_; }
 
  private:
-  bool publishCurrentPacket(
+  struct QueuedAudioPacket {
+    std::vector<int16_t> interleavedSamples;
+    uint64_t startSampleIndex = 0;
+    uint64_t endSampleIndex = 0;
+    uint64_t startMonotonicUs = 0;
+    uint64_t sequence = 0;
+    bool hasEnvironmentalSample = false;
+    EnvironmentalSample environmentalSample = {};
+  };
+
+  bool enqueueCurrentPacket(
       uint64_t packetEndSampleIndex,
-      const EnvironmentalSample* environmentalSample,
-      int& lastPublishStatus);
+      const EnvironmentalSample* environmentalSample);
+  void dropOldestQueuedPacket();
+  bool popQueuedPacket(QueuedAudioPacket& packet);
+  AudioFrame buildFrameForPacket(const QueuedAudioPacket& packet, uint64_t publishMonotonicUs) const;
+  void drainAvailableAudioFrames();
+  void processCapturedFrame(
+      const AudioCaptureTimestamp& captureTimestamp,
+      const EnvironmentalSample* environmentalSample);
+  void pumpPublisher();
+  void startNextPublishIfPossible();
+  uint32_t effectiveQueueDepth() const;
 
   const NodeDescriptor& descriptor_;
   IAudioSource& audioSource_;
@@ -66,9 +88,15 @@ class NodeRunner {
   uint64_t expectedNextSampleIndex_ = 0;
   uint64_t sequence_ = 0;
   uint32_t logEveryFrames_ = 100;
+  uint64_t lastLoggedFrameCount_ = 0;
   size_t maxPacketSamplesPerChannel_ = 0;
   uint32_t publishFailureBackoffMs_ = 0;
   uint32_t nextPublishAttemptMs_ = 0;
+  std::vector<QueuedAudioPacket> queuedPackets_;
+  size_t queueHead_ = 0;
+  size_t queueDepth_ = 0;
+  QueuedAudioPacket activePublishPacket_;
+  bool activePublishPacketValid_ = false;
 
   RunnerStats stats_ = {};
 };

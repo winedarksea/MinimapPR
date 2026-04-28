@@ -258,7 +258,7 @@ bool buildIngestPayloadParts(
   outPayload += ",\"samples_b64\":\"";
 
   std::string& suffix = outParts.suffix;
-  suffix.reserve(256);
+  suffix.reserve(512);
   suffix += '"';
 
   suffix += ",\"sequence\":";
@@ -287,6 +287,22 @@ bool buildIngestPayloadParts(
     char ppmBuffer[32];
     std::snprintf(ppmBuffer, sizeof(ppmBuffer), "%.6f", frame.estimatedPpm);
     suffix += ppmBuffer;
+    suffix += ",\"runner_frames_captured\":";
+    appendUint64(suffix, frame.runnerFramesCaptured);
+    suffix += ",\"runner_frames_dropped\":";
+    appendUint64(suffix, frame.runnerFramesDropped);
+    suffix += ",\"runner_continuity_violations\":";
+    appendUint64(suffix, frame.runnerContinuityViolations);
+    suffix += ",\"runner_publish_errors\":";
+    appendUint64(suffix, frame.runnerPublishErrors);
+    suffix += ",\"runner_queue_depth\":";
+    appendUint32(suffix, frame.runnerQueueDepth);
+    suffix += ",\"runner_queue_overflows\":";
+    appendUint64(suffix, frame.runnerQueueOverflows);
+    suffix += ",\"runner_last_publish_status\":";
+    suffix += std::to_string(frame.runnerLastPublishStatus);
+    suffix += ",\"packet_age_us\":";
+    appendUint64(suffix, frame.packetAgeUs);
     suffix += "}";
   }
 

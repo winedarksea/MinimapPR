@@ -147,6 +147,8 @@ struct HttpFramePublisher::TransportState {
   size_t bodyBytesReceived = 0;
   bool responseMustClose = false;
   bool sawResponseClose = false;
+  bool asyncPublishActive = false;
+  absolute_time_t requestDeadline = {};
   HttpFramePublisher::BackgroundPollCallback backgroundPollCallback = nullptr;
   void* backgroundPollContext = nullptr;
 };
@@ -221,11 +223,16 @@ void resetRequestState(HttpFramePublisher::TransportState& state, bool keepRespo
   state.bodyBytesReceived = 0;
   state.responseMustClose = false;
   state.sawResponseClose = false;
+  state.asyncPublishActive = false;
+  state.requestDeadline = {};
   state.requestDone = false;
   state.err = ERR_OK;
 }
 
-bool resolveHost(const std::string& host, uint32_t timeoutMs, HttpFramePublisher::TransportState& state) {
+bool resolveHostUntil(
+    const std::string& host,
+    absolute_time_t deadline,
+    HttpFramePublisher::TransportState& state) {
   if (state.remoteAddrValid) {
     return true;
   }
@@ -261,7 +268,6 @@ bool resolveHost(const std::string& host, uint32_t timeoutMs, HttpFramePublisher
     return false;
   }
 
-  const absolute_time_t deadline = make_timeout_time_ms(timeoutMs);
   while (!state.dnsDone && !time_reached(deadline)) {
     cyw43_arch_poll();
     runBackgroundPoll(state);
@@ -620,10 +626,10 @@ void onErr(void* arg, err_t err) {
 bool ensureConnected(
     const std::string& host,
     uint16_t port,
-    uint32_t timeoutMs,
+    absolute_time_t deadline,
     HttpFramePublisher::TransportState& state) {
   closeConnection(state);
-  if (!resolveHost(host, timeoutMs, state)) {
+  if (!resolveHostUntil(host, deadline, state)) {
     return false;
   }
 
@@ -646,7 +652,6 @@ bool ensureConnected(
     return false;
   }
 
-  const absolute_time_t deadline = make_timeout_time_ms(timeoutMs);
   while (!state.connectDone && !time_reached(deadline)) {
     cyw43_arch_poll();
     runBackgroundPoll(state);
@@ -660,6 +665,54 @@ bool ensureConnected(
   }
 
   return true;
+}
+
+bool beginConnection(
+    const std::string& host,
+    uint16_t port,
+    HttpFramePublisher::TransportState& state) {
+  closeConnection(state);
+  if (!resolveHostUntil(host, make_timeout_time_ms(0), state)) {
+    return false;
+  }
+
+  state.connectDone = false;
+  state.connected = false;
+  state.err = ERR_OK;
+  state.pcb = tcp_new_ip_type(IP_GET_TYPE(&state.remoteAddr));
+  if (state.pcb == nullptr) {
+    return false;
+  }
+
+  tcp_arg(state.pcb, &state);
+  tcp_recv(state.pcb, &onRecv);
+  tcp_sent(state.pcb, &onSent);
+  tcp_poll(state.pcb, &onPoll, 2);
+  tcp_err(state.pcb, &onErr);
+
+  const err_t connectErr = tcp_connect(state.pcb, &state.remoteAddr, port, &onConnected);
+  if (connectErr != ERR_OK) {
+    closeConnection(state);
+    state.err = connectErr;
+    return false;
+  }
+  return true;
+}
+
+PublishResult finishRequestResult(HttpFramePublisher::TransportState& state, bool keepResponseBody) {
+  PublishResult result = {};
+  if (state.statusCode > 0) {
+    result.statusCode = state.statusCode;
+  } else {
+    result.statusCode = (state.err == ERR_OK || state.err == ERR_CLSD) ? -4 : -3;
+  }
+  if (keepResponseBody || result.statusCode < 200 || result.statusCode >= 300) {
+    result.responseBody = state.response;
+  }
+  result.ok = (result.statusCode >= 200 && result.statusCode < 300);
+  closeConnection(state);
+  state.asyncPublishActive = false;
+  return result;
 }
 
 PublishResult post(
@@ -688,14 +741,14 @@ PublishResult post(
   state.audioData = audioData;
   state.audioBytes = payloadParts.rawAudioBytes;
 
-  if (!ensureConnected(host, port, timeoutMs, state)) {
+  const absolute_time_t deadline = make_timeout_time_ms(timeoutMs);
+  if (!ensureConnected(host, port, deadline, state)) {
     result.statusCode = (state.err == ERR_TIMEOUT) ? -4 : -3;
     return result;
   }
 
   flushTx(state, state.pcb);
 
-  const absolute_time_t deadline = make_timeout_time_ms(timeoutMs);
   while (!state.requestDone && !time_reached(deadline)) {
     cyw43_arch_poll();
     runBackgroundPoll(state);
@@ -706,18 +759,13 @@ PublishResult post(
     state.err = ERR_TIMEOUT;
     abortConnection(state);
     result.statusCode = -4;
-  } else if (state.statusCode > 0) {
-    result.statusCode = state.statusCode;
-  } else {
-    result.statusCode = (state.err == ERR_OK || state.err == ERR_CLSD) ? -4 : -3;
+    if (keepResponseBody) {
+      result.responseBody = state.response;
+    }
+    closeConnection(state);
+    return result;
   }
-
-  if (keepResponseBody || result.statusCode < 200 || result.statusCode >= 300) {
-    result.responseBody = state.response;
-  }
-  result.ok = (result.statusCode >= 200 && result.statusCode < 300);
-  closeConnection(state);
-  return result;
+  return finishRequestResult(state, keepResponseBody);
 }
 
 }  // namespace
@@ -744,6 +792,106 @@ void HttpFramePublisher::setBackgroundPollCallback(BackgroundPollCallback callba
   }
   transportState_->backgroundPollCallback = callback;
   transportState_->backgroundPollContext = context;
+}
+
+bool HttpFramePublisher::publishInProgress() const {
+  return transportState_ != nullptr && transportState_->asyncPublishActive;
+}
+
+void HttpFramePublisher::cancelPublish() {
+  if (transportState_ == nullptr) {
+    return;
+  }
+  abortConnection(*transportState_);
+  transportState_->asyncPublishActive = false;
+}
+
+bool HttpFramePublisher::beginPublish(
+    const NodeDescriptor& node,
+    const AudioFrame& frame,
+    const EnvironmentalSample* environment,
+    bool keepResponseBody,
+    PublishResult& immediateResult) {
+  immediateResult = {};
+  immediateResult.ok = false;
+  immediateResult.statusCode = -1;
+
+  if (transportState_ == nullptr || transportState_->asyncPublishActive) {
+    immediateResult.statusCode = -7;
+    return false;
+  }
+  if (!endpointValid_) {
+    immediateResult.statusCode = -3;
+    return false;
+  }
+  if (!isWiFiConnected()) {
+    immediateResult.statusCode = -1;
+    return false;
+  }
+
+  IngestPayloadParts payloadParts;
+  try {
+    if (!buildIngestPayloadParts(node, frame, environment, payloadParts)) {
+      immediateResult.statusCode = -2;
+      return false;
+    }
+  } catch (const std::bad_alloc&) {
+    immediateResult.statusCode = -6;
+    return false;
+  }
+
+  resetRequestState(*transportState_, keepResponseBody);
+  const size_t payloadSize =
+      payloadParts.prefix.size() + payloadParts.encodedAudioBytes + payloadParts.suffix.size();
+  transportState_->requestHeader = buildRequestHeader(host_, port_, path_, payloadSize);
+  transportState_->payloadPrefix = std::move(payloadParts.prefix);
+  transportState_->payloadSuffix = std::move(payloadParts.suffix);
+  transportState_->audioData = reinterpret_cast<const uint8_t*>(frame.interleavedSamples);
+  transportState_->audioBytes = payloadParts.rawAudioBytes;
+  transportState_->requestDeadline = make_timeout_time_ms(timeoutMs_);
+
+  if (!beginConnection(host_, port_, *transportState_)) {
+    immediateResult.statusCode = -3;
+    closeConnection(*transportState_);
+    return false;
+  }
+
+  transportState_->asyncPublishActive = true;
+  return true;
+}
+
+bool HttpFramePublisher::pollPublish(PublishResult& result) {
+  result = {};
+  result.ok = false;
+  result.statusCode = -1;
+
+  if (transportState_ == nullptr || !transportState_->asyncPublishActive) {
+    return false;
+  }
+
+  cyw43_arch_poll();
+  runBackgroundPoll(*transportState_);
+  if (transportState_->connected && transportState_->pcb != nullptr) {
+    flushTx(*transportState_, transportState_->pcb);
+  }
+
+  if (!transportState_->requestDone && time_reached(transportState_->requestDeadline)) {
+    transportState_->err = ERR_TIMEOUT;
+    abortConnection(*transportState_);
+    transportState_->asyncPublishActive = false;
+    result.statusCode = -4;
+    if (transportState_->keepResponse) {
+      result.responseBody = transportState_->response;
+    }
+    return true;
+  }
+
+  if (!transportState_->requestDone) {
+    return false;
+  }
+
+  result = finishRequestResult(*transportState_, transportState_->keepResponse);
+  return true;
 }
 
 PublishResult HttpFramePublisher::publish(const NodeDescriptor& node, const AudioFrame& frame, bool keepResponseBody) {

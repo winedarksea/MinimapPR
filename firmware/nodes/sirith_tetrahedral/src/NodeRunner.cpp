@@ -13,6 +13,7 @@ namespace {
 
 constexpr uint64_t kNsPerSecond = 1000000000ULL;
 constexpr int kPublishSkippedForBackoffStatus = -5;
+constexpr size_t kQueuedPacketSlots = 8;
 
 uint64_t nextUtcSecondBoundary(uint64_t utcNs) {
   return ((utcNs / kNsPerSecond) + 1ULL) * kNsPerSecond;
@@ -86,6 +87,13 @@ bool NodeRunner::begin(bool syncNtp, const char* ntpServer, long gmtOffsetSecond
                                           : audioSource_.sampleRateHz();
     packetInterleavedSamples_.reserve(
         maxSamplesPerChannel * static_cast<size_t>(audioSource_.channels()));
+    queuedPackets_.resize(kQueuedPacketSlots);
+    for (QueuedAudioPacket& packet : queuedPackets_) {
+      packet.interleavedSamples.reserve(
+          maxSamplesPerChannel * static_cast<size_t>(audioSource_.channels()));
+    }
+    activePublishPacket_.interleavedSamples.reserve(
+        maxSamplesPerChannel * static_cast<size_t>(audioSource_.channels()));
   }
 
   std::printf(
@@ -99,10 +107,9 @@ bool NodeRunner::begin(bool syncNtp, const char* ntpServer, long gmtOffsetSecond
   return true;
 }
 
-bool NodeRunner::publishCurrentPacket(
+bool NodeRunner::enqueueCurrentPacket(
     uint64_t packetEndSampleIndex,
-    const EnvironmentalSample* environmentalSample,
-    int& lastPublishStatus) {
+    const EnvironmentalSample* environmentalSample) {
   if (!packetOpen_ || packetInterleavedSamples_.empty() || packetEndSampleIndex <= packetStartSampleIndex_) {
     packetOpen_ = false;
     packetInterleavedSamples_.clear();
@@ -111,24 +118,82 @@ bool NodeRunner::publishCurrentPacket(
     return false;
   }
 
+  if (queuedPackets_.empty()) {
+    packetOpen_ = false;
+    packetInterleavedSamples_.clear();
+    packetTargetEndSampleIndex_ = 0;
+    packetStartMonotonicUs_ = 0;
+    return false;
+  }
+  if (queueDepth_ >= queuedPackets_.size()) {
+    dropOldestQueuedPacket();
+  }
+  const size_t writeIndex = (queueHead_ + queueDepth_) % queuedPackets_.size();
+  QueuedAudioPacket& packet = queuedPackets_[writeIndex];
+  packet.interleavedSamples.assign(packetInterleavedSamples_.begin(), packetInterleavedSamples_.end());
+  packet.startSampleIndex = packetStartSampleIndex_;
+  packet.endSampleIndex = packetEndSampleIndex;
+  packet.startMonotonicUs = packetStartMonotonicUs_;
+  packet.sequence = sequence_++;
+  packet.hasEnvironmentalSample = false;
+  if (environmentalSample != nullptr) {
+    packet.hasEnvironmentalSample = true;
+    packet.environmentalSample = *environmentalSample;
+  }
+  ++queueDepth_;
+  stats_.queueDepth = effectiveQueueDepth();
+
+  packetOpen_ = false;
+  packetInterleavedSamples_.clear();
+  packetTargetEndSampleIndex_ = 0;
+  packetStartMonotonicUs_ = 0;
+  return true;
+}
+
+void NodeRunner::dropOldestQueuedPacket() {
+  if (queueDepth_ == 0 || queuedPackets_.empty()) {
+    return;
+  }
+  queueHead_ = (queueHead_ + 1u) % queuedPackets_.size();
+  --queueDepth_;
+  ++stats_.queueOverflows;
+}
+
+bool NodeRunner::popQueuedPacket(QueuedAudioPacket& packet) {
+  if (queueDepth_ == 0 || queuedPackets_.empty()) {
+    return false;
+  }
+  packet = queuedPackets_[queueHead_];
+  queuedPackets_[queueHead_].interleavedSamples.clear();
+  queuedPackets_[queueHead_].hasEnvironmentalSample = false;
+  queueHead_ = (queueHead_ + 1u) % queuedPackets_.size();
+  --queueDepth_;
+  stats_.queueDepth = effectiveQueueDepth();
+  return true;
+}
+
+uint32_t NodeRunner::effectiveQueueDepth() const {
+  return static_cast<uint32_t>(queueDepth_ + (activePublishPacketValid_ ? 1u : 0u));
+}
+
+AudioFrame NodeRunner::buildFrameForPacket(const QueuedAudioPacket& packet, uint64_t publishMonotonicUs) const {
   // Stamp TOA from the current UTC epoch plus the DMA-captured monotonic age of
   // the packet. This keeps recent audio tied to the clock correction that is
   // valid at publish time while preserving the precise capture offset.
-  const uint64_t elapsedSamples = packetEndSampleIndex - packetStartSampleIndex_;
+  const uint64_t elapsedSamples = packet.endSampleIndex - packet.startSampleIndex;
   const uint64_t durationNs =
       (elapsedSamples * kNsPerSecond) / static_cast<uint64_t>(audioSource_.sampleRateHz());
-  const uint64_t publishMonotonicUs = time_us_64();
   const uint64_t receiptNs = clock_.utcAtMonotonicUs(publishMonotonicUs);
   uint64_t packetAgeNs = 0;
   uint64_t utcStartNs = 0;
   uint64_t utcEndNs = 0;
-  if (packetStartMonotonicUs_ > 0 && publishMonotonicUs >= packetStartMonotonicUs_) {
-    packetAgeNs = (publishMonotonicUs - packetStartMonotonicUs_) * 1000ULL;
+  if (packet.startMonotonicUs > 0 && publishMonotonicUs >= packet.startMonotonicUs) {
+    packetAgeNs = (publishMonotonicUs - packet.startMonotonicUs) * 1000ULL;
     utcStartNs = receiptNs > packetAgeNs ? receiptNs - packetAgeNs : 0;
     utcEndNs = utcStartNs + durationNs;
   } else {
-    utcStartNs = clock_.utcAtSampleIndex(packetStartSampleIndex_);
-    utcEndNs = clock_.utcAtSampleIndex(packetEndSampleIndex);
+    utcStartNs = clock_.utcAtSampleIndex(packet.startSampleIndex);
+    utcEndNs = clock_.utcAtSampleIndex(packet.endSampleIndex);
     if (utcEndNs < utcStartNs) {
       utcEndNs = utcStartNs + durationNs;
     }
@@ -138,11 +203,11 @@ bool NodeRunner::publishCurrentPacket(
   const AudioFrame frame = {
       utcStartNs,
       utcEndNs,
-      packetStartSampleIndex_,
-      packetEndSampleIndex,
+      packet.startSampleIndex,
+      packet.endSampleIndex,
       audioSource_.sampleRateHz(),
       audioSource_.channels(),
-      sequence_,
+      packet.sequence,
       utcStartNs,
       receiptNs,
       clock_.timeQuality(),
@@ -152,26 +217,80 @@ bool NodeRunner::publishCurrentPacket(
       timingDiagnostics.dmaRingSlotIndex,
       timingDiagnostics.ppsPhaseErrorNs,
       timingDiagnostics.estimatedPpm,
-      packetInterleavedSamples_.data(),
-      packetInterleavedSamples_.size() / static_cast<size_t>(audioSource_.channels()),
+      packet.interleavedSamples.data(),
+      packet.interleavedSamples.size() / static_cast<size_t>(audioSource_.channels()),
+      stats_.framesCaptured,
+      stats_.framesDropped,
+      stats_.packetContinuityViolations,
+      stats_.publishErrors,
+      effectiveQueueDepth(),
+      stats_.queueOverflows,
+      stats_.lastPublishStatus,
+      packetAgeNs / 1000ULL,
   };
+  return frame;
+}
 
+void NodeRunner::pumpPublisher() {
+  PublishResult result = {};
+  if (publisher_.pollPublish(result)) {
+    stats_.lastPublishStatus = result.statusCode;
+    if (result.ok) {
+      ++stats_.framesPublished;
+      nextPublishAttemptMs_ = 0;
+      activePublishPacketValid_ = false;
+      activePublishPacket_.interleavedSamples.clear();
+      stats_.queueDepth = effectiveQueueDepth();
+    } else {
+      ++stats_.publishErrors;
+      if (publishFailureBackoffMs_ > 0) {
+        nextPublishAttemptMs_ = to_ms_since_boot(get_absolute_time()) + publishFailureBackoffMs_;
+      }
+      std::printf(
+          "[node] publish failed status=%d seq=%" PRIu64
+          " samples=%lu queue=%u\n",
+          result.statusCode,
+          activePublishPacket_.sequence,
+          static_cast<unsigned long>(
+              activePublishPacket_.interleavedSamples.size() / static_cast<size_t>(audioSource_.channels())),
+          static_cast<unsigned>(effectiveQueueDepth()));
+      stats_.queueDepth = effectiveQueueDepth();
+    }
+  }
+  startNextPublishIfPossible();
+}
+
+void NodeRunner::startNextPublishIfPossible() {
+  if (publisher_.publishInProgress()) {
+    return;
+  }
   const uint32_t nowMs = to_ms_since_boot(get_absolute_time());
   if (publishFailureBackoffMs_ > 0 && !deadlineReached(nowMs, nextPublishAttemptMs_)) {
-    lastPublishStatus = kPublishSkippedForBackoffStatus;
-    ++stats_.publishErrors;
-    ++sequence_;
-    packetOpen_ = false;
-    packetInterleavedSamples_.clear();
-    packetTargetEndSampleIndex_ = 0;
-    return false;
+    stats_.lastPublishStatus = kPublishSkippedForBackoffStatus;
+    stats_.queueDepth = effectiveQueueDepth();
+    return;
   }
 
-  const PublishResult result = publisher_.publish(descriptor_, frame, environmentalSample, false);
-  lastPublishStatus = result.statusCode;
-  if (result.ok) {
+  if (!activePublishPacketValid_ && !popQueuedPacket(activePublishPacket_)) {
+    stats_.queueDepth = effectiveQueueDepth();
+    return;
+  }
+  activePublishPacketValid_ = true;
+
+  const AudioFrame frame = buildFrameForPacket(activePublishPacket_, time_us_64());
+  PublishResult immediateResult = {};
+  const EnvironmentalSample* environmentalSample =
+      activePublishPacket_.hasEnvironmentalSample ? &activePublishPacket_.environmentalSample : nullptr;
+  if (publisher_.beginPublish(descriptor_, frame, environmentalSample, false, immediateResult)) {
+    stats_.queueDepth = effectiveQueueDepth();
+    return;
+  }
+
+  stats_.lastPublishStatus = immediateResult.statusCode;
+  if (immediateResult.ok) {
     ++stats_.framesPublished;
-    nextPublishAttemptMs_ = 0;
+    activePublishPacketValid_ = false;
+    activePublishPacket_.interleavedSamples.clear();
   } else {
     ++stats_.publishErrors;
     if (publishFailureBackoffMs_ > 0) {
@@ -179,50 +298,19 @@ bool NodeRunner::publishCurrentPacket(
     }
     std::printf(
         "[node] publish failed status=%d seq=%" PRIu64
-        " samples=%lu utc_start=%" PRIu64 " utc_end=%" PRIu64
-        " receipt=%" PRIu64 " packet_age_us=%" PRIu64 "\n",
-        result.statusCode,
-        sequence_,
+        " samples=%lu queue=%u\n",
+        immediateResult.statusCode,
+        activePublishPacket_.sequence,
         static_cast<unsigned long>(frame.samplesPerChannel),
-        utcStartNs,
-        utcEndNs,
-        receiptNs,
-        packetAgeNs / 1000ULL);
+        static_cast<unsigned>(effectiveQueueDepth()));
   }
-  ++sequence_;
-  packetOpen_ = false;
-  packetInterleavedSamples_.clear();
-  packetTargetEndSampleIndex_ = 0;
-  return result.ok;
+  stats_.queueDepth = effectiveQueueDepth();
 }
 
-void NodeRunner::loopOnce() {
-  if (frameBuffer_ == nullptr) {
-    return;
-  }
-
-  AudioCaptureTimestamp captureTimestamp = {};
-  const bool frameOk =
-      audioSource_.readFrame(frameBuffer_, audioSource_.frameSamples(), &captureTimestamp);
-  if (!frameOk) {
-    ++stats_.framesDropped;
-    sleep_ms(1);
-    return;
-  }
-
-  clock_.observeCapturedAudio(captureTimestamp);
-
-  ++stats_.framesCaptured;
-  stats_.framesDropped += captureTimestamp.droppedBlocksBeforeCapture;
-
-  EnvironmentalSample environmental = {};
-  const EnvironmentalSample* environmentalPtr = nullptr;
-  if (environmentalSourceReady_ && environmentalSource_ != nullptr && environmentalSource_->read(environmental)) {
-    environmentalPtr = &environmental;
-  }
-
+void NodeRunner::processCapturedFrame(
+    const AudioCaptureTimestamp& captureTimestamp,
+    const EnvironmentalSample* environmentalPtr) {
   const uint8_t channels = audioSource_.channels();
-  int lastPublishStatus = -1;
   if (haveExpectedNextSampleIndex_ && captureTimestamp.startSampleIndex != expectedNextSampleIndex_) {
     ++stats_.packetContinuityViolations;
     std::printf(
@@ -234,7 +322,7 @@ void NodeRunner::loopOnce() {
     if (packetOpen_ && !packetInterleavedSamples_.empty()) {
       const uint64_t packetEndSampleIndex =
           packetStartSampleIndex_ + (packetInterleavedSamples_.size() / static_cast<size_t>(channels));
-      publishCurrentPacket(packetEndSampleIndex, environmentalPtr, lastPublishStatus);
+      enqueueCurrentPacket(packetEndSampleIndex, environmentalPtr);
     } else {
       packetOpen_ = false;
       packetInterleavedSamples_.clear();
@@ -302,24 +390,72 @@ void NodeRunner::loopOnce() {
 
     if ((packetStartSampleIndex_ + (packetInterleavedSamples_.size() / static_cast<size_t>(channels))) >=
         packetEndSampleIndex) {
-      publishCurrentPacket(packetEndSampleIndex, environmentalPtr, lastPublishStatus);
+      enqueueCurrentPacket(packetEndSampleIndex, environmentalPtr);
       packetOpen_ = false;
       packetStartSampleIndex_ = packetEndSampleIndex;
       packetStartMonotonicUs_ = 0;
       packetTargetEndSampleIndex_ = 0;
     }
   }
+}
 
-  if (logEveryFrames_ > 0 && (stats_.framesCaptured % logEveryFrames_) == 0) {
+void NodeRunner::drainAvailableAudioFrames() {
+  if (frameBuffer_ == nullptr) {
+    return;
+  }
+
+  bool drainedAnyFrame = false;
+  while (true) {
+    AudioCaptureTimestamp captureTimestamp = {};
+    const bool frameOk =
+        audioSource_.readFrameNonblocking(frameBuffer_, audioSource_.frameSamples(), &captureTimestamp);
+    if (!frameOk) {
+      break;
+    }
+
+    drainedAnyFrame = true;
+    clock_.observeCapturedAudio(captureTimestamp);
+    ++stats_.framesCaptured;
+    stats_.framesDropped += captureTimestamp.droppedBlocksBeforeCapture;
+
+    EnvironmentalSample environmental = {};
+    const EnvironmentalSample* environmentalPtr = nullptr;
+    if (environmentalSourceReady_ && environmentalSource_ != nullptr && environmentalSource_->read(environmental)) {
+      environmentalPtr = &environmental;
+    }
+    processCapturedFrame(captureTimestamp, environmentalPtr);
+  }
+
+  if (!drainedAnyFrame) {
+    sleep_ms(1);
+  }
+}
+
+void NodeRunner::loopOnce() {
+  if (frameBuffer_ == nullptr) {
+    return;
+  }
+
+  pumpPublisher();
+  drainAvailableAudioFrames();
+  pumpPublisher();
+
+  if (logEveryFrames_ > 0 &&
+      stats_.framesCaptured != lastLoggedFrameCount_ &&
+      (stats_.framesCaptured % logEveryFrames_) == 0) {
+    lastLoggedFrameCount_ = stats_.framesCaptured;
     std::printf(
         "[node] blocks=%" PRIu64 " published=%" PRIu64 " dropped=%" PRIu64
-        " continuity=%" PRIu64 " errors=%" PRIu64 " last_status=%d\n",
+        " continuity=%" PRIu64 " errors=%" PRIu64 " queue=%u overflows=%" PRIu64
+        " last_status=%d\n",
         stats_.framesCaptured,
         stats_.framesPublished,
         stats_.framesDropped,
         stats_.packetContinuityViolations,
         stats_.publishErrors,
-        lastPublishStatus);
+        static_cast<unsigned>(stats_.queueDepth),
+        stats_.queueOverflows,
+        stats_.lastPublishStatus);
   }
 }
 
