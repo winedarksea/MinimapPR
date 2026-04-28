@@ -16,6 +16,7 @@ struct IngestPayloadParts {
 };
 
 const char* nodeTypeToWire(NodeType type);
+const char* publishFailureStageToWire(PublishFailureStage stage);
 
 bool buildIngestPayload(const NodeDescriptor& node, const AudioFrame& frame, std::string& outPayload);
 bool buildIngestPayload(

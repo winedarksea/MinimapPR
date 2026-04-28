@@ -232,6 +232,13 @@ bool appendBinaryFrameHeader(
     appendLeU64(out, frame.runnerQueueOverflows);
     appendLeI32(out, static_cast<int32_t>(frame.runnerLastPublishStatus));
     appendLeU64(out, frame.packetAgeUs);
+    appendLeU8(out, static_cast<uint8_t>(frame.runnerLastPublishFailureStage));
+    appendLeI32(out, frame.runnerLastPublishLwipError);
+    appendLeU32(out, frame.runnerConsecutivePublishFailures);
+    appendLeU64(out, frame.runnerPublishTimeoutFailures);
+    appendLeU64(out, frame.runnerPublishConnectOrResetFailures);
+    appendLeU64(out, frame.runnerPublishDnsFailures);
+    appendLeU64(out, frame.runnerPublishWifiDownFailures);
   }
 
   uint8_t environmentFlags = 0;
@@ -279,6 +286,28 @@ const char* timeQualityToWire(TimeQuality quality) {
     case TimeQuality::kFreeRunning:
     default:
       return "free_running";
+  }
+}
+
+const char* publishFailureStageToWire(PublishFailureStage stage) {
+  switch (stage) {
+    case PublishFailureStage::kDns:
+      return "dns";
+    case PublishFailureStage::kConnect:
+      return "connect";
+    case PublishFailureStage::kSend:
+      return "send";
+    case PublishFailureStage::kRecv:
+      return "recv";
+    case PublishFailureStage::kResponseParse:
+      return "response_parse";
+    case PublishFailureStage::kTimeout:
+      return "timeout";
+    case PublishFailureStage::kWiFiDisconnected:
+      return "wifi_disconnected";
+    case PublishFailureStage::kNone:
+    default:
+      return "none";
   }
 }
 
@@ -492,6 +521,20 @@ bool buildFramePayloadParts(
     suffix += std::to_string(frame.runnerLastPublishStatus);
     suffix += ",\"packet_age_us\":";
     appendUint64(suffix, frame.packetAgeUs);
+    suffix += ",\"runner_last_publish_failure_stage\":";
+    appendQuoted(suffix, publishFailureStageToWire(frame.runnerLastPublishFailureStage));
+    suffix += ",\"runner_last_publish_lwip_error\":";
+    suffix += std::to_string(frame.runnerLastPublishLwipError);
+    suffix += ",\"runner_consecutive_publish_failures\":";
+    appendUint32(suffix, frame.runnerConsecutivePublishFailures);
+    suffix += ",\"runner_publish_timeout_failures\":";
+    appendUint64(suffix, frame.runnerPublishTimeoutFailures);
+    suffix += ",\"runner_publish_connect_or_reset_failures\":";
+    appendUint64(suffix, frame.runnerPublishConnectOrResetFailures);
+    suffix += ",\"runner_publish_dns_failures\":";
+    appendUint64(suffix, frame.runnerPublishDnsFailures);
+    suffix += ",\"runner_publish_wifi_down_failures\":";
+    appendUint64(suffix, frame.runnerPublishWifiDownFailures);
     suffix += "}";
   }
 

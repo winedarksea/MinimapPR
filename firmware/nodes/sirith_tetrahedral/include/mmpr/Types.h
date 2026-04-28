@@ -6,6 +6,17 @@
 
 namespace mmpr {
 
+enum class PublishFailureStage : uint8_t {
+  kNone = 0,
+  kDns = 1,
+  kConnect = 2,
+  kSend = 3,
+  kRecv = 4,
+  kResponseParse = 5,
+  kTimeout = 6,
+  kWiFiDisconnected = 7,
+};
+
 enum class NodeType {
   kPoint,
   kSirithTetra,
@@ -82,6 +93,13 @@ struct AudioFrame {
   uint64_t runnerQueueOverflows = 0;
   int runnerLastPublishStatus = 0;
   uint64_t packetAgeUs = 0;
+  PublishFailureStage runnerLastPublishFailureStage = PublishFailureStage::kNone;
+  int32_t runnerLastPublishLwipError = 0;
+  uint32_t runnerConsecutivePublishFailures = 0;
+  uint64_t runnerPublishTimeoutFailures = 0;
+  uint64_t runnerPublishConnectOrResetFailures = 0;
+  uint64_t runnerPublishDnsFailures = 0;
+  uint64_t runnerPublishWifiDownFailures = 0;
 };
 
 struct EnvironmentalSample {
@@ -95,6 +113,8 @@ struct EnvironmentalSample {
 struct PublishResult {
   bool ok = false;
   int statusCode = -1;
+  PublishFailureStage failureStage = PublishFailureStage::kNone;
+  int32_t lwipError = 0;
   std::string responseBody;
 };
 

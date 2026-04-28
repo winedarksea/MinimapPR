@@ -135,7 +135,7 @@ static constexpr uint32_t kWiFiConnectTimeoutMs = 15000;
 // Keep this below the DMA ring slack. At 16 kHz / 1024 samples / 16 buffered
 // blocks, the capture ring holds about 1.0 s; longer synchronous publishes
 // overrun capture and make the heartbeat look randomly slow.
-static constexpr uint32_t kHttpTimeoutMs = 400;
+static constexpr uint32_t kHttpTimeoutMs = 450;
 // After a failed publish, skip network attempts briefly so capture and Wi-Fi
 // polling recover. Keep this short: a multi-second backoff discards dozens of
 // audio packets and makes the debug stream sparse even after transient stalls.

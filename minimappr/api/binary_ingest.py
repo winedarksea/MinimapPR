@@ -244,7 +244,31 @@ def _read_timing_diagnostics(reader: _BinaryReader) -> dict:
         "runner_queue_overflows": reader.u64(),
         "runner_last_publish_status": reader.i32(),
         "packet_age_us": reader.u64(),
+        "runner_last_publish_failure_stage": _read_publish_failure_stage(reader.u8()),
+        "runner_last_publish_lwip_error": reader.i32(),
+        "runner_consecutive_publish_failures": reader.u32(),
+        "runner_publish_timeout_failures": reader.u64(),
+        "runner_publish_connect_or_reset_failures": reader.u64(),
+        "runner_publish_dns_failures": reader.u64(),
+        "runner_publish_wifi_down_failures": reader.u64(),
     }
+
+
+def _read_publish_failure_stage(value: int) -> str:
+    stages = (
+        "none",
+        "dns",
+        "connect",
+        "send",
+        "recv",
+        "response_parse",
+        "timeout",
+        "wifi_disconnected",
+    )
+    try:
+        return stages[value]
+    except IndexError as exc:
+        raise ValueError(f"Unsupported publish failure stage {value}") from exc
 
 
 def _read_environment(reader: _BinaryReader) -> EnvironmentSampleIn | None:

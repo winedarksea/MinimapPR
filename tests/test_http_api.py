@@ -71,22 +71,26 @@ def _binary_frame(
         0,
     )
     payload += struct.pack("<B", 1)
-    payload += struct.pack(
-        "<BIiqdQQQQIQiQ",
-        1,
-        123,
-        2,
-        -17,
-        0.25,
-        sequence,
-        0,
-        0,
-        0,
-        1,
-        0,
-        200,
-        2500,
-    )
+    payload += struct.pack("<B", 1)
+    payload += struct.pack("<I", 123)
+    payload += struct.pack("<I", 2)
+    payload += struct.pack("<q", -17)
+    payload += struct.pack("<d", 0.25)
+    payload += struct.pack("<Q", sequence)
+    payload += struct.pack("<Q", 0)
+    payload += struct.pack("<Q", 0)
+    payload += struct.pack("<Q", 0)
+    payload += struct.pack("<I", 1)
+    payload += struct.pack("<Q", 0)
+    payload += struct.pack("<i", 200)
+    payload += struct.pack("<Q", 2500)
+    payload += struct.pack("<B", 6)
+    payload += struct.pack("<i", -4)
+    payload += struct.pack("<I", 2)
+    payload += struct.pack("<Q", 11)
+    payload += struct.pack("<Q", 7)
+    payload += struct.pack("<Q", 3)
+    payload += struct.pack("<Q", 5)
     payload += struct.pack("<B", 0)
     payload += struct.pack("<I", samples_per_channel)
     payload += pcm16
@@ -958,6 +962,13 @@ def test_nodes_endpoint_exposes_latest_firmware_timing_diagnostics(monkeypatch, 
         "runner_queue_overflows": 0,
         "runner_last_publish_status": -4,
         "packet_age_us": 64000,
+        "runner_last_publish_failure_stage": "timeout",
+        "runner_last_publish_lwip_error": -3,
+        "runner_consecutive_publish_failures": 3,
+        "runner_publish_timeout_failures": 11,
+        "runner_publish_connect_or_reset_failures": 7,
+        "runner_publish_dns_failures": 3,
+        "runner_publish_wifi_down_failures": 5,
     }
 
     with TestClient(app) as client:
@@ -972,6 +983,7 @@ def test_nodes_endpoint_exposes_latest_firmware_timing_diagnostics(monkeypatch, 
         node = response.json()[0]
         assert node["latest_timing_diagnostics"]["runner_frames_captured"] == 120
         assert node["latest_timing_diagnostics"]["runner_last_publish_status"] == -4
+        assert node["latest_timing_diagnostics"]["runner_last_publish_failure_stage"] == "timeout"
 
 
 def test_node_recent_audio_endpoint_validates_seconds(monkeypatch, tmp_path: Path) -> None:

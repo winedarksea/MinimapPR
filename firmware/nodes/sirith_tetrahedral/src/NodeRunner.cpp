@@ -14,6 +14,7 @@ namespace {
 constexpr uint64_t kNsPerSecond = 1000000000ULL;
 constexpr int kPublishSkippedForBackoffStatus = -5;
 constexpr size_t kQueuedPacketSlots = 40;
+constexpr uint32_t kQueueDepthBypassThreshold = 32;
 
 uint64_t nextUtcSecondBoundary(uint64_t utcNs) {
   return ((utcNs / kNsPerSecond) + 1ULL) * kNsPerSecond;
@@ -232,6 +233,13 @@ AudioFrame NodeRunner::buildFrameForPacket(const QueuedAudioPacket& packet, uint
       stats_.queueOverflows,
       stats_.lastPublishStatus,
       packetAgeNs / 1000ULL,
+      stats_.lastPublishFailureStage,
+      stats_.lastPublishLwipError,
+      stats_.consecutivePublishFailures,
+      stats_.publishTimeoutFailures,
+      stats_.publishConnectOrResetFailures,
+      stats_.publishDnsFailures,
+      stats_.publishWifiDownFailures,
   };
   return frame;
 }
@@ -242,10 +250,6 @@ bool NodeRunner::fillActivePublishBatch() {
   }
   if (queueDepth_ == 0) {
     activePublishBatchSize_ = 0;
-    return false;
-  }
-  if (storeForwardBatchFrames_ > 1 && queueDepth_ < storeForwardBatchFrames_) {
-    stats_.queueDepth = effectiveQueueDepth();
     return false;
   }
 
@@ -273,29 +277,93 @@ void NodeRunner::clearActivePublishBatch() {
   stats_.queueDepth = effectiveQueueDepth();
 }
 
+uint32_t NodeRunner::adaptivePublishBackoffMs() const {
+  const uint32_t failures = stats_.consecutivePublishFailures;
+  if (failures <= 1) {
+    return 0;
+  }
+  if (failures == 2) {
+    return 25;
+  }
+  if (failures == 3) {
+    return 50;
+  }
+  if (failures == 4) {
+    return 100;
+  }
+  return 200;
+}
+
+bool NodeRunner::shouldBypassAdaptiveBackoff() const {
+  return effectiveQueueDepth() >= kQueueDepthBypassThreshold;
+}
+
+void NodeRunner::onPublishSuccess() {
+  stats_.framesPublished += activePublishBatchSize_;
+  stats_.consecutivePublishFailures = 0;
+  stats_.lastPublishFailureStage = PublishFailureStage::kNone;
+  stats_.lastPublishLwipError = 0;
+  nextPublishAttemptMs_ = 0;
+  clearActivePublishBatch();
+}
+
+void NodeRunner::onPublishFailure(const PublishResult& result, uint32_t nowMs) {
+  ++stats_.publishErrors;
+  ++stats_.consecutivePublishFailures;
+  stats_.lastPublishFailureStage = result.failureStage;
+  stats_.lastPublishLwipError = result.lwipError;
+
+  switch (result.failureStage) {
+    case PublishFailureStage::kDns:
+      ++stats_.publishDnsFailures;
+      break;
+    case PublishFailureStage::kTimeout:
+      ++stats_.publishTimeoutFailures;
+      break;
+    case PublishFailureStage::kWiFiDisconnected:
+      ++stats_.publishWifiDownFailures;
+      break;
+    case PublishFailureStage::kConnect:
+    case PublishFailureStage::kRecv:
+    case PublishFailureStage::kSend:
+      ++stats_.publishConnectOrResetFailures;
+      break;
+    default:
+      break;
+  }
+
+  uint32_t backoffMs = adaptivePublishBackoffMs();
+  if (publishFailureBackoffMs_ > 0 && backoffMs < publishFailureBackoffMs_) {
+    backoffMs = publishFailureBackoffMs_;
+  }
+  if (shouldBypassAdaptiveBackoff()) {
+    backoffMs = 0;
+  }
+  nextPublishAttemptMs_ = backoffMs > 0 ? (nowMs + backoffMs) : 0;
+
+  const uint64_t firstSequence =
+      activePublishBatchSize_ > 0 ? activePublishPackets_[0].sequence : 0;
+  std::printf(
+      "[node] publish failed status=%d stage=%u lwip=%d seq=%" PRIu64
+      " batch=%lu queue=%u backoff_ms=%lu\n",
+      result.statusCode,
+      static_cast<unsigned>(result.failureStage),
+      static_cast<int>(result.lwipError),
+      firstSequence,
+      static_cast<unsigned long>(activePublishBatchSize_),
+      static_cast<unsigned>(effectiveQueueDepth()),
+      static_cast<unsigned long>(backoffMs));
+  stats_.queueDepth = effectiveQueueDepth();
+}
+
 void NodeRunner::pumpPublisher() {
   PublishResult result = {};
   if (publisher_.pollPublish(result)) {
     stats_.lastPublishStatus = result.statusCode;
     if (result.ok) {
-      stats_.framesPublished += activePublishBatchSize_;
-      nextPublishAttemptMs_ = 0;
-      clearActivePublishBatch();
+      onPublishSuccess();
     } else {
-      ++stats_.publishErrors;
-      if (publishFailureBackoffMs_ > 0) {
-        nextPublishAttemptMs_ = to_ms_since_boot(get_absolute_time()) + publishFailureBackoffMs_;
-      }
-      const uint64_t firstSequence =
-          activePublishBatchSize_ > 0 ? activePublishPackets_[0].sequence : 0;
-      std::printf(
-          "[node] publish failed status=%d seq=%" PRIu64
-          " batch=%lu queue=%u\n",
-          result.statusCode,
-          firstSequence,
-          static_cast<unsigned long>(activePublishBatchSize_),
-          static_cast<unsigned>(effectiveQueueDepth()));
-      stats_.queueDepth = effectiveQueueDepth();
+      onPublishFailure(result, to_ms_since_boot(get_absolute_time()));
     }
   }
   startNextPublishIfPossible();
@@ -306,7 +374,7 @@ void NodeRunner::startNextPublishIfPossible() {
     return;
   }
   const uint32_t nowMs = to_ms_since_boot(get_absolute_time());
-  if (publishFailureBackoffMs_ > 0 && !deadlineReached(nowMs, nextPublishAttemptMs_)) {
+  if (nextPublishAttemptMs_ > 0 && !deadlineReached(nowMs, nextPublishAttemptMs_)) {
     stats_.lastPublishStatus = kPublishSkippedForBackoffStatus;
     stats_.queueDepth = effectiveQueueDepth();
     return;
@@ -330,8 +398,13 @@ void NodeRunner::startNextPublishIfPossible() {
               : nullptr);
     }
   } catch (const std::bad_alloc&) {
-    stats_.lastPublishStatus = -6;
-    ++stats_.publishErrors;
+    PublishResult allocFailure = {};
+    allocFailure.ok = false;
+    allocFailure.statusCode = -6;
+    allocFailure.failureStage = PublishFailureStage::kResponseParse;
+    allocFailure.lwipError = 0;
+    stats_.lastPublishStatus = allocFailure.statusCode;
+    onPublishFailure(allocFailure, nowMs);
     return;
   }
   PublishResult immediateResult = {};
@@ -342,22 +415,9 @@ void NodeRunner::startNextPublishIfPossible() {
 
   stats_.lastPublishStatus = immediateResult.statusCode;
   if (immediateResult.ok) {
-    stats_.framesPublished += activePublishBatchSize_;
-    clearActivePublishBatch();
+    onPublishSuccess();
   } else {
-    ++stats_.publishErrors;
-    if (publishFailureBackoffMs_ > 0) {
-      nextPublishAttemptMs_ = nowMs + publishFailureBackoffMs_;
-    }
-    const uint64_t firstSequence =
-        activePublishBatchSize_ > 0 ? activePublishPackets_[0].sequence : 0;
-    std::printf(
-        "[node] publish failed status=%d seq=%" PRIu64
-        " batch=%lu queue=%u\n",
-        immediateResult.statusCode,
-        firstSequence,
-        static_cast<unsigned long>(activePublishBatchSize_),
-        static_cast<unsigned>(effectiveQueueDepth()));
+    onPublishFailure(immediateResult, nowMs);
   }
   stats_.queueDepth = effectiveQueueDepth();
 }

@@ -21,6 +21,13 @@ struct RunnerStats {
   uint64_t queueOverflows = 0;
   uint32_t queueDepth = 0;
   int lastPublishStatus = 0;
+  PublishFailureStage lastPublishFailureStage = PublishFailureStage::kNone;
+  int32_t lastPublishLwipError = 0;
+  uint32_t consecutivePublishFailures = 0;
+  uint64_t publishTimeoutFailures = 0;
+  uint64_t publishConnectOrResetFailures = 0;
+  uint64_t publishDnsFailures = 0;
+  uint64_t publishWifiDownFailures = 0;
 };
 
 class NodeRunner {
@@ -71,6 +78,10 @@ class NodeRunner {
       const EnvironmentalSample* environmentalSample);
   void pumpPublisher();
   void startNextPublishIfPossible();
+  void onPublishSuccess();
+  void onPublishFailure(const PublishResult& result, uint32_t nowMs);
+  uint32_t adaptivePublishBackoffMs() const;
+  bool shouldBypassAdaptiveBackoff() const;
   uint32_t effectiveQueueDepth() const;
 
   const NodeDescriptor& descriptor_;

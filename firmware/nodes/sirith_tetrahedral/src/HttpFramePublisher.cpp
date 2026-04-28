@@ -153,8 +153,10 @@ struct HttpFramePublisher::TransportState {
   bool sawResponseClose = false;
   bool asyncPublishActive = false;
   absolute_time_t requestDeadline = {};
+  uint32_t requestTimeoutMs = 0;
   HttpFramePublisher::BackgroundPollCallback backgroundPollCallback = nullptr;
   void* backgroundPollContext = nullptr;
+  PublishFailureStage failureStage = PublishFailureStage::kNone;
 };
 
 namespace {
@@ -162,6 +164,12 @@ namespace {
 void runBackgroundPoll(HttpFramePublisher::TransportState& state) {
   if (state.backgroundPollCallback != nullptr) {
     state.backgroundPollCallback(state.backgroundPollContext);
+  }
+}
+
+void refreshRequestDeadline(HttpFramePublisher::TransportState& state) {
+  if (state.requestTimeoutMs > 0) {
+    state.requestDeadline = make_timeout_time_ms(state.requestTimeoutMs);
   }
 }
 
@@ -229,8 +237,10 @@ void resetRequestState(HttpFramePublisher::TransportState& state, bool keepRespo
   state.sawResponseClose = false;
   state.asyncPublishActive = false;
   state.requestDeadline = {};
+  state.requestTimeoutMs = 0;
   state.requestDone = false;
   state.err = ERR_OK;
+  state.failureStage = PublishFailureStage::kNone;
 }
 
 bool resolveHostUntil(
@@ -269,6 +279,8 @@ bool resolveHostUntil(
     return true;
   }
   if (dnsErr != ERR_INPROGRESS) {
+    state.err = dnsErr;
+    state.failureStage = PublishFailureStage::kDns;
     return false;
   }
 
@@ -279,6 +291,10 @@ bool resolveHostUntil(
   }
 
   state.remoteAddrValid = state.dnsDone && state.dnsOk;
+  if (!state.remoteAddrValid) {
+    state.err = ERR_TIMEOUT;
+    state.failureStage = PublishFailureStage::kDns;
+  }
   return state.remoteAddrValid;
 }
 
@@ -307,10 +323,12 @@ bool writeStringSegment(
         TCP_WRITE_FLAG_COPY);
     if (writeErr == ERR_OK) {
       state.sendOffset += chunk;
+      refreshRequestDeadline(state);
     } else if (writeErr == ERR_MEM) {
       return false;
     } else {
       state.err = writeErr;
+      state.failureStage = PublishFailureStage::kSend;
       state.requestDone = true;
       closeConnection(state);
       return false;
@@ -571,12 +589,14 @@ err_t onConnected(void* arg, tcp_pcb* tpcb, err_t err) {
   state->connectDone = true;
   if (err != ERR_OK) {
     state->err = err;
+    state->failureStage = PublishFailureStage::kConnect;
     state->requestDone = true;
     closeConnection(*state);
     return err;
   }
 
   state->connected = true;
+  refreshRequestDeadline(*state);
   flushTx(*state, tpcb);
   return ERR_OK;
 }
@@ -588,6 +608,7 @@ err_t onSent(void* arg, tcp_pcb* tpcb, uint16_t len) {
   if (state == nullptr) {
     return ERR_ARG;
   }
+  refreshRequestDeadline(*state);
   flushTx(*state, tpcb);
   return ERR_OK;
 }
@@ -616,6 +637,7 @@ err_t onRecv(void* arg, tcp_pcb* tpcb, pbuf* p, err_t err) {
 
   if (err != ERR_OK) {
     state->err = err;
+    state->failureStage = PublishFailureStage::kRecv;
     state->requestDone = true;
     if (p != nullptr) {
       pbuf_free(p);
@@ -625,6 +647,7 @@ err_t onRecv(void* arg, tcp_pcb* tpcb, pbuf* p, err_t err) {
   }
 
   if (p == nullptr) {
+    refreshRequestDeadline(*state);
     state->sawResponseClose = true;
     parseHeadersIfReady(*state);
     state->requestDone = true;
@@ -634,6 +657,7 @@ err_t onRecv(void* arg, tcp_pcb* tpcb, pbuf* p, err_t err) {
 
   for (pbuf* q = p; q != nullptr; q = q->next) {
     const char* chunk = static_cast<const char*>(q->payload);
+    refreshRequestDeadline(*state);
     appendResponseChunk(state->response, state->keepResponse, state->responseCap, chunk, q->len);
     if (!state->headersParsed) {
       state->headerBuffer.append(chunk, q->len);
@@ -655,10 +679,12 @@ void onErr(void* arg, err_t err) {
   if (state == nullptr) {
     return;
   }
+  const bool wasConnected = state->connected;
   state->pcb = nullptr;
   state->connected = false;
   state->connectDone = true;
   state->err = err;
+  state->failureStage = wasConnected ? PublishFailureStage::kRecv : PublishFailureStage::kConnect;
   state->requestDone = true;
 }
 
@@ -692,6 +718,8 @@ bool ensureConnected(
 
   const err_t connectErr = tcp_connect(state.pcb, &state.remoteAddr, port, &onConnected);
   if (connectErr != ERR_OK) {
+    state.err = connectErr;
+    state.failureStage = PublishFailureStage::kConnect;
     closeConnection(state);
     return false;
   }
@@ -704,6 +732,9 @@ bool ensureConnected(
 
   if (!state.connected) {
     state.err = state.err == ERR_OK ? ERR_TIMEOUT : state.err;
+    if (state.failureStage == PublishFailureStage::kNone) {
+      state.failureStage = PublishFailureStage::kConnect;
+    }
     abortConnection(state);
     return false;
   }
@@ -744,6 +775,7 @@ bool beginConnection(
   if (connectErr != ERR_OK) {
     closeConnection(state);
     state.err = connectErr;
+    state.failureStage = PublishFailureStage::kConnect;
     return false;
   }
   return true;
@@ -751,15 +783,28 @@ bool beginConnection(
 
 PublishResult finishRequestResult(HttpFramePublisher::TransportState& state, bool keepResponseBody) {
   PublishResult result = {};
+  result.failureStage = PublishFailureStage::kNone;
+  result.lwipError = static_cast<int32_t>(state.err);
   if (state.statusCode > 0) {
     result.statusCode = state.statusCode;
   } else {
     result.statusCode = (state.err == ERR_OK || state.err == ERR_CLSD) ? -4 : -3;
+    if (state.err == ERR_TIMEOUT) {
+      result.failureStage = PublishFailureStage::kTimeout;
+    } else if (state.failureStage != PublishFailureStage::kNone) {
+      result.failureStage = state.failureStage;
+    } else {
+      result.failureStage = PublishFailureStage::kResponseParse;
+    }
   }
   if (keepResponseBody || result.statusCode < 200 || result.statusCode >= 300) {
     result.responseBody = state.response;
   }
   result.ok = (result.statusCode >= 200 && result.statusCode < 300);
+  if (result.ok) {
+    result.failureStage = PublishFailureStage::kNone;
+    result.lwipError = 0;
+  }
   if (state.responseMustClose) {
     closeConnection(state);
   }
@@ -780,6 +825,8 @@ PublishResult post(
   PublishResult result = {};
   result.ok = false;
   result.statusCode = -3;
+  result.failureStage = PublishFailureStage::kNone;
+  result.lwipError = 0;
 
   if (host.empty() || path.empty()) {
     return result;
@@ -799,25 +846,36 @@ PublishResult post(
   state.payloadParts = std::move(payloadParts);
   state.audioSegments = std::move(audioSegments);
   state.binaryAudio = binaryAudio;
+  state.requestTimeoutMs = timeoutMs;
+  refreshRequestDeadline(state);
 
   const absolute_time_t deadline = make_timeout_time_ms(timeoutMs);
   if (!ensureConnected(host, port, deadline, state)) {
     result.statusCode = (state.err == ERR_TIMEOUT) ? -4 : -3;
+    result.failureStage =
+        (state.err == ERR_TIMEOUT) ? PublishFailureStage::kTimeout : state.failureStage;
+    result.lwipError = static_cast<int32_t>(state.err);
     return result;
   }
 
   flushTx(state, state.pcb);
 
-  while (!state.requestDone && !time_reached(deadline)) {
+  while (!state.requestDone) {
     cyw43_arch_poll();
     runBackgroundPoll(state);
+    if (time_reached(state.requestDeadline)) {
+      break;
+    }
     sleep_ms(1);
   }
 
   if (!state.requestDone) {
     state.err = ERR_TIMEOUT;
+    state.failureStage = PublishFailureStage::kTimeout;
     abortConnection(state);
     result.statusCode = -4;
+    result.failureStage = PublishFailureStage::kTimeout;
+    result.lwipError = static_cast<int32_t>(ERR_TIMEOUT);
     if (keepResponseBody) {
       result.responseBody = state.response;
     }
@@ -874,6 +932,8 @@ bool HttpFramePublisher::beginPublish(
   immediateResult = {};
   immediateResult.ok = false;
   immediateResult.statusCode = -1;
+  immediateResult.failureStage = PublishFailureStage::kNone;
+  immediateResult.lwipError = 0;
 
   if (transportState_ == nullptr || transportState_->asyncPublishActive) {
     immediateResult.statusCode = -7;
@@ -881,10 +941,12 @@ bool HttpFramePublisher::beginPublish(
   }
   if (!endpointValid_) {
     immediateResult.statusCode = -3;
+    immediateResult.failureStage = PublishFailureStage::kResponseParse;
     return false;
   }
   if (!isWiFiConnected()) {
     immediateResult.statusCode = -1;
+    immediateResult.failureStage = PublishFailureStage::kWiFiDisconnected;
     return false;
   }
 
@@ -908,10 +970,13 @@ bool HttpFramePublisher::beginPublish(
   transportState_->audioSegments.clear();
   transportState_->audioSegments.push_back(reinterpret_cast<const uint8_t*>(frame.interleavedSamples));
   transportState_->binaryAudio = false;
-  transportState_->requestDeadline = make_timeout_time_ms(timeoutMs_);
+  transportState_->requestTimeoutMs = timeoutMs_;
+  refreshRequestDeadline(*transportState_);
 
   if (!beginConnection(host_, port_, *transportState_)) {
     immediateResult.statusCode = -3;
+    immediateResult.failureStage = transportState_->failureStage;
+    immediateResult.lwipError = static_cast<int32_t>(transportState_->err);
     closeConnection(*transportState_);
     return false;
   }
@@ -930,6 +995,8 @@ bool HttpFramePublisher::beginStoreForwardPublish(
   immediateResult = {};
   immediateResult.ok = false;
   immediateResult.statusCode = -1;
+  immediateResult.failureStage = PublishFailureStage::kNone;
+  immediateResult.lwipError = 0;
 
   if (transportState_ == nullptr || transportState_->asyncPublishActive) {
     immediateResult.statusCode = -7;
@@ -937,10 +1004,12 @@ bool HttpFramePublisher::beginStoreForwardPublish(
   }
   if (!endpointValid_) {
     immediateResult.statusCode = -3;
+    immediateResult.failureStage = PublishFailureStage::kResponseParse;
     return false;
   }
   if (!isWiFiConnected()) {
     immediateResult.statusCode = -1;
+    immediateResult.failureStage = PublishFailureStage::kWiFiDisconnected;
     return false;
   }
   if (frames.empty()) {
@@ -990,10 +1059,13 @@ bool HttpFramePublisher::beginStoreForwardPublish(
   transportState_->payloadParts = std::move(payloadParts);
   transportState_->audioSegments = std::move(audioSegments);
   transportState_->binaryAudio = false;
-  transportState_->requestDeadline = make_timeout_time_ms(timeoutMs_);
+  transportState_->requestTimeoutMs = timeoutMs_;
+  refreshRequestDeadline(*transportState_);
 
   if (!beginConnection(host_, port_, *transportState_)) {
     immediateResult.statusCode = -3;
+    immediateResult.failureStage = transportState_->failureStage;
+    immediateResult.lwipError = static_cast<int32_t>(transportState_->err);
     closeConnection(*transportState_);
     return false;
   }
@@ -1012,6 +1084,8 @@ bool HttpFramePublisher::beginBinaryStoreForwardPublish(
   immediateResult = {};
   immediateResult.ok = false;
   immediateResult.statusCode = -1;
+  immediateResult.failureStage = PublishFailureStage::kNone;
+  immediateResult.lwipError = 0;
 
   if (transportState_ == nullptr || transportState_->asyncPublishActive) {
     immediateResult.statusCode = -7;
@@ -1019,10 +1093,12 @@ bool HttpFramePublisher::beginBinaryStoreForwardPublish(
   }
   if (!endpointValid_) {
     immediateResult.statusCode = -3;
+    immediateResult.failureStage = PublishFailureStage::kResponseParse;
     return false;
   }
   if (!isWiFiConnected()) {
     immediateResult.statusCode = -1;
+    immediateResult.failureStage = PublishFailureStage::kWiFiDisconnected;
     return false;
   }
   if (frames.empty()) {
@@ -1077,10 +1153,13 @@ bool HttpFramePublisher::beginBinaryStoreForwardPublish(
   transportState_->payloadParts = std::move(payloadParts);
   transportState_->audioSegments = std::move(audioSegments);
   transportState_->binaryAudio = true;
-  transportState_->requestDeadline = make_timeout_time_ms(timeoutMs_);
+  transportState_->requestTimeoutMs = timeoutMs_;
+  refreshRequestDeadline(*transportState_);
 
   if (!beginConnection(host_, port_, *transportState_)) {
     immediateResult.statusCode = -3;
+    immediateResult.failureStage = transportState_->failureStage;
+    immediateResult.lwipError = static_cast<int32_t>(transportState_->err);
     closeConnection(*transportState_);
     return false;
   }
@@ -1093,6 +1172,8 @@ bool HttpFramePublisher::pollPublish(PublishResult& result) {
   result = {};
   result.ok = false;
   result.statusCode = -1;
+  result.failureStage = PublishFailureStage::kNone;
+  result.lwipError = 0;
 
   if (transportState_ == nullptr || !transportState_->asyncPublishActive) {
     return false;
@@ -1106,9 +1187,12 @@ bool HttpFramePublisher::pollPublish(PublishResult& result) {
 
   if (!transportState_->requestDone && time_reached(transportState_->requestDeadline)) {
     transportState_->err = ERR_TIMEOUT;
+    transportState_->failureStage = PublishFailureStage::kTimeout;
     abortConnection(*transportState_);
     transportState_->asyncPublishActive = false;
     result.statusCode = -4;
+    result.failureStage = PublishFailureStage::kTimeout;
+    result.lwipError = static_cast<int32_t>(ERR_TIMEOUT);
     if (transportState_->keepResponse) {
       result.responseBody = transportState_->response;
     }
@@ -1135,13 +1219,17 @@ PublishResult HttpFramePublisher::publish(
   PublishResult result = {};
   result.ok = false;
   result.statusCode = -1;
+  result.failureStage = PublishFailureStage::kNone;
+  result.lwipError = 0;
 
   if (!endpointValid_) {
     result.statusCode = -3;
+    result.failureStage = PublishFailureStage::kResponseParse;
     return result;
   }
   if (!isWiFiConnected()) {
     result.statusCode = -1;
+    result.failureStage = PublishFailureStage::kWiFiDisconnected;
     return result;
   }
 
