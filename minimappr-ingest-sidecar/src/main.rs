@@ -82,6 +82,35 @@ impl std::fmt::Display for BodyTooLargeError {
 
 impl std::error::Error for BodyTooLargeError {}
 
+#[derive(Debug)]
+struct ClientDisconnectError;
+
+impl std::fmt::Display for ClientDisconnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "client disconnected before request body was fully received")
+    }
+}
+
+impl std::error::Error for ClientDisconnectError {}
+
+/// Heuristically detect whether an error represents a client-side disconnect
+/// (connection reset, broken pipe, etc.) by walking the error message chain.
+fn is_client_disconnect(err: &dyn std::error::Error) -> bool {
+    let mut cursor: Option<&dyn std::error::Error> = Some(err);
+    while let Some(e) = cursor {
+        let desc = e.to_string().to_lowercase();
+        if desc.contains("connection reset")
+            || desc.contains("broken pipe")
+            || desc.contains("connection aborted")
+            || desc.contains("incomplete message")
+        {
+            return true;
+        }
+        cursor = e.source();
+    }
+    false
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
@@ -168,6 +197,20 @@ async fn enqueue_request(
                 )
                     .into_response();
             }
+            if err.downcast_ref::<ClientDisconnectError>().is_some() {
+                // Client closed the connection before the body was fully received;
+                // the payload was not committed to the spool.  This is expected
+                // when firmware uses a short HTTP timeout, so don't log a warning.
+                return (
+                    StatusCode::from_u16(499).unwrap_or(StatusCode::BAD_REQUEST),
+                    Json(ErrorResponse {
+                        accepted: false,
+                        queued: false,
+                        detail: err.to_string(),
+                    }),
+                )
+                    .into_response();
+            }
             warn!(endpoint, error = %err, "failed to enqueue ingest request");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -187,7 +230,7 @@ async fn spool_body(
     max_body_bytes: usize,
     endpoint: &'static str,
     headers: HeaderMap,
-    mut body: Body,
+    body: Body,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     // Reject early if Content-Length already declares an oversized body.
     if let Some(cl_value) = headers.get(axum::http::header::CONTENT_LENGTH) {
@@ -212,16 +255,59 @@ async fn spool_body(
     let ready_body_path = ready_dir.join(&body_filename);
     let ready_manifest_path = ready_dir.join(&manifest_filename);
 
+    let result = spool_body_inner(
+        &tmp_body_path,
+        &tmp_manifest_path,
+        &ready_body_path,
+        &ready_manifest_path,
+        &ready_dir,
+        max_body_bytes,
+        endpoint,
+        headers,
+        body,
+        spool_id,
+        received_ns,
+    )
+    .await;
+
+    if result.is_err() {
+        // Best-effort cleanup of any tmp-phase files left behind by the failed
+        // attempt.  Files already promoted into ready/ are intentionally kept.
+        let _ = fs::remove_file(&tmp_body_path).await;
+        let _ = fs::remove_file(&tmp_manifest_path).await;
+    }
+    result
+}
+
+async fn spool_body_inner(
+    tmp_body_path: &Path,
+    tmp_manifest_path: &Path,
+    ready_body_path: &Path,
+    ready_manifest_path: &Path,
+    ready_dir: &Path,
+    max_body_bytes: usize,
+    endpoint: &str,
+    headers: HeaderMap,
+    mut body: Body,
+    spool_id: String,
+    received_ns: u128,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let mut bytes_written: usize = 0;
-    let mut file = fs::File::create(&tmp_body_path).await?;
+    let mut file = fs::File::create(tmp_body_path).await?;
     while let Some(frame_result) = body.frame().await {
-        let frame = frame_result?;
+        let frame = match frame_result {
+            Ok(f) => f,
+            Err(e) => {
+                let boxed: Box<dyn std::error::Error + Send + Sync> = Box::new(e);
+                if is_client_disconnect(boxed.as_ref()) {
+                    return Err(Box::new(ClientDisconnectError));
+                }
+                return Err(boxed);
+            }
+        };
         if let Some(chunk) = frame.data_ref() {
             bytes_written += chunk.len();
             if bytes_written > max_body_bytes {
-                // Clean up the partial write before returning the error.
-                drop(file);
-                let _ = fs::remove_file(&tmp_body_path).await;
                 return Err(Box::new(BodyTooLargeError { limit_bytes: max_body_bytes }));
             }
             file.write_all(chunk).await?;
@@ -235,6 +321,7 @@ async fn spool_body(
         .get(axum::http::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
+    let body_filename = format!("{}.body", spool_id);
     let manifest = SpoolManifest {
         spool_id: spool_id.clone(),
         endpoint: endpoint.to_string(),
@@ -243,26 +330,25 @@ async fn spool_body(
         body_filename,
     };
     let manifest_bytes = serde_json::to_vec(&manifest)?;
-    let mut manifest_file = fs::File::create(&tmp_manifest_path).await?;
+    let mut manifest_file = fs::File::create(tmp_manifest_path).await?;
     manifest_file.write_all(&manifest_bytes).await?;
     manifest_file.write_all(b"\n").await?;
     manifest_file.flush().await?;
     manifest_file.sync_all().await?;
     drop(manifest_file);
 
-    fs::rename(&tmp_body_path, &ready_body_path).await?;
+    fs::rename(tmp_body_path, ready_body_path).await?;
     // Publish the manifest last. Python only scans manifests, so this is the queue commit point.
     // fsync the body into ready/ before touching the manifest; roll back on failure.
-    if let Err(err) = fsync_dir(&ready_dir).await {
-        let _ = fs::remove_file(&ready_body_path).await;
+    if let Err(err) = fsync_dir(ready_dir).await {
+        let _ = fs::remove_file(ready_body_path).await;
         return Err(Box::new(err));
     }
-    if let Err(err) = fs::rename(&tmp_manifest_path, &ready_manifest_path).await {
-        let _ = fs::remove_file(&ready_body_path).await;
-        let _ = fs::remove_file(&tmp_manifest_path).await;
+    if let Err(err) = fs::rename(tmp_manifest_path, ready_manifest_path).await {
+        let _ = fs::remove_file(ready_body_path).await;
         return Err(Box::new(err));
     }
-    fsync_dir(&ready_dir).await?;
+    fsync_dir(ready_dir).await?;
 
     Ok(spool_id)
 }
