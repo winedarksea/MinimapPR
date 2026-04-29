@@ -35,11 +35,15 @@ struct Args {
 
     #[arg(long, env = "MINIMAPPR_INGEST_SPOOL_DIR", default_value = "data/spool")]
     spool_dir: PathBuf,
+
+    #[arg(long, env = "MINIMAPPR_SIDECAR_MAX_BODY_BYTES", default_value_t = 33_554_432)]
+    max_body_bytes: usize,
 }
 
 #[derive(Clone, Debug)]
 struct AppState {
     spool_dir: Arc<PathBuf>,
+    max_body_bytes: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -65,6 +69,19 @@ struct ErrorResponse {
     detail: String,
 }
 
+#[derive(Debug)]
+struct BodyTooLargeError {
+    limit_bytes: usize,
+}
+
+impl std::fmt::Display for BodyTooLargeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "request body exceeds maximum of {} bytes", self.limit_bytes)
+    }
+}
+
+impl std::error::Error for BodyTooLargeError {}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
@@ -74,14 +91,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let state = AppState {
         spool_dir: Arc::new(args.spool_dir),
+        max_body_bytes: args.max_body_bytes,
     };
     ensure_spool_dirs(&state.spool_dir).await?;
 
     let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
-    info!(%addr, spool_dir = %state.spool_dir.display(), "starting ingest sidecar");
+    info!(%addr, spool_dir = %state.spool_dir.display(), max_body_bytes = args.max_body_bytes, "starting ingest sidecar");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app(state)).await?;
+    axum::serve(listener, app(state))
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
     Ok(())
 }
 
@@ -92,6 +112,16 @@ fn app(state: AppState) -> Router {
         .route(STORE_FORWARD_ENDPOINT, post(ingest_store_forward))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+async fn shutdown_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut sigterm = signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {},
+        _ = sigterm.recv() => {},
+    }
+    info!("shutdown signal received; draining in-flight requests");
 }
 
 async fn healthz() -> Json<serde_json::Value> {
@@ -116,7 +146,7 @@ async fn enqueue_request(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    match spool_body(&state.spool_dir, endpoint, headers, body).await {
+    match spool_body(&state.spool_dir, state.max_body_bytes, endpoint, headers, body).await {
         Ok(spool_id) => (
             StatusCode::ACCEPTED,
             Json(EnqueueResponse {
@@ -127,6 +157,17 @@ async fn enqueue_request(
         )
             .into_response(),
         Err(err) => {
+            if err.downcast_ref::<BodyTooLargeError>().is_some() {
+                return (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    Json(ErrorResponse {
+                        accepted: false,
+                        queued: false,
+                        detail: err.to_string(),
+                    }),
+                )
+                    .into_response();
+            }
             warn!(endpoint, error = %err, "failed to enqueue ingest request");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -143,11 +184,21 @@ async fn enqueue_request(
 
 async fn spool_body(
     spool_dir: &Path,
+    max_body_bytes: usize,
     endpoint: &'static str,
     headers: HeaderMap,
     mut body: Body,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    ensure_spool_dirs(spool_dir).await?;
+    // Reject early if Content-Length already declares an oversized body.
+    if let Some(cl_value) = headers.get(axum::http::header::CONTENT_LENGTH) {
+        if let Ok(cl_str) = cl_value.to_str() {
+            if let Ok(cl_len) = cl_str.parse::<usize>() {
+                if cl_len > max_body_bytes {
+                    return Err(Box::new(BodyTooLargeError { limit_bytes: max_body_bytes }));
+                }
+            }
+        }
+    }
 
     let received_ns = now_ns()?;
     let spool_id = format!("{}-{}", received_ns, Uuid::new_v4());
@@ -161,10 +212,18 @@ async fn spool_body(
     let ready_body_path = ready_dir.join(&body_filename);
     let ready_manifest_path = ready_dir.join(&manifest_filename);
 
+    let mut bytes_written: usize = 0;
     let mut file = fs::File::create(&tmp_body_path).await?;
     while let Some(frame_result) = body.frame().await {
         let frame = frame_result?;
         if let Some(chunk) = frame.data_ref() {
+            bytes_written += chunk.len();
+            if bytes_written > max_body_bytes {
+                // Clean up the partial write before returning the error.
+                drop(file);
+                let _ = fs::remove_file(&tmp_body_path).await;
+                return Err(Box::new(BodyTooLargeError { limit_bytes: max_body_bytes }));
+            }
             file.write_all(chunk).await?;
         }
     }
@@ -192,15 +251,18 @@ async fn spool_body(
     drop(manifest_file);
 
     fs::rename(&tmp_body_path, &ready_body_path).await?;
-    fsync_dir(&ready_dir).await?;
     // Publish the manifest last. Python only scans manifests, so this is the queue commit point.
+    // fsync the body into ready/ before touching the manifest; roll back on failure.
+    if let Err(err) = fsync_dir(&ready_dir).await {
+        let _ = fs::remove_file(&ready_body_path).await;
+        return Err(Box::new(err));
+    }
     if let Err(err) = fs::rename(&tmp_manifest_path, &ready_manifest_path).await {
         let _ = fs::remove_file(&ready_body_path).await;
         let _ = fs::remove_file(&tmp_manifest_path).await;
         return Err(Box::new(err));
     }
     fsync_dir(&ready_dir).await?;
-    fsync_dir(&tmp_dir).await?;
 
     Ok(spool_id)
 }
@@ -235,7 +297,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state = AppState {
             spool_dir: Arc::new(tmp.path().join("spool")),
+            max_body_bytes: usize::MAX,
         };
+        ensure_spool_dirs(&state.spool_dir).await.unwrap();
         let response = app(state.clone())
             .oneshot(
                 Request::builder()
@@ -258,7 +322,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state = AppState {
             spool_dir: Arc::new(tmp.path().join("spool")),
+            max_body_bytes: usize::MAX,
         };
+        ensure_spool_dirs(&state.spool_dir).await.unwrap();
         let router = app(state.clone());
         let first = router.clone().oneshot(
             Request::builder()
@@ -279,5 +345,30 @@ mod tests {
         assert_eq!(first_response.unwrap().status(), StatusCode::ACCEPTED);
         assert_eq!(second_response.unwrap().status(), StatusCode::ACCEPTED);
         assert_eq!(state.spool_dir.join("ready").read_dir().unwrap().count(), 4);
+    }
+
+    #[tokio::test]
+    async fn oversized_body_returns_413() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState {
+            spool_dir: Arc::new(tmp.path().join("spool")),
+            max_body_bytes: 8,
+        };
+        ensure_spool_dirs(&state.spool_dir).await.unwrap();
+        // Limit to 8 bytes; send 16 bytes. Content-Length triggers early rejection.
+        let response = app(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(BINARY_ENDPOINT)
+                    .header("content-type", "application/octet-stream")
+                    .header("content-length", "16")
+                    .body(Body::from("0123456789abcdef"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 }

@@ -293,6 +293,9 @@ class Settings:
     ingest_spool_poll_interval_seconds: float = 0.05
     ingest_spool_worker_count: int = 1
     direct_ingest_enabled: bool = True
+    ingest_sidecar_enabled: bool = True
+    ingest_sidecar_binary_path: Path = Path("dist/minimappr-ingest-sidecar")
+    ingest_sidecar_port: int = 8081
     retention_policy_path: Path = Path("data/retention_policy.json")
     rules_config_path: Path = DEFAULT_RULES_CONFIG_PATH
     taxonomy_config_path: Path = Path("data/taxonomy.json")
@@ -691,6 +694,11 @@ class Settings:
             ingest_spool_poll_interval_seconds=_env_float("MINIMAPPR_INGEST_SPOOL_POLL_INTERVAL_SECONDS", 0.05),
             ingest_spool_worker_count=_env_int("MINIMAPPR_INGEST_SPOOL_WORKER_COUNT", 1),
             direct_ingest_enabled=_env_bool("MINIMAPPR_DIRECT_INGEST_ENABLED", True),
+            ingest_sidecar_enabled=_env_bool("MINIMAPPR_INGEST_SIDECAR_ENABLED", True),
+            ingest_sidecar_binary_path=Path(
+                _env_str("MINIMAPPR_INGEST_SIDECAR_BINARY_PATH", "dist/minimappr-ingest-sidecar")
+            ),
+            ingest_sidecar_port=_env_int("MINIMAPPR_SIDECAR_PORT", 8081),
             retention_policy_path=Path(_env_str("MINIMAPPR_RETENTION_POLICY_PATH", "data/retention_policy.json")),
             rules_config_path=Path(_env_str("MINIMAPPR_RULES_CONFIG_PATH", "data/rules.json")),
             taxonomy_config_path=Path(_env_str("MINIMAPPR_TAXONOMY_CONFIG_PATH", "data/taxonomy.json")),

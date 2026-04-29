@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -214,6 +215,114 @@ async def _reconcile_site_origin_after_startup(app: FastAPI) -> None:
         logger.warning("Previous classifier close failed after site-origin reconciliation: %s", exc)
 
 
+class _SidecarState:
+    """Mutable runtime health for the supervised ingest sidecar process.
+
+    Shared between the supervision task and the diagnostics endpoint so the
+    Server page always reflects live process state.
+    """
+
+    __slots__ = ("status", "pid", "restart_count", "last_exit_code", "_current_process")
+
+    def __init__(self) -> None:
+        self.status: str = "disabled"
+        self.pid: int | None = None
+        self.restart_count: int = 0
+        self.last_exit_code: int | None = None
+        self._current_process: "asyncio.subprocess.Process | None" = None
+
+
+async def _supervise_ingest_sidecar(
+    settings: "Settings",
+    initial_process: "asyncio.subprocess.Process",
+    state: _SidecarState,
+) -> None:
+    """Watch the ingest sidecar and restart it on unexpected exit.
+
+    A clean exit (returncode 0) or SIGTERM (−15) is treated as an intentional
+    shutdown and terminates supervision.  Any other exit code triggers an
+    exponential-backoff restart loop.
+    """
+    process = initial_process
+    state._current_process = process
+    state.status = "running"
+    state.pid = process.pid
+    while True:
+        returncode = await process.wait()
+        state.last_exit_code = returncode
+        if returncode in (0, -15):
+            # Intentional shutdown; stop supervising.
+            state.status = "stopped"
+            state._current_process = None
+            return
+        state.restart_count += 1
+        state.status = "restarting"
+        logger.warning(
+            "Ingest sidecar exited unexpectedly (code %d); restarting (attempt %d)",
+            returncode,
+            state.restart_count,
+        )
+        await asyncio.sleep(2.0)
+        try:
+            new_process = await _start_ingest_sidecar(settings)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Failed to restart ingest sidecar: %s", exc)
+            state.status = "crashed"
+            state._current_process = None
+            return
+        if new_process is None:
+            state.status = "binary_not_found"
+            state._current_process = None
+            return
+        process = new_process
+        state._current_process = process
+        state.status = "running"
+        state.pid = process.pid
+
+
+def _count_failed_spool_manifest_items(spool_dir: "Path") -> int:
+    """Count manifest files (.json) in the spool failed directory."""
+    failed_dir = spool_dir / "failed"
+    if not failed_dir.exists():
+        return 0
+    return sum(1 for p in failed_dir.glob("*.json") if p.is_file())
+
+
+async def _start_ingest_sidecar(
+    settings: "Settings",
+) -> "asyncio.subprocess.Process | None":
+    """Launch the Rust ingest sidecar as a managed child process.
+
+    Returns the process if started, or None when the binary is absent or the
+    feature is disabled.  The process inherits stdout/stderr so its log lines
+    appear in the same terminal as the Python server.
+    """
+    binary = settings.ingest_sidecar_binary_path
+    if not binary.exists():
+        logger.warning(
+            "Ingest sidecar binary not found at %s; sidecar will not start. "
+            "Build it with: scripts/build_rust.sh --sidecar",
+            binary,
+        )
+        return None
+    env = {
+        **os.environ,
+        # Keep spool dir in sync with the Python consumer regardless of what
+        # env vars the operator may have set for the Rust binary directly.
+        "MINIMAPPR_INGEST_SPOOL_DIR": str(settings.ingest_spool_dir),
+        "MINIMAPPR_SIDECAR_PORT": str(settings.ingest_sidecar_port),
+    }
+    logger.info(
+        "Starting ingest sidecar: %s (port %d, spool %s)",
+        binary,
+        settings.ingest_sidecar_port,
+        settings.ingest_spool_dir,
+    )
+    return await asyncio.create_subprocess_exec(str(binary), env=env)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     install_log_ring()
@@ -300,6 +409,22 @@ async def lifespan(app: FastAPI):
     )
     ingest_spool_consumer.ensure_directories()
 
+    sidecar_state = _SidecarState()
+    sidecar_supervision_task: asyncio.Task | None = None
+    if settings.ingest_sidecar_enabled:
+        sidecar_process = await _start_ingest_sidecar(settings)
+        if sidecar_process is not None:
+            sidecar_state._current_process = sidecar_process
+            sidecar_state.status = "running"
+            sidecar_state.pid = sidecar_process.pid
+            sidecar_supervision_task = asyncio.create_task(
+                _supervise_ingest_sidecar(settings, sidecar_process, sidecar_state)
+            )
+        else:
+            sidecar_state.status = "binary_not_found"
+    else:
+        sidecar_state.status = "disabled"
+
     async def _federation_local_tracks(now_ns: int) -> list[TrackState]:
         tracks = await tracker.snapshot(now_ns=now_ns)
         active: list[TrackState] = []
@@ -334,6 +459,7 @@ async def lifespan(app: FastAPI):
     app.state.diagnostics = diagnostics
     app.state.cleanup_service = cleanup_service
     app.state.ingest_spool_consumer = ingest_spool_consumer
+    app.state.sidecar_state = sidecar_state
     _apply_site_origin_resolution(app.state, resolved_site_origin)
 
     cleanup_task: asyncio.Task | None = None
@@ -397,6 +523,23 @@ async def lifespan(app: FastAPI):
             await asyncio.wait_for(storage.close(), timeout=shutdown_timeout_s)
         except Exception as exc:
             logger.warning("Storage close failed during shutdown: %s", exc)
+
+        # Cancel the supervision task first so it does not restart the process
+        # after we intentionally terminate it.
+        if sidecar_supervision_task is not None:
+            sidecar_supervision_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+                await asyncio.wait_for(sidecar_supervision_task, timeout=shutdown_timeout_s)
+        current_sidecar = sidecar_state._current_process
+        if current_sidecar is not None and current_sidecar.returncode is None:
+            logger.info("Stopping ingest sidecar (pid %d)", current_sidecar.pid)
+            current_sidecar.terminate()
+            try:
+                await asyncio.wait_for(current_sidecar.wait(), timeout=shutdown_timeout_s)
+            except asyncio.TimeoutError:
+                logger.warning("Ingest sidecar did not exit cleanly; sending SIGKILL")
+                current_sidecar.kill()
+                await current_sidecar.wait()
 
 
 app = FastAPI(title="MinimapPR", version="0.1.0", lifespan=lifespan)
@@ -1350,6 +1493,21 @@ async def get_system_diagnostics(request: Request) -> dict:
             ),
             "detections_emitted": fusion_status["metrics"].get("detections_emitted", 0),
         },
+    }
+    sidecar_state: _SidecarState | None = getattr(state, "sidecar_state", None)
+    failed_spool_count = await asyncio.to_thread(
+        _count_failed_spool_manifest_items,
+        settings.ingest_spool_dir,
+    )
+    diagnostics["sidecar"] = {
+        "enabled": settings.ingest_sidecar_enabled,
+        "status": sidecar_state.status if sidecar_state is not None else (
+            "disabled" if not settings.ingest_sidecar_enabled else "unknown"
+        ),
+        "pid": sidecar_state.pid if sidecar_state is not None else None,
+        "restart_count": sidecar_state.restart_count if sidecar_state is not None else 0,
+        "last_exit_code": sidecar_state.last_exit_code if sidecar_state is not None else None,
+        "failed_spool_items": failed_spool_count,
     }
     return diagnostics
 

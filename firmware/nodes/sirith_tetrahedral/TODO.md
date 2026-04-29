@@ -58,6 +58,61 @@
 - [x] Keep optional LIS2 auto-orientation and GPS setup integrated in thin node entrypoint wiring.
 - [x] Update CMake target to compile modular sources and shared audio library source/include paths.
 
+
+## Testing
+```bash
+conda activate minimappr && export MINIMAPPR_HOST=192.168.8.199 MINIMAPPR_PORT=8080 MINIMAPPR_CLASSIFIER=yamnet MINIMAPPR_BEAMFORMED_CLASSIFICATION_ENABLED=true MINIMAPPR_BIRDNET_TRIGGER_MIN_CONFIDENCE=0.05 && minimappr
+```
+birdnet_hybrid_production, birdnet_omni_testing
+(birdnet_hybrid_production now defaults to coyote-only alert rules unless MINIMAPPR_RULES_CONFIG_PATH is explicitly set)
+```
+conda activate minimappr && export MINIMAPPR_HOST=192.168.8.199 MINIMAPPR_PORT=8080 MINIMAPPR_RUNTIME_PROFILE=birdnet_hybrid_production && minimappr
+```
+cleanup 
+```bash
+minimappr cleanup full --yes
+```
+build
+```
+bash ./scripts/build_frontend.sh
+ bash ./scripts/build_rust.sh
+```
+local dev
+```bash
+pip uninstall -y minimappr
+pip install -e .
+```
+Running the sidecar indepently
+```
+# Terminal 2: Rust fast-path sidecar
+MINIMAPPR_INGEST_SPOOL_DIR=data/spool ./dist/minimappr-ingest-sidecar
+```
+
+
+```
+(cut the trace to pin 5, bodge VDD to pin 4, bodge the cap to pin 6).
+```
+
+how to read serial
+```python
+import os, time, select, sys
+
+path = "/dev/cu.usbmodem1101"
+fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+end = time.time() + 15
+
+try:
+    while time.time() < end:
+        r, _, _ = select.select([fd], [], [], 0.25)
+        if r:
+            data = os.read(fd, 4096)
+            if data:
+                sys.stdout.write(data.decode("utf-8", "replace"))
+                sys.stdout.flush()
+finally:
+    os.close(fd)
+```
+
 ## Notes / Calibration
 - Manual base-plane rotation must remain configurable for installation alignment.
 - Auto-orientation is optional and should gracefully fall back to manual rotation if unhealthy.

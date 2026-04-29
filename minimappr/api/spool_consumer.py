@@ -61,6 +61,7 @@ class SpoolProcessingSummary:
     cleaned_tmp: int = 0
     cleaned_orphan_ready: int = 0
     cleaned_failed: int = 0
+    cleaned_processing: int = 0
 
 
 class IngestSpoolConsumer:
@@ -79,6 +80,21 @@ class IngestSpoolConsumer:
 
     async def run_forever(self, *, worker_name: str) -> None:
         self.ensure_directories()
+        # One-time startup pass: reclaim items orphaned in processing/ by a
+        # previous crash.  Done before the live loop so no in-flight workers
+        # are racing against the deletion.
+        startup_cleaned_processing = await asyncio.to_thread(
+            _delete_files_older_than,
+            self._config.processing_dir,
+            self._config.tmp_ttl_seconds,
+            time.time_ns(),
+        )
+        if startup_cleaned_processing:
+            logger.info(
+                "Ingest spool worker %s cleaned %d stale processing item(s) at startup",
+                worker_name,
+                startup_cleaned_processing,
+            )
         while True:
             try:
                 summary = await self.run_once(now_ns=time.time_ns())
@@ -89,6 +105,7 @@ class IngestSpoolConsumer:
                     or summary.cleaned_tmp
                     or summary.cleaned_orphan_ready
                     or summary.cleaned_failed
+                    or summary.cleaned_processing
                 ):
                     logger.info("Ingest spool worker %s summary: %s", worker_name, summary)
             except asyncio.CancelledError:
@@ -118,6 +135,10 @@ class IngestSpoolConsumer:
             self._config.failed_ttl_seconds,
             effective_now_ns,
         )
+        # Processing-dir cleanup is intentionally skipped here: items claimed
+        # into processing/ may still be in-flight on a concurrent worker.  Stale
+        # items from crashes are cleaned once at worker startup (run_forever).
+        cleaned_processing = 0
 
         processed = 0
         expired = 0
@@ -134,7 +155,11 @@ class IngestSpoolConsumer:
 
             try:
                 item = await asyncio.to_thread(_load_claimed_item, claimed_manifest_path)
-                age_seconds = max(0.0, (effective_now_ns - item.received_ns) / 1_000_000_000.0)
+                # Re-sample now so items that waited in a large backlog are
+                # judged by the time they are actually reached, not the single
+                # snapshot taken at the start of this pass.
+                item_check_now_ns = time.time_ns()
+                age_seconds = max(0.0, (item_check_now_ns - item.received_ns) / 1_000_000_000.0)
                 if age_seconds > self._config.ready_ttl_seconds:
                     await asyncio.to_thread(_delete_item_files, claimed_manifest_path, item.body_path)
                     expired += 1
@@ -156,6 +181,7 @@ class IngestSpoolConsumer:
             cleaned_tmp=cleaned_tmp,
             cleaned_orphan_ready=cleaned_orphan_ready,
             cleaned_failed=cleaned_failed,
+            cleaned_processing=cleaned_processing,  # always 0 in live loop
         )
 
     async def _deliver_item(self, item: "ClaimedSpoolItem") -> None:
@@ -186,13 +212,17 @@ class ClaimedSpoolItem:
 def _list_ready_manifests_oldest_first(ready_dir: Path) -> list[Path]:
     manifests = [path for path in ready_dir.glob("*.json") if path.is_file()]
 
-    def _sort_key(path: Path) -> tuple[int, str]:
+    def _sort_key(path: Path) -> str:
+        stem = path.stem
+        # Spool IDs begin with a 19-digit epoch-nanosecond prefix, so lexicographic
+        # filename order is equivalent to received_ns timestamp order — no file I/O needed.
+        # Fall back to mtime string for files that don't follow the naming convention.
+        if stem and stem[0].isdigit():
+            return stem
         try:
-            with path.open("r", encoding="utf-8") as handle:
-                metadata = json.load(handle)
-            return (int(metadata.get("received_ns", 0)), path.name)
+            return str(path.stat().st_mtime_ns)
         except Exception:  # noqa: BLE001
-            return (int(path.stat().st_mtime_ns), path.name)
+            return stem
 
     return sorted(manifests, key=_sort_key)
 

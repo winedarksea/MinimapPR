@@ -62,6 +62,22 @@ struct DiskEntry {
 }
 
 #[derive(Clone, Debug, Deserialize, Default, PartialEq)]
+struct SidecarDiagnostics {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    pid: Option<u64>,
+    #[serde(default)]
+    restart_count: u64,
+    #[serde(default)]
+    last_exit_code: Option<i32>,
+    #[serde(default)]
+    failed_spool_items: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Default, PartialEq)]
 struct Diagnostics {
     #[serde(default)]
     now_ns: i64,
@@ -81,6 +97,8 @@ struct Diagnostics {
     disk: std::collections::BTreeMap<String, Option<DiskEntry>>,
     #[serde(default)]
     pipeline: Option<PipelineDiagnostics>,
+    #[serde(default)]
+    sidecar: SidecarDiagnostics,
 }
 
 #[derive(Clone, Debug, Deserialize, Default, PartialEq)]
@@ -362,6 +380,36 @@ pub fn ServerDiagnosticsView() -> impl IntoView {
                                             None => view! { <DiagRow k=name.clone() v="unavailable".into() /> }.into_any(),
                                         }
                                     }).collect_view()}
+                                </DiagCard>
+
+                                <DiagCard title="Ingest Sidecar">
+                                    <DiagRow
+                                        k="Status".into()
+                                        v={
+                                            let s = &d.sidecar.status;
+                                            if s.is_empty() {
+                                                if d.sidecar.enabled { "unknown".into() } else { "disabled".into() }
+                                            } else {
+                                                s.clone()
+                                            }
+                                        }
+                                    />
+                                    <DiagRow
+                                        k="PID".into()
+                                        v=d.sidecar.pid.map(|p| p.to_string()).unwrap_or_else(|| "—".into())
+                                    />
+                                    <DiagRow
+                                        k="Restart count".into()
+                                        v=d.sidecar.restart_count.to_string()
+                                    />
+                                    <DiagRow
+                                        k="Last exit code".into()
+                                        v=d.sidecar.last_exit_code.map(|c| c.to_string()).unwrap_or_else(|| "—".into())
+                                    />
+                                    <DiagRow
+                                        k="Failed spool items".into()
+                                        v=d.sidecar.failed_spool_items.to_string()
+                                    />
                                 </DiagCard>
                             </div>
                         }.into_any()

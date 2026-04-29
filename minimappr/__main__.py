@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 from dataclasses import replace
 from pathlib import Path
 from typing import Sequence
@@ -18,9 +19,21 @@ from minimappr.storage.db import Storage
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="minimappr")
+    parser.add_argument(
+        "--no-sidecar",
+        action="store_true",
+        default=False,
+        help="Do not automatically start the Rust ingest sidecar process",
+    )
     subparsers = parser.add_subparsers(dest="command")
 
-    subparsers.add_parser("serve", help="Start the MinimapPR server")
+    serve_parser = subparsers.add_parser("serve", help="Start the MinimapPR server")
+    serve_parser.add_argument(
+        "--no-sidecar",
+        action="store_true",
+        default=False,
+        help="Do not automatically start the Rust ingest sidecar process",
+    )
 
     cleanup_parser = subparsers.add_parser("cleanup", help="Run cleanup and retention maintenance commands")
     cleanup_subparsers = cleanup_parser.add_subparsers(dest="cleanup_mode", required=True)
@@ -48,7 +61,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     if args.command in {None, "serve"}:
-        _run_server()
+        _run_server(no_sidecar=getattr(args, "no_sidecar", False))
         return
 
     if args.command == "cleanup":
@@ -59,7 +72,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.error(f"Unsupported command: {args.command}")
 
 
-def _run_server() -> None:
+def _run_server(*, no_sidecar: bool = False) -> None:
+    if no_sidecar:
+        os.environ["MINIMAPPR_INGEST_SIDECAR_ENABLED"] = "false"
     settings = Settings.from_env()
     uvicorn.run(
         "minimappr.main:app",
