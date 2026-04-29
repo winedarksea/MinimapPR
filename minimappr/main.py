@@ -21,6 +21,7 @@ from starlette.requests import ClientDisconnect
 
 from minimappr.api.binary_ingest import parse_binary_ingest_payload
 from minimappr.api.live import LiveEventHub
+from minimappr.api.spool_consumer import IngestSpoolConfig, IngestSpoolConsumer
 from minimappr.api.transports import HttpIngestTransport
 from minimappr.classifiers.factory import create_classifier
 from minimappr.cleanup_service import CleanupService
@@ -286,6 +287,18 @@ async def lifespan(app: FastAPI):
         classifier=classifier,
     )
     cleanup_service = CleanupService(settings=settings, storage=storage)
+    ingest_spool_consumer = IngestSpoolConsumer(
+        config=IngestSpoolConfig(
+            spool_dir=settings.ingest_spool_dir,
+            ready_ttl_seconds=settings.ingest_spool_ready_ttl_seconds,
+            failed_ttl_seconds=settings.ingest_spool_failed_ttl_seconds,
+            tmp_ttl_seconds=settings.ingest_spool_tmp_ttl_seconds,
+            poll_interval_seconds=settings.ingest_spool_poll_interval_seconds,
+            worker_count=settings.ingest_spool_worker_count,
+        ),
+        ingest_transport=ingest_transport,
+    )
+    ingest_spool_consumer.ensure_directories()
 
     async def _federation_local_tracks(now_ns: int) -> list[TrackState]:
         tracks = await tracker.snapshot(now_ns=now_ns)
@@ -320,15 +333,22 @@ async def lifespan(app: FastAPI):
     app.state.bit_evaluator = bit_evaluator
     app.state.diagnostics = diagnostics
     app.state.cleanup_service = cleanup_service
+    app.state.ingest_spool_consumer = ingest_spool_consumer
     _apply_site_origin_resolution(app.state, resolved_site_origin)
 
     cleanup_task: asyncio.Task | None = None
     site_origin_reconcile_task: asyncio.Task | None = None
+    ingest_spool_tasks: list[asyncio.Task] = []
     environment_provider.bootstrap(await storage.list_latest_environment_per_node(limit=1024))
     await fusion_node.start()
     await federation.start()
     cleanup_task = asyncio.create_task(_cleanup_loop(app))
     app.state.cleanup_task = cleanup_task
+    ingest_spool_tasks = [
+        asyncio.create_task(ingest_spool_consumer.run_forever(worker_name=f"spool-{index + 1}"))
+        for index in range(settings.ingest_spool_worker_count)
+    ]
+    app.state.ingest_spool_tasks = ingest_spool_tasks
     if should_schedule_deferred_site_origin_reconciliation(
         settings,
         initial_resolution_source=resolved_site_origin.source,
@@ -348,6 +368,11 @@ async def lifespan(app: FastAPI):
             cleanup_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
                 await asyncio.wait_for(cleanup_task, timeout=shutdown_timeout_s)
+        for task in ingest_spool_tasks:
+            task.cancel()
+        if ingest_spool_tasks:
+            with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+                await asyncio.wait_for(asyncio.gather(*ingest_spool_tasks), timeout=shutdown_timeout_s)
 
         try:
             await asyncio.wait_for(federation.stop(), timeout=shutdown_timeout_s)
@@ -483,6 +508,8 @@ async def ingest_frame(payload: IngestFrameRequest, request: Request) -> IngestF
 @app.post("/api/v1/ingest/store-forward", response_model=StoreForwardIngestResponse)
 async def ingest_store_forward(payload: StoreForwardIngestRequest, request: Request) -> StoreForwardIngestResponse:
     state = _require_state(request)
+    if not state.settings.direct_ingest_enabled:
+        raise HTTPException(status_code=410, detail="Direct ingest is disabled; send firmware ingest to the Rust sidecar")
     try:
         return await state.ingest_transport.deliver_store_forward(payload)
     except ValueError as exc:
@@ -492,6 +519,8 @@ async def ingest_store_forward(payload: StoreForwardIngestRequest, request: Requ
 @app.post("/api/v1/ingest/binary", response_model=StoreForwardIngestResponse)
 async def ingest_binary(request: Request) -> StoreForwardIngestResponse:
     state = _require_state(request)
+    if not state.settings.direct_ingest_enabled:
+        raise HTTPException(status_code=410, detail="Direct ingest is disabled; send firmware ingest to the Rust sidecar")
     try:
         payload = parse_binary_ingest_payload(await request.body())
         return await state.ingest_transport.deliver_binary(payload)

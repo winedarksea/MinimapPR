@@ -111,9 +111,12 @@ def _configure_env(monkeypatch, tmp_path: Path, *, snippet_retention_seconds: in
     db_path = tmp_path / "http_api.db"
     snippet_dir = tmp_path / "snippets"
     artifact_dir = tmp_path / "artifacts"
+    spool_dir = tmp_path / "spool"
     monkeypatch.setenv("MINIMAPPR_DB_PATH", str(db_path))
     monkeypatch.setenv("MINIMAPPR_SNIPPET_DIR", str(snippet_dir))
     monkeypatch.setenv("MINIMAPPR_LARGE_ARTIFACT_DIR", str(artifact_dir))
+    monkeypatch.setenv("MINIMAPPR_INGEST_SPOOL_DIR", str(spool_dir))
+    monkeypatch.setenv("MINIMAPPR_INGEST_SPOOL_POLL_INTERVAL_SECONDS", "3600")
     monkeypatch.setenv("MINIMAPPR_TRIGGER_RMS", "0.000001")
     monkeypatch.setenv("MINIMAPPR_TRIGGER_COOLDOWN_SECONDS", "0")
     monkeypatch.setenv("MINIMAPPR_LOCALIZATION_WINDOW_SECONDS", "0.02")
@@ -1249,3 +1252,207 @@ def test_analytics_heatmap_returns_binned_points(monkeypatch, tmp_path: Path) ->
         for b in body["bins"]:
             assert "lat" in b and "lon" in b and "weight" in b
             assert b["weight"] >= 1
+
+
+def _write_spool_item(spool_dir: Path, *, endpoint: str, body: bytes, received_ns: int, spool_id: str) -> None:
+    ready_dir = spool_dir / "ready"
+    ready_dir.mkdir(parents=True, exist_ok=True)
+    body_filename = f"{spool_id}.body"
+    (ready_dir / body_filename).write_bytes(body)
+    (ready_dir / f"{spool_id}.json").write_text(
+        "{"
+        f'"spool_id":"{spool_id}",'
+        f'"endpoint":"{endpoint}",'
+        '"content_type":"application/octet-stream",'
+        f'"received_ns":{received_ns},'
+        f'"body_filename":"{body_filename}"'
+        "}\n",
+        encoding="utf-8",
+    )
+
+
+def test_direct_store_forward_ingest_can_be_disabled(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    monkeypatch.setenv("MINIMAPPR_DIRECT_INGEST_ENABLED", "false")
+    payload = {
+        "node": {
+            "id": "http-node-1",
+            "node_type": "point",
+            "position_m": [0.0, 0.0, 0.0],
+            "sensor_offsets_m": [[0.0, 0.0, 0.0]],
+            "capabilities": ["audio"],
+            "metadata": {},
+        },
+        "buffered_frames": [
+            {
+                "frame": {
+                    "start_time_ns": time.time_ns(),
+                    "sample_rate_hz": 16000,
+                    "channels": 1,
+                    "encoding": "pcm16le",
+                    "samples_b64": encode_pcm16le_b64(
+                        np.random.default_rng(11).normal(0.0, 0.1, size=(1, 128)).astype(np.float32)
+                    ),
+                }
+            }
+        ],
+    }
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/ingest/store-forward", json=payload)
+        assert response.status_code == 410
+        assert "sidecar" in response.json()["detail"]
+
+
+def test_ingest_spool_consumer_processes_binary_payload(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    spool_dir = tmp_path / "spool"
+    samples = np.random.default_rng(43).normal(0.0, 0.35, size=(1, 512)).astype(np.float32)
+    start_time_ns = time.time_ns()
+    body = _binary_ingest_payload(
+        [
+            _binary_frame(
+                samples,
+                start_time_ns=start_time_ns,
+                sequence=1010,
+                start_sample_index=0,
+            )
+        ]
+    )
+    _write_spool_item(
+        spool_dir,
+        endpoint="/api/v1/ingest/binary",
+        body=body,
+        received_ns=time.time_ns(),
+        spool_id="binary-ok",
+    )
+
+    with TestClient(app) as client:
+        deadline = time.monotonic() + 2.0
+        nodes = []
+        while time.monotonic() < deadline:
+            nodes_response = client.get("/api/v1/nodes", params={"limit": 10})
+            assert nodes_response.status_code == 200
+            nodes = nodes_response.json()
+            if any(row["id"] == "binary-node-1" for row in nodes):
+                break
+            time.sleep(0.05)
+        assert any(row["id"] == "binary-node-1" for row in nodes)
+        assert list((spool_dir / "ready").glob("*")) == []
+        assert list((spool_dir / "processing").glob("*")) == []
+
+
+def test_ingest_spool_consumer_expires_ready_payload(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    monkeypatch.setenv("MINIMAPPR_INGEST_SPOOL_READY_TTL_SECONDS", "0.001")
+    spool_dir = tmp_path / "spool"
+    old_received_ns = time.time_ns() - 10_000_000_000
+    _write_spool_item(
+        spool_dir,
+        endpoint="/api/v1/ingest/binary",
+        body=b"BAD!",
+        received_ns=old_received_ns,
+        spool_id="expired",
+    )
+
+    with TestClient(app) as client:
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and list((spool_dir / "ready").glob("*")):
+            time.sleep(0.05)
+        assert list((spool_dir / "ready").glob("*")) == []
+        assert list((spool_dir / "failed").glob("*")) == []
+
+
+def test_ingest_spool_consumer_moves_parse_error_to_failed(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    spool_dir = tmp_path / "spool"
+    _write_spool_item(
+        spool_dir,
+        endpoint="/api/v1/ingest/binary",
+        body=b"BAD!",
+        received_ns=time.time_ns(),
+        spool_id="bad-binary",
+    )
+
+    with TestClient(app) as client:
+        deadline = time.monotonic() + 2.0
+        failed_files = []
+        while time.monotonic() < deadline:
+            failed_files = sorted(path.name for path in (spool_dir / "failed").glob("*"))
+            if failed_files:
+                break
+            time.sleep(0.05)
+        assert failed_files == ["bad-binary.body", "bad-binary.json"]
+
+
+def test_ingest_spool_consumer_cleans_stale_tmp_and_failed(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    monkeypatch.setenv("MINIMAPPR_INGEST_SPOOL_TMP_TTL_SECONDS", "0.001")
+    monkeypatch.setenv("MINIMAPPR_INGEST_SPOOL_FAILED_TTL_SECONDS", "0.001")
+    spool_dir = tmp_path / "spool"
+    tmp_dir = spool_dir / "tmp"
+    failed_dir = spool_dir / "failed"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    failed_dir.mkdir(parents=True, exist_ok=True)
+    tmp_file = tmp_dir / "old.upload"
+    failed_file = failed_dir / "old.body"
+    tmp_file.write_bytes(b"tmp")
+    failed_file.write_bytes(b"failed")
+    old_seconds = time.time() - 10.0
+    import os
+
+    os.utime(tmp_file, (old_seconds, old_seconds))
+    os.utime(failed_file, (old_seconds, old_seconds))
+
+    with TestClient(app) as client:
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and (tmp_file.exists() or failed_file.exists()):
+            time.sleep(0.05)
+        assert not tmp_file.exists()
+        assert not failed_file.exists()
+
+
+def test_ingest_spool_consumer_cleans_orphan_ready_body(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    monkeypatch.setenv("MINIMAPPR_INGEST_SPOOL_TMP_TTL_SECONDS", "0.001")
+    spool_dir = tmp_path / "spool"
+    ready_dir = spool_dir / "ready"
+    ready_dir.mkdir(parents=True, exist_ok=True)
+    orphan_body = ready_dir / "orphan.body"
+    orphan_body.write_bytes(b"orphan")
+    old_seconds = time.time() - 10.0
+    import os
+
+    os.utime(orphan_body, (old_seconds, old_seconds))
+
+    with TestClient(app) as client:
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and orphan_body.exists():
+            time.sleep(0.05)
+        assert not orphan_body.exists()
+
+
+def test_ingest_spool_consumer_rejects_manifest_path_traversal(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    spool_dir = tmp_path / "spool"
+    ready_dir = spool_dir / "ready"
+    ready_dir.mkdir(parents=True, exist_ok=True)
+    (spool_dir / "evil.body").write_bytes(b"must-not-move")
+    (ready_dir / "bad-path.json").write_text(
+        "{"
+        '"spool_id":"bad-path",'
+        '"endpoint":"/api/v1/ingest/binary",'
+        '"content_type":"application/octet-stream",'
+        f'"received_ns":{time.time_ns()},'
+        '"body_filename":"../evil.body"'
+        "}\n",
+        encoding="utf-8",
+    )
+
+    with TestClient(app) as client:
+        deadline = time.monotonic() + 2.0
+        failed_manifest = spool_dir / "failed" / "bad-path.json"
+        while time.monotonic() < deadline and not failed_manifest.exists():
+            time.sleep(0.05)
+        assert failed_manifest.exists()
+        assert (spool_dir / "evil.body").read_bytes() == b"must-not-move"

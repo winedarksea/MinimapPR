@@ -25,6 +25,7 @@ This repository now includes a complete Phase 1 core build focused on the base c
 - `minimappr/classifiers/`: classifier interface, heuristic backend, optional YAMNet backend
 - `minimappr/storage/db.py`: SQLite schema + persistence
 - `minimappr/frontend/`: basic web UI
+- `minimappr-ingest-sidecar/`: Rust firmware-facing ingest spool proxy
 - `minimappr/sim/run_demo.py`: realtime two-node simulator (point + Sirith tetra)
 - `firmware/`: shared embedded node runtime + Sirith/point firmware targets
 - `tests/`: localization and classifier tests
@@ -120,6 +121,26 @@ Notes:
 - optional environmental payload supported: `environment.temperature_c` (minimum), humidity/pressure/wind/lux optional
 - firmware-compatible fallback: if `node.metadata.temperature_c` is provided, it is ingested into `environment` even without an explicit `environment` object
 - response `triggered=true` means an event candidate was queued for fusion workers; detection emission is asynchronous
+
+## Firmware Ingest Sidecar
+For deployment, firmware should post high-rate batch ingest to the Rust sidecar instead of the Python UI/API process.
+
+```bash
+# Terminal 1: Python UI/API and spool consumer
+.venv/bin/python -m minimappr
+
+# Terminal 2: Rust fast-path proxy
+MINIMAPPR_INGEST_SPOOL_DIR=data/spool ./dist/minimappr-ingest-sidecar
+```
+
+Defaults:
+- Python FastAPI UI/API listens on `:8080`.
+- Rust sidecar listens on `:8081`.
+- Sidecar accepts `POST /api/v1/ingest/binary` and `POST /api/v1/ingest/store-forward`, streams bodies to `data/spool/tmp/`, atomically publishes complete items to `data/spool/ready/`, then returns `202 Accepted`.
+- Python drains `data/spool/ready/`, drops items older than `MINIMAPPR_INGEST_SPOOL_READY_TTL_SECONDS` (default `60`), and moves parse/delivery failures to `data/spool/failed/`.
+- Set `MINIMAPPR_DIRECT_INGEST_ENABLED=false` to disable direct Python access to firmware batch ingest endpoints.
+
+Firmware deployments should point the node ingest port at `8081`.
 
 ## Processing Pipeline
 1. Ingest timestamped audio frames.
@@ -289,6 +310,13 @@ cd minimappr-frontend && trunk serve
 ```bash
 scripts/build_frontend.sh
 # Outputs: minimappr/frontend/{index.html,*.js,*.wasm,*.css}
+```
+
+To build all Rust deliverables, including the ingest sidecar:
+```bash
+scripts/build_rust.sh --all
+# Outputs: minimappr/frontend/{index.html,*.js,*.wasm,*.css}
+# Outputs: dist/minimappr-ingest-sidecar
 ```
 
 ### Pre-publish check

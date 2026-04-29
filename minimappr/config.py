@@ -286,6 +286,13 @@ class Settings:
     db_path: Path = Path("data/minimappr.db")
     snippet_dir: Path = Path("data/snippets")
     snippet_retention_seconds: int = 3600
+    ingest_spool_dir: Path = Path("data/spool")
+    ingest_spool_ready_ttl_seconds: float = 60.0
+    ingest_spool_failed_ttl_seconds: float = 86_400.0
+    ingest_spool_tmp_ttl_seconds: float = 300.0
+    ingest_spool_poll_interval_seconds: float = 0.05
+    ingest_spool_worker_count: int = 1
+    direct_ingest_enabled: bool = True
     retention_policy_path: Path = Path("data/retention_policy.json")
     rules_config_path: Path = DEFAULT_RULES_CONFIG_PATH
     taxonomy_config_path: Path = Path("data/taxonomy.json")
@@ -429,6 +436,7 @@ class Settings:
     def __post_init__(self) -> None:
         self.db_path = Path(self.db_path)
         self.snippet_dir = Path(self.snippet_dir)
+        self.ingest_spool_dir = Path(self.ingest_spool_dir)
         self.retention_policy_path = Path(self.retention_policy_path)
         self.rules_config_path = Path(self.rules_config_path)
         self.taxonomy_config_path = Path(self.taxonomy_config_path)
@@ -450,6 +458,16 @@ class Settings:
             raise ValueError("MINIMAPPR_EVENT_STALE_SECONDS must be > 0")
         if self.cleanup_interval_seconds <= 0.0:
             raise ValueError("MINIMAPPR_CLEANUP_INTERVAL_SECONDS must be > 0")
+        if self.ingest_spool_ready_ttl_seconds < 0.0:
+            raise ValueError("MINIMAPPR_INGEST_SPOOL_READY_TTL_SECONDS must be >= 0")
+        if self.ingest_spool_failed_ttl_seconds < 0.0:
+            raise ValueError("MINIMAPPR_INGEST_SPOOL_FAILED_TTL_SECONDS must be >= 0")
+        if self.ingest_spool_tmp_ttl_seconds < 0.0:
+            raise ValueError("MINIMAPPR_INGEST_SPOOL_TMP_TTL_SECONDS must be >= 0")
+        if self.ingest_spool_poll_interval_seconds <= 0.0:
+            raise ValueError("MINIMAPPR_INGEST_SPOOL_POLL_INTERVAL_SECONDS must be > 0")
+        if self.ingest_spool_worker_count < 1:
+            raise ValueError("MINIMAPPR_INGEST_SPOOL_WORKER_COUNT must be >= 1")
         if self.min_sensors_for_2d < 2:
             raise ValueError("MINIMAPPR_MIN_SENSORS_FOR_2D must be >= 2")
         if self.min_sensors_for_3d < self.min_sensors_for_2d:
@@ -666,6 +684,13 @@ class Settings:
             db_path=Path(_env_str("MINIMAPPR_DB_PATH", "data/minimappr.db")),
             snippet_dir=Path(_env_str("MINIMAPPR_SNIPPET_DIR", "data/snippets")),
             snippet_retention_seconds=_env_int("MINIMAPPR_SNIPPET_RETENTION_SECONDS", 3600),
+            ingest_spool_dir=Path(_env_str("MINIMAPPR_INGEST_SPOOL_DIR", "data/spool")),
+            ingest_spool_ready_ttl_seconds=_env_float("MINIMAPPR_INGEST_SPOOL_READY_TTL_SECONDS", 60.0),
+            ingest_spool_failed_ttl_seconds=_env_float("MINIMAPPR_INGEST_SPOOL_FAILED_TTL_SECONDS", 86_400.0),
+            ingest_spool_tmp_ttl_seconds=_env_float("MINIMAPPR_INGEST_SPOOL_TMP_TTL_SECONDS", 300.0),
+            ingest_spool_poll_interval_seconds=_env_float("MINIMAPPR_INGEST_SPOOL_POLL_INTERVAL_SECONDS", 0.05),
+            ingest_spool_worker_count=_env_int("MINIMAPPR_INGEST_SPOOL_WORKER_COUNT", 1),
+            direct_ingest_enabled=_env_bool("MINIMAPPR_DIRECT_INGEST_ENABLED", True),
             retention_policy_path=Path(_env_str("MINIMAPPR_RETENTION_POLICY_PATH", "data/retention_policy.json")),
             rules_config_path=Path(_env_str("MINIMAPPR_RULES_CONFIG_PATH", "data/rules.json")),
             taxonomy_config_path=Path(_env_str("MINIMAPPR_TAXONOMY_CONFIG_PATH", "data/taxonomy.json")),
