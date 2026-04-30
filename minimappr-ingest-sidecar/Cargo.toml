@@ -9,16 +9,27 @@ path = "src/main.rs"
 
 [dependencies]
 axum = "0.7"
+base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
 http-body-util = "0.1"
+memmap2 = "0.9"
+num-complex = "0.4"
+rustfft = "6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+sha2 = "0.10"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tower-http = { version = "0.6", features = ["trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
+
+[[bench]]
+name = "capture_plane"
+harness = false

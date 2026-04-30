@@ -1,8 +1,9 @@
-"""Filesystem spool consumer for sidecar-backed ingest.
+"""Filesystem ingest consumer for sidecar-backed ingest.
 
-The Rust sidecar publishes a body file and then atomically publishes a JSON
-manifest.  The consumer scans manifests only, so incomplete uploads in tmp/ are
-never parsed by Python.
+The Rust sidecar can publish either per-request spool manifests or append-only
+journal entries. Journal replay state is durable per consumer and stream, while
+short-lived claim files remain the in-flight lock so partial writes are never
+parsed and concurrent workers do not race the same stream.
 """
 
 from __future__ import annotations
@@ -18,12 +19,15 @@ from typing import Any, Literal
 
 from pydantic import ValidationError
 
+from minimappr.api.journal_reader import JournalPayloadHandle
 from minimappr.api.binary_ingest import parse_binary_ingest_payload
+from minimappr.api.journal_state import JournalConsumerCursor, JournalConsumerStateStore
 from minimappr.interfaces import IngestTransport
 from minimappr.models import StoreForwardIngestRequest
 
 logger = logging.getLogger(__name__)
 
+IngestStorageMode = Literal["spool", "journal"]
 SpoolEndpoint = Literal["/api/v1/ingest/binary", "/api/v1/ingest/store-forward"]
 
 
@@ -35,6 +39,8 @@ class IngestSpoolConfig:
     tmp_ttl_seconds: float
     poll_interval_seconds: float
     worker_count: int
+    storage_mode: IngestStorageMode = "spool"
+    consumer_name: str = "python-ingest"
 
     @property
     def tmp_dir(self) -> Path:
@@ -51,6 +57,22 @@ class IngestSpoolConfig:
     @property
     def failed_dir(self) -> Path:
         return self.spool_dir / "failed"
+
+    @property
+    def journal_dir(self) -> Path:
+        return self.spool_dir / "journal"
+
+    @property
+    def journal_streams_dir(self) -> Path:
+        return self.journal_dir / "streams"
+
+    @property
+    def journal_segments_dir(self) -> Path:
+        return self.journal_streams_dir
+
+    @property
+    def journal_consumer_state_path(self) -> Path:
+        return self.journal_dir / "consumer_state.sqlite3"
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,13 +92,18 @@ class IngestSpoolConsumer:
         self._ingest_transport = ingest_transport
 
     def ensure_directories(self) -> None:
-        for directory in (
+        directories = [
             self._config.tmp_dir,
             self._config.ready_dir,
             self._config.processing_dir,
             self._config.failed_dir,
-        ):
+        ]
+        if self._config.storage_mode == "journal":
+            directories.append(self._config.journal_streams_dir)
+        for directory in directories:
             directory.mkdir(parents=True, exist_ok=True)
+        if self._config.storage_mode == "journal":
+            JournalConsumerStateStore(self._config.journal_consumer_state_path).ensure_initialized()
 
     async def run_forever(self, *, worker_name: str) -> None:
         self.ensure_directories()
@@ -117,18 +144,21 @@ class IngestSpoolConsumer:
     async def run_once(self, *, now_ns: int | None = None) -> SpoolProcessingSummary:
         self.ensure_directories()
         effective_now_ns = time.time_ns() if now_ns is None else now_ns
-        cleaned_tmp = await asyncio.to_thread(
-            _delete_files_older_than,
-            self._config.tmp_dir,
-            self._config.tmp_ttl_seconds,
-            effective_now_ns,
-        )
-        cleaned_orphan_ready = await asyncio.to_thread(
-            _delete_orphan_ready_bodies,
-            self._config.ready_dir,
-            self._config.tmp_ttl_seconds,
-            effective_now_ns,
-        )
+        cleaned_tmp = 0
+        cleaned_orphan_ready = 0
+        if self._config.storage_mode == "spool":
+            cleaned_tmp = await asyncio.to_thread(
+                _delete_files_older_than,
+                self._config.tmp_dir,
+                self._config.tmp_ttl_seconds,
+                effective_now_ns,
+            )
+            cleaned_orphan_ready = await asyncio.to_thread(
+                _delete_orphan_ready_bodies,
+                self._config.ready_dir,
+                self._config.tmp_ttl_seconds,
+                effective_now_ns,
+            )
         cleaned_failed = await asyncio.to_thread(
             _delete_files_older_than,
             self._config.failed_dir,
@@ -143,36 +173,48 @@ class IngestSpoolConsumer:
         processed = 0
         expired = 0
         failed = 0
-        manifests = await asyncio.to_thread(_list_ready_manifests_oldest_first, self._config.ready_dir)
-        for manifest_path in manifests:
-            claimed_manifest_path = await asyncio.to_thread(
-                _claim_manifest,
-                manifest_path,
-                self._config.processing_dir,
-            )
-            if claimed_manifest_path is None:
-                continue
+        claimed_paths = await self._claim_ready_items()
+        for claimed_path in claimed_paths:
 
             try:
-                item = await asyncio.to_thread(_load_claimed_item, claimed_manifest_path)
+                item = await self._load_claimed_item(claimed_path)
                 # Re-sample now so items that waited in a large backlog are
                 # judged by the time they are actually reached, not the single
                 # snapshot taken at the start of this pass.
                 item_check_now_ns = time.time_ns()
                 age_seconds = max(0.0, (item_check_now_ns - item.received_ns) / 1_000_000_000.0)
                 if age_seconds > self._config.ready_ttl_seconds:
-                    await asyncio.to_thread(_delete_item_files, claimed_manifest_path, item.body_path)
+                    await asyncio.to_thread(
+                        _complete_claimed_item,
+                        item,
+                        self._config.journal_consumer_state_path,
+                        self._config.consumer_name,
+                        "expired",
+                    )
                     expired += 1
                     continue
 
                 await self._deliver_item(item)
-                await asyncio.to_thread(_delete_item_files, claimed_manifest_path, item.body_path)
+                await asyncio.to_thread(
+                    _complete_claimed_item,
+                    item,
+                    self._config.journal_consumer_state_path,
+                    self._config.consumer_name,
+                    "processed",
+                )
                 processed += 1
             except Exception as exc:  # noqa: BLE001
                 failed += 1
-                logger.warning("Moving ingest spool item %s to failed: %s", claimed_manifest_path.name, exc)
+                logger.warning("Moving ingest item %s to failed: %s", claimed_path.name, exc)
                 with contextlib.suppress(Exception):
-                    await asyncio.to_thread(_move_claimed_item_to_failed, claimed_manifest_path, self._config.failed_dir)
+                    await asyncio.to_thread(
+                        _move_claimed_item_to_failed,
+                        claimed_path,
+                        self._config.failed_dir,
+                        self._config.journal_consumer_state_path,
+                        self._config.consumer_name,
+                        str(exc),
+                    )
 
         return SpoolProcessingSummary(
             processed=processed,
@@ -184,8 +226,39 @@ class IngestSpoolConsumer:
             cleaned_processing=cleaned_processing,  # always 0 in live loop
         )
 
-    async def _deliver_item(self, item: "ClaimedSpoolItem") -> None:
-        raw_payload = await asyncio.to_thread(item.body_path.read_bytes)
+    async def _claim_ready_items(self) -> list[Path]:
+        if self._config.storage_mode == "journal":
+            return await asyncio.to_thread(
+                _claim_journal_entries_oldest_first,
+                self._config.journal_streams_dir,
+                self._config.processing_dir,
+                self._config.journal_consumer_state_path,
+                self._config.consumer_name,
+            )
+
+        manifests = await asyncio.to_thread(_list_ready_manifests_oldest_first, self._config.ready_dir)
+        claimed_paths: list[Path] = []
+        for manifest_path in manifests:
+            claimed_path = await asyncio.to_thread(
+                _claim_manifest,
+                manifest_path,
+                self._config.processing_dir,
+            )
+            if claimed_path is not None:
+                claimed_paths.append(claimed_path)
+        return claimed_paths
+
+    async def _load_claimed_item(self, claimed_path: Path) -> "ClaimedIngestItem":
+        if self._config.storage_mode == "journal":
+            return await asyncio.to_thread(
+                _load_claimed_journal_item,
+                claimed_path,
+                self._config.journal_streams_dir,
+            )
+        return await asyncio.to_thread(_load_claimed_spool_item, claimed_path)
+
+    async def _deliver_item(self, item: "ClaimedIngestItem") -> None:
+        raw_payload = await asyncio.to_thread(item.read_payload_bytes)
         if item.endpoint == "/api/v1/ingest/binary":
             payload = parse_binary_ingest_payload(raw_payload)
             await self._ingest_transport.deliver_binary(payload)
@@ -202,11 +275,39 @@ class IngestSpoolConsumer:
 
 
 @dataclass(frozen=True, slots=True)
-class ClaimedSpoolItem:
-    spool_id: str
+class ClaimedIngestItem:
+    ingest_id: str
+    source_kind: IngestStorageMode
     endpoint: str
     received_ns: int
-    body_path: Path
+    cleanup_paths: tuple[Path, ...]
+    stream_key: str | None = None
+    journal_epoch: int | None = None
+    journal_sequence: int | None = None
+    body_path: Path | None = None
+    segment_path: Path | None = None
+    body_offset_bytes: int = 0
+    body_length_bytes: int = 0
+    integrity_hash: str = ""
+    sample_index_start: int | None = None
+    sample_count: int | None = None
+
+    def read_payload_bytes(self) -> bytes:
+        if self.body_path is not None:
+            return self.body_path.read_bytes()
+        if self.segment_path is None:
+            raise ValueError(f"No payload source configured for ingest item {self.ingest_id}")
+        return JournalPayloadHandle(
+            journal_epoch=int(self.journal_epoch or 0),
+            segment_id=self.segment_path.stem,
+            stream_key=str(self.stream_key or ""),
+            payload_offset_bytes=self.body_offset_bytes,
+            payload_length_bytes=self.body_length_bytes,
+            sample_index_start=self.sample_index_start,
+            sample_count=self.sample_count,
+            integrity_hash=self.integrity_hash,
+            segment_path=self.segment_path,
+        ).read_bytes()
 
 
 def _list_ready_manifests_oldest_first(ready_dir: Path) -> list[Path]:
@@ -237,7 +338,7 @@ def _claim_manifest(manifest_path: Path, processing_dir: Path) -> Path | None:
     return destination
 
 
-def _load_claimed_item(manifest_path: Path) -> ClaimedSpoolItem:
+def _load_claimed_spool_item(manifest_path: Path) -> ClaimedIngestItem:
     with manifest_path.open("r", encoding="utf-8") as handle:
         metadata = json.load(handle)
     body_filename = str(metadata["body_filename"])
@@ -249,26 +350,115 @@ def _load_claimed_item(manifest_path: Path) -> ClaimedSpoolItem:
         ready_body_path.replace(body_path)
     if not body_path.is_file():
         raise FileNotFoundError(f"Spool body file missing for {manifest_path.name}: {body_filename}")
-    return ClaimedSpoolItem(
-        spool_id=str(metadata.get("spool_id") or manifest_path.stem),
+    return ClaimedIngestItem(
+        ingest_id=str(metadata.get("spool_id") or manifest_path.stem),
+        source_kind="spool",
         endpoint=str(metadata["endpoint"]),
         received_ns=int(metadata["received_ns"]),
         body_path=body_path,
+        cleanup_paths=(body_path, manifest_path),
     )
 
 
-def _delete_item_files(manifest_path: Path, body_path: Path) -> None:
-    for path in (body_path, manifest_path):
+def _load_claimed_journal_item(claim_path: Path, journal_streams_dir: Path) -> ClaimedIngestItem:
+    with claim_path.open("r", encoding="utf-8") as handle:
+        metadata = json.load(handle)
+    if str(metadata.get("source_kind", "")).strip().lower() != "journal":
+        raise ValueError(f"Invalid journal claim file {claim_path.name}: missing source_kind=journal")
+
+    journal_id = str(metadata.get("journal_id") or _journal_id_from_claim_path(claim_path))
+    stream_key = str(metadata["stream_key"])
+    if Path(stream_key).name != stream_key:
+        raise ValueError(f"Invalid journal stream key {stream_key!r}")
+
+    segment_id = str(metadata["segment_id"])
+    if Path(segment_id).name != segment_id:
+        raise ValueError(f"Invalid journal segment id {segment_id!r}")
+
+    journal_epoch = int(metadata["journal_epoch"])
+    journal_sequence = int(metadata["journal_sequence"])
+    body_offset_bytes = int(metadata["body_offset_bytes"])
+    body_length_bytes = int(metadata["body_length_bytes"])
+    if body_offset_bytes < 0 or body_length_bytes < 0:
+        raise ValueError(f"Journal entry {journal_id} has invalid byte range")
+
+    segment_path = journal_streams_dir / stream_key / "segments" / f"{segment_id}.bin"
+    if not segment_path.is_file():
+        raise FileNotFoundError(
+            f"Journal segment file missing for {claim_path.name}: {segment_path.name}"
+        )
+
+    return ClaimedIngestItem(
+        ingest_id=journal_id,
+        source_kind="journal",
+        endpoint=str(metadata["endpoint"]),
+        received_ns=int(metadata.get("ingest_received_ns") or metadata["received_ns"]),
+        cleanup_paths=(claim_path,),
+        stream_key=stream_key,
+        journal_epoch=journal_epoch,
+        journal_sequence=journal_sequence,
+        segment_path=segment_path,
+        body_offset_bytes=body_offset_bytes,
+        body_length_bytes=body_length_bytes,
+        integrity_hash=str(metadata.get("integrity_hash") or ""),
+        sample_index_start=_optional_int(metadata.get("sample_index_start")),
+        sample_count=_optional_int(metadata.get("sample_count")),
+    )
+
+
+def _delete_item_files(paths: tuple[Path, ...]) -> None:
+    for path in paths:
         with contextlib.suppress(FileNotFoundError):
             path.unlink()
 
 
-def _move_claimed_item_to_failed(manifest_path: Path, failed_dir: Path) -> None:
+def _complete_claimed_item(
+    item: ClaimedIngestItem,
+    journal_consumer_state_path: Path,
+    consumer_name: str,
+    status: Literal["processed", "expired"],
+) -> None:
+    if item.source_kind == "journal":
+        if item.stream_key is None or item.journal_epoch is None or item.journal_sequence is None:
+            raise ValueError(f"Journal item {item.ingest_id} is missing durable cursor metadata")
+        JournalConsumerStateStore(journal_consumer_state_path).mark_handled(
+            consumer_name=consumer_name,
+            stream_key=item.stream_key,
+            journal_epoch=item.journal_epoch,
+            journal_sequence=item.journal_sequence,
+            journal_id=item.ingest_id,
+            status=status,
+            handled_ns=time.time_ns(),
+        )
+    _delete_item_files(item.cleanup_paths)
+
+
+def _move_claimed_item_to_failed(
+    manifest_path: Path,
+    failed_dir: Path,
+    journal_consumer_state_path: Path,
+    consumer_name: str,
+    detail: str,
+) -> None:
     failed_dir.mkdir(parents=True, exist_ok=True)
     body_path: Path | None = None
     with contextlib.suppress(Exception):
         with manifest_path.open("r", encoding="utf-8") as handle:
             metadata = json.load(handle)
+        if str(metadata.get("source_kind", "")).strip().lower() == "journal":
+            JournalConsumerStateStore(journal_consumer_state_path).mark_handled(
+                consumer_name=consumer_name,
+                stream_key=str(metadata["stream_key"]),
+                journal_epoch=int(metadata["journal_epoch"]),
+                journal_sequence=int(metadata["journal_sequence"]),
+                journal_id=str(metadata.get("journal_id") or _journal_id_from_claim_path(manifest_path)),
+                status="failed",
+                handled_ns=time.time_ns(),
+                detail=detail,
+            )
+            if manifest_path.exists():
+                manifest_path.replace(failed_dir / manifest_path.name)
+            return
         body_filename = str(metadata["body_filename"])
         if Path(body_filename).name == body_filename:
             body_path = manifest_path.parent / body_filename
@@ -276,6 +466,128 @@ def _move_claimed_item_to_failed(manifest_path: Path, failed_dir: Path) -> None:
         body_path.replace(failed_dir / body_path.name)
     if manifest_path.exists():
         manifest_path.replace(failed_dir / manifest_path.name)
+
+
+def _claim_journal_entries_oldest_first(
+    journal_streams_dir: Path,
+    processing_dir: Path,
+    journal_consumer_state_path: Path,
+    consumer_name: str,
+) -> list[Path]:
+    if not journal_streams_dir.exists():
+        return []
+
+    processing_dir.mkdir(parents=True, exist_ok=True)
+    state_store = JournalConsumerStateStore(journal_consumer_state_path)
+    state_store.ensure_initialized()
+
+    cursor_by_stream = state_store.load_cursors(consumer_name)
+    exception_ids = state_store.load_exception_ids(consumer_name)
+    active_stream_keys = _processing_stream_keys(processing_dir)
+
+    entries: list[tuple[tuple[int, str, int, int], dict[str, Any]]] = []
+    for index_path in sorted(journal_streams_dir.glob("*/segments/*.index.jsonl")):
+        default_stream_key = index_path.parent.parent.name
+        with index_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                raw_entry = json.loads(line)
+                stream_key = str(raw_entry.get("stream_key") or default_stream_key)
+                journal_sequence = int(raw_entry["journal_sequence"])
+                journal_epoch = int(raw_entry.get("journal_epoch") or 0)
+                journal_id = str(raw_entry["journal_id"])
+                if _cursor_covers_entry(cursor_by_stream.get(stream_key), journal_epoch, journal_sequence):
+                    continue
+                if journal_id in exception_ids:
+                    continue
+                entry = {
+                    "source_kind": "journal",
+                    "journal_id": journal_id,
+                    "journal_epoch": journal_epoch,
+                    "journal_sequence": journal_sequence,
+                    "stream_key": stream_key,
+                    "segment_id": str(raw_entry["segment_id"]),
+                    "endpoint": str(raw_entry["endpoint"]),
+                    "received_ns": int(raw_entry.get("ingest_received_ns") or raw_entry["received_ns"]),
+                    "body_offset_bytes": int(raw_entry.get("payload_offset_bytes") or raw_entry["body_offset_bytes"]),
+                    "body_length_bytes": int(raw_entry.get("payload_length_bytes") or raw_entry["body_length_bytes"]),
+                    "integrity_hash": str(raw_entry.get("integrity_hash") or ""),
+                    "sample_index_start": raw_entry.get("sample_index_start"),
+                    "sample_count": raw_entry.get("sample_count"),
+                }
+                entries.append(
+                    (
+                        (entry["received_ns"], stream_key, journal_epoch, journal_sequence),
+                        entry,
+                    )
+                )
+
+    claimed_paths: list[Path] = []
+    claimed_stream_keys = set(active_stream_keys)
+    for _, entry in sorted(entries, key=lambda item: item[0]):
+        stream_key = str(entry["stream_key"])
+        if stream_key in claimed_stream_keys:
+            continue
+
+        journal_id = str(entry["journal_id"])
+        claim_path = processing_dir / f"{journal_id}.journal.json"
+        try:
+            with claim_path.open("x", encoding="utf-8") as handle:
+                json.dump(entry, handle)
+                handle.write("\n")
+        except FileExistsError:
+            claimed_stream_keys.add(stream_key)
+            continue
+
+        if _cursor_covers_entry(
+            state_store.get_cursor(consumer_name, stream_key),
+            int(entry["journal_epoch"]),
+            int(entry["journal_sequence"]),
+        ):
+            with contextlib.suppress(FileNotFoundError):
+                claim_path.unlink()
+            continue
+
+        claimed_paths.append(claim_path)
+        claimed_stream_keys.add(stream_key)
+
+    return claimed_paths
+
+
+def _processing_stream_keys(processing_dir: Path) -> set[str]:
+    if not processing_dir.exists():
+        return set()
+    stream_keys: set[str] = set()
+    for claim_path in processing_dir.glob("*.journal.json"):
+        with contextlib.suppress(Exception):
+            metadata = json.loads(claim_path.read_text(encoding="utf-8"))
+            stream_key = str(metadata.get("stream_key") or "")
+            if stream_key:
+                stream_keys.add(stream_key)
+    return stream_keys
+
+
+def _cursor_covers_entry(
+    cursor: JournalConsumerCursor | None,
+    journal_epoch: int,
+    journal_sequence: int,
+) -> bool:
+    if cursor is None:
+        return False
+    if cursor.journal_epoch != journal_epoch:
+        return cursor.journal_epoch > journal_epoch
+    return cursor.last_fully_processed_journal_sequence >= journal_sequence
+
+
+def _journal_id_from_claim_path(claim_path: Path) -> str:
+    return claim_path.name.removesuffix(".journal.json")
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    return int(value)
 
 
 def _delete_files_older_than(directory: Path, ttl_seconds: float, now_ns: int) -> int:

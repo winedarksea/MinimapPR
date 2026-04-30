@@ -6,6 +6,7 @@ import struct
 import time
 import wave
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -259,6 +260,54 @@ def test_binary_ingest_rejects_invalid_magic(monkeypatch, tmp_path: Path) -> Non
         )
         assert response.status_code == 400
         assert "magic" in response.json()["detail"]
+
+
+def test_system_diagnostics_includes_sidecar_health(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    monkeypatch.setenv("MINIMAPPR_INGEST_SIDECAR_ENABLED", "1")
+
+    class _FakeSidecarProcess:
+        def __init__(self) -> None:
+            self.pid = 2468
+            self.returncode = None
+
+        def terminate(self) -> None:
+            self.returncode = 0
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+        async def wait(self) -> int:
+            if self.returncode is None:
+                self.returncode = 0
+            return self.returncode
+
+    fake_process = _FakeSidecarProcess()
+
+    async def fake_start_ingest_sidecar(settings):
+        return fake_process
+
+    async def fake_supervise_ingest_sidecar(settings, initial_process, state):
+        return None
+
+    monkeypatch.setattr("minimappr.main._start_ingest_sidecar", fake_start_ingest_sidecar)
+    monkeypatch.setattr("minimappr.main._supervise_ingest_sidecar", fake_supervise_ingest_sidecar)
+    monkeypatch.setattr(
+        "minimappr.main._fetch_ingest_sidecar_health",
+        lambda port: {"status": "ok", "backend": {"storage_mode": "journal", "entry_count": 3}},
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/system/diagnostics")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["sidecar"]["status"] == "running"
+    assert payload["sidecar"]["pid"] == 2468
+    assert payload["sidecar"]["health"] == {
+        "status": "ok",
+        "backend": {"storage_mode": "journal", "entry_count": 3},
+    }
 
 
 def test_spa_refresh_fallback_serves_index_for_frontend_routes(monkeypatch, tmp_path: Path) -> None:

@@ -12,6 +12,8 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import Literal
+import urllib.error
+import urllib.request
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
@@ -79,6 +81,9 @@ from minimappr.utils.audio import mono_mix, read_wav_mono
 
 logger = logging.getLogger(__name__)
 frontend_dir = Path(__file__).parent / "frontend"
+_SIDECAR_READY_TIMEOUT_SECONDS = 5.0
+_SIDECAR_READY_POLL_INTERVAL_SECONDS = 0.1
+_SIDECAR_HEALTHCHECK_TIMEOUT_SECONDS = 0.5
 
 
 def _parse_window_ns(window: str) -> int:
@@ -232,6 +237,56 @@ class _SidecarState:
         self._current_process: "asyncio.subprocess.Process | None" = None
 
 
+def _sidecar_healthcheck_url(port: int) -> str:
+    return f"http://127.0.0.1:{port}/healthz"
+
+
+def _fetch_ingest_sidecar_health(port: int) -> dict[str, object] | None:
+    request = urllib.request.Request(_sidecar_healthcheck_url(port), method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=_SIDECAR_HEALTHCHECK_TIMEOUT_SECONDS) as response:
+            if getattr(response, "status", None) != 200:
+                return None
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, TimeoutError, ValueError, urllib.error.HTTPError, urllib.error.URLError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _probe_ingest_sidecar_ready(port: int) -> bool:
+    payload = _fetch_ingest_sidecar_health(port)
+    return isinstance(payload, dict) and payload.get("status") == "ok"
+
+
+async def _wait_for_ingest_sidecar_ready(
+    process: "asyncio.subprocess.Process",
+    *,
+    port: int,
+    timeout_seconds: float = _SIDECAR_READY_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = _SIDECAR_READY_POLL_INTERVAL_SECONDS,
+) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_seconds
+    while True:
+        if process.returncode is not None:
+            raise RuntimeError(
+                f"Ingest sidecar exited before readiness check completed (code {process.returncode})"
+            )
+        if await asyncio.to_thread(_probe_ingest_sidecar_ready, port):
+            return
+        if loop.time() >= deadline:
+            with contextlib.suppress(ProcessLookupError):
+                process.terminate()
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(process.wait(), timeout=1.0)
+            raise RuntimeError(
+                f"Ingest sidecar did not become ready on port {port} within {timeout_seconds:.1f}s"
+            )
+        await asyncio.sleep(poll_interval_seconds)
+
+
 async def _supervise_ingest_sidecar(
     settings: "Settings",
     initial_process: "asyncio.subprocess.Process",
@@ -312,15 +367,36 @@ async def _start_ingest_sidecar(
         # Keep spool dir in sync with the Python consumer regardless of what
         # env vars the operator may have set for the Rust binary directly.
         "MINIMAPPR_INGEST_SPOOL_DIR": str(settings.ingest_spool_dir),
+        "MINIMAPPR_INGEST_CONSUMER_NAME": settings.ingest_consumer_name,
         "MINIMAPPR_SIDECAR_PORT": str(settings.ingest_sidecar_port),
+        "MINIMAPPR_SIDECAR_STORAGE_MODE": settings.ingest_storage_mode,
+        "MINIMAPPR_SIDECAR_TOTAL_JOURNAL_BUDGET_BYTES": str(
+            settings.ingest_sidecar_total_journal_budget_bytes
+        ),
+        "MINIMAPPR_SIDECAR_ADMISSION_RESERVE_BYTES": str(
+            settings.ingest_sidecar_admission_reserve_bytes
+        ),
+        "MINIMAPPR_RUNTIME_PROFILE": str(getattr(settings, "runtime_profile", "default")),
+        "MINIMAPPR_LOCALIZATION_BAND_MIN_HZ": str(
+            getattr(settings, "localization_band_min_hz", 300.0)
+        ),
+        "MINIMAPPR_LOCALIZATION_BAND_MAX_HZ": str(
+            getattr(settings, "localization_band_max_hz", 3500.0)
+        ),
     }
     logger.info(
-        "Starting ingest sidecar: %s (port %d, spool %s)",
+        "Starting ingest sidecar: %s (port %d, storage %s, spool %s, journal budget %d, reserve %d)",
         binary,
         settings.ingest_sidecar_port,
+        settings.ingest_storage_mode,
         settings.ingest_spool_dir,
+        settings.ingest_sidecar_total_journal_budget_bytes,
+        settings.ingest_sidecar_admission_reserve_bytes,
     )
-    return await asyncio.create_subprocess_exec(str(binary), env=env)
+    process = await asyncio.create_subprocess_exec(str(binary), env=env)
+    await _wait_for_ingest_sidecar_ready(process, port=settings.ingest_sidecar_port)
+    logger.info("Ingest sidecar ready on port %d", settings.ingest_sidecar_port)
+    return process
 
 
 @asynccontextmanager
@@ -404,6 +480,8 @@ async def lifespan(app: FastAPI):
             tmp_ttl_seconds=settings.ingest_spool_tmp_ttl_seconds,
             poll_interval_seconds=settings.ingest_spool_poll_interval_seconds,
             worker_count=settings.ingest_spool_worker_count,
+            storage_mode=settings.ingest_storage_mode,
+            consumer_name=settings.ingest_consumer_name,
         ),
         ingest_transport=ingest_transport,
     )
@@ -1499,6 +1577,12 @@ async def get_system_diagnostics(request: Request) -> dict:
         _count_failed_spool_manifest_items,
         settings.ingest_spool_dir,
     )
+    sidecar_health: dict[str, object] | None = None
+    if settings.ingest_sidecar_enabled and sidecar_state is not None and sidecar_state.status == "running":
+        sidecar_health = await asyncio.to_thread(
+            _fetch_ingest_sidecar_health,
+            settings.ingest_sidecar_port,
+        )
     diagnostics["sidecar"] = {
         "enabled": settings.ingest_sidecar_enabled,
         "status": sidecar_state.status if sidecar_state is not None else (
@@ -1508,6 +1592,7 @@ async def get_system_diagnostics(request: Request) -> dict:
         "restart_count": sidecar_state.restart_count if sidecar_state is not None else 0,
         "last_exit_code": sidecar_state.last_exit_code if sidecar_state is not None else None,
         "failed_spool_items": failed_spool_count,
+        "health": sidecar_health,
     }
     return diagnostics
 

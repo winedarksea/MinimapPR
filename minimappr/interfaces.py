@@ -152,6 +152,21 @@ class StorageBackend(Protocol):
     ) -> str:
         ...
 
+    async def insert_large_artifact(
+        self,
+        *,
+        artifact_type: str,
+        path: str,
+        retention_tier: str,
+        source_detection_id: str | None,
+        source_track_id: str | None,
+        created_ns: int,
+        expires_ns: int | None,
+        metadata: dict[str, Any] | None = None,
+        artifact_id: str | None = None,
+    ) -> str:
+        ...
+
     async def upsert_label(
         self,
         *,

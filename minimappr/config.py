@@ -292,10 +292,14 @@ class Settings:
     ingest_spool_tmp_ttl_seconds: float = 300.0
     ingest_spool_poll_interval_seconds: float = 0.05
     ingest_spool_worker_count: int = 1
+    ingest_storage_mode: str = "spool"
+    ingest_consumer_name: str = "python-ingest"
     direct_ingest_enabled: bool = True
     ingest_sidecar_enabled: bool = True
     ingest_sidecar_binary_path: Path = Path("dist/minimappr-ingest-sidecar")
     ingest_sidecar_port: int = 8081
+    ingest_sidecar_total_journal_budget_bytes: int = 268_435_456
+    ingest_sidecar_admission_reserve_bytes: int = 16_777_216
     retention_policy_path: Path = Path("data/retention_policy.json")
     rules_config_path: Path = DEFAULT_RULES_CONFIG_PATH
     taxonomy_config_path: Path = Path("data/taxonomy.json")
@@ -471,6 +475,20 @@ class Settings:
             raise ValueError("MINIMAPPR_INGEST_SPOOL_POLL_INTERVAL_SECONDS must be > 0")
         if self.ingest_spool_worker_count < 1:
             raise ValueError("MINIMAPPR_INGEST_SPOOL_WORKER_COUNT must be >= 1")
+        if not self.ingest_consumer_name.strip():
+            raise ValueError("MINIMAPPR_INGEST_CONSUMER_NAME must not be blank")
+        if self.ingest_sidecar_total_journal_budget_bytes < 0:
+            raise ValueError("MINIMAPPR_SIDECAR_TOTAL_JOURNAL_BUDGET_BYTES must be >= 0")
+        if self.ingest_sidecar_admission_reserve_bytes < 0:
+            raise ValueError("MINIMAPPR_SIDECAR_ADMISSION_RESERVE_BYTES must be >= 0")
+        if (
+            self.ingest_sidecar_total_journal_budget_bytes > 0
+            and self.ingest_sidecar_admission_reserve_bytes >= self.ingest_sidecar_total_journal_budget_bytes
+        ):
+            raise ValueError(
+                "MINIMAPPR_SIDECAR_ADMISSION_RESERVE_BYTES must be smaller than "
+                "MINIMAPPR_SIDECAR_TOTAL_JOURNAL_BUDGET_BYTES"
+            )
         if self.min_sensors_for_2d < 2:
             raise ValueError("MINIMAPPR_MIN_SENSORS_FOR_2D must be >= 2")
         if self.min_sensors_for_3d < self.min_sensors_for_2d:
@@ -680,6 +698,11 @@ class Settings:
             raw_json=os.getenv("MINIMAPPR_FEDERATION_PEERS_JSON"),
             config_path=peers_config_path,
         )
+        ingest_storage_mode = _env_str("MINIMAPPR_INGEST_STORAGE_MODE", "spool").strip().lower()
+        if ingest_storage_mode not in {"spool", "journal"}:
+            raise ValueError(
+                "MINIMAPPR_INGEST_STORAGE_MODE must be one of {'spool', 'journal'}"
+            )
         return cls(
             runtime_profile=_env_str("MINIMAPPR_RUNTIME_PROFILE", "default"),
             host=_env_str("MINIMAPPR_HOST", "0.0.0.0"),
@@ -693,12 +716,20 @@ class Settings:
             ingest_spool_tmp_ttl_seconds=_env_float("MINIMAPPR_INGEST_SPOOL_TMP_TTL_SECONDS", 300.0),
             ingest_spool_poll_interval_seconds=_env_float("MINIMAPPR_INGEST_SPOOL_POLL_INTERVAL_SECONDS", 0.05),
             ingest_spool_worker_count=_env_int("MINIMAPPR_INGEST_SPOOL_WORKER_COUNT", 1),
+            ingest_storage_mode=ingest_storage_mode,
+            ingest_consumer_name=_env_str("MINIMAPPR_INGEST_CONSUMER_NAME", "python-ingest"),
             direct_ingest_enabled=_env_bool("MINIMAPPR_DIRECT_INGEST_ENABLED", True),
             ingest_sidecar_enabled=_env_bool("MINIMAPPR_INGEST_SIDECAR_ENABLED", True),
             ingest_sidecar_binary_path=Path(
                 _env_str("MINIMAPPR_INGEST_SIDECAR_BINARY_PATH", "dist/minimappr-ingest-sidecar")
             ),
             ingest_sidecar_port=_env_int("MINIMAPPR_SIDECAR_PORT", 8081),
+            ingest_sidecar_total_journal_budget_bytes=_env_int(
+                "MINIMAPPR_SIDECAR_TOTAL_JOURNAL_BUDGET_BYTES", 268_435_456
+            ),
+            ingest_sidecar_admission_reserve_bytes=_env_int(
+                "MINIMAPPR_SIDECAR_ADMISSION_RESERVE_BYTES", 16_777_216
+            ),
             retention_policy_path=Path(_env_str("MINIMAPPR_RETENTION_POLICY_PATH", "data/retention_policy.json")),
             rules_config_path=Path(_env_str("MINIMAPPR_RULES_CONFIG_PATH", "data/rules.json")),
             taxonomy_config_path=Path(_env_str("MINIMAPPR_TAXONOMY_CONFIG_PATH", "data/taxonomy.json")),
