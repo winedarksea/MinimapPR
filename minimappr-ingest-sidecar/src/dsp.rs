@@ -102,6 +102,45 @@ impl SensorStreamBuffer {
         }
 
         let incoming_end = incoming_start + samples.len() as i64;
+
+        // Fast path: append after current tail, optionally zero-filling a gap.
+        if incoming_start >= current_end {
+            let gap = (incoming_start - current_end) as usize;
+            if gap > 0 {
+                self.samples.extend(vec![0.0_f32; gap]);
+                self.coverage.extend(vec![false; gap]);
+            }
+            self.samples.extend_from_slice(samples);
+            self.coverage.extend(vec![true; samples.len()]);
+            self.prune();
+            return Ok(());
+        }
+
+        // Fast path: incoming frame is fully inside current buffer bounds.
+        if incoming_start >= current_start && incoming_end <= current_end {
+            let offset = (incoming_start - current_start) as usize;
+            self.samples[offset..offset + samples.len()].copy_from_slice(samples);
+            self.coverage[offset..offset + samples.len()].fill(true);
+            return Ok(());
+        }
+
+        // Fast path: overlap tail then extend past current end.
+        if incoming_start >= current_start
+            && incoming_start < current_end
+            && incoming_end > current_end
+        {
+            let offset = (incoming_start - current_start) as usize;
+            let overlap_len = (current_end - incoming_start) as usize;
+            self.samples[offset..offset + overlap_len].copy_from_slice(&samples[..overlap_len]);
+            self.coverage[offset..offset + overlap_len].fill(true);
+            self.samples.extend_from_slice(&samples[overlap_len..]);
+            self.coverage
+                .extend(vec![true; samples.len().saturating_sub(overlap_len)]);
+            self.prune();
+            return Ok(());
+        }
+
+        // Fallback path for prepend and complex overlap patterns.
         let merged_start = current_start.min(incoming_start);
         let merged_end = current_end.max(incoming_end);
         let mut merged = vec![0.0_f32; (merged_end - merged_start) as usize];
@@ -540,7 +579,9 @@ mod tests {
         let sr = 16_000_u32;
         let t0 = 1_000_000_000_000_000_000_i128;
         let mut buffer = SensorStreamBuffer::new(sr, 5.0);
-        buffer.append(t0, &[1.0_f32; 2_048], Some(0), Some(2_048)).unwrap();
+        buffer
+            .append(t0, &[1.0_f32; 2_048], Some(0), Some(2_048))
+            .unwrap();
 
         let early_end_time_ns = t0 - 1_000_000_000_i128;
         assert!(
@@ -554,7 +595,9 @@ mod tests {
         let sr = 16_000_u32;
         let t0 = 1_000_000_000_000_000_000_i128;
         let mut buffer = SensorStreamBuffer::new(sr, 5.0);
-        buffer.append(t0, &[1.0_f32; 2_048], Some(0), Some(2_048)).unwrap();
+        buffer
+            .append(t0, &[1.0_f32; 2_048], Some(0), Some(2_048))
+            .unwrap();
 
         let early_end_time_ns = t0 - 1_000_000_000_i128;
         assert!(

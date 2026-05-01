@@ -1327,14 +1327,17 @@ async def test_fusion_ingests_rust_localized_render_directly(tmp_path: Path) -> 
     assert detection["feature_summary"]["rust_render_kind"] == "birdnet_hybrid_spatial_blend"
     assert tuple(detection["position_m"]) == pytest.approx((1.5, -0.5, 0.0))
 
+    nodes = await storage.list_nodes(limit=10)
+    assert nodes == []
+
     sensor_descriptors = await fusion.registry.sensors_for_node(node.id)
     summary = await buffer.summarize_sensors(
         sensor_ids=[descriptor.sensor_id for descriptor in sensor_descriptors],
         now_ns=1_739_950_000_000_000_000,
     )
-    assert summary["active_sensor_count"] == 1
-    assert summary["sample_rate_hz"] == 48_000
-    assert summary["rms"] is not None
+    assert summary["active_sensor_count"] == 0
+    assert summary["sample_rate_hz"] is None
+    assert summary["rms"] is None
 
     await fusion.stop()
     await storage.close()

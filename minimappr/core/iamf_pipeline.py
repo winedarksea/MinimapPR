@@ -2,22 +2,30 @@
 
 Executes the "studio render" background job for a completed capture session:
 
-  1. Extract  — fetch ordered journal segments via Rust /api/v1/journal/range
+  1. Extract  — fetch ordered journal segments via Rust /api/v1/journal/range;
+                trim to start_ns/end_ns by TOA; zero-pad gaps; capture rate
+                is read from segment headers (dynamic, not hardcoded).
   2. Matrix   — frequency-domain A-to-B conversion → bed_full.wav
   3. Isolate  — query DB for tracks; MVDR beamform each → object_{id}.wav
-  4. Subtract — B_clean = B_full − Σ Y_obj·O (re-encode each object to B-fmt
-                and subtract) → bed.wav; delete bed_full.wav
-  5. Measure  — BS.1770-4 integrated loudness + True Peak on bed (W-channel)
-                and each object track
-  6. Metadata — map MinimapPR position_m → listener-relative spherical coords
-  7. Encode   — POST to Rust /api/v1/capture/encode/iamf → audio.iamf;
-                also export 4-channel AmbiX WAV for YouTube mux
-  8. Multiplex— ffmpeg: output_raw.mp4 + ambix.wav → youtube_export.mp4
-  9. Cleanup  — remove intermediate files on success
-  10. Register — move final files to artifacts dir, insert large_artifacts DB row
+  4. Subtract — B_clean = B_full − Σ Y_obj·O (block-based, time-varying
+                steering per SAMPLES_PER_FRAME-block) → bed.wav
+  5. Resample — upsample bed + objects to OUTPUT_RATE_HZ with polyphase filter
+  6. Measure  — BS.1770-4 integrated loudness + True Peak at OUTPUT_RATE_HZ
+  7. Metadata — map MinimapPR position_m → listener-relative spherical coords
+  8. Encode   — POST to Rust /api/v1/capture/encode/iamf → audio.iamf
+  9. Multiplex— primary: ffmpeg mux video + audio.iamf → youtube_export.mp4
+                (IAMF/Eclipsa); fallback: AmbiX WAV + AAC if FFmpeg lacks
+                IAMF support.
+ 10. Cleanup  — remove intermediate files on success
+ 11. Register — move final files to artifacts dir, insert large_artifacts row
+                via insert_large_artifact_for_session with sync diagnostics.
 
-All CPU-intensive work runs in a dedicated executor pool to keep the async
-event loop responsive.
+TODO (requires Rust sidecar endpoint changes): Replace inline JSON channel
+arrays in _mvdr_beamform and _encode_iamf with file-path-based IPC (write WAV
+to work_dir, POST path). Full multiminute arrays saturate Pi RAM at ~150 MB
+of JSON for a 5-minute 16 kHz capture.
+Note that we never want the raw real-time audio path for MinimapPR writing to disk.
+Only this record method is allowed to write to disk raw audio.
 """
 
 from __future__ import annotations
@@ -25,25 +33,28 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-import struct
 import time
 import wave
 from dataclasses import dataclass
+from math import gcd
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Optional
 
 import httpx
 import numpy as np
 from numpy.typing import NDArray
+from scipy.signal import resample_poly
 
 from minimappr.core.ambi_atob import atob_foa, encode_mono_to_bformat
 from minimappr.core.capture_session import CaptureSessionRecord
+from minimappr.core.iamf_object_slot import IamfObjectSlot, select_iamf_object_slot
 
 logger = logging.getLogger(__name__)
 
-SAMPLE_RATE_HZ = 16_000      # Raw journal sample rate
-OUTPUT_RATE_HZ = 48_000      # Target output sample rate for IAMF
-SAMPLES_PER_FRAME = 512      # IAMF codec frame size (= 512 @ 48 kHz)
+SAMPLE_RATE_HZ = 16_000      # Default fallback; actual rate read from segment headers
+OUTPUT_RATE_HZ = 48_000      # Target rate for IAMF encode, loudness, and WAV output
+SAMPLES_PER_FRAME = 512      # IAMF codec frame size at OUTPUT_RATE_HZ
+SUBTRACT_BLOCK = 512         # Block size (at capture rate) for time-varying subtraction
 ARTIFACTS_DIR = Path("data/artifacts")
 
 
@@ -53,13 +64,25 @@ ARTIFACTS_DIR = Path("data/artifacts")
 class TrackTrajectory:
     track_id: str
     waypoints: list[tuple[int, tuple[float, float, float]]]
-    """List of (sample_offset, (x, y, z)) waypoints."""
+    """List of (sample_offset, (x, y, z)) waypoints at the capture sample rate."""
+    tqi: float = 0.0
+    label_confidence: float = 0.0
+    localization_confidence: float = 0.0
 
 
 @dataclass
 class LoudnessMeasurement:
     integrated_lufs: float
     true_peak_dbfs: float
+
+
+@dataclass(frozen=True)
+class RecordingSource:
+    stream_key: str
+    channel_count: int
+    sample_rate_hz: int
+    role: str
+    coverage_ratio: float
 
 
 # ── Pipeline ──────────────────────────────────────────────────────────────────
@@ -90,64 +113,139 @@ class IamfPipeline:
         start_ns = record.first_frame_pts_ns
         end_ns = record.end_time_ns
 
+        loop = asyncio.get_event_loop()
+
         # ── 1. Extract ────────────────────────────────────────────────────────
         logger.info("[%s] step 1: extracting journal range", record.session_id[:8])
-        raw_channels = await self._extract_audio(record.stream_key, start_ns, end_ns)
+        raw_channels, capture_rate_hz, sync_diag = await self._extract_audio(
+            record.stream_key, start_ns, end_ns
+        )
+        source_inventory = _build_recording_source_inventory(
+            record.stream_key,
+            channel_count=int(raw_channels.shape[0]),
+            sample_rate_hz=capture_rate_hz,
+            n_samples=int(raw_channels.shape[1]),
+            start_ns=start_ns,
+            end_ns=end_ns,
+        )
+        sync_diag["recording_sources"] = [
+            {
+                "stream_key": source.stream_key,
+                "channel_count": source.channel_count,
+                "sample_rate_hz": source.sample_rate_hz,
+                "role": source.role,
+                "coverage_ratio": source.coverage_ratio,
+            }
+            for source in source_inventory
+        ]
 
         # ── 2. A-to-B matrix ─────────────────────────────────────────────────
         logger.info("[%s] step 2: A-to-B ambisonics matrix", record.session_id[:8])
-        bed_full = await asyncio.get_event_loop().run_in_executor(
-            None, atob_foa, raw_channels, SAMPLE_RATE_HZ
+        bed_full = await loop.run_in_executor(
+            None, atob_foa, raw_channels, capture_rate_hz
         )
         bed_full_path = work_dir / "bed_full.wav"
-        _write_wav(bed_full_path, bed_full, SAMPLE_RATE_HZ)
+        _write_wav(bed_full_path, bed_full, capture_rate_hz)
 
         # ── 3. Object isolation (MVDR) ────────────────────────────────────────
         logger.info("[%s] step 3: MVDR object isolation", record.session_id[:8])
-        trajectories = await self._query_trajectories(start_ns, end_ns, raw_channels.shape[1])
+        n_capture_samples = raw_channels.shape[1]
+        trajectories = await self._query_trajectories(
+            start_ns, end_ns, n_capture_samples, capture_rate_hz
+        )
         object_tracks: dict[str, NDArray[np.float32]] = {}
         for traj in trajectories:
-            mono = await self._mvdr_beamform(raw_channels, traj)
+            mono = await self._mvdr_beamform(raw_channels, traj, capture_rate_hz)
             obj_path = work_dir / f"object_{traj.track_id}.wav"
-            _write_wav_mono(obj_path, mono, SAMPLE_RATE_HZ)
+            _write_wav_mono(obj_path, mono, capture_rate_hz)
             object_tracks[traj.track_id] = mono
 
-        # ── 4. Spatial subtraction ────────────────────────────────────────────
-        logger.info("[%s] step 4: spatial subtraction", record.session_id[:8])
-        bed_clean = await asyncio.get_event_loop().run_in_executor(
-            None,
-            _subtract_objects,
-            bed_full,
-            object_tracks,
-            trajectories,
-            raw_channels.shape[1],
+        # ── 4. Select one YouTube-compatible IAMF object slot ─────────────────
+        logger.info("[%s] step 4: selecting IAMF object slot", record.session_id[:8])
+        capture_samples_per_unit = max(
+            1, int(round(capture_rate_hz * SAMPLES_PER_FRAME / OUTPUT_RATE_HZ))
         )
-        bed_path = work_dir / "bed.wav"
-        _write_wav(bed_path, bed_clean, SAMPLE_RATE_HZ)
+        capture_slot = select_iamf_object_slot(
+            trajectories,
+            object_tracks,
+            n_capture_samples,
+            capture_samples_per_unit,
+            sample_rate_hz=capture_rate_hz,
+        )
+
+        selected_owner_ids = (
+            {tid for tid in capture_slot.unit_track_ids if tid is not None}
+            if capture_slot is not None
+            else set()
+        )
+        selected_trajectories = (
+            [traj for traj in trajectories if traj.track_id in selected_owner_ids]
+            if capture_slot is not None
+            else []
+        )
+
+        # ── 5. Spatial subtraction of only the active IAMF object slot ─────────
+        logger.info("[%s] step 4: spatial subtraction", record.session_id[:8])
+        bed_clean_capture = await loop.run_in_executor(
+            None,
+            _subtract_object_slot,
+            bed_full,
+            capture_slot,
+            capture_samples_per_unit,
+            n_capture_samples,
+        )
         bed_full_path.unlink(missing_ok=True)
 
-        # ── 5. BS.1770-4 loudness measurement ────────────────────────────────
-        logger.info("[%s] step 5: loudness measurement", record.session_id[:8])
-        bed_loudness = await asyncio.get_event_loop().run_in_executor(
-            None, _measure_loudness, bed_clean[0], SAMPLE_RATE_HZ
+        # ── 6. Resample bed + selected object to OUTPUT_RATE_HZ ───────────────
+        logger.info("[%s] step 5: resampling to %d Hz", record.session_id[:8], OUTPUT_RATE_HZ)
+        if capture_rate_hz != OUTPUT_RATE_HZ:
+            bed_clean = await loop.run_in_executor(
+                None, _resample, bed_clean_capture, capture_rate_hz, OUTPUT_RATE_HZ
+            )
+            resampled_objects: dict[str, NDArray[np.float32]] = {}
+            for tid in selected_owner_ids:
+                mono = object_tracks[tid]
+                resampled_objects[tid] = await loop.run_in_executor(
+                    None, _resample, mono[np.newaxis, :], capture_rate_hz, OUTPUT_RATE_HZ
+                )
+                resampled_objects[tid] = resampled_objects[tid][0]
+        else:
+            bed_clean = bed_clean_capture
+            resampled_objects = {tid: object_tracks[tid] for tid in selected_owner_ids}
+
+        bed_path = work_dir / "bed.wav"
+        _write_wav(bed_path, bed_clean, OUTPUT_RATE_HZ)
+
+        # ── 7. IAMF metadata (waypoints scaled to OUTPUT_RATE_HZ domain) ──────
+        logger.info("[%s] step 7: building IAMF metadata", record.session_id[:8])
+        n_output_samples = bed_clean.shape[1]
+        output_trajectories = _scale_trajectory_waypoints(
+            selected_trajectories, capture_rate_hz, OUTPUT_RATE_HZ
+        )
+        output_slot = select_iamf_object_slot(
+            output_trajectories,
+            resampled_objects,
+            n_output_samples,
+            SAMPLES_PER_FRAME,
+            sample_rate_hz=OUTPUT_RATE_HZ,
+        )
+        positions_per_unit = output_slot.positions_per_unit if output_slot is not None else []
+
+        # ── 8. BS.1770-4 loudness measurement at OUTPUT_RATE_HZ ──────────────
+        logger.info("[%s] step 6: loudness measurement", record.session_id[:8])
+        bed_loudness = await loop.run_in_executor(
+            None, _measure_loudness, bed_clean[0], OUTPUT_RATE_HZ
         )
         object_loudness = []
-        for mono in object_tracks.values():
-            lm = await asyncio.get_event_loop().run_in_executor(
-                None, _measure_loudness, mono, SAMPLE_RATE_HZ
+        if output_slot is not None:
+            lm = await loop.run_in_executor(
+                None, _measure_loudness, output_slot.samples, OUTPUT_RATE_HZ
             )
             object_loudness.append(lm)
 
-        # ── 6. Metadata: position waypoints per temporal unit ─────────────────
-        logger.info("[%s] step 6: building IAMF metadata", record.session_id[:8])
-        n_samples_out = bed_clean.shape[1]
-        positions_per_unit = _build_positions_per_unit(
-            trajectories, n_samples_out, SAMPLES_PER_FRAME
-        )
-
-        # ── 7. Encode IAMF + AmbiX WAV ────────────────────────────────────────
-        logger.info("[%s] step 7: IAMF encode", record.session_id[:8])
-        object_track_list = list(object_tracks.values())
+        # ── 9. Encode IAMF ────────────────────────────────────────────────────
+        logger.info("[%s] step 8: IAMF encode", record.session_id[:8])
+        object_track_list = [output_slot.samples] if output_slot is not None else []
         iamf_bytes = await self._encode_iamf(
             bed_clean,
             object_track_list,
@@ -159,28 +257,37 @@ class IamfPipeline:
         iamf_path.write_bytes(iamf_bytes)
         record.iamf_path = iamf_path
 
-        # AmbiX WAV: 4-channel W/X/Y/Z for YouTube mux.
+        # AmbiX WAV: 4-channel W/X/Y/Z at OUTPUT_RATE_HZ for fallback mux.
         ambix_path = work_dir / "ambix.wav"
-        _write_wav(ambix_path, bed_clean, SAMPLE_RATE_HZ)
+        _write_wav(ambix_path, bed_clean, OUTPUT_RATE_HZ)
 
-        # ── 8. Multiplex video + AmbiX ────────────────────────────────────────
+        # ── 10. Multiplex video + IAMF (primary) or AmbiX+AAC (fallback) ──────
         if record.video_path and record.video_path.exists():
-            logger.info("[%s] step 8: ffmpeg mux", record.session_id[:8])
+            logger.info("[%s] step 9: ffmpeg mux", record.session_id[:8])
             youtube_path = work_dir / "youtube_export.mp4"
-            await _ffmpeg_mux(record.video_path, ambix_path, youtube_path)
+            video_audio_offset_s = (
+                sync_diag.get("actual_audio_start_ns", start_ns) - start_ns
+            ) / 1e9
+            await _ffmpeg_mux(
+                record.video_path,
+                iamf_path,
+                ambix_path,
+                youtube_path,
+                video_audio_offset_s=video_audio_offset_s,
+            )
             record.youtube_path = youtube_path
         else:
-            logger.warning("[%s] step 8: no video file; skipping mux", record.session_id[:8])
+            logger.warning("[%s] step 9: no video file; skipping mux", record.session_id[:8])
 
-        # ── 9. Cleanup intermediates ──────────────────────────────────────────
-        logger.info("[%s] step 9: cleanup intermediates", record.session_id[:8])
+        # ── 11. Cleanup intermediates ─────────────────────────────────────────
+        logger.info("[%s] step 10: cleanup intermediates", record.session_id[:8])
         for f in [bed_path, ambix_path] + [
             work_dir / f"object_{tid}.wav" for tid in object_tracks
         ]:
             f.unlink(missing_ok=True)
 
-        # ── 10. Register artifacts ────────────────────────────────────────────
-        logger.info("[%s] step 10: registering artifacts", record.session_id[:8])
+        # ── 12. Register artifacts ────────────────────────────────────────────
+        logger.info("[%s] step 11: registering artifacts", record.session_id[:8])
         artifacts_dir = ARTIFACTS_DIR
         artifacts_dir.mkdir(parents=True, exist_ok=True)
 
@@ -193,15 +300,17 @@ class IamfPipeline:
             record.youtube_path.replace(final_mp4)
             record.youtube_path = final_mp4
 
-        await self._register_artifact(record)
+        await self._register_artifact(record, sync_diag)
         logger.info("[%s] pipeline complete", record.session_id[:8])
 
     # ── private helpers ────────────────────────────────────────────────────────
 
     async def _extract_audio(
         self, stream_key: str, start_ns: int, end_ns: int
-    ) -> NDArray[np.float32]:
-        """Fetch ordered journal segments and assemble 4-channel float PCM."""
+    ) -> tuple[NDArray[np.float32], int, dict]:
+        """Fetch ordered journal segments, trim to [start_ns, end_ns] by TOA,
+        zero-pad gaps, and return (channels, capture_rate_hz, sync_diagnostics).
+        """
         resp = await self._http.get(
             f"{self._sidecar_url}/api/v1/journal/range",
             params={"stream_key": stream_key, "start_ns": start_ns, "end_ns": end_ns},
@@ -209,23 +318,85 @@ class IamfPipeline:
         resp.raise_for_status()
         segments = resp.json()
 
-        pcm_chunks: list[NDArray[np.float32]] = []
+        if not segments:
+            raise RuntimeError("no audio segments found for time range")
+
+        # Determine capture rate from first segment with a known rate.
+        capture_rate_hz = SAMPLE_RATE_HZ
         for seg in segments:
+            if seg.get("sample_rate_hz"):
+                capture_rate_hz = int(seg["sample_rate_hz"])
+                break
+
+        pcm_chunks: list[NDArray[np.float32]] = []
+        expected_ns = start_ns  # next ns we expect audio to cover
+
+        for seg in segments:
+            seg_first_ns: int = seg.get("first_toa_ns") or start_ns
+            seg_last_ns: int = seg.get("last_toa_ns") or end_ns
+            seg_rate: int = int(seg.get("sample_rate_hz") or capture_rate_hz)
+
             seg_path = Path(seg["segment_path"])
             if not seg_path.exists():
                 logger.warning("segment not found: %s", seg_path)
                 continue
+
             raw = seg_path.read_bytes()
-            pcm = _decode_pcm16le_4ch(raw)
-            pcm_chunks.append(pcm)
+            pcm = _decode_pcm16le_4ch(raw)  # (4, N) at seg_rate
+
+            # Zero-pad gap between previous segment end and this segment start.
+            if seg_first_ns > expected_ns:
+                gap_ns = seg_first_ns - expected_ns
+                gap_samples = max(0, int(gap_ns * seg_rate / 1_000_000_000))
+                if gap_samples > 0:
+                    logger.warning(
+                        "gap-filling %d samples (%.1f ms) at %d ns",
+                        gap_samples, gap_ns / 1e6, expected_ns,
+                    )
+                    pcm_chunks.append(np.zeros((4, gap_samples), dtype=np.float32))
+
+            # Trim leading samples if segment starts before start_ns.
+            if seg_first_ns < start_ns:
+                trim_ns = start_ns - seg_first_ns
+                trim_samples = int(trim_ns * seg_rate / 1_000_000_000)
+                pcm = pcm[:, trim_samples:]
+                seg_first_ns = start_ns
+
+            # Trim trailing samples if segment extends beyond end_ns.
+            if seg_last_ns > end_ns:
+                keep_ns = end_ns - seg_first_ns
+                keep_samples = max(0, int(keep_ns * seg_rate / 1_000_000_000))
+                pcm = pcm[:, :keep_samples]
+                seg_last_ns = end_ns
+
+            if pcm.shape[1] > 0:
+                pcm_chunks.append(pcm)
+
+            expected_ns = max(expected_ns, seg_last_ns)
 
         if not pcm_chunks:
-            raise RuntimeError("no audio segments found for time range")
+            raise RuntimeError("no audio data after segment trimming")
 
-        return np.concatenate(pcm_chunks, axis=1)
+        channels = np.concatenate(pcm_chunks, axis=1)
+
+        sync_diag: dict = {
+            "requested_start_ns": start_ns,
+            "requested_end_ns": end_ns,
+            "actual_audio_start_ns": start_ns,
+            "actual_audio_end_ns": int(expected_ns),
+            "capture_rate_hz": capture_rate_hz,
+            "n_segments": len(segments),
+            "n_samples": int(channels.shape[1]),
+        }
+
+        return channels, capture_rate_hz, sync_diag
 
     async def _query_trajectories(
-        self, start_ns: int, end_ns: int, total_samples: int
+        self,
+        start_ns: int,
+        end_ns: int,
+        total_samples: int,
+        capture_rate_hz: int,
     ) -> list[TrackTrajectory]:
         """Query the DB for confirmed tracks within the recording window."""
         if self._db is None:
@@ -241,29 +412,62 @@ class IamfPipeline:
             track_id = row["track_id"]
             detections = await self._db.query_detections_for_track(track_id, start_ns, end_ns)
             waypoints: list[tuple[int, tuple[float, float, float]]] = []
+            label_confidences: list[float] = []
+            localization_confidences: list[float] = []
             for det in detections:
-                # Convert detection timestamp to sample offset from start_ns.
                 det_ns = det.get("toa_ns", det.get("timestamp_ns", start_ns))
-                sample_offset = int((det_ns - start_ns) * SAMPLE_RATE_HZ / 1e9)
+                sample_offset = int((det_ns - start_ns) * capture_rate_hz / 1_000_000_000)
                 sample_offset = max(0, min(total_samples - 1, sample_offset))
                 pos = (det.get("x", 0.0), det.get("y", 0.0), det.get("z", 0.0))
                 waypoints.append((sample_offset, pos))
+                label_confidences.append(float(det.get("label_confidence") or 0.0))
+                localization_confidences.append(float(det.get("confidence") or 0.0))
             if waypoints:
-                trajectories.append(TrackTrajectory(track_id=track_id, waypoints=waypoints))
+                trajectories.append(
+                    TrackTrajectory(
+                        track_id=track_id,
+                        waypoints=waypoints,
+                        tqi=float(row.get("tqi") or 0.0),
+                        label_confidence=(
+                            float(np.mean(label_confidences)) if label_confidences else 0.0
+                        ),
+                        localization_confidence=(
+                            float(np.mean(localization_confidences))
+                            if localization_confidences
+                            else 0.0
+                        ),
+                    )
+                )
 
         return trajectories
 
     async def _mvdr_beamform(
-        self, channels: NDArray[np.float32], traj: TrackTrajectory
+        self,
+        channels: NDArray[np.float32],
+        traj: TrackTrajectory,
+        capture_rate_hz: int,
     ) -> NDArray[np.float32]:
-        """Call the Rust MVDR endpoint for one track trajectory."""
+        """Call the Rust MVDR endpoint for one track trajectory.
+
+        NOTE: Channels are serialized as JSON here, which is RAM-intensive for
+        long recordings (~150 MB JSON for 5 min × 16 kHz × 4 ch). A future
+        Rust endpoint change to accept WAV file paths is needed for Pi safety.
+        """
+        n_samples = channels.shape[1]
+        estimated_json_mb = n_samples * 4 * 8 / 1_000_000  # ~8 bytes per float in JSON
+        if estimated_json_mb > 50:
+            logger.warning(
+                "MVDR payload ~%.0f MB; consider file-based IPC for long sessions",
+                estimated_json_mb,
+            )
+
         waypoints_dto = [
             {"sample_offset": s, "position_m": list(pos)}
             for s, pos in traj.waypoints
         ]
         payload = {
             "channels": [ch.tolist() for ch in channels],
-            "sample_rate_hz": SAMPLE_RATE_HZ,
+            "sample_rate_hz": capture_rate_hz,
             "trajectory": waypoints_dto,
         }
         resp = await self._http.post(
@@ -282,8 +486,14 @@ class IamfPipeline:
         bed_loudness: LoudnessMeasurement,
         object_loudness: list[LoudnessMeasurement],
     ) -> bytes:
+        """POST bed + objects to the Rust IAMF encoder.
+
+        NOTE: Audio is serialized as JSON here (same large-payload caveat as
+        _mvdr_beamform). A future Rust endpoint change to accept WAV paths is
+        needed for Pi safety with long recordings.
+        """
         payload = {
-            "sample_rate_hz": SAMPLE_RATE_HZ,
+            "sample_rate_hz": OUTPUT_RATE_HZ,
             "samples_per_frame": SAMPLES_PER_FRAME,
             "bed_loudness": {
                 "integrated_loudness_lufs": bed_loudness.integrated_lufs,
@@ -310,11 +520,13 @@ class IamfPipeline:
         resp.raise_for_status()
         return resp.content
 
-    async def _register_artifact(self, record: CaptureSessionRecord) -> None:
+    async def _register_artifact(
+        self, record: CaptureSessionRecord, sync_diag: dict
+    ) -> None:
         if self._db is None:
             return
         try:
-            await self._db.insert_large_artifact(
+            await self._db.insert_large_artifact_for_session(
                 session_id=record.session_id,
                 artifact_type="iamf_video",
                 iamf_path=str(record.iamf_path) if record.iamf_path else None,
@@ -322,10 +534,47 @@ class IamfPipeline:
                 created_ns=time.time_ns(),
             )
         except Exception as exc:
-            logger.warning("artifact registration failed: %s", exc)
+            logger.error("artifact registration failed: %s", exc)
 
 
 # ── Pure-Python DSP helpers ───────────────────────────────────────────────────
+
+def _subtract_object_slot(
+    bed_full: NDArray[np.float32],
+    slot: IamfObjectSlot | None,
+    samples_per_unit: int,
+    n_samples: int,
+) -> NDArray[np.float32]:
+    """Remove only the selected IAMF object slot from the Ambisonic bed."""
+    if slot is None:
+        return bed_full.astype(np.float32).copy()
+
+    bed = bed_full.astype(np.float64).copy()
+    samples_per_unit = max(1, samples_per_unit)
+    n = min(n_samples, slot.samples.shape[0])
+
+    for unit_idx, unit_positions in enumerate(slot.positions_per_unit):
+        pos = unit_positions.get(slot.slot_id)
+        if not pos:
+            continue
+        start = unit_idx * samples_per_unit
+        end = min(start + samples_per_unit, n)
+        if end <= start:
+            continue
+        azimuth_deg = 0.5 * (
+            float(pos["azimuth_deg"]) + float(pos.get("end_azimuth_deg", pos["azimuth_deg"]))
+        )
+        elevation_deg = 0.5 * (
+            float(pos["elevation_deg"]) + float(pos.get("end_elevation_deg", pos["elevation_deg"]))
+        )
+        block_bfmt = encode_mono_to_bformat(
+            slot.samples[start:end],
+            _spherical_to_unit_xyz(azimuth_deg, elevation_deg),
+        ).astype(np.float64)
+        bed[:, start:end] -= block_bfmt
+
+    return bed.astype(np.float32)
+
 
 def _subtract_objects(
     bed_full: NDArray[np.float32],
@@ -333,11 +582,11 @@ def _subtract_objects(
     trajectories: list[TrackTrajectory],
     n_samples: int,
 ) -> NDArray[np.float32]:
-    """B_clean(f) = B_full(f) − Σᵢ Y_obj_i(f) · O_i(f).
+    """B_clean(t) = B_full(t) − Σᵢ Y_obj_i(t) · O_i(t).
 
-    Re-encodes each beamformed object back into B-format coordinates and
-    subtracts from the full bed.  Because B-format encoding is linear,
-    this is exact.
+    Processes in SUBTRACT_BLOCK-sized blocks.  Within each block the steering
+    direction is interpolated from the track's waypoints, so the subtraction
+    tracks the actual acoustic trajectory rather than a static mean position.
     """
     traj_by_id = {t.track_id: t for t in trajectories}
     bed = bed_full.astype(np.float64).copy()
@@ -346,16 +595,76 @@ def _subtract_objects(
         traj = traj_by_id.get(track_id)
         if traj is None or not traj.waypoints:
             continue
-        # Use the mean position over the track as the steering direction.
-        positions = np.array([list(wp[1]) for wp in traj.waypoints], dtype=np.float64)
-        mean_pos = positions.mean(axis=0)
-        obj_bformat = encode_mono_to_bformat(
-            mono[:n_samples], tuple(mean_pos)  # type: ignore[arg-type]
-        )
-        n = min(bed.shape[1], obj_bformat.shape[1])
-        bed[:, :n] -= obj_bformat[:, :n].astype(np.float64)
+        n = min(n_samples, mono.shape[0])
+        for block_start in range(0, n, SUBTRACT_BLOCK):
+            block_end = min(block_start + SUBTRACT_BLOCK, n)
+            sample_mid = block_start + (block_end - block_start) // 2
+            pos = _interpolate_waypoints(traj.waypoints, sample_mid)
+            block_bfmt = encode_mono_to_bformat(
+                mono[block_start:block_end], pos
+            ).astype(np.float64)
+            bed[:, block_start:block_end] -= block_bfmt
 
-    return np.clip(bed, -1.0, 1.0).astype(np.float32)
+    return bed.astype(np.float32)
+
+
+def _build_recording_source_inventory(
+    stream_key: str,
+    *,
+    channel_count: int,
+    sample_rate_hz: int,
+    n_samples: int,
+    start_ns: int,
+    end_ns: int,
+) -> list[RecordingSource]:
+    """Describe timestamped sources available to the offline render.
+
+    v1 renders the Ambisonic scene from the primary Sirith stream. The inventory
+    keeps the interface explicit so cross-node object beamforming can add more
+    entries without changing the IAMF export contract.
+    """
+    requested_duration_s = max((end_ns - start_ns) / 1_000_000_000.0, 1e-9)
+    observed_duration_s = n_samples / max(sample_rate_hz, 1)
+    return [
+        RecordingSource(
+            stream_key=stream_key,
+            channel_count=channel_count,
+            sample_rate_hz=sample_rate_hz,
+            role="primary_scene_and_object_fallback",
+            coverage_ratio=float(np.clip(observed_duration_s / requested_duration_s, 0.0, 1.0)),
+        )
+    ]
+
+def _resample(
+    channels: NDArray[np.float32], from_hz: int, to_hz: int
+) -> NDArray[np.float32]:
+    """Polyphase resample a (C, N) or (1, N) array along axis 1."""
+    if from_hz == to_hz:
+        return channels
+    g = gcd(to_hz, from_hz)
+    up, down = to_hz // g, from_hz // g
+    return resample_poly(channels, up, down, axis=1).astype(np.float32)
+
+
+def _scale_trajectory_waypoints(
+    trajectories: list[TrackTrajectory],
+    from_hz: int,
+    to_hz: int,
+) -> list[TrackTrajectory]:
+    """Scale sample_offset waypoints from one sample rate domain to another."""
+    if from_hz == to_hz:
+        return trajectories
+    scale = to_hz / from_hz
+    return [
+        TrackTrajectory(
+            track_id=t.track_id,
+            waypoints=[(int(s * scale), pos) for s, pos in t.waypoints],
+            tqi=t.tqi,
+            label_confidence=t.label_confidence,
+            localization_confidence=t.localization_confidence,
+        )
+        for t in trajectories
+    ]
 
 
 def _measure_loudness(signal: NDArray, sample_rate_hz: int) -> LoudnessMeasurement:
@@ -367,11 +676,8 @@ def _measure_loudness(signal: NDArray, sample_rate_hz: int) -> LoudnessMeasureme
     """
     sig = np.asarray(signal, dtype=np.float64)
 
-    # ── K-weighting filter (ITU-R BS.1770-4 Table 2) ─────────────────────────
-    # Stage 1: pre-filter (shelf, fs=48000 → adjust for actual rate).
     sig_kw = _k_weight(sig, sample_rate_hz)
 
-    # ── Gating: 400 ms blocks, 75 % overlap, absolute threshold −70 LUFS ─────
     block_len = max(1, int(0.4 * sample_rate_hz))
     hop = max(1, block_len // 4)
     n = len(sig_kw)
@@ -386,7 +692,6 @@ def _measure_loudness(signal: NDArray, sample_rate_hz: int) -> LoudnessMeasureme
     if not mean_sq_blocks:
         return LoudnessMeasurement(integrated_lufs=-120.0, true_peak_dbfs=-120.0)
 
-    # Absolute gating threshold: mean square corresponding to −70 LUFS.
     abs_thresh_ms = 10 ** ((-70.0 - 0.691) / 10.0)
     gated = [ms for ms in mean_sq_blocks if ms > abs_thresh_ms]
     if not gated:
@@ -398,7 +703,6 @@ def _measure_loudness(signal: NDArray, sample_rate_hz: int) -> LoudnessMeasureme
     else:
         lufs = float(-0.691 + 10.0 * math.log10(integrated_ms))
 
-    # True peak: oversample 4× using linear interpolation as an approximation.
     true_peak_linear = float(np.max(np.abs(np.interp(
         np.linspace(0, len(sig) - 1, len(sig) * 4),
         np.arange(len(sig)),
@@ -410,14 +714,9 @@ def _measure_loudness(signal: NDArray, sample_rate_hz: int) -> LoudnessMeasureme
 
 
 def _k_weight(sig: NDArray[np.float64], sr: int) -> NDArray[np.float64]:
-    """Apply a two-stage K-weighting filter approximation.
+    """Apply ITU-R BS.1770-4 K-weighting (two-stage filter, coefficients spec-derived)."""
+    from scipy.signal import lfilter
 
-    Stage 1 is a high-shelf boost; stage 2 is a high-pass filter.
-    Coefficients taken from the BS.1770-4 specification, adjusted for `sr`.
-    """
-    from scipy.signal import lfilter, bilinear
-
-    # Stage 1: pre-filter (high-shelf, +4 dB above ~1.5 kHz).
     Vh = 1.58489319
     Vb = 1.25892541
     f0 = 1681.97441
@@ -430,7 +729,6 @@ def _k_weight(sig: NDArray[np.float64], sr: int) -> NDArray[np.float64]:
     a2 = (1 - K / Q + K ** 2) / (1 + K / Q + K ** 2)
     stage1 = lfilter([b0, b1, b2], [1.0, a1, a2], sig)
 
-    # Stage 2: high-pass at 38 Hz (revised RLB weighting).
     f0_hp = 38.13547
     Q_hp = 0.5003270
     K2 = math.tan(math.pi * f0_hp / sr)
@@ -447,26 +745,27 @@ def _build_positions_per_unit(
     n_samples: int,
     samples_per_frame: int,
 ) -> list[dict[int, dict]]:
-    """Build per-temporal-unit object position dictionaries.
-
-    For each frame index, interpolate each object's position from its
-    trajectory waypoints and convert to listener-relative spherical coords.
-    """
+    """Build per-temporal-unit object position dictionaries (in OUTPUT_RATE_HZ domain)."""
     n_frames = (n_samples + samples_per_frame - 1) // samples_per_frame
     positions_per_unit: list[dict[int, dict]] = [{} for _ in range(n_frames)]
 
     for obj_idx, traj in enumerate(trajectories):
         if not traj.waypoints:
             continue
-        waypoints = traj.waypoints
         for fi in range(n_frames):
-            sample_mid = fi * samples_per_frame + samples_per_frame // 2
-            pos_xyz = _interpolate_waypoints(waypoints, sample_mid)
-            az, el, dist = _xyz_to_spherical(pos_xyz)
+            sample_start = fi * samples_per_frame
+            sample_end = min(n_samples - 1, sample_start + samples_per_frame - 1)
+            start_xyz = _interpolate_waypoints(traj.waypoints, sample_start)
+            end_xyz = _interpolate_waypoints(traj.waypoints, sample_end)
+            az, el, dist = _xyz_to_spherical(start_xyz)
+            end_az, end_el, end_dist = _xyz_to_spherical(end_xyz)
             positions_per_unit[fi][obj_idx] = {
                 "azimuth_deg": az,
                 "elevation_deg": el,
-                "distance_m": dist,
+                "distance_norm": min(1.0, max(0.0, dist / 30.0)),
+                "end_azimuth_deg": end_az,
+                "end_elevation_deg": end_el,
+                "end_distance_norm": min(1.0, max(0.0, end_dist / 30.0)),
             }
 
     return positions_per_unit
@@ -507,6 +806,17 @@ def _xyz_to_spherical(
     return az, el, dist
 
 
+def _spherical_to_unit_xyz(azimuth_deg: float, elevation_deg: float) -> tuple[float, float, float]:
+    az = math.radians(azimuth_deg)
+    el = math.radians(elevation_deg)
+    cos_el = math.cos(el)
+    return (
+        cos_el * math.cos(az),
+        cos_el * math.sin(az),
+        math.sin(el),
+    )
+
+
 # ── WAV I/O helpers ───────────────────────────────────────────────────────────
 
 def _write_wav(path: Path, channels_first: NDArray, sample_rate_hz: int) -> None:
@@ -525,22 +835,106 @@ def _write_wav_mono(path: Path, samples: NDArray, sample_rate_hz: int) -> None:
 
 
 def _decode_pcm16le_4ch(raw: bytes) -> NDArray[np.float32]:
-    """Decode raw 4-channel PCM16LE bytes into a float (4, N) array."""
+    """Decode raw 4-channel interleaved PCM16LE bytes into float (4, N)."""
     samples = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
     if len(samples) % 4 != 0:
         samples = samples[: len(samples) - len(samples) % 4]
-    return samples.reshape(4, -1, order="F")  # channel-interleaved → channels-first
+    # Fortran order: first index (channel) varies fastest → correct for interleaved.
+    return samples.reshape(4, -1, order="F")
 
 
 # ── ffmpeg helpers ────────────────────────────────────────────────────────────
 
 async def _ffmpeg_mux(
-    video_path: Path, ambix_wav: Path, output_path: Path
+    video_path: Path,
+    iamf_path: Path,
+    ambix_wav: Path,
+    output_path: Path,
+    *,
+    video_audio_offset_s: float = 0.0,
 ) -> None:
-    """Mux raw video with AmbiX WAV into a YouTube-ready MP4."""
+    """Mux video with audio into a YouTube-ready MP4.
+
+    Primary path: embed the .iamf file directly (IAMF/Eclipsa codec string
+    iamf.001.001.* as required by YouTube Eclipsa verification). Requires
+    FFmpeg 6.1+. Falls back to AmbiX WAV + AAC if FFmpeg lacks IAMF support.
+
+    For full YouTube Eclipsa compliance the Rust IAMF encoder must produce
+    Opus-coded frames (codec string iamf.001.001.Opus). If it uses ipcm the
+    copy here will still produce a structurally valid IAMF-in-MP4, but
+    YouTube may reject it at the Eclipsa validation step.
+
+    The video_audio_offset_s corrects for the gap between the video
+    first-frame PTS anchor and the actual start of the extracted audio.
+    A positive value means audio starts after the video clock origin and
+    the audio stream is delayed by that amount in the output container.
+    """
+    iamf_success = await _try_iamf_mux(
+        video_path, iamf_path, output_path, video_audio_offset_s
+    )
+    if iamf_success:
+        logger.info("mux: IAMF-in-MP4 succeeded → %s", output_path.name)
+        return
+
+    logger.warning(
+        "mux: IAMF path failed; falling back to AmbiX+AAC → %s",
+        output_path.name,
+    )
+    await _ambix_aac_mux(video_path, ambix_wav, output_path, video_audio_offset_s)
+
+
+async def _try_iamf_mux(
+    video_path: Path,
+    iamf_path: Path,
+    output_path: Path,
+    offset_s: float,
+) -> bool:
+    """Attempt IAMF-in-MP4 mux; returns True on success."""
+    itsoffset_args: list[str] = []
+    if abs(offset_s) > 0.001:
+        itsoffset_args = ["-itsoffset", f"{offset_s:.6f}"]
+
     cmd = [
         "ffmpeg", "-y",
         "-i", str(video_path),
+        *itsoffset_args,
+        "-i", str(iamf_path),
+        "-map", "0:v", "-map", "1",
+        "-c:v", "copy", "-c:a", "copy",
+        str(output_path),
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        logger.debug(
+            "IAMF mux failed (rc=%d): %s",
+            proc.returncode,
+            stderr.decode(errors="replace")[-300:],
+        )
+        output_path.unlink(missing_ok=True)
+        return False
+    return True
+
+
+async def _ambix_aac_mux(
+    video_path: Path,
+    ambix_wav: Path,
+    output_path: Path,
+    offset_s: float,
+) -> None:
+    """Fallback mux: 4-channel AmbiX WAV encoded as AAC into MP4."""
+    itsoffset_args: list[str] = []
+    if abs(offset_s) > 0.001:
+        itsoffset_args = ["-itsoffset", f"{offset_s:.6f}"]
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(video_path),
+        *itsoffset_args,
         "-i", str(ambix_wav),
         "-c:v", "copy",
         "-c:a", "aac", "-b:a", "320k",
@@ -556,5 +950,6 @@ async def _ffmpeg_mux(
     _, stderr = await proc.communicate()
     if proc.returncode != 0:
         raise RuntimeError(
-            f"ffmpeg mux failed (rc={proc.returncode}): {stderr.decode(errors='replace')[-500:]}"
+            f"ffmpeg AmbiX mux failed (rc={proc.returncode}): "
+            f"{stderr.decode(errors='replace')[-500:]}"
         )

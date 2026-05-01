@@ -2255,7 +2255,7 @@ class Storage:
         rows = await (
             await db.execute(
                 """
-                SELECT id AS track_id, x, y, z, label, status
+                SELECT id AS track_id, x, y, z, label, status, tqi, confidence
                 FROM tracks
                 WHERE last_seen_ns >= ? AND first_seen_ns <= ?
                   AND status = 'confirmed'
@@ -2274,7 +2274,7 @@ class Storage:
         rows = await (
             await db.execute(
                 """
-                SELECT toa_ns, timestamp_ns, x, y, z
+                SELECT toa_ns, timestamp_ns, x, y, z, confidence, label_confidence
                 FROM detections
                 WHERE track_id=? AND toa_ns >= ? AND toa_ns <= ?
                 ORDER BY toa_ns ASC

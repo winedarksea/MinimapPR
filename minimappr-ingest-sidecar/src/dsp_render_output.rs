@@ -195,8 +195,14 @@ async fn publish_render_manifest(
         stream_key: stream_key.to_string(),
         payload_offset_bytes: 0,
         payload_length_bytes: entry.byte_length,
-        toa_ns: manifest.source_handles.first().and_then(|handle| handle.toa_ns),
-        tor_ns: manifest.source_handles.first().and_then(|handle| handle.tor_ns),
+        toa_ns: manifest
+            .source_handles
+            .first()
+            .and_then(|handle| handle.toa_ns),
+        tor_ns: manifest
+            .source_handles
+            .first()
+            .and_then(|handle| handle.tor_ns),
         sample_index_start: None,
         sample_count: Some(sample_count as u64),
         integrity_hash: String::new(),

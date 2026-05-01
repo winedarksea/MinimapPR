@@ -407,16 +407,10 @@ class FusionNode:
         metadata["time_quality"] = payload.time_quality.value
         node = payload.node.model_copy(update={"metadata": metadata})
 
-        last_seen_ns = time.time_ns()
-        runtime = await self.registry.upsert(node, last_seen_ns)
-        position_geo = node.position_geo
-        if position_geo is None and node.position_m is not None:
-            position_geo = self.coordinate_frame.local_to_geo(node.position_m)
-        await self.storage.upsert_node(
-            spec=node,
-            last_seen_ns=last_seen_ns,
-            position_geo=position_geo,
-        )
+        # Localized classifier renders are derived products, not direct node
+        # heartbeats. Register sensors for downstream attribution, but do not
+        # refresh persisted node liveness or raw-audio debug state from them.
+        runtime = await self.registry.upsert(node, time.time_ns())
         sensor_descriptors = await self.registry.sensors_for_node(node.id)
         selected_positions = {
             descriptor.sensor_id: descriptor.position_m for descriptor in sensor_descriptors
@@ -426,19 +420,6 @@ class FusionNode:
             raise ValueError(f"Node {node.id!r} did not register any sensors")
 
         reference_sensor = selected_sensor_ids[0]
-        render_duration_ns = int((normalized_audio.size / float(payload.sample_rate_hz)) * 1_000_000_000)
-        render_end_time_ns = last_seen_ns
-        render_start_time_ns = max(0, render_end_time_ns - render_duration_ns)
-        # Rust journal mode promotes rendered audio asynchronously. Use receipt-time
-        # coverage for the live debug buffer so operator listen checks do not look
-        # stale while the event provenance keeps the source TOA.
-        await self.buffer.append(
-            sensor_id=reference_sensor,
-            sample_rate_hz=payload.sample_rate_hz,
-            start_time_ns=render_start_time_ns,
-            samples=normalized_audio,
-            end_time_ns=render_end_time_ns,
-        )
         capability_tier = (
             "full_3d"
             if len(selected_sensor_ids) >= self.settings.min_sensors_for_3d

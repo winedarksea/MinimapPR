@@ -39,6 +39,8 @@ pub struct DspWorkerConfig {
     pub window_seconds: f64,
     /// Classification render window in seconds.
     pub classification_window_seconds: f64,
+    /// Minimum interval between classifier renders per stream.
+    pub classifier_render_min_interval_seconds: f64,
     /// Maximum retained history per stream buffer.
     pub max_buffer_seconds: f64,
     /// Skip windows with coverage below this ratio.
@@ -78,6 +80,7 @@ impl Default for DspWorkerConfig {
             pending_manifest_batch_size: 128,
             window_seconds: 512.0 / 16_000.0,
             classification_window_seconds: 512.0 / 16_000.0,
+            classifier_render_min_interval_seconds: 0.0,
             max_buffer_seconds: 4.0 * 512.0 / 16_000.0,
             min_coverage_ratio: 0.85,
             localization_band_hz: [300.0, 3500.0],
@@ -203,12 +206,13 @@ impl DspWorker {
             st.pending_count = pending.len();
         }
 
+        let pending_backlog_depth = pending.len();
         for manifest in pending {
-            self.process_one(manifest).await;
+            self.process_one(manifest, pending_backlog_depth).await;
         }
     }
 
-    async fn process_one(&mut self, manifest: DspManifest) {
+    async fn process_one(&mut self, manifest: DspManifest, pending_backlog_depth: usize) {
         let now_ns = system_now_ns();
 
         let Some(first_handle) = manifest.source_handles.first() else {
@@ -268,8 +272,11 @@ impl DspWorker {
             decoded.temperature_c,
             decoded.humidity_fraction,
         );
-        let source_manifest_is_stale =
-            manifest_is_older_than_buffer_horizon(&manifest, now_ns, self.config.max_buffer_seconds);
+        let source_manifest_is_stale = manifest_is_older_than_buffer_horizon(
+            &manifest,
+            now_ns,
+            self.config.max_buffer_seconds,
+        );
         if source_manifest_is_stale && self.config.skip_stale_manifests_for_live_buffer {
             debug!(
                 manifest_id = %manifest.manifest_id,
@@ -288,7 +295,7 @@ impl DspWorker {
                 self.consume_source_manifest(&manifest).await;
                 return;
             }
-            if !self.should_publish_classifier_render(&stream_key, now_ns) {
+            if !self.should_publish_classifier_render(&stream_key, now_ns, pending_backlog_depth) {
                 self.consume_source_manifest(&manifest).await;
                 return;
             }
@@ -370,8 +377,12 @@ impl DspWorker {
                 self.consume_source_manifest(&manifest).await;
                 return;
             }
-            let fallback_render_windows = latest_channel_windows(buffers, classification_window_sec);
-            let fallback_render_channels = if fallback_render_windows.iter().any(|window| !window.is_empty()) {
+            let fallback_render_windows =
+                latest_channel_windows(buffers, classification_window_sec);
+            let fallback_render_channels = if fallback_render_windows
+                .iter()
+                .any(|window| !window.is_empty())
+            {
                 fallback_render_windows
                     .iter()
                     .cloned()
@@ -379,7 +390,7 @@ impl DspWorker {
             } else {
                 decoded.channels.clone()
             };
-            if !self.should_publish_classifier_render(&stream_key, now_ns) {
+            if !self.should_publish_classifier_render(&stream_key, now_ns, pending_backlog_depth) {
                 self.consume_source_manifest(&manifest).await;
                 return;
             }
@@ -414,11 +425,13 @@ impl DspWorker {
             return;
         }
 
-        let active_channels = eligible_localization_channels(&channel_states, self.config.min_coverage_ratio);
+        let active_channels =
+            eligible_localization_channels(&channel_states, self.config.min_coverage_ratio);
         let windows: [Vec<f32>; 4] = core::array::from_fn(|ch| channel_states[ch].window.clone());
-        let classification_windows = channel_windows_ending_at(buffers, end_ns, classification_window_sec);
+        let classification_windows =
+            channel_windows_ending_at(buffers, end_ns, classification_window_sec);
         if self.config.birdnet_hybrid_render_enabled
-            && !self.should_publish_classifier_render(&stream_key, now_ns)
+            && !self.should_publish_classifier_render(&stream_key, now_ns, pending_backlog_depth)
         {
             self.consume_source_manifest(&manifest).await;
             return;
@@ -550,8 +563,7 @@ impl DspWorker {
             return;
         }
 
-        self.consumed_manifests_since_prune =
-            self.consumed_manifests_since_prune.saturating_add(1);
+        self.consumed_manifests_since_prune = self.consumed_manifests_since_prune.saturating_add(1);
         let prune_interval = self.config.consumed_manifest_prune_interval.max(1);
         if self.consumed_manifests_since_prune % prune_interval == 0 {
             if let Err(error) = self
@@ -579,12 +591,24 @@ impl DspWorker {
         self.note_failures(1).await;
     }
 
-    fn should_publish_classifier_render(&mut self, stream_key: &str, now_ns: u128) -> bool {
-        let min_interval_ns = classifier_render_min_interval_ns(self.config.classification_window_seconds);
+    fn should_publish_classifier_render(
+        &mut self,
+        stream_key: &str,
+        now_ns: u128,
+        pending_backlog_depth: usize,
+    ) -> bool {
+        let min_interval_ns = classifier_render_min_interval_ns(
+            self.config.classifier_render_min_interval_seconds,
+            pending_backlog_depth,
+        );
         if min_interval_ns == 0 {
             return true;
         }
-        match self.last_classifier_render_ns_by_stream.get(stream_key).copied() {
+        match self
+            .last_classifier_render_ns_by_stream
+            .get(stream_key)
+            .copied()
+        {
             Some(last_ns) if now_ns.saturating_sub(last_ns) < min_interval_ns => false,
             _ => {
                 self.last_classifier_render_ns_by_stream
@@ -630,10 +654,7 @@ fn channel_windows_ending_at(
     })
 }
 
-fn latest_channel_windows(
-    buffers: &[SensorStreamBuffer; 4],
-    window_seconds: f64,
-) -> [Vec<f32>; 4] {
+fn latest_channel_windows(buffers: &[SensorStreamBuffer; 4], window_seconds: f64) -> [Vec<f32>; 4] {
     core::array::from_fn(|channel_index| buffers[channel_index].latest_window(window_seconds))
 }
 
@@ -664,7 +685,10 @@ fn localization_manifest_payload(
             .then_some(result.steering_direction),
         position_m: result.position_m,
         confidence: result.confidence,
-        residual_rms_seconds: result.residual_rms_seconds.is_finite().then_some(result.residual_rms_seconds),
+        residual_rms_seconds: result
+            .residual_rms_seconds
+            .is_finite()
+            .then_some(result.residual_rms_seconds),
         sound_speed_mps: result.sound_speed_mps,
         effective_band_hz: Some(effective_band_hz),
         pair_tdoas,
@@ -706,9 +730,9 @@ fn resolve_buffer_start_time_ns(
                 .map(|sample_index| sample_index_to_relative_time_ns(sample_index, sample_rate_hz))
         })
         .or_else(|| {
-            first_handle
-                .sample_index_start
-                .map(|sample_index| sample_index_to_relative_time_ns(sample_index as i64, sample_rate_hz))
+            first_handle.sample_index_start.map(|sample_index| {
+                sample_index_to_relative_time_ns(sample_index as i64, sample_rate_hz)
+            })
         })
         .unwrap_or(now_ns as i128)
 }
@@ -732,11 +756,23 @@ fn manifest_is_older_than_buffer_horizon(
     now_ns.saturating_sub(newest_source_ns) > horizon_ns
 }
 
-fn classifier_render_min_interval_ns(classification_window_seconds: f64) -> u128 {
-    if classification_window_seconds < 5.0 {
+fn classifier_render_min_interval_ns(
+    classifier_render_min_interval_seconds: f64,
+    pending_backlog_depth: usize,
+) -> u128 {
+    if classifier_render_min_interval_seconds <= 0.0 {
         return 0;
     }
-    2_000_000_000
+
+    let backlog_multiplier = match pending_backlog_depth {
+        0..=128 => 1_u128,
+        129..=256 => 2_u128,
+        257..=512 => 3_u128,
+        _ => 4_u128,
+    };
+    let base_interval_ns =
+        (classifier_render_min_interval_seconds * 1_000_000_000.0).round() as u128;
+    base_interval_ns.saturating_mul(backlog_multiplier)
 }
 
 fn sample_index_to_relative_time_ns(sample_index: i64, sample_rate_hz: u32) -> i128 {

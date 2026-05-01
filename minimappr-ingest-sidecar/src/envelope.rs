@@ -382,23 +382,23 @@ fn parse_store_forward_capture_envelope(raw_payload: &[u8]) -> Result<CaptureEnv
         "store-forward ingest payload must include at least one buffered frame".to_string()
     })?;
 
-    let total_sample_count = envelope
-        .buffered_frames
-        .iter()
-        .fold(Some(0_u64), |running_total, buffered_frame| {
-            let frame = &buffered_frame.frame;
-            let frame_samples = frame
-                .samples_per_channel
-                .map(u64::from)
-                .or_else(|| match (frame.start_sample_index, frame.end_sample_index) {
-                    (Some(start), Some(end)) if end >= start => Some(end - start),
-                    _ => None,
+    let total_sample_count =
+        envelope
+            .buffered_frames
+            .iter()
+            .fold(Some(0_u64), |running_total, buffered_frame| {
+                let frame = &buffered_frame.frame;
+                let frame_samples = frame.samples_per_channel.map(u64::from).or_else(|| {
+                    match (frame.start_sample_index, frame.end_sample_index) {
+                        (Some(start), Some(end)) if end >= start => Some(end - start),
+                        _ => None,
+                    }
                 });
-            match (running_total, frame_samples) {
-                (Some(total), Some(samples)) => Some(total.saturating_add(samples)),
-                _ => None,
-            }
-        });
+                match (running_total, frame_samples) {
+                    (Some(total), Some(samples)) => Some(total.saturating_add(samples)),
+                    _ => None,
+                }
+            });
 
     let node_id = envelope.node.id.clone();
     let stream_id = "audio_main".to_string();

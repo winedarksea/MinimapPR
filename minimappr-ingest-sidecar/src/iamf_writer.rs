@@ -28,8 +28,18 @@ mod obu_type {
 
 /// Audio element types.
 mod audio_element_type {
-    pub const CHANNEL_BASED: u8 = 0;
     pub const SCENE_BASED: u8 = 1; // HOA / ambisonics
+    pub const OBJECT_BASED: u8 = 2;
+}
+
+mod param_definition_type {
+    pub const MIX_GAIN: u8 = 0;
+    pub const SINGLE_POSITION: u8 = 3;
+}
+
+mod animation_type {
+    pub const STEP: u8 = 0;
+    pub const LINEAR: u8 = 1;
 }
 
 /// First-order ambisonics: W X Y Z (ACN order).
@@ -53,19 +63,18 @@ pub struct ObjectPosition {
     pub azimuth_deg: f32,
     /// Elevation in degrees [−90, 90].
     pub elevation_deg: f32,
-    /// Distance in metres.
-    pub distance_m: f32,
+    /// IAMF normalized distance in [0, 1].
+    pub distance_norm: f32,
+    /// End azimuth for LINEAR animation over this temporal unit.
+    pub end_azimuth_deg: Option<f32>,
+    /// End elevation for LINEAR animation over this temporal unit.
+    pub end_elevation_deg: Option<f32>,
+    /// End normalized distance for LINEAR animation over this temporal unit.
+    pub end_distance_norm: Option<f32>,
 }
 
 /// Per-temporal-unit position data for all objects.
 pub type ObjectPositions = HashMap<u32 /* object_id */, ObjectPosition>;
-
-/// An audio frame for one substream in one temporal unit.
-pub struct AudioFrameData<'a> {
-    pub substream_id: u32,
-    /// Interleaved PCM samples, 16-bit little-endian.
-    pub pcm_bytes: &'a [u8],
-}
 
 /// Complete scene description passed to the writer.
 pub struct IamfScene {
@@ -223,7 +232,7 @@ impl IamfWriter {
         payload.push(0); // ambisonics_mode = MONO_PROJECTION
         payload.push(FOA_CHANNEL_COUNT); // output_channel_count
         payload.push(FOA_CHANNEL_COUNT); // substream_count
-        // channel_mapping: ACN order (0=W, 1=X, 2=Y, 3=Z) mapped to substreams 0..3
+                                         // channel_mapping: ACN order (0=W, 1=X, 2=Y, 3=Z) mapped to substreams 0..3
         for i in 0..FOA_CHANNEL_COUNT {
             payload.push(i);
         }
@@ -234,29 +243,15 @@ impl IamfWriter {
     fn object_audio_element_obu(&self, element_id: u32, substream_id: u32) -> Vec<u8> {
         let mut payload = Vec::new();
         write_leb128(&mut payload, element_id as u64);
-        // audio_element_type CHANNEL_BASED (0) | reserved
-        payload.push((audio_element_type::CHANNEL_BASED << 5) | 0);
+        payload.push((audio_element_type::OBJECT_BASED << 5) | 0);
         write_leb128(&mut payload, self.codec_config_id as u64);
 
-        // num_substreams = 1 (mono)
         write_leb128(&mut payload, 1u64);
         write_leb128(&mut payload, substream_id as u64);
 
-        // num_parameters = 1 (one parameter definition for object position)
-        write_leb128(&mut payload, 1u64);
-        // parameter_id, parameter_rate, param_definition_type (demixing=1)
-        write_leb128(&mut payload, element_id as u64); // parameter_id = same as element_id
-        write_leb128(&mut payload, self.scene.sample_rate_hz as u64);
-        payload.push(3); // param_definition_type = OBJECT_BASED (3)
-        // default_demix_mode/weight — 0
-        payload.push(0);
-
-        // scalable_channel_layout_config: 1 layer, 1 ch mono
-        payload.push(0); // num_layers_minus1 = 0
-        payload.push(1); // loudspeaker_layout = MONO (1)
-        payload.push(0); // output_gain_flags
-        payload.push(1); // substream_count = 1
-        payload.push(0); // coupled_substream_count = 0
+        write_leb128(&mut payload, 0u64);
+        write_leb128(&mut payload, 1u64); // objects_config_size: num_objects only
+        payload.push(1); // num_objects
 
         write_obu(obu_type::AUDIO_ELEMENT, &payload)
     }
@@ -280,22 +275,21 @@ impl IamfWriter {
 
         // FOA bed element
         write_leb128(&mut payload, self.bed_element_id as u64);
-        // rendering_config.headphones_rendering_mode = STEREO (0)
-        payload.push(0);
+        self.write_rendering_config(&mut payload, None);
         // element_mix_config: parameter_id, rate, type=MIX_GAIN(0),
         // default_mix_gain in Q7.8 fixed-point (0 dB = 0x0100 = 256).
         write_leb128(&mut payload, 0u64); // parameter_id
         write_leb128(&mut payload, self.scene.sample_rate_hz as u64);
-        payload.push(0); // param_definition_type = MIX_GAIN
+        payload.push(param_definition_type::MIX_GAIN);
         payload.extend_from_slice(&256u16.to_be_bytes()); // default_mix_gain Q7.8
 
         // Object elements
         for (idx, &elem_id) in self.object_element_ids.iter().enumerate() {
             write_leb128(&mut payload, elem_id as u64);
-            payload.push(0); // rendering_config
+            self.write_rendering_config(&mut payload, Some(elem_id));
             write_leb128(&mut payload, (idx + 1) as u64); // parameter_id
             write_leb128(&mut payload, self.scene.sample_rate_hz as u64);
-            payload.push(0); // MIX_GAIN
+            payload.push(param_definition_type::MIX_GAIN);
             payload.extend_from_slice(&256u16.to_be_bytes());
         }
 
@@ -303,16 +297,45 @@ impl IamfWriter {
         let output_mix_param_id = 100u64;
         write_leb128(&mut payload, output_mix_param_id);
         write_leb128(&mut payload, self.scene.sample_rate_hz as u64);
-        payload.push(0);
+        payload.push(param_definition_type::MIX_GAIN);
         payload.extend_from_slice(&256u16.to_be_bytes());
 
         // num_layouts = 1 (binaural)
         write_leb128(&mut payload, 1u64);
         payload.push(2); // layout_type = BINAURAL (2)
-        // loudness_info for the single layout
+                         // loudness_info for the single layout
         self.write_loudness_info_aggregate(&mut payload);
 
         write_obu(obu_type::MIX_PRESENTATION, &payload)
+    }
+
+    fn write_rendering_config(&self, out: &mut Vec<u8>, object_element_id: Option<u32>) {
+        out.push(0); // headphones_rendering_mode=0, reserved=0
+        let mut extension = Vec::new();
+        match object_element_id {
+            Some(elem_id) => {
+                write_leb128(&mut extension, 1u64); // num_parameters
+                write_leb128(
+                    &mut extension,
+                    param_definition_type::SINGLE_POSITION as u64,
+                );
+                self.write_single_position_param_definition(&mut extension, elem_id);
+            }
+            None => {
+                write_leb128(&mut extension, 0u64); // num_parameters
+            }
+        }
+        write_leb128(out, extension.len() as u64);
+        out.extend(extension);
+    }
+
+    fn write_single_position_param_definition(&self, out: &mut Vec<u8>, parameter_id: u32) {
+        write_leb128(out, parameter_id as u64);
+        write_leb128(out, self.scene.sample_rate_hz as u64);
+        out.push(0); // param_definition_mode=0, reserved=0
+        write_leb128(out, self.scene.samples_per_frame as u64);
+        write_leb128(out, self.scene.samples_per_frame as u64);
+        pack_single_position_triplet(out, 0, 0, 0);
     }
 
     /// Aggregate loudness across bed + objects for the Mix_Presentation.
@@ -342,20 +365,105 @@ impl IamfWriter {
         // parameter_id matches the one registered in the Audio_Element_OBU
         write_leb128(&mut payload, element_id as u64);
 
-        // duration and constant_subblock_duration = samples_per_frame
-        write_leb128(&mut payload, self.scene.samples_per_frame as u64);
-        write_leb128(&mut payload, self.scene.samples_per_frame as u64);
-
-        // One subblock: object metadata.
-        // azimuth Q0.8 (degrees, range -180..180), elevation Q0.8, distance Q8.8
-        let az_i8 = pos.azimuth_deg.clamp(-128.0, 127.0) as i8;
-        let el_i8 = pos.elevation_deg.clamp(-128.0, 127.0) as i8;
-        let dist_q88 = (pos.distance_m.max(0.0) * 256.0).min(65535.0) as u16;
-        payload.push(az_i8 as u8);
-        payload.push(el_i8 as u8);
-        payload.extend_from_slice(&dist_q88.to_be_bytes());
+        let end = ObjectPosition {
+            azimuth_deg: pos.end_azimuth_deg.unwrap_or(pos.azimuth_deg),
+            elevation_deg: pos.end_elevation_deg.unwrap_or(pos.elevation_deg),
+            distance_norm: pos.end_distance_norm.unwrap_or(pos.distance_norm),
+            end_azimuth_deg: None,
+            end_elevation_deg: None,
+            end_distance_norm: None,
+        };
+        payload.extend(single_position_parameter_data(pos, &end));
 
         write_obu(obu_type::PARAMETER_BLOCK, &payload)
+    }
+}
+
+fn single_position_parameter_data(start: &ObjectPosition, end: &ObjectPosition) -> Vec<u8> {
+    let same = (start.azimuth_deg - end.azimuth_deg).abs() < 0.5
+        && (start.elevation_deg - end.elevation_deg).abs() < 0.5
+        && (start.distance_norm - end.distance_norm).abs() < 0.01;
+    let animation = if same {
+        animation_type::STEP
+    } else {
+        animation_type::LINEAR
+    };
+    let mut body = Vec::new();
+    write_leb128(&mut body, animation as u64);
+    pack_single_position_triplet(
+        &mut body,
+        quantize_azimuth(start.azimuth_deg),
+        quantize_elevation(start.elevation_deg),
+        quantize_distance(start.distance_norm),
+    );
+    if animation == animation_type::LINEAR {
+        pack_single_position_triplet(
+            &mut body,
+            quantize_azimuth(end.azimuth_deg),
+            quantize_elevation(end.elevation_deg),
+            quantize_distance(end.distance_norm),
+        );
+    }
+    let mut out = Vec::new();
+    write_leb128(&mut out, body.len() as u64);
+    out.extend(body);
+    out
+}
+
+fn quantize_azimuth(value: f32) -> i16 {
+    value.clamp(-180.0, 180.0).round() as i16
+}
+
+fn quantize_elevation(value: f32) -> i8 {
+    value.clamp(-90.0, 90.0).round() as i8
+}
+
+fn quantize_distance(value: f32) -> u8 {
+    let quantized = (value.clamp(0.0, 1.0) * 7.0).round();
+    quantized.clamp(0.0, 7.0) as u8
+}
+
+fn pack_single_position_triplet(out: &mut Vec<u8>, azimuth: i16, elevation: i8, distance: u8) {
+    let mut bits = BitWriter::default();
+    bits.write_signed(azimuth as i32, 9);
+    bits.write_signed(elevation as i32, 8);
+    bits.write_unsigned(distance as u32, 3);
+    bits.write_unsigned(0, 4);
+    out.extend(bits.finish());
+}
+
+#[derive(Default)]
+struct BitWriter {
+    bytes: Vec<u8>,
+    current: u8,
+    used_bits: u8,
+}
+
+impl BitWriter {
+    fn write_unsigned(&mut self, value: u32, n_bits: u8) {
+        for bit_idx in (0..n_bits).rev() {
+            let bit = ((value >> bit_idx) & 1) as u8;
+            self.current = (self.current << 1) | bit;
+            self.used_bits += 1;
+            if self.used_bits == 8 {
+                self.bytes.push(self.current);
+                self.current = 0;
+                self.used_bits = 0;
+            }
+        }
+    }
+
+    fn write_signed(&mut self, value: i32, n_bits: u8) {
+        let mask = (1i32 << n_bits) - 1;
+        self.write_unsigned((value & mask) as u32, n_bits);
+    }
+
+    fn finish(mut self) -> Vec<u8> {
+        if self.used_bits > 0 {
+            self.current <<= 8 - self.used_bits;
+            self.bytes.push(self.current);
+        }
+        self.bytes
     }
 }
 
@@ -529,7 +637,10 @@ mod tests {
             ObjectPosition {
                 azimuth_deg: 45.0,
                 elevation_deg: 0.0,
-                distance_m: 5.0,
+                distance_norm: 0.5,
+                end_azimuth_deg: None,
+                end_elevation_deg: None,
+                end_distance_norm: None,
             },
         );
 
@@ -538,6 +649,82 @@ mod tests {
         // First byte of temporal unit must be Temporal_Delimiter OBU header.
         let expected_td = (obu_type::TEMPORAL_DELIMITER & 0x1F) << 3;
         assert_eq!(unit[0], expected_td);
+    }
+
+    #[test]
+    fn object_audio_element_uses_objects_config() {
+        let (scene, n) = make_scene(1);
+        let writer = IamfWriter::new(scene, n);
+        let obu = writer.object_audio_element_obu(2, 4);
+        let payload = obu_payload(&obu);
+        let (element_id, consumed) = read_leb128(payload).unwrap();
+        assert_eq!(element_id, 2);
+        let audio_element_type_byte = payload[consumed];
+        assert_eq!(
+            audio_element_type_byte >> 5,
+            audio_element_type::OBJECT_BASED
+        );
+
+        let objects_config = &payload[payload.len() - 2..];
+        assert_eq!(objects_config[0], 1, "objects_config_size must be 1 byte");
+        assert_eq!(objects_config[1], 1, "YouTube path emits one mono object");
+    }
+
+    #[test]
+    fn temporal_unit_writes_position_parameter_before_audio_frames() {
+        let (scene, n) = make_scene(1);
+        let writer = IamfWriter::new(scene, n);
+        let spf = 512usize;
+        let silence_bed: [Vec<u8>; 4] = std::array::from_fn(|_| vec![0u8; spf * 2]);
+        let silence_obj = vec![vec![0u8; spf * 2]];
+        let mut positions = ObjectPositions::new();
+        positions.insert(
+            0,
+            ObjectPosition {
+                azimuth_deg: 10.0,
+                elevation_deg: 5.0,
+                distance_norm: 0.25,
+                end_azimuth_deg: Some(20.0),
+                end_elevation_deg: Some(10.0),
+                end_distance_norm: Some(0.35),
+            },
+        );
+
+        let unit = writer.write_temporal_unit(&silence_bed, &silence_obj, &positions);
+        let mut offset = skip_obu(&unit, 0);
+        assert_eq!(unit[0] >> 3, obu_type::TEMPORAL_DELIMITER);
+        assert_eq!(unit[offset] >> 3, obu_type::PARAMETER_BLOCK);
+        let payload = obu_payload(&unit[offset..]);
+        let (_parameter_id, consumed) = read_leb128(payload).unwrap();
+        let (_param_size, size_consumed) = read_leb128(&payload[consumed..]).unwrap();
+        let (animation, _) = read_leb128(&payload[consumed + size_consumed..]).unwrap();
+        assert_eq!(animation as u8, animation_type::LINEAR);
+        offset = skip_obu(&unit, offset);
+        assert_eq!(unit[offset] >> 3, obu_type::AUDIO_FRAME_EXPLICIT_ID);
+    }
+
+    #[test]
+    fn single_position_parameter_data_uses_linear_for_motion() {
+        let start = ObjectPosition {
+            azimuth_deg: 0.0,
+            elevation_deg: 0.0,
+            distance_norm: 0.1,
+            end_azimuth_deg: None,
+            end_elevation_deg: None,
+            end_distance_norm: None,
+        };
+        let end = ObjectPosition {
+            azimuth_deg: 30.0,
+            elevation_deg: 5.0,
+            distance_norm: 0.6,
+            end_azimuth_deg: None,
+            end_elevation_deg: None,
+            end_distance_norm: None,
+        };
+        let data = single_position_parameter_data(&start, &end);
+        let (_size, consumed) = read_leb128(&data).unwrap();
+        let (animation, _) = read_leb128(&data[consumed..]).unwrap();
+        assert_eq!(animation as u8, animation_type::LINEAR);
     }
 
     #[test]
@@ -565,6 +752,16 @@ mod tests {
             .map(|b| i16::from_le_bytes([b[0], b[1]]))
             .collect();
         assert_eq!(words[0], -32767); // clamped −1.0 → -32767
-        assert_eq!(words[4], 32767);  // clamped +1.0 → 32767
+        assert_eq!(words[4], 32767); // clamped +1.0 → 32767
+    }
+
+    fn obu_payload(obu: &[u8]) -> &[u8] {
+        let (_size, consumed) = read_leb128(&obu[1..]).unwrap();
+        &obu[1 + consumed..]
+    }
+
+    fn skip_obu(obus: &[u8], offset: usize) -> usize {
+        let (size, consumed) = read_leb128(&obus[offset + 1..]).unwrap();
+        offset + 1 + consumed + size as usize
     }
 }

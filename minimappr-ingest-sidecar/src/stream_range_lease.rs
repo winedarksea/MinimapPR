@@ -174,9 +174,7 @@ impl StreamRangeLeaseStore {
         index
             .leases
             .values()
-            .filter(|lease| {
-                lease.stream_key == stream_key && lease.heartbeat_deadline_ns > now_ns
-            })
+            .filter(|lease| lease.stream_key == stream_key && lease.heartbeat_deadline_ns > now_ns)
             .any(|lease| {
                 // Ranges overlap when neither is entirely before the other.
                 seg_start <= lease.end_ns && seg_end >= lease.start_ns
@@ -327,19 +325,39 @@ mod tests {
         let index = store.active_index(now_ns).await.unwrap();
 
         assert!(StreamRangeLeaseStore::segment_is_pinned(
-            &index, "audio", Some(500), Some(2_000), now_ns
+            &index,
+            "audio",
+            Some(500),
+            Some(2_000),
+            now_ns
         ));
         assert!(StreamRangeLeaseStore::segment_is_pinned(
-            &index, "audio", Some(4_000), Some(6_000), now_ns
+            &index,
+            "audio",
+            Some(4_000),
+            Some(6_000),
+            now_ns
         ));
         assert!(StreamRangeLeaseStore::segment_is_pinned(
-            &index, "audio", Some(8_500), Some(10_000), now_ns
+            &index,
+            "audio",
+            Some(8_500),
+            Some(10_000),
+            now_ns
         ));
         assert!(!StreamRangeLeaseStore::segment_is_pinned(
-            &index, "audio", Some(10_000), Some(20_000), now_ns
+            &index,
+            "audio",
+            Some(10_000),
+            Some(20_000),
+            now_ns
         ));
         assert!(!StreamRangeLeaseStore::segment_is_pinned(
-            &index, "other_stream", Some(4_000), Some(6_000), now_ns
+            &index,
+            "other_stream",
+            Some(4_000),
+            Some(6_000),
+            now_ns
         ));
     }
 }

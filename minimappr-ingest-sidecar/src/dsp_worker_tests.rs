@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
-    dsp::SensorStreamBuffer,
     derived_cache::{DerivedCache, DerivedCacheConfig},
+    dsp::SensorStreamBuffer,
     journal_reader::JournalPayloadHandle,
     manifests::ManifestStore,
 };
@@ -62,7 +62,7 @@ async fn worker_publishes_localization_and_classifier_render_contract() {
         state.clone(),
     );
 
-    worker.process_one(raw_manifest).await;
+    worker.process_one(raw_manifest, 1).await;
 
     let localizations = manifest_store
         .query_pending("localization_result")
@@ -132,15 +132,21 @@ async fn worker_publishes_omni_render_when_localization_coverage_is_unavailable(
 
     let first_payload = store_forward_payload_with_timing(1_000_000_000, 0, 1);
     let first_manifest =
-        raw_manifest_for_payload(tmp.path(), "manifest-raw-first", "seg-first", first_payload).await;
-    worker.process_one(first_manifest).await;
+        raw_manifest_for_payload(tmp.path(), "manifest-raw-first", "seg-first", first_payload)
+            .await;
+    worker.process_one(first_manifest, 2).await;
 
     // This mirrors the live Sirith failure mode: sample coverage appends, but
     // the frame timestamp maps the evaluation window outside the buffer.
     let second_payload = store_forward_payload_with_timing(100_000_000, 1024, 2);
-    let second_manifest =
-        raw_manifest_for_payload(tmp.path(), "manifest-raw-second", "seg-second", second_payload).await;
-    worker.process_one(second_manifest).await;
+    let second_manifest = raw_manifest_for_payload(
+        tmp.path(),
+        "manifest-raw-second",
+        "seg-second",
+        second_payload,
+    )
+    .await;
+    worker.process_one(second_manifest, 2).await;
 
     let localizations = manifest_store
         .query_pending("localization_result")
@@ -207,12 +213,13 @@ async fn worker_skips_stale_manifest_without_rewriting_timestamps() {
 
     let stale_payload = store_forward_payload_with_timing(1_000_000_000, 0, 1);
     let mut stale_manifest =
-        raw_manifest_for_payload(tmp.path(), "manifest-raw-stale", "seg-stale", stale_payload).await;
+        raw_manifest_for_payload(tmp.path(), "manifest-raw-stale", "seg-stale", stale_payload)
+            .await;
     stale_manifest.created_ns = 1;
     stale_manifest.source_handles[0].tor_ns = Some(1);
     stale_manifest.source_handles[0].toa_ns = Some(1);
 
-    worker.process_one(stale_manifest).await;
+    worker.process_one(stale_manifest, 1).await;
 
     let localizations = manifest_store
         .query_pending("localization_result")
@@ -270,7 +277,11 @@ fn store_forward_payload() -> String {
     store_forward_payload_with_timing(1_000_000_000, 0, 1)
 }
 
-fn store_forward_payload_with_timing(start_time_ns: u64, start_sample_index: u64, sequence: u64) -> String {
+fn store_forward_payload_with_timing(
+    start_time_ns: u64,
+    start_sample_index: u64,
+    sequence: u64,
+) -> String {
     let sr = 16_000;
     let samples = pseudo_random(520);
     let channels = vec![
@@ -356,12 +367,14 @@ fn low_coverage_channel_drops_out_of_localization_set() {
     let active_channels = eligible_localization_channels(&channel_states, 0.85);
 
     assert_eq!(active_channels, vec![0, 1, 2]);
-    assert!(channel_states[3]
-        .coverage
-        .as_ref()
-        .expect("coverage stats")
-        .coverage_ratio
-        < 0.85);
+    assert!(
+        channel_states[3]
+            .coverage
+            .as_ref()
+            .expect("coverage stats")
+            .coverage_ratio
+            < 0.85
+    );
 }
 
 #[test]
@@ -453,6 +466,14 @@ fn stale_manifest_detection_uses_source_receipt_time() {
         promotion_ready: false,
     };
 
-    assert!(manifest_is_older_than_buffer_horizon(&manifest, 40_000_000_001, 32.0));
-    assert!(!manifest_is_older_than_buffer_horizon(&manifest, 30_000_000_000, 32.0));
+    assert!(manifest_is_older_than_buffer_horizon(
+        &manifest,
+        40_000_000_001,
+        32.0
+    ));
+    assert!(!manifest_is_older_than_buffer_horizon(
+        &manifest,
+        30_000_000_000,
+        32.0
+    ));
 }

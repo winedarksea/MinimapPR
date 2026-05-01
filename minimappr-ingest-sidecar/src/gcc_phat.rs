@@ -108,8 +108,8 @@ pub(crate) fn phat_correlation(
     ifft.process(&mut cross_spectrum);
 
     let scale = 1.0 / fft_len as f32;
-    let lag = ((max_tau_s.max(1.0 / sample_rate_hz as f32)) * sample_rate_hz as f32)
-        .ceil() as usize;
+    let lag =
+        ((max_tau_s.max(1.0 / sample_rate_hz as f32)) * sample_rate_hz as f32).ceil() as usize;
     let lag = lag.clamp(1, fft_len / 2);
 
     let mut lags_seconds = Vec::with_capacity((2 * lag) + 1);
@@ -184,7 +184,16 @@ pub fn tetrahedral_gcc_phat(
     const PAIRS: [(usize, usize); 6] = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
     // Keep this helper permissive; the worker uses per-pair geometric limits.
     let max_tau_s = (0.07_f32 / 343.2) + (1.0 / sample_rate_hz.max(1) as f32);
-    PAIRS.map(|(a, b)| phat_correlation(&channels[a], &channels[b], sample_rate_hz, max_tau_s, band_hz).tdoa)
+    PAIRS.map(|(a, b)| {
+        phat_correlation(
+            &channels[a],
+            &channels[b],
+            sample_rate_hz,
+            max_tau_s,
+            band_hz,
+        )
+        .tdoa
+    })
 }
 
 fn next_pow2(n: usize) -> usize {
@@ -220,12 +229,7 @@ fn normalize_band_hz(band_hz: Option<[f32; 2]>, sample_rate_hz: u32) -> Option<[
     (clamped_high_hz > clamped_low_hz).then_some([clamped_low_hz, clamped_high_hz])
 }
 
-fn bin_in_band(
-    bin: usize,
-    fft_len: usize,
-    sample_rate_hz: u32,
-    band_hz: Option<[f32; 2]>,
-) -> bool {
+fn bin_in_band(bin: usize, fft_len: usize, sample_rate_hz: u32, band_hz: Option<[f32; 2]>) -> bool {
     let Some([low_hz, high_hz]) = band_hz else {
         return true;
     };
@@ -326,7 +330,8 @@ mod tests {
         let ch2 = low_component[4..len + 4].to_vec();
 
         let unbanded = phat_correlation(&ch1, &ch2, sr, 6.0 / sr as f32, None).tdoa;
-        let banded = phat_correlation(&ch1, &ch2, sr, 6.0 / sr as f32, Some([1_000.0, 3_200.0])).tdoa;
+        let banded =
+            phat_correlation(&ch1, &ch2, sr, 6.0 / sr as f32, Some([1_000.0, 3_200.0])).tdoa;
 
         assert!(
             (unbanded.delay_samples - 4.0).abs() < 0.45,
@@ -360,7 +365,8 @@ mod tests {
 
         let ch1 = high_component[..len].to_vec();
         let ch2 = high_component[1..len + 1].to_vec();
-        let banded = phat_correlation(&ch1, &ch2, sr, 6.0 / sr as f32, Some([1_000.0, 3_200.0])).tdoa;
+        let banded =
+            phat_correlation(&ch1, &ch2, sr, 6.0 / sr as f32, Some([1_000.0, 3_200.0])).tdoa;
 
         assert!(
             (banded.delay_samples - 1.0).abs() < 0.45,
@@ -390,5 +396,4 @@ mod tests {
         }
         smoothed
     }
-
 }

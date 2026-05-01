@@ -39,12 +39,14 @@ from minimappr.core.iamf_pipeline import (
     LoudnessMeasurement,
     TrackTrajectory,
     _measure_loudness,
+    _subtract_object_slot,
     _subtract_objects,
     _build_positions_per_unit,
     _xyz_to_spherical,
     _write_wav,
     _write_wav_mono,
 )
+from minimappr.core.iamf_object_slot import IamfObjectSlot, select_iamf_object_slot
 
 SAMPLE_RATE = 16_000
 
@@ -206,6 +208,157 @@ class TestPositionMetadata:
     def test_xyz_to_spherical_origin(self):
         az, el, dist = _xyz_to_spherical((0.0, 0.0, 0.0))
         assert dist == 0.0
+
+
+class TestObjectSlotSelector:
+    def test_rejects_low_quality_tracks(self):
+        n = 2048
+        traj = TrackTrajectory(
+            track_id="low",
+            waypoints=[(0, (1.0, 0.0, 0.0)), (n - 1, (1.0, 0.0, 0.0))],
+            tqi=0.2,
+            label_confidence=0.9,
+            localization_confidence=0.9,
+        )
+        slot = select_iamf_object_slot(
+            [traj],
+            {"low": np.ones(n, dtype=np.float32) * 0.2},
+            n,
+            512,
+            sample_rate_hz=SAMPLE_RATE,
+        )
+        assert slot is None
+
+    def test_selects_louder_higher_confidence_candidate(self):
+        n = 4096
+        quiet = TrackTrajectory(
+            track_id="quiet",
+            waypoints=[(0, (1.0, 0.0, 0.0)), (n - 1, (1.0, 0.0, 0.0))],
+            tqi=0.5,
+            label_confidence=0.5,
+            localization_confidence=0.5,
+        )
+        loud = TrackTrajectory(
+            track_id="loud",
+            waypoints=[(0, (0.0, 1.0, 0.0)), (n - 1, (0.0, 1.0, 0.0))],
+            tqi=0.9,
+            label_confidence=0.9,
+            localization_confidence=0.9,
+        )
+        slot = select_iamf_object_slot(
+            [quiet, loud],
+            {
+                "quiet": np.ones(n, dtype=np.float32) * 0.1,
+                "loud": np.ones(n, dtype=np.float32) * 0.5,
+            },
+            n,
+            512,
+            sample_rate_hz=SAMPLE_RATE,
+        )
+        assert isinstance(slot, IamfObjectSlot)
+        assert slot.track_id == "loud"
+        assert slot.positions_per_unit[0][0]["azimuth_deg"] == pytest.approx(90.0)
+
+    def test_stable_winner_survives_short_challenger(self):
+        n = 4096
+        incumbent = TrackTrajectory(
+            track_id="incumbent",
+            waypoints=[(0, (1.0, 0.0, 0.0)), (n - 1, (1.0, 0.0, 0.0))],
+            tqi=0.7,
+            label_confidence=0.7,
+            localization_confidence=0.7,
+        )
+        challenger = TrackTrajectory(
+            track_id="challenger",
+            waypoints=[(512, (0.0, 1.0, 0.0)), (1024, (0.0, 1.0, 0.0))],
+            tqi=1.0,
+            label_confidence=1.0,
+            localization_confidence=1.0,
+        )
+        slot = select_iamf_object_slot(
+            [incumbent, challenger],
+            {
+                "incumbent": np.ones(n, dtype=np.float32) * 0.2,
+                "challenger": np.ones(n, dtype=np.float32) * 0.8,
+            },
+            n,
+            512,
+            sample_rate_hz=SAMPLE_RATE,
+        )
+        assert slot is not None
+        assert slot.track_id == "incumbent"
+
+    def test_strong_challenger_takes_over_after_hold_time(self):
+        n = 16_384
+        incumbent = TrackTrajectory(
+            track_id="incumbent",
+            waypoints=[(0, (1.0, 0.0, 0.0)), (n - 1, (1.0, 0.0, 0.0))],
+            tqi=0.7,
+            label_confidence=0.7,
+            localization_confidence=0.7,
+        )
+        challenger = TrackTrajectory(
+            track_id="challenger",
+            waypoints=[(512, (0.0, 1.0, 0.0)), (n - 1, (0.0, 1.0, 0.0))],
+            tqi=1.0,
+            label_confidence=1.0,
+            localization_confidence=1.0,
+        )
+        slot = select_iamf_object_slot(
+            [incumbent, challenger],
+            {
+                "incumbent": np.ones(n, dtype=np.float32) * 0.2,
+                "challenger": np.ones(n, dtype=np.float32) * 0.8,
+            },
+            n,
+            512,
+            sample_rate_hz=SAMPLE_RATE,
+        )
+        assert slot is not None
+        assert len(slot.active_ranges) == 2
+        assert slot.positions_per_unit[-1][0]["azimuth_deg"] == pytest.approx(90.0)
+
+    def test_subtract_object_slot_leaves_unselected_source_in_bed(self):
+        n = 1024
+        selected = _sine(440.0, n / SAMPLE_RATE)
+        unselected = _sine(880.0, n / SAMPLE_RATE)
+        selected_bed = encode_mono_to_bformat(selected, (1.0, 0.0, 0.0))
+        unselected_bed = encode_mono_to_bformat(unselected, (0.0, 1.0, 0.0))
+        bed_full = selected_bed + unselected_bed
+        slot = IamfObjectSlot(
+            slot_id=0,
+            track_id="selected",
+            samples=selected,
+            positions_per_unit=[
+                {
+                    0: {
+                        "azimuth_deg": 0.0,
+                        "elevation_deg": 0.0,
+                        "distance_norm": 0.2,
+                        "end_azimuth_deg": 0.0,
+                        "end_elevation_deg": 0.0,
+                        "end_distance_norm": 0.2,
+                    }
+                },
+                {
+                    0: {
+                        "azimuth_deg": 0.0,
+                        "elevation_deg": 0.0,
+                        "distance_norm": 0.2,
+                        "end_azimuth_deg": 0.0,
+                        "end_elevation_deg": 0.0,
+                        "end_distance_norm": 0.2,
+                    }
+                },
+            ],
+            unit_track_ids=["selected", "selected"],
+            active_ranges=[(0, n)],
+            score=1.0,
+        )
+
+        cleaned = _subtract_object_slot(bed_full, slot, 512, n)
+
+        assert np.sqrt(np.mean((cleaned - unselected_bed) ** 2)) < 1e-6
 
 
 # ── WAV I/O helpers ───────────────────────────────────────────────────────────

@@ -16,7 +16,7 @@
 use std::f32::consts::PI;
 
 use num_complex::Complex32;
-use rustfft::{FftPlanner, FftDirection};
+use rustfft::{FftDirection, FftPlanner};
 
 use crate::dsp_worker::SIRITH_MIC_POSITIONS_M;
 
@@ -242,8 +242,7 @@ fn steering_vector(
     std::array::from_fn(|ch| {
         let pos = mic_positions[ch];
         // Delay = dot(dir, pos) / c  (positive = towards source)
-        let delay_s = -(pos[0] * dir[0] + pos[1] * dir[1] + pos[2] * dir[2])
-            / SPEED_OF_SOUND_MPS;
+        let delay_s = -(pos[0] * dir[0] + pos[1] * dir[1] + pos[2] * dir[2]) / SPEED_OF_SOUND_MPS;
         let delay_samples = delay_s * sample_rate_hz;
         (0..n_bins)
             .map(|k| {
@@ -258,11 +257,7 @@ fn steering_vector(
 /// Compute scalar MVDR weight vector for one frequency bin.
 /// Returns a length-4 weight vector w such that the beamformed output is
 /// `y[k] = sum_i w_i.conj() * x_i[k]`.
-fn mvdr_weight_scalar(
-    x: [Complex32; 4],
-    d: [Complex32; 4],
-    reg: f32,
-) -> [Complex32; 4] {
+fn mvdr_weight_scalar(x: [Complex32; 4], d: [Complex32; 4], reg: f32) -> [Complex32; 4] {
     // Estimate rank-1 covariance R = x * x^H (outer product).
     // For a single snapshot we regularise: R_reg = x x^H + reg * I.
     // R^{-1} d via direct formula for diagonal + rank-1:
@@ -366,11 +361,7 @@ mod tests {
                 ],
                 fade_samples: Some(160),
             });
-            assert_eq!(
-                result.samples.len(),
-                n,
-                "output length mismatch for n={n}"
-            );
+            assert_eq!(result.samples.len(), n, "output length mismatch for n={n}");
         }
     }
 

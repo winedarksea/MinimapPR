@@ -1620,8 +1620,8 @@ fn is_client_disconnect(err: &dyn std::error::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifests::ManifestStore;
     use crate::journal_reader::{hex_digest, read_payload_with_mmap};
+    use crate::manifests::ManifestStore;
     use rusqlite::params;
     use serde_json::json;
 
@@ -1778,7 +1778,10 @@ mod tests {
             .unwrap();
 
         let manifest_store = ManifestStore::new(&tmp.path().join("store").join("journal"));
-        let manifests = manifest_store.query_pending("raw_journal_append").await.unwrap();
+        let manifests = manifest_store
+            .query_pending("raw_journal_append")
+            .await
+            .unwrap();
 
         assert_eq!(manifests.len(), 1);
         assert_eq!(manifests[0].created_ns, 1007);
@@ -3048,10 +3051,7 @@ mod tests {
             .expect("pending manifest path should have root parent")
             .join("consumed")
             .join(path.file_name().expect("manifest file name should exist"));
-        assert!(
-            consumed_path.exists(),
-            "consumed file should exist"
-        );
+        assert!(consumed_path.exists(), "consumed file should exist");
 
         let pending = manifest_store
             .query_pending("raw_journal_append")
@@ -3139,7 +3139,12 @@ mod tests {
 
         manifest_store.prune_consumed_manifests(2).await.unwrap();
 
-        let consumed_dir = tmp.path().join("store").join("journal").join("manifests").join("consumed");
+        let consumed_dir = tmp
+            .path()
+            .join("store")
+            .join("journal")
+            .join("manifests")
+            .join("consumed");
         let mut consumed_files = Vec::new();
         let mut entries = tokio::fs::read_dir(&consumed_dir).await.unwrap();
         while let Some(entry) = entries.next_entry().await.unwrap() {

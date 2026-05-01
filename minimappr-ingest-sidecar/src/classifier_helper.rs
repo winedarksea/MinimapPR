@@ -76,28 +76,25 @@ impl ManifestClassificationAnnotator {
     ) -> Result<Option<AuthoritativeClassification>, String> {
         let request_id = self.next_request_id;
         self.next_request_id = self.next_request_id.saturating_add(1);
-        let response_result = {
-            let bridge = self.ensure_bridge().await?;
-            let request = serde_json::to_string(&ClassifierRequest {
-                request_id,
-                pcm16le_path: &pcm16le_path.display().to_string(),
-                sample_rate_hz,
-            })
-            .map_err(|error| format!("failed to serialize classifier request: {error}"))?;
+        let response_result =
+            {
+                let bridge = self.ensure_bridge().await?;
+                let request = serde_json::to_string(&ClassifierRequest {
+                    request_id,
+                    pcm16le_path: &pcm16le_path.display().to_string(),
+                    sample_rate_hz,
+                })
+                .map_err(|error| format!("failed to serialize classifier request: {error}"))?;
 
-            timeout(
-                _CLASSIFIER_HELPER_TIMEOUT,
-                async {
+                timeout(_CLASSIFIER_HELPER_TIMEOUT, async {
                     bridge
                         .stdin
                         .write_all(request.as_bytes())
                         .await
                         .map_err(|error| format!("failed to write classifier request: {error}"))?;
-                    bridge
-                        .stdin
-                        .write_all(b"\n")
-                        .await
-                        .map_err(|error| format!("failed to terminate classifier request: {error}"))?;
+                    bridge.stdin.write_all(b"\n").await.map_err(|error| {
+                        format!("failed to terminate classifier request: {error}")
+                    })?;
                     bridge
                         .stdin
                         .flush()
@@ -114,11 +111,10 @@ impl ManifestClassificationAnnotator {
                         return Err("classifier helper closed stdout unexpectedly".to_string());
                     }
                     Self::parse_response(request_id, &response_line)
-                },
-            )
-            .await
-            .map_err(|_| "classifier helper timed out".to_string())?
-        };
+                })
+                .await
+                .map_err(|_| "classifier helper timed out".to_string())?
+            };
 
         if response_result.is_err() {
             self.bridge = None;

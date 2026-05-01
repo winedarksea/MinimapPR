@@ -108,7 +108,10 @@ pub fn estimate_tetrahedral_steering(
     let measured_tdoa = build_reference_measurements(reference_channel, &pair_observations);
     if measured_tdoa.len() < 3 {
         return SrpPhatEvaluation {
-            localization: degraded_localization("srp_phat_degraded_no_reference_pairs", sound_speed_mps),
+            localization: degraded_localization(
+                "srp_phat_degraded_no_reference_pairs",
+                sound_speed_mps,
+            ),
             pair_tdoas,
         };
     }
@@ -176,7 +179,7 @@ pub fn estimate_tetrahedral_steering(
     let confidence = ((0.6 * fit_score)
         + (0.25 * peak_score.clamp(0.0, 1.0))
         + (0.15 * contrast.clamp(0.0, 1.0)))
-        .clamp(0.0, 1.0);
+    .clamp(0.0, 1.0);
 
     let array_centroid_m = centroid(&ordered_channels, mic_positions_m);
     let steering_direction = normalize_or_zero(sub(best_position_m, array_centroid_m));
@@ -491,8 +494,14 @@ mod tests {
         let recovered_position_m = evaluation.localization.position_m.expect("SRP position");
         assert!(euclidean_distance(recovered_position_m, source_position_m) <= 0.08);
 
-        let expected_direction = normalize_or_zero(sub(source_position_m, centroid(&[0, 1, 2, 3], &mics)));
-        assert!(dot(evaluation.localization.steering_direction, expected_direction) > 0.95);
+        let expected_direction =
+            normalize_or_zero(sub(source_position_m, centroid(&[0, 1, 2, 3], &mics)));
+        assert!(
+            dot(
+                evaluation.localization.steering_direction,
+                expected_direction
+            ) > 0.95
+        );
         assert!(evaluation.localization.confidence >= 0.25);
     }
 
@@ -581,7 +590,10 @@ mod tests {
             SrpPhatConfig::default(),
         );
 
-        assert_eq!(evaluation.localization.resolved_algorithm, "srp_phat_degraded_partial_array");
+        assert_eq!(
+            evaluation.localization.resolved_algorithm,
+            "srp_phat_degraded_partial_array"
+        );
         assert_eq!(evaluation.localization.confidence, 0.0);
         assert!(evaluation.localization.position_m.is_none());
         assert_eq!(evaluation.pair_tdoas.len(), 3);
@@ -595,7 +607,12 @@ mod tests {
             [0.0, 0.0, 0.0],
             [0.02165, 0.025, 0.04082],
         ];
-        let channels = [vec![0.0; 512], vec![0.0; 512], vec![0.0; 512], vec![0.0; 512]];
+        let channels = [
+            vec![0.0; 512],
+            vec![0.0; 512],
+            vec![0.0; 512],
+            vec![0.0; 512],
+        ];
         let evaluation = estimate_tetrahedral_steering(
             &channels,
             &[0, 1, 2, 3],
@@ -605,7 +622,10 @@ mod tests {
             SrpPhatConfig::default(),
         );
 
-        assert_eq!(evaluation.localization.resolved_algorithm, "srp_phat_degraded_low_energy");
+        assert_eq!(
+            evaluation.localization.resolved_algorithm,
+            "srp_phat_degraded_low_energy"
+        );
         assert!(evaluation.localization.position_m.is_none());
         assert_eq!(evaluation.localization.confidence, 0.0);
     }
@@ -652,7 +672,9 @@ mod tests {
             euclidean_distance(source_position_m, position_m) / 343.2 * sample_rate_hz as f32
         });
         let min_delay_samples = delays_samples.iter().copied().fold(f32::INFINITY, f32::min);
-        delays_samples.map(|delay_samples| fractional_delay(&source, delay_samples - min_delay_samples, output_len))
+        delays_samples.map(|delay_samples| {
+            fractional_delay(&source, delay_samples - min_delay_samples, output_len)
+        })
     }
 
     fn fractional_delay(source: &[f32], delay_samples: f32, output_len: usize) -> Vec<f32> {

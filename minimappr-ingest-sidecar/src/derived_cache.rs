@@ -64,10 +64,50 @@ impl DerivedCache {
     }
 
     pub async fn reserve_for_write(&self, append_length_bytes: u64) -> BoxedResult<()> {
-        if self.config.budget_bytes == 0 {
-            return Ok(());
+        let (index, changed) = self.evict_index_for_append(append_length_bytes).await?;
+        if changed {
+            self.write_index(&index).await?;
         }
+        Ok(())
+    }
+
+    pub async fn record_entry(
+        &self,
+        artifact_type: String,
+        payload: &[u8],
+        source_journal_ids: Vec<String>,
+        now_ns: u128,
+    ) -> BoxedResult<DerivedCacheEntry> {
+        let append_length_bytes = u64::try_from(payload.len())?;
+        let (mut index, _) = self.evict_index_for_append(append_length_bytes).await?;
+        fs::create_dir_all(&self.root).await?;
+        let derived_id = format!("derived-{}", Uuid::new_v4());
+        let path = self.root.join(format!("{derived_id}.bin"));
+        fs::write(&path, payload).await?;
+        let entry = DerivedCacheEntry {
+            derived_id,
+            artifact_type,
+            path,
+            byte_length: u64::try_from(payload.len())?,
+            created_ns: now_ns,
+            last_access_ns: now_ns,
+            source_journal_ids,
+        };
+        index.entries.push(entry.clone());
+        self.write_index(&index).await?;
+        Ok(entry)
+    }
+
+    async fn evict_index_for_append(
+        &self,
+        append_length_bytes: u64,
+    ) -> BoxedResult<(DerivedCacheIndex, bool)> {
+        if self.config.budget_bytes == 0 {
+            return Ok((self.read_index().await?, false));
+        }
+
         let mut index = self.read_index().await?;
+        let mut changed = false;
         while total_bytes(&index)
             .saturating_add(append_length_bytes)
             .saturating_add(self.config.admission_reserve_bytes)
@@ -84,37 +124,10 @@ impl DerivedCache {
             };
             let evicted = index.entries.remove(oldest);
             let _ = fs::remove_file(evicted.path).await;
+            changed = true;
         }
-        self.write_index(&index).await?;
-        Ok(())
-    }
 
-    pub async fn record_entry(
-        &self,
-        artifact_type: String,
-        payload: &[u8],
-        source_journal_ids: Vec<String>,
-        now_ns: u128,
-    ) -> BoxedResult<DerivedCacheEntry> {
-        self.reserve_for_write(u64::try_from(payload.len())?)
-            .await?;
-        fs::create_dir_all(&self.root).await?;
-        let derived_id = format!("derived-{}", Uuid::new_v4());
-        let path = self.root.join(format!("{derived_id}.bin"));
-        fs::write(&path, payload).await?;
-        let mut index = self.read_index().await?;
-        let entry = DerivedCacheEntry {
-            derived_id,
-            artifact_type,
-            path,
-            byte_length: u64::try_from(payload.len())?,
-            created_ns: now_ns,
-            last_access_ns: now_ns,
-            source_journal_ids,
-        };
-        index.entries.push(entry.clone());
-        self.write_index(&index).await?;
-        Ok(entry)
+        Ok((index, changed))
     }
 
     /// Update `last_access_ns` for an existing entry so LRU eviction stays accurate.

@@ -105,7 +105,9 @@ impl ManifestStore {
         if manifest.manifest_id.is_empty() {
             manifest.manifest_id = format!("manifest-{}", Uuid::new_v4());
         }
-        let path = self.pending_root().join(format!("{}.json", manifest.manifest_id));
+        let path = self
+            .pending_root()
+            .join(format!("{}.json", manifest.manifest_id));
         let tmp_path = self
             .pending_root()
             .join(format!(".{}.json.tmp", manifest.manifest_id));

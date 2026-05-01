@@ -31,19 +31,19 @@ use axum::{
 use clap::Parser;
 use derived_cache::DerivedCache;
 use dsp_worker::{DspWorker, DspWorkerConfig, SharedDspState};
-use ingest_backend::{
-    BodyTooLargeError, ClientDisconnectError, IngestBackend, IngestStorageMode,
-    InvalidIngestEnvelopeError, JournalCapacityExceededError, JournalRuntimeConfig,
-};
 use iamf_writer::{
     split_bed_into_frames, split_object_into_frames, IamfScene, IamfWriter, LoudnessInfo,
     ObjectPosition, ObjectPositions,
 };
+use ingest_backend::{
+    BodyTooLargeError, ClientDisconnectError, IngestBackend, IngestStorageMode,
+    InvalidIngestEnvelopeError, JournalCapacityExceededError, JournalRuntimeConfig,
+};
 use leases::PinLeaseRequest;
 use render_mvdr::{render_mvdr, MvdrRenderRequest, TrajectoryWaypoint};
 use serde::{Deserialize, Serialize};
-use stream_range_lease::{StreamRangeLeaseRequest, StreamRangeLeaseStore};
 use std::sync::Arc;
+use stream_range_lease::{StreamRangeLeaseRequest, StreamRangeLeaseStore};
 use tokio::sync::Mutex;
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
@@ -141,16 +141,19 @@ struct Args {
 
     #[arg(
         long,
+        env = "MINIMAPPR_CLASSIFIER_RENDER_MIN_INTERVAL_SECONDS",
+        default_value_t = -1.0
+    )]
+    classifier_render_min_interval_seconds: f64,
+
+    #[arg(
+        long,
         env = "MINIMAPPR_MAX_SENSOR_BUFFER_SECONDS",
         default_value_t = 8.0
     )]
     max_sensor_buffer_seconds: f64,
 
-    #[arg(
-        long,
-        env = "MINIMAPPR_DSP_PENDING_BATCH_SIZE",
-        default_value_t = 128
-    )]
+    #[arg(long, env = "MINIMAPPR_DSP_PENDING_BATCH_SIZE", default_value_t = 128)]
     dsp_pending_batch_size: usize,
 
     #[arg(
@@ -223,18 +226,10 @@ struct Args {
     )]
     birdnet_pre_blend_highpass_hz: f32,
 
-    #[arg(
-        long,
-        env = "MINIMAPPR_DEFAULT_TEMPERATURE_C",
-        default_value_t = 20.0
-    )]
+    #[arg(long, env = "MINIMAPPR_DEFAULT_TEMPERATURE_C", default_value_t = 20.0)]
     default_temperature_c: f32,
 
-    #[arg(
-        long,
-        env = "MINIMAPPR_DEFAULT_HUMIDITY",
-        default_value_t = 0.5
-    )]
+    #[arg(long, env = "MINIMAPPR_DEFAULT_HUMIDITY", default_value_t = 0.5)]
     default_humidity_fraction: f32,
 
     #[arg(long, env = "MINIMAPPR_SIDECAR_CLASSIFIER_COMMAND_JSON")]
@@ -302,18 +297,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             // a longer context window via MINIMAPPR_CLASSIFICATION_WINDOW_SECONDS.
             localization_window_seconds
         } else {
-            args.classification_window_seconds.max(localization_window_seconds)
+            args.classification_window_seconds
+                .max(localization_window_seconds)
         };
         let max_sensor_buffer_seconds = args
             .max_sensor_buffer_seconds
             .max(classification_window_seconds)
             .max(localization_window_seconds);
+        let classifier_render_min_interval_seconds =
+            if args.classifier_render_min_interval_seconds >= 0.0 {
+                args.classifier_render_min_interval_seconds
+            } else if args.runtime_profile == "birdnet_hybrid_production" {
+                1.0
+            } else {
+                0.0
+            };
         let worker = DspWorker::new(
             manifest_store,
             derived_cache,
             DspWorkerConfig {
                 window_seconds: localization_window_seconds,
                 classification_window_seconds,
+                classifier_render_min_interval_seconds,
                 max_buffer_seconds: max_sensor_buffer_seconds,
                 pending_manifest_batch_size: args.dsp_pending_batch_size,
                 birdnet_hybrid_render_enabled: args.runtime_profile == "birdnet_hybrid_production",
@@ -343,9 +348,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         info!("DSP worker spawned");
     }
 
-    let range_lease_store = backend.journal_root().map(|root| {
-        Arc::new(StreamRangeLeaseStore::new(root))
-    });
+    let range_lease_store = backend
+        .journal_root()
+        .map(|root| Arc::new(StreamRangeLeaseStore::new(root)));
 
     let state = AppState {
         derived_cache: backend.derived_cache(),
@@ -614,14 +619,6 @@ async fn dsp_results(
             .cloned()
             .collect()
     };
-    if let Some(derived_cache) = state.derived_cache.as_ref() {
-        let now_ns = current_unix_ns();
-        for result in &results {
-            if let Some(handle) = result.derived_handle.as_ref() {
-                let _ = derived_cache.touch(&handle.segment_id, now_ns).await;
-            }
-        }
-    }
     Json(results).into_response()
 }
 
@@ -727,6 +724,7 @@ struct JournalRangeEntry {
     segment_id: String,
     first_toa_ns: Option<u64>,
     last_toa_ns: Option<u64>,
+    sample_rate_hz: Option<u32>,
     payload_bytes: u64,
     segment_path: std::path::PathBuf,
 }
@@ -776,6 +774,7 @@ async fn journal_range(
         let last_toa = header["last_toa_ns"].as_u64();
         let segment_id = header["segment_id"].as_str().unwrap_or("").to_string();
         let payload_bytes = header["payload_bytes"].as_u64().unwrap_or(0);
+        let sample_rate = header["sample_rate_hz"].as_u64().map(|v| v as u32);
 
         // Overlap test: segment range [first_toa, last_toa] overlaps [start_ns, end_ns].
         let seg_start = first_toa.unwrap_or(u64::MAX);
@@ -786,6 +785,7 @@ async fn journal_range(
                 segment_id,
                 first_toa_ns: first_toa,
                 last_toa_ns: last_toa,
+                sample_rate_hz: sample_rate,
                 payload_bytes,
                 segment_path: bin_path,
             });
@@ -820,9 +820,7 @@ struct MvdrResponse {
     sample_rate_hz: u32,
 }
 
-async fn render_mvdr_endpoint(
-    Json(request): Json<MvdrRequest>,
-) -> Response {
+async fn render_mvdr_endpoint(Json(request): Json<MvdrRequest>) -> Response {
     let waypoints = request
         .trajectory
         .into_iter()
@@ -872,7 +870,11 @@ struct LoudnessInfoDto {
 struct ObjectPositionDto {
     azimuth_deg: f32,
     elevation_deg: f32,
-    distance_m: f32,
+    distance_norm: Option<f32>,
+    distance_m: Option<f32>,
+    end_azimuth_deg: Option<f32>,
+    end_elevation_deg: Option<f32>,
+    end_distance_norm: Option<f32>,
 }
 
 async fn encode_iamf(Json(request): Json<IamfEncodeRequest>) -> Response {
@@ -908,8 +910,7 @@ async fn encode_iamf(Json(request): Json<IamfEncodeRequest>) -> Response {
 
     let n_frames = bed_frame_chunks[0].len();
     for fi in 0..n_frames {
-        let bed_frames: [Vec<u8>; 4] =
-            std::array::from_fn(|ch| bed_frame_chunks[ch][fi].clone());
+        let bed_frames: [Vec<u8>; 4] = std::array::from_fn(|ch| bed_frame_chunks[ch][fi].clone());
         let object_frames: Vec<Vec<u8>> = object_frame_chunks
             .iter()
             .map(|chunks| chunks.get(fi).cloned().unwrap_or_default())
@@ -927,7 +928,10 @@ async fn encode_iamf(Json(request): Json<IamfEncodeRequest>) -> Response {
                     ObjectPosition {
                         azimuth_deg: p.azimuth_deg,
                         elevation_deg: p.elevation_deg,
-                        distance_m: p.distance_m,
+                        distance_norm: p.distance_norm.or(p.distance_m).unwrap_or(0.0),
+                        end_azimuth_deg: p.end_azimuth_deg,
+                        end_elevation_deg: p.end_elevation_deg,
+                        end_distance_norm: p.end_distance_norm,
                     },
                 )
             })
