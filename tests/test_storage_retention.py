@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -40,6 +42,49 @@ async def test_storage_recovery_preserves_nonempty_wal(tmp_path: Path) -> None:
     assert await storage._recover_empty_wal_sidecars() is False
     assert wal_path.read_bytes() == b"pending-wal"
     assert shm_path.read_bytes() == b"active-shm"
+
+
+@pytest.mark.asyncio
+async def test_storage_initialize_retries_schema_after_disk_io_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = Storage(tmp_path / "retry.db")
+    call_counts: dict[str, int] = {
+        "open": 0,
+        "configure": 0,
+        "schema": 0,
+        "recover": 0,
+    }
+
+    async def _open_connection_stub() -> None:
+        call_counts["open"] += 1
+
+    async def _configure_connection_stub() -> None:
+        call_counts["configure"] += 1
+
+    async def _initialize_schema_and_migrations_stub() -> None:
+        call_counts["schema"] += 1
+        if call_counts["schema"] == 1:
+            raise sqlite3.OperationalError("disk I/O error")
+
+    async def _recover_empty_wal_sidecars_stub() -> bool:
+        call_counts["recover"] += 1
+        return True
+
+    monkeypatch.setattr(storage, "_open_connection", _open_connection_stub)
+    monkeypatch.setattr(storage, "_configure_connection", _configure_connection_stub)
+    monkeypatch.setattr(storage, "_initialize_schema_and_migrations", _initialize_schema_and_migrations_stub)
+    monkeypatch.setattr(storage, "_recover_empty_wal_sidecars", _recover_empty_wal_sidecars_stub)
+
+    await storage.initialize()
+
+    assert call_counts == {
+        "open": 2,
+        "configure": 2,
+        "schema": 2,
+        "recover": 1,
+    }
 
 
 @pytest.mark.asyncio

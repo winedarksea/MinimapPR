@@ -13,6 +13,7 @@ import contextlib
 import json
 import logging
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -20,6 +21,13 @@ from typing import Any, Literal
 from pydantic import ValidationError
 
 from minimappr.api.journal_reader import JournalPayloadHandle
+from minimappr.api.rust_dsp_manifests import (
+    JournalCursorUpdate,
+    LocalizedClassifierRenderRequest,
+    LocalizedRenderManifestBundle,
+    load_localized_render_manifest_bundle,
+    manifest_source_key,
+)
 from minimappr.api.binary_ingest import parse_binary_ingest_payload
 from minimappr.api.journal_state import JournalConsumerCursor, JournalConsumerStateStore
 from minimappr.interfaces import IngestTransport
@@ -41,6 +49,7 @@ class IngestSpoolConfig:
     worker_count: int
     storage_mode: IngestStorageMode = "spool"
     consumer_name: str = "python-ingest"
+    runtime_profile: str = "default"
 
     @property
     def tmp_dir(self) -> Path:
@@ -74,6 +83,10 @@ class IngestSpoolConfig:
     def journal_consumer_state_path(self) -> Path:
         return self.journal_dir / "consumer_state.sqlite3"
 
+    @property
+    def journal_manifest_dir(self) -> Path:
+        return self.journal_dir / "manifests" / "pending"
+
 
 @dataclass(frozen=True, slots=True)
 class SpoolProcessingSummary:
@@ -100,6 +113,7 @@ class IngestSpoolConsumer:
         ]
         if self._config.storage_mode == "journal":
             directories.append(self._config.journal_streams_dir)
+            directories.append(self._config.journal_manifest_dir)
         for directory in directories:
             directory.mkdir(parents=True, exist_ok=True)
         if self._config.storage_mode == "journal":
@@ -173,7 +187,13 @@ class IngestSpoolConsumer:
         processed = 0
         expired = 0
         failed = 0
-        claimed_paths = await self._claim_ready_items()
+        lease_owner = f"{time.time_ns()}-{uuid.uuid4().hex[:8]}"
+        leased_processing_paths = await asyncio.to_thread(
+            _lease_existing_processing_claims_oldest_first,
+            self._config.processing_dir,
+            lease_owner,
+        )
+        claimed_paths = leased_processing_paths + await self._claim_ready_items()
         for claimed_path in claimed_paths:
 
             try:
@@ -227,6 +247,15 @@ class IngestSpoolConsumer:
         )
 
     async def _claim_ready_items(self) -> list[Path]:
+        if self._should_consume_rust_dsp_manifests():
+            return await asyncio.to_thread(
+                _claim_rust_dsp_manifests_oldest_first,
+                self._config.journal_manifest_dir,
+                self._config.journal_streams_dir,
+                self._config.processing_dir,
+                self._config.journal_consumer_state_path,
+                self._config.consumer_name,
+            )
         if self._config.storage_mode == "journal":
             return await asyncio.to_thread(
                 _claim_journal_entries_oldest_first,
@@ -249,6 +278,12 @@ class IngestSpoolConsumer:
         return claimed_paths
 
     async def _load_claimed_item(self, claimed_path: Path) -> "ClaimedIngestItem":
+        if claimed_path.name.endswith(".rustdsp.json"):
+            return await asyncio.to_thread(
+                _load_claimed_rust_dsp_item,
+                claimed_path,
+                self._config.journal_streams_dir,
+            )
         if self._config.storage_mode == "journal":
             return await asyncio.to_thread(
                 _load_claimed_journal_item,
@@ -258,6 +293,9 @@ class IngestSpoolConsumer:
         return await asyncio.to_thread(_load_claimed_spool_item, claimed_path)
 
     async def _deliver_item(self, item: "ClaimedIngestItem") -> None:
+        if isinstance(item, ClaimedLocalizedRenderItem):
+            await self._ingest_transport.deliver_localized_render(item.localized_render_request)
+            return
         raw_payload = await asyncio.to_thread(item.read_payload_bytes)
         if item.endpoint == "/api/v1/ingest/binary":
             payload = parse_binary_ingest_payload(raw_payload)
@@ -272,6 +310,12 @@ class IngestSpoolConsumer:
             await self._ingest_transport.deliver_store_forward(payload)
             return
         raise ValueError(f"Unsupported ingest spool endpoint {item.endpoint!r}")
+
+    def _should_consume_rust_dsp_manifests(self) -> bool:
+        return (
+            self._config.storage_mode == "journal"
+            and self._config.runtime_profile == "birdnet_hybrid_production"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,6 +352,16 @@ class ClaimedIngestItem:
             integrity_hash=self.integrity_hash,
             segment_path=self.segment_path,
         ).read_bytes()
+
+
+@dataclass(frozen=True, slots=True)
+class ClaimedLocalizedRenderItem:
+    ingest_id: str
+    source_kind: Literal["journal_localized_render_manifest"]
+    received_ns: int
+    cleanup_paths: tuple[Path, ...]
+    cursor_updates: tuple[JournalCursorUpdate, ...]
+    localized_render_request: LocalizedClassifierRenderRequest
 
 
 def _list_ready_manifests_oldest_first(ready_dir: Path) -> list[Path]:
@@ -418,6 +472,21 @@ def _complete_claimed_item(
     consumer_name: str,
     status: Literal["processed", "expired"],
 ) -> None:
+    if isinstance(item, ClaimedLocalizedRenderItem):
+        state_store = JournalConsumerStateStore(journal_consumer_state_path)
+        handled_ns = time.time_ns()
+        for cursor_update in item.cursor_updates:
+            state_store.mark_handled(
+                consumer_name=consumer_name,
+                stream_key=cursor_update.stream_key,
+                journal_epoch=cursor_update.journal_epoch,
+                journal_sequence=cursor_update.journal_sequence,
+                journal_id=cursor_update.journal_id,
+                status=status,
+                handled_ns=handled_ns,
+            )
+        _delete_item_files(item.cleanup_paths)
+        return
     if item.source_kind == "journal":
         if item.stream_key is None or item.journal_epoch is None or item.journal_sequence is None:
             raise ValueError(f"Journal item {item.ingest_id} is missing durable cursor metadata")
@@ -445,6 +514,27 @@ def _move_claimed_item_to_failed(
     with contextlib.suppress(Exception):
         with manifest_path.open("r", encoding="utf-8") as handle:
             metadata = json.load(handle)
+        if str(metadata.get("source_kind", "")).strip().lower() == "journal_localized_render_manifest":
+            state_store = JournalConsumerStateStore(journal_consumer_state_path)
+            handled_ns = time.time_ns()
+            for payload in metadata.get("cursor_updates", []):
+                state_store.mark_handled(
+                    consumer_name=consumer_name,
+                    stream_key=str(payload["stream_key"]),
+                    journal_epoch=int(payload["journal_epoch"]),
+                    journal_sequence=int(payload["journal_sequence"]),
+                    journal_id=str(payload["journal_id"]),
+                    status="failed",
+                    handled_ns=handled_ns,
+                    detail=detail,
+                )
+            for filename in metadata.get("cleanup_filenames", []):
+                path = manifest_path.parent / str(filename)
+                if path.exists():
+                    path.replace(failed_dir / path.name)
+            if manifest_path.exists():
+                manifest_path.replace(failed_dir / manifest_path.name)
+            return
         if str(metadata.get("source_kind", "")).strip().lower() == "journal":
             JournalConsumerStateStore(journal_consumer_state_path).mark_handled(
                 consumer_name=consumer_name,
@@ -565,7 +655,202 @@ def _processing_stream_keys(processing_dir: Path) -> set[str]:
             stream_key = str(metadata.get("stream_key") or "")
             if stream_key:
                 stream_keys.add(stream_key)
+    for claim_path in processing_dir.glob("*.rustdsp.json"):
+        with contextlib.suppress(Exception):
+            metadata = json.loads(claim_path.read_text(encoding="utf-8"))
+            for stream_key in metadata.get("stream_keys", []):
+                stream_key_text = str(stream_key or "")
+                if stream_key_text:
+                    stream_keys.add(stream_key_text)
     return stream_keys
+
+
+def _lease_existing_processing_claims_oldest_first(
+    processing_dir: Path,
+    lease_owner: str,
+) -> list[Path]:
+    """Atomically lease pre-existing processing claim files for retry.
+
+    Claims are the control files consumed by ``_load_claimed_item``:
+    - ``*.journal.json`` for raw journal entries
+    - ``*.rustdsp.json`` for paired Rust DSP manifests
+    """
+    if not processing_dir.exists():
+        return []
+
+    candidates: list[Path] = []
+    candidates.extend(processing_dir.glob("*.journal.json"))
+    candidates.extend(processing_dir.glob("*.rustdsp.json"))
+
+    leased: list[Path] = []
+    for claim_path in sorted(candidates, key=lambda path: path.stat().st_mtime_ns):
+        lease_path = claim_path.with_name(f"lease-{lease_owner}-{claim_path.name}")
+        try:
+            claim_path.replace(lease_path)
+        except FileNotFoundError:
+            continue
+        leased.append(lease_path)
+    return leased
+
+
+def _load_claimed_rust_dsp_item(
+    claim_path: Path,
+    journal_streams_dir: Path,
+) -> ClaimedLocalizedRenderItem:
+    with claim_path.open("r", encoding="utf-8") as handle:
+        metadata = json.load(handle)
+    primary_manifest_path = claim_path.parent / str(metadata["primary_manifest_filename"])
+    paired_manifest_filename = metadata.get("paired_manifest_filename")
+    paired_manifest_path = claim_path.parent / str(paired_manifest_filename) if paired_manifest_filename else None
+    primary_manifest_payload = json.loads(primary_manifest_path.read_text(encoding="utf-8"))
+    paired_manifest_payload = (
+        json.loads(paired_manifest_path.read_text(encoding="utf-8"))
+        if paired_manifest_path is not None and paired_manifest_path.exists()
+        else None
+    )
+    bundle = load_localized_render_manifest_bundle(
+        manifest_payload=primary_manifest_payload,
+        journal_streams_dir=journal_streams_dir,
+        paired_classifier_manifest_payload=paired_manifest_payload,
+    )
+    cleanup_paths: list[Path] = [claim_path, primary_manifest_path]
+    if paired_manifest_path is not None:
+        cleanup_paths.append(paired_manifest_path)
+    return ClaimedLocalizedRenderItem(
+        ingest_id=str(metadata.get("ingest_id") or primary_manifest_payload.get("manifest_id") or claim_path.stem),
+        source_kind="journal_localized_render_manifest",
+        received_ns=int(metadata.get("received_ns") or primary_manifest_payload.get("created_ns") or time.time_ns()),
+        cleanup_paths=tuple(cleanup_paths),
+        cursor_updates=bundle.cursor_updates,
+        localized_render_request=bundle.request,
+    )
+
+
+def _claim_rust_dsp_manifests_oldest_first(
+    journal_manifest_dir: Path,
+    journal_streams_dir: Path,
+    processing_dir: Path,
+    journal_consumer_state_path: Path,
+    consumer_name: str,
+) -> list[Path]:
+    if not journal_manifest_dir.exists():
+        return []
+
+    processing_dir.mkdir(parents=True, exist_ok=True)
+    state_store = JournalConsumerStateStore(journal_consumer_state_path)
+    state_store.ensure_initialized()
+    cursor_by_stream = state_store.load_cursors(consumer_name)
+    active_stream_keys = _processing_stream_keys(processing_dir)
+
+    localization_candidates: dict[tuple[tuple[Any, ...], ...], tuple[Path, dict[str, Any]]] = {}
+    classifier_candidates: dict[tuple[tuple[Any, ...], ...], tuple[Path, dict[str, Any]]] = {}
+
+    for manifest_path in sorted(journal_manifest_dir.glob("*.json")):
+        if not manifest_path.is_file() or manifest_path.name.startswith("."):
+            continue
+        with contextlib.suppress(Exception):
+            manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest_type = str(manifest_payload.get("manifest_type") or "")
+            source_key = manifest_source_key(manifest_payload)
+            if not source_key:
+                continue
+            if manifest_type == "localization_result" and manifest_payload.get("classifier_render") is not None:
+                localization_candidates[source_key] = (manifest_path, manifest_payload)
+            elif manifest_type == "classifier_render" and manifest_payload.get("derived_handle") is not None:
+                classifier_candidates[source_key] = (manifest_path, manifest_payload)
+
+    claims: list[tuple[int, Path, dict[str, Any], Path | None, dict[str, Any] | None]] = []
+    for source_key, (localization_path, localization_payload) in localization_candidates.items():
+        classifier_path, classifier_payload = classifier_candidates.get(source_key, (None, None))
+        claims.append(
+            (
+                int(localization_payload.get("created_ns") or 0),
+                localization_path,
+                localization_payload,
+                classifier_path,
+                classifier_payload,
+            )
+        )
+    for source_key, (classifier_path, classifier_payload) in classifier_candidates.items():
+        if source_key in localization_candidates:
+            continue
+        claims.append(
+            (
+                int(classifier_payload.get("created_ns") or 0),
+                classifier_path,
+                classifier_payload,
+                None,
+                None,
+            )
+        )
+
+    claimed_paths: list[Path] = []
+    claimed_stream_keys = set(active_stream_keys)
+    for _, primary_path, primary_payload, paired_path, paired_payload in sorted(claims, key=lambda item: item[0]):
+        with contextlib.suppress(Exception):
+            bundle = load_localized_render_manifest_bundle(
+                manifest_payload=primary_payload,
+                journal_streams_dir=journal_streams_dir,
+                paired_classifier_manifest_payload=paired_payload,
+            )
+            stream_keys = {cursor_update.stream_key for cursor_update in bundle.cursor_updates}
+            if stream_keys & claimed_stream_keys:
+                continue
+            if bundle.cursor_updates and all(
+                _cursor_covers_entry(
+                    cursor_by_stream.get(cursor_update.stream_key),
+                    cursor_update.journal_epoch,
+                    cursor_update.journal_sequence,
+                )
+                for cursor_update in bundle.cursor_updates
+            ):
+                with contextlib.suppress(FileNotFoundError):
+                    primary_path.unlink()
+                if paired_path is not None:
+                    with contextlib.suppress(FileNotFoundError):
+                        paired_path.unlink()
+                continue
+
+            primary_processing_path = processing_dir / primary_path.name
+            paired_processing_path: Path | None = None
+            primary_path.replace(primary_processing_path)
+            if paired_path is not None:
+                paired_processing_path = processing_dir / paired_path.name
+                paired_path.replace(paired_processing_path)
+
+            claim_payload = {
+                "source_kind": "journal_localized_render_manifest",
+                "ingest_id": bundle.request.manifest_id,
+                "received_ns": int(primary_payload.get("created_ns") or time.time_ns()),
+                "stream_keys": sorted(stream_keys),
+                "cursor_updates": [
+                    {
+                        "journal_id": cursor_update.journal_id,
+                        "stream_key": cursor_update.stream_key,
+                        "journal_epoch": cursor_update.journal_epoch,
+                        "journal_sequence": cursor_update.journal_sequence,
+                    }
+                    for cursor_update in bundle.cursor_updates
+                ],
+                "primary_manifest_filename": primary_processing_path.name,
+                "paired_manifest_filename": paired_processing_path.name if paired_processing_path is not None else None,
+                "cleanup_filenames": [
+                    name
+                    for name in (
+                        primary_processing_path.name,
+                        paired_processing_path.name if paired_processing_path is not None else None,
+                    )
+                    if name is not None
+                ],
+            }
+            claim_path = processing_dir / f"{bundle.request.manifest_id}.rustdsp.json"
+            with claim_path.open("x", encoding="utf-8") as handle:
+                json.dump(claim_payload, handle)
+                handle.write("\n")
+            claimed_paths.append(claim_path)
+            claimed_stream_keys.update(stream_keys)
+
+    return claimed_paths
 
 
 def _cursor_covers_entry(

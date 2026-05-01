@@ -17,6 +17,8 @@ pub struct JournalPayloadHandle {
     pub stream_key: String,
     pub payload_offset_bytes: u64,
     pub payload_length_bytes: u64,
+    pub toa_ns: Option<u64>,
+    pub tor_ns: Option<u64>,
     pub sample_index_start: Option<u64>,
     pub sample_count: Option<u64>,
     pub integrity_hash: String,

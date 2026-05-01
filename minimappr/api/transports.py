@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 
 from minimappr.api.binary_ingest import BinaryIngestPayload
+from minimappr.api.rust_dsp_manifests import LocalizedClassifierRenderRequest
 from minimappr.core.fusion_node import FusionNode
 from minimappr.interfaces import IngestTransport
 from minimappr.models import (
@@ -36,6 +37,9 @@ class HttpIngestTransport(IngestTransport):
             buffered_frames=payload.buffered_frames,
             sort_by_toa=payload.sort_by_toa,
         )
+
+    async def deliver_localized_render(self, payload: LocalizedClassifierRenderRequest) -> None:
+        await self._fusion_node.ingest_localized_render(payload)
 
     async def _deliver_buffered_frames(self, *, node, buffered_frames, sort_by_toa: bool) -> StoreForwardIngestResponse:
         ordered_frames = buffered_frames

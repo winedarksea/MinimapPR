@@ -7,6 +7,7 @@ import contextlib
 import json
 import logging
 import os
+import sys
 import time
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -84,6 +85,13 @@ frontend_dir = Path(__file__).parent / "frontend"
 _SIDECAR_READY_TIMEOUT_SECONDS = 5.0
 _SIDECAR_READY_POLL_INTERVAL_SECONDS = 0.1
 _SIDECAR_HEALTHCHECK_TIMEOUT_SECONDS = 0.5
+
+
+def _default_sidecar_classifier_command_json(settings: "Settings") -> str | None:
+    # Keep the Rust sidecar on transport/DSP work only. Synchronous BirdNET
+    # annotation blocks render publication, which makes live audio/debug stale;
+    # Python classification still runs after the render is promoted.
+    return None
 
 
 def _parse_window_ns(window: str) -> int:
@@ -237,6 +245,28 @@ class _SidecarState:
         self._current_process: "asyncio.subprocess.Process | None" = None
 
 
+def _ingest_sidecar_is_running(state) -> bool:
+    sidecar_state: _SidecarState | None = getattr(state, "sidecar_state", None)
+    return bool(
+        state.settings.ingest_sidecar_enabled
+        and sidecar_state is not None
+        and sidecar_state.status == "running"
+    )
+
+
+def _should_block_direct_ingest(state) -> bool:
+    """Return True when direct ingest must be rejected in favor of sidecar ingest.
+
+    Direct ingest should only be hard-blocked when operators disabled it and the
+    sidecar is confirmed running. If sidecar startup fails (missing binary,
+    crash, misconfiguration), we fail open to keep nodes reporting instead of
+    creating a complete ingest outage.
+    """
+    if state.settings.direct_ingest_enabled:
+        return False
+    return _ingest_sidecar_is_running(state)
+
+
 def _sidecar_healthcheck_url(port: int) -> str:
     return f"http://127.0.0.1:{port}/healthz"
 
@@ -376,22 +406,51 @@ async def _start_ingest_sidecar(
         "MINIMAPPR_SIDECAR_ADMISSION_RESERVE_BYTES": str(
             settings.ingest_sidecar_admission_reserve_bytes
         ),
+        "MINIMAPPR_SIDECAR_ALLOW_NON_TMPFS_JOURNAL": str(
+            bool(getattr(settings, "ingest_sidecar_allow_non_tmpfs_journal", False))
+        ).lower(),
         "MINIMAPPR_RUNTIME_PROFILE": str(getattr(settings, "runtime_profile", "default")),
+        "MINIMAPPR_LOCALIZATION_WINDOW_SECONDS": str(
+            getattr(settings, "localization_window_seconds", 0.08)
+        ),
+        "MINIMAPPR_CLASSIFICATION_WINDOW_SECONDS": str(
+            getattr(settings, "classification_window_seconds", 30.0)
+        ),
+        "MINIMAPPR_MAX_SENSOR_BUFFER_SECONDS": str(
+            getattr(settings, "max_sensor_buffer_seconds", 32.0)
+        ),
         "MINIMAPPR_LOCALIZATION_BAND_MIN_HZ": str(
             getattr(settings, "localization_band_min_hz", 300.0)
         ),
         "MINIMAPPR_LOCALIZATION_BAND_MAX_HZ": str(
             getattr(settings, "localization_band_max_hz", 3500.0)
         ),
+        "MINIMAPPR_DEFAULT_TEMPERATURE_C": str(getattr(settings, "default_temperature_c", 20.0)),
+        "MINIMAPPR_DEFAULT_HUMIDITY": str(getattr(settings, "default_humidity", 0.5)),
+        "MINIMAPPR_SITE_ORIGIN_LAT": str(getattr(settings, "site_origin_lat", 0.0)),
+        "MINIMAPPR_SITE_ORIGIN_LON": str(getattr(settings, "site_origin_lon", 0.0)),
+        "MINIMAPPR_SITE_ORIGIN_ALT_M": str(getattr(settings, "site_origin_alt_m", 0.0)),
+        "MINIMAPPR_BIRDNET_TRIGGER_MIN_CONFIDENCE": str(
+            getattr(settings, "birdnet_trigger_min_confidence", 0.4)
+        ),
+        "MINIMAPPR_BIRDNET_GEO_MIN_CONFIDENCE": str(
+            getattr(settings, "birdnet_geo_min_confidence", 0.03)
+        ),
     }
+    classifier_command_json = os.environ.get("MINIMAPPR_SIDECAR_CLASSIFIER_COMMAND_JSON")
+    if classifier_command_json is None:
+        classifier_command_json = _default_sidecar_classifier_command_json(settings)
+    if classifier_command_json is not None:
+        env["MINIMAPPR_SIDECAR_CLASSIFIER_COMMAND_JSON"] = classifier_command_json
     logger.info(
-        "Starting ingest sidecar: %s (port %d, storage %s, spool %s, journal budget %d, reserve %d)",
+        "Starting ingest sidecar: %s (port %d, storage %s, spool %s, journal budget %d, reserve %d, allow non-tmpfs %s)",
         binary,
         settings.ingest_sidecar_port,
         settings.ingest_storage_mode,
         settings.ingest_spool_dir,
         settings.ingest_sidecar_total_journal_budget_bytes,
         settings.ingest_sidecar_admission_reserve_bytes,
+        bool(getattr(settings, "ingest_sidecar_allow_non_tmpfs_journal", False)),
     )
     process = await asyncio.create_subprocess_exec(str(binary), env=env)
     await _wait_for_ingest_sidecar_ready(process, port=settings.ingest_sidecar_port)
@@ -482,6 +541,7 @@ async def lifespan(app: FastAPI):
             worker_count=settings.ingest_spool_worker_count,
             storage_mode=settings.ingest_storage_mode,
             consumer_name=settings.ingest_consumer_name,
+            runtime_profile=settings.runtime_profile,
         ),
         ingest_transport=ingest_transport,
     )
@@ -502,6 +562,13 @@ async def lifespan(app: FastAPI):
             sidecar_state.status = "binary_not_found"
     else:
         sidecar_state.status = "disabled"
+
+    if not settings.direct_ingest_enabled and sidecar_state.status != "running":
+        logger.warning(
+            "Direct ingest is disabled but sidecar is not running (status=%s). "
+            "Falling back to direct ingest to avoid node ingest outage.",
+            sidecar_state.status,
+        )
 
     async def _federation_local_tracks(now_ns: int) -> list[TrackState]:
         tracks = await tracker.snapshot(now_ns=now_ns)
@@ -729,7 +796,7 @@ async def ingest_frame(payload: IngestFrameRequest, request: Request) -> IngestF
 @app.post("/api/v1/ingest/store-forward", response_model=StoreForwardIngestResponse)
 async def ingest_store_forward(payload: StoreForwardIngestRequest, request: Request) -> StoreForwardIngestResponse:
     state = _require_state(request)
-    if not state.settings.direct_ingest_enabled:
+    if _should_block_direct_ingest(state):
         raise HTTPException(status_code=410, detail="Direct ingest is disabled; send firmware ingest to the Rust sidecar")
     try:
         return await state.ingest_transport.deliver_store_forward(payload)
@@ -740,7 +807,7 @@ async def ingest_store_forward(payload: StoreForwardIngestRequest, request: Requ
 @app.post("/api/v1/ingest/binary", response_model=StoreForwardIngestResponse)
 async def ingest_binary(request: Request) -> StoreForwardIngestResponse:
     state = _require_state(request)
-    if not state.settings.direct_ingest_enabled:
+    if _should_block_direct_ingest(state):
         raise HTTPException(status_code=410, detail="Direct ingest is disabled; send firmware ingest to the Rust sidecar")
     try:
         payload = parse_binary_ingest_payload(await request.body())
@@ -823,6 +890,10 @@ async def list_nodes(
             node["latest_environment"] = latest_environment
 
         tq = latest_time_quality_by_node.get(node["id"])
+        if tq is None and isinstance(node.get("metadata"), dict):
+            metadata_time_quality = node["metadata"].get("time_quality")
+            if isinstance(metadata_time_quality, str) and metadata_time_quality:
+                tq = metadata_time_quality
         if tq is not None:
             node["latest_time_quality"] = tq
         latest_observation_metadata = latest_observation_metadata_by_node.get(node["id"], {})

@@ -142,6 +142,7 @@ async def test_start_ingest_sidecar_waits_for_healthcheck(
         ingest_storage_mode="journal",
         ingest_sidecar_total_journal_budget_bytes=1024,
         ingest_sidecar_admission_reserve_bytes=128,
+        ingest_sidecar_allow_non_tmpfs_journal=True,
     )
 
     started_process = await main._start_ingest_sidecar(settings)
@@ -150,3 +151,4 @@ async def test_start_ingest_sidecar_waits_for_healthcheck(
     assert observed["process"] is process
     assert observed["port"] == 18081
     assert observed["argv"] == (str(binary_path),)
+    assert observed["env"]["MINIMAPPR_SIDECAR_ALLOW_NON_TMPFS_JOURNAL"] == "true"

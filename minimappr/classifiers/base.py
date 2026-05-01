@@ -21,3 +21,12 @@ class AudioClassifier(ABC):
         processes or threads must override this to terminate them cleanly.
         """
         return
+
+    def cancel_pending(self) -> None:
+        """Best-effort cancellation for in-flight classify() work.
+
+        Classification orchestration may timeout a classify() call while the
+        backend worker is still blocked on model inference or IPC. Backends
+        that can interrupt in-flight work should override this hook.
+        """
+        return

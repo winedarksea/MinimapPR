@@ -11,6 +11,8 @@ pub struct DecodedAudioPayload {
     pub start_time_ns: Option<i128>,
     pub start_sample_index: Option<i64>,
     pub end_sample_index: Option<i64>,
+    pub temperature_c: Option<f32>,
+    pub humidity_fraction: Option<f32>,
 }
 
 struct BinaryReader<'a> {
@@ -105,6 +107,8 @@ fn decode_binary_mmb1_audio(raw_payload: &[u8]) -> BoxedResult<DecodedAudioPaylo
     let mut first_start_time_ns: Option<i128> = None;
     let mut first_start_sample_index: Option<i64> = None;
     let mut last_end_sample_index: Option<i64> = None;
+    let mut latest_temperature_c: Option<f32> = None;
+    let mut latest_humidity_fraction: Option<f32> = None;
     for _ in 0..frame_count {
         let frame = read_binary_audio_frame(&mut reader)?;
         if let Some(existing_rate) = sample_rate_hz {
@@ -116,6 +120,12 @@ fn decode_binary_mmb1_audio(raw_payload: &[u8]) -> BoxedResult<DecodedAudioPaylo
         first_start_time_ns.get_or_insert(frame.start_time_ns as i128);
         first_start_sample_index.get_or_insert(frame.start_sample_index as i64);
         last_end_sample_index = Some(frame.end_sample_index as i64);
+        if frame.temperature_c.is_some() {
+            latest_temperature_c = frame.temperature_c;
+        }
+        if frame.humidity_fraction.is_some() {
+            latest_humidity_fraction = frame.humidity_fraction;
+        }
         append_channels(&mut channels, frame.channels, frame.samples);
     }
     if reader.remaining() != 0 {
@@ -127,6 +137,8 @@ fn decode_binary_mmb1_audio(raw_payload: &[u8]) -> BoxedResult<DecodedAudioPaylo
         start_time_ns: first_start_time_ns,
         start_sample_index: first_start_sample_index,
         end_sample_index: last_end_sample_index,
+        temperature_c: latest_temperature_c,
+        humidity_fraction: latest_humidity_fraction,
     })
 }
 
@@ -169,6 +181,8 @@ struct BinaryAudioFrame {
     start_sample_index: u64,
     end_sample_index: u64,
     samples: Vec<f32>,
+    temperature_c: Option<f32>,
+    humidity_fraction: Option<f32>,
 }
 
 fn read_binary_audio_frame(reader: &mut BinaryReader<'_>) -> BoxedResult<BinaryAudioFrame> {
@@ -183,7 +197,7 @@ fn read_binary_audio_frame(reader: &mut BinaryReader<'_>) -> BoxedResult<BinaryA
     let _tor_ns = reader.u64()?;
     let _time_quality = reader.u8()?;
     skip_binary_timing_diagnostics(reader)?;
-    skip_binary_environment(reader)?;
+    let environment = read_binary_environment(reader)?;
     let samples_per_channel = usize::try_from(reader.u32()?)?;
     if channels == 0 || samples_per_channel == 0 {
         return Err("binary frame must include at least one channel and sample".into());
@@ -204,6 +218,8 @@ fn read_binary_audio_frame(reader: &mut BinaryReader<'_>) -> BoxedResult<BinaryA
         start_sample_index,
         end_sample_index,
         samples: pcm16le_to_f32(raw_audio),
+        temperature_c: environment.temperature_c,
+        humidity_fraction: environment.humidity_fraction,
     })
 }
 
@@ -234,18 +250,28 @@ fn skip_binary_timing_diagnostics(reader: &mut BinaryReader<'_>) -> BoxedResult<
     Ok(())
 }
 
-fn skip_binary_environment(reader: &mut BinaryReader<'_>) -> BoxedResult<()> {
+struct BinaryEnvironmentSample {
+    temperature_c: Option<f32>,
+    humidity_fraction: Option<f32>,
+}
+
+fn read_binary_environment(reader: &mut BinaryReader<'_>) -> BoxedResult<BinaryEnvironmentSample> {
     let flags = reader.u8()?;
+    let mut temperature_c = None;
+    let mut humidity_fraction = None;
     if flags & 0x01 != 0 {
-        let _temperature_c = reader.f32()?;
+        temperature_c = Some(reader.f32()?);
     }
     if flags & 0x02 != 0 {
-        let _humidity_fraction = reader.f32()?;
+        humidity_fraction = Some(reader.f32()?);
     }
     if flags & 0x04 != 0 {
         let _source = reader.string()?;
     }
-    Ok(())
+    Ok(BinaryEnvironmentSample {
+        temperature_c,
+        humidity_fraction,
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -256,6 +282,14 @@ struct StoreForwardEnvelope {
 #[derive(Debug, Deserialize)]
 struct StoreForwardBufferedFrame {
     frame: StoreForwardFrame,
+    #[serde(default)]
+    environment: Option<StoreForwardEnvironment>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StoreForwardEnvironment {
+    temperature_c: Option<f32>,
+    humidity_fraction: Option<f32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -277,7 +311,17 @@ fn decode_store_forward_audio(raw_payload: &[u8]) -> BoxedResult<DecodedAudioPay
     let mut first_start_time_ns: Option<i128> = None;
     let mut first_start_sample_index: Option<i64> = None;
     let mut last_end_sample_index: Option<i64> = None;
+    let mut latest_temperature_c: Option<f32> = None;
+    let mut latest_humidity_fraction: Option<f32> = None;
     for buffered in envelope.buffered_frames {
+        if let Some(environment) = buffered.environment {
+            if environment.temperature_c.is_some() {
+                latest_temperature_c = environment.temperature_c;
+            }
+            if environment.humidity_fraction.is_some() {
+                latest_humidity_fraction = environment.humidity_fraction;
+            }
+        }
         let frame = buffered.frame;
         if frame.channels == 0 {
             return Err("store-forward frame must have at least one channel".into());
@@ -321,6 +365,8 @@ fn decode_store_forward_audio(raw_payload: &[u8]) -> BoxedResult<DecodedAudioPay
         start_time_ns: first_start_time_ns,
         start_sample_index: first_start_sample_index,
         end_sample_index: last_end_sample_index,
+        temperature_c: latest_temperature_c,
+        humidity_fraction: latest_humidity_fraction,
     })
 }
 

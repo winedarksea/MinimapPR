@@ -84,7 +84,23 @@ class Storage:
         await self._open_connection()
         await self._configure_connection()
 
-        await self._db.executescript(
+        try:
+            await self._initialize_schema_and_migrations()
+        except sqlite3.OperationalError as exc:
+            if not self._is_disk_io_error(exc) or not await self._recover_empty_wal_sidecars():
+                raise
+            logger.warning(
+                "Recovered stale SQLite WAL sidecars for %s during schema init; retrying database open",
+                self.db_path,
+            )
+            await self._open_connection()
+            await self._configure_connection()
+            await self._initialize_schema_and_migrations()
+
+    async def _initialize_schema_and_migrations(self) -> None:
+        db = self._require_db()
+
+        await db.executescript(
             """
             CREATE TABLE IF NOT EXISTS nodes (
                 id TEXT PRIMARY KEY,
@@ -422,7 +438,7 @@ class Storage:
         )
         await self._deduplicate_reporting_window_canonicals()
         await self._ensure_reporting_window_uniqueness_index()
-        await self._db.commit()
+        await db.commit()
 
     async def _open_connection(self) -> None:
         self._db = await aiosqlite.connect(self.db_path)
@@ -434,7 +450,7 @@ class Storage:
         try:
             await db.execute("PRAGMA journal_mode=WAL;")
         except sqlite3.OperationalError as exc:
-            if "disk I/O error" not in str(exc) or not await self._recover_empty_wal_sidecars():
+            if not self._is_disk_io_error(exc) or not await self._recover_empty_wal_sidecars():
                 raise
             logger.warning("Recovered stale SQLite WAL sidecars for %s; retrying database open", self.db_path)
             await self._open_connection()
@@ -442,6 +458,10 @@ class Storage:
             await db.execute("PRAGMA foreign_keys=ON;")
             await db.execute("PRAGMA journal_mode=WAL;")
         await db.execute("PRAGMA synchronous=NORMAL;")
+
+    @staticmethod
+    def _is_disk_io_error(exc: sqlite3.OperationalError) -> bool:
+        return "disk I/O error" in str(exc)
 
     async def _recover_empty_wal_sidecars(self) -> bool:
         db = self._db

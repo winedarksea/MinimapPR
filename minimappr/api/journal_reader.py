@@ -40,8 +40,16 @@ class JournalPayloadHandle:
             journal_epoch=int(payload["journal_epoch"]),
             segment_id=segment_id,
             stream_key=stream_key,
-            payload_offset_bytes=int(payload.get("payload_offset_bytes") or payload["body_offset_bytes"]),
-            payload_length_bytes=int(payload.get("payload_length_bytes") or payload["body_length_bytes"]),
+            payload_offset_bytes=int(
+                payload["payload_offset_bytes"]
+                if "payload_offset_bytes" in payload
+                else payload["body_offset_bytes"]
+            ),
+            payload_length_bytes=int(
+                payload["payload_length_bytes"]
+                if "payload_length_bytes" in payload
+                else payload["body_length_bytes"]
+            ),
             sample_index_start=_optional_int(payload.get("sample_index_start")),
             sample_count=_optional_int(payload.get("sample_count")),
             integrity_hash=str(payload.get("integrity_hash") or ""),

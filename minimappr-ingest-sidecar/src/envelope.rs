@@ -38,6 +38,7 @@ struct StoreForwardEnvelope {
 #[derive(Debug, Deserialize)]
 struct StoreForwardNode {
     id: String,
+    #[serde(default)]
     sensor_offsets_m: Vec<[f32; 3]>,
     #[serde(default)]
     metadata: serde_json::Value,
@@ -381,26 +382,23 @@ fn parse_store_forward_capture_envelope(raw_payload: &[u8]) -> Result<CaptureEnv
         "store-forward ingest payload must include at least one buffered frame".to_string()
     })?;
 
-    let total_sample_count =
-        envelope
-            .buffered_frames
-            .iter()
-            .try_fold(0_u64, |running_total, buffered_frame| {
-                let frame = &buffered_frame.frame;
-                let frame_samples = frame
-                    .samples_per_channel
-                    .map(u64::from)
-                    .or_else(
-                        || match (frame.start_sample_index, frame.end_sample_index) {
-                            (Some(start), Some(end)) if end >= start => Some(end - start),
-                            _ => None,
-                        },
-                    )
-                    .ok_or_else(|| {
-                        "store-forward ingest frame is missing sample coverage".to_string()
-                    })?;
-                Ok::<u64, String>(running_total.saturating_add(frame_samples))
-            })?;
+    let total_sample_count = envelope
+        .buffered_frames
+        .iter()
+        .fold(Some(0_u64), |running_total, buffered_frame| {
+            let frame = &buffered_frame.frame;
+            let frame_samples = frame
+                .samples_per_channel
+                .map(u64::from)
+                .or_else(|| match (frame.start_sample_index, frame.end_sample_index) {
+                    (Some(start), Some(end)) if end >= start => Some(end - start),
+                    _ => None,
+                });
+            match (running_total, frame_samples) {
+                (Some(total), Some(samples)) => Some(total.saturating_add(samples)),
+                _ => None,
+            }
+        });
 
     let node_id = envelope.node.id.clone();
     let stream_id = "audio_main".to_string();
@@ -442,7 +440,7 @@ fn parse_store_forward_capture_envelope(raw_payload: &[u8]) -> Result<CaptureEnv
         channel_count,
         channel_layout: channel_layout(channel_count),
         sample_index_start: first_frame.frame.start_sample_index,
-        sample_count: Some(total_sample_count),
+        sample_count: total_sample_count,
         geometry_version: metadata_string(metadata.get("geometry_version")),
         orientation_version: metadata_string(metadata.get("orientation_version")),
         calibration_version: metadata_string(metadata.get("calibration_version")),
@@ -523,4 +521,75 @@ fn hex_encode(bytes: &[u8]) -> String {
         encoded.push(HEX[(byte & 0x0f) as usize] as char);
     }
     encoded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_capture_envelope;
+
+    #[test]
+    fn store_forward_accepts_missing_sensor_offsets_for_point_nodes() {
+        let payload = serde_json::json!({
+            "node": {
+                "id": "point-node-1",
+                "metadata": {}
+            },
+            "buffered_frames": [
+                {
+                    "frame": {
+                        "sample_rate_hz": 16000,
+                        "channels": 1,
+                        "samples_per_channel": 4,
+                        "time_quality": "gps_locked",
+                        "toa_ns": 1000,
+                        "tor_ns": 2000,
+                        "encoding": "pcm16le",
+                        "source_type": "raw_sensor"
+                    }
+                }
+            ]
+        });
+
+        let parsed = parse_capture_envelope(
+            "/api/v1/ingest/store-forward",
+            payload.to_string().as_bytes(),
+        )
+        .expect("store-forward envelope should parse without sensor offsets");
+
+        assert_eq!(parsed.node_id, "point-node-1");
+        assert_eq!(parsed.channel_count, Some(1));
+        assert_eq!(parsed.sample_count, Some(4));
+    }
+
+    #[test]
+    fn store_forward_missing_sample_coverage_degrades_sample_count_to_none() {
+        let payload = serde_json::json!({
+            "node": {
+                "id": "point-node-2",
+                "metadata": {}
+            },
+            "buffered_frames": [
+                {
+                    "frame": {
+                        "sample_rate_hz": 16000,
+                        "channels": 1,
+                        "time_quality": "gps_locked",
+                        "toa_ns": 1000,
+                        "tor_ns": 2000,
+                        "encoding": "pcm16le",
+                        "source_type": "raw_sensor"
+                    }
+                }
+            ]
+        });
+
+        let parsed = parse_capture_envelope(
+            "/api/v1/ingest/store-forward",
+            payload.to_string().as_bytes(),
+        )
+        .expect("store-forward envelope should parse even without sample coverage fields");
+
+        assert_eq!(parsed.node_id, "point-node-2");
+        assert_eq!(parsed.sample_count, None);
+    }
 }

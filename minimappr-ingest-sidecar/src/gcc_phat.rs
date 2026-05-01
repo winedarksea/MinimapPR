@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 use num_complex::Complex32;
 use rustfft::FftPlanner;
 
@@ -10,6 +12,16 @@ pub struct TdoaResult {
     pub lag_seconds: f32,
     /// Confidence: peak-to-sidelobe ratio in [0.0, 1.0].
     pub confidence: f32,
+    /// Absolute GCC-PHAT peak magnitude used in SRP confidence scoring.
+    #[serde(default)]
+    pub peak_value: f32,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct GccPhatCorrelation {
+    pub lags_seconds: Vec<f32>,
+    pub magnitudes: Vec<f32>,
+    pub tdoa: TdoaResult,
 }
 
 /// Compute the GCC-PHAT inter-channel time delay for one microphone pair.
@@ -22,101 +34,157 @@ pub fn gcc_phat(
     sample_rate_hz: u32,
     max_lag_samples: usize,
 ) -> TdoaResult {
+    phat_correlation(
+        ch1,
+        ch2,
+        sample_rate_hz,
+        max_lag_samples as f32 / sample_rate_hz.max(1) as f32,
+        None,
+    )
+    .tdoa
+}
+
+pub(crate) fn phat_correlation(
+    ch1: &[f32],
+    ch2: &[f32],
+    sample_rate_hz: u32,
+    max_tau_s: f32,
+    band_hz: Option<[f32; 2]>,
+) -> GccPhatCorrelation {
+    const EPSILON: f32 = 1e-9;
+
     let n = ch1.len().min(ch2.len());
-    if n == 0 {
-        return TdoaResult {
-            delay_samples: 0.0,
-            lag_seconds: 0.0,
-            confidence: 0.0,
+    if n == 0 || sample_rate_hz == 0 {
+        return GccPhatCorrelation {
+            lags_seconds: vec![0.0],
+            magnitudes: vec![0.0],
+            tdoa: TdoaResult {
+                delay_samples: 0.0,
+                lag_seconds: 0.0,
+                confidence: 0.0,
+                peak_value: 0.0,
+            },
         };
     }
 
-    // Zero-pad to next power-of-2 >= 2*n to prevent circular wrap-around.
-    let fft_len = next_pow2(2 * n);
+    let fft_len = next_pow2(2 * n.max(1));
     let mut planner = FftPlanner::<f32>::new();
     let fft = planner.plan_fft_forward(fft_len);
     let ifft = planner.plan_fft_inverse(fft_len);
 
     let mut x1: Vec<Complex32> = ch1[..n]
         .iter()
-        .map(|&s| Complex32::new(s, 0.0))
+        .map(|&sample| Complex32::new(sample, 0.0))
         .chain(std::iter::repeat(Complex32::new(0.0, 0.0)).take(fft_len - n))
         .collect();
     let mut x2: Vec<Complex32> = ch2[..n]
         .iter()
-        .map(|&s| Complex32::new(s, 0.0))
+        .map(|&sample| Complex32::new(sample, 0.0))
         .chain(std::iter::repeat(Complex32::new(0.0, 0.0)).take(fft_len - n))
         .collect();
 
     fft.process(&mut x1);
     fft.process(&mut x2);
 
-    // Cross-spectrum with PHAT whitening.
-    const EPSILON: f32 = 1e-9;
-    let mut g: Vec<Complex32> = x1
+    let effective_band = normalize_band_hz(band_hz, sample_rate_hz);
+    let mut cross_spectrum: Vec<Complex32> = x1
         .iter()
         .zip(x2.iter())
-        .map(|(a, b)| {
+        .enumerate()
+        .map(|(bin, (a, b))| {
+            if !bin_in_band(bin, fft_len, sample_rate_hz, effective_band) {
+                return Complex32::new(0.0, 0.0);
+            }
             let cross = a * b.conj();
-            let mag = cross.norm();
-            cross / (mag + EPSILON)
+            let magnitude = cross.norm();
+            if magnitude <= EPSILON {
+                Complex32::new(0.0, 0.0)
+            } else {
+                cross / magnitude
+            }
         })
         .collect();
 
-    ifft.process(&mut g);
+    ifft.process(&mut cross_spectrum);
+
     let scale = 1.0 / fft_len as f32;
+    let lag = ((max_tau_s.max(1.0 / sample_rate_hz as f32)) * sample_rate_hz as f32)
+        .ceil() as usize;
+    let lag = lag.clamp(1, fft_len / 2);
 
-    // Real part of the IFFT output is the GCC-PHAT correlation.
-    // The correlation is wrapped: positive lags are at indices [0..max_lag] and
-    // negative lags are at indices [fft_len - max_lag..fft_len].
-    let lag = max_lag_samples.min(fft_len / 2);
-    let mut corr: Vec<(i64, f32)> = Vec::with_capacity(2 * lag + 1);
-    for d in 0..=lag as i64 {
-        corr.push((d, g[d as usize].re * scale));
+    let mut lags_seconds = Vec::with_capacity((2 * lag) + 1);
+    let mut magnitudes = Vec::with_capacity((2 * lag) + 1);
+
+    for delay in (1..=lag).rev() {
+        lags_seconds.push(-(delay as f32) / sample_rate_hz as f32);
+        magnitudes.push((cross_spectrum[fft_len - delay].re * scale).abs());
     }
-    for d in 1..=lag as i64 {
-        let idx = fft_len as i64 - d;
-        corr.push((-d, g[idx as usize].re * scale));
+    lags_seconds.push(0.0);
+    magnitudes.push((cross_spectrum[0].re * scale).abs());
+    for delay in 1..=lag {
+        lags_seconds.push(delay as f32 / sample_rate_hz as f32);
+        magnitudes.push((cross_spectrum[delay].re * scale).abs());
     }
-    corr.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-    let (peak_lag, peak_val) = corr[0];
+    let (peak_index, peak_value) = magnitudes
+        .iter()
+        .copied()
+        .enumerate()
+        .max_by(|(_, left), (_, right)| left.partial_cmp(right).unwrap_or(Ordering::Equal))
+        .unwrap_or((lag, 0.0));
+    let peak_offset = parabolic_peak_offset(&magnitudes, peak_index);
+    let delay_samples = (peak_index as f32 - lag as f32) + peak_offset;
 
-    // Parabolic interpolation for sub-sample accuracy.
-    let delay_samples = parabolic_interp(&g, peak_lag, fft_len, scale);
-
-    // Confidence: peak vs. mean of the next 3 highest sidelobe maxima.
-    let sidelobe_mean = if corr.len() > 1 {
-        corr[1..corr.len().min(4)]
-            .iter()
-            .map(|(_, v)| v.abs())
-            .sum::<f32>()
-            / (corr.len().min(4) - 1) as f32
+    let mut sorted_peaks = magnitudes.clone();
+    sorted_peaks.sort_by(|left, right| right.partial_cmp(left).unwrap_or(Ordering::Equal));
+    let sidelobe_count = sorted_peaks.len().saturating_sub(1).min(3);
+    let sidelobe_mean = if sidelobe_count > 0 {
+        sorted_peaks[1..=sidelobe_count].iter().sum::<f32>() / sidelobe_count as f32
     } else {
         0.0
     };
-    let confidence = if peak_val.abs() > 0.0 && sidelobe_mean > 0.0 {
-        (peak_val.abs() / (peak_val.abs() + sidelobe_mean)).clamp(0.0, 1.0)
-    } else if peak_val.abs() > 0.0 {
+    let confidence = if peak_value > 0.0 && sidelobe_mean > 0.0 {
+        (peak_value / (peak_value + sidelobe_mean)).clamp(0.0, 1.0)
+    } else if peak_value > 0.0 {
         1.0
     } else {
         0.0
     };
 
-    TdoaResult {
-        delay_samples,
-        lag_seconds: delay_samples / sample_rate_hz as f32,
-        confidence,
+    GccPhatCorrelation {
+        lags_seconds,
+        magnitudes,
+        tdoa: TdoaResult {
+            delay_samples,
+            lag_seconds: delay_samples / sample_rate_hz as f32,
+            confidence,
+            peak_value,
+        },
     }
+}
+
+pub(crate) fn pair_max_tau_s(
+    position_a_m: [f32; 3],
+    position_b_m: [f32; 3],
+    sample_rate_hz: u32,
+    sound_speed_mps: f32,
+) -> f32 {
+    let distance_m = euclidean_distance(position_a_m, position_b_m);
+    ((distance_m / sound_speed_mps.max(1.0)) + (1.0 / sample_rate_hz.max(1) as f32))
+        .max(1.0 / sample_rate_hz.max(1) as f32)
 }
 
 /// All 6 pairwise TDOA results for a 4-microphone tetrahedral array.
 /// Channel order follows the Sirith node: [MK1, MK2, MK3, MK4].
-pub fn tetrahedral_gcc_phat(channels: &[Vec<f32>; 4], sample_rate_hz: u32) -> [TdoaResult; 6] {
+pub fn tetrahedral_gcc_phat(
+    channels: &[Vec<f32>; 4],
+    sample_rate_hz: u32,
+    band_hz: Option<[f32; 2]>,
+) -> [TdoaResult; 6] {
     const PAIRS: [(usize, usize); 6] = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
-    // 50 mm max spacing, 340 m/s → 0.147 ms → 2.4 samples at 16 kHz
-    let max_lag = (0.05_f32 / 340.0 * sample_rate_hz as f32).ceil() as usize + 1;
-    PAIRS.map(|(a, b)| gcc_phat(&channels[a], &channels[b], sample_rate_hz, max_lag))
+    // Keep this helper permissive; the worker uses per-pair geometric limits.
+    let max_tau_s = (0.07_f32 / 343.2) + (1.0 / sample_rate_hz.max(1) as f32);
+    PAIRS.map(|(a, b)| phat_correlation(&channels[a], &channels[b], sample_rate_hz, max_tau_s, band_hz).tdoa)
 }
 
 fn next_pow2(n: usize) -> usize {
@@ -130,22 +198,47 @@ fn next_pow2(n: usize) -> usize {
     p
 }
 
-fn parabolic_interp(g: &[Complex32], peak_lag: i64, fft_len: usize, scale: f32) -> f32 {
-    let to_idx = |lag: i64| -> usize {
-        if lag >= 0 {
-            lag as usize
-        } else {
-            (fft_len as i64 + lag) as usize
-        }
-    };
-    let y0 = g[to_idx(peak_lag - 1)].re * scale;
-    let y1 = g[to_idx(peak_lag)].re * scale;
-    let y2 = g[to_idx(peak_lag + 1)].re * scale;
-    let denom = 2.0 * y1 - y0 - y2;
-    if denom.abs() < 1e-12 {
-        return peak_lag as f32;
+fn parabolic_peak_offset(magnitudes: &[f32], peak_index: usize) -> f32 {
+    if peak_index == 0 || peak_index + 1 >= magnitudes.len() {
+        return 0.0;
     }
-    peak_lag as f32 + (y2 - y0) / (2.0 * denom)
+    let left = magnitudes[peak_index - 1];
+    let center = magnitudes[peak_index];
+    let right = magnitudes[peak_index + 1];
+    let denominator = left - (2.0 * center) + right;
+    if denominator.abs() < 1e-12 {
+        return 0.0;
+    }
+    (0.5 * (left - right) / denominator).clamp(-1.0, 1.0)
+}
+
+fn normalize_band_hz(band_hz: Option<[f32; 2]>, sample_rate_hz: u32) -> Option<[f32; 2]> {
+    let [low_hz, high_hz] = band_hz?;
+    let nyquist_hz = sample_rate_hz as f32 * 0.5;
+    let clamped_low_hz = low_hz.max(0.0).min(nyquist_hz);
+    let clamped_high_hz = high_hz.max(0.0).min(nyquist_hz);
+    (clamped_high_hz > clamped_low_hz).then_some([clamped_low_hz, clamped_high_hz])
+}
+
+fn bin_in_band(
+    bin: usize,
+    fft_len: usize,
+    sample_rate_hz: u32,
+    band_hz: Option<[f32; 2]>,
+) -> bool {
+    let Some([low_hz, high_hz]) = band_hz else {
+        return true;
+    };
+    let folded_bin = bin.min(fft_len.saturating_sub(bin));
+    let frequency_hz = folded_bin as f32 * sample_rate_hz as f32 / fft_len as f32;
+    frequency_hz >= low_hz && frequency_hz <= high_hz
+}
+
+fn euclidean_distance(a: [f32; 3], b: [f32; 3]) -> f32 {
+    let dx = a[0] - b[0];
+    let dy = a[1] - b[1];
+    let dz = a[2] - b[2];
+    (dx * dx + dy * dy + dz * dz).sqrt()
 }
 
 #[cfg(test)]
@@ -174,6 +267,7 @@ mod tests {
             result.delay_samples
         );
         assert!(result.confidence > 0.5);
+        assert!(result.peak_value > 0.0);
     }
 
     #[test]
@@ -216,10 +310,85 @@ mod tests {
             signal.clone(),
             signal.clone(),
         ];
-        let results = tetrahedral_gcc_phat(&channels, sr);
+        let results = tetrahedral_gcc_phat(&channels, sr, None);
         assert_eq!(results.len(), 6);
         for r in &results {
             assert!(r.delay_samples.abs() < 0.3);
         }
     }
+
+    #[test]
+    fn localization_band_suppresses_out_of_band_delay() {
+        let sr = 16_000;
+        let len = 1_024;
+        let low_component = moving_average(&pseudo_random_with_seed(0xA5A5_A5A5, len + 8), 31);
+        let ch1 = low_component[..len].to_vec();
+        let ch2 = low_component[4..len + 4].to_vec();
+
+        let unbanded = phat_correlation(&ch1, &ch2, sr, 6.0 / sr as f32, None).tdoa;
+        let banded = phat_correlation(&ch1, &ch2, sr, 6.0 / sr as f32, Some([1_000.0, 3_200.0])).tdoa;
+
+        assert!(
+            (unbanded.delay_samples - 4.0).abs() < 0.45,
+            "expected unbanded low-band lag near 4 samples, got {}",
+            unbanded.delay_samples
+        );
+        assert!(
+            banded.peak_value < (unbanded.peak_value * 0.35),
+            "expected banded path to suppress the out-of-band correlation, got banded_peak={} unbanded_peak={}",
+            banded.peak_value,
+            unbanded.peak_value
+        );
+        assert!(
+            banded.confidence < unbanded.confidence,
+            "expected banded path to lower confidence for an out-of-band signal, got banded_confidence={} unbanded_confidence={}",
+            banded.confidence,
+            unbanded.confidence
+        );
+    }
+
+    #[test]
+    fn localization_band_preserves_in_band_delay() {
+        let sr = 16_000;
+        let len = 1_024;
+        let high_raw = pseudo_random_with_seed(0x5A5A_5A5A, len + 8);
+        let high_component = high_raw
+            .iter()
+            .zip(moving_average(&high_raw, 9).iter())
+            .map(|(raw, smooth)| raw - smooth)
+            .collect::<Vec<_>>();
+
+        let ch1 = high_component[..len].to_vec();
+        let ch2 = high_component[1..len + 1].to_vec();
+        let banded = phat_correlation(&ch1, &ch2, sr, 6.0 / sr as f32, Some([1_000.0, 3_200.0])).tdoa;
+
+        assert!(
+            (banded.delay_samples - 1.0).abs() < 0.45,
+            "expected banded in-band lag near 1 sample, got {}",
+            banded.delay_samples
+        );
+        assert!(banded.peak_value > 0.0);
+    }
+
+    fn pseudo_random_with_seed(mut seed: u32, len: usize) -> Vec<f32> {
+        (0..len)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (seed as i32 as f32) / (i32::MAX as f32)
+            })
+            .collect()
+    }
+
+    fn moving_average(samples: &[f32], window_len: usize) -> Vec<f32> {
+        let mut smoothed = Vec::with_capacity(samples.len());
+        let radius = window_len.max(1) / 2;
+        for index in 0..samples.len() {
+            let start = index.saturating_sub(radius);
+            let end = (index + radius + 1).min(samples.len());
+            let mean = samples[start..end].iter().sum::<f32>() / (end - start) as f32;
+            smoothed.push(mean);
+        }
+        smoothed
+    }
+
 }

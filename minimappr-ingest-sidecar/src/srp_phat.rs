@@ -1,6 +1,34 @@
+use std::cmp::Ordering;
+
 use serde::{Deserialize, Serialize};
 
-use crate::dsp_worker::PairTdoa;
+use crate::{
+    dsp_worker::PairTdoa,
+    gcc_phat::{pair_max_tau_s, phat_correlation, GccPhatCorrelation},
+};
+
+const EPSILON: f32 = 1e-9;
+
+#[derive(Clone, Copy, Debug)]
+pub struct SrpPhatConfig {
+    pub localization_band_hz: [f32; 2],
+    pub grid_resolution_m: f32,
+    pub search_padding_m: f32,
+    pub max_grid_points: usize,
+    pub min_channel_rms: f32,
+}
+
+impl Default for SrpPhatConfig {
+    fn default() -> Self {
+        Self {
+            localization_band_hz: [300.0, 3500.0],
+            grid_resolution_m: 0.5,
+            search_padding_m: 2.0,
+            max_grid_points: 60_000,
+            min_channel_rms: 1.0e-4,
+        }
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SrpPhatLocalization {
@@ -13,141 +41,397 @@ pub struct SrpPhatLocalization {
     pub sound_speed_mps: f32,
 }
 
+pub struct SrpPhatEvaluation {
+    pub localization: SrpPhatLocalization,
+    pub pair_tdoas: Vec<PairTdoa>,
+}
+
+#[derive(Clone, Debug)]
+struct PairObservation {
+    ch_a: usize,
+    ch_b: usize,
+    correlation: GccPhatCorrelation,
+}
+
 pub fn estimate_tetrahedral_steering(
-    pair_tdoas: &[PairTdoa],
+    windows: &[Vec<f32>; 4],
+    active_channels: &[usize],
     mic_positions_m: &[[f32; 3]; 4],
+    sample_rate_hz: u32,
     sound_speed_mps: f32,
-) -> Option<SrpPhatLocalization> {
-    let mut normal = [[0.0_f32; 3]; 3];
-    let mut rhs = [0.0_f32; 3];
-    let mut usable_pairs = 0_usize;
-    let mut mean_pair_confidence = 0.0_f32;
+    config: SrpPhatConfig,
+) -> SrpPhatEvaluation {
+    let mut ordered_channels = active_channels.to_vec();
+    ordered_channels.sort_unstable();
 
-    for pair in pair_tdoas {
-        if pair.ch_a >= mic_positions_m.len() || pair.ch_b >= mic_positions_m.len() {
-            continue;
-        }
-        let baseline = sub(mic_positions_m[pair.ch_b], mic_positions_m[pair.ch_a]);
-        let observed_path_delta_m = pair.tdoa.lag_seconds * sound_speed_mps;
-        for row in 0..3 {
-            rhs[row] += baseline[row] * observed_path_delta_m;
-            for col in 0..3 {
-                normal[row][col] += baseline[row] * baseline[col];
-            }
-        }
-        usable_pairs += 1;
-        mean_pair_confidence += pair.tdoa.confidence;
-    }
-
-    if usable_pairs < 3 {
-        return None;
-    }
-
-    let raw_direction = solve_3x3(normal, rhs)?;
-    let norm = magnitude(raw_direction);
-    if norm < 1e-6 {
-        return None;
-    }
-    let steering_direction = [
-        raw_direction[0] / norm,
-        raw_direction[1] / norm,
-        raw_direction[2] / norm,
-    ];
-    mean_pair_confidence /= usable_pairs as f32;
-
-    let residual_rms_seconds = residual_rms(
-        pair_tdoas,
+    let pair_observations = build_pair_observations(
+        windows,
+        &ordered_channels,
         mic_positions_m,
-        steering_direction,
+        sample_rate_hz,
+        sound_speed_mps,
+        config.localization_band_hz,
+    );
+    let pair_tdoas = pair_observations
+        .iter()
+        .map(|pair| PairTdoa {
+            ch_a: pair.ch_a,
+            ch_b: pair.ch_b,
+            tdoa: pair.correlation.tdoa.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    if ordered_channels.len() < 4 {
+        return SrpPhatEvaluation {
+            localization: degraded_localization("srp_phat_degraded_partial_array", sound_speed_mps),
+            pair_tdoas,
+        };
+    }
+
+    let reference_channel = ordered_channels
+        .iter()
+        .copied()
+        .max_by(|left, right| {
+            window_rms(&windows[*left])
+                .partial_cmp(&window_rms(&windows[*right]))
+                .unwrap_or(Ordering::Equal)
+        })
+        .unwrap_or(ordered_channels[0]);
+    let reference_rms = window_rms(&windows[reference_channel]);
+    if reference_rms < config.min_channel_rms {
+        return SrpPhatEvaluation {
+            localization: degraded_localization("srp_phat_degraded_low_energy", sound_speed_mps),
+            pair_tdoas,
+        };
+    }
+
+    let measured_tdoa = build_reference_measurements(reference_channel, &pair_observations);
+    if measured_tdoa.len() < 3 {
+        return SrpPhatEvaluation {
+            localization: degraded_localization("srp_phat_degraded_no_reference_pairs", sound_speed_mps),
+            pair_tdoas,
+        };
+    }
+
+    let grid = grid_from_bounds(
+        &ordered_channels,
+        mic_positions_m,
+        config.search_padding_m,
+        config.grid_resolution_m,
+        config.max_grid_points,
+    );
+    if grid.is_empty() {
+        return SrpPhatEvaluation {
+            localization: degraded_localization("srp_phat_degraded_empty_grid", sound_speed_mps),
+            pair_tdoas,
+        };
+    }
+
+    let mut scores = vec![0.0_f32; grid.len()];
+    for pair in &pair_observations {
+        for (point_index, point_m) in grid.iter().enumerate() {
+            let predicted_tau_s = predicted_pair_tau_s(
+                *point_m,
+                mic_positions_m[pair.ch_a],
+                mic_positions_m[pair.ch_b],
+                sound_speed_mps,
+            );
+            scores[point_index] += sample_pair_correlation(&pair.correlation, predicted_tau_s);
+        }
+    }
+
+    let (best_index, best_score) = scores
+        .iter()
+        .copied()
+        .enumerate()
+        .max_by(|(_, left), (_, right)| left.partial_cmp(right).unwrap_or(Ordering::Equal))
+        .unwrap_or((0, 0.0));
+    let peak_score = measured_tdoa
+        .iter()
+        .map(|measurement| measurement.peak_value)
+        .sum::<f32>()
+        / measured_tdoa.len() as f32;
+    if best_score <= EPSILON && peak_score <= EPSILON {
+        return SrpPhatEvaluation {
+            localization: degraded_localization("srp_phat_degraded_no_srp_peak", sound_speed_mps),
+            pair_tdoas,
+        };
+    }
+
+    let best_position_m = grid[best_index];
+    let residual_rms_seconds = residual_rms(
+        best_position_m,
+        reference_channel,
+        &measured_tdoa,
+        mic_positions_m,
         sound_speed_mps,
     );
-    let aperture_m = max_aperture(mic_positions_m);
-    let residual_limit_s = (aperture_m / sound_speed_mps).max(1e-6);
-    let residual_confidence = (1.0 - (residual_rms_seconds / residual_limit_s)).clamp(0.0, 1.0);
-    let confidence = (mean_pair_confidence * residual_confidence).clamp(0.0, 1.0);
+    let tau_scale = measured_tdoa
+        .iter()
+        .map(|measurement| measurement.tdoa_seconds.abs())
+        .fold(1.0e-5_f32, f32::max);
+    let fit_score = (1.0 - (residual_rms_seconds / tau_scale)).clamp(0.0, 1.0);
+    let median_score = median(&scores);
+    let contrast = (best_score - median_score) / (best_score.abs() + EPSILON);
+    let confidence = ((0.6 * fit_score)
+        + (0.25 * peak_score.clamp(0.0, 1.0))
+        + (0.15 * contrast.clamp(0.0, 1.0)))
+        .clamp(0.0, 1.0);
 
-    Some(SrpPhatLocalization {
+    let array_centroid_m = centroid(&ordered_channels, mic_positions_m);
+    let steering_direction = normalize_or_zero(sub(best_position_m, array_centroid_m));
+
+    SrpPhatEvaluation {
+        localization: SrpPhatLocalization {
+            attempted_algorithm: "srp_phat".to_string(),
+            resolved_algorithm: "srp_phat".to_string(),
+            steering_direction,
+            position_m: Some(best_position_m),
+            confidence,
+            residual_rms_seconds,
+            sound_speed_mps,
+        },
+        pair_tdoas,
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ReferenceMeasurement {
+    channel_index: usize,
+    tdoa_seconds: f32,
+    peak_value: f32,
+}
+
+fn degraded_localization(resolved_algorithm: &str, sound_speed_mps: f32) -> SrpPhatLocalization {
+    SrpPhatLocalization {
         attempted_algorithm: "srp_phat".to_string(),
-        resolved_algorithm: "srp_phat".to_string(),
-        steering_direction,
-        position_m: Some(steering_direction),
-        confidence,
-        residual_rms_seconds,
+        resolved_algorithm: resolved_algorithm.to_string(),
+        steering_direction: [0.0, 0.0, 0.0],
+        position_m: None,
+        confidence: 0.0,
+        residual_rms_seconds: f32::INFINITY,
         sound_speed_mps,
-    })
+    }
+}
+
+fn build_pair_observations(
+    windows: &[Vec<f32>; 4],
+    active_channels: &[usize],
+    mic_positions_m: &[[f32; 3]; 4],
+    sample_rate_hz: u32,
+    sound_speed_mps: f32,
+    localization_band_hz: [f32; 2],
+) -> Vec<PairObservation> {
+    let mut pairs = Vec::new();
+    for (left_index, &ch_a) in active_channels.iter().enumerate() {
+        for &ch_b in &active_channels[left_index + 1..] {
+            let max_tau_s = pair_max_tau_s(
+                mic_positions_m[ch_a],
+                mic_positions_m[ch_b],
+                sample_rate_hz,
+                sound_speed_mps,
+            );
+            let correlation = phat_correlation(
+                &windows[ch_a],
+                &windows[ch_b],
+                sample_rate_hz,
+                max_tau_s,
+                Some(localization_band_hz),
+            );
+            pairs.push(PairObservation {
+                ch_a,
+                ch_b,
+                correlation,
+            });
+        }
+    }
+    pairs
+}
+
+fn build_reference_measurements(
+    reference_channel: usize,
+    pair_observations: &[PairObservation],
+) -> Vec<ReferenceMeasurement> {
+    let mut measurements = Vec::new();
+    for pair in pair_observations {
+        if pair.ch_a == reference_channel {
+            measurements.push(ReferenceMeasurement {
+                channel_index: pair.ch_b,
+                tdoa_seconds: -pair.correlation.tdoa.lag_seconds,
+                peak_value: pair.correlation.tdoa.peak_value,
+            });
+        } else if pair.ch_b == reference_channel {
+            measurements.push(ReferenceMeasurement {
+                channel_index: pair.ch_a,
+                tdoa_seconds: pair.correlation.tdoa.lag_seconds,
+                peak_value: pair.correlation.tdoa.peak_value,
+            });
+        }
+    }
+    measurements.sort_by_key(|measurement| measurement.channel_index);
+    measurements
 }
 
 fn residual_rms(
-    pair_tdoas: &[PairTdoa],
+    position_m: [f32; 3],
+    reference_channel: usize,
+    measurements: &[ReferenceMeasurement],
     mic_positions_m: &[[f32; 3]; 4],
-    direction: [f32; 3],
     sound_speed_mps: f32,
 ) -> f32 {
-    let mut squared = 0.0_f32;
-    let mut count = 0_usize;
-    for pair in pair_tdoas {
-        if pair.ch_a >= mic_positions_m.len() || pair.ch_b >= mic_positions_m.len() {
-            continue;
-        }
-        let baseline = sub(mic_positions_m[pair.ch_b], mic_positions_m[pair.ch_a]);
-        let predicted = dot(baseline, direction) / sound_speed_mps;
-        let error = pair.tdoa.lag_seconds - predicted;
-        squared += error * error;
-        count += 1;
-    }
-    if count == 0 {
+    if measurements.is_empty() {
         return f32::INFINITY;
     }
-    (squared / count as f32).sqrt()
+    let mut squared_error = 0.0_f32;
+    for measurement in measurements {
+        let predicted_tdoa_s = predicted_reference_tau_s(
+            position_m,
+            mic_positions_m[measurement.channel_index],
+            mic_positions_m[reference_channel],
+            sound_speed_mps,
+        );
+        let error_seconds = predicted_tdoa_s - measurement.tdoa_seconds;
+        squared_error += error_seconds * error_seconds;
+    }
+    (squared_error / measurements.len() as f32).sqrt()
 }
 
-fn max_aperture(mic_positions_m: &[[f32; 3]; 4]) -> f32 {
-    let mut max_distance = 0.0_f32;
-    for a in 0..mic_positions_m.len() {
-        for b in a + 1..mic_positions_m.len() {
-            max_distance = max_distance.max(magnitude(sub(mic_positions_m[a], mic_positions_m[b])));
+fn grid_from_bounds(
+    active_channels: &[usize],
+    mic_positions_m: &[[f32; 3]; 4],
+    search_padding_m: f32,
+    grid_resolution_m: f32,
+    max_grid_points: usize,
+) -> Vec<[f32; 3]> {
+    let padding_m = search_padding_m.max(0.05);
+    let resolution_m = grid_resolution_m.max(0.05);
+
+    let mut mins = [f32::INFINITY; 3];
+    let mut maxs = [f32::NEG_INFINITY; 3];
+    for &channel_index in active_channels {
+        let position_m = mic_positions_m[channel_index];
+        for axis in 0..3 {
+            mins[axis] = mins[axis].min(position_m[axis] - padding_m);
+            maxs[axis] = maxs[axis].max(position_m[axis] + padding_m);
         }
     }
-    max_distance
+
+    let xs = axis_points(mins[0], maxs[0], resolution_m);
+    let ys = axis_points(mins[1], maxs[1], resolution_m);
+    let zs = axis_points(mins[2], maxs[2], resolution_m);
+    let total_points = xs.len() * ys.len() * zs.len();
+    if total_points == 0 {
+        return Vec::new();
+    }
+
+    let step = ((total_points as f32 / max_grid_points.max(1) as f32).ceil() as usize).max(1);
+    let mut grid = Vec::with_capacity(total_points.min(max_grid_points.max(1)));
+    let mut point_index = 0_usize;
+    for &x_m in &xs {
+        for &y_m in &ys {
+            for &z_m in &zs {
+                if point_index % step == 0 {
+                    grid.push([x_m, y_m, z_m]);
+                }
+                point_index += 1;
+            }
+        }
+    }
+    grid
 }
 
-fn solve_3x3(mut matrix: [[f32; 3]; 3], mut rhs: [f32; 3]) -> Option<[f32; 3]> {
-    for pivot in 0..3 {
-        let mut best_row = pivot;
-        let mut best_abs = matrix[pivot][pivot].abs();
-        for row in pivot + 1..3 {
-            let candidate_abs = matrix[row][pivot].abs();
-            if candidate_abs > best_abs {
-                best_abs = candidate_abs;
-                best_row = row;
-            }
-        }
-        if best_abs < 1e-9 {
-            return None;
-        }
-        if best_row != pivot {
-            matrix.swap(pivot, best_row);
-            rhs.swap(pivot, best_row);
-        }
+fn axis_points(min_m: f32, max_m: f32, resolution_m: f32) -> Vec<f32> {
+    let mut values = Vec::new();
+    let mut current_m = min_m;
+    while current_m <= max_m + (resolution_m * 0.5) {
+        values.push(current_m);
+        current_m += resolution_m;
+    }
+    values
+}
 
-        let pivot_value = matrix[pivot][pivot];
-        for col in pivot..3 {
-            matrix[pivot][col] /= pivot_value;
-        }
-        rhs[pivot] /= pivot_value;
+fn sample_pair_correlation(correlation: &GccPhatCorrelation, tau_seconds: f32) -> f32 {
+    if correlation.lags_seconds.len() < 2 || correlation.magnitudes.is_empty() {
+        return 0.0;
+    }
+    let step_seconds = correlation.lags_seconds[1] - correlation.lags_seconds[0];
+    if step_seconds <= 0.0 {
+        return 0.0;
+    }
+    let position = (tau_seconds - correlation.lags_seconds[0]) / step_seconds;
+    if !(0.0..=(correlation.magnitudes.len().saturating_sub(1) as f32)).contains(&position) {
+        return 0.0;
+    }
+    let lower_index = position.floor() as usize;
+    let upper_index = position.ceil() as usize;
+    if lower_index == upper_index {
+        return correlation.magnitudes[lower_index];
+    }
+    let weight = position - lower_index as f32;
+    let lower_value = correlation.magnitudes[lower_index];
+    let upper_value = correlation.magnitudes[upper_index];
+    lower_value + ((upper_value - lower_value) * weight)
+}
 
-        for row in 0..3 {
-            if row == pivot {
-                continue;
-            }
-            let factor = matrix[row][pivot];
-            for col in pivot..3 {
-                matrix[row][col] -= factor * matrix[pivot][col];
-            }
-            rhs[row] -= factor * rhs[pivot];
+fn predicted_pair_tau_s(
+    position_m: [f32; 3],
+    position_a_m: [f32; 3],
+    position_b_m: [f32; 3],
+    sound_speed_mps: f32,
+) -> f32 {
+    let distance_a_m = euclidean_distance(position_m, position_a_m) + EPSILON;
+    let distance_b_m = euclidean_distance(position_m, position_b_m) + EPSILON;
+    (distance_a_m - distance_b_m) / sound_speed_mps.max(1.0)
+}
+
+fn predicted_reference_tau_s(
+    position_m: [f32; 3],
+    sensor_position_m: [f32; 3],
+    reference_position_m: [f32; 3],
+    sound_speed_mps: f32,
+) -> f32 {
+    let reference_distance_m = euclidean_distance(position_m, reference_position_m) + EPSILON;
+    let sensor_distance_m = euclidean_distance(position_m, sensor_position_m) + EPSILON;
+    (sensor_distance_m - reference_distance_m) / sound_speed_mps.max(1.0)
+}
+
+fn centroid(active_channels: &[usize], mic_positions_m: &[[f32; 3]; 4]) -> [f32; 3] {
+    let mut mean = [0.0_f32; 3];
+    if active_channels.is_empty() {
+        return mean;
+    }
+    for &channel_index in active_channels {
+        let position_m = mic_positions_m[channel_index];
+        for axis in 0..3 {
+            mean[axis] += position_m[axis];
         }
     }
-    Some(rhs)
+    for axis in 0..3 {
+        mean[axis] /= active_channels.len() as f32;
+    }
+    mean
+}
+
+fn median(values: &[f32]) -> f32 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut ordered = values.to_vec();
+    ordered.sort_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
+    let middle = ordered.len() / 2;
+    if ordered.len() % 2 == 0 {
+        (ordered[middle - 1] + ordered[middle]) * 0.5
+    } else {
+        ordered[middle]
+    }
+}
+
+fn window_rms(window: &[f32]) -> f32 {
+    if window.is_empty() {
+        return 0.0;
+    }
+    let energy = window.iter().map(|sample| sample * sample).sum::<f32>();
+    (energy / window.len() as f32).sqrt()
 }
 
 fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
@@ -162,43 +446,236 @@ fn magnitude(v: [f32; 3]) -> f32 {
     dot(v, v).sqrt()
 }
 
+fn normalize_or_zero(v: [f32; 3]) -> [f32; 3] {
+    let norm = magnitude(v);
+    if norm <= EPSILON {
+        [0.0, 0.0, 0.0]
+    } else {
+        [v[0] / norm, v[1] / norm, v[2] / norm]
+    }
+}
+
+fn euclidean_distance(a: [f32; 3], b: [f32; 3]) -> f32 {
+    magnitude(sub(a, b))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{dsp_worker::PairTdoa, gcc_phat::TdoaResult};
 
     #[test]
-    fn tetrahedral_solver_recovers_far_field_direction() {
+    fn tetrahedral_solver_recovers_near_field_position_on_sirith_fixture() {
         let mics = [
             [0.0, 0.050, 0.0],
             [0.0433, 0.025, 0.0],
             [0.0, 0.0, 0.0],
             [0.02165, 0.025, 0.04082],
         ];
-        let direction = normalize([0.4, -0.2, 0.7]);
-        let pairs = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
-            .into_iter()
-            .map(|(a, b)| {
-                let baseline = sub(mics[b], mics[a]);
-                PairTdoa {
-                    ch_a: a,
-                    ch_b: b,
-                    tdoa: TdoaResult {
-                        delay_samples: 0.0,
-                        lag_seconds: dot(baseline, direction) / 343.2,
-                        confidence: 0.95,
-                    },
-                }
-            })
-            .collect::<Vec<_>>();
+        let source_position_m = [0.20, 0.10, 0.15];
+        let channels = synthesize_point_source_channels(source_position_m, &mics, 16_000, 1_024);
+        let evaluation = estimate_tetrahedral_steering(
+            &channels,
+            &[0, 1, 2, 3],
+            &mics,
+            16_000,
+            343.2,
+            SrpPhatConfig {
+                grid_resolution_m: 0.05,
+                search_padding_m: 0.3,
+                ..SrpPhatConfig::default()
+            },
+        );
 
-        let result = estimate_tetrahedral_steering(&pairs, &mics, 343.2).unwrap();
-        assert!(dot(result.steering_direction, direction) > 0.99);
-        assert_eq!(result.resolved_algorithm, "srp_phat");
+        assert_eq!(evaluation.pair_tdoas.len(), 6);
+        assert_eq!(evaluation.localization.resolved_algorithm, "srp_phat");
+        let recovered_position_m = evaluation.localization.position_m.expect("SRP position");
+        assert!(euclidean_distance(recovered_position_m, source_position_m) <= 0.08);
+
+        let expected_direction = normalize_or_zero(sub(source_position_m, centroid(&[0, 1, 2, 3], &mics)));
+        assert!(dot(evaluation.localization.steering_direction, expected_direction) > 0.95);
+        assert!(evaluation.localization.confidence >= 0.25);
     }
 
-    fn normalize(v: [f32; 3]) -> [f32; 3] {
-        let mag = magnitude(v);
-        [v[0] / mag, v[1] / mag, v[2] / mag]
+    #[test]
+    fn sirith_fixture_pair_tdoas_match_python_oracle_signs_and_order() {
+        let mics = [
+            [0.0, 0.050, 0.0],
+            [0.0433, 0.025, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.02165, 0.025, 0.04082],
+        ];
+        let source_position_m = [0.20, 0.10, 0.15];
+        let channels = synthesize_point_source_channels(source_position_m, &mics, 16_000, 1_024);
+        let evaluation = estimate_tetrahedral_steering(
+            &channels,
+            &[0, 1, 2, 3],
+            &mics,
+            16_000,
+            343.2,
+            SrpPhatConfig {
+                grid_resolution_m: 0.05,
+                search_padding_m: 0.3,
+                ..SrpPhatConfig::default()
+            },
+        );
+
+        let strongest_channel = [0, 1, 2, 3]
+            .into_iter()
+            .max_by(|left, right| {
+                window_rms(&channels[*left])
+                    .partial_cmp(&window_rms(&channels[*right]))
+                    .unwrap_or(Ordering::Equal)
+            })
+            .expect("fixture should have a reference channel");
+        assert_eq!(strongest_channel, 3);
+
+        let expected_pair_delay_samples = [
+            ((0, 1), 1.5_f32),
+            ((0, 2), -0.5_f32),
+            ((0, 3), 1.5_f32),
+            ((1, 2), -2.0_f32),
+            ((1, 3), 0.25_f32),
+            ((2, 3), 2.0_f32),
+        ];
+
+        for ((ch_a, ch_b), expected_delay_samples) in expected_pair_delay_samples {
+            let pair = evaluation
+                .pair_tdoas
+                .iter()
+                .find(|pair| pair.ch_a == ch_a && pair.ch_b == ch_b)
+                .expect("expected pair TDOA for oracle comparison");
+            assert!(
+                (pair.tdoa.delay_samples - expected_delay_samples).abs() < 0.6,
+                "expected pair ({}, {}) near Python oracle {} samples, got {}",
+                ch_a,
+                ch_b,
+                expected_delay_samples,
+                pair.tdoa.delay_samples
+            );
+            assert_eq!(
+                pair.tdoa.delay_samples.is_sign_positive(),
+                expected_delay_samples.is_sign_positive(),
+                "expected pair ({}, {}) to preserve Python oracle sign",
+                ch_a,
+                ch_b
+            );
+        }
+    }
+
+    #[test]
+    fn degraded_partial_array_stays_explicit() {
+        let mics = [
+            [0.0, 0.050, 0.0],
+            [0.0433, 0.025, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.02165, 0.025, 0.04082],
+        ];
+        let source_position_m = [0.20, 0.10, 0.15];
+        let channels = synthesize_point_source_channels(source_position_m, &mics, 16_000, 1_024);
+        let evaluation = estimate_tetrahedral_steering(
+            &channels,
+            &[0, 1, 2],
+            &mics,
+            16_000,
+            343.2,
+            SrpPhatConfig::default(),
+        );
+
+        assert_eq!(evaluation.localization.resolved_algorithm, "srp_phat_degraded_partial_array");
+        assert_eq!(evaluation.localization.confidence, 0.0);
+        assert!(evaluation.localization.position_m.is_none());
+        assert_eq!(evaluation.pair_tdoas.len(), 3);
+    }
+
+    #[test]
+    fn low_energy_windows_degrade_cleanly() {
+        let mics = [
+            [0.0, 0.050, 0.0],
+            [0.0433, 0.025, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.02165, 0.025, 0.04082],
+        ];
+        let channels = [vec![0.0; 512], vec![0.0; 512], vec![0.0; 512], vec![0.0; 512]];
+        let evaluation = estimate_tetrahedral_steering(
+            &channels,
+            &[0, 1, 2, 3],
+            &mics,
+            16_000,
+            343.2,
+            SrpPhatConfig::default(),
+        );
+
+        assert_eq!(evaluation.localization.resolved_algorithm, "srp_phat_degraded_low_energy");
+        assert!(evaluation.localization.position_m.is_none());
+        assert_eq!(evaluation.localization.confidence, 0.0);
+    }
+
+    #[test]
+    fn uncorrelated_windows_return_low_confidence() {
+        let mics = [
+            [0.0, 0.050, 0.0],
+            [0.0433, 0.025, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.02165, 0.025, 0.04082],
+        ];
+        let channels = [
+            pseudo_random_with_seed(0x1111_1111, 1_024),
+            pseudo_random_with_seed(0x2222_2222, 1_024),
+            pseudo_random_with_seed(0x3333_3333, 1_024),
+            pseudo_random_with_seed(0x4444_4444, 1_024),
+        ];
+        let evaluation = estimate_tetrahedral_steering(
+            &channels,
+            &[0, 1, 2, 3],
+            &mics,
+            16_000,
+            343.2,
+            SrpPhatConfig {
+                grid_resolution_m: 0.05,
+                search_padding_m: 0.3,
+                ..SrpPhatConfig::default()
+            },
+        );
+
+        assert_eq!(evaluation.localization.resolved_algorithm, "srp_phat");
+        assert!(evaluation.localization.confidence < 0.2);
+    }
+
+    fn synthesize_point_source_channels(
+        source_position_m: [f32; 3],
+        mic_positions_m: &[[f32; 3]; 4],
+        sample_rate_hz: u32,
+        output_len: usize,
+    ) -> [Vec<f32>; 4] {
+        let source = pseudo_random_with_seed(0x1234_5678, output_len + 64);
+        let delays_samples = mic_positions_m.map(|position_m| {
+            euclidean_distance(source_position_m, position_m) / 343.2 * sample_rate_hz as f32
+        });
+        let min_delay_samples = delays_samples.iter().copied().fold(f32::INFINITY, f32::min);
+        delays_samples.map(|delay_samples| fractional_delay(&source, delay_samples - min_delay_samples, output_len))
+    }
+
+    fn fractional_delay(source: &[f32], delay_samples: f32, output_len: usize) -> Vec<f32> {
+        (0..output_len)
+            .map(|sample_index| {
+                let source_index = sample_index as f32 - delay_samples;
+                if source_index < 0.0 || source_index + 1.0 >= source.len() as f32 {
+                    return 0.0;
+                }
+                let lower_index = source_index.floor() as usize;
+                let upper_index = lower_index + 1;
+                let fraction = source_index - lower_index as f32;
+                (source[lower_index] * (1.0 - fraction)) + (source[upper_index] * fraction)
+            })
+            .collect()
+    }
+
+    fn pseudo_random_with_seed(mut seed: u32, len: usize) -> Vec<f32> {
+        (0..len)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (seed as i32 as f32) / (i32::MAX as f32)
+            })
+            .collect()
     }
 }

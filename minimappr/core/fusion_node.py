@@ -26,6 +26,7 @@ from typing import Any
 import aiosqlite
 import numpy as np
 
+from minimappr.api.rust_dsp_manifests import LocalizedClassifierRenderRequest
 from minimappr.classifiers.base import AudioClassifier
 from minimappr.config import Settings
 from minimappr.core.assembly import DetectionAssembler
@@ -243,6 +244,7 @@ class FusionNode:
             coordinate_frame=coordinate_frame,
             preprocessor_factory=self.preprocessor_factory,
             environment_updater=EnvironmentUpdater(self.environment_provider),
+            persist_observations_on_ingest=bool(settings.persist_observations_on_ingest),
         )
         self._classification_orchestrator = ClassificationOrchestrator(
             classifier=classifier,
@@ -390,6 +392,117 @@ class FusionNode:
 
     async def ingest_decoded(self, request: IngestFrameRequest, decoded_audio: np.ndarray) -> IngestFrameResponse:
         return await self._ingest_request(request, decoded_audio=decoded_audio)
+
+    async def ingest_localized_render(self, payload: LocalizedClassifierRenderRequest) -> None:
+        if self._stopping:
+            raise ValueError("Fusion node is stopping")
+
+        normalized_audio = np.asarray(payload.decoded_audio, dtype=np.float32)
+        if normalized_audio.ndim != 1 or normalized_audio.size == 0:
+            raise ValueError("Localized render audio must be a non-empty mono signal")
+        if payload.sample_rate_hz <= 0:
+            raise ValueError("Localized render sample_rate_hz must be positive")
+
+        metadata = dict(payload.node.metadata)
+        metadata["time_quality"] = payload.time_quality.value
+        node = payload.node.model_copy(update={"metadata": metadata})
+
+        last_seen_ns = time.time_ns()
+        runtime = await self.registry.upsert(node, last_seen_ns)
+        position_geo = node.position_geo
+        if position_geo is None and node.position_m is not None:
+            position_geo = self.coordinate_frame.local_to_geo(node.position_m)
+        await self.storage.upsert_node(
+            spec=node,
+            last_seen_ns=last_seen_ns,
+            position_geo=position_geo,
+        )
+        sensor_descriptors = await self.registry.sensors_for_node(node.id)
+        selected_positions = {
+            descriptor.sensor_id: descriptor.position_m for descriptor in sensor_descriptors
+        }
+        selected_sensor_ids = list(runtime.sensor_ids)
+        if not selected_sensor_ids:
+            raise ValueError(f"Node {node.id!r} did not register any sensors")
+
+        reference_sensor = selected_sensor_ids[0]
+        render_duration_ns = int((normalized_audio.size / float(payload.sample_rate_hz)) * 1_000_000_000)
+        render_end_time_ns = last_seen_ns
+        render_start_time_ns = max(0, render_end_time_ns - render_duration_ns)
+        # Rust journal mode promotes rendered audio asynchronously. Use receipt-time
+        # coverage for the live debug buffer so operator listen checks do not look
+        # stale while the event provenance keeps the source TOA.
+        await self.buffer.append(
+            sensor_id=reference_sensor,
+            sample_rate_hz=payload.sample_rate_hz,
+            start_time_ns=render_start_time_ns,
+            samples=normalized_audio,
+            end_time_ns=render_end_time_ns,
+        )
+        capability_tier = (
+            "full_3d"
+            if len(selected_sensor_ids) >= self.settings.min_sensors_for_3d
+            else "classification_only"
+        )
+        candidate = EventCandidate(
+            id=f"rust-{payload.manifest_id}",
+            source_node_id=node.id,
+            event_time_ns=payload.event_time_ns,
+            sample_rate_hz=payload.sample_rate_hz,
+            source_type=payload.source_type,
+            time_quality=payload.time_quality,
+            source_observation_ids=list(payload.source_observation_ids),
+        )
+        localized_product = LocalizedCandidate(
+            candidate=candidate,
+            localization_branch=None,
+            selected_sensor_ids=selected_sensor_ids,
+            selected_windows={},
+            selected_positions=selected_positions,
+            classification_selected_windows={},
+            omni_reference_sensor=reference_sensor,
+            omni_reference_signal=normalized_audio,
+            omni_position_m=payload.localization_position_m,
+            omni_classification_reference_signal=normalized_audio,
+            localization_audio_quality={},
+            classification_audio_quality={},
+            classification_audio_quality_source="rust_classifier_render",
+            environment=dict(payload.environment),
+        )
+        if payload.authoritative_classification is not None:
+            classified = await self._classification_orchestrator.adopt_authoritative_classification(
+                classification=payload.authoritative_classification,
+                event_time_ns=payload.event_time_ns,
+                classification_signal=normalized_audio,
+            )
+            classified.classification.features["rust_classification_authoritative"] = True
+        else:
+            classified = await self._classification_orchestrator.classify_omni_only(
+                reference_signal=normalized_audio,
+                sample_rate_hz=payload.sample_rate_hz,
+                event_time_ns=payload.event_time_ns,
+            )
+        classified.classification.features["rust_manifest_id"] = payload.manifest_id
+        if payload.render_kind is not None:
+            classified.classification.features["rust_render_kind"] = payload.render_kind
+        if payload.fallback_reason is not None:
+            classified.classification.features["rust_fallback_reason"] = payload.fallback_reason
+        detection_product = await self._assemble_reporting_branch(
+            product=localized_product,
+            classified=classified,
+            reporting_modality="localized",
+            localization_position_m=payload.localization_position_m,
+            localization_confidence=payload.localization_confidence,
+            localization_gdop=payload.localization_gdop,
+            reference_sensor=reference_sensor,
+            reference_signal=normalized_audio,
+            tdoa_s={},
+            capability_tier=capability_tier,
+            localization_method=payload.localization_method,
+        )
+        if detection_product is None:
+            return
+        await self._process_rules_and_delivery(detection_product)
 
     async def _ingest_request(
         self,

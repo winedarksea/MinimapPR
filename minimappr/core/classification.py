@@ -191,6 +191,26 @@ class ClassificationOrchestrator:
             event_time_ns=event_time_ns,
         )
 
+    async def adopt_authoritative_classification(
+        self,
+        *,
+        classification: ClassificationResult,
+        event_time_ns: int,
+        classification_signal: np.ndarray,
+        classification_path: str = "rust_manifest",
+    ) -> ClassifiedResult:
+        """Adopt a precomputed classification result without re-running inference."""
+        authoritative_classification = classification.model_copy(deep=True)
+        return await self._build_result(
+            classification=authoritative_classification,
+            omni_classification=authoritative_classification.model_copy(deep=True),
+            beamformed_classification=None,
+            classification_path=classification_path,
+            classification_signal=classification_signal,
+            beamforming_error=None,
+            event_time_ns=event_time_ns,
+        )
+
     async def _classify_with_timeout(
         self, signal: np.ndarray, sample_rate_hz: int
     ) -> ClassificationResult:
@@ -203,6 +223,10 @@ class ClassificationOrchestrator:
             logger.warning(
                 "Classification timed out after %.0fs", _CLASSIFICATION_TIMEOUT_S
             )
+            try:
+                self._classifier.cancel_pending()
+            except Exception:  # noqa: BLE001 - timeout path should never crash classification
+                logger.exception("Classifier cancellation hook failed after timeout")
             return ClassificationResult(
                 label="timeout",
                 confidence=0.0,

@@ -4,6 +4,7 @@ mod map;
 mod pages;
 mod panels;
 mod prefs;
+mod recording;
 mod shell;
 mod state;
 mod ui;
@@ -48,8 +49,12 @@ fn App() -> impl IntoView {
                         <Route path=path!("heatmap")  view=pages::analysis::heatmap::GeoHeatmapView />
                     </ParentRoute>
 
-                    <Route path=path!("/audio")       view=pages::audio::AudioAnalysisPage />
-                    <Route path=path!("/audio/d/:id") view=pages::audio::AudioAnalysisPage />
+                    <ParentRoute path=path!("/audio") view=pages::audio::AudioLayout>
+                        <Route path=path!("")            view=|| view! { <Redirect path="/audio/record" /> } />
+                        <Route path=path!("record")      view=pages::audio::recording::RecordingPage />
+                        <Route path=path!("analysis")    view=pages::audio::AudioAnalysisPage />
+                        <Route path=path!("d/:id")       view=pages::audio::AudioAnalysisPage />
+                    </ParentRoute>
 
                     <ParentRoute path=path!("/settings") view=pages::settings::SettingsLayout>
                         <Route path=path!("")       view=pages::settings::config::ConfigView />

@@ -24,6 +24,7 @@ from minimappr.models import (
 
 if TYPE_CHECKING:
     from minimappr.api.binary_ingest import BinaryIngestPayload
+    from minimappr.api.rust_dsp_manifests import LocalizedClassifierRenderRequest
 
 
 Vec3Array = np.ndarray
@@ -391,6 +392,9 @@ class IngestTransport(Protocol):
         ...
 
     async def deliver_binary(self, payload: "BinaryIngestPayload") -> StoreForwardIngestResponse:
+        ...
+
+    async def deliver_localized_render(self, payload: "LocalizedClassifierRenderRequest") -> None:
         ...
 
 

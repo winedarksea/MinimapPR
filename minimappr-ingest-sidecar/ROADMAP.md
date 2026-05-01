@@ -1,404 +1,103 @@
-# Ingest Sidecar Build Target
+# IAMF and Ambisonics Design Plan
+Here is the technical solution architecture for integrating studio-grade Ambisonics, IAMF (object-based audio), and synchronized video capture into MinimapPR.
 
-Build the ingest sidecar around one storage and processing contract: a Rust capture service appends observations into tmpfs-backed, mmap-readable per-stream rolling journals, publishes typed handles, and ACKs as soon as the append is committed in RAM. Heavy DSP, classification-window rendering, durable persistence, and downstream policy stay off the capture path. This keeps the current MinimapPR retention rules, late-frame semantics, coverage semantics, and BirdNET hybrid expectations while removing file-per-packet churn and avoiding raw operational audio writes to durable disk. Per-packet observation records are not durably written on ingress; they are materialized only when a promotion, review, export, or fault workflow explicitly requires them.
+This plan leverages the existing Rust ingest journal for high-fidelity raw audio access, the Python backend for spatial metadata reasoning, and ffmpeg for video capture and final multiplexing.
 
-The capture boundary is strict: parse, validate, copy into the tmpfs journal, publish the handle, ACK. The ACK never waits on DSP, Python processing, database writes, fsync of raw audio, or artifact promotion.
+## High-Level Architecture Overview
+To achieve "studio-grade" outputs while keeping the live pipeline lightweight, the recording subsystem will operate completely asynchronously from the live tracking pipeline. It uses a Session-Based Capture Model:
 
-## Higher Level Goals
+Live Capture Phase: Pin the Rust journal and record raw video to disk.
+Post-Processing Phase: Extract high-fidelity audio, generate spatial metadata, encode to IAMF/Ambisonics, and multiplex with the video.
 
-Use Cases: whatever the design, it must support studio-grade ambisonics and IAMF (object tracking recording like Dolby Atmos) recording, speed to text processing of audio inputs, high precision TDOA localization, non-audio data capture (such as temperature and accelerometers), and prepare high quality audio for accurate classification.
+## Core Components
 
-Performance Requirements: minimal packet loss (0.01% is the goal), high efficiency processing, minimal writing to disk, and high reliability. Logs and errors need to never build up such that they may eventually swamp the system. However the system does not need to be particularly crash tolerant, if 30 seconds of audio are lost on a crash and reset, this is acceptable, and a worthwhile tradeoff for smaller footprint and simpler system design.
+### A. Capture Session Manager (Python)
+A new state machine manager in Python that coordinates recordings.
 
-Aim to keep files beneath 500 lines where practical.
-Only use widely-used, well-maintained dependencies.
+State: Maintains CaptureSession records in SQLite (States: PENDING, RECORDING, PROCESSING, COMPLETED, FAILED).
+Rust Journal Pinning: When a session starts, it issues a `StreamRangeLease` request to the Rust sidecar for the relevant array node's `stream_key` starting at `start_time_ns`. This range pin prevents the tmpfs rolling ring from evicting any newly written segments whose `toa_ns` falls within the active recording window.
+Lease Hard Cap: The Rust side enforces an absolute, non-renewable `end_ns = start_ns + MAX_DURATION` (e.g., 5 minutes) on every `StreamRangeLease` at creation time. Heartbeat signals from Python are liveness checks only — receiving them cannot extend `end_ns` and any attempt to do so must be rejected by the Rust sidecar. Missing a heartbeat triggers immediate GC of the lease on the Rust side, instantly freeing tmpfs memory. The Python session manager may not override this cap under any circumstances.
+Release: Once the session stops and audio is extracted, the pin is released.
 
-## Status Snapshot
+### B. Video Capture Subsystem
+A lightweight, headless subprocess runner for ffmpeg.
 
-This roadmap should now be read as a status-aware build target rather than as a claim that every downstream migration is already complete. The ingest journal slice is substantially implemented. The two major workstreams that remain outside that closure are the full production Rust DSP worker orchestration and the broader file-size refactor of the existing large Python backend.
+Source / Execution: Configurable per deployment. On Raspberry Pi (Bookworm), this uses `libcamera-vid -o - --codec h264 | ffmpeg -f h264 -i pipe:0 -c:v copy output_raw.mp4` to leverage the modern libcamera stack. On macOS, this uses `AVFoundation` with no live-view UI overhead.
+Hardware-Accelerated Codec: The video encoder is selected from a deployment profile to prevent video encoding from competing with the audio ingest pipeline. Defaults: `h264_v4l2m2m` on Linux/Pi (V4L2 M2M kernel encoder), `h264_videotoolbox` on macOS (VideoToolbox), `libx264 -preset veryfast -crf 18` as a software fallback. The ffmpeg subprocess is fully process-isolated and shares no thread pool or memory with the Rust audio worker.
+Synchronization: Pipes ffmpeg's progress output (`-progress pipe:2 -stats_period 0.1`) and parses the first `pts_time=` line to capture the exact timestamp of the first actual video frame, avoiding the 50–500ms driver init latency. Audio is extracted strictly aligned to this first-frame timestamp rather than the process spawn time.
 
-Implemented and verified now:
+### C. Studio-Grade Audio Extraction
+To get studio-grade audio, we bypass the real-time classification downsampling and use the raw, uncompressed PCM data from the pinned Rust journal.
 
-- Rust capture-plane sidecar with journal mode, per-stream segment rotation, mmap-readable handles, admission reserve enforcement, cursor-aware eviction, and pin lease APIs.
-- Python journal consumer with durable cursor and exception storage for journal replay.
-- Baseline artifact promotion from a journal handle into durable observation and artifact records.
-- Derived-cache and manifest stores that define the Rust-to-Python DSP handoff contract.
-- Warm-restart sequence recovery, torn-tail index salvage, and cold-restart epoch advancement for the journal lineage.
+Raw Ambisonic Bed (Frequency-Domain A-to-B): For the ambient "bed", we pull the 4-channel Sirith array data. Because the capsules are omnidirectional (measuring pressure, not direction), a simple time-domain matrix fails. Instead, we derive the encoding matrix E at runtime from `SIRITH_MIC_POSITIONS_M`. Because MK3 sits at [0,0,0] in that constant — not the geometric centroid (approximately [0.016, 0.025, 0.010]) — the centroid shift must be applied to all capsule positions before computing unit direction vectors, otherwise the matrix produces incorrect steering. The frequency-domain pseudoinverse of E is applied per FFT bin with frequency-dependent Tikhonov regularization (λ(f) = λ₀·(f_ref/max(f, f_ref))², with f_ref ≈ 120 Hz, λ₀ ≈ 1e-3) to prevent blowup near DC where velocity components are physically near zero. The X, Y, and Z velocity components are low-passed above ~3.4 kHz (= c / (2 × 0.05 m edge length)) to prevent spatial aliasing, while W remains full-bandwidth. The output is 4-channel B-format in ACN/SN3D (AmbiX) normalization.
 
-Partially implemented or intentionally deferred:
+Instead of a fixed formula, the regularization strength will be dynamically adapted based on the condition number of the encoding matrix at each frequency bin. This is more physically accurate, applying regularization only as much as is needed to counteract the ill-conditioning inherent at low frequencies, resulting in a more natural-sounding bass response
 
-- `dsp.rs` covers buffer and parity primitives plus the manifest boundary, but it does not yet replace the current Python localization and classification orchestration end-to-end in production.
-- The current Rust worker scaffolding is not yet sufficient for `MINIMAPPR_RUNTIME_PROFILE=birdnet_hybrid_production`: that profile expects `srp_phat`-resolved localized detections plus classifier-ready audio renders with explicit spatial provenance, while the sidecar currently stops short of that contract.
-- Multichannel journal storage already supports array-coherent audio capture, but IAMF/ADM/Dolby-class export remains out of scope for this build.
-- The transport-neutral envelope can carry non-audio metadata, but the higher-level Python and policy flows for non-audio capture remain follow-on work.
-- The sidecar removes file-per-packet churn and bounds journal and cache growth, but the dedicated burst and load benchmark proving the 0.01% packet-loss target remains an open operational gate.
-- The broader large-backend decomposition remains separate work and should not block the journal-sidecar slice.
+Object Extraction: Object isolation uses a shared `render_mvdr.rs` module placed alongside `gcc_phat.rs` and `srp_phat.rs` in the DSP worker, not as IAMF-only code. This ensures its minimum variance distortionless response (MVDR) calculations are consistent with the live localization pipeline, independently testable, and available to future live beamforming paths. It accepts a trajectory of `(sample_offset, [x,y,z])` waypoints from track history, processes 50% overlapping blocks, and crossfades between steering directions to output a clean mono track per object.
 
-## Goal Alignment
+Steering Slew-Rate Limiter: A first-order IIR smoother is applied to the cartesian steering unit vector before computing delays per block: `current = α·target + (1−α)·current`, renormalized to unit length. The smoothing constant α is chosen to limit angular slew to approximately 180°/second, preventing audible phase tearing when the Kalman tracker makes a sudden large position jump between frames.
 
-This build already serves the higher-level goals where the ingest boundary is the deciding factor:
+Track Handoff and Gaps: Inactive tracks fade to silence over ~100 ms; new tracks fade in over ~100 ms. No processing bridges silence gaps between separate acoustic events — a brief silence between two calls is always the correct output. Attempting to steer through the gap would smear unrelated sounds together.
 
-- minimal disk writes via tmpfs-backed operational journals and transient derived caches
-- reliable bounded growth via admission reserves, eviction rules, lease expiry, and durable consumer cursors
-- high-fidelity classifier preparation via mmap-reopenable raw handles, derived-cache entries, manifest provenance, and promotion-time observation materialization
-- multichannel capture readiness via per-stream rings that keep channel-coherent media together instead of flattening it into per-channel files
+### D. Spatial Subtraction
+After each object track is beamformed, its acoustic contribution is still present in the full B-format bed, causing it to be rendered twice at playback: once as a positioned point-source object element, and once diffusely from the ambient bed. To prevent this, each extracted object is re-encoded back into B-format coordinates and subtracted from the full bed before the bed is finalized:
 
-The remaining higher-level goals depend mostly on downstream orchestration rather than on the capture boundary itself:
+  B_clean(f) = B_full(f) − Σᵢ [ Y_obj_i(f) · O_i(f) ]
 
-- full Rust DSP worker orchestration for TDOA, localization, and classifier rendering at production depth
-- `birdnet_hybrid_production` readiness where Rust owns ingest and initial audio processing while Python remains the BirdNET inference, tracking, rules, and durable-state plane
-- broader speech-to-text and non-audio consumer workflows
-- IAMF/ADM/Dolby-class export and scene packaging
+where Y_obj_i(f) is the ambisonic encoding vector for the i-th object's steering direction and O_i(f) is the beamformed mono object in the frequency domain. Because B-format encoding is a linear operation, this subtraction is exact rather than approximate. This step runs after all objects have been isolated and before the bed WAV is written to disk.
 
-## Core Contract
+### E. IAMF Scene Builder & Exporter
+Translates MinimapPR tracks into IAMF (Immersive Audio Model and Formats).
 
-### Observation envelope
+Audio Elements:
+- A 4-channel Ambisonic B-format bed track for the environment (after spatial subtraction).
+- N isolated mono tracks for distinct acoustic objects.
 
-The journal entry is a typed in-memory observation envelope plus a journal handle. For audio observations, every committed entry carries:
+Loudness Measurement (BS.1770-4): Before writing the Mix_Presentation_OBU, a final offline pass computes ITU-R BS.1770-4 integrated loudness (LUFS) and True Peak for the FOA bed (measured on the W channel) and each object mono track independently. These measurements are injected into the `loudness_info` field of Mix_Presentation_OBU before the file is finalized, ensuring YouTube playback compliance (−14 LUFS normalization target) and correct IAMF metadata.
 
-- `observation_id`
-- `journal_epoch`
-- `journal_sequence`
-- `node_id`
-- `stream_id`
-- `sensor_type`
-- `source_type`
-- `transport`
-- TOA
-- TOR
-- `ingest_received_ns`
-- `time_quality`
-- `clock_domain`
-- `sync_source`
-- `clock_correction_ns` or `clock_drift_ppm`
-- `sample_rate_hz`
-- `channel_count`
-- `channel_layout`
-- `sample_index_start`
-- `sample_count`
-- `geometry_version`
-- `orientation_version`
-- `calibration_version`
-- `retention_hint`
-- `payload_codec`
-- `payload_byte_range`
-- `integrity_hash`
+Metadata Generation: Queries the TrackManager / SQLite history for the exact time window. The listener origin is fixed at the mic array centroid. The transform maps `room_xyz` → `listener_relative_xyz` → `spherical(azimuth, elevation, distance)`. Object trajectory waypoints are sampled at the track update rate and written as Parameter_Block_OBUs in each temporal unit.
 
-`journal_epoch` is a monotonically increasing journal namespace identifier assigned when a live journal lineage starts; a cold restart advances the epoch so `journal_sequence` values remain unambiguous within and across recoveries.
+Before multiplexing, the final extracted audio (both the ambisonic bed and the object tracks) is optionally passed through a high-quality polyphase resampler (e.g., using libsoxr).
 
-`sensor_type` and `transport` are first-class fields in the build target, not deferred schema cleanup. These fields live in the journal entry and short-lived indices by default; they become durable only if a promotion path materializes a retained observation record.
+Compilation (Custom Rust Writer): Writing IAMF v1.0.0 directly avoids the heavy `iamf-tools` C++ build chain on Raspberry Pi. We use a purpose-built Rust writer (~800 lines) implementing the OBU (Open Bitstream Unit) framing: 1-byte header, LEB128 size, and payload for each OBU type (IA_Sequence_Header, Codec_Config with `ipcm`, Audio_Element for the FOA bed and each object, Mix_Presentation with loudness_info, Temporal_Delimiter, Parameter_Block, and Audio_Frame). The static descriptor OBUs are written once; temporal units repeat at the codec frame rate.
 
-### Journal handle
+https://github.com/AOMediaCodec/iamf-tools/blob/main/docs/external/encoding_with_external_tools.md#encode-wav-files-to-iamf-with-ffmpeg
 
-The media handle resolves to a committed byte range inside a tmpfs-backed, mmap-readable raw-media segment owned by a per-stream rolling ring keyed by `node_id + stream_id`. Each handle includes enough information to reopen the payload without scanning unrelated streams:
+YouTube AmbiX Mux: As a backup, the processor simultaneously outputs a derived 4-channel AmbiX (W/X/Y/Z in ACN/SN3D) WAV from the bed. `ffmpeg` multiplexes this standard AmbiX track with the raw video to produce a bulletproof, YouTube-ready spatial audio MP4.
 
-- `journal_epoch`
-- `segment_id`
-- `stream_key`
-- `payload_offset_bytes`
-- `payload_length_bytes`
-- `sample_index_start`
-- `sample_count`
-- `integrity_hash`
+## Data Flow & Execution Sequence
 
-### Storage classes
+### START Recording (POST /api/v1/capture/start)
+1. The API receives the request (with optional video source and deployment profile).
+2. Generates a session_id.
+3. Sends a `StreamRangeLease` to the Rust sidecar. The Rust side immediately sets the absolute `end_ns` cap; no subsequent call can extend it.
+4. Spawns ffmpeg using the deployment-profile hardware codec and parses the first-frame `pts_time=` for the exact `start_time_ns`.
 
-There are exactly three storage classes:
+### STOP Recording (POST /api/v1/capture/{id}/stop)
+1. Sends SIGTERM (`process.terminate()`) to the ffmpeg process to cleanly finalize the raw MP4 `moov` atom (required on macOS).
+2. Records `end_time_ns`.
+3. Enqueues the session into a background asyncio task for post-processing so it doesn't block the API.
 
-1. Operational rolling journal: tmpfs-backed, mmap-readable, bounded by memory budget, non-durable raw audio.
-2. Transient derived cache: bounded cache for candidate windows, classifier-ready renders, and localized review audio that have not been retained.
-3. Promoted retained artifacts: durable outputs governed by existing retention tiers and cleanup rules.
+### Background Post-Processing (The "Studio" Render)
+1. **Extract**: Calls a new Rust endpoint `GET /api/v1/journal/range?stream_key=X&start_ns=Y&end_ns=Z` to fetch the ordered segments spanning the time window. Unpins the journal immediately after reading to free tmpfs memory.
+2. **Matrix**: Applies frequency-domain A-to-B conversion (centroid-corrected E matrix, Tikhonov-regularized pseudoinverse) to render the full Ambisonic background bed to `bed_full.wav`.
+3. **Isolate**: Queries the database for all confirmed tracks within the time window. Runs `render_tvds` with the slew-rate limiter and track handoff rules on each track's trajectory to generate `object_{track_id}.wav`.
+4. **Subtract**: Re-encodes each beamformed object into B-format and subtracts all contributions from `bed_full` (B_clean = B_full − Σ Y_obj · O). Writes the result to `bed.wav`. Deletes `bed_full.wav`.
+5. **Measure**: Runs a BS.1770-4 integrated loudness and True Peak pass over `bed.wav` (W channel) and each `object_{track_id}.wav`. Holds these values for injection into the IAMF writer.
+6. **Metadata**: Maps MinimapPR's `position_m` coordinates to IAMF listener-relative spherical coordinates for the writer.
+7. **Encode IAMF & AmbiX**: The Rust IAMF writer emits the custom `.iamf` OBU bitstream with the measured `loudness_info` injected into Mix_Presentation_OBU. Simultaneously exports a 4-channel AmbiX WAV from `bed.wav`.
+8. **Multiplex**: Executes `ffmpeg` to combine `output_raw.mp4` with the AmbiX WAV into `youtube_export.mp4`.
+9. **Cleanup**: Deletes all intermediate files (`bed.wav`, `object_*.wav`, AmbiX WAV) on success. On FAILED state, actively sweeps the session working directory to remove any leftover multi-gigabyte intermediate files.
+10. **Register**: Moves `youtube_export.mp4` and the archival `audio.iamf` into `MinimapPR/data/artifacts` and inserts a `large_artifacts` DB record with `artifact_type="iamf_video"`.
 
-Raw operational audio lives only in the operational journal unless an explicit promotion or capture-session policy pins and exports it.
+## Safety & Performance Constraints
 
-## Storage Model
+**Non-Blocking Operation**: Audio processing, beamforming, loudness measurement, and video multiplexing are highly CPU-intensive. All post-processing runs strictly in a dedicated background thread/process pool. The real-time TDOA and ingestion pipelines must never be affected.
 
-### Commit to tmpfs plus mmap
+**Memory Budgets**: The Rust `StreamRangeLease` hard cap is the sole OOM defense and is enforced by the Rust sidecar, not the Python session manager. The absolute `end_ns` is set at creation and cannot be extended. Missing heartbeats on the Python side trigger immediate Rust-side GC, freeing tmpfs. No secondary Python-side duration enforcement is required or trusted. A UI element (so users control the end runtime) may make sense.
 
-The default and required IPC/storage mechanism for this build is tmpfs-backed segment files opened through mmap. This is not a fallback. It is the only mechanism that satisfies both the Rust capture-plane requirements and the existing Python consumer boundary. Pure in-process memory or anonymous shared-memory designs are out of scope for this build because the Python consumer requires file-backed reopening semantics.
+**Hardware Codec Isolation**: The ffmpeg video subprocess must use hardware-accelerated encoding in all production deployments (`h264_v4l2m2m` on Pi, `h264_videotoolbox` on macOS). Software `libx264` at 1080p on a Pi 4 consumes two CPU cores and directly competes with audio ingest. The subprocess is fully process-isolated from the Rust audio worker and must not share any execution resources with it.
 
-### Per-stream rings
+**Audio-Video Synchronization**: The raw audio journal operates on absolute ns timestamps (aligned to GPS/NTP). The video capture uses the host OS clock, anchored to the first actual ffmpeg `pts_time`. The post-processor aligns the audio start exactly to this frame, applying a fractional-sample offset if `timing_diagnostics` indicate clock skew between the audio hardware clock and the host wall clock.
 
-Each `node_id + stream_id` pair owns its own append ring. Rings isolate head-of-line blocking, make eviction local, and keep sample-index ordering coherent for multichannel sources. Array-node audio remains phase-coherent multichannel media in one stream ring rather than being flattened into per-channel artifacts.
-
-### Segment layout
-
-Each stream ring is composed of sealed tmpfs segments with compact headers:
-
-- `segment_id`
-- `journal_epoch`
-- `stream_key`
-- `first_journal_sequence`
-- `last_journal_sequence`
-- `first_received_ns`
-- `last_received_ns`
-- optional first and last TOA
-- optional first and last TOR
-- `entry_count`
-- `payload_bytes`
-- `pin_count`
-- `sealed`
-
-Sealed-segment metadata keeps replay lookup, pinning, and cleanup bounded by segment count rather than entry count.
-
-### Consumer state replaces receipt files
-
-Receipt files are replaced by a durable consumer-state store with two tables:
-
-1. Consumer cursor table: one row per consumer and stream, storing the monotonic watermark (`last_fully_processed_journal_sequence`) and last update time.
-2. Consumer exception table: compact rows for entries that failed permanently, expired before processing, or were intentionally skipped.
-
-The raw journal is allowed to disappear. Consumer watermarks and exception rows are durable and must survive process restarts and host restarts.
-
-### Frame dedup disposition
-
-Ingress dedup remains a separate lightweight control-plane record rather than a durable observation record. Keep a compact dedup table keyed by `node_id + boot_session + frame_sequence` so the system can reject replays of the same firmware frame without reintroducing per-channel or per-observation writes. This table exists only to preserve ingest idempotence across retries and restarts; it is not a retained packet log.
-
-### Short-lived ingress indices and aggregate metrics
-
-Instead of durably writing one observation row per packet on ingest, the sidecar maintains bounded short-lived indices over the live journal:
-
-- stream-local sequence to segment-range index
-- time-range index keyed by `node_id + stream_id`
-- active pin index
-- transient manifest index for candidate detections and derived windows
-
-These indices exist only to support live consumers, promotion lookups, and fault handling while the underlying journal ranges remain available.
-
-Durable operational visibility comes from aggregate metrics and rollups rather than per-observation rows:
-
-- ingress bytes/sec and packets/sec by node and stream
-- append latency and ACK latency histograms
-- consumer lag and watermark deltas
-- eviction counts and pin-pressure counters
-- overload rejections and degraded-mode counters
-- clock-quality and gap-rate summaries
-
-Those metrics are durable as counters, histograms, and time-bucketed summaries, not as packet-by-packet audit logs.
-
-## Capture and Consumer Behavior
-
-### Capture-plane ACK rule
-
-The sidecar hot path does only this:
-
-1. Parse and validate the request envelope.
-2. Reserve byte range and next `journal_sequence` in the target per-stream ring.
-3. Copy payload bytes into the tmpfs segment.
-4. Publish the journal entry and journal handle as committed.
-5. ACK the sender.
-
-If any of those steps fail before publish, the append is rolled back and the request is not ACKed.
-
-### Rust DSP plane
-
-Rust DSP workers tail committed journal ranges and emit typed manifests plus derived-audio handles. They own rolling buffering, trigger evaluation, sibling-node grace handling, localization-window extraction, TDOA or GCC-PHAT estimation, localization, and classifier-audio rendering. They do not run on the capture executor.
-
-Current status: the repository contains the journal, derived-cache, manifest, and buffer/parity primitives for this plane, but the full production worker orchestration that would replace the current Python path is still follow-on work.
-
-Near-term cutover requirement: for `MINIMAPPR_RUNTIME_PROFILE=birdnet_hybrid_production`, Rust workers must be able to handle ingest and initial audio processing without waiting for a full Rust BirdNET migration. In that staged design, Rust owns journal append, rolling buffer parity, array-local localization, classifier-render preparation, and review-render preparation; Python continues to own BirdNET inference, tracking, rules, alerting, and durable observation materialization.
-
-### Python boundary
-
-Python consumes:
-
-- journal metadata plus tmpfs-backed handles for raw-frame access where needed
-- DSP manifests plus memory handles for classifier-ready audio and localized review audio
-- promoted artifact references after retention or review decisions
-
-This keeps Python as the rules, tracking, database, alerting, and BirdNET inference plane while raw packet ingestion stops depending on file-per-packet spooling. Python opens the tmpfs-backed segments through file-backed handles rather than through direct shared-memory access, and only writes durable observation records when a promotion, review, export, or fault workflow materializes them from the live journal entry or derived manifest.
-
-## Pinning, Eviction, and Memory Limits
-
-### Pin and unpin protocol
-
-Eviction is safe only if raw ranges and derived windows have explicit ownership. Every handle can be in one of three retention states:
-
-1. Unpinned: eligible for normal ring eviction.
-2. Soft-pinned: temporarily retained for an active consumer or DSP task.
-3. Hard-pinned: retained for operator-requested capture sessions, artifact promotion, or active export.
-
-Pinning rules:
-
-- Rust DSP pins source ranges while window extraction or rendering is in progress.
-- Python pins derived handles while classifier, review, or persistence work is in progress.
-- Operator capture sessions and promotion flows create hard pins until export or retention expiry completes.
-- Pins are reference-counted and tied to lease expirations so crashed consumers cannot pin forever.
-
-Unpin happens on successful completion, explicit abandonment, or lease expiry. Eviction may reclaim only fully unpinned segments below the oldest active pin for that stream.
-
-### Memory sizing formula
-
-Size the operational journal with an explicit formula:
-
-$$
-\\text{journal\_bytes} = \left(\sum_{streams} \text{peak\_ingress\_bytes\_per\_sec} \times \text{target\_lag\_seconds}\right) \times \text{burst\_multiplier} + \text{pin\_reserve\_bytes} + \text{metadata\_reserve\_bytes}
-$$
-
-For PCM-like audio streams:
-
-$$
-\\text{ingress\_bytes\_per\_sec} = \text{sample\_rate\_hz} \times \text{channel\_count} \times \text{bytes\_per\_sample}
-$$
-
-Required configuration:
-
-- per-stream minimum reservation
-- total tmpfs journal budget
-- transient derived-cache budget
-- hard pin reserve
-- admission reserve for one maximum-size append per active stream
-- target consumer lag window in seconds
-- burst multiplier
-
-### OOM and overload behavior
-
-The sidecar enforces this degradation order:
-
-1. Drop optional DSP work and stop creating new derived windows.
-2. Reduce localization cost or spatial weighting work.
-3. Fall back to cheaper classifier-audio rendering paths.
-4. Evict oldest unpinned journal data above the consumer watermark.
-5. Reject new ingest with a clear overload error only when the append path cannot preserve the admission reserve.
-
-Capture never blocks on durable I/O to make progress. If admission reserve is exhausted, the request is rejected rather than partially accepted.
-
-## Durability and Recovery
-
-### Durable versus non-durable state
-
-Durable state:
-
-- consumer cursor table
-- consumer exception table
-- frame dedup table
-- promoted retained artifacts
-- policy and cleanup state
-- aggregate health metrics and rollups
-
-Non-durable state:
-
-- raw operational journal segments in tmpfs
-- per-packet observation envelopes that have not been promoted
-- short-lived ingress indices
-- transient derived-cache entries that were not promoted
-- in-flight DSP work
-
-### Named recovery modes
-
-The build target names three recovery modes explicitly:
-
-1. Warm process restart: tmpfs journal still exists, the sidecar rebuilds in-memory indexes from segment headers, resumes from the last committed segment state, and continues from the durable consumer cursors.
-2. Cold host restart: tmpfs journal is gone, unpromoted raw audio is intentionally lost, durable cursors remain, and consumers resume from the next live append in a new `journal_epoch`.
-3. Torn-tail recovery: the sidecar finds a partially written or unpublished tail range after a crash, truncates back to the last committed offset, and preserves sequence monotonicity inside the recovered epoch.
-
-The product accepts loss of unpromoted raw audio, unpromoted observation envelopes, and short-lived indices across cold restart. It does not accept loss of durable cursor state, frame dedup state, promoted artifacts, active policy state, or aggregate operational metrics.
-
-## Semantic Requirements
-
-### Audio-buffer parity
-
-Rust DSP behavior must match the existing Python audio-buffer semantics in `minimappr/core/audio_buffer.py`: timeline anchoring, late-frame snap tolerance, overlap merge behavior, zero-fill for gaps, partial trailing windows, full-window availability checks, coverage accounting, and sample-rate-reset handling. These semantics remain the oracle for BirdNET hybrid and snippet fidelity.
-
-### BirdNET hybrid render contract
-
-Classifier-ready renders must carry explicit spatial provenance rather than implicit path assumptions:
-
-- steering solution
-- classifier source node
-- spatial blend mode
-- effective spatial band
-- confidence
-- fallback reason
-
-The classifier contract is broadband audio with spatial weighting only where the array can localize reliably.
-
-### `birdnet_hybrid_production` runtime-profile contract
-
-The current Python runtime profile is the compatibility target for the Rust worker migration:
-
-- `classifier_backend = birdnet`
-- `localization_algorithm = srp_phat`
-- `localization_strategy = fixed`
-- localized detections are expected to report `localization_method = srp_phat`
-- `beamformed_classification_enabled = False` remains the conservative default until journal-derived render parity is proven
-
-That means the Rust sidecar cannot stop at pairwise GCC-PHAT output. To be considered ready for this profile, the Rust workers must provide:
-
-1. array-local localization compatible with the `srp_phat` expectation for Sirith tetrahedral nodes
-2. point-node and degraded-localization omni fallback without breaking detection provenance
-3. classifier-ready render handles that preserve full-band BirdNET input while applying spatial weighting only where the array has useful aperture
-4. explicit BirdNET provenance describing steering solution, blend mode, spatial band, confidence, and fallback reason
-
-The intended hybrid render for Sirith tetrahedral nodes remains:
-
-- array-steered band approximately 1 kHz to 3.4 kHz
-- omni contribution outside the spatially reliable band so BirdNET still receives broadband input
-- optional high-pass conditioning above roughly 100 Hz before the spatial blend when low-frequency rumble would otherwise dominate the render
-
-Migration rule: keep the profile's current default behavior stable until the Rust-generated manifests and renders satisfy `tests/test_birdnet_hybrid_production.py`. Only after that parity is demonstrated should array-node hybrid renders become the default production path.
-
-### Promotion policy
-
-Candidate windows are transient by default. Durable promotion happens only for:
-
-- retained classifier input audio
-- retained localized review audio
-- explicit raw capture bundles
-- scene manifests and other policy-approved exports
-
-Promotion reuses the existing retention tiers, `large_artifacts` storage path, cleanup policy, and cleanup service. When promotion occurs, the system lazily materializes the retained observation metadata needed for provenance from the live journal entry, DSP manifest, and pinned source ranges rather than from a preexisting per-packet database row.
-
-## Verification Status
-
-| Gate | Status | Evidence | Remaining |
-|------|--------|----------|-----------|
-| Capture-plane ACK and raw-handle readability | Done at unit and integration level | `src/main.rs::{returns_accepted_after_manifest_is_ready,journal_mode_appends_segment_and_index_files,journal_overload_returns_503}`, `src/ingest_backend.rs::journal_payload_handle_reopens_with_mmap_and_verifies_hash` | Keep the load benchmark separate from the correctness gate |
-| Warm and cold recovery semantics | Done | `src/ingest_backend.rs::{journal_recovers_next_sequence_after_restart,journal_recovers_torn_index_tail_by_truncating_uncommitted_payload,journal_recovers_complete_unterminated_index_entry_as_committed,journal_advances_epoch_after_cold_restart}` | None at the correctness gate; load-loss tolerance remains under benchmarking |
-| Load and packet-loss benchmarking | Open | No dedicated committed benchmark yet | Measure target burst rates with DSP disabled, degraded, and enabled |
-| Memory pressure, reserve enforcement, and eviction safety | Partial | `src/ingest_backend.rs::{journal_rejects_when_no_evictable_segment_can_preserve_reserve,journal_evicts_oldest_sealed_segment_once_cursor_covers_it,pin_lease_blocks_segment_eviction_until_released}`, `src/derived_cache.rs::derived_cache_evicts_oldest_entry_to_preserve_budget` | Add consumer-lag and lease-expiry stress coverage |
-| Cursor-store durability | Done for the Python consumer slice | `tests/test_ingest_spool_consumer_journal.py` covers processed, failed, and hash-mismatch journal handling with durable cursor and exception updates | Add a broader end-to-end cold-loss replay scenario if needed |
-| Cross-language buffer parity | Partial | `src/dsp.rs::{late_frame_replaces_zero_gap,trailing_window_returns_partial_audio,overlap_merge_overwrites_existing_samples,explicit_sample_index_gaps_mark_missing_coverage,explicit_contiguous_samples_reanchor_after_large_timestamp_correction}` | Add zero-fill edge cases and sample-rate reset parity against the Python oracle |
-| BirdNET hybrid production parity | Open | `tests/test_birdnet_hybrid_production.py`, `config.py` runtime-profile defaults, and the current placeholder BirdNET provenance show the required contract more clearly than the current Rust worker output | Add `srp_phat`-compatible array-local localization, hybrid/omni classifier-render handles, explicit fallback semantics, and manifest provenance before enabling Rust-generated hybrid renders by default |
-| Promotion materialization | Done for the current journal promotion slice | `tests/test_journal_promotion.py` covers classifier-input promotion plus retained detection references, localized review artifacts, fault capture, and explicit raw-capture bundle cases without pre-packet database writes | Keep extending end-to-end workflow wiring as higher-level consumers land |
-
-Current verification baseline:
-
-- `cargo test -q` in `minimappr-ingest-sidecar`
-- `pytest tests/test_sidecar_startup.py tests/test_http_api.py::test_system_diagnostics_includes_sidecar_health tests/test_journal_promotion.py -q`
-- `pytest tests/test_ingest_spool_consumer_journal.py tests/test_journal_promotion.py -q`
-
-## Decisions
-
-- Included scope: tmpfs+mmap rolling journal, per-stream rings, durable cursor tables, Rust DSP workers, Python manifest consumption, artifact promotion, cleanup alignment, optional raw capture sessions, and transport-neutral observation envelopes.
-- Excluded scope: pure in-process shared-memory transport, durable raw-audio journaling to physical disk, moving BirdNET inference into Rust, and IAMF/ADM/Dolby export work.
-- Spool mode fate: legacy spool mode is deprecated and should be removed from production once the tmpfs journal path satisfies the verification gates; it may remain only as a temporary test or rollback harness during transition.
-- ACK policy: ACK after parse, validate, copy to tmpfs, publish handle. Do not wait on DSP, Python, DB, or disk.
-- Retention policy: raw operational audio is ephemeral unless pinned and promoted by policy, review, or capture-session request.
-- Provenance policy: keep TOA, TOR, `time_quality`, geometry, orientation, and calibration immutable in source journal entries; lazily materialize durable observation records only for promoted detections, retained artifacts, exports, and explicit fault records.
-
-## Key Files
-
-| File | Role |
-|------|------|
-| `minimappr-ingest-sidecar/src/main.rs` | Capture-plane ACK boundary |
-| `minimappr-ingest-sidecar/src/ingest_backend.rs` | Journal append, segment rotation, pinning, and cursor integration |
-| `minimappr-ingest-sidecar/src/dsp_worker.rs` | Rust worker scaffold for journal-driven initial audio processing |
-| `minimappr-ingest-sidecar/src/manifests.rs` | Rust-to-Python DSP manifest and BirdNET provenance contract |
-| `minimappr/api/journal_reader.py` | Python mmap-backed journal-handle reopen and integrity verification |
-| `minimappr/api/journal_state.py` | Durable consumer cursor and exception storage |
-| `minimappr/api/spool_consumer.py` | Python consumer boundary for journal handles and manifests |
-| `minimappr/api/transports.py` | Python handoff boundary to preserve provenance and ingestion semantics |
-| `minimappr/core/journal_promotion.py` | Journal-handle promotion into durable artifacts and observations |
-| `minimappr/core/ingest.py` | Promotion-time observation materialization, preprocessing, and trigger orchestration |
-| `minimappr/core/audio_buffer.py` | Semantic oracle for late-frame and coverage behavior |
-| `minimappr/core/fusion_node.py` | Localization and classification orchestration |
-| `minimappr/core/classification.py` | Classifier-input expectations and fallback behavior |
-| `minimappr/core/assembly.py` | Snippet and artifact assembly path |
-| `minimappr/storage/db.py` | Durable promoted metadata, artifacts, cursors, and aggregate metric storage |
-| `minimappr/cleanup_policy.py` | Retention and export policy |
-| `minimappr/cleanup_service.py` | Cleanup orchestration |
-| `minimappr/config.py` | Journal budgets, cache budgets, queue sizing, and retention settings |
-| `tests/test_ingest_spool_consumer_journal.py` | Journal consumer cursor and exception coverage |
-| `tests/test_journal_promotion.py` | Promotion materialization coverage |
-| `tests/test_birdnet_hybrid_production.py` | Core behavioral parity suite |
+**Tests** a short capture unittest should exist that confirms capture works and produces correctly formated files, then cleans up after itself. This will use a synthetic input as in test_birdnet_hybrid_production.py 

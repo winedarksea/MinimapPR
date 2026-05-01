@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use tracing::warn;
 use uuid::Uuid;
 
@@ -5,6 +7,7 @@ use crate::{
     birdnet_render::{
         render_hybrid_pcm16le, render_omni_pcm16le, ClassifierRenderPayload, HybridRenderConfig,
     },
+    classifier_helper::ManifestClassificationAnnotator,
     derived_cache::DerivedCache,
     dsp_worker::{DspWorkerConfig, SIRITH_MIC_POSITIONS_M},
     journal_reader::JournalPayloadHandle,
@@ -18,6 +21,8 @@ pub struct RenderPublishContext<'a> {
     pub manifest_store: &'a ManifestStore,
     pub derived_cache: &'a DerivedCache,
     pub config: &'a DspWorkerConfig,
+    pub sound_speed_mps: f32,
+    pub classifier_annotator: Option<&'a mut ManifestClassificationAnnotator>,
 }
 
 pub struct RenderPublishResult {
@@ -51,7 +56,7 @@ pub async fn publish_classifier_render(
                     HybridRenderConfig {
                         spatial_band_hz: context.config.spatial_blend_band_hz,
                         pre_blend_highpass_hz: context.config.pre_blend_highpass_hz,
-                        sound_speed_mps: context.config.sound_speed_mps,
+                        sound_speed_mps: context.sound_speed_mps,
                     },
                 ),
                 "birdnet_hybrid_spatial_blend".to_string(),
@@ -124,7 +129,7 @@ pub async fn publish_omni_render(
 
 #[allow(clippy::too_many_arguments)]
 async fn publish_render_manifest(
-    context: RenderPublishContext<'_>,
+    mut context: RenderPublishContext<'_>,
     manifest: &DspManifest,
     stream_key: &str,
     payload: Vec<u8>,
@@ -190,11 +195,36 @@ async fn publish_render_manifest(
         stream_key: stream_key.to_string(),
         payload_offset_bytes: 0,
         payload_length_bytes: entry.byte_length,
+        toa_ns: manifest.source_handles.first().and_then(|handle| handle.toa_ns),
+        tor_ns: manifest.source_handles.first().and_then(|handle| handle.tor_ns),
         sample_index_start: None,
         sample_count: Some(sample_count as u64),
         integrity_hash: String::new(),
         segment_path: entry.path.clone(),
     };
+    let mut authoritative_label: Option<String> = None;
+    let mut authoritative_label_confidence: Option<f32> = None;
+    let mut authoritative_scores: Option<BTreeMap<String, f32>> = None;
+    if let Some(classifier_annotator) = context.classifier_annotator.as_mut() {
+        match classifier_annotator
+            .classify_render(&derived_handle.segment_path, sample_rate_hz)
+            .await
+        {
+            Ok(Some(classification)) => {
+                authoritative_label = Some(classification.label);
+                authoritative_label_confidence = Some(classification.label_confidence);
+                authoritative_scores = Some(classification.scores);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                warn!(
+                    manifest_id = %manifest.manifest_id,
+                    error = %error,
+                    "DSP worker classifier helper did not annotate render manifest"
+                );
+            }
+        }
+    }
     let published = DspManifest {
         manifest_id: format!("manifest-{}", Uuid::new_v4()),
         manifest_type: "classifier_render".to_string(),
@@ -210,6 +240,9 @@ async fn publish_render_manifest(
             effective_spatial_band,
             confidence,
             fallback_reason,
+            label: authoritative_label,
+            label_confidence: authoritative_label_confidence,
+            scores: authoritative_scores,
         }),
         coverage_stats: None,
         promotion_ready: true,

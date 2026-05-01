@@ -658,7 +658,11 @@ impl SegmentJournalBackend {
             .publish(DspManifest {
                 manifest_id: format!("manifest-{}", entry.journal_id),
                 manifest_type: "raw_journal_append".to_string(),
-                created_ns: entry.ingest_received_ns,
+                created_ns: entry
+                    .toa_ns
+                    .map(u128::from)
+                    .or(entry.tor_ns.map(u128::from))
+                    .unwrap_or(entry.ingest_received_ns),
                 source_handles: vec![handle],
                 derived_handle: None,
                 localization: None,
@@ -1000,6 +1004,8 @@ impl SegmentJournalEntry {
             stream_key: self.stream_key.clone(),
             payload_offset_bytes: self.payload_offset_bytes,
             payload_length_bytes: self.payload_length_bytes,
+            toa_ns: self.toa_ns,
+            tor_ns: self.tor_ns,
             sample_index_start: self.sample_index_start,
             sample_count: self.sample_count,
             integrity_hash: self.integrity_hash.clone(),
@@ -1606,6 +1612,7 @@ fn is_client_disconnect(err: &dyn std::error::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::manifests::ManifestStore;
     use crate::journal_reader::{hex_digest, read_payload_with_mmap};
     use rusqlite::params;
     use serde_json::json;
@@ -1737,6 +1744,38 @@ mod tests {
                 ],
             )
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn raw_capture_manifest_prefers_packet_toa_for_created_time() {
+        let tmp = tempfile::tempdir().unwrap();
+        let payload = store_forward_body("node-a", 7, 0);
+        let backend = IngestBackend::open(
+            tmp.path().join("store"),
+            IngestStorageMode::Journal,
+            usize::MAX as u64,
+            test_journal_runtime_config(),
+        )
+        .await
+        .unwrap();
+
+        backend
+            .enqueue(
+                usize::MAX,
+                "/api/v1/ingest/store-forward",
+                HeaderMap::new(),
+                Body::from(payload),
+            )
+            .await
+            .unwrap();
+
+        let manifest_store = ManifestStore::new(&tmp.path().join("store").join("journal"));
+        let manifests = manifest_store.query_pending("raw_journal_append").await.unwrap();
+
+        assert_eq!(manifests.len(), 1);
+        assert_eq!(manifests[0].created_ns, 1007);
+        assert_eq!(manifests[0].source_handles[0].toa_ns, Some(1007));
+        assert_eq!(manifests[0].source_handles[0].tor_ns, Some(2007));
     }
 
     #[tokio::test]
@@ -2995,8 +3034,14 @@ mod tests {
             .await
             .unwrap();
         assert!(!path.exists(), "original manifest file should be renamed");
+        let consumed_path = path
+            .parent()
+            .and_then(|parent| parent.parent())
+            .expect("pending manifest path should have root parent")
+            .join("consumed")
+            .join(path.file_name().expect("manifest file name should exist"));
         assert!(
-            path.with_extension("json.consumed").exists(),
+            consumed_path.exists(),
             "consumed file should exist"
         );
 
@@ -3009,5 +3054,95 @@ mod tests {
             0,
             "consumed manifest should not appear in pending"
         );
+    }
+
+    #[tokio::test]
+    async fn query_pending_limited_respects_batch_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = IngestBackend::open(
+            tmp.path().join("store"),
+            IngestStorageMode::Journal,
+            8_388_608,
+            test_journal_runtime_config(),
+        )
+        .await
+        .unwrap();
+        let manifest_store = backend.manifest_store().expect("journal mode required");
+
+        for index in 0..4_u64 {
+            manifest_store
+                .publish(crate::manifests::DspManifest {
+                    manifest_id: format!("test-manifest-{index}"),
+                    manifest_type: "raw_journal_append".to_string(),
+                    created_ns: index as u128,
+                    source_handles: vec![],
+                    derived_handle: None,
+                    localization: None,
+                    classifier_render: None,
+                    birdnet: None,
+                    coverage_stats: None,
+                    promotion_ready: false,
+                })
+                .await
+                .unwrap();
+        }
+
+        let pending = manifest_store
+            .query_pending_limited("raw_journal_append", 2)
+            .await
+            .unwrap();
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].created_ns, 0);
+        assert_eq!(pending[1].created_ns, 1);
+    }
+
+    #[tokio::test]
+    async fn prune_consumed_manifests_keeps_latest_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = IngestBackend::open(
+            tmp.path().join("store"),
+            IngestStorageMode::Journal,
+            8_388_608,
+            test_journal_runtime_config(),
+        )
+        .await
+        .unwrap();
+        let manifest_store = backend.manifest_store().expect("journal mode required");
+
+        for index in 0..5_u64 {
+            let manifest_id = format!("test-manifest-prune-{index}");
+            manifest_store
+                .publish(crate::manifests::DspManifest {
+                    manifest_id: manifest_id.clone(),
+                    manifest_type: "raw_journal_append".to_string(),
+                    created_ns: index as u128,
+                    source_handles: vec![],
+                    derived_handle: None,
+                    localization: None,
+                    classifier_render: None,
+                    birdnet: None,
+                    coverage_stats: None,
+                    promotion_ready: false,
+                })
+                .await
+                .unwrap();
+            manifest_store.mark_consumed(&manifest_id).await.unwrap();
+        }
+
+        manifest_store.prune_consumed_manifests(2).await.unwrap();
+
+        let consumed_dir = tmp.path().join("store").join("journal").join("manifests").join("consumed");
+        let mut consumed_files = Vec::new();
+        let mut entries = tokio::fs::read_dir(&consumed_dir).await.unwrap();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            let file_type = entry.file_type().await.unwrap();
+            if file_type.is_file() {
+                consumed_files.push(entry.file_name().to_string_lossy().into_owned());
+            }
+        }
+        consumed_files.sort();
+        assert_eq!(consumed_files.len(), 2);
+        assert_eq!(consumed_files[0], "test-manifest-prune-3.json");
+        assert_eq!(consumed_files[1], "test-manifest-prune-4.json");
     }
 }

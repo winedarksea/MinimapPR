@@ -1,5 +1,6 @@
 mod audio_payload;
 mod birdnet_render;
+mod classifier_helper;
 mod derived_cache;
 mod dsp;
 mod dsp_render_output;
@@ -117,6 +118,55 @@ struct Args {
 
     #[arg(
         long,
+        env = "MINIMAPPR_LOCALIZATION_WINDOW_SECONDS",
+        default_value_t = 512.0 / 16_000.0
+    )]
+    localization_window_seconds: f64,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_CLASSIFICATION_WINDOW_SECONDS",
+        default_value_t = 0.0
+    )]
+    classification_window_seconds: f64,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_MAX_SENSOR_BUFFER_SECONDS",
+        default_value_t = 8.0
+    )]
+    max_sensor_buffer_seconds: f64,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_DSP_PENDING_BATCH_SIZE",
+        default_value_t = 128
+    )]
+    dsp_pending_batch_size: usize,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_DSP_SKIP_STALE_MANIFESTS",
+        default_value_t = true
+    )]
+    dsp_skip_stale_manifests: bool,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_DSP_CONSUMED_MANIFEST_RETENTION_MAX_FILES",
+        default_value_t = 20_000
+    )]
+    dsp_consumed_manifest_retention_max_files: usize,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_DSP_CONSUMED_MANIFEST_PRUNE_INTERVAL",
+        default_value_t = 256
+    )]
+    dsp_consumed_manifest_prune_interval: u64,
+
+    #[arg(
+        long,
         env = "MINIMAPPR_LOCALIZATION_BAND_MIN_HZ",
         default_value_t = 300.0
     )]
@@ -128,6 +178,20 @@ struct Args {
         default_value_t = 3500.0
     )]
     localization_band_max_hz: f32,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_LOCALIZATION_SRP_GRID_RESOLUTION_M",
+        default_value_t = 0.5
+    )]
+    localization_srp_grid_resolution_m: f32,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_LOCALIZATION_SEARCH_PADDING_M",
+        default_value_t = 2.0
+    )]
+    localization_search_padding_m: f32,
 
     #[arg(
         long,
@@ -149,6 +213,23 @@ struct Args {
         default_value_t = 100.0
     )]
     birdnet_pre_blend_highpass_hz: f32,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_DEFAULT_TEMPERATURE_C",
+        default_value_t = 20.0
+    )]
+    default_temperature_c: f32,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_DEFAULT_HUMIDITY",
+        default_value_t = 0.5
+    )]
+    default_humidity_fraction: f32,
+
+    #[arg(long, env = "MINIMAPPR_SIDECAR_CLASSIFIER_COMMAND_JSON")]
+    classifier_command_json: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -205,20 +286,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if let (Some(manifest_store), Some(derived_cache)) =
         (backend.manifest_store(), backend.derived_cache())
     {
+        let localization_window_seconds = args.localization_window_seconds.max(512.0 / 16_000.0);
+        let classification_window_seconds = if args.classification_window_seconds <= 0.0 {
+            // Keep render latency bounded unless operators explicitly request
+            // a longer context window via MINIMAPPR_CLASSIFICATION_WINDOW_SECONDS.
+            localization_window_seconds
+        } else {
+            args.classification_window_seconds.max(localization_window_seconds)
+        };
+        let max_sensor_buffer_seconds = args
+            .max_sensor_buffer_seconds
+            .max(classification_window_seconds)
+            .max(localization_window_seconds);
         let worker = DspWorker::new(
             manifest_store,
             derived_cache,
             DspWorkerConfig {
+                window_seconds: localization_window_seconds,
+                classification_window_seconds,
+                max_buffer_seconds: max_sensor_buffer_seconds,
+                pending_manifest_batch_size: args.dsp_pending_batch_size,
                 birdnet_hybrid_render_enabled: args.runtime_profile == "birdnet_hybrid_production",
+                skip_stale_manifests_for_live_buffer: args.dsp_skip_stale_manifests,
+                consumed_manifest_retention_max_files: args
+                    .dsp_consumed_manifest_retention_max_files,
+                consumed_manifest_prune_interval: args.dsp_consumed_manifest_prune_interval,
                 localization_band_hz: [
                     args.localization_band_min_hz,
                     args.localization_band_max_hz,
                 ],
+                localization_srp_grid_resolution_m: args.localization_srp_grid_resolution_m,
+                localization_search_padding_m: args.localization_search_padding_m,
                 spatial_blend_band_hz: [
                     args.birdnet_spatial_blend_min_hz,
                     args.birdnet_spatial_blend_max_hz,
                 ],
                 pre_blend_highpass_hz: args.birdnet_pre_blend_highpass_hz,
+                default_temperature_c: args.default_temperature_c,
+                default_humidity_fraction: args.default_humidity_fraction,
+                classifier_command_json: args.classifier_command_json.clone(),
                 ..DspWorkerConfig::default()
             },
             dsp_state.clone(),
@@ -439,6 +545,7 @@ struct DspStatusResponse {
     total_localization_results: u64,
     total_classifier_renders: u64,
     total_failures: u64,
+    total_stale_manifest_skips: u64,
     dsp_worker_running: bool,
 }
 
@@ -453,6 +560,7 @@ async fn dsp_status(State(state): State<AppState>) -> Response {
         total_localization_results: st.total_localization_results,
         total_classifier_renders: st.total_classifier_renders,
         total_failures: st.total_failures,
+        total_stale_manifest_skips: st.total_stale_manifest_skips,
         dsp_worker_running: st.worker_running,
     })
     .into_response()

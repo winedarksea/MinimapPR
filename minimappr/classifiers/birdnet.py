@@ -183,6 +183,17 @@ class BirdNETClassifier(AudioClassifier):
         for child in multiprocessing.active_children():
             child.join(timeout=1.0)
 
+    def cancel_pending(self) -> None:
+        """Best-effort cancellation of the currently running BirdNET session."""
+        with self._session_lock:
+            session = self._current_session
+        if session is None:
+            return
+        try:
+            session.cancel()
+        except Exception:  # noqa: BLE001
+            pass
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers

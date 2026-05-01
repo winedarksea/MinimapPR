@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import platform
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -300,6 +301,8 @@ class Settings:
     ingest_sidecar_port: int = 8081
     ingest_sidecar_total_journal_budget_bytes: int = 268_435_456
     ingest_sidecar_admission_reserve_bytes: int = 16_777_216
+    ingest_sidecar_allow_non_tmpfs_journal: bool | None = None
+    persist_observations_on_ingest: bool | None = None
     retention_policy_path: Path = Path("data/retention_policy.json")
     rules_config_path: Path = DEFAULT_RULES_CONFIG_PATH
     taxonomy_config_path: Path = Path("data/taxonomy.json")
@@ -456,6 +459,14 @@ class Settings:
             raise ValueError("MINIMAPPR_COORDINATE_MODE must be 'flat' or 'geodetic'")
         self.runtime_profile = self.runtime_profile.strip().lower() or "default"
         self._apply_runtime_profile()
+        if self.ingest_sidecar_allow_non_tmpfs_journal is None:
+            self.ingest_sidecar_allow_non_tmpfs_journal = platform.system() != "Linux"
+        if self.persist_observations_on_ingest is None:
+            self.persist_observations_on_ingest = not (
+                self.runtime_profile == "birdnet_hybrid_production"
+                and self.ingest_storage_mode == "journal"
+                and not self.direct_ingest_enabled
+            )
 
         if self.node_degraded_after_seconds <= 0.0:
             raise ValueError("MINIMAPPR_NODE_DEGRADED_AFTER_SECONDS must be > 0")
@@ -698,6 +709,8 @@ class Settings:
             raw_json=os.getenv("MINIMAPPR_FEDERATION_PEERS_JSON"),
             config_path=peers_config_path,
         )
+        allow_non_tmpfs_journal_raw = os.getenv("MINIMAPPR_SIDECAR_ALLOW_NON_TMPFS_JOURNAL")
+        persist_observations_on_ingest_raw = os.getenv("MINIMAPPR_PERSIST_OBSERVATIONS_ON_INGEST")
         ingest_storage_mode = _env_str("MINIMAPPR_INGEST_STORAGE_MODE", "spool").strip().lower()
         if ingest_storage_mode not in {"spool", "journal"}:
             raise ValueError(
@@ -729,6 +742,16 @@ class Settings:
             ),
             ingest_sidecar_admission_reserve_bytes=_env_int(
                 "MINIMAPPR_SIDECAR_ADMISSION_RESERVE_BYTES", 16_777_216
+            ),
+            ingest_sidecar_allow_non_tmpfs_journal=(
+                _env_bool("MINIMAPPR_SIDECAR_ALLOW_NON_TMPFS_JOURNAL", False)
+                if allow_non_tmpfs_journal_raw is not None
+                else None
+            ),
+            persist_observations_on_ingest=(
+                _env_bool("MINIMAPPR_PERSIST_OBSERVATIONS_ON_INGEST", True)
+                if persist_observations_on_ingest_raw is not None
+                else None
             ),
             retention_policy_path=Path(_env_str("MINIMAPPR_RETENTION_POLICY_PATH", "data/retention_policy.json")),
             rules_config_path=Path(_env_str("MINIMAPPR_RULES_CONFIG_PATH", "data/rules.json")),

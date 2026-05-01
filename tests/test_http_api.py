@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import io
 import sqlite3
 import struct
+import sys
 import time
 import wave
 from pathlib import Path
@@ -12,6 +14,7 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
+from minimappr.config import Settings
 from minimappr.main import app
 from minimappr.storage.db import _ingested_frame_key
 from minimappr.utils.audio import encode_pcm16le_b64
@@ -117,6 +120,9 @@ def _configure_env(monkeypatch, tmp_path: Path, *, snippet_retention_seconds: in
     monkeypatch.setenv("MINIMAPPR_SNIPPET_DIR", str(snippet_dir))
     monkeypatch.setenv("MINIMAPPR_LARGE_ARTIFACT_DIR", str(artifact_dir))
     monkeypatch.setenv("MINIMAPPR_INGEST_SPOOL_DIR", str(spool_dir))
+    monkeypatch.setenv("MINIMAPPR_INGEST_STORAGE_MODE", "spool")
+    monkeypatch.setenv("MINIMAPPR_DIRECT_INGEST_ENABLED", "true")
+    monkeypatch.setenv("MINIMAPPR_INGEST_SIDECAR_ENABLED", "false")
     monkeypatch.setenv("MINIMAPPR_INGEST_SPOOL_POLL_INTERVAL_SECONDS", "3600")
     monkeypatch.setenv("MINIMAPPR_TRIGGER_RMS", "0.000001")
     monkeypatch.setenv("MINIMAPPR_TRIGGER_COOLDOWN_SECONDS", "0")
@@ -262,6 +268,87 @@ def test_binary_ingest_rejects_invalid_magic(monkeypatch, tmp_path: Path) -> Non
         assert "magic" in response.json()["detail"]
 
 
+def test_direct_binary_ingest_falls_back_when_sidecar_unavailable(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    monkeypatch.setenv("MINIMAPPR_DIRECT_INGEST_ENABLED", "false")
+    samples = np.random.default_rng(24).normal(0.0, 0.2, size=(1, 256)).astype(np.float32)
+    payload = _binary_ingest_payload(
+        [
+            _binary_frame(
+                samples,
+                start_time_ns=time.time_ns(),
+                sequence=12,
+                start_sample_index=0,
+            )
+        ]
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/ingest/binary",
+            content=payload,
+            headers={"content-type": "application/octet-stream"},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["accepted"] is True
+        assert body["accepted_frames"] == 1
+
+
+def test_direct_binary_ingest_is_blocked_when_sidecar_running(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    monkeypatch.setenv("MINIMAPPR_DIRECT_INGEST_ENABLED", "false")
+    monkeypatch.setenv("MINIMAPPR_INGEST_SIDECAR_ENABLED", "1")
+
+    class _FakeSidecarProcess:
+        def __init__(self) -> None:
+            self.pid = 2469
+            self.returncode = None
+
+        def terminate(self) -> None:
+            self.returncode = 0
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+        async def wait(self) -> int:
+            if self.returncode is None:
+                self.returncode = 0
+            return self.returncode
+
+    fake_process = _FakeSidecarProcess()
+
+    async def fake_start_ingest_sidecar(settings):
+        return fake_process
+
+    async def fake_supervise_ingest_sidecar(settings, initial_process, state):
+        return None
+
+    monkeypatch.setattr("minimappr.main._start_ingest_sidecar", fake_start_ingest_sidecar)
+    monkeypatch.setattr("minimappr.main._supervise_ingest_sidecar", fake_supervise_ingest_sidecar)
+
+    samples = np.random.default_rng(25).normal(0.0, 0.2, size=(1, 256)).astype(np.float32)
+    payload = _binary_ingest_payload(
+        [
+            _binary_frame(
+                samples,
+                start_time_ns=time.time_ns(),
+                sequence=13,
+                start_sample_index=0,
+            )
+        ]
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/ingest/binary",
+            content=payload,
+            headers={"content-type": "application/octet-stream"},
+        )
+        assert response.status_code == 410
+        assert "sidecar" in response.json()["detail"]
+
+
 def test_system_diagnostics_includes_sidecar_health(monkeypatch, tmp_path: Path) -> None:
     _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
     monkeypatch.setenv("MINIMAPPR_INGEST_SIDECAR_ENABLED", "1")
@@ -308,6 +395,65 @@ def test_system_diagnostics_includes_sidecar_health(monkeypatch, tmp_path: Path)
         "status": "ok",
         "backend": {"storage_mode": "journal", "entry_count": 3},
     }
+
+
+@pytest.mark.asyncio
+async def test_start_ingest_sidecar_passes_classifier_helper_env(monkeypatch, tmp_path: Path) -> None:
+    import minimappr.main as main_module
+
+    binary_path = tmp_path / "fake-sidecar"
+    binary_path.write_text("", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    class _FakeProcess:
+        pid = 4321
+        returncode = None
+
+        async def wait(self) -> int:
+            return 0
+
+    async def fake_create_subprocess_exec(*argv, env):
+        captured["argv"] = argv
+        captured["env"] = env
+        return _FakeProcess()
+
+    async def fake_wait_for_ingest_sidecar_ready(process, *, port, timeout_seconds=5.0, poll_interval_seconds=0.1):
+        del process, port, timeout_seconds, poll_interval_seconds
+        return None
+
+    monkeypatch.setattr("minimappr.main.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr("minimappr.main._wait_for_ingest_sidecar_ready", fake_wait_for_ingest_sidecar_ready)
+    monkeypatch.delenv("MINIMAPPR_SIDECAR_CLASSIFIER_COMMAND_JSON", raising=False)
+
+    settings = Settings(
+        runtime_profile="birdnet_hybrid_production",
+        ingest_sidecar_binary_path=binary_path,
+        ingest_spool_dir=tmp_path / "spool",
+        ingest_storage_mode="journal",
+        ingest_sidecar_port=8899,
+        site_origin_lat=37.0,
+        site_origin_lon=-122.0,
+        site_origin_alt_m=12.5,
+        birdnet_trigger_min_confidence=0.27,
+        birdnet_geo_min_confidence=0.08,
+        classification_window_seconds=30.0,
+        max_sensor_buffer_seconds=32.0,
+    )
+
+    process = await main_module._start_ingest_sidecar(settings)
+
+    assert process is not None
+    env = captured["env"]
+    assert isinstance(env, dict)
+    helper_command = json.loads(str(env["MINIMAPPR_SIDECAR_CLASSIFIER_COMMAND_JSON"]))
+    assert helper_command == [sys.executable, "-m", "minimappr.sidecar_classifier_helper"]
+    assert env["MINIMAPPR_CLASSIFICATION_WINDOW_SECONDS"] == "30.0"
+    assert env["MINIMAPPR_MAX_SENSOR_BUFFER_SECONDS"] == "32.0"
+    assert env["MINIMAPPR_SITE_ORIGIN_LAT"] == "37.0"
+    assert env["MINIMAPPR_SITE_ORIGIN_LON"] == "-122.0"
+    assert env["MINIMAPPR_SITE_ORIGIN_ALT_M"] == "12.5"
+    assert env["MINIMAPPR_BIRDNET_TRIGGER_MIN_CONFIDENCE"] == "0.27"
+    assert env["MINIMAPPR_BIRDNET_GEO_MIN_CONFIDENCE"] == "0.08"
 
 
 def test_spa_refresh_fallback_serves_index_for_frontend_routes(monkeypatch, tmp_path: Path) -> None:
@@ -1320,7 +1466,7 @@ def _write_spool_item(spool_dir: Path, *, endpoint: str, body: bytes, received_n
     )
 
 
-def test_direct_store_forward_ingest_can_be_disabled(monkeypatch, tmp_path: Path) -> None:
+def test_direct_store_forward_ingest_falls_back_when_sidecar_unavailable(monkeypatch, tmp_path: Path) -> None:
     _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
     monkeypatch.setenv("MINIMAPPR_DIRECT_INGEST_ENABLED", "false")
     payload = {
@@ -1349,8 +1495,10 @@ def test_direct_store_forward_ingest_can_be_disabled(monkeypatch, tmp_path: Path
 
     with TestClient(app) as client:
         response = client.post("/api/v1/ingest/store-forward", json=payload)
-        assert response.status_code == 410
-        assert "sidecar" in response.json()["detail"]
+        assert response.status_code == 200
+        body = response.json()
+        assert body["accepted"] is True
+        assert body["accepted_frames"] == 1
 
 
 def test_ingest_spool_consumer_processes_binary_payload(monkeypatch, tmp_path: Path) -> None:

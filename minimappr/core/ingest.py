@@ -97,7 +97,7 @@ class IngestProcessor:
       - PCM base64 decoding and channel validation
       - Per-node audio preprocessing (highpass/lowpass)
       - Multi-sensor buffer insertion
-      - Observation and environment sample persistence
+            - Optional observation persistence plus environment sample persistence
       - Frame energy trigger evaluation and cooldown gating
     """
 
@@ -112,6 +112,7 @@ class IngestProcessor:
         coordinate_frame: LocalCoordinateFrame,
         preprocessor_factory: NodePreprocessorFactory,
         environment_updater: EnvironmentUpdater | None = None,
+        persist_observations_on_ingest: bool = True,
     ) -> None:
         self._localization_config = localization_config
         self._fusion_config = fusion_config
@@ -121,6 +122,7 @@ class IngestProcessor:
         self._coordinate_frame = coordinate_frame
         self._preprocessor_factory = preprocessor_factory
         self._environment_updater = environment_updater
+        self._persist_observations_on_ingest = persist_observations_on_ingest
 
         self._last_trigger_ns = 0
         self._accepted_frame_count = 0
@@ -237,7 +239,7 @@ class IngestProcessor:
             allow_receipt_time_fallback="gps_optional" in normalized_node.capabilities,
         )
 
-        # -- persist observations ---------------------------------------------
+        # -- register frame and optionally persist observations ---------------
         observation_ids: list[str] = []
         frame_registered = False
 
@@ -276,33 +278,34 @@ class IngestProcessor:
                     )
                     if self._environment_updater is not None:
                         self._environment_updater.update(environment_sample)
-                for channel_index, sensor_id in enumerate(runtime.sensor_ids):
-                    observation_id = await self._storage.insert_observation(
-                        node_id=normalized_node.id,
-                        sensor_id=sensor_id,
-                        sensor_type="audio",
-                        source_type=frame.source_type,
-                        toa_ns=toa_ns,
-                        tor_ns=tor_ns,
-                        time_quality=frame.time_quality.value,
-                        sample_rate_hz=frame.sample_rate_hz,
-                        channel_index=channel_index,
-                        frame_sequence=frame.sequence,
-                        metadata={
-                            "frame_start_ns": frame.start_time_ns,
-                            "frame_end_ns": frame.utc_end_ns,
-                            "start_sample_index": frame.start_sample_index,
-                            "end_sample_index": frame.end_sample_index,
-                            "frame_channels": frame.channels,
-                            "samples_per_channel": audio.shape[1],
-                            "encoding": frame.encoding,
-                            "server_received_ns": server_received_ns,
-                            "buffer_uses_receipt_time": buffer_uses_receipt_time,
-                            "timing_diagnostics": frame.timing_diagnostics,
-                            "preprocess": normalized_node.properties.get("preprocess", {}),
-                        },
-                    )
-                    observation_ids.append(observation_id)
+                if self._persist_observations_on_ingest:
+                    for channel_index, sensor_id in enumerate(runtime.sensor_ids):
+                        observation_id = await self._storage.insert_observation(
+                            node_id=normalized_node.id,
+                            sensor_id=sensor_id,
+                            sensor_type="audio",
+                            source_type=frame.source_type,
+                            toa_ns=toa_ns,
+                            tor_ns=tor_ns,
+                            time_quality=frame.time_quality.value,
+                            sample_rate_hz=frame.sample_rate_hz,
+                            channel_index=channel_index,
+                            frame_sequence=frame.sequence,
+                            metadata={
+                                "frame_start_ns": frame.start_time_ns,
+                                "frame_end_ns": frame.utc_end_ns,
+                                "start_sample_index": frame.start_sample_index,
+                                "end_sample_index": frame.end_sample_index,
+                                "frame_channels": frame.channels,
+                                "samples_per_channel": audio.shape[1],
+                                "encoding": frame.encoding,
+                                "server_received_ns": server_received_ns,
+                                "buffer_uses_receipt_time": buffer_uses_receipt_time,
+                                "timing_diagnostics": frame.timing_diagnostics,
+                                "preprocess": normalized_node.properties.get("preprocess", {}),
+                            },
+                        )
+                        observation_ids.append(observation_id)
 
         if not frame_registered:
             return IngestResult(
@@ -329,10 +332,11 @@ class IngestProcessor:
                 end_sample_index=frame.end_sample_index,
                 end_time_ns=buffer_end_time_ns,
             )
-            await self._registry.record_observation(
-                sensor_id=sensor_id,
-                observation_id=observation_ids[channel_index],
-            )
+            if self._persist_observations_on_ingest:
+                await self._registry.record_observation(
+                    sensor_id=sensor_id,
+                    observation_id=observation_ids[channel_index],
+                )
 
         # -- trigger evaluation ------------------------------------------------
         frame_energy = trigger_rms(processed)

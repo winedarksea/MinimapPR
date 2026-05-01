@@ -131,11 +131,25 @@ impl SensorStreamBuffer {
         let end_sample = self.time_to_sample_index(end_time_ns).ok()?;
         let start_sample = end_sample - window_samples;
         let end_offset = end_sample - self.buffer_start_sample_index;
-        if end_offset > self.samples.len() as i64 {
+        if end_offset <= 0 || end_offset > self.samples.len() as i64 {
             return None;
         }
         let start_offset = (start_sample - self.buffer_start_sample_index).max(0) as usize;
+        if start_offset >= end_offset as usize {
+            return None;
+        }
         Some(self.samples[start_offset..end_offset as usize].to_vec())
+    }
+
+    pub fn latest_window(&self, window_seconds: f64) -> Vec<f32> {
+        if self.samples.is_empty() {
+            return Vec::new();
+        }
+        let window_samples = (window_seconds * f64::from(self.sample_rate_hz))
+            .round()
+            .max(1.0) as usize;
+        let start_offset = self.samples.len().saturating_sub(window_samples);
+        self.samples[start_offset..].to_vec()
     }
 
     pub fn coverage_ending_at(
@@ -149,10 +163,13 @@ impl SensorStreamBuffer {
         let end_sample = self.time_to_sample_index(end_time_ns).ok()?;
         let start_sample = end_sample - window_samples;
         let end_offset = end_sample - self.buffer_start_sample_index;
-        if end_offset > self.coverage.len() as i64 {
+        if end_offset <= 0 || end_offset > self.coverage.len() as i64 {
             return None;
         }
         let start_offset = (start_sample - self.buffer_start_sample_index).max(0) as usize;
+        if start_offset >= end_offset as usize {
+            return None;
+        }
         Some(coverage_stats(
             &self.coverage[start_offset..end_offset as usize],
             self.sample_rate_hz,
@@ -516,5 +533,33 @@ mod tests {
             .unwrap();
         assert_eq!(stats.missing_samples, 0);
         assert_eq!(stats.coverage_ratio, 1.0);
+    }
+
+    #[test]
+    fn coverage_window_before_buffer_start_returns_none() {
+        let sr = 16_000_u32;
+        let t0 = 1_000_000_000_000_000_000_i128;
+        let mut buffer = SensorStreamBuffer::new(sr, 5.0);
+        buffer.append(t0, &[1.0_f32; 2_048], Some(0), Some(2_048)).unwrap();
+
+        let early_end_time_ns = t0 - 1_000_000_000_i128;
+        assert!(
+            buffer.coverage_ending_at(early_end_time_ns, 0.5).is_none(),
+            "coverage window ending before buffer start should return None"
+        );
+    }
+
+    #[test]
+    fn audio_window_before_buffer_start_returns_none() {
+        let sr = 16_000_u32;
+        let t0 = 1_000_000_000_000_000_000_i128;
+        let mut buffer = SensorStreamBuffer::new(sr, 5.0);
+        buffer.append(t0, &[1.0_f32; 2_048], Some(0), Some(2_048)).unwrap();
+
+        let early_end_time_ns = t0 - 1_000_000_000_i128;
+        assert!(
+            buffer.window_ending_at(early_end_time_ns, 0.5).is_none(),
+            "audio window ending before buffer start should return None"
+        );
     }
 }
