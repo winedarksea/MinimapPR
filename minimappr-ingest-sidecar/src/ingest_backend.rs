@@ -392,6 +392,14 @@ impl IngestBackend {
             BackendInner::Spool(_) => None,
         }
     }
+
+    /// Returns the journal root path if the backend is in journal mode.
+    pub fn journal_root(&self) -> Option<&std::path::Path> {
+        match self.inner.as_ref() {
+            BackendInner::Journal(b) => Some(&b.journal_root),
+            BackendInner::Spool(_) => None,
+        }
+    }
 }
 
 impl FileSpoolBackend {

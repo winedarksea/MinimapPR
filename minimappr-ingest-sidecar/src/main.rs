@@ -7,12 +7,15 @@ mod dsp_render_output;
 mod dsp_worker;
 mod envelope;
 mod gcc_phat;
+mod iamf_writer;
 mod ingest_backend;
 mod journal_reader;
 mod leases;
 mod manifests;
+mod render_mvdr;
 mod srp_phat;
 mod storage_class;
+mod stream_range_lease;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -32,8 +35,14 @@ use ingest_backend::{
     BodyTooLargeError, ClientDisconnectError, IngestBackend, IngestStorageMode,
     InvalidIngestEnvelopeError, JournalCapacityExceededError, JournalRuntimeConfig,
 };
+use iamf_writer::{
+    split_bed_into_frames, split_object_into_frames, IamfScene, IamfWriter, LoudnessInfo,
+    ObjectPosition, ObjectPositions,
+};
 use leases::PinLeaseRequest;
+use render_mvdr::{render_mvdr, MvdrRenderRequest, TrajectoryWaypoint};
 use serde::{Deserialize, Serialize};
+use stream_range_lease::{StreamRangeLeaseRequest, StreamRangeLeaseStore};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tower_http::trace::TraceLayer;
@@ -238,6 +247,7 @@ struct AppState {
     max_body_bytes: usize,
     dsp_state: SharedDspState,
     derived_cache: Option<DerivedCache>,
+    range_lease_store: Option<Arc<StreamRangeLeaseStore>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -333,11 +343,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         info!("DSP worker spawned");
     }
 
+    let range_lease_store = backend.journal_root().map(|root| {
+        Arc::new(StreamRangeLeaseStore::new(root))
+    });
+
     let state = AppState {
         derived_cache: backend.derived_cache(),
         backend,
         max_body_bytes: args.max_body_bytes,
         dsp_state,
+        range_lease_store,
     };
 
     let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
@@ -371,6 +386,25 @@ fn app(state: AppState) -> Router {
         )
         .route("/api/v1/dsp/status", get(dsp_status))
         .route("/api/v1/dsp/results", get(dsp_results))
+        // Capture pipeline: stream-range leases
+        .route(
+            "/api/v1/capture/range-lease",
+            post(create_stream_range_lease),
+        )
+        .route(
+            "/api/v1/capture/range-lease/:lease_id",
+            axum::routing::delete(release_stream_range_lease),
+        )
+        .route(
+            "/api/v1/capture/range-lease/:lease_id/heartbeat",
+            post(heartbeat_stream_range_lease),
+        )
+        // Capture pipeline: journal range extraction
+        .route("/api/v1/journal/range", get(journal_range))
+        // Capture pipeline: MVDR beamforming
+        .route("/api/v1/capture/render/mvdr", post(render_mvdr_endpoint))
+        // Capture pipeline: IAMF encoding
+        .route("/api/v1/capture/encode/iamf", post(encode_iamf))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -598,6 +632,318 @@ fn current_unix_ns() -> u128 {
         .unwrap_or(0)
 }
 
+// ── Stream-Range-Lease handlers ───────────────────────────────────────────────
+
+async fn create_stream_range_lease(
+    State(state): State<AppState>,
+    Json(request): Json<StreamRangeLeaseRequest>,
+) -> Response {
+    let Some(store) = state.range_lease_store.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                accepted: false,
+                queued: false,
+                detail: "stream range leases require journal storage mode".to_string(),
+            }),
+        )
+            .into_response();
+    };
+    match store.create(request, current_unix_ns()).await {
+        Ok((response, _)) => (StatusCode::CREATED, Json(response)).into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                accepted: false,
+                queued: false,
+                detail: error.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+async fn release_stream_range_lease(
+    State(state): State<AppState>,
+    axum::extract::Path(lease_id): axum::extract::Path<String>,
+) -> Response {
+    let Some(store) = state.range_lease_store.as_ref() else {
+        return StatusCode::NO_CONTENT.into_response();
+    };
+    match store.release(&lease_id, current_unix_ns()).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                accepted: false,
+                queued: false,
+                detail: error.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+async fn heartbeat_stream_range_lease(
+    State(state): State<AppState>,
+    axum::extract::Path(lease_id): axum::extract::Path<String>,
+) -> Response {
+    let Some(store) = state.range_lease_store.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                accepted: false,
+                queued: false,
+                detail: "stream range leases require journal storage mode".to_string(),
+            }),
+        )
+            .into_response();
+    };
+    match store.heartbeat(&lease_id, current_unix_ns()).await {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                accepted: false,
+                queued: false,
+                detail: error.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+// ── Journal range extraction ──────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct JournalRangeQuery {
+    stream_key: String,
+    start_ns: u64,
+    end_ns: u64,
+}
+
+#[derive(Serialize)]
+struct JournalRangeEntry {
+    segment_id: String,
+    first_toa_ns: Option<u64>,
+    last_toa_ns: Option<u64>,
+    payload_bytes: u64,
+    segment_path: std::path::PathBuf,
+}
+
+async fn journal_range(
+    State(state): State<AppState>,
+    Query(params): Query<JournalRangeQuery>,
+) -> Response {
+    let Some(journal_root) = state.backend.journal_root() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                accepted: false,
+                queued: false,
+                detail: "journal range requires journal storage mode".to_string(),
+            }),
+        )
+            .into_response();
+    };
+
+    let segments_dir = journal_root
+        .join("streams")
+        .join(&params.stream_key)
+        .join("segments");
+
+    let mut entries = match tokio::fs::read_dir(&segments_dir).await {
+        Ok(e) => e,
+        Err(_) => {
+            return Json(Vec::<JournalRangeEntry>::new()).into_response();
+        }
+    };
+
+    let mut matching: Vec<JournalRangeEntry> = Vec::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(content) = tokio::fs::read_to_string(&path).await else {
+            continue;
+        };
+        let Ok(header) = serde_json::from_str::<serde_json::Value>(&content) else {
+            continue;
+        };
+
+        let first_toa = header["first_toa_ns"].as_u64();
+        let last_toa = header["last_toa_ns"].as_u64();
+        let segment_id = header["segment_id"].as_str().unwrap_or("").to_string();
+        let payload_bytes = header["payload_bytes"].as_u64().unwrap_or(0);
+
+        // Overlap test: segment range [first_toa, last_toa] overlaps [start_ns, end_ns].
+        let seg_start = first_toa.unwrap_or(u64::MAX);
+        let seg_end = last_toa.unwrap_or(0);
+        if seg_start <= params.end_ns && seg_end >= params.start_ns {
+            let bin_path = path.with_extension("bin");
+            matching.push(JournalRangeEntry {
+                segment_id,
+                first_toa_ns: first_toa,
+                last_toa_ns: last_toa,
+                payload_bytes,
+                segment_path: bin_path,
+            });
+        }
+    }
+
+    // Sort by first_toa_ns ascending for ordered extraction.
+    matching.sort_by_key(|e| e.first_toa_ns.unwrap_or(u64::MAX));
+    Json(matching).into_response()
+}
+
+// ── MVDR beamform endpoint ────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct MvdrRequest {
+    /// Four channels, each a Vec<f32> of equal length (float32, ±1.0).
+    channels: [Vec<f32>; 4],
+    sample_rate_hz: u32,
+    trajectory: Vec<MvdrWaypointDto>,
+    fade_samples: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct MvdrWaypointDto {
+    sample_offset: usize,
+    position_m: [f32; 3],
+}
+
+#[derive(Serialize)]
+struct MvdrResponse {
+    samples: Vec<f32>,
+    sample_rate_hz: u32,
+}
+
+async fn render_mvdr_endpoint(
+    Json(request): Json<MvdrRequest>,
+) -> Response {
+    let waypoints = request
+        .trajectory
+        .into_iter()
+        .map(|wp| TrajectoryWaypoint {
+            sample_offset: wp.sample_offset,
+            position_m: wp.position_m,
+        })
+        .collect();
+
+    let output = render_mvdr(MvdrRenderRequest {
+        channels: request.channels,
+        sample_rate_hz: request.sample_rate_hz,
+        trajectory: waypoints,
+        fade_samples: request.fade_samples,
+    });
+
+    Json(MvdrResponse {
+        samples: output.samples,
+        sample_rate_hz: output.sample_rate_hz,
+    })
+    .into_response()
+}
+
+// ── IAMF encode endpoint ──────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct IamfEncodeRequest {
+    sample_rate_hz: u32,
+    samples_per_frame: u32,
+    bed_loudness: LoudnessInfoDto,
+    object_loudness: Vec<LoudnessInfoDto>,
+    /// 4-channel FOA bed, channels-first, float32.
+    bed_channels: [Vec<f32>; 4],
+    /// Mono object tracks, each float32.
+    object_tracks: Vec<Vec<f32>>,
+    /// Per-object positions per temporal unit: outer index = TU, inner = object_id → pos.
+    positions_per_unit: Vec<std::collections::HashMap<u32, ObjectPositionDto>>,
+}
+
+#[derive(Deserialize, Clone)]
+struct LoudnessInfoDto {
+    integrated_loudness_lufs: f32,
+    true_peak_dbfs: f32,
+}
+
+#[derive(Deserialize, Clone)]
+struct ObjectPositionDto {
+    azimuth_deg: f32,
+    elevation_deg: f32,
+    distance_m: f32,
+}
+
+async fn encode_iamf(Json(request): Json<IamfEncodeRequest>) -> Response {
+    let spf = request.samples_per_frame as usize;
+    let scene = IamfScene {
+        sample_rate_hz: request.sample_rate_hz,
+        samples_per_frame: request.samples_per_frame,
+        bed_loudness: LoudnessInfo {
+            integrated_loudness_lufs: request.bed_loudness.integrated_loudness_lufs,
+            true_peak_dbfs: request.bed_loudness.true_peak_dbfs,
+        },
+        object_loudness: request
+            .object_loudness
+            .iter()
+            .map(|l| LoudnessInfo {
+                integrated_loudness_lufs: l.integrated_loudness_lufs,
+                true_peak_dbfs: l.true_peak_dbfs,
+            })
+            .collect(),
+    };
+
+    let n_objects = request.object_tracks.len();
+    let writer = IamfWriter::new(scene, n_objects);
+
+    let mut bitstream = writer.write_descriptor_obus();
+
+    let bed_frame_chunks = split_bed_into_frames(&request.bed_channels, spf);
+    let object_frame_chunks: Vec<Vec<Vec<u8>>> = request
+        .object_tracks
+        .iter()
+        .map(|track| split_object_into_frames(track, spf))
+        .collect();
+
+    let n_frames = bed_frame_chunks[0].len();
+    for fi in 0..n_frames {
+        let bed_frames: [Vec<u8>; 4] =
+            std::array::from_fn(|ch| bed_frame_chunks[ch][fi].clone());
+        let object_frames: Vec<Vec<u8>> = object_frame_chunks
+            .iter()
+            .map(|chunks| chunks.get(fi).cloned().unwrap_or_default())
+            .collect();
+
+        let positions: ObjectPositions = request
+            .positions_per_unit
+            .get(fi)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(id, p)| {
+                (
+                    id,
+                    ObjectPosition {
+                        azimuth_deg: p.azimuth_deg,
+                        elevation_deg: p.elevation_deg,
+                        distance_m: p.distance_m,
+                    },
+                )
+            })
+            .collect();
+
+        bitstream.extend(writer.write_temporal_unit(&bed_frames, &object_frames, &positions));
+    }
+
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+        bitstream,
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -611,6 +957,7 @@ mod tests {
             max_body_bytes,
             dsp_state: Arc::new(Mutex::new(Default::default())),
             derived_cache: None,
+            range_lease_store: None,
         }
     }
 

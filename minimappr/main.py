@@ -18,6 +18,7 @@ import urllib.request
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -30,6 +31,12 @@ from minimappr.api.transports import HttpIngestTransport
 from minimappr.classifiers.factory import create_classifier
 from minimappr.cleanup_service import CleanupService
 from minimappr.config import Settings
+from minimappr.core.capture_session import (
+    CaptureSessionManager,
+    CaptureStartRequest,
+    CaptureState,
+)
+from minimappr.core.iamf_pipeline import IamfPipeline
 from minimappr.core.ambisonics import (
     AmbisonicSpatialEncoder,
     SoundscapeRenderer,
@@ -586,6 +593,18 @@ async def lifespan(app: FastAPI):
         live_callback=live_hub.broadcast,
     )
 
+    capture_manager = CaptureSessionManager()
+    iamf_pipeline = IamfPipeline(
+        sidecar_url=settings.sidecar_url if hasattr(settings, "sidecar_url") else "http://localhost:8081",
+        db_storage=storage,
+    )
+
+    async def _run_capture_post_processing(record):
+        await iamf_pipeline.run(record)
+        await storage.upsert_capture_session(record)
+
+    capture_manager.set_post_process_callback(_run_capture_post_processing)
+
     app.state.settings = settings
     app.state.storage = storage
     app.state.registry = registry
@@ -605,6 +624,7 @@ async def lifespan(app: FastAPI):
     app.state.cleanup_service = cleanup_service
     app.state.ingest_spool_consumer = ingest_spool_consumer
     app.state.sidecar_state = sidecar_state
+    app.state.capture_manager = capture_manager
     _apply_site_origin_resolution(app.state, resolved_site_origin)
 
     cleanup_task: asyncio.Task | None = None
@@ -2059,6 +2079,124 @@ async def render_soundscape(
             "X-Minimappr-Sample-Rate": str(sample_rate_hz),
         },
     )
+
+
+# ── Capture API ────────────────────────────────────────────────────────────────
+
+class _CaptureStartBody(BaseModel):
+    stream_key: str
+    max_duration_s: float = 300.0
+    video_source: str | None = None
+    libcamera_mode: bool = False
+    deployment_profile: str = "auto"
+    work_dir: str | None = None
+
+
+@app.post("/api/v1/capture/start")
+async def capture_start(request: Request, body: _CaptureStartBody):
+    state = request.app.state
+    manager: CaptureSessionManager = state.capture_manager
+    settings: Settings = state.settings
+
+    sidecar_url = (
+        getattr(settings, "sidecar_url", None) or "http://localhost:8081"
+    )
+    work_dir_path = (
+        Path(body.work_dir) if body.work_dir else Path("data/captures")
+    )
+
+    req = CaptureStartRequest(
+        stream_key=body.stream_key,
+        sidecar_url=sidecar_url,
+        work_dir=work_dir_path,
+        max_duration_s=body.max_duration_s,
+        video_source=body.video_source,
+        libcamera_mode=body.libcamera_mode,
+        deployment_profile=body.deployment_profile,
+    )
+    record = await manager.start(req)
+
+    if record.state == CaptureState.FAILED:
+        raise HTTPException(status_code=500, detail=record.error or "capture start failed")
+
+    storage: Storage = state.storage
+    await storage.upsert_capture_session(record)
+
+    return {
+        "session_id": record.session_id,
+        "state": record.state.value,
+        "stream_key": record.stream_key,
+        "range_lease_id": record.range_lease_id,
+        "start_time_ns": record.start_time_ns,
+    }
+
+
+@app.post("/api/v1/capture/{session_id}/stop")
+async def capture_stop(session_id: str, request: Request):
+    state = request.app.state
+    manager: CaptureSessionManager = state.capture_manager
+    settings: Settings = state.settings
+    sidecar_url = getattr(settings, "sidecar_url", None) or "http://localhost:8081"
+
+    try:
+        record = await manager.stop(session_id, sidecar_url)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"session {session_id} not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    storage: Storage = state.storage
+    await storage.upsert_capture_session(record)
+
+    return {
+        "session_id": record.session_id,
+        "state": record.state.value,
+        "end_time_ns": record.end_time_ns,
+    }
+
+
+@app.get("/api/v1/capture/{session_id}/status")
+async def capture_status(session_id: str, request: Request):
+    state = request.app.state
+    manager: CaptureSessionManager = state.capture_manager
+    record = manager.get(session_id)
+    if record is None:
+        # Fall back to DB for completed / failed sessions that left memory.
+        storage: Storage = state.storage
+        row = await storage.get_capture_session(session_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"session {session_id} not found")
+        return row
+    return {
+        "session_id": record.session_id,
+        "state": record.state.value,
+        "stream_key": record.stream_key,
+        "range_lease_id": record.range_lease_id,
+        "start_time_ns": record.start_time_ns,
+        "end_time_ns": record.end_time_ns,
+        "first_frame_pts_ns": record.first_frame_pts_ns,
+        "iamf_path": str(record.iamf_path) if record.iamf_path else None,
+        "youtube_path": str(record.youtube_path) if record.youtube_path else None,
+        "error": record.error,
+        "created_ns": record.created_ns,
+    }
+
+
+@app.get("/api/v1/capture")
+async def capture_list(request: Request):
+    state = request.app.state
+    manager: CaptureSessionManager = state.capture_manager
+    records = manager.list_sessions()
+    return [
+        {
+            "session_id": r.session_id,
+            "state": r.state.value,
+            "stream_key": r.stream_key,
+            "created_ns": r.created_ns,
+            "error": r.error,
+        }
+        for r in records
+    ]
 
 
 @app.websocket("/ws/live")

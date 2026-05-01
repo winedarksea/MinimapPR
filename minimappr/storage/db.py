@@ -357,6 +357,24 @@ class Storage:
             );
             CREATE INDEX IF NOT EXISTS idx_bit_reports_node_ts ON bit_reports(node_id, timestamp_ns DESC);
             CREATE INDEX IF NOT EXISTS idx_bit_reports_type ON bit_reports(report_type, timestamp_ns DESC);
+
+            CREATE TABLE IF NOT EXISTS capture_sessions (
+                session_id TEXT PRIMARY KEY,
+                state TEXT NOT NULL,
+                stream_key TEXT NOT NULL,
+                range_lease_id TEXT,
+                start_time_ns INTEGER,
+                end_time_ns INTEGER,
+                first_frame_pts_ns INTEGER,
+                work_dir TEXT NOT NULL,
+                video_path TEXT,
+                iamf_path TEXT,
+                youtube_path TEXT,
+                error TEXT,
+                created_ns INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_capture_sessions_created ON capture_sessions(created_ns DESC);
+            CREATE INDEX IF NOT EXISTS idx_capture_sessions_state ON capture_sessions(state);
             """
         )
 
@@ -2144,6 +2162,127 @@ class Storage:
             )
             await self._commit_if_needed(db)
         return final_id
+
+    # ── Capture sessions ───────────────────────────────────────────────────────
+
+    async def upsert_capture_session(self, record: "Any") -> None:
+        """Insert or replace a CaptureSessionRecord row."""
+        from minimappr.core.capture_session import CaptureSessionRecord
+        db = self._require_db()
+        async with self._write_guard():
+            await db.execute(
+                """
+                INSERT OR REPLACE INTO capture_sessions (
+                    session_id, state, stream_key, range_lease_id,
+                    start_time_ns, end_time_ns, first_frame_pts_ns,
+                    work_dir, video_path, iamf_path, youtube_path,
+                    error, created_ns
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    record.session_id,
+                    record.state.value if hasattr(record.state, "value") else str(record.state),
+                    record.stream_key,
+                    record.range_lease_id,
+                    record.start_time_ns,
+                    record.end_time_ns,
+                    record.first_frame_pts_ns,
+                    str(record.work_dir),
+                    str(record.video_path) if record.video_path else None,
+                    str(record.iamf_path) if record.iamf_path else None,
+                    str(record.youtube_path) if record.youtube_path else None,
+                    record.error,
+                    record.created_ns,
+                ),
+            )
+            await self._commit_if_needed(db)
+
+    async def get_capture_session(self, session_id: str) -> dict | None:
+        db = self._require_db()
+        row = await (
+            await db.execute(
+                "SELECT * FROM capture_sessions WHERE session_id=?", (session_id,)
+            )
+        ).fetchone()
+        if row is None:
+            return None
+        return dict(row)
+
+    async def list_capture_sessions(self, limit: int = 100) -> list[dict]:
+        db = self._require_db()
+        rows = await (
+            await db.execute(
+                "SELECT * FROM capture_sessions ORDER BY created_ns DESC LIMIT ?",
+                (limit,),
+            )
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    async def insert_large_artifact_for_session(
+        self,
+        *,
+        session_id: str,
+        artifact_type: str,
+        iamf_path: str | None,
+        youtube_path: str | None,
+        created_ns: int,
+    ) -> str:
+        """Insert a large_artifacts row for a completed capture session."""
+        path = iamf_path or youtube_path or ""
+        metadata: dict[str, Any] = {"session_id": session_id}
+        if iamf_path:
+            metadata["iamf_path"] = iamf_path
+        if youtube_path:
+            metadata["youtube_path"] = youtube_path
+        return await self.insert_large_artifact(
+            artifact_type=artifact_type,
+            path=path,
+            retention_tier="long",
+            source_detection_id=None,
+            source_track_id=None,
+            created_ns=created_ns,
+            expires_ns=None,
+            metadata=metadata,
+        )
+
+    # ── Track / detection range queries (for iamf_pipeline) ──────────────────
+
+    async def query_tracks_in_window(
+        self, start_ns: int, end_ns: int
+    ) -> list[dict]:
+        """Return tracks that were active during [start_ns, end_ns]."""
+        db = self._require_db()
+        rows = await (
+            await db.execute(
+                """
+                SELECT id AS track_id, x, y, z, label, status
+                FROM tracks
+                WHERE last_seen_ns >= ? AND first_seen_ns <= ?
+                  AND status = 'confirmed'
+                ORDER BY first_seen_ns ASC
+                """,
+                (start_ns, end_ns),
+            )
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    async def query_detections_for_track(
+        self, track_id: str, start_ns: int, end_ns: int
+    ) -> list[dict]:
+        """Return detections for a track within [start_ns, end_ns]."""
+        db = self._require_db()
+        rows = await (
+            await db.execute(
+                """
+                SELECT toa_ns, timestamp_ns, x, y, z
+                FROM detections
+                WHERE track_id=? AND toa_ns >= ? AND toa_ns <= ?
+                ORDER BY toa_ns ASC
+                """,
+                (track_id, start_ns, end_ns),
+            )
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     async def list_zones(self) -> list[dict]:
         db = self._require_db()
