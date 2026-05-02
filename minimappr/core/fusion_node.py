@@ -487,6 +487,13 @@ class FusionNode:
             classification_audio_quality_source="rust_classifier_render",
             environment=dict(payload.environment),
         )
+        if self._classification_chunking_policy is not None and payload.authoritative_classification is None:
+            if self._should_suppress_chunked_classification(localized_product):
+                self._metrics.birdnet_chunk_dispatches_suppressed += 1
+                return
+            await self._enqueue_stage(self._classification_queue, localized_product)
+            return
+
         if payload.authoritative_classification is not None:
             classified = await self._classification_orchestrator.adopt_authoritative_classification(
                 classification=payload.authoritative_classification,
@@ -652,15 +659,19 @@ class FusionNode:
                     self._metrics.birdnet_chunk_dispatches_suppressed += 1
                     continue
                 detection_products = await self._classify_and_assemble(product)
+                classification_failed = self._detection_products_had_backend_failure(detection_products)
                 self._record_chunk_dispatch_outcome(
                     product=product,
                     detection_products=detection_products,
-                    classification_failed=False,
+                    classification_failed=classification_failed,
                 )
-                for detection_product in detection_products:
-                    if await self._enqueue_stage(self._rules_queue, detection_product):
-                        self._metrics.classification_stage_out += 1
-            except Exception as exc:  # pragma: no cover - resilience path
+                if classification_failed:
+                    self._metrics.classification_failures += 1
+                else:
+                    for detection_product in detection_products:
+                        if await self._enqueue_stage(self._rules_queue, detection_product):
+                            self._metrics.classification_stage_out += 1
+            except Exception as exc:
                 self._record_chunk_dispatch_outcome(
                     product=product,
                     detection_products=[],
@@ -1359,6 +1370,13 @@ class FusionNode:
         return not self._classification_chunking_policy.should_dispatch(
             source_node_id=product.candidate.source_node_id,
             event_time_ns=product.candidate.event_time_ns,
+        )
+
+    @staticmethod
+    def _detection_products_had_backend_failure(detection_products: list[DetectionProduct]) -> bool:
+        return bool(detection_products) and all(
+            product.detection.feature_summary.get("reason") == "classification_error"
+            for product in detection_products
         )
 
     def _record_chunk_dispatch_outcome(

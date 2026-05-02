@@ -870,19 +870,22 @@ async fn journal_range(
 
         let first_toa = header["first_toa_ns"].as_u64();
         let last_toa = header["last_toa_ns"].as_u64();
+        let first_tor = header["first_tor_ns"].as_u64();
+        let last_tor = header["last_tor_ns"].as_u64();
         let segment_id = header["segment_id"].as_str().unwrap_or("").to_string();
         let payload_bytes = header["payload_bytes"].as_u64().unwrap_or(0);
         let sample_rate = header["sample_rate_hz"].as_u64().map(|v| v as u32);
 
-        // Overlap test: segment range [first_toa, last_toa] overlaps [start_ns, end_ns].
-        let seg_start = first_toa.unwrap_or(u64::MAX);
-        let seg_end = last_toa.unwrap_or(0);
+        // Overlap test: segment range overlaps [start_ns, end_ns].
+        // Fall back to tor_ns when toa_ns is missing so non-GPS nodes are not silently excluded.
+        let seg_start = first_toa.or(first_tor).unwrap_or(0);
+        let seg_end = last_toa.or(last_tor).unwrap_or(0);
         if seg_start <= params.end_ns && seg_end >= params.start_ns {
             let bin_path = path.with_extension("bin");
             matching.push(JournalRangeEntry {
                 segment_id,
-                first_toa_ns: first_toa,
-                last_toa_ns: last_toa,
+                first_toa_ns: first_toa.or(first_tor),
+                last_toa_ns: last_toa.or(last_tor),
                 sample_rate_hz: sample_rate,
                 payload_bytes,
                 segment_path: bin_path,
@@ -891,7 +894,7 @@ async fn journal_range(
     }
 
     // Sort by first_toa_ns ascending for ordered extraction.
-    matching.sort_by_key(|e| e.first_toa_ns.unwrap_or(u64::MAX));
+    matching.sort_by_key(|e| e.first_toa_ns.unwrap_or(0));
     Json(matching).into_response()
 }
 

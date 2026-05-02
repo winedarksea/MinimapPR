@@ -76,9 +76,14 @@ pub fn render_mvdr(request: MvdrRenderRequest) -> MvdrRenderOutput {
 
     let window = hann_window(block_size);
 
-    let mut planner = FftPlanner::<f32>::new();
-    let fft = planner.plan_fft(block_size, FftDirection::Forward);
-    let ifft = planner.plan_fft(block_size, FftDirection::Inverse);
+    thread_local! {
+        static PLANNER: std::cell::RefCell<FftPlanner<f32>> = std::cell::RefCell::new(FftPlanner::new());
+    }
+
+    let (fft, ifft) = PLANNER.with(|planner| {
+        let mut p = planner.borrow_mut();
+        (p.plan_fft(block_size, FftDirection::Forward), p.plan_fft(block_size, FftDirection::Inverse))
+    });
 
     // IIR steering state (unit vector, initialised from first waypoint).
     let first_dir = if request.trajectory.is_empty() {

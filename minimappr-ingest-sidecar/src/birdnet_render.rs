@@ -110,9 +110,17 @@ fn frequency_blend(
         return Vec::new();
     }
     let fft_len = next_pow2(n);
-    let mut planner = FftPlanner::<f32>::new();
-    let fft = planner.plan_fft_forward(fft_len);
-    let ifft = planner.plan_fft_inverse(fft_len);
+
+    // Cache the FFT planner per Rayon thread to avoid heavy re-computation in the hot loop.
+    thread_local! {
+        static PLANNER: std::cell::RefCell<FftPlanner<f32>> = std::cell::RefCell::new(FftPlanner::new());
+    }
+
+    let (fft, ifft) = PLANNER.with(|planner| {
+        let mut p = planner.borrow_mut();
+        (p.plan_fft_forward(fft_len), p.plan_fft_inverse(fft_len))
+    });
+
     let mut omni_spectrum = real_to_complex_padded(&omni[..n], fft_len);
     let mut steered_spectrum = real_to_complex_padded(&steered[..n], fft_len);
     fft.process(&mut omni_spectrum);

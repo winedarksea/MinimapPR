@@ -96,9 +96,8 @@ _SIDECAR_HEALTHCHECK_TIMEOUT_SECONDS = 0.5
 
 
 def _default_sidecar_classifier_command_json(settings: "Settings") -> str | None:
-    # Keep the Rust sidecar on transport/DSP work only. Synchronous BirdNET
-    # annotation blocks render publication, which makes live audio/debug stale;
-    # Python classification still runs after the render is promoted.
+    if getattr(settings, "classifier_backend", "").lower() == "birdnet":
+        return json.dumps([sys.executable, "-m", "minimappr.sidecar_classifier_helper"])
     return None
 
 

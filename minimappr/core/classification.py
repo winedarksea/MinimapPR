@@ -53,6 +53,9 @@ class ClassifiedResult:
     iff_category: str
     label_id: LabelId | None
 
+    # Set True when the backend raised an exception (degraded to unknown)
+    backend_failed: bool = False
+
 
 class ClassificationOrchestrator:
     """Runs the omni + beamformed dual classification path.
@@ -113,6 +116,7 @@ class ClassificationOrchestrator:
             )
 
         omni_classification = await self._classify_with_timeout(omni_signal, sample_rate_hz)
+        backend_failed = omni_classification.features.get("reason") == "classification_error"
         classification = omni_classification
         classification_signal = omni_signal
         classification_path = "omni"
@@ -163,6 +167,7 @@ class ClassificationOrchestrator:
             classification_signal=classification_signal,
             beamforming_error=beamforming_error,
             event_time_ns=event_time_ns,
+            backend_failed=backend_failed,
         )
 
     async def classify_omni_only(
@@ -181,6 +186,7 @@ class ClassificationOrchestrator:
             )
 
         omni_classification = await self._classify_with_timeout(omni_signal, sample_rate_hz)
+        backend_failed = omni_classification.features.get("reason") == "classification_error"
         return await self._build_result(
             classification=omni_classification,
             omni_classification=omni_classification,
@@ -189,6 +195,7 @@ class ClassificationOrchestrator:
             classification_signal=omni_signal,
             beamforming_error=None,
             event_time_ns=event_time_ns,
+            backend_failed=backend_failed,
         )
 
     async def adopt_authoritative_classification(
@@ -280,6 +287,7 @@ class ClassificationOrchestrator:
         classification_signal: np.ndarray,
         beamforming_error: str | None,
         event_time_ns: int,
+        backend_failed: bool = False,
     ) -> ClassifiedResult:
         label_category = self._taxonomy_provider.category_for_label(classification.label)
         iff_category = self._taxonomy_provider.iff_for_category(label_category)
@@ -301,4 +309,5 @@ class ClassificationOrchestrator:
             label_category=label_category,
             iff_category=iff_category,
             label_id=label_id,
+            backend_failed=backend_failed,
         )

@@ -789,12 +789,15 @@ pub(crate) async fn consume_manifest_standalone(
     }
     let count = consumed_since_prune.fetch_add(1, Ordering::Relaxed) + 1;
     if count % prune_interval == 0 {
-        if let Err(error) = manifest_store
-            .prune_consumed_manifests(retention_max_files)
-            .await
-        {
-            warn!(error = %error, "DSP worker failed to prune consumed manifests");
-        }
+        let store = manifest_store.clone();
+        tokio::spawn(async move {
+            if let Err(error) = store
+                .prune_consumed_manifests(retention_max_files)
+                .await
+            {
+                warn!(error = %error, "DSP worker failed to prune consumed manifests");
+            }
+        });
     }
 }
 
@@ -916,16 +919,20 @@ fn resolve_buffer_start_time_ns(
         .filter(|start_time_ns| *start_time_ns > 0)
         .or_else(|| first_handle.toa_ns.map(i128::from))
         .or_else(|| {
+            // Anchor sample-index math to Time of Receipt (tor_ns) rather than now_ns
+            // so that consecutive packets align seamlessly regardless of queue jitter.
+            let anchor_ns = first_handle.tor_ns.unwrap_or(now_ns as u64);
             decoded.start_sample_index.map(|sample_index| {
-                sample_index_to_absolute_time_from_now_ns(sample_index, sample_rate_hz, now_ns)
+                sample_index_to_absolute_time_from_now_ns(sample_index, sample_rate_hz, anchor_ns.into())
             })
         })
         .or_else(|| {
+            let anchor_ns = first_handle.tor_ns.unwrap_or(now_ns as u64);
             first_handle.sample_index_start.map(|sample_index| {
                 sample_index_to_absolute_time_from_now_ns(
                     sample_index as i64,
                     sample_rate_hz,
-                    now_ns,
+                    anchor_ns.into(),
                 )
             })
         })

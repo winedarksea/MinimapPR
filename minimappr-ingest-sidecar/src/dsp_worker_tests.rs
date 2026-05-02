@@ -413,38 +413,7 @@ fn resolve_buffer_start_time_prefers_packet_toa_over_other_fallbacks() {
 }
 
 #[test]
-fn resolve_buffer_start_time_uses_relative_sample_time_before_now() {
-    let decoded = DecodedAudioPayload {
-        channels: vec![vec![0.0; 16]; 4],
-        sample_rate_hz: 16_000,
-        start_time_ns: None,
-        start_sample_index: Some(32_000),
-        end_sample_index: Some(32_016),
-        temperature_c: None,
-        humidity_fraction: None,
-    };
-    let handle = JournalPayloadHandle {
-        journal_epoch: 1,
-        segment_id: "seg-test".to_string(),
-        stream_key: "sirith-test__audio_main__abcd".to_string(),
-        payload_offset_bytes: 0,
-        payload_length_bytes: 0,
-        toa_ns: None,
-        tor_ns: None,
-        sample_index_start: Some(32_000),
-        sample_count: Some(16),
-        integrity_hash: String::new(),
-        segment_path: std::path::PathBuf::new(),
-    };
-
-    assert_eq!(
-        resolve_buffer_start_time_ns(&decoded, &handle, 16_000, 5_000_000_000),
-        3_000_000_000
-    );
-}
-
-#[test]
-fn resolve_buffer_start_time_prefers_packet_sample_index_over_receipt_time() {
+fn resolve_buffer_start_time_uses_tor_as_fallback() {
     let decoded = DecodedAudioPayload {
         channels: vec![vec![0.0; 16]; 4],
         sample_rate_hz: 16_000,
@@ -468,21 +437,20 @@ fn resolve_buffer_start_time_prefers_packet_sample_index_over_receipt_time() {
         segment_path: std::path::PathBuf::new(),
     };
 
-    // TDOA alignment must prefer packet-derived timing over server-receipt fallback.
     assert_eq!(
         resolve_buffer_start_time_ns(&decoded, &handle, 16_000, 5_000_000_000),
-        3_000_000_000
+        4_900_000_000
     );
 }
 
 #[test]
-fn resolve_buffer_start_time_uses_handle_sample_index_relative_to_now() {
+fn resolve_buffer_start_time_uses_now_as_fallback() {
     let decoded = DecodedAudioPayload {
         channels: vec![vec![0.0; 16]; 4],
         sample_rate_hz: 16_000,
         start_time_ns: None,
-        start_sample_index: None,
-        end_sample_index: None,
+        start_sample_index: Some(32_000),
+        end_sample_index: Some(32_016),
         temperature_c: None,
         humidity_fraction: None,
     };
@@ -494,7 +462,7 @@ fn resolve_buffer_start_time_uses_handle_sample_index_relative_to_now() {
         payload_length_bytes: 0,
         toa_ns: None,
         tor_ns: None,
-        sample_index_start: Some(16_000),
+        sample_index_start: Some(32_000),
         sample_count: Some(16),
         integrity_hash: String::new(),
         segment_path: std::path::PathBuf::new(),
@@ -502,7 +470,7 @@ fn resolve_buffer_start_time_uses_handle_sample_index_relative_to_now() {
 
     assert_eq!(
         resolve_buffer_start_time_ns(&decoded, &handle, 16_000, 5_000_000_000),
-        4_000_000_000
+        5_000_000_000
     );
 }
 

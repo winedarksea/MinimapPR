@@ -68,9 +68,15 @@ pub(crate) fn phat_correlation(
     }
 
     let fft_len = next_pow2(2 * n.max(1));
-    let mut planner = FftPlanner::<f32>::new();
-    let fft = planner.plan_fft_forward(fft_len);
-    let ifft = planner.plan_fft_inverse(fft_len);
+
+    thread_local! {
+        static PLANNER: std::cell::RefCell<FftPlanner<f32>> = std::cell::RefCell::new(FftPlanner::new());
+    }
+
+    let (fft, ifft) = PLANNER.with(|planner| {
+        let mut p = planner.borrow_mut();
+        (p.plan_fft_forward(fft_len), p.plan_fft_inverse(fft_len))
+    });
 
     let mut x1: Vec<Complex32> = ch1[..n]
         .iter()
