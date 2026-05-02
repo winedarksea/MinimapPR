@@ -50,6 +50,8 @@ async fn worker_publishes_localization_and_classifier_render_contract() {
         birdnet: None,
         coverage_stats: None,
         promotion_ready: false,
+        env_samples: None,
+        raw_payload: None,
     };
     let state: SharedDspState = Arc::new(RwLock::new(Default::default()));
     let mut worker = DspWorker::new(
@@ -270,6 +272,8 @@ async fn raw_manifest_for_payload(
         birdnet: None,
         coverage_stats: None,
         promotion_ready: false,
+        env_samples: None,
+        raw_payload: None,
     }
 }
 
@@ -527,6 +531,8 @@ fn stale_manifest_detection_uses_source_receipt_time() {
         birdnet: None,
         coverage_stats: None,
         promotion_ready: false,
+        env_samples: None,
+        raw_payload: None,
     };
 
     assert!(manifest_is_older_than_buffer_horizon(

@@ -1,6 +1,6 @@
 # MinimapPR Agent Guidelines
 
-This document provides guidelines for agents working on the MinimapPR codebase. Following these rules ensures consistency, maintainability, and architectural integrity.
+This document provides guidelines for agents working on the MinimapPR codebase.
 
 ## Architectural Principles
 
@@ -9,39 +9,37 @@ This document provides guidelines for agents working on the MinimapPR codebase. 
 - **Single Responsibility per File:** Each module should have one reason to change.
 - **Decompose "God Classes":** Avoid monolithic classes. Extract responsibilities into focused components.
 
-### 1.2 Interface-First Design (Protocols)
-- **Use Protocols for Pluggability:** All major subsystems must implement a `Protocol` defined in [minimappr/interfaces.py](minimappr/interfaces.py)
-- **`@runtime_checkable`:** All Protocols are decorated with `@runtime_checkable` to support `isinstance` checks at wiring time.
-
-### 1.3 Module Boundaries & Dependency Injection
+### 1.2 Module Boundaries & Dependency Injection
 - **Explicit Boundaries:** Avoid deep coupling between modules.
-- **Constructor Injection:** Pass dependencies (storage, trackers, etc.) into classes during initialization.
-- **`app.state` is the DI root:** The `lifespan` context manager in `main.py` wires all subsystems onto `app.state` (e.g., `app.state.storage`, `app.state.classifier`, `app.state.tracker`). Dependency functions (`get_state`) extract these for route handlers.
 
-### 1.4 Configuration-Driven Logic
+### 1.3 Configuration-Driven Logic
 - **No Magic Numbers:** Move operational constants (thresholds, multipliers, timings) into domain-specific sub-configs.
-- **Sub-Configs over God-Settings:** Pass only relevant sub-configs to subsystems instead of the entire `Settings` object.
 
 ## 2. Coding Standards
 
 ### 2.1 Hyper-Descriptive Naming
 - **Favor Explicit Over Concise:** Use long, descriptive names that explain intent
 
-### 2.3 Explicit State & Error Handling
-- **Explicit State Transitions:** State changes (e.g., `TrackState` / `TrackStatus` transitions) should be clear and traceable.
+### 2.3 Error Handling
 - **Robustness at the Edge:** Wrap potentially unstable operations (like `np.linalg.solve`) with try/except blocks to handle `LinAlgError` or singular matrices gracefully.
+- **Avoid Pointless Fallbacks** Only include fallbacks where the fallback is effective. Heuristic fallbacks can hide errors and slow debugging, so avoid them.
 
 ### 2.4 High-Signal Comments
 - **Explain "Why", Not "What":** Comments should explain the reasoning behind complex algorithms or architectural decisions.
 - **Be Token-Efficient in Comments:** Use concise, informative language. Focus on documenting interface contracts and capability tiers.
 
-## 3. Data Integrity & Provenance
-- **Maintain Traceability:** Every event must follow the chain: `observation` → `detection` → `track update` → `track` → `alert`.
-- **Stable IDs:** Ensure `event_id`, `node_id`, and `track_id` are consistent across the pipeline.
-- **Timestamp Accuracy:** Always include `TOA` (Time of Applicability), `TOR` (Time of Receipt), and `time_quality` (`gps_locked`, `ntp_sync`, `freerunning`).
-
-
-## 4. Testing & Benchmarking
-- **Shared Fixtures:** Place reusable fixtures in [tests/conftest.py](tests/conftest.py). Extract common test utilities (synthetic signal generators, stub storage) into a shared helper module if reused across 3+ files.
-- **Avoid Test Duplication:** If the same setup appears in multiple test files, factor it into a conftest fixture or a helper module.
+## 3. Testing & Benchmarking
+- **Shared Fixtures:** Place reusable fixtures into a shared helper module if reused across 3+ files.
+- **Avoid Test Duplication:** If the same setup appears in multiple test files, factor it into a fixture or a helper module.
 - **Refactor When Useful:** Code base is not deployed in production. Breaking changes are fine when they add clear value.
+
+# Core Release Requirements
+Make sure there are no gaps in the detection audio.
+Make sure realistic localization is occurring.
+Make sure nothing is holding back the pipeline (ie UI requests don't hold up audio processing requests)
+Make sure detections have lat/long of their track (or of their node, if omnidirectional)
+Precise TDOA is important. This means using carefully precise GPS (or NTP if no GPS) timestamps on firmware's outgoing audio packets which the server then uses (using the timestamp on packet, not server time) to process localizations.
+Streaming audio should not be landing on disk until it is localized and classified. Most audio should be discarded (assuming no detections, etc) without ever being written to disk on the server. This also should have minimal other tracking bloat (indexes, etc) being landed to disk, and generally what is landing should be landing in the SQLite, which should have proper cleanup policies automatically cleaning up old data.
+Birdnet production mode working cleanly with localized and detected bird calls, with some tracking of movement tracks where possible
+Birndet production mode working such that localized audio includes localization of appropriate wavelengths (TDOA can only pull in certain wavelengths depending on distance, other wavelengths should still be included but won't be as effectively localized)
+IAMF audio and ambisonic audio able to be recorded and export, with the localized and tracked audio passed in as proper objects to the IAMF (Atmos style) audio format. The goal is also for this to have a basic video start to a server connected webcam such that high quality video is recorded perfectly in sync with the audio, ready for upload to YouTube.

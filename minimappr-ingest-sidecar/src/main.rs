@@ -1,3 +1,4 @@
+mod actors;
 mod audio_payload;
 mod birdnet_render;
 mod classifier_helper;
@@ -6,6 +7,7 @@ mod dsp;
 mod dsp_render_output;
 mod dsp_worker;
 mod envelope;
+mod env_payload;
 mod gcc_phat;
 mod iamf_writer;
 mod ingest_backend;
@@ -13,6 +15,7 @@ mod journal_reader;
 mod leases;
 mod manifests;
 mod render_mvdr;
+mod runtime;
 mod srp_phat;
 mod storage_class;
 mod stream_range_lease;
@@ -30,7 +33,9 @@ use axum::{
 };
 use clap::Parser;
 use derived_cache::DerivedCache;
+use actors::environment::EnvironmentCache;
 use dsp_worker::{DspWorker, DspWorkerConfig, SharedDspState};
+use env_payload::{EnvIngestPayload, EnvIngestResponse};
 use iamf_writer::{
     split_bed_into_frames, split_object_into_frames, IamfScene, IamfWriter, LoudnessInfo,
     ObjectPosition, ObjectPositions,
@@ -50,6 +55,7 @@ use tracing::{info, warn};
 
 const BINARY_ENDPOINT: &str = "/api/v1/ingest/binary";
 const STORE_FORWARD_ENDPOINT: &str = "/api/v1/ingest/store-forward";
+const ENV_ENDPOINT: &str = "/api/v1/ingest/env";
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "MinimapPR firmware ingest spool sidecar")]
@@ -257,6 +263,7 @@ struct AppState {
     dsp_state: SharedDspState,
     derived_cache: Option<DerivedCache>,
     range_lease_store: Option<Arc<StreamRangeLeaseStore>>,
+    env_cache: EnvironmentCache,
 }
 
 #[derive(Debug, Serialize)]
@@ -304,6 +311,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     .await?;
 
     let dsp_state: SharedDspState = Arc::new(RwLock::new(Default::default()));
+    let env_cache = EnvironmentCache::new();
 
     // Spawn DSP worker if journal mode has a manifest store and derived cache.
     if let (Some(manifest_store), Some(derived_cache)) =
@@ -365,13 +373,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             dsp_state.clone(),
         );
         let worker = worker.with_raw_manifest_receiver(raw_manifest_rx);
-        let (worker, classification_worker) = worker.with_classification_worker(16);
+        let worker = worker.with_env_cache(env_cache.clone());
+        let (worker, classification_worker) = worker.with_classification_worker(64);
         if let Some(cw) = classification_worker {
             tokio::spawn(cw.run_loop());
             info!("ClassificationWorker spawned");
         }
         tokio::spawn(worker.run_loop());
         info!("DSP worker spawned");
+        // Eagerly init the rayon pool so first-frame latency is not inflated.
+        let _ = runtime::dsp_pool();
     }
 
     let range_lease_store = backend
@@ -384,6 +395,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         max_body_bytes: args.max_body_bytes,
         dsp_state,
         range_lease_store,
+        env_cache,
     };
 
     let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
@@ -410,6 +422,7 @@ fn app(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route(BINARY_ENDPOINT, post(ingest_binary))
         .route(STORE_FORWARD_ENDPOINT, post(ingest_store_forward))
+        .route(ENV_ENDPOINT, post(ingest_env))
         .route("/api/v1/journal/pins", post(create_pin_lease))
         .route(
             "/api/v1/journal/pins/:lease_id",
@@ -475,6 +488,63 @@ async fn ingest_store_forward(
     body: Body,
 ) -> Response {
     enqueue_request(state, STORE_FORWARD_ENDPOINT, headers, body).await
+}
+
+async fn ingest_env(
+    State(state): State<AppState>,
+    Json(payload): Json<EnvIngestPayload>,
+) -> Response {
+    use actors::environment::EnvSample;
+    use manifests::DspManifest;
+
+    if payload.samples.len() > 64 {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(ErrorResponse {
+                accepted: false,
+                queued: false,
+                detail: "env batch exceeds 64 samples".to_string(),
+            }),
+        )
+            .into_response();
+    }
+
+    let now_ns = dsp_worker::system_now_ns();
+    let mut accepted = 0usize;
+    for dto in &payload.samples {
+        let sample = EnvSample {
+            t_ns: dto.t_ns,
+            temp_c: dto.temp_c,
+            rh_pct: dto.rh_pct,
+        };
+        state.env_cache.update(&dto.node_id, sample).await;
+        accepted += 1;
+    }
+
+    // Journal env readings so the Python spool consumer can process them.
+    if let Some(manifest_store) = state.backend.manifest_store() {
+        if let Ok(samples_value) = serde_json::to_value(&payload.samples) {
+            let manifest = DspManifest {
+                manifest_id: String::new(),
+                manifest_type: "env_sample_append".to_string(),
+                created_ns: now_ns,
+                source_handles: vec![],
+                derived_handle: None,
+                localization: None,
+                classifier_render: None,
+                birdnet: None,
+                coverage_stats: None,
+                promotion_ready: false,
+                env_samples: Some(samples_value),
+                raw_payload: None,
+            };
+            if let Err(err) = manifest_store.publish(manifest).await {
+                warn!(error = %err, "failed to publish env_sample_append manifest");
+            }
+        }
+    }
+
+    (StatusCode::ACCEPTED, Json(EnvIngestResponse { accepted })).into_response()
 }
 
 async fn enqueue_request(
@@ -990,6 +1060,7 @@ mod tests {
             dsp_state: Arc::new(RwLock::new(Default::default())),
             derived_cache: None,
             range_lease_store: None,
+            env_cache: EnvironmentCache::new(),
         }
     }
 

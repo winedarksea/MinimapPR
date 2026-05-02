@@ -8,22 +8,20 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use tokio::{sync::mpsc, sync::RwLock, task::JoinSet, time};
+use tokio::{sync::mpsc, sync::RwLock, time};
 use tracing::{debug, info, warn};
-use uuid::Uuid;
-
 use crate::{
+    actors::{
+        classification::ClassificationWorker,
+        environment::EnvironmentCache,
+    },
     audio_payload::{decode_audio_payload, DecodedAudioPayload},
     classifier_helper::ManifestClassificationAnnotator,
     derived_cache::DerivedCache,
     dsp::{AudioCoverageStats, SensorStreamBuffer},
-    dsp_render_output::{publish_classifier_render, publish_omni_render, RenderPublishContext},
     gcc_phat::TdoaResult,
     journal_reader::{read_payload_with_mmap, JournalPayloadHandle},
-    manifests::{DspManifest, LocalizationManifestPayload, ManifestStore, PairTdoaDiagnostic},
-    srp_phat::{
-        estimate_tetrahedral_steering, SrpPhatConfig, SrpPhatEvaluation, SrpPhatLocalization,
-    },
+    manifests::{DspManifest, ManifestStore},
 };
 
 /// Centroid-relative Sirith tetrahedral mic positions [MK1, MK2, MK3, MK4].
@@ -36,49 +34,28 @@ pub(crate) const SIRITH_MIC_POSITIONS_M: [[f32; 3]; 4] = [
 
 #[derive(Clone, Debug)]
 pub struct DspWorkerConfig {
-    /// How often to poll for pending manifests.
     pub poll_interval_ms: u64,
-    /// Maximum number of pending manifests to process per poll iteration.
     pub pending_manifest_batch_size: usize,
-    /// DSP window size in seconds (default: 512/16000 ≈ 32 ms).
     pub window_seconds: f64,
-    /// Classification render window in seconds.
     pub classification_window_seconds: f64,
-    /// Minimum interval between classifier renders per stream.
     pub classifier_render_min_interval_seconds: f64,
-    /// Maximum retained history per stream buffer.
     pub max_buffer_seconds: f64,
-    /// Skip windows with coverage below this ratio.
     pub min_coverage_ratio: f64,
-    /// Runtime-profile localization band reported in localization provenance.
     pub localization_band_hz: [f32; 2],
-    /// Search resolution used by the SRP-PHAT grid in meters.
     pub localization_srp_grid_resolution_m: f32,
-    /// Padding around the active array bounds used for SRP search.
     pub localization_search_padding_m: f32,
-    /// Frequency band where the BirdNET render uses spatial steering.
     pub spatial_blend_band_hz: [f32; 2],
-    /// High-pass floor applied to the steered render before spatial blending.
     pub pre_blend_highpass_hz: f32,
-    /// Minimum SRP confidence required before producing a hybrid render.
     pub min_localization_confidence: f32,
-    /// Enables classifier-ready BirdNET hybrid render manifests.
     pub birdnet_hybrid_render_enabled: bool,
-    /// Skip stale manifests instead of mutating live buffers with old audio.
     pub skip_stale_manifests_for_live_buffer: bool,
-    /// Keep at most this many consumed manifest files on disk.
     pub consumed_manifest_retention_max_files: usize,
-    /// Run consumed-manifest pruning after this many consumes.
     pub consumed_manifest_prune_interval: u64,
     pub default_temperature_c: f32,
     pub default_humidity_fraction: f32,
     pub sound_speed_mps: f32,
     pub classifier_command_json: Option<String>,
-    /// Minimum interval between SRP-PHAT runs per stream (milliseconds).
-    /// Reduces 30+ Hz grid searches to ~4 Hz. Set to 0 to run on every frame.
     pub localization_cadence_ms: u64,
-    /// Skip SRP-PHAT when the window's peak-channel RMS is below this value.
-    /// 0.0 disables the energy gate.
     pub localization_rms_gate: f32,
 }
 
@@ -141,9 +118,9 @@ pub struct DspWorkerState {
 pub type SharedDspState = Arc<RwLock<DspWorkerState>>;
 
 #[derive(Clone, Debug)]
-struct LocalizationChannelState {
-    coverage: Option<AudioCoverageStats>,
-    window: Vec<f32>,
+pub(crate) struct LocalizationChannelState {
+    pub(crate) coverage: Option<AudioCoverageStats>,
+    pub(crate) window: Vec<f32>,
 }
 
 /// Carries a pre-built classifier_render manifest + the PCM path to the
@@ -151,70 +128,39 @@ struct LocalizationChannelState {
 pub struct ClassificationRequest {
     pub pcm_path: std::path::PathBuf,
     pub sample_rate_hz: u32,
-    /// Pre-built DspManifest with birdnet.label/scores = None.
     pub pending_manifest: DspManifest,
-}
-
-/// Dedicated task that owns ManifestClassificationAnnotator and processes
-/// ClassificationRequests from a bounded channel, decoupling BirdNET latency
-/// from the main DSP worker loop.
-pub struct ClassificationWorker {
-    annotator: ManifestClassificationAnnotator,
-    manifest_store: ManifestStore,
-    rx: mpsc::Receiver<ClassificationRequest>,
-}
-
-impl ClassificationWorker {
-    pub async fn run_loop(mut self) {
-        while let Some(req) = self.rx.recv().await {
-            let mut manifest = req.pending_manifest;
-            match self
-                .annotator
-                .classify_render(&req.pcm_path, req.sample_rate_hz)
-                .await
-            {
-                Ok(Some(cls)) => {
-                    if let Some(bn) = manifest.birdnet.as_mut() {
-                        bn.label = Some(cls.label);
-                        bn.label_confidence = Some(cls.label_confidence);
-                        bn.scores = Some(cls.scores);
-                    }
-                }
-                Ok(None) => {}
-                Err(err) => {
-                    warn!(error = %err, "ClassificationWorker: BirdNET annotation failed");
-                }
-            }
-            if let Err(err) = self.manifest_store.publish(manifest).await {
-                warn!(error = %err, "ClassificationWorker: failed to publish manifest");
-            }
-        }
-    }
 }
 
 /// All owned data needed to run the compute phase (SRP-PHAT + render + publish)
 /// for a single manifest after the ingest (buffer-append) phase completes.
-/// Passed into `run_compute`, which is spawned as an independent tokio task so
-/// the main ingest loop can immediately proceed to the next manifest.
-struct ComputePayload {
-    manifest: DspManifest,
-    stream_key: String,
-    channel_states: [LocalizationChannelState; 4],
-    active_channels: Vec<usize>,
-    classification_windows: [Vec<f32>; 4],
-    classification_coverage: [Option<AudioCoverageStats>; 4],
-    source_ids: Vec<String>,
-    sr: u32,
-    now_ns: u128,
-    effective_sound_speed_mps: f32,
-    run_srp: bool,
-    run_classifier_render: bool,
-    manifest_store: ManifestStore,
-    derived_cache: DerivedCache,
-    state: SharedDspState,
-    classification_tx: Option<mpsc::Sender<ClassificationRequest>>,
-    config: DspWorkerConfig,
-    consumed_since_prune: Arc<AtomicU64>,
+pub(crate) struct ComputePayload {
+    pub(crate) manifest: DspManifest,
+    pub(crate) stream_key: String,
+    pub(crate) channel_states: [LocalizationChannelState; 4],
+    pub(crate) active_channels: Vec<usize>,
+    pub(crate) classification_windows: [Vec<f32>; 4],
+    pub(crate) classification_coverage: [Option<AudioCoverageStats>; 4],
+    pub(crate) source_ids: Vec<String>,
+    pub(crate) sr: u32,
+    pub(crate) now_ns: u128,
+    pub(crate) effective_sound_speed_mps: f32,
+    pub(crate) run_srp: bool,
+    pub(crate) run_classifier_render: bool,
+    /// When set, overrides classification_windows for the omni render (single-sensor
+    /// or no-coverage fallback paths that dispatch to Rayon instead of blocking inline).
+    pub(crate) omni_channels_override: Option<Vec<Vec<f32>>>,
+    /// When set, used as the render fallback_reason instead of deriving it from the
+    /// localization algorithm string. Preserves semantic accuracy for fallback paths.
+    pub(crate) omni_fallback_reason: Option<String>,
+    /// When true, run_io skips publishing a localization_result manifest. Used for
+    /// omni-only fallback paths that never had a real localization attempt.
+    pub(crate) skip_localization_result: bool,
+    pub(crate) manifest_store: ManifestStore,
+    pub(crate) derived_cache: DerivedCache,
+    pub(crate) state: SharedDspState,
+    pub(crate) classification_tx: Option<flume::Sender<ClassificationRequest>>,
+    pub(crate) config: DspWorkerConfig,
+    pub(crate) consumed_since_prune: Arc<AtomicU64>,
 }
 
 pub struct DspWorker {
@@ -223,16 +169,13 @@ pub struct DspWorker {
     config: DspWorkerConfig,
     state: SharedDspState,
     classifier_annotator: Option<ManifestClassificationAnnotator>,
-    classification_tx: Option<mpsc::Sender<ClassificationRequest>>,
-    /// In-process channel receiver for raw_journal_append manifests, bypassing
-    /// the 20ms filesystem polling cycle when the ingest backend is co-located.
+    classification_tx: Option<flume::Sender<ClassificationRequest>>,
     raw_manifest_rx: Option<mpsc::Receiver<DspManifest>>,
-    /// Per-stream sample buffers (one channel-set per stream_key).
     buffers: HashMap<String, [SensorStreamBuffer; 4]>,
     last_classifier_render_ns_by_stream: HashMap<String, u128>,
     last_localization_ns_by_stream: HashMap<String, u128>,
-    /// Shared with compute tasks so pruning is counted across spawned tasks.
     consumed_manifests_since_prune: Arc<AtomicU64>,
+    env_cache: Option<EnvironmentCache>,
 }
 
 impl DspWorker {
@@ -245,7 +188,7 @@ impl DspWorker {
         let classifier_annotator = match ManifestClassificationAnnotator::from_command_json(
             config.classifier_command_json.as_deref(),
         ) {
-            Ok(classifier_annotator) => classifier_annotator,
+            Ok(a) => a,
             Err(error) => {
                 warn!(error = %error, "DSP worker classifier helper disabled");
                 None
@@ -263,11 +206,12 @@ impl DspWorker {
             last_classifier_render_ns_by_stream: HashMap::new(),
             last_localization_ns_by_stream: HashMap::new(),
             consumed_manifests_since_prune: Arc::new(AtomicU64::new(0)),
+            env_cache: None,
         }
     }
 
-    /// Extracts the `ManifestClassificationAnnotator` from the worker and
-    /// wires it to a dedicated `ClassificationWorker` task via a bounded channel.
+    /// Wires the ManifestClassificationAnnotator to a dedicated `ClassificationWorker`
+    /// task via a flume bounded channel (capacity 64, raised from legacy 16).
     /// Returns `(self, Some(worker))` when classification is configured,
     /// `(self, None)` when no classifier command is set.
     pub fn with_classification_worker(
@@ -277,7 +221,7 @@ impl DspWorker {
         let Some(annotator) = self.classifier_annotator.take() else {
             return (self, None);
         };
-        let (tx, rx) = mpsc::channel(channel_capacity);
+        let (tx, rx) = flume::bounded(channel_capacity);
         self.classification_tx = Some(tx);
         let worker = ClassificationWorker {
             annotator,
@@ -294,7 +238,12 @@ impl DspWorker {
         self
     }
 
-    /// Main processing loop. Runs forever as a tokio task.
+    /// Injects a shared EnvironmentCache for sound-speed interpolation (Phase 6).
+    pub fn with_env_cache(mut self, cache: EnvironmentCache) -> Self {
+        self.env_cache = Some(cache);
+        self
+    }
+
     pub async fn run_loop(mut self) {
         info!("DSP worker started");
         let interval = time::Duration::from_millis(self.config.poll_interval_ms);
@@ -326,7 +275,6 @@ impl DspWorker {
             Vec::new()
         };
 
-        // Prefer channel delivery; fall back to filesystem poll when channel is empty.
         let pending = if !channel_manifests.is_empty() {
             channel_manifests
         } else {
@@ -350,26 +298,24 @@ impl DspWorker {
 
         let pending_backlog_depth = pending.len();
 
-        let mut compute_tasks: JoinSet<()> = JoinSet::new();
+        // Capture the Tokio handle once so each rayon closure can call
+        // `handle.spawn(run_io(...))` after the sync math phase completes.
+        let handle = tokio::runtime::Handle::current();
 
         for manifest in pending {
             if let Some(payload) = self.ingest_one(manifest, pending_backlog_depth).await {
-                compute_tasks.spawn(run_compute(payload));
-            }
-        }
-
-        while let Some(result) = compute_tasks.join_next().await {
-            if let Err(err) = result {
-                warn!(error = ?err, "DSP compute task panicked");
+                let h = handle.clone();
+                // Dispatch to the dedicated DSP rayon pool. run_compute is sync:
+                // it runs CPU math on the Rayon thread, then calls handle.spawn(run_io(...))
+                // which queues async I/O onto Tokio and returns immediately. The Rayon
+                // thread is free for the next frame without waiting on disk or DB.
+                crate::runtime::dsp_pool().spawn_fifo(move || {
+                    crate::actors::dsp_compute::run_compute(payload, h);
+                });
             }
         }
     }
 
-    /// Reads, decodes, and buffer-appends a single manifest.  Handles all
-    /// early-exit paths (stale, decode error, insufficient channels, no coverage)
-    /// inline.  Returns `Some(ComputePayload)` when the main localization +
-    /// render path should run; the caller spawns `run_compute` on the payload
-    /// so the next manifest's ingest can begin immediately.
     async fn ingest_one(
         &mut self,
         manifest: DspManifest,
@@ -386,17 +332,38 @@ impl DspWorker {
         };
 
         let stream_key = first_handle.stream_key.clone();
-        let raw_payload = match read_payload_with_mmap(first_handle) {
-            Ok(payload) => payload,
-            Err(err) => {
-                self.note_failure().await;
-                warn!(
-                    manifest_id = %manifest.manifest_id,
-                    error = %err,
-                    "DSP worker failed to read journal payload; consuming unreadable source manifest"
-                );
-                self.consume_source_manifest(&manifest).await;
-                return None;
+
+        // Fast path: raw audio bytes were delivered through the in-process channel
+        // alongside the manifest metadata — no disk read required.
+        // Fallback: read from the journal segment via mmap. read_payload_with_mmap is
+        // a blocking synchronous call, so run it in spawn_blocking to avoid stalling
+        // the Tokio executor thread while the OS resolves the mmap page faults.
+        let raw_payload: Vec<u8> = if let Some(bytes) = manifest.raw_payload.clone() {
+            bytes
+        } else {
+            let handle = first_handle.clone();
+            match tokio::task::spawn_blocking(move || read_payload_with_mmap(&handle)).await {
+                Ok(Ok(bytes)) => bytes,
+                Ok(Err(err)) => {
+                    self.note_failure().await;
+                    warn!(
+                        manifest_id = %manifest.manifest_id,
+                        error = %err,
+                        "DSP worker failed to read journal payload; consuming unreadable source manifest"
+                    );
+                    self.consume_source_manifest(&manifest).await;
+                    return None;
+                }
+                Err(join_err) => {
+                    self.note_failure().await;
+                    warn!(
+                        manifest_id = %manifest.manifest_id,
+                        error = %join_err,
+                        "DSP worker spawn_blocking panicked reading journal payload"
+                    );
+                    self.consume_source_manifest(&manifest).await;
+                    return None;
+                }
             }
         };
         let decoded = match decode_audio_payload(&raw_payload) {
@@ -429,16 +396,35 @@ impl DspWorker {
             .map(|h| h.segment_id.clone())
             .collect::<Vec<_>>();
         let sr = decoded.sample_rate_hz.max(1);
+
+        // Phase 6: sound-speed fallback chain:
+        // (1) embedded MMB1 flag bytes > (2) EnvironmentCache interpolation > (3) config defaults.
+        let (env_temp_c, env_humidity_fraction) = if decoded.temperature_c.is_none()
+            && decoded.humidity_fraction.is_none()
+        {
+            if let Some(cache) = &self.env_cache {
+                let query_ns = first_handle
+                    .toa_ns
+                    .unwrap_or_else(|| now_ns as u64);
+                let node_id = stream_key.split("__").next().unwrap_or(&stream_key);
+                cache
+                    .interpolate(node_id, query_ns)
+                    .await
+                    .map(|(t, h)| (Some(t), Some(h)))
+                    .unwrap_or((None, None))
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
+
         let effective_sound_speed_mps = resolve_effective_sound_speed_mps(
             &self.config,
-            decoded.temperature_c,
-            decoded.humidity_fraction,
+            decoded.temperature_c.or(env_temp_c),
+            decoded.humidity_fraction.or(env_humidity_fraction),
         );
 
-        // Compute the audio-timeline endpoint of this frame up front so that
-        // cadence decisions below are based on audio time, not wall-clock time.
-        // Wall-clock can be misleading when the worker processes a burst of
-        // queued manifests faster than real-time (Bug 3 fix).
         let frames_all = decoded.channels.iter().map(Vec::len).min().unwrap_or(0);
         let render_duration_ns =
             (frames_all as i128).saturating_mul(1_000_000_000) / i128::from(sr.max(1));
@@ -478,34 +464,33 @@ impl DspWorker {
                 self.consume_source_manifest(&manifest).await;
                 return None;
             }
-            let render_result = publish_omni_render(
-                RenderPublishContext {
-                    derived_cache: &self.derived_cache,
-                    config: &self.config,
-                    sound_speed_mps: effective_sound_speed_mps,
-                },
-                &manifest,
-                &stream_key,
-                &decoded.channels,
-                None,
-                sr,
+            // Dispatch to Rayon so disk/DB I/O doesn't block the ingest loop.
+            let channel_states: [LocalizationChannelState; 4] =
+                core::array::from_fn(|_| LocalizationChannelState { coverage: None, window: Vec::new() });
+            let classification_windows: [Vec<f32>; 4] = core::array::from_fn(|_| Vec::new());
+            return Some(ComputePayload {
+                manifest,
+                stream_key,
+                channel_states,
+                active_channels: Vec::new(),
+                classification_windows,
+                classification_coverage: [None, None, None, None],
+                omni_channels_override: Some(decoded.channels.clone()),
+                omni_fallback_reason: Some("single_sensor_or_non_array_node".to_string()),
+                skip_localization_result: true,
                 source_ids,
+                sr,
                 now_ns,
-                Some("single_sensor_or_non_array_node".to_string()),
-            )
-            .await;
-            self.note_failures(render_result.failure_count).await;
-            if let Some(pending) = self.dispatch_classification_result(render_result).await {
-                let mut st = self.state.write().await;
-                st.last_processed_ns = Some(now_ns);
-                st.total_classifier_renders += 1;
-                st.recent_results.push(pending);
-                if st.recent_results.len() > 50 {
-                    st.recent_results.remove(0);
-                }
-            }
-            self.consume_source_manifest(&manifest).await;
-            return None;
+                effective_sound_speed_mps,
+                run_srp: false,
+                run_classifier_render: true,
+                manifest_store: self.manifest_store.clone(),
+                derived_cache: self.derived_cache.clone(),
+                state: self.state.clone(),
+                classification_tx: self.classification_tx.clone(),
+                config: self.config.clone(),
+                consumed_since_prune: self.consumed_manifests_since_prune.clone(),
+            });
         }
 
         let start_sample_index = decoded.start_sample_index;
@@ -569,39 +554,33 @@ impl DspWorker {
                 self.consume_source_manifest(&manifest).await;
                 return None;
             }
-            let render_result = publish_omni_render(
-                RenderPublishContext {
-                    derived_cache: &self.derived_cache,
-                    config: &self.config,
-                    sound_speed_mps: effective_sound_speed_mps,
-                },
-                &manifest,
-                &stream_key,
-                &fallback_render_channels,
-                render_coverage_json(
-                    &fallback_render_coverage,
-                    &eligible_coverage_channels(&fallback_render_coverage),
-                    self.config.min_coverage_ratio,
-                    "classification_latest",
-                ),
-                sr,
+            // Dispatch to Rayon so disk/DB I/O doesn't block the ingest loop.
+            // Pass fallback_render_coverage as classification_coverage so run_math
+            // builds an accurate coverage_json for the classifier_render manifest.
+            let active_channels = eligible_coverage_channels(&fallback_render_coverage);
+            return Some(ComputePayload {
+                manifest,
+                stream_key,
+                channel_states,
+                active_channels,
+                classification_windows: core::array::from_fn(|_| Vec::new()),
+                classification_coverage: fallback_render_coverage,
+                omni_channels_override: Some(fallback_render_channels),
+                omni_fallback_reason: Some("localization_coverage_unavailable".to_string()),
+                skip_localization_result: true,
                 source_ids,
+                sr,
                 now_ns,
-                Some("localization_coverage_unavailable".to_string()),
-            )
-            .await;
-            self.note_failures(render_result.failure_count).await;
-            if let Some(pending) = self.dispatch_classification_result(render_result).await {
-                let mut st = self.state.write().await;
-                st.last_processed_ns = Some(now_ns);
-                st.total_classifier_renders += 1;
-                st.recent_results.push(pending);
-                if st.recent_results.len() > 50 {
-                    st.recent_results.remove(0);
-                }
-            }
-            self.consume_source_manifest(&manifest).await;
-            return None;
+                effective_sound_speed_mps,
+                run_srp: false,
+                run_classifier_render: true,
+                manifest_store: self.manifest_store.clone(),
+                derived_cache: self.derived_cache.clone(),
+                state: self.state.clone(),
+                classification_tx: self.classification_tx.clone(),
+                config: self.config.clone(),
+                consumed_since_prune: self.consumed_manifests_since_prune.clone(),
+            });
         }
 
         let active_channels =
@@ -622,9 +601,6 @@ impl DspWorker {
             return None;
         }
 
-        // Extract localization windows to pass to the compute task. The RMS check
-        // inside should_run_localization is done here (ingest phase) because it
-        // reads from the same window data that the compute task will use.
         let windows: [Vec<f32>; 4] = core::array::from_fn(|ch| channel_states[ch].window.clone());
         let run_srp = self.should_run_localization(&stream_key, audio_end_ns, &windows);
         let run_classifier_render = self.config.birdnet_hybrid_render_enabled;
@@ -642,6 +618,9 @@ impl DspWorker {
             effective_sound_speed_mps,
             run_srp,
             run_classifier_render,
+            omni_channels_override: None,
+            omni_fallback_reason: None,
+            skip_localization_result: false,
             manifest_store: self.manifest_store.clone(),
             derived_cache: self.derived_cache.clone(),
             state: self.state.clone(),
@@ -652,9 +631,14 @@ impl DspWorker {
     }
 
     #[cfg(test)]
-    async fn process_one(&mut self, manifest: DspManifest, pending_backlog_depth: usize) {
+    pub(crate) async fn process_one(
+        &mut self,
+        manifest: DspManifest,
+        pending_backlog_depth: usize,
+    ) {
         if let Some(payload) = self.ingest_one(manifest, pending_backlog_depth).await {
-            run_compute(payload).await;
+            let result = crate::actors::dsp_compute::run_math(payload);
+            crate::actors::dsp_compute::run_io(result).await;
         }
     }
 
@@ -681,26 +665,6 @@ impl DspWorker {
         self.note_failures(1).await;
     }
 
-    /// Sends a `RenderPublishResult` to the `ClassificationWorker` channel.
-    /// Falls back to direct `ManifestStore` publish when no worker is configured
-    /// or the channel is full, so the manifest is never silently lost.
-    async fn dispatch_classification_result(
-        &mut self,
-        result: crate::dsp_render_output::RenderPublishResult,
-    ) -> Option<DspManifest> {
-        dispatch_classification_result_standalone(
-            result,
-            &self.classification_tx,
-            &self.manifest_store,
-            &self.state,
-        )
-        .await
-    }
-
-    /// Cadence gate: returns true if SRP-PHAT should run for this frame.
-    /// Uses the audio-timeline endpoint (`audio_ns`) instead of wall-clock so
-    /// that burst processing of queued manifests doesn't skip frames based on
-    /// CPU execution speed.
     fn should_run_localization(
         &mut self,
         stream_key: &str,
@@ -736,9 +700,6 @@ impl DspWorker {
         }
     }
 
-    /// Cadence gate: returns true if a classifier render should be produced.
-    /// Uses audio-timeline endpoint (`audio_ns`) for the same reason as
-    /// `should_run_localization`.
     fn should_publish_classifier_render(
         &mut self,
         stream_key: &str,
@@ -768,201 +729,15 @@ impl DspWorker {
 }
 
 // ---------------------------------------------------------------------------
-// Free functions shared by the DspWorker ingest path and the spawned compute tasks
+// Free functions shared between the ingest path and actors/dsp_compute
 // ---------------------------------------------------------------------------
 
-/// SRP-PHAT + render + publish for one manifest.  Designed to run as an
-/// independent `tokio::spawn` task so the ingest loop can process the next
-/// manifest while this one's CPU/IO work is in flight.
-async fn run_compute(payload: ComputePayload) {
-    let windows: [Vec<f32>; 4] =
-        core::array::from_fn(|ch| payload.channel_states[ch].window.clone());
-
-    let localization_evaluation = if payload.run_srp {
-        let srp_config = SrpPhatConfig {
-            localization_band_hz: payload.config.localization_band_hz,
-            grid_resolution_m: payload.config.localization_srp_grid_resolution_m,
-            search_padding_m: payload.config.localization_search_padding_m,
-            ..SrpPhatConfig::default()
-        };
-        let active_channels = payload.active_channels.clone();
-        let mic_positions = SIRITH_MIC_POSITIONS_M;
-        let sr = payload.sr;
-        let sound_speed = payload.effective_sound_speed_mps;
-        // CPU-bound FFT + grid search: run on the blocking thread pool so the
-        // async executor remains free to accept new audio payloads.
-        tokio::task::spawn_blocking(move || {
-            estimate_tetrahedral_steering(
-                &windows,
-                &active_channels,
-                &mic_positions,
-                sr,
-                sound_speed,
-                srp_config,
-            )
-        })
-        .await
-        .expect("SRP-PHAT blocking task panicked")
-    } else {
-        SrpPhatEvaluation {
-            localization: SrpPhatLocalization {
-                attempted_algorithm: "localization_cadence_skipped".to_string(),
-                resolved_algorithm: "localization_cadence_skipped".to_string(),
-                steering_direction: [0.0, 0.0, 0.0],
-                position_m: None,
-                confidence: 0.0,
-                residual_rms_seconds: 0.0,
-                sound_speed_mps: payload.effective_sound_speed_mps,
-            },
-            pair_tdoas: vec![],
-        }
-    };
-
-    let pair_diagnostics = localization_evaluation
-        .pair_tdoas
-        .iter()
-        .map(pair_tdoa_diagnostic)
-        .collect::<Vec<_>>();
-    let localization = localization_evaluation.localization;
-    let localization_payload = localization_manifest_payload(
-        &localization,
-        payload.config.localization_band_hz,
-        pair_diagnostics.clone(),
-    );
-    let fallback_reason = if localization.resolved_algorithm != "srp_phat" {
-        Some(localization.resolved_algorithm.clone())
-    } else if localization.confidence < payload.config.min_localization_confidence {
-        Some("low_localization_confidence".to_string())
-    } else {
-        None
-    };
-
-    let render_result = if payload.run_classifier_render {
-        Some(
-            publish_classifier_render(
-                RenderPublishContext {
-                    derived_cache: &payload.derived_cache,
-                    config: &payload.config,
-                    sound_speed_mps: payload.effective_sound_speed_mps,
-                },
-                &payload.manifest,
-                &payload.stream_key,
-                &payload.classification_windows,
-                render_coverage_json(
-                    &payload.classification_coverage,
-                    &payload.active_channels,
-                    payload.config.min_coverage_ratio,
-                    "classification_trailing",
-                ),
-                payload.sr,
-                payload.source_ids.clone(),
-                payload.now_ns,
-                Some(&localization),
-                fallback_reason,
-            )
-            .await,
-        )
-    } else {
-        None
-    };
-
-    if let Some(ref result) = render_result {
-        if result.failure_count > 0 {
-            let mut st = payload.state.write().await;
-            st.total_failures += result.failure_count;
-        }
-    }
-
-    let render_classifier_render = render_result
-        .as_ref()
-        .and_then(|r| r.pending_manifest.as_ref())
-        .and_then(|m| m.classifier_render.clone());
-    let render_pending = if let Some(result) = render_result {
-        dispatch_classification_result_standalone(
-            result,
-            &payload.classification_tx,
-            &payload.manifest_store,
-            &payload.state,
-        )
-        .await
-    } else {
-        None
-    };
-
-    let coverage_json = serde_json::to_value(serde_json::json!({
-        "per_channel": payload.channel_states
-            .iter()
-            .map(|state| state.coverage.clone())
-            .collect::<Vec<_>>(),
-        "active_channels": payload.active_channels,
-        "threshold": payload.config.min_coverage_ratio,
-    }))
-    .ok();
-
-    let published = DspManifest {
-        manifest_id: format!("manifest-{}", Uuid::new_v4()),
-        manifest_type: "localization_result".to_string(),
-        created_ns: payload.now_ns,
-        source_handles: payload.manifest.source_handles.clone(),
-        derived_handle: None,
-        localization: Some(localization_payload),
-        classifier_render: render_classifier_render,
-        birdnet: None,
-        coverage_stats: coverage_json,
-        promotion_ready: false,
-    };
-
-    if let Err(err) = payload.manifest_store.publish(published.clone()).await {
-        warn!(
-            manifest_id = %payload.manifest.manifest_id,
-            error = %err,
-            "DSP worker failed to publish localization manifest"
-        );
-    }
-
-    consume_manifest_standalone(
-        &payload.manifest,
-        &payload.manifest_store,
-        &payload.consumed_since_prune,
-        payload.config.consumed_manifest_prune_interval.max(1),
-        payload.config.consumed_manifest_retention_max_files,
-    )
-    .await;
-
-    let mut st = payload.state.write().await;
-    st.last_processed_ns = Some(payload.now_ns);
-    let real_localization = localization.resolved_algorithm == "srp_phat"
-        || localization
-            .resolved_algorithm
-            .starts_with("srp_phat_degraded");
-    if real_localization {
-        st.total_tdoa_results += 1;
-    }
-    if published.localization.is_some() && real_localization {
-        st.total_localization_results += 1;
-    }
-    if published.classifier_render.is_some() {
-        st.total_classifier_renders += 1;
-    }
-    if let Some(pending) = render_pending {
-        st.recent_results.push(pending);
-    }
-    st.recent_results.push(published);
-    if st.recent_results.len() > 50 {
-        st.recent_results.remove(0);
-    }
-}
-
-/// Routes a `RenderPublishResult` to the `ClassificationWorker` channel, or
-/// falls back to a direct `ManifestStore` publish if no worker is wired up or
-/// the channel is full.
-async fn dispatch_classification_result_standalone(
+pub(crate) async fn dispatch_classification_result_standalone(
     result: crate::dsp_render_output::RenderPublishResult,
-    classification_tx: &Option<mpsc::Sender<ClassificationRequest>>,
+    classification_tx: &Option<flume::Sender<ClassificationRequest>>,
     manifest_store: &ManifestStore,
     state: &SharedDspState,
 ) -> Option<DspManifest> {
-    use tokio::sync::mpsc::error::TrySendError;
     let Some(pending) = result.pending_manifest else {
         return None;
     };
@@ -974,7 +749,7 @@ async fn dispatch_classification_result_standalone(
         };
         match tx.try_send(req) {
             Ok(()) => {}
-            Err(TrySendError::Full(_)) => {
+            Err(flume::TrySendError::Full(_)) => {
                 let mut st = state.write().await;
                 st.total_classification_drops += 1;
                 warn!(
@@ -984,23 +759,20 @@ async fn dispatch_classification_result_standalone(
                 drop(st);
                 let _ = manifest_store.publish(pending.clone()).await;
             }
-            Err(TrySendError::Closed(_)) => {
-                warn!("ClassificationWorker channel closed; publishing manifest without BirdNET labels");
+            Err(flume::TrySendError::Disconnected(_)) => {
+                warn!(
+                    "ClassificationWorker channel closed; publishing manifest without BirdNET labels"
+                );
                 let _ = manifest_store.publish(pending.clone()).await;
             }
         }
-    } else {
-        if let Err(err) = manifest_store.publish(pending.clone()).await {
-            warn!(error = %err, "failed to publish classifier render manifest");
-        }
+    } else if let Err(err) = manifest_store.publish(pending.clone()).await {
+        warn!(error = %err, "failed to publish classifier render manifest");
     }
     Some(pending)
 }
 
-/// Marks a manifest as consumed and periodically triggers a prune pass.
-/// Called both from the ingest path (`&mut DspWorker`) and from spawned compute
-/// tasks via a cloned `Arc<AtomicU64>` counter.
-async fn consume_manifest_standalone(
+pub(crate) async fn consume_manifest_standalone(
     manifest: &DspManifest,
     manifest_store: &ManifestStore,
     consumed_since_prune: &Arc<AtomicU64>,
@@ -1026,19 +798,24 @@ async fn consume_manifest_standalone(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Pure helper functions (unchanged)
-// ---------------------------------------------------------------------------
-
-fn pair_tdoa_diagnostic(pair: &PairTdoa) -> PairTdoaDiagnostic {
-    PairTdoaDiagnostic {
-        ch_a: pair.ch_a,
-        ch_b: pair.ch_b,
-        delay_samples: pair.tdoa.delay_samples,
-        lag_seconds: pair.tdoa.lag_seconds,
-        confidence: pair.tdoa.confidence,
-    }
+pub(crate) fn render_coverage_json(
+    channel_coverage: &[Option<AudioCoverageStats>; 4],
+    active_channels: &[usize],
+    min_coverage_ratio: f64,
+    window_type: &str,
+) -> Option<serde_json::Value> {
+    serde_json::to_value(serde_json::json!({
+        "window_type": window_type,
+        "per_channel": channel_coverage.to_vec(),
+        "active_channels": active_channels,
+        "threshold": min_coverage_ratio,
+    }))
+    .ok()
 }
+
+// ---------------------------------------------------------------------------
+// Pure helper functions
+// ---------------------------------------------------------------------------
 
 fn localization_channel_states(
     buffers: &[SensorStreamBuffer; 4],
@@ -1075,7 +852,10 @@ fn channel_coverage_ending_at(
     })
 }
 
-fn latest_channel_windows(buffers: &[SensorStreamBuffer; 4], window_seconds: f64) -> [Vec<f32>; 4] {
+fn latest_channel_windows(
+    buffers: &[SensorStreamBuffer; 4],
+    window_seconds: f64,
+) -> [Vec<f32>; 4] {
     core::array::from_fn(|channel_index| buffers[channel_index].latest_window(window_seconds))
 }
 
@@ -1109,47 +889,6 @@ fn eligible_localization_channels(
                 .then_some(channel_index)
         })
         .collect()
-}
-
-fn render_coverage_json(
-    channel_coverage: &[Option<AudioCoverageStats>; 4],
-    active_channels: &[usize],
-    min_coverage_ratio: f64,
-    window_type: &str,
-) -> Option<serde_json::Value> {
-    serde_json::to_value(serde_json::json!({
-        "window_type": window_type,
-        "per_channel": channel_coverage.to_vec(),
-        "active_channels": active_channels,
-        "threshold": min_coverage_ratio,
-    }))
-    .ok()
-}
-
-fn localization_manifest_payload(
-    result: &SrpPhatLocalization,
-    effective_band_hz: [f32; 2],
-    pair_tdoas: Vec<PairTdoaDiagnostic>,
-) -> LocalizationManifestPayload {
-    LocalizationManifestPayload {
-        attempted_algorithm: result.attempted_algorithm.clone(),
-        resolved_algorithm: result.resolved_algorithm.clone(),
-        steering_direction: (magnitude(result.steering_direction) > 1.0e-6)
-            .then_some(result.steering_direction),
-        position_m: result.position_m,
-        confidence: result.confidence,
-        residual_rms_seconds: result
-            .residual_rms_seconds
-            .is_finite()
-            .then_some(result.residual_rms_seconds),
-        sound_speed_mps: result.sound_speed_mps,
-        effective_band_hz: Some(effective_band_hz),
-        pair_tdoas,
-    }
-}
-
-fn magnitude(vector: [f32; 3]) -> f32 {
-    (vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2]).sqrt()
 }
 
 fn resolve_effective_sound_speed_mps(
@@ -1232,7 +971,6 @@ fn classifier_render_min_interval_ns(
     if classifier_render_min_interval_seconds <= 0.0 {
         return 0;
     }
-
     let backlog_multiplier = match pending_backlog_depth {
         0..=128 => 1_u128,
         129..=256 => 2_u128,
@@ -1256,7 +994,7 @@ fn speed_of_sound_mps(temperature_c: f32, humidity_fraction: f32) -> f32 {
     331.3 + (0.606 * temperature_c) + (0.0124 * humidity_percent)
 }
 
-fn system_now_ns() -> u128 {
+pub(crate) fn system_now_ns() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())

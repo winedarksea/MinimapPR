@@ -78,7 +78,16 @@ pub struct DspManifest {
     pub birdnet: Option<BirdnetHybridProvenance>,
     pub coverage_stats: Option<serde_json::Value>,
     pub promotion_ready: bool,
+    /// Populated for `manifest_type == "env_sample_append"` manifests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_samples: Option<serde_json::Value>,
+    /// Raw audio payload bytes carried in-process by the fast-path channel only.
+    /// Never serialized to disk — skipped by serde. When Some, ingest_one skips
+    /// the blocking read_payload_with_mmap call.
+    #[serde(skip, default)]
+    pub raw_payload: Option<Vec<u8>>,
 }
+
 
 #[derive(Clone, Debug)]
 pub struct ManifestStore {
@@ -132,6 +141,11 @@ impl ManifestStore {
     }
 
     /// Return up to `limit` manifests of the given type that have not been consumed yet.
+    ///
+    /// Two-phase approach to avoid reading all N pending files when backlog is large:
+    /// 1. Collect (mtime, path) for all files — metadata only, much cheaper than content.
+    /// 2. Sort by mtime, truncate to `limit`, then read only those file contents.
+    /// This changes O(N_files × content_read) to O(N_files × metadata_read + limit × content_read).
     pub async fn query_pending_limited(
         &self,
         manifest_type: &str,
@@ -145,21 +159,37 @@ impl ManifestStore {
         } else {
             self.pending_root()
         };
-        let mut entries = match fs::read_dir(query_root).await {
+        let mut entries = match fs::read_dir(&query_root).await {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(Box::new(error)),
         };
-        let mut manifests = Vec::new();
+
+        // Phase 1: collect metadata for every pending file (no content reads).
+        let mut file_mtimes: Vec<(SystemTime, PathBuf)> = Vec::new();
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or_default();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
             if !is_pending_manifest_file_name(name) {
                 continue;
             }
+            let mtime = entry
+                .metadata()
+                .await
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            file_mtimes.push((mtime, path));
+        }
+
+        // Phase 2: sort by mtime (oldest first), keep only the first `limit` entries,
+        // then read only those files. This prevents the O(N) content-read death spiral
+        // when a large backlog accumulates.
+        file_mtimes.sort_unstable_by_key(|(mtime, _)| *mtime);
+        file_mtimes.truncate(limit);
+
+        let mut manifests = Vec::with_capacity(file_mtimes.len());
+        for (_, path) in file_mtimes {
             let contents = match fs::read_to_string(&path).await {
                 Ok(c) => c,
                 Err(_) => continue,
@@ -173,7 +203,6 @@ impl ManifestStore {
             }
         }
         manifests.sort_by_key(|m| m.created_ns);
-        manifests.truncate(limit);
         Ok(manifests)
     }
 

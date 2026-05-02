@@ -660,12 +660,16 @@ impl SegmentJournalBackend {
         };
         state.total_journal_bytes += appended_length_bytes;
         let _ = write_json_file(&metadata_path, &updated_header).await;
-        let _ = self.publish_capture_manifest(&entry).await;
+        let _ = self.publish_capture_manifest(&entry, &body_bytes).await;
 
         Ok(journal_id)
     }
 
-    async fn publish_capture_manifest(&self, entry: &SegmentJournalEntry) -> BoxedResult<()> {
+    async fn publish_capture_manifest(
+        &self,
+        entry: &SegmentJournalEntry,
+        raw_bytes: &[u8],
+    ) -> BoxedResult<()> {
         let handle = entry.payload_handle();
         let manifest = DspManifest {
             manifest_id: format!("manifest-{}", entry.journal_id),
@@ -682,6 +686,9 @@ impl SegmentJournalBackend {
             birdnet: None,
             coverage_stats: None,
             promotion_ready: false,
+            env_samples: None,
+            // raw_payload is #[serde(skip)] — not written to disk.
+            raw_payload: None,
         };
         // Write to filesystem first so the manifest exists before the DspWorker
         // can attempt mark_consumed. The channel send is fire-and-forget; if the
@@ -689,7 +696,11 @@ impl SegmentJournalBackend {
         // present it would fail silently, leaving the file for re-processing.
         self.manifest_store.publish(manifest.clone()).await?;
         if let Some(tx) = &self.runtime_config.raw_manifest_tx {
-            let _ = tx.try_send(manifest);
+            // Attach the raw audio bytes only for the in-process channel message so
+            // the DSP worker can skip the blocking read_payload_with_mmap call.
+            let mut manifest_with_payload = manifest;
+            manifest_with_payload.raw_payload = Some(raw_bytes.to_vec());
+            let _ = tx.try_send(manifest_with_payload);
         }
         Ok(())
     }
@@ -3015,6 +3026,8 @@ mod tests {
             birdnet: None,
             coverage_stats: None,
             promotion_ready: true,
+            env_samples: None,
+            raw_payload: None,
         };
         let path = manifest_store.publish(manifest.clone()).await.unwrap();
         assert!(path.exists(), "manifest file should exist after publish");
@@ -3054,6 +3067,8 @@ mod tests {
                 birdnet: None,
                 coverage_stats: None,
                 promotion_ready: false,
+                env_samples: None,
+                raw_payload: None,
             })
             .await
             .unwrap();
@@ -3108,6 +3123,8 @@ mod tests {
             birdnet: None,
             coverage_stats: None,
             promotion_ready: false,
+            env_samples: None,
+            raw_payload: None,
         };
         let pending_file = tmp
             .path()
@@ -3174,6 +3191,8 @@ mod tests {
                     birdnet: None,
                     coverage_stats: None,
                     promotion_ready: false,
+                    env_samples: None,
+                    raw_payload: None,
                 })
                 .await
                 .unwrap();
@@ -3215,6 +3234,8 @@ mod tests {
                     birdnet: None,
                     coverage_stats: None,
                     promotion_ready: false,
+                    env_samples: None,
+                    raw_payload: None,
                 })
                 .await
                 .unwrap();
