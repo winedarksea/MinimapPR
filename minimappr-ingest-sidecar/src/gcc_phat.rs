@@ -28,6 +28,7 @@ pub(crate) struct GccPhatCorrelation {
 ///
 /// `max_lag_samples` bounds the search window; for the tetrahedral array
 /// (50 mm spacing, 340 m/s, 16 kHz) use 4.
+#[allow(dead_code)]
 pub fn gcc_phat(
     ch1: &[f32],
     ch2: &[f32],
@@ -81,12 +82,12 @@ pub(crate) fn phat_correlation(
     let mut x1: Vec<Complex32> = ch1[..n]
         .iter()
         .map(|&sample| Complex32::new(sample, 0.0))
-        .chain(std::iter::repeat(Complex32::new(0.0, 0.0)).take(fft_len - n))
+        .chain(std::iter::repeat_n(Complex32::new(0.0, 0.0), fft_len - n))
         .collect();
     let mut x2: Vec<Complex32> = ch2[..n]
         .iter()
         .map(|&sample| Complex32::new(sample, 0.0))
-        .chain(std::iter::repeat(Complex32::new(0.0, 0.0)).take(fft_len - n))
+        .chain(std::iter::repeat_n(Complex32::new(0.0, 0.0), fft_len - n))
         .collect();
 
     fft.process(&mut x1);
@@ -127,9 +128,9 @@ pub(crate) fn phat_correlation(
     }
     lags_seconds.push(0.0);
     magnitudes.push((cross_spectrum[0].re * scale).abs());
-    for delay in 1..=lag {
+    for (delay, cross_val) in cross_spectrum.iter().enumerate().skip(1).take(lag) {
         lags_seconds.push(delay as f32 / sample_rate_hz as f32);
-        magnitudes.push((cross_spectrum[delay].re * scale).abs());
+        magnitudes.push((cross_val.re * scale).abs());
     }
 
     let (peak_index, peak_value) = magnitudes
@@ -182,6 +183,7 @@ pub(crate) fn pair_max_tau_s(
 
 /// All 6 pairwise TDOA results for a 4-microphone tetrahedral array.
 /// Channel order follows the Sirith node: [MK1, MK2, MK3, MK4].
+#[allow(dead_code)]
 pub fn tetrahedral_gcc_phat(
     channels: &[Vec<f32>; 4],
     sample_rate_hz: u32,

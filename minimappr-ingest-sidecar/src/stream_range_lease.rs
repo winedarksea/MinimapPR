@@ -150,6 +150,7 @@ impl StreamRangeLeaseStore {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn active_index(&self, now_ns: u128) -> BoxedResult<StreamRangeLeaseIndex> {
         let mut index = self.load().await?;
         if self.purge_dead_leases(&mut index, now_ns) {
@@ -160,6 +161,7 @@ impl StreamRangeLeaseStore {
 
     /// Returns true if the segment with `[seg_start_toa, seg_end_toa]` for
     /// `stream_key` is covered by at least one active range lease.
+    #[allow(dead_code)]
     pub fn segment_is_pinned(
         index: &StreamRangeLeaseIndex,
         stream_key: &str,

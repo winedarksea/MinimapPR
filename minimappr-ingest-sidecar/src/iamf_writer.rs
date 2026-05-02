@@ -216,7 +216,7 @@ impl IamfWriter {
         let mut payload = Vec::new();
         write_leb128(&mut payload, self.bed_element_id as u64);
         // audio_element_type (3 bits) | reserved (5 bits)
-        payload.push((audio_element_type::SCENE_BASED << 5) | 0);
+        payload.push(audio_element_type::SCENE_BASED << 5);
         write_leb128(&mut payload, self.codec_config_id as u64);
 
         // num_substreams = 4 (one per B-format channel)
@@ -243,7 +243,7 @@ impl IamfWriter {
     fn object_audio_element_obu(&self, element_id: u32, substream_id: u32) -> Vec<u8> {
         let mut payload = Vec::new();
         write_leb128(&mut payload, element_id as u64);
-        payload.push((audio_element_type::OBJECT_BASED << 5) | 0);
+        payload.push(audio_element_type::OBJECT_BASED << 5);
         write_leb128(&mut payload, self.codec_config_id as u64);
 
         write_leb128(&mut payload, 1u64);
@@ -504,6 +504,7 @@ pub fn write_leb128(out: &mut Vec<u8>, mut value: u64) {
 }
 
 /// Decode unsigned LEB128 from a byte slice, returning (value, bytes_consumed).
+#[allow(dead_code)]
 pub fn read_leb128(bytes: &[u8]) -> Option<(u64, usize)> {
     let mut value = 0u64;
     let mut shift = 0u32;
@@ -543,7 +544,7 @@ pub fn split_bed_into_frames(
     samples_per_frame: usize,
 ) -> [Vec<Vec<u8>>; 4] {
     let n_samples = channels_first[0].len();
-    let n_frames = (n_samples + samples_per_frame - 1) / samples_per_frame;
+    let n_frames = n_samples.div_ceil(samples_per_frame);
     std::array::from_fn(|ch| {
         (0..n_frames)
             .map(|fi| {
@@ -561,7 +562,7 @@ pub fn split_bed_into_frames(
 /// Split a mono object track into per-frame byte chunks.
 pub fn split_object_into_frames(samples: &[f32], samples_per_frame: usize) -> Vec<Vec<u8>> {
     let n_samples = samples.len();
-    let n_frames = (n_samples + samples_per_frame - 1) / samples_per_frame;
+    let n_frames = n_samples.div_ceil(samples_per_frame);
     (0..n_frames)
         .map(|fi| {
             let start = fi * samples_per_frame;

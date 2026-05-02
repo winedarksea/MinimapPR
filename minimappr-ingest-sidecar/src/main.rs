@@ -261,6 +261,7 @@ struct AppState {
     backend: IngestBackend,
     max_body_bytes: usize,
     dsp_state: SharedDspState,
+    #[allow(dead_code)]
     derived_cache: Option<DerivedCache>,
     range_lease_store: Option<Arc<StreamRangeLeaseStore>>,
     env_cache: EnvironmentCache,
@@ -1015,6 +1016,7 @@ async fn encode_iamf(Json(request): Json<IamfEncodeRequest>) -> Response {
         .collect();
 
     let n_frames = bed_frame_chunks[0].len();
+    #[allow(clippy::needless_range_loop)]
     for fi in 0..n_frames {
         let bed_frames: [Vec<u8>; 4] = std::array::from_fn(|ch| bed_frame_chunks[ch][fi].clone());
         let object_frames: Vec<Vec<u8>> = object_frame_chunks

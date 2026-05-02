@@ -333,7 +333,7 @@ fn grid_from_bounds(
     for &x_m in &xs {
         for &y_m in &ys {
             for &z_m in &zs {
-                if point_index % step == 0 {
+                if point_index.is_multiple_of(step) {
                     grid.push([x_m, y_m, z_m]);
                 }
                 point_index += 1;
@@ -409,8 +409,8 @@ fn centroid(active_channels: &[usize], mic_positions_m: &[[f32; 3]; 4]) -> [f32;
             mean[axis] += position_m[axis];
         }
     }
-    for axis in 0..3 {
-        mean[axis] /= active_channels.len() as f32;
+    for item in &mut mean {
+        *item /= active_channels.len() as f32;
     }
     mean
 }
@@ -422,7 +422,7 @@ fn median(values: &[f32]) -> f32 {
     let mut ordered = values.to_vec();
     ordered.sort_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
     let middle = ordered.len() / 2;
-    if ordered.len() % 2 == 0 {
+    if ordered.len().is_multiple_of(2) {
         (ordered[middle - 1] + ordered[middle]) * 0.5
     } else {
         ordered[middle]

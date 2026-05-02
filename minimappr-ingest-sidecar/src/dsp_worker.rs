@@ -413,7 +413,7 @@ impl DspWorker {
             if let Some(cache) = &self.env_cache {
                 let query_ns = first_handle
                     .toa_ns
-                    .unwrap_or_else(|| now_ns as u64);
+                    .unwrap_or(now_ns as u64);
                 let node_id = stream_key.split("__").next().unwrap_or(&stream_key);
                 cache
                     .interpolate(node_id, query_ns)
@@ -571,10 +571,7 @@ impl DspWorker {
                 .iter()
                 .any(|window| !window.is_empty())
             {
-                fallback_render_windows
-                    .iter()
-                    .cloned()
-                    .collect::<Vec<Vec<f32>>>()
+                fallback_render_windows.to_vec()
             } else {
                 decoded.channels.clone()
             };
@@ -797,9 +794,7 @@ pub(crate) async fn dispatch_classification_result_standalone(
     manifest_store: &ManifestStore,
     state: &SharedDspState,
 ) -> Option<DspManifest> {
-    let Some(pending) = result.pending_manifest else {
-        return None;
-    };
+    let pending = result.pending_manifest?;
     if let Some(tx) = classification_tx {
         let req = ClassificationRequest {
             pcm_path: result.pcm_path.unwrap_or_default(),
@@ -847,7 +842,7 @@ pub(crate) async fn consume_manifest_standalone(
         return;
     }
     let count = consumed_since_prune.fetch_add(1, Ordering::Relaxed) + 1;
-    if count % prune_interval == 0 {
+    if count.is_multiple_of(prune_interval) {
         let store = manifest_store.clone();
         tokio::spawn(async move {
             if let Err(error) = store
@@ -879,6 +874,7 @@ pub(crate) fn render_coverage_json(
 // Pure helper functions
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 fn localization_channel_states(
     buffers: &[SensorStreamBuffer; 4],
     end_ns: i128,

@@ -76,7 +76,7 @@ pub struct IngestBackend {
 #[derive(Debug)]
 enum BackendInner {
     Spool(FileSpoolBackend),
-    Journal(SegmentJournalBackend),
+    Journal(Box<SegmentJournalBackend>),
 }
 
 #[derive(Debug)]
@@ -320,10 +320,10 @@ impl IngestBackend {
             IngestStorageMode::Spool => {
                 BackendInner::Spool(FileSpoolBackend::open(base_dir).await?)
             }
-            IngestStorageMode::Journal => BackendInner::Journal(
+            IngestStorageMode::Journal => BackendInner::Journal(Box::new(
                 SegmentJournalBackend::open(base_dir, max_segment_bytes, journal_runtime_config)
                     .await?,
-            ),
+            )),
         };
         Ok(Self {
             inner: Arc::new(inner),
@@ -578,6 +578,7 @@ impl SegmentJournalBackend {
 
         let mut segment_file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&open_segment.segment_path)
@@ -622,6 +623,7 @@ impl SegmentJournalBackend {
         let index_bytes = serde_json::to_vec(&entry)?;
         let mut index_file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&open_segment.index_path)
@@ -640,6 +642,7 @@ impl SegmentJournalBackend {
             rollback_index_append(&mut index_file, index_offset_bytes).await?;
             let mut segment_file = OpenOptions::new()
                 .create(true)
+                .truncate(false)
                 .read(true)
                 .write(true)
                 .open(&open_segment.segment_path)
@@ -902,6 +905,7 @@ impl SegmentJournalBackend {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn spool_body_inner(
     tmp_body_path: &Path,
     tmp_manifest_path: &Path,
@@ -970,6 +974,7 @@ async fn spool_body_inner(
     Ok(spool_id)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_segment_journal_entry(
     capture_envelope: &CaptureEnvelope,
     endpoint: &str,
@@ -1616,7 +1621,7 @@ async fn fsync_dir(path: &Path) -> std::io::Result<()> {
     let path = path.to_path_buf();
     tokio::task::spawn_blocking(move || std::fs::File::open(path).and_then(|file| file.sync_all()))
         .await
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?
+        .map_err(std::io::Error::other)?
 }
 
 fn now_ns() -> Result<u128, std::time::SystemTimeError> {

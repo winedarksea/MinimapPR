@@ -136,6 +136,7 @@ impl ManifestStore {
     }
 
     /// Return all manifests of the given type that have not been consumed yet.
+    #[allow(dead_code)]
     pub async fn query_pending(&self, manifest_type: &str) -> BoxedResult<Vec<DspManifest>> {
         self.query_pending_limited(manifest_type, usize::MAX).await
     }
@@ -145,6 +146,7 @@ impl ManifestStore {
     /// Two-phase approach to avoid reading all N pending files when backlog is large:
     /// 1. Collect (mtime, path) for all files — metadata only, much cheaper than content.
     /// 2. Sort by mtime, truncate to `limit`, then read only those file contents.
+    ///
     /// This changes O(N_files × content_read) to O(N_files × metadata_read + limit × content_read).
     pub async fn query_pending_limited(
         &self,

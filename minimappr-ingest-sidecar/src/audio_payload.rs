@@ -333,7 +333,7 @@ fn decode_store_forward_audio(raw_payload: &[u8]) -> BoxedResult<DecodedAudioPay
         }
         let raw_audio = STANDARD.decode(frame.samples_b64.as_bytes())?;
         let decoded = pcm16le_to_f32(&raw_audio);
-        if decoded.len() % frame.channels != 0 {
+        if !decoded.len().is_multiple_of(frame.channels) {
             return Err("store-forward PCM sample count is not divisible by channels".into());
         }
         let frame_samples = decoded.len() / frame.channels;

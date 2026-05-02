@@ -127,6 +127,7 @@ async fn worker_publishes_omni_render_when_localization_coverage_is_unavailable(
         DspWorkerConfig {
             birdnet_hybrid_render_enabled: true,
             max_buffer_seconds: 32.0,
+            max_trusted_node_clock_skew_seconds: f64::MAX,
             ..DspWorkerConfig::default()
         },
         state.clone(),
@@ -439,7 +440,7 @@ fn resolve_buffer_start_time_uses_tor_as_fallback() {
 
     assert_eq!(
         resolve_buffer_start_time_ns(&decoded, &handle, 16_000, 5_000_000_000),
-        4_900_000_000
+        2_900_000_000
     );
 }
 
@@ -470,7 +471,7 @@ fn resolve_buffer_start_time_uses_now_as_fallback() {
 
     assert_eq!(
         resolve_buffer_start_time_ns(&decoded, &handle, 16_000, 5_000_000_000),
-        5_000_000_000
+        3_000_000_000
     );
 }
 

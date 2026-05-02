@@ -99,7 +99,7 @@ pub fn render_mvdr(request: MvdrRenderRequest) -> MvdrRenderOutput {
     let alpha = 1.0 - (-2.0 * PI * 0.5 * (hop as f32 / sr)).exp();
     let alpha = alpha.clamp(0.01, 0.5);
 
-    let n_blocks = (n_samples + hop - 1) / hop;
+    let n_blocks = n_samples.div_ceil(hop);
     for block_idx in 0..n_blocks {
         let start = block_idx * hop;
         let end = (start + block_size).min(n_samples);

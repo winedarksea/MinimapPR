@@ -386,7 +386,7 @@ fn parse_store_forward_capture_envelope(raw_payload: &[u8]) -> Result<CaptureEnv
         envelope
             .buffered_frames
             .iter()
-            .fold(Some(0_u64), |running_total, buffered_frame| {
+            .try_fold(0_u64, |running_total, buffered_frame| {
                 let frame = &buffered_frame.frame;
                 let frame_samples = frame.samples_per_channel.map(u64::from).or_else(|| {
                     match (frame.start_sample_index, frame.end_sample_index) {
@@ -394,7 +394,7 @@ fn parse_store_forward_capture_envelope(raw_payload: &[u8]) -> Result<CaptureEnv
                         _ => None,
                     }
                 });
-                match (running_total, frame_samples) {
+                match (Some(running_total), frame_samples) {
                     (Some(total), Some(samples)) => Some(total.saturating_add(samples)),
                     _ => None,
                 }
