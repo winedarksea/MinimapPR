@@ -371,6 +371,71 @@ def _ingest_runtime_base_url(settings: "Settings") -> str:
     return settings.ingest_base_url.rstrip("/")
 
 
+def _should_proxy_ingest_to_python_worker(state) -> bool:
+    settings = state.settings
+    return (
+        getattr(settings, "process_role", "combined") == "api"
+        and getattr(settings, "ingest_backend", "python") == "python"
+        and settings.ingest_port != settings.port
+        and os.getenv("MINIMAPPR_INGEST_PORT") is not None
+    )
+
+
+async def _proxy_ingest_post(
+    state,
+    *,
+    endpoint_path: str,
+    body: bytes,
+    content_type: str,
+) -> dict:
+    settings = state.settings
+    if settings.ingest_port == settings.port:
+        raise HTTPException(
+            status_code=503,
+            detail="Ingest proxy is misconfigured: ingest_port matches API port",
+        )
+    target_url = f"{_ingest_runtime_base_url(settings)}{endpoint_path}"
+
+    def _post() -> tuple[int, bytes]:
+        request = urllib.request.Request(
+            target_url,
+            data=body,
+            method="POST",
+            headers={"Content-Type": content_type},
+        )
+        with urllib.request.urlopen(request, timeout=15.0) as response:
+            status = int(getattr(response, "status", 200))
+            payload = response.read()
+            return status, payload
+
+    try:
+        status, payload = await asyncio.to_thread(_post)
+    except urllib.error.HTTPError as exc:
+        detail = f"Ingest worker returned HTTP {exc.code}"
+        try:
+            error_payload = exc.read().decode("utf-8")
+            parsed = json.loads(error_payload)
+            if isinstance(parsed, dict) and parsed.get("detail"):
+                detail = str(parsed["detail"])
+        except Exception:
+            pass
+        raise HTTPException(status_code=exc.code, detail=detail) from exc
+    except urllib.error.URLError as exc:
+        raise HTTPException(status_code=503, detail=f"Ingest worker unreachable: {exc}") from exc
+
+    if not payload:
+        return {}
+    try:
+        decoded = json.loads(payload.decode("utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="Invalid JSON response from ingest worker") from exc
+    if not isinstance(decoded, dict):
+        raise HTTPException(status_code=502, detail="Unexpected response shape from ingest worker")
+    if status >= 400:
+        raise HTTPException(status_code=status, detail=str(decoded.get("detail") or "Ingest worker error"))
+    return decoded
+
+
 def _capture_pipeline_available(settings: "Settings") -> bool:
     return settings.ingest_backend == "rust" and settings.ingest_storage_mode == "journal"
 
@@ -520,6 +585,17 @@ async def _start_ingest_sidecar(
             "Ingest sidecar readiness endpoint is already healthy on "
             f"port {settings.ingest_sidecar_port}. Another ingest worker is likely already running."
         )
+        
+    classification_window_seconds = getattr(settings, "classification_window_seconds", 0.0)
+    if classification_window_seconds <= 0.0:
+        classification_window_seconds = getattr(settings, "localization_window_seconds", 0.08)
+
+    classifier_render_min_interval_seconds = getattr(settings, "classifier_render_min_interval_seconds", 0.0)
+    if classifier_render_min_interval_seconds <= 0.0:
+        overlap_seconds = getattr(settings, "birdnet_chunk_overlap_seconds", 0.0)
+        if classification_window_seconds > 0.0 and overlap_seconds >= 0.0:
+            classifier_render_min_interval_seconds = max(0.0, classification_window_seconds - overlap_seconds)
+
     env = {
         **os.environ,
         # Keep spool dir in sync with the Python consumer regardless of what
@@ -542,17 +618,13 @@ async def _start_ingest_sidecar(
         "MINIMAPPR_LOCALIZATION_WINDOW_SECONDS": str(
             getattr(settings, "localization_window_seconds", 0.08)
         ),
-        "MINIMAPPR_CLASSIFICATION_WINDOW_SECONDS": str(
-            getattr(settings, "classification_window_seconds", 30.0)
-        ),
-        "MINIMAPPR_CLASSIFIER_RENDER_MIN_INTERVAL_SECONDS": str(
-            getattr(settings, "classifier_render_min_interval_seconds", 0.0)
-        ),
+        "MINIMAPPR_CLASSIFICATION_WINDOW_SECONDS": str(classification_window_seconds),
+        "MINIMAPPR_CLASSIFIER_RENDER_MIN_INTERVAL_SECONDS": str(classifier_render_min_interval_seconds),
         "MINIMAPPR_MAX_SENSOR_BUFFER_SECONDS": str(
             getattr(settings, "max_sensor_buffer_seconds", 32.0)
         ),
         "MINIMAPPR_DSP_LOCALIZATION_RMS_GATE": str(
-            getattr(settings, "trigger_rms", 0.0015)
+            getattr(settings, "trigger_rms", 0.015)
         ),
         "MINIMAPPR_TRIGGER_COOLDOWN_SECONDS": str(
             getattr(settings, "trigger_cooldown_seconds", 0.8)
@@ -1019,6 +1091,15 @@ async def process_role_route_guard(request: Request, call_next):
     role = settings.process_role if settings is not None else os.getenv("MINIMAPPR_PROCESS_ROLE", "combined")
     path = request.url.path
     if role == "api" and path.startswith("/api/v1/ingest"):
+        if (
+            settings is not None
+            and settings.ingest_backend == "python"
+            and settings.ingest_port != settings.port
+            and os.getenv("MINIMAPPR_INGEST_PORT") is not None
+        ):
+            return await call_next(request)
+        if settings is not None and settings.ingest_backend != "python":
+            return JSONResponse(status_code=404, content={"detail": "Ingest endpoints are not served by this API process"})
         return JSONResponse(status_code=404, content={"detail": "Ingest endpoints are served by the ingest process"})
     if role == "ingest":
         allowed = path == "/health" or path.startswith(_INGEST_PATH_PREFIXES)
@@ -1107,6 +1188,14 @@ async def health(request: Request) -> dict:
 @app.post("/api/v1/ingest/frame", response_model=IngestFrameResponse)
 async def ingest_frame(payload: IngestFrameRequest, request: Request) -> IngestFrameResponse:
     state = _require_state(request)
+    if _should_proxy_ingest_to_python_worker(state):
+        forwarded = await _proxy_ingest_post(
+            state,
+            endpoint_path="/api/v1/ingest/frame",
+            body=payload.model_dump_json().encode("utf-8"),
+            content_type="application/json",
+        )
+        return IngestFrameResponse(**forwarded)
     try:
         return await state.fusion_node.ingest(payload)
     except ValueError as exc:
@@ -1116,6 +1205,14 @@ async def ingest_frame(payload: IngestFrameRequest, request: Request) -> IngestF
 @app.post("/api/v1/ingest/store-forward", response_model=StoreForwardIngestResponse)
 async def ingest_store_forward(payload: StoreForwardIngestRequest, request: Request) -> StoreForwardIngestResponse:
     state = _require_state(request)
+    if _should_proxy_ingest_to_python_worker(state):
+        forwarded = await _proxy_ingest_post(
+            state,
+            endpoint_path="/api/v1/ingest/store-forward",
+            body=payload.model_dump_json().encode("utf-8"),
+            content_type="application/json",
+        )
+        return StoreForwardIngestResponse(**forwarded)
     if _should_block_direct_ingest(state):
         raise HTTPException(status_code=410, detail="Direct ingest is disabled; send firmware ingest to the Rust sidecar")
     try:
@@ -1152,6 +1249,15 @@ async def ingest_store_forward(payload: StoreForwardIngestRequest, request: Requ
 @app.post("/api/v1/ingest/binary", response_model=StoreForwardIngestResponse)
 async def ingest_binary(request: Request) -> StoreForwardIngestResponse:
     state = _require_state(request)
+    if _should_proxy_ingest_to_python_worker(state):
+        body = await request.body()
+        forwarded = await _proxy_ingest_post(
+            state,
+            endpoint_path="/api/v1/ingest/binary",
+            body=body,
+            content_type="application/octet-stream",
+        )
+        return StoreForwardIngestResponse(**forwarded)
     if _should_block_direct_ingest(state):
         raise HTTPException(status_code=410, detail="Direct ingest is disabled; send firmware ingest to the Rust sidecar")
     try:
@@ -1192,6 +1298,13 @@ async def ingest_binary(request: Request) -> StoreForwardIngestResponse:
 @app.post("/api/v1/ingest/env")
 async def ingest_environment(payload: _EnvironmentIngestBody, request: Request) -> dict:
     state = _require_state(request)
+    if _should_proxy_ingest_to_python_worker(state):
+        return await _proxy_ingest_post(
+            state,
+            endpoint_path="/api/v1/ingest/env",
+            body=payload.model_dump_json().encode("utf-8"),
+            content_type="application/json",
+        )
     if len(payload.samples) > 64:
         raise HTTPException(status_code=413, detail="environment batch exceeds 64 samples")
 

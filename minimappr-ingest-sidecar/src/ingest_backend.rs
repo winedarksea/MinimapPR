@@ -677,11 +677,10 @@ impl SegmentJournalBackend {
         let manifest = DspManifest {
             manifest_id: format!("manifest-{}", entry.journal_id),
             manifest_type: "raw_journal_append".to_string(),
-            created_ns: entry
-                .toa_ns
-                .map(u128::from)
-                .or(entry.tor_ns.map(u128::from))
-                .unwrap_or(entry.ingest_received_ns),
+            // `created_ns` should represent manifest/journal arrival time, not
+            // packet capture epoch. Packet timestamps remain available on
+            // source_handles for TDOA anchoring.
+            created_ns: entry.ingest_received_ns,
             source_handles: vec![handle],
             derived_handle: None,
             localization: None,

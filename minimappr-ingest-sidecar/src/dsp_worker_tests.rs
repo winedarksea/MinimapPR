@@ -517,6 +517,44 @@ fn stale_manifest_detection_uses_source_receipt_time() {
 }
 
 #[test]
+fn stale_manifest_detection_keeps_fresh_manifest_with_old_packet_epoch() {
+    let manifest = DspManifest {
+        manifest_id: "manifest-old-epoch-fresh-arrival".to_string(),
+        manifest_type: "raw_journal_append".to_string(),
+        created_ns: 40_000_000_000,
+        source_handles: vec![JournalPayloadHandle {
+            journal_epoch: 1,
+            segment_id: "seg-old-epoch".to_string(),
+            stream_key: "sirith-test__audio_main__abcd".to_string(),
+            payload_offset_bytes: 0,
+            payload_length_bytes: 0,
+            toa_ns: Some(1_000_000_000),
+            tor_ns: Some(2_000_000_000),
+            sample_index_start: None,
+            sample_count: None,
+            integrity_hash: String::new(),
+            segment_path: std::path::PathBuf::new(),
+        }],
+        derived_handle: None,
+        localization: None,
+        classifier_render: None,
+        birdnet: None,
+        coverage_stats: None,
+        promotion_ready: false,
+        env_samples: None,
+        raw_payload: None,
+    };
+
+    // Even with old packet timestamps, the manifest just arrived and should
+    // stay in the live path when using a 32s stale horizon.
+    assert!(!manifest_is_older_than_buffer_horizon(
+        &manifest,
+        40_000_000_001,
+        32.0
+    ));
+}
+
+#[test]
 fn classifier_render_interval_is_zero_when_disabled() {
     assert_eq!(classifier_render_min_interval_ns(0.0, 999), 0);
     assert_eq!(classifier_render_min_interval_ns(-1.0, 999), 0);

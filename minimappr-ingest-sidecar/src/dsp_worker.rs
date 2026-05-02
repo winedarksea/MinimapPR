@@ -449,8 +449,9 @@ impl DspWorker {
             skew_ns > max_skew_ns
         };
         let (buffer_start_time_ns, buffer_end_time_ns) = if buffer_uses_receipt_time {
-            let start_ns = (now_ns as i128).saturating_sub(render_duration_ns).max(1);
-            (start_ns, now_ns as i128)
+            let anchor_ns = first_handle.tor_ns.unwrap_or(now_ns as u64) as i128;
+            let start_ns = anchor_ns.saturating_sub(render_duration_ns).max(1);
+            (start_ns, anchor_ns)
         } else {
             (start_time_ns, start_time_ns + render_duration_ns)
         };
@@ -1039,7 +1040,15 @@ fn manifest_is_older_than_buffer_horizon(
         .map(u128::from)
         .max()
         .unwrap_or(manifest.created_ns);
-    now_ns.saturating_sub(newest_source_ns) > horizon_ns
+
+    // Use the newest of source timestamps and manifest creation time.
+    // Source timing fields come from node/packet clocks and can legitimately
+    // be far in the past (replay/tests/GPS-anchored captures). Staleness
+    // gating is meant to protect live buffering from old queue backlog, so
+    // a manifest that just arrived should not be dropped solely because its
+    // embedded capture epoch is old.
+    let freshness_anchor_ns = newest_source_ns.max(manifest.created_ns);
+    now_ns.saturating_sub(freshness_anchor_ns) > horizon_ns
 }
 
 fn classifier_render_min_interval_ns(
