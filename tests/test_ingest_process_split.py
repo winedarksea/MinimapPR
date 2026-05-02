@@ -210,7 +210,7 @@ def test_capture_start_unavailable_for_python_ingest(monkeypatch, tmp_path: Path
         response = client.post("/api/v1/capture/start", json={"stream_key": "node-a"})
 
     assert response.status_code == 503
-    assert "Rust ingest journal mode" in response.json()["detail"]
+    assert "combined process role" in response.json()["detail"]
 
 
 def test_plain_minimappr_supervises_python_ingest_when_ingest_port_is_explicit(

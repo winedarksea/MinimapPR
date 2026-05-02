@@ -437,6 +437,8 @@ async def _proxy_ingest_post(
 
 
 def _capture_pipeline_available(settings: "Settings") -> bool:
+    if settings.ingest_backend == "python":
+        return True
     return settings.ingest_backend == "rust" and settings.ingest_storage_mode == "journal"
 
 
@@ -929,9 +931,11 @@ async def lifespan(app: FastAPI):
     )
 
     capture_manager = CaptureSessionManager()
+    _python_ingest = settings.ingest_backend == "python"
     iamf_pipeline = IamfPipeline(
-        sidecar_url=_ingest_runtime_base_url(settings),
+        sidecar_url=None if _python_ingest else _ingest_runtime_base_url(settings),
         db_storage=storage,
+        multi_sensor_buffer=audio_buffer if _python_ingest else None,
     )
 
     async def _run_capture_post_processing(record):
@@ -2699,26 +2703,47 @@ async def capture_start(request: Request, body: _CaptureStartBody):
     if not _capture_pipeline_available(settings):
         raise HTTPException(
             status_code=503,
-            detail=(
-                "Ambisonic/IAMF capture requires Rust ingest journal mode; "
-                "Python ingest keeps live raw audio in memory and does not expose journal range leases"
-            ),
+            detail="Ambisonic/IAMF capture requires Python or Rust+journal ingest mode",
         )
 
-    sidecar_url = _ingest_runtime_base_url(settings)
     work_dir_path = (
         Path(body.work_dir) if body.work_dir else Path("data/captures")
     )
 
-    req = CaptureStartRequest(
-        stream_key=body.stream_key,
-        sidecar_url=sidecar_url,
-        work_dir=work_dir_path,
-        max_duration_s=body.max_duration_s,
-        video_source=body.video_source,
-        libcamera_mode=body.libcamera_mode,
-        deployment_profile=body.deployment_profile,
-    )
+    _python_ingest = settings.ingest_backend == "python"
+    if _python_ingest:
+        if getattr(settings, "process_role", "combined") == "api":
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Python ingest capture requires the combined process role; "
+                    "the API-only role does not hold a live audio buffer"
+                ),
+            )
+        audio_buffer = getattr(state, "audio_buffer", None)
+        # Derive the 4 channel sensor IDs from the stream_key (node ID).
+        ch_sensor_ids = [f"{body.stream_key}:ch{i}" for i in range(4)]
+        req = CaptureStartRequest(
+            stream_key=body.stream_key,
+            work_dir=work_dir_path,
+            sidecar_url=None,
+            multi_sensor_buffer=audio_buffer,
+            channel_sensor_ids=ch_sensor_ids,
+            max_duration_s=body.max_duration_s,
+            video_source=body.video_source,
+            libcamera_mode=body.libcamera_mode,
+            deployment_profile=body.deployment_profile,
+        )
+    else:
+        req = CaptureStartRequest(
+            stream_key=body.stream_key,
+            work_dir=work_dir_path,
+            sidecar_url=_ingest_runtime_base_url(settings),
+            max_duration_s=body.max_duration_s,
+            video_source=body.video_source,
+            libcamera_mode=body.libcamera_mode,
+            deployment_profile=body.deployment_profile,
+        )
     record = await manager.start(req)
 
     if record.state == CaptureState.FAILED:
@@ -2744,9 +2769,9 @@ async def capture_stop(session_id: str, request: Request):
     if not _capture_pipeline_available(settings):
         raise HTTPException(
             status_code=503,
-            detail="Ambisonic/IAMF capture requires Rust ingest journal mode",
+            detail="Ambisonic/IAMF capture requires Python or Rust+journal ingest mode",
         )
-    sidecar_url = _ingest_runtime_base_url(settings)
+    sidecar_url = "" if settings.ingest_backend == "python" else _ingest_runtime_base_url(settings)
 
     try:
         record = await manager.stop(session_id, sidecar_url)

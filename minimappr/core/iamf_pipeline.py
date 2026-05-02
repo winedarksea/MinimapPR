@@ -38,14 +38,14 @@ import wave
 from dataclasses import dataclass
 from math import gcd
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
 import numpy as np
 from numpy.typing import NDArray
 from scipy.signal import resample_poly
 
-from minimappr.core.ambi_atob import atob_foa, encode_mono_to_bformat
+from minimappr.core.ambi_atob import SIRITH_MIC_POSITIONS_M, atob_foa, encode_mono_to_bformat
 from minimappr.core.capture_session import CaptureSessionRecord
 from minimappr.core.iamf_object_slot import IamfObjectSlot, select_iamf_object_slot
 
@@ -92,14 +92,16 @@ class IamfPipeline:
 
     def __init__(
         self,
-        sidecar_url: str,
+        sidecar_url: Optional[str],
         db_storage: "Any",  # minimappr.storage.db.Storage
         *,
+        multi_sensor_buffer: Optional[Any] = None,  # minimappr.core.audio_buffer.MultiSensorBuffer
         executor: Optional[asyncio.AbstractEventLoop] = None,
     ) -> None:
         self._sidecar_url = sidecar_url
         self._db = db_storage
-        self._http = httpx.AsyncClient(timeout=60.0)
+        self._multi_sensor_buffer = multi_sensor_buffer
+        self._http = httpx.AsyncClient(timeout=60.0) if sidecar_url else None
 
     async def run(self, record: CaptureSessionRecord) -> None:
         """Execute all pipeline steps for the given session record."""
@@ -116,9 +118,9 @@ class IamfPipeline:
         loop = asyncio.get_event_loop()
 
         # ── 1. Extract ────────────────────────────────────────────────────────
-        logger.info("[%s] step 1: extracting journal range", record.session_id[:8])
+        logger.info("[%s] step 1: extracting audio", record.session_id[:8])
         raw_channels, capture_rate_hz, sync_diag = await self._extract_audio(
-            record.stream_key, start_ns, end_ns
+            record, start_ns, end_ns
         )
         source_inventory = _build_recording_source_inventory(
             record.stream_key,
@@ -306,11 +308,24 @@ class IamfPipeline:
     # ── private helpers ────────────────────────────────────────────────────────
 
     async def _extract_audio(
+        self, record: CaptureSessionRecord, start_ns: int, end_ns: int
+    ) -> tuple[NDArray[np.float32], int, dict]:
+        """Return (channels, capture_rate_hz, sync_diagnostics) for [start_ns, end_ns].
+
+        Dispatches to the Python ring buffer when use_python_ingest is set,
+        otherwise fetches from the Rust sidecar journal range endpoint.
+        """
+        if record.use_python_ingest and self._multi_sensor_buffer is not None:
+            return await self._multi_sensor_buffer.extract_range(
+                record.channel_sensor_ids, start_ns, end_ns
+            )
+        return await self._extract_audio_rust(record.stream_key, start_ns, end_ns)
+
+    async def _extract_audio_rust(
         self, stream_key: str, start_ns: int, end_ns: int
     ) -> tuple[NDArray[np.float32], int, dict]:
-        """Fetch ordered journal segments, trim to [start_ns, end_ns] by TOA,
-        zero-pad gaps, and return (channels, capture_rate_hz, sync_diagnostics).
-        """
+        """Fetch ordered journal segments from the Rust sidecar."""
+        assert self._http is not None, "httpx client not initialised (Python ingest mode?)"
         resp = await self._http.get(
             f"{self._sidecar_url}/api/v1/journal/range",
             params={"stream_key": stream_key, "start_ns": start_ns, "end_ns": end_ns},
@@ -447,12 +462,104 @@ class IamfPipeline:
         traj: TrackTrajectory,
         capture_rate_hz: int,
     ) -> NDArray[np.float32]:
+        """Beamform one track trajectory to a mono object signal.
+
+        Uses the Python MVDRBeamformer when no sidecar is configured, otherwise
+        calls the Rust /api/v1/capture/render/mvdr endpoint.
+        """
+        if self._multi_sensor_buffer is not None:
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(
+                None, self._mvdr_beamform_python, channels, traj, capture_rate_hz
+            )
+        return await self._mvdr_beamform_rust(channels, traj, capture_rate_hz)
+
+    def _mvdr_beamform_python(
+        self,
+        channels: NDArray[np.float32],
+        traj: TrackTrajectory,
+        capture_rate_hz: int,
+    ) -> NDArray[np.float32]:
+        """Pure-Python block-by-block MVDR beamformer for offline rendering."""
+        from minimappr.core.beamforming import MVDRBeamformer
+
+        n_channels = channels.shape[0]
+        n_samples = channels.shape[1]
+
+        # Build sensor_id → position mapping from the fixed Sirith geometry.
+        # Channels arrive in order ch0…ch{N-1}, matching SIRITH_MIC_POSITIONS_M rows.
+        sensor_ids = [f"ch{i}" for i in range(n_channels)]
+        sensor_positions: dict[str, np.ndarray] = {
+            sid: SIRITH_MIC_POSITIONS_M[i]
+            for i, sid in enumerate(sensor_ids)
+            if i < len(SIRITH_MIC_POSITIONS_M)
+        }
+
+        beamformer = MVDRBeamformer(diagonal_loading=1e-3)
+        output = np.zeros(n_samples, dtype=np.float32)
+
+        if not traj.waypoints:
+            return output
+
+        first_active = traj.waypoints[0][0]
+        last_active = traj.waypoints[-1][0]
+        fade_samples = 100
+
+        for block_start in range(0, n_samples, SUBTRACT_BLOCK):
+            block_end = min(block_start + SUBTRACT_BLOCK, n_samples)
+            block_len = block_end - block_start
+
+            # Silence blocks entirely outside the track's active range.
+            if block_end <= first_active or block_start >= last_active:
+                continue
+
+            sample_mid = block_start + block_len // 2
+            steer_pos = _interpolate_waypoints(traj.waypoints, sample_mid)
+
+            sensor_windows: dict[str, np.ndarray] = {
+                sid: channels[i, block_start:block_end]
+                for i, sid in enumerate(sensor_ids)
+                if i < channels.shape[0]
+            }
+            block_out = beamformer.beamform(
+                sensor_positions=sensor_positions,
+                sensor_windows=sensor_windows,
+                sample_rate_hz=capture_rate_hz,
+                steer_position_m=steer_pos,
+            )
+            if block_out.size < block_len:
+                block_out = np.pad(block_out, (0, block_len - block_out.size))
+            output[block_start:block_end] = block_out[:block_len]
+
+        # Linear fade-in at the start of the active range.
+        fade_in_start = max(0, first_active)
+        fade_in_end = min(n_samples, first_active + fade_samples)
+        if fade_in_end > fade_in_start:
+            ramp = np.linspace(0.0, 1.0, fade_in_end - fade_in_start, dtype=np.float32)
+            output[fade_in_start:fade_in_end] *= ramp
+
+        # Linear fade-out at the end of the active range.
+        fade_out_start = max(0, last_active - fade_samples)
+        fade_out_end = min(n_samples, last_active)
+        if fade_out_end > fade_out_start:
+            ramp = np.linspace(1.0, 0.0, fade_out_end - fade_out_start, dtype=np.float32)
+            output[fade_out_start:fade_out_end] *= ramp
+
+        return output
+
+    async def _mvdr_beamform_rust(
+        self,
+        channels: NDArray[np.float32],
+        traj: TrackTrajectory,
+        capture_rate_hz: int,
+    ) -> NDArray[np.float32]:
         """Call the Rust MVDR endpoint for one track trajectory.
 
         NOTE: Channels are serialized as JSON here, which is RAM-intensive for
         long recordings (~150 MB JSON for 5 min × 16 kHz × 4 ch). A future
         Rust endpoint change to accept WAV file paths is needed for Pi safety.
         """
+        assert self._http is not None
         n_samples = channels.shape[1]
         estimated_json_mb = n_samples * 4 * 8 / 1_000_000  # ~8 bytes per float in JSON
         if estimated_json_mb > 50:
@@ -486,12 +593,40 @@ class IamfPipeline:
         bed_loudness: LoudnessMeasurement,
         object_loudness: list[LoudnessMeasurement],
     ) -> bytes:
+        """Encode bed + objects as IAMF.
+
+        Uses the pure-Python ipcm writer when no sidecar is configured,
+        otherwise POSTs to the Rust /api/v1/capture/encode/iamf endpoint.
+        """
+        if self._multi_sensor_buffer is not None:
+            from minimappr.core.iamf_writer import write_iamf
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(
+                None,
+                write_iamf,
+                bed,
+                objects,
+                positions_per_unit,
+                bed_loudness,
+                object_loudness,
+            )
+        return await self._encode_iamf_rust(bed, objects, positions_per_unit, bed_loudness, object_loudness)
+
+    async def _encode_iamf_rust(
+        self,
+        bed: NDArray[np.float32],
+        objects: list[NDArray[np.float32]],
+        positions_per_unit: list[dict[int, dict]],
+        bed_loudness: LoudnessMeasurement,
+        object_loudness: list[LoudnessMeasurement],
+    ) -> bytes:
         """POST bed + objects to the Rust IAMF encoder.
 
         NOTE: Audio is serialized as JSON here (same large-payload caveat as
         _mvdr_beamform). A future Rust endpoint change to accept WAV paths is
         needed for Pi safety with long recordings.
         """
+        assert self._http is not None
         payload = {
             "sample_rate_hz": OUTPUT_RATE_HZ,
             "samples_per_frame": SAMPLES_PER_FRAME,

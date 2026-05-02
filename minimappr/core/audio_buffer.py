@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass, field
+from typing import Optional
 
 import numpy as np
 
@@ -101,6 +103,7 @@ class SensorStreamBuffer:
         start_sample_index: int | None = None,
         end_sample_index: int | None = None,
         end_time_ns: int | None = None,
+        _protected_from_ns: Optional[int] = None,
     ) -> None:
         samples = np.asarray(samples, dtype=np.float32)
         if samples.ndim != 1:
@@ -121,7 +124,7 @@ class SensorStreamBuffer:
             self.start_time_ns = start_time_ns
             self.samples = samples.copy()
             self.coverage = np.ones(samples.size, dtype=np.bool_)
-            self._prune()
+            self._prune(_protected_from_ns)
             return
 
         if samples.size == 0:
@@ -145,7 +148,7 @@ class SensorStreamBuffer:
                 self.start_time_ns = start_time_ns
                 self.samples = samples.copy()
                 self.coverage = np.ones(samples.size, dtype=np.bool_)
-                self._prune()
+                self._prune(_protected_from_ns)
                 return
 
         # If the incoming frame is more than max_samples away from the current buffer
@@ -161,7 +164,7 @@ class SensorStreamBuffer:
             self.start_time_ns = start_time_ns
             self.samples = samples.copy()
             self.coverage = np.ones(samples.size, dtype=np.bool_)
-            self._prune()
+            self._prune(_protected_from_ns)
             return
 
         # Snap to sample-contiguous when the apparent gap or overlap is smaller than
@@ -200,13 +203,57 @@ class SensorStreamBuffer:
         self.coverage = merged_coverage
         self._buffer_start_sample_index = merged_start_sample_index
         self._refresh_start_time_ns()
-        self._prune()
+        self._prune(_protected_from_ns)
 
-    def _prune(self) -> None:
+    def get_range(self, start_ns: int, end_ns: int) -> np.ndarray:
+        """Return samples for [start_ns, end_ns), zero-padding any coverage gaps.
+
+        Returns an empty array if the entire range lies outside the buffer.
+        """
+        if self.start_time_ns is None or self.samples.size == 0:
+            return np.zeros(0, dtype=np.float32)
+
+        start_idx = self._time_to_sample_index(start_ns)
+        end_idx = self._time_to_sample_index(end_ns)
+        n_out = max(0, end_idx - start_idx)
+        if n_out == 0:
+            return np.zeros(0, dtype=np.float32)
+
+        out = np.zeros(n_out, dtype=np.float32)
+        cov_out = np.zeros(n_out, dtype=np.bool_)
+
+        buf_start = self._buffer_start_sample_index
+        buf_end = buf_start + self.samples.size
+
+        # Overlap of requested range with buffered range.
+        overlap_start = max(start_idx, buf_start)
+        overlap_end = min(end_idx, buf_end)
+
+        if overlap_start < overlap_end:
+            out_offset = overlap_start - start_idx
+            buf_offset = overlap_start - buf_start
+            length = overlap_end - overlap_start
+            out[out_offset : out_offset + length] = self.samples[buf_offset : buf_offset + length]
+            cov_out[out_offset : out_offset + length] = self.coverage[buf_offset : buf_offset + length]
+
+        # Zero-out any uncovered samples (coverage gaps inside the buffered range).
+        out[~cov_out] = 0.0
+        return out
+
+    def _prune(self, protected_from_ns: Optional[int] = None) -> None:
         if self.samples.size <= self.max_samples:
             return
 
         drop = self.samples.size - self.max_samples
+
+        # If a pin is active, do not evict samples at or after the pin timestamp.
+        if protected_from_ns is not None and self._timeline_origin_ns is not None:
+            protected_idx = self._time_to_sample_index(protected_from_ns)
+            max_drop = max(0, protected_idx - self._buffer_start_sample_index)
+            drop = min(drop, max_drop)
+            if drop <= 0:
+                return
+
         self.samples = self.samples[drop:]
         self.coverage = self.coverage[drop:]
         self._buffer_start_sample_index += drop
@@ -327,10 +374,145 @@ class SensorStreamBuffer:
 
 
 class MultiSensorBuffer:
+    # Maximum duration a pin can protect (mirrors Rust sidecar's hard cap).
+    _PIN_MAX_DURATION_NS: int = 300_000_000_000  # 5 minutes
+
     def __init__(self, max_duration_seconds: float) -> None:
         self.max_duration_seconds = max_duration_seconds
         self._buffers: dict[str, SensorStreamBuffer] = {}
         self._lock = asyncio.Lock()
+        self._pins: dict[str, int] = {}  # session_id → start_ns
+
+    def pin(self, session_id: str, start_ns: int) -> None:
+        """Prevent the buffer from evicting samples at or after start_ns.
+
+        Enforces a 5-minute hard cap so a stuck session cannot cause OOM.
+        """
+        floor = time.time_ns() - self._PIN_MAX_DURATION_NS
+        self._pins[session_id] = max(start_ns, floor)
+
+    def unpin(self, session_id: str) -> None:
+        """Release a pin, allowing normal pruning to resume."""
+        self._pins.pop(session_id, None)
+
+    def _oldest_pin_ns(self) -> Optional[int]:
+        return min(self._pins.values()) if self._pins else None
+
+    async def extract_range(
+        self,
+        sensor_ids: list[str],
+        start_ns: int,
+        end_ns: int,
+    ) -> tuple[np.ndarray, int, dict]:
+        """Assemble a (N_channels, N_samples) float32 array from pinned buffers.
+
+        Returns (channels, sample_rate_hz, sync_diagnostics) with the same
+        contract as IamfPipeline._extract_audio so the pipeline step is
+        a transparent drop-in replacement for the Rust journal path.
+
+        The lock is held only briefly to snapshot array references and index
+        metadata. The actual numpy slicing happens outside the lock so that
+        incoming real-time frames are not blocked during post-processing of a
+        potentially multi-minute recording.  CPython reference counting keeps
+        the snapshotted numpy arrays alive even after _prune() replaces them.
+        """
+        # ── Phase 1: snapshot under lock (cheap — just captures references) ───
+        # Each entry is (samples_ref, coverage_ref, buf_start_idx, sr, origin_ns, origin_sample_idx)
+        # or None when the sensor has no data.
+        snapshots: list[Optional[tuple]] = []
+        sample_rate_hz = 0
+        actual_start_ns = start_ns
+        actual_end_ns = start_ns
+
+        async with self._lock:
+            for sensor_id in sensor_ids:
+                buf = self._buffers.get(sensor_id)
+                if buf is None or buf.samples.size == 0 or buf._timeline_origin_ns is None:
+                    snapshots.append(None)
+                    continue
+                if sample_rate_hz == 0:
+                    sample_rate_hz = buf.sample_rate_hz
+                    if buf.start_time_ns is not None:
+                        actual_start_ns = max(start_ns, buf.start_time_ns)
+                    end_buf = buf.end_time_ns()
+                    if end_buf is not None:
+                        actual_end_ns = min(end_ns, end_buf)
+                # Snapshot the array *references* (not copies) plus index metadata.
+                # After lock release, buf.samples may be replaced by append(), but
+                # CPython keeps the old array alive as long as we hold this reference.
+                snapshots.append((
+                    buf.samples,                       # numpy ref — safe to read after unlock
+                    buf.coverage,
+                    buf._buffer_start_sample_index,
+                    buf.sample_rate_hz,
+                    buf._timeline_origin_ns,
+                    buf._timeline_origin_sample_index,
+                ))
+
+        # ── Phase 2: slice from snapshots — lock NOT held ─────────────────────
+        if sample_rate_hz == 0:
+            raise RuntimeError("no audio data found in Python buffer for time range")
+
+        def _snap_get_range(snap: tuple) -> np.ndarray:
+            samples_ref, coverage_ref, buf_start_idx, sr, origin_ns, origin_sample_idx = snap
+            # Replicate SensorStreamBuffer._time_to_sample_index arithmetic.
+            def _ts_to_idx(ns: int) -> int:
+                delta = ns - origin_ns
+                return origin_sample_idx + (delta * sr + 500_000_000) // 1_000_000_000
+            start_idx = _ts_to_idx(start_ns)
+            end_idx = _ts_to_idx(end_ns)
+            n_out = max(0, end_idx - start_idx)
+            if n_out == 0:
+                return np.zeros(0, dtype=np.float32)
+            out = np.zeros(n_out, dtype=np.float32)
+            overlap_start = max(start_idx, buf_start_idx)
+            overlap_end = min(end_idx, buf_start_idx + samples_ref.size)
+            if overlap_start < overlap_end:
+                out_off = overlap_start - start_idx
+                buf_off = overlap_start - buf_start_idx
+                length = overlap_end - overlap_start
+                chunk = samples_ref[buf_off : buf_off + length]
+                cov_chunk = coverage_ref[buf_off : buf_off + length]
+                out[out_off : out_off + length] = chunk
+                out[out_off : out_off + length][~cov_chunk] = 0.0
+            return out
+
+        channels_list: list[np.ndarray] = []
+        for snap in snapshots:
+            if snap is None:
+                channels_list.append(np.zeros(0, dtype=np.float32))
+            else:
+                channels_list.append(_snap_get_range(snap))
+
+        if all(c.size == 0 for c in channels_list):
+            raise RuntimeError("no audio data after range extraction")
+
+        n_samples = max(c.size for c in channels_list)
+        if n_samples == 0:
+            raise RuntimeError("no audio data after range extraction")
+
+        aligned: list[np.ndarray] = []
+        for ch in channels_list:
+            if ch.size < n_samples:
+                padded = np.zeros(n_samples, dtype=np.float32)
+                padded[: ch.size] = ch
+                aligned.append(padded)
+            else:
+                aligned.append(ch[:n_samples])
+
+        channels = np.vstack(aligned)  # (N_ch, N_samples)
+
+        sync_diag: dict = {
+            "requested_start_ns": start_ns,
+            "requested_end_ns": end_ns,
+            "actual_audio_start_ns": actual_start_ns,
+            "actual_audio_end_ns": actual_end_ns,
+            "capture_rate_hz": sample_rate_hz,
+            "n_segments": 1,
+            "n_samples": n_samples,
+            "source": "python_buffer",
+        }
+        return channels, sample_rate_hz, sync_diag
 
     async def append(
         self,
@@ -354,6 +536,7 @@ class MultiSensorBuffer:
                 start_sample_index=start_sample_index,
                 end_sample_index=end_sample_index,
                 end_time_ns=end_time_ns,
+                _protected_from_ns=self._oldest_pin_ns(),
             )
 
     async def get_synchronized_window(

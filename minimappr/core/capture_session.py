@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any, Callable, Coroutine, Optional
 import httpx
 
 if TYPE_CHECKING:
+    from minimappr.core.audio_buffer import MultiSensorBuffer
     from minimappr.core.iamf_pipeline import IamfPipeline
 
 logger = logging.getLogger(__name__)
@@ -60,15 +61,21 @@ class CaptureSessionRecord:
     youtube_path: Optional[Path]
     error: Optional[str]
     created_ns: int = field(default_factory=time.time_ns)
+    use_python_ingest: bool = False
+    channel_sensor_ids: list[str] = field(default_factory=list)
 
 
 @dataclass
 class CaptureStartRequest:
     stream_key: str
-    sidecar_url: str
-    """Base URL of the Rust ingest sidecar, e.g. http://localhost:8081"""
     work_dir: Path
     """Directory where intermediate and final files will be written."""
+    sidecar_url: Optional[str] = None
+    """Base URL of the Rust ingest sidecar. None = Python ingest mode."""
+    multi_sensor_buffer: Optional["MultiSensorBuffer"] = None
+    """Python ring buffer to pin when sidecar_url is None."""
+    channel_sensor_ids: list[str] = field(default_factory=list)
+    """Ordered sensor IDs for the 4-channel array (Python ingest mode)."""
     max_duration_s: float = 300.0
     video_source: Optional[str] = None
     libcamera_mode: bool = False
@@ -89,6 +96,7 @@ class CaptureSessionManager:
         self._heartbeat_tasks: dict[str, asyncio.Task[None]] = {}
         self._post_process_callback: Optional[PostProcessCallback] = None
         self._http: Optional[httpx.AsyncClient] = None
+        self._python_buffers: dict[str, "MultiSensorBuffer"] = {}  # session_id → buffer
 
     def set_post_process_callback(self, cb: PostProcessCallback) -> None:
         self._post_process_callback = cb
@@ -124,23 +132,54 @@ class CaptureSessionManager:
         )
         self._sessions[session_id] = record
 
-        # Issue StreamRangeLease to Rust sidecar.
-        try:
-            lease_resp = await self._create_range_lease(
-                request.sidecar_url,
-                request.stream_key,
-                now_ns,
-                max_duration_s=request.max_duration_s,
+        if request.sidecar_url is None:
+            # Python ingest mode: pin the in-memory ring buffer instead of a Rust range lease.
+            if request.multi_sensor_buffer is None:
+                record.state = CaptureState.FAILED
+                record.error = "Python ingest mode requires multi_sensor_buffer"
+                logger.error("session %s: %s", session_id, record.error)
+                return record
+            request.multi_sensor_buffer.pin(session_id, now_ns)
+            self._python_buffers[session_id] = request.multi_sensor_buffer
+            record.start_time_ns = now_ns
+            record.use_python_ingest = True
+            record.channel_sensor_ids = list(request.channel_sensor_ids)
+            logger.info(
+                "session %s started (python ingest): stream=%s channels=%s",
+                session_id,
+                record.stream_key,
+                record.channel_sensor_ids,
             )
-            record.range_lease_id = lease_resp["lease_id"]
-            record.start_time_ns = lease_resp["start_ns"]
-        except Exception as exc:
-            record.state = CaptureState.FAILED
-            record.error = f"range lease creation failed: {exc}"
-            logger.error("session %s: %s", session_id, record.error)
-            return record
+        else:
+            # Rust sidecar mode: issue a StreamRangeLease.
+            try:
+                lease_resp = await self._create_range_lease(
+                    request.sidecar_url,
+                    request.stream_key,
+                    now_ns,
+                    max_duration_s=request.max_duration_s,
+                )
+                record.range_lease_id = lease_resp["lease_id"]
+                record.start_time_ns = lease_resp["start_ns"]
+            except Exception as exc:
+                record.state = CaptureState.FAILED
+                record.error = f"range lease creation failed: {exc}"
+                logger.error("session %s: %s", session_id, record.error)
+                return record
 
-        # Start video capture.
+            # Begin heartbeat loop (Rust sidecar only).
+            self._heartbeat_tasks[session_id] = asyncio.create_task(
+                self._heartbeat_loop(session_id, request.sidecar_url),
+                name=f"capture_heartbeat_{session_id[:8]}",
+            )
+            logger.info(
+                "session %s started: lease=%s stream=%s",
+                session_id,
+                record.range_lease_id,
+                record.stream_key,
+            )
+
+        # Start video capture (both modes).
         video_path = work_dir / "output_raw.mp4"
         cap_cfg = VideoCaptureConfig(
             output_path=video_path,
@@ -153,28 +192,17 @@ class CaptureSessionManager:
         except Exception as exc:
             record.state = CaptureState.FAILED
             record.error = f"video capture start failed: {exc}"
-            await self._release_range_lease(request.sidecar_url, record)
+            sidecar = request.sidecar_url or ""
+            await self._release_range_lease(sidecar, record)
             return record
 
         record.video_path = video_path
         record.state = CaptureState.RECORDING
         self._captures[session_id] = cap
 
-        # Begin heartbeat loop.
-        self._heartbeat_tasks[session_id] = asyncio.create_task(
-            self._heartbeat_loop(session_id, request.sidecar_url),
-            name=f"capture_heartbeat_{session_id[:8]}",
-        )
-
-        logger.info(
-            "session %s started: lease=%s stream=%s",
-            session_id,
-            record.range_lease_id,
-            record.stream_key,
-        )
         return record
 
-    async def stop(self, session_id: str, sidecar_url: str) -> CaptureSessionRecord:
+    async def stop(self, session_id: str, sidecar_url: str = "") -> CaptureSessionRecord:
         """Stop recording and enqueue background post-processing."""
         record = self._sessions.get(session_id)
         if record is None:
@@ -182,7 +210,7 @@ class CaptureSessionManager:
         if record.state != CaptureState.RECORDING:
             raise ValueError(f"session {session_id} is not recording (state={record.state})")
 
-        # Cancel heartbeat task.
+        # Cancel heartbeat task (Rust path only; Python mode never creates one).
         ht = self._heartbeat_tasks.pop(session_id, None)
         if ht is not None:
             ht.cancel()
@@ -200,8 +228,9 @@ class CaptureSessionManager:
         record.state = CaptureState.PROCESSING
 
         # Enqueue post-processing in the background.
+        effective_sidecar_url = "" if record.use_python_ingest else sidecar_url
         asyncio.create_task(
-            self._run_post_processing(session_id, sidecar_url),
+            self._run_post_processing(session_id, effective_sidecar_url),
             name=f"capture_postprocess_{session_id[:8]}",
         )
 
@@ -251,7 +280,12 @@ class CaptureSessionManager:
             logger.error("session %s post-processing failed: %s", session_id, exc, exc_info=True)
             await self._cleanup_on_failure(record)
         finally:
-            await self._release_range_lease(sidecar_url, record)
+            if record.use_python_ingest:
+                buf = self._python_buffers.pop(session_id, None)
+                if buf is not None:
+                    buf.unpin(session_id)
+            else:
+                await self._release_range_lease(sidecar_url, record)
 
     async def _cleanup_on_failure(self, record: CaptureSessionRecord) -> None:
         """Remove large intermediate files to prevent disk exhaustion."""
