@@ -10,7 +10,6 @@ from typing import Any
 from minimappr.classifiers.base import AudioClassifier
 from minimappr.classifiers.chaining import ChainStage, ChainedClassifier
 from minimappr.classifiers.heuristic import HeuristicClassifier
-from minimappr.classifiers.yamnet import YAMNetClassifier
 from minimappr.config import Settings
 from minimappr.core.taxonomy import label_category_for_name
 
@@ -24,6 +23,8 @@ def create_classifier(settings: Settings) -> AudioClassifier:
     yamnet_active = False
     if backend == "yamnet":
         try:
+            from minimappr.classifiers.yamnet import YAMNetClassifier  # noqa: PLC0415
+
             base_classifier = YAMNetClassifier(
                 min_confidence=settings.yamnet_min_confidence,
                 target_rms=settings.yamnet_input_target_rms,
@@ -91,6 +92,8 @@ def _build_stage(raw: dict[str, Any], settings: Settings) -> ChainStage | None:
     classifier: AudioClassifier
     if backend == "yamnet":
         try:
+            from minimappr.classifiers.yamnet import YAMNetClassifier  # noqa: PLC0415
+
             classifier = YAMNetClassifier(
                 min_confidence=settings.yamnet_min_confidence,
                 target_rms=settings.yamnet_input_target_rms,

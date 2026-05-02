@@ -20,7 +20,7 @@ import asyncio
 import itertools
 import time
 from contextlib import asynccontextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import aiosqlite
@@ -105,6 +105,7 @@ class LocalizedCandidate:
     classification_audio_quality: dict[str, AudioCoverageStats]
     classification_audio_quality_source: str
     environment: dict[str, Any]
+    extra_classification_features: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -461,6 +462,11 @@ class FusionNode:
             time_quality=payload.time_quality,
             source_observation_ids=list(payload.source_observation_ids),
         )
+        rust_extra_features: dict[str, Any] = {"rust_manifest_id": payload.manifest_id}
+        if payload.render_kind is not None:
+            rust_extra_features["rust_render_kind"] = payload.render_kind
+        if payload.fallback_reason is not None:
+            rust_extra_features["rust_fallback_reason"] = payload.fallback_reason
         localized_product = LocalizedCandidate(
             candidate=candidate,
             localization_branch=LocalizationBranch(
@@ -486,6 +492,7 @@ class FusionNode:
             classification_audio_quality=rust_audio_quality,
             classification_audio_quality_source="rust_classifier_render",
             environment=dict(payload.environment),
+            extra_classification_features=rust_extra_features,
         )
         if self._classification_chunking_policy is not None and payload.authoritative_classification is None:
             if self._should_suppress_chunked_classification(localized_product):
@@ -507,11 +514,7 @@ class FusionNode:
                 sample_rate_hz=payload.sample_rate_hz,
                 event_time_ns=payload.event_time_ns,
             )
-        classified.classification.features["rust_manifest_id"] = payload.manifest_id
-        if payload.render_kind is not None:
-            classified.classification.features["rust_render_kind"] = payload.render_kind
-        if payload.fallback_reason is not None:
-            classified.classification.features["rust_fallback_reason"] = payload.fallback_reason
+        classified.classification.features.update(rust_extra_features)
         detection_product = await self._assemble_reporting_branch(
             product=localized_product,
             classified=classified,
@@ -865,6 +868,7 @@ class FusionNode:
     async def _classify_and_assemble(self, product: LocalizedCandidate) -> list[DetectionProduct]:
         """Classify localized and omni branches, then apply reporting fusion."""
         detection_products: list[DetectionProduct] = []
+        extra_features = product.extra_classification_features
 
         if product.localization_branch is not None:
             localized = await self._classification_orchestrator.classify(
@@ -877,6 +881,8 @@ class FusionNode:
                 localization_position_m=product.localization_branch.localization_position_m,
                 event_time_ns=product.candidate.event_time_ns,
             )
+            if extra_features:
+                localized.classification.features.update(extra_features)
             maybe_detection = await self._assemble_reporting_branch(
                 product=product,
                 classified=localized,
@@ -893,10 +899,13 @@ class FusionNode:
             if maybe_detection is not None:
                 detection_products.append(maybe_detection)
 
+        localized_result_for_omni = localized if product.localization_branch is not None else None
         omni = await self._classify_omni_branch(
             product=product,
-            localized_result=localized if product.localization_branch is not None else None,
+            localized_result=localized_result_for_omni,
         )
+        if extra_features and omni is not localized_result_for_omni:
+            omni.classification.features.update(extra_features)
         maybe_detection = await self._assemble_reporting_branch(
             product=product,
             classified=omni,

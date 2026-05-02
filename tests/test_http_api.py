@@ -351,6 +351,7 @@ def test_direct_binary_ingest_is_blocked_when_sidecar_running(monkeypatch, tmp_p
 
 def test_system_diagnostics_includes_sidecar_health(monkeypatch, tmp_path: Path) -> None:
     _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    monkeypatch.setenv("MINIMAPPR_PROCESS_ROLE", "api")
     monkeypatch.setenv("MINIMAPPR_DIRECT_INGEST_ENABLED", "false")
     monkeypatch.setenv("MINIMAPPR_INGEST_SIDECAR_ENABLED", "1")
 

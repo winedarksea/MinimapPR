@@ -282,8 +282,13 @@ def _load_federation_peers(*, raw_json: str | None, config_path: Path) -> tuple[
 @dataclass(slots=True)
 class Settings:
     runtime_profile: str = "default"
+    process_role: str = "combined"
     host: str = "0.0.0.0"
     port: int = 8080
+    ingest_host: str = "0.0.0.0"
+    ingest_port: int = 8081
+    ingest_base_url: str = ""
+    ingest_backend: str = "python"
     db_path: Path = Path("data/minimappr.db")
     snippet_dir: Path = Path("data/snippets")
     snippet_retention_seconds: int = 3600
@@ -458,6 +463,17 @@ class Settings:
         if self.coordinate_mode not in {"flat", "geodetic"}:
             raise ValueError("MINIMAPPR_COORDINATE_MODE must be 'flat' or 'geodetic'")
         self.runtime_profile = self.runtime_profile.strip().lower() or "default"
+        self.process_role = self.process_role.strip().lower() or "combined"
+        if self.process_role not in {"combined", "api", "ingest"}:
+            raise ValueError("MINIMAPPR_PROCESS_ROLE must be one of combined/api/ingest")
+        self.ingest_backend = self.ingest_backend.strip().lower() or "python"
+        if self.ingest_backend not in {"python", "rust"}:
+            raise ValueError("MINIMAPPR_INGEST_BACKEND must be one of python/rust")
+        if self.ingest_port <= 0 or self.ingest_port > 65535:
+            raise ValueError("MINIMAPPR_INGEST_PORT must be in [1, 65535]")
+        if not self.ingest_base_url:
+            self.ingest_base_url = f"http://127.0.0.1:{self.ingest_port}"
+        self.ingest_sidecar_port = self.ingest_port
         self._apply_runtime_profile()
         if self.ingest_sidecar_allow_non_tmpfs_journal is None:
             self.ingest_sidecar_allow_non_tmpfs_journal = platform.system() != "Linux"
@@ -488,6 +504,12 @@ class Settings:
             raise ValueError("MINIMAPPR_INGEST_SPOOL_WORKER_COUNT must be >= 1")
         if not self.ingest_consumer_name.strip():
             raise ValueError("MINIMAPPR_INGEST_CONSUMER_NAME must not be blank")
+        if self.process_role == "ingest" and self.ingest_backend == "rust":
+            raise ValueError("MINIMAPPR_PROCESS_ROLE=ingest is only valid with MINIMAPPR_INGEST_BACKEND=python")
+        if self.process_role == "api" and self.direct_ingest_enabled:
+            self.direct_ingest_enabled = False
+        if self.ingest_backend == "rust" and self.direct_ingest_enabled and self.process_role != "combined":
+            raise ValueError("Rust ingest backend cannot run with direct Python ingest enabled in split mode")
         if self.ingest_sidecar_total_journal_budget_bytes < 0:
             raise ValueError("MINIMAPPR_SIDECAR_TOTAL_JOURNAL_BUDGET_BYTES must be >= 0")
         if self.ingest_sidecar_admission_reserve_bytes < 0:
@@ -716,10 +738,33 @@ class Settings:
             raise ValueError(
                 "MINIMAPPR_INGEST_STORAGE_MODE must be one of {'spool', 'journal'}"
             )
+        ingest_port = _env_int(
+            "MINIMAPPR_INGEST_PORT",
+            _env_int("MINIMAPPR_SIDECAR_PORT", 8081),
+        )
+        ingest_backend_raw = os.getenv("MINIMAPPR_INGEST_BACKEND")
+        if ingest_backend_raw is None:
+            # Preserve the historical sidecar deployment toggle while adding
+            # the explicit backend selector for split-process operation.
+            ingest_backend = (
+                "rust"
+                if (
+                    _env_bool("MINIMAPPR_INGEST_SIDECAR_ENABLED", True)
+                    and not _env_bool("MINIMAPPR_DIRECT_INGEST_ENABLED", True)
+                )
+                else "python"
+            )
+        else:
+            ingest_backend = ingest_backend_raw
         return cls(
             runtime_profile=_env_str("MINIMAPPR_RUNTIME_PROFILE", "default"),
+            process_role=_env_str("MINIMAPPR_PROCESS_ROLE", "combined"),
             host=_env_str("MINIMAPPR_HOST", "0.0.0.0"),
             port=_env_int("MINIMAPPR_PORT", 8080),
+            ingest_host=_env_str("MINIMAPPR_INGEST_HOST", "0.0.0.0"),
+            ingest_port=ingest_port,
+            ingest_base_url=_env_str("MINIMAPPR_INGEST_BASE_URL", ""),
+            ingest_backend=ingest_backend,
             db_path=Path(_env_str("MINIMAPPR_DB_PATH", "data/minimappr.db")),
             snippet_dir=Path(_env_str("MINIMAPPR_SNIPPET_DIR", "data/snippets")),
             snippet_retention_seconds=_env_int("MINIMAPPR_SNIPPET_RETENTION_SECONDS", 3600),
@@ -736,7 +781,7 @@ class Settings:
             ingest_sidecar_binary_path=Path(
                 _env_str("MINIMAPPR_INGEST_SIDECAR_BINARY_PATH", "dist/minimappr-ingest-sidecar")
             ),
-            ingest_sidecar_port=_env_int("MINIMAPPR_SIDECAR_PORT", 8081),
+            ingest_sidecar_port=ingest_port,
             ingest_sidecar_total_journal_budget_bytes=_env_int(
                 "MINIMAPPR_SIDECAR_TOTAL_JOURNAL_BUDGET_BYTES", 268_435_456
             ),

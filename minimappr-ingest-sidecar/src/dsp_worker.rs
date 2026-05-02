@@ -57,6 +57,7 @@ pub struct DspWorkerConfig {
     pub classifier_command_json: Option<String>,
     pub localization_cadence_ms: u64,
     pub localization_rms_gate: f32,
+    pub trigger_cooldown_seconds: f64,
 }
 
 impl Default for DspWorkerConfig {
@@ -69,7 +70,7 @@ impl Default for DspWorkerConfig {
             window_seconds: 512.0 / 16_000.0,
             classification_window_seconds: 512.0 / 16_000.0,
             classifier_render_min_interval_seconds: 0.0,
-            max_buffer_seconds: 4.0 * 512.0 / 16_000.0,
+            max_buffer_seconds: 8.0,
             min_coverage_ratio: 0.85,
             localization_band_hz: [300.0, 3500.0],
             localization_srp_grid_resolution_m: 0.5,
@@ -78,7 +79,7 @@ impl Default for DspWorkerConfig {
             pre_blend_highpass_hz: 100.0,
             min_localization_confidence: 0.20,
             birdnet_hybrid_render_enabled: false,
-            skip_stale_manifests_for_live_buffer: true,
+            skip_stale_manifests_for_live_buffer: false,
             consumed_manifest_retention_max_files: 20_000,
             consumed_manifest_prune_interval: 256,
             default_temperature_c,
@@ -86,7 +87,8 @@ impl Default for DspWorkerConfig {
             sound_speed_mps: 343.2,
             classifier_command_json: None,
             localization_cadence_ms: 250,
-            localization_rms_gate: 0.0,
+            localization_rms_gate: 0.015,
+            trigger_cooldown_seconds: 0.8,
         }
     }
 }
@@ -174,6 +176,7 @@ pub struct DspWorker {
     buffers: HashMap<String, [SensorStreamBuffer; 4]>,
     last_classifier_render_ns_by_stream: HashMap<String, u128>,
     last_localization_ns_by_stream: HashMap<String, u128>,
+    last_trigger_ns_by_stream: HashMap<String, u128>,
     consumed_manifests_since_prune: Arc<AtomicU64>,
     env_cache: Option<EnvironmentCache>,
 }
@@ -205,6 +208,7 @@ impl DspWorker {
             buffers: HashMap::new(),
             last_classifier_render_ns_by_stream: HashMap::new(),
             last_localization_ns_by_stream: HashMap::new(),
+            last_trigger_ns_by_stream: HashMap::new(),
             consumed_manifests_since_prune: Arc::new(AtomicU64::new(0)),
             env_cache: None,
         }
@@ -671,6 +675,32 @@ impl DspWorker {
         audio_ns: u128,
         windows: &[Vec<f32>; 4],
     ) -> bool {
+        if !self.should_trigger(stream_key, audio_ns, windows) {
+            return false;
+        }
+        let cadence_ns = (self.config.localization_cadence_ms as u128) * 1_000_000;
+        if cadence_ns == 0 {
+            return true;
+        }
+        match self.last_localization_ns_by_stream.get(stream_key).copied() {
+            Some(last_ns) if audio_ns.saturating_sub(last_ns) < cadence_ns => false,
+            _ => {
+                self.last_localization_ns_by_stream
+                    .insert(stream_key.to_string(), audio_ns);
+                true
+            }
+        }
+    }
+
+    /// Combined RMS energy gate + trigger cooldown, matching Python's IngestProcessor
+    /// trigger evaluation. Returns true when the audio is loud enough and the cooldown
+    /// period has elapsed since the last trigger for this stream.
+    fn should_trigger(
+        &mut self,
+        stream_key: &str,
+        audio_ns: u128,
+        windows: &[Vec<f32>; 4],
+    ) -> bool {
         if self.config.localization_rms_gate > 0.0 {
             let max_rms = windows
                 .iter()
@@ -686,14 +716,15 @@ impl DspWorker {
                 return false;
             }
         }
-        let cadence_ns = (self.config.localization_cadence_ms as u128) * 1_000_000;
-        if cadence_ns == 0 {
+        let cooldown_ns =
+            (self.config.trigger_cooldown_seconds * 1_000_000_000.0).round() as u128;
+        if cooldown_ns == 0 {
             return true;
         }
-        match self.last_localization_ns_by_stream.get(stream_key).copied() {
-            Some(last_ns) if audio_ns.saturating_sub(last_ns) < cadence_ns => false,
+        match self.last_trigger_ns_by_stream.get(stream_key).copied() {
+            Some(last_ns) if audio_ns.saturating_sub(last_ns) < cooldown_ns => false,
             _ => {
-                self.last_localization_ns_by_stream
+                self.last_trigger_ns_by_stream
                     .insert(stream_key.to_string(), audio_ns);
                 true
             }

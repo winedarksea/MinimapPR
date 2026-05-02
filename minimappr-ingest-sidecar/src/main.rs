@@ -63,7 +63,7 @@ struct Args {
     #[arg(long, env = "MINIMAPPR_SIDECAR_HOST", default_value = "0.0.0.0")]
     host: String,
 
-    #[arg(long, env = "MINIMAPPR_SIDECAR_PORT", default_value_t = 8081)]
+    #[arg(long, env = "MINIMAPPR_INGEST_PORT", default_value_t = 8081)]
     port: u16,
 
     #[arg(long, env = "MINIMAPPR_INGEST_SPOOL_DIR", default_value = "data/spool")]
@@ -286,6 +286,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
+    if std::env::var_os("MINIMAPPR_INGEST_PORT").is_none() {
+        if let Some(legacy_port) = std::env::var_os("MINIMAPPR_SIDECAR_PORT") {
+            std::env::set_var("MINIMAPPR_INGEST_PORT", legacy_port);
+        }
+    }
     let args = Args::parse();
     let storage_dir = args.spool_dir.clone();
     let storage_mode = args.storage_mode;

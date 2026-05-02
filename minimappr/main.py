@@ -70,6 +70,7 @@ from minimappr.models import (
     BITType,
     ContextSnapshot,
     CopStatusResponse,
+    EnvironmentSampleIn,
     FederationAck,
     FederationHeartbeat,
     FederationStatusResponse,
@@ -93,6 +94,11 @@ frontend_dir = Path(__file__).parent / "frontend"
 _SIDECAR_READY_TIMEOUT_SECONDS = 5.0
 _SIDECAR_READY_POLL_INTERVAL_SECONDS = 0.1
 _SIDECAR_HEALTHCHECK_TIMEOUT_SECONDS = 0.5
+_INGEST_PATH_PREFIXES = (
+    "/api/v1/ingest",
+    "/api/v1/fusion/status",
+    "/api/v1/system/diagnostics",
+)
 
 
 def _default_sidecar_classifier_command_json(settings: "Settings") -> str | None:
@@ -235,6 +241,64 @@ async def _reconcile_site_origin_after_startup(app: FastAPI) -> None:
         logger.warning("Previous classifier close failed after site-origin reconciliation: %s", exc)
 
 
+async def _api_live_db_poll_loop(app: FastAPI) -> None:
+    """Bridge ingest-process DB writes into API-process websocket updates."""
+    state = app.state
+    settings: Settings = state.settings
+    last_detection_ts = time.time_ns()
+    last_track_ts = last_detection_ts
+    seen_detection_ids: set[str] = set()
+    seen_track_ids: set[str] = set()
+    while True:
+        try:
+            detections = await state.storage.list_detections(
+                limit=100,
+                since_ns=last_detection_ts,
+                min_label_confidence=settings.detection_min_confidence,
+            )
+            for detection in sorted(detections, key=lambda item: int(item.get("timestamp_ns") or 0)):
+                detection_id = str(detection.get("id") or detection.get("event_id") or "")
+                timestamp_ns = int(detection.get("timestamp_ns") or last_detection_ts)
+                if detection_id and detection_id not in seen_detection_ids:
+                    await state.live_hub.broadcast(
+                        {
+                            "type": "detection",
+                            "event_id": detection.get("event_id"),
+                            "event_type": "detection",
+                            "detection": detection,
+                            "track": None,
+                            "server_time_ns": time.time_ns(),
+                        }
+                    )
+                    seen_detection_ids.add(detection_id)
+                    if len(seen_detection_ids) > 512:
+                        seen_detection_ids = set(list(seen_detection_ids)[-256:])
+                last_detection_ts = max(last_detection_ts, timestamp_ns)
+
+            tracks = await state.storage.list_tracks(limit=100, since_ns=last_track_ts)
+            for track in sorted(tracks, key=lambda item: int(item.get("last_seen_ns") or 0)):
+                track_id = str(track.get("id") or "")
+                last_seen_ns = int(track.get("last_seen_ns") or last_track_ts)
+                dedupe_key = f"{track_id}:{last_seen_ns}"
+                if track_id and dedupe_key not in seen_track_ids:
+                    await state.live_hub.broadcast(
+                        {
+                            "type": "track_updated",
+                            "track": track,
+                            "server_time_ns": time.time_ns(),
+                        }
+                    )
+                    seen_track_ids.add(dedupe_key)
+                    if len(seen_track_ids) > 512:
+                        seen_track_ids = set(list(seen_track_ids)[-256:])
+                last_track_ts = max(last_track_ts, last_seen_ns)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("API live DB poll failed: %s", exc)
+        await asyncio.sleep(1.0)
+
+
 class _SidecarState:
     """Mutable runtime health for the supervised ingest sidecar process.
 
@@ -250,6 +314,15 @@ class _SidecarState:
         self.restart_count: int = 0
         self.last_exit_code: int | None = None
         self._current_process: "asyncio.subprocess.Process | None" = None
+
+
+class _EnvironmentIngestSample(BaseModel):
+    node_id: str
+    sample: EnvironmentSampleIn
+
+
+class _EnvironmentIngestBody(BaseModel):
+    samples: list[_EnvironmentIngestSample]
 
 
 def _ingest_sidecar_is_running(state) -> bool:
@@ -281,11 +354,38 @@ def _should_autostart_ingest_sidecar(settings: "Settings") -> bool:
     API process, so auto-launching the sidecar is unnecessary and can introduce
     unrelated startup failures.
     """
-    return settings.ingest_sidecar_enabled and not settings.direct_ingest_enabled
+    return (
+        getattr(settings, "process_role", "combined") != "ingest"
+        and getattr(settings, "ingest_backend", "rust") == "rust"
+        and settings.ingest_sidecar_enabled
+        and not settings.direct_ingest_enabled
+    )
 
 
 def _sidecar_healthcheck_url(port: int) -> str:
     return f"http://127.0.0.1:{port}/healthz"
+
+
+def _ingest_runtime_base_url(settings: "Settings") -> str:
+    return settings.ingest_base_url.rstrip("/")
+
+
+def _capture_pipeline_available(settings: "Settings") -> bool:
+    return settings.ingest_backend == "rust" and settings.ingest_storage_mode == "journal"
+
+
+def _has_live_ingest_runtime(state) -> bool:
+    settings = getattr(state, "settings", None)
+    if settings is not None and getattr(settings, "process_role", "combined") == "api":
+        return False
+    return hasattr(state, "registry") and hasattr(state, "audio_buffer")
+
+
+def _sensor_ids_from_node_row(node: dict) -> list[str]:
+    offsets = node.get("sensor_offsets_m")
+    if not isinstance(offsets, list):
+        return []
+    return [f"{node['id']}:ch{index}" for index in range(len(offsets))]
 
 
 def _fetch_ingest_sidecar_health(port: int) -> dict[str, object] | None:
@@ -425,6 +525,7 @@ async def _start_ingest_sidecar(
         # env vars the operator may have set for the Rust binary directly.
         "MINIMAPPR_INGEST_SPOOL_DIR": str(settings.ingest_spool_dir),
         "MINIMAPPR_INGEST_CONSUMER_NAME": settings.ingest_consumer_name,
+        "MINIMAPPR_INGEST_PORT": str(getattr(settings, "ingest_port", settings.ingest_sidecar_port)),
         "MINIMAPPR_SIDECAR_PORT": str(settings.ingest_sidecar_port),
         "MINIMAPPR_SIDECAR_STORAGE_MODE": settings.ingest_storage_mode,
         "MINIMAPPR_SIDECAR_TOTAL_JOURNAL_BUDGET_BYTES": str(
@@ -486,9 +587,134 @@ async def _start_ingest_sidecar(
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def _api_only_lifespan(app: FastAPI, settings: Settings):
+    """Initialize the API/UI process without DSP, classifiers, or live ingest."""
     install_log_ring()
+    settings.federation_peers_config_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.snippet_dir.mkdir(parents=True, exist_ok=True)
+    settings.large_artifact_dir.mkdir(parents=True, exist_ok=True)
+
+    storage = Storage(settings.storage_config().db_path)
+    await storage.initialize()
+    resolved_site_origin = resolve_site_origin_from_nodes(
+        settings,
+        nodes=await storage.list_nodes(limit=4096),
+        now_ns=time.time_ns(),
+    )
+    settings.site_origin_lat = resolved_site_origin.origin.lat
+    settings.site_origin_lon = resolved_site_origin.origin.lon
+    settings.site_origin_alt_m = resolved_site_origin.origin.alt_m
+
+    live_hub = LiveEventHub()
+    coordinate_frame = LocalCoordinateFrame(
+        origin=GeoPoint(
+            lat=settings.site_origin_lat,
+            lon=settings.site_origin_lon,
+            alt_m=settings.site_origin_alt_m,
+        ),
+        mode=settings.coordinate_mode,
+    )
+    environment_provider = LiveEnvironmentProvider(
+        fallback_temperature_c=settings.default_temperature_c,
+        fallback_humidity_fraction=settings.default_humidity,
+        max_reading_age_seconds=settings.environment_reading_max_age_seconds,
+    )
+    cleanup_service = CleanupService(settings=settings, storage=storage)
+    bit_evaluator = BITReportEvaluator()
+
+    async def _empty_local_tracks(now_ns: int) -> list[TrackState]:
+        del now_ns
+        return []
+
+    federation = FederationCoordinator(
+        settings=settings,
+        track_supplier=_empty_local_tracks,
+        live_callback=live_hub.broadcast,
+    )
+
+    capture_manager = CaptureSessionManager()
+    iamf_pipeline = IamfPipeline(
+        sidecar_url=_ingest_runtime_base_url(settings),
+        db_storage=storage,
+    )
+
+    async def _run_capture_post_processing(record):
+        await iamf_pipeline.run(record)
+        await storage.upsert_capture_session(record)
+
+    capture_manager.set_post_process_callback(_run_capture_post_processing)
+
+    sidecar_state = _SidecarState()
+    sidecar_supervision_task: asyncio.Task | None = None
+    if _should_autostart_ingest_sidecar(settings):
+        try:
+            sidecar_process = await _start_ingest_sidecar(settings)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Ingest sidecar startup failed in API role: %s", exc)
+            sidecar_state.status = "startup_failed"
+        else:
+            if sidecar_process is not None:
+                sidecar_state._current_process = sidecar_process
+                sidecar_state.status = "running"
+                sidecar_state.pid = sidecar_process.pid
+                sidecar_supervision_task = asyncio.create_task(
+                    _supervise_ingest_sidecar(settings, sidecar_process, sidecar_state)
+                )
+            else:
+                sidecar_state.status = "binary_not_found"
+    else:
+        sidecar_state.status = "disabled"
+
+    app.state.settings = settings
+    app.state.storage = storage
+    app.state.live_hub = live_hub
+    app.state.coordinate_frame = coordinate_frame
+    app.state.environment_provider = environment_provider
+    app.state.federation = federation
+    app.state.bit_evaluator = bit_evaluator
+    app.state.cleanup_service = cleanup_service
+    app.state.sidecar_state = sidecar_state
+    app.state.capture_manager = capture_manager
+    _apply_site_origin_resolution(app.state, resolved_site_origin)
+
+    live_db_poll_task: asyncio.Task | None = None
+    try:
+        environment_provider.bootstrap(await storage.list_latest_environment_per_node(limit=1024))
+        await federation.start()
+        live_db_poll_task = asyncio.create_task(_api_live_db_poll_loop(app))
+        yield
+    finally:
+        shutdown_timeout_s = 15.0
+        if sidecar_supervision_task is not None:
+            sidecar_supervision_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+                await asyncio.wait_for(sidecar_supervision_task, timeout=shutdown_timeout_s)
+        current_sidecar = sidecar_state._current_process
+        if current_sidecar is not None and current_sidecar.returncode is None:
+            logger.info("Stopping ingest sidecar (pid %d)", current_sidecar.pid)
+            current_sidecar.terminate()
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(current_sidecar.wait(), timeout=shutdown_timeout_s)
+        if live_db_poll_task is not None:
+            live_db_poll_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+                await asyncio.wait_for(live_db_poll_task, timeout=shutdown_timeout_s)
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(federation.stop(), timeout=shutdown_timeout_s)
+        await storage.close()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     settings = Settings.from_env()
+    if settings.process_role == "api":
+        async with _api_only_lifespan(app, settings):
+            yield
+        return
+
+    install_log_ring()
     settings.federation_peers_config_path.parent.mkdir(parents=True, exist_ok=True)
     settings.snippet_dir.mkdir(parents=True, exist_ok=True)
     settings.large_artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -622,7 +848,7 @@ async def lifespan(app: FastAPI):
 
     capture_manager = CaptureSessionManager()
     iamf_pipeline = IamfPipeline(
-        sidecar_url=settings.sidecar_url if hasattr(settings, "sidecar_url") else "http://localhost:8081",
+        sidecar_url=_ingest_runtime_base_url(settings),
         db_storage=storage,
     )
 
@@ -777,6 +1003,20 @@ async def dynamic_cors_headers(request: Request, call_next):
     return response
 
 
+@app.middleware("http")
+async def process_role_route_guard(request: Request, call_next):
+    settings: Settings | None = getattr(request.app.state, "settings", None)
+    role = settings.process_role if settings is not None else os.getenv("MINIMAPPR_PROCESS_ROLE", "combined")
+    path = request.url.path
+    if role == "api" and path.startswith("/api/v1/ingest"):
+        return JSONResponse(status_code=404, content={"detail": "Ingest endpoints are served by the ingest process"})
+    if role == "ingest":
+        allowed = path == "/health" or path.startswith(_INGEST_PATH_PREFIXES)
+        if not allowed:
+            return JSONResponse(status_code=404, content={"detail": "Endpoint is not served by the ingest process"})
+    return await call_next(request)
+
+
 @app.exception_handler(RuntimeError)
 async def runtime_error_handler(request: Request, exc: RuntimeError):
     if str(exc) == "Storage is not initialized":
@@ -829,17 +1069,25 @@ async def root() -> Response:
 async def health(request: Request) -> dict:
     state = _require_state(request)
     settings: Settings = state.settings
-    status = await state.fusion_node.status()
-    workers = status.get("workers", {})
-    running = int(workers.get("localization_running", 0)) + int(workers.get("classification_running", 0)) + int(
-        workers.get("rules_running", 0)
-    )
+    if hasattr(state, "fusion_node"):
+        status = await state.fusion_node.status()
+        workers = status.get("workers", {})
+        running = int(workers.get("localization_running", 0)) + int(workers.get("classification_running", 0)) + int(
+            workers.get("rules_running", 0)
+        )
+        fusion_queue_depth = status["queue"]["localization_depth"]
+    else:
+        running = 0
+        fusion_queue_depth = 0
     federation_status = await state.federation.status()
     return {
         "status": "ok",
         "time_ns": time.time_ns(),
+        "process_role": settings.process_role,
+        "ingest_backend": settings.ingest_backend,
+        "ingest_port": settings.ingest_port,
         "classifier": settings.classifier_backend,
-        "fusion_queue_depth": status["queue"]["localization_depth"],
+        "fusion_queue_depth": fusion_queue_depth,
         "fusion_workers_running": running,
         "federation_enabled": federation_status["enabled"],
         "federation_peer_count": federation_status["peer_count"],
@@ -878,6 +1126,48 @@ async def ingest_binary(request: Request) -> StoreForwardIngestResponse:
         raise HTTPException(status_code=499, detail="Client disconnected while uploading binary ingest payload") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/ingest/env")
+async def ingest_environment(payload: _EnvironmentIngestBody, request: Request) -> dict:
+    state = _require_state(request)
+    if len(payload.samples) > 64:
+        raise HTTPException(status_code=413, detail="environment batch exceeds 64 samples")
+
+    accepted = 0
+    now_ns = time.time_ns()
+    for item in payload.samples:
+        sample = item.sample
+        if not sample.has_any_measurement():
+            continue
+        timestamp_ns = sample.timestamp_ns or now_ns
+        await state.storage.insert_environment(
+            node_id=item.node_id,
+            timestamp_ns=timestamp_ns,
+            temperature_c=sample.temperature_c,
+            pressure_pa=sample.pressure_pa,
+            humidity_fraction=sample.humidity_fraction,
+            wind_speed_mps=sample.wind_speed_mps,
+            wind_dir_deg=sample.wind_dir_deg,
+            solar_lux=sample.solar_lux,
+            metadata={"source": sample.source, **sample.metadata} if sample.source else sample.metadata,
+        )
+        environment_provider = getattr(state, "environment_provider", None)
+        if environment_provider is not None and hasattr(environment_provider, "ingest_sample"):
+            environment_provider.ingest_sample(
+                node_id=item.node_id,
+                timestamp_ns=timestamp_ns,
+                temperature_c=sample.temperature_c,
+                humidity_fraction=sample.humidity_fraction,
+                pressure_pa=sample.pressure_pa,
+                wind_speed_mps=sample.wind_speed_mps,
+                wind_dir_deg=sample.wind_dir_deg,
+                solar_lux=sample.solar_lux,
+                location_m=None,
+                metadata={"source": sample.source, **sample.metadata} if sample.source else sample.metadata,
+            )
+        accepted += 1
+    return {"accepted": accepted, "queued": False}
 
 
 @app.get("/api/v1/nodes")
@@ -925,27 +1215,39 @@ async def list_nodes(
         if failure_codes:
             node["bit_failure_codes"] = failure_codes
 
-        sensor_descriptors = await state.registry.sensors_for_node(node["id"])
-        sensor_ids = [descriptor.sensor_id for descriptor in sensor_descriptors]
-        audio_summary = await state.audio_buffer.summarize_sensors(sensor_ids=sensor_ids, now_ns=now_ns)
+        if _has_live_ingest_runtime(state):
+            sensor_descriptors = await state.registry.sensors_for_node(node["id"])
+            sensor_ids = [descriptor.sensor_id for descriptor in sensor_descriptors]
+            audio_summary = await state.audio_buffer.summarize_sensors(sensor_ids=sensor_ids, now_ns=now_ns)
 
-        age_seconds = audio_summary["age_seconds"]
-        if age_seconds is None:
-            audio_status = "no_audio"
-        elif age_seconds <= settings.node_degraded_after_seconds:
-            audio_status = "recent"
+            age_seconds = audio_summary["age_seconds"]
+            if age_seconds is None:
+                audio_status = "no_audio"
+            elif age_seconds <= settings.node_degraded_after_seconds:
+                audio_status = "recent"
+            else:
+                audio_status = "stale"
+
+            node["audio_debug"] = {
+                "sensor_count": len(sensor_ids),
+                "active_sensor_count": int(audio_summary["active_sensor_count"] or 0),
+                "sample_rate_hz": audio_summary["sample_rate_hz"],
+                "last_sample_time_ns": audio_summary["last_sample_time_ns"],
+                "age_seconds": age_seconds,
+                "rms": audio_summary["rms"],
+                "status": audio_status,
+            }
         else:
-            audio_status = "stale"
-
-        node["audio_debug"] = {
-            "sensor_count": len(sensor_ids),
-            "active_sensor_count": int(audio_summary["active_sensor_count"] or 0),
-            "sample_rate_hz": audio_summary["sample_rate_hz"],
-            "last_sample_time_ns": audio_summary["last_sample_time_ns"],
-            "age_seconds": age_seconds,
-            "rms": audio_summary["rms"],
-            "status": audio_status,
-        }
+            sensor_ids = _sensor_ids_from_node_row(node)
+            node["audio_debug"] = {
+                "sensor_count": len(sensor_ids),
+                "active_sensor_count": 0,
+                "sample_rate_hz": None,
+                "last_sample_time_ns": None,
+                "age_seconds": None,
+                "rms": None,
+                "status": "external_ingest_process",
+            }
 
         latest_environment = latest_environment_by_node.get(node["id"])
         if latest_environment is not None:
@@ -1086,7 +1388,8 @@ async def list_tracks(
 ) -> list[dict]:
     state = _require_state(request)
     now_ns = time.time_ns()
-    _ = await state.tracker.snapshot(now_ns=now_ns)
+    if hasattr(state, "tracker"):
+        _ = await state.tracker.snapshot(now_ns=now_ns)
     effective_limit = min(limit, state.settings.cop_tracks_max_items)
     cutoff_ns = now_ns - int(state.settings.cop_tracks_max_age_seconds * 1_000_000_000)
     tracks = await state.storage.list_tracks(limit=effective_limit, since_ns=cutoff_ns)
@@ -1117,6 +1420,11 @@ async def get_config(request: Request) -> dict:
     site_origin_resolution_source = getattr(state, "site_origin_resolution_source", settings.site_origin_source)
     return {
         "trigger_rms": settings.trigger_rms,
+        "process_role": settings.process_role,
+        "ingest_backend": settings.ingest_backend,
+        "ingest_host": settings.ingest_host,
+        "ingest_port": settings.ingest_port,
+        "ingest_base_url": settings.ingest_base_url,
         "trigger_cooldown_seconds": settings.trigger_cooldown_seconds,
         "localization_window_seconds": settings.localization_window_seconds,
         "snippet_retention_seconds": settings.snippet_retention_seconds,
@@ -1322,18 +1630,24 @@ async def patch_config(request: Request) -> dict:
 @app.get("/api/v1/fusion/status", response_model=FusionStatusResponse)
 async def fusion_status(request: Request) -> dict:
     state = _require_state(request)
+    if not hasattr(state, "fusion_node"):
+        raise HTTPException(status_code=503, detail="Fusion pipeline runs in the ingest process")
     return await state.fusion_node.status()
 
 
 @app.get("/api/v1/debug/config")
 async def debug_config(request: Request) -> dict:
     state = _require_state(request)
+    if not hasattr(state, "diagnostics"):
+        raise HTTPException(status_code=503, detail="Diagnostics requiring DSP runtime run in the ingest process")
     return await state.diagnostics.config_snapshot()
 
 
 @app.get("/api/v1/debug/event/{event_id}")
 async def debug_event_snapshot(event_id: str, request: Request) -> dict:
     state = _require_state(request)
+    if not hasattr(state, "diagnostics"):
+        raise HTTPException(status_code=503, detail="Diagnostics requiring DSP runtime run in the ingest process")
     snapshot = await state.diagnostics.event_snapshot(event_id)
     if snapshot is None:
         raise HTTPException(status_code=404, detail="Event not found")
@@ -1343,6 +1657,8 @@ async def debug_event_snapshot(event_id: str, request: Request) -> dict:
 @app.get("/api/v1/debug/selftest")
 async def debug_selftest(request: Request) -> dict:
     state = _require_state(request)
+    if not hasattr(state, "diagnostics"):
+        raise HTTPException(status_code=503, detail="Diagnostics requiring DSP runtime run in the ingest process")
     return await state.diagnostics.selftest()
 
 
@@ -1688,23 +2004,44 @@ async def get_system_diagnostics(request: Request) -> dict:
     state = _require_state(request)
     settings: Settings = state.settings
     diagnostics = system_info.collect(db_path=settings.db_path, start_ns=process_start_ns())
-    fusion_status = await state.fusion_node.status()
-    diagnostics["pipeline"] = {
-        "queue": fusion_status["queue"],
-        "workers": fusion_status["workers"],
-        "realtime": fusion_status["realtime"],
-        "drop_on_backpressure": fusion_status["drop_on_backpressure"],
-        "metrics": {
-            "triggers_enqueued": fusion_status["metrics"].get("triggers_enqueued", 0),
-            "triggers_dropped_queue_full": fusion_status["metrics"].get("triggers_dropped_queue_full", 0),
-            "stage_drops_backpressure": fusion_status["metrics"].get("stage_drops_backpressure", 0),
-            "classification_reuse_hits": fusion_status["metrics"].get("classification_reuse_hits", 0),
-            "birdnet_chunk_dispatches_suppressed": (
-                fusion_status["metrics"].get("birdnet_chunk_dispatches_suppressed", 0)
-            ),
-            "detections_emitted": fusion_status["metrics"].get("detections_emitted", 0),
-        },
+    diagnostics["process_role"] = settings.process_role
+    diagnostics["ingest"] = {
+        "backend": settings.ingest_backend,
+        "host": settings.ingest_host,
+        "port": settings.ingest_port,
+        "base_url": settings.ingest_base_url,
+        "capture_available": _capture_pipeline_available(settings),
+        "capture_unavailable_reason": None
+        if _capture_pipeline_available(settings)
+        else "Ambisonic/IAMF capture requires Rust ingest journal mode",
     }
+    if hasattr(state, "fusion_node"):
+        fusion_status = await state.fusion_node.status()
+        diagnostics["pipeline"] = {
+            "queue": fusion_status["queue"],
+            "workers": fusion_status["workers"],
+            "realtime": fusion_status["realtime"],
+            "drop_on_backpressure": fusion_status["drop_on_backpressure"],
+            "metrics": {
+                "triggers_enqueued": fusion_status["metrics"].get("triggers_enqueued", 0),
+                "triggers_dropped_queue_full": fusion_status["metrics"].get("triggers_dropped_queue_full", 0),
+                "stage_drops_backpressure": fusion_status["metrics"].get("stage_drops_backpressure", 0),
+                "classification_reuse_hits": fusion_status["metrics"].get("classification_reuse_hits", 0),
+                "birdnet_chunk_dispatches_suppressed": (
+                    fusion_status["metrics"].get("birdnet_chunk_dispatches_suppressed", 0)
+                ),
+                "detections_emitted": fusion_status["metrics"].get("detections_emitted", 0),
+            },
+        }
+    else:
+        diagnostics["pipeline"] = {
+            "status": "external_ingest_process",
+            "queue": {},
+            "workers": {},
+            "realtime": {},
+            "drop_on_backpressure": None,
+            "metrics": {},
+        }
     sidecar_state: _SidecarState | None = getattr(state, "sidecar_state", None)
     failed_spool_count = await asyncio.to_thread(
         _count_failed_spool_manifest_items,
@@ -1714,7 +2051,7 @@ async def get_system_diagnostics(request: Request) -> dict:
     if settings.ingest_sidecar_enabled and sidecar_state is not None and sidecar_state.status == "running":
         sidecar_health = await asyncio.to_thread(
             _fetch_ingest_sidecar_health,
-            settings.ingest_sidecar_port,
+            settings.ingest_port,
         )
     diagnostics["sidecar"] = {
         "enabled": settings.ingest_sidecar_enabled,
@@ -1759,6 +2096,8 @@ async def get_system_logs(
 async def get_zone_occupancy(request: Request) -> list[ZoneOccupancyState]:
     """Return occupancy state for all zones based on the current active track snapshot."""
     state = _require_state(request)
+    if not hasattr(state, "tracker") or not hasattr(state, "zone_matcher"):
+        return []
     now_ns = time.time_ns()
     tracks = await state.tracker.snapshot(now_ns=now_ns)
     for track in tracks:
@@ -1788,22 +2127,29 @@ async def get_context_current(
     now_ns = time.time_ns()
 
     # Active tracks with geographic positions
-    tracks = await state.tracker.snapshot(now_ns=now_ns)
-    for track in tracks:
-        if track.position_geo is None:
-            track.position_geo = state.coordinate_frame.local_to_geo(track.position_m)
-    active_tracks = [
-        t.model_dump(mode="json")
-        for t in tracks
-        if t.status in {"tentative", "confirmed", "coasting"}
-    ][:track_limit]
-
-    # Zone occupancy
-    zone_occupancy = await state.zone_matcher.compute_occupancy(
-        tracks=tracks,
-        coordinate_frame=state.coordinate_frame,
-        now_ns=now_ns,
-    )
+    if hasattr(state, "tracker") and hasattr(state, "zone_matcher"):
+        tracks = await state.tracker.snapshot(now_ns=now_ns)
+        for track in tracks:
+            if track.position_geo is None:
+                track.position_geo = state.coordinate_frame.local_to_geo(track.position_m)
+        active_tracks = [
+            t.model_dump(mode="json")
+            for t in tracks
+            if t.status in {"tentative", "confirmed", "coasting"}
+        ][:track_limit]
+        zone_occupancy = await state.zone_matcher.compute_occupancy(
+            tracks=tracks,
+            coordinate_frame=state.coordinate_frame,
+            now_ns=now_ns,
+        )
+    else:
+        track_rows = await state.storage.list_tracks(limit=track_limit)
+        active_tracks = [
+            track
+            for track in track_rows
+            if track.get("status") in {"tentative", "confirmed", "coasting"}
+        ][:track_limit]
+        zone_occupancy = []
 
     # Recent alerts
     recent_window_ns = now_ns - int(recent_alert_window_seconds * 1_000_000_000)
@@ -1941,6 +2287,11 @@ async def get_recent_node_audio(
 ) -> Response:
     state = _require_state(request)
     settings: Settings = state.settings
+    if not _has_live_ingest_runtime(state):
+        raise HTTPException(
+            status_code=404,
+            detail="Recent raw node audio is held by the ingest process and is not available from the API process",
+        )
 
     sensor_descriptors = await state.registry.sensors_for_node(node_id)
     if not sensor_descriptors:
@@ -2139,10 +2490,16 @@ async def capture_start(request: Request, body: _CaptureStartBody):
     state = request.app.state
     manager: CaptureSessionManager = state.capture_manager
     settings: Settings = state.settings
+    if not _capture_pipeline_available(settings):
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Ambisonic/IAMF capture requires Rust ingest journal mode; "
+                "Python ingest keeps live raw audio in memory and does not expose journal range leases"
+            ),
+        )
 
-    sidecar_url = (
-        getattr(settings, "sidecar_url", None) or "http://localhost:8081"
-    )
+    sidecar_url = _ingest_runtime_base_url(settings)
     work_dir_path = (
         Path(body.work_dir) if body.work_dir else Path("data/captures")
     )
@@ -2178,7 +2535,12 @@ async def capture_stop(session_id: str, request: Request):
     state = request.app.state
     manager: CaptureSessionManager = state.capture_manager
     settings: Settings = state.settings
-    sidecar_url = getattr(settings, "sidecar_url", None) or "http://localhost:8081"
+    if not _capture_pipeline_available(settings):
+        raise HTTPException(
+            status_code=503,
+            detail="Ambisonic/IAMF capture requires Rust ingest journal mode",
+        )
+    sidecar_url = _ingest_runtime_base_url(settings)
 
     try:
         record = await manager.stop(session_id, sidecar_url)

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import json
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from minimappr import main
+from minimappr.config import Settings
 
 
 class _FakeResponse:
@@ -178,6 +182,8 @@ async def test_start_ingest_sidecar_waits_for_healthcheck(
     assert observed["port"] == 18081
     assert observed["argv"] == (str(binary_path),)
     assert observed["env"]["MINIMAPPR_SIDECAR_ALLOW_NON_TMPFS_JOURNAL"] == "true"
+    assert observed["env"]["MINIMAPPR_INGEST_PORT"] == "18081"
+    assert observed["env"]["MINIMAPPR_SIDECAR_PORT"] == "18081"
 
 
 @pytest.mark.asyncio
