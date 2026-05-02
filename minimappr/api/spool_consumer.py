@@ -25,6 +25,7 @@ from minimappr.api.rust_dsp_manifests import (
     JournalCursorUpdate,
     LocalizedClassifierRenderRequest,
     LocalizedRenderManifestBundle,
+    _lookup_cursor_update,
     load_localized_render_manifest_bundle,
     manifest_source_key,
 )
@@ -50,6 +51,7 @@ class IngestSpoolConfig:
     storage_mode: IngestStorageMode = "spool"
     consumer_name: str = "python-ingest"
     runtime_profile: str = "default"
+    rust_dsp_claim_batch_size: int = 2
 
     @property
     def tmp_dir(self) -> Path:
@@ -198,6 +200,21 @@ class IngestSpoolConsumer:
 
             try:
                 item = await self._load_claimed_item(claimed_path)
+                if isinstance(item, ClaimedLocalizedRenderItem) and await asyncio.to_thread(
+                    _localized_render_item_is_cursor_covered,
+                    item,
+                    self._config.journal_consumer_state_path,
+                    self._config.consumer_name,
+                ):
+                    await asyncio.to_thread(
+                        _complete_claimed_item,
+                        item,
+                        self._config.journal_consumer_state_path,
+                        self._config.consumer_name,
+                        "processed",
+                    )
+                    processed += 1
+                    continue
                 # Re-sample now so items that waited in a large backlog are
                 # judged by the time they are actually reached, not the single
                 # snapshot taken at the start of this pass.
@@ -255,6 +272,7 @@ class IngestSpoolConsumer:
                 self._config.processing_dir,
                 self._config.journal_consumer_state_path,
                 self._config.consumer_name,
+                self._config.rust_dsp_claim_batch_size,
             )
         if self._config.storage_mode == "journal":
             return await asyncio.to_thread(
@@ -362,6 +380,25 @@ class ClaimedLocalizedRenderItem:
     cleanup_paths: tuple[Path, ...]
     cursor_updates: tuple[JournalCursorUpdate, ...]
     localized_render_request: LocalizedClassifierRenderRequest
+
+
+def _localized_render_item_is_cursor_covered(
+    item: ClaimedLocalizedRenderItem,
+    journal_consumer_state_path: Path,
+    consumer_name: str,
+) -> bool:
+    if not item.cursor_updates:
+        return False
+    state_store = JournalConsumerStateStore(journal_consumer_state_path)
+    cursor_by_stream = state_store.load_cursors(consumer_name)
+    return all(
+        _cursor_covers_entry(
+            cursor_by_stream.get(cursor_update.stream_key),
+            cursor_update.journal_epoch,
+            cursor_update.journal_sequence,
+        )
+        for cursor_update in item.cursor_updates
+    )
 
 
 def _list_ready_manifests_oldest_first(ready_dir: Path) -> list[Path]:
@@ -708,6 +745,23 @@ def _load_claimed_rust_dsp_item(
         if paired_manifest_path is not None and paired_manifest_path.exists()
         else None
     )
+    render_body_filename = metadata.get("render_body_filename")
+    render_body_path: Path | None = None
+    if render_body_filename:
+        render_body_path = claim_path.parent / str(render_body_filename)
+        if not render_body_path.is_file():
+            raise FileNotFoundError(
+                f"Localized render body file missing for {claim_path.name}: {render_body_filename}"
+            )
+        _rewrite_manifest_derived_handle_to_processing_copy(
+            primary_manifest_payload,
+            render_body_path,
+        )
+        if paired_manifest_payload is not None:
+            _rewrite_manifest_derived_handle_to_processing_copy(
+                paired_manifest_payload,
+                render_body_path,
+            )
     bundle = load_localized_render_manifest_bundle(
         manifest_payload=primary_manifest_payload,
         journal_streams_dir=journal_streams_dir,
@@ -716,6 +770,8 @@ def _load_claimed_rust_dsp_item(
     cleanup_paths: list[Path] = [claim_path, primary_manifest_path]
     if paired_manifest_path is not None:
         cleanup_paths.append(paired_manifest_path)
+    if render_body_path is not None:
+        cleanup_paths.append(render_body_path)
     return ClaimedLocalizedRenderItem(
         ingest_id=str(metadata.get("ingest_id") or primary_manifest_payload.get("manifest_id") or claim_path.stem),
         source_kind="journal_localized_render_manifest",
@@ -732,6 +788,7 @@ def _claim_rust_dsp_manifests_oldest_first(
     processing_dir: Path,
     journal_consumer_state_path: Path,
     consumer_name: str,
+    max_claims: int | None = None,
 ) -> list[Path]:
     if not journal_manifest_dir.exists():
         return []
@@ -740,12 +797,22 @@ def _claim_rust_dsp_manifests_oldest_first(
     state_store = JournalConsumerStateStore(journal_consumer_state_path)
     state_store.ensure_initialized()
     cursor_by_stream = state_store.load_cursors(consumer_name)
-    active_stream_keys = _processing_stream_keys(processing_dir)
 
     localization_candidates: dict[tuple[tuple[Any, ...], ...], tuple[Path, dict[str, Any]]] = {}
     classifier_candidates: dict[tuple[tuple[Any, ...], ...], tuple[Path, dict[str, Any]]] = {}
 
-    for manifest_path in sorted(journal_manifest_dir.glob("*.json")):
+    manifest_paths = [path for path in journal_manifest_dir.glob("*.json") if path.is_file()]
+    if max_claims is not None:
+        scan_limit = max(256, int(max_claims) * 64)
+        manifest_paths = sorted(
+            manifest_paths,
+            key=lambda path: path.stat().st_mtime_ns,
+            reverse=True,
+        )[:scan_limit]
+    else:
+        manifest_paths = sorted(manifest_paths)
+
+    for manifest_path in manifest_paths:
         if not manifest_path.is_file() or manifest_path.name.startswith("."):
             continue
         with contextlib.suppress(Exception):
@@ -785,8 +852,25 @@ def _claim_rust_dsp_manifests_oldest_first(
         )
 
     claimed_paths: list[Path] = []
-    claimed_stream_keys = set(active_stream_keys)
-    for _, primary_path, primary_payload, paired_path, paired_payload in sorted(claims, key=lambda item: item[0]):
+    claim_limit = max_claims if max_claims is None else max(0, int(max_claims))
+    for _, primary_path, primary_payload, paired_path, paired_payload in sorted(
+        claims,
+        key=lambda item: item[0],
+        reverse=max_claims is not None,
+    ):
+        if claim_limit is not None and len(claimed_paths) >= claim_limit:
+            break
+        if _manifest_sources_are_cursor_covered(
+            primary_payload,
+            cursor_by_stream,
+            journal_streams_dir,
+        ):
+            with contextlib.suppress(FileNotFoundError):
+                primary_path.unlink()
+            if paired_path is not None:
+                with contextlib.suppress(FileNotFoundError):
+                    paired_path.unlink()
+            continue
         with contextlib.suppress(Exception):
             bundle = load_localized_render_manifest_bundle(
                 manifest_payload=primary_payload,
@@ -794,8 +878,6 @@ def _claim_rust_dsp_manifests_oldest_first(
                 paired_classifier_manifest_payload=paired_payload,
             )
             stream_keys = {cursor_update.stream_key for cursor_update in bundle.cursor_updates}
-            if stream_keys & claimed_stream_keys:
-                continue
             if bundle.cursor_updates and all(
                 _cursor_covers_entry(
                     cursor_by_stream.get(cursor_update.stream_key),
@@ -817,6 +899,12 @@ def _claim_rust_dsp_manifests_oldest_first(
             if paired_path is not None:
                 paired_processing_path = processing_dir / paired_path.name
                 paired_path.replace(paired_processing_path)
+            render_body_filename = _materialize_processing_local_render_body(
+                processing_dir=processing_dir,
+                ingest_id=bundle.request.manifest_id,
+                primary_manifest_payload=primary_payload,
+                paired_manifest_payload=paired_payload,
+            )
 
             claim_payload = {
                 "source_kind": "journal_localized_render_manifest",
@@ -834,11 +922,13 @@ def _claim_rust_dsp_manifests_oldest_first(
                 ],
                 "primary_manifest_filename": primary_processing_path.name,
                 "paired_manifest_filename": paired_processing_path.name if paired_processing_path is not None else None,
+                "render_body_filename": render_body_filename,
                 "cleanup_filenames": [
                     name
                     for name in (
                         primary_processing_path.name,
                         paired_processing_path.name if paired_processing_path is not None else None,
+                        render_body_filename,
                     )
                     if name is not None
                 ],
@@ -848,9 +938,101 @@ def _claim_rust_dsp_manifests_oldest_first(
                 json.dump(claim_payload, handle)
                 handle.write("\n")
             claimed_paths.append(claim_path)
-            claimed_stream_keys.update(stream_keys)
 
     return claimed_paths
+
+
+def _manifest_sources_are_cursor_covered(
+    manifest_payload: dict[str, Any],
+    cursor_by_stream: dict[str, JournalConsumerCursor],
+    journal_streams_dir: Path,
+) -> bool:
+    source_handles = manifest_payload.get("source_handles")
+    if not isinstance(source_handles, list) or not source_handles:
+        return False
+    covered_any = False
+    for handle_payload in source_handles:
+        if not isinstance(handle_payload, dict):
+            return False
+        stream_key = str(handle_payload.get("stream_key") or "")
+        journal_epoch = _optional_int(handle_payload.get("journal_epoch"))
+        if not stream_key or journal_epoch is None:
+            return False
+        journal_sequence = _journal_sequence_from_journal_id(
+            str(handle_payload.get("journal_id") or "")
+        )
+        if journal_sequence is None:
+            journal_sequence = _journal_sequence_from_manifest_source_handle(handle_payload)
+        if journal_sequence is None:
+            with contextlib.suppress(Exception):
+                handle = JournalPayloadHandle.from_mapping(
+                    handle_payload,
+                    journal_streams_dir=journal_streams_dir,
+                )
+                cursor_update = _lookup_cursor_update(handle, journal_streams_dir)
+                journal_sequence = cursor_update.journal_sequence
+        if journal_sequence is None:
+            return False
+        if not _cursor_covers_entry(cursor_by_stream.get(stream_key), journal_epoch, journal_sequence):
+            return False
+        covered_any = True
+    return covered_any
+
+
+def _journal_sequence_from_manifest_source_handle(handle_payload: dict[str, Any]) -> int | None:
+    for raw_value in (
+        handle_payload.get("journal_sequence"),
+        handle_payload.get("sequence"),
+    ):
+        parsed = _optional_int(raw_value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _journal_sequence_from_journal_id(value: str) -> int | None:
+    if not value:
+        return None
+    parts = value.split("-")
+    if len(parts) < 3 or parts[0] != "jrnl":
+        return None
+    for part in reversed(parts):
+        if part.isdigit():
+            return int(part)
+    return None
+
+
+def _materialize_processing_local_render_body(
+    *,
+    processing_dir: Path,
+    ingest_id: str,
+    primary_manifest_payload: dict[str, Any],
+    paired_manifest_payload: dict[str, Any] | None,
+) -> str | None:
+    derived_handle_payload = primary_manifest_payload.get("derived_handle")
+    if not isinstance(derived_handle_payload, dict) and paired_manifest_payload is not None:
+        derived_handle_payload = paired_manifest_payload.get("derived_handle")
+    if not isinstance(derived_handle_payload, dict):
+        return None
+
+    derived_handle = JournalPayloadHandle.from_mapping(derived_handle_payload)
+    render_body_path = processing_dir / f"{ingest_id}.render.body"
+    render_body_path.write_bytes(derived_handle.read_bytes())
+    return render_body_path.name
+
+
+def _rewrite_manifest_derived_handle_to_processing_copy(
+    manifest_payload: dict[str, Any],
+    render_body_path: Path,
+) -> None:
+    derived_handle_payload = manifest_payload.get("derived_handle")
+    if not isinstance(derived_handle_payload, dict):
+        return
+    derived_handle_payload["segment_path"] = str(render_body_path)
+    derived_handle_payload["payload_offset_bytes"] = 0
+    derived_handle_payload["payload_length_bytes"] = render_body_path.stat().st_size
+    derived_handle_payload["body_offset_bytes"] = 0
+    derived_handle_payload["body_length_bytes"] = render_body_path.stat().st_size
 
 
 def _cursor_covers_entry(

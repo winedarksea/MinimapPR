@@ -23,7 +23,9 @@ type BoxedResult<T> = Result<T, BoxedError>;
 pub const MAX_DURATION_NS: u64 = 5 * 60 * 1_000_000_000; // 5 minutes
 
 /// How long a lease survives without a heartbeat before it is GC'd.
-pub const HEARTBEAT_TTL_NS: u128 = 30 * 1_000_000_000; // 30 seconds
+/// 120s floor: worst-case pipeline lag with a full 128-manifest backlog and
+/// 1.5s BirdNET calls is ~192s; 120s matches the BirdNET subprocess timeout.
+pub const HEARTBEAT_TTL_NS: u128 = 120 * 1_000_000_000; // 120 seconds
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StreamRangeLeaseRequest {

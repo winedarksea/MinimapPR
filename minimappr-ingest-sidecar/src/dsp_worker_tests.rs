@@ -7,7 +7,7 @@ use crate::{
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use std::sync::Arc;
-use tokio::{fs, sync::Mutex};
+use tokio::{fs, sync::RwLock};
 
 #[tokio::test]
 async fn worker_publishes_localization_and_classifier_render_contract() {
@@ -51,7 +51,7 @@ async fn worker_publishes_localization_and_classifier_render_contract() {
         coverage_stats: None,
         promotion_ready: false,
     };
-    let state: SharedDspState = Arc::new(Mutex::new(Default::default()));
+    let state: SharedDspState = Arc::new(RwLock::new(Default::default()));
     let mut worker = DspWorker::new(
         manifest_store.clone(),
         derived_cache,
@@ -98,7 +98,7 @@ async fn worker_publishes_localization_and_classifier_render_contract() {
         .segment_path
         .exists());
 
-    let state = state.lock().await;
+    let state = state.read().await;
     assert_eq!(state.total_tdoa_results, 1);
     assert_eq!(state.total_localization_results, 1);
     assert_eq!(state.total_classifier_renders, 1);
@@ -118,7 +118,7 @@ async fn worker_publishes_omni_render_when_localization_coverage_is_unavailable(
     );
     derived_cache.ensure_initialized().await.unwrap();
 
-    let state: SharedDspState = Arc::new(Mutex::new(Default::default()));
+    let state: SharedDspState = Arc::new(RwLock::new(Default::default()));
     let mut worker = DspWorker::new(
         manifest_store.clone(),
         derived_cache,
@@ -179,7 +179,7 @@ async fn worker_publishes_omni_render_when_localization_coverage_is_unavailable(
         Some("localization_coverage_unavailable")
     );
 
-    let state = state.lock().await;
+    let state = state.read().await;
     assert_eq!(state.total_localization_results, 1);
     assert_eq!(state.total_classifier_renders, 2);
 }
@@ -198,7 +198,7 @@ async fn worker_skips_stale_manifest_without_rewriting_timestamps() {
     );
     derived_cache.ensure_initialized().await.unwrap();
 
-    let state: SharedDspState = Arc::new(Mutex::new(Default::default()));
+    let state: SharedDspState = Arc::new(RwLock::new(Default::default()));
     let mut worker = DspWorker::new(
         manifest_store.clone(),
         derived_cache,
@@ -232,7 +232,7 @@ async fn worker_skips_stale_manifest_without_rewriting_timestamps() {
         .unwrap();
     assert_eq!(renders.len(), 0);
 
-    let state = state.lock().await;
+    let state = state.read().await;
     assert_eq!(state.total_stale_manifest_skips, 1);
     assert_eq!(state.total_localization_results, 0);
     assert_eq!(state.total_classifier_renders, 0);
@@ -434,8 +434,71 @@ fn resolve_buffer_start_time_uses_relative_sample_time_before_now() {
     };
 
     assert_eq!(
-        resolve_buffer_start_time_ns(&decoded, &handle, 16_000, 99_999),
-        2_000_000_000
+        resolve_buffer_start_time_ns(&decoded, &handle, 16_000, 5_000_000_000),
+        3_000_000_000
+    );
+}
+
+#[test]
+fn resolve_buffer_start_time_prefers_packet_sample_index_over_receipt_time() {
+    let decoded = DecodedAudioPayload {
+        channels: vec![vec![0.0; 16]; 4],
+        sample_rate_hz: 16_000,
+        start_time_ns: None,
+        start_sample_index: Some(32_000),
+        end_sample_index: Some(32_016),
+        temperature_c: None,
+        humidity_fraction: None,
+    };
+    let handle = JournalPayloadHandle {
+        journal_epoch: 1,
+        segment_id: "seg-test".to_string(),
+        stream_key: "sirith-test__audio_main__abcd".to_string(),
+        payload_offset_bytes: 0,
+        payload_length_bytes: 0,
+        toa_ns: None,
+        tor_ns: Some(4_900_000_000),
+        sample_index_start: Some(32_000),
+        sample_count: Some(16),
+        integrity_hash: String::new(),
+        segment_path: std::path::PathBuf::new(),
+    };
+
+    // TDOA alignment must prefer packet-derived timing over server-receipt fallback.
+    assert_eq!(
+        resolve_buffer_start_time_ns(&decoded, &handle, 16_000, 5_000_000_000),
+        3_000_000_000
+    );
+}
+
+#[test]
+fn resolve_buffer_start_time_uses_handle_sample_index_relative_to_now() {
+    let decoded = DecodedAudioPayload {
+        channels: vec![vec![0.0; 16]; 4],
+        sample_rate_hz: 16_000,
+        start_time_ns: None,
+        start_sample_index: None,
+        end_sample_index: None,
+        temperature_c: None,
+        humidity_fraction: None,
+    };
+    let handle = JournalPayloadHandle {
+        journal_epoch: 1,
+        segment_id: "seg-test".to_string(),
+        stream_key: "sirith-test__audio_main__abcd".to_string(),
+        payload_offset_bytes: 0,
+        payload_length_bytes: 0,
+        toa_ns: None,
+        tor_ns: None,
+        sample_index_start: Some(16_000),
+        sample_count: Some(16),
+        integrity_hash: String::new(),
+        segment_path: std::path::PathBuf::new(),
+    };
+
+    assert_eq!(
+        resolve_buffer_start_time_ns(&decoded, &handle, 16_000, 5_000_000_000),
+        4_000_000_000
     );
 }
 

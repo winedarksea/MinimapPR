@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 
 import numpy as np
@@ -1303,6 +1304,7 @@ async def test_fusion_ingests_rust_localized_render_directly(tmp_path: Path) -> 
     )
     audio = np.random.default_rng(901).normal(0.0, 0.3, size=48_000).astype(np.float32)
 
+    ingest_before_ns = time.time_ns()
     await fusion.ingest_localized_render(
         LocalizedClassifierRenderRequest(
             manifest_id="manifest-rust-render-1",
@@ -1318,6 +1320,7 @@ async def test_fusion_ingests_rust_localized_render_directly(tmp_path: Path) -> 
             environment={"temperature_c": 18.0, "humidity_fraction": 0.4},
         )
     )
+    ingest_after_ns = time.time_ns()
 
     detections = await storage.list_detections(limit=10)
     assert len(detections) == 1
@@ -1328,16 +1331,93 @@ async def test_fusion_ingests_rust_localized_render_directly(tmp_path: Path) -> 
     assert tuple(detection["position_m"]) == pytest.approx((1.5, -0.5, 0.0))
 
     nodes = await storage.list_nodes(limit=10)
-    assert nodes == []
+    assert len(nodes) == 1
+    assert nodes[0]["id"] == node.id
+    last_seen_ns = int(nodes[0]["last_seen_ns"])
+    assert ingest_before_ns <= last_seen_ns <= ingest_after_ns
 
     sensor_descriptors = await fusion.registry.sensors_for_node(node.id)
     summary = await buffer.summarize_sensors(
         sensor_ids=[descriptor.sensor_id for descriptor in sensor_descriptors],
-        now_ns=1_739_950_000_000_000_000,
+        now_ns=ingest_after_ns,
     )
-    assert summary["active_sensor_count"] == 0
-    assert summary["sample_rate_hz"] is None
-    assert summary["rms"] is None
+    assert summary["active_sensor_count"] == len(sensor_descriptors)
+    assert summary["sample_rate_hz"] == 48_000
+    assert summary["last_sample_time_ns"] is not None
+    assert summary["age_seconds"] is not None
+    assert summary["age_seconds"] <= 1.0
+    assert summary["rms"] is not None
 
     await fusion.stop()
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_rust_render_production_classification_is_coalesced(tmp_path: Path) -> None:
+    settings = Settings(
+        db_path=tmp_path / "fusion_rust_render_coalesced.db",
+        snippet_dir=tmp_path / "snippets",
+        snippet_retention_seconds=0,
+        runtime_profile="birdnet_hybrid_production",
+        fusion_worker_count=1,
+        fusion_classification_queue_size=8,
+    )
+    settings.db_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.snippet_dir.mkdir(parents=True, exist_ok=True)
+
+    storage = Storage(settings.db_path)
+    await storage.initialize()
+    fusion = FusionNode(
+        settings=settings,
+        registry=NodeRegistry(),
+        buffer=MultiSensorBuffer(max_duration_seconds=settings.max_sensor_buffer_seconds),
+        localizer=LocalizationEngine(max_tau_s=0.03),
+        classifier=HeuristicClassifier(),
+        tracker=TrackManager(settings),
+        storage=storage,
+        live_callback=lambda payload: asyncio.sleep(0, result=None),
+        coordinate_frame=LocalCoordinateFrame(origin=GeoPoint(lat=37.0, lon=-122.0, alt_m=0.0), mode="flat"),
+        zone_matcher=ZoneMatcher(storage=storage),
+    )
+
+    node = NodeSpec(
+        id="sirith-rust-render-coalesce",
+        node_type=NodeType.SIRITH_TETRA,
+        position_m=(0.0, 0.0, 0.0),
+        sensor_offsets_m=[
+            (0.0, 0.05, 0.0),
+            (0.0433, 0.025, 0.0),
+            (0.0, 0.0, 0.0),
+            (0.02165, 0.025, 0.04082),
+        ],
+        capabilities=["audio"],
+        metadata={},
+    )
+    audio = np.random.default_rng(902).normal(0.0, 0.3, size=16_000).astype(np.float32)
+
+    for index in range(3):
+        await fusion.ingest_localized_render(
+            LocalizedClassifierRenderRequest(
+                manifest_id=f"manifest-rust-render-coalesce-{index}",
+                node=node,
+                event_time_ns=1_739_950_000_000_000_000 + index,
+                sample_rate_hz=16_000,
+                decoded_audio=audio,
+                localization_position_m=(1.5, -0.5, 0.0),
+                localization_confidence=0.87,
+                localization_gdop=1.2,
+                localization_method="rust_srp_phat",
+                render_kind="birdnet_hybrid_spatial_blend",
+                environment={"temperature_c": 18.0, "humidity_fraction": 0.4},
+            )
+        )
+
+    status = await fusion.status()
+    assert status["queue"]["classification_depth"] == 1
+    assert status["metrics"]["birdnet_chunk_dispatches_suppressed"] == 2
+
+    nodes = await storage.list_nodes(limit=10)
+    assert len(nodes) == 1
+    assert nodes[0]["id"] == node.id
+
     await storage.close()

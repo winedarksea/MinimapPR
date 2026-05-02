@@ -44,7 +44,7 @@ use render_mvdr::{render_mvdr, MvdrRenderRequest, TrajectoryWaypoint};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use stream_range_lease::{StreamRangeLeaseRequest, StreamRangeLeaseStore};
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, RwLock};
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
@@ -118,7 +118,7 @@ struct Args {
     #[arg(
         long,
         env = "MINIMAPPR_SIDECAR_DERIVED_CACHE_ADMISSION_RESERVE_BYTES",
-        default_value_t = 8_388_608
+        default_value_t = 33_554_432
     )]
     derived_cache_admission_reserve_bytes: u64,
 
@@ -207,6 +207,20 @@ struct Args {
 
     #[arg(
         long,
+        env = "MINIMAPPR_DSP_LOCALIZATION_CADENCE_MS",
+        default_value_t = 250
+    )]
+    dsp_localization_cadence_ms: u64,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_DSP_LOCALIZATION_RMS_GATE",
+        default_value_t = 0.0
+    )]
+    dsp_localization_rms_gate: f32,
+
+    #[arg(
+        long,
         env = "MINIMAPPR_BIRDNET_SPATIAL_BLEND_MIN_HZ",
         default_value_t = 1000.0
     )]
@@ -268,6 +282,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args = Args::parse();
     let storage_dir = args.spool_dir.clone();
     let storage_mode = args.storage_mode;
+    // Create the in-process channel before opening the backend so we can inject
+    // the sender into JournalRuntimeConfig. Capacity 512 = ~16s at 32ms frames.
+    let (raw_manifest_tx, raw_manifest_rx) = mpsc::channel::<manifests::DspManifest>(512);
     let journal_runtime_config = JournalRuntimeConfig {
         consumer_name: args.consumer_name.clone(),
         total_journal_budget_bytes: args.total_journal_budget_bytes,
@@ -276,6 +293,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             && !args.allow_non_tmpfs_journal,
         derived_cache_budget_bytes: args.derived_cache_budget_bytes,
         derived_cache_admission_reserve_bytes: args.derived_cache_admission_reserve_bytes,
+        raw_manifest_tx: Some(raw_manifest_tx),
     };
     let backend = IngestBackend::open(
         args.spool_dir,
@@ -285,7 +303,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     )
     .await?;
 
-    let dsp_state: SharedDspState = Arc::new(Mutex::new(Default::default()));
+    let dsp_state: SharedDspState = Arc::new(RwLock::new(Default::default()));
 
     // Spawn DSP worker if journal mode has a manifest store and derived cache.
     if let (Some(manifest_store), Some(derived_cache)) =
@@ -340,10 +358,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 default_temperature_c: args.default_temperature_c,
                 default_humidity_fraction: args.default_humidity_fraction,
                 classifier_command_json: args.classifier_command_json.clone(),
+                localization_cadence_ms: args.dsp_localization_cadence_ms,
+                localization_rms_gate: args.dsp_localization_rms_gate,
                 ..DspWorkerConfig::default()
             },
             dsp_state.clone(),
         );
+        let worker = worker.with_raw_manifest_receiver(raw_manifest_rx);
+        let (worker, classification_worker) = worker.with_classification_worker(16);
+        if let Some(cw) = classification_worker {
+            tokio::spawn(cw.run_loop());
+            info!("ClassificationWorker spawned");
+        }
         tokio::spawn(worker.run_loop());
         info!("DSP worker spawned");
     }
@@ -585,11 +611,12 @@ struct DspStatusResponse {
     total_classifier_renders: u64,
     total_failures: u64,
     total_stale_manifest_skips: u64,
+    total_classification_drops: u64,
     dsp_worker_running: bool,
 }
 
 async fn dsp_status(State(state): State<AppState>) -> Response {
-    let st = state.dsp_state.lock().await;
+    let st = state.dsp_state.read().await;
     Json(DspStatusResponse {
         worker_running: st.worker_running,
         last_heartbeat_ns: st.last_heartbeat_ns,
@@ -600,6 +627,7 @@ async fn dsp_status(State(state): State<AppState>) -> Response {
         total_classifier_renders: st.total_classifier_renders,
         total_failures: st.total_failures,
         total_stale_manifest_skips: st.total_stale_manifest_skips,
+        total_classification_drops: st.total_classification_drops,
         dsp_worker_running: st.worker_running,
     })
     .into_response()
@@ -611,7 +639,7 @@ async fn dsp_results(
 ) -> Response {
     let limit = params.limit.unwrap_or(50).min(200);
     let results: Vec<_> = {
-        let st = state.dsp_state.lock().await;
+        let st = state.dsp_state.read().await;
         st.recent_results
             .iter()
             .rev()
@@ -959,7 +987,7 @@ mod tests {
         AppState {
             backend,
             max_body_bytes,
-            dsp_state: Arc::new(Mutex::new(Default::default())),
+            dsp_state: Arc::new(RwLock::new(Default::default())),
             derived_cache: None,
             range_lease_store: None,
         }
@@ -972,7 +1000,8 @@ mod tests {
             admission_reserve_bytes: 16_777_216,
             enforce_tmpfs: false,
             derived_cache_budget_bytes: 67_108_864,
-            derived_cache_admission_reserve_bytes: 8_388_608,
+            derived_cache_admission_reserve_bytes: 33_554_432,
+            raw_manifest_tx: None,
         }
     }
 
@@ -1207,7 +1236,8 @@ mod tests {
                     admission_reserve_bytes: reserve,
                     enforce_tmpfs: false,
                     derived_cache_budget_bytes: 67_108_864,
-                    derived_cache_admission_reserve_bytes: 8_388_608,
+                    derived_cache_admission_reserve_bytes: 33_554_432,
+                    raw_manifest_tx: None,
                 },
             )
             .await

@@ -23,6 +23,24 @@ class _HangingClassifier(AudioClassifier):
         self.cancel_pending_calls += 1
 
 
+class _CancellingThenRecoveringClassifier(AudioClassifier):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def classify(self, samples: np.ndarray, sample_rate_hz: int) -> ClassificationResult:
+        del samples, sample_rate_hz
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("Analysis was cancelled")
+        return ClassificationResult(label="warbler", confidence=0.72, scores={"warbler": 0.72}, features={})
+
+
+class _AlwaysFailingClassifier(AudioClassifier):
+    def classify(self, samples: np.ndarray, sample_rate_hz: int) -> ClassificationResult:
+        del samples, sample_rate_hz
+        raise RuntimeError("birdnet worker crashed")
+
+
 class _StorageStub:
     async def upsert_label(self, *, name: str, category: str, source: str, created_ns: int) -> str:
         del name, category, source, created_ns
@@ -66,3 +84,42 @@ async def test_timeout_invokes_classifier_cancellation(monkeypatch: pytest.Monke
     assert result.classification.label == "timeout"
     assert result.classification.features.get("reason") == "classification_timeout"
     assert classifier.cancel_pending_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_analysis_retries_once_and_recovers() -> None:
+    classifier = _CancellingThenRecoveringClassifier()
+    orchestrator = ClassificationOrchestrator(
+        classifier=classifier,
+        storage=_StorageStub(),
+        taxonomy_provider=_TaxonomyStub(),
+        environment_provider=_EnvironmentStub(),
+    )
+
+    result = await orchestrator.classify_omni_only(
+        reference_signal=np.zeros(1024, dtype=np.float32),
+        sample_rate_hz=16_000,
+        event_time_ns=123,
+    )
+
+    assert result.classification.label == "warbler"
+    assert classifier.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_classifier_exception_degrades_to_unknown() -> None:
+    orchestrator = ClassificationOrchestrator(
+        classifier=_AlwaysFailingClassifier(),
+        storage=_StorageStub(),
+        taxonomy_provider=_TaxonomyStub(),
+        environment_provider=_EnvironmentStub(),
+    )
+
+    result = await orchestrator.classify_omni_only(
+        reference_signal=np.zeros(1024, dtype=np.float32),
+        sample_rate_hz=16_000,
+        event_time_ns=123,
+    )
+
+    assert result.classification.label == "unknown"
+    assert result.classification.features.get("reason") == "classification_error"

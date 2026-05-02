@@ -191,6 +191,20 @@ impl SensorStreamBuffer {
         self.samples[start_offset..].to_vec()
     }
 
+    pub fn latest_coverage_stats(&self, window_seconds: f64) -> Option<AudioCoverageStats> {
+        if self.coverage.is_empty() {
+            return None;
+        }
+        let window_samples = (window_seconds * f64::from(self.sample_rate_hz))
+            .round()
+            .max(1.0) as usize;
+        let start_offset = self.coverage.len().saturating_sub(window_samples);
+        Some(coverage_stats(
+            &self.coverage[start_offset..],
+            self.sample_rate_hz,
+        ))
+    }
+
     pub fn coverage_ending_at(
         &self,
         end_time_ns: i128,

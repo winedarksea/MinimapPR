@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use tokio::{
     fs::{self, OpenOptions},
     io::{AsyncSeekExt, AsyncWriteExt},
-    sync::Mutex,
+    sync::{mpsc, Mutex},
 };
 use tracing::warn;
 use uuid::Uuid;
@@ -42,6 +42,10 @@ pub struct JournalRuntimeConfig {
     pub enforce_tmpfs: bool,
     pub derived_cache_budget_bytes: u64,
     pub derived_cache_admission_reserve_bytes: u64,
+    /// Optional in-process channel for zero-latency delivery of raw_journal_append
+    /// manifests to the DspWorker, bypassing the 20ms filesystem polling cycle.
+    /// Filesystem writes still happen for durability; the channel is fire-and-forget.
+    pub raw_manifest_tx: Option<mpsc::Sender<DspManifest>>,
 }
 
 impl Default for JournalRuntimeConfig {
@@ -53,6 +57,7 @@ impl Default for JournalRuntimeConfig {
             enforce_tmpfs: true,
             derived_cache_budget_bytes: 67_108_864,
             derived_cache_admission_reserve_bytes: 8_388_608,
+            raw_manifest_tx: None,
         }
     }
 }
@@ -662,24 +667,30 @@ impl SegmentJournalBackend {
 
     async fn publish_capture_manifest(&self, entry: &SegmentJournalEntry) -> BoxedResult<()> {
         let handle = entry.payload_handle();
-        self.manifest_store
-            .publish(DspManifest {
-                manifest_id: format!("manifest-{}", entry.journal_id),
-                manifest_type: "raw_journal_append".to_string(),
-                created_ns: entry
-                    .toa_ns
-                    .map(u128::from)
-                    .or(entry.tor_ns.map(u128::from))
-                    .unwrap_or(entry.ingest_received_ns),
-                source_handles: vec![handle],
-                derived_handle: None,
-                localization: None,
-                classifier_render: None,
-                birdnet: None,
-                coverage_stats: None,
-                promotion_ready: false,
-            })
-            .await?;
+        let manifest = DspManifest {
+            manifest_id: format!("manifest-{}", entry.journal_id),
+            manifest_type: "raw_journal_append".to_string(),
+            created_ns: entry
+                .toa_ns
+                .map(u128::from)
+                .or(entry.tor_ns.map(u128::from))
+                .unwrap_or(entry.ingest_received_ns),
+            source_handles: vec![handle],
+            derived_handle: None,
+            localization: None,
+            classifier_render: None,
+            birdnet: None,
+            coverage_stats: None,
+            promotion_ready: false,
+        };
+        // Write to filesystem first so the manifest exists before the DspWorker
+        // can attempt mark_consumed. The channel send is fire-and-forget; if the
+        // worker receives via channel and calls mark_consumed before the file is
+        // present it would fail silently, leaving the file for re-processing.
+        self.manifest_store.publish(manifest.clone()).await?;
+        if let Some(tx) = &self.runtime_config.raw_manifest_tx {
+            let _ = tx.try_send(manifest);
+        }
         Ok(())
     }
 
@@ -1705,6 +1716,7 @@ mod tests {
             enforce_tmpfs: false,
             derived_cache_budget_bytes: 67_108_864,
             derived_cache_admission_reserve_bytes: 8_388_608,
+            raw_manifest_tx: None,
         }
     }
 
@@ -2366,6 +2378,7 @@ mod tests {
                 enforce_tmpfs: false,
                 derived_cache_budget_bytes: 67_108_864,
                 derived_cache_admission_reserve_bytes: 8_388_608,
+                raw_manifest_tx: None,
             },
         )
         .await
@@ -2413,6 +2426,7 @@ mod tests {
                 enforce_tmpfs: false,
                 derived_cache_budget_bytes: 67_108_864,
                 derived_cache_admission_reserve_bytes: 8_388_608,
+                raw_manifest_tx: None,
             },
         )
         .await
@@ -2568,6 +2582,7 @@ mod tests {
                 enforce_tmpfs: false,
                 derived_cache_budget_bytes: 67_108_864,
                 derived_cache_admission_reserve_bytes: 8_388_608,
+                raw_manifest_tx: None,
             },
         )
         .await
@@ -2717,6 +2732,7 @@ mod tests {
                 enforce_tmpfs: false,
                 derived_cache_budget_bytes: 67_108_864,
                 derived_cache_admission_reserve_bytes: 8_388_608,
+                raw_manifest_tx: None,
             },
         )
         .await
@@ -2804,6 +2820,7 @@ mod tests {
                 enforce_tmpfs: false,
                 derived_cache_budget_bytes: 67_108_864,
                 derived_cache_admission_reserve_bytes: 8_388_608,
+                raw_manifest_tx: None,
             },
         )
         .await
@@ -2902,6 +2919,7 @@ mod tests {
                 enforce_tmpfs: false,
                 derived_cache_budget_bytes: 67_108_864,
                 derived_cache_admission_reserve_bytes: 8_388_608,
+                raw_manifest_tx: None,
             },
         )
         .await
@@ -3052,6 +3070,72 @@ mod tests {
             .join("consumed")
             .join(path.file_name().expect("manifest file name should exist"));
         assert!(consumed_path.exists(), "consumed file should exist");
+
+        let pending = manifest_store
+            .query_pending("raw_journal_append")
+            .await
+            .unwrap();
+        assert_eq!(
+            pending.len(),
+            0,
+            "consumed manifest should not appear in pending"
+        );
+    }
+
+    #[tokio::test]
+    async fn mark_consumed_matches_manifest_id_when_filename_differs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = IngestBackend::open(
+            tmp.path().join("store"),
+            IngestStorageMode::Journal,
+            8_388_608,
+            test_journal_runtime_config(),
+        )
+        .await
+        .unwrap();
+        let manifest_store = backend.manifest_store().expect("journal mode required");
+
+        manifest_store.ensure_initialized().await.unwrap();
+
+        let manifest = crate::manifests::DspManifest {
+            manifest_id: "manifest-xyz".to_string(),
+            manifest_type: "raw_journal_append".to_string(),
+            created_ns: 1,
+            source_handles: vec![],
+            derived_handle: None,
+            localization: None,
+            classifier_render: None,
+            birdnet: None,
+            coverage_stats: None,
+            promotion_ready: false,
+        };
+        let pending_file = tmp
+            .path()
+            .join("store")
+            .join("journal")
+            .join("manifests")
+            .join("pending")
+            .join("1700000000-node1.json");
+        tokio::fs::write(&pending_file, serde_json::to_vec(&manifest).unwrap())
+            .await
+            .unwrap();
+
+        manifest_store.mark_consumed("manifest-xyz").await.unwrap();
+        assert!(
+            !pending_file.exists(),
+            "pending manifest should be moved out of pending directory"
+        );
+        let consumed_file = tmp
+            .path()
+            .join("store")
+            .join("journal")
+            .join("manifests")
+            .join("consumed")
+            .join("1700000000-node1.json");
+        assert!(
+            consumed_file.exists(),
+            "consumed manifest should preserve file name"
+        );
 
         let pending = manifest_store
             .query_pending("raw_journal_append")

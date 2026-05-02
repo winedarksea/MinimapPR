@@ -233,6 +233,42 @@ class ClassificationOrchestrator:
                 scores={},
                 features={"reason": "classification_timeout"},
             )
+        except Exception as exc:  # noqa: BLE001 - classifier backends are optional/runtime-boundary code
+            message = str(exc).strip()
+            if "cancel" in message.lower():
+                logger.warning("Classification backend cancelled analysis; retrying once: %s", message)
+                try:
+                    return await asyncio.wait_for(
+                        asyncio.to_thread(self._classifier.classify, signal, sample_rate_hz),
+                        timeout=_CLASSIFICATION_TIMEOUT_S,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Classification retry timed out after %.0fs", _CLASSIFICATION_TIMEOUT_S
+                    )
+                    try:
+                        self._classifier.cancel_pending()
+                    except Exception:  # noqa: BLE001
+                        logger.exception("Classifier cancellation hook failed after retry timeout")
+                    return ClassificationResult(
+                        label="timeout",
+                        confidence=0.0,
+                        scores={},
+                        features={"reason": "classification_timeout"},
+                    )
+                except Exception as retry_exc:  # noqa: BLE001
+                    message = str(retry_exc).strip() or type(retry_exc).__name__
+                    exc = retry_exc
+            logger.warning("Classification backend failed; degrading to unknown: %s", message or type(exc).__name__)
+            return ClassificationResult(
+                label="unknown",
+                confidence=0.0,
+                scores={},
+                features={
+                    "reason": "classification_error",
+                    "error_type": type(exc).__name__,
+                },
+            )
 
     async def _build_result(
         self,

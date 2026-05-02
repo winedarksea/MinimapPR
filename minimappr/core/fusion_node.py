@@ -397,6 +397,8 @@ class FusionNode:
         if self._stopping:
             raise ValueError("Fusion node is stopping")
 
+        server_received_ns = time.time_ns()
+
         normalized_audio = np.asarray(payload.decoded_audio, dtype=np.float32)
         if normalized_audio.ndim != 1 or normalized_audio.size == 0:
             raise ValueError("Localized render audio must be a non-empty mono signal")
@@ -407,11 +409,31 @@ class FusionNode:
         metadata["time_quality"] = payload.time_quality.value
         node = payload.node.model_copy(update={"metadata": metadata})
 
-        # Localized classifier renders are derived products, not direct node
-        # heartbeats. Register sensors for downstream attribution, but do not
-        # refresh persisted node liveness or raw-audio debug state from them.
-        runtime = await self.registry.upsert(node, time.time_ns())
+        # Localized classifier renders are derived products, not raw sensor frames.
+        # Keep event-time semantics for localization/classification, but update
+        # node heartbeat freshness from server receipt time so online/offline
+        # status reflects current connectivity rather than source clock skew.
+        runtime = await self.registry.upsert(node, server_received_ns)
+        position_geo = node.position_geo
+        if position_geo is None and node.position_m is not None:
+            position_geo = self.coordinate_frame.local_to_geo(node.position_m)
+        await self.storage.upsert_node(
+            spec=node,
+            last_seen_ns=server_received_ns,
+            position_geo=position_geo,
+        )
         sensor_descriptors = await self.registry.sensors_for_node(node.id)
+        render_duration_ns = int(
+            round(normalized_audio.size * (1_000_000_000.0 / float(payload.sample_rate_hz)))
+        )
+        render_start_time_ns = server_received_ns - max(0, render_duration_ns)
+        for descriptor in sensor_descriptors:
+            await self.buffer.append(
+                sensor_id=descriptor.sensor_id,
+                sample_rate_hz=payload.sample_rate_hz,
+                start_time_ns=render_start_time_ns,
+                samples=normalized_audio,
+            )
         selected_positions = {
             descriptor.sensor_id: descriptor.position_m for descriptor in sensor_descriptors
         }
@@ -420,6 +442,11 @@ class FusionNode:
             raise ValueError(f"Node {node.id!r} did not register any sensors")
 
         reference_sensor = selected_sensor_ids[0]
+        rust_audio_quality = (
+            {reference_sensor: payload.audio_quality}
+            if payload.audio_quality is not None
+            else {}
+        )
         capability_tier = (
             "full_3d"
             if len(selected_sensor_ids) >= self.settings.min_sensors_for_3d
@@ -436,7 +463,17 @@ class FusionNode:
         )
         localized_product = LocalizedCandidate(
             candidate=candidate,
-            localization_branch=None,
+            localization_branch=LocalizationBranch(
+                localization_position_m=payload.localization_position_m,
+                localization_confidence=payload.localization_confidence,
+                localization_gdop=payload.localization_gdop,
+                reference_sensor=reference_sensor,
+                reference_signal=normalized_audio,
+                classification_reference_signal=normalized_audio,
+                tdoa_s={},
+                localization_method=payload.localization_method,
+                capability_tier=capability_tier,
+            ),
             selected_sensor_ids=selected_sensor_ids,
             selected_windows={},
             selected_positions=selected_positions,
@@ -445,8 +482,8 @@ class FusionNode:
             omni_reference_signal=normalized_audio,
             omni_position_m=payload.localization_position_m,
             omni_classification_reference_signal=normalized_audio,
-            localization_audio_quality={},
-            classification_audio_quality={},
+            localization_audio_quality=rust_audio_quality,
+            classification_audio_quality=rust_audio_quality,
             classification_audio_quality_source="rust_classifier_render",
             environment=dict(payload.environment),
         )
@@ -1166,10 +1203,10 @@ class FusionNode:
         if stats is None:
             return {
                 "source_window_type": source_window_type,
-                "degraded": False,
-                "warning": False,
-                "coverage_ratio": 1.0,
-                "missing_ratio": 0.0,
+                "degraded": True,
+                "warning": True,
+                "coverage_ratio": 0.0,
+                "missing_ratio": 1.0,
                 "max_gap_seconds": 0.0,
                 "sample_count": 0,
                 "covered_samples": 0,

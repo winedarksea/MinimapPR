@@ -9,6 +9,7 @@ import logging
 import os
 import sys
 import time
+import multiprocessing
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -274,6 +275,16 @@ def _should_block_direct_ingest(state) -> bool:
     return _ingest_sidecar_is_running(state)
 
 
+def _should_autostart_ingest_sidecar(settings: "Settings") -> bool:
+    """Return True when the managed sidecar process should be started.
+
+    In Python-direct ingest mode, firmware payloads are accepted directly by the
+    API process, so auto-launching the sidecar is unnecessary and can introduce
+    unrelated startup failures.
+    """
+    return settings.ingest_sidecar_enabled and not settings.direct_ingest_enabled
+
+
 def _sidecar_healthcheck_url(port: int) -> str:
     return f"http://127.0.0.1:{port}/healthz"
 
@@ -308,6 +319,11 @@ async def _wait_for_ingest_sidecar_ready(
     deadline = loop.time() + timeout_seconds
     while True:
         if process.returncode is not None:
+            if await asyncio.to_thread(_probe_ingest_sidecar_ready, port):
+                raise RuntimeError(
+                    "Ingest sidecar child process exited, but readiness endpoint is already healthy on "
+                    f"port {port}. Another ingest worker is likely already running."
+                )
             raise RuntimeError(
                 f"Ingest sidecar exited before readiness check completed (code {process.returncode})"
             )
@@ -399,6 +415,11 @@ async def _start_ingest_sidecar(
             binary,
         )
         return None
+    if await asyncio.to_thread(_probe_ingest_sidecar_ready, settings.ingest_sidecar_port):
+        raise RuntimeError(
+            "Ingest sidecar readiness endpoint is already healthy on "
+            f"port {settings.ingest_sidecar_port}. Another ingest worker is likely already running."
+        )
     env = {
         **os.environ,
         # Keep spool dir in sync with the Python consumer regardless of what
@@ -556,17 +577,24 @@ async def lifespan(app: FastAPI):
 
     sidecar_state = _SidecarState()
     sidecar_supervision_task: asyncio.Task | None = None
-    if settings.ingest_sidecar_enabled:
-        sidecar_process = await _start_ingest_sidecar(settings)
-        if sidecar_process is not None:
-            sidecar_state._current_process = sidecar_process
-            sidecar_state.status = "running"
-            sidecar_state.pid = sidecar_process.pid
-            sidecar_supervision_task = asyncio.create_task(
-                _supervise_ingest_sidecar(settings, sidecar_process, sidecar_state)
-            )
+    if _should_autostart_ingest_sidecar(settings):
+        try:
+            sidecar_process = await _start_ingest_sidecar(settings)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Ingest sidecar startup failed; continuing with direct ingest fallback: %s", exc)
+            sidecar_state.status = "startup_failed"
         else:
-            sidecar_state.status = "binary_not_found"
+            if sidecar_process is not None:
+                sidecar_state._current_process = sidecar_process
+                sidecar_state.status = "running"
+                sidecar_state.pid = sidecar_process.pid
+                sidecar_supervision_task = asyncio.create_task(
+                    _supervise_ingest_sidecar(settings, sidecar_process, sidecar_state)
+                )
+            else:
+                sidecar_state.status = "binary_not_found"
     else:
         sidecar_state.status = "disabled"
 
@@ -630,27 +658,44 @@ async def lifespan(app: FastAPI):
     cleanup_task: asyncio.Task | None = None
     site_origin_reconcile_task: asyncio.Task | None = None
     ingest_spool_tasks: list[asyncio.Task] = []
-    environment_provider.bootstrap(await storage.list_latest_environment_per_node(limit=1024))
-    await fusion_node.start()
-    await federation.start()
-    cleanup_task = asyncio.create_task(_cleanup_loop(app))
-    app.state.cleanup_task = cleanup_task
-    ingest_spool_tasks = [
-        asyncio.create_task(ingest_spool_consumer.run_forever(worker_name=f"spool-{index + 1}"))
-        for index in range(settings.ingest_spool_worker_count)
-    ]
-    app.state.ingest_spool_tasks = ingest_spool_tasks
-    if should_schedule_deferred_site_origin_reconciliation(
-        settings,
-        initial_resolution_source=resolved_site_origin.source,
-    ):
-        site_origin_reconcile_task = asyncio.create_task(_reconcile_site_origin_after_startup(app))
-    app.state.site_origin_reconcile_task = site_origin_reconcile_task
-
     try:
+        environment_provider.bootstrap(await storage.list_latest_environment_per_node(limit=1024))
+        await fusion_node.start()
+        await federation.start()
+        cleanup_task = asyncio.create_task(_cleanup_loop(app))
+        app.state.cleanup_task = cleanup_task
+        ingest_spool_tasks = [
+            asyncio.create_task(ingest_spool_consumer.run_forever(worker_name=f"spool-{index + 1}"))
+            for index in range(settings.ingest_spool_worker_count)
+        ]
+        app.state.ingest_spool_tasks = ingest_spool_tasks
+        if should_schedule_deferred_site_origin_reconciliation(
+            settings,
+            initial_resolution_source=resolved_site_origin.source,
+        ):
+            site_origin_reconcile_task = asyncio.create_task(_reconcile_site_origin_after_startup(app))
+        app.state.site_origin_reconcile_task = site_origin_reconcile_task
+
         yield
     finally:
-        shutdown_timeout_s = 5.0
+        shutdown_timeout_s = 15.0
+        # Stop the ingest sidecar first so startup/bind failures do not leave
+        # the Rust process running after the Python server begins teardown.
+        if sidecar_supervision_task is not None:
+            sidecar_supervision_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+                await asyncio.wait_for(sidecar_supervision_task, timeout=shutdown_timeout_s)
+        current_sidecar = sidecar_state._current_process
+        if current_sidecar is not None and current_sidecar.returncode is None:
+            logger.info("Stopping ingest sidecar (pid %d)", current_sidecar.pid)
+            current_sidecar.terminate()
+            try:
+                await asyncio.wait_for(current_sidecar.wait(), timeout=shutdown_timeout_s)
+            except asyncio.TimeoutError:
+                logger.warning("Ingest sidecar did not exit cleanly; sending SIGKILL")
+                current_sidecar.kill()
+                await current_sidecar.wait()
+
         if site_origin_reconcile_task is not None:
             site_origin_reconcile_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
@@ -689,22 +734,20 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.warning("Storage close failed during shutdown: %s", exc)
 
-        # Cancel the supervision task first so it does not restart the process
-        # after we intentionally terminate it.
-        if sidecar_supervision_task is not None:
-            sidecar_supervision_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
-                await asyncio.wait_for(sidecar_supervision_task, timeout=shutdown_timeout_s)
-        current_sidecar = sidecar_state._current_process
-        if current_sidecar is not None and current_sidecar.returncode is None:
-            logger.info("Stopping ingest sidecar (pid %d)", current_sidecar.pid)
-            current_sidecar.terminate()
-            try:
-                await asyncio.wait_for(current_sidecar.wait(), timeout=shutdown_timeout_s)
-            except asyncio.TimeoutError:
-                logger.warning("Ingest sidecar did not exit cleanly; sending SIGKILL")
-                current_sidecar.kill()
-                await current_sidecar.wait()
+        # After closing the classifier, explicitly clean up multiprocessing resources
+        # to avoid "resource_tracker: There appear to be X leaked shared_memory objects" warnings.
+        # Give multiprocessing time to fully clean up before the event loop closes.
+        try:
+            # Wait for any active processes to finish with an explicit timeout.
+            # This allows the resource_tracker to properly unregister shared_memory objects.
+            for proc in multiprocessing.active_children():
+                try:
+                    proc.join(timeout=1.0)
+                except Exception:  # noqa: BLE001
+                    pass
+            logger.info("Multiprocessing cleanup completed during shutdown")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Multiprocessing cleanup warning: %s", exc)
 
 
 app = FastAPI(title="MinimapPR", version="0.1.0", lifespan=lifespan)

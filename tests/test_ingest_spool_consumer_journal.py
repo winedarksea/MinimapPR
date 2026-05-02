@@ -13,7 +13,12 @@ from fastapi.testclient import TestClient
 
 from minimappr.api.binary_ingest import parse_binary_ingest_payload
 from minimappr.api.rust_dsp_manifests import LocalizedClassifierRenderRequest
-from minimappr.api.spool_consumer import IngestSpoolConfig, IngestSpoolConsumer
+from minimappr.api.spool_consumer import (
+    IngestSpoolConfig,
+    IngestSpoolConsumer,
+    _claim_rust_dsp_manifests_oldest_first,
+    _load_claimed_rust_dsp_item,
+)
 from minimappr.main import app
 
 
@@ -315,6 +320,7 @@ def _write_rust_dsp_manifest_pair(
     birdnet_label: str | None = None,
     birdnet_label_confidence: float | None = None,
     birdnet_scores: dict[str, float] | None = None,
+    coverage_stats: dict | None = None,
 ) -> None:
     manifest_dir = spool_dir / "journal" / "manifests" / "pending"
     manifest_dir.mkdir(parents=True, exist_ok=True)
@@ -365,7 +371,7 @@ def _write_rust_dsp_manifest_pair(
                 },
                 "classifier_render": classifier_render_payload,
                 "birdnet": None,
-                "coverage_stats": None,
+                "coverage_stats": coverage_stats,
                 "promotion_ready": False,
             }
         ),
@@ -402,7 +408,7 @@ def _write_rust_dsp_manifest_pair(
                     "label_confidence": birdnet_label_confidence,
                     "scores": birdnet_scores,
                 },
-                "coverage_stats": None,
+                "coverage_stats": coverage_stats,
                 "promotion_ready": True,
             }
         ),
@@ -598,6 +604,23 @@ async def test_journal_consumer_prefers_rust_dsp_manifest_pair(tmp_path: Path) -
         payload_length_bytes=len(raw_body),
         derived_pcm16=render_pcm16,
         created_ns=now_ns - 100_000_000,
+        coverage_stats={
+            "window_type": "classification_trailing",
+            "active_channels": [0, 1, 2, 3],
+            "per_channel": [
+                {
+                    "sample_count": 48_000,
+                    "covered_samples": 43_200,
+                    "missing_samples": 4_800,
+                    "coverage_ratio": 0.9,
+                    "missing_ratio": 0.1,
+                    "max_gap_samples": 1_600,
+                    "max_gap_seconds": 0.1,
+                    "warning": True,
+                    "degraded": True,
+                }
+            ],
+        },
     )
 
     summary = await consumer.run_once(now_ns=now_ns)
@@ -610,6 +633,9 @@ async def test_journal_consumer_prefers_rust_dsp_manifest_pair(tmp_path: Path) -
     assert localized_payload.manifest_id == "manifest-localization"
     assert localized_payload.render_kind == "birdnet_hybrid_spatial_blend"
     assert localized_payload.localization_method == "srp_phat"
+    assert localized_payload.audio_quality is not None
+    assert localized_payload.audio_quality.missing_ratio == pytest.approx(0.1)
+    assert localized_payload.audio_quality.missing_samples == 4_800
     cursor_row = _load_cursor_row(spool_dir)
     assert int(cursor_row["journal_epoch"]) == 1
     assert int(cursor_row["last_fully_processed_journal_sequence"]) == 41
@@ -675,3 +701,198 @@ async def test_journal_consumer_loads_authoritative_rust_classification(tmp_path
     assert localized_payload.authoritative_classification.label == "winter wren"
     assert localized_payload.authoritative_classification.confidence == pytest.approx(0.91)
     assert localized_payload.authoritative_classification.scores["song sparrow"] == pytest.approx(0.08)
+
+
+def test_rust_dsp_claim_materializes_processing_local_render_copy(tmp_path: Path) -> None:
+    spool_dir = tmp_path / "spool"
+    stream_key = "sirith-array__audio_main__claim-copy"
+    raw_body = _binary_ingest_payload(
+        [
+            _binary_frame(
+                np.random.default_rng(81).normal(0.0, 0.2, size=(4, 512)).astype(np.float32),
+                start_time_ns=time.time_ns() - 200_000_000,
+                sequence=81,
+                start_sample_index=0,
+            )
+        ],
+        node_id="sirith-array",
+        sensor_count=4,
+    )
+    _write_journal_item(
+        spool_dir,
+        endpoint="/api/v1/ingest/binary",
+        body=raw_body,
+        received_ns=time.time_ns() - 100_000_000,
+        journal_id="jrnl-00000000000000000081",
+        journal_sequence=81,
+        stream_key=stream_key,
+        segment_id="seg-rust-claim-copy",
+    )
+    render_pcm16 = (np.zeros(48_000, dtype=np.int16)).tobytes()
+    _write_rust_dsp_manifest_pair(
+        spool_dir,
+        stream_key=stream_key,
+        segment_id="seg-rust-claim-copy",
+        payload_length_bytes=len(raw_body),
+        derived_pcm16=render_pcm16,
+        created_ns=time.time_ns(),
+    )
+
+    processing_dir = spool_dir / "processing"
+    claim_paths = _claim_rust_dsp_manifests_oldest_first(
+        spool_dir / "journal" / "manifests" / "pending",
+        spool_dir / "journal" / "streams",
+        processing_dir,
+        spool_dir / "journal" / "consumer_state.sqlite3",
+        "python-ingest",
+    )
+
+    assert len(claim_paths) == 1
+    claim_payload = json.loads(claim_paths[0].read_text(encoding="utf-8"))
+    render_body_filename = claim_payload["render_body_filename"]
+    render_body_path = processing_dir / render_body_filename
+    assert render_body_path.is_file()
+
+    derived_path = spool_dir / "journal" / "derived-cache" / "render-1.bin"
+    derived_path.unlink()
+
+    claimed = _load_claimed_rust_dsp_item(claim_paths[0], spool_dir / "journal" / "streams")
+    assert claimed.localized_render_request.decoded_audio.size == len(render_pcm16) // 2
+
+
+def test_rust_dsp_claim_does_not_treat_numeric_segment_id_part_as_sequence(
+    tmp_path: Path,
+) -> None:
+    spool_dir = tmp_path / "spool"
+    stream_key = "sirith-array__audio_main__numeric-segment"
+    raw_body = _binary_ingest_payload(
+        [
+            _binary_frame(
+                np.random.default_rng(93).normal(0.0, 0.2, size=(4, 512)).astype(np.float32),
+                start_time_ns=time.time_ns() - 200_000_000,
+                sequence=93,
+                start_sample_index=0,
+            )
+        ],
+        node_id="sirith-array",
+        sensor_count=4,
+    )
+    segment_id = "seg-1777673123997424000-b37ca52b-9662-4306-af7b-81ddd6371b06"
+    _write_journal_item(
+        spool_dir,
+        endpoint="/api/v1/ingest/binary",
+        body=raw_body,
+        received_ns=time.time_ns() - 100_000_000,
+        journal_id="jrnl-00000000000000000001-00000000000000093000-sirith-array",
+        journal_sequence=93_000,
+        stream_key=stream_key,
+        segment_id=segment_id,
+    )
+    _write_rust_dsp_manifest_pair(
+        spool_dir,
+        stream_key=stream_key,
+        segment_id=segment_id,
+        payload_length_bytes=len(raw_body),
+        derived_pcm16=(np.zeros(48_000, dtype=np.int16)).tobytes(),
+        created_ns=time.time_ns(),
+        journal_epoch=1,
+    )
+    connection = sqlite3.connect(spool_dir / "journal" / "consumer_state.sqlite3")
+    try:
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS consumer_cursors (
+                consumer_name TEXT NOT NULL,
+                stream_key TEXT NOT NULL,
+                journal_epoch INTEGER NOT NULL,
+                last_fully_processed_journal_sequence INTEGER NOT NULL,
+                updated_ns INTEGER NOT NULL,
+                PRIMARY KEY (consumer_name, stream_key)
+            );
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO consumer_cursors (
+                consumer_name,
+                stream_key,
+                journal_epoch,
+                last_fully_processed_journal_sequence,
+                updated_ns
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            ("python-ingest", stream_key, 1, 4_306, time.time_ns()),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    claim_paths = _claim_rust_dsp_manifests_oldest_first(
+        spool_dir / "journal" / "manifests" / "pending",
+        spool_dir / "journal" / "streams",
+        spool_dir / "processing",
+        spool_dir / "journal" / "consumer_state.sqlite3",
+        "python-ingest",
+    )
+
+    assert len(claim_paths) == 1
+
+
+def test_rust_dsp_claims_multiple_pending_manifests_for_one_stream(tmp_path: Path) -> None:
+    spool_dir = tmp_path / "spool"
+    stream_key = "sirith-array__audio_main__claim-backlog"
+    for sequence in (91, 92):
+        raw_body = _binary_ingest_payload(
+            [
+                _binary_frame(
+                    np.random.default_rng(sequence).normal(0.0, 0.2, size=(4, 512)).astype(np.float32),
+                    start_time_ns=time.time_ns() - 200_000_000,
+                    sequence=sequence,
+                    start_sample_index=(sequence - 91) * 512,
+                )
+            ],
+            node_id="sirith-array",
+            sensor_count=4,
+        )
+        segment_id = f"seg-rust-backlog-{sequence}"
+        _write_journal_item(
+            spool_dir,
+            endpoint="/api/v1/ingest/binary",
+            body=raw_body,
+            received_ns=time.time_ns() - 100_000_000,
+            journal_id=f"jrnl-{sequence:020d}",
+            journal_sequence=sequence,
+            stream_key=stream_key,
+            segment_id=segment_id,
+        )
+        _write_rust_dsp_manifest_pair(
+            spool_dir,
+            stream_key=stream_key,
+            segment_id=segment_id,
+            payload_length_bytes=len(raw_body),
+            derived_pcm16=(np.zeros(48_000, dtype=np.int16)).tobytes(),
+            created_ns=time.time_ns() + sequence,
+            journal_epoch=1,
+        )
+        manifest_dir = spool_dir / "journal" / "manifests" / "pending"
+        localization_path = manifest_dir / f"manifest-localization-{sequence}.json"
+        render_path = manifest_dir / f"manifest-render-{sequence}.json"
+        (manifest_dir / "manifest-localization.json").rename(localization_path)
+        (manifest_dir / "manifest-render.json").rename(render_path)
+        localization_payload = json.loads(localization_path.read_text(encoding="utf-8"))
+        render_payload = json.loads(render_path.read_text(encoding="utf-8"))
+        localization_payload["manifest_id"] = f"manifest-localization-{sequence}"
+        render_payload["manifest_id"] = f"manifest-render-{sequence}"
+        localization_path.write_text(json.dumps(localization_payload), encoding="utf-8")
+        render_path.write_text(json.dumps(render_payload), encoding="utf-8")
+
+    claim_paths = _claim_rust_dsp_manifests_oldest_first(
+        spool_dir / "journal" / "manifests" / "pending",
+        spool_dir / "journal" / "streams",
+        spool_dir / "processing",
+        spool_dir / "journal" / "consumer_state.sqlite3",
+        "python-ingest",
+    )
+
+    assert len(claim_paths) == 2

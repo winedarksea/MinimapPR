@@ -68,6 +68,9 @@ birdnet_hybrid_production, birdnet_omni_testing
 ```
 conda activate minimappr && export MINIMAPPR_HOST=192.168.8.199 MINIMAPPR_PORT=8080 MINIMAPPR_RUNTIME_PROFILE=birdnet_hybrid_production && minimappr
 ```
+```
+conda activate minimappr && export MINIMAPPR_HOST=192.168.8.165 MINIMAPPR_PORT=8080 MINIMAPPR_RUNTIME_PROFILE=birdnet_hybrid_production MINIMAPPR_INGEST_STORAGE_MODE=journal MINIMAPPR_DIRECT_INGEST_ENABLED=false MINIMAPPR_INGEST_SPOOL_READY_TTL_SECONDS=60 && minimappr
+```
 cleanup 
 ```bash
 minimappr cleanup full --yes
@@ -111,6 +114,17 @@ try:
                 sys.stdout.flush()
 finally:
     os.close(fd)
+```
+
+Run with Python ingest
+```
+conda activate minimappr && \
+export MINIMAPPR_HOST=192.168.8.165 \
+MINIMAPPR_PORT=8080 \
+MINIMAPPR_RUNTIME_PROFILE=birdnet_hybrid_production \
+MINIMAPPR_DIRECT_INGEST_ENABLED=true && \
+unset MINIMAPPR_INGEST_STORAGE_MODE MINIMAPPR_INGEST_SPOOL_READY_TTL_SECONDS && \
+minimappr
 ```
 
 ## Notes / Calibration

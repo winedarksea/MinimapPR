@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from minimappr.api.binary_ingest import parse_binary_ingest_payload
 from minimappr.api.journal_reader import JournalPayloadHandle
+from minimappr.core.audio_buffer import AudioCoverageStats
 from minimappr.models import (
     ClassificationResult,
     EnvironmentSampleIn,
@@ -38,6 +39,7 @@ class LocalizedClassifierRenderRequest:
     environment: dict[str, Any] = field(default_factory=dict)
     render_kind: str | None = None
     fallback_reason: str | None = None
+    audio_quality: AudioCoverageStats | None = None
     authoritative_classification: ClassificationResult | None = None
 
 
@@ -110,6 +112,10 @@ def load_localized_render_manifest_bundle(
     node, event_time_ns, source_type, time_quality, environment = _load_source_context(source_handle)
     derived_handle = JournalPayloadHandle.from_mapping(derived_handle_payload, journal_streams_dir=journal_streams_dir)
     decoded_audio = _decode_classifier_render_audio(derived_handle, classifier_render_payload)
+    coverage_payload = manifest_payload.get("coverage_stats")
+    if coverage_payload is None and paired_classifier_manifest_payload is not None:
+        coverage_payload = paired_classifier_manifest_payload.get("coverage_stats")
+    audio_quality = _load_audio_coverage_stats(coverage_payload)
 
     localization_payload = manifest_payload.get("localization")
     if isinstance(localization_payload, dict) and isinstance(localization_payload.get("position_m"), list):
@@ -153,9 +159,50 @@ def load_localized_render_manifest_bundle(
                 or ""
             )
             or None,
+            audio_quality=audio_quality,
             authoritative_classification=authoritative_classification,
         ),
         cursor_updates=cursor_updates,
+    )
+
+
+def _load_audio_coverage_stats(payload: Any) -> AudioCoverageStats | None:
+    if not isinstance(payload, dict):
+        return None
+    per_channel = payload.get("per_channel")
+    if isinstance(per_channel, list):
+        stats = [
+            _audio_coverage_stats_from_mapping(item)
+            for item in per_channel
+            if isinstance(item, dict)
+        ]
+        stats = [item for item in stats if item is not None]
+        if stats:
+            return max(stats, key=lambda item: (item.missing_ratio, item.max_gap_seconds))
+    return _audio_coverage_stats_from_mapping(payload)
+
+
+def _audio_coverage_stats_from_mapping(payload: dict[str, Any]) -> AudioCoverageStats | None:
+    try:
+        sample_count = int(payload.get("sample_count") or 0)
+        covered_samples = int(payload.get("covered_samples") or 0)
+        missing_samples = int(payload.get("missing_samples") or 0)
+        coverage_ratio = float(payload.get("coverage_ratio") or 0.0)
+        missing_ratio = float(payload.get("missing_ratio") or 0.0)
+        max_gap_samples = int(payload.get("max_gap_samples") or 0)
+        max_gap_seconds = float(payload.get("max_gap_seconds") or 0.0)
+    except (TypeError, ValueError):
+        return None
+    return AudioCoverageStats(
+        sample_count=sample_count,
+        covered_samples=covered_samples,
+        missing_samples=missing_samples,
+        coverage_ratio=coverage_ratio,
+        missing_ratio=missing_ratio,
+        max_gap_samples=max_gap_samples,
+        max_gap_seconds=max_gap_seconds,
+        warning=bool(payload.get("warning")),
+        degraded=bool(payload.get("degraded")),
     )
 
 

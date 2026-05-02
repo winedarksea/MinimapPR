@@ -95,22 +95,30 @@ impl ManifestStore {
     pub async fn ensure_initialized(&self) -> BoxedResult<()> {
         fs::create_dir_all(&self.root).await?;
         fs::create_dir_all(self.pending_root()).await?;
+        fs::create_dir_all(self.raw_pending_root()).await?;
         fs::create_dir_all(self.consumed_root()).await?;
         self.migrate_legacy_pending_manifests().await?;
+        self.migrate_raw_pending_manifests().await?;
         Ok(())
     }
 
     pub async fn publish(&self, mut manifest: DspManifest) -> BoxedResult<PathBuf> {
         self.ensure_initialized().await?;
         if manifest.manifest_id.is_empty() {
-            manifest.manifest_id = format!("manifest-{}", Uuid::new_v4());
+            let prefix = if manifest.manifest_type == "raw_journal_append" {
+                "manifest-jrnl"
+            } else {
+                "manifest"
+            };
+            manifest.manifest_id = format!("{}-{}", prefix, Uuid::new_v4());
         }
-        let path = self
-            .pending_root()
-            .join(format!("{}.json", manifest.manifest_id));
-        let tmp_path = self
-            .pending_root()
-            .join(format!(".{}.json.tmp", manifest.manifest_id));
+        let pending_root = if manifest.manifest_type == "raw_journal_append" {
+            self.raw_pending_root()
+        } else {
+            self.pending_root()
+        };
+        let path = pending_root.join(format!("{}.json", manifest.manifest_id));
+        let tmp_path = pending_root.join(format!(".{}.json.tmp", manifest.manifest_id));
         let mut bytes = serde_json::to_vec(&manifest)?;
         bytes.push(b'\n');
         fs::write(&tmp_path, bytes).await?;
@@ -132,7 +140,12 @@ impl ManifestStore {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let mut entries = match fs::read_dir(self.pending_root()).await {
+        let query_root = if manifest_type == "raw_journal_append" {
+            self.raw_pending_root()
+        } else {
+            self.pending_root()
+        };
+        let mut entries = match fs::read_dir(query_root).await {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(Box::new(error)),
@@ -167,17 +180,60 @@ impl ManifestStore {
     /// Atomically rename a manifest file to mark it consumed.
     pub async fn mark_consumed(&self, manifest_id: &str) -> BoxedResult<()> {
         self.ensure_initialized().await?;
-        let src = self.pending_root().join(format!("{manifest_id}.json"));
         let dst = self.consumed_root().join(format!("{manifest_id}.json"));
-        if fs::metadata(&src).await.is_err() {
-            let legacy_src = self.root.join(format!("{manifest_id}.json"));
-            if fs::metadata(&legacy_src).await.is_ok() {
-                fs::rename(&legacy_src, &dst).await?;
+        for src in [
+            self.raw_pending_root().join(format!("{manifest_id}.json")),
+            self.pending_root().join(format!("{manifest_id}.json")),
+            self.root.join(format!("{manifest_id}.json")),
+        ] {
+            if fs::metadata(&src).await.is_ok() {
+                fs::rename(&src, &dst).await?;
                 return Ok(());
             }
         }
-        fs::rename(&src, &dst).await?;
-        Ok(())
+
+        // External producers may write pending manifests with a prefixed filename
+        // (for example, "1700000000-node1.json") while JSON.manifest_id differs.
+        // Fall back to scanning pending files by payload manifest_id.
+        let mut entries = match fs::read_dir(self.pending_root()).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("pending manifest {manifest_id} not found"),
+                )));
+            }
+            Err(error) => return Err(Box::new(error)),
+        };
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            let file_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
+            if !is_pending_manifest_file_name(file_name) {
+                continue;
+            }
+            let contents = match fs::read_to_string(&path).await {
+                Ok(contents) => contents,
+                Err(_) => continue,
+            };
+            let pending_manifest: DspManifest = match serde_json::from_str(contents.trim()) {
+                Ok(manifest) => manifest,
+                Err(_) => continue,
+            };
+            if pending_manifest.manifest_id != manifest_id {
+                continue;
+            }
+            let discovered_dst = self.consumed_root().join(file_name);
+            fs::rename(&path, discovered_dst).await?;
+            return Ok(());
+        }
+
+        Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("pending manifest {manifest_id} not found"),
+        )))
     }
 
     /// Keep at most `max_files` consumed manifests, removing oldest first.
@@ -242,11 +298,19 @@ impl ManifestStore {
         self.root.join("pending")
     }
 
+    fn raw_pending_root(&self) -> PathBuf {
+        self.root.join("raw_pending")
+    }
+
     fn consumed_root(&self) -> PathBuf {
         self.root.join("consumed")
     }
 
     async fn migrate_legacy_pending_manifests(&self) -> BoxedResult<()> {
+        let marker_path = self.root.join(".legacy_pending_migrated");
+        if fs::metadata(&marker_path).await.is_ok() {
+            return Ok(());
+        }
         let mut entries = match fs::read_dir(&self.root).await {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -271,6 +335,40 @@ impl ManifestStore {
             }
             fs::rename(path, dst).await?;
         }
+        let _ = fs::write(marker_path, b"1\n").await;
+        Ok(())
+    }
+
+    async fn migrate_raw_pending_manifests(&self) -> BoxedResult<()> {
+        let marker_path = self.root.join(".raw_pending_migrated");
+        if fs::metadata(&marker_path).await.is_ok() {
+            return Ok(());
+        }
+        let mut entries = match fs::read_dir(self.pending_root()).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(Box::new(error)),
+        };
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            if !name.starts_with("manifest-jrnl-") || !is_pending_manifest_file_name(name) {
+                continue;
+            }
+            let file_type = entry.file_type().await?;
+            if !file_type.is_file() {
+                continue;
+            }
+            let dst = self.raw_pending_root().join(name);
+            if fs::metadata(&dst).await.is_ok() {
+                continue;
+            }
+            fs::rename(path, dst).await?;
+        }
+        let _ = fs::write(marker_path, b"1\n").await;
         Ok(())
     }
 }

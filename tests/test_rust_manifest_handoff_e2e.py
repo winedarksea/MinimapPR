@@ -24,7 +24,7 @@ from minimappr.api.transports import HttpIngestTransport
 from minimappr.classifiers.base import AudioClassifier, ClassificationResult
 from minimappr.config import Settings
 from minimappr.main import app
-from minimappr.core.audio_buffer import MultiSensorBuffer
+from minimappr.core.audio_buffer import AudioCoverageStats, MultiSensorBuffer
 from minimappr.core.fusion_node import FusionNode
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.localization import LocalizationEngine
@@ -469,6 +469,17 @@ async def test_fusion_prefers_authoritative_rust_classification_over_python_recl
                 source_observation_ids=[],
                 environment={"temperature_c": 20.0, "humidity_fraction": 0.5},
                 render_kind="birdnet_hybrid_spatial_blend",
+                audio_quality=AudioCoverageStats(
+                    sample_count=24_000,
+                    covered_samples=20_000,
+                    missing_samples=4_000,
+                    coverage_ratio=20_000 / 24_000,
+                    missing_ratio=4_000 / 24_000,
+                    max_gap_samples=1_600,
+                    max_gap_seconds=0.1,
+                    warning=True,
+                    degraded=True,
+                ),
                 authoritative_classification=ClassificationResult(
                     label="winter wren",
                     confidence=0.91,
@@ -489,6 +500,80 @@ async def test_fusion_prefers_authoritative_rust_classification_over_python_recl
         assert detection["feature_summary"]["rust_classification_authoritative"] is True
         assert detection["feature_summary"]["rust_manifest_id"] == "manifest-rust-authoritative-1"
         assert detection["feature_summary"]["rust_render_kind"] == "birdnet_hybrid_spatial_blend"
+        audio_quality = detection["feature_summary"]["audio_quality"]
+        assert audio_quality["source_window_type"] == "rust_classifier_render"
+        assert audio_quality["sample_count"] == 24_000
+        assert audio_quality["missing_samples"] == 4_000
+        assert audio_quality["missing_ratio"] == pytest.approx(4_000 / 24_000)
+        assert audio_quality["degraded"] is True
+    finally:
+        await fusion.stop()
+        await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_fusion_classifies_non_authoritative_rust_render_immediately_in_production(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(
+        runtime_profile="birdnet_hybrid_production",
+        db_path=tmp_path / "non-authoritative-rust.db",
+        snippet_dir=tmp_path / "snippets",
+        snippet_retention_seconds=0,
+        fusion_worker_count=1,
+        fusion_event_queue_size=8,
+    )
+    settings.db_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.snippet_dir.mkdir(parents=True, exist_ok=True)
+
+    storage = Storage(settings.db_path)
+    await storage.initialize()
+    fusion = FusionNode(
+        settings=settings,
+        registry=NodeRegistry(),
+        buffer=MultiSensorBuffer(max_duration_seconds=settings.max_sensor_buffer_seconds),
+        localizer=LocalizationEngine(max_tau_s=0.03),
+        classifier=_ConstantBirdClassifier(),
+        tracker=TrackManager(settings),
+        storage=storage,
+        live_callback=lambda payload: asyncio.sleep(0, result=None),
+        coordinate_frame=LocalCoordinateFrame(origin=GeoPoint(lat=37.0, lon=-122.0, alt_m=0.0), mode="flat"),
+        zone_matcher=ZoneMatcher(storage=storage),
+    )
+    await fusion.start()
+    try:
+        render_audio = np.clip(
+            np.random.default_rng(61).normal(0.0, 0.25, size=24_000),
+            -1.0,
+            0.9999695,
+        ).astype(np.float32)
+        await fusion.ingest_localized_render(
+            payload=LocalizedClassifierRenderRequest(
+                manifest_id="manifest-rust-python-classify-1",
+                node=_node_spec("sirith-rust-python-classify"),
+                event_time_ns=time.time_ns(),
+                sample_rate_hz=16_000,
+                decoded_audio=render_audio,
+                localization_position_m=TEST_SOURCE_POSITION_M,
+                localization_confidence=0.77,
+                localization_gdop=1.8,
+                localization_method="srp_phat",
+                source_type="raw_sensor",
+                source_observation_ids=[],
+                environment={"temperature_c": 20.0, "humidity_fraction": 0.5},
+                render_kind="birdnet_omni_fallback",
+            )
+        )
+
+        detections = await storage.list_detections(limit=10)
+        assert len(detections) == 1
+        detection = detections[0]
+        assert detection["label"] == "sparrow"
+        assert detection["feature_summary"]["rust_manifest_id"] == "manifest-rust-python-classify-1"
+        assert detection["feature_summary"]["classification_path"] == "omni"
+        status = await fusion.status()
+        assert status["queue"]["classification_depth"] == 0
+        assert status["metrics"]["birdnet_chunk_dispatches_suppressed"] == 0
     finally:
         await fusion.stop()
         await storage.close()
