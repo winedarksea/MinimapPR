@@ -7,6 +7,7 @@ independently testable component.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass
@@ -16,6 +17,7 @@ _logger = logging.getLogger(__name__)
 
 # Log a summary after this many accepted (non-duplicate) frames.
 _INGEST_LOG_INTERVAL_FRAMES = 5000
+_AUDIO_SUMMARY_PUBLISH_INTERVAL_NS = 500_000_000
 # Firmware clock labels can be stale during GPS/NTP acquisition or while
 # recovering from a rejected discipline source. Use receipt-aligned buffering
 # for large skews so debug audio remains usable; TDOA triggering stays disabled
@@ -126,6 +128,8 @@ class IngestProcessor:
 
         self._last_trigger_ns = 0
         self._accepted_frame_count = 0
+        self._last_audio_summary_publish_ns_by_node: dict[str, int] = {}
+        self._preprocess_locks_by_node: dict[str, asyncio.Lock] = {}
 
     @property
     def last_trigger_ns(self) -> int:
@@ -197,10 +201,11 @@ class IngestProcessor:
             )
 
         # -- decode PCM --------------------------------------------------------
-        audio = (
-            decode_pcm16le_b64(frame.samples_b64, frame.channels)
-            if decoded_audio is None
-            else np.asarray(decoded_audio, dtype=np.float32)
+        audio = await asyncio.to_thread(
+            _decode_audio_frame,
+            samples_b64=frame.samples_b64,
+            channels=frame.channels,
+            decoded_audio=decoded_audio,
         )
         if audio.ndim != 2:
             raise ValueError("Decoded audio must be channels-first")
@@ -211,12 +216,14 @@ class IngestProcessor:
 
         # -- preprocess --------------------------------------------------------
         preprocessor: AudioPreprocessor = self._preprocessor_factory.for_node(normalized_node)
-        processed = np.zeros_like(audio, dtype=np.float32)
-        for channel_idx in range(audio.shape[0]):
-            processed[channel_idx] = preprocessor.process(
-                audio[channel_idx],
+        preprocess_lock = self._preprocess_locks_by_node.setdefault(normalized_node.id, asyncio.Lock())
+        async with preprocess_lock:
+            processed = await asyncio.to_thread(
+                _preprocess_audio_frame,
+                audio,
                 frame.sample_rate_hz,
-                node_id=normalized_node.id,
+                normalized_node.id,
+                preprocessor,
             )
 
         # -- environment extraction -------------------------------------------
@@ -340,6 +347,16 @@ class IngestProcessor:
 
         # -- trigger evaluation ------------------------------------------------
         frame_energy = trigger_rms(processed)
+        await self._publish_audio_summary_if_due(
+            node_id=normalized_node.id,
+            sensor_ids=list(runtime.sensor_ids),
+            now_ns=time.time_ns(),
+            frame_energy=frame_energy,
+            frame_sequence=frame.sequence,
+            source_type=frame.source_type,
+            time_quality=frame.time_quality.value,
+            buffer_uses_receipt_time=buffer_uses_receipt_time,
+        )
         frame_duration_ns = int((processed.shape[1] / frame.sample_rate_hz) * 1_000_000_000)
         half_window_ns = int(self._localization_config.localization_window_seconds * 0.5 * 1_000_000_000)
         center_offset_ns = max(0, frame_duration_ns - half_window_ns)
@@ -391,6 +408,49 @@ class IngestProcessor:
             environment_counts=env_counts,
         )
 
+    async def _publish_audio_summary_if_due(
+        self,
+        *,
+        node_id: str,
+        sensor_ids: list[str],
+        now_ns: int,
+        frame_energy: float,
+        frame_sequence: int | None,
+        source_type: str,
+        time_quality: str,
+        buffer_uses_receipt_time: bool,
+    ) -> None:
+        last_publish_ns = self._last_audio_summary_publish_ns_by_node.get(node_id, 0)
+        if now_ns - last_publish_ns < _AUDIO_SUMMARY_PUBLISH_INTERVAL_NS:
+            return
+        self._last_audio_summary_publish_ns_by_node[node_id] = now_ns
+
+        audio_summary = await self._buffer.summarize_sensors(sensor_ids=sensor_ids, now_ns=now_ns)
+        summary = {
+            "sensor_count": len(sensor_ids),
+            "active_sensor_count": int(audio_summary["active_sensor_count"] or 0),
+            "sample_rate_hz": audio_summary["sample_rate_hz"],
+            "last_sample_time_ns": audio_summary["last_sample_time_ns"],
+            "age_seconds": audio_summary["age_seconds"],
+            "rms": audio_summary["rms"],
+            "recent_coverage_ratio": audio_summary["recent_coverage_ratio"],
+            "recent_missing_ratio": audio_summary["recent_missing_ratio"],
+            "recent_max_gap_seconds": audio_summary["recent_max_gap_seconds"],
+            "max_buffer_samples": audio_summary["max_buffer_samples"],
+            "max_buffer_seconds": audio_summary["max_buffer_seconds"],
+            "frame_energy": frame_energy,
+            "frame_sequence": frame_sequence,
+            "source_type": source_type,
+            "time_quality": time_quality,
+            "buffer_uses_receipt_time": buffer_uses_receipt_time,
+            "status": "live_ingest_process",
+        }
+        await self._storage.upsert_node_audio_summary(
+            node_id=node_id,
+            summary=summary,
+            updated_ns=now_ns,
+        )
+
     def _normalize_node_spec(self, spec: NodeSpec) -> tuple[NodeSpec, GeoPoint]:
         gps_metadata = spec.metadata.get("gps") if isinstance(spec.metadata, dict) else None
         gps_position_source = (
@@ -428,6 +488,35 @@ class IngestProcessor:
 # ---------------------------------------------------------------------------
 # Environment sample extraction (pure logic, no I/O)
 # ---------------------------------------------------------------------------
+
+
+def _decode_audio_frame(
+    *,
+    samples_b64: str,
+    channels: int,
+    decoded_audio: np.ndarray | None,
+) -> np.ndarray:
+    return (
+        decode_pcm16le_b64(samples_b64, channels)
+        if decoded_audio is None
+        else np.asarray(decoded_audio, dtype=np.float32)
+    )
+
+
+def _preprocess_audio_frame(
+    audio: np.ndarray,
+    sample_rate_hz: int,
+    node_id: str,
+    preprocessor: AudioPreprocessor,
+) -> np.ndarray:
+    processed = np.zeros_like(audio, dtype=np.float32)
+    for channel_idx in range(audio.shape[0]):
+        processed[channel_idx] = preprocessor.process(
+            audio[channel_idx],
+            sample_rate_hz,
+            node_id=node_id,
+        )
+    return processed
 
 
 def _extract_environment_sample(

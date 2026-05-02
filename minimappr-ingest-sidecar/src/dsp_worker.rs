@@ -58,6 +58,9 @@ pub struct DspWorkerConfig {
     pub localization_cadence_ms: u64,
     pub localization_rms_gate: f32,
     pub trigger_cooldown_seconds: f64,
+    /// Maximum trusted node clock skew in seconds before falling back to
+    /// receipt-time alignment. Matching Python's _MAX_TRUSTED_NODE_CLOCK_SKEW_NS.
+    pub max_trusted_node_clock_skew_seconds: f64,
 }
 
 impl Default for DspWorkerConfig {
@@ -89,6 +92,7 @@ impl Default for DspWorkerConfig {
             localization_cadence_ms: 250,
             localization_rms_gate: 0.015,
             trigger_cooldown_seconds: 0.8,
+            max_trusted_node_clock_skew_seconds: 300.0,
         }
     }
 }
@@ -433,7 +437,24 @@ impl DspWorker {
         let render_duration_ns =
             (frames_all as i128).saturating_mul(1_000_000_000) / i128::from(sr.max(1));
         let start_time_ns = resolve_buffer_start_time_ns(&decoded, first_handle, sr, now_ns);
-        let audio_end_ns = start_time_ns.saturating_add(render_duration_ns).max(0) as u128;
+
+        // Clock skew detection: when the node's reported start_time_ns differs from
+        // server receipt time by more than max_trusted_node_clock_skew_seconds, fall
+        // back to receipt-time alignment. This matches Python's _buffer_timestamps_for_frame
+        // and prevents buffer corruption from nodes with stale or uninitialized clocks.
+        let buffer_uses_receipt_time = {
+            let skew_ns = (start_time_ns - now_ns as i128).unsigned_abs();
+            let max_skew_ns =
+                (self.config.max_trusted_node_clock_skew_seconds * 1_000_000_000.0).round() as u128;
+            skew_ns > max_skew_ns
+        };
+        let (buffer_start_time_ns, buffer_end_time_ns) = if buffer_uses_receipt_time {
+            let start_ns = (now_ns as i128).saturating_sub(render_duration_ns).max(1);
+            (start_ns, now_ns as i128)
+        } else {
+            (start_time_ns, start_time_ns + render_duration_ns)
+        };
+        let audio_end_ns = buffer_end_time_ns.max(0) as u128;
 
         let source_manifest_is_stale = manifest_is_older_than_buffer_horizon(
             &manifest,
@@ -506,7 +527,7 @@ impl DspWorker {
 
         for (ch, buf) in buffers.iter_mut().enumerate() {
             if let Err(err) = buf.append(
-                start_time_ns,
+                buffer_start_time_ns,
                 &decoded.channels[ch],
                 start_sample_index,
                 end_sample_index,
@@ -523,8 +544,15 @@ impl DspWorker {
             }
         }
 
-        let end_ns = start_time_ns + render_duration_ns;
-        let channel_states = localization_channel_states(buffers, end_ns, window_sec);
+        let end_ns = buffer_end_time_ns;
+        // Use centered windows for localization (matching Python's center_time_ns).
+        // TDOA is computed relative to the window center, so centering on the frame
+        // midpoint gives the most symmetric coverage.
+        let window_duration_ns = (window_sec * 1_000_000_000.0).round() as i128;
+        let half_window_ns = window_duration_ns / 2;
+        let center_offset_ns = (render_duration_ns - half_window_ns).max(0);
+        let center_time_ns = buffer_start_time_ns + center_offset_ns;
+        let channel_states = localization_channel_states_centered(buffers, center_time_ns, window_sec);
 
         if channel_states.iter().all(|state| state.coverage.is_none()) {
             debug!(
@@ -860,6 +888,22 @@ fn localization_channel_states(
         coverage: buffers[channel_index].coverage_ending_at(end_ns, window_seconds),
         window: buffers[channel_index]
             .window_ending_at(end_ns, window_seconds)
+            .unwrap_or_default(),
+    })
+}
+
+/// Build localization channel states using centered windows (matching Python's
+/// `get_window(center_time_ns, window_seconds)`). TDOA is computed relative to
+/// the window center, so centering on the frame midpoint gives symmetric coverage.
+fn localization_channel_states_centered(
+    buffers: &[SensorStreamBuffer; 4],
+    center_time_ns: i128,
+    window_seconds: f64,
+) -> [LocalizationChannelState; 4] {
+    core::array::from_fn(|channel_index| LocalizationChannelState {
+        coverage: buffers[channel_index].coverage_centered_at(center_time_ns, window_seconds),
+        window: buffers[channel_index]
+            .window_centered_at(center_time_ns, window_seconds)
             .unwrap_or_default(),
     })
 }

@@ -158,6 +158,13 @@ class Storage:
             CREATE INDEX IF NOT EXISTS idx_ingested_frames_node_start ON ingested_frames(node_id, start_time_ns DESC);
             CREATE INDEX IF NOT EXISTS idx_ingested_frames_node_seq ON ingested_frames(node_id, frame_sequence, start_time_ns DESC);
 
+            CREATE TABLE IF NOT EXISTS node_audio_summaries (
+                node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+                summary_json TEXT NOT NULL,
+                updated_ns INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_node_audio_summaries_updated ON node_audio_summaries(updated_ns DESC);
+
             CREATE TABLE IF NOT EXISTS labels (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL UNIQUE,
@@ -691,6 +698,53 @@ class Storage:
                 ),
             )
             await self._commit_if_needed(db)
+
+    async def upsert_node_audio_summary(
+        self,
+        *,
+        node_id: str,
+        summary: dict[str, Any],
+        updated_ns: int,
+    ) -> None:
+        db = self._require_db()
+        async with self._write_guard():
+            await db.execute(
+                """
+                INSERT INTO node_audio_summaries (node_id, summary_json, updated_ns)
+                VALUES (?, ?, ?)
+                ON CONFLICT(node_id) DO UPDATE SET
+                    summary_json=excluded.summary_json,
+                    updated_ns=excluded.updated_ns
+                """,
+                (node_id, _json_dumps(summary), updated_ns),
+            )
+            await self._commit_if_needed(db)
+
+    async def list_node_audio_summaries(self, limit: int | None = None) -> list[dict[str, Any]]:
+        db = self._require_db()
+        if limit is not None and limit > 0:
+            rows = await (
+                await db.execute(
+                    "SELECT node_id, summary_json, updated_ns FROM node_audio_summaries ORDER BY updated_ns DESC LIMIT ?",
+                    (limit,),
+                )
+            ).fetchall()
+        else:
+            rows = await (
+                await db.execute(
+                    "SELECT node_id, summary_json, updated_ns FROM node_audio_summaries ORDER BY updated_ns DESC"
+                )
+            ).fetchall()
+
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            summary = _json_loads(row["summary_json"], {})
+            if not isinstance(summary, dict):
+                summary = {}
+            summary["node_id"] = row["node_id"]
+            summary["updated_ns"] = row["updated_ns"]
+            result.append(summary)
+        return result
 
     # ------------------------------------------------------------------
     # BIT Reports

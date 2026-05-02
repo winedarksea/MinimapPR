@@ -134,6 +134,18 @@ class StorageBackend(Protocol):
     ) -> None:
         ...
 
+    async def upsert_node_audio_summary(
+        self,
+        *,
+        node_id: str,
+        summary: dict[str, Any],
+        updated_ns: int,
+    ) -> None:
+        ...
+
+    async def list_node_audio_summaries(self, limit: int | None = None) -> list[dict[str, Any]]:
+        ...
+
     async def insert_observation(
         self,
         *,

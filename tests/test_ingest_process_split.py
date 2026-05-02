@@ -84,6 +84,24 @@ def test_split_api_role_lists_nodes_from_storage_without_live_registry(monkeypat
                 ),
                 last_seen_ns=time.time_ns(),
             )
+            await storage.upsert_node_audio_summary(
+                node_id="api-node-1",
+                summary={
+                    "sensor_count": 4,
+                    "active_sensor_count": 4,
+                    "sample_rate_hz": 16000,
+                    "last_sample_time_ns": time.time_ns(),
+                    "age_seconds": 0.0,
+                    "rms": 0.031,
+                    "recent_coverage_ratio": 1.0,
+                    "recent_missing_ratio": 0.0,
+                    "recent_max_gap_seconds": 0.0,
+                    "max_buffer_samples": 160000,
+                    "max_buffer_seconds": 10.0,
+                    "status": "live_ingest_process",
+                },
+                updated_ns=time.time_ns(),
+            )
         finally:
             await storage.close()
 
@@ -103,8 +121,12 @@ def test_split_api_role_lists_nodes_from_storage_without_live_registry(monkeypat
     assert response.status_code == 200
     body = response.json()
     assert body[0]["id"] == "api-node-1"
-    assert body[0]["audio_debug"]["status"] == "external_ingest_process"
+    assert body[0]["audio_debug"]["status"] == "recent"
     assert body[0]["audio_debug"]["sensor_count"] == 4
+    assert body[0]["audio_debug"]["active_sensor_count"] == 4
+    assert body[0]["audio_debug"]["sample_rate_hz"] == 16000
+    assert body[0]["audio_debug"]["rms"] == 0.031
+    assert body[0]["audio_debug"]["recent_coverage_ratio"] == 1.0
     assert tracks_response.status_code == 200
     assert recent_audio_response.status_code == 404
 

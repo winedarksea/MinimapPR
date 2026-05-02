@@ -488,6 +488,11 @@ class MultiSensorBuffer:
             active_sensor_count = 0
             sample_rate_counts: dict[int, int] = {}
             rms_values: list[float] = []
+            coverage_ratios: list[float] = []
+            missing_ratios: list[float] = []
+            max_gap_seconds = 0.0
+            max_buffer_samples = 0
+            max_buffer_seconds = 0.0
             latest_sample_time_ns: int | None = None
             for sensor_id in sensor_ids:
                 buffer = self._buffers.get(sensor_id)
@@ -496,6 +501,8 @@ class MultiSensorBuffer:
 
                 active_sensor_count += 1
                 sample_rate_counts[buffer.sample_rate_hz] = sample_rate_counts.get(buffer.sample_rate_hz, 0) + 1
+                max_buffer_samples = max(max_buffer_samples, buffer.max_samples)
+                max_buffer_seconds = max(max_buffer_seconds, buffer.max_duration_seconds)
                 end_ns = buffer.end_time_ns()
                 if end_ns is None:
                     continue
@@ -504,6 +511,11 @@ class MultiSensorBuffer:
                 tail_samples = max(1, min(buffer.samples.size, buffer.sample_rate_hz // 2))
                 tail = buffer.samples[-tail_samples:]
                 rms_values.append(float(np.sqrt(np.mean(np.square(tail)) + 1e-12)))
+                coverage_tail = buffer.coverage[-tail_samples:]
+                coverage_stats = _coverage_stats(coverage_tail, buffer.sample_rate_hz)
+                coverage_ratios.append(coverage_stats.coverage_ratio)
+                missing_ratios.append(coverage_stats.missing_ratio)
+                max_gap_seconds = max(max_gap_seconds, coverage_stats.max_gap_seconds)
 
             dominant_sample_rate_hz: int | None = None
             if sample_rate_counts:
@@ -517,10 +529,22 @@ class MultiSensorBuffer:
             if rms_values:
                 rms_value = float(np.mean(np.asarray(rms_values, dtype=np.float64)))
 
+            coverage_ratio: float | None = None
+            missing_ratio: float | None = None
+            if coverage_ratios:
+                coverage_ratio = float(np.mean(np.asarray(coverage_ratios, dtype=np.float64)))
+            if missing_ratios:
+                missing_ratio = float(np.mean(np.asarray(missing_ratios, dtype=np.float64)))
+
             return {
                 "active_sensor_count": active_sensor_count,
                 "sample_rate_hz": dominant_sample_rate_hz,
                 "last_sample_time_ns": latest_sample_time_ns,
                 "age_seconds": age_seconds,
                 "rms": rms_value,
+                "recent_coverage_ratio": coverage_ratio,
+                "recent_missing_ratio": missing_ratio,
+                "recent_max_gap_seconds": max_gap_seconds if coverage_ratios else None,
+                "max_buffer_samples": max_buffer_samples or None,
+                "max_buffer_seconds": max_buffer_seconds or None,
             }

@@ -187,6 +187,50 @@ impl SensorStreamBuffer {
         Some(self.samples[start_offset..end_offset as usize].to_vec())
     }
 
+    /// Extract a window centered on `center_time_ns`, matching Python's `get_window`.
+    /// Used for localization where TDOA is computed relative to the window center.
+    pub fn window_centered_at(
+        &self,
+        center_time_ns: i128,
+        window_seconds: f64,
+    ) -> Option<Vec<f32>> {
+        let window_samples = (window_seconds * f64::from(self.sample_rate_hz))
+            .round()
+            .max(1.0) as i64;
+        let center_sample = self.time_to_sample_index(center_time_ns).ok()?;
+        let start_sample = center_sample - (window_samples / 2);
+        let end_sample = start_sample + window_samples;
+        let start_offset = start_sample - self.buffer_start_sample_index;
+        let end_offset = end_sample - self.buffer_start_sample_index;
+        if start_offset < 0 || end_offset > self.samples.len() as i64 {
+            return None;
+        }
+        Some(self.samples[start_offset as usize..end_offset as usize].to_vec())
+    }
+
+    /// Coverage stats for a window centered on `center_time_ns`.
+    pub fn coverage_centered_at(
+        &self,
+        center_time_ns: i128,
+        window_seconds: f64,
+    ) -> Option<AudioCoverageStats> {
+        let window_samples = (window_seconds * f64::from(self.sample_rate_hz))
+            .round()
+            .max(1.0) as i64;
+        let center_sample = self.time_to_sample_index(center_time_ns).ok()?;
+        let start_sample = center_sample - (window_samples / 2);
+        let end_sample = start_sample + window_samples;
+        let start_offset = start_sample - self.buffer_start_sample_index;
+        let end_offset = end_sample - self.buffer_start_sample_index;
+        if start_offset < 0 || end_offset > self.coverage.len() as i64 {
+            return None;
+        }
+        Some(coverage_stats(
+            &self.coverage[start_offset as usize..end_offset as usize],
+            self.sample_rate_hz,
+        ))
+    }
+
     pub fn latest_window(&self, window_seconds: f64) -> Vec<f32> {
         if self.samples.is_empty() {
             return Vec::new();

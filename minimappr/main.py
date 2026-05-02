@@ -1120,7 +1120,8 @@ async def ingest_binary(request: Request) -> StoreForwardIngestResponse:
     if _should_block_direct_ingest(state):
         raise HTTPException(status_code=410, detail="Direct ingest is disabled; send firmware ingest to the Rust sidecar")
     try:
-        payload = parse_binary_ingest_payload(await request.body())
+        body = await request.body()
+        payload = await asyncio.to_thread(parse_binary_ingest_payload, body)
         return await state.ingest_transport.deliver_binary(payload)
     except ClientDisconnect as exc:
         raise HTTPException(status_code=499, detail="Client disconnected while uploading binary ingest payload") from exc
@@ -1183,8 +1184,12 @@ async def list_nodes(
     latest_environment_rows = await state.storage.list_latest_environment_per_node(limit=limit)
     latest_time_quality_by_node = await state.storage.list_latest_time_quality_per_node()
     latest_observation_metadata_by_node = await state.storage.list_latest_observation_metadata_per_node()
+    latest_audio_summary_rows = await state.storage.list_node_audio_summaries(limit=limit)
     latest_environment_by_node = {
         row["node_id"]: row for row in latest_environment_rows if row.get("node_id") is not None
+    }
+    latest_audio_summary_by_node = {
+        row["node_id"]: row for row in latest_audio_summary_rows if row.get("node_id") is not None
     }
     for node in nodes:
         if node.get("position_geo") is None and node.get("position_m"):
@@ -1235,19 +1240,47 @@ async def list_nodes(
                 "last_sample_time_ns": audio_summary["last_sample_time_ns"],
                 "age_seconds": age_seconds,
                 "rms": audio_summary["rms"],
+                "recent_coverage_ratio": audio_summary["recent_coverage_ratio"],
+                "recent_missing_ratio": audio_summary["recent_missing_ratio"],
+                "recent_max_gap_seconds": audio_summary["recent_max_gap_seconds"],
+                "max_buffer_samples": audio_summary["max_buffer_samples"],
+                "max_buffer_seconds": audio_summary["max_buffer_seconds"],
                 "status": audio_status,
             }
         else:
             sensor_ids = _sensor_ids_from_node_row(node)
-            node["audio_debug"] = {
-                "sensor_count": len(sensor_ids),
-                "active_sensor_count": 0,
-                "sample_rate_hz": None,
-                "last_sample_time_ns": None,
-                "age_seconds": None,
-                "rms": None,
-                "status": "external_ingest_process",
-            }
+            persisted_summary = latest_audio_summary_by_node.get(node["id"])
+            if persisted_summary is not None:
+                last_sample_time_ns = persisted_summary.get("last_sample_time_ns")
+                age_seconds = persisted_summary.get("age_seconds")
+                if isinstance(last_sample_time_ns, int):
+                    age_seconds = max(0.0, (now_ns - last_sample_time_ns) / 1_000_000_000.0)
+                if age_seconds is None:
+                    audio_status = "external_ingest_process"
+                elif float(age_seconds) <= settings.node_degraded_after_seconds:
+                    audio_status = "recent"
+                else:
+                    audio_status = "stale"
+                persisted_summary["sensor_count"] = int(persisted_summary.get("sensor_count") or len(sensor_ids))
+                persisted_summary["active_sensor_count"] = int(persisted_summary.get("active_sensor_count") or 0)
+                persisted_summary["age_seconds"] = age_seconds
+                persisted_summary["status"] = audio_status
+                node["audio_debug"] = persisted_summary
+            else:
+                node["audio_debug"] = {
+                    "sensor_count": len(sensor_ids),
+                    "active_sensor_count": 0,
+                    "sample_rate_hz": None,
+                    "last_sample_time_ns": None,
+                    "age_seconds": None,
+                    "rms": None,
+                    "recent_coverage_ratio": None,
+                    "recent_missing_ratio": None,
+                    "recent_max_gap_seconds": None,
+                    "max_buffer_samples": None,
+                    "max_buffer_seconds": None,
+                    "status": "external_ingest_process",
+                }
 
         latest_environment = latest_environment_by_node.get(node["id"])
         if latest_environment is not None:
