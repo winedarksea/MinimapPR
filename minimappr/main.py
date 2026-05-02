@@ -79,6 +79,7 @@ from minimappr.models import (
     GeoPoint,
     IngestFrameRequest,
     IngestFrameResponse,
+    StoreForwardBufferedFrameResponse,
     StoreForwardIngestRequest,
     StoreForwardIngestResponse,
     TrackState,
@@ -544,8 +545,17 @@ async def _start_ingest_sidecar(
         "MINIMAPPR_CLASSIFICATION_WINDOW_SECONDS": str(
             getattr(settings, "classification_window_seconds", 30.0)
         ),
+        "MINIMAPPR_CLASSIFIER_RENDER_MIN_INTERVAL_SECONDS": str(
+            getattr(settings, "classifier_render_min_interval_seconds", 0.0)
+        ),
         "MINIMAPPR_MAX_SENSOR_BUFFER_SECONDS": str(
             getattr(settings, "max_sensor_buffer_seconds", 32.0)
+        ),
+        "MINIMAPPR_DSP_LOCALIZATION_RMS_GATE": str(
+            getattr(settings, "trigger_rms", 0.0015)
+        ),
+        "MINIMAPPR_TRIGGER_COOLDOWN_SECONDS": str(
+            getattr(settings, "trigger_cooldown_seconds", 0.8)
         ),
         "MINIMAPPR_LOCALIZATION_BAND_MIN_HZ": str(
             getattr(settings, "localization_band_min_hz", 300.0)
@@ -1098,7 +1108,7 @@ async def health(request: Request) -> dict:
 async def ingest_frame(payload: IngestFrameRequest, request: Request) -> IngestFrameResponse:
     state = _require_state(request)
     try:
-        return await state.ingest_transport.deliver_frame(payload)
+        return await state.fusion_node.ingest(payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1109,7 +1119,32 @@ async def ingest_store_forward(payload: StoreForwardIngestRequest, request: Requ
     if _should_block_direct_ingest(state):
         raise HTTPException(status_code=410, detail="Direct ingest is disabled; send firmware ingest to the Rust sidecar")
     try:
-        return await state.ingest_transport.deliver_store_forward(payload)
+        results = []
+        for item in payload.buffered_frames:
+            req = IngestFrameRequest(
+                node=payload.node,
+                frame=item.frame,
+                environment=item.environment,
+            )
+            resp = await state.fusion_node.ingest(req)
+            results.append(StoreForwardBufferedFrameResponse(
+                sequence=item.frame.sequence,
+                start_time_ns=item.frame.start_time_ns,
+                accepted=resp.accepted,
+                duplicate=resp.duplicate,
+                triggered=resp.triggered,
+                frame_energy=resp.frame_energy,
+                queued_event_id=resp.queued_event_id,
+            ))
+        return StoreForwardIngestResponse(
+            accepted=True,
+            total_frames=len(payload.buffered_frames),
+            accepted_frames=sum(1 for r in results if r.accepted),
+            duplicate_frames=sum(1 for r in results if r.duplicate),
+            rejected_frames=sum(1 for r in results if not r.accepted),
+            queued_events=sum(1 for r in results if r.queued_event_id),
+            results=results,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1122,7 +1157,32 @@ async def ingest_binary(request: Request) -> StoreForwardIngestResponse:
     try:
         body = await request.body()
         payload = await asyncio.to_thread(parse_binary_ingest_payload, body)
-        return await state.ingest_transport.deliver_binary(payload)
+        results = []
+        for item in payload.buffered_frames:
+            req = IngestFrameRequest(
+                node=payload.node,
+                frame=item.frame,
+                environment=item.environment,
+            )
+            resp = await state.fusion_node.ingest(req)
+            results.append(StoreForwardBufferedFrameResponse(
+                sequence=item.frame.sequence,
+                start_time_ns=item.frame.start_time_ns,
+                accepted=resp.accepted,
+                duplicate=resp.duplicate,
+                triggered=resp.triggered,
+                frame_energy=resp.frame_energy,
+                queued_event_id=resp.queued_event_id,
+            ))
+        return StoreForwardIngestResponse(
+            accepted=True,
+            total_frames=len(payload.buffered_frames),
+            accepted_frames=sum(1 for r in results if r.accepted),
+            duplicate_frames=sum(1 for r in results if r.duplicate),
+            rejected_frames=sum(1 for r in results if not r.accepted),
+            queued_events=sum(1 for r in results if r.queued_event_id),
+            results=results,
+        )
     except ClientDisconnect as exc:
         raise HTTPException(status_code=499, detail="Client disconnected while uploading binary ingest payload") from exc
     except ValueError as exc:
@@ -2036,7 +2096,7 @@ async def get_system_diagnostics(request: Request) -> dict:
     """Runtime facts (uptime, CPU, memory, disk, load) for the Server page."""
     state = _require_state(request)
     settings: Settings = state.settings
-    diagnostics = system_info.collect(db_path=settings.db_path, start_ns=process_start_ns())
+    diagnostics = await asyncio.to_thread(system_info.collect, db_path=settings.db_path, start_ns=process_start_ns())
     diagnostics["process_role"] = settings.process_role
     diagnostics["ingest"] = {
         "backend": settings.ingest_backend,

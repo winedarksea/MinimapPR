@@ -425,6 +425,7 @@ async def test_start_ingest_sidecar_passes_classifier_helper_env(monkeypatch, tm
 
     monkeypatch.setattr("minimappr.main.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
     monkeypatch.setattr("minimappr.main._wait_for_ingest_sidecar_ready", fake_wait_for_ingest_sidecar_ready)
+    monkeypatch.setattr("minimappr.main._probe_ingest_sidecar_ready", lambda port: False)
     monkeypatch.delenv("MINIMAPPR_SIDECAR_CLASSIFIER_COMMAND_JSON", raising=False)
 
     settings = Settings(
@@ -450,7 +451,10 @@ async def test_start_ingest_sidecar_passes_classifier_helper_env(monkeypatch, tm
     helper_command = json.loads(str(env["MINIMAPPR_SIDECAR_CLASSIFIER_COMMAND_JSON"]))
     assert helper_command == [sys.executable, "-m", "minimappr.sidecar_classifier_helper"]
     assert env["MINIMAPPR_CLASSIFICATION_WINDOW_SECONDS"] == "30.0"
+    assert env["MINIMAPPR_CLASSIFIER_RENDER_MIN_INTERVAL_SECONDS"] == "0.0"
     assert env["MINIMAPPR_MAX_SENSOR_BUFFER_SECONDS"] == "32.0"
+    assert env["MINIMAPPR_DSP_LOCALIZATION_RMS_GATE"] == str(settings.trigger_rms)
+    assert env["MINIMAPPR_TRIGGER_COOLDOWN_SECONDS"] == str(settings.trigger_cooldown_seconds)
     assert env["MINIMAPPR_SITE_ORIGIN_LAT"] == "37.0"
     assert env["MINIMAPPR_SITE_ORIGIN_LON"] == "-122.0"
     assert env["MINIMAPPR_SITE_ORIGIN_ALT_M"] == "12.5"

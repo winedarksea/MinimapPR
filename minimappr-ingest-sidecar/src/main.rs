@@ -227,6 +227,13 @@ struct Args {
 
     #[arg(
         long,
+        env = "MINIMAPPR_TRIGGER_COOLDOWN_SECONDS",
+        default_value_t = -1.0
+    )]
+    trigger_cooldown_seconds: f64,
+
+    #[arg(
+        long,
         env = "MINIMAPPR_BIRDNET_SPATIAL_BLEND_MIN_HZ",
         default_value_t = 1000.0
     )]
@@ -339,11 +346,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let classifier_render_min_interval_seconds =
             if args.classifier_render_min_interval_seconds >= 0.0 {
                 args.classifier_render_min_interval_seconds
-            } else if args.runtime_profile == "birdnet_hybrid_production" {
-                1.0
             } else {
                 0.0
             };
+        let trigger_cooldown_seconds = if args.trigger_cooldown_seconds >= 0.0 {
+            args.trigger_cooldown_seconds
+        } else {
+            DspWorkerConfig::default().trigger_cooldown_seconds
+        };
         let worker = DspWorker::new(
             manifest_store,
             derived_cache,
@@ -374,6 +384,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 classifier_command_json: args.classifier_command_json.clone(),
                 localization_cadence_ms: args.dsp_localization_cadence_ms,
                 localization_rms_gate: args.dsp_localization_rms_gate,
+                trigger_cooldown_seconds,
                 ..DspWorkerConfig::default()
             },
             dsp_state.clone(),

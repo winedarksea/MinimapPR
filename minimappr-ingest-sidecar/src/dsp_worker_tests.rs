@@ -515,3 +515,16 @@ fn stale_manifest_detection_uses_source_receipt_time() {
         32.0
     ));
 }
+
+#[test]
+fn classifier_render_interval_is_zero_when_disabled() {
+    assert_eq!(classifier_render_min_interval_ns(0.0, 999), 0);
+    assert_eq!(classifier_render_min_interval_ns(-1.0, 999), 0);
+}
+
+#[test]
+fn classifier_render_interval_does_not_scale_with_backlog() {
+    let expected = 1_000_000_000_u128;
+    assert_eq!(classifier_render_min_interval_ns(1.0, 0), expected);
+    assert_eq!(classifier_render_min_interval_ns(1.0, 10_000), expected);
+}

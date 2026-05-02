@@ -1044,20 +1044,14 @@ fn manifest_is_older_than_buffer_horizon(
 
 fn classifier_render_min_interval_ns(
     classifier_render_min_interval_seconds: f64,
-    pending_backlog_depth: usize,
+    _pending_backlog_depth: usize,
 ) -> u128 {
     if classifier_render_min_interval_seconds <= 0.0 {
         return 0;
     }
-    let backlog_multiplier = match pending_backlog_depth {
-        0..=128 => 1_u128,
-        129..=256 => 2_u128,
-        257..=512 => 3_u128,
-        _ => 4_u128,
-    };
     let base_interval_ns =
         (classifier_render_min_interval_seconds * 1_000_000_000.0).round() as u128;
-    base_interval_ns.saturating_mul(backlog_multiplier)
+    base_interval_ns
 }
 
 fn sample_index_to_relative_time_ns(sample_index: i64, sample_rate_hz: u32) -> i128 {
