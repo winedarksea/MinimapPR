@@ -6,8 +6,8 @@ mod derived_cache;
 mod dsp;
 mod dsp_render_output;
 mod dsp_worker;
-mod envelope;
 mod env_payload;
+mod envelope;
 mod gcc_phat;
 mod iamf_writer;
 mod ingest_backend;
@@ -23,6 +23,7 @@ mod stream_range_lease;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use actors::environment::EnvironmentCache;
 use axum::{
     body::Body,
     extract::{Query, State},
@@ -33,7 +34,6 @@ use axum::{
 };
 use clap::Parser;
 use derived_cache::DerivedCache;
-use actors::environment::EnvironmentCache;
 use dsp_worker::{DspWorker, DspWorkerConfig, SharedDspState};
 use env_payload::{EnvIngestPayload, EnvIngestResponse};
 use iamf_writer::{
@@ -56,6 +56,9 @@ use tracing::{info, warn};
 const BINARY_ENDPOINT: &str = "/api/v1/ingest/binary";
 const STORE_FORWARD_ENDPOINT: &str = "/api/v1/ingest/store-forward";
 const ENV_ENDPOINT: &str = "/api/v1/ingest/env";
+const MIN_BIRDNET_CLASSIFICATION_WINDOW_SECONDS: f64 = 15.0;
+const DEFAULT_BIRDNET_CLASSIFICATION_WINDOW_SECONDS: f64 = 30.0;
+const DEFAULT_CLASSIFIER_RENDER_OVERLAP_SECONDS: f64 = 2.0;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "MinimapPR firmware ingest spool sidecar")]
@@ -331,9 +334,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         (backend.manifest_store(), backend.derived_cache())
     {
         let localization_window_seconds = args.localization_window_seconds.max(512.0 / 16_000.0);
-        let classification_window_seconds = if args.classification_window_seconds <= 0.0 {
-            // Keep render latency bounded unless operators explicitly request
-            // a longer context window via MINIMAPPR_CLASSIFICATION_WINDOW_SECONDS.
+        let birdnet_hybrid_render_enabled = args.runtime_profile == "birdnet_hybrid_production";
+        let classification_window_seconds = if birdnet_hybrid_render_enabled {
+            if args.classification_window_seconds <= 0.0 {
+                DEFAULT_BIRDNET_CLASSIFICATION_WINDOW_SECONDS
+            } else {
+                args.classification_window_seconds
+                    .max(MIN_BIRDNET_CLASSIFICATION_WINDOW_SECONDS)
+            }
+            .max(localization_window_seconds)
+        } else if args.classification_window_seconds <= 0.0 {
             localization_window_seconds
         } else {
             args.classification_window_seconds
@@ -346,6 +356,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let classifier_render_min_interval_seconds =
             if args.classifier_render_min_interval_seconds >= 0.0 {
                 args.classifier_render_min_interval_seconds
+            } else if birdnet_hybrid_render_enabled {
+                (classification_window_seconds - DEFAULT_CLASSIFIER_RENDER_OVERLAP_SECONDS).max(0.0)
             } else {
                 0.0
             };
@@ -363,7 +375,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 classifier_render_min_interval_seconds,
                 max_buffer_seconds: max_sensor_buffer_seconds,
                 pending_manifest_batch_size: args.dsp_pending_batch_size,
-                birdnet_hybrid_render_enabled: args.runtime_profile == "birdnet_hybrid_production",
+                birdnet_hybrid_render_enabled,
                 skip_stale_manifests_for_live_buffer: args.dsp_skip_stale_manifests,
                 consumed_manifest_retention_max_files: args
                     .dsp_consumed_manifest_retention_max_files,

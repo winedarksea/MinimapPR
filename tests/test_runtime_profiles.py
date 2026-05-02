@@ -49,7 +49,13 @@ def test_birdnet_hybrid_production_respects_explicit_rules_path_override() -> No
     assert settings.rules_config_path == explicit_rules_path
 
 
-def test_classification_window_defaults_to_localization_window() -> None:
+def test_classification_window_default_keeps_birdnet_context() -> None:
+    settings = Settings(localization_window_seconds=0.12)
+
+    assert settings.classification_window_seconds == 30.0
+
+
+def test_explicit_zero_classification_window_falls_back_to_localization_window() -> None:
     settings = Settings(localization_window_seconds=0.12, classification_window_seconds=0.0)
 
     assert settings.classification_window_seconds == 0.12

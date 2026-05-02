@@ -91,7 +91,7 @@ class LocalizationConfig:
     pre_classification_highpass_hz: float
     pre_classification_lowpass_hz: float
     gcc_phat_interp_factor: int
-    classification_window_seconds: float = 0.0
+    classification_window_seconds: float = 30.0
     localization_band_min_hz: float = 0.0
     localization_band_max_hz: float = 0.0
     skip_localization_for_classification: bool = False
@@ -319,8 +319,8 @@ class Settings:
     trigger_rms: float = 0.015
     trigger_cooldown_seconds: float = 0.8
     localization_window_seconds: float = 0.08
-    classification_window_seconds: float = 0.0
-    max_sensor_buffer_seconds: float = 8.0
+    classification_window_seconds: float = 30.0
+    max_sensor_buffer_seconds: float = 32.0
     preprocess_enabled: bool = True
     ingest_gain_multiplier: float = 1.0
     audio_highpass_hz: float = 50.0
@@ -811,8 +811,8 @@ class Settings:
             trigger_rms=_env_float("MINIMAPPR_TRIGGER_RMS", 0.001),
             trigger_cooldown_seconds=_env_float("MINIMAPPR_TRIGGER_COOLDOWN_SECONDS", 0.8),
             localization_window_seconds=_env_float("MINIMAPPR_LOCALIZATION_WINDOW_SECONDS", 0.08),
-            classification_window_seconds=_env_float("MINIMAPPR_CLASSIFICATION_WINDOW_SECONDS", 0.0),
-            max_sensor_buffer_seconds=_env_float("MINIMAPPR_MAX_SENSOR_BUFFER_SECONDS", 8.0),
+            classification_window_seconds=_env_float("MINIMAPPR_CLASSIFICATION_WINDOW_SECONDS", 30.0),
+            max_sensor_buffer_seconds=_env_float("MINIMAPPR_MAX_SENSOR_BUFFER_SECONDS", 32.0),
             preprocess_enabled=_env_bool("MINIMAPPR_PREPROCESS_ENABLED", True),
             ingest_gain_multiplier=_env_float("MINIMAPPR_INGEST_GAIN_MULTIPLIER", 4.0),
             audio_highpass_hz=_env_float("MINIMAPPR_AUDIO_HIGHPASS_HZ", 50.0),

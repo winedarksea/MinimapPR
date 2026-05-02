@@ -88,7 +88,6 @@ pub struct DspManifest {
     pub raw_payload: Option<Vec<u8>>,
 }
 
-
 #[derive(Clone, Debug)]
 pub struct ManifestStore {
     root: PathBuf,
@@ -171,7 +170,10 @@ impl ManifestStore {
         let mut file_mtimes: Vec<(SystemTime, PathBuf)> = Vec::new();
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
             if !is_pending_manifest_file_name(name) {
                 continue;
             }

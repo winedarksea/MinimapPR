@@ -318,6 +318,10 @@ impl SensorStreamBuffer {
                 i128::from(self.sample_rate_hz),
             ))
     }
+
+    pub fn time_for_sample_index(&self, sample_index: i64) -> Option<i128> {
+        self.sample_index_to_time_ns(sample_index).ok()
+    }
 }
 
 pub fn coverage_stats(coverage: &[bool], sample_rate_hz: u32) -> AudioCoverageStats {

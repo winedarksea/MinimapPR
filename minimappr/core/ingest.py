@@ -18,10 +18,8 @@ _logger = logging.getLogger(__name__)
 # Log a summary after this many accepted (non-duplicate) frames.
 _INGEST_LOG_INTERVAL_FRAMES = 5000
 _AUDIO_SUMMARY_PUBLISH_INTERVAL_NS = 500_000_000
-# Firmware clock labels can be stale during GPS/NTP acquisition or while
-# recovering from a rejected discipline source. Use receipt-aligned buffering
-# for large skews so debug audio remains usable; TDOA triggering stays disabled
-# on receipt-time fallback.
+# Receipt time is metadata for freshness. GPS/NTP packet timestamps remain the
+# audio processing timeline even when transport latency is high.
 _MAX_TRUSTED_NODE_CLOCK_SKEW_NS = 300_000_000_000
 
 import numpy as np
@@ -679,7 +677,11 @@ def _buffer_timestamps_for_frame(
 ) -> tuple[int, int | None, bool]:
     duration_ns = int(round((sample_count / sample_rate_hz) * 1_000_000_000))
     node_clock_skew_ns = abs(frame_start_time_ns - server_received_ns)
-    if allow_receipt_time_fallback and node_clock_skew_ns > _MAX_TRUSTED_NODE_CLOCK_SKEW_NS:
+    if (
+        allow_receipt_time_fallback
+        and time_quality == TimeQuality.FREE_RUNNING
+        and node_clock_skew_ns > _MAX_TRUSTED_NODE_CLOCK_SKEW_NS
+    ):
         start_ns = max(1, server_received_ns - duration_ns)
         return start_ns, server_received_ns, True
     return frame_start_time_ns, frame_end_time_ns, False

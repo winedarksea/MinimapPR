@@ -126,6 +126,7 @@ async fn worker_publishes_omni_render_when_localization_coverage_is_unavailable(
         derived_cache,
         DspWorkerConfig {
             birdnet_hybrid_render_enabled: true,
+            classifier_render_min_interval_seconds: 0.0,
             max_buffer_seconds: 32.0,
             max_trusted_node_clock_skew_seconds: f64::MAX,
             ..DspWorkerConfig::default()
@@ -473,6 +474,34 @@ fn resolve_buffer_start_time_uses_now_as_fallback() {
         resolve_buffer_start_time_ns(&decoded, &handle, 16_000, 5_000_000_000),
         3_000_000_000
     );
+}
+
+#[test]
+fn existing_sample_timeline_is_stable_across_receipt_jitter() {
+    let sample_rate_hz = 16_000;
+    let first_packet_start_ns = 4_900_000_000_i128;
+    let mut buffer = SensorStreamBuffer::new(sample_rate_hz, 32.0);
+    buffer
+        .append(first_packet_start_ns, &vec![0.0; 1280], Some(0), Some(1280))
+        .unwrap();
+
+    let expected_second_packet_start_ns =
+        first_packet_start_ns + (1280 * 1_000_000_000_i128 / i128::from(sample_rate_hz));
+
+    assert_eq!(
+        buffer.time_for_sample_index(1280),
+        Some(expected_second_packet_start_ns)
+    );
+}
+
+#[test]
+fn default_classifier_window_has_birdnet_context_and_sparse_stride() {
+    let config = DspWorkerConfig::default();
+
+    assert!(config.classification_window_seconds >= 15.0);
+    assert_eq!(config.classification_window_seconds, 30.0);
+    assert_eq!(config.classifier_render_min_interval_seconds, 28.0);
+    assert!(config.max_buffer_seconds >= 32.0);
 }
 
 #[test]

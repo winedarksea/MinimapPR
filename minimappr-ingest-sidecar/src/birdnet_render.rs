@@ -175,7 +175,10 @@ fn real_to_complex_padded(samples: &[f32], fft_len: usize) -> Vec<Complex32> {
     samples
         .iter()
         .map(|sample| Complex32::new(*sample, 0.0))
-        .chain(std::iter::repeat_n(Complex32::new(0.0, 0.0), fft_len - samples.len()))
+        .chain(std::iter::repeat_n(
+            Complex32::new(0.0, 0.0),
+            fft_len - samples.len(),
+        ))
         .collect()
 }
 

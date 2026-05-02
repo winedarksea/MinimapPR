@@ -1,8 +1,7 @@
 use tracing::warn;
 
 use crate::{
-    classifier_helper::ManifestClassificationAnnotator,
-    dsp_worker::ClassificationRequest,
+    classifier_helper::ManifestClassificationAnnotator, dsp_worker::ClassificationRequest,
     manifests::ManifestStore,
 };
 

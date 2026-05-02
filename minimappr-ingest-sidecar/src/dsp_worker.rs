@@ -7,14 +7,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use serde::{Deserialize, Serialize};
-use tokio::{sync::mpsc, sync::RwLock, time};
-use tracing::{debug, info, warn};
 use crate::{
-    actors::{
-        classification::ClassificationWorker,
-        environment::EnvironmentCache,
-    },
+    actors::{classification::ClassificationWorker, environment::EnvironmentCache},
     audio_payload::{decode_audio_payload, DecodedAudioPayload},
     classifier_helper::ManifestClassificationAnnotator,
     derived_cache::DerivedCache,
@@ -23,6 +17,13 @@ use crate::{
     journal_reader::{read_payload_with_mmap, JournalPayloadHandle},
     manifests::{DspManifest, ManifestStore},
 };
+use serde::{Deserialize, Serialize};
+use tokio::{sync::mpsc, sync::RwLock, time};
+use tracing::{debug, info, warn};
+
+const MIN_BIRDNET_CLASSIFICATION_WINDOW_SECONDS: f64 = 15.0;
+const DEFAULT_BIRDNET_CLASSIFICATION_WINDOW_SECONDS: f64 = 30.0;
+const DEFAULT_CLASSIFIER_RENDER_OVERLAP_SECONDS: f64 = 2.0;
 
 /// Centroid-relative Sirith tetrahedral mic positions [MK1, MK2, MK3, MK4].
 pub(crate) const SIRITH_MIC_POSITIONS_M: [[f32; 3]; 4] = [
@@ -71,9 +72,11 @@ impl Default for DspWorkerConfig {
             poll_interval_ms: 20,
             pending_manifest_batch_size: 128,
             window_seconds: 512.0 / 16_000.0,
-            classification_window_seconds: 512.0 / 16_000.0,
-            classifier_render_min_interval_seconds: 0.0,
-            max_buffer_seconds: 8.0,
+            classification_window_seconds: DEFAULT_BIRDNET_CLASSIFICATION_WINDOW_SECONDS,
+            classifier_render_min_interval_seconds: DEFAULT_BIRDNET_CLASSIFICATION_WINDOW_SECONDS
+                - DEFAULT_CLASSIFIER_RENDER_OVERLAP_SECONDS,
+            max_buffer_seconds: DEFAULT_BIRDNET_CLASSIFICATION_WINDOW_SECONDS
+                + DEFAULT_CLASSIFIER_RENDER_OVERLAP_SECONDS,
             min_coverage_ratio: 0.85,
             localization_band_hz: [300.0, 3500.0],
             localization_srp_grid_resolution_m: 0.5,
@@ -407,25 +410,22 @@ impl DspWorker {
 
         // Phase 6: sound-speed fallback chain:
         // (1) embedded MMB1 flag bytes > (2) EnvironmentCache interpolation > (3) config defaults.
-        let (env_temp_c, env_humidity_fraction) = if decoded.temperature_c.is_none()
-            && decoded.humidity_fraction.is_none()
-        {
-            if let Some(cache) = &self.env_cache {
-                let query_ns = first_handle
-                    .toa_ns
-                    .unwrap_or(now_ns as u64);
-                let node_id = stream_key.split("__").next().unwrap_or(&stream_key);
-                cache
-                    .interpolate(node_id, query_ns)
-                    .await
-                    .map(|(t, h)| (Some(t), Some(h)))
-                    .unwrap_or((None, None))
+        let (env_temp_c, env_humidity_fraction) =
+            if decoded.temperature_c.is_none() && decoded.humidity_fraction.is_none() {
+                if let Some(cache) = &self.env_cache {
+                    let query_ns = first_handle.toa_ns.unwrap_or(now_ns as u64);
+                    let node_id = stream_key.split("__").next().unwrap_or(&stream_key);
+                    cache
+                        .interpolate(node_id, query_ns)
+                        .await
+                        .map(|(t, h)| (Some(t), Some(h)))
+                        .unwrap_or((None, None))
+                } else {
+                    (None, None)
+                }
             } else {
                 (None, None)
-            }
-        } else {
-            (None, None)
-        };
+            };
 
         let effective_sound_speed_mps = resolve_effective_sound_speed_mps(
             &self.config,
@@ -437,16 +437,18 @@ impl DspWorker {
         let render_duration_ns =
             (frames_all as i128).saturating_mul(1_000_000_000) / i128::from(sr.max(1));
         let start_time_ns = resolve_buffer_start_time_ns(&decoded, first_handle, sr, now_ns);
+        let node_timestamp_is_available =
+            decoded.start_time_ns.is_some_and(|start_ns| start_ns > 0)
+                || first_handle.toa_ns.is_some();
 
-        // Clock skew detection: when the node's reported start_time_ns differs from
-        // server receipt time by more than max_trusted_node_clock_skew_seconds, fall
-        // back to receipt-time alignment. This matches Python's _buffer_timestamps_for_frame
-        // and prevents buffer corruption from nodes with stale or uninitialized clocks.
+        // Receipt time is metadata for freshness/backlog decisions. Audio assembly
+        // must stay on the node/sample timeline so WiFi jitter cannot move the
+        // extraction window over otherwise contiguous buffered samples.
         let buffer_uses_receipt_time = {
             let skew_ns = (start_time_ns - now_ns as i128).unsigned_abs();
             let max_skew_ns =
                 (self.config.max_trusted_node_clock_skew_seconds * 1_000_000_000.0).round() as u128;
-            skew_ns > max_skew_ns
+            !node_timestamp_is_available && skew_ns > max_skew_ns
         };
         let (buffer_start_time_ns, buffer_end_time_ns) = if buffer_uses_receipt_time {
             let anchor_ns = first_handle.tor_ns.unwrap_or(now_ns as u64) as i128;
@@ -475,7 +477,14 @@ impl DspWorker {
         }
 
         let window_sec = self.config.window_seconds;
-        let classification_window_sec = self.config.classification_window_seconds.max(window_sec);
+        let classification_window_sec = if self.config.birdnet_hybrid_render_enabled {
+            self.config
+                .classification_window_seconds
+                .max(MIN_BIRDNET_CLASSIFICATION_WINDOW_SECONDS)
+                .max(window_sec)
+        } else {
+            self.config.classification_window_seconds.max(window_sec)
+        };
 
         if decoded.channels.len() < 4 {
             if !self.config.birdnet_hybrid_render_enabled {
@@ -492,7 +501,10 @@ impl DspWorker {
             }
             // Dispatch to Rayon so disk/DB I/O doesn't block the ingest loop.
             let channel_states: [LocalizationChannelState; 4] =
-                core::array::from_fn(|_| LocalizationChannelState { coverage: None, window: Vec::new() });
+                core::array::from_fn(|_| LocalizationChannelState {
+                    coverage: None,
+                    window: Vec::new(),
+                });
             let classification_windows: [Vec<f32>; 4] = core::array::from_fn(|_| Vec::new());
             return Some(ComputePayload {
                 manifest,
@@ -525,6 +537,23 @@ impl DspWorker {
         let buffers = self.buffers.entry(stream_key.clone()).or_insert_with(|| {
             core::array::from_fn(|_| SensorStreamBuffer::new(sr, self.config.max_buffer_seconds))
         });
+        let existing_sample_timeline_start_time_ns =
+            if !node_timestamp_is_available && !buffer_uses_receipt_time {
+                start_sample_index
+                    .and_then(|sample_index| buffers[0].time_for_sample_index(sample_index))
+            } else {
+                None
+            };
+        let (buffer_start_time_ns, buffer_end_time_ns) =
+            if let Some(existing_start_time_ns) = existing_sample_timeline_start_time_ns {
+                (
+                    existing_start_time_ns,
+                    existing_start_time_ns + render_duration_ns,
+                )
+            } else {
+                (buffer_start_time_ns, buffer_end_time_ns)
+            };
+        let audio_end_ns = buffer_end_time_ns.max(0) as u128;
 
         for (ch, buf) in buffers.iter_mut().enumerate() {
             if let Err(err) = buf.append(
@@ -553,7 +582,8 @@ impl DspWorker {
         let half_window_ns = window_duration_ns / 2;
         let center_offset_ns = (render_duration_ns - half_window_ns).max(0);
         let center_time_ns = buffer_start_time_ns + center_offset_ns;
-        let channel_states = localization_channel_states_centered(buffers, center_time_ns, window_sec);
+        let channel_states =
+            localization_channel_states_centered(buffers, center_time_ns, window_sec);
 
         if channel_states.iter().all(|state| state.coverage.is_none()) {
             debug!(
@@ -742,8 +772,7 @@ impl DspWorker {
                 return false;
             }
         }
-        let cooldown_ns =
-            (self.config.trigger_cooldown_seconds * 1_000_000_000.0).round() as u128;
+        let cooldown_ns = (self.config.trigger_cooldown_seconds * 1_000_000_000.0).round() as u128;
         if cooldown_ns == 0 {
             return true;
         }
@@ -846,10 +875,7 @@ pub(crate) async fn consume_manifest_standalone(
     if count.is_multiple_of(prune_interval) {
         let store = manifest_store.clone();
         tokio::spawn(async move {
-            if let Err(error) = store
-                .prune_consumed_manifests(retention_max_files)
-                .await
-            {
+            if let Err(error) = store.prune_consumed_manifests(retention_max_files).await {
                 warn!(error = %error, "DSP worker failed to prune consumed manifests");
             }
         });
@@ -927,10 +953,7 @@ fn channel_coverage_ending_at(
     })
 }
 
-fn latest_channel_windows(
-    buffers: &[SensorStreamBuffer; 4],
-    window_seconds: f64,
-) -> [Vec<f32>; 4] {
+fn latest_channel_windows(buffers: &[SensorStreamBuffer; 4], window_seconds: f64) -> [Vec<f32>; 4] {
     core::array::from_fn(|channel_index| buffers[channel_index].latest_window(window_seconds))
 }
 
@@ -991,15 +1014,21 @@ fn resolve_buffer_start_time_ns(
         .filter(|start_time_ns| *start_time_ns > 0)
         .or_else(|| first_handle.toa_ns.map(i128::from))
         .or_else(|| {
-            // Anchor sample-index math to Time of Receipt (tor_ns) rather than now_ns
-            // so that consecutive packets align seamlessly regardless of queue jitter.
-            let anchor_ns = first_handle.tor_ns.unwrap_or(now_ns as u64);
+            let anchor_ns = first_handle
+                .toa_ns
+                .unwrap_or_else(|| first_handle.tor_ns.unwrap_or(now_ns as u64));
             decoded.start_sample_index.map(|sample_index| {
-                sample_index_to_absolute_time_from_now_ns(sample_index, sample_rate_hz, anchor_ns.into())
+                sample_index_to_absolute_time_from_now_ns(
+                    sample_index,
+                    sample_rate_hz,
+                    anchor_ns.into(),
+                )
             })
         })
         .or_else(|| {
-            let anchor_ns = first_handle.tor_ns.unwrap_or(now_ns as u64);
+            let anchor_ns = first_handle
+                .toa_ns
+                .unwrap_or_else(|| first_handle.tor_ns.unwrap_or(now_ns as u64));
             first_handle.sample_index_start.map(|sample_index| {
                 sample_index_to_absolute_time_from_now_ns(
                     sample_index as i64,

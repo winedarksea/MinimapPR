@@ -56,8 +56,7 @@ impl EnvironmentCache {
             if after.t_ns == before.t_ns {
                 (before.temp_c, before.rh_pct)
             } else {
-                let alpha = (query_ns - before.t_ns) as f32
-                    / (after.t_ns - before.t_ns) as f32;
+                let alpha = (query_ns - before.t_ns) as f32 / (after.t_ns - before.t_ns) as f32;
                 let alpha = alpha.clamp(0.0, 1.0);
                 (
                     before.temp_c + alpha * (after.temp_c - before.temp_c),
@@ -85,7 +84,14 @@ mod tests {
     async fn interpolate_unknown_node_returns_none() {
         let cache = EnvironmentCache::new();
         cache
-            .update("n1", EnvSample { t_ns: 1000, temp_c: 20.0, rh_pct: 50.0 })
+            .update(
+                "n1",
+                EnvSample {
+                    t_ns: 1000,
+                    temp_c: 20.0,
+                    rh_pct: 50.0,
+                },
+            )
             .await;
         assert!(cache.interpolate("other", 1000).await.is_none());
     }
@@ -94,32 +100,66 @@ mod tests {
     async fn interpolate_before_first_clamps_to_first() {
         let cache = EnvironmentCache::new();
         cache
-            .update("n1", EnvSample { t_ns: 1000, temp_c: 20.0, rh_pct: 50.0 })
+            .update(
+                "n1",
+                EnvSample {
+                    t_ns: 1000,
+                    temp_c: 20.0,
+                    rh_pct: 50.0,
+                },
+            )
             .await;
         let (t, h) = cache.interpolate("n1", 0).await.unwrap();
         assert_eq!(t, 20.0);
-        assert!((h - 0.5).abs() < 1e-6, "humidity fraction expected 0.5, got {h}");
+        assert!(
+            (h - 0.5).abs() < 1e-6,
+            "humidity fraction expected 0.5, got {h}"
+        );
     }
 
     #[tokio::test]
     async fn interpolate_after_last_clamps_to_last() {
         let cache = EnvironmentCache::new();
         cache
-            .update("n1", EnvSample { t_ns: 1000, temp_c: 25.0, rh_pct: 60.0 })
+            .update(
+                "n1",
+                EnvSample {
+                    t_ns: 1000,
+                    temp_c: 25.0,
+                    rh_pct: 60.0,
+                },
+            )
             .await;
         let (t, h) = cache.interpolate("n1", 9999).await.unwrap();
         assert_eq!(t, 25.0);
-        assert!((h - 0.6).abs() < 1e-6, "humidity fraction expected 0.6, got {h}");
+        assert!(
+            (h - 0.6).abs() < 1e-6,
+            "humidity fraction expected 0.6, got {h}"
+        );
     }
 
     #[tokio::test]
     async fn interpolate_midpoint() {
         let cache = EnvironmentCache::new();
         cache
-            .update("n1", EnvSample { t_ns: 0, temp_c: 20.0, rh_pct: 40.0 })
+            .update(
+                "n1",
+                EnvSample {
+                    t_ns: 0,
+                    temp_c: 20.0,
+                    rh_pct: 40.0,
+                },
+            )
             .await;
         cache
-            .update("n1", EnvSample { t_ns: 1000, temp_c: 30.0, rh_pct: 60.0 })
+            .update(
+                "n1",
+                EnvSample {
+                    t_ns: 1000,
+                    temp_c: 30.0,
+                    rh_pct: 60.0,
+                },
+            )
             .await;
         let (t, h) = cache.interpolate("n1", 500).await.unwrap();
         assert!((t - 25.0).abs() < 1e-4, "temp expected 25, got {t}");
@@ -130,10 +170,24 @@ mod tests {
     async fn interpolate_exact_sample_time() {
         let cache = EnvironmentCache::new();
         cache
-            .update("n1", EnvSample { t_ns: 500, temp_c: 22.0, rh_pct: 55.0 })
+            .update(
+                "n1",
+                EnvSample {
+                    t_ns: 500,
+                    temp_c: 22.0,
+                    rh_pct: 55.0,
+                },
+            )
             .await;
         cache
-            .update("n1", EnvSample { t_ns: 1500, temp_c: 28.0, rh_pct: 65.0 })
+            .update(
+                "n1",
+                EnvSample {
+                    t_ns: 1500,
+                    temp_c: 28.0,
+                    rh_pct: 65.0,
+                },
+            )
             .await;
         let (t, h) = cache.interpolate("n1", 500).await.unwrap();
         assert!((t - 22.0).abs() < 1e-4);
@@ -145,7 +199,14 @@ mod tests {
         let cache = EnvironmentCache::new();
         for i in 0u64..=(RING_SIZE as u64) {
             cache
-                .update("n1", EnvSample { t_ns: i * 1000, temp_c: i as f32, rh_pct: 50.0 })
+                .update(
+                    "n1",
+                    EnvSample {
+                        t_ns: i * 1000,
+                        temp_c: i as f32,
+                        rh_pct: 50.0,
+                    },
+                )
                 .await;
         }
         // After RING_SIZE+1 insertions the oldest entry (t_ns=0, temp=0) is evicted.

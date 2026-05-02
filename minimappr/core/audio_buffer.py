@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -387,16 +390,43 @@ class MultiSensorBuffer:
         """Prevent the buffer from evicting samples at or after start_ns.
 
         Enforces a 5-minute hard cap so a stuck session cannot cause OOM.
+
+        Performance note: SensorStreamBuffer uses a grow-and-prune pattern.
+        While a pin is active, _prune() cannot evict old frames, so the buffer
+        grows by one frame on every append() call.  Each append() allocates and
+        copies (current_buffer_size + new_frame) samples — O(N) per frame.
+        At 16 kHz × 4 ch × 5 min this peaks at ~19 MB per append on a 300 s
+        recording, which will block the event loop for several milliseconds per
+        frame on a Raspberry Pi and may cause ingest frame drops at that point.
+        For production Pi captures use the Rust ingest sidecar (journal mode),
+        which avoids this by writing audio directly to tmpfs.
         """
         floor = time.time_ns() - self._PIN_MAX_DURATION_NS
         self._pins[session_id] = max(start_ns, floor)
+        if self.max_duration_seconds < 60.0:
+            logger.warning(
+                "capture pin started on a buffer configured for %.0f s of live data; "
+                "buffer will grow during recording (peak ~%.0f MB per channel at 5 min / 16 kHz). "
+                "Use Rust ingest+journal mode for production Pi captures.",
+                self.max_duration_seconds,
+                300 * 16000 * 4 / 1_000_000,
+            )
 
     def unpin(self, session_id: str) -> None:
         """Release a pin, allowing normal pruning to resume."""
         self._pins.pop(session_id, None)
 
     def _oldest_pin_ns(self) -> Optional[int]:
-        return min(self._pins.values()) if self._pins else None
+        if not self._pins:
+            return None
+        earliest_recorded = min(self._pins.values())
+        # Rolling TTL: even if unpin() is never called, never protect data
+        # older than _PIN_MAX_DURATION_NS from the current moment.  Without
+        # this, a stuck pin (unhandled exception or task cancellation before
+        # unpin()) would allow the buffer to grow without bound past the
+        # initial 5-minute cap enforced at pin creation time.
+        ttl_floor = time.time_ns() - self._PIN_MAX_DURATION_NS
+        return max(earliest_recorded, ttl_floor)
 
     async def extract_range(
         self,

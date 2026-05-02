@@ -8,9 +8,10 @@ from fastapi.testclient import TestClient
 
 from minimappr import __main__ as minimappr_cli
 from minimappr.config import Settings
+from minimappr.core.ingest import _buffer_timestamps_for_frame
 from minimappr.core.capture_session import CaptureSessionRecord, CaptureState
 from minimappr.main import app
-from minimappr.models import NodeSpec, NodeType
+from minimappr.models import NodeSpec, NodeType, TimeQuality
 from minimappr.storage.db import Storage
 
 
@@ -43,6 +44,26 @@ def test_settings_accepts_explicit_ingest_base_url(monkeypatch) -> None:
     settings = Settings.from_env()
 
     assert settings.ingest_base_url == "http://minimap-ingest.local:19091"
+
+
+def test_gps_buffer_timestamps_ignore_receipt_jitter() -> None:
+    frame_start_ns = 1_000_000_000
+    frame_end_ns = 1_080_000_000
+    delayed_receipt_ns = frame_start_ns + 150_000_000
+
+    start_ns, end_ns, used_receipt_time = _buffer_timestamps_for_frame(
+        frame_start_time_ns=frame_start_ns,
+        frame_end_time_ns=frame_end_ns,
+        sample_count=1280,
+        sample_rate_hz=16_000,
+        time_quality=TimeQuality.GPS_LOCKED,
+        server_received_ns=delayed_receipt_ns,
+        allow_receipt_time_fallback=True,
+    )
+
+    assert start_ns == frame_start_ns
+    assert end_ns == frame_end_ns
+    assert used_receipt_time is False
 
 
 def test_split_api_role_hides_ingest_endpoints(monkeypatch, tmp_path: Path) -> None:

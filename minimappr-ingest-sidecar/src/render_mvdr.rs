@@ -82,7 +82,10 @@ pub fn render_mvdr(request: MvdrRenderRequest) -> MvdrRenderOutput {
 
     let (fft, ifft) = PLANNER.with(|planner| {
         let mut p = planner.borrow_mut();
-        (p.plan_fft(block_size, FftDirection::Forward), p.plan_fft(block_size, FftDirection::Inverse))
+        (
+            p.plan_fft(block_size, FftDirection::Forward),
+            p.plan_fft(block_size, FftDirection::Inverse),
+        )
     });
 
     // IIR steering state (unit vector, initialised from first waypoint).

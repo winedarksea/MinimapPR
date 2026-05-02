@@ -248,7 +248,9 @@ pub async fn run_io(result: ComputeMathResult) {
     let mut st = payload.state.write().await;
     st.last_processed_ns = Some(payload.now_ns);
     let real_localization = localization.resolved_algorithm == "srp_phat"
-        || localization.resolved_algorithm.starts_with("srp_phat_degraded");
+        || localization
+            .resolved_algorithm
+            .starts_with("srp_phat_degraded");
     if real_localization {
         st.total_tdoa_results += 1;
     }

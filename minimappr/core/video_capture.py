@@ -214,9 +214,14 @@ class VideoCapture:
                 match = pts_pattern.search(line)
                 if match:
                     pts_s = float(match.group(1))
-                    # Convert to absolute ns using process_start_ns as the
-                    # video clock origin (pts_time=0 corresponds to first frame).
-                    self._first_frame_pts_ns = self._process_start_ns + int(
+                    # Derive the wall-clock time of PTS=0 (first frame) by
+                    # subtracting pts_s from the current wall clock at parse
+                    # time.  This corrects for camera init latency (50–500 ms)
+                    # that makes process_start_ns an inaccurate video origin.
+                    # process_start_ns + pts_s would anchor to spawn time, but
+                    # the camera may not have delivered its first frame until
+                    # well after spawn, introducing a constant AV drift.
+                    self._first_frame_pts_ns = time.time_ns() - int(
                         pts_s * 1_000_000_000
                     )
                     self._pts_event.set()
