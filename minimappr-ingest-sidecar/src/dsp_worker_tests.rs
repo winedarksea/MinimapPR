@@ -54,7 +54,8 @@ async fn worker_publishes_localization_and_classifier_render_contract() {
         coverage_stats: None,
         promotion_ready: false,
         env_samples: None,
-        raw_payload: None,
+        node_context: None,
+            raw_payload: None,
     };
     let state: SharedDspState = Arc::new(RwLock::new(Default::default()));
     let mut worker = DspWorker::new(
@@ -327,6 +328,7 @@ async fn consume_manifest_standalone_skips_non_persisted_channel_manifests() {
         coverage_stats: None,
         promotion_ready: false,
         env_samples: None,
+            node_context: None,
         raw_payload: Some(vec![1, 2, 3]),
     };
 
@@ -375,7 +377,8 @@ async fn raw_manifest_for_payload(
         coverage_stats: None,
         promotion_ready: false,
         env_samples: None,
-        raw_payload: None,
+        node_context: None,
+            raw_payload: None,
     }
 }
 
@@ -655,7 +658,8 @@ fn stale_manifest_detection_uses_source_receipt_time() {
         coverage_stats: None,
         promotion_ready: false,
         env_samples: None,
-        raw_payload: None,
+        node_context: None,
+            raw_payload: None,
     };
 
     assert!(manifest_is_older_than_buffer_horizon(
@@ -696,7 +700,8 @@ fn stale_manifest_detection_keeps_fresh_manifest_with_old_packet_epoch() {
         coverage_stats: None,
         promotion_ready: false,
         env_samples: None,
-        raw_payload: None,
+        node_context: None,
+            raw_payload: None,
     };
 
     // Even with old packet timestamps, the manifest just arrived and should
@@ -732,7 +737,7 @@ fn merge_pending_manifests_prioritizes_fresh_disk_when_channel_is_busy() {
     let disk = vec![test_manifest_with_created_ns("disk-fresh", 1_000)];
 
     let merged = merge_pending_manifests_for_batch(channel, disk, 4);
-    let merged_ids: Vec<&str> = merged.iter().map(|m| m.manifest_id.as_str()).collect();
+    let merged_ids: Vec<&str> = merged.iter().map(|manifest| manifest.manifest_id.as_str()).collect();
 
     assert_eq!(merged.len(), 4);
     assert!(merged_ids.contains(&"disk-fresh"));
@@ -757,6 +762,13 @@ fn merge_pending_manifests_deduplicates_by_manifest_id() {
     assert_eq!(merged.len(), 2);
 }
 
+#[test]
+fn poll_cycle_sleep_policy_only_sleeps_when_no_work_was_processed() {
+    assert!(should_sleep_after_poll_cycle(0));
+    assert!(!should_sleep_after_poll_cycle(1));
+    assert!(!should_sleep_after_poll_cycle(128));
+}
+
 fn test_manifest_with_created_ns(manifest_id: &str, created_ns: u128) -> DspManifest {
     DspManifest {
         manifest_id: manifest_id.to_string(),
@@ -770,6 +782,7 @@ fn test_manifest_with_created_ns(manifest_id: &str, created_ns: u128) -> DspMani
         coverage_stats: None,
         promotion_ready: false,
         env_samples: None,
-        raw_payload: None,
+        node_context: None,
+            raw_payload: None,
     }
 }

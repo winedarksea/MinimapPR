@@ -1,9 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
-const PRUNE_CHUNK_DIVISOR: i64 = 8;
-const PRUNE_MIN_CHUNK_SECONDS: f64 = 0.25;
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AudioCoverageStats {
     pub sample_count: usize,
@@ -329,18 +326,12 @@ impl SensorStreamBuffer {
         if self.sample_len() as i64 <= self.max_samples {
             return;
         }
-        let overflow = (self.sample_len() as i64 - self.max_samples) as usize;
-        // VecDeque front pops are O(1), so prune no longer memmoves the full tail.
-        let drop = if self.max_samples >= i64::from(self.sample_rate_hz) {
-            let chunk_samples_from_window =
-                (self.max_samples / PRUNE_CHUNK_DIVISOR).max(1) as usize;
-            let min_chunk_samples =
-                (f64::from(self.sample_rate_hz) * PRUNE_MIN_CHUNK_SECONDS).round() as usize;
-            overflow.max(chunk_samples_from_window.max(min_chunk_samples))
-        } else {
-            overflow
-        }
-        .min(self.sample_len());
+        // Drop exactly the minimum number of samples needed to fit within max_samples.
+        // VecDeque front pops are O(1), so there is no memmove cost — aggressive
+        // chunked dropping is not needed and would create coverage gaps in the
+        // 30-second BirdNET classification window.
+        let drop = (self.sample_len() as i64 - self.max_samples)
+            .max(0) as usize;
         for _ in 0..drop {
             let _ = self.samples.pop_front();
             let _ = self.coverage.pop_front();
@@ -743,7 +734,7 @@ mod tests {
     }
 
     #[test]
-    fn prune_drops_chunk_to_amortize_front_compaction_cost() {
+    fn prune_drops_exact_overflow_to_preserve_coverage_continuity() {
         let sr = 16_u32;
         let t0 = 1_000_000_000_i128;
         let mut buffer = SensorStreamBuffer::new(sr, 1.0);
@@ -760,10 +751,11 @@ mod tests {
             )
             .unwrap();
 
-        // max_samples=16 and overflow=1, but chunked prune should drop 4 samples
-        // (max(sr*0.25, max_samples/8)) to avoid tiny per-frame front drains.
-        assert_eq!(buffer.buffer_start_sample_index, 4);
-        assert_eq!(buffer.samples.len(), 13);
+        // max_samples=16, overflow=1: exactly 1 sample should be dropped.
+        // Aggressive chunked dropping would create false coverage gaps in the
+        // BirdNET classification window, so prune must be exact.
+        assert_eq!(buffer.buffer_start_sample_index, 1);
+        assert_eq!(buffer.samples.len(), 16);
         assert_eq!(buffer.samples[0], 1.0);
         assert_eq!(buffer.samples.back().copied(), Some(2.0));
     }

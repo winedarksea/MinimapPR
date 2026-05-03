@@ -266,12 +266,14 @@ impl DspWorker {
                 st.worker_running = true;
                 st.last_heartbeat_ns = Some(system_now_ns());
             }
-            self.process_pending().await;
-            time::sleep(interval).await;
+            let processed_manifest_count = self.process_pending().await;
+            if should_sleep_after_poll_cycle(processed_manifest_count) {
+                time::sleep(interval).await;
+            }
         }
     }
 
-    async fn process_pending(&mut self) {
+    async fn process_pending(&mut self) -> usize {
         let batch_limit = self.config.pending_manifest_batch_size.max(1);
         let channel_limit = (batch_limit / 2).max(1);
 
@@ -302,7 +304,7 @@ impl DspWorker {
                 Ok(m) => m,
                 Err(err) => {
                     warn!(error = %err, "DSP worker failed to query pending manifests");
-                    return;
+                    return 0;
                 }
             }
         } else {
@@ -335,6 +337,7 @@ impl DspWorker {
         }
 
         self.flush_deferred_source_manifest_consumptions().await;
+        pending_backlog_depth
     }
 
     async fn ingest_one(
@@ -485,7 +488,13 @@ impl DspWorker {
             now_ns,
             self.config.max_buffer_seconds,
         );
-        if source_manifest_is_stale && self.config.skip_stale_manifests_for_live_buffer {
+            // Channel-delivered manifests are freshly received in-process even when their
+            // embedded node timestamps are historical (replay/tests). Do not drop those as stale.
+            let arrived_via_channel = manifest.raw_payload.is_some();
+            if source_manifest_is_stale
+                && self.config.skip_stale_manifests_for_live_buffer
+                && !arrived_via_channel
+            {
             debug!(
                 manifest_id = %manifest.manifest_id,
                 "DSP worker skipped stale source manifest to protect live buffer continuity"
@@ -496,6 +505,23 @@ impl DspWorker {
             st.last_processed_ns = Some(now_ns);
             return None;
         }
+            // Channel-delivered manifests (raw_payload is Some) are always fresh — they just
+            // arrived in-process and audio timestamps from firmware/tests can legitimately
+            // be far in the past. Staleness gating is for disk queue backlog only.
+            if source_manifest_is_stale
+                && self.config.skip_stale_manifests_for_live_buffer
+                && manifest.raw_payload.is_none()
+            {
+                debug!(
+                    manifest_id = %manifest.manifest_id,
+                    "DSP worker skipped stale disk manifest to protect live buffer continuity"
+                );
+                self.defer_source_manifest_consumption(&manifest);
+                let mut st = self.state.write().await;
+                st.total_stale_manifest_skips += 1;
+                st.last_processed_ns = Some(now_ns);
+                return None;
+            }
 
         let window_sec = self.config.window_seconds;
         let classification_window_sec = if self.config.birdnet_hybrid_render_enabled {
@@ -973,10 +999,15 @@ fn merge_pending_manifests_for_batch(
     }
 
     // Prioritize freshest manifests so live audio stays current even while a
-    // backlog exists in either source.
+    // backlog exists in either source. This keeps the 30-second BirdNET window
+    // populated with recent audio rather than draining an old backlog first.
     merged.sort_unstable_by(|left, right| right.created_ns.cmp(&left.created_ns));
     merged.truncate(batch_limit);
     merged
+}
+
+fn should_sleep_after_poll_cycle(processed_manifest_count: usize) -> bool {
+    processed_manifest_count == 0
 }
 
 pub(crate) async fn consume_manifest_standalone(

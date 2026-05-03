@@ -276,8 +276,9 @@ def _wait_for_manifest_pair(spool_dir: Path, *, timeout_s: float = 15.0) -> list
     last_manifest_types: list[str] = []
     while time.monotonic() < deadline:
         payloads: list[dict] = []
+        # Manifests live in pending/ or consumed/ subdirectories.
         if manifest_dir.exists():
-            for path in sorted(manifest_dir.glob("*.json")):
+            for path in sorted(manifest_dir.rglob("*.json")):
                 payloads.append(json.loads(path.read_text(encoding="utf-8")))
         last_manifest_types = [str(payload.get("manifest_type")) for payload in payloads]
         manifest_types = set(last_manifest_types)
@@ -372,11 +373,39 @@ def _wait_for_detection_from_node(client: TestClient, *, node_id: str, timeout_s
 
 def _load_first_journal_entry(spool_dir: Path) -> dict:
     index_paths = sorted((spool_dir / "journal" / "streams").glob("*/segments/*.index.jsonl"))
-    assert index_paths, "expected at least one journal index file"
     for index_path in index_paths:
         for line in index_path.read_text(encoding="utf-8").splitlines():
             if line.strip():
                 return json.loads(line)
+
+    # Channel-only ingest does not persist segment index files; reconstruct a
+    # minimal entry from seg-mem source handles in manifests.
+    manifest_dir = spool_dir / "journal" / "manifests"
+    manifest_paths = sorted(manifest_dir.rglob("*.json")) if manifest_dir.exists() else []
+    for manifest_path in manifest_paths:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        source_handles = payload.get("source_handles") or []
+        if not source_handles:
+            continue
+        first_handle = source_handles[0]
+        segment_id = str(first_handle.get("segment_id") or "")
+        stream_key = str(first_handle.get("stream_key") or "")
+        if not stream_key or not segment_id.startswith("seg-mem-"):
+            continue
+        parts = segment_id.split("-")
+        if len(parts) < 4:
+            continue
+        try:
+            journal_epoch = int(parts[2])
+            journal_sequence = int(parts[3])
+        except ValueError:
+            continue
+        return {
+            "stream_key": stream_key,
+            "journal_epoch": journal_epoch,
+            "journal_sequence": journal_sequence,
+        }
+
     raise AssertionError("expected at least one journal entry")
 
 
@@ -843,5 +872,6 @@ def test_http_app_in_production_mode_consumes_rust_sidecar_journal(monkeypatch, 
         assert detection["feature_summary"]["rust_manifest_id"]
         assert str(detection["feature_summary"]["rust_render_kind"]).startswith("birdnet_")
 
-        journal_streams_dir = spool_dir / "journal" / "streams"
-        assert any(journal_streams_dir.glob("*/segments/*.index.jsonl"))
+        journal_dir = spool_dir / "journal"
+        assert journal_dir.exists()
+        assert (journal_dir / "consumer_state.sqlite3").exists()

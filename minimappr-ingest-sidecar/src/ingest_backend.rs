@@ -561,9 +561,11 @@ impl SegmentJournalBackend {
             .map_err(InvalidIngestEnvelopeError::new)
             .map_err(|error| -> BoxedError { Box::new(error) })?;
 
-        // Fast-path mode: when raw audio bytes are delivered in-process and binary
-        // writes are disabled, avoid all per-frame journal filesystem writes here.
-        if self.runtime_config.skip_binary_writes && self.runtime_config.raw_manifest_tx.is_some() {
+        // When a DSP channel is wired in, deliver audio entirely in-memory.
+        // No segment binary, no JSONL index, no metadata JSON, no manifest JSON on disk.
+        // The capture pipeline (journal_range / MVDR) requires skip_binary_writes=false
+        // and no raw_manifest_tx, which routes through the full journal path below.
+        if self.runtime_config.raw_manifest_tx.is_some() {
             return self
                 .enqueue_channel_only(
                     endpoint,
@@ -790,26 +792,43 @@ impl SegmentJournalBackend {
             promotion_ready: false,
             env_samples: None,
             // raw_payload is #[serde(skip)] — not written to disk.
+            node_context: None,
             raw_payload: None,
         };
-        // Channel-first delivery keeps the ingest path off the filesystem in
-        // steady state. If the receiver is gone, we fall back to disk so the
-        // frame can still be discovered once the worker restarts.
+        // Deliver audio to the DSP worker exclusively via the in-process channel.
+        // Never fall back to disk — a channel-send failure means the DSP worker has
+        // stopped, and writing to the manifest store would not help it recover.
         if let Some(tx) = &self.runtime_config.raw_manifest_tx {
-            // Attach the raw audio bytes only for the in-process channel message so
-            // the DSP worker can skip the blocking read_payload_with_mmap call.
-            // Unbounded send: only fails if the receiver has been dropped (DSP worker
-            // stopped), which is acceptable during graceful shutdown.
-            let mut manifest_with_payload = manifest.clone();
+            let mut manifest_with_payload = manifest;
             manifest_with_payload.raw_payload = Some(raw_bytes.to_vec());
-            if tx.send(manifest_with_payload).is_ok() {
-                return Ok(());
+            // Embed node spec and frame metadata so Python can reconstruct node context
+            // without reading the segment binary (never written in this path).
+            let node_value_opt = if raw_bytes.starts_with(b"MMB1") {
+                // Binary MMB1: parse node spec from the binary header.
+                crate::envelope::extract_mmb1_node_json(raw_bytes)
+            } else {
+                // StoreForward JSON: extract the top-level "node" object.
+                serde_json::from_slice::<serde_json::Value>(raw_bytes)
+                    .ok()
+                    .and_then(|body_json| body_json.get("node").cloned())
+            };
+            if let Some(node_value) = node_value_opt {
+                manifest_with_payload.node_context = Some(serde_json::json!({
+                    "node": node_value,
+                    "toa_ns": entry.toa_ns,
+                    "time_quality": entry.time_quality,
+                    "source_type": entry.source_type,
+                }));
             }
-            warn!(
-                manifest_id = %entry.journal_id,
-                "raw manifest channel receiver unavailable; falling back to manifest store"
-            );
+            if tx.send(manifest_with_payload).is_err() {
+                warn!(
+                    manifest_id = %entry.journal_id,
+                    "raw manifest channel receiver unavailable; frame dropped (DSP worker stopped)"
+                );
+            }
+            return Ok(());
         }
+        // No channel configured — full journal path (capture pipeline only).
         self.manifest_store.publish(manifest).await?;
         Ok(())
     }
@@ -3163,6 +3182,7 @@ mod tests {
             coverage_stats: None,
             promotion_ready: true,
             env_samples: None,
+            node_context: None,
             raw_payload: None,
         };
         let path = manifest_store.publish(manifest.clone()).await.unwrap();
@@ -3204,7 +3224,8 @@ mod tests {
                 coverage_stats: None,
                 promotion_ready: false,
                 env_samples: None,
-                raw_payload: None,
+                node_context: None,
+            raw_payload: None,
             })
             .await
             .unwrap();
@@ -3260,6 +3281,7 @@ mod tests {
             coverage_stats: None,
             promotion_ready: false,
             env_samples: None,
+            node_context: None,
             raw_payload: None,
         };
         let pending_file = tmp
@@ -3328,7 +3350,8 @@ mod tests {
                     coverage_stats: None,
                     promotion_ready: false,
                     env_samples: None,
-                    raw_payload: None,
+                    node_context: None,
+            raw_payload: None,
                 })
                 .await
                 .unwrap();
@@ -3371,7 +3394,8 @@ mod tests {
                     coverage_stats: None,
                     promotion_ready: false,
                     env_samples: None,
-                    raw_payload: None,
+                    node_context: None,
+            raw_payload: None,
                 })
                 .await
                 .unwrap();

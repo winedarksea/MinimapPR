@@ -109,7 +109,14 @@ def load_localized_render_manifest_bundle(
         manifest_id = str(paired_classifier_manifest_payload.get("manifest_id") or "")
 
     source_handle = JournalPayloadHandle.from_mapping(source_handles_payload[0], journal_streams_dir=journal_streams_dir)
-    node, event_time_ns, source_type, time_quality, environment = _load_source_context(source_handle)
+    # For channel-only manifests (payload_length_bytes == 0), the segment binary is
+    # never written to disk. Use the node_context embedded directly in the manifest.
+    node_context_payload = manifest_payload.get("node_context")
+    if source_handle.payload_length_bytes == 0 and isinstance(node_context_payload, dict):
+        node, event_time_ns, source_type, time_quality, environment = \
+            _load_source_context_from_channel_manifest(node_context_payload, source_handle)
+    else:
+        node, event_time_ns, source_type, time_quality, environment = _load_source_context(source_handle)
     derived_handle = JournalPayloadHandle.from_mapping(derived_handle_payload, journal_streams_dir=journal_streams_dir)
     decoded_audio = _decode_classifier_render_audio(derived_handle, classifier_render_payload)
     coverage_payload = manifest_payload.get("coverage_stats")
@@ -244,6 +251,27 @@ def _load_authoritative_classification(
     )
 
 
+def _load_source_context_from_channel_manifest(
+    node_context: dict[str, Any],
+    source_handle: JournalPayloadHandle,
+) -> tuple[NodeSpec, int, str, TimeQuality, dict[str, Any]]:
+    """Reconstruct source context from node_context embedded in channel-only manifests.
+
+    Called when payload_length_bytes == 0 (no segment binary written to disk).
+    The node_context field is set by the Rust ingest backend when delivering audio
+    via the in-process channel rather than the disk journal path.
+    """
+    node = NodeSpec.model_validate(node_context["node"])
+    toa_ns = node_context.get("toa_ns") or source_handle.toa_ns or source_handle.tor_ns or 0
+    source_type = str(node_context.get("source_type") or "raw_sensor")
+    time_quality_str = str(node_context.get("time_quality") or "free_running")
+    try:
+        time_quality = TimeQuality(time_quality_str)
+    except ValueError:
+        time_quality = TimeQuality.FREE_RUNNING
+    return (node, int(toa_ns), source_type, time_quality, {})
+
+
 def _load_source_context(
     source_handle: JournalPayloadHandle,
 ) -> tuple[NodeSpec, int, str, TimeQuality, dict[str, Any]]:
@@ -314,6 +342,23 @@ def _lookup_cursor_update(
     handle: JournalPayloadHandle,
     journal_streams_dir: Path,
 ) -> JournalCursorUpdate:
+    # Channel-only manifests use virtual segment IDs ("seg-mem-{epoch}-{seq}").
+    # No index JSONL exists on disk — synthesize the cursor update from the segment_id.
+    if handle.segment_id.startswith("seg-mem-"):
+        parts = handle.segment_id.split("-")
+        # Format: seg-mem-{epoch:020}-{sequence:020} → parts[2]=epoch, parts[3]=sequence
+        try:
+            epoch = int(parts[2]) if len(parts) > 2 else handle.journal_epoch
+            sequence = int(parts[3]) if len(parts) > 3 else 0
+        except (ValueError, IndexError):
+            epoch = handle.journal_epoch
+            sequence = 0
+        return JournalCursorUpdate(
+            journal_id=handle.segment_id,
+            stream_key=handle.stream_key,
+            journal_epoch=epoch,
+            journal_sequence=sequence,
+        )
     index_path = journal_streams_dir / handle.stream_key / "segments" / f"{handle.segment_id}.index.jsonl"
     with index_path.open("r", encoding="utf-8") as source:
         for line in source:

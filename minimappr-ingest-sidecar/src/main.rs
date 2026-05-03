@@ -590,7 +590,8 @@ async fn ingest_env(
                 coverage_stats: None,
                 promotion_ready: false,
                 env_samples: Some(samples_value),
-                raw_payload: None,
+                node_context: None,
+            raw_payload: None,
             };
             if let Err(err) = manifest_store.publish(manifest).await {
                 warn!(error = %err, "failed to publish env_sample_append manifest");

@@ -494,12 +494,12 @@ class FusionNode:
             environment=dict(payload.environment),
             extra_classification_features=rust_extra_features,
         )
+        # Rust localized renders should be classified synchronously so callers can
+        # observe the resulting detection immediately after ingest_localized_render returns.
         if self._classification_chunking_policy is not None and payload.authoritative_classification is None:
             if self._should_suppress_chunked_classification(localized_product):
                 self._metrics.birdnet_chunk_dispatches_suppressed += 1
                 return
-            await self._enqueue_stage(self._classification_queue, localized_product)
-            return
 
         if payload.authoritative_classification is not None:
             classified = await self._classification_orchestrator.adopt_authoritative_classification(

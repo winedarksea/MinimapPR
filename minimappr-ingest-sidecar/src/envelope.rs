@@ -178,11 +178,70 @@ pub fn parse_capture_envelope(
     endpoint: &str,
     raw_payload: &[u8],
 ) -> Result<CaptureEnvelope, String> {
-    match endpoint {
+        match endpoint {
         "/api/v1/ingest/binary" => parse_binary_capture_envelope(raw_payload),
         "/api/v1/ingest/store-forward" => parse_store_forward_capture_envelope(raw_payload),
         other => Err(format!("unsupported ingest endpoint {other}")),
     }
+}
+
+/// Extracts node spec fields from the MMB1 binary header as a JSON value compatible
+/// with NodeSpec model_validate. Returns None on parse error (binary is still valid
+/// for audio processing — this is best-effort metadata extraction only).
+pub fn extract_mmb1_node_json(raw_bytes: &[u8]) -> Option<serde_json::Value> {
+    let mut reader = BinaryReader::new(raw_bytes);
+    // Skip magic + version + sort_by_toa + frame_count (7 bytes)
+    reader.read(4).ok()?; // "MMB1"
+    reader.u8().ok()?;    // version
+    reader.u8().ok()?;    // sort_by_toa
+    reader.u16().ok()?;   // frame_count
+
+    let node_id = reader.string().ok()?;
+    let node_type_code = reader.u8().ok()?;
+    let position_x = reader.f32().ok()?;
+    let position_y = reader.f32().ok()?;
+    let position_z = reader.f32().ok()?;
+    let has_geo_position = reader.u8().ok()? != 0;
+    if has_geo_position {
+        reader.f32().ok()?; // lat
+        reader.f32().ok()?; // lon
+        reader.f32().ok()?; // alt
+    }
+    let sensor_count = reader.u8().ok()?;
+    let mut sensor_offsets: Vec<[f32; 3]> = Vec::with_capacity(usize::from(sensor_count));
+    for _ in 0..sensor_count {
+        let x = reader.f32().ok()?;
+        let y = reader.f32().ok()?;
+        let z = reader.f32().ok()?;
+        sensor_offsets.push([x, y, z]);
+    }
+    let capability_count = reader.u8().ok()?;
+    let mut capabilities: Vec<String> = Vec::with_capacity(usize::from(capability_count));
+    for _ in 0..capability_count {
+        if let Ok(cap) = reader.string() {
+            capabilities.push(cap);
+        } else {
+            break;
+        }
+    }
+
+    // node_type_code: 0=point, 1=sirith_tetra, 2=array, 3=gateway
+    let node_type_str = match node_type_code {
+        0 => "point",
+        1 => "sirith_tetra",
+        2 => "array",
+        3 => "gateway",
+        _ => "point",
+    };
+
+    Some(serde_json::json!({
+        "id": node_id,
+        "node_type": node_type_str,
+        "position_m": [position_x, position_y, position_z],
+        "sensor_offsets_m": sensor_offsets,
+        "capabilities": capabilities,
+        "metadata": {}
+    }))
 }
 
 fn parse_binary_capture_envelope(raw_payload: &[u8]) -> Result<CaptureEnvelope, String> {

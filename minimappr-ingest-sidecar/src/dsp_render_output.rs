@@ -178,7 +178,8 @@ pub async fn write_render_to_cache(
         coverage_stats,
         promotion_ready: true,
         env_samples: None,
-        raw_payload: None,
+        node_context: None,
+            raw_payload: None,
     };
     RenderPublishResult {
         pending_manifest: Some(pending),

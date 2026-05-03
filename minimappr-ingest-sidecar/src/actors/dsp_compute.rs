@@ -160,7 +160,7 @@ pub async fn run_io(result: ComputeMathResult) {
                 &payload.stream_key,
                 bytes,
                 meta,
-                render_coverage_json,
+                render_coverage_json.clone(),
                 payload.source_ids.clone(),
                 payload.now_ns,
                 payload.sr,
@@ -219,9 +219,15 @@ pub async fn run_io(result: ComputeMathResult) {
             localization: Some(localization_payload),
             classifier_render: render_classifier_render,
             birdnet: None,
-            coverage_stats: localization_coverage_json,
+            // Use the classification/render window coverage (the full audio window) for
+            // audio quality display. The localization window is only ~32ms (TDOA), which
+            // produces misleading missing% on the rendered 30s audio.
+            coverage_stats: render_coverage_json.or(localization_coverage_json),
             promotion_ready: false,
             env_samples: None,
+              // Carry node context forward so Python can reconstruct the NodeSpec
+              // without reading the source segment binary (channel-only path has none).
+              node_context: payload.manifest.node_context.clone(),
             raw_payload: None,
         };
         if let Err(err) = payload.manifest_store.publish(m.clone()).await {
