@@ -178,8 +178,11 @@ pub async fn write_render_to_cache(
         coverage_stats,
         promotion_ready: true,
         env_samples: None,
-        node_context: None,
-            raw_payload: None,
+        // Carry node_context forward so Python can reconstruct the NodeSpec from the
+        // classifier_render manifest without reading the source segment binary — which
+        // is never written in the channel-only (memory-only) ingest path.
+        node_context: manifest.node_context.clone(),
+        raw_payload: None,
     };
     RenderPublishResult {
         pending_manifest: Some(pending),

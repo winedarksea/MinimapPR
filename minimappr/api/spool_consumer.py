@@ -32,7 +32,7 @@ from minimappr.api.rust_dsp_manifests import (
 from minimappr.api.binary_ingest import parse_binary_ingest_payload
 from minimappr.api.journal_state import JournalConsumerCursor, JournalConsumerStateStore
 from minimappr.interfaces import IngestTransport
-from minimappr.models import StoreForwardIngestRequest
+from minimappr.models import NodeSpec, StoreForwardIngestRequest
 
 logger = logging.getLogger(__name__)
 
@@ -200,8 +200,8 @@ class IngestSpoolConsumer:
 
             try:
                 item = await self._load_claimed_item(claimed_path)
-                if isinstance(item, ClaimedLocalizedRenderItem) and await asyncio.to_thread(
-                    _localized_render_item_is_cursor_covered,
+                if isinstance(item, (ClaimedLocalizedRenderItem, ClaimedLocalizedNodeHeartbeatItem)) and await asyncio.to_thread(
+                    _localized_manifest_item_is_cursor_covered,
                     item,
                     self._config.journal_consumer_state_path,
                     self._config.consumer_name,
@@ -314,6 +314,9 @@ class IngestSpoolConsumer:
         if isinstance(item, ClaimedLocalizedRenderItem):
             await self._ingest_transport.deliver_localized_render(item.localized_render_request)
             return
+        if isinstance(item, ClaimedLocalizedNodeHeartbeatItem):
+            await self._ingest_transport.deliver_node_heartbeat(item.node)
+            return
         raw_payload = await asyncio.to_thread(item.read_payload_bytes)
         if item.endpoint == "/api/v1/ingest/binary":
             payload = parse_binary_ingest_payload(raw_payload)
@@ -382,8 +385,18 @@ class ClaimedLocalizedRenderItem:
     localized_render_request: LocalizedClassifierRenderRequest
 
 
-def _localized_render_item_is_cursor_covered(
-    item: ClaimedLocalizedRenderItem,
+@dataclass(frozen=True, slots=True)
+class ClaimedLocalizedNodeHeartbeatItem:
+    ingest_id: str
+    source_kind: Literal["journal_localized_render_manifest"]
+    received_ns: int
+    cleanup_paths: tuple[Path, ...]
+    cursor_updates: tuple[JournalCursorUpdate, ...]
+    node: NodeSpec
+
+
+def _localized_manifest_item_is_cursor_covered(
+    item: ClaimedLocalizedRenderItem | ClaimedLocalizedNodeHeartbeatItem,
     journal_consumer_state_path: Path,
     consumer_name: str,
 ) -> bool:
@@ -509,7 +522,7 @@ def _complete_claimed_item(
     consumer_name: str,
     status: Literal["processed", "expired"],
 ) -> None:
-    if isinstance(item, ClaimedLocalizedRenderItem):
+    if isinstance(item, (ClaimedLocalizedRenderItem, ClaimedLocalizedNodeHeartbeatItem)):
         state_store = JournalConsumerStateStore(journal_consumer_state_path)
         handled_ns = time.time_ns()
         for cursor_update in item.cursor_updates:
@@ -733,9 +746,10 @@ def _lease_existing_processing_claims_oldest_first(
 def _load_claimed_rust_dsp_item(
     claim_path: Path,
     journal_streams_dir: Path,
-) -> ClaimedLocalizedRenderItem:
+) -> ClaimedLocalizedRenderItem | ClaimedLocalizedNodeHeartbeatItem:
     with claim_path.open("r", encoding="utf-8") as handle:
         metadata = json.load(handle)
+    claim_kind = str(metadata.get("claim_kind") or "localized_render")
     primary_manifest_path = claim_path.parent / str(metadata["primary_manifest_filename"])
     paired_manifest_filename = metadata.get("paired_manifest_filename")
     paired_manifest_path = claim_path.parent / str(paired_manifest_filename) if paired_manifest_filename else None
@@ -762,16 +776,36 @@ def _load_claimed_rust_dsp_item(
                 paired_manifest_payload,
                 render_body_path,
             )
-    bundle = load_localized_render_manifest_bundle(
-        manifest_payload=primary_manifest_payload,
-        journal_streams_dir=journal_streams_dir,
-        paired_classifier_manifest_payload=paired_manifest_payload,
-    )
     cleanup_paths: list[Path] = [claim_path, primary_manifest_path]
     if paired_manifest_path is not None:
         cleanup_paths.append(paired_manifest_path)
     if render_body_path is not None:
         cleanup_paths.append(render_body_path)
+
+    if claim_kind == "node_heartbeat":
+        node_context_payload = primary_manifest_payload.get("node_context")
+        if not isinstance(node_context_payload, dict):
+            raise ValueError(f"Missing node_context in heartbeat claim {claim_path.name}")
+        node_payload = node_context_payload.get("node")
+        if not isinstance(node_payload, dict):
+            raise ValueError(f"Missing node payload in heartbeat claim {claim_path.name}")
+        return ClaimedLocalizedNodeHeartbeatItem(
+            ingest_id=str(metadata.get("ingest_id") or primary_manifest_payload.get("manifest_id") or claim_path.stem),
+            source_kind="journal_localized_render_manifest",
+            received_ns=int(metadata.get("received_ns") or primary_manifest_payload.get("created_ns") or time.time_ns()),
+            cleanup_paths=tuple(cleanup_paths),
+            cursor_updates=_cursor_updates_for_manifest_source_handles(
+                primary_manifest_payload,
+                journal_streams_dir,
+            ),
+            node=NodeSpec.model_validate(node_payload),
+        )
+
+    bundle = load_localized_render_manifest_bundle(
+        manifest_payload=primary_manifest_payload,
+        journal_streams_dir=journal_streams_dir,
+        paired_classifier_manifest_payload=paired_manifest_payload,
+    )
     return ClaimedLocalizedRenderItem(
         ingest_id=str(metadata.get("ingest_id") or primary_manifest_payload.get("manifest_id") or claim_path.stem),
         source_kind="journal_localized_render_manifest",
@@ -800,13 +834,17 @@ def _claim_rust_dsp_manifests_oldest_first(
 
     localization_candidates: dict[tuple[tuple[Any, ...], ...], tuple[Path, dict[str, Any]]] = {}
     classifier_candidates: dict[tuple[tuple[Any, ...], ...], tuple[Path, dict[str, Any]]] = {}
+    heartbeat_candidates: dict[tuple[tuple[Any, ...], ...], tuple[Path, dict[str, Any]]] = {}
 
     manifest_paths = [path for path in journal_manifest_dir.glob("*.json") if path.is_file()]
     if max_claims is not None:
         scan_limit = max(256, int(max_claims) * 64)
+        # Under backlog pressure, prioritize freshest manifests so live ingest
+        # continues even if older files reference payloads already cleaned up.
         manifest_paths = sorted(
             manifest_paths,
             key=lambda path: path.stat().st_mtime_ns,
+            reverse=True,
         )[:scan_limit]
     else:
         manifest_paths = sorted(manifest_paths)
@@ -822,15 +860,22 @@ def _claim_rust_dsp_manifests_oldest_first(
                 continue
             if manifest_type == "localization_result" and manifest_payload.get("classifier_render") is not None:
                 localization_candidates[source_key] = (manifest_path, manifest_payload)
+            elif (
+                manifest_type == "localization_result"
+                and manifest_payload.get("classifier_render") is None
+                and isinstance(manifest_payload.get("node_context"), dict)
+            ):
+                heartbeat_candidates[source_key] = (manifest_path, manifest_payload)
             elif manifest_type == "classifier_render" and manifest_payload.get("derived_handle") is not None:
                 classifier_candidates[source_key] = (manifest_path, manifest_payload)
 
-    claims: list[tuple[int, Path, dict[str, Any], Path | None, dict[str, Any] | None]] = []
+    claims: list[tuple[int, str, Path, dict[str, Any], Path | None, dict[str, Any] | None]] = []
     for source_key, (localization_path, localization_payload) in localization_candidates.items():
         classifier_path, classifier_payload = classifier_candidates.get(source_key, (None, None))
         claims.append(
             (
                 int(localization_payload.get("created_ns") or 0),
+                "localized_render",
                 localization_path,
                 localization_payload,
                 classifier_path,
@@ -843,8 +888,22 @@ def _claim_rust_dsp_manifests_oldest_first(
         claims.append(
             (
                 int(classifier_payload.get("created_ns") or 0),
+                "localized_render",
                 classifier_path,
                 classifier_payload,
+                None,
+                None,
+            )
+        )
+    for source_key, (heartbeat_path, heartbeat_payload) in heartbeat_candidates.items():
+        if source_key in localization_candidates or source_key in classifier_candidates:
+            continue
+        claims.append(
+            (
+                int(heartbeat_payload.get("created_ns") or 0),
+                "node_heartbeat",
+                heartbeat_path,
+                heartbeat_payload,
                 None,
                 None,
             )
@@ -852,9 +911,10 @@ def _claim_rust_dsp_manifests_oldest_first(
 
     claimed_paths: list[Path] = []
     claim_limit = max_claims if max_claims is None else max(0, int(max_claims))
-    for _, primary_path, primary_payload, paired_path, paired_payload in sorted(
+    for _, claim_kind, primary_path, primary_payload, paired_path, paired_payload in sorted(
         claims,
         key=lambda item: item[0],
+        reverse=max_claims is not None,
     ):
         if claim_limit is not None and len(claimed_paths) >= claim_limit:
             break
@@ -870,6 +930,54 @@ def _claim_rust_dsp_manifests_oldest_first(
                     paired_path.unlink()
             continue
         with contextlib.suppress(Exception):
+            if claim_kind == "node_heartbeat":
+                cursor_updates = _cursor_updates_for_manifest_source_handles(
+                    primary_payload,
+                    journal_streams_dir,
+                )
+                stream_keys = {cursor_update.stream_key for cursor_update in cursor_updates}
+                if cursor_updates and all(
+                    _cursor_covers_entry(
+                        cursor_by_stream.get(cursor_update.stream_key),
+                        cursor_update.journal_epoch,
+                        cursor_update.journal_sequence,
+                    )
+                    for cursor_update in cursor_updates
+                ):
+                    with contextlib.suppress(FileNotFoundError):
+                        primary_path.unlink()
+                    continue
+
+                ingest_id = str(primary_payload.get("manifest_id") or primary_path.stem)
+                primary_processing_path = processing_dir / primary_path.name
+                primary_path.replace(primary_processing_path)
+                claim_payload = {
+                    "source_kind": "journal_localized_render_manifest",
+                    "claim_kind": "node_heartbeat",
+                    "ingest_id": ingest_id,
+                    "received_ns": time.time_ns(),
+                    "stream_keys": sorted(stream_keys),
+                    "cursor_updates": [
+                        {
+                            "journal_id": cursor_update.journal_id,
+                            "stream_key": cursor_update.stream_key,
+                            "journal_epoch": cursor_update.journal_epoch,
+                            "journal_sequence": cursor_update.journal_sequence,
+                        }
+                        for cursor_update in cursor_updates
+                    ],
+                    "primary_manifest_filename": primary_processing_path.name,
+                    "paired_manifest_filename": None,
+                    "render_body_filename": None,
+                    "cleanup_filenames": [primary_processing_path.name],
+                }
+                claim_path = processing_dir / f"{ingest_id}.rustdsp.json"
+                with claim_path.open("x", encoding="utf-8") as handle:
+                    json.dump(claim_payload, handle)
+                    handle.write("\n")
+                claimed_paths.append(claim_path)
+                continue
+
             bundle = load_localized_render_manifest_bundle(
                 manifest_payload=primary_payload,
                 journal_streams_dir=journal_streams_dir,
@@ -906,8 +1014,9 @@ def _claim_rust_dsp_manifests_oldest_first(
 
             claim_payload = {
                 "source_kind": "journal_localized_render_manifest",
+                "claim_kind": "localized_render",
                 "ingest_id": bundle.request.manifest_id,
-                "received_ns": int(primary_payload.get("created_ns") or time.time_ns()),
+                "received_ns": time.time_ns(),
                 "stream_keys": sorted(stream_keys),
                 "cursor_updates": [
                     {
@@ -1017,6 +1126,26 @@ def _materialize_processing_local_render_body(
     render_body_path = processing_dir / f"{ingest_id}.render.body"
     render_body_path.write_bytes(derived_handle.read_bytes())
     return render_body_path.name
+
+
+def _cursor_updates_for_manifest_source_handles(
+    manifest_payload: dict[str, Any],
+    journal_streams_dir: Path,
+) -> tuple[JournalCursorUpdate, ...]:
+    source_handles = manifest_payload.get("source_handles")
+    if not isinstance(source_handles, list):
+        return tuple()
+    updates: list[JournalCursorUpdate] = []
+    for source_handle_payload in source_handles:
+        if not isinstance(source_handle_payload, dict):
+            continue
+        with contextlib.suppress(Exception):
+            handle = JournalPayloadHandle.from_mapping(
+                source_handle_payload,
+                journal_streams_dir=journal_streams_dir,
+            )
+            updates.append(_lookup_cursor_update(handle, journal_streams_dir))
+    return tuple(updates)
 
 
 def _rewrite_manifest_derived_handle_to_processing_copy(

@@ -561,11 +561,12 @@ impl SegmentJournalBackend {
             .map_err(InvalidIngestEnvelopeError::new)
             .map_err(|error| -> BoxedError { Box::new(error) })?;
 
-        // When a DSP channel is wired in, deliver audio entirely in-memory.
-        // No segment binary, no JSONL index, no metadata JSON, no manifest JSON on disk.
-        // The capture pipeline (journal_range / MVDR) requires skip_binary_writes=false
-        // and no raw_manifest_tx, which routes through the full journal path below.
-        if self.runtime_config.raw_manifest_tx.is_some() {
+        // Channel-only mode is allowed only when binary writes are explicitly
+        // disabled. In normal journal mode (skip_binary_writes=false), always
+        // run the full segment/index append path below.
+        if self.runtime_config.skip_binary_writes
+            && self.runtime_config.raw_manifest_tx.is_some()
+        {
             return self
                 .enqueue_channel_only(
                     endpoint,
@@ -1959,6 +1960,58 @@ mod tests {
         assert_eq!(manifests[0].created_ns, 1007);
         assert_eq!(manifests[0].source_handles[0].toa_ns, Some(1007));
         assert_eq!(manifests[0].source_handles[0].tor_ns, Some(2007));
+    }
+
+    #[tokio::test]
+    async fn journal_mode_with_raw_channel_still_writes_segment_and_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let payload = store_forward_body("node-a", 11, 0);
+        let mut runtime_config = test_journal_runtime_config();
+        let (raw_manifest_tx, _raw_manifest_rx) = tokio::sync::mpsc::unbounded_channel();
+        runtime_config.raw_manifest_tx = Some(raw_manifest_tx);
+        runtime_config.skip_binary_writes = false;
+
+        let backend = IngestBackend::open(
+            tmp.path().join("store"),
+            IngestStorageMode::Journal,
+            usize::MAX as u64,
+            runtime_config,
+        )
+        .await
+        .unwrap();
+
+        backend
+            .enqueue(
+                usize::MAX,
+                "/api/v1/ingest/store-forward",
+                HeaderMap::new(),
+                Body::from(payload.clone()),
+            )
+            .await
+            .unwrap();
+
+        let journal_root = tmp.path().join("store").join("journal");
+        let stream_key = {
+            let mut streams = std::fs::read_dir(journal_root.join("streams")).unwrap();
+            streams
+                .next()
+                .expect("stream dir")
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        };
+        let stream_dir = journal_root.join("streams").join(stream_key);
+        let entry = read_single_index_entry(&stream_dir).await;
+
+        assert!(
+            !entry.segment_id.starts_with("seg-mem-"),
+            "journal mode must not synthesize seg-mem ids"
+        );
+        assert!(entry.payload_length_bytes > 0);
+        assert!(entry.segment_path.exists());
+        let segment_bytes = tokio::fs::metadata(&entry.segment_path).await.unwrap().len();
+        assert!(segment_bytes >= entry.payload_offset_bytes + entry.payload_length_bytes);
     }
 
     #[tokio::test]

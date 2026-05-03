@@ -261,6 +261,7 @@ class _RecordingIngestTransport:
         self.binary_payloads: list[object] = []
         self.store_forward_payloads: list[object] = []
         self.localized_render_payloads: list[LocalizedClassifierRenderRequest] = []
+        self.heartbeat_nodes: list[object] = []
 
     async def deliver_binary(self, payload: object) -> None:
         self.binary_payloads.append(payload)
@@ -270,6 +271,9 @@ class _RecordingIngestTransport:
 
     async def deliver_localized_render(self, payload: LocalizedClassifierRenderRequest) -> None:
         self.localized_render_payloads.append(payload)
+
+    async def deliver_node_heartbeat(self, node: object) -> None:
+        self.heartbeat_nodes.append(node)
 
 
 def _journal_consumer(
@@ -410,6 +414,82 @@ def _write_rust_dsp_manifest_pair(
                 },
                 "coverage_stats": coverage_stats,
                 "promotion_ready": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_rust_localization_only_manifest(
+    spool_dir: Path,
+    *,
+    stream_key: str,
+    created_ns: int,
+    sequence: int,
+    node_id: str,
+) -> None:
+    manifest_dir = spool_dir / "journal" / "manifests" / "pending"
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    segment_id = f"seg-mem-00000000000000000001-{sequence:020d}"
+    source_handle = {
+        "journal_epoch": 1,
+        "segment_id": segment_id,
+        "stream_key": stream_key,
+        "payload_offset_bytes": 0,
+        "payload_length_bytes": 0,
+        "sample_index_start": sequence * 512,
+        "sample_count": 512,
+        "integrity_hash": "",
+        "segment_path": str(
+            spool_dir
+            / "journal"
+            / "streams"
+            / stream_key
+            / "segments"
+            / f"{segment_id}.bin"
+        ),
+    }
+    (manifest_dir / f"manifest-localization-heartbeat-{sequence}.json").write_text(
+        json.dumps(
+            {
+                "manifest_id": f"manifest-localization-heartbeat-{sequence}",
+                "manifest_type": "localization_result",
+                "created_ns": created_ns,
+                "source_handles": [source_handle],
+                "derived_handle": None,
+                "localization": {
+                    "attempted_algorithm": "srp_phat",
+                    "resolved_algorithm": "srp_phat",
+                    "steering_direction": [0.0, 1.0, 0.0],
+                    "position_m": [1.0, 2.0, 0.0],
+                    "confidence": 0.5,
+                    "residual_rms_seconds": 0.0001,
+                    "sound_speed_mps": 343.2,
+                    "effective_band_hz": [300.0, 3500.0],
+                    "pair_tdoas": [],
+                },
+                "classifier_render": None,
+                "birdnet": None,
+                "coverage_stats": None,
+                "promotion_ready": False,
+                "node_context": {
+                    "node": {
+                        "id": node_id,
+                        "node_type": "sirith_tetra",
+                        "position_m": [0.0, 0.0, 0.0],
+                        "sensor_offsets_m": [
+                            [0.0, 0.0, 0.0],
+                            [0.01, 0.0, 0.0],
+                            [0.0, 0.01, 0.0],
+                            [0.0, 0.0, 0.01],
+                        ],
+                        "capabilities": ["audio", "array_localization"],
+                        "metadata": {},
+                    },
+                    "toa_ns": created_ns,
+                    "time_quality": "ntp_disciplined",
+                    "source_type": "raw_sensor",
+                },
             }
         ),
         encoding="utf-8",
@@ -640,6 +720,92 @@ async def test_journal_consumer_prefers_rust_dsp_manifest_pair(tmp_path: Path) -
     assert int(cursor_row["journal_epoch"]) == 1
     assert int(cursor_row["last_fully_processed_journal_sequence"]) == 41
     assert list((spool_dir / "processing").glob("*")) == []
+
+
+@pytest.mark.asyncio
+async def test_journal_consumer_localization_only_manifest_updates_node_heartbeat(tmp_path: Path) -> None:
+    spool_dir = tmp_path / "spool"
+    transport = _RecordingIngestTransport()
+    consumer = _journal_consumer(
+        spool_dir,
+        transport,
+        runtime_profile="birdnet_hybrid_production",
+    )
+    now_ns = time.time_ns()
+    stream_key = "sirith-array-heartbeat__audio_main__test"
+    _write_rust_localization_only_manifest(
+        spool_dir,
+        stream_key=stream_key,
+        created_ns=now_ns - 50_000_000,
+        sequence=77,
+        node_id="sirith-array-heartbeat",
+    )
+
+    summary = await consumer.run_once(now_ns=now_ns)
+
+    assert summary.processed == 1
+    assert transport.binary_payloads == []
+    assert transport.localized_render_payloads == []
+    assert transport.store_forward_payloads == []
+    assert len(transport.heartbeat_nodes) == 1
+    heartbeat_node = transport.heartbeat_nodes[0]
+    assert heartbeat_node.id == "sirith-array-heartbeat"
+    cursor_row = _load_cursor_row(spool_dir)
+    assert int(cursor_row["journal_epoch"]) == 1
+    assert int(cursor_row["last_fully_processed_journal_sequence"]) == 77
+
+
+@pytest.mark.asyncio
+async def test_rust_manifest_claim_uses_claim_time_for_ttl_not_event_time(tmp_path: Path) -> None:
+    spool_dir = tmp_path / "spool"
+    transport = _RecordingIngestTransport()
+    consumer = _journal_consumer(
+        spool_dir,
+        transport,
+        runtime_profile="birdnet_hybrid_production",
+    )
+    now_ns = time.time_ns()
+    stream_key = "sirith-array-ttl__audio_main__test"
+    raw_samples = np.random.default_rng(91).normal(0.0, 0.25, size=(4, 512)).astype(np.float32)
+    raw_body = _binary_ingest_payload(
+        [
+            _binary_frame(
+                raw_samples,
+                start_time_ns=now_ns - 300_000_000,
+                sequence=91,
+                start_sample_index=0,
+                sample_rate_hz=16_000,
+            )
+        ],
+        node_id="sirith-array-ttl",
+        sensor_count=4,
+    )
+    _write_journal_item(
+        spool_dir,
+        endpoint="/api/v1/ingest/binary",
+        body=raw_body,
+        received_ns=now_ns - 200_000_000,
+        journal_id="jrnl-00000000000000000091",
+        journal_sequence=91,
+        stream_key=stream_key,
+        segment_id="seg-rust-ttl-1",
+    )
+    # Simulate replay/historical packet time: created_ns is hours in the past.
+    _write_rust_dsp_manifest_pair(
+        spool_dir,
+        stream_key=stream_key,
+        segment_id="seg-rust-ttl-1",
+        payload_length_bytes=len(raw_body),
+        derived_pcm16=(np.zeros(48_000, dtype=np.int16)).tobytes(),
+        created_ns=now_ns - 3_600_000_000_000,
+    )
+
+    summary = await consumer.run_once(now_ns=now_ns)
+
+    assert summary.processed == 1
+    assert summary.expired == 0
+    assert summary.failed == 0
+    assert len(transport.localized_render_payloads) == 1
 
 
 @pytest.mark.asyncio
@@ -896,3 +1062,65 @@ def test_rust_dsp_claims_multiple_pending_manifests_for_one_stream(tmp_path: Pat
     )
 
     assert len(claim_paths) == 2
+
+
+def test_rust_dsp_claim_with_limit_prioritizes_fresh_manifest(tmp_path: Path) -> None:
+    spool_dir = tmp_path / "spool"
+    stream_key = "sirith-array__audio_main__claim-priority"
+    for sequence in (201, 202):
+        raw_body = _binary_ingest_payload(
+            [
+                _binary_frame(
+                    np.random.default_rng(sequence).normal(0.0, 0.2, size=(4, 512)).astype(np.float32),
+                    start_time_ns=time.time_ns() - 200_000_000,
+                    sequence=sequence,
+                    start_sample_index=(sequence - 201) * 512,
+                )
+            ],
+            node_id="sirith-array",
+            sensor_count=4,
+        )
+        segment_id = f"seg-rust-priority-{sequence}"
+        _write_journal_item(
+            spool_dir,
+            endpoint="/api/v1/ingest/binary",
+            body=raw_body,
+            received_ns=time.time_ns() - 100_000_000,
+            journal_id=f"jrnl-{sequence:020d}",
+            journal_sequence=sequence,
+            stream_key=stream_key,
+            segment_id=segment_id,
+        )
+        _write_rust_dsp_manifest_pair(
+            spool_dir,
+            stream_key=stream_key,
+            segment_id=segment_id,
+            payload_length_bytes=len(raw_body),
+            derived_pcm16=(np.zeros(48_000, dtype=np.int16)).tobytes(),
+            created_ns=time.time_ns() + sequence,
+            journal_epoch=1,
+        )
+        manifest_dir = spool_dir / "journal" / "manifests" / "pending"
+        localization_path = manifest_dir / f"manifest-localization-{sequence}.json"
+        render_path = manifest_dir / f"manifest-render-{sequence}.json"
+        (manifest_dir / "manifest-localization.json").rename(localization_path)
+        (manifest_dir / "manifest-render.json").rename(render_path)
+        localization_payload = json.loads(localization_path.read_text(encoding="utf-8"))
+        render_payload = json.loads(render_path.read_text(encoding="utf-8"))
+        localization_payload["manifest_id"] = f"manifest-localization-{sequence}"
+        render_payload["manifest_id"] = f"manifest-render-{sequence}"
+        localization_path.write_text(json.dumps(localization_payload), encoding="utf-8")
+        render_path.write_text(json.dumps(render_payload), encoding="utf-8")
+
+    claim_paths = _claim_rust_dsp_manifests_oldest_first(
+        spool_dir / "journal" / "manifests" / "pending",
+        spool_dir / "journal" / "streams",
+        spool_dir / "processing",
+        spool_dir / "journal" / "consumer_state.sqlite3",
+        "python-ingest",
+        max_claims=1,
+    )
+
+    assert len(claim_paths) == 1
+    claim_payload = json.loads(claim_paths[0].read_text(encoding="utf-8"))
+    assert claim_payload["ingest_id"] == "manifest-localization-202"

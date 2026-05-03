@@ -409,6 +409,9 @@ class IngestTransport(Protocol):
     async def deliver_localized_render(self, payload: "LocalizedClassifierRenderRequest") -> None:
         ...
 
+    async def deliver_node_heartbeat(self, node: NodeSpec) -> None:
+        ...
+
 
 @runtime_checkable
 class AudioPreprocessor(Protocol):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 from minimappr.api.binary_ingest import BinaryIngestPayload
 from minimappr.api.rust_dsp_manifests import LocalizedClassifierRenderRequest
@@ -14,6 +15,7 @@ from minimappr.models import (
     StoreForwardBufferedFrameResponse,
     StoreForwardIngestRequest,
     StoreForwardIngestResponse,
+    NodeSpec,
 )
 
 
@@ -40,6 +42,15 @@ class HttpIngestTransport(IngestTransport):
 
     async def deliver_localized_render(self, payload: LocalizedClassifierRenderRequest) -> None:
         await self._fusion_node.ingest_localized_render(payload)
+
+    async def deliver_node_heartbeat(self, node: NodeSpec) -> None:
+        normalized_node, geo_position = self._fusion_node._ingest_processor._normalize_node_spec(node)
+        async with self._fusion_node._storage_batch():
+            await self._fusion_node.storage.upsert_node(
+                spec=normalized_node,
+                last_seen_ns=time.time_ns(),
+                position_geo=geo_position,
+            )
 
     async def _deliver_buffered_frames(self, *, node, buffered_frames, sort_by_toa: bool) -> StoreForwardIngestResponse:
         ordered_frames = buffered_frames

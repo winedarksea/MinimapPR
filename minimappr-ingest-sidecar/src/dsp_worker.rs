@@ -488,16 +488,17 @@ impl DspWorker {
             now_ns,
             self.config.max_buffer_seconds,
         );
-            // Channel-delivered manifests are freshly received in-process even when their
-            // embedded node timestamps are historical (replay/tests). Do not drop those as stale.
-            let arrived_via_channel = manifest.raw_payload.is_some();
-            if source_manifest_is_stale
-                && self.config.skip_stale_manifests_for_live_buffer
-                && !arrived_via_channel
-            {
+        // Channel-delivered manifests are freshly received in-process even when their
+        // embedded node timestamps are historical (replay/tests). Staleness gating is
+        // for disk queue backlog only.
+        let arrived_via_channel = manifest.raw_payload.is_some();
+        if source_manifest_is_stale
+            && self.config.skip_stale_manifests_for_live_buffer
+            && !arrived_via_channel
+        {
             debug!(
                 manifest_id = %manifest.manifest_id,
-                "DSP worker skipped stale source manifest to protect live buffer continuity"
+                "DSP worker skipped stale disk manifest to protect live buffer continuity"
             );
             self.defer_source_manifest_consumption(&manifest);
             let mut st = self.state.write().await;
@@ -505,23 +506,6 @@ impl DspWorker {
             st.last_processed_ns = Some(now_ns);
             return None;
         }
-            // Channel-delivered manifests (raw_payload is Some) are always fresh — they just
-            // arrived in-process and audio timestamps from firmware/tests can legitimately
-            // be far in the past. Staleness gating is for disk queue backlog only.
-            if source_manifest_is_stale
-                && self.config.skip_stale_manifests_for_live_buffer
-                && manifest.raw_payload.is_none()
-            {
-                debug!(
-                    manifest_id = %manifest.manifest_id,
-                    "DSP worker skipped stale disk manifest to protect live buffer continuity"
-                );
-                self.defer_source_manifest_consumption(&manifest);
-                let mut st = self.state.write().await;
-                st.total_stale_manifest_skips += 1;
-                st.last_processed_ns = Some(now_ns);
-                return None;
-            }
 
         let window_sec = self.config.window_seconds;
         let classification_window_sec = if self.config.birdnet_hybrid_render_enabled {
