@@ -844,8 +844,7 @@ def _claim_rust_dsp_manifests_oldest_first(
         manifest_paths = sorted(
             manifest_paths,
             key=lambda path: path.stat().st_mtime_ns,
-            reverse=True,
-        )[:scan_limit]
+                    )[:scan_limit]
     else:
         manifest_paths = sorted(manifest_paths)
 
@@ -914,8 +913,7 @@ def _claim_rust_dsp_manifests_oldest_first(
     for _, claim_kind, primary_path, primary_payload, paired_path, paired_payload in sorted(
         claims,
         key=lambda item: item[0],
-        reverse=max_claims is not None,
-    ):
+            ):
         if claim_limit is not None and len(claimed_paths) >= claim_limit:
             break
         if _manifest_sources_are_cursor_covered(

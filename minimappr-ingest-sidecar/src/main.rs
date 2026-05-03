@@ -1168,7 +1168,7 @@ fn build_iamf_ffmpeg_plan(request: &IamfEncodeRequest) -> IamfFfmpegPlan {
 
     args.extend([
         "-filter_complex".to_string(),
-        "[0:a]pan=mono|c0=c0[bed0];[0:a]pan=mono|c0=c1[bed1];[0:a]pan=mono|c0=c2[bed2];[0:a]pan=mono|c0=c3[bed3]".to_string(),
+        "[0:a]channelmap=0:mono[bed0];[0:a]channelmap=1:mono[bed1];[0:a]channelmap=2:mono[bed2];[0:a]channelmap=3:mono[bed3]".to_string(),
         "-map".to_string(),
         "[bed0]".to_string(),
         "-map".to_string(),
@@ -1183,6 +1183,17 @@ fn build_iamf_ffmpeg_plan(request: &IamfEncodeRequest) -> IamfFfmpegPlan {
         args.extend(["-map".to_string(), "1:a:0".to_string()]);
     }
 
+    for stream_index in 0..if request.object_wav_path.is_some() {
+        5
+    } else {
+        4
+    } {
+        args.extend([
+            "-streamid".to_string(),
+            format!("{stream_index}:{stream_index}"),
+        ]);
+    }
+
     args.extend([
         "-c:a".to_string(),
         "libopus".to_string(),
@@ -1191,7 +1202,8 @@ fn build_iamf_ffmpeg_plan(request: &IamfEncodeRequest) -> IamfFfmpegPlan {
         "-b:a".to_string(),
         bitrate_per_channel.to_string(),
         "-stream_group".to_string(),
-        "type=iamf_audio_element:id=1:st=0:st=1:st=2:st=3,layer=ch_layout=ambisonic 1".to_string(),
+        "type=iamf_audio_element:id=1:st=0:st=1:st=2:st=3:audio_element_type=scene,layer=ch_layout=ambisonic\\ 1:ambisonics_mode=mono,"
+            .to_string(),
     ]);
 
     if request.object_wav_path.is_some() {
@@ -1199,12 +1211,12 @@ fn build_iamf_ffmpeg_plan(request: &IamfEncodeRequest) -> IamfFfmpegPlan {
             "-stream_group".to_string(),
             "type=iamf_audio_element:id=2:st=4,layer=ch_layout=mono".to_string(),
             "-stream_group".to_string(),
-            "type=iamf_mix_presentation:id=3:stg=0:stg=1:annotations=en-us=MinimapPR IAMF,submix=parameter_id=100:parameter_rate=48000|element=stg=0:parameter_id=101:annotations=en-us=Ambisonics|element=stg=1:parameter_id=102:annotations=en-us=Bird Object|layout=sound_system=binaural".to_string(),
+            "type=iamf_mix_presentation:id=3:stg=0:stg=1:annotations=en-us=MinimapPR IAMF,submix=parameter_id=100:parameter_rate=48000:default_mix_gain=0.0|element=stg=0:headphones_rendering_mode=binaural:annotations=en-us=Ambisonics:parameter_id=101:parameter_rate=48000:default_mix_gain=0.0|element=stg=1:headphones_rendering_mode=binaural:annotations=en-us=Bird Object:parameter_id=102:parameter_rate=48000:default_mix_gain=0.0|layout=sound_system=stereo:integrated_loudness=0.0:digital_peak=0.0".to_string(),
         ]);
     } else {
         args.extend([
             "-stream_group".to_string(),
-            "type=iamf_mix_presentation:id=3:stg=0:annotations=en-us=MinimapPR IAMF,submix=parameter_id=100:parameter_rate=48000|element=stg=0:parameter_id=101:annotations=en-us=Ambisonics|layout=sound_system=binaural".to_string(),
+            "type=iamf_mix_presentation:id=3:stg=0:annotations=en-us=MinimapPR IAMF,submix=parameter_id=100:parameter_rate=48000:default_mix_gain=0.0|element=stg=0:headphones_rendering_mode=binaural:annotations=en-us=Ambisonics:parameter_id=101:parameter_rate=48000:default_mix_gain=0.0|layout=sound_system=stereo:integrated_loudness=0.0:digital_peak=0.0".to_string(),
         ]);
     }
 
@@ -1306,9 +1318,12 @@ mod tests {
         assert!(joined.contains("-stream_group"));
         assert!(joined.contains("type=iamf_audio_element:id=1"));
         assert!(joined.contains("type=iamf_audio_element:id=2"));
+        assert!(joined.contains("audio_element_type=scene"));
+        assert!(joined.contains("ambisonics_mode=mono"));
         assert!(joined.contains("type=iamf_mix_presentation"));
         assert!(joined.contains("128000"));
-        assert!(joined.contains("pan=mono"));
+        assert!(joined.contains("channelmap=0:mono"));
+        assert!(joined.contains("-streamid"));
     }
 
     #[test]
