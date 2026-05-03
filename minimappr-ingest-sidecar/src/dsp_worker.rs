@@ -179,7 +179,7 @@ pub struct DspWorker {
     state: SharedDspState,
     classifier_annotator: Option<ManifestClassificationAnnotator>,
     classification_tx: Option<flume::Sender<ClassificationRequest>>,
-    raw_manifest_rx: Option<mpsc::Receiver<DspManifest>>,
+    raw_manifest_rx: Option<mpsc::UnboundedReceiver<DspManifest>>,
     buffers: HashMap<String, [SensorStreamBuffer; 4]>,
     last_classifier_render_ns_by_stream: HashMap<String, u128>,
     last_localization_ns_by_stream: HashMap<String, u128>,
@@ -246,7 +246,7 @@ impl DspWorker {
 
     /// Injects an in-process receiver for raw_journal_append manifests from the
     /// co-located ingest backend, bypassing the 20ms filesystem poll cycle.
-    pub fn with_raw_manifest_receiver(mut self, rx: mpsc::Receiver<DspManifest>) -> Self {
+    pub fn with_raw_manifest_receiver(mut self, rx: mpsc::UnboundedReceiver<DspManifest>) -> Self {
         self.raw_manifest_rx = Some(rx);
         self
     }
@@ -354,6 +354,18 @@ impl DspWorker {
         // the Tokio executor thread while the OS resolves the mmap page faults.
         let raw_payload: Vec<u8> = if let Some(bytes) = manifest.raw_payload.clone() {
             bytes
+        } else if first_handle.payload_length_bytes == 0 {
+            // body_length_bytes == 0 is the sentinel written when skip_binary_writes is
+            // enabled. There is no segment file to mmap; the frame was delivered via the
+            // in-process channel and was not cached here. Consume and skip silently.
+            warn!(
+                manifest_id = %manifest.manifest_id,
+                "DSP worker: manifest arrived without raw_payload and no binary segment \
+                 (skip_binary_writes mode); frame dropped — in-process channel may have \
+                 been saturated"
+            );
+            self.defer_source_manifest_consumption(&manifest);
+            return None;
         } else {
             let handle = first_handle.clone();
             match tokio::task::spawn_blocking(move || read_payload_with_mmap(&handle)).await {
@@ -717,21 +729,33 @@ impl DspWorker {
         }
         let manifest_ids = std::mem::take(&mut self.deferred_source_manifest_ids);
         let mut unique_manifest_ids = HashSet::with_capacity(manifest_ids.len());
+        for id in manifest_ids {
+            unique_manifest_ids.insert(id);
+        }
+
+        // Run all renames concurrently — on tmpfs these are in-memory directory
+        // entry updates and complete in microseconds even at batch depth 128.
+        let mut set = tokio::task::JoinSet::new();
+        for manifest_id in unique_manifest_ids {
+            let store = self.manifest_store.clone();
+            set.spawn(async move {
+                let result = store.mark_consumed(&manifest_id).await;
+                (manifest_id, result)
+            });
+        }
         let mut successful_consumes = 0_u64;
-        for manifest_id in manifest_ids {
-            if !unique_manifest_ids.insert(manifest_id.clone()) {
-                continue;
-            }
-            match self.manifest_store.mark_consumed(&manifest_id).await {
-                Ok(()) => {
-                    successful_consumes += 1;
-                }
-                Err(err) => {
+        while let Some(result) = set.join_next().await {
+            match result {
+                Ok((_, Ok(()))) => successful_consumes += 1,
+                Ok((manifest_id, Err(err))) => {
                     warn!(
                         manifest_id = %manifest_id,
                         error = %err,
                         "DSP worker failed to mark manifest consumed"
                     );
+                }
+                Err(join_err) => {
+                    warn!(error = %join_err, "mark_consumed task panicked");
                 }
             }
         }

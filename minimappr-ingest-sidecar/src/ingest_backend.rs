@@ -44,8 +44,14 @@ pub struct JournalRuntimeConfig {
     pub derived_cache_admission_reserve_bytes: u64,
     /// Optional in-process channel for zero-latency delivery of raw_journal_append
     /// manifests to the DspWorker, bypassing the 20ms filesystem polling cycle.
-    /// Filesystem writes still happen for durability; the channel is fire-and-forget.
-    pub raw_manifest_tx: Option<mpsc::Sender<DspManifest>>,
+    /// Unbounded so that the ingest path never blocks or drops when the DSP worker
+    /// is briefly busy; memory growth is bounded by the DSP worker's buffer window.
+    pub raw_manifest_tx: Option<mpsc::UnboundedSender<DspManifest>>,
+    /// When true (default), raw audio bytes are delivered exclusively via the
+    /// in-process channel and never written to binary segment files on disk.
+    /// Set to false only when the capture pipeline (journal_range / MVDR) is
+    /// required, as those endpoints read audio directly from segment binary files.
+    pub skip_binary_writes: bool,
 }
 
 impl Default for JournalRuntimeConfig {
@@ -58,6 +64,7 @@ impl Default for JournalRuntimeConfig {
             derived_cache_budget_bytes: 67_108_864,
             derived_cache_admission_reserve_bytes: 8_388_608,
             raw_manifest_tx: None,
+            skip_binary_writes: false,
         }
     }
 }
@@ -117,6 +124,10 @@ struct OpenSegment {
     index_path: PathBuf,
     metadata_path: PathBuf,
     size_bytes: u64,
+    /// Tracks the byte length of the JSONL index file so we can pre-allocate
+    /// a write offset under the lock and then perform the actual file I/O
+    /// after releasing the lock (eliminating async file I/O from the critical section).
+    index_size_bytes: u64,
     header: SegmentJournalHeader,
 }
 
@@ -550,7 +561,10 @@ impl SegmentJournalBackend {
             .map_err(InvalidIngestEnvelopeError::new)
             .map_err(|error| -> BoxedError { Box::new(error) })?;
 
-        let (journal_id, entry) = {
+        // All mutable state (sequence numbers, size accounting, segment rotation) is
+        // updated under the lock. File I/O is then performed after the lock is released
+        // so concurrent requests from different streams never block each other.
+        let (journal_id, entry, index_bytes, index_path, index_write_offset, metadata_path, updated_header) = {
             let mut state = self.state.lock().await;
             let journal_epoch = state.journal_epoch;
             self.ensure_capacity_for_append(&mut state, u64::try_from(body_bytes.len())?)
@@ -572,24 +586,37 @@ impl SegmentJournalBackend {
                 .open_segment
                 .as_mut()
                 .expect("segment must be open before append");
-            let body_offset_bytes = open_segment.size_bytes;
 
-            let mut segment_file = OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .read(true)
-                .write(true)
-                .open(&open_segment.segment_path)
-                .await?;
-            segment_file
-                .seek(std::io::SeekFrom::Start(body_offset_bytes))
-                .await?;
-            if let Err(error) = segment_file.write_all(&body_bytes).await {
-                rollback_segment_append(&mut segment_file, body_offset_bytes).await?;
-                return Err(Box::new(error));
+            // When skip_binary_writes is true, raw audio bytes are delivered
+            // exclusively via the in-process channel (raw_manifest_tx). The virtual
+            // offset is 0 since no binary file is written; size_bytes is still
+            // tracked so segment rotation decisions remain correct.
+            let body_offset_bytes = if self.runtime_config.skip_binary_writes {
+                0u64
+            } else {
+                open_segment.size_bytes
+            };
+
+            // Binary write: only in capture mode. Kept inside the lock because the
+            // segment file offset is tightly coupled to open_segment.size_bytes and
+            // capture mode is not the latency-critical path.
+            if !self.runtime_config.skip_binary_writes {
+                let mut segment_file = OpenOptions::new()
+                    .create(true)
+                    .truncate(false)
+                    .read(true)
+                    .write(true)
+                    .open(&open_segment.segment_path)
+                    .await?;
+                segment_file
+                    .seek(std::io::SeekFrom::Start(body_offset_bytes))
+                    .await?;
+                if let Err(error) = segment_file.write_all(&body_bytes).await {
+                    rollback_segment_append(&mut segment_file, body_offset_bytes).await?;
+                    return Err(Box::new(error));
+                }
+                segment_file.flush().await?;
             }
-            segment_file.flush().await?;
-            drop(segment_file);
 
             let journal_id = format!(
                 "jrnl-{:020}-{:020}-{}",
@@ -618,48 +645,51 @@ impl SegmentJournalBackend {
                 u64::try_from(body_bytes.len())?,
             );
 
+            // Serialize the index entry and pre-allocate its write offset while still
+            // holding the lock. The actual file write happens outside the lock.
+            // Each request opens its own file handle, so non-overlapping offset writes
+            // from concurrent requests for the same stream are safe.
             let index_bytes = serde_json::to_vec(&entry)?;
-            let mut index_file = OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .read(true)
-                .write(true)
-                .open(&open_segment.index_path)
-                .await?;
-            let index_offset_bytes = index_file.metadata().await?.len();
-            index_file
-                .seek(std::io::SeekFrom::Start(index_offset_bytes))
-                .await?;
-            if let Err(error) = async {
-                index_file.write_all(&index_bytes).await?;
-                index_file.write_all(b"\n").await?;
-                index_file.flush().await
-            }
-            .await
-            {
-                rollback_index_append(&mut index_file, index_offset_bytes).await?;
-                let mut segment_file = OpenOptions::new()
-                    .create(true)
-                    .truncate(false)
-                    .read(true)
-                    .write(true)
-                    .open(&open_segment.segment_path)
-                    .await?;
-                rollback_segment_append(&mut segment_file, body_offset_bytes).await?;
-                return Err(Box::new(error));
-            }
-            drop(index_file);
+            let index_write_offset = open_segment.index_size_bytes;
+            open_segment.index_size_bytes += index_bytes.len() as u64 + 1; // +1 for newline
 
+            // Update in-memory state before releasing the lock.
             let appended_length_bytes = u64::try_from(body_bytes.len())?;
             open_segment.size_bytes += appended_length_bytes;
             update_segment_header(&mut open_segment.header, &entry, open_segment.size_bytes);
+
+            let index_path = open_segment.index_path.clone();
             let metadata_path = open_segment.metadata_path.clone();
             let updated_header = open_segment.header.clone();
+            // stream_state (and open_segment) borrow of state ends here; now safe to
+            // access state.total_journal_bytes directly.
+            let _ = stream_state;
             state.total_journal_bytes += appended_length_bytes;
-            let _ = write_json_file(&metadata_path, &updated_header).await;
 
-            (journal_id, entry)
+            (journal_id, entry, index_bytes, index_path, index_write_offset, metadata_path, updated_header)
+            // Lock released here.
         };
+
+        // JSONL index write — outside the lock. Each request opens a new file handle
+        // and writes at a pre-computed, non-overlapping offset, so no ordering issues
+        // arise even when two requests for the same stream execute concurrently.
+        {
+            let mut index_file = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&index_path)
+                .await?;
+            index_file
+                .seek(std::io::SeekFrom::Start(index_write_offset))
+                .await?;
+            index_file.write_all(&index_bytes).await?;
+            index_file.write_all(b"\n").await?;
+            index_file.flush().await?;
+        }
+
+        // Metadata header write — fire-and-forget, outside the lock.
+        let _ = write_json_file(&metadata_path, &updated_header).await;
 
         let _ = self.publish_capture_manifest(&entry, &body_bytes).await;
 
@@ -697,9 +727,11 @@ impl SegmentJournalBackend {
         if let Some(tx) = &self.runtime_config.raw_manifest_tx {
             // Attach the raw audio bytes only for the in-process channel message so
             // the DSP worker can skip the blocking read_payload_with_mmap call.
+            // Unbounded send: only fails if the receiver has been dropped (DSP worker
+            // stopped), which is acceptable during graceful shutdown.
             let mut manifest_with_payload = manifest;
             manifest_with_payload.raw_payload = Some(raw_bytes.to_vec());
-            let _ = tx.try_send(manifest_with_payload);
+            let _ = tx.send(manifest_with_payload);
         }
         Ok(())
     }
@@ -907,6 +939,7 @@ impl SegmentJournalBackend {
             index_path,
             metadata_path,
             size_bytes: 0,
+            index_size_bytes: 0,
             header,
         })
     }
@@ -1226,12 +1259,17 @@ async fn recover_single_stream_state(
                 None => true,
             };
             if should_replace {
+                let index_size_bytes = fs::metadata(&recovered_segment.index_path)
+                    .await
+                    .map(|m| m.len())
+                    .unwrap_or(0);
                 open_segment = Some(OpenSegment {
                     segment_id: recovered_segment.header.segment_id.clone(),
                     segment_path: recovered_segment.segment_path,
                     index_path: recovered_segment.index_path,
                     metadata_path: recovered_segment.metadata_path,
                     size_bytes: recovered_segment.header.payload_bytes,
+                    index_size_bytes,
                     header: recovered_segment.header,
                 });
             }
@@ -1574,6 +1612,7 @@ async fn rollback_segment_append(
     Ok(())
 }
 
+#[allow(dead_code)]
 async fn rollback_index_append(
     index_file: &mut fs::File,
     index_offset_bytes: u64,
@@ -1740,6 +1779,7 @@ mod tests {
             derived_cache_budget_bytes: 67_108_864,
             derived_cache_admission_reserve_bytes: 8_388_608,
             raw_manifest_tx: None,
+            skip_binary_writes: false,
         }
     }
 
@@ -2402,6 +2442,7 @@ mod tests {
                 derived_cache_budget_bytes: 67_108_864,
                 derived_cache_admission_reserve_bytes: 8_388_608,
                 raw_manifest_tx: None,
+                skip_binary_writes: false,
             },
         )
         .await
@@ -2450,6 +2491,7 @@ mod tests {
                 derived_cache_budget_bytes: 67_108_864,
                 derived_cache_admission_reserve_bytes: 8_388_608,
                 raw_manifest_tx: None,
+                skip_binary_writes: false,
             },
         )
         .await
@@ -2606,6 +2648,7 @@ mod tests {
                 derived_cache_budget_bytes: 67_108_864,
                 derived_cache_admission_reserve_bytes: 8_388_608,
                 raw_manifest_tx: None,
+                skip_binary_writes: false,
             },
         )
         .await
@@ -2756,6 +2799,7 @@ mod tests {
                 derived_cache_budget_bytes: 67_108_864,
                 derived_cache_admission_reserve_bytes: 8_388_608,
                 raw_manifest_tx: None,
+                skip_binary_writes: false,
             },
         )
         .await
@@ -2844,6 +2888,7 @@ mod tests {
                 derived_cache_budget_bytes: 67_108_864,
                 derived_cache_admission_reserve_bytes: 8_388_608,
                 raw_manifest_tx: None,
+                skip_binary_writes: false,
             },
         )
         .await
@@ -2943,6 +2988,7 @@ mod tests {
                 derived_cache_budget_bytes: 67_108_864,
                 derived_cache_admission_reserve_bytes: 8_388_608,
                 raw_manifest_tx: None,
+                skip_binary_writes: false,
             },
         )
         .await

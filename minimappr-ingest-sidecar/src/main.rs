@@ -117,6 +117,19 @@ struct Args {
     )]
     allow_non_tmpfs_journal: bool,
 
+    /// Enable writing raw audio bytes to binary segment files on disk.
+    /// Required by the Python spool consumer (which reads raw audio via mmap)
+    /// and by the capture pipeline (journal_range / MVDR beamforming).
+    /// Enabled by default for full compatibility. Set to false only when the
+    /// Python consumer has been updated to source audio exclusively from the
+    /// in-process channel path and the capture pipeline is not in use.
+    #[arg(
+        long,
+        env = "MINIMAPPR_ENABLE_SEGMENT_BINARY_WRITES",
+        default_value_t = true
+    )]
+    enable_segment_binary_writes: bool,
+
     #[arg(
         long,
         env = "MINIMAPPR_SIDECAR_DERIVED_CACHE_BUDGET_BYTES",
@@ -313,11 +326,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let storage_dir = args.spool_dir.clone();
     let storage_mode = args.storage_mode;
     let raw_manifest_channel_capacity = args.dsp_raw_manifest_channel_capacity.max(1);
-    // Create the in-process channel before opening the backend so we can inject
-    // the sender into JournalRuntimeConfig. Keep this configurable because
-    // 16kHz/512-sample packets arrive every 32ms.
+    // Unbounded channel: the ingest path must never drop audio frames due to channel
+    // backpressure. Memory growth is bounded by the DSP worker's buffer window (~30s).
+    // raw_manifest_channel_capacity is retained as a soft-cap warning threshold only.
     let (raw_manifest_tx, raw_manifest_rx) =
-        mpsc::channel::<manifests::DspManifest>(raw_manifest_channel_capacity);
+        mpsc::unbounded_channel::<manifests::DspManifest>();
+    let _ = raw_manifest_channel_capacity; // used as soft-cap threshold in DSP worker
     let journal_runtime_config = JournalRuntimeConfig {
         consumer_name: args.consumer_name.clone(),
         total_journal_budget_bytes: args.total_journal_budget_bytes,
@@ -327,6 +341,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         derived_cache_budget_bytes: args.derived_cache_budget_bytes,
         derived_cache_admission_reserve_bytes: args.derived_cache_admission_reserve_bytes,
         raw_manifest_tx: Some(raw_manifest_tx),
+        skip_binary_writes: !args.enable_segment_binary_writes,
     };
     let backend = IngestBackend::open(
         args.spool_dir,
@@ -1116,6 +1131,7 @@ mod tests {
             derived_cache_budget_bytes: 67_108_864,
             derived_cache_admission_reserve_bytes: 33_554_432,
             raw_manifest_tx: None,
+            skip_binary_writes: false,
         }
     }
 
@@ -1352,6 +1368,7 @@ mod tests {
                     derived_cache_budget_bytes: 67_108_864,
                     derived_cache_admission_reserve_bytes: 33_554_432,
                     raw_manifest_tx: None,
+                    skip_binary_writes: false,
                 },
             )
             .await

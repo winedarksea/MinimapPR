@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
+    sync::{atomic::{AtomicBool, Ordering}, Arc},
     time::SystemTime,
 };
 
@@ -91,22 +92,28 @@ pub struct DspManifest {
 #[derive(Clone, Debug)]
 pub struct ManifestStore {
     root: PathBuf,
+    initialized: Arc<AtomicBool>,
 }
 
 impl ManifestStore {
     pub fn new(journal_root: &Path) -> Self {
         Self {
             root: journal_root.join("manifests"),
+            initialized: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub async fn ensure_initialized(&self) -> BoxedResult<()> {
+        if self.initialized.load(Ordering::Acquire) {
+            return Ok(());
+        }
         fs::create_dir_all(&self.root).await?;
         fs::create_dir_all(self.pending_root()).await?;
         fs::create_dir_all(self.raw_pending_root()).await?;
         fs::create_dir_all(self.consumed_root()).await?;
         self.migrate_legacy_pending_manifests().await?;
         self.migrate_raw_pending_manifests().await?;
+        self.initialized.store(true, Ordering::Release);
         Ok(())
     }
 
