@@ -110,7 +110,7 @@ struct PipelineDiagnostics {
     #[serde(default)]
     realtime: RealtimeInfo,
     #[serde(default)]
-    drop_on_backpressure: bool,
+    drop_on_backpressure: Option<bool>,
     #[serde(default)]
     metrics: PipelineMetrics,
 }
@@ -341,7 +341,11 @@ pub fn ServerDiagnosticsView() -> impl IntoView {
                                     <DiagRow k="Rules lag".into() v=fmt_seconds(rules_lag) />
                                     <DiagRow
                                         k="Backpressure".into()
-                                        v=if pipeline.drop_on_backpressure { "drop when full".into() } else { "block / replay".into() }
+                                        v=match pipeline.drop_on_backpressure {
+                                            Some(true) => "drop when full".into(),
+                                            Some(false) => "block / replay".into(),
+                                            None => "unknown".into(),
+                                        }
                                     />
                                     <DiagRow
                                         k="Dropped triggers".into()
