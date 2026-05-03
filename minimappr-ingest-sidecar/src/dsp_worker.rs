@@ -18,7 +18,7 @@ use crate::{
     manifests::{DspManifest, ManifestStore},
 };
 use serde::{Deserialize, Serialize};
-use tokio::{sync::mpsc, sync::RwLock, time};
+use tokio::{sync::broadcast, sync::mpsc, sync::RwLock, time};
 use tracing::{debug, info, warn};
 
 const MIN_BIRDNET_CLASSIFICATION_WINDOW_SECONDS: f64 = 15.0;
@@ -168,6 +168,7 @@ pub(crate) struct ComputePayload {
     pub(crate) derived_cache: DerivedCache,
     pub(crate) state: SharedDspState,
     pub(crate) classification_tx: Option<flume::Sender<ClassificationRequest>>,
+    pub(crate) dsp_result_tx: Option<broadcast::Sender<DspManifest>>,
     pub(crate) config: DspWorkerConfig,
     pub(crate) consumed_since_prune: Arc<AtomicU64>,
 }
@@ -187,6 +188,8 @@ pub struct DspWorker {
     consumed_manifests_since_prune: Arc<AtomicU64>,
     deferred_source_manifest_ids: Vec<String>,
     env_cache: Option<EnvironmentCache>,
+    /// Broadcast channel for DSP result manifests to Python consumers via SSE.
+    dsp_result_tx: Option<broadcast::Sender<DspManifest>>,
 }
 
 impl DspWorker {
@@ -220,6 +223,7 @@ impl DspWorker {
             consumed_manifests_since_prune: Arc::new(AtomicU64::new(0)),
             deferred_source_manifest_ids: Vec::new(),
             env_cache: None,
+            dsp_result_tx: None,
         }
     }
 
@@ -254,6 +258,13 @@ impl DspWorker {
     /// Injects a shared EnvironmentCache for sound-speed interpolation (Phase 6).
     pub fn with_env_cache(mut self, cache: EnvironmentCache) -> Self {
         self.env_cache = Some(cache);
+        self
+    }
+
+    /// Injects a broadcast sender so DSP result manifests can be streamed to
+    /// Python consumers via SSE without touching the filesystem.
+    pub fn with_dsp_result_sender(mut self, tx: broadcast::Sender<DspManifest>) -> Self {
+        self.dsp_result_tx = Some(tx);
         self
     }
 
@@ -519,6 +530,7 @@ impl DspWorker {
                 derived_cache: self.derived_cache.clone(),
                 state: self.state.clone(),
                 classification_tx: self.classification_tx.clone(),
+                dsp_result_tx: self.dsp_result_tx.clone(),
                 config: self.config.clone(),
                 consumed_since_prune: self.consumed_manifests_since_prune.clone(),
             });
@@ -643,6 +655,7 @@ impl DspWorker {
                 derived_cache: self.derived_cache.clone(),
                 state: self.state.clone(),
                 classification_tx: self.classification_tx.clone(),
+                dsp_result_tx: self.dsp_result_tx.clone(),
                 config: self.config.clone(),
                 consumed_since_prune: self.consumed_manifests_since_prune.clone(),
             });
@@ -700,6 +713,7 @@ impl DspWorker {
             derived_cache: self.derived_cache.clone(),
             state: self.state.clone(),
             classification_tx: self.classification_tx.clone(),
+            dsp_result_tx: self.dsp_result_tx.clone(),
             config: self.config.clone(),
             consumed_since_prune: self.consumed_manifests_since_prune.clone(),
         })
@@ -1124,36 +1138,36 @@ fn resolve_buffer_start_time_ns(
     sample_rate_hz: u32,
     now_ns: u128,
 ) -> i128 {
-    decoded
-        .start_time_ns
-        .filter(|start_time_ns| *start_time_ns > 0)
-        .or_else(|| first_handle.toa_ns.map(i128::from))
-        .or_else(|| {
-            let anchor_ns = first_handle
-                .toa_ns
-                .unwrap_or_else(|| first_handle.tor_ns.unwrap_or(now_ns as u64));
-            decoded.start_sample_index.map(|sample_index| {
-                sample_index_to_absolute_time_from_now_ns(
-                    sample_index,
-                    sample_rate_hz,
-                    anchor_ns.into(),
-                )
+        decoded
+            .start_time_ns
+            .filter(|start_time_ns| *start_time_ns > 0)
+            .or_else(|| first_handle.toa_ns.map(i128::from))
+            .or_else(|| {
+                let anchor_ns = first_handle
+                    .toa_ns
+                    .unwrap_or_else(|| first_handle.tor_ns.unwrap_or(now_ns as u64));
+                decoded.start_sample_index.map(|sample_index| {
+                    sample_index_to_absolute_time_from_now_ns(
+                        sample_index,
+                        sample_rate_hz,
+                        anchor_ns.into(),
+                    )
+                })
             })
-        })
-        .or_else(|| {
-            let anchor_ns = first_handle
-                .toa_ns
-                .unwrap_or_else(|| first_handle.tor_ns.unwrap_or(now_ns as u64));
-            first_handle.sample_index_start.map(|sample_index| {
-                sample_index_to_absolute_time_from_now_ns(
-                    sample_index as i64,
-                    sample_rate_hz,
-                    anchor_ns.into(),
-                )
+            .or_else(|| {
+                let anchor_ns = first_handle
+                    .toa_ns
+                    .unwrap_or_else(|| first_handle.tor_ns.unwrap_or(now_ns as u64));
+                first_handle.sample_index_start.map(|sample_index| {
+                    sample_index_to_absolute_time_from_now_ns(
+                        sample_index as i64,
+                        sample_rate_hz,
+                        anchor_ns.into(),
+                    )
+                })
             })
-        })
-        .or_else(|| first_handle.tor_ns.map(i128::from))
-        .unwrap_or(now_ns as i128)
+            .or_else(|| first_handle.tor_ns.map(i128::from))
+            .unwrap_or(now_ns as i128)
 }
 
 fn should_use_receipt_time_alignment(

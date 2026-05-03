@@ -19,7 +19,6 @@ mod render_mvdr;
 mod runtime;
 mod srp_phat;
 mod storage_class;
-mod stream_range_lease;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -29,7 +28,7 @@ use axum::{
     body::Body,
     extract::{Query, State},
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Response, Sse},
     routing::{get, post},
     Json, Router,
 };
@@ -45,11 +44,11 @@ use leases::PinLeaseRequest;
 use render_mvdr::{render_mvdr, MvdrRenderRequest, TrajectoryWaypoint};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use stream_range_lease::{StreamRangeLeaseRequest, StreamRangeLeaseStore};
 use tokio::{
     process::Command,
-    sync::{mpsc, RwLock},
+    sync::{broadcast, mpsc, RwLock},
 };
+use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
@@ -61,7 +60,7 @@ const DEFAULT_BIRDNET_CLASSIFICATION_WINDOW_SECONDS: f64 = 30.0;
 const DEFAULT_CLASSIFIER_RENDER_OVERLAP_SECONDS: f64 = 2.0;
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "MinimapPR firmware ingest spool sidecar")]
+#[command(author, version, about = "MinimapPR firmware ingest sidecar")]
 struct Args {
     #[arg(long, env = "MINIMAPPR_SIDECAR_HOST", default_value = "0.0.0.0")]
     host: String,
@@ -69,8 +68,12 @@ struct Args {
     #[arg(long, env = "MINIMAPPR_INGEST_PORT", default_value_t = 8081)]
     port: u16,
 
-    #[arg(long, env = "MINIMAPPR_INGEST_SPOOL_DIR", default_value = "data/spool")]
-    spool_dir: PathBuf,
+    #[arg(
+        long,
+        env = "MINIMAPPR_INGEST_STORAGE_DIR",
+        default_value = "data/ingest"
+    )]
+    storage_dir: PathBuf,
 
     #[arg(
         long,
@@ -85,13 +88,6 @@ struct Args {
         default_value_t = 8_388_608
     )]
     segment_max_bytes: u64,
-
-    #[arg(
-        long,
-        env = "MINIMAPPR_INGEST_CONSUMER_NAME",
-        default_value = "python-ingest"
-    )]
-    consumer_name: String,
 
     #[arg(
         long,
@@ -277,15 +273,17 @@ struct AppState {
     dsp_state: SharedDspState,
     #[allow(dead_code)]
     derived_cache: Option<DerivedCache>,
-    range_lease_store: Option<Arc<StreamRangeLeaseStore>>,
     env_cache: EnvironmentCache,
+    /// Broadcast channel for DSP result manifests (localization_result, classifier_render)
+    /// delivered to Python consumers via SSE.  Capacity tuned for ~1s of burst at 30fps.
+    dsp_result_tx: broadcast::Sender<manifests::DspManifest>,
 }
 
 #[derive(Debug, Serialize)]
 struct EnqueueResponse {
     accepted: bool,
     queued: bool,
-    spool_id: String,
+    journal_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -307,7 +305,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     }
     let args = Args::parse();
-    let storage_dir = args.spool_dir.clone();
+    let storage_dir = args.storage_dir.clone();
     let raw_manifest_channel_capacity = args.dsp_raw_manifest_channel_capacity.max(1);
     // Unbounded channel: the ingest path must never drop audio frames due to channel
     // backpressure. Memory growth is bounded by the DSP worker's buffer window (~30s).
@@ -315,7 +313,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (raw_manifest_tx, raw_manifest_rx) = mpsc::unbounded_channel::<manifests::DspManifest>();
     let _ = raw_manifest_channel_capacity; // used as soft-cap threshold in DSP worker
     let journal_runtime_config = JournalRuntimeConfig {
-        consumer_name: args.consumer_name.clone(),
         total_journal_budget_bytes: args.total_journal_budget_bytes,
         admission_reserve_bytes: args.admission_reserve_bytes,
         enforce_tmpfs: !args.allow_non_tmpfs_journal,
@@ -324,7 +321,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         raw_manifest_tx: Some(raw_manifest_tx),
     };
     let backend = IngestBackend::open(
-        args.spool_dir,
+        args.storage_dir,
         IngestStorageMode::Journal,
         args.segment_max_bytes,
         journal_runtime_config,
@@ -333,6 +330,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let dsp_state: SharedDspState = Arc::new(RwLock::new(Default::default()));
     let env_cache = EnvironmentCache::new();
+
+    // Broadcast channel for DSP result manifests → Python SSE consumer.
+    // Capacity ~1s of burst at 30fps with safety margin.
+    let (dsp_result_tx, _dsp_result_rx) = broadcast::channel::<manifests::DspManifest>(4096);
 
     // Spawn DSP worker if journal mode has a manifest store and derived cache.
     if let (Some(manifest_store), Some(derived_cache)) =
@@ -408,6 +409,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         );
         let worker = worker.with_raw_manifest_receiver(raw_manifest_rx);
         let worker = worker.with_env_cache(env_cache.clone());
+        let worker = worker.with_dsp_result_sender(dsp_result_tx.clone());
         let (worker, classification_worker) = worker.with_classification_worker(64);
         if let Some(cw) = classification_worker {
             tokio::spawn(cw.run_loop());
@@ -419,17 +421,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = runtime::dsp_pool();
     }
 
-    let range_lease_store = backend
-        .journal_root()
-        .map(|root| Arc::new(StreamRangeLeaseStore::new(root)));
-
     let state = AppState {
         derived_cache: backend.derived_cache(),
         backend,
         max_body_bytes: args.max_body_bytes,
         dsp_state,
-        range_lease_store,
         env_cache,
+        dsp_result_tx,
     };
 
     let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
@@ -464,21 +462,7 @@ fn app(state: AppState) -> Router {
         )
         .route("/api/v1/dsp/status", get(dsp_status))
         .route("/api/v1/dsp/results", get(dsp_results))
-        // Capture pipeline: stream-range leases
-        .route(
-            "/api/v1/capture/range-lease",
-            post(create_stream_range_lease),
-        )
-        .route(
-            "/api/v1/capture/range-lease/:lease_id",
-            axum::routing::delete(release_stream_range_lease),
-        )
-        .route(
-            "/api/v1/capture/range-lease/:lease_id/heartbeat",
-            post(heartbeat_stream_range_lease),
-        )
-        // Capture pipeline: journal range extraction
-        .route("/api/v1/journal/range", get(journal_range))
+        .route("/api/v1/dsp/stream", get(dsp_stream))
         // Capture pipeline: MVDR beamforming
         .route("/api/v1/capture/render/mvdr", post(render_mvdr_endpoint))
         // Capture pipeline: IAMF encoding
@@ -555,7 +539,7 @@ async fn ingest_env(
         accepted += 1;
     }
 
-    // Journal env readings so the Python spool consumer can process them.
+    // Journal env readings so downstream consumers can process them.
     if let Some(manifest_store) = state.backend.manifest_store() {
         if let Ok(samples_value) = serde_json::to_value(&payload.samples) {
             let manifest = DspManifest {
@@ -593,12 +577,12 @@ async fn enqueue_request(
         .enqueue(state.max_body_bytes, endpoint, headers, body)
         .await
     {
-        Ok(spool_id) => (
+        Ok(journal_id) => (
             StatusCode::ACCEPTED,
             Json(EnqueueResponse {
                 accepted: true,
                 queued: true,
-                spool_id,
+                journal_id,
             }),
         )
             .into_response(),
@@ -616,7 +600,7 @@ async fn enqueue_request(
             }
             if err.downcast_ref::<ClientDisconnectError>().is_some() {
                 // Client closed the connection before the body was fully received;
-                // the payload was not committed to the spool.  This is expected
+                // the payload was not committed. This is expected
                 // when firmware uses a short HTTP timeout, so don't log a warning.
                 return (
                     StatusCode::from_u16(499).unwrap_or(StatusCode::BAD_REQUEST),
@@ -755,182 +739,30 @@ async fn dsp_results(
     Json(results).into_response()
 }
 
-fn current_unix_ns() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0)
-}
-
-// ── Stream-Range-Lease handlers ───────────────────────────────────────────────
-
-async fn create_stream_range_lease(
-    State(state): State<AppState>,
-    Json(request): Json<StreamRangeLeaseRequest>,
-) -> Response {
-    let Some(store) = state.range_lease_store.as_ref() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(ErrorResponse {
-                accepted: false,
-                queued: false,
-                detail: "stream range leases require journal storage mode".to_string(),
-            }),
-        )
-            .into_response();
-    };
-    match store.create(request, current_unix_ns()).await {
-        Ok((response, _)) => (StatusCode::CREATED, Json(response)).into_response(),
-        Err(error) => (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                accepted: false,
-                queued: false,
-                detail: error.to_string(),
-            }),
-        )
-            .into_response(),
-    }
-}
-
-async fn release_stream_range_lease(
-    State(state): State<AppState>,
-    axum::extract::Path(lease_id): axum::extract::Path<String>,
-) -> Response {
-    let Some(store) = state.range_lease_store.as_ref() else {
-        return StatusCode::NO_CONTENT.into_response();
-    };
-    match store.release(&lease_id, current_unix_ns()).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(error) => (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                accepted: false,
-                queued: false,
-                detail: error.to_string(),
-            }),
-        )
-            .into_response(),
-    }
-}
-
-async fn heartbeat_stream_range_lease(
-    State(state): State<AppState>,
-    axum::extract::Path(lease_id): axum::extract::Path<String>,
-) -> Response {
-    let Some(store) = state.range_lease_store.as_ref() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(ErrorResponse {
-                accepted: false,
-                queued: false,
-                detail: "stream range leases require journal storage mode".to_string(),
-            }),
-        )
-            .into_response();
-    };
-    match store.heartbeat(&lease_id, current_unix_ns()).await {
-        Ok(response) => Json(response).into_response(),
-        Err(error) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                accepted: false,
-                queued: false,
-                detail: error.to_string(),
-            }),
-        )
-            .into_response(),
-    }
-}
-
-// ── Journal range extraction ──────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-struct JournalRangeQuery {
-    stream_key: String,
-    start_ns: u64,
-    end_ns: u64,
-}
-
-#[derive(Serialize)]
-struct JournalRangeEntry {
-    segment_id: String,
-    first_toa_ns: Option<u64>,
-    last_toa_ns: Option<u64>,
-    sample_rate_hz: Option<u32>,
-    payload_bytes: u64,
-    segment_path: std::path::PathBuf,
-}
-
-async fn journal_range(
-    State(state): State<AppState>,
-    Query(params): Query<JournalRangeQuery>,
-) -> Response {
-    let Some(journal_root) = state.backend.journal_root() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(ErrorResponse {
-                accepted: false,
-                queued: false,
-                detail: "journal range requires journal storage mode".to_string(),
-            }),
-        )
-            .into_response();
-    };
-
-    let segments_dir = journal_root
-        .join("streams")
-        .join(&params.stream_key)
-        .join("segments");
-
-    let mut entries = match tokio::fs::read_dir(&segments_dir).await {
-        Ok(e) => e,
-        Err(_) => {
-            return Json(Vec::<JournalRangeEntry>::new()).into_response();
-        }
-    };
-
-    let mut matching: Vec<JournalRangeEntry> = Vec::new();
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        let Ok(content) = tokio::fs::read_to_string(&path).await else {
-            continue;
+/// SSE endpoint that streams DSP result manifests (localization_result, classifier_render)
+/// to Python consumers in real-time, bypassing the filesystem entirely.
+async fn dsp_stream(State(state): State<AppState>) -> Sse<impl tokio_stream::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>> {
+    let rx = state.dsp_result_tx.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(|result| {
+        let event = match result {
+            Ok(manifest) => {
+                let json = match serde_json::to_string(&manifest) {
+                    Ok(s) => s,
+                    Err(_) => return None,
+                };
+                axum::response::sse::Event::default().data(json)
+            }
+            Err(_) => {
+                // Lagged — skip stale events to keep consumer current.
+                return None;
+            }
         };
-        let Ok(header) = serde_json::from_str::<serde_json::Value>(&content) else {
-            continue;
-        };
-
-        let first_toa = header["first_toa_ns"].as_u64();
-        let last_toa = header["last_toa_ns"].as_u64();
-        let first_tor = header["first_tor_ns"].as_u64();
-        let last_tor = header["last_tor_ns"].as_u64();
-        let segment_id = header["segment_id"].as_str().unwrap_or("").to_string();
-        let payload_bytes = header["payload_bytes"].as_u64().unwrap_or(0);
-        let sample_rate = header["sample_rate_hz"].as_u64().map(|v| v as u32);
-
-        // Overlap test: segment range overlaps [start_ns, end_ns].
-        // Fall back to tor_ns when toa_ns is missing so non-GPS nodes are not silently excluded.
-        let seg_start = first_toa.or(first_tor).unwrap_or(0);
-        let seg_end = last_toa.or(last_tor).unwrap_or(0);
-        if seg_start <= params.end_ns && seg_end >= params.start_ns {
-            let bin_path = path.with_extension("bin");
-            matching.push(JournalRangeEntry {
-                segment_id,
-                first_toa_ns: first_toa.or(first_tor),
-                last_toa_ns: last_toa.or(last_tor),
-                sample_rate_hz: sample_rate,
-                payload_bytes,
-                segment_path: bin_path,
-            });
-        }
-    }
-
-    // Sort by first_toa_ns ascending for ordered extraction.
-    matching.sort_by_key(|e| e.first_toa_ns.unwrap_or(0));
-    Json(matching).into_response()
+        Some(Ok(event))
+    });
+    Sse::new(stream).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(std::time::Duration::from_secs(15)),
+    )
 }
 
 // ── MVDR beamform endpoint ────────────────────────────────────────────────────
@@ -1208,32 +1040,6 @@ fn build_iamf_ffmpeg_plan(request: &IamfEncodeRequest) -> IamfFfmpegPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{body::Body, http::Request};
-    use tokio::fs;
-    use tower::ServiceExt;
-
-    fn test_app_state(backend: IngestBackend, max_body_bytes: usize) -> AppState {
-        AppState {
-            backend,
-            max_body_bytes,
-            dsp_state: Arc::new(RwLock::new(Default::default())),
-            derived_cache: None,
-            range_lease_store: None,
-            env_cache: EnvironmentCache::new(),
-        }
-    }
-
-    fn test_journal_runtime_config() -> JournalRuntimeConfig {
-        JournalRuntimeConfig {
-            consumer_name: "python-ingest".to_string(),
-            total_journal_budget_bytes: 268_435_456,
-            admission_reserve_bytes: 16_777_216,
-            enforce_tmpfs: false,
-            derived_cache_budget_bytes: 67_108_864,
-            derived_cache_admission_reserve_bytes: 33_554_432,
-            raw_manifest_tx: None,
-        }
-    }
 
     fn iamf_test_request(tmp: &tempfile::TempDir, with_object: bool) -> IamfEncodeRequest {
         let bed = tmp.path().join("bed.wav");
@@ -1318,42 +1124,4 @@ mod tests {
         assert!(!joined.contains("type=iamf_audio_element:id=2"));
         assert!(joined.contains("type=iamf_mix_presentation"));
     }
-
-    fn journal_test_payload() -> String {
-        serde_json::json!({
-            "node": {
-                "id": "journal-node-1",
-                "node_type": "point",
-                "position_m": [0.0, 0.0, 0.0],
-                "sensor_offsets_m": [[0.0, 0.0, 0.0]],
-                "capabilities": ["audio"],
-                "metadata": {},
-                "properties": {}
-            },
-            "buffered_frames": [
-                {
-                    "frame": {
-                        "start_time_ns": 1000,
-                        "utc_start_ns": 1000,
-                        "utc_end_ns": 2000,
-                        "start_sample_index": 0,
-                        "end_sample_index": 4,
-                        "sample_rate_hz": 16000,
-                        "channels": 1,
-                        "encoding": "pcm16le",
-                        "samples_per_channel": 4,
-                        "samples_b64": "AA==",
-                        "sequence": 1,
-                        "time_quality": "gps_locked",
-                        "toa_ns": 1000,
-                        "tor_ns": 2000,
-                        "source_type": "raw_sensor"
-                    }
-                }
-            ],
-            "sort_by_toa": true
-        })
-        .to_string()
-    }
-
 }

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -77,7 +76,7 @@ def manifest_source_key(manifest_payload: dict[str, Any]) -> tuple[tuple[Any, ..
 def load_localized_render_manifest_bundle(
     *,
     manifest_payload: dict[str, Any],
-    journal_streams_dir: Path,
+    journal_streams_dir: Path | None = None,
     paired_classifier_manifest_payload: dict[str, Any] | None = None,
 ) -> LocalizedRenderManifestBundle:
     source_handles_payload = manifest_payload.get("source_handles")
@@ -300,8 +299,8 @@ def _lookup_cursor_update(
     handle: JournalPayloadHandle,
     journal_streams_dir: Path,
 ) -> JournalCursorUpdate:
-    # Channel-only manifests use virtual segment IDs ("seg-mem-{epoch}-{seq}").
-    # No index JSONL exists on disk — synthesize the cursor update from the segment_id.
+    # Memory-path manifests use virtual segment IDs ("seg-mem-{epoch}-{seq}").
+    # Synthesize the cursor update from the segment_id.
     if handle.segment_id.startswith("seg-mem-"):
         parts = handle.segment_id.split("-")
         # Format: seg-mem-{epoch:020}-{sequence:020} → parts[2]=epoch, parts[3]=sequence
@@ -317,28 +316,8 @@ def _lookup_cursor_update(
             journal_epoch=epoch,
             journal_sequence=sequence,
         )
-    index_path = journal_streams_dir / handle.stream_key / "segments" / f"{handle.segment_id}.index.jsonl"
-    with index_path.open("r", encoding="utf-8") as source:
-        for line in source:
-            if not line.strip():
-                continue
-            payload = json.loads(line)
-            payload_offset = int(payload.get("payload_offset_bytes") or payload.get("body_offset_bytes") or 0)
-            payload_length = int(payload.get("payload_length_bytes") or payload.get("body_length_bytes") or 0)
-            if int(payload.get("journal_epoch") or 0) != handle.journal_epoch:
-                continue
-            if payload_offset != handle.payload_offset_bytes:
-                continue
-            if payload_length != handle.payload_length_bytes:
-                continue
-            return JournalCursorUpdate(
-                journal_id=str(payload["journal_id"]),
-                stream_key=str(payload.get("stream_key") or handle.stream_key),
-                journal_epoch=int(payload.get("journal_epoch") or 0),
-                journal_sequence=int(payload["journal_sequence"]),
-            )
     raise ValueError(
-        f"Unable to resolve journal cursor update for {handle.stream_key}/{handle.segment_id}@{handle.payload_offset_bytes}"
+        f"Unsupported persisted source handle for {handle.stream_key}/{handle.segment_id}"
     )
 
 

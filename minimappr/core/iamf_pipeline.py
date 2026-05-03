@@ -2,9 +2,9 @@
 
 Executes the "studio render" background job for a completed capture session:
 
-  1. Extract  — fetch ordered journal segments via Rust /api/v1/journal/range;
-                trim to start_ns/end_ns by TOA; zero-pad gaps; capture rate
-                is read from segment headers (dynamic, not hardcoded).
+  1. Extract  — read the active IAMF recording buffer for [start_ns/end_ns];
+                trim by TOA; zero-pad gaps; capture rate is read from the
+                recording source (dynamic, not hardcoded).
   2. Matrix   — frequency-domain A-to-B conversion → bed_full.wav
   3. Isolate  — query DB for tracks; MVDR beamform each → object_{id}.wav
   4. Subtract — B_clean = B_full − Σ Y_obj·O (block-based, time-varying
@@ -359,99 +359,17 @@ class IamfPipeline:
     ) -> tuple[NDArray[np.float32], int, dict]:
         """Return (channels, capture_rate_hz, sync_diagnostics) for [start_ns, end_ns].
 
-        Dispatches to the Python ring buffer when use_python_ingest is set,
-        otherwise fetches from the Rust sidecar journal range endpoint.
+        IAMF recording is the only raw-audio disk exception. The real-time Rust
+        ingest/DSP path remains memory-only, so Rust journal extraction is not
+        available here.
         """
         if record.use_python_ingest and self._multi_sensor_buffer is not None:
             return await self._multi_sensor_buffer.extract_range(
                 record.channel_sensor_ids, start_ns, end_ns
             )
-        return await self._extract_audio_rust(record.stream_key, start_ns, end_ns)
-
-    async def _extract_audio_rust(
-        self, stream_key: str, start_ns: int, end_ns: int
-    ) -> tuple[NDArray[np.float32], int, dict]:
-        """Fetch ordered journal segments from the Rust sidecar."""
-        assert self._http is not None, "httpx client not initialised (Python ingest mode?)"
-        resp = await self._http.get(
-            f"{self._sidecar_url}/api/v1/journal/range",
-            params={"stream_key": stream_key, "start_ns": start_ns, "end_ns": end_ns},
+        raise RuntimeError(
+            "IAMF capture requires the dedicated recording buffer; Rust raw journal extraction is disabled"
         )
-        resp.raise_for_status()
-        segments = resp.json()
-
-        if not segments:
-            raise RuntimeError("no audio segments found for time range")
-
-        # Determine capture rate from first segment with a known rate.
-        capture_rate_hz = SAMPLE_RATE_HZ
-        for seg in segments:
-            if seg.get("sample_rate_hz"):
-                capture_rate_hz = int(seg["sample_rate_hz"])
-                break
-
-        pcm_chunks: list[NDArray[np.float32]] = []
-        expected_ns = start_ns  # next ns we expect audio to cover
-
-        for seg in segments:
-            seg_first_ns: int = seg.get("first_toa_ns") or start_ns
-            seg_last_ns: int = seg.get("last_toa_ns") or end_ns
-            seg_rate: int = int(seg.get("sample_rate_hz") or capture_rate_hz)
-
-            seg_path = Path(seg["segment_path"])
-            if not seg_path.exists():
-                logger.warning("segment not found: %s", seg_path)
-                continue
-
-            raw = seg_path.read_bytes()
-            pcm = _decode_pcm16le_4ch(raw)  # (4, N) at seg_rate
-
-            # Zero-pad gap between previous segment end and this segment start.
-            if seg_first_ns > expected_ns:
-                gap_ns = seg_first_ns - expected_ns
-                gap_samples = max(0, int(gap_ns * seg_rate / 1_000_000_000))
-                if gap_samples > 0:
-                    logger.warning(
-                        "gap-filling %d samples (%.1f ms) at %d ns",
-                        gap_samples, gap_ns / 1e6, expected_ns,
-                    )
-                    pcm_chunks.append(np.zeros((4, gap_samples), dtype=np.float32))
-
-            # Trim leading samples if segment starts before start_ns.
-            if seg_first_ns < start_ns:
-                trim_ns = start_ns - seg_first_ns
-                trim_samples = int(trim_ns * seg_rate / 1_000_000_000)
-                pcm = pcm[:, trim_samples:]
-                seg_first_ns = start_ns
-
-            # Trim trailing samples if segment extends beyond end_ns.
-            if seg_last_ns > end_ns:
-                keep_ns = end_ns - seg_first_ns
-                keep_samples = max(0, int(keep_ns * seg_rate / 1_000_000_000))
-                pcm = pcm[:, :keep_samples]
-                seg_last_ns = end_ns
-
-            if pcm.shape[1] > 0:
-                pcm_chunks.append(pcm)
-
-            expected_ns = max(expected_ns, seg_last_ns)
-
-        if not pcm_chunks:
-            raise RuntimeError("no audio data after segment trimming")
-
-        channels = np.concatenate(pcm_chunks, axis=1)
-
-        sync_diag: dict = {
-            "requested_start_ns": start_ns,
-            "requested_end_ns": end_ns,
-            "actual_audio_start_ns": start_ns,
-            "actual_audio_end_ns": int(expected_ns),
-            "capture_rate_hz": capture_rate_hz,
-            "n_segments": len(segments),
-            "n_samples": int(channels.shape[1]),
-        }
-
-        return channels, capture_rate_hz, sync_diag
 
     async def _query_trajectories(
         self,

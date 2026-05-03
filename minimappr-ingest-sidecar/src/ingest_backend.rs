@@ -11,22 +11,17 @@ use axum::{
     http::{header, HeaderMap},
 };
 use http_body_util::BodyExt;
-use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use tokio::{
-    fs::{self, OpenOptions},
-    io::{AsyncSeekExt, AsyncWriteExt},
+    fs,
     sync::{mpsc, Mutex},
 };
 use tracing::warn;
-use uuid::Uuid;
 
 use crate::derived_cache::{DerivedCache, DerivedCacheConfig};
 use crate::envelope::{parse_capture_envelope, CaptureEnvelope};
 use crate::journal_reader::{stable_segment_path, JournalPayloadHandle};
-use crate::leases::{
-    hard_segment_pin_counts, segment_pin_counts, LeaseStore, PinLeaseRequest, PinLeaseResponse,
-};
+use crate::leases::{LeaseStore, PinLeaseRequest, PinLeaseResponse};
 use crate::manifests::{DspManifest, ManifestStore};
 use crate::storage_class::{validate_journal_storage_class, StorageClassReport};
 
@@ -35,7 +30,6 @@ type BoxedResult<T> = Result<T, BoxedError>;
 
 #[derive(Clone, Debug)]
 pub struct JournalRuntimeConfig {
-    pub consumer_name: String,
     pub total_journal_budget_bytes: u64,
     pub admission_reserve_bytes: u64,
     pub enforce_tmpfs: bool,
@@ -51,7 +45,6 @@ pub struct JournalRuntimeConfig {
 impl Default for JournalRuntimeConfig {
     fn default() -> Self {
         Self {
-            consumer_name: "python-ingest".to_string(),
             total_journal_budget_bytes: 268_435_456,
             admission_reserve_bytes: 16_777_216,
             enforce_tmpfs: true,
@@ -158,27 +151,6 @@ pub struct JournalHealth {
     pub admission_reserve_bytes: u64,
     pub derived_cache_budget_bytes: u64,
     pub active_pin_leases: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SegmentJournalHeader {
-    segment_id: String,
-    journal_epoch: u64,
-    stream_key: String,
-    first_journal_sequence: Option<u64>,
-    last_journal_sequence: Option<u64>,
-    first_received_ns: Option<u128>,
-    last_received_ns: Option<u128>,
-    first_toa_ns: Option<u64>,
-    last_toa_ns: Option<u64>,
-    first_tor_ns: Option<u64>,
-    last_tor_ns: Option<u64>,
-    entry_count: u64,
-    payload_bytes: u64,
-    pin_count: u64,
-    #[serde(default)]
-    hard_pin_count: u64,
-    sealed: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -451,10 +423,7 @@ impl SegmentJournalBackend {
             let stream_state = state
                 .streams
                 .entry(capture_envelope.stream_key.clone())
-                .or_insert_with(|| StreamJournalState {
-                    next_sequence: 1,
-                    open_segment: None,
-                });
+                .or_insert_with(|| StreamJournalState { next_sequence: 1 });
             if stream_state.next_sequence == 0 {
                 stream_state.next_sequence = 1;
             }
@@ -521,40 +490,40 @@ impl SegmentJournalBackend {
             raw_payload: None,
         };
         // Deliver audio to the DSP worker exclusively via the in-process channel.
-        // Never fall back to disk — a channel-send failure means the DSP worker has
-        // stopped, and writing to the manifest store would not help it recover.
-        if let Some(tx) = &self.runtime_config.raw_manifest_tx {
-            let mut manifest_with_payload = manifest;
-            manifest_with_payload.raw_payload = Some(raw_bytes.to_vec());
-            // Embed node spec and frame metadata so Python can reconstruct node context
-            // without relying on any persisted raw audio payload.
-            let node_value_opt = if raw_bytes.starts_with(b"MMB1") {
-                // Binary MMB1: parse node spec from the binary header.
-                crate::envelope::extract_mmb1_node_json(raw_bytes)
-            } else {
-                // StoreForward JSON: extract the top-level "node" object.
-                serde_json::from_slice::<serde_json::Value>(raw_bytes)
-                    .ok()
-                    .and_then(|body_json| body_json.get("node").cloned())
-            };
-            if let Some(node_value) = node_value_opt {
-                manifest_with_payload.node_context = Some(serde_json::json!({
-                    "node": node_value,
-                    "toa_ns": entry.toa_ns,
-                    "time_quality": entry.time_quality,
-                    "source_type": entry.source_type,
-                }));
-            }
-            if tx.send(manifest_with_payload).is_err() {
-                warn!(
-                    manifest_id = %entry.journal_id,
-                    "raw manifest channel receiver unavailable; frame dropped (DSP worker stopped)"
-                );
-            }
-            return Ok(());
+        // If the channel is not connected, the pipeline is misconfigured — fail fast
+        // so the caller knows audio is not being processed, rather than silently
+        // falling back to disk and violating the "never write raw audio to disk" invariant.
+        let Some(tx) = &self.runtime_config.raw_manifest_tx else {
+            return Err(Box::new(InvalidIngestEnvelopeError::new(
+                "raw manifest channel not configured — DSP worker is not connected",
+            )));
+        };
+        let mut manifest_with_payload = manifest;
+        manifest_with_payload.raw_payload = Some(raw_bytes.to_vec());
+        // Embed node spec and frame metadata so Python can reconstruct node context
+        // without relying on any persisted raw audio payload.
+        let node_value_opt = if raw_bytes.starts_with(b"MMB1") {
+            // Binary MMB1: parse node spec from the binary header.
+            crate::envelope::extract_mmb1_node_json(raw_bytes)
+        } else {
+            // StoreForward JSON: extract the top-level "node" object.
+            serde_json::from_slice::<serde_json::Value>(raw_bytes)
+                .ok()
+                .and_then(|body_json| body_json.get("node").cloned())
+        };
+        if let Some(node_value) = node_value_opt {
+            manifest_with_payload.node_context = Some(serde_json::json!({
+                "node": node_value,
+                "toa_ns": entry.toa_ns,
+                "time_quality": entry.time_quality,
+                "source_type": entry.source_type,
+            }));
         }
-        // No channel configured — full journal path (capture pipeline only).
-        self.manifest_store.publish(manifest).await?;
+        if tx.send(manifest_with_payload).is_err() {
+            return Err(Box::new(InvalidIngestEnvelopeError::new(
+                "raw manifest channel receiver unavailable — DSP worker stopped",
+            )));
+        }
         Ok(())
     }
 
@@ -563,208 +532,8 @@ impl SegmentJournalBackend {
         active_index: &crate::leases::PinLeaseIndex,
         now_ns: u128,
     ) -> BoxedResult<()> {
-        let counts = segment_pin_counts(active_index, now_ns);
-        let hard_counts = hard_segment_pin_counts(active_index, now_ns);
-        let mut stream_entries = match fs::read_dir(&self.streams_dir).await {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(Box::new(error)),
-        };
-        while let Some(stream_entry) = stream_entries.next_entry().await? {
-            if !stream_entry.file_type().await?.is_dir() {
-                continue;
-            }
-            let stream_key = stream_entry.file_name().to_string_lossy().into_owned();
-            let segments_dir = stream_entry.path().join("segments");
-            let mut segment_entries = match fs::read_dir(&segments_dir).await {
-                Ok(entries) => entries,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(Box::new(error)),
-            };
-            while let Some(segment_entry) = segment_entries.next_entry().await? {
-                let metadata_path = segment_entry.path();
-                if !metadata_path
-                    .file_name()
-                    .and_then(OsStr::to_str)
-                    .is_some_and(|name| name.ends_with(".segment.json"))
-                {
-                    continue;
-                }
-                let mut header: SegmentJournalHeader =
-                    serde_json::from_str(&fs::read_to_string(&metadata_path).await?)?;
-                let key = (stream_key.clone(), header.segment_id.clone());
-                let count = *counts.get(&key).unwrap_or(&0);
-                let hard_count = *hard_counts.get(&key).unwrap_or(&0);
-                if header.pin_count != count || header.hard_pin_count != hard_count {
-                    header.pin_count = count;
-                    header.hard_pin_count = hard_count;
-                    write_json_file(&metadata_path, &header).await?;
-                }
-            }
-        }
+        let _ = (active_index, now_ns);
         Ok(())
-    }
-
-    async fn ensure_capacity_for_append(
-        &self,
-        state: &mut SegmentJournalState,
-        append_length_bytes: u64,
-    ) -> BoxedResult<()> {
-        if self.runtime_config.total_journal_budget_bytes == 0 {
-            return Ok(());
-        }
-
-        if state
-            .total_journal_bytes
-            .saturating_add(append_length_bytes)
-            .saturating_add(self.runtime_config.admission_reserve_bytes)
-            > self.runtime_config.total_journal_budget_bytes
-        {
-            let now_ns = now_ns()?;
-            let active_index = self.lease_store.active_index(now_ns).await?;
-            self.refresh_segment_pin_counts(&active_index, now_ns)
-                .await?;
-        }
-
-        while state
-            .total_journal_bytes
-            .saturating_add(append_length_bytes)
-            .saturating_add(self.runtime_config.admission_reserve_bytes)
-            > self.runtime_config.total_journal_budget_bytes
-        {
-            let cursor_by_stream = load_consumer_cursors(
-                self.journal_root.join("consumer_state.sqlite3"),
-                self.runtime_config.consumer_name.clone(),
-            )
-            .await?;
-            let mut candidates =
-                collect_evictable_segments(&self.streams_dir, &cursor_by_stream).await?;
-            candidates.sort_by_key(|candidate| {
-                (
-                    candidate.header.first_received_ns.unwrap_or(u128::MAX),
-                    candidate.header.first_journal_sequence.unwrap_or(u64::MAX),
-                )
-            });
-
-            let candidate = if let Some(c) = candidates.into_iter().next() {
-                c
-            } else {
-                // No unpinned candidates — try soft-pinned segments as last resort.
-                let mut soft_candidates =
-                    collect_soft_evictable_segments(&self.streams_dir, &cursor_by_stream).await?;
-                soft_candidates.sort_by_key(|c| {
-                    (
-                        c.header.first_received_ns.unwrap_or(u128::MAX),
-                        c.header.first_journal_sequence.unwrap_or(u64::MAX),
-                    )
-                });
-                let Some(c) = soft_candidates.into_iter().next() else {
-                    return Err(Box::new(JournalCapacityExceededError {
-                        total_journal_budget_bytes: self.runtime_config.total_journal_budget_bytes,
-                        admission_reserve_bytes: self.runtime_config.admission_reserve_bytes,
-                        projected_total_bytes: state
-                            .total_journal_bytes
-                            .saturating_add(append_length_bytes),
-                    }));
-                };
-                warn!(
-                    segment_id = %c.header.segment_id,
-                    soft_pin_count = c.header.pin_count,
-                    "evicting soft-pinned segment as last resort under journal capacity pressure"
-                );
-                c
-            };
-
-            evict_segment_files(&candidate).await?;
-            state.total_journal_bytes = state
-                .total_journal_bytes
-                .saturating_sub(candidate.header.payload_bytes);
-        }
-        Ok(())
-    }
-
-    async fn ensure_open_segment(
-        &self,
-        state: &mut SegmentJournalState,
-        capture_envelope: &CaptureEnvelope,
-        append_length_bytes: u64,
-    ) -> BoxedResult<()> {
-        let stream_state = state
-            .streams
-            .entry(capture_envelope.stream_key.clone())
-            .or_insert_with(|| StreamJournalState {
-                next_sequence: 1,
-                open_segment: None,
-            });
-
-        let needs_rotation = match stream_state.open_segment.as_ref() {
-            Some(open_segment) => {
-                open_segment.size_bytes > 0
-                    && open_segment.size_bytes.saturating_add(append_length_bytes)
-                        > self.max_segment_bytes
-            }
-            None => true,
-        };
-
-        if needs_rotation {
-            if let Some(open_segment) = stream_state.open_segment.as_mut() {
-                open_segment.header.sealed = true;
-                let _ = write_json_file(&open_segment.metadata_path, &open_segment.header).await;
-            }
-            stream_state.open_segment = Some(
-                self.create_segment(&capture_envelope.stream_key, state.journal_epoch)
-                    .await?,
-            );
-        }
-        Ok(())
-    }
-
-    async fn create_segment(
-        &self,
-        stream_key: &str,
-        journal_epoch: u64,
-    ) -> BoxedResult<OpenSegment> {
-        let stream_dir = self.streams_dir.join(stream_key);
-        let segments_dir = stream_dir.join("segments");
-        fs::create_dir_all(&segments_dir).await?;
-
-        let created_ns = now_ns()?;
-        let segment_id = format!("seg-{}-{}", created_ns, Uuid::new_v4());
-        let segment_path = segments_dir.join(format!("{}.bin", segment_id));
-        let index_path = segments_dir.join(format!("{}.index.jsonl", segment_id));
-        let metadata_path = segments_dir.join(format!("{}.segment.json", segment_id));
-        fs::File::create(&segment_path).await?;
-        fs::File::create(&index_path).await?;
-
-        let header = SegmentJournalHeader {
-            segment_id: segment_id.clone(),
-            journal_epoch,
-            stream_key: stream_key.to_string(),
-            first_journal_sequence: None,
-            last_journal_sequence: None,
-            first_received_ns: None,
-            last_received_ns: None,
-            first_toa_ns: None,
-            last_toa_ns: None,
-            first_tor_ns: None,
-            last_tor_ns: None,
-            entry_count: 0,
-            payload_bytes: 0,
-            pin_count: 0,
-            hard_pin_count: 0,
-            sealed: false,
-        };
-        write_json_file(&metadata_path, &header).await?;
-
-        Ok(OpenSegment {
-            segment_id,
-            segment_path,
-            index_path,
-            metadata_path,
-            size_bytes: 0,
-            index_size_bytes: 0,
-            header,
-        })
     }
 }
 
@@ -843,25 +612,6 @@ impl SegmentJournalEntry {
     }
 }
 
-fn update_segment_header(
-    header: &mut SegmentJournalHeader,
-    entry: &SegmentJournalEntry,
-    payload_bytes: u64,
-) {
-    if header.first_journal_sequence.is_none() {
-        header.first_journal_sequence = Some(entry.journal_sequence);
-        header.first_received_ns = Some(entry.ingest_received_ns);
-        header.first_toa_ns = entry.toa_ns;
-        header.first_tor_ns = entry.tor_ns;
-    }
-    header.last_journal_sequence = Some(entry.journal_sequence);
-    header.last_received_ns = Some(entry.ingest_received_ns);
-    header.last_toa_ns = entry.toa_ns.or(header.last_toa_ns);
-    header.last_tor_ns = entry.tor_ns.or(header.last_tor_ns);
-    header.entry_count += 1;
-    header.payload_bytes = payload_bytes;
-}
-
 async fn read_body_bytes(body: Body, max_body_bytes: usize) -> BoxedResult<Vec<u8>> {
     let mut body = body;
     let mut bytes = Vec::new();
@@ -888,7 +638,7 @@ async fn read_body_bytes(body: Body, max_body_bytes: usize) -> BoxedResult<Vec<u
     Ok(bytes)
 }
 
-async fn open_or_advance_epoch(journal_root: &Path, streams_dir: &Path) -> BoxedResult<u64> {
+async fn open_or_advance_epoch(journal_root: &Path, _streams_dir: &Path) -> BoxedResult<u64> {
     let state_path = journal_root.join("epoch.json");
     let existing_state = match fs::read_to_string(&state_path).await {
         Ok(contents) => Some(serde_json::from_str::<JournalEpochState>(&contents)?),
@@ -896,484 +646,22 @@ async fn open_or_advance_epoch(journal_root: &Path, streams_dir: &Path) -> Boxed
         Err(error) => return Err(Box::new(error)),
     };
 
-    let has_live_segments = streams_have_live_segments(streams_dir).await?;
-    let epoch_state = if has_live_segments {
-        existing_state.unwrap_or(JournalEpochState {
-            active_epoch: 1,
-            last_assigned_epoch: 1,
-        })
-    } else {
-        let next_epoch = existing_state
-            .as_ref()
-            .map(|state| state.last_assigned_epoch.saturating_add(1))
-            .unwrap_or(1);
-        JournalEpochState {
-            active_epoch: next_epoch,
-            last_assigned_epoch: next_epoch,
-        }
+    let next_epoch = existing_state
+        .as_ref()
+        .map(|state| state.last_assigned_epoch.saturating_add(1))
+        .unwrap_or(1);
+    let epoch_state = JournalEpochState {
+        active_epoch: next_epoch,
+        last_assigned_epoch: next_epoch,
     };
     write_json_file(&state_path, &epoch_state).await?;
     Ok(epoch_state.active_epoch)
 }
 
-async fn streams_have_live_segments(streams_dir: &Path) -> std::io::Result<bool> {
-    let mut stream_entries = fs::read_dir(streams_dir).await?;
-    while let Some(stream_entry) = stream_entries.next_entry().await? {
-        if !stream_entry.file_type().await?.is_dir() {
-            continue;
-        }
-        let segments_dir = stream_entry.path().join("segments");
-        let mut segment_entries = match fs::read_dir(&segments_dir).await {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error),
-        };
-        while let Some(segment_entry) = segment_entries.next_entry().await? {
-            if segment_entry.path().extension().and_then(OsStr::to_str) == Some("bin") {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
-}
-
 async fn recover_stream_states(
-    streams_dir: &Path,
+    _streams_dir: &Path,
 ) -> BoxedResult<(HashMap<String, StreamJournalState>, u64)> {
-    let mut states = HashMap::new();
-    let mut total_journal_bytes = 0_u64;
-    let mut stream_entries = match fs::read_dir(streams_dir).await {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((states, total_journal_bytes))
-        }
-        Err(error) => return Err(Box::new(error)),
-    };
-
-    while let Some(stream_entry) = stream_entries.next_entry().await? {
-        if !stream_entry.file_type().await?.is_dir() {
-            continue;
-        }
-        let stream_key = stream_entry.file_name().to_string_lossy().into_owned();
-        let (stream_state, recovered_stream_bytes) =
-            recover_single_stream_state(stream_entry.path(), &stream_key).await?;
-        states.insert(stream_key, stream_state);
-        total_journal_bytes = total_journal_bytes.saturating_add(recovered_stream_bytes);
-    }
-    Ok((states, total_journal_bytes))
-}
-
-async fn recover_single_stream_state(
-    stream_dir: PathBuf,
-    stream_key: &str,
-) -> BoxedResult<(StreamJournalState, u64)> {
-    let segments_dir = stream_dir.join("segments");
-    let mut segment_entries = match fs::read_dir(&segments_dir).await {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((
-                StreamJournalState {
-                    next_sequence: 1,
-                    open_segment: None,
-                },
-                0,
-            ));
-        }
-        Err(error) => return Err(Box::new(error)),
-    };
-
-    let mut next_sequence = 1_u64;
-    let mut open_segment: Option<OpenSegment> = None;
-    let mut recovered_stream_bytes = 0_u64;
-    while let Some(segment_entry) = segment_entries.next_entry().await? {
-        let index_path = segment_entry.path();
-        if index_path.extension().and_then(OsStr::to_str) != Some("jsonl") {
-            continue;
-        }
-        let recovered_segment = recover_segment(index_path, stream_key).await?;
-        recovered_stream_bytes =
-            recovered_stream_bytes.saturating_add(recovered_segment.header.payload_bytes);
-        next_sequence = next_sequence.max(
-            recovered_segment
-                .header
-                .last_journal_sequence
-                .unwrap_or(0)
-                .saturating_add(1),
-        );
-
-        if !recovered_segment.header.sealed {
-            let should_replace = match open_segment.as_ref() {
-                Some(existing_open_segment) => {
-                    recovered_segment.header.last_journal_sequence.unwrap_or(0)
-                        > existing_open_segment
-                            .header
-                            .last_journal_sequence
-                            .unwrap_or(0)
-                }
-                None => true,
-            };
-            if should_replace {
-                let index_size_bytes = fs::metadata(&recovered_segment.index_path)
-                    .await
-                    .map(|m| m.len())
-                    .unwrap_or(0);
-                open_segment = Some(OpenSegment {
-                    segment_id: recovered_segment.header.segment_id.clone(),
-                    segment_path: recovered_segment.segment_path,
-                    index_path: recovered_segment.index_path,
-                    metadata_path: recovered_segment.metadata_path,
-                    size_bytes: recovered_segment.header.payload_bytes,
-                    index_size_bytes,
-                    header: recovered_segment.header,
-                });
-            }
-        }
-    }
-
-    Ok((
-        StreamJournalState {
-            next_sequence,
-            open_segment,
-        },
-        recovered_stream_bytes,
-    ))
-}
-
-async fn load_consumer_cursors(
-    cursor_state_path: PathBuf,
-    consumer_name: String,
-) -> BoxedResult<HashMap<String, ConsumerCursorWatermark>> {
-    tokio::task::spawn_blocking(
-        move || -> BoxedResult<HashMap<String, ConsumerCursorWatermark>> {
-            if !cursor_state_path.exists() {
-                return Ok(HashMap::new());
-            }
-            let connection = Connection::open(cursor_state_path)?;
-            let mut statement = connection.prepare(
-                r#"
-            SELECT stream_key, journal_epoch, last_fully_processed_journal_sequence
-            FROM consumer_cursors
-            WHERE consumer_name = ?1
-            "#,
-            )?;
-            let mut rows = statement.query([consumer_name])?;
-            let mut cursor_by_stream = HashMap::new();
-            while let Some(row) = rows.next()? {
-                cursor_by_stream.insert(
-                    row.get::<_, String>(0)?,
-                    ConsumerCursorWatermark {
-                        journal_epoch: row.get::<_, u64>(1)?,
-                        last_fully_processed_journal_sequence: row.get::<_, u64>(2)?,
-                    },
-                );
-            }
-            Ok(cursor_by_stream)
-        },
-    )
-    .await
-    .map_err(|error| -> BoxedError { Box::new(error) })?
-}
-
-async fn collect_evictable_segments(
-    streams_dir: &Path,
-    cursor_by_stream: &HashMap<String, ConsumerCursorWatermark>,
-) -> BoxedResult<Vec<EvictableSegment>> {
-    let mut candidates = Vec::new();
-    let mut stream_entries = match fs::read_dir(streams_dir).await {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(candidates),
-        Err(error) => return Err(Box::new(error)),
-    };
-
-    while let Some(stream_entry) = stream_entries.next_entry().await? {
-        if !stream_entry.file_type().await?.is_dir() {
-            continue;
-        }
-        let stream_key = stream_entry.file_name().to_string_lossy().into_owned();
-        let Some(cursor) = cursor_by_stream.get(&stream_key) else {
-            continue;
-        };
-
-        let segments_dir = stream_entry.path().join("segments");
-        let mut segment_entries = match fs::read_dir(&segments_dir).await {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(Box::new(error)),
-        };
-        while let Some(segment_entry) = segment_entries.next_entry().await? {
-            let metadata_path = segment_entry.path();
-            if !metadata_path
-                .file_name()
-                .and_then(OsStr::to_str)
-                .is_some_and(|name| name.ends_with(".segment.json"))
-            {
-                continue;
-            }
-            let header: SegmentJournalHeader =
-                serde_json::from_str(&fs::read_to_string(&metadata_path).await?)?;
-            if !header.sealed || header.pin_count > 0 || !cursor_covers_segment(*cursor, &header) {
-                continue;
-            }
-            candidates.push(EvictableSegment {
-                segment_path: metadata_path.with_file_name(format!("{}.bin", header.segment_id)),
-                index_path: metadata_path
-                    .with_file_name(format!("{}.index.jsonl", header.segment_id)),
-                metadata_path,
-                header,
-            });
-        }
-    }
-
-    Ok(candidates)
-}
-
-/// Like `collect_evictable_segments` but treats soft-pinned segments as
-/// evictable.  Used as a last-resort when the budget is exhausted and no
-/// unpinned candidates remain.
-async fn collect_soft_evictable_segments(
-    streams_dir: &Path,
-    cursor_by_stream: &HashMap<String, ConsumerCursorWatermark>,
-) -> BoxedResult<Vec<EvictableSegment>> {
-    let mut candidates = Vec::new();
-    let mut stream_entries = match fs::read_dir(streams_dir).await {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(candidates),
-        Err(error) => return Err(Box::new(error)),
-    };
-    while let Some(stream_entry) = stream_entries.next_entry().await? {
-        if !stream_entry.file_type().await?.is_dir() {
-            continue;
-        }
-        let stream_key = stream_entry.file_name().to_string_lossy().into_owned();
-        let Some(cursor) = cursor_by_stream.get(&stream_key) else {
-            continue;
-        };
-        let segments_dir = stream_entry.path().join("segments");
-        let mut segment_entries = match fs::read_dir(&segments_dir).await {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(Box::new(error)),
-        };
-        while let Some(segment_entry) = segment_entries.next_entry().await? {
-            let metadata_path = segment_entry.path();
-            if !metadata_path
-                .file_name()
-                .and_then(OsStr::to_str)
-                .is_some_and(|name| name.ends_with(".segment.json"))
-            {
-                continue;
-            }
-            let header: SegmentJournalHeader =
-                serde_json::from_str(&fs::read_to_string(&metadata_path).await?)?;
-            // Only hard pins are an absolute block; soft-only pinned segments are eligible here.
-            if !header.sealed
-                || header.hard_pin_count > 0
-                || !cursor_covers_segment(*cursor, &header)
-            {
-                continue;
-            }
-            candidates.push(EvictableSegment {
-                segment_path: metadata_path.with_file_name(format!("{}.bin", header.segment_id)),
-                index_path: metadata_path
-                    .with_file_name(format!("{}.index.jsonl", header.segment_id)),
-                metadata_path,
-                header,
-            });
-        }
-    }
-    Ok(candidates)
-}
-
-fn cursor_covers_segment(cursor: ConsumerCursorWatermark, header: &SegmentJournalHeader) -> bool {
-    let Some(last_journal_sequence) = header.last_journal_sequence else {
-        return false;
-    };
-    if cursor.journal_epoch != header.journal_epoch {
-        return cursor.journal_epoch > header.journal_epoch;
-    }
-    cursor.last_fully_processed_journal_sequence >= last_journal_sequence
-}
-
-async fn evict_segment_files(candidate: &EvictableSegment) -> BoxedResult<()> {
-    let _ = fs::remove_file(&candidate.segment_path).await;
-    let _ = fs::remove_file(&candidate.index_path).await;
-    let _ = fs::remove_file(&candidate.metadata_path).await;
-    Ok(())
-}
-
-async fn recover_segment(index_path: PathBuf, stream_key: &str) -> BoxedResult<RecoveredSegment> {
-    let index_name = index_path
-        .file_name()
-        .and_then(OsStr::to_str)
-        .ok_or_else(|| {
-            InvalidIngestEnvelopeError::new("segment index filename was not valid utf-8")
-        })?;
-    let segment_id = index_name
-        .strip_suffix(".index.jsonl")
-        .ok_or_else(|| {
-            InvalidIngestEnvelopeError::new("segment index filename did not end with .index.jsonl")
-        })?
-        .to_string();
-    let segment_path = index_path.with_file_name(format!("{}.bin", segment_id));
-    let metadata_path = index_path.with_file_name(format!("{}.segment.json", segment_id));
-
-    let existing_header = match fs::read_to_string(&metadata_path).await {
-        Ok(contents) => Some(serde_json::from_str::<SegmentJournalHeader>(&contents)?),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(Box::new(error)),
-    };
-
-    let index_bytes = fs::read(&index_path).await?;
-    let mut derived_journal_epoch = existing_header
-        .as_ref()
-        .map(|header| header.journal_epoch)
-        .unwrap_or(0);
-    let mut first_sequence = None;
-    let mut last_sequence = None;
-    let mut first_received_ns = None;
-    let mut last_received_ns = None;
-    let mut first_toa_ns = None;
-    let mut last_toa_ns = None;
-    let mut first_tor_ns = None;
-    let mut last_tor_ns = None;
-    let mut entry_count = 0_u64;
-    let mut payload_bytes = 0_u64;
-    let mut committed_index_bytes = 0_u64;
-
-    let mut observe_entry = |entry: &SegmentJournalEntry| {
-        derived_journal_epoch = derived_journal_epoch.max(entry.journal_epoch);
-        if first_sequence.is_none() {
-            first_sequence = Some(entry.journal_sequence);
-            first_received_ns = Some(entry.ingest_received_ns);
-            first_toa_ns = entry.toa_ns;
-            first_tor_ns = entry.tor_ns;
-        }
-        last_sequence = Some(entry.journal_sequence);
-        last_received_ns = Some(entry.ingest_received_ns);
-        last_toa_ns = entry.toa_ns.or(last_toa_ns);
-        last_tor_ns = entry.tor_ns.or(last_tor_ns);
-        entry_count += 1;
-        payload_bytes = payload_bytes.max(
-            entry
-                .payload_offset_bytes
-                .saturating_add(entry.payload_length_bytes),
-        );
-    };
-
-    let mut cursor = 0_usize;
-    while cursor < index_bytes.len() {
-        let Some(relative_newline_index) =
-            index_bytes[cursor..].iter().position(|byte| *byte == b'\n')
-        else {
-            break;
-        };
-        let line_end = cursor + relative_newline_index;
-        let line_bytes = &index_bytes[cursor..line_end];
-        cursor = line_end + 1;
-        committed_index_bytes = u64::try_from(cursor)?;
-        if line_bytes.iter().all(|byte| byte.is_ascii_whitespace()) {
-            continue;
-        }
-        let entry: SegmentJournalEntry = serde_json::from_slice(line_bytes)?;
-        observe_entry(&entry);
-    }
-
-    let trailing_bytes = &index_bytes[cursor..];
-    let trailing_bytes_are_whitespace =
-        trailing_bytes.iter().all(|byte| byte.is_ascii_whitespace());
-    let mut append_trailing_newline = false;
-    if !trailing_bytes.is_empty() && !trailing_bytes_are_whitespace {
-        match serde_json::from_slice::<SegmentJournalEntry>(trailing_bytes) {
-            Ok(entry) => {
-                observe_entry(&entry);
-                committed_index_bytes = u64::try_from(index_bytes.len())?;
-                append_trailing_newline = true;
-            }
-            Err(_) => {
-                // Crash recovery only trusts newline-delimited records plus an
-                // otherwise complete final record. Any other tail bytes are
-                // treated as a torn append and truncated below.
-            }
-        }
-    } else if trailing_bytes_are_whitespace {
-        committed_index_bytes = u64::try_from(cursor)?;
-    }
-
-    if append_trailing_newline {
-        let mut index_file = OpenOptions::new().write(true).open(&index_path).await?;
-        index_file.seek(std::io::SeekFrom::End(0)).await?;
-        index_file.write_all(b"\n").await?;
-        index_file.flush().await?;
-    } else if committed_index_bytes < u64::try_from(index_bytes.len())? {
-        let mut index_file = OpenOptions::new().write(true).open(&index_path).await?;
-        index_file.set_len(committed_index_bytes).await?;
-        index_file.flush().await?;
-    }
-
-    let mut header = existing_header.unwrap_or(SegmentJournalHeader {
-        segment_id: segment_id.clone(),
-        journal_epoch: derived_journal_epoch,
-        stream_key: stream_key.to_string(),
-        first_journal_sequence: first_sequence,
-        last_journal_sequence: last_sequence,
-        first_received_ns,
-        last_received_ns,
-        first_toa_ns,
-        last_toa_ns,
-        first_tor_ns,
-        last_tor_ns,
-        entry_count,
-        payload_bytes,
-        pin_count: 0,
-        hard_pin_count: 0,
-        sealed: false,
-    });
-
-    header.journal_epoch = derived_journal_epoch.max(header.journal_epoch);
-    header.stream_key = stream_key.to_string();
-    header.first_journal_sequence = first_sequence.or(header.first_journal_sequence);
-    header.last_journal_sequence = last_sequence.or(header.last_journal_sequence);
-    header.first_received_ns = first_received_ns.or(header.first_received_ns);
-    header.last_received_ns = last_received_ns.or(header.last_received_ns);
-    header.first_toa_ns = first_toa_ns.or(header.first_toa_ns);
-    header.last_toa_ns = last_toa_ns.or(header.last_toa_ns);
-    header.first_tor_ns = first_tor_ns.or(header.first_tor_ns);
-    header.last_tor_ns = last_tor_ns.or(header.last_tor_ns);
-    header.entry_count = entry_count.max(header.entry_count);
-    header.payload_bytes = payload_bytes.max(header.payload_bytes);
-
-    let segment_metadata = fs::metadata(&segment_path).await?;
-    if segment_metadata.len() > header.payload_bytes {
-        let segment_file = OpenOptions::new().write(true).open(&segment_path).await?;
-        segment_file.set_len(header.payload_bytes).await?;
-    }
-    let _ = write_json_file(&metadata_path, &header).await;
-
-    Ok(RecoveredSegment {
-        segment_path,
-        index_path,
-        metadata_path,
-        header,
-    })
-}
-
-async fn rollback_segment_append(
-    segment_file: &mut fs::File,
-    body_offset_bytes: u64,
-) -> BoxedResult<()> {
-    segment_file.set_len(body_offset_bytes).await?;
-    segment_file.flush().await?;
-    Ok(())
-}
-
-#[allow(dead_code)]
-async fn rollback_index_append(
-    index_file: &mut fs::File,
-    index_offset_bytes: u64,
-) -> BoxedResult<()> {
-    index_file.set_len(index_offset_bytes).await?;
-    index_file.flush().await?;
-    Ok(())
+    Ok((HashMap::new(), 0))
 }
 
 fn validate_declared_content_length(headers: &HeaderMap, max_body_bytes: usize) -> BoxedResult<()> {
@@ -1448,7 +736,6 @@ fn is_client_disconnect(err: &dyn std::error::Error) -> bool {
 mod tests {
     use super::*;
     use crate::manifests::ManifestStore;
-    use rusqlite::params;
     use serde_json::json;
 
     fn store_forward_body(node_id: &str, sequence: u64, start_sample_index: u64) -> String {
@@ -1488,44 +775,8 @@ mod tests {
         .to_string()
     }
 
-    async fn read_single_index_entry(stream_dir: &Path) -> SegmentJournalEntry {
-        let segments_dir = stream_dir.join("segments");
-        let mut entries = fs::read_dir(&segments_dir).await.unwrap();
-        while let Some(entry) = entries.next_entry().await.unwrap() {
-            let path = entry.path();
-            if path.extension().and_then(OsStr::to_str) == Some("jsonl") {
-                let contents = fs::read_to_string(path).await.unwrap();
-                let line = contents
-                    .lines()
-                    .find(|line| !line.trim().is_empty())
-                    .unwrap();
-                return serde_json::from_str(line).unwrap();
-            }
-        }
-        panic!("missing index entry");
-    }
-
-    async fn read_segment_headers(stream_dir: &Path) -> Vec<SegmentJournalHeader> {
-        let segments_dir = stream_dir.join("segments");
-        let mut headers = Vec::new();
-        let mut entries = fs::read_dir(&segments_dir).await.unwrap();
-        while let Some(entry) = entries.next_entry().await.unwrap() {
-            let path = entry.path();
-            if !path
-                .file_name()
-                .and_then(OsStr::to_str)
-                .is_some_and(|name| name.ends_with(".segment.json"))
-            {
-                continue;
-            }
-            headers.push(serde_json::from_str(&fs::read_to_string(path).await.unwrap()).unwrap());
-        }
-        headers
-    }
-
     fn test_journal_runtime_config() -> JournalRuntimeConfig {
         JournalRuntimeConfig {
-            consumer_name: "python-ingest".to_string(),
             total_journal_budget_bytes: 268_435_456,
             admission_reserve_bytes: 16_777_216,
             enforce_tmpfs: false,
@@ -1533,52 +784,6 @@ mod tests {
             derived_cache_admission_reserve_bytes: 8_388_608,
             raw_manifest_tx: None,
         }
-    }
-
-    fn write_cursor(
-        journal_root: &Path,
-        consumer_name: &str,
-        stream_key: &str,
-        journal_epoch: u64,
-        journal_sequence: u64,
-    ) {
-        let db_path = journal_root.join("consumer_state.sqlite3");
-        let connection = Connection::open(db_path).unwrap();
-        connection
-            .execute_batch(
-                r#"
-                CREATE TABLE IF NOT EXISTS consumer_cursors (
-                    consumer_name TEXT NOT NULL,
-                    stream_key TEXT NOT NULL,
-                    journal_epoch INTEGER NOT NULL,
-                    last_fully_processed_journal_sequence INTEGER NOT NULL,
-                    updated_ns INTEGER NOT NULL,
-                    PRIMARY KEY (consumer_name, stream_key)
-                );
-                "#,
-            )
-            .unwrap();
-        connection
-            .execute(
-                r#"
-                INSERT OR REPLACE INTO consumer_cursors (
-                    consumer_name,
-                    stream_key,
-                    journal_epoch,
-                    last_fully_processed_journal_sequence,
-                    updated_ns
-                )
-                VALUES (?1, ?2, ?3, ?4, ?5)
-                "#,
-                params![
-                    consumer_name,
-                    stream_key,
-                    journal_epoch,
-                    journal_sequence,
-                    123_i64
-                ],
-            )
-            .unwrap();
     }
 
     #[tokio::test]
@@ -1661,37 +866,6 @@ mod tests {
         assert!(journal_id.contains("-00000000000000000002-"));
     }
 
-    fn read_all_entries(stream_dir: &std::path::Path) -> Vec<SegmentJournalEntry> {
-        let segments_dir = stream_dir.join("segments");
-        let mut all = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(&segments_dir) {
-            for e in entries.flatten() {
-                let p = e.path();
-                if p.extension().and_then(std::ffi::OsStr::to_str) != Some("jsonl") {
-                    continue;
-                }
-                if let Ok(contents) = std::fs::read_to_string(&p) {
-                    for line in contents.lines() {
-                        if line.trim().is_empty() {
-                            continue;
-                        }
-                        if let Ok(je) = serde_json::from_str::<SegmentJournalEntry>(line) {
-                            all.push(je);
-                        }
-                    }
-                }
-            }
-        }
-        all.sort_by_key(|e| e.journal_sequence);
-        all
-    }
-
-    /// A hard-pinned segment is never evicted; the adjacent unpinned sealed segment
-    /// is evicted to make room for a new frame.
-    ///
-    /// Setup: segment_max_bytes = 1 forces every append to seal the previous segment.
-    /// After 3 frames: seg1 (seq 1, sealed) + seg2 (seq 2, sealed) + seg3 (seq 3, open).
-    /// Cursor covers all 3.  Hard-pin seg1 → only seg2 is an unpinned eviction candidate.
     #[tokio::test]
     async fn manifest_publish_and_query_pending_round_trip() {
         let tmp = tempfile::tempdir().unwrap();

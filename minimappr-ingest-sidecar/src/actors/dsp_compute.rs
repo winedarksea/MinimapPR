@@ -268,16 +268,26 @@ pub async fn run_io(result: ComputeMathResult) {
     if has_classifier_render {
         st.total_classifier_renders += 1;
     }
-    if let Some(pending) = render_pending {
-        st.recent_results.push(pending);
+    if let Some(ref pending) = render_pending {
+        st.recent_results.push(pending.clone());
         if st.recent_results.len() > 50 {
             st.recent_results.remove(0);
         }
     }
-    if let Some(m) = published {
-        st.recent_results.push(m);
+    if let Some(ref m) = published {
+        st.recent_results.push(m.clone());
         if st.recent_results.len() > 50 {
             st.recent_results.remove(0);
+        }
+    }
+
+    // Broadcast result manifests to Python consumers via SSE — zero-disk path.
+    if let Some(ref tx) = payload.dsp_result_tx {
+        if let Some(ref m) = render_pending {
+            let _ = tx.send(m.clone());
+        }
+        if let Some(ref m) = published {
+            let _ = tx.send(m.clone());
         }
     }
 }

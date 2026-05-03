@@ -28,6 +28,7 @@ from starlette.requests import ClientDisconnect
 from minimappr.api.binary_ingest import parse_binary_ingest_payload
 from minimappr.api.live import LiveEventHub
 from minimappr.api.spool_consumer import IngestSpoolConfig, IngestSpoolConsumer
+from minimappr.api.stream_consumer import IngestStreamConsumer, StreamConsumerConfig
 from minimappr.api.transports import HttpIngestTransport
 from minimappr.classifiers.factory import create_classifier
 from minimappr.cleanup_service import CleanupService
@@ -966,6 +967,17 @@ async def lifespan(app: FastAPI):
     app.state.capture_manager = capture_manager
     _apply_site_origin_resolution(app.state, resolved_site_origin)
 
+    # In-memory stream consumer: active when sidecar is running and backend is rust.
+    ingest_stream_consumer: IngestStreamConsumer | None = None
+    if sidecar_state.status == "running" and getattr(settings, "ingest_backend", "rust") == "rust":
+        ingest_stream_consumer = IngestStreamConsumer(
+            config=StreamConsumerConfig(
+                sidecar_base_url=_ingest_runtime_base_url(settings),
+            ),
+            ingest_transport=ingest_transport,
+        )
+        app.state.ingest_stream_consumer = ingest_stream_consumer
+
     cleanup_task: asyncio.Task | None = None
     site_origin_reconcile_task: asyncio.Task | None = None
     ingest_spool_tasks: list[asyncio.Task] = []
@@ -975,11 +987,14 @@ async def lifespan(app: FastAPI):
         await federation.start()
         cleanup_task = asyncio.create_task(_cleanup_loop(app))
         app.state.cleanup_task = cleanup_task
-        ingest_spool_tasks = [
-            asyncio.create_task(ingest_spool_consumer.run_forever(worker_name=f"spool-{index + 1}"))
-            for index in range(settings.ingest_spool_worker_count)
-        ]
-        app.state.ingest_spool_tasks = ingest_spool_tasks
+        if ingest_stream_consumer is not None:
+            ingest_stream_consumer.start()
+        else:
+            ingest_spool_tasks = [
+                asyncio.create_task(ingest_spool_consumer.run_forever(worker_name=f"spool-{index + 1}"))
+                for index in range(settings.ingest_spool_worker_count)
+            ]
+            app.state.ingest_spool_tasks = ingest_spool_tasks
         if should_schedule_deferred_site_origin_reconciliation(
             settings,
             initial_resolution_source=resolved_site_origin.source,
@@ -1020,6 +1035,8 @@ async def lifespan(app: FastAPI):
         if ingest_spool_tasks:
             with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
                 await asyncio.wait_for(asyncio.gather(*ingest_spool_tasks), timeout=shutdown_timeout_s)
+        if ingest_stream_consumer is not None:
+            await ingest_stream_consumer.stop()
 
         try:
             await asyncio.wait_for(federation.stop(), timeout=shutdown_timeout_s)

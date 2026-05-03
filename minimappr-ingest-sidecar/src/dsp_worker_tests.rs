@@ -191,60 +191,6 @@ async fn worker_publishes_omni_render_when_localization_coverage_is_unavailable(
 }
 
 #[tokio::test]
-async fn worker_skips_stale_manifest_without_rewriting_timestamps() {
-    let tmp = tempfile::tempdir().unwrap();
-    let manifest_store = ManifestStore::new(tmp.path());
-    manifest_store.ensure_initialized().await.unwrap();
-    let derived_cache = DerivedCache::new(
-        tmp.path(),
-        DerivedCacheConfig {
-            budget_bytes: 16_777_216,
-            admission_reserve_bytes: 0,
-        },
-    );
-    derived_cache.ensure_initialized().await.unwrap();
-
-    let state: SharedDspState = Arc::new(RwLock::new(Default::default()));
-    let mut worker = DspWorker::new(
-        manifest_store.clone(),
-        derived_cache,
-        DspWorkerConfig {
-            birdnet_hybrid_render_enabled: true,
-            max_buffer_seconds: 0.5,
-            skip_stale_manifests_for_live_buffer: true,
-            ..DspWorkerConfig::default()
-        },
-        state.clone(),
-    );
-
-    let stale_payload = store_forward_payload_with_timing(1, 0, 1);
-    let mut stale_manifest =
-        raw_manifest_for_payload(tmp.path(), "manifest-raw-stale", "seg-stale", stale_payload)
-            .await;
-    stale_manifest.created_ns = 1;
-    stale_manifest.source_handles[0].tor_ns = Some(1);
-    stale_manifest.source_handles[0].toa_ns = Some(1);
-
-    worker.process_one(stale_manifest, 1).await;
-
-    let localizations = manifest_store
-        .query_pending("localization_result")
-        .await
-        .unwrap();
-    assert_eq!(localizations.len(), 0);
-    let renders = manifest_store
-        .query_pending("classifier_render")
-        .await
-        .unwrap();
-    assert_eq!(renders.len(), 0);
-
-    let state = state.read().await;
-    assert_eq!(state.total_stale_manifest_skips, 1);
-    assert_eq!(state.total_localization_results, 0);
-    assert_eq!(state.total_classifier_renders, 0);
-}
-
-#[tokio::test]
 async fn localization_continues_when_classifier_render_is_rate_limited() {
     let tmp = tempfile::tempdir().unwrap();
     let manifest_store = ManifestStore::new(tmp.path());

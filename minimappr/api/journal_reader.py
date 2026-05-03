@@ -1,9 +1,8 @@
-"""mmap-backed journal handle reader for sidecar segment payloads."""
+"""Handle reader for persisted derived sidecar payloads."""
 
 from __future__ import annotations
 
 import hashlib
-import mmap
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -73,8 +72,8 @@ class JournalPayloadHandle:
                 f"journal handle range {self.payload_offset_bytes}..{end_offset} exceeds segment size {segment_size}"
             )
         with self.segment_path.open("rb") as handle:
-            with mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as mapped:
-                payload = mapped[self.payload_offset_bytes:end_offset]
+            handle.seek(self.payload_offset_bytes)
+            payload = handle.read(self.payload_length_bytes)
         _verify_integrity_hash(payload, self.integrity_hash)
         return payload
 

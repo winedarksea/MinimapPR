@@ -21,6 +21,6 @@ pub fn stable_segment_path(journal_root: &Path, stream_key: &str, segment_id: &s
     journal_root
         .join("streams")
         .join(stream_key)
-        .join("segments")
-        .join(format!("{segment_id}.bin"))
+        .join("memory")
+        .join(segment_id)
 }
