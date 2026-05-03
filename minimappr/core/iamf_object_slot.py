@@ -18,6 +18,7 @@ class IamfObjectSlot:
     positions_per_unit: list[dict[int, dict]]
     unit_track_ids: list[str | None]
     active_ranges: list[tuple[int, int]]
+    handoff_gap_ranges: list[tuple[int, int]]
     score: float
 
 
@@ -41,16 +42,17 @@ def select_iamf_object_slot(
     min_localization_confidence: float = 0.30,
     challenger_margin: float = 0.15,
     challenger_hold_units: int | None = None,
+    handoff_gap_seconds: float = 0.25,
     fade_samples: int | None = None,
 ) -> IamfObjectSlot | None:
     """Choose one stable IAMF object slot from rendered object candidates."""
     samples_per_unit = max(1, samples_per_unit)
     n_units = max(1, math.ceil(max(0, n_samples) / samples_per_unit))
     hold_units = challenger_hold_units or max(1, math.ceil(0.5 * sample_rate_hz / samples_per_unit))
+    gap_units = max(1, math.ceil(max(0.0, handoff_gap_seconds) * sample_rate_hz / samples_per_unit))
     fade_len = fade_samples or max(1, int(round(0.1 * sample_rate_hz)))
 
-    eligible: dict[str, tuple[ObjectSlotTrajectory, NDArray[np.float32], float]] = {}
-    rms_values: dict[str, float] = {}
+    eligible: dict[str, tuple[ObjectSlotTrajectory, NDArray[np.float32]]] = {}
     for traj in trajectories:
         mono = object_tracks.get(traj.track_id)
         if mono is None:
@@ -59,25 +61,7 @@ def select_iamf_object_slot(
             continue
         if traj.tqi < min_tqi or traj.localization_confidence < min_localization_confidence:
             continue
-        rms = float(np.sqrt(np.mean(np.asarray(mono, dtype=np.float64) ** 2))) if mono.size else 0.0
-        rms_values[traj.track_id] = rms
-
-    if not rms_values:
-        return None
-
-    max_rms = max(max(rms_values.values()), 1e-9)
-    for traj in trajectories:
-        mono = object_tracks.get(traj.track_id)
-        if mono is None or traj.track_id not in rms_values:
-            continue
-        normalized_rms = min(1.0, rms_values[traj.track_id] / max_rms)
-        score = (
-            0.35 * float(traj.tqi)
-            + 0.25 * float(traj.label_confidence)
-            + 0.25 * float(traj.localization_confidence)
-            + 0.15 * normalized_rms
-        )
-        eligible[traj.track_id] = (traj, mono, float(np.clip(score, 0.0, 1.0)))
+        eligible[traj.track_id] = (traj, mono)
 
     if not eligible:
         return None
@@ -89,25 +73,23 @@ def select_iamf_object_slot(
 
     for unit_idx in range(n_units):
         sample_mid = min(n_samples - 1, unit_idx * samples_per_unit + samples_per_unit // 2)
-        active = [
-            item for item in eligible.values()
-            if _trajectory_active_at_sample(item[0], sample_mid)
-        ]
-        if not active:
+        active_scores = _score_active_tracks_for_unit(
+            eligible, sample_mid, unit_idx * samples_per_unit, samples_per_unit, n_samples
+        )
+        if not active_scores:
             unit_owner.append(None)
             current_owner = None
             challenger_id = None
             challenger_units = 0
             continue
 
-        best_traj, _best_mono, best_score = max(active, key=lambda item: item[2])
-        best_id = best_traj.track_id
+        best_id, best_score = max(active_scores.items(), key=lambda item: item[1])
         if current_owner is None:
             current_owner = best_id
             challenger_id = None
             challenger_units = 0
         elif best_id != current_owner:
-            current_score = eligible[current_owner][2]
+            current_score = active_scores.get(current_owner, 0.0)
             if best_score >= current_score + challenger_margin:
                 if challenger_id == best_id:
                     challenger_units += 1
@@ -125,6 +107,10 @@ def select_iamf_object_slot(
             challenger_id = None
             challenger_units = 0
         unit_owner.append(current_owner)
+
+    unit_owner, handoff_gap_ranges = _apply_handoff_gaps(
+        unit_owner, samples_per_unit, n_samples, gap_units
+    )
 
     if not any(owner is not None for owner in unit_owner):
         return None
@@ -147,7 +133,10 @@ def select_iamf_object_slot(
             last_owner = None
             continue
 
-        traj, mono, score = eligible[owner]
+        traj, mono = eligible[owner]
+        score = _score_track_for_unit(
+            traj, mono, start, samples_per_unit, n_samples, local_rms_norm=1.0
+        )
         slot_samples[start:end] = mono[start:end]
         start_pos = _interpolate_waypoints(traj.waypoints, start)
         end_pos = _interpolate_waypoints(traj.waypoints, max(start, end - 1))
@@ -182,8 +171,111 @@ def select_iamf_object_slot(
         positions_per_unit=positions_per_unit,
         unit_track_ids=unit_owner,
         active_ranges=active_ranges,
+        handoff_gap_ranges=handoff_gap_ranges,
         score=float(np.mean(selected_scores)) if selected_scores else 0.0,
     )
+
+
+def _score_active_tracks_for_unit(
+    eligible: dict[str, tuple[ObjectSlotTrajectory, NDArray[np.float32]]],
+    sample_mid: int,
+    sample_start: int,
+    samples_per_unit: int,
+    n_samples: int,
+) -> dict[str, float]:
+    active: list[tuple[str, ObjectSlotTrajectory, NDArray[np.float32], float]] = []
+    for track_id, (traj, mono) in eligible.items():
+        if not _trajectory_active_at_sample(traj, sample_mid):
+            continue
+        local_rms = _local_rms(mono, sample_start, samples_per_unit, n_samples)
+        active.append((track_id, traj, mono, local_rms))
+
+    if not active:
+        return {}
+
+    max_rms = max(max(item[3] for item in active), 1e-9)
+    return {
+        track_id: _score_track_for_unit(
+            traj,
+            mono,
+            sample_start,
+            samples_per_unit,
+            n_samples,
+            local_rms_norm=min(1.0, local_rms / max_rms),
+        )
+        for track_id, traj, mono, local_rms in active
+    }
+
+
+def _score_track_for_unit(
+    traj: ObjectSlotTrajectory,
+    mono: NDArray[np.float32],
+    sample_start: int,
+    samples_per_unit: int,
+    n_samples: int,
+    *,
+    local_rms_norm: float | None = None,
+) -> float:
+    if local_rms_norm is None:
+        local_rms_norm = min(
+            1.0,
+            _local_rms(mono, sample_start, samples_per_unit, n_samples)
+            / max(_local_rms(mono, 0, n_samples, n_samples), 1e-9),
+        )
+    score = (
+        0.30 * float(traj.tqi)
+        + 0.20 * float(traj.label_confidence)
+        + 0.20 * float(traj.localization_confidence)
+        + 0.30 * float(local_rms_norm)
+    )
+    return float(np.clip(score, 0.0, 1.0))
+
+
+def _local_rms(
+    mono: NDArray[np.float32],
+    sample_start: int,
+    samples_per_unit: int,
+    n_samples: int,
+) -> float:
+    start = max(0, min(sample_start, n_samples))
+    end = max(start, min(start + samples_per_unit, n_samples, mono.shape[0]))
+    if end <= start:
+        return 0.0
+    block = np.asarray(mono[start:end], dtype=np.float64)
+    return float(np.sqrt(np.mean(block * block))) if block.size else 0.0
+
+
+def _apply_handoff_gaps(
+    unit_owner: list[str | None],
+    samples_per_unit: int,
+    n_samples: int,
+    gap_units: int,
+) -> tuple[list[str | None], list[tuple[int, int]]]:
+    if gap_units <= 0:
+        return unit_owner, []
+
+    output = list(unit_owner)
+    ranges: list[tuple[int, int]] = []
+    previous_owner: str | None = None
+
+    for idx, owner in enumerate(unit_owner):
+        if (
+            previous_owner is not None
+            and owner is not None
+            and owner != previous_owner
+        ):
+            gap_start_unit = idx
+            gap_end_unit = min(len(output), gap_start_unit + gap_units)
+            for gap_idx in range(gap_start_unit, gap_end_unit):
+                output[gap_idx] = None
+            start = min(n_samples, gap_start_unit * samples_per_unit)
+            end = min(n_samples, gap_end_unit * samples_per_unit)
+            if end > start:
+                ranges.append((start, end))
+        if owner is not None:
+            previous_owner = owner
+
+    return output, ranges
 
 
 def _trajectory_active_at_sample(traj: ObjectSlotTrajectory, sample: int) -> bool:

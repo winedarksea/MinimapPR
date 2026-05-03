@@ -134,7 +134,8 @@ impl SensorStreamBuffer {
                 self.coverage.resize(self.coverage.len() + gap, false);
             }
             self.samples.extend(samples.iter().copied());
-            self.coverage.resize(self.coverage.len() + samples.len(), true);
+            self.coverage
+                .resize(self.coverage.len() + samples.len(), true);
             self.prune();
             return Ok(());
         }
@@ -160,10 +161,11 @@ impl SensorStreamBuffer {
                 self.samples[offset + index] = sample;
                 self.coverage[offset + index] = true;
             }
-            self.samples
-                .extend(samples[overlap_len..].iter().copied());
-            self.coverage
-                .resize(self.coverage.len() + samples.len().saturating_sub(overlap_len), true);
+            self.samples.extend(samples[overlap_len..].iter().copied());
+            self.coverage.resize(
+                self.coverage.len() + samples.len().saturating_sub(overlap_len),
+                true,
+            );
             self.prune();
             return Ok(());
         }
@@ -255,11 +257,9 @@ impl SensorStreamBuffer {
         if start_offset < 0 || end_offset > self.coverage.len() as i64 {
             return None;
         }
-        let window_coverage = self.collect_coverage_range(start_offset as usize, end_offset as usize);
-        Some(coverage_stats(
-            &window_coverage,
-            self.sample_rate_hz,
-        ))
+        let window_coverage =
+            self.collect_coverage_range(start_offset as usize, end_offset as usize);
+        Some(coverage_stats(&window_coverage, self.sample_rate_hz))
     }
 
     pub fn latest_window(&self, window_seconds: f64) -> Vec<f32> {
@@ -282,10 +282,7 @@ impl SensorStreamBuffer {
             .max(1.0) as usize;
         let start_offset = self.coverage.len().saturating_sub(window_samples);
         let window_coverage = self.collect_coverage_range(start_offset, self.coverage.len());
-        Some(coverage_stats(
-            &window_coverage,
-            self.sample_rate_hz,
-        ))
+        Some(coverage_stats(&window_coverage, self.sample_rate_hz))
     }
 
     pub fn coverage_ending_at(
@@ -307,10 +304,7 @@ impl SensorStreamBuffer {
             return None;
         }
         let window_coverage = self.collect_coverage_range(start_offset, end_offset as usize);
-        Some(coverage_stats(
-            &window_coverage,
-            self.sample_rate_hz,
-        ))
+        Some(coverage_stats(&window_coverage, self.sample_rate_hz))
     }
 
     fn reset(&mut self, start_time_ns: i128, start_sample_index: i64, samples: &[f32]) {
@@ -330,8 +324,7 @@ impl SensorStreamBuffer {
         // VecDeque front pops are O(1), so there is no memmove cost — aggressive
         // chunked dropping is not needed and would create coverage gaps in the
         // 30-second BirdNET classification window.
-        let drop = (self.sample_len() as i64 - self.max_samples)
-            .max(0) as usize;
+        let drop = (self.sample_len() as i64 - self.max_samples).max(0) as usize;
         for _ in 0..drop {
             let _ = self.samples.pop_front();
             let _ = self.coverage.pop_front();

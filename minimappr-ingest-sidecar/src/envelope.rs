@@ -178,7 +178,7 @@ pub fn parse_capture_envelope(
     endpoint: &str,
     raw_payload: &[u8],
 ) -> Result<CaptureEnvelope, String> {
-        match endpoint {
+    match endpoint {
         "/api/v1/ingest/binary" => parse_binary_capture_envelope(raw_payload),
         "/api/v1/ingest/store-forward" => parse_store_forward_capture_envelope(raw_payload),
         other => Err(format!("unsupported ingest endpoint {other}")),
@@ -192,9 +192,9 @@ pub fn extract_mmb1_node_json(raw_bytes: &[u8]) -> Option<serde_json::Value> {
     let mut reader = BinaryReader::new(raw_bytes);
     // Skip magic + version + sort_by_toa + frame_count (7 bytes)
     reader.read(4).ok()?; // "MMB1"
-    reader.u8().ok()?;    // version
-    reader.u8().ok()?;    // sort_by_toa
-    reader.u16().ok()?;   // frame_count
+    reader.u8().ok()?; // version
+    reader.u8().ok()?; // sort_by_toa
+    reader.u16().ok()?; // frame_count
 
     let node_id = reader.string().ok()?;
     let node_type_code = reader.u8().ok()?;

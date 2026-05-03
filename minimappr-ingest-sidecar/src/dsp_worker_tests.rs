@@ -55,7 +55,7 @@ async fn worker_publishes_localization_and_classifier_render_contract() {
         promotion_ready: false,
         env_samples: None,
         node_context: None,
-            raw_payload: None,
+        raw_payload: None,
     };
     let state: SharedDspState = Arc::new(RwLock::new(Default::default()));
     let mut worker = DspWorker::new(
@@ -275,9 +275,13 @@ async fn localization_continues_when_classifier_render_is_rate_limited() {
     );
 
     let first_payload = store_forward_payload_with_timing(1_000_000_000, 0, 1);
-    let first_manifest =
-        raw_manifest_for_payload(tmp.path(), "manifest-raw-cadence-1", "seg-cadence-1", first_payload)
-            .await;
+    let first_manifest = raw_manifest_for_payload(
+        tmp.path(),
+        "manifest-raw-cadence-1",
+        "seg-cadence-1",
+        first_payload,
+    )
+    .await;
     worker.process_one(first_manifest, 1).await;
 
     let second_payload = store_forward_payload_with_timing(1_032_000_000, 512, 2);
@@ -328,18 +332,11 @@ async fn consume_manifest_standalone_skips_non_persisted_channel_manifests() {
         coverage_stats: None,
         promotion_ready: false,
         env_samples: None,
-            node_context: None,
+        node_context: None,
         raw_payload: Some(vec![1, 2, 3]),
     };
 
-    consume_manifest_standalone(
-        &manifest,
-        &manifest_store,
-        &consumed_since_prune,
-        1,
-        10,
-    )
-    .await;
+    consume_manifest_standalone(&manifest, &manifest_store, &consumed_since_prune, 1, 10).await;
 
     assert_eq!(consumed_since_prune.load(Ordering::Relaxed), 0);
 }
@@ -378,7 +375,7 @@ async fn raw_manifest_for_payload(
         promotion_ready: false,
         env_samples: None,
         node_context: None,
-            raw_payload: None,
+        raw_payload: None,
     }
 }
 
@@ -659,7 +656,7 @@ fn stale_manifest_detection_uses_source_receipt_time() {
         promotion_ready: false,
         env_samples: None,
         node_context: None,
-            raw_payload: None,
+        raw_payload: None,
     };
 
     assert!(manifest_is_older_than_buffer_horizon(
@@ -701,7 +698,7 @@ fn stale_manifest_detection_keeps_fresh_manifest_with_old_packet_epoch() {
         promotion_ready: false,
         env_samples: None,
         node_context: None,
-            raw_payload: None,
+        raw_payload: None,
     };
 
     // Even with old packet timestamps, the manifest just arrived and should
@@ -737,7 +734,10 @@ fn merge_pending_manifests_prioritizes_fresh_disk_when_channel_is_busy() {
     let disk = vec![test_manifest_with_created_ns("disk-fresh", 1_000)];
 
     let merged = merge_pending_manifests_for_batch(channel, disk, 4);
-    let merged_ids: Vec<&str> = merged.iter().map(|manifest| manifest.manifest_id.as_str()).collect();
+    let merged_ids: Vec<&str> = merged
+        .iter()
+        .map(|manifest| manifest.manifest_id.as_str())
+        .collect();
 
     assert_eq!(merged.len(), 4);
     assert!(merged_ids.contains(&"disk-fresh"));
@@ -783,6 +783,6 @@ fn test_manifest_with_created_ns(manifest_id: &str, created_ns: u128) -> DspMani
         promotion_ready: false,
         env_samples: None,
         node_context: None,
-            raw_payload: None,
+        raw_payload: None,
     }
 }

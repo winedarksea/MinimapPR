@@ -225,9 +225,9 @@ pub async fn run_io(result: ComputeMathResult) {
             coverage_stats: render_coverage_json.or(localization_coverage_json),
             promotion_ready: false,
             env_samples: None,
-              // Carry node context forward so Python can reconstruct the NodeSpec
-              // without reading the source segment binary (channel-only path has none).
-              node_context: payload.manifest.node_context.clone(),
+            // Carry node context forward so Python can reconstruct the NodeSpec
+            // without reading the source segment binary (channel-only path has none).
+            node_context: payload.manifest.node_context.clone(),
             raw_payload: None,
         };
         if let Err(err) = payload.manifest_store.publish(m.clone()).await {

@@ -31,6 +31,7 @@ Only this record method is allowed to write to disk raw audio.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import time
@@ -198,7 +199,7 @@ class IamfPipeline:
         )
         bed_full_path.unlink(missing_ok=True)
 
-        # ── 6. Resample bed + selected object to OUTPUT_RATE_HZ ───────────────
+        # ── 6. Resample bed + selected object candidates to OUTPUT_RATE_HZ ────
         logger.info("[%s] step 5: resampling to %d Hz", record.session_id[:8], OUTPUT_RATE_HZ)
         if capture_rate_hz != OUTPUT_RATE_HZ:
             bed_clean = await loop.run_in_executor(
@@ -215,15 +216,43 @@ class IamfPipeline:
             bed_clean = bed_clean_capture
             resampled_objects = {tid: object_tracks[tid] for tid in selected_owner_ids}
 
-        bed_path = work_dir / "bed.wav"
-        _write_wav(bed_path, bed_clean, OUTPUT_RATE_HZ)
-
-        # ── 7. IAMF metadata (waypoints scaled to OUTPUT_RATE_HZ domain) ──────
-        logger.info("[%s] step 7: building IAMF metadata", record.session_id[:8])
-        n_output_samples = bed_clean.shape[1]
+        # ── 7. Match exact video duration before metadata and encode ──────────
+        logger.info("[%s] step 6: conforming audio duration", record.session_id[:8])
         output_trajectories = _scale_trajectory_waypoints(
             selected_trajectories, capture_rate_hz, OUTPUT_RATE_HZ
         )
+        original_output_samples = int(bed_clean.shape[1])
+        if record.video_path and record.video_path.exists():
+            target_samples = await _probe_video_target_sample_count(
+                record.video_path, OUTPUT_RATE_HZ
+            )
+            if target_samples is not None and target_samples > 0:
+                bed_clean = await loop.run_in_executor(
+                    None, _conform_channels_to_sample_count, bed_clean, target_samples
+                )
+                resampled_objects = {
+                    tid: await loop.run_in_executor(
+                        None,
+                        _conform_mono_to_sample_count,
+                        mono,
+                        target_samples,
+                    )
+                    for tid, mono in resampled_objects.items()
+                }
+                output_trajectories = _scale_trajectory_sample_offsets(
+                    output_trajectories,
+                    original_output_samples,
+                    target_samples,
+                )
+
+        bed_clean = _normalize_channels_for_encode(bed_clean)
+
+        bed_path = work_dir / "bed.wav"
+        _write_wav(bed_path, bed_clean, OUTPUT_RATE_HZ)
+
+        # ── 8. IAMF metadata (waypoints in final OUTPUT_RATE_HZ domain) ───────
+        logger.info("[%s] step 7: building IAMF metadata", record.session_id[:8])
+        n_output_samples = bed_clean.shape[1]
         output_slot = select_iamf_object_slot(
             output_trajectories,
             resampled_objects,
@@ -232,8 +261,20 @@ class IamfPipeline:
             sample_rate_hz=OUTPUT_RATE_HZ,
         )
         positions_per_unit = output_slot.positions_per_unit if output_slot is not None else []
+        object_path: Path | None = None
+        if output_slot is not None:
+            object_path = work_dir / "object_slot.wav"
+            _write_wav_mono(object_path, output_slot.samples, OUTPUT_RATE_HZ)
+        positions_path = work_dir / "iamf_positions.json"
+        _write_iamf_positions_sidecar(
+            positions_path,
+            positions_per_unit,
+            output_slot,
+            SAMPLES_PER_FRAME,
+            OUTPUT_RATE_HZ,
+        )
 
-        # ── 8. BS.1770-4 loudness measurement at OUTPUT_RATE_HZ ──────────────
+        # ── 9. BS.1770-4 loudness measurement at OUTPUT_RATE_HZ ──────────────
         logger.info("[%s] step 6: loudness measurement", record.session_id[:8])
         bed_loudness = await loop.run_in_executor(
             None, _measure_loudness, bed_clean[0], OUTPUT_RATE_HZ
@@ -245,18 +286,23 @@ class IamfPipeline:
             )
             object_loudness.append(lm)
 
-        # ── 9. Encode IAMF ────────────────────────────────────────────────────
+        # ── 10. Encode IAMF ───────────────────────────────────────────────────
         logger.info("[%s] step 8: IAMF encode", record.session_id[:8])
         object_track_list = [output_slot.samples] if output_slot is not None else []
+        iamf_path = work_dir / "audio.iamf"
         iamf_bytes = await self._encode_iamf(
             bed_clean,
             object_track_list,
             positions_per_unit,
             bed_loudness,
             object_loudness,
+            bed_path=bed_path,
+            object_path=object_path,
+            positions_path=positions_path,
+            output_iamf_path=iamf_path,
         )
-        iamf_path = work_dir / "audio.iamf"
-        iamf_path.write_bytes(iamf_bytes)
+        if iamf_bytes is not None:
+            iamf_path.write_bytes(iamf_bytes)
         record.iamf_path = iamf_path
 
         # AmbiX WAV: 4-channel W/X/Y/Z at OUTPUT_RATE_HZ for fallback mux.
@@ -283,10 +329,11 @@ class IamfPipeline:
 
         # ── 11. Cleanup intermediates ─────────────────────────────────────────
         logger.info("[%s] step 10: cleanup intermediates", record.session_id[:8])
-        for f in [bed_path, ambix_path] + [
+        for f in [bed_path, ambix_path, object_path, positions_path] + [
             work_dir / f"object_{tid}.wav" for tid in object_tracks
         ]:
-            f.unlink(missing_ok=True)
+            if f is not None:
+                f.unlink(missing_ok=True)
 
         # ── 12. Register artifacts ────────────────────────────────────────────
         logger.info("[%s] step 11: registering artifacts", record.session_id[:8])
@@ -592,7 +639,12 @@ class IamfPipeline:
         positions_per_unit: list[dict[int, dict]],
         bed_loudness: LoudnessMeasurement,
         object_loudness: list[LoudnessMeasurement],
-    ) -> bytes:
+        *,
+        bed_path: Path,
+        object_path: Path | None,
+        positions_path: Path,
+        output_iamf_path: Path,
+    ) -> bytes | None:
         """Encode bed + objects as IAMF.
 
         Uses the pure-Python ipcm writer when no sidecar is configured,
@@ -610,26 +662,36 @@ class IamfPipeline:
                 bed_loudness,
                 object_loudness,
             )
-        return await self._encode_iamf_rust(bed, objects, positions_per_unit, bed_loudness, object_loudness)
+        return await self._encode_iamf_rust(
+            bed_path,
+            object_path,
+            positions_path,
+            output_iamf_path,
+            bed_loudness,
+            object_loudness,
+        )
 
     async def _encode_iamf_rust(
         self,
-        bed: NDArray[np.float32],
-        objects: list[NDArray[np.float32]],
-        positions_per_unit: list[dict[int, dict]],
+        bed_path: Path,
+        object_path: Path | None,
+        positions_path: Path,
+        output_iamf_path: Path,
         bed_loudness: LoudnessMeasurement,
         object_loudness: list[LoudnessMeasurement],
-    ) -> bytes:
-        """POST bed + objects to the Rust IAMF encoder.
-
-        NOTE: Audio is serialized as JSON here (same large-payload caveat as
-        _mvdr_beamform). A future Rust endpoint change to accept WAV paths is
-        needed for Pi safety with long recordings.
-        """
+    ) -> bytes | None:
+        """POST file paths to the Rust IAMF Opus encoder."""
         assert self._http is not None
+        if len(object_loudness) > 1:
+            raise ValueError("IAMF base export supports at most one object track")
         payload = {
             "sample_rate_hz": OUTPUT_RATE_HZ,
             "samples_per_frame": SAMPLES_PER_FRAME,
+            "bed_wav_path": str(bed_path),
+            "object_wav_path": str(object_path) if object_path is not None else None,
+            "positions_json_path": str(positions_path),
+            "output_iamf_path": str(output_iamf_path),
+            "bitrate_per_channel_bps": 128_000,
             "bed_loudness": {
                 "integrated_loudness_lufs": bed_loudness.integrated_lufs,
                 "true_peak_dbfs": bed_loudness.true_peak_dbfs,
@@ -641,19 +703,13 @@ class IamfPipeline:
                 }
                 for lm in object_loudness
             ],
-            "bed_channels": [ch.tolist() for ch in bed],
-            "object_tracks": [o.tolist() for o in objects],
-            "positions_per_unit": [
-                {str(obj_id): pos for obj_id, pos in unit.items()}
-                for unit in positions_per_unit
-            ],
         }
         resp = await self._http.post(
             f"{self._sidecar_url}/api/v1/capture/encode/iamf",
             json=payload,
         )
         resp.raise_for_status()
-        return resp.content
+        return resp.content or None
 
     async def _register_artifact(
         self, record: CaptureSessionRecord, sync_diag: dict
@@ -800,6 +856,178 @@ def _scale_trajectory_waypoints(
         )
         for t in trajectories
     ]
+
+
+def _scale_trajectory_sample_offsets(
+    trajectories: list[TrackTrajectory],
+    from_samples: int,
+    to_samples: int,
+) -> list[TrackTrajectory]:
+    if from_samples <= 0 or from_samples == to_samples:
+        return trajectories
+    scale = to_samples / from_samples
+    return [
+        TrackTrajectory(
+            track_id=t.track_id,
+            waypoints=[(max(0, min(to_samples - 1, int(round(s * scale)))), pos) for s, pos in t.waypoints],
+            tqi=t.tqi,
+            label_confidence=t.label_confidence,
+            localization_confidence=t.localization_confidence,
+        )
+        for t in trajectories
+    ]
+
+
+async def _probe_video_target_sample_count(
+    video_path: Path,
+    sample_rate_hz: int,
+) -> int | None:
+    """Return the exact 48 kHz audio sample count implied by the video duration."""
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=duration,duration_ts,time_base,nb_frames,r_frame_rate:format=duration",
+        "-of",
+        "json",
+        str(video_path),
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        logger.warning(
+            "ffprobe duration probe failed (rc=%d): %s",
+            proc.returncode,
+            stderr.decode(errors="replace")[-300:],
+        )
+        return None
+
+    try:
+        data = json.loads(stdout.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        logger.warning("ffprobe returned invalid JSON: %s", exc)
+        return None
+
+    duration_s = _duration_seconds_from_ffprobe_json(data)
+    if duration_s is None or duration_s <= 0.0:
+        return None
+    return max(1, int(round(duration_s * sample_rate_hz)))
+
+
+def _duration_seconds_from_ffprobe_json(data: dict[str, Any]) -> float | None:
+    streams = data.get("streams") or []
+    stream = streams[0] if streams else {}
+
+    duration_ts = stream.get("duration_ts")
+    time_base = stream.get("time_base")
+    if duration_ts is not None and time_base:
+        num, den = _parse_rational(str(time_base))
+        if num > 0 and den > 0:
+            return float(duration_ts) * num / den
+
+    duration = stream.get("duration") or (data.get("format") or {}).get("duration")
+    if duration is not None:
+        try:
+            return float(duration)
+        except (TypeError, ValueError):
+            return None
+
+    nb_frames = stream.get("nb_frames")
+    frame_rate = stream.get("r_frame_rate")
+    if nb_frames is not None and frame_rate:
+        num, den = _parse_rational(str(frame_rate))
+        if num > 0 and den > 0:
+            return float(nb_frames) * den / num
+    return None
+
+
+def _parse_rational(value: str) -> tuple[int, int]:
+    if "/" not in value:
+        try:
+            return int(value), 1
+        except ValueError:
+            return 0, 0
+    left, right = value.split("/", 1)
+    try:
+        return int(left), int(right)
+    except ValueError:
+        return 0, 0
+
+
+def _conform_channels_to_sample_count(
+    channels: NDArray[np.float32],
+    target_samples: int,
+) -> NDArray[np.float32]:
+    """Stretch/squeeze channels to exactly target_samples with polyphase resampling."""
+    target_samples = max(1, int(target_samples))
+    current_samples = int(channels.shape[1])
+    if current_samples == target_samples:
+        return channels.astype(np.float32, copy=False)
+    if abs(current_samples - target_samples) <= 1:
+        return _trim_or_pad_channels(channels, target_samples)
+
+    g = gcd(current_samples, target_samples)
+    up = target_samples // g
+    down = current_samples // g
+    conformed = resample_poly(channels, up, down, axis=1).astype(np.float32)
+    return _trim_or_pad_channels(conformed, target_samples)
+
+
+def _conform_mono_to_sample_count(
+    mono: NDArray[np.float32],
+    target_samples: int,
+) -> NDArray[np.float32]:
+    conformed = _conform_channels_to_sample_count(mono[np.newaxis, :], target_samples)
+    return conformed[0]
+
+
+def _trim_or_pad_channels(
+    channels: NDArray[np.float32],
+    target_samples: int,
+) -> NDArray[np.float32]:
+    target_samples = max(1, int(target_samples))
+    current_samples = int(channels.shape[1])
+    if current_samples > target_samples:
+        return channels[:, :target_samples].astype(np.float32, copy=False)
+    if current_samples < target_samples:
+        pad = target_samples - current_samples
+        return np.pad(channels, ((0, 0), (0, pad))).astype(np.float32)
+    return channels.astype(np.float32, copy=False)
+
+
+def _normalize_channels_for_encode(channels: NDArray[np.float32]) -> NDArray[np.float32]:
+    peak = float(np.max(np.abs(channels))) if channels.size else 0.0
+    if peak <= 0.98:
+        return channels.astype(np.float32, copy=False)
+    return (channels.astype(np.float32) * (0.98 / peak)).astype(np.float32)
+
+
+def _write_iamf_positions_sidecar(
+    path: Path,
+    positions_per_unit: list[dict[int, dict]],
+    slot: IamfObjectSlot | None,
+    samples_per_frame: int,
+    sample_rate_hz: int,
+) -> None:
+    payload = {
+        "sample_rate_hz": sample_rate_hz,
+        "samples_per_frame": samples_per_frame,
+        "positions_per_unit": [
+            {str(obj_id): pos for obj_id, pos in unit.items()}
+            for unit in positions_per_unit
+        ],
+        "unit_track_ids": slot.unit_track_ids if slot is not None else [],
+        "active_ranges": slot.active_ranges if slot is not None else [],
+        "handoff_gap_ranges": slot.handoff_gap_ranges if slot is not None else [],
+    }
+    path.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
 
 
 def _measure_loudness(signal: NDArray, sample_rate_hz: int) -> LoudnessMeasurement:

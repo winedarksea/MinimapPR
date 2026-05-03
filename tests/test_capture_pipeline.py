@@ -39,6 +39,7 @@ from minimappr.core.iamf_pipeline import (
     LoudnessMeasurement,
     TrackTrajectory,
     _measure_loudness,
+    _conform_channels_to_sample_count,
     _subtract_object_slot,
     _subtract_objects,
     _build_positions_per_unit,
@@ -316,7 +317,46 @@ class TestObjectSlotSelector:
         )
         assert slot is not None
         assert len(slot.active_ranges) == 2
+        assert slot.handoff_gap_ranges
         assert slot.positions_per_unit[-1][0]["azimuth_deg"] == pytest.approx(90.0)
+
+    def test_handoff_gap_silences_object_and_omits_position_metadata(self):
+        n = 16_384
+        incumbent = TrackTrajectory(
+            track_id="incumbent",
+            waypoints=[(0, (1.0, 0.0, 0.0)), (n - 1, (1.0, 0.0, 0.0))],
+            tqi=0.7,
+            label_confidence=0.7,
+            localization_confidence=0.7,
+        )
+        challenger = TrackTrajectory(
+            track_id="challenger",
+            waypoints=[(512, (0.0, 1.0, 0.0)), (n - 1, (0.0, 1.0, 0.0))],
+            tqi=1.0,
+            label_confidence=1.0,
+            localization_confidence=1.0,
+        )
+
+        slot = select_iamf_object_slot(
+            [incumbent, challenger],
+            {
+                "incumbent": np.ones(n, dtype=np.float32) * 0.2,
+                "challenger": np.ones(n, dtype=np.float32) * 0.8,
+            },
+            n,
+            512,
+            sample_rate_hz=SAMPLE_RATE,
+            challenger_hold_units=2,
+            handoff_gap_seconds=0.25,
+        )
+
+        assert slot is not None
+        assert slot.handoff_gap_ranges
+        gap_start, gap_end = slot.handoff_gap_ranges[0]
+        assert np.max(np.abs(slot.samples[gap_start:gap_end])) == 0.0
+        for unit_idx in range(gap_start // 512, math.ceil(gap_end / 512)):
+            assert slot.positions_per_unit[unit_idx] == {}
+            assert slot.unit_track_ids[unit_idx] is None
 
     def test_subtract_object_slot_leaves_unselected_source_in_bed(self):
         n = 1024
@@ -353,12 +393,55 @@ class TestObjectSlotSelector:
             ],
             unit_track_ids=["selected", "selected"],
             active_ranges=[(0, n)],
+            handoff_gap_ranges=[],
             score=1.0,
         )
 
         cleaned = _subtract_object_slot(bed_full, slot, 512, n)
 
         assert np.sqrt(np.mean((cleaned - unselected_bed) ** 2)) < 1e-6
+
+    def test_subtract_object_slot_skips_handoff_gap(self):
+        n = 1024
+        selected = _sine(440.0, n / SAMPLE_RATE)
+        bed_full = encode_mono_to_bformat(selected, (1.0, 0.0, 0.0))
+        slot = IamfObjectSlot(
+            slot_id=0,
+            track_id="selected",
+            samples=selected.copy(),
+            positions_per_unit=[
+                {
+                    0: {
+                        "azimuth_deg": 0.0,
+                        "elevation_deg": 0.0,
+                        "distance_norm": 0.2,
+                    }
+                },
+                {},
+            ],
+            unit_track_ids=["selected", None],
+            active_ranges=[(0, 512)],
+            handoff_gap_ranges=[(512, n)],
+            score=1.0,
+        )
+
+        cleaned = _subtract_object_slot(bed_full, slot, 512, n)
+
+        assert np.sqrt(np.mean(cleaned[:, :512] ** 2)) < 1e-6
+        assert np.sqrt(np.mean((cleaned[:, 512:] - bed_full[:, 512:]) ** 2)) < 1e-6
+
+
+class TestDurationConformance:
+    def test_conform_channels_to_sample_count_exact_target(self):
+        channels = np.stack([
+            _sine(440.0, 0.2),
+            _sine(550.0, 0.2),
+        ])
+
+        conformed = _conform_channels_to_sample_count(channels, channels.shape[1] + 37)
+
+        assert conformed.shape == (2, channels.shape[1] + 37)
+        assert np.all(np.isfinite(conformed))
 
 
 # ── WAV I/O helpers ───────────────────────────────────────────────────────────

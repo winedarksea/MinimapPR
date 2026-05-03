@@ -310,7 +310,8 @@ impl DspWorker {
         } else {
             Vec::new()
         };
-        let pending = merge_pending_manifests_for_batch(channel_manifests, disk_manifests, batch_limit);
+        let pending =
+            merge_pending_manifests_for_batch(channel_manifests, disk_manifests, batch_limit);
 
         {
             let mut st = self.state.write().await;
@@ -348,8 +349,7 @@ impl DspWorker {
         let now_ns = system_now_ns();
 
         let Some(first_handle) = manifest.source_handles.first() else {
-            self
-                .mark_source_manifest_consumed_if_persisted(&manifest)
+            self.mark_source_manifest_consumed_if_persisted(&manifest)
                 .await;
             return None;
         };
@@ -410,15 +410,13 @@ impl DspWorker {
                     error = %err,
                     "DSP worker failed to decode ingest audio; consuming manifest"
                 );
-                self
-                    .mark_source_manifest_consumed_if_persisted(&manifest)
+                self.mark_source_manifest_consumed_if_persisted(&manifest)
                     .await;
                 return None;
             }
         };
         if decoded.channels.is_empty() {
-            self
-                .mark_source_manifest_consumed_if_persisted(&manifest)
+            self.mark_source_manifest_consumed_if_persisted(&manifest)
                 .await;
             return None;
         }
@@ -469,11 +467,8 @@ impl DspWorker {
         let skew_ns = (start_time_ns - now_ns as i128).unsigned_abs();
         let max_skew_ns =
             (self.config.max_trusted_node_clock_skew_seconds * 1_000_000_000.0).round() as u128;
-        let buffer_uses_receipt_time = should_use_receipt_time_alignment(
-            node_timestamp_is_available,
-            skew_ns,
-            max_skew_ns,
-        );
+        let buffer_uses_receipt_time =
+            should_use_receipt_time_alignment(node_timestamp_is_available, skew_ns, max_skew_ns);
         let (buffer_start_time_ns, buffer_end_time_ns) = if buffer_uses_receipt_time {
             let anchor_ns = first_handle.tor_ns.unwrap_or(now_ns as u64) as i128;
             let start_ns = anchor_ns.saturating_sub(render_duration_ns).max(1);
@@ -567,7 +562,9 @@ impl DspWorker {
 
         let (audio_end_ns, end_ns, channel_states) = {
             let buffers = self.buffers.entry(stream_key.clone()).or_insert_with(|| {
-                core::array::from_fn(|_| SensorStreamBuffer::new(sr, self.config.max_buffer_seconds))
+                core::array::from_fn(|_| {
+                    SensorStreamBuffer::new(sr, self.config.max_buffer_seconds)
+                })
             });
             let existing_sample_timeline_start_time_ns =
                 if !node_timestamp_is_available && !buffer_uses_receipt_time {
@@ -766,7 +763,10 @@ impl DspWorker {
         if !source_manifest_was_persisted(manifest) {
             return;
         }
-        let _ = self.manifest_store.mark_consumed(&manifest.manifest_id).await;
+        let _ = self
+            .manifest_store
+            .mark_consumed(&manifest.manifest_id)
+            .await;
     }
 
     async fn flush_deferred_source_manifest_consumptions(&mut self) {

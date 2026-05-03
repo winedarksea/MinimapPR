@@ -9,6 +9,7 @@ mod dsp_worker;
 mod env_payload;
 mod envelope;
 mod gcc_phat;
+#[allow(dead_code)]
 mod iamf_writer;
 mod ingest_backend;
 mod journal_reader;
@@ -21,7 +22,7 @@ mod storage_class;
 mod stream_range_lease;
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use actors::environment::EnvironmentCache;
 use axum::{
@@ -36,10 +37,6 @@ use clap::Parser;
 use derived_cache::DerivedCache;
 use dsp_worker::{DspWorker, DspWorkerConfig, SharedDspState};
 use env_payload::{EnvIngestPayload, EnvIngestResponse};
-use iamf_writer::{
-    split_bed_into_frames, split_object_into_frames, IamfScene, IamfWriter, LoudnessInfo,
-    ObjectPosition, ObjectPositions,
-};
 use ingest_backend::{
     BodyTooLargeError, ClientDisconnectError, IngestBackend, IngestStorageMode,
     InvalidIngestEnvelopeError, JournalCapacityExceededError, JournalRuntimeConfig,
@@ -49,7 +46,10 @@ use render_mvdr::{render_mvdr, MvdrRenderRequest, TrajectoryWaypoint};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use stream_range_lease::{StreamRangeLeaseRequest, StreamRangeLeaseStore};
-use tokio::sync::{mpsc, RwLock};
+use tokio::{
+    process::Command,
+    sync::{mpsc, RwLock},
+};
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
@@ -329,8 +329,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Unbounded channel: the ingest path must never drop audio frames due to channel
     // backpressure. Memory growth is bounded by the DSP worker's buffer window (~30s).
     // raw_manifest_channel_capacity is retained as a soft-cap warning threshold only.
-    let (raw_manifest_tx, raw_manifest_rx) =
-        mpsc::unbounded_channel::<manifests::DspManifest>();
+    let (raw_manifest_tx, raw_manifest_rx) = mpsc::unbounded_channel::<manifests::DspManifest>();
     let _ = raw_manifest_channel_capacity; // used as soft-cap threshold in DSP worker
     let journal_runtime_config = JournalRuntimeConfig {
         consumer_name: args.consumer_name.clone(),
@@ -591,7 +590,7 @@ async fn ingest_env(
                 promotion_ready: false,
                 env_samples: Some(samples_value),
                 node_context: None,
-            raw_payload: None,
+                raw_payload: None,
             };
             if let Err(err) = manifest_store.publish(manifest).await {
                 warn!(error = %err, "failed to publish env_sample_append manifest");
@@ -1008,101 +1007,209 @@ struct IamfEncodeRequest {
     samples_per_frame: u32,
     bed_loudness: LoudnessInfoDto,
     object_loudness: Vec<LoudnessInfoDto>,
-    /// 4-channel FOA bed, channels-first, float32.
-    bed_channels: [Vec<f32>; 4],
-    /// Mono object tracks, each float32.
-    object_tracks: Vec<Vec<f32>>,
-    /// Per-object positions per temporal unit: outer index = TU, inner = object_id → pos.
-    positions_per_unit: Vec<std::collections::HashMap<u32, ObjectPositionDto>>,
+    bed_wav_path: PathBuf,
+    object_wav_path: Option<PathBuf>,
+    positions_json_path: PathBuf,
+    output_iamf_path: PathBuf,
+    bitrate_per_channel_bps: Option<u32>,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 struct LoudnessInfoDto {
     integrated_loudness_lufs: f32,
     true_peak_dbfs: f32,
 }
 
-#[derive(Deserialize, Clone)]
-struct ObjectPositionDto {
-    azimuth_deg: f32,
-    elevation_deg: f32,
-    distance_norm: Option<f32>,
-    distance_m: Option<f32>,
-    end_azimuth_deg: Option<f32>,
-    end_elevation_deg: Option<f32>,
-    end_distance_norm: Option<f32>,
+#[derive(Debug)]
+struct IamfFfmpegPlan {
+    args: Vec<String>,
 }
 
 async fn encode_iamf(Json(request): Json<IamfEncodeRequest>) -> Response {
-    let spf = request.samples_per_frame as usize;
-    let scene = IamfScene {
-        sample_rate_hz: request.sample_rate_hz,
-        samples_per_frame: request.samples_per_frame,
-        bed_loudness: LoudnessInfo {
-            integrated_loudness_lufs: request.bed_loudness.integrated_loudness_lufs,
-            true_peak_dbfs: request.bed_loudness.true_peak_dbfs,
-        },
-        object_loudness: request
-            .object_loudness
-            .iter()
-            .map(|l| LoudnessInfo {
-                integrated_loudness_lufs: l.integrated_loudness_lufs,
-                true_peak_dbfs: l.true_peak_dbfs,
-            })
-            .collect(),
-    };
-
-    let n_objects = request.object_tracks.len();
-    let writer = IamfWriter::new(scene, n_objects);
-
-    let mut bitstream = writer.write_descriptor_obus();
-
-    let bed_frame_chunks = split_bed_into_frames(&request.bed_channels, spf);
-    let object_frame_chunks: Vec<Vec<Vec<u8>>> = request
-        .object_tracks
-        .iter()
-        .map(|track| split_object_into_frames(track, spf))
-        .collect();
-
-    let n_frames = bed_frame_chunks[0].len();
-    #[allow(clippy::needless_range_loop)]
-    for fi in 0..n_frames {
-        let bed_frames: [Vec<u8>; 4] = std::array::from_fn(|ch| bed_frame_chunks[ch][fi].clone());
-        let object_frames: Vec<Vec<u8>> = object_frame_chunks
-            .iter()
-            .map(|chunks| chunks.get(fi).cloned().unwrap_or_default())
-            .collect();
-
-        let positions: ObjectPositions = request
-            .positions_per_unit
-            .get(fi)
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(id, p)| {
-                (
-                    id,
-                    ObjectPosition {
-                        azimuth_deg: p.azimuth_deg,
-                        elevation_deg: p.elevation_deg,
-                        distance_norm: p.distance_norm.or(p.distance_m).unwrap_or(0.0),
-                        end_azimuth_deg: p.end_azimuth_deg,
-                        end_elevation_deg: p.end_elevation_deg,
-                        end_distance_norm: p.end_distance_norm,
-                    },
-                )
-            })
-            .collect();
-
-        bitstream.extend(writer.write_temporal_unit(&bed_frames, &object_frames, &positions));
+    if let Err(error) = validate_iamf_encode_request(&request).await {
+        return (StatusCode::BAD_REQUEST, error).into_response();
     }
 
-    (
-        StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
-        bitstream,
-    )
-        .into_response()
+    match ffmpeg_supports_iamf_stream_groups().await {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::FAILED_DEPENDENCY,
+                "ffmpeg does not expose IAMF -stream_group support",
+            )
+                .into_response();
+        }
+        Err(error) => {
+            return (
+                StatusCode::FAILED_DEPENDENCY,
+                format!("failed to inspect ffmpeg IAMF support: {error}"),
+            )
+                .into_response();
+        }
+    }
+
+    let plan = build_iamf_ffmpeg_plan(&request);
+    let output = Command::new("ffmpeg").args(&plan.args).output().await;
+    match output {
+        Ok(output) if output.status.success() => {
+            match tokio::fs::read(&request.output_iamf_path).await {
+                Ok(bytes) => (
+                    StatusCode::OK,
+                    [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+                    bytes,
+                )
+                    .into_response(),
+                Err(error) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("ffmpeg completed but IAMF output could not be read: {error}"),
+                )
+                    .into_response(),
+            }
+        }
+        Ok(output) => (
+            StatusCode::BAD_GATEWAY,
+            format!(
+                "ffmpeg IAMF encode failed (status={}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+                    .chars()
+                    .rev()
+                    .take(1200)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect::<String>()
+            ),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::FAILED_DEPENDENCY,
+            format!("failed to start ffmpeg for IAMF encode: {error}"),
+        )
+            .into_response(),
+    }
+}
+
+async fn validate_iamf_encode_request(request: &IamfEncodeRequest) -> Result<(), String> {
+    if request.sample_rate_hz != 48_000 {
+        return Err("IAMF YouTube export expects 48 kHz audio".to_string());
+    }
+    if request.samples_per_frame == 0 {
+        return Err("samples_per_frame must be non-zero".to_string());
+    }
+    if !request.bed_loudness.integrated_loudness_lufs.is_finite()
+        || !request.bed_loudness.true_peak_dbfs.is_finite()
+    {
+        return Err("bed_loudness must contain finite values".to_string());
+    }
+    if request.object_loudness.len() > 1 {
+        return Err("IAMF base export supports at most one object audio element".to_string());
+    }
+    if request.object_loudness.iter().any(|loudness| {
+        !loudness.integrated_loudness_lufs.is_finite() || !loudness.true_peak_dbfs.is_finite()
+    }) {
+        return Err("object_loudness must contain finite values".to_string());
+    }
+    ensure_file_exists(&request.bed_wav_path, "bed_wav_path").await?;
+    ensure_file_exists(&request.positions_json_path, "positions_json_path").await?;
+    if let Some(path) = &request.object_wav_path {
+        ensure_file_exists(path, "object_wav_path").await?;
+        if request.object_loudness.len() != 1 {
+            return Err(
+                "object_loudness must contain exactly one entry when object_wav_path is set"
+                    .to_string(),
+            );
+        }
+    } else if !request.object_loudness.is_empty() {
+        return Err("object_loudness must be empty when object_wav_path is absent".to_string());
+    }
+    Ok(())
+}
+
+async fn ensure_file_exists(path: &Path, field_name: &str) -> Result<(), String> {
+    match tokio::fs::metadata(path).await {
+        Ok(metadata) if metadata.is_file() => Ok(()),
+        Ok(_) => Err(format!(
+            "{field_name} is not a regular file: {}",
+            path.display()
+        )),
+        Err(error) => Err(format!(
+            "{field_name} does not exist or is unreadable: {} ({error})",
+            path.display()
+        )),
+    }
+}
+
+async fn ffmpeg_supports_iamf_stream_groups() -> Result<bool, std::io::Error> {
+    let output = Command::new("ffmpeg")
+        .args(["-hide_banner", "-h", "full"])
+        .output()
+        .await?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Ok(stdout.contains("-stream_group") || stderr.contains("-stream_group"))
+}
+
+fn build_iamf_ffmpeg_plan(request: &IamfEncodeRequest) -> IamfFfmpegPlan {
+    let bitrate_per_channel = request
+        .bitrate_per_channel_bps
+        .unwrap_or(128_000)
+        .max(32_000);
+    let mut args = vec![
+        "-y".to_string(),
+        "-i".to_string(),
+        request.bed_wav_path.display().to_string(),
+    ];
+
+    if let Some(object_path) = &request.object_wav_path {
+        args.push("-i".to_string());
+        args.push(object_path.display().to_string());
+    }
+
+    args.extend([
+        "-filter_complex".to_string(),
+        "[0:a]pan=mono|c0=c0[bed0];[0:a]pan=mono|c0=c1[bed1];[0:a]pan=mono|c0=c2[bed2];[0:a]pan=mono|c0=c3[bed3]".to_string(),
+        "-map".to_string(),
+        "[bed0]".to_string(),
+        "-map".to_string(),
+        "[bed1]".to_string(),
+        "-map".to_string(),
+        "[bed2]".to_string(),
+        "-map".to_string(),
+        "[bed3]".to_string(),
+    ]);
+
+    if request.object_wav_path.is_some() {
+        args.extend(["-map".to_string(), "1:a:0".to_string()]);
+    }
+
+    args.extend([
+        "-c:a".to_string(),
+        "libopus".to_string(),
+        "-ar".to_string(),
+        request.sample_rate_hz.to_string(),
+        "-b:a".to_string(),
+        bitrate_per_channel.to_string(),
+        "-stream_group".to_string(),
+        "type=iamf_audio_element:id=1:st=0:st=1:st=2:st=3,layer=ch_layout=ambisonic 1".to_string(),
+    ]);
+
+    if request.object_wav_path.is_some() {
+        args.extend([
+            "-stream_group".to_string(),
+            "type=iamf_audio_element:id=2:st=4,layer=ch_layout=mono".to_string(),
+            "-stream_group".to_string(),
+            "type=iamf_mix_presentation:id=3:stg=0:stg=1:annotations=en-us=MinimapPR IAMF,submix=parameter_id=100:parameter_rate=48000|element=stg=0:parameter_id=101:annotations=en-us=Ambisonics|element=stg=1:parameter_id=102:annotations=en-us=Bird Object|layout=sound_system=binaural".to_string(),
+        ]);
+    } else {
+        args.extend([
+            "-stream_group".to_string(),
+            "type=iamf_mix_presentation:id=3:stg=0:annotations=en-us=MinimapPR IAMF,submix=parameter_id=100:parameter_rate=48000|element=stg=0:parameter_id=101:annotations=en-us=Ambisonics|layout=sound_system=binaural".to_string(),
+        ]);
+    }
+
+    args.push(request.output_iamf_path.display().to_string());
+    IamfFfmpegPlan { args }
 }
 
 #[cfg(test)]
@@ -1134,6 +1241,87 @@ mod tests {
             raw_manifest_tx: None,
             skip_binary_writes: false,
         }
+    }
+
+    fn iamf_test_request(tmp: &tempfile::TempDir, with_object: bool) -> IamfEncodeRequest {
+        let bed = tmp.path().join("bed.wav");
+        let positions = tmp.path().join("positions.json");
+        let output = tmp.path().join("audio.iamf");
+        std::fs::write(&bed, b"wav").unwrap();
+        std::fs::write(&positions, b"{\"positions_per_unit\":[]}").unwrap();
+        let object = if with_object {
+            let path = tmp.path().join("object.wav");
+            std::fs::write(&path, b"wav").unwrap();
+            Some(path)
+        } else {
+            None
+        };
+        IamfEncodeRequest {
+            sample_rate_hz: 48_000,
+            samples_per_frame: 512,
+            bed_loudness: LoudnessInfoDto {
+                integrated_loudness_lufs: -20.0,
+                true_peak_dbfs: -3.0,
+            },
+            object_loudness: if with_object {
+                vec![LoudnessInfoDto {
+                    integrated_loudness_lufs: -18.0,
+                    true_peak_dbfs: -4.0,
+                }]
+            } else {
+                vec![]
+            },
+            bed_wav_path: bed,
+            object_wav_path: object,
+            positions_json_path: positions,
+            output_iamf_path: output,
+            bitrate_per_channel_bps: Some(128_000),
+        }
+    }
+
+    #[tokio::test]
+    async fn iamf_path_request_rejects_more_than_one_object() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut request = iamf_test_request(&tmp, true);
+        request.object_loudness.push(LoudnessInfoDto {
+            integrated_loudness_lufs: -18.0,
+            true_peak_dbfs: -4.0,
+        });
+
+        let error = validate_iamf_encode_request(&request).await.unwrap_err();
+
+        assert!(error.contains("at most one object"));
+    }
+
+    #[test]
+    fn iamf_ffmpeg_plan_uses_opus_and_stream_groups() {
+        let tmp = tempfile::tempdir().unwrap();
+        let request = iamf_test_request(&tmp, true);
+
+        let plan = build_iamf_ffmpeg_plan(&request);
+        let joined = plan.args.join(" ");
+
+        assert!(joined.contains("libopus"));
+        assert!(joined.contains("48000"));
+        assert!(joined.contains("-stream_group"));
+        assert!(joined.contains("type=iamf_audio_element:id=1"));
+        assert!(joined.contains("type=iamf_audio_element:id=2"));
+        assert!(joined.contains("type=iamf_mix_presentation"));
+        assert!(joined.contains("128000"));
+        assert!(joined.contains("pan=mono"));
+    }
+
+    #[test]
+    fn iamf_ffmpeg_plan_omits_object_group_without_object() {
+        let tmp = tempfile::tempdir().unwrap();
+        let request = iamf_test_request(&tmp, false);
+
+        let plan = build_iamf_ffmpeg_plan(&request);
+        let joined = plan.args.join(" ");
+
+        assert!(joined.contains("type=iamf_audio_element:id=1"));
+        assert!(!joined.contains("type=iamf_audio_element:id=2"));
+        assert!(joined.contains("type=iamf_mix_presentation"));
     }
 
     fn journal_test_payload() -> String {

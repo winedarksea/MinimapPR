@@ -564,9 +564,7 @@ impl SegmentJournalBackend {
         // Channel-only mode is allowed only when binary writes are explicitly
         // disabled. In normal journal mode (skip_binary_writes=false), always
         // run the full segment/index append path below.
-        if self.runtime_config.skip_binary_writes
-            && self.runtime_config.raw_manifest_tx.is_some()
-        {
+        if self.runtime_config.skip_binary_writes && self.runtime_config.raw_manifest_tx.is_some() {
             return self
                 .enqueue_channel_only(
                     endpoint,
@@ -581,7 +579,15 @@ impl SegmentJournalBackend {
         // All mutable state (sequence numbers, size accounting, segment rotation) is
         // updated under the lock. File I/O is then performed after the lock is released
         // so concurrent requests from different streams never block each other.
-        let (journal_id, entry, index_bytes, index_path, index_write_offset, metadata_path, updated_header) = {
+        let (
+            journal_id,
+            entry,
+            index_bytes,
+            index_path,
+            index_write_offset,
+            metadata_path,
+            updated_header,
+        ) = {
             let mut state = self.state.lock().await;
             let journal_epoch = state.journal_epoch;
             self.ensure_capacity_for_append(&mut state, u64::try_from(body_bytes.len())?)
@@ -683,7 +689,15 @@ impl SegmentJournalBackend {
             let _ = stream_state;
             state.total_journal_bytes += appended_length_bytes;
 
-            (journal_id, entry, index_bytes, index_path, index_write_offset, metadata_path, updated_header)
+            (
+                journal_id,
+                entry,
+                index_bytes,
+                index_path,
+                index_write_offset,
+                metadata_path,
+                updated_header,
+            )
             // Lock released here.
         };
 
@@ -898,7 +912,8 @@ impl SegmentJournalBackend {
         {
             let now_ns = now_ns()?;
             let active_index = self.lease_store.active_index(now_ns).await?;
-            self.refresh_segment_pin_counts(&active_index, now_ns).await?;
+            self.refresh_segment_pin_counts(&active_index, now_ns)
+                .await?;
         }
 
         while state
@@ -2010,7 +2025,10 @@ mod tests {
         );
         assert!(entry.payload_length_bytes > 0);
         assert!(entry.segment_path.exists());
-        let segment_bytes = tokio::fs::metadata(&entry.segment_path).await.unwrap().len();
+        let segment_bytes = tokio::fs::metadata(&entry.segment_path)
+            .await
+            .unwrap()
+            .len();
         assert!(segment_bytes >= entry.payload_offset_bytes + entry.payload_length_bytes);
     }
 
@@ -3278,7 +3296,7 @@ mod tests {
                 promotion_ready: false,
                 env_samples: None,
                 node_context: None,
-            raw_payload: None,
+                raw_payload: None,
             })
             .await
             .unwrap();
@@ -3404,7 +3422,7 @@ mod tests {
                     promotion_ready: false,
                     env_samples: None,
                     node_context: None,
-            raw_payload: None,
+                    raw_payload: None,
                 })
                 .await
                 .unwrap();
@@ -3448,7 +3466,7 @@ mod tests {
                     promotion_ready: false,
                     env_samples: None,
                     node_context: None,
-            raw_payload: None,
+                    raw_payload: None,
                 })
                 .await
                 .unwrap();
