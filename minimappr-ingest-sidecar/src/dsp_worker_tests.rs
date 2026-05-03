@@ -595,3 +595,56 @@ fn classifier_render_interval_does_not_scale_with_backlog() {
     assert_eq!(classifier_render_min_interval_ns(1.0, 0), expected);
     assert_eq!(classifier_render_min_interval_ns(1.0, 10_000), expected);
 }
+
+#[test]
+fn merge_pending_manifests_prioritizes_fresh_disk_when_channel_is_busy() {
+    let channel = vec![
+        test_manifest_with_created_ns("channel-old-1", 1),
+        test_manifest_with_created_ns("channel-old-2", 2),
+        test_manifest_with_created_ns("channel-old-3", 3),
+        test_manifest_with_created_ns("channel-old-4", 4),
+    ];
+    let disk = vec![test_manifest_with_created_ns("disk-fresh", 1_000)];
+
+    let merged = merge_pending_manifests_for_batch(channel, disk, 4);
+    let merged_ids: Vec<&str> = merged.iter().map(|m| m.manifest_id.as_str()).collect();
+
+    assert_eq!(merged.len(), 4);
+    assert!(merged_ids.contains(&"disk-fresh"));
+    assert_eq!(merged[0].manifest_id, "disk-fresh");
+}
+
+#[test]
+fn merge_pending_manifests_deduplicates_by_manifest_id() {
+    let channel = vec![test_manifest_with_created_ns("shared", 10)];
+    let disk = vec![
+        test_manifest_with_created_ns("shared", 20),
+        test_manifest_with_created_ns("disk-other", 15),
+    ];
+
+    let merged = merge_pending_manifests_for_batch(channel, disk, 10);
+    let shared_count = merged
+        .iter()
+        .filter(|manifest| manifest.manifest_id == "shared")
+        .count();
+
+    assert_eq!(shared_count, 1);
+    assert_eq!(merged.len(), 2);
+}
+
+fn test_manifest_with_created_ns(manifest_id: &str, created_ns: u128) -> DspManifest {
+    DspManifest {
+        manifest_id: manifest_id.to_string(),
+        manifest_type: "raw_journal_append".to_string(),
+        created_ns,
+        source_handles: vec![],
+        derived_handle: None,
+        localization: None,
+        classifier_render: None,
+        birdnet: None,
+        coverage_stats: None,
+        promotion_ready: false,
+        env_samples: None,
+        raw_payload: None,
+    }
+}

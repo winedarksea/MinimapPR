@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -185,6 +185,7 @@ pub struct DspWorker {
     last_localization_ns_by_stream: HashMap<String, u128>,
     last_trigger_ns_by_stream: HashMap<String, u128>,
     consumed_manifests_since_prune: Arc<AtomicU64>,
+    deferred_source_manifest_ids: Vec<String>,
     env_cache: Option<EnvironmentCache>,
 }
 
@@ -217,6 +218,7 @@ impl DspWorker {
             last_localization_ns_by_stream: HashMap::new(),
             last_trigger_ns_by_stream: HashMap::new(),
             consumed_manifests_since_prune: Arc::new(AtomicU64::new(0)),
+            deferred_source_manifest_ids: Vec::new(),
             env_cache: None,
         }
     }
@@ -271,13 +273,15 @@ impl DspWorker {
 
     async fn process_pending(&mut self) {
         let batch_limit = self.config.pending_manifest_batch_size.max(1);
+        let channel_limit = (batch_limit / 2).max(1);
 
-        // Fast path: drain the in-process channel before touching the filesystem.
+        // Drain a bounded amount from the in-process channel, then also query disk
+        // so fresh spillover manifests are not starved behind channel backlog.
         let channel_manifests: Vec<DspManifest> = if let Some(rx) = &mut self.raw_manifest_rx {
             let mut v = Vec::new();
             while let Ok(m) = rx.try_recv() {
                 v.push(m);
-                if v.len() >= batch_limit {
+                if v.len() >= channel_limit {
                     break;
                 }
             }
@@ -286,21 +290,18 @@ impl DspWorker {
             Vec::new()
         };
 
-        let pending = if !channel_manifests.is_empty() {
-            channel_manifests
-        } else {
-            match self
-                .manifest_store
-                .query_pending_limited("raw_journal_append", batch_limit)
-                .await
-            {
-                Ok(m) => m,
-                Err(err) => {
-                    warn!(error = %err, "DSP worker failed to query pending manifests");
-                    return;
-                }
+        let disk_manifests = match self
+            .manifest_store
+            .query_pending_limited("raw_journal_append", batch_limit)
+            .await
+        {
+            Ok(m) => m,
+            Err(err) => {
+                warn!(error = %err, "DSP worker failed to query pending manifests");
+                return;
             }
         };
+        let pending = merge_pending_manifests_for_batch(channel_manifests, disk_manifests, batch_limit);
 
         {
             let mut st = self.state.write().await;
@@ -325,6 +326,8 @@ impl DspWorker {
                 });
             }
         }
+
+        self.flush_deferred_source_manifest_consumptions().await;
     }
 
     async fn ingest_one(
@@ -362,7 +365,7 @@ impl DspWorker {
                         error = %err,
                         "DSP worker failed to read journal payload; consuming unreadable source manifest"
                     );
-                    self.consume_source_manifest(&manifest).await;
+                    self.defer_source_manifest_consumption(&manifest);
                     return None;
                 }
                 Err(join_err) => {
@@ -372,7 +375,7 @@ impl DspWorker {
                         error = %join_err,
                         "DSP worker spawn_blocking panicked reading journal payload"
                     );
-                    self.consume_source_manifest(&manifest).await;
+                    self.defer_source_manifest_consumption(&manifest);
                     return None;
                 }
             }
@@ -469,7 +472,7 @@ impl DspWorker {
                 manifest_id = %manifest.manifest_id,
                 "DSP worker skipped stale source manifest to protect live buffer continuity"
             );
-            self.consume_source_manifest(&manifest).await;
+            self.defer_source_manifest_consumption(&manifest);
             let mut st = self.state.write().await;
             st.total_stale_manifest_skips += 1;
             st.last_processed_ns = Some(now_ns);
@@ -488,7 +491,7 @@ impl DspWorker {
 
         if decoded.channels.len() < 4 {
             if !self.config.birdnet_hybrid_render_enabled {
-                self.consume_source_manifest(&manifest).await;
+                self.defer_source_manifest_consumption(&manifest);
                 return None;
             }
             if !self.should_publish_classifier_render(
@@ -496,7 +499,7 @@ impl DspWorker {
                 audio_end_ns,
                 pending_backlog_depth,
             ) {
-                self.consume_source_manifest(&manifest).await;
+                self.defer_source_manifest_consumption(&manifest);
                 return None;
             }
             // Dispatch to Rayon so disk/DB I/O doesn't block the ingest loop.
@@ -569,7 +572,7 @@ impl DspWorker {
                     error = %err,
                     "DSP worker failed to append decoded audio; consuming malformed source manifest"
                 );
-                self.consume_source_manifest(&manifest).await;
+                self.defer_source_manifest_consumption(&manifest);
                 return None;
             }
         }
@@ -591,7 +594,7 @@ impl DspWorker {
                 "DSP worker: no localization coverage window after buffering; publishing omni fallback render"
             );
             if !self.config.birdnet_hybrid_render_enabled {
-                self.consume_source_manifest(&manifest).await;
+                self.defer_source_manifest_consumption(&manifest);
                 return None;
             }
             let fallback_render_windows =
@@ -611,7 +614,7 @@ impl DspWorker {
                 audio_end_ns,
                 pending_backlog_depth,
             ) {
-                self.consume_source_manifest(&manifest).await;
+                self.defer_source_manifest_consumption(&manifest);
                 return None;
             }
             // Dispatch to Rayon so disk/DB I/O doesn't block the ingest loop.
@@ -657,7 +660,7 @@ impl DspWorker {
                 pending_backlog_depth,
             )
         {
-            self.consume_source_manifest(&manifest).await;
+            self.defer_source_manifest_consumption(&manifest);
             return None;
         }
 
@@ -700,17 +703,57 @@ impl DspWorker {
             let result = crate::actors::dsp_compute::run_math(payload);
             crate::actors::dsp_compute::run_io(result).await;
         }
+        self.flush_deferred_source_manifest_consumptions().await;
     }
 
-    async fn consume_source_manifest(&mut self, manifest: &DspManifest) {
-        consume_manifest_standalone(
-            manifest,
-            &self.manifest_store,
-            &self.consumed_manifests_since_prune,
-            self.config.consumed_manifest_prune_interval.max(1),
-            self.config.consumed_manifest_retention_max_files,
-        )
-        .await;
+    fn defer_source_manifest_consumption(&mut self, manifest: &DspManifest) {
+        self.deferred_source_manifest_ids
+            .push(manifest.manifest_id.clone());
+    }
+
+    async fn flush_deferred_source_manifest_consumptions(&mut self) {
+        if self.deferred_source_manifest_ids.is_empty() {
+            return;
+        }
+        let manifest_ids = std::mem::take(&mut self.deferred_source_manifest_ids);
+        let mut unique_manifest_ids = HashSet::with_capacity(manifest_ids.len());
+        let mut successful_consumes = 0_u64;
+        for manifest_id in manifest_ids {
+            if !unique_manifest_ids.insert(manifest_id.clone()) {
+                continue;
+            }
+            match self.manifest_store.mark_consumed(&manifest_id).await {
+                Ok(()) => {
+                    successful_consumes += 1;
+                }
+                Err(err) => {
+                    warn!(
+                        manifest_id = %manifest_id,
+                        error = %err,
+                        "DSP worker failed to mark manifest consumed"
+                    );
+                }
+            }
+        }
+
+        if successful_consumes == 0 {
+            return;
+        }
+
+        let prune_interval = self.config.consumed_manifest_prune_interval.max(1);
+        let previous = self
+            .consumed_manifests_since_prune
+            .fetch_add(successful_consumes, Ordering::Relaxed);
+        let current = previous.saturating_add(successful_consumes);
+        if previous / prune_interval < current / prune_interval {
+            let store = self.manifest_store.clone();
+            let retention_max_files = self.config.consumed_manifest_retention_max_files;
+            tokio::spawn(async move {
+                if let Err(error) = store.prune_consumed_manifests(retention_max_files).await {
+                    warn!(error = %error, "DSP worker failed to prune consumed manifests");
+                }
+            });
+        }
     }
 
     async fn note_failures(&self, count: u64) {
@@ -854,6 +897,26 @@ pub(crate) async fn dispatch_classification_result_standalone(
         warn!(error = %err, "failed to publish classifier render manifest");
     }
     Some(pending)
+}
+
+fn merge_pending_manifests_for_batch(
+    channel_manifests: Vec<DspManifest>,
+    disk_manifests: Vec<DspManifest>,
+    batch_limit: usize,
+) -> Vec<DspManifest> {
+    let mut dedupe_manifest_ids = HashSet::new();
+    let mut merged = Vec::with_capacity(channel_manifests.len() + disk_manifests.len());
+    for manifest in channel_manifests.into_iter().chain(disk_manifests) {
+        if dedupe_manifest_ids.insert(manifest.manifest_id.clone()) {
+            merged.push(manifest);
+        }
+    }
+
+    // Prioritize freshest manifests so live audio stays current even while a
+    // backlog exists in either source.
+    merged.sort_unstable_by(|left, right| right.created_ns.cmp(&left.created_ns));
+    merged.truncate(batch_limit);
+    merged
 }
 
 pub(crate) async fn consume_manifest_standalone(

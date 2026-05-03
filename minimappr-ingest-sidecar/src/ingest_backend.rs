@@ -550,96 +550,30 @@ impl SegmentJournalBackend {
             .map_err(InvalidIngestEnvelopeError::new)
             .map_err(|error| -> BoxedError { Box::new(error) })?;
 
-        let mut state = self.state.lock().await;
-        let active_leases = self.lease_store.active_index(received_ns).await?;
-        self.refresh_segment_pin_counts(&active_leases, received_ns)
-            .await?;
-        let journal_epoch = state.journal_epoch;
-        self.ensure_capacity_for_append(&mut state, u64::try_from(body_bytes.len())?)
-            .await?;
-        self.ensure_open_segment(&mut state, &capture_envelope, body_bytes.len() as u64)
-            .await?;
+        let (journal_id, entry) = {
+            let mut state = self.state.lock().await;
+            let journal_epoch = state.journal_epoch;
+            self.ensure_capacity_for_append(&mut state, u64::try_from(body_bytes.len())?)
+                .await?;
+            self.ensure_open_segment(&mut state, &capture_envelope, body_bytes.len() as u64)
+                .await?;
 
-        let stream_state = state
-            .streams
-            .get_mut(&capture_envelope.stream_key)
-            .expect("stream state must exist after segment initialization");
-        if stream_state.next_sequence == 0 {
-            stream_state.next_sequence = 1;
-        }
+            let stream_state = state
+                .streams
+                .get_mut(&capture_envelope.stream_key)
+                .expect("stream state must exist after segment initialization");
+            if stream_state.next_sequence == 0 {
+                stream_state.next_sequence = 1;
+            }
 
-        let sequence = stream_state.next_sequence;
-        stream_state.next_sequence += 1;
-        let open_segment = stream_state
-            .open_segment
-            .as_mut()
-            .expect("segment must be open before append");
-        let body_offset_bytes = open_segment.size_bytes;
+            let sequence = stream_state.next_sequence;
+            stream_state.next_sequence += 1;
+            let open_segment = stream_state
+                .open_segment
+                .as_mut()
+                .expect("segment must be open before append");
+            let body_offset_bytes = open_segment.size_bytes;
 
-        let mut segment_file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&open_segment.segment_path)
-            .await?;
-        segment_file
-            .seek(std::io::SeekFrom::Start(body_offset_bytes))
-            .await?;
-        if let Err(error) = segment_file.write_all(&body_bytes).await {
-            rollback_segment_append(&mut segment_file, body_offset_bytes).await?;
-            return Err(Box::new(error));
-        }
-        segment_file.flush().await?;
-        drop(segment_file);
-
-        let journal_id = format!(
-            "jrnl-{:020}-{:020}-{}",
-            journal_epoch, sequence, capture_envelope.stream_key
-        );
-        let observation_id = format!(
-            "obs-{:020}-{:020}-{}",
-            journal_epoch, sequence, capture_envelope.stream_key
-        );
-        let entry = build_segment_journal_entry(
-            &capture_envelope,
-            endpoint,
-            content_type,
-            received_ns,
-            journal_epoch,
-            sequence,
-            journal_id.clone(),
-            observation_id,
-            open_segment.segment_id.clone(),
-            stable_segment_path(
-                &self.journal_root,
-                &capture_envelope.stream_key,
-                &open_segment.segment_id,
-            ),
-            body_offset_bytes,
-            u64::try_from(body_bytes.len())?,
-        );
-
-        let index_bytes = serde_json::to_vec(&entry)?;
-        let mut index_file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&open_segment.index_path)
-            .await?;
-        let index_offset_bytes = index_file.metadata().await?.len();
-        index_file
-            .seek(std::io::SeekFrom::Start(index_offset_bytes))
-            .await?;
-        if let Err(error) = async {
-            index_file.write_all(&index_bytes).await?;
-            index_file.write_all(b"\n").await?;
-            index_file.flush().await
-        }
-        .await
-        {
-            rollback_index_append(&mut index_file, index_offset_bytes).await?;
             let mut segment_file = OpenOptions::new()
                 .create(true)
                 .truncate(false)
@@ -647,22 +581,86 @@ impl SegmentJournalBackend {
                 .write(true)
                 .open(&open_segment.segment_path)
                 .await?;
-            rollback_segment_append(&mut segment_file, body_offset_bytes).await?;
-            return Err(Box::new(error));
-        }
-        drop(index_file);
+            segment_file
+                .seek(std::io::SeekFrom::Start(body_offset_bytes))
+                .await?;
+            if let Err(error) = segment_file.write_all(&body_bytes).await {
+                rollback_segment_append(&mut segment_file, body_offset_bytes).await?;
+                return Err(Box::new(error));
+            }
+            segment_file.flush().await?;
+            drop(segment_file);
 
-        let appended_length_bytes = u64::try_from(body_bytes.len())?;
-        let (metadata_path, updated_header) = {
+            let journal_id = format!(
+                "jrnl-{:020}-{:020}-{}",
+                journal_epoch, sequence, capture_envelope.stream_key
+            );
+            let observation_id = format!(
+                "obs-{:020}-{:020}-{}",
+                journal_epoch, sequence, capture_envelope.stream_key
+            );
+            let entry = build_segment_journal_entry(
+                &capture_envelope,
+                endpoint,
+                content_type,
+                received_ns,
+                journal_epoch,
+                sequence,
+                journal_id.clone(),
+                observation_id,
+                open_segment.segment_id.clone(),
+                stable_segment_path(
+                    &self.journal_root,
+                    &capture_envelope.stream_key,
+                    &open_segment.segment_id,
+                ),
+                body_offset_bytes,
+                u64::try_from(body_bytes.len())?,
+            );
+
+            let index_bytes = serde_json::to_vec(&entry)?;
+            let mut index_file = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(&open_segment.index_path)
+                .await?;
+            let index_offset_bytes = index_file.metadata().await?.len();
+            index_file
+                .seek(std::io::SeekFrom::Start(index_offset_bytes))
+                .await?;
+            if let Err(error) = async {
+                index_file.write_all(&index_bytes).await?;
+                index_file.write_all(b"\n").await?;
+                index_file.flush().await
+            }
+            .await
+            {
+                rollback_index_append(&mut index_file, index_offset_bytes).await?;
+                let mut segment_file = OpenOptions::new()
+                    .create(true)
+                    .truncate(false)
+                    .read(true)
+                    .write(true)
+                    .open(&open_segment.segment_path)
+                    .await?;
+                rollback_segment_append(&mut segment_file, body_offset_bytes).await?;
+                return Err(Box::new(error));
+            }
+            drop(index_file);
+
+            let appended_length_bytes = u64::try_from(body_bytes.len())?;
             open_segment.size_bytes += appended_length_bytes;
             update_segment_header(&mut open_segment.header, &entry, open_segment.size_bytes);
-            (
-                open_segment.metadata_path.clone(),
-                open_segment.header.clone(),
-            )
+            let metadata_path = open_segment.metadata_path.clone();
+            let updated_header = open_segment.header.clone();
+            state.total_journal_bytes += appended_length_bytes;
+            let _ = write_json_file(&metadata_path, &updated_header).await;
+
+            (journal_id, entry)
         };
-        state.total_journal_bytes += appended_length_bytes;
-        let _ = write_json_file(&metadata_path, &updated_header).await;
+
         let _ = self.publish_capture_manifest(&entry, &body_bytes).await;
 
         Ok(journal_id)
@@ -677,10 +675,9 @@ impl SegmentJournalBackend {
         let manifest = DspManifest {
             manifest_id: format!("manifest-{}", entry.journal_id),
             manifest_type: "raw_journal_append".to_string(),
-            // `created_ns` should represent manifest/journal arrival time, not
-            // packet capture epoch. Packet timestamps remain available on
-            // source_handles for TDOA anchoring.
-            created_ns: entry.ingest_received_ns,
+            // Raw audio processing must be ordered on firmware packet time.
+            // Receipt time stays on the journal entry for freshness/backlog diagnostics.
+            created_ns: entry.toa_ns.unwrap_or(entry.ingest_received_ns as u64) as u128,
             source_handles: vec![handle],
             derived_handle: None,
             localization: None,
@@ -761,6 +758,17 @@ impl SegmentJournalBackend {
     ) -> BoxedResult<()> {
         if self.runtime_config.total_journal_budget_bytes == 0 {
             return Ok(());
+        }
+
+        if state
+            .total_journal_bytes
+            .saturating_add(append_length_bytes)
+            .saturating_add(self.runtime_config.admission_reserve_bytes)
+            > self.runtime_config.total_journal_budget_bytes
+        {
+            let now_ns = now_ns()?;
+            let active_index = self.lease_store.active_index(now_ns).await?;
+            self.refresh_segment_pin_counts(&active_index, now_ns).await?;
         }
 
         while state

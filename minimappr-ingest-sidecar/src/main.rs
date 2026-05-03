@@ -167,6 +167,13 @@ struct Args {
 
     #[arg(
         long,
+        env = "MINIMAPPR_DSP_RAW_MANIFEST_CHANNEL_CAPACITY",
+        default_value_t = 2048
+    )]
+    dsp_raw_manifest_channel_capacity: usize,
+
+    #[arg(
+        long,
         env = "MINIMAPPR_DSP_SKIP_STALE_MANIFESTS",
         default_value_t = true
     )]
@@ -305,9 +312,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args = Args::parse();
     let storage_dir = args.spool_dir.clone();
     let storage_mode = args.storage_mode;
+    let raw_manifest_channel_capacity = args.dsp_raw_manifest_channel_capacity.max(1);
     // Create the in-process channel before opening the backend so we can inject
-    // the sender into JournalRuntimeConfig. Capacity 512 = ~16s at 32ms frames.
-    let (raw_manifest_tx, raw_manifest_rx) = mpsc::channel::<manifests::DspManifest>(512);
+    // the sender into JournalRuntimeConfig. Keep this configurable because
+    // 16kHz/512-sample packets arrive every 32ms.
+    let (raw_manifest_tx, raw_manifest_rx) =
+        mpsc::channel::<manifests::DspManifest>(raw_manifest_channel_capacity);
     let journal_runtime_config = JournalRuntimeConfig {
         consumer_name: args.consumer_name.clone(),
         total_journal_budget_bytes: args.total_journal_budget_bytes,
