@@ -14,7 +14,7 @@ use crate::{
     derived_cache::DerivedCache,
     dsp::{AudioCoverageStats, SensorStreamBuffer},
     gcc_phat::TdoaResult,
-    journal_reader::{read_payload_with_mmap, JournalPayloadHandle},
+    journal_reader::JournalPayloadHandle,
     manifests::{DspManifest, ManifestStore},
 };
 use serde::{Deserialize, Serialize};
@@ -356,50 +356,17 @@ impl DspWorker {
 
         let stream_key = first_handle.stream_key.clone();
 
-        // Fast path: raw audio bytes were delivered through the in-process channel
-        // alongside the manifest metadata — no disk read required.
-        // Fallback: read from the journal segment via mmap. read_payload_with_mmap is
-        // a blocking synchronous call, so run it in spawn_blocking to avoid stalling
-        // the Tokio executor thread while the OS resolves the mmap page faults.
+        // Raw audio reaches DSP only through the in-process channel. Persisted
+        // manifests are metadata breadcrumbs; they are not a source of raw audio.
         let raw_payload: Vec<u8> = if let Some(bytes) = manifest.raw_payload.clone() {
             bytes
-        } else if first_handle.payload_length_bytes == 0 {
-            // body_length_bytes == 0 is the sentinel written when skip_binary_writes is
-            // enabled. There is no segment file to mmap; the frame was delivered via the
-            // in-process channel and was not cached here. Consume and skip silently.
+        } else {
             warn!(
                 manifest_id = %manifest.manifest_id,
-                "DSP worker: manifest arrived without raw_payload and no binary segment \
-                 (skip_binary_writes mode); frame dropped — in-process channel may have \
-                 been saturated"
+                "DSP worker: raw manifest arrived without in-memory payload; frame dropped"
             );
             self.defer_source_manifest_consumption(&manifest);
             return None;
-        } else {
-            let handle = first_handle.clone();
-            match tokio::task::spawn_blocking(move || read_payload_with_mmap(&handle)).await {
-                Ok(Ok(bytes)) => bytes,
-                Ok(Err(err)) => {
-                    self.note_failure().await;
-                    warn!(
-                        manifest_id = %manifest.manifest_id,
-                        error = %err,
-                        "DSP worker failed to read journal payload; consuming unreadable source manifest"
-                    );
-                    self.defer_source_manifest_consumption(&manifest);
-                    return None;
-                }
-                Err(join_err) => {
-                    self.note_failure().await;
-                    warn!(
-                        manifest_id = %manifest.manifest_id,
-                        error = %join_err,
-                        "DSP worker spawn_blocking panicked reading journal payload"
-                    );
-                    self.defer_source_manifest_consumption(&manifest);
-                    return None;
-                }
-            }
         };
         let decoded = match decode_audio_payload(&raw_payload) {
             Ok(decoded) => decoded,

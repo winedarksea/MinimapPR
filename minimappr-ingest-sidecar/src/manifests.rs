@@ -85,14 +85,12 @@ pub struct DspManifest {
     /// Populated for `manifest_type == "env_sample_append"` manifests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_samples: Option<serde_json::Value>,
-    /// Node spec JSON embedded in channel-only (memory path) localization_result
-    /// manifests. Python uses this to reconstruct node context without reading the
-    /// source segment binary (which is never written in the channel-only path).
+    /// Node spec JSON embedded in memory-path localization_result manifests.
+    /// Python uses this to reconstruct node context without a persisted raw payload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_context: Option<serde_json::Value>,
     /// Raw audio payload bytes carried in-process by the fast-path channel only.
-    /// Never serialized to disk — skipped by serde. When Some, ingest_one skips
-    /// the blocking read_payload_with_mmap call.
+    /// Never serialized to disk; skipped by serde.
     #[serde(skip, default)]
     pub raw_payload: Option<Vec<u8>>,
 }

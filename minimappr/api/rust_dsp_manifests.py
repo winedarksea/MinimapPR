@@ -8,16 +8,13 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from pydantic import ValidationError
 
-from minimappr.api.binary_ingest import parse_binary_ingest_payload
 from minimappr.api.journal_reader import JournalPayloadHandle
 from minimappr.core.audio_buffer import AudioCoverageStats
 from minimappr.models import (
     ClassificationResult,
     EnvironmentSampleIn,
     NodeSpec,
-    StoreForwardIngestRequest,
     TimeQuality,
 )
 
@@ -109,14 +106,11 @@ def load_localized_render_manifest_bundle(
         manifest_id = str(paired_classifier_manifest_payload.get("manifest_id") or "")
 
     source_handle = JournalPayloadHandle.from_mapping(source_handles_payload[0], journal_streams_dir=journal_streams_dir)
-    # For channel-only manifests (payload_length_bytes == 0), the segment binary is
-    # never written to disk. Use the node_context embedded directly in the manifest.
     node_context_payload = manifest_payload.get("node_context")
-    if source_handle.payload_length_bytes == 0 and isinstance(node_context_payload, dict):
-        node, event_time_ns, source_type, time_quality, environment = \
-            _load_source_context_from_channel_manifest(node_context_payload, source_handle)
-    else:
-        node, event_time_ns, source_type, time_quality, environment = _load_source_context(source_handle)
+    if not isinstance(node_context_payload, dict):
+        raise ValueError("Rust DSP manifest omitted in-memory source node_context")
+    node, event_time_ns, source_type, time_quality, environment = \
+        _load_source_context_from_channel_manifest(node_context_payload, source_handle)
     derived_handle = JournalPayloadHandle.from_mapping(derived_handle_payload, journal_streams_dir=journal_streams_dir)
     decoded_audio = _decode_classifier_render_audio(derived_handle, classifier_render_payload)
     coverage_payload = manifest_payload.get("coverage_stats")
@@ -255,12 +249,7 @@ def _load_source_context_from_channel_manifest(
     node_context: dict[str, Any],
     source_handle: JournalPayloadHandle,
 ) -> tuple[NodeSpec, int, str, TimeQuality, dict[str, Any]]:
-    """Reconstruct source context from node_context embedded in channel-only manifests.
-
-    Called when payload_length_bytes == 0 (no segment binary written to disk).
-    The node_context field is set by the Rust ingest backend when delivering audio
-    via the in-process channel rather than the disk journal path.
-    """
+    """Reconstruct source context from node_context embedded in memory-path manifests."""
     node = NodeSpec.model_validate(node_context["node"])
     toa_ns = node_context.get("toa_ns") or source_handle.toa_ns or source_handle.tor_ns or 0
     source_type = str(node_context.get("source_type") or "raw_sensor")
@@ -270,37 +259,6 @@ def _load_source_context_from_channel_manifest(
     except ValueError:
         time_quality = TimeQuality.FREE_RUNNING
     return (node, int(toa_ns), source_type, time_quality, {})
-
-
-def _load_source_context(
-    source_handle: JournalPayloadHandle,
-) -> tuple[NodeSpec, int, str, TimeQuality, dict[str, Any]]:
-    raw_payload = source_handle.read_bytes()
-    if raw_payload.startswith(b"MMB1"):
-        parsed_payload = parse_binary_ingest_payload(raw_payload)
-        buffered_frame = parsed_payload.buffered_frames[0]
-        return (
-            parsed_payload.node,
-            int(buffered_frame.frame.toa_ns or buffered_frame.frame.start_time_ns),
-            buffered_frame.frame.source_type,
-            buffered_frame.frame.time_quality,
-            _environment_summary(buffered_frame.environment),
-        )
-
-    try:
-        decoded_payload = json.loads(raw_payload.decode("utf-8"))
-        parsed_payload = StoreForwardIngestRequest.model_validate(decoded_payload)
-    except (UnicodeDecodeError, json.JSONDecodeError, ValidationError) as exc:
-        raise ValueError(f"Unsupported Rust DSP source payload format: {exc}") from exc
-
-    buffered_frame = parsed_payload.buffered_frames[0]
-    return (
-        parsed_payload.node,
-        int(buffered_frame.frame.toa_ns or buffered_frame.frame.start_time_ns),
-        buffered_frame.frame.source_type,
-        buffered_frame.frame.time_quality,
-        _environment_summary(buffered_frame.environment),
-    )
 
 
 def _decode_classifier_render_audio(

@@ -10,7 +10,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
 };
-use tokio::{fs, sync::RwLock};
+use tokio::sync::RwLock;
 
 #[tokio::test]
 async fn worker_publishes_localization_and_classifier_render_contract() {
@@ -27,8 +27,6 @@ async fn worker_publishes_localization_and_classifier_render_contract() {
     derived_cache.ensure_initialized().await.unwrap();
 
     let payload = store_forward_payload();
-    let segment_path = tmp.path().join("segment.bin");
-    fs::write(&segment_path, payload.as_bytes()).await.unwrap();
     let now_ns = system_now_ns();
     let raw_manifest = DspManifest {
         manifest_id: "manifest-raw-test".to_string(),
@@ -45,7 +43,7 @@ async fn worker_publishes_localization_and_classifier_render_contract() {
             sample_index_start: Some(0),
             sample_count: Some(512),
             integrity_hash: String::new(),
-            segment_path,
+            segment_path: tmp.path().join("in-memory-only.bin"),
         }],
         derived_handle: None,
         localization: None,
@@ -55,7 +53,7 @@ async fn worker_publishes_localization_and_classifier_render_contract() {
         promotion_ready: false,
         env_samples: None,
         node_context: None,
-        raw_payload: None,
+        raw_payload: Some(payload.into_bytes()),
     };
     let state: SharedDspState = Arc::new(RwLock::new(Default::default()));
     let mut worker = DspWorker::new(
@@ -219,7 +217,7 @@ async fn worker_skips_stale_manifest_without_rewriting_timestamps() {
         state.clone(),
     );
 
-    let stale_payload = store_forward_payload_with_timing(1_000_000_000, 0, 1);
+    let stale_payload = store_forward_payload_with_timing(1, 0, 1);
     let mut stale_manifest =
         raw_manifest_for_payload(tmp.path(), "manifest-raw-stale", "seg-stale", stale_payload)
             .await;
@@ -347,9 +345,9 @@ async fn raw_manifest_for_payload(
     segment_id: &str,
     payload: String,
 ) -> DspManifest {
-    let segment_path = root.join(format!("{segment_id}.bin"));
-    fs::write(&segment_path, payload.as_bytes()).await.unwrap();
     let now_ns = system_now_ns();
+    let payload_bytes = payload.into_bytes();
+    let payload_length_bytes = payload_bytes.len() as u64;
     DspManifest {
         manifest_id: manifest_id.to_string(),
         manifest_type: "raw_journal_append".to_string(),
@@ -359,13 +357,13 @@ async fn raw_manifest_for_payload(
             segment_id: segment_id.to_string(),
             stream_key: "sirith-test__audio_main__abcd".to_string(),
             payload_offset_bytes: 0,
-            payload_length_bytes: payload.len() as u64,
+            payload_length_bytes,
             toa_ns: None,
             tor_ns: Some(now_ns as u64),
             sample_index_start: Some(0),
             sample_count: Some(512),
             integrity_hash: String::new(),
-            segment_path,
+            segment_path: root.join(format!("{segment_id}.in-memory-only.bin")),
         }],
         derived_handle: None,
         localization: None,
@@ -375,7 +373,7 @@ async fn raw_manifest_for_payload(
         promotion_ready: false,
         env_samples: None,
         node_context: None,
-        raw_payload: None,
+        raw_payload: Some(payload_bytes),
     }
 }
 

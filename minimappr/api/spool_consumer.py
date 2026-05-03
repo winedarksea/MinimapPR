@@ -794,10 +794,7 @@ def _load_claimed_rust_dsp_item(
             source_kind="journal_localized_render_manifest",
             received_ns=int(metadata.get("received_ns") or primary_manifest_payload.get("created_ns") or time.time_ns()),
             cleanup_paths=tuple(cleanup_paths),
-            cursor_updates=_cursor_updates_for_manifest_source_handles(
-                primary_manifest_payload,
-                journal_streams_dir,
-            ),
+            cursor_updates=tuple(),
             node=NodeSpec.model_validate(node_payload),
         )
 
@@ -844,7 +841,8 @@ def _claim_rust_dsp_manifests_oldest_first(
         manifest_paths = sorted(
             manifest_paths,
             key=lambda path: path.stat().st_mtime_ns,
-                    )[:scan_limit]
+            reverse=True,
+        )[:scan_limit]
     else:
         manifest_paths = sorted(manifest_paths)
 
@@ -913,7 +911,8 @@ def _claim_rust_dsp_manifests_oldest_first(
     for _, claim_kind, primary_path, primary_payload, paired_path, paired_payload in sorted(
         claims,
         key=lambda item: item[0],
-            ):
+        reverse=max_claims is not None,
+    ):
         if claim_limit is not None and len(claimed_paths) >= claim_limit:
             break
         if _manifest_sources_are_cursor_covered(
@@ -934,17 +933,7 @@ def _claim_rust_dsp_manifests_oldest_first(
                     journal_streams_dir,
                 )
                 stream_keys = {cursor_update.stream_key for cursor_update in cursor_updates}
-                if cursor_updates and all(
-                    _cursor_covers_entry(
-                        cursor_by_stream.get(cursor_update.stream_key),
-                        cursor_update.journal_epoch,
-                        cursor_update.journal_sequence,
-                    )
-                    for cursor_update in cursor_updates
-                ):
-                    with contextlib.suppress(FileNotFoundError):
-                        primary_path.unlink()
-                    continue
+                
 
                 ingest_id = str(primary_payload.get("manifest_id") or primary_path.stem)
                 primary_processing_path = processing_dir / primary_path.name
@@ -955,15 +944,7 @@ def _claim_rust_dsp_manifests_oldest_first(
                     "ingest_id": ingest_id,
                     "received_ns": time.time_ns(),
                     "stream_keys": sorted(stream_keys),
-                    "cursor_updates": [
-                        {
-                            "journal_id": cursor_update.journal_id,
-                            "stream_key": cursor_update.stream_key,
-                            "journal_epoch": cursor_update.journal_epoch,
-                            "journal_sequence": cursor_update.journal_sequence,
-                        }
-                        for cursor_update in cursor_updates
-                    ],
+                    "cursor_updates": [],
                     "primary_manifest_filename": primary_processing_path.name,
                     "paired_manifest_filename": None,
                     "render_body_filename": None,

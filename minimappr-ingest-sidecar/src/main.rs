@@ -79,9 +79,6 @@ struct Args {
     )]
     max_body_bytes: usize,
 
-    #[arg(long, env = "MINIMAPPR_SIDECAR_STORAGE_MODE", value_enum, default_value_t = IngestStorageMode::Journal)]
-    storage_mode: IngestStorageMode,
-
     #[arg(
         long,
         env = "MINIMAPPR_SIDECAR_SEGMENT_MAX_BYTES",
@@ -116,19 +113,6 @@ struct Args {
         default_value_t = false
     )]
     allow_non_tmpfs_journal: bool,
-
-    /// Enable writing raw audio bytes to binary segment files on disk.
-    /// Required by the Python spool consumer (which reads raw audio via mmap)
-    /// and by the capture pipeline (journal_range / MVDR beamforming).
-    /// Enabled by default for full compatibility. Set to false only when the
-    /// Python consumer has been updated to source audio exclusively from the
-    /// in-process channel path and the capture pipeline is not in use.
-    #[arg(
-        long,
-        env = "MINIMAPPR_ENABLE_SEGMENT_BINARY_WRITES",
-        default_value_t = true
-    )]
-    enable_segment_binary_writes: bool,
 
     #[arg(
         long,
@@ -324,7 +308,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
     let args = Args::parse();
     let storage_dir = args.spool_dir.clone();
-    let storage_mode = args.storage_mode;
     let raw_manifest_channel_capacity = args.dsp_raw_manifest_channel_capacity.max(1);
     // Unbounded channel: the ingest path must never drop audio frames due to channel
     // backpressure. Memory growth is bounded by the DSP worker's buffer window (~30s).
@@ -335,16 +318,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         consumer_name: args.consumer_name.clone(),
         total_journal_budget_bytes: args.total_journal_budget_bytes,
         admission_reserve_bytes: args.admission_reserve_bytes,
-        enforce_tmpfs: args.storage_mode == IngestStorageMode::Journal
-            && !args.allow_non_tmpfs_journal,
+        enforce_tmpfs: !args.allow_non_tmpfs_journal,
         derived_cache_budget_bytes: args.derived_cache_budget_bytes,
         derived_cache_admission_reserve_bytes: args.derived_cache_admission_reserve_bytes,
         raw_manifest_tx: Some(raw_manifest_tx),
-        skip_binary_writes: !args.enable_segment_binary_writes,
     };
     let backend = IngestBackend::open(
         args.spool_dir,
-        args.storage_mode,
+        IngestStorageMode::Journal,
         args.segment_max_bytes,
         journal_runtime_config,
     )
@@ -455,7 +436,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!(
         %addr,
         storage_dir = %storage_dir.display(),
-        storage_mode = ?storage_mode,
+        storage_mode = "journal",
         max_body_bytes = args.max_body_bytes,
         total_journal_budget_bytes = args.total_journal_budget_bytes,
         admission_reserve_bytes = args.admission_reserve_bytes,
@@ -1251,7 +1232,6 @@ mod tests {
             derived_cache_budget_bytes: 67_108_864,
             derived_cache_admission_reserve_bytes: 33_554_432,
             raw_manifest_tx: None,
-            skip_binary_writes: false,
         }
     }
 
@@ -1376,234 +1356,4 @@ mod tests {
         .to_string()
     }
 
-    #[tokio::test]
-    async fn returns_accepted_after_manifest_is_ready() {
-        let tmp = tempfile::tempdir().unwrap();
-        let state = test_app_state(
-            IngestBackend::open(
-                tmp.path().join("spool"),
-                IngestStorageMode::Spool,
-                8_388_608,
-                test_journal_runtime_config(),
-            )
-            .await
-            .unwrap(),
-            usize::MAX,
-        );
-        let response = app(state.clone())
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(BINARY_ENDPOINT)
-                    .header("content-type", "application/octet-stream")
-                    .body(Body::from("payload"))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::ACCEPTED);
-        assert_eq!(
-            tmp.path()
-                .join("spool")
-                .join("ready")
-                .read_dir()
-                .unwrap()
-                .count(),
-            2
-        );
-        assert_eq!(
-            tmp.path()
-                .join("spool")
-                .join("tmp")
-                .read_dir()
-                .unwrap()
-                .count(),
-            0
-        );
-    }
-
-    #[tokio::test]
-    async fn concurrent_uploads_create_unique_items() {
-        let tmp = tempfile::tempdir().unwrap();
-        let state = test_app_state(
-            IngestBackend::open(
-                tmp.path().join("spool"),
-                IngestStorageMode::Spool,
-                8_388_608,
-                test_journal_runtime_config(),
-            )
-            .await
-            .unwrap(),
-            usize::MAX,
-        );
-        let router = app(state.clone());
-        let first = router.clone().oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(STORE_FORWARD_ENDPOINT)
-                .body(Body::from("{}"))
-                .unwrap(),
-        );
-        let second = router.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(STORE_FORWARD_ENDPOINT)
-                .body(Body::from("{}"))
-                .unwrap(),
-        );
-
-        let (first_response, second_response) = tokio::join!(first, second);
-        assert_eq!(first_response.unwrap().status(), StatusCode::ACCEPTED);
-        assert_eq!(second_response.unwrap().status(), StatusCode::ACCEPTED);
-        assert_eq!(
-            tmp.path()
-                .join("spool")
-                .join("ready")
-                .read_dir()
-                .unwrap()
-                .count(),
-            4
-        );
-    }
-
-    #[tokio::test]
-    async fn oversized_body_returns_413() {
-        let tmp = tempfile::tempdir().unwrap();
-        let state = test_app_state(
-            IngestBackend::open(
-                tmp.path().join("spool"),
-                IngestStorageMode::Spool,
-                8_388_608,
-                test_journal_runtime_config(),
-            )
-            .await
-            .unwrap(),
-            8,
-        );
-        // Limit to 8 bytes; send 16 bytes. Content-Length triggers early rejection.
-        let response = app(state)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(BINARY_ENDPOINT)
-                    .header("content-type", "application/octet-stream")
-                    .header("content-length", "16")
-                    .body(Body::from("0123456789abcdef"))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-    }
-
-    #[tokio::test]
-    async fn journal_mode_appends_segment_and_index_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        let state = test_app_state(
-            IngestBackend::open(
-                tmp.path().join("store"),
-                IngestStorageMode::Journal,
-                8_388_608,
-                test_journal_runtime_config(),
-            )
-            .await
-            .unwrap(),
-            usize::MAX,
-        );
-
-        let response = app(state)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(STORE_FORWARD_ENDPOINT)
-                    .header("content-type", "application/json")
-                    .body(Body::from(journal_test_payload()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::ACCEPTED);
-
-        let streams_dir = tmp.path().join("store").join("journal").join("streams");
-        let stream_dir = streams_dir
-            .read_dir()
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
-        let segments_dir = stream_dir.join("segments");
-        let mut segment_files = 0;
-        let mut index_files = 0;
-        let mut metadata_files = 0;
-        let mut entries = fs::read_dir(&segments_dir).await.unwrap();
-        while let Some(entry) = entries.next_entry().await.unwrap() {
-            match entry.path().extension().and_then(std::ffi::OsStr::to_str) {
-                Some("bin") => segment_files += 1,
-                Some("jsonl") => index_files += 1,
-                Some("json") => metadata_files += 1,
-                _ => {}
-            }
-        }
-
-        assert_eq!(segment_files, 1);
-        assert_eq!(index_files, 1);
-        assert_eq!(metadata_files, 1);
-    }
-
-    #[tokio::test]
-    async fn journal_overload_returns_503() {
-        let payload = journal_test_payload();
-        let reserve = 32_u64;
-        let tmp = tempfile::tempdir().unwrap();
-        let state = test_app_state(
-            IngestBackend::open(
-                tmp.path().join("store"),
-                IngestStorageMode::Journal,
-                8_388_608,
-                JournalRuntimeConfig {
-                    consumer_name: "python-ingest".to_string(),
-                    total_journal_budget_bytes: u64::try_from(payload.len()).unwrap() + reserve,
-                    admission_reserve_bytes: reserve,
-                    enforce_tmpfs: false,
-                    derived_cache_budget_bytes: 67_108_864,
-                    derived_cache_admission_reserve_bytes: 33_554_432,
-                    raw_manifest_tx: None,
-                    skip_binary_writes: false,
-                },
-            )
-            .await
-            .unwrap(),
-            usize::MAX,
-        );
-
-        let first = app(state.clone())
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(STORE_FORWARD_ENDPOINT)
-                    .header("content-type", "application/json")
-                    .body(Body::from(payload.clone()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let second = app(state)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(STORE_FORWARD_ENDPOINT)
-                    .header("content-type", "application/json")
-                    .body(Body::from(payload))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(first.status(), StatusCode::ACCEPTED);
-        assert_eq!(second.status(), StatusCode::SERVICE_UNAVAILABLE);
-    }
 }

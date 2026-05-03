@@ -226,7 +226,7 @@ pub async fn run_io(result: ComputeMathResult) {
             promotion_ready: false,
             env_samples: None,
             // Carry node context forward so Python can reconstruct the NodeSpec
-            // without reading the source segment binary (channel-only path has none).
+            // without relying on any persisted raw audio payload.
             node_context: payload.manifest.node_context.clone(),
             raw_payload: None,
         };
