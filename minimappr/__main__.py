@@ -122,6 +122,7 @@ def _should_supervise_python_ingest(settings: Settings) -> bool:
 def _run_split_python_server(settings: Settings) -> None:
     ingest_process = _start_python_ingest_process(settings)
     previous_process_role = os.environ.get("MINIMAPPR_PROCESS_ROLE")
+    previous_ingest_backend = os.environ.get("MINIMAPPR_INGEST_BACKEND")
     previous_direct_ingest = os.environ.get("MINIMAPPR_DIRECT_INGEST_ENABLED")
     try:
         _wait_for_python_ingest_ready(ingest_process, settings=settings)
@@ -136,6 +137,7 @@ def _run_split_python_server(settings: Settings) -> None:
         )
     finally:
         _restore_env("MINIMAPPR_PROCESS_ROLE", previous_process_role)
+        _restore_env("MINIMAPPR_INGEST_BACKEND", previous_ingest_backend)
         _restore_env("MINIMAPPR_DIRECT_INGEST_ENABLED", previous_direct_ingest)
         _stop_python_ingest_process(ingest_process)
 

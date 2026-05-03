@@ -1268,22 +1268,34 @@ async def ingest_binary(request: Request) -> StoreForwardIngestResponse:
         body = await request.body()
         payload = await asyncio.to_thread(parse_binary_ingest_payload, body)
         results = []
-        for item in payload.buffered_frames:
-            req = IngestFrameRequest(
-                node=payload.node,
-                frame=item.frame,
-                environment=item.environment,
-            )
-            resp = await state.fusion_node.ingest(req)
-            results.append(StoreForwardBufferedFrameResponse(
-                sequence=item.frame.sequence,
-                start_time_ns=item.frame.start_time_ns,
-                accepted=resp.accepted,
-                duplicate=resp.duplicate,
-                triggered=resp.triggered,
-                frame_energy=resp.frame_energy,
-                queued_event_id=resp.queued_event_id,
-            ))
+        if payload.buffered_frames:
+            for item in payload.buffered_frames:
+                req = IngestFrameRequest(
+                    node=payload.node,
+                    frame=item.frame,
+                    environment=item.environment,
+                )
+                resp = await state.fusion_node.ingest_decoded(req, item.decoded_audio)
+                results.append(StoreForwardBufferedFrameResponse(
+                    sequence=item.frame.sequence,
+                    start_time_ns=item.frame.start_time_ns,
+                    accepted=resp.accepted,
+                    duplicate=resp.duplicate,
+                    triggered=resp.triggered,
+                    frame_energy=resp.frame_energy,
+                    queued_event_id=resp.queued_event_id,
+                ))
+        else:
+            # Heartbeat-only payload: touch last_seen so the node stays online.
+            # Must go through _normalize_node_spec so position_m is always set
+            # (upsert_node requires it) and position_geo is correctly derived.
+            normalized_node, geo_position = state.fusion_node._ingest_processor._normalize_node_spec(payload.node)
+            async with state.fusion_node._storage_batch():
+                await state.fusion_node.storage.upsert_node(
+                    spec=normalized_node,
+                    last_seen_ns=time.time_ns(),
+                    position_geo=geo_position,
+                )
         return StoreForwardIngestResponse(
             accepted=True,
             total_frames=len(payload.buffered_frames),

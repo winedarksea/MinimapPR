@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.node_registry import NodeRegistry
 from minimappr.core.retention import RetentionPolicy
@@ -37,6 +39,56 @@ class AssemblyResult:
     track: TrackState | None
     suppressed_by_zone: bool
     suppression_reasons: list[str]
+
+
+def _collapse_long_exact_zero_runs(
+    signal,
+    *,
+    sample_rate_hz: int,
+    min_gap_seconds: float = 0.03,
+):
+    """Remove long exact-zero spans that represent uncovered buffer gaps.
+
+    Coverage holes are inserted as literal zeros by the audio buffer. Compacting
+    long zero runs for snippet rendering avoids playback dropouts while keeping
+    the classified content intact.
+    """
+    arr = np.asarray(signal, dtype=np.float32).reshape(-1)
+    if arr.size == 0 or sample_rate_hz <= 0:
+        return arr
+
+    zero_mask = arr == 0.0
+    if not bool(np.any(zero_mask)):
+        return arr
+
+    min_gap_samples = max(1, int(round(min_gap_seconds * float(sample_rate_hz))))
+    if min_gap_samples <= 1:
+        return arr
+
+    keep_mask = np.ones(arr.size, dtype=np.bool_)
+    in_zero_run = False
+    run_start = 0
+
+    for index, is_zero in enumerate(zero_mask):
+        if is_zero and not in_zero_run:
+            in_zero_run = True
+            run_start = index
+            continue
+        if not is_zero and in_zero_run:
+            run_length = index - run_start
+            if run_length >= min_gap_samples:
+                keep_mask[run_start:index] = False
+            in_zero_run = False
+
+    if in_zero_run:
+        run_length = arr.size - run_start
+        if run_length >= min_gap_samples:
+            keep_mask[run_start:] = False
+
+    compacted = arr[keep_mask]
+    if compacted.size == 0:
+        return arr
+    return compacted
 
 
 class DetectionAssembler:
@@ -247,9 +299,17 @@ class DetectionAssembler:
         snippet_path: str | None = None
         snippet_expires_ns: int | None = None
         if self._snippet_retention_seconds > 0 and retention_tier not in {"ephemeral", "experiment"}:
+            snippet_signal = classification_signal
+            if isinstance(audio_quality, dict):
+                missing_ratio = float(audio_quality.get("missing_ratio") or 0.0)
+                if missing_ratio > 0.05:
+                    snippet_signal = _collapse_long_exact_zero_runs(
+                        snippet_signal,
+                        sample_rate_hz=sample_rate_hz,
+                    )
             snippet_file = self._snippet_dir / f"{detection.id}.wav"
             await asyncio.to_thread(
-                write_wav_mono, snippet_file, classification_signal, sample_rate_hz
+                write_wav_mono, snippet_file, snippet_signal, sample_rate_hz
             )
             snippet_path = str(snippet_file)
             snippet_expires_ns = event_time_ns + int(

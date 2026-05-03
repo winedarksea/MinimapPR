@@ -1259,6 +1259,18 @@ async def test_fusion_ingest_skips_observation_rows_for_staged_journal_profile(t
     await storage.close()
 
 
+def test_settings_default_skip_observation_rows_for_birdnet_hybrid_direct_ingest(tmp_path: Path) -> None:
+    settings = Settings(
+        runtime_profile="birdnet_hybrid_production",
+        db_path=tmp_path / "fusion_birdnet_direct.db",
+        snippet_dir=tmp_path / "snippets",
+        direct_ingest_enabled=True,
+        ingest_storage_mode="spool",
+    )
+
+    assert settings.persist_observations_on_ingest is False
+
+
 @pytest.mark.asyncio
 async def test_fusion_ingests_rust_localized_render_directly(tmp_path: Path) -> None:
     settings = Settings(

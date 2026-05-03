@@ -478,11 +478,11 @@ class Settings:
         if self.ingest_sidecar_allow_non_tmpfs_journal is None:
             self.ingest_sidecar_allow_non_tmpfs_journal = platform.system() != "Linux"
         if self.persist_observations_on_ingest is None:
-            self.persist_observations_on_ingest = not (
-                self.runtime_profile == "birdnet_hybrid_production"
-                and self.ingest_storage_mode == "journal"
-                and not self.direct_ingest_enabled
-            )
+            # BirdNET production favors real-time ingest and contiguous detection
+            # snippets over dense raw-observation provenance at ingest time.
+            # Persisting one observation row per sensor per frame amplifies DB I/O
+            # and can starve HTTP ingest under sustained edge publish load.
+            self.persist_observations_on_ingest = self.runtime_profile != "birdnet_hybrid_production"
 
         if self.node_degraded_after_seconds <= 0.0:
             raise ValueError("MINIMAPPR_NODE_DEGRADED_AFTER_SECONDS must be > 0")
