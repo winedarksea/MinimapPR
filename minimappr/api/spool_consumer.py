@@ -333,10 +333,12 @@ class IngestSpoolConsumer:
         raise ValueError(f"Unsupported ingest spool endpoint {item.endpoint!r}")
 
     def _should_consume_rust_dsp_manifests(self) -> bool:
-        return (
-            self._config.storage_mode == "journal"
-            and self._config.runtime_profile == "birdnet_hybrid_production"
-        )
+        # In birdnet_hybrid_production mode, Rust DSP results used to be consumed via
+        # disk manifests. With the SSE-based stream_consumer delivering results inline
+        # (including BirdNET labels via ClassificationWorker → dsp_result_tx), the disk
+        # manifest path is no longer needed and would cause double-delivery to the fusion
+        # node. Always return False so only the stream_consumer handles delivery.
+        return False
 
 
 @dataclass(frozen=True, slots=True)

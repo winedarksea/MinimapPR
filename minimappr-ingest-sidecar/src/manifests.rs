@@ -93,6 +93,11 @@ pub struct DspManifest {
     /// Never serialized to disk; skipped by serde.
     #[serde(skip, default)]
     pub raw_payload: Option<Vec<u8>>,
+    /// Base64-encoded PCM16LE mono render bytes for inline SSE delivery.
+    /// Set only on manifests sent via the broadcast channel; always cleared to
+    /// None before ManifestStore.publish() so disk files stay compact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_render_bytes: Option<String>,
 }
 
 #[derive(Clone, Debug)]

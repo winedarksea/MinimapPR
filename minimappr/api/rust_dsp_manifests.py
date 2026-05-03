@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -111,7 +112,14 @@ def load_localized_render_manifest_bundle(
     node, event_time_ns, source_type, time_quality, environment = \
         _load_source_context_from_channel_manifest(node_context_payload, source_handle)
     derived_handle = JournalPayloadHandle.from_mapping(derived_handle_payload, journal_streams_dir=journal_streams_dir)
-    decoded_audio = _decode_classifier_render_audio(derived_handle, classifier_render_payload)
+    # Prefer inline base64 PCM from the SSE manifest (memory-only path, no disk read).
+    # Fall back to reading the derived_handle segment_path for disk-backed (spool) consumers.
+    raw_render_bytes_b64 = manifest_payload.get("raw_render_bytes")
+    if raw_render_bytes_b64 is None and paired_classifier_manifest_payload is not None:
+        raw_render_bytes_b64 = paired_classifier_manifest_payload.get("raw_render_bytes")
+    decoded_audio = _decode_classifier_render_audio(
+        derived_handle, classifier_render_payload, raw_render_bytes_b64
+    )
     coverage_payload = manifest_payload.get("coverage_stats")
     if coverage_payload is None and paired_classifier_manifest_payload is not None:
         coverage_payload = paired_classifier_manifest_payload.get("coverage_stats")
@@ -263,6 +271,7 @@ def _load_source_context_from_channel_manifest(
 def _decode_classifier_render_audio(
     derived_handle: JournalPayloadHandle,
     classifier_render_payload: dict[str, Any],
+    raw_render_bytes_b64: str | None = None,
 ) -> np.ndarray:
     sample_format = str(classifier_render_payload.get("sample_format") or "")
     if sample_format != "pcm16le":
@@ -272,7 +281,13 @@ def _decode_classifier_render_audio(
     if channels < 1:
         raise ValueError("Classifier render channels must be >= 1")
 
-    raw_payload = derived_handle.read_bytes()
+    if raw_render_bytes_b64 is not None:
+        # Memory-only path: PCM bytes are inline in the SSE manifest (no disk read).
+        raw_payload = base64.b64decode(raw_render_bytes_b64)
+    else:
+        # Disk-backed path: read from the derived_handle segment file (spool consumer).
+        raw_payload = derived_handle.read_bytes()
+
     decoded = np.frombuffer(raw_payload, dtype="<i2").astype(np.float32) / 32768.0
     if decoded.size % channels != 0:
         raise ValueError("Classifier render payload length is not aligned to the channel count")
@@ -283,7 +298,7 @@ def _decode_classifier_render_audio(
 
 def _resolve_cursor_updates(
     source_handles_payload: list[dict[str, Any]],
-    journal_streams_dir: Path,
+    journal_streams_dir: Path | None,
 ) -> tuple[JournalCursorUpdate, ...]:
     latest_by_stream: dict[str, JournalCursorUpdate] = {}
     for handle_payload in source_handles_payload:

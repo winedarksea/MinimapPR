@@ -16,7 +16,6 @@ use tokio::{
     fs,
     sync::{mpsc, Mutex},
 };
-use tracing::warn;
 
 use crate::derived_cache::{DerivedCache, DerivedCacheConfig};
 use crate::envelope::{parse_capture_envelope, CaptureEnvelope};
@@ -488,6 +487,7 @@ impl SegmentJournalBackend {
             // raw_payload is #[serde(skip)] — not written to disk.
             node_context: None,
             raw_payload: None,
+            raw_render_bytes: None,
         };
         // Deliver audio to the DSP worker exclusively via the in-process channel.
         // If the channel is not connected, the pipeline is misconfigured — fail fast
@@ -790,11 +790,18 @@ mod tests {
     async fn raw_capture_manifest_prefers_packet_toa_for_created_time() {
         let tmp = tempfile::tempdir().unwrap();
         let payload = store_forward_body("node-a", 7, 0);
+
+        // Wire an unbounded channel so the manifest arrives in-memory (no disk write).
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let config = JournalRuntimeConfig {
+            raw_manifest_tx: Some(tx),
+            ..test_journal_runtime_config()
+        };
         let backend = IngestBackend::open(
             tmp.path().join("store"),
             IngestStorageMode::Journal,
             usize::MAX as u64,
-            test_journal_runtime_config(),
+            config,
         )
         .await
         .unwrap();
@@ -809,16 +816,10 @@ mod tests {
             .await
             .unwrap();
 
-        let manifest_store = ManifestStore::new(&tmp.path().join("store").join("journal"));
-        let manifests = manifest_store
-            .query_pending("raw_journal_append")
-            .await
-            .unwrap();
-
-        assert_eq!(manifests.len(), 1);
-        assert_eq!(manifests[0].created_ns, 1007);
-        assert_eq!(manifests[0].source_handles[0].toa_ns, Some(1007));
-        assert_eq!(manifests[0].source_handles[0].tor_ns, Some(2007));
+        let manifest = rx.try_recv().expect("manifest delivered via channel");
+        assert_eq!(manifest.created_ns, 1007);
+        assert_eq!(manifest.source_handles[0].toa_ns, Some(1007));
+        assert_eq!(manifest.source_handles[0].tor_ns, Some(2007));
     }
 
     #[tokio::test]
@@ -893,6 +894,7 @@ mod tests {
             env_samples: None,
             node_context: None,
             raw_payload: None,
+            raw_render_bytes: None,
         };
         let path = manifest_store.publish(manifest.clone()).await.unwrap();
         assert!(path.exists(), "manifest file should exist after publish");
@@ -935,6 +937,7 @@ mod tests {
                 env_samples: None,
                 node_context: None,
                 raw_payload: None,
+                raw_render_bytes: None,
             })
             .await
             .unwrap();
@@ -992,6 +995,7 @@ mod tests {
             env_samples: None,
             node_context: None,
             raw_payload: None,
+            raw_render_bytes: None,
         };
         let pending_file = tmp
             .path()
@@ -1061,6 +1065,7 @@ mod tests {
                     env_samples: None,
                     node_context: None,
                     raw_payload: None,
+                    raw_render_bytes: None,
                 })
                 .await
                 .unwrap();
@@ -1105,6 +1110,7 @@ mod tests {
                     env_samples: None,
                     node_context: None,
                     raw_payload: None,
+                    raw_render_bytes: None,
                 })
                 .await
                 .unwrap();

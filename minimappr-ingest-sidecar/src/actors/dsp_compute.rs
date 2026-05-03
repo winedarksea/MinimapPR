@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -5,7 +6,8 @@ use crate::{
     dsp_render_output::{compute_render_bytes, write_render_to_cache, RenderMeta},
     dsp_worker::{
         consume_manifest_standalone, dispatch_classification_result_standalone,
-        render_coverage_json, ComputePayload, PairTdoa, SIRITH_MIC_POSITIONS_M,
+        render_coverage_json, source_manifest_was_persisted, ComputePayload, PairTdoa,
+        SIRITH_MIC_POSITIONS_M,
     },
     manifests::{DspManifest, LocalizationManifestPayload, PairTdoaDiagnostic},
     srp_phat::{
@@ -42,7 +44,6 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
             search_padding_m: payload.config.localization_search_padding_m,
             ..SrpPhatConfig::default()
         };
-        // Direct call: we are already on a dedicated Rayon thread.
         estimate_tetrahedral_steering(
             &windows,
             &payload.active_channels,
@@ -73,9 +74,6 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
         .collect::<Vec<_>>();
     let localization = localization_evaluation.localization;
 
-    // For omni-only fallback paths, use the caller-supplied reason string so
-    // classifier_render manifests carry accurate provenance ("single_sensor_or_non_array_node",
-    // "localization_coverage_unavailable", etc.) instead of the generic skip label.
     let fallback_reason = if let Some(ref reason) = payload.omni_fallback_reason {
         Some(reason.clone())
     } else if localization.resolved_algorithm != "srp_phat" {
@@ -87,8 +85,6 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
     };
 
     let (pcm_bytes, render_meta, render_cov) = if payload.run_classifier_render {
-        // Use omni_channels_override when set (single-sensor or no-coverage fallback paths),
-        // otherwise use the normal classification windows.
         let render_channels: &[Vec<f32>] = payload
             .omni_channels_override
             .as_deref()
@@ -101,7 +97,6 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
             "classification_trailing",
         );
 
-        // compute_render_bytes is sync — safe to call directly on a Rayon thread.
         let (bytes, meta) = compute_render_bytes(
             &payload.config,
             payload.effective_sound_speed_mps,
@@ -136,10 +131,8 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
     }
 }
 
-/// Async I/O phase: write render to cache, publish manifests, forward to ClassificationWorker.
-///
-/// Spawned onto the Tokio runtime by `run_compute` so the Rayon thread is freed
-/// immediately after `run_math` returns.
+/// Async I/O phase: build manifests, broadcast via SSE, forward to ClassificationWorker.
+/// No disk writes for memory-path (channel-delivered) manifests.
 pub async fn run_io(result: ComputeMathResult) {
     let ComputeMathResult {
         payload,
@@ -151,8 +144,8 @@ pub async fn run_io(result: ComputeMathResult) {
         localization_coverage_json,
     } = result;
 
-    let render_result = if let Some(bytes) = pcm_bytes {
-        let meta = render_meta.expect("render_meta is set whenever pcm_bytes is set");
+    // Build the classifier_render manifest and keep PCM bytes in memory.
+    let render_result = if let (Some(bytes), Some(meta)) = (pcm_bytes, render_meta) {
         Some(
             write_render_to_cache(
                 &payload.derived_cache,
@@ -190,16 +183,29 @@ pub async fn run_io(result: ComputeMathResult) {
         .and_then(|m| m.classifier_render.as_ref())
         .is_some();
 
+    // Base64-encode PCM bytes for inline SSE delivery (no disk file).
+    let raw_render_b64: Option<String> = render_result
+        .as_ref()
+        .and_then(|r| r.pcm_bytes.as_ref())
+        .map(|bytes| BASE64.encode(bytes));
+
     let render_classifier_render = render_result
         .as_ref()
         .and_then(|r| r.pending_manifest.as_ref())
         .and_then(|m| m.classifier_render.clone());
 
+    // derived_handle from the render result, propagated to localization_result so Python
+    // can identify the render (Bug A fix — without this Python drops the event).
+    let render_derived_handle = render_result
+        .as_ref()
+        .and_then(|r| r.pending_manifest.as_ref())
+        .and_then(|m| m.derived_handle.clone());
+
+    // Dispatch PCM bytes to ClassificationWorker (via flume channel, no disk).
     let render_pending = if let Some(r) = render_result {
         dispatch_classification_result_standalone(
             r,
             &payload.classification_tx,
-            &payload.manifest_store,
             &payload.state,
         )
         .await
@@ -207,35 +213,41 @@ pub async fn run_io(result: ComputeMathResult) {
         None
     };
 
-    // Omni-only fallback paths skip publishing a localization_result — they never
-    // had a real localization attempt, matching the behaviour of the old inline paths.
+    // Memory-path manifests (seg-mem-*) are delivered exclusively via SSE.
+    // Only persist to disk for disk-backed ingest paths.
+    let arrived_via_channel = !source_manifest_was_persisted(&payload.manifest);
+
     let published = if !payload.skip_localization_result {
         let m = DspManifest {
             manifest_id: format!("manifest-{}", Uuid::new_v4()),
             manifest_type: "localization_result".to_string(),
             created_ns: payload.now_ns,
             source_handles: payload.manifest.source_handles.clone(),
-            derived_handle: None,
+            // Carry derived_handle from the render so Python's load_localized_render_manifest_bundle
+            // can find the render metadata (fixes the dropped-event bug).
+            derived_handle: render_derived_handle,
             localization: Some(localization_payload),
             classifier_render: render_classifier_render,
             birdnet: None,
-            // Use the classification/render window coverage (the full audio window) for
-            // audio quality display. The localization window is only ~32ms (TDOA), which
-            // produces misleading missing% on the rendered 30s audio.
             coverage_stats: render_coverage_json.or(localization_coverage_json),
             promotion_ready: false,
             env_samples: None,
-            // Carry node context forward so Python can reconstruct the NodeSpec
-            // without relying on any persisted raw audio payload.
             node_context: payload.manifest.node_context.clone(),
             raw_payload: None,
+            // Inline PCM bytes for SSE consumers — cleared before any disk publish below.
+            raw_render_bytes: raw_render_b64.clone(),
         };
-        if let Err(err) = payload.manifest_store.publish(m.clone()).await {
-            warn!(
-                manifest_id = %payload.manifest.manifest_id,
-                error = %err,
-                "DSP worker failed to publish localization manifest"
-            );
+        if !arrived_via_channel {
+            // Disk-backed ingest: persist manifest (without bulky base64 data).
+            let mut disk_m = m.clone();
+            disk_m.raw_render_bytes = None;
+            if let Err(err) = payload.manifest_store.publish(disk_m).await {
+                warn!(
+                    manifest_id = %payload.manifest.manifest_id,
+                    error = %err,
+                    "DSP worker failed to publish localization manifest"
+                );
+            }
         }
         Some(m)
     } else {
@@ -269,34 +281,40 @@ pub async fn run_io(result: ComputeMathResult) {
         st.total_classifier_renders += 1;
     }
     if let Some(ref pending) = render_pending {
-        st.recent_results.push(pending.clone());
+        // Embed inline PCM on the pre-BirdNET classifier_render SSE event too.
+        let mut sse_pending = pending.clone();
+        sse_pending.raw_render_bytes = raw_render_b64.clone();
+        st.recent_results.push(sse_pending.clone());
         if st.recent_results.len() > 50 {
             st.recent_results.remove(0);
         }
-    }
-    if let Some(ref m) = published {
+        if let Some(ref m) = published {
+            st.recent_results.push(m.clone());
+            if st.recent_results.len() > 50 {
+                st.recent_results.remove(0);
+            }
+        }
+        // Broadcast results to Python consumers via SSE — zero-disk path.
+        // The ClassificationWorker will broadcast the BirdNET-labeled version separately.
+        if let Some(ref tx) = payload.dsp_result_tx {
+            let _ = tx.send(sse_pending);
+            if let Some(ref m) = published {
+                let _ = tx.send(m.clone());
+            }
+        }
+    } else if let Some(ref m) = published {
+        // No render — just broadcast the localization_result.
         st.recent_results.push(m.clone());
         if st.recent_results.len() > 50 {
             st.recent_results.remove(0);
         }
-    }
-
-    // Broadcast result manifests to Python consumers via SSE — zero-disk path.
-    if let Some(ref tx) = payload.dsp_result_tx {
-        if let Some(ref m) = render_pending {
-            let _ = tx.send(m.clone());
-        }
-        if let Some(ref m) = published {
+        if let Some(ref tx) = payload.dsp_result_tx {
             let _ = tx.send(m.clone());
         }
     }
 }
 
 /// Entry point dispatched onto the Rayon pool from `process_pending`.
-///
-/// Runs `run_math` synchronously on the Rayon thread (no I/O), then calls
-/// `handle.spawn(run_io(...))` which queues the async I/O onto the Tokio runtime
-/// and returns immediately — the Rayon thread is free for the next frame.
 pub fn run_compute(payload: ComputePayload, handle: tokio::runtime::Handle) {
     let result = run_math(payload);
     handle.spawn(run_io(result));

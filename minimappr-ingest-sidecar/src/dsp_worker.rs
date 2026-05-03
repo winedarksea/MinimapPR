@@ -132,10 +132,11 @@ pub(crate) struct LocalizationChannelState {
     pub(crate) window: Vec<f32>,
 }
 
-/// Carries a pre-built classifier_render manifest + the PCM path to the
-/// ClassificationWorker, which calls BirdNET and publishes the annotated manifest.
+/// Carries a pre-built classifier_render manifest + raw PCM bytes to the
+/// ClassificationWorker. The worker writes a transient temp file for the BirdNET
+/// subprocess and sends the annotated manifest back via dsp_result_tx (no disk persist).
 pub struct ClassificationRequest {
-    pub pcm_path: std::path::PathBuf,
+    pub pcm_bytes: Vec<u8>,
     pub sample_rate_hz: u32,
     pub pending_manifest: DspManifest,
 }
@@ -242,8 +243,8 @@ impl DspWorker {
         self.classification_tx = Some(tx);
         let worker = ClassificationWorker {
             annotator,
-            manifest_store: self.manifest_store.clone(),
             rx,
+            dsp_result_tx: self.dsp_result_tx.clone(),
         };
         (self, Some(worker))
     }
@@ -915,13 +916,13 @@ impl DspWorker {
 pub(crate) async fn dispatch_classification_result_standalone(
     result: crate::dsp_render_output::RenderPublishResult,
     classification_tx: &Option<flume::Sender<ClassificationRequest>>,
-    manifest_store: &ManifestStore,
     state: &SharedDspState,
 ) -> Option<DspManifest> {
     let pending = result.pending_manifest?;
     if let Some(tx) = classification_tx {
+        let pcm_bytes = result.pcm_bytes.unwrap_or_default();
         let req = ClassificationRequest {
-            pcm_path: result.pcm_path.unwrap_or_default(),
+            pcm_bytes,
             sample_rate_hz: result.sample_rate_hz,
             pending_manifest: pending.clone(),
         };
@@ -932,21 +933,19 @@ pub(crate) async fn dispatch_classification_result_standalone(
                 st.total_classification_drops += 1;
                 warn!(
                     drops = st.total_classification_drops,
-                    "ClassificationWorker channel full; publishing manifest without BirdNET labels"
+                    "ClassificationWorker channel full; returning manifest without BirdNET labels"
                 );
-                drop(st);
-                let _ = manifest_store.publish(pending.clone()).await;
+                // No disk write — caller broadcasts via SSE without labels.
             }
             Err(flume::TrySendError::Disconnected(_)) => {
                 warn!(
-                    "ClassificationWorker channel closed; publishing manifest without BirdNET labels"
+                    "ClassificationWorker channel closed; returning manifest without BirdNET labels"
                 );
-                let _ = manifest_store.publish(pending.clone()).await;
+                // No disk write — caller broadcasts via SSE without labels.
             }
         }
-    } else if let Err(err) = manifest_store.publish(pending.clone()).await {
-        warn!(error = %err, "failed to publish classifier render manifest");
     }
+    // No ClassificationWorker configured — return manifest unlabeled; caller broadcasts via SSE.
     Some(pending)
 }
 

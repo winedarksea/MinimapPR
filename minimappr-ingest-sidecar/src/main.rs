@@ -513,7 +513,6 @@ async fn ingest_env(
     Json(payload): Json<EnvIngestPayload>,
 ) -> Response {
     use actors::environment::EnvSample;
-    use manifests::DspManifest;
 
     if payload.samples.len() > 64 {
         return (
@@ -527,7 +526,6 @@ async fn ingest_env(
             .into_response();
     }
 
-    let now_ns = dsp_worker::system_now_ns();
     let mut accepted = 0usize;
     for dto in &payload.samples {
         let sample = EnvSample {
@@ -537,30 +535,6 @@ async fn ingest_env(
         };
         state.env_cache.update(&dto.node_id, sample).await;
         accepted += 1;
-    }
-
-    // Journal env readings so downstream consumers can process them.
-    if let Some(manifest_store) = state.backend.manifest_store() {
-        if let Ok(samples_value) = serde_json::to_value(&payload.samples) {
-            let manifest = DspManifest {
-                manifest_id: String::new(),
-                manifest_type: "env_sample_append".to_string(),
-                created_ns: now_ns,
-                source_handles: vec![],
-                derived_handle: None,
-                localization: None,
-                classifier_render: None,
-                birdnet: None,
-                coverage_stats: None,
-                promotion_ready: false,
-                env_samples: Some(samples_value),
-                node_context: None,
-                raw_payload: None,
-            };
-            if let Err(err) = manifest_store.publish(manifest).await {
-                warn!(error = %err, "failed to publish env_sample_append manifest");
-            }
-        }
     }
 
     (StatusCode::ACCEPTED, Json(EnvIngestResponse { accepted })).into_response()

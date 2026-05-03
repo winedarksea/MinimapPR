@@ -1,11 +1,8 @@
-use std::path::PathBuf;
-
 use tracing::warn;
 use uuid::Uuid;
 
 use crate::{
     birdnet_render::{render_hybrid_pcm16le, render_omni_pcm16le, HybridRenderConfig},
-    derived_cache::DerivedCache,
     dsp_worker::{DspWorkerConfig, SIRITH_MIC_POSITIONS_M},
     journal_reader::JournalPayloadHandle,
     manifests::{BirdnetHybridProvenance, ClassifierRenderManifestPayload, DspManifest},
@@ -14,10 +11,11 @@ use crate::{
 
 pub struct RenderPublishResult {
     /// Pre-built classifier_render manifest; not yet published to ManifestStore.
-    /// None only on DerivedCache write failure.
+    /// None only on render failure.
     pub pending_manifest: Option<DspManifest>,
-    /// Path to the PCM file in DerivedCache, needed by ClassificationWorker.
-    pub pcm_path: Option<PathBuf>,
+    /// Raw PCM16LE mono bytes produced by the render — carried in memory so
+    /// ClassificationWorker can write to a temp file without a persistent cache.
+    pub pcm_bytes: Option<Vec<u8>>,
     pub sample_rate_hz: u32,
     pub failure_count: u64,
 }
@@ -91,48 +89,39 @@ pub fn compute_render_bytes(
     }
 }
 
-/// Write PCM bytes to the DerivedCache and build a RenderPublishResult.
-/// Async I/O only — no CPU render math.
+/// Build the classifier_render manifest and return raw PCM bytes in memory.
+/// No disk writes — the caller is responsible for delivering PCM bytes to
+/// ClassificationWorker via the in-process channel.
 #[allow(clippy::too_many_arguments)]
-pub async fn write_render_to_cache(
-    derived_cache: &DerivedCache,
+pub fn build_render_result(
     manifest: &DspManifest,
     stream_key: &str,
     pcm_bytes: Vec<u8>,
     meta: RenderMeta,
     coverage_stats: Option<serde_json::Value>,
-    source_ids: Vec<String>,
+    _source_ids: Vec<String>,
     now_ns: u128,
     sample_rate_hz: u32,
 ) -> RenderPublishResult {
-    let entry = match derived_cache
-        .record_entry(
-            "classifier_render".to_string(),
-            &pcm_bytes,
-            source_ids,
-            now_ns,
-        )
-        .await
-    {
-        Ok(entry) => entry,
-        Err(err) => {
-            warn!(
-                manifest_id = %manifest.manifest_id,
-                error = %err,
-                "DSP worker failed to record classifier render"
-            );
-            return RenderPublishResult {
-                pending_manifest: None,
-                pcm_path: None,
-                sample_rate_hz,
-                failure_count: 1,
-            };
-        }
-    };
-    let pcm_path = entry.path.clone();
     let sample_count = pcm_bytes.len() / 2;
+    // Sentinel derived_handle — segment_path is not a readable disk location in
+    // the memory-only path. The inline raw_render_bytes field on the SSE manifest
+    // carries the actual PCM; derived_handle conveys schema metadata only.
+    let derived_handle = JournalPayloadHandle {
+        journal_epoch: 0,
+        segment_id: format!("derived-mem-{}", Uuid::new_v4()),
+        stream_key: stream_key.to_string(),
+        payload_offset_bytes: 0,
+        payload_length_bytes: pcm_bytes.len() as u64,
+        toa_ns: manifest.source_handles.first().and_then(|h| h.toa_ns),
+        tor_ns: manifest.source_handles.first().and_then(|h| h.tor_ns),
+        sample_index_start: None,
+        sample_count: Some(sample_count as u64),
+        integrity_hash: String::new(),
+        segment_path: std::path::PathBuf::new(), // not a readable path
+    };
     let manifest_payload = ClassifierRenderManifestPayload {
-        render_id: entry.derived_id.clone(),
+        render_id: derived_handle.segment_id.clone(),
         render_kind: meta.render_kind.clone(),
         sample_rate_hz,
         channels: 1,
@@ -142,20 +131,6 @@ pub async fn write_render_to_cache(
         source_channel_count: meta.source_channel_count,
         fallback_reason: meta.effective_fallback_reason.clone(),
     };
-    let derived_handle = JournalPayloadHandle {
-        journal_epoch: 0,
-        segment_id: entry.derived_id.clone(),
-        stream_key: stream_key.to_string(),
-        payload_offset_bytes: 0,
-        payload_length_bytes: entry.byte_length,
-        toa_ns: manifest.source_handles.first().and_then(|h| h.toa_ns),
-        tor_ns: manifest.source_handles.first().and_then(|h| h.tor_ns),
-        sample_index_start: None,
-        sample_count: Some(sample_count as u64),
-        integrity_hash: String::new(),
-        segment_path: entry.path.clone(),
-    };
-    // BirdNET labels are filled in by ClassificationWorker before ManifestStore.publish.
     let pending = DspManifest {
         manifest_id: format!("manifest-{}", Uuid::new_v4()),
         manifest_type: "classifier_render".to_string(),
@@ -178,15 +153,43 @@ pub async fn write_render_to_cache(
         coverage_stats,
         promotion_ready: true,
         env_samples: None,
-        // Carry node_context forward so Python can reconstruct the NodeSpec from the
-        // classifier_render manifest without relying on any persisted raw payload.
         node_context: manifest.node_context.clone(),
         raw_payload: None,
+        raw_render_bytes: None, // set by run_io before SSE broadcast
     };
     RenderPublishResult {
         pending_manifest: Some(pending),
-        pcm_path: Some(pcm_path),
+        pcm_bytes: Some(pcm_bytes),
         sample_rate_hz,
         failure_count: 0,
     }
+}
+
+/// Async wrapper kept for callers that previously used write_render_to_cache.
+/// Now purely synchronous under the hood — no I/O, no DerivedCache.
+#[allow(clippy::too_many_arguments)]
+pub async fn write_render_to_cache(
+    _derived_cache: &crate::derived_cache::DerivedCache,
+    manifest: &DspManifest,
+    stream_key: &str,
+    pcm_bytes: Vec<u8>,
+    meta: RenderMeta,
+    coverage_stats: Option<serde_json::Value>,
+    source_ids: Vec<String>,
+    now_ns: u128,
+    sample_rate_hz: u32,
+) -> RenderPublishResult {
+    if pcm_bytes.is_empty() {
+        warn!(
+            manifest_id = %manifest.manifest_id,
+            "DSP worker: empty PCM render — skipping classifier render"
+        );
+        return RenderPublishResult {
+            pending_manifest: None,
+            pcm_bytes: None,
+            sample_rate_hz,
+            failure_count: 1,
+        };
+    }
+    build_render_result(manifest, stream_key, pcm_bytes, meta, coverage_stats, source_ids, now_ns, sample_rate_hz)
 }

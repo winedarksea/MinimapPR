@@ -26,6 +26,8 @@ async fn worker_publishes_localization_and_classifier_render_contract() {
     );
     derived_cache.ensure_initialized().await.unwrap();
 
+    let (dsp_result_tx, mut dsp_result_rx) = tokio::sync::broadcast::channel(16);
+
     let payload = store_forward_payload();
     let now_ns = system_now_ns();
     let raw_manifest = DspManifest {
@@ -54,6 +56,7 @@ async fn worker_publishes_localization_and_classifier_render_contract() {
         env_samples: None,
         node_context: None,
         raw_payload: Some(payload.into_bytes()),
+        raw_render_bytes: None,
     };
     let state: SharedDspState = Arc::new(RwLock::new(Default::default()));
     let mut worker = DspWorker::new(
@@ -64,16 +67,27 @@ async fn worker_publishes_localization_and_classifier_render_contract() {
             ..DspWorkerConfig::default()
         },
         state.clone(),
-    );
+    )
+    .with_dsp_result_sender(dsp_result_tx);
 
     worker.process_one(raw_manifest, 1).await;
 
-    let localizations = manifest_store
-        .query_pending("localization_result")
-        .await
-        .unwrap();
-    assert_eq!(localizations.len(), 1);
-    let localization = localizations[0]
+    // Collect SSE events broadcast by run_io (no disk writes for memory-path manifests).
+    let mut events: Vec<DspManifest> = Vec::new();
+    while let Ok(m) = dsp_result_rx.try_recv() {
+        events.push(m);
+    }
+
+    let localization_event = events
+        .iter()
+        .find(|m| m.manifest_type == "localization_result")
+        .expect("localization_result SSE event");
+    let render_event = events
+        .iter()
+        .find(|m| m.manifest_type == "classifier_render")
+        .expect("classifier_render SSE event");
+
+    let localization = localization_event
         .localization
         .as_ref()
         .expect("localization payload");
@@ -81,26 +95,21 @@ async fn worker_publishes_localization_and_classifier_render_contract() {
     assert_eq!(localization.resolved_algorithm, "srp_phat");
     assert_eq!(localization.pair_tdoas.len(), 6);
 
-    let renders = manifest_store
-        .query_pending("classifier_render")
-        .await
-        .unwrap();
-    assert_eq!(renders.len(), 1);
-    assert!(renders[0].promotion_ready);
+    // localization_result carries derived_handle (Bug A fix) and inline PCM.
+    assert!(localization_event.derived_handle.is_some());
+    assert!(localization_event.raw_render_bytes.is_some());
+
     assert_eq!(
-        renders[0]
+        render_event
             .classifier_render
             .as_ref()
             .expect("render payload")
             .sample_format,
         "pcm16le"
     );
-    assert!(renders[0]
-        .derived_handle
-        .as_ref()
-        .unwrap()
-        .segment_path
-        .exists());
+    // Inline PCM delivered — segment_path is a sentinel (no disk file written).
+    assert!(render_event.raw_render_bytes.is_some());
+    assert!(!render_event.derived_handle.as_ref().unwrap().segment_path.exists());
 
     let state = state.read().await;
     assert_eq!(state.total_tdoa_results, 1);
@@ -122,6 +131,8 @@ async fn worker_publishes_omni_render_when_localization_coverage_is_unavailable(
     );
     derived_cache.ensure_initialized().await.unwrap();
 
+    let (dsp_result_tx, mut dsp_result_rx) = tokio::sync::broadcast::channel(32);
+
     let state: SharedDspState = Arc::new(RwLock::new(Default::default()));
     let mut worker = DspWorker::new(
         manifest_store.clone(),
@@ -134,7 +145,8 @@ async fn worker_publishes_omni_render_when_localization_coverage_is_unavailable(
             ..DspWorkerConfig::default()
         },
         state.clone(),
-    );
+    )
+    .with_dsp_result_sender(dsp_result_tx);
 
     let first_payload = store_forward_payload_with_timing(1_000_000_000, 0, 1);
     let first_manifest =
@@ -142,8 +154,6 @@ async fn worker_publishes_omni_render_when_localization_coverage_is_unavailable(
             .await;
     worker.process_one(first_manifest, 2).await;
 
-    // This mirrors the live Sirith failure mode: sample coverage appends, but
-    // the frame timestamp maps the evaluation window outside the buffer.
     let second_payload = store_forward_payload_with_timing(100_000_000, 1024, 2);
     let second_manifest = raw_manifest_for_payload(
         tmp.path(),
@@ -154,17 +164,23 @@ async fn worker_publishes_omni_render_when_localization_coverage_is_unavailable(
     .await;
     worker.process_one(second_manifest, 2).await;
 
-    let localizations = manifest_store
-        .query_pending("localization_result")
-        .await
-        .unwrap();
+    let mut events: Vec<DspManifest> = Vec::new();
+    while let Ok(m) = dsp_result_rx.try_recv() {
+        events.push(m);
+    }
+
+    let localizations: Vec<_> = events
+        .iter()
+        .filter(|m| m.manifest_type == "localization_result")
+        .collect();
     assert_eq!(localizations.len(), 1);
 
-    let renders = manifest_store
-        .query_pending("classifier_render")
-        .await
-        .unwrap();
+    let renders: Vec<_> = events
+        .iter()
+        .filter(|m| m.manifest_type == "classifier_render")
+        .collect();
     assert_eq!(renders.len(), 2);
+
     let fallback_render = renders
         .iter()
         .find(|render| {
@@ -204,6 +220,8 @@ async fn localization_continues_when_classifier_render_is_rate_limited() {
     );
     derived_cache.ensure_initialized().await.unwrap();
 
+    let (dsp_result_tx, mut dsp_result_rx) = tokio::sync::broadcast::channel(32);
+
     let state: SharedDspState = Arc::new(RwLock::new(Default::default()));
     let mut worker = DspWorker::new(
         manifest_store.clone(),
@@ -216,7 +234,8 @@ async fn localization_continues_when_classifier_render_is_rate_limited() {
             ..DspWorkerConfig::default()
         },
         state.clone(),
-    );
+    )
+    .with_dsp_result_sender(dsp_result_tx);
 
     let first_payload = store_forward_payload_with_timing(1_000_000_000, 0, 1);
     let first_manifest = raw_manifest_for_payload(
@@ -238,19 +257,23 @@ async fn localization_continues_when_classifier_render_is_rate_limited() {
     .await;
     worker.process_one(second_manifest, 1).await;
 
-    let localizations = manifest_store
-        .query_pending("localization_result")
-        .await
-        .unwrap();
-    let renders = manifest_store
-        .query_pending("classifier_render")
-        .await
-        .unwrap();
+    let mut events: Vec<DspManifest> = Vec::new();
+    while let Ok(m) = dsp_result_rx.try_recv() {
+        events.push(m);
+    }
 
-    // First frame can publish both; second frame should still localize even
-    // when classifier render cadence suppresses publication.
-    assert_eq!(localizations.len(), 2);
-    assert_eq!(renders.len(), 1);
+    let localization_count = events
+        .iter()
+        .filter(|m| m.manifest_type == "localization_result")
+        .count();
+    let render_count = events
+        .iter()
+        .filter(|m| m.manifest_type == "classifier_render")
+        .count();
+
+    // First frame publishes both; second still localizes even when render cadence suppresses.
+    assert_eq!(localization_count, 2);
+    assert_eq!(render_count, 1);
 
     let state = state.read().await;
     assert_eq!(state.total_localization_results, 2);
@@ -278,6 +301,7 @@ async fn consume_manifest_standalone_skips_non_persisted_channel_manifests() {
         env_samples: None,
         node_context: None,
         raw_payload: Some(vec![1, 2, 3]),
+        raw_render_bytes: None,
     };
 
     consume_manifest_standalone(&manifest, &manifest_store, &consumed_since_prune, 1, 10).await;
@@ -320,6 +344,7 @@ async fn raw_manifest_for_payload(
         env_samples: None,
         node_context: None,
         raw_payload: Some(payload_bytes),
+        raw_render_bytes: None,
     }
 }
 
@@ -601,6 +626,7 @@ fn stale_manifest_detection_uses_source_receipt_time() {
         env_samples: None,
         node_context: None,
         raw_payload: None,
+        raw_render_bytes: None,
     };
 
     assert!(manifest_is_older_than_buffer_horizon(
@@ -643,6 +669,7 @@ fn stale_manifest_detection_keeps_fresh_manifest_with_old_packet_epoch() {
         env_samples: None,
         node_context: None,
         raw_payload: None,
+        raw_render_bytes: None,
     };
 
     // Even with old packet timestamps, the manifest just arrived and should
@@ -728,5 +755,6 @@ fn test_manifest_with_created_ns(manifest_id: &str, created_ns: u128) -> DspMani
         env_samples: None,
         node_context: None,
         raw_payload: None,
+        raw_render_bytes: None,
     }
 }
