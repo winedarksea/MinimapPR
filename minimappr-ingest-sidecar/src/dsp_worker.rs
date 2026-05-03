@@ -745,22 +745,15 @@ impl DspWorker {
     }
 
     fn defer_source_manifest_consumption(&mut self, manifest: &DspManifest) {
-        if !Self::source_manifest_was_persisted(manifest) {
+        if !source_manifest_was_persisted(manifest) {
             return;
         }
         self.deferred_source_manifest_ids
             .push(manifest.manifest_id.clone());
     }
 
-    fn source_manifest_was_persisted(manifest: &DspManifest) -> bool {
-        // Manifests read from disk never include raw_payload because the field is
-        // serde-skipped. Channel-delivered manifests include raw_payload and do not
-        // require mark_consumed filesystem operations.
-        manifest.raw_payload.is_none()
-    }
-
     async fn mark_source_manifest_consumed_if_persisted(&self, manifest: &DspManifest) {
-        if !Self::source_manifest_was_persisted(manifest) {
+        if !source_manifest_was_persisted(manifest) {
             return;
         }
         let _ = self.manifest_store.mark_consumed(&manifest.manifest_id).await;
@@ -993,6 +986,9 @@ pub(crate) async fn consume_manifest_standalone(
     prune_interval: u64,
     retention_max_files: usize,
 ) {
+    if !source_manifest_was_persisted(manifest) {
+        return;
+    }
     if let Err(err) = manifest_store.mark_consumed(&manifest.manifest_id).await {
         warn!(
             manifest_id = %manifest.manifest_id,
@@ -1010,6 +1006,13 @@ pub(crate) async fn consume_manifest_standalone(
             }
         });
     }
+}
+
+pub(crate) fn source_manifest_was_persisted(manifest: &DspManifest) -> bool {
+    // Manifests read from disk never include raw_payload because the field is
+    // serde-skipped. Channel-delivered manifests include raw_payload and do not
+    // require mark_consumed filesystem operations.
+    manifest.raw_payload.is_none()
 }
 
 pub(crate) fn render_coverage_json(

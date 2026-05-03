@@ -6,7 +6,10 @@ use crate::{
     manifests::ManifestStore,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use tokio::{fs, sync::RwLock};
 
 #[tokio::test]
@@ -303,6 +306,40 @@ async fn localization_continues_when_classifier_render_is_rate_limited() {
     let state = state.read().await;
     assert_eq!(state.total_localization_results, 2);
     assert_eq!(state.total_classifier_renders, 1);
+}
+
+#[tokio::test]
+async fn consume_manifest_standalone_skips_non_persisted_channel_manifests() {
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest_store = ManifestStore::new(tmp.path());
+    manifest_store.ensure_initialized().await.unwrap();
+
+    let consumed_since_prune = Arc::new(AtomicU64::new(0));
+    let manifest = DspManifest {
+        manifest_id: "manifest-in-memory-only".to_string(),
+        manifest_type: "raw_journal_append".to_string(),
+        created_ns: system_now_ns(),
+        source_handles: vec![],
+        derived_handle: None,
+        localization: None,
+        classifier_render: None,
+        birdnet: None,
+        coverage_stats: None,
+        promotion_ready: false,
+        env_samples: None,
+        raw_payload: Some(vec![1, 2, 3]),
+    };
+
+    consume_manifest_standalone(
+        &manifest,
+        &manifest_store,
+        &consumed_since_prune,
+        1,
+        10,
+    )
+    .await;
+
+    assert_eq!(consumed_since_prune.load(Ordering::Relaxed), 0);
 }
 
 async fn raw_manifest_for_payload(

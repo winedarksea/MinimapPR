@@ -1,4 +1,8 @@
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
+
+const PRUNE_CHUNK_DIVISOR: i64 = 8;
+const PRUNE_MIN_CHUNK_SECONDS: f64 = 0.25;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AudioCoverageStats {
@@ -20,8 +24,8 @@ pub struct SensorStreamBuffer {
     timeline_origin_ns: Option<i128>,
     timeline_origin_sample_index: i64,
     buffer_start_sample_index: i64,
-    samples: Vec<f32>,
-    coverage: Vec<bool>,
+    samples: VecDeque<f32>,
+    coverage: VecDeque<bool>,
 }
 
 impl SensorStreamBuffer {
@@ -35,9 +39,31 @@ impl SensorStreamBuffer {
             timeline_origin_ns: None,
             timeline_origin_sample_index: 0,
             buffer_start_sample_index: 0,
-            samples: Vec::new(),
-            coverage: Vec::new(),
+            samples: VecDeque::new(),
+            coverage: VecDeque::new(),
         }
+    }
+
+    fn sample_len(&self) -> usize {
+        self.samples.len()
+    }
+
+    fn collect_samples_range(&self, start_offset: usize, end_offset: usize) -> Vec<f32> {
+        self.samples
+            .iter()
+            .skip(start_offset)
+            .take(end_offset.saturating_sub(start_offset))
+            .copied()
+            .collect()
+    }
+
+    fn collect_coverage_range(&self, start_offset: usize, end_offset: usize) -> Vec<bool> {
+        self.coverage
+            .iter()
+            .skip(start_offset)
+            .take(end_offset.saturating_sub(start_offset))
+            .copied()
+            .collect()
     }
 
     pub fn append(
@@ -72,7 +98,7 @@ impl SensorStreamBuffer {
         }
 
         let current_start = self.buffer_start_sample_index;
-        let current_end = current_start + self.samples.len() as i64;
+        let current_end = current_start + self.sample_len() as i64;
         let mut incoming_start = incoming_start;
 
         if explicit_sample_coverage {
@@ -107,11 +133,11 @@ impl SensorStreamBuffer {
         if incoming_start >= current_end {
             let gap = (incoming_start - current_end) as usize;
             if gap > 0 {
-                self.samples.extend(vec![0.0_f32; gap]);
-                self.coverage.extend(vec![false; gap]);
+                self.samples.resize(self.sample_len() + gap, 0.0_f32);
+                self.coverage.resize(self.coverage.len() + gap, false);
             }
-            self.samples.extend_from_slice(samples);
-            self.coverage.extend(vec![true; samples.len()]);
+            self.samples.extend(samples.iter().copied());
+            self.coverage.resize(self.coverage.len() + samples.len(), true);
             self.prune();
             return Ok(());
         }
@@ -119,8 +145,10 @@ impl SensorStreamBuffer {
         // Fast path: incoming frame is fully inside current buffer bounds.
         if incoming_start >= current_start && incoming_end <= current_end {
             let offset = (incoming_start - current_start) as usize;
-            self.samples[offset..offset + samples.len()].copy_from_slice(samples);
-            self.coverage[offset..offset + samples.len()].fill(true);
+            for (index, sample) in samples.iter().copied().enumerate() {
+                self.samples[offset + index] = sample;
+                self.coverage[offset + index] = true;
+            }
             return Ok(());
         }
 
@@ -131,11 +159,14 @@ impl SensorStreamBuffer {
         {
             let offset = (incoming_start - current_start) as usize;
             let overlap_len = (current_end - incoming_start) as usize;
-            self.samples[offset..offset + overlap_len].copy_from_slice(&samples[..overlap_len]);
-            self.coverage[offset..offset + overlap_len].fill(true);
-            self.samples.extend_from_slice(&samples[overlap_len..]);
+            for (index, sample) in samples.iter().take(overlap_len).copied().enumerate() {
+                self.samples[offset + index] = sample;
+                self.coverage[offset + index] = true;
+            }
+            self.samples
+                .extend(samples[overlap_len..].iter().copied());
             self.coverage
-                .extend(vec![true; samples.len().saturating_sub(overlap_len)]);
+                .resize(self.coverage.len() + samples.len().saturating_sub(overlap_len), true);
             self.prune();
             return Ok(());
         }
@@ -147,17 +178,19 @@ impl SensorStreamBuffer {
         let mut merged_coverage = vec![false; (merged_end - merged_start) as usize];
 
         let existing_offset = (current_start - merged_start) as usize;
-        merged[existing_offset..existing_offset + self.samples.len()]
-            .copy_from_slice(&self.samples);
-        merged_coverage[existing_offset..existing_offset + self.coverage.len()]
-            .copy_from_slice(&self.coverage);
+        for (index, sample) in self.samples.iter().copied().enumerate() {
+            merged[existing_offset + index] = sample;
+        }
+        for (index, covered) in self.coverage.iter().copied().enumerate() {
+            merged_coverage[existing_offset + index] = covered;
+        }
 
         let incoming_offset = (incoming_start - merged_start) as usize;
         merged[incoming_offset..incoming_offset + samples.len()].copy_from_slice(samples);
         merged_coverage[incoming_offset..incoming_offset + samples.len()].fill(true);
 
-        self.samples = merged;
-        self.coverage = merged_coverage;
+        self.samples = VecDeque::from(merged);
+        self.coverage = VecDeque::from(merged_coverage);
         self.buffer_start_sample_index = merged_start;
         self.prune();
         Ok(())
@@ -177,14 +210,14 @@ impl SensorStreamBuffer {
         // is far too short for BirdNET and produced only "unknown" (0.0) classifications.
         // We still return None when the end is beyond what has been buffered because
         // that would require future samples.
-        if end_offset <= 0 || end_offset > self.samples.len() as i64 {
+        if end_offset <= 0 || end_offset > self.sample_len() as i64 {
             return None;
         }
         let start_offset = (start_sample - self.buffer_start_sample_index).max(0) as usize;
         if start_offset >= end_offset as usize {
             return None;
         }
-        Some(self.samples[start_offset..end_offset as usize].to_vec())
+        Some(self.collect_samples_range(start_offset, end_offset as usize))
     }
 
     /// Extract a window centered on `center_time_ns`, matching Python's `get_window`.
@@ -202,10 +235,10 @@ impl SensorStreamBuffer {
         let end_sample = start_sample + window_samples;
         let start_offset = start_sample - self.buffer_start_sample_index;
         let end_offset = end_sample - self.buffer_start_sample_index;
-        if start_offset < 0 || end_offset > self.samples.len() as i64 {
+        if start_offset < 0 || end_offset > self.sample_len() as i64 {
             return None;
         }
-        Some(self.samples[start_offset as usize..end_offset as usize].to_vec())
+        Some(self.collect_samples_range(start_offset as usize, end_offset as usize))
     }
 
     /// Coverage stats for a window centered on `center_time_ns`.
@@ -225,8 +258,9 @@ impl SensorStreamBuffer {
         if start_offset < 0 || end_offset > self.coverage.len() as i64 {
             return None;
         }
+        let window_coverage = self.collect_coverage_range(start_offset as usize, end_offset as usize);
         Some(coverage_stats(
-            &self.coverage[start_offset as usize..end_offset as usize],
+            &window_coverage,
             self.sample_rate_hz,
         ))
     }
@@ -238,8 +272,8 @@ impl SensorStreamBuffer {
         let window_samples = (window_seconds * f64::from(self.sample_rate_hz))
             .round()
             .max(1.0) as usize;
-        let start_offset = self.samples.len().saturating_sub(window_samples);
-        self.samples[start_offset..].to_vec()
+        let start_offset = self.sample_len().saturating_sub(window_samples);
+        self.collect_samples_range(start_offset, self.sample_len())
     }
 
     pub fn latest_coverage_stats(&self, window_seconds: f64) -> Option<AudioCoverageStats> {
@@ -250,8 +284,9 @@ impl SensorStreamBuffer {
             .round()
             .max(1.0) as usize;
         let start_offset = self.coverage.len().saturating_sub(window_samples);
+        let window_coverage = self.collect_coverage_range(start_offset, self.coverage.len());
         Some(coverage_stats(
-            &self.coverage[start_offset..],
+            &window_coverage,
             self.sample_rate_hz,
         ))
     }
@@ -274,8 +309,9 @@ impl SensorStreamBuffer {
         if start_offset >= end_offset as usize {
             return None;
         }
+        let window_coverage = self.collect_coverage_range(start_offset, end_offset as usize);
         Some(coverage_stats(
-            &self.coverage[start_offset..end_offset as usize],
+            &window_coverage,
             self.sample_rate_hz,
         ))
     }
@@ -284,18 +320,31 @@ impl SensorStreamBuffer {
         self.timeline_origin_ns = Some(start_time_ns);
         self.timeline_origin_sample_index = start_sample_index;
         self.buffer_start_sample_index = start_sample_index;
-        self.samples = samples.to_vec();
-        self.coverage = vec![true; samples.len()];
+        self.samples = VecDeque::from(samples.to_vec());
+        self.coverage = VecDeque::from(vec![true; samples.len()]);
         self.prune();
     }
 
     fn prune(&mut self) {
-        if self.samples.len() as i64 <= self.max_samples {
+        if self.sample_len() as i64 <= self.max_samples {
             return;
         }
-        let drop = (self.samples.len() as i64 - self.max_samples) as usize;
-        self.samples.drain(0..drop);
-        self.coverage.drain(0..drop);
+        let overflow = (self.sample_len() as i64 - self.max_samples) as usize;
+        // VecDeque front pops are O(1), so prune no longer memmoves the full tail.
+        let drop = if self.max_samples >= i64::from(self.sample_rate_hz) {
+            let chunk_samples_from_window =
+                (self.max_samples / PRUNE_CHUNK_DIVISOR).max(1) as usize;
+            let min_chunk_samples =
+                (f64::from(self.sample_rate_hz) * PRUNE_MIN_CHUNK_SECONDS).round() as usize;
+            overflow.max(chunk_samples_from_window.max(min_chunk_samples))
+        } else {
+            overflow
+        }
+        .min(self.sample_len());
+        for _ in 0..drop {
+            let _ = self.samples.pop_front();
+            let _ = self.coverage.pop_front();
+        }
         self.buffer_start_sample_index += drop as i64;
     }
 
@@ -396,8 +445,14 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(buffer.samples, vec![1.0, 1.0, 9.0, 9.0, 9.0, 9.0]);
-        assert_eq!(buffer.coverage, vec![true, true, true, true, true, true]);
+        assert_eq!(
+            buffer.samples.iter().copied().collect::<Vec<_>>(),
+            vec![1.0, 1.0, 9.0, 9.0, 9.0, 9.0]
+        );
+        assert_eq!(
+            buffer.coverage.iter().copied().collect::<Vec<_>>(),
+            vec![true, true, true, true, true, true]
+        );
     }
 
     #[test]
@@ -412,7 +467,7 @@ mod tests {
             .unwrap();
         buffer.append(t0 + chunk_ns, &[2.0; 4], None, None).unwrap();
         assert_eq!(
-            buffer.samples,
+            buffer.samples.iter().copied().collect::<Vec<_>>(),
             vec![1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 3.0]
         );
         assert_eq!(
@@ -445,7 +500,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            buffer.samples,
+            buffer.samples.iter().copied().collect::<Vec<_>>(),
             vec![1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 2.0, 2.0, 2.0, 2.0]
         );
         let stats = buffer
@@ -485,11 +540,17 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(buffer.samples, vec![2.0; frame_samples]);
+        assert_eq!(
+            buffer.samples.iter().copied().collect::<Vec<_>>(),
+            vec![2.0; frame_samples]
+        );
         assert_eq!(buffer.timeline_origin_ns, Some(corrected_start_ns));
         assert_eq!(buffer.timeline_origin_sample_index, frame_samples as i64);
         assert_eq!(buffer.buffer_start_sample_index, frame_samples as i64);
-        assert_eq!(buffer.coverage, vec![true; frame_samples]);
+        assert_eq!(
+            buffer.coverage.iter().copied().collect::<Vec<_>>(),
+            vec![true; frame_samples]
+        );
     }
 
     #[test]
@@ -523,14 +584,17 @@ mod tests {
 
         // Expected: [1,1,1,1, 0,0,0,0, 2,2,2,2]
         assert_eq!(
-            buffer.samples,
+            buffer.samples.iter().copied().collect::<Vec<_>>(),
             vec![1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 2.0, 2.0, 2.0, 2.0]
         );
         // Gap in the middle must have false coverage.
         let expected_coverage = vec![
             true, true, true, true, false, false, false, false, true, true, true, true,
         ];
-        assert_eq!(buffer.coverage, expected_coverage);
+        assert_eq!(
+            buffer.coverage.iter().copied().collect::<Vec<_>>(),
+            expected_coverage
+        );
     }
 
     /// A single continuous frame produces full coverage with no gaps.
@@ -608,7 +672,10 @@ mod tests {
             .unwrap();
 
         // After reset, only the new frame should be in the buffer.
-        assert_eq!(buffer.samples, vec![2.0_f32; 128]);
+        assert_eq!(
+            buffer.samples.iter().copied().collect::<Vec<_>>(),
+            vec![2.0_f32; 128]
+        );
         assert_eq!(buffer.timeline_origin_ns, Some(corrected_t0));
     }
 
@@ -673,5 +740,31 @@ mod tests {
             buffer.window_ending_at(early_end_time_ns, 0.5).is_none(),
             "audio window ending before buffer start should return None"
         );
+    }
+
+    #[test]
+    fn prune_drops_chunk_to_amortize_front_compaction_cost() {
+        let sr = 16_u32;
+        let t0 = 1_000_000_000_i128;
+        let mut buffer = SensorStreamBuffer::new(sr, 1.0);
+
+        buffer
+            .append(t0, &[1.0_f32; 16], Some(0), Some(16))
+            .unwrap();
+        buffer
+            .append(
+                t0 + (16 * 1_000_000_000_i128 / i128::from(sr)),
+                &[2.0_f32; 1],
+                Some(16),
+                Some(17),
+            )
+            .unwrap();
+
+        // max_samples=16 and overflow=1, but chunked prune should drop 4 samples
+        // (max(sr*0.25, max_samples/8)) to avoid tiny per-frame front drains.
+        assert_eq!(buffer.buffer_start_sample_index, 4);
+        assert_eq!(buffer.samples.len(), 13);
+        assert_eq!(buffer.samples[0], 1.0);
+        assert_eq!(buffer.samples.back().copied(), Some(2.0));
     }
 }
