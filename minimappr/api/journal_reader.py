@@ -59,6 +59,10 @@ class JournalPayloadHandle:
     def read_bytes(self) -> bytes:
         if self.payload_offset_bytes < 0 or self.payload_length_bytes < 0:
             raise JournalHandleReadError("journal handle byte range must be non-negative")
+        if self.payload_length_bytes == 0:
+            payload = b""
+            _verify_integrity_hash(payload, self.integrity_hash)
+            return payload
         try:
             segment_size = self.segment_path.stat().st_size
         except FileNotFoundError as exc:

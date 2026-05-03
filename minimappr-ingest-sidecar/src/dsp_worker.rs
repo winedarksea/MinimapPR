@@ -290,16 +290,23 @@ impl DspWorker {
             Vec::new()
         };
 
-        let disk_manifests = match self
-            .manifest_store
-            .query_pending_limited("raw_journal_append", batch_limit)
-            .await
-        {
-            Ok(m) => m,
-            Err(err) => {
-                warn!(error = %err, "DSP worker failed to query pending manifests");
-                return;
+        // Only hit the filesystem when the in-process channel did not already
+        // fill the batch budget. This keeps steady-state ingest on memory paths.
+        let should_query_disk = channel_manifests.len() < channel_limit;
+        let disk_manifests = if should_query_disk {
+            match self
+                .manifest_store
+                .query_pending_limited("raw_journal_append", batch_limit)
+                .await
+            {
+                Ok(m) => m,
+                Err(err) => {
+                    warn!(error = %err, "DSP worker failed to query pending manifests");
+                    return;
+                }
             }
+        } else {
+            Vec::new()
         };
         let pending = merge_pending_manifests_for_batch(channel_manifests, disk_manifests, batch_limit);
 
@@ -338,9 +345,8 @@ impl DspWorker {
         let now_ns = system_now_ns();
 
         let Some(first_handle) = manifest.source_handles.first() else {
-            let _ = self
-                .manifest_store
-                .mark_consumed(&manifest.manifest_id)
+            self
+                .mark_source_manifest_consumed_if_persisted(&manifest)
                 .await;
             return None;
         };
@@ -401,17 +407,15 @@ impl DspWorker {
                     error = %err,
                     "DSP worker failed to decode ingest audio; consuming manifest"
                 );
-                let _ = self
-                    .manifest_store
-                    .mark_consumed(&manifest.manifest_id)
+                self
+                    .mark_source_manifest_consumed_if_persisted(&manifest)
                     .await;
                 return None;
             }
         };
         if decoded.channels.is_empty() {
-            let _ = self
-                .manifest_store
-                .mark_consumed(&manifest.manifest_id)
+            self
+                .mark_source_manifest_consumed_if_persisted(&manifest)
                 .await;
             return None;
         }
@@ -459,12 +463,14 @@ impl DspWorker {
         // Receipt time is metadata for freshness/backlog decisions. Audio assembly
         // must stay on the node/sample timeline so WiFi jitter cannot move the
         // extraction window over otherwise contiguous buffered samples.
-        let buffer_uses_receipt_time = {
-            let skew_ns = (start_time_ns - now_ns as i128).unsigned_abs();
-            let max_skew_ns =
-                (self.config.max_trusted_node_clock_skew_seconds * 1_000_000_000.0).round() as u128;
-            !node_timestamp_is_available && skew_ns > max_skew_ns
-        };
+        let skew_ns = (start_time_ns - now_ns as i128).unsigned_abs();
+        let max_skew_ns =
+            (self.config.max_trusted_node_clock_skew_seconds * 1_000_000_000.0).round() as u128;
+        let buffer_uses_receipt_time = should_use_receipt_time_alignment(
+            node_timestamp_is_available,
+            skew_ns,
+            max_skew_ns,
+        );
         let (buffer_start_time_ns, buffer_end_time_ns) = if buffer_uses_receipt_time {
             let anchor_ns = first_handle.tor_ns.unwrap_or(now_ns as u64) as i128;
             let start_ns = anchor_ns.saturating_sub(render_duration_ns).max(1);
@@ -549,56 +555,59 @@ impl DspWorker {
         let start_sample_index = decoded.start_sample_index;
         let end_sample_index = decoded.end_sample_index;
 
-        let buffers = self.buffers.entry(stream_key.clone()).or_insert_with(|| {
-            core::array::from_fn(|_| SensorStreamBuffer::new(sr, self.config.max_buffer_seconds))
-        });
-        let existing_sample_timeline_start_time_ns =
-            if !node_timestamp_is_available && !buffer_uses_receipt_time {
-                start_sample_index
-                    .and_then(|sample_index| buffers[0].time_for_sample_index(sample_index))
-            } else {
-                None
-            };
-        let (buffer_start_time_ns, buffer_end_time_ns) =
-            if let Some(existing_start_time_ns) = existing_sample_timeline_start_time_ns {
-                (
-                    existing_start_time_ns,
-                    existing_start_time_ns + render_duration_ns,
-                )
-            } else {
-                (buffer_start_time_ns, buffer_end_time_ns)
-            };
-        let audio_end_ns = buffer_end_time_ns.max(0) as u128;
+        let (audio_end_ns, end_ns, channel_states) = {
+            let buffers = self.buffers.entry(stream_key.clone()).or_insert_with(|| {
+                core::array::from_fn(|_| SensorStreamBuffer::new(sr, self.config.max_buffer_seconds))
+            });
+            let existing_sample_timeline_start_time_ns =
+                if !node_timestamp_is_available && !buffer_uses_receipt_time {
+                    start_sample_index
+                        .and_then(|sample_index| buffers[0].time_for_sample_index(sample_index))
+                } else {
+                    None
+                };
+            let (buffer_start_time_ns, buffer_end_time_ns) =
+                if let Some(existing_start_time_ns) = existing_sample_timeline_start_time_ns {
+                    (
+                        existing_start_time_ns,
+                        existing_start_time_ns + render_duration_ns,
+                    )
+                } else {
+                    (buffer_start_time_ns, buffer_end_time_ns)
+                };
 
-        for (ch, buf) in buffers.iter_mut().enumerate() {
-            if let Err(err) = buf.append(
-                buffer_start_time_ns,
-                &decoded.channels[ch],
-                start_sample_index,
-                end_sample_index,
-            ) {
-                self.note_failure().await;
-                warn!(
-                    manifest_id = %manifest.manifest_id,
-                    channel = ch,
-                    error = %err,
-                    "DSP worker failed to append decoded audio; consuming malformed source manifest"
-                );
-                self.defer_source_manifest_consumption(&manifest);
-                return None;
+            for (ch, buf) in buffers.iter_mut().enumerate() {
+                if let Err(err) = buf.append(
+                    buffer_start_time_ns,
+                    &decoded.channels[ch],
+                    start_sample_index,
+                    end_sample_index,
+                ) {
+                    self.note_failure().await;
+                    warn!(
+                        manifest_id = %manifest.manifest_id,
+                        channel = ch,
+                        error = %err,
+                        "DSP worker failed to append decoded audio; consuming malformed source manifest"
+                    );
+                    self.defer_source_manifest_consumption(&manifest);
+                    return None;
+                }
             }
-        }
 
-        let end_ns = buffer_end_time_ns;
-        // Use centered windows for localization (matching Python's center_time_ns).
-        // TDOA is computed relative to the window center, so centering on the frame
-        // midpoint gives the most symmetric coverage.
-        let window_duration_ns = (window_sec * 1_000_000_000.0).round() as i128;
-        let half_window_ns = window_duration_ns / 2;
-        let center_offset_ns = (render_duration_ns - half_window_ns).max(0);
-        let center_time_ns = buffer_start_time_ns + center_offset_ns;
-        let channel_states =
-            localization_channel_states_centered(buffers, center_time_ns, window_sec);
+            let end_ns = buffer_end_time_ns;
+            // Use centered windows for localization (matching Python's center_time_ns).
+            // TDOA is computed relative to the window center, so centering on the frame
+            // midpoint gives the most symmetric coverage.
+            let window_duration_ns = (window_sec * 1_000_000_000.0).round() as i128;
+            let half_window_ns = window_duration_ns / 2;
+            let center_offset_ns = (render_duration_ns - half_window_ns).max(0);
+            let center_time_ns = buffer_start_time_ns + center_offset_ns;
+            let channel_states =
+                localization_channel_states_centered(buffers, center_time_ns, window_sec);
+
+            (buffer_end_time_ns.max(0) as u128, end_ns, channel_states)
+        };
 
         if channel_states.iter().all(|state| state.coverage.is_none()) {
             debug!(
@@ -609,10 +618,25 @@ impl DspWorker {
                 self.defer_source_manifest_consumption(&manifest);
                 return None;
             }
-            let fallback_render_windows =
-                latest_channel_windows(buffers, classification_window_sec);
-            let fallback_render_coverage =
-                latest_channel_coverage_stats(buffers, classification_window_sec);
+            let run_classifier_render = self.should_publish_classifier_render(
+                &stream_key,
+                audio_end_ns,
+                pending_backlog_depth,
+            );
+            if !run_classifier_render {
+                self.defer_source_manifest_consumption(&manifest);
+                return None;
+            }
+            let (fallback_render_windows, fallback_render_coverage) = {
+                let buffers = self
+                    .buffers
+                    .get(&stream_key)
+                    .expect("stream buffers must exist after append");
+                (
+                    latest_channel_windows(buffers, classification_window_sec),
+                    latest_channel_coverage_stats(buffers, classification_window_sec),
+                )
+            };
             let fallback_render_channels = if fallback_render_windows
                 .iter()
                 .any(|window| !window.is_empty())
@@ -621,14 +645,6 @@ impl DspWorker {
             } else {
                 decoded.channels.clone()
             };
-            if !self.should_publish_classifier_render(
-                &stream_key,
-                audio_end_ns,
-                pending_backlog_depth,
-            ) {
-                self.defer_source_manifest_consumption(&manifest);
-                return None;
-            }
             // Dispatch to Rayon so disk/DB I/O doesn't block the ingest loop.
             // Pass fallback_render_coverage as classification_coverage so run_math
             // builds an accurate coverage_json for the classifier_render manifest.
@@ -660,25 +676,35 @@ impl DspWorker {
 
         let active_channels =
             eligible_localization_channels(&channel_states, self.config.min_coverage_ratio);
-        let classification_windows =
-            channel_windows_ending_at(buffers, end_ns, classification_window_sec);
-        let classification_coverage =
-            channel_coverage_ending_at(buffers, end_ns, classification_window_sec);
-
-        if self.config.birdnet_hybrid_render_enabled
-            && !self.should_publish_classifier_render(
+        let windows: [Vec<f32>; 4] = core::array::from_fn(|ch| channel_states[ch].window.clone());
+        let run_srp = self.should_run_localization(&stream_key, audio_end_ns, &windows);
+        let run_classifier_render = self.config.birdnet_hybrid_render_enabled
+            && self.should_publish_classifier_render(
                 &stream_key,
                 audio_end_ns,
                 pending_backlog_depth,
-            )
-        {
+            );
+
+        if !run_srp && !run_classifier_render {
             self.defer_source_manifest_consumption(&manifest);
             return None;
         }
 
-        let windows: [Vec<f32>; 4] = core::array::from_fn(|ch| channel_states[ch].window.clone());
-        let run_srp = self.should_run_localization(&stream_key, audio_end_ns, &windows);
-        let run_classifier_render = self.config.birdnet_hybrid_render_enabled;
+        let (classification_windows, classification_coverage) = if run_classifier_render {
+            let buffers = self
+                .buffers
+                .get(&stream_key)
+                .expect("stream buffers must exist after append");
+            (
+                channel_windows_ending_at(buffers, end_ns, classification_window_sec),
+                channel_coverage_ending_at(buffers, end_ns, classification_window_sec),
+            )
+        } else {
+            (
+                core::array::from_fn(|_| Vec::new()),
+                [None, None, None, None],
+            )
+        };
 
         Some(ComputePayload {
             manifest,
@@ -719,8 +745,25 @@ impl DspWorker {
     }
 
     fn defer_source_manifest_consumption(&mut self, manifest: &DspManifest) {
+        if !Self::source_manifest_was_persisted(manifest) {
+            return;
+        }
         self.deferred_source_manifest_ids
             .push(manifest.manifest_id.clone());
+    }
+
+    fn source_manifest_was_persisted(manifest: &DspManifest) -> bool {
+        // Manifests read from disk never include raw_payload because the field is
+        // serde-skipped. Channel-delivered manifests include raw_payload and do not
+        // require mark_consumed filesystem operations.
+        manifest.raw_payload.is_none()
+    }
+
+    async fn mark_source_manifest_consumed_if_persisted(&self, manifest: &DspManifest) {
+        if !Self::source_manifest_was_persisted(manifest) {
+            return;
+        }
+        let _ = self.manifest_store.mark_consumed(&manifest.manifest_id).await;
     }
 
     async fn flush_deferred_source_manifest_consumptions(&mut self) {
@@ -1126,6 +1169,17 @@ fn resolve_buffer_start_time_ns(
         })
         .or_else(|| first_handle.tor_ns.map(i128::from))
         .unwrap_or(now_ns as i128)
+}
+
+fn should_use_receipt_time_alignment(
+    node_timestamp_is_available: bool,
+    skew_ns: u128,
+    max_trusted_node_clock_skew_ns: u128,
+) -> bool {
+    // Preserve packet/node timing for TDOA whenever firmware timing exists.
+    // Receipt-time alignment is a last-resort fallback only when node timing
+    // is absent and skew is beyond the trusted horizon.
+    !node_timestamp_is_available && skew_ns > max_trusted_node_clock_skew_ns
 }
 
 fn sample_index_to_absolute_time_from_now_ns(

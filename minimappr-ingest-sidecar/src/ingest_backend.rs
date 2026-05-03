@@ -561,6 +561,20 @@ impl SegmentJournalBackend {
             .map_err(InvalidIngestEnvelopeError::new)
             .map_err(|error| -> BoxedError { Box::new(error) })?;
 
+        // Fast-path mode: when raw audio bytes are delivered in-process and binary
+        // writes are disabled, avoid all per-frame journal filesystem writes here.
+        if self.runtime_config.skip_binary_writes && self.runtime_config.raw_manifest_tx.is_some() {
+            return self
+                .enqueue_channel_only(
+                    endpoint,
+                    content_type,
+                    received_ns,
+                    &capture_envelope,
+                    &body_bytes,
+                )
+                .await;
+        }
+
         // All mutable state (sequence numbers, size accounting, segment rotation) is
         // updated under the lock. File I/O is then performed after the lock is released
         // so concurrent requests from different streams never block each other.
@@ -696,6 +710,65 @@ impl SegmentJournalBackend {
         Ok(journal_id)
     }
 
+    async fn enqueue_channel_only(
+        &self,
+        endpoint: &'static str,
+        content_type: Option<String>,
+        received_ns: u128,
+        capture_envelope: &CaptureEnvelope,
+        body_bytes: &[u8],
+    ) -> BoxedResult<String> {
+        let (journal_id, entry) = {
+            let mut state = self.state.lock().await;
+            let journal_epoch = state.journal_epoch;
+            let stream_state = state
+                .streams
+                .entry(capture_envelope.stream_key.clone())
+                .or_insert_with(|| StreamJournalState {
+                    next_sequence: 1,
+                    open_segment: None,
+                });
+            if stream_state.next_sequence == 0 {
+                stream_state.next_sequence = 1;
+            }
+
+            let sequence = stream_state.next_sequence;
+            stream_state.next_sequence += 1;
+
+            let journal_id = format!(
+                "jrnl-{:020}-{:020}-{}",
+                journal_epoch, sequence, capture_envelope.stream_key
+            );
+            let observation_id = format!(
+                "obs-{:020}-{:020}-{}",
+                journal_epoch, sequence, capture_envelope.stream_key
+            );
+            let virtual_segment_id = format!("seg-mem-{:020}-{:020}", journal_epoch, sequence);
+            let entry = build_segment_journal_entry(
+                capture_envelope,
+                endpoint,
+                content_type,
+                received_ns,
+                journal_epoch,
+                sequence,
+                journal_id.clone(),
+                observation_id,
+                virtual_segment_id.clone(),
+                stable_segment_path(
+                    &self.journal_root,
+                    &capture_envelope.stream_key,
+                    &virtual_segment_id,
+                ),
+                0,
+                0,
+            );
+            (journal_id, entry)
+        };
+
+        let _ = self.publish_capture_manifest(&entry, body_bytes).await;
+        Ok(journal_id)
+    }
+
     async fn publish_capture_manifest(
         &self,
         entry: &SegmentJournalEntry,
@@ -719,20 +792,25 @@ impl SegmentJournalBackend {
             // raw_payload is #[serde(skip)] — not written to disk.
             raw_payload: None,
         };
-        // Write to filesystem first so the manifest exists before the DspWorker
-        // can attempt mark_consumed. The channel send is fire-and-forget; if the
-        // worker receives via channel and calls mark_consumed before the file is
-        // present it would fail silently, leaving the file for re-processing.
-        self.manifest_store.publish(manifest.clone()).await?;
+        // Channel-first delivery keeps the ingest path off the filesystem in
+        // steady state. If the receiver is gone, we fall back to disk so the
+        // frame can still be discovered once the worker restarts.
         if let Some(tx) = &self.runtime_config.raw_manifest_tx {
             // Attach the raw audio bytes only for the in-process channel message so
             // the DSP worker can skip the blocking read_payload_with_mmap call.
             // Unbounded send: only fails if the receiver has been dropped (DSP worker
             // stopped), which is acceptable during graceful shutdown.
-            let mut manifest_with_payload = manifest;
+            let mut manifest_with_payload = manifest.clone();
             manifest_with_payload.raw_payload = Some(raw_bytes.to_vec());
-            let _ = tx.send(manifest_with_payload);
+            if tx.send(manifest_with_payload).is_ok() {
+                return Ok(());
+            }
+            warn!(
+                manifest_id = %entry.journal_id,
+                "raw manifest channel receiver unavailable; falling back to manifest store"
+            );
         }
+        self.manifest_store.publish(manifest).await?;
         Ok(())
     }
 

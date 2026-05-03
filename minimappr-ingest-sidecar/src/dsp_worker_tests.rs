@@ -242,6 +242,69 @@ async fn worker_skips_stale_manifest_without_rewriting_timestamps() {
     assert_eq!(state.total_classifier_renders, 0);
 }
 
+#[tokio::test]
+async fn localization_continues_when_classifier_render_is_rate_limited() {
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest_store = ManifestStore::new(tmp.path());
+    manifest_store.ensure_initialized().await.unwrap();
+    let derived_cache = DerivedCache::new(
+        tmp.path(),
+        DerivedCacheConfig {
+            budget_bytes: 16_777_216,
+            admission_reserve_bytes: 0,
+        },
+    );
+    derived_cache.ensure_initialized().await.unwrap();
+
+    let state: SharedDspState = Arc::new(RwLock::new(Default::default()));
+    let mut worker = DspWorker::new(
+        manifest_store.clone(),
+        derived_cache,
+        DspWorkerConfig {
+            birdnet_hybrid_render_enabled: true,
+            classifier_render_min_interval_seconds: 999.0,
+            localization_cadence_ms: 0,
+            trigger_cooldown_seconds: 0.0,
+            ..DspWorkerConfig::default()
+        },
+        state.clone(),
+    );
+
+    let first_payload = store_forward_payload_with_timing(1_000_000_000, 0, 1);
+    let first_manifest =
+        raw_manifest_for_payload(tmp.path(), "manifest-raw-cadence-1", "seg-cadence-1", first_payload)
+            .await;
+    worker.process_one(first_manifest, 1).await;
+
+    let second_payload = store_forward_payload_with_timing(1_032_000_000, 512, 2);
+    let second_manifest = raw_manifest_for_payload(
+        tmp.path(),
+        "manifest-raw-cadence-2",
+        "seg-cadence-2",
+        second_payload,
+    )
+    .await;
+    worker.process_one(second_manifest, 1).await;
+
+    let localizations = manifest_store
+        .query_pending("localization_result")
+        .await
+        .unwrap();
+    let renders = manifest_store
+        .query_pending("classifier_render")
+        .await
+        .unwrap();
+
+    // First frame can publish both; second frame should still localize even
+    // when classifier render cadence suppresses publication.
+    assert_eq!(localizations.len(), 2);
+    assert_eq!(renders.len(), 1);
+
+    let state = state.read().await;
+    assert_eq!(state.total_localization_results, 2);
+    assert_eq!(state.total_classifier_renders, 1);
+}
+
 async fn raw_manifest_for_payload(
     root: &std::path::Path,
     manifest_id: &str,
@@ -474,6 +537,31 @@ fn resolve_buffer_start_time_uses_now_as_fallback() {
         resolve_buffer_start_time_ns(&decoded, &handle, 16_000, 5_000_000_000),
         3_000_000_000
     );
+}
+
+#[test]
+fn receipt_time_alignment_never_overrides_firmware_timestamps_for_tdoa() {
+    // Even with extreme skew, firmware/node timing must remain authoritative
+    // when available so TDOA continues to use packet timestamps.
+    assert!(!should_use_receipt_time_alignment(
+        true,
+        9_000_000_000,
+        100_000_000,
+    ));
+}
+
+#[test]
+fn receipt_time_alignment_is_only_fallback_when_node_timestamps_absent() {
+    assert!(should_use_receipt_time_alignment(
+        false,
+        9_000_000_000,
+        100_000_000,
+    ));
+    assert!(!should_use_receipt_time_alignment(
+        false,
+        50_000_000,
+        100_000_000,
+    ));
 }
 
 #[test]
