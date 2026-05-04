@@ -44,13 +44,38 @@ class HttpIngestTransport(IngestTransport):
     async def deliver_localized_render(self, payload: LocalizedClassifierRenderRequest) -> None:
         await self._fusion_node.ingest_localized_render(payload)
 
-    async def deliver_node_heartbeat(self, node: NodeSpec) -> None:
+    async def deliver_node_heartbeat(
+        self,
+        node: NodeSpec,
+        *,
+        last_sample_time_ns: int | None = None,
+    ) -> None:
         normalized_node, geo_position = self._fusion_node._ingest_processor._normalize_node_spec(node)
+        sensor_count = len(normalized_node.sensor_offsets_m or [])
+        audio_summary = {
+            "sensor_count": sensor_count,
+            "active_sensor_count": sensor_count,
+            "sample_rate_hz": None,
+            "last_sample_time_ns": last_sample_time_ns,
+            "age_seconds": None,
+            "rms": None,
+            "recent_coverage_ratio": None,
+            "recent_missing_ratio": None,
+            "recent_max_gap_seconds": None,
+            "max_buffer_samples": None,
+            "max_buffer_seconds": None,
+            "status": "sidecar_stream_consumer",
+        }
         async with self._fusion_node._storage_batch():
             await self._fusion_node.storage.upsert_node(
                 spec=normalized_node,
                 last_seen_ns=time.time_ns(),
                 position_geo=geo_position,
+            )
+            await self._fusion_node.storage.upsert_node_audio_summary(
+                node_id=normalized_node.id,
+                summary=audio_summary,
+                updated_ns=time.time_ns(),
             )
 
     async def deliver_environment_sample(self, *, node_id: str, sample: EnvironmentSampleIn) -> None:

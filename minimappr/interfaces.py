@@ -410,7 +410,12 @@ class IngestTransport(Protocol):
     async def deliver_localized_render(self, payload: "LocalizedClassifierRenderRequest") -> None:
         ...
 
-    async def deliver_node_heartbeat(self, node: NodeSpec) -> None:
+    async def deliver_node_heartbeat(
+        self,
+        node: NodeSpec,
+        *,
+        last_sample_time_ns: int | None = None,
+    ) -> None:
         ...
 
     async def deliver_environment_sample(self, *, node_id: str, sample: EnvironmentSampleIn) -> None:

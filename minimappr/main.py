@@ -1441,7 +1441,10 @@ async def list_nodes(
         if failure_codes:
             node["bit_failure_codes"] = failure_codes
 
-        if _has_live_ingest_runtime(state):
+        use_live_audio_buffer_summary = _has_live_ingest_runtime(state) and (
+            settings.ingest_backend == "python" or settings.direct_ingest_enabled
+        )
+        if use_live_audio_buffer_summary:
             sensor_descriptors = await state.registry.sensors_for_node(node["id"])
             sensor_ids = [descriptor.sensor_id for descriptor in sensor_descriptors]
             audio_summary = await state.audio_buffer.summarize_sensors(sensor_ids=sensor_ids, now_ns=now_ns)

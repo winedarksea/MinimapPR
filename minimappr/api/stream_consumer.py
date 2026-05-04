@@ -257,7 +257,13 @@ class IngestStreamConsumer:
 
         # Always refresh node heartbeat from localization_result so online/offline
         # status does not depend on classifier embedding details.
-        await self._ingest_transport.deliver_node_heartbeat(node)
+        node_audio_time_ns = node_context.get("toa_ns")
+        if not isinstance(node_audio_time_ns, int):
+            node_audio_time_ns = int(manifest.get("created_ns") or time.time_ns())
+        await self._ingest_transport.deliver_node_heartbeat(
+            node,
+            last_sample_time_ns=node_audio_time_ns,
+        )
 
         # If the manifest carries an embedded classifier_render, deliver it as a
         # localized render so Python gets the full audio + classification bundle.
