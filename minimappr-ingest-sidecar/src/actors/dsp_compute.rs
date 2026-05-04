@@ -267,49 +267,53 @@ pub async fn run_io(result: ComputeMathResult) {
     )
     .await;
 
-    let mut st = payload.state.write().await;
-    st.last_processed_ns = Some(payload.now_ns);
-    let real_localization = localization.resolved_algorithm == "srp_phat"
-        || localization
-            .resolved_algorithm
-            .starts_with("srp_phat_degraded");
-    if real_localization {
-        st.total_tdoa_results += 1;
-    }
-    if let Some(ref m) = published {
-        if m.localization.is_some() && real_localization {
-            st.total_localization_results += 1;
-        }
-    }
-    if has_classifier_render {
-        st.total_classifier_renders += 1;
-    }
-    if let Some(ref pending) = render_pending {
-        st.recent_results.push(pending.clone());
-        if st.recent_results.len() > 50 {
-            st.recent_results.remove(0);
+    {
+        let mut st = payload.state.write().await;
+        st.last_processed_ns = Some(payload.now_ns);
+        let real_localization = localization.resolved_algorithm == "srp_phat"
+            || localization
+                .resolved_algorithm
+                .starts_with("srp_phat_degraded");
+        if real_localization {
+            st.total_tdoa_results += 1;
         }
         if let Some(ref m) = published {
+            if m.localization.is_some() && real_localization {
+                st.total_localization_results += 1;
+            }
+        }
+        if has_classifier_render {
+            st.total_classifier_renders += 1;
+        }
+    }
+
+    if let Some(ref publisher) = payload.dsp_event_publisher {
+        if let Some(ref pending) = render_pending {
+            let _ = publisher.publish(pending.clone()).await;
+            if let Some(ref m) = published {
+                let _ = publisher.publish(m.clone()).await;
+            }
+        } else if let Some(ref m) = published {
+            let _ = publisher.publish(m.clone()).await;
+        }
+    } else {
+        let mut st = payload.state.write().await;
+        if let Some(ref pending) = render_pending {
+            st.recent_results.push(pending.clone());
+            if st.recent_results.len() > 50 {
+                st.recent_results.remove(0);
+            }
+            if let Some(ref m) = published {
+                st.recent_results.push(m.clone());
+                if st.recent_results.len() > 50 {
+                    st.recent_results.remove(0);
+                }
+            }
+        } else if let Some(ref m) = published {
             st.recent_results.push(m.clone());
             if st.recent_results.len() > 50 {
                 st.recent_results.remove(0);
             }
-        }
-        // Broadcast results to Python consumers via SSE — zero-disk path.
-        if let Some(ref tx) = payload.dsp_result_tx {
-            let _ = tx.send(pending.clone());
-            if let Some(ref m) = published {
-                let _ = tx.send(m.clone());
-            }
-        }
-    } else if let Some(ref m) = published {
-        // No render — just broadcast the localization_result.
-        st.recent_results.push(m.clone());
-        if st.recent_results.len() > 50 {
-            st.recent_results.remove(0);
-        }
-        if let Some(ref tx) = payload.dsp_result_tx {
-            let _ = tx.send(m.clone());
         }
     }
 }

@@ -182,6 +182,7 @@ async def test_start_ingest_sidecar_waits_for_healthcheck(
     assert observed["port"] == 18081
     assert observed["argv"] == (str(binary_path),)
     assert observed["env"]["MINIMAPPR_SIDECAR_ALLOW_NON_TMPFS_JOURNAL"] == "true"
+    assert observed["env"]["MINIMAPPR_SIDECAR_MEMORY_ONLY_LIVE_PATH"] == "true"
     assert observed["env"]["MINIMAPPR_INGEST_PORT"] == "18081"
     assert observed["env"]["MINIMAPPR_SIDECAR_PORT"] == "18081"
 

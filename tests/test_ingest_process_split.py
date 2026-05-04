@@ -185,6 +185,7 @@ def test_capture_start_uses_configured_ingest_base_url(monkeypatch, tmp_path: Pa
     monkeypatch.setenv("MINIMAPPR_PROCESS_ROLE", "api")
     monkeypatch.setenv("MINIMAPPR_INGEST_BACKEND", "rust")
     monkeypatch.setenv("MINIMAPPR_INGEST_STORAGE_MODE", "journal")
+    monkeypatch.setenv("MINIMAPPR_SIDECAR_MEMORY_ONLY_LIVE_PATH", "false")
     monkeypatch.setenv("MINIMAPPR_DIRECT_INGEST_ENABLED", "false")
     monkeypatch.setenv("MINIMAPPR_INGEST_SIDECAR_ENABLED", "false")
     monkeypatch.setenv("MINIMAPPR_INGEST_PORT", "19091")
@@ -232,6 +233,78 @@ def test_capture_start_unavailable_for_python_ingest(monkeypatch, tmp_path: Path
 
     assert response.status_code == 503
     assert "combined process role" in response.json()["detail"]
+
+
+def test_capture_start_unavailable_for_memory_only_rust_sidecar(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("MINIMAPPR_PROCESS_ROLE", "api")
+    monkeypatch.setenv("MINIMAPPR_INGEST_BACKEND", "rust")
+    monkeypatch.setenv("MINIMAPPR_INGEST_STORAGE_MODE", "journal")
+    monkeypatch.setenv("MINIMAPPR_SIDECAR_MEMORY_ONLY_LIVE_PATH", "true")
+    monkeypatch.setenv("MINIMAPPR_DIRECT_INGEST_ENABLED", "false")
+    monkeypatch.setenv("MINIMAPPR_INGEST_SIDECAR_ENABLED", "false")
+    monkeypatch.setenv("MINIMAPPR_DB_PATH", str(tmp_path / "capture-memory-only.db"))
+    monkeypatch.setenv("MINIMAPPR_SNIPPET_DIR", str(tmp_path / "snippets"))
+    monkeypatch.setenv("MINIMAPPR_LARGE_ARTIFACT_DIR", str(tmp_path / "artifacts"))
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/capture/start", json={"stream_key": "node-a"})
+
+    assert response.status_code == 503
+    assert "memory-only live mode" in response.json()["detail"]
+
+
+def test_capture_start_uses_live_buffer_for_python_ingest(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("MINIMAPPR_PROCESS_ROLE", "combined")
+    monkeypatch.setenv("MINIMAPPR_INGEST_BACKEND", "python")
+    monkeypatch.setenv("MINIMAPPR_DIRECT_INGEST_ENABLED", "true")
+    monkeypatch.setenv("MINIMAPPR_INGEST_SIDECAR_ENABLED", "false")
+    monkeypatch.setenv("MINIMAPPR_DB_PATH", str(tmp_path / "capture-python-live.db"))
+    monkeypatch.setenv("MINIMAPPR_SNIPPET_DIR", str(tmp_path / "snippets"))
+    monkeypatch.setenv("MINIMAPPR_LARGE_ARTIFACT_DIR", str(tmp_path / "artifacts"))
+    monkeypatch.setenv("MINIMAPPR_CLASSIFIER", "heuristic")
+    monkeypatch.setenv("MINIMAPPR_MODEL_CHAIN_CONFIG_PATH", str(tmp_path / "missing-model-chain.json"))
+    monkeypatch.setenv("MINIMAPPR_FEDERATION_ENABLED", "false")
+    observed: dict[str, object] = {}
+
+    async def fake_start(self, request):
+        observed["sidecar_url"] = request.sidecar_url
+        observed["channel_sensor_ids"] = request.channel_sensor_ids
+        observed["has_buffer"] = request.multi_sensor_buffer is not None
+        return CaptureSessionRecord(
+            session_id="session-python-live",
+            state=CaptureState.RECORDING,
+            stream_key=request.stream_key,
+            range_lease_id=None,
+            start_time_ns=123,
+            end_time_ns=None,
+            first_frame_pts_ns=None,
+            work_dir=request.work_dir / "session-python-live",
+            video_path=None,
+            iamf_path=None,
+            youtube_path=None,
+            error=None,
+        )
+
+    monkeypatch.setattr("minimappr.core.capture_session.CaptureSessionManager.start", fake_start)
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/capture/start", json={"stream_key": "node-a"})
+
+    assert response.status_code == 200
+    assert observed["sidecar_url"] is None
+    assert observed["has_buffer"] is True
+    assert observed["channel_sensor_ids"] == [
+        "node-a:ch0",
+        "node-a:ch1",
+        "node-a:ch2",
+        "node-a:ch3",
+    ]
 
 
 def test_plain_minimappr_supervises_python_ingest_when_ingest_port_is_explicit(

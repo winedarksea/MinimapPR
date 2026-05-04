@@ -304,6 +304,7 @@ class Settings:
     ingest_sidecar_enabled: bool = True
     ingest_sidecar_binary_path: Path = Path("dist/minimappr-ingest-sidecar")
     ingest_sidecar_port: int = 8081
+    ingest_sidecar_memory_only_live_path: bool = True
     ingest_sidecar_total_journal_budget_bytes: int = 268_435_456
     ingest_sidecar_admission_reserve_bytes: int = 16_777_216
     ingest_sidecar_allow_non_tmpfs_journal: bool | None = None
@@ -782,6 +783,10 @@ class Settings:
                 _env_str("MINIMAPPR_INGEST_SIDECAR_BINARY_PATH", "dist/minimappr-ingest-sidecar")
             ),
             ingest_sidecar_port=ingest_port,
+            ingest_sidecar_memory_only_live_path=_env_bool(
+                "MINIMAPPR_SIDECAR_MEMORY_ONLY_LIVE_PATH",
+                True,
+            ),
             ingest_sidecar_total_journal_budget_bytes=_env_int(
                 "MINIMAPPR_SIDECAR_TOTAL_JOURNAL_BUDGET_BYTES", 268_435_456
             ),

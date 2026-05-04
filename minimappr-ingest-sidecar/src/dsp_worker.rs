@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     time::{SystemTime, UNIX_EPOCH},
@@ -12,13 +12,15 @@ use crate::{
     audio_payload::{decode_audio_payload, DecodedAudioPayload},
     classifier_helper::ManifestClassificationAnnotator,
     derived_cache::DerivedCache,
+    dsp_events::DspEventPublisher,
     dsp::{AudioCoverageStats, SensorStreamBuffer},
     gcc_phat::TdoaResult,
+    ingest_backend::QueuedRawManifest,
     journal_reader::JournalPayloadHandle,
     manifests::{DspManifest, ManifestStore},
 };
 use serde::{Deserialize, Serialize};
-use tokio::{sync::broadcast, sync::mpsc, sync::RwLock, time};
+use tokio::{sync::mpsc, sync::RwLock, time};
 use tracing::{debug, info, warn};
 
 const MIN_BIRDNET_CLASSIFICATION_WINDOW_SECONDS: f64 = 15.0;
@@ -59,6 +61,9 @@ pub struct DspWorkerConfig {
     pub localization_cadence_ms: u64,
     pub localization_rms_gate: f32,
     pub trigger_cooldown_seconds: f64,
+    /// When false, the worker stays fully memory-path for raw audio and does not
+    /// poll ManifestStore for raw_journal_append items.
+    pub query_persisted_raw_manifests: bool,
     /// Maximum trusted node clock skew in seconds before falling back to
     /// receipt-time alignment. Matching Python's _MAX_TRUSTED_NODE_CLOCK_SKEW_NS.
     pub max_trusted_node_clock_skew_seconds: f64,
@@ -95,6 +100,7 @@ impl Default for DspWorkerConfig {
             localization_cadence_ms: 250,
             localization_rms_gate: 0.015,
             trigger_cooldown_seconds: 0.8,
+            query_persisted_raw_manifests: true,
             max_trusted_node_clock_skew_seconds: 300.0,
         }
     }
@@ -133,8 +139,8 @@ pub(crate) struct LocalizationChannelState {
 }
 
 /// Carries a pre-built classifier_render manifest + raw PCM bytes to the
-/// ClassificationWorker. The worker writes a transient temp file for the BirdNET
-/// subprocess and sends the annotated manifest back via dsp_result_tx (no disk persist).
+/// ClassificationWorker. The worker keeps the PCM in memory and hands the
+/// annotated manifest back to the shared DSP event publisher (no disk persist).
 pub struct ClassificationRequest {
     pub pcm_bytes: Vec<u8>,
     pub sample_rate_hz: u32,
@@ -170,7 +176,7 @@ pub(crate) struct ComputePayload {
     pub(crate) derived_cache: DerivedCache,
     pub(crate) state: SharedDspState,
     pub(crate) classification_tx: Option<flume::Sender<ClassificationRequest>>,
-    pub(crate) dsp_result_tx: Option<broadcast::Sender<DspManifest>>,
+    pub(crate) dsp_event_publisher: Option<DspEventPublisher>,
     pub(crate) config: DspWorkerConfig,
     pub(crate) consumed_since_prune: Arc<AtomicU64>,
 }
@@ -182,7 +188,8 @@ pub struct DspWorker {
     state: SharedDspState,
     classifier_annotator: Option<ManifestClassificationAnnotator>,
     classification_tx: Option<flume::Sender<ClassificationRequest>>,
-    raw_manifest_rx: Option<mpsc::UnboundedReceiver<DspManifest>>,
+    raw_manifest_rx: Option<mpsc::Receiver<QueuedRawManifest>>,
+    shutdown_requested: Option<Arc<AtomicBool>>,
     buffers: HashMap<String, [SensorStreamBuffer; 4]>,
     last_classifier_render_ns_by_stream: HashMap<String, u128>,
     last_localization_ns_by_stream: HashMap<String, u128>,
@@ -190,8 +197,8 @@ pub struct DspWorker {
     consumed_manifests_since_prune: Arc<AtomicU64>,
     deferred_source_manifest_ids: Vec<String>,
     env_cache: Option<EnvironmentCache>,
-    /// Broadcast channel for DSP result manifests to Python consumers via SSE.
-    dsp_result_tx: Option<broadcast::Sender<DspManifest>>,
+    /// Shared publisher for DSP result manifests streamed to Python via SSE.
+    dsp_event_publisher: Option<DspEventPublisher>,
 }
 
 impl DspWorker {
@@ -218,6 +225,7 @@ impl DspWorker {
             classifier_annotator,
             classification_tx: None,
             raw_manifest_rx: None,
+            shutdown_requested: None,
             buffers: HashMap::new(),
             last_classifier_render_ns_by_stream: HashMap::new(),
             last_localization_ns_by_stream: HashMap::new(),
@@ -225,7 +233,7 @@ impl DspWorker {
             consumed_manifests_since_prune: Arc::new(AtomicU64::new(0)),
             deferred_source_manifest_ids: Vec::new(),
             env_cache: None,
-            dsp_result_tx: None,
+            dsp_event_publisher: None,
         }
     }
 
@@ -245,14 +253,14 @@ impl DspWorker {
         let worker = ClassificationWorker {
             annotator,
             rx,
-            dsp_result_tx: self.dsp_result_tx.clone(),
+            dsp_event_publisher: self.dsp_event_publisher.clone(),
         };
         (self, Some(worker))
     }
 
     /// Injects an in-process receiver for raw_journal_append manifests from the
     /// co-located ingest backend, bypassing the 20ms filesystem poll cycle.
-    pub fn with_raw_manifest_receiver(mut self, rx: mpsc::UnboundedReceiver<DspManifest>) -> Self {
+    pub fn with_raw_manifest_receiver(mut self, rx: mpsc::Receiver<QueuedRawManifest>) -> Self {
         self.raw_manifest_rx = Some(rx);
         self
     }
@@ -263,10 +271,15 @@ impl DspWorker {
         self
     }
 
-    /// Injects a broadcast sender so DSP result manifests can be streamed to
-    /// Python consumers via SSE without touching the filesystem.
-    pub fn with_dsp_result_sender(mut self, tx: broadcast::Sender<DspManifest>) -> Self {
-        self.dsp_result_tx = Some(tx);
+    /// Injects the shared publisher used for SSE delivery and replay.
+    pub fn with_dsp_event_publisher(mut self, publisher: DspEventPublisher) -> Self {
+        self.dsp_event_publisher = Some(publisher);
+        self
+    }
+
+    /// Signals the worker to stop after the ingest channel has been fully drained.
+    pub fn with_shutdown_signal(mut self, shutdown_requested: Arc<AtomicBool>) -> Self {
+        self.shutdown_requested = Some(shutdown_requested);
         self
     }
 
@@ -280,10 +293,32 @@ impl DspWorker {
                 st.last_heartbeat_ns = Some(system_now_ns());
             }
             let processed_manifest_count = self.process_pending().await;
+            if self.should_exit_after_drain(processed_manifest_count) {
+                break;
+            }
             if should_sleep_after_poll_cycle(processed_manifest_count) {
                 time::sleep(interval).await;
             }
         }
+        {
+            let mut st = self.state.write().await;
+            st.worker_running = false;
+            st.last_heartbeat_ns = Some(system_now_ns());
+        }
+        info!("DSP worker drained and exited");
+    }
+
+    fn should_exit_after_drain(&self, processed_manifest_count: usize) -> bool {
+        let shutdown_requested = self
+            .shutdown_requested
+            .as_ref()
+            .is_some_and(|flag| !flag.load(Ordering::Acquire));
+        if !shutdown_requested || processed_manifest_count > 0 {
+            return false;
+        }
+        self.raw_manifest_rx
+            .as_ref()
+            .is_none_or(|rx| rx.is_closed() && rx.is_empty())
     }
 
     async fn process_pending(&mut self) -> usize {
@@ -295,7 +330,7 @@ impl DspWorker {
         let channel_manifests: Vec<DspManifest> = if let Some(rx) = &mut self.raw_manifest_rx {
             let mut v = Vec::new();
             while let Ok(m) = rx.try_recv() {
-                v.push(m);
+                v.push(m.into_manifest());
                 if v.len() >= channel_limit {
                     break;
                 }
@@ -307,7 +342,8 @@ impl DspWorker {
 
         // Only hit the filesystem when the in-process channel did not already
         // fill the batch budget. This keeps steady-state ingest on memory paths.
-        let should_query_disk = channel_manifests.len() < channel_limit;
+        let should_query_disk = self.config.query_persisted_raw_manifests
+            && channel_manifests.len() < channel_limit;
         let disk_manifests = if should_query_disk {
             match self
                 .manifest_store
@@ -492,7 +528,7 @@ impl DspWorker {
             self.config.classification_window_seconds.max(window_sec)
         };
 
-        if decoded.channels.len() < 4 {
+        if decoded.channels.len() != 4 {
             if !self.config.birdnet_hybrid_render_enabled {
                 self.defer_source_manifest_consumption(&manifest);
                 return None;
@@ -520,7 +556,7 @@ impl DspWorker {
                 classification_windows,
                 classification_coverage: [None, None, None, None],
                 omni_channels_override: Some(decoded.channels.clone()),
-                omni_fallback_reason: Some("single_sensor_or_non_array_node".to_string()),
+                omni_fallback_reason: Some("single_sensor_or_non_tetrahedral_array".to_string()),
                 skip_localization_result: true,
                 source_ids,
                 sr,
@@ -532,7 +568,7 @@ impl DspWorker {
                 derived_cache: self.derived_cache.clone(),
                 state: self.state.clone(),
                 classification_tx: self.classification_tx.clone(),
-                dsp_result_tx: self.dsp_result_tx.clone(),
+                dsp_event_publisher: self.dsp_event_publisher.clone(),
                 config: self.config.clone(),
                 consumed_since_prune: self.consumed_manifests_since_prune.clone(),
             });
@@ -657,7 +693,7 @@ impl DspWorker {
                 derived_cache: self.derived_cache.clone(),
                 state: self.state.clone(),
                 classification_tx: self.classification_tx.clone(),
-                dsp_result_tx: self.dsp_result_tx.clone(),
+                dsp_event_publisher: self.dsp_event_publisher.clone(),
                 config: self.config.clone(),
                 consumed_since_prune: self.consumed_manifests_since_prune.clone(),
             });
@@ -715,7 +751,7 @@ impl DspWorker {
             derived_cache: self.derived_cache.clone(),
             state: self.state.clone(),
             classification_tx: self.classification_tx.clone(),
-            dsp_result_tx: self.dsp_result_tx.clone(),
+            dsp_event_publisher: self.dsp_event_publisher.clone(),
             config: self.config.clone(),
             consumed_since_prune: self.consumed_manifests_since_prune.clone(),
         })

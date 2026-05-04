@@ -4,6 +4,7 @@ mod birdnet_render;
 mod classifier_helper;
 mod derived_cache;
 mod dsp;
+mod dsp_events;
 mod dsp_render_output;
 mod dsp_worker;
 mod env_payload;
@@ -22,33 +23,33 @@ mod storage_class;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
 
 use actors::environment::EnvironmentCache;
 use axum::{
     body::Body,
     extract::{Query, State},
-    http::{HeaderMap, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response, Sse},
     routing::{get, post},
     Json, Router,
 };
 use clap::Parser;
 use derived_cache::DerivedCache;
+use dsp_events::{DspEventPublisher, ReplayableDspEvent};
 use dsp_worker::{DspWorker, DspWorkerConfig, SharedDspState};
 use env_payload::{EnvIngestPayload, EnvIngestResponse};
 use ingest_backend::{
     BodyTooLargeError, ClientDisconnectError, IngestBackend, IngestStorageMode,
     InvalidIngestEnvelopeError, JournalCapacityExceededError, JournalRuntimeConfig,
+    RawManifestChannelFullError, RawManifestQueueBackpressure,
+    RawManifestQueueBytesExceededError,
 };
 use leases::PinLeaseRequest;
 use render_mvdr::{render_mvdr, MvdrRenderRequest, TrajectoryWaypoint};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use tokio::{
-    process::Command,
-    sync::{broadcast, mpsc, RwLock},
-};
-use tokio_stream::{wrappers::BroadcastStream, StreamExt};
+use tokio::{process::Command, sync::{mpsc, RwLock}};
+use tokio_stream::StreamExt;
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -59,6 +60,10 @@ const ENV_ENDPOINT: &str = "/api/v1/ingest/env";
 const MIN_BIRDNET_CLASSIFICATION_WINDOW_SECONDS: f64 = 15.0;
 const DEFAULT_BIRDNET_CLASSIFICATION_WINDOW_SECONDS: f64 = 30.0;
 const DEFAULT_CLASSIFIER_RENDER_OVERLAP_SECONDS: f64 = 2.0;
+const OVERLOAD_RETRY_AFTER_SECONDS: &str = "1";
+const DSP_EVENT_CHANNEL_CAPACITY: usize = 4096;
+const DSP_EVENT_REPLAY_CAPACITY: usize = 512;
+const DSP_RESULTS_RECENT_CAPACITY: usize = 50;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "MinimapPR firmware ingest sidecar")]
@@ -110,6 +115,13 @@ struct Args {
         default_value_t = false
     )]
     allow_non_tmpfs_journal: bool,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_SIDECAR_MEMORY_ONLY_LIVE_PATH",
+        default_value_t = false
+    )]
+    memory_only_live_path: bool,
 
     #[arg(
         long,
@@ -165,6 +177,13 @@ struct Args {
         default_value_t = 2048
     )]
     dsp_raw_manifest_channel_capacity: usize,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_DSP_RAW_MANIFEST_QUEUE_BYTE_LIMIT",
+        default_value_t = 67_108_864
+    )]
+    dsp_raw_manifest_queue_byte_limit: usize,
 
     #[arg(
         long,
@@ -272,13 +291,12 @@ struct AppState {
     backend: IngestBackend,
     max_body_bytes: usize,
     dsp_state: SharedDspState,
+    accepting_ingest: Arc<AtomicBool>,
     #[allow(dead_code)]
     derived_cache: Option<DerivedCache>,
     env_cache: EnvironmentCache,
-    /// Broadcast channel for DSP result manifests (localization_result,
-    /// classifier_render, env_sample_append)
-    /// delivered to Python consumers via SSE.  Capacity tuned for ~1s of burst at 30fps.
-    dsp_result_tx: broadcast::Sender<manifests::DspManifest>,
+    raw_manifest_queue_backpressure: Arc<RawManifestQueueBackpressure>,
+    dsp_event_publisher: DspEventPublisher,
 }
 
 #[derive(Debug, Serialize)]
@@ -309,17 +327,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args = Args::parse();
     let storage_dir = args.storage_dir.clone();
     let raw_manifest_channel_capacity = args.dsp_raw_manifest_channel_capacity.max(1);
-    // Unbounded channel: the ingest path must never drop audio frames due to channel
-    // backpressure. Memory growth is bounded by the DSP worker's buffer window (~30s).
-    // raw_manifest_channel_capacity is retained as a soft-cap warning threshold only.
-    let (raw_manifest_tx, raw_manifest_rx) = mpsc::unbounded_channel::<manifests::DspManifest>();
-    let _ = raw_manifest_channel_capacity; // used as soft-cap threshold in DSP worker
+    let raw_manifest_queue_byte_limit = args.dsp_raw_manifest_queue_byte_limit.max(1);
+    let raw_manifest_queue_backpressure = Arc::new(RawManifestQueueBackpressure::new(
+        raw_manifest_queue_byte_limit,
+    ));
+    let (raw_manifest_tx, raw_manifest_rx) =
+        mpsc::channel::<ingest_backend::QueuedRawManifest>(raw_manifest_channel_capacity);
+    let accepting_ingest = Arc::new(AtomicBool::new(true));
     let journal_runtime_config = JournalRuntimeConfig {
         total_journal_budget_bytes: args.total_journal_budget_bytes,
         admission_reserve_bytes: args.admission_reserve_bytes,
         enforce_tmpfs: !args.allow_non_tmpfs_journal,
+        memory_only_live_path: args.memory_only_live_path,
         derived_cache_budget_bytes: args.derived_cache_budget_bytes,
         derived_cache_admission_reserve_bytes: args.derived_cache_admission_reserve_bytes,
+        raw_manifest_channel_capacity,
+        raw_manifest_queue_backpressure: Some(raw_manifest_queue_backpressure.clone()),
         raw_manifest_tx: Some(raw_manifest_tx),
     };
     let backend = IngestBackend::open(
@@ -333,9 +356,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let dsp_state: SharedDspState = Arc::new(RwLock::new(Default::default()));
     let env_cache = EnvironmentCache::new();
 
-    // Broadcast channel for DSP result manifests → Python SSE consumer.
-    // Capacity ~1s of burst at 30fps with safety margin.
-    let (dsp_result_tx, _dsp_result_rx) = broadcast::channel::<manifests::DspManifest>(4096);
+    let dsp_event_publisher = DspEventPublisher::new(
+        dsp_state.clone(),
+        DSP_EVENT_CHANNEL_CAPACITY,
+        DSP_EVENT_REPLAY_CAPACITY,
+        DSP_RESULTS_RECENT_CAPACITY,
+    );
+    let mut dsp_worker_handle = None;
+    let mut classification_worker_handle = None;
 
     // Spawn DSP worker if journal mode has a manifest store and derived cache.
     if let (Some(manifest_store), Some(derived_cache)) =
@@ -405,38 +433,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 localization_cadence_ms: args.dsp_localization_cadence_ms,
                 localization_rms_gate: args.dsp_localization_rms_gate,
                 trigger_cooldown_seconds,
+                query_persisted_raw_manifests: false,
                 ..DspWorkerConfig::default()
             },
             dsp_state.clone(),
         );
         let worker = worker.with_raw_manifest_receiver(raw_manifest_rx);
         let worker = worker.with_env_cache(env_cache.clone());
-        let worker = worker.with_dsp_result_sender(dsp_result_tx.clone());
+        let worker = worker.with_dsp_event_publisher(dsp_event_publisher.clone());
+        let worker = worker.with_shutdown_signal(accepting_ingest.clone());
         let (worker, classification_worker) = worker.with_classification_worker(64);
         if let Some(cw) = classification_worker {
-            tokio::spawn(cw.run_loop());
+            classification_worker_handle = Some(tokio::spawn(cw.run_loop()));
             info!("ClassificationWorker spawned");
         }
-        tokio::spawn(worker.run_loop());
+        dsp_worker_handle = Some(tokio::spawn(worker.run_loop()));
         info!("DSP worker spawned");
         // Eagerly init the rayon pool so first-frame latency is not inflated.
         let _ = runtime::dsp_pool();
     }
 
     let state = AppState {
+        accepting_ingest: accepting_ingest.clone(),
         derived_cache: backend.derived_cache(),
         backend,
         max_body_bytes: args.max_body_bytes,
         dsp_state,
         env_cache,
-        dsp_result_tx,
+        raw_manifest_queue_backpressure,
+        dsp_event_publisher,
     };
 
     let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
     info!(
         %addr,
         storage_dir = %storage_dir.display(),
-        storage_mode = "journal",
+        storage_mode = if args.memory_only_live_path {
+            "memory_only_live_path"
+        } else {
+            "journal"
+        },
         max_body_bytes = args.max_body_bytes,
         total_journal_budget_bytes = args.total_journal_budget_bytes,
         admission_reserve_bytes = args.admission_reserve_bytes,
@@ -445,9 +481,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     );
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    let server_result = axum::serve(listener, app(state))
+        .with_graceful_shutdown(shutdown_signal(accepting_ingest.clone()))
+        .await;
+    if let Some(handle) = dsp_worker_handle {
+        if let Err(error) = handle.await {
+            warn!(error = %error, "DSP worker task join failed during shutdown");
+        }
+    }
+    if let Some(handle) = classification_worker_handle {
+        if let Err(error) = handle.await {
+            warn!(error = %error, "Classification worker task join failed during shutdown");
+        }
+    }
+    server_result?;
     Ok(())
 }
 
@@ -473,14 +520,15 @@ fn app(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn shutdown_signal() {
+async fn shutdown_signal(accepting_ingest: Arc<AtomicBool>) {
     use tokio::signal::unix::{signal, SignalKind};
     let mut sigterm = signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {},
         _ = sigterm.recv() => {},
     }
-    info!("shutdown signal received; draining in-flight requests");
+    accepting_ingest.store(false, Ordering::Release);
+    info!("shutdown signal received; rejecting new ingest and draining in-flight work");
 }
 
 async fn healthz(State(state): State<AppState>) -> Response {
@@ -514,6 +562,9 @@ async fn ingest_env(
     State(state): State<AppState>,
     Json(payload): Json<EnvIngestPayload>,
 ) -> Response {
+    if !state.accepting_ingest.load(Ordering::Acquire) {
+        return overload_response("ingest sidecar is draining for shutdown".to_string());
+    }
     use actors::environment::EnvSample;
 
     if payload.samples.len() > 64 {
@@ -570,7 +621,7 @@ async fn ingest_env(
             raw_payload: None,
             raw_render_bytes: None,
         };
-        let _ = state.dsp_result_tx.send(env_manifest);
+        let _ = state.dsp_event_publisher.publish(env_manifest).await;
     }
 
     (StatusCode::ACCEPTED, Json(EnvIngestResponse { accepted })).into_response()
@@ -582,6 +633,9 @@ async fn enqueue_request(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
+    if !state.accepting_ingest.load(Ordering::Acquire) {
+        return overload_response("ingest sidecar is draining for shutdown".to_string());
+    }
     match state
         .backend
         .enqueue(state.max_body_bytes, endpoint, headers, body)
@@ -634,15 +688,16 @@ async fn enqueue_request(
                     .into_response();
             }
             if err.downcast_ref::<JournalCapacityExceededError>().is_some() {
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Json(ErrorResponse {
-                        accepted: false,
-                        queued: false,
-                        detail: err.to_string(),
-                    }),
-                )
-                    .into_response();
+                return overload_response(err.to_string());
+            }
+            if err.downcast_ref::<RawManifestChannelFullError>().is_some() {
+                return overload_response(err.to_string());
+            }
+            if err
+                .downcast_ref::<RawManifestQueueBytesExceededError>()
+                .is_some()
+            {
+                return overload_response(err.to_string());
             }
             warn!(endpoint, error = %err, "failed to enqueue ingest request");
             (
@@ -656,6 +711,23 @@ async fn enqueue_request(
                 .into_response()
         }
     }
+}
+
+fn overload_response(detail: String) -> Response {
+    let mut response = (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(ErrorResponse {
+            accepted: false,
+            queued: false,
+            detail,
+        }),
+    )
+        .into_response();
+    response.headers_mut().insert(
+        header::RETRY_AFTER,
+        HeaderValue::from_static(OVERLOAD_RETRY_AFTER_SECONDS),
+    );
+    response
 }
 
 async fn create_pin_lease(
@@ -705,6 +777,9 @@ struct DspStatusResponse {
     last_heartbeat_ns: Option<u128>,
     last_processed_ns: Option<u128>,
     pending_manifest_count: usize,
+    raw_manifest_queue_depth: usize,
+    raw_manifest_queue_bytes: usize,
+    raw_manifest_queue_byte_limit: usize,
     total_tdoa_results: u64,
     total_localization_results: u64,
     total_classifier_renders: u64,
@@ -721,6 +796,9 @@ async fn dsp_status(State(state): State<AppState>) -> Response {
         last_heartbeat_ns: st.last_heartbeat_ns,
         last_processed_ns: st.last_processed_ns,
         pending_manifest_count: st.pending_count,
+        raw_manifest_queue_depth: state.raw_manifest_queue_backpressure.queued_messages(),
+        raw_manifest_queue_bytes: state.raw_manifest_queue_backpressure.queued_bytes(),
+        raw_manifest_queue_byte_limit: state.raw_manifest_queue_backpressure.byte_limit(),
         total_tdoa_results: st.total_tdoa_results,
         total_localization_results: st.total_localization_results,
         total_classifier_renders: st.total_classifier_renders,
@@ -752,28 +830,110 @@ async fn dsp_results(
 /// SSE endpoint that streams DSP result manifests
 /// (localization_result, classifier_render, env_sample_append)
 /// to Python consumers in real-time, bypassing the filesystem entirely.
-async fn dsp_stream(State(state): State<AppState>) -> Sse<impl tokio_stream::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>> {
-    let rx = state.dsp_result_tx.subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(|result| {
-        let event = match result {
-            Ok(manifest) => {
-                let json = match serde_json::to_string(&manifest) {
-                    Ok(s) => s,
-                    Err(_) => return None,
-                };
-                axum::response::sse::Event::default().data(json)
-            }
-            Err(_) => {
-                // Lagged — skip stale events to keep consumer current.
+async fn dsp_stream(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Sse<impl tokio_stream::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>> {
+    let last_event_id = headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
+    let rx = state.dsp_event_publisher.subscribe();
+    let replay_window = state
+        .dsp_event_publisher
+        .replay_after(last_event_id, DSP_EVENT_REPLAY_CAPACITY)
+        .await;
+    let replayed_through_event_id = replay_window
+        .events
+        .last()
+        .map(|event| event.event_id)
+        .or(last_event_id)
+        .unwrap_or(0);
+    let mut replay_events = Vec::new();
+    if replay_window.gap_detected {
+        let data = serde_json::json!({
+            "requested_after": last_event_id,
+            "oldest_available": replay_window.oldest_available_event_id,
+        });
+        replay_events.push(Ok(
+            axum::response::sse::Event::default()
+                .event("replay_gap")
+                .data(data.to_string()),
+        ));
+    }
+    replay_events.extend(
+        replay_window
+            .events
+            .into_iter()
+            .filter_map(replayable_dsp_event_to_sse)
+            .map(Ok),
+    );
+    let replay_stream = tokio_stream::iter(replay_events);
+    let live_stream = futures::stream::unfold(
+        LiveDspEventStreamState {
+            rx,
+            last_delivered_event_id: replayed_through_event_id,
+            close_after_yield: false,
+        },
+        |mut stream_state| async move {
+            if stream_state.close_after_yield {
                 return None;
             }
-        };
-        Some(Ok(event))
-    });
+            loop {
+                match stream_state.rx.recv().await {
+                    Ok(event) if event.event_id <= stream_state.last_delivered_event_id => continue,
+                    Ok(event) => {
+                        stream_state.last_delivered_event_id = event.event_id;
+                        if let Some(sse_event) = replayable_dsp_event_to_sse(event) {
+                            return Some((Ok(sse_event), stream_state));
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped_messages)) => {
+                        stream_state.close_after_yield = true;
+                        let gap_event = replay_gap_sse_event(
+                            Some(stream_state.last_delivered_event_id),
+                            Some(skipped_messages as u64),
+                        );
+                        return Some((Ok(gap_event), stream_state));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                }
+            }
+        },
+    );
+    let stream = replay_stream.chain(live_stream);
     Sse::new(stream).keep_alive(
         axum::response::sse::KeepAlive::new()
             .interval(std::time::Duration::from_secs(15)),
     )
+}
+
+struct LiveDspEventStreamState {
+    rx: tokio::sync::broadcast::Receiver<ReplayableDspEvent>,
+    last_delivered_event_id: u64,
+    close_after_yield: bool,
+}
+
+fn replayable_dsp_event_to_sse(event: ReplayableDspEvent) -> Option<axum::response::sse::Event> {
+    let json = serde_json::to_string(&event.manifest).ok()?;
+    Some(
+        axum::response::sse::Event::default()
+            .id(event.event_id.to_string())
+            .data(json),
+    )
+}
+
+fn replay_gap_sse_event(
+    requested_after: Option<u64>,
+    skipped_messages: Option<u64>,
+) -> axum::response::sse::Event {
+    let data = serde_json::json!({
+        "requested_after": requested_after,
+        "skipped_messages": skipped_messages,
+    });
+    axum::response::sse::Event::default()
+        .event("replay_gap")
+        .data(data.to_string())
 }
 
 // ── MVDR beamform endpoint ────────────────────────────────────────────────────

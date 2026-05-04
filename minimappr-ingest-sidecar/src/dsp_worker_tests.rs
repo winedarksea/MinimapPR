@@ -1,6 +1,7 @@
 use super::*;
 use crate::{
     derived_cache::{DerivedCache, DerivedCacheConfig},
+    dsp_events::{DspEventPublisher, ReplayableDspEvent},
     dsp::SensorStreamBuffer,
     journal_reader::JournalPayloadHandle,
     manifests::ManifestStore,
@@ -25,8 +26,6 @@ async fn worker_publishes_localization_and_classifier_render_contract() {
         },
     );
     derived_cache.ensure_initialized().await.unwrap();
-
-    let (dsp_result_tx, mut dsp_result_rx) = tokio::sync::broadcast::channel(16);
 
     let payload = store_forward_payload();
     let now_ns = system_now_ns();
@@ -59,6 +58,8 @@ async fn worker_publishes_localization_and_classifier_render_contract() {
         raw_render_bytes: None,
     };
     let state: SharedDspState = Arc::new(RwLock::new(Default::default()));
+    let event_publisher = DspEventPublisher::new(state.clone(), 16, 16, 50);
+    let mut dsp_result_rx = event_publisher.subscribe();
     let mut worker = DspWorker::new(
         manifest_store.clone(),
         derived_cache,
@@ -68,15 +69,12 @@ async fn worker_publishes_localization_and_classifier_render_contract() {
         },
         state.clone(),
     )
-    .with_dsp_result_sender(dsp_result_tx);
+    .with_dsp_event_publisher(event_publisher);
 
     worker.process_one(raw_manifest, 1).await;
 
     // Collect SSE events broadcast by run_io (no disk writes for memory-path manifests).
-    let mut events: Vec<DspManifest> = Vec::new();
-    while let Ok(m) = dsp_result_rx.try_recv() {
-        events.push(m);
-    }
+    let events = drain_published_manifests(&mut dsp_result_rx);
 
     let localization_event = events
         .iter()
@@ -132,9 +130,9 @@ async fn worker_publishes_omni_render_when_localization_coverage_is_unavailable(
     );
     derived_cache.ensure_initialized().await.unwrap();
 
-    let (dsp_result_tx, mut dsp_result_rx) = tokio::sync::broadcast::channel(32);
-
     let state: SharedDspState = Arc::new(RwLock::new(Default::default()));
+    let event_publisher = DspEventPublisher::new(state.clone(), 32, 32, 50);
+    let mut dsp_result_rx = event_publisher.subscribe();
     let mut worker = DspWorker::new(
         manifest_store.clone(),
         derived_cache,
@@ -147,7 +145,7 @@ async fn worker_publishes_omni_render_when_localization_coverage_is_unavailable(
         },
         state.clone(),
     )
-    .with_dsp_result_sender(dsp_result_tx);
+    .with_dsp_event_publisher(event_publisher);
 
     let first_payload = store_forward_payload_with_timing(1_000_000_000, 0, 1);
     let first_manifest =
@@ -165,10 +163,7 @@ async fn worker_publishes_omni_render_when_localization_coverage_is_unavailable(
     .await;
     worker.process_one(second_manifest, 2).await;
 
-    let mut events: Vec<DspManifest> = Vec::new();
-    while let Ok(m) = dsp_result_rx.try_recv() {
-        events.push(m);
-    }
+    let events = drain_published_manifests(&mut dsp_result_rx);
 
     let localizations: Vec<_> = events
         .iter()
@@ -221,9 +216,9 @@ async fn localization_continues_when_classifier_render_is_rate_limited() {
     );
     derived_cache.ensure_initialized().await.unwrap();
 
-    let (dsp_result_tx, mut dsp_result_rx) = tokio::sync::broadcast::channel(32);
-
     let state: SharedDspState = Arc::new(RwLock::new(Default::default()));
+    let event_publisher = DspEventPublisher::new(state.clone(), 32, 32, 50);
+    let mut dsp_result_rx = event_publisher.subscribe();
     let mut worker = DspWorker::new(
         manifest_store.clone(),
         derived_cache,
@@ -236,7 +231,7 @@ async fn localization_continues_when_classifier_render_is_rate_limited() {
         },
         state.clone(),
     )
-    .with_dsp_result_sender(dsp_result_tx);
+    .with_dsp_event_publisher(event_publisher);
 
     let first_payload = store_forward_payload_with_timing(1_000_000_000, 0, 1);
     let first_manifest = raw_manifest_for_payload(
@@ -258,10 +253,7 @@ async fn localization_continues_when_classifier_render_is_rate_limited() {
     .await;
     worker.process_one(second_manifest, 1).await;
 
-    let mut events: Vec<DspManifest> = Vec::new();
-    while let Ok(m) = dsp_result_rx.try_recv() {
-        events.push(m);
-    }
+    let events = drain_published_manifests(&mut dsp_result_rx);
 
     let localization_count = events
         .iter()
@@ -278,6 +270,69 @@ async fn localization_continues_when_classifier_render_is_rate_limited() {
 
     let state = state.read().await;
     assert_eq!(state.total_localization_results, 2);
+    assert_eq!(state.total_classifier_renders, 1);
+}
+
+#[tokio::test]
+async fn worker_publishes_omni_render_for_non_tetrahedral_channel_count() {
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest_store = ManifestStore::new(tmp.path());
+    manifest_store.ensure_initialized().await.unwrap();
+    let derived_cache = DerivedCache::new(
+        tmp.path(),
+        DerivedCacheConfig {
+            budget_bytes: 16_777_216,
+            admission_reserve_bytes: 0,
+        },
+    );
+    derived_cache.ensure_initialized().await.unwrap();
+
+    let state: SharedDspState = Arc::new(RwLock::new(Default::default()));
+    let event_publisher = DspEventPublisher::new(state.clone(), 32, 32, 50);
+    let mut dsp_result_rx = event_publisher.subscribe();
+    let mut worker = DspWorker::new(
+        manifest_store.clone(),
+        derived_cache,
+        DspWorkerConfig {
+            birdnet_hybrid_render_enabled: true,
+            ..DspWorkerConfig::default()
+        },
+        state.clone(),
+    )
+    .with_dsp_event_publisher(event_publisher);
+
+    let payload = store_forward_payload_with_channel_count(1_000_000_000, 0, 1, 5);
+    let manifest = raw_manifest_for_payload(
+        tmp.path(),
+        "manifest-raw-five-channel",
+        "seg-five-channel",
+        payload,
+    )
+    .await;
+
+    worker.process_one(manifest, 1).await;
+
+    let events = drain_published_manifests(&mut dsp_result_rx);
+    let localization_count = events
+        .iter()
+        .filter(|m| m.manifest_type == "localization_result")
+        .count();
+    let render = events
+        .iter()
+        .find(|m| m.manifest_type == "classifier_render")
+        .expect("classifier render event");
+
+    assert_eq!(localization_count, 0);
+    assert_eq!(
+        render
+            .classifier_render
+            .as_ref()
+            .and_then(|payload| payload.fallback_reason.as_deref()),
+        Some("single_sensor_or_non_tetrahedral_array")
+    );
+
+    let state = state.read().await;
+    assert_eq!(state.total_localization_results, 0);
     assert_eq!(state.total_classifier_renders, 1);
 }
 
@@ -358,18 +413,34 @@ fn store_forward_payload_with_timing(
     start_sample_index: u64,
     sequence: u64,
 ) -> String {
+    store_forward_payload_with_channel_count(start_time_ns, start_sample_index, sequence, 4)
+}
+
+fn store_forward_payload_with_channel_count(
+    start_time_ns: u64,
+    start_sample_index: u64,
+    sequence: u64,
+    channel_count: usize,
+) -> String {
     let sr = 16_000;
     let samples = pseudo_random(520);
-    let channels = vec![
-        samples[0..512].to_vec(),
-        samples[1..513].to_vec(),
-        samples[2..514].to_vec(),
-        samples[0..512].to_vec(),
-    ];
+    let channels = (0..channel_count)
+        .map(|channel_index| samples[channel_index..channel_index + 512].to_vec())
+        .collect::<Vec<_>>();
+    let sensor_offsets = if channel_count == 4 {
+        SIRITH_MIC_POSITIONS_M
+            .iter()
+            .map(|position| vec![position[0], position[1], position[2]])
+            .collect::<Vec<_>>()
+    } else {
+        (0..channel_count)
+            .map(|index| vec![index as f32 * 0.01, 0.0, 0.0])
+            .collect::<Vec<_>>()
+    };
     serde_json::json!({
         "node": {
             "id": "sirith-test",
-            "sensor_offsets_m": SIRITH_MIC_POSITIONS_M,
+            "sensor_offsets_m": sensor_offsets,
             "metadata": {}
         },
         "buffered_frames": [{
@@ -380,7 +451,7 @@ fn store_forward_payload_with_timing(
                 "start_sample_index": start_sample_index,
                 "end_sample_index": start_sample_index + 512,
                 "sample_rate_hz": sr,
-                "channels": 4,
+                "channels": channel_count,
                 "encoding": "pcm16le",
                 "samples_per_channel": 512,
                 "samples_b64": encode_pcm16le_b64(&channels),
@@ -390,6 +461,16 @@ fn store_forward_payload_with_timing(
         }]
     })
     .to_string()
+}
+
+fn drain_published_manifests(
+    rx: &mut tokio::sync::broadcast::Receiver<ReplayableDspEvent>,
+) -> Vec<DspManifest> {
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event.manifest);
+    }
+    events
 }
 
 fn pseudo_random(n: usize) -> Vec<f32> {

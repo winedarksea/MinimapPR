@@ -441,7 +441,18 @@ async def _proxy_ingest_post(
 def _capture_pipeline_available(settings: "Settings") -> bool:
     if settings.ingest_backend == "python":
         return True
-    return settings.ingest_backend == "rust" and settings.ingest_storage_mode == "journal"
+    return (
+        settings.ingest_backend == "rust"
+        and settings.ingest_storage_mode == "journal"
+        and not settings.ingest_sidecar_memory_only_live_path
+    )
+
+
+def _capture_pipeline_unavailable_reason() -> str:
+    return (
+        "Ambisonic/IAMF capture requires Python ingest or a Rust journal-backed "
+        "range-lease sidecar; memory-only live mode does not provide capture sessions yet"
+    )
 
 
 def _has_live_ingest_runtime(state) -> bool:
@@ -617,6 +628,9 @@ async def _start_ingest_sidecar(
         ),
         "MINIMAPPR_SIDECAR_ALLOW_NON_TMPFS_JOURNAL": str(
             bool(getattr(settings, "ingest_sidecar_allow_non_tmpfs_journal", False))
+        ).lower(),
+        "MINIMAPPR_SIDECAR_MEMORY_ONLY_LIVE_PATH": str(
+            getattr(settings, "ingest_sidecar_memory_only_live_path", True)
         ).lower(),
         "MINIMAPPR_RUNTIME_PROFILE": str(getattr(settings, "runtime_profile", "default")),
         "MINIMAPPR_LOCALIZATION_WINDOW_SECONDS": str(
@@ -2253,7 +2267,7 @@ async def get_system_diagnostics(request: Request) -> dict:
         "capture_available": _capture_pipeline_available(settings),
         "capture_unavailable_reason": None
         if _capture_pipeline_available(settings)
-        else "Ambisonic/IAMF capture requires Python or Rust+journal ingest mode",
+        else _capture_pipeline_unavailable_reason(),
     }
     if hasattr(state, "fusion_node"):
         fusion_status = await state.fusion_node.status()
@@ -2746,12 +2760,13 @@ async def capture_start(request: Request, body: _CaptureStartBody):
     if not _capture_pipeline_available(settings):
         raise HTTPException(
             status_code=503,
-            detail="Ambisonic/IAMF capture requires Python or Rust+journal ingest mode",
+            detail=_capture_pipeline_unavailable_reason(),
         )
 
     work_dir_path = (
         Path(body.work_dir) if body.work_dir else Path("data/captures")
     )
+    storage: Storage = state.storage
 
     _python_ingest = settings.ingest_backend == "python"
     if _python_ingest:
@@ -2766,6 +2781,7 @@ async def capture_start(request: Request, body: _CaptureStartBody):
         audio_buffer = getattr(state, "audio_buffer", None)
         # Derive channel sensor IDs from the node's sensor_offsets_m when available,
         # falling back to the hardcoded 4-channel pattern for unknown nodes.
+        ch_sensor_ids: list[str] = []
         node_row = await storage.get_node_by_id(body.stream_key)
         if node_row is not None:
             ch_sensor_ids = _sensor_ids_from_node_row(node_row)
@@ -2817,7 +2833,7 @@ async def capture_stop(session_id: str, request: Request):
     if not _capture_pipeline_available(settings):
         raise HTTPException(
             status_code=503,
-            detail="Ambisonic/IAMF capture requires Python or Rust+journal ingest mode",
+            detail=_capture_pipeline_unavailable_reason(),
         )
     sidecar_url = "" if settings.ingest_backend == "python" else _ingest_runtime_base_url(settings)
 
@@ -2948,7 +2964,7 @@ async def recordings_start(request: Request, body: _StartRecordingBody):
     if not _capture_pipeline_available(settings):
         raise HTTPException(
             status_code=503,
-            detail="Ambisonic/IAMF capture requires Python or Rust+journal ingest mode",
+            detail=_capture_pipeline_unavailable_reason(),
         )
 
     stream_key = body.listener_node_id
@@ -3006,7 +3022,7 @@ async def recordings_stop(session_id: str, request: Request):
     settings: Settings = state.settings
 
     if not _capture_pipeline_available(settings):
-        raise HTTPException(status_code=503, detail="Capture not available")
+        raise HTTPException(status_code=503, detail=_capture_pipeline_unavailable_reason())
 
     sidecar_url = "" if settings.ingest_backend == "python" else _ingest_runtime_base_url(settings)
 

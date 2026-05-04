@@ -1,5 +1,6 @@
-use std::{collections::BTreeMap, path::Path, process::Stdio, time::Duration};
+use std::{collections::BTreeMap, process::Stdio, time::Duration};
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -20,7 +21,7 @@ pub struct AuthoritativeClassification {
 #[derive(Debug, Serialize)]
 struct ClassifierRequest<'a> {
     request_id: u64,
-    pcm16le_path: &'a str,
+    pcm16le_b64: &'a str,
     sample_rate_hz: u32,
 }
 
@@ -71,17 +72,18 @@ impl ManifestClassificationAnnotator {
 
     pub async fn classify_render(
         &mut self,
-        pcm16le_path: &Path,
+        pcm16le_bytes: &[u8],
         sample_rate_hz: u32,
     ) -> Result<Option<AuthoritativeClassification>, String> {
         let request_id = self.next_request_id;
         self.next_request_id = self.next_request_id.saturating_add(1);
+        let pcm16le_b64 = BASE64.encode(pcm16le_bytes);
         let response_result =
             {
                 let bridge = self.ensure_bridge().await?;
                 let request = serde_json::to_string(&ClassifierRequest {
                     request_id,
-                    pcm16le_path: &pcm16le_path.display().to_string(),
+                    pcm16le_b64: &pcm16le_b64,
                     sample_rate_hz,
                 })
                 .map_err(|error| format!("failed to serialize classifier request: {error}"))?;
@@ -204,5 +206,26 @@ impl ManifestClassificationAnnotator {
             label_confidence: response.label_confidence.unwrap_or(0.0).clamp(0.0, 1.0),
             scores: response.scores.unwrap_or_default(),
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifier_request_serializes_inline_pcm_bytes() {
+        let encoded_pcm = BASE64.encode([0_u8, 1, 2, 3]);
+        let request = serde_json::to_value(ClassifierRequest {
+            request_id: 42,
+            pcm16le_b64: &encoded_pcm,
+            sample_rate_hz: 16_000,
+        })
+        .expect("request should serialize");
+
+        assert_eq!(request["request_id"], 42);
+        assert_eq!(request["sample_rate_hz"], 16_000);
+        assert_eq!(request["pcm16le_b64"], encoded_pcm);
+        assert!(request.get("pcm16le_path").is_none());
     }
 }

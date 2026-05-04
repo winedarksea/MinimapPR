@@ -2,7 +2,10 @@ use std::{
     collections::HashMap,
     ffi::OsStr,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -32,13 +35,16 @@ pub struct JournalRuntimeConfig {
     pub total_journal_budget_bytes: u64,
     pub admission_reserve_bytes: u64,
     pub enforce_tmpfs: bool,
+    pub memory_only_live_path: bool,
     pub derived_cache_budget_bytes: u64,
     pub derived_cache_admission_reserve_bytes: u64,
+    pub raw_manifest_channel_capacity: usize,
+    pub raw_manifest_queue_backpressure: Option<Arc<RawManifestQueueBackpressure>>,
     /// Optional in-process channel for zero-latency delivery of raw_journal_append
     /// manifests to the DspWorker, bypassing the 20ms filesystem polling cycle.
-    /// Unbounded so that the ingest path never blocks or drops when the DSP worker
-    /// is briefly busy; memory growth is bounded by the DSP worker's buffer window.
-    pub raw_manifest_tx: Option<mpsc::UnboundedSender<DspManifest>>,
+    /// Bounded so overload is surfaced immediately to the ingest client instead
+    /// of accumulating raw audio payloads unbounded in heap memory.
+    pub raw_manifest_tx: Option<mpsc::Sender<QueuedRawManifest>>,
 }
 
 impl Default for JournalRuntimeConfig {
@@ -47,10 +53,163 @@ impl Default for JournalRuntimeConfig {
             total_journal_budget_bytes: 268_435_456,
             admission_reserve_bytes: 16_777_216,
             enforce_tmpfs: true,
+            memory_only_live_path: false,
             derived_cache_budget_bytes: 67_108_864,
             derived_cache_admission_reserve_bytes: 8_388_608,
+            raw_manifest_channel_capacity: 2048,
+            raw_manifest_queue_backpressure: None,
             raw_manifest_tx: None,
         }
+    }
+}
+
+#[derive(Debug)]
+pub struct RawManifestQueueBackpressure {
+    queued_messages: AtomicUsize,
+    queued_bytes: AtomicUsize,
+    byte_limit: usize,
+}
+
+impl RawManifestQueueBackpressure {
+    pub fn new(byte_limit: usize) -> Self {
+        Self {
+            queued_messages: AtomicUsize::new(0),
+            queued_bytes: AtomicUsize::new(0),
+            byte_limit,
+        }
+    }
+
+    pub fn byte_limit(&self) -> usize {
+        self.byte_limit
+    }
+
+    pub fn queued_messages(&self) -> usize {
+        self.queued_messages.load(Ordering::Relaxed)
+    }
+
+    pub fn queued_bytes(&self) -> usize {
+        self.queued_bytes.load(Ordering::Relaxed)
+    }
+
+    fn try_reserve(
+        self: &Arc<Self>,
+        requested_bytes: usize,
+    ) -> Result<RawManifestQueuePermit, RawManifestQueueBytesExceededError> {
+        loop {
+            let current_queued_bytes = self.queued_bytes.load(Ordering::Relaxed);
+            let projected_queued_bytes = current_queued_bytes.saturating_add(requested_bytes);
+            if projected_queued_bytes > self.byte_limit {
+                return Err(RawManifestQueueBytesExceededError {
+                    byte_limit: self.byte_limit,
+                    current_queued_bytes,
+                    requested_bytes,
+                });
+            }
+            if self
+                .queued_bytes
+                .compare_exchange(
+                    current_queued_bytes,
+                    projected_queued_bytes,
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                self.queued_messages.fetch_add(1, Ordering::AcqRel);
+                return Ok(RawManifestQueuePermit {
+                    tracker: Arc::clone(self),
+                    queued_bytes: requested_bytes,
+                    released: false,
+                });
+            }
+        }
+    }
+
+    fn release(&self, queued_bytes: usize) {
+        self.queued_messages.fetch_sub(1, Ordering::AcqRel);
+        self.queued_bytes.fetch_sub(queued_bytes, Ordering::AcqRel);
+    }
+}
+
+#[derive(Debug)]
+struct RawManifestQueuePermit {
+    tracker: Arc<RawManifestQueueBackpressure>,
+    queued_bytes: usize,
+    released: bool,
+}
+
+impl RawManifestQueuePermit {
+    fn release(&mut self) {
+        if self.released {
+            return;
+        }
+        self.tracker.release(self.queued_bytes);
+        self.released = true;
+    }
+
+    fn try_resize(
+        &mut self,
+        requested_bytes: usize,
+    ) -> Result<(), RawManifestQueueBytesExceededError> {
+        if self.released || requested_bytes == self.queued_bytes {
+            return Ok(());
+        }
+        if requested_bytes < self.queued_bytes {
+            let released_bytes = self.queued_bytes - requested_bytes;
+            self.tracker
+                .queued_bytes
+                .fetch_sub(released_bytes, Ordering::AcqRel);
+            self.queued_bytes = requested_bytes;
+            return Ok(());
+        }
+
+        let additional_bytes = requested_bytes - self.queued_bytes;
+        loop {
+            let current_queued_bytes = self.tracker.queued_bytes.load(Ordering::Relaxed);
+            let projected_queued_bytes = current_queued_bytes.saturating_add(additional_bytes);
+            if projected_queued_bytes > self.tracker.byte_limit {
+                return Err(RawManifestQueueBytesExceededError {
+                    byte_limit: self.tracker.byte_limit,
+                    current_queued_bytes,
+                    requested_bytes: additional_bytes,
+                });
+            }
+            if self
+                .tracker
+                .queued_bytes
+                .compare_exchange(
+                    current_queued_bytes,
+                    projected_queued_bytes,
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                self.queued_bytes = requested_bytes;
+                return Ok(());
+            }
+        }
+    }
+}
+
+impl Drop for RawManifestQueuePermit {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct QueuedRawManifest {
+    manifest: DspManifest,
+    _queue_permit: Option<RawManifestQueuePermit>,
+}
+
+impl QueuedRawManifest {
+    pub(crate) fn into_manifest(mut self) -> DspManifest {
+        if let Some(queue_permit) = self._queue_permit.as_mut() {
+            queue_permit.release();
+        }
+        self.manifest
     }
 }
 
@@ -93,6 +252,20 @@ struct SegmentJournalState {
 struct StreamJournalState {
     next_sequence: u64,
 }
+
+#[derive(Debug)]
+struct MemoryOnlyLivePathLeaseUnsupportedError;
+
+impl std::fmt::Display for MemoryOnlyLivePathLeaseUnsupportedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "pin leases are unavailable while the sidecar is running in memory-only live mode"
+        )
+    }
+}
+
+impl std::error::Error for MemoryOnlyLivePathLeaseUnsupportedError {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SegmentJournalEntry {
@@ -231,6 +404,44 @@ impl std::fmt::Display for JournalCapacityExceededError {
 
 impl std::error::Error for JournalCapacityExceededError {}
 
+#[derive(Debug)]
+pub struct RawManifestChannelFullError {
+    channel_capacity: usize,
+}
+
+impl std::fmt::Display for RawManifestChannelFullError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "raw manifest channel is full (capacity {}); ingest backpressure engaged",
+            self.channel_capacity,
+        )
+    }
+}
+
+impl std::error::Error for RawManifestChannelFullError {}
+
+#[derive(Debug)]
+pub struct RawManifestQueueBytesExceededError {
+    byte_limit: usize,
+    current_queued_bytes: usize,
+    requested_bytes: usize,
+}
+
+impl std::fmt::Display for RawManifestQueueBytesExceededError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "raw manifest queue byte budget exhausted: current {} bytes + requested {} bytes exceeds {} bytes",
+            self.current_queued_bytes,
+            self.requested_bytes,
+            self.byte_limit,
+        )
+    }
+}
+
+impl std::error::Error for RawManifestQueueBytesExceededError {}
+
 impl IngestBackend {
     pub async fn open(
         base_dir: PathBuf,
@@ -316,13 +527,33 @@ impl SegmentJournalBackend {
     ) -> BoxedResult<Self> {
         let journal_root = base_dir.join("journal");
         let streams_dir = journal_root.join("streams");
-        fs::create_dir_all(&streams_dir).await?;
-        let storage_class_report =
-            validate_journal_storage_class(&journal_root, runtime_config.enforce_tmpfs)
-                .map_err(|error| -> BoxedError { Box::new(error) })?;
-
-        let journal_epoch = open_or_advance_epoch(&journal_root, &streams_dir).await?;
-        let (streams, total_journal_bytes) = recover_stream_states(&streams_dir).await?;
+        let (storage_class_report, journal_epoch, streams, total_journal_bytes) =
+            if runtime_config.memory_only_live_path {
+                (
+                    StorageClassReport {
+                        path: journal_root.clone(),
+                        storage_class: "memory-only-live-path".to_string(),
+                        tmpfs_backed: true,
+                        enforcement_enabled: false,
+                    },
+                    0,
+                    HashMap::new(),
+                    0,
+                )
+            } else {
+                fs::create_dir_all(&streams_dir).await?;
+                let storage_class_report =
+                    validate_journal_storage_class(&journal_root, runtime_config.enforce_tmpfs)
+                        .map_err(|error| -> BoxedError { Box::new(error) })?;
+                let journal_epoch = open_or_advance_epoch(&journal_root, &streams_dir).await?;
+                let (streams, total_journal_bytes) = recover_stream_states(&streams_dir).await?;
+                (
+                    storage_class_report,
+                    journal_epoch,
+                    streams,
+                    total_journal_bytes,
+                )
+            };
         let lease_store = LeaseStore::new(&journal_root);
         let derived_cache = DerivedCache::new(
             &journal_root,
@@ -331,9 +562,11 @@ impl SegmentJournalBackend {
                 admission_reserve_bytes: runtime_config.derived_cache_admission_reserve_bytes,
             },
         );
-        derived_cache.ensure_initialized().await?;
         let manifest_store = ManifestStore::new(&journal_root);
-        manifest_store.ensure_initialized().await?;
+        if !runtime_config.memory_only_live_path {
+            derived_cache.ensure_initialized().await?;
+            manifest_store.ensure_initialized().await?;
+        }
         Ok(Self {
             journal_root,
             streams_dir,
@@ -352,22 +585,34 @@ impl SegmentJournalBackend {
     }
 
     async fn health(&self) -> BoxedResult<IngestBackendHealth> {
-        self.derived_cache.reserve_for_write(0).await?;
-        let lease_index = self.lease_store.active_index(now_ns()?).await?;
+        let active_pin_leases = if self.runtime_config.memory_only_live_path {
+            0
+        } else {
+            self.derived_cache.reserve_for_write(0).await?;
+            self.lease_store.active_index(now_ns()?).await?.leases.len()
+        };
         Ok(IngestBackendHealth {
-            storage_mode: "journal".to_string(),
+            storage_mode: if self.runtime_config.memory_only_live_path {
+                "memory_only_live_path".to_string()
+            } else {
+                "journal".to_string()
+            },
             journal: Some(JournalHealth {
                 journal_root: self.journal_root.clone(),
                 storage_class: self.storage_class_report.clone(),
                 total_journal_budget_bytes: self.runtime_config.total_journal_budget_bytes,
                 admission_reserve_bytes: self.runtime_config.admission_reserve_bytes,
                 derived_cache_budget_bytes: self.runtime_config.derived_cache_budget_bytes,
-                active_pin_leases: lease_index.leases.len(),
+                active_pin_leases,
             }),
         })
     }
 
     async fn create_pin_lease(&self, request: PinLeaseRequest) -> BoxedResult<PinLeaseResponse> {
+        if self.runtime_config.memory_only_live_path {
+            let _ = request;
+            return Err(Box::new(MemoryOnlyLivePathLeaseUnsupportedError));
+        }
         let now_ns = now_ns()?;
         let (response, active_index) = self.lease_store.upsert(request, now_ns).await?;
         self.refresh_segment_pin_counts(&active_index, now_ns)
@@ -376,6 +621,10 @@ impl SegmentJournalBackend {
     }
 
     async fn release_pin_lease(&self, lease_id: &str) -> BoxedResult<()> {
+        if self.runtime_config.memory_only_live_path {
+            let _ = lease_id;
+            return Err(Box::new(MemoryOnlyLivePathLeaseUnsupportedError));
+        }
         let now_ns = now_ns()?;
         let active_index = self.lease_store.release(lease_id, now_ns).await?;
         self.refresh_segment_pin_counts(&active_index, now_ns)
@@ -391,12 +640,15 @@ impl SegmentJournalBackend {
         body: Body,
     ) -> BoxedResult<String> {
         validate_declared_content_length(&headers, max_body_bytes)?;
+        let mut preflight_queue_permit = self.preflight_raw_manifest_queue_reserve(&headers)?;
         let received_ns = now_ns()?;
         let content_type = content_type_from_headers(&headers);
         let body_bytes = read_body_bytes(body, max_body_bytes).await?;
-        let capture_envelope = parse_capture_envelope(endpoint, &body_bytes)
-            .map_err(InvalidIngestEnvelopeError::new)
-            .map_err(|error| -> BoxedError { Box::new(error) })?;
+        if let Some(queue_permit) = preflight_queue_permit.as_mut() {
+            queue_permit.try_resize(body_bytes.len())?;
+        }
+        let (body_bytes, capture_envelope) = parse_capture_envelope_for_enqueue(endpoint, body_bytes)
+            .await?;
 
         self.enqueue_channel_only(
             endpoint,
@@ -404,8 +656,22 @@ impl SegmentJournalBackend {
             received_ns,
             &capture_envelope,
             &body_bytes,
+            preflight_queue_permit,
         )
         .await
+    }
+
+    fn preflight_raw_manifest_queue_reserve(
+        &self,
+        headers: &HeaderMap,
+    ) -> BoxedResult<Option<RawManifestQueuePermit>> {
+        let Some(queue_backpressure) = &self.runtime_config.raw_manifest_queue_backpressure else {
+            return Ok(None);
+        };
+        let Some(content_length_bytes) = declared_content_length_bytes(headers) else {
+            return Ok(None);
+        };
+        Ok(Some(queue_backpressure.try_reserve(content_length_bytes)?))
     }
 
     async fn enqueue_channel_only(
@@ -415,6 +681,7 @@ impl SegmentJournalBackend {
         received_ns: u128,
         capture_envelope: &CaptureEnvelope,
         body_bytes: &[u8],
+        preflight_queue_permit: Option<RawManifestQueuePermit>,
     ) -> BoxedResult<String> {
         let (journal_id, entry) = {
             let mut state = self.state.lock().await;
@@ -460,7 +727,8 @@ impl SegmentJournalBackend {
             (journal_id, entry)
         };
 
-        let _ = self.publish_capture_manifest(&entry, body_bytes).await;
+        self.publish_capture_manifest(&entry, body_bytes, preflight_queue_permit)
+            .await?;
         Ok(journal_id)
     }
 
@@ -468,6 +736,7 @@ impl SegmentJournalBackend {
         &self,
         entry: &SegmentJournalEntry,
         raw_bytes: &[u8],
+        mut preflight_queue_permit: Option<RawManifestQueuePermit>,
     ) -> BoxedResult<()> {
         let handle = entry.payload_handle();
         let manifest = DspManifest {
@@ -519,12 +788,34 @@ impl SegmentJournalBackend {
                 "source_type": entry.source_type,
             }));
         }
-        if tx.send(manifest_with_payload).is_err() {
-            return Err(Box::new(InvalidIngestEnvelopeError::new(
-                "raw manifest channel receiver unavailable — DSP worker stopped",
-            )));
+        if let Some(queue_permit) = preflight_queue_permit.as_mut() {
+            queue_permit.try_resize(raw_bytes.len())?;
         }
-        Ok(())
+        let queue_permit = if let Some(queue_permit) = preflight_queue_permit {
+            Some(queue_permit)
+        } else if let Some(queue_backpressure) = &self.runtime_config.raw_manifest_queue_backpressure
+        {
+            Some(queue_backpressure.try_reserve(raw_bytes.len())?)
+        } else {
+            None
+        };
+        let queued_manifest = QueuedRawManifest {
+            manifest: manifest_with_payload,
+            _queue_permit: queue_permit,
+        };
+        match tx.try_send(queued_manifest) {
+            Ok(()) => Ok(()),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                Err(Box::new(RawManifestChannelFullError {
+                    channel_capacity: self.runtime_config.raw_manifest_channel_capacity,
+                }))
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                Err(Box::new(InvalidIngestEnvelopeError::new(
+                    "raw manifest channel receiver unavailable — DSP worker stopped",
+                )))
+            }
+        }
     }
 
     async fn refresh_segment_pin_counts(
@@ -638,6 +929,27 @@ async fn read_body_bytes(body: Body, max_body_bytes: usize) -> BoxedResult<Vec<u
     Ok(bytes)
 }
 
+async fn parse_capture_envelope_for_enqueue(
+    endpoint: &'static str,
+    body_bytes: Vec<u8>,
+) -> BoxedResult<(Vec<u8>, CaptureEnvelope)> {
+    if endpoint == "/api/v1/ingest/store-forward" {
+        return tokio::task::spawn_blocking(move || {
+            let envelope = parse_capture_envelope(endpoint, &body_bytes)
+                .map_err(InvalidIngestEnvelopeError::new)
+                .map_err(|error| -> BoxedError { Box::new(error) })?;
+            Ok((body_bytes, envelope))
+        })
+        .await
+        .map_err(|error| -> BoxedError { Box::new(error) })?;
+    }
+
+    let envelope = parse_capture_envelope(endpoint, &body_bytes)
+        .map_err(InvalidIngestEnvelopeError::new)
+        .map_err(|error| -> BoxedError { Box::new(error) })?;
+    Ok((body_bytes, envelope))
+}
+
 async fn open_or_advance_epoch(journal_root: &Path, _streams_dir: &Path) -> BoxedResult<u64> {
     let state_path = journal_root.join("epoch.json");
     let existing_state = match fs::read_to_string(&state_path).await {
@@ -735,7 +1047,6 @@ fn is_client_disconnect(err: &dyn std::error::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifests::ManifestStore;
     use serde_json::json;
 
     fn store_forward_body(node_id: &str, sequence: u64, start_sample_index: u64) -> String {
@@ -780,8 +1091,11 @@ mod tests {
             total_journal_budget_bytes: 268_435_456,
             admission_reserve_bytes: 16_777_216,
             enforce_tmpfs: false,
+            memory_only_live_path: false,
             derived_cache_budget_bytes: 67_108_864,
             derived_cache_admission_reserve_bytes: 8_388_608,
+            raw_manifest_channel_capacity: 2048,
+            raw_manifest_queue_backpressure: None,
             raw_manifest_tx: None,
         }
     }
@@ -791,9 +1105,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let payload = store_forward_body("node-a", 7, 0);
 
-        // Wire an unbounded channel so the manifest arrives in-memory (no disk write).
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        // Wire a bounded channel so the manifest arrives in-memory (no disk write).
+        let queue_backpressure = Arc::new(RawManifestQueueBackpressure::new(1_048_576));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
         let config = JournalRuntimeConfig {
+            raw_manifest_channel_capacity: 4,
+            raw_manifest_queue_backpressure: Some(queue_backpressure),
             raw_manifest_tx: Some(tx),
             ..test_journal_runtime_config()
         };
@@ -816,22 +1133,180 @@ mod tests {
             .await
             .unwrap();
 
-        let manifest = rx.try_recv().expect("manifest delivered via channel");
+        let manifest = rx
+            .try_recv()
+            .expect("manifest delivered via channel")
+            .into_manifest();
         assert_eq!(manifest.created_ns, 1007);
         assert_eq!(manifest.source_handles[0].toa_ns, Some(1007));
         assert_eq!(manifest.source_handles[0].tor_ns, Some(2007));
     }
 
     #[tokio::test]
+    async fn raw_capture_manifest_returns_backpressure_error_when_channel_is_full() {
+        let tmp = tempfile::tempdir().unwrap();
+        let payload = store_forward_body("node-a", 7, 0);
+        let next_payload = store_forward_body("node-a", 8, 4);
+
+        let queue_backpressure = Arc::new(RawManifestQueueBackpressure::new(1_048_576));
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let config = JournalRuntimeConfig {
+            raw_manifest_channel_capacity: 1,
+            raw_manifest_queue_backpressure: Some(queue_backpressure),
+            raw_manifest_tx: Some(tx),
+            ..test_journal_runtime_config()
+        };
+        let backend = IngestBackend::open(
+            tmp.path().join("store"),
+            IngestStorageMode::Journal,
+            usize::MAX as u64,
+            config,
+        )
+        .await
+        .unwrap();
+
+        backend
+            .enqueue(
+                usize::MAX,
+                "/api/v1/ingest/store-forward",
+                HeaderMap::new(),
+                Body::from(payload),
+            )
+            .await
+            .unwrap();
+
+        let err = backend
+            .enqueue(
+                usize::MAX,
+                "/api/v1/ingest/store-forward",
+                HeaderMap::new(),
+                Body::from(next_payload),
+            )
+            .await
+            .expect_err("second enqueue should hit channel backpressure");
+
+        assert!(err.downcast_ref::<RawManifestChannelFullError>().is_some());
+    }
+
+    #[tokio::test]
+    async fn raw_capture_manifest_returns_backpressure_error_when_byte_budget_is_exhausted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let payload = store_forward_body("node-a", 7, 0);
+        let payload_len = payload.len();
+        let next_payload = store_forward_body("node-a", 8, 4);
+
+        let queue_backpressure = Arc::new(RawManifestQueueBackpressure::new(
+            payload_len.saturating_mul(2).saturating_sub(1),
+        ));
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let config = JournalRuntimeConfig {
+            raw_manifest_channel_capacity: 8,
+            raw_manifest_queue_backpressure: Some(queue_backpressure),
+            raw_manifest_tx: Some(tx),
+            ..test_journal_runtime_config()
+        };
+        let backend = IngestBackend::open(
+            tmp.path().join("store"),
+            IngestStorageMode::Journal,
+            usize::MAX as u64,
+            config,
+        )
+        .await
+        .unwrap();
+
+        backend
+            .enqueue(
+                usize::MAX,
+                "/api/v1/ingest/store-forward",
+                HeaderMap::new(),
+                Body::from(payload),
+            )
+            .await
+            .unwrap();
+
+        let err = backend
+            .enqueue(
+                usize::MAX,
+                "/api/v1/ingest/store-forward",
+                HeaderMap::new(),
+                Body::from(next_payload),
+            )
+            .await
+            .expect_err("second enqueue should hit byte-budget backpressure");
+
+        assert!(err
+            .downcast_ref::<RawManifestQueueBytesExceededError>()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn store_forward_fast_fails_on_declared_length_before_parsing_when_queue_budget_full() {
+        let tmp = tempfile::tempdir().unwrap();
+        let payload = store_forward_body("node-a", 7, 0);
+        let payload_len = payload.len();
+
+        let queue_backpressure = Arc::new(RawManifestQueueBackpressure::new(payload_len));
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let config = JournalRuntimeConfig {
+            raw_manifest_channel_capacity: 8,
+            raw_manifest_queue_backpressure: Some(queue_backpressure),
+            raw_manifest_tx: Some(tx),
+            ..test_journal_runtime_config()
+        };
+        let backend = IngestBackend::open(
+            tmp.path().join("store"),
+            IngestStorageMode::Journal,
+            usize::MAX as u64,
+            config,
+        )
+        .await
+        .unwrap();
+
+        backend
+            .enqueue(
+                usize::MAX,
+                "/api/v1/ingest/store-forward",
+                HeaderMap::new(),
+                Body::from(payload),
+            )
+            .await
+            .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_LENGTH, header::HeaderValue::from_static("1"));
+
+        let err = backend
+            .enqueue(
+                usize::MAX,
+                "/api/v1/ingest/store-forward",
+                headers,
+                Body::from("{"),
+            )
+            .await
+            .expect_err("declared length should be rejected before parsing malformed body");
+
+        assert!(err
+            .downcast_ref::<RawManifestQueueBytesExceededError>()
+            .is_some());
+    }
+
+    #[tokio::test]
     async fn journal_recovers_next_sequence_after_restart() {
         let tmp = tempfile::tempdir().unwrap();
         let store_dir = tmp.path().join("store");
+        let queue_backpressure = Arc::new(RawManifestQueueBackpressure::new(1_048_576));
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
 
         let backend = IngestBackend::open(
             store_dir.clone(),
             IngestStorageMode::Journal,
             65_536,
-            test_journal_runtime_config(),
+            JournalRuntimeConfig {
+                raw_manifest_channel_capacity: 4,
+                raw_manifest_queue_backpressure: Some(queue_backpressure),
+                raw_manifest_tx: Some(tx),
+                ..test_journal_runtime_config()
+            },
         )
         .await
         .unwrap();
@@ -846,11 +1321,19 @@ mod tests {
             .unwrap();
         drop(backend);
 
+        let queue_backpressure = Arc::new(RawManifestQueueBackpressure::new(1_048_576));
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+
         let reopened = IngestBackend::open(
             store_dir.clone(),
             IngestStorageMode::Journal,
             65_536,
-            test_journal_runtime_config(),
+            JournalRuntimeConfig {
+                raw_manifest_channel_capacity: 4,
+                raw_manifest_queue_backpressure: Some(queue_backpressure),
+                raw_manifest_tx: Some(tx),
+                ..test_journal_runtime_config()
+            },
         )
         .await
         .unwrap();
@@ -865,6 +1348,42 @@ mod tests {
             .unwrap();
 
         assert!(journal_id.contains("-00000000000000000002-"));
+    }
+
+    #[tokio::test]
+    async fn memory_only_live_path_does_not_initialize_journal_directories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_dir = tmp.path().join("store");
+        let queue_backpressure = Arc::new(RawManifestQueueBackpressure::new(1_048_576));
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+
+        let backend = IngestBackend::open(
+            store_dir.clone(),
+            IngestStorageMode::Journal,
+            65_536,
+            JournalRuntimeConfig {
+                memory_only_live_path: true,
+                raw_manifest_channel_capacity: 4,
+                raw_manifest_queue_backpressure: Some(queue_backpressure),
+                raw_manifest_tx: Some(tx),
+                ..test_journal_runtime_config()
+            },
+        )
+        .await
+        .unwrap();
+
+        backend
+            .enqueue(
+                usize::MAX,
+                "/api/v1/ingest/store-forward",
+                HeaderMap::new(),
+                Body::from(store_forward_body("node-a", 1, 0)),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(backend.health().await.unwrap().storage_mode, "memory_only_live_path");
+        assert!(!store_dir.join("journal").exists());
     }
 
     #[tokio::test]

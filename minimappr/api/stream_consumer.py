@@ -63,6 +63,7 @@ class IngestStreamConsumer:
         self._ingest_transport = ingest_transport
         self._running = False
         self._task: asyncio.Task | None = None
+        self._last_event_id: str | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -132,19 +133,87 @@ class IngestStreamConsumer:
             pool=5.0,
         )
         async with httpx.AsyncClient(timeout=timeout) as client:
-            async with client.stream("GET", url, headers={"Accept": "text/event-stream"}) as response:
+            async with client.stream("GET", url, headers=self._stream_request_headers()) as response:
                 response.raise_for_status()
                 logger.debug("IngestStreamConsumer SSE connected")
+                current_data_lines: list[str] = []
+                current_event_type = "message"
+                current_event_id: str | None = None
                 async for line in response.aiter_lines():
                     if not self._running:
                         break
-                    line = line.strip()
-                    if not line.startswith("data:"):
+                    line = line.rstrip("\r")
+                    if line == "":
+                        await self._dispatch_sse_event(
+                            event_type=current_event_type,
+                            event_id=current_event_id,
+                            data_lines=current_data_lines,
+                        )
+                        current_data_lines = []
+                        current_event_type = "message"
+                        current_event_id = None
                         continue
-                    payload = line[len("data:"):].strip()
-                    if not payload:
+                    if line.startswith(":"):
                         continue
-                    await self._handle_event(payload)
+                    field_name, separator, field_value = line.partition(":")
+                    if separator == "":
+                        continue
+                    field_value = field_value.lstrip()
+                    if field_name == "data":
+                        current_data_lines.append(field_value)
+                    elif field_name == "event":
+                        current_event_type = field_value or "message"
+                    elif field_name == "id":
+                        current_event_id = field_value or None
+                await self._dispatch_sse_event(
+                    event_type=current_event_type,
+                    event_id=current_event_id,
+                    data_lines=current_data_lines,
+                )
+
+    def _stream_request_headers(self) -> dict[str, str]:
+        headers = {"Accept": "text/event-stream"}
+        if self._last_event_id:
+            headers["Last-Event-ID"] = self._last_event_id
+        return headers
+
+    async def _dispatch_sse_event(
+        self,
+        *,
+        event_type: str,
+        event_id: str | None,
+        data_lines: list[str],
+    ) -> None:
+        if not data_lines:
+            return
+        payload = "\n".join(data_lines).strip()
+        if not payload:
+            return
+        if event_type == "replay_gap":
+            self._handle_replay_gap(payload)
+            return
+        if event_type not in {"", "message"}:
+            logger.debug("IngestStreamConsumer ignoring SSE event=%s", event_type)
+            return
+        await self._handle_event(payload)
+        if event_id:
+            self._last_event_id = event_id
+
+    def _handle_replay_gap(self, payload: str) -> None:
+        try:
+            gap_payload = json.loads(payload)
+        except json.JSONDecodeError:
+            logger.warning("IngestStreamConsumer replay gap signaled with malformed payload")
+            return
+        logger.warning(
+            (
+                "IngestStreamConsumer replay gap detected: requested_after=%s "
+                "oldest_available=%s skipped_messages=%s"
+            ),
+            gap_payload.get("requested_after"),
+            gap_payload.get("oldest_available"),
+            gap_payload.get("skipped_messages"),
+        )
 
     async def _handle_event(self, payload: str) -> None:
         """Parse a single SSE data line and route to the transport."""
