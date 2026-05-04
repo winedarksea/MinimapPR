@@ -202,11 +202,14 @@ pub fn extract_mmb1_node_json(raw_bytes: &[u8]) -> Option<serde_json::Value> {
     let position_y = reader.f32().ok()?;
     let position_z = reader.f32().ok()?;
     let has_geo_position = reader.u8().ok()? != 0;
-    if has_geo_position {
-        reader.f32().ok()?; // lat
-        reader.f32().ok()?; // lon
-        reader.f32().ok()?; // alt
-    }
+    let position_geo: Option<(f32, f32, f32)> = if has_geo_position {
+        let lat = reader.f32().ok()?;
+        let lon = reader.f32().ok()?;
+        let alt = reader.f32().ok()?;
+        Some((lat, lon, alt))
+    } else {
+        None
+    };
     let sensor_count = reader.u8().ok()?;
     let mut sensor_offsets: Vec<[f32; 3]> = Vec::with_capacity(usize::from(sensor_count));
     for _ in 0..sensor_count {
@@ -224,6 +227,11 @@ pub fn extract_mmb1_node_json(raw_bytes: &[u8]) -> Option<serde_json::Value> {
             break;
         }
     }
+    // Read remaining node header fields so GPS metadata reaches Python ingest.
+    let _hardware = reader.string().unwrap_or_default();
+    let _firmware = reader.string().unwrap_or_default();
+    let gps_signal = reader.string().unwrap_or_default();
+    let position_source = reader.string().unwrap_or_default();
 
     // node_type_code: 0=point, 1=sirith_tetra, 2=array, 3=gateway
     let node_type_str = match node_type_code {
@@ -234,14 +242,38 @@ pub fn extract_mmb1_node_json(raw_bytes: &[u8]) -> Option<serde_json::Value> {
         _ => "point",
     };
 
-    Some(serde_json::json!({
+    let mut gps_meta = serde_json::Map::new();
+    if !gps_signal.is_empty() {
+        gps_meta.insert("signal".to_string(), serde_json::Value::String(gps_signal));
+    }
+    if !position_source.is_empty() {
+        gps_meta.insert(
+            "position_source".to_string(),
+            serde_json::Value::String(position_source),
+        );
+    }
+    let metadata = if gps_meta.is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::json!({ "gps": gps_meta })
+    };
+
+    let mut node_json = serde_json::json!({
         "id": node_id,
         "node_type": node_type_str,
         "position_m": [position_x, position_y, position_z],
         "sensor_offsets_m": sensor_offsets,
         "capabilities": capabilities,
-        "metadata": {}
-    }))
+        "metadata": metadata,
+    });
+    if let Some((lat, lon, alt)) = position_geo {
+        node_json["position_geo"] = serde_json::json!({
+            "lat": lat,
+            "lon": lon,
+            "alt_m": alt,
+        });
+    }
+    Some(node_json)
 }
 
 fn parse_binary_capture_envelope(raw_payload: &[u8]) -> Result<CaptureEnvelope, String> {
