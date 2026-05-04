@@ -469,6 +469,103 @@ def _clear_state_attrs(state, *names: str) -> None:
             delattr(state, name)
 
 
+def _sidecar_stream_consumer_snapshots(state) -> dict[str, object]:
+    consumer = getattr(state, "ingest_stream_consumer", None)
+    snapshot_nodes = getattr(consumer, "snapshot_nodes", None)
+    if not callable(snapshot_nodes):
+        return {}
+    snapshots = snapshot_nodes()
+    return snapshots if isinstance(snapshots, dict) else {}
+
+
+def _node_row_from_sidecar_snapshot(snapshot: object) -> dict[str, object] | None:
+    node_payload = getattr(snapshot, "node_payload", None)
+    last_seen_ns = getattr(snapshot, "last_seen_ns", None)
+    if not isinstance(node_payload, dict) or not isinstance(last_seen_ns, int):
+        return None
+    row = dict(node_payload)
+    row["last_seen_ns"] = last_seen_ns
+    return row
+
+
+def _merge_nodes_with_sidecar_snapshots(
+    nodes: list[dict],
+    sidecar_snapshots: dict[str, object],
+    *,
+    limit: int,
+) -> list[dict]:
+    nodes_by_id = {
+        str(node.get("id")): node
+        for node in nodes
+        if isinstance(node, dict) and isinstance(node.get("id"), str)
+    }
+    for node_id, snapshot in sidecar_snapshots.items():
+        snapshot_row = _node_row_from_sidecar_snapshot(snapshot)
+        if snapshot_row is None:
+            continue
+        existing = nodes_by_id.get(node_id)
+        if existing is None:
+            nodes.append(snapshot_row)
+            nodes_by_id[node_id] = snapshot_row
+            continue
+        existing_last_seen_ns = existing.get("last_seen_ns")
+        existing_last_seen_ns = existing_last_seen_ns if isinstance(existing_last_seen_ns, int) else 0
+        snapshot_last_seen_ns = int(snapshot_row.get("last_seen_ns") or 0)
+        if snapshot_last_seen_ns >= existing_last_seen_ns:
+            existing.update(snapshot_row)
+    nodes.sort(key=lambda node: str(node.get("id") or ""))
+    return nodes[:limit]
+
+
+def _sidecar_snapshot_audio_debug(
+    snapshot: object,
+    *,
+    now_ns: int,
+    degraded_after_seconds: float,
+) -> dict[str, object] | None:
+    node_payload = getattr(snapshot, "node_payload", None)
+    if not isinstance(node_payload, dict):
+        return None
+    sensor_offsets_m = node_payload.get("sensor_offsets_m")
+    sensor_count = len(sensor_offsets_m) if isinstance(sensor_offsets_m, list) else 0
+    last_sample_time_ns = getattr(snapshot, "last_sample_time_ns", None)
+    age_seconds = None
+    if isinstance(last_sample_time_ns, int):
+        age_seconds = max(0.0, (now_ns - last_sample_time_ns) / 1_000_000_000.0)
+    if age_seconds is None:
+        status = "external_ingest_process"
+    elif age_seconds <= degraded_after_seconds:
+        status = "recent"
+    else:
+        status = "stale"
+    sample_rate_hz = getattr(snapshot, "sample_rate_hz", None)
+    active_sensor_count = getattr(snapshot, "active_sensor_count", None)
+    rms = getattr(snapshot, "rms", None)
+    return {
+        "sensor_count": sensor_count,
+        "active_sensor_count": int(active_sensor_count or 0),
+        "sample_rate_hz": sample_rate_hz if isinstance(sample_rate_hz, int) else None,
+        "last_sample_time_ns": last_sample_time_ns if isinstance(last_sample_time_ns, int) else None,
+        "age_seconds": age_seconds,
+        "rms": rms if isinstance(rms, (int, float)) else None,
+        "recent_coverage_ratio": None,
+        "recent_missing_ratio": None,
+        "recent_max_gap_seconds": None,
+        "max_buffer_samples": None,
+        "max_buffer_seconds": None,
+        "status": status,
+    }
+
+
+def _sidecar_snapshot_latest_environment(snapshot: object, *, node_id: str) -> dict[str, object] | None:
+    latest_environment = getattr(snapshot, "latest_environment", None)
+    if not isinstance(latest_environment, dict) or not latest_environment:
+        return None
+    payload = dict(latest_environment)
+    payload.setdefault("node_id", node_id)
+    return payload
+
+
 def _ingest_stream_consumer_runtime(state):
     settings = getattr(state, "settings", None)
     sidecar_state = getattr(state, "sidecar_state", None)
@@ -1494,6 +1591,17 @@ async def list_nodes(
     latest_audio_summary_by_node = {
         row["node_id"]: row for row in latest_audio_summary_rows if row.get("node_id") is not None
     }
+    sidecar_node_snapshots = (
+        _sidecar_stream_consumer_snapshots(state)
+        if settings.ingest_backend == "rust"
+        else {}
+    )
+    if sidecar_node_snapshots:
+        nodes = _merge_nodes_with_sidecar_snapshots(nodes, sidecar_node_snapshots, limit=limit)
+        for node_id, snapshot in sidecar_node_snapshots.items():
+            latest_environment = _sidecar_snapshot_latest_environment(snapshot, node_id=node_id)
+            if latest_environment is not None:
+                latest_environment_by_node[node_id] = latest_environment
     for node in nodes:
         if node.get("position_geo") is None and node.get("position_m"):
             local = node["position_m"]
@@ -1555,8 +1663,20 @@ async def list_nodes(
             }
         else:
             sensor_ids = _sensor_ids_from_node_row(node)
+            sidecar_snapshot = sidecar_node_snapshots.get(node["id"])
+            sidecar_audio_debug = (
+                _sidecar_snapshot_audio_debug(
+                    sidecar_snapshot,
+                    now_ns=now_ns,
+                    degraded_after_seconds=settings.node_degraded_after_seconds,
+                )
+                if sidecar_snapshot is not None
+                else None
+            )
             persisted_summary = latest_audio_summary_by_node.get(node["id"])
-            if persisted_summary is not None:
+            if sidecar_audio_debug is not None:
+                node["audio_debug"] = sidecar_audio_debug
+            elif persisted_summary is not None:
                 last_sample_time_ns = persisted_summary.get("last_sample_time_ns")
                 age_seconds = persisted_summary.get("age_seconds")
                 if isinstance(last_sample_time_ns, int):

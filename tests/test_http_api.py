@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
+from minimappr.api.stream_consumer import SidecarNodeSnapshot
 from minimappr.config import Settings
 from minimappr.main import app
 from minimappr.storage.db import _ingested_frame_key
@@ -1293,6 +1294,72 @@ def test_nodes_include_audio_debug_summary(monkeypatch, tmp_path: Path) -> None:
         assert isinstance(audio_debug, dict)
         assert audio_debug["status"] in {"recent", "stale", "no_audio"}
         assert int(audio_debug["sensor_count"]) >= 1
+
+
+def test_rust_nodes_use_in_memory_stream_consumer_snapshot(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    monkeypatch.setenv("MINIMAPPR_INGEST_BACKEND", "rust")
+    monkeypatch.setenv("MINIMAPPR_DIRECT_INGEST_ENABLED", "false")
+    monkeypatch.setenv("MINIMAPPR_INGEST_SIDECAR_ENABLED", "false")
+
+    class _FakeStreamConsumer:
+        def snapshot_nodes(self) -> dict[str, SidecarNodeSnapshot]:
+            now_ns = time.time_ns()
+            return {
+                "rust-node-1": SidecarNodeSnapshot(
+                    node_payload={
+                        "id": "rust-node-1",
+                        "node_type": "sirith_tetra",
+                        "position_m": [1.0, 2.0, 3.0],
+                        "position_geo": None,
+                        "sensor_offsets_m": [
+                            [0.0, 0.0, 0.0],
+                            [0.1, 0.0, 0.0],
+                            [0.0, 0.1, 0.0],
+                            [0.0, 0.0, 0.1],
+                        ],
+                        "capabilities": ["audio"],
+                        "mobility": "stationary",
+                        "metadata": {"time_quality": "gps_locked"},
+                        "properties": {},
+                    },
+                    last_seen_ns=now_ns,
+                    last_sample_time_ns=now_ns,
+                    sample_rate_hz=16000,
+                    active_sensor_count=4,
+                    rms=0.03125,
+                    latest_environment={
+                        "timestamp_ns": now_ns,
+                        "temperature_c": 21.5,
+                        "humidity_fraction": 0.44,
+                        "source": "sht45",
+                        "metadata": {},
+                    },
+                )
+            }
+
+        @property
+        def is_running(self) -> bool:
+            return False
+
+        async def stop(self) -> None:
+            return None
+
+    with TestClient(app) as client:
+        client.app.state.ingest_stream_consumer = _FakeStreamConsumer()
+        response = client.get("/api/v1/nodes", params={"limit": 10})
+
+    assert response.status_code == 200
+    rows = response.json()
+    node = next(row for row in rows if row["id"] == "rust-node-1")
+    assert node["latest_time_quality"] == "gps_locked"
+    assert node["audio_debug"]["status"] == "recent"
+    assert node["audio_debug"]["sensor_count"] == 4
+    assert node["audio_debug"]["active_sensor_count"] == 4
+    assert node["audio_debug"]["sample_rate_hz"] == 16000
+    assert node["audio_debug"]["rms"] == pytest.approx(0.03125)
+    assert node["latest_environment"]["temperature_c"] == pytest.approx(21.5)
+    assert node["latest_environment"]["humidity_fraction"] == pytest.approx(0.44)
 
 
 def test_environment_ingest_from_node_metadata(monkeypatch, tmp_path: Path) -> None:

@@ -41,35 +41,6 @@ class _RecordingIngestTransport:
         self.environment_samples.append((node_id, sample))
 
 
-class _HeartbeatFirstIngestTransport(_RecordingIngestTransport):
-    def __init__(self) -> None:
-        super().__init__()
-        self._heartbeat_seen = False
-
-    async def deliver_node_heartbeat(
-        self,
-        node,
-        *,
-        last_sample_time_ns=None,
-        sample_rate_hz=None,
-        active_sensor_count=None,
-        rms=None,
-    ) -> None:
-        self._heartbeat_seen = True
-        await super().deliver_node_heartbeat(
-            node,
-            last_sample_time_ns=last_sample_time_ns,
-            sample_rate_hz=sample_rate_hz,
-            active_sensor_count=active_sensor_count,
-            rms=rms,
-        )
-
-    async def deliver_environment_sample(self, *, node_id, sample) -> None:
-        if not self._heartbeat_seen:
-            raise AssertionError("environment sample arrived before node heartbeat")
-        await super().deliver_environment_sample(node_id=node_id, sample=sample)
-
-
 @pytest.mark.asyncio
 async def test_stream_consumer_tracks_last_event_id_after_message_dispatch() -> None:
     transport = _RecordingIngestTransport()
@@ -161,15 +132,14 @@ async def test_stream_consumer_uses_localization_toa_for_node_audio_freshness() 
         ],
     )
 
-    assert len(transport.node_heartbeats) == 1
-    heartbeat = transport.node_heartbeats[0]
-    node = heartbeat["node"]
-    assert node.id == "sirith-1"
-    assert heartbeat["last_sample_time_ns"] == 123456789
+    assert transport.node_heartbeats == []
+    snapshot = consumer.snapshot_nodes()["sirith-1"]
+    assert snapshot.node_payload["id"] == "sirith-1"
+    assert snapshot.last_sample_time_ns == 123456789
 
 
 @pytest.mark.asyncio
-async def test_stream_consumer_forwards_environment_and_audio_debug_from_localization_context() -> None:
+async def test_stream_consumer_records_environment_and_audio_debug_from_localization_context() -> None:
     transport = _RecordingIngestTransport()
     consumer = IngestStreamConsumer(
         config=StreamConsumerConfig(sidecar_base_url="http://127.0.0.1:8081"),
@@ -211,25 +181,23 @@ async def test_stream_consumer_forwards_environment_and_audio_debug_from_localiz
         ],
     )
 
-    assert len(transport.environment_samples) == 1
-    node_id, sample = transport.environment_samples[0]
-    assert node_id == "sirith-point-1"
-    assert sample.temperature_c == pytest.approx(21.5)
-    assert sample.humidity_fraction == pytest.approx(0.44)
-    assert sample.source == "sht45"
-    assert sample.timestamp_ns == 123456790
+    assert transport.environment_samples == []
+    assert transport.node_heartbeats == []
 
-    assert len(transport.node_heartbeats) == 1
-    heartbeat = transport.node_heartbeats[0]
-    assert heartbeat["sample_rate_hz"] == 16000
-    assert heartbeat["active_sensor_count"] == 1
-    assert heartbeat["rms"] == pytest.approx(0.03125)
-    assert heartbeat["node"].metadata["time_quality"] == "gps_locked"
+    snapshot = consumer.snapshot_nodes()["sirith-point-1"]
+    assert snapshot.sample_rate_hz == 16000
+    assert snapshot.active_sensor_count == 1
+    assert snapshot.rms == pytest.approx(0.03125)
+    assert snapshot.node_payload["metadata"]["time_quality"] == "gps_locked"
+    assert snapshot.latest_environment["temperature_c"] == pytest.approx(21.5)
+    assert snapshot.latest_environment["humidity_fraction"] == pytest.approx(0.44)
+    assert snapshot.latest_environment["source"] == "sht45"
+    assert snapshot.latest_environment["timestamp_ns"] == 123456790
 
 
 @pytest.mark.asyncio
-async def test_stream_consumer_persists_node_before_environment_from_localization_context() -> None:
-    transport = _HeartbeatFirstIngestTransport()
+async def test_stream_consumer_keeps_localization_context_in_memory_only() -> None:
+    transport = _RecordingIngestTransport()
     consumer = IngestStreamConsumer(
         config=StreamConsumerConfig(sidecar_base_url="http://127.0.0.1:8081"),
         ingest_transport=transport,
@@ -269,8 +237,11 @@ async def test_stream_consumer_persists_node_before_environment_from_localizatio
         ],
     )
 
-    assert len(transport.node_heartbeats) == 1
-    assert len(transport.environment_samples) == 1
+    assert transport.node_heartbeats == []
+    assert transport.environment_samples == []
+    snapshot = consumer.snapshot_nodes()["sirith-point-2"]
+    assert snapshot.latest_environment["temperature_c"] == pytest.approx(22.0)
+    assert snapshot.latest_environment["humidity_fraction"] == pytest.approx(0.4)
 
 
 @pytest.mark.asyncio

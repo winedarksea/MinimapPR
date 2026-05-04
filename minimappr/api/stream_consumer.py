@@ -12,7 +12,7 @@ import contextlib
 import json
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -42,6 +42,19 @@ class StreamConsumerConfig:
 
     max_reconnect_backoff_seconds: float = 30.0
     """Cap for exponential reconnect backoff."""
+
+
+@dataclass(frozen=True, slots=True)
+class SidecarNodeSnapshot:
+    """Latest in-memory node status extracted from sidecar localization results."""
+
+    node_payload: dict[str, Any]
+    last_seen_ns: int
+    last_sample_time_ns: int | None = None
+    sample_rate_hz: int | None = None
+    active_sensor_count: int | None = None
+    rms: float | None = None
+    latest_environment: dict[str, Any] = field(default_factory=dict)
 
 
 def _enrich_node_payload_from_context(
@@ -112,6 +125,17 @@ def _audio_debug_from_context(node_context: dict[str, Any]) -> tuple[int | None,
     )
 
 
+def _environment_summary(sample: EnvironmentSampleIn | None) -> dict[str, Any]:
+    if sample is None:
+        return {}
+    payload = sample.model_dump(mode="json")
+    return {
+        key: value
+        for key, value in payload.items()
+        if value is not None or key == "metadata"
+    }
+
+
 class IngestStreamConsumer:
     """Async consumer that receives DSP manifests from the sidecar via SSE.
 
@@ -132,6 +156,11 @@ class IngestStreamConsumer:
         self._running = False
         self._task: asyncio.Task | None = None
         self._last_event_id: str | None = None
+        self._latest_node_snapshots: dict[str, SidecarNodeSnapshot] = {}
+
+    def snapshot_nodes(self) -> dict[str, SidecarNodeSnapshot]:
+        """Return the latest node state derived from sidecar heartbeat manifests."""
+        return dict(self._latest_node_snapshots)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -338,23 +367,11 @@ class IngestStreamConsumer:
         node_audio_time_ns = node_context.get("toa_ns")
         if not isinstance(node_audio_time_ns, int):
             node_audio_time_ns = int(manifest.get("created_ns") or time.time_ns())
-        sample_rate_hz, active_sensor_count, rms = _audio_debug_from_context(node_context)
-        await self._ingest_transport.deliver_node_heartbeat(
-            node,
-            last_sample_time_ns=node_audio_time_ns,
-            sample_rate_hz=sample_rate_hz,
-            active_sensor_count=active_sensor_count,
-            rms=rms,
+        self._record_node_snapshot(
+            node=node,
+            node_context=node_context,
+            node_audio_time_ns=node_audio_time_ns,
         )
-        environment_sample = _environment_sample_from_context(
-            node_context,
-            fallback_timestamp_ns=node_audio_time_ns,
-        )
-        if environment_sample is not None:
-            await self._ingest_transport.deliver_environment_sample(
-                node_id=node.id,
-                sample=environment_sample,
-            )
 
         # If the manifest carries an embedded classifier_render, deliver it as a
         # localized render so Python gets the full audio + classification bundle.
@@ -419,3 +436,38 @@ class IngestStreamConsumer:
     @property
     def is_running(self) -> bool:
         return self._running and self._task is not None and not self._task.done()
+
+    def _record_node_snapshot(
+        self,
+        *,
+        node: NodeSpec,
+        node_context: dict[str, Any],
+        node_audio_time_ns: int,
+    ) -> None:
+        sample_rate_hz, active_sensor_count, rms = _audio_debug_from_context(node_context)
+        environment_sample = _environment_sample_from_context(
+            node_context,
+            fallback_timestamp_ns=node_audio_time_ns,
+        )
+        existing = self._latest_node_snapshots.get(node.id)
+        self._latest_node_snapshots[node.id] = SidecarNodeSnapshot(
+            node_payload=node.model_dump(mode="json"),
+            last_seen_ns=time.time_ns(),
+            last_sample_time_ns=node_audio_time_ns,
+            sample_rate_hz=(
+                sample_rate_hz
+                if sample_rate_hz is not None
+                else existing.sample_rate_hz if existing is not None else None
+            ),
+            active_sensor_count=(
+                active_sensor_count
+                if active_sensor_count is not None
+                else existing.active_sensor_count if existing is not None else None
+            ),
+            rms=rms if rms is not None else existing.rms if existing is not None else None,
+            latest_environment=(
+                _environment_summary(environment_sample)
+                if environment_sample is not None
+                else existing.latest_environment if existing is not None else {}
+            ),
+        )
