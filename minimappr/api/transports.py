@@ -10,6 +10,7 @@ from minimappr.api.rust_dsp_manifests import LocalizedClassifierRenderRequest
 from minimappr.core.fusion_node import FusionNode
 from minimappr.interfaces import IngestTransport
 from minimappr.models import (
+    EnvironmentSampleIn,
     IngestFrameRequest,
     IngestFrameResponse,
     StoreForwardBufferedFrameResponse,
@@ -50,6 +51,57 @@ class HttpIngestTransport(IngestTransport):
                 spec=normalized_node,
                 last_seen_ns=time.time_ns(),
                 position_geo=geo_position,
+            )
+
+    async def deliver_environment_sample(self, *, node_id: str, sample: EnvironmentSampleIn) -> None:
+        if not sample.has_any_measurement():
+            return
+
+        timestamp_ns = sample.timestamp_ns or time.time_ns()
+        metadata = dict(sample.metadata)
+        if sample.source:
+            metadata = {"source": sample.source, **metadata}
+
+        async with self._fusion_node._storage_batch():
+            await self._fusion_node.storage.insert_environment(
+                node_id=node_id,
+                timestamp_ns=timestamp_ns,
+                temperature_c=sample.temperature_c,
+                pressure_pa=sample.pressure_pa,
+                humidity_fraction=sample.humidity_fraction,
+                wind_speed_mps=sample.wind_speed_mps,
+                wind_dir_deg=sample.wind_dir_deg,
+                solar_lux=sample.solar_lux,
+                metadata=metadata,
+            )
+
+            existing_node = await self._fusion_node.storage.get_node_by_id(node_id)
+            if isinstance(existing_node, dict):
+                try:
+                    node_spec = NodeSpec.model_validate(existing_node)
+                except Exception:  # noqa: BLE001
+                    node_spec = None
+                if node_spec is not None:
+                    normalized_node, geo_position = self._fusion_node._ingest_processor._normalize_node_spec(node_spec)
+                    await self._fusion_node.storage.upsert_node(
+                        spec=normalized_node,
+                        last_seen_ns=time.time_ns(),
+                        position_geo=geo_position,
+                    )
+
+        environment_provider = getattr(self._fusion_node, "environment_provider", None)
+        if environment_provider is not None and hasattr(environment_provider, "ingest_sample"):
+            environment_provider.ingest_sample(
+                node_id=node_id,
+                timestamp_ns=timestamp_ns,
+                temperature_c=sample.temperature_c,
+                humidity_fraction=sample.humidity_fraction,
+                pressure_pa=sample.pressure_pa,
+                wind_speed_mps=sample.wind_speed_mps,
+                wind_dir_deg=sample.wind_dir_deg,
+                solar_lux=sample.solar_lux,
+                location_m=None,
+                metadata=metadata,
             )
 
     async def _deliver_buffered_frames(self, *, node, buffered_frames, sort_by_toa: bool) -> StoreForwardIngestResponse:

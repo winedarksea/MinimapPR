@@ -22,7 +22,7 @@ from minimappr.api.rust_dsp_manifests import (
     load_localized_render_manifest_bundle,
 )
 from minimappr.interfaces import IngestTransport
-from minimappr.models import NodeSpec
+from minimappr.models import EnvironmentSampleIn, NodeSpec
 
 logger = logging.getLogger(__name__)
 
@@ -160,8 +160,7 @@ class IngestStreamConsumer:
         elif manifest_type == "classifier_render":
             await self._handle_classifier_render(manifest)
         elif manifest_type == "env_sample_append":
-            # Environment samples are handled directly by the sidecar; no action needed.
-            pass
+            await self._handle_env_sample_append(manifest)
         else:
             logger.debug("IngestStreamConsumer ignoring manifest_type=%s", manifest_type)
 
@@ -183,6 +182,10 @@ class IngestStreamConsumer:
             logger.warning("localization_result node validation failed: %s", exc)
             return
 
+        # Always refresh node heartbeat from localization_result so online/offline
+        # status does not depend on classifier embedding details.
+        await self._ingest_transport.deliver_node_heartbeat(node)
+
         # If the manifest carries an embedded classifier_render, deliver it as a
         # localized render so Python gets the full audio + classification bundle.
         classifier_render = manifest.get("classifier_render")
@@ -197,10 +200,36 @@ class IngestStreamConsumer:
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Failed to deliver localized render from localization_result: %s", exc)
+
+    async def _handle_env_sample_append(self, manifest: dict[str, Any]) -> None:
+        env_samples_payload = manifest.get("env_samples")
+        if not isinstance(env_samples_payload, dict):
+            logger.warning("env_sample_append missing env_samples payload; skipping")
             return
 
-        # Pure localization without render — deliver as node heartbeat.
-        await self._ingest_transport.deliver_node_heartbeat(node)
+        samples_payload = env_samples_payload.get("samples")
+        if not isinstance(samples_payload, list):
+            logger.warning("env_sample_append missing samples list; skipping")
+            return
+
+        for sample_payload in samples_payload:
+            if not isinstance(sample_payload, dict):
+                continue
+            node_id = str(sample_payload.get("node_id") or "").strip()
+            if not node_id:
+                continue
+            sample_mapping = sample_payload.get("sample")
+            if not isinstance(sample_mapping, dict):
+                continue
+            try:
+                sample = EnvironmentSampleIn.model_validate(sample_mapping)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("env_sample_append sample validation failed: %s", exc)
+                continue
+            await self._ingest_transport.deliver_environment_sample(
+                node_id=node_id,
+                sample=sample,
+            )
 
     async def _handle_classifier_render(self, manifest: dict[str, Any]) -> None:
         """Deliver a standalone classifier_render manifest."""

@@ -139,6 +139,7 @@ pub struct ClassificationRequest {
     pub pcm_bytes: Vec<u8>,
     pub sample_rate_hz: u32,
     pub pending_manifest: DspManifest,
+    pub raw_render_bytes: Option<String>,
 }
 
 /// All owned data needed to run the compute phase (SRP-PHAT + render + publish)
@@ -917,17 +918,24 @@ pub(crate) async fn dispatch_classification_result_standalone(
     result: crate::dsp_render_output::RenderPublishResult,
     classification_tx: &Option<flume::Sender<ClassificationRequest>>,
     state: &SharedDspState,
+    raw_render_bytes: Option<String>,
 ) -> Option<DspManifest> {
     let pending = result.pending_manifest?;
     if let Some(tx) = classification_tx {
         let pcm_bytes = result.pcm_bytes.unwrap_or_default();
+        let mut pending_with_bytes = pending.clone();
+        pending_with_bytes.raw_render_bytes = raw_render_bytes.clone();
         let req = ClassificationRequest {
             pcm_bytes,
             sample_rate_hz: result.sample_rate_hz,
-            pending_manifest: pending.clone(),
+            pending_manifest: pending_with_bytes,
+            raw_render_bytes: raw_render_bytes.clone(),
         };
         match tx.try_send(req) {
-            Ok(()) => {}
+            Ok(()) => {
+                // ClassificationWorker will publish the single classifier_render event.
+                return None;
+            }
             Err(flume::TrySendError::Full(_)) => {
                 let mut st = state.write().await;
                 st.total_classification_drops += 1;
@@ -945,8 +953,10 @@ pub(crate) async fn dispatch_classification_result_standalone(
             }
         }
     }
+    let mut fallback = pending;
+    fallback.raw_render_bytes = raw_render_bytes;
     // No ClassificationWorker configured — return manifest unlabeled; caller broadcasts via SSE.
-    Some(pending)
+    Some(fallback)
 }
 
 fn merge_pending_manifests_for_batch(

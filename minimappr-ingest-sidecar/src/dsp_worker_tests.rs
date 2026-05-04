@@ -95,9 +95,10 @@ async fn worker_publishes_localization_and_classifier_render_contract() {
     assert_eq!(localization.resolved_algorithm, "srp_phat");
     assert_eq!(localization.pair_tdoas.len(), 6);
 
-    // localization_result carries derived_handle (Bug A fix) and inline PCM.
+    // localization_result remains heartbeat/localization metadata only.
     assert!(localization_event.derived_handle.is_some());
-    assert!(localization_event.raw_render_bytes.is_some());
+    assert!(localization_event.raw_render_bytes.is_none());
+    assert!(localization_event.classifier_render.is_none());
 
     assert_eq!(
         render_event

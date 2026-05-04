@@ -20,8 +20,7 @@ pub struct ClassificationWorker {
     pub annotator: ManifestClassificationAnnotator,
     pub rx: flume::Receiver<ClassificationRequest>,
     /// Broadcast channel to SSE consumers. When Some, annotated manifests are
-    /// sent here after BirdNET runs. When None, manifests are discarded (labels
-    /// were already sent unlabeled by run_io before queuing this request).
+    /// sent here after BirdNET runs. When None, manifests are discarded.
     pub dsp_result_tx: Option<broadcast::Sender<DspManifest>>,
 }
 
@@ -29,6 +28,7 @@ impl ClassificationWorker {
     pub async fn run_loop(mut self) {
         while let Ok(req) = self.rx.recv_async().await {
             let mut manifest = req.pending_manifest;
+            manifest.raw_render_bytes = req.raw_render_bytes.clone();
 
             // Write PCM bytes to a temp file for the BirdNET subprocess.
             // NamedTempFile auto-deletes on drop — the only accepted disk write.

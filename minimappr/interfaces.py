@@ -11,6 +11,7 @@ from minimappr.cleanup_policy import CleanupPolicy
 from minimappr.models import (
     ClassificationResult,
     DetectionEvent,
+    EnvironmentSampleIn,
     GeoPoint,
     IngestFrameRequest,
     IngestFrameResponse,
@@ -410,6 +411,9 @@ class IngestTransport(Protocol):
         ...
 
     async def deliver_node_heartbeat(self, node: NodeSpec) -> None:
+        ...
+
+    async def deliver_environment_sample(self, *, node_id: str, sample: EnvironmentSampleIn) -> None:
         ...
 
 

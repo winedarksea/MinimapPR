@@ -51,6 +51,7 @@ use tokio::{
 use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
+use uuid::Uuid;
 
 const BINARY_ENDPOINT: &str = "/api/v1/ingest/binary";
 const STORE_FORWARD_ENDPOINT: &str = "/api/v1/ingest/store-forward";
@@ -274,7 +275,8 @@ struct AppState {
     #[allow(dead_code)]
     derived_cache: Option<DerivedCache>,
     env_cache: EnvironmentCache,
-    /// Broadcast channel for DSP result manifests (localization_result, classifier_render)
+    /// Broadcast channel for DSP result manifests (localization_result,
+    /// classifier_render, env_sample_append)
     /// delivered to Python consumers via SSE.  Capacity tuned for ~1s of burst at 30fps.
     dsp_result_tx: broadcast::Sender<manifests::DspManifest>,
 }
@@ -527,6 +529,7 @@ async fn ingest_env(
     }
 
     let mut accepted = 0usize;
+    let mut sse_samples: Vec<serde_json::Value> = Vec::new();
     for dto in &payload.samples {
         let sample = EnvSample {
             t_ns: dto.t_ns,
@@ -534,7 +537,40 @@ async fn ingest_env(
             rh_pct: dto.rh_pct,
         };
         state.env_cache.update(&dto.node_id, sample).await;
+        sse_samples.push(serde_json::json!({
+            "node_id": dto.node_id,
+            "sample": {
+                "timestamp_ns": dto.t_ns,
+                "temperature_c": dto.temp_c,
+                "humidity_fraction": dto.rh_pct / 100.0,
+                "source": "rust_sidecar_env",
+            }
+        }));
         accepted += 1;
+    }
+
+    if !sse_samples.is_empty() {
+        let created_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let env_manifest = manifests::DspManifest {
+            manifest_id: format!("manifest-{}", Uuid::new_v4()),
+            manifest_type: "env_sample_append".to_string(),
+            created_ns,
+            source_handles: vec![],
+            derived_handle: None,
+            localization: None,
+            classifier_render: None,
+            birdnet: None,
+            coverage_stats: None,
+            promotion_ready: false,
+            env_samples: Some(serde_json::json!({ "samples": sse_samples })),
+            node_context: None,
+            raw_payload: None,
+            raw_render_bytes: None,
+        };
+        let _ = state.dsp_result_tx.send(env_manifest);
     }
 
     (StatusCode::ACCEPTED, Json(EnvIngestResponse { accepted })).into_response()
@@ -713,7 +749,8 @@ async fn dsp_results(
     Json(results).into_response()
 }
 
-/// SSE endpoint that streams DSP result manifests (localization_result, classifier_render)
+/// SSE endpoint that streams DSP result manifests
+/// (localization_result, classifier_render, env_sample_append)
 /// to Python consumers in real-time, bypassing the filesystem entirely.
 async fn dsp_stream(State(state): State<AppState>) -> Sse<impl tokio_stream::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>> {
     let rx = state.dsp_result_tx.subscribe();

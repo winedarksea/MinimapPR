@@ -145,7 +145,7 @@ pub async fn run_io(result: ComputeMathResult) {
     } = result;
 
     // Build the classifier_render manifest and keep PCM bytes in memory.
-    let render_result = if let (Some(bytes), Some(meta)) = (pcm_bytes, render_meta) {
+    let mut render_result = if let (Some(bytes), Some(meta)) = (pcm_bytes, render_meta) {
         Some(
             write_render_to_cache(
                 &payload.derived_cache,
@@ -189,11 +189,6 @@ pub async fn run_io(result: ComputeMathResult) {
         .and_then(|r| r.pcm_bytes.as_ref())
         .map(|bytes| BASE64.encode(bytes));
 
-    let render_classifier_render = render_result
-        .as_ref()
-        .and_then(|r| r.pending_manifest.as_ref())
-        .and_then(|m| m.classifier_render.clone());
-
     // derived_handle from the render result, propagated to localization_result so Python
     // can identify the render (Bug A fix — without this Python drops the event).
     let render_derived_handle = render_result
@@ -201,12 +196,22 @@ pub async fn run_io(result: ComputeMathResult) {
         .and_then(|r| r.pending_manifest.as_ref())
         .and_then(|m| m.derived_handle.clone());
 
+    // Attach localization to classifier_render manifests so the standalone
+    // classifier_render event remains self-contained when localization_result does
+    // not embed classifier payloads.
+    if let Some(ref mut r) = render_result {
+        if let Some(ref mut pending) = r.pending_manifest {
+            pending.localization = Some(localization_payload.clone());
+        }
+    }
+
     // Dispatch PCM bytes to ClassificationWorker (via flume channel, no disk).
     let render_pending = if let Some(r) = render_result {
         dispatch_classification_result_standalone(
             r,
             &payload.classification_tx,
             &payload.state,
+            raw_render_b64.clone(),
         )
         .await
     } else {
@@ -227,15 +232,14 @@ pub async fn run_io(result: ComputeMathResult) {
             // can find the render metadata (fixes the dropped-event bug).
             derived_handle: render_derived_handle,
             localization: Some(localization_payload),
-            classifier_render: render_classifier_render,
+            classifier_render: None,
             birdnet: None,
             coverage_stats: render_coverage_json.or(localization_coverage_json),
             promotion_ready: false,
             env_samples: None,
             node_context: payload.manifest.node_context.clone(),
             raw_payload: None,
-            // Inline PCM bytes for SSE consumers — cleared before any disk publish below.
-            raw_render_bytes: raw_render_b64.clone(),
+            raw_render_bytes: None,
         };
         if !arrived_via_channel {
             // Disk-backed ingest: persist manifest (without bulky base64 data).
@@ -281,10 +285,7 @@ pub async fn run_io(result: ComputeMathResult) {
         st.total_classifier_renders += 1;
     }
     if let Some(ref pending) = render_pending {
-        // Embed inline PCM on the pre-BirdNET classifier_render SSE event too.
-        let mut sse_pending = pending.clone();
-        sse_pending.raw_render_bytes = raw_render_b64.clone();
-        st.recent_results.push(sse_pending.clone());
+        st.recent_results.push(pending.clone());
         if st.recent_results.len() > 50 {
             st.recent_results.remove(0);
         }
@@ -295,9 +296,8 @@ pub async fn run_io(result: ComputeMathResult) {
             }
         }
         // Broadcast results to Python consumers via SSE — zero-disk path.
-        // The ClassificationWorker will broadcast the BirdNET-labeled version separately.
         if let Some(ref tx) = payload.dsp_result_tx {
-            let _ = tx.send(sse_pending);
+            let _ = tx.send(pending.clone());
             if let Some(ref m) = published {
                 let _ = tx.send(m.clone());
             }
