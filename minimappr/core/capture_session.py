@@ -63,6 +63,10 @@ class CaptureSessionRecord:
     created_ns: int = field(default_factory=time.time_ns)
     use_python_ingest: bool = False
     channel_sensor_ids: list[str] = field(default_factory=list)
+    include_iamf: bool = True
+    """When False, skip IAMF encoding (ambisonics-only recording)."""
+    include_video: bool = True
+    """When False, no video was captured for this session."""
 
 
 @dataclass
@@ -80,6 +84,10 @@ class CaptureStartRequest:
     video_source: Optional[str] = None
     libcamera_mode: bool = False
     deployment_profile: str = "auto"
+    record_video: bool = True
+    """When False, skip ffmpeg video capture entirely (audio-only recording)."""
+    include_iamf: bool = True
+    """When False, skip IAMF encoding step in the post-processing pipeline."""
 
 
 PostProcessCallback = Callable[
@@ -129,6 +137,8 @@ class CaptureSessionManager:
             youtube_path=None,
             error=None,
             created_ns=now_ns,
+            include_iamf=request.include_iamf,
+            include_video=request.record_video,
         )
         self._sessions[session_id] = record
 
@@ -179,26 +189,30 @@ class CaptureSessionManager:
                 record.stream_key,
             )
 
-        # Start video capture (both modes).
-        video_path = work_dir / "output_raw.mp4"
-        cap_cfg = VideoCaptureConfig(
-            output_path=video_path,
-            video_source=request.video_source,
-            libcamera_mode=request.libcamera_mode,
-        )
-        cap = VideoCapture(cap_cfg)
-        try:
-            await cap.start()
-        except Exception as exc:
-            record.state = CaptureState.FAILED
-            record.error = f"video capture start failed: {exc}"
-            sidecar = request.sidecar_url or ""
-            await self._release_range_lease(sidecar, record)
-            return record
+        # Start video capture (both modes), unless explicitly disabled.
+        if request.record_video:
+            video_path = work_dir / "output_raw.mp4"
+            cap_cfg = VideoCaptureConfig(
+                output_path=video_path,
+                video_source=request.video_source,
+                libcamera_mode=request.libcamera_mode,
+            )
+            cap = VideoCapture(cap_cfg)
+            try:
+                await cap.start()
+            except Exception as exc:
+                record.state = CaptureState.FAILED
+                record.error = f"video capture start failed: {exc}"
+                sidecar = request.sidecar_url or ""
+                await self._release_range_lease(sidecar, record)
+                return record
 
-        record.video_path = video_path
+            record.video_path = video_path
+            self._captures[session_id] = cap
+        else:
+            logger.info("session %s: video capture disabled (record_video=False)", session_id)
+
         record.state = CaptureState.RECORDING
-        self._captures[session_id] = cap
 
         return record
 

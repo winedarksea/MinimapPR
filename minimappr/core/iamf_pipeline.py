@@ -123,6 +123,9 @@ class IamfPipeline:
         raw_channels, capture_rate_hz, sync_diag = await self._extract_audio(
             record, start_ns, end_ns
         )
+        # Log coverage warnings from the buffer extraction step.
+        for warning in sync_diag.get("coverage_warnings", []):
+            logger.warning("[%s] audio extraction: %s", record.session_id[:8], warning)
         source_inventory = _build_recording_source_inventory(
             record.stream_key,
             channel_count=int(raw_channels.shape[0]),
@@ -147,6 +150,39 @@ class IamfPipeline:
         bed_full = await loop.run_in_executor(
             None, atob_foa, raw_channels, capture_rate_hz
         )
+
+        # When IAMF encoding is disabled, produce ambisonics-only output.
+        if not record.include_iamf:
+            logger.info("[%s] IAMF disabled; writing ambisonics-only output", record.session_id[:8])
+            if capture_rate_hz != OUTPUT_RATE_HZ:
+                bed_full = await loop.run_in_executor(
+                    None, _resample, bed_full, capture_rate_hz, OUTPUT_RATE_HZ
+                )
+            bed_full = _normalize_channels_for_encode(bed_full)
+            ambix_path = work_dir / "ambix.wav"
+            _write_wav(ambix_path, bed_full, OUTPUT_RATE_HZ)
+
+            # Mux with video if available.
+            if record.video_path and record.video_path.exists():
+                logger.info("[%s] mux: ambisonics + video", record.session_id[:8])
+                youtube_path = work_dir / "youtube_export.mp4"
+                await _ambix_aac_mux(record.video_path, ambix_path, youtube_path, offset_s=0.0)
+                record.youtube_path = youtube_path
+
+            # Register artifact.
+            artifacts_dir = ARTIFACTS_DIR
+            artifacts_dir.mkdir(parents=True, exist_ok=True)
+            final_ambix = artifacts_dir / f"{record.session_id}_ambix.wav"
+            ambix_path.replace(final_ambix)
+            if record.youtube_path and record.youtube_path.exists():
+                final_mp4 = artifacts_dir / f"{record.session_id}_youtube.mp4"
+                record.youtube_path.replace(final_mp4)
+                record.youtube_path = final_mp4
+
+            await self._register_artifact(record, sync_diag)
+            logger.info("[%s] ambisonics-only pipeline complete", record.session_id[:8])
+            return
+
         bed_full_path = work_dir / "bed_full.wav"
         _write_wav(bed_full_path, bed_full, capture_rate_hz)
 
@@ -432,6 +468,10 @@ class IamfPipeline:
         Uses the Python MVDRBeamformer when no sidecar is configured, otherwise
         calls the Rust /api/v1/capture/render/mvdr endpoint.
         """
+        if self._multi_sensor_buffer is None and self._http is None:
+            raise RuntimeError(
+                "No beamforming backend available (need multi_sensor_buffer or sidecar_url)"
+            )
         if self._multi_sensor_buffer is not None:
             loop = asyncio.get_event_loop()
             return await loop.run_in_executor(

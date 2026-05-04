@@ -235,7 +235,10 @@ class VideoCapture:
 def _autodetect_source() -> str:
     system = platform.system()
     if system == "Darwin":
-        return "avfoundation"
+        # Return the device index, not the format name.  _source_input_args
+        # already supplies "-f avfoundation", so the source string must be
+        # the camera index (e.g. "0") that ffmpeg expects after "-i".
+        return "0"
     if system == "Linux":
         return "/dev/video0"
     return "0"

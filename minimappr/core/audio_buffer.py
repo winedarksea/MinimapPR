@@ -508,11 +508,35 @@ class MultiSensorBuffer:
             return out
 
         channels_list: list[np.ndarray] = []
-        for snap in snapshots:
+        # Track per-channel coverage ratio for diagnostic warnings.
+        channel_coverage_ratios: list[float] = []
+        for i, snap in enumerate(snapshots):
             if snap is None:
                 channels_list.append(np.zeros(0, dtype=np.float32))
+                channel_coverage_ratios.append(0.0)
             else:
-                channels_list.append(_snap_get_range(snap))
+                ch_data = _snap_get_range(snap)
+                channels_list.append(ch_data)
+                # Compute coverage ratio from the snapshot's coverage array.
+                samples_ref, coverage_ref, buf_start_idx, sr, origin_ns, origin_sample_idx = snap
+                def _ts_to_idx(ns: int) -> int:
+                    delta = ns - origin_ns
+                    return origin_sample_idx + (delta * sr + 500_000_000) // 1_000_000_000
+                start_idx = _ts_to_idx(start_ns)
+                end_idx = _ts_to_idx(end_ns)
+                n_range = max(0, end_idx - start_idx)
+                if n_range > 0 and coverage_ref.size > 0:
+                    overlap_start = max(start_idx, buf_start_idx)
+                    overlap_end = min(end_idx, buf_start_idx + coverage_ref.size)
+                    if overlap_start < overlap_end:
+                        cov_off = overlap_start - buf_start_idx
+                        cov_len = overlap_end - overlap_start
+                        covered = int(np.count_nonzero(coverage_ref[cov_off:cov_off + cov_len]))
+                        channel_coverage_ratios.append(covered / float(n_range))
+                    else:
+                        channel_coverage_ratios.append(0.0)
+                else:
+                    channel_coverage_ratios.append(0.0)
 
         if all(c.size == 0 for c in channels_list):
             raise RuntimeError("no audio data after range extraction")
@@ -532,6 +556,15 @@ class MultiSensorBuffer:
 
         channels = np.vstack(aligned)  # (N_ch, N_samples)
 
+        # Build warnings for channels with poor coverage (<50%).
+        coverage_warnings: list[str] = []
+        for i, ratio in enumerate(channel_coverage_ratios):
+            if ratio < 0.5:
+                sensor_label = sensor_ids[i] if i < len(sensor_ids) else f"ch{i}"
+                coverage_warnings.append(
+                    f"sensor {sensor_label} has {ratio:.0%} coverage in the requested range"
+                )
+
         sync_diag: dict = {
             "requested_start_ns": start_ns,
             "requested_end_ns": end_ns,
@@ -541,6 +574,8 @@ class MultiSensorBuffer:
             "n_segments": 1,
             "n_samples": n_samples,
             "source": "python_buffer",
+            "channel_coverage_ratios": channel_coverage_ratios,
+            "coverage_warnings": coverage_warnings,
         }
         return channels, sample_rate_hz, sync_diag
 

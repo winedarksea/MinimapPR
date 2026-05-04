@@ -35,6 +35,7 @@ from minimappr.cleanup_service import CleanupService
 from minimappr.config import Settings
 from minimappr.core.capture_session import (
     CaptureSessionManager,
+    CaptureSessionRecord,
     CaptureStartRequest,
     CaptureState,
 )
@@ -2252,7 +2253,7 @@ async def get_system_diagnostics(request: Request) -> dict:
         "capture_available": _capture_pipeline_available(settings),
         "capture_unavailable_reason": None
         if _capture_pipeline_available(settings)
-        else "Ambisonic/IAMF capture requires Rust ingest journal mode",
+        else "Ambisonic/IAMF capture requires Python or Rust+journal ingest mode",
     }
     if hasattr(state, "fusion_node"):
         fusion_status = await state.fusion_node.status()
@@ -2713,6 +2714,19 @@ async def render_soundscape(
     )
 
 
+# ── Camera Discovery API ──────────────────────────────────────────────────────
+
+@app.get("/api/v1/cameras")
+async def list_cameras():
+    """Enumerate available video capture devices for the recording UI."""
+    from minimappr.core.camera_discovery import discover_cameras
+    cameras = await discover_cameras()
+    return [
+        {"id": cam.id, "label": cam.label, "platform": cam.platform}
+        for cam in cameras
+    ]
+
+
 # ── Capture API ────────────────────────────────────────────────────────────────
 
 class _CaptureStartBody(BaseModel):
@@ -2750,8 +2764,13 @@ async def capture_start(request: Request, body: _CaptureStartBody):
                 ),
             )
         audio_buffer = getattr(state, "audio_buffer", None)
-        # Derive the 4 channel sensor IDs from the stream_key (node ID).
-        ch_sensor_ids = [f"{body.stream_key}:ch{i}" for i in range(4)]
+        # Derive channel sensor IDs from the node's sensor_offsets_m when available,
+        # falling back to the hardcoded 4-channel pattern for unknown nodes.
+        node_row = await storage.get_node_by_id(body.stream_key)
+        if node_row is not None:
+            ch_sensor_ids = _sensor_ids_from_node_row(node_row)
+        if not ch_sensor_ids:
+            ch_sensor_ids = [f"{body.stream_key}:ch{i}" for i in range(4)]
         req = CaptureStartRequest(
             stream_key=body.stream_key,
             work_dir=work_dir_path,
@@ -2861,6 +2880,296 @@ async def capture_list(request: Request):
         }
         for r in records
     ]
+
+
+# ── Recordings API (Frontend Adapter) ─────────────────────────────────────────
+# Maps the frontend's RecordingSession / RecordingLibraryEntry shapes to the
+# existing CaptureSessionManager and Storage layer.
+
+def _capture_state_to_recording_status(state: CaptureState) -> str:
+    """Map CaptureState to the frontend's RecordingStatus snake_case string."""
+    mapping = {
+        CaptureState.PENDING: "starting",
+        CaptureState.RECORDING: "active",
+        CaptureState.PROCESSING: "stopping",
+        CaptureState.COMPLETED: "completed",
+        CaptureState.FAILED: "failed",
+    }
+    return mapping.get(state, "idle")
+
+
+def _session_record_to_recording_session(record: CaptureSessionRecord) -> dict:
+    """Convert a CaptureSessionRecord to the frontend's RecordingSession shape."""
+    started_at_ms = (record.start_time_ns / 1_000_000) if record.start_time_ns else None
+    ended_at_ms = (record.end_time_ns / 1_000_000) if record.end_time_ns else None
+    duration_seconds = None
+    if record.start_time_ns and record.end_time_ns:
+        duration_seconds = (record.end_time_ns - record.start_time_ns) / 1_000_000_000.0
+
+    return {
+        "session_id": record.session_id,
+        "status": _capture_state_to_recording_status(record.state),
+        "listener_node_id": record.stream_key,
+        "include_ambisonics": True,
+        "include_iamf": record.include_iamf,
+        "include_video": record.include_video,
+        "camera_source": None,
+        "started_at_ms": started_at_ms or 0.0,
+        "ended_at_ms": ended_at_ms,
+        "duration_seconds": duration_seconds,
+        "ambisonics_ready": record.iamf_path is not None or record.state == CaptureState.COMPLETED,
+        "iamf_ready": record.iamf_path is not None and record.iamf_path.exists() if record.iamf_path else False,
+        "video_ready": record.youtube_path is not None and record.youtube_path.exists() if record.youtube_path else False,
+        "error_message": record.error,
+    }
+
+
+class _StartRecordingBody(BaseModel):
+    listener_node_id: str
+    include_ambisonics: bool = True
+    include_iamf: bool = True
+    include_video: bool = True
+    camera_source: str | None = None
+
+
+@app.post("/api/v1/recordings")
+async def recordings_start(request: Request, body: _StartRecordingBody):
+    """Start a new recording session (frontend adapter).
+
+    Translates the frontend's StartRecordingRequest into a CaptureStartRequest,
+    resolving listener_node_id → stream_key and deriving channel_sensor_ids
+    from the node's sensor_offsets_m.
+    """
+    state = request.app.state
+    manager: CaptureSessionManager = state.capture_manager
+    settings: Settings = state.settings
+    storage: Storage = state.storage
+
+    if not _capture_pipeline_available(settings):
+        raise HTTPException(
+            status_code=503,
+            detail="Ambisonic/IAMF capture requires Python or Rust+journal ingest mode",
+        )
+
+    stream_key = body.listener_node_id
+    work_dir_path = Path("data/captures")
+
+    _python_ingest = settings.ingest_backend == "python"
+    if _python_ingest:
+        if getattr(settings, "process_role", "combined") == "api":
+            raise HTTPException(
+                status_code=503,
+                detail="Python ingest capture requires the combined process role",
+            )
+        audio_buffer = getattr(state, "audio_buffer", None)
+        # Derive channel sensor IDs from the node's sensor_offsets_m when available.
+        node_row = await storage.get_node_by_id(stream_key)
+        ch_sensor_ids = _sensor_ids_from_node_row(node_row) if node_row else []
+        if not ch_sensor_ids:
+            ch_sensor_ids = [f"{stream_key}:ch{i}" for i in range(4)]
+
+        req = CaptureStartRequest(
+            stream_key=stream_key,
+            work_dir=work_dir_path,
+            sidecar_url=None,
+            multi_sensor_buffer=audio_buffer,
+            channel_sensor_ids=ch_sensor_ids,
+            max_duration_s=300.0,
+            video_source=body.camera_source,
+            record_video=body.include_video,
+            include_iamf=body.include_iamf,
+        )
+    else:
+        req = CaptureStartRequest(
+            stream_key=stream_key,
+            work_dir=work_dir_path,
+            sidecar_url=_ingest_runtime_base_url(settings),
+            max_duration_s=300.0,
+            video_source=body.camera_source,
+            record_video=body.include_video,
+            include_iamf=body.include_iamf,
+        )
+
+    record = await manager.start(req)
+    if record.state == CaptureState.FAILED:
+        raise HTTPException(status_code=500, detail=record.error or "capture start failed")
+
+    await storage.upsert_capture_session(record)
+    return _session_record_to_recording_session(record)
+
+
+@app.patch("/api/v1/recordings/{session_id}/stop")
+async def recordings_stop(session_id: str, request: Request):
+    """Stop an active recording session (frontend adapter)."""
+    state = request.app.state
+    manager: CaptureSessionManager = state.capture_manager
+    settings: Settings = state.settings
+
+    if not _capture_pipeline_available(settings):
+        raise HTTPException(status_code=503, detail="Capture not available")
+
+    sidecar_url = "" if settings.ingest_backend == "python" else _ingest_runtime_base_url(settings)
+
+    try:
+        record = await manager.stop(session_id, sidecar_url)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"session {session_id} not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    storage: Storage = state.storage
+    await storage.upsert_capture_session(record)
+    return _session_record_to_recording_session(record)
+
+
+@app.get("/api/v1/recordings/{session_id}")
+async def recordings_get(session_id: str, request: Request):
+    """Get a single recording session status (frontend adapter)."""
+    state = request.app.state
+    manager: CaptureSessionManager = state.capture_manager
+
+    record = manager.get(session_id)
+    if record is not None:
+        return _session_record_to_recording_session(record)
+
+    # Fall back to DB for completed/failed sessions no longer in memory.
+    storage: Storage = state.storage
+    row = await storage.get_capture_session(session_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"session {session_id} not found")
+
+    # Reconstruct a minimal CaptureSessionRecord from the DB row for shape mapping.
+    record = CaptureSessionRecord(
+        session_id=row["session_id"],
+        state=CaptureState(row["state"]),
+        stream_key=row["stream_key"],
+        range_lease_id=row.get("range_lease_id"),
+        start_time_ns=row.get("start_time_ns"),
+        end_time_ns=row.get("end_time_ns"),
+        first_frame_pts_ns=row.get("first_frame_pts_ns"),
+        work_dir=Path(row["work_dir"]),
+        video_path=Path(row["video_path"]) if row.get("video_path") else None,
+        iamf_path=Path(row["iamf_path"]) if row.get("iamf_path") else None,
+        youtube_path=Path(row["youtube_path"]) if row.get("youtube_path") else None,
+        error=row.get("error"),
+        created_ns=row.get("created_ns", 0),
+    )
+    return _session_record_to_recording_session(record)
+
+
+@app.get("/api/v1/recordings")
+async def recordings_list(request: Request):
+    """List all recording sessions (frontend adapter)."""
+    state = request.app.state
+    storage: Storage = state.storage
+    rows = await storage.list_capture_sessions(limit=200)
+
+    results = []
+    for row in rows:
+        started_at_ms = (row["start_time_ns"] / 1_000_000) if row.get("start_time_ns") else None
+        ended_at_ms = (row["end_time_ns"] / 1_000_000) if row.get("end_time_ns") else None
+        duration_seconds = None
+        if row.get("start_time_ns") and row.get("end_time_ns"):
+            duration_seconds = (row["end_time_ns"] - row["start_time_ns"]) / 1_000_000_000.0
+
+        iamf_path = Path(row["iamf_path"]) if row.get("iamf_path") else None
+        youtube_path = Path(row["youtube_path"]) if row.get("youtube_path") else None
+
+        results.append({
+            "session_id": row["session_id"],
+            "started_at_ms": started_at_ms or 0.0,
+            "ended_at_ms": ended_at_ms,
+            "duration_seconds": duration_seconds,
+            "listener_node_id": row["stream_key"],
+            "ambisonics_available": row.get("state") == "completed",
+            "iamf_available": iamf_path is not None and iamf_path.exists() if iamf_path else False,
+            "video_available": youtube_path is not None and youtube_path.exists() if youtube_path else False,
+            "size_bytes": None,
+            "status": _capture_state_to_recording_status(CaptureState(row["state"])),
+        })
+
+    return results
+
+
+@app.delete("/api/v1/recordings/{session_id}")
+async def recordings_delete(session_id: str, request: Request):
+    """Delete a recording session and its artifacts."""
+    state = request.app.state
+    manager: CaptureSessionManager = state.capture_manager
+    storage: Storage = state.storage
+
+    # If the session is still active, stop it first.
+    record = manager.get(session_id)
+    if record is not None and record.state == CaptureState.RECORDING:
+        settings: Settings = state.settings
+        sidecar_url = "" if settings.ingest_backend == "python" else _ingest_runtime_base_url(settings)
+        try:
+            await manager.stop(session_id, sidecar_url)
+        except (KeyError, ValueError):
+            pass
+
+    # Clean up artifacts from disk.
+    row = await storage.get_capture_session(session_id)
+    if row is not None:
+        work_dir = Path(row["work_dir"]) if row.get("work_dir") else None
+        if work_dir and work_dir.exists():
+            import shutil
+            shutil.rmtree(work_dir, ignore_errors=True)
+
+        for path_key in ("iamf_path", "youtube_path"):
+            artifact_path = row.get(path_key)
+            if artifact_path:
+                p = Path(artifact_path)
+                if p.exists():
+                    p.unlink(missing_ok=True)
+
+    # Remove from in-memory manager.
+    manager._sessions.pop(session_id, None)
+
+    return Response(status_code=204)
+
+
+@app.get("/api/v1/recordings/{session_id}/download")
+async def recordings_download(session_id: str, format: str = Query(...), request: Request = None):
+    """Download a recording artifact by format (ambisonics, iamf, video)."""
+    state = request.app.state
+    storage: Storage = state.storage
+
+    row = await storage.get_capture_session(session_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"session {session_id} not found")
+
+    if format == "iamf":
+        path = row.get("iamf_path")
+        if not path or not Path(path).exists():
+            raise HTTPException(status_code=404, detail="IAMF file not available")
+        return FileResponse(
+            path,
+            media_type="application/octet-stream",
+            filename=f"{session_id}_audio.iamf",
+        )
+    elif format == "video":
+        path = row.get("youtube_path")
+        if not path or not Path(path).exists():
+            raise HTTPException(status_code=404, detail="Video file not available")
+        return FileResponse(
+            path,
+            media_type="video/mp4",
+            filename=f"{session_id}_youtube.mp4",
+        )
+    elif format in ("ambisonics", "ambix"):
+        # Ambisonics WAV is stored in the artifacts dir.
+        artifacts_dir = Path("data/artifacts")
+        ambix_path = artifacts_dir / f"{session_id}_ambix.wav"
+        if ambix_path.exists():
+            return FileResponse(
+                str(ambix_path),
+                media_type="audio/wav",
+                filename=f"{session_id}_ambix.wav",
+            )
+        raise HTTPException(status_code=404, detail="Ambisonics file not available")
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown format: {format}. Use ambisonics, iamf, or video.")
 
 
 @app.websocket("/ws/live")
