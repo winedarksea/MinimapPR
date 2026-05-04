@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
+const MAX_SPLINE_GAP_SAMPLES: usize = 15;
+const MICRO_FADE_EDGE_SECONDS: f64 = 0.002;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AudioCoverageStats {
     pub sample_count: usize,
@@ -126,7 +129,8 @@ impl SensorStreamBuffer {
 
         let incoming_end = incoming_start + samples.len() as i64;
 
-        // Fast path: append after current tail, optionally zero-filling a gap.
+        // Fast path: append after current tail, zero-filling any missing span while
+        // keeping coverage false so canonical buffered audio reflects real loss.
         if incoming_start >= current_end {
             let gap = (incoming_start - current_end) as usize;
             if gap > 0 {
@@ -217,6 +221,33 @@ impl SensorStreamBuffer {
             return None;
         }
         Some(self.collect_samples_range(start_offset, end_offset as usize))
+    }
+
+    /// Extract a trailing render window while applying gap concealment only to the
+    /// returned copy. The canonical buffer remains zero-filled so localization and
+    /// classifier inputs still reflect real missing coverage.
+    pub fn window_ending_at_with_gap_concealment(
+        &self,
+        end_time_ns: i128,
+        window_seconds: f64,
+    ) -> Option<Vec<f32>> {
+        let window_samples = (window_seconds * f64::from(self.sample_rate_hz))
+            .round()
+            .max(1.0) as i64;
+        let end_sample = self.time_to_sample_index(end_time_ns).ok()?;
+        let start_sample = end_sample - window_samples;
+        let end_offset = end_sample - self.buffer_start_sample_index;
+        if end_offset <= 0 || end_offset > self.sample_len() as i64 {
+            return None;
+        }
+        let start_offset = (start_sample - self.buffer_start_sample_index).max(0) as usize;
+        if start_offset >= end_offset as usize {
+            return None;
+        }
+        let mut window = self.collect_samples_range(start_offset, end_offset as usize);
+        let window_coverage = self.collect_coverage_range(start_offset, end_offset as usize);
+        conceal_missing_spans_in_window(&mut window, &window_coverage, self.sample_rate_hz);
+        Some(window)
     }
 
     /// Extract a window centered on `center_time_ns`, matching Python's `get_window`.
@@ -408,6 +439,125 @@ fn round_divide(numerator: i128, denominator: i128) -> i128 {
     }
 }
 
+fn conceal_missing_spans_in_window(samples: &mut [f32], coverage: &[bool], sample_rate_hz: u32) {
+    if samples.len() != coverage.len() {
+        return;
+    }
+    let mut active_gap_start = None;
+    for (sample_index, covered) in coverage.iter().copied().enumerate() {
+        match (active_gap_start, covered) {
+            (None, false) => active_gap_start = Some(sample_index),
+            (Some(gap_start), true) => {
+                conceal_gap_in_samples(samples, gap_start, sample_index - gap_start, sample_rate_hz);
+                active_gap_start = None;
+            }
+            _ => {}
+        }
+    }
+}
+
+fn conceal_gap_in_samples(
+    samples: &mut [f32],
+    gap_start_offset: usize,
+    gap_len: usize,
+    sample_rate_hz: u32,
+) {
+    if gap_len == 0 {
+        return;
+    }
+    let gap_end_offset = gap_start_offset + gap_len;
+    if gap_start_offset == 0 || gap_end_offset >= samples.len() {
+        return;
+    }
+
+    let left_anchor = samples[gap_start_offset - 1];
+    let right_anchor = samples[gap_end_offset];
+    let concealed_gap = if gap_len <= MAX_SPLINE_GAP_SAMPLES {
+        let left_context = if gap_start_offset >= 2 {
+            samples[gap_start_offset - 2]
+        } else {
+            left_anchor
+        };
+        let right_context = if gap_end_offset + 1 < samples.len() {
+            samples[gap_end_offset + 1]
+        } else {
+            right_anchor
+        };
+        synthesize_catmull_rom_gap(
+            left_context,
+            left_anchor,
+            right_anchor,
+            right_context,
+            gap_len,
+        )
+    } else {
+        synthesize_micro_fade_gap(left_anchor, right_anchor, gap_len, sample_rate_hz)
+    };
+
+    samples[gap_start_offset..gap_end_offset].copy_from_slice(&concealed_gap);
+}
+
+fn synthesize_catmull_rom_gap(
+    p0: f32,
+    p1: f32,
+    p2: f32,
+    p3: f32,
+    gap_len: usize,
+) -> Vec<f32> {
+    let lower_bound = p0.min(p1).min(p2).min(p3);
+    let upper_bound = p0.max(p1).max(p2).max(p3);
+    (0..gap_len)
+        .map(|offset| {
+            let t = (offset + 1) as f32 / (gap_len + 1) as f32;
+            let t2 = t * t;
+            let t3 = t2 * t;
+            let interpolated = 0.5_f32
+                * ((2.0 * p1)
+                    + (-p0 + p2) * t
+                    + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
+                    + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3);
+            interpolated.clamp(lower_bound, upper_bound)
+        })
+        .collect()
+}
+
+fn synthesize_micro_fade_gap(
+    left_anchor: f32,
+    right_anchor: f32,
+    gap_len: usize,
+    sample_rate_hz: u32,
+) -> Vec<f32> {
+    let desired_edge_samples = (MICRO_FADE_EDGE_SECONDS * f64::from(sample_rate_hz))
+        .round()
+        .max(1.0) as usize;
+    let edge_samples = desired_edge_samples.min(gap_len / 2).max(1);
+    let fade_denominator = edge_samples.saturating_sub(1).max(1) as f32;
+    let mut concealed = vec![0.0_f32; gap_len];
+
+    for offset in 0..edge_samples {
+        let phase = if edge_samples == 1 {
+            0.5_f32
+        } else {
+            offset as f32 / fade_denominator
+        };
+        let angle = phase.clamp(0.0, 1.0) * std::f32::consts::FRAC_PI_2;
+        concealed[offset] = left_anchor * angle.cos().powi(2);
+    }
+
+    let fade_in_start = gap_len.saturating_sub(edge_samples);
+    for offset in 0..edge_samples {
+        let phase = if edge_samples == 1 {
+            0.5_f32
+        } else {
+            offset as f32 / fade_denominator
+        };
+        let angle = phase.clamp(0.0, 1.0) * std::f32::consts::FRAC_PI_2;
+        concealed[fade_in_start + offset] = right_anchor * angle.sin().powi(2);
+    }
+
+    concealed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -550,8 +700,8 @@ mod tests {
 
     // --- Phase 1a: cross-language buffer parity ---
 
-    /// Two non-overlapping frames with an explicit gap produce the correct merged
-    /// sample values and leave the gap zero-filled with false coverage bits.
+    /// Two non-overlapping frames with an explicit gap preserve false coverage bits
+    /// and keep the canonical buffer zero-filled.
     #[test]
     fn multi_frame_merge_with_gap_zero_fills_and_preserves_coverage() {
         let sr = 16_000;
@@ -566,7 +716,6 @@ mod tests {
             .append(t0 + 8 * ns_per_sample, &[2.0; 4], Some(8), Some(12))
             .unwrap();
 
-        // Expected: [1,1,1,1, 0,0,0,0, 2,2,2,2]
         assert_eq!(
             buffer.samples.iter().copied().collect::<Vec<_>>(),
             vec![1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 2.0, 2.0, 2.0, 2.0]
@@ -578,6 +727,77 @@ mod tests {
         assert_eq!(
             buffer.coverage.iter().copied().collect::<Vec<_>>(),
             expected_coverage
+        );
+    }
+
+    #[test]
+    fn concealed_trailing_window_uses_cosine_micro_fades_without_mutating_buffer() {
+        let sr = 16_000;
+        let t0 = 1_000_000_000_000_000_000_i128;
+        let mut buffer = SensorStreamBuffer::new(sr, 5.0);
+
+        buffer.append(t0, &[0.75_f32; 8], Some(0), Some(8)).unwrap();
+        buffer
+            .append(
+                t0 + (72 * 1_000_000_000_i128 / i128::from(sr)),
+                &[0.25_f32; 8],
+                Some(72),
+                Some(80),
+            )
+            .unwrap();
+
+        let concealed_window = buffer
+            .window_ending_at_with_gap_concealment(
+                t0 + (80 * 1_000_000_000_i128 / i128::from(sr)),
+                80.0 / f64::from(sr),
+            )
+            .unwrap();
+        let gap = &concealed_window[8..72];
+        assert_eq!(gap.first().copied(), Some(0.75_f32));
+        assert_eq!(gap.last().copied(), Some(0.25_f32));
+        assert!(gap.iter().any(|sample| sample.abs() < 1.0e-6));
+        assert_eq!(
+            buffer.samples.iter().skip(8).take(64).copied().collect::<Vec<_>>(),
+            vec![0.0_f32; 64]
+        );
+        assert_eq!(
+            buffer.coverage.iter().skip(8).take(64).filter(|covered| !**covered).count(),
+            64
+        );
+    }
+
+    #[test]
+    fn concealed_trailing_window_smooths_tiny_gap_without_mutating_buffer() {
+        let sr = 16_000;
+        let t0 = 1_000_000_000_000_000_000_i128;
+        let mut buffer = SensorStreamBuffer::new(sr, 5.0);
+
+        buffer.append(t0, &[1.0_f32; 4], Some(0), Some(4)).unwrap();
+        buffer
+            .append(
+                t0 + (8 * 1_000_000_000_i128 / i128::from(sr)),
+                &[2.0_f32; 4],
+                Some(8),
+                Some(12),
+            )
+            .unwrap();
+
+        let concealed_window = buffer
+            .window_ending_at_with_gap_concealment(
+                t0 + (12 * 1_000_000_000_i128 / i128::from(sr)),
+                12.0 / f64::from(sr),
+            )
+            .unwrap();
+        assert_eq!(&concealed_window[..4], &[1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(&concealed_window[8..], &[2.0, 2.0, 2.0, 2.0]);
+        assert!(
+            concealed_window[4..8]
+                .iter()
+                .all(|sample| *sample > 1.0 && *sample < 2.0)
+        );
+        assert_eq!(
+            buffer.samples.iter().copied().collect::<Vec<_>>(),
+            vec![1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 2.0, 2.0, 2.0, 2.0]
         );
     }
 

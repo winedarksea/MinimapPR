@@ -20,8 +20,10 @@ pub(crate) struct ComputeMathResult {
     pub(crate) payload: ComputePayload,
     pub(crate) localization: SrpPhatLocalization,
     pub(crate) pair_diagnostics: Vec<PairTdoaDiagnostic>,
-    /// Raw PCM bytes — Some when run_classifier_render is true and render succeeded.
+    /// Canonical render PCM bytes used for BirdNET classification.
     pub(crate) pcm_bytes: Option<Vec<u8>>,
+    /// Listener-facing render bytes that may conceal missing spans on copied windows.
+    pub(crate) listenable_pcm_bytes: Option<Vec<u8>>,
     pub(crate) render_meta: Option<RenderMeta>,
     /// Coverage JSON for the classifier_render manifest.
     pub(crate) render_coverage_json: Option<serde_json::Value>,
@@ -90,11 +92,15 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
         None
     };
 
-    let (pcm_bytes, render_meta, render_cov) = if payload.run_classifier_render {
+    let (pcm_bytes, listenable_pcm_bytes, render_meta, render_cov) = if payload.run_classifier_render {
         let render_channels: &[Vec<f32>] = payload
             .omni_channels_override
             .as_deref()
             .unwrap_or(payload.classification_windows.as_slice());
+        let listenable_render_channels: &[Vec<f32>] = payload
+            .listenable_omni_channels_override
+            .as_deref()
+            .unwrap_or(payload.listenable_classification_windows.as_slice());
 
         let cov = render_coverage_json(
             &payload.classification_coverage,
@@ -112,9 +118,18 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
             Some(&localization),
             fallback_reason.clone(),
         );
-        (Some(bytes), Some(meta), cov)
+        let (listenable_bytes, _) = compute_render_bytes(
+            &payload.config,
+            payload.effective_sound_speed_mps,
+            listenable_render_channels,
+            payload.mic_positions_m.as_slice(),
+            payload.sr,
+            Some(&localization),
+            fallback_reason.clone(),
+        );
+        (Some(bytes), Some(listenable_bytes), Some(meta), cov)
     } else {
-        (None, None, None)
+        (None, None, None, None)
     };
 
     let localization_coverage_json = serde_json::to_value(serde_json::json!({
@@ -132,6 +147,7 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
         localization,
         pair_diagnostics,
         pcm_bytes,
+        listenable_pcm_bytes,
         render_meta,
         render_coverage_json: render_cov,
         localization_coverage_json,
@@ -146,6 +162,7 @@ pub async fn run_io(result: ComputeMathResult) {
         localization,
         pair_diagnostics,
         pcm_bytes,
+        listenable_pcm_bytes,
         render_meta,
         render_coverage_json,
         localization_coverage_json,
@@ -195,7 +212,7 @@ pub async fn run_io(result: ComputeMathResult) {
     // Base64-encode PCM bytes for inline SSE delivery (no disk file).
     let raw_render_b64: Option<String> = render_result
         .as_ref()
-        .and_then(|r| r.pcm_bytes.as_ref())
+        .and_then(|r| listenable_pcm_bytes.as_ref().or(r.pcm_bytes.as_ref()))
         .map(|bytes| BASE64.encode(bytes));
 
     // derived_handle from the render result, propagated to localization_result so Python

@@ -158,6 +158,7 @@ pub(crate) struct ComputePayload {
     pub(crate) channel_states: Vec<LocalizationChannelState>,
     pub(crate) active_channels: Vec<usize>,
     pub(crate) classification_windows: Vec<Vec<f32>>,
+    pub(crate) listenable_classification_windows: Vec<Vec<f32>>,
     pub(crate) classification_coverage: Vec<Option<AudioCoverageStats>>,
     /// Per-channel mic positions extracted from node_context.sensor_offsets_m.
     pub(crate) mic_positions_m: Vec<[f32; 3]>,
@@ -176,8 +177,10 @@ pub(crate) struct ComputePayload {
     pub(crate) skip_localization_result: bool,
     /// Pre-computed reason to force omni fallback render (e.g. "single_point_node").
     pub(crate) omni_fallback_reason: Option<String>,
-    /// Override channels for omni render; if None, classification_windows is used.
+    /// Canonical render channels used for localization/BirdNET-facing render bytes.
     pub(crate) omni_channels_override: Option<Vec<Vec<f32>>>,
+    /// Listener-facing render channels; may conceal missing spans on copied windows only.
+    pub(crate) listenable_omni_channels_override: Option<Vec<Vec<f32>>>,
     pub(crate) manifest_store: ManifestStore,
     pub(crate) derived_cache: DerivedCache,
     pub(crate) state: SharedDspState,
@@ -559,6 +562,9 @@ impl DspWorker {
                     .collect(),
                 active_channels: Vec::new(),
                 classification_windows: (0..channel_count).map(|_| Vec::new()).collect(),
+                listenable_classification_windows: (0..channel_count)
+                    .map(|_| Vec::new())
+                    .collect(),
                 classification_coverage: (0..channel_count).map(|_| None).collect(),
                 mic_positions_m,
                 source_ids,
@@ -575,6 +581,7 @@ impl DspWorker {
                 skip_localization_result: true,
                 omni_fallback_reason: Some("single_sensor_or_non_tetrahedral_array".to_string()),
                 omni_channels_override: Some(decoded.channels.clone()),
+                listenable_omni_channels_override: Some(decoded.channels.clone()),
                 manifest_store: self.manifest_store.clone(),
                 derived_cache: self.derived_cache.clone(),
                 state: self.state.clone(),
@@ -663,6 +670,11 @@ impl DspWorker {
                     .expect("stream buffers must exist after append");
                 let fallback_render_windows =
                     channel_windows_ending_at(buffers, end_ns, classification_window_sec);
+                let listenable_fallback_render_windows = channel_windows_ending_at_with_gap_concealment(
+                    buffers,
+                    end_ns,
+                    classification_window_sec,
+                );
                 let fallback_render_coverage =
                     channel_coverage_ending_at(buffers, end_ns, classification_window_sec);
                 let fallback_render_channels = if fallback_render_windows
@@ -673,6 +685,14 @@ impl DspWorker {
                 } else {
                     decoded.channels.clone()
                 };
+                let listenable_fallback_render_channels = if listenable_fallback_render_windows
+                    .iter()
+                    .any(|window| !window.is_empty())
+                {
+                    listenable_fallback_render_windows.clone()
+                } else {
+                    fallback_render_channels.clone()
+                };
                 return Some(ComputePayload {
                     manifest,
                     stream_key,
@@ -681,8 +701,8 @@ impl DspWorker {
                         &fallback_render_coverage,
                         self.config.min_coverage_ratio,
                     ),
-                    classification_windows: fallback_render_windows
-                        .iter()
+                    classification_windows: (0..channel_count).map(|_| Vec::new()).collect(),
+                    listenable_classification_windows: (0..channel_count)
                         .map(|_| Vec::new())
                         .collect(),
                     classification_coverage: fallback_render_coverage,
@@ -701,6 +721,7 @@ impl DspWorker {
                     skip_localization_result: true,
                     omni_fallback_reason: Some("localization_coverage_unavailable".to_string()),
                     omni_channels_override: Some(fallback_render_channels),
+                    listenable_omni_channels_override: Some(listenable_fallback_render_channels),
                     manifest_store: self.manifest_store.clone(),
                     derived_cache: self.derived_cache.clone(),
                     state: self.state.clone(),
@@ -739,17 +760,24 @@ impl DspWorker {
             return None;
         }
 
-        let (classification_windows, classification_coverage) = if run_classifier_render {
+        let (classification_windows, listenable_classification_windows, classification_coverage) =
+            if run_classifier_render {
             let buffers = self
                 .buffers
                 .get(&stream_key)
                 .expect("stream buffers must exist after append");
             (
                 channel_windows_ending_at(buffers, end_ns, classification_window_sec),
+                channel_windows_ending_at_with_gap_concealment(
+                    buffers,
+                    end_ns,
+                    classification_window_sec,
+                ),
                 channel_coverage_ending_at(buffers, end_ns, classification_window_sec),
             )
         } else {
             (
+                channel_states.iter().map(|_| Vec::new()).collect(),
                 channel_states.iter().map(|_| Vec::new()).collect(),
                 channel_states.iter().map(|_| None).collect(),
             )
@@ -761,6 +789,7 @@ impl DspWorker {
             channel_states,
             active_channels,
             classification_windows,
+            listenable_classification_windows,
             classification_coverage,
             mic_positions_m,
             source_ids,
@@ -777,6 +806,7 @@ impl DspWorker {
             skip_localization_result: false,
             omni_fallback_reason: (channel_count < 4).then(|| "single_point_node".to_string()),
             omni_channels_override: None,
+            listenable_omni_channels_override: None,
             manifest_store: self.manifest_store.clone(),
             derived_cache: self.derived_cache.clone(),
             state: self.state.clone(),
@@ -1162,6 +1192,20 @@ fn channel_windows_ending_at(
     buffers
         .iter()
         .map(|buf| buf.window_ending_at(end_ns, window_seconds).unwrap_or_default())
+        .collect()
+}
+
+fn channel_windows_ending_at_with_gap_concealment(
+    buffers: &[SensorStreamBuffer],
+    end_ns: i128,
+    window_seconds: f64,
+) -> Vec<Vec<f32>> {
+    buffers
+        .iter()
+        .map(|buf| {
+            buf.window_ending_at_with_gap_concealment(end_ns, window_seconds)
+                .unwrap_or_default()
+        })
         .collect()
 }
 
