@@ -1,7 +1,9 @@
-"""Chunked per-session audio capture buffers for IAMF recording.
+"""Per-session audio capture buffers for IAMF recording.
 
 These buffers mirror incoming frame-sized chunks so the live rolling
 MultiSensorBuffer can keep pruning normally during a recording session.
+Pre-allocated flat arrays avoid per-frame heap allocation and eliminate
+GC pressure during long recordings.
 """
 
 from __future__ import annotations
@@ -12,20 +14,21 @@ import numpy as np
 
 
 @dataclass(slots=True)
-class _CapturedChunk:
-    start_sample_index: int
-    samples: np.ndarray
-
-
-@dataclass(slots=True)
 class _CapturedSensorStream:
     sample_rate_hz: int
     max_duration_seconds: float
+    _max_samples: int = field(init=False, default=0)
     _timeline_origin_ns: int | None = field(init=False, default=None)
     _timeline_origin_sample_index: int = field(init=False, default=0)
-    _chunks: list[_CapturedChunk] = field(init=False, default_factory=list)
-    _start_sample_index: int | None = field(init=False, default=None)
-    _end_sample_index: int | None = field(init=False, default=None)
+    _buffer_start_sample_index: int | None = field(init=False, default=None)
+    _write_local_end: int = field(init=False, default=0)
+    _samples: np.ndarray = field(init=False, default_factory=lambda: np.zeros(0, dtype=np.float32))
+    _coverage: np.ndarray = field(init=False, default_factory=lambda: np.zeros(0, dtype=np.bool_))
+
+    def __post_init__(self) -> None:
+        self._max_samples = max(1, int(round(self.max_duration_seconds * self.sample_rate_hz)))
+        self._samples = np.zeros(self._max_samples, dtype=np.float32)
+        self._coverage = np.zeros(self._max_samples, dtype=np.bool_)
 
     def append(
         self,
@@ -61,49 +64,53 @@ class _CapturedSensorStream:
             if timestamp_correction_ns > reset_threshold_ns:
                 self._timeline_origin_ns = start_time_ns
                 self._timeline_origin_sample_index = start_sample_index or 0
-                self._chunks.clear()
-                self._start_sample_index = None
-                self._end_sample_index = None
+                self._samples[:] = 0
+                self._coverage[:] = False
+                self._buffer_start_sample_index = None
+                self._write_local_end = 0
             incoming_start_sample_index = start_sample_index
         else:
             incoming_start_sample_index = self._time_to_sample_index(start_time_ns)
-            if self._end_sample_index is not None:
-                drift = incoming_start_sample_index - self._end_sample_index
+            if self._buffer_start_sample_index is not None and self._write_local_end > 0:
+                global_write_end = self._buffer_start_sample_index + self._write_local_end
+                drift = incoming_start_sample_index - global_write_end
                 snap_tolerance = max(1, samples.size // 2)
                 if -snap_tolerance < drift < snap_tolerance:
-                    incoming_start_sample_index = self._end_sample_index
+                    incoming_start_sample_index = global_write_end
 
-        self._chunks.append(
-            _CapturedChunk(
-                start_sample_index=incoming_start_sample_index,
-                samples=samples.copy(),
-            )
-        )
-        self._start_sample_index = (
-            incoming_start_sample_index
-            if self._start_sample_index is None
-            else min(self._start_sample_index, incoming_start_sample_index)
-        )
-        chunk_end_sample_index = incoming_start_sample_index + samples.size
-        self._end_sample_index = (
-            chunk_end_sample_index
-            if self._end_sample_index is None
-            else max(self._end_sample_index, chunk_end_sample_index)
-        )
+        if self._buffer_start_sample_index is None:
+            self._buffer_start_sample_index = incoming_start_sample_index
+
+        buf_offset = incoming_start_sample_index - self._buffer_start_sample_index
+        write_start = max(0, buf_offset)
+        write_end = min(self._max_samples, buf_offset + samples.size)
+        if write_start < write_end:
+            src_start = write_start - buf_offset
+            src_end = write_end - buf_offset
+            self._samples[write_start:write_end] = samples[src_start:src_end]
+            self._coverage[write_start:write_end] = True
+        if write_end > self._write_local_end:
+            self._write_local_end = write_end
 
     @property
     def start_time_ns(self) -> int | None:
-        if self._timeline_origin_ns is None or self._start_sample_index is None:
+        if self._timeline_origin_ns is None or self._buffer_start_sample_index is None:
             return None
-        return self._sample_index_to_time_ns(self._start_sample_index)
+        return self._sample_index_to_time_ns(self._buffer_start_sample_index)
 
     def end_time_ns(self) -> int | None:
-        if self._timeline_origin_ns is None or self._end_sample_index is None:
+        if (
+            self._timeline_origin_ns is None
+            or self._buffer_start_sample_index is None
+            or self._write_local_end == 0
+        ):
             return None
-        return self._sample_index_to_time_ns(self._end_sample_index)
+        return self._sample_index_to_time_ns(
+            self._buffer_start_sample_index + self._write_local_end
+        )
 
     def render_range(self, start_ns: int, end_ns: int) -> tuple[np.ndarray, np.ndarray]:
-        if self._timeline_origin_ns is None:
+        if self._timeline_origin_ns is None or self._buffer_start_sample_index is None:
             return np.zeros(0, dtype=np.float32), np.zeros(0, dtype=np.bool_)
 
         start_idx = self._time_to_sample_index(start_ns)
@@ -115,17 +122,16 @@ class _CapturedSensorStream:
         out = np.zeros(n_out, dtype=np.float32)
         coverage = np.zeros(n_out, dtype=np.bool_)
 
-        for chunk in self._chunks:
-            chunk_end = chunk.start_sample_index + chunk.samples.size
-            overlap_start = max(start_idx, chunk.start_sample_index)
-            overlap_end = min(end_idx, chunk_end)
-            if overlap_start >= overlap_end:
-                continue
+        buf_start = self._buffer_start_sample_index
+        buf_end = buf_start + self._max_samples
+        overlap_start = max(start_idx, buf_start)
+        overlap_end = min(end_idx, buf_end)
+        if overlap_start < overlap_end:
             out_offset = overlap_start - start_idx
-            chunk_offset = overlap_start - chunk.start_sample_index
+            buf_offset = overlap_start - buf_start
             length = overlap_end - overlap_start
-            out[out_offset : out_offset + length] = chunk.samples[chunk_offset : chunk_offset + length]
-            coverage[out_offset : out_offset + length] = True
+            out[out_offset:out_offset + length] = self._samples[buf_offset:buf_offset + length]
+            coverage[out_offset:out_offset + length] = self._coverage[buf_offset:buf_offset + length]
 
         return out, coverage
 
@@ -266,7 +272,7 @@ class ChunkedCaptureSessionBuffer:
             "actual_audio_start_ns": actual_start_ns,
             "actual_audio_end_ns": actual_end_ns,
             "capture_rate_hz": sample_rate_hz,
-            "n_segments": sum(len(stream._chunks) for stream in self._streams.values()),
+            "n_streams": len(self._streams),
             "n_samples": n_samples,
             "source": "python_capture_session",
             "channel_coverage_ratios": channel_coverage_ratios,

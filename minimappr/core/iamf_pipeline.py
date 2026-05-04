@@ -400,10 +400,10 @@ class IamfPipeline:
         available here.
         """
         if record.capture_audio_buffer is not None:
-            return record.capture_audio_buffer.extract_range(
-                record.channel_sensor_ids,
-                start_ns,
-                end_ns,
+            capture_buf = record.capture_audio_buffer
+            sensor_ids = record.channel_sensor_ids
+            return await asyncio.to_thread(
+                capture_buf.extract_range, sensor_ids, start_ns, end_ns
             )
         if record.use_python_ingest and self._multi_sensor_buffer is not None:
             return await self._multi_sensor_buffer.extract_range(
