@@ -61,6 +61,41 @@ async def test_multi_sensor_buffer_can_fetch_trailing_window() -> None:
     assert np.array_equal(trailing["s16k"], samples[-4_000:])
 
 
+@pytest.mark.asyncio
+async def test_multi_sensor_buffer_session_capture_does_not_block_live_pruning() -> None:
+    buffer = MultiSensorBuffer(max_duration_seconds=1.0)
+    capture = await buffer.start_capture(
+        "session-1",
+        ["s16k"],
+        max_duration_seconds=10.0,
+    )
+    start_time_ns = 1_739_900_000_000_000_000
+    frame = np.ones(400, dtype=np.float32)
+    frame_duration_ns = int(round((frame.size / 16_000) * 1_000_000_000))
+
+    for index in range(100):
+        await buffer.append(
+            sensor_id="s16k",
+            sample_rate_hz=16_000,
+            start_time_ns=start_time_ns + index * frame_duration_ns,
+            samples=frame,
+        )
+
+    live_stream = buffer._buffers["s16k"]
+    assert live_stream.samples.size == 16_000
+
+    captured, sample_rate_hz, sync_diag = capture.extract_range(
+        ["s16k"],
+        start_time_ns,
+        start_time_ns + 100 * frame_duration_ns,
+    )
+
+    assert sample_rate_hz == 16_000
+    assert captured.shape == (1, 40_000)
+    assert sync_diag["source"] == "python_capture_session"
+    assert sync_diag["channel_coverage_ratios"] == [1.0]
+
+
 def test_sensor_stream_buffer_replaces_padded_gap_when_late_frame_arrives() -> None:
     sample_rate_hz = 16_000
     samples_per_chunk = 4

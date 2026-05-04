@@ -10,6 +10,8 @@ from typing import Optional
 
 import numpy as np
 
+from minimappr.core.capture_audio_buffer import ChunkedCaptureSessionBuffer
+
 logger = logging.getLogger(__name__)
 
 
@@ -385,6 +387,26 @@ class MultiSensorBuffer:
         self._buffers: dict[str, SensorStreamBuffer] = {}
         self._lock = asyncio.Lock()
         self._pins: dict[str, int] = {}  # session_id → start_ns
+        self._capture_sessions: dict[str, ChunkedCaptureSessionBuffer] = {}
+
+    async def start_capture(
+        self,
+        session_id: str,
+        sensor_ids: list[str],
+        *,
+        max_duration_seconds: float,
+    ) -> ChunkedCaptureSessionBuffer:
+        capture_buffer = ChunkedCaptureSessionBuffer(
+            sensor_ids=sensor_ids,
+            max_duration_seconds=max_duration_seconds,
+        )
+        async with self._lock:
+            self._capture_sessions[session_id] = capture_buffer
+        return capture_buffer
+
+    async def stop_capture(self, session_id: str) -> None:
+        async with self._lock:
+            self._capture_sessions.pop(session_id, None)
 
     def pin(self, session_id: str, start_ns: int) -> None:
         """Prevent the buffer from evicting samples at or after start_ns.
@@ -590,6 +612,7 @@ class MultiSensorBuffer:
         end_sample_index: int | None = None,
         end_time_ns: int | None = None,
     ) -> None:
+        capture_buffers: list[ChunkedCaptureSessionBuffer] = []
         async with self._lock:
             buffer = self._buffers.get(sensor_id)
             if buffer is None or buffer.sample_rate_hz != sample_rate_hz:
@@ -602,6 +625,22 @@ class MultiSensorBuffer:
                 end_sample_index=end_sample_index,
                 end_time_ns=end_time_ns,
                 _protected_from_ns=self._oldest_pin_ns(),
+            )
+            if self._capture_sessions:
+                capture_buffers = [
+                    capture_buffer
+                    for capture_buffer in self._capture_sessions.values()
+                    if capture_buffer.wants_sensor(sensor_id)
+                ]
+
+        for capture_buffer in capture_buffers:
+            capture_buffer.append(
+                sensor_id=sensor_id,
+                sample_rate_hz=sample_rate_hz,
+                start_time_ns=start_time_ns,
+                samples=samples,
+                start_sample_index=start_sample_index,
+                end_sample_index=end_sample_index,
             )
 
     async def get_synchronized_window(

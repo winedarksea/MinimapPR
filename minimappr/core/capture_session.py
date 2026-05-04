@@ -30,6 +30,7 @@ import httpx
 
 if TYPE_CHECKING:
     from minimappr.core.audio_buffer import MultiSensorBuffer
+    from minimappr.core.capture_audio_buffer import ChunkedCaptureSessionBuffer
     from minimappr.core.iamf_pipeline import IamfPipeline
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,7 @@ class CaptureSessionRecord:
     created_ns: int = field(default_factory=time.time_ns)
     use_python_ingest: bool = False
     channel_sensor_ids: list[str] = field(default_factory=list)
+    capture_audio_buffer: Optional["ChunkedCaptureSessionBuffer"] = field(default=None, repr=False)
     include_iamf: bool = True
     """When False, skip IAMF encoding (ambisonics-only recording)."""
     include_video: bool = True
@@ -77,7 +79,7 @@ class CaptureStartRequest:
     sidecar_url: Optional[str] = None
     """Base URL of the Rust ingest sidecar. None = Python ingest mode."""
     multi_sensor_buffer: Optional["MultiSensorBuffer"] = None
-    """Python ring buffer to pin when sidecar_url is None."""
+    """Live multi-sensor buffer that mirrors session audio when sidecar_url is None."""
     channel_sensor_ids: list[str] = field(default_factory=list)
     """Ordered sensor IDs for the 4-channel array (Python ingest mode)."""
     max_duration_s: float = 300.0
@@ -115,7 +117,7 @@ class CaptureSessionManager:
         return self._http
 
     async def start(self, request: CaptureStartRequest) -> CaptureSessionRecord:
-        """Create a new session, pin the journal range, start video capture."""
+        """Create a new session, start capture mirroring, and start video capture."""
         from minimappr.core.video_capture import VideoCapture, VideoCaptureConfig
 
         session_id = str(uuid.uuid4())
@@ -143,13 +145,18 @@ class CaptureSessionManager:
         self._sessions[session_id] = record
 
         if request.sidecar_url is None:
-            # Python ingest mode: pin the in-memory ring buffer instead of a Rust range lease.
+            # Python ingest mode: mirror frame-sized chunks into a session-local
+            # buffer so the live rolling buffer can continue pruning normally.
             if request.multi_sensor_buffer is None:
                 record.state = CaptureState.FAILED
                 record.error = "Python ingest mode requires multi_sensor_buffer"
                 logger.error("session %s: %s", session_id, record.error)
                 return record
-            request.multi_sensor_buffer.pin(session_id, now_ns)
+            record.capture_audio_buffer = await request.multi_sensor_buffer.start_capture(
+                session_id,
+                request.channel_sensor_ids,
+                max_duration_seconds=request.max_duration_s,
+            )
             self._python_buffers[session_id] = request.multi_sensor_buffer
             record.start_time_ns = now_ns
             record.use_python_ingest = True
@@ -203,6 +210,10 @@ class CaptureSessionManager:
             except Exception as exc:
                 record.state = CaptureState.FAILED
                 record.error = f"video capture start failed: {exc}"
+                if request.sidecar_url is None and request.multi_sensor_buffer is not None:
+                    self._python_buffers.pop(session_id, None)
+                    await request.multi_sensor_buffer.stop_capture(session_id)
+                    record.capture_audio_buffer = None
                 sidecar = request.sidecar_url or ""
                 await self._release_range_lease(sidecar, record)
                 return record
@@ -240,6 +251,11 @@ class CaptureSessionManager:
 
         record.end_time_ns = time.time_ns()
         record.state = CaptureState.PROCESSING
+
+        if record.use_python_ingest:
+            buf = self._python_buffers.pop(session_id, None)
+            if buf is not None:
+                await buf.stop_capture(session_id)
 
         # Enqueue post-processing in the background.
         effective_sidecar_url = "" if record.use_python_ingest else sidecar_url
@@ -295,9 +311,8 @@ class CaptureSessionManager:
             await self._cleanup_on_failure(record)
         finally:
             if record.use_python_ingest:
-                buf = self._python_buffers.pop(session_id, None)
-                if buf is not None:
-                    buf.unpin(session_id)
+                self._python_buffers.pop(session_id, None)
+                record.capture_audio_buffer = None
             else:
                 await self._release_range_lease(sidecar_url, record)
 

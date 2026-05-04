@@ -399,6 +399,12 @@ class IamfPipeline:
         ingest/DSP path remains memory-only, so Rust journal extraction is not
         available here.
         """
+        if record.capture_audio_buffer is not None:
+            return record.capture_audio_buffer.extract_range(
+                record.channel_sensor_ids,
+                start_ns,
+                end_ns,
+            )
         if record.use_python_ingest and self._multi_sensor_buffer is not None:
             return await self._multi_sensor_buffer.extract_range(
                 record.channel_sensor_ids, start_ns, end_ns
