@@ -628,18 +628,22 @@ impl DspWorker {
                 }
             }
 
-            let end_ns = buffer_end_time_ns;
+            let end_ns = resolve_buffer_end_time_ns(
+                buffers,
+                end_sample_index,
+                buffer_end_time_ns,
+                sr,
+            );
             // Use centered windows for localization (matching Python's center_time_ns).
             // TDOA is computed relative to the window center, so centering on the frame
             // midpoint gives the most symmetric coverage.
             let window_duration_ns = (window_sec * 1_000_000_000.0).round() as i128;
             let half_window_ns = window_duration_ns / 2;
-            let center_offset_ns = (render_duration_ns - half_window_ns).max(0);
-            let center_time_ns = buffer_start_time_ns + center_offset_ns;
+            let center_time_ns = end_ns.saturating_sub(half_window_ns).max(buffer_start_time_ns);
             let channel_states =
                 localization_channel_states_centered(buffers, center_time_ns, window_sec);
 
-            (buffer_end_time_ns.max(0) as u128, end_ns, channel_states)
+            (end_ns.max(0) as u128, end_ns, channel_states)
         };
 
         if channel_states.iter().all(|state| state.coverage.is_none()) {
@@ -1275,6 +1279,38 @@ fn resolve_buffer_start_time_ns(
             })
             .or_else(|| first_handle.tor_ns.map(i128::from))
             .unwrap_or(now_ns as i128)
+}
+
+fn resolve_buffer_end_time_ns(
+    buffers: &[SensorStreamBuffer],
+    end_sample_index: Option<i64>,
+    fallback_end_time_ns: i128,
+    sample_rate_hz: u32,
+) -> i128 {
+    let Some(sample_timeline_end_ns) = end_sample_index.and_then(|sample_index| {
+        buffers
+            .first()
+            .and_then(|buffer| buffer.time_for_sample_index(sample_index))
+    }) else {
+        return fallback_end_time_ns;
+    };
+
+    let sample_period_ns = if sample_rate_hz == 0 {
+        0
+    } else {
+        1_000_000_000_i128 / i128::from(sample_rate_hz)
+    };
+    // Live tetrahedral nodes can carry a small absolute TOA offset relative to
+    // the sample-index timeline while still advancing with sample-accurate
+    // deltas. Treat sub-millisecond drift as timeline noise and snap to the
+    // buffered sample edge so 30 s trailing windows do not miss by a handful
+    // of samples.
+    let timestamp_jitter_tolerance_ns = (sample_period_ns * 16).max(1);
+    if (sample_timeline_end_ns - fallback_end_time_ns).abs() <= timestamp_jitter_tolerance_ns {
+        sample_timeline_end_ns
+    } else {
+        fallback_end_time_ns
+    }
 }
 
 fn should_use_receipt_time_alignment(

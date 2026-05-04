@@ -274,6 +274,86 @@ async fn localization_continues_when_classifier_render_is_rate_limited() {
 }
 
 #[tokio::test]
+async fn small_packet_timestamp_jitter_does_not_drop_array_window_coverage() {
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest_store = ManifestStore::new(tmp.path());
+    manifest_store.ensure_initialized().await.unwrap();
+    let derived_cache = DerivedCache::new(
+        tmp.path(),
+        DerivedCacheConfig {
+            budget_bytes: 16_777_216,
+            admission_reserve_bytes: 0,
+        },
+    );
+    derived_cache.ensure_initialized().await.unwrap();
+
+    let state: SharedDspState = Arc::new(RwLock::new(Default::default()));
+    let event_publisher = DspEventPublisher::new(state.clone(), 32, 32, 50);
+    let mut dsp_result_rx = event_publisher.subscribe();
+    let mut worker = DspWorker::new(
+        manifest_store.clone(),
+        derived_cache,
+        DspWorkerConfig {
+            birdnet_hybrid_render_enabled: true,
+            classifier_render_min_interval_seconds: 0.0,
+            localization_cadence_ms: 0,
+            trigger_cooldown_seconds: 0.0,
+            max_buffer_seconds: 32.0,
+            max_trusted_node_clock_skew_seconds: f64::MAX,
+            ..DspWorkerConfig::default()
+        },
+        state.clone(),
+    )
+    .with_dsp_event_publisher(event_publisher);
+
+    let first_payload = store_forward_payload_with_timing(1_000_000_000, 0, 1);
+    let first_manifest = raw_manifest_for_payload(
+        tmp.path(),
+        "manifest-raw-jitter-1",
+        "seg-jitter-1",
+        first_payload,
+    )
+    .await;
+    worker.process_one(first_manifest, 1).await;
+
+    let second_payload = store_forward_payload_with_timing_jitter(1_032_500_000, 512, 2);
+    let second_manifest = raw_manifest_for_payload(
+        tmp.path(),
+        "manifest-raw-jitter-2",
+        "seg-jitter-2",
+        second_payload,
+    )
+    .await;
+    worker.process_one(second_manifest, 1).await;
+
+    let events = drain_published_manifests(&mut dsp_result_rx);
+    let localization_events: Vec<_> = events
+        .iter()
+        .filter(|manifest| manifest.manifest_type == "localization_result")
+        .collect();
+    let render_events: Vec<_> = events
+        .iter()
+        .filter(|manifest| manifest.manifest_type == "classifier_render")
+        .collect();
+
+    assert_eq!(localization_events.len(), 2);
+    assert_eq!(render_events.len(), 2);
+    assert!(localization_events.iter().all(|manifest| {
+        manifest
+            .localization
+            .as_ref()
+            .is_some_and(|payload| payload.resolved_algorithm == "srp_phat")
+    }));
+    assert!(render_events.iter().all(|manifest| {
+        manifest
+            .classifier_render
+            .as_ref()
+            .and_then(|payload| payload.fallback_reason.as_deref())
+            != Some("localization_coverage_unavailable")
+    }));
+}
+
+#[tokio::test]
 async fn worker_publishes_omni_render_for_non_tetrahedral_channel_count() {
     let tmp = tempfile::tempdir().unwrap();
     let manifest_store = ManifestStore::new(tmp.path());
@@ -414,6 +494,46 @@ fn store_forward_payload_with_timing(
     sequence: u64,
 ) -> String {
     store_forward_payload_with_channel_count(start_time_ns, start_sample_index, sequence, 4)
+}
+
+fn store_forward_payload_with_timing_jitter(
+    start_time_ns: u64,
+    start_sample_index: u64,
+    sequence: u64,
+) -> String {
+    let sr = 16_000;
+    let samples = pseudo_random(520);
+    let channels = (0..4)
+        .map(|channel_index| samples[channel_index..channel_index + 512].to_vec())
+        .collect::<Vec<_>>();
+    let sensor_offsets = SIRITH_MIC_POSITIONS_M
+        .iter()
+        .map(|position| vec![position[0], position[1], position[2]])
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "node": {
+            "id": "sirith-test",
+            "sensor_offsets_m": sensor_offsets,
+            "metadata": {}
+        },
+        "buffered_frames": [{
+            "frame": {
+                "start_time_ns": start_time_ns,
+                "utc_start_ns": start_time_ns,
+                "utc_end_ns": start_time_ns + 32_000_000,
+                "start_sample_index": start_sample_index,
+                "end_sample_index": start_sample_index + 512,
+                "sample_rate_hz": sr,
+                "channels": 4,
+                "encoding": "pcm16le",
+                "samples_per_channel": 512,
+                "samples_b64": encode_pcm16le_b64(&channels),
+                "sequence": sequence,
+                "time_quality": "gps_locked"
+            }
+        }]
+    })
+    .to_string()
 }
 
 fn store_forward_payload_with_channel_count(
