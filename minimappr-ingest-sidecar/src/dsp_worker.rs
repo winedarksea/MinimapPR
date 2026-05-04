@@ -722,14 +722,17 @@ impl DspWorker {
         // nodes to appear degraded between BirdNET windows.
         let on_localization_cadence =
             self.should_run_localization(&stream_key, audio_end_ns, &windows);
-        // SRP-PHAT requires at least 4 channels (tetrahedral array).
-        let run_srp = channel_count == 4 && on_localization_cadence;
+        let run_classifier_render =
+            self.should_publish_classifier_render(&stream_key, audio_end_ns, pending_backlog_depth);
+        // SRP-PHAT requires at least 4 channels (tetrahedral array). Force SRP on
+        // any frame that will publish a classifier render so the render does not
+        // silently degrade into omni fallback just because the 250 ms heartbeat
+        // cadence and the ~28 s BirdNET render cadence landed on different frames.
+        let run_srp = channel_count == 4 && (on_localization_cadence || run_classifier_render);
         // Heartbeat fires on the same interval as localization but bypasses the RMS
         // energy gate so nodes remain live during quiet periods.
         let on_heartbeat_cadence =
             on_localization_cadence || self.should_emit_heartbeat(&stream_key, audio_end_ns);
-        let run_classifier_render =
-            self.should_publish_classifier_render(&stream_key, audio_end_ns, pending_backlog_depth);
 
         if !on_heartbeat_cadence && !run_classifier_render {
             self.defer_source_manifest_consumption(&manifest);
@@ -1285,32 +1288,23 @@ fn resolve_buffer_end_time_ns(
     buffers: &[SensorStreamBuffer],
     end_sample_index: Option<i64>,
     fallback_end_time_ns: i128,
-    sample_rate_hz: u32,
+    _sample_rate_hz: u32,
 ) -> i128 {
-    let Some(sample_timeline_end_ns) = end_sample_index.and_then(|sample_index| {
-        buffers
-            .first()
-            .and_then(|buffer| buffer.time_for_sample_index(sample_index))
-    }) else {
-        return fallback_end_time_ns;
-    };
-
-    let sample_period_ns = if sample_rate_hz == 0 {
-        0
-    } else {
-        1_000_000_000_i128 / i128::from(sample_rate_hz)
-    };
-    // Live tetrahedral nodes can carry a small absolute TOA offset relative to
-    // the sample-index timeline while still advancing with sample-accurate
-    // deltas. Treat sub-millisecond drift as timeline noise and snap to the
-    // buffered sample edge so 30 s trailing windows do not miss by a handful
-    // of samples.
-    let timestamp_jitter_tolerance_ns = (sample_period_ns * 16).max(1);
-    if (sample_timeline_end_ns - fallback_end_time_ns).abs() <= timestamp_jitter_tolerance_ns {
-        sample_timeline_end_ns
-    } else {
-        fallback_end_time_ns
-    }
+    // The buffer is anchored to the sample-index timeline, so windowing must
+    // ride that timeline regardless of how far the publish-time TOA has drifted.
+    // GPS-disciplined nodes recompute utcStart from a freshly-sampled clock
+    // correction on every publish (NodeRunner::buildFrameForPacket), which can
+    // shift consecutive packets' TOAs by tens of milliseconds while the sample
+    // counter advances at a fixed rate. Trusting TOA here makes
+    // coverage_centered_at / window_ending_at overshoot the buffer tail and
+    // return None, which silently drops the entire classifier_render.
+    end_sample_index
+        .and_then(|sample_index| {
+            buffers
+                .first()
+                .and_then(|buffer| buffer.time_for_sample_index(sample_index))
+        })
+        .unwrap_or(fallback_end_time_ns)
 }
 
 fn should_use_receipt_time_alignment(

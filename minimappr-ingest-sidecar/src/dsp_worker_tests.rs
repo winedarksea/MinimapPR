@@ -117,7 +117,15 @@ async fn worker_publishes_localization_and_classifier_render_contract() {
 }
 
 #[tokio::test]
-async fn worker_publishes_omni_render_when_localization_coverage_is_unavailable() {
+async fn worker_continues_localization_across_packet_gap_with_misaligned_toa() {
+    // The previous shape of this test (worker_publishes_omni_render_when_localization_coverage_is_unavailable)
+    // intentionally sent a backward-jumping TOA to force coverage_centered_at to
+    // miss the buffer tail. That only "worked" because resolve_buffer_end_time_ns
+    // was riding the publish-time TOA — the same TOA-trust that broke
+    // GPS-locked tetrahedral arrays in production. Now that windowing follows
+    // the sample-index timeline, a 512-sample gap is recovered and the second
+    // frame's centered window lands on real samples, producing a real SRP
+    // localization rather than the coverage_unavailable fallback.
     let tmp = tempfile::tempdir().unwrap();
     let manifest_store = ManifestStore::new(tmp.path());
     manifest_store.ensure_initialized().await.unwrap();
@@ -169,36 +177,31 @@ async fn worker_publishes_omni_render_when_localization_coverage_is_unavailable(
         .iter()
         .filter(|m| m.manifest_type == "localization_result")
         .collect();
-    assert_eq!(localizations.len(), 1);
-
     let renders: Vec<_> = events
         .iter()
         .filter(|m| m.manifest_type == "classifier_render")
         .collect();
+    assert_eq!(localizations.len(), 2);
     assert_eq!(renders.len(), 2);
 
-    let fallback_render = renders
-        .iter()
-        .find(|render| {
-            render
-                .classifier_render
-                .as_ref()
-                .and_then(|payload| payload.fallback_reason.as_deref())
-                == Some("localization_coverage_unavailable")
-        })
-        .expect("fallback render");
-    assert_eq!(
-        fallback_render
+    // Neither render should land in the empty-PCM / coverage-unavailable branch.
+    assert!(renders.iter().all(|render| {
+        render
             .classifier_render
             .as_ref()
-            .expect("render payload")
-            .fallback_reason
-            .as_deref(),
-        Some("localization_coverage_unavailable")
-    );
+            .and_then(|payload| payload.fallback_reason.as_deref())
+            != Some("localization_coverage_unavailable")
+    }));
+    assert!(renders.iter().all(|render| {
+        render
+            .classifier_render
+            .as_ref()
+            .map(|payload| payload.sample_count > 0)
+            .unwrap_or(false)
+    }));
 
     let state = state.read().await;
-    assert_eq!(state.total_localization_results, 1);
+    assert_eq!(state.total_localization_results, 2);
     assert_eq!(state.total_classifier_renders, 2);
 }
 
@@ -271,6 +274,83 @@ async fn localization_continues_when_classifier_render_is_rate_limited() {
     let state = state.read().await;
     assert_eq!(state.total_localization_results, 2);
     assert_eq!(state.total_classifier_renders, 1);
+}
+
+#[tokio::test]
+async fn tetra_classifier_render_forces_srp_between_localization_cadence_ticks() {
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest_store = ManifestStore::new(tmp.path());
+    manifest_store.ensure_initialized().await.unwrap();
+    let derived_cache = DerivedCache::new(
+        tmp.path(),
+        DerivedCacheConfig {
+            budget_bytes: 16_777_216,
+            admission_reserve_bytes: 0,
+        },
+    );
+    derived_cache.ensure_initialized().await.unwrap();
+
+    let state: SharedDspState = Arc::new(RwLock::new(Default::default()));
+    let event_publisher = DspEventPublisher::new(state.clone(), 32, 32, 50);
+    let mut dsp_result_rx = event_publisher.subscribe();
+    let mut worker = DspWorker::new(
+        manifest_store.clone(),
+        derived_cache,
+        DspWorkerConfig {
+            birdnet_hybrid_render_enabled: true,
+            classifier_render_min_interval_seconds: 0.0,
+            localization_cadence_ms: 60_000,
+            trigger_cooldown_seconds: 0.0,
+            ..DspWorkerConfig::default()
+        },
+        state.clone(),
+    )
+    .with_dsp_event_publisher(event_publisher);
+
+    let first_payload = store_forward_payload_with_timing(1_000_000_000, 0, 1);
+    let first_manifest = raw_manifest_for_payload(
+        tmp.path(),
+        "manifest-raw-render-srp-1",
+        "seg-render-srp-1",
+        first_payload,
+    )
+    .await;
+    worker.process_one(first_manifest, 1).await;
+
+    let second_payload = store_forward_payload_with_timing(1_032_000_000, 512, 2);
+    let second_manifest = raw_manifest_for_payload(
+        tmp.path(),
+        "manifest-raw-render-srp-2",
+        "seg-render-srp-2",
+        second_payload,
+    )
+    .await;
+    worker.process_one(second_manifest, 1).await;
+
+    let events = drain_published_manifests(&mut dsp_result_rx);
+    let localization_events: Vec<_> = events
+        .iter()
+        .filter(|manifest| manifest.manifest_type == "localization_result")
+        .collect();
+    let render_events: Vec<_> = events
+        .iter()
+        .filter(|manifest| manifest.manifest_type == "classifier_render")
+        .collect();
+
+    assert_eq!(localization_events.len(), 2);
+    assert_eq!(render_events.len(), 2);
+    assert!(localization_events.iter().all(|manifest| {
+        manifest
+            .localization
+            .as_ref()
+            .is_some_and(|payload| payload.resolved_algorithm == "srp_phat")
+    }));
+    assert!(render_events.iter().all(|manifest| {
+        manifest
+            .classifier_render
+            .as_ref()
+            .is_some_and(|payload| payload.render_kind == "birdnet_hybrid_spatial_blend")
+    }));
 }
 
 #[tokio::test]
@@ -351,6 +431,116 @@ async fn small_packet_timestamp_jitter_does_not_drop_array_window_coverage() {
             .and_then(|payload| payload.fallback_reason.as_deref())
             != Some("localization_coverage_unavailable")
     }));
+}
+
+#[tokio::test]
+async fn gps_clock_correction_jitter_does_not_drop_classifier_render() {
+    // Reproduces the live sirith-tetra-1a15 (4-mic, GPS-locked) failure mode:
+    // NodeRunner re-samples the GPS-corrected UTC at every publish, so consecutive
+    // packets carry start_time_ns deltas that don't match the sample-rate delta,
+    // even though start_sample_index advances perfectly. Tens of milliseconds of
+    // drift caused the previous 1 ms snap tolerance to fall back to TOA, which
+    // pushed the windowing time past the buffer tail; coverage_centered_at and
+    // window_ending_at returned None, the render produced empty PCM, and the
+    // classifier_render manifest was silently dropped in write_render_to_cache.
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest_store = ManifestStore::new(tmp.path());
+    manifest_store.ensure_initialized().await.unwrap();
+    let derived_cache = DerivedCache::new(
+        tmp.path(),
+        DerivedCacheConfig {
+            budget_bytes: 16_777_216,
+            admission_reserve_bytes: 0,
+        },
+    );
+    derived_cache.ensure_initialized().await.unwrap();
+
+    let state: SharedDspState = Arc::new(RwLock::new(Default::default()));
+    let event_publisher = DspEventPublisher::new(state.clone(), 64, 64, 50);
+    let mut dsp_result_rx = event_publisher.subscribe();
+    let mut worker = DspWorker::new(
+        manifest_store.clone(),
+        derived_cache,
+        DspWorkerConfig {
+            birdnet_hybrid_render_enabled: true,
+            classifier_render_min_interval_seconds: 0.0,
+            localization_cadence_ms: 0,
+            trigger_cooldown_seconds: 0.0,
+            max_buffer_seconds: 32.0,
+            max_trusted_node_clock_skew_seconds: f64::MAX,
+            ..DspWorkerConfig::default()
+        },
+        state.clone(),
+    )
+    .with_dsp_event_publisher(event_publisher);
+
+    // 16 packets of 512 samples each = 32 ms cadence on the sample timeline,
+    // but each packet's TOA wanders by ±50 ms relative to the sample-rate delta
+    // (representative of GPS PPS clock-correction shifts between publishes).
+    let toa_jitter_pattern: [i64; 16] = [
+        0, 50_000_000, -30_000_000, 40_000_000, -20_000_000, 55_000_000, -45_000_000, 35_000_000,
+        25_000_000, -15_000_000, 60_000_000, -25_000_000, 45_000_000, -35_000_000, 20_000_000,
+        -10_000_000,
+    ];
+    let nominal_period_ns: u64 = 32_000_000;
+    let mut start_time_ns: i64 = 1_000_000_000;
+    let mut start_sample_index: u64 = 0;
+    for (sequence, jitter_ns) in toa_jitter_pattern.iter().copied().enumerate() {
+        let toa = (start_time_ns + jitter_ns).max(1) as u64;
+        let payload = store_forward_payload_with_timing_jitter(toa, start_sample_index, sequence as u64 + 1);
+        let manifest = raw_manifest_for_payload(
+            tmp.path(),
+            &format!("manifest-gps-jitter-{sequence}"),
+            &format!("seg-gps-jitter-{sequence}"),
+            payload,
+        )
+        .await;
+        worker.process_one(manifest, 1).await;
+        start_time_ns += nominal_period_ns as i64;
+        start_sample_index += 512;
+    }
+
+    let events = drain_published_manifests(&mut dsp_result_rx);
+    let render_events: Vec<_> = events
+        .iter()
+        .filter(|manifest| manifest.manifest_type == "classifier_render")
+        .collect();
+    assert!(
+        !render_events.is_empty(),
+        "GPS clock-correction jitter must not suppress classifier_render manifests"
+    );
+    let localization_events: Vec<_> = events
+        .iter()
+        .filter(|manifest| manifest.manifest_type == "localization_result")
+        .collect();
+    assert!(!localization_events.is_empty());
+
+    // Once the buffer holds a localization-window's worth of samples, every
+    // subsequent localization_result must resolve to srp_phat — a None coverage
+    // would have downgraded resolved_algorithm to "localization_cadence_skipped".
+    assert!(
+        localization_events
+            .iter()
+            .skip(2)
+            .all(|manifest| manifest
+                .localization
+                .as_ref()
+                .is_some_and(|payload| payload.resolved_algorithm == "srp_phat")),
+        "GPS-jittered packets should still produce srp_phat localizations"
+    );
+
+    // No render should land in the empty-PCM branch (which would have been
+    // silently dropped by write_render_to_cache).
+    assert!(
+        render_events.iter().all(|manifest| {
+            manifest
+                .classifier_render
+                .as_ref()
+                .map(|payload| payload.sample_count > 0)
+                .unwrap_or(false)
+        }),
+        "GPS-jittered renders must contain non-empty PCM"
+    );
 }
 
 #[tokio::test]
