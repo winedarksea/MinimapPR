@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use crate::{
     birdnet_render::{render_hybrid_pcm16le, render_omni_pcm16le, HybridRenderConfig},
-    dsp_worker::{DspWorkerConfig, SIRITH_MIC_POSITIONS_M},
+    dsp_worker::DspWorkerConfig,
     journal_reader::JournalPayloadHandle,
     manifests::{BirdnetHybridProvenance, ClassifierRenderManifestPayload, DspManifest},
     srp_phat::SrpPhatLocalization,
@@ -36,13 +36,16 @@ pub fn compute_render_bytes(
     config: &DspWorkerConfig,
     sound_speed_mps: f32,
     channels: &[Vec<f32>],
+    mic_positions_m: &[[f32; 3]],
     sample_rate_hz: u32,
     localization: Option<&SrpPhatLocalization>,
     fallback_reason: Option<String>,
 ) -> (Vec<u8>, RenderMeta) {
     let source_channel_count = channels.len();
     let use_hybrid = localization.filter(|sol| {
-        sol.confidence >= config.min_localization_confidence && fallback_reason.is_none()
+        sol.confidence >= config.min_localization_confidence
+            && fallback_reason.is_none()
+            && !mic_positions_m.is_empty()
     });
 
     if let Some(solution) = use_hybrid {
@@ -54,7 +57,7 @@ pub fn compute_render_bytes(
         let bytes = render_hybrid_pcm16le(
             channels,
             solution.steering_direction,
-            &SIRITH_MIC_POSITIONS_M,
+            mic_positions_m,
             sample_rate_hz,
             hybrid_config,
         );

@@ -399,6 +399,85 @@ def test_system_diagnostics_includes_sidecar_health(monkeypatch, tmp_path: Path)
     }
 
 
+def test_system_diagnostics_reports_stream_consumer_state(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    monkeypatch.setenv("MINIMAPPR_DIRECT_INGEST_ENABLED", "false")
+    monkeypatch.setenv("MINIMAPPR_INGEST_BACKEND", "rust")
+    monkeypatch.setenv("MINIMAPPR_INGEST_SIDECAR_ENABLED", "1")
+
+    class _FakeSidecarProcess:
+        def __init__(self) -> None:
+            self.pid = 3579
+            self.returncode = None
+
+        def terminate(self) -> None:
+            self.returncode = 0
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+        async def wait(self) -> int:
+            if self.returncode is None:
+                self.returncode = 0
+            return self.returncode
+
+    class _FakeIngestStreamConsumer:
+        instances: list["_FakeIngestStreamConsumer"] = []
+
+        def __init__(self, *, config, ingest_transport) -> None:
+            self._config = config
+            self._ingest_transport = ingest_transport
+            self._running = False
+            self._last_event_id = "27"
+            self.start_calls = 0
+            self.stop_calls = 0
+            self.__class__.instances.append(self)
+
+        def start(self) -> None:
+            self.start_calls += 1
+            self._running = True
+
+        async def stop(self) -> None:
+            self.stop_calls += 1
+            self._running = False
+
+        @property
+        def is_running(self) -> bool:
+            return self._running
+
+    fake_process = _FakeSidecarProcess()
+
+    async def fake_start_ingest_sidecar(settings):
+        return fake_process
+
+    async def fake_supervise_ingest_sidecar(settings, initial_process, state):
+        return None
+
+    monkeypatch.setattr("minimappr.main._start_ingest_sidecar", fake_start_ingest_sidecar)
+    monkeypatch.setattr("minimappr.main._supervise_ingest_sidecar", fake_supervise_ingest_sidecar)
+    monkeypatch.setattr("minimappr.main.IngestStreamConsumer", _FakeIngestStreamConsumer)
+    monkeypatch.setattr(
+        "minimappr.main._fetch_ingest_sidecar_health",
+        lambda port: {"status": "ok", "backend": {"storage_mode": "memory_only_live_path"}},
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/system/diagnostics")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert _FakeIngestStreamConsumer.instances
+    consumer = _FakeIngestStreamConsumer.instances[0]
+    assert consumer.start_calls >= 1
+    assert payload["sidecar"]["stream_consumer"] == {
+        "configured": True,
+        "present": True,
+        "running": True,
+        "last_event_id": "27",
+        "sidecar_base_url": "http://127.0.0.1:8081",
+    }
+
+
 @pytest.mark.asyncio
 async def test_start_ingest_sidecar_passes_classifier_helper_env(monkeypatch, tmp_path: Path) -> None:
     import minimappr.main as main_module

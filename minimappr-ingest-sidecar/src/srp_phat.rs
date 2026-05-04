@@ -54,9 +54,9 @@ struct PairObservation {
 }
 
 pub fn estimate_tetrahedral_steering(
-    windows: &[Vec<f32>; 4],
+    windows: &[Vec<f32>],
     active_channels: &[usize],
-    mic_positions_m: &[[f32; 3]; 4],
+    mic_positions_m: &[[f32; 3]],
     sample_rate_hz: u32,
     sound_speed_mps: f32,
     config: SrpPhatConfig,
@@ -218,9 +218,9 @@ fn degraded_localization(resolved_algorithm: &str, sound_speed_mps: f32) -> SrpP
 }
 
 fn build_pair_observations(
-    windows: &[Vec<f32>; 4],
+    windows: &[Vec<f32>],
     active_channels: &[usize],
-    mic_positions_m: &[[f32; 3]; 4],
+    mic_positions_m: &[[f32; 3]],
     sample_rate_hz: u32,
     sound_speed_mps: f32,
     localization_band_hz: [f32; 2],
@@ -279,7 +279,7 @@ fn residual_rms(
     position_m: [f32; 3],
     reference_channel: usize,
     measurements: &[ReferenceMeasurement],
-    mic_positions_m: &[[f32; 3]; 4],
+    mic_positions_m: &[[f32; 3]],
     sound_speed_mps: f32,
 ) -> f32 {
     if measurements.is_empty() {
@@ -301,7 +301,7 @@ fn residual_rms(
 
 fn grid_from_bounds(
     active_channels: &[usize],
-    mic_positions_m: &[[f32; 3]; 4],
+    mic_positions_m: &[[f32; 3]],
     search_padding_m: f32,
     grid_resolution_m: f32,
     max_grid_points: usize,
@@ -398,7 +398,7 @@ fn predicted_reference_tau_s(
     (sensor_distance_m - reference_distance_m) / sound_speed_mps.max(1.0)
 }
 
-fn centroid(active_channels: &[usize], mic_positions_m: &[[f32; 3]; 4]) -> [f32; 3] {
+fn centroid(active_channels: &[usize], mic_positions_m: &[[f32; 3]]) -> [f32; 3] {
     let mut mean = [0.0_f32; 3];
     if active_channels.is_empty() {
         return mean;

@@ -57,10 +57,6 @@ class BirdNETClassifier(AudioClassifier):
             longitude=longitude,
             geo_min_confidence=geo_min_confidence,
         )
-        # The protobuf SavedModel backend can hang during model initialization on
-        # macOS/Python 3.12 when BirdNET spins up multiprocessing helpers. Use the
-        # official TF/TFLite backend instead so test and runtime classification stay
-        # on a real BirdNET model without wedging before the first prediction.
         self._model = model_loader.load("acoustic", "2.4", "tf", library="tflite")
         # Tracks the active prediction session so close() can cancel it from
         # another thread during server shutdown without waiting for subprocess I/O.

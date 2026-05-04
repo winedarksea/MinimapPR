@@ -97,6 +97,7 @@ frontend_dir = Path(__file__).parent / "frontend"
 _SIDECAR_READY_TIMEOUT_SECONDS = 5.0
 _SIDECAR_READY_POLL_INTERVAL_SECONDS = 0.1
 _SIDECAR_HEALTHCHECK_TIMEOUT_SECONDS = 0.5
+_INGEST_STREAM_CONSUMER_WATCHDOG_INTERVAL_SECONDS = 1.0
 _INGEST_PATH_PREFIXES = (
     "/api/v1/ingest",
     "/api/v1/fusion/status",
@@ -462,6 +463,85 @@ def _has_live_ingest_runtime(state) -> bool:
     return hasattr(state, "registry") and hasattr(state, "audio_buffer")
 
 
+def _clear_state_attrs(state, *names: str) -> None:
+    for name in names:
+        with contextlib.suppress(AttributeError, KeyError):
+            delattr(state, name)
+
+
+def _ingest_stream_consumer_runtime(state):
+    settings = getattr(state, "settings", None)
+    sidecar_state = getattr(state, "sidecar_state", None)
+    ingest_transport = getattr(state, "ingest_transport", None)
+    if settings is None or ingest_transport is None:
+        return None
+    if getattr(settings, "ingest_backend", "python") != "rust":
+        return None
+    if sidecar_state is None or sidecar_state.status != "running":
+        return None
+    return {
+        "config": StreamConsumerConfig(
+            sidecar_base_url=_ingest_runtime_base_url(settings),
+        ),
+        "ingest_transport": ingest_transport,
+    }
+
+
+def _build_ingest_stream_consumer(state) -> IngestStreamConsumer | None:
+    runtime = _ingest_stream_consumer_runtime(state)
+    if runtime is None:
+        return None
+    return IngestStreamConsumer(
+        config=runtime["config"],
+        ingest_transport=runtime["ingest_transport"],
+    )
+
+
+def _ensure_ingest_stream_consumer_running(state) -> bool:
+    runtime = _ingest_stream_consumer_runtime(state)
+    consumer: IngestStreamConsumer | None = getattr(state, "ingest_stream_consumer", None)
+    if runtime is None:
+        if consumer is not None and not consumer.is_running:
+            _clear_state_attrs(state, "ingest_stream_consumer")
+        return False
+
+    desired_config = runtime["config"]
+    desired_transport = runtime["ingest_transport"]
+    consumer_already_present = consumer is not None
+    if consumer is not None:
+        consumer_config = getattr(consumer, "_config", None)
+        consumer_transport = getattr(consumer, "_ingest_transport", None)
+        if (
+            getattr(consumer_config, "sidecar_base_url", None) != desired_config.sidecar_base_url
+            or consumer_transport is not desired_transport
+        ):
+            if not consumer.is_running:
+                _clear_state_attrs(state, "ingest_stream_consumer")
+            consumer = None
+            consumer_already_present = False
+
+    if consumer is None:
+        consumer = IngestStreamConsumer(
+            config=desired_config,
+            ingest_transport=desired_transport,
+        )
+        state.ingest_stream_consumer = consumer
+    if consumer.is_running:
+        return True
+    logger.warning(
+        "Ingest stream consumer is %s; starting sidecar SSE consumer",
+        "stopped" if consumer_already_present else "not initialized",
+    )
+    consumer.start()
+    return True
+
+
+async def _maintain_ingest_stream_consumer(app: FastAPI) -> None:
+    while True:
+        _ensure_ingest_stream_consumer_running(app.state)
+        await asyncio.sleep(_INGEST_STREAM_CONSUMER_WATCHDOG_INTERVAL_SECONDS)
+
+
 def _sensor_ids_from_node_row(node: dict) -> list[str]:
     offsets = node.get("sensor_offsets_m")
     if not isinstance(offsets, list):
@@ -690,6 +770,7 @@ async def _start_ingest_sidecar(
 async def _api_only_lifespan(app: FastAPI, settings: Settings):
     """Initialize the API/UI process without DSP, classifiers, or live ingest."""
     install_log_ring()
+    _clear_state_attrs(app.state, "ingest_stream_consumer", "ingest_stream_consumer_watchdog_task", "ingest_spool_tasks")
     settings.federation_peers_config_path.parent.mkdir(parents=True, exist_ok=True)
     settings.snippet_dir.mkdir(parents=True, exist_ok=True)
     settings.large_artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -804,6 +885,7 @@ async def _api_only_lifespan(app: FastAPI, settings: Settings):
         with contextlib.suppress(Exception):
             await asyncio.wait_for(federation.stop(), timeout=shutdown_timeout_s)
         await storage.close()
+        _clear_state_attrs(app.state, "ingest_stream_consumer", "ingest_stream_consumer_watchdog_task", "ingest_spool_tasks")
 
 
 @asynccontextmanager
@@ -815,6 +897,7 @@ async def lifespan(app: FastAPI):
         return
 
     install_log_ring()
+    _clear_state_attrs(app.state, "ingest_stream_consumer", "ingest_stream_consumer_watchdog_task", "ingest_spool_tasks")
     settings.federation_peers_config_path.parent.mkdir(parents=True, exist_ok=True)
     settings.snippet_dir.mkdir(parents=True, exist_ok=True)
     settings.large_artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -982,28 +1065,21 @@ async def lifespan(app: FastAPI):
     app.state.capture_manager = capture_manager
     _apply_site_origin_resolution(app.state, resolved_site_origin)
 
-    # In-memory stream consumer: active when sidecar is running and backend is rust.
-    ingest_stream_consumer: IngestStreamConsumer | None = None
-    if sidecar_state.status == "running" and getattr(settings, "ingest_backend", "rust") == "rust":
-        ingest_stream_consumer = IngestStreamConsumer(
-            config=StreamConsumerConfig(
-                sidecar_base_url=_ingest_runtime_base_url(settings),
-            ),
-            ingest_transport=ingest_transport,
-        )
-        app.state.ingest_stream_consumer = ingest_stream_consumer
+    ingest_stream_consumer_enabled = _ensure_ingest_stream_consumer_running(app.state)
 
     cleanup_task: asyncio.Task | None = None
     site_origin_reconcile_task: asyncio.Task | None = None
     ingest_spool_tasks: list[asyncio.Task] = []
+    ingest_stream_consumer_watchdog_task: asyncio.Task | None = None
     try:
         environment_provider.bootstrap(await storage.list_latest_environment_per_node(limit=1024))
         await fusion_node.start()
         await federation.start()
         cleanup_task = asyncio.create_task(_cleanup_loop(app))
         app.state.cleanup_task = cleanup_task
-        if ingest_stream_consumer is not None:
-            ingest_stream_consumer.start()
+        if ingest_stream_consumer_enabled:
+            ingest_stream_consumer_watchdog_task = asyncio.create_task(_maintain_ingest_stream_consumer(app))
+            app.state.ingest_stream_consumer_watchdog_task = ingest_stream_consumer_watchdog_task
         else:
             ingest_spool_tasks = [
                 asyncio.create_task(ingest_spool_consumer.run_forever(worker_name=f"spool-{index + 1}"))
@@ -1050,8 +1126,14 @@ async def lifespan(app: FastAPI):
         if ingest_spool_tasks:
             with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
                 await asyncio.wait_for(asyncio.gather(*ingest_spool_tasks), timeout=shutdown_timeout_s)
+        if ingest_stream_consumer_watchdog_task is not None:
+            ingest_stream_consumer_watchdog_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+                await asyncio.wait_for(ingest_stream_consumer_watchdog_task, timeout=shutdown_timeout_s)
+        ingest_stream_consumer: IngestStreamConsumer | None = getattr(app.state, "ingest_stream_consumer", None)
         if ingest_stream_consumer is not None:
             await ingest_stream_consumer.stop()
+        _clear_state_attrs(app.state, "ingest_stream_consumer", "ingest_stream_consumer_watchdog_task", "ingest_spool_tasks")
 
         try:
             await asyncio.wait_for(federation.stop(), timeout=shutdown_timeout_s)
@@ -2320,6 +2402,21 @@ async def get_system_diagnostics(request: Request) -> dict:
         "last_exit_code": sidecar_state.last_exit_code if sidecar_state is not None else None,
         "failed_spool_items": failed_spool_count,
         "health": sidecar_health,
+        "stream_consumer": {
+            "configured": bool(
+                settings.ingest_backend == "rust"
+                and sidecar_state is not None
+                and sidecar_state.status == "running"
+            ),
+            "present": getattr(state, "ingest_stream_consumer", None) is not None,
+            "running": bool(getattr(getattr(state, "ingest_stream_consumer", None), "is_running", False)),
+            "last_event_id": getattr(getattr(state, "ingest_stream_consumer", None), "_last_event_id", None),
+            "sidecar_base_url": getattr(
+                getattr(getattr(state, "ingest_stream_consumer", None), "_config", None),
+                "sidecar_base_url",
+                None,
+            ),
+        },
     }
     return diagnostics
 

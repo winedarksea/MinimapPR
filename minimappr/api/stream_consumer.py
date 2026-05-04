@@ -44,6 +44,74 @@ class StreamConsumerConfig:
     """Cap for exponential reconnect backoff."""
 
 
+def _enrich_node_payload_from_context(
+    node_payload: dict[str, Any],
+    node_context: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge frame-level fields from node_context into the node payload dict.
+
+    The binary node header carries static fields (position, sensors, capabilities).
+    Frame-level fields like ``time_quality`` live at the top level of
+    ``node_context`` and are not present in the node header.  Injecting them
+    into ``node.metadata`` ensures every ``upsert_node`` call carries a
+    complete picture regardless of which manifest type triggered it.
+    """
+    time_quality = node_context.get("time_quality")
+    if not isinstance(time_quality, str) or not time_quality:
+        return node_payload
+    node_payload = dict(node_payload)
+    metadata: dict[str, Any] = dict(node_payload.get("metadata") or {})
+    metadata["time_quality"] = time_quality
+    node_payload["metadata"] = metadata
+    return node_payload
+
+
+def _coerce_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    return None
+
+
+def _coerce_float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _environment_sample_from_context(
+    node_context: dict[str, Any],
+    *,
+    fallback_timestamp_ns: int,
+) -> EnvironmentSampleIn | None:
+    environment_payload = node_context.get("environment")
+    if not isinstance(environment_payload, dict):
+        return None
+    sample_payload = dict(environment_payload)
+    sample_payload.setdefault("timestamp_ns", fallback_timestamp_ns)
+    try:
+        sample = EnvironmentSampleIn.model_validate(sample_payload)
+    except Exception:  # noqa: BLE001
+        return None
+    return sample if sample.has_any_measurement() else None
+
+
+def _audio_debug_from_context(node_context: dict[str, Any]) -> tuple[int | None, int | None, float | None]:
+    audio_debug_payload = node_context.get("audio_debug")
+    if not isinstance(audio_debug_payload, dict):
+        return (None, None, None)
+    return (
+        _coerce_int(audio_debug_payload.get("sample_rate_hz")),
+        _coerce_int(audio_debug_payload.get("active_sensor_count")),
+        _coerce_float(audio_debug_payload.get("rms")),
+    )
+
+
 class IngestStreamConsumer:
     """Async consumer that receives DSP manifests from the sidecar via SSE.
 
@@ -71,8 +139,10 @@ class IngestStreamConsumer:
 
     def start(self) -> None:
         """Idempotent start — spawns the background SSE listener."""
-        if self._running:
+        if self.is_running:
             return
+        if self._task is not None and self._task.done():
+            self._task = None
         self._running = True
         self._task = asyncio.create_task(
             self._run_loop(),
@@ -249,6 +319,14 @@ class IngestStreamConsumer:
             logger.warning("localization_result missing node payload; skipping")
             return
 
+        # Merge frame-level fields from node_context into node.metadata before
+        # validating.  The binary node header carries static fields; time_quality
+        # lives at the context level and must travel with every heartbeat upsert
+        # so the DB record stays current.  Without this, cadence heartbeats
+        # (every ~250ms) overwrite the metadata with no time_quality, undoing
+        # what the 30s classifier-render path correctly sets.
+        node_payload = _enrich_node_payload_from_context(node_payload, node_context)
+
         try:
             node = NodeSpec.model_validate(node_payload)
         except Exception as exc:  # noqa: BLE001
@@ -260,10 +338,23 @@ class IngestStreamConsumer:
         node_audio_time_ns = node_context.get("toa_ns")
         if not isinstance(node_audio_time_ns, int):
             node_audio_time_ns = int(manifest.get("created_ns") or time.time_ns())
+        sample_rate_hz, active_sensor_count, rms = _audio_debug_from_context(node_context)
         await self._ingest_transport.deliver_node_heartbeat(
             node,
             last_sample_time_ns=node_audio_time_ns,
+            sample_rate_hz=sample_rate_hz,
+            active_sensor_count=active_sensor_count,
+            rms=rms,
         )
+        environment_sample = _environment_sample_from_context(
+            node_context,
+            fallback_timestamp_ns=node_audio_time_ns,
+        )
+        if environment_sample is not None:
+            await self._ingest_transport.deliver_environment_sample(
+                node_id=node.id,
+                sample=environment_sample,
+            )
 
         # If the manifest carries an embedded classifier_render, deliver it as a
         # localized render so Python gets the full audio + classification bundle.

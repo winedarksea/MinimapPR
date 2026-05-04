@@ -272,7 +272,16 @@ class _RecordingIngestTransport:
     async def deliver_localized_render(self, payload: LocalizedClassifierRenderRequest) -> None:
         self.localized_render_payloads.append(payload)
 
-    async def deliver_node_heartbeat(self, node: object) -> None:
+    async def deliver_node_heartbeat(
+        self,
+        node: object,
+        *,
+        last_sample_time_ns: int | None = None,
+        sample_rate_hz: int | None = None,
+        active_sensor_count: int | None = None,
+        rms: float | None = None,
+    ) -> None:
+        _ = (last_sample_time_ns, sample_rate_hz, active_sensor_count, rms)
         self.heartbeat_nodes.append(node)
 
 

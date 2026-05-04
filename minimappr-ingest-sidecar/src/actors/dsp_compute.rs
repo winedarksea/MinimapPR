@@ -1,4 +1,5 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use serde_json::{Map, Value};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -7,7 +8,6 @@ use crate::{
     dsp_worker::{
         consume_manifest_standalone, dispatch_classification_result_standalone,
         render_coverage_json, source_manifest_was_persisted, ComputePayload, PairTdoa,
-        SIRITH_MIC_POSITIONS_M,
     },
     manifests::{DspManifest, LocalizationManifestPayload, PairTdoaDiagnostic},
     srp_phat::{
@@ -34,10 +34,9 @@ pub(crate) struct ComputeMathResult {
 /// Performs SRP-PHAT and PCM rendering synchronously. All I/O is deferred to
 /// `run_io`, which is spawned onto the Tokio runtime after this returns.
 pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
-    let windows: [Vec<f32>; 4] =
-        core::array::from_fn(|ch| payload.channel_states[ch].window.clone());
-
-    let localization_evaluation = if payload.run_srp {
+    let localization_evaluation = if payload.run_srp && payload.channel_states.len() >= 4 {
+        let windows: [Vec<f32>; 4] =
+            core::array::from_fn(|ch| payload.channel_states[ch].window.clone());
         let srp_config = SrpPhatConfig {
             localization_band_hz: payload.config.localization_band_hz,
             grid_resolution_m: payload.config.localization_srp_grid_resolution_m,
@@ -47,16 +46,23 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
         estimate_tetrahedral_steering(
             &windows,
             &payload.active_channels,
-            &SIRITH_MIC_POSITIONS_M,
+            payload.mic_positions_m.as_slice(),
             payload.sr,
             payload.effective_sound_speed_mps,
             srp_config,
         )
     } else {
+        let skipped_reason = if payload.run_srp {
+            // run_srp was true but channel count was insufficient — shouldn't happen
+            // after the ingest_one guard, but kept as a safety net.
+            "insufficient_channels"
+        } else {
+            "localization_cadence_skipped"
+        };
         SrpPhatEvaluation {
             localization: SrpPhatLocalization {
-                attempted_algorithm: "localization_cadence_skipped".to_string(),
-                resolved_algorithm: "localization_cadence_skipped".to_string(),
+                attempted_algorithm: skipped_reason.to_string(),
+                resolved_algorithm: skipped_reason.to_string(),
                 steering_direction: [0.0, 0.0, 0.0],
                 position_m: None,
                 confidence: 0.0,
@@ -101,6 +107,7 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
             &payload.config,
             payload.effective_sound_speed_mps,
             render_channels,
+            payload.mic_positions_m.as_slice(),
             payload.sr,
             Some(&localization),
             fallback_reason.clone(),
@@ -135,7 +142,7 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
 /// No disk writes for memory-path (channel-delivered) manifests.
 pub async fn run_io(result: ComputeMathResult) {
     let ComputeMathResult {
-        payload,
+        mut payload,
         localization,
         pair_diagnostics,
         pcm_bytes,
@@ -143,6 +150,8 @@ pub async fn run_io(result: ComputeMathResult) {
         render_coverage_json,
         localization_coverage_json,
     } = result;
+
+    enrich_node_context_with_runtime_telemetry(&mut payload);
 
     // Build the classifier_render manifest and keep PCM bytes in memory.
     let mut render_result = if let (Some(bytes), Some(meta)) = (pcm_bytes, render_meta) {
@@ -316,6 +325,74 @@ pub async fn run_io(result: ComputeMathResult) {
             }
         }
     }
+}
+
+fn enrich_node_context_with_runtime_telemetry(payload: &mut ComputePayload) {
+    let Some(node_context) = payload.manifest.node_context.as_mut() else {
+        return;
+    };
+    let Some(node_context_map) = node_context.as_object_mut() else {
+        return;
+    };
+
+    let mut audio_debug = Map::new();
+    audio_debug.insert(
+        "sample_rate_hz".to_string(),
+        Value::from(u64::from(payload.sr)),
+    );
+    audio_debug.insert(
+        "active_sensor_count".to_string(),
+        Value::from(payload.active_channels.len() as u64),
+    );
+    if let Some(rms) = max_window_rms(&payload.channel_states) {
+        audio_debug.insert("rms".to_string(), Value::from(rms));
+    }
+    node_context_map.insert("audio_debug".to_string(), Value::Object(audio_debug));
+
+    if payload.reported_temperature_c.is_none() && payload.reported_humidity_fraction.is_none() {
+        return;
+    }
+
+    let mut environment = Map::new();
+    if let Some(temperature_c) = payload.reported_temperature_c {
+        environment.insert("temperature_c".to_string(), Value::from(temperature_c));
+    }
+    if let Some(humidity_fraction) = payload.reported_humidity_fraction {
+        environment.insert(
+            "humidity_fraction".to_string(),
+            Value::from(humidity_fraction),
+        );
+    }
+    if let Some(source) = payload.reported_environment_source.as_ref() {
+        environment.insert("source".to_string(), Value::from(source.clone()));
+    } else {
+        environment.insert(
+            "source".to_string(),
+            Value::from("embedded_audio_frame"),
+        );
+    }
+    node_context_map.insert("environment".to_string(), Value::Object(environment));
+}
+
+fn max_window_rms(channel_states: &[crate::dsp_worker::LocalizationChannelState]) -> Option<f64> {
+    channel_states
+        .iter()
+        .filter_map(|state| rms_for_window(&state.window))
+        .max_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal))
+}
+
+fn rms_for_window(window: &[f32]) -> Option<f64> {
+    if window.is_empty() {
+        return None;
+    }
+    let energy = window
+        .iter()
+        .map(|sample| {
+            let sample64 = f64::from(*sample);
+            sample64 * sample64
+        })
+        .sum::<f64>();
+    Some((energy / window.len() as f64).sqrt())
 }
 
 /// Entry point dispatched onto the Rayon pool from `process_pending`.

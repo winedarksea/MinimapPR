@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
@@ -31,6 +31,7 @@ class LocalizedClassifierRenderRequest:
     localization_gdop: float = float("inf")
     localization_method: str = "rust_dsp_worker"
     source_type: str = "raw_sensor"
+    reporting_modality: Literal["localized", "omni"] = "localized"
     time_quality: TimeQuality = TimeQuality.FREE_RUNNING
     source_observation_ids: list[str] = field(default_factory=list)
     environment: dict[str, Any] = field(default_factory=dict)
@@ -134,12 +135,14 @@ def load_localized_render_manifest_bundle(
             or localization_payload.get("attempted_algorithm")
             or "rust_dsp_worker"
         )
+        reporting_modality: Literal["localized", "omni"] = "localized"
     else:
         if node.position_m is None:
             raise ValueError("Standalone classifier render manifest requires node.position_m")
         localization_position_m = tuple(float(value) for value in node.position_m)
         localization_confidence = 0.0
         localization_method = "rust_classifier_render_fallback"
+        reporting_modality = "omni"
 
     cursor_updates = _resolve_cursor_updates(source_handles_payload, journal_streams_dir)
     return LocalizedRenderManifestBundle(
@@ -153,6 +156,7 @@ def load_localized_render_manifest_bundle(
             localization_confidence=localization_confidence,
             localization_method=localization_method,
             source_type=source_type,
+            reporting_modality=reporting_modality,
             time_quality=time_quality,
             environment=environment,
             render_kind=str(
@@ -265,7 +269,16 @@ def _load_source_context_from_channel_manifest(
         time_quality = TimeQuality(time_quality_str)
     except ValueError:
         time_quality = TimeQuality.FREE_RUNNING
-    return (node, int(toa_ns), source_type, time_quality, {})
+    environment_payload = node_context.get("environment")
+    environment: EnvironmentSampleIn | None = None
+    if isinstance(environment_payload, dict):
+        sample_payload = dict(environment_payload)
+        sample_payload.setdefault("timestamp_ns", int(toa_ns))
+        try:
+            environment = EnvironmentSampleIn.model_validate(sample_payload)
+        except Exception:  # noqa: BLE001
+            environment = None
+    return (node, int(toa_ns), source_type, time_quality, _environment_summary(environment))
 
 
 def _decode_classifier_render_audio(

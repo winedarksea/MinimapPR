@@ -502,7 +502,8 @@ fn low_coverage_channel_drops_out_of_localization_set() {
     let start_time_ns = 1_000_000_000_000_i128;
     let end_time_ns = start_time_ns + (512 * 1_000_000_000_i128 / i128::from(sample_rate_hz));
 
-    let mut buffers = core::array::from_fn(|_| SensorStreamBuffer::new(sample_rate_hz, 1.0));
+    let mut buffers: [SensorStreamBuffer; 4] =
+        core::array::from_fn(|_| SensorStreamBuffer::new(sample_rate_hz, 1.0));
     for channel_index in 0..3 {
         buffers[channel_index]
             .append(start_time_ns, &vec![1.0; 512], Some(0), Some(512))
@@ -544,6 +545,7 @@ fn resolve_buffer_start_time_prefers_packet_toa_over_other_fallbacks() {
         end_sample_index: Some(16_016),
         temperature_c: None,
         humidity_fraction: None,
+        environment_source: None,
     };
     let handle = JournalPayloadHandle {
         journal_epoch: 1,
@@ -575,6 +577,7 @@ fn resolve_buffer_start_time_uses_tor_as_fallback() {
         end_sample_index: Some(32_016),
         temperature_c: None,
         humidity_fraction: None,
+        environment_source: None,
     };
     let handle = JournalPayloadHandle {
         journal_epoch: 1,
@@ -606,6 +609,7 @@ fn resolve_buffer_start_time_uses_now_as_fallback() {
         end_sample_index: Some(32_016),
         temperature_c: None,
         humidity_fraction: None,
+        environment_source: None,
     };
     let handle = JournalPayloadHandle {
         journal_epoch: 1,

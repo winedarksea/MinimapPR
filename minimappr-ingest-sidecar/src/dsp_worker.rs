@@ -50,7 +50,6 @@ pub struct DspWorkerConfig {
     pub spatial_blend_band_hz: [f32; 2],
     pub pre_blend_highpass_hz: f32,
     pub min_localization_confidence: f32,
-    pub birdnet_hybrid_render_enabled: bool,
     pub skip_stale_manifests_for_live_buffer: bool,
     pub consumed_manifest_retention_max_files: usize,
     pub consumed_manifest_prune_interval: u64,
@@ -67,6 +66,9 @@ pub struct DspWorkerConfig {
     /// Maximum trusted node clock skew in seconds before falling back to
     /// receipt-time alignment. Matching Python's _MAX_TRUSTED_NODE_CLOCK_SKEW_NS.
     pub max_trusted_node_clock_skew_seconds: f64,
+    /// Enable hybrid spatial-blend render for BirdNET classification.
+    /// True when runtime_profile == "birdnet_hybrid_production".
+    pub birdnet_hybrid_render_enabled: bool,
 }
 
 impl Default for DspWorkerConfig {
@@ -89,7 +91,6 @@ impl Default for DspWorkerConfig {
             spatial_blend_band_hz: [1000.0, 3400.0],
             pre_blend_highpass_hz: 100.0,
             min_localization_confidence: 0.20,
-            birdnet_hybrid_render_enabled: false,
             skip_stale_manifests_for_live_buffer: false,
             consumed_manifest_retention_max_files: 20_000,
             consumed_manifest_prune_interval: 256,
@@ -102,6 +103,7 @@ impl Default for DspWorkerConfig {
             trigger_cooldown_seconds: 0.8,
             query_persisted_raw_manifests: true,
             max_trusted_node_clock_skew_seconds: 300.0,
+            birdnet_hybrid_render_enabled: false,
         }
     }
 }
@@ -153,25 +155,29 @@ pub struct ClassificationRequest {
 pub(crate) struct ComputePayload {
     pub(crate) manifest: DspManifest,
     pub(crate) stream_key: String,
-    pub(crate) channel_states: [LocalizationChannelState; 4],
+    pub(crate) channel_states: Vec<LocalizationChannelState>,
     pub(crate) active_channels: Vec<usize>,
-    pub(crate) classification_windows: [Vec<f32>; 4],
-    pub(crate) classification_coverage: [Option<AudioCoverageStats>; 4],
+    pub(crate) classification_windows: Vec<Vec<f32>>,
+    pub(crate) classification_coverage: Vec<Option<AudioCoverageStats>>,
+    /// Per-channel mic positions extracted from node_context.sensor_offsets_m.
+    pub(crate) mic_positions_m: Vec<[f32; 3]>,
     pub(crate) source_ids: Vec<String>,
     pub(crate) sr: u32,
     pub(crate) now_ns: u128,
     pub(crate) effective_sound_speed_mps: f32,
+    pub(crate) reported_temperature_c: Option<f32>,
+    pub(crate) reported_humidity_fraction: Option<f32>,
+    pub(crate) reported_environment_source: Option<String>,
+    pub(crate) effective_temperature_c: Option<f32>,
+    pub(crate) effective_humidity_fraction: Option<f32>,
     pub(crate) run_srp: bool,
     pub(crate) run_classifier_render: bool,
-    /// When set, overrides classification_windows for the omni render (single-sensor
-    /// or no-coverage fallback paths that dispatch to Rayon instead of blocking inline).
-    pub(crate) omni_channels_override: Option<Vec<Vec<f32>>>,
-    /// When set, used as the render fallback_reason instead of deriving it from the
-    /// localization algorithm string. Preserves semantic accuracy for fallback paths.
-    pub(crate) omni_fallback_reason: Option<String>,
-    /// When true, run_io skips publishing a localization_result manifest. Used for
-    /// omni-only fallback paths that never had a real localization attempt.
+    /// Suppress the localization_result manifest for this frame (e.g. omni-only single-point node).
     pub(crate) skip_localization_result: bool,
+    /// Pre-computed reason to force omni fallback render (e.g. "single_point_node").
+    pub(crate) omni_fallback_reason: Option<String>,
+    /// Override channels for omni render; if None, classification_windows is used.
+    pub(crate) omni_channels_override: Option<Vec<Vec<f32>>>,
     pub(crate) manifest_store: ManifestStore,
     pub(crate) derived_cache: DerivedCache,
     pub(crate) state: SharedDspState,
@@ -190,10 +196,15 @@ pub struct DspWorker {
     classification_tx: Option<flume::Sender<ClassificationRequest>>,
     raw_manifest_rx: Option<mpsc::Receiver<QueuedRawManifest>>,
     shutdown_requested: Option<Arc<AtomicBool>>,
-    buffers: HashMap<String, [SensorStreamBuffer; 4]>,
+    buffers: HashMap<String, Vec<SensorStreamBuffer>>,
     last_classifier_render_ns_by_stream: HashMap<String, u128>,
     last_localization_ns_by_stream: HashMap<String, u128>,
     last_trigger_ns_by_stream: HashMap<String, u128>,
+    /// Time-only cadence gate used for node liveness heartbeats.
+    /// Unlike `last_localization_ns_by_stream`, this is never blocked by the RMS
+    /// energy gate or trigger cooldown — it fires unconditionally every
+    /// `localization_cadence_ms` so nodes appear alive even during quiet periods.
+    last_heartbeat_ns_by_stream: HashMap<String, u128>,
     consumed_manifests_since_prune: Arc<AtomicU64>,
     deferred_source_manifest_ids: Vec<String>,
     env_cache: Option<EnvironmentCache>,
@@ -230,6 +241,7 @@ impl DspWorker {
             last_classifier_render_ns_by_stream: HashMap::new(),
             last_localization_ns_by_stream: HashMap::new(),
             last_trigger_ns_by_stream: HashMap::new(),
+            last_heartbeat_ns_by_stream: HashMap::new(),
             consumed_manifests_since_prune: Arc::new(AtomicU64::new(0)),
             deferred_source_manifest_ids: Vec::new(),
             env_cache: None,
@@ -492,7 +504,6 @@ impl DspWorker {
         } else {
             (start_time_ns, start_time_ns + render_duration_ns)
         };
-        let audio_end_ns = buffer_end_time_ns.max(0) as u128;
 
         let source_manifest_is_stale = manifest_is_older_than_buffer_horizon(
             &manifest,
@@ -519,51 +530,51 @@ impl DspWorker {
         }
 
         let window_sec = self.config.window_seconds;
-        let classification_window_sec = if self.config.birdnet_hybrid_render_enabled {
-            self.config
-                .classification_window_seconds
-                .max(MIN_BIRDNET_CLASSIFICATION_WINDOW_SECONDS)
-                .max(window_sec)
-        } else {
-            self.config.classification_window_seconds.max(window_sec)
-        };
+        let classification_window_sec = self
+            .config
+            .classification_window_seconds
+            .max(MIN_BIRDNET_CLASSIFICATION_WINDOW_SECONDS)
+            .max(window_sec);
 
-        if decoded.channels.len() != 4 {
-            if !self.config.birdnet_hybrid_render_enabled {
+        let start_sample_index = decoded.start_sample_index;
+        let end_sample_index = decoded.end_sample_index;
+        let channel_count = decoded.channels.len();
+        let effective_temperature_c = decoded.temperature_c.or(env_temp_c);
+        let effective_humidity_fraction = decoded.humidity_fraction.or(env_humidity_fraction);
+        let mic_positions_m = mic_positions_from_node_context(&manifest.node_context);
+
+        if channel_count > 4 {
+            if !self.should_publish_classifier_render(&stream_key, now_ns, pending_backlog_depth) {
                 self.defer_source_manifest_consumption(&manifest);
                 return None;
             }
-            if !self.should_publish_classifier_render(
-                &stream_key,
-                audio_end_ns,
-                pending_backlog_depth,
-            ) {
-                self.defer_source_manifest_consumption(&manifest);
-                return None;
-            }
-            // Dispatch to Rayon so disk/DB I/O doesn't block the ingest loop.
-            let channel_states: [LocalizationChannelState; 4] =
-                core::array::from_fn(|_| LocalizationChannelState {
-                    coverage: None,
-                    window: Vec::new(),
-                });
-            let classification_windows: [Vec<f32>; 4] = core::array::from_fn(|_| Vec::new());
             return Some(ComputePayload {
                 manifest,
                 stream_key,
-                channel_states,
+                channel_states: (0..channel_count)
+                    .map(|_| LocalizationChannelState {
+                        coverage: None,
+                        window: Vec::new(),
+                    })
+                    .collect(),
                 active_channels: Vec::new(),
-                classification_windows,
-                classification_coverage: [None, None, None, None],
-                omni_channels_override: Some(decoded.channels.clone()),
-                omni_fallback_reason: Some("single_sensor_or_non_tetrahedral_array".to_string()),
-                skip_localization_result: true,
+                classification_windows: (0..channel_count).map(|_| Vec::new()).collect(),
+                classification_coverage: (0..channel_count).map(|_| None).collect(),
+                mic_positions_m,
                 source_ids,
                 sr,
                 now_ns,
                 effective_sound_speed_mps,
+                reported_temperature_c: decoded.temperature_c,
+                reported_humidity_fraction: decoded.humidity_fraction,
+                reported_environment_source: decoded.environment_source,
+                effective_temperature_c,
+                effective_humidity_fraction,
                 run_srp: false,
                 run_classifier_render: true,
+                skip_localization_result: true,
+                omni_fallback_reason: Some("single_sensor_or_non_tetrahedral_array".to_string()),
+                omni_channels_override: Some(decoded.channels.clone()),
                 manifest_store: self.manifest_store.clone(),
                 derived_cache: self.derived_cache.clone(),
                 state: self.state.clone(),
@@ -574,14 +585,11 @@ impl DspWorker {
             });
         }
 
-        let start_sample_index = decoded.start_sample_index;
-        let end_sample_index = decoded.end_sample_index;
-
         let (audio_end_ns, end_ns, channel_states) = {
             let buffers = self.buffers.entry(stream_key.clone()).or_insert_with(|| {
-                core::array::from_fn(|_| {
-                    SensorStreamBuffer::new(sr, self.config.max_buffer_seconds)
-                })
+                (0..channel_count)
+                    .map(|_| SensorStreamBuffer::new(sr, self.config.max_buffer_seconds))
+                    .collect()
             });
             let existing_sample_timeline_start_time_ns =
                 if !node_timestamp_is_available && !buffer_uses_receipt_time {
@@ -601,9 +609,10 @@ impl DspWorker {
                 };
 
             for (ch, buf) in buffers.iter_mut().enumerate() {
+                let Some(channel_samples) = decoded.channels.get(ch) else { break; };
                 if let Err(err) = buf.append(
                     buffer_start_time_ns,
-                    &decoded.channels[ch],
+                    channel_samples,
                     start_sample_index,
                     end_sample_index,
                 ) {
@@ -634,83 +643,91 @@ impl DspWorker {
         };
 
         if channel_states.iter().all(|state| state.coverage.is_none()) {
-            debug!(
-                manifest_id = %manifest.manifest_id,
-                "DSP worker: no localization coverage window after buffering; publishing omni fallback render"
-            );
-            if !self.config.birdnet_hybrid_render_enabled {
-                self.defer_source_manifest_consumption(&manifest);
-                return None;
-            }
             let run_classifier_render = self.should_publish_classifier_render(
                 &stream_key,
                 audio_end_ns,
                 pending_backlog_depth,
             );
-            if !run_classifier_render {
-                self.defer_source_manifest_consumption(&manifest);
-                return None;
-            }
-            let (fallback_render_windows, fallback_render_coverage) = {
+            if run_classifier_render {
+                debug!(
+                    manifest_id = %manifest.manifest_id,
+                    "DSP worker: no localization coverage window after buffering; publishing omni fallback render"
+                );
                 let buffers = self
                     .buffers
                     .get(&stream_key)
                     .expect("stream buffers must exist after append");
-                (
-                    latest_channel_windows(buffers, classification_window_sec),
-                    latest_channel_coverage_stats(buffers, classification_window_sec),
-                )
-            };
-            let fallback_render_channels = if fallback_render_windows
-                .iter()
-                .any(|window| !window.is_empty())
-            {
-                fallback_render_windows.to_vec()
-            } else {
-                decoded.channels.clone()
-            };
-            // Dispatch to Rayon so disk/DB I/O doesn't block the ingest loop.
-            // Pass fallback_render_coverage as classification_coverage so run_math
-            // builds an accurate coverage_json for the classifier_render manifest.
-            let active_channels = eligible_coverage_channels(&fallback_render_coverage);
-            return Some(ComputePayload {
-                manifest,
-                stream_key,
-                channel_states,
-                active_channels,
-                classification_windows: core::array::from_fn(|_| Vec::new()),
-                classification_coverage: fallback_render_coverage,
-                omni_channels_override: Some(fallback_render_channels),
-                omni_fallback_reason: Some("localization_coverage_unavailable".to_string()),
-                skip_localization_result: true,
-                source_ids,
-                sr,
-                now_ns,
-                effective_sound_speed_mps,
-                run_srp: false,
-                run_classifier_render: true,
-                manifest_store: self.manifest_store.clone(),
-                derived_cache: self.derived_cache.clone(),
-                state: self.state.clone(),
-                classification_tx: self.classification_tx.clone(),
-                dsp_event_publisher: self.dsp_event_publisher.clone(),
-                config: self.config.clone(),
-                consumed_since_prune: self.consumed_manifests_since_prune.clone(),
-            });
+                let fallback_render_windows =
+                    channel_windows_ending_at(buffers, end_ns, classification_window_sec);
+                let fallback_render_coverage =
+                    channel_coverage_ending_at(buffers, end_ns, classification_window_sec);
+                let fallback_render_channels = if fallback_render_windows
+                    .iter()
+                    .any(|window| !window.is_empty())
+                {
+                    fallback_render_windows.clone()
+                } else {
+                    decoded.channels.clone()
+                };
+                return Some(ComputePayload {
+                    manifest,
+                    stream_key,
+                    channel_states,
+                    active_channels: eligible_coverage_channels(
+                        &fallback_render_coverage,
+                        self.config.min_coverage_ratio,
+                    ),
+                    classification_windows: fallback_render_windows
+                        .iter()
+                        .map(|_| Vec::new())
+                        .collect(),
+                    classification_coverage: fallback_render_coverage,
+                    mic_positions_m,
+                    source_ids,
+                    sr,
+                    now_ns,
+                    effective_sound_speed_mps,
+                    reported_temperature_c: decoded.temperature_c,
+                    reported_humidity_fraction: decoded.humidity_fraction,
+                    reported_environment_source: decoded.environment_source,
+                    effective_temperature_c,
+                    effective_humidity_fraction,
+                    run_srp: false,
+                    run_classifier_render: true,
+                    skip_localization_result: true,
+                    omni_fallback_reason: Some("localization_coverage_unavailable".to_string()),
+                    omni_channels_override: Some(fallback_render_channels),
+                    manifest_store: self.manifest_store.clone(),
+                    derived_cache: self.derived_cache.clone(),
+                    state: self.state.clone(),
+                    classification_tx: self.classification_tx.clone(),
+                    dsp_event_publisher: self.dsp_event_publisher.clone(),
+                    config: self.config.clone(),
+                    consumed_since_prune: self.consumed_manifests_since_prune.clone(),
+                });
+            }
         }
 
         let active_channels =
             eligible_localization_channels(&channel_states, self.config.min_coverage_ratio);
-        let windows: [Vec<f32>; 4] = core::array::from_fn(|ch| channel_states[ch].window.clone());
-        let run_srp = self.should_run_localization(&stream_key, audio_end_ns, &windows);
-        let run_classifier_render = self.config.birdnet_hybrid_render_enabled
-            && self.should_publish_classifier_render(
-                &stream_key,
-                audio_end_ns,
-                pending_backlog_depth,
-            );
+        let windows: Vec<Vec<f32>> = channel_states.iter().map(|s| s.window.clone()).collect();
+        // Evaluate the localization cadence for all nodes so single-point nodes still
+        // emit localization_result manifests at the cadence interval.  Python's
+        // _handle_localization_result calls deliver_node_heartbeat on each one, so
+        // gating heartbeats on run_classifier_render (~30 s) was causing single-point
+        // nodes to appear degraded between BirdNET windows.
+        let on_localization_cadence =
+            self.should_run_localization(&stream_key, audio_end_ns, &windows);
+        // SRP-PHAT requires at least 4 channels (tetrahedral array).
+        let run_srp = channel_count == 4 && on_localization_cadence;
+        // Heartbeat fires on the same interval as localization but bypasses the RMS
+        // energy gate so nodes remain live during quiet periods.
+        let on_heartbeat_cadence =
+            on_localization_cadence || self.should_emit_heartbeat(&stream_key, audio_end_ns);
+        let run_classifier_render =
+            self.should_publish_classifier_render(&stream_key, audio_end_ns, pending_backlog_depth);
 
-        if !run_srp && !run_classifier_render {
+        if !on_heartbeat_cadence && !run_classifier_render {
             self.defer_source_manifest_consumption(&manifest);
             return None;
         }
@@ -726,8 +743,8 @@ impl DspWorker {
             )
         } else {
             (
-                core::array::from_fn(|_| Vec::new()),
-                [None, None, None, None],
+                channel_states.iter().map(|_| Vec::new()).collect(),
+                channel_states.iter().map(|_| None).collect(),
             )
         };
 
@@ -738,15 +755,21 @@ impl DspWorker {
             active_channels,
             classification_windows,
             classification_coverage,
+            mic_positions_m,
             source_ids,
             sr,
             now_ns,
             effective_sound_speed_mps,
+            reported_temperature_c: decoded.temperature_c,
+            reported_humidity_fraction: decoded.humidity_fraction,
+            reported_environment_source: decoded.environment_source,
+            effective_temperature_c,
+            effective_humidity_fraction,
             run_srp,
             run_classifier_render,
-            omni_channels_override: None,
-            omni_fallback_reason: None,
             skip_localization_result: false,
+            omni_fallback_reason: (channel_count < 4).then(|| "single_point_node".to_string()),
+            omni_channels_override: None,
             manifest_store: self.manifest_store.clone(),
             derived_cache: self.derived_cache.clone(),
             state: self.state.clone(),
@@ -861,7 +884,7 @@ impl DspWorker {
         &mut self,
         stream_key: &str,
         audio_ns: u128,
-        windows: &[Vec<f32>; 4],
+        windows: &[Vec<f32>],
     ) -> bool {
         if !self.should_trigger(stream_key, audio_ns, windows) {
             return false;
@@ -887,7 +910,7 @@ impl DspWorker {
         &mut self,
         stream_key: &str,
         audio_ns: u128,
-        windows: &[Vec<f32>; 4],
+        windows: &[Vec<f32>],
     ) -> bool {
         if self.config.localization_rms_gate > 0.0 {
             let max_rms = windows
@@ -912,6 +935,23 @@ impl DspWorker {
             Some(last_ns) if audio_ns.saturating_sub(last_ns) < cooldown_ns => false,
             _ => {
                 self.last_trigger_ns_by_stream
+                    .insert(stream_key.to_string(), audio_ns);
+                true
+            }
+        }
+    }
+
+    /// Time-only cadence check for node liveness heartbeats.
+    /// Never blocked by the RMS energy gate or trigger cooldown.
+    fn should_emit_heartbeat(&mut self, stream_key: &str, audio_ns: u128) -> bool {
+        let cadence_ns = (self.config.localization_cadence_ms as u128) * 1_000_000;
+        if cadence_ns == 0 {
+            return true;
+        }
+        match self.last_heartbeat_ns_by_stream.get(stream_key).copied() {
+            Some(last_ns) if audio_ns.saturating_sub(last_ns) < cadence_ns => false,
+            _ => {
+                self.last_heartbeat_ns_by_stream
                     .insert(stream_key.to_string(), audio_ns);
                 true
             }
@@ -1057,7 +1097,7 @@ pub(crate) fn source_manifest_was_persisted(manifest: &DspManifest) -> bool {
 }
 
 pub(crate) fn render_coverage_json(
-    channel_coverage: &[Option<AudioCoverageStats>; 4],
+    channel_coverage: &[Option<AudioCoverageStats>],
     active_channels: &[usize],
     min_coverage_ratio: f64,
     window_type: &str,
@@ -1077,79 +1117,60 @@ pub(crate) fn render_coverage_json(
 
 #[allow(dead_code)]
 fn localization_channel_states(
-    buffers: &[SensorStreamBuffer; 4],
+    buffers: &[SensorStreamBuffer],
     end_ns: i128,
     window_seconds: f64,
-) -> [LocalizationChannelState; 4] {
-    core::array::from_fn(|channel_index| LocalizationChannelState {
-        coverage: buffers[channel_index].coverage_ending_at(end_ns, window_seconds),
-        window: buffers[channel_index]
-            .window_ending_at(end_ns, window_seconds)
-            .unwrap_or_default(),
-    })
+) -> Vec<LocalizationChannelState> {
+    buffers
+        .iter()
+        .map(|buf| LocalizationChannelState {
+            coverage: buf.coverage_ending_at(end_ns, window_seconds),
+            window: buf.window_ending_at(end_ns, window_seconds).unwrap_or_default(),
+        })
+        .collect()
 }
 
 /// Build localization channel states using centered windows (matching Python's
 /// `get_window(center_time_ns, window_seconds)`). TDOA is computed relative to
 /// the window center, so centering on the frame midpoint gives symmetric coverage.
 fn localization_channel_states_centered(
-    buffers: &[SensorStreamBuffer; 4],
+    buffers: &[SensorStreamBuffer],
     center_time_ns: i128,
     window_seconds: f64,
-) -> [LocalizationChannelState; 4] {
-    core::array::from_fn(|channel_index| LocalizationChannelState {
-        coverage: buffers[channel_index].coverage_centered_at(center_time_ns, window_seconds),
-        window: buffers[channel_index]
-            .window_centered_at(center_time_ns, window_seconds)
-            .unwrap_or_default(),
-    })
+) -> Vec<LocalizationChannelState> {
+    buffers
+        .iter()
+        .map(|buf| LocalizationChannelState {
+            coverage: buf.coverage_centered_at(center_time_ns, window_seconds),
+            window: buf.window_centered_at(center_time_ns, window_seconds).unwrap_or_default(),
+        })
+        .collect()
 }
 
 fn channel_windows_ending_at(
-    buffers: &[SensorStreamBuffer; 4],
+    buffers: &[SensorStreamBuffer],
     end_ns: i128,
     window_seconds: f64,
-) -> [Vec<f32>; 4] {
-    core::array::from_fn(|channel_index| {
-        buffers[channel_index]
-            .window_ending_at(end_ns, window_seconds)
-            .unwrap_or_default()
-    })
+) -> Vec<Vec<f32>> {
+    buffers
+        .iter()
+        .map(|buf| buf.window_ending_at(end_ns, window_seconds).unwrap_or_default())
+        .collect()
 }
 
 fn channel_coverage_ending_at(
-    buffers: &[SensorStreamBuffer; 4],
+    buffers: &[SensorStreamBuffer],
     end_ns: i128,
     window_seconds: f64,
-) -> [Option<AudioCoverageStats>; 4] {
-    core::array::from_fn(|channel_index| {
-        buffers[channel_index].coverage_ending_at(end_ns, window_seconds)
-    })
-}
-
-fn latest_channel_windows(buffers: &[SensorStreamBuffer; 4], window_seconds: f64) -> [Vec<f32>; 4] {
-    core::array::from_fn(|channel_index| buffers[channel_index].latest_window(window_seconds))
-}
-
-fn latest_channel_coverage_stats(
-    buffers: &[SensorStreamBuffer; 4],
-    window_seconds: f64,
-) -> [Option<AudioCoverageStats>; 4] {
-    core::array::from_fn(|channel_index| {
-        buffers[channel_index].latest_coverage_stats(window_seconds)
-    })
-}
-
-fn eligible_coverage_channels(channel_coverage: &[Option<AudioCoverageStats>; 4]) -> Vec<usize> {
-    channel_coverage
+) -> Vec<Option<AudioCoverageStats>> {
+    buffers
         .iter()
-        .enumerate()
-        .filter_map(|(channel_index, coverage)| coverage.as_ref().map(|_| channel_index))
+        .map(|buf| buf.coverage_ending_at(end_ns, window_seconds))
         .collect()
 }
 
 fn eligible_localization_channels(
-    channel_states: &[LocalizationChannelState; 4],
+    channel_states: &[LocalizationChannelState],
     min_coverage_ratio: f64,
 ) -> Vec<usize> {
     channel_states
@@ -1161,6 +1182,47 @@ fn eligible_localization_channels(
                 .then_some(channel_index)
         })
         .collect()
+}
+
+fn eligible_coverage_channels(
+    channel_coverage: &[Option<AudioCoverageStats>],
+    min_coverage_ratio: f64,
+) -> Vec<usize> {
+    channel_coverage
+        .iter()
+        .enumerate()
+        .filter_map(|(channel_index, coverage)| {
+            let coverage = coverage.as_ref()?;
+            (coverage.coverage_ratio >= min_coverage_ratio).then_some(channel_index)
+        })
+        .collect()
+}
+
+/// Extract per-channel mic positions from node_context.node.sensor_offsets_m.
+/// Falls back to the hardcoded Sirith tetrahedral positions if absent.
+fn mic_positions_from_node_context(node_context: &Option<serde_json::Value>) -> Vec<[f32; 3]> {
+    let positions = node_context
+        .as_ref()
+        .and_then(|ctx| ctx.get("node"))
+        .and_then(|node| node.get("sensor_offsets_m"))
+        .and_then(|v| v.as_array())
+        .and_then(|arr| {
+            arr.iter()
+                .map(|v| {
+                    let arr = v.as_array()?;
+                    if arr.len() < 3 {
+                        return None;
+                    }
+                    Some([
+                        arr[0].as_f64()? as f32,
+                        arr[1].as_f64()? as f32,
+                        arr[2].as_f64()? as f32,
+                    ])
+                })
+                .collect::<Option<Vec<[f32; 3]>>>()
+        })
+        .filter(|v| !v.is_empty());
+    positions.unwrap_or_else(|| SIRITH_MIC_POSITIONS_M.to_vec())
 }
 
 fn resolve_effective_sound_speed_mps(

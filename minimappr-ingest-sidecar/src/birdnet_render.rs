@@ -31,7 +31,7 @@ pub fn render_omni_pcm16le(channels: &[Vec<f32>]) -> Vec<u8> {
 pub fn render_hybrid_pcm16le(
     channels: &[Vec<f32>],
     steering_direction: [f32; 3],
-    mic_positions_m: &[[f32; 3]; 4],
+    mic_positions_m: &[[f32; 3]],
     sample_rate_hz: u32,
     config: HybridRenderConfig,
 ) -> Vec<u8> {
@@ -68,25 +68,28 @@ fn omni_mix(channels: &[Vec<f32>]) -> Vec<f32> {
 fn delay_and_sum(
     channels: &[Vec<f32>],
     steering_direction: [f32; 3],
-    mic_positions_m: &[[f32; 3]; 4],
+    mic_positions_m: &[[f32; 3]],
     sample_rate_hz: u32,
     config: HybridRenderConfig,
 ) -> Vec<f32> {
-    let frame_count = channels.iter().take(4).map(Vec::len).min().unwrap_or(0);
-    if frame_count == 0 {
+    let n = channels.len().min(mic_positions_m.len());
+    let frame_count = channels[..n].iter().map(Vec::len).min().unwrap_or(0);
+    if frame_count == 0 || n == 0 {
         return Vec::new();
     }
-    let arrival_offsets_s = mic_positions_m
-        .map(|position| -dot(position, steering_direction) / config.sound_speed_mps.max(1.0));
-    let earliest = arrival_offsets_s
+    let arrival_offsets_s: Vec<f32> = mic_positions_m[..n]
         .iter()
-        .copied()
-        .fold(f32::INFINITY, f32::min);
-    let delay_samples =
-        arrival_offsets_s.map(|offset| ((offset - earliest) * sample_rate_hz as f32).max(0.0));
+        .map(|position| -dot(*position, steering_direction) / config.sound_speed_mps.max(1.0))
+        .collect();
+    let earliest = arrival_offsets_s.iter().copied().fold(f32::INFINITY, f32::min);
+    let delay_samples: Vec<f32> = arrival_offsets_s
+        .iter()
+        .map(|offset| ((offset - earliest) * sample_rate_hz as f32).max(0.0))
+        .collect();
 
+    let scale = 1.0 / n as f32;
     let mut rendered = vec![0.0_f32; frame_count];
-    for channel_index in 0..4 {
+    for channel_index in 0..n {
         for (sample_index, out) in rendered.iter_mut().enumerate() {
             *out += sample_at_fractional(
                 &channels[channel_index],
@@ -95,7 +98,7 @@ fn delay_and_sum(
         }
     }
     for sample in &mut rendered {
-        *sample *= 0.25;
+        *sample *= scale;
     }
     rendered
 }

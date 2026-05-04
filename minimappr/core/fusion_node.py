@@ -450,7 +450,8 @@ class FusionNode:
         )
         capability_tier = (
             "full_3d"
-            if len(selected_sensor_ids) >= self.settings.min_sensors_for_3d
+            if payload.reporting_modality == "localized"
+            and len(selected_sensor_ids) >= self.settings.min_sensors_for_3d
             else "classification_only"
         )
         candidate = EventCandidate(
@@ -518,7 +519,7 @@ class FusionNode:
         detection_product = await self._assemble_reporting_branch(
             product=localized_product,
             classified=classified,
-            reporting_modality="localized",
+            reporting_modality=payload.reporting_modality,
             localization_position_m=payload.localization_position_m,
             localization_confidence=payload.localization_confidence,
             localization_gdop=payload.localization_gdop,

@@ -1433,3 +1433,74 @@ async def test_rust_render_production_classification_is_coalesced(tmp_path: Path
     assert nodes[0]["id"] == node.id
 
     await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_fusion_ingests_rust_classifier_render_fallback_as_omni(tmp_path: Path) -> None:
+    settings = Settings(
+        db_path=tmp_path / "fusion_rust_render_fallback.db",
+        snippet_dir=tmp_path / "snippets",
+        snippet_retention_seconds=0,
+        fusion_worker_count=1,
+        fusion_event_queue_size=8,
+    )
+    settings.db_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.snippet_dir.mkdir(parents=True, exist_ok=True)
+
+    storage = Storage(settings.db_path)
+    await storage.initialize()
+
+    fusion = FusionNode(
+        settings=settings,
+        registry=NodeRegistry(),
+        buffer=MultiSensorBuffer(max_duration_seconds=settings.max_sensor_buffer_seconds),
+        localizer=LocalizationEngine(max_tau_s=0.03),
+        classifier=HeuristicClassifier(),
+        tracker=TrackManager(settings),
+        storage=storage,
+        live_callback=lambda payload: asyncio.sleep(0, result=None),
+        coordinate_frame=LocalCoordinateFrame(origin=GeoPoint(lat=37.0, lon=-122.0, alt_m=0.0), mode="flat"),
+        zone_matcher=ZoneMatcher(storage=storage),
+    )
+    await fusion.start()
+
+    node = NodeSpec(
+        id="sirith-rust-point-fallback",
+        node_type=NodeType.POINT,
+        position_m=(3.0, 1.0, 2.0),
+        sensor_offsets_m=[(0.0, 0.0, 0.0)],
+        capabilities=["audio"],
+        metadata={},
+    )
+    audio = np.random.default_rng(903).normal(0.0, 0.3, size=16_000).astype(np.float32)
+
+    await fusion.ingest_localized_render(
+        LocalizedClassifierRenderRequest(
+            manifest_id="manifest-rust-point-fallback-1",
+            node=node,
+            event_time_ns=1_739_950_000_000_000_100,
+            sample_rate_hz=16_000,
+            decoded_audio=audio,
+            localization_position_m=node.position_m,
+            localization_confidence=0.0,
+            localization_gdop=float("inf"),
+            localization_method="rust_classifier_render_fallback",
+            source_type="raw_sensor",
+            reporting_modality="omni",
+            fallback_reason="single_point_node",
+            render_kind="birdnet_omni_fallback",
+            environment={"temperature_c": 18.0, "humidity_fraction": 0.4},
+        )
+    )
+
+    detections = await storage.list_detections(limit=10)
+    assert len(detections) == 1
+    detection = detections[0]
+    assert detection["source_node_id"] == node.id
+    assert detection["reporting_modality"] == "omni"
+    assert detection["feature_summary"]["localization_method"] == "rust_classifier_render_fallback"
+    assert detection["feature_summary"]["rust_fallback_reason"] == "single_point_node"
+    assert tuple(detection["position_m"]) == pytest.approx(node.position_m)
+
+    await fusion.stop()
+    await storage.close()

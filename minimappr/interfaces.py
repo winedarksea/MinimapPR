@@ -415,6 +415,9 @@ class IngestTransport(Protocol):
         node: NodeSpec,
         *,
         last_sample_time_ns: int | None = None,
+        sample_rate_hz: int | None = None,
+        active_sensor_count: int | None = None,
+        rms: float | None = None,
     ) -> None:
         ...
 
