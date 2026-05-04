@@ -80,3 +80,20 @@ async def test_stream_consumer_replay_gap_does_not_advance_cursor() -> None:
     assert transport.environment_samples == []
     assert transport.localized_render_deliveries == []
     assert transport.node_heartbeats == []
+
+
+def test_stream_consumer_builds_valid_httpx_timeout() -> None:
+    consumer = IngestStreamConsumer(
+        config=StreamConsumerConfig(
+            sidecar_base_url="http://127.0.0.1:8081",
+            read_timeout_seconds=30.0,
+        ),
+        ingest_transport=_RecordingIngestTransport(),
+    )
+
+    timeout = consumer._client_timeout()
+
+    assert timeout.connect == pytest.approx(10.0)
+    assert timeout.read == pytest.approx(30.0)
+    assert timeout.write == pytest.approx(10.0)
+    assert timeout.pool == pytest.approx(5.0)

@@ -127,11 +127,7 @@ class IngestStreamConsumer:
     async def _connect_and_consume(self) -> None:
         """Open SSE connection and process events until disconnect."""
         url = f"{self._config.sidecar_base_url.rstrip('/')}/api/v1/dsp/stream"
-        timeout = httpx.Timeout(
-            connect=10.0,
-            read=self._config.read_timeout_seconds,
-            pool=5.0,
-        )
+        timeout = self._client_timeout()
         async with httpx.AsyncClient(timeout=timeout) as client:
             async with client.stream("GET", url, headers=self._stream_request_headers()) as response:
                 response.raise_for_status()
@@ -176,6 +172,14 @@ class IngestStreamConsumer:
         if self._last_event_id:
             headers["Last-Event-ID"] = self._last_event_id
         return headers
+
+    def _client_timeout(self) -> httpx.Timeout:
+        return httpx.Timeout(
+            connect=10.0,
+            read=self._config.read_timeout_seconds,
+            write=10.0,
+            pool=5.0,
+        )
 
     async def _dispatch_sse_event(
         self,
