@@ -448,7 +448,12 @@ fn conceal_missing_spans_in_window(samples: &mut [f32], coverage: &[bool], sampl
         match (active_gap_start, covered) {
             (None, false) => active_gap_start = Some(sample_index),
             (Some(gap_start), true) => {
-                conceal_gap_in_samples(samples, gap_start, sample_index - gap_start, sample_rate_hz);
+                conceal_gap_in_samples(
+                    samples,
+                    gap_start,
+                    sample_index - gap_start,
+                    sample_rate_hz,
+                );
                 active_gap_start = None;
             }
             _ => {}
@@ -497,13 +502,7 @@ fn conceal_gap_in_samples(
     samples[gap_start_offset..gap_end_offset].copy_from_slice(&concealed_gap);
 }
 
-fn synthesize_catmull_rom_gap(
-    p0: f32,
-    p1: f32,
-    p2: f32,
-    p3: f32,
-    gap_len: usize,
-) -> Vec<f32> {
+fn synthesize_catmull_rom_gap(p0: f32, p1: f32, p2: f32, p3: f32, gap_len: usize) -> Vec<f32> {
     let lower_bound = p0.min(p1).min(p2).min(p3);
     let upper_bound = p0.max(p1).max(p2).max(p3);
     (0..gap_len)
@@ -757,11 +756,23 @@ mod tests {
         assert_eq!(gap.last().copied(), Some(0.25_f32));
         assert!(gap.iter().any(|sample| sample.abs() < 1.0e-6));
         assert_eq!(
-            buffer.samples.iter().skip(8).take(64).copied().collect::<Vec<_>>(),
+            buffer
+                .samples
+                .iter()
+                .skip(8)
+                .take(64)
+                .copied()
+                .collect::<Vec<_>>(),
             vec![0.0_f32; 64]
         );
         assert_eq!(
-            buffer.coverage.iter().skip(8).take(64).filter(|covered| !**covered).count(),
+            buffer
+                .coverage
+                .iter()
+                .skip(8)
+                .take(64)
+                .filter(|covered| !**covered)
+                .count(),
             64
         );
     }
@@ -790,11 +801,9 @@ mod tests {
             .unwrap();
         assert_eq!(&concealed_window[..4], &[1.0, 1.0, 1.0, 1.0]);
         assert_eq!(&concealed_window[8..], &[2.0, 2.0, 2.0, 2.0]);
-        assert!(
-            concealed_window[4..8]
-                .iter()
-                .all(|sample| *sample > 1.0 && *sample < 2.0)
-        );
+        assert!(concealed_window[4..8]
+            .iter()
+            .all(|sample| *sample > 1.0 && *sample < 2.0));
         assert_eq!(
             buffer.samples.iter().copied().collect::<Vec<_>>(),
             vec![1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 2.0, 2.0, 2.0, 2.0]

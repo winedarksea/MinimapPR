@@ -1,10 +1,8 @@
 use tracing::warn;
 
 use crate::{
-    classifier_helper::ManifestClassificationAnnotator,
-    dsp_events::DspEventPublisher,
-    dsp_worker::ClassificationRequest,
-    manifests::DspManifest,
+    classifier_helper::ManifestClassificationAnnotator, dsp_events::DspEventPublisher,
+    dsp_worker::ClassificationRequest, manifests::DspManifest,
 };
 
 /// Dedicated actor that owns the BirdNET subprocess bridge and processes

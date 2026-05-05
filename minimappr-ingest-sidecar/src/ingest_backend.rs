@@ -647,8 +647,8 @@ impl SegmentJournalBackend {
         if let Some(queue_permit) = preflight_queue_permit.as_mut() {
             queue_permit.try_resize(body_bytes.len())?;
         }
-        let (body_bytes, capture_envelope) = parse_capture_envelope_for_enqueue(endpoint, body_bytes)
-            .await?;
+        let (body_bytes, capture_envelope) =
+            parse_capture_envelope_for_enqueue(endpoint, body_bytes).await?;
 
         self.enqueue_channel_only(
             endpoint,
@@ -793,7 +793,8 @@ impl SegmentJournalBackend {
         }
         let queue_permit = if let Some(queue_permit) = preflight_queue_permit {
             Some(queue_permit)
-        } else if let Some(queue_backpressure) = &self.runtime_config.raw_manifest_queue_backpressure
+        } else if let Some(queue_backpressure) =
+            &self.runtime_config.raw_manifest_queue_backpressure
         {
             Some(queue_backpressure.try_reserve(raw_bytes.len())?)
         } else {
@@ -1273,7 +1274,10 @@ mod tests {
             .unwrap();
 
         let mut headers = HeaderMap::new();
-        headers.insert(header::CONTENT_LENGTH, header::HeaderValue::from_static("1"));
+        headers.insert(
+            header::CONTENT_LENGTH,
+            header::HeaderValue::from_static("1"),
+        );
 
         let err = backend
             .enqueue(
@@ -1382,7 +1386,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(backend.health().await.unwrap().storage_mode, "memory_only_live_path");
+        assert_eq!(
+            backend.health().await.unwrap().storage_mode,
+            "memory_only_live_path"
+        );
         assert!(!store_dir.join("journal").exists());
     }
 

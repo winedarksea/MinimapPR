@@ -26,6 +26,7 @@ import pytest
 
 from minimappr.core.ambi_atob import (
     SIRITH_MIC_POSITIONS_M,
+    SPEED_OF_SOUND_MPS,
     atob_foa,
     centroid_corrected_positions,
     encode_mono_to_bformat,
@@ -76,6 +77,28 @@ def _synthetic_4ch(duration_s: float = 1.0, sr: int = SAMPLE_RATE) -> np.ndarray
     return channels
 
 
+def _far_field_noise_4ch(
+    direction_xyz: tuple[float, float, float],
+    *,
+    duration_s: float = 0.35,
+    sr: int = SAMPLE_RATE,
+) -> np.ndarray:
+    """Simulate a broadband far-field plane wave at the Sirith capsules."""
+    n = int(sr * duration_s)
+    rng = np.random.default_rng(42)
+    source = rng.normal(0.0, 0.2, n).astype(np.float32)
+    direction = np.asarray(direction_xyz, dtype=np.float64)
+    direction /= np.linalg.norm(direction)
+    centered_positions, _ = centroid_corrected_positions(SIRITH_MIC_POSITIONS_M)
+    sample_axis = np.arange(n, dtype=np.float64)
+    channels = []
+    for position_m in centered_positions:
+        delay_s = -float(np.dot(position_m, direction)) / SPEED_OF_SOUND_MPS
+        shifted_axis = sample_axis - delay_s * sr
+        channels.append(np.interp(shifted_axis, sample_axis, source, left=0.0, right=0.0))
+    return np.asarray(channels, dtype=np.float32)
+
+
 # ── ambi_atob tests ───────────────────────────────────────────────────────────
 
 class TestAmbiAtob:
@@ -121,6 +144,20 @@ class TestAmbiAtob:
         bformat = atob_foa(channels, SAMPLE_RATE)
         assert bformat.min() >= -1.0
         assert bformat.max() <= 1.0
+
+    @pytest.mark.parametrize(
+        ("direction_xyz", "dominant_channel"),
+        [((1.0, 0.0, 0.0), 1), ((0.0, 1.0, 0.0), 2), ((0.0, 0.0, 1.0), 3)],
+    )
+    def test_atob_far_field_directional_component_dominates(
+        self,
+        direction_xyz: tuple[float, float, float],
+        dominant_channel: int,
+    ):
+        channels = _far_field_noise_4ch(direction_xyz)
+        bformat = atob_foa(channels, SAMPLE_RATE)
+        xyz_rms = np.sqrt(np.mean(bformat[1:4] ** 2, axis=1))
+        assert int(np.argmax(xyz_rms)) + 1 == dominant_channel
 
     def test_encode_mono_to_bformat_shape(self):
         mono = _sine(440.0, 0.5)

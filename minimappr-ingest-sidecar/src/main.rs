@@ -23,7 +23,10 @@ mod storage_class;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use actors::environment::EnvironmentCache;
 use axum::{
@@ -42,13 +45,16 @@ use env_payload::{EnvIngestPayload, EnvIngestResponse};
 use ingest_backend::{
     BodyTooLargeError, ClientDisconnectError, IngestBackend, IngestStorageMode,
     InvalidIngestEnvelopeError, JournalCapacityExceededError, JournalRuntimeConfig,
-    RawManifestChannelFullError, RawManifestQueueBackpressure,
-    RawManifestQueueBytesExceededError,
+    RawManifestChannelFullError, RawManifestQueueBackpressure, RawManifestQueueBytesExceededError,
 };
-use leases::PinLeaseRequest;
+use journal_reader::JournalPayloadHandle;
+use leases::{PinKind, PinLeaseRequest, PinTargetKind};
 use render_mvdr::{render_mvdr, MvdrRenderRequest, TrajectoryWaypoint};
 use serde::{Deserialize, Serialize};
-use tokio::{process::Command, sync::{mpsc, RwLock}};
+use tokio::{
+    process::Command,
+    sync::{mpsc, RwLock},
+};
 use tokio_stream::StreamExt;
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
@@ -509,6 +515,14 @@ fn app(state: AppState) -> Router {
             "/api/v1/journal/pins/:lease_id",
             axum::routing::delete(release_pin_lease),
         )
+        .route(
+            "/api/v1/capture/range-lease",
+            post(create_capture_range_lease),
+        )
+        .route(
+            "/api/v1/capture/range-lease/:lease_id",
+            axum::routing::delete(release_pin_lease),
+        )
         .route("/api/v1/dsp/status", get(dsp_status))
         .route("/api/v1/dsp/results", get(dsp_results))
         .route("/api/v1/dsp/stream", get(dsp_stream))
@@ -748,6 +762,57 @@ async fn create_pin_lease(
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct CaptureRangeLeaseRequest {
+    owner: String,
+    stream_key: String,
+    start_ns: u64,
+    requested_end_ns: u64,
+}
+
+async fn create_capture_range_lease(
+    State(state): State<AppState>,
+    Json(request): Json<CaptureRangeLeaseRequest>,
+) -> Response {
+    if request.requested_end_ns <= request.start_ns {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                accepted: false,
+                queued: false,
+                detail: "requested_end_ns must be greater than start_ns".to_string(),
+            }),
+        )
+            .into_response();
+    }
+    let ttl_seconds = ((request.requested_end_ns - request.start_ns) / 1_000_000_000).max(1);
+    let pin_request = PinLeaseRequest {
+        owner: request.owner,
+        pin_kind: PinKind::Hard,
+        target_kind: PinTargetKind::RawJournal,
+        lease_id: None,
+        ttl_seconds,
+        handle: JournalPayloadHandle {
+            journal_epoch: 0,
+            segment_id: format!(
+                "capture-range-{}-{}-{}",
+                request.stream_key, request.start_ns, request.requested_end_ns
+            ),
+            stream_key: request.stream_key,
+            payload_offset_bytes: 0,
+            payload_length_bytes: 0,
+            toa_ns: Some(request.start_ns),
+            tor_ns: None,
+            sample_index_start: None,
+            sample_count: None,
+            integrity_hash: String::new(),
+            segment_path: PathBuf::new(),
+        },
+        promotion_id: None,
+    };
+    create_pin_lease(State(state), Json(pin_request)).await
+}
+
 async fn release_pin_lease(
     State(state): State<AppState>,
     axum::extract::Path(lease_id): axum::extract::Path<String>,
@@ -833,7 +898,9 @@ async fn dsp_results(
 async fn dsp_stream(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Sse<impl tokio_stream::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>> {
+) -> Sse<
+    impl tokio_stream::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+> {
     let last_event_id = headers
         .get("last-event-id")
         .and_then(|value| value.to_str().ok())
@@ -855,11 +922,9 @@ async fn dsp_stream(
             "requested_after": last_event_id,
             "oldest_available": replay_window.oldest_available_event_id,
         });
-        replay_events.push(Ok(
-            axum::response::sse::Event::default()
-                .event("replay_gap")
-                .data(data.to_string()),
-        ));
+        replay_events.push(Ok(axum::response::sse::Event::default()
+            .event("replay_gap")
+            .data(data.to_string())));
     }
     replay_events.extend(
         replay_window
@@ -903,8 +968,7 @@ async fn dsp_stream(
     );
     let stream = replay_stream.chain(live_stream);
     Sse::new(stream).keep_alive(
-        axum::response::sse::KeepAlive::new()
-            .interval(std::time::Duration::from_secs(15)),
+        axum::response::sse::KeepAlive::new().interval(std::time::Duration::from_secs(15)),
     )
 }
 

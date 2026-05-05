@@ -1,11 +1,15 @@
 """Frequency-domain A-format to B-format (AmbiX) converter for the Sirith
 tetrahedral microphone array.
 
-The four capsules are omnidirectional (pressure sensors), so a simple
-time-domain matrix gives incorrect results. Instead we build the encoding
-matrix E from the capsule positions, apply a frequency-dependent Tikhonov-
-regularised pseudoinverse per FFT bin, and post-filter the X/Y/Z velocity
-components with a spatial-aliasing low-pass above ~3.4 kHz.
+The four capsules are omnidirectional pressure sensors, so a static gain
+matrix cannot recover useful velocity components. Instead each FFT bin uses a
+first-order pressure-gradient model:
+
+    p(r, f) ~= sqrt(2) * W(f) - j * k(f) * dot(r, [X(f), Y(f), Z(f)])
+
+where r is the centroid-relative capsule position and k = 2*pi*f/c. The
+frequency-dependent Tikhonov pseudoinverse solves that model per bin, then
+X/Y/Z are low-passed above the array's spatial-aliasing limit.
 
 Output: 4-channel B-format in ACN/SN3D normalisation (AmbiX) — W, X, Y, Z.
 
@@ -16,9 +20,8 @@ Reference geometry (centroid-relative, metres):
     MK4: [ 0.02165,0.025, 0.04082]
 
 The centroid is approximately [0.016, 0.025, 0.010], so MK3 is NOT at the
-centroid.  We correct for this by computing the centroid and shifting all
-positions before deriving unit direction vectors — otherwise the matrix
-produces incorrect X/Y/Z steering.
+centroid. We correct for this by computing the centroid and shifting all
+positions before solving the pressure-gradient model.
 """
 
 from __future__ import annotations
@@ -94,7 +97,7 @@ def atob_foa(
     positions = (
         SIRITH_MIC_POSITIONS_M if mic_positions_m is None else np.asarray(mic_positions_m)
     )
-    E = _build_encoding_matrix(positions)
+    corrected_positions, _ = centroid_corrected_positions(positions)
     freqs = np.fft.rfftfreq(block_size, d=1.0 / sample_rate_hz)
 
     output = np.zeros((4, n_samples), dtype=np.float64)
@@ -115,7 +118,7 @@ def atob_foa(
         A_freq = np.fft.rfft(frame, axis=1)  # (4, n_bins)
 
         # Apply frequency-dependent regularised pseudoinverse per bin.
-        B_freq = _apply_atob_matrix(A_freq, E, freqs)
+        B_freq = _apply_atob_matrix(A_freq, corrected_positions, freqs)
 
         # Alias LP filter on X/Y/Z (channels 1–3) above ALIAS_CUTOFF_HZ.
         _apply_alias_lp(B_freq, freqs)
@@ -219,49 +222,44 @@ def _tikhonov_lambda(freqs: NDArray[np.float64]) -> NDArray[np.float64]:
 
 def _apply_atob_matrix(
     A_freq: NDArray[np.complex128],
-    E: NDArray[np.float64],
+    corrected_positions_m: NDArray[np.float64],
     freqs: NDArray[np.float64],
 ) -> NDArray[np.complex128]:
-    """Apply the frequency-dependent Tikhonov-regularised A-to-B matrix.
-
-    For each bin k:
-        B(k) = E⁺_reg(k) · A(k)
-        E⁺_reg = Eᵀ (E Eᵀ + λ(f) I)⁻¹
-
-    This is the standard Tikhonov solution for underdetermined least squares.
-
-    Parameters
-    ----------
-    A_freq:
-        Shape (4, n_bins), complex RFFT of the four capsule channels.
-    E:
-        Shape (4, 4), encoding matrix.
-    freqs:
-        Shape (n_bins,), frequency axis from np.fft.rfftfreq.
-
-    Returns
-    -------
-    NDArray[np.complex128]
-        Shape (4, n_bins), B-format in the frequency domain.
-    """
+    """Apply a physical, frequency-dependent pressure-gradient A-to-B solve."""
     n_bins = A_freq.shape[1]
     B_freq = np.zeros((4, n_bins), dtype=np.complex128)
     lambdas = _tikhonov_lambda(freqs)
 
-    # EEᵀ is constant (real, 4×4).
-    EEt = E @ E.T
-
-    for k in range(n_bins):
-        lam = float(lambdas[k])
-        reg_matrix = EEt + lam * np.eye(4)
-        # E⁺_reg = Eᵀ (EEᵀ + λI)⁻¹
-        # B(k) = E⁺_reg · A(k)  →  equivalent to solving (EEᵀ + λI) x = E A(k)
-        #                                                               then x = E⁺_reg A(k).
-        # Numerically: E⁺_reg = E.T @ inv(reg_matrix)
-        # B(k) = E.T @ solve(reg_matrix, A(k))
-        B_freq[:, k] = E.T @ np.linalg.solve(reg_matrix, A_freq[:, k])
+    for bin_index, freq_hz in enumerate(freqs):
+        E = _build_frequency_domain_pressure_gradient_matrix(
+            corrected_positions_m,
+            float(freq_hz),
+        )
+        lam = float(lambdas[bin_index])
+        reg_matrix = E @ E.conj().T + lam * np.eye(4)
+        try:
+            B_freq[:, bin_index] = E.conj().T @ np.linalg.solve(
+                reg_matrix,
+                A_freq[:, bin_index],
+            )
+        except np.linalg.LinAlgError:
+            B_freq[:, bin_index] = (
+                E.conj().T @ np.linalg.pinv(reg_matrix) @ A_freq[:, bin_index]
+            )
 
     return B_freq
+
+
+def _build_frequency_domain_pressure_gradient_matrix(
+    corrected_positions_m: NDArray[np.float64],
+    freq_hz: float,
+) -> NDArray[np.complex128]:
+    """Return capsule pressure response for AmbiX W/X/Y/Z at one frequency."""
+    wavenumber = 2.0 * np.pi * max(freq_hz, 0.0) / SPEED_OF_SOUND_MPS
+    E = np.zeros((4, 4), dtype=np.complex128)
+    E[:, 0] = np.sqrt(2.0)
+    E[:, 1:] = -1j * wavenumber * corrected_positions_m
+    return E
 
 
 def _apply_alias_lp(

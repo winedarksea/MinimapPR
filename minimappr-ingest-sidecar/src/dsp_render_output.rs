@@ -194,5 +194,14 @@ pub async fn write_render_to_cache(
             failure_count: 1,
         };
     }
-    build_render_result(manifest, stream_key, pcm_bytes, meta, coverage_stats, source_ids, now_ns, sample_rate_hz)
+    build_render_result(
+        manifest,
+        stream_key,
+        pcm_bytes,
+        meta,
+        coverage_stats,
+        source_ids,
+        now_ns,
+        sample_rate_hz,
+    )
 }

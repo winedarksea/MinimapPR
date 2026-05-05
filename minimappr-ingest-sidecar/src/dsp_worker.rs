@@ -12,8 +12,8 @@ use crate::{
     audio_payload::{decode_audio_payload, DecodedAudioPayload},
     classifier_helper::ManifestClassificationAnnotator,
     derived_cache::DerivedCache,
-    dsp_events::DspEventPublisher,
     dsp::{AudioCoverageStats, SensorStreamBuffer},
+    dsp_events::DspEventPublisher,
     gcc_phat::TdoaResult,
     ingest_backend::QueuedRawManifest,
     journal_reader::JournalPayloadHandle,
@@ -357,8 +357,8 @@ impl DspWorker {
 
         // Only hit the filesystem when the in-process channel did not already
         // fill the batch budget. This keeps steady-state ingest on memory paths.
-        let should_query_disk = self.config.query_persisted_raw_manifests
-            && channel_manifests.len() < channel_limit;
+        let should_query_disk =
+            self.config.query_persisted_raw_manifests && channel_manifests.len() < channel_limit;
         let disk_manifests = if should_query_disk {
             match self
                 .manifest_store
@@ -562,9 +562,7 @@ impl DspWorker {
                     .collect(),
                 active_channels: Vec::new(),
                 classification_windows: (0..channel_count).map(|_| Vec::new()).collect(),
-                listenable_classification_windows: (0..channel_count)
-                    .map(|_| Vec::new())
-                    .collect(),
+                listenable_classification_windows: (0..channel_count).map(|_| Vec::new()).collect(),
                 classification_coverage: (0..channel_count).map(|_| None).collect(),
                 mic_positions_m,
                 source_ids,
@@ -616,7 +614,9 @@ impl DspWorker {
                 };
 
             for (ch, buf) in buffers.iter_mut().enumerate() {
-                let Some(channel_samples) = decoded.channels.get(ch) else { break; };
+                let Some(channel_samples) = decoded.channels.get(ch) else {
+                    break;
+                };
                 if let Err(err) = buf.append(
                     buffer_start_time_ns,
                     channel_samples,
@@ -635,18 +635,16 @@ impl DspWorker {
                 }
             }
 
-            let end_ns = resolve_buffer_end_time_ns(
-                buffers,
-                end_sample_index,
-                buffer_end_time_ns,
-                sr,
-            );
+            let end_ns =
+                resolve_buffer_end_time_ns(buffers, end_sample_index, buffer_end_time_ns, sr);
             // Use centered windows for localization (matching Python's center_time_ns).
             // TDOA is computed relative to the window center, so centering on the frame
             // midpoint gives the most symmetric coverage.
             let window_duration_ns = (window_sec * 1_000_000_000.0).round() as i128;
             let half_window_ns = window_duration_ns / 2;
-            let center_time_ns = end_ns.saturating_sub(half_window_ns).max(buffer_start_time_ns);
+            let center_time_ns = end_ns
+                .saturating_sub(half_window_ns)
+                .max(buffer_start_time_ns);
             let channel_states =
                 localization_channel_states_centered(buffers, center_time_ns, window_sec);
 
@@ -670,11 +668,12 @@ impl DspWorker {
                     .expect("stream buffers must exist after append");
                 let fallback_render_windows =
                     channel_windows_ending_at(buffers, end_ns, classification_window_sec);
-                let listenable_fallback_render_windows = channel_windows_ending_at_with_gap_concealment(
-                    buffers,
-                    end_ns,
-                    classification_window_sec,
-                );
+                let listenable_fallback_render_windows =
+                    channel_windows_ending_at_with_gap_concealment(
+                        buffers,
+                        end_ns,
+                        classification_window_sec,
+                    );
                 let fallback_render_coverage =
                     channel_coverage_ending_at(buffers, end_ns, classification_window_sec);
                 let fallback_render_channels = if fallback_render_windows
@@ -762,26 +761,26 @@ impl DspWorker {
 
         let (classification_windows, listenable_classification_windows, classification_coverage) =
             if run_classifier_render {
-            let buffers = self
-                .buffers
-                .get(&stream_key)
-                .expect("stream buffers must exist after append");
-            (
-                channel_windows_ending_at(buffers, end_ns, classification_window_sec),
-                channel_windows_ending_at_with_gap_concealment(
-                    buffers,
-                    end_ns,
-                    classification_window_sec,
-                ),
-                channel_coverage_ending_at(buffers, end_ns, classification_window_sec),
-            )
-        } else {
-            (
-                channel_states.iter().map(|_| Vec::new()).collect(),
-                channel_states.iter().map(|_| Vec::new()).collect(),
-                channel_states.iter().map(|_| None).collect(),
-            )
-        };
+                let buffers = self
+                    .buffers
+                    .get(&stream_key)
+                    .expect("stream buffers must exist after append");
+                (
+                    channel_windows_ending_at(buffers, end_ns, classification_window_sec),
+                    channel_windows_ending_at_with_gap_concealment(
+                        buffers,
+                        end_ns,
+                        classification_window_sec,
+                    ),
+                    channel_coverage_ending_at(buffers, end_ns, classification_window_sec),
+                )
+            } else {
+                (
+                    channel_states.iter().map(|_| Vec::new()).collect(),
+                    channel_states.iter().map(|_| Vec::new()).collect(),
+                    channel_states.iter().map(|_| None).collect(),
+                )
+            };
 
         Some(ComputePayload {
             manifest,
@@ -943,12 +942,7 @@ impl DspWorker {
     /// Combined RMS energy gate + trigger cooldown, matching Python's IngestProcessor
     /// trigger evaluation. Returns true when the audio is loud enough and the cooldown
     /// period has elapsed since the last trigger for this stream.
-    fn should_trigger(
-        &mut self,
-        stream_key: &str,
-        audio_ns: u128,
-        windows: &[Vec<f32>],
-    ) -> bool {
+    fn should_trigger(&mut self, stream_key: &str, audio_ns: u128, windows: &[Vec<f32>]) -> bool {
         if self.config.localization_rms_gate > 0.0 {
             let max_rms = windows
                 .iter()
@@ -1162,7 +1156,9 @@ fn localization_channel_states(
         .iter()
         .map(|buf| LocalizationChannelState {
             coverage: buf.coverage_ending_at(end_ns, window_seconds),
-            window: buf.window_ending_at(end_ns, window_seconds).unwrap_or_default(),
+            window: buf
+                .window_ending_at(end_ns, window_seconds)
+                .unwrap_or_default(),
         })
         .collect()
 }
@@ -1179,7 +1175,9 @@ fn localization_channel_states_centered(
         .iter()
         .map(|buf| LocalizationChannelState {
             coverage: buf.coverage_centered_at(center_time_ns, window_seconds),
-            window: buf.window_centered_at(center_time_ns, window_seconds).unwrap_or_default(),
+            window: buf
+                .window_centered_at(center_time_ns, window_seconds)
+                .unwrap_or_default(),
         })
         .collect()
 }
@@ -1191,7 +1189,10 @@ fn channel_windows_ending_at(
 ) -> Vec<Vec<f32>> {
     buffers
         .iter()
-        .map(|buf| buf.window_ending_at(end_ns, window_seconds).unwrap_or_default())
+        .map(|buf| {
+            buf.window_ending_at(end_ns, window_seconds)
+                .unwrap_or_default()
+        })
         .collect()
 }
 
@@ -1296,36 +1297,36 @@ fn resolve_buffer_start_time_ns(
     sample_rate_hz: u32,
     now_ns: u128,
 ) -> i128 {
-        decoded
-            .start_time_ns
-            .filter(|start_time_ns| *start_time_ns > 0)
-            .or_else(|| first_handle.toa_ns.map(i128::from))
-            .or_else(|| {
-                let anchor_ns = first_handle
-                    .toa_ns
-                    .unwrap_or_else(|| first_handle.tor_ns.unwrap_or(now_ns as u64));
-                decoded.start_sample_index.map(|sample_index| {
-                    sample_index_to_absolute_time_from_now_ns(
-                        sample_index,
-                        sample_rate_hz,
-                        anchor_ns.into(),
-                    )
-                })
+    decoded
+        .start_time_ns
+        .filter(|start_time_ns| *start_time_ns > 0)
+        .or_else(|| first_handle.toa_ns.map(i128::from))
+        .or_else(|| {
+            let anchor_ns = first_handle
+                .toa_ns
+                .unwrap_or_else(|| first_handle.tor_ns.unwrap_or(now_ns as u64));
+            decoded.start_sample_index.map(|sample_index| {
+                sample_index_to_absolute_time_from_now_ns(
+                    sample_index,
+                    sample_rate_hz,
+                    anchor_ns.into(),
+                )
             })
-            .or_else(|| {
-                let anchor_ns = first_handle
-                    .toa_ns
-                    .unwrap_or_else(|| first_handle.tor_ns.unwrap_or(now_ns as u64));
-                first_handle.sample_index_start.map(|sample_index| {
-                    sample_index_to_absolute_time_from_now_ns(
-                        sample_index as i64,
-                        sample_rate_hz,
-                        anchor_ns.into(),
-                    )
-                })
+        })
+        .or_else(|| {
+            let anchor_ns = first_handle
+                .toa_ns
+                .unwrap_or_else(|| first_handle.tor_ns.unwrap_or(now_ns as u64));
+            first_handle.sample_index_start.map(|sample_index| {
+                sample_index_to_absolute_time_from_now_ns(
+                    sample_index as i64,
+                    sample_rate_hz,
+                    anchor_ns.into(),
+                )
             })
-            .or_else(|| first_handle.tor_ns.map(i128::from))
-            .unwrap_or(now_ns as i128)
+        })
+        .or_else(|| first_handle.tor_ns.map(i128::from))
+        .unwrap_or(now_ns as i128)
 }
 
 fn resolve_buffer_end_time_ns(

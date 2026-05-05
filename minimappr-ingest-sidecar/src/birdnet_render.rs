@@ -81,7 +81,10 @@ fn delay_and_sum(
         .iter()
         .map(|position| -dot(*position, steering_direction) / config.sound_speed_mps.max(1.0))
         .collect();
-    let earliest = arrival_offsets_s.iter().copied().fold(f32::INFINITY, f32::min);
+    let earliest = arrival_offsets_s
+        .iter()
+        .copied()
+        .fold(f32::INFINITY, f32::min);
     let delay_samples: Vec<f32> = arrival_offsets_s
         .iter()
         .map(|offset| ((offset - earliest) * sample_rate_hz as f32).max(0.0))

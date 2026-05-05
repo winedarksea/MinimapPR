@@ -1,8 +1,8 @@
 use super::*;
 use crate::{
     derived_cache::{DerivedCache, DerivedCacheConfig},
-    dsp_events::{DspEventPublisher, ReplayableDspEvent},
     dsp::SensorStreamBuffer,
+    dsp_events::{DspEventPublisher, ReplayableDspEvent},
     journal_reader::JournalPayloadHandle,
     manifests::ManifestStore,
 };
@@ -108,7 +108,12 @@ async fn worker_publishes_localization_and_classifier_render_contract() {
     );
     // Inline PCM delivered — segment_path is a sentinel (no disk file written).
     assert!(render_event.raw_render_bytes.is_some());
-    assert!(!render_event.derived_handle.as_ref().unwrap().segment_path.exists());
+    assert!(!render_event
+        .derived_handle
+        .as_ref()
+        .unwrap()
+        .segment_path
+        .exists());
 
     let state = state.read().await;
     assert_eq!(state.total_tdoa_results, 1);
@@ -478,8 +483,21 @@ async fn gps_clock_correction_jitter_does_not_drop_classifier_render() {
     // but each packet's TOA wanders by ±50 ms relative to the sample-rate delta
     // (representative of GPS PPS clock-correction shifts between publishes).
     let toa_jitter_pattern: [i64; 16] = [
-        0, 50_000_000, -30_000_000, 40_000_000, -20_000_000, 55_000_000, -45_000_000, 35_000_000,
-        25_000_000, -15_000_000, 60_000_000, -25_000_000, 45_000_000, -35_000_000, 20_000_000,
+        0,
+        50_000_000,
+        -30_000_000,
+        40_000_000,
+        -20_000_000,
+        55_000_000,
+        -45_000_000,
+        35_000_000,
+        25_000_000,
+        -15_000_000,
+        60_000_000,
+        -25_000_000,
+        45_000_000,
+        -35_000_000,
+        20_000_000,
         -10_000_000,
     ];
     let nominal_period_ns: u64 = 32_000_000;
@@ -487,7 +505,8 @@ async fn gps_clock_correction_jitter_does_not_drop_classifier_render() {
     let mut start_sample_index: u64 = 0;
     for (sequence, jitter_ns) in toa_jitter_pattern.iter().copied().enumerate() {
         let toa = (start_time_ns + jitter_ns).max(1) as u64;
-        let payload = store_forward_payload_with_timing_jitter(toa, start_sample_index, sequence as u64 + 1);
+        let payload =
+            store_forward_payload_with_timing_jitter(toa, start_sample_index, sequence as u64 + 1);
         let manifest = raw_manifest_for_payload(
             tmp.path(),
             &format!("manifest-gps-jitter-{sequence}"),
@@ -519,13 +538,10 @@ async fn gps_clock_correction_jitter_does_not_drop_classifier_render() {
     // subsequent localization_result must resolve to srp_phat — a None coverage
     // would have downgraded resolved_algorithm to "localization_cadence_skipped".
     assert!(
-        localization_events
-            .iter()
-            .skip(2)
-            .all(|manifest| manifest
-                .localization
-                .as_ref()
-                .is_some_and(|payload| payload.resolved_algorithm == "srp_phat")),
+        localization_events.iter().skip(2).all(|manifest| manifest
+            .localization
+            .as_ref()
+            .is_some_and(|payload| payload.resolved_algorithm == "srp_phat")),
         "GPS-jittered packets should still produce srp_phat localizations"
     );
 

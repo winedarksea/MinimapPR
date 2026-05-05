@@ -92,45 +92,46 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
         None
     };
 
-    let (pcm_bytes, listenable_pcm_bytes, render_meta, render_cov) = if payload.run_classifier_render {
-        let render_channels: &[Vec<f32>] = payload
-            .omni_channels_override
-            .as_deref()
-            .unwrap_or(payload.classification_windows.as_slice());
-        let listenable_render_channels: &[Vec<f32>] = payload
-            .listenable_omni_channels_override
-            .as_deref()
-            .unwrap_or(payload.listenable_classification_windows.as_slice());
+    let (pcm_bytes, listenable_pcm_bytes, render_meta, render_cov) =
+        if payload.run_classifier_render {
+            let render_channels: &[Vec<f32>] = payload
+                .omni_channels_override
+                .as_deref()
+                .unwrap_or(payload.classification_windows.as_slice());
+            let listenable_render_channels: &[Vec<f32>] = payload
+                .listenable_omni_channels_override
+                .as_deref()
+                .unwrap_or(payload.listenable_classification_windows.as_slice());
 
-        let cov = render_coverage_json(
-            &payload.classification_coverage,
-            &payload.active_channels,
-            payload.config.min_coverage_ratio,
-            "classification_trailing",
-        );
+            let cov = render_coverage_json(
+                &payload.classification_coverage,
+                &payload.active_channels,
+                payload.config.min_coverage_ratio,
+                "classification_trailing",
+            );
 
-        let (bytes, meta) = compute_render_bytes(
-            &payload.config,
-            payload.effective_sound_speed_mps,
-            render_channels,
-            payload.mic_positions_m.as_slice(),
-            payload.sr,
-            Some(&localization),
-            fallback_reason.clone(),
-        );
-        let (listenable_bytes, _) = compute_render_bytes(
-            &payload.config,
-            payload.effective_sound_speed_mps,
-            listenable_render_channels,
-            payload.mic_positions_m.as_slice(),
-            payload.sr,
-            Some(&localization),
-            fallback_reason.clone(),
-        );
-        (Some(bytes), Some(listenable_bytes), Some(meta), cov)
-    } else {
-        (None, None, None, None)
-    };
+            let (bytes, meta) = compute_render_bytes(
+                &payload.config,
+                payload.effective_sound_speed_mps,
+                render_channels,
+                payload.mic_positions_m.as_slice(),
+                payload.sr,
+                Some(&localization),
+                fallback_reason.clone(),
+            );
+            let (listenable_bytes, _) = compute_render_bytes(
+                &payload.config,
+                payload.effective_sound_speed_mps,
+                listenable_render_channels,
+                payload.mic_positions_m.as_slice(),
+                payload.sr,
+                Some(&localization),
+                fallback_reason.clone(),
+            );
+            (Some(bytes), Some(listenable_bytes), Some(meta), cov)
+        } else {
+            (None, None, None, None)
+        };
 
     let localization_coverage_json = serde_json::to_value(serde_json::json!({
         "per_channel": payload.channel_states
@@ -383,10 +384,7 @@ fn enrich_node_context_with_runtime_telemetry(payload: &mut ComputePayload) {
     if let Some(source) = payload.reported_environment_source.as_ref() {
         environment.insert("source".to_string(), Value::from(source.clone()));
     } else {
-        environment.insert(
-            "source".to_string(),
-            Value::from("embedded_audio_frame"),
-        );
+        environment.insert("source".to_string(), Value::from("embedded_audio_frame"));
     }
     node_context_map.insert("environment".to_string(), Value::Object(environment));
 }
