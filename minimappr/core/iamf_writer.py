@@ -49,7 +49,7 @@ _AE_TYPE_SCENE = 1
 _AMBI_MONO_MODE = 0
 
 # ipcm sample format: signed integer
-_IPCM_FORMAT_SIGNED = 1
+_IPCM_FORMAT_SIGNED = 0
 
 
 # ── Low-level OBU helpers ──────────────────────────────────────────────────────
@@ -81,24 +81,25 @@ def _obu(obu_type: int, payload: bytes, *, redundant_copy: bool = False) -> byte
 def _ia_sequence_header() -> bytes:
     """IA_Sequence_Header_OBU (type 31).
 
-    Fields: ia_presentation_version (8) | primary_profile (8) | additional_profile (8).
-    All zero = version 0, Base profile, no additional profile.
+    Fields: ia_code ("iamf") | primary_profile (8) | additional_profile (8).
     """
-    payload = struct.pack("BBB", 0, _PROFILE_BASE, _PROFILE_BASE)
+    payload = b"iamf" + struct.pack("BB", _PROFILE_BASE, _PROFILE_BASE)
     return _obu(_OBU_IA_SEQUENCE_HEADER, payload)
 
 
 def _codec_config(codec_config_id: int, sample_rate: int, samples_per_frame: int) -> bytes:
     """Codec_Config_OBU (type 0) for ipcm codec.
 
-    codec_config_id (leb128) | num_samples_per_frame (16) | audio_roll_distance (i16) |
-    codec_id (4 bytes ASCII) | ipcm_config { sample_format_flags (8) |
+    codec_config_id (leb128) | codec_id (4 bytes ASCII) |
+    num_samples_per_frame (leb128) | audio_roll_distance (i16) |
+    ipcm_config { sample_format_flags (8) |
     sample_size (8) | sample_rate (32) }
     """
     payload = bytearray()
     payload += _leb128(codec_config_id)
-    payload += struct.pack(">Hh", samples_per_frame, 0)  # num_samples, audio_roll_distance=0
     payload += b"ipcm"
+    payload += _leb128(samples_per_frame)
+    payload += struct.pack(">h", 0)  # audio_roll_distance=0
     payload += struct.pack(">BBI", _IPCM_FORMAT_SIGNED, 16, sample_rate)
     return _obu(_OBU_CODEC_CONFIG, bytes(payload))
 

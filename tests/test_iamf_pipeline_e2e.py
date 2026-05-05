@@ -92,6 +92,7 @@ def _make_session_record(
     *,
     include_iamf: bool = True,
     include_video: bool = False,
+    first_frame_pts_ns: int | None = None,
 ) -> CaptureSessionRecord:
     return CaptureSessionRecord(
         session_id=session_id,
@@ -100,9 +101,10 @@ def _make_session_record(
         range_lease_id=None,
         start_time_ns=start_ns,
         end_time_ns=end_ns,
-        first_frame_pts_ns=start_ns,
+        first_frame_pts_ns=first_frame_pts_ns,
         work_dir=work_dir,
         video_path=None,
+        ambix_path=None,
         iamf_path=None,
         youtube_path=None,
         error=None,
@@ -217,6 +219,7 @@ class TestIamfPipelineE2E:
             end_ns=end_ns,
             sensor_ids=sensor_ids,
             include_iamf=False,
+            first_frame_pts_ns=None,
         )
 
         import minimappr.core.iamf_pipeline as iamf_mod

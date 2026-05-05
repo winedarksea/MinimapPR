@@ -100,6 +100,8 @@ _SIDECAR_HEALTHCHECK_TIMEOUT_SECONDS = 0.5
 _INGEST_STREAM_CONSUMER_WATCHDOG_INTERVAL_SECONDS = 1.0
 _INGEST_PATH_PREFIXES = (
     "/api/v1/ingest",
+    "/api/v1/capture",
+    "/api/v1/recordings",
     "/api/v1/fusion/status",
     "/api/v1/system/diagnostics",
 )
@@ -382,6 +384,63 @@ def _should_proxy_ingest_to_python_worker(state) -> bool:
         and settings.ingest_port != settings.port
         and os.getenv("MINIMAPPR_INGEST_PORT") is not None
     )
+
+
+async def _proxy_json_to_python_worker(
+    state,
+    *,
+    method: str,
+    endpoint_path: str,
+    json_body: object | None = None,
+) -> dict | list:
+    settings = state.settings
+    if settings.ingest_port == settings.port:
+        raise HTTPException(
+            status_code=503,
+            detail="Ingest proxy is misconfigured: ingest_port matches API port",
+        )
+    target_url = f"{_ingest_runtime_base_url(settings)}{endpoint_path}"
+    payload = None if json_body is None else json.dumps(json_body).encode("utf-8")
+    headers = {"Content-Type": "application/json"} if payload is not None else {}
+
+    def _request() -> tuple[int, bytes]:
+        request = urllib.request.Request(
+            target_url,
+            data=payload,
+            method=method,
+            headers=headers,
+        )
+        with urllib.request.urlopen(request, timeout=30.0) as response:
+            status = int(getattr(response, "status", 200))
+            return status, response.read()
+
+    try:
+        status, response_payload = await asyncio.to_thread(_request)
+    except urllib.error.HTTPError as exc:
+        detail = exc.reason or "Ingest worker error"
+        error_payload = exc.read()
+        try:
+            parsed = json.loads(error_payload)
+            if isinstance(parsed, dict) and parsed.get("detail"):
+                detail = str(parsed["detail"])
+        except Exception:
+            pass
+        raise HTTPException(status_code=exc.code, detail=detail) from exc
+    except urllib.error.URLError as exc:
+        raise HTTPException(status_code=503, detail=f"Ingest worker unreachable: {exc}") from exc
+
+    if not response_payload:
+        return {}
+    try:
+        decoded = json.loads(response_payload.decode("utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="Invalid JSON response from ingest worker") from exc
+    if not isinstance(decoded, (dict, list)):
+        raise HTTPException(status_code=502, detail="Unexpected response shape from ingest worker")
+    if status >= 400:
+        detail = decoded.get("detail") if isinstance(decoded, dict) else "Ingest worker error"
+        raise HTTPException(status_code=status, detail=str(detail or "Ingest worker error"))
+    return decoded
 
 
 async def _proxy_ingest_post(
@@ -914,13 +973,14 @@ async def _api_only_lifespan(app: FastAPI, settings: Settings):
     iamf_pipeline = IamfPipeline(
         sidecar_url=_ingest_runtime_base_url(settings),
         db_storage=storage,
+        artifact_dir=settings.large_artifact_dir,
     )
 
     async def _run_capture_post_processing(record):
         await iamf_pipeline.run(record)
-        await storage.upsert_capture_session(record)
 
     capture_manager.set_post_process_callback(_run_capture_post_processing)
+    capture_manager.set_session_update_callback(storage.upsert_capture_session)
 
     sidecar_state = _SidecarState()
     sidecar_supervision_task: asyncio.Task | None = None
@@ -1132,13 +1192,14 @@ async def lifespan(app: FastAPI):
         sidecar_url=None if _python_ingest else _ingest_runtime_base_url(settings),
         db_storage=storage,
         multi_sensor_buffer=audio_buffer if _python_ingest else None,
+        artifact_dir=settings.large_artifact_dir,
     )
 
     async def _run_capture_post_processing(record):
         await iamf_pipeline.run(record)
-        await storage.upsert_capture_session(record)
 
     capture_manager.set_post_process_callback(_run_capture_post_processing)
+    capture_manager.set_session_update_callback(storage.upsert_capture_session)
 
     app.state.settings = settings
     app.state.storage = storage
@@ -2977,6 +3038,13 @@ async def capture_start(request: Request, body: _CaptureStartBody):
     state = request.app.state
     manager: CaptureSessionManager = state.capture_manager
     settings: Settings = state.settings
+    if _should_proxy_ingest_to_python_worker(state):
+        return await _proxy_json_to_python_worker(
+            state,
+            method="POST",
+            endpoint_path="/api/v1/capture/start",
+            json_body=body.model_dump(mode="json"),
+        )
     if not _capture_pipeline_available(settings):
         raise HTTPException(
             status_code=503,
@@ -3050,6 +3118,12 @@ async def capture_stop(session_id: str, request: Request):
     state = request.app.state
     manager: CaptureSessionManager = state.capture_manager
     settings: Settings = state.settings
+    if _should_proxy_ingest_to_python_worker(state):
+        return await _proxy_json_to_python_worker(
+            state,
+            method="POST",
+            endpoint_path=f"/api/v1/capture/{session_id}/stop",
+        )
     if not _capture_pipeline_available(settings):
         raise HTTPException(
             status_code=503,
@@ -3062,6 +3136,17 @@ async def capture_stop(session_id: str, request: Request):
     except KeyError:
         raise HTTPException(status_code=404, detail=f"session {session_id} not found")
     except ValueError as exc:
+        record = manager.get(session_id)
+        if record is not None and record.state in {
+            CaptureState.PROCESSING,
+            CaptureState.COMPLETED,
+            CaptureState.FAILED,
+        }:
+            return {
+                "session_id": record.session_id,
+                "state": record.state.value,
+                "end_time_ns": record.end_time_ns,
+            }
         raise HTTPException(status_code=409, detail=str(exc))
 
     storage: Storage = state.storage
@@ -3077,6 +3162,12 @@ async def capture_stop(session_id: str, request: Request):
 @app.get("/api/v1/capture/{session_id}/status")
 async def capture_status(session_id: str, request: Request):
     state = request.app.state
+    if _should_proxy_ingest_to_python_worker(state):
+        return await _proxy_json_to_python_worker(
+            state,
+            method="GET",
+            endpoint_path=f"/api/v1/capture/{session_id}/status",
+        )
     manager: CaptureSessionManager = state.capture_manager
     record = manager.get(session_id)
     if record is None:
@@ -3094,6 +3185,7 @@ async def capture_status(session_id: str, request: Request):
         "start_time_ns": record.start_time_ns,
         "end_time_ns": record.end_time_ns,
         "first_frame_pts_ns": record.first_frame_pts_ns,
+        "ambix_path": str(record.ambix_path) if record.ambix_path else None,
         "iamf_path": str(record.iamf_path) if record.iamf_path else None,
         "youtube_path": str(record.youtube_path) if record.youtube_path else None,
         "error": record.error,
@@ -3104,6 +3196,12 @@ async def capture_status(session_id: str, request: Request):
 @app.get("/api/v1/capture")
 async def capture_list(request: Request):
     state = request.app.state
+    if _should_proxy_ingest_to_python_worker(state):
+        return await _proxy_json_to_python_worker(
+            state,
+            method="GET",
+            endpoint_path="/api/v1/capture",
+        )
     manager: CaptureSessionManager = state.capture_manager
     records = manager.list_sessions()
     return [
@@ -3153,7 +3251,7 @@ def _session_record_to_recording_session(record: CaptureSessionRecord) -> dict:
         "started_at_ms": started_at_ms or 0.0,
         "ended_at_ms": ended_at_ms,
         "duration_seconds": duration_seconds,
-        "ambisonics_ready": record.iamf_path is not None or record.state == CaptureState.COMPLETED,
+        "ambisonics_ready": record.ambix_path is not None and record.ambix_path.exists() if record.ambix_path else False,
         "iamf_ready": record.iamf_path is not None and record.iamf_path.exists() if record.iamf_path else False,
         "video_ready": record.youtube_path is not None and record.youtube_path.exists() if record.youtube_path else False,
         "error_message": record.error,
@@ -3180,6 +3278,13 @@ async def recordings_start(request: Request, body: _StartRecordingBody):
     manager: CaptureSessionManager = state.capture_manager
     settings: Settings = state.settings
     storage: Storage = state.storage
+    if _should_proxy_ingest_to_python_worker(state):
+        return await _proxy_json_to_python_worker(
+            state,
+            method="POST",
+            endpoint_path="/api/v1/recordings",
+            json_body=body.model_dump(mode="json"),
+        )
 
     if not _capture_pipeline_available(settings):
         raise HTTPException(
@@ -3240,6 +3345,12 @@ async def recordings_stop(session_id: str, request: Request):
     state = request.app.state
     manager: CaptureSessionManager = state.capture_manager
     settings: Settings = state.settings
+    if _should_proxy_ingest_to_python_worker(state):
+        return await _proxy_json_to_python_worker(
+            state,
+            method="PATCH",
+            endpoint_path=f"/api/v1/recordings/{session_id}/stop",
+        )
 
     if not _capture_pipeline_available(settings):
         raise HTTPException(status_code=503, detail=_capture_pipeline_unavailable_reason())
@@ -3251,6 +3362,13 @@ async def recordings_stop(session_id: str, request: Request):
     except KeyError:
         raise HTTPException(status_code=404, detail=f"session {session_id} not found")
     except ValueError as exc:
+        record = manager.get(session_id)
+        if record is not None and record.state in {
+            CaptureState.PROCESSING,
+            CaptureState.COMPLETED,
+            CaptureState.FAILED,
+        }:
+            return _session_record_to_recording_session(record)
         raise HTTPException(status_code=409, detail=str(exc))
 
     storage: Storage = state.storage
@@ -3285,6 +3403,7 @@ async def recordings_get(session_id: str, request: Request):
         first_frame_pts_ns=row.get("first_frame_pts_ns"),
         work_dir=Path(row["work_dir"]),
         video_path=Path(row["video_path"]) if row.get("video_path") else None,
+        ambix_path=Path(row["ambix_path"]) if row.get("ambix_path") else None,
         iamf_path=Path(row["iamf_path"]) if row.get("iamf_path") else None,
         youtube_path=Path(row["youtube_path"]) if row.get("youtube_path") else None,
         error=row.get("error"),
@@ -3309,6 +3428,7 @@ async def recordings_list(request: Request):
             duration_seconds = (row["end_time_ns"] - row["start_time_ns"]) / 1_000_000_000.0
 
         iamf_path = Path(row["iamf_path"]) if row.get("iamf_path") else None
+        ambix_path = Path(row["ambix_path"]) if row.get("ambix_path") else None
         youtube_path = Path(row["youtube_path"]) if row.get("youtube_path") else None
 
         results.append({
@@ -3317,11 +3437,12 @@ async def recordings_list(request: Request):
             "ended_at_ms": ended_at_ms,
             "duration_seconds": duration_seconds,
             "listener_node_id": row["stream_key"],
-            "ambisonics_available": row.get("state") == "completed",
+            "ambisonics_available": ambix_path is not None and ambix_path.exists() if ambix_path else False,
             "iamf_available": iamf_path is not None and iamf_path.exists() if iamf_path else False,
             "video_available": youtube_path is not None and youtube_path.exists() if youtube_path else False,
             "size_bytes": None,
             "status": _capture_state_to_recording_status(CaptureState(row["state"])),
+            "error_message": row.get("error"),
         })
 
     return results
@@ -3331,6 +3452,12 @@ async def recordings_list(request: Request):
 async def recordings_delete(session_id: str, request: Request):
     """Delete a recording session and its artifacts."""
     state = request.app.state
+    if _should_proxy_ingest_to_python_worker(state):
+        return await _proxy_json_to_python_worker(
+            state,
+            method="DELETE",
+            endpoint_path=f"/api/v1/recordings/{session_id}",
+        )
     manager: CaptureSessionManager = state.capture_manager
     storage: Storage = state.storage
 
@@ -3352,7 +3479,7 @@ async def recordings_delete(session_id: str, request: Request):
             import shutil
             shutil.rmtree(work_dir, ignore_errors=True)
 
-        for path_key in ("iamf_path", "youtube_path"):
+        for path_key in ("ambix_path", "iamf_path", "youtube_path"):
             artifact_path = row.get(path_key)
             if artifact_path:
                 p = Path(artifact_path)
@@ -3361,6 +3488,8 @@ async def recordings_delete(session_id: str, request: Request):
 
     # Remove from in-memory manager.
     manager._sessions.pop(session_id, None)
+    await storage.delete_large_artifacts_for_session(session_id)
+    await storage.delete_capture_session(session_id)
 
     return Response(status_code=204)
 
@@ -3394,12 +3523,10 @@ async def recordings_download(session_id: str, format: str = Query(...), request
             filename=f"{session_id}_youtube.mp4",
         )
     elif format in ("ambisonics", "ambix"):
-        # Ambisonics WAV is stored in the artifacts dir.
-        artifacts_dir = Path("data/artifacts")
-        ambix_path = artifacts_dir / f"{session_id}_ambix.wav"
-        if ambix_path.exists():
+        path = row.get("ambix_path")
+        if path and Path(path).exists():
             return FileResponse(
-                str(ambix_path),
+                path,
                 media_type="audio/wav",
                 filename=f"{session_id}_ambix.wav",
             )

@@ -111,6 +111,7 @@ fn RecordingRow(
     let video_url = api::download_url(&entry.session_id, "video");
     let show_iamf = entry.iamf_available;
     let show_video = entry.video_available;
+    let error_message = entry.error_message.clone();
     // Clone session_id for use in the reactive delete closure.
     let sid_for_delete = entry.session_id.clone();
 
@@ -134,6 +135,9 @@ fn RecordingRow(
                         <span class="badge badge--dim">{entry.status.label()}</span>
                     })}
                 </div>
+                {error_message.clone().filter(|msg| !msg.is_empty()).map(|msg| view! {
+                    <p class="row-error">{msg}</p>
+                })}
             </td>
             <td class="td-mono">{size}</td>
             <td>

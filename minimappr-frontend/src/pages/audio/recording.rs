@@ -2,6 +2,7 @@ use crate::recording::api;
 use crate::recording::{CameraDevice, RecordingStatus, StartRecordingRequest};
 use crate::state::AppState;
 use futures::StreamExt;
+use gloo_timers::future::TimeoutFuture;
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
@@ -212,21 +213,34 @@ fn CameraSelector(
                     }.into_any()
                 } else {
                     view! {
-                        <select
-                            class="form-select"
-                            on:change=move |ev| camera_source.set(event_target_value(&ev))
-                        >
-                            {devs.iter().map(|d| {
-                                let id = d.id.clone();
-                                let label = format!("{} ({})", d.label, d.id);
-                                view! {
-                                    <option
-                                        value=id.clone()
-                                        selected=move || camera_source.get() == id
-                                    >{label}</option>
-                                }.into_any()
-                            }).collect::<Vec<_>>()}
-                        </select>
+                        <div class="camera-source-stack">
+                            <select
+                                class="form-select"
+                                on:change=move |ev| camera_source.set(event_target_value(&ev))
+                            >
+                                {devs.iter().map(|d| {
+                                    let id = d.id.clone();
+                                    let label = format!("{} ({})", d.label, d.id);
+                                    view! {
+                                        <option
+                                            value=id.clone()
+                                            selected=move || camera_source.get() == id
+                                        >{label}</option>
+                                    }.into_any()
+                                }).collect::<Vec<_>>()}
+                            </select>
+                            <div class="camera-source-id">
+                                <span>"ID "</span>
+                                <code>{move || camera_source.get()}</code>
+                            </div>
+                            <input
+                                type="text"
+                                class="form-input"
+                                placeholder="Override camera ID"
+                                prop:value=move || camera_source.get()
+                                on:input=move |ev| camera_source.set(event_target_value(&ev))
+                            />
+                        </div>
                     }.into_any()
                 }
             }}
@@ -335,6 +349,12 @@ fn RecordingControls(
                 Ok(session) => {
                     active_recording.set(Some(session));
                     session_error.set(None);
+                    poll_recording_until_finished(
+                        session_id,
+                        active_recording,
+                        session_error,
+                    )
+                    .await;
                 }
                 Err(e) => session_error.set(Some(e)),
             }
@@ -401,5 +421,29 @@ fn RecordingControls(
                 <p class="recording-error">{err}</p>
             })}
         </div>
+    }
+}
+
+async fn poll_recording_until_finished(
+    session_id: String,
+    active_recording: RwSignal<Option<crate::recording::RecordingSession>>,
+    session_error: RwSignal<Option<String>>,
+) {
+    for _ in 0..120 {
+        TimeoutFuture::new(1_000).await;
+        match api::fetch_recording(&session_id).await {
+            Ok(session) => {
+                let finished = !session.status.is_active();
+                active_recording.set(Some(session));
+                session_error.set(None);
+                if finished {
+                    break;
+                }
+            }
+            Err(error) => {
+                session_error.set(Some(error));
+                break;
+            }
+        }
     }
 }

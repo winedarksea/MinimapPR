@@ -58,6 +58,7 @@ class CaptureSessionRecord:
     first_frame_pts_ns: Optional[int]
     work_dir: Path
     video_path: Optional[Path]
+    ambix_path: Optional[Path]
     iamf_path: Optional[Path]
     youtube_path: Optional[Path]
     error: Optional[str]
@@ -95,6 +96,9 @@ class CaptureStartRequest:
 PostProcessCallback = Callable[
     [CaptureSessionRecord], Coroutine[Any, Any, None]
 ]
+SessionUpdateCallback = Callable[
+    [CaptureSessionRecord], Coroutine[Any, Any, None]
+]
 
 
 class CaptureSessionManager:
@@ -105,11 +109,15 @@ class CaptureSessionManager:
         self._captures: dict[str, Any] = {}  # session_id → VideoCapture
         self._heartbeat_tasks: dict[str, asyncio.Task[None]] = {}
         self._post_process_callback: Optional[PostProcessCallback] = None
+        self._session_update_callback: Optional[SessionUpdateCallback] = None
         self._http: Optional[httpx.AsyncClient] = None
         self._python_buffers: dict[str, "MultiSensorBuffer"] = {}  # session_id → buffer
 
     def set_post_process_callback(self, cb: PostProcessCallback) -> None:
         self._post_process_callback = cb
+
+    def set_session_update_callback(self, cb: SessionUpdateCallback) -> None:
+        self._session_update_callback = cb
 
     def _client(self) -> httpx.AsyncClient:
         if self._http is None:
@@ -135,6 +143,7 @@ class CaptureSessionManager:
             first_frame_pts_ns=None,
             work_dir=work_dir,
             video_path=None,
+            ambix_path=None,
             iamf_path=None,
             youtube_path=None,
             error=None,
@@ -315,6 +324,15 @@ class CaptureSessionManager:
                 record.capture_audio_buffer = None
             else:
                 await self._release_range_lease(sidecar_url, record)
+            if self._session_update_callback is not None:
+                try:
+                    await self._session_update_callback(record)
+                except Exception as exc:
+                    logger.warning(
+                        "session %s final state persistence failed: %s",
+                        session_id,
+                        exc,
+                    )
 
     async def _cleanup_on_failure(self, record: CaptureSessionRecord) -> None:
         """Remove large intermediate files to prevent disk exhaustion."""

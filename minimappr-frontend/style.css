@@ -1903,6 +1903,23 @@ a.btn-sm {
   border-color: var(--md-sys-color-primary);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--md-sys-color-primary) 22%, transparent);
 }
+.camera-source-stack {
+  display: grid;
+  gap: 6px;
+  max-width: 360px;
+}
+.camera-source-id {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: var(--md-sys-typescale-label-medium-size);
+}
+.camera-source-id code {
+  color: var(--md-sys-color-on-surface);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow-wrap: anywhere;
+}
 
 /* ── Format checkboxes ───────────────────────────────────────── */
 .format-checks {

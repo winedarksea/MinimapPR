@@ -93,6 +93,7 @@ class VideoCapture:
         self._process_start_ns: int = 0
         self._pts_event = asyncio.Event()
         self._reader_task: Optional[asyncio.Task[None]] = None
+        self._stderr_tail: list[str] = []
 
     async def start(self) -> None:
         """Spawn ffmpeg and wait until the first frame timestamp is available."""
@@ -117,6 +118,11 @@ class VideoCapture:
         try:
             await asyncio.wait_for(self._pts_event.wait(), timeout=5.0)
         except asyncio.TimeoutError:
+            if self._process.returncode is not None:
+                raise VideoCaptureError(
+                    "video capture exited before first frame: "
+                    + _format_stderr_tail(self._stderr_tail)
+                )
             logger.warning(
                 "video capture: first pts_time not received within 5 s; "
                 "using process-spawn time as fallback"
@@ -179,11 +185,8 @@ class VideoCapture:
         source = cfg.video_source or _autodetect_source()
         cmd = ["ffmpeg"]
 
-        # Input.
+        # Capture input options must precede the input they configure.
         cmd += _source_input_args(source, cfg)
-
-        # Video size / rate.
-        cmd += ["-video_size", f"{cfg.width}x{cfg.height}", "-framerate", str(cfg.fps)]
 
         # Codec.
         cmd += cfg.codec_args
@@ -209,6 +212,10 @@ class VideoCapture:
                 break
             if not line:
                 break
+            decoded_line = line.decode("utf-8", errors="replace").strip()
+            if decoded_line:
+                self._stderr_tail.append(decoded_line)
+                self._stderr_tail = self._stderr_tail[-20:]
 
             if not self._pts_event.is_set():
                 match = pts_pattern.search(line)
@@ -247,7 +254,28 @@ def _autodetect_source() -> str:
 def _source_input_args(source: str, cfg: VideoCaptureConfig) -> list[str]:
     system = platform.system()
     if system == "Darwin":
-        return ["-f", "avfoundation", "-i", f"{source}:none"]
+        return [
+            "-f", "avfoundation",
+            "-framerate", str(min(cfg.fps, 30)),
+            "-video_size", "640x480",
+            "-i", f"{source}:none",
+        ]
     if system == "Linux":
-        return ["-f", "v4l2", "-i", source]
-    return ["-f", "dshow", "-i", f"video={source}"]
+        return [
+            "-f", "v4l2",
+            "-framerate", str(cfg.fps),
+            "-video_size", f"{cfg.width}x{cfg.height}",
+            "-i", source,
+        ]
+    return [
+        "-f", "dshow",
+        "-framerate", str(cfg.fps),
+        "-video_size", f"{cfg.width}x{cfg.height}",
+        "-i", f"video={source}",
+    ]
+
+
+def _format_stderr_tail(lines: list[str]) -> str:
+    if not lines:
+        return "ffmpeg produced no diagnostic output"
+    return "\n".join(lines[-8:])

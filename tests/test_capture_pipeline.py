@@ -12,6 +12,7 @@ mocks only.
 
 from __future__ import annotations
 
+import asyncio
 import math
 import struct
 import tempfile
@@ -554,6 +555,70 @@ class TestCaptureSessionManager:
             stop_record = await manager.stop(record.session_id, "http://localhost:8081")
             assert stop_record.state == CaptureState.PROCESSING
             assert stop_record.end_time_ns is not None
+
+    @pytest.mark.asyncio
+    async def test_final_state_update_callback_runs_after_completion(self, tmp_path):
+        """The durable row must see COMPLETED/FAILED, not only PROCESSING."""
+        manager = CaptureSessionManager()
+        persisted_states: list[CaptureState] = []
+
+        async def persist(record):
+            persisted_states.append(record.state)
+
+        manager.set_session_update_callback(persist)
+
+        fake_lease = {
+            "lease_id": "srl-test-lease-002",
+            "start_ns": time.time_ns(),
+        }
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json = MagicMock(return_value=fake_lease)
+
+        from minimappr.core.video_capture import VideoCaptureResult
+
+        fake_capture_result = VideoCaptureResult(
+            output_path=tmp_path / "output_raw.mp4",
+            first_frame_pts_ns=time.time_ns(),
+            process_start_ns=time.time_ns(),
+        )
+
+        with (
+            patch(
+                "minimappr.core.capture_session.httpx.AsyncClient.post",
+                new_callable=AsyncMock,
+                return_value=mock_response,
+            ),
+            patch(
+                "minimappr.core.capture_session.httpx.AsyncClient.delete",
+                new_callable=AsyncMock,
+                return_value=mock_response,
+            ),
+            patch(
+                "minimappr.core.video_capture.VideoCapture.start",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "minimappr.core.video_capture.VideoCapture.stop",
+                new_callable=AsyncMock,
+                return_value=fake_capture_result,
+            ),
+        ):
+            req = CaptureStartRequest(
+                stream_key="mic-array-1",
+                sidecar_url="http://localhost:8081",
+                work_dir=tmp_path,
+                max_duration_s=30.0,
+            )
+            record = await manager.start(req)
+            await manager.stop(record.session_id, "http://localhost:8081")
+
+            for _ in range(20):
+                if persisted_states:
+                    break
+                await asyncio.sleep(0.01)
+
+        assert persisted_states == [CaptureState.COMPLETED]
 
 
 # ── Round-trip: A-to-B → subtract → measure → write ─────────────────────────

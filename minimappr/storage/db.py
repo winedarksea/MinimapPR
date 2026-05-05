@@ -375,6 +375,7 @@ class Storage:
                 first_frame_pts_ns INTEGER,
                 work_dir TEXT NOT NULL,
                 video_path TEXT,
+                ambix_path TEXT,
                 iamf_path TEXT,
                 youtube_path TEXT,
                 error TEXT,
@@ -459,6 +460,12 @@ class Storage:
                 "wind_dir_deg": "REAL",
                 "solar_lux": "REAL",
                 "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+            },
+        )
+        await self._ensure_columns(
+            "capture_sessions",
+            {
+                "ambix_path": "TEXT",
             },
         )
         await self._deduplicate_reporting_window_canonicals()
@@ -2227,11 +2234,11 @@ class Storage:
             await db.execute(
                 """
                 INSERT OR REPLACE INTO capture_sessions (
-                    session_id, state, stream_key, range_lease_id,
-                    start_time_ns, end_time_ns, first_frame_pts_ns,
-                    work_dir, video_path, iamf_path, youtube_path,
+                session_id, state, stream_key, range_lease_id,
+                start_time_ns, end_time_ns, first_frame_pts_ns,
+                    work_dir, video_path, ambix_path, iamf_path, youtube_path,
                     error, created_ns
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     record.session_id,
@@ -2243,11 +2250,31 @@ class Storage:
                     record.first_frame_pts_ns,
                     str(record.work_dir),
                     str(record.video_path) if record.video_path else None,
+                    str(record.ambix_path) if getattr(record, "ambix_path", None) else None,
                     str(record.iamf_path) if record.iamf_path else None,
                     str(record.youtube_path) if record.youtube_path else None,
                     record.error,
                     record.created_ns,
                 ),
+            )
+            await self._commit_if_needed(db)
+
+    async def delete_capture_session(self, session_id: str) -> None:
+        db = self._require_db()
+        async with self._write_guard():
+            await db.execute("DELETE FROM capture_sessions WHERE session_id=?", (session_id,))
+            await self._commit_if_needed(db)
+
+    async def delete_large_artifacts_for_session(self, session_id: str) -> None:
+        db = self._require_db()
+        async with self._write_guard():
+            await db.execute(
+                "DELETE FROM large_artifacts WHERE metadata_json LIKE ?",
+                (f'%"session_id":"{session_id}"%',),
+            )
+            await db.execute(
+                "DELETE FROM large_artifacts WHERE metadata_json LIKE ?",
+                (f'%"session_id": "{session_id}"%',),
             )
             await self._commit_if_needed(db)
 
@@ -2277,13 +2304,16 @@ class Storage:
         *,
         session_id: str,
         artifact_type: str,
-        iamf_path: str | None,
-        youtube_path: str | None,
+        ambix_path: str | None = None,
+        iamf_path: str | None = None,
+        youtube_path: str | None = None,
         created_ns: int,
     ) -> str:
         """Insert a large_artifacts row for a completed capture session."""
-        path = iamf_path or youtube_path or ""
+        path = iamf_path or youtube_path or ambix_path or ""
         metadata: dict[str, Any] = {"session_id": session_id}
+        if ambix_path:
+            metadata["ambix_path"] = ambix_path
         if iamf_path:
             metadata["iamf_path"] = iamf_path
         if youtube_path:

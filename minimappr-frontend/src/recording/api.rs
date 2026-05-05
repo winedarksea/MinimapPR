@@ -15,6 +15,7 @@
 use crate::recording::{CameraDevice, RecordingLibraryEntry, RecordingSession, StartRecordingRequest};
 use gloo_net::http::Request;
 use js_sys::encode_uri_component;
+use serde_json::Value;
 
 fn enc(s: &str) -> String {
     encode_uri_component(s).as_string().unwrap_or_default()
@@ -34,10 +35,18 @@ async fn expect_json<T: serde::de::DeserializeOwned>(
             Err(if body.is_empty() {
                 format!("HTTP {status}")
             } else {
-                body
+                extract_error_detail(&body).unwrap_or(body)
             })
         }
     }
+}
+
+fn extract_error_detail(body: &str) -> Option<String> {
+    let parsed = serde_json::from_str::<Value>(body).ok()?;
+    parsed
+        .get("detail")
+        .and_then(|detail| detail.as_str())
+        .map(ToOwned::to_owned)
 }
 
 /// Start a new recording session.

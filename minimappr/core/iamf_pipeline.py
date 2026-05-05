@@ -12,10 +12,9 @@ Executes the "studio render" background job for a completed capture session:
   5. Resample — upsample bed + objects to OUTPUT_RATE_HZ with polyphase filter
   6. Measure  — BS.1770-4 integrated loudness + True Peak at OUTPUT_RATE_HZ
   7. Metadata — map MinimapPR position_m → listener-relative spherical coords
-  8. Encode   — POST to Rust /api/v1/capture/encode/iamf → audio.iamf
-  9. Multiplex— primary: ffmpeg mux video + audio.iamf → youtube_export.mp4
-                (IAMF/Eclipsa); fallback: AmbiX WAV + AAC if FFmpeg lacks
-                IAMF support.
+  8. Encode   — FFmpeg/Rust IAMF Opus stream groups → audio.iamf
+  9. Multiplex— ffmpeg mux video + audio.iamf → youtube_export.mp4
+                with IAMF stream groups preserved.
  10. Cleanup  — remove intermediate files on success
  11. Register — move final files to artifacts dir, insert large_artifacts row
                 via insert_large_artifact_for_session with sync diagnostics.
@@ -78,6 +77,13 @@ class LoudnessMeasurement:
 
 
 @dataclass(frozen=True)
+class IamfStreamGroupLayout:
+    group_index: int
+    group_type: str
+    stream_indices: tuple[int, ...]
+
+
+@dataclass(frozen=True)
 class RecordingSource:
     stream_key: str
     channel_count: int
@@ -98,10 +104,12 @@ class IamfPipeline:
         *,
         multi_sensor_buffer: Optional[Any] = None,  # minimappr.core.audio_buffer.MultiSensorBuffer
         executor: Optional[asyncio.AbstractEventLoop] = None,
+        artifact_dir: Optional[Path] = None,
     ) -> None:
         self._sidecar_url = sidecar_url
         self._db = db_storage
         self._multi_sensor_buffer = multi_sensor_buffer
+        self._artifact_dir = artifact_dir or ARTIFACTS_DIR
         self._http = httpx.AsyncClient(timeout=60.0) if sidecar_url else None
 
     async def run(self, record: CaptureSessionRecord) -> None:
@@ -111,9 +119,10 @@ class IamfPipeline:
 
         assert record.start_time_ns is not None
         assert record.end_time_ns is not None
-        assert record.first_frame_pts_ns is not None
 
-        start_ns = record.first_frame_pts_ns
+        # Audio-only captures have no video first-frame timestamp. In that
+        # case the capture buffer start is the correct render origin.
+        start_ns = record.first_frame_pts_ns or record.start_time_ns
         end_ns = record.end_time_ns
 
         loop = asyncio.get_event_loop()
@@ -170,10 +179,11 @@ class IamfPipeline:
                 record.youtube_path = youtube_path
 
             # Register artifact.
-            artifacts_dir = ARTIFACTS_DIR
+            artifacts_dir = self._artifact_dir
             artifacts_dir.mkdir(parents=True, exist_ok=True)
             final_ambix = artifacts_dir / f"{record.session_id}_ambix.wav"
             ambix_path.replace(final_ambix)
+            record.ambix_path = final_ambix
             if record.youtube_path and record.youtube_path.exists():
                 final_mp4 = artifacts_dir / f"{record.session_id}_youtube.mp4"
                 record.youtube_path.replace(final_mp4)
@@ -365,7 +375,7 @@ class IamfPipeline:
 
         # ── 11. Cleanup intermediates ─────────────────────────────────────────
         logger.info("[%s] step 10: cleanup intermediates", record.session_id[:8])
-        for f in [bed_path, ambix_path, object_path, positions_path] + [
+        for f in [bed_path, object_path, positions_path] + [
             work_dir / f"object_{tid}.wav" for tid in object_tracks
         ]:
             if f is not None:
@@ -373,12 +383,17 @@ class IamfPipeline:
 
         # ── 12. Register artifacts ────────────────────────────────────────────
         logger.info("[%s] step 11: registering artifacts", record.session_id[:8])
-        artifacts_dir = ARTIFACTS_DIR
+        artifacts_dir = self._artifact_dir
         artifacts_dir.mkdir(parents=True, exist_ok=True)
 
         final_iamf = artifacts_dir / f"{record.session_id}_audio.iamf"
         iamf_path.replace(final_iamf)
         record.iamf_path = final_iamf
+
+        final_ambix = artifacts_dir / f"{record.session_id}_ambix.wav"
+        if ambix_path.exists():
+            ambix_path.replace(final_ambix)
+            record.ambix_path = final_ambix
 
         if record.youtube_path and record.youtube_path.exists():
             final_mp4 = artifacts_dir / f"{record.session_id}_youtube.mp4"
@@ -611,21 +626,18 @@ class IamfPipeline:
     ) -> bytes | None:
         """Encode bed + objects as IAMF.
 
-        Uses the pure-Python ipcm writer when no sidecar is configured,
-        otherwise POSTs to the Rust /api/v1/capture/encode/iamf endpoint.
+        Uses local FFmpeg/libopus when no sidecar is configured, otherwise
+        POSTs to the Rust /api/v1/capture/encode/iamf endpoint.
         """
-        if self._multi_sensor_buffer is not None:
-            from minimappr.core.iamf_writer import write_iamf
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(
-                None,
-                write_iamf,
-                bed,
-                objects,
-                positions_per_unit,
+        if self._sidecar_url is None:
+            await _encode_iamf_ffmpeg(
+                bed_path,
+                object_path,
+                output_iamf_path,
                 bed_loudness,
                 object_loudness,
             )
+            return None
         return await self._encode_iamf_rust(
             bed_path,
             object_path,
@@ -684,6 +696,7 @@ class IamfPipeline:
             await self._db.insert_large_artifact_for_session(
                 session_id=record.session_id,
                 artifact_type="iamf_video",
+                ambix_path=str(record.ambix_path) if record.ambix_path else None,
                 iamf_path=str(record.iamf_path) if record.iamf_path else None,
                 youtube_path=str(record.youtube_path) if record.youtube_path else None,
                 created_ns=time.time_ns(),
@@ -1182,14 +1195,10 @@ async def _ffmpeg_mux(
 ) -> None:
     """Mux video with audio into a YouTube-ready MP4.
 
-    Primary path: embed the .iamf file directly (IAMF/Eclipsa codec string
-    iamf.001.001.* as required by YouTube Eclipsa verification). Requires
-    FFmpeg 6.1+. Falls back to AmbiX WAV + AAC if FFmpeg lacks IAMF support.
-
-    For full YouTube Eclipsa compliance the Rust IAMF encoder must produce
-    Opus-coded frames (codec string iamf.001.001.Opus). If it uses ipcm the
-    copy here will still produce a structurally valid IAMF-in-MP4, but
-    YouTube may reject it at the Eclipsa validation step.
+    Embeds the .iamf file directly and recreates IAMF stream groups in the
+    MP4. We intentionally fail the IAMF export instead of silently writing
+    AAC when include_iamf=True, because that masks the artifact type the UI
+    promised to create.
 
     The video_audio_offset_s corrects for the gap between the video
     first-frame PTS anchor and the actual start of the extracted audio.
@@ -1203,11 +1212,106 @@ async def _ffmpeg_mux(
         logger.info("mux: IAMF-in-MP4 succeeded → %s", output_path.name)
         return
 
-    logger.warning(
-        "mux: IAMF path failed; falling back to AmbiX+AAC → %s",
-        output_path.name,
+    raise RuntimeError("ffmpeg IAMF-in-MP4 mux failed; AAC fallback disabled for IAMF exports")
+
+
+async def _encode_iamf_ffmpeg(
+    bed_path: Path,
+    object_path: Path | None,
+    output_iamf_path: Path,
+    bed_loudness: LoudnessMeasurement,
+    object_loudness: list[LoudnessMeasurement],
+) -> None:
+    """Encode AmbiX bed plus optional mono object as standalone IAMF/Opus."""
+    if object_path is not None and len(object_loudness) != 1:
+        raise ValueError("IAMF object export requires exactly one object loudness measurement")
+
+    filter_complex = (
+        "[0:a]channelmap=0:mono[bed0];"
+        "[0:a]channelmap=1:mono[bed1];"
+        "[0:a]channelmap=2:mono[bed2];"
+        "[0:a]channelmap=3:mono[bed3]"
     )
-    await _ambix_aac_mux(video_path, ambix_wav, output_path, video_audio_offset_s)
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(bed_path),
+    ]
+    if object_path is not None:
+        cmd.extend(["-i", str(object_path)])
+    cmd.extend([
+        "-filter_complex", filter_complex,
+        "-map", "[bed0]",
+        "-map", "[bed1]",
+        "-map", "[bed2]",
+        "-map", "[bed3]",
+    ])
+    if object_path is not None:
+        cmd.extend(["-map", "1:a:0"])
+
+    output_stream_count = 5 if object_path is not None else 4
+    for stream_index in range(output_stream_count):
+        cmd.extend(["-streamid", f"{stream_index}:{stream_index}"])
+
+    bed_lufs = _format_iamf_loudness(bed_loudness.integrated_lufs)
+    bed_peak = _format_iamf_loudness(bed_loudness.true_peak_dbfs)
+    cmd.extend([
+        "-c:a", "libopus",
+        "-ar", str(OUTPUT_RATE_HZ),
+        "-b:a", "128000",
+        "-stream_group",
+        "type=iamf_audio_element:id=1:st=0:st=1:st=2:st=3:"
+        "audio_element_type=scene,layer=ch_layout=ambisonic 1:ambisonics_mode=mono",
+    ])
+
+    if object_path is not None:
+        mix_lufs = _format_iamf_loudness(
+            min(bed_loudness.integrated_lufs, object_loudness[0].integrated_lufs)
+        )
+        mix_peak = _format_iamf_loudness(
+            max(bed_loudness.true_peak_dbfs, object_loudness[0].true_peak_dbfs)
+        )
+        cmd.extend([
+            "-stream_group",
+            "type=iamf_audio_element:id=2:st=4,layer=ch_layout=mono",
+            "-stream_group",
+            "type=iamf_mix_presentation:id=3:stg=0:stg=1:"
+            "annotations=en-us=MinimapPR IAMF,"
+            "submix=parameter_id=100:parameter_rate=48000:default_mix_gain=0.0|"
+            "element=stg=0:headphones_rendering_mode=binaural:"
+            "annotations=en-us=Ambisonics:parameter_id=101:parameter_rate=48000:"
+            "default_mix_gain=0.0|"
+            "element=stg=1:headphones_rendering_mode=binaural:"
+            "annotations=en-us=Bird Object:parameter_id=102:parameter_rate=48000:"
+            "default_mix_gain=0.0|"
+            f"layout=sound_system=stereo:integrated_loudness={mix_lufs}:"
+            f"digital_peak={mix_peak}",
+        ])
+    else:
+        cmd.extend([
+            "-stream_group",
+            "type=iamf_mix_presentation:id=3:stg=0:"
+            "annotations=en-us=MinimapPR IAMF,"
+            "submix=parameter_id=100:parameter_rate=48000:default_mix_gain=0.0|"
+            "element=stg=0:headphones_rendering_mode=binaural:"
+            "annotations=en-us=Ambisonics:parameter_id=101:parameter_rate=48000:"
+            "default_mix_gain=0.0|"
+            f"layout=sound_system=stereo:integrated_loudness={bed_lufs}:"
+            f"digital_peak={bed_peak}",
+        ])
+    cmd.append(str(output_iamf_path))
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        output_iamf_path.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"ffmpeg IAMF encode failed (rc={proc.returncode}): "
+            f"{stderr.decode(errors='replace')[-800:]}"
+        )
 
 
 async def _try_iamf_mux(
@@ -1217,17 +1321,79 @@ async def _try_iamf_mux(
     offset_s: float,
 ) -> bool:
     """Attempt IAMF-in-MP4 mux; returns True on success."""
+    try:
+        stream_groups = await _probe_iamf_stream_groups(iamf_path)
+    except RuntimeError as exc:
+        logger.debug("IAMF mux probe failed: %s", exc)
+        return False
+
+    input_stream_indices = sorted({
+        stream_index
+        for group in stream_groups
+        for stream_index in group.stream_indices
+    })
+    if not input_stream_indices:
+        logger.debug("IAMF mux failed: no IAMF audio streams in %s", iamf_path)
+        return False
+    input_to_output_index = {
+        input_stream_index: output_index
+        for output_index, input_stream_index in enumerate(input_stream_indices, start=1)
+    }
+    audio_element_output_group_indices: list[int] = []
+    stream_group_args: list[str] = []
+    for group in stream_groups:
+        if group.group_type == "IAMF Audio Element":
+            stream_parts = [
+                f"st={input_to_output_index[input_stream_index]}"
+                for input_stream_index in group.stream_indices
+                if input_stream_index in input_to_output_index
+            ]
+            if not stream_parts:
+                logger.debug("IAMF mux failed: audio element group has no streams")
+                return False
+            stream_group_args.extend([
+                "-stream_group",
+                f"map=1={group.group_index}:" + ":".join(stream_parts),
+            ])
+            audio_element_output_group_indices.append(len(audio_element_output_group_indices))
+        elif group.group_type == "IAMF Mix Presentation":
+            if not audio_element_output_group_indices:
+                logger.debug("IAMF mux failed: mix presentation before audio elements")
+                return False
+            stg_parts = [f"stg={idx}" for idx in audio_element_output_group_indices]
+            stream_group_args.extend([
+                "-stream_group",
+                f"map=1={group.group_index}:" + ":".join(stg_parts),
+            ])
+
+    if not stream_group_args:
+        logger.debug("IAMF mux failed: no mappable IAMF stream groups")
+        return False
+
     itsoffset_args: list[str] = []
     if abs(offset_s) > 0.001:
         itsoffset_args = ["-itsoffset", f"{offset_s:.6f}"]
+
+    stream_map_args: list[str] = []
+    for input_stream_index in input_stream_indices:
+        stream_map_args.extend(["-map", f"1:{input_stream_index}"])
+    stream_id_args = ["-streamid", "0:1"]
+    for output_stream_index in range(1, len(input_stream_indices) + 1):
+        stream_id_args.extend([
+            "-streamid",
+            f"{output_stream_index}:{output_stream_index + 1}",
+        ])
 
     cmd = [
         "ffmpeg", "-y",
         "-i", str(video_path),
         *itsoffset_args,
         "-i", str(iamf_path),
-        "-map", "0:v", "-map", "1",
+        "-map", "0:v:0",
+        *stream_map_args,
         "-c:v", "copy", "-c:a", "copy",
+        *stream_id_args,
+        *stream_group_args,
         str(output_path),
     ]
     proc = await asyncio.create_subprocess_exec(
@@ -1247,6 +1413,59 @@ async def _try_iamf_mux(
     return True
 
 
+async def _probe_iamf_stream_groups(iamf_path: Path) -> list[IamfStreamGroupLayout]:
+    cmd = [
+        "ffprobe",
+        "-hide_banner",
+        "-v", "error",
+        "-show_stream_groups",
+        "-of", "json",
+        str(iamf_path),
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"ffprobe IAMF stream-group probe failed (rc={proc.returncode}): "
+            f"{stderr.decode(errors='replace')[-500:]}"
+        )
+    try:
+        payload = json.loads(stdout.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"ffprobe IAMF stream-group JSON parse failed: {exc}") from exc
+
+    groups: list[IamfStreamGroupLayout] = []
+    for group in payload.get("stream_groups", []):
+        group_type = str(group.get("type") or "")
+        if group_type not in {"IAMF Audio Element", "IAMF Mix Presentation"}:
+            continue
+        stream_indices = tuple(
+            int(stream["index"])
+            for stream in group.get("streams", [])
+            if "index" in stream
+        )
+        groups.append(
+            IamfStreamGroupLayout(
+                group_index=int(group.get("index", len(groups))),
+                group_type=group_type,
+                stream_indices=stream_indices,
+            )
+        )
+    if not groups:
+        raise RuntimeError(f"no IAMF stream groups found in {iamf_path}")
+    return groups
+
+
+def _format_iamf_loudness(value: float) -> str:
+    if not math.isfinite(value):
+        return "0.0"
+    return f"{value:.1f}"
+
+
 async def _ambix_aac_mux(
     video_path: Path,
     ambix_wav: Path,
@@ -1263,10 +1482,10 @@ async def _ambix_aac_mux(
         "-i", str(video_path),
         *itsoffset_args,
         "-i", str(ambix_wav),
+        "-filter:a", "pan=stereo|c0=0.707*c0+0.5*c1+0.5*c2|c1=0.707*c0-0.5*c1+0.5*c2",
         "-c:v", "copy",
         "-c:a", "aac", "-b:a", "320k",
         "-map", "0:v:0", "-map", "1:a:0",
-        "-metadata:s:a:0", "channel_layout=4.0",
         str(output_path),
     ]
     proc = await asyncio.create_subprocess_exec(

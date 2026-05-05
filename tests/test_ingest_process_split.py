@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from pathlib import Path
 
@@ -207,6 +208,7 @@ def test_capture_start_uses_configured_ingest_base_url(monkeypatch, tmp_path: Pa
             first_frame_pts_ns=None,
             work_dir=request.work_dir / "session-1",
             video_path=None,
+            ambix_path=None,
             iamf_path=None,
             youtube_path=None,
             error=None,
@@ -233,6 +235,58 @@ def test_capture_start_unavailable_for_python_ingest(monkeypatch, tmp_path: Path
 
     assert response.status_code == 503
     assert "combined process role" in response.json()["detail"]
+
+
+def test_capture_start_proxies_to_python_ingest_worker_in_split_mode(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    observed: dict[str, object] = {}
+
+    class _FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "session_id": "session-python-split",
+                    "state": "recording",
+                    "stream_key": "node-a",
+                    "range_lease_id": None,
+                    "start_time_ns": 123,
+                }
+            ).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        observed["url"] = request.full_url
+        observed["method"] = request.get_method()
+        observed["timeout"] = timeout
+        observed["body"] = json.loads(request.data.decode("utf-8"))
+        return _FakeResponse()
+
+    monkeypatch.setenv("MINIMAPPR_PROCESS_ROLE", "api")
+    monkeypatch.setenv("MINIMAPPR_INGEST_BACKEND", "python")
+    monkeypatch.setenv("MINIMAPPR_INGEST_PORT", "19091")
+    monkeypatch.setenv("MINIMAPPR_PORT", "18080")
+    monkeypatch.setenv("MINIMAPPR_DB_PATH", str(tmp_path / "capture-python-proxy.db"))
+    monkeypatch.setenv("MINIMAPPR_SNIPPET_DIR", str(tmp_path / "snippets"))
+    monkeypatch.setenv("MINIMAPPR_LARGE_ARTIFACT_DIR", str(tmp_path / "artifacts"))
+    monkeypatch.setattr("minimappr.main.urllib.request.urlopen", fake_urlopen)
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/capture/start", json={"stream_key": "node-a"})
+
+    assert response.status_code == 200
+    assert response.json()["session_id"] == "session-python-split"
+    assert observed["url"] == "http://127.0.0.1:19091/api/v1/capture/start"
+    assert observed["method"] == "POST"
+    assert observed["body"]["stream_key"] == "node-a"
 
 
 def test_capture_start_unavailable_for_memory_only_rust_sidecar(
@@ -286,6 +340,7 @@ def test_capture_start_uses_live_buffer_for_python_ingest(
             first_frame_pts_ns=None,
             work_dir=request.work_dir / "session-python-live",
             video_path=None,
+            ambix_path=None,
             iamf_path=None,
             youtube_path=None,
             error=None,
@@ -305,6 +360,134 @@ def test_capture_start_uses_live_buffer_for_python_ingest(
         "node-a:ch2",
         "node-a:ch3",
     ]
+
+
+def test_recording_stop_is_idempotent_after_worker_completed_session(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("MINIMAPPR_PROCESS_ROLE", "combined")
+    monkeypatch.setenv("MINIMAPPR_INGEST_BACKEND", "python")
+    monkeypatch.setenv("MINIMAPPR_DIRECT_INGEST_ENABLED", "true")
+    monkeypatch.setenv("MINIMAPPR_INGEST_SIDECAR_ENABLED", "false")
+    monkeypatch.setenv("MINIMAPPR_DB_PATH", str(tmp_path / "recording-stop-completed.db"))
+    monkeypatch.setenv("MINIMAPPR_SNIPPET_DIR", str(tmp_path / "snippets"))
+    monkeypatch.setenv("MINIMAPPR_LARGE_ARTIFACT_DIR", str(tmp_path / "artifacts"))
+    monkeypatch.setenv("MINIMAPPR_CLASSIFIER", "heuristic")
+    monkeypatch.setenv("MINIMAPPR_MODEL_CHAIN_CONFIG_PATH", str(tmp_path / "missing-model-chain.json"))
+    monkeypatch.setenv("MINIMAPPR_FEDERATION_ENABLED", "false")
+
+    completed_record = CaptureSessionRecord(
+        session_id="session-completed",
+        state=CaptureState.COMPLETED,
+        stream_key="node-a",
+        range_lease_id=None,
+        start_time_ns=123,
+        end_time_ns=456,
+        first_frame_pts_ns=123,
+        work_dir=tmp_path / "session-completed",
+        video_path=None,
+        ambix_path=None,
+        iamf_path=None,
+        youtube_path=None,
+        error=None,
+    )
+
+    async def fake_stop(self, session_id, sidecar_url=""):
+        del self, session_id, sidecar_url
+        raise ValueError("session session-completed is not recording (state=CaptureState.COMPLETED)")
+
+    def fake_get(self, session_id):
+        del self
+        return completed_record if session_id == "session-completed" else None
+
+    monkeypatch.setattr("minimappr.core.capture_session.CaptureSessionManager.stop", fake_stop)
+    monkeypatch.setattr("minimappr.core.capture_session.CaptureSessionManager.get", fake_get)
+
+    with TestClient(app) as client:
+        response = client.patch("/api/v1/recordings/session-completed/stop")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "completed"
+
+
+def test_recording_delete_removes_capture_session_row_and_artifacts(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "recording-delete.db"
+    artifact_dir = tmp_path / "artifacts"
+    work_dir = tmp_path / "captures" / "session-delete"
+    artifact_dir.mkdir()
+    work_dir.mkdir(parents=True)
+    ambix_path = artifact_dir / "session-delete_ambix.wav"
+    iamf_path = artifact_dir / "session-delete_audio.iamf"
+    ambix_path.write_bytes(b"wav")
+    iamf_path.write_bytes(b"iamf")
+
+    async def prepare_recording() -> None:
+        storage = Storage(db_path)
+        await storage.initialize()
+        try:
+            record = CaptureSessionRecord(
+                session_id="session-delete",
+                state=CaptureState.COMPLETED,
+                stream_key="node-a",
+                range_lease_id=None,
+                start_time_ns=123,
+                end_time_ns=456,
+                first_frame_pts_ns=123,
+                work_dir=work_dir,
+                video_path=None,
+                ambix_path=ambix_path,
+                iamf_path=iamf_path,
+                youtube_path=None,
+                error=None,
+            )
+            await storage.upsert_capture_session(record)
+            await storage.insert_large_artifact_for_session(
+                session_id=record.session_id,
+                artifact_type="iamf_video",
+                ambix_path=str(ambix_path),
+                iamf_path=str(iamf_path),
+                youtube_path=None,
+                created_ns=time.time_ns(),
+            )
+        finally:
+            await storage.close()
+
+    async def fetch_remaining_counts() -> tuple[int, int]:
+        storage = Storage(db_path)
+        await storage.initialize()
+        try:
+            db = storage._require_db()
+            capture_count = (await (await db.execute("SELECT COUNT(*) FROM capture_sessions")).fetchone())[0]
+            artifact_count = (await (await db.execute("SELECT COUNT(*) FROM large_artifacts")).fetchone())[0]
+            return int(capture_count), int(artifact_count)
+        finally:
+            await storage.close()
+
+    asyncio.run(prepare_recording())
+
+    monkeypatch.setenv("MINIMAPPR_PROCESS_ROLE", "combined")
+    monkeypatch.setenv("MINIMAPPR_INGEST_BACKEND", "python")
+    monkeypatch.setenv("MINIMAPPR_DIRECT_INGEST_ENABLED", "true")
+    monkeypatch.setenv("MINIMAPPR_INGEST_SIDECAR_ENABLED", "false")
+    monkeypatch.setenv("MINIMAPPR_DB_PATH", str(db_path))
+    monkeypatch.setenv("MINIMAPPR_SNIPPET_DIR", str(tmp_path / "snippets"))
+    monkeypatch.setenv("MINIMAPPR_LARGE_ARTIFACT_DIR", str(artifact_dir))
+    monkeypatch.setenv("MINIMAPPR_CLASSIFIER", "heuristic")
+    monkeypatch.setenv("MINIMAPPR_MODEL_CHAIN_CONFIG_PATH", str(tmp_path / "missing-model-chain.json"))
+    monkeypatch.setenv("MINIMAPPR_FEDERATION_ENABLED", "false")
+
+    with TestClient(app) as client:
+        response = client.delete("/api/v1/recordings/session-delete")
+
+    assert response.status_code == 204
+    assert ambix_path.exists() is False
+    assert iamf_path.exists() is False
+    assert work_dir.exists() is False
+    assert asyncio.run(fetch_remaining_counts()) == (0, 0)
 
 
 def test_plain_minimappr_supervises_python_ingest_when_ingest_port_is_explicit(

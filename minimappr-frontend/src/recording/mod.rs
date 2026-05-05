@@ -50,6 +50,7 @@ pub struct RecordingSession {
     pub ambisonics_ready: bool,
     pub iamf_ready: bool,
     pub video_ready: bool,
+    #[serde(default)]
     pub error_message: Option<String>,
 }
 
@@ -91,6 +92,8 @@ pub struct RecordingLibraryEntry {
     /// Approximate combined size of all output files in bytes.
     pub size_bytes: Option<u64>,
     pub status: RecordingStatus,
+    #[serde(default)]
+    pub error_message: Option<String>,
 }
 
 /// A camera/video capture device returned by GET /api/v1/cameras.
