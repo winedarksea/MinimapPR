@@ -15,7 +15,7 @@ extern "C" {
     pub fn add_detection_marker(event_id: &str, lat: f64, lon: f64, label: &str);
 
     #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "setTrackMarker")]
-    pub fn set_track_marker(track_id: &str, lat: f64, lon: f64, label: &str, tqi: f64);
+    pub fn set_track_marker(track_id: &str, lat: f64, lon: f64, label: &str, tqi: f64, status: &str);
 
     #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "setTrackVelocityVector")]
     pub fn set_track_velocity_vector(
@@ -24,6 +24,7 @@ extern "C" {
         lon: f64,
         vel_lat: f64,
         vel_lon: f64,
+        status: &str,
     );
 
     #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "removeTrack")]

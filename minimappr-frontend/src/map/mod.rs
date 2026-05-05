@@ -4,6 +4,7 @@ use crate::state::AppState;
 use bindings::*;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
+use std::collections::HashSet;
 
 #[component]
 pub fn LeafletMapPanel() -> impl IntoView {
@@ -46,26 +47,41 @@ pub fn LeafletMapPanel() -> impl IntoView {
         });
     }
 
-    // Sync tracks → map markers
+    // Sync tracks → map markers.
+    // Carries the previous set of track IDs as Effect state so stale markers
+    // (tracks that disappeared from the polled list) are removed promptly.
     {
-        Effect::new(move |_| {
+        Effect::new(move |prev_ids: Option<HashSet<String>>| {
             let _ = theme.get();
             let ts = tracks.get();
+
+            let current_ids: HashSet<String> = ts.iter().map(|t| t.track_id.clone()).collect();
+
+            // Remove markers for tracks no longer in the server list.
+            if let Some(ref prev) = prev_ids {
+                for id in prev.difference(&current_ids) {
+                    remove_track(id);
+                }
+            }
+
             for t in &ts {
                 if let Some(geo) = &t.position_geo {
                     let label = t.label.as_deref().unwrap_or("");
                     let tqi = t.tqi.unwrap_or(0.0);
-                    set_track_marker(&t.track_id, geo.lat, geo.lon, label, tqi);
+                    let status = t.status.as_deref().unwrap_or("active");
+                    set_track_marker(&t.track_id, geo.lat, geo.lon, label, tqi, status);
                     if let Some(vel) = &t.velocity_mps {
                         if vel.len() >= 2 {
                             // Rough local velocity → geo delta (1 m ≈ 9e-6 deg)
                             let dlat = vel[1] * 9e-6;
                             let dlon = vel[0] * 9e-6 / (geo.lat.to_radians().cos()).max(0.01);
-                            set_track_velocity_vector(&t.track_id, geo.lat, geo.lon, dlat, dlon);
+                            set_track_velocity_vector(&t.track_id, geo.lat, geo.lon, dlat, dlon, status);
                         }
                     }
                 }
             }
+
+            current_ids
         });
     }
 
@@ -92,18 +108,46 @@ pub fn LeafletMapPanel() -> impl IntoView {
                     <section class="map-floating-panel">
                         <div class="map-floating-title">"Overlay Legend"</div>
                         <div class="legend">
-                            <span class="legend-item">
-                                <span class="legend-dot node"></span>
-                                "Nodes"
-                            </span>
-                            <span class="legend-item">
-                                <span class="legend-dot track"></span>
-                                "Tracks"
-                            </span>
-                            <span class="legend-item">
-                                <span class="legend-dot detection"></span>
-                                "Detections"
-                            </span>
+                            // Nodes
+                            <div class="legend-group">
+                                <div class="legend-group-label">"Nodes"</div>
+                                <span class="legend-item">
+                                    <span class="legend-shape-node"></span>
+                                    "Online"
+                                </span>
+                                <span class="legend-item">
+                                    <span class="legend-shape-node degraded"></span>
+                                    "Degraded"
+                                </span>
+                                <span class="legend-item">
+                                    <span class="legend-shape-node offline"></span>
+                                    "Offline"
+                                </span>
+                            </div>
+                            // Tracks
+                            <div class="legend-group">
+                                <div class="legend-group-label">"Tracks"</div>
+                                <span class="legend-item">
+                                    <span class="legend-shape-track"></span>
+                                    "Active"
+                                </span>
+                                <span class="legend-item">
+                                    <span class="legend-shape-track coasting"></span>
+                                    "Coasting"
+                                </span>
+                                <span class="legend-item">
+                                    <span class="legend-shape-track dropped"></span>
+                                    "Dropped"
+                                </span>
+                            </div>
+                            // Events
+                            <div class="legend-group">
+                                <div class="legend-group-label">"Events"</div>
+                                <span class="legend-item">
+                                    <span class="legend-shape-detection"></span>
+                                    "Detection"
+                                </span>
+                            </div>
                         </div>
                     </section>
                 </div>

@@ -5,14 +5,17 @@
   "use strict";
 
   let _map = null;
-  const _markers = {};   // key → L.Marker or L.CircleMarker
-  const _vectors = {};   // track_id → L.Polyline (velocity)
-  const _ellipses = {};  // track_id → L.Ellipse (covariance)
-  const _zones = {};     // zone_id → L.Polygon
-  const _gdop = {};      // key → L.Circle
+  const _markers = {};           // key → L.Marker or L.CircleMarker
+  const _vectors = {};           // track_id → L.Polyline (velocity)
+  const _ellipses = {};          // track_id → L.Ellipse (covariance)
+  const _zones = {};             // zone_id → L.Polygon
+  const _gdop = {};              // key → L.Circle
+  const _trackRemoveTimers = {}; // track_id → setTimeout handle for dropped cleanup
 
   const TILE_CACHE_NAME = "mmpr-osm-tiles-v2";
   const OSM_TEMPLATE = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
+  // Delay before a "dropped" track marker is auto-removed from the map.
+  const DROPPED_TRACK_LINGER_MS = 30_000;
 
   function readCssColor(name, fallback) {
     const root = document.documentElement;
@@ -23,14 +26,28 @@
 
   function palette() {
     return {
-      node: readCssColor("--mmp-sys-color-map-node", "#58a6ff"),
-      track: readCssColor("--mmp-sys-color-map-track", "#5fd6c4"),
-      detection: readCssColor("--mmp-sys-color-map-detection", "#f78166"),
-      warn: readCssColor("--mmp-sys-color-warn", "#d29922"),
-      danger: readCssColor("--mmp-sys-color-danger", "#f85149"),
-      surface: readCssColor("--md-sys-color-surface-container-low", "#161b22"),
-      outline: readCssColor("--md-sys-color-outline-variant", "#30363d"),
+      node:          readCssColor("--mmp-sys-color-map-node",           "#58a6ff"),
+      track:         readCssColor("--mmp-sys-color-map-track",          "#5fd6c4"),
+      trackCoasting: readCssColor("--mmp-sys-color-map-track-coasting", "#d29922"),
+      trackDropped:  readCssColor("--mmp-sys-color-map-track-dropped",  "#6e7681"),
+      detection:     readCssColor("--mmp-sys-color-map-detection",      "#f78166"),
+      warn:          readCssColor("--mmp-sys-color-warn",               "#d29922"),
+      danger:        readCssColor("--mmp-sys-color-danger",             "#f85149"),
+      surface:       readCssColor("--md-sys-color-surface-container-low", "#161b22"),
+      outline:       readCssColor("--md-sys-color-outline-variant",    "#30363d"),
     };
+  }
+
+  function trackColorForStatus(status, colors) {
+    if (status === "dropped" || status === "lost") return colors.trackDropped;
+    if (status === "coasting") return colors.trackCoasting;
+    return colors.track;
+  }
+
+  function trackOpacityForStatus(status) {
+    if (status === "dropped") return 0.38;
+    if (status === "lost")    return 0.62;
+    return 1.0;
   }
 
   function divIcon(html, size, className) {
@@ -57,12 +74,13 @@
     );
   }
 
-  function makeTrackIcon(color, tqi) {
+  function makeTrackIcon(color, tqi, opacity) {
     const colors = palette();
     const size = 34 + Math.round((tqi || 0) * 6);
     const offset = (size - 34) / 2;
+    const op = (opacity !== undefined && opacity !== null) ? opacity : 1.0;
     return divIcon(
-      '<div style="width:' + size + "px;height:" + size + 'px;filter:drop-shadow(0 2px 7px rgba(0,0,0,.46));">' +
+      '<div style="width:' + size + "px;height:" + size + 'px;filter:drop-shadow(0 2px 7px rgba(0,0,0,.46));opacity:' + op + ';">' +
         '<svg viewBox="0 0 34 34" width="' + size + '" height="' + size + '" aria-hidden="true">' +
           '<g transform="translate(' + offset + "," + offset + ')">' +
             '<polygon points="17,4 30,17 17,30 4,17" fill="' + colors.surface + '" stroke="' + color + '" stroke-width="2.2"></polygon>' +
@@ -135,70 +153,84 @@
     });
   }
 
-  // Intercepts tile load errors at the L.TileLayer level.
-  // Normal (non-error) tiles take the fast path: Leaflet sets img.src directly
-  // via the inherited createTile, avoiding any async overhead.  Only on error
-  // do we check the persistent cache and then fall back to the generated
-  // placeholder canvas tile so the map stays usable even when OSM is down.
+  // Resilient OSM tile layer with a fixed createTile implementation.
+  //
+  // Previous approach: called L.TileLayer.prototype.createTile (which sets
+  // up img.onload/img.onerror internally), then added a separate addEventListener
+  // for "error". When a tile failed, Leaflet's onerror called done(err), and
+  // our handler then changed tile.src, triggering onload again → done(null)
+  // called a second time. This double-done confused Leaflet's tile manager,
+  // breaking zoom interactions until page refresh.
+  //
+  // New approach: own createTile entirely. Call done() exactly once per tile.
+  // Cache hit → load from blob URL → done(null).
+  // Cache miss → load from network → done(null), then opportunistically cache.
+  // Network error → render fallback canvas → done(null, tile as "loaded").
   function createResilientOsmTileLayer() {
     const ResilientTileLayer = L.TileLayer.extend({
       createTile: function (coords, done) {
-        // Call the standard Leaflet createTile so the img.src is set
-        // immediately, giving tiles the fastest possible happy-path load.
-        const tile = L.TileLayer.prototype.createTile.call(this, coords, done);
+        const tile = document.createElement("img");
+        tile.setAttribute("role", "presentation");
+        tile.crossOrigin = "";
         const url = this.getTileUrl(coords);
         const tileSize = this.getTileSize();
         const width = (tileSize && tileSize.x) || 256;
 
-        // Intercept tile errors: try persistent cache first, then render
-        // a labelled placeholder canvas tile so the overlay layer (markers,
-        // heatmap, tracks) is still visible on a non-blank background.
-        let _usedFallback = false;
-        tile.addEventListener("error", function onTileError() {
-          _usedFallback = true;
-          (async () => {
-            try {
-              const cache = await getTileCache();
-              if (cache) {
-                const cachedResp = await cache.match(requestFromUrl(url));
-                if (cachedResp) {
-                  const blobUrl = await responseToObjectUrl(cachedResp);
-                  tile.onload = function () { URL.revokeObjectURL(blobUrl); };
-                  tile.src = blobUrl;
-                  return;
-                }
-              }
-            } catch (_) {
-              // Cache unavailable (non-secure context, quota, etc.) — fall through.
+        (async () => {
+          // 1. Try the persistent cache — avoids the blank-map flash on reload.
+          let blobUrl = null;
+          try {
+            const cache = await getTileCache();
+            if (cache) {
+              const cached = await cache.match(requestFromUrl(url));
+              if (cached) blobUrl = await responseToObjectUrl(cached);
             }
-            tile.src = makeGenericFallbackTileDataUrl(width);
-          })();
-        }, { once: true });
+          } catch (_) { /* cache unavailable */ }
 
-        // After a successful network load, opportunistically cache the tile
-        // so it survives future rate-limit or offline periods.
-        // Skip if the load was triggered by the error fallback path.
-        tile.addEventListener("load", function onTileLoad() {
-          if (_usedFallback) return;
-          (async () => {
-            try {
-              const cache = await getTileCache();
-              if (!cache) return;
-              // Skip if already cached to avoid redundant writes.
-              const alreadyCached = await cache.match(requestFromUrl(url));
-              if (alreadyCached) return;
-              const resp = await fetch(requestFromUrl(url), {
-                mode: "cors",
-                credentials: "omit",
-              });
-              if (resp.ok) {
-                await cache.put(requestFromUrl(url), resp);
-              }
-            } catch (_) {
-              // Best-effort write; failure is non-fatal.
-            }
-          })();
-        }, { once: true });
+          if (blobUrl) {
+            tile.onload = function () {
+              tile.onload = null; tile.onerror = null;
+              URL.revokeObjectURL(blobUrl);
+              done(null, tile);
+            };
+            tile.onerror = function () {
+              // Corrupt or expired cache entry — fall through to network.
+              tile.onload = null; tile.onerror = null;
+              URL.revokeObjectURL(blobUrl);
+              loadFromNetwork();
+            };
+            tile.src = blobUrl;
+          } else {
+            loadFromNetwork();
+          }
+
+          function loadFromNetwork() {
+            tile.onload = function () {
+              tile.onload = null; tile.onerror = null;
+              done(null, tile);
+              // Opportunistically cache the tile for offline/rate-limit resilience.
+              (async () => {
+                try {
+                  const cache = await getTileCache();
+                  if (!cache) return;
+                  if (await cache.match(requestFromUrl(url))) return;
+                  const resp = await fetch(requestFromUrl(url), { mode: "cors", credentials: "omit" });
+                  if (resp.ok) await cache.put(requestFromUrl(url), resp);
+                } catch (_) { /* best-effort */ }
+              })();
+            };
+            tile.onerror = function () {
+              tile.onload = null; tile.onerror = null;
+              // Show a labelled placeholder so overlay markers remain visible.
+              // Pass done(null) so Leaflet treats the tile as loaded (not errored),
+              // which keeps zoom and pan working correctly.
+              const fallback = makeGenericFallbackTileDataUrl(width);
+              tile.onload = function () { tile.onload = null; done(null, tile); };
+              tile.src = fallback;
+            };
+            tile.src = url;
+          }
+        })();
 
         return tile;
       },
@@ -244,6 +276,7 @@
       for (const k in _ellipses) delete _ellipses[k];
       for (const k in _zones)    delete _zones[k];
       for (const k in _gdop)     delete _gdop[k];
+      for (const k in _trackRemoveTimers) { clearTimeout(_trackRemoveTimers[k]); delete _trackRemoveTimers[k]; }
     }
     try {
       _map = L.map(target, {
@@ -257,12 +290,26 @@
       try { delete target._leaflet_id; _map = L.map(target, { center: [lat, lon], zoom: zoom ?? 17, zoomControl: true }); }
       catch (_) { return; }
     }
-    // updateWhenIdle defers tile fetches until panning stops, reducing OSM load.
-    // maxZoom 18 = OSM's nominal limit (19+ just upscales the same tiles).
     createResilientOsmTileLayer().addTo(_map);
     // Deferred invalidateSize handles cases where the map container's flex
     // dimensions settle after the initial paint (e.g. WASM hydration timing).
     setTimeout(function () { if (_map) _map.invalidateSize(); }, 100);
+
+    // ResizeObserver fires once the container reaches its settled flex
+    // dimensions, ensuring invalidateSize sees the real layout. This fixes
+    // zoom interactions that break when init() runs before layout is complete.
+    if (typeof ResizeObserver !== "undefined") {
+      const ro = new ResizeObserver(function (entries) {
+        const entry = entries[0];
+        if (!entry) return;
+        const rect = entry.contentRect;
+        if (rect.width > 0 && rect.height > 0) {
+          if (_map) _map.invalidateSize();
+          ro.disconnect();
+        }
+      });
+      ro.observe(target);
+    }
   }
 
   // ── Node markers ──────────────────────────────────────────────
@@ -302,34 +349,61 @@
   }
 
   // ── Track markers + velocity vectors ─────────────────────────
-  function setTrackMarker(trackId, lat, lon, label, tqi) {
+  function setTrackMarker(trackId, lat, lon, label, tqi, status) {
     const colors = palette();
-    const key = "track:" + trackId;
+    const color   = trackColorForStatus(status, colors);
+    const opacity = trackOpacityForStatus(status);
+    const key     = "track:" + trackId;
+
+    // Cancel any pending auto-removal (track came back to life or changed status).
+    if (_trackRemoveTimers[trackId]) {
+      clearTimeout(_trackRemoveTimers[trackId]);
+      delete _trackRemoveTimers[trackId];
+    }
+
+    const tooltipText = (label || trackId.slice(0, 8)) +
+      (status && status !== "active" && status !== "confirmed" ? " [" + status + "]" : "");
+
     if (_markers[key]) {
       _markers[key].setLatLng([lat, lon]);
-      _markers[key].setIcon(makeTrackIcon(colors.track, tqi));
+      _markers[key].setIcon(makeTrackIcon(color, tqi, opacity));
+      _markers[key].setTooltipContent(tooltipText);
     } else {
       _markers[key] = L.marker([lat, lon], {
-        icon: makeTrackIcon(colors.track, tqi),
-      }).bindTooltip(label || trackId.slice(0, 8), { permanent: false }).addTo(_map);
+        icon: makeTrackIcon(color, tqi, opacity),
+      }).bindTooltip(tooltipText, { permanent: false }).addTo(_map);
+    }
+
+    // Schedule auto-removal for dropped tracks so they eventually clear even
+    // if the backend keeps them in the list beyond their display window.
+    if (status === "dropped") {
+      _trackRemoveTimers[trackId] = setTimeout(function () {
+        removeTrack(trackId);
+      }, DROPPED_TRACK_LINGER_MS);
     }
   }
 
-  function setTrackVelocityVector(trackId, lat, lon, velLat, velLon) {
-    const colors = palette();
-    const endLat = lat + velLat * 3;
-    const endLon = lon + velLon * 3;
+  function setTrackVelocityVector(trackId, lat, lon, velLat, velLon, status) {
+    const colors  = palette();
+    const color   = trackColorForStatus(status, colors);
+    const opacity = status === "dropped" ? 0.0 : 0.72;
+    const endLat  = lat + velLat * 3;
+    const endLon  = lon + velLon * 3;
     if (_vectors[trackId]) {
       _vectors[trackId].setLatLngs([[lat, lon], [endLat, endLon]]);
-      _vectors[trackId].setStyle({ color: colors.track });
+      _vectors[trackId].setStyle({ color, opacity });
     } else {
       _vectors[trackId] = L.polyline([[lat, lon], [endLat, endLon]], {
-        color: colors.track, weight: 1.5, opacity: 0.72, dashArray: "5,4",
+        color, weight: 1.5, opacity, dashArray: "5,4",
       }).addTo(_map);
     }
   }
 
   function removeTrack(trackId) {
+    if (_trackRemoveTimers[trackId]) {
+      clearTimeout(_trackRemoveTimers[trackId]);
+      delete _trackRemoveTimers[trackId];
+    }
     const key = "track:" + trackId;
     if (_markers[key]) { _markers[key].remove(); delete _markers[key]; }
     if (_vectors[trackId]) { _vectors[trackId].remove(); delete _vectors[trackId]; }

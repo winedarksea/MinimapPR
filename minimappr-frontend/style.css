@@ -84,9 +84,11 @@
   /* Tactical accent — saturated amber for live/armed states */
   --mmp-sys-color-armed:    #ff9030;
   --mmp-sys-color-on-armed: #2d1400;
-  --mmp-sys-color-map-node:      var(--mmp-sys-color-info);
-  --mmp-sys-color-map-track:     #5fd6c4;
-  --mmp-sys-color-map-detection: #ff8d6a;
+  --mmp-sys-color-map-node:             var(--mmp-sys-color-info);
+  --mmp-sys-color-map-track:            #5fd6c4;
+  --mmp-sys-color-map-track-coasting:   var(--mmp-sys-color-warn);
+  --mmp-sys-color-map-track-dropped:    #6e7681;
+  --mmp-sys-color-map-detection:        #ff8d6a;
   --mmp-glass-bg: color-mix(in srgb, var(--md-sys-color-surface-container) 72%, transparent);
   --mmp-glass-border: color-mix(in srgb, var(--md-sys-color-outline) 65%, transparent);
 
@@ -238,9 +240,11 @@
 
   --mmp-sys-color-armed:    #c4480b;
   --mmp-sys-color-on-armed: #ffffff;
-  --mmp-sys-color-map-node:      var(--mmp-sys-color-info);
-  --mmp-sys-color-map-track:     #006e65;
-  --mmp-sys-color-map-detection: #b13812;
+  --mmp-sys-color-map-node:             var(--mmp-sys-color-info);
+  --mmp-sys-color-map-track:            #006e65;
+  --mmp-sys-color-map-track-coasting:   var(--mmp-sys-color-warn);
+  --mmp-sys-color-map-track-dropped:    #8c959f;
+  --mmp-sys-color-map-detection:        #b13812;
   --mmp-glass-bg: color-mix(in srgb, var(--md-sys-color-surface-container-lowest) 82%, transparent);
   --mmp-glass-border: color-mix(in srgb, var(--md-sys-color-outline) 48%, transparent);
 }
@@ -775,11 +779,93 @@ body {
   gap: var(--mmp-density-gap-md);
   flex-wrap: wrap;
 }
+.legend-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.legend-group-label {
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--md-sys-color-on-surface-variant);
+  margin-bottom: 2px;
+}
 .legend-item {
   display: flex; align-items: center; gap: 6px;
   color: var(--md-sys-color-on-surface-variant);
   font-size: var(--md-sys-typescale-label-small-size);
 }
+
+/* ── Legend shapes (CSS-only, match actual map icons) ── */
+/* Node: rounded square with center dot */
+.legend-shape-node {
+  width: 11px; height: 11px;
+  border: 1.5px solid var(--mmp-sys-color-map-node);
+  border-radius: 3px;
+  position: relative;
+  flex-shrink: 0;
+}
+.legend-shape-node::after {
+  content: "";
+  position: absolute;
+  top: 50%; left: 50%;
+  width: 3.5px; height: 3.5px;
+  background: var(--mmp-sys-color-map-node);
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+}
+.legend-shape-node.degraded { border-color: var(--mmp-sys-color-warn); }
+.legend-shape-node.degraded::after { background: var(--mmp-sys-color-warn); }
+.legend-shape-node.offline  { border-color: var(--mmp-sys-color-danger); }
+.legend-shape-node.offline::after  { background: var(--mmp-sys-color-danger); }
+
+/* Track: rotated square (diamond) with center dot */
+.legend-shape-track {
+  width: 9px; height: 9px;
+  border: 1.5px solid var(--mmp-sys-color-map-track);
+  transform: rotate(45deg);
+  position: relative;
+  flex-shrink: 0;
+  margin: 1px 2px; /* compensate for rotation expanding bounding box */
+}
+.legend-shape-track::after {
+  content: "";
+  position: absolute;
+  top: 50%; left: 50%;
+  width: 3px; height: 3px;
+  background: var(--mmp-sys-color-map-track);
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+}
+.legend-shape-track.coasting { border-color: var(--mmp-sys-color-map-track-coasting); }
+.legend-shape-track.coasting::after { background: var(--mmp-sys-color-map-track-coasting); }
+.legend-shape-track.dropped {
+  border-color: var(--mmp-sys-color-map-track-dropped);
+  opacity: 0.55;
+}
+.legend-shape-track.dropped::after { background: var(--mmp-sys-color-map-track-dropped); }
+
+/* Detection: concentric rings */
+.legend-shape-detection {
+  width: 11px; height: 11px;
+  border: 1.5px solid var(--mmp-sys-color-map-detection);
+  border-radius: 50%;
+  position: relative;
+  flex-shrink: 0;
+}
+.legend-shape-detection::after {
+  content: "";
+  position: absolute;
+  top: 50%; left: 50%;
+  width: 3.5px; height: 3.5px;
+  background: var(--mmp-sys-color-map-detection);
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+}
+
+/* Legacy dot classes kept for any external references */
 .legend-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 .legend-dot.node { background: var(--mmp-sys-color-map-node); }
 .legend-dot.track { background: var(--mmp-sys-color-map-track); }
