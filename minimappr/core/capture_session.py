@@ -70,6 +70,8 @@ class CaptureSessionRecord:
     """When False, skip IAMF encoding (ambisonics-only recording)."""
     include_video: bool = True
     """When False, no video was captured for this session."""
+    object_path: Optional[Path] = None
+    """Selected mono IAMF object slot rendered for review."""
 
 
 @dataclass

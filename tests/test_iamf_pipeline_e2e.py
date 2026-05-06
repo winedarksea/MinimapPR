@@ -118,6 +118,12 @@ def _make_session_record(
 class _StubStorage:
     """Minimal storage stub that satisfies IamfPipeline's DB queries."""
 
+    async def query_tracks_in_window(self, start_ns: int, end_ns: int):
+        return []
+
+    async def query_detections_for_track(self, track_id: str, start_ns: int, end_ns: int):
+        return []
+
     async def get_tracks_in_range(self, start_ns: int, end_ns: int):
         return []
 
@@ -129,6 +135,44 @@ class _StubStorage:
 
     async def insert_large_artifact_for_session(self, *args, **kwargs):
         pass
+
+
+class _StubStorageWithTrack(_StubStorage):
+    def __init__(self, start_ns: int, end_ns: int) -> None:
+        self._start_ns = start_ns
+        self._end_ns = end_ns
+
+    async def query_tracks_in_window(self, start_ns: int, end_ns: int):
+        return [
+            {
+                "track_id": "trk-review",
+                "tqi": 0.9,
+                "confidence": 0.8,
+            }
+        ]
+
+    async def query_detections_for_track(self, track_id: str, start_ns: int, end_ns: int):
+        del track_id
+        return [
+            {
+                "toa_ns": self._start_ns,
+                "timestamp_ns": self._start_ns,
+                "x": 1.0,
+                "y": 0.0,
+                "z": 0.0,
+                "confidence": 0.8,
+                "label_confidence": 0.9,
+            },
+            {
+                "toa_ns": self._end_ns,
+                "timestamp_ns": self._end_ns,
+                "x": 1.0,
+                "y": 0.0,
+                "z": 0.0,
+                "confidence": 0.8,
+                "label_confidence": 0.9,
+            },
+        ]
 
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
@@ -199,6 +243,46 @@ class TestIamfPipelineE2E:
         # Verify the IAMF file is non-empty.
         iamf_path = iamf_files[0]
         assert iamf_path.stat().st_size > 0, "IAMF file is empty"
+
+    @pytest.mark.asyncio
+    async def test_full_pipeline_preserves_selected_object_review_wav(self, work_dir: Path, artifacts_dir: Path):
+        """A selected IAMF object slot should be saved as a mono review WAV."""
+        sensor_ids = [f"test_node:ch{i}" for i in range(N_CHANNELS)]
+        buffer = MultiSensorBuffer(max_duration_seconds=30.0)
+
+        start_ns = time.time_ns()
+        await _populate_buffer(buffer, sensor_ids, start_ns)
+        end_ns = start_ns + int(DURATION_S * 1_000_000_000)
+        buffer.pin("test_session_object", start_ns)
+
+        record = _make_session_record(
+            session_id="e2e_object_session",
+            work_dir=work_dir,
+            start_ns=start_ns,
+            end_ns=end_ns,
+            sensor_ids=sensor_ids,
+        )
+
+        pipeline = IamfPipeline(
+            sidecar_url=None,
+            db_storage=_StubStorageWithTrack(start_ns, end_ns),
+            multi_sensor_buffer=buffer,
+            artifact_dir=artifacts_dir,
+        )
+
+        try:
+            await pipeline.run(record)
+        finally:
+            buffer.unpin("test_session_object")
+
+        object_files = list(artifacts_dir.glob("*_object.wav"))
+        assert len(object_files) == 1
+        object_path = object_files[0]
+        assert record.object_path == object_path
+        with wave.open(str(object_path), "rb") as w:
+            assert w.getnchannels() == 1
+            assert w.getframerate() == OUTPUT_RATE_HZ
+            assert w.getnframes() > 0
 
     @pytest.mark.asyncio
     async def test_ambisonics_only_pipeline(self, work_dir: Path, artifacts_dir: Path):

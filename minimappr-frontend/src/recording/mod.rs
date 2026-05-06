@@ -49,6 +49,8 @@ pub struct RecordingSession {
     pub duration_seconds: Option<f64>,
     pub ambisonics_ready: bool,
     pub iamf_ready: bool,
+    #[serde(default)]
+    pub object_ready: bool,
     pub video_ready: bool,
     #[serde(default)]
     pub error_message: Option<String>,
@@ -88,6 +90,8 @@ pub struct RecordingLibraryEntry {
     pub listener_node_id: String,
     pub ambisonics_available: bool,
     pub iamf_available: bool,
+    #[serde(default)]
+    pub object_available: bool,
     pub video_available: bool,
     /// Approximate combined size of all output files in bytes.
     pub size_bytes: Option<u64>,

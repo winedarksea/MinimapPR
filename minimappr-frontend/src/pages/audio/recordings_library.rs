@@ -107,8 +107,10 @@ fn RecordingRow(
     let is_completed = matches!(entry.status, RecordingStatus::Completed);
 
     let ambi_url = api::download_url(&entry.session_id, "ambisonics");
+    let object_url = api::download_url(&entry.session_id, "object");
     let iamf_url = api::download_url(&entry.session_id, "iamf");
     let video_url = api::download_url(&entry.session_id, "video");
+    let show_object = entry.object_available;
     let show_iamf = entry.iamf_available;
     let show_video = entry.video_available;
     let error_message = entry.error_message.clone();
@@ -127,6 +129,9 @@ fn RecordingRow(
                     })}
                     {show_iamf.then(|| view! {
                         <span class="badge">"IAMF"</span>
+                    })}
+                    {show_object.then(|| view! {
+                        <span class="badge">"Obj"</span>
                     })}
                     {show_video.then(|| view! {
                         <span class="badge">"Video"</span>
@@ -147,6 +152,14 @@ fn RecordingRow(
                         move || view! {
                             <a class="btn-sm" href=ambi_url.clone() download>
                                 "↓ Ambi"
+                            </a>
+                        }
+                    })}
+                    {(is_completed && show_object).then({
+                        let object_url = object_url.clone();
+                        move || view! {
+                            <a class="btn-sm" href=object_url.clone() download>
+                                "↓ Obj"
                             </a>
                         }
                     })}

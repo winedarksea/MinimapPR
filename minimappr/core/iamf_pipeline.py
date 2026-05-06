@@ -311,6 +311,7 @@ class IamfPipeline:
         if output_slot is not None:
             object_path = work_dir / "object_slot.wav"
             _write_wav_mono(object_path, output_slot.samples, OUTPUT_RATE_HZ)
+            record.object_path = object_path
         positions_path = work_dir / "iamf_positions.json"
         _write_iamf_positions_sidecar(
             positions_path,
@@ -375,7 +376,7 @@ class IamfPipeline:
 
         # ── 11. Cleanup intermediates ─────────────────────────────────────────
         logger.info("[%s] step 10: cleanup intermediates", record.session_id[:8])
-        for f in [bed_path, object_path, positions_path] + [
+        for f in [bed_path, positions_path] + [
             work_dir / f"object_{tid}.wav" for tid in object_tracks
         ]:
             if f is not None:
@@ -394,6 +395,11 @@ class IamfPipeline:
         if ambix_path.exists():
             ambix_path.replace(final_ambix)
             record.ambix_path = final_ambix
+
+        if object_path is not None and object_path.exists():
+            final_object = artifacts_dir / f"{record.session_id}_object.wav"
+            object_path.replace(final_object)
+            record.object_path = final_object
 
         if record.youtube_path and record.youtube_path.exists():
             final_mp4 = artifacts_dir / f"{record.session_id}_youtube.mp4"
@@ -698,6 +704,7 @@ class IamfPipeline:
                 artifact_type="iamf_video",
                 ambix_path=str(record.ambix_path) if record.ambix_path else None,
                 iamf_path=str(record.iamf_path) if record.iamf_path else None,
+                object_path=str(record.object_path) if record.object_path else None,
                 youtube_path=str(record.youtube_path) if record.youtube_path else None,
                 created_ns=time.time_ns(),
             )
