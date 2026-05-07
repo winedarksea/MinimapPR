@@ -1,3 +1,4 @@
+use crate::map::bindings::pan_to;
 use crate::state::AppState;
 use crate::ui::{classify_age_from_ns, short_id, track_status_chip_class, track_status_label};
 use leptos::prelude::*;
@@ -38,6 +39,7 @@ fn trigger_track_download(track_id: &str) {
 pub fn TracksPane() -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState");
     let tracks = state.tracks;
+    let selected_track = state.selected_track;
 
     view! {
         <div class="tab-pane">
@@ -86,9 +88,31 @@ pub fn TracksPane() -> impl IntoView {
                                 }).unwrap_or_else(|| t.track_id.clone());
 
                                 let track_id = t.track_id.clone();
+                                let geo_for_click = t.position_geo.clone();
+                                let hover_id = track_id.clone();
+                                let row_tid = track_id.clone();
 
                                 view! {
-                                    <tr class=move || if age_class == "age-lost" { "track-row-stale" } else { "" }>
+                                    <tr
+                                        class=move || {
+                                            let sel = selected_track.get();
+                                            let is_sel = sel.as_deref() == Some(&row_tid);
+                                            match (age_class == "age-lost", is_sel) {
+                                                (true, true)  => "track-row-stale track-row-selected",
+                                                (true, false) => "track-row-stale",
+                                                (false, true) => "track-row-selected",
+                                                (false, false) => "",
+                                            }
+                                        }
+                                        style="cursor:pointer"
+                                        on:mouseenter=move |_| selected_track.set(Some(hover_id.clone()))
+                                        on:mouseleave=move |_| selected_track.set(None)
+                                        on:click=move |_| {
+                                            if let Some(geo) = &geo_for_click {
+                                                pan_to(geo.lat, geo.lon);
+                                            }
+                                        }
+                                    >
                                         <td>
                                             <code class="track-id-code" title=geo_title>
                                                 {id_short}

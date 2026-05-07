@@ -11,6 +11,8 @@
   const _zones = {};             // zone_id → L.Polygon
   const _gdop = {};              // key → L.Circle
   const _trackRemoveTimers = {}; // track_id → setTimeout handle for dropped cleanup
+  let _highlightedTrackId = null;
+  let _highlightRing = null;
 
   const TILE_CACHE_NAME = "mmpr-osm-tiles-v2";
   const OSM_TEMPLATE = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
@@ -404,10 +406,35 @@
       clearTimeout(_trackRemoveTimers[trackId]);
       delete _trackRemoveTimers[trackId];
     }
+    if (trackId === _highlightedTrackId) clearTrackHighlight();
     const key = "track:" + trackId;
     if (_markers[key]) { _markers[key].remove(); delete _markers[key]; }
     if (_vectors[trackId]) { _vectors[trackId].remove(); delete _vectors[trackId]; }
     if (_ellipses[trackId]) { _ellipses[trackId].remove(); delete _ellipses[trackId]; }
+  }
+
+  function highlightTrack(trackId) {
+    clearTrackHighlight();
+    _highlightedTrackId = trackId;
+    const key = "track:" + trackId;
+    const marker = _markers[key];
+    if (!marker || !_map) return;
+    marker.bringToFront();
+    const latlng = marker.getLatLng();
+    const colors = palette();
+    _highlightRing = L.circleMarker(latlng, {
+      radius: 24,
+      color: colors.track,
+      weight: 2.5,
+      fillOpacity: 0,
+      opacity: 0.9,
+      className: "mmpr-track-highlight-ring",
+    }).addTo(_map);
+  }
+
+  function clearTrackHighlight() {
+    if (_highlightRing) { _highlightRing.remove(); _highlightRing = null; }
+    _highlightedTrackId = null;
   }
 
   // ── Zone polygons ─────────────────────────────────────────────
@@ -490,6 +517,7 @@
     setNodeMarker, removeNodeMarker,
     addDetectionMarker,
     setTrackMarker, setTrackVelocityVector, removeTrack,
+    highlightTrack, clearTrackHighlight,
     setZone, removeZone,
     setGdopCircle, removeGdopCircle,
     panTo,

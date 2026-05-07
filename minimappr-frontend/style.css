@@ -989,6 +989,16 @@ body {
 .track-row-stale td { opacity: 0.55; }
 .track-row-stale:hover td { opacity: 0.85; }
 
+/* Sidebar row highlight on hover — synced to map ring */
+.track-row-selected td { background: var(--md-sys-color-surface-container-high, #30363d); }
+
+/* Map highlight ring — pulsing outline around the hovered track marker */
+@keyframes mmpr-ring-pulse {
+  0%, 100% { opacity: 0.9; }
+  50%       { opacity: 0.35; }
+}
+.mmpr-track-highlight-ring { animation: mmpr-ring-pulse 1.4s ease-in-out infinite; }
+
 /* Track ID code in table — shows geo coords as native tooltip */
 .track-id-code {
   cursor: help;

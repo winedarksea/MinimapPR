@@ -85,6 +85,15 @@ pub fn LeafletMapPanel() -> impl IntoView {
         });
     }
 
+    // Highlight the track hovered in the sidebar: ring + bringToFront.
+    {
+        let selected_track = state.selected_track;
+        Effect::new(move |_| match selected_track.get() {
+            Some(ref id) => highlight_track(id),
+            None => clear_track_highlight(),
+        });
+    }
+
     // Sync detections → map markers (newest event only, JS shim auto-removes after 30s)
     {
         Effect::new(move |_| {

@@ -250,6 +250,8 @@ pub struct AppState {
     /// Active recording session — persists across navigation so the backend
     /// session isn't lost if the user leaves the recording page.
     pub active_recording: RwSignal<Option<RecordingSession>>,
+    /// Track ID currently hovered in the sidebar; drives map highlight ring.
+    pub selected_track: RwSignal<Option<String>>,
 }
 
 impl AppState {
@@ -268,6 +270,7 @@ impl AppState {
             audio_drawer_open: RwSignal::new(false),
             audio_drawer_detection_id: RwSignal::new(None),
             active_recording: RwSignal::new(None),
+            selected_track: RwSignal::new(None),
         }
     }
 }
