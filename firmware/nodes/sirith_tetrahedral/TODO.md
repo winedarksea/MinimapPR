@@ -90,6 +90,20 @@ Running the sidecar indepently
 # Terminal 2: Rust fast-path sidecar
 MINIMAPPR_INGEST_SPOOL_DIR=data/spool ./dist/minimappr-ingest-sidecar
 ```
+Add these to store to disk, necessary for recording:
+```
+export MINIMAPPR_INGEST_BACKEND=rust
+export MINIMAPPR_DIRECT_INGEST_ENABLED=false
+export MINIMAPPR_INGEST_STORAGE_MODE=journal
+export MINIMAPPR_SIDECAR_MEMORY_ONLY_LIVE_PATH=false
+```
+undo those
+```
+unset MINIMAPPR_INGEST_BACKEND
+unset MINIMAPPR_DIRECT_INGEST_ENABLED
+unset MINIMAPPR_INGEST_STORAGE_MODE
+unset MINIMAPPR_SIDECAR_MEMORY_ONLY_LIVE_PATH
+```
 
 
 ```

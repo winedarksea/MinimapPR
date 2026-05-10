@@ -23,6 +23,8 @@ pub struct RenderPublishResult {
 /// Metadata produced by the sync CPU render phase, consumed by the async I/O phase.
 pub struct RenderMeta {
     pub render_kind: String,
+    pub render_start_ns: Option<u128>,
+    pub render_end_ns: Option<u128>,
     pub spatial_band: Option<[f32; 2]>,
     pub steering_solution: Option<String>,
     pub confidence: Option<f32>,
@@ -40,6 +42,8 @@ pub fn compute_render_bytes(
     sample_rate_hz: u32,
     localization: Option<&SrpPhatLocalization>,
     fallback_reason: Option<String>,
+    render_start_ns: Option<u128>,
+    render_end_ns: Option<u128>,
 ) -> (Vec<u8>, RenderMeta) {
     let source_channel_count = channels.len();
     let use_hybrid = localization.filter(|sol| {
@@ -63,6 +67,8 @@ pub fn compute_render_bytes(
         );
         let meta = RenderMeta {
             render_kind: "birdnet_hybrid_spatial_blend".to_string(),
+            render_start_ns,
+            render_end_ns,
             spatial_band: Some(config.spatial_blend_band_hz),
             steering_solution: Some(format!(
                 "srp_phat:{:.4},{:.4},{:.4}",
@@ -82,6 +88,8 @@ pub fn compute_render_bytes(
             fallback_reason.or_else(|| Some("localization_unavailable".to_string()));
         let meta = RenderMeta {
             render_kind: "birdnet_omni_fallback".to_string(),
+            render_start_ns,
+            render_end_ns,
             spatial_band: None,
             steering_solution: None,
             confidence,
@@ -126,6 +134,8 @@ pub fn build_render_result(
     let manifest_payload = ClassifierRenderManifestPayload {
         render_id: derived_handle.segment_id.clone(),
         render_kind: meta.render_kind.clone(),
+        render_start_ns: meta.render_start_ns,
+        render_end_ns: meta.render_end_ns,
         sample_rate_hz,
         channels: 1,
         sample_count,
@@ -159,6 +169,8 @@ pub fn build_render_result(
         node_context: manifest.node_context.clone(),
         raw_payload: None,
         raw_render_bytes: None, // set by run_io before SSE broadcast
+        raw_audio_frame: None,
+        raw_audio_bytes: None,
     };
     RenderPublishResult {
         pending_manifest: Some(pending),

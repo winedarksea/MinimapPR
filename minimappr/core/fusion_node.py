@@ -466,6 +466,10 @@ class FusionNode:
         rust_extra_features: dict[str, Any] = {"rust_manifest_id": payload.manifest_id}
         if payload.render_kind is not None:
             rust_extra_features["rust_render_kind"] = payload.render_kind
+        if payload.render_start_ns is not None:
+            rust_extra_features["rust_render_start_ns"] = int(payload.render_start_ns)
+        if payload.render_end_ns is not None:
+            rust_extra_features["rust_render_end_ns"] = int(payload.render_end_ns)
         if payload.fallback_reason is not None:
             rust_extra_features["rust_fallback_reason"] = payload.fallback_reason
         localized_product = LocalizedCandidate(

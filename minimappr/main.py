@@ -503,15 +503,17 @@ def _capture_pipeline_available(settings: "Settings") -> bool:
         return True
     return (
         settings.ingest_backend == "rust"
-        and settings.ingest_storage_mode == "journal"
-        and not settings.ingest_sidecar_memory_only_live_path
+        and (
+            settings.ingest_sidecar_memory_only_live_path
+            or settings.ingest_storage_mode == "journal"
+        )
     )
 
 
 def _capture_pipeline_unavailable_reason() -> str:
     return (
-        "Ambisonic/IAMF capture requires Python ingest or a Rust journal-backed "
-        "range-lease sidecar; memory-only live mode does not provide capture sessions yet"
+        "Ambisonic/IAMF capture requires Python ingest, Rust memory-only live "
+        "mirroring, or a Rust journal-backed range-lease sidecar"
     )
 
 
@@ -640,6 +642,7 @@ def _ingest_stream_consumer_runtime(state):
             sidecar_base_url=_ingest_runtime_base_url(settings),
         ),
         "ingest_transport": ingest_transport,
+        "audio_buffer": getattr(state, "audio_buffer", None),
     }
 
 
@@ -650,6 +653,7 @@ def _build_ingest_stream_consumer(state) -> IngestStreamConsumer | None:
     return IngestStreamConsumer(
         config=runtime["config"],
         ingest_transport=runtime["ingest_transport"],
+        audio_buffer=runtime["audio_buffer"],
     )
 
 
@@ -663,13 +667,16 @@ def _ensure_ingest_stream_consumer_running(state) -> bool:
 
     desired_config = runtime["config"]
     desired_transport = runtime["ingest_transport"]
+    desired_audio_buffer = runtime["audio_buffer"]
     consumer_already_present = consumer is not None
     if consumer is not None:
         consumer_config = getattr(consumer, "_config", None)
         consumer_transport = getattr(consumer, "_ingest_transport", None)
+        consumer_audio_buffer = getattr(consumer, "_audio_buffer", None)
         if (
             getattr(consumer_config, "sidecar_base_url", None) != desired_config.sidecar_base_url
             or consumer_transport is not desired_transport
+            or consumer_audio_buffer is not desired_audio_buffer
         ):
             if not consumer.is_running:
                 _clear_state_attrs(state, "ingest_stream_consumer")
@@ -680,6 +687,7 @@ def _ensure_ingest_stream_consumer_running(state) -> bool:
         consumer = IngestStreamConsumer(
             config=desired_config,
             ingest_transport=desired_transport,
+            audio_buffer=desired_audio_buffer,
         )
         state.ingest_stream_consumer = consumer
     if consumer.is_running:
@@ -970,6 +978,7 @@ async def _api_only_lifespan(app: FastAPI, settings: Settings):
     )
 
     capture_manager = CaptureSessionManager()
+    capture_manager.set_final_track_settle_seconds(settings.capture_final_tracks_settle_seconds)
     iamf_pipeline = IamfPipeline(
         sidecar_url=_ingest_runtime_base_url(settings),
         db_storage=storage,
@@ -1187,6 +1196,7 @@ async def lifespan(app: FastAPI):
     )
 
     capture_manager = CaptureSessionManager()
+    capture_manager.set_final_track_settle_seconds(settings.capture_final_tracks_settle_seconds)
     _python_ingest = settings.ingest_backend == "python"
     iamf_pipeline = IamfPipeline(
         sidecar_url=None if _python_ingest else _ingest_runtime_base_url(settings),
@@ -3056,13 +3066,16 @@ async def capture_start(request: Request, body: _CaptureStartBody):
     )
     storage: Storage = state.storage
 
-    _python_ingest = settings.ingest_backend == "python"
-    if _python_ingest:
+    _buffer_backed_ingest = settings.ingest_backend == "python" or (
+        settings.ingest_backend == "rust"
+        and getattr(settings, "ingest_sidecar_memory_only_live_path", True)
+    )
+    if _buffer_backed_ingest:
         if getattr(settings, "process_role", "combined") == "api":
             raise HTTPException(
                 status_code=503,
                 detail=(
-                    "Python ingest capture requires the combined process role; "
+                    "Buffer-backed ingest capture requires the combined process role; "
                     "the API-only role does not hold a live audio buffer"
                 ),
             )
@@ -3138,6 +3151,7 @@ async def capture_stop(session_id: str, request: Request):
     except ValueError as exc:
         record = manager.get(session_id)
         if record is not None and record.state in {
+            CaptureState.AWAITING_FINAL_TRACKS,
             CaptureState.PROCESSING,
             CaptureState.COMPLETED,
             CaptureState.FAILED,
@@ -3226,6 +3240,9 @@ def _capture_state_to_recording_status(state: CaptureState) -> str:
     mapping = {
         CaptureState.PENDING: "starting",
         CaptureState.RECORDING: "active",
+        # Keep the frontend adapter wire-compatible with already-loaded WASM
+        # clients; the raw capture endpoint still exposes awaiting_final_tracks.
+        CaptureState.AWAITING_FINAL_TRACKS: "stopping",
         CaptureState.PROCESSING: "stopping",
         CaptureState.COMPLETED: "completed",
         CaptureState.FAILED: "failed",
@@ -3366,6 +3383,7 @@ async def recordings_stop(session_id: str, request: Request):
     except ValueError as exc:
         record = manager.get(session_id)
         if record is not None and record.state in {
+            CaptureState.AWAITING_FINAL_TRACKS,
             CaptureState.PROCESSING,
             CaptureState.COMPLETED,
             CaptureState.FAILED,

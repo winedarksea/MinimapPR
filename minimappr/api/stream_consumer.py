@@ -13,7 +13,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
@@ -23,6 +23,10 @@ from minimappr.api.rust_dsp_manifests import (
 )
 from minimappr.interfaces import IngestTransport
 from minimappr.models import EnvironmentSampleIn, NodeSpec
+from minimappr.utils.audio import decode_pcm16le_b64, rms
+
+if TYPE_CHECKING:
+    from minimappr.core.audio_buffer import MultiSensorBuffer
 
 logger = logging.getLogger(__name__)
 
@@ -150,9 +154,11 @@ class IngestStreamConsumer:
         *,
         config: StreamConsumerConfig,
         ingest_transport: IngestTransport,
+        audio_buffer: "MultiSensorBuffer | None" = None,
     ) -> None:
         self._config = config
         self._ingest_transport = ingest_transport
+        self._audio_buffer = audio_buffer
         self._running = False
         self._task: asyncio.Task | None = None
         self._last_event_id: str | None = None
@@ -333,8 +339,95 @@ class IngestStreamConsumer:
             await self._handle_classifier_render(manifest)
         elif manifest_type == "env_sample_append":
             await self._handle_env_sample_append(manifest)
+        elif manifest_type == "raw_audio_frame":
+            await self._handle_raw_audio_frame(manifest)
         else:
             logger.debug("IngestStreamConsumer ignoring manifest_type=%s", manifest_type)
+
+    async def _handle_raw_audio_frame(self, manifest: dict[str, Any]) -> None:
+        """Mirror sidecar raw ingest frames into Python's bounded live buffer."""
+        node_context = manifest.get("node_context")
+        if not isinstance(node_context, dict):
+            logger.warning("raw_audio_frame missing node_context; skipping")
+            return
+        node_payload = node_context.get("node")
+        if not isinstance(node_payload, dict):
+            logger.warning("raw_audio_frame missing node payload; skipping")
+            return
+        frame_payload = manifest.get("raw_audio_frame")
+        if not isinstance(frame_payload, dict):
+            logger.warning("raw_audio_frame missing frame payload; skipping")
+            return
+        raw_audio_bytes = manifest.get("raw_audio_bytes")
+        if not isinstance(raw_audio_bytes, str) or not raw_audio_bytes:
+            logger.warning("raw_audio_frame missing inline PCM bytes; skipping")
+            return
+
+        node_payload = _enrich_node_payload_from_context(node_payload, node_context)
+        try:
+            node = NodeSpec.model_validate(node_payload)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("raw_audio_frame node validation failed: %s", exc)
+            return
+
+        sample_rate_hz = _coerce_int(frame_payload.get("sample_rate_hz"))
+        channel_count = _coerce_int(frame_payload.get("channel_count"))
+        if channel_count is None:
+            channel_count = _coerce_int(frame_payload.get("channels"))
+        start_time_ns = _coerce_int(frame_payload.get("start_time_ns"))
+        end_time_ns = _coerce_int(frame_payload.get("end_time_ns"))
+        if sample_rate_hz is None or sample_rate_hz <= 0:
+            logger.warning("raw_audio_frame has invalid sample_rate_hz; skipping")
+            return
+        if channel_count is None or channel_count <= 0:
+            logger.warning("raw_audio_frame has invalid channel_count; skipping")
+            return
+        if start_time_ns is None:
+            start_time_ns = _coerce_int(node_context.get("toa_ns"))
+        if start_time_ns is None:
+            start_time_ns = _coerce_int(manifest.get("created_ns")) or time.time_ns()
+
+        try:
+            channels_first = decode_pcm16le_b64(raw_audio_bytes, channel_count)
+        except ValueError as exc:
+            logger.warning("raw_audio_frame PCM decode failed: %s", exc)
+            return
+        if channels_first.shape[0] != channel_count or channels_first.shape[1] == 0:
+            logger.warning("raw_audio_frame decoded empty or mismatched channel payload")
+            return
+
+        if end_time_ns is None:
+            frame_duration_ns = int(
+                round(channels_first.shape[1] * 1_000_000_000 / sample_rate_hz)
+            )
+            end_time_ns = start_time_ns + frame_duration_ns
+
+        audio_debug_context = dict(node_context)
+        audio_debug_context["audio_debug"] = {
+            "sample_rate_hz": sample_rate_hz,
+            "active_sensor_count": channel_count,
+            "rms": max(rms(channel) for channel in channels_first),
+        }
+        self._record_node_snapshot(
+            node=node,
+            node_context=audio_debug_context,
+            node_audio_time_ns=end_time_ns,
+        )
+
+        if self._audio_buffer is None:
+            return
+        start_sample_index = _coerce_int(frame_payload.get("start_sample_index"))
+        end_sample_index = _coerce_int(frame_payload.get("end_sample_index"))
+        for channel_index, samples in enumerate(channels_first):
+            await self._audio_buffer.append(
+                sensor_id=f"{node.id}:ch{channel_index}",
+                sample_rate_hz=sample_rate_hz,
+                start_time_ns=start_time_ns,
+                samples=samples,
+                start_sample_index=start_sample_index,
+                end_sample_index=end_sample_index,
+                end_time_ns=end_time_ns,
+            )
 
     async def _handle_localization_result(self, manifest: dict[str, Any]) -> None:
         """Deliver a localization result (with optional embedded classifier_render)."""

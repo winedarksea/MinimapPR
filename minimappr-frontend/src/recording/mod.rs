@@ -10,6 +10,7 @@ pub enum RecordingStatus {
     Idle,
     Starting,
     Active,
+    AwaitingFinalTracks,
     Stopping,
     Completed,
     Failed,
@@ -17,7 +18,10 @@ pub enum RecordingStatus {
 
 impl RecordingStatus {
     pub fn is_active(&self) -> bool {
-        matches!(self, Self::Starting | Self::Active | Self::Stopping)
+        matches!(
+            self,
+            Self::Starting | Self::Active | Self::AwaitingFinalTracks | Self::Stopping
+        )
     }
 
     pub fn label(&self) -> &'static str {
@@ -25,6 +29,7 @@ impl RecordingStatus {
             Self::Idle => "Idle",
             Self::Starting => "Starting…",
             Self::Active => "Recording",
+            Self::AwaitingFinalTracks => "Awaiting final tracks…",
             Self::Stopping => "Stopping…",
             Self::Completed => "Completed",
             Self::Failed => "Failed",

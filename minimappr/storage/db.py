@@ -2347,11 +2347,20 @@ class Storage:
                 """
                 SELECT id AS track_id, x, y, z, label, status, tqi, confidence
                 FROM tracks
-                WHERE last_seen_ns >= ? AND first_seen_ns <= ?
-                  AND status = 'confirmed'
+                WHERE status IN ('confirmed', 'dropped')
+                  AND (
+                    (last_seen_ns >= ? AND first_seen_ns <= ?)
+                    OR EXISTS (
+                        SELECT 1
+                        FROM detections
+                        WHERE detections.track_id = tracks.id
+                          AND COALESCE(report_window_end_ns, toa_ns, timestamp_ns) >= ?
+                          AND COALESCE(report_window_start_ns, toa_ns, timestamp_ns) <= ?
+                    )
+                  )
                 ORDER BY first_seen_ns ASC
                 """,
-                (start_ns, end_ns),
+                (start_ns, end_ns, start_ns, end_ns),
             )
         ).fetchall()
         return [dict(r) for r in rows]
@@ -2359,17 +2368,55 @@ class Storage:
     async def query_detections_for_track(
         self, track_id: str, start_ns: int, end_ns: int
     ) -> list[dict]:
-        """Return detections for a track within [start_ns, end_ns]."""
+        """Return in-window detections plus nearest bracketing detections for a track."""
         db = self._require_db()
         rows = await (
             await db.execute(
                 """
-                SELECT toa_ns, timestamp_ns, x, y, z, confidence, label_confidence
+                SELECT
+                    toa_ns,
+                    timestamp_ns,
+                    report_window_start_ns,
+                    report_window_end_ns,
+                    x,
+                    y,
+                    z,
+                    confidence,
+                    label_confidence,
+                    snippet_path,
+                    feature_summary_json
                 FROM detections
-                WHERE track_id=? AND toa_ns >= ? AND toa_ns <= ?
+                WHERE track_id = ?
+                  AND (
+                    (toa_ns >= ? AND toa_ns <= ?)
+                    OR (
+                        COALESCE(report_window_end_ns, toa_ns, timestamp_ns) >= ?
+                        AND COALESCE(report_window_start_ns, toa_ns, timestamp_ns) <= ?
+                    )
+                    OR toa_ns = (
+                        SELECT max(toa_ns)
+                        FROM detections
+                        WHERE track_id = ? AND toa_ns < ?
+                    )
+                    OR toa_ns = (
+                        SELECT min(toa_ns)
+                        FROM detections
+                        WHERE track_id = ? AND toa_ns > ?
+                    )
+                  )
                 ORDER BY toa_ns ASC
                 """,
-                (track_id, start_ns, end_ns),
+                (
+                    track_id,
+                    start_ns,
+                    end_ns,
+                    start_ns,
+                    end_ns,
+                    track_id,
+                    start_ns,
+                    track_id,
+                    end_ns,
+                ),
             )
         ).fetchall()
         return [dict(r) for r in rows]

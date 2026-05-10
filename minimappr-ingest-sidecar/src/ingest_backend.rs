@@ -757,6 +757,8 @@ impl SegmentJournalBackend {
             node_context: None,
             raw_payload: None,
             raw_render_bytes: None,
+            raw_audio_frame: None,
+            raw_audio_bytes: None,
         };
         // Deliver audio to the DSP worker exclusively via the in-process channel.
         // If the channel is not connected, the pipeline is misconfigured — fail fast
@@ -1421,6 +1423,8 @@ mod tests {
             node_context: None,
             raw_payload: None,
             raw_render_bytes: None,
+            raw_audio_frame: None,
+            raw_audio_bytes: None,
         };
         let path = manifest_store.publish(manifest.clone()).await.unwrap();
         assert!(path.exists(), "manifest file should exist after publish");
@@ -1464,6 +1468,8 @@ mod tests {
                 node_context: None,
                 raw_payload: None,
                 raw_render_bytes: None,
+                raw_audio_frame: None,
+                raw_audio_bytes: None,
             })
             .await
             .unwrap();
@@ -1522,6 +1528,8 @@ mod tests {
             node_context: None,
             raw_payload: None,
             raw_render_bytes: None,
+            raw_audio_frame: None,
+            raw_audio_bytes: None,
         };
         let pending_file = tmp
             .path()
@@ -1592,6 +1600,8 @@ mod tests {
                     node_context: None,
                     raw_payload: None,
                     raw_render_bytes: None,
+                    raw_audio_frame: None,
+                    raw_audio_bytes: None,
                 })
                 .await
                 .unwrap();
@@ -1637,6 +1647,8 @@ mod tests {
                     node_context: None,
                     raw_payload: None,
                     raw_render_bytes: None,
+                    raw_audio_frame: None,
+                    raw_audio_bytes: None,
                 })
                 .await
                 .unwrap();

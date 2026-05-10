@@ -1,7 +1,7 @@
 """Capture Session Manager.
 
 Coordinates the full recording lifecycle:
-  PENDING → RECORDING → PROCESSING → COMPLETED | FAILED
+  PENDING → RECORDING → AWAITING_FINAL_TRACKS → PROCESSING → COMPLETED | FAILED
 
 Responsibilities:
 - Issues a StreamRangeLease to the Rust sidecar at session start.
@@ -42,6 +42,7 @@ HEARTBEAT_INTERVAL_S: float = 10.0
 class CaptureState(str, enum.Enum):
     PENDING = "pending"
     RECORDING = "recording"
+    AWAITING_FINAL_TRACKS = "awaiting_final_tracks"
     PROCESSING = "processing"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -114,12 +115,17 @@ class CaptureSessionManager:
         self._session_update_callback: Optional[SessionUpdateCallback] = None
         self._http: Optional[httpx.AsyncClient] = None
         self._python_buffers: dict[str, "MultiSensorBuffer"] = {}  # session_id → buffer
+        self._final_track_settle_seconds = 0.0
 
     def set_post_process_callback(self, cb: PostProcessCallback) -> None:
         self._post_process_callback = cb
 
     def set_session_update_callback(self, cb: SessionUpdateCallback) -> None:
         self._session_update_callback = cb
+
+    def set_final_track_settle_seconds(self, seconds: float) -> None:
+        """Delay rendering so classifier/tracker windows can publish final updates."""
+        self._final_track_settle_seconds = max(0.0, float(seconds))
 
     def _client(self) -> httpx.AsyncClient:
         if self._http is None:
@@ -261,7 +267,11 @@ class CaptureSessionManager:
                 logger.warning("session %s: video stop error: %s", session_id, exc)
 
         record.end_time_ns = time.time_ns()
-        record.state = CaptureState.PROCESSING
+        record.state = (
+            CaptureState.AWAITING_FINAL_TRACKS
+            if self._final_track_settle_seconds > 0.0
+            else CaptureState.PROCESSING
+        )
 
         if record.use_python_ingest:
             buf = self._python_buffers.pop(session_id, None)
@@ -305,6 +315,19 @@ class CaptureSessionManager:
     async def _run_post_processing(self, session_id: str, sidecar_url: str) -> None:
         record = self._sessions[session_id]
         try:
+            if (
+                record.state == CaptureState.AWAITING_FINAL_TRACKS
+                and self._final_track_settle_seconds > 0.0
+            ):
+                logger.info(
+                    "session %s awaiting final tracks for %.1fs",
+                    session_id,
+                    self._final_track_settle_seconds,
+                )
+                await asyncio.sleep(self._final_track_settle_seconds)
+                record.state = CaptureState.PROCESSING
+                if self._session_update_callback is not None:
+                    await self._session_update_callback(record)
             if self._post_process_callback is not None:
                 await self._post_process_callback(record)
                 record.state = CaptureState.COMPLETED

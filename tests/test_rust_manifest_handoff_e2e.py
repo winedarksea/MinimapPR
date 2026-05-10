@@ -483,11 +483,13 @@ async def test_fusion_prefers_authoritative_rust_classification_over_python_recl
             -1.0,
             0.9999695,
         ).astype(np.float32)
+        render_end_ns = time.time_ns()
+        render_start_ns = render_end_ns - 1_500_000_000
         await fusion.ingest_localized_render(
             payload=LocalizedClassifierRenderRequest(
                 manifest_id="manifest-rust-authoritative-1",
                 node=_node_spec("sirith-rust-authoritative"),
-                event_time_ns=time.time_ns(),
+                event_time_ns=render_end_ns,
                 sample_rate_hz=16_000,
                 decoded_audio=render_audio,
                 localization_position_m=TEST_SOURCE_POSITION_M,
@@ -498,6 +500,8 @@ async def test_fusion_prefers_authoritative_rust_classification_over_python_recl
                 source_observation_ids=[],
                 environment={"temperature_c": 20.0, "humidity_fraction": 0.5},
                 render_kind="birdnet_hybrid_spatial_blend",
+                render_start_ns=render_start_ns,
+                render_end_ns=render_end_ns,
                 audio_quality=AudioCoverageStats(
                     sample_count=24_000,
                     covered_samples=20_000,
@@ -529,6 +533,8 @@ async def test_fusion_prefers_authoritative_rust_classification_over_python_recl
         assert detection["feature_summary"]["rust_classification_authoritative"] is True
         assert detection["feature_summary"]["rust_manifest_id"] == "manifest-rust-authoritative-1"
         assert detection["feature_summary"]["rust_render_kind"] == "birdnet_hybrid_spatial_blend"
+        assert detection["feature_summary"]["rust_render_start_ns"] == render_start_ns
+        assert detection["feature_summary"]["rust_render_end_ns"] == render_end_ns
         audio_quality = detection["feature_summary"]["audio_quality"]
         assert audio_quality["source_window_type"] == "rust_classifier_render"
         assert audio_quality["sample_count"] == 24_000
@@ -609,10 +615,18 @@ async def test_fusion_classifies_non_authoritative_rust_render_immediately_in_pr
 
 
 @pytest.mark.asyncio
-async def test_live_rust_sidecar_emits_authoritative_classification_fields(tmp_path: Path) -> None:
+async def test_live_rust_sidecar_emits_authoritative_classification_fields(monkeypatch, tmp_path: Path) -> None:
     sample_rate_hz = 16_000
     node_id = "sirith-rust-authoritative-live"
     helper_path = _write_fake_sidecar_classifier_helper(tmp_path)
+    sidecar_port = _pick_free_tcp_port()
+    _configure_http_app_sidecar_env(monkeypatch, tmp_path, sidecar_port=sidecar_port)
+    monkeypatch.setenv(
+        "MINIMAPPR_SIDECAR_CLASSIFIER_COMMAND_JSON",
+        json.dumps([sys.executable, str(helper_path)]),
+    )
+    monkeypatch.setenv("MINIMAPPR_CLASSIFICATION_WINDOW_SECONDS", "2.0")
+    monkeypatch.setenv("MINIMAPPR_MAX_SENSOR_BUFFER_SECONDS", "4.0")
     payload = _binary_ingest_payload(
         node_id=node_id,
         frames=[
@@ -626,18 +640,9 @@ async def test_live_rust_sidecar_emits_authoritative_classification_fields(tmp_p
         ],
     )
 
-    with _running_rust_sidecar(
-        tmp_path,
-        extra_env={
-            "MINIMAPPR_SIDECAR_CLASSIFIER_COMMAND_JSON": json.dumps(
-                [sys.executable, str(helper_path)]
-            ),
-            "MINIMAPPR_CLASSIFICATION_WINDOW_SECONDS": "2.0",
-            "MINIMAPPR_MAX_SENSOR_BUFFER_SECONDS": "4.0",
-        },
-    ) as (port, spool_dir):
+    with TestClient(app) as client:
         response = _http_json(
-            port,
+            sidecar_port,
             "/api/v1/ingest/binary",
             method="POST",
             body=payload,
@@ -645,77 +650,16 @@ async def test_live_rust_sidecar_emits_authoritative_classification_fields(tmp_p
         )
         assert response["accepted"] is True
 
-        manifest_payloads = _wait_for_manifest_pair(spool_dir)
-        classifier_manifest = next(
-            manifest_payload
-            for manifest_payload in manifest_payloads
-            if manifest_payload["manifest_type"] == "classifier_render"
-        )
-        assert classifier_manifest["birdnet"]["label"] == "winter wren"
-        assert classifier_manifest["birdnet"]["label_confidence"] == pytest.approx(0.91)
-        assert classifier_manifest["birdnet"]["scores"]["sparrow"] == pytest.approx(0.04)
-
-        settings = Settings(
-            runtime_profile="birdnet_hybrid_production",
-            db_path=tmp_path / "authoritative-live.db",
-            snippet_dir=tmp_path / "snippets-live",
-            snippet_retention_seconds=0,
-            fusion_worker_count=1,
-            fusion_event_queue_size=8,
-        )
-        settings.db_path.parent.mkdir(parents=True, exist_ok=True)
-        settings.snippet_dir.mkdir(parents=True, exist_ok=True)
-
-        storage = Storage(settings.db_path)
-        await storage.initialize()
-        fusion = FusionNode(
-            settings=settings,
-            registry=NodeRegistry(),
-            buffer=MultiSensorBuffer(max_duration_seconds=settings.max_sensor_buffer_seconds),
-            localizer=LocalizationEngine(max_tau_s=0.03),
-            classifier=_UnexpectedClassifier(),
-            tracker=TrackManager(settings),
-            storage=storage,
-            live_callback=lambda payload: asyncio.sleep(0, result=None),
-            coordinate_frame=LocalCoordinateFrame(origin=GeoPoint(lat=37.0, lon=-122.0, alt_m=0.0), mode="flat"),
-            zone_matcher=ZoneMatcher(storage=storage),
-        )
-        await fusion.start()
-        try:
-            transport = _RecordingHttpIngestTransport(fusion)
-            consumer = IngestSpoolConsumer(
-                config=IngestSpoolConfig(
-                    spool_dir=spool_dir,
-                    ready_ttl_seconds=60.0,
-                    failed_ttl_seconds=86_400.0,
-                    tmp_ttl_seconds=300.0,
-                    poll_interval_seconds=0.05,
-                    worker_count=1,
-                    storage_mode="journal",
-                    runtime_profile="birdnet_hybrid_production",
-                ),
-                ingest_transport=transport,
-            )
-
-            summary = await consumer.run_once(now_ns=time.time_ns())
-
-            assert summary.processed == 1
-            assert transport.localized_render_deliveries == 1
-
-            detections = await storage.list_detections(limit=10)
-            assert len(detections) == 1
-            detection = detections[0]
-            assert detection["label"] == "winter wren"
-            assert detection["label_confidence"] == pytest.approx(0.91)
-            assert detection["feature_summary"]["classification_path"] == "rust_manifest"
-            assert detection["feature_summary"]["rust_classification_authoritative"] is True
-        finally:
-            await fusion.stop()
-            await storage.close()
+        detection = _wait_for_detection_from_node(client, node_id=node_id)
+        assert detection["label"] == "winter wren"
+        assert detection["label_confidence"] == pytest.approx(0.91)
+        assert detection["feature_summary"]["classification_path"] == "rust_manifest"
+        assert detection["feature_summary"]["rust_classification_authoritative"] is True
+        assert detection["feature_summary"]["rust_manifest_id"]
 
 
 @pytest.mark.asyncio
-async def test_rust_manifest_handoff_reaches_python_without_raw_replay(tmp_path: Path) -> None:
+async def test_rust_memory_only_sidecar_does_not_persist_raw_replay(tmp_path: Path) -> None:
     sample_rate_hz = 16_000
     node_id = "sirith-rust-handoff"
     start_time_ns = 1_739_970_000_000_000_000
@@ -732,7 +676,10 @@ async def test_rust_manifest_handoff_reaches_python_without_raw_replay(tmp_path:
         ],
     )
 
-    with _running_rust_sidecar(tmp_path) as (port, spool_dir):
+    with _running_rust_sidecar(
+        tmp_path,
+        extra_env={"MINIMAPPR_SIDECAR_MEMORY_ONLY_LIVE_PATH": "true"},
+    ) as (port, spool_dir):
         response = _http_json(
             port,
             "/api/v1/ingest/binary",
@@ -742,83 +689,17 @@ async def test_rust_manifest_handoff_reaches_python_without_raw_replay(tmp_path:
         )
         assert response["accepted"] is True
 
-        manifest_payloads = _wait_for_manifest_pair(spool_dir)
-        assert {payload["manifest_type"] for payload in manifest_payloads} >= {
-            "localization_result",
-            "classifier_render",
-        }
-
-        journal_entry = _load_first_journal_entry(spool_dir)
-        stream_key = str(journal_entry["stream_key"])
-        journal_sequence = int(journal_entry["journal_sequence"])
-
-        settings = Settings(
-            runtime_profile="birdnet_hybrid_production",
-            db_path=tmp_path / "handoff.db",
-            snippet_dir=tmp_path / "snippets",
-            snippet_retention_seconds=0,
-            fusion_worker_count=1,
-            fusion_event_queue_size=8,
-        )
-        settings.db_path.parent.mkdir(parents=True, exist_ok=True)
-        settings.snippet_dir.mkdir(parents=True, exist_ok=True)
-
-        storage = Storage(settings.db_path)
-        await storage.initialize()
-        fusion = FusionNode(
-            settings=settings,
-            registry=NodeRegistry(),
-            buffer=MultiSensorBuffer(max_duration_seconds=settings.max_sensor_buffer_seconds),
-            localizer=LocalizationEngine(max_tau_s=0.03),
-            classifier=_ConstantBirdClassifier(),
-            tracker=TrackManager(settings),
-            storage=storage,
-            live_callback=lambda payload: asyncio.sleep(0, result=None),
-            coordinate_frame=LocalCoordinateFrame(origin=GeoPoint(lat=37.0, lon=-122.0, alt_m=0.0), mode="flat"),
-            zone_matcher=ZoneMatcher(storage=storage),
-        )
-        await fusion.start()
-        try:
-            transport = _RecordingHttpIngestTransport(fusion)
-            consumer = IngestSpoolConsumer(
-                config=IngestSpoolConfig(
-                    spool_dir=spool_dir,
-                    ready_ttl_seconds=60.0,
-                    failed_ttl_seconds=86_400.0,
-                    tmp_ttl_seconds=300.0,
-                    poll_interval_seconds=0.05,
-                    worker_count=1,
-                    storage_mode="journal",
-                    runtime_profile="birdnet_hybrid_production",
-                ),
-                ingest_transport=transport,
-            )
-
-            summary = await consumer.run_once(now_ns=time.time_ns())
-
-            assert summary.processed == 1
-            assert transport.binary_deliveries == 0
-            assert transport.localized_render_deliveries == 1
-
-            detections = await storage.list_detections(limit=10)
-            assert len(detections) == 1
-            detection = detections[0]
-            assert detection["label"] == "sparrow"
-            assert detection["source_node_id"] == node_id
-            assert detection["reporting_modality"] == "localized"
-            assert detection["feature_summary"]["localization_method"] == "srp_phat"
-            assert str(detection["feature_summary"]["rust_render_kind"]).startswith("birdnet_")
-
-            cursor_row = _load_cursor_row(spool_dir, stream_key)
-            assert int(cursor_row["journal_epoch"]) == 1
-            assert int(cursor_row["last_fully_processed_journal_sequence"]) == journal_sequence
-            assert list((spool_dir / "processing").glob("*")) == []
-        finally:
-            await fusion.stop()
-            await storage.close()
+        health = _http_json(port, "/healthz")
+        assert health["backend"]["storage_mode"] == "memory_only_live_path"
+        time.sleep(0.2)
+        journal_dir = spool_dir / "journal"
+        streams_dir = journal_dir / "streams"
+        assert not list(streams_dir.rglob("*.index.jsonl"))
+        assert not list(streams_dir.rglob("*.bin"))
+        assert not list((journal_dir / "manifests").rglob("*.json"))
 
 
-def test_http_app_in_production_mode_consumes_rust_sidecar_journal(monkeypatch, tmp_path: Path) -> None:
+def test_http_app_in_production_mode_consumes_memory_only_rust_sidecar(monkeypatch, tmp_path: Path) -> None:
     sidecar_port = _pick_free_tcp_port()
     spool_dir = _configure_http_app_sidecar_env(monkeypatch, tmp_path, sidecar_port=sidecar_port)
     monkeypatch.setattr("minimappr.main.create_classifier", lambda settings: _ConstantBirdClassifier())
@@ -845,7 +726,7 @@ def test_http_app_in_production_mode_consumes_rust_sidecar_journal(monkeypatch, 
         assert diagnostics["sidecar"]["enabled"] is True
         assert diagnostics["sidecar"]["status"] == "running"
         assert diagnostics["sidecar"]["health"]["status"] == "ok"
-        assert diagnostics["sidecar"]["health"]["backend"]["storage_mode"] == "journal"
+        assert diagnostics["sidecar"]["health"]["backend"]["storage_mode"] == "memory_only_live_path"
 
         blocked_response = client.post(
             "/api/v1/ingest/binary",
@@ -873,5 +754,6 @@ def test_http_app_in_production_mode_consumes_rust_sidecar_journal(monkeypatch, 
         assert str(detection["feature_summary"]["rust_render_kind"]).startswith("birdnet_")
 
         journal_dir = spool_dir / "journal"
-        assert journal_dir.exists()
-        assert (journal_dir / "consumer_state.sqlite3").exists()
+        streams_dir = journal_dir / "streams"
+        assert not list(streams_dir.rglob("*.index.jsonl"))
+        assert not list(streams_dir.rglob("*.bin"))

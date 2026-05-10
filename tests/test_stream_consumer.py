@@ -4,9 +4,12 @@ import asyncio
 import base64
 import json
 
+import numpy as np
 import pytest
 
 from minimappr.api.stream_consumer import IngestStreamConsumer, StreamConsumerConfig
+from minimappr.core.audio_buffer import MultiSensorBuffer
+from minimappr.utils.audio import encode_pcm16le_b64
 
 
 class _RecordingIngestTransport:
@@ -136,6 +139,80 @@ async def test_stream_consumer_uses_localization_toa_for_node_audio_freshness() 
     snapshot = consumer.snapshot_nodes()["sirith-1"]
     assert snapshot.node_payload["id"] == "sirith-1"
     assert snapshot.last_sample_time_ns == 123456789
+
+
+@pytest.mark.asyncio
+async def test_stream_consumer_mirrors_raw_audio_frame_into_audio_buffer() -> None:
+    transport = _RecordingIngestTransport()
+    audio_buffer = MultiSensorBuffer(max_duration_seconds=2.0)
+    consumer = IngestStreamConsumer(
+        config=StreamConsumerConfig(sidecar_base_url="http://127.0.0.1:8081"),
+        ingest_transport=transport,
+        audio_buffer=audio_buffer,
+    )
+    channels_first = np.array(
+        [
+            [0.10, 0.20, 0.30, 0.40],
+            [-0.10, -0.20, -0.30, -0.40],
+        ],
+        dtype=np.float32,
+    )
+
+    await consumer._dispatch_sse_event(
+        event_type="message",
+        event_id="100",
+        data_lines=[
+            json.dumps(
+                {
+                    "manifest_type": "raw_audio_frame",
+                    "created_ns": 10_000,
+                    "node_context": {
+                        "toa_ns": 1_000_000_000,
+                        "time_quality": "gps_locked",
+                        "node": {
+                            "id": "sirith-raw-1",
+                            "node_type": "sirith_tetra",
+                            "position_m": [0.0, 0.0, 0.0],
+                            "sensor_offsets_m": [
+                                [0.0, 0.0, 0.0],
+                                [0.1, 0.0, 0.0],
+                            ],
+                            "capabilities": ["audio"],
+                            "metadata": {},
+                        },
+                    },
+                    "raw_audio_frame": {
+                        "stream_key": "sirith-raw-1",
+                        "sample_rate_hz": 4,
+                        "channel_count": 2,
+                        "sample_count": 4,
+                        "sample_format": "pcm16le",
+                        "start_time_ns": 1_000_000_000,
+                        "end_time_ns": 2_000_000_000,
+                        "start_sample_index": 400,
+                        "end_sample_index": 404,
+                    },
+                    "raw_audio_bytes": encode_pcm16le_b64(channels_first),
+                }
+            )
+        ],
+    )
+
+    recent = await audio_buffer.get_recent_window_for_sensors(
+        ["sirith-raw-1:ch0", "sirith-raw-1:ch1"],
+        window_seconds=1.0,
+    )
+
+    assert recent is not None
+    channel_windows, sample_rate_hz, latest_end_ns = recent
+    assert sample_rate_hz == 4
+    assert latest_end_ns == 2_000_000_000
+    assert channel_windows["sirith-raw-1:ch0"] == pytest.approx(channels_first[0], abs=4e-5)
+    assert channel_windows["sirith-raw-1:ch1"] == pytest.approx(channels_first[1], abs=4e-5)
+    snapshot = consumer.snapshot_nodes()["sirith-raw-1"]
+    assert snapshot.sample_rate_hz == 4
+    assert snapshot.active_sensor_count == 2
+    assert snapshot.last_sample_time_ns == 2_000_000_000
 
 
 @pytest.mark.asyncio
@@ -295,6 +372,8 @@ async def test_stream_consumer_decodes_single_point_classifier_render_as_omni() 
                         "channels": 1,
                         "sample_format": "pcm16le",
                         "render_kind": "birdnet_omni_fallback",
+                        "render_start_ns": 123455792,
+                        "render_end_ns": 123456792,
                         "fallback_reason": "single_point_node",
                     },
                     "node_context": {
@@ -321,6 +400,8 @@ async def test_stream_consumer_decodes_single_point_classifier_render_as_omni() 
     assert payload.reporting_modality == "omni"
     assert payload.localization_method == "rust_classifier_render_fallback"
     assert payload.fallback_reason == "single_point_node"
+    assert payload.render_start_ns == 123455792
+    assert payload.render_end_ns == 123456792
     assert tuple(payload.localization_position_m) == pytest.approx((3.0, 1.0, 2.0))
 
 

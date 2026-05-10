@@ -297,7 +297,9 @@ static constexpr uint8_t kActiveAudioChannels = kUseTdmAudio ? 4u : 1u;
 
 // --- Optional GPS/PPS (M10Q style) ---
 static constexpr bool kEnableGpsUart = true;
-static constexpr uint32_t kGpsUartBaud = 9600;
+static constexpr uint32_t kGpsUartBaud = 38400; // 9600 for sparkfun, 38400 for ublox NEO-M10Q.
+// Pin names are MCU-relative: module TX must connect to kGpsRxPin (GP13) for
+// incoming NMEA; kGpsTxPin (GP12) is only MCU TX to the module RX.
 static constexpr int kGpsTxPin = 12;
 static constexpr int kGpsRxPin = 13;
 // Configures the PPS-capable GPIO. Runtime clock discipline still tolerates no

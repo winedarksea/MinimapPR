@@ -6,7 +6,7 @@ use crate::{
     journal_reader::JournalPayloadHandle,
     manifests::ManifestStore,
 };
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::engine::general_purpose::STANDARD;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
@@ -56,6 +56,8 @@ async fn worker_publishes_localization_and_classifier_render_contract() {
         node_context: None,
         raw_payload: Some(payload.into_bytes()),
         raw_render_bytes: None,
+        raw_audio_frame: None,
+        raw_audio_bytes: None,
     };
     let state: SharedDspState = Arc::new(RwLock::new(Default::default()));
     let event_publisher = DspEventPublisher::new(state.clone(), 16, 16, 50);
@@ -80,6 +82,10 @@ async fn worker_publishes_localization_and_classifier_render_contract() {
         .iter()
         .find(|m| m.manifest_type == "localization_result")
         .expect("localization_result SSE event");
+    let raw_audio_event = events
+        .iter()
+        .find(|m| m.manifest_type == "raw_audio_frame")
+        .expect("raw_audio_frame SSE event");
     let render_event = events
         .iter()
         .find(|m| m.manifest_type == "classifier_render")
@@ -98,14 +104,28 @@ async fn worker_publishes_localization_and_classifier_render_contract() {
     assert!(localization_event.raw_render_bytes.is_none());
     assert!(localization_event.classifier_render.is_none());
 
+    let raw_audio_frame = raw_audio_event
+        .raw_audio_frame
+        .as_ref()
+        .expect("raw audio frame payload");
+    assert_eq!(raw_audio_frame["sample_format"], "pcm16le");
     assert_eq!(
-        render_event
-            .classifier_render
-            .as_ref()
-            .expect("render payload")
-            .sample_format,
-        "pcm16le"
+        raw_audio_frame["stream_key"],
+        "sirith-test__audio_main__abcd"
     );
+    assert_eq!(raw_audio_frame["channel_count"], 4);
+    assert!(raw_audio_frame["sample_count"].as_u64().unwrap() > 0);
+    assert!(raw_audio_event.raw_audio_bytes.is_some());
+    assert!(raw_audio_event.raw_render_bytes.is_none());
+
+    let render_payload = render_event
+        .classifier_render
+        .as_ref()
+        .expect("render payload");
+    assert_eq!(render_payload.sample_format, "pcm16le");
+    assert!(render_payload.render_start_ns.is_some());
+    assert!(render_payload.render_end_ns.is_some());
+    assert!(render_payload.render_start_ns < render_payload.render_end_ns);
     // Inline PCM delivered — segment_path is a sentinel (no disk file written).
     assert!(render_event.raw_render_bytes.is_some());
     assert!(!render_event
@@ -355,6 +375,13 @@ async fn tetra_classifier_render_forces_srp_between_localization_cadence_ticks()
             .classifier_render
             .as_ref()
             .is_some_and(|payload| payload.render_kind == "birdnet_hybrid_spatial_blend")
+    }));
+    assert!(render_events.iter().all(|manifest| {
+        manifest.classifier_render.as_ref().is_some_and(|payload| {
+            payload.render_start_ns.is_some()
+                && payload.render_end_ns.is_some()
+                && payload.render_start_ns < payload.render_end_ns
+        })
     }));
 }
 
@@ -644,6 +671,8 @@ async fn consume_manifest_standalone_skips_non_persisted_channel_manifests() {
         node_context: None,
         raw_payload: Some(vec![1, 2, 3]),
         raw_render_bytes: None,
+        raw_audio_frame: None,
+        raw_audio_bytes: None,
     };
 
     consume_manifest_standalone(&manifest, &manifest_store, &consumed_since_prune, 1, 10).await;
@@ -687,6 +716,8 @@ async fn raw_manifest_for_payload(
         node_context: None,
         raw_payload: Some(payload_bytes),
         raw_render_bytes: None,
+        raw_audio_frame: None,
+        raw_audio_bytes: None,
     }
 }
 
@@ -1039,6 +1070,8 @@ fn stale_manifest_detection_uses_source_receipt_time() {
         node_context: None,
         raw_payload: None,
         raw_render_bytes: None,
+        raw_audio_frame: None,
+        raw_audio_bytes: None,
     };
 
     assert!(manifest_is_older_than_buffer_horizon(
@@ -1082,6 +1115,8 @@ fn stale_manifest_detection_keeps_fresh_manifest_with_old_packet_epoch() {
         node_context: None,
         raw_payload: None,
         raw_render_bytes: None,
+        raw_audio_frame: None,
+        raw_audio_bytes: None,
     };
 
     // Even with old packet timestamps, the manifest just arrived and should
@@ -1168,5 +1203,7 @@ fn test_manifest_with_created_ns(manifest_id: &str, created_ns: u128) -> DspMani
         node_context: None,
         raw_payload: None,
         raw_render_bytes: None,
+        raw_audio_frame: None,
+        raw_audio_bytes: None,
     }
 }

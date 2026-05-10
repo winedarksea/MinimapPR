@@ -19,6 +19,7 @@ use crate::{
     journal_reader::JournalPayloadHandle,
     manifests::{DspManifest, ManifestStore},
 };
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 use tokio::{sync::mpsc, sync::RwLock, time};
 use tracing::{debug, info, warn};
@@ -160,6 +161,8 @@ pub(crate) struct ComputePayload {
     pub(crate) classification_windows: Vec<Vec<f32>>,
     pub(crate) listenable_classification_windows: Vec<Vec<f32>>,
     pub(crate) classification_coverage: Vec<Option<AudioCoverageStats>>,
+    pub(crate) classifier_render_start_ns: Option<u128>,
+    pub(crate) classifier_render_end_ns: Option<u128>,
     /// Per-channel mic positions extracted from node_context.sensor_offsets_m.
     pub(crate) mic_positions_m: Vec<[f32; 3]>,
     pub(crate) source_ids: Vec<String>,
@@ -508,6 +511,18 @@ impl DspWorker {
             (start_time_ns, start_time_ns + render_duration_ns)
         };
 
+        publish_raw_audio_frame_event(
+            &self.dsp_event_publisher,
+            &manifest,
+            &decoded,
+            &stream_key,
+            sr,
+            buffer_start_time_ns,
+            buffer_end_time_ns,
+            now_ns,
+        )
+        .await;
+
         let source_manifest_is_stale = manifest_is_older_than_buffer_horizon(
             &manifest,
             now_ns,
@@ -564,6 +579,8 @@ impl DspWorker {
                 classification_windows: (0..channel_count).map(|_| Vec::new()).collect(),
                 listenable_classification_windows: (0..channel_count).map(|_| Vec::new()).collect(),
                 classification_coverage: (0..channel_count).map(|_| None).collect(),
+                classifier_render_start_ns: Some(buffer_start_time_ns.max(0) as u128),
+                classifier_render_end_ns: Some(buffer_end_time_ns.max(0) as u128),
                 mic_positions_m,
                 source_ids,
                 sr,
@@ -692,6 +709,8 @@ impl DspWorker {
                 } else {
                     fallback_render_channels.clone()
                 };
+                let (classifier_render_start_ns, classifier_render_end_ns) =
+                    classifier_render_bounds_from_windows(end_ns, &fallback_render_channels, sr);
                 return Some(ComputePayload {
                     manifest,
                     stream_key,
@@ -705,6 +724,8 @@ impl DspWorker {
                         .map(|_| Vec::new())
                         .collect(),
                     classification_coverage: fallback_render_coverage,
+                    classifier_render_start_ns,
+                    classifier_render_end_ns,
                     mic_positions_m,
                     source_ids,
                     sr,
@@ -781,6 +802,11 @@ impl DspWorker {
                     channel_states.iter().map(|_| None).collect(),
                 )
             };
+        let (classifier_render_start_ns, classifier_render_end_ns) = if run_classifier_render {
+            classifier_render_bounds_from_windows(end_ns, &classification_windows, sr)
+        } else {
+            (None, None)
+        };
 
         Some(ComputePayload {
             manifest,
@@ -790,6 +816,8 @@ impl DspWorker {
             classification_windows,
             listenable_classification_windows,
             classification_coverage,
+            classifier_render_start_ns,
+            classifier_render_end_ns,
             mic_positions_m,
             source_ids,
             sr,
@@ -1066,6 +1094,72 @@ pub(crate) async fn dispatch_classification_result_standalone(
     Some(fallback)
 }
 
+async fn publish_raw_audio_frame_event(
+    publisher: &Option<DspEventPublisher>,
+    source_manifest: &DspManifest,
+    decoded: &DecodedAudioPayload,
+    stream_key: &str,
+    sample_rate_hz: u32,
+    start_time_ns: i128,
+    end_time_ns: i128,
+    created_ns: u128,
+) {
+    let Some(publisher) = publisher else {
+        return;
+    };
+    let Some(raw_pcm_bytes) = encode_interleaved_pcm16le(&decoded.channels) else {
+        return;
+    };
+    let channel_count = decoded.channels.len();
+    let sample_count = decoded.channels.iter().map(Vec::len).min().unwrap_or(0);
+    let raw_manifest = DspManifest {
+        manifest_id: format!("raw-audio-{}", source_manifest.manifest_id),
+        manifest_type: "raw_audio_frame".to_string(),
+        created_ns,
+        source_handles: source_manifest.source_handles.clone(),
+        derived_handle: None,
+        localization: None,
+        classifier_render: None,
+        birdnet: None,
+        coverage_stats: None,
+        promotion_ready: false,
+        env_samples: None,
+        node_context: source_manifest.node_context.clone(),
+        raw_payload: None,
+        raw_render_bytes: None,
+        raw_audio_frame: Some(serde_json::json!({
+            "stream_key": stream_key,
+            "sample_rate_hz": sample_rate_hz,
+            "channel_count": channel_count,
+            "channels": channel_count,
+            "sample_count": sample_count,
+            "sample_format": "pcm16le",
+            "start_time_ns": start_time_ns.max(0) as u128,
+            "end_time_ns": end_time_ns.max(0) as u128,
+            "start_sample_index": decoded.start_sample_index,
+            "end_sample_index": decoded.end_sample_index,
+            "source_manifest_id": source_manifest.manifest_id,
+        })),
+        raw_audio_bytes: Some(BASE64.encode(raw_pcm_bytes)),
+    };
+    let _ = publisher.publish(raw_manifest).await;
+}
+
+fn encode_interleaved_pcm16le(channels: &[Vec<f32>]) -> Option<Vec<u8>> {
+    let sample_count = channels.iter().map(Vec::len).min().unwrap_or(0);
+    if channels.is_empty() || sample_count == 0 {
+        return None;
+    }
+    let mut raw = Vec::with_capacity(sample_count * channels.len() * std::mem::size_of::<i16>());
+    for sample_index in 0..sample_count {
+        for channel in channels {
+            let scaled = (channel[sample_index].clamp(-1.0, 1.0) * 32767.0).round() as i16;
+            raw.extend_from_slice(&scaled.to_le_bytes());
+        }
+    }
+    Some(raw)
+}
+
 fn merge_pending_manifests_for_batch(
     channel_manifests: Vec<DspManifest>,
     disk_manifests: Vec<DspManifest>,
@@ -1219,6 +1313,22 @@ fn channel_coverage_ending_at(
         .iter()
         .map(|buf| buf.coverage_ending_at(end_ns, window_seconds))
         .collect()
+}
+
+fn classifier_render_bounds_from_windows(
+    end_ns: i128,
+    windows: &[Vec<f32>],
+    sample_rate_hz: u32,
+) -> (Option<u128>, Option<u128>) {
+    let sample_count = windows.iter().map(|window| window.len()).max().unwrap_or(0);
+    if sample_count == 0 || sample_rate_hz == 0 {
+        return (None, None);
+    }
+    let duration_ns =
+        ((sample_count as f64 / sample_rate_hz as f64) * 1_000_000_000.0).round() as i128;
+    let render_end_ns = end_ns.max(0);
+    let render_start_ns = render_end_ns.saturating_sub(duration_ns).max(0);
+    (Some(render_start_ns as u128), Some(render_end_ns as u128))
 }
 
 fn eligible_localization_channels(

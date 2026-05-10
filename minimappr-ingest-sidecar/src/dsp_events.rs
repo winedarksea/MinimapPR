@@ -129,6 +129,8 @@ mod tests {
             node_context: None,
             raw_payload: None,
             raw_render_bytes: None,
+            raw_audio_frame: None,
+            raw_audio_bytes: None,
         }
     }
 

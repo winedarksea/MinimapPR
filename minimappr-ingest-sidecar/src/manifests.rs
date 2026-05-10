@@ -43,6 +43,10 @@ pub struct LocalizationManifestPayload {
 pub struct ClassifierRenderManifestPayload {
     pub render_id: String,
     pub render_kind: String,
+    #[serde(default)]
+    pub render_start_ns: Option<u128>,
+    #[serde(default)]
+    pub render_end_ns: Option<u128>,
     pub sample_rate_hz: u32,
     pub channels: u16,
     pub sample_count: usize,
@@ -98,6 +102,12 @@ pub struct DspManifest {
     /// None before ManifestStore.publish() so disk files stay compact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_render_bytes: Option<String>,
+    /// Memory-only raw ingest frame metadata for live SSE mirroring.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_audio_frame: Option<serde_json::Value>,
+    /// Base64-encoded interleaved PCM16LE for raw_audio_frame SSE delivery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_audio_bytes: Option<String>,
 }
 
 #[derive(Clone, Debug)]

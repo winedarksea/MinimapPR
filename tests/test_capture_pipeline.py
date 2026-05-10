@@ -37,6 +37,7 @@ from minimappr.core.capture_session import (
     CaptureStartRequest,
     CaptureState,
 )
+from minimappr.core.audio_buffer import MultiSensorBuffer
 from minimappr.core.iamf_pipeline import (
     LoudnessMeasurement,
     TrackTrajectory,
@@ -594,6 +595,36 @@ class TestCaptureSessionManager:
             assert stop_record.end_time_ns is not None
 
     @pytest.mark.asyncio
+    async def test_buffer_backed_capture_starts_without_range_lease(self, tmp_path):
+        """Memory-only sidecar mode uses Python's mirrored buffer, not range leases."""
+        manager = CaptureSessionManager()
+        audio_buffer = MultiSensorBuffer(max_duration_seconds=5.0)
+        req = CaptureStartRequest(
+            stream_key="sirith-memory-only",
+            sidecar_url=None,
+            multi_sensor_buffer=audio_buffer,
+            channel_sensor_ids=[f"sirith-memory-only:ch{i}" for i in range(4)],
+            work_dir=tmp_path,
+            max_duration_s=30.0,
+            record_video=False,
+        )
+
+        with patch(
+            "minimappr.core.capture_session.httpx.AsyncClient.post",
+            new_callable=AsyncMock,
+        ) as post_mock:
+            record = await manager.start(req)
+
+        assert record.state == CaptureState.RECORDING
+        assert record.range_lease_id is None
+        assert record.use_python_ingest is True
+        assert record.capture_audio_buffer is not None
+        post_mock.assert_not_called()
+
+        stopped = await manager.stop(record.session_id)
+        assert stopped.state == CaptureState.PROCESSING
+
+    @pytest.mark.asyncio
     async def test_final_state_update_callback_runs_after_completion(self, tmp_path):
         """The durable row must see COMPLETED/FAILED, not only PROCESSING."""
         manager = CaptureSessionManager()
@@ -656,6 +687,71 @@ class TestCaptureSessionManager:
                 await asyncio.sleep(0.01)
 
         assert persisted_states == [CaptureState.COMPLETED]
+
+    @pytest.mark.asyncio
+    async def test_final_track_settle_state_is_persisted_before_processing(self, tmp_path):
+        manager = CaptureSessionManager()
+        manager.set_final_track_settle_seconds(0.01)
+        persisted_states: list[CaptureState] = []
+
+        async def persist(record):
+            persisted_states.append(record.state)
+
+        manager.set_session_update_callback(persist)
+
+        fake_lease = {
+            "lease_id": "srl-test-lease-003",
+            "start_ns": time.time_ns(),
+        }
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json = MagicMock(return_value=fake_lease)
+
+        from minimappr.core.video_capture import VideoCaptureResult
+
+        fake_capture_result = VideoCaptureResult(
+            output_path=tmp_path / "output_raw.mp4",
+            first_frame_pts_ns=time.time_ns(),
+            process_start_ns=time.time_ns(),
+        )
+
+        with (
+            patch(
+                "minimappr.core.capture_session.httpx.AsyncClient.post",
+                new_callable=AsyncMock,
+                return_value=mock_response,
+            ),
+            patch(
+                "minimappr.core.capture_session.httpx.AsyncClient.delete",
+                new_callable=AsyncMock,
+                return_value=mock_response,
+            ),
+            patch(
+                "minimappr.core.video_capture.VideoCapture.start",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "minimappr.core.video_capture.VideoCapture.stop",
+                new_callable=AsyncMock,
+                return_value=fake_capture_result,
+            ),
+        ):
+            req = CaptureStartRequest(
+                stream_key="mic-array-1",
+                sidecar_url="http://localhost:8081",
+                work_dir=tmp_path,
+                max_duration_s=30.0,
+            )
+            record = await manager.start(req)
+            stop_record = await manager.stop(record.session_id, "http://localhost:8081")
+            assert stop_record.state == CaptureState.AWAITING_FINAL_TRACKS
+
+            for _ in range(20):
+                if persisted_states == [CaptureState.PROCESSING, CaptureState.COMPLETED]:
+                    break
+                await asyncio.sleep(0.01)
+
+        assert persisted_states == [CaptureState.PROCESSING, CaptureState.COMPLETED]
 
 
 # ── Round-trip: A-to-B → subtract → measure → write ─────────────────────────

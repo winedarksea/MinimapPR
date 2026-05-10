@@ -36,6 +36,8 @@ class LocalizedClassifierRenderRequest:
     source_observation_ids: list[str] = field(default_factory=list)
     environment: dict[str, Any] = field(default_factory=dict)
     render_kind: str | None = None
+    render_start_ns: int | None = None
+    render_end_ns: int | None = None
     fallback_reason: str | None = None
     audio_quality: AudioCoverageStats | None = None
     authoritative_classification: ClassificationResult | None = None
@@ -165,6 +167,8 @@ def load_localized_render_manifest_bundle(
                 or ""
             )
             or None,
+            render_start_ns=_optional_int(classifier_render_payload.get("render_start_ns")),
+            render_end_ns=_optional_int(classifier_render_payload.get("render_end_ns")),
             fallback_reason=str(
                 birdnet_payload.get("fallback_reason")
                 or classifier_render_payload.get("fallback_reason")
@@ -192,6 +196,15 @@ def _load_audio_coverage_stats(payload: Any) -> AudioCoverageStats | None:
         if stats:
             return max(stats, key=lambda item: (item.missing_ratio, item.max_gap_seconds))
     return _audio_coverage_stats_from_mapping(payload)
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _audio_coverage_stats_from_mapping(payload: dict[str, Any]) -> AudioCoverageStats | None:

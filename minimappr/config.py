@@ -314,6 +314,7 @@ class Settings:
     taxonomy_config_path: Path = Path("data/taxonomy.json")
     model_chain_config_path: Path = Path("data/model_chain.json")
     large_artifact_dir: Path = Path("data/artifacts")
+    capture_final_tracks_settle_seconds: float = 30.0
     cors_allow_origins: tuple[str, ...] = ("http://localhost:8080", "http://127.0.0.1:8080")
     cors_allow_credentials: bool = False
 
@@ -493,6 +494,8 @@ class Settings:
             raise ValueError("MINIMAPPR_EVENT_STALE_SECONDS must be > 0")
         if self.cleanup_interval_seconds <= 0.0:
             raise ValueError("MINIMAPPR_CLEANUP_INTERVAL_SECONDS must be > 0")
+        if self.capture_final_tracks_settle_seconds < 0.0:
+            raise ValueError("MINIMAPPR_CAPTURE_FINAL_TRACKS_SETTLE_SECONDS must be >= 0")
         if self.ingest_spool_ready_ttl_seconds < 0.0:
             raise ValueError("MINIMAPPR_INGEST_SPOOL_READY_TTL_SECONDS must be >= 0")
         if self.ingest_spool_failed_ttl_seconds < 0.0:
@@ -808,6 +811,10 @@ class Settings:
             taxonomy_config_path=Path(_env_str("MINIMAPPR_TAXONOMY_CONFIG_PATH", "data/taxonomy.json")),
             model_chain_config_path=Path(_env_str("MINIMAPPR_MODEL_CHAIN_CONFIG_PATH", "data/model_chain.json")),
             large_artifact_dir=Path(_env_str("MINIMAPPR_LARGE_ARTIFACT_DIR", "data/artifacts")),
+            capture_final_tracks_settle_seconds=_env_float(
+                "MINIMAPPR_CAPTURE_FINAL_TRACKS_SETTLE_SECONDS",
+                30.0,
+            ),
             cors_allow_origins=_env_list(
                 "MINIMAPPR_CORS_ALLOW_ORIGINS",
                 ("http://localhost:8080", "http://127.0.0.1:8080"),

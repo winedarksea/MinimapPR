@@ -634,6 +634,8 @@ async fn ingest_env(
             node_context: None,
             raw_payload: None,
             raw_render_bytes: None,
+            raw_audio_frame: None,
+            raw_audio_bytes: None,
         };
         let _ = state.dsp_event_publisher.publish(env_manifest).await;
     }

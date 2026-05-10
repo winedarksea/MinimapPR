@@ -13,6 +13,7 @@ synthetic 4-channel audio, verifying:
 from __future__ import annotations
 
 import math
+import json
 import tempfile
 import time
 import wave
@@ -25,6 +26,7 @@ import pytest
 from minimappr.core.audio_buffer import MultiSensorBuffer
 from minimappr.core.capture_session import CaptureSessionRecord, CaptureState
 from minimappr.core.iamf_pipeline import IamfPipeline, OUTPUT_RATE_HZ
+from minimappr.utils.audio import write_wav_mono
 
 SAMPLE_RATE = 16_000
 DURATION_S = 2.0
@@ -175,6 +177,108 @@ class _StubStorageWithTrack(_StubStorage):
         ]
 
 
+class _StubStorageWithLaggingTrack(_StubStorage):
+    def __init__(self, start_ns: int, end_ns: int) -> None:
+        self._start_ns = start_ns
+        self._end_ns = end_ns
+
+    async def query_tracks_in_window(self, start_ns: int, end_ns: int):
+        del start_ns, end_ns
+        return [
+            {
+                "track_id": "trk-lagging",
+                "status": "dropped",
+                "tqi": 0.7,
+                "confidence": 0.82,
+            }
+        ]
+
+    async def query_detections_for_track(self, track_id: str, start_ns: int, end_ns: int):
+        del track_id, start_ns, end_ns
+        return [
+            {
+                "toa_ns": self._start_ns - 2_000_000_000,
+                "timestamp_ns": self._start_ns - 2_000_000_000,
+                "x": 1.0,
+                "y": 0.0,
+                "z": 0.0,
+                "confidence": 0.0,
+                "label_confidence": 0.75,
+            },
+            {
+                "toa_ns": self._end_ns + 2_000_000_000,
+                "timestamp_ns": self._end_ns + 2_000_000_000,
+                "report_window_start_ns": self._start_ns + 2_000_000_000,
+                "report_window_end_ns": self._end_ns + 2_000_000_000,
+                "x": 1.2,
+                "y": 0.1,
+                "z": 0.0,
+                "confidence": 0.0,
+                "label_confidence": 0.76,
+            },
+        ]
+
+
+class _StubStorageWithBirdnetSnippet(_StubStorage):
+    def __init__(self, start_ns: int, snippet_path: Path) -> None:
+        self._start_ns = start_ns
+        self._snippet_path = snippet_path
+
+    async def query_tracks_in_window(self, start_ns: int, end_ns: int):
+        del start_ns, end_ns
+        return [{"track_id": "trk-birdnet", "tqi": 0.9, "confidence": 0.84}]
+
+    async def query_detections_for_track(self, track_id: str, start_ns: int, end_ns: int):
+        del track_id, start_ns, end_ns
+        render_start_ns = self._start_ns + 2_000_000_000
+        render_end_ns = self._start_ns + 3_000_000_000
+        return [
+            {
+                "toa_ns": render_end_ns,
+                "timestamp_ns": render_end_ns,
+                "report_window_start_ns": render_start_ns,
+                "report_window_end_ns": render_end_ns,
+                "x": 1.0,
+                "y": 0.25,
+                "z": 0.0,
+                "confidence": 0.84,
+                "label_confidence": 0.91,
+                "snippet_path": str(self._snippet_path),
+                "feature_summary_json": json.dumps(
+                    {
+                        "rust_render_kind": "birdnet_hybrid_spatial_blend",
+                        "rust_render_start_ns": render_start_ns,
+                        "rust_render_end_ns": render_end_ns,
+                    }
+                ),
+            }
+        ]
+
+
+class _StubStorageWithSingleReportWindowDetection(_StubStorage):
+    def __init__(self, start_ns: int) -> None:
+        self._start_ns = start_ns
+
+    async def query_tracks_in_window(self, start_ns: int, end_ns: int):
+        del start_ns, end_ns
+        return [{"track_id": "trk-single", "tqi": 0.8, "confidence": 0.75}]
+
+    async def query_detections_for_track(self, track_id: str, start_ns: int, end_ns: int):
+        del track_id, start_ns, end_ns
+        return [
+            {
+                "toa_ns": self._start_ns + 2_500_000_000,
+                "timestamp_ns": self._start_ns + 2_500_000_000,
+                "report_window_start_ns": self._start_ns + 2_000_000_000,
+                "report_window_end_ns": self._start_ns + 3_000_000_000,
+                "x": 0.5,
+                "y": 1.0,
+                "z": 0.0,
+                "confidence": 0.75,
+                "label_confidence": 0.82,
+            }
+        ]
+
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
 class TestIamfPipelineE2E:
@@ -192,6 +296,95 @@ class TestIamfPipelineE2E:
         d = tmp_path / "artifacts"
         d.mkdir()
         return d
+
+    @pytest.mark.asyncio
+    async def test_lagging_track_bracketing_detections_are_export_eligible(
+        self,
+        artifacts_dir: Path,
+    ):
+        start_ns = 1_000_000_000_000
+        end_ns = start_ns + 10_000_000_000
+        total_samples = 480_000
+        pipeline = IamfPipeline(
+            sidecar_url=None,
+            db_storage=_StubStorageWithLaggingTrack(start_ns, end_ns),
+            artifact_dir=artifacts_dir,
+        )
+
+        trajectories = await pipeline._query_trajectories(
+            start_ns,
+            end_ns,
+            total_samples=total_samples,
+            capture_rate_hz=48_000,
+        )
+
+        assert len(trajectories) == 1
+        trajectory = trajectories[0]
+        assert trajectory.track_id == "trk-lagging"
+        assert trajectory.localization_confidence == pytest.approx(0.82)
+        assert trajectory.label_confidence == pytest.approx(0.755)
+        assert trajectory.waypoints[0][0] == 0
+        assert trajectory.waypoints[1][0] == 96_000
+        assert trajectory.waypoints[2][0] == 479_999
+
+    @pytest.mark.asyncio
+    async def test_birdnet_hybrid_snippet_is_preferred_for_object_audio(
+        self,
+        tmp_path: Path,
+        artifacts_dir: Path,
+    ):
+        start_ns = 1_000_000_000_000
+        snippet_path = tmp_path / "birdnet-snippet.wav"
+        snippet_samples = _sine(2200.0, 1.0, sr=16_000)
+        write_wav_mono(snippet_path, snippet_samples, 16_000)
+
+        pipeline = IamfPipeline(
+            sidecar_url=None,
+            db_storage=_StubStorageWithBirdnetSnippet(start_ns, snippet_path),
+            artifact_dir=artifacts_dir,
+        )
+        trajectories = await pipeline._query_trajectories(
+            start_ns,
+            start_ns + 10_000_000_000,
+            total_samples=480_000,
+            capture_rate_hz=48_000,
+        )
+
+        assert len(trajectories) == 1
+        trajectory = trajectories[0]
+        assert trajectory.rendered_object_samples is not None
+        assert trajectory.waypoints == [
+            (96_000, (1.0, 0.25, 0.0)),
+            (143_999, (1.0, 0.25, 0.0)),
+        ]
+        assert np.max(np.abs(trajectory.rendered_object_samples[:96_000])) == 0.0
+        assert np.max(np.abs(trajectory.rendered_object_samples[96_000:144_000])) > 0.05
+        assert np.max(np.abs(trajectory.rendered_object_samples[144_000:])) == 0.0
+
+    @pytest.mark.asyncio
+    async def test_single_detection_uses_report_window_span_for_export(
+        self,
+        artifacts_dir: Path,
+    ):
+        start_ns = 1_000_000_000_000
+        pipeline = IamfPipeline(
+            sidecar_url=None,
+            db_storage=_StubStorageWithSingleReportWindowDetection(start_ns),
+            artifact_dir=artifacts_dir,
+        )
+        trajectories = await pipeline._query_trajectories(
+            start_ns,
+            start_ns + 10_000_000_000,
+            total_samples=480_000,
+            capture_rate_hz=48_000,
+        )
+
+        assert len(trajectories) == 1
+        assert trajectories[0].rendered_object_samples is None
+        assert trajectories[0].waypoints == [
+            (96_000, (0.5, 1.0, 0.0)),
+            (143_999, (0.5, 1.0, 0.0)),
+        ]
 
     @pytest.mark.asyncio
     async def test_full_pipeline_with_python_buffer(self, work_dir: Path, artifacts_dir: Path):

@@ -48,6 +48,7 @@ from scipy.signal import resample_poly
 from minimappr.core.ambi_atob import SIRITH_MIC_POSITIONS_M, atob_foa, encode_mono_to_bformat
 from minimappr.core.capture_session import CaptureSessionRecord
 from minimappr.core.iamf_object_slot import IamfObjectSlot, select_iamf_object_slot
+from minimappr.utils.audio import read_wav_mono
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,7 @@ class TrackTrajectory:
     tqi: float = 0.0
     label_confidence: float = 0.0
     localization_confidence: float = 0.0
+    rendered_object_samples: NDArray[np.float32] | None = None
 
 
 @dataclass
@@ -204,7 +206,10 @@ class IamfPipeline:
         )
         object_tracks: dict[str, NDArray[np.float32]] = {}
         for traj in trajectories:
-            mono = await self._mvdr_beamform(raw_channels, traj, capture_rate_hz)
+            if traj.rendered_object_samples is not None:
+                mono = traj.rendered_object_samples
+            else:
+                mono = await self._mvdr_beamform(raw_channels, traj, capture_rate_hz)
             obj_path = work_dir / f"object_{traj.track_id}.wav"
             _write_wav_mono(obj_path, mono, capture_rate_hz)
             object_tracks[traj.track_id] = mono
@@ -441,7 +446,7 @@ class IamfPipeline:
         total_samples: int,
         capture_rate_hz: int,
     ) -> list[TrackTrajectory]:
-        """Query the DB for confirmed tracks within the recording window."""
+        """Query the DB for tracks eligible for object rendering."""
         if self._db is None:
             return []
         try:
@@ -457,27 +462,62 @@ class IamfPipeline:
             waypoints: list[tuple[int, tuple[float, float, float]]] = []
             label_confidences: list[float] = []
             localization_confidences: list[float] = []
+            rendered_object_samples = np.zeros(total_samples, dtype=np.float32)
+            rendered_object_sample_count = 0
+            track_confidence = float(row.get("confidence") or 0.0)
             for det in detections:
-                det_ns = det.get("toa_ns", det.get("timestamp_ns", start_ns))
-                sample_offset = int((det_ns - start_ns) * capture_rate_hz / 1_000_000_000)
-                sample_offset = max(0, min(total_samples - 1, sample_offset))
-                pos = (det.get("x", 0.0), det.get("y", 0.0), det.get("z", 0.0))
-                waypoints.append((sample_offset, pos))
+                pos = _detection_position_m(det)
+                rendered_span = _try_place_birdnet_rendered_object_audio(
+                    det,
+                    rendered_object_samples,
+                    start_ns,
+                    end_ns,
+                    capture_rate_hz,
+                )
+                if rendered_span is not None:
+                    span_start_sample, span_end_sample, placed_samples = rendered_span
+                    if placed_samples > 0:
+                        rendered_object_sample_count += placed_samples
+                        waypoints.append((span_start_sample, pos))
+                        waypoints.append((max(span_start_sample, span_end_sample - 1), pos))
+                else:
+                    waypoints.extend(
+                        _detection_waypoints_for_export(
+                            det,
+                            start_ns,
+                            end_ns,
+                            total_samples,
+                            capture_rate_hz,
+                            pos,
+                        )
+                    )
                 label_confidences.append(float(det.get("label_confidence") or 0.0))
                 localization_confidences.append(float(det.get("confidence") or 0.0))
             if waypoints:
+                waypoints = _dedupe_sorted_waypoints(waypoints)
+                detection_localization_confidence = (
+                    float(np.mean(localization_confidences))
+                    if localization_confidences
+                    else 0.0
+                )
                 trajectories.append(
                     TrackTrajectory(
                         track_id=track_id,
                         waypoints=waypoints,
                         tqi=float(row.get("tqi") or 0.0),
                         label_confidence=(
-                            float(np.mean(label_confidences)) if label_confidences else 0.0
+                            float(np.mean(label_confidences))
+                            if label_confidences
+                            else track_confidence
                         ),
-                        localization_confidence=(
-                            float(np.mean(localization_confidences))
-                            if localization_confidences
-                            else 0.0
+                        localization_confidence=max(
+                            detection_localization_confidence,
+                            track_confidence,
+                        ),
+                        rendered_object_samples=(
+                            rendered_object_samples
+                            if rendered_object_sample_count > 0
+                            else None
                         ),
                     )
                 )
@@ -809,6 +849,170 @@ def _build_recording_source_inventory(
             coverage_ratio=float(np.clip(observed_duration_s / requested_duration_s, 0.0, 1.0)),
         )
     ]
+
+
+def _detection_position_m(det: dict[str, Any]) -> tuple[float, float, float]:
+    return (
+        float(det.get("x") or 0.0),
+        float(det.get("y") or 0.0),
+        float(det.get("z") or 0.0),
+    )
+
+
+def _detection_waypoints_for_export(
+    det: dict[str, Any],
+    start_ns: int,
+    end_ns: int,
+    total_samples: int,
+    capture_rate_hz: int,
+    pos: tuple[float, float, float],
+) -> list[tuple[int, tuple[float, float, float]]]:
+    report_start_ns = _optional_detection_int(det.get("report_window_start_ns"))
+    report_end_ns = _optional_detection_int(det.get("report_window_end_ns"))
+    if (
+        report_start_ns is not None
+        and report_end_ns is not None
+        and report_end_ns >= start_ns
+        and report_start_ns <= end_ns
+    ):
+        span_start_sample = _ns_to_capture_sample(
+            max(start_ns, report_start_ns), start_ns, total_samples, capture_rate_hz
+        )
+        span_end_sample = _ns_to_capture_sample_exclusive(
+            min(end_ns, report_end_ns), start_ns, total_samples, capture_rate_hz
+        )
+        if span_end_sample > span_start_sample:
+            return [
+                (span_start_sample, pos),
+                (max(span_start_sample, span_end_sample - 1), pos),
+            ]
+
+    det_ns = int(det.get("toa_ns") or det.get("timestamp_ns") or start_ns)
+    return [(_ns_to_capture_sample(det_ns, start_ns, total_samples, capture_rate_hz), pos)]
+
+
+def _try_place_birdnet_rendered_object_audio(
+    det: dict[str, Any],
+    destination: NDArray[np.float32],
+    start_ns: int,
+    end_ns: int,
+    capture_rate_hz: int,
+) -> tuple[int, int, int] | None:
+    feature_summary = _detection_feature_summary(det)
+    render_kind = str(feature_summary.get("rust_render_kind") or "").strip()
+    if not render_kind.startswith("birdnet_hybrid_"):
+        return None
+
+    render_start_ns = _optional_detection_int(
+        feature_summary.get("rust_render_start_ns")
+        or feature_summary.get("render_start_ns")
+    )
+    render_end_ns = _optional_detection_int(
+        feature_summary.get("rust_render_end_ns")
+        or feature_summary.get("render_end_ns")
+    )
+    snippet_path = det.get("snippet_path")
+    if render_start_ns is None or render_end_ns is None or render_end_ns <= render_start_ns:
+        return None
+    if render_end_ns < start_ns or render_start_ns > end_ns:
+        return None
+    if not snippet_path:
+        return None
+
+    path = Path(str(snippet_path))
+    if not path.exists():
+        return None
+
+    try:
+        mono, snippet_rate_hz = read_wav_mono(path)
+    except Exception as exc:
+        logger.warning("IAMF object snippet read failed for %s: %s", path, exc)
+        return None
+    if mono.size == 0:
+        return None
+
+    mono = mono.astype(np.float32, copy=False)
+    if snippet_rate_hz != capture_rate_hz:
+        mono = _resample(mono[np.newaxis, :], snippet_rate_hz, capture_rate_hz)[0]
+
+    target_samples = max(
+        1,
+        int(round((render_end_ns - render_start_ns) * capture_rate_hz / 1_000_000_000)),
+    )
+    mono = _conform_mono_to_sample_count(mono, target_samples)
+
+    unclipped_start = int(round((render_start_ns - start_ns) * capture_rate_hz / 1_000_000_000))
+    unclipped_end = unclipped_start + mono.shape[0]
+    dest_start = max(0, unclipped_start)
+    dest_end = min(destination.shape[0], unclipped_end)
+    if dest_end <= dest_start:
+        return None
+
+    source_start = dest_start - unclipped_start
+    source_end = source_start + (dest_end - dest_start)
+    destination[dest_start:dest_end] = np.clip(
+        destination[dest_start:dest_end] + mono[source_start:source_end],
+        -1.0,
+        1.0,
+    )
+    return dest_start, dest_end, dest_end - dest_start
+
+
+def _detection_feature_summary(det: dict[str, Any]) -> dict[str, Any]:
+    feature_summary = det.get("feature_summary")
+    if isinstance(feature_summary, dict):
+        return feature_summary
+    raw = det.get("feature_summary_json")
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _optional_detection_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _ns_to_capture_sample(
+    value_ns: int,
+    start_ns: int,
+    total_samples: int,
+    capture_rate_hz: int,
+) -> int:
+    if total_samples <= 0:
+        return 0
+    sample = int(round((value_ns - start_ns) * capture_rate_hz / 1_000_000_000))
+    return max(0, min(total_samples - 1, sample))
+
+
+def _ns_to_capture_sample_exclusive(
+    value_ns: int,
+    start_ns: int,
+    total_samples: int,
+    capture_rate_hz: int,
+) -> int:
+    if total_samples <= 0:
+        return 0
+    sample = int(round((value_ns - start_ns) * capture_rate_hz / 1_000_000_000))
+    return max(0, min(total_samples, sample))
+
+
+def _dedupe_sorted_waypoints(
+    waypoints: list[tuple[int, tuple[float, float, float]]]
+) -> list[tuple[int, tuple[float, float, float]]]:
+    deduped: dict[int, tuple[float, float, float]] = {}
+    for sample_offset, pos in waypoints:
+        deduped[int(sample_offset)] = pos
+    return sorted(deduped.items(), key=lambda item: item[0])
+
 
 def _resample(
     channels: NDArray[np.float32], from_hz: int, to_hz: int

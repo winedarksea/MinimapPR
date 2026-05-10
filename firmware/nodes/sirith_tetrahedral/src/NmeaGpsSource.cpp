@@ -71,6 +71,9 @@ bool NmeaGpsSource::begin() {
   loggedHealthyState_ = false;
   loggedFixState_ = false;
   loggedNoPpsFallback_ = false;
+  loggedUartBytes_ = false;
+  loggedInvalidNmeaChecksum_ = false;
+  loggedUnsupportedNmeaSentence_ = false;
   haveAlignedPpsEpoch_ = false;
   ppsSignalCurrentlyObserved_ = false;
   lastAppliedPpsEdgeCount_ = 0;
@@ -119,6 +122,10 @@ void NmeaGpsSource::poll(NodeDescriptor& descriptor, NodeClock* clock) {
   while (uart_is_readable(config_.uart) && bytesConsumed < config_.maxBytesPerPoll) {
     const char byte = static_cast<char>(uart_getc(config_.uart));
     ++bytesConsumed;
+    if (!loggedUartBytes_) {
+      loggedUartBytes_ = true;
+      std::printf("[gps] UART bytes received on GP%d; waiting for valid NMEA sentences\n", config_.rxPin);
+    }
     if (byte == '\r') {
       continue;
     }
@@ -274,8 +281,32 @@ void NmeaGpsSource::updateDescriptor(NodeDescriptor& descriptor) const {
 }
 
 void NmeaGpsSource::consumeLine(const char* line, NodeClock* clock) {
+  if (line == nullptr || line[0] != '$') {
+    return;
+  }
+
+  if (!validateChecksum(line)) {
+    if (!loggedInvalidNmeaChecksum_) {
+      loggedInvalidNmeaChecksum_ = true;
+      std::printf("[gps] ignoring NMEA-looking line with invalid checksum\n");
+    }
+    return;
+  }
+
   ParsedSentence parsed = {};
   if (!parseSentence(line, parsed)) {
+    if (!loggedUnsupportedNmeaSentence_) {
+      loggedUnsupportedNmeaSentence_ = true;
+      char header[8] = {};
+      size_t headerLength = 0;
+      for (const char* cursor = line + 1; *cursor != '\0' && *cursor != ',' && *cursor != '*'; ++cursor) {
+        if (headerLength + 1 >= sizeof(header)) {
+          break;
+        }
+        header[headerLength++] = *cursor;
+      }
+      std::printf("[gps] valid but unsupported NMEA sentence %s; waiting for GGA/RMC/GLL/ZDA\n", header);
+    }
     return;
   }
 

@@ -123,6 +123,9 @@ class NmeaGpsSource {
   bool loggedHealthyState_ = false;
   bool loggedFixState_ = false;
   bool loggedNoPpsFallback_ = false;
+  bool loggedUartBytes_ = false;
+  bool loggedInvalidNmeaChecksum_ = false;
+  bool loggedUnsupportedNmeaSentence_ = false;
   bool haveAlignedPpsEpoch_ = false;
   bool ppsSignalCurrentlyObserved_ = false;
   uint32_t lastAppliedPpsEdgeCount_ = 0;

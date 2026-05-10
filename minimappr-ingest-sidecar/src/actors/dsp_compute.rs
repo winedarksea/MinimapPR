@@ -118,6 +118,8 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
                 payload.sr,
                 Some(&localization),
                 fallback_reason.clone(),
+                payload.classifier_render_start_ns,
+                payload.classifier_render_end_ns,
             );
             let (listenable_bytes, _) = compute_render_bytes(
                 &payload.config,
@@ -127,6 +129,8 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
                 payload.sr,
                 Some(&localization),
                 fallback_reason.clone(),
+                payload.classifier_render_start_ns,
+                payload.classifier_render_end_ns,
             );
             (Some(bytes), Some(listenable_bytes), Some(meta), cov)
         } else {
@@ -267,6 +271,8 @@ pub async fn run_io(result: ComputeMathResult) {
             node_context: payload.manifest.node_context.clone(),
             raw_payload: None,
             raw_render_bytes: None,
+            raw_audio_frame: None,
+            raw_audio_bytes: None,
         };
         if !arrived_via_channel {
             // Disk-backed ingest: persist manifest (without bulky base64 data).
