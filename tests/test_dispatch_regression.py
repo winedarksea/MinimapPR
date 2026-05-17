@@ -15,6 +15,7 @@ import pytest
 
 from minimappr.core.localization import LocalizationError
 from minimappr.core.localization_dispatch import LocalizationDispatcher
+from minimappr.models import LocalizationResult
 from tests.helpers import FailingLocalizer, StubLocalizer
 
 
@@ -65,6 +66,58 @@ def test_run_algorithm_gcc_phat_error_propagates() -> None:
 
     assert failing_gcc.calls == 1
     assert dispatcher.fallback_count() == 0
+
+
+def test_sensor_weights_trigger_gcc_fallback_for_unsupported_algorithm() -> None:
+    """Weighted localization should not silently ignore weights on non-gcc algorithms."""
+
+    class WeightedGccStub:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def localize(
+            self,
+            sensor_positions: dict[str, np.ndarray],
+            sensor_windows: dict[str, np.ndarray],
+            sample_rate_hz: int,
+            temperature_c: float,
+            humidity_fraction: float,
+            sensor_weights: dict[str, float] | None = None,
+        ) -> LocalizationResult:
+            del sensor_windows, sample_rate_hz, temperature_c, humidity_fraction
+            self.calls += 1
+            assert sensor_weights is not None
+            reference_sensor = sorted(sensor_positions.keys())[0]
+            return LocalizationResult(
+                position_m=(0.0, 0.0, 0.0),
+                confidence=0.3,
+                gdop=1.0,
+                reference_sensor=reference_sensor,
+                tdoa_s={},
+            )
+
+    gcc = WeightedGccStub()
+    music = StubLocalizer("music", 0.8)
+    dispatcher = LocalizationDispatcher(
+        strategy="fixed",
+        default_algorithm="music",
+        algorithms={"gcc_phat": gcc, "music": music},
+    )
+
+    result = dispatcher.localize(
+        _POSITIONS,
+        _WINDOWS,
+        _SR,
+        _TEMP,
+        _HUM,
+        sensor_weights={sid: 1.0 for sid in _POSITIONS},
+    )
+
+    assert music.calls == 0
+    assert gcc.calls == 1
+    assert dispatcher.fallback_count() == 1
+    assert result.attempted_algorithm == "music"
+    assert result.resolved_algorithm == "gcc_phat"
 
 
 def test_fallback_count_accumulates() -> None:

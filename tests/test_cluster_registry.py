@@ -73,6 +73,19 @@ async def test_cluster_for_node_resolution() -> None:
 
 
 @pytest.mark.asyncio
+async def test_upsert_rejects_overlapping_cluster_memberships() -> None:
+    reg = ClusterRegistry()
+    await reg.upsert(ClusterSpec(
+        id="alpha", member_node_ids=["n0", "n1"], declared_sync_grade=SyncGrade.GPS_PPS,
+    ))
+
+    with pytest.raises(ValueError, match="overlaps existing cluster membership"):
+        await reg.upsert(ClusterSpec(
+            id="beta", member_node_ids=["n1", "n2"], declared_sync_grade=SyncGrade.NTP,
+        ))
+
+
+@pytest.mark.asyncio
 async def test_sensors_and_positions_in_cluster() -> None:
     nodes = NodeRegistry()
     await nodes.upsert(_node("n0", 0.0, 0.0), last_seen_ns=1)
@@ -170,6 +183,24 @@ async def test_update_node_memberships_propagates_to_registry() -> None:
     await reg.update_node_memberships(nodes)
     sensors_n0 = await nodes.sensors_for_node("n0")
     assert sensors_n0[0].cluster_id is None
+
+
+@pytest.mark.asyncio
+async def test_node_upsert_preserves_cluster_membership() -> None:
+    nodes = NodeRegistry()
+    spec = _node("n0", 0.0, 0.0)
+    await nodes.upsert(spec, last_seen_ns=1)
+
+    reg = ClusterRegistry()
+    await reg.upsert(ClusterSpec(
+        id="c1", member_node_ids=["n0"], declared_sync_grade=SyncGrade.GPS_PPS,
+    ))
+    await reg.update_node_memberships(nodes)
+
+    await nodes.upsert(spec, last_seen_ns=2)
+
+    sensors_n0 = await nodes.sensors_for_node("n0")
+    assert sensors_n0[0].cluster_id == "c1"
 
 
 def test_min_grade_helper_orders_grades_correctly() -> None:

@@ -2653,7 +2653,10 @@ async def create_or_update_cluster(request: Request, spec: ClusterSpec) -> Clust
     After upsert the registry propagates cluster_id back into NodeRegistry.
     """
     state = _require_state(request)
-    await state.cluster_registry.upsert(spec)
+    try:
+        await state.cluster_registry.upsert(spec)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     await state.cluster_registry.update_node_memberships(state.registry)
     return spec
 

@@ -344,6 +344,7 @@ class Settings:
     localization_refine_confidence_threshold: float = 0.45
     localization_tight_array_aperture_m: float = 0.35
     skip_localization_for_classification: bool = False
+    cluster_aware_localization: bool = False
     beamformed_classification_enabled: bool = False
     beamformer_type: str = "delay_and_sum"
     beamformed_classification_min_sensor_count: int = 2
@@ -944,6 +945,7 @@ class Settings:
                 "MINIMAPPR_BIRDNET_CHUNK_RETRY_ON_CLASSIFIER_ERROR",
                 False,
             ),
+            cluster_aware_localization=_env_bool("MINIMAPPR_CLUSTER_AWARE_LOCALIZATION", False),
             fusion_drop_on_backpressure=_env_bool("MINIMAPPR_FUSION_DROP_ON_BACKPRESSURE", True),
             fusion_offline_replay_mode=_env_bool("MINIMAPPR_FUSION_OFFLINE_REPLAY_MODE", False),
             sensor_energy_threshold_multiplier=_env_float("MINIMAPPR_SENSOR_ENERGY_THRESHOLD_MULTIPLIER", 0.45),
@@ -1014,6 +1016,7 @@ class Settings:
             localization_refine_confidence_threshold=self.localization_refine_confidence_threshold,
             localization_tight_array_aperture_m=self.localization_tight_array_aperture_m,
             skip_localization_for_classification=self.skip_localization_for_classification,
+            cluster_aware_localization=self.cluster_aware_localization,
             beamformed_classification_enabled=self.beamformed_classification_enabled,
             beamformer_type=self.beamformer_type,
             beamformed_classification_min_sensor_count=self.beamformed_classification_min_sensor_count,

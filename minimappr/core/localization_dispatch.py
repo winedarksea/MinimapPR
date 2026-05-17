@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import inspect
+import logging
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -11,6 +13,9 @@ from minimappr.core.advanced_localization import EspritLocalizer, MusicLocalizer
 from minimappr.core.localization import LocalizationEngine, LocalizationError
 from minimappr.interfaces import Localizer
 from minimappr.models import LocalizationResult
+
+
+logger = logging.getLogger(__name__)
 
 
 def _array_aperture_m(sensor_positions: dict[str, np.ndarray]) -> float:
@@ -121,7 +126,10 @@ class LocalizationDispatcher:
             )
         self._last_algorithm = "gcc_phat"
         self._last_attempted = "gcc_phat"
-        if sensor_weights is not None and isinstance(fallback, LocalizationEngine):
+        if sensor_weights is not None and self._localizer_supports_sensor_weights(
+            fallback,
+            method_name="localize_2d",
+        ):
             result = fallback.localize_2d(
                 sensor_positions=sensor_positions,
                 sensor_windows=sensor_windows,
@@ -222,6 +230,7 @@ class LocalizationDispatcher:
         try:
             result = self._call_localizer(
                 localizer=localizer,
+                localizer_name=attempted,
                 sensor_positions=sensor_positions,
                 sensor_windows=sensor_windows,
                 sample_rate_hz=sample_rate_hz,
@@ -238,6 +247,7 @@ class LocalizationDispatcher:
                 raise
             result = self._call_localizer(
                 localizer=self._fallback,
+                localizer_name="gcc_phat",
                 sensor_positions=sensor_positions,
                 sensor_windows=sensor_windows,
                 sample_rate_hz=sample_rate_hz,
@@ -252,9 +262,20 @@ class LocalizationDispatcher:
             return result
 
     @staticmethod
+    def _localizer_supports_sensor_weights(localizer, *, method_name: str = "localize") -> bool:
+        method = getattr(localizer, method_name, None)
+        if method is None:
+            return False
+        try:
+            return "sensor_weights" in inspect.signature(method).parameters
+        except (TypeError, ValueError):
+            return isinstance(localizer, LocalizationEngine)
+
+    @staticmethod
     def _call_localizer(
         *,
         localizer,
+        localizer_name: str,
         sensor_positions: dict[str, np.ndarray],
         sensor_windows: dict[str, np.ndarray],
         sample_rate_hz: int,
@@ -263,7 +284,7 @@ class LocalizationDispatcher:
         sensor_weights: dict[str, float] | None = None,
     ) -> LocalizationResult:
         """Call localizer.localize(), passing sensor_weights only when supported."""
-        if sensor_weights is not None and isinstance(localizer, LocalizationEngine):
+        if sensor_weights is not None and LocalizationDispatcher._localizer_supports_sensor_weights(localizer):
             return localizer.localize(
                 sensor_positions=sensor_positions,
                 sensor_windows=sensor_windows,
@@ -271,6 +292,14 @@ class LocalizationDispatcher:
                 temperature_c=temperature_c,
                 humidity_fraction=humidity_fraction,
                 sensor_weights=sensor_weights,
+            )
+        if sensor_weights is not None:
+            logger.warning(
+                "Localization algorithm %s does not support sensor_weights; falling back to gcc_phat",
+                localizer_name,
+            )
+            raise LocalizationError(
+                f"Localization algorithm '{localizer_name}' does not support sensor_weights"
             )
         return localizer.localize(
             sensor_positions=sensor_positions,

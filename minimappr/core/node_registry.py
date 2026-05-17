@@ -55,6 +55,11 @@ class NodeRegistry:
             existing = self._nodes.get(spec.id)
             if existing is not None and last_seen_ns < existing.last_seen_ns:
                 return existing
+            for sensor_id, descriptor in sensor_descriptors.items():
+                existing_descriptor = self._sensors.get(sensor_id)
+                if existing_descriptor is not None:
+                    descriptor.effective_sync_grade = existing_descriptor.effective_sync_grade
+                    descriptor.cluster_id = existing_descriptor.cluster_id
             runtime = NodeRuntime(spec=spec, sensor_ids=sensor_ids, last_seen_ns=last_seen_ns)
             self._nodes[spec.id] = runtime
             for sensor_id, descriptor in sensor_descriptors.items():

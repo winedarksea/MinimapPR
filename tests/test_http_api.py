@@ -222,6 +222,32 @@ def test_http_ingest_and_cop_status(monkeypatch, tmp_path: Path) -> None:
         assert "metrics" in diagnostics["pipeline"]
 
 
+def test_cluster_api_rejects_overlapping_memberships(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+
+    with TestClient(app) as client:
+        first = client.post(
+            "/api/v1/clusters",
+            json={
+                "id": "alpha",
+                "member_node_ids": ["n0", "n1"],
+                "declared_sync_grade": "gps_pps",
+            },
+        )
+        assert first.status_code == 201
+
+        second = client.post(
+            "/api/v1/clusters",
+            json={
+                "id": "beta",
+                "member_node_ids": ["n1", "n2"],
+                "declared_sync_grade": "ntp",
+            },
+        )
+        assert second.status_code == 400
+        assert "overlaps existing cluster membership" in second.json()["detail"]
+
+
 def test_binary_ingest_accepts_raw_pcm_batch(monkeypatch, tmp_path: Path) -> None:
     _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
     samples = np.random.default_rng(42).normal(0.0, 0.35, size=(1, 512)).astype(np.float32)

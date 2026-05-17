@@ -25,6 +25,22 @@ class ClusterRegistry:
 
     async def upsert(self, spec: ClusterSpec) -> None:
         async with self._lock:
+            requested_node_ids = set(spec.member_node_ids)
+            overlapping_memberships: list[tuple[str, list[str]]] = []
+            for existing_cluster_id, existing_spec in self._clusters.items():
+                if existing_cluster_id == spec.id:
+                    continue
+                overlap = sorted(requested_node_ids.intersection(existing_spec.member_node_ids))
+                if overlap:
+                    overlapping_memberships.append((existing_cluster_id, overlap))
+            if overlapping_memberships:
+                overlap_summary = "; ".join(
+                    f"{cluster_id}: {', '.join(node_ids)}"
+                    for cluster_id, node_ids in overlapping_memberships
+                )
+                raise ValueError(
+                    f"Cluster '{spec.id}' overlaps existing cluster membership(s): {overlap_summary}"
+                )
             self._clusters[spec.id] = spec
 
     async def get(self, cluster_id: str) -> ClusterSpec | None:

@@ -13,6 +13,88 @@ use std::sync::{
 };
 use tokio::sync::RwLock;
 
+#[test]
+fn mic_positions_from_manifest_prefers_cluster_sensor_positions() {
+    let manifest = DspManifest {
+        manifest_id: "manifest-cluster-positions".to_string(),
+        manifest_type: "raw_journal_append".to_string(),
+        created_ns: 1,
+        source_handles: vec![],
+        derived_handle: None,
+        localization: None,
+        classifier_render: None,
+        birdnet: None,
+        coverage_stats: None,
+        promotion_ready: false,
+        env_samples: None,
+        node_context: Some(serde_json::json!({
+            "node": {
+                "sensor_offsets_m": [
+                    [9.0, 9.0, 9.0],
+                    [8.0, 8.0, 8.0],
+                ]
+            }
+        })),
+        cluster_id: Some("square".to_string()),
+        cluster_sensor_positions: Some(vec![
+            ("n0:ch0".to_string(), [0.0, 0.0, 2.0]),
+            ("n1:ch0".to_string(), [2.0, 0.0, 2.0]),
+            ("n2:ch0".to_string(), [2.0, 2.0, 2.0]),
+            ("n3:ch0".to_string(), [0.0, 2.0, 2.0]),
+        ]),
+        raw_payload: None,
+        raw_render_bytes: None,
+        raw_audio_frame: None,
+        raw_audio_bytes: None,
+    };
+
+    assert_eq!(
+        mic_positions_from_manifest(&manifest),
+        vec![
+            [0.0, 0.0, 2.0],
+            [2.0, 0.0, 2.0],
+            [2.0, 2.0, 2.0],
+            [0.0, 2.0, 2.0],
+        ]
+    );
+}
+
+#[test]
+fn mic_positions_from_manifest_falls_back_to_node_context_positions() {
+    let manifest = DspManifest {
+        manifest_id: "manifest-node-context-positions".to_string(),
+        manifest_type: "raw_journal_append".to_string(),
+        created_ns: 1,
+        source_handles: vec![],
+        derived_handle: None,
+        localization: None,
+        classifier_render: None,
+        birdnet: None,
+        coverage_stats: None,
+        promotion_ready: false,
+        env_samples: None,
+        node_context: Some(serde_json::json!({
+            "node": {
+                "sensor_offsets_m": [
+                    [0.1, 0.2, 0.3],
+                    [0.4, 0.5, 0.6],
+                ]
+            }
+        })),
+        cluster_id: Some("square".to_string()),
+        cluster_sensor_positions: None,
+        raw_payload: None,
+        raw_render_bytes: None,
+        raw_audio_frame: None,
+        raw_audio_bytes: None,
+    };
+
+    assert_eq!(
+        mic_positions_from_manifest(&manifest),
+        vec![[0.1, 0.2, 0.3], [0.4, 0.5, 0.6],]
+    );
+}
+
 #[tokio::test]
 async fn worker_publishes_localization_and_classifier_render_contract() {
     let tmp = tempfile::tempdir().unwrap();
