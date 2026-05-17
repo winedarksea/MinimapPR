@@ -269,6 +269,8 @@ pub async fn run_io(result: ComputeMathResult) {
             promotion_ready: false,
             env_samples: None,
             node_context: payload.manifest.node_context.clone(),
+            cluster_id: payload.manifest.cluster_id.clone(),
+            cluster_sensor_positions: payload.manifest.cluster_sensor_positions.clone(),
             raw_payload: None,
             raw_render_bytes: None,
             raw_audio_frame: None,

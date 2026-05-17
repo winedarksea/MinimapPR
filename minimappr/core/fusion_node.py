@@ -37,6 +37,7 @@ from minimappr.core.classification import ClassificationOrchestrator
 from minimappr.core.degradation import CapabilityDegradationModel
 from minimappr.core.environment import StaticEnvironmentProvider
 from minimappr.core.geo import LocalCoordinateFrame
+from minimappr.core.cluster_registry import ClusterRegistry
 from minimappr.core.ingest import EnvironmentUpdater, IngestProcessor
 from minimappr.core.localization import LocalizationError
 from minimappr.core.node_registry import NodeRegistry
@@ -188,6 +189,7 @@ class FusionNode:
         coordinate_frame: LocalCoordinateFrame,
         zone_matcher: ZoneMatcher,
         *,
+        cluster_registry: ClusterRegistry | None = None,
         taxonomy_provider: TaxonomyProvider | None = None,
         rules_engine: RuleEngine | None = None,
         action_handlers: dict[str, RuleActionHandler] | None = None,
@@ -200,6 +202,7 @@ class FusionNode:
         self.localization_config = settings.localization_config()
         self.fusion_config = settings.fusion_config()
         self.registry = registry
+        self.cluster_registry = cluster_registry
         self.buffer = buffer
         self.localizer = localizer
         self.classifier = classifier
@@ -725,6 +728,23 @@ class FusionNode:
 
     async def _localize_candidate(self, candidate: EventCandidate) -> LocalizedCandidate | None:
         sensor_positions = await self.registry.sensor_positions()
+        sensor_weights: dict[str, float] | None = None
+
+        if (
+            self.localization_config.cluster_aware_localization
+            and self.cluster_registry is not None
+        ):
+            cluster = await self.cluster_registry.cluster_for_node(candidate.source_node_id)
+            if cluster is not None:
+                cluster_positions = await self.cluster_registry.cluster_sensor_positions(
+                    cluster.id, self.registry
+                )
+                if cluster_positions:
+                    sensor_positions = cluster_positions
+                    sensor_weights = await self.cluster_registry.cluster_sensor_weights(
+                        cluster.id, self.registry
+                    )
+
         sensor_ids = sorted(sensor_positions.keys())
         if not sensor_ids:
             return None
@@ -809,6 +829,7 @@ class FusionNode:
                 for sensor_id, window in selected_windows.items()
             }
 
+        weight_kwargs: dict = {"sensor_weights": sensor_weights} if sensor_weights is not None else {}
         localization_branch: LocalizationBranch | None = None
         if tier == "full_3d":
             try:
@@ -819,6 +840,7 @@ class FusionNode:
                     candidate.sample_rate_hz,
                     conditions.temperature_c,
                     conditions.humidity_fraction,
+                    **weight_kwargs,
                 )
                 localization_branch = self._build_localization_branch(
                     localization=localization,
@@ -839,6 +861,7 @@ class FusionNode:
                     conditions.temperature_c,
                     conditions.humidity_fraction,
                     mean_z,
+                    **weight_kwargs,
                 )
                 localization_branch = self._build_localization_branch(
                     localization=localization,

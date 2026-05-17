@@ -82,18 +82,22 @@ class LocalizationEngine:
         sample_rate_hz: int,
         temperature_c: float,
         humidity_fraction: float,
+        sensor_weights: dict[str, float] | None = None,
     ) -> LocalizationResult:
         if len(sensor_windows) < 4:
             raise LocalizationError("Need at least 4 active sensors for 3D TDOA localization")
         self._validate_inputs(sensor_positions=sensor_positions, sensor_windows=sensor_windows)
 
+        w = sensor_weights or {}
         sensor_ids = sorted(sensor_windows.keys())
         energies = {sensor_id: rms(sensor_windows[sensor_id]) for sensor_id in sensor_ids}
         reference_sensor = max(energies.items(), key=lambda item: item[1])[0]
         reference_signal = sensor_windows[reference_sensor]
         ref_pos = sensor_positions[reference_sensor]
+        ref_weight = w.get(reference_sensor, 1.0)
 
         tdoa_s: dict[str, float] = {}
+        pair_weights: dict[str, float] = {}
         peaks: list[float] = []
         meas_ids: list[str] = []
 
@@ -109,8 +113,10 @@ class LocalizationEngine:
             )
             if not np.isfinite(tau_s) or not np.isfinite(peak):
                 raise LocalizationError(f"Non-finite GCC-PHAT output for sensor {sensor_id}")
+            pw = min(ref_weight, w.get(sensor_id, 1.0))
             tdoa_s[sensor_id] = tau_s
-            peaks.append(peak)
+            pair_weights[sensor_id] = pw
+            peaks.append(peak * pw)
             meas_ids.append(sensor_id)
 
         if len(meas_ids) < 3:
@@ -127,7 +133,7 @@ class LocalizationEngine:
             for sid in meas_ids:
                 dist_i = np.linalg.norm(position - sensor_positions[sid]) + 1e-9
                 predicted = (dist_i - dist_ref) / sound_speed
-                rows.append(predicted - tdoa_s[sid])
+                rows.append(pair_weights.get(sid, 1.0) * (predicted - tdoa_s[sid]))
             return np.asarray(rows, dtype=np.float64)
 
         solved = least_squares(residuals, x0=x0, method="trf", loss="soft_l1")
@@ -174,18 +180,22 @@ class LocalizationEngine:
         temperature_c: float,
         humidity_fraction: float,
         fixed_z_m: float | None = None,
+        sensor_weights: dict[str, float] | None = None,
     ) -> LocalizationResult:
         if len(sensor_windows) < 3:
             raise LocalizationError("Need at least 3 active sensors for 2D TDOA localization")
         self._validate_inputs(sensor_positions=sensor_positions, sensor_windows=sensor_windows)
 
+        w = sensor_weights or {}
         sensor_ids = sorted(sensor_windows.keys())
         energies = {sensor_id: rms(sensor_windows[sensor_id]) for sensor_id in sensor_ids}
         reference_sensor = max(energies.items(), key=lambda item: item[1])[0]
         reference_signal = sensor_windows[reference_sensor]
         ref_pos = sensor_positions[reference_sensor]
+        ref_weight = w.get(reference_sensor, 1.0)
 
         tdoa_s: dict[str, float] = {}
+        pair_weights: dict[str, float] = {}
         peaks: list[float] = []
         meas_ids: list[str] = []
 
@@ -201,8 +211,10 @@ class LocalizationEngine:
             )
             if not np.isfinite(tau_s) or not np.isfinite(peak):
                 raise LocalizationError(f"Non-finite GCC-PHAT output for sensor {sensor_id}")
+            pw = min(ref_weight, w.get(sensor_id, 1.0))
             tdoa_s[sensor_id] = tau_s
-            peaks.append(peak)
+            pair_weights[sensor_id] = pw
+            peaks.append(peak * pw)
             meas_ids.append(sensor_id)
 
         if len(meas_ids) < 2:
@@ -220,7 +232,7 @@ class LocalizationEngine:
             for sid in meas_ids:
                 dist_i = np.linalg.norm(pos - sensor_positions[sid]) + 1e-9
                 predicted = (dist_i - dist_ref) / sound_speed
-                rows.append(predicted - tdoa_s[sid])
+                rows.append(pair_weights.get(sid, 1.0) * (predicted - tdoa_s[sid]))
             return np.asarray(rows, dtype=np.float64)
 
         solved = least_squares(residuals_xy, x0=xy0, method="trf", loss="soft_l1")

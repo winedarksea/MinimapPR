@@ -41,6 +41,7 @@ async def test_zone_suppressed_detection_does_not_emit_tracks_or_alerts(tmp_path
         trigger_rms=0.01,
         trigger_cooldown_seconds=0.0,
         localization_window_seconds=0.04,
+        classification_window_seconds=0.0,
         max_sensor_buffer_seconds=2.0,
         fusion_worker_count=1,
         site_origin_lat=37.0,

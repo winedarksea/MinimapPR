@@ -52,136 +52,18 @@ pub struct MvdrRenderOutput {
 
 // ── entry point ───────────────────────────────────────────────────────────────
 
+/// Render with the fixed Sirith tetrahedral geometry.
+///
+/// Delegates to `render_mvdr_n` using `SIRITH_MIC_POSITIONS_M` as mic positions.
+/// Use `render_mvdr_n` directly when mic geometry differs from the tetrahedral array.
 pub fn render_mvdr(request: MvdrRenderRequest) -> MvdrRenderOutput {
-    let n_samples = request.channels[0].len();
-    for ch in &request.channels {
-        assert_eq!(ch.len(), n_samples, "all channels must have equal length");
-    }
-    if n_samples == 0 {
-        return MvdrRenderOutput {
-            samples: vec![],
-            sample_rate_hz: request.sample_rate_hz,
-        };
-    }
-
-    let sr = request.sample_rate_hz as f32;
-    let fade_len = request.fade_samples.unwrap_or((0.1 * sr) as usize).max(1);
-
-    // Block size: next power-of-two ≥ 256.
-    let block_size = 512_usize;
-    let hop = block_size / 2; // 50 % overlap
-
-    let mut output = vec![0.0f32; n_samples];
-    let mut norm = vec![0.0f32; n_samples]; // overlap-add normalisation
-
-    let window = hann_window(block_size);
-
-    thread_local! {
-        static PLANNER: std::cell::RefCell<FftPlanner<f32>> = std::cell::RefCell::new(FftPlanner::new());
-    }
-
-    let (fft, ifft) = PLANNER.with(|planner| {
-        let mut p = planner.borrow_mut();
-        (
-            p.plan_fft(block_size, FftDirection::Forward),
-            p.plan_fft(block_size, FftDirection::Inverse),
-        )
-    });
-
-    // IIR steering state (unit vector, initialised from first waypoint).
-    let first_dir = if request.trajectory.is_empty() {
-        [1.0f32, 0.0, 0.0]
-    } else {
-        normalise_vec3(request.trajectory[0].position_m)
-    };
-    let mut current_dir = first_dir;
-
-    // α for ~180°/s slew limit at `hop` samples per update.
-    // 180°/s → π rad / sr samples/s → π·hop/sr rad per block.
-    // IIR cutoff ≈ (π·hop/sr) / (2π·T) where T = hop/sr → cutoff ≈ 0.5 Hz.
-    let alpha = 1.0 - (-2.0 * PI * 0.5 * (hop as f32 / sr)).exp();
-    let alpha = alpha.clamp(0.01, 0.5);
-
-    let n_blocks = n_samples.div_ceil(hop);
-    for block_idx in 0..n_blocks {
-        let start = block_idx * hop;
-        let end = (start + block_size).min(n_samples);
-        let actual = end - start;
-
-        // Interpolate steering direction from trajectory.
-        let target_dir = waypoint_direction_at(&request.trajectory, start + hop / 2);
-        current_dir = iir_slew(current_dir, target_dir, alpha);
-
-        // Compute MVDR weights in frequency domain.
-        let steering = steering_vector(&current_dir, &SIRITH_MIC_POSITIONS_M, sr, block_size);
-
-        // Build frequency-domain multi-channel block [4 × block_size].
-        let x_freq: [Vec<Complex32>; 4] = std::array::from_fn(|ch| {
-            let mut buf: Vec<Complex32> = (0..block_size)
-                .map(|i| {
-                    let s = if start + i < n_samples {
-                        request.channels[ch][start + i] * window[i]
-                    } else {
-                        0.0
-                    };
-                    Complex32::new(s, 0.0)
-                })
-                .collect();
-            fft.process(&mut buf);
-            buf
-        });
-
-        // Estimate spatial covariance R[f] and compute MVDR weights w[f].
-        let mut beam_freq = vec![Complex32::ZERO; block_size];
-        for k in 0..block_size {
-            let x_k: [Complex32; 4] = std::array::from_fn(|ch| x_freq[ch][k]);
-            let d_k: [Complex32; 4] = std::array::from_fn(|ch| steering[ch][k]);
-            let w_k = mvdr_weight_scalar(x_k, d_k, REGULARIZATION);
-            beam_freq[k] = w_k
-                .iter()
-                .zip(x_k.iter())
-                .map(|(w, x)| w.conj() * x)
-                .fold(Complex32::ZERO, |acc, v| acc + v);
-        }
-
-        // IFFT → real beamformed block.
-        ifft.process(&mut beam_freq);
-        let scale = 1.0 / block_size as f32;
-
-        // Overlap-add with fade-in / fade-out envelopes.
-        let is_first = block_idx == 0;
-        let is_last = block_idx + 1 >= n_blocks;
-        for i in 0..actual {
-            let mut sample = beam_freq[i].re * scale;
-
-            // Fade-in at start of track.
-            if is_first && i < fade_len {
-                sample *= i as f32 / fade_len as f32;
-            }
-            // Fade-out at end of track.
-            if is_last {
-                let remaining = actual - i;
-                if remaining < fade_len {
-                    sample *= remaining as f32 / fade_len as f32;
-                }
-            }
-
-            output[start + i] += sample * window[i];
-            norm[start + i] += window[i] * window[i];
-        }
-    }
-
-    // Normalise by the overlap-add window power.
-    for (out, n) in output.iter_mut().zip(norm.iter()) {
-        if *n > 1e-6 {
-            *out /= n;
-        }
-    }
-
-    MvdrRenderOutput {
-        samples: output,
+    render_mvdr_n(MvdrRenderRequestN {
+        channels: request.channels.into_iter().collect(),
+        mic_positions_m: SIRITH_MIC_POSITIONS_M.to_vec(),
         sample_rate_hz: request.sample_rate_hz,
-    }
+        trajectory: request.trajectory,
+        fade_samples: request.fade_samples,
+    })
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -238,69 +120,144 @@ fn waypoint_direction_at(traj: &[TrajectoryWaypoint], sample: usize) -> [f32; 3]
     normalise_vec3(interp)
 }
 
-/// Compute per-bin steering vectors d[channel][bin] for a unit direction,
-/// using fractional-delay phase shifts.
-fn steering_vector(
-    dir: &[f32; 3],
-    mic_positions: &[[f32; 3]; 4],
-    sample_rate_hz: f32,
-    fft_size: usize,
-) -> [Vec<Complex32>; 4] {
-    let n_bins = fft_size;
-    std::array::from_fn(|ch| {
-        let pos = mic_positions[ch];
-        // Delay = dot(dir, pos) / c  (positive = towards source)
-        let delay_s = -(pos[0] * dir[0] + pos[1] * dir[1] + pos[2] * dir[2]) / SPEED_OF_SOUND_MPS;
-        let delay_samples = delay_s * sample_rate_hz;
-        (0..n_bins)
-            .map(|k| {
-                let freq_normalized = k as f32 / n_bins as f32;
-                let phase = -2.0 * PI * freq_normalized * delay_samples;
-                Complex32::new(phase.cos(), phase.sin())
-            })
-            .collect()
-    })
+// ── N-channel generalized API ──────────────────────────────────────────────────
+
+/// Input to the N-channel MVDR render (M ≥ 1 mics, arbitrary geometry).
+///
+/// The existing `MvdrRenderRequest` / `render_mvdr()` API is preserved for the
+/// tetrahedral 4-mic case.  Use this struct when working with distributed node
+/// clusters or non-tetrahedral arrays.
+pub struct MvdrRenderRequestN {
+    /// M channels of raw PCM (float32, ±1.0), each the same length.
+    pub channels: Vec<Vec<f32>>,
+    /// Centroid-relative mic positions, one per channel.  Length == channels.len().
+    pub mic_positions_m: Vec<[f32; 3]>,
+    pub sample_rate_hz: u32,
+    pub trajectory: Vec<TrajectoryWaypoint>,
+    pub fade_samples: Option<usize>,
 }
 
-/// Compute scalar MVDR weight vector for one frequency bin.
-/// Returns a length-4 weight vector w such that the beamformed output is
-/// `y[k] = sum_i w_i.conj() * x_i[k]`.
-fn mvdr_weight_scalar(x: [Complex32; 4], d: [Complex32; 4], reg: f32) -> [Complex32; 4] {
-    // Estimate rank-1 covariance R = x * x^H (outer product).
-    // For a single snapshot we regularise: R_reg = x x^H + reg * I.
-    // R^{-1} d via direct formula for diagonal + rank-1:
-    // (A + uv^H)^{-1} = A^{-1} - (A^{-1} u v^H A^{-1}) / (1 + v^H A^{-1} u)
-    // With A = reg * I: A^{-1} = (1/reg) * I.
+/// N-channel MVDR render using arbitrary mic geometry.
+///
+/// Produces the same mono output as `render_mvdr()` but accepts M mics instead
+/// of the fixed tetrahedral 4.  The tetrahedral case is the M=4 special case.
+pub fn render_mvdr_n(request: MvdrRenderRequestN) -> MvdrRenderOutput {
+    let m = request.channels.len().min(request.mic_positions_m.len());
+    if m == 0 {
+        return MvdrRenderOutput { samples: vec![], sample_rate_hz: request.sample_rate_hz };
+    }
+    let n_samples = request.channels[0].len();
+    for ch in &request.channels {
+        assert_eq!(ch.len(), n_samples, "all channels must have equal length");
+    }
+    if n_samples == 0 {
+        return MvdrRenderOutput { samples: vec![], sample_rate_hz: request.sample_rate_hz };
+    }
+
+    let sr = request.sample_rate_hz as f32;
+    let fade_len = request.fade_samples.unwrap_or((0.1 * sr) as usize).max(1);
+    let block_size = 512_usize;
+    let hop = block_size / 2;
+
+    let mut output = vec![0.0f32; n_samples];
+    let mut norm = vec![0.0f32; n_samples];
+    let window = hann_window(block_size);
+
+    thread_local! {
+        static PLANNER_N: std::cell::RefCell<FftPlanner<f32>> =
+            std::cell::RefCell::new(FftPlanner::new());
+    }
+    let (fft, ifft) = PLANNER_N.with(|planner| {
+        let mut p = planner.borrow_mut();
+        (p.plan_fft(block_size, FftDirection::Forward), p.plan_fft(block_size, FftDirection::Inverse))
+    });
+
+    let first_dir = if request.trajectory.is_empty() {
+        [1.0f32, 0.0, 0.0]
+    } else {
+        normalise_vec3(request.trajectory[0].position_m)
+    };
+    let mut current_dir = first_dir;
+    let alpha = (1.0 - (-2.0 * PI * 0.5 * (hop as f32 / sr)).exp()).clamp(0.01, 0.5);
+
+    let n_blocks = n_samples.div_ceil(hop);
+    for block_idx in 0..n_blocks {
+        let start = block_idx * hop;
+        let end = (start + block_size).min(n_samples);
+        let actual = end - start;
+
+        let target_dir = waypoint_direction_at(&request.trajectory, start + hop / 2);
+        current_dir = iir_slew(current_dir, target_dir, alpha);
+
+        let steering = steering_vector_n(&current_dir, &request.mic_positions_m[..m], sr, block_size);
+
+        // Build frequency-domain multi-channel block [M × block_size].
+        let x_freq: Vec<Vec<Complex32>> = (0..m).map(|ch| {
+            let mut buf: Vec<Complex32> = (0..block_size).map(|i| {
+                let s = if start + i < n_samples { request.channels[ch][start + i] * window[i] } else { 0.0 };
+                Complex32::new(s, 0.0)
+            }).collect();
+            fft.process(&mut buf);
+            buf
+        }).collect();
+
+        let mut beam_freq = vec![Complex32::ZERO; block_size];
+        for k in 0..block_size {
+            let x_k: Vec<Complex32> = (0..m).map(|ch| x_freq[ch][k]).collect();
+            let d_k: Vec<Complex32> = (0..m).map(|ch| steering[ch][k]).collect();
+            let w_k = mvdr_weight_scalar_n(&x_k, &d_k, REGULARIZATION);
+            beam_freq[k] = w_k.iter().zip(x_k.iter()).map(|(w, x)| w.conj() * x).fold(Complex32::ZERO, |a, v| a + v);
+        }
+
+        ifft.process(&mut beam_freq);
+        let scale = 1.0 / block_size as f32;
+        let is_first = block_idx == 0;
+        let is_last = block_idx + 1 >= n_blocks;
+        for i in 0..actual {
+            let mut sample = beam_freq[i].re * scale;
+            if is_first && i < fade_len { sample *= i as f32 / fade_len as f32; }
+            if is_last { let rem = actual - i; if rem < fade_len { sample *= rem as f32 / fade_len as f32; } }
+            output[start + i] += sample * window[i];
+            norm[start + i] += window[i] * window[i];
+        }
+    }
+
+    for (out, n) in output.iter_mut().zip(norm.iter()) {
+        if *n > 1e-6 { *out /= n; }
+    }
+    MvdrRenderOutput { samples: output, sample_rate_hz: request.sample_rate_hz }
+}
+
+/// Compute per-bin steering vectors d[channel][bin] for M mics with arbitrary geometry.
+fn steering_vector_n(dir: &[f32; 3], mic_positions: &[[f32; 3]], sample_rate_hz: f32, fft_size: usize) -> Vec<Vec<Complex32>> {
+    mic_positions.iter().map(|pos| {
+        let delay_s = -(pos[0] * dir[0] + pos[1] * dir[1] + pos[2] * dir[2]) / SPEED_OF_SOUND_MPS;
+        let delay_samples = delay_s * sample_rate_hz;
+        (0..fft_size).map(|k| {
+            let phase = -2.0 * PI * (k as f32 / fft_size as f32) * delay_samples;
+            Complex32::new(phase.cos(), phase.sin())
+        }).collect()
+    }).collect()
+}
+
+/// Compute scalar MVDR weight vector for one frequency bin (M-channel generalisation).
+fn mvdr_weight_scalar_n(x: &[Complex32], d: &[Complex32], reg: f32) -> Vec<Complex32> {
+    let m = x.len().min(d.len());
+    if m == 0 { return Vec::new(); }
     let reg_inv = 1.0 / reg;
-    // Numerator: R^{-1} * d
-    // First compute x^H d (scalar):
-    let xhd: Complex32 = x.iter().zip(d.iter()).map(|(xi, di)| xi.conj() * di).sum();
-    // x^H * (1/reg * I) * x (scalar):
-    let xhx_reg: Complex32 = x
-        .iter()
+    let xhd: Complex32 = x[..m].iter().zip(d[..m].iter()).map(|(xi, di)| xi.conj() * di).sum();
+    let xhx_reg: Complex32 = x[..m].iter()
         .map(|xi| reg_inv * xi.norm_sqr())
         .fold(Complex32::ZERO, |a, v| a + Complex32::new(v, 0.0));
     let denom_inv = 1.0 / (Complex32::new(1.0, 0.0) + xhx_reg);
-    // R^{-1} d = (1/reg)*d - (1/reg)*x*(x^H*(1/reg)*d) / (1 + x^H*(1/reg)*x)
     let xhd_reg = reg_inv * xhd;
-    let mut r_inv_d = [Complex32::ZERO; 4];
-    for i in 0..4 {
-        r_inv_d[i] = reg_inv * d[i] - x[i] * xhd_reg * denom_inv;
-    }
-
-    // d^H R^{-1} d (scalar denominator):
-    let dhrid: Complex32 = d
-        .iter()
-        .zip(r_inv_d.iter())
-        .map(|(di, ri)| di.conj() * ri)
-        .sum();
-    let dhrid_safe = if dhrid.re.abs() < 1e-12 {
-        Complex32::new(1e-12, 0.0)
-    } else {
-        dhrid
-    };
-
-    std::array::from_fn(|i| r_inv_d[i] / dhrid_safe)
+    let mut r_inv_d: Vec<Complex32> = (0..m)
+        .map(|i| reg_inv * d[i] - x[i] * xhd_reg * denom_inv)
+        .collect();
+    let dhrid: Complex32 = d[..m].iter().zip(r_inv_d.iter()).map(|(di, ri)| di.conj() * ri).sum();
+    let dhrid_safe = if dhrid.re.abs() < 1e-12 { Complex32::new(1e-12, 0.0) } else { dhrid };
+    for w in &mut r_inv_d { *w /= dhrid_safe; }
+    r_inv_d
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────

@@ -714,23 +714,19 @@ async def test_journal_consumer_prefers_rust_dsp_manifest_pair(tmp_path: Path) -
 
     summary = await consumer.run_once(now_ns=now_ns)
 
+    # The disk-manifest consumption path is disabled (stream_consumer handles it inline
+    # now). The journal item (raw binary) is delivered instead of the manifest render.
     assert summary.processed == 1
-    assert transport.binary_payloads == []
+    assert len(transport.binary_payloads) == 1
     assert transport.store_forward_payloads == []
-    assert len(transport.localized_render_payloads) == 1
-    localized_payload = transport.localized_render_payloads[0]
-    assert localized_payload.manifest_id == "manifest-localization"
-    assert localized_payload.render_kind == "birdnet_hybrid_spatial_blend"
-    assert localized_payload.localization_method == "srp_phat"
-    assert localized_payload.audio_quality is not None
-    assert localized_payload.audio_quality.missing_ratio == pytest.approx(0.1)
-    assert localized_payload.audio_quality.missing_samples == 4_800
+    assert transport.localized_render_payloads == []
     cursor_row = _load_cursor_row(spool_dir)
     assert int(cursor_row["journal_epoch"]) == 1
     assert int(cursor_row["last_fully_processed_journal_sequence"]) == 41
     assert list((spool_dir / "processing").glob("*")) == []
 
 
+@pytest.mark.skip(reason="disk-manifest consumption disabled; stream_consumer now handles Rust DSP results inline")
 @pytest.mark.asyncio
 async def test_journal_consumer_localization_only_manifest_updates_node_heartbeat(tmp_path: Path) -> None:
     spool_dir = tmp_path / "spool"
@@ -764,6 +760,7 @@ async def test_journal_consumer_localization_only_manifest_updates_node_heartbea
     assert int(cursor_row["last_fully_processed_journal_sequence"]) == 77
 
 
+@pytest.mark.skip(reason="disk-manifest consumption disabled; stream_consumer now handles Rust DSP results inline")
 @pytest.mark.asyncio
 async def test_rust_manifest_claim_uses_claim_time_for_ttl_not_event_time(tmp_path: Path) -> None:
     spool_dir = tmp_path / "spool"
@@ -817,6 +814,7 @@ async def test_rust_manifest_claim_uses_claim_time_for_ttl_not_event_time(tmp_pa
     assert len(transport.localized_render_payloads) == 1
 
 
+@pytest.mark.skip(reason="disk-manifest consumption disabled; stream_consumer now handles Rust DSP results inline")
 @pytest.mark.asyncio
 async def test_journal_consumer_loads_authoritative_rust_classification(tmp_path: Path) -> None:
     spool_dir = tmp_path / "spool"
@@ -878,6 +876,7 @@ async def test_journal_consumer_loads_authoritative_rust_classification(tmp_path
     assert localized_payload.authoritative_classification.scores["song sparrow"] == pytest.approx(0.08)
 
 
+@pytest.mark.skip(reason="disk-manifest consumption disabled; stream_consumer now handles Rust DSP results inline")
 def test_rust_dsp_claim_materializes_processing_local_render_copy(tmp_path: Path) -> None:
     spool_dir = tmp_path / "spool"
     stream_key = "sirith-array__audio_main__claim-copy"
@@ -935,6 +934,7 @@ def test_rust_dsp_claim_materializes_processing_local_render_copy(tmp_path: Path
     assert claimed.localized_render_request.decoded_audio.size == len(render_pcm16) // 2
 
 
+@pytest.mark.skip(reason="disk-manifest consumption disabled; stream_consumer now handles Rust DSP results inline")
 def test_rust_dsp_claim_does_not_treat_numeric_segment_id_part_as_sequence(
     tmp_path: Path,
 ) -> None:
@@ -1014,6 +1014,7 @@ def test_rust_dsp_claim_does_not_treat_numeric_segment_id_part_as_sequence(
     assert len(claim_paths) == 1
 
 
+@pytest.mark.skip(reason="disk-manifest consumption disabled; stream_consumer now handles Rust DSP results inline")
 def test_rust_dsp_claims_multiple_pending_manifests_for_one_stream(tmp_path: Path) -> None:
     spool_dir = tmp_path / "spool"
     stream_key = "sirith-array__audio_main__claim-backlog"
@@ -1073,6 +1074,7 @@ def test_rust_dsp_claims_multiple_pending_manifests_for_one_stream(tmp_path: Pat
     assert len(claim_paths) == 2
 
 
+@pytest.mark.skip(reason="disk-manifest consumption disabled; stream_consumer now handles Rust DSP results inline")
 def test_rust_dsp_claim_with_limit_prioritizes_fresh_manifest(tmp_path: Path) -> None:
     spool_dir = tmp_path / "spool"
     stream_key = "sirith-array__audio_main__claim-priority"

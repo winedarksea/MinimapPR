@@ -40,6 +40,7 @@ async def test_detection_triggers_alert_actions_and_lifecycle_updates(tmp_path: 
         trigger_rms=0.01,
         trigger_cooldown_seconds=0.0,
         localization_window_seconds=0.04,
+        classification_window_seconds=0.0,
         max_sensor_buffer_seconds=2.0,
         fusion_worker_count=1,
         site_origin_lat=37.0,

@@ -632,6 +632,8 @@ async fn ingest_env(
             promotion_ready: false,
             env_samples: Some(serde_json::json!({ "samples": sse_samples })),
             node_context: None,
+            cluster_id: None,
+            cluster_sensor_positions: None,
             raw_payload: None,
             raw_render_bytes: None,
             raw_audio_frame: None,

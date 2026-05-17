@@ -27,6 +27,8 @@ pub struct CaptureEnvelope {
     pub retention_hint: Option<String>,
     pub payload_codec: String,
     pub integrity_hash: String,
+    /// Server-assigned cluster this node belongs to (None = independent node).
+    pub cluster_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -42,6 +44,8 @@ struct StoreForwardNode {
     sensor_offsets_m: Vec<[f32; 3]>,
     #[serde(default)]
     metadata: serde_json::Value,
+    #[serde(default)]
+    cluster_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -366,6 +370,7 @@ fn parse_binary_capture_envelope(raw_payload: &[u8]) -> Result<CaptureEnvelope, 
         retention_hint: Some("ephemeral".to_string()),
         payload_codec: "binary_mmb1_pcm16le".to_string(),
         integrity_hash: sha256_hex(raw_payload),
+        cluster_id: None,
     })
 }
 
@@ -538,6 +543,7 @@ fn parse_store_forward_capture_envelope(raw_payload: &[u8]) -> Result<CaptureEnv
         retention_hint: Some("ephemeral".to_string()),
         payload_codec: format!("store_forward_{encoding}"),
         integrity_hash: sha256_hex(raw_payload),
+        cluster_id: None,
     })
 }
 

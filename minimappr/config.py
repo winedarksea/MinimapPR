@@ -95,6 +95,7 @@ class LocalizationConfig:
     localization_band_min_hz: float = 0.0
     localization_band_max_hz: float = 0.0
     skip_localization_for_classification: bool = False
+    cluster_aware_localization: bool = False
 
 
 @dataclass(slots=True)

@@ -93,6 +93,13 @@ pub struct DspManifest {
     /// Python uses this to reconstruct node context without a persisted raw payload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_context: Option<serde_json::Value>,
+    /// Server-assigned cluster this stream belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster_id: Option<String>,
+    /// Cluster-resolved sensor positions: [(sensor_id, [x,y,z]), ...].
+    /// When present, takes precedence over node_context sensor_offsets_m for DSP.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster_sensor_positions: Option<Vec<(String, [f32; 3])>>,
     /// Raw audio payload bytes carried in-process by the fast-path channel only.
     /// Never serialized to disk; skipped by serde.
     #[serde(skip, default)]

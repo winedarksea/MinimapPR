@@ -81,6 +81,9 @@ pub struct IamfScene {
     pub sample_rate_hz: u32,
     /// Number of samples per codec frame (e.g. 512).
     pub samples_per_frame: u32,
+    /// Number of channels in the ambisonic bed.  Defaults to `FOA_CHANNEL_COUNT` (4).
+    /// Set to 4 for standard First-Order Ambisonics; other values for arbitrary arrays.
+    pub n_bed_channels: u8,
     /// BS.1770-4 loudness for the FOA bed (measured on W channel).
     pub bed_loudness: LoudnessInfo,
     /// Per-object loudness, indexed by object_id (0-based).
@@ -97,8 +100,8 @@ pub struct IamfWriter {
     bed_element_id: u32,
     /// audio_element_id for each object (index = object index).
     object_element_ids: Vec<u32>,
-    /// substream_id for each channel of the FOA bed (4 substreams).
-    bed_substream_ids: [u32; 4],
+    /// substream_id for each channel of the bed (one per B-format channel).
+    bed_substream_ids: Vec<u32>,
     /// substream_id for each mono object.
     object_substream_ids: Vec<u32>,
     /// mix_presentation_id.
@@ -108,6 +111,7 @@ pub struct IamfWriter {
 impl IamfWriter {
     pub fn new(scene: IamfScene, n_objects: usize) -> Self {
         let n_objs = n_objects;
+        let n_bed = scene.n_bed_channels.max(1) as u32;
         // Assign IDs sequentially.
         let codec_config_id = 0;
         let bed_element_id = 1;
@@ -115,9 +119,9 @@ impl IamfWriter {
         let object_element_ids: Vec<u32> =
             (first_obj_element..first_obj_element + n_objs as u32).collect();
 
-        // Substream IDs: bed uses 0..3, objects use 4..4+N.
-        let bed_substream_ids = [0, 1, 2, 3];
-        let object_substream_ids: Vec<u32> = (4u32..4 + n_objs as u32).collect();
+        // Substream IDs: bed uses 0..n_bed, objects use n_bed..n_bed+N.
+        let bed_substream_ids: Vec<u32> = (0..n_bed).collect();
+        let object_substream_ids: Vec<u32> = (n_bed..n_bed + n_objs as u32).collect();
         let mix_presentation_id = first_obj_element + n_objs as u32;
 
         Self {
@@ -147,12 +151,12 @@ impl IamfWriter {
     }
 
     /// Emit one temporal unit given:
-    /// - PCM bytes for each bed substream (W, X, Y, Z)
+    /// - PCM bytes for each bed substream (one per B-format channel)
     /// - PCM bytes for each object mono substream
     /// - spatial positions for each object in this unit
     pub fn write_temporal_unit(
         &self,
-        bed_frames: &[Vec<u8>; 4],
+        bed_frames: &[Vec<u8>],
         object_frames: &[Vec<u8>],
         positions: &ObjectPositions,
     ) -> Vec<u8> {
@@ -213,14 +217,15 @@ impl IamfWriter {
     }
 
     fn bed_audio_element_obu(&self) -> Vec<u8> {
+        let n_bed = self.scene.n_bed_channels;
         let mut payload = Vec::new();
         write_leb128(&mut payload, self.bed_element_id as u64);
         // audio_element_type (3 bits) | reserved (5 bits)
         payload.push(audio_element_type::SCENE_BASED << 5);
         write_leb128(&mut payload, self.codec_config_id as u64);
 
-        // num_substreams = 4 (one per B-format channel)
-        write_leb128(&mut payload, FOA_CHANNEL_COUNT as u64);
+        // num_substreams = n_bed (one per B-format channel)
+        write_leb128(&mut payload, n_bed as u64);
         for &ss_id in &self.bed_substream_ids {
             write_leb128(&mut payload, ss_id as u64);
         }
@@ -230,10 +235,10 @@ impl IamfWriter {
 
         // ambisonics_config: MONO_PROJECTION (mode 0)
         payload.push(0); // ambisonics_mode = MONO_PROJECTION
-        payload.push(FOA_CHANNEL_COUNT); // output_channel_count
-        payload.push(FOA_CHANNEL_COUNT); // substream_count
-                                         // channel_mapping: ACN order (0=W, 1=X, 2=Y, 3=Z) mapped to substreams 0..3
-        for i in 0..FOA_CHANNEL_COUNT {
+        payload.push(n_bed); // output_channel_count
+        payload.push(n_bed); // substream_count
+                                         // channel_mapping: ACN order mapped to substreams 0..n_bed
+        for i in 0..n_bed {
             payload.push(i);
         }
 
@@ -574,6 +579,127 @@ pub fn split_object_into_frames(samples: &[f32], samples_per_frame: usize) -> Ve
         .collect()
 }
 
+// ── N-mono object substream writer ────────────────────────────────────────────
+
+/// Metadata for one mono substream in a distributed-node cluster recording.
+#[derive(Clone, Debug)]
+pub struct MonoSubstreamInfo {
+    pub sensor_id: String,
+    pub position_m: [f32; 3],
+    pub sync_grade: String,
+}
+
+/// Write N mono CHANNEL Audio_Elements without a FOA bed.
+///
+/// Produces a valid (if non-standard for Base Profile) IAMF bitstream where
+/// each mic gets its own CHANNEL Audio_Element.  Parsers compliant with the
+/// IAMF Simple Profile (≤ 28 elements) will accept up to 28 sensors.
+///
+/// Returns the raw IAMF byte sequence.
+pub fn write_object_substreams(
+    streams: &[(MonoSubstreamInfo, Vec<f32>)],
+    sample_rate_hz: u32,
+    samples_per_frame: usize,
+    loudness: &[LoudnessInfo],
+) -> Vec<u8> {
+    if streams.is_empty() {
+        return Vec::new();
+    }
+    let n = streams.len();
+    let n_samples = streams[0].1.len();
+    let n_frames = n_samples.div_ceil(samples_per_frame);
+
+    let codec_config_id: u32 = 0;
+    // Each sensor gets its own Audio_Element (channel-based, mono).
+    let element_ids: Vec<u32> = (1..=n as u32).collect();
+    let substream_ids: Vec<u32> = element_ids.clone();
+    let mix_id: u32 = n as u32 + 1;
+
+    let mut out = Vec::new();
+
+    // ── Descriptor OBUs ───────────────────────────────────────────────────────
+    // IA_Sequence_Header
+    let mut sh_payload = b"iamf".to_vec();
+    sh_payload.extend_from_slice(&[0u8, 0u8]); // Base profile
+    out.extend(write_obu(obu_type::IA_SEQUENCE_HEADER, &sh_payload));
+
+    // Codec_Config (ipcm, 16-bit)
+    {
+        let mut payload = Vec::new();
+        write_leb128(&mut payload, codec_config_id as u64);
+        payload.extend_from_slice(b"ipcm");
+        write_leb128(&mut payload, samples_per_frame as u64);
+        payload.extend_from_slice(&0i16.to_be_bytes());
+        payload.push(0); payload.push(16);
+        payload.extend_from_slice(&sample_rate_hz.to_be_bytes());
+        out.extend(write_obu(obu_type::CODEC_CONFIG, &payload));
+    }
+
+    // Audio_Elements: one mono CHANNEL element per sensor.
+    for (i, elem_id) in element_ids.iter().enumerate() {
+        let ss_id = substream_ids[i];
+        let mut payload = Vec::new();
+        write_leb128(&mut payload, *elem_id as u64);
+        payload.push(audio_element_type::OBJECT_BASED << 5);
+        write_leb128(&mut payload, codec_config_id as u64);
+        write_leb128(&mut payload, 1u64); // num_substreams = 1
+        write_leb128(&mut payload, ss_id as u64);
+        write_leb128(&mut payload, 0u64); // num_parameters = 0
+        // Scalable_Channel_Layout_Config: num_layers=1
+        write_leb128(&mut payload, 1u64);
+        payload.extend_from_slice(&[0x00, 0x00, 1u8, 0u8]); // MONO layout
+        out.extend(write_obu(obu_type::AUDIO_ELEMENT, &payload));
+    }
+
+    // Mix_Presentation
+    {
+        let mut payload = Vec::new();
+        write_leb128(&mut payload, mix_id as u64);
+        write_leb128(&mut payload, 0u64); // count_label = 0
+        write_leb128(&mut payload, n as u64); // num_audio_elements
+        for (i, elem_id) in element_ids.iter().enumerate() {
+            write_leb128(&mut payload, *elem_id as u64);
+            write_leb128(&mut payload, 0u64); // rendering mode
+            write_leb128(&mut payload, 0u64); // num_parameters
+            payload.push(0); // rendering_config
+            let lm = loudness.get(i).cloned().unwrap_or_default();
+            payload.extend_from_slice(&[0u8]); // info_type
+            let lufs = (lm.integrated_loudness_lufs * 256.0).round().clamp(-32768.0, 32767.0) as i16;
+            let tp = (lm.true_peak_dbfs * 256.0).round().clamp(-32768.0, 32767.0) as i16;
+            payload.extend_from_slice(&lufs.to_be_bytes());
+            payload.extend_from_slice(&tp.to_be_bytes());
+        }
+        write_leb128(&mut payload, 1u64); // num_layouts
+        payload.push(0); // layout_type = MONO
+        // Consolidated loudness (use first sensor's loudness as representative)
+        let lm = loudness.first().cloned().unwrap_or_default();
+        payload.push(0);
+        let lufs = (lm.integrated_loudness_lufs * 256.0).round().clamp(-32768.0, 32767.0) as i16;
+        let tp = (lm.true_peak_dbfs * 256.0).round().clamp(-32768.0, 32767.0) as i16;
+        payload.extend_from_slice(&lufs.to_be_bytes());
+        payload.extend_from_slice(&tp.to_be_bytes());
+        out.extend(write_obu(obu_type::MIX_PRESENTATION, &payload));
+    }
+
+    // ── Temporal units ────────────────────────────────────────────────────────
+    for fi in 0..n_frames {
+        let frame_start = fi * samples_per_frame;
+        let frame_end = (frame_start + samples_per_frame).min(n_samples);
+
+        out.extend(write_obu(obu_type::TEMPORAL_DELIMITER, &[]));
+
+        for (i, ss_id) in substream_ids.iter().enumerate() {
+            let samples = &streams[i].1;
+            let mut frame: Vec<f32> = samples[frame_start..frame_end.min(samples.len())].to_vec();
+            frame.resize(samples_per_frame, 0.0);
+            let pcm = f32_to_pcm16le(&frame);
+            out.extend(audio_frame_obu(*ss_id, &pcm));
+        }
+    }
+
+    out
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -584,6 +710,7 @@ mod tests {
         let scene = IamfScene {
             sample_rate_hz: 48_000,
             samples_per_frame: 512,
+            n_bed_channels: FOA_CHANNEL_COUNT,
             bed_loudness: LoudnessInfo {
                 integrated_loudness_lufs: -20.0,
                 true_peak_dbfs: -3.0,

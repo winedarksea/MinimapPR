@@ -490,6 +490,7 @@ async def test_full_pipeline_localize_beamform_preprocess_classify_chain(tmp_pat
         trigger_rms=0.001,
         trigger_cooldown_seconds=0.0,
         localization_window_seconds=0.04,
+        classification_window_seconds=0.0,
         max_sensor_buffer_seconds=2.0,
         fusion_worker_count=1,
         beamformed_classification_enabled=True,

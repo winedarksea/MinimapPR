@@ -45,7 +45,12 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.signal import resample_poly
 
-from minimappr.core.ambi_atob import SIRITH_MIC_POSITIONS_M, atob_foa, encode_mono_to_bformat
+from minimappr.core.ambi_atob import (
+    SIRITH_MIC_POSITIONS_M,
+    atob_foa,
+    encode_mono_to_bformat,
+    foa_geometry_suitable,
+)
 from minimappr.core.capture_session import CaptureSessionRecord
 from minimappr.core.iamf_object_slot import IamfObjectSlot, select_iamf_object_slot
 from minimappr.utils.audio import read_wav_mono
@@ -529,6 +534,7 @@ class IamfPipeline:
         channels: NDArray[np.float32],
         traj: TrackTrajectory,
         capture_rate_hz: int,
+        mic_positions_m: NDArray[np.float64] | None = None,
     ) -> NDArray[np.float32]:
         """Beamform one track trajectory to a mono object signal.
 
@@ -542,7 +548,7 @@ class IamfPipeline:
         if self._multi_sensor_buffer is not None:
             loop = asyncio.get_event_loop()
             return await loop.run_in_executor(
-                None, self._mvdr_beamform_python, channels, traj, capture_rate_hz
+                None, self._mvdr_beamform_python, channels, traj, capture_rate_hz, mic_positions_m
             )
         return await self._mvdr_beamform_rust(channels, traj, capture_rate_hz)
 
@@ -551,6 +557,7 @@ class IamfPipeline:
         channels: NDArray[np.float32],
         traj: TrackTrajectory,
         capture_rate_hz: int,
+        mic_positions_m: NDArray[np.float64] | None = None,
     ) -> NDArray[np.float32]:
         """Pure-Python block-by-block MVDR beamformer for offline rendering."""
         from minimappr.core.beamforming import MVDRBeamformer
@@ -558,13 +565,12 @@ class IamfPipeline:
         n_channels = channels.shape[0]
         n_samples = channels.shape[1]
 
-        # Build sensor_id → position mapping from the fixed Sirith geometry.
-        # Channels arrive in order ch0…ch{N-1}, matching SIRITH_MIC_POSITIONS_M rows.
+        positions = mic_positions_m if mic_positions_m is not None else SIRITH_MIC_POSITIONS_M
         sensor_ids = [f"ch{i}" for i in range(n_channels)]
         sensor_positions: dict[str, np.ndarray] = {
-            sid: SIRITH_MIC_POSITIONS_M[i]
+            sid: positions[i]
             for i, sid in enumerate(sensor_ids)
-            if i < len(SIRITH_MIC_POSITIONS_M)
+            if i < len(positions)
         }
 
         beamformer = MVDRBeamformer(diagonal_loading=1e-3)
@@ -821,6 +827,119 @@ def _subtract_objects(
             bed[:, block_start:block_end] -= block_bfmt
 
     return bed.astype(np.float32)
+
+
+def render_cluster_audio(
+    cluster_spec: "Any",  # minimappr.models.ClusterSpec
+    channels: dict[str, NDArray[np.float32]],
+    sensor_positions: dict[str, NDArray],
+    sensor_grades: dict[str, "Any"],  # minimappr.models.SyncGrade
+    capture_rate_hz: int,
+) -> "ClusterRenderResult":
+    """DSP-layer render for a node cluster.
+
+    Accepts pre-extracted per-sensor audio windows and the cluster topology,
+    selects the render mode (FOA_BED vs N_MONO_OBJECTS per AUTO logic), and
+    returns a ``ClusterRenderResult`` with the rendered audio + metadata.
+
+    This function does no I/O.  The full pipeline (loudness measurement, IAMF
+    encode, resampling, artifact registration) is performed by IamfPipeline.run().
+
+    AUTO mode partition rules (from the plan):
+    * High-grade = GPS_PPS or PTP sensors only.
+    * If cluster has ≥ 4 high-grade sensors AND geometry is FOA-suitable
+      → FOA bed from high-grade sensors + N-mono from NTP sensors.
+    * Otherwise → all-N-mono.
+    """
+    from minimappr.models import ClusterSpec, IamfRenderMode, SyncGrade
+    from minimappr.core.iamf_writer import MonoSubstreamMeta, NMonoBundle
+
+    assert isinstance(cluster_spec, ClusterSpec)
+
+    _HIGH_GRADES = {SyncGrade.GPS_PPS, SyncGrade.PTP}
+    mode = cluster_spec.iamf_render_mode
+
+    # Resolve ordered sensor lists.
+    sensor_ids = sorted(channels.keys())
+
+    if mode == IamfRenderMode.AUTO:
+        high_ids = [sid for sid in sensor_ids if sensor_grades.get(sid) in _HIGH_GRADES]
+        ntp_ids  = [sid for sid in sensor_ids if sensor_grades.get(sid) not in _HIGH_GRADES]
+        if len(high_ids) >= 4:
+            high_positions = np.array([sensor_positions[sid] for sid in high_ids], dtype=np.float64)
+            suitable, _ = foa_geometry_suitable(high_positions, cluster_spec.max_baseline_m_for_foa)
+        else:
+            suitable = False
+            ntp_ids = sensor_ids
+            high_ids = []
+        mode = IamfRenderMode.FOA_BED if suitable else IamfRenderMode.N_MONO_OBJECTS
+    else:
+        high_ids = sensor_ids
+        ntp_ids = []
+
+    if mode == IamfRenderMode.FOA_BED:
+        # Stack channels in sensor_id order; build matching position array.
+        foa_ids = high_ids if high_ids else sensor_ids
+        stacked = np.array([channels[sid] for sid in foa_ids], dtype=np.float32)
+        mic_pos = np.array([sensor_positions[sid] for sid in foa_ids], dtype=np.float64)
+        bed = atob_foa(stacked, capture_rate_hz, mic_positions_m=mic_pos)
+
+        ntp_bundle: NMonoBundle | None = None
+        if ntp_ids:
+            ntp_streams = [
+                (
+                    MonoSubstreamMeta(
+                        sensor_id=sid,
+                        position_m=tuple(float(v) for v in sensor_positions[sid]),
+                        sync_grade=getattr(sensor_grades.get(sid), "value", "free"),
+                    ),
+                    channels[sid],
+                )
+                for sid in ntp_ids
+            ]
+            ntp_bundle = NMonoBundle(streams=ntp_streams, sample_rate_hz=capture_rate_hz)
+
+        return ClusterRenderResult(
+            render_mode=IamfRenderMode.FOA_BED,
+            foa_bed=bed,
+            foa_sensor_ids=foa_ids,
+            ntp_mono_bundle=ntp_bundle,
+            capture_rate_hz=capture_rate_hz,
+        )
+
+    else:  # N_MONO_OBJECTS
+        streams = [
+            (
+                MonoSubstreamMeta(
+                    sensor_id=sid,
+                    position_m=tuple(float(v) for v in sensor_positions[sid]),
+                    sync_grade=getattr(sensor_grades.get(sid), "value", "free"),
+                ),
+                channels[sid],
+            )
+            for sid in sensor_ids
+        ]
+        bundle = NMonoBundle(streams=streams, sample_rate_hz=capture_rate_hz)
+        return ClusterRenderResult(
+            render_mode=IamfRenderMode.N_MONO_OBJECTS,
+            mono_bundle=bundle,
+            capture_rate_hz=capture_rate_hz,
+        )
+
+
+@dataclass
+class ClusterRenderResult:
+    """Output of ``render_cluster_audio()``.
+
+    Exactly one of ``foa_bed`` or ``mono_bundle`` is populated depending on
+    which render mode was chosen.
+    """
+    render_mode: "Any"  # IamfRenderMode
+    capture_rate_hz: int
+    foa_bed: NDArray[np.float32] | None = None
+    foa_sensor_ids: list[str] | None = None
+    ntp_mono_bundle: "Any | None" = None  # NMonoBundle for NTP sensors in AUTO+FOA mode
+    mono_bundle: "Any | None" = None       # NMonoBundle for full N-mono mode
 
 
 def _build_recording_source_inventory(
@@ -1387,11 +1506,17 @@ def _write_wav_mono(path: Path, samples: NDArray, sample_rate_hz: int) -> None:
 
 def _decode_pcm16le_4ch(raw: bytes) -> NDArray[np.float32]:
     """Decode raw 4-channel interleaved PCM16LE bytes into float (4, N)."""
+    return _decode_pcm16le(raw, channel_count=4)
+
+
+def _decode_pcm16le(raw: bytes, channel_count: int) -> NDArray[np.float32]:
+    """Decode raw N-channel interleaved PCM16LE bytes into float (N, samples)."""
     samples = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
-    if len(samples) % 4 != 0:
-        samples = samples[: len(samples) - len(samples) % 4]
+    remainder = len(samples) % channel_count
+    if remainder:
+        samples = samples[: len(samples) - remainder]
     # Fortran order: first index (channel) varies fastest → correct for interleaved.
-    return samples.reshape(4, -1, order="F")
+    return samples.reshape(channel_count, -1, order="F")
 
 
 # ── ffmpeg helpers ────────────────────────────────────────────────────────────

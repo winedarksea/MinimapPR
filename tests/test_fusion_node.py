@@ -116,6 +116,7 @@ async def test_fusion_node_ingest_and_status(tmp_path: Path) -> None:
         trigger_rms=0.001,
         trigger_cooldown_seconds=0.0,
         localization_window_seconds=0.04,
+        classification_window_seconds=0.0,
         max_sensor_buffer_seconds=2.0,
         fusion_worker_count=1,
         fusion_event_queue_size=8,
@@ -215,6 +216,7 @@ async def test_fusion_ingest_accepts_explicit_packet_coverage_metadata(tmp_path:
         trigger_rms=0.001,
         trigger_cooldown_seconds=0.0,
         localization_window_seconds=0.04,
+        classification_window_seconds=0.0,
         max_sensor_buffer_seconds=2.0,
         fusion_worker_count=1,
         fusion_event_queue_size=8,
@@ -317,6 +319,7 @@ async def test_multichannel_trigger_avoids_phase_cancellation(tmp_path: Path) ->
         trigger_rms=0.05,
         trigger_cooldown_seconds=0.0,
         localization_window_seconds=0.04,
+        classification_window_seconds=0.0,
         max_sensor_buffer_seconds=2.0,
         fusion_worker_count=1,
         fusion_event_queue_size=8,
@@ -395,6 +398,7 @@ async def test_fusion_backpressure_drops_when_queue_full(tmp_path: Path) -> None
         trigger_rms=0.001,
         trigger_cooldown_seconds=0.0,
         localization_window_seconds=0.04,
+        classification_window_seconds=0.0,
         max_sensor_buffer_seconds=2.0,
         fusion_worker_count=1,
         fusion_localization_queue_size=1,
@@ -920,6 +924,7 @@ async def test_single_sensor_classification_only_detection_does_not_create_track
         trigger_rms=0.001,
         trigger_cooldown_seconds=0.0,
         localization_window_seconds=0.04,
+        classification_window_seconds=0.0,
         max_sensor_buffer_seconds=2.0,
         fusion_worker_count=1,
     )
@@ -1089,6 +1094,7 @@ async def test_fusion_ingest_deduplicates_replayed_frame(tmp_path: Path) -> None
         trigger_rms=0.001,
         trigger_cooldown_seconds=0.0,
         localization_window_seconds=0.04,
+        classification_window_seconds=0.0,
         max_sensor_buffer_seconds=2.0,
         fusion_worker_count=1,
         fusion_event_queue_size=8,
@@ -1425,7 +1431,8 @@ async def test_rust_render_production_classification_is_coalesced(tmp_path: Path
         )
 
     status = await fusion.status()
-    assert status["queue"]["classification_depth"] == 1
+    # ingest_localized_render classifies synchronously, so the queue stays empty
+    assert status["queue"]["classification_depth"] == 0
     assert status["metrics"]["birdnet_chunk_dispatches_suppressed"] == 2
 
     nodes = await storage.list_nodes(limit=10)

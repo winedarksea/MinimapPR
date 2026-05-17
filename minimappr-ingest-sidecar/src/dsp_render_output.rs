@@ -167,6 +167,8 @@ pub fn build_render_result(
         promotion_ready: true,
         env_samples: None,
         node_context: manifest.node_context.clone(),
+        cluster_id: manifest.cluster_id.clone(),
+        cluster_sensor_positions: manifest.cluster_sensor_positions.clone(),
         raw_payload: None,
         raw_render_bytes: None, // set by run_io before SSE broadcast
         raw_audio_frame: None,

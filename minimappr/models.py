@@ -36,6 +36,52 @@ class NodeType(str, Enum):
     GATEWAY = "gateway"
 
 
+class SyncGrade(str, Enum):
+    """Per-sensor time-synchronisation quality, ordered high → low."""
+    GPS_PPS = "gps_pps"
+    PTP     = "ptp"
+    NTP     = "ntp"
+    FREE    = "free"
+
+    def weight(self) -> float:
+        """Localization residual weight for this sync grade."""
+        return _SYNC_GRADE_WEIGHTS[self]
+
+
+_SYNC_GRADE_WEIGHTS: dict[str, float] = {
+    SyncGrade.GPS_PPS: 1.0,
+    SyncGrade.PTP:     1.0,
+    SyncGrade.NTP:     0.25,
+    SyncGrade.FREE:    0.05,
+}
+
+
+def sync_grade_from_time_quality(tq: "TimeQuality") -> SyncGrade:
+    """Map a runtime TimeQuality to the equivalent SyncGrade."""
+    if tq in (TimeQuality.GPS_LOCKED, TimeQuality.GPS_HOLDOVER):
+        return SyncGrade.GPS_PPS
+    if tq in (TimeQuality.NTP_DISCIPLINED, TimeQuality.NTP_SYNC):
+        return SyncGrade.NTP
+    return SyncGrade.FREE
+
+
+class IamfRenderMode(str, Enum):
+    """IAMF output layout for a node cluster."""
+    FOA_BED        = "foa_bed"
+    N_MONO_OBJECTS = "n_mono_objects"
+    AUTO           = "auto"
+
+
+class ClusterSpec(BaseModel):
+    """Logical grouping of nodes that form a TDOA array."""
+    id: str = Field(min_length=1)
+    member_node_ids: list[str] = Field(min_length=1)
+    declared_sync_grade: SyncGrade
+    iamf_render_mode: IamfRenderMode = IamfRenderMode.AUTO
+    max_baseline_m_for_foa: float = Field(default=0.50, gt=0.0)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class GeoPoint(BaseModel):
     lat: float = Field(ge=-90.0, le=90.0)
     lon: float = Field(ge=-180.0, le=180.0)
@@ -52,6 +98,7 @@ class NodeSpec(BaseModel):
     mobility: Literal["stationary", "mobile"] = "stationary"
     metadata: dict[str, Any] = Field(default_factory=dict)
     properties: dict[str, Any] = Field(default_factory=dict)
+    cluster_id: str | None = None
 
     @model_validator(mode="after")
     def _validate(self) -> "NodeSpec":

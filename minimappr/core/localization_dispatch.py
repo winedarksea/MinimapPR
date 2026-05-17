@@ -75,6 +75,7 @@ class LocalizationDispatcher:
         sample_rate_hz: int,
         temperature_c: float,
         humidity_fraction: float,
+        sensor_weights: dict[str, float] | None = None,
     ) -> LocalizationResult:
         strategy = self.strategy.strip().lower()
         if strategy == "cascade":
@@ -84,6 +85,7 @@ class LocalizationDispatcher:
                 sample_rate_hz=sample_rate_hz,
                 temperature_c=temperature_c,
                 humidity_fraction=humidity_fraction,
+                sensor_weights=sensor_weights,
             )
 
         name = self.select_algorithm_name(sensor_positions)
@@ -94,6 +96,7 @@ class LocalizationDispatcher:
             sample_rate_hz=sample_rate_hz,
             temperature_c=temperature_c,
             humidity_fraction=humidity_fraction,
+            sensor_weights=sensor_weights,
         )
 
     def localize_2d(
@@ -104,6 +107,7 @@ class LocalizationDispatcher:
         temperature_c: float,
         humidity_fraction: float,
         fixed_z_m: float | None = None,
+        sensor_weights: dict[str, float] | None = None,
     ) -> LocalizationResult:
         fallback = self._fallback
         if not hasattr(fallback, "localize_2d"):
@@ -113,17 +117,29 @@ class LocalizationDispatcher:
                 sample_rate_hz=sample_rate_hz,
                 temperature_c=temperature_c,
                 humidity_fraction=humidity_fraction,
+                sensor_weights=sensor_weights,
             )
         self._last_algorithm = "gcc_phat"
         self._last_attempted = "gcc_phat"
-        result = fallback.localize_2d(
-            sensor_positions=sensor_positions,
-            sensor_windows=sensor_windows,
-            sample_rate_hz=sample_rate_hz,
-            temperature_c=temperature_c,
-            humidity_fraction=humidity_fraction,
-            fixed_z_m=fixed_z_m,
-        )
+        if sensor_weights is not None and isinstance(fallback, LocalizationEngine):
+            result = fallback.localize_2d(
+                sensor_positions=sensor_positions,
+                sensor_windows=sensor_windows,
+                sample_rate_hz=sample_rate_hz,
+                temperature_c=temperature_c,
+                humidity_fraction=humidity_fraction,
+                fixed_z_m=fixed_z_m,
+                sensor_weights=sensor_weights,
+            )
+        else:
+            result = fallback.localize_2d(
+                sensor_positions=sensor_positions,
+                sensor_windows=sensor_windows,
+                sample_rate_hz=sample_rate_hz,
+                temperature_c=temperature_c,
+                humidity_fraction=humidity_fraction,
+                fixed_z_m=fixed_z_m,
+            )
         result.attempted_algorithm = "gcc_phat"
         result.resolved_algorithm = "gcc_phat"
         return result
@@ -148,6 +164,7 @@ class LocalizationDispatcher:
         sample_rate_hz: int,
         temperature_c: float,
         humidity_fraction: float,
+        sensor_weights: dict[str, float] | None = None,
     ) -> LocalizationResult:
         result = self._run_algorithm(
             name=self.default_algorithm,
@@ -156,6 +173,7 @@ class LocalizationDispatcher:
             sample_rate_hz=sample_rate_hz,
             temperature_c=temperature_c,
             humidity_fraction=humidity_fraction,
+            sensor_weights=sensor_weights,
         )
         if result.confidence >= self.refine_confidence_threshold:
             return result
@@ -173,6 +191,7 @@ class LocalizationDispatcher:
                     sample_rate_hz=sample_rate_hz,
                     temperature_c=temperature_c,
                     humidity_fraction=humidity_fraction,
+                    sensor_weights=sensor_weights,
                 )
                 if candidate.confidence > best.confidence:
                     best = candidate
@@ -195,17 +214,20 @@ class LocalizationDispatcher:
         sample_rate_hz: int,
         temperature_c: float,
         humidity_fraction: float,
+        sensor_weights: dict[str, float] | None = None,
     ) -> LocalizationResult:
         localizer = self.algorithms.get(name, self._fallback)
         attempted = name if name in self.algorithms else "gcc_phat"
         self._last_attempted = attempted
         try:
-            result = localizer.localize(
+            result = self._call_localizer(
+                localizer=localizer,
                 sensor_positions=sensor_positions,
                 sensor_windows=sensor_windows,
                 sample_rate_hz=sample_rate_hz,
                 temperature_c=temperature_c,
                 humidity_fraction=humidity_fraction,
+                sensor_weights=sensor_weights,
             )
             self._last_algorithm = attempted
             result.attempted_algorithm = attempted
@@ -214,18 +236,49 @@ class LocalizationDispatcher:
         except LocalizationError:
             if name == "gcc_phat":
                 raise
-            result = self._fallback.localize(
+            result = self._call_localizer(
+                localizer=self._fallback,
                 sensor_positions=sensor_positions,
                 sensor_windows=sensor_windows,
                 sample_rate_hz=sample_rate_hz,
                 temperature_c=temperature_c,
                 humidity_fraction=humidity_fraction,
+                sensor_weights=sensor_weights,
             )
             self._last_algorithm = "gcc_phat"
             self._fallback_count += 1
             result.attempted_algorithm = attempted
             result.resolved_algorithm = "gcc_phat"
             return result
+
+    @staticmethod
+    def _call_localizer(
+        *,
+        localizer,
+        sensor_positions: dict[str, np.ndarray],
+        sensor_windows: dict[str, np.ndarray],
+        sample_rate_hz: int,
+        temperature_c: float,
+        humidity_fraction: float,
+        sensor_weights: dict[str, float] | None = None,
+    ) -> LocalizationResult:
+        """Call localizer.localize(), passing sensor_weights only when supported."""
+        if sensor_weights is not None and isinstance(localizer, LocalizationEngine):
+            return localizer.localize(
+                sensor_positions=sensor_positions,
+                sensor_windows=sensor_windows,
+                sample_rate_hz=sample_rate_hz,
+                temperature_c=temperature_c,
+                humidity_fraction=humidity_fraction,
+                sensor_weights=sensor_weights,
+            )
+        return localizer.localize(
+            sensor_positions=sensor_positions,
+            sensor_windows=sensor_windows,
+            sample_rate_hz=sample_rate_hz,
+            temperature_c=temperature_c,
+            humidity_fraction=humidity_fraction,
+        )
 
 
 def build_localizer_from_settings(settings: Settings | LocalizationConfig) -> Localizer:

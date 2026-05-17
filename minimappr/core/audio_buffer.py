@@ -60,14 +60,17 @@ def _coverage_stats(coverage: np.ndarray, sample_rate_hz: int) -> AudioCoverageS
     missing = ~coverage
     missing_samples = int(np.count_nonzero(missing))
     covered_samples = sample_count - missing_samples
-    max_gap_samples = 0
-    current_gap = 0
-    for is_missing in missing:
-        if bool(is_missing):
-            current_gap += 1
-            max_gap_samples = max(max_gap_samples, current_gap)
-        else:
-            current_gap = 0
+    if missing_samples > 0:
+        padded = np.empty(missing.size + 2, dtype=np.bool_)
+        padded[0] = False
+        padded[1:-1] = missing
+        padded[-1] = False
+        edges = np.diff(padded.view(np.int8))
+        starts = np.where(edges == 1)[0]
+        ends = np.where(edges == -1)[0]
+        max_gap_samples = int(np.max(ends - starts))
+    else:
+        max_gap_samples = 0
     max_gap_seconds = max_gap_samples / float(sample_rate_hz)
     missing_ratio = missing_samples / float(sample_count)
     warning = missing_ratio > 0.01 or max_gap_seconds > 0.100
@@ -474,7 +477,7 @@ class MultiSensorBuffer:
         snapshots: list[Optional[tuple]] = []
         sample_rate_hz = 0
         actual_start_ns = start_ns
-        actual_end_ns = start_ns
+        actual_end_ns = end_ns
 
         async with self._lock:
             for sensor_id in sensor_ids:
@@ -484,11 +487,11 @@ class MultiSensorBuffer:
                     continue
                 if sample_rate_hz == 0:
                     sample_rate_hz = buf.sample_rate_hz
-                    if buf.start_time_ns is not None:
-                        actual_start_ns = max(start_ns, buf.start_time_ns)
-                    end_buf = buf.end_time_ns()
-                    if end_buf is not None:
-                        actual_end_ns = min(end_ns, end_buf)
+                if buf.start_time_ns is not None:
+                    actual_start_ns = max(actual_start_ns, buf.start_time_ns)
+                end_buf = buf.end_time_ns()
+                if end_buf is not None:
+                    actual_end_ns = min(actual_end_ns, end_buf)
                 # Snapshot the array *references* (not copies) plus index metadata.
                 # After lock release, buf.samples may be replaced by append(), but
                 # CPython keeps the old array alive as long as we hold this reference.

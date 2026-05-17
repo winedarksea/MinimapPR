@@ -62,6 +62,7 @@ from minimappr.core.site_origin import (
     should_schedule_deferred_site_origin_reconciliation,
 )
 from minimappr.core import system_info
+from minimappr.core.cluster_registry import ClusterRegistry
 from minimappr.core.node_registry import NodeRegistry
 from minimappr.core.tracking import TrackManager
 from minimappr.core.zones import ZoneMatcher
@@ -70,6 +71,7 @@ from minimappr.models import (
     BITReport,
     BITReportIn,
     BITType,
+    ClusterSpec,
     ContextSnapshot,
     CopStatusResponse,
     EnvironmentSampleIn,
@@ -1092,6 +1094,7 @@ async def lifespan(app: FastAPI):
     )
 
     registry = NodeRegistry()
+    cluster_registry = ClusterRegistry()
     audio_buffer = MultiSensorBuffer(max_duration_seconds=localization_cfg.max_sensor_buffer_seconds)
     localizer = build_localizer_from_settings(localization_cfg)
     classifier = create_classifier(settings)
@@ -1123,6 +1126,7 @@ async def lifespan(app: FastAPI):
         coordinate_frame=coordinate_frame,
         zone_matcher=zone_matcher,
         environment_provider=environment_provider,
+        cluster_registry=cluster_registry,
     )
     ingest_transport = HttpIngestTransport(fusion_node)
     bit_evaluator = BITReportEvaluator()
@@ -1214,6 +1218,7 @@ async def lifespan(app: FastAPI):
     app.state.settings = settings
     app.state.storage = storage
     app.state.registry = registry
+    app.state.cluster_registry = cluster_registry
     app.state.audio_buffer = audio_buffer
     app.state.localizer = localizer
     app.state.classifier = classifier
@@ -1502,8 +1507,11 @@ async def ingest_store_forward(payload: StoreForwardIngestRequest, request: Requ
     if _should_block_direct_ingest(state):
         raise HTTPException(status_code=410, detail="Direct ingest is disabled; send firmware ingest to the Rust sidecar")
     try:
+        frames = payload.buffered_frames
+        if payload.sort_by_toa:
+            frames = sorted(frames, key=lambda item: item.frame.toa_ns or item.frame.start_time_ns)
         results = []
-        for item in payload.buffered_frames:
+        for item in frames:
             req = IngestFrameRequest(
                 node=payload.node,
                 frame=item.frame,
@@ -2635,6 +2643,46 @@ async def get_system_logs(
         since_seq=since_seq,
     )
     return {"records": records, "capacity": handler._buffer.maxlen or 0}
+
+
+@app.post("/api/v1/clusters", response_model=ClusterSpec, status_code=201)
+async def create_or_update_cluster(request: Request, spec: ClusterSpec) -> ClusterSpec:
+    """Create or replace a node cluster definition.
+
+    Cluster membership is server-authoritative: nodes never self-declare.
+    After upsert the registry propagates cluster_id back into NodeRegistry.
+    """
+    state = _require_state(request)
+    await state.cluster_registry.upsert(spec)
+    await state.cluster_registry.update_node_memberships(state.registry)
+    return spec
+
+
+@app.get("/api/v1/clusters", response_model=list[ClusterSpec])
+async def list_clusters(request: Request) -> list[ClusterSpec]:
+    """List all registered node clusters."""
+    state = _require_state(request)
+    return await state.cluster_registry.list_all()
+
+
+@app.get("/api/v1/clusters/{cluster_id}", response_model=ClusterSpec)
+async def get_cluster(request: Request, cluster_id: str) -> ClusterSpec:
+    """Return a single cluster by ID."""
+    state = _require_state(request)
+    spec = await state.cluster_registry.get(cluster_id)
+    if spec is None:
+        raise HTTPException(status_code=404, detail=f"Cluster '{cluster_id}' not found")
+    return spec
+
+
+@app.delete("/api/v1/clusters/{cluster_id}", status_code=204)
+async def delete_cluster(request: Request, cluster_id: str) -> None:
+    """Remove a cluster definition. Member nodes revert to independent operation."""
+    state = _require_state(request)
+    deleted = await state.cluster_registry.delete(cluster_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Cluster '{cluster_id}' not found")
+    await state.cluster_registry.update_node_memberships(state.registry)
 
 
 @app.get("/api/v1/zones/occupancy", response_model=list[ZoneOccupancyState])

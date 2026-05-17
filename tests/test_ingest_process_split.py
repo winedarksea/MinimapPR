@@ -307,7 +307,7 @@ def test_capture_start_unavailable_for_memory_only_rust_sidecar(
         response = client.post("/api/v1/capture/start", json={"stream_key": "node-a"})
 
     assert response.status_code == 503
-    assert "memory-only live mode" in response.json()["detail"]
+    assert "combined process role" in response.json()["detail"]
 
 
 def test_capture_start_uses_live_buffer_for_python_ingest(

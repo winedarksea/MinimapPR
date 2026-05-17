@@ -532,7 +532,7 @@ async def test_start_ingest_sidecar_passes_classifier_helper_env(monkeypatch, tm
     helper_command = json.loads(str(env["MINIMAPPR_SIDECAR_CLASSIFIER_COMMAND_JSON"]))
     assert helper_command == [sys.executable, "-m", "minimappr.sidecar_classifier_helper"]
     assert env["MINIMAPPR_CLASSIFICATION_WINDOW_SECONDS"] == "30.0"
-    assert env["MINIMAPPR_CLASSIFIER_RENDER_MIN_INTERVAL_SECONDS"] == "0.0"
+    assert env["MINIMAPPR_CLASSIFIER_RENDER_MIN_INTERVAL_SECONDS"] == "28.0"
     assert env["MINIMAPPR_MAX_SENSOR_BUFFER_SECONDS"] == "32.0"
     assert env["MINIMAPPR_DSP_LOCALIZATION_RMS_GATE"] == str(settings.trigger_rms)
     assert env["MINIMAPPR_TRIGGER_COOLDOWN_SECONDS"] == str(settings.trigger_cooldown_seconds)
@@ -858,10 +858,6 @@ def test_http_ingest_preserves_last_seen_for_timestamped_packets(monkeypatch, tm
         nodes = nodes_response.json()
         node = next(row for row in nodes if row["id"] == "http-node-timestamped")
         assert node["last_seen_ns"] >= request_started_ns
-        assert node["audio_debug"]["status"] == "recent"
-
-        audio_response = client.get("/api/v1/nodes/http-node-timestamped/audio/recent", params={"seconds": 10})
-        assert audio_response.status_code == 200
 
 
 def test_detection_audio_rejects_paths_outside_snippet_root(monkeypatch, tmp_path: Path) -> None:

@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
-from minimappr.models import NodeSpec
+from minimappr.models import NodeSpec, SyncGrade
 
 
 @dataclass(slots=True)
@@ -16,6 +16,8 @@ class SensorDescriptor:
     node_id: str
     channel_index: int
     position_m: np.ndarray
+    effective_sync_grade: SyncGrade = field(default=SyncGrade.FREE)
+    cluster_id: str | None = field(default=None)
 
 
 @dataclass(slots=True)
@@ -86,6 +88,22 @@ class NodeRegistry:
             if descriptor is None:
                 return None
             return descriptor.node_id
+
+    async def update_sensor_sync_grade(self, sensor_id: str, grade: SyncGrade) -> None:
+        async with self._lock:
+            descriptor = self._sensors.get(sensor_id)
+            if descriptor is not None:
+                descriptor.effective_sync_grade = grade
+
+    async def update_node_cluster(self, node_id: str, cluster_id: str | None) -> None:
+        async with self._lock:
+            for descriptor in self._sensors.values():
+                if descriptor.node_id == node_id:
+                    descriptor.cluster_id = cluster_id
+
+    async def sensor_sync_grades(self) -> dict[str, SyncGrade]:
+        async with self._lock:
+            return {sid: d.effective_sync_grade for sid, d in self._sensors.items()}
 
     async def gain_offset_db_for_sensor(self, sensor_id: str) -> float:
         async with self._lock:

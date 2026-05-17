@@ -13,6 +13,10 @@ from minimappr.classifiers.heuristic import HeuristicClassifier
 from minimappr.config import Settings
 from minimappr.core.taxonomy import label_category_for_name
 
+try:
+    from minimappr.classifiers.yamnet import YAMNetClassifier
+except Exception:
+    YAMNetClassifier = None  # type: ignore[assignment,misc]
 
 logger = logging.getLogger(__name__)
 
@@ -23,8 +27,8 @@ def create_classifier(settings: Settings) -> AudioClassifier:
     yamnet_active = False
     if backend == "yamnet":
         try:
-            from minimappr.classifiers.yamnet import YAMNetClassifier  # noqa: PLC0415
-
+            if YAMNetClassifier is None:
+                raise RuntimeError("YAMNet backend requires tensorflow and tensorflow-hub")
             base_classifier = YAMNetClassifier(
                 min_confidence=settings.yamnet_min_confidence,
                 target_rms=settings.yamnet_input_target_rms,
@@ -92,8 +96,8 @@ def _build_stage(raw: dict[str, Any], settings: Settings) -> ChainStage | None:
     classifier: AudioClassifier
     if backend == "yamnet":
         try:
-            from minimappr.classifiers.yamnet import YAMNetClassifier  # noqa: PLC0415
-
+            if YAMNetClassifier is None:
+                raise RuntimeError("YAMNet unavailable")
             classifier = YAMNetClassifier(
                 min_confidence=settings.yamnet_min_confidence,
                 target_rms=settings.yamnet_input_target_rms,

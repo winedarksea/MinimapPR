@@ -22,7 +22,7 @@ use crate::{
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 use tokio::{sync::mpsc, sync::RwLock, time};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 const MIN_BIRDNET_CLASSIFICATION_WINDOW_SECONDS: f64 = 15.0;
 const DEFAULT_BIRDNET_CLASSIFICATION_WINDOW_SECONDS: f64 = 30.0;
@@ -559,7 +559,7 @@ impl DspWorker {
         let channel_count = decoded.channels.len();
         let effective_temperature_c = decoded.temperature_c.or(env_temp_c);
         let effective_humidity_fraction = decoded.humidity_fraction.or(env_humidity_fraction);
-        let mic_positions_m = mic_positions_from_node_context(&manifest.node_context);
+        let mic_positions_m = mic_positions_from_manifest(&manifest);
 
         if channel_count > 4 {
             if !self.should_publish_classifier_render(&stream_key, now_ns, pending_backlog_depth) {
@@ -679,10 +679,10 @@ impl DspWorker {
                     manifest_id = %manifest.manifest_id,
                     "DSP worker: no localization coverage window after buffering; publishing omni fallback render"
                 );
-                let buffers = self
-                    .buffers
-                    .get(&stream_key)
-                    .expect("stream buffers must exist after append");
+                let Some(buffers) = self.buffers.get(&stream_key) else {
+                    error!(%stream_key, "stream buffers missing after append in omni fallback path — skipping");
+                    return None;
+                };
                 let fallback_render_windows =
                     channel_windows_ending_at(buffers, end_ns, classification_window_sec);
                 let listenable_fallback_render_windows =
@@ -782,10 +782,10 @@ impl DspWorker {
 
         let (classification_windows, listenable_classification_windows, classification_coverage) =
             if run_classifier_render {
-                let buffers = self
-                    .buffers
-                    .get(&stream_key)
-                    .expect("stream buffers must exist after append");
+                let Some(buffers) = self.buffers.get(&stream_key) else {
+                    error!(%stream_key, "stream buffers missing after append in classifier render path — skipping");
+                    return None;
+                };
                 (
                     channel_windows_ending_at(buffers, end_ns, classification_window_sec),
                     channel_windows_ending_at_with_gap_concealment(
@@ -1125,6 +1125,8 @@ async fn publish_raw_audio_frame_event(
         promotion_ready: false,
         env_samples: None,
         node_context: source_manifest.node_context.clone(),
+        cluster_id: source_manifest.cluster_id.clone(),
+        cluster_sensor_positions: source_manifest.cluster_sensor_positions.clone(),
         raw_payload: None,
         raw_render_bytes: None,
         raw_audio_frame: Some(serde_json::json!({
@@ -1360,9 +1362,22 @@ fn eligible_coverage_channels(
         .collect()
 }
 
+/// Extract per-channel mic positions from a manifest, checking cluster positions
+/// first, then falling back to node_context.node.sensor_offsets_m, and finally
+/// to the hardcoded Sirith tetrahedral positions for legacy payloads.
+pub(crate) fn mic_positions_from_manifest(manifest: &crate::manifests::DspManifest) -> Vec<[f32; 3]> {
+    // Cluster-resolved positions are authoritative when present.
+    if let Some(ref cluster_pos) = manifest.cluster_sensor_positions {
+        if !cluster_pos.is_empty() {
+            return cluster_pos.iter().map(|(_, pos)| *pos).collect();
+        }
+    }
+    mic_positions_from_node_context(&manifest.node_context)
+}
+
 /// Extract per-channel mic positions from node_context.node.sensor_offsets_m.
 /// Falls back to the hardcoded Sirith tetrahedral positions if absent.
-fn mic_positions_from_node_context(node_context: &Option<serde_json::Value>) -> Vec<[f32; 3]> {
+pub(crate) fn mic_positions_from_node_context(node_context: &Option<serde_json::Value>) -> Vec<[f32; 3]> {
     let positions = node_context
         .as_ref()
         .and_then(|ctx| ctx.get("node"))

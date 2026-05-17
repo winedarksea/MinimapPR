@@ -18,8 +18,10 @@ References:
 
 from __future__ import annotations
 
+import json
 import math
 import struct
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -341,3 +343,84 @@ def write_iamf(
             out += _audio_frame_obu(sub_id, _encode_pcm16(chunk, n_frame_samples))
 
     return bytes(out)
+
+
+# ── N-mono substream bundle ────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class MonoSubstreamMeta:
+    """Position and identity metadata for one mono channel in a cluster render."""
+    sensor_id: str
+    position_m: tuple[float, float, float]
+    sync_grade: str = "free"
+    node_id: str = ""
+
+
+@dataclass
+class NMonoBundle:
+    """Bundle of N independent mono audio substreams with positional metadata.
+
+    Used for distributed node clusters where FOA encoding is not appropriate
+    (large baselines, mixed sync grades, or operator preference).
+    """
+    streams: list[tuple[MonoSubstreamMeta, NDArray[np.float32]]] = field(default_factory=list)
+    sample_rate_hz: int = 48_000
+    samples_per_frame: int = 512
+
+    def to_pcm16_map(self) -> dict[str, bytes]:
+        """Return {sensor_id: pcm16le_bytes} for each substream."""
+        return {
+            meta.sensor_id: _encode_pcm16(samples, len(samples))
+            for meta, samples in self.streams
+        }
+
+    def position_manifest(self) -> dict:
+        """Return a JSON-serialisable manifest describing sensor positions."""
+        return {
+            "sample_rate_hz": self.sample_rate_hz,
+            "streams": [
+                {
+                    "sensor_id": meta.sensor_id,
+                    "node_id": meta.node_id,
+                    "position_m": list(meta.position_m),
+                    "sync_grade": meta.sync_grade,
+                    "n_samples": len(samples),
+                }
+                for meta, samples in self.streams
+            ],
+        }
+
+
+def write_n_mono_substreams(
+    bundle: NMonoBundle,
+) -> tuple[bytes, str]:
+    """Serialise N mono substreams to a compact binary bundle.
+
+    Format: 4-byte magic "NMBT" | 4-byte manifest length (big-endian uint32) |
+            manifest JSON bytes | N × (sensor_id_len uint16 | sensor_id bytes |
+            pcm_len uint32 | pcm16le bytes).
+
+    Returns
+    -------
+    (bundle_bytes, manifest_json)
+        ``bundle_bytes`` is the binary payload.
+        ``manifest_json`` is the human-readable position manifest as a JSON string.
+    """
+    manifest = bundle.position_manifest()
+    manifest_json = json.dumps(manifest, separators=(",", ":"))
+    manifest_bytes = manifest_json.encode("utf-8")
+
+    out = bytearray()
+    out += b"NMBT"
+    out += struct.pack(">I", len(manifest_bytes))
+    out += manifest_bytes
+
+    for meta, samples in bundle.streams:
+        pcm = _encode_pcm16(samples, len(samples))
+        sid_bytes = meta.sensor_id.encode("utf-8")
+        out += struct.pack(">H", len(sid_bytes))
+        out += sid_bytes
+        out += struct.pack(">I", len(pcm))
+        out += pcm
+
+    return bytes(out), manifest_json
