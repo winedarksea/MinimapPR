@@ -383,6 +383,18 @@ class StorageBackend(Protocol):
     ) -> dict[str, int]:
         ...
 
+    async def cleanup_retention(
+        self,
+        *,
+        now_ns: int,
+        tier_ttls_seconds: dict[str, int],
+        operational_ttls_seconds: dict[str, int] | None = None,
+    ) -> dict[str, int]:
+        ...
+
+    async def run_sqlite_maintenance(self) -> dict[str, int]:
+        ...
+
     def begin_batch(self) -> AsyncContextManager[None]:
         ...
 

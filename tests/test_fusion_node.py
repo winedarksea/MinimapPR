@@ -24,8 +24,20 @@ from minimappr.utils.audio import encode_pcm16le_b64, mono_mix, rms
 
 
 class _FixedReferenceLocalizer:
-    def __init__(self, reference_sensor: str) -> None:
+    def __init__(
+        self,
+        reference_sensor: str,
+        *,
+        confidence: float = 0.9,
+        wavelength_factor: float | None = None,
+        dominant_frequency_hz: float | None = None,
+        alias_cutoff_hz: float | None = None,
+    ) -> None:
         self.reference_sensor = reference_sensor
+        self.confidence = confidence
+        self.wavelength_factor = wavelength_factor
+        self.dominant_frequency_hz = dominant_frequency_hz
+        self.alias_cutoff_hz = alias_cutoff_hz
 
     def localize(
         self,
@@ -38,10 +50,13 @@ class _FixedReferenceLocalizer:
         del sensor_positions, sensor_windows, sample_rate_hz, temperature_c, humidity_fraction
         return LocalizationResult(
             position_m=(0.0, 0.0, 0.0),
-            confidence=0.9,
+            confidence=self.confidence,
             gdop=1.0,
             reference_sensor=self.reference_sensor,
             tdoa_s={},
+            wavelength_factor=self.wavelength_factor,
+            dominant_frequency_hz=self.dominant_frequency_hz,
+            alias_cutoff_hz=self.alias_cutoff_hz,
         )
 
 
@@ -552,6 +567,101 @@ async def test_fusion_reuses_localized_classification_for_matching_omni_referenc
     status = await fusion.status()
     assert classifier.calls == 1
     assert status["metrics"]["classification_reuse_hits"] == 1
+
+    await fusion.stop()
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_fusion_records_wavelength_alias_metrics_and_features(tmp_path: Path) -> None:
+    settings = Settings(
+        db_path=tmp_path / "fusion_wavelength.db",
+        snippet_dir=tmp_path / "snippets",
+        snippet_retention_seconds=0,
+        trigger_rms=0.001,
+        trigger_cooldown_seconds=0.0,
+        localization_window_seconds=0.04,
+        classification_window_seconds=0.08,
+        max_sensor_buffer_seconds=2.0,
+        fusion_worker_count=1,
+        beamformed_classification_enabled=False,
+        preprocess_enabled=False,
+    )
+    settings.db_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.snippet_dir.mkdir(parents=True, exist_ok=True)
+
+    storage = Storage(settings.db_path)
+    await storage.initialize()
+
+    fusion = FusionNode(
+        settings=settings,
+        registry=NodeRegistry(),
+        buffer=MultiSensorBuffer(max_duration_seconds=settings.max_sensor_buffer_seconds),
+        localizer=_FixedReferenceLocalizer(
+            reference_sensor="alias-node:ch0",
+            confidence=0.36,
+            wavelength_factor=0.4,
+            dominant_frequency_hz=12_000.0,
+            alias_cutoff_hz=3_200.0,
+        ),
+        classifier=_CountingClassifier(),
+        tracker=TrackManager(settings),
+        storage=storage,
+        live_callback=lambda payload: asyncio.sleep(0, result=None),
+        coordinate_frame=LocalCoordinateFrame(origin=GeoPoint(lat=37.0, lon=-122.0, alt_m=0.0), mode="flat"),
+        zone_matcher=ZoneMatcher(storage=storage),
+    )
+    await fusion.start()
+
+    node = NodeSpec(
+        id="alias-node",
+        node_type=NodeType.SIRITH_TETRA,
+        position_m=(0.0, 0.0, 0.0),
+        sensor_offsets_m=[
+            (-0.02, -0.01, 0.0),
+            (0.02, -0.01, 0.0),
+            (0.0, 0.02, 0.0),
+            (0.0, 0.0, 0.03),
+        ],
+        capabilities=["audio", "array_localization"],
+        metadata={},
+    )
+    time_axis = np.arange(1024, dtype=np.float32) / 16_000.0
+    channels = np.stack(
+        [
+            0.4 * np.sin(2.0 * np.pi * 1200.0 * time_axis),
+            0.2 * np.sin(2.0 * np.pi * 1200.0 * time_axis),
+            0.1 * np.sin(2.0 * np.pi * 1200.0 * time_axis),
+            0.05 * np.sin(2.0 * np.pi * 1200.0 * time_axis),
+        ]
+    ).astype(np.float32)
+
+    response = await fusion.ingest(
+        IngestFrameRequest(
+            node=node,
+            frame={
+                "start_time_ns": 1_739_810_320_000_000_000,
+                "sample_rate_hz": 16000,
+                "channels": 4,
+                "encoding": "pcm16le",
+                "samples_b64": encode_pcm16le_b64(channels),
+                "sequence": 1,
+            },
+        )
+    )
+    assert response.triggered is True
+
+    await asyncio.sleep(0.2)
+
+    status = await fusion.status()
+    assert status["metrics"]["localization_band_aliased_count"] == 1
+
+    detections = await storage.list_detections(limit=10)
+    assert len(detections) == 1
+    feature_summary = detections[0]["feature_summary"]
+    assert feature_summary["wavelength_factor"] == pytest.approx(0.4)
+    assert feature_summary["dominant_frequency_hz"] == pytest.approx(12_000.0)
+    assert feature_summary["alias_cutoff_hz"] == pytest.approx(3_200.0)
 
     await fusion.stop()
     await storage.close()
@@ -1080,6 +1190,9 @@ async def test_detection_feature_summary_flags_reconstructed_audio_gap(tmp_path:
     assert audio_quality["degraded"] is True
     assert audio_quality["missing_ratio"] > 0.05
     assert audio_quality["max_gap_seconds"] > 0.25
+
+    status = await fusion.status()
+    assert status["metrics"]["frames_zero_padded_degraded"] >= 1
 
     await fusion.stop()
     await storage.close()

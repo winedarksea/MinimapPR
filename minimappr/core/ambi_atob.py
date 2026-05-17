@@ -106,7 +106,7 @@ def atob_foa(
     freqs = np.fft.rfftfreq(block_size, d=1.0 / sample_rate_hz)
 
     # Compute spatial-aliasing cutoff from the actual array geometry.
-    alias_cutoff_hz = _alias_cutoff_from_positions(positions)
+    alias_cutoff_hz = alias_cutoff_from_positions(positions)
 
     output = np.zeros((4, n_samples), dtype=np.float64)
     norm = np.zeros(n_samples, dtype=np.float64)
@@ -229,12 +229,15 @@ def _max_baseline_m(positions: NDArray[np.float64]) -> float:
     return max_d
 
 
-def _alias_cutoff_from_positions(positions: NDArray[np.float64]) -> float:
+def alias_cutoff_from_positions(
+    positions: NDArray[np.float64],
+    c_sound: float = SPEED_OF_SOUND_MPS,
+) -> float:
     """Spatial-aliasing cutoff for the given mic geometry: c / (2 * max_edge)."""
     baseline = _max_baseline_m(positions)
     if baseline < 1e-6:
         return ALIAS_CUTOFF_HZ  # degenerate geometry: fall back to default
-    return SPEED_OF_SOUND_MPS / (2.0 * baseline)
+    return float(c_sound) / (2.0 * baseline)
 
 
 def _build_encoding_matrix(

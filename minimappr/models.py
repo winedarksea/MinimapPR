@@ -261,6 +261,9 @@ class LocalizationResult(BaseModel):
     tdoa_s: dict[str, float] = Field(default_factory=dict)
     attempted_algorithm: str | None = None
     resolved_algorithm: str | None = None
+    wavelength_factor: float | None = Field(default=None, ge=0.0, le=1.0)
+    dominant_frequency_hz: float | None = Field(default=None, ge=0.0)
+    alias_cutoff_hz: float | None = Field(default=None, ge=0.0)
 
 
 class DetectionEvent(BaseModel):

@@ -10,7 +10,13 @@ import numpy as np
 
 from minimappr.config import LocalizationConfig, Settings
 from minimappr.core.advanced_localization import EspritLocalizer, MusicLocalizer, SRPPhatLocalizer
-from minimappr.core.localization import LocalizationEngine, LocalizationError
+from minimappr.core.ambi_atob import alias_cutoff_from_positions
+from minimappr.core.localization import (
+    LocalizationEngine,
+    LocalizationError,
+    dominant_frequency_hz,
+    speed_of_sound_mps,
+)
 from minimappr.interfaces import Localizer
 from minimappr.models import LocalizationResult
 
@@ -38,6 +44,8 @@ class LocalizationDispatcher:
     default_algorithm: str = "gcc_phat"
     refine_confidence_threshold: float = 0.45
     tight_array_aperture_m: float = 0.35
+    wavelength_gating_enabled: bool = True
+    wavelength_penalty_floor: float = 0.25
     algorithms: dict[str, Localizer] = field(default_factory=dict)
     _fallback: Localizer = field(init=False, repr=False)
     _last_algorithm: str = field(init=False, default="gcc_phat", repr=False)
@@ -47,6 +55,8 @@ class LocalizationDispatcher:
     def __post_init__(self) -> None:
         if "gcc_phat" not in self.algorithms:
             self.algorithms["gcc_phat"] = LocalizationEngine()
+        if self.wavelength_penalty_floor < 0.0 or self.wavelength_penalty_floor > 1.0:
+            raise ValueError("wavelength_penalty_floor must be in [0,1]")
         self._fallback = self.algorithms["gcc_phat"]
         if self.default_algorithm not in self.algorithms:
             self.default_algorithm = "gcc_phat"
@@ -84,7 +94,7 @@ class LocalizationDispatcher:
     ) -> LocalizationResult:
         strategy = self.strategy.strip().lower()
         if strategy == "cascade":
-            return self._localize_with_cascade(
+            result = self._localize_with_cascade(
                 sensor_positions=sensor_positions,
                 sensor_windows=sensor_windows,
                 sample_rate_hz=sample_rate_hz,
@@ -92,16 +102,24 @@ class LocalizationDispatcher:
                 humidity_fraction=humidity_fraction,
                 sensor_weights=sensor_weights,
             )
-
-        name = self.select_algorithm_name(sensor_positions)
-        return self._run_algorithm(
-            name=name,
+        else:
+            name = self.select_algorithm_name(sensor_positions)
+            result = self._run_algorithm(
+                name=name,
+                sensor_positions=sensor_positions,
+                sensor_windows=sensor_windows,
+                sample_rate_hz=sample_rate_hz,
+                temperature_c=temperature_c,
+                humidity_fraction=humidity_fraction,
+                sensor_weights=sensor_weights,
+            )
+        return self._apply_wavelength_penalty(
+            result=result,
             sensor_positions=sensor_positions,
             sensor_windows=sensor_windows,
             sample_rate_hz=sample_rate_hz,
             temperature_c=temperature_c,
             humidity_fraction=humidity_fraction,
-            sensor_weights=sensor_weights,
         )
 
     def localize_2d(
@@ -150,7 +168,14 @@ class LocalizationDispatcher:
             )
         result.attempted_algorithm = "gcc_phat"
         result.resolved_algorithm = "gcc_phat"
-        return result
+        return self._apply_wavelength_penalty(
+            result=result,
+            sensor_positions=sensor_positions,
+            sensor_windows=sensor_windows,
+            sample_rate_hz=sample_rate_hz,
+            temperature_c=temperature_c,
+            humidity_fraction=humidity_fraction,
+        )
 
     def _geometry_aware_choice(self, sensor_positions: dict[str, np.ndarray]) -> str:
         sensor_count = len(sensor_positions)
@@ -261,6 +286,50 @@ class LocalizationDispatcher:
             result.resolved_algorithm = "gcc_phat"
             return result
 
+    def _apply_wavelength_penalty(
+        self,
+        *,
+        result: LocalizationResult,
+        sensor_positions: dict[str, np.ndarray],
+        sensor_windows: dict[str, np.ndarray],
+        sample_rate_hz: int,
+        temperature_c: float,
+        humidity_fraction: float,
+    ) -> LocalizationResult:
+        if not self.wavelength_gating_enabled:
+            return result
+
+        reference_window = sensor_windows.get(result.reference_sensor)
+        if reference_window is None and sensor_windows:
+            reference_window = next(iter(sensor_windows.values()))
+        if reference_window is None or len(sensor_positions) < 2:
+            return result
+
+        sensor_ids = sorted(sensor_positions.keys())
+        positions = np.vstack([np.asarray(sensor_positions[sensor_id], dtype=np.float64) for sensor_id in sensor_ids])
+        alias_cutoff_hz = alias_cutoff_from_positions(
+            positions,
+            c_sound=speed_of_sound_mps(temperature_c, humidity_fraction),
+        )
+        dominant_hz = dominant_frequency_hz(reference_window, sample_rate_hz)
+        result.alias_cutoff_hz = float(max(alias_cutoff_hz, 0.0))
+        result.dominant_frequency_hz = float(max(dominant_hz, 0.0))
+
+        if alias_cutoff_hz <= 0.0 or dominant_hz <= 0.0:
+            result.wavelength_factor = 1.0
+            return result
+
+        factor = float(
+            np.clip(
+                alias_cutoff_hz / max(dominant_hz, alias_cutoff_hz),
+                self.wavelength_penalty_floor,
+                1.0,
+            )
+        )
+        result.wavelength_factor = factor
+        result.confidence = float(np.clip(result.confidence * factor, 0.0, 1.0))
+        return result
+
     @staticmethod
     def _localizer_supports_sensor_weights(localizer, *, method_name: str = "localize") -> bool:
         method = getattr(localizer, method_name, None)
@@ -344,5 +413,7 @@ def build_localizer_from_settings(settings: Settings | LocalizationConfig) -> Lo
         default_algorithm=cfg.localization_algorithm,
         refine_confidence_threshold=cfg.localization_refine_confidence_threshold,
         tight_array_aperture_m=cfg.localization_tight_array_aperture_m,
+        wavelength_gating_enabled=cfg.wavelength_gating_enabled,
+        wavelength_penalty_floor=cfg.wavelength_penalty_floor,
         algorithms=algorithms,
     )

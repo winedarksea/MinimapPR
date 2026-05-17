@@ -64,6 +64,7 @@ class IngestResult:
     time_quality: TimeQuality | None = None
     observation_ids: list[str] | None = None
     environment_counts: EnvironmentCounts | None = None
+    sequence_gap_count: int = 0
 
 
 class EnvironmentUpdater:
@@ -247,6 +248,7 @@ class IngestProcessor:
         # -- register frame and optionally persist observations ---------------
         observation_ids: list[str] = []
         frame_registered = False
+        sequence_gap_count = 0
 
         async with storage_batch_ctx():
             await self._storage.upsert_node(
@@ -269,6 +271,23 @@ class IngestProcessor:
                 time_quality=frame.time_quality.value,
             )
             if frame_registered:
+                sequence_gap_count = await self._registry.record_frame_sequence(
+                    node_id=normalized_node.id,
+                    boot_session=boot_session,
+                    frame_sequence=frame.sequence,
+                )
+                if sequence_gap_count > 0 and frame.sequence is not None:
+                    expected_sequence = frame.sequence - sequence_gap_count
+                    _logger.warning(
+                        "Detected ingest frame sequence gap",
+                        extra={
+                            "node_id": normalized_node.id,
+                            "boot_session": boot_session or None,
+                            "expected_sequence": expected_sequence,
+                            "received_sequence": frame.sequence,
+                            "gap_size": sequence_gap_count,
+                        },
+                    )
                 if environment_sample is not None:
                     await self._storage.insert_environment(
                         node_id=normalized_node.id,
@@ -404,6 +423,7 @@ class IngestProcessor:
             time_quality=frame.time_quality if triggered else None,
             observation_ids=observation_ids,
             environment_counts=env_counts,
+            sequence_gap_count=sequence_gap_count,
         )
 
     async def _publish_audio_summary_if_due(

@@ -16,7 +16,7 @@ import pytest
 from minimappr.core.localization import LocalizationError
 from minimappr.core.localization_dispatch import LocalizationDispatcher
 from minimappr.models import LocalizationResult
-from tests.helpers import FailingLocalizer, StubLocalizer
+from tests.helpers import FailingLocalizer, SIRITH_TETRA_SENSOR_OFFSETS_M, StubLocalizer
 
 
 # Shared test fixtures.
@@ -246,3 +246,29 @@ def test_unknown_algorithm_falls_back_to_gcc() -> None:
     result = dispatcher.localize(_POSITIONS, _WINDOWS, _SR, _TEMP, _HUM)
     assert result.attempted_algorithm == "gcc_phat"
     assert result.resolved_algorithm == "gcc_phat"
+
+
+def test_wavelength_penalty_preserves_provenance_fields() -> None:
+    positions = {
+        f"tetra:ch{index}": np.asarray(offset_m, dtype=np.float64)
+        for index, offset_m in enumerate(SIRITH_TETRA_SENSOR_OFFSETS_M)
+    }
+    time_axis = np.arange(4096, dtype=np.float32) / 48_000.0
+    tone = np.sin(2.0 * np.pi * 12_000.0 * time_axis).astype(np.float32)
+    windows = {sensor_id: tone.copy() for sensor_id in positions}
+    srp = StubLocalizer("srp", 0.7)
+    dispatcher = LocalizationDispatcher(
+        strategy="fixed",
+        default_algorithm="srp_phat",
+        wavelength_gating_enabled=True,
+        wavelength_penalty_floor=0.25,
+        algorithms={"gcc_phat": StubLocalizer("gcc", 0.3), "srp_phat": srp},
+    )
+
+    result = dispatcher.localize(positions, windows, 48_000, _TEMP, _HUM)
+
+    assert result.attempted_algorithm == "srp_phat"
+    assert result.resolved_algorithm == "srp_phat"
+    assert result.wavelength_factor is not None
+    assert result.wavelength_factor < 1.0
+    assert srp.calls == 1

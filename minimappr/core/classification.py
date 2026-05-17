@@ -30,8 +30,6 @@ from minimappr.models import LabelId
 
 logger = logging.getLogger(__name__)
 
-_CLASSIFICATION_TIMEOUT_S = 30.0
-
 
 @dataclass(slots=True)
 class ClassifiedResult:
@@ -80,6 +78,7 @@ class ClassificationOrchestrator:
         classification_preprocessor: AudioPreprocessor | None = None,
         beamformed_classification_min_sensor_count: int = 3,
         beamformed_classification_confidence_margin: float = 0.0,
+        stage_timeout_seconds: float = 30.0,
         classifier_backend_name: str = "heuristic",
     ) -> None:
         self._classifier = classifier
@@ -90,6 +89,7 @@ class ClassificationOrchestrator:
         self._classification_preprocessor = classification_preprocessor
         self._beamformed_min_sensors = beamformed_classification_min_sensor_count
         self._confidence_margin = max(0.0, beamformed_classification_confidence_margin)
+        self._stage_timeout_seconds = max(0.001, float(stage_timeout_seconds))
         self._classifier_backend_name = classifier_backend_name
 
     def replace_classifier(self, classifier: AudioClassifier) -> None:
@@ -224,11 +224,11 @@ class ClassificationOrchestrator:
         try:
             return await asyncio.wait_for(
                 asyncio.to_thread(self._classifier.classify, signal, sample_rate_hz),
-                timeout=_CLASSIFICATION_TIMEOUT_S,
+                timeout=self._stage_timeout_seconds,
             )
         except asyncio.TimeoutError:
             logger.warning(
-                "Classification timed out after %.0fs", _CLASSIFICATION_TIMEOUT_S
+                "Classification timed out after %.3fs", self._stage_timeout_seconds
             )
             try:
                 self._classifier.cancel_pending()
@@ -247,11 +247,11 @@ class ClassificationOrchestrator:
                 try:
                     return await asyncio.wait_for(
                         asyncio.to_thread(self._classifier.classify, signal, sample_rate_hz),
-                        timeout=_CLASSIFICATION_TIMEOUT_S,
+                        timeout=self._stage_timeout_seconds,
                     )
                 except asyncio.TimeoutError:
                     logger.warning(
-                        "Classification retry timed out after %.0fs", _CLASSIFICATION_TIMEOUT_S
+                        "Classification retry timed out after %.3fs", self._stage_timeout_seconds
                     )
                     try:
                         self._classifier.cancel_pending()

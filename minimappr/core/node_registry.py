@@ -25,6 +25,8 @@ class NodeRuntime:
     spec: NodeSpec
     sensor_ids: list[str]
     last_seen_ns: int
+    last_sequence_seen: int | None = None
+    boot_session: str | None = None
 
 
 class NodeRegistry:
@@ -60,7 +62,13 @@ class NodeRegistry:
                 if existing_descriptor is not None:
                     descriptor.effective_sync_grade = existing_descriptor.effective_sync_grade
                     descriptor.cluster_id = existing_descriptor.cluster_id
-            runtime = NodeRuntime(spec=spec, sensor_ids=sensor_ids, last_seen_ns=last_seen_ns)
+            runtime = NodeRuntime(
+                spec=spec,
+                sensor_ids=sensor_ids,
+                last_seen_ns=last_seen_ns,
+                last_sequence_seen=existing.last_sequence_seen if existing is not None else None,
+                boot_session=existing.boot_session if existing is not None else None,
+            )
             self._nodes[spec.id] = runtime
             for sensor_id, descriptor in sensor_descriptors.items():
                 self._sensors[sensor_id] = descriptor
@@ -81,6 +89,32 @@ class NodeRegistry:
     async def record_observation(self, sensor_id: str, observation_id: str) -> None:
         async with self._lock:
             self._latest_observations[sensor_id] = observation_id
+
+    async def record_frame_sequence(
+        self,
+        *,
+        node_id: str,
+        boot_session: str,
+        frame_sequence: int | None,
+    ) -> int:
+        if frame_sequence is None:
+            return 0
+        normalized_boot_session = boot_session or None
+        async with self._lock:
+            runtime = self._nodes.get(node_id)
+            if runtime is None:
+                return 0
+            if runtime.boot_session != normalized_boot_session:
+                runtime.boot_session = normalized_boot_session
+                runtime.last_sequence_seen = frame_sequence
+                return 0
+            last_sequence_seen = runtime.last_sequence_seen
+            gap_size = 0
+            if last_sequence_seen is not None and frame_sequence > last_sequence_seen + 1:
+                gap_size = frame_sequence - (last_sequence_seen + 1)
+            if last_sequence_seen is None or frame_sequence > last_sequence_seen:
+                runtime.last_sequence_seen = frame_sequence
+            return gap_size
 
     async def latest_observation_ids(self, sensor_ids: list[str]) -> list[str]:
         async with self._lock:

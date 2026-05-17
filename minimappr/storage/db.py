@@ -97,6 +97,8 @@ class Storage:
             await self._configure_connection()
             await self._initialize_schema_and_migrations()
 
+        await self._ensure_incremental_auto_vacuum()
+
     async def _initialize_schema_and_migrations(self) -> None:
         db = self._require_db()
 
@@ -220,6 +222,8 @@ class Storage:
             CREATE INDEX IF NOT EXISTS idx_detections_ts ON detections(timestamp_ns DESC);
             CREATE INDEX IF NOT EXISTS idx_detections_track ON detections(track_id, timestamp_ns DESC);
             CREATE INDEX IF NOT EXISTS idx_detections_label ON detections(label_category, timestamp_ns DESC);
+            CREATE INDEX IF NOT EXISTS ix_detections_retention_tier_created
+                ON detections(retention_tier, timestamp_ns DESC);
             CREATE INDEX IF NOT EXISTS idx_detections_reporting_window
                 ON detections(source_node_id, label, report_window_start_ns DESC);
 
@@ -275,6 +279,8 @@ class Storage:
                 metadata_json TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_track_updates_track_ts ON track_updates(track_id, timestamp_ns DESC);
+            CREATE INDEX IF NOT EXISTS ix_track_updates_retention_tier_created
+                ON track_updates(timestamp_ns DESC);
 
             CREATE TABLE IF NOT EXISTS alerts (
                 id TEXT PRIMARY KEY,
@@ -324,6 +330,8 @@ class Storage:
                 expires_ns INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_large_artifacts_expires ON large_artifacts(expires_ns);
+            CREATE INDEX IF NOT EXISTS ix_large_artifacts_retention_tier_expires
+                ON large_artifacts(retention_tier, expires_ns, created_ns DESC);
 
             CREATE TABLE IF NOT EXISTS zones (
                 id TEXT PRIMARY KEY,
@@ -481,6 +489,7 @@ class Storage:
     async def _configure_connection(self) -> None:
         db = self._require_db()
         await db.execute("PRAGMA foreign_keys=ON;")
+        await db.execute("PRAGMA auto_vacuum=INCREMENTAL;")
         try:
             await db.execute("PRAGMA journal_mode=WAL;")
         except sqlite3.OperationalError as exc:
@@ -490,8 +499,38 @@ class Storage:
             await self._open_connection()
             db = self._require_db()
             await db.execute("PRAGMA foreign_keys=ON;")
+            await db.execute("PRAGMA auto_vacuum=INCREMENTAL;")
             await db.execute("PRAGMA journal_mode=WAL;")
         await db.execute("PRAGMA synchronous=NORMAL;")
+
+    async def _ensure_incremental_auto_vacuum(self) -> None:
+        db = self._db
+        if db is None:
+            return
+        row = await (await db.execute("PRAGMA auto_vacuum;")).fetchone()
+        current_mode = int(row[0]) if row is not None else 0
+        if current_mode == 2:
+            return
+        logger.info("Enabling incremental auto_vacuum for %s", self.db_path)
+        await db.execute("PRAGMA auto_vacuum=INCREMENTAL;")
+        await db.commit()
+        await db.execute("VACUUM;")
+        await db.commit()
+
+    async def run_sqlite_maintenance(self) -> dict[str, int]:
+        db = self._require_db()
+        async with self._write_guard():
+            freelist_before_row = await (await db.execute("PRAGMA freelist_count;")).fetchone()
+            freelist_before = int(freelist_before_row[0]) if freelist_before_row is not None else 0
+            await db.execute("PRAGMA incremental_vacuum;")
+            await db.execute("PRAGMA optimize;")
+            await self._commit_if_needed(db)
+            freelist_after_row = await (await db.execute("PRAGMA freelist_count;")).fetchone()
+            freelist_after = int(freelist_after_row[0]) if freelist_after_row is not None else 0
+        return {
+            "freelist_before": freelist_before,
+            "freelist_after": freelist_after,
+        }
 
     @staticmethod
     def _is_disk_io_error(exc: sqlite3.OperationalError) -> bool:
@@ -2690,12 +2729,15 @@ class Storage:
             "pings": 0,
             "large_artifacts": 0,
             "ingested_frames": 0,
+            "bit_reports": 0,
             "track_updates": 0,
             "alerts": 0,
             "environment": 0,
             "dropped_tracks": 0,
         }
         protected_tiers = {"config", "permanent"}
+        operational_ttls = operational_ttls_seconds or {}
+        prune_pings_by_operational_ttl = "pings" in operational_ttls
 
         async with self._write_guard():
             for tier, ttl_s in tier_ttls_seconds.items():
@@ -2741,15 +2783,16 @@ class Storage:
                 )
                 summary["detections"] += max(0, det_cursor.rowcount)
 
-                ping_cursor = await db.execute(
-                    """
-                    DELETE FROM pings
-                    WHERE retention_tier = ?
-                    AND timestamp_ns <= ?
-                    """,
-                    (tier, threshold_ns),
-                )
-                summary["pings"] += max(0, ping_cursor.rowcount)
+                if not prune_pings_by_operational_ttl:
+                    ping_cursor = await db.execute(
+                        """
+                        DELETE FROM pings
+                        WHERE retention_tier = ?
+                        AND timestamp_ns <= ?
+                        """,
+                        (tier, threshold_ns),
+                    )
+                    summary["pings"] += max(0, ping_cursor.rowcount)
 
                 artifact_rows = await (
                     await db.execute(
@@ -2777,10 +2820,11 @@ class Storage:
                 )
                 summary["large_artifacts"] += max(0, artifact_cursor.rowcount)
 
-            # Frame receipt dedupe state tracks recent ingest only; align its TTL to short retention.
-            ingest_receipt_ttl_seconds = max(0, int(tier_ttls_seconds.get("short", 0)))
-            if ingest_receipt_ttl_seconds > 0:
-                ingest_threshold_ns = now_ns - int(ingest_receipt_ttl_seconds * 1_000_000_000)
+            ingest_receipt_ttl_seconds = operational_ttls.get("ingested_frames")
+            if ingest_receipt_ttl_seconds is None:
+                ingest_receipt_ttl_seconds = max(0, int(tier_ttls_seconds.get("short", 0)))
+            if ingest_receipt_ttl_seconds >= 0:
+                ingest_threshold_ns = now_ns - int(int(ingest_receipt_ttl_seconds) * 1_000_000_000)
                 ingested_frames_cursor = await db.execute(
                     """
                     DELETE FROM ingested_frames
@@ -2790,8 +2834,22 @@ class Storage:
                 )
                 summary["ingested_frames"] += max(0, ingested_frames_cursor.rowcount)
 
-            operational_ttls = operational_ttls_seconds or {}
             for key, sql in (
+                (
+                    "pings",
+                    """
+                    DELETE FROM pings
+                    WHERE retention_tier NOT IN ('config', 'permanent')
+                    AND timestamp_ns <= ?
+                    """,
+                ),
+                (
+                    "bit_reports",
+                    """
+                    DELETE FROM bit_reports
+                    WHERE timestamp_ns <= ?
+                    """,
+                ),
                 (
                     "track_updates",
                     """

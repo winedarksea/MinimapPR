@@ -20,6 +20,30 @@ def speed_of_sound_mps(temperature_c: float, humidity_fraction: float) -> float:
     return 331.3 + (0.606 * temperature_c) + (0.0124 * humidity_percent)
 
 
+def dominant_frequency_hz(window: np.ndarray, sample_rate_hz: int) -> float:
+    samples = np.asarray(window, dtype=np.float64).reshape(-1)
+    if samples.size <= 1 or sample_rate_hz <= 0:
+        return 0.0
+
+    centered = samples - float(np.mean(samples))
+    if not np.any(np.abs(centered) > 1e-12):
+        return 0.0
+
+    tapered = centered * np.hanning(centered.size)
+    spectrum = np.fft.rfft(tapered)
+    power = np.abs(spectrum) ** 2
+    freqs = np.fft.rfftfreq(tapered.size, d=1.0 / float(sample_rate_hz))
+    if power.size <= 1 or freqs.size <= 1:
+        return 0.0
+
+    power = power[1:]
+    freqs = freqs[1:]
+    total_power = float(np.sum(power))
+    if total_power <= 1e-12:
+        return 0.0
+    return float(np.sum(freqs * power) / total_power)
+
+
 def gcc_phat(
     signal: np.ndarray,
     reference_signal: np.ndarray,

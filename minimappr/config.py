@@ -96,6 +96,8 @@ class LocalizationConfig:
     localization_band_max_hz: float = 0.0
     skip_localization_for_classification: bool = False
     cluster_aware_localization: bool = False
+    wavelength_gating_enabled: bool = True
+    wavelength_penalty_floor: float = 0.25
 
 
 @dataclass(slots=True)
@@ -120,6 +122,7 @@ class TrackingConfig:
 @dataclass(slots=True)
 class ClassifierConfig:
     backend: str
+    stage_timeout_seconds: float
     yamnet_min_confidence: float
     yamnet_input_target_rms: float
     yamnet_max_input_gain: float
@@ -151,6 +154,9 @@ class StorageConfig:
     retention_short_seconds: int
     retention_long_seconds: int
     retention_experiment_seconds: int
+    retention_ingested_frames_seconds: int
+    retention_bit_reports_seconds: int
+    retention_pings_seconds: int
     retention_track_updates_seconds: int
     retention_alerts_seconds: int
     retention_environment_seconds: int
@@ -343,6 +349,8 @@ class Settings:
     localization_subspace_freq_max_hz: float = 3500.0
     localization_refine_confidence_threshold: float = 0.45
     localization_tight_array_aperture_m: float = 0.35
+    wavelength_gating_enabled: bool = True
+    wavelength_penalty_floor: float = 0.25
     skip_localization_for_classification: bool = False
     cluster_aware_localization: bool = False
     beamformed_classification_enabled: bool = False
@@ -351,6 +359,7 @@ class Settings:
     beamformed_classification_confidence_margin: float = 0.0
     mvdr_diagonal_loading: float = 1e-3
     classifier_diagonal_loading_scale: float = 10.0
+    classification_stage_timeout_seconds: float = 30.0
     pre_classification_highpass_hz: float = 0.0
     pre_classification_lowpass_hz: float = 0.0
     gcc_phat_interp_factor: int = 4
@@ -434,6 +443,9 @@ class Settings:
     retention_short_seconds: int = 86_400
     retention_long_seconds: int = 2_592_000
     retention_experiment_seconds: int = 21_600
+    retention_ingested_frames_seconds: int = 86_400
+    retention_bit_reports_seconds: int = 604_800
+    retention_pings_seconds: int = 86_400
     retention_track_updates_seconds: int = 604_800
     retention_alerts_seconds: int = 2_592_000
     retention_environment_seconds: int = 604_800
@@ -580,6 +592,8 @@ class Settings:
             raise ValueError("MINIMAPPR_LOCALIZATION_REFINE_CONFIDENCE_THRESHOLD must be in [0,1]")
         if self.localization_tight_array_aperture_m <= 0.0:
             raise ValueError("MINIMAPPR_LOCALIZATION_TIGHT_ARRAY_APERTURE_M must be > 0")
+        if self.wavelength_penalty_floor < 0.0 or self.wavelength_penalty_floor > 1.0:
+            raise ValueError("MINIMAPPR_WAVELENGTH_PENALTY_FLOOR must be in [0,1]")
         if self.gcc_phat_interp_factor < 1:
             raise ValueError("MINIMAPPR_GCC_PHAT_INTERP_FACTOR must be >= 1")
         self.beamformer_type = self.beamformer_type.strip().lower()
@@ -594,6 +608,8 @@ class Settings:
             )
         if self.classifier_diagonal_loading_scale < 1.0:
             raise ValueError("MINIMAPPR_CLASSIFIER_DIAGONAL_LOADING_SCALE must be >= 1.0")
+        if self.classification_stage_timeout_seconds <= 0.0:
+            raise ValueError("MINIMAPPR_CLASSIFICATION_STAGE_TIMEOUT_SECONDS must be > 0")
         if self.pre_classification_highpass_hz < 0.0:
             raise ValueError("MINIMAPPR_PRE_CLASSIFICATION_HIGHPASS_HZ must be >= 0")
         if self.pre_classification_lowpass_hz < 0.0:
@@ -673,6 +689,9 @@ class Settings:
             "retention_short_seconds",
             "retention_long_seconds",
             "retention_experiment_seconds",
+            "retention_ingested_frames_seconds",
+            "retention_bit_reports_seconds",
+            "retention_pings_seconds",
             "retention_track_updates_seconds",
             "retention_alerts_seconds",
             "retention_environment_seconds",
@@ -849,6 +868,8 @@ class Settings:
                 0.45,
             ),
             localization_tight_array_aperture_m=_env_float("MINIMAPPR_LOCALIZATION_TIGHT_ARRAY_APERTURE_M", 0.35),
+            wavelength_gating_enabled=_env_bool("MINIMAPPR_WAVELENGTH_GATING_ENABLED", True),
+            wavelength_penalty_floor=_env_float("MINIMAPPR_WAVELENGTH_PENALTY_FLOOR", 0.25),
             skip_localization_for_classification=_env_bool(
                 "MINIMAPPR_SKIP_LOCALIZATION_FOR_CLASSIFICATION",
                 False,
@@ -865,6 +886,7 @@ class Settings:
             ),
             mvdr_diagonal_loading=_env_float("MINIMAPPR_MVDR_DIAGONAL_LOADING", 1e-3),
             classifier_diagonal_loading_scale=_env_float("MINIMAPPR_CLASSIFIER_DIAGONAL_LOADING_SCALE", 10.0),
+            classification_stage_timeout_seconds=_env_float("MINIMAPPR_CLASSIFICATION_STAGE_TIMEOUT_SECONDS", 30.0),
             pre_classification_highpass_hz=_env_float("MINIMAPPR_PRE_CLASSIFICATION_HIGHPASS_HZ", 0.0),
             pre_classification_lowpass_hz=_env_float("MINIMAPPR_PRE_CLASSIFICATION_LOWPASS_HZ", 0.0),
             gcc_phat_interp_factor=_env_int("MINIMAPPR_GCC_PHAT_INTERP_FACTOR", 4),
@@ -965,6 +987,9 @@ class Settings:
             retention_short_seconds=_env_int("MINIMAPPR_RETENTION_SHORT_SECONDS", 86_400),
             retention_long_seconds=_env_int("MINIMAPPR_RETENTION_LONG_SECONDS", 2_592_000),
             retention_experiment_seconds=_env_int("MINIMAPPR_RETENTION_EXPERIMENT_SECONDS", 21_600),
+            retention_ingested_frames_seconds=_env_int("MINIMAPPR_RETENTION_INGESTED_FRAMES_SECONDS", 86_400),
+            retention_bit_reports_seconds=_env_int("MINIMAPPR_RETENTION_BIT_REPORTS_SECONDS", 604_800),
+            retention_pings_seconds=_env_int("MINIMAPPR_RETENTION_PINGS_SECONDS", 86_400),
             retention_track_updates_seconds=_env_int("MINIMAPPR_RETENTION_TRACK_UPDATES_SECONDS", 604_800),
             retention_alerts_seconds=_env_int("MINIMAPPR_RETENTION_ALERTS_SECONDS", 2_592_000),
             retention_environment_seconds=_env_int("MINIMAPPR_RETENTION_ENVIRONMENT_SECONDS", 604_800),
@@ -1015,6 +1040,8 @@ class Settings:
             localization_subspace_freq_max_hz=self.localization_subspace_freq_max_hz,
             localization_refine_confidence_threshold=self.localization_refine_confidence_threshold,
             localization_tight_array_aperture_m=self.localization_tight_array_aperture_m,
+            wavelength_gating_enabled=self.wavelength_gating_enabled,
+            wavelength_penalty_floor=self.wavelength_penalty_floor,
             skip_localization_for_classification=self.skip_localization_for_classification,
             cluster_aware_localization=self.cluster_aware_localization,
             beamformed_classification_enabled=self.beamformed_classification_enabled,
@@ -1050,6 +1077,7 @@ class Settings:
     def classifier_config(self) -> ClassifierConfig:
         return ClassifierConfig(
             backend=self.classifier_backend,
+            stage_timeout_seconds=self.classification_stage_timeout_seconds,
             yamnet_min_confidence=self.yamnet_min_confidence,
             yamnet_input_target_rms=self.yamnet_input_target_rms,
             yamnet_max_input_gain=self.yamnet_max_input_gain,
@@ -1081,6 +1109,9 @@ class Settings:
             retention_short_seconds=self.retention_short_seconds,
             retention_long_seconds=self.retention_long_seconds,
             retention_experiment_seconds=self.retention_experiment_seconds,
+            retention_ingested_frames_seconds=self.retention_ingested_frames_seconds,
+            retention_bit_reports_seconds=self.retention_bit_reports_seconds,
+            retention_pings_seconds=self.retention_pings_seconds,
             retention_track_updates_seconds=self.retention_track_updates_seconds,
             retention_alerts_seconds=self.retention_alerts_seconds,
             retention_environment_seconds=self.retention_environment_seconds,

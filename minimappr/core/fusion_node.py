@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import logging
 import time
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
@@ -75,6 +76,9 @@ from minimappr.models import (
 from minimappr.utils.audio import rms
 
 
+logger = logging.getLogger(__name__)
+
+
 # ---------------------------------------------------------------------------
 # Internal pipeline stage data carriers
 # ---------------------------------------------------------------------------
@@ -130,6 +134,9 @@ class LocalizationBranch:
     tdoa_s: dict[str, float]
     localization_method: str
     capability_tier: str
+    wavelength_factor: float | None = None
+    dominant_frequency_hz: float | None = None
+    alias_cutoff_hz: float | None = None
 
 
 @dataclass(slots=True)
@@ -137,6 +144,8 @@ class FusionMetrics:
     ingest_requests: int = 0
     frames_accepted: int = 0
     frames_rejected: int = 0
+    frames_zero_padded_degraded: int = 0
+    frame_sequence_gaps: int = 0
     triggers_enqueued: int = 0
     triggers_dropped_queue_full: int = 0
     localization_stage_in: int = 0
@@ -155,6 +164,8 @@ class FusionMetrics:
     environment_samples_ingested: int = 0
     environment_samples_persisted: int = 0
     localization_fallback_count: int = 0
+    localization_band_aliased_count: int = 0
+    stage_timeout_count: int = 0
     last_localization_algorithm: str = "gcc_phat"
     last_attempted_algorithm: str = "gcc_phat"
     classification_reuse_hits: int = 0
@@ -199,6 +210,7 @@ class FusionNode:
         beamformer: Beamformer | None = None,
     ) -> None:
         self.settings = settings
+        self.classifier_config = settings.classifier_config()
         self.localization_config = settings.localization_config()
         self.fusion_config = settings.fusion_config()
         self.registry = registry
@@ -259,6 +271,7 @@ class FusionNode:
             classification_preprocessor=self.classification_preprocessor,
             beamformed_classification_min_sensor_count=settings.beamformed_classification_min_sensor_count,
             beamformed_classification_confidence_margin=settings.beamformed_classification_confidence_margin,
+            stage_timeout_seconds=self.classifier_config.stage_timeout_seconds,
             classifier_backend_name=settings.classifier_backend,
         )
         self._detection_assembler = DetectionAssembler(
@@ -502,6 +515,11 @@ class FusionNode:
             environment=dict(payload.environment),
             extra_classification_features=rust_extra_features,
         )
+        self._record_degraded_audio_quality_metrics(
+            candidate=candidate,
+            source_window_type=localized_product.classification_audio_quality_source,
+            audio_quality=localized_product.classification_audio_quality,
+        )
         # Rust localized renders should be classified synchronously so callers can
         # observe the resulting detection immediately after ingest_localized_render returns.
         if self._classification_chunking_policy is not None and payload.authoritative_classification is None:
@@ -563,6 +581,8 @@ class FusionNode:
         if result.environment_counts is not None:
             self._metrics.environment_samples_ingested += result.environment_counts.ingested
             self._metrics.environment_samples_persisted += result.environment_counts.persisted
+        if result.sequence_gap_count > 0:
+            self._metrics.frame_sequence_gaps += result.sequence_gap_count
 
         # Update queue depth on the response before returning.
         result.response.queue_depth = self._localization_queue.qsize()
@@ -634,6 +654,7 @@ class FusionNode:
 
     async def _localization_worker_loop(self, worker_id: int) -> None:
         del worker_id
+        timeout_s = self.classifier_config.stage_timeout_seconds
         while True:
             candidate = await self._localization_queue.get()
             if candidate is None:
@@ -642,10 +663,24 @@ class FusionNode:
             self._realtime_tracker.mark_started(stage_name="localization", item_id=candidate.id)
             self._metrics.localization_stage_in += 1
             try:
-                product = await self._localize_candidate(candidate)
+                product = await asyncio.wait_for(
+                    self._localize_candidate(candidate),
+                    timeout=timeout_s,
+                )
                 if product is not None:
                     if await self._enqueue_stage(self._classification_queue, product):
                         self._metrics.localization_stage_out += 1
+            except asyncio.TimeoutError:
+                self._metrics.stage_timeout_count += 1
+                self._last_error = f"Localization stage timed out after {timeout_s:.3f}s"
+                logger.warning(
+                    "Localization stage timed out",
+                    extra={
+                        "candidate_id": candidate.id,
+                        "source_node_id": candidate.source_node_id,
+                        "timeout_seconds": timeout_s,
+                    },
+                )
             except Exception as exc:  # pragma: no cover - resilience path
                 self._metrics.localization_failures += 1
                 self._last_error = f"{type(exc).__name__}: {exc}"
@@ -655,6 +690,7 @@ class FusionNode:
 
     async def _classification_worker_loop(self, worker_id: int) -> None:
         del worker_id
+        timeout_s = self.classifier_config.stage_timeout_seconds
         while True:
             product = await self._classification_queue.get()
             if product is None:
@@ -669,7 +705,10 @@ class FusionNode:
                 if self._should_suppress_chunked_classification(product):
                     self._metrics.birdnet_chunk_dispatches_suppressed += 1
                     continue
-                detection_products = await self._classify_and_assemble(product)
+                detection_products = await asyncio.wait_for(
+                    self._classify_and_assemble(product),
+                    timeout=timeout_s,
+                )
                 classification_failed = self._detection_products_had_backend_failure(detection_products)
                 self._record_chunk_dispatch_outcome(
                     product=product,
@@ -682,6 +721,22 @@ class FusionNode:
                     for detection_product in detection_products:
                         if await self._enqueue_stage(self._rules_queue, detection_product):
                             self._metrics.classification_stage_out += 1
+            except asyncio.TimeoutError:
+                self._record_chunk_dispatch_outcome(
+                    product=product,
+                    detection_products=[],
+                    classification_failed=True,
+                )
+                self._metrics.stage_timeout_count += 1
+                self._last_error = f"Classification stage timed out after {timeout_s:.3f}s"
+                logger.warning(
+                    "Classification stage timed out",
+                    extra={
+                        "candidate_id": product.candidate.id,
+                        "source_node_id": product.candidate.source_node_id,
+                        "timeout_seconds": timeout_s,
+                    },
+                )
             except Exception as exc:
                 self._record_chunk_dispatch_outcome(
                     product=product,
@@ -798,6 +853,11 @@ class FusionNode:
             selected_sensor_ids=selected_ids,
             localization_audio_quality=localization_audio_quality,
             classification_windows=classification_windows,
+        )
+        self._record_degraded_audio_quality_metrics(
+            candidate=candidate,
+            source_window_type=classification_audio_quality_source,
+            audio_quality=classification_audio_quality,
         )
 
         environment_location = self._sensor_centroid(selected_positions)
@@ -1051,6 +1111,33 @@ class FusionNode:
             source = "mixed"
         return merged, source
 
+    def _record_degraded_audio_quality_metrics(
+        self,
+        *,
+        candidate: EventCandidate,
+        source_window_type: str,
+        audio_quality: dict[str, AudioCoverageStats],
+    ) -> None:
+        degraded_stats = {
+            sensor_id: stats
+            for sensor_id, stats in audio_quality.items()
+            if stats.degraded
+        }
+        if not degraded_stats:
+            return
+        self._metrics.frames_zero_padded_degraded += len(degraded_stats)
+        logger.warning(
+            "Zero-padded degraded audio coverage detected",
+            extra={
+                "candidate_id": candidate.id,
+                "source_node_id": candidate.source_node_id,
+                "source_window_type": source_window_type,
+                "degraded_sensor_ids": sorted(degraded_stats.keys()),
+                "max_missing_ratio": max(stats.missing_ratio for stats in degraded_stats.values()),
+                "max_gap_seconds": max(stats.max_gap_seconds for stats in degraded_stats.values()),
+            },
+        )
+
     def _build_reference_sensor_candidate(
         self,
         *,
@@ -1100,6 +1187,8 @@ class FusionNode:
             and localization.attempted_algorithm != localization.resolved_algorithm
         ):
             self._metrics.localization_fallback_count += 1
+        if localization.wavelength_factor is not None and localization.wavelength_factor < 1.0:
+            self._metrics.localization_band_aliased_count += 1
         return LocalizationBranch(
             localization_position_m=localization.position_m,
             localization_confidence=localization.confidence,
@@ -1113,6 +1202,9 @@ class FusionNode:
             tdoa_s=localization.tdoa_s,
             localization_method=localization_method,
             capability_tier=capability_tier,
+            wavelength_factor=localization.wavelength_factor,
+            dominant_frequency_hz=localization.dominant_frequency_hz,
+            alias_cutoff_hz=localization.alias_cutoff_hz,
         )
 
     async def _assemble_reporting_branch(
@@ -1178,6 +1270,14 @@ class FusionNode:
 
         persist_mode = "update" if decision.action == "upgrade_existing" else "insert"
         try:
+            classification_features = dict(classified.classification.features)
+            if reporting_modality == "localized" and product.localization_branch is not None:
+                if product.localization_branch.wavelength_factor is not None:
+                    classification_features["wavelength_factor"] = product.localization_branch.wavelength_factor
+                if product.localization_branch.dominant_frequency_hz is not None:
+                    classification_features["dominant_frequency_hz"] = product.localization_branch.dominant_frequency_hz
+                if product.localization_branch.alias_cutoff_hz is not None:
+                    classification_features["alias_cutoff_hz"] = product.localization_branch.alias_cutoff_hz
             assembly = await self._detection_assembler.assemble(
                 localization_position_m=localization_position_m,
                 localization_confidence=localization_confidence,
@@ -1192,7 +1292,7 @@ class FusionNode:
                 classification_label=classified.classification.label,
                 classification_confidence=classified.classification.confidence,
                 classification_scores=classified.classification.scores,
-                classification_features=dict(classified.classification.features),
+                classification_features=classification_features,
                 classification_path=classified.classification_path,
                 omni_confidence=classified.omni_classification.confidence,
                 beamformed_classification_confidence=(

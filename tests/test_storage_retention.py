@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -8,6 +9,8 @@ from typing import Any
 import pytest
 
 from minimappr.cleanup_policy import CleanupDefaults, CleanupPolicy, RetentionActions, RetentionMatchCriteria, RetentionRule
+from minimappr.cleanup_service import CleanupService
+from minimappr.config import Settings
 from minimappr.models import DetectionEvent, NodeSpec, NodeType, TrackState
 from minimappr.storage.db import Storage
 
@@ -200,6 +203,33 @@ async def test_storage_retention_cleanup_removes_expired_records(tmp_path: Path)
         status="sent",
         payload={"message": "old"},
     )
+    await storage.register_ingested_frame(
+        node_id="node-1",
+        boot_session="boot-a",
+        frame_sequence=42,
+        start_time_ns=old_ns,
+        utc_end_ns=old_ns + 1_000_000,
+        start_sample_index=0,
+        end_sample_index=255,
+        toa_ns=old_ns,
+        tor_ns=old_ns,
+        created_ns=old_ns,
+        source_type="audio",
+        time_quality="gps",
+    )
+    await storage.insert_bit_report(
+        report_id="bit-old",
+        node_id="node-1",
+        report_type="startup",
+        overall_status="ok",
+        timestamp_ns=old_ns,
+        received_ns=old_ns,
+        results_json=json.dumps([{"check": "pps", "status": "ok"}]),
+        failure_codes_json=json.dumps([]),
+        firmware_version="1.0.0",
+        uptime_seconds=3.5,
+        metadata_json=json.dumps({"source": "test"}),
+    )
 
     artifact = tmp_path / "artifact.bin"
     artifact.write_bytes(b"artifact")
@@ -230,6 +260,9 @@ async def test_storage_retention_cleanup_removes_expired_records(tmp_path: Path)
         now_ns=now_ns,
         tier_ttls_seconds={"short": 1, "experiment": 1},
         operational_ttls_seconds={
+            "ingested_frames": 1,
+            "bit_reports": 1,
+            "pings": 1,
             "track_updates": 1,
             "alerts": 1,
             "environment": 1,
@@ -243,6 +276,8 @@ async def test_storage_retention_cleanup_removes_expired_records(tmp_path: Path)
     assert summary["alerts"] >= 1
     assert summary["environment"] >= 1
     assert summary["dropped_tracks"] >= 1
+    assert summary["ingested_frames"] >= 1
+    assert summary["bit_reports"] >= 1
     assert snippet_file.exists() is False
     assert artifact.exists() is False
     assert protected_artifact.exists() is True
@@ -250,8 +285,103 @@ async def test_storage_retention_cleanup_removes_expired_records(tmp_path: Path)
     assert await storage.list_pings(limit=10) == []
     assert await storage.list_alerts(limit=10) == []
     assert await storage.list_environment(limit=10) == []
+    assert await storage.list_bit_reports(limit=10) == []
     tracks = await storage.list_tracks(limit=20)
     assert all(track["id"] != "trk-dropped-old" for track in tracks)
+
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_housekeeping_cycle_runs_sqlite_maintenance_and_retention_indexes(tmp_path: Path) -> None:
+    db_path = tmp_path / "maintenance.db"
+    storage = Storage(db_path)
+    await storage.initialize()
+
+    now_ns = 2_200_000_000_000_000_000
+    old_ns = now_ns - 20_000_000_000
+    await storage.upsert_node(
+        NodeSpec(
+            id="node-maint",
+            node_type=NodeType.POINT,
+            position_m=(0.0, 0.0, 0.0),
+            sensor_offsets_m=[(0.0, 0.0, 0.0)],
+            capabilities=["audio"],
+        ),
+        last_seen_ns=old_ns,
+    )
+
+    payload_json = json.dumps({"payload": "x" * 4096})
+    for index in range(48):
+        await storage.insert_bit_report(
+            report_id=f"bit-bulk-{index}",
+            node_id="node-maint",
+            report_type="health",
+            overall_status="ok",
+            timestamp_ns=old_ns - index,
+            received_ns=old_ns - index,
+            results_json=payload_json,
+            failure_codes_json=json.dumps([]),
+            firmware_version="1.0.0",
+            uptime_seconds=float(index),
+            metadata_json=payload_json,
+        )
+
+    settings = Settings(
+        db_path=db_path,
+        snippet_dir=tmp_path / "snippets",
+        large_artifact_dir=tmp_path / "artifacts",
+        retention_policy_path=tmp_path / "cleanup-policy.json",
+        retention_bit_reports_seconds=1,
+        retention_ingested_frames_seconds=1,
+        retention_pings_seconds=1,
+        retention_track_updates_seconds=1,
+        retention_alerts_seconds=1,
+        retention_environment_seconds=1,
+        retention_dropped_tracks_seconds=1,
+    )
+    service = CleanupService(settings=settings, storage=storage)
+
+    db = storage._require_db()
+    index_rows = await (
+        await db.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'index'
+            AND name IN (
+                'ix_detections_retention_tier_created',
+                'ix_large_artifacts_retention_tier_expires',
+                'ix_track_updates_retention_tier_created'
+            )
+            ORDER BY name
+            """
+        )
+    ).fetchall()
+    assert [row[0] for row in index_rows] == [
+        "ix_detections_retention_tier_created",
+        "ix_large_artifacts_retention_tier_expires",
+        "ix_track_updates_retention_tier_created",
+    ]
+
+    auto_vacuum_row = await (await db.execute("PRAGMA auto_vacuum;")).fetchone()
+    assert int(auto_vacuum_row[0]) == 2
+
+    retention_summary = await storage.cleanup_retention(
+        now_ns=now_ns,
+        tier_ttls_seconds={"short": 1, "experiment": 1},
+        operational_ttls_seconds={"bit_reports": 1},
+    )
+    assert retention_summary["bit_reports"] == 48
+
+    freelist_after_delete_row = await (await db.execute("PRAGMA freelist_count;")).fetchone()
+    freelist_after_delete = int(freelist_after_delete_row[0])
+    assert freelist_after_delete > 0
+
+    maintenance_summary = await service.run_housekeeping_cycle(now_ns=now_ns)
+    sqlite_maintenance = maintenance_summary["sqlite_maintenance"]
+    assert sqlite_maintenance["freelist_before"] == freelist_after_delete
+    assert sqlite_maintenance["freelist_after"] < freelist_after_delete
 
     await storage.close()
 

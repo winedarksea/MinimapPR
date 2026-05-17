@@ -103,18 +103,23 @@ class CleanupService:
                 "experiment": self._settings.retention_experiment_seconds,
             },
             operational_ttls_seconds={
+                "ingested_frames": self._settings.retention_ingested_frames_seconds,
+                "bit_reports": self._settings.retention_bit_reports_seconds,
+                "pings": self._settings.retention_pings_seconds,
                 "track_updates": self._settings.retention_track_updates_seconds,
                 "alerts": self._settings.retention_alerts_seconds,
                 "environment": self._settings.retention_environment_seconds,
                 "dropped_tracks": self._settings.retention_dropped_tracks_seconds,
             },
         )
+        maintenance_summary = await self._storage.run_sqlite_maintenance()
         return {
             "mode": "housekeeping",
             "dry_run": dry_run,
             "now_ns": effective_now_ns,
             "partial_cleanup": partial_summary["summary"],
             "retention_cleanup": retention_summary,
+            "sqlite_maintenance": maintenance_summary,
         }
 
     async def run_full_cleanup(self, *, dry_run: bool = False) -> dict[str, Any]:
