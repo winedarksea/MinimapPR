@@ -526,3 +526,55 @@ class NodeHealthStatus(str, Enum):
     DEGRADED = "degraded"
     OFFLINE = "offline"
     BIT_FAIL = "bit_fail"  # BIT failure overrides heartbeat-based status
+
+
+# ---------------------------------------------------------------------------
+# Pipeline / Nodes view — per-node audio pipeline state and settings
+# ---------------------------------------------------------------------------
+
+
+class NodeAudioOverride(BaseModel):
+    """Per-node audio DSP overrides stored in Settings.node_audio_overrides."""
+
+    mic_gains_db: list[float] | None = None
+    hp_hz: float | None = None
+    lp_hz: float | None = None
+    smoothing: Literal["off", "ema_50ms", "ema_200ms"] | None = None
+
+
+class PipelineStageView(BaseModel):
+    name: str
+    count_in: int = 0
+    count_out: int = 0
+    drops: int = 0
+    queue_depth: int = 0
+    queue_max: int = 0
+    lag_s: float | None = None
+
+
+class MicView(BaseModel):
+    index: int
+    label: str
+    gain_db: float = 0.0
+    hp_hz: float = 0.0
+    lp_hz: float = 0.0
+    smoothing: str = "off"
+    rms_recent: list[float] = Field(default_factory=list)
+
+
+class PipelineNodeView(BaseModel):
+    node_id: str
+    node_type: str
+    mics: list[MicView] = Field(default_factory=list)
+    stages: list[PipelineStageView] = Field(default_factory=list)
+    frame_gaps: int = 0
+    zero_padded_degraded: int = 0
+    last_frame_ns: int | None = None
+    sample_rate_hz: int | None = None
+    audio_status: str = "unknown"
+
+
+class PipelineNodesResponse(BaseModel):
+    active_pipeline: Literal["python", "rust"]
+    nodes: list[PipelineNodeView] = Field(default_factory=list)
+    pipeline_seconds_behind_realtime: float | None = None

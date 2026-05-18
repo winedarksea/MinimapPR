@@ -6,7 +6,7 @@ import json
 import math
 import os
 import platform
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -481,6 +481,8 @@ class Settings:
     federation_tqi_hysteresis: float = 0.05
     federation_deconflict_use_3d: bool = False
     federation_auth_token: str = ""
+
+    node_audio_overrides: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.db_path = Path(self.db_path)

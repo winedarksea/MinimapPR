@@ -117,6 +117,15 @@ pub struct PairTdoa {
     pub tdoa: TdoaResult,
 }
 
+/// Per-node audio DSP override (gain and filters applied before buffer insertion).
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct NodeAudioConfig {
+    /// Gain in dB to apply to all channels for this node (0.0 = no change).
+    pub gain_db: Option<f64>,
+    /// 1st-order IIR highpass cutoff in Hz (0 or None = disabled).
+    pub hp_hz: Option<f64>,
+}
+
 /// Shared state exposed via the /api/v1/dsp/* endpoints.
 #[derive(Debug, Default)]
 pub struct DspWorkerState {
@@ -133,6 +142,8 @@ pub struct DspWorkerState {
     pub total_classification_drops: u64,
     pub pending_count: usize,
     pub recent_results: Vec<DspManifest>,
+    /// Per-node audio overrides applied during ingest (set via POST /api/v1/dsp/config).
+    pub node_audio_overrides: HashMap<String, NodeAudioConfig>,
 }
 
 pub type SharedDspState = Arc<RwLock<DspWorkerState>>;
@@ -438,7 +449,7 @@ impl DspWorker {
             self.defer_source_manifest_consumption(&manifest);
             return None;
         };
-        let decoded = match decode_audio_payload(&raw_payload) {
+        let mut decoded = match decode_audio_payload(&raw_payload) {
             Ok(decoded) => decoded,
             Err(err) => {
                 self.note_failure().await;
@@ -456,6 +467,20 @@ impl DspWorker {
             self.mark_source_manifest_consumed_if_persisted(&manifest)
                 .await;
             return None;
+        }
+
+        // Apply per-node audio overrides (gain, highpass) if configured.
+        {
+            let node_id_key = stream_key.split("__").next().unwrap_or(&stream_key);
+            let st = self.state.read().await;
+            if let Some(cfg) = st.node_audio_overrides.get(node_id_key).cloned() {
+                drop(st);
+                apply_node_audio_to_channels(
+                    &mut decoded.channels,
+                    &cfg,
+                    decoded.sample_rate_hz,
+                );
+            }
         }
 
         let source_ids = manifest
@@ -1566,6 +1591,52 @@ fn sample_index_to_relative_time_ns(sample_index: i64, sample_rate_hz: u32) -> i
 fn speed_of_sound_mps(temperature_c: f32, humidity_fraction: f32) -> f32 {
     let humidity_percent = humidity_fraction.clamp(0.0, 1.0) * 100.0;
     331.3 + (0.606 * temperature_c) + (0.0124 * humidity_percent)
+}
+
+/// Apply per-node audio overrides (gain_db, hp_hz) to decoded channel buffers
+/// in-place, before they are written into the SensorStreamBuffer.
+///
+/// Gain is applied as a linear multiplier derived from `gain_db`.
+/// The highpass is a first-order IIR discrete approximation:
+///   y[n] = α · (y[n-1] + x[n] − x[n-1])   where α = fs / (fs + 2π·fc)
+pub(crate) fn apply_node_audio_to_channels(
+    channels: &mut [Vec<f32>],
+    config: &NodeAudioConfig,
+    sample_rate_hz: u32,
+) {
+    let gain = config
+        .gain_db
+        .filter(|&db| db != 0.0)
+        .map(|db| 10f64.powf(db / 20.0) as f32);
+
+    let hp_alpha = config
+        .hp_hz
+        .filter(|&hz| hz > 0.0)
+        .map(|hz| {
+            let fs = sample_rate_hz as f64;
+            (fs / (fs + 2.0 * std::f64::consts::PI * hz)) as f32
+        });
+
+    for ch in channels.iter_mut() {
+        if let Some(g) = gain {
+            for s in ch.iter_mut() {
+                *s *= g;
+            }
+        }
+        if let Some(alpha) = hp_alpha {
+            if ch.len() >= 2 {
+                let mut prev_x = ch[0];
+                let mut prev_y = ch[0];
+                for sample in ch.iter_mut().skip(1) {
+                    let x = *sample;
+                    let y = alpha * (prev_y + x - prev_x);
+                    prev_x = x;
+                    prev_y = y;
+                    *sample = y;
+                }
+            }
+        }
+    }
 }
 
 pub(crate) fn system_now_ns() -> u128 {

@@ -2168,3 +2168,186 @@ a.btn-sm {
   text-align: center;
   display: block;
 }
+
+/* ---------------------------------------------------------------------------
+   Pipeline / Nodes view
+   --------------------------------------------------------------------------- */
+
+.pipeline-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.pipeline-node-card {
+  margin-bottom: 1rem;
+  padding: 1rem;
+}
+
+.pipeline-node-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+/* Stage flow row: horizontal chip strip */
+.pipeline-stage-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+}
+
+.pipeline-stage-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 4.5rem;
+  padding: 0.25rem 0.5rem;
+  border-radius: 6px;
+  font-size: var(--md-sys-typescale-label-small-size);
+  font-variant-numeric: tabular-nums;
+  border: 1px solid transparent;
+}
+
+.pipeline-stage-chip.ok {
+  background: color-mix(in srgb, var(--mmp-sys-color-ok) 12%, transparent);
+  border-color: color-mix(in srgb, var(--mmp-sys-color-ok) 35%, transparent);
+  color: var(--md-sys-color-on-surface);
+}
+
+.pipeline-stage-chip.warn {
+  background: color-mix(in srgb, var(--mmp-sys-color-warn) 15%, transparent);
+  border-color: color-mix(in srgb, var(--mmp-sys-color-warn) 45%, transparent);
+  color: var(--md-sys-color-on-surface);
+}
+
+.pipeline-stage-chip.danger {
+  background: color-mix(in srgb, var(--mmp-sys-color-danger) 15%, transparent);
+  border-color: color-mix(in srgb, var(--mmp-sys-color-danger) 45%, transparent);
+  color: var(--md-sys-color-on-surface);
+}
+
+.pipeline-stage-name {
+  font-weight: 600;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.pipeline-stage-lag {
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.pipeline-stage-queue {
+  font-size: 0.7rem;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.pipeline-stage-drops {
+  font-size: 0.75rem;
+  color: var(--mmp-sys-color-danger);
+  font-weight: 600;
+}
+
+/* Mic settings table */
+.mic-table {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0.25rem 0;
+}
+
+.mic-table-row {
+  display: grid;
+  grid-template-columns: max-content 1fr 1fr;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.mic-table-header span {
+  font-size: var(--md-sys-typescale-label-small-size);
+  color: var(--md-sys-color-on-surface-variant);
+  font-weight: 600;
+}
+
+.mic-label {
+  font-size: var(--md-sys-typescale-label-medium-size);
+  font-weight: 500;
+  color: var(--md-sys-color-on-surface-variant);
+  min-width: 2.5rem;
+}
+
+.mic-input {
+  background: var(--md-sys-color-surface-container);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: 4px;
+  color: var(--md-sys-color-on-surface);
+  padding: 0.2rem 0.4rem;
+  font-size: var(--md-sys-typescale-body-small-size);
+  font-family: inherit;
+  width: 100%;
+  max-width: 7rem;
+}
+
+.mic-input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.mic-input:focus {
+  outline: 2px solid var(--md-sys-color-primary);
+  outline-offset: 1px;
+}
+
+.pipeline-section-label {
+  font-size: var(--md-sys-typescale-label-medium-size);
+  font-weight: 600;
+  color: var(--md-sys-color-on-surface-variant);
+  margin-bottom: 0.35rem;
+  display: flex;
+  align-items: center;
+}
+
+.pipeline-save-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin-top: 0.6rem;
+}
+
+.pipeline-node-footer {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-top: 0.5rem;
+  font-size: var(--md-sys-typescale-label-small-size);
+  font-variant-numeric: tabular-nums;
+}
+
+.rms-sparkline {
+  vertical-align: middle;
+}
+
+.btn-primary {
+  background: var(--md-sys-color-primary);
+  color: var(--md-sys-color-on-primary);
+  border: none;
+  border-radius: 6px;
+  padding: 0.3rem 0.8rem;
+  font-size: var(--md-sys-typescale-label-medium-size);
+  font-family: inherit;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.btn-primary:hover { opacity: 0.88; }
+.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }

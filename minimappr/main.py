@@ -83,6 +83,11 @@ from minimappr.models import (
     GeoPoint,
     IngestFrameRequest,
     IngestFrameResponse,
+    MicView,
+    NodeAudioOverride,
+    PipelineNodeView,
+    PipelineNodesResponse,
+    PipelineStageView,
     StoreForwardBufferedFrameResponse,
     StoreForwardIngestRequest,
     StoreForwardIngestResponse,
@@ -2175,6 +2180,311 @@ async def fusion_status(request: Request) -> dict:
     if not hasattr(state, "fusion_node"):
         raise HTTPException(status_code=503, detail="Fusion pipeline runs in the ingest process")
     return await state.fusion_node.status()
+
+
+# ---------------------------------------------------------------------------
+# Pipeline / Nodes view
+# ---------------------------------------------------------------------------
+
+
+def _mic_labels(count: int) -> list[str]:
+    _TETRA_LABELS = ["FL", "FR", "BL", "BR"]
+    if count == 4:
+        return _TETRA_LABELS
+    return [f"CH{i}" for i in range(count)]
+
+
+
+def _build_rust_stages(dsp_status: dict) -> list[PipelineStageView]:
+    if not isinstance(dsp_status, dict):
+        return []
+    total_loc = int(dsp_status.get("total_localization_attempts") or 0)
+    total_loc_out = int(dsp_status.get("total_localization_results") or 0)
+    total_cls = int(dsp_status.get("total_classification_attempts") or 0)
+    total_cls_out = int(dsp_status.get("total_classifier_renders") or 0)
+    total_fails = int(dsp_status.get("total_failures") or 0)
+    total_drops = int(dsp_status.get("total_classification_drops") or 0)
+    queue_depth = int(dsp_status.get("raw_manifest_queue_depth") or 0)
+    pending = int(dsp_status.get("pending_manifest_count") or 0)
+    return [
+        PipelineStageView(name="ingest", count_in=total_loc, count_out=total_loc, drops=0, queue_depth=queue_depth),
+        PipelineStageView(name="localization", count_in=total_loc, count_out=total_loc_out, drops=total_fails, queue_depth=pending),
+        PipelineStageView(name="classification", count_in=total_cls, count_out=total_cls_out, drops=total_drops),
+        PipelineStageView(name="track", count_in=total_cls_out, count_out=total_cls_out, drops=0),
+        PipelineStageView(name="rules", count_in=total_cls_out, count_out=total_cls_out, drops=0),
+    ]
+
+
+def _fetch_json_from_sidecar(base_url: str, path: str, body: dict | None = None) -> dict:
+    url = f"{base_url.rstrip('/')}{path}"
+    try:
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+            req = urllib.request.Request(
+                url, data=data, method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+        else:
+            req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=1.0) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return {}
+
+
+@app.get("/api/v1/pipeline/nodes", response_model=PipelineNodesResponse)
+async def get_pipeline_nodes(request: Request) -> PipelineNodesResponse:
+    state = _require_state(request)
+    settings: Settings = state.settings
+    if _ingest_sidecar_is_running(state) and settings.ingest_backend == "rust":
+        dsp_status = await asyncio.to_thread(
+            _fetch_json_from_sidecar,
+            _ingest_runtime_base_url(settings),
+            "/api/v1/dsp/status",
+        )
+        sidecar_snapshots = _sidecar_stream_consumer_snapshots(state)
+        now_ns = time.time_ns()
+        nodes_out: list[PipelineNodeView] = []
+        for node_id, snapshot in sidecar_snapshots.items():
+            audio_debug = _sidecar_snapshot_audio_debug(
+                snapshot,
+                now_ns=now_ns,
+                degraded_after_seconds=settings.node_degraded_after_seconds,
+            ) or {}
+            sensor_count = int(audio_debug.get("sensor_count") or 1)
+            sample_rate_hz = audio_debug.get("sample_rate_hz")
+            last_ns = audio_debug.get("last_sample_time_ns")
+            audio_status = str(audio_debug.get("status") or "unknown")
+            rms_val = audio_debug.get("rms")
+            rms_list = [float(rms_val)] if isinstance(rms_val, (int, float)) else []
+
+            overrides: dict = settings.node_audio_overrides.get(node_id) or {}
+            mic_count = max(1, sensor_count)
+            labels = _mic_labels(mic_count)
+            mic_gains_db: list[float] = overrides.get("mic_gains_db") or [0.0] * mic_count
+            hp = float(overrides.get("hp_hz", settings.audio_highpass_hz))
+            lp = float(overrides.get("lp_hz", settings.audio_lowpass_hz))
+            smoothing = overrides.get("smoothing") or "off"
+
+            mics = [
+                MicView(
+                    index=i,
+                    label=labels[i] if i < len(labels) else f"CH{i}",
+                    gain_db=float(mic_gains_db[i]) if i < len(mic_gains_db) else 0.0,
+                    hp_hz=hp,
+                    lp_hz=lp,
+                    smoothing=smoothing,
+                    rms_recent=rms_list if i == 0 else [],
+                )
+                for i in range(mic_count)
+            ]
+            nodes_out.append(PipelineNodeView(
+                node_id=node_id,
+                node_type="sirith_tetra",
+                mics=mics,
+                stages=_build_rust_stages(dsp_status),
+                last_frame_ns=int(last_ns) if isinstance(last_ns, int) else None,
+                sample_rate_hz=int(sample_rate_hz) if isinstance(sample_rate_hz, int) else None,
+                audio_status=audio_status,
+            ))
+        return PipelineNodesResponse(active_pipeline="rust", nodes=nodes_out)
+
+    # Python ingest path.
+    fusion_node: FusionNode | None = getattr(state, "fusion_node", None)
+    realtime: dict = {}
+    node_frame_metrics: dict = {}
+    queue_sizes: dict = {}
+    if fusion_node is not None:
+        realtime = fusion_node._realtime_tracker.snapshot(now_ns=time.time_ns())
+        node_frame_metrics = fusion_node.node_frame_metrics()
+        queue_sizes = {
+            "localization": (fusion_node._localization_queue.qsize(), fusion_node._localization_queue.maxsize),
+            "classification": (fusion_node._classification_queue.qsize(), fusion_node._classification_queue.maxsize),
+            "rules": (fusion_node._rules_queue.qsize(), fusion_node._rules_queue.maxsize),
+        }
+
+    def _lag(stage: str) -> float | None:
+        stages_rt = realtime.get("stages") or {}
+        info = stages_rt.get(stage) or {}
+        v = info.get("seconds_behind_realtime")
+        return float(v) if v is not None else None
+
+    m = fusion_node._metrics if fusion_node is not None else None
+    loc_q, loc_max = queue_sizes.get("localization", (0, 0))
+    cls_q, cls_max = queue_sizes.get("classification", (0, 0))
+    rls_q, rls_max = queue_sizes.get("rules", (0, 0))
+    stages = [
+        PipelineStageView(
+            name="ingest",
+            count_in=m.ingest_requests if m else 0,
+            count_out=m.frames_accepted if m else 0,
+            drops=m.frames_rejected if m else 0,
+        ),
+        PipelineStageView(
+            name="localization",
+            count_in=m.localization_stage_in if m else 0,
+            count_out=m.localization_stage_out if m else 0,
+            drops=m.localization_failures if m else 0,
+            queue_depth=loc_q,
+            queue_max=loc_max,
+            lag_s=_lag("localization"),
+        ),
+        PipelineStageView(
+            name="classification",
+            count_in=m.classification_stage_in if m else 0,
+            count_out=m.classification_stage_out if m else 0,
+            drops=m.classification_failures if m else 0,
+            queue_depth=cls_q,
+            queue_max=cls_max,
+            lag_s=_lag("classification"),
+        ),
+        PipelineStageView(
+            name="track",
+            count_in=m.rules_stage_in if m else 0,
+            count_out=m.rules_stage_out if m else 0,
+            drops=m.rules_failures if m else 0,
+            queue_depth=rls_q,
+            queue_max=rls_max,
+            lag_s=_lag("rules"),
+        ),
+        PipelineStageView(
+            name="rules",
+            count_in=m.detections_emitted if m else 0,
+            count_out=m.detections_emitted if m else 0,
+            drops=0,
+        ),
+    ]
+
+    overall_lag = realtime.get("pipeline_seconds_behind_realtime")
+    audio_buffer: MultiSensorBuffer | None = getattr(state, "audio_buffer", None)
+    nodes_out = []
+    seen_ids: set = set()
+    for node_id, pnm in node_frame_metrics.items():
+        seen_ids.add(node_id)
+        overrides = settings.node_audio_overrides.get(node_id) or {}
+
+        # Resolve actual mic count from registry; fall back to override hints.
+        sensor_descriptors = []
+        if fusion_node is not None:
+            sensor_descriptors = await fusion_node.registry.sensors_for_node(node_id)
+        mic_count = max(1, len(sensor_descriptors))
+
+        labels = _mic_labels(mic_count)
+        mic_gains_db: list[float] = overrides.get("mic_gains_db") or [0.0] * mic_count
+        hp = float(overrides.get("hp_hz", settings.audio_highpass_hz))
+        lp = float(overrides.get("lp_hz", settings.audio_lowpass_hz))
+        smoothing = overrides.get("smoothing") or "off"
+
+        mics = []
+        for i in range(mic_count):
+            sensor_id = f"{node_id}:ch{i}"
+            rms_history: list[float] = []
+            if audio_buffer is not None:
+                rms_history = await audio_buffer.get_sensor_rms_history(sensor_id)
+            mics.append(MicView(
+                index=i,
+                label=labels[i] if i < len(labels) else f"CH{i}",
+                gain_db=float(mic_gains_db[i]) if i < len(mic_gains_db) else 0.0,
+                hp_hz=hp,
+                lp_hz=lp,
+                smoothing=smoothing,
+                rms_recent=rms_history,
+            ))
+
+        last_ns = pnm.get("last_frame_ns") or None
+        if last_ns == 0:
+            last_ns = None
+        nodes_out.append(PipelineNodeView(
+            node_id=node_id,
+            node_type="unknown",
+            mics=mics,
+            stages=stages,
+            frame_gaps=pnm.get("frame_gaps", 0),
+            last_frame_ns=last_ns,
+            audio_status="recent" if last_ns is not None else "unknown",
+        ))
+    for node_id in list(settings.node_audio_overrides.keys()):
+        if node_id not in seen_ids:
+            seen_ids.add(node_id)
+            overrides = settings.node_audio_overrides.get(node_id) or {}
+            hp = float(overrides.get("hp_hz", settings.audio_highpass_hz))
+            lp = float(overrides.get("lp_hz", settings.audio_lowpass_hz))
+            smoothing = overrides.get("smoothing") or "off"
+            mics = [MicView(index=0, label="CH0", hp_hz=hp, lp_hz=lp, smoothing=smoothing)]
+            nodes_out.append(PipelineNodeView(
+                node_id=node_id,
+                node_type="unknown",
+                mics=mics,
+                stages=stages,
+            ))
+    return PipelineNodesResponse(
+        active_pipeline="python",
+        nodes=nodes_out,
+        pipeline_seconds_behind_realtime=float(overall_lag) if overall_lag is not None else None,
+    )
+
+
+@app.patch("/api/v1/pipeline/nodes/{node_id}/audio")
+async def patch_node_audio(node_id: str, body: NodeAudioOverride, request: Request) -> dict:
+    state = _require_state(request)
+    settings: Settings = state.settings
+
+    # Validate mic_gains_db if provided.
+    if body.mic_gains_db is not None:
+        for db in body.mic_gains_db:
+            if db < -60.0 or db > 60.0:
+                raise HTTPException(status_code=422, detail="mic_gains_db values must be in [-60, 60] dB")
+    if body.hp_hz is not None and body.hp_hz < 0.0:
+        raise HTTPException(status_code=422, detail="hp_hz must be >= 0")
+    if body.lp_hz is not None and body.lp_hz < 0.0:
+        raise HTTPException(status_code=422, detail="lp_hz must be >= 0")
+
+    override_dict: dict = {}
+    if body.mic_gains_db is not None:
+        override_dict["mic_gains_db"] = body.mic_gains_db
+        override_dict["gain_db"] = body.mic_gains_db[0] if body.mic_gains_db else 0.0
+    if body.hp_hz is not None:
+        override_dict["hp_hz"] = body.hp_hz
+    if body.lp_hz is not None:
+        override_dict["lp_hz"] = body.lp_hz
+    if body.smoothing is not None:
+        override_dict["smoothing"] = body.smoothing
+
+    settings.node_audio_overrides[node_id] = override_dict
+
+    # Apply immediately to the Python ingest preprocessor if running.
+    fusion_node: FusionNode | None = getattr(state, "fusion_node", None)
+    rust_active = _ingest_sidecar_is_running(state) and settings.ingest_backend == "rust"
+    sidecar_forward_ok = False
+
+    if fusion_node is not None and not rust_active:
+        fusion_node.apply_node_audio_override(node_id, override_dict if override_dict else None)
+    elif rust_active:
+        # Forward to the Rust sidecar so it takes effect in the live DSP path.
+        sidecar_payload = {
+            "node_id": node_id,
+            "gain_db": override_dict.get("gain_db"),
+            "hp_hz": override_dict.get("hp_hz"),
+        }
+        # Remove None values — sidecar treats missing keys as "unchanged".
+        sidecar_payload = {k: v for k, v in sidecar_payload.items() if v is not None}
+        try:
+            sidecar_forward_ok = await asyncio.to_thread(
+                _fetch_json_from_sidecar,
+                _ingest_runtime_base_url(settings),
+                "/api/v1/dsp/config",
+                sidecar_payload,
+            ) is not None
+        except Exception:
+            sidecar_forward_ok = False
+
+    return {
+        "node_id": node_id,
+        "override": override_dict,
+        "applied_to_pipeline": (fusion_node is not None and not rust_active) or sidecar_forward_ok,
+        "rust_sidecar_active": rust_active,
+        "rust_sidecar_forwarded": sidecar_forward_ok,
+    }
 
 
 @app.get("/api/v1/debug/config")

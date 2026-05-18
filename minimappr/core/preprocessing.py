@@ -336,6 +336,14 @@ class NodePreprocessorFactory:
 
     def __init__(self, settings: Settings | LocalizationConfig) -> None:
         self._settings = settings.localization_config() if isinstance(settings, Settings) else settings
+        self._node_overrides: dict[str, dict] = {}
+
+    def set_node_override(self, node_id: str, override: dict | None) -> None:
+        """Apply or clear a runtime per-node DSP override (gain_db, hp_hz, lp_hz)."""
+        if override is None:
+            self._node_overrides.pop(node_id, None)
+        else:
+            self._node_overrides[node_id] = override
 
     def for_node(self, node: NodeSpec) -> AudioPreprocessor:
         if not self._settings.preprocess_enabled:
@@ -345,9 +353,13 @@ class NodePreprocessorFactory:
         if cfg.get("enabled") is False:
             return AudioPreprocessingChain(stages=[])
 
-        highpass = float(cfg.get("highpass_hz", self._settings.audio_highpass_hz))
-        lowpass = float(cfg.get("lowpass_hz", self._settings.audio_lowpass_hz))
-        gain = float(cfg.get("gain_multiplier", self._settings.ingest_gain_multiplier))
+        override = self._node_overrides.get(node.id, {})
+
+        highpass = float(override.get("hp_hz", cfg.get("highpass_hz", self._settings.audio_highpass_hz)))
+        lowpass = float(override.get("lp_hz", cfg.get("lowpass_hz", self._settings.audio_lowpass_hz)))
+        base_gain = float(cfg.get("gain_multiplier", self._settings.ingest_gain_multiplier))
+        gain_db = float(override.get("gain_db", 0.0))
+        gain = base_gain * (10.0 ** (gain_db / 20.0))
 
         stages: list[AudioPreprocessor] = []
         if gain != 1.0:

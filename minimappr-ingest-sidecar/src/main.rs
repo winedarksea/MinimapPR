@@ -40,7 +40,7 @@ use axum::{
 use clap::Parser;
 use derived_cache::DerivedCache;
 use dsp_events::{DspEventPublisher, ReplayableDspEvent};
-use dsp_worker::{DspWorker, DspWorkerConfig, SharedDspState};
+use dsp_worker::{DspWorker, DspWorkerConfig, NodeAudioConfig, SharedDspState};
 use env_payload::{EnvIngestPayload, EnvIngestResponse};
 use ingest_backend::{
     BodyTooLargeError, ClientDisconnectError, IngestBackend, IngestStorageMode,
@@ -526,6 +526,7 @@ fn app(state: AppState) -> Router {
         .route("/api/v1/dsp/status", get(dsp_status))
         .route("/api/v1/dsp/results", get(dsp_results))
         .route("/api/v1/dsp/stream", get(dsp_stream))
+        .route("/api/v1/dsp/config", post(post_dsp_config))
         // Capture pipeline: MVDR beamforming
         .route("/api/v1/capture/render/mvdr", post(render_mvdr_endpoint))
         // Capture pipeline: IAMF encoding
@@ -880,6 +881,57 @@ async fn dsp_status(State(state): State<AppState>) -> Response {
         total_classification_drops: st.total_classification_drops,
         dsp_worker_running: st.worker_running,
     })
+    .into_response()
+}
+
+/// Request body for POST /api/v1/dsp/config — sets per-node audio overrides.
+#[derive(Debug, Deserialize)]
+struct DspNodeConfigRequest {
+    node_id: String,
+    #[serde(flatten)]
+    config: NodeAudioConfig,
+}
+
+/// POST /api/v1/dsp/config — store per-node gain/highpass overrides applied
+/// to audio during ingest (takes effect on the next frame for that node).
+async fn post_dsp_config(
+    State(state): State<AppState>,
+    Json(body): Json<DspNodeConfigRequest>,
+) -> Response {
+    if body.node_id.is_empty() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({"error": "node_id must not be empty"})),
+        )
+            .into_response();
+    }
+    if let Some(db) = body.config.gain_db {
+        if !(-60.0..=60.0).contains(&db) {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({"error": "gain_db must be in [-60, 60]"})),
+            )
+                .into_response();
+        }
+    }
+    if let Some(hz) = body.config.hp_hz {
+        if hz < 0.0 {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({"error": "hp_hz must be >= 0"})),
+            )
+                .into_response();
+        }
+    }
+    {
+        let mut st = state.dsp_state.write().await;
+        st.node_audio_overrides
+            .insert(body.node_id.clone(), body.config.clone());
+    }
+    Json(serde_json::json!({
+        "node_id": body.node_id,
+        "applied": true,
+    }))
     .into_response()
 }
 

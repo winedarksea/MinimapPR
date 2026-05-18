@@ -1,5 +1,6 @@
 pub mod config;
 pub mod logs;
+pub mod pipeline;
 pub mod server;
 
 use leptos::prelude::*;
@@ -11,9 +12,10 @@ pub fn SettingsLayout() -> impl IntoView {
     view! {
         <div class="app-page">
             <nav class="subnav" aria-label="Settings sections">
-                <SubNavLink href="/settings/config" label="Config" />
-                <SubNavLink href="/settings/server" label="Server" />
-                <SubNavLink href="/settings/logs"   label="Logs" />
+                <SubNavLink href="/settings/config"   label="Config" />
+                <SubNavLink href="/settings/server"   label="Server" />
+                <SubNavLink href="/settings/pipeline" label="Pipeline" />
+                <SubNavLink href="/settings/logs"     label="Logs" />
             </nav>
             <div class="page-content">
                 <Outlet />

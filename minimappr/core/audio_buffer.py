@@ -786,6 +786,26 @@ class MultiSensorBuffer:
             aligned = {sensor_id: window[-common_samples:] for sensor_id, window in recent.items()}
             return aligned, dominant_sample_rate_hz, latest_end_ns
 
+    async def get_sensor_rms_history(self, sensor_id: str, n_buckets: int = 20) -> list[float]:
+        """Return a list of n_buckets RMS values spanning the stored sample window for one sensor."""
+        async with self._lock:
+            buffer = self._buffers.get(sensor_id)
+            if buffer is None or buffer.samples.size < n_buckets:
+                return []
+            samples = buffer.samples
+            n = samples.size
+            chunk_size = max(1, n // n_buckets)
+            result: list[float] = []
+            for i in range(n_buckets):
+                start = i * chunk_size
+                end = start + chunk_size if i < n_buckets - 1 else n
+                chunk = samples[start:end]
+                if chunk.size > 0:
+                    result.append(float(np.sqrt(np.mean(np.square(chunk)) + 1e-12)))
+                else:
+                    result.append(0.0)
+            return result
+
     async def summarize_sensors(self, sensor_ids: list[str], now_ns: int) -> dict[str, float | int | None]:
         async with self._lock:
             active_sensor_count = 0

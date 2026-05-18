@@ -217,3 +217,65 @@ def test_get_config_exposes_canonical_cleanup_keys(monkeypatch, tmp_path: Path) 
     assert body["localization_max_tau_seconds"] == body["localization_max_tau_s"]
     assert body["drop_on_backpressure"] == body["fusion_drop_on_backpressure"]
     assert body["classifier_stage_timeout_seconds"] == body["classification_stage_timeout_seconds"]
+
+
+# ---------------------------------------------------------------------------
+# Per-node audio overrides — round-trip via /api/v1/pipeline/nodes/{id}/audio
+# ---------------------------------------------------------------------------
+
+
+def test_node_audio_override_does_not_affect_global_config(monkeypatch, tmp_path: Path) -> None:
+    """Patching a node's audio override must not alter the global config keys."""
+    _configure_env(monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        before = client.get("/api/v1/config").json()
+        client.patch(
+            "/api/v1/pipeline/nodes/node-a/audio",
+            json={"hp_hz": 300.0, "lp_hz": 5000.0, "mic_gains_db": [6.0]},
+        )
+        after = client.get("/api/v1/config").json()
+
+    assert abs(before["audio_highpass_hz"] - after["audio_highpass_hz"]) < 1e-9
+    assert abs(before["audio_lowpass_hz"] - after["audio_lowpass_hz"]) < 1e-9
+
+
+def test_global_audio_config_patch_does_not_clear_node_overrides(monkeypatch, tmp_path: Path) -> None:
+    """Patching global audio settings must not wipe existing per-node overrides."""
+    _configure_env(monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        client.patch("/api/v1/pipeline/nodes/node-b/audio", json={"hp_hz": 200.0})
+        client.patch("/api/v1/config", json={"audio_highpass_hz": 75.0})
+        pipeline = client.get("/api/v1/pipeline/nodes").json()
+
+    node_ids = [n["node_id"] for n in pipeline["nodes"]]
+    assert "node-b" in node_ids, "Per-node override must survive a global config PATCH"
+
+
+def test_node_override_hp_reflected_in_pipeline_view_independent_of_global(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Per-node HP override is returned in the pipeline view even when global HP differs."""
+    _configure_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("MINIMAPPR_AUDIO_HIGHPASS_HZ", "50")
+    with TestClient(app) as client:
+        client.patch("/api/v1/pipeline/nodes/node-c/audio", json={"hp_hz": 400.0})
+        pipeline = client.get("/api/v1/pipeline/nodes").json()
+
+    nodes_by_id = {n["node_id"]: n for n in pipeline["nodes"]}
+    node_c = nodes_by_id.get("node-c")
+    assert node_c is not None
+    assert len(node_c["mics"]) >= 1
+    assert abs(node_c["mics"][0]["hp_hz"] - 400.0) < 1e-6
+
+
+def test_multiple_node_overrides_are_independent(monkeypatch, tmp_path: Path) -> None:
+    """Separate nodes each get their own override values."""
+    _configure_env(monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        client.patch("/api/v1/pipeline/nodes/node-x/audio", json={"hp_hz": 100.0})
+        client.patch("/api/v1/pipeline/nodes/node-y/audio", json={"hp_hz": 800.0})
+        pipeline = client.get("/api/v1/pipeline/nodes").json()
+
+    nodes_by_id = {n["node_id"]: n for n in pipeline["nodes"]}
+    assert abs(nodes_by_id["node-x"]["mics"][0]["hp_hz"] - 100.0) < 1e-6
+    assert abs(nodes_by_id["node-y"]["mics"][0]["hp_hz"] - 800.0) < 1e-6

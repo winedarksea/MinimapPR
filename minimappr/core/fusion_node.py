@@ -287,6 +287,7 @@ class FusionNode:
 
         self._candidate_counter = itertools.count(1)
         self._taxonomy_refresh_ns = 0
+        self._per_node_frame_metrics: dict[str, dict[str, int]] = {}
 
         self._localization_queue: asyncio.Queue[EventCandidate | None] = asyncio.Queue(
             maxsize=max(1, self.fusion_config.localization_queue_size)
@@ -586,6 +587,14 @@ class FusionNode:
         if result.sequence_gap_count > 0:
             self._metrics.frame_sequence_gaps += result.sequence_gap_count
 
+        pnm = self._per_node_frame_metrics.setdefault(
+            request.node.id, {"frames_accepted": 0, "frame_gaps": 0, "last_frame_ns": 0}
+        )
+        pnm["frames_accepted"] += 1
+        pnm["last_frame_ns"] = max(pnm["last_frame_ns"], request.frame.start_time_ns)
+        if result.sequence_gap_count > 0:
+            pnm["frame_gaps"] += result.sequence_gap_count
+
         # Update queue depth on the response before returning.
         result.response.queue_depth = self._localization_queue.qsize()
 
@@ -641,6 +650,14 @@ class FusionNode:
             "offline_replay_mode": self.fusion_config.offline_replay_mode,
             "drop_on_backpressure": self.fusion_config.drop_on_backpressure,
         }
+
+    def node_frame_metrics(self) -> dict[str, dict[str, int]]:
+        """Return a snapshot of per-node frame ingest counts."""
+        return dict(self._per_node_frame_metrics)
+
+    def apply_node_audio_override(self, node_id: str, override: dict | None) -> None:
+        """Apply or clear a runtime per-node DSP override on the preprocessor factory."""
+        self._ingest_processor._preprocessor_factory.set_node_override(node_id, override)
 
     async def housekeeping_tick(self, now_ns: int) -> None:
         await self.zone_matcher.refresh_if_due(now_ns=now_ns)
