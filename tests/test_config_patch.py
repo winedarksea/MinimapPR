@@ -207,3 +207,13 @@ def test_patch_bool_non_bool_rejected(monkeypatch, tmp_path: Path) -> None:
     with TestClient(app) as client:
         resp = client.patch("/api/v1/config", json={"preprocess_enabled": "yes"})
         assert resp.status_code == 422
+
+
+def test_get_config_exposes_canonical_cleanup_keys(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        body = client.get("/api/v1/config").json()
+
+    assert body["localization_max_tau_seconds"] == body["localization_max_tau_s"]
+    assert body["drop_on_backpressure"] == body["fusion_drop_on_backpressure"]
+    assert body["classifier_stage_timeout_seconds"] == body["classification_stage_timeout_seconds"]

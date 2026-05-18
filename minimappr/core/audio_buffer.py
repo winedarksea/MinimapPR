@@ -27,6 +27,19 @@ class AudioCoverageStats:
     warning: bool
     degraded: bool
 
+    def to_json(self) -> dict[str, int | float | bool]:
+        return {
+            "sample_count": self.sample_count,
+            "covered_samples": self.covered_samples,
+            "missing_samples": self.missing_samples,
+            "coverage_ratio": self.coverage_ratio,
+            "missing_ratio": self.missing_ratio,
+            "max_gap_samples": self.max_gap_samples,
+            "max_gap_seconds": self.max_gap_seconds,
+            "warning": self.warning,
+            "degraded": self.degraded,
+        }
+
     def to_feature_summary(self, *, source_window_type: str) -> dict[str, float | int | bool | str]:
         return {
             "source_window_type": source_window_type,

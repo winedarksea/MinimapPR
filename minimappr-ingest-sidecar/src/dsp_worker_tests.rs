@@ -220,6 +220,8 @@ async fn worker_publishes_localization_and_classifier_render_contract() {
         .exists());
 
     let state = state.read().await;
+    assert_eq!(state.total_localization_attempts, 1);
+    assert_eq!(state.total_classification_attempts, 1);
     assert_eq!(state.total_tdoa_results, 1);
     assert_eq!(state.total_localization_results, 1);
     assert_eq!(state.total_classifier_renders, 1);
@@ -729,6 +731,8 @@ async fn worker_publishes_omni_render_for_non_tetrahedral_channel_count() {
     );
 
     let state = state.read().await;
+    assert_eq!(state.total_localization_attempts, 0);
+    assert_eq!(state.total_classification_attempts, 1);
     assert_eq!(state.total_localization_results, 0);
     assert_eq!(state.total_classifier_renders, 1);
 }

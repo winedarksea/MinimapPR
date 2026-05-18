@@ -26,6 +26,14 @@ def _env_float(key: str, default: float) -> float:
     return float(raw) if raw is not None else default
 
 
+def _env_float_alias(keys: tuple[str, ...], default: float) -> float:
+    for key in keys:
+        raw = os.getenv(key)
+        if raw is not None:
+            return float(raw)
+    return default
+
+
 def _env_int(key: str, default: int) -> int:
     raw = os.getenv(key)
     return int(raw) if raw is not None else default
@@ -71,7 +79,7 @@ class LocalizationConfig:
     ingest_gain_multiplier: float
     min_sensors_for_3d: int
     min_sensors_for_2d: int
-    localization_max_tau_s: float
+    localization_max_tau_seconds: float
     localization_algorithm: str
     localization_strategy: str
     localization_srp_grid_resolution_m: float
@@ -98,6 +106,14 @@ class LocalizationConfig:
     cluster_aware_localization: bool = False
     wavelength_gating_enabled: bool = True
     wavelength_penalty_floor: float = 0.25
+
+    @property
+    def localization_max_tau_s(self) -> float:
+        return self.localization_max_tau_seconds
+
+    @localization_max_tau_s.setter
+    def localization_max_tau_s(self, value: float) -> None:
+        self.localization_max_tau_seconds = value
 
 
 @dataclass(slots=True)
@@ -148,6 +164,7 @@ class ClassifierConfig:
 class StorageConfig:
     db_path: Path
     snippet_dir: Path
+    # Precedence: retention_policy_path overrides this default per label.
     snippet_retention_seconds: int
     retention_policy_path: Path
     retention_ephemeral_seconds: int
@@ -298,6 +315,7 @@ class Settings:
     ingest_backend: str = "python"
     db_path: Path = Path("data/minimappr.db")
     snippet_dir: Path = Path("data/snippets")
+    # Precedence: retention_policy_path overrides this default per label.
     snippet_retention_seconds: int = 3600
     ingest_spool_dir: Path = Path("data/spool")
     ingest_spool_ready_ttl_seconds: float = 60.0
@@ -336,7 +354,7 @@ class Settings:
     audio_lowpass_hz: float = 0.0
     min_sensors_for_3d: int = 4
     min_sensors_for_2d: int = 3
-    localization_max_tau_s: float = 0.02
+    localization_max_tau_seconds: float = 0.02
     localization_algorithm: str = "gcc_phat"
     localization_strategy: str = "fixed"
     localization_band_min_hz: float = 0.0
@@ -359,7 +377,7 @@ class Settings:
     beamformed_classification_confidence_margin: float = 0.0
     mvdr_diagonal_loading: float = 1e-3
     classifier_diagonal_loading_scale: float = 10.0
-    classification_stage_timeout_seconds: float = 30.0
+    classifier_stage_timeout_seconds: float = 30.0
     pre_classification_highpass_hz: float = 0.0
     pre_classification_lowpass_hz: float = 0.0
     gcc_phat_interp_factor: int = 4
@@ -417,16 +435,16 @@ class Settings:
     track_reap_multiplier: float = 5.0
 
     fusion_worker_count: int = 1
-    fusion_event_queue_size: int = 256
-    fusion_localization_queue_size: int = 256
-    fusion_classification_queue_size: int = 256
-    fusion_rules_queue_size: int = 256
+    fusion_event_queue_size: int = 512
+    fusion_localization_queue_size: int = 1024
+    fusion_classification_queue_size: int = 1024
+    fusion_rules_queue_size: int = 512
     birdnet_chunked_dispatch_enabled: bool = False
     birdnet_chunk_overlap_seconds: float = 2.0
     birdnet_chunk_max_retries_per_chunk: int = 1
     birdnet_chunk_min_retry_progress_seconds: float = 8.0
     birdnet_chunk_retry_on_classifier_error: bool = False
-    fusion_drop_on_backpressure: bool = True
+    drop_on_backpressure: bool = True
     fusion_offline_replay_mode: bool = False
     sensor_energy_threshold_multiplier: float = 0.45
     fallback_localization_confidence: float = 0.25
@@ -554,8 +572,8 @@ class Settings:
         if not math.isfinite(self.ingest_gain_multiplier) or self.ingest_gain_multiplier <= 0.0:
             raise ValueError("MINIMAPPR_INGEST_GAIN_MULTIPLIER must be finite and > 0")
 
-        if self.localization_max_tau_s <= 0.0:
-            raise ValueError("MINIMAPPR_LOCALIZATION_MAX_TAU_S must be > 0")
+        if self.localization_max_tau_seconds <= 0.0:
+            raise ValueError("MINIMAPPR_LOCALIZATION_MAX_TAU_SECONDS must be > 0")
         if self.localization_window_seconds <= 0.0:
             raise ValueError("MINIMAPPR_LOCALIZATION_WINDOW_SECONDS must be > 0")
         if self.classification_window_seconds <= 0.0:
@@ -608,8 +626,16 @@ class Settings:
             )
         if self.classifier_diagonal_loading_scale < 1.0:
             raise ValueError("MINIMAPPR_CLASSIFIER_DIAGONAL_LOADING_SCALE must be >= 1.0")
-        if self.classification_stage_timeout_seconds <= 0.0:
-            raise ValueError("MINIMAPPR_CLASSIFICATION_STAGE_TIMEOUT_SECONDS must be > 0")
+        if self.classifier_stage_timeout_seconds <= 0.0:
+            raise ValueError("MINIMAPPR_CLASSIFIER_STAGE_TIMEOUT_SECONDS must be > 0")
+        for field_name in (
+            "fusion_event_queue_size",
+            "fusion_localization_queue_size",
+            "fusion_classification_queue_size",
+            "fusion_rules_queue_size",
+        ):
+            if getattr(self, field_name) < 1:
+                raise ValueError(f"{field_name} must be >= 1")
         if self.pre_classification_highpass_hz < 0.0:
             raise ValueError("MINIMAPPR_PRE_CLASSIFICATION_HIGHPASS_HZ must be >= 0")
         if self.pre_classification_lowpass_hz < 0.0:
@@ -852,7 +878,10 @@ class Settings:
             audio_lowpass_hz=_env_float("MINIMAPPR_AUDIO_LOWPASS_HZ", 0.0),
             min_sensors_for_3d=_env_int("MINIMAPPR_MIN_SENSORS_FOR_3D", 4),
             min_sensors_for_2d=_env_int("MINIMAPPR_MIN_SENSORS_FOR_2D", 3),
-            localization_max_tau_s=_env_float("MINIMAPPR_LOCALIZATION_MAX_TAU_S", 0.02),
+            localization_max_tau_seconds=_env_float_alias(
+                ("MINIMAPPR_LOCALIZATION_MAX_TAU_SECONDS", "MINIMAPPR_LOCALIZATION_MAX_TAU_S"),
+                0.02,
+            ),
             localization_algorithm=_env_str("MINIMAPPR_LOCALIZATION_ALGORITHM", "gcc_phat"),
             localization_strategy=_env_str("MINIMAPPR_LOCALIZATION_STRATEGY", "geometry_aware"),
             localization_band_min_hz=_env_float("MINIMAPPR_LOCALIZATION_BAND_MIN_HZ", 0.0),
@@ -886,7 +915,13 @@ class Settings:
             ),
             mvdr_diagonal_loading=_env_float("MINIMAPPR_MVDR_DIAGONAL_LOADING", 1e-3),
             classifier_diagonal_loading_scale=_env_float("MINIMAPPR_CLASSIFIER_DIAGONAL_LOADING_SCALE", 10.0),
-            classification_stage_timeout_seconds=_env_float("MINIMAPPR_CLASSIFICATION_STAGE_TIMEOUT_SECONDS", 30.0),
+            classifier_stage_timeout_seconds=_env_float_alias(
+                (
+                    "MINIMAPPR_CLASSIFIER_STAGE_TIMEOUT_SECONDS",
+                    "MINIMAPPR_CLASSIFICATION_STAGE_TIMEOUT_SECONDS",
+                ),
+                30.0,
+            ),
             pre_classification_highpass_hz=_env_float("MINIMAPPR_PRE_CLASSIFICATION_HIGHPASS_HZ", 0.0),
             pre_classification_lowpass_hz=_env_float("MINIMAPPR_PRE_CLASSIFICATION_LOWPASS_HZ", 0.0),
             gcc_phat_interp_factor=_env_int("MINIMAPPR_GCC_PHAT_INTERP_FACTOR", 4),
@@ -952,10 +987,10 @@ class Settings:
             track_drop_multiplier=_env_float("MINIMAPPR_TRACK_DROP_MULTIPLIER", 3.0),
             track_reap_multiplier=_env_float("MINIMAPPR_TRACK_REAP_MULTIPLIER", 5.0),
             fusion_worker_count=_env_int("MINIMAPPR_FUSION_WORKER_COUNT", 1),
-            fusion_event_queue_size=_env_int("MINIMAPPR_FUSION_EVENT_QUEUE_SIZE", 256),
-            fusion_localization_queue_size=_env_int("MINIMAPPR_FUSION_LOCALIZATION_QUEUE_SIZE", 256),
-            fusion_classification_queue_size=_env_int("MINIMAPPR_FUSION_CLASSIFICATION_QUEUE_SIZE", 256),
-            fusion_rules_queue_size=_env_int("MINIMAPPR_FUSION_RULES_QUEUE_SIZE", 256),
+            fusion_event_queue_size=_env_int("MINIMAPPR_FUSION_EVENT_QUEUE_SIZE", 512),
+            fusion_localization_queue_size=_env_int("MINIMAPPR_FUSION_LOCALIZATION_QUEUE_SIZE", 1024),
+            fusion_classification_queue_size=_env_int("MINIMAPPR_FUSION_CLASSIFICATION_QUEUE_SIZE", 1024),
+            fusion_rules_queue_size=_env_int("MINIMAPPR_FUSION_RULES_QUEUE_SIZE", 512),
             birdnet_chunked_dispatch_enabled=_env_bool("MINIMAPPR_BIRDNET_CHUNKED_DISPATCH_ENABLED", False),
             birdnet_chunk_overlap_seconds=_env_float("MINIMAPPR_BIRDNET_CHUNK_OVERLAP_SECONDS", 2.0),
             birdnet_chunk_max_retries_per_chunk=_env_int("MINIMAPPR_BIRDNET_CHUNK_MAX_RETRIES_PER_CHUNK", 1),
@@ -968,7 +1003,7 @@ class Settings:
                 False,
             ),
             cluster_aware_localization=_env_bool("MINIMAPPR_CLUSTER_AWARE_LOCALIZATION", False),
-            fusion_drop_on_backpressure=_env_bool("MINIMAPPR_FUSION_DROP_ON_BACKPRESSURE", True),
+            drop_on_backpressure=_env_bool("MINIMAPPR_FUSION_DROP_ON_BACKPRESSURE", True),
             fusion_offline_replay_mode=_env_bool("MINIMAPPR_FUSION_OFFLINE_REPLAY_MODE", False),
             sensor_energy_threshold_multiplier=_env_float("MINIMAPPR_SENSOR_ENERGY_THRESHOLD_MULTIPLIER", 0.45),
             fallback_localization_confidence=_env_float("MINIMAPPR_FALLBACK_LOCALIZATION_CONFIDENCE", 0.25),
@@ -1027,7 +1062,7 @@ class Settings:
             ingest_gain_multiplier=self.ingest_gain_multiplier,
             min_sensors_for_3d=self.min_sensors_for_3d,
             min_sensors_for_2d=self.min_sensors_for_2d,
-            localization_max_tau_s=self.localization_max_tau_s,
+            localization_max_tau_seconds=self.localization_max_tau_seconds,
             localization_algorithm=self.localization_algorithm,
             localization_strategy=self.localization_strategy,
             localization_band_min_hz=self.localization_band_min_hz,
@@ -1077,7 +1112,7 @@ class Settings:
     def classifier_config(self) -> ClassifierConfig:
         return ClassifierConfig(
             backend=self.classifier_backend,
-            stage_timeout_seconds=self.classification_stage_timeout_seconds,
+            stage_timeout_seconds=self.classifier_stage_timeout_seconds,
             yamnet_min_confidence=self.yamnet_min_confidence,
             yamnet_input_target_rms=self.yamnet_input_target_rms,
             yamnet_max_input_gain=self.yamnet_max_input_gain,
@@ -1131,7 +1166,7 @@ class Settings:
             birdnet_chunk_max_retries_per_chunk=self.birdnet_chunk_max_retries_per_chunk,
             birdnet_chunk_min_retry_progress_seconds=self.birdnet_chunk_min_retry_progress_seconds,
             birdnet_chunk_retry_on_classifier_error=self.birdnet_chunk_retry_on_classifier_error,
-            drop_on_backpressure=self.fusion_drop_on_backpressure,
+            drop_on_backpressure=self.drop_on_backpressure,
             offline_replay_mode=self.fusion_offline_replay_mode,
             sensor_energy_threshold_multiplier=self.sensor_energy_threshold_multiplier,
             fallback_localization_confidence=self.fallback_localization_confidence,
@@ -1140,6 +1175,30 @@ class Settings:
             retention_permanent_labels=self.retention_permanent_labels,
             retention_long_security_confidence=self.retention_long_security_confidence,
         )
+
+    @property
+    def localization_max_tau_s(self) -> float:
+        return self.localization_max_tau_seconds
+
+    @localization_max_tau_s.setter
+    def localization_max_tau_s(self, value: float) -> None:
+        self.localization_max_tau_seconds = value
+
+    @property
+    def classification_stage_timeout_seconds(self) -> float:
+        return self.classifier_stage_timeout_seconds
+
+    @classification_stage_timeout_seconds.setter
+    def classification_stage_timeout_seconds(self, value: float) -> None:
+        self.classifier_stage_timeout_seconds = value
+
+    @property
+    def fusion_drop_on_backpressure(self) -> bool:
+        return self.drop_on_backpressure
+
+    @fusion_drop_on_backpressure.setter
+    def fusion_drop_on_backpressure(self, value: bool) -> None:
+        self.drop_on_backpressure = value
 
     def rules_config(self) -> RulesConfig:
         return RulesConfig(

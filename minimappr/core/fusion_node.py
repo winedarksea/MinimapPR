@@ -306,6 +306,8 @@ class FusionNode:
             ("localization", "classification", "rules")
         )
         self._classification_chunking_policy = self._build_classification_chunking_policy()
+        self._backpressure_warning_last_logged_s: dict[str, float] = {}
+        self._backpressure_warning_interval_seconds = 5.0
         self._last_error: str | None = None
         self._started = False
         self._stopping = False
@@ -1583,6 +1585,20 @@ class FusionNode:
             return True
         except asyncio.QueueFull:
             self._metrics.stage_drops_backpressure += 1
+            now_s = time.monotonic()
+            last_logged_s = self._backpressure_warning_last_logged_s.get(tracker_stage_name, 0.0)
+            if now_s - last_logged_s >= self._backpressure_warning_interval_seconds:
+                self._backpressure_warning_last_logged_s[tracker_stage_name] = now_s
+                logger.warning(
+                    "Dropping pipeline item due to fusion backpressure",
+                    extra={
+                        "stage_name": tracker_stage_name,
+                        "item_id": tracker_item_id,
+                        "event_time_ns": tracker_event_time_ns,
+                        "queue_size": queue.qsize(),
+                        "queue_maxsize": queue.maxsize,
+                    },
+                )
             return False
 
     def _queue_stage_name(self, queue: asyncio.Queue) -> str:

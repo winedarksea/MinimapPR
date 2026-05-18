@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from minimappr.core.audio_buffer import MultiSensorBuffer, SensorStreamBuffer
+from minimappr.core.audio_buffer import AudioCoverageStats, MultiSensorBuffer, SensorStreamBuffer
 
 
 @pytest.mark.asyncio
@@ -160,6 +160,32 @@ def test_sensor_stream_buffer_marks_explicit_sample_index_gaps_as_missing() -> N
     assert stats.max_gap_samples == 4
     assert stats.warning is True
     assert stats.degraded is True
+
+
+def test_audio_coverage_stats_to_json_matches_manifest_shape() -> None:
+    stats = AudioCoverageStats(
+        sample_count=1280,
+        covered_samples=1184,
+        missing_samples=96,
+        coverage_ratio=0.925,
+        missing_ratio=0.075,
+        max_gap_samples=64,
+        max_gap_seconds=0.004,
+        warning=True,
+        degraded=True,
+    )
+
+    assert stats.to_json() == {
+        "sample_count": 1280,
+        "covered_samples": 1184,
+        "missing_samples": 96,
+        "coverage_ratio": 0.925,
+        "missing_ratio": 0.075,
+        "max_gap_samples": 64,
+        "max_gap_seconds": 0.004,
+        "warning": True,
+        "degraded": True,
+    }
 
 
 def test_sensor_stream_buffer_prune_uses_exact_sample_time_at_48khz() -> None:

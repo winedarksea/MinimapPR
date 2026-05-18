@@ -160,7 +160,7 @@ async def test_fusion_stage_timeout_drops_stalled_candidate_and_recovers(tmp_pat
         classification_window_seconds=0.0,
         max_sensor_buffer_seconds=2.0,
         fusion_worker_count=1,
-        classification_stage_timeout_seconds=0.01,
+        classifier_stage_timeout_seconds=0.01,
     )
     settings.db_path.parent.mkdir(parents=True, exist_ok=True)
     settings.snippet_dir.mkdir(parents=True, exist_ok=True)

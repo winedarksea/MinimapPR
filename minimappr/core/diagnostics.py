@@ -53,6 +53,7 @@ class DiagnosticsService:
                     "window_seconds": self._settings.localization_window_seconds,
                     "classification_window_seconds": self._settings.classification_window_seconds,
                     "reporting_window_seconds": self._settings.reporting_window_seconds,
+                    "max_tau_seconds": self._settings.localization_max_tau_seconds,
                     "max_tau_s": self._settings.localization_max_tau_s,
                     "skip_localization_for_classification": (
                         self._settings.skip_localization_for_classification
@@ -83,7 +84,7 @@ class DiagnosticsService:
                 "localization_queue_size": self._settings.fusion_localization_queue_size,
                 "classification_queue_size": self._settings.fusion_classification_queue_size,
                 "rules_queue_size": self._settings.fusion_rules_queue_size,
-                "drop_on_backpressure": self._settings.fusion_drop_on_backpressure,
+                "drop_on_backpressure": self._settings.drop_on_backpressure,
                 "offline_replay_mode": self._settings.fusion_offline_replay_mode,
             },
             "retention": {

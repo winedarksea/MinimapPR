@@ -382,19 +382,19 @@ class LocalizationDispatcher:
 def build_localizer_from_settings(settings: Settings | LocalizationConfig) -> Localizer:
     cfg = settings.localization_config() if isinstance(settings, Settings) else settings
     gcc = LocalizationEngine(
-        max_tau_s=cfg.localization_max_tau_s,
+        max_tau_s=cfg.localization_max_tau_seconds,
         interp_factor=cfg.gcc_phat_interp_factor,
     )
     algorithms: dict[str, Localizer] = {
         "gcc_phat": gcc,
         "srp_phat": SRPPhatLocalizer(
-            max_tau_s=cfg.localization_max_tau_s,
+            max_tau_s=cfg.localization_max_tau_seconds,
             grid_resolution_m=cfg.localization_srp_grid_resolution_m,
             search_padding_m=cfg.localization_search_padding_m,
             interp=cfg.gcc_phat_interp_factor,
         ),
         "music": MusicLocalizer(
-            max_tau_s=cfg.localization_max_tau_s,
+            max_tau_s=cfg.localization_max_tau_seconds,
             azimuth_step_deg=cfg.localization_music_azimuth_step_deg,
             elevation_step_deg=cfg.localization_music_elevation_step_deg,
             freq_min_hz=cfg.localization_subspace_freq_min_hz,
@@ -402,7 +402,7 @@ def build_localizer_from_settings(settings: Settings | LocalizationConfig) -> Lo
             interp=cfg.gcc_phat_interp_factor,
         ),
         "esprit": EspritLocalizer(
-            max_tau_s=cfg.localization_max_tau_s,
+            max_tau_s=cfg.localization_max_tau_seconds,
             freq_min_hz=cfg.localization_subspace_freq_min_hz,
             freq_max_hz=cfg.localization_subspace_freq_max_hz,
             interp=cfg.gcc_phat_interp_factor,

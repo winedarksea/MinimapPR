@@ -419,7 +419,7 @@ async def test_fusion_backpressure_drops_when_queue_full(tmp_path: Path) -> None
         fusion_localization_queue_size=1,
         fusion_classification_queue_size=1,
         fusion_rules_queue_size=1,
-        fusion_drop_on_backpressure=True,
+        drop_on_backpressure=True,
     )
     settings.db_path.parent.mkdir(parents=True, exist_ok=True)
     settings.snippet_dir.mkdir(parents=True, exist_ok=True)

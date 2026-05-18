@@ -123,6 +123,8 @@ pub struct DspWorkerState {
     pub worker_running: bool,
     pub last_heartbeat_ns: Option<u128>,
     pub last_processed_ns: Option<u128>,
+    pub total_localization_attempts: u64,
+    pub total_classification_attempts: u64,
     pub total_tdoa_results: u64,
     pub total_localization_results: u64,
     pub total_classifier_renders: u64,
@@ -393,6 +395,7 @@ impl DspWorker {
 
         for manifest in pending {
             if let Some(payload) = self.ingest_one(manifest, pending_backlog_depth).await {
+                self.note_stage_attempts(&payload).await;
                 let h = handle.clone();
                 // Dispatch to the dedicated DSP rayon pool. run_compute is sync:
                 // it runs CPU math on the Rayon thread, then calls handle.spawn(run_io(...))
@@ -851,6 +854,7 @@ impl DspWorker {
         pending_backlog_depth: usize,
     ) {
         if let Some(payload) = self.ingest_one(manifest, pending_backlog_depth).await {
+            self.note_stage_attempts(&payload).await;
             let result = crate::actors::dsp_compute::run_math(payload);
             crate::actors::dsp_compute::run_io(result).await;
         }
@@ -942,6 +946,19 @@ impl DspWorker {
 
     async fn note_failure(&self) {
         self.note_failures(1).await;
+    }
+
+    async fn note_stage_attempts(&self, payload: &ComputePayload) {
+        if !payload.run_srp && !payload.run_classifier_render {
+            return;
+        }
+        let mut st = self.state.write().await;
+        if payload.run_srp {
+            st.total_localization_attempts += 1;
+        }
+        if payload.run_classifier_render {
+            st.total_classification_attempts += 1;
+        }
     }
 
     fn should_run_localization(
