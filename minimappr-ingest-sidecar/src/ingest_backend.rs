@@ -239,8 +239,6 @@ enum BackendInner {
 #[derive(Debug)]
 struct SegmentJournalBackend {
     journal_root: PathBuf,
-    streams_dir: PathBuf,
-    max_segment_bytes: u64,
     runtime_config: JournalRuntimeConfig,
     storage_class_report: StorageClassReport,
     lease_store: LeaseStore,
@@ -252,7 +250,6 @@ struct SegmentJournalBackend {
 #[derive(Debug)]
 struct SegmentJournalState {
     journal_epoch: u64,
-    total_journal_bytes: u64,
     streams: HashMap<String, StreamJournalState>,
 }
 
@@ -519,23 +516,17 @@ impl IngestBackend {
         }
     }
 
-    /// Returns the journal root path if the backend is in journal mode.
-    pub fn journal_root(&self) -> Option<&std::path::Path> {
-        match self.inner.as_ref() {
-            BackendInner::Journal(b) => Some(&b.journal_root),
-        }
-    }
 }
 
 impl SegmentJournalBackend {
     async fn open(
         base_dir: PathBuf,
-        max_segment_bytes: u64,
+        _max_segment_bytes: u64,
         runtime_config: JournalRuntimeConfig,
     ) -> BoxedResult<Self> {
         let journal_root = base_dir.join("journal");
         let streams_dir = journal_root.join("streams");
-        let (storage_class_report, journal_epoch, streams, total_journal_bytes) =
+        let (storage_class_report, journal_epoch, streams, _total_journal_bytes) =
             if runtime_config.memory_only_live_path {
                 (
                     StorageClassReport {
@@ -579,8 +570,6 @@ impl SegmentJournalBackend {
         .await?;
         Ok(Self {
             journal_root,
-            streams_dir,
-            max_segment_bytes,
             runtime_config,
             storage_class_report,
             lease_store,
@@ -588,7 +577,6 @@ impl SegmentJournalBackend {
             manifest_store,
             state: Mutex::new(SegmentJournalState {
                 journal_epoch,
-                total_journal_bytes,
                 streams,
             }),
         })
@@ -1079,13 +1067,6 @@ fn temporary_path_for(path: &Path) -> BoxedResult<PathBuf> {
     Ok(path.with_file_name(format!(".{file_name}.tmp")))
 }
 
-async fn fsync_dir(path: &Path) -> std::io::Result<()> {
-    let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || std::fs::File::open(path).and_then(|file| file.sync_all()))
-        .await
-        .map_err(std::io::Error::other)?
-}
-
 fn now_ns() -> Result<u128, std::time::SystemTimeError> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos())
 }
@@ -1495,7 +1476,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].promotion_ready, true);
+        assert!(pending[0].promotion_ready);
     }
 
     /// mark_consumed renames the manifest file so it no longer appears in

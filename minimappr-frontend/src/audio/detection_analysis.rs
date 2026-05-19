@@ -121,7 +121,7 @@ fn AudioAnalysisHeader(
                     </A>
                 }.into_any()
             } else {
-                view! { <></> }.into_any()
+                ().into_any()
             }}
         </div>
     }

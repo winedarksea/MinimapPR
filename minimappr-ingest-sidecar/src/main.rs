@@ -417,7 +417,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 classifier_render_min_interval_seconds,
                 max_buffer_seconds: max_sensor_buffer_seconds,
                 pending_manifest_batch_size: args.dsp_pending_batch_size,
-                birdnet_hybrid_render_enabled,
                 skip_stale_manifests_for_live_buffer: args.dsp_skip_stale_manifests,
                 consumed_manifest_retention_max_files: args
                     .dsp_consumed_manifest_retention_max_files,
@@ -1017,7 +1016,7 @@ async fn dsp_stream(
                         stream_state.close_after_yield = true;
                         let gap_event = replay_gap_sse_event(
                             Some(stream_state.last_delivered_event_id),
-                            Some(skipped_messages as u64),
+                            Some(skipped_messages),
                         );
                         return Some((Ok(gap_event), stream_state));
                     }

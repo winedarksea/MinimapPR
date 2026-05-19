@@ -32,19 +32,32 @@ pub struct RenderMeta {
     pub source_channel_count: usize,
 }
 
+pub struct RenderComputeRequest<'a> {
+    pub config: &'a DspWorkerConfig,
+    pub sound_speed_mps: f32,
+    pub channels: &'a [Vec<f32>],
+    pub mic_positions_m: &'a [[f32; 3]],
+    pub sample_rate_hz: u32,
+    pub localization: Option<&'a SrpPhatLocalization>,
+    pub fallback_reason: Option<String>,
+    pub render_start_ns: Option<u128>,
+    pub render_end_ns: Option<u128>,
+}
+
 /// Compute PCM render bytes and metadata synchronously.
 /// Safe to call directly from a Rayon thread — no async I/O, no spawn_blocking.
-pub fn compute_render_bytes(
-    config: &DspWorkerConfig,
-    sound_speed_mps: f32,
-    channels: &[Vec<f32>],
-    mic_positions_m: &[[f32; 3]],
-    sample_rate_hz: u32,
-    localization: Option<&SrpPhatLocalization>,
-    fallback_reason: Option<String>,
-    render_start_ns: Option<u128>,
-    render_end_ns: Option<u128>,
-) -> (Vec<u8>, RenderMeta) {
+pub fn compute_render_bytes(request: RenderComputeRequest<'_>) -> (Vec<u8>, RenderMeta) {
+    let RenderComputeRequest {
+        config,
+        sound_speed_mps,
+        channels,
+        mic_positions_m,
+        sample_rate_hz,
+        localization,
+        fallback_reason,
+        render_start_ns,
+        render_end_ns,
+    } = request;
     let source_channel_count = channels.len();
     let use_hybrid = localization.filter(|sol| {
         sol.confidence >= config.min_localization_confidence

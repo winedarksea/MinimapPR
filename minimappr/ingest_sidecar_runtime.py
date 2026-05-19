@@ -240,7 +240,25 @@ def build_ingest_stream_consumer(
     )
 
 
-def ensure_ingest_stream_consumer_running(
+async def _stop_ingest_stream_consumer(
+    state,
+    consumer,
+    *,
+    clear_state_attrs: Callable[..., None],
+    logger,
+    reason: str,
+) -> bool:
+    try:
+        await consumer.stop()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to stop ingest stream consumer while %s: %s", reason, exc)
+        return False
+    if getattr(state, "ingest_stream_consumer", None) is consumer:
+        clear_state_attrs(state, "ingest_stream_consumer")
+    return True
+
+
+async def ensure_ingest_stream_consumer_running(
     state,
     *,
     clear_state_attrs: Callable[..., None],
@@ -256,8 +274,14 @@ def ensure_ingest_stream_consumer_running(
     )
     consumer = getattr(state, "ingest_stream_consumer", None)
     if runtime is None:
-        if consumer is not None and not consumer.is_running:
-            clear_state_attrs(state, "ingest_stream_consumer")
+        if consumer is not None:
+            await _stop_ingest_stream_consumer(
+                state,
+                consumer,
+                clear_state_attrs=clear_state_attrs,
+                logger=logger,
+                reason="disabling sidecar SSE consumption",
+            )
         return False
 
     desired_config = runtime["config"]
@@ -273,8 +297,14 @@ def ensure_ingest_stream_consumer_running(
             or consumer_transport is not desired_transport
             or consumer_audio_buffer is not desired_audio_buffer
         ):
-            if not consumer.is_running:
-                clear_state_attrs(state, "ingest_stream_consumer")
+            if not await _stop_ingest_stream_consumer(
+                state,
+                consumer,
+                clear_state_attrs=clear_state_attrs,
+                logger=logger,
+                reason="replacing sidecar SSE configuration",
+            ):
+                return consumer.is_running
             consumer = None
             consumer_already_present = False
 

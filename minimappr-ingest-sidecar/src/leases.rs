@@ -141,48 +141,6 @@ impl LeaseStore {
     }
 }
 
-pub fn segment_pin_counts(index: &PinLeaseIndex, now_ns: u128) -> HashMap<(String, String), u64> {
-    let mut counts = HashMap::new();
-    for lease in index
-        .leases
-        .values()
-        .filter(|lease| lease.expires_ns > now_ns)
-    {
-        if matches!(lease.target_kind, PinTargetKind::RawJournal) {
-            *counts
-                .entry((
-                    lease.handle.stream_key.clone(),
-                    lease.handle.segment_id.clone(),
-                ))
-                .or_insert(0) += 1;
-        }
-    }
-    counts
-}
-
-/// Hard-pin-only counts. Segments with hard pins must never be evicted.
-pub fn hard_segment_pin_counts(
-    index: &PinLeaseIndex,
-    now_ns: u128,
-) -> HashMap<(String, String), u64> {
-    let mut counts = HashMap::new();
-    for lease in index
-        .leases
-        .values()
-        .filter(|lease| lease.expires_ns > now_ns && matches!(lease.pin_kind, PinKind::Hard))
-    {
-        if matches!(lease.target_kind, PinTargetKind::RawJournal) {
-            *counts
-                .entry((
-                    lease.handle.stream_key.clone(),
-                    lease.handle.segment_id.clone(),
-                ))
-                .or_insert(0) += 1;
-        }
-    }
-    counts
-}
-
 fn purge_expired_leases(index: &mut PinLeaseIndex, now_ns: u128) -> bool {
     let before = index.leases.len();
     index.leases.retain(|_, lease| lease.expires_ns > now_ns);

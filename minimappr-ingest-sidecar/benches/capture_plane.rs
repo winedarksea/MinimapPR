@@ -83,7 +83,7 @@ fn bench_tetrahedral_gcc_phat(c: &mut Criterion) {
     group.throughput(Throughput::Elements(6 * n as u64));
 
     group.bench_function("6_pairs_512_samples", |b| {
-        b.iter(|| tetrahedral_gcc_phat(&channels, sr));
+        b.iter(|| tetrahedral_gcc_phat(&channels, sr, None));
     });
     group.finish();
 }

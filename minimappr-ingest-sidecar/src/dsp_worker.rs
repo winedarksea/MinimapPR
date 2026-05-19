@@ -67,9 +67,6 @@ pub struct DspWorkerConfig {
     /// Maximum trusted node clock skew in seconds before falling back to
     /// receipt-time alignment. Matching Python's _MAX_TRUSTED_NODE_CLOCK_SKEW_NS.
     pub max_trusted_node_clock_skew_seconds: f64,
-    /// Enable hybrid spatial-blend render for BirdNET classification.
-    /// True when runtime_profile == "birdnet_hybrid_production".
-    pub birdnet_hybrid_render_enabled: bool,
 }
 
 impl Default for DspWorkerConfig {
@@ -104,7 +101,6 @@ impl Default for DspWorkerConfig {
             trigger_cooldown_seconds: 0.8,
             query_persisted_raw_manifests: true,
             max_trusted_node_clock_skew_seconds: 300.0,
-            birdnet_hybrid_render_enabled: false,
         }
     }
 }
@@ -185,8 +181,6 @@ pub(crate) struct ComputePayload {
     pub(crate) reported_temperature_c: Option<f32>,
     pub(crate) reported_humidity_fraction: Option<f32>,
     pub(crate) reported_environment_source: Option<String>,
-    pub(crate) effective_temperature_c: Option<f32>,
-    pub(crate) effective_humidity_fraction: Option<f32>,
     pub(crate) run_srp: bool,
     pub(crate) run_classifier_render: bool,
     /// Suppress the localization_result manifest for this frame (e.g. omni-only single-point node).
@@ -217,8 +211,6 @@ struct OwnedManifestAudio {
     classification_window_sec: f64,
     mic_positions_m: Vec<[f32; 3]>,
     effective_sound_speed_mps: f32,
-    effective_temperature_c: Option<f32>,
-    effective_humidity_fraction: Option<f32>,
     buffer_start_time_ns: i128,
     buffer_end_time_ns: i128,
     start_sample_index: Option<i64>,
@@ -238,6 +230,17 @@ struct BufferedManifestTimingGates {
     on_heartbeat_cadence: bool,
     run_classifier_render: bool,
     run_srp: bool,
+}
+
+struct RawAudioFramePublishRequest<'a> {
+    publisher: &'a Option<DspEventPublisher>,
+    source_manifest: &'a DspManifest,
+    decoded: &'a DecodedAudioPayload,
+    stream_key: &'a str,
+    sample_rate_hz: u32,
+    start_time_ns: i128,
+    end_time_ns: i128,
+    created_ns: u128,
 }
 
 pub struct DspWorker {
@@ -611,8 +614,6 @@ impl DspWorker {
             classification_window_sec,
             mic_positions_m,
             effective_sound_speed_mps,
-            effective_temperature_c,
-            effective_humidity_fraction,
             buffer_start_time_ns,
             buffer_end_time_ns,
             start_sample_index,
@@ -624,16 +625,16 @@ impl DspWorker {
     }
 
     async fn publish_raw_audio_frame_for_owned_manifest(&self, owned: &OwnedManifestAudio) {
-        publish_raw_audio_frame_event(
-            &self.dsp_event_publisher,
-            &owned.manifest,
-            &owned.decoded,
-            &owned.stream_key,
-            owned.sr,
-            owned.buffer_start_time_ns,
-            owned.buffer_end_time_ns,
-            owned.now_ns,
-        )
+        publish_raw_audio_frame_event(RawAudioFramePublishRequest {
+            publisher: &self.dsp_event_publisher,
+            source_manifest: &owned.manifest,
+            decoded: &owned.decoded,
+            stream_key: &owned.stream_key,
+            sample_rate_hz: owned.sr,
+            start_time_ns: owned.buffer_start_time_ns,
+            end_time_ns: owned.buffer_end_time_ns,
+            created_ns: owned.now_ns,
+        })
         .await;
     }
 
@@ -774,8 +775,6 @@ impl DspWorker {
             reported_temperature_c: owned.decoded.temperature_c,
             reported_humidity_fraction: owned.decoded.humidity_fraction,
             reported_environment_source: owned.decoded.environment_source,
-            effective_temperature_c: owned.effective_temperature_c,
-            effective_humidity_fraction: owned.effective_humidity_fraction,
             run_srp: false,
             run_classifier_render: true,
             skip_localization_result: true,
@@ -894,8 +893,6 @@ impl DspWorker {
                     reported_temperature_c: owned.decoded.temperature_c,
                     reported_humidity_fraction: owned.decoded.humidity_fraction,
                     reported_environment_source: owned.decoded.environment_source,
-                    effective_temperature_c: owned.effective_temperature_c,
-                    effective_humidity_fraction: owned.effective_humidity_fraction,
                     run_srp: false,
                     run_classifier_render: true,
                     skip_localization_result: true,
@@ -979,8 +976,6 @@ impl DspWorker {
             reported_temperature_c: owned.decoded.temperature_c,
             reported_humidity_fraction: owned.decoded.humidity_fraction,
             reported_environment_source: owned.decoded.environment_source,
-            effective_temperature_c: owned.effective_temperature_c,
-            effective_humidity_fraction: owned.effective_humidity_fraction,
             run_srp: timing_gates.run_srp,
             run_classifier_render: timing_gates.run_classifier_render,
             skip_localization_result: false,
@@ -1261,16 +1256,17 @@ pub(crate) async fn dispatch_classification_result_standalone(
     Some(fallback)
 }
 
-async fn publish_raw_audio_frame_event(
-    publisher: &Option<DspEventPublisher>,
-    source_manifest: &DspManifest,
-    decoded: &DecodedAudioPayload,
-    stream_key: &str,
-    sample_rate_hz: u32,
-    start_time_ns: i128,
-    end_time_ns: i128,
-    created_ns: u128,
-) {
+async fn publish_raw_audio_frame_event(request: RawAudioFramePublishRequest<'_>) {
+    let RawAudioFramePublishRequest {
+        publisher,
+        source_manifest,
+        decoded,
+        stream_key,
+        sample_rate_hz,
+        start_time_ns,
+        end_time_ns,
+        created_ns,
+    } = request;
     let Some(publisher) = publisher else {
         return;
     };
@@ -1701,9 +1697,7 @@ fn classifier_render_min_interval_ns(
     if classifier_render_min_interval_seconds <= 0.0 {
         return 0;
     }
-    let base_interval_ns =
-        (classifier_render_min_interval_seconds * 1_000_000_000.0).round() as u128;
-    base_interval_ns
+    (classifier_render_min_interval_seconds * 1_000_000_000.0).round() as u128
 }
 
 fn sample_index_to_relative_time_ns(sample_index: i64, sample_rate_hz: u32) -> i128 {

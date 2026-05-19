@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use tokio::fs;
+#[cfg(test)]
 use uuid::Uuid;
 
 type BoxedError = Box<dyn std::error::Error + Send + Sync>;
@@ -71,6 +72,7 @@ impl DerivedCache {
         Ok(())
     }
 
+    #[cfg(test)]
     pub async fn record_entry(
         &self,
         artifact_type: String,

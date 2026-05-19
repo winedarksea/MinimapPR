@@ -136,7 +136,7 @@ fn AlertCard(alert: crate::state::Alert) -> impl IntoView {
 
             {move || match error_message.get() {
                 Some(error) => view! { <div class="alert-card-error">{error}</div> }.into_any(),
-                None => view! { <></> }.into_any(),
+                None => ().into_any(),
             }}
         </article>
     }

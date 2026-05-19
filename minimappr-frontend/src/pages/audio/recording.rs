@@ -101,7 +101,7 @@ fn ListenerSelector(selected_node_id: RwSignal<String>) -> impl IntoView {
                                 let id = n.node_id.clone();
                                 let label = n.metadata
                                     .as_ref()
-                                    .and_then(|_| None::<String>)  // future: node label field
+                                    .and(None::<String>)  // future: node label field
                                     .unwrap_or_else(|| id.clone());
                                                 let pos_str = n.position_m.as_ref()
                                     .filter(|p| p.len() >= 2)
@@ -179,7 +179,7 @@ fn FormatOptions(
                 />
             }.into_any()
         } else {
-            view! { <></> }.into_any()
+            ().into_any()
         }}
     }
 }
@@ -391,7 +391,7 @@ fn RecordingControls(
                         </div>
                     }.into_any()
                 } else {
-                    view! { <></> }.into_any()
+                    ().into_any()
                 }
             }}
 

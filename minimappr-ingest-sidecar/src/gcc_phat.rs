@@ -204,65 +204,6 @@ pub fn tetrahedral_gcc_phat(
     })
 }
 
-/// Result of one mic pair in a cluster GCC-PHAT computation.
-#[derive(Clone, Debug)]
-pub struct ClusterPairResult {
-    pub channel_a: usize,
-    pub channel_b: usize,
-    pub tdoa: TdoaResult,
-}
-
-/// Compute all C(M,2) pairwise TDOA results for an M-mic cluster.
-///
-/// `channels` — M audio buffers (one per mic), any equal-length slice.
-/// `mic_positions_m` — M centroid-relative mic positions; used for per-pair
-///   geometric max-lag bounds.  Length must match `channels`.
-/// `sensor_weights` — optional per-channel confidence weights in [0.0, 1.0];
-///   the pair weight is `min(w_a, w_b)` and scales the returned `confidence`.
-///   Pass `None` for uniform unit weights (identical to tetrahedral behaviour).
-///
-/// The tetrahedral 4-mic case is the M=4 special case of this function.
-pub fn cluster_gcc_phat(
-    channels: &[Vec<f32>],
-    mic_positions_m: &[[f32; 3]],
-    sample_rate_hz: u32,
-    band_hz: Option<[f32; 2]>,
-    sensor_weights: Option<&[f32]>,
-) -> Vec<ClusterPairResult> {
-    let m = channels.len().min(mic_positions_m.len());
-    if m < 2 {
-        return Vec::new();
-    }
-    let mut results = Vec::with_capacity(m * (m - 1) / 2);
-    for a in 0..m {
-        for b in (a + 1)..m {
-            let max_tau_s = pair_max_tau_s(
-                mic_positions_m[a],
-                mic_positions_m[b],
-                sample_rate_hz,
-                343.2,
-            );
-            let mut tdoa = phat_correlation(
-                &channels[a],
-                &channels[b],
-                sample_rate_hz,
-                max_tau_s,
-                band_hz,
-            )
-            .tdoa;
-            // Scale confidence by the pair weight (min of individual weights).
-            if let Some(w) = sensor_weights {
-                let wa = w.get(a).copied().unwrap_or(1.0).clamp(0.0, 1.0);
-                let wb = w.get(b).copied().unwrap_or(1.0).clamp(0.0, 1.0);
-                tdoa.confidence *= wa.min(wb);
-                tdoa.peak_value *= wa.min(wb);
-            }
-            results.push(ClusterPairResult { channel_a: a, channel_b: b, tdoa });
-        }
-    }
-    results
-}
-
 fn next_pow2(n: usize) -> usize {
     if n <= 1 {
         return 1;

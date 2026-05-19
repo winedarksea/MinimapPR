@@ -293,29 +293,6 @@ impl SensorStreamBuffer {
         Some(coverage_stats(&window_coverage, self.sample_rate_hz))
     }
 
-    pub fn latest_window(&self, window_seconds: f64) -> Vec<f32> {
-        if self.samples.is_empty() {
-            return Vec::new();
-        }
-        let window_samples = (window_seconds * f64::from(self.sample_rate_hz))
-            .round()
-            .max(1.0) as usize;
-        let start_offset = self.sample_len().saturating_sub(window_samples);
-        self.collect_samples_range(start_offset, self.sample_len())
-    }
-
-    pub fn latest_coverage_stats(&self, window_seconds: f64) -> Option<AudioCoverageStats> {
-        if self.coverage.is_empty() {
-            return None;
-        }
-        let window_samples = (window_seconds * f64::from(self.sample_rate_hz))
-            .round()
-            .max(1.0) as usize;
-        let start_offset = self.coverage.len().saturating_sub(window_samples);
-        let window_coverage = self.collect_coverage_range(start_offset, self.coverage.len());
-        Some(coverage_stats(&window_coverage, self.sample_rate_hz))
-    }
-
     pub fn coverage_ending_at(
         &self,
         end_time_ns: i128,
@@ -533,14 +510,14 @@ fn synthesize_micro_fade_gap(
     let fade_denominator = edge_samples.saturating_sub(1).max(1) as f32;
     let mut concealed = vec![0.0_f32; gap_len];
 
-    for offset in 0..edge_samples {
+    for (offset, sample) in concealed.iter_mut().enumerate().take(edge_samples) {
         let phase = if edge_samples == 1 {
             0.5_f32
         } else {
             offset as f32 / fade_denominator
         };
         let angle = phase.clamp(0.0, 1.0) * std::f32::consts::FRAC_PI_2;
-        concealed[offset] = left_anchor * angle.cos().powi(2);
+        *sample = left_anchor * angle.cos().powi(2);
     }
 
     let fade_in_start = gap_len.saturating_sub(edge_samples);

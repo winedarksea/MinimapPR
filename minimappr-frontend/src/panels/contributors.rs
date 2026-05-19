@@ -73,7 +73,7 @@ pub fn CompactContributorChips(
                     </span>
                 }.into_any()
             } else {
-                view! { <></> }.into_any()
+                ().into_any()
             }}
         </div>
     }.into_any()

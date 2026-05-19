@@ -9,6 +9,7 @@ import pytest
 
 from minimappr import main
 from minimappr.config import Settings
+from minimappr.ingest_sidecar_runtime import ensure_ingest_stream_consumer_running
 
 
 class _FakeResponse:
@@ -41,6 +42,34 @@ class _FakeProcess:
         if self.returncode is None:
             self.returncode = 0
         return self.returncode
+
+
+class _FakeIngestStreamConsumer:
+    def __init__(self, *, config, ingest_transport, audio_buffer=None) -> None:
+        self._config = config
+        self._ingest_transport = ingest_transport
+        self._audio_buffer = audio_buffer
+        self._running = False
+        self.start_calls = 0
+        self.stop_calls = 0
+
+    @property
+    def is_running(self) -> bool:
+        return self._running
+
+    def start(self) -> None:
+        self.start_calls += 1
+        self._running = True
+
+    async def stop(self) -> None:
+        self.stop_calls += 1
+        self._running = False
+
+
+def _clear_state_attrs(state, *names: str) -> None:
+    for name in names:
+        if hasattr(state, name):
+            delattr(state, name)
 
 
 def test_probe_ingest_sidecar_ready_accepts_ok_status(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -239,3 +268,69 @@ async def test_start_ingest_sidecar_reports_existing_worker_if_port_already_heal
 
     with pytest.raises(RuntimeError, match="already running"):
         await main._start_ingest_sidecar(settings)
+
+
+@pytest.mark.asyncio
+async def test_ensure_ingest_stream_consumer_running_replaces_running_mismatched_consumer() -> None:
+    state = SimpleNamespace(
+        settings=SimpleNamespace(ingest_backend="rust"),
+        sidecar_state=SimpleNamespace(status="running"),
+        ingest_transport=object(),
+        audio_buffer=object(),
+    )
+    old_consumer = _FakeIngestStreamConsumer(
+        config=SimpleNamespace(sidecar_base_url="http://127.0.0.1:8081"),
+        ingest_transport=state.ingest_transport,
+        audio_buffer=state.audio_buffer,
+    )
+    old_consumer.start()
+    state.ingest_stream_consumer = old_consumer
+
+    result = await ensure_ingest_stream_consumer_running(
+        state,
+        clear_state_attrs=_clear_state_attrs,
+        ingest_stream_consumer_class=_FakeIngestStreamConsumer,
+        ingest_runtime_base_url_builder=lambda settings: "http://127.0.0.1:9999",
+        logger=SimpleNamespace(warning=lambda *args, **kwargs: None),
+        stream_consumer_config_class=lambda sidecar_base_url: SimpleNamespace(
+            sidecar_base_url=sidecar_base_url
+        ),
+    )
+
+    assert result is True
+    assert old_consumer.stop_calls == 1
+    assert state.ingest_stream_consumer is not old_consumer
+    assert state.ingest_stream_consumer.is_running is True
+    assert state.ingest_stream_consumer._config.sidecar_base_url == "http://127.0.0.1:9999"
+
+
+@pytest.mark.asyncio
+async def test_ensure_ingest_stream_consumer_running_stops_consumer_when_runtime_disabled() -> None:
+    state = SimpleNamespace(
+        settings=SimpleNamespace(ingest_backend="python"),
+        sidecar_state=SimpleNamespace(status="running"),
+        ingest_transport=object(),
+        audio_buffer=object(),
+    )
+    consumer = _FakeIngestStreamConsumer(
+        config=SimpleNamespace(sidecar_base_url="http://127.0.0.1:8081"),
+        ingest_transport=state.ingest_transport,
+        audio_buffer=state.audio_buffer,
+    )
+    consumer.start()
+    state.ingest_stream_consumer = consumer
+
+    result = await ensure_ingest_stream_consumer_running(
+        state,
+        clear_state_attrs=_clear_state_attrs,
+        ingest_stream_consumer_class=_FakeIngestStreamConsumer,
+        ingest_runtime_base_url_builder=lambda settings: "http://127.0.0.1:8081",
+        logger=SimpleNamespace(warning=lambda *args, **kwargs: None),
+        stream_consumer_config_class=lambda sidecar_base_url: SimpleNamespace(
+            sidecar_base_url=sidecar_base_url
+        ),
+    )
+
+    assert result is False
+    assert consumer.stop_calls == 1
+    assert not hasattr(state, "ingest_stream_consumer")

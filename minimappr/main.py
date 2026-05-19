@@ -143,6 +143,10 @@ def _default_sidecar_classifier_command_json(settings: "Settings") -> str | None
     return None
 
 
+def _build_runtime_classifier(settings: Settings):
+    return create_classifier(settings)
+
+
 def _parse_window_ns(window: str) -> int:
     """Parse a compact window string (e.g. '24h', '7d', '30m', '1y') into nanoseconds."""
     if not window:
@@ -284,7 +288,7 @@ async def _reconcile_site_origin_after_startup(app: FastAPI) -> None:
         site_origin_lon=resolved_site_origin.origin.lon,
         site_origin_alt_m=resolved_site_origin.origin.alt_m,
     )
-    new_classifier = create_classifier(candidate_settings)
+    new_classifier = _build_runtime_classifier(candidate_settings)
     new_coordinate_frame = LocalCoordinateFrame(
         origin=resolved_site_origin.origin,
         mode=settings.coordinate_mode,
@@ -715,8 +719,8 @@ def _build_ingest_stream_consumer(state) -> IngestStreamConsumer | None:
     )
 
 
-def _ensure_ingest_stream_consumer_running(state) -> bool:
-    return _runtime_ensure_ingest_stream_consumer_running(
+async def _ensure_ingest_stream_consumer_running(state) -> bool:
+    return await _runtime_ensure_ingest_stream_consumer_running(
         state,
         clear_state_attrs=_clear_state_attrs,
         ingest_stream_consumer_class=IngestStreamConsumer,
@@ -728,7 +732,7 @@ def _ensure_ingest_stream_consumer_running(state) -> bool:
 
 async def _maintain_ingest_stream_consumer(app: FastAPI) -> None:
     while True:
-        _ensure_ingest_stream_consumer_running(app.state)
+        await _ensure_ingest_stream_consumer_running(app.state)
         await asyncio.sleep(_INGEST_STREAM_CONSUMER_WATCHDOG_INTERVAL_SECONDS)
 
 
@@ -923,6 +927,7 @@ async def lifespan(app: FastAPI):
     common_live_runtime_services = _build_common_live_runtime_services(settings, storage=storage)
     combined_runtime_core_services = _build_combined_runtime_core_services(
         settings,
+        classifier_factory=_build_runtime_classifier,
         common_live_runtime_services=common_live_runtime_services,
         localization_cfg=localization_cfg,
         storage=storage,
@@ -976,7 +981,7 @@ async def lifespan(app: FastAPI):
         capture_manager=capture_manager,
     )
 
-    ingest_stream_consumer_enabled = _ensure_ingest_stream_consumer_running(app.state)
+    ingest_stream_consumer_enabled = await _ensure_ingest_stream_consumer_running(app.state)
 
     task_handles = _CombinedRuntimeTaskHandles()
     try:

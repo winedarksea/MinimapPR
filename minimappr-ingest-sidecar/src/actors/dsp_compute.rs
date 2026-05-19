@@ -4,7 +4,9 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::{
-    dsp_render_output::{compute_render_bytes, write_render_to_cache, RenderMeta},
+    dsp_render_output::{
+        compute_render_bytes, write_render_to_cache, RenderComputeRequest, RenderMeta,
+    },
     dsp_worker::{
         consume_manifest_standalone, dispatch_classification_result_standalone,
         render_coverage_json, source_manifest_was_persisted, ComputePayload, PairTdoa,
@@ -110,28 +112,28 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
                 "classification_trailing",
             );
 
-            let (bytes, meta) = compute_render_bytes(
-                &payload.config,
-                payload.effective_sound_speed_mps,
-                render_channels,
-                payload.mic_positions_m.as_slice(),
-                payload.sr,
-                Some(&localization),
-                fallback_reason.clone(),
-                payload.classifier_render_start_ns,
-                payload.classifier_render_end_ns,
-            );
-            let (listenable_bytes, _) = compute_render_bytes(
-                &payload.config,
-                payload.effective_sound_speed_mps,
-                listenable_render_channels,
-                payload.mic_positions_m.as_slice(),
-                payload.sr,
-                Some(&localization),
-                fallback_reason.clone(),
-                payload.classifier_render_start_ns,
-                payload.classifier_render_end_ns,
-            );
+            let (bytes, meta) = compute_render_bytes(RenderComputeRequest {
+                config: &payload.config,
+                sound_speed_mps: payload.effective_sound_speed_mps,
+                channels: render_channels,
+                mic_positions_m: payload.mic_positions_m.as_slice(),
+                sample_rate_hz: payload.sr,
+                localization: Some(&localization),
+                fallback_reason: fallback_reason.clone(),
+                render_start_ns: payload.classifier_render_start_ns,
+                render_end_ns: payload.classifier_render_end_ns,
+            });
+            let (listenable_bytes, _) = compute_render_bytes(RenderComputeRequest {
+                config: &payload.config,
+                sound_speed_mps: payload.effective_sound_speed_mps,
+                channels: listenable_render_channels,
+                mic_positions_m: payload.mic_positions_m.as_slice(),
+                sample_rate_hz: payload.sr,
+                localization: Some(&localization),
+                fallback_reason: fallback_reason.clone(),
+                render_start_ns: payload.classifier_render_start_ns,
+                render_end_ns: payload.classifier_render_end_ns,
+            });
             (Some(bytes), Some(listenable_bytes), Some(meta), cov)
         } else {
             (None, None, None, None)

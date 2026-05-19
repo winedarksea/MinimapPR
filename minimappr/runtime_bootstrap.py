@@ -13,6 +13,7 @@ import logging
 import multiprocessing
 import time
 from dataclasses import dataclass, field
+from typing import Callable
 
 from minimappr.api.live import LiveEventHub
 from minimappr.api.spool_consumer import IngestSpoolConfig, IngestSpoolConsumer
@@ -138,6 +139,7 @@ def _build_capture_manager(
 def _build_combined_runtime_core_services(
     settings: Settings,
     *,
+    classifier_factory: Callable[[Settings], object],
     common_live_runtime_services: _CommonLiveRuntimeServices,
     localization_cfg,
     storage: Storage,
@@ -147,7 +149,7 @@ def _build_combined_runtime_core_services(
     cluster_registry = ClusterRegistry()
     audio_buffer = MultiSensorBuffer(max_duration_seconds=localization_cfg.max_sensor_buffer_seconds)
     localizer = build_localizer_from_settings(localization_cfg)
-    classifier = create_classifier(settings)
+    classifier = classifier_factory(settings)
     tracker = TrackManager(tracking_cfg)
     zone_matcher = ZoneMatcher(storage=storage)
     fusion_node = FusionNode(

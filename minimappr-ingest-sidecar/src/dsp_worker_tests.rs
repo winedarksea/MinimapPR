@@ -150,7 +150,6 @@ async fn worker_publishes_localization_and_classifier_render_contract() {
         manifest_store.clone(),
         derived_cache,
         DspWorkerConfig {
-            birdnet_hybrid_render_enabled: true,
             ..DspWorkerConfig::default()
         },
         state.clone(),
@@ -256,7 +255,6 @@ async fn worker_continues_localization_across_packet_gap_with_misaligned_toa() {
         manifest_store.clone(),
         derived_cache,
         DspWorkerConfig {
-            birdnet_hybrid_render_enabled: true,
             classifier_render_min_interval_seconds: 0.0,
             max_buffer_seconds: 32.0,
             max_trusted_node_clock_skew_seconds: f64::MAX,
@@ -337,7 +335,6 @@ async fn localization_continues_when_classifier_render_is_rate_limited() {
         manifest_store.clone(),
         derived_cache,
         DspWorkerConfig {
-            birdnet_hybrid_render_enabled: true,
             classifier_render_min_interval_seconds: 999.0,
             localization_cadence_ms: 0,
             trigger_cooldown_seconds: 0.0,
@@ -408,7 +405,6 @@ async fn tetra_classifier_render_forces_srp_between_localization_cadence_ticks()
         manifest_store.clone(),
         derived_cache,
         DspWorkerConfig {
-            birdnet_hybrid_render_enabled: true,
             classifier_render_min_interval_seconds: 0.0,
             localization_cadence_ms: 60_000,
             trigger_cooldown_seconds: 0.0,
@@ -492,7 +488,6 @@ async fn small_packet_timestamp_jitter_does_not_drop_array_window_coverage() {
         manifest_store.clone(),
         derived_cache,
         DspWorkerConfig {
-            birdnet_hybrid_render_enabled: true,
             classifier_render_min_interval_seconds: 0.0,
             localization_cadence_ms: 0,
             trigger_cooldown_seconds: 0.0,
@@ -580,7 +575,6 @@ async fn gps_clock_correction_jitter_does_not_drop_classifier_render() {
         manifest_store.clone(),
         derived_cache,
         DspWorkerConfig {
-            birdnet_hybrid_render_enabled: true,
             classifier_render_min_interval_seconds: 0.0,
             localization_cadence_ms: 0,
             trigger_cooldown_seconds: 0.0,
@@ -693,7 +687,6 @@ async fn worker_publishes_omni_render_for_non_tetrahedral_channel_count() {
         manifest_store.clone(),
         derived_cache,
         DspWorkerConfig {
-            birdnet_hybrid_render_enabled: true,
             ..DspWorkerConfig::default()
         },
         state.clone(),
@@ -953,8 +946,8 @@ fn low_coverage_channel_drops_out_of_localization_set() {
 
     let mut buffers: [SensorStreamBuffer; 4] =
         core::array::from_fn(|_| SensorStreamBuffer::new(sample_rate_hz, 1.0));
-    for channel_index in 0..3 {
-        buffers[channel_index]
+    for buffer in buffers.iter_mut().take(3) {
+        buffer
             .append(start_time_ns, &vec![1.0; 512], Some(0), Some(512))
             .unwrap();
     }

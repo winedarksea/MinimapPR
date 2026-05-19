@@ -15,7 +15,7 @@ pub fn AudioAnalysisDrawer() -> impl IntoView {
     view! {
         {move || {
             if !is_open.get() {
-                return view! { <></> }.into_any();
+                return ().into_any();
             }
 
             let selected_id = selected_detection_id.get();
