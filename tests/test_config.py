@@ -4,7 +4,14 @@ import os
 
 import pytest
 
-from minimappr.config import ClassifierConfig, FusionConfig, LocalizationConfig, Settings
+from minimappr.config import (
+    ClassifierConfig,
+    FusionConfig,
+    IngestSidecarProcessConfig,
+    IngestSidecarStartupConfig,
+    LocalizationConfig,
+    Settings,
+)
 
 
 def _clear_minimappr_env(monkeypatch) -> None:
@@ -22,10 +29,14 @@ def test_settings_from_env_populates_subconfigs_with_cleanup_defaults(monkeypatc
     localization = settings.localization_config()
     classifier = settings.classifier_config()
     fusion = settings.fusion_config()
+    sidecar_process = settings.ingest_sidecar_process_config()
+    sidecar_startup = settings.ingest_sidecar_startup_config()
 
     assert isinstance(localization, LocalizationConfig)
     assert isinstance(classifier, ClassifierConfig)
     assert isinstance(fusion, FusionConfig)
+    assert isinstance(sidecar_process, IngestSidecarProcessConfig)
+    assert isinstance(sidecar_startup, IngestSidecarStartupConfig)
     assert settings.localization_max_tau_seconds == 0.02
     assert localization.localization_max_tau_seconds == 0.02
     assert settings.classifier_stage_timeout_seconds == 30.0
@@ -34,6 +45,12 @@ def test_settings_from_env_populates_subconfigs_with_cleanup_defaults(monkeypatc
     assert fusion.localization_queue_size == 1024
     assert fusion.classification_queue_size == 1024
     assert fusion.rules_queue_size == 512
+    assert sidecar_process.sidecar_port == 8081
+    assert sidecar_process.storage_mode == "spool"
+    assert sidecar_process.memory_only_live_path is True
+    assert sidecar_startup.ready_timeout_seconds == pytest.approx(5.0)
+    assert sidecar_startup.ready_poll_interval_seconds == pytest.approx(0.1)
+    assert sidecar_startup.healthcheck_timeout_seconds == pytest.approx(0.5)
 
 
 def test_settings_from_env_accepts_legacy_cleanup_env_keys(monkeypatch, tmp_path) -> None:
@@ -72,3 +89,18 @@ def test_settings_cleanup_alias_properties_track_canonical_fields() -> None:
 def test_settings_reject_zero_fusion_queue_size() -> None:
     with pytest.raises(ValueError, match="fusion_event_queue_size must be >= 1"):
         Settings(fusion_event_queue_size=0)
+
+
+def test_settings_from_env_populates_sidecar_startup_timeouts(monkeypatch, tmp_path) -> None:
+    _clear_minimappr_env(monkeypatch)
+    monkeypatch.setenv("MINIMAPPR_FEDERATION_PEERS_CONFIG_PATH", str(tmp_path / "missing-peers.json"))
+    monkeypatch.setenv("MINIMAPPR_SIDECAR_READY_TIMEOUT_SECONDS", "7.5")
+    monkeypatch.setenv("MINIMAPPR_SIDECAR_READY_POLL_INTERVAL_SECONDS", "0.2")
+    monkeypatch.setenv("MINIMAPPR_SIDECAR_HEALTHCHECK_TIMEOUT_SECONDS", "1.25")
+
+    settings = Settings.from_env()
+    sidecar_startup = settings.ingest_sidecar_startup_config()
+
+    assert sidecar_startup.ready_timeout_seconds == pytest.approx(7.5)
+    assert sidecar_startup.ready_poll_interval_seconds == pytest.approx(0.2)
+    assert sidecar_startup.healthcheck_timeout_seconds == pytest.approx(1.25)

@@ -204,6 +204,27 @@ class FusionConfig:
 
 
 @dataclass(slots=True)
+class IngestSidecarStartupConfig:
+    ready_timeout_seconds: float
+    ready_poll_interval_seconds: float
+    healthcheck_timeout_seconds: float
+
+
+@dataclass(slots=True)
+class IngestSidecarProcessConfig:
+    binary_path: Path
+    spool_dir: Path
+    consumer_name: str
+    ingest_port: int
+    sidecar_port: int
+    storage_mode: str
+    total_journal_budget_bytes: int
+    admission_reserve_bytes: int
+    allow_non_tmpfs_journal: bool
+    memory_only_live_path: bool
+
+
+@dataclass(slots=True)
 class RulesConfig:
     rules_config_path: Path
     taxonomy_config_path: Path
@@ -333,6 +354,9 @@ class Settings:
     ingest_sidecar_total_journal_budget_bytes: int = 268_435_456
     ingest_sidecar_admission_reserve_bytes: int = 16_777_216
     ingest_sidecar_allow_non_tmpfs_journal: bool | None = None
+    ingest_sidecar_ready_timeout_seconds: float = 5.0
+    ingest_sidecar_ready_poll_interval_seconds: float = 0.1
+    ingest_sidecar_healthcheck_timeout_seconds: float = 0.5
     persist_observations_on_ingest: bool | None = None
     retention_policy_path: Path = Path("data/retention_policy.json")
     rules_config_path: Path = DEFAULT_RULES_CONFIG_PATH
@@ -560,6 +584,12 @@ class Settings:
                 "MINIMAPPR_SIDECAR_ADMISSION_RESERVE_BYTES must be smaller than "
                 "MINIMAPPR_SIDECAR_TOTAL_JOURNAL_BUDGET_BYTES"
             )
+        if self.ingest_sidecar_ready_timeout_seconds <= 0.0:
+            raise ValueError("MINIMAPPR_SIDECAR_READY_TIMEOUT_SECONDS must be > 0")
+        if self.ingest_sidecar_ready_poll_interval_seconds <= 0.0:
+            raise ValueError("MINIMAPPR_SIDECAR_READY_POLL_INTERVAL_SECONDS must be > 0")
+        if self.ingest_sidecar_healthcheck_timeout_seconds <= 0.0:
+            raise ValueError("MINIMAPPR_SIDECAR_HEALTHCHECK_TIMEOUT_SECONDS must be > 0")
         if self.min_sensors_for_2d < 2:
             raise ValueError("MINIMAPPR_MIN_SENSORS_FOR_2D must be >= 2")
         if self.min_sensors_for_3d < self.min_sensors_for_2d:
@@ -849,6 +879,18 @@ class Settings:
                 _env_bool("MINIMAPPR_SIDECAR_ALLOW_NON_TMPFS_JOURNAL", False)
                 if allow_non_tmpfs_journal_raw is not None
                 else None
+            ),
+            ingest_sidecar_ready_timeout_seconds=_env_float(
+                "MINIMAPPR_SIDECAR_READY_TIMEOUT_SECONDS",
+                5.0,
+            ),
+            ingest_sidecar_ready_poll_interval_seconds=_env_float(
+                "MINIMAPPR_SIDECAR_READY_POLL_INTERVAL_SECONDS",
+                0.1,
+            ),
+            ingest_sidecar_healthcheck_timeout_seconds=_env_float(
+                "MINIMAPPR_SIDECAR_HEALTHCHECK_TIMEOUT_SECONDS",
+                0.5,
             ),
             persist_observations_on_ingest=(
                 _env_bool("MINIMAPPR_PERSIST_OBSERVATIONS_ON_INGEST", True)
@@ -1176,6 +1218,27 @@ class Settings:
             taxonomy_refresh_interval_seconds=self.taxonomy_refresh_interval_seconds,
             retention_permanent_labels=self.retention_permanent_labels,
             retention_long_security_confidence=self.retention_long_security_confidence,
+        )
+
+    def ingest_sidecar_startup_config(self) -> IngestSidecarStartupConfig:
+        return IngestSidecarStartupConfig(
+            ready_timeout_seconds=self.ingest_sidecar_ready_timeout_seconds,
+            ready_poll_interval_seconds=self.ingest_sidecar_ready_poll_interval_seconds,
+            healthcheck_timeout_seconds=self.ingest_sidecar_healthcheck_timeout_seconds,
+        )
+
+    def ingest_sidecar_process_config(self) -> IngestSidecarProcessConfig:
+        return IngestSidecarProcessConfig(
+            binary_path=self.ingest_sidecar_binary_path,
+            spool_dir=self.ingest_spool_dir,
+            consumer_name=self.ingest_consumer_name,
+            ingest_port=self.ingest_port,
+            sidecar_port=self.ingest_sidecar_port,
+            storage_mode=self.ingest_storage_mode,
+            total_journal_budget_bytes=self.ingest_sidecar_total_journal_budget_bytes,
+            admission_reserve_bytes=self.ingest_sidecar_admission_reserve_bytes,
+            allow_non_tmpfs_journal=bool(self.ingest_sidecar_allow_non_tmpfs_journal),
+            memory_only_live_path=self.ingest_sidecar_memory_only_live_path,
         )
 
     @property

@@ -580,42 +580,8 @@ class FusionNode:
             self._metrics.frames_rejected += 1
             raise
 
-        self._metrics.frames_accepted += 1
-        if result.environment_counts is not None:
-            self._metrics.environment_samples_ingested += result.environment_counts.ingested
-            self._metrics.environment_samples_persisted += result.environment_counts.persisted
-        if result.sequence_gap_count > 0:
-            self._metrics.frame_sequence_gaps += result.sequence_gap_count
-
-        pnm = self._per_node_frame_metrics.setdefault(
-            request.node.id, {"frames_accepted": 0, "frame_gaps": 0, "last_frame_ns": 0}
-        )
-        pnm["frames_accepted"] += 1
-        pnm["last_frame_ns"] = max(pnm["last_frame_ns"], request.frame.start_time_ns)
-        if result.sequence_gap_count > 0:
-            pnm["frame_gaps"] += result.sequence_gap_count
-
-        # Update queue depth on the response before returning.
-        result.response.queue_depth = self._localization_queue.qsize()
-
-        if result.triggered:
-            candidate = EventCandidate(
-                id=f"evt-{next(self._candidate_counter):08d}",
-                source_node_id=request.node.id,
-                event_time_ns=result.event_time_ns,
-                sample_rate_hz=result.sample_rate_hz,
-                source_type=result.source_type,
-                time_quality=result.time_quality,
-                source_observation_ids=result.observation_ids or [],
-            )
-            if await self._enqueue_stage(self._localization_queue, candidate):
-                self._ingest_processor.confirm_trigger(result.event_time_ns)
-                self._metrics.triggers_enqueued += 1
-                result.response.queued_event_id = candidate.id
-            else:
-                # Queue full — report as not triggered to the caller.
-                result.response.triggered = False
-                self._metrics.triggers_dropped_queue_full += 1
+        self._record_ingest_result_metrics(request, result)
+        await self._queue_trigger_candidate(request, result)
 
         return result.response
 
@@ -1226,6 +1192,33 @@ class FusionNode:
             alias_cutoff_hz=localization.alias_cutoff_hz,
         )
 
+    @staticmethod
+    def _merge_source_observation_ids(
+        existing_source_observation_ids: list[str],
+        new_source_observation_ids: list[str],
+    ) -> list[str]:
+        return list(dict.fromkeys([*existing_source_observation_ids, *new_source_observation_ids]))
+
+    @staticmethod
+    def _classification_features_for_reporting(
+        product: LocalizedCandidate,
+        *,
+        classified,
+        reporting_modality: str,
+    ) -> dict[str, Any]:
+        classification_features = dict(classified.classification.features)
+        if reporting_modality != "localized" or product.localization_branch is None:
+            return classification_features
+
+        for feature_name, feature_value in (
+            ("wavelength_factor", product.localization_branch.wavelength_factor),
+            ("dominant_frequency_hz", product.localization_branch.dominant_frequency_hz),
+            ("alias_cutoff_hz", product.localization_branch.alias_cutoff_hz),
+        ):
+            if feature_value is not None:
+                classification_features[feature_name] = feature_value
+        return classification_features
+
     async def _assemble_reporting_branch(
         self,
         *,
@@ -1271,13 +1264,9 @@ class FusionNode:
             existing_feature_summary = dict(existing_detection.feature_summary)
             existing_feature_summary["branch_evidence"] = decision.branch_evidence
             existing_detection.feature_summary = existing_feature_summary
-            existing_detection.source_observation_ids = list(
-                dict.fromkeys(
-                    [
-                        *existing_detection.source_observation_ids,
-                        *product.candidate.source_observation_ids,
-                    ]
-                )
+            existing_detection.source_observation_ids = self._merge_source_observation_ids(
+                existing_detection.source_observation_ids,
+                product.candidate.source_observation_ids,
             )
             await self.storage.update_detection(
                 detection=existing_detection,
@@ -1289,14 +1278,11 @@ class FusionNode:
 
         persist_mode = "update" if decision.action == "upgrade_existing" else "insert"
         try:
-            classification_features = dict(classified.classification.features)
-            if reporting_modality == "localized" and product.localization_branch is not None:
-                if product.localization_branch.wavelength_factor is not None:
-                    classification_features["wavelength_factor"] = product.localization_branch.wavelength_factor
-                if product.localization_branch.dominant_frequency_hz is not None:
-                    classification_features["dominant_frequency_hz"] = product.localization_branch.dominant_frequency_hz
-                if product.localization_branch.alias_cutoff_hz is not None:
-                    classification_features["alias_cutoff_hz"] = product.localization_branch.alias_cutoff_hz
+            classification_features = self._classification_features_for_reporting(
+                product,
+                classified=classified,
+                reporting_modality=reporting_modality,
+            )
             assembly = await self._detection_assembler.assemble(
                 localization_position_m=localization_position_m,
                 localization_confidence=localization_confidence,
@@ -1580,13 +1566,95 @@ class FusionNode:
             self.taxonomy_provider.merge_labels(rows)
         self._taxonomy_refresh_ns = now
 
+    def _record_ingest_result_metrics(self, request: IngestFrameRequest, result: Any) -> None:
+        self._metrics.frames_accepted += 1
+        if result.environment_counts is not None:
+            self._metrics.environment_samples_ingested += result.environment_counts.ingested
+            self._metrics.environment_samples_persisted += result.environment_counts.persisted
+        if result.sequence_gap_count > 0:
+            self._metrics.frame_sequence_gaps += result.sequence_gap_count
+
+        per_node_metrics = self._per_node_frame_metrics.setdefault(
+            request.node.id,
+            {"frames_accepted": 0, "frame_gaps": 0, "last_frame_ns": 0},
+        )
+        per_node_metrics["frames_accepted"] += 1
+        per_node_metrics["last_frame_ns"] = max(
+            per_node_metrics["last_frame_ns"],
+            request.frame.start_time_ns,
+        )
+        if result.sequence_gap_count > 0:
+            per_node_metrics["frame_gaps"] += result.sequence_gap_count
+
+        result.response.queue_depth = self._localization_queue.qsize()
+
+    async def _queue_trigger_candidate(self, request: IngestFrameRequest, result: Any) -> None:
+        if not result.triggered:
+            return
+
+        candidate = EventCandidate(
+            id=f"evt-{next(self._candidate_counter):08d}",
+            source_node_id=request.node.id,
+            event_time_ns=result.event_time_ns,
+            sample_rate_hz=result.sample_rate_hz,
+            source_type=result.source_type,
+            time_quality=result.time_quality,
+            source_observation_ids=result.observation_ids or [],
+        )
+        if await self._enqueue_stage(self._localization_queue, candidate):
+            self._ingest_processor.confirm_trigger(result.event_time_ns)
+            self._metrics.triggers_enqueued += 1
+            result.response.queued_event_id = candidate.id
+            return
+
+        # Queue full — report as not triggered to the caller.
+        result.response.triggered = False
+        self._metrics.triggers_dropped_queue_full += 1
+
+    def _record_stage_enqueue(
+        self,
+        *,
+        stage_name: str,
+        item_id: str,
+        event_time_ns: int,
+    ) -> None:
+        self._realtime_tracker.mark_enqueued(
+            stage_name=stage_name,
+            item_id=item_id,
+            event_time_ns=event_time_ns,
+        )
+
+    def _record_stage_backpressure_drop(
+        self,
+        *,
+        event_time_ns: int,
+        item_id: str,
+        queue: asyncio.Queue,
+        stage_name: str,
+    ) -> None:
+        self._metrics.stage_drops_backpressure += 1
+        now_s = time.monotonic()
+        last_logged_s = self._backpressure_warning_last_logged_s.get(stage_name, 0.0)
+        if now_s - last_logged_s >= self._backpressure_warning_interval_seconds:
+            self._backpressure_warning_last_logged_s[stage_name] = now_s
+            logger.warning(
+                "Dropping pipeline item due to fusion backpressure",
+                extra={
+                    "stage_name": stage_name,
+                    "item_id": item_id,
+                    "event_time_ns": event_time_ns,
+                    "queue_size": queue.qsize(),
+                    "queue_maxsize": queue.maxsize,
+                },
+            )
+
     async def _enqueue_stage(self, queue: asyncio.Queue, item: Any) -> bool:
         tracker_stage_name = self._queue_stage_name(queue)
         tracker_item_id = self._stage_item_id(item)
         tracker_event_time_ns = self._stage_item_event_time_ns(item)
         if self.fusion_config.offline_replay_mode or not self.fusion_config.drop_on_backpressure:
             await queue.put(item)
-            self._realtime_tracker.mark_enqueued(
+            self._record_stage_enqueue(
                 stage_name=tracker_stage_name,
                 item_id=tracker_item_id,
                 event_time_ns=tracker_event_time_ns,
@@ -1594,28 +1662,19 @@ class FusionNode:
             return True
         try:
             queue.put_nowait(item)
-            self._realtime_tracker.mark_enqueued(
+            self._record_stage_enqueue(
                 stage_name=tracker_stage_name,
                 item_id=tracker_item_id,
                 event_time_ns=tracker_event_time_ns,
             )
             return True
         except asyncio.QueueFull:
-            self._metrics.stage_drops_backpressure += 1
-            now_s = time.monotonic()
-            last_logged_s = self._backpressure_warning_last_logged_s.get(tracker_stage_name, 0.0)
-            if now_s - last_logged_s >= self._backpressure_warning_interval_seconds:
-                self._backpressure_warning_last_logged_s[tracker_stage_name] = now_s
-                logger.warning(
-                    "Dropping pipeline item due to fusion backpressure",
-                    extra={
-                        "stage_name": tracker_stage_name,
-                        "item_id": tracker_item_id,
-                        "event_time_ns": tracker_event_time_ns,
-                        "queue_size": queue.qsize(),
-                        "queue_maxsize": queue.maxsize,
-                    },
-                )
+            self._record_stage_backpressure_drop(
+                event_time_ns=tracker_event_time_ns,
+                item_id=tracker_item_id,
+                queue=queue,
+                stage_name=tracker_stage_name,
+            )
             return False
 
     def _queue_stage_name(self, queue: asyncio.Queue) -> str:

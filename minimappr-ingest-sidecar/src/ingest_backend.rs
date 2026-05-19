@@ -204,6 +204,14 @@ pub(crate) struct QueuedRawManifest {
     _queue_permit: Option<RawManifestQueuePermit>,
 }
 
+struct AdmittedEnqueueRequest {
+    received_ns: u128,
+    content_type: Option<String>,
+    capture_envelope: CaptureEnvelope,
+    body_bytes: Vec<u8>,
+    preflight_queue_permit: Option<RawManifestQueuePermit>,
+}
+
 impl QueuedRawManifest {
     pub(crate) fn into_manifest(mut self) -> DspManifest {
         if let Some(queue_permit) = self._queue_permit.as_mut() {
@@ -563,10 +571,12 @@ impl SegmentJournalBackend {
             },
         );
         let manifest_store = ManifestStore::new(&journal_root);
-        if !runtime_config.memory_only_live_path {
-            derived_cache.ensure_initialized().await?;
-            manifest_store.ensure_initialized().await?;
-        }
+        coordinate_runtime_store_initialization(
+            &derived_cache,
+            &manifest_store,
+            runtime_config.memory_only_live_path,
+        )
+        .await?;
         Ok(Self {
             journal_root,
             streams_dir,
@@ -639,6 +649,19 @@ impl SegmentJournalBackend {
         headers: HeaderMap,
         body: Body,
     ) -> BoxedResult<String> {
+        let admitted = self
+            .admit_enqueue_request(max_body_bytes, endpoint, headers, body)
+            .await?;
+        self.enqueue_channel_only(endpoint, admitted).await
+    }
+
+    async fn admit_enqueue_request(
+        &self,
+        max_body_bytes: usize,
+        endpoint: &'static str,
+        headers: HeaderMap,
+        body: Body,
+    ) -> BoxedResult<AdmittedEnqueueRequest> {
         validate_declared_content_length(&headers, max_body_bytes)?;
         let mut preflight_queue_permit = self.preflight_raw_manifest_queue_reserve(&headers)?;
         let received_ns = now_ns()?;
@@ -649,16 +672,13 @@ impl SegmentJournalBackend {
         }
         let (body_bytes, capture_envelope) =
             parse_capture_envelope_for_enqueue(endpoint, body_bytes).await?;
-
-        self.enqueue_channel_only(
-            endpoint,
-            content_type,
+        Ok(AdmittedEnqueueRequest {
             received_ns,
-            &capture_envelope,
-            &body_bytes,
+            content_type,
+            capture_envelope,
+            body_bytes,
             preflight_queue_permit,
-        )
-        .await
+        })
     }
 
     fn preflight_raw_manifest_queue_reserve(
@@ -677,135 +697,88 @@ impl SegmentJournalBackend {
     async fn enqueue_channel_only(
         &self,
         endpoint: &'static str,
+        admitted: AdmittedEnqueueRequest,
+    ) -> BoxedResult<String> {
+        let (journal_id, entry) = self
+            .allocate_live_journal_entry(
+                endpoint,
+                admitted.content_type,
+                admitted.received_ns,
+                &admitted.capture_envelope,
+            )
+            .await;
+
+        self.publish_capture_manifest(
+            &entry,
+            &admitted.body_bytes,
+            admitted.preflight_queue_permit,
+        )
+            .await?;
+        Ok(journal_id)
+    }
+
+    async fn allocate_live_journal_entry(
+        &self,
+        endpoint: &'static str,
         content_type: Option<String>,
         received_ns: u128,
         capture_envelope: &CaptureEnvelope,
-        body_bytes: &[u8],
-        preflight_queue_permit: Option<RawManifestQueuePermit>,
-    ) -> BoxedResult<String> {
-        let (journal_id, entry) = {
-            let mut state = self.state.lock().await;
-            let journal_epoch = state.journal_epoch;
-            let stream_state = state
-                .streams
-                .entry(capture_envelope.stream_key.clone())
-                .or_insert_with(|| StreamJournalState { next_sequence: 1 });
-            if stream_state.next_sequence == 0 {
-                stream_state.next_sequence = 1;
-            }
+    ) -> (String, SegmentJournalEntry) {
+        let mut state = self.state.lock().await;
+        let journal_epoch = state.journal_epoch;
+        let stream_state = state
+            .streams
+            .entry(capture_envelope.stream_key.clone())
+            .or_insert_with(|| StreamJournalState { next_sequence: 1 });
+        if stream_state.next_sequence == 0 {
+            stream_state.next_sequence = 1;
+        }
 
-            let sequence = stream_state.next_sequence;
-            stream_state.next_sequence += 1;
+        let sequence = stream_state.next_sequence;
+        stream_state.next_sequence += 1;
 
-            let journal_id = format!(
-                "jrnl-{:020}-{:020}-{}",
-                journal_epoch, sequence, capture_envelope.stream_key
-            );
-            let observation_id = format!(
-                "obs-{:020}-{:020}-{}",
-                journal_epoch, sequence, capture_envelope.stream_key
-            );
-            let virtual_segment_id = format!("seg-mem-{:020}-{:020}", journal_epoch, sequence);
-            let entry = build_segment_journal_entry(
-                capture_envelope,
-                endpoint,
-                content_type,
-                received_ns,
-                journal_epoch,
-                sequence,
-                journal_id.clone(),
-                observation_id,
-                virtual_segment_id.clone(),
-                stable_segment_path(
-                    &self.journal_root,
-                    &capture_envelope.stream_key,
-                    &virtual_segment_id,
-                ),
-                0,
-                0,
-            );
-            (journal_id, entry)
-        };
-
-        self.publish_capture_manifest(&entry, body_bytes, preflight_queue_permit)
-            .await?;
-        Ok(journal_id)
+        let journal_id = format!(
+            "jrnl-{:020}-{:020}-{}",
+            journal_epoch, sequence, capture_envelope.stream_key
+        );
+        let observation_id = format!(
+            "obs-{:020}-{:020}-{}",
+            journal_epoch, sequence, capture_envelope.stream_key
+        );
+        let virtual_segment_id = format!("seg-mem-{:020}-{:020}", journal_epoch, sequence);
+        let entry = build_segment_journal_entry(
+            capture_envelope,
+            endpoint,
+            content_type,
+            received_ns,
+            journal_epoch,
+            sequence,
+            journal_id.clone(),
+            observation_id,
+            virtual_segment_id.clone(),
+            stable_segment_path(
+                &self.journal_root,
+                &capture_envelope.stream_key,
+                &virtual_segment_id,
+            ),
+            0,
+            0,
+        );
+        (journal_id, entry)
     }
 
     async fn publish_capture_manifest(
         &self,
         entry: &SegmentJournalEntry,
         raw_bytes: &[u8],
-        mut preflight_queue_permit: Option<RawManifestQueuePermit>,
+        preflight_queue_permit: Option<RawManifestQueuePermit>,
     ) -> BoxedResult<()> {
-        let handle = entry.payload_handle();
-        let manifest = DspManifest {
-            manifest_id: format!("manifest-{}", entry.journal_id),
-            manifest_type: "raw_journal_append".to_string(),
-            // Raw audio processing must be ordered on firmware packet time.
-            // Receipt time stays on the journal entry for freshness/backlog diagnostics.
-            created_ns: entry.toa_ns.unwrap_or(entry.ingest_received_ns as u64) as u128,
-            source_handles: vec![handle],
-            derived_handle: None,
-            localization: None,
-            classifier_render: None,
-            birdnet: None,
-            coverage_stats: None,
-            promotion_ready: false,
-            env_samples: None,
-            // raw_payload is #[serde(skip)] — not written to disk.
-            node_context: None,
-            cluster_id: None,
-            cluster_sensor_positions: None,
-            raw_payload: None,
-            raw_render_bytes: None,
-            raw_audio_frame: None,
-            raw_audio_bytes: None,
-        };
-        // Deliver audio to the DSP worker exclusively via the in-process channel.
-        // If the channel is not connected, the pipeline is misconfigured — fail fast
-        // so the caller knows audio is not being processed, rather than silently
-        // falling back to disk and violating the "never write raw audio to disk" invariant.
-        let Some(tx) = &self.runtime_config.raw_manifest_tx else {
-            return Err(Box::new(InvalidIngestEnvelopeError::new(
-                "raw manifest channel not configured — DSP worker is not connected",
-            )));
-        };
-        let mut manifest_with_payload = manifest;
-        manifest_with_payload.raw_payload = Some(raw_bytes.to_vec());
-        // Embed node spec and frame metadata so Python can reconstruct node context
-        // without relying on any persisted raw audio payload.
-        let node_value_opt = if raw_bytes.starts_with(b"MMB1") {
-            // Binary MMB1: parse node spec from the binary header.
-            crate::envelope::extract_mmb1_node_json(raw_bytes)
-        } else {
-            // StoreForward JSON: extract the top-level "node" object.
-            serde_json::from_slice::<serde_json::Value>(raw_bytes)
-                .ok()
-                .and_then(|body_json| body_json.get("node").cloned())
-        };
-        if let Some(node_value) = node_value_opt {
-            manifest_with_payload.node_context = Some(serde_json::json!({
-                "node": node_value,
-                "toa_ns": entry.toa_ns,
-                "time_quality": entry.time_quality,
-                "source_type": entry.source_type,
-            }));
-        }
-        if let Some(queue_permit) = preflight_queue_permit.as_mut() {
-            queue_permit.try_resize(raw_bytes.len())?;
-        }
-        let queue_permit = if let Some(queue_permit) = preflight_queue_permit {
-            Some(queue_permit)
-        } else if let Some(queue_backpressure) =
-            &self.runtime_config.raw_manifest_queue_backpressure
-        {
-            Some(queue_backpressure.try_reserve(raw_bytes.len())?)
-        } else {
-            None
-        };
+        let tx = self.raw_manifest_sender()?;
+        let manifest = self.build_validated_raw_capture_manifest(entry, raw_bytes);
+        let queue_permit =
+            self.finalize_raw_manifest_queue_permit(raw_bytes.len(), preflight_queue_permit)?;
         let queued_manifest = QueuedRawManifest {
-            manifest: manifest_with_payload,
+            manifest,
             _queue_permit: queue_permit,
         };
         match tx.try_send(queued_manifest) {
@@ -813,14 +786,85 @@ impl SegmentJournalBackend {
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 Err(Box::new(RawManifestChannelFullError {
                     channel_capacity: self.runtime_config.raw_manifest_channel_capacity,
-                }))
+                }) as BoxedError)
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                 Err(Box::new(InvalidIngestEnvelopeError::new(
                     "raw manifest channel receiver unavailable — DSP worker stopped",
-                )))
+                )) as BoxedError)
             }
         }
+    }
+
+    fn raw_manifest_sender(&self) -> BoxedResult<&mpsc::Sender<QueuedRawManifest>> {
+        self.runtime_config
+            .raw_manifest_tx
+            .as_ref()
+            .ok_or_else(|| {
+                Box::new(InvalidIngestEnvelopeError::new(
+                    "raw manifest channel not configured — DSP worker is not connected",
+                )) as BoxedError
+            })
+    }
+
+    fn build_validated_raw_capture_manifest(
+        &self,
+        entry: &SegmentJournalEntry,
+        raw_bytes: &[u8],
+    ) -> DspManifest {
+        let mut manifest = DspManifest {
+            manifest_id: format!("manifest-{}", entry.journal_id),
+            manifest_type: "raw_journal_append".to_string(),
+            created_ns: entry.toa_ns.unwrap_or(entry.ingest_received_ns as u64) as u128,
+            source_handles: vec![entry.payload_handle()],
+            derived_handle: None,
+            localization: None,
+            classifier_render: None,
+            birdnet: None,
+            coverage_stats: None,
+            promotion_ready: false,
+            env_samples: None,
+            node_context: None,
+            cluster_id: None,
+            cluster_sensor_positions: None,
+            raw_payload: Some(raw_bytes.to_vec()),
+            raw_render_bytes: None,
+            raw_audio_frame: None,
+            raw_audio_bytes: None,
+        };
+        let node_value_opt = if raw_bytes.starts_with(b"MMB1") {
+            crate::envelope::extract_mmb1_node_json(raw_bytes)
+        } else {
+            serde_json::from_slice::<serde_json::Value>(raw_bytes)
+                .ok()
+                .and_then(|body_json| body_json.get("node").cloned())
+        };
+        if let Some(node_value) = node_value_opt {
+            manifest.node_context = Some(serde_json::json!({
+                "node": node_value,
+                "toa_ns": entry.toa_ns,
+                "time_quality": entry.time_quality,
+                "source_type": entry.source_type,
+            }));
+        }
+        manifest
+    }
+
+    fn finalize_raw_manifest_queue_permit(
+        &self,
+        requested_bytes: usize,
+        mut preflight_queue_permit: Option<RawManifestQueuePermit>,
+    ) -> BoxedResult<Option<RawManifestQueuePermit>> {
+        if let Some(queue_permit) = preflight_queue_permit.as_mut() {
+            queue_permit.try_resize(requested_bytes)?;
+        }
+        if let Some(queue_permit) = preflight_queue_permit {
+            return Ok(Some(queue_permit));
+        }
+        if let Some(queue_backpressure) = &self.runtime_config.raw_manifest_queue_backpressure {
+            return Ok(Some(queue_backpressure.try_reserve(requested_bytes)?));
+        }
+        Ok(None)
     }
 
     async fn refresh_segment_pin_counts(
@@ -917,7 +961,7 @@ async fn read_body_bytes(body: Body, max_body_bytes: usize) -> BoxedResult<Vec<u
             Err(error) => {
                 let boxed: BoxedError = Box::new(error);
                 if is_client_disconnect(boxed.as_ref()) {
-                    return Err(Box::new(ClientDisconnectError));
+                    return Err(Box::new(ClientDisconnectError) as BoxedError);
                 }
                 return Err(boxed);
             }
@@ -926,7 +970,7 @@ async fn read_body_bytes(body: Body, max_body_bytes: usize) -> BoxedResult<Vec<u
             if bytes.len().saturating_add(chunk.len()) > max_body_bytes {
                 return Err(Box::new(BodyTooLargeError {
                     limit_bytes: max_body_bytes,
-                }));
+                }) as BoxedError);
             }
             bytes.extend_from_slice(chunk);
         }
@@ -953,6 +997,19 @@ async fn parse_capture_envelope_for_enqueue(
         .map_err(InvalidIngestEnvelopeError::new)
         .map_err(|error| -> BoxedError { Box::new(error) })?;
     Ok((body_bytes, envelope))
+}
+
+async fn coordinate_runtime_store_initialization(
+    derived_cache: &DerivedCache,
+    manifest_store: &ManifestStore,
+    memory_only_live_path: bool,
+) -> BoxedResult<()> {
+    if memory_only_live_path {
+        return Ok(());
+    }
+    derived_cache.ensure_initialized().await?;
+    manifest_store.ensure_initialized().await?;
+    Ok(())
 }
 
 async fn open_or_advance_epoch(journal_root: &Path, _streams_dir: &Path) -> BoxedResult<u64> {

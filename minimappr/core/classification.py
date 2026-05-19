@@ -55,6 +55,19 @@ class ClassifiedResult:
     backend_failed: bool = False
 
 
+@dataclass(slots=True)
+class _ClassificationPathCandidate:
+    classification: ClassificationResult
+    signal: np.ndarray
+    path: str
+
+
+@dataclass(slots=True)
+class _BeamformedClassificationAttempt:
+    candidate: _ClassificationPathCandidate | None
+    error: str | None = None
+
+
 class ClassificationOrchestrator:
     """Runs the omni + beamformed dual classification path.
 
@@ -108,64 +121,36 @@ class ClassificationOrchestrator:
         event_time_ns: int,
     ) -> ClassifiedResult:
         """Run classification pipeline and return the best result with taxonomy."""
-        omni_signal = reference_signal
-        if self._classification_preprocessor is not None:
-            omni_signal = self._classification_preprocessor.process(
-                omni_signal,
-                sample_rate_hz,
-            )
-
-        omni_classification = await self._classify_with_timeout(omni_signal, sample_rate_hz)
-        backend_failed = omni_classification.features.get("reason") == "classification_error"
-        classification = omni_classification
-        classification_signal = omni_signal
-        classification_path = "omni"
-        beamformed_classification: ClassificationResult | None = None
-        beamforming_error: str | None = None
-
-        if (
-            self._beamformer is not None
-            and capability_tier != "alerting_only"
-            and len(selected_sensor_ids) >= self._beamformed_min_sensors
-        ):
-            try:
-                sound_speed = self._environment_provider.get_speed_of_sound(
-                    localization_position_m
-                )
-                beamformed_signal = await asyncio.to_thread(
-                    self._beamformer.beamform,
-                    selected_positions,
-                    selected_windows,
-                    sample_rate_hz,
-                    localization_position_m,
-                    sound_speed,
-                )
-
-                if self._classification_preprocessor is not None:
-                    beamformed_signal = self._classification_preprocessor.process(
-                        beamformed_signal,
-                        sample_rate_hz,
-                    )
-
-                beamformed_classification = await self._classify_with_timeout(
-                    beamformed_signal, sample_rate_hz
-                )
-                if beamformed_classification.confidence > (
-                    omni_classification.confidence + self._confidence_margin
-                ):
-                    classification = beamformed_classification
-                    classification_signal = beamformed_signal
-                    classification_path = f"beamformed:{self._beamformer.__class__.__name__}"
-            except Exception as exc:  # pragma: no cover - resilience path
-                beamforming_error = f"{type(exc).__name__}: {exc}"
+        omni_candidate = await self._classify_omni_candidate(
+            reference_signal=reference_signal,
+            sample_rate_hz=sample_rate_hz,
+        )
+        backend_failed = self._classification_backend_failed(omni_candidate.classification)
+        beamformed_attempt = await self._classify_beamformed_candidate_if_eligible(
+            capability_tier=capability_tier,
+            sample_rate_hz=sample_rate_hz,
+            selected_sensor_ids=selected_sensor_ids,
+            selected_positions=selected_positions,
+            selected_windows=selected_windows,
+            localization_position_m=localization_position_m,
+        )
+        winning_candidate = self._select_winning_candidate(
+            omni_candidate=omni_candidate,
+            beamformed_candidate=beamformed_attempt.candidate,
+        )
+        beamformed_classification = (
+            None
+            if beamformed_attempt.candidate is None
+            else beamformed_attempt.candidate.classification
+        )
 
         return await self._build_result(
-            classification=classification,
-            omni_classification=omni_classification,
+            classification=winning_candidate.classification,
+            omni_classification=omni_candidate.classification,
             beamformed_classification=beamformed_classification,
-            classification_path=classification_path,
-            classification_signal=classification_signal,
-            beamforming_error=beamforming_error,
+            classification_path=winning_candidate.path,
+            classification_signal=winning_candidate.signal,
+            beamforming_error=beamformed_attempt.error,
             event_time_ns=event_time_ns,
             backend_failed=backend_failed,
         )
@@ -178,21 +163,17 @@ class ClassificationOrchestrator:
         event_time_ns: int,
     ) -> ClassifiedResult:
         """Classify a full-band omni signal without beamforming."""
-        omni_signal = reference_signal
-        if self._classification_preprocessor is not None:
-            omni_signal = self._classification_preprocessor.process(
-                omni_signal,
-                sample_rate_hz,
-            )
-
-        omni_classification = await self._classify_with_timeout(omni_signal, sample_rate_hz)
-        backend_failed = omni_classification.features.get("reason") == "classification_error"
+        omni_candidate = await self._classify_omni_candidate(
+            reference_signal=reference_signal,
+            sample_rate_hz=sample_rate_hz,
+        )
+        backend_failed = self._classification_backend_failed(omni_candidate.classification)
         return await self._build_result(
-            classification=omni_classification,
-            omni_classification=omni_classification,
+            classification=omni_candidate.classification,
+            omni_classification=omni_candidate.classification,
             beamformed_classification=None,
-            classification_path="omni",
-            classification_signal=omni_signal,
+            classification_path=omni_candidate.path,
+            classification_signal=omni_candidate.signal,
             beamforming_error=None,
             event_time_ns=event_time_ns,
             backend_failed=backend_failed,
@@ -218,64 +199,182 @@ class ClassificationOrchestrator:
             event_time_ns=event_time_ns,
         )
 
+    def _prepare_signal_for_classification(
+        self,
+        signal: np.ndarray,
+        sample_rate_hz: int,
+    ) -> np.ndarray:
+        if self._classification_preprocessor is None:
+            return signal
+        return self._classification_preprocessor.process(signal, sample_rate_hz)
+
+    async def _classify_omni_candidate(
+        self,
+        *,
+        reference_signal: np.ndarray,
+        sample_rate_hz: int,
+    ) -> _ClassificationPathCandidate:
+        omni_signal = self._prepare_signal_for_classification(reference_signal, sample_rate_hz)
+        return _ClassificationPathCandidate(
+            classification=await self._classify_with_timeout(omni_signal, sample_rate_hz),
+            signal=omni_signal,
+            path="omni",
+        )
+
+    def _should_attempt_beamformed_classification(
+        self,
+        *,
+        capability_tier: str,
+        selected_sensor_ids: list[str],
+    ) -> bool:
+        return (
+            self._beamformer is not None
+            and capability_tier != "alerting_only"
+            and len(selected_sensor_ids) >= self._beamformed_min_sensors
+        )
+
+    async def _classify_beamformed_candidate_if_eligible(
+        self,
+        *,
+        capability_tier: str,
+        sample_rate_hz: int,
+        selected_sensor_ids: list[str],
+        selected_positions: dict[str, np.ndarray],
+        selected_windows: dict[str, np.ndarray],
+        localization_position_m: tuple[float, float, float],
+    ) -> _BeamformedClassificationAttempt:
+        if not self._should_attempt_beamformed_classification(
+            capability_tier=capability_tier,
+            selected_sensor_ids=selected_sensor_ids,
+        ):
+            return _BeamformedClassificationAttempt(candidate=None)
+
+        assert self._beamformer is not None
+        try:
+            sound_speed = self._environment_provider.get_speed_of_sound(localization_position_m)
+            beamformed_signal = await asyncio.to_thread(
+                self._beamformer.beamform,
+                selected_positions,
+                selected_windows,
+                sample_rate_hz,
+                localization_position_m,
+                sound_speed,
+            )
+            prepared_signal = self._prepare_signal_for_classification(
+                beamformed_signal,
+                sample_rate_hz,
+            )
+            return _BeamformedClassificationAttempt(
+                candidate=_ClassificationPathCandidate(
+                    classification=await self._classify_with_timeout(prepared_signal, sample_rate_hz),
+                    signal=prepared_signal,
+                    path=f"beamformed:{self._beamformer.__class__.__name__}",
+                )
+            )
+        except Exception as exc:  # pragma: no cover - resilience path
+            return _BeamformedClassificationAttempt(
+                candidate=None,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+
+    def _select_winning_candidate(
+        self,
+        *,
+        omni_candidate: _ClassificationPathCandidate,
+        beamformed_candidate: _ClassificationPathCandidate | None,
+    ) -> _ClassificationPathCandidate:
+        if beamformed_candidate is None:
+            return omni_candidate
+        if beamformed_candidate.classification.confidence > (
+            omni_candidate.classification.confidence + self._confidence_margin
+        ):
+            return beamformed_candidate
+        return omni_candidate
+
+    def _classification_backend_failed(self, classification: ClassificationResult) -> bool:
+        return classification.features.get("reason") == "classification_error"
+
+    async def _run_classifier_with_timeout(
+        self,
+        signal: np.ndarray,
+        sample_rate_hz: int,
+    ) -> ClassificationResult:
+        return await asyncio.wait_for(
+            asyncio.to_thread(self._classifier.classify, signal, sample_rate_hz),
+            timeout=self._stage_timeout_seconds,
+        )
+
     async def _classify_with_timeout(
         self, signal: np.ndarray, sample_rate_hz: int
     ) -> ClassificationResult:
         try:
-            return await asyncio.wait_for(
-                asyncio.to_thread(self._classifier.classify, signal, sample_rate_hz),
-                timeout=self._stage_timeout_seconds,
-            )
+            return await self._run_classifier_with_timeout(signal, sample_rate_hz)
         except asyncio.TimeoutError:
-            logger.warning(
-                "Classification timed out after %.3fs", self._stage_timeout_seconds
-            )
-            try:
-                self._classifier.cancel_pending()
-            except Exception:  # noqa: BLE001 - timeout path should never crash classification
-                logger.exception("Classifier cancellation hook failed after timeout")
-            return ClassificationResult(
-                label="timeout",
-                confidence=0.0,
-                scores={},
-                features={"reason": "classification_timeout"},
+            return self._timeout_degradation_result(
+                warning_message="Classification timed out after %.3fs",
+                cancellation_failure_message="Classifier cancellation hook failed after timeout",
             )
         except Exception as exc:  # noqa: BLE001 - classifier backends are optional/runtime-boundary code
-            message = str(exc).strip()
-            if "cancel" in message.lower():
-                logger.warning("Classification backend cancelled analysis; retrying once: %s", message)
-                try:
-                    return await asyncio.wait_for(
-                        asyncio.to_thread(self._classifier.classify, signal, sample_rate_hz),
-                        timeout=self._stage_timeout_seconds,
-                    )
-                except asyncio.TimeoutError:
-                    logger.warning(
-                        "Classification retry timed out after %.3fs", self._stage_timeout_seconds
-                    )
-                    try:
-                        self._classifier.cancel_pending()
-                    except Exception:  # noqa: BLE001
-                        logger.exception("Classifier cancellation hook failed after retry timeout")
-                    return ClassificationResult(
-                        label="timeout",
-                        confidence=0.0,
-                        scores={},
-                        features={"reason": "classification_timeout"},
-                    )
-                except Exception as retry_exc:  # noqa: BLE001
-                    message = str(retry_exc).strip() or type(retry_exc).__name__
-                    exc = retry_exc
-            logger.warning("Classification backend failed; degrading to unknown: %s", message or type(exc).__name__)
-            return ClassificationResult(
-                label="unknown",
-                confidence=0.0,
-                scores={},
-                features={
-                    "reason": "classification_error",
-                    "error_type": type(exc).__name__,
-                },
+            retry_result = await self._retry_cancelled_classification(
+                signal,
+                sample_rate_hz,
+                exc,
             )
+            if retry_result is not None:
+                return retry_result
+            return self._exception_degradation_result(exc)
+
+    async def _retry_cancelled_classification(
+        self,
+        signal: np.ndarray,
+        sample_rate_hz: int,
+        exc: Exception,
+    ) -> ClassificationResult | None:
+        message = str(exc).strip()
+        if "cancel" not in message.lower():
+            return None
+
+        logger.warning("Classification backend cancelled analysis; retrying once: %s", message)
+        try:
+            return await self._run_classifier_with_timeout(signal, sample_rate_hz)
+        except asyncio.TimeoutError:
+            return self._timeout_degradation_result(
+                warning_message="Classification retry timed out after %.3fs",
+                cancellation_failure_message="Classifier cancellation hook failed after retry timeout",
+            )
+        except Exception as retry_exc:  # noqa: BLE001
+            return self._exception_degradation_result(retry_exc)
+
+    def _timeout_degradation_result(
+        self,
+        *,
+        warning_message: str,
+        cancellation_failure_message: str,
+    ) -> ClassificationResult:
+        logger.warning(warning_message, self._stage_timeout_seconds)
+        try:
+            self._classifier.cancel_pending()
+        except Exception:  # noqa: BLE001 - timeout path should never crash classification
+            logger.exception(cancellation_failure_message)
+        return ClassificationResult(
+            label="timeout",
+            confidence=0.0,
+            scores={},
+            features={"reason": "classification_timeout"},
+        )
+
+    def _exception_degradation_result(self, exc: Exception) -> ClassificationResult:
+        message = str(exc).strip() or type(exc).__name__
+        logger.warning("Classification backend failed; degrading to unknown: %s", message)
+        return ClassificationResult(
+            label="unknown",
+            confidence=0.0,
+            scores={},
+            features={
+                "reason": "classification_error",
+                "error_type": type(exc).__name__,
+            },
+        )
 
     async def _build_result(
         self,

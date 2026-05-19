@@ -38,6 +38,13 @@ def _array_aperture_m(sensor_positions: dict[str, np.ndarray]) -> float:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _WavelengthObservability:
+    alias_cutoff_hz: float
+    dominant_frequency_hz: float
+    wavelength_factor: float
+
+
 @dataclass(slots=True)
 class LocalizationDispatcher:
     strategy: str = "fixed"
@@ -73,8 +80,11 @@ class LocalizationDispatcher:
     def fallback_count(self) -> int:
         return self._fallback_count
 
+    def _normalized_strategy(self) -> str:
+        return self.strategy.strip().lower()
+
     def select_algorithm_name(self, sensor_positions: dict[str, np.ndarray]) -> str:
-        strategy = self.strategy.strip().lower()
+        strategy = self._normalized_strategy()
         if strategy == "fixed":
             return self.default_algorithm
         if strategy == "geometry_aware":
@@ -92,27 +102,14 @@ class LocalizationDispatcher:
         humidity_fraction: float,
         sensor_weights: dict[str, float] | None = None,
     ) -> LocalizationResult:
-        strategy = self.strategy.strip().lower()
-        if strategy == "cascade":
-            result = self._localize_with_cascade(
-                sensor_positions=sensor_positions,
-                sensor_windows=sensor_windows,
-                sample_rate_hz=sample_rate_hz,
-                temperature_c=temperature_c,
-                humidity_fraction=humidity_fraction,
-                sensor_weights=sensor_weights,
-            )
-        else:
-            name = self.select_algorithm_name(sensor_positions)
-            result = self._run_algorithm(
-                name=name,
-                sensor_positions=sensor_positions,
-                sensor_windows=sensor_windows,
-                sample_rate_hz=sample_rate_hz,
-                temperature_c=temperature_c,
-                humidity_fraction=humidity_fraction,
-                sensor_weights=sensor_weights,
-            )
+        result = self._localize_for_strategy(
+            sensor_positions=sensor_positions,
+            sensor_windows=sensor_windows,
+            sample_rate_hz=sample_rate_hz,
+            temperature_c=temperature_c,
+            humidity_fraction=humidity_fraction,
+            sensor_weights=sensor_weights,
+        )
         return self._apply_wavelength_penalty(
             result=result,
             sensor_positions=sensor_positions,
@@ -142,7 +139,6 @@ class LocalizationDispatcher:
                 humidity_fraction=humidity_fraction,
                 sensor_weights=sensor_weights,
             )
-        self._last_algorithm = "gcc_phat"
         self._last_attempted = "gcc_phat"
         if sensor_weights is not None and self._localizer_supports_sensor_weights(
             fallback,
@@ -166,8 +162,11 @@ class LocalizationDispatcher:
                 humidity_fraction=humidity_fraction,
                 fixed_z_m=fixed_z_m,
             )
-        result.attempted_algorithm = "gcc_phat"
-        result.resolved_algorithm = "gcc_phat"
+        self._record_algorithm_provenance(
+            result,
+            attempted_algorithm="gcc_phat",
+            resolved_algorithm="gcc_phat",
+        )
         return self._apply_wavelength_penalty(
             result=result,
             sensor_positions=sensor_positions,
@@ -175,6 +174,56 @@ class LocalizationDispatcher:
             sample_rate_hz=sample_rate_hz,
             temperature_c=temperature_c,
             humidity_fraction=humidity_fraction,
+        )
+
+    def _localize_for_strategy(
+        self,
+        *,
+        sensor_positions: dict[str, np.ndarray],
+        sensor_windows: dict[str, np.ndarray],
+        sample_rate_hz: int,
+        temperature_c: float,
+        humidity_fraction: float,
+        sensor_weights: dict[str, float] | None = None,
+    ) -> LocalizationResult:
+        if self._normalized_strategy() == "cascade":
+            return self._localize_with_cascade(
+                sensor_positions=sensor_positions,
+                sensor_windows=sensor_windows,
+                sample_rate_hz=sample_rate_hz,
+                temperature_c=temperature_c,
+                humidity_fraction=humidity_fraction,
+                sensor_weights=sensor_weights,
+            )
+        return self._localize_selected_algorithm(
+            name=self.select_algorithm_name(sensor_positions),
+            sensor_positions=sensor_positions,
+            sensor_windows=sensor_windows,
+            sample_rate_hz=sample_rate_hz,
+            temperature_c=temperature_c,
+            humidity_fraction=humidity_fraction,
+            sensor_weights=sensor_weights,
+        )
+
+    def _localize_selected_algorithm(
+        self,
+        *,
+        name: str,
+        sensor_positions: dict[str, np.ndarray],
+        sensor_windows: dict[str, np.ndarray],
+        sample_rate_hz: int,
+        temperature_c: float,
+        humidity_fraction: float,
+        sensor_weights: dict[str, float] | None = None,
+    ) -> LocalizationResult:
+        return self._run_algorithm(
+            name=name,
+            sensor_positions=sensor_positions,
+            sensor_windows=sensor_windows,
+            sample_rate_hz=sample_rate_hz,
+            temperature_c=temperature_c,
+            humidity_fraction=humidity_fraction,
+            sensor_weights=sensor_weights,
         )
 
     def _geometry_aware_choice(self, sensor_positions: dict[str, np.ndarray]) -> str:
@@ -199,7 +248,7 @@ class LocalizationDispatcher:
         humidity_fraction: float,
         sensor_weights: dict[str, float] | None = None,
     ) -> LocalizationResult:
-        result = self._run_algorithm(
+        result = self._localize_selected_algorithm(
             name=self.default_algorithm,
             sensor_positions=sensor_positions,
             sensor_windows=sensor_windows,
@@ -208,16 +257,16 @@ class LocalizationDispatcher:
             humidity_fraction=humidity_fraction,
             sensor_weights=sensor_weights,
         )
-        if result.confidence >= self.refine_confidence_threshold:
+        if not self._should_refine_cascade_result(result):
             return result
 
         best = result
         best_name = self.default_algorithm
-        for name in ("music", "esprit", "srp_phat"):
+        for name in self._cascade_refinement_names():
             if name == self.default_algorithm or name not in self.algorithms:
                 continue
             try:
-                candidate = self._run_algorithm(
+                candidate = self._localize_selected_algorithm(
                     name=name,
                     sensor_positions=sensor_positions,
                     sensor_windows=sensor_windows,
@@ -231,12 +280,21 @@ class LocalizationDispatcher:
                     best_name = name
             except LocalizationError:
                 continue
-        self._last_algorithm = best_name
-        best.attempted_algorithm = self.default_algorithm
-        best.resolved_algorithm = best_name
+        self._record_algorithm_provenance(
+            best,
+            attempted_algorithm=self.default_algorithm,
+            resolved_algorithm=best_name,
+        )
         if best_name != self.default_algorithm:
             self._fallback_count += 1
         return best
+
+    def _should_refine_cascade_result(self, result: LocalizationResult) -> bool:
+        return result.confidence < self.refine_confidence_threshold
+
+    @staticmethod
+    def _cascade_refinement_names() -> tuple[str, ...]:
+        return ("music", "esprit", "srp_phat")
 
     def _run_algorithm(
         self,
@@ -263,9 +321,11 @@ class LocalizationDispatcher:
                 humidity_fraction=humidity_fraction,
                 sensor_weights=sensor_weights,
             )
-            self._last_algorithm = attempted
-            result.attempted_algorithm = attempted
-            result.resolved_algorithm = attempted
+            self._record_algorithm_provenance(
+                result,
+                attempted_algorithm=attempted,
+                resolved_algorithm=attempted,
+            )
             return result
         except LocalizationError:
             if name == "gcc_phat":
@@ -280,11 +340,25 @@ class LocalizationDispatcher:
                 humidity_fraction=humidity_fraction,
                 sensor_weights=sensor_weights,
             )
-            self._last_algorithm = "gcc_phat"
             self._fallback_count += 1
-            result.attempted_algorithm = attempted
-            result.resolved_algorithm = "gcc_phat"
+            self._record_algorithm_provenance(
+                result,
+                attempted_algorithm=attempted,
+                resolved_algorithm="gcc_phat",
+            )
             return result
+
+    def _record_algorithm_provenance(
+        self,
+        result: LocalizationResult,
+        *,
+        attempted_algorithm: str,
+        resolved_algorithm: str,
+    ) -> None:
+        self._last_attempted = attempted_algorithm
+        self._last_algorithm = resolved_algorithm
+        result.attempted_algorithm = attempted_algorithm
+        result.resolved_algorithm = resolved_algorithm
 
     def _apply_wavelength_penalty(
         self,
@@ -299,11 +373,41 @@ class LocalizationDispatcher:
         if not self.wavelength_gating_enabled:
             return result
 
-        reference_window = sensor_windows.get(result.reference_sensor)
-        if reference_window is None and sensor_windows:
-            reference_window = next(iter(sensor_windows.values()))
-        if reference_window is None or len(sensor_positions) < 2:
+        observability = self._compute_wavelength_observability(
+            reference_sensor=result.reference_sensor,
+            sensor_positions=sensor_positions,
+            sensor_windows=sensor_windows,
+            sample_rate_hz=sample_rate_hz,
+            temperature_c=temperature_c,
+            humidity_fraction=humidity_fraction,
+        )
+        if observability is None:
             return result
+
+        result.alias_cutoff_hz = observability.alias_cutoff_hz
+        result.dominant_frequency_hz = observability.dominant_frequency_hz
+        result.wavelength_factor = observability.wavelength_factor
+        result.confidence = float(
+            np.clip(result.confidence * observability.wavelength_factor, 0.0, 1.0)
+        )
+        return result
+
+    def _compute_wavelength_observability(
+        self,
+        *,
+        reference_sensor: str,
+        sensor_positions: dict[str, np.ndarray],
+        sensor_windows: dict[str, np.ndarray],
+        sample_rate_hz: int,
+        temperature_c: float,
+        humidity_fraction: float,
+    ) -> _WavelengthObservability | None:
+        reference_window = self._reference_window_for_observability(
+            reference_sensor=reference_sensor,
+            sensor_windows=sensor_windows,
+        )
+        if reference_window is None or len(sensor_positions) < 2:
+            return None
 
         sensor_ids = sorted(sensor_positions.keys())
         positions = np.vstack([np.asarray(sensor_positions[sensor_id], dtype=np.float64) for sensor_id in sensor_ids])
@@ -312,23 +416,33 @@ class LocalizationDispatcher:
             c_sound=speed_of_sound_mps(temperature_c, humidity_fraction),
         )
         dominant_hz = dominant_frequency_hz(reference_window, sample_rate_hz)
-        result.alias_cutoff_hz = float(max(alias_cutoff_hz, 0.0))
-        result.dominant_frequency_hz = float(max(dominant_hz, 0.0))
+        return _WavelengthObservability(
+            alias_cutoff_hz=float(max(alias_cutoff_hz, 0.0)),
+            dominant_frequency_hz=float(max(dominant_hz, 0.0)),
+            wavelength_factor=self._wavelength_factor(alias_cutoff_hz, dominant_hz),
+        )
 
+    @staticmethod
+    def _reference_window_for_observability(
+        *,
+        reference_sensor: str,
+        sensor_windows: dict[str, np.ndarray],
+    ) -> np.ndarray | None:
+        reference_window = sensor_windows.get(reference_sensor)
+        if reference_window is None and sensor_windows:
+            return next(iter(sensor_windows.values()))
+        return reference_window
+
+    def _wavelength_factor(self, alias_cutoff_hz: float, dominant_hz: float) -> float:
         if alias_cutoff_hz <= 0.0 or dominant_hz <= 0.0:
-            result.wavelength_factor = 1.0
-            return result
-
-        factor = float(
+            return 1.0
+        return float(
             np.clip(
                 alias_cutoff_hz / max(dominant_hz, alias_cutoff_hz),
                 self.wavelength_penalty_floor,
                 1.0,
             )
         )
-        result.wavelength_factor = factor
-        result.confidence = float(np.clip(result.confidence * factor, 0.0, 1.0))
-        return result
 
     @staticmethod
     def _localizer_supports_sensor_weights(localizer, *, method_name: str = "localize") -> bool:

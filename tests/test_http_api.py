@@ -480,7 +480,7 @@ def test_system_diagnostics_includes_sidecar_health(monkeypatch, tmp_path: Path)
     monkeypatch.setattr("minimappr.main._supervise_ingest_sidecar", fake_supervise_ingest_sidecar)
     monkeypatch.setattr(
         "minimappr.main._fetch_ingest_sidecar_health",
-        lambda port: {"status": "ok", "backend": {"storage_mode": "journal", "entry_count": 3}},
+        lambda *args, **kwargs: {"status": "ok", "backend": {"storage_mode": "journal", "entry_count": 3}},
     )
 
     with TestClient(app) as client:
@@ -556,7 +556,7 @@ def test_system_diagnostics_reports_stream_consumer_state(monkeypatch, tmp_path:
     monkeypatch.setattr("minimappr.main.IngestStreamConsumer", _FakeIngestStreamConsumer)
     monkeypatch.setattr(
         "minimappr.main._fetch_ingest_sidecar_health",
-        lambda port: {"status": "ok", "backend": {"storage_mode": "memory_only_live_path"}},
+        lambda *args, **kwargs: {"status": "ok", "backend": {"storage_mode": "memory_only_live_path"}},
     )
 
     with TestClient(app) as client:
@@ -596,13 +596,20 @@ async def test_start_ingest_sidecar_passes_classifier_helper_env(monkeypatch, tm
         captured["env"] = env
         return _FakeProcess()
 
-    async def fake_wait_for_ingest_sidecar_ready(process, *, port, timeout_seconds=5.0, poll_interval_seconds=0.1):
-        del process, port, timeout_seconds, poll_interval_seconds
+    async def fake_wait_for_ingest_sidecar_ready(
+        process,
+        *,
+        port,
+        timeout_seconds=5.0,
+        poll_interval_seconds=0.1,
+        probe_ready=None,
+    ):
+        del process, port, timeout_seconds, poll_interval_seconds, probe_ready
         return None
 
     monkeypatch.setattr("minimappr.main.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
     monkeypatch.setattr("minimappr.main._wait_for_ingest_sidecar_ready", fake_wait_for_ingest_sidecar_ready)
-    monkeypatch.setattr("minimappr.main._probe_ingest_sidecar_ready", lambda port: False)
+    monkeypatch.setattr("minimappr.main._probe_ingest_sidecar_ready", lambda *args, **kwargs: False)
     monkeypatch.delenv("MINIMAPPR_SIDECAR_CLASSIFIER_COMMAND_JSON", raising=False)
 
     settings = Settings(

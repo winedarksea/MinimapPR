@@ -9,11 +9,10 @@ import logging
 import os
 import sys
 import time
-import multiprocessing
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 import urllib.error
 import urllib.request
 
@@ -27,19 +26,52 @@ from starlette.requests import ClientDisconnect
 
 from minimappr.api.binary_ingest import parse_binary_ingest_payload
 from minimappr.api.live import LiveEventHub
-from minimappr.api.spool_consumer import IngestSpoolConfig, IngestSpoolConsumer
+from minimappr.api.spool_consumer import IngestSpoolConsumer
 from minimappr.api.stream_consumer import IngestStreamConsumer, StreamConsumerConfig
-from minimappr.api.transports import HttpIngestTransport
 from minimappr.classifiers.factory import create_classifier
-from minimappr.cleanup_service import CleanupService
-from minimappr.config import Settings
+from minimappr.config import IngestSidecarProcessConfig, IngestSidecarStartupConfig, Settings
+from minimappr.ingest_sidecar_runtime import (
+    IngestSidecarRuntimeState as _RuntimeSidecarState,
+    build_ingest_stream_consumer as _runtime_build_ingest_stream_consumer,
+    build_ingest_sidecar_environment as _runtime_build_ingest_sidecar_environment,
+    ensure_ingest_stream_consumer_running as _runtime_ensure_ingest_stream_consumer_running,
+    fetch_ingest_sidecar_health as _runtime_fetch_ingest_sidecar_health,
+    ingest_stream_consumer_runtime as _runtime_ingest_stream_consumer_runtime,
+    ingest_sidecar_is_running as _runtime_ingest_sidecar_is_running,
+    ingest_sidecar_process_config as _runtime_ingest_sidecar_process_config,
+    ingest_sidecar_startup_config as _runtime_ingest_sidecar_startup_config,
+    launch_managed_ingest_sidecar as _runtime_launch_managed_ingest_sidecar,
+    probe_ingest_sidecar_ready as _runtime_probe_ingest_sidecar_ready,
+    shutdown_managed_ingest_sidecar as _runtime_shutdown_managed_ingest_sidecar,
+    should_autostart_ingest_sidecar as _runtime_should_autostart_ingest_sidecar,
+    sidecar_classification_window_seconds as _runtime_sidecar_classification_window_seconds,
+    sidecar_classifier_render_min_interval_seconds as _runtime_sidecar_classifier_render_min_interval_seconds,
+    start_ingest_sidecar as _runtime_start_ingest_sidecar,
+    supervise_ingest_sidecar as _runtime_supervise_ingest_sidecar,
+    wait_for_ingest_sidecar_ready as _runtime_wait_for_ingest_sidecar_ready,
+)
+from minimappr.runtime_bootstrap import (
+    _ApiOnlyRuntimeTaskHandles,
+    _CombinedRuntimeTaskHandles,
+    _apply_settings_site_origin_resolution,
+    _build_api_only_runtime_federation,
+    _build_capture_manager,
+    _build_combined_runtime_core_services,
+    _build_combined_runtime_federation,
+    _build_common_live_runtime_services,
+    _initialize_storage_and_resolve_site_origin,
+    _start_api_only_runtime_services,
+    _stop_api_only_runtime_services,
+    _shutdown_combined_runtime_services,
+    _start_combined_runtime_background_tasks,
+    _stop_combined_runtime_background_tasks,
+)
 from minimappr.core.capture_session import (
     CaptureSessionManager,
     CaptureSessionRecord,
     CaptureStartRequest,
     CaptureState,
 )
-from minimappr.core.iamf_pipeline import IamfPipeline
 from minimappr.core.ambisonics import (
     AmbisonicSpatialEncoder,
     SoundscapeRenderer,
@@ -50,22 +82,16 @@ from minimappr.core.ambisonics import (
 from minimappr.core.audio_buffer import MultiSensorBuffer
 from minimappr.core.auth import extract_federation_token
 from minimappr.core.bit_report import BITReportEvaluator
-from minimappr.core.diagnostics import DiagnosticsService
 from minimappr.core.environment import LiveEnvironmentProvider
 from minimappr.core.federation import FederationCoordinator
 from minimappr.core.fusion_node import FusionNode
 from minimappr.core.geo import LocalCoordinateFrame
-from minimappr.core.localization_dispatch import build_localizer_from_settings
 from minimappr.core.logging_ring import install_global as install_log_ring, process_start_ns
 from minimappr.core.site_origin import (
     resolve_site_origin_from_nodes,
     should_schedule_deferred_site_origin_reconciliation,
 )
 from minimappr.core import system_info
-from minimappr.core.cluster_registry import ClusterRegistry
-from minimappr.core.node_registry import NodeRegistry
-from minimappr.core.tracking import TrackManager
-from minimappr.core.zones import ZoneMatcher
 from minimappr.models import (
     AlertStatus,
     BITReport,
@@ -101,9 +127,6 @@ from minimappr.utils.audio import mono_mix, read_wav_mono
 
 logger = logging.getLogger(__name__)
 frontend_dir = Path(__file__).parent / "frontend"
-_SIDECAR_READY_TIMEOUT_SECONDS = 5.0
-_SIDECAR_READY_POLL_INTERVAL_SECONDS = 0.1
-_SIDECAR_HEALTHCHECK_TIMEOUT_SECONDS = 0.5
 _INGEST_STREAM_CONSUMER_WATCHDOG_INTERVAL_SECONDS = 1.0
 _INGEST_PATH_PREFIXES = (
     "/api/v1/ingest",
@@ -174,11 +197,47 @@ async def _cleanup_loop(app: FastAPI) -> None:
 
 def _apply_site_origin_resolution(state, resolved_site_origin) -> None:
     settings: Settings = state.settings
-    settings.site_origin_lat = resolved_site_origin.origin.lat
-    settings.site_origin_lon = resolved_site_origin.origin.lon
-    settings.site_origin_alt_m = resolved_site_origin.origin.alt_m
+    _apply_settings_site_origin_resolution(settings, resolved_site_origin)
     state.site_origin_resolution_source = resolved_site_origin.source
     state.site_origin_contributing_node_ids = resolved_site_origin.contributing_node_ids
+
+
+def _clear_transient_ingest_runtime_state(state) -> None:
+    _clear_state_attrs(
+        state,
+        "ingest_stream_consumer",
+        "ingest_stream_consumer_watchdog_task",
+        "ingest_spool_tasks",
+    )
+
+
+def _ensure_lifespan_runtime_directories(settings: Settings) -> None:
+    settings.federation_peers_config_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.snippet_dir.mkdir(parents=True, exist_ok=True)
+    settings.large_artifact_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _prepare_lifespan_runtime(state, settings: Settings) -> None:
+    install_log_ring()
+    _clear_transient_ingest_runtime_state(state)
+    _ensure_lifespan_runtime_directories(settings)
+
+
+def _bind_runtime_state(state, *, resolved_site_origin=None, **state_fields) -> None:
+    for name, value in state_fields.items():
+        setattr(state, name, value)
+    if resolved_site_origin is not None:
+        _apply_site_origin_resolution(state, resolved_site_origin)
+
+
+def _warn_when_direct_ingest_falls_back(settings: Settings, sidecar_state: _SidecarState) -> None:
+    if settings.direct_ingest_enabled or sidecar_state.status == "running":
+        return
+    logger.warning(
+        "Direct ingest is disabled but sidecar is not running (status=%s). "
+        "Falling back to direct ingest to avoid node ingest outage.",
+        sidecar_state.status,
+    )
 
 
 async def _reconcile_site_origin_after_startup(app: FastAPI) -> None:
@@ -312,21 +371,9 @@ async def _api_live_db_poll_loop(app: FastAPI) -> None:
         await asyncio.sleep(1.0)
 
 
-class _SidecarState:
-    """Mutable runtime health for the supervised ingest sidecar process.
-
-    Shared between the supervision task and the diagnostics endpoint so the
-    Server page always reflects live process state.
-    """
-
-    __slots__ = ("status", "pid", "restart_count", "last_exit_code", "_current_process")
-
-    def __init__(self) -> None:
-        self.status: str = "disabled"
-        self.pid: int | None = None
-        self.restart_count: int = 0
-        self.last_exit_code: int | None = None
-        self._current_process: "asyncio.subprocess.Process | None" = None
+# Keep the historical private name stable for local call sites and tests while
+# delegating the implementation to the dedicated sidecar runtime module.
+_SidecarState = _RuntimeSidecarState
 
 
 class _EnvironmentIngestSample(BaseModel):
@@ -339,12 +386,7 @@ class _EnvironmentIngestBody(BaseModel):
 
 
 def _ingest_sidecar_is_running(state) -> bool:
-    sidecar_state: _SidecarState | None = getattr(state, "sidecar_state", None)
-    return bool(
-        state.settings.ingest_sidecar_enabled
-        and sidecar_state is not None
-        and sidecar_state.status == "running"
-    )
+    return _runtime_ingest_sidecar_is_running(state)
 
 
 def _should_block_direct_ingest(state) -> bool:
@@ -361,22 +403,44 @@ def _should_block_direct_ingest(state) -> bool:
 
 
 def _should_autostart_ingest_sidecar(settings: "Settings") -> bool:
-    """Return True when the managed sidecar process should be started.
+    return _runtime_should_autostart_ingest_sidecar(settings)
 
-    In Python-direct ingest mode, firmware payloads are accepted directly by the
-    API process, so auto-launching the sidecar is unnecessary and can introduce
-    unrelated startup failures.
-    """
-    return (
-        getattr(settings, "process_role", "combined") != "ingest"
-        and getattr(settings, "ingest_backend", "rust") == "rust"
-        and settings.ingest_sidecar_enabled
-        and not settings.direct_ingest_enabled
+
+def _ingest_sidecar_startup_config(settings) -> IngestSidecarStartupConfig:
+    return _runtime_ingest_sidecar_startup_config(settings)
+
+
+def _ingest_sidecar_process_config(settings) -> IngestSidecarProcessConfig:
+    return _runtime_ingest_sidecar_process_config(settings)
+
+
+def _sidecar_classification_window_seconds(settings) -> float:
+    return _runtime_sidecar_classification_window_seconds(settings)
+
+
+def _sidecar_classifier_render_min_interval_seconds(
+    settings,
+    *,
+    classification_window_seconds: float,
+) -> float:
+    return _runtime_sidecar_classifier_render_min_interval_seconds(
+        settings,
+        classification_window_seconds=classification_window_seconds,
     )
 
 
-def _sidecar_healthcheck_url(port: int) -> str:
-    return f"http://127.0.0.1:{port}/healthz"
+def _sidecar_classifier_command_json(settings) -> str | None:
+    classifier_command_json = os.environ.get("MINIMAPPR_SIDECAR_CLASSIFIER_COMMAND_JSON")
+    if classifier_command_json is not None:
+        return classifier_command_json
+    return _default_sidecar_classifier_command_json(settings)
+
+
+def _build_ingest_sidecar_environment(settings) -> dict[str, str]:
+    return _runtime_build_ingest_sidecar_environment(
+        settings,
+        default_classifier_command_json_builder=_default_sidecar_classifier_command_json,
+    )
 
 
 def _ingest_runtime_base_url(settings: "Settings") -> str:
@@ -635,76 +699,31 @@ def _sidecar_snapshot_latest_environment(snapshot: object, *, node_id: str) -> d
 
 
 def _ingest_stream_consumer_runtime(state):
-    settings = getattr(state, "settings", None)
-    sidecar_state = getattr(state, "sidecar_state", None)
-    ingest_transport = getattr(state, "ingest_transport", None)
-    if settings is None or ingest_transport is None:
-        return None
-    if getattr(settings, "ingest_backend", "python") != "rust":
-        return None
-    if sidecar_state is None or sidecar_state.status != "running":
-        return None
-    return {
-        "config": StreamConsumerConfig(
-            sidecar_base_url=_ingest_runtime_base_url(settings),
-        ),
-        "ingest_transport": ingest_transport,
-        "audio_buffer": getattr(state, "audio_buffer", None),
-    }
+    return _runtime_ingest_stream_consumer_runtime(
+        state,
+        ingest_runtime_base_url_builder=_ingest_runtime_base_url,
+        stream_consumer_config_class=StreamConsumerConfig,
+    )
 
 
 def _build_ingest_stream_consumer(state) -> IngestStreamConsumer | None:
-    runtime = _ingest_stream_consumer_runtime(state)
-    if runtime is None:
-        return None
-    return IngestStreamConsumer(
-        config=runtime["config"],
-        ingest_transport=runtime["ingest_transport"],
-        audio_buffer=runtime["audio_buffer"],
+    return _runtime_build_ingest_stream_consumer(
+        state,
+        ingest_stream_consumer_class=IngestStreamConsumer,
+        ingest_runtime_base_url_builder=_ingest_runtime_base_url,
+        stream_consumer_config_class=StreamConsumerConfig,
     )
 
 
 def _ensure_ingest_stream_consumer_running(state) -> bool:
-    runtime = _ingest_stream_consumer_runtime(state)
-    consumer: IngestStreamConsumer | None = getattr(state, "ingest_stream_consumer", None)
-    if runtime is None:
-        if consumer is not None and not consumer.is_running:
-            _clear_state_attrs(state, "ingest_stream_consumer")
-        return False
-
-    desired_config = runtime["config"]
-    desired_transport = runtime["ingest_transport"]
-    desired_audio_buffer = runtime["audio_buffer"]
-    consumer_already_present = consumer is not None
-    if consumer is not None:
-        consumer_config = getattr(consumer, "_config", None)
-        consumer_transport = getattr(consumer, "_ingest_transport", None)
-        consumer_audio_buffer = getattr(consumer, "_audio_buffer", None)
-        if (
-            getattr(consumer_config, "sidecar_base_url", None) != desired_config.sidecar_base_url
-            or consumer_transport is not desired_transport
-            or consumer_audio_buffer is not desired_audio_buffer
-        ):
-            if not consumer.is_running:
-                _clear_state_attrs(state, "ingest_stream_consumer")
-            consumer = None
-            consumer_already_present = False
-
-    if consumer is None:
-        consumer = IngestStreamConsumer(
-            config=desired_config,
-            ingest_transport=desired_transport,
-            audio_buffer=desired_audio_buffer,
-        )
-        state.ingest_stream_consumer = consumer
-    if consumer.is_running:
-        return True
-    logger.warning(
-        "Ingest stream consumer is %s; starting sidecar SSE consumer",
-        "stopped" if consumer_already_present else "not initialized",
+    return _runtime_ensure_ingest_stream_consumer_running(
+        state,
+        clear_state_attrs=_clear_state_attrs,
+        ingest_stream_consumer_class=IngestStreamConsumer,
+        ingest_runtime_base_url_builder=_ingest_runtime_base_url,
+        logger=logger,
+        stream_consumer_config_class=StreamConsumerConfig,
     )
-    consumer.start()
-    return True
 
 
 async def _maintain_ingest_stream_consumer(app: FastAPI) -> None:
@@ -720,55 +739,31 @@ def _sensor_ids_from_node_row(node: dict) -> list[str]:
     return [f"{node['id']}:ch{index}" for index in range(len(offsets))]
 
 
-def _fetch_ingest_sidecar_health(port: int) -> dict[str, object] | None:
-    request = urllib.request.Request(_sidecar_healthcheck_url(port), method="GET")
-    try:
-        with urllib.request.urlopen(request, timeout=_SIDECAR_HEALTHCHECK_TIMEOUT_SECONDS) as response:
-            if getattr(response, "status", None) != 200:
-                return None
-            payload = json.loads(response.read().decode("utf-8"))
-    except (OSError, TimeoutError, ValueError, urllib.error.HTTPError, urllib.error.URLError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    return payload
+def _fetch_ingest_sidecar_health(port: int, timeout_seconds: float = 0.5) -> dict[str, object] | None:
+    return _runtime_fetch_ingest_sidecar_health(port, timeout_seconds)
 
 
-def _probe_ingest_sidecar_ready(port: int) -> bool:
-    payload = _fetch_ingest_sidecar_health(port)
-    return isinstance(payload, dict) and payload.get("status") == "ok"
+def _probe_ingest_sidecar_ready(port: int, timeout_seconds: float = 0.5) -> bool:
+    return _runtime_probe_ingest_sidecar_ready(port, timeout_seconds)
 
 
 async def _wait_for_ingest_sidecar_ready(
     process: "asyncio.subprocess.Process",
     *,
     port: int,
-    timeout_seconds: float = _SIDECAR_READY_TIMEOUT_SECONDS,
-    poll_interval_seconds: float = _SIDECAR_READY_POLL_INTERVAL_SECONDS,
+    timeout_seconds: float = 5.0,
+    poll_interval_seconds: float = 0.1,
+    probe_ready: Callable[[int], bool] | None = None,
 ) -> None:
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout_seconds
-    while True:
-        if process.returncode is not None:
-            if await asyncio.to_thread(_probe_ingest_sidecar_ready, port):
-                raise RuntimeError(
-                    "Ingest sidecar child process exited, but readiness endpoint is already healthy on "
-                    f"port {port}. Another ingest worker is likely already running."
-                )
-            raise RuntimeError(
-                f"Ingest sidecar exited before readiness check completed (code {process.returncode})"
-            )
-        if await asyncio.to_thread(_probe_ingest_sidecar_ready, port):
-            return
-        if loop.time() >= deadline:
-            with contextlib.suppress(ProcessLookupError):
-                process.terminate()
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(process.wait(), timeout=1.0)
-            raise RuntimeError(
-                f"Ingest sidecar did not become ready on port {port} within {timeout_seconds:.1f}s"
-            )
-        await asyncio.sleep(poll_interval_seconds)
+    if probe_ready is None:
+        probe_ready = _probe_ingest_sidecar_ready
+    await _runtime_wait_for_ingest_sidecar_ready(
+        process,
+        port=port,
+        timeout_seconds=timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+        probe_ready=probe_ready,
+    )
 
 
 async def _supervise_ingest_sidecar(
@@ -776,49 +771,13 @@ async def _supervise_ingest_sidecar(
     initial_process: "asyncio.subprocess.Process",
     state: _SidecarState,
 ) -> None:
-    """Watch the ingest sidecar and restart it on unexpected exit.
-
-    A clean exit (returncode 0) or SIGTERM (−15) is treated as an intentional
-    shutdown and terminates supervision.  Any other exit code triggers an
-    exponential-backoff restart loop.
-    """
-    process = initial_process
-    state._current_process = process
-    state.status = "running"
-    state.pid = process.pid
-    while True:
-        returncode = await process.wait()
-        state.last_exit_code = returncode
-        if returncode in (0, -15):
-            # Intentional shutdown; stop supervising.
-            state.status = "stopped"
-            state._current_process = None
-            return
-        state.restart_count += 1
-        state.status = "restarting"
-        logger.warning(
-            "Ingest sidecar exited unexpectedly (code %d); restarting (attempt %d)",
-            returncode,
-            state.restart_count,
-        )
-        await asyncio.sleep(2.0)
-        try:
-            new_process = await _start_ingest_sidecar(settings)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Failed to restart ingest sidecar: %s", exc)
-            state.status = "crashed"
-            state._current_process = None
-            return
-        if new_process is None:
-            state.status = "binary_not_found"
-            state._current_process = None
-            return
-        process = new_process
-        state._current_process = process
-        state.status = "running"
-        state.pid = process.pid
+    await _runtime_supervise_ingest_sidecar(
+        settings,
+        initial_process,
+        state,
+        start_ingest_sidecar=_start_ingest_sidecar,
+        logger=logger,
+    )
 
 
 def _count_failed_spool_manifest_items(spool_dir: "Path") -> int:
@@ -832,233 +791,115 @@ def _count_failed_spool_manifest_items(spool_dir: "Path") -> int:
 async def _start_ingest_sidecar(
     settings: "Settings",
 ) -> "asyncio.subprocess.Process | None":
-    """Launch the Rust ingest sidecar as a managed child process.
-
-    Returns the process if started, or None when the binary is absent or the
-    feature is disabled.  The process inherits stdout/stderr so its log lines
-    appear in the same terminal as the Python server.
-    """
-    binary = settings.ingest_sidecar_binary_path
-    if not binary.exists():
-        logger.warning(
-            "Ingest sidecar binary not found at %s; sidecar will not start. "
-            "Build it with: scripts/build_rust.sh --sidecar",
-            binary,
-        )
-        return None
-    if await asyncio.to_thread(_probe_ingest_sidecar_ready, settings.ingest_sidecar_port):
-        raise RuntimeError(
-            "Ingest sidecar readiness endpoint is already healthy on "
-            f"port {settings.ingest_sidecar_port}. Another ingest worker is likely already running."
-        )
-        
-    classification_window_seconds = getattr(settings, "classification_window_seconds", 0.0)
-    if classification_window_seconds <= 0.0:
-        classification_window_seconds = getattr(settings, "localization_window_seconds", 0.08)
-
-    classifier_render_min_interval_seconds = getattr(settings, "classifier_render_min_interval_seconds", 0.0)
-    if classifier_render_min_interval_seconds <= 0.0:
-        overlap_seconds = getattr(settings, "birdnet_chunk_overlap_seconds", 0.0)
-        if classification_window_seconds > 0.0 and overlap_seconds >= 0.0:
-            classifier_render_min_interval_seconds = max(0.0, classification_window_seconds - overlap_seconds)
-
-    env = {
-        **os.environ,
-        # Keep spool dir in sync with the Python consumer regardless of what
-        # env vars the operator may have set for the Rust binary directly.
-        "MINIMAPPR_INGEST_SPOOL_DIR": str(settings.ingest_spool_dir),
-        "MINIMAPPR_INGEST_CONSUMER_NAME": settings.ingest_consumer_name,
-        "MINIMAPPR_INGEST_PORT": str(getattr(settings, "ingest_port", settings.ingest_sidecar_port)),
-        "MINIMAPPR_SIDECAR_PORT": str(settings.ingest_sidecar_port),
-        "MINIMAPPR_SIDECAR_STORAGE_MODE": settings.ingest_storage_mode,
-        "MINIMAPPR_SIDECAR_TOTAL_JOURNAL_BUDGET_BYTES": str(
-            settings.ingest_sidecar_total_journal_budget_bytes
-        ),
-        "MINIMAPPR_SIDECAR_ADMISSION_RESERVE_BYTES": str(
-            settings.ingest_sidecar_admission_reserve_bytes
-        ),
-        "MINIMAPPR_SIDECAR_ALLOW_NON_TMPFS_JOURNAL": str(
-            bool(getattr(settings, "ingest_sidecar_allow_non_tmpfs_journal", False))
-        ).lower(),
-        "MINIMAPPR_SIDECAR_MEMORY_ONLY_LIVE_PATH": str(
-            getattr(settings, "ingest_sidecar_memory_only_live_path", True)
-        ).lower(),
-        "MINIMAPPR_RUNTIME_PROFILE": str(getattr(settings, "runtime_profile", "default")),
-        "MINIMAPPR_LOCALIZATION_WINDOW_SECONDS": str(
-            getattr(settings, "localization_window_seconds", 0.08)
-        ),
-        "MINIMAPPR_CLASSIFICATION_WINDOW_SECONDS": str(classification_window_seconds),
-        "MINIMAPPR_CLASSIFIER_RENDER_MIN_INTERVAL_SECONDS": str(classifier_render_min_interval_seconds),
-        "MINIMAPPR_MAX_SENSOR_BUFFER_SECONDS": str(
-            getattr(settings, "max_sensor_buffer_seconds", 32.0)
-        ),
-        "MINIMAPPR_DSP_LOCALIZATION_RMS_GATE": str(
-            getattr(settings, "trigger_rms", 0.015)
-        ),
-        "MINIMAPPR_TRIGGER_COOLDOWN_SECONDS": str(
-            getattr(settings, "trigger_cooldown_seconds", 0.8)
-        ),
-        "MINIMAPPR_LOCALIZATION_BAND_MIN_HZ": str(
-            getattr(settings, "localization_band_min_hz", 300.0)
-        ),
-        "MINIMAPPR_LOCALIZATION_BAND_MAX_HZ": str(
-            getattr(settings, "localization_band_max_hz", 3500.0)
-        ),
-        "MINIMAPPR_DEFAULT_TEMPERATURE_C": str(getattr(settings, "default_temperature_c", 20.0)),
-        "MINIMAPPR_DEFAULT_HUMIDITY": str(getattr(settings, "default_humidity", 0.5)),
-        "MINIMAPPR_SITE_ORIGIN_LAT": str(getattr(settings, "site_origin_lat", 0.0)),
-        "MINIMAPPR_SITE_ORIGIN_LON": str(getattr(settings, "site_origin_lon", 0.0)),
-        "MINIMAPPR_SITE_ORIGIN_ALT_M": str(getattr(settings, "site_origin_alt_m", 0.0)),
-        "MINIMAPPR_BIRDNET_TRIGGER_MIN_CONFIDENCE": str(
-            getattr(settings, "birdnet_trigger_min_confidence", 0.4)
-        ),
-        "MINIMAPPR_BIRDNET_GEO_MIN_CONFIDENCE": str(
-            getattr(settings, "birdnet_geo_min_confidence", 0.03)
-        ),
-    }
-    classifier_command_json = os.environ.get("MINIMAPPR_SIDECAR_CLASSIFIER_COMMAND_JSON")
-    if classifier_command_json is None:
-        classifier_command_json = _default_sidecar_classifier_command_json(settings)
-    if classifier_command_json is not None:
-        env["MINIMAPPR_SIDECAR_CLASSIFIER_COMMAND_JSON"] = classifier_command_json
-    logger.info(
-        "Starting ingest sidecar: %s (port %d, storage %s, spool %s, journal budget %d, reserve %d, allow non-tmpfs %s)",
-        binary,
-        settings.ingest_sidecar_port,
-        settings.ingest_storage_mode,
-        settings.ingest_spool_dir,
-        settings.ingest_sidecar_total_journal_budget_bytes,
-        settings.ingest_sidecar_admission_reserve_bytes,
-        bool(getattr(settings, "ingest_sidecar_allow_non_tmpfs_journal", False)),
+    return await _runtime_start_ingest_sidecar(
+        settings,
+        default_classifier_command_json_builder=_default_sidecar_classifier_command_json,
+        probe_ready=_probe_ingest_sidecar_ready,
+        wait_for_ready=_wait_for_ingest_sidecar_ready,
+        create_subprocess_exec=asyncio.create_subprocess_exec,
+        logger=logger,
     )
-    process = await asyncio.create_subprocess_exec(str(binary), env=env)
-    await _wait_for_ingest_sidecar_ready(process, port=settings.ingest_sidecar_port)
-    logger.info("Ingest sidecar ready on port %d", settings.ingest_sidecar_port)
-    return process
+
+
+async def _launch_managed_ingest_sidecar(
+    settings: "Settings",
+    *,
+    startup_failure_log_message: str,
+) -> tuple[_SidecarState, asyncio.Task | None]:
+    return await _runtime_launch_managed_ingest_sidecar(
+        settings,
+        logger=logger,
+        sidecar_state_class=_SidecarState,
+        start_ingest_sidecar=_start_ingest_sidecar,
+        startup_failure_log_message=startup_failure_log_message,
+        supervise_ingest_sidecar=_supervise_ingest_sidecar,
+    )
+
+
+async def _shutdown_managed_ingest_sidecar(
+    sidecar_state: _SidecarState,
+    sidecar_supervision_task: asyncio.Task | None,
+    *,
+    force_kill_on_timeout: bool,
+    shutdown_timeout_seconds: float,
+) -> None:
+    await _runtime_shutdown_managed_ingest_sidecar(
+        sidecar_state,
+        sidecar_supervision_task,
+        force_kill_on_timeout=force_kill_on_timeout,
+        logger=logger,
+        shutdown_timeout_seconds=shutdown_timeout_seconds,
+    )
 
 
 @asynccontextmanager
 async def _api_only_lifespan(app: FastAPI, settings: Settings):
     """Initialize the API/UI process without DSP, classifiers, or live ingest."""
-    install_log_ring()
-    _clear_state_attrs(app.state, "ingest_stream_consumer", "ingest_stream_consumer_watchdog_task", "ingest_spool_tasks")
-    settings.federation_peers_config_path.parent.mkdir(parents=True, exist_ok=True)
-    settings.snippet_dir.mkdir(parents=True, exist_ok=True)
-    settings.large_artifact_dir.mkdir(parents=True, exist_ok=True)
+    _prepare_lifespan_runtime(app.state, settings)
 
-    storage = Storage(settings.storage_config().db_path)
-    await storage.initialize()
-    resolved_site_origin = resolve_site_origin_from_nodes(
+    storage, resolved_site_origin = await _initialize_storage_and_resolve_site_origin(
         settings,
-        nodes=await storage.list_nodes(limit=4096),
-        now_ns=time.time_ns(),
-    )
-    settings.site_origin_lat = resolved_site_origin.origin.lat
-    settings.site_origin_lon = resolved_site_origin.origin.lon
-    settings.site_origin_alt_m = resolved_site_origin.origin.alt_m
-
-    live_hub = LiveEventHub()
-    coordinate_frame = LocalCoordinateFrame(
-        origin=GeoPoint(
-            lat=settings.site_origin_lat,
-            lon=settings.site_origin_lon,
-            alt_m=settings.site_origin_alt_m,
-        ),
-        mode=settings.coordinate_mode,
-    )
-    environment_provider = LiveEnvironmentProvider(
-        fallback_temperature_c=settings.default_temperature_c,
-        fallback_humidity_fraction=settings.default_humidity,
-        max_reading_age_seconds=settings.environment_reading_max_age_seconds,
-    )
-    cleanup_service = CleanupService(settings=settings, storage=storage)
-    bit_evaluator = BITReportEvaluator()
-
-    async def _empty_local_tracks(now_ns: int) -> list[TrackState]:
-        del now_ns
-        return []
-
-    federation = FederationCoordinator(
-        settings=settings,
-        track_supplier=_empty_local_tracks,
-        live_callback=live_hub.broadcast,
+        log_resolution=False,
     )
 
-    capture_manager = CaptureSessionManager()
-    capture_manager.set_final_track_settle_seconds(settings.capture_final_tracks_settle_seconds)
-    iamf_pipeline = IamfPipeline(
+    common_live_runtime_services = _build_common_live_runtime_services(settings, storage=storage)
+    federation = _build_api_only_runtime_federation(
+        settings,
+        live_hub=common_live_runtime_services.live_hub,
+    )
+
+    capture_manager = _build_capture_manager(
+        settings,
         sidecar_url=_ingest_runtime_base_url(settings),
-        db_storage=storage,
-        artifact_dir=settings.large_artifact_dir,
+        storage=storage,
     )
 
-    async def _run_capture_post_processing(record):
-        await iamf_pipeline.run(record)
+    sidecar_state, sidecar_supervision_task = await _launch_managed_ingest_sidecar(
+        settings,
+        startup_failure_log_message="Ingest sidecar startup failed in API role",
+    )
 
-    capture_manager.set_post_process_callback(_run_capture_post_processing)
-    capture_manager.set_session_update_callback(storage.upsert_capture_session)
+    _bind_runtime_state(
+        app.state,
+        resolved_site_origin=resolved_site_origin,
+        settings=settings,
+        storage=storage,
+        live_hub=common_live_runtime_services.live_hub,
+        coordinate_frame=common_live_runtime_services.coordinate_frame,
+        environment_provider=common_live_runtime_services.environment_provider,
+        federation=federation,
+        bit_evaluator=common_live_runtime_services.bit_evaluator,
+        cleanup_service=common_live_runtime_services.cleanup_service,
+        sidecar_state=sidecar_state,
+        capture_manager=capture_manager,
+    )
 
-    sidecar_state = _SidecarState()
-    sidecar_supervision_task: asyncio.Task | None = None
-    if _should_autostart_ingest_sidecar(settings):
-        try:
-            sidecar_process = await _start_ingest_sidecar(settings)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Ingest sidecar startup failed in API role: %s", exc)
-            sidecar_state.status = "startup_failed"
-        else:
-            if sidecar_process is not None:
-                sidecar_state._current_process = sidecar_process
-                sidecar_state.status = "running"
-                sidecar_state.pid = sidecar_process.pid
-                sidecar_supervision_task = asyncio.create_task(
-                    _supervise_ingest_sidecar(settings, sidecar_process, sidecar_state)
-                )
-            else:
-                sidecar_state.status = "binary_not_found"
-    else:
-        sidecar_state.status = "disabled"
-
-    app.state.settings = settings
-    app.state.storage = storage
-    app.state.live_hub = live_hub
-    app.state.coordinate_frame = coordinate_frame
-    app.state.environment_provider = environment_provider
-    app.state.federation = federation
-    app.state.bit_evaluator = bit_evaluator
-    app.state.cleanup_service = cleanup_service
-    app.state.sidecar_state = sidecar_state
-    app.state.capture_manager = capture_manager
-    _apply_site_origin_resolution(app.state, resolved_site_origin)
-
-    live_db_poll_task: asyncio.Task | None = None
+    task_handles = _ApiOnlyRuntimeTaskHandles()
     try:
-        environment_provider.bootstrap(await storage.list_latest_environment_per_node(limit=1024))
-        await federation.start()
-        live_db_poll_task = asyncio.create_task(_api_live_db_poll_loop(app))
+        task_handles = await _start_api_only_runtime_services(
+            app,
+            api_live_db_poll_loop=_api_live_db_poll_loop,
+            environment_provider=common_live_runtime_services.environment_provider,
+            federation=federation,
+            storage=storage,
+        )
         yield
     finally:
         shutdown_timeout_s = 15.0
-        if sidecar_supervision_task is not None:
-            sidecar_supervision_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
-                await asyncio.wait_for(sidecar_supervision_task, timeout=shutdown_timeout_s)
-        current_sidecar = sidecar_state._current_process
-        if current_sidecar is not None and current_sidecar.returncode is None:
-            logger.info("Stopping ingest sidecar (pid %d)", current_sidecar.pid)
-            current_sidecar.terminate()
-            with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(current_sidecar.wait(), timeout=shutdown_timeout_s)
-        if live_db_poll_task is not None:
-            live_db_poll_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
-                await asyncio.wait_for(live_db_poll_task, timeout=shutdown_timeout_s)
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(federation.stop(), timeout=shutdown_timeout_s)
-        await storage.close()
-        _clear_state_attrs(app.state, "ingest_stream_consumer", "ingest_stream_consumer_watchdog_task", "ingest_spool_tasks")
+        await _shutdown_managed_ingest_sidecar(
+            sidecar_state,
+            sidecar_supervision_task,
+            force_kill_on_timeout=False,
+            shutdown_timeout_seconds=shutdown_timeout_s,
+        )
+        await _stop_api_only_runtime_services(
+            app,
+            task_handles,
+            clear_transient_ingest_runtime_state=_clear_transient_ingest_runtime_state,
+            federation=federation,
+            shutdown_timeout_seconds=shutdown_timeout_s,
+            storage=storage,
+        )
 
 
 @asynccontextmanager
@@ -1069,288 +910,117 @@ async def lifespan(app: FastAPI):
             yield
         return
 
-    install_log_ring()
-    _clear_state_attrs(app.state, "ingest_stream_consumer", "ingest_stream_consumer_watchdog_task", "ingest_spool_tasks")
-    settings.federation_peers_config_path.parent.mkdir(parents=True, exist_ok=True)
-    settings.snippet_dir.mkdir(parents=True, exist_ok=True)
-    settings.large_artifact_dir.mkdir(parents=True, exist_ok=True)
+    _prepare_lifespan_runtime(app.state, settings)
 
-    storage_cfg = settings.storage_config()
     localization_cfg = settings.localization_config()
     tracking_cfg = settings.tracking_config()
 
-    storage = Storage(storage_cfg.db_path)
-    await storage.initialize()
-    resolved_site_origin = resolve_site_origin_from_nodes(
+    storage, resolved_site_origin = await _initialize_storage_and_resolve_site_origin(
         settings,
-        nodes=await storage.list_nodes(limit=4096),
-        now_ns=time.time_ns(),
-    )
-    settings.site_origin_lat = resolved_site_origin.origin.lat
-    settings.site_origin_lon = resolved_site_origin.origin.lon
-    settings.site_origin_alt_m = resolved_site_origin.origin.alt_m
-    logger.info(
-        "Resolved site origin via %s: lat=%.6f lon=%.6f alt=%.2f nodes=%s",
-        resolved_site_origin.source,
-        settings.site_origin_lat,
-        settings.site_origin_lon,
-        settings.site_origin_alt_m,
-        list(resolved_site_origin.contributing_node_ids),
+        log_resolution=True,
     )
 
-    registry = NodeRegistry()
-    cluster_registry = ClusterRegistry()
-    audio_buffer = MultiSensorBuffer(max_duration_seconds=localization_cfg.max_sensor_buffer_seconds)
-    localizer = build_localizer_from_settings(localization_cfg)
-    classifier = create_classifier(settings)
-    tracker = TrackManager(tracking_cfg)
-    live_hub = LiveEventHub()
-    coordinate_frame = LocalCoordinateFrame(
-        origin=GeoPoint(
-            lat=settings.site_origin_lat,
-            lon=settings.site_origin_lon,
-            alt_m=settings.site_origin_alt_m,
-        ),
-        mode=settings.coordinate_mode,
-    )
-    zone_matcher = ZoneMatcher(storage=storage)
-    environment_provider = LiveEnvironmentProvider(
-        fallback_temperature_c=settings.default_temperature_c,
-        fallback_humidity_fraction=settings.default_humidity,
-        max_reading_age_seconds=settings.environment_reading_max_age_seconds,
-    )
-    fusion_node = FusionNode(
-        settings=settings,
-        registry=registry,
-        buffer=audio_buffer,
-        localizer=localizer,
-        classifier=classifier,
-        tracker=tracker,
+    common_live_runtime_services = _build_common_live_runtime_services(settings, storage=storage)
+    combined_runtime_core_services = _build_combined_runtime_core_services(
+        settings,
+        common_live_runtime_services=common_live_runtime_services,
+        localization_cfg=localization_cfg,
         storage=storage,
-        live_callback=live_hub.broadcast,
-        coordinate_frame=coordinate_frame,
-        zone_matcher=zone_matcher,
-        environment_provider=environment_provider,
-        cluster_registry=cluster_registry,
-    )
-    ingest_transport = HttpIngestTransport(fusion_node)
-    bit_evaluator = BITReportEvaluator()
-    diagnostics = DiagnosticsService(
-        settings=settings,
-        storage=storage,
-        fusion_node=fusion_node,
-        classifier=classifier,
-    )
-    cleanup_service = CleanupService(settings=settings, storage=storage)
-    ingest_spool_consumer = IngestSpoolConsumer(
-        config=IngestSpoolConfig(
-            spool_dir=settings.ingest_spool_dir,
-            ready_ttl_seconds=settings.ingest_spool_ready_ttl_seconds,
-            failed_ttl_seconds=settings.ingest_spool_failed_ttl_seconds,
-            tmp_ttl_seconds=settings.ingest_spool_tmp_ttl_seconds,
-            poll_interval_seconds=settings.ingest_spool_poll_interval_seconds,
-            worker_count=settings.ingest_spool_worker_count,
-            storage_mode=settings.ingest_storage_mode,
-            consumer_name=settings.ingest_consumer_name,
-            runtime_profile=settings.runtime_profile,
-        ),
-        ingest_transport=ingest_transport,
-    )
-    ingest_spool_consumer.ensure_directories()
-
-    sidecar_state = _SidecarState()
-    sidecar_supervision_task: asyncio.Task | None = None
-    if _should_autostart_ingest_sidecar(settings):
-        try:
-            sidecar_process = await _start_ingest_sidecar(settings)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Ingest sidecar startup failed; continuing with direct ingest fallback: %s", exc)
-            sidecar_state.status = "startup_failed"
-        else:
-            if sidecar_process is not None:
-                sidecar_state._current_process = sidecar_process
-                sidecar_state.status = "running"
-                sidecar_state.pid = sidecar_process.pid
-                sidecar_supervision_task = asyncio.create_task(
-                    _supervise_ingest_sidecar(settings, sidecar_process, sidecar_state)
-                )
-            else:
-                sidecar_state.status = "binary_not_found"
-    else:
-        sidecar_state.status = "disabled"
-
-    if not settings.direct_ingest_enabled and sidecar_state.status != "running":
-        logger.warning(
-            "Direct ingest is disabled but sidecar is not running (status=%s). "
-            "Falling back to direct ingest to avoid node ingest outage.",
-            sidecar_state.status,
-        )
-
-    async def _federation_local_tracks(now_ns: int) -> list[TrackState]:
-        tracks = await tracker.snapshot(now_ns=now_ns)
-        active: list[TrackState] = []
-        for track in tracks:
-            if track.status not in {"tentative", "confirmed", "coasting"}:
-                continue
-            track.position_geo = app.state.coordinate_frame.local_to_geo(track.position_m)
-            active.append(track)
-        return active
-
-    federation = FederationCoordinator(
-        settings=settings,
-        track_supplier=_federation_local_tracks,
-        live_callback=live_hub.broadcast,
+        tracking_cfg=tracking_cfg,
     )
 
-    capture_manager = CaptureSessionManager()
-    capture_manager.set_final_track_settle_seconds(settings.capture_final_tracks_settle_seconds)
+    sidecar_state, sidecar_supervision_task = await _launch_managed_ingest_sidecar(
+        settings,
+        startup_failure_log_message="Ingest sidecar startup failed; continuing with direct ingest fallback",
+    )
+    _warn_when_direct_ingest_falls_back(settings, sidecar_state)
+
+    federation = _build_combined_runtime_federation(
+        settings,
+        coordinate_frame=common_live_runtime_services.coordinate_frame,
+        live_hub=common_live_runtime_services.live_hub,
+        tracker=combined_runtime_core_services.tracker,
+    )
+
     _python_ingest = settings.ingest_backend == "python"
-    iamf_pipeline = IamfPipeline(
+    capture_manager = _build_capture_manager(
+        settings,
         sidecar_url=None if _python_ingest else _ingest_runtime_base_url(settings),
-        db_storage=storage,
-        multi_sensor_buffer=audio_buffer if _python_ingest else None,
-        artifact_dir=settings.large_artifact_dir,
+        storage=storage,
+        multi_sensor_buffer=combined_runtime_core_services.audio_buffer if _python_ingest else None,
     )
 
-    async def _run_capture_post_processing(record):
-        await iamf_pipeline.run(record)
-
-    capture_manager.set_post_process_callback(_run_capture_post_processing)
-    capture_manager.set_session_update_callback(storage.upsert_capture_session)
-
-    app.state.settings = settings
-    app.state.storage = storage
-    app.state.registry = registry
-    app.state.cluster_registry = cluster_registry
-    app.state.audio_buffer = audio_buffer
-    app.state.localizer = localizer
-    app.state.classifier = classifier
-    app.state.tracker = tracker
-    app.state.live_hub = live_hub
-    app.state.coordinate_frame = coordinate_frame
-    app.state.zone_matcher = zone_matcher
-    app.state.environment_provider = environment_provider
-    app.state.fusion_node = fusion_node
-    app.state.ingest_transport = ingest_transport
-    app.state.federation = federation
-    app.state.bit_evaluator = bit_evaluator
-    app.state.diagnostics = diagnostics
-    app.state.cleanup_service = cleanup_service
-    app.state.ingest_spool_consumer = ingest_spool_consumer
-    app.state.sidecar_state = sidecar_state
-    app.state.capture_manager = capture_manager
-    _apply_site_origin_resolution(app.state, resolved_site_origin)
+    _bind_runtime_state(
+        app.state,
+        resolved_site_origin=resolved_site_origin,
+        settings=settings,
+        storage=storage,
+        registry=combined_runtime_core_services.registry,
+        cluster_registry=combined_runtime_core_services.cluster_registry,
+        audio_buffer=combined_runtime_core_services.audio_buffer,
+        localizer=combined_runtime_core_services.localizer,
+        classifier=combined_runtime_core_services.classifier,
+        tracker=combined_runtime_core_services.tracker,
+        live_hub=common_live_runtime_services.live_hub,
+        coordinate_frame=common_live_runtime_services.coordinate_frame,
+        zone_matcher=combined_runtime_core_services.zone_matcher,
+        environment_provider=common_live_runtime_services.environment_provider,
+        fusion_node=combined_runtime_core_services.fusion_node,
+        ingest_transport=combined_runtime_core_services.ingest_transport,
+        federation=federation,
+        bit_evaluator=common_live_runtime_services.bit_evaluator,
+        diagnostics=combined_runtime_core_services.diagnostics,
+        cleanup_service=common_live_runtime_services.cleanup_service,
+        ingest_spool_consumer=combined_runtime_core_services.ingest_spool_consumer,
+        sidecar_state=sidecar_state,
+        capture_manager=capture_manager,
+    )
 
     ingest_stream_consumer_enabled = _ensure_ingest_stream_consumer_running(app.state)
 
-    cleanup_task: asyncio.Task | None = None
-    site_origin_reconcile_task: asyncio.Task | None = None
-    ingest_spool_tasks: list[asyncio.Task] = []
-    ingest_stream_consumer_watchdog_task: asyncio.Task | None = None
+    task_handles = _CombinedRuntimeTaskHandles()
     try:
-        environment_provider.bootstrap(await storage.list_latest_environment_per_node(limit=1024))
-        await fusion_node.start()
-        await federation.start()
-        cleanup_task = asyncio.create_task(_cleanup_loop(app))
-        app.state.cleanup_task = cleanup_task
-        if ingest_stream_consumer_enabled:
-            ingest_stream_consumer_watchdog_task = asyncio.create_task(_maintain_ingest_stream_consumer(app))
-            app.state.ingest_stream_consumer_watchdog_task = ingest_stream_consumer_watchdog_task
-        else:
-            ingest_spool_tasks = [
-                asyncio.create_task(ingest_spool_consumer.run_forever(worker_name=f"spool-{index + 1}"))
-                for index in range(settings.ingest_spool_worker_count)
-            ]
-            app.state.ingest_spool_tasks = ingest_spool_tasks
-        if should_schedule_deferred_site_origin_reconciliation(
-            settings,
+        task_handles = await _start_combined_runtime_background_tasks(
+            app,
+            cleanup_loop=_cleanup_loop,
+            environment_provider=common_live_runtime_services.environment_provider,
+            federation=federation,
+            fusion_node=combined_runtime_core_services.fusion_node,
+            ingest_spool_consumer=combined_runtime_core_services.ingest_spool_consumer,
+            ingest_stream_consumer_enabled=ingest_stream_consumer_enabled,
             initial_resolution_source=resolved_site_origin.source,
-        ):
-            site_origin_reconcile_task = asyncio.create_task(_reconcile_site_origin_after_startup(app))
-        app.state.site_origin_reconcile_task = site_origin_reconcile_task
+            maintain_ingest_stream_consumer=_maintain_ingest_stream_consumer,
+            reconcile_site_origin_after_startup=_reconcile_site_origin_after_startup,
+            settings=settings,
+            should_schedule_site_origin_reconciliation=should_schedule_deferred_site_origin_reconciliation,
+            storage=storage,
+        )
 
         yield
     finally:
         shutdown_timeout_s = 15.0
         # Stop the ingest sidecar first so startup/bind failures do not leave
         # the Rust process running after the Python server begins teardown.
-        if sidecar_supervision_task is not None:
-            sidecar_supervision_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
-                await asyncio.wait_for(sidecar_supervision_task, timeout=shutdown_timeout_s)
-        current_sidecar = sidecar_state._current_process
-        if current_sidecar is not None and current_sidecar.returncode is None:
-            logger.info("Stopping ingest sidecar (pid %d)", current_sidecar.pid)
-            current_sidecar.terminate()
-            try:
-                await asyncio.wait_for(current_sidecar.wait(), timeout=shutdown_timeout_s)
-            except asyncio.TimeoutError:
-                logger.warning("Ingest sidecar did not exit cleanly; sending SIGKILL")
-                current_sidecar.kill()
-                await current_sidecar.wait()
+        await _shutdown_managed_ingest_sidecar(
+            sidecar_state,
+            sidecar_supervision_task,
+            force_kill_on_timeout=True,
+            shutdown_timeout_seconds=shutdown_timeout_s,
+        )
 
-        if site_origin_reconcile_task is not None:
-            site_origin_reconcile_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
-                await asyncio.wait_for(site_origin_reconcile_task, timeout=shutdown_timeout_s)
-        if cleanup_task is not None:
-            cleanup_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
-                await asyncio.wait_for(cleanup_task, timeout=shutdown_timeout_s)
-        for task in ingest_spool_tasks:
-            task.cancel()
-        if ingest_spool_tasks:
-            with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
-                await asyncio.wait_for(asyncio.gather(*ingest_spool_tasks), timeout=shutdown_timeout_s)
-        if ingest_stream_consumer_watchdog_task is not None:
-            ingest_stream_consumer_watchdog_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
-                await asyncio.wait_for(ingest_stream_consumer_watchdog_task, timeout=shutdown_timeout_s)
-        ingest_stream_consumer: IngestStreamConsumer | None = getattr(app.state, "ingest_stream_consumer", None)
-        if ingest_stream_consumer is not None:
-            await ingest_stream_consumer.stop()
-        _clear_state_attrs(app.state, "ingest_stream_consumer", "ingest_stream_consumer_watchdog_task", "ingest_spool_tasks")
-
-        try:
-            await asyncio.wait_for(federation.stop(), timeout=shutdown_timeout_s)
-        except Exception as exc:
-            logger.warning("Federation stop failed during shutdown: %s", exc)
-
-        # Cancel any in-flight BirdNET predictions and terminate their worker
-        # subprocesses BEFORE stopping the fusion node.  If a SIGINT kills BirdNET
-        # workers mid-init, the Consumer blocks on queue.get() indefinitely; closing
-        # the classifier first lets the thread unblock and the queue to drain.
-        try:
-            classifier.close()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Classifier close failed during shutdown: %s", exc)
-
-        try:
-            await asyncio.wait_for(fusion_node.stop(), timeout=shutdown_timeout_s)
-        except Exception as exc:
-            logger.warning("Fusion node stop failed during shutdown: %s", exc)
-
-        try:
-            await asyncio.wait_for(storage.close(), timeout=shutdown_timeout_s)
-        except Exception as exc:
-            logger.warning("Storage close failed during shutdown: %s", exc)
-
-        # After closing the classifier, explicitly clean up multiprocessing resources
-        # to avoid "resource_tracker: There appear to be X leaked shared_memory objects" warnings.
-        # Give multiprocessing time to fully clean up before the event loop closes.
-        try:
-            # Wait for any active processes to finish with an explicit timeout.
-            # This allows the resource_tracker to properly unregister shared_memory objects.
-            for proc in multiprocessing.active_children():
-                try:
-                    proc.join(timeout=1.0)
-                except Exception:  # noqa: BLE001
-                    pass
-            logger.info("Multiprocessing cleanup completed during shutdown")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Multiprocessing cleanup warning: %s", exc)
+        await _stop_combined_runtime_background_tasks(
+            app,
+            task_handles,
+            clear_transient_ingest_runtime_state=_clear_transient_ingest_runtime_state,
+            shutdown_timeout_seconds=shutdown_timeout_s,
+        )
+        await _shutdown_combined_runtime_services(
+            classifier=combined_runtime_core_services.classifier,
+            federation=federation,
+            fusion_node=combined_runtime_core_services.fusion_node,
+            shutdown_timeout_seconds=shutdown_timeout_s,
+            storage=storage,
+        )
 
 
 app = FastAPI(title="MinimapPR", version="0.1.0", lifespan=lifespan)
@@ -2901,9 +2571,11 @@ async def get_system_diagnostics(request: Request) -> dict:
     )
     sidecar_health: dict[str, object] | None = None
     if settings.ingest_sidecar_enabled and sidecar_state is not None and sidecar_state.status == "running":
+        sidecar_startup = _ingest_sidecar_startup_config(settings)
         sidecar_health = await asyncio.to_thread(
             _fetch_ingest_sidecar_health,
             settings.ingest_port,
+            sidecar_startup.healthcheck_timeout_seconds,
         )
     diagnostics["sidecar"] = {
         "enabled": settings.ingest_sidecar_enabled,
