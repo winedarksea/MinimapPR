@@ -1,4 +1,5 @@
 use crate::audio::detection_actions::DetectionAudioActions;
+use crate::panels::contributors::CompactContributorChips;
 use crate::state::AppState;
 use crate::ui::{classify_age_from_ns, short_id};
 use leptos::prelude::*;
@@ -31,6 +32,7 @@ pub fn DetectionsPane() -> impl IntoView {
                             {dets.into_iter().map(|d| {
                                 let label = d.label.clone().unwrap_or_else(|| "—".to_string());
                                 let node  = d.node_id.clone().unwrap_or_else(|| "—".to_string());
+                                let contributors = d.contributors.clone();
                                 let conf  = d.label_confidence.or(d.confidence)
                                     .map(|c| format!("{:.0}%", c * 100.0))
                                     .unwrap_or_else(|| "—".to_string());
@@ -50,7 +52,7 @@ pub fn DetectionsPane() -> impl IntoView {
                                         </td>
                                         <td>{label}</td>
                                         <td>
-                                            <code class="node-chip">{node}</code>
+                                            <CompactContributorChips contributors=contributors fallback_node_id=Some(node) />
                                         </td>
                                         <td><span class="conf-pill">{conf}</span></td>
                                         <td>

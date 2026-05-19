@@ -15,7 +15,7 @@ from typing import Any
 import aiosqlite
 
 from minimappr.cleanup_policy import CleanupPolicy
-from minimappr.models import DetectionEvent, GeoPoint, LabelId, NodeSpec, TrackState
+from minimappr.models import ContributorSummary, DetectionEvent, GeoPoint, LabelId, NodeSpec, TrackState
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,16 @@ def _round_digits(bin_deg: float) -> int:
     if bin_deg <= 0:
         return 4
     return max(0, min(6, int(round(-math.log10(bin_deg)))))
+
+
+def _contributor_role_priority(roles: list[str]) -> int:
+    if "source" in roles:
+        return 0
+    if "reference" in roles:
+        return 1
+    if "tdoa" in roles:
+        return 2
+    return 3
 
 
 def _ingested_frame_key(
@@ -1516,7 +1526,8 @@ class Storage:
                     (int(since_ns), float(min_label_confidence), limit),
                 )
             ).fetchall()
-        return [self._row_to_detection(row).model_dump(mode="json") for row in rows]
+        detections = [self._row_to_detection(row).model_dump(mode="json") for row in rows]
+        return await self.enrich_detections_with_contributor_summaries(detections)
 
     async def detection_matrix(
         self,
@@ -1811,7 +1822,8 @@ class Storage:
                     (int(since_ns), limit),
                 )
             ).fetchall()
-        return [self._row_to_track(row).model_dump(mode="json") for row in rows]
+        tracks = [self._row_to_track(row).model_dump(mode="json") for row in rows]
+        return await self.enrich_tracks_with_contributor_summaries(tracks)
 
     async def list_labels(self) -> list[dict]:
         db = self._require_db()
@@ -2975,6 +2987,170 @@ class Storage:
             capability_tier=row["capability_tier"] or "full_3d",
             tqi=float(row["tqi"]),
         )
+
+    @staticmethod
+    def _ensure_contributor_entry(
+        contributors_by_node_id: dict[str, dict[str, Any]],
+        node_id: str,
+    ) -> dict[str, Any]:
+        return contributors_by_node_id.setdefault(
+            node_id,
+            {
+                "node_id": node_id,
+                "roles": set(),
+                "sensor_ids": set(),
+                "contribution_count": 0,
+                "last_contributed_ns": None,
+            },
+        )
+
+    @classmethod
+    def _record_contributor_roles(
+        cls,
+        contributors_by_node_id: dict[str, dict[str, Any]],
+        *,
+        node_id: str | None,
+        roles: list[str],
+        sensor_id: str | None = None,
+        timestamp_ns: int | None = None,
+        increment_count: bool,
+    ) -> None:
+        if not node_id:
+            return
+        entry = cls._ensure_contributor_entry(contributors_by_node_id, node_id)
+        entry["roles"].update(role for role in roles if role)
+        if sensor_id:
+            entry["sensor_ids"].add(sensor_id)
+        if increment_count:
+            entry["contribution_count"] += 1
+        else:
+            entry["contribution_count"] = max(1, int(entry["contribution_count"]))
+        if timestamp_ns is not None:
+            existing = entry["last_contributed_ns"]
+            entry["last_contributed_ns"] = timestamp_ns if existing is None else max(existing, timestamp_ns)
+
+    @staticmethod
+    def _serialize_contributor_summaries(
+        contributors_by_node_id: dict[str, dict[str, Any]],
+    ) -> list[ContributorSummary]:
+        contributor_summaries = [
+            ContributorSummary(
+                node_id=entry["node_id"],
+                roles=sorted(entry["roles"]),
+                sensor_ids=sorted(entry["sensor_ids"]),
+                contribution_count=int(entry["contribution_count"]),
+                last_contributed_ns=entry["last_contributed_ns"],
+            )
+            for entry in contributors_by_node_id.values()
+        ]
+        contributor_summaries.sort(
+            key=lambda contributor: (
+                _contributor_role_priority(contributor.roles),
+                -(contributor.last_contributed_ns or 0),
+                -contributor.contribution_count,
+                contributor.node_id,
+            )
+        )
+        return contributor_summaries
+
+    def _build_detection_contributor_summaries(
+        self,
+        detection: dict[str, Any],
+        observations_by_id: dict[str, dict[str, Any]],
+    ) -> list[ContributorSummary]:
+        contributors_by_node_id: dict[str, dict[str, Any]] = {}
+        detection_timestamp_ns = detection.get("timestamp_ns")
+        detection_timestamp_ns = detection_timestamp_ns if isinstance(detection_timestamp_ns, int) else None
+        source_node_id = detection.get("source_node_id")
+        self._record_contributor_roles(
+            contributors_by_node_id,
+            node_id=source_node_id,
+            roles=["source"],
+            timestamp_ns=detection_timestamp_ns,
+            increment_count=False,
+        )
+
+        reference_sensor_id = detection.get("reference_sensor")
+        localized_sensor_ids = set(detection.get("source_sensors") or [])
+        localized_sensor_ids.update((detection.get("tdoa_s") or {}).keys())
+
+        for observation_id in detection.get("source_observation_ids") or []:
+            observation = observations_by_id.get(observation_id)
+            if observation is None:
+                continue
+            observation_roles: list[str] = []
+            sensor_id = observation.get("sensor_id")
+            if sensor_id == reference_sensor_id:
+                observation_roles.append("reference")
+            if sensor_id in localized_sensor_ids:
+                observation_roles.append("tdoa")
+            if not observation_roles:
+                observation_roles.append("support")
+            self._record_contributor_roles(
+                contributors_by_node_id,
+                node_id=observation.get("node_id"),
+                roles=observation_roles,
+                sensor_id=sensor_id,
+                timestamp_ns=detection_timestamp_ns,
+                increment_count=True,
+            )
+
+        return self._serialize_contributor_summaries(contributors_by_node_id)
+
+    async def enrich_detections_with_contributor_summaries(self, detections: list[dict]) -> list[dict]:
+        observation_ids: list[str] = []
+        for detection in detections:
+            observation_ids.extend(detection.get("source_observation_ids") or [])
+        observations = await self.list_observations_by_ids(list(dict.fromkeys(observation_ids)))
+        observations_by_id = {observation["id"]: observation for observation in observations}
+
+        for detection in detections:
+            contributors = self._build_detection_contributor_summaries(detection, observations_by_id)
+            detection["contributors"] = [contributor.model_dump(mode="json") for contributor in contributors]
+        return detections
+
+    async def enrich_tracks_with_contributor_summaries(self, tracks: list[dict]) -> list[dict]:
+        for track in tracks:
+            track_updates = await self.list_track_updates(track_id=track["id"], limit=1)
+            if not track_updates:
+                track["contributors"] = []
+                track["contributor_count"] = 0
+                continue
+
+            latest_track_update = track_updates[0]
+            contributors: list[ContributorSummary] = []
+            detection_id = latest_track_update.get("detection_id")
+            if isinstance(detection_id, str) and detection_id:
+                detection = await self.get_detection(detection_id)
+                if detection is not None:
+                    observations = await self.list_observations_by_ids(detection.get("source_observation_ids") or [])
+                    observations_by_id = {observation["id"]: observation for observation in observations}
+                    contributors = self._build_detection_contributor_summaries(detection, observations_by_id)
+
+            if not contributors:
+                contributors_by_node_id: dict[str, dict[str, Any]] = {}
+                observation_ids = latest_track_update.get("observation_ids") or []
+                observations = await self.list_observations_by_ids(observation_ids)
+                reference_sensor_id = (latest_track_update.get("metadata") or {}).get("reference_sensor")
+                update_timestamp_ns = latest_track_update.get("timestamp_ns")
+                update_timestamp_ns = update_timestamp_ns if isinstance(update_timestamp_ns, int) else None
+                for observation in observations:
+                    observation_roles = ["tdoa"]
+                    if observation.get("sensor_id") == reference_sensor_id:
+                        observation_roles.append("reference")
+                    self._record_contributor_roles(
+                        contributors_by_node_id,
+                        node_id=observation.get("node_id"),
+                        roles=observation_roles,
+                        sensor_id=observation.get("sensor_id"),
+                        timestamp_ns=update_timestamp_ns,
+                        increment_count=True,
+                    )
+                contributors = self._serialize_contributor_summaries(contributors_by_node_id)
+
+            track["contributors"] = [contributor.model_dump(mode="json") for contributor in contributors]
+            track["contributor_count"] = len(contributors)
+        return tracks
 
     def _require_db(self) -> aiosqlite.Connection:
         if self._db is None:

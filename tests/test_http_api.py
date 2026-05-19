@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import io
 import sqlite3
@@ -17,6 +18,7 @@ from fastapi.testclient import TestClient
 from minimappr.api.stream_consumer import SidecarNodeSnapshot
 from minimappr.config import Settings
 from minimappr.main import app
+from minimappr.models import TrackState
 from minimappr.storage.db import _ingested_frame_key
 from minimappr.utils.audio import encode_pcm16le_b64
 
@@ -187,6 +189,18 @@ def _wait_for_detections(client: TestClient, *, timeout_s: float = 5.0) -> list[
     return []
 
 
+def _wait_for_tracks(client: TestClient, *, timeout_s: float = 5.0) -> list[dict]:
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        response = client.get("/api/v1/tracks", params={"limit": 10})
+        assert response.status_code == 200
+        tracks = response.json()
+        if tracks:
+            return tracks
+        time.sleep(0.05)
+    return []
+
+
 def test_http_ingest_and_cop_status(monkeypatch, tmp_path: Path) -> None:
     _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
 
@@ -220,6 +234,54 @@ def test_http_ingest_and_cop_status(monkeypatch, tmp_path: Path) -> None:
         assert "pipeline" in diagnostics
         assert "realtime" in diagnostics["pipeline"]
         assert "metrics" in diagnostics["pipeline"]
+
+
+def test_cop_detections_and_tracks_include_contributor_summaries(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+
+    with TestClient(app) as client:
+        _ingest_single_frame(client, start_time_ns=time.time_ns())
+
+        detections = _wait_for_detections(client)
+        assert detections
+        detection = detections[0]
+        assert isinstance(detection.get("contributors"), list)
+        assert detection["contributors"]
+        assert detection["contributors"][0]["node_id"] == "http-node-1"
+        assert "source" in detection["contributors"][0]["roles"]
+
+        track = TrackState(
+            id="trk-http-contrib-1",
+            first_seen_ns=int(detection["timestamp_ns"]),
+            last_seen_ns=int(detection["timestamp_ns"]),
+            position_m=tuple(float(value) for value in detection["position_m"]),
+            position_geo=detection.get("position_geo"),
+            label=detection["label"],
+            label_category=detection.get("label_category") or "unknown",
+            confidence=float(detection["confidence"]),
+            update_count=1,
+            status="confirmed",
+        )
+        asyncio.run(client.app.state.storage.upsert_track(track))
+        asyncio.run(
+            client.app.state.storage.insert_track_update(
+                track=track,
+                timestamp_ns=int(detection["timestamp_ns"]),
+                event_id=detection["event_id"],
+                update_type="detection",
+                detection_id=detection["id"],
+                observation_ids=list(detection.get("source_observation_ids") or []),
+                metadata={"reference_sensor": detection["reference_sensor"]},
+            )
+        )
+
+        tracks = _wait_for_tracks(client)
+        assert tracks
+        track_payload = next(item for item in tracks if item["id"] == "trk-http-contrib-1")
+        assert isinstance(track_payload.get("contributors"), list)
+        assert track_payload["contributors"]
+        assert track_payload["contributor_count"] == len(track_payload["contributors"])
+        assert track_payload["contributors"][0]["node_id"] == "http-node-1"
 
 
 def test_cluster_api_rejects_overlapping_memberships(monkeypatch, tmp_path: Path) -> None:

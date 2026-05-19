@@ -1,4 +1,5 @@
 use crate::map::bindings::pan_to;
+use crate::panels::contributors::CompactContributorChips;
 use crate::state::AppState;
 use crate::ui::{classify_age_from_ns, short_id, track_status_chip_class, track_status_label};
 use leptos::prelude::*;
@@ -91,6 +92,7 @@ pub fn TracksPane() -> impl IntoView {
                                 let geo_for_click = t.position_geo.clone();
                                 let hover_id = track_id.clone();
                                 let row_tid = track_id.clone();
+                                let contributors = t.contributors.clone();
 
                                 view! {
                                     <tr
@@ -114,14 +116,30 @@ pub fn TracksPane() -> impl IntoView {
                                         }
                                     >
                                         <td>
-                                            <code class="track-id-code" title=geo_title>
-                                                {id_short}
-                                            </code>
+                                            <div class="track-id-cell">
+                                                <code class="track-id-code" title=geo_title>
+                                                    {id_short}
+                                                </code>
+                                                {if !contributors.is_empty() {
+                                                    view! {
+                                                        <span class="track-contributor-count">
+                                                            {format!("{} nodes", t.contributor_count.max(contributors.len() as u32))}
+                                                        </span>
+                                                    }.into_any()
+                                                } else {
+                                                    view! { <></> }.into_any()
+                                                }}
+                                            </div>
                                         </td>
                                         <td>
                                             <span class=st_class>{st_label}</span>
                                         </td>
-                                        <td>{label}</td>
+                                        <td>
+                                            <div class="label-with-contributors">
+                                                <span>{label}</span>
+                                                <CompactContributorChips contributors=contributors fallback_node_id=None />
+                                            </div>
+                                        </td>
                                         <td><span class="conf-pill">{conf}</span></td>
                                         <td>
                                             <span class="tqi-bar" style:width=tqi_w title=tqi_pct></span>

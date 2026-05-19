@@ -1021,6 +1021,60 @@ body {
   white-space: nowrap;
 }
 
+.contributor-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.contributor-chip-pair {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.contributor-chip {
+  max-width: 10ch;
+}
+
+.contributor-role-pill {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--md-sys-color-primary);
+  background: color-mix(in srgb, var(--md-sys-color-primary) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--md-sys-color-primary) 24%, transparent);
+  border-radius: var(--md-sys-shape-corner-xs);
+  padding: 1px 4px;
+  text-transform: uppercase;
+}
+
+.contributor-overflow {
+  min-height: 18px;
+  padding: 0 6px;
+}
+
+.label-with-contributors {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.track-id-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.track-contributor-count {
+  font-size: var(--md-sys-typescale-label-small-size);
+  color: var(--md-sys-color-on-surface-variant);
+}
+
 /* Fused-track link chip in detections table */
 .track-link-chip {
   font-size: var(--md-sys-typescale-label-small-size);

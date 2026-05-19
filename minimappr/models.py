@@ -266,6 +266,14 @@ class LocalizationResult(BaseModel):
     alias_cutoff_hz: float | None = Field(default=None, ge=0.0)
 
 
+class ContributorSummary(BaseModel):
+    node_id: str
+    roles: list[str] = Field(default_factory=list)
+    sensor_ids: list[str] = Field(default_factory=list)
+    contribution_count: int = Field(default=0, ge=0)
+    last_contributed_ns: int | None = None
+
+
 class DetectionEvent(BaseModel):
     id: str
     event_id: str | None = None
@@ -300,6 +308,7 @@ class DetectionEvent(BaseModel):
     feature_summary: dict[str, Any] = Field(default_factory=dict)
     retention_tier: RetentionTier = RetentionTier.SHORT
     snippet_path: str | None = None
+    contributors: list[ContributorSummary] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _defaults(self) -> "DetectionEvent":
@@ -339,6 +348,8 @@ class TrackState(BaseModel):
     status: str = TrackStatus.TENTATIVE.value
     tqi: float = Field(default=0.0, ge=0.0, description="Track Quality Index")
     capability_tier: Literal["full_3d", "2d", "classification_only", "alerting_only"] = "full_3d"
+    contributor_count: int = Field(default=0, ge=0)
+    contributors: list[ContributorSummary] = Field(default_factory=list)
 
 
 class FederationHeartbeat(BaseModel):

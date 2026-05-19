@@ -93,7 +93,22 @@ pub struct Track {
     pub last_update_ns: Option<i64>,
     #[serde(alias = "update_count")]
     pub sensor_count: Option<u32>,
+    #[serde(default)]
+    pub contributor_count: u32,
+    #[serde(default)]
+    pub contributors: Vec<ContributorSummary>,
     pub status: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ContributorSummary {
+    pub node_id: String,
+    #[serde(default)]
+    pub roles: Vec<String>,
+    #[serde(default)]
+    pub sensor_ids: Vec<String>,
+    pub contribution_count: u32,
+    pub last_contributed_ns: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -116,6 +131,7 @@ pub struct Detection {
     pub has_audio: Option<bool>,
     pub snippet_path: Option<String>,
     pub track_id: Option<String>,
+    pub contributors: Vec<ContributorSummary>,
 }
 
 #[derive(Deserialize)]
@@ -134,6 +150,8 @@ struct DetectionWire {
     has_audio: Option<bool>,
     snippet_path: Option<String>,
     track_id: Option<String>,
+    #[serde(default)]
+    contributors: Vec<ContributorSummary>,
 }
 
 impl<'de> Deserialize<'de> for Detection {
@@ -154,6 +172,7 @@ impl<'de> Deserialize<'de> for Detection {
             has_audio: wire.has_audio,
             snippet_path: wire.snippet_path,
             track_id: wire.track_id,
+            contributors: wire.contributors,
         })
     }
 }
