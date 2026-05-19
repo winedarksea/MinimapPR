@@ -422,8 +422,10 @@ def test_recording_delete_removes_capture_session_row_and_artifacts(
     work_dir.mkdir(parents=True)
     ambix_path = artifact_dir / "session-delete_ambix.wav"
     iamf_path = artifact_dir / "session-delete_audio.iamf"
+    visual_path = artifact_dir / "session-delete_visual.mp4"
     ambix_path.write_bytes(b"wav")
     iamf_path.write_bytes(b"iamf")
+    visual_path.write_bytes(b"mp4")
 
     async def prepare_recording() -> None:
         storage = Storage(db_path)
@@ -441,6 +443,7 @@ def test_recording_delete_removes_capture_session_row_and_artifacts(
                 video_path=None,
                 ambix_path=ambix_path,
                 iamf_path=iamf_path,
+                visual_path=visual_path,
                 youtube_path=None,
                 error=None,
             )
@@ -450,6 +453,7 @@ def test_recording_delete_removes_capture_session_row_and_artifacts(
                 artifact_type="iamf_video",
                 ambix_path=str(ambix_path),
                 iamf_path=str(iamf_path),
+                visual_path=str(visual_path),
                 youtube_path=None,
                 created_ns=time.time_ns(),
             )
@@ -486,6 +490,7 @@ def test_recording_delete_removes_capture_session_row_and_artifacts(
     assert response.status_code == 204
     assert ambix_path.exists() is False
     assert iamf_path.exists() is False
+    assert visual_path.exists() is False
     assert work_dir.exists() is False
     assert asyncio.run(fetch_remaining_counts()) == (0, 0)
 

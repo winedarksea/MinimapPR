@@ -438,8 +438,13 @@ class TestIamfPipelineE2E:
         assert iamf_path.stat().st_size > 0, "IAMF file is empty"
 
     @pytest.mark.asyncio
-    async def test_full_pipeline_preserves_selected_object_review_wav(self, work_dir: Path, artifacts_dir: Path):
-        """A selected IAMF object slot should be saved as a mono review WAV."""
+    async def test_full_pipeline_preserves_selected_object_review_wav(
+        self,
+        work_dir: Path,
+        artifacts_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A selected IAMF object slot should save review WAV and visual MP4."""
         sensor_ids = [f"test_node:ch{i}" for i in range(N_CHANNELS)]
         buffer = MultiSensorBuffer(max_duration_seconds=30.0)
 
@@ -463,6 +468,15 @@ class TestIamfPipelineE2E:
             artifact_dir=artifacts_dir,
         )
 
+        async def _fake_visual_renderer(output_path: Path, *args, **kwargs) -> bool:
+            output_path.write_bytes(b"fake mp4")
+            return True
+
+        monkeypatch.setattr(
+            "minimappr.core.iamf_pipeline.render_recording_visual_mp4",
+            _fake_visual_renderer,
+        )
+
         try:
             await pipeline.run(record)
         finally:
@@ -476,6 +490,10 @@ class TestIamfPipelineE2E:
             assert w.getnchannels() == 1
             assert w.getframerate() == OUTPUT_RATE_HZ
             assert w.getnframes() > 0
+
+        visual_files = list(artifacts_dir.glob("*_visual.mp4"))
+        assert len(visual_files) == 1
+        assert record.visual_path == visual_files[0]
 
     @pytest.mark.asyncio
     async def test_ambisonics_only_pipeline(self, work_dir: Path, artifacts_dir: Path):

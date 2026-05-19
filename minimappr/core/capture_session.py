@@ -73,6 +73,8 @@ class CaptureSessionRecord:
     """When False, no video was captured for this session."""
     object_path: Optional[Path] = None
     """Selected mono IAMF object slot rendered for review."""
+    visual_path: Optional[Path] = None
+    """Deterministic COP-like MP4 visual for the selected IAMF object slot."""
 
 
 @dataclass
@@ -363,7 +365,7 @@ class CaptureSessionManager:
         """Remove large intermediate files to prevent disk exhaustion."""
         import shutil
 
-        patterns = ["bed_full.wav", "bed.wav", "object_*.wav", "ambix.wav"]
+        patterns = ["bed_full.wav", "bed.wav", "object_*.wav", "ambix.wav", "recording_visual.mp4"]
         for pattern in patterns:
             for f in record.work_dir.glob(pattern):
                 try:

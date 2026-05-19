@@ -545,14 +545,25 @@ def _running_rust_sidecar(
 def _wait_for_rust_localization_manifest(port: int, *, timeout_s: float = 15.0) -> dict:
     deadline = time.monotonic() + timeout_s
     last_results: list[dict] = []
+    latest_localization_result: dict | None = None
+    latest_classifier_render: dict | None = None
     while time.monotonic() < deadline:
         results = _http_json(port, "/api/v1/dsp/results?limit=20")
         assert isinstance(results, list)
         last_results = results
         for result in results:
+            classifier_render = result.get("classifier_render")
+            if result.get("manifest_type") == "classifier_render" and isinstance(classifier_render, dict):
+                latest_classifier_render = classifier_render
             localization = result.get("localization")
             if result.get("manifest_type") == "localization_result" and isinstance(localization, dict):
-                return result
+                if isinstance(classifier_render, dict):
+                    return result
+                latest_localization_result = result
+        if latest_localization_result is not None and latest_classifier_render is not None:
+            merged_result = dict(latest_localization_result)
+            merged_result["classifier_render"] = latest_classifier_render
+            return merged_result
         time.sleep(0.05)
     raise AssertionError(
         "Timed out waiting for a Rust localization manifest. "

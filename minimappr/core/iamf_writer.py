@@ -46,6 +46,15 @@ _PROFILE_BASE = 0
 # Audio element types
 _AE_TYPE_CHANNEL = 0
 _AE_TYPE_SCENE = 1
+_AE_TYPE_OBJECT = 2
+
+# Parameter definition types
+_PARAM_MIX_GAIN = 0
+_PARAM_SINGLE_POSITION = 3
+
+# Single-position animation types
+_ANIMATION_STEP = 0
+_ANIMATION_LINEAR = 1
 
 # Ambisonics mode
 _AMBI_MONO_MODE = 0
@@ -135,19 +144,16 @@ def _audio_element_foa(audio_element_id: int, codec_config_id: int, num_substrea
 
 
 def _audio_element_object(audio_element_id: int, codec_config_id: int) -> bytes:
-    """Audio_Element_OBU (type 1) for a single-channel mono CHANNEL element."""
+    """Audio_Element_OBU (type 1) for a single-object OBJECT_BASED element."""
     payload = bytearray()
     payload += _leb128(audio_element_id)
-    payload += bytes([(_AE_TYPE_CHANNEL << 5) & 0xFF])
+    payload += bytes([(_AE_TYPE_OBJECT << 5) & 0xFF])
     payload += _leb128(codec_config_id)
     payload += _leb128(1)  # num_substreams = 1
     payload += _leb128(audio_element_id * 100)  # substream_id
     payload += _leb128(0)  # num_parameters = 0
-    # Scalable_Channel_Layout_Config: num_layers=1, default loudness layout
-    payload += _leb128(1)  # num_layers
-    # ChannelAudioLayerConfig: loudspeaker_layout=MONO(0), output_gain_is_present=0,
-    # recon_gain_is_present=0, reserved=0, substream_count=1, coupled_substream_count=0
-    payload += struct.pack("BBBB", 0x00, 0x00, 1, 0)
+    payload += _leb128(1)  # objects_config_size: num_objects only
+    payload += bytes([1])  # num_objects = 1, mono object substream
     return _obu(_OBU_AUDIO_ELEMENT, bytes(payload))
 
 
@@ -157,6 +163,9 @@ def _mix_presentation(
     object_ae_ids: list[int],
     bed_loudness: "LoudnessMeasurement",
     object_loudness_list: list["LoudnessMeasurement"],
+    *,
+    sample_rate_hz: int = 48_000,
+    samples_per_frame: int = 512,
 ) -> bytes:
     """Mix_Presentation_OBU (type 2).
 
@@ -167,29 +176,27 @@ def _mix_presentation(
     payload += _leb128(mix_presentation_id)
     payload += _leb128(0)  # count_label = 0 (no language tags)
 
-    # num_audio_elements in this mix
+    payload += _leb128(1)  # num_sub_mixes
+
     num_elements = 1 + len(object_ae_ids)
     payload += _leb128(num_elements)
 
     # FOA bed element
     payload += _leb128(bed_ae_id)
-    payload += _leb128(0)  # headphones_rendering_mode = STEREO(0)
-    payload += _leb128(0)  # num_parameters = 0
-    # rendering_config for SCENE: binaural_rendering_mode = NONE(0)
-    payload += bytes([0])
+    payload += _rendering_config(None, sample_rate_hz, samples_per_frame)
+    payload += _mix_gain_param_definition(100, sample_rate_hz, samples_per_frame)
 
     # Object elements
     for ae_id in object_ae_ids:
         payload += _leb128(ae_id)
-        payload += _leb128(0)
-        payload += _leb128(0)
-        # rendering_config for CHANNEL: default_demixing_mode = NONE(0)
-        payload += bytes([0])
+        payload += _rendering_config(ae_id, sample_rate_hz, samples_per_frame)
+        payload += _mix_gain_param_definition(100 + ae_id, sample_rate_hz, samples_per_frame)
+
+    payload += _mix_gain_param_definition(200, sample_rate_hz, samples_per_frame)  # output_mix_gain
 
     # num_layouts = 1
     payload += _leb128(1)
-    # loudness_layout: layout_type=LOUDSPEAKERS_SS_MONO(0)
-    payload += bytes([0])
+    payload += bytes([0x80])  # layout_type=LOUDSPEAKERS_SS_CONVENTION, sound_system=A
 
     def _loudness_info(lm: "LoudnessMeasurement") -> bytes:
         # info_type = 0 (integrated loudness + digital peak only)
@@ -202,6 +209,55 @@ def _mix_presentation(
     return _obu(_OBU_MIX_PRESENTATION, bytes(payload))
 
 
+def _mix_gain_param_definition(parameter_id: int, sample_rate_hz: int, samples_per_frame: int) -> bytes:
+    payload = bytearray()
+    payload += _leb128(parameter_id)
+    payload += _leb128(sample_rate_hz)
+    payload += bytes([0])  # param_definition_mode=0, reserved=0
+    payload += _leb128(samples_per_frame)  # duration
+    payload += _leb128(samples_per_frame)  # constant_subblock_duration
+    payload += struct.pack(">h", 0)  # default_mix_gain = 0 dB, Q7.8
+    return bytes(payload)
+
+
+def _rendering_config(
+    single_position_parameter_id: int | None,
+    sample_rate_hz: int,
+    samples_per_frame: int,
+) -> bytes:
+    extension = bytearray()
+    if single_position_parameter_id is None:
+        extension += _leb128(0)  # num_parameters
+    else:
+        extension += _leb128(1)  # num_parameters
+        extension += _leb128(_PARAM_SINGLE_POSITION)
+        extension += _single_position_param_definition(
+            single_position_parameter_id,
+            sample_rate_hz,
+            samples_per_frame,
+        )
+    payload = bytearray()
+    payload += bytes([0])  # headphones_rendering_mode=0, reserved=0
+    payload += _leb128(len(extension))
+    payload += extension
+    return bytes(payload)
+
+
+def _single_position_param_definition(
+    parameter_id: int,
+    sample_rate_hz: int,
+    samples_per_frame: int,
+) -> bytes:
+    payload = bytearray()
+    payload += _leb128(parameter_id)
+    payload += _leb128(sample_rate_hz)
+    payload += bytes([0])  # param_definition_mode=0, reserved=0
+    payload += _leb128(samples_per_frame)  # duration
+    payload += _leb128(samples_per_frame)  # constant_subblock_duration
+    payload += _pack_single_position_triplet(0, 0, 0, reserved_bits=4)
+    return bytes(payload)
+
+
 # ── Temporal unit writers ──────────────────────────────────────────────────────
 
 def _temporal_delimiter() -> bytes:
@@ -209,24 +265,91 @@ def _temporal_delimiter() -> bytes:
 
 
 def _parameter_block(
-    ae_id: int,
+    parameter_id: int,
     positions: dict[int, dict] | None,
 ) -> bytes:
-    """Minimal Parameter_Block_OBU for object position.
-
-    Writes an empty parameter block (no gain/demixing parameters) — positional
-    metadata for objects is carried here but the Base Profile allows omitting
-    the actual parameter data if no gain changes are applied; we still emit the
-    OBU to satisfy parsers that require it per temporal unit.
-    """
+    """Parameter_Block_OBU carrying SinglePositionParameterData for one object."""
+    pos = (positions or {}).get(0)
+    if not pos:
+        return b""
     payload = bytearray()
-    payload += _leb128(ae_id)        # parameter_id references audio element
-    payload += _leb128(0)            # parameter_rate = inherit from codec
-    payload += bytes([0])            # param_definition_type = DEMIXING(0)
-    payload += _leb128(0)            # duration
-    payload += _leb128(0)            # constant_subblock_duration flag
-    payload += _leb128(0)            # num_subblocks = 0
+    payload += _leb128(parameter_id)
+    payload += _single_position_parameter_data(pos)
     return _obu(_OBU_PARAMETER_BLOCK, bytes(payload))
+
+
+def _single_position_parameter_data(pos: dict) -> bytes:
+    start = (
+        _quantize_azimuth(pos.get("azimuth_deg", 0.0)),
+        _quantize_elevation(pos.get("elevation_deg", 0.0)),
+        _quantize_distance(pos.get("distance_norm", 0.0)),
+    )
+    end = (
+        _quantize_azimuth(pos.get("end_azimuth_deg", pos.get("azimuth_deg", 0.0))),
+        _quantize_elevation(pos.get("end_elevation_deg", pos.get("elevation_deg", 0.0))),
+        _quantize_distance(pos.get("end_distance_norm", pos.get("distance_norm", 0.0))),
+    )
+    animation = _ANIMATION_STEP if start == end else _ANIMATION_LINEAR
+    body = bytearray()
+    body += _leb128(animation)
+    body += _pack_single_position_triplet(*start, reserved_bits=4 if animation == _ANIMATION_STEP else 0)
+    if animation == _ANIMATION_LINEAR:
+        body += _pack_single_position_triplet(*end, reserved_bits=0)
+    return _leb128(len(body)) + bytes(body)
+
+
+def _quantize_azimuth(value: object) -> int:
+    return max(-180, min(180, int(round(float(value)))))
+
+
+def _quantize_elevation(value: object) -> int:
+    return max(-90, min(90, int(round(float(value)))))
+
+
+def _quantize_distance(value: object) -> int:
+    return max(0, min(7, int(round(float(value) * 7.0))))
+
+
+def _pack_single_position_triplet(
+    azimuth: int,
+    elevation: int,
+    distance: int,
+    *,
+    reserved_bits: int,
+) -> bytes:
+    bits = _BitWriter()
+    bits.write_signed(azimuth, 9)
+    bits.write_signed(elevation, 8)
+    bits.write_unsigned(distance, 3)
+    if reserved_bits:
+        bits.write_unsigned(0, reserved_bits)
+    return bits.finish()
+
+
+class _BitWriter:
+    def __init__(self) -> None:
+        self._bytes = bytearray()
+        self._current = 0
+        self._used_bits = 0
+
+    def write_unsigned(self, value: int, n_bits: int) -> None:
+        for bit_idx in range(n_bits - 1, -1, -1):
+            bit = (value >> bit_idx) & 1
+            self._current = (self._current << 1) | bit
+            self._used_bits += 1
+            if self._used_bits == 8:
+                self._bytes.append(self._current)
+                self._current = 0
+                self._used_bits = 0
+
+    def write_signed(self, value: int, n_bits: int) -> None:
+        self.write_unsigned(value & ((1 << n_bits) - 1), n_bits)
+
+    def finish(self) -> bytes:
+        if self._used_bits:
+            self._current <<= 8 - self._used_bits
+            self._bytes.append(self._current)
+        return bytes(self._bytes)
 
 
 def _audio_frame_obu(substream_id: int, pcm16_bytes: bytes) -> bytes:
@@ -314,6 +437,8 @@ def write_iamf(
         obj_ae_ids,
         bed_loudness,
         object_loudness,
+        sample_rate_hz=sample_rate_hz,
+        samples_per_frame=samples_per_frame,
     )
 
     # ── Temporal units (one per codec frame) ──────────────────────────────────

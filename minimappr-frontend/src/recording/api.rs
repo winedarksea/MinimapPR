@@ -11,7 +11,7 @@
 ///   GET    /api/v1/recordings                         → Vec<RecordingLibraryEntry>
 ///   DELETE /api/v1/recordings/{id}                    → 204
 ///   GET    /api/v1/cameras                            → Vec<CameraDevice>
-///   GET    /api/v1/recordings/{id}/download?format=…  → file (ambisonics|iamf|video)
+///   GET    /api/v1/recordings/{id}/download?format=…  → file (ambisonics|iamf|visual|video)
 use crate::recording::{CameraDevice, RecordingLibraryEntry, RecordingSession, StartRecordingRequest};
 use gloo_net::http::Request;
 use js_sys::encode_uri_component;
@@ -138,7 +138,7 @@ pub async fn fetch_cameras() -> Result<Vec<CameraDevice>, String> {
 
 /// Build the download URL for a completed recording.
 ///
-/// `format` is one of: `ambisonics`, `iamf`, `video`.
+/// `format` is one of: `ambisonics`, `iamf`, `visual`, `video`.
 pub fn download_url(session_id: &str, format: &str) -> String {
     format!(
         "/api/v1/recordings/{}/download?format={}",

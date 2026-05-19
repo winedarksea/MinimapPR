@@ -109,9 +109,11 @@ fn RecordingRow(
     let ambi_url = api::download_url(&entry.session_id, "ambisonics");
     let object_url = api::download_url(&entry.session_id, "object");
     let iamf_url = api::download_url(&entry.session_id, "iamf");
+    let visual_url = api::download_url(&entry.session_id, "visual");
     let video_url = api::download_url(&entry.session_id, "video");
     let show_object = entry.object_available;
     let show_iamf = entry.iamf_available;
+    let show_visual = entry.visual_available;
     let show_video = entry.video_available;
     let error_message = entry.error_message.clone();
     // Clone session_id for use in the reactive delete closure.
@@ -132,6 +134,9 @@ fn RecordingRow(
                     })}
                     {show_object.then(|| view! {
                         <span class="badge">"Obj"</span>
+                    })}
+                    {show_visual.then(|| view! {
+                        <span class="badge">"Visual"</span>
                     })}
                     {show_video.then(|| view! {
                         <span class="badge">"Video"</span>
@@ -168,6 +173,14 @@ fn RecordingRow(
                         move || view! {
                             <a class="btn-sm" href=iamf_url.clone() download>
                                 "↓ IAMF"
+                            </a>
+                        }
+                    })}
+                    {(is_completed && show_visual).then({
+                        let visual_url = visual_url.clone();
+                        move || view! {
+                            <a class="btn-sm" href=visual_url.clone() download>
+                                "↓ Visual"
                             </a>
                         }
                     })}

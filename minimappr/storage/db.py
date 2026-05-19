@@ -396,6 +396,7 @@ class Storage:
                 ambix_path TEXT,
                 iamf_path TEXT,
                 object_path TEXT,
+                visual_path TEXT,
                 youtube_path TEXT,
                 error TEXT,
                 created_ns INTEGER NOT NULL
@@ -486,6 +487,7 @@ class Storage:
             {
                 "ambix_path": "TEXT",
                 "object_path": "TEXT",
+                "visual_path": "TEXT",
             },
         )
         await self._deduplicate_reporting_window_canonicals()
@@ -2289,9 +2291,9 @@ class Storage:
                 INSERT OR REPLACE INTO capture_sessions (
                 session_id, state, stream_key, range_lease_id,
                 start_time_ns, end_time_ns, first_frame_pts_ns,
-                    work_dir, video_path, ambix_path, iamf_path, object_path, youtube_path,
+                    work_dir, video_path, ambix_path, iamf_path, object_path, visual_path, youtube_path,
                     error, created_ns
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     record.session_id,
@@ -2306,6 +2308,7 @@ class Storage:
                     str(record.ambix_path) if getattr(record, "ambix_path", None) else None,
                     str(record.iamf_path) if record.iamf_path else None,
                     str(record.object_path) if getattr(record, "object_path", None) else None,
+                    str(record.visual_path) if getattr(record, "visual_path", None) else None,
                     str(record.youtube_path) if record.youtube_path else None,
                     record.error,
                     record.created_ns,
@@ -2361,11 +2364,12 @@ class Storage:
         ambix_path: str | None = None,
         iamf_path: str | None = None,
         object_path: str | None = None,
+        visual_path: str | None = None,
         youtube_path: str | None = None,
         created_ns: int,
     ) -> str:
         """Insert a large_artifacts row for a completed capture session."""
-        path = iamf_path or youtube_path or ambix_path or object_path or ""
+        path = iamf_path or youtube_path or visual_path or ambix_path or object_path or ""
         metadata: dict[str, Any] = {"session_id": session_id}
         if ambix_path:
             metadata["ambix_path"] = ambix_path
@@ -2373,6 +2377,8 @@ class Storage:
             metadata["iamf_path"] = iamf_path
         if object_path:
             metadata["object_path"] = object_path
+        if visual_path:
+            metadata["visual_path"] = visual_path
         if youtube_path:
             metadata["youtube_path"] = youtube_path
         return await self.insert_large_artifact(

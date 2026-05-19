@@ -53,6 +53,7 @@ from minimappr.core.ambi_atob import (
 )
 from minimappr.core.capture_session import CaptureSessionRecord
 from minimappr.core.iamf_object_slot import IamfObjectSlot, select_iamf_object_slot
+from minimappr.core.recording_visual import render_recording_visual_mp4
 from minimappr.utils.audio import read_wav_mono
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,7 @@ class TrackTrajectory:
     track_id: str
     waypoints: list[tuple[int, tuple[float, float, float]]]
     """List of (sample_offset, (x, y, z)) waypoints at the capture sample rate."""
+    label: str = ""
     tqi: float = 0.0
     label_confidence: float = 0.0
     localization_confidence: float = 0.0
@@ -330,6 +332,17 @@ class IamfPipeline:
             SAMPLES_PER_FRAME,
             OUTPUT_RATE_HZ,
         )
+        visual_path = work_dir / "recording_visual.mp4"
+        visual_ready = await render_recording_visual_mp4(
+            visual_path,
+            output_slot,
+            output_trajectories,
+            n_samples=n_output_samples,
+            sample_rate_hz=OUTPUT_RATE_HZ,
+            samples_per_unit=SAMPLES_PER_FRAME,
+        )
+        if visual_ready:
+            record.visual_path = visual_path
 
         # ── 9. BS.1770-4 loudness measurement at OUTPUT_RATE_HZ ──────────────
         logger.info("[%s] step 6: loudness measurement", record.session_id[:8])
@@ -410,6 +423,11 @@ class IamfPipeline:
             final_object = artifacts_dir / f"{record.session_id}_object.wav"
             object_path.replace(final_object)
             record.object_path = final_object
+
+        if record.visual_path and record.visual_path.exists():
+            final_visual = artifacts_dir / f"{record.session_id}_visual.mp4"
+            record.visual_path.replace(final_visual)
+            record.visual_path = final_visual
 
         if record.youtube_path and record.youtube_path.exists():
             final_mp4 = artifacts_dir / f"{record.session_id}_youtube.mp4"
@@ -509,6 +527,7 @@ class IamfPipeline:
                     TrackTrajectory(
                         track_id=track_id,
                         waypoints=waypoints,
+                        label=str(row.get("label") or ""),
                         tqi=float(row.get("tqi") or 0.0),
                         label_confidence=(
                             float(np.mean(label_confidences))
@@ -678,26 +697,23 @@ class IamfPipeline:
     ) -> bytes | None:
         """Encode bed + objects as IAMF.
 
-        Uses local FFmpeg/libopus when no sidecar is configured, otherwise
-        POSTs to the Rust /api/v1/capture/encode/iamf endpoint.
+        Uses the in-process IAMF writer so object position metadata is encoded
+        into Parameter_Block_OBUs instead of being left only in a sidecar JSON.
         """
-        if self._sidecar_url is None:
-            await _encode_iamf_ffmpeg(
-                bed_path,
-                object_path,
-                output_iamf_path,
+        from minimappr.core.iamf_writer import write_iamf
+
+        output_iamf_path.write_bytes(
+            write_iamf(
+                bed,
+                objects,
+                positions_per_unit,
                 bed_loudness,
                 object_loudness,
+                sample_rate_hz=OUTPUT_RATE_HZ,
+                samples_per_frame=SAMPLES_PER_FRAME,
             )
-            return None
-        return await self._encode_iamf_rust(
-            bed_path,
-            object_path,
-            positions_path,
-            output_iamf_path,
-            bed_loudness,
-            object_loudness,
         )
+        return None
 
     async def _encode_iamf_rust(
         self,
@@ -751,6 +767,7 @@ class IamfPipeline:
                 ambix_path=str(record.ambix_path) if record.ambix_path else None,
                 iamf_path=str(record.iamf_path) if record.iamf_path else None,
                 object_path=str(record.object_path) if record.object_path else None,
+                visual_path=str(record.visual_path) if record.visual_path else None,
                 youtube_path=str(record.youtube_path) if record.youtube_path else None,
                 created_ns=time.time_ns(),
             )
@@ -1157,6 +1174,7 @@ def _scale_trajectory_waypoints(
         TrackTrajectory(
             track_id=t.track_id,
             waypoints=[(int(s * scale), pos) for s, pos in t.waypoints],
+            label=t.label,
             tqi=t.tqi,
             label_confidence=t.label_confidence,
             localization_confidence=t.localization_confidence,
@@ -1177,6 +1195,7 @@ def _scale_trajectory_sample_offsets(
         TrackTrajectory(
             track_id=t.track_id,
             waypoints=[(max(0, min(to_samples - 1, int(round(s * scale)))), pos) for s, pos in t.waypoints],
+            label=t.label,
             tqi=t.tqi,
             label_confidence=t.label_confidence,
             localization_confidence=t.localization_confidence,

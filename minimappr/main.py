@@ -3567,6 +3567,7 @@ async def capture_status(session_id: str, request: Request):
         "ambix_path": str(record.ambix_path) if record.ambix_path else None,
         "iamf_path": str(record.iamf_path) if record.iamf_path else None,
         "object_path": str(record.object_path) if record.object_path else None,
+        "visual_path": str(record.visual_path) if record.visual_path else None,
         "youtube_path": str(record.youtube_path) if record.youtube_path else None,
         "error": record.error,
         "created_ns": record.created_ns,
@@ -3637,6 +3638,7 @@ def _session_record_to_recording_session(record: CaptureSessionRecord) -> dict:
         "ambisonics_ready": record.ambix_path is not None and record.ambix_path.exists() if record.ambix_path else False,
         "iamf_ready": record.iamf_path is not None and record.iamf_path.exists() if record.iamf_path else False,
         "object_ready": record.object_path is not None and record.object_path.exists() if record.object_path else False,
+        "visual_ready": record.visual_path is not None and record.visual_path.exists() if record.visual_path else False,
         "video_ready": record.youtube_path is not None and record.youtube_path.exists() if record.youtube_path else False,
         "error_message": record.error,
     }
@@ -3791,6 +3793,7 @@ async def recordings_get(session_id: str, request: Request):
         ambix_path=Path(row["ambix_path"]) if row.get("ambix_path") else None,
         iamf_path=Path(row["iamf_path"]) if row.get("iamf_path") else None,
         object_path=Path(row["object_path"]) if row.get("object_path") else None,
+        visual_path=Path(row["visual_path"]) if row.get("visual_path") else None,
         youtube_path=Path(row["youtube_path"]) if row.get("youtube_path") else None,
         error=row.get("error"),
         created_ns=row.get("created_ns", 0),
@@ -3816,6 +3819,7 @@ async def recordings_list(request: Request):
         iamf_path = Path(row["iamf_path"]) if row.get("iamf_path") else None
         ambix_path = Path(row["ambix_path"]) if row.get("ambix_path") else None
         object_path = Path(row["object_path"]) if row.get("object_path") else None
+        visual_path = Path(row["visual_path"]) if row.get("visual_path") else None
         youtube_path = Path(row["youtube_path"]) if row.get("youtube_path") else None
 
         results.append({
@@ -3827,6 +3831,7 @@ async def recordings_list(request: Request):
             "ambisonics_available": ambix_path is not None and ambix_path.exists() if ambix_path else False,
             "iamf_available": iamf_path is not None and iamf_path.exists() if iamf_path else False,
             "object_available": object_path is not None and object_path.exists() if object_path else False,
+            "visual_available": visual_path is not None and visual_path.exists() if visual_path else False,
             "video_available": youtube_path is not None and youtube_path.exists() if youtube_path else False,
             "size_bytes": None,
             "status": _capture_state_to_recording_status(CaptureState(row["state"])),
@@ -3867,7 +3872,7 @@ async def recordings_delete(session_id: str, request: Request):
             import shutil
             shutil.rmtree(work_dir, ignore_errors=True)
 
-        for path_key in ("ambix_path", "iamf_path", "object_path", "youtube_path"):
+        for path_key in ("ambix_path", "iamf_path", "object_path", "visual_path", "youtube_path"):
             artifact_path = row.get(path_key)
             if artifact_path:
                 p = Path(artifact_path)
@@ -3928,8 +3933,17 @@ async def recordings_download(session_id: str, format: str = Query(...), request
                 filename=f"{session_id}_object.wav",
             )
         raise HTTPException(status_code=404, detail="Selected object file not available")
+    elif format in ("visual", "recording-visual"):
+        path = row.get("visual_path")
+        if path and Path(path).exists():
+            return FileResponse(
+                path,
+                media_type="video/mp4",
+                filename=f"{session_id}_visual.mp4",
+            )
+        raise HTTPException(status_code=404, detail="Recording visual not available")
     else:
-        raise HTTPException(status_code=400, detail=f"Unknown format: {format}. Use ambisonics, object, iamf, or video.")
+        raise HTTPException(status_code=400, detail=f"Unknown format: {format}. Use ambisonics, object, iamf, visual, or video.")
 
 
 @app.websocket("/ws/live")

@@ -114,7 +114,13 @@ def _binary_ingest_payload(frames: list[bytes], *, sort_by_toa: bool = False) ->
     return bytes(payload)
 
 
-def _configure_env(monkeypatch, tmp_path: Path, *, snippet_retention_seconds: int) -> Path:
+def _configure_env(
+    monkeypatch,
+    tmp_path: Path,
+    *,
+    snippet_retention_seconds: int,
+    classifier_backend: str = "heuristic",
+) -> Path:
     db_path = tmp_path / "http_api.db"
     snippet_dir = tmp_path / "snippets"
     artifact_dir = tmp_path / "artifacts"
@@ -127,6 +133,8 @@ def _configure_env(monkeypatch, tmp_path: Path, *, snippet_retention_seconds: in
     monkeypatch.setenv("MINIMAPPR_DIRECT_INGEST_ENABLED", "true")
     monkeypatch.setenv("MINIMAPPR_INGEST_SIDECAR_ENABLED", "false")
     monkeypatch.setenv("MINIMAPPR_INGEST_SPOOL_POLL_INTERVAL_SECONDS", "3600")
+    monkeypatch.setenv("MINIMAPPR_CLASSIFIER", classifier_backend)
+    monkeypatch.setenv("MINIMAPPR_MODEL_CHAIN_CONFIG_PATH", str(tmp_path / "missing-model-chain.json"))
     monkeypatch.setenv("MINIMAPPR_TRIGGER_RMS", "0.000001")
     monkeypatch.setenv("MINIMAPPR_TRIGGER_COOLDOWN_SECONDS", "0")
     monkeypatch.setenv("MINIMAPPR_LOCALIZATION_WINDOW_SECONDS", "0.02")
@@ -665,9 +673,7 @@ def test_debug_endpoints_expose_runtime_and_event_provenance(monkeypatch, tmp_pa
         config_response = client.get("/api/v1/debug/config")
         assert config_response.status_code == 200
         config_body = config_response.json()
-        assert config_body["runtime"]["classifier"]["requested_backend"] == "yamnet"
-        assert "yamnet_input_target_rms" in config_body["thresholds"]
-        assert "yamnet_max_input_gain" in config_body["thresholds"]
+        assert config_body["runtime"]["classifier"]["requested_backend"] == "heuristic"
         assert "python_version" in config_body["runtime"]
 
         selftest_response = client.get("/api/v1/debug/selftest")
@@ -690,6 +696,24 @@ def test_debug_endpoints_expose_runtime_and_event_provenance(monkeypatch, tmp_pa
         tracking_updates = event_body["tracking"]["updates"]
         if tracking_updates:
             assert any(update.get("detection_id") == detection["id"] for update in tracking_updates)
+
+
+def test_debug_config_reports_requested_yamnet_backend(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(
+        monkeypatch,
+        tmp_path,
+        snippet_retention_seconds=0,
+        classifier_backend="yamnet",
+    )
+
+    with TestClient(app) as client:
+        config_response = client.get("/api/v1/debug/config")
+        assert config_response.status_code == 200
+        config_body = config_response.json()
+        assert config_body["runtime"]["classifier"]["requested_backend"] == "yamnet"
+        assert "yamnet_input_target_rms" in config_body["thresholds"]
+        assert "yamnet_max_input_gain" in config_body["thresholds"]
+        assert "python_version" in config_body["runtime"]
 
 
 def test_http_ingest_duplicate_frame_is_idempotent(monkeypatch, tmp_path: Path) -> None:
