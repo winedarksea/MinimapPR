@@ -78,6 +78,36 @@ struct SidecarDiagnostics {
 }
 
 #[derive(Clone, Debug, Deserialize, Default, PartialEq)]
+struct IngestConcurrencyLimit {
+    #[serde(default)]
+    max_concurrent: Option<u64>,
+    #[serde(default)]
+    active: Option<u64>,
+    #[serde(default)]
+    total_admissions: Option<u64>,
+    #[serde(default)]
+    total_shed: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Default, PartialEq)]
+struct IngestDiagnostics {
+    #[serde(default)]
+    backend: String,
+    #[serde(default)]
+    host: String,
+    #[serde(default)]
+    port: u64,
+    #[serde(default)]
+    base_url: String,
+    #[serde(default)]
+    capture_available: bool,
+    #[serde(default)]
+    capture_unavailable_reason: Option<String>,
+    #[serde(default)]
+    concurrency_limit: IngestConcurrencyLimit,
+}
+
+#[derive(Clone, Debug, Deserialize, Default, PartialEq)]
 struct Diagnostics {
     #[serde(default)]
     now_ns: i64,
@@ -95,6 +125,8 @@ struct Diagnostics {
     cpu_count: Option<u32>,
     #[serde(default)]
     disk: std::collections::BTreeMap<String, Option<DiskEntry>>,
+    #[serde(default)]
+    ingest: IngestDiagnostics,
     #[serde(default)]
     pipeline: Option<PipelineDiagnostics>,
     #[serde(default)]
@@ -214,6 +246,10 @@ fn fmt_seconds(value: Option<f64>) -> String {
     }
 }
 
+fn fmt_optional_count(value: Option<u64>) -> String {
+    value.map(|count| count.to_string()).unwrap_or_else(|| "—".into())
+}
+
 #[component]
 pub fn ServerDiagnosticsView() -> impl IntoView {
     let data: RwSignal<Option<Diagnostics>> = RwSignal::new(None);
@@ -269,6 +305,7 @@ pub fn ServerDiagnosticsView() -> impl IntoView {
                         let cpu_user = d.process.cpu_user_s.map(|v| format!("{v:.1}s")).unwrap_or_else(|| "—".into());
                         let cpu_sys = d.process.cpu_system_s.map(|v| format!("{v:.1}s")).unwrap_or_else(|| "—".into());
                         let disks = d.disk.clone();
+                        let ingest = d.ingest.clone();
                         let pipeline = d.pipeline.clone().unwrap_or_default();
                         let localization_lag = pipeline
                             .realtime
@@ -285,6 +322,27 @@ pub fn ServerDiagnosticsView() -> impl IntoView {
                             .stages
                             .get("rules")
                             .and_then(|stage| stage.seconds_behind_realtime);
+                        let ingest_endpoint = if ingest.base_url.is_empty() {
+                            format!("{}:{}", ingest.host, ingest.port)
+                        } else {
+                            ingest.base_url.clone()
+                        };
+                        let capture_status = if ingest.capture_available {
+                            "available".into()
+                        } else {
+                            ingest
+                                .capture_unavailable_reason
+                                .clone()
+                                .unwrap_or_else(|| "unavailable".into())
+                        };
+                        let concurrency_status = match (
+                            ingest.concurrency_limit.active,
+                            ingest.concurrency_limit.max_concurrent,
+                        ) {
+                            (Some(active), Some(max)) => format!("{active}/{max} active"),
+                            (Some(active), None) => format!("{active} active"),
+                            _ => "—".into(),
+                        };
 
                         view! {
                             <div class="diag-grid">
@@ -308,6 +366,24 @@ pub fn ServerDiagnosticsView() -> impl IntoView {
                                     <DiagRow k="Load 1m".into() v=la1 />
                                     <DiagRow k="Load 5m".into() v=la5 />
                                     <DiagRow k="Load 15m".into() v=la15 />
+                                </DiagCard>
+
+                                <DiagCard title="Ingest">
+                                    <DiagRow
+                                        k="Backend".into()
+                                        v=if ingest.backend.is_empty() { "—".into() } else { ingest.backend.clone() }
+                                    />
+                                    <DiagRow k="Endpoint".into() v=ingest_endpoint />
+                                    <DiagRow k="Capture".into() v=capture_status />
+                                    <DiagRow k="Concurrency".into() v=concurrency_status />
+                                    <DiagRow
+                                        k="Total admissions".into()
+                                        v=fmt_optional_count(ingest.concurrency_limit.total_admissions)
+                                    />
+                                    <DiagRow
+                                        k="Total shed".into()
+                                        v=fmt_optional_count(ingest.concurrency_limit.total_shed)
+                                    />
                                 </DiagCard>
 
                                 <DiagCard title="Pipeline">

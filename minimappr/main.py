@@ -12,7 +12,7 @@ import time
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Any, Callable, Literal
 import urllib.error
 import urllib.request
 
@@ -286,6 +286,37 @@ def _clear_transient_ingest_runtime_state(state) -> None:
     )
 
 
+def _clear_bound_runtime_state(state) -> None:
+    _clear_state_attrs(
+        state,
+        "settings",
+        "storage",
+        "registry",
+        "cluster_registry",
+        "audio_buffer",
+        "localizer",
+        "classifier",
+        "tracker",
+        "live_hub",
+        "coordinate_frame",
+        "zone_matcher",
+        "environment_provider",
+        "fusion_node",
+        "ingest_transport",
+        "federation",
+        "bit_evaluator",
+        "diagnostics",
+        "cleanup_service",
+        "ingest_spool_consumer",
+        "sidecar_state",
+        "capture_manager",
+        "ingest_concurrency",
+        "ingest_stream_consumer_enabled",
+        "site_origin_resolution_source",
+        "site_origin_contributing_node_ids",
+    )
+
+
 def _ensure_lifespan_runtime_directories(settings: Settings) -> None:
     settings.federation_peers_config_path.parent.mkdir(parents=True, exist_ok=True)
     settings.snippet_dir.mkdir(parents=True, exist_ok=True)
@@ -294,6 +325,7 @@ def _ensure_lifespan_runtime_directories(settings: Settings) -> None:
 
 def _prepare_lifespan_runtime(state, settings: Settings) -> None:
     install_log_ring()
+    _clear_bound_runtime_state(state)
     _clear_transient_ingest_runtime_state(state)
     _ensure_lifespan_runtime_directories(settings)
 
@@ -644,22 +676,86 @@ async def _proxy_ingest_post(
     return decoded
 
 
-def _capture_pipeline_available(settings: "Settings") -> bool:
+def _capture_pipeline_status(state) -> tuple[bool, str | None]:
+    settings: Settings | None = getattr(state, "settings", None)
+    if settings is None:
+        return False, "Capture is unavailable because runtime settings are not initialized"
+
     if settings.ingest_backend == "python":
-        return True
+        if _should_proxy_ingest_to_python_worker(state):
+            return True, None
+        if getattr(state, "audio_buffer", None) is not None:
+            return True, None
+        return False, "Python ingest capture requires the combined process role or a configured ingest worker proxy"
+
+    if settings.ingest_backend != "rust":
+        return False, f"Unsupported ingest backend for capture: {settings.ingest_backend}"
+
+    if getattr(state, "audio_buffer", None) is not None:
+        return True, None
+
     return (
-        settings.ingest_backend == "rust"
-        and (
-            settings.ingest_sidecar_memory_only_live_path
-            or settings.ingest_storage_mode == "journal"
-        )
+        False,
+        "Rust ingest capture currently requires the combined process role so raw audio can be mirrored into the in-memory live buffer before IAMF post-processing",
     )
 
 
-def _capture_pipeline_unavailable_reason() -> str:
-    return (
-        "Ambisonic/IAMF capture requires Python ingest, Rust memory-only live "
-        "mirroring, or a Rust journal-backed range-lease sidecar"
+def _capture_pipeline_available(state) -> bool:
+    return _capture_pipeline_status(state)[0]
+
+
+def _capture_pipeline_unavailable_reason(state) -> str:
+    return _capture_pipeline_status(state)[1] or "Capture pipeline is unavailable"
+
+
+async def _capture_channel_sensor_ids(storage: Storage, stream_key: str) -> list[str]:
+    node_row = await storage.get_node_by_id(stream_key)
+    channel_sensor_ids = _sensor_ids_from_node_row(node_row) if node_row is not None else []
+    if channel_sensor_ids:
+        return channel_sensor_ids
+    return [f"{stream_key}:ch{i}" for i in range(4)]
+
+
+async def _build_capture_start_request(
+    state,
+    *,
+    stream_key: str,
+    work_dir_path: Path,
+    max_duration_s: float,
+    video_source: str | None,
+    libcamera_mode: bool = False,
+    deployment_profile: str = "auto",
+    record_video: bool = True,
+    include_iamf: bool = True,
+) -> CaptureStartRequest:
+    settings: Settings = state.settings
+    storage: Storage = state.storage
+    audio_buffer = getattr(state, "audio_buffer", None)
+
+    if audio_buffer is not None:
+        return CaptureStartRequest(
+            stream_key=stream_key,
+            work_dir=work_dir_path,
+            sidecar_url=None,
+            multi_sensor_buffer=audio_buffer,
+            channel_sensor_ids=await _capture_channel_sensor_ids(storage, stream_key),
+            max_duration_s=max_duration_s,
+            video_source=video_source,
+            libcamera_mode=libcamera_mode,
+            deployment_profile=deployment_profile,
+            record_video=record_video,
+            include_iamf=include_iamf,
+        )
+
+    if settings.ingest_backend == "python":
+        raise HTTPException(
+            status_code=503,
+            detail="Python ingest capture requires the combined process role or a configured ingest worker proxy",
+        )
+
+    raise HTTPException(
+        status_code=503,
+        detail=_capture_pipeline_unavailable_reason(state),
     )
 
 
@@ -948,7 +1044,7 @@ async def _api_only_lifespan(app: FastAPI, settings: Settings):
         sidecar_state=sidecar_state,
         capture_manager=capture_manager,
         ingest_concurrency=_IngestConcurrencyLimit(
-            getattr(settings, "ingest_max_concurrent", _DEFAULT_INGEST_MAX_CONCURRENT)
+            settings.ingest_max_concurrent
         ),
     )
 
@@ -1054,7 +1150,7 @@ async def lifespan(app: FastAPI):
         sidecar_state=sidecar_state,
         capture_manager=capture_manager,
         ingest_concurrency=_IngestConcurrencyLimit(
-            getattr(settings, "ingest_max_concurrent", _DEFAULT_INGEST_MAX_CONCURRENT)
+            settings.ingest_max_concurrent
         ),
     )
 
@@ -2051,6 +2147,7 @@ async def get_pipeline_nodes(request: Request) -> PipelineNodesResponse:
                 node_type="sirith_tetra",
                 mics=mics,
                 stages=_build_rust_stages(dsp_status),
+                audio_override=NodeAudioOverride.model_validate(overrides) if overrides else None,
                 last_frame_ns=int(last_ns) if isinstance(last_ns, int) else None,
                 sample_rate_hz=int(sample_rate_hz) if isinstance(sample_rate_hz, int) else None,
                 audio_status=audio_status,
@@ -2167,6 +2264,7 @@ async def get_pipeline_nodes(request: Request) -> PipelineNodesResponse:
             node_type="unknown",
             mics=mics,
             stages=stages,
+            audio_override=NodeAudioOverride.model_validate(overrides) if overrides else None,
             frame_gaps=pnm.get("frame_gaps", 0),
             last_frame_ns=last_ns,
             audio_status="recent" if last_ns is not None else "unknown",
@@ -2184,6 +2282,7 @@ async def get_pipeline_nodes(request: Request) -> PipelineNodesResponse:
                 node_type="unknown",
                 mics=mics,
                 stages=stages,
+                audio_override=NodeAudioOverride.model_validate(overrides) if overrides else None,
             ))
     return PipelineNodesResponse(
         active_pipeline="python",
@@ -2191,34 +2290,171 @@ async def get_pipeline_nodes(request: Request) -> PipelineNodesResponse:
         pipeline_seconds_behind_realtime=float(overall_lag) if overall_lag is not None else None,
     )
 
+def _validate_stage_float(raw_value: object, *, stage_index: int, field_name: str) -> float:
+    if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
+        raise HTTPException(
+            status_code=422,
+            detail=f"stages[{stage_index}].{field_name} must be a number",
+        )
+    value = float(raw_value)
+    if not np.isfinite(value):
+        raise HTTPException(
+            status_code=422,
+            detail=f"stages[{stage_index}].{field_name} must be finite",
+        )
+    return value
+
+
+def _validate_stage_order(raw_value: object | None, *, stage_index: int) -> int:
+    if raw_value is None:
+        return 4
+    if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
+        raise HTTPException(
+            status_code=422,
+            detail=f"stages[{stage_index}].order must be an integer in [2, 8]",
+        )
+    order = float(raw_value)
+    if not np.isfinite(order) or not order.is_integer():
+        raise HTTPException(
+            status_code=422,
+            detail=f"stages[{stage_index}].order must be an integer in [2, 8]",
+        )
+    order_int = int(order)
+    if order_int < 2 or order_int > 8:
+        raise HTTPException(
+            status_code=422,
+            detail=f"stages[{stage_index}].order must be in [2, 8]",
+        )
+    return order_int
+
+
+def _canonicalize_preprocess_stages(raw_stages: list[dict[str, Any]]) -> list[dict[str, object]]:
+    canonical_stages: list[dict[str, object]] = []
+    for stage_index, raw_stage in enumerate(raw_stages):
+        if not isinstance(raw_stage, dict):
+            raise HTTPException(
+                status_code=422,
+                detail=f"stages[{stage_index}] must be an object",
+            )
+        stage_type_raw = raw_stage.get("type")
+        if not isinstance(stage_type_raw, str) or not stage_type_raw.strip():
+            raise HTTPException(
+                status_code=422,
+                detail=f"stages[{stage_index}].type must be a non-empty string",
+            )
+        stage_type = stage_type_raw.strip().lower()
+        if stage_type == "gain":
+            db = _validate_stage_float(raw_stage.get("db"), stage_index=stage_index, field_name="db")
+            if db < -60.0 or db > 60.0:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"stages[{stage_index}].db must be in [-60, 60]",
+                )
+            canonical_stages.append({"type": "gain", "db": db})
+            continue
+        if stage_type in {"highpass", "lowpass"}:
+            cutoff_hz = _validate_stage_float(
+                raw_stage.get("cutoff_hz"),
+                stage_index=stage_index,
+                field_name="cutoff_hz",
+            )
+            if cutoff_hz <= 0.0:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"stages[{stage_index}].cutoff_hz must be > 0",
+                )
+            canonical_stages.append(
+                {
+                    "type": stage_type,
+                    "cutoff_hz": cutoff_hz,
+                    "order": _validate_stage_order(raw_stage.get("order"), stage_index=stage_index),
+                }
+            )
+            continue
+        if stage_type == "bandpass":
+            low_hz = _validate_stage_float(raw_stage.get("low_hz"), stage_index=stage_index, field_name="low_hz")
+            high_hz = _validate_stage_float(raw_stage.get("high_hz"), stage_index=stage_index, field_name="high_hz")
+            if low_hz <= 0.0:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"stages[{stage_index}].low_hz must be > 0",
+                )
+            if high_hz <= low_hz:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"stages[{stage_index}].high_hz must be > low_hz",
+                )
+            canonical_stages.append(
+                {
+                    "type": "bandpass",
+                    "low_hz": low_hz,
+                    "high_hz": high_hz,
+                    "order": _validate_stage_order(raw_stage.get("order"), stage_index=stage_index),
+                }
+            )
+            continue
+        if stage_type in {"dc_block", "passthrough"}:
+            canonical_stages.append({"type": stage_type})
+            continue
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"stages[{stage_index}].type must be one of: gain, highpass, lowpass, "
+                "bandpass, dc_block, passthrough"
+            ),
+        )
+    return canonical_stages
+
+
+def _build_legacy_node_audio_override(body: NodeAudioOverride) -> dict[str, object]:
+    override_dict: dict[str, object] = {}
+    if body.mic_gains_db is not None:
+        for db in body.mic_gains_db:
+            if db < -60.0 or db > 60.0:
+                raise HTTPException(status_code=422, detail="mic_gains_db values must be in [-60, 60] dB")
+        override_dict["mic_gains_db"] = body.mic_gains_db
+        override_dict["gain_db"] = body.mic_gains_db[0] if body.mic_gains_db else 0.0
+    if body.hp_hz is not None:
+        if body.hp_hz < 0.0:
+            raise HTTPException(status_code=422, detail="hp_hz must be >= 0")
+        override_dict["hp_hz"] = body.hp_hz
+    if body.lp_hz is not None:
+        if body.lp_hz < 0.0:
+            raise HTTPException(status_code=422, detail="lp_hz must be >= 0")
+        override_dict["lp_hz"] = body.lp_hz
+    if body.smoothing is not None:
+        override_dict["smoothing"] = body.smoothing
+    return override_dict
+
+
+def _canonicalize_node_audio_override(
+    body: NodeAudioOverride,
+    existing_override: dict[str, object] | None,
+) -> dict[str, object]:
+    legacy_override = _build_legacy_node_audio_override(body)
+    if body.stages is not None:
+        canonical_stages = _canonicalize_preprocess_stages(body.stages)
+        if canonical_stages:
+            return {"stages": canonical_stages}
+        return legacy_override
+    existing_stages = existing_override.get("stages") if isinstance(existing_override, dict) else None
+    if isinstance(existing_stages, list) and existing_stages:
+        return dict(existing_override)
+    return legacy_override
+
 
 @app.patch("/api/v1/pipeline/nodes/{node_id}/audio")
 async def patch_node_audio(node_id: str, body: NodeAudioOverride, request: Request) -> dict:
     state = _require_state(request)
     settings: Settings = state.settings
 
-    # Validate mic_gains_db if provided.
-    if body.mic_gains_db is not None:
-        for db in body.mic_gains_db:
-            if db < -60.0 or db > 60.0:
-                raise HTTPException(status_code=422, detail="mic_gains_db values must be in [-60, 60] dB")
-    if body.hp_hz is not None and body.hp_hz < 0.0:
-        raise HTTPException(status_code=422, detail="hp_hz must be >= 0")
-    if body.lp_hz is not None and body.lp_hz < 0.0:
-        raise HTTPException(status_code=422, detail="lp_hz must be >= 0")
+    existing_override = settings.node_audio_overrides.get(node_id)
+    override_dict = _canonicalize_node_audio_override(body, existing_override)
 
-    override_dict: dict = {}
-    if body.mic_gains_db is not None:
-        override_dict["mic_gains_db"] = body.mic_gains_db
-        override_dict["gain_db"] = body.mic_gains_db[0] if body.mic_gains_db else 0.0
-    if body.hp_hz is not None:
-        override_dict["hp_hz"] = body.hp_hz
-    if body.lp_hz is not None:
-        override_dict["lp_hz"] = body.lp_hz
-    if body.smoothing is not None:
-        override_dict["smoothing"] = body.smoothing
-
-    settings.node_audio_overrides[node_id] = override_dict
+    if override_dict:
+        settings.node_audio_overrides[node_id] = override_dict
+    else:
+        settings.node_audio_overrides.pop(node_id, None)
 
     # Apply immediately to the Python ingest preprocessor if running.
     fusion_node: FusionNode | None = getattr(state, "fusion_node", None)
@@ -2229,11 +2465,7 @@ async def patch_node_audio(node_id: str, body: NodeAudioOverride, request: Reque
         fusion_node.apply_node_audio_override(node_id, override_dict if override_dict else None)
     elif rust_active:
         # Forward to the Rust sidecar so it takes effect in the live DSP path.
-        sidecar_payload = {
-            "node_id": node_id,
-            "gain_db": override_dict.get("gain_db"),
-            "hp_hz": override_dict.get("hp_hz"),
-        }
+        sidecar_payload = {"node_id": node_id, **override_dict}
         # Remove None values — sidecar treats missing keys as "unchanged".
         sidecar_payload = {k: v for k, v in sidecar_payload.items() if v is not None}
         try:
@@ -2625,15 +2857,37 @@ async def get_system_diagnostics(request: Request) -> dict:
     settings: Settings = state.settings
     diagnostics = await asyncio.to_thread(system_info.collect, db_path=settings.db_path, start_ns=process_start_ns())
     diagnostics["process_role"] = settings.process_role
+    ingest_concurrency = getattr(state, "ingest_concurrency", None)
+    capture_available, capture_unavailable_reason = _capture_pipeline_status(state)
     diagnostics["ingest"] = {
         "backend": settings.ingest_backend,
         "host": settings.ingest_host,
         "port": settings.ingest_port,
         "base_url": settings.ingest_base_url,
-        "capture_available": _capture_pipeline_available(settings),
-        "capture_unavailable_reason": None
-        if _capture_pipeline_available(settings)
-        else _capture_pipeline_unavailable_reason(),
+        "capture_available": capture_available,
+        "capture_unavailable_reason": None if capture_available else capture_unavailable_reason,
+        "concurrency_limit": {
+            "max_concurrent": (
+                ingest_concurrency.max_concurrent
+                if isinstance(ingest_concurrency, _IngestConcurrencyLimit)
+                else None
+            ),
+            "active": (
+                ingest_concurrency.active
+                if isinstance(ingest_concurrency, _IngestConcurrencyLimit)
+                else None
+            ),
+            "total_admissions": (
+                ingest_concurrency.total_admissions
+                if isinstance(ingest_concurrency, _IngestConcurrencyLimit)
+                else None
+            ),
+            "total_shed": (
+                ingest_concurrency.total_shed
+                if isinstance(ingest_concurrency, _IngestConcurrencyLimit)
+                else None
+            ),
+        },
     }
     if hasattr(state, "fusion_node"):
         fusion_status = await state.fusion_node.status()
@@ -3182,7 +3436,6 @@ class _CaptureStartBody(BaseModel):
 async def capture_start(request: Request, body: _CaptureStartBody):
     state = request.app.state
     manager: CaptureSessionManager = state.capture_manager
-    settings: Settings = state.settings
     if _should_proxy_ingest_to_python_worker(state):
         return await _proxy_json_to_python_worker(
             state,
@@ -3190,60 +3443,24 @@ async def capture_start(request: Request, body: _CaptureStartBody):
             endpoint_path="/api/v1/capture/start",
             json_body=body.model_dump(mode="json"),
         )
-    if not _capture_pipeline_available(settings):
+    if not _capture_pipeline_available(state):
         raise HTTPException(
             status_code=503,
-            detail=_capture_pipeline_unavailable_reason(),
+            detail=_capture_pipeline_unavailable_reason(state),
         )
 
     work_dir_path = (
         Path(body.work_dir) if body.work_dir else Path("data/captures")
     )
-    storage: Storage = state.storage
-
-    _buffer_backed_ingest = settings.ingest_backend == "python" or (
-        settings.ingest_backend == "rust"
-        and getattr(settings, "ingest_sidecar_memory_only_live_path", True)
+    req = await _build_capture_start_request(
+        state,
+        stream_key=body.stream_key,
+        work_dir_path=work_dir_path,
+        max_duration_s=body.max_duration_s,
+        video_source=body.video_source,
+        libcamera_mode=body.libcamera_mode,
+        deployment_profile=body.deployment_profile,
     )
-    if _buffer_backed_ingest:
-        if getattr(settings, "process_role", "combined") == "api":
-            raise HTTPException(
-                status_code=503,
-                detail=(
-                    "Buffer-backed ingest capture requires the combined process role; "
-                    "the API-only role does not hold a live audio buffer"
-                ),
-            )
-        audio_buffer = getattr(state, "audio_buffer", None)
-        # Derive channel sensor IDs from the node's sensor_offsets_m when available,
-        # falling back to the hardcoded 4-channel pattern for unknown nodes.
-        ch_sensor_ids: list[str] = []
-        node_row = await storage.get_node_by_id(body.stream_key)
-        if node_row is not None:
-            ch_sensor_ids = _sensor_ids_from_node_row(node_row)
-        if not ch_sensor_ids:
-            ch_sensor_ids = [f"{body.stream_key}:ch{i}" for i in range(4)]
-        req = CaptureStartRequest(
-            stream_key=body.stream_key,
-            work_dir=work_dir_path,
-            sidecar_url=None,
-            multi_sensor_buffer=audio_buffer,
-            channel_sensor_ids=ch_sensor_ids,
-            max_duration_s=body.max_duration_s,
-            video_source=body.video_source,
-            libcamera_mode=body.libcamera_mode,
-            deployment_profile=body.deployment_profile,
-        )
-    else:
-        req = CaptureStartRequest(
-            stream_key=body.stream_key,
-            work_dir=work_dir_path,
-            sidecar_url=_ingest_runtime_base_url(settings),
-            max_duration_s=body.max_duration_s,
-            video_source=body.video_source,
-            libcamera_mode=body.libcamera_mode,
-            deployment_profile=body.deployment_profile,
-        )
     record = await manager.start(req)
 
     if record.state == CaptureState.FAILED:
@@ -3272,10 +3489,10 @@ async def capture_stop(session_id: str, request: Request):
             method="POST",
             endpoint_path=f"/api/v1/capture/{session_id}/stop",
         )
-    if not _capture_pipeline_available(settings):
+    if not _capture_pipeline_available(state):
         raise HTTPException(
             status_code=503,
-            detail=_capture_pipeline_unavailable_reason(),
+            detail=_capture_pipeline_unavailable_reason(state),
         )
     sidecar_url = "" if settings.ingest_backend == "python" else _ingest_runtime_base_url(settings)
 
@@ -3442,50 +3659,23 @@ async def recordings_start(request: Request, body: _StartRecordingBody):
             json_body=body.model_dump(mode="json"),
         )
 
-    if not _capture_pipeline_available(settings):
+    if not _capture_pipeline_available(state):
         raise HTTPException(
             status_code=503,
-            detail=_capture_pipeline_unavailable_reason(),
+            detail=_capture_pipeline_unavailable_reason(state),
         )
 
     stream_key = body.listener_node_id
     work_dir_path = Path("data/captures")
-
-    _python_ingest = settings.ingest_backend == "python"
-    if _python_ingest:
-        if getattr(settings, "process_role", "combined") == "api":
-            raise HTTPException(
-                status_code=503,
-                detail="Python ingest capture requires the combined process role",
-            )
-        audio_buffer = getattr(state, "audio_buffer", None)
-        # Derive channel sensor IDs from the node's sensor_offsets_m when available.
-        node_row = await storage.get_node_by_id(stream_key)
-        ch_sensor_ids = _sensor_ids_from_node_row(node_row) if node_row else []
-        if not ch_sensor_ids:
-            ch_sensor_ids = [f"{stream_key}:ch{i}" for i in range(4)]
-
-        req = CaptureStartRequest(
-            stream_key=stream_key,
-            work_dir=work_dir_path,
-            sidecar_url=None,
-            multi_sensor_buffer=audio_buffer,
-            channel_sensor_ids=ch_sensor_ids,
-            max_duration_s=300.0,
-            video_source=body.camera_source,
-            record_video=body.include_video,
-            include_iamf=body.include_iamf,
-        )
-    else:
-        req = CaptureStartRequest(
-            stream_key=stream_key,
-            work_dir=work_dir_path,
-            sidecar_url=_ingest_runtime_base_url(settings),
-            max_duration_s=300.0,
-            video_source=body.camera_source,
-            record_video=body.include_video,
-            include_iamf=body.include_iamf,
-        )
+    req = await _build_capture_start_request(
+        state,
+        stream_key=stream_key,
+        work_dir_path=work_dir_path,
+        max_duration_s=300.0,
+        video_source=body.camera_source,
+        record_video=body.include_video,
+        include_iamf=body.include_iamf,
+    )
 
     record = await manager.start(req)
     if record.state == CaptureState.FAILED:
@@ -3508,8 +3698,8 @@ async def recordings_stop(session_id: str, request: Request):
             endpoint_path=f"/api/v1/recordings/{session_id}/stop",
         )
 
-    if not _capture_pipeline_available(settings):
-        raise HTTPException(status_code=503, detail=_capture_pipeline_unavailable_reason())
+    if not _capture_pipeline_available(state):
+        raise HTTPException(status_code=503, detail=_capture_pipeline_unavailable_reason(state))
 
     sidecar_url = "" if settings.ingest_backend == "python" else _ingest_runtime_base_url(settings)
 

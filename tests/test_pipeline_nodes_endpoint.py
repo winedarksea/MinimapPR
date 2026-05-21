@@ -104,6 +104,55 @@ class TestPatchNodeAudio:
             assert resp.status_code == 200
             assert resp.json()["override"]["hp_hz"] == 200.0
 
+    def test_stage_override_round_trips_canonical_shape(self, monkeypatch, tmp_path):
+        _configure_env(monkeypatch, tmp_path)
+        with TestClient(app) as client:
+            resp = client.patch(
+                "/api/v1/pipeline/nodes/stage-node/audio",
+                json={"stages": [{"type": "highpass", "cutoff_hz": 120.0}]},
+            )
+            nodes = client.get("/api/v1/pipeline/nodes").json()["nodes"]
+
+        assert resp.status_code == 200
+        assert resp.json()["override"] == {
+            "stages": [{"type": "highpass", "cutoff_hz": 120.0, "order": 4}]
+        }
+        stage_node = next(node for node in nodes if node["node_id"] == "stage-node")
+        assert stage_node["audio_override"] == {
+            "mic_gains_db": None,
+            "hp_hz": None,
+            "lp_hz": None,
+            "smoothing": None,
+            "stages": [{"type": "highpass", "cutoff_hz": 120.0, "order": 4}],
+        }
+
+    def test_invalid_stage_rejected(self, monkeypatch, tmp_path):
+        _configure_env(monkeypatch, tmp_path)
+        with TestClient(app) as client:
+            resp = client.patch(
+                "/api/v1/pipeline/nodes/bad-stage/audio",
+                json={"stages": [{"type": "bandpass", "low_hz": 500.0, "high_hz": 400.0}]},
+            )
+
+        assert resp.status_code == 422
+        assert "high_hz" in resp.json()["detail"]
+
+    def test_legacy_patch_does_not_replace_existing_stages(self, monkeypatch, tmp_path):
+        _configure_env(monkeypatch, tmp_path)
+        with TestClient(app) as client:
+            first = client.patch(
+                "/api/v1/pipeline/nodes/stage-authoritative/audio",
+                json={"stages": [{"type": "gain", "db": 6.0}]},
+            )
+            second = client.patch(
+                "/api/v1/pipeline/nodes/stage-authoritative/audio",
+                json={"hp_hz": 200.0},
+            )
+
+        assert first.status_code == 200
+        assert second.status_code == 200
+        assert second.json()["override"] == first.json()["override"]
+
     def test_invalid_gain_db_rejected(self, monkeypatch, tmp_path):
         _configure_env(monkeypatch, tmp_path)
         with TestClient(app) as client:
@@ -143,3 +192,34 @@ class TestPatchNodeAudio:
             body = resp.json()
             assert "rust_sidecar_active" in body
             assert body["rust_sidecar_active"] is False
+
+    def test_stage_override_forwarded_to_rust_sidecar(self, monkeypatch, tmp_path):
+        _configure_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("MINIMAPPR_INGEST_BACKEND", "rust")
+        captured: dict[str, object] = {}
+
+        monkeypatch.setattr("minimappr.main._ingest_sidecar_is_running", lambda state: True)
+
+        def fake_fetch_json_from_sidecar(base_url: str, endpoint_path: str, payload: dict):
+            captured["base_url"] = base_url
+            captured["endpoint_path"] = endpoint_path
+            captured["payload"] = payload
+            return {"applied": True}
+
+        monkeypatch.setattr("minimappr.main._fetch_json_from_sidecar", fake_fetch_json_from_sidecar)
+
+        with TestClient(app) as client:
+            resp = client.patch(
+                "/api/v1/pipeline/nodes/rust-stage-node/audio",
+                json={"stages": [{"type": "gain", "db": 6.0}]},
+            )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["rust_sidecar_active"] is True
+        assert body["rust_sidecar_forwarded"] is True
+        assert captured["endpoint_path"] == "/api/v1/dsp/config"
+        assert captured["payload"] == {
+            "node_id": "rust-stage-node",
+            "stages": [{"type": "gain", "db": 6.0}],
+        }

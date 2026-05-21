@@ -2370,6 +2370,33 @@ a.btn-sm {
   align-items: center;
 }
 
+.pipeline-mode-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  align-items: flex-start;
+}
+
+.pipeline-mode-row .mic-input {
+  max-width: 12rem;
+}
+
+.pipeline-stage-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  margin-top: 0.5rem;
+}
+
+.pipeline-stage-json {
+  width: 100%;
+  max-width: 100%;
+  min-height: 10rem;
+  font-family: var(--md-sys-typescale-mono);
+  font-variant-numeric: tabular-nums;
+  resize: vertical;
+}
+
 .pipeline-save-row {
   display: flex;
   align-items: center;

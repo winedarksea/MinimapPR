@@ -483,11 +483,17 @@ def build_chain_from_rust_stages(
             )
             continue
         if stage_type == "bandpass":
+            order = int(spec.get("order", 4))
             stages.append(
-                BandpassFilterStage(
-                    low_hz=float(spec["low_hz"]),
-                    high_hz=float(spec["high_hz"]),
-                    order=int(spec.get("order", 4)),
+                HighpassFilterStage(
+                    cutoff_hz=float(spec["low_hz"]),
+                    order=order,
+                )
+            )
+            stages.append(
+                LowpassFilterStage(
+                    cutoff_hz=float(spec["high_hz"]),
+                    order=order,
                 )
             )
             continue

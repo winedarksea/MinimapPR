@@ -588,6 +588,7 @@ class PipelineNodeView(BaseModel):
     node_type: str
     mics: list[MicView] = Field(default_factory=list)
     stages: list[PipelineStageView] = Field(default_factory=list)
+    audio_override: NodeAudioOverride | None = None
     frame_gaps: int = 0
     zero_padded_degraded: int = 0
     last_frame_ns: int | None = None

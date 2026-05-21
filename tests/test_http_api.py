@@ -242,6 +242,10 @@ def test_http_ingest_and_cop_status(monkeypatch, tmp_path: Path) -> None:
         assert "pipeline" in diagnostics
         assert "realtime" in diagnostics["pipeline"]
         assert "metrics" in diagnostics["pipeline"]
+        assert diagnostics["ingest"]["concurrency_limit"]["max_concurrent"] == 64
+        assert diagnostics["ingest"]["concurrency_limit"]["active"] == 0
+        assert diagnostics["ingest"]["concurrency_limit"]["total_admissions"] >= 1
+        assert diagnostics["ingest"]["concurrency_limit"]["total_shed"] == 0
 
 
 def test_cop_detections_and_tracks_include_contributor_summaries(monkeypatch, tmp_path: Path) -> None:
@@ -574,6 +578,36 @@ def test_system_diagnostics_reports_stream_consumer_state(monkeypatch, tmp_path:
         "last_event_id": "27",
         "sidecar_base_url": "http://127.0.0.1:8081",
     }
+
+
+def test_system_diagnostics_uses_configured_ingest_concurrency_limit(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    monkeypatch.setenv("MINIMAPPR_INGEST_MAX_CONCURRENT", "7")
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/system/diagnostics")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ingest"]["concurrency_limit"]["max_concurrent"] == 7
+    assert payload["ingest"]["concurrency_limit"]["active"] == 0
+
+
+def test_system_diagnostics_reports_rust_capture_unavailable_without_live_buffer(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    monkeypatch.setenv("MINIMAPPR_PROCESS_ROLE", "api")
+    monkeypatch.setenv("MINIMAPPR_DIRECT_INGEST_ENABLED", "false")
+    monkeypatch.setenv("MINIMAPPR_INGEST_BACKEND", "rust")
+    monkeypatch.setenv("MINIMAPPR_INGEST_SIDECAR_ENABLED", "false")
+    monkeypatch.setenv("MINIMAPPR_SIDECAR_MEMORY_ONLY_LIVE_PATH", "true")
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/system/diagnostics")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ingest"]["capture_available"] is False
+    assert "in-memory live buffer" in payload["ingest"]["capture_unavailable_reason"]
 
 
 @pytest.mark.asyncio

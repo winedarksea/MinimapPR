@@ -27,7 +27,6 @@ from fastapi import HTTPException
 
 from minimappr.core.preprocessing import (
     AudioPreprocessingChain,
-    BandpassFilterStage,
     GainStage,
     HighpassFilterStage,
     LowpassFilterStage,
@@ -101,9 +100,13 @@ class TestBuildChainFromRustStages:
         chain = build_chain_from_rust_stages([
             {"type": "bandpass", "low_hz": 300.0, "high_hz": 3000.0, "order": 4},
         ])
-        assert isinstance(chain.stages[0], BandpassFilterStage)
-        assert chain.stages[0].low_hz == 300.0
-        assert chain.stages[0].high_hz == 3_000.0
+        assert len(chain.stages) == 2
+        assert isinstance(chain.stages[0], HighpassFilterStage)
+        assert chain.stages[0].cutoff_hz == 300.0
+        assert chain.stages[0].order == 4
+        assert isinstance(chain.stages[1], LowpassFilterStage)
+        assert chain.stages[1].cutoff_hz == 3_000.0
+        assert chain.stages[1].order == 4
 
     def test_dc_block_maps_to_dc_removal(self) -> None:
         chain = build_chain_from_rust_stages([{"type": "dc_block"}])

@@ -183,7 +183,7 @@ def test_ingest_role_rejects_rust_backend() -> None:
 
 
 def test_capture_start_uses_configured_ingest_base_url(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("MINIMAPPR_PROCESS_ROLE", "api")
+    monkeypatch.setenv("MINIMAPPR_PROCESS_ROLE", "combined")
     monkeypatch.setenv("MINIMAPPR_INGEST_BACKEND", "rust")
     monkeypatch.setenv("MINIMAPPR_INGEST_STORAGE_MODE", "journal")
     monkeypatch.setenv("MINIMAPPR_SIDECAR_MEMORY_ONLY_LIVE_PATH", "false")
@@ -194,10 +194,12 @@ def test_capture_start_uses_configured_ingest_base_url(monkeypatch, tmp_path: Pa
     monkeypatch.setenv("MINIMAPPR_DB_PATH", str(tmp_path / "capture.db"))
     monkeypatch.setenv("MINIMAPPR_SNIPPET_DIR", str(tmp_path / "snippets"))
     monkeypatch.setenv("MINIMAPPR_LARGE_ARTIFACT_DIR", str(tmp_path / "artifacts"))
-    observed: dict[str, str] = {}
+    observed: dict[str, object] = {}
 
     async def fake_start(self, request):
         observed["sidecar_url"] = request.sidecar_url
+        observed["has_buffer"] = request.multi_sensor_buffer is not None
+        observed["channel_sensor_ids"] = request.channel_sensor_ids
         return CaptureSessionRecord(
             session_id="session-1",
             state=CaptureState.RECORDING,
@@ -220,7 +222,14 @@ def test_capture_start_uses_configured_ingest_base_url(monkeypatch, tmp_path: Pa
         response = client.post("/api/v1/capture/start", json={"stream_key": "node-a"})
 
     assert response.status_code == 200
-    assert observed["sidecar_url"] == "http://127.0.0.1:19091"
+    assert observed["sidecar_url"] is None
+    assert observed["has_buffer"] is True
+    assert observed["channel_sensor_ids"] == [
+        "node-a:ch0",
+        "node-a:ch1",
+        "node-a:ch2",
+        "node-a:ch3",
+    ]
 
 
 def test_capture_start_unavailable_for_python_ingest(monkeypatch, tmp_path: Path) -> None:
@@ -289,7 +298,7 @@ def test_capture_start_proxies_to_python_ingest_worker_in_split_mode(
     assert observed["body"]["stream_key"] == "node-a"
 
 
-def test_capture_start_unavailable_for_memory_only_rust_sidecar(
+def test_capture_start_unavailable_for_rust_api_role_without_live_buffer(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -307,7 +316,93 @@ def test_capture_start_unavailable_for_memory_only_rust_sidecar(
         response = client.post("/api/v1/capture/start", json={"stream_key": "node-a"})
 
     assert response.status_code == 503
-    assert "combined process role" in response.json()["detail"]
+    assert "in-memory live buffer" in response.json()["detail"]
+
+
+def test_recordings_start_unavailable_for_rust_api_role_without_live_buffer(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("MINIMAPPR_PROCESS_ROLE", "api")
+    monkeypatch.setenv("MINIMAPPR_INGEST_BACKEND", "rust")
+    monkeypatch.setenv("MINIMAPPR_INGEST_STORAGE_MODE", "journal")
+    monkeypatch.setenv("MINIMAPPR_SIDECAR_MEMORY_ONLY_LIVE_PATH", "true")
+    monkeypatch.setenv("MINIMAPPR_DIRECT_INGEST_ENABLED", "false")
+    monkeypatch.setenv("MINIMAPPR_INGEST_SIDECAR_ENABLED", "false")
+    monkeypatch.setenv("MINIMAPPR_DB_PATH", str(tmp_path / "recordings-rust-api.db"))
+    monkeypatch.setenv("MINIMAPPR_SNIPPET_DIR", str(tmp_path / "snippets"))
+    monkeypatch.setenv("MINIMAPPR_LARGE_ARTIFACT_DIR", str(tmp_path / "artifacts"))
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/recordings",
+            json={"listener_node_id": "node-a", "include_iamf": True},
+        )
+
+    assert response.status_code == 503
+    assert "in-memory live buffer" in response.json()["detail"]
+
+
+def test_recordings_start_uses_live_buffer_for_combined_rust_ingest(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("MINIMAPPR_PROCESS_ROLE", "combined")
+    monkeypatch.setenv("MINIMAPPR_INGEST_BACKEND", "rust")
+    monkeypatch.setenv("MINIMAPPR_DIRECT_INGEST_ENABLED", "false")
+    monkeypatch.setenv("MINIMAPPR_INGEST_SIDECAR_ENABLED", "false")
+    monkeypatch.setenv("MINIMAPPR_DB_PATH", str(tmp_path / "recordings-rust-combined.db"))
+    monkeypatch.setenv("MINIMAPPR_SNIPPET_DIR", str(tmp_path / "snippets"))
+    monkeypatch.setenv("MINIMAPPR_LARGE_ARTIFACT_DIR", str(tmp_path / "artifacts"))
+    observed: dict[str, object] = {}
+
+    async def fake_start(self, request):
+        observed["sidecar_url"] = request.sidecar_url
+        observed["has_buffer"] = request.multi_sensor_buffer is not None
+        observed["channel_sensor_ids"] = request.channel_sensor_ids
+        observed["include_iamf"] = request.include_iamf
+        observed["record_video"] = request.record_video
+        return CaptureSessionRecord(
+            session_id="recording-rust-live",
+            state=CaptureState.RECORDING,
+            stream_key=request.stream_key,
+            range_lease_id=None,
+            start_time_ns=123,
+            end_time_ns=None,
+            first_frame_pts_ns=None,
+            work_dir=request.work_dir / "recording-rust-live",
+            video_path=None,
+            ambix_path=None,
+            iamf_path=None,
+            youtube_path=None,
+            error=None,
+            include_iamf=request.include_iamf,
+            include_video=request.record_video,
+        )
+
+    monkeypatch.setattr("minimappr.core.capture_session.CaptureSessionManager.start", fake_start)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/recordings",
+            json={
+                "listener_node_id": "node-a",
+                "include_iamf": True,
+                "include_video": False,
+            },
+        )
+
+    assert response.status_code == 200
+    assert observed["sidecar_url"] is None
+    assert observed["has_buffer"] is True
+    assert observed["channel_sensor_ids"] == [
+        "node-a:ch0",
+        "node-a:ch1",
+        "node-a:ch2",
+        "node-a:ch3",
+    ]
+    assert observed["include_iamf"] is True
+    assert observed["record_video"] is False
 
 
 def test_capture_start_uses_live_buffer_for_python_ingest(
