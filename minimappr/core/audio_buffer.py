@@ -404,6 +404,13 @@ class MultiSensorBuffer:
         self._lock = asyncio.Lock()
         self._pins: dict[str, int] = {}  # session_id → start_ns
         self._capture_sessions: dict[str, ChunkedCaptureSessionBuffer] = {}
+        # Per-sensor mutation lock — append() takes the global `_lock` only
+        # briefly to look up/init the sensor's buffer + pin horizon, then
+        # releases it and acquires the per-sensor lock for the heavy numpy
+        # merge in `asyncio.to_thread`. This lets concurrent appends to
+        # *different* sensors run in parallel while still serializing
+        # same-sensor appends to preserve the buffer's invariants.
+        self._per_sensor_locks: dict[str, asyncio.Lock] = {}
 
     async def start_capture(
         self,
@@ -628,26 +635,64 @@ class MultiSensorBuffer:
         end_sample_index: int | None = None,
         end_time_ns: int | None = None,
     ) -> None:
-        capture_buffers: list[ChunkedCaptureSessionBuffer] = []
+        # Per-sensor concurrency: same-sensor appends serialize, but appends
+        # for *different* sensors run in parallel. This is required for the
+        # plan's primary goal ("many nodes streaming concurrently") — without
+        # it, a single global lock around the O(N) numpy merge would queue
+        # every node's ingest behind every other node.
+        #
+        # Lock order is always sensor → global (never global → sensor), since
+        # the per-sensor lookup happens under the global lock only once during
+        # init and the subsequent buffer-state acquisition re-enters the
+        # global lock *inside* the sensor lock. No other call site acquires
+        # the sensor lock, so deadlock is impossible.
+
+        # Brief global lock — just to get/init the per-sensor lock handle.
         async with self._lock:
-            buffer = self._buffers.get(sensor_id)
-            if buffer is None or buffer.sample_rate_hz != sample_rate_hz:
-                buffer = SensorStreamBuffer(sample_rate_hz=sample_rate_hz, max_duration_seconds=self.max_duration_seconds)
-                self._buffers[sensor_id] = buffer
-            buffer.append(
+            sensor_lock = self._per_sensor_locks.setdefault(sensor_id, asyncio.Lock())
+
+        async with sensor_lock:
+            # Re-acquire the global lock inside the sensor lock so the buffer
+            # lookup and the merge stay consistent with each other. Without
+            # this, a sample-rate-change race could leave one append writing
+            # to a buffer the other append has already replaced in the dict,
+            # silently dropping the first append's samples.
+            async with self._lock:
+                buffer = self._buffers.get(sensor_id)
+                if buffer is None or buffer.sample_rate_hz != sample_rate_hz:
+                    buffer = SensorStreamBuffer(
+                        sample_rate_hz=sample_rate_hz,
+                        max_duration_seconds=self.max_duration_seconds,
+                    )
+                    self._buffers[sensor_id] = buffer
+                # Pin horizon is captured once. Any pin acquired *during* the
+                # merge will be honored on the next append; the numpy merge
+                # itself is bounded by max_duration_seconds so a stale-by-one-
+                # frame pin horizon is safe.
+                protected_from_ns = self._oldest_pin_ns()
+                capture_buffers: list[ChunkedCaptureSessionBuffer] = (
+                    [
+                        capture_buffer
+                        for capture_buffer in self._capture_sessions.values()
+                        if capture_buffer.wants_sensor(sensor_id)
+                    ]
+                    if self._capture_sessions
+                    else []
+                )
+
+            # Heavy numpy merge — bounded by max_samples (~32s × 16kHz = 512K
+            # floats). Runs off the event loop so other ingest tasks (and any
+            # concurrent reader on a *different* sensor) keep making progress.
+            # The global lock is *not* held during this call.
+            await asyncio.to_thread(
+                buffer.append,
                 start_time_ns=start_time_ns,
                 samples=samples,
                 start_sample_index=start_sample_index,
                 end_sample_index=end_sample_index,
                 end_time_ns=end_time_ns,
-                _protected_from_ns=self._oldest_pin_ns(),
+                _protected_from_ns=protected_from_ns,
             )
-            if self._capture_sessions:
-                capture_buffers = [
-                    capture_buffer
-                    for capture_buffer in self._capture_sessions.values()
-                    if capture_buffer.wants_sensor(sensor_id)
-                ]
 
         for capture_buffer in capture_buffers:
             capture_buffer.append(

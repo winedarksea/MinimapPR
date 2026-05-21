@@ -363,7 +363,11 @@ class IngestProcessor:
                 )
 
         # -- trigger evaluation ------------------------------------------------
-        frame_energy = trigger_rms(processed)
+        # `trigger_rms` is an O(N) numpy reduction over the processed frame.
+        # Concurrent-ingest audit measured this at ~1 ms on a 32-channel frame —
+        # not catastrophic, but worth keeping off the event loop alongside the
+        # other to_thread'd hot-path numpy work.
+        frame_energy = await asyncio.to_thread(trigger_rms, processed)
         await self._publish_audio_summary_if_due(
             node_id=normalized_node.id,
             sensor_ids=list(runtime.sensor_ids),
@@ -533,6 +537,7 @@ def _preprocess_audio_frame(
             audio[channel_idx],
             sample_rate_hz,
             node_id=node_id,
+            channel_idx=channel_idx,
         )
     return processed
 

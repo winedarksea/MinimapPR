@@ -137,6 +137,77 @@ _INGEST_PATH_PREFIXES = (
 )
 
 
+# Default ingest concurrency ceiling. Mirrors the Rust sidecar's bounded MPSC
+# strategy ([ingest_backend.rs] raw_manifest_channel_capacity = 2048) but
+# scaled down because each Python ingest task does much heavier work (numpy
+# merge + classifier wakeup) than a Rust ingest task (just queue + write).
+# Tuned in conjunction with the to_thread merge in audio_buffer.py.
+_DEFAULT_INGEST_MAX_CONCURRENT = 64
+
+
+class _IngestConcurrencyLimit:
+    """Bounded-concurrency gate on the FastAPI ingest endpoints.
+
+    Mirrors the Rust sidecar's HTTP-503-with-`Retry-After` shape at
+    [main.rs] so a burst of slow concurrent requests cannot saturate the
+    worker pool. We *shed* immediately on overload (no buffering) — the
+    firmware client retries on `Retry-After`, which is the same wait-and-
+    retry contract the sidecar already enforces, just on the Python lane.
+
+    Single-threaded asyncio makes the counter-check and increment safe
+    without a lock (no yield points between them).
+    """
+
+    def __init__(self, max_concurrent: int) -> None:
+        self._max = max(1, int(max_concurrent))
+        self._active = 0
+        # Atomic-from-asyncio's perspective: count never escapes the event loop.
+        # `total_admissions` / `total_shed` are exposed via /api/v1/system/diagnostics
+        # so operators can confirm backpressure is firing under load.
+        self.total_admissions = 0
+        self.total_shed = 0
+
+    @property
+    def max_concurrent(self) -> int:
+        return self._max
+
+    @property
+    def active(self) -> int:
+        return self._active
+
+    async def __aenter__(self) -> "_IngestConcurrencyLimit":
+        if self._active >= self._max:
+            self.total_shed += 1
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"ingest backpressure: {self._active}/{self._max} slots in use"
+                ),
+                headers={"Retry-After": "1"},
+            )
+        self._active += 1
+        self.total_admissions += 1
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        if self._active > 0:
+            self._active -= 1
+
+
+def _require_ingest_concurrency(request: Request) -> _IngestConcurrencyLimit:
+    """Fetch the per-app ingest concurrency limiter. Falls through to a fresh
+    unbounded limiter only in tests where lifespan setup is skipped — in
+    production, the lifespan binds the configured limit on app.state."""
+    limit = getattr(request.app.state, "ingest_concurrency", None)
+    if isinstance(limit, _IngestConcurrencyLimit):
+        return limit
+    # Defensive fallback for tests that bypass lifespan: a limiter with the
+    # default ceiling, attached to app.state so subsequent requests share it.
+    limit = _IngestConcurrencyLimit(_DEFAULT_INGEST_MAX_CONCURRENT)
+    request.app.state.ingest_concurrency = limit
+    return limit
+
+
 def _default_sidecar_classifier_command_json(settings: "Settings") -> str | None:
     if getattr(settings, "classifier_backend", "").lower() == "birdnet":
         return json.dumps([sys.executable, "-m", "minimappr.sidecar_classifier_helper"])
@@ -876,6 +947,9 @@ async def _api_only_lifespan(app: FastAPI, settings: Settings):
         cleanup_service=common_live_runtime_services.cleanup_service,
         sidecar_state=sidecar_state,
         capture_manager=capture_manager,
+        ingest_concurrency=_IngestConcurrencyLimit(
+            getattr(settings, "ingest_max_concurrent", _DEFAULT_INGEST_MAX_CONCURRENT)
+        ),
     )
 
     task_handles = _ApiOnlyRuntimeTaskHandles()
@@ -979,6 +1053,9 @@ async def lifespan(app: FastAPI):
         ingest_spool_consumer=combined_runtime_core_services.ingest_spool_consumer,
         sidecar_state=sidecar_state,
         capture_manager=capture_manager,
+        ingest_concurrency=_IngestConcurrencyLimit(
+            getattr(settings, "ingest_max_concurrent", _DEFAULT_INGEST_MAX_CONCURRENT)
+        ),
     )
 
     ingest_stream_consumer_enabled = await _ensure_ingest_stream_consumer_running(app.state)
@@ -1159,23 +1236,31 @@ async def health(request: Request) -> dict:
 @app.post("/api/v1/ingest/frame", response_model=IngestFrameResponse)
 async def ingest_frame(payload: IngestFrameRequest, request: Request) -> IngestFrameResponse:
     state = _require_state(request)
-    if _should_proxy_ingest_to_python_worker(state):
-        forwarded = await _proxy_ingest_post(
-            state,
-            endpoint_path="/api/v1/ingest/frame",
-            body=payload.model_dump_json().encode("utf-8"),
-            content_type="application/json",
-        )
-        return IngestFrameResponse(**forwarded)
-    try:
-        return await state.fusion_node.ingest(payload)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    async with _require_ingest_concurrency(request):
+        if _should_proxy_ingest_to_python_worker(state):
+            forwarded = await _proxy_ingest_post(
+                state,
+                endpoint_path="/api/v1/ingest/frame",
+                body=payload.model_dump_json().encode("utf-8"),
+                content_type="application/json",
+            )
+            return IngestFrameResponse(**forwarded)
+        try:
+            return await state.fusion_node.ingest(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/v1/ingest/store-forward", response_model=StoreForwardIngestResponse)
 async def ingest_store_forward(payload: StoreForwardIngestRequest, request: Request) -> StoreForwardIngestResponse:
     state = _require_state(request)
+    async with _require_ingest_concurrency(request):
+        return await _ingest_store_forward_impl(state, payload)
+
+
+async def _ingest_store_forward_impl(
+    state, payload: StoreForwardIngestRequest
+) -> StoreForwardIngestResponse:
     if _should_proxy_ingest_to_python_worker(state):
         forwarded = await _proxy_ingest_post(
             state,
@@ -1185,7 +1270,10 @@ async def ingest_store_forward(payload: StoreForwardIngestRequest, request: Requ
         )
         return StoreForwardIngestResponse(**forwarded)
     if _should_block_direct_ingest(state):
-        raise HTTPException(status_code=410, detail="Direct ingest is disabled; send firmware ingest to the Rust sidecar")
+        raise HTTPException(
+            status_code=410,
+            detail="Direct ingest is disabled; send firmware ingest to the Rust sidecar",
+        )
     try:
         frames = payload.buffered_frames
         if payload.sort_by_toa:
@@ -1223,6 +1311,11 @@ async def ingest_store_forward(payload: StoreForwardIngestRequest, request: Requ
 @app.post("/api/v1/ingest/binary", response_model=StoreForwardIngestResponse)
 async def ingest_binary(request: Request) -> StoreForwardIngestResponse:
     state = _require_state(request)
+    async with _require_ingest_concurrency(request):
+        return await _ingest_binary_impl(state, request)
+
+
+async def _ingest_binary_impl(state, request: Request) -> StoreForwardIngestResponse:
     if _should_proxy_ingest_to_python_worker(state):
         body = await request.body()
         forwarded = await _proxy_ingest_post(

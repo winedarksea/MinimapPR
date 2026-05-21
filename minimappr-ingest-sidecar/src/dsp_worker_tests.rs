@@ -13,6 +13,272 @@ use std::sync::{
 };
 use tokio::sync::RwLock;
 
+// ---------------------------------------------------------------------------
+// Item 1: per-node preprocessing chain (PreprocessStage + biquad cascade).
+// ---------------------------------------------------------------------------
+
+/// Generate a single-frequency sine for filter response checks.
+fn sine_wave(frequency_hz: f64, sample_rate_hz: u32, samples: usize) -> Vec<f32> {
+    let fs = f64::from(sample_rate_hz);
+    (0..samples)
+        .map(|i| {
+            (2.0 * std::f64::consts::PI * frequency_hz * (i as f64) / fs).sin() as f32
+        })
+        .collect()
+}
+
+fn rms(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let sum_sq: f64 = samples.iter().map(|s| (*s as f64) * (*s as f64)).sum();
+    (sum_sq / samples.len() as f64).sqrt() as f32
+}
+
+#[test]
+fn node_audio_config_effective_stages_synthesizes_legacy_fields_when_stages_empty() {
+    let cfg = NodeAudioConfig {
+        gain_db: Some(6.0),
+        hp_hz: Some(100.0),
+        stages: vec![],
+    };
+    let stages = cfg.effective_stages();
+    assert_eq!(stages.len(), 2);
+    assert!(matches!(stages[0], PreprocessStage::Gain { db } if (db - 6.0).abs() < 1e-9));
+    assert!(matches!(
+        stages[1],
+        PreprocessStage::Highpass { cutoff_hz, order } if (cutoff_hz - 100.0).abs() < 1e-9 && order == 2
+    ));
+}
+
+#[test]
+fn node_audio_config_explicit_stages_take_priority_over_legacy_fields() {
+    let cfg = NodeAudioConfig {
+        gain_db: Some(6.0),
+        hp_hz: Some(100.0),
+        stages: vec![PreprocessStage::Passthrough],
+    };
+    let stages = cfg.effective_stages();
+    assert_eq!(stages, vec![PreprocessStage::Passthrough]);
+}
+
+#[test]
+fn node_audio_config_empty_means_passthrough() {
+    let cfg = NodeAudioConfig::default();
+    assert!(cfg.effective_stages().is_empty());
+
+    // Apply must leave samples untouched when stages are empty.
+    let mut state = NodeAudioState::default();
+    let mut channels = vec![vec![0.1_f32, -0.2, 0.3, -0.4]];
+    let original = channels[0].clone();
+    state.apply(&mut channels, &cfg, 16_000);
+    assert_eq!(channels[0], original);
+}
+
+#[test]
+fn gain_stage_applies_linear_multiplier_within_tolerance() {
+    let mut state = NodeAudioState::default();
+    let cfg = NodeAudioConfig {
+        stages: vec![PreprocessStage::Gain { db: 6.0 }],
+        ..NodeAudioConfig::default()
+    };
+    let mut channels = vec![vec![1.0_f32, -1.0, 0.5]];
+    state.apply(&mut channels, &cfg, 16_000);
+    // +6 dB ≈ ×1.9953 linear.
+    let expected = 10f32.powf(6.0 / 20.0);
+    for (got, original) in channels[0].iter().zip([1.0_f32, -1.0, 0.5].iter()) {
+        assert!((got - original * expected).abs() < 1e-4);
+    }
+}
+
+#[test]
+fn lowpass_attenuates_high_frequency_more_than_low_frequency() {
+    let cfg = NodeAudioConfig {
+        stages: vec![PreprocessStage::Lowpass {
+            cutoff_hz: 500.0,
+            order: 4,
+        }],
+        ..NodeAudioConfig::default()
+    };
+    let sr = 16_000;
+
+    // 100 Hz tone — well below the 500 Hz cutoff, should pass nearly intact.
+    let mut low_state = NodeAudioState::default();
+    let mut low_channels = vec![sine_wave(100.0, sr, 4_096)];
+    let low_in = low_channels[0].clone();
+    low_state.apply(&mut low_channels, &cfg, sr);
+
+    // 4 kHz tone — well above the cutoff, should be heavily attenuated.
+    let mut hi_state = NodeAudioState::default();
+    let mut hi_channels = vec![sine_wave(4_000.0, sr, 4_096)];
+    let hi_in = hi_channels[0].clone();
+    hi_state.apply(&mut hi_channels, &cfg, sr);
+
+    // Skip the first N samples to let the filter settle.
+    let settle = 1_024;
+    let low_attenuation = rms(&low_channels[0][settle..]) / rms(&low_in[settle..]);
+    let hi_attenuation = rms(&hi_channels[0][settle..]) / rms(&hi_in[settle..]);
+
+    assert!(
+        low_attenuation > 0.9,
+        "100 Hz tone unexpectedly attenuated: {low_attenuation}"
+    );
+    assert!(
+        hi_attenuation < 0.1,
+        "4 kHz tone not attenuated enough: {hi_attenuation}"
+    );
+}
+
+#[test]
+fn highpass_attenuates_low_frequency_more_than_high_frequency() {
+    let cfg = NodeAudioConfig {
+        stages: vec![PreprocessStage::Highpass {
+            cutoff_hz: 500.0,
+            order: 4,
+        }],
+        ..NodeAudioConfig::default()
+    };
+    let sr = 16_000;
+
+    let mut low_state = NodeAudioState::default();
+    let mut low_channels = vec![sine_wave(100.0, sr, 4_096)];
+    let low_in = low_channels[0].clone();
+    low_state.apply(&mut low_channels, &cfg, sr);
+
+    let mut hi_state = NodeAudioState::default();
+    let mut hi_channels = vec![sine_wave(4_000.0, sr, 4_096)];
+    let hi_in = hi_channels[0].clone();
+    hi_state.apply(&mut hi_channels, &cfg, sr);
+
+    let settle = 1_024;
+    let low_attenuation = rms(&low_channels[0][settle..]) / rms(&low_in[settle..]);
+    let hi_attenuation = rms(&hi_channels[0][settle..]) / rms(&hi_in[settle..]);
+
+    assert!(
+        low_attenuation < 0.1,
+        "100 Hz tone not attenuated enough by HPF: {low_attenuation}"
+    );
+    assert!(
+        hi_attenuation > 0.9,
+        "4 kHz tone unexpectedly attenuated by HPF: {hi_attenuation}"
+    );
+}
+
+#[test]
+fn cascade_preserves_state_across_frame_boundaries() {
+    // The whole point of the per-stream state is that splitting a buffer in
+    // two and applying the filter to each half should produce the same output
+    // as applying it to the whole buffer in one shot.
+    let cfg = NodeAudioConfig {
+        stages: vec![PreprocessStage::Highpass {
+            cutoff_hz: 200.0,
+            order: 4,
+        }],
+        ..NodeAudioConfig::default()
+    };
+    let sr = 16_000;
+
+    let mut whole_state = NodeAudioState::default();
+    let mut whole = vec![sine_wave(50.0, sr, 1_024)];
+    whole_state.apply(&mut whole, &cfg, sr);
+
+    let mut split_state = NodeAudioState::default();
+    let full = sine_wave(50.0, sr, 1_024);
+    let mut first_half = vec![full[..512].to_vec()];
+    split_state.apply(&mut first_half, &cfg, sr);
+    let mut second_half = vec![full[512..].to_vec()];
+    split_state.apply(&mut second_half, &cfg, sr);
+
+    let mut stitched = first_half[0].clone();
+    stitched.extend_from_slice(&second_half[0]);
+
+    assert_eq!(stitched.len(), whole[0].len());
+    for (i, (a, b)) in stitched.iter().zip(whole[0].iter()).enumerate() {
+        assert!(
+            (a - b).abs() < 1e-5,
+            "sample {i} diverged: split={a} whole={b}"
+        );
+    }
+}
+
+#[test]
+fn config_change_recompiles_and_resets_state() {
+    let mut state = NodeAudioState::default();
+    let sr = 16_000;
+
+    // First config — lowpass at 1 kHz.
+    let cfg1 = NodeAudioConfig {
+        stages: vec![PreprocessStage::Lowpass {
+            cutoff_hz: 1_000.0,
+            order: 4,
+        }],
+        ..NodeAudioConfig::default()
+    };
+    let mut channels = vec![sine_wave(100.0, sr, 256)];
+    state.apply(&mut channels, &cfg1, sr);
+    let sig_after_first = state.config_signature.clone();
+
+    // Switch to highpass at 2 kHz — coefficients and state must reset.
+    let cfg2 = NodeAudioConfig {
+        stages: vec![PreprocessStage::Highpass {
+            cutoff_hz: 2_000.0,
+            order: 4,
+        }],
+        ..NodeAudioConfig::default()
+    };
+    let mut channels = vec![sine_wave(100.0, sr, 256)];
+    state.apply(&mut channels, &cfg2, sr);
+    assert_ne!(state.config_signature, sig_after_first);
+    assert!(matches!(
+        state.config_signature[0],
+        PreprocessStage::Highpass { .. }
+    ));
+}
+
+#[test]
+fn passthrough_stage_does_not_modify_samples() {
+    let mut state = NodeAudioState::default();
+    let cfg = NodeAudioConfig {
+        stages: vec![PreprocessStage::Passthrough],
+        ..NodeAudioConfig::default()
+    };
+    let original = sine_wave(440.0, 16_000, 512);
+    let mut channels = vec![original.clone()];
+    state.apply(&mut channels, &cfg, 16_000);
+    assert_eq!(channels[0], original);
+}
+
+#[test]
+fn multi_stage_chain_applies_in_order() {
+    // gain → HP → LP: each stage transforms the output of the previous.
+    let cfg = NodeAudioConfig {
+        stages: vec![
+            PreprocessStage::Gain { db: -6.0 },
+            PreprocessStage::Highpass {
+                cutoff_hz: 100.0,
+                order: 2,
+            },
+            PreprocessStage::Lowpass {
+                cutoff_hz: 4_000.0,
+                order: 2,
+            },
+        ],
+        ..NodeAudioConfig::default()
+    };
+    let mut state = NodeAudioState::default();
+    let mut channels = vec![sine_wave(1_000.0, 16_000, 2_048)];
+    let original_rms = rms(&channels[0]);
+    state.apply(&mut channels, &cfg, 16_000);
+    let processed_rms = rms(&channels[0][512..]);
+    // 1 kHz tone is in the passband; after -6 dB gain it should be ~0.5×.
+    let attenuation = processed_rms / original_rms;
+    assert!(
+        (attenuation - 0.5).abs() < 0.1,
+        "expected ~0.5× attenuation through gain+HP+LP at 1 kHz, got {attenuation}"
+    );
+}
+
+
 #[test]
 fn mic_positions_from_manifest_prefers_cluster_sensor_positions() {
     let manifest = DspManifest {

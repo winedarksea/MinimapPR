@@ -372,6 +372,12 @@ impl SequenceTracker {
     /// Record the (first_sequence, last_sequence) range of a payload from
     /// `(node_id, boot_session)` and return any newly-detected gap size.
     /// A gap of 0 means contiguous with the prior payload (or first ever).
+    ///
+    /// Out-of-order / duplicate payloads do *not* rewind `last_seen` — the
+    /// high-water mark only advances. This guards against the following
+    /// false-gap pattern: prev_last=15 → payload {first=5, last=8} arrives
+    /// out-of-order → if we naively rewrote last_seen=8, the next legitimate
+    /// payload {first=16, ...} would appear to have a gap of 16-(8+1)=7.
     pub(crate) fn record(
         &self,
         node_id: &str,
@@ -381,13 +387,25 @@ impl SequenceTracker {
     ) -> u64 {
         let key = (node_id.to_string(), boot_session);
         let mut inner = self.inner.lock().expect("sequence tracker poisoned");
-        let gap = match inner.last_seen.get(&key) {
-            Some(&prev_last) if first_sequence > prev_last + 1 => {
-                first_sequence - (prev_last + 1)
+        let (gap, advance_high_water) = match inner.last_seen.get(&key) {
+            Some(&prev_last) => {
+                // Use saturating arithmetic to defend against an adversarial
+                // prev_last = u64::MAX (not reachable in practice but cheap to guard).
+                let expected = prev_last.saturating_add(1);
+                let gap = if first_sequence > expected {
+                    first_sequence - expected
+                } else {
+                    0
+                };
+                // Only advance the high-water mark when this payload extends
+                // it. Out-of-order/duplicate payloads observe but do not rewrite.
+                (gap, last_sequence > prev_last)
             }
-            _ => 0,
+            None => (0, true),
         };
-        inner.last_seen.insert(key, last_sequence);
+        if advance_high_water {
+            inner.last_seen.insert(key, last_sequence);
+        }
         if gap > 0 {
             *inner
                 .per_node_gap_count
@@ -1259,6 +1277,41 @@ mod tests {
         let snapshot = tracker.snapshot();
         assert_eq!(snapshot.per_node_gap_count.get("node-a"), Some(&3));
         assert_eq!(snapshot.total_gap_count, 3);
+    }
+
+    #[test]
+    fn sequence_tracker_out_of_order_payload_does_not_rewind_high_water() {
+        // Guards the false-gap pattern: a late/out-of-order payload arriving
+        // *after* a contiguous run must not appear to "reset" the high-water
+        // mark — otherwise the next legitimate payload would falsely register
+        // a gap relative to the older sequence.
+        let tracker = SequenceTracker::new();
+
+        // Establish contiguous run 1..=15.
+        assert_eq!(tracker.record("node-a", 0, 1, 15), 0);
+
+        // Late-arriving out-of-order payload covering 5..=8.
+        // Already-observed range — no gap to report, no high-water change.
+        assert_eq!(tracker.record("node-a", 0, 5, 8), 0);
+
+        // Next legitimate payload picks up where the high-water mark really
+        // was (15), not where the out-of-order payload ended (8).
+        assert_eq!(tracker.record("node-a", 0, 16, 20), 0);
+
+        let snapshot = tracker.snapshot();
+        assert_eq!(snapshot.per_node_gap_count.get("node-a"), None);
+        assert_eq!(snapshot.total_gap_count, 0);
+    }
+
+    #[test]
+    fn sequence_tracker_does_not_overflow_at_u64_max() {
+        // Defensive: a tracker observing prev_last = u64::MAX must not panic
+        // on the next record() — `prev_last + 1` would overflow in debug.
+        let tracker = SequenceTracker::new();
+        assert_eq!(tracker.record("node-a", 0, u64::MAX, u64::MAX), 0);
+        // Any subsequent first_sequence is by definition ≤ u64::MAX, so no
+        // gap and no overflow. saturating_add(1) clamps to u64::MAX.
+        assert_eq!(tracker.record("node-a", 0, u64::MAX, u64::MAX), 0);
     }
 
     fn store_forward_body(node_id: &str, sequence: u64, start_sample_index: u64) -> String {

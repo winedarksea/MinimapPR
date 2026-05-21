@@ -545,12 +545,22 @@ class NodeHealthStatus(str, Enum):
 
 
 class NodeAudioOverride(BaseModel):
-    """Per-node audio DSP overrides stored in Settings.node_audio_overrides."""
+    """Per-node audio DSP overrides stored in Settings.node_audio_overrides.
+
+    The legacy flat fields (`mic_gains_db`, `hp_hz`, `lp_hz`, `smoothing`)
+    coexist with the new `stages` field, which carries an ordered chain of
+    [`PreprocessStage`-shaped][1] dicts. When `stages` is present, the legacy
+    fields are ignored — this mirrors the Rust sidecar's `NodeAudioConfig`
+    behavior so the JSON schema is identical across both languages.
+
+    [1]: minimappr-ingest-sidecar/src/dsp_worker.rs::PreprocessStage
+    """
 
     mic_gains_db: list[float] | None = None
     hp_hz: float | None = None
     lp_hz: float | None = None
     smoothing: Literal["off", "ema_50ms", "ema_200ms"] | None = None
+    stages: list[dict] | None = None
 
 
 class PipelineStageView(BaseModel):

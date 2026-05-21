@@ -445,6 +445,7 @@ class AudioPreprocessor(Protocol):
         sample_rate_hz: int,
         *,
         node_id: str | None = None,
+        channel_idx: int = 0,
     ) -> np.ndarray:
         ...
 

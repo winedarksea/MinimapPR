@@ -40,7 +40,7 @@ use axum::{
 use clap::Parser;
 use derived_cache::DerivedCache;
 use dsp_events::{DspEventPublisher, ReplayableDspEvent};
-use dsp_worker::{DspWorker, DspWorkerConfig, NodeAudioConfig, SharedDspState};
+use dsp_worker::{DspWorker, DspWorkerConfig, NodeAudioConfig, PreprocessStage, SharedDspState};
 use env_payload::{EnvIngestPayload, EnvIngestResponse};
 use ingest_backend::{
     BodyTooLargeError, ClientDisconnectError, IngestBackend, IngestStorageMode,
@@ -892,6 +892,59 @@ struct DspNodeConfigRequest {
     config: NodeAudioConfig,
 }
 
+/// Validate the new `stages` chain — reject obviously-malformed entries before
+/// they can poison the per-stream filter cache. The validation must accept
+/// every shape the matching Python `NodeAudioOverride.stages` accepts.
+fn validate_preprocess_stages(stages: &[PreprocessStage]) -> Result<(), String> {
+    for (idx, stage) in stages.iter().enumerate() {
+        match stage {
+            PreprocessStage::Gain { db } => {
+                if !(-60.0..=60.0).contains(db) {
+                    return Err(format!(
+                        "stages[{idx}].db must be in [-60, 60] (got {db})"
+                    ));
+                }
+            }
+            PreprocessStage::Highpass { cutoff_hz, order }
+            | PreprocessStage::Lowpass { cutoff_hz, order } => {
+                if !cutoff_hz.is_finite() || *cutoff_hz <= 0.0 {
+                    return Err(format!(
+                        "stages[{idx}].cutoff_hz must be > 0 (got {cutoff_hz})"
+                    ));
+                }
+                if *order < 2 || *order > 8 {
+                    return Err(format!(
+                        "stages[{idx}].order must be in [2, 8] (got {order})"
+                    ));
+                }
+            }
+            PreprocessStage::Bandpass {
+                low_hz,
+                high_hz,
+                order,
+            } => {
+                if !low_hz.is_finite() || *low_hz <= 0.0 {
+                    return Err(format!(
+                        "stages[{idx}].low_hz must be > 0 (got {low_hz})"
+                    ));
+                }
+                if !high_hz.is_finite() || *high_hz <= *low_hz {
+                    return Err(format!(
+                        "stages[{idx}].high_hz must be > low_hz (got high={high_hz} low={low_hz})"
+                    ));
+                }
+                if *order < 2 || *order > 8 {
+                    return Err(format!(
+                        "stages[{idx}].order must be in [2, 8] (got {order})"
+                    ));
+                }
+            }
+            PreprocessStage::DcBlock | PreprocessStage::Passthrough => {}
+        }
+    }
+    Ok(())
+}
+
 /// POST /api/v1/dsp/config — store per-node gain/highpass overrides applied
 /// to audio during ingest (takes effect on the next frame for that node).
 async fn post_dsp_config(
@@ -922,6 +975,13 @@ async fn post_dsp_config(
             )
                 .into_response();
         }
+    }
+    if let Err(error) = validate_preprocess_stages(&body.config.stages) {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({"error": error})),
+        )
+            .into_response();
     }
     {
         let mut st = state.dsp_state.write().await;
