@@ -932,6 +932,7 @@ impl SegmentJournalEntry {
             payload_length_bytes: self.payload_length_bytes,
             toa_ns: self.toa_ns,
             tor_ns: self.tor_ns,
+            received_ns: Some(self.ingest_received_ns),
             sample_index_start: self.sample_index_start,
             sample_count: self.sample_count,
             integrity_hash: self.integrity_hash.clone(),
@@ -1144,7 +1145,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn raw_capture_manifest_prefers_packet_toa_for_created_time() {
+    async fn raw_capture_manifest_preserves_packet_time_and_records_ingest_receipt_time() {
         let tmp = tempfile::tempdir().unwrap();
         let payload = store_forward_body("node-a", 7, 0);
 
@@ -1166,6 +1167,7 @@ mod tests {
         .await
         .unwrap();
 
+        let before_enqueue_ns = now_ns().unwrap();
         backend
             .enqueue(
                 usize::MAX,
@@ -1175,6 +1177,7 @@ mod tests {
             )
             .await
             .unwrap();
+        let after_enqueue_ns = now_ns().unwrap();
 
         let manifest = rx
             .try_recv()
@@ -1183,6 +1186,8 @@ mod tests {
         assert_eq!(manifest.created_ns, 1007);
         assert_eq!(manifest.source_handles[0].toa_ns, Some(1007));
         assert_eq!(manifest.source_handles[0].tor_ns, Some(2007));
+        assert!(manifest.source_handles[0].received_ns >= Some(before_enqueue_ns));
+        assert!(manifest.source_handles[0].received_ns <= Some(after_enqueue_ns));
     }
 
     #[tokio::test]

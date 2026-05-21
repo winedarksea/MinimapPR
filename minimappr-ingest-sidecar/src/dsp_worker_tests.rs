@@ -123,6 +123,7 @@ async fn worker_publishes_localization_and_classifier_render_contract() {
             payload_length_bytes: payload.len() as u64,
             toa_ns: None,
             tor_ns: Some(now_ns as u64),
+            received_ns: None,
             sample_index_start: Some(0),
             sample_count: Some(512),
             integrity_hash: String::new(),
@@ -784,6 +785,7 @@ async fn raw_manifest_for_payload(
             payload_length_bytes,
             toa_ns: None,
             tor_ns: Some(now_ns as u64),
+            received_ns: None,
             sample_index_start: Some(0),
             sample_count: Some(512),
             integrity_hash: String::new(),
@@ -997,6 +999,7 @@ fn resolve_buffer_start_time_prefers_packet_toa_over_other_fallbacks() {
         payload_length_bytes: 0,
         toa_ns: Some(1_234_567_890),
         tor_ns: Some(9_876_543_210),
+        received_ns: None,
         sample_index_start: Some(16_000),
         sample_count: Some(16),
         integrity_hash: String::new(),
@@ -1029,6 +1032,7 @@ fn resolve_buffer_start_time_uses_tor_as_fallback() {
         payload_length_bytes: 0,
         toa_ns: None,
         tor_ns: Some(4_900_000_000),
+        received_ns: None,
         sample_index_start: Some(32_000),
         sample_count: Some(16),
         integrity_hash: String::new(),
@@ -1061,6 +1065,7 @@ fn resolve_buffer_start_time_uses_now_as_fallback() {
         payload_length_bytes: 0,
         toa_ns: None,
         tor_ns: None,
+        received_ns: None,
         sample_index_start: Some(32_000),
         sample_count: Some(16),
         integrity_hash: String::new(),
@@ -1140,6 +1145,7 @@ fn stale_manifest_detection_uses_source_receipt_time() {
             payload_length_bytes: 0,
             toa_ns: Some(1_000_000_000),
             tor_ns: Some(2_000_000_000),
+            received_ns: None,
             sample_index_start: None,
             sample_count: None,
             integrity_hash: String::new(),
@@ -1178,7 +1184,7 @@ fn stale_manifest_detection_keeps_fresh_manifest_with_old_packet_epoch() {
     let manifest = DspManifest {
         manifest_id: "manifest-old-epoch-fresh-arrival".to_string(),
         manifest_type: "raw_journal_append".to_string(),
-        created_ns: 40_000_000_000,
+        created_ns: 1_000_000_000,
         source_handles: vec![JournalPayloadHandle {
             journal_epoch: 1,
             segment_id: "seg-old-epoch".to_string(),
@@ -1187,6 +1193,7 @@ fn stale_manifest_detection_keeps_fresh_manifest_with_old_packet_epoch() {
             payload_length_bytes: 0,
             toa_ns: Some(1_000_000_000),
             tor_ns: Some(2_000_000_000),
+            received_ns: Some(40_000_000_000),
             sample_index_start: None,
             sample_count: None,
             integrity_hash: String::new(),
@@ -1208,8 +1215,8 @@ fn stale_manifest_detection_keeps_fresh_manifest_with_old_packet_epoch() {
         raw_audio_bytes: None,
     };
 
-    // Even with old packet timestamps, the manifest just arrived and should
-    // stay in the live path when using a 32s stale horizon.
+    // Even with old packet timestamps, the fresh ingest receipt time keeps the
+    // manifest in the live path when using a 32 s stale horizon.
     assert!(!manifest_is_older_than_buffer_horizon(
         &manifest,
         40_000_000_001,

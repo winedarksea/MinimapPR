@@ -139,6 +139,7 @@ pub fn build_render_result(
         payload_length_bytes: pcm_bytes.len() as u64,
         toa_ns: manifest.source_handles.first().and_then(|h| h.toa_ns),
         tor_ns: manifest.source_handles.first().and_then(|h| h.tor_ns),
+        received_ns: None,
         sample_index_start: None,
         sample_count: Some(sample_count as u64),
         integrity_hash: String::new(),

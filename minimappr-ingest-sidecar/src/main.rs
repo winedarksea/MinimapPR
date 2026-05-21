@@ -807,6 +807,7 @@ async fn create_capture_range_lease(
             payload_length_bytes: 0,
             toa_ns: Some(request.start_ns),
             tor_ns: None,
+            received_ns: None,
             sample_index_start: None,
             sample_count: None,
             integrity_hash: String::new(),

@@ -9,7 +9,7 @@ import pytest
 
 from minimappr.api.stream_consumer import IngestStreamConsumer, StreamConsumerConfig
 from minimappr.core.audio_buffer import MultiSensorBuffer
-from minimappr.utils.audio import encode_pcm16le_b64
+from minimappr.utils.audio import decode_pcm16le_b64, encode_pcm16le_b64
 
 
 class _RecordingIngestTransport:
@@ -213,6 +213,157 @@ async def test_stream_consumer_mirrors_raw_audio_frame_into_audio_buffer() -> No
     assert snapshot.sample_rate_hz == 4
     assert snapshot.active_sensor_count == 2
     assert snapshot.last_sample_time_ns == 2_000_000_000
+
+
+@pytest.mark.asyncio
+async def test_stream_consumer_raw_audio_frame_matches_direct_buffer_append_for_late_gap_fill() -> None:
+    transport = _RecordingIngestTransport()
+    mirrored_buffer = MultiSensorBuffer(max_duration_seconds=4.0)
+    reference_buffer = MultiSensorBuffer(max_duration_seconds=4.0)
+    consumer = IngestStreamConsumer(
+        config=StreamConsumerConfig(sidecar_base_url="http://127.0.0.1:8081"),
+        ingest_transport=transport,
+        audio_buffer=mirrored_buffer,
+    )
+    sensor_ids = ["sirith-raw-2:ch0", "sirith-raw-2:ch1"]
+    frame_specs = [
+        {
+            "event_id": "101",
+            "start_time_ns": 1_000_000_000,
+            "end_time_ns": 2_000_000_000,
+            "start_sample_index": 400,
+            "end_sample_index": 404,
+            "samples": np.array(
+                [
+                    [0.10, 0.20, 0.30, 0.40],
+                    [-0.10, -0.20, -0.30, -0.40],
+                ],
+                dtype=np.float32,
+            ),
+        },
+        {
+            "event_id": "102",
+            "start_time_ns": 3_000_000_000,
+            "end_time_ns": 4_000_000_000,
+            "start_sample_index": 408,
+            "end_sample_index": 412,
+            "samples": np.array(
+                [
+                    [0.90, 0.80, 0.70, 0.60],
+                    [-0.90, -0.80, -0.70, -0.60],
+                ],
+                dtype=np.float32,
+            ),
+        },
+        {
+            "event_id": "103",
+            "start_time_ns": 2_000_000_000,
+            "end_time_ns": 3_000_000_000,
+            "start_sample_index": 404,
+            "end_sample_index": 408,
+            "samples": np.array(
+                [
+                    [0.50, 0.60, 0.70, 0.80],
+                    [-0.50, -0.60, -0.70, -0.80],
+                ],
+                dtype=np.float32,
+            ),
+        },
+    ]
+
+    for frame in frame_specs:
+        quantized_channels = decode_pcm16le_b64(
+            encode_pcm16le_b64(frame["samples"]),
+            2,
+        )
+        for channel_index, sensor_id in enumerate(sensor_ids):
+            await reference_buffer.append(
+                sensor_id=sensor_id,
+                sample_rate_hz=4,
+                start_time_ns=frame["start_time_ns"],
+                samples=quantized_channels[channel_index],
+                start_sample_index=frame["start_sample_index"],
+                end_sample_index=frame["end_sample_index"],
+                end_time_ns=frame["end_time_ns"],
+            )
+
+        await consumer._dispatch_sse_event(
+            event_type="message",
+            event_id=frame["event_id"],
+            data_lines=[
+                json.dumps(
+                    {
+                        "manifest_type": "raw_audio_frame",
+                        "created_ns": 10_000 + int(frame["event_id"]),
+                        "node_context": {
+                            "toa_ns": frame["start_time_ns"],
+                            "time_quality": "gps_locked",
+                            "node": {
+                                "id": "sirith-raw-2",
+                                "node_type": "sirith_tetra",
+                                "position_m": [0.0, 0.0, 0.0],
+                                "sensor_offsets_m": [
+                                    [0.0, 0.0, 0.0],
+                                    [0.1, 0.0, 0.0],
+                                ],
+                                "capabilities": ["audio"],
+                                "metadata": {},
+                            },
+                        },
+                        "raw_audio_frame": {
+                            "stream_key": "sirith-raw-2",
+                            "sample_rate_hz": 4,
+                            "channel_count": 2,
+                            "sample_count": 4,
+                            "sample_format": "pcm16le",
+                            "start_time_ns": frame["start_time_ns"],
+                            "end_time_ns": frame["end_time_ns"],
+                            "start_sample_index": frame["start_sample_index"],
+                            "end_sample_index": frame["end_sample_index"],
+                        },
+                        "raw_audio_bytes": encode_pcm16le_b64(frame["samples"]),
+                    }
+                )
+            ],
+        )
+
+    mirrored_recent = await mirrored_buffer.get_recent_window_for_sensors(
+        sensor_ids,
+        window_seconds=3.0,
+    )
+    reference_recent = await reference_buffer.get_recent_window_for_sensors(
+        sensor_ids,
+        window_seconds=3.0,
+    )
+
+    assert mirrored_recent is not None
+    assert reference_recent is not None
+    mirrored_windows, mirrored_sample_rate_hz, mirrored_end_ns = mirrored_recent
+    reference_windows, reference_sample_rate_hz, reference_end_ns = reference_recent
+    assert mirrored_sample_rate_hz == reference_sample_rate_hz == 4
+    assert mirrored_end_ns == reference_end_ns == 4_000_000_000
+    for sensor_id in sensor_ids:
+        assert mirrored_windows[sensor_id] == pytest.approx(reference_windows[sensor_id], abs=4e-5)
+
+    mirrored_coverage = await mirrored_buffer.get_synchronized_window_ending_at_coverage_stats(
+        sensor_ids=sensor_ids,
+        end_time_ns=4_000_000_000,
+        window_seconds=3.0,
+        sample_rate_hz=4,
+    )
+    reference_coverage = await reference_buffer.get_synchronized_window_ending_at_coverage_stats(
+        sensor_ids=sensor_ids,
+        end_time_ns=4_000_000_000,
+        window_seconds=3.0,
+        sample_rate_hz=4,
+    )
+
+    assert {
+        sensor_id: stats.to_json() for sensor_id, stats in mirrored_coverage.items()
+    } == {
+        sensor_id: stats.to_json() for sensor_id, stats in reference_coverage.items()
+    }
+    assert all(stats.coverage_ratio == 1.0 for stats in mirrored_coverage.values())
 
 
 @pytest.mark.asyncio

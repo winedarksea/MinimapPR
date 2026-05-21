@@ -1679,14 +1679,20 @@ fn manifest_is_older_than_buffer_horizon(
         .map(u128::from)
         .max()
         .unwrap_or(manifest.created_ns);
+    let newest_received_ns = manifest
+        .source_handles
+        .iter()
+        .filter_map(|handle| handle.received_ns)
+        .max();
 
-    // Use the newest of source timestamps and manifest creation time.
+    // Use explicit ingest receipt time for freshness when available.
     // Source timing fields come from node/packet clocks and can legitimately
     // be far in the past (replay/tests/GPS-anchored captures). Staleness
     // gating is meant to protect live buffering from old queue backlog, so
     // a manifest that just arrived should not be dropped solely because its
     // embedded capture epoch is old.
-    let freshness_anchor_ns = newest_source_ns.max(manifest.created_ns);
+    let freshness_anchor_ns = newest_received_ns
+        .unwrap_or_else(|| newest_source_ns.max(manifest.created_ns));
     now_ns.saturating_sub(freshness_anchor_ns) > horizon_ns
 }
 

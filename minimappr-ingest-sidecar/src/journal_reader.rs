@@ -11,6 +11,8 @@ pub struct JournalPayloadHandle {
     pub payload_length_bytes: u64,
     pub toa_ns: Option<u64>,
     pub tor_ns: Option<u64>,
+    #[serde(default)]
+    pub received_ns: Option<u128>,
     pub sample_index_start: Option<u64>,
     pub sample_count: Option<u64>,
     pub integrity_hash: String,
