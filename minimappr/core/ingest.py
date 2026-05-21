@@ -695,6 +695,24 @@ def _buffer_timestamps_for_frame(
     server_received_ns: int,
     allow_receipt_time_fallback: bool = False,
 ) -> tuple[int, int | None, bool]:
+    # Receipt-time-fallback policy — intentional asymmetry with the Rust sidecar.
+    #
+    # Python (this function): when the firmware reports FREE_RUNNING time quality
+    # *and* declares gps_optional capability *and* the node clock is skewed beyond
+    # _MAX_TRUSTED_NODE_CLOCK_SKEW_NS from server wallclock, the Python ingest path
+    # *overrides* the firmware timestamp with a server-receipt-derived timestamp so
+    # debug audio remains roughly playable while the firmware lacks GPS/NTP lock.
+    #
+    # Rust (dsp_worker.rs `should_use_receipt_time_alignment`): never overrides
+    # firmware timestamps when they are present, no matter how skewed. TDOA
+    # localization correctness depends on packet-time alignment across nodes — a
+    # well-defined wrong timestamp degrades gracefully under TDOA, while a
+    # silently-corrected one looks correct but corrupts the spatial solution.
+    #
+    # The asymmetry is *by design*: Python is a debug/dev reference path that may
+    # never feed multi-node TDOA, while the Rust sidecar is the real-time hot
+    # path that always does. Do not "fix" by aligning the two — fix by ensuring
+    # tests assert the intentional divergence on the FREE_RUNNING + skew case.
     duration_ns = int(round((sample_count / sample_rate_hz) * 1_000_000_000))
     node_clock_skew_ns = abs(frame_start_time_ns - server_received_ns)
     if (

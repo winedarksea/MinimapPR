@@ -12,7 +12,7 @@ use crate::{
     audio_payload::{decode_audio_payload, DecodedAudioPayload},
     classifier_helper::ManifestClassificationAnnotator,
     derived_cache::DerivedCache,
-    dsp::{AudioCoverageStats, SensorStreamBuffer},
+    dsp::{coverage_stats, AudioCoverageStats, SensorStreamBuffer},
     dsp_events::DspEventPublisher,
     gcc_phat::TdoaResult,
     ingest_backend::QueuedRawManifest,
@@ -1275,6 +1275,15 @@ async fn publish_raw_audio_frame_event(request: RawAudioFramePublishRequest<'_>)
     };
     let channel_count = decoded.channels.len();
     let sample_count = decoded.channels.iter().map(Vec::len).min().unwrap_or(0);
+    // raw_audio_frame is a freshly decoded contiguous payload — every sample
+    // is present at this point, so coverage is all-true. Matches Python's
+    // AudioCoverageStats.to_json() 9-field shape at audio_buffer.py:30.
+    let frame_coverage = vec![true; sample_count];
+    let coverage_stats_json = serde_json::to_value(coverage_stats(
+        &frame_coverage,
+        sample_rate_hz.max(1),
+    ))
+    .ok();
     let raw_manifest = DspManifest {
         manifest_id: format!("raw-audio-{}", source_manifest.manifest_id),
         manifest_type: "raw_audio_frame".to_string(),
@@ -1284,7 +1293,7 @@ async fn publish_raw_audio_frame_event(request: RawAudioFramePublishRequest<'_>)
         localization: None,
         classifier_render: None,
         birdnet: None,
-        coverage_stats: None,
+        coverage_stats: coverage_stats_json,
         promotion_ready: false,
         env_samples: None,
         node_context: source_manifest.node_context.clone(),
@@ -1648,6 +1657,16 @@ fn should_use_receipt_time_alignment(
     // Preserve packet/node timing for TDOA whenever firmware timing exists.
     // Receipt-time alignment is a last-resort fallback only when node timing
     // is absent and skew is beyond the trusted horizon.
+    //
+    // Receipt-time-fallback policy — intentional asymmetry with the Python ingest
+    // path. Python's `_buffer_timestamps_for_frame` (ingest.py:688) *overrides*
+    // firmware timestamps when time_quality=FREE_RUNNING + gps_optional capability
+    // + node clock skew > max_trusted, so debug audio stays playable on dev nodes
+    // that lack GPS/NTP lock. The Rust sidecar deliberately does *not* override:
+    // TDOA correctness depends on consistent packet-time alignment across nodes,
+    // and silently rewriting timestamps masks clock issues that operators must
+    // see to act on. Do not align the two implementations — this divergence is
+    // covered by parity tests as an expected difference, not a bug.
     !node_timestamp_is_available && skew_ns > max_trusted_node_clock_skew_ns
 }
 

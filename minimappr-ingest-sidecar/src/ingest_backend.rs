@@ -21,6 +21,7 @@ use tokio::{
 };
 
 use crate::derived_cache::{DerivedCache, DerivedCacheConfig};
+use crate::dsp::coverage_stats;
 use crate::envelope::{parse_capture_envelope, CaptureEnvelope};
 use crate::journal_reader::{stable_segment_path, JournalPayloadHandle};
 use crate::leases::{LeaseStore, PinLeaseRequest, PinLeaseResponse};
@@ -245,6 +246,7 @@ struct SegmentJournalBackend {
     derived_cache: DerivedCache,
     manifest_store: ManifestStore,
     state: Mutex<SegmentJournalState>,
+    sequence_tracker: Arc<SequenceTracker>,
 }
 
 #[derive(Debug)]
@@ -318,6 +320,20 @@ struct SegmentJournalEntry {
 pub struct IngestBackendHealth {
     pub storage_mode: String,
     pub journal: Option<JournalHealth>,
+    /// Per-node firmware sequence-gap counters. Mirrors Python's
+    /// `_logger.warning("Detected ingest frame sequence gap", ...)` at
+    /// ingest.py:281 — Rust now matches that observability surface.
+    #[serde(default)]
+    pub sequence_gaps: SequenceTrackerSnapshot,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct SequenceTrackerSnapshot {
+    /// Cumulative gap-frame count per node_id (summed across boot sessions).
+    /// "Gap-frame count" means: number of *missing* sequence numbers detected.
+    /// E.g. expected 4, received 7 → contributes 3 to this counter.
+    pub per_node_gap_count: HashMap<String, u64>,
+    pub total_gap_count: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -328,6 +344,70 @@ pub struct JournalHealth {
     pub admission_reserve_bytes: u64,
     pub derived_cache_budget_bytes: u64,
     pub active_pin_leases: usize,
+}
+
+/// Tracks per-(node_id, boot_session) firmware sequence numbers across
+/// inbound payloads to surface dropped frames.
+///
+/// A *gap* means the firmware reported a sequence > expected_next; the
+/// difference is added to the per-node and total counters. Reboots (boot_session
+/// change) re-anchor the tracker without warning.
+#[derive(Debug, Default)]
+pub(crate) struct SequenceTracker {
+    inner: std::sync::Mutex<SequenceTrackerInner>,
+    total_gap_count: std::sync::atomic::AtomicU64,
+}
+
+#[derive(Debug, Default)]
+struct SequenceTrackerInner {
+    last_seen: HashMap<(String, u32), u64>,
+    per_node_gap_count: HashMap<String, u64>,
+}
+
+impl SequenceTracker {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record the (first_sequence, last_sequence) range of a payload from
+    /// `(node_id, boot_session)` and return any newly-detected gap size.
+    /// A gap of 0 means contiguous with the prior payload (or first ever).
+    pub(crate) fn record(
+        &self,
+        node_id: &str,
+        boot_session: u32,
+        first_sequence: u64,
+        last_sequence: u64,
+    ) -> u64 {
+        let key = (node_id.to_string(), boot_session);
+        let mut inner = self.inner.lock().expect("sequence tracker poisoned");
+        let gap = match inner.last_seen.get(&key) {
+            Some(&prev_last) if first_sequence > prev_last + 1 => {
+                first_sequence - (prev_last + 1)
+            }
+            _ => 0,
+        };
+        inner.last_seen.insert(key, last_sequence);
+        if gap > 0 {
+            *inner
+                .per_node_gap_count
+                .entry(node_id.to_string())
+                .or_insert(0) += gap;
+            self.total_gap_count
+                .fetch_add(gap, std::sync::atomic::Ordering::Relaxed);
+        }
+        gap
+    }
+
+    pub(crate) fn snapshot(&self) -> SequenceTrackerSnapshot {
+        let inner = self.inner.lock().expect("sequence tracker poisoned");
+        SequenceTrackerSnapshot {
+            per_node_gap_count: inner.per_node_gap_count.clone(),
+            total_gap_count: self
+                .total_gap_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -579,6 +659,7 @@ impl SegmentJournalBackend {
                 journal_epoch,
                 streams,
             }),
+            sequence_tracker: Arc::new(SequenceTracker::new()),
         })
     }
 
@@ -603,6 +684,7 @@ impl SegmentJournalBackend {
                 derived_cache_budget_bytes: self.runtime_config.derived_cache_budget_bytes,
                 active_pin_leases,
             }),
+            sequence_gaps: self.sequence_tracker.snapshot(),
         })
     }
 
@@ -682,11 +764,39 @@ impl SegmentJournalBackend {
         Ok(Some(queue_backpressure.try_reserve(content_length_bytes)?))
     }
 
+    fn check_sequence_gap(&self, capture_envelope: &CaptureEnvelope) {
+        let (Some(first_sequence), Some(last_sequence), Some(boot_session)) = (
+            capture_envelope.first_sequence,
+            capture_envelope.last_sequence,
+            capture_envelope.boot_session,
+        ) else {
+            return;
+        };
+        let gap = self.sequence_tracker.record(
+            &capture_envelope.node_id,
+            boot_session,
+            first_sequence,
+            last_sequence,
+        );
+        if gap > 0 {
+            let expected_sequence = first_sequence - gap;
+            tracing::warn!(
+                node_id = %capture_envelope.node_id,
+                boot_session,
+                expected_sequence,
+                received_sequence = first_sequence,
+                gap_size = gap,
+                "Detected ingest frame sequence gap"
+            );
+        }
+    }
+
     async fn enqueue_channel_only(
         &self,
         endpoint: &'static str,
         admitted: AdmittedEnqueueRequest,
     ) -> BoxedResult<String> {
+        self.check_sequence_gap(&admitted.capture_envelope);
         let (journal_id, entry) = self
             .allocate_live_journal_entry(
                 endpoint,
@@ -800,6 +910,19 @@ impl SegmentJournalBackend {
         entry: &SegmentJournalEntry,
         raw_bytes: &[u8],
     ) -> DspManifest {
+        // raw_journal_append is a single contiguous frame at ingest time, so
+        // coverage is trivially all-true. Surface the AudioCoverageStats 9-field
+        // JSON shape so downstream consumers see consistent shape on every raw
+        // path. Matches Python AudioCoverageStats.to_json() at audio_buffer.py:30.
+        let coverage_stats_json = match (entry.sample_count, entry.sample_rate_hz) {
+            (Some(sample_count), Some(sample_rate_hz))
+                if sample_count > 0 && sample_rate_hz > 0 =>
+            {
+                let coverage = vec![true; sample_count as usize];
+                serde_json::to_value(coverage_stats(&coverage, sample_rate_hz)).ok()
+            }
+            _ => None,
+        };
         let mut manifest = DspManifest {
             manifest_id: format!("manifest-{}", entry.journal_id),
             manifest_type: "raw_journal_append".to_string(),
@@ -809,7 +932,7 @@ impl SegmentJournalBackend {
             localization: None,
             classifier_render: None,
             birdnet: None,
-            coverage_stats: None,
+            coverage_stats: coverage_stats_json,
             promotion_ready: false,
             env_samples: None,
             node_context: None,
@@ -1092,6 +1215,51 @@ fn is_client_disconnect(err: &dyn std::error::Error) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn sequence_tracker_isolates_per_node_counters() {
+        let tracker = SequenceTracker::new();
+
+        // node-a streams contiguously: 1, 2, 3 → no gaps.
+        assert_eq!(tracker.record("node-a", 0, 1, 1), 0);
+        assert_eq!(tracker.record("node-a", 0, 2, 2), 0);
+        assert_eq!(tracker.record("node-a", 0, 3, 3), 0);
+
+        // node-b starts fresh: no prior state, no gap.
+        assert_eq!(tracker.record("node-b", 0, 100, 100), 0);
+
+        // node-a drops sequences 4..=6, jumps to 7 → gap of 3 frames.
+        assert_eq!(tracker.record("node-a", 0, 7, 7), 3);
+
+        let snapshot = tracker.snapshot();
+        assert_eq!(snapshot.per_node_gap_count.get("node-a"), Some(&3));
+        // node-b must remain clean — one node's gaps must not pollute another's counter.
+        assert_eq!(snapshot.per_node_gap_count.get("node-b"), None);
+        assert_eq!(snapshot.total_gap_count, 3);
+
+        // boot-session change re-anchors: a reboot from sequence 7 down to 1
+        // under a new boot_session must not register as a gap.
+        assert_eq!(tracker.record("node-a", 1, 1, 1), 0);
+        let snapshot = tracker.snapshot();
+        assert_eq!(snapshot.per_node_gap_count.get("node-a"), Some(&3));
+        assert_eq!(snapshot.total_gap_count, 3);
+    }
+
+    #[test]
+    fn sequence_tracker_handles_multi_frame_payloads() {
+        let tracker = SequenceTracker::new();
+
+        // Payload carrying frames 1..=4 in one shot.
+        assert_eq!(tracker.record("node-a", 0, 1, 4), 0);
+        // Next payload carries frames 5..=8 — contiguous.
+        assert_eq!(tracker.record("node-a", 0, 5, 8), 0);
+        // Next payload carries frames 12..=14 — gap of 3 (9, 10, 11 missing).
+        assert_eq!(tracker.record("node-a", 0, 12, 14), 3);
+
+        let snapshot = tracker.snapshot();
+        assert_eq!(snapshot.per_node_gap_count.get("node-a"), Some(&3));
+        assert_eq!(snapshot.total_gap_count, 3);
+    }
 
     fn store_forward_body(node_id: &str, sequence: u64, start_sample_index: u64) -> String {
         json!({

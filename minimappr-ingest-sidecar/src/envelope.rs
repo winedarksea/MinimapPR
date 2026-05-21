@@ -27,6 +27,17 @@ pub struct CaptureEnvelope {
     pub retention_hint: Option<String>,
     pub payload_codec: String,
     pub integrity_hash: String,
+    /// Firmware per-frame sequence counter — sequence of the *first* frame in
+    /// the payload. Sidecar uses (first_sequence, last_sequence) to detect
+    /// gaps across consecutive payloads from the same (node_id, boot_session).
+    /// `None` for transports that don't carry a sequence (e.g. JSON store-and-forward).
+    pub first_sequence: Option<u64>,
+    /// Sequence of the *last* frame in the payload. Equal to first_sequence
+    /// for single-frame payloads.
+    pub last_sequence: Option<u64>,
+    /// Firmware boot-session counter (resets on reboot). Scopes the sequence
+    /// tracker so a reboot does not surface as a spurious gap warning.
+    pub boot_session: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,6 +107,7 @@ struct BinaryFrameSummary {
     channels: u16,
     sample_index_start: u64,
     sample_count: u64,
+    sequence: u64,
     toa_ns: u64,
     tor_ns: u64,
     time_quality: BinaryTimeQuality,
@@ -320,13 +332,15 @@ fn parse_binary_capture_envelope(raw_payload: &[u8]) -> Result<CaptureEnvelope, 
     let _firmware = reader.string()?;
     let _gps_signal = reader.string()?;
     let _position_source = reader.string()?;
-    let _boot_count = reader.u32()?;
+    let boot_count = reader.u32()?;
 
     let mut first_frame: Option<BinaryFrameSummary> = None;
+    let mut last_sequence: Option<u64> = None;
     let mut total_sample_count = 0_u64;
     for _ in 0..frame_count {
         let frame = read_binary_frame_summary(&mut reader)?;
         total_sample_count = total_sample_count.saturating_add(frame.sample_count);
+        last_sequence = Some(frame.sequence);
         if first_frame.is_none() {
             first_frame = Some(frame);
         }
@@ -366,6 +380,9 @@ fn parse_binary_capture_envelope(raw_payload: &[u8]) -> Result<CaptureEnvelope, 
         retention_hint: Some("ephemeral".to_string()),
         payload_codec: "binary_mmb1_pcm16le".to_string(),
         integrity_hash: sha256_hex(raw_payload),
+        first_sequence: Some(first_frame.sequence),
+        last_sequence,
+        boot_session: Some(boot_count),
     })
 }
 
@@ -376,7 +393,7 @@ fn read_binary_frame_summary(reader: &mut BinaryReader<'_>) -> Result<BinaryFram
     let end_sample_index = reader.u64()?;
     let sample_rate_hz = reader.u32()?;
     let channels = reader.u8()?;
-    let _sequence = reader.u64()?;
+    let sequence = reader.u64()?;
     let toa_ns = reader.u64()?;
     let tor_ns = reader.u64()?;
     let time_quality = read_binary_time_quality(reader.u8()?)?;
@@ -405,6 +422,7 @@ fn read_binary_frame_summary(reader: &mut BinaryReader<'_>) -> Result<BinaryFram
         channels: u16::from(channels),
         sample_index_start: start_sample_index,
         sample_count: u64::from(samples_per_channel),
+        sequence,
         toa_ns,
         tor_ns,
         time_quality,
@@ -538,6 +556,12 @@ fn parse_store_forward_capture_envelope(raw_payload: &[u8]) -> Result<CaptureEnv
         retention_hint: Some("ephemeral".to_string()),
         payload_codec: format!("store_forward_{encoding}"),
         integrity_hash: sha256_hex(raw_payload),
+        // JSON store-and-forward transport does not currently carry sequence
+        // or boot-session metadata. Sequence-gap tracking is therefore a no-op
+        // for this transport.
+        first_sequence: None,
+        last_sequence: None,
+        boot_session: None,
     })
 }
 
