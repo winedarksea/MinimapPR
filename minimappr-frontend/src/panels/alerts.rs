@@ -108,36 +108,39 @@ fn AlertCard(alert: crate::state::Alert) -> impl IntoView {
                 if is_actionable { " alert-live" } else { "" },
             )
         >
-            <div class="alert-card-head">
-                <div class="alert-card-titleblock">
-                    <div class="alert-card-title">{rule_name}</div>
-                    <div class="alert-card-age">
-                        <span class=age_class>{age_text}</span>
+            <details class="alert-details" open=is_actionable>
+                <summary class="alert-card-head">
+                    <div class="alert-card-titleblock">
+                        <div class="alert-card-title">{rule_name}</div>
+                        <div class="alert-card-age">
+                            <span class=age_class>{age_text}</span>
+                        </div>
                     </div>
+                    <div class="alert-card-badges">
+                        <span class=severity_class>{severity}</span>
+                        <span class=status_class>{status}</span>
+                        <span class="row-chevron" aria-hidden="true">"▾"</span>
+                    </div>
+                </summary>
+
+                <p class="alert-card-message">{message}</p>
+
+                <div class="alert-card-actions">
+                    <button
+                        class="btn-sm btn-ack"
+                        disabled=move || !is_actionable || is_pending.get()
+                        on:click=on_acknowledge
+                    >
+                        {move || if is_pending.get() { "Acknowledging…" } else { "Acknowledge" }}
+                    </button>
+                    <code class="alert-card-id">{alert.alert_id.clone()}</code>
                 </div>
-                <div class="alert-card-badges">
-                    <span class=severity_class>{severity}</span>
-                    <span class=status_class>{status}</span>
-                </div>
-            </div>
 
-            <p class="alert-card-message">{message}</p>
-
-            <div class="alert-card-actions">
-                <button
-                    class="btn-sm btn-ack"
-                    disabled=move || !is_actionable || is_pending.get()
-                    on:click=on_acknowledge
-                >
-                    {move || if is_pending.get() { "Acknowledging…" } else { "Acknowledge" }}
-                </button>
-                <code class="alert-card-id">{alert.alert_id.clone()}</code>
-            </div>
-
-            {move || match error_message.get() {
-                Some(error) => view! { <div class="alert-card-error">{error}</div> }.into_any(),
-                None => ().into_any(),
-            }}
+                {move || match error_message.get() {
+                    Some(error) => view! { <div class="alert-card-error">{error}</div> }.into_any(),
+                    None => ().into_any(),
+                }}
+            </details>
         </article>
     }
 }

@@ -1,8 +1,23 @@
-use crate::audio::detection_actions::DetectionAudioActions;
+use crate::audio::detection_actions::{
+    detection_audio_url, DetectionAudioActions,
+};
 use crate::panels::contributors::CompactContributorChips;
 use crate::state::AppState;
 use crate::ui::{classify_age_from_ns, short_id};
 use leptos::prelude::*;
+use wasm_bindgen::JsCast;
+use web_sys::HtmlAudioElement;
+
+fn play_detection_url(url: &str) {
+    if let Some(audio) = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.get_element_by_id("audio-player"))
+        .and_then(|el| el.dyn_into::<HtmlAudioElement>().ok())
+    {
+        audio.set_src(url);
+        let _ = audio.play();
+    }
+}
 
 #[component]
 pub fn DetectionsPane() -> impl IntoView {
@@ -17,70 +32,88 @@ pub fn DetectionsPane() -> impl IntoView {
                     return view! { <div class="empty-state">"No recent detections"</div> }.into_any();
                 }
                 view! {
-                    <table class="data-table">
-                        <thead>
-                            <tr>
-                                <th>"Age"</th>
-                                <th>"Label"</th>
-                                <th>"Node"</th>
-                                <th>"Conf"</th>
-                                <th title="Fused track ID">"Track"</th>
-                                <th>"Audio"</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {dets.into_iter().map(|d| {
-                                let label = d.label.clone().unwrap_or_else(|| "—".to_string());
-                                let node  = d.node_id.clone().unwrap_or_else(|| "—".to_string());
-                                let contributors = d.contributors.clone();
-                                let conf  = d.label_confidence.or(d.confidence)
-                                    .map(|c| format!("{:.0}%", c * 100.0))
-                                    .unwrap_or_else(|| "—".to_string());
-                                let has_audio = d.has_audio.unwrap_or(false) || d.snippet_path.is_some();
-                                let eid = d.event_id.clone();
-                                let (age_text, age_class) = classify_age_from_ns(d.received_ns, 30.0, 300.0);
+                    <ul class="compact-list">
+                        {dets.into_iter().map(|d| {
+                            let label = d.label.clone().unwrap_or_else(|| "—".to_string());
+                            let node  = d.node_id.clone().unwrap_or_else(|| "—".to_string());
+                            let contributors = d.contributors.clone();
+                            let conf  = d.label_confidence.or(d.confidence)
+                                .map(|c| format!("{:.0}%", c * 100.0))
+                                .unwrap_or_else(|| "—".to_string());
+                            let has_audio = d.has_audio.unwrap_or(false) || d.snippet_path.is_some();
+                            let eid = d.event_id.clone();
+                            let (age_text, age_class) = classify_age_from_ns(d.received_ns, 30.0, 300.0);
 
-                                // Short track ID chip if this detection was fused
-                                let track_chip = d.track_id.as_ref().map(|tid| {
-                                    short_id(tid, 8)
-                                });
+                            let track_chip = d.track_id.as_ref().map(|tid| short_id(tid, 8));
+                            let dot_class = format!("row-status-dot {age_class}");
+                            let play_url = detection_audio_url(&eid);
 
-                                view! {
-                                    <tr>
-                                        <td>
-                                            <span class=age_class>{age_text}</span>
-                                        </td>
-                                        <td>{label}</td>
-                                        <td>
-                                            <CompactContributorChips contributors=contributors fallback_node_id=Some(node) />
-                                        </td>
-                                        <td><span class="conf-pill">{conf}</span></td>
-                                        <td>
-                                            {match track_chip {
-                                                Some(tid) => view! {
-                                                    <code class="track-link-chip">{tid}</code>
-                                                }.into_any(),
-                                                None => view! {
-                                                    <span class="age-unknown">"-"</span>
-                                                }.into_any(),
-                                            }}
-                                        </td>
-                                        <td>
-                                            {if has_audio {
-                                                view! {
-                                                    <DetectionAudioActions event_id=eid.clone() />
-                                                }.into_any()
-                                            } else {
-                                                view! {
-                                                    <span class="age-unknown">"-"</span>
-                                                }.into_any()
-                                            }}
-                                        </td>
-                                    </tr>
-                                }
-                            }).collect_view()}
-                        </tbody>
-                    </table>
+                            view! {
+                                <li>
+                                    <details class="compact-row">
+                                        <summary>
+                                            <span class=dot_class title=age_text.clone()></span>
+                                            <span class="row-label">{label}</span>
+                                            <span class="row-summary-meta">
+                                                <span class="conf-pill">{conf}</span>
+                                                {if has_audio {
+                                                    let url = play_url.clone();
+                                                    view! {
+                                                        <button
+                                                            class="play-btn"
+                                                            title="Play detection audio"
+                                                            on:click=move |ev| {
+                                                                ev.stop_propagation();
+                                                                ev.prevent_default();
+                                                                play_detection_url(&url);
+                                                            }
+                                                        >
+                                                            "▶"
+                                                        </button>
+                                                    }.into_any()
+                                                } else {
+                                                    ().into_any()
+                                                }}
+                                            </span>
+                                            <span class="row-chevron" aria-hidden="true">"▾"</span>
+                                        </summary>
+                                        <dl class="compact-detail">
+                                            <dt>"Age"</dt>
+                                            <dd><span class=age_class>{age_text}</span></dd>
+
+                                            <dt>"Node"</dt>
+                                            <dd>
+                                                <CompactContributorChips contributors=contributors fallback_node_id=Some(node) />
+                                            </dd>
+
+                                            <dt>"Track"</dt>
+                                            <dd>
+                                                {match track_chip {
+                                                    Some(tid) => view! {
+                                                        <code class="track-link-chip">{tid}</code>
+                                                    }.into_any(),
+                                                    None => view! { <span class="age-unknown">"—"</span> }.into_any(),
+                                                }}
+                                            </dd>
+
+                                            <dt>"Audio"</dt>
+                                            <dd>
+                                                {if has_audio {
+                                                    view! {
+                                                        <div class="compact-detail-actions">
+                                                            <DetectionAudioActions event_id=eid.clone() />
+                                                        </div>
+                                                    }.into_any()
+                                                } else {
+                                                    view! { <span class="age-unknown">"—"</span> }.into_any()
+                                                }}
+                                            </dd>
+                                        </dl>
+                                    </details>
+                                </li>
+                            }
+                        }).collect_view()}
+                    </ul>
                 }.into_any()
             }}
         </div>
