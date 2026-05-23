@@ -88,23 +88,28 @@ class Storage:
         self._write_lock = asyncio.Lock()
         self._write_owner: asyncio.Task[Any] | None = None
         self._batch_depth = 0
+        self.stale_recoveries_count = 0
 
     async def initialize(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        await self._open_connection()
-        await self._configure_connection()
+
+        async def _open_and_configure() -> None:
+            await self._open_connection()
+            await self._configure_connection()
+
+        try:
+            await _open_and_configure()
+        except sqlite3.OperationalError as exc:
+            if not self._is_recoverable_open_error(exc) or not await self._recover_stale_sqlite_state(exc):
+                raise
+            await _open_and_configure()
 
         try:
             await self._initialize_schema_and_migrations()
         except sqlite3.OperationalError as exc:
-            if not self._is_disk_io_error(exc) or not await self._recover_empty_wal_sidecars():
+            if not self._is_recoverable_open_error(exc) or not await self._recover_stale_sqlite_state(exc):
                 raise
-            logger.warning(
-                "Recovered stale SQLite WAL sidecars for %s during schema init; retrying database open",
-                self.db_path,
-            )
-            await self._open_connection()
-            await self._configure_connection()
+            await _open_and_configure()
             await self._initialize_schema_and_migrations()
 
         await self._ensure_incremental_auto_vacuum()
@@ -500,19 +505,14 @@ class Storage:
 
     async def _configure_connection(self) -> None:
         db = self._require_db()
+        # Establish WAL mode first so the subsequent checkpoint has something to operate on.
+        # Then drain any stale WAL frames left by an unclean prior shutdown — without this,
+        # write-side PRAGMAs below can hit "database is locked" because SQLite still treats
+        # the abandoned -wal/-shm pair as belonging to a live writer.
+        await db.execute("PRAGMA journal_mode=WAL;")
+        await db.execute("PRAGMA wal_checkpoint(TRUNCATE);")
         await db.execute("PRAGMA foreign_keys=ON;")
         await db.execute("PRAGMA auto_vacuum=INCREMENTAL;")
-        try:
-            await db.execute("PRAGMA journal_mode=WAL;")
-        except sqlite3.OperationalError as exc:
-            if not self._is_disk_io_error(exc) or not await self._recover_empty_wal_sidecars():
-                raise
-            logger.warning("Recovered stale SQLite WAL sidecars for %s; retrying database open", self.db_path)
-            await self._open_connection()
-            db = self._require_db()
-            await db.execute("PRAGMA foreign_keys=ON;")
-            await db.execute("PRAGMA auto_vacuum=INCREMENTAL;")
-            await db.execute("PRAGMA journal_mode=WAL;")
         await db.execute("PRAGMA synchronous=NORMAL;")
 
     async def _ensure_incremental_auto_vacuum(self) -> None:
@@ -548,24 +548,163 @@ class Storage:
     def _is_disk_io_error(exc: sqlite3.OperationalError) -> bool:
         return "disk I/O error" in str(exc)
 
-    async def _recover_empty_wal_sidecars(self) -> bool:
-        db = self._db
-        if db is not None:
-            await db.close()
-            self._db = None
+    @staticmethod
+    def _is_database_locked(exc: sqlite3.OperationalError) -> bool:
+        return "database is locked" in str(exc)
+
+    @classmethod
+    def _is_recoverable_open_error(cls, exc: sqlite3.OperationalError) -> bool:
+        return cls._is_disk_io_error(exc) or cls._is_database_locked(exc)
+
+    @staticmethod
+    def _file_size_or_none(path: Path) -> int | None:
+        try:
+            return path.stat().st_size
+        except OSError:
+            return None
+
+    async def _recover_stale_sqlite_state(self, trigger_exc: sqlite3.OperationalError) -> bool:
+        """Graduated recovery for stale WAL/SHM state from an unclean shutdown.
+
+        Returns True if recovery succeeded and the caller should retry opening the
+        database. False propagates the original error to the caller.
+
+        Safety invariants:
+          * The ``-shm`` file is never load-bearing; it is rebuilt from ``-wal`` on
+            open, so deleting it cannot lose data.
+          * The ``-wal`` file is only deleted when a checkpoint has proven it
+            contains zero committed frames. Any path that would lose committed
+            data returns False and re-raises instead.
+        """
+        if not self.db_path.exists():
+            return False
 
         wal_path = Path(f"{self.db_path}-wal")
         shm_path = Path(f"{self.db_path}-shm")
-        if not self.db_path.exists() or not wal_path.exists():
+
+        await self._close_connection()
+
+        def _sizes() -> str:
+            return (
+                f"db={self._file_size_or_none(self.db_path)} "
+                f"wal={self._file_size_or_none(wal_path)} "
+                f"shm={self._file_size_or_none(shm_path)}"
+            )
+
+        logger.warning(
+            "SQLite stale-state recovery starting for %s after %s (%s)",
+            self.db_path,
+            type(trigger_exc).__name__,
+            _sizes(),
+        )
+
+        # Step A: fresh connection + TRUNCATE checkpoint.
+        if await self._try_checkpoint_truncate():
+            logger.warning("SQLite stale-state recovery step A succeeded for %s (%s)", self.db_path, _sizes())
+            self.stale_recoveries_count += 1
+            return True
+
+        # Step B: delete -shm (always safe — rebuilt from -wal) and retry checkpoint.
+        if shm_path.exists():
+            try:
+                shm_path.unlink()
+            except OSError as exc:
+                logger.warning("SQLite stale-state recovery could not remove %s: %s", shm_path, exc)
+                return False
+            if await self._try_checkpoint_truncate():
+                logger.warning("SQLite stale-state recovery step B succeeded for %s (%s)", self.db_path, _sizes())
+                self.stale_recoveries_count += 1
+                return True
+
+        # Step C: only if we can prove -wal has zero committed frames, delete it.
+        if wal_path.exists():
+            frames_in_wal = await self._wal_committed_frames()
+            if frames_in_wal == 0:
+                try:
+                    wal_path.unlink(missing_ok=True)
+                except OSError as exc:
+                    logger.warning("SQLite stale-state recovery could not remove %s: %s", wal_path, exc)
+                    return False
+                logger.warning(
+                    "SQLite stale-state recovery step C succeeded for %s — removed empty WAL (%s)",
+                    self.db_path,
+                    _sizes(),
+                )
+                self.stale_recoveries_count += 1
+                return True
+            logger.error(
+                "SQLite stale-state recovery refusing to delete -wal with %s committed frames for %s (%s)",
+                frames_in_wal,
+                self.db_path,
+                _sizes(),
+            )
+
+        return False
+
+    async def _close_connection(self) -> None:
+        db = self._db
+        if db is None:
+            return
+        self._db = None
+        try:
+            await db.close()
+        except Exception as exc:  # noqa: BLE001 — defensive: closing a half-broken conn
+            logger.debug("Ignoring error while closing stale SQLite connection: %s", exc)
+
+    async def _try_checkpoint_truncate(self) -> bool:
+        """Open a short-lived connection and attempt a TRUNCATE checkpoint."""
+        try:
+            conn = await aiosqlite.connect(self.db_path, timeout=2.0)
+        except sqlite3.OperationalError as exc:
+            logger.debug("Recovery checkpoint: could not open %s: %s", self.db_path, exc)
             return False
         try:
-            if wal_path.stat().st_size != 0:
+            try:
+                await conn.execute("PRAGMA journal_mode=WAL;")
+                await conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+                await conn.commit()
+            except sqlite3.OperationalError as exc:
+                logger.debug("Recovery checkpoint failed for %s: %s", self.db_path, exc)
                 return False
-            wal_path.unlink(missing_ok=True)
-            shm_path.unlink(missing_ok=True)
-        except OSError:
-            return False
+        finally:
+            try:
+                await conn.close()
+            except Exception:  # noqa: BLE001
+                pass
         return True
+
+    async def _wal_committed_frames(self) -> int | None:
+        """Return the number of committed frames currently in the WAL, or None on error.
+
+        Uses ``PRAGMA wal_checkpoint(PASSIVE)`` which returns ``(busy, log, checkpointed)``;
+        ``log`` is the count of frames in the WAL after the call (0 means the WAL contains
+        no committed data).
+        """
+        try:
+            conn = await aiosqlite.connect(self.db_path, timeout=2.0)
+        except sqlite3.OperationalError as exc:
+            logger.debug("Recovery probe: could not open %s: %s", self.db_path, exc)
+            return None
+        try:
+            try:
+                await conn.execute("PRAGMA journal_mode=WAL;")
+                cursor = await conn.execute("PRAGMA wal_checkpoint(PASSIVE);")
+                row = await cursor.fetchone()
+                await cursor.close()
+            except sqlite3.OperationalError as exc:
+                logger.debug("Recovery probe failed for %s: %s", self.db_path, exc)
+                return None
+            if row is None or len(row) < 2:
+                return None
+            try:
+                return int(row[1])
+            except (TypeError, ValueError):
+                return None
+        finally:
+            try:
+                await conn.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     async def _deduplicate_reporting_window_canonicals(self) -> None:
         """Keep one canonical row per reporting key before enforcing uniqueness."""
