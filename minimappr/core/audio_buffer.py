@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 
@@ -112,6 +112,13 @@ class SensorStreamBuffer:
     _timeline_origin_ns: int | None = field(init=False, default=None)
     _timeline_origin_sample_index: int = field(init=False, default=0)
     _buffer_start_sample_index: int = field(init=False, default=0)
+    # Diagnostic counter: incremented when append() resets the timeline anchor
+    # (NTP/GPS correction or a frame so far ahead/behind that allocating the
+    # in-between zero gap would be unbounded). Long-uptime drift between this
+    # and the rate-mismatch wipe count was the leading hypothesis for the
+    # 2026-05 silent-window-drop incident — see the corresponding counter on
+    # MultiSensorBuffer for wipes, which survive buffer replacement.
+    reanchor_count: int = field(init=False, default=0)
 
     def __post_init__(self) -> None:
         self.max_samples = max(1, int(round(self.max_duration_seconds * self.sample_rate_hz)))
@@ -163,6 +170,17 @@ class SensorStreamBuffer:
             if timestamp_correction_ns > reset_threshold_ns:
                 # NTP/GPS lock can correct wall time while sample indices stay contiguous.
                 # Re-anchor so recent-audio age follows the corrected node clock.
+                self.reanchor_count += 1
+                logger.warning(
+                    "SensorStreamBuffer re-anchor (timestamp correction)",
+                    extra={
+                        "sample_rate_hz": self.sample_rate_hz,
+                        "timestamp_correction_ns": timestamp_correction_ns,
+                        "reset_threshold_ns": reset_threshold_ns,
+                        "new_start_time_ns": start_time_ns,
+                        "reanchor_count": self.reanchor_count,
+                    },
+                )
                 self._timeline_origin_ns = start_time_ns
                 self._timeline_origin_sample_index = start_sample_index or 0
                 self._buffer_start_sample_index = start_sample_index or 0
@@ -179,6 +197,19 @@ class SensorStreamBuffer:
         # silence gap and a potentially enormous intermediate allocation.
         if (incoming_start_sample_index > current_end_sample_index + self.max_samples
                 or incoming_start_sample_index < current_start_sample_index - self.max_samples):
+            self.reanchor_count += 1
+            logger.warning(
+                "SensorStreamBuffer re-anchor (out-of-bounds frame)",
+                extra={
+                    "sample_rate_hz": self.sample_rate_hz,
+                    "incoming_start_sample_index": incoming_start_sample_index,
+                    "current_start_sample_index": current_start_sample_index,
+                    "current_end_sample_index": current_end_sample_index,
+                    "max_samples": self.max_samples,
+                    "new_start_time_ns": start_time_ns,
+                    "reanchor_count": self.reanchor_count,
+                },
+            )
             self._timeline_origin_ns = start_time_ns
             self._timeline_origin_sample_index = start_sample_index or 0
             self._buffer_start_sample_index = start_sample_index or 0
@@ -411,6 +442,11 @@ class MultiSensorBuffer:
         # *different* sensors run in parallel while still serializing
         # same-sensor appends to preserve the buffer's invariants.
         self._per_sensor_locks: dict[str, asyncio.Lock] = {}
+        # Diagnostic counter: incremented when an append() arrives with a
+        # different sample_rate_hz than the existing per-sensor buffer, which
+        # silently discards prior audio. Survives the buffer replacement
+        # because it's on the wrapper, unlike SensorStreamBuffer.reanchor_count.
+        self._rate_mismatch_wipes: dict[str, int] = {}
 
     async def start_capture(
         self,
@@ -660,6 +696,19 @@ class MultiSensorBuffer:
             async with self._lock:
                 buffer = self._buffers.get(sensor_id)
                 if buffer is None or buffer.sample_rate_hz != sample_rate_hz:
+                    if buffer is not None and buffer.sample_rate_hz != sample_rate_hz:
+                        self._rate_mismatch_wipes[sensor_id] = (
+                            self._rate_mismatch_wipes.get(sensor_id, 0) + 1
+                        )
+                        logger.warning(
+                            "MultiSensorBuffer rate-mismatch wipe",
+                            extra={
+                                "sensor_id": sensor_id,
+                                "old_sample_rate_hz": buffer.sample_rate_hz,
+                                "new_sample_rate_hz": sample_rate_hz,
+                                "wipes_for_sensor": self._rate_mismatch_wipes[sensor_id],
+                            },
+                        )
                     buffer = SensorStreamBuffer(
                         sample_rate_hz=sample_rate_hz,
                         max_duration_seconds=self.max_duration_seconds,
@@ -721,6 +770,42 @@ class MultiSensorBuffer:
                 if window is not None:
                     result[sensor_id] = window
             return result
+
+    async def snapshot_state(
+        self,
+        sensor_ids: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return a per-sensor snapshot of buffer time coverage and counters.
+
+        Used by FusionNode.status() for /api/v1/fusion/status and by
+        _localize_candidate's "no_window" silent-drop log so an operator can
+        immediately see whether an event_time_ns fell behind buffer start or
+        ahead of buffer end, without code spelunking.
+        """
+        async with self._lock:
+            ids = sensor_ids if sensor_ids is not None else sorted(self._buffers.keys())
+            pin_ns = self._oldest_pin_ns()
+            state: list[dict[str, Any]] = []
+            for sensor_id in ids:
+                buffer = self._buffers.get(sensor_id)
+                if buffer is None:
+                    state.append({"sensor_id": sensor_id, "present": False})
+                    continue
+                end_time_ns = buffer.end_time_ns()
+                state.append(
+                    {
+                        "sensor_id": sensor_id,
+                        "present": True,
+                        "sample_rate_hz": buffer.sample_rate_hz,
+                        "sample_count": int(buffer.samples.size),
+                        "start_time_ns": buffer.start_time_ns,
+                        "end_time_ns": end_time_ns,
+                        "reanchor_count": int(buffer.reanchor_count),
+                        "rate_mismatch_wipes": int(self._rate_mismatch_wipes.get(sensor_id, 0)),
+                        "pin_protected_from_ns": pin_ns,
+                    }
+                )
+            return state
 
     async def get_synchronized_window_coverage_stats(
         self,

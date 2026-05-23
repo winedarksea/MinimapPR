@@ -1571,3 +1571,22 @@ fn test_manifest_with_created_ns(manifest_id: &str, created_ns: u128) -> DspMani
         raw_audio_bytes: None,
     }
 }
+
+/// Smoke test for the cross-language silent-drop counters surfaced via
+/// `/api/v1/dsp/status`. The fields are the Rust counterpart to Python's
+/// `localization_drops_by_reason` / `SensorStreamBuffer.reanchor_count` and
+/// must start at zero, accept saturating increments, and survive serialization
+/// — these are the load-bearing properties for the alert query that watches
+/// both backends with one rule.
+#[test]
+fn dsp_worker_state_silent_drop_counters_default_zero_and_increment() {
+    let mut state = crate::dsp_worker::DspWorkerState::default();
+    assert_eq!(state.total_buffer_reanchors, 0);
+    assert_eq!(state.total_window_underrun_drops, 0);
+
+    state.total_buffer_reanchors = state.total_buffer_reanchors.saturating_add(3);
+    state.total_window_underrun_drops = state.total_window_underrun_drops.saturating_add(1);
+
+    assert_eq!(state.total_buffer_reanchors, 3);
+    assert_eq!(state.total_window_underrun_drops, 1);
+}

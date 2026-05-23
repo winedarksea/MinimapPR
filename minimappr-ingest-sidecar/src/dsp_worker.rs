@@ -221,6 +221,15 @@ pub struct DspWorkerState {
     pub total_failures: u64,
     pub total_stale_manifest_skips: u64,
     pub total_classification_drops: u64,
+    /// Per-sensor SensorStreamBuffer re-anchor events (NTP/GPS correction or
+    /// large frame jumps). Mirrors `SensorStreamBuffer.reanchor_count` on the
+    /// Python side. Visible degradation signal for long-uptime timeline drift.
+    pub total_buffer_reanchors: u64,
+    /// `compute_manifest_frame` returned None because the requested audio
+    /// window fell outside the buffer's coverage. Mirrors the Python
+    /// `localization_drops_by_reason["no_window"]` counter — both are the
+    /// canonical "pipeline is silently dropping" signal.
+    pub total_window_underrun_drops: u64,
     pub pending_count: usize,
     pub recent_results: Vec<DspManifest>,
     /// Per-node audio overrides applied during ingest (set via POST /api/v1/dsp/config).
@@ -572,6 +581,7 @@ impl DspWorker {
 
         let buffered = self.buffer_owned_manifest_audio(&owned).await?;
         self.dispatch_buffered_manifest(owned, buffered, pending_backlog_depth)
+            .await
     }
 
     async fn prepare_owned_manifest_audio(
@@ -786,10 +796,12 @@ impl DspWorker {
                 (owned.buffer_start_time_ns, owned.buffer_end_time_ns)
             };
 
+        let mut reanchor_delta: u64 = 0;
         for (channel_index, buffer) in buffers.iter_mut().enumerate() {
             let Some(channel_samples) = owned.decoded.channels.get(channel_index) else {
                 break;
             };
+            let pre_reanchor = buffer.reanchor_count();
             if let Err(err) = buffer.append(
                 buffer_start_time_ns,
                 channel_samples,
@@ -806,6 +818,9 @@ impl DspWorker {
                 self.defer_source_manifest_consumption(&owned.manifest);
                 return None;
             }
+            reanchor_delta = reanchor_delta.saturating_add(
+                buffer.reanchor_count().saturating_sub(pre_reanchor),
+            );
         }
 
         let end_ns = resolve_buffer_end_time_ns(
@@ -820,6 +835,11 @@ impl DspWorker {
             .max(buffer_start_time_ns);
         let channel_states =
             localization_channel_states_centered(buffers, center_time_ns, self.config.window_seconds);
+        // `buffers` borrow ends here; safe to take &self again for the
+        // shared-state write.
+        if reanchor_delta > 0 {
+            self.note_buffer_reanchors(reanchor_delta).await;
+        }
         Some(BufferedManifestAudio {
             audio_end_ns: end_ns.max(0) as u128,
             end_ns,
@@ -905,7 +925,7 @@ impl DspWorker {
         }
     }
 
-    fn dispatch_buffered_manifest(
+    async fn dispatch_buffered_manifest(
         &mut self,
         owned: OwnedManifestAudio,
         buffered: BufferedManifestAudio,
@@ -1018,6 +1038,19 @@ impl DspWorker {
         );
 
         if !timing_gates.on_heartbeat_cadence && !timing_gates.run_classifier_render {
+            // Parity with Python's localization "no_window" silent-drop reason:
+            // when every per-channel window is empty AND no cadence wants a
+            // result, the frame is dropped invisibly. The Python pipeline now
+            // counts the corresponding state via
+            // `localization_drops_by_reason["no_window"]`; bump the equivalent
+            // here so a Rust-backed deployment exposes the same signal via
+            // /api/v1/dsp/status.total_window_underrun_drops. Heartbeat /
+            // classifier-render dispatches are intentional emissions and not
+            // counted as a drop.
+            let all_windows_empty = windows.iter().all(|window| window.is_empty());
+            if all_windows_empty {
+                self.note_window_underrun_drop().await;
+            }
             self.defer_source_manifest_consumption(&owned.manifest);
             return None;
         }
@@ -1183,6 +1216,28 @@ impl DspWorker {
 
     async fn note_failure(&self) {
         self.note_failures(1).await;
+    }
+
+    /// Cross-process diagnostic counter mirroring the Python
+    /// `SensorStreamBuffer.reanchor_count`. Surfaced via `/api/v1/dsp/status`
+    /// so an operator alerting on long-uptime timeline drift sees the same
+    /// signal whether the deployment is using the Python or the Rust ingest.
+    async fn note_buffer_reanchors(&self, count: u64) {
+        if count == 0 {
+            return;
+        }
+        let mut st = self.state.write().await;
+        st.total_buffer_reanchors = st.total_buffer_reanchors.saturating_add(count);
+    }
+
+    /// Mirror of the Python localization `"no_window"` drop reason. Incremented
+    /// when `compute_manifest_frame` (or its callers) cannot extract an audio
+    /// window for a manifest because the requested time is outside the buffer
+    /// coverage. This is the single canonical "silent stall" signal — paired
+    /// with `total_buffer_reanchors` it explains *why* the stall happened.
+    async fn note_window_underrun_drop(&self) {
+        let mut st = self.state.write().await;
+        st.total_window_underrun_drops = st.total_window_underrun_drops.saturating_add(1);
     }
 
     async fn note_stage_attempts(&self, payload: &ComputePayload) {

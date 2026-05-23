@@ -26,6 +26,13 @@ pub struct SensorStreamBuffer {
     buffer_start_sample_index: i64,
     samples: VecDeque<f32>,
     coverage: VecDeque<bool>,
+    /// Diagnostic counter: incremented when `append` resets the timeline anchor
+    /// (NTP/GPS correction or a frame so far ahead/behind the buffer that
+    /// allocating the in-between zero gap would be unbounded). Mirrors the
+    /// Python `SensorStreamBuffer.reanchor_count` field one-for-one — both are
+    /// surfaced via the cross-process status JSON so operators can correlate
+    /// silent-pipeline-drop spikes to actual timeline drift.
+    reanchor_count: u64,
 }
 
 impl SensorStreamBuffer {
@@ -41,7 +48,45 @@ impl SensorStreamBuffer {
             buffer_start_sample_index: 0,
             samples: VecDeque::new(),
             coverage: VecDeque::new(),
+            reanchor_count: 0,
         }
+    }
+
+    pub fn reanchor_count(&self) -> u64 {
+        self.reanchor_count
+    }
+
+    // These accessors mirror the Python `MultiSensorBuffer.snapshot_state`
+    // payload field-for-field. They're intentionally part of the public API
+    // even though only tests / a future status surface call them today; the
+    // parity contract is enforced by tests in dsp_worker_tests.rs.
+    #[allow(dead_code)]
+    pub fn sample_rate_hz_value(&self) -> u32 {
+        self.sample_rate_hz
+    }
+
+    #[allow(dead_code)]
+    pub fn sample_count(&self) -> usize {
+        self.samples.len()
+    }
+
+    /// Wall-clock end of the buffered range, or None if the buffer is empty.
+    #[allow(dead_code)]
+    pub fn end_time_ns(&self) -> Option<i128> {
+        if self.timeline_origin_ns.is_none() || self.samples.is_empty() {
+            return None;
+        }
+        let end_sample = self.buffer_start_sample_index + self.samples.len() as i64;
+        self.sample_index_to_time_ns(end_sample).ok()
+    }
+
+    /// Wall-clock start of the buffered range, or None if the buffer is empty.
+    #[allow(dead_code)]
+    pub fn start_time_ns(&self) -> Option<i128> {
+        if self.timeline_origin_ns.is_none() || self.samples.is_empty() {
+            return None;
+        }
+        self.sample_index_to_time_ns(self.buffer_start_sample_index).ok()
     }
 
     fn sample_len(&self) -> usize {
@@ -107,6 +152,15 @@ impl SensorStreamBuffer {
             let reset_threshold_ns =
                 self.max_samples as i128 * 1_000_000_000_i128 / i128::from(self.sample_rate_hz);
             if timestamp_correction_ns > reset_threshold_ns {
+                self.reanchor_count = self.reanchor_count.saturating_add(1);
+                tracing::warn!(
+                    sample_rate_hz = self.sample_rate_hz,
+                    timestamp_correction_ns = %timestamp_correction_ns,
+                    reset_threshold_ns = %reset_threshold_ns,
+                    new_start_time_ns = %start_time_ns,
+                    reanchor_count = self.reanchor_count,
+                    "SensorStreamBuffer re-anchor (timestamp correction)",
+                );
                 self.reset(start_time_ns, incoming_start, samples);
                 return Ok(());
             }
@@ -115,6 +169,17 @@ impl SensorStreamBuffer {
         if incoming_start > current_end + self.max_samples
             || incoming_start < current_start - self.max_samples
         {
+            self.reanchor_count = self.reanchor_count.saturating_add(1);
+            tracing::warn!(
+                sample_rate_hz = self.sample_rate_hz,
+                incoming_start_sample_index = incoming_start,
+                current_start_sample_index = current_start,
+                current_end_sample_index = current_end,
+                max_samples = self.max_samples,
+                new_start_time_ns = %start_time_ns,
+                reanchor_count = self.reanchor_count,
+                "SensorStreamBuffer re-anchor (out-of-bounds frame)",
+            );
             self.reset(start_time_ns, incoming_start, samples);
             return Ok(());
         }
@@ -661,6 +726,46 @@ mod tests {
             buffer.coverage.iter().copied().collect::<Vec<_>>(),
             vec![true; frame_samples]
         );
+    }
+
+    /// Diagnostic-counter regression: the two reset paths in `append` are the
+    /// Rust mirror of Python's `SensorStreamBuffer.reanchor_count`. The Python
+    /// pipeline incident that motivated this work would have been diagnosed
+    /// faster if this counter had existed; assert it climbs deterministically.
+    #[test]
+    fn reanchor_count_increments_on_each_reset_path() {
+        let sr = 16_000;
+        let frame_samples = 1_024;
+        let mut buffer = SensorStreamBuffer::new(sr, 5.0);
+        let t0 = 1_000_000_000_000_000_000_i128;
+
+        // Initial append establishes the timeline — NOT a re-anchor.
+        buffer
+            .append(t0, &vec![1.0; frame_samples], None, None)
+            .unwrap();
+        assert_eq!(buffer.reanchor_count(), 0);
+
+        // Trip the out-of-bounds reset path with a 1-hour forward jump.
+        let one_hour_ns = 3_600_i128 * 1_000_000_000_i128;
+        buffer
+            .append(t0 + one_hour_ns, &vec![2.0; frame_samples], None, None)
+            .unwrap();
+        assert_eq!(buffer.reanchor_count(), 1);
+
+        // Trip the explicit-coverage timestamp-correction path. Provide a
+        // sample-contiguous index but a wall-time that differs by more than
+        // the buffer's max_duration_seconds.
+        let next_index = (frame_samples * 2) as i64;
+        let corrected_t = t0 + one_hour_ns + 600_000_000_000_i128;
+        buffer
+            .append(
+                corrected_t,
+                &vec![3.0; frame_samples],
+                Some(next_index),
+                Some(next_index + frame_samples as i64),
+            )
+            .unwrap();
+        assert_eq!(buffer.reanchor_count(), 2);
     }
 
     #[test]

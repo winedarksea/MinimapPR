@@ -858,6 +858,11 @@ struct DspStatusResponse {
     total_failures: u64,
     total_stale_manifest_skips: u64,
     total_classification_drops: u64,
+    // Mirrors of Python silent-drop counters. Names are kept stable so an
+    // alerting rule (e.g. `total_window_underrun_drops` climbing while no
+    // classifier renders emit) works against either backend.
+    total_buffer_reanchors: u64,
+    total_window_underrun_drops: u64,
     dsp_worker_running: bool,
 }
 
@@ -879,6 +884,8 @@ async fn dsp_status(State(state): State<AppState>) -> Response {
         total_failures: st.total_failures,
         total_stale_manifest_skips: st.total_stale_manifest_skips,
         total_classification_drops: st.total_classification_drops,
+        total_buffer_reanchors: st.total_buffer_reanchors,
+        total_window_underrun_drops: st.total_window_underrun_drops,
         dsp_worker_running: st.worker_running,
     })
     .into_response()

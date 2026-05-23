@@ -134,6 +134,7 @@ _INGEST_PATH_PREFIXES = (
     "/api/v1/recordings",
     "/api/v1/fusion/status",
     "/api/v1/system/diagnostics",
+    "/api/v1/system/logs",
 )
 
 
@@ -2896,6 +2897,8 @@ async def get_system_diagnostics(request: Request) -> dict:
             "workers": fusion_status["workers"],
             "realtime": fusion_status["realtime"],
             "drop_on_backpressure": fusion_status["drop_on_backpressure"],
+            "buffer_state": fusion_status.get("buffer_state", []),
+            "health": fusion_status.get("health", {}),
             "metrics": {
                 "triggers_enqueued": fusion_status["metrics"].get("triggers_enqueued", 0),
                 "triggers_dropped_queue_full": fusion_status["metrics"].get("triggers_dropped_queue_full", 0),
@@ -2905,6 +2908,18 @@ async def get_system_diagnostics(request: Request) -> dict:
                     fusion_status["metrics"].get("birdnet_chunk_dispatches_suppressed", 0)
                 ),
                 "detections_emitted": fusion_status["metrics"].get("detections_emitted", 0),
+                # Silent-drop visibility — these counters are the canonical
+                # "pipeline is silently dropping" signal for the Python ingest.
+                # See FusionMetrics in core/fusion_node.py for full set.
+                "localization_drops_by_reason": (
+                    fusion_status["metrics"].get("localization_drops_by_reason", {})
+                ),
+                "classification_drops_by_reason": (
+                    fusion_status["metrics"].get("classification_drops_by_reason", {})
+                ),
+                "rules_drops_by_reason": (
+                    fusion_status["metrics"].get("rules_drops_by_reason", {})
+                ),
             },
         }
     else:
@@ -2922,6 +2937,7 @@ async def get_system_diagnostics(request: Request) -> dict:
         settings.ingest_spool_dir,
     )
     sidecar_health: dict[str, object] | None = None
+    sidecar_dsp_metrics: dict[str, object] | None = None
     if settings.ingest_sidecar_enabled and sidecar_state is not None and sidecar_state.status == "running":
         sidecar_startup = _ingest_sidecar_startup_config(settings)
         sidecar_health = await asyncio.to_thread(
@@ -2929,6 +2945,35 @@ async def get_system_diagnostics(request: Request) -> dict:
             settings.ingest_port,
             sidecar_startup.healthcheck_timeout_seconds,
         )
+        # Pull DSP counters so the diagnostics page can surface the Rust-side
+        # silent-drop signals (total_buffer_reanchors,
+        # total_window_underrun_drops). The endpoint is the same one
+        # `_build_rust_stages` consumes; the fetch is best-effort.
+        dsp_status_raw = await asyncio.to_thread(
+            _fetch_json_from_sidecar,
+            _ingest_runtime_base_url(settings),
+            "/api/v1/dsp/status",
+        )
+        if isinstance(dsp_status_raw, dict) and dsp_status_raw:
+            sidecar_dsp_metrics = {
+                "total_failures": dsp_status_raw.get("total_failures", 0),
+                "total_classification_drops": dsp_status_raw.get(
+                    "total_classification_drops", 0
+                ),
+                "total_stale_manifest_skips": dsp_status_raw.get(
+                    "total_stale_manifest_skips", 0
+                ),
+                # Mirrors of Python silent-drop counters — names kept stable so
+                # an alert query (`sidecar.dsp_metrics.total_window_underrun_drops`
+                # vs. `pipeline.metrics.localization_drops_by_reason.no_window`)
+                # works against either backend.
+                "total_buffer_reanchors": dsp_status_raw.get(
+                    "total_buffer_reanchors", 0
+                ),
+                "total_window_underrun_drops": dsp_status_raw.get(
+                    "total_window_underrun_drops", 0
+                ),
+            }
     diagnostics["sidecar"] = {
         "enabled": settings.ingest_sidecar_enabled,
         "status": sidecar_state.status if sidecar_state is not None else (
@@ -2939,6 +2984,8 @@ async def get_system_diagnostics(request: Request) -> dict:
         "last_exit_code": sidecar_state.last_exit_code if sidecar_state is not None else None,
         "failed_spool_items": failed_spool_count,
         "health": sidecar_health,
+        "dsp_metrics": sidecar_dsp_metrics,
+        "log_source": "stderr_only",  # Rust sidecar has no /api/v1/system/logs.
         "stream_consumer": {
             "configured": bool(
                 settings.ingest_backend == "rust"
@@ -2966,21 +3013,85 @@ async def get_system_logs(
     logger_prefix: str | None = Query(default=None),
     since_seq: int | None = Query(default=None, description="Tail: records with seq > since_seq"),
 ) -> dict:
-    """Recent log records from the in-process ring buffer."""
+    """Recent log records from the in-process ring buffer.
+
+    In split-process mode (process_role == "api") the ingest process owns the
+    fusion pipeline and therefore the only records that diagnose pipeline
+    issues. To keep operators from having to curl two ports, the API process
+    merges its own ring with a proxy fetch of the ingest process's ring and
+    tags each record with `source: "local" | "ingest"`. The two processes
+    maintain independent `seq` counters, so callers using `since_seq` should
+    track per-source cursors via `sources.local_max_seq` / `sources.ingest_max_seq`.
+    """
     from minimappr.core.logging_ring import global_handler
+
     handler = global_handler()
-    if handler is None:
-        return {"records": [], "capacity": 0}
     level_no = logging.getLevelName(level.upper()) if isinstance(level, str) else logging.INFO
     if not isinstance(level_no, int):
         level_no = logging.INFO
-    records = handler.snapshot(
-        limit=limit,
-        min_level=level_no,
-        logger_prefix=logger_prefix,
-        since_seq=since_seq,
+
+    local_records: list[dict] = []
+    local_capacity = 0
+    if handler is not None:
+        raw = handler.snapshot(
+            limit=limit,
+            min_level=level_no,
+            logger_prefix=logger_prefix,
+            since_seq=since_seq,
+        )
+        for record in raw:
+            record["source"] = "local"
+        local_records = raw
+        local_capacity = handler._buffer.maxlen or 0
+
+    state = _require_state(request)
+    settings: Settings = state.settings
+    process_role = getattr(settings, "process_role", "combined")
+    should_proxy = (
+        process_role == "api"
+        and settings.ingest_port != settings.port
     )
-    return {"records": records, "capacity": handler._buffer.maxlen or 0}
+    ingest_records: list[dict] = []
+    ingest_capacity = 0
+    proxy_error: str | None = None
+    if should_proxy:
+        proxy_params: dict[str, Any] = {
+            "limit": limit,
+            "level": level,
+        }
+        if logger_prefix is not None:
+            proxy_params["logger_prefix"] = logger_prefix
+        if since_seq is not None:
+            proxy_params["since_seq"] = since_seq
+        try:
+            import httpx
+
+            url = f"http://127.0.0.1:{settings.ingest_port}/api/v1/system/logs"
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                response = await client.get(url, params=proxy_params)
+            response.raise_for_status()
+            payload = response.json()
+            ingest_capacity = int(payload.get("capacity", 0))
+            for record in payload.get("records", []):
+                # Avoid overwriting the ingest's own "local" tag if it ever
+                # proxies further; always retag as "ingest" from this hop.
+                record["source"] = "ingest"
+                ingest_records.append(record)
+        except Exception as exc:  # pragma: no cover - network resilience path
+            proxy_error = f"{type(exc).__name__}: {exc}"
+
+    merged = local_records + ingest_records
+    return {
+        "records": merged,
+        "capacity": local_capacity,
+        "sources": {
+            "local": len(local_records),
+            "local_capacity": local_capacity,
+            "ingest": len(ingest_records),
+            "ingest_capacity": ingest_capacity,
+            "proxy_error": proxy_error,
+        },
+    }
 
 
 @app.post("/api/v1/clusters", response_model=ClusterSpec, status_code=201)

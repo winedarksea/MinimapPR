@@ -170,6 +170,16 @@ class FusionMetrics:
     last_attempted_algorithm: str = "gcc_phat"
     classification_reuse_hits: int = 0
     birdnet_chunk_dispatches_suppressed: int = 0
+    # Silent-drop visibility: each pipeline stage may return without emitting a
+    # downstream item (e.g. localization buffer miss, classifier suppression).
+    # These dicts make the previously-invisible drops countable per reason.
+    localization_drops_by_reason: dict[str, int] = field(default_factory=dict)
+    classification_drops_by_reason: dict[str, int] = field(default_factory=dict)
+    rules_drops_by_reason: dict[str, int] = field(default_factory=dict)
+    # Wall-clock timestamps used to derive "active drought" — triggers firing
+    # while detections stall. Both default to 0 so status() can detect "never".
+    last_detection_emission_ns: int = 0
+    last_trigger_enqueue_ns: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +319,8 @@ class FusionNode:
         self._classification_chunking_policy = self._build_classification_chunking_policy()
         self._backpressure_warning_last_logged_s: dict[str, float] = {}
         self._backpressure_warning_interval_seconds = 5.0
+        self._drop_warning_last_logged_s: dict[tuple[str, str], float] = {}
+        self._drop_warning_interval_seconds = 10.0
         self._last_error: str | None = None
         self._started = False
         self._stopping = False
@@ -591,7 +603,10 @@ class FusionNode:
 
     async def status(self) -> dict[str, Any]:
         nodes = await self.registry.list_nodes()
-        realtime = self._realtime_tracker.snapshot(now_ns=time.time_ns())
+        now_ns = time.time_ns()
+        realtime = self._realtime_tracker.snapshot(now_ns=now_ns)
+        buffer_state = await self.buffer.snapshot_state()
+        health = self._compute_health_snapshot(now_ns=now_ns)
         return {
             "started": self._started,
             "queue": {
@@ -615,6 +630,28 @@ class FusionNode:
             "realtime": realtime,
             "offline_replay_mode": self.fusion_config.offline_replay_mode,
             "drop_on_backpressure": self.fusion_config.drop_on_backpressure,
+            "buffer_state": buffer_state,
+            "health": health,
+        }
+
+    def _compute_health_snapshot(self, *, now_ns: int) -> dict[str, Any]:
+        """Derive watchdog signals from FusionMetrics emission timestamps.
+
+        `active_drought` flags the silent-stall state that motivated the
+        observability work: triggers continue to fire while emissions stall.
+        """
+        last_emit_ns = self._metrics.last_detection_emission_ns
+        last_trig_ns = self._metrics.last_trigger_enqueue_ns
+        seconds_since_emit = (now_ns - last_emit_ns) / 1e9 if last_emit_ns else None
+        seconds_since_trig = (now_ns - last_trig_ns) / 1e9 if last_trig_ns else None
+        active_drought = (
+            last_trig_ns > 0
+            and (last_emit_ns == 0 or last_trig_ns > last_emit_ns + 60 * 1_000_000_000)
+        )
+        return {
+            "seconds_since_last_emission": seconds_since_emit,
+            "seconds_since_last_trigger": seconds_since_trig,
+            "active_drought": active_drought,
         }
 
     def node_frame_metrics(self) -> dict[str, dict[str, int]]:
@@ -689,6 +726,13 @@ class FusionNode:
             try:
                 if self._should_suppress_chunked_classification(product):
                     self._metrics.birdnet_chunk_dispatches_suppressed += 1
+                    self._record_silent_drop(
+                        stage="classification",
+                        reason="chunk_suppressed",
+                        candidate_id=product.candidate.id,
+                        event_time_ns=product.candidate.event_time_ns,
+                        source_node_id=product.candidate.source_node_id,
+                    )
                     continue
                 detection_products = await asyncio.wait_for(
                     self._classify_and_assemble(product),
@@ -702,6 +746,21 @@ class FusionNode:
                 )
                 if classification_failed:
                     self._metrics.classification_failures += 1
+                    self._record_silent_drop(
+                        stage="classification",
+                        reason="backend_failure",
+                        candidate_id=product.candidate.id,
+                        event_time_ns=product.candidate.event_time_ns,
+                        source_node_id=product.candidate.source_node_id,
+                    )
+                elif not detection_products:
+                    self._record_silent_drop(
+                        stage="classification",
+                        reason="empty_classification",
+                        candidate_id=product.candidate.id,
+                        event_time_ns=product.candidate.event_time_ns,
+                        source_node_id=product.candidate.source_node_id,
+                    )
                 else:
                     for detection_product in detection_products:
                         if await self._enqueue_stage(self._rules_queue, detection_product):
@@ -787,6 +846,13 @@ class FusionNode:
 
         sensor_ids = sorted(sensor_positions.keys())
         if not sensor_ids:
+            self._record_silent_drop(
+                stage="localization",
+                reason="no_sensors",
+                candidate_id=candidate.id,
+                event_time_ns=candidate.event_time_ns,
+                source_node_id=candidate.source_node_id,
+            )
             return None
 
         windows = await self.buffer.get_synchronized_window(
@@ -807,6 +873,21 @@ class FusionNode:
                 sample_rate_hz=candidate.sample_rate_hz,
             )
         if not windows:
+            # Capture per-sensor coverage so the log distinguishes "buffer is
+            # behind the event" from "event is in the future" without needing a
+            # metric per sub-cause. snapshot_state() is cheap (already grabs
+            # the lock once per call).
+            buffer_snapshot = await self.buffer.snapshot_state(sensor_ids=sensor_ids)
+            self._record_silent_drop(
+                stage="localization",
+                reason="no_window",
+                candidate_id=candidate.id,
+                event_time_ns=candidate.event_time_ns,
+                source_node_id=candidate.source_node_id,
+                sample_rate_hz=candidate.sample_rate_hz,
+                sensors_requested=len(sensor_ids),
+                buffer_snapshot=buffer_snapshot,
+            )
             return None
 
         energies = {sensor_id: rms(sig) for sensor_id, sig in windows.items()}
@@ -817,6 +898,16 @@ class FusionNode:
             ranked = sorted(energies.items(), key=lambda item: item[1], reverse=True)
             selected_ids = [sensor_id for sensor_id, _ in ranked[:min_localization_sensors]]
         if len(selected_ids) < 1:
+            self._record_silent_drop(
+                stage="localization",
+                reason="low_energy",
+                candidate_id=candidate.id,
+                event_time_ns=candidate.event_time_ns,
+                source_node_id=candidate.source_node_id,
+                threshold=threshold,
+                max_sensor_energy=max(energies.values()) if energies else 0.0,
+                sensors_evaluated=len(energies),
+            )
             return None
 
         tier = self.degradation_model.tier_for_sensor_count(len(selected_ids))
@@ -1376,6 +1467,14 @@ class FusionNode:
         track = product.track
 
         if product.suppressed_by_zone:
+            self._record_silent_drop(
+                stage="rules",
+                reason="suppressed_by_zone",
+                candidate_id=product.pipeline_item_id,
+                event_time_ns=product.event_time_ns,
+                source_node_id=detection.source_node_id,
+                suppression_reasons=list(product.suppression_reasons or []),
+            )
             return
 
         # Skip broadcasting unknown/0% confidence detections — they provide no
@@ -1383,6 +1482,13 @@ class FusionNode:
         # The DB row is still written so the reporting-window policy can track
         # it and upgrade to a real species label if one arrives later.
         if detection.label == "unknown" and detection.label_confidence == 0.0:
+            self._record_silent_drop(
+                stage="rules",
+                reason="unknown_zero_confidence",
+                candidate_id=product.pipeline_item_id,
+                event_time_ns=product.event_time_ns,
+                source_node_id=detection.source_node_id,
+            )
             return
 
         payload = {
@@ -1409,6 +1515,7 @@ class FusionNode:
         }
         await self.live_callback(payload)
         self._metrics.detections_emitted += 1
+        self._metrics.last_detection_emission_ns = time.time_ns()
         self._realtime_tracker.record_completed(event_time_ns=product.event_time_ns)
 
         evaluations = await self.rules_engine.evaluate(detection=detection, track=track)
@@ -1604,6 +1711,7 @@ class FusionNode:
         if await self._enqueue_stage(self._localization_queue, candidate):
             self._ingest_processor.confirm_trigger(result.event_time_ns)
             self._metrics.triggers_enqueued += 1
+            self._metrics.last_trigger_enqueue_ns = time.time_ns()
             result.response.queued_event_id = candidate.id
             return
 
@@ -1647,6 +1755,49 @@ class FusionNode:
                     "queue_maxsize": queue.maxsize,
                 },
             )
+
+    _DROP_REASON_COUNTER_FIELDS: dict[str, str] = {
+        "localization": "localization_drops_by_reason",
+        "classification": "classification_drops_by_reason",
+        "rules": "rules_drops_by_reason",
+    }
+
+    def _record_silent_drop(
+        self,
+        *,
+        stage: str,
+        reason: str,
+        candidate_id: str | None = None,
+        event_time_ns: int | None = None,
+        **extras: Any,
+    ) -> None:
+        """Count and rate-limit-log a silent stage drop.
+
+        A "silent drop" is a stage exit that produces no downstream item but is
+        not a timeout or raised exception — historically these were invisible
+        and produced a hung-pipeline symptom with no diagnosable signal.
+        """
+        field_name = self._DROP_REASON_COUNTER_FIELDS.get(stage)
+        if field_name is None:
+            return
+        counters: dict[str, int] = getattr(self._metrics, field_name)
+        counters[reason] = counters.get(reason, 0) + 1
+
+        rate_key = (stage, reason)
+        now_s = time.monotonic()
+        last_logged_s = self._drop_warning_last_logged_s.get(rate_key, 0.0)
+        if now_s - last_logged_s < self._drop_warning_interval_seconds:
+            return
+        self._drop_warning_last_logged_s[rate_key] = now_s
+        log_extra: dict[str, Any] = {
+            "stage_name": stage,
+            "drop_reason": reason,
+            "candidate_id": candidate_id,
+            "event_time_ns": event_time_ns,
+            "drop_count_for_reason": counters[reason],
+        }
+        log_extra.update(extras)
+        logger.warning("Silent pipeline drop", extra=log_extra)
 
     async def _enqueue_stage(self, queue: asyncio.Queue, item: Any) -> bool:
         tracker_stage_name = self._queue_stage_name(queue)

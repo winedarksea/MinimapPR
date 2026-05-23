@@ -468,3 +468,103 @@ async def test_classification_windows_use_per_sensor_fallback_when_some_sensors_
     assert trailing["a"].shape[0] == 3 * sample_rate_hz
     # Sensor B has nothing — no key.
     assert "b" not in trailing
+
+
+def test_sensor_stream_buffer_increments_reanchor_count_on_ntp_correction() -> None:
+    """The two reset branches in `append` must increment the diagnostic counter
+    so a long-running buffer's anchor drift is visible via snapshot_state.
+
+    Regression for the silent-pipeline-freeze incident: timeline drift was
+    suspected but invisible — no counter, no log. With this counter operators
+    can correlate a no_window drop spike to actual anchor resets.
+    """
+    sample_rate_hz = 16_000
+    samples_per_chunk = 1024
+    buf = SensorStreamBuffer(sample_rate_hz=sample_rate_hz, max_duration_seconds=30.0)
+
+    t0 = 1_000_000_000_000_000_000
+    buf.append(start_time_ns=t0, samples=np.ones(samples_per_chunk, dtype=np.float32))
+    assert buf.reanchor_count == 0
+
+    # Large forward jump (1 hour) trips the out-of-bounds reset path.
+    one_hour_ns = 3_600 * 1_000_000_000
+    buf.append(
+        start_time_ns=t0 + one_hour_ns,
+        samples=np.full(samples_per_chunk, 2.0, dtype=np.float32),
+    )
+    assert buf.reanchor_count == 1
+
+    # Another big jump backwards from the post-reset anchor — second reset.
+    buf.append(
+        start_time_ns=t0,
+        samples=np.full(samples_per_chunk, 3.0, dtype=np.float32),
+    )
+    assert buf.reanchor_count == 2
+
+
+@pytest.mark.asyncio
+async def test_multi_sensor_buffer_counts_rate_mismatch_wipes(caplog) -> None:
+    """A change in sample_rate_hz silently rebuilds the per-sensor buffer.
+    Diagnostic counter + WARNING make this visible."""
+    import logging as _logging
+
+    buf = MultiSensorBuffer(max_duration_seconds=1.0)
+    start_time_ns = 1_739_900_000_000_000_000
+
+    await buf.append(
+        sensor_id="s",
+        sample_rate_hz=16_000,
+        start_time_ns=start_time_ns,
+        samples=np.ones(160, dtype=np.float32),
+    )
+    state_before = await buf.snapshot_state()
+    assert state_before[0]["rate_mismatch_wipes"] == 0
+
+    with caplog.at_level(_logging.WARNING, logger="minimappr.core.audio_buffer"):
+        await buf.append(
+            sensor_id="s",
+            sample_rate_hz=48_000,
+            start_time_ns=start_time_ns + 100_000_000,
+            samples=np.ones(480, dtype=np.float32),
+        )
+
+    state_after = await buf.snapshot_state()
+    assert state_after[0]["rate_mismatch_wipes"] == 1
+    assert state_after[0]["sample_rate_hz"] == 48_000
+    assert any(
+        "MultiSensorBuffer rate-mismatch wipe" in record.message
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_multi_sensor_buffer_snapshot_state_shape() -> None:
+    buf = MultiSensorBuffer(max_duration_seconds=1.0)
+    start_time_ns = 1_739_900_000_000_000_000
+
+    await buf.append(
+        sensor_id="s",
+        sample_rate_hz=16_000,
+        start_time_ns=start_time_ns,
+        samples=np.ones(160, dtype=np.float32),
+    )
+
+    snapshot = await buf.snapshot_state()
+    assert len(snapshot) == 1
+    entry = snapshot[0]
+    assert entry["sensor_id"] == "s"
+    assert entry["present"] is True
+    assert entry["sample_rate_hz"] == 16_000
+    assert entry["sample_count"] == 160
+    assert entry["start_time_ns"] == start_time_ns
+    assert entry["end_time_ns"] is not None and entry["end_time_ns"] > start_time_ns
+    assert entry["reanchor_count"] == 0
+    assert entry["rate_mismatch_wipes"] == 0
+    assert entry["pin_protected_from_ns"] is None
+
+    # Filtering by sensor_ids should also handle absent sensors.
+    snapshot_missing = await buf.snapshot_state(sensor_ids=["s", "ghost"])
+    assert len(snapshot_missing) == 2
+    by_id = {row["sensor_id"]: row for row in snapshot_missing}
+    assert by_id["s"]["present"] is True
+    assert by_id["ghost"]["present"] is False

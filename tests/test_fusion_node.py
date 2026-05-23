@@ -1624,3 +1624,178 @@ async def test_fusion_ingests_rust_classifier_render_fallback_as_omni(tmp_path: 
 
     await fusion.stop()
     await storage.close()
+
+
+def _make_minimal_fusion_node(tmp_path: Path):
+    """Build a FusionNode wired with real components but no nodes registered.
+
+    The silent-drop instrumentation can be exercised by calling its helpers
+    directly; we don't need a full ingest round-trip for these unit tests.
+    """
+    settings = Settings(
+        db_path=tmp_path / "fusion_drops.db",
+        snippet_dir=tmp_path / "snippets",
+        snippet_retention_seconds=0,
+        trigger_rms=0.001,
+        trigger_cooldown_seconds=0.0,
+        localization_window_seconds=0.04,
+        classification_window_seconds=0.0,
+        max_sensor_buffer_seconds=2.0,
+        fusion_worker_count=1,
+    )
+    settings.db_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.snippet_dir.mkdir(parents=True, exist_ok=True)
+    return settings
+
+
+@pytest.mark.asyncio
+async def test_record_silent_drop_increments_counters_and_rate_limits_log(
+    tmp_path: Path, caplog
+) -> None:
+    """`_record_silent_drop` is the single source of truth for silent-drop
+    visibility — every silent return in the pipeline routes through it. It must
+    bump the right counter and emit a rate-limited WARNING."""
+    import logging as _logging
+
+    settings = _make_minimal_fusion_node(tmp_path)
+    storage = Storage(settings.db_path)
+    await storage.initialize()
+
+    fusion = FusionNode(
+        settings=settings,
+        registry=NodeRegistry(),
+        buffer=MultiSensorBuffer(max_duration_seconds=settings.max_sensor_buffer_seconds),
+        localizer=LocalizationEngine(max_tau_s=0.03),
+        classifier=HeuristicClassifier(),
+        tracker=TrackManager(settings),
+        storage=storage,
+        live_callback=lambda payload: asyncio.sleep(0, result=None),
+        coordinate_frame=LocalCoordinateFrame(
+            origin=GeoPoint(lat=37.0, lon=-122.0, alt_m=0.0), mode="flat"
+        ),
+        zone_matcher=ZoneMatcher(storage=storage),
+    )
+
+    # Tighten the rate-limit so the test can observe a single warning per reason
+    # without sleeping.
+    fusion._drop_warning_interval_seconds = 0.0
+
+    with caplog.at_level(_logging.WARNING, logger="minimappr.core.fusion_node"):
+        fusion._record_silent_drop(
+            stage="localization", reason="no_sensors", candidate_id="evt-1"
+        )
+        fusion._record_silent_drop(
+            stage="localization", reason="no_window", candidate_id="evt-2"
+        )
+        fusion._record_silent_drop(
+            stage="classification", reason="chunk_suppressed", candidate_id="evt-3"
+        )
+        fusion._record_silent_drop(
+            stage="rules", reason="suppressed_by_zone", candidate_id="evt-4"
+        )
+
+    metrics = fusion._metrics
+    assert metrics.localization_drops_by_reason == {"no_sensors": 1, "no_window": 1}
+    assert metrics.classification_drops_by_reason == {"chunk_suppressed": 1}
+    assert metrics.rules_drops_by_reason == {"suppressed_by_zone": 1}
+
+    warning_messages = [r.message for r in caplog.records if r.levelno == _logging.WARNING]
+    assert sum(1 for m in warning_messages if m == "Silent pipeline drop") == 4
+
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_localize_candidate_no_sensors_drop_visible_in_metrics(
+    tmp_path: Path,
+) -> None:
+    """End-to-end through the helper: when no sensors are registered, the
+    silent-None return path increments the `no_sensors` counter."""
+    from minimappr.core.fusion_node import EventCandidate
+    from minimappr.models import TimeQuality
+
+    settings = _make_minimal_fusion_node(tmp_path)
+    storage = Storage(settings.db_path)
+    await storage.initialize()
+
+    fusion = FusionNode(
+        settings=settings,
+        registry=NodeRegistry(),
+        buffer=MultiSensorBuffer(max_duration_seconds=settings.max_sensor_buffer_seconds),
+        localizer=LocalizationEngine(max_tau_s=0.03),
+        classifier=HeuristicClassifier(),
+        tracker=TrackManager(settings),
+        storage=storage,
+        live_callback=lambda payload: asyncio.sleep(0, result=None),
+        coordinate_frame=LocalCoordinateFrame(
+            origin=GeoPoint(lat=37.0, lon=-122.0, alt_m=0.0), mode="flat"
+        ),
+        zone_matcher=ZoneMatcher(storage=storage),
+    )
+
+    candidate = EventCandidate(
+        id="evt-empty-registry",
+        source_node_id="ghost-node",
+        event_time_ns=1_739_900_000_000_000_000,
+        sample_rate_hz=16_000,
+        source_type="raw_sensor",
+        time_quality=TimeQuality.GPS_LOCKED,
+        source_observation_ids=[],
+    )
+
+    result = await fusion._localize_candidate(candidate)
+
+    assert result is None
+    assert fusion._metrics.localization_drops_by_reason.get("no_sensors") == 1
+
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_fusion_status_exposes_health_and_buffer_state(
+    tmp_path: Path,
+) -> None:
+    """The new `health` and `buffer_state` blocks must surface through
+    FusionNode.status() so `/api/v1/fusion/status` carries the silent-stall
+    watchdog signals."""
+    settings = _make_minimal_fusion_node(tmp_path)
+    storage = Storage(settings.db_path)
+    await storage.initialize()
+
+    fusion = FusionNode(
+        settings=settings,
+        registry=NodeRegistry(),
+        buffer=MultiSensorBuffer(max_duration_seconds=settings.max_sensor_buffer_seconds),
+        localizer=LocalizationEngine(max_tau_s=0.03),
+        classifier=HeuristicClassifier(),
+        tracker=TrackManager(settings),
+        storage=storage,
+        live_callback=lambda payload: asyncio.sleep(0, result=None),
+        coordinate_frame=LocalCoordinateFrame(
+            origin=GeoPoint(lat=37.0, lon=-122.0, alt_m=0.0), mode="flat"
+        ),
+        zone_matcher=ZoneMatcher(storage=storage),
+    )
+
+    status = await fusion.status()
+
+    assert "health" in status
+    health = status["health"]
+    # No traffic yet — both timestamps are 0 → seconds_since_* is None.
+    assert health["seconds_since_last_emission"] is None
+    assert health["seconds_since_last_trigger"] is None
+    assert health["active_drought"] is False
+
+    assert "buffer_state" in status
+    assert isinstance(status["buffer_state"], list)
+
+    # Simulate trigger-without-emission to flip active_drought via timestamps.
+    now_ns = time.time_ns()
+    fusion._metrics.last_trigger_enqueue_ns = now_ns
+    fusion._metrics.last_detection_emission_ns = now_ns - 120 * 1_000_000_000
+
+    status2 = await fusion.status()
+    assert status2["health"]["active_drought"] is True
+    assert status2["health"]["seconds_since_last_emission"] >= 120.0
+
+    await storage.close()
