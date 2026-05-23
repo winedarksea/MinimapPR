@@ -266,6 +266,7 @@ pub struct AppState {
     pub theme: RwSignal<String>,
     pub audio_drawer_open: RwSignal<bool>,
     pub audio_drawer_detection_id: RwSignal<Option<String>>,
+    pub audio_drawer_track_id: RwSignal<Option<String>>,
     /// Active recording session — persists across navigation so the backend
     /// session isn't lost if the user leaves the recording page.
     pub active_recording: RwSignal<Option<RecordingSession>>,
@@ -288,6 +289,7 @@ impl AppState {
             theme: RwSignal::new(crate::prefs::current_theme()),
             audio_drawer_open: RwSignal::new(false),
             audio_drawer_detection_id: RwSignal::new(None),
+            audio_drawer_track_id: RwSignal::new(None),
             active_recording: RwSignal::new(None),
             selected_track: RwSignal::new(None),
         }

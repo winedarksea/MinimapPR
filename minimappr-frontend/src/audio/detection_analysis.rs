@@ -74,7 +74,8 @@ fn fmt_ts_ns(ns: i64) -> String {
 /// Header bar: detection title, info/error spans, play/pause, download, expand.
 #[component]
 fn AudioAnalysisHeader(
-    detection_id: String,
+    analysis_title: String,
+    analysis_id: String,
     info: RwSignal<Option<String>>,
     error: RwSignal<Option<String>>,
     is_playing: RwSignal<bool>,
@@ -86,7 +87,7 @@ fn AudioAnalysisHeader(
     let player_id_play = player_id.clone();
     view! {
         <div class="audio-header">
-            <h2 style="margin:0">"Detection " <code>{detection_id.clone()}</code></h2>
+            <h2 style="margin:0">{analysis_title} " " <code>{analysis_id.clone()}</code></h2>
             <span class="muted">{move || info.get().unwrap_or_default()}</span>
             <span class="daily-error">{move || error.get().unwrap_or_default()}</span>
             <button
@@ -111,7 +112,7 @@ fn AudioAnalysisHeader(
             >
                 {move || if is_playing.get() { "⏸" } else { "▶" }}
             </button>
-            <a class="btn-sm" href=download_url download=format!("{}.wav", detection_id)>
+            <a class="btn-sm" href=download_url download=format!("{}.wav", analysis_id)>
                 "Download WAV"
             </a>
             {if show_expand_link {
@@ -167,10 +168,15 @@ pub fn DetectionAudioAnalysisView(
     #[prop(default = false)] show_expand_link: bool,
     #[prop(default = "audio-page".to_string())] container_class: String,
     #[prop(default = "audio".to_string())] instance_prefix: String,
+    #[prop(optional)] audio_url_override: Option<String>,
+    #[prop(optional)] download_url_override: Option<String>,
+    #[prop(default = true)] load_detection_metadata: bool,
+    #[prop(default = "Detection".to_string())] analysis_title: String,
 ) -> impl IntoView {
     let detection: RwSignal<Option<Detection>> = RwSignal::new(None);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
     let info: RwSignal<Option<String>> = RwSignal::new(None);
+    let metadata_loaded: RwSignal<bool> = RwSignal::new(false);
 
     // Monotonically-increasing generation counter used as a stale-render guard.
     // Incremented at the start of each async cycle.  Async tasks capture the
@@ -183,21 +189,28 @@ pub fn DetectionAudioAnalysisView(
     let waveform_id = format!("{instance_prefix}-waveform");
     let spectrogram_id = format!("{instance_prefix}-spectrogram");
     let player_id = format!("{instance_prefix}-player");
-    let audio_url = detection_audio_url(&detection_id);
-    let download_url = detection_audio_download_url(&detection_id);
+    let audio_url = audio_url_override.unwrap_or_else(|| detection_audio_url(&detection_id));
+    let download_url =
+        download_url_override.unwrap_or_else(|| detection_audio_download_url(&detection_id));
+    let metadata_url = format!("/api/v1/detections/{detection_id}");
     let is_playing: RwSignal<bool> = RwSignal::new(false);
     let expand_href = audio_analysis_href(&detection_id);
 
-    // Fetch metadata panel details for the selected detection.
+    // Fetch metadata panel details when this view is backed by a detection.
     Effect::new({
-        let detection_id = detection_id.clone();
+        let metadata_url = metadata_url.clone();
         move |_| {
             let gen = render_gen.get_untracked().wrapping_add(1);
             render_gen.set(gen);
             detection.set(None);
+            metadata_loaded.set(false);
             error.set(None);
             info.set(None);
-            let det_url = format!("/api/v1/detections/{detection_id}");
+            if !load_detection_metadata {
+                metadata_loaded.set(true);
+                return;
+            }
+            let det_url = metadata_url.clone();
             spawn_local(async move {
                 let result = Request::get(&det_url).send().await;
                 // Abort if a newer cycle started while we were awaiting.
@@ -209,22 +222,26 @@ pub fn DetectionAudioAnalysisView(
                         Ok(d) => {
                             if render_gen.get_untracked() == gen {
                                 detection.set(Some(d));
+                                metadata_loaded.set(true);
                             }
                         }
                         Err(e) => {
                             if render_gen.get_untracked() == gen {
                                 error.set(Some(format!("parse: {e}")));
+                                metadata_loaded.set(true);
                             }
                         }
                     },
                     Ok(r) => {
                         if render_gen.get_untracked() == gen {
                             error.set(Some(format!("HTTP {}", r.status())));
+                            metadata_loaded.set(true);
                         }
                     }
                     Err(e) => {
                         if render_gen.get_untracked() == gen {
                             error.set(Some(e.to_string()));
+                            metadata_loaded.set(true);
                         }
                     }
                 }
@@ -241,7 +258,7 @@ pub fn DetectionAudioAnalysisView(
         let waveform_id = waveform_id.clone();
         let spectrogram_id = spectrogram_id.clone();
         move |_| {
-            if detection.get().is_none() {
+            if !metadata_loaded.get() {
                 return;
             }
             let gen = render_gen.get_untracked();
@@ -292,7 +309,8 @@ pub fn DetectionAudioAnalysisView(
         <div class=container_class>
             <div class="audio-layout">
                 <AudioAnalysisHeader
-                    detection_id=detection_id.clone()
+                    analysis_title=analysis_title.clone()
+                    analysis_id=detection_id.clone()
                     info=info
                     error=error
                     is_playing=is_playing
@@ -308,7 +326,11 @@ pub fn DetectionAudioAnalysisView(
                     audio_url=audio_url
                     is_playing=is_playing
                 />
-                <DetectionMetaPanel detection=detection />
+                {if load_detection_metadata {
+                    view! { <DetectionMetaPanel detection=detection /> }.into_any()
+                } else {
+                    ().into_any()
+                }}
             </div>
         </div>
     }

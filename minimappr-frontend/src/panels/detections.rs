@@ -1,23 +1,8 @@
-use crate::audio::detection_actions::{
-    detection_audio_url, DetectionAudioActions,
-};
+use crate::audio::detection_actions::DetectionAudioActions;
 use crate::panels::contributors::CompactContributorChips;
 use crate::state::AppState;
 use crate::ui::{classify_age_from_ns, short_id};
 use leptos::prelude::*;
-use wasm_bindgen::JsCast;
-use web_sys::HtmlAudioElement;
-
-fn play_detection_url(url: &str) {
-    if let Some(audio) = web_sys::window()
-        .and_then(|w| w.document())
-        .and_then(|d| d.get_element_by_id("audio-player"))
-        .and_then(|el| el.dyn_into::<HtmlAudioElement>().ok())
-    {
-        audio.set_src(url);
-        let _ = audio.play();
-    }
-}
 
 #[component]
 pub fn DetectionsPane() -> impl IntoView {
@@ -46,7 +31,6 @@ pub fn DetectionsPane() -> impl IntoView {
 
                             let track_chip = d.track_id.as_ref().map(|tid| short_id(tid, 8));
                             let dot_class = format!("row-status-dot {age_class}");
-                            let play_url = detection_audio_url(&eid);
 
                             view! {
                                 <li>
@@ -56,31 +40,11 @@ pub fn DetectionsPane() -> impl IntoView {
                                             <span class="row-label">{label}</span>
                                             <span class="row-summary-meta">
                                                 <span class="conf-pill">{conf}</span>
-                                                {if has_audio {
-                                                    let url = play_url.clone();
-                                                    view! {
-                                                        <button
-                                                            class="play-btn"
-                                                            title="Play detection audio"
-                                                            on:click=move |ev| {
-                                                                ev.stop_propagation();
-                                                                ev.prevent_default();
-                                                                play_detection_url(&url);
-                                                            }
-                                                        >
-                                                            "▶"
-                                                        </button>
-                                                    }.into_any()
-                                                } else {
-                                                    ().into_any()
-                                                }}
+                                                <span class=age_class>{age_text.clone()}</span>
                                             </span>
                                             <span class="row-chevron" aria-hidden="true">"▾"</span>
                                         </summary>
                                         <dl class="compact-detail">
-                                            <dt>"Age"</dt>
-                                            <dd><span class=age_class>{age_text}</span></dd>
-
                                             <dt>"Node"</dt>
                                             <dd>
                                                 <CompactContributorChips contributors=contributors fallback_node_id=Some(node) />

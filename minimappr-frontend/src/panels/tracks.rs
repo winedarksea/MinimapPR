@@ -41,6 +41,9 @@ pub fn TracksPane() -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState");
     let tracks = state.tracks;
     let selected_track = state.selected_track;
+    let audio_drawer_open = state.audio_drawer_open;
+    let audio_drawer_detection_id = state.audio_drawer_detection_id;
+    let audio_drawer_track_id = state.audio_drawer_track_id;
 
     view! {
         <div class="tab-pane">
@@ -175,12 +178,24 @@ pub fn TracksPane() -> impl IntoView {
                                                     {
                                                         let play_id = track_id.clone();
                                                         let download_id = track_id.clone();
+                                                        let analyze_id = track_id.clone();
                                                         view! {
                                                             <button class="play-btn" title="Play" on:click=move |_| play_track_audio(&play_id)>
                                                                 "▶"
                                                             </button>
                                                             <button class="btn-sm" title="Download" on:click=move |_| trigger_track_download(&download_id)>
                                                                 "↓ Download"
+                                                            </button>
+                                                            <button
+                                                                class="btn-sm"
+                                                                title="Analyze latest track audio"
+                                                                on:click=move |_| {
+                                                                    audio_drawer_detection_id.set(None);
+                                                                    audio_drawer_track_id.set(Some(analyze_id.clone()));
+                                                                    audio_drawer_open.set(true);
+                                                                }
+                                                            >
+                                                                "Analyze"
                                                             </button>
                                                         }
                                                     }

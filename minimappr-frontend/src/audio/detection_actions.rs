@@ -47,6 +47,7 @@ pub fn DetectionAudioActions(event_id: String) -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState");
     let drawer_open = state.audio_drawer_open;
     let drawer_detection_id = state.audio_drawer_detection_id;
+    let drawer_track_id = state.audio_drawer_track_id;
 
     let play_eid = event_id.clone();
     let download_eid = event_id.clone();
@@ -68,6 +69,7 @@ pub fn DetectionAudioActions(event_id: String) -> impl IntoView {
         </button>
         <button class="btn-sm" on:click=move |_| {
             drawer_detection_id.set(Some(inspect_eid.clone()));
+            drawer_track_id.set(None);
             drawer_open.set(true);
         }>
             "Analyze"
