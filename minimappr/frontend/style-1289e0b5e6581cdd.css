@@ -1021,6 +1021,60 @@ body {
   white-space: nowrap;
 }
 
+.contributor-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.contributor-chip-pair {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.contributor-chip {
+  max-width: 10ch;
+}
+
+.contributor-role-pill {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--md-sys-color-primary);
+  background: color-mix(in srgb, var(--md-sys-color-primary) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--md-sys-color-primary) 24%, transparent);
+  border-radius: var(--md-sys-shape-corner-xs);
+  padding: 1px 4px;
+  text-transform: uppercase;
+}
+
+.contributor-overflow {
+  min-height: 18px;
+  padding: 0 6px;
+}
+
+.label-with-contributors {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.track-id-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.track-contributor-count {
+  font-size: var(--md-sys-typescale-label-small-size);
+  color: var(--md-sys-color-on-surface-variant);
+}
+
 /* Fused-track link chip in detections table */
 .track-link-chip {
   font-size: var(--md-sys-typescale-label-small-size);
@@ -2316,6 +2370,33 @@ a.btn-sm {
   align-items: center;
 }
 
+.pipeline-mode-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  align-items: flex-start;
+}
+
+.pipeline-mode-row .mic-input {
+  max-width: 12rem;
+}
+
+.pipeline-stage-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  margin-top: 0.5rem;
+}
+
+.pipeline-stage-json {
+  width: 100%;
+  max-width: 100%;
+  min-height: 10rem;
+  font-family: var(--md-sys-typescale-mono);
+  font-variant-numeric: tabular-nums;
+  resize: vertical;
+}
+
 .pipeline-save-row {
   display: flex;
   align-items: center;
@@ -2351,3 +2432,114 @@ a.btn-sm {
 
 .btn-primary:hover { opacity: 0.88; }
 .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ═══ Compact sidebar rows (Tracks / Detections / Alerts) ═════════════ */
+.compact-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.compact-list > li { margin: 0; }
+.compact-row {
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+}
+.compact-row:last-child { border-bottom: none; }
+.compact-row > summary {
+  display: flex;
+  align-items: center;
+  gap: var(--mmp-density-gap-sm);
+  padding: var(--mmp-density-pad-cell) var(--mmp-density-pad-panel);
+  min-height: var(--mmp-density-row-h);
+  cursor: pointer;
+  list-style: none;
+  white-space: nowrap;
+  overflow: hidden;
+  font-size: var(--md-sys-typescale-label-large-size);
+  user-select: none;
+}
+.compact-row > summary::-webkit-details-marker { display: none; }
+.compact-row > summary::marker { content: ""; }
+.compact-row > summary:hover {
+  background: color-mix(in srgb, var(--md-sys-color-on-surface) 5%, transparent);
+}
+.compact-row.track-row-selected > summary {
+  background: var(--md-sys-color-surface-container-high, #30363d);
+}
+.compact-row.track-row-stale > summary { opacity: 0.6; }
+.compact-row.track-row-stale.track-row-selected > summary { opacity: 0.85; }
+
+.row-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 8px;
+  background: var(--md-sys-color-on-surface-variant);
+}
+.row-status-dot.age-fresh   { background: var(--mmp-sys-color-ok); }
+.row-status-dot.age-stale   { background: var(--mmp-sys-color-warn); }
+.row-status-dot.age-lost    { background: var(--mmp-sys-color-danger); }
+.row-status-dot.age-unknown { background: var(--md-sys-color-on-surface-variant); }
+
+.row-label {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.row-summary-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--mmp-density-gap-xs);
+  flex: 0 0 auto;
+}
+.row-chevron {
+  flex: 0 0 auto;
+  margin-left: var(--mmp-density-gap-xs);
+  color: var(--md-sys-color-on-surface-variant);
+  transition: transform 120ms ease;
+  font-size: 14px;
+  line-height: 1;
+}
+.compact-row[open] > summary .row-chevron,
+.alert-details[open] > summary .row-chevron { transform: rotate(180deg); }
+
+/* Alert card details: wraps message/actions inside the existing .alert-card layout. */
+.alert-details > summary.alert-card-head {
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.alert-details > summary.alert-card-head::-webkit-details-marker { display: none; }
+.alert-details > summary.alert-card-head::marker { content: ""; }
+
+.compact-detail {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  column-gap: var(--mmp-density-gap-md);
+  row-gap: var(--mmp-density-gap-xs);
+  padding: var(--mmp-density-gap-xs) var(--mmp-density-pad-panel)
+           var(--mmp-density-pad-cell) calc(var(--mmp-density-pad-panel) + 18px);
+  font-size: var(--md-sys-typescale-label-medium-size);
+  background: color-mix(in srgb, var(--md-sys-color-on-surface) 3%, transparent);
+}
+.compact-detail dt {
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: var(--md-sys-typescale-label-small-size);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  align-self: center;
+}
+.compact-detail dd {
+  margin: 0;
+  align-self: center;
+  min-width: 0;
+  word-break: break-word;
+}
+.compact-detail .compact-detail-actions {
+  display: flex;
+  gap: var(--mmp-density-gap-xs);
+  flex-wrap: wrap;
+  align-items: center;
+}
+.compact-detail .tqi-bar { height: 6px; max-width: 120px; }

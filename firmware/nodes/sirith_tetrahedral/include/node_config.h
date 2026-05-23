@@ -144,6 +144,13 @@ static constexpr uint32_t kPublishFailureBackoffMs = 0;
 static constexpr const char* kIngestPath = "/api/v1/ingest/binary";
 static constexpr size_t kStoreForwardBatchFrames = 4;
 
+// Tiny debug/control listener for reading and chaning the current publish target
+// Changes are RAM-only and reset on reboot.
+static constexpr bool kEnablePublishTargetControlServer = true;
+static constexpr bool kAllowRuntimePublishPortChange = true;
+static constexpr uint16_t kPublishTargetControlPort = 8082;
+static constexpr const char* kPublishTargetControlPath = "/api/v1/publish-target";
+
 // Max samples per channel in a single published packet. Keep diagnostic HTTP
 // POSTs near one TCP send window so a timeout does not leave body bytes that
 // uvicorn parses as a malformed follow-up request.
