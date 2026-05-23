@@ -239,11 +239,13 @@ pub fn extract_mmb1_node_json(raw_bytes: &[u8]) -> Option<serde_json::Value> {
             break;
         }
     }
-    // Read remaining node header fields so GPS metadata reaches Python ingest.
-    let _hardware = reader.string().unwrap_or_default();
-    let _firmware = reader.string().unwrap_or_default();
+    // Keep this metadata shape aligned with Python's binary_ingest._read_node;
+    // stream consumers upsert it directly into the API node status view.
+    let hardware = reader.string().unwrap_or_default();
+    let firmware = reader.string().unwrap_or_default();
     let gps_signal = reader.string().unwrap_or_default();
     let position_source = reader.string().unwrap_or_default();
+    let boot_count = reader.u32().unwrap_or_default();
 
     // node_type_code: 0=point, 1=sirith_tetra, 2=array, 3=gateway
     let node_type_str = match node_type_code {
@@ -264,11 +266,30 @@ pub fn extract_mmb1_node_json(raw_bytes: &[u8]) -> Option<serde_json::Value> {
             serde_json::Value::String(position_source),
         );
     }
-    let metadata = if gps_meta.is_empty() {
-        serde_json::json!({})
-    } else {
-        serde_json::json!({ "gps": gps_meta })
-    };
+    let mut metadata_map = serde_json::Map::new();
+    metadata_map.insert(
+        "hardware".to_string(),
+        serde_json::Value::String(if hardware.is_empty() {
+            "unknown".to_string()
+        } else {
+            hardware
+        }),
+    );
+    metadata_map.insert(
+        "firmware".to_string(),
+        serde_json::Value::String(if firmware.is_empty() {
+            "dev".to_string()
+        } else {
+            firmware
+        }),
+    );
+    metadata_map.insert(
+        "boot_count".to_string(),
+        serde_json::Value::from(boot_count),
+    );
+    if !gps_meta.is_empty() {
+        metadata_map.insert("gps".to_string(), serde_json::Value::Object(gps_meta));
+    }
 
     let mut node_json = serde_json::json!({
         "id": node_id,
@@ -276,7 +297,7 @@ pub fn extract_mmb1_node_json(raw_bytes: &[u8]) -> Option<serde_json::Value> {
         "position_m": [position_x, position_y, position_z],
         "sensor_offsets_m": sensor_offsets,
         "capabilities": capabilities,
-        "metadata": metadata,
+        "metadata": serde_json::Value::Object(metadata_map),
     });
     if let Some((lat, lon, alt)) = position_geo {
         node_json["position_geo"] = serde_json::json!({
@@ -640,7 +661,50 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_capture_envelope;
+    use super::{extract_mmb1_node_json, parse_capture_envelope};
+
+    fn push_string(payload: &mut Vec<u8>, value: &str) {
+        payload.push(u8::try_from(value.len()).expect("test string fits in MMB1 length byte"));
+        payload.extend_from_slice(value.as_bytes());
+    }
+
+    fn push_f32(payload: &mut Vec<u8>, value: f32) {
+        payload.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn push_binary_node_header(payload: &mut Vec<u8>) {
+        push_string(payload, "sirith-tetra-1a15");
+        payload.push(1); // sirith_tetra
+        push_f32(payload, 1.0);
+        push_f32(payload, 2.0);
+        push_f32(payload, 3.0);
+        payload.push(1); // has_geo_position
+        push_f32(payload, 44.987);
+        push_f32(payload, -93.258);
+        push_f32(payload, 281.5);
+        payload.push(1); // sensor_count
+        push_f32(payload, 0.0);
+        push_f32(payload, 0.0);
+        push_f32(payload, 0.0);
+        payload.push(2); // capability_count
+        push_string(payload, "audio");
+        push_string(payload, "gps_optional");
+        push_string(payload, "sirith-test-hardware");
+        push_string(payload, "sirith-test-firmware");
+        push_string(payload, "fix_3d");
+        push_string(payload, "gps_nmea_uart");
+        payload.extend_from_slice(&7_u32.to_le_bytes());
+    }
+
+    fn binary_mmb1_header_only_payload() -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"MMB1");
+        payload.push(1); // version
+        payload.push(1); // sort_by_toa
+        payload.extend_from_slice(&1_u16.to_le_bytes());
+        push_binary_node_header(&mut payload);
+        payload
+    }
 
     #[test]
     fn store_forward_accepts_missing_sensor_offsets_for_point_nodes() {
@@ -706,5 +770,21 @@ mod tests {
 
         assert_eq!(parsed.node_id, "point-node-2");
         assert_eq!(parsed.sample_count, None);
+    }
+
+    #[test]
+    fn binary_node_extraction_preserves_python_metadata_shape_for_gps_status() {
+        let node = extract_mmb1_node_json(&binary_mmb1_header_only_payload())
+            .expect("MMB1 node header should extract");
+
+        assert_eq!(node["id"], "sirith-tetra-1a15");
+        assert_eq!(node["node_type"], "sirith_tetra");
+        assert_eq!(node["metadata"]["hardware"], "sirith-test-hardware");
+        assert_eq!(node["metadata"]["firmware"], "sirith-test-firmware");
+        assert_eq!(node["metadata"]["boot_count"], 7);
+        assert_eq!(node["metadata"]["gps"]["signal"], "fix_3d");
+        assert_eq!(node["metadata"]["gps"]["position_source"], "gps_nmea_uart");
+        assert_eq!(node["capabilities"][1], "gps_optional");
+        assert_eq!(node["position_geo"]["lat"].as_f64().unwrap() as f32, 44.987);
     }
 }
