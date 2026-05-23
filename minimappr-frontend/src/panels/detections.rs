@@ -1,4 +1,5 @@
 use crate::audio::detection_actions::DetectionAudioActions;
+use crate::map::bindings::pan_to;
 use crate::panels::contributors::CompactContributorChips;
 use crate::state::AppState;
 use crate::ui::{classify_age_from_ns, short_id};
@@ -31,6 +32,11 @@ pub fn DetectionsPane() -> impl IntoView {
 
                             let track_chip = d.track_id.as_ref().map(|tid| short_id(tid, 8));
                             let dot_class = format!("row-status-dot {age_class}");
+                            let geo_display = d.position_geo.as_ref().map(|g| match g.alt_m {
+                                Some(alt) => format!("{:.5}°N, {:.5}°E · {:.1} m", g.lat, g.lon, alt),
+                                None => format!("{:.5}°N, {:.5}°E", g.lat, g.lon),
+                            });
+                            let geo_for_pan = d.position_geo.clone();
 
                             view! {
                                 <li>
@@ -58,6 +64,29 @@ pub fn DetectionsPane() -> impl IntoView {
                                                     }.into_any(),
                                                     None => view! { <span class="age-unknown">"—"</span> }.into_any(),
                                                 }}
+                                            </dd>
+
+                                            <dt>"Geo"</dt>
+                                            <dd>
+                                                <div class="compact-detail-actions">
+                                                    <span>{geo_display.clone().unwrap_or_else(|| "—".to_string())}</span>
+                                                    {match geo_for_pan {
+                                                        Some(geo) => {
+                                                            let lat = geo.lat;
+                                                            let lon = geo.lon;
+                                                            view! {
+                                                                <button
+                                                                    class="btn-sm"
+                                                                    title="Center map on detection"
+                                                                    on:click=move |_| pan_to(lat, lon)
+                                                                >
+                                                                    "Center on map"
+                                                                </button>
+                                                            }.into_any()
+                                                        }
+                                                        None => ().into_any(),
+                                                    }}
+                                                </div>
                                             </dd>
 
                                             <dt>"Audio"</dt>
