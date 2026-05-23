@@ -34,15 +34,21 @@ async def test_proactive_checkpoint_drains_oversized_empty_wal(tmp_path: Path) -
     wal_path = Path(f"{db_path}-wal")
 
     # Pre-extend the WAL with zeros to simulate the leftover pre-allocated space.
+    stale_size = 4 * 1024 * 1024
     with open(wal_path, "ab") as f:
-        f.write(b"\x00" * (4 * 1024 * 1024))
-    assert wal_path.stat().st_size > 0
+        f.write(b"\x00" * stale_size)
+    assert wal_path.stat().st_size >= stale_size
 
     storage = Storage(db_path)
     await storage.initialize()
     try:
-        assert wal_path.stat().st_size == 0
-        assert storage.stale_recoveries_count == 0  # checkpoint succeeded, no recovery needed
+        # Startup re-establishes a small WAL for its own work; the test is that
+        # the proactive checkpoint shrank the stale-extended WAL well below its
+        # injected size (i.e. the TRUNCATE happened).
+        assert wal_path.stat().st_size < stale_size // 10
+        # The proactive checkpoint should handle this without the graduated
+        # recovery path being triggered.
+        assert storage.stale_recoveries_count == 0
     finally:
         await storage._require_db().close()  # type: ignore[union-attr]
 
@@ -138,7 +144,7 @@ async def test_recovery_deletes_provably_empty_wal_after_shm_removal_fails(
     ok = await storage._recover_stale_sqlite_state(trigger)
     assert ok is True
     assert storage.stale_recoveries_count == 1
-    assert wal_path.stat().st_size == 0 or not wal_path.exists()
+    assert (not wal_path.exists()) or wal_path.stat().st_size == 0
 
 
 @pytest.mark.asyncio

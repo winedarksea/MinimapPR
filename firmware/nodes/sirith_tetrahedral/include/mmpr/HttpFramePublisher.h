@@ -49,8 +49,11 @@ class HttpFramePublisher {
   bool pollPublish(PublishResult& result);
   bool publishInProgress() const;
   void cancelPublish();
+    bool setEndpointPort(uint16_t port);
 
   const std::string& endpointUrl() const { return endpointUrl_; }
+    uint16_t endpointPort() const { return port_; }
+    bool endpointValid() const { return endpointValid_; }
   void setBackgroundPollCallback(BackgroundPollCallback callback, void* context);
 
  private:

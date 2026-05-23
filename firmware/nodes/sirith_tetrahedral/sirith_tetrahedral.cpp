@@ -18,6 +18,7 @@
 #include "mmpr/MagAutoOrientation.h"
 #include "mmpr/NmeaGpsSource.h"
 #include "mmpr/NodeClock.h"
+#include "mmpr/NodeControlServer.h"
 #include "mmpr/NodeRunner.h"
 #include "mmpr/PicoI2SMonoSource.h"
 #include "mmpr/Sht4xEnvironmentalSource.h"
@@ -283,6 +284,11 @@ mmpr::SilenceAudioSource gSilenceAudioSource(
     nodecfg::kActiveAudioFrameSamples,
     nodecfg::kActiveAudioChannels);
 mmpr::HttpFramePublisher gPublisher(nodecfg::kServerBaseUrl, nodecfg::kIngestPath, nodecfg::kHttpTimeoutMs);
+mmpr::NodeControlServer gControlServer(
+  gPublisher,
+  nodecfg::kPublishTargetControlPort,
+  nodecfg::kPublishTargetControlPath,
+  nodecfg::kAllowRuntimePublishPortChange);
 mmpr::NodeClock gClock;
 
 mmpr::IAudioSource& gConfiguredAudioSource = nodecfg::kUseTdmAudio
@@ -434,6 +440,15 @@ int main() {
     std::printf("[sirith-pico] fatal: Wi-Fi init failed\n");
     while (true) {
       sleep_ms(1000);
+    }
+  }
+
+  if (nodecfg::kEnablePublishTargetControlServer) {
+    if (!gControlServer.begin()) {
+      std::printf(
+          "[control] failed to start port=%u path=%s\n",
+          static_cast<unsigned>(nodecfg::kPublishTargetControlPort),
+          nodecfg::kPublishTargetControlPath);
     }
   }
 

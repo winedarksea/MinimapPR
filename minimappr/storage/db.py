@@ -509,8 +509,13 @@ class Storage:
         # Then drain any stale WAL frames left by an unclean prior shutdown — without this,
         # write-side PRAGMAs below can hit "database is locked" because SQLite still treats
         # the abandoned -wal/-shm pair as belonging to a live writer.
-        await db.execute("PRAGMA journal_mode=WAL;")
-        await db.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+        #
+        # Each PRAGMA that returns rows must have its cursor drained and closed before the
+        # next statement, or SQLite reports SQLITE_LOCKED on the connection.
+        async with db.execute("PRAGMA journal_mode=WAL;") as cursor:
+            await cursor.fetchall()
+        async with db.execute("PRAGMA wal_checkpoint(TRUNCATE);") as cursor:
+            await cursor.fetchall()
         await db.execute("PRAGMA foreign_keys=ON;")
         await db.execute("PRAGMA auto_vacuum=INCREMENTAL;")
         await db.execute("PRAGMA synchronous=NORMAL;")

@@ -923,6 +923,49 @@ void HttpFramePublisher::cancelPublish() {
   transportState_->asyncPublishActive = false;
 }
 
+bool HttpFramePublisher::setEndpointPort(uint16_t port) {
+  if (transportState_ == nullptr || transportState_->asyncPublishActive) {
+    return false;
+  }
+  if (port == 0 || host_.empty()) {
+    return false;
+  }
+
+  std::string nextEndpoint = "http://";
+  const bool needsIpv6Brackets =
+      host_.find(':') != std::string::npos &&
+      (host_.empty() || host_.front() != '[' || host_.back() != ']');
+  if (needsIpv6Brackets) {
+    nextEndpoint.push_back('[');
+  }
+  nextEndpoint += host_;
+  if (needsIpv6Brackets) {
+    nextEndpoint.push_back(']');
+  }
+  nextEndpoint += ':';
+  nextEndpoint += std::to_string(static_cast<unsigned>(port));
+  nextEndpoint += path_.empty() ? std::string("/") : path_;
+
+  const std::string previousEndpoint = endpointUrl_;
+  const std::string previousHost = host_;
+  const std::string previousPath = path_;
+  const uint16_t previousPort = port_;
+  const bool previousValid = endpointValid_;
+
+  endpointUrl_ = nextEndpoint;
+  endpointValid_ = parseEndpoint();
+  if (endpointValid_) {
+    return true;
+  }
+
+  endpointUrl_ = previousEndpoint;
+  host_ = previousHost;
+  path_ = previousPath;
+  port_ = previousPort;
+  endpointValid_ = previousValid;
+  return false;
+}
+
 bool HttpFramePublisher::beginPublish(
     const NodeDescriptor& node,
     const AudioFrame& frame,
