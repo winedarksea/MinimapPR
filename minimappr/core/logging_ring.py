@@ -9,6 +9,30 @@ import time
 from typing import Any
 
 
+# Standard LogRecord attribute names — anything *not* in this set is treated as
+# a caller-supplied `extra=` field and surfaced in the snapshot payload. Built
+# once from a synthetic record so the list stays in sync with the stdlib.
+_STANDARD_LOG_RECORD_ATTRS: frozenset[str] = frozenset(
+    logging.LogRecord(name="", level=0, pathname="", lineno=0, msg="", args=None, exc_info=None).__dict__
+) | {"message", "asctime"}
+
+
+def _coerce_extra_value(value: Any) -> Any:
+    """Coerce an `extra=` field value to a JSON-safe representation.
+
+    The ring buffer is consumed via /api/v1/system/logs (JSON), so anything
+    that isn't natively serializable falls back to `repr()` rather than
+    crashing the handler — log handlers must never raise.
+    """
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_coerce_extra_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(k): _coerce_extra_value(v) for k, v in value.items()}
+    return repr(value)
+
+
 class LogCaptureHandler(logging.Handler):
     """Keep the last N log records so the UI can show a live tail without tailing files."""
 
@@ -30,6 +54,13 @@ class LogCaptureHandler(logging.Handler):
             "logger": record.name,
             "message": msg,
         }
+        extras = {
+            key: _coerce_extra_value(value)
+            for key, value in record.__dict__.items()
+            if key not in _STANDARD_LOG_RECORD_ATTRS and not key.startswith("_")
+        }
+        if extras:
+            entry["extra"] = extras
         if record.exc_info:
             entry["exc"] = self.format(record)
         with self._lock:

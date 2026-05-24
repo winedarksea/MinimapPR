@@ -106,6 +106,12 @@ class LocalizationConfig:
     cluster_aware_localization: bool = False
     wavelength_gating_enabled: bool = True
     wavelength_penalty_floor: float = 0.25
+    # Bound on how long _localize_candidate will wait for the per-node sensor
+    # buffers to advance past event_time_ns + window/2 before dropping the
+    # candidate as `buffer_lag_timeout`. Was effectively 40 ms under the
+    # legacy fixed-grace-sleep retry; 300 ms restores headroom for typical
+    # per-sensor ingest jitter (see plan: valiant-launching-whale).
+    localization_buffer_wait_max_seconds: float = 0.30
 
     @property
     def localization_max_tau_s(self) -> float:
@@ -406,6 +412,7 @@ class Settings:
     pre_classification_highpass_hz: float = 0.0
     pre_classification_lowpass_hz: float = 0.0
     gcc_phat_interp_factor: int = 4
+    localization_buffer_wait_max_seconds: float = 0.30
 
     default_temperature_c: float = 20.0
     default_humidity: float = 0.5
@@ -649,6 +656,8 @@ class Settings:
             raise ValueError("MINIMAPPR_WAVELENGTH_PENALTY_FLOOR must be in [0,1]")
         if self.gcc_phat_interp_factor < 1:
             raise ValueError("MINIMAPPR_GCC_PHAT_INTERP_FACTOR must be >= 1")
+        if self.localization_buffer_wait_max_seconds < 0.0:
+            raise ValueError("MINIMAPPR_LOCALIZATION_BUFFER_WAIT_MAX_SECONDS must be >= 0")
         self.beamformer_type = self.beamformer_type.strip().lower()
         if self.beamformer_type == "das":
             # Preserve the more descriptive config name internally while
@@ -973,6 +982,9 @@ class Settings:
             pre_classification_highpass_hz=_env_float("MINIMAPPR_PRE_CLASSIFICATION_HIGHPASS_HZ", 0.0),
             pre_classification_lowpass_hz=_env_float("MINIMAPPR_PRE_CLASSIFICATION_LOWPASS_HZ", 0.0),
             gcc_phat_interp_factor=_env_int("MINIMAPPR_GCC_PHAT_INTERP_FACTOR", 4),
+            localization_buffer_wait_max_seconds=_env_float(
+                "MINIMAPPR_LOCALIZATION_BUFFER_WAIT_MAX_SECONDS", 0.30
+            ),
             default_temperature_c=_env_float("MINIMAPPR_DEFAULT_TEMPERATURE_C", 20.0),
             default_humidity=_env_float("MINIMAPPR_DEFAULT_HUMIDITY", 0.5),
             environment_reading_max_age_seconds=_env_float("MINIMAPPR_ENVIRONMENT_READING_MAX_AGE_SECONDS", 300.0),
@@ -1136,6 +1148,7 @@ class Settings:
             pre_classification_highpass_hz=self.pre_classification_highpass_hz,
             pre_classification_lowpass_hz=self.pre_classification_lowpass_hz,
             gcc_phat_interp_factor=self.gcc_phat_interp_factor,
+            localization_buffer_wait_max_seconds=self.localization_buffer_wait_max_seconds,
         )
 
     def tracking_config(self) -> TrackingConfig:

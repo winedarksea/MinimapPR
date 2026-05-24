@@ -825,6 +825,58 @@ class FusionNode:
     # Localization stage — sensor selection, environment, localizer call
     # ------------------------------------------------------------------
 
+    async def _await_window_coverage(
+        self,
+        *,
+        sensor_ids: list[str],
+        center_time_ns: int,
+        window_seconds: float,
+        timeout_s: float,
+        poll_interval_s: float = 0.005,
+    ) -> tuple[bool, list[dict[str, Any]]]:
+        """Yield until at least min_sensors_for_2d sensors have audio covering
+        [center − window/2, center + window/2], or the deadline expires.
+
+        Returns (ready, last_snapshot). Replaces the legacy fixed 40 ms
+        grace-sleep retry which dropped 96 % of triggers under typical
+        per-sensor ingest jitter (see plan: valiant-launching-whale).
+        """
+        half_window_ns = int(window_seconds / 2 * 1_000_000_000)
+        target_end_ns = center_time_ns + half_window_ns
+        target_start_ns = center_time_ns - half_window_ns
+        # Wait until we have coverage for the smaller of (sensors registered
+        # on this node) and min_sensors_for_2d. Capping at the registered
+        # count preserves the single-sensor / classification-only path that
+        # the legacy code allowed through with whatever window was present.
+        min_needed = max(
+            1,
+            min(len(sensor_ids), int(self.localization_config.min_sensors_for_2d)),
+        )
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        snapshot: list[dict[str, Any]] = []
+        while True:
+            snapshot = await self.buffer.snapshot_state(sensor_ids=sensor_ids)
+            covered = 0
+            min_start_ns: int | None = None
+            for state in snapshot:
+                start_ns = state.get("start_time_ns")
+                end_ns = state.get("end_time_ns")
+                if state.get("present") and start_ns is not None and end_ns is not None:
+                    if start_ns <= target_start_ns and end_ns >= target_end_ns:
+                        covered += 1
+                    if min_start_ns is None or start_ns < min_start_ns:
+                        min_start_ns = start_ns
+            if covered >= min_needed:
+                return True, snapshot
+            # If the event's trailing edge sits before the oldest buffered
+            # sample, waiting can't recover it — exit immediately so the
+            # caller can drop with `event_too_old` instead of stalling.
+            if min_start_ns is not None and target_end_ns < min_start_ns:
+                return False, snapshot
+            if time.monotonic() >= deadline:
+                return False, snapshot
+            await asyncio.sleep(poll_interval_s)
+
     async def _localize_candidate(self, candidate: EventCandidate) -> LocalizedCandidate | None:
         sensor_positions = await self.registry.sensor_positions()
         sensor_weights: dict[str, float] | None = None
@@ -855,28 +907,60 @@ class FusionNode:
             )
             return None
 
+        window_seconds = self.localization_config.localization_window_seconds
+        timeout_s = self.localization_config.localization_buffer_wait_max_seconds
+        min_localization_sensors = max(2, int(self.localization_config.min_sensors_for_2d))
+        # Wait for the per-node sensor buffers to actually cover the requested
+        # window before asking for it. The legacy fixed 40 ms grace-sleep
+        # retry was insufficient under steady-state ingest jitter and dropped
+        # ~96 % of triggers in production with no diagnosable signal.
+        ready, coverage_snapshot = await self._await_window_coverage(
+            sensor_ids=sensor_ids,
+            center_time_ns=candidate.event_time_ns,
+            window_seconds=window_seconds,
+            timeout_s=timeout_s,
+        )
+        if not ready:
+            half_window_ns = int(window_seconds / 2 * 1_000_000_000)
+            target_start_ns = candidate.event_time_ns - half_window_ns
+            present_starts = [
+                state["start_time_ns"]
+                for state in coverage_snapshot
+                if state.get("present") and state.get("start_time_ns") is not None
+            ]
+            min_start_ns = min(present_starts) if present_starts else None
+            # Two distinct failure modes share the same drop path:
+            #   * `event_too_old` — buffer pruned past target; waiting can't help.
+            #   * `buffer_lag_timeout` — sensors never caught up within timeout_s.
+            reason = (
+                "event_too_old"
+                if (min_start_ns is not None and target_start_ns < min_start_ns)
+                else "buffer_lag_timeout"
+            )
+            self._record_silent_drop(
+                stage="localization",
+                reason=reason,
+                candidate_id=candidate.id,
+                event_time_ns=candidate.event_time_ns,
+                source_node_id=candidate.source_node_id,
+                sample_rate_hz=candidate.sample_rate_hz,
+                sensors_requested=len(sensor_ids),
+                timeout_s=timeout_s,
+                buffer_snapshot=coverage_snapshot,
+            )
+            return None
+
         windows = await self.buffer.get_synchronized_window(
             sensor_ids=sensor_ids,
             center_time_ns=candidate.event_time_ns,
-            window_seconds=self.localization_config.localization_window_seconds,
+            window_seconds=window_seconds,
             sample_rate_hz=candidate.sample_rate_hz,
         )
-        min_localization_sensors = max(2, int(self.localization_config.min_sensors_for_2d))
-        if len(windows) < min_localization_sensors and len(sensor_ids) >= min_localization_sensors:
-            # Ingest arrives per-node; a short grace period captures sibling node frames for the same event time.
-            grace_s = min(0.05, max(0.005, self.localization_config.localization_window_seconds * 0.5))
-            await asyncio.sleep(grace_s)
-            windows = await self.buffer.get_synchronized_window(
-                sensor_ids=sensor_ids,
-                center_time_ns=candidate.event_time_ns,
-                window_seconds=self.localization_config.localization_window_seconds,
-                sample_rate_hz=candidate.sample_rate_hz,
-            )
         if not windows:
-            # Capture per-sensor coverage so the log distinguishes "buffer is
-            # behind the event" from "event is in the future" without needing a
-            # metric per sub-cause. snapshot_state() is cheap (already grabs
-            # the lock once per call).
+            # Rare residual race: coverage was present at the snapshot but the
+            # synchronized fetch returned empty (e.g. concurrent rate-mismatch
+            # wipe between snapshot and fetch). Keep the original drop reason
+            # so an unexpected regression to "no_window" remains visible.
             buffer_snapshot = await self.buffer.snapshot_state(sensor_ids=sensor_ids)
             self._record_silent_drop(
                 stage="localization",

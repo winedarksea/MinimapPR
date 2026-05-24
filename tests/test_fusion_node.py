@@ -1799,3 +1799,362 @@ async def test_fusion_status_exposes_health_and_buffer_state(
     assert status2["health"]["seconds_since_last_emission"] >= 120.0
 
     await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_await_window_coverage_returns_true_when_all_sensors_covered(
+    tmp_path: Path,
+) -> None:
+    """Helper returns immediately when every sensor already has coverage
+    straddling the requested centered window — no sleeping, no polling."""
+    settings = _make_minimal_fusion_node(tmp_path)
+    storage = Storage(settings.db_path)
+    await storage.initialize()
+    buffer = MultiSensorBuffer(max_duration_seconds=settings.max_sensor_buffer_seconds)
+
+    fusion = FusionNode(
+        settings=settings,
+        registry=NodeRegistry(),
+        buffer=buffer,
+        localizer=LocalizationEngine(max_tau_s=0.03),
+        classifier=HeuristicClassifier(),
+        tracker=TrackManager(settings),
+        storage=storage,
+        live_callback=lambda payload: asyncio.sleep(0, result=None),
+        coordinate_frame=LocalCoordinateFrame(
+            origin=GeoPoint(lat=37.0, lon=-122.0, alt_m=0.0), mode="flat"
+        ),
+        zone_matcher=ZoneMatcher(storage=storage),
+    )
+
+    sample_rate = 16_000
+    samples_per_chunk = 1024
+    base_ns = 1_739_900_000_000_000_000
+    chunk_duration_ns = int(samples_per_chunk / sample_rate * 1_000_000_000)
+    # Append two consecutive chunks per sensor so the buffer covers a 100+ ms
+    # span centered around event_time below.
+    for sensor_id in ("a", "b", "c"):
+        for k in range(3):
+            await buffer.append(
+                sensor_id=sensor_id,
+                sample_rate_hz=sample_rate,
+                start_time_ns=base_ns + k * chunk_duration_ns,
+                samples=np.ones(samples_per_chunk, dtype=np.float32),
+            )
+
+    center_time_ns = base_ns + chunk_duration_ns  # second chunk center
+    started = time.monotonic()
+    ready, snapshot = await fusion._await_window_coverage(
+        sensor_ids=["a", "b", "c"],
+        center_time_ns=center_time_ns,
+        window_seconds=0.04,
+        timeout_s=0.5,
+    )
+    elapsed = time.monotonic() - started
+
+    assert ready is True
+    assert len(snapshot) == 3
+    assert all(s["present"] for s in snapshot)
+    # Helper must short-circuit on the first poll when coverage is already
+    # there — no sleep, no second snapshot.
+    assert elapsed < 0.05
+
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_await_window_coverage_waits_until_late_sensor_catches_up(
+    tmp_path: Path,
+) -> None:
+    """A trailing sensor arriving mid-wait should unblock the helper before
+    the deadline — this is the canonical race the fix targets."""
+    settings = _make_minimal_fusion_node(tmp_path)
+    storage = Storage(settings.db_path)
+    await storage.initialize()
+    buffer = MultiSensorBuffer(max_duration_seconds=settings.max_sensor_buffer_seconds)
+
+    fusion = FusionNode(
+        settings=settings,
+        registry=NodeRegistry(),
+        buffer=buffer,
+        localizer=LocalizationEngine(max_tau_s=0.03),
+        classifier=HeuristicClassifier(),
+        tracker=TrackManager(settings),
+        storage=storage,
+        live_callback=lambda payload: asyncio.sleep(0, result=None),
+        coordinate_frame=LocalCoordinateFrame(
+            origin=GeoPoint(lat=37.0, lon=-122.0, alt_m=0.0), mode="flat"
+        ),
+        zone_matcher=ZoneMatcher(storage=storage),
+    )
+
+    sample_rate = 16_000
+    samples_per_chunk = 1024
+    base_ns = 1_739_900_000_000_000_000
+    chunk_duration_ns = int(samples_per_chunk / sample_rate * 1_000_000_000)
+
+    # Sensors a, b cover [base, base + 3*chunk]; c will arrive late.
+    for sensor_id in ("a", "b"):
+        for k in range(3):
+            await buffer.append(
+                sensor_id=sensor_id,
+                sample_rate_hz=sample_rate,
+                start_time_ns=base_ns + k * chunk_duration_ns,
+                samples=np.ones(samples_per_chunk, dtype=np.float32),
+            )
+
+    center_time_ns = base_ns + chunk_duration_ns
+
+    async def _late_append() -> None:
+        await asyncio.sleep(0.04)
+        for k in range(3):
+            await buffer.append(
+                sensor_id="c",
+                sample_rate_hz=sample_rate,
+                start_time_ns=base_ns + k * chunk_duration_ns,
+                samples=np.ones(samples_per_chunk, dtype=np.float32),
+            )
+
+    started = time.monotonic()
+    late_task = asyncio.create_task(_late_append())
+    ready, snapshot = await fusion._await_window_coverage(
+        sensor_ids=["a", "b", "c"],
+        center_time_ns=center_time_ns,
+        window_seconds=0.04,
+        timeout_s=0.5,
+        poll_interval_s=0.005,
+    )
+    elapsed = time.monotonic() - started
+    await late_task
+
+    assert ready is True
+    # Helper should not have returned before the late append fired (~40 ms),
+    # and should not have spent more than the budget.
+    assert 0.03 < elapsed < 0.3
+    by_id = {s["sensor_id"]: s for s in snapshot}
+    assert all(by_id[sid].get("present") for sid in ("a", "b", "c"))
+
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_await_window_coverage_times_out_when_buffer_never_advances(
+    tmp_path: Path,
+) -> None:
+    """If the buffer never catches up to target_end, the helper returns False
+    after the timeout — driving the `buffer_lag_timeout` drop in the caller."""
+    settings = _make_minimal_fusion_node(tmp_path)
+    storage = Storage(settings.db_path)
+    await storage.initialize()
+    buffer = MultiSensorBuffer(max_duration_seconds=settings.max_sensor_buffer_seconds)
+
+    fusion = FusionNode(
+        settings=settings,
+        registry=NodeRegistry(),
+        buffer=buffer,
+        localizer=LocalizationEngine(max_tau_s=0.03),
+        classifier=HeuristicClassifier(),
+        tracker=TrackManager(settings),
+        storage=storage,
+        live_callback=lambda payload: asyncio.sleep(0, result=None),
+        coordinate_frame=LocalCoordinateFrame(
+            origin=GeoPoint(lat=37.0, lon=-122.0, alt_m=0.0), mode="flat"
+        ),
+        zone_matcher=ZoneMatcher(storage=storage),
+    )
+
+    sample_rate = 16_000
+    samples_per_chunk = 1024
+    base_ns = 1_739_900_000_000_000_000
+    # Only sensor a has data; b and c never arrive.
+    await buffer.append(
+        sensor_id="a",
+        sample_rate_hz=sample_rate,
+        start_time_ns=base_ns,
+        samples=np.ones(samples_per_chunk, dtype=np.float32),
+    )
+
+    started = time.monotonic()
+    ready, snapshot = await fusion._await_window_coverage(
+        sensor_ids=["a", "b", "c"],
+        center_time_ns=base_ns,
+        window_seconds=0.04,
+        timeout_s=0.08,
+        poll_interval_s=0.005,
+    )
+    elapsed = time.monotonic() - started
+
+    assert ready is False
+    # Should not return *before* the timeout, and not much after.
+    assert 0.06 < elapsed < 0.25
+    by_id = {s["sensor_id"]: s for s in snapshot}
+    assert by_id["a"]["present"] is True
+    assert by_id["b"]["present"] is False
+    assert by_id["c"]["present"] is False
+
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_localize_candidate_drops_with_buffer_lag_timeout_reason(
+    tmp_path: Path,
+) -> None:
+    """End-to-end: a candidate whose required window will never be covered
+    drops with `buffer_lag_timeout` and the warning carries `buffer_snapshot`
+    so operators can see which sensor was lagging."""
+    from minimappr.core.fusion_node import EventCandidate
+    from minimappr.models import TimeQuality
+
+    settings = _make_minimal_fusion_node(tmp_path)
+    storage = Storage(settings.db_path)
+    await storage.initialize()
+    registry = NodeRegistry()
+    buffer = MultiSensorBuffer(max_duration_seconds=settings.max_sensor_buffer_seconds)
+
+    node = NodeSpec(
+        id="lag-node",
+        node_type=NodeType.SIRITH_TETRA,
+        position_m=(0.0, 0.0, 0.0),
+        sensor_offsets_m=[
+            (-0.02, -0.01, 0.0),
+            (0.02, -0.01, 0.0),
+            (0.0, 0.02, 0.0),
+            (0.0, 0.0, 0.03),
+        ],
+        capabilities=["audio"],
+        metadata={},
+    )
+    await registry.upsert(node, last_seen_ns=1_739_900_000_000_000_000)
+
+    fusion = FusionNode(
+        settings=settings,
+        registry=registry,
+        buffer=buffer,
+        localizer=LocalizationEngine(max_tau_s=0.03),
+        classifier=HeuristicClassifier(),
+        tracker=TrackManager(settings),
+        storage=storage,
+        live_callback=lambda payload: asyncio.sleep(0, result=None),
+        coordinate_frame=LocalCoordinateFrame(
+            origin=GeoPoint(lat=37.0, lon=-122.0, alt_m=0.0), mode="flat"
+        ),
+        zone_matcher=ZoneMatcher(storage=storage),
+    )
+    # Cap the wait so the test runs fast.
+    fusion.localization_config.localization_buffer_wait_max_seconds = 0.08
+    fusion._drop_warning_interval_seconds = 0.0
+
+    # Append only to one sensor — the other 3 stay absent → coverage never
+    # reaches min_sensors_for_2d (default 3).
+    sample_rate = 16_000
+    samples_per_chunk = 1024
+    base_ns = 1_739_900_000_000_000_000
+    await buffer.append(
+        sensor_id="lag-node:ch0",
+        sample_rate_hz=sample_rate,
+        start_time_ns=base_ns,
+        samples=np.ones(samples_per_chunk, dtype=np.float32),
+    )
+
+    candidate = EventCandidate(
+        id="evt-lag",
+        source_node_id="lag-node",
+        event_time_ns=base_ns + int(0.02 * 1_000_000_000),
+        sample_rate_hz=sample_rate,
+        source_type="raw_sensor",
+        time_quality=TimeQuality.GPS_LOCKED,
+        source_observation_ids=[],
+    )
+
+    result = await fusion._localize_candidate(candidate)
+
+    assert result is None
+    assert fusion._metrics.localization_drops_by_reason.get("buffer_lag_timeout") == 1
+    assert "no_window" not in fusion._metrics.localization_drops_by_reason
+    assert "event_too_old" not in fusion._metrics.localization_drops_by_reason
+
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_localize_candidate_drops_with_event_too_old_reason(
+    tmp_path: Path,
+) -> None:
+    """When the candidate's window trailing edge sits before every buffered
+    sample, waiting can't help — the helper bails immediately and the caller
+    drops with `event_too_old` rather than burning the full timeout."""
+    from minimappr.core.fusion_node import EventCandidate
+    from minimappr.models import TimeQuality
+
+    settings = _make_minimal_fusion_node(tmp_path)
+    storage = Storage(settings.db_path)
+    await storage.initialize()
+    registry = NodeRegistry()
+    buffer = MultiSensorBuffer(max_duration_seconds=settings.max_sensor_buffer_seconds)
+
+    node = NodeSpec(
+        id="old-node",
+        node_type=NodeType.SIRITH_TETRA,
+        position_m=(0.0, 0.0, 0.0),
+        sensor_offsets_m=[
+            (-0.02, -0.01, 0.0),
+            (0.02, -0.01, 0.0),
+            (0.0, 0.02, 0.0),
+            (0.0, 0.0, 0.03),
+        ],
+        capabilities=["audio"],
+        metadata={},
+    )
+    await registry.upsert(node, last_seen_ns=1_739_900_000_000_000_000)
+
+    fusion = FusionNode(
+        settings=settings,
+        registry=registry,
+        buffer=buffer,
+        localizer=LocalizationEngine(max_tau_s=0.03),
+        classifier=HeuristicClassifier(),
+        tracker=TrackManager(settings),
+        storage=storage,
+        live_callback=lambda payload: asyncio.sleep(0, result=None),
+        coordinate_frame=LocalCoordinateFrame(
+            origin=GeoPoint(lat=37.0, lon=-122.0, alt_m=0.0), mode="flat"
+        ),
+        zone_matcher=ZoneMatcher(storage=storage),
+    )
+    fusion.localization_config.localization_buffer_wait_max_seconds = 2.0
+    fusion._drop_warning_interval_seconds = 0.0
+
+    sample_rate = 16_000
+    samples_per_chunk = 1024
+    buffer_anchor_ns = 1_739_900_000_000_000_000
+    # Populate sensors with audio starting far in the "future" relative to
+    # the candidate's event_time_ns.
+    for k in range(4):
+        await buffer.append(
+            sensor_id=f"old-node:ch{k}",
+            sample_rate_hz=sample_rate,
+            start_time_ns=buffer_anchor_ns,
+            samples=np.ones(samples_per_chunk, dtype=np.float32),
+        )
+
+    # event_time_ns is one full second before the buffer's start.
+    candidate = EventCandidate(
+        id="evt-old",
+        source_node_id="old-node",
+        event_time_ns=buffer_anchor_ns - 1_000_000_000,
+        sample_rate_hz=sample_rate,
+        source_type="raw_sensor",
+        time_quality=TimeQuality.GPS_LOCKED,
+        source_observation_ids=[],
+    )
+
+    started = time.monotonic()
+    result = await fusion._localize_candidate(candidate)
+    elapsed = time.monotonic() - started
+
+    assert result is None
+    assert fusion._metrics.localization_drops_by_reason.get("event_too_old") == 1
+    # Should NOT have waited the full 2 s timeout — bails on first poll.
+    assert elapsed < 0.2
+
+    await storage.close()
