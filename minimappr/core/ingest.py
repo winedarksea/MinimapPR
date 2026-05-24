@@ -378,10 +378,26 @@ class IngestProcessor:
             time_quality=frame.time_quality.value,
             buffer_uses_receipt_time=buffer_uses_receipt_time,
         )
-        frame_duration_ns = int((processed.shape[1] / frame.sample_rate_hz) * 1_000_000_000)
         half_window_ns = int(self._localization_config.localization_window_seconds * 0.5 * 1_000_000_000)
-        center_offset_ns = max(0, frame_duration_ns - half_window_ns)
-        center_time_ns = frame.start_time_ns + center_offset_ns
+        # Anchor event_time_ns to the buffer's own sample-count timeline rather
+        # than the firmware GPS clock.  The GPS clock drifts from the ADC crystal
+        # oscillator (~40 ppm); after ~4 hours of uptime frame.start_time_ns
+        # advances ~1.2 s ahead of buffer.end_time_ns(), causing every trigger
+        # to time out with buffer_lag_timeout.  Using the buffer's sample-count
+        # end time keeps event_time_ns consistent with what is actually stored
+        # while still using the GPS-originated timeline anchor — this is NOT
+        # server receipt time and does not break TDOA alignment.
+        first_sensor_id = runtime.sensor_ids[0] if runtime.sensor_ids else None
+        buf_end_ns: int | None = (
+            await self._buffer.sensor_end_time_ns(first_sensor_id)
+            if first_sensor_id is not None
+            else None
+        )
+        if buf_end_ns is not None:
+            center_time_ns = buf_end_ns - half_window_ns
+        else:
+            frame_duration_ns = int((processed.shape[1] / frame.sample_rate_hz) * 1_000_000_000)
+            center_time_ns = frame.start_time_ns + max(0, frame_duration_ns - half_window_ns)
         cooldown_ns = int(self._localization_config.trigger_cooldown_seconds * 1_000_000_000)
 
         triggered = False

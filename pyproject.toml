@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "minimappr"
-version = "0.2.0"
+version = "0.2.1"
 description = "Realtime environmental awareness: distributed sound localization + classification + common operating picture"
 readme = "README.md"
 license = "GPL-3.0"

@@ -916,6 +916,23 @@ class MultiSensorBuffer:
             aligned = {sensor_id: window[-common_samples:] for sensor_id, window in recent.items()}
             return aligned, dominant_sample_rate_hz, latest_end_ns
 
+    async def sensor_end_time_ns(self, sensor_id: str) -> int | None:
+        """Return the sample-count-based end timestamp for one sensor's buffer.
+
+        The returned value is derived from the GPS-anchored timeline origin plus
+        accumulated sample counts (not from the firmware GPS clock directly).
+        This is intentional: the firmware GPS clock drifts from the ADC crystal
+        oscillator (~40 ppm typical), so using the GPS-derived frame timestamp
+        directly for trigger placement causes buffer_lag_timeout after hours of
+        uptime.  Callers that need event_time_ns consistent with buffer contents
+        should use this value rather than frame.start_time_ns.
+        """
+        async with self._lock:
+            buf = self._buffers.get(sensor_id)
+            if buf is None:
+                return None
+            return buf.end_time_ns()
+
     async def get_sensor_rms_history(self, sensor_id: str, n_buckets: int = 20) -> list[float]:
         """Return a list of n_buckets RMS values spanning the stored sample window for one sensor."""
         async with self._lock:
