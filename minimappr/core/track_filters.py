@@ -387,4 +387,13 @@ class KalmanTrackFilter:
         if covariance.shape != (3, 3) or not np.all(np.isfinite(covariance)):
             return self._measurement_covariance
         covariance = 0.5 * (covariance + covariance.T)
+        try:
+            eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+        except np.linalg.LinAlgError:
+            return self._measurement_covariance
+        if not np.all(np.isfinite(eigenvalues)):
+            return self._measurement_covariance
+        variance_floor = max(float(self._measurement_noise), 1.0e-6)
+        covariance = eigenvectors @ np.diag(np.maximum(eigenvalues, variance_floor)) @ eigenvectors.T
+        covariance = 0.5 * (covariance + covariance.T)
         return covariance + (np.eye(3, dtype=np.float64) * 1e-9)

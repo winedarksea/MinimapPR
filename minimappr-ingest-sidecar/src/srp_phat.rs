@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     dsp_worker::PairTdoa,
-    gcc_phat::{pair_max_tau_s, phat_correlation, GccPhatCorrelation},
+    gcc_phat::{GccPhatCorrelation, pair_max_tau_s, phat_correlation},
 };
 
 const EPSILON: f32 = 1e-9;
@@ -42,6 +42,7 @@ pub struct SrpPhatLocalization {
     pub position_m: Option<[f32; 3]>,
     pub position_covariance_m2: Option<[[f32; 3]; 3]>,
     pub range_observability: Option<f32>,
+    pub range_projection_mode: Option<String>,
     pub confidence: f32,
     pub residual_rms_seconds: f32,
     pub sound_speed_mps: f32,
@@ -65,6 +66,7 @@ struct LocalizationCandidate {
     steering_direction: [f32; 3],
     position_covariance_m2: [[f32; 3]; 3],
     range_observability: Option<f32>,
+    range_projection_mode: Option<&'static str>,
     residual_rms_seconds: f32,
     contrast_score: f32,
 }
@@ -76,6 +78,7 @@ struct FarFieldRangeEstimate {
     radial_std_m: f32,
     range_observability: f32,
     residual_rms_seconds: f32,
+    range_projection_mode: &'static str,
 }
 
 pub fn estimate_tetrahedral_steering(
@@ -187,8 +190,7 @@ pub fn estimate_tetrahedral_steering(
     let confidence = ((0.6 * fit_score)
         + (0.25 * peak_score.clamp(0.0, 1.0))
         + (0.15 * candidate.contrast_score.clamp(0.0, 1.0)))
-        * candidate.range_observability.unwrap_or(1.0).clamp(0.35, 1.0)
-    .clamp(0.0, 1.0);
+        * candidate.range_observability.unwrap_or(1.0).clamp(0.35, 1.0);
 
     SrpPhatEvaluation {
         localization: SrpPhatLocalization {
@@ -198,6 +200,7 @@ pub fn estimate_tetrahedral_steering(
             position_m: Some(candidate.position_m),
             position_covariance_m2: Some(candidate.position_covariance_m2),
             range_observability: candidate.range_observability,
+            range_projection_mode: candidate.range_projection_mode.map(str::to_string),
             confidence,
             residual_rms_seconds: candidate.residual_rms_seconds,
             sound_speed_mps,
@@ -221,6 +224,7 @@ fn degraded_localization(resolved_algorithm: &str, sound_speed_mps: f32) -> SrpP
         position_m: None,
         position_covariance_m2: None,
         range_observability: None,
+        range_projection_mode: None,
         confidence: 0.0,
         residual_rms_seconds: f32::INFINITY,
         sound_speed_mps,
@@ -325,15 +329,22 @@ fn refine_reference_position(
         for measurement in measurements {
             let sensor_position_m = mic_positions_m[measurement.channel_index];
             let sensor_distance_m = euclidean_distance(position_m, sensor_position_m) + EPSILON;
-            let predicted_tdoa_s = (sensor_distance_m - reference_distance_m) / sound_speed_mps.max(1.0);
+            let predicted_tdoa_s =
+                (sensor_distance_m - reference_distance_m) / sound_speed_mps.max(1.0);
             residuals.push(predicted_tdoa_s - measurement.tdoa_seconds);
             jacobian_rows.push([
-                ((position_m[0] - sensor_position_m[0]) / (sensor_distance_m * sound_speed_mps.max(1.0)))
-                    - ((position_m[0] - reference_position_m[0]) / (reference_distance_m * sound_speed_mps.max(1.0))),
-                ((position_m[1] - sensor_position_m[1]) / (sensor_distance_m * sound_speed_mps.max(1.0)))
-                    - ((position_m[1] - reference_position_m[1]) / (reference_distance_m * sound_speed_mps.max(1.0))),
-                ((position_m[2] - sensor_position_m[2]) / (sensor_distance_m * sound_speed_mps.max(1.0)))
-                    - ((position_m[2] - reference_position_m[2]) / (reference_distance_m * sound_speed_mps.max(1.0))),
+                ((position_m[0] - sensor_position_m[0])
+                    / (sensor_distance_m * sound_speed_mps.max(1.0)))
+                    - ((position_m[0] - reference_position_m[0])
+                        / (reference_distance_m * sound_speed_mps.max(1.0))),
+                ((position_m[1] - sensor_position_m[1])
+                    / (sensor_distance_m * sound_speed_mps.max(1.0)))
+                    - ((position_m[1] - reference_position_m[1])
+                        / (reference_distance_m * sound_speed_mps.max(1.0))),
+                ((position_m[2] - sensor_position_m[2])
+                    / (sensor_distance_m * sound_speed_mps.max(1.0)))
+                    - ((position_m[2] - reference_position_m[2])
+                        / (reference_distance_m * sound_speed_mps.max(1.0))),
             ]);
         }
 
@@ -427,18 +438,28 @@ fn near_field_candidate(
         minimum_std_m,
     );
     let (mins, maxs) = padded_bounds(active_channels, mic_positions_m, config.search_padding_m);
-    let boundary_clamped = is_boundary_clamped(best_position_m, mins, maxs, config.grid_resolution_m);
+    let boundary_clamped =
+        is_boundary_clamped(best_position_m, mins, maxs, config.grid_resolution_m);
     Some(LocalizationCandidate {
         position_m: refined_position_m,
-        steering_direction: normalize_or_zero(sub(refined_position_m, centroid(active_channels, mic_positions_m))),
+        steering_direction: normalize_or_zero(sub(
+            refined_position_m,
+            centroid(active_channels, mic_positions_m),
+        )),
         position_covariance_m2,
         range_observability: Some(if boundary_clamped {
             range_observability.min(0.25)
         } else {
             range_observability
         }),
+        range_projection_mode: Some(if boundary_clamped {
+            "bounded_grid_boundary"
+        } else {
+            "range_refined"
+        }),
         residual_rms_seconds,
-        contrast_score: ((best_score - median(&scores)) / (best_score.abs() + EPSILON)).clamp(0.0, 1.0),
+        contrast_score: ((best_score - median(&scores)) / (best_score.abs() + EPSILON))
+            .clamp(0.0, 1.0),
     })
 }
 
@@ -468,16 +489,23 @@ fn far_field_candidate(
         sound_speed_mps,
         config,
     );
+    let aperture_m = aperture(active_channels, mic_positions_m);
     let lateral_std_m = (config.grid_resolution_m * 0.5)
         .max(range_estimate.radius_m * direction_fit_residual.clamp(0.05, 0.6))
-        .max(aperture(active_channels, mic_positions_m) * 0.5)
+        .max(aperture_m * 0.5)
         .max(sound_speed_mps / sample_rate_hz.max(1) as f32);
     let radial_std_m = range_estimate.radial_std_m.max(lateral_std_m);
+    let range_projection_mode = if aperture_m <= 0.35 {
+        "prior_projected"
+    } else {
+        range_estimate.range_projection_mode
+    };
     Some(LocalizationCandidate {
         position_m: range_estimate.position_m,
         steering_direction: direction,
         position_covariance_m2: directional_covariance(direction, lateral_std_m, radial_std_m),
         range_observability: Some(range_estimate.range_observability),
+        range_projection_mode: Some(range_projection_mode),
         residual_rms_seconds: range_estimate.residual_rms_seconds,
         contrast_score: (1.0 - direction_fit_residual).clamp(0.0, 1.0),
     })
@@ -532,7 +560,12 @@ fn pairwise_far_field_direction(
     if magnitude(direction) <= EPSILON {
         return None;
     }
-    let target_norm = targets.iter().map(|value| value * value).sum::<f32>().sqrt().max(EPSILON);
+    let target_norm = targets
+        .iter()
+        .map(|value| value * value)
+        .sum::<f32>()
+        .sqrt()
+        .max(EPSILON);
     let fit_error = rows
         .iter()
         .zip(targets.iter())
@@ -660,6 +693,15 @@ fn fit_far_field_range(
     };
     let range_scale_m = radius_m.abs().max(1.0);
     let range_observability = (range_scale_m / (range_scale_m + radial_std_m)).clamp(0.0, 1.0);
+    let prior_radius_tolerance_m = (default_range_m * 0.02).max(0.5);
+    let range_projection_mode = if (radius_m - default_range_m).abs() <= prior_radius_tolerance_m
+        || range_observability < 0.10
+        || radial_std_m >= radius_m.abs().max(1.0)
+    {
+        "prior_projected"
+    } else {
+        "range_refined"
+    };
 
     FarFieldRangeEstimate {
         position_m: add(centroid_m, scale(direction, radius_m)),
@@ -667,6 +709,7 @@ fn fit_far_field_range(
         radial_std_m,
         range_observability,
         residual_rms_seconds,
+        range_projection_mode,
     }
 }
 
@@ -723,7 +766,8 @@ fn is_boundary_clamped(
 ) -> bool {
     let margin_m = grid_resolution_m.max(0.05);
     (0..3).any(|axis| {
-        (position_m[axis] - mins[axis]).abs() <= margin_m || (maxs[axis] - position_m[axis]).abs() <= margin_m
+        (position_m[axis] - mins[axis]).abs() <= margin_m
+            || (maxs[axis] - position_m[axis]).abs() <= margin_m
     })
 }
 
@@ -772,11 +816,7 @@ fn directional_covariance(
     covariance
 }
 
-fn accumulate_outer_product(
-    covariance_m2: &mut [[f32; 3]; 3],
-    axis: [f32; 3],
-    variance_m2: f32,
-) {
+fn accumulate_outer_product(covariance_m2: &mut [[f32; 3]; 3], axis: [f32; 3], variance_m2: f32) {
     for row in 0..3 {
         for col in 0..3 {
             covariance_m2[row][col] += axis[row] * axis[col] * variance_m2;
@@ -869,12 +909,18 @@ fn position_covariance_and_observability(
         let sensor_position_m = mic_positions_m[measurement.channel_index];
         let sensor_distance_m = euclidean_distance(position_m, sensor_position_m) + EPSILON;
         let jacobian_row = [
-            ((position_m[0] - sensor_position_m[0]) / (sensor_distance_m * sound_speed_mps.max(1.0)))
-                - ((position_m[0] - reference_position_m[0]) / (reference_distance_m * sound_speed_mps.max(1.0))),
-            ((position_m[1] - sensor_position_m[1]) / (sensor_distance_m * sound_speed_mps.max(1.0)))
-                - ((position_m[1] - reference_position_m[1]) / (reference_distance_m * sound_speed_mps.max(1.0))),
-            ((position_m[2] - sensor_position_m[2]) / (sensor_distance_m * sound_speed_mps.max(1.0)))
-                - ((position_m[2] - reference_position_m[2]) / (reference_distance_m * sound_speed_mps.max(1.0))),
+            ((position_m[0] - sensor_position_m[0])
+                / (sensor_distance_m * sound_speed_mps.max(1.0)))
+                - ((position_m[0] - reference_position_m[0])
+                    / (reference_distance_m * sound_speed_mps.max(1.0))),
+            ((position_m[1] - sensor_position_m[1])
+                / (sensor_distance_m * sound_speed_mps.max(1.0)))
+                - ((position_m[1] - reference_position_m[1])
+                    / (reference_distance_m * sound_speed_mps.max(1.0))),
+            ((position_m[2] - sensor_position_m[2])
+                / (sensor_distance_m * sound_speed_mps.max(1.0)))
+                - ((position_m[2] - reference_position_m[2])
+                    / (reference_distance_m * sound_speed_mps.max(1.0))),
         ];
         for out_axis in 0..3 {
             for in_axis in 0..3 {
@@ -1177,7 +1223,10 @@ mod tests {
                 ..SrpPhatConfig::default()
             },
         );
-        let recovered_position_m = evaluation.localization.position_m.expect("far-field position");
+        let recovered_position_m = evaluation
+            .localization
+            .position_m
+            .expect("far-field position");
         let array_centroid_m = centroid(&[0, 1, 2, 3], &mics);
         let recovered_offset_m = sub(recovered_position_m, array_centroid_m);
         let expected_direction = normalize_or_zero(sub(source_position_m, array_centroid_m));
@@ -1185,6 +1234,10 @@ mod tests {
         assert!(dot(normalize_or_zero(recovered_offset_m), expected_direction) > 0.8);
         assert!(evaluation.localization.position_covariance_m2.is_some());
         assert!(evaluation.localization.range_observability.is_some());
+        assert_eq!(
+            evaluation.localization.range_projection_mode.as_deref(),
+            Some("prior_projected")
+        );
     }
 
     #[test]

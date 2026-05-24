@@ -138,6 +138,7 @@ class DetectionAssembler:
         localization_position_covariance_m2: list[list[float]] | None,
         localization_range_observability: float | None,
         localization_residual_rms_seconds: float | None,
+        localization_range_projection_mode: str | None,
         reference_sensor: str,
         tdoa_s: dict[str, float],
         selected_sensor_ids: list[str],
@@ -246,6 +247,13 @@ class DetectionAssembler:
             feature_summary["localization_range_observability"] = localization_range_observability
         if localization_residual_rms_seconds is not None:
             feature_summary["localization_residual_rms_seconds"] = localization_residual_rms_seconds
+        if localization_range_projection_mode is not None:
+            feature_summary["localization_range_projection_mode"] = localization_range_projection_mode
+        geo_uncertainty = self._coordinate_frame.local_covariance_to_geo_uncertainty(
+            localization_position_covariance_m2
+        )
+        if geo_uncertainty is not None:
+            feature_summary["position_geo_uncertainty"] = geo_uncertainty
         feature_summary["classification_path"] = classification_path
         feature_summary["omni_confidence"] = omni_confidence
         feature_summary["environment"] = environment

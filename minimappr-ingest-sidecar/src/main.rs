@@ -242,6 +242,20 @@ struct Args {
 
     #[arg(
         long,
+        env = "MINIMAPPR_LOCALIZATION_FAR_FIELD_DEFAULT_RANGE_M",
+        default_value_t = 50.0
+    )]
+    localization_far_field_default_range_m: f32,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_LOCALIZATION_FAR_FIELD_MAX_RANGE_M",
+        default_value_t = 250.0
+    )]
+    localization_far_field_max_range_m: f32,
+
+    #[arg(
+        long,
         env = "MINIMAPPR_DSP_LOCALIZATION_CADENCE_MS",
         default_value_t = 250
     )]
@@ -427,6 +441,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 ],
                 localization_srp_grid_resolution_m: args.localization_srp_grid_resolution_m,
                 localization_search_padding_m: args.localization_search_padding_m,
+                localization_far_field_default_range_m: args.localization_far_field_default_range_m,
+                localization_far_field_max_range_m: args.localization_far_field_max_range_m,
                 spatial_blend_band_hz: [
                     args.birdnet_spatial_blend_min_hz,
                     args.birdnet_spatial_blend_max_hz,

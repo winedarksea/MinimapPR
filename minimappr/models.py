@@ -262,6 +262,7 @@ class LocalizationResult(BaseModel):
     position_covariance_m2: list[list[float]] | None = None
     range_observability: float | None = Field(default=None, ge=0.0, le=1.0)
     residual_rms_seconds: float | None = Field(default=None, ge=0.0)
+    range_projection_mode: str | None = None
     attempted_algorithm: str | None = None
     resolved_algorithm: str | None = None
     wavelength_factor: float | None = Field(default=None, ge=0.0, le=1.0)

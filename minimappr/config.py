@@ -648,10 +648,21 @@ class Settings:
             raise ValueError("MINIMAPPR_LOCALIZATION_SRP_GRID_RESOLUTION_M must be > 0")
         if self.localization_search_padding_m <= 0.0:
             raise ValueError("MINIMAPPR_LOCALIZATION_SEARCH_PADDING_M must be > 0")
+        if self.localization_far_field_default_range_m <= 0.0:
+            raise ValueError("MINIMAPPR_LOCALIZATION_FAR_FIELD_DEFAULT_RANGE_M must be > 0")
+        if self.localization_far_field_max_range_m < self.localization_far_field_default_range_m:
+            raise ValueError(
+                "MINIMAPPR_LOCALIZATION_FAR_FIELD_MAX_RANGE_M must be >= "
+                "MINIMAPPR_LOCALIZATION_FAR_FIELD_DEFAULT_RANGE_M"
+            )
         if self.localization_subspace_freq_min_hz <= 0.0:
             raise ValueError("MINIMAPPR_LOCALIZATION_SUBSPACE_FREQ_MIN_HZ must be > 0")
         if self.localization_subspace_freq_max_hz <= self.localization_subspace_freq_min_hz:
             raise ValueError("MINIMAPPR_LOCALIZATION_SUBSPACE_FREQ_MAX_HZ must be > MIN frequency")
+        if self.localization_music_azimuth_step_deg <= 0.0 or self.localization_music_azimuth_step_deg > 45.0:
+            raise ValueError("MINIMAPPR_LOCALIZATION_MUSIC_AZ_STEP_DEG must be in (0,45]")
+        if self.localization_music_elevation_step_deg <= 0.0 or self.localization_music_elevation_step_deg > 45.0:
+            raise ValueError("MINIMAPPR_LOCALIZATION_MUSIC_EL_STEP_DEG must be in (0,45]")
         if self.localization_refine_confidence_threshold < 0.0 or self.localization_refine_confidence_threshold > 1.0:
             raise ValueError("MINIMAPPR_LOCALIZATION_REFINE_CONFIDENCE_THRESHOLD must be in [0,1]")
         if self.localization_tight_array_aperture_m <= 0.0:

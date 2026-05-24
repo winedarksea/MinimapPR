@@ -120,3 +120,20 @@ def test_settings_from_env_reads_ingest_max_concurrent(monkeypatch, tmp_path) ->
 def test_settings_reject_non_positive_ingest_max_concurrent() -> None:
     with pytest.raises(ValueError, match="MINIMAPPR_INGEST_MAX_CONCURRENT"):
         Settings(ingest_max_concurrent=0)
+
+
+def test_settings_reject_invalid_far_field_localization_config() -> None:
+    with pytest.raises(ValueError, match="FAR_FIELD_DEFAULT_RANGE"):
+        Settings(localization_far_field_default_range_m=0.0)
+
+    with pytest.raises(ValueError, match="FAR_FIELD_MAX_RANGE"):
+        Settings(
+            localization_far_field_default_range_m=100.0,
+            localization_far_field_max_range_m=50.0,
+        )
+
+    with pytest.raises(ValueError, match="MUSIC_AZ_STEP"):
+        Settings(localization_music_azimuth_step_deg=90.0)
+
+    with pytest.raises(ValueError, match="MUSIC_EL_STEP"):
+        Settings(localization_music_elevation_step_deg=90.0)

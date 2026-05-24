@@ -32,6 +32,7 @@ class LocalizedClassifierRenderRequest:
     localization_position_covariance_m2: list[list[float]] | None = None
     localization_range_observability: float | None = None
     localization_residual_rms_seconds: float | None = None
+    localization_range_projection_mode: str | None = None
     localization_method: str = "rust_dsp_worker"
     source_type: str = "raw_sensor"
     reporting_modality: Literal["localized", "omni"] = "localized"
@@ -144,6 +145,9 @@ def load_localized_render_manifest_bundle(
         localization_residual_rms_seconds = _optional_nonnegative_float(
             localization_payload.get("residual_rms_seconds")
         )
+        localization_range_projection_mode = _optional_nonempty_string(
+            localization_payload.get("range_projection_mode")
+        )
         localization_method = str(
             localization_payload.get("resolved_algorithm")
             or localization_payload.get("attempted_algorithm")
@@ -158,6 +162,7 @@ def load_localized_render_manifest_bundle(
         localization_position_covariance_m2 = None
         localization_range_observability = None
         localization_residual_rms_seconds = None
+        localization_range_projection_mode = None
         localization_method = "rust_classifier_render_fallback"
         reporting_modality = "omni"
 
@@ -174,6 +179,7 @@ def load_localized_render_manifest_bundle(
             localization_position_covariance_m2=localization_position_covariance_m2,
             localization_range_observability=localization_range_observability,
             localization_residual_rms_seconds=localization_residual_rms_seconds,
+            localization_range_projection_mode=localization_range_projection_mode,
             localization_method=localization_method,
             source_type=source_type,
             reporting_modality=reporting_modality,
@@ -223,6 +229,13 @@ def _optional_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _optional_nonempty_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _optional_nonnegative_float(value: Any) -> float | None:

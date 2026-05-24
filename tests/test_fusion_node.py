@@ -1453,6 +1453,7 @@ async def test_fusion_ingests_rust_localized_render_directly(tmp_path: Path) -> 
             ],
             localization_range_observability=0.42,
             localization_residual_rms_seconds=2.5e-4,
+            localization_range_projection_mode="prior_projected",
             localization_method="rust_srp_phat",
             render_kind="birdnet_hybrid_spatial_blend",
             environment={"temperature_c": 18.0, "humidity_fraction": 0.4},
@@ -1467,6 +1468,8 @@ async def test_fusion_ingests_rust_localized_render_directly(tmp_path: Path) -> 
     assert detection["feature_summary"]["localization_method"] == "rust_srp_phat"
     assert detection["feature_summary"]["localization_range_observability"] == pytest.approx(0.42)
     assert detection["feature_summary"]["localization_residual_rms_seconds"] == pytest.approx(2.5e-4)
+    assert detection["feature_summary"]["localization_range_projection_mode"] == "prior_projected"
+    assert detection["feature_summary"]["position_geo_uncertainty"]["horizontal_major_std_m"] > 0.0
     assert detection["feature_summary"]["rust_render_kind"] == "birdnet_hybrid_spatial_blend"
     assert tuple(detection["position_m"]) == pytest.approx((1.5, -0.5, 0.0))
     assert np.allclose(

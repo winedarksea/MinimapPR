@@ -11,6 +11,7 @@ Verifies:
 from __future__ import annotations
 
 import pytest
+import numpy as np
 
 from minimappr.config import Settings
 from minimappr.core.track_associators import NearestNeighborAssociator
@@ -111,6 +112,59 @@ def test_associator_rejects_out_of_gate() -> None:
     assert result is None
 
 
+def test_associator_uses_bounded_mahalanobis_gate() -> None:
+    assoc = NearestNeighborAssociator(association_distance_m=5.0)
+    t0 = 1_000_000_000_000_000_000
+    tracks = [
+        TrackState(
+            id="trk-near",
+            first_seen_ns=t0,
+            last_seen_ns=t0,
+            position_m=(0.0, 0.0, 0.0),
+            position_covariance_m2=[
+                [4.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+        ),
+        TrackState(
+            id="trk-far",
+            first_seen_ns=t0,
+            last_seen_ns=t0,
+            position_m=(60.0, 0.0, 0.0),
+            position_covariance_m2=[
+                [10_000.0, 0.0, 0.0],
+                [0.0, 10_000.0, 0.0],
+                [0.0, 0.0, 10_000.0],
+            ],
+        ),
+    ]
+
+    matched = assoc.associate(
+        timestamp_ns=t0 + 1_000_000_000,
+        position_m=(5.5, 0.0, 0.0),
+        existing_tracks=tracks,
+        measurement_covariance_m2=[
+            [4.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+    )
+    assert matched == "trk-near"
+
+    rejected = assoc.associate(
+        timestamp_ns=t0 + 1_000_000_000,
+        position_m=(35.0, 0.0, 0.0),
+        existing_tracks=tracks,
+        measurement_covariance_m2=[
+            [10_000.0, 0.0, 0.0],
+            [0.0, 10_000.0, 0.0],
+            [0.0, 0.0, 10_000.0],
+        ],
+    )
+    assert rejected is None
+
+
 # ---------------------------------------------------------------------------
 # LinearTrackFilter unit tests
 # ---------------------------------------------------------------------------
@@ -183,6 +237,36 @@ def test_kalman_filter_predict_grows_position_covariance() -> None:
     assert predicted.position_covariance_m2 is not None
     assert updated.position_covariance_m2 is not None
     assert predicted.position_covariance_m2[0][0] > updated.position_covariance_m2[0][0]
+
+
+def test_kalman_filter_inflates_non_positive_definite_measurement_covariance() -> None:
+    filt = KalmanTrackFilter(
+        process_noise=1.0,
+        measurement_noise=0.8,
+        initial_position_variance=10.0,
+        initial_velocity_variance=1.0,
+    )
+    t0 = 1_000_000_000_000_000_000
+    state = TrackState(
+        id="trk-pd",
+        first_seen_ns=t0,
+        last_seen_ns=t0,
+        position_m=(0.0, 0.0, 0.0),
+    )
+    filt.initialize_track("trk-pd", (0.0, 0.0, 0.0))
+
+    updated = filt.update(
+        state,
+        measurement_m=(1.0, 0.0, 0.0),
+        dt_s=1.0,
+        measurement_covariance_m2=[
+            [-100.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+    )
+    covariance = np.asarray(updated.position_covariance_m2, dtype=np.float64)
+    assert np.all(np.linalg.eigvalsh(covariance) > 0.0)
 
 
 def test_kalman_filter_remove_track_cleanup() -> None:

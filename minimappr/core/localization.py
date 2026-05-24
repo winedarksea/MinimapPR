@@ -224,6 +224,7 @@ class LocalizationEngine:
             position_covariance_m2=covariance_to_nested_list(position_covariance_m2),
             range_observability=range_observability,
             residual_rms_seconds=rmse_s,
+            range_projection_mode="range_refined",
         )
 
     def localize_2d(
@@ -346,6 +347,7 @@ class LocalizationEngine:
             position_covariance_m2=covariance_to_nested_list(position_covariance_m2),
             range_observability=range_observability,
             residual_rms_seconds=rmse_s,
+            range_projection_mode="range_refined",
         )
 
     @staticmethod

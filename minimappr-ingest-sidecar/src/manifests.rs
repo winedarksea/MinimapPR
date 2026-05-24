@@ -36,6 +36,8 @@ pub struct LocalizationManifestPayload {
     pub position_covariance_m2: Option<[[f32; 3]; 3]>,
     #[serde(default)]
     pub range_observability: Option<f32>,
+    #[serde(default)]
+    pub range_projection_mode: Option<String>,
     pub confidence: f32,
     pub residual_rms_seconds: Option<f32>,
     pub sound_speed_mps: f32,

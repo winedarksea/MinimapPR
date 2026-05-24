@@ -109,6 +109,45 @@ class LocalCoordinateFrame:
         lat, lon, alt = _ecef_to_lla(ecef)
         return GeoPoint(lat=lat, lon=lon, alt_m=float(alt))
 
+    def local_covariance_to_geo_uncertainty(
+        self,
+        covariance_m2: list[list[float]] | np.ndarray | None,
+    ) -> dict[str, float] | None:
+        if covariance_m2 is None:
+            return None
+        try:
+            covariance = np.asarray(covariance_m2, dtype=np.float64)
+        except (TypeError, ValueError):
+            return None
+        if covariance.shape != (3, 3) or not np.all(np.isfinite(covariance)):
+            return None
+        covariance = 0.5 * (covariance + covariance.T)
+        try:
+            eigenvalues, eigenvectors = np.linalg.eigh(covariance[:2, :2])
+        except np.linalg.LinAlgError:
+            return None
+        if not np.all(np.isfinite(eigenvalues)):
+            return None
+
+        order = np.argsort(eigenvalues)[::-1]
+        major_variance_m2 = max(float(eigenvalues[order[0]]), 0.0)
+        minor_variance_m2 = max(float(eigenvalues[order[1]]), 0.0)
+        major_axis = eigenvectors[:, order[0]]
+        major_bearing_deg = math.degrees(math.atan2(float(major_axis[0]), float(major_axis[1])))
+        east_std_m = math.sqrt(max(float(covariance[0, 0]), 0.0))
+        north_std_m = math.sqrt(max(float(covariance[1, 1]), 0.0))
+        up_std_m = math.sqrt(max(float(covariance[2, 2]), 0.0))
+        return {
+            "east_std_m": east_std_m,
+            "north_std_m": north_std_m,
+            "up_std_m": up_std_m,
+            "lat_std_deg": north_std_m / max(self._meters_per_deg_lat, 1e-9),
+            "lon_std_deg": east_std_m / max(self._meters_per_deg_lon, 1e-9),
+            "horizontal_major_std_m": math.sqrt(major_variance_m2),
+            "horizontal_minor_std_m": math.sqrt(minor_variance_m2),
+            "horizontal_major_bearing_deg": ((major_bearing_deg + 180.0) % 360.0) - 180.0,
+        }
+
     def geo_to_local(self, point: GeoPoint) -> Vec3:
         if self.mode == "flat":
             east = (point.lon - self.origin.lon) * self._meters_per_deg_lon

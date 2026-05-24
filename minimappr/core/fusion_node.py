@@ -131,6 +131,7 @@ class LocalizationBranch:
     localization_position_covariance_m2: list[list[float]] | None
     localization_range_observability: float | None
     localization_residual_rms_seconds: float | None
+    localization_range_projection_mode: str | None
     reference_sensor: str
     reference_signal: np.ndarray
     classification_reference_signal: np.ndarray
@@ -168,6 +169,11 @@ class FusionMetrics:
     environment_samples_persisted: int = 0
     localization_fallback_count: int = 0
     localization_band_aliased_count: int = 0
+    localization_prior_projected_count: int = 0
+    localization_covariance_missing_count: int = 0
+    localization_range_observability_low_count: int = 0
+    localization_stage_total_time_ms: float = 0.0
+    localization_stage_max_time_ms: float = 0.0
     stage_timeout_count: int = 0
     last_localization_algorithm: str = "gcc_phat"
     last_attempted_algorithm: str = "gcc_phat"
@@ -521,6 +527,7 @@ class FusionNode:
                 localization_position_covariance_m2=payload.localization_position_covariance_m2,
                 localization_range_observability=payload.localization_range_observability,
                 localization_residual_rms_seconds=payload.localization_residual_rms_seconds,
+                localization_range_projection_mode=payload.localization_range_projection_mode,
             ),
             selected_sensor_ids=selected_sensor_ids,
             selected_windows={},
@@ -572,6 +579,7 @@ class FusionNode:
             localization_position_covariance_m2=payload.localization_position_covariance_m2,
             localization_range_observability=payload.localization_range_observability,
             localization_residual_rms_seconds=payload.localization_residual_rms_seconds,
+            localization_range_projection_mode=payload.localization_range_projection_mode,
             reference_sensor=reference_sensor,
             reference_signal=normalized_audio,
             tdoa_s={},
@@ -694,9 +702,16 @@ class FusionNode:
             self._realtime_tracker.mark_started(stage_name="localization", item_id=candidate.id)
             self._metrics.localization_stage_in += 1
             try:
+                localization_started_ns = time.perf_counter_ns()
                 product = await asyncio.wait_for(
                     self._localize_candidate(candidate),
                     timeout=timeout_s,
+                )
+                elapsed_ms = (time.perf_counter_ns() - localization_started_ns) / 1_000_000.0
+                self._metrics.localization_stage_total_time_ms += elapsed_ms
+                self._metrics.localization_stage_max_time_ms = max(
+                    self._metrics.localization_stage_max_time_ms,
+                    elapsed_ms,
                 )
                 if product is not None:
                     if await self._enqueue_stage(self._classification_queue, product):
@@ -1150,6 +1165,7 @@ class FusionNode:
                 localization_position_covariance_m2=product.localization_branch.localization_position_covariance_m2,
                 localization_range_observability=product.localization_branch.localization_range_observability,
                 localization_residual_rms_seconds=product.localization_branch.localization_residual_rms_seconds,
+                localization_range_projection_mode=product.localization_branch.localization_range_projection_mode,
                 reference_sensor=product.localization_branch.reference_sensor,
                 reference_signal=product.localization_branch.reference_signal,
                 tdoa_s=product.localization_branch.tdoa_s,
@@ -1176,6 +1192,7 @@ class FusionNode:
             localization_position_covariance_m2=None,
             localization_range_observability=None,
             localization_residual_rms_seconds=None,
+            localization_range_projection_mode=None,
             reference_sensor=product.omni_reference_sensor,
             reference_signal=product.omni_reference_signal,
             tdoa_s={},
@@ -1356,6 +1373,12 @@ class FusionNode:
         localization_method = self._current_localizer_name()
         self._metrics.last_localization_algorithm = localization.resolved_algorithm or localization_method
         self._metrics.last_attempted_algorithm = localization.attempted_algorithm or localization_method
+        if localization.position_covariance_m2 is None:
+            self._metrics.localization_covariance_missing_count += 1
+        if localization.range_observability is not None and localization.range_observability < 0.10:
+            self._metrics.localization_range_observability_low_count += 1
+        if localization.range_projection_mode == "prior_projected":
+            self._metrics.localization_prior_projected_count += 1
         if (
             localization.attempted_algorithm
             and localization.resolved_algorithm
@@ -1371,6 +1394,7 @@ class FusionNode:
             localization_position_covariance_m2=localization.position_covariance_m2,
             localization_range_observability=localization.range_observability,
             localization_residual_rms_seconds=localization.residual_rms_seconds,
+            localization_range_projection_mode=localization.range_projection_mode,
             reference_sensor=localization.reference_sensor,
             reference_signal=reference_signal,
             classification_reference_signal=classification_windows.get(
@@ -1424,6 +1448,7 @@ class FusionNode:
         localization_position_covariance_m2: list[list[float]] | None,
         localization_range_observability: float | None,
         localization_residual_rms_seconds: float | None,
+        localization_range_projection_mode: str | None,
         reference_sensor: str,
         reference_signal: np.ndarray,
         tdoa_s: dict[str, float],
@@ -1486,6 +1511,7 @@ class FusionNode:
                 localization_position_covariance_m2=localization_position_covariance_m2,
                 localization_range_observability=localization_range_observability,
                 localization_residual_rms_seconds=localization_residual_rms_seconds,
+                localization_range_projection_mode=localization_range_projection_mode,
                 reference_sensor=reference_sensor,
                 tdoa_s=tdoa_s,
                 selected_sensor_ids=product.selected_sensor_ids,

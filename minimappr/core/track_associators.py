@@ -52,27 +52,40 @@ class NearestNeighborAssociator:
             if track.status == TrackStatus.DROPPED.value:
                 continue
             track_position = np.asarray(track.position_m, dtype=np.float64)
-            distance = float(np.linalg.norm(measurement - track_position))
-            gate_radius = self._adaptive_gate_radius(
+            residual = measurement - track_position
+            distance = float(np.linalg.norm(residual))
+            if distance < self._association_distance_m and distance < best_score:
+                best_score = distance
+                best_track_id = track.id
+                continue
+            gate = self._association_gate(
                 measurement_covariance=measurement_covariance,
                 track_covariance=self._coerce_covariance(track.position_covariance_m2),
             )
-            if gate_radius <= 0.0:
+            if gate is None:
+                if distance < self._association_distance_m and distance < best_score:
+                    best_score = distance
+                    best_track_id = track.id
                 continue
-            score = distance / gate_radius
-            if distance < gate_radius and score < best_score:
+
+            mahalanobis_sq, physical_gate_radius_m = gate
+            if distance > physical_gate_radius_m:
+                continue
+            score = self._mahalanobis_distance_squared(residual, mahalanobis_sq)
+            if score is None:
+                continue
+            if score <= 9.0 and score < best_score:
                 best_score = score
                 best_track_id = track.id
 
         return best_track_id
 
-    def _adaptive_gate_radius(
+    def _association_gate(
         self,
         *,
         measurement_covariance: np.ndarray | None,
         track_covariance: np.ndarray | None,
-    ) -> float:
-        gate_radius = self._association_distance_m
+    ) -> tuple[np.ndarray, float] | None:
         combined_covariance = None
         if measurement_covariance is not None and track_covariance is not None:
             combined_covariance = measurement_covariance + track_covariance
@@ -81,16 +94,41 @@ class NearestNeighborAssociator:
         elif track_covariance is not None:
             combined_covariance = track_covariance
         if combined_covariance is None:
-            return gate_radius
+            return None
         try:
-            eigenvalues = np.linalg.eigvalsh(combined_covariance)
+            covariance = self._positive_definite_covariance(combined_covariance)
+            eigenvalues = np.linalg.eigvalsh(covariance)
         except np.linalg.LinAlgError:
-            return gate_radius
+            return None
         largest_variance = float(np.max(eigenvalues)) if eigenvalues.size else 0.0
         if not np.isfinite(largest_variance) or largest_variance <= 0.0:
-            return gate_radius
+            return None
         sigma = float(np.sqrt(largest_variance))
-        return float(np.clip(max(gate_radius, 2.5 * sigma), gate_radius, gate_radius * 4.0))
+        physical_gate_radius_m = float(
+            np.clip(3.0 * sigma, self._association_distance_m, self._association_distance_m * 4.0)
+        )
+        return covariance, physical_gate_radius_m
+
+    def _mahalanobis_distance_squared(
+        self,
+        residual: np.ndarray,
+        covariance: np.ndarray,
+    ) -> float | None:
+        try:
+            solved = np.linalg.solve(covariance, residual)
+        except np.linalg.LinAlgError:
+            return None
+        score = float(residual @ solved)
+        return score if np.isfinite(score) else None
+
+    def _positive_definite_covariance(self, covariance: np.ndarray) -> np.ndarray:
+        covariance = 0.5 * (covariance + covariance.T)
+        eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+        if not np.all(np.isfinite(eigenvalues)):
+            raise np.linalg.LinAlgError("non-finite covariance eigenvalues")
+        clamped = np.maximum(eigenvalues, 1.0e-6)
+        stabilized = eigenvectors @ np.diag(clamped) @ eigenvectors.T
+        return 0.5 * (stabilized + stabilized.T)
 
     def _coerce_covariance(self, value: list[list[float]] | None) -> np.ndarray | None:
         if value is None:
@@ -101,4 +139,7 @@ class NearestNeighborAssociator:
             return None
         if covariance.shape != (3, 3) or not np.all(np.isfinite(covariance)):
             return None
-        return covariance
+        try:
+            return self._positive_definite_covariance(covariance)
+        except np.linalg.LinAlgError:
+            return None

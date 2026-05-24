@@ -245,6 +245,7 @@ class FarFieldRangeEstimate:
     radial_std_m: float
     range_observability: float
     residual_rms_seconds: float
+    range_projection_mode: str
 
 
 def _far_field_range_fit(
@@ -312,12 +313,24 @@ def _far_field_range_fit(
     else:
         range_scale_m = max(abs(radius), 1.0)
         range_observability = float(np.clip(range_scale_m / (range_scale_m + radial_std_m), 0.0, 1.0))
+    prior_radius_tolerance_m = max(0.5, initial_range_m * 0.02)
+    range_projection_mode = (
+        "prior_projected"
+        if (
+            not solved.success
+            or abs(radius - initial_range_m) <= prior_radius_tolerance_m
+            or range_observability < 0.10
+            or radial_std_m >= max(radius, 1.0)
+        )
+        else "range_refined"
+    )
     return FarFieldRangeEstimate(
         position=position,
         radius_m=float(radius),
         radial_std_m=float(radial_std_m),
         range_observability=range_observability,
         residual_rms_seconds=rmse_s,
+        range_projection_mode=range_projection_mode,
     )
 
 
@@ -583,6 +596,11 @@ class SRPPhatLocalizer:
             position_covariance_m2=covariance_to_nested_list(covariance_m2),
             range_observability=range_observability,
             residual_rms_seconds=rmse_s,
+            range_projection_mode=(
+                range_estimate.range_projection_mode
+                if array_aperture_m <= self.tight_array_aperture_m
+                else "range_refined"
+            ),
         )
 
 
@@ -720,6 +738,7 @@ class MusicLocalizer:
             position_covariance_m2=covariance_to_nested_list(covariance_m2),
             range_observability=range_estimate.range_observability,
             residual_rms_seconds=rmse_s,
+            range_projection_mode=range_estimate.range_projection_mode,
         )
 
 
@@ -837,4 +856,5 @@ class EspritLocalizer:
             position_covariance_m2=covariance_to_nested_list(covariance_m2),
             range_observability=range_estimate.range_observability,
             residual_rms_seconds=rmse_s,
+            range_projection_mode=range_estimate.range_projection_mode,
         )

@@ -45,6 +45,8 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
             localization_band_hz: payload.config.localization_band_hz,
             grid_resolution_m: payload.config.localization_srp_grid_resolution_m,
             search_padding_m: payload.config.localization_search_padding_m,
+            far_field_default_range_m: payload.config.localization_far_field_default_range_m,
+            far_field_max_range_m: payload.config.localization_far_field_max_range_m,
             ..SrpPhatConfig::default()
         };
         estimate_tetrahedral_steering(
@@ -71,6 +73,7 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
                 position_m: None,
                 position_covariance_m2: None,
                 range_observability: None,
+                range_projection_mode: None,
                 confidence: 0.0,
                 residual_rms_seconds: f32::INFINITY,
                 sound_speed_mps: payload.effective_sound_speed_mps,
@@ -451,6 +454,7 @@ fn localization_manifest_payload(
         position_m: result.position_m,
         position_covariance_m2: result.position_covariance_m2,
         range_observability: result.range_observability,
+        range_projection_mode: result.range_projection_mode.clone(),
         confidence: result.confidence,
         residual_rms_seconds: result
             .residual_rms_seconds
