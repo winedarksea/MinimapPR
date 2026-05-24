@@ -702,20 +702,20 @@ class IamfPipeline:
         positions_path: Path,
         output_iamf_path: Path,
     ) -> bytes | None:
-        """Encode bed + objects as IAMF using the Rust sidecar writer.
+        """Encode bed + objects as IAMF with FFmpeg/libopus.
 
-        The sidecar encoder embeds the per-temporal-unit object coordinates from
-        `positions_json_path` into the IAMF temporal units, which keeps the video
-        export path spatially correct while still producing a remuxable .iamf.
+        Object coordinates stay in the JSON sidecar until the custom writer has
+        decoder coverage. FFmpeg's muxer reliably remuxes its own IAMF stream
+        groups into MP4; the experimental coordinate-bearing writer does not.
         """
-        return await self._encode_iamf_rust(
+        await _encode_iamf_ffmpeg(
             bed_path,
             object_path,
-            positions_path,
             output_iamf_path,
             bed_loudness,
             object_loudness,
         )
+        return None
 
     async def _encode_iamf_rust(
         self,

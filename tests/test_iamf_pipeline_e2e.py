@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import math
 import json
+import shutil
+import subprocess
 import tempfile
 import time
 import wave
@@ -31,6 +33,7 @@ from minimappr.core.iamf_pipeline import (
     OUTPUT_RATE_HZ,
     _encode_iamf_ffmpeg,
     _ffmpeg_mux,
+    _write_wav,
 )
 from minimappr.utils.audio import write_wav_mono
 
@@ -451,6 +454,88 @@ class TestIamfPipelineE2E:
             )
 
         try_iamf_mock.assert_awaited_once_with(video_path, iamf_path, output_path, 0.125)
+
+    @pytest.mark.asyncio
+    async def test_ffmpeg_iamf_encode_remuxes_into_youtube_mp4(self, tmp_path: Path):
+        if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
+            pytest.skip("ffmpeg/ffprobe not installed")
+
+        n_samples = OUTPUT_RATE_HZ
+        t = np.arange(n_samples, dtype=np.float32) / OUTPUT_RATE_HZ
+        bed = np.stack(
+            [
+                0.05 * np.sin(2 * math.pi * 440.0 * t),
+                0.02 * np.sin(2 * math.pi * 550.0 * t),
+                0.02 * np.sin(2 * math.pi * 660.0 * t),
+                0.02 * np.sin(2 * math.pi * 770.0 * t),
+            ]
+        ).astype(np.float32)
+        obj = (0.02 * np.sin(2 * math.pi * 880.0 * t)).astype(np.float32)
+        loudness = __import__(
+            "minimappr.core.iamf_pipeline",
+            fromlist=["LoudnessMeasurement"],
+        ).LoudnessMeasurement(integrated_lufs=-20.0, true_peak_dbfs=-3.0)
+
+        bed_path = tmp_path / "bed.wav"
+        object_path = tmp_path / "object.wav"
+        iamf_path = tmp_path / "audio.iamf"
+        video_path = tmp_path / "video.mp4"
+        output_path = tmp_path / "youtube_export.mp4"
+
+        _write_wav(bed_path, bed, OUTPUT_RATE_HZ)
+        write_wav_mono(object_path, obj, OUTPUT_RATE_HZ)
+        await _encode_iamf_ffmpeg(
+            bed_path,
+            object_path,
+            iamf_path,
+            loudness,
+            [loudness],
+        )
+
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=320x240:rate=30:duration=1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                str(video_path),
+            ],
+            check=True,
+        )
+
+        await _ffmpeg_mux(
+            video_path,
+            iamf_path,
+            tmp_path / "ambix.wav",
+            output_path,
+            video_audio_offset_s=0.0,
+        )
+
+        probe = subprocess.run(
+            [
+                "ffprobe",
+                "-hide_banner",
+                "-v",
+                "error",
+                "-show_stream_groups",
+                "-of",
+                "json",
+                str(output_path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert "IAMF Mix Presentation" in probe.stdout
 
     @pytest.mark.asyncio
     async def test_full_pipeline_with_python_buffer(self, work_dir: Path, artifacts_dir: Path):
