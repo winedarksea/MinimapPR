@@ -15,7 +15,7 @@ from minimappr.core.audio_buffer import MultiSensorBuffer
 from minimappr.core.beamforming import DelayAndSumBeamformer, MVDRBeamformer
 from minimappr.core.fusion_node import FusionNode
 from minimappr.core.geo import LocalCoordinateFrame
-from minimappr.core.localization_dispatch import LocalizationDispatcher
+from minimappr.core.localization_dispatch import LocalizationDispatcher, build_localizer_from_settings
 from minimappr.core.node_registry import NodeRegistry
 from minimappr.core.tracking import TrackManager
 from minimappr.core.zones import ZoneMatcher
@@ -189,14 +189,17 @@ def test_tight_array_srp_far_field_reports_bearing_with_honest_range_uncertainty
 
 
 @pytest.mark.parametrize(
-    "source",
+    ("source", "max_position_error_m"),
     [
-        np.asarray([0.20, 0.10, 0.15], dtype=np.float64),
-        np.asarray([1.5, 0.6, 0.4], dtype=np.float64),
-        np.asarray([4.0, -2.0, 1.0], dtype=np.float64),
+        (np.asarray([0.20, 0.10, 0.15], dtype=np.float64), 0.10),
+        (np.asarray([1.5, 0.6, 0.4], dtype=np.float64), 1.50),
+        (np.asarray([4.0, -2.0, 1.0], dtype=np.float64), 4.50),
     ],
 )
-def test_tight_array_srp_near_field_regression_keeps_bearing_and_covariance(source: np.ndarray) -> None:
+def test_tight_array_srp_near_field_regression_keeps_bearing_and_covariance(
+    source: np.ndarray,
+    max_position_error_m: float,
+) -> None:
     sample_rate_hz = 48_000
     n = int(sample_rate_hz * 0.18)
     rng = np.random.default_rng(93)
@@ -229,10 +232,108 @@ def test_tight_array_srp_near_field_regression_keeps_bearing_and_covariance(sour
     ).localize(sensor_positions, windows, sample_rate_hz, 20.0, 0.5)
 
     estimate = np.asarray(result.position_m, dtype=np.float64)
+    position_error_m = float(np.linalg.norm(estimate - source))
     estimated_direction = estimate - centroid
     estimated_direction /= np.linalg.norm(estimated_direction)
     assert float(np.dot(estimated_direction, expected_direction)) > 0.95
+    assert position_error_m <= max_position_error_m
+    assert result.range_projection_mode != "prior_projected"
     assert result.position_covariance_m2 is not None
+
+
+def test_birdnet_hybrid_profile_uses_fixed_srp_for_tight_array_near_field() -> None:
+    sample_rate_hz = 48_000
+    n = int(sample_rate_hz * 0.18)
+    rng = np.random.default_rng(95)
+    excitation = (rng.standard_normal(n) * np.hanning(n)).astype(np.float32)
+    sensor_positions = {
+        "s0": np.array([0.0, 0.0, 0.0]),
+        "s1": np.array([0.05, 0.0, 0.0]),
+        "s2": np.array([0.0, 0.05, 0.0]),
+        "s3": np.array([0.0, 0.0, 0.05]),
+    }
+    source = np.asarray([0.20, 0.10, 0.15], dtype=np.float64)
+    distances = {
+        sensor_id: float(np.linalg.norm(source - position))
+        for sensor_id, position in sensor_positions.items()
+    }
+    min_delay_s = min(distances.values()) / 343.2
+    windows = {
+        sensor_id: shift_signal(excitation, sample_rate_hz, (distance / 343.2) - min_delay_s)
+        for sensor_id, distance in distances.items()
+    }
+    settings = Settings(
+        runtime_profile="birdnet_hybrid_production",
+        localization_srp_grid_resolution_m=0.05,
+        localization_search_padding_m=0.3,
+    )
+    result = build_localizer_from_settings(settings).localize(
+        sensor_positions=sensor_positions,
+        sensor_windows=windows,
+        sample_rate_hz=sample_rate_hz,
+        temperature_c=20.0,
+        humidity_fraction=0.5,
+    )
+
+    estimate = np.asarray(result.position_m, dtype=np.float64)
+    assert float(np.linalg.norm(estimate - source)) <= 0.10
+    assert result.attempted_algorithm == "srp_phat"
+    assert result.resolved_algorithm == "srp_phat"
+    assert result.range_projection_mode != "prior_projected"
+    assert result.position_covariance_m2 is not None
+
+
+def test_birdnet_hybrid_profile_uses_fixed_srp_for_tight_array_far_field() -> None:
+    sample_rate_hz = 48_000
+    n = int(sample_rate_hz * 0.18)
+    rng = np.random.default_rng(96)
+    excitation = (rng.standard_normal(n) * np.hanning(n)).astype(np.float32)
+    sound_speed = 343.2
+    sensor_positions = {
+        "s0": np.array([0.0, 0.0, 0.0]),
+        "s1": np.array([0.05, 0.0, 0.0]),
+        "s2": np.array([0.0, 0.05, 0.0]),
+        "s3": np.array([0.0, 0.0, 0.05]),
+    }
+    source = np.asarray([82.0, 34.0, 11.0], dtype=np.float64)
+    centroid = np.mean(np.vstack(list(sensor_positions.values())), axis=0)
+    expected_direction = source - centroid
+    expected_direction /= np.linalg.norm(expected_direction)
+    distances = {
+        sensor_id: float(np.linalg.norm(source - position))
+        for sensor_id, position in sensor_positions.items()
+    }
+    min_delay_s = min(distances.values()) / sound_speed
+    windows = {
+        sensor_id: shift_signal(excitation, sample_rate_hz, (distance / sound_speed) - min_delay_s)
+        for sensor_id, distance in distances.items()
+    }
+    settings = Settings(
+        runtime_profile="birdnet_hybrid_production",
+        localization_srp_grid_resolution_m=0.5,
+        localization_search_padding_m=1.0,
+        localization_far_field_default_range_m=60.0,
+        localization_far_field_max_range_m=250.0,
+    )
+    result = build_localizer_from_settings(settings).localize(
+        sensor_positions=sensor_positions,
+        sensor_windows=windows,
+        sample_rate_hz=sample_rate_hz,
+        temperature_c=20.0,
+        humidity_fraction=0.5,
+    )
+
+    estimate = np.asarray(result.position_m, dtype=np.float64)
+    estimated_offset = estimate - centroid
+    estimated_range_m = float(np.linalg.norm(estimated_offset))
+    estimated_direction = estimated_offset / estimated_range_m
+    assert estimated_range_m > 20.0
+    assert float(np.dot(estimated_direction, expected_direction)) > 0.97
+    assert result.attempted_algorithm == "srp_phat"
+    assert result.resolved_algorithm == "srp_phat"
+    assert result.range_projection_mode == "prior_projected"
+    assert result.range_observability is not None
+    assert result.range_observability < 0.10
 
 
 def test_localization_dispatch_geometry_aware_and_cascade() -> None:

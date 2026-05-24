@@ -471,6 +471,77 @@ class SRPPhatLocalizer:
             raise LocalizationError("SRP-PHAT could not form sensor pairs")
 
         if array_aperture_m <= self.tight_array_aperture_m:
+            mins = np.min(pos_matrix, axis=0) - self.search_padding_m
+            maxs = np.max(pos_matrix, axis=0) + self.search_padding_m
+            grid = _grid_from_bounds(
+                mins=mins,
+                maxs=maxs,
+                resolution_m=max(0.05, self.grid_resolution_m),
+                max_points=max(1, self.max_grid_points),
+            )
+            if grid.size == 0:
+                raise LocalizationError("SRP-PHAT grid is empty")
+
+            near_scores = np.zeros(grid.shape[0], dtype=np.float64)
+            for pos_a, pos_b, lags, corr in pair_terms:
+                lag0 = float(lags[0])
+                step = float(lags[1] - lags[0]) if lags.size > 1 else (1.0 / sample_rate_hz)
+                dist_a = np.linalg.norm(grid - pos_a[None, :], axis=1)
+                dist_b = np.linalg.norm(grid - pos_b[None, :], axis=1)
+                tau = (dist_a - dist_b) / sound_speed
+                indices = np.rint((tau - lag0) / step).astype(np.int64)
+                valid = (indices >= 0) & (indices < corr.size)
+                near_scores[valid] += corr[indices[valid]]
+
+            near_best_idx = int(np.argmax(near_scores))
+            near_grid_position = grid[near_best_idx]
+            try:
+                near_best_position, near_rmse_s = _solve_position_from_tdoa(
+                    sensor_positions=sensor_positions,
+                    reference_sensor=reference_sensor,
+                    tdoa_s=measured_tdoa,
+                    sound_speed=sound_speed,
+                    x0=near_grid_position,
+                )
+            except LocalizationError:
+                near_best_position = near_grid_position
+                near_predicted = _predicted_tdoa(
+                    position=near_best_position,
+                    sensor_positions=sensor_positions,
+                    reference_sensor=reference_sensor,
+                    meas_ids=meas_ids,
+                    sound_speed=sound_speed,
+                )
+                near_residual = np.asarray(
+                    [near_predicted[sensor_id] - measured_tdoa[sensor_id] for sensor_id in meas_ids],
+                    dtype=np.float64,
+                )
+                near_rmse_s = float(np.sqrt(np.mean(np.square(near_residual))))
+
+            near_covariance_m2 = covariance_from_jacobian(
+                _tdoa_jacobian(
+                    position=near_best_position,
+                    sensor_positions=sensor_positions,
+                    reference_sensor=reference_sensor,
+                    meas_ids=meas_ids,
+                    sound_speed=sound_speed,
+                ),
+                near_rmse_s,
+                minimum_time_std_s=1.0 / max(sample_rate_hz * max(self.interp, 1), 1),
+                minimum_std_m=max(self.grid_resolution_m * 0.5, minimum_position_std_m),
+            )
+            near_range_observability = range_observability_from_covariance(
+                near_covariance_m2,
+                near_best_position - array_centroid,
+            )
+            boundary_margin_m = max(0.05, self.grid_resolution_m)
+            boundary_clamped = bool(
+                np.any(np.abs(near_grid_position - mins) <= boundary_margin_m)
+                or np.any(np.abs(maxs - near_grid_position) <= boundary_margin_m)
+            )
+            if boundary_clamped and near_range_observability is not None:
+                near_range_observability = float(min(near_range_observability, 0.25))
+
             relative_tdoa_by_sensor = {reference_sensor: 0.0, **measured_tdoa}
             direction_rows: list[np.ndarray] = []
             direction_targets: list[float] = []
@@ -492,8 +563,8 @@ class SRPPhatLocalizer:
                 np.linalg.norm(direction_matrix @ best_direction - target_vector)
                 / (np.linalg.norm(target_vector) + EPSILON)
             )
-            scores = np.asarray([max(0.0, 1.0 - direction_fit_residual)], dtype=np.float64)
-            best_idx = 0
+            far_scores = np.asarray([max(0.0, 1.0 - direction_fit_residual)], dtype=np.float64)
+            far_best_idx = 0
             range_estimate = _far_field_range_fit(
                 direction=best_direction,
                 centroid=array_centroid,
@@ -505,16 +576,35 @@ class SRPPhatLocalizer:
                 max_range_m=max(self.far_field_default_range_m, self.far_field_max_range_m),
                 minimum_time_std_s=1.0 / max(sample_rate_hz * max(self.interp, 1), 1),
             )
-            best_position = range_estimate.position
-            rmse_s = range_estimate.residual_rms_seconds
-            covariance_m2 = _far_field_covariance(
+            far_best_position = range_estimate.position
+            far_rmse_s = range_estimate.residual_rms_seconds
+            far_covariance_m2 = _far_field_covariance(
                 direction=best_direction,
                 range_estimate=range_estimate,
                 angular_std_rad=float(np.clip(direction_fit_residual, 0.05, 0.6)),
                 aperture_m=array_aperture_m,
                 minimum_position_std_m=minimum_position_std_m,
             )
-            range_observability = range_estimate.range_observability
+            far_range_observability = range_estimate.range_observability
+
+            scores = near_scores
+            best_idx = near_best_idx
+            best_position = near_best_position
+            rmse_s = near_rmse_s
+            covariance_m2 = near_covariance_m2
+            range_observability = near_range_observability
+            range_projection_mode = "bounded_grid_boundary" if boundary_clamped else "range_refined"
+            far_selection_margin = 0.5 if boundary_clamped else 0.2
+            if np.isfinite(far_rmse_s) and (
+                not np.isfinite(rmse_s) or far_rmse_s <= (rmse_s * far_selection_margin)
+            ):
+                scores = far_scores
+                best_idx = far_best_idx
+                best_position = far_best_position
+                rmse_s = far_rmse_s
+                covariance_m2 = far_covariance_m2
+                range_observability = far_range_observability
+                range_projection_mode = range_estimate.range_projection_mode
         else:
             mins = np.min(pos_matrix, axis=0) - self.search_padding_m
             maxs = np.max(pos_matrix, axis=0) + self.search_padding_m
@@ -568,6 +658,7 @@ class SRPPhatLocalizer:
                 covariance_m2,
                 best_position - array_centroid,
             )
+            range_projection_mode = "range_refined"
 
         gdop = _gdop(
             position=best_position,
@@ -596,11 +687,7 @@ class SRPPhatLocalizer:
             position_covariance_m2=covariance_to_nested_list(covariance_m2),
             range_observability=range_observability,
             residual_rms_seconds=rmse_s,
-            range_projection_mode=(
-                range_estimate.range_projection_mode
-                if array_aperture_m <= self.tight_array_aperture_m
-                else "range_refined"
-            ),
+            range_projection_mode=range_projection_mode,
         )
 
 

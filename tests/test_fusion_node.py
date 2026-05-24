@@ -60,6 +60,29 @@ class _FixedReferenceLocalizer:
         )
 
 
+class _LatencyInjectedFixedReferenceLocalizer(_FixedReferenceLocalizer):
+    def __init__(self, reference_sensor: str, *, latency_seconds: float, **kwargs: object) -> None:
+        super().__init__(reference_sensor, **kwargs)
+        self.latency_seconds = latency_seconds
+
+    def localize(
+        self,
+        sensor_positions: dict[str, np.ndarray],
+        sensor_windows: dict[str, np.ndarray],
+        sample_rate_hz: int,
+        temperature_c: float,
+        humidity_fraction: float,
+    ) -> LocalizationResult:
+        time.sleep(self.latency_seconds)
+        return super().localize(
+            sensor_positions,
+            sensor_windows,
+            sample_rate_hz,
+            temperature_c,
+            humidity_fraction,
+        )
+
+
 class _CountingClassifier(AudioClassifier):
     def __init__(self) -> None:
         self.calls = 0
@@ -514,7 +537,10 @@ async def test_fusion_reuses_localized_classification_for_matching_omni_referenc
         settings=settings,
         registry=NodeRegistry(),
         buffer=MultiSensorBuffer(max_duration_seconds=settings.max_sensor_buffer_seconds),
-        localizer=_FixedReferenceLocalizer(reference_sensor="reuse-node:ch0"),
+        localizer=_LatencyInjectedFixedReferenceLocalizer(
+            reference_sensor="reuse-node:ch0",
+            latency_seconds=0.005,
+        ),
         classifier=classifier,
         tracker=TrackManager(settings),
         storage=storage,
@@ -567,6 +593,11 @@ async def test_fusion_reuses_localized_classification_for_matching_omni_referenc
     status = await fusion.status()
     assert classifier.calls == 1
     assert status["metrics"]["classification_reuse_hits"] == 1
+    assert status["metrics"]["localization_stage_in"] >= 1
+    assert status["metrics"]["localization_stage_out"] >= 1
+    assert status["metrics"]["localization_stage_total_time_ms"] >= 4.0
+    assert status["metrics"]["localization_stage_max_time_ms"] >= 4.0
+    assert status["metrics"]["stage_timeout_count"] == 0
 
     await fusion.stop()
     await storage.close()
