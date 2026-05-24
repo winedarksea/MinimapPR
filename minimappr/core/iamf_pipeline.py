@@ -375,11 +375,11 @@ class IamfPipeline:
             iamf_path.write_bytes(iamf_bytes)
         record.iamf_path = iamf_path
 
-        # AmbiX WAV: 4-channel W/X/Y/Z at OUTPUT_RATE_HZ for fallback mux.
+        # AmbiX WAV: 4-channel W/X/Y/Z at OUTPUT_RATE_HZ for review exports.
         ambix_path = work_dir / "ambix.wav"
         _write_wav(ambix_path, bed_clean, OUTPUT_RATE_HZ)
 
-        # ── 10. Multiplex video + IAMF (primary) or AmbiX+AAC (fallback) ──────
+        # ── 10. Multiplex video + IAMF when video exists ──────────────────────
         if record.video_path and record.video_path.exists():
             logger.info("[%s] step 9: ffmpeg mux", record.session_id[:8])
             youtube_path = work_dir / "youtube_export.mp4"
@@ -557,19 +557,26 @@ class IamfPipeline:
     ) -> NDArray[np.float32]:
         """Beamform one track trajectory to a mono object signal.
 
-        Uses the Python MVDRBeamformer when no sidecar is configured, otherwise
-        calls the Rust /api/v1/capture/render/mvdr endpoint.
+        Prefer the Rust /api/v1/capture/render/mvdr endpoint when configured,
+        but fall back to the in-process Python MVDR beamformer if that RPC
+        fails. The offline renderer already has the extracted channel windows,
+        so a transient sidecar read error should degrade performance, not
+        convert the whole recording into a failed session.
         """
-        if self._multi_sensor_buffer is None and self._http is None:
-            raise RuntimeError(
-                "No beamforming backend available (need multi_sensor_buffer or sidecar_url)"
-            )
-        if self._multi_sensor_buffer is not None:
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(
-                None, self._mvdr_beamform_python, channels, traj, capture_rate_hz, mic_positions_m
-            )
-        return await self._mvdr_beamform_rust(channels, traj, capture_rate_hz)
+        if self._http is not None:
+            try:
+                return await self._mvdr_beamform_rust(channels, traj, capture_rate_hz)
+            except (httpx.HTTPError, KeyError, ValueError) as exc:
+                logger.warning(
+                    "MVDR rust beamform failed for track %s; falling back to Python beamformer: %s",
+                    traj.track_id,
+                    str(exc) or exc.__class__.__name__,
+                )
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, self._mvdr_beamform_python, channels, traj, capture_rate_hz, mic_positions_m
+        )
 
     def _mvdr_beamform_python(
         self,
@@ -695,25 +702,20 @@ class IamfPipeline:
         positions_path: Path,
         output_iamf_path: Path,
     ) -> bytes | None:
-        """Encode bed + objects as IAMF.
+        """Encode bed + objects as IAMF using the Rust sidecar writer.
 
-        Uses the in-process IAMF writer so object position metadata is encoded
-        into Parameter_Block_OBUs instead of being left only in a sidecar JSON.
+        The sidecar encoder embeds the per-temporal-unit object coordinates from
+        `positions_json_path` into the IAMF temporal units, which keeps the video
+        export path spatially correct while still producing a remuxable .iamf.
         """
-        from minimappr.core.iamf_writer import write_iamf
-
-        output_iamf_path.write_bytes(
-            write_iamf(
-                bed,
-                objects,
-                positions_per_unit,
-                bed_loudness,
-                object_loudness,
-                sample_rate_hz=OUTPUT_RATE_HZ,
-                samples_per_frame=SAMPLES_PER_FRAME,
-            )
+        return await self._encode_iamf_rust(
+            bed_path,
+            object_path,
+            positions_path,
+            output_iamf_path,
+            bed_loudness,
+            object_loudness,
         )
-        return None
 
     async def _encode_iamf_rust(
         self,
@@ -1550,10 +1552,9 @@ async def _ffmpeg_mux(
 ) -> None:
     """Mux video with audio into a YouTube-ready MP4.
 
-    Embeds the .iamf file directly and recreates IAMF stream groups in the
-    MP4. We intentionally fail the IAMF export instead of silently writing
-    AAC when include_iamf=True, because that masks the artifact type the UI
-    promised to create.
+    Prefer embedding the .iamf file directly and recreating IAMF stream groups
+    in the MP4. If the host ffmpeg build cannot mux IAMF into MP4, fail the
+    export instead of silently switching to a different audio format.
 
     The video_audio_offset_s corrects for the gap between the video
     first-frame PTS anchor and the actual start of the extracted audio.
@@ -1567,7 +1568,7 @@ async def _ffmpeg_mux(
         logger.info("mux: IAMF-in-MP4 succeeded → %s", output_path.name)
         return
 
-    raise RuntimeError("ffmpeg IAMF-in-MP4 mux failed; AAC fallback disabled for IAMF exports")
+    raise RuntimeError(f"IAMF-in-MP4 mux failed for {output_path.name}")
 
 
 async def _encode_iamf_ffmpeg(
@@ -1827,7 +1828,7 @@ async def _ambix_aac_mux(
     output_path: Path,
     offset_s: float,
 ) -> None:
-    """Fallback mux: 4-channel AmbiX WAV encoded as AAC into MP4."""
+    """Mux 4-channel AmbiX WAV as AAC into MP4 for review exports."""
     itsoffset_args: list[str] = []
     if abs(offset_s) > 0.001:
         itsoffset_args = ["-itsoffset", f"{offset_s:.6f}"]

@@ -30,18 +30,19 @@ from numpy.typing import NDArray
 if TYPE_CHECKING:
     from minimappr.core.iamf_pipeline import LoudnessMeasurement
 
-# ── OBU type constants (IAMF spec §5) ─────────────────────────────────────────
+# ── OBU type constants (IAMF spec §3.2) ───────────────────────────────────────
 
 _OBU_IA_SEQUENCE_HEADER = 31
 _OBU_CODEC_CONFIG = 0
 _OBU_AUDIO_ELEMENT = 1
 _OBU_MIX_PRESENTATION = 2
-_OBU_PARAMETER_BLOCK = 4
-_OBU_TEMPORAL_DELIMITER = 6
-_OBU_AUDIO_FRAME = 7
+_OBU_PARAMETER_BLOCK = 3
+_OBU_TEMPORAL_DELIMITER = 4
+_OBU_AUDIO_FRAME = 5
+_OBU_AUDIO_FRAME_ID0 = 6
 
 # IAMF profiles
-_PROFILE_BASE = 0
+_PROFILE_BASE = 1
 
 # Audio element types
 _AE_TYPE_CHANNEL = 0
@@ -59,8 +60,8 @@ _ANIMATION_LINEAR = 1
 # Ambisonics mode
 _AMBI_MONO_MODE = 0
 
-# ipcm sample format: signed integer
-_IPCM_FORMAT_SIGNED = 0
+# ipcm sample format flags: 0x01 indicates little-endian PCM
+_IPCM_FORMAT_LITTLE_ENDIAN = 0x01
 
 
 # ── Low-level OBU helpers ──────────────────────────────────────────────────────
@@ -81,9 +82,9 @@ def _leb128(n: int) -> bytes:
 
 def _obu(obu_type: int, payload: bytes, *, redundant_copy: bool = False) -> bytes:
     """Wrap payload in an OBU with the IAMF 1-byte header + LEB128 size."""
-    # Header byte: obu_type[4:1] | redundant_copy[0] | trimming_status_flag[0] |
-    #              reserved[2] — simplified to the commonly used encoding.
-    header = ((obu_type & 0x1F) << 3) | (0x01 if redundant_copy else 0x00)
+    # Header byte: obu_type[7:3] | redundant_copy[2] |
+    # trimming_status_flag[1] | extension_flag[0].
+    header = ((obu_type & 0x1F) << 3) | (0x04 if redundant_copy else 0x00)
     return bytes([header]) + _leb128(len(payload)) + payload
 
 
@@ -111,7 +112,7 @@ def _codec_config(codec_config_id: int, sample_rate: int, samples_per_frame: int
     payload += b"ipcm"
     payload += _leb128(samples_per_frame)
     payload += struct.pack(">h", 0)  # audio_roll_distance=0
-    payload += struct.pack(">BBI", _IPCM_FORMAT_SIGNED, 16, sample_rate)
+    payload += struct.pack(">BBI", _IPCM_FORMAT_LITTLE_ENDIAN, 16, sample_rate)
     return _obu(_OBU_CODEC_CONFIG, bytes(payload))
 
 
@@ -353,12 +354,13 @@ class _BitWriter:
 
 
 def _audio_frame_obu(substream_id: int, pcm16_bytes: bytes) -> bytes:
-    """Audio_Frame_OBU (type 7) for one substream.
+    """Audio_Frame_OBU for one substream.
 
-    Uses the explicit_audio_frame_id=True variant so the substream ID is
-    encoded in the OBU header's lower bits, keeping parsers aligned.
+    IAMF uses implicit OBU types 6..23 for audio_substream_id 0..17 and the
+    explicit type 5 payload prefix for higher IDs.
     """
-    # Encode substream_id in the OBU payload (simplified: prefix with leb128 id).
+    if 0 <= substream_id <= 17:
+        return _obu(_OBU_AUDIO_FRAME_ID0 + substream_id, pcm16_bytes)
     payload = _leb128(substream_id) + pcm16_bytes
     return _obu(_OBU_AUDIO_FRAME, payload)
 

@@ -12,6 +12,7 @@ axum = "0.7"
 base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
 http-body-util = "0.1"
+hound = "3"
 memmap2 = "0.9"
 num-complex = "0.4"
 rustfft = "6"

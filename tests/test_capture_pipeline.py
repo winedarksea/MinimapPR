@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import asyncio
 import math
+import os
+import signal
 import struct
 import tempfile
 import time
@@ -21,6 +23,7 @@ import wave
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import numpy as np
 import pytest
 
@@ -34,6 +37,7 @@ from minimappr.core.ambi_atob import (
 )
 from minimappr.core.capture_session import (
     CaptureSessionManager,
+    CaptureSessionRecord,
     CaptureStartRequest,
     CaptureState,
 )
@@ -51,6 +55,7 @@ from minimappr.core.iamf_pipeline import (
     _write_wav_mono,
 )
 from minimappr.core.iamf_object_slot import IamfObjectSlot, select_iamf_object_slot
+from minimappr.core.video_capture import VideoCapture, VideoCaptureConfig
 
 SAMPLE_RATE = 16_000
 
@@ -752,6 +757,114 @@ class TestCaptureSessionManager:
                 await asyncio.sleep(0.01)
 
         assert persisted_states == [CaptureState.PROCESSING, CaptureState.COMPLETED]
+
+    @pytest.mark.asyncio
+    async def test_post_processing_failure_uses_exception_class_when_message_empty(self, tmp_path):
+        manager = CaptureSessionManager()
+        session_id = "failed-postprocess"
+        record = CaptureSessionRecord(
+            session_id=session_id,
+            state=CaptureState.PROCESSING,
+            stream_key="mic-array-1",
+            range_lease_id=None,
+            start_time_ns=time.time_ns(),
+            end_time_ns=time.time_ns(),
+            first_frame_pts_ns=time.time_ns(),
+            work_dir=tmp_path / session_id,
+            video_path=None,
+            ambix_path=None,
+            iamf_path=None,
+            youtube_path=None,
+            error=None,
+        )
+        record.work_dir.mkdir(parents=True, exist_ok=True)
+        manager._sessions[session_id] = record
+
+        async def failing_post_process(_record):
+            raise httpx.ReadError("")
+
+        manager.set_post_process_callback(failing_post_process)
+
+        await manager._run_post_processing(session_id, "")
+
+        assert record.state == CaptureState.FAILED
+        assert record.error == "ReadError"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "posix", reason="Process-group signaling is POSIX-only")
+async def test_video_capture_start_uses_dedicated_process_session(tmp_path):
+    observed: dict[str, object] = {}
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.stderr = asyncio.StreamReader()
+            self.returncode = None
+            self.pid = 4242
+
+        async def wait(self) -> int:
+            self.returncode = 0
+            return 0
+
+    fake_process = _FakeProcess()
+
+    async def fake_create_subprocess_exec(*cmd, **kwargs):
+        observed["cmd"] = list(cmd)
+        observed["kwargs"] = kwargs
+        return fake_process
+
+    async def fake_parse_stderr(self, proc):
+        del proc
+        self._first_frame_pts_ns = self._process_start_ns
+        self._pts_event.set()
+
+    capture = VideoCapture(VideoCaptureConfig(output_path=tmp_path / "output.mp4"))
+
+    with (
+        patch("minimappr.core.video_capture.asyncio.create_subprocess_exec", new=fake_create_subprocess_exec),
+        patch.object(VideoCapture, "_build_command", return_value=["ffmpeg", "-version"]),
+        patch.object(VideoCapture, "_parse_stderr", new=fake_parse_stderr),
+    ):
+        await capture.start()
+
+    assert observed["cmd"] == ["ffmpeg", "-version"]
+    assert observed["kwargs"]["start_new_session"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "posix", reason="Process-group signaling is POSIX-only")
+async def test_video_capture_stop_signals_process_group(tmp_path):
+    waits = 0
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.pid = 5150
+            self.returncode = None
+
+        def terminate(self) -> None:
+            raise AssertionError("stop() should signal the process group on POSIX")
+
+        def kill(self) -> None:
+            raise AssertionError("stop() should signal the process group on POSIX")
+
+        async def wait(self) -> int:
+            nonlocal waits
+            waits += 1
+            self.returncode = 0
+            return 0
+
+    capture = VideoCapture(VideoCaptureConfig(output_path=tmp_path / "output.mp4"))
+    capture._process = _FakeProcess()
+    capture._process_start_ns = 123
+    capture._first_frame_pts_ns = 456
+    capture._reader_task = asyncio.create_task(asyncio.sleep(0))
+
+    with patch("minimappr.core.video_capture.os.killpg") as killpg_mock:
+        result = await capture.stop()
+
+    assert waits == 1
+    killpg_mock.assert_called_once_with(5150, signal.SIGTERM)
+    assert result.first_frame_pts_ns == 456
 
 
 # ── Round-trip: A-to-B → subtract → measure → write ─────────────────────────

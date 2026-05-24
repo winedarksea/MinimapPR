@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import platform
 import re
+import signal
 import sys
 import time
 from dataclasses import dataclass, field
@@ -94,6 +96,7 @@ class VideoCapture:
         self._pts_event = asyncio.Event()
         self._reader_task: Optional[asyncio.Task[None]] = None
         self._stderr_tail: list[str] = []
+        self._use_process_groups = os.name == "posix"
 
     async def start(self) -> None:
         """Spawn ffmpeg and wait until the first frame timestamp is available."""
@@ -104,10 +107,18 @@ class VideoCapture:
         logger.info("starting video capture: %s", " ".join(cmd))
 
         self._process_start_ns = time.time_ns()
+        subprocess_kwargs: dict[str, object] = {
+            "stdout": asyncio.subprocess.DEVNULL,
+            "stderr": asyncio.subprocess.PIPE,
+        }
+        if self._use_process_groups:
+            # The libcamera path shells into a pipeline; isolating the session
+            # lets stop() terminate the whole capture tree instead of only the
+            # shell parent.
+            subprocess_kwargs["start_new_session"] = True
         self._process = await asyncio.create_subprocess_exec(
             *cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
+            **subprocess_kwargs,
         )
         self._reader_task = asyncio.create_task(
             self._parse_stderr(self._process),
@@ -136,16 +147,13 @@ class VideoCapture:
 
         proc = self._process
         logger.info("stopping video capture (SIGTERM)")
-        try:
-            proc.terminate()
-        except ProcessLookupError:
-            pass
+        self._signal_capture_tree(proc, signal.SIGTERM)
 
         try:
             await asyncio.wait_for(proc.wait(), timeout=15.0)
         except asyncio.TimeoutError:
             logger.warning("ffmpeg did not exit after SIGTERM; sending SIGKILL")
-            proc.kill()
+            self._signal_capture_tree(proc, signal.SIGKILL)
             await proc.wait()
 
         if self._reader_task is not None:
@@ -154,6 +162,7 @@ class VideoCapture:
                 await self._reader_task
             except (asyncio.CancelledError, Exception):
                 pass
+            self._reader_task = None
 
         self._process = None
 
@@ -163,6 +172,31 @@ class VideoCapture:
             first_frame_pts_ns=pts_ns,
             process_start_ns=self._process_start_ns,
         )
+
+    def _signal_capture_tree(
+        self,
+        proc: asyncio.subprocess.Process,
+        sig: signal.Signals,
+    ) -> None:
+        if self._use_process_groups and proc.pid is not None:
+            try:
+                os.killpg(proc.pid, sig)
+                return
+            except ProcessLookupError:
+                return
+            except OSError as exc:
+                logger.warning(
+                    "video capture process-group signal failed; falling back to direct process signal: %s",
+                    exc,
+                )
+
+        try:
+            if sig == signal.SIGKILL:
+                proc.kill()
+            else:
+                proc.terminate()
+        except ProcessLookupError:
+            pass
 
     # ── internal ──────────────────────────────────────────────────────────────
 

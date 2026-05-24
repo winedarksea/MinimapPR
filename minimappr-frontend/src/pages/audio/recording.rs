@@ -1,6 +1,7 @@
 use crate::recording::api;
-use crate::recording::{CameraDevice, RecordingStatus, StartRecordingRequest};
+use crate::recording::{CameraDevice, StartRecordingRequest};
 use crate::state::AppState;
+use futures::future::{AbortHandle, Abortable};
 use futures::StreamExt;
 use gloo_timers::future::TimeoutFuture;
 use leptos::prelude::*;
@@ -261,35 +262,18 @@ fn RecordingControls(
     let state = use_context::<AppState>().expect("AppState");
     let active_recording = state.active_recording;
 
-    // Elapsed seconds ticker — only runs while status is Active.
-    let elapsed: RwSignal<u32> = RwSignal::new(0);
-
-    // Start ticker when recording goes Active; reset when session ends.
-    Effect::new(move |_| {
-        let status = active_recording
-            .get()
-            .map(|s| s.status.clone())
-            .unwrap_or(RecordingStatus::Idle);
-        if status == RecordingStatus::Active {
-            let elapsed_clone = elapsed;
-            spawn_local(async move {
-                let mut stream = gloo_timers::future::IntervalStream::new(1_000);
-                while stream.next().await.is_some() {
-                    // Stop ticking once no longer active.
-                    let still_active = active_recording
-                        .get_untracked()
-                        .map(|s| s.status == RecordingStatus::Active)
-                        .unwrap_or(false);
-                    if !still_active {
-                        break;
-                    }
-                    elapsed_clone.update(|e| *e += 1);
-                }
-            });
-        } else if !status.is_active() {
-            elapsed.set(0);
-        }
+    let now_ms: RwSignal<f64> = RwSignal::new(js_sys::Date::now());
+    let (timer_abort_handle, timer_abort_registration) = AbortHandle::new_pair();
+    spawn_local(async move {
+        let mut stream = gloo_timers::future::IntervalStream::new(1_000);
+        let timer_loop = async move {
+            while stream.next().await.is_some() {
+                now_ms.set(js_sys::Date::now());
+            }
+        };
+        let _ = Abortable::new(timer_loop, timer_abort_registration).await;
     });
+    on_cleanup(move || timer_abort_handle.abort());
 
     let is_busy = move || {
         active_recording
@@ -367,7 +351,7 @@ fn RecordingControls(
                 let busy = is_busy();
                 if busy {
                     let session = active_recording.get().unwrap();
-                    let secs = elapsed.get();
+                    let secs = recording_elapsed_seconds(&session, now_ms.get());
                     let elapsed_str = format!(
                         "{:02}:{:02}:{:02}",
                         secs / 3600,
@@ -422,6 +406,15 @@ fn RecordingControls(
             })}
         </div>
     }
+}
+
+fn recording_elapsed_seconds(
+    session: &crate::recording::RecordingSession,
+    now_ms: f64,
+) -> u32 {
+    let end_ms = session.ended_at_ms.unwrap_or(now_ms);
+    let elapsed_ms = (end_ms - session.started_at_ms).max(0.0);
+    (elapsed_ms / 1_000.0).floor() as u32
 }
 
 async fn poll_recording_until_finished(

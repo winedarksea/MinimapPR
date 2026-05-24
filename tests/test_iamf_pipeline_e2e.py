@@ -20,12 +20,18 @@ import wave
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import numpy as np
 import pytest
 
 from minimappr.core.audio_buffer import MultiSensorBuffer
 from minimappr.core.capture_session import CaptureSessionRecord, CaptureState
-from minimappr.core.iamf_pipeline import IamfPipeline, OUTPUT_RATE_HZ
+from minimappr.core.iamf_pipeline import (
+    IamfPipeline,
+    OUTPUT_RATE_HZ,
+    _encode_iamf_ffmpeg,
+    _ffmpeg_mux,
+)
 from minimappr.utils.audio import write_wav_mono
 
 SAMPLE_RATE = 16_000
@@ -387,6 +393,66 @@ class TestIamfPipelineE2E:
         ]
 
     @pytest.mark.asyncio
+    async def test_mvdr_falls_back_to_python_when_rust_rpc_errors(
+        self,
+        artifacts_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        pipeline = IamfPipeline(
+            sidecar_url="http://127.0.0.1:9999",
+            db_storage=_StubStorage(),
+            artifact_dir=artifacts_dir,
+        )
+        channels = _synthetic_4ch(duration_s=0.1)
+        trajectory = pipeline_track = None
+        trajectory = pipeline_track = __import__("minimappr.core.iamf_pipeline", fromlist=["TrackTrajectory"]).TrackTrajectory(
+            track_id="trk-fallback",
+            waypoints=[(0, (1.0, 0.0, 0.0)), (channels.shape[1] - 1, (1.0, 0.0, 0.0))],
+        )
+        expected = np.linspace(-0.25, 0.25, channels.shape[1], dtype=np.float32)
+
+        rust_mock = AsyncMock(side_effect=httpx.ReadError("socket closed"))
+        python_mock = MagicMock(return_value=expected)
+        monkeypatch.setattr(pipeline, "_mvdr_beamform_rust", rust_mock)
+        monkeypatch.setattr(pipeline, "_mvdr_beamform_python", python_mock)
+
+        result = await pipeline._mvdr_beamform(channels, trajectory, SAMPLE_RATE)
+
+        rust_mock.assert_awaited_once()
+        python_mock.assert_called_once()
+        np.testing.assert_allclose(result, expected)
+        await pipeline._http.aclose()
+
+    @pytest.mark.asyncio
+    async def test_ffmpeg_mux_raises_when_iamf_mux_fails(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        video_path = tmp_path / "video.mp4"
+        iamf_path = tmp_path / "audio.iamf"
+        ambix_path = tmp_path / "ambix.wav"
+        output_path = tmp_path / "youtube_export.mp4"
+
+        video_path.write_bytes(b"video")
+        iamf_path.write_bytes(b"iamf")
+        ambix_path.write_bytes(b"wav")
+
+        try_iamf_mock = AsyncMock(return_value=False)
+        monkeypatch.setattr("minimappr.core.iamf_pipeline._try_iamf_mux", try_iamf_mock)
+
+        with pytest.raises(RuntimeError, match="IAMF-in-MP4 mux failed"):
+            await _ffmpeg_mux(
+                video_path,
+                iamf_path,
+                ambix_path,
+                output_path,
+                video_audio_offset_s=0.125,
+            )
+
+        try_iamf_mock.assert_awaited_once_with(video_path, iamf_path, output_path, 0.125)
+
+    @pytest.mark.asyncio
     async def test_full_pipeline_with_python_buffer(self, work_dir: Path, artifacts_dir: Path):
         """Run IamfPipeline.run() end-to-end with synthetic audio in a MultiSensorBuffer."""
         sensor_ids = [f"test_node:ch{i}" for i in range(N_CHANNELS)]
@@ -419,9 +485,31 @@ class TestIamfPipelineE2E:
             multi_sensor_buffer=buffer,
         )
 
+        async def _fake_rust_encoder(
+            self,
+            bed_path: Path,
+            object_path: Path | None,
+            positions_path: Path,
+            output_iamf_path: Path,
+            bed_loudness,
+            object_loudness,
+        ) -> bytes:
+            await _encode_iamf_ffmpeg(
+                bed_path,
+                object_path,
+                output_iamf_path,
+                bed_loudness,
+                object_loudness,
+            )
+            return output_iamf_path.read_bytes()
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(IamfPipeline, "_encode_iamf_rust", _fake_rust_encoder)
+
         try:
             await pipeline.run(record)
         finally:
+            monkeypatch.undo()
             iamf_mod.ARTIFACTS_DIR = original_artifacts_dir
             buffer.unpin("test_session")
 
@@ -476,6 +564,26 @@ class TestIamfPipelineE2E:
             "minimappr.core.iamf_pipeline.render_recording_visual_mp4",
             _fake_visual_renderer,
         )
+
+        async def _fake_rust_encoder(
+            self,
+            bed_path: Path,
+            object_path: Path | None,
+            positions_path: Path,
+            output_iamf_path: Path,
+            bed_loudness,
+            object_loudness,
+        ) -> bytes:
+            await _encode_iamf_ffmpeg(
+                bed_path,
+                object_path,
+                output_iamf_path,
+                bed_loudness,
+                object_loudness,
+            )
+            return output_iamf_path.read_bytes()
+
+        monkeypatch.setattr(IamfPipeline, "_encode_iamf_rust", _fake_rust_encoder)
 
         try:
             await pipeline.run(record)

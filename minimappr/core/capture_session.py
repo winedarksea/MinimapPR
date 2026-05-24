@@ -342,8 +342,13 @@ class CaptureSessionManager:
                 record.state = CaptureState.COMPLETED
         except Exception as exc:
             record.state = CaptureState.FAILED
-            record.error = str(exc)
-            logger.error("session %s post-processing failed: %s", session_id, exc, exc_info=True)
+            record.error = str(exc).strip() or exc.__class__.__name__
+            logger.error(
+                "session %s post-processing failed: %s",
+                session_id,
+                record.error,
+                exc_info=True,
+            )
             await self._cleanup_on_failure(record)
         finally:
             if record.use_python_ingest:
