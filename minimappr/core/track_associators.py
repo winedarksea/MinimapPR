@@ -33,6 +33,7 @@ class NearestNeighborAssociator:
         timestamp_ns: int,
         position_m: tuple[float, float, float],
         existing_tracks: list[TrackState],
+        measurement_covariance_m2: list[list[float]] | None = None,
     ) -> str | None:
         """Return the track ID of the closest active track within the
         association gate, or ``None`` if no track is close enough (meaning
@@ -44,15 +45,60 @@ class NearestNeighborAssociator:
         """
         measurement = np.asarray(position_m, dtype=np.float64)
         best_track_id: str | None = None
-        best_distance = float("inf")
+        best_score = float("inf")
+        measurement_covariance = self._coerce_covariance(measurement_covariance_m2)
 
         for track in existing_tracks:
             if track.status == TrackStatus.DROPPED.value:
                 continue
             track_position = np.asarray(track.position_m, dtype=np.float64)
             distance = float(np.linalg.norm(measurement - track_position))
-            if distance < self._association_distance_m and distance < best_distance:
-                best_distance = distance
+            gate_radius = self._adaptive_gate_radius(
+                measurement_covariance=measurement_covariance,
+                track_covariance=self._coerce_covariance(track.position_covariance_m2),
+            )
+            if gate_radius <= 0.0:
+                continue
+            score = distance / gate_radius
+            if distance < gate_radius and score < best_score:
+                best_score = score
                 best_track_id = track.id
 
         return best_track_id
+
+    def _adaptive_gate_radius(
+        self,
+        *,
+        measurement_covariance: np.ndarray | None,
+        track_covariance: np.ndarray | None,
+    ) -> float:
+        gate_radius = self._association_distance_m
+        combined_covariance = None
+        if measurement_covariance is not None and track_covariance is not None:
+            combined_covariance = measurement_covariance + track_covariance
+        elif measurement_covariance is not None:
+            combined_covariance = measurement_covariance
+        elif track_covariance is not None:
+            combined_covariance = track_covariance
+        if combined_covariance is None:
+            return gate_radius
+        try:
+            eigenvalues = np.linalg.eigvalsh(combined_covariance)
+        except np.linalg.LinAlgError:
+            return gate_radius
+        largest_variance = float(np.max(eigenvalues)) if eigenvalues.size else 0.0
+        if not np.isfinite(largest_variance) or largest_variance <= 0.0:
+            return gate_radius
+        sigma = float(np.sqrt(largest_variance))
+        return float(np.clip(max(gate_radius, 2.5 * sigma), gate_radius, gate_radius * 4.0))
+
+    def _coerce_covariance(self, value: list[list[float]] | None) -> np.ndarray | None:
+        if value is None:
+            return None
+        try:
+            covariance = np.asarray(value, dtype=np.float64)
+        except (TypeError, ValueError):
+            return None
+        if covariance.shape != (3, 3) or not np.all(np.isfinite(covariance)):
+            return None
+        return covariance

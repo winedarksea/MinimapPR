@@ -69,8 +69,10 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
                 resolved_algorithm: skipped_reason.to_string(),
                 steering_direction: [0.0, 0.0, 0.0],
                 position_m: None,
+                position_covariance_m2: None,
+                range_observability: None,
                 confidence: 0.0,
-                residual_rms_seconds: 0.0,
+                residual_rms_seconds: f32::INFINITY,
                 sound_speed_mps: payload.effective_sound_speed_mps,
             },
             pair_tdoas: vec![],
@@ -447,6 +449,8 @@ fn localization_manifest_payload(
         steering_direction: (magnitude(result.steering_direction) > 1.0e-6)
             .then_some(result.steering_direction),
         position_m: result.position_m,
+        position_covariance_m2: result.position_covariance_m2,
+        range_observability: result.range_observability,
         confidence: result.confidence,
         residual_rms_seconds: result
             .residual_rms_seconds

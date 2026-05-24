@@ -32,6 +32,10 @@ pub struct LocalizationManifestPayload {
     pub resolved_algorithm: String,
     pub steering_direction: Option<[f32; 3]>,
     pub position_m: Option<[f32; 3]>,
+    #[serde(default)]
+    pub position_covariance_m2: Option<[[f32; 3]; 3]>,
+    #[serde(default)]
+    pub range_observability: Option<f32>,
     pub confidence: f32,
     pub residual_rms_seconds: Option<f32>,
     pub sound_speed_mps: f32,

@@ -16,6 +16,8 @@ pub struct SrpPhatConfig {
     pub search_padding_m: f32,
     pub max_grid_points: usize,
     pub min_channel_rms: f32,
+    pub far_field_default_range_m: f32,
+    pub far_field_max_range_m: f32,
 }
 
 impl Default for SrpPhatConfig {
@@ -26,6 +28,8 @@ impl Default for SrpPhatConfig {
             search_padding_m: 2.0,
             max_grid_points: 60_000,
             min_channel_rms: 1.0e-4,
+            far_field_default_range_m: 50.0,
+            far_field_max_range_m: 250.0,
         }
     }
 }
@@ -36,6 +40,8 @@ pub struct SrpPhatLocalization {
     pub resolved_algorithm: String,
     pub steering_direction: [f32; 3],
     pub position_m: Option<[f32; 3]>,
+    pub position_covariance_m2: Option<[[f32; 3]; 3]>,
+    pub range_observability: Option<f32>,
     pub confidence: f32,
     pub residual_rms_seconds: f32,
     pub sound_speed_mps: f32,
@@ -51,6 +57,25 @@ struct PairObservation {
     ch_a: usize,
     ch_b: usize,
     correlation: GccPhatCorrelation,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LocalizationCandidate {
+    position_m: [f32; 3],
+    steering_direction: [f32; 3],
+    position_covariance_m2: [[f32; 3]; 3],
+    range_observability: Option<f32>,
+    residual_rms_seconds: f32,
+    contrast_score: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FarFieldRangeEstimate {
+    position_m: [f32; 3],
+    radius_m: f32,
+    radial_std_m: f32,
+    range_observability: f32,
+    residual_rms_seconds: f32,
 }
 
 pub fn estimate_tetrahedral_steering(
@@ -116,82 +141,65 @@ pub fn estimate_tetrahedral_steering(
         };
     }
 
-    let grid = grid_from_bounds(
-        &ordered_channels,
-        mic_positions_m,
-        config.search_padding_m,
-        config.grid_resolution_m,
-        config.max_grid_points,
-    );
-    if grid.is_empty() {
-        return SrpPhatEvaluation {
-            localization: degraded_localization("srp_phat_degraded_empty_grid", sound_speed_mps),
-            pair_tdoas,
-        };
-    }
-
-    let mut scores = vec![0.0_f32; grid.len()];
-    for pair in &pair_observations {
-        for (point_index, point_m) in grid.iter().enumerate() {
-            let predicted_tau_s = predicted_pair_tau_s(
-                *point_m,
-                mic_positions_m[pair.ch_a],
-                mic_positions_m[pair.ch_b],
-                sound_speed_mps,
-            );
-            scores[point_index] += sample_pair_correlation(&pair.correlation, predicted_tau_s);
-        }
-    }
-
-    let (best_index, best_score) = scores
-        .iter()
-        .copied()
-        .enumerate()
-        .max_by(|(_, left), (_, right)| left.partial_cmp(right).unwrap_or(Ordering::Equal))
-        .unwrap_or((0, 0.0));
     let peak_score = measured_tdoa
         .iter()
         .map(|measurement| measurement.peak_value)
         .sum::<f32>()
         / measured_tdoa.len() as f32;
-    if best_score <= EPSILON && peak_score <= EPSILON {
+    let near_field_candidate = near_field_candidate(
+        &ordered_channels,
+        &pair_observations,
+        reference_channel,
+        &measured_tdoa,
+        mic_positions_m,
+        sample_rate_hz,
+        sound_speed_mps,
+        config,
+    );
+    let far_field_candidate = far_field_candidate(
+        &ordered_channels,
+        reference_channel,
+        &measured_tdoa,
+        mic_positions_m,
+        sample_rate_hz,
+        sound_speed_mps,
+        config,
+    );
+    let selected_candidate = select_candidate(near_field_candidate, far_field_candidate);
+    let Some(candidate) = selected_candidate else {
+        return SrpPhatEvaluation {
+            localization: degraded_localization("srp_phat_degraded_empty_grid", sound_speed_mps),
+            pair_tdoas,
+        };
+    };
+    if candidate.contrast_score <= EPSILON && peak_score <= EPSILON {
         return SrpPhatEvaluation {
             localization: degraded_localization("srp_phat_degraded_no_srp_peak", sound_speed_mps),
             pair_tdoas,
         };
     }
 
-    let best_position_m = grid[best_index];
-    let residual_rms_seconds = residual_rms(
-        best_position_m,
-        reference_channel,
-        &measured_tdoa,
-        mic_positions_m,
-        sound_speed_mps,
-    );
     let tau_scale = measured_tdoa
         .iter()
         .map(|measurement| measurement.tdoa_seconds.abs())
         .fold(1.0e-5_f32, f32::max);
-    let fit_score = (1.0 - (residual_rms_seconds / tau_scale)).clamp(0.0, 1.0);
-    let median_score = median(&scores);
-    let contrast = (best_score - median_score) / (best_score.abs() + EPSILON);
+    let fit_score = (1.0 - (candidate.residual_rms_seconds / tau_scale)).clamp(0.0, 1.0);
     let confidence = ((0.6 * fit_score)
         + (0.25 * peak_score.clamp(0.0, 1.0))
-        + (0.15 * contrast.clamp(0.0, 1.0)))
+        + (0.15 * candidate.contrast_score.clamp(0.0, 1.0)))
+        * candidate.range_observability.unwrap_or(1.0).clamp(0.35, 1.0)
     .clamp(0.0, 1.0);
-
-    let array_centroid_m = centroid(&ordered_channels, mic_positions_m);
-    let steering_direction = normalize_or_zero(sub(best_position_m, array_centroid_m));
 
     SrpPhatEvaluation {
         localization: SrpPhatLocalization {
             attempted_algorithm: "srp_phat".to_string(),
             resolved_algorithm: "srp_phat".to_string(),
-            steering_direction,
-            position_m: Some(best_position_m),
+            steering_direction: candidate.steering_direction,
+            position_m: Some(candidate.position_m),
+            position_covariance_m2: Some(candidate.position_covariance_m2),
+            range_observability: candidate.range_observability,
             confidence,
-            residual_rms_seconds,
+            residual_rms_seconds: candidate.residual_rms_seconds,
             sound_speed_mps,
         },
         pair_tdoas,
@@ -211,6 +219,8 @@ fn degraded_localization(resolved_algorithm: &str, sound_speed_mps: f32) -> SrpP
         resolved_algorithm: resolved_algorithm.to_string(),
         steering_direction: [0.0, 0.0, 0.0],
         position_m: None,
+        position_covariance_m2: None,
+        range_observability: None,
         confidence: 0.0,
         residual_rms_seconds: f32::INFINITY,
         sound_speed_mps,
@@ -297,6 +307,627 @@ fn residual_rms(
         squared_error += error_seconds * error_seconds;
     }
     (squared_error / measurements.len() as f32).sqrt()
+}
+
+fn refine_reference_position(
+    initial_position_m: [f32; 3],
+    reference_channel: usize,
+    measurements: &[ReferenceMeasurement],
+    mic_positions_m: &[[f32; 3]],
+    sound_speed_mps: f32,
+) -> [f32; 3] {
+    let mut position_m = initial_position_m;
+    for _ in 0..8 {
+        let reference_position_m = mic_positions_m[reference_channel];
+        let reference_distance_m = euclidean_distance(position_m, reference_position_m) + EPSILON;
+        let mut jacobian_rows = Vec::with_capacity(measurements.len());
+        let mut residuals = Vec::with_capacity(measurements.len());
+        for measurement in measurements {
+            let sensor_position_m = mic_positions_m[measurement.channel_index];
+            let sensor_distance_m = euclidean_distance(position_m, sensor_position_m) + EPSILON;
+            let predicted_tdoa_s = (sensor_distance_m - reference_distance_m) / sound_speed_mps.max(1.0);
+            residuals.push(predicted_tdoa_s - measurement.tdoa_seconds);
+            jacobian_rows.push([
+                ((position_m[0] - sensor_position_m[0]) / (sensor_distance_m * sound_speed_mps.max(1.0)))
+                    - ((position_m[0] - reference_position_m[0]) / (reference_distance_m * sound_speed_mps.max(1.0))),
+                ((position_m[1] - sensor_position_m[1]) / (sensor_distance_m * sound_speed_mps.max(1.0)))
+                    - ((position_m[1] - reference_position_m[1]) / (reference_distance_m * sound_speed_mps.max(1.0))),
+                ((position_m[2] - sensor_position_m[2]) / (sensor_distance_m * sound_speed_mps.max(1.0)))
+                    - ((position_m[2] - reference_position_m[2]) / (reference_distance_m * sound_speed_mps.max(1.0))),
+            ]);
+        }
+
+        let mut normal_matrix = [[0.0_f32; 3]; 3];
+        let mut normal_rhs = [0.0_f32; 3];
+        for (row, residual) in jacobian_rows.iter().zip(residuals.iter()) {
+            for out_axis in 0..3 {
+                normal_rhs[out_axis] -= row[out_axis] * *residual;
+                for in_axis in 0..3 {
+                    normal_matrix[out_axis][in_axis] += row[out_axis] * row[in_axis];
+                }
+            }
+        }
+        for axis in 0..3 {
+            normal_matrix[axis][axis] += 1.0e-6;
+        }
+        let Some(delta_m) = solve_3x3(normal_matrix, normal_rhs) else {
+            break;
+        };
+        position_m = add(position_m, delta_m);
+        if magnitude(delta_m) <= 1.0e-4 {
+            break;
+        }
+    }
+    position_m
+}
+
+fn near_field_candidate(
+    active_channels: &[usize],
+    pair_observations: &[PairObservation],
+    reference_channel: usize,
+    measurements: &[ReferenceMeasurement],
+    mic_positions_m: &[[f32; 3]],
+    sample_rate_hz: u32,
+    sound_speed_mps: f32,
+    config: SrpPhatConfig,
+) -> Option<LocalizationCandidate> {
+    let grid = grid_from_bounds(
+        active_channels,
+        mic_positions_m,
+        config.search_padding_m,
+        config.grid_resolution_m,
+        config.max_grid_points,
+    );
+    if grid.is_empty() {
+        return None;
+    }
+
+    let mut scores = vec![0.0_f32; grid.len()];
+    for pair in pair_observations {
+        for (point_index, point_m) in grid.iter().enumerate() {
+            let predicted_tau_s = predicted_pair_tau_s(
+                *point_m,
+                mic_positions_m[pair.ch_a],
+                mic_positions_m[pair.ch_b],
+                sound_speed_mps,
+            );
+            scores[point_index] += sample_pair_correlation(&pair.correlation, predicted_tau_s);
+        }
+    }
+
+    let (best_index, best_score) = scores
+        .iter()
+        .copied()
+        .enumerate()
+        .max_by(|(_, left), (_, right)| left.partial_cmp(right).unwrap_or(Ordering::Equal))?;
+    let best_position_m = grid[best_index];
+    let refined_position_m = refine_reference_position(
+        best_position_m,
+        reference_channel,
+        measurements,
+        mic_positions_m,
+        sound_speed_mps,
+    );
+    let residual_rms_seconds = residual_rms(
+        refined_position_m,
+        reference_channel,
+        measurements,
+        mic_positions_m,
+        sound_speed_mps,
+    );
+    let minimum_std_m = (config.grid_resolution_m * 0.5).max(0.05);
+    let (position_covariance_m2, range_observability) = position_covariance_and_observability(
+        refined_position_m,
+        centroid(active_channels, mic_positions_m),
+        reference_channel,
+        measurements,
+        mic_positions_m,
+        sample_rate_hz,
+        sound_speed_mps,
+        minimum_std_m,
+    );
+    let (mins, maxs) = padded_bounds(active_channels, mic_positions_m, config.search_padding_m);
+    let boundary_clamped = is_boundary_clamped(best_position_m, mins, maxs, config.grid_resolution_m);
+    Some(LocalizationCandidate {
+        position_m: refined_position_m,
+        steering_direction: normalize_or_zero(sub(refined_position_m, centroid(active_channels, mic_positions_m))),
+        position_covariance_m2,
+        range_observability: Some(if boundary_clamped {
+            range_observability.min(0.25)
+        } else {
+            range_observability
+        }),
+        residual_rms_seconds,
+        contrast_score: ((best_score - median(&scores)) / (best_score.abs() + EPSILON)).clamp(0.0, 1.0),
+    })
+}
+
+fn far_field_candidate(
+    active_channels: &[usize],
+    reference_channel: usize,
+    measurements: &[ReferenceMeasurement],
+    mic_positions_m: &[[f32; 3]],
+    sample_rate_hz: u32,
+    sound_speed_mps: f32,
+    config: SrpPhatConfig,
+) -> Option<LocalizationCandidate> {
+    let (direction, direction_fit_residual) = pairwise_far_field_direction(
+        active_channels,
+        reference_channel,
+        measurements,
+        mic_positions_m,
+        sound_speed_mps,
+    )?;
+    let range_estimate = fit_far_field_range(
+        direction,
+        centroid(active_channels, mic_positions_m),
+        reference_channel,
+        measurements,
+        mic_positions_m,
+        sample_rate_hz,
+        sound_speed_mps,
+        config,
+    );
+    let lateral_std_m = (config.grid_resolution_m * 0.5)
+        .max(range_estimate.radius_m * direction_fit_residual.clamp(0.05, 0.6))
+        .max(aperture(active_channels, mic_positions_m) * 0.5)
+        .max(sound_speed_mps / sample_rate_hz.max(1) as f32);
+    let radial_std_m = range_estimate.radial_std_m.max(lateral_std_m);
+    Some(LocalizationCandidate {
+        position_m: range_estimate.position_m,
+        steering_direction: direction,
+        position_covariance_m2: directional_covariance(direction, lateral_std_m, radial_std_m),
+        range_observability: Some(range_estimate.range_observability),
+        residual_rms_seconds: range_estimate.residual_rms_seconds,
+        contrast_score: (1.0 - direction_fit_residual).clamp(0.0, 1.0),
+    })
+}
+
+fn select_candidate(
+    near_field_candidate: Option<LocalizationCandidate>,
+    far_field_candidate: Option<LocalizationCandidate>,
+) -> Option<LocalizationCandidate> {
+    match (near_field_candidate, far_field_candidate) {
+        (Some(near), Some(far)) => {
+            if far.residual_rms_seconds.is_finite()
+                && (!near.residual_rms_seconds.is_finite()
+                    || far.residual_rms_seconds <= (near.residual_rms_seconds * 0.2))
+            {
+                Some(far)
+            } else {
+                Some(near)
+            }
+        }
+        (Some(near), None) => Some(near),
+        (None, Some(far)) => Some(far),
+        (None, None) => None,
+    }
+}
+
+fn pairwise_far_field_direction(
+    active_channels: &[usize],
+    reference_channel: usize,
+    measurements: &[ReferenceMeasurement],
+    mic_positions_m: &[[f32; 3]],
+    sound_speed_mps: f32,
+) -> Option<([f32; 3], f32)> {
+    let mut relative_tdoa_seconds = vec![None; mic_positions_m.len()];
+    relative_tdoa_seconds[reference_channel] = Some(0.0);
+    for measurement in measurements {
+        relative_tdoa_seconds[measurement.channel_index] = Some(measurement.tdoa_seconds);
+    }
+
+    let mut rows = Vec::new();
+    let mut targets = Vec::new();
+    for (left_index, &channel_a) in active_channels.iter().enumerate() {
+        let tau_a_seconds = relative_tdoa_seconds[channel_a]?;
+        for &channel_b in &active_channels[left_index + 1..] {
+            let tau_b_seconds = relative_tdoa_seconds[channel_b]?;
+            rows.push(sub(mic_positions_m[channel_b], mic_positions_m[channel_a]));
+            targets.push(sound_speed_mps * (tau_a_seconds - tau_b_seconds));
+        }
+    }
+    let direction = solve_normal_equations(&rows, &targets)?;
+    let direction = normalize_or_zero(direction);
+    if magnitude(direction) <= EPSILON {
+        return None;
+    }
+    let target_norm = targets.iter().map(|value| value * value).sum::<f32>().sqrt().max(EPSILON);
+    let fit_error = rows
+        .iter()
+        .zip(targets.iter())
+        .map(|(row, target)| {
+            let error = dot(*row, direction) - *target;
+            error * error
+        })
+        .sum::<f32>()
+        .sqrt()
+        / target_norm;
+    Some((direction, fit_error))
+}
+
+fn fit_far_field_range(
+    direction: [f32; 3],
+    centroid_m: [f32; 3],
+    reference_channel: usize,
+    measurements: &[ReferenceMeasurement],
+    mic_positions_m: &[[f32; 3]],
+    sample_rate_hz: u32,
+    sound_speed_mps: f32,
+    config: SrpPhatConfig,
+) -> FarFieldRangeEstimate {
+    let max_range_m = config
+        .far_field_max_range_m
+        .max(config.far_field_default_range_m)
+        .max(1.0);
+    let default_range_m = config.far_field_default_range_m.max(0.5).min(max_range_m);
+    let mut left_m = 0.05_f32;
+    let mut right_m = max_range_m;
+    let inverse_phi = 0.618_033_95_f32;
+    let mut c_m = right_m - ((right_m - left_m) * inverse_phi);
+    let mut d_m = left_m + ((right_m - left_m) * inverse_phi);
+    let mut fc = ray_mean_squared_error(
+        c_m,
+        direction,
+        centroid_m,
+        reference_channel,
+        measurements,
+        mic_positions_m,
+        sound_speed_mps,
+    );
+    let mut fd = ray_mean_squared_error(
+        d_m,
+        direction,
+        centroid_m,
+        reference_channel,
+        measurements,
+        mic_positions_m,
+        sound_speed_mps,
+    );
+    for _ in 0..48 {
+        if fc < fd {
+            right_m = d_m;
+            d_m = c_m;
+            fd = fc;
+            c_m = right_m - ((right_m - left_m) * inverse_phi);
+            fc = ray_mean_squared_error(
+                c_m,
+                direction,
+                centroid_m,
+                reference_channel,
+                measurements,
+                mic_positions_m,
+                sound_speed_mps,
+            );
+        } else {
+            left_m = c_m;
+            c_m = d_m;
+            fc = fd;
+            d_m = left_m + ((right_m - left_m) * inverse_phi);
+            fd = ray_mean_squared_error(
+                d_m,
+                direction,
+                centroid_m,
+                reference_channel,
+                measurements,
+                mic_positions_m,
+                sound_speed_mps,
+            );
+        }
+    }
+    let radius_m = if fc.is_finite() || fd.is_finite() {
+        if fc <= fd { c_m } else { d_m }
+    } else {
+        default_range_m
+    };
+    let residual_rms_seconds = ray_mean_squared_error(
+        radius_m,
+        direction,
+        centroid_m,
+        reference_channel,
+        measurements,
+        mic_positions_m,
+        sound_speed_mps,
+    )
+    .sqrt();
+
+    let delta_m = (radius_m * 0.05).abs().max(0.5).min(max_range_m * 0.25);
+    let left_radius_m = (radius_m - delta_m).max(0.05);
+    let right_radius_m = (radius_m + delta_m).min(max_range_m);
+    let step_m = (right_radius_m - left_radius_m).max(EPSILON);
+    let mut derivative_info = 0.0_f32;
+    for measurement in measurements {
+        let left_tau_s = predicted_reference_tau_s(
+            add(centroid_m, scale(direction, left_radius_m)),
+            mic_positions_m[measurement.channel_index],
+            mic_positions_m[reference_channel],
+            sound_speed_mps,
+        );
+        let right_tau_s = predicted_reference_tau_s(
+            add(centroid_m, scale(direction, right_radius_m)),
+            mic_positions_m[measurement.channel_index],
+            mic_positions_m[reference_channel],
+            sound_speed_mps,
+        );
+        let derivative = (right_tau_s - left_tau_s) / step_m;
+        derivative_info += derivative * derivative;
+    }
+    let time_std_seconds = residual_rms_seconds.max(1.0 / sample_rate_hz.max(1) as f32);
+    let radial_std_m = if derivative_info > EPSILON {
+        time_std_seconds / derivative_info.sqrt()
+    } else {
+        max_range_m * 0.5
+    };
+    let range_scale_m = radius_m.abs().max(1.0);
+    let range_observability = (range_scale_m / (range_scale_m + radial_std_m)).clamp(0.0, 1.0);
+
+    FarFieldRangeEstimate {
+        position_m: add(centroid_m, scale(direction, radius_m)),
+        radius_m,
+        radial_std_m,
+        range_observability,
+        residual_rms_seconds,
+    }
+}
+
+fn ray_mean_squared_error(
+    radius_m: f32,
+    direction: [f32; 3],
+    centroid_m: [f32; 3],
+    reference_channel: usize,
+    measurements: &[ReferenceMeasurement],
+    mic_positions_m: &[[f32; 3]],
+    sound_speed_mps: f32,
+) -> f32 {
+    if measurements.is_empty() {
+        return f32::INFINITY;
+    }
+    let position_m = add(centroid_m, scale(direction, radius_m.max(0.05)));
+    let mut squared_error = 0.0_f32;
+    for measurement in measurements {
+        let predicted_tdoa_s = predicted_reference_tau_s(
+            position_m,
+            mic_positions_m[measurement.channel_index],
+            mic_positions_m[reference_channel],
+            sound_speed_mps,
+        );
+        let error_seconds = predicted_tdoa_s - measurement.tdoa_seconds;
+        squared_error += error_seconds * error_seconds;
+    }
+    squared_error / measurements.len() as f32
+}
+
+fn padded_bounds(
+    active_channels: &[usize],
+    mic_positions_m: &[[f32; 3]],
+    search_padding_m: f32,
+) -> ([f32; 3], [f32; 3]) {
+    let padding_m = search_padding_m.max(0.05);
+    let mut mins = [f32::INFINITY; 3];
+    let mut maxs = [f32::NEG_INFINITY; 3];
+    for &channel_index in active_channels {
+        let position_m = mic_positions_m[channel_index];
+        for axis in 0..3 {
+            mins[axis] = mins[axis].min(position_m[axis] - padding_m);
+            maxs[axis] = maxs[axis].max(position_m[axis] + padding_m);
+        }
+    }
+    (mins, maxs)
+}
+
+fn is_boundary_clamped(
+    position_m: [f32; 3],
+    mins: [f32; 3],
+    maxs: [f32; 3],
+    grid_resolution_m: f32,
+) -> bool {
+    let margin_m = grid_resolution_m.max(0.05);
+    (0..3).any(|axis| {
+        (position_m[axis] - mins[axis]).abs() <= margin_m || (maxs[axis] - position_m[axis]).abs() <= margin_m
+    })
+}
+
+fn aperture(active_channels: &[usize], mic_positions_m: &[[f32; 3]]) -> f32 {
+    let mut max_distance_m = 0.0_f32;
+    for (left_index, &channel_a) in active_channels.iter().enumerate() {
+        for &channel_b in &active_channels[left_index + 1..] {
+            max_distance_m = max_distance_m.max(euclidean_distance(
+                mic_positions_m[channel_a],
+                mic_positions_m[channel_b],
+            ));
+        }
+    }
+    max_distance_m
+}
+
+fn diagonal_covariance(x_std_m: f32, y_std_m: f32, z_std_m: f32) -> [[f32; 3]; 3] {
+    [
+        [x_std_m * x_std_m, 0.0, 0.0],
+        [0.0, y_std_m * y_std_m, 0.0],
+        [0.0, 0.0, z_std_m * z_std_m],
+    ]
+}
+
+fn directional_covariance(
+    direction: [f32; 3],
+    lateral_std_m: f32,
+    radial_std_m: f32,
+) -> [[f32; 3]; 3] {
+    let radial_axis = normalize_or_zero(direction);
+    if magnitude(radial_axis) <= EPSILON {
+        return diagonal_covariance(lateral_std_m, lateral_std_m, lateral_std_m);
+    }
+    let mut helper_axis = [1.0_f32, 0.0, 0.0];
+    if dot(radial_axis, helper_axis).abs() > 0.9 {
+        helper_axis = [0.0, 1.0, 0.0];
+    }
+    let lateral_axis_a = normalize_or_zero(cross(radial_axis, helper_axis));
+    let lateral_axis_b = normalize_or_zero(cross(radial_axis, lateral_axis_a));
+    let radial_variance_m2 = radial_std_m.max(lateral_std_m).powi(2);
+    let lateral_variance_m2 = lateral_std_m.powi(2);
+    let mut covariance = [[0.0_f32; 3]; 3];
+    accumulate_outer_product(&mut covariance, radial_axis, radial_variance_m2);
+    accumulate_outer_product(&mut covariance, lateral_axis_a, lateral_variance_m2);
+    accumulate_outer_product(&mut covariance, lateral_axis_b, lateral_variance_m2);
+    covariance
+}
+
+fn accumulate_outer_product(
+    covariance_m2: &mut [[f32; 3]; 3],
+    axis: [f32; 3],
+    variance_m2: f32,
+) {
+    for row in 0..3 {
+        for col in 0..3 {
+            covariance_m2[row][col] += axis[row] * axis[col] * variance_m2;
+        }
+    }
+}
+
+fn solve_normal_equations(rows: &[[f32; 3]], targets: &[f32]) -> Option<[f32; 3]> {
+    if rows.is_empty() || rows.len() != targets.len() {
+        return None;
+    }
+    let mut ata = [[0.0_f32; 3]; 3];
+    let mut atb = [0.0_f32; 3];
+    for (row, target) in rows.iter().zip(targets.iter()) {
+        for out_axis in 0..3 {
+            atb[out_axis] += row[out_axis] * *target;
+            for in_axis in 0..3 {
+                ata[out_axis][in_axis] += row[out_axis] * row[in_axis];
+            }
+        }
+    }
+    solve_3x3(ata, atb)
+}
+
+fn solve_3x3(mut matrix: [[f32; 3]; 3], mut rhs: [f32; 3]) -> Option<[f32; 3]> {
+    for pivot in 0..3 {
+        let mut best_row = pivot;
+        let mut best_value = matrix[pivot][pivot].abs();
+        for row in (pivot + 1)..3 {
+            let candidate = matrix[row][pivot].abs();
+            if candidate > best_value {
+                best_value = candidate;
+                best_row = row;
+            }
+        }
+        if best_value <= EPSILON {
+            return None;
+        }
+        if best_row != pivot {
+            matrix.swap(pivot, best_row);
+            rhs.swap(pivot, best_row);
+        }
+        let pivot_value = matrix[pivot][pivot];
+        for col in pivot..3 {
+            matrix[pivot][col] /= pivot_value;
+        }
+        rhs[pivot] /= pivot_value;
+        for row in 0..3 {
+            if row == pivot {
+                continue;
+            }
+            let factor = matrix[row][pivot];
+            if factor.abs() <= EPSILON {
+                continue;
+            }
+            for col in pivot..3 {
+                matrix[row][col] -= factor * matrix[pivot][col];
+            }
+            rhs[row] -= factor * rhs[pivot];
+        }
+    }
+    Some(rhs)
+}
+
+fn invert_3x3(matrix: [[f32; 3]; 3]) -> Option<[[f32; 3]; 3]> {
+    let col0 = solve_3x3(matrix, [1.0, 0.0, 0.0])?;
+    let col1 = solve_3x3(matrix, [0.0, 1.0, 0.0])?;
+    let col2 = solve_3x3(matrix, [0.0, 0.0, 1.0])?;
+    Some([
+        [col0[0], col1[0], col2[0]],
+        [col0[1], col1[1], col2[1]],
+        [col0[2], col1[2], col2[2]],
+    ])
+}
+
+fn position_covariance_and_observability(
+    position_m: [f32; 3],
+    centroid_m: [f32; 3],
+    reference_channel: usize,
+    measurements: &[ReferenceMeasurement],
+    mic_positions_m: &[[f32; 3]],
+    sample_rate_hz: u32,
+    sound_speed_mps: f32,
+    minimum_std_m: f32,
+) -> ([[f32; 3]; 3], f32) {
+    let reference_position_m = mic_positions_m[reference_channel];
+    let reference_distance_m = euclidean_distance(position_m, reference_position_m) + EPSILON;
+    let mut normal_matrix = [[0.0_f32; 3]; 3];
+    for measurement in measurements {
+        let sensor_position_m = mic_positions_m[measurement.channel_index];
+        let sensor_distance_m = euclidean_distance(position_m, sensor_position_m) + EPSILON;
+        let jacobian_row = [
+            ((position_m[0] - sensor_position_m[0]) / (sensor_distance_m * sound_speed_mps.max(1.0)))
+                - ((position_m[0] - reference_position_m[0]) / (reference_distance_m * sound_speed_mps.max(1.0))),
+            ((position_m[1] - sensor_position_m[1]) / (sensor_distance_m * sound_speed_mps.max(1.0)))
+                - ((position_m[1] - reference_position_m[1]) / (reference_distance_m * sound_speed_mps.max(1.0))),
+            ((position_m[2] - sensor_position_m[2]) / (sensor_distance_m * sound_speed_mps.max(1.0)))
+                - ((position_m[2] - reference_position_m[2]) / (reference_distance_m * sound_speed_mps.max(1.0))),
+        ];
+        for out_axis in 0..3 {
+            for in_axis in 0..3 {
+                normal_matrix[out_axis][in_axis] += jacobian_row[out_axis] * jacobian_row[in_axis];
+            }
+        }
+    }
+    for axis in 0..3 {
+        normal_matrix[axis][axis] += 1.0e-9;
+    }
+    let time_std_seconds = residual_rms(
+        position_m,
+        reference_channel,
+        measurements,
+        mic_positions_m,
+        sound_speed_mps,
+    )
+    .max(1.0 / sample_rate_hz.max(1) as f32);
+    let variance_floor_m2 = minimum_std_m * minimum_std_m;
+    let mut covariance_m2 = invert_3x3(normal_matrix)
+        .map(|inverse| scale_matrix(inverse, time_std_seconds * time_std_seconds))
+        .unwrap_or_else(|| diagonal_covariance(minimum_std_m, minimum_std_m, minimum_std_m));
+    for axis in 0..3 {
+        covariance_m2[axis][axis] = covariance_m2[axis][axis].max(variance_floor_m2);
+    }
+    let direction = normalize_or_zero(sub(position_m, centroid_m));
+    let radial_variance_m2 = quadratic_form(covariance_m2, direction).max(EPSILON);
+    let trace = covariance_m2[0][0] + covariance_m2[1][1] + covariance_m2[2][2];
+    let lateral_variance_m2 = ((trace - radial_variance_m2) * 0.5).max(EPSILON);
+    let range_observability = (lateral_variance_m2
+        / radial_variance_m2.max(lateral_variance_m2).max(EPSILON))
+        .sqrt()
+        .clamp(0.0, 1.0);
+    (covariance_m2, range_observability)
+}
+
+fn scale_matrix(matrix: [[f32; 3]; 3], scalar: f32) -> [[f32; 3]; 3] {
+    let mut out = [[0.0_f32; 3]; 3];
+    for row in 0..3 {
+        for col in 0..3 {
+            out[row][col] = matrix[row][col] * scalar;
+        }
+    }
+    out
+}
+
+fn quadratic_form(matrix: [[f32; 3]; 3], vector: [f32; 3]) -> f32 {
+    let product = [
+        (matrix[0][0] * vector[0]) + (matrix[0][1] * vector[1]) + (matrix[0][2] * vector[2]),
+        (matrix[1][0] * vector[0]) + (matrix[1][1] * vector[1]) + (matrix[1][2] * vector[2]),
+        (matrix[2][0] * vector[0]) + (matrix[2][1] * vector[1]) + (matrix[2][2] * vector[2]),
+    ];
+    dot(vector, product)
 }
 
 fn grid_from_bounds(
@@ -441,6 +1072,22 @@ fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
 
+fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+
+fn scale(v: [f32; 3], scalar: f32) -> [f32; 3] {
+    [v[0] * scalar, v[1] * scalar, v[2] * scalar]
+}
+
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        (a[1] * b[2]) - (a[2] * b[1]),
+        (a[2] * b[0]) - (a[0] * b[2]),
+        (a[0] * b[1]) - (a[1] * b[0]),
+    ]
+}
+
 fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
@@ -488,11 +1135,12 @@ mod tests {
                 ..SrpPhatConfig::default()
             },
         );
-
         assert_eq!(evaluation.pair_tdoas.len(), 6);
         assert_eq!(evaluation.localization.resolved_algorithm, "srp_phat");
         let recovered_position_m = evaluation.localization.position_m.expect("SRP position");
         assert!(euclidean_distance(recovered_position_m, source_position_m) <= 0.08);
+        assert!(evaluation.localization.position_covariance_m2.is_some());
+        assert!(evaluation.localization.range_observability.is_some());
 
         let expected_direction =
             normalize_or_zero(sub(source_position_m, centroid(&[0, 1, 2, 3], &mics)));
@@ -503,6 +1151,40 @@ mod tests {
             ) > 0.95
         );
         assert!(evaluation.localization.confidence >= 0.25);
+    }
+
+    #[test]
+    fn tetrahedral_solver_far_field_candidate_escapes_near_field_grid_bounds() {
+        let mics = [
+            [0.0, 0.050, 0.0],
+            [0.0433, 0.025, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.02165, 0.025, 0.04082],
+        ];
+        let source_position_m = [80.0, 34.0, 11.0];
+        let channels = synthesize_point_source_channels(source_position_m, &mics, 48_000, 8_192);
+        let evaluation = estimate_tetrahedral_steering(
+            &channels,
+            &[0, 1, 2, 3],
+            &mics,
+            48_000,
+            343.2,
+            SrpPhatConfig {
+                grid_resolution_m: 0.05,
+                search_padding_m: 0.3,
+                far_field_default_range_m: 60.0,
+                far_field_max_range_m: 250.0,
+                ..SrpPhatConfig::default()
+            },
+        );
+        let recovered_position_m = evaluation.localization.position_m.expect("far-field position");
+        let array_centroid_m = centroid(&[0, 1, 2, 3], &mics);
+        let recovered_offset_m = sub(recovered_position_m, array_centroid_m);
+        let expected_direction = normalize_or_zero(sub(source_position_m, array_centroid_m));
+        assert!(magnitude(recovered_offset_m) > 20.0);
+        assert!(dot(normalize_or_zero(recovered_offset_m), expected_direction) > 0.8);
+        assert!(evaluation.localization.position_covariance_m2.is_some());
+        assert!(evaluation.localization.range_observability.is_some());
     }
 
     #[test]
@@ -656,7 +1338,6 @@ mod tests {
                 ..SrpPhatConfig::default()
             },
         );
-
         assert_eq!(evaluation.localization.resolved_algorithm, "srp_phat");
         assert!(evaluation.localization.confidence < 0.2);
     }

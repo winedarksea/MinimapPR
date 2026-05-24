@@ -128,6 +128,9 @@ class LocalizationBranch:
     localization_position_m: tuple[float, float, float]
     localization_confidence: float
     localization_gdop: float
+    localization_position_covariance_m2: list[list[float]] | None
+    localization_range_observability: float | None
+    localization_residual_rms_seconds: float | None
     reference_sensor: str
     reference_signal: np.ndarray
     classification_reference_signal: np.ndarray
@@ -515,6 +518,9 @@ class FusionNode:
                 tdoa_s={},
                 localization_method=payload.localization_method,
                 capability_tier=capability_tier,
+                localization_position_covariance_m2=payload.localization_position_covariance_m2,
+                localization_range_observability=payload.localization_range_observability,
+                localization_residual_rms_seconds=payload.localization_residual_rms_seconds,
             ),
             selected_sensor_ids=selected_sensor_ids,
             selected_windows={},
@@ -563,6 +569,9 @@ class FusionNode:
             localization_position_m=payload.localization_position_m,
             localization_confidence=payload.localization_confidence,
             localization_gdop=payload.localization_gdop,
+            localization_position_covariance_m2=payload.localization_position_covariance_m2,
+            localization_range_observability=payload.localization_range_observability,
+            localization_residual_rms_seconds=payload.localization_residual_rms_seconds,
             reference_sensor=reference_sensor,
             reference_signal=normalized_audio,
             tdoa_s={},
@@ -1138,6 +1147,9 @@ class FusionNode:
                 localization_position_m=product.localization_branch.localization_position_m,
                 localization_confidence=product.localization_branch.localization_confidence,
                 localization_gdop=product.localization_branch.localization_gdop,
+                localization_position_covariance_m2=product.localization_branch.localization_position_covariance_m2,
+                localization_range_observability=product.localization_branch.localization_range_observability,
+                localization_residual_rms_seconds=product.localization_branch.localization_residual_rms_seconds,
                 reference_sensor=product.localization_branch.reference_sensor,
                 reference_signal=product.localization_branch.reference_signal,
                 tdoa_s=product.localization_branch.tdoa_s,
@@ -1161,6 +1173,9 @@ class FusionNode:
             localization_position_m=product.omni_position_m,
             localization_confidence=self.fusion_config.fallback_localization_confidence,
             localization_gdop=float("inf"),
+            localization_position_covariance_m2=None,
+            localization_range_observability=None,
+            localization_residual_rms_seconds=None,
             reference_sensor=product.omni_reference_sensor,
             reference_signal=product.omni_reference_signal,
             tdoa_s={},
@@ -1353,6 +1368,9 @@ class FusionNode:
             localization_position_m=localization.position_m,
             localization_confidence=localization.confidence,
             localization_gdop=localization.gdop,
+            localization_position_covariance_m2=localization.position_covariance_m2,
+            localization_range_observability=localization.range_observability,
+            localization_residual_rms_seconds=localization.residual_rms_seconds,
             reference_sensor=localization.reference_sensor,
             reference_signal=reference_signal,
             classification_reference_signal=classification_windows.get(
@@ -1403,6 +1421,9 @@ class FusionNode:
         localization_position_m: tuple[float, float, float],
         localization_confidence: float,
         localization_gdop: float,
+        localization_position_covariance_m2: list[list[float]] | None,
+        localization_range_observability: float | None,
+        localization_residual_rms_seconds: float | None,
         reference_sensor: str,
         reference_signal: np.ndarray,
         tdoa_s: dict[str, float],
@@ -1462,6 +1483,9 @@ class FusionNode:
                 localization_position_m=localization_position_m,
                 localization_confidence=localization_confidence,
                 localization_gdop=localization_gdop,
+                localization_position_covariance_m2=localization_position_covariance_m2,
+                localization_range_observability=localization_range_observability,
+                localization_residual_rms_seconds=localization_residual_rms_seconds,
                 reference_sensor=reference_sensor,
                 tdoa_s=tdoa_s,
                 selected_sensor_ids=product.selected_sensor_ids,

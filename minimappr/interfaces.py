@@ -77,6 +77,7 @@ class TrackAssociator(Protocol):
         timestamp_ns: int,
         position_m: tuple[float, float, float],
         existing_tracks: list[TrackState],
+        measurement_covariance_m2: list[list[float]] | None = None,
     ) -> str | None:
         ...
 
@@ -97,6 +98,7 @@ class TrackFilter(Protocol):
         state: TrackState,
         measurement_m: tuple[float, float, float],
         dt_s: float,
+        measurement_covariance_m2: list[list[float]] | None = None,
     ) -> TrackState:
         """Apply measurement update and return the updated state.
 

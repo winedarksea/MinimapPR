@@ -161,6 +161,30 @@ def test_kalman_filter_predict_extrapolates() -> None:
     assert predicted.position_m[0] > updated.position_m[0]  # Should be ahead
 
 
+def test_kalman_filter_predict_grows_position_covariance() -> None:
+    filt = KalmanTrackFilter(
+        process_noise=1.0,
+        measurement_noise=0.8,
+        initial_position_variance=10.0,
+        initial_velocity_variance=1.0,
+    )
+    t0 = 1_000_000_000_000_000_000
+    state = TrackState(
+        id="trk-2",
+        first_seen_ns=t0,
+        last_seen_ns=t0,
+        position_m=(0.0, 0.0, 0.0),
+    )
+
+    filt.initialize_track("trk-2", (0.0, 0.0, 0.0))
+    updated = filt.update(state, measurement_m=(2.0, 0.0, 0.0), dt_s=1.0)
+    predicted = filt.predict(updated, dt_s=2.0)
+
+    assert predicted.position_covariance_m2 is not None
+    assert updated.position_covariance_m2 is not None
+    assert predicted.position_covariance_m2[0][0] > updated.position_covariance_m2[0][0]
+
+
 def test_kalman_filter_remove_track_cleanup() -> None:
     filt = KalmanTrackFilter(
         process_noise=1.0, measurement_noise=0.8,

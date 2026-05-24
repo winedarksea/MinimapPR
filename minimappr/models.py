@@ -259,6 +259,9 @@ class LocalizationResult(BaseModel):
     gdop: float = Field(ge=0.0)
     reference_sensor: str
     tdoa_s: dict[str, float] = Field(default_factory=dict)
+    position_covariance_m2: list[list[float]] | None = None
+    range_observability: float | None = Field(default=None, ge=0.0, le=1.0)
+    residual_rms_seconds: float | None = Field(default=None, ge=0.0)
     attempted_algorithm: str | None = None
     resolved_algorithm: str | None = None
     wavelength_factor: float | None = Field(default=None, ge=0.0, le=1.0)

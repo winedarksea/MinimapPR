@@ -135,6 +135,9 @@ class DetectionAssembler:
         localization_position_m: tuple[float, float, float],
         localization_confidence: float,
         localization_gdop: float,
+        localization_position_covariance_m2: list[list[float]] | None,
+        localization_range_observability: float | None,
+        localization_residual_rms_seconds: float | None,
         reference_sensor: str,
         tdoa_s: dict[str, float],
         selected_sensor_ids: list[str],
@@ -197,6 +200,7 @@ class DetectionAssembler:
             track = await tracker.update(
                 timestamp_ns=event_time_ns,
                 position_m=localization_position_m,
+                measurement_covariance_m2=localization_position_covariance_m2,
                 label=classification_label,
                 label_category=label_category,
                 iff_category=iff_category,
@@ -238,6 +242,10 @@ class DetectionAssembler:
         feature_summary.update(classification_features)
         feature_summary["capability_tier"] = capability_tier
         feature_summary["localization_method"] = localization_method
+        if localization_range_observability is not None:
+            feature_summary["localization_range_observability"] = localization_range_observability
+        if localization_residual_rms_seconds is not None:
+            feature_summary["localization_residual_rms_seconds"] = localization_residual_rms_seconds
         feature_summary["classification_path"] = classification_path
         feature_summary["omni_confidence"] = omni_confidence
         feature_summary["environment"] = environment
@@ -274,7 +282,11 @@ class DetectionAssembler:
             reporting_modality=reporting_modality,
             position_m=localization_position_m,
             position_geo=detection_geo,
-            position_covariance_m2=track.position_covariance_m2 if track is not None else None,
+            position_covariance_m2=(
+                localization_position_covariance_m2
+                if localization_position_covariance_m2 is not None
+                else (track.position_covariance_m2 if track is not None else None)
+            ),
             confidence=localization_confidence,
             gdop=localization_gdop,
             label_id=label_id,

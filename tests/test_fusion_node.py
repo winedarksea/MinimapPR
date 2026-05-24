@@ -1446,6 +1446,13 @@ async def test_fusion_ingests_rust_localized_render_directly(tmp_path: Path) -> 
             localization_position_m=(1.5, -0.5, 0.0),
             localization_confidence=0.87,
             localization_gdop=1.2,
+            localization_position_covariance_m2=[
+                [2.0, 0.1, 0.0],
+                [0.1, 1.5, 0.0],
+                [0.0, 0.0, 3.0],
+            ],
+            localization_range_observability=0.42,
+            localization_residual_rms_seconds=2.5e-4,
             localization_method="rust_srp_phat",
             render_kind="birdnet_hybrid_spatial_blend",
             environment={"temperature_c": 18.0, "humidity_fraction": 0.4},
@@ -1458,8 +1465,14 @@ async def test_fusion_ingests_rust_localized_render_directly(tmp_path: Path) -> 
     detection = detections[0]
     assert detection["source_node_id"] == node.id
     assert detection["feature_summary"]["localization_method"] == "rust_srp_phat"
+    assert detection["feature_summary"]["localization_range_observability"] == pytest.approx(0.42)
+    assert detection["feature_summary"]["localization_residual_rms_seconds"] == pytest.approx(2.5e-4)
     assert detection["feature_summary"]["rust_render_kind"] == "birdnet_hybrid_spatial_blend"
     assert tuple(detection["position_m"]) == pytest.approx((1.5, -0.5, 0.0))
+    assert np.allclose(
+        np.asarray(detection["position_covariance_m2"], dtype=np.float64),
+        np.asarray([[2.0, 0.1, 0.0], [0.1, 1.5, 0.0], [0.0, 0.0, 3.0]], dtype=np.float64),
+    )
 
     nodes = await storage.list_nodes(limit=10)
     assert len(nodes) == 1

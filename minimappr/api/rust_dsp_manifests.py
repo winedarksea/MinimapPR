@@ -29,6 +29,9 @@ class LocalizedClassifierRenderRequest:
     localization_position_m: tuple[float, float, float]
     localization_confidence: float
     localization_gdop: float = float("inf")
+    localization_position_covariance_m2: list[list[float]] | None = None
+    localization_range_observability: float | None = None
+    localization_residual_rms_seconds: float | None = None
     localization_method: str = "rust_dsp_worker"
     source_type: str = "raw_sensor"
     reporting_modality: Literal["localized", "omni"] = "localized"
@@ -132,6 +135,15 @@ def load_localized_render_manifest_bundle(
     if isinstance(localization_payload, dict) and isinstance(localization_payload.get("position_m"), list):
         localization_position_m = tuple(float(value) for value in localization_payload["position_m"])
         localization_confidence = float(localization_payload.get("confidence") or 0.0)
+        localization_position_covariance_m2 = _coerce_covariance_matrix(
+            localization_payload.get("position_covariance_m2")
+        )
+        localization_range_observability = _optional_bounded_float(
+            localization_payload.get("range_observability")
+        )
+        localization_residual_rms_seconds = _optional_nonnegative_float(
+            localization_payload.get("residual_rms_seconds")
+        )
         localization_method = str(
             localization_payload.get("resolved_algorithm")
             or localization_payload.get("attempted_algorithm")
@@ -143,6 +155,9 @@ def load_localized_render_manifest_bundle(
             raise ValueError("Standalone classifier render manifest requires node.position_m")
         localization_position_m = tuple(float(value) for value in node.position_m)
         localization_confidence = 0.0
+        localization_position_covariance_m2 = None
+        localization_range_observability = None
+        localization_residual_rms_seconds = None
         localization_method = "rust_classifier_render_fallback"
         reporting_modality = "omni"
 
@@ -156,6 +171,9 @@ def load_localized_render_manifest_bundle(
             decoded_audio=decoded_audio,
             localization_position_m=localization_position_m,
             localization_confidence=localization_confidence,
+            localization_position_covariance_m2=localization_position_covariance_m2,
+            localization_range_observability=localization_range_observability,
+            localization_residual_rms_seconds=localization_residual_rms_seconds,
             localization_method=localization_method,
             source_type=source_type,
             reporting_modality=reporting_modality,
@@ -205,6 +223,42 @@ def _optional_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _optional_nonnegative_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(parsed) or parsed < 0.0:
+        return None
+    return parsed
+
+
+def _optional_bounded_float(value: Any) -> float | None:
+    parsed = _optional_nonnegative_float(value)
+    if parsed is None or parsed > 1.0:
+        return None
+    return parsed
+
+
+def _coerce_covariance_matrix(value: Any) -> list[list[float]] | None:
+    if not isinstance(value, list) or len(value) != 3:
+        return None
+    matrix: list[list[float]] = []
+    for row in value:
+        if not isinstance(row, list) or len(row) != 3:
+            return None
+        try:
+            parsed_row = [float(cell) for cell in row]
+        except (TypeError, ValueError):
+            return None
+        if any(not np.isfinite(cell) for cell in parsed_row):
+            return None
+        matrix.append(parsed_row)
+    return matrix
 
 
 def _audio_coverage_stats_from_mapping(payload: dict[str, Any]) -> AudioCoverageStats | None:

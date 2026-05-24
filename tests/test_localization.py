@@ -46,6 +46,9 @@ def test_tdoa_localization_recovers_source_position() -> None:
     assert error < 0.9
     assert result.confidence > 0.1
     assert np.isfinite(result.gdop)
+    assert result.position_covariance_m2 is not None
+    assert result.range_observability is not None
+    assert result.residual_rms_seconds is not None
 
 
 def test_localization_rejects_non_finite_windows() -> None:

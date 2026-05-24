@@ -67,6 +67,61 @@ def test_phase2_localizers_return_reasonable_solution(localizer, max_error_m: fl
     assert error_m < max_error_m
     assert 0.0 <= result.confidence <= 1.0
     assert np.isfinite(result.gdop) or np.isinf(result.gdop)
+    assert result.position_covariance_m2 is not None
+    assert result.residual_rms_seconds is not None
+
+
+def test_tight_array_srp_far_field_escapes_bounded_cartesian_box() -> None:
+    sample_rate_hz = 48_000
+    n = int(sample_rate_hz * 0.18)
+    rng = np.random.default_rng(91)
+    excitation = (rng.standard_normal(n) * np.hanning(n)).astype(np.float32)
+    sound_speed = 343.2
+
+    sensor_positions = {
+        "s0": np.array([0.0, 0.0, 0.0]),
+        "s1": np.array([0.05, 0.0, 0.0]),
+        "s2": np.array([0.0, 0.05, 0.0]),
+        "s3": np.array([0.0, 0.0, 0.05]),
+    }
+    source = np.asarray([82.0, 34.0, 11.0], dtype=np.float64)
+    centroid = np.mean(np.vstack(list(sensor_positions.values())), axis=0)
+    expected_direction = source - centroid
+    expected_direction /= np.linalg.norm(expected_direction)
+
+    distances = {
+        sensor_id: float(np.linalg.norm(source - position))
+        for sensor_id, position in sensor_positions.items()
+    }
+    min_delay_s = min(distances.values()) / sound_speed
+    windows = {}
+    for sensor_id, distance in distances.items():
+        windows[sensor_id] = shift_signal(excitation, sample_rate_hz, (distance / sound_speed) - min_delay_s)
+
+    result = SRPPhatLocalizer(
+        max_tau_s=0.003,
+        grid_resolution_m=0.5,
+        search_padding_m=1.0,
+        far_field_default_range_m=60.0,
+        far_field_max_range_m=250.0,
+    ).localize(
+        sensor_positions=sensor_positions,
+        sensor_windows=windows,
+        sample_rate_hz=sample_rate_hz,
+        temperature_c=20.0,
+        humidity_fraction=0.5,
+    )
+
+    estimate = np.asarray(result.position_m, dtype=np.float64)
+    estimated_offset = estimate - centroid
+    estimated_range_m = float(np.linalg.norm(estimated_offset))
+    estimated_direction = estimated_offset / estimated_range_m
+
+    assert estimated_range_m > 20.0
+    assert float(np.dot(estimated_direction, expected_direction)) > 0.97
+    assert result.position_covariance_m2 is not None
+    assert result.range_observability is not None
+    assert result.residual_rms_seconds is not None
 
 
 def test_localization_dispatch_geometry_aware_and_cascade() -> None:

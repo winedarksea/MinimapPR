@@ -10,11 +10,22 @@ import numpy as np
 from scipy.optimize import least_squares
 
 from minimappr.core.localization import LocalizationError, gcc_phat, speed_of_sound_mps
+from minimappr.core.localization_uncertainty import (
+    covariance_from_jacobian,
+    covariance_to_nested_list,
+    directional_covariance_m2,
+    range_observability_from_covariance,
+)
 from minimappr.models import LocalizationResult
 from minimappr.utils.audio import rms
 
 
 EPSILON = 1e-9
+
+
+def _minimum_position_std_m(sound_speed_mps: float, sample_rate_hz: int, interp: int) -> float:
+    sample_period_s = 1.0 / max(sample_rate_hz * max(interp, 1), 1)
+    return max(sound_speed_mps * sample_period_s, 0.05)
 
 
 def _common_sensor_ids(
@@ -93,8 +104,6 @@ def _solve_position_from_tdoa(
     if not meas_ids:
         raise LocalizationError("No TDOA measurements available for solve")
 
-    ref_pos = sensor_positions[reference_sensor]
-
     def residuals(position: np.ndarray) -> np.ndarray:
         predicted = _predicted_tdoa(
             position=position,
@@ -111,10 +120,28 @@ def _solve_position_from_tdoa(
         raise LocalizationError("Least-squares position solve failed")
 
     position = solved.x
-    _ = ref_pos
     residual = residuals(position)
     rmse_s = float(np.sqrt(np.mean(np.square(residual))))
     return position, rmse_s
+
+
+def _tdoa_jacobian(
+    *,
+    position: np.ndarray,
+    sensor_positions: dict[str, np.ndarray],
+    reference_sensor: str,
+    meas_ids: list[str],
+    sound_speed: float,
+) -> np.ndarray:
+    ref_pos = sensor_positions[reference_sensor]
+    dist_ref = np.linalg.norm(position - ref_pos) + EPSILON
+    rows: list[np.ndarray] = []
+    for sensor_id in meas_ids:
+        pos_i = sensor_positions[sensor_id]
+        dist_i = np.linalg.norm(position - pos_i) + EPSILON
+        grad = ((position - pos_i) / (dist_i * sound_speed)) - ((position - ref_pos) / (dist_ref * sound_speed))
+        rows.append(grad)
+    return np.vstack(rows)
 
 
 def _gdop(
@@ -125,15 +152,13 @@ def _gdop(
     meas_ids: list[str],
     sound_speed: float,
 ) -> float:
-    ref_pos = sensor_positions[reference_sensor]
-    dist_ref = np.linalg.norm(position - ref_pos) + EPSILON
-    rows: list[np.ndarray] = []
-    for sensor_id in meas_ids:
-        pos_i = sensor_positions[sensor_id]
-        dist_i = np.linalg.norm(position - pos_i) + EPSILON
-        grad = ((position - pos_i) / (dist_i * sound_speed)) - ((position - ref_pos) / (dist_ref * sound_speed))
-        rows.append(grad)
-    jacobian = np.vstack(rows)
+    jacobian = _tdoa_jacobian(
+        position=position,
+        sensor_positions=sensor_positions,
+        reference_sensor=reference_sensor,
+        meas_ids=meas_ids,
+        sound_speed=sound_speed,
+    )
     info = jacobian.T @ jacobian
     if np.linalg.cond(info) > 1e12:
         return float("inf")
@@ -213,6 +238,15 @@ def _estimate_source_count_mdl(eigenvalues: np.ndarray, snapshot_count: int) -> 
     return max(1, min(m - 1, estimate))
 
 
+@dataclass(slots=True)
+class FarFieldRangeEstimate:
+    position: np.ndarray
+    radius_m: float
+    radial_std_m: float
+    range_observability: float
+    residual_rms_seconds: float
+
+
 def _far_field_range_fit(
     *,
     direction: np.ndarray,
@@ -223,7 +257,8 @@ def _far_field_range_fit(
     sound_speed: float,
     initial_range_m: float,
     max_range_m: float,
-) -> tuple[np.ndarray, float]:
+    minimum_time_std_s: float,
+) -> FarFieldRangeEstimate:
     meas_ids = sorted(measured_tdoa_s.keys())
     if not meas_ids:
         raise LocalizationError("Cannot estimate range without TDOA measurements")
@@ -253,11 +288,76 @@ def _far_field_range_fit(
     )
     if not solved.success:
         radius = initial_range_m
+        radial_std_m = max(initial_range_m, max_range_m * 0.5, 1.0)
     else:
         radius = float(solved.x[0])
+        rmse_at_solution_s = float(
+            np.sqrt(np.mean(np.square(residuals(np.asarray([radius], dtype=np.float64)))))
+        )
+        radial_covariance_m2 = covariance_from_jacobian(
+            np.asarray(solved.jac, dtype=np.float64).reshape(-1, 1),
+            rmse_at_solution_s,
+            minimum_time_std_s=minimum_time_std_s,
+            minimum_std_m=max(sound_speed * minimum_time_std_s, 1.0),
+        )
+        radial_std_m = (
+            float(np.sqrt(max(float(radial_covariance_m2[0, 0]), EPSILON)))
+            if radial_covariance_m2 is not None
+            else max(initial_range_m, 1.0)
+        )
     position = centroid + direction * radius
     rmse_s = float(np.sqrt(np.mean(np.square(residuals(np.asarray([radius], dtype=np.float64))))))
-    return position, rmse_s
+    if not solved.success:
+        range_observability = 0.0
+    else:
+        range_scale_m = max(abs(radius), 1.0)
+        range_observability = float(np.clip(range_scale_m / (range_scale_m + radial_std_m), 0.0, 1.0))
+    return FarFieldRangeEstimate(
+        position=position,
+        radius_m=float(radius),
+        radial_std_m=float(radial_std_m),
+        range_observability=range_observability,
+        residual_rms_seconds=rmse_s,
+    )
+
+
+def _angular_search_directions(azimuth_step_deg: float, elevation_step_deg: float) -> np.ndarray:
+    azimuths = np.deg2rad(np.arange(-180.0, 180.0, max(1.0, azimuth_step_deg)))
+    elevations = np.deg2rad(np.arange(-65.0, 66.0, max(1.0, elevation_step_deg)))
+    directions: list[np.ndarray] = []
+    for elevation in elevations:
+        cos_el = math.cos(float(elevation))
+        sin_el = math.sin(float(elevation))
+        for azimuth in azimuths:
+            directions.append(
+                np.asarray(
+                    [cos_el * math.cos(float(azimuth)), cos_el * math.sin(float(azimuth)), sin_el],
+                    dtype=np.float64,
+                )
+            )
+    return np.vstack(directions)
+
+
+def _far_field_covariance(
+    *,
+    direction: np.ndarray,
+    range_estimate: FarFieldRangeEstimate,
+    angular_std_rad: float,
+    aperture_m: float,
+    minimum_position_std_m: float,
+) -> np.ndarray | None:
+    lateral_std_m = max(
+        minimum_position_std_m,
+        range_estimate.radius_m * angular_std_rad,
+        aperture_m * 0.5,
+    )
+    radial_std_m = max(range_estimate.radial_std_m, lateral_std_m)
+    return directional_covariance_m2(
+        direction,
+        lateral_std_m=lateral_std_m,
+        radial_std_m=radial_std_m,
+        minimum_std_m=minimum_position_std_m,
+    )
 
 
 def _phat_correlation(
@@ -280,7 +380,7 @@ def _phat_correlation(
     max_shift = max(1, min(max_shift, corr.size // 2))
     corr = np.concatenate((corr[-max_shift:], corr[: max_shift + 1]))
     lags = np.arange(-max_shift, max_shift + 1, dtype=np.float64) / float(interp * sample_rate_hz)
-    return lags, np.abs(corr).astype(np.float64)
+    return lags, corr.astype(np.float64)
 
 
 def _grid_from_bounds(
@@ -307,6 +407,11 @@ class SRPPhatLocalizer:
     search_padding_m: float = 2.0
     interp: int = 4
     max_grid_points: int = 60_000
+    tight_array_aperture_m: float = 0.35
+    far_field_default_range_m: float = 50.0
+    far_field_max_range_m: float = 250.0
+    far_field_azimuth_step_deg: float = 6.0
+    far_field_elevation_step_deg: float = 8.0
 
     def localize(
         self,
@@ -330,16 +435,9 @@ class SRPPhatLocalizer:
         meas_ids = sorted(measured_tdoa.keys())
 
         pos_matrix = np.vstack([sensor_positions[sensor_id] for sensor_id in sensor_ids])
-        mins = np.min(pos_matrix, axis=0) - self.search_padding_m
-        maxs = np.max(pos_matrix, axis=0) + self.search_padding_m
-        grid = _grid_from_bounds(
-            mins=mins,
-            maxs=maxs,
-            resolution_m=max(0.05, self.grid_resolution_m),
-            max_points=max(1, self.max_grid_points),
-        )
-        if grid.size == 0:
-            raise LocalizationError("SRP-PHAT grid is empty")
+        array_centroid = np.mean(pos_matrix, axis=0)
+        array_aperture_m = _aperture_m(sensor_positions, sensor_ids)
+        minimum_position_std_m = _minimum_position_std_m(sound_speed, sample_rate_hz, self.interp)
 
         pair_terms: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
         for sensor_a, sensor_b in itertools.combinations(sensor_ids, 2):
@@ -359,31 +457,105 @@ class SRPPhatLocalizer:
         if not pair_terms:
             raise LocalizationError("SRP-PHAT could not form sensor pairs")
 
-        scores = np.zeros(grid.shape[0], dtype=np.float64)
-        for pos_a, pos_b, lags, corr in pair_terms:
-            lag0 = float(lags[0])
-            step = float(lags[1] - lags[0]) if lags.size > 1 else (1.0 / sample_rate_hz)
-            dist_a = np.linalg.norm(grid - pos_a[None, :], axis=1)
-            dist_b = np.linalg.norm(grid - pos_b[None, :], axis=1)
-            tau = (dist_a - dist_b) / sound_speed
-            indices = np.rint((tau - lag0) / step).astype(np.int64)
-            valid = (indices >= 0) & (indices < corr.size)
-            scores[valid] += corr[indices[valid]]
+        if array_aperture_m <= self.tight_array_aperture_m:
+            relative_tdoa_by_sensor = {reference_sensor: 0.0, **measured_tdoa}
+            direction_rows: list[np.ndarray] = []
+            direction_targets: list[float] = []
+            for sensor_a, sensor_b in itertools.combinations(sensor_ids, 2):
+                direction_rows.append(sensor_positions[sensor_b] - sensor_positions[sensor_a])
+                direction_targets.append(
+                    sound_speed
+                    * (relative_tdoa_by_sensor[sensor_a] - relative_tdoa_by_sensor[sensor_b])
+                )
 
-        best_idx = int(np.argmax(scores))
-        best_position = grid[best_idx]
-        predicted = _predicted_tdoa(
-            position=best_position,
-            sensor_positions=sensor_positions,
-            reference_sensor=reference_sensor,
-            meas_ids=meas_ids,
-            sound_speed=sound_speed,
-        )
-        residual = np.asarray(
-            [predicted[sensor_id] - measured_tdoa[sensor_id] for sensor_id in meas_ids],
-            dtype=np.float64,
-        )
-        rmse_s = float(np.sqrt(np.mean(np.square(residual))))
+            direction_matrix = np.vstack(direction_rows)
+            target_vector = np.asarray(direction_targets, dtype=np.float64)
+            best_direction, *_ = np.linalg.lstsq(direction_matrix, target_vector, rcond=None)
+            direction_norm = float(np.linalg.norm(best_direction))
+            if direction_norm < 1e-8:
+                raise LocalizationError("SRP-PHAT tight-array direction solve failed")
+            best_direction = best_direction / direction_norm
+            direction_fit_residual = float(
+                np.linalg.norm(direction_matrix @ best_direction - target_vector)
+                / (np.linalg.norm(target_vector) + EPSILON)
+            )
+            scores = np.asarray([max(0.0, 1.0 - direction_fit_residual)], dtype=np.float64)
+            best_idx = 0
+            range_estimate = _far_field_range_fit(
+                direction=best_direction,
+                centroid=array_centroid,
+                sensor_positions=sensor_positions,
+                reference_sensor=reference_sensor,
+                measured_tdoa_s=measured_tdoa,
+                sound_speed=sound_speed,
+                initial_range_m=max(0.5, self.far_field_default_range_m),
+                max_range_m=max(self.far_field_default_range_m, self.far_field_max_range_m),
+                minimum_time_std_s=1.0 / max(sample_rate_hz * max(self.interp, 1), 1),
+            )
+            best_position = range_estimate.position
+            rmse_s = range_estimate.residual_rms_seconds
+            covariance_m2 = _far_field_covariance(
+                direction=best_direction,
+                range_estimate=range_estimate,
+                angular_std_rad=float(np.clip(direction_fit_residual, 0.05, 0.6)),
+                aperture_m=array_aperture_m,
+                minimum_position_std_m=minimum_position_std_m,
+            )
+            range_observability = range_estimate.range_observability
+        else:
+            mins = np.min(pos_matrix, axis=0) - self.search_padding_m
+            maxs = np.max(pos_matrix, axis=0) + self.search_padding_m
+            grid = _grid_from_bounds(
+                mins=mins,
+                maxs=maxs,
+                resolution_m=max(0.05, self.grid_resolution_m),
+                max_points=max(1, self.max_grid_points),
+            )
+            if grid.size == 0:
+                raise LocalizationError("SRP-PHAT grid is empty")
+
+            scores = np.zeros(grid.shape[0], dtype=np.float64)
+            for pos_a, pos_b, lags, corr in pair_terms:
+                lag0 = float(lags[0])
+                step = float(lags[1] - lags[0]) if lags.size > 1 else (1.0 / sample_rate_hz)
+                dist_a = np.linalg.norm(grid - pos_a[None, :], axis=1)
+                dist_b = np.linalg.norm(grid - pos_b[None, :], axis=1)
+                tau = (dist_a - dist_b) / sound_speed
+                indices = np.rint((tau - lag0) / step).astype(np.int64)
+                valid = (indices >= 0) & (indices < corr.size)
+                scores[valid] += corr[indices[valid]]
+
+            best_idx = int(np.argmax(scores))
+            best_position = grid[best_idx]
+            predicted = _predicted_tdoa(
+                position=best_position,
+                sensor_positions=sensor_positions,
+                reference_sensor=reference_sensor,
+                meas_ids=meas_ids,
+                sound_speed=sound_speed,
+            )
+            residual = np.asarray(
+                [predicted[sensor_id] - measured_tdoa[sensor_id] for sensor_id in meas_ids],
+                dtype=np.float64,
+            )
+            rmse_s = float(np.sqrt(np.mean(np.square(residual))))
+            covariance_m2 = covariance_from_jacobian(
+                _tdoa_jacobian(
+                    position=best_position,
+                    sensor_positions=sensor_positions,
+                    reference_sensor=reference_sensor,
+                    meas_ids=meas_ids,
+                    sound_speed=sound_speed,
+                ),
+                rmse_s,
+                minimum_time_std_s=1.0 / max(sample_rate_hz * max(self.interp, 1), 1),
+                minimum_std_m=max(self.grid_resolution_m * 0.5, minimum_position_std_m),
+            )
+            range_observability = range_observability_from_covariance(
+                covariance_m2,
+                best_position - array_centroid,
+            )
+
         gdop = _gdop(
             position=best_position,
             sensor_positions=sensor_positions,
@@ -408,6 +580,9 @@ class SRPPhatLocalizer:
             gdop=gdop,
             reference_sensor=reference_sensor,
             tdoa_s=measured_tdoa,
+            position_covariance_m2=covariance_to_nested_list(covariance_m2),
+            range_observability=range_observability,
+            residual_rms_seconds=rmse_s,
         )
 
 
@@ -420,6 +595,8 @@ class MusicLocalizer:
     freq_max_hz: float = 3500.0
     source_count: int | None = None
     interp: int = 4
+    far_field_default_range_m: float = 50.0
+    far_field_max_range_m: float = 250.0
 
     def localize(
         self,
@@ -497,16 +674,20 @@ class MusicLocalizer:
                     best_dir = direction
 
         aperture = max(0.2, _aperture_m(sensor_positions, sensor_ids))
-        position, rmse_s = _far_field_range_fit(
+        minimum_position_std_m = _minimum_position_std_m(sound_speed, sample_rate_hz, self.interp)
+        range_estimate = _far_field_range_fit(
             direction=best_dir,
             centroid=centroid,
             sensor_positions=sensor_positions,
             reference_sensor=reference_sensor,
             measured_tdoa_s=measured_tdoa,
             sound_speed=sound_speed,
-            initial_range_m=max(0.5, aperture * 6.0),
-            max_range_m=max(20.0, aperture * 450.0),
+            initial_range_m=max(0.5, self.far_field_default_range_m),
+            max_range_m=max(self.far_field_default_range_m, self.far_field_max_range_m),
+            minimum_time_std_s=1.0 / max(sample_rate_hz * max(self.interp, 1), 1),
         )
+        position = range_estimate.position
+        rmse_s = range_estimate.residual_rms_seconds
         gdop = _gdop(
             position=position,
             sensor_positions=sensor_positions,
@@ -523,12 +704,22 @@ class MusicLocalizer:
             peaks=peaks,
             contrast=contrast,
         )
+        covariance_m2 = _far_field_covariance(
+            direction=best_dir,
+            range_estimate=range_estimate,
+            angular_std_rad=math.radians(max(self.azimuth_step_deg, self.elevation_step_deg)),
+            aperture_m=aperture,
+            minimum_position_std_m=minimum_position_std_m,
+        )
         return LocalizationResult(
             position_m=(float(position[0]), float(position[1]), float(position[2])),
             confidence=confidence,
             gdop=gdop,
             reference_sensor=reference_sensor,
             tdoa_s=measured_tdoa,
+            position_covariance_m2=covariance_to_nested_list(covariance_m2),
+            range_observability=range_estimate.range_observability,
+            residual_rms_seconds=rmse_s,
         )
 
 
@@ -538,6 +729,8 @@ class EspritLocalizer:
     freq_min_hz: float = 300.0
     freq_max_hz: float = 3500.0
     interp: int = 4
+    far_field_default_range_m: float = 50.0
+    far_field_max_range_m: float = 250.0
 
     def localize(
         self,
@@ -598,16 +791,20 @@ class EspritLocalizer:
         direction = direction / norm
 
         aperture = max(0.2, _aperture_m(sensor_positions, sensor_ids))
-        position, rmse_s = _far_field_range_fit(
+        minimum_position_std_m = _minimum_position_std_m(sound_speed, sample_rate_hz, self.interp)
+        range_estimate = _far_field_range_fit(
             direction=direction,
             centroid=centroid,
             sensor_positions=sensor_positions,
             reference_sensor=reference_sensor,
             measured_tdoa_s=measured_tdoa,
             sound_speed=sound_speed,
-            initial_range_m=max(0.5, aperture * 5.0),
-            max_range_m=max(20.0, aperture * 450.0),
+            initial_range_m=max(0.5, self.far_field_default_range_m),
+            max_range_m=max(self.far_field_default_range_m, self.far_field_max_range_m),
+            minimum_time_std_s=1.0 / max(sample_rate_hz * max(self.interp, 1), 1),
         )
+        position = range_estimate.position
+        rmse_s = range_estimate.residual_rms_seconds
         gdop = _gdop(
             position=position,
             sensor_positions=sensor_positions,
@@ -624,10 +821,20 @@ class EspritLocalizer:
             peaks=peaks,
             contrast=contrast,
         )
+        covariance_m2 = _far_field_covariance(
+            direction=direction,
+            range_estimate=range_estimate,
+            angular_std_rad=float(np.clip(linear_residual, 0.05, 0.6)),
+            aperture_m=aperture,
+            minimum_position_std_m=minimum_position_std_m,
+        )
         return LocalizationResult(
             position_m=(float(position[0]), float(position[1]), float(position[2])),
             confidence=confidence,
             gdop=gdop,
             reference_sensor=reference_sensor,
             tdoa_s=measured_tdoa,
+            position_covariance_m2=covariance_to_nested_list(covariance_m2),
+            range_observability=range_estimate.range_observability,
+            residual_rms_seconds=rmse_s,
         )

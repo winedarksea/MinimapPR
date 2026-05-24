@@ -68,6 +68,7 @@ class LinearTrackFilter:
         state: TrackState,
         measurement_m: tuple[float, float, float],
         dt_s: float,
+        measurement_covariance_m2: list[list[float]] | None = None,
     ) -> TrackState:
         """Alpha-beta smoothing: blend previous and measured position/velocity."""
         previous_position = np.asarray(state.position_m, dtype=np.float64)
@@ -86,8 +87,7 @@ class LinearTrackFilter:
             + (1.0 - self._velocity_alpha) * measured_velocity
         )
 
-        d = self._default_covariance_diag_value
-        covariance = [[d, 0.0, 0.0], [0.0, d, 0.0], [0.0, 0.0, d]]
+        covariance = self._measurement_covariance_output(measurement_covariance_m2)
 
         return state.model_copy(
             update={
@@ -114,6 +114,28 @@ class LinearTrackFilter:
 
     def remove_track(self, track_id: str) -> None:
         """No-op: linear filter has no per-track internal state."""
+
+    def _measurement_covariance_output(
+        self,
+        measurement_covariance_m2: list[list[float]] | None,
+    ) -> list[list[float]]:
+        if measurement_covariance_m2 is not None:
+            try:
+                measurement_covariance = np.asarray(measurement_covariance_m2, dtype=np.float64)
+            except (TypeError, ValueError):
+                measurement_covariance = None
+            if (
+                measurement_covariance is not None
+                and measurement_covariance.shape == (3, 3)
+                and np.all(np.isfinite(measurement_covariance))
+            ):
+                return [
+                    [float(measurement_covariance[0, 0]), float(measurement_covariance[0, 1]), float(measurement_covariance[0, 2])],
+                    [float(measurement_covariance[1, 0]), float(measurement_covariance[1, 1]), float(measurement_covariance[1, 2])],
+                    [float(measurement_covariance[2, 0]), float(measurement_covariance[2, 1]), float(measurement_covariance[2, 2])],
+                ]
+        d = self._default_covariance_diag_value
+        return [[d, 0.0, 0.0], [0.0, d, 0.0], [0.0, 0.0, d]]
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +198,16 @@ class KalmanTrackFilter:
         internal = self._states.get(state.id)
         if internal is None:
             return state
-        predicted_position = internal.mean[:3] + internal.mean[3:] * dt_s
+        dt_safe = max(dt_s, 1e-3)
+        transition = self._build_transition_matrix(dt_safe)
+        process_covariance = self._build_process_covariance(dt_safe)
+        predicted_mean = transition @ internal.mean
+        predicted_covariance = (
+            transition @ internal.covariance @ transition.T
+        ) + process_covariance
+        predicted_covariance = 0.5 * (predicted_covariance + predicted_covariance.T)
+        predicted_position = predicted_mean[:3]
+        predicted_position_covariance = predicted_covariance[:3, :3]
         return state.model_copy(
             update={
                 "position_m": (
@@ -184,6 +215,23 @@ class KalmanTrackFilter:
                     float(predicted_position[1]),
                     float(predicted_position[2]),
                 ),
+                "position_covariance_m2": [
+                    [
+                        float(predicted_position_covariance[0, 0]),
+                        float(predicted_position_covariance[0, 1]),
+                        float(predicted_position_covariance[0, 2]),
+                    ],
+                    [
+                        float(predicted_position_covariance[1, 0]),
+                        float(predicted_position_covariance[1, 1]),
+                        float(predicted_position_covariance[1, 2]),
+                    ],
+                    [
+                        float(predicted_position_covariance[2, 0]),
+                        float(predicted_position_covariance[2, 1]),
+                        float(predicted_position_covariance[2, 2]),
+                    ],
+                ],
             },
         )
 
@@ -192,6 +240,7 @@ class KalmanTrackFilter:
         state: TrackState,
         measurement_m: tuple[float, float, float],
         dt_s: float,
+        measurement_covariance_m2: list[list[float]] | None = None,
     ) -> TrackState:
         """Full Kalman predict + measurement-update cycle.
 
@@ -216,7 +265,8 @@ class KalmanTrackFilter:
         # --- Update (measurement) ---
         H = self._observation_model
         innovation = measured_position - (H @ prior_mean)
-        innovation_cov = (H @ prior_covariance @ H.T) + self._measurement_covariance
+        measurement_covariance = self._resolved_measurement_covariance(measurement_covariance_m2)
+        innovation_cov = (H @ prior_covariance @ H.T) + measurement_covariance
         prior_cross = prior_covariance @ H.T
 
         try:
@@ -236,7 +286,7 @@ class KalmanTrackFilter:
         residual_projection = self._identity_6 - (kalman_gain @ H)
         posterior_covariance = (
             residual_projection @ prior_covariance @ residual_projection.T
-        ) + (kalman_gain @ self._measurement_covariance @ kalman_gain.T)
+        ) + (kalman_gain @ measurement_covariance @ kalman_gain.T)
         # Symmetrise to counteract floating-point drift.
         posterior_covariance = 0.5 * (posterior_covariance + posterior_covariance.T)
 
@@ -323,3 +373,18 @@ class KalmanTrackFilter:
             covariance[vel_idx, pos_idx] = block[1, 0]
             covariance[vel_idx, vel_idx] = block[1, 1]
         return covariance
+
+    def _resolved_measurement_covariance(
+        self,
+        measurement_covariance_m2: list[list[float]] | None,
+    ) -> np.ndarray:
+        if measurement_covariance_m2 is None:
+            return self._measurement_covariance
+        try:
+            covariance = np.asarray(measurement_covariance_m2, dtype=np.float64)
+        except (TypeError, ValueError):
+            return self._measurement_covariance
+        if covariance.shape != (3, 3) or not np.all(np.isfinite(covariance)):
+            return self._measurement_covariance
+        covariance = 0.5 * (covariance + covariance.T)
+        return covariance + (np.eye(3, dtype=np.float64) * 1e-9)

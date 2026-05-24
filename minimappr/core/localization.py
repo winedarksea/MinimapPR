@@ -7,12 +7,23 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.optimize import least_squares
 
+from minimappr.core.localization_uncertainty import (
+    covariance_from_jacobian,
+    covariance_to_nested_list,
+    embed_planar_covariance_m2,
+    range_observability_from_covariance,
+)
 from minimappr.models import LocalizationResult
 from minimappr.utils.audio import rms
 
 
 class LocalizationError(RuntimeError):
     pass
+
+
+def _minimum_position_std_m(sound_speed_mps: float, sample_rate_hz: int, interp_factor: int) -> float:
+    sample_period_s = 1.0 / max(sample_rate_hz * max(interp_factor, 1), 1)
+    return max(sound_speed_mps * sample_period_s, 0.05)
 
 
 def speed_of_sound_mps(temperature_c: float, humidity_fraction: float) -> float:
@@ -188,12 +199,31 @@ class LocalizationEngine:
         if peaks:
             confidence *= float(np.clip(np.mean(peaks), 0.0, 1.0))
 
+        minimum_position_std_m = _minimum_position_std_m(
+            sound_speed,
+            sample_rate_hz,
+            self.interp_factor,
+        )
+        position_covariance_m2 = covariance_from_jacobian(
+            solved.jac,
+            rmse_s,
+            minimum_time_std_s=1.0 / max(sample_rate_hz * max(self.interp_factor, 1), 1),
+            minimum_std_m=minimum_position_std_m,
+        )
+        range_observability = range_observability_from_covariance(
+            position_covariance_m2,
+            position - np.mean(points, axis=0),
+        )
+
         return LocalizationResult(
             position_m=(float(position[0]), float(position[1]), float(position[2])),
             confidence=float(np.clip(confidence, 0.0, 1.0)),
             gdop=gdop,
             reference_sensor=reference_sensor,
             tdoa_s=tdoa_s,
+            position_covariance_m2=covariance_to_nested_list(position_covariance_m2),
+            range_observability=range_observability,
+            residual_rms_seconds=rmse_s,
         )
 
     def localize_2d(
@@ -285,12 +315,37 @@ class LocalizationEngine:
         )
         if np.isnan(gdop):
             raise LocalizationError("2D GDOP computation produced NaN")
+
+        minimum_position_std_m = _minimum_position_std_m(
+            sound_speed,
+            sample_rate_hz,
+            self.interp_factor,
+        )
+        planar_covariance_m2 = covariance_from_jacobian(
+            solved.jac,
+            rmse_s,
+            minimum_time_std_s=1.0 / max(sample_rate_hz * max(self.interp_factor, 1), 1),
+            minimum_std_m=minimum_position_std_m,
+        )
+        position_covariance_m2 = embed_planar_covariance_m2(
+            planar_covariance_m2,
+            vertical_std_m=minimum_position_std_m,
+            minimum_std_m=minimum_position_std_m,
+        )
+        range_observability = range_observability_from_covariance(
+            position_covariance_m2,
+            position - np.mean(points, axis=0),
+        )
+
         return LocalizationResult(
             position_m=(float(position[0]), float(position[1]), float(position[2])),
             confidence=float(np.clip(confidence, 0.0, 1.0)),
             gdop=gdop,
             reference_sensor=reference_sensor,
             tdoa_s=tdoa_s,
+            position_covariance_m2=covariance_to_nested_list(position_covariance_m2),
+            range_observability=range_observability,
+            residual_rms_seconds=rmse_s,
         )
 
     @staticmethod

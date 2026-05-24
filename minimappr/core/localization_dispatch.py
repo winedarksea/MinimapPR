@@ -506,6 +506,11 @@ def build_localizer_from_settings(settings: Settings | LocalizationConfig) -> Lo
             grid_resolution_m=cfg.localization_srp_grid_resolution_m,
             search_padding_m=cfg.localization_search_padding_m,
             interp=cfg.gcc_phat_interp_factor,
+            tight_array_aperture_m=cfg.localization_tight_array_aperture_m,
+            far_field_default_range_m=cfg.localization_far_field_default_range_m,
+            far_field_max_range_m=cfg.localization_far_field_max_range_m,
+            far_field_azimuth_step_deg=cfg.localization_music_azimuth_step_deg,
+            far_field_elevation_step_deg=cfg.localization_music_elevation_step_deg,
         ),
         "music": MusicLocalizer(
             max_tau_s=cfg.localization_max_tau_seconds,
@@ -514,12 +519,16 @@ def build_localizer_from_settings(settings: Settings | LocalizationConfig) -> Lo
             freq_min_hz=cfg.localization_subspace_freq_min_hz,
             freq_max_hz=cfg.localization_subspace_freq_max_hz,
             interp=cfg.gcc_phat_interp_factor,
+            far_field_default_range_m=cfg.localization_far_field_default_range_m,
+            far_field_max_range_m=cfg.localization_far_field_max_range_m,
         ),
         "esprit": EspritLocalizer(
             max_tau_s=cfg.localization_max_tau_seconds,
             freq_min_hz=cfg.localization_subspace_freq_min_hz,
             freq_max_hz=cfg.localization_subspace_freq_max_hz,
             interp=cfg.gcc_phat_interp_factor,
+            far_field_default_range_m=cfg.localization_far_field_default_range_m,
+            far_field_max_range_m=cfg.localization_far_field_max_range_m,
         ),
     }
     return LocalizationDispatcher(

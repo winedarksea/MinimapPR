@@ -84,6 +84,8 @@ class LocalizationConfig:
     localization_strategy: str
     localization_srp_grid_resolution_m: float
     localization_search_padding_m: float
+    localization_far_field_default_range_m: float
+    localization_far_field_max_range_m: float
     localization_music_azimuth_step_deg: float
     localization_music_elevation_step_deg: float
     localization_subspace_freq_min_hz: float
@@ -392,6 +394,8 @@ class Settings:
     localization_band_max_hz: float = 0.0
     localization_srp_grid_resolution_m: float = 0.5
     localization_search_padding_m: float = 2.0
+    localization_far_field_default_range_m: float = 50.0
+    localization_far_field_max_range_m: float = 250.0
     localization_music_azimuth_step_deg: float = 6.0
     localization_music_elevation_step_deg: float = 8.0
     localization_subspace_freq_min_hz: float = 300.0
@@ -945,6 +949,14 @@ class Settings:
             localization_band_max_hz=_env_float("MINIMAPPR_LOCALIZATION_BAND_MAX_HZ", 0.0),
             localization_srp_grid_resolution_m=_env_float("MINIMAPPR_LOCALIZATION_SRP_GRID_RESOLUTION_M", 0.5),
             localization_search_padding_m=_env_float("MINIMAPPR_LOCALIZATION_SEARCH_PADDING_M", 2.0),
+            localization_far_field_default_range_m=_env_float(
+                "MINIMAPPR_LOCALIZATION_FAR_FIELD_DEFAULT_RANGE_M",
+                50.0,
+            ),
+            localization_far_field_max_range_m=_env_float(
+                "MINIMAPPR_LOCALIZATION_FAR_FIELD_MAX_RANGE_M",
+                250.0,
+            ),
             localization_music_azimuth_step_deg=_env_float("MINIMAPPR_LOCALIZATION_MUSIC_AZ_STEP_DEG", 6.0),
             localization_music_elevation_step_deg=_env_float("MINIMAPPR_LOCALIZATION_MUSIC_EL_STEP_DEG", 8.0),
             localization_subspace_freq_min_hz=_env_float("MINIMAPPR_LOCALIZATION_SUBSPACE_FREQ_MIN_HZ", 300.0),
@@ -1129,6 +1141,8 @@ class Settings:
             localization_band_max_hz=self.localization_band_max_hz,
             localization_srp_grid_resolution_m=self.localization_srp_grid_resolution_m,
             localization_search_padding_m=self.localization_search_padding_m,
+            localization_far_field_default_range_m=self.localization_far_field_default_range_m,
+            localization_far_field_max_range_m=self.localization_far_field_max_range_m,
             localization_music_azimuth_step_deg=self.localization_music_azimuth_step_deg,
             localization_music_elevation_step_deg=self.localization_music_elevation_step_deg,
             localization_subspace_freq_min_hz=self.localization_subspace_freq_min_hz,

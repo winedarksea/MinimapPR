@@ -21,6 +21,7 @@ are constructed from ``TrackingConfig``.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import itertools
 from typing import Iterable
 
@@ -96,6 +97,15 @@ class TrackManager:
                     f"Supported values: linear, kalman"
                 )
 
+        associator_signature = inspect.signature(self._associator.associate)
+        self._associator_accepts_measurement_covariance = (
+            len(associator_signature.parameters) >= 4
+        )
+        filter_update_signature = inspect.signature(self._filter.update)
+        self._filter_accepts_measurement_covariance = (
+            len(filter_update_signature.parameters) >= 4
+        )
+
         # TQI weights (normalised).
         raw_tqi_weights = np.asarray(
             [
@@ -126,6 +136,7 @@ class TrackManager:
         sensor_count: int = 1,
         label_id: LabelId | None = None,
         capability_tier: str = "full_3d",
+        measurement_covariance_m2: list[list[float]] | None = None,
     ) -> TrackState:
         async with self._lock:
             self._age_tracks(timestamp_ns)
@@ -141,9 +152,19 @@ class TrackManager:
                 predicted_tracks.append(self._filter.predict(track, dt_s))
 
             # Delegate association to the pluggable strategy.
-            matched_id = self._associator.associate(
-                timestamp_ns, position_m, predicted_tracks,
-            )
+            if self._associator_accepts_measurement_covariance:
+                matched_id = self._associator.associate(
+                    timestamp_ns,
+                    position_m,
+                    predicted_tracks,
+                    measurement_covariance_m2,
+                )
+            else:
+                matched_id = self._associator.associate(
+                    timestamp_ns,
+                    position_m,
+                    predicted_tracks,
+                )
 
             if matched_id is None:
                 # --- New track ---
@@ -154,11 +175,15 @@ class TrackManager:
                     first_seen_ns=timestamp_ns,
                     last_seen_ns=timestamp_ns,
                     position_m=(float(position_m[0]), float(position_m[1]), float(position_m[2])),
-                    position_covariance_m2=[
-                        [p_var, 0.0, 0.0],
-                        [0.0, p_var, 0.0],
-                        [0.0, 0.0, p_var],
-                    ],
+                    position_covariance_m2=(
+                        measurement_covariance_m2
+                        if measurement_covariance_m2 is not None
+                        else [
+                            [p_var, 0.0, 0.0],
+                            [0.0, p_var, 0.0],
+                            [0.0, 0.0, p_var],
+                        ]
+                    ),
                     velocity_mps=(0.0, 0.0, 0.0),
                     label_id=label_id,
                     label=label,
@@ -181,7 +206,19 @@ class TrackManager:
             )
 
             # Delegate filtering to the pluggable strategy.
-            filtered = self._filter.update(best_track, position_m, dt_s)
+            if self._filter_accepts_measurement_covariance:
+                filtered = self._filter.update(
+                    best_track,
+                    position_m,
+                    dt_s,
+                    measurement_covariance_m2,
+                )
+            else:
+                filtered = self._filter.update(
+                    best_track,
+                    position_m,
+                    dt_s,
+                )
 
             best_track.last_seen_ns = timestamp_ns
             best_track.position_m = filtered.position_m
