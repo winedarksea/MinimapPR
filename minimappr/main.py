@@ -905,6 +905,45 @@ async def _maintain_ingest_stream_consumer(app: FastAPI) -> None:
         await asyncio.sleep(_INGEST_STREAM_CONSUMER_WATCHDOG_INTERVAL_SECONDS)
 
 
+def _heartbeat_health_status(
+    *,
+    last_seen_ns: int,
+    now_ns: int,
+    degraded_after_seconds: float,
+    offline_after_seconds: float,
+) -> str:
+    age_s = max(0.0, (now_ns - last_seen_ns) / 1_000_000_000.0)
+    if age_s >= offline_after_seconds:
+        return NodeHealthStatus.OFFLINE.value
+    if age_s >= degraded_after_seconds:
+        return NodeHealthStatus.DEGRADED.value
+    return NodeHealthStatus.ONLINE.value
+
+
+async def _apply_runtime_health_statuses(
+    nodes: list[dict],
+    *,
+    bit_evaluator: BITReportEvaluator,
+    now_ns: int,
+    degraded_after_seconds: float,
+    offline_after_seconds: float,
+) -> None:
+    for node in nodes:
+        node_id = str(node.get("id") or "")
+        last_seen_ns = int(node.get("last_seen_ns") or 0)
+        heartbeat_health = _heartbeat_health_status(
+            last_seen_ns=last_seen_ns,
+            now_ns=now_ns,
+            degraded_after_seconds=degraded_after_seconds,
+            offline_after_seconds=offline_after_seconds,
+        )
+        node["health_status"] = await bit_evaluator.derive_health_status(
+            node_id=node_id,
+            heartbeat_health=heartbeat_health,
+            now_ns=now_ns,
+        )
+
+
 def _sensor_ids_from_node_row(node: dict) -> list[str]:
     offsets = node.get("sensor_offsets_m")
     if not isinstance(offsets, list):
@@ -1552,26 +1591,18 @@ async def list_nodes(
             latest_environment = _sidecar_snapshot_latest_environment(snapshot, node_id=node_id)
             if latest_environment is not None:
                 latest_environment_by_node[node_id] = latest_environment
+    await _apply_runtime_health_statuses(
+        nodes,
+        bit_evaluator=bit_evaluator,
+        now_ns=now_ns,
+        degraded_after_seconds=settings.node_degraded_after_seconds,
+        offline_after_seconds=settings.node_offline_after_seconds,
+    )
     for node in nodes:
         if node.get("position_geo") is None and node.get("position_m"):
             local = node["position_m"]
             geo = state.coordinate_frame.local_to_geo((float(local[0]), float(local[1]), float(local[2])))
             node["position_geo"] = geo.model_dump(mode="json")
-
-        age_s = max(0.0, (now_ns - int(node["last_seen_ns"])) / 1_000_000_000.0)
-        if age_s >= settings.node_offline_after_seconds:
-            heartbeat_health = "offline"
-        elif age_s >= settings.node_degraded_after_seconds:
-            heartbeat_health = "degraded"
-        else:
-            heartbeat_health = "online"
-
-        # Merge BIT status with heartbeat staleness
-        node["health_status"] = await bit_evaluator.derive_health_status(
-            node_id=node["id"],
-            heartbeat_health=heartbeat_health,
-            now_ns=now_ns,
-        )
 
         # Attach latest BIT failure codes for UI consumption
         bit_reports = await bit_evaluator.latest_reports_for_node(node["id"])
@@ -1681,11 +1712,28 @@ async def list_nodes(
 
 
 async def _runtime_node_health_counts(
-    request: Request,
+    state,
     *,
+    now_ns: int,
     limit: int = 5000,
 ) -> dict[str, int]:
-    nodes = await list_nodes(request, limit=limit)
+    settings: Settings = state.settings
+    bit_evaluator: BITReportEvaluator = state.bit_evaluator
+    nodes = await state.storage.list_nodes(limit=limit)
+    sidecar_node_snapshots = (
+        _sidecar_stream_consumer_snapshots(state)
+        if settings.ingest_backend == "rust"
+        else {}
+    )
+    if sidecar_node_snapshots:
+        nodes = _merge_nodes_with_sidecar_snapshots(nodes, sidecar_node_snapshots, limit=limit)
+    await _apply_runtime_health_statuses(
+        nodes,
+        bit_evaluator=bit_evaluator,
+        now_ns=now_ns,
+        degraded_after_seconds=settings.node_degraded_after_seconds,
+        offline_after_seconds=settings.node_offline_after_seconds,
+    )
     counts = {
         "online_nodes": 0,
         "degraded_nodes": 0,
@@ -2604,7 +2652,7 @@ async def federation_snapshot(payload: FederationTrackSnapshot, request: Request
 async def cop_status(request: Request) -> CopStatusResponse:
     state = _require_state(request)
     now_ns = time.time_ns()
-    node_counts = await _runtime_node_health_counts(request)
+    node_counts = await _runtime_node_health_counts(state, now_ns=now_ns)
     active_tracks = await state.storage.count_active_tracks()
     recent_window_ns = now_ns - 300_000_000_000
     recent_alert_count = await state.storage.recent_alert_count(since_ns=recent_window_ns)
@@ -3220,7 +3268,7 @@ async def get_context_current(
     recent_alerts = [a for a in all_alerts if int(a.get("timestamp_ns", 0)) >= recent_window_ns]
 
     # Node health counts
-    node_counts = await _runtime_node_health_counts(request)
+    node_counts = await _runtime_node_health_counts(state, now_ns=now_ns)
 
     # Environment snapshot at origin
     conditions = state.environment_provider.get_conditions(location_m=None)

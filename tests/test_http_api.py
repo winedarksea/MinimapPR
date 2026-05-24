@@ -1539,6 +1539,29 @@ def test_rust_snapshot_nodes_drive_cop_and_context_health(monkeypatch, tmp_path:
         assert context["system_health"] == "ok"
 
 
+def test_rust_snapshot_health_aggregation_skips_node_detail_queries(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    monkeypatch.setenv("MINIMAPPR_INGEST_BACKEND", "rust")
+    monkeypatch.setenv("MINIMAPPR_DIRECT_INGEST_ENABLED", "false")
+    monkeypatch.setenv("MINIMAPPR_INGEST_SIDECAR_ENABLED", "false")
+
+    async def _unexpected(*args, **kwargs):
+        raise AssertionError("aggregate health endpoint should not call node-detail query")
+
+    with TestClient(app) as client:
+        client.app.state.ingest_stream_consumer = _make_fake_rust_stream_consumer()
+        monkeypatch.setattr(client.app.state.storage, "list_latest_environment_per_node", _unexpected)
+        monkeypatch.setattr(client.app.state.storage, "list_latest_time_quality_per_node", _unexpected)
+        monkeypatch.setattr(client.app.state.storage, "list_latest_observation_metadata_per_node", _unexpected)
+        monkeypatch.setattr(client.app.state.storage, "list_node_audio_summaries", _unexpected)
+
+        cop_response = client.get("/api/v1/cop/status")
+        assert cop_response.status_code == 200
+
+        context_response = client.get("/api/v1/context/current")
+        assert context_response.status_code == 200
+
+
 def test_environment_ingest_from_node_metadata(monkeypatch, tmp_path: Path) -> None:
     _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
     monkeypatch.setenv("MINIMAPPR_DEFAULT_TEMPERATURE_C", "7.5")
