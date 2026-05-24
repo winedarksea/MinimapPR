@@ -1446,12 +1446,7 @@ def test_nodes_include_audio_debug_summary(monkeypatch, tmp_path: Path) -> None:
         assert int(audio_debug["sensor_count"]) >= 1
 
 
-def test_rust_nodes_use_in_memory_stream_consumer_snapshot(monkeypatch, tmp_path: Path) -> None:
-    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
-    monkeypatch.setenv("MINIMAPPR_INGEST_BACKEND", "rust")
-    monkeypatch.setenv("MINIMAPPR_DIRECT_INGEST_ENABLED", "false")
-    monkeypatch.setenv("MINIMAPPR_INGEST_SIDECAR_ENABLED", "false")
-
+def _make_fake_rust_stream_consumer() -> object:
     class _FakeStreamConsumer:
         def snapshot_nodes(self) -> dict[str, SidecarNodeSnapshot]:
             now_ns = time.time_ns()
@@ -1495,8 +1490,17 @@ def test_rust_nodes_use_in_memory_stream_consumer_snapshot(monkeypatch, tmp_path
         async def stop(self) -> None:
             return None
 
+    return _FakeStreamConsumer()
+
+
+def test_rust_nodes_use_in_memory_stream_consumer_snapshot(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    monkeypatch.setenv("MINIMAPPR_INGEST_BACKEND", "rust")
+    monkeypatch.setenv("MINIMAPPR_DIRECT_INGEST_ENABLED", "false")
+    monkeypatch.setenv("MINIMAPPR_INGEST_SIDECAR_ENABLED", "false")
+
     with TestClient(app) as client:
-        client.app.state.ingest_stream_consumer = _FakeStreamConsumer()
+        client.app.state.ingest_stream_consumer = _make_fake_rust_stream_consumer()
         response = client.get("/api/v1/nodes", params={"limit": 10})
 
     assert response.status_code == 200
@@ -1510,6 +1514,29 @@ def test_rust_nodes_use_in_memory_stream_consumer_snapshot(monkeypatch, tmp_path
     assert node["audio_debug"]["rms"] == pytest.approx(0.03125)
     assert node["latest_environment"]["temperature_c"] == pytest.approx(21.5)
     assert node["latest_environment"]["humidity_fraction"] == pytest.approx(0.44)
+
+
+def test_rust_snapshot_nodes_drive_cop_and_context_health(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    monkeypatch.setenv("MINIMAPPR_INGEST_BACKEND", "rust")
+    monkeypatch.setenv("MINIMAPPR_DIRECT_INGEST_ENABLED", "false")
+    monkeypatch.setenv("MINIMAPPR_INGEST_SIDECAR_ENABLED", "false")
+
+    with TestClient(app) as client:
+        client.app.state.ingest_stream_consumer = _make_fake_rust_stream_consumer()
+
+        cop_response = client.get("/api/v1/cop/status")
+        assert cop_response.status_code == 200
+        cop = cop_response.json()
+        assert cop["active_nodes"] == 1
+        assert cop["degraded_nodes"] == 0
+        assert cop["offline_nodes"] == 0
+
+        context_response = client.get("/api/v1/context/current")
+        assert context_response.status_code == 200
+        context = context_response.json()
+        assert context["node_health"] == {"online": 1, "degraded": 0, "offline": 0}
+        assert context["system_health"] == "ok"
 
 
 def test_environment_ingest_from_node_metadata(monkeypatch, tmp_path: Path) -> None:

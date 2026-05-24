@@ -214,6 +214,20 @@ struct Args {
 
     #[arg(
         long,
+        env = "MINIMAPPR_DSP_CONSUMED_MANIFEST_PRUNE_MAX_AGE_SECONDS",
+        default_value_t = 300
+    )]
+    dsp_consumed_manifest_prune_max_age_seconds: u64,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_DSP_STREAM_INACTIVITY_EVICT_SECONDS",
+        default_value_t = 3600
+    )]
+    dsp_stream_inactivity_evict_seconds: u64,
+
+    #[arg(
+        long,
         env = "MINIMAPPR_LOCALIZATION_BAND_MIN_HZ",
         default_value_t = 300.0
     )]
@@ -435,6 +449,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 consumed_manifest_retention_max_files: args
                     .dsp_consumed_manifest_retention_max_files,
                 consumed_manifest_prune_interval: args.dsp_consumed_manifest_prune_interval,
+                consumed_manifest_prune_max_age_seconds: args
+                    .dsp_consumed_manifest_prune_max_age_seconds,
+                stream_inactivity_evict_seconds: args.dsp_stream_inactivity_evict_seconds,
                 localization_band_hz: [
                     args.localization_band_min_hz,
                     args.localization_band_max_hz,
@@ -879,6 +896,7 @@ struct DspStatusResponse {
     // classifier renders emit) works against either backend.
     total_buffer_reanchors: u64,
     total_window_underrun_drops: u64,
+    total_stale_streams_evicted: u64,
     dsp_worker_running: bool,
 }
 
@@ -902,6 +920,7 @@ async fn dsp_status(State(state): State<AppState>) -> Response {
         total_classification_drops: st.total_classification_drops,
         total_buffer_reanchors: st.total_buffer_reanchors,
         total_window_underrun_drops: st.total_window_underrun_drops,
+        total_stale_streams_evicted: st.total_stale_streams_evicted,
         dsp_worker_running: st.worker_running,
     })
     .into_response()

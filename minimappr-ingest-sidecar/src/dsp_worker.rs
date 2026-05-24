@@ -56,6 +56,14 @@ pub struct DspWorkerConfig {
     pub skip_stale_manifests_for_live_buffer: bool,
     pub consumed_manifest_retention_max_files: usize,
     pub consumed_manifest_prune_interval: u64,
+    /// Also prune consumed manifests if this many seconds have elapsed since the
+    /// last prune, even if the count threshold has not been reached (e.g. quiet
+    /// periods where ingest pauses and prune would never fire).
+    pub consumed_manifest_prune_max_age_seconds: u64,
+    /// Evict per-stream buffer and state entries (buffers, node_audio_state, etc.)
+    /// after this many seconds of inactivity. Prevents RSS growth from node-ID
+    /// churn across sensor reflashes or hostname changes.
+    pub stream_inactivity_evict_seconds: u64,
     pub default_temperature_c: f32,
     pub default_humidity_fraction: f32,
     pub sound_speed_mps: f32,
@@ -96,6 +104,8 @@ impl Default for DspWorkerConfig {
             skip_stale_manifests_for_live_buffer: false,
             consumed_manifest_retention_max_files: 20_000,
             consumed_manifest_prune_interval: 256,
+            consumed_manifest_prune_max_age_seconds: 300,
+            stream_inactivity_evict_seconds: 3600,
             default_temperature_c,
             default_humidity_fraction,
             sound_speed_mps: 343.2,
@@ -234,6 +244,7 @@ pub struct DspWorkerState {
     /// `localization_drops_by_reason["no_window"]` counter — both are the
     /// canonical "pipeline is silently dropping" signal.
     pub total_window_underrun_drops: u64,
+    pub total_stale_streams_evicted: u64,
     pub pending_count: usize,
     pub recent_results: Vec<DspManifest>,
     /// Per-node audio overrides applied during ingest (set via POST /api/v1/dsp/config).
@@ -365,6 +376,8 @@ pub struct DspWorker {
     /// `localization_cadence_ms` so nodes appear alive even during quiet periods.
     last_heartbeat_ns_by_stream: HashMap<String, u128>,
     consumed_manifests_since_prune: Arc<AtomicU64>,
+    last_consumed_prune_ns: u128,
+    last_stream_purge_ns: u128,
     deferred_source_manifest_ids: Vec<String>,
     env_cache: Option<EnvironmentCache>,
     /// Shared publisher for DSP result manifests streamed to Python via SSE.
@@ -403,6 +416,8 @@ impl DspWorker {
             last_trigger_ns_by_stream: HashMap::new(),
             last_heartbeat_ns_by_stream: HashMap::new(),
             consumed_manifests_since_prune: Arc::new(AtomicU64::new(0)),
+            last_consumed_prune_ns: system_now_ns(),
+            last_stream_purge_ns: system_now_ns(),
             deferred_source_manifest_ids: Vec::new(),
             env_cache: None,
             dsp_event_publisher: None,
@@ -458,6 +473,7 @@ impl DspWorker {
     pub async fn run_loop(mut self) {
         info!("DSP worker started");
         let interval = time::Duration::from_millis(self.config.poll_interval_ms);
+        const STREAM_PURGE_INTERVAL_NS: u128 = 60 * 1_000_000_000; // once per minute
         loop {
             {
                 let mut st = self.state.write().await;
@@ -467,6 +483,11 @@ impl DspWorker {
             let processed_manifest_count = self.process_pending().await;
             if self.should_exit_after_drain(processed_manifest_count) {
                 break;
+            }
+            let now_ns = system_now_ns();
+            if now_ns.saturating_sub(self.last_stream_purge_ns) >= STREAM_PURGE_INTERVAL_NS {
+                self.last_stream_purge_ns = now_ns;
+                self.purge_stale_streams().await;
             }
             if should_sleep_after_poll_cycle(processed_manifest_count) {
                 time::sleep(interval).await;
@@ -1199,7 +1220,13 @@ impl DspWorker {
             .consumed_manifests_since_prune
             .fetch_add(successful_consumes, Ordering::Relaxed);
         let current = previous.saturating_add(successful_consumes);
-        if previous / prune_interval < current / prune_interval {
+        let count_due = previous / prune_interval < current / prune_interval;
+        let prune_max_age_ns =
+            (self.config.consumed_manifest_prune_max_age_seconds as u128) * 1_000_000_000;
+        let time_due =
+            system_now_ns().saturating_sub(self.last_consumed_prune_ns) >= prune_max_age_ns;
+        if count_due || time_due {
+            self.last_consumed_prune_ns = system_now_ns();
             let store = self.manifest_store.clone();
             let retention_max_files = self.config.consumed_manifest_retention_max_files;
             tokio::spawn(async move {
@@ -1232,6 +1259,47 @@ impl DspWorker {
         }
         let mut st = self.state.write().await;
         st.total_buffer_reanchors = st.total_buffer_reanchors.saturating_add(count);
+    }
+
+    /// Evict per-stream entries (buffers, audio state, cadence timestamps) for
+    /// streams that have not produced a heartbeat in `stream_inactivity_evict_seconds`.
+    /// Mirrors the leases.rs `purge_expired_*` idiom. Called once per minute from
+    /// `run_loop` to prevent RSS growth from node-ID churn (reflash, hostname change).
+    async fn purge_stale_streams(&mut self) {
+        let ttl_ns =
+            (self.config.stream_inactivity_evict_seconds as u128) * 1_000_000_000;
+        let now_ns = system_now_ns();
+        let cutoff = now_ns.saturating_sub(ttl_ns);
+        let stale: Vec<String> = self
+            .last_heartbeat_ns_by_stream
+            .iter()
+            .filter_map(|(k, &v)| (v < cutoff).then(|| k.clone()))
+            .collect();
+        if stale.is_empty() {
+            return;
+        }
+        for key in &stale {
+            self.buffers.remove(key);
+            self.last_classifier_render_ns_by_stream.remove(key);
+            self.last_localization_ns_by_stream.remove(key);
+            self.last_trigger_ns_by_stream.remove(key);
+            self.last_heartbeat_ns_by_stream.remove(key);
+            // node_audio_state is keyed by node_id (prefix before "__"), not stream_key.
+            // Only remove if no remaining stream for that node still active.
+            let node_id = key.split("__").next().unwrap_or(key.as_str());
+            let node_still_active = self
+                .last_heartbeat_ns_by_stream
+                .keys()
+                .any(|k| k.starts_with(node_id));
+            if !node_still_active {
+                self.node_audio_state.remove(node_id);
+            }
+        }
+        let evicted = stale.len() as u64;
+        let mut st = self.state.write().await;
+        st.total_stale_streams_evicted =
+            st.total_stale_streams_evicted.saturating_add(evicted);
+        info!(count = evicted, "Evicted stale per-stream entries");
     }
 
     /// Mirror of the Python localization `"no_window"` drop reason. Incremented
@@ -2173,7 +2241,7 @@ pub(crate) fn system_now_ns() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
-        .unwrap_or(0)
+        .expect("system clock is before UNIX_EPOCH — RTC fault or misconfiguration")
 }
 
 #[cfg(test)]

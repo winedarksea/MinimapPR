@@ -2174,3 +2174,112 @@ async def test_localize_candidate_drops_with_event_too_old_reason(
     assert elapsed < 0.2
 
     await storage.close()
+
+
+# ---------------------------------------------------------------------------
+# Fix 4: throttled per-stage exception counter
+# ---------------------------------------------------------------------------
+
+
+def _make_minimal_fusion(tmp_path: Path) -> tuple[FusionNode, Storage]:
+    """Return a FusionNode wired with a minimal in-memory config for unit tests."""
+    settings = Settings(
+        db_path=tmp_path / "fusion.db",
+        snippet_dir=tmp_path / "snippets",
+        snippet_retention_seconds=0,
+        trigger_rms=0.001,
+        trigger_cooldown_seconds=0.0,
+        localization_window_seconds=0.04,
+        classification_window_seconds=0.0,
+        max_sensor_buffer_seconds=2.0,
+        fusion_worker_count=1,
+        fusion_event_queue_size=8,
+    )
+    settings.db_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.snippet_dir.mkdir(parents=True, exist_ok=True)
+
+    storage = Storage(settings.db_path)
+    coordinate_frame = LocalCoordinateFrame(
+        origin=GeoPoint(lat=37.0, lon=-122.0, alt_m=0.0), mode="flat"
+    )
+
+    fusion = FusionNode(
+        settings=settings,
+        registry=NodeRegistry(),
+        buffer=MultiSensorBuffer(max_duration_seconds=2.0),
+        localizer=LocalizationEngine(max_tau_s=0.03),
+        classifier=HeuristicClassifier(),
+        tracker=TrackManager(settings),
+        storage=storage,
+        live_callback=None,
+        coordinate_frame=coordinate_frame,
+        zone_matcher=ZoneMatcher(storage=storage),
+    )
+    return fusion, storage
+
+
+def test_record_worker_exception_increments_counter(tmp_path: Path) -> None:
+    """_record_worker_exception increments the per-stage exceptions_by_type counter."""
+    fusion, _ = _make_minimal_fusion(tmp_path)
+
+    exc = ValueError("boom")
+    fusion._record_worker_exception(stage="localization", exc=exc)
+
+    assert fusion._metrics.localization_exceptions_by_type == {"ValueError": 1}
+    assert fusion._metrics.classification_exceptions_by_type == {}
+    assert fusion._metrics.rules_exceptions_by_type == {}
+
+    # Second call on same type increments, not re-keyed.
+    fusion._record_worker_exception(stage="localization", exc=ValueError("again"))
+    assert fusion._metrics.localization_exceptions_by_type == {"ValueError": 2}
+
+    # Different exception type gets its own key.
+    fusion._record_worker_exception(stage="localization", exc=RuntimeError("other"))
+    assert fusion._metrics.localization_exceptions_by_type == {"ValueError": 2, "RuntimeError": 1}
+
+
+def test_record_worker_exception_throttles_warning(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """_record_worker_exception logs at most once per (stage, exc_type) per interval."""
+    import logging
+
+    fusion, _ = _make_minimal_fusion(tmp_path)
+    # Force the throttle interval to be very long so repeat calls are suppressed.
+    fusion._drop_warning_interval_seconds = 9999.0
+
+    exc = ValueError("boom")
+    with caplog.at_level(logging.WARNING, logger="minimappr.core.fusion_node"):
+        fusion._record_worker_exception(stage="localization", exc=exc)
+        fusion._record_worker_exception(stage="localization", exc=exc)
+        fusion._record_worker_exception(stage="localization", exc=exc)
+
+    worker_exc_logs = [r for r in caplog.records if r.message == "Fusion worker exception"]
+    assert len(worker_exc_logs) == 1, "Expected exactly one log entry per throttle window"
+    assert worker_exc_logs[0].__dict__["exception_type"] == "ValueError"
+    assert worker_exc_logs[0].__dict__["stage_name"] == "localization"
+
+
+def test_record_worker_exception_different_stages_independent(tmp_path: Path) -> None:
+    """Exceptions on different stages are tracked independently and don't interfere."""
+    fusion, _ = _make_minimal_fusion(tmp_path)
+
+    fusion._record_worker_exception(stage="localization", exc=ValueError("a"))
+    fusion._record_worker_exception(stage="classification", exc=ValueError("b"))
+    fusion._record_worker_exception(stage="rules", exc=ValueError("c"))
+
+    assert fusion._metrics.localization_exceptions_by_type == {"ValueError": 1}
+    assert fusion._metrics.classification_exceptions_by_type == {"ValueError": 1}
+    assert fusion._metrics.rules_exceptions_by_type == {"ValueError": 1}
+
+
+def test_exception_counters_appear_in_status(tmp_path: Path) -> None:
+    """FusionMetrics exception dicts are serialized into the status() metrics dict."""
+    import dataclasses
+
+    fusion, _ = _make_minimal_fusion(tmp_path)
+    fusion._record_worker_exception(stage="classification", exc=RuntimeError("test"))
+
+    metrics = dataclasses.asdict(fusion._metrics)
+    assert "classification_exceptions_by_type" in metrics
+    assert metrics["classification_exceptions_by_type"] == {"RuntimeError": 1}
+    assert "localization_exceptions_by_type" in metrics
+    assert "rules_exceptions_by_type" in metrics

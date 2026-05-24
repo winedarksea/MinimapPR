@@ -110,6 +110,7 @@ from minimappr.models import (
     IngestFrameRequest,
     IngestFrameResponse,
     MicView,
+    NodeHealthStatus,
     NodeAudioOverride,
     PipelineNodeView,
     PipelineNodesResponse,
@@ -1679,6 +1680,28 @@ async def list_nodes(
     return nodes
 
 
+async def _runtime_node_health_counts(
+    request: Request,
+    *,
+    limit: int = 5000,
+) -> dict[str, int]:
+    nodes = await list_nodes(request, limit=limit)
+    counts = {
+        "online_nodes": 0,
+        "degraded_nodes": 0,
+        "offline_nodes": 0,
+    }
+    for node in nodes:
+        health_status = str(node.get("health_status") or "")
+        if health_status == NodeHealthStatus.ONLINE.value:
+            counts["online_nodes"] += 1
+        elif health_status == NodeHealthStatus.OFFLINE.value:
+            counts["offline_nodes"] += 1
+        else:
+            counts["degraded_nodes"] += 1
+    return counts
+
+
 # ------------------------------------------------------------------
 # BIT (Built-In Test) Endpoints
 # ------------------------------------------------------------------
@@ -2580,13 +2603,8 @@ async def federation_snapshot(payload: FederationTrackSnapshot, request: Request
 @app.get("/api/v1/cop/status", response_model=CopStatusResponse)
 async def cop_status(request: Request) -> CopStatusResponse:
     state = _require_state(request)
-    settings: Settings = state.settings
     now_ns = time.time_ns()
-    node_counts = await state.storage.count_nodes_by_status(
-        now_ns=now_ns,
-        degraded_after_seconds=settings.node_degraded_after_seconds,
-        offline_after_seconds=settings.node_offline_after_seconds,
-    )
+    node_counts = await _runtime_node_health_counts(request)
     active_tracks = await state.storage.count_active_tracks()
     recent_window_ns = now_ns - 300_000_000_000
     recent_alert_count = await state.storage.recent_alert_count(since_ns=recent_window_ns)
@@ -3202,11 +3220,7 @@ async def get_context_current(
     recent_alerts = [a for a in all_alerts if int(a.get("timestamp_ns", 0)) >= recent_window_ns]
 
     # Node health counts
-    node_counts = await state.storage.count_nodes_by_status(
-        now_ns=now_ns,
-        degraded_after_seconds=settings.node_degraded_after_seconds,
-        offline_after_seconds=settings.node_offline_after_seconds,
-    )
+    node_counts = await _runtime_node_health_counts(request)
 
     # Environment snapshot at origin
     conditions = state.environment_provider.get_conditions(location_m=None)

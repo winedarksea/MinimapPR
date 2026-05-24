@@ -185,6 +185,11 @@ class FusionMetrics:
     localization_drops_by_reason: dict[str, int] = field(default_factory=dict)
     classification_drops_by_reason: dict[str, int] = field(default_factory=dict)
     rules_drops_by_reason: dict[str, int] = field(default_factory=dict)
+    # Worker exception visibility: unexpected exceptions caught by each worker loop.
+    # Keyed by exception class name so persistent bugs surface without drowning logs.
+    localization_exceptions_by_type: dict[str, int] = field(default_factory=dict)
+    classification_exceptions_by_type: dict[str, int] = field(default_factory=dict)
+    rules_exceptions_by_type: dict[str, int] = field(default_factory=dict)
     # Wall-clock timestamps used to derive "active drought" — triggers firing
     # while detections stall. Both default to 0 so status() can detect "never".
     last_detection_emission_ns: int = 0
@@ -730,6 +735,7 @@ class FusionNode:
             except Exception as exc:  # pragma: no cover - resilience path
                 self._metrics.localization_failures += 1
                 self._last_error = f"{type(exc).__name__}: {exc}"
+                self._record_worker_exception(stage="localization", exc=exc, candidate_id=candidate.id)
             finally:
                 self._realtime_tracker.mark_finished(stage_name="localization", item_id=candidate.id)
                 self._localization_queue.task_done()
@@ -813,6 +819,7 @@ class FusionNode:
                 )
                 self._metrics.classification_failures += 1
                 self._last_error = f"{type(exc).__name__}: {exc}"
+                self._record_worker_exception(stage="classification", exc=exc, candidate_id=product.candidate.id)
             finally:
                 self._realtime_tracker.mark_finished(
                     stage_name="classification",
@@ -838,6 +845,7 @@ class FusionNode:
             except Exception as exc:  # pragma: no cover - resilience path
                 self._metrics.rules_failures += 1
                 self._last_error = f"{type(exc).__name__}: {exc}"
+                self._record_worker_exception(stage="rules", exc=exc)
             finally:
                 self._realtime_tracker.mark_finished(
                     stage_name="rules",
@@ -1932,6 +1940,50 @@ class FusionNode:
         }
         log_extra.update(extras)
         logger.warning("Silent pipeline drop", extra=log_extra)
+
+    _EXCEPTION_COUNTER_FIELDS: dict[str, str] = {
+        "localization": "localization_exceptions_by_type",
+        "classification": "classification_exceptions_by_type",
+        "rules": "rules_exceptions_by_type",
+    }
+
+    def _record_worker_exception(
+        self,
+        *,
+        stage: str,
+        exc: BaseException,
+        **extras: Any,
+    ) -> None:
+        """Count and rate-limit-log an unexpected worker exception.
+
+        Mirrors the _record_silent_drop throttling pattern: same 10s interval,
+        same throttle dict, keyed by (\"exception\", stage, exc_type) so a
+        persistent bug floods neither logs nor the counter dict.
+        """
+        field_name = self._EXCEPTION_COUNTER_FIELDS.get(stage)
+        if field_name is None:
+            return
+        counters: dict[str, int] = getattr(self._metrics, field_name)
+        exc_type = type(exc).__name__
+        counters[exc_type] = counters.get(exc_type, 0) + 1
+
+        rate_key = ("exception", stage, exc_type)
+        now_s = time.monotonic()
+        last_logged_s = self._drop_warning_last_logged_s.get(rate_key, 0.0)
+        if now_s - last_logged_s < self._drop_warning_interval_seconds:
+            return
+        self._drop_warning_last_logged_s[rate_key] = now_s
+        logger.warning(
+            "Fusion worker exception",
+            extra={
+                "stage_name": stage,
+                "exception_type": exc_type,
+                "exception_message": str(exc),
+                "count_for_type": counters[exc_type],
+                **extras,
+            },
+            exc_info=exc,
+        )
 
     async def _enqueue_stage(self, queue: asyncio.Queue, item: Any) -> bool:
         tracker_stage_name = self._queue_stage_name(queue)

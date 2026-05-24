@@ -1590,3 +1590,102 @@ fn dsp_worker_state_silent_drop_counters_default_zero_and_increment() {
     assert_eq!(state.total_buffer_reanchors, 3);
     assert_eq!(state.total_window_underrun_drops, 1);
 }
+
+// ---------------------------------------------------------------------------
+// Fix 1: purge_stale_streams — per-stream HashMap eviction
+// ---------------------------------------------------------------------------
+
+/// Helper that builds a minimal DspWorker without a real filesystem store.
+async fn make_test_worker(tmp: &tempfile::TempDir) -> DspWorker {
+    let manifest_store = ManifestStore::new(tmp.path());
+    manifest_store.ensure_initialized().await.unwrap();
+    let derived_cache = DerivedCache::new(
+        tmp.path(),
+        DerivedCacheConfig {
+            budget_bytes: 16_777_216,
+            admission_reserve_bytes: 0,
+        },
+    );
+    derived_cache.ensure_initialized().await.unwrap();
+    let state: SharedDspState = Arc::new(RwLock::new(Default::default()));
+    DspWorker::new(
+        manifest_store,
+        derived_cache,
+        DspWorkerConfig::default(),
+        state,
+    )
+}
+
+#[tokio::test]
+async fn purge_stale_streams_removes_idle_stream_entries() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut worker = make_test_worker(&tmp).await;
+
+    // Insert two streams: one ancient, one recent.
+    let old_key = "node-old__audio_main__0000".to_string();
+    let live_key = "node-live__audio_main__0000".to_string();
+
+    let now_ns = system_now_ns();
+    let two_hours_ago = now_ns.saturating_sub(2 * 3600 * 1_000_000_000);
+
+    worker.last_heartbeat_ns_by_stream.insert(old_key.clone(), two_hours_ago);
+    worker.last_heartbeat_ns_by_stream.insert(live_key.clone(), now_ns);
+    worker.last_localization_ns_by_stream.insert(old_key.clone(), two_hours_ago);
+    worker.last_localization_ns_by_stream.insert(live_key.clone(), now_ns);
+    worker.last_trigger_ns_by_stream.insert(old_key.clone(), two_hours_ago);
+    worker.last_trigger_ns_by_stream.insert(live_key.clone(), now_ns);
+    worker.last_classifier_render_ns_by_stream.insert(old_key.clone(), two_hours_ago);
+    worker.last_classifier_render_ns_by_stream.insert(live_key.clone(), now_ns);
+
+    // TTL is 1h (3600s default); old stream (2h) should be evicted, live stream kept.
+    worker.purge_stale_streams().await;
+
+    assert!(!worker.last_heartbeat_ns_by_stream.contains_key(&old_key), "stale stream should be evicted");
+    assert!(worker.last_heartbeat_ns_by_stream.contains_key(&live_key), "live stream should be retained");
+    assert!(!worker.last_localization_ns_by_stream.contains_key(&old_key));
+    assert!(worker.last_localization_ns_by_stream.contains_key(&live_key));
+
+    let st = worker.state.read().await;
+    assert_eq!(st.total_stale_streams_evicted, 1, "eviction counter should be 1");
+}
+
+#[tokio::test]
+async fn purge_stale_streams_keeps_all_when_none_idle() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut worker = make_test_worker(&tmp).await;
+
+    let now_ns = system_now_ns();
+    for i in 0..3 {
+        let key = format!("node-{i}__audio_main__0000");
+        worker.last_heartbeat_ns_by_stream.insert(key.clone(), now_ns);
+        worker.last_localization_ns_by_stream.insert(key, now_ns);
+    }
+
+    worker.purge_stale_streams().await;
+
+    assert_eq!(worker.last_heartbeat_ns_by_stream.len(), 3, "no streams should be evicted");
+    let st = worker.state.read().await;
+    assert_eq!(st.total_stale_streams_evicted, 0);
+}
+
+#[tokio::test]
+async fn purge_stale_streams_evicts_node_audio_state_when_all_channels_gone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut worker = make_test_worker(&tmp).await;
+
+    let now_ns = system_now_ns();
+    let stale_ns = now_ns.saturating_sub(2 * 3600 * 1_000_000_000);
+
+    // Insert all 4 channels for "stale-node" as stale.
+    for ch in 0..4u32 {
+        let key = format!("stale-node__audio_main__{ch:04x}");
+        worker.last_heartbeat_ns_by_stream.insert(key, stale_ns);
+    }
+    worker.node_audio_state.insert("stale-node".to_string(), NodeAudioState::default());
+
+    worker.purge_stale_streams().await;
+
+    assert!(worker.last_heartbeat_ns_by_stream.is_empty());
+    assert!(!worker.node_audio_state.contains_key("stale-node"),
+        "node_audio_state should be removed when all its streams are evicted");
+}
