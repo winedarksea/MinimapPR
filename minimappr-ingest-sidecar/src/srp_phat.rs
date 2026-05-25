@@ -67,6 +67,7 @@ struct LocalizationCandidate {
     position_covariance_m2: [[f32; 3]; 3],
     range_observability: Option<f32>,
     range_projection_mode: Option<&'static str>,
+    is_boundary_clamped: bool,
     residual_rms_seconds: f32,
     contrast_score: f32,
 }
@@ -457,6 +458,7 @@ fn near_field_candidate(
         } else {
             "range_refined"
         }),
+        is_boundary_clamped: boundary_clamped,
         residual_rms_seconds,
         contrast_score: ((best_score - median(&scores)) / (best_score.abs() + EPSILON))
             .clamp(0.0, 1.0),
@@ -506,6 +508,7 @@ fn far_field_candidate(
         position_covariance_m2: directional_covariance(direction, lateral_std_m, radial_std_m),
         range_observability: Some(range_estimate.range_observability),
         range_projection_mode: Some(range_projection_mode),
+        is_boundary_clamped: false,
         residual_rms_seconds: range_estimate.residual_rms_seconds,
         contrast_score: (1.0 - direction_fit_residual).clamp(0.0, 1.0),
     })
@@ -517,9 +520,11 @@ fn select_candidate(
 ) -> Option<LocalizationCandidate> {
     match (near_field_candidate, far_field_candidate) {
         (Some(near), Some(far)) => {
+            let far_selection_margin = if near.is_boundary_clamped { 0.5 } else { 0.2 };
             if far.residual_rms_seconds.is_finite()
                 && (!near.residual_rms_seconds.is_finite()
-                    || far.residual_rms_seconds <= (near.residual_rms_seconds * 0.2))
+                    || far.residual_rms_seconds
+                        <= (near.residual_rms_seconds * far_selection_margin))
             {
                 Some(far)
             } else {
@@ -1238,6 +1243,43 @@ mod tests {
             evaluation.localization.range_projection_mode.as_deref(),
             Some("prior_projected")
         );
+    }
+
+    #[test]
+    fn tight_array_boundary_clamp_uses_relaxed_far_field_margin() {
+        let near_boundary = LocalizationCandidate {
+            position_m: [0.0, 0.0, 0.0],
+            steering_direction: [1.0, 0.0, 0.0],
+            position_covariance_m2: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            range_observability: Some(0.25),
+            range_projection_mode: Some("bounded_grid_boundary"),
+            is_boundary_clamped: true,
+            residual_rms_seconds: 1.0,
+            contrast_score: 0.8,
+        };
+        let near_interior = LocalizationCandidate {
+            is_boundary_clamped: false,
+            range_projection_mode: Some("range_refined"),
+            ..near_boundary
+        };
+        let marginal_far = LocalizationCandidate {
+            position_m: [50.0, 0.0, 0.0],
+            steering_direction: [1.0, 0.0, 0.0],
+            position_covariance_m2: [[4.0, 0.0, 0.0], [0.0, 4.0, 0.0], [0.0, 0.0, 4.0]],
+            range_observability: Some(0.05),
+            range_projection_mode: Some("prior_projected"),
+            is_boundary_clamped: false,
+            residual_rms_seconds: 0.4,
+            contrast_score: 0.6,
+        };
+
+        let selected_boundary = select_candidate(Some(near_boundary), Some(marginal_far))
+            .expect("boundary-clamped near candidate");
+        assert_eq!(selected_boundary.range_projection_mode, Some("prior_projected"));
+
+        let selected_interior = select_candidate(Some(near_interior), Some(marginal_far))
+            .expect("interior near candidate");
+        assert_eq!(selected_interior.range_projection_mode, Some("range_refined"));
     }
 
     #[test]
