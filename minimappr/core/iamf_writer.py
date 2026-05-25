@@ -52,6 +52,10 @@ _AE_TYPE_OBJECT = 2
 # Parameter definition types
 _PARAM_MIX_GAIN = 0
 _PARAM_SINGLE_POSITION = 3
+_BED_MIX_GAIN_PARAMETER_ID = 100
+_OBJECT_MIX_GAIN_PARAMETER_ID = 101
+_OUTPUT_MIX_GAIN_PARAMETER_ID = 200
+_OBJECT_POSITION_PARAMETER_ID = 300
 
 # Single-position animation types
 _ANIMATION_STEP = 0
@@ -116,7 +120,11 @@ def _codec_config(codec_config_id: int, sample_rate: int, samples_per_frame: int
     return _obu(_OBU_CODEC_CONFIG, bytes(payload))
 
 
-def _audio_element_foa(audio_element_id: int, codec_config_id: int, num_substreams: int = 4) -> bytes:
+def _audio_element_foa(
+    audio_element_id: int,
+    codec_config_id: int,
+    substream_ids: list[int],
+) -> bytes:
     """Audio_Element_OBU (type 1) for a First-Order Ambisonics SCENE element.
 
     audio_element_id (leb128) | audio_element_type (3) | reserved (5) |
@@ -132,26 +140,26 @@ def _audio_element_foa(audio_element_id: int, codec_config_id: int, num_substrea
     # audio_element_type=SCENE(1) packed in top 3 bits, lower 5 reserved.
     payload += bytes([(_AE_TYPE_SCENE << 5) & 0xFF])
     payload += _leb128(codec_config_id)
-    payload += _leb128(num_substreams)
-    for sub_id in range(num_substreams):
-        payload += _leb128(audio_element_id * 100 + sub_id)  # unique substream IDs
+    payload += _leb128(len(substream_ids))
+    for sub_id in substream_ids:
+        payload += _leb128(sub_id)
     payload += _leb128(0)  # num_parameters = 0
     # ambisonics_config: mono mode, 4 output channels ACN 0-3
     payload += _leb128(_AMBI_MONO_MODE)
-    payload += struct.pack("BB", num_substreams, num_substreams)  # output_channel_count, substream_count
-    for ch in range(num_substreams):
+    payload += struct.pack("BB", len(substream_ids), len(substream_ids))  # output_channel_count, substream_count
+    for ch in range(len(substream_ids)):
         payload += bytes([ch])  # channel_mapping: ACN order
     return _obu(_OBU_AUDIO_ELEMENT, bytes(payload))
 
 
-def _audio_element_object(audio_element_id: int, codec_config_id: int) -> bytes:
+def _audio_element_object(audio_element_id: int, codec_config_id: int, substream_id: int) -> bytes:
     """Audio_Element_OBU (type 1) for a single-object OBJECT_BASED element."""
     payload = bytearray()
     payload += _leb128(audio_element_id)
     payload += bytes([(_AE_TYPE_OBJECT << 5) & 0xFF])
     payload += _leb128(codec_config_id)
     payload += _leb128(1)  # num_substreams = 1
-    payload += _leb128(audio_element_id * 100)  # substream_id
+    payload += _leb128(substream_id)
     payload += _leb128(0)  # num_parameters = 0
     payload += _leb128(1)  # objects_config_size: num_objects only
     payload += bytes([1])  # num_objects = 1, mono object substream
@@ -167,6 +175,7 @@ def _mix_presentation(
     *,
     sample_rate_hz: int = 48_000,
     samples_per_frame: int = 512,
+    object_position_defaults: dict[int, dict] | None = None,
 ) -> bytes:
     """Mix_Presentation_OBU (type 2).
 
@@ -185,15 +194,21 @@ def _mix_presentation(
     # FOA bed element
     payload += _leb128(bed_ae_id)
     payload += _rendering_config(None, sample_rate_hz, samples_per_frame)
-    payload += _mix_gain_param_definition(100, sample_rate_hz, samples_per_frame)
+    payload += _mix_gain_param_definition(_BED_MIX_GAIN_PARAMETER_ID, sample_rate_hz, samples_per_frame)
 
     # Object elements
     for ae_id in object_ae_ids:
         payload += _leb128(ae_id)
-        payload += _rendering_config(ae_id, sample_rate_hz, samples_per_frame)
-        payload += _mix_gain_param_definition(100 + ae_id, sample_rate_hz, samples_per_frame)
+        default_position = (object_position_defaults or {}).get(ae_id, {})
+        payload += _rendering_config(
+            _OBJECT_POSITION_PARAMETER_ID,
+            sample_rate_hz,
+            samples_per_frame,
+            default_position,
+        )
+        payload += _mix_gain_param_definition(_OBJECT_MIX_GAIN_PARAMETER_ID, sample_rate_hz, samples_per_frame)
 
-    payload += _mix_gain_param_definition(200, sample_rate_hz, samples_per_frame)  # output_mix_gain
+    payload += _mix_gain_param_definition(_OUTPUT_MIX_GAIN_PARAMETER_ID, sample_rate_hz, samples_per_frame)
 
     # num_layouts = 1
     payload += _leb128(1)
@@ -225,6 +240,7 @@ def _rendering_config(
     single_position_parameter_id: int | None,
     sample_rate_hz: int,
     samples_per_frame: int,
+    default_position: dict | None = None,
 ) -> bytes:
     extension = bytearray()
     if single_position_parameter_id is None:
@@ -236,6 +252,7 @@ def _rendering_config(
             single_position_parameter_id,
             sample_rate_hz,
             samples_per_frame,
+            default_position or {},
         )
     payload = bytearray()
     payload += bytes([0])  # headphones_rendering_mode=0, reserved=0
@@ -248,6 +265,7 @@ def _single_position_param_definition(
     parameter_id: int,
     sample_rate_hz: int,
     samples_per_frame: int,
+    default_position: dict,
 ) -> bytes:
     payload = bytearray()
     payload += _leb128(parameter_id)
@@ -255,7 +273,12 @@ def _single_position_param_definition(
     payload += bytes([0])  # param_definition_mode=0, reserved=0
     payload += _leb128(samples_per_frame)  # duration
     payload += _leb128(samples_per_frame)  # constant_subblock_duration
-    payload += _pack_single_position_triplet(0, 0, 0, reserved_bits=4)
+    payload += _pack_single_position_triplet(
+        _quantize_azimuth(default_position.get("azimuth_deg", 0.0)),
+        _quantize_elevation(default_position.get("elevation_deg", 0.0)),
+        _quantize_distance(default_position.get("distance_norm", 0.0)),
+        reserved_bits=4,
+    )
     return bytes(payload)
 
 
@@ -267,15 +290,12 @@ def _temporal_delimiter() -> bytes:
 
 def _parameter_block(
     parameter_id: int,
-    positions: dict[int, dict] | None,
+    position: dict | None,
 ) -> bytes:
     """Parameter_Block_OBU carrying SinglePositionParameterData for one object."""
-    pos = (positions or {}).get(0)
-    if not pos:
-        return b""
     payload = bytearray()
     payload += _leb128(parameter_id)
-    payload += _single_position_parameter_data(pos)
+    payload += _single_position_parameter_data(position or {})
     return _obu(_OBU_PARAMETER_BLOCK, bytes(payload))
 
 
@@ -293,9 +313,7 @@ def _single_position_parameter_data(pos: dict) -> bytes:
     animation = _ANIMATION_STEP if start == end else _ANIMATION_LINEAR
     body = bytearray()
     body += _leb128(animation)
-    body += _pack_single_position_triplet(*start, reserved_bits=4 if animation == _ANIMATION_STEP else 0)
-    if animation == _ANIMATION_LINEAR:
-        body += _pack_single_position_triplet(*end, reserved_bits=0)
+    body += _pack_single_position_parameter_values(start, end if animation == _ANIMATION_LINEAR else None)
     return _leb128(len(body)) + bytes(body)
 
 
@@ -311,6 +329,20 @@ def _quantize_distance(value: object) -> int:
     return max(0, min(7, int(round(float(value) * 7.0))))
 
 
+def _first_object_position_defaults(
+    object_ae_ids: list[int],
+    positions_per_unit: list[dict[int, dict]],
+) -> dict[int, dict]:
+    defaults: dict[int, dict] = {}
+    for obj_idx, ae_id in enumerate(object_ae_ids):
+        defaults[ae_id] = {}
+        for unit in positions_per_unit:
+            if obj_idx in unit:
+                defaults[ae_id] = unit[obj_idx]
+                break
+    return defaults
+
+
 def _pack_single_position_triplet(
     azimuth: int,
     elevation: int,
@@ -324,6 +356,31 @@ def _pack_single_position_triplet(
     bits.write_unsigned(distance, 3)
     if reserved_bits:
         bits.write_unsigned(0, reserved_bits)
+    return bits.finish()
+
+
+def _pack_single_position_parameter_values(
+    start: tuple[int, int, int],
+    end: tuple[int, int, int] | None,
+) -> bytes:
+    """Pack SinglePositionParameterData in spec field order.
+
+    The animated data template is applied independently to azimuth, elevation,
+    and distance, so LINEAR order is azimuth start/end, elevation start/end,
+    distance start/end. STEP carries one value per field plus 4 reserved bits.
+    """
+    bits = _BitWriter()
+    bits.write_signed(start[0], 9)
+    if end is not None:
+        bits.write_signed(end[0], 9)
+    bits.write_signed(start[1], 8)
+    if end is not None:
+        bits.write_signed(end[1], 8)
+    bits.write_unsigned(start[2], 3)
+    if end is not None:
+        bits.write_unsigned(end[2], 3)
+    else:
+        bits.write_unsigned(0, 4)
     return bits.finish()
 
 
@@ -421,18 +478,21 @@ def write_iamf(
     n_frames = math.ceil(n_samples / samples_per_frame)
 
     codec_config_id = 0
-    bed_ae_id = 0
-    obj_ae_ids = [1] if objects else []
-    mix_id = 0
+    bed_ae_id = 1
+    obj_ae_ids = [2] if objects else []
+    mix_id = 3
+    bed_substream_ids = list(range(n_channels))
+    object_substream_ids = [n_channels + idx for idx, _ in enumerate(objects)]
+    object_position_defaults = _first_object_position_defaults(obj_ae_ids, positions_per_unit)
 
     out = bytearray()
 
     # ── Descriptor OBUs (written once) ────────────────────────────────────────
     out += _ia_sequence_header()
     out += _codec_config(codec_config_id, sample_rate_hz, samples_per_frame)
-    out += _audio_element_foa(bed_ae_id, codec_config_id, n_channels)
-    for obj_ae_id in obj_ae_ids:
-        out += _audio_element_object(obj_ae_id, codec_config_id)
+    out += _audio_element_foa(bed_ae_id, codec_config_id, bed_substream_ids)
+    for obj_idx, obj_ae_id in enumerate(obj_ae_ids):
+        out += _audio_element_object(obj_ae_id, codec_config_id, object_substream_ids[obj_idx])
     out += _mix_presentation(
         mix_id,
         bed_ae_id,
@@ -441,6 +501,7 @@ def write_iamf(
         object_loudness,
         sample_rate_hz=sample_rate_hz,
         samples_per_frame=samples_per_frame,
+        object_position_defaults=object_position_defaults,
     )
 
     # ── Temporal units (one per codec frame) ──────────────────────────────────
@@ -452,20 +513,20 @@ def write_iamf(
         out += _temporal_delimiter()
 
         # Parameter block for each object (even if empty, keeps parsers happy).
-        for obj_ae_id in obj_ae_ids:
-            positions = positions_per_unit[fi] if fi < len(positions_per_unit) else None
-            out += _parameter_block(obj_ae_id, positions)
+        for obj_idx, obj_ae_id in enumerate(obj_ae_ids):
+            unit_positions = positions_per_unit[fi] if fi < len(positions_per_unit) else {}
+            position = unit_positions.get(obj_idx, object_position_defaults.get(obj_ae_id, {}))
+            out += _parameter_block(_OBJECT_POSITION_PARAMETER_ID, position)
 
         # FOA bed: 4 substreams (one per ACN channel).
         for ch_idx in range(n_channels):
-            sub_id = bed_ae_id * 100 + ch_idx
+            sub_id = bed_substream_ids[ch_idx]
             chunk = bed[ch_idx, frame_start:frame_end]
             out += _audio_frame_obu(sub_id, _encode_pcm16(chunk, n_frame_samples))
 
         # Object substreams.
         for obj_idx, obj_track in enumerate(objects):
-            obj_ae_id = obj_ae_ids[obj_idx]
-            sub_id = obj_ae_id * 100
+            sub_id = object_substream_ids[obj_idx]
             chunk = obj_track[frame_start:frame_end] if frame_start < obj_track.size else np.zeros(0, dtype=np.float32)
             out += _audio_frame_obu(sub_id, _encode_pcm16(chunk, n_frame_samples))
 

@@ -934,6 +934,79 @@ async fn gps_clock_correction_jitter_does_not_drop_classifier_render() {
 }
 
 #[tokio::test]
+async fn packet_timestamp_lead_does_not_force_localization_coverage_unavailable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest_store = ManifestStore::new(tmp.path());
+    manifest_store.ensure_initialized().await.unwrap();
+    let derived_cache = DerivedCache::new(
+        tmp.path(),
+        DerivedCacheConfig {
+            budget_bytes: 16_777_216,
+            admission_reserve_bytes: 0,
+        },
+    );
+    derived_cache.ensure_initialized().await.unwrap();
+
+    let state: SharedDspState = Arc::new(RwLock::new(Default::default()));
+    let event_publisher = DspEventPublisher::new(state.clone(), 64, 64, 50);
+    let mut dsp_result_rx = event_publisher.subscribe();
+    let mut worker = DspWorker::new(
+        manifest_store.clone(),
+        derived_cache,
+        DspWorkerConfig {
+            classifier_render_min_interval_seconds: 0.0,
+            localization_cadence_ms: 0,
+            trigger_cooldown_seconds: 0.0,
+            max_buffer_seconds: 32.0,
+            max_trusted_node_clock_skew_seconds: f64::MAX,
+            ..DspWorkerConfig::default()
+        },
+        state.clone(),
+    )
+    .with_dsp_event_publisher(event_publisher);
+
+    let first_payload = store_forward_payload_with_timing(1_000_000_000, 0, 1);
+    let first_manifest = raw_manifest_for_payload(
+        tmp.path(),
+        "manifest-positive-lead-1",
+        "seg-positive-lead-1",
+        first_payload,
+    )
+    .await;
+    worker.process_one(first_manifest, 1).await;
+
+    let second_payload = store_forward_payload_with_timing_jitter(2_452_000_000, 512, 2);
+    let second_manifest = raw_manifest_for_payload(
+        tmp.path(),
+        "manifest-positive-lead-2",
+        "seg-positive-lead-2",
+        second_payload,
+    )
+    .await;
+    worker.process_one(second_manifest, 1).await;
+
+    let events = drain_published_manifests(&mut dsp_result_rx);
+    let localization_events: Vec<_> = events
+        .iter()
+        .filter(|manifest| manifest.manifest_type == "localization_result")
+        .collect();
+    let render_events: Vec<_> = events
+        .iter()
+        .filter(|manifest| manifest.manifest_type == "classifier_render")
+        .collect();
+
+    assert_eq!(localization_events.len(), 2);
+    assert_eq!(render_events.len(), 2);
+    assert!(render_events.iter().all(|manifest| {
+        manifest
+            .classifier_render
+            .as_ref()
+            .and_then(|payload| payload.fallback_reason.as_deref())
+            != Some("localization_coverage_unavailable")
+    }));
+}
+
+#[tokio::test]
 async fn worker_publishes_omni_render_for_non_tetrahedral_channel_count() {
     let tmp = tempfile::tempdir().unwrap();
     let manifest_store = ManifestStore::new(tmp.path());

@@ -1294,6 +1294,7 @@ async fn encode_iamf_with_rust_writer(request: &IamfEncodeRequest) -> Result<Vec
             true_peak_dbfs: loudness.true_peak_dbfs,
         })
         .collect();
+    let object_position_defaults = first_object_position_defaults(&positions_payload);
 
     let scene = IamfScene {
         sample_rate_hz: request.sample_rate_hz,
@@ -1304,6 +1305,7 @@ async fn encode_iamf_with_rust_writer(request: &IamfEncodeRequest) -> Result<Vec
             true_peak_dbfs: request.bed_loudness.true_peak_dbfs,
         },
         object_loudness,
+        object_position_defaults,
     };
 
     let writer = IamfWriter::new(scene, object_track.as_ref().map_or(0, |_| 1));
@@ -1317,7 +1319,10 @@ async fn encode_iamf_with_rust_writer(request: &IamfEncodeRequest) -> Result<Vec
 
     let mut bitstream = writer.write_descriptor_obus();
     for frame_index in 0..frame_count {
-        let positions = positions_per_unit.get(frame_index).cloned().unwrap_or_default();
+        let positions = positions_per_unit
+            .get(frame_index)
+            .cloned()
+            .unwrap_or_default();
         let bed_unit = [
             bed_frames[0][frame_index].clone(),
             bed_frames[1][frame_index].clone(),
@@ -1340,6 +1345,34 @@ async fn encode_iamf_with_rust_writer(request: &IamfEncodeRequest) -> Result<Vec
             )
         })?;
     Ok(bitstream)
+}
+
+fn first_object_position_defaults(payload: &IamfPositionsPayload) -> Vec<ObjectPosition> {
+    let mut defaults = Vec::new();
+    for object_id in 0..1u32 {
+        let default_position = payload
+            .positions_per_unit
+            .iter()
+            .find_map(|unit| unit.get(&object_id.to_string()))
+            .map(|position| ObjectPosition {
+                azimuth_deg: position.azimuth_deg,
+                elevation_deg: position.elevation_deg,
+                distance_norm: position.distance_norm,
+                end_azimuth_deg: None,
+                end_elevation_deg: None,
+                end_distance_norm: None,
+            })
+            .unwrap_or(ObjectPosition {
+                azimuth_deg: 0.0,
+                elevation_deg: 0.0,
+                distance_norm: 0.0,
+                end_azimuth_deg: None,
+                end_elevation_deg: None,
+                end_distance_norm: None,
+            });
+        defaults.push(default_position);
+    }
+    defaults
 }
 
 fn convert_positions_per_unit(

@@ -17,13 +17,14 @@ use std::collections::HashMap;
 
 /// OBU type codes (5-bit field in the OBU header byte).
 mod obu_type {
-    pub const IA_SEQUENCE_HEADER: u8 = 0;
-    pub const TEMPORAL_DELIMITER: u8 = 1;
-    pub const CODEC_CONFIG: u8 = 2;
-    pub const AUDIO_ELEMENT: u8 = 3;
-    pub const MIX_PRESENTATION: u8 = 4;
-    pub const PARAMETER_BLOCK: u8 = 5;
-    pub const AUDIO_FRAME_EXPLICIT_ID: u8 = 6;
+    pub const CODEC_CONFIG: u8 = 0;
+    pub const AUDIO_ELEMENT: u8 = 1;
+    pub const MIX_PRESENTATION: u8 = 2;
+    pub const PARAMETER_BLOCK: u8 = 3;
+    pub const TEMPORAL_DELIMITER: u8 = 4;
+    pub const AUDIO_FRAME_EXPLICIT_ID: u8 = 5;
+    pub const AUDIO_FRAME_ID0: u8 = 6;
+    pub const IA_SEQUENCE_HEADER: u8 = 31;
 }
 
 /// Audio element types.
@@ -33,7 +34,6 @@ mod audio_element_type {
 }
 
 mod param_definition_type {
-    pub const MIX_GAIN: u8 = 0;
     pub const SINGLE_POSITION: u8 = 3;
 }
 
@@ -44,6 +44,10 @@ mod animation_type {
 
 /// First-order ambisonics: W X Y Z (ACN order).
 pub const FOA_CHANNEL_COUNT: u8 = 4;
+const BED_MIX_GAIN_PARAMETER_ID: u32 = 100;
+const OBJECT_MIX_GAIN_PARAMETER_ID: u32 = 101;
+const OUTPUT_MIX_GAIN_PARAMETER_ID: u32 = 200;
+const OBJECT_POSITION_PARAMETER_ID: u32 = 300;
 
 // ── public data types ─────────────────────────────────────────────────────────
 
@@ -88,6 +92,8 @@ pub struct IamfScene {
     pub bed_loudness: LoudnessInfo,
     /// Per-object loudness, indexed by object_id (0-based).
     pub object_loudness: Vec<LoudnessInfo>,
+    /// Default coordinate per object, indexed by object_id (0-based).
+    pub object_position_defaults: Vec<ObjectPosition>,
 }
 
 // ── writer ────────────────────────────────────────────────────────────────────
@@ -164,10 +170,14 @@ impl IamfWriter {
         out.extend(write_obu(obu_type::TEMPORAL_DELIMITER, &[]));
 
         // Parameter blocks for object positions.
-        for (obj_idx, &elem_id) in self.object_element_ids.iter().enumerate() {
-            if let Some(pos) = positions.get(&(obj_idx as u32)) {
-                out.extend(self.object_parameter_block(elem_id, pos));
-            }
+        for obj_idx in 0..self.object_element_ids.len() {
+            let fallback = self.scene.object_position_defaults.get(obj_idx);
+            let pos = positions
+                .get(&(obj_idx as u32))
+                .or(fallback)
+                .cloned()
+                .unwrap_or_else(default_object_position);
+            out.extend(self.object_parameter_block(&pos));
         }
 
         // Bed audio frames.
@@ -190,8 +200,8 @@ impl IamfWriter {
     fn ia_sequence_header(&self) -> Vec<u8> {
         let mut payload = Vec::new();
         payload.extend_from_slice(b"iamf"); // ia_code
-        payload.push(0); // primary_profile = Base (0)
-        payload.push(0); // additional_profile = Base (0)
+        payload.push(1); // primary_profile = Base
+        payload.push(1); // additional_profile = Base
         write_obu(obu_type::IA_SEQUENCE_HEADER, &payload)
     }
 
@@ -206,8 +216,8 @@ impl IamfWriter {
         payload.extend_from_slice(&0i16.to_be_bytes());
 
         // decoder_config_ipcm:
-        //   sample_format_flags u8: bit0=0 (signed), others 0
-        payload.push(0);
+        //   sample_format_flags u8: bit0=1 (little endian signed PCM)
+        payload.push(1);
         //   sample_size u8: 16
         payload.push(16);
         //   sample_rate u32 big-endian
@@ -237,7 +247,7 @@ impl IamfWriter {
         payload.push(0); // ambisonics_mode = MONO_PROJECTION
         payload.push(n_bed); // output_channel_count
         payload.push(n_bed); // substream_count
-                                         // channel_mapping: ACN order mapped to substreams 0..n_bed
+                             // channel_mapping: ACN order mapped to substreams 0..n_bed
         for i in 0..n_bed {
             payload.push(i);
         }
@@ -265,10 +275,8 @@ impl IamfWriter {
         let mut payload = Vec::new();
         write_leb128(&mut payload, self.mix_presentation_id as u64);
 
-        // count_label
-        write_leb128(&mut payload, 1u64);
-        // language_label[0] as null-terminated string
-        payload.extend_from_slice(b"en-US\0");
+        // count_label = 0: no language labels or localized annotations.
+        write_leb128(&mut payload, 0u64);
 
         // num_sub_mixes = 1
         write_leb128(&mut payload, 1u64);
@@ -281,50 +289,53 @@ impl IamfWriter {
         // FOA bed element
         write_leb128(&mut payload, self.bed_element_id as u64);
         self.write_rendering_config(&mut payload, None);
-        // element_mix_config: parameter_id, rate, type=MIX_GAIN(0),
-        // default_mix_gain in Q7.8 fixed-point (0 dB = 0x0100 = 256).
-        write_leb128(&mut payload, 0u64); // parameter_id
-        write_leb128(&mut payload, self.scene.sample_rate_hz as u64);
-        payload.push(param_definition_type::MIX_GAIN);
-        payload.extend_from_slice(&256u16.to_be_bytes()); // default_mix_gain Q7.8
+        self.write_mix_gain_param_definition(&mut payload, BED_MIX_GAIN_PARAMETER_ID);
 
         // Object elements
         for (idx, &elem_id) in self.object_element_ids.iter().enumerate() {
             write_leb128(&mut payload, elem_id as u64);
-            self.write_rendering_config(&mut payload, Some(elem_id));
-            write_leb128(&mut payload, (idx + 1) as u64); // parameter_id
-            write_leb128(&mut payload, self.scene.sample_rate_hz as u64);
-            payload.push(param_definition_type::MIX_GAIN);
-            payload.extend_from_slice(&256u16.to_be_bytes());
+            let default_position = self
+                .scene
+                .object_position_defaults
+                .get(idx)
+                .cloned()
+                .unwrap_or_else(default_object_position);
+            self.write_rendering_config(&mut payload, Some(&default_position));
+            self.write_mix_gain_param_definition(&mut payload, OBJECT_MIX_GAIN_PARAMETER_ID);
         }
 
         // output_mix_config (parameter_id, rate, MIX_GAIN, default)
-        let output_mix_param_id = 100u64;
-        write_leb128(&mut payload, output_mix_param_id);
-        write_leb128(&mut payload, self.scene.sample_rate_hz as u64);
-        payload.push(param_definition_type::MIX_GAIN);
-        payload.extend_from_slice(&256u16.to_be_bytes());
+        self.write_mix_gain_param_definition(&mut payload, OUTPUT_MIX_GAIN_PARAMETER_ID);
 
         // num_layouts = 1 (binaural)
         write_leb128(&mut payload, 1u64);
-        payload.push(2); // layout_type = BINAURAL (2)
-                         // loudness_info for the single layout
+        payload.push(0x80); // layout_type = LOUDSPEAKERS_SS_CONVENTION, sound_system A
+                            // loudness_info for the single layout
         self.write_loudness_info_aggregate(&mut payload);
 
         write_obu(obu_type::MIX_PRESENTATION, &payload)
     }
 
-    fn write_rendering_config(&self, out: &mut Vec<u8>, object_element_id: Option<u32>) {
+    fn write_mix_gain_param_definition(&self, out: &mut Vec<u8>, parameter_id: u32) {
+        write_leb128(out, parameter_id as u64);
+        write_leb128(out, self.scene.sample_rate_hz as u64);
+        out.push(0); // param_definition_mode=0, reserved=0
+        write_leb128(out, self.scene.samples_per_frame as u64);
+        write_leb128(out, self.scene.samples_per_frame as u64);
+        out.extend_from_slice(&0i16.to_be_bytes()); // default_mix_gain = 0 dB, Q7.8
+    }
+
+    fn write_rendering_config(&self, out: &mut Vec<u8>, default_position: Option<&ObjectPosition>) {
         out.push(0); // headphones_rendering_mode=0, reserved=0
         let mut extension = Vec::new();
-        match object_element_id {
-            Some(elem_id) => {
+        match default_position {
+            Some(position) => {
                 write_leb128(&mut extension, 1u64); // num_parameters
                 write_leb128(
                     &mut extension,
                     param_definition_type::SINGLE_POSITION as u64,
                 );
-                self.write_single_position_param_definition(&mut extension, elem_id);
+                self.write_single_position_param_definition(&mut extension, position);
             }
             None => {
                 write_leb128(&mut extension, 0u64); // num_parameters
@@ -334,13 +345,18 @@ impl IamfWriter {
         out.extend(extension);
     }
 
-    fn write_single_position_param_definition(&self, out: &mut Vec<u8>, parameter_id: u32) {
-        write_leb128(out, parameter_id as u64);
+    fn write_single_position_param_definition(&self, out: &mut Vec<u8>, position: &ObjectPosition) {
+        write_leb128(out, OBJECT_POSITION_PARAMETER_ID as u64);
         write_leb128(out, self.scene.sample_rate_hz as u64);
         out.push(0); // param_definition_mode=0, reserved=0
         write_leb128(out, self.scene.samples_per_frame as u64);
         write_leb128(out, self.scene.samples_per_frame as u64);
-        pack_single_position_triplet(out, 0, 0, 0);
+        pack_single_position_triplet(
+            out,
+            quantize_azimuth(position.azimuth_deg),
+            quantize_elevation(position.elevation_deg),
+            quantize_distance(position.distance_norm),
+        );
     }
 
     /// Aggregate loudness across bed + objects for the Mix_Presentation.
@@ -365,10 +381,9 @@ impl IamfWriter {
         out.extend_from_slice(&true_peak_q78.to_be_bytes());
     }
 
-    fn object_parameter_block(&self, element_id: u32, pos: &ObjectPosition) -> Vec<u8> {
+    fn object_parameter_block(&self, pos: &ObjectPosition) -> Vec<u8> {
         let mut payload = Vec::new();
-        // parameter_id matches the one registered in the Audio_Element_OBU
-        write_leb128(&mut payload, element_id as u64);
+        write_leb128(&mut payload, OBJECT_POSITION_PARAMETER_ID as u64);
 
         let end = ObjectPosition {
             azimuth_deg: pos.end_azimuth_deg.unwrap_or(pos.azimuth_deg),
@@ -395,24 +410,46 @@ fn single_position_parameter_data(start: &ObjectPosition, end: &ObjectPosition) 
     };
     let mut body = Vec::new();
     write_leb128(&mut body, animation as u64);
-    pack_single_position_triplet(
-        &mut body,
-        quantize_azimuth(start.azimuth_deg),
-        quantize_elevation(start.elevation_deg),
-        quantize_distance(start.distance_norm),
-    );
     if animation == animation_type::LINEAR {
-        pack_single_position_triplet(
+        pack_single_position_parameter_values(
             &mut body,
-            quantize_azimuth(end.azimuth_deg),
-            quantize_elevation(end.elevation_deg),
-            quantize_distance(end.distance_norm),
+            (
+                quantize_azimuth(start.azimuth_deg),
+                quantize_elevation(start.elevation_deg),
+                quantize_distance(start.distance_norm),
+            ),
+            Some((
+                quantize_azimuth(end.azimuth_deg),
+                quantize_elevation(end.elevation_deg),
+                quantize_distance(end.distance_norm),
+            )),
+        );
+    } else {
+        pack_single_position_parameter_values(
+            &mut body,
+            (
+                quantize_azimuth(start.azimuth_deg),
+                quantize_elevation(start.elevation_deg),
+                quantize_distance(start.distance_norm),
+            ),
+            None,
         );
     }
     let mut out = Vec::new();
     write_leb128(&mut out, body.len() as u64);
     out.extend(body);
     out
+}
+
+fn default_object_position() -> ObjectPosition {
+    ObjectPosition {
+        azimuth_deg: 0.0,
+        elevation_deg: 0.0,
+        distance_norm: 0.0,
+        end_azimuth_deg: None,
+        end_elevation_deg: None,
+        end_distance_norm: None,
+    }
 }
 
 fn quantize_azimuth(value: f32) -> i16 {
@@ -434,6 +471,27 @@ fn pack_single_position_triplet(out: &mut Vec<u8>, azimuth: i16, elevation: i8, 
     bits.write_signed(elevation as i32, 8);
     bits.write_unsigned(distance as u32, 3);
     bits.write_unsigned(0, 4);
+    out.extend(bits.finish());
+}
+
+fn pack_single_position_parameter_values(
+    out: &mut Vec<u8>,
+    start: (i16, i8, u8),
+    end: Option<(i16, i8, u8)>,
+) {
+    let mut bits = BitWriter::default();
+    bits.write_signed(start.0 as i32, 9);
+    if let Some(end) = end {
+        bits.write_signed(end.0 as i32, 9);
+        bits.write_signed(start.1 as i32, 8);
+        bits.write_signed(end.1 as i32, 8);
+        bits.write_unsigned(start.2 as u32, 3);
+        bits.write_unsigned(end.2 as u32, 3);
+    } else {
+        bits.write_signed(start.1 as i32, 8);
+        bits.write_unsigned(start.2 as u32, 3);
+        bits.write_unsigned(0, 4);
+    }
     out.extend(bits.finish());
 }
 
@@ -475,6 +533,9 @@ impl BitWriter {
 // ── audio frame OBU ───────────────────────────────────────────────────────────
 
 fn audio_frame_obu(substream_id: u32, pcm_bytes: &[u8]) -> Vec<u8> {
+    if substream_id <= 17 {
+        return write_obu(obu_type::AUDIO_FRAME_ID0 + substream_id as u8, pcm_bytes);
+    }
     let mut payload = Vec::with_capacity(4 + pcm_bytes.len());
     write_leb128(&mut payload, substream_id as u64);
     payload.extend_from_slice(pcm_bytes);
@@ -620,7 +681,7 @@ pub fn write_object_substreams(
     // ── Descriptor OBUs ───────────────────────────────────────────────────────
     // IA_Sequence_Header
     let mut sh_payload = b"iamf".to_vec();
-    sh_payload.extend_from_slice(&[0u8, 0u8]); // Base profile
+    sh_payload.extend_from_slice(&[1u8, 1u8]); // Base profile
     out.extend(write_obu(obu_type::IA_SEQUENCE_HEADER, &sh_payload));
 
     // Codec_Config (ipcm, 16-bit)
@@ -630,7 +691,8 @@ pub fn write_object_substreams(
         payload.extend_from_slice(b"ipcm");
         write_leb128(&mut payload, samples_per_frame as u64);
         payload.extend_from_slice(&0i16.to_be_bytes());
-        payload.push(0); payload.push(16);
+        payload.push(0);
+        payload.push(16);
         payload.extend_from_slice(&sample_rate_hz.to_be_bytes());
         out.extend(write_obu(obu_type::CODEC_CONFIG, &payload));
     }
@@ -645,7 +707,7 @@ pub fn write_object_substreams(
         write_leb128(&mut payload, 1u64); // num_substreams = 1
         write_leb128(&mut payload, ss_id as u64);
         write_leb128(&mut payload, 0u64); // num_parameters = 0
-        // Scalable_Channel_Layout_Config: num_layers=1
+                                          // Scalable_Channel_Layout_Config: num_layers=1
         write_leb128(&mut payload, 1u64);
         payload.extend_from_slice(&[0x00, 0x00, 1u8, 0u8]); // MONO layout
         out.extend(write_obu(obu_type::AUDIO_ELEMENT, &payload));
@@ -664,17 +726,21 @@ pub fn write_object_substreams(
             payload.push(0); // rendering_config
             let lm = loudness.get(i).cloned().unwrap_or_default();
             payload.extend_from_slice(&[0u8]); // info_type
-            let lufs = (lm.integrated_loudness_lufs * 256.0).round().clamp(-32768.0, 32767.0) as i16;
+            let lufs = (lm.integrated_loudness_lufs * 256.0)
+                .round()
+                .clamp(-32768.0, 32767.0) as i16;
             let tp = (lm.true_peak_dbfs * 256.0).round().clamp(-32768.0, 32767.0) as i16;
             payload.extend_from_slice(&lufs.to_be_bytes());
             payload.extend_from_slice(&tp.to_be_bytes());
         }
         write_leb128(&mut payload, 1u64); // num_layouts
         payload.push(0); // layout_type = MONO
-        // Consolidated loudness (use first sensor's loudness as representative)
+                         // Consolidated loudness (use first sensor's loudness as representative)
         let lm = loudness.first().cloned().unwrap_or_default();
         payload.push(0);
-        let lufs = (lm.integrated_loudness_lufs * 256.0).round().clamp(-32768.0, 32767.0) as i16;
+        let lufs = (lm.integrated_loudness_lufs * 256.0)
+            .round()
+            .clamp(-32768.0, 32767.0) as i16;
         let tp = (lm.true_peak_dbfs * 256.0).round().clamp(-32768.0, 32767.0) as i16;
         payload.extend_from_slice(&lufs.to_be_bytes());
         payload.extend_from_slice(&tp.to_be_bytes());
@@ -719,6 +785,16 @@ mod tests {
                 .map(|_| LoudnessInfo {
                     integrated_loudness_lufs: -18.0,
                     true_peak_dbfs: -6.0,
+                })
+                .collect(),
+            object_position_defaults: (0..n_objects)
+                .map(|_| ObjectPosition {
+                    azimuth_deg: 10.0,
+                    elevation_deg: 5.0,
+                    distance_norm: 0.25,
+                    end_azimuth_deg: None,
+                    end_elevation_deg: None,
+                    end_distance_norm: None,
                 })
                 .collect(),
         };
@@ -823,12 +899,13 @@ mod tests {
         assert_eq!(unit[0] >> 3, obu_type::TEMPORAL_DELIMITER);
         assert_eq!(unit[offset] >> 3, obu_type::PARAMETER_BLOCK);
         let payload = obu_payload(&unit[offset..]);
-        let (_parameter_id, consumed) = read_leb128(payload).unwrap();
-        let (_param_size, size_consumed) = read_leb128(&payload[consumed..]).unwrap();
-        let (animation, _) = read_leb128(&payload[consumed + size_consumed..]).unwrap();
+        let (parameter_id, consumed) = read_leb128(payload).unwrap();
+        assert_eq!(parameter_id, OBJECT_POSITION_PARAMETER_ID as u64);
+        let (animation, values) = decode_single_position_data(&payload[consumed..]);
         assert_eq!(animation as u8, animation_type::LINEAR);
+        assert_eq!(values, vec![10, 20, 5, 10, 2, 2]);
         offset = skip_obu(&unit, offset);
-        assert_eq!(unit[offset] >> 3, obu_type::AUDIO_FRAME_EXPLICIT_ID);
+        assert_eq!(unit[offset] >> 3, obu_type::AUDIO_FRAME_ID0);
     }
 
     #[test]
@@ -850,9 +927,73 @@ mod tests {
             end_distance_norm: None,
         };
         let data = single_position_parameter_data(&start, &end);
-        let (_size, consumed) = read_leb128(&data).unwrap();
-        let (animation, _) = read_leb128(&data[consumed..]).unwrap();
+        let (animation, values) = decode_single_position_data(&data);
         assert_eq!(animation as u8, animation_type::LINEAR);
+        assert_eq!(values, vec![0, 30, 0, 5, 1, 4]);
+    }
+
+    #[test]
+    fn single_position_parameter_data_uses_step_for_static_position() {
+        let start = ObjectPosition {
+            azimuth_deg: -30.0,
+            elevation_deg: 5.0,
+            distance_norm: 0.25,
+            end_azimuth_deg: None,
+            end_elevation_deg: None,
+            end_distance_norm: None,
+        };
+        let data = single_position_parameter_data(&start, &start);
+        let (animation, values) = decode_single_position_data(&data);
+        assert_eq!(animation as u8, animation_type::STEP);
+        assert_eq!(values, vec![-30, 5, 2]);
+    }
+
+    #[test]
+    fn mix_presentation_uses_spec_param_definition_shape() {
+        let (scene, n) = make_scene(1);
+        let writer = IamfWriter::new(scene, n);
+        let descriptor_obus = writer.write_descriptor_obus();
+        let mut offset = 0;
+        let mut mix_payload = None;
+        while offset < descriptor_obus.len() {
+            let current_obu_type = descriptor_obus[offset] >> 3;
+            if current_obu_type == obu_type::MIX_PRESENTATION {
+                mix_payload = Some(obu_payload(&descriptor_obus[offset..]));
+                break;
+            }
+            offset = skip_obu(&descriptor_obus, offset);
+        }
+        let payload = mix_payload.expect("mix presentation OBU");
+        let mut offset = 0;
+        let (_mix_id, consumed) = read_leb128(payload).unwrap();
+        offset += consumed;
+        let (count_label, consumed) = read_leb128(&payload[offset..]).unwrap();
+        offset += consumed;
+        assert_eq!(count_label, 0);
+        let (num_sub_mixes, consumed) = read_leb128(&payload[offset..]).unwrap();
+        offset += consumed;
+        assert_eq!(num_sub_mixes, 1);
+        let (num_audio_elements, consumed) = read_leb128(&payload[offset..]).unwrap();
+        offset += consumed;
+        assert_eq!(num_audio_elements, 2);
+
+        let (_bed_element_id, consumed) = read_leb128(&payload[offset..]).unwrap();
+        offset += consumed;
+        offset += 1; // headphones_rendering_mode/reserved
+        let (rendering_config_size, consumed) = read_leb128(&payload[offset..]).unwrap();
+        offset += consumed + rendering_config_size as usize;
+        let (bed_mix_parameter_id, consumed) = read_leb128(&payload[offset..]).unwrap();
+        offset += consumed;
+        assert_eq!(bed_mix_parameter_id, BED_MIX_GAIN_PARAMETER_ID as u64);
+        let (_rate, consumed) = read_leb128(&payload[offset..]).unwrap();
+        offset += consumed;
+        assert_eq!(payload[offset], 0); // param_definition_mode
+        offset += 1;
+        let (duration, consumed) = read_leb128(&payload[offset..]).unwrap();
+        offset += consumed;
+        let (constant_subblock_duration, _consumed) = read_leb128(&payload[offset..]).unwrap();
+        assert_eq!(duration, 512);
+        assert_eq!(constant_subblock_duration, 512);
     }
 
     #[test]
@@ -891,5 +1032,55 @@ mod tests {
     fn skip_obu(obus: &[u8], offset: usize) -> usize {
         let (size, consumed) = read_leb128(&obus[offset + 1..]).unwrap();
         offset + 1 + consumed + size as usize
+    }
+
+    fn decode_single_position_data(data: &[u8]) -> (u64, Vec<i32>) {
+        let (_size, size_consumed) = read_leb128(data).unwrap();
+        let (animation, animation_consumed) = read_leb128(&data[size_consumed..]).unwrap();
+        let mut bit_offset = (size_consumed + animation_consumed) * 8;
+        if animation as u8 == animation_type::LINEAR {
+            let start_azimuth = read_signed_bits(data, &mut bit_offset, 9);
+            let end_azimuth = read_signed_bits(data, &mut bit_offset, 9);
+            let start_elevation = read_signed_bits(data, &mut bit_offset, 8);
+            let end_elevation = read_signed_bits(data, &mut bit_offset, 8);
+            let start_distance = read_unsigned_bits(data, &mut bit_offset, 3) as i32;
+            let end_distance = read_unsigned_bits(data, &mut bit_offset, 3) as i32;
+            return (
+                animation,
+                vec![
+                    start_azimuth,
+                    end_azimuth,
+                    start_elevation,
+                    end_elevation,
+                    start_distance,
+                    end_distance,
+                ],
+            );
+        }
+        let azimuth = read_signed_bits(data, &mut bit_offset, 9);
+        let elevation = read_signed_bits(data, &mut bit_offset, 8);
+        let distance = read_unsigned_bits(data, &mut bit_offset, 3) as i32;
+        (animation, vec![azimuth, elevation, distance])
+    }
+
+    fn read_signed_bits(data: &[u8], bit_offset: &mut usize, n_bits: usize) -> i32 {
+        let raw = read_unsigned_bits(data, bit_offset, n_bits) as i32;
+        let sign_bit = 1i32 << (n_bits - 1);
+        if raw & sign_bit != 0 {
+            raw - (1i32 << n_bits)
+        } else {
+            raw
+        }
+    }
+
+    fn read_unsigned_bits(data: &[u8], bit_offset: &mut usize, n_bits: usize) -> u32 {
+        let mut value = 0u32;
+        for _ in 0..n_bits {
+            let byte = data[*bit_offset / 8];
+            let bit = (byte >> (7 - (*bit_offset % 8))) & 1;
+            value = (value << 1) | u32::from(bit);
+            *bit_offset += 1;
+        }
+        value
     }
 }

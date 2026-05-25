@@ -855,9 +855,13 @@ impl DspWorker {
             owned.sr,
         );
         let window_duration_ns = (self.config.window_seconds * 1_000_000_000.0).round() as i128;
+        let buffered_range_start_ns = buffers
+            .first()
+            .and_then(|buffer| buffer.start_time_ns())
+            .unwrap_or(buffer_start_time_ns);
         let center_time_ns = end_ns
             .saturating_sub(window_duration_ns / 2)
-            .max(buffer_start_time_ns);
+            .max(buffered_range_start_ns);
         let channel_states =
             localization_channel_states_centered(buffers, center_time_ns, self.config.window_seconds);
         // `buffers` borrow ends here; safe to take &self again for the
