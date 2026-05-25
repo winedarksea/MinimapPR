@@ -32,6 +32,7 @@ from minimappr.core.preprocessing import (
     LowpassFilterStage,
     build_chain_from_rust_stages,
 )
+import minimappr.main as main_module
 from minimappr.main import _DEFAULT_INGEST_MAX_CONCURRENT, _IngestConcurrencyLimit
 from minimappr.models import NodeAudioOverride
 
@@ -309,3 +310,15 @@ class TestIngestConcurrencyLimit:
         # Slot must be reusable.
         async with limit:
             assert limit.active == 1
+
+    @pytest.mark.asyncio
+    async def test_expired_lease_is_evicted_before_shedding(self, monkeypatch) -> None:
+        limit = _IngestConcurrencyLimit(max_concurrent=1, lease_timeout_seconds=0.5)
+        monkeypatch.setattr(main_module.time, "monotonic", lambda: 100.0)
+        await self._enter(limit)
+        assert limit.active == 1
+
+        monkeypatch.setattr(main_module.time, "monotonic", lambda: 100.6)
+        async with limit:
+            assert limit.active == 1
+        assert limit.total_shed == 0

@@ -591,6 +591,7 @@ def test_system_diagnostics_uses_configured_ingest_concurrency_limit(monkeypatch
     payload = response.json()
     assert payload["ingest"]["concurrency_limit"]["max_concurrent"] == 7
     assert payload["ingest"]["concurrency_limit"]["active"] == 0
+    assert payload["ingest"]["request_timeout_seconds"] > 0
 
 
 def test_system_diagnostics_reports_rust_capture_unavailable_without_live_buffer(monkeypatch, tmp_path: Path) -> None:

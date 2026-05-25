@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import contextlib
 import json
 import logging
@@ -160,9 +161,15 @@ class _IngestConcurrencyLimit:
     without a lock (no yield points between them).
     """
 
-    def __init__(self, max_concurrent: int) -> None:
+    def __init__(self, max_concurrent: int, lease_timeout_seconds: float = 5.0) -> None:
         self._max = max(1, int(max_concurrent))
-        self._active = 0
+        self._lease_timeout_seconds = max(0.1, float(lease_timeout_seconds))
+        self._active_leases: dict[int, float] = {}
+        self._next_lease_id = 0
+        self._lease_context: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+            "minimappr_ingest_lease_id",
+            default=None,
+        )
         # Atomic-from-asyncio's perspective: count never escapes the event loop.
         # `total_admissions` / `total_shed` are exposed via /api/v1/system/diagnostics
         # so operators can confirm backpressure is firing under load.
@@ -175,25 +182,42 @@ class _IngestConcurrencyLimit:
 
     @property
     def active(self) -> int:
-        return self._active
+        self._evict_expired_leases(time.monotonic())
+        return len(self._active_leases)
 
     async def __aenter__(self) -> "_IngestConcurrencyLimit":
-        if self._active >= self._max:
+        now = time.monotonic()
+        self._evict_expired_leases(now)
+        if len(self._active_leases) >= self._max:
             self.total_shed += 1
             raise HTTPException(
                 status_code=503,
                 detail=(
-                    f"ingest backpressure: {self._active}/{self._max} slots in use"
+                    f"ingest backpressure: {len(self._active_leases)}/{self._max} slots in use"
                 ),
                 headers={"Retry-After": "1"},
             )
-        self._active += 1
+        self._next_lease_id += 1
+        lease_id = self._next_lease_id
+        self._active_leases[lease_id] = now + self._lease_timeout_seconds
+        self._lease_context.set(lease_id)
         self.total_admissions += 1
         return self
 
     async def __aexit__(self, *exc: object) -> None:
-        if self._active > 0:
-            self._active -= 1
+        lease_id = self._lease_context.get()
+        if lease_id is not None:
+            self._active_leases.pop(lease_id, None)
+            self._lease_context.set(None)
+
+    def _evict_expired_leases(self, now: float) -> None:
+        expired = [
+            lease_id
+            for lease_id, deadline in self._active_leases.items()
+            if deadline <= now
+        ]
+        for lease_id in expired:
+            self._active_leases.pop(lease_id, None)
 
 
 def _require_ingest_concurrency(request: Request) -> _IngestConcurrencyLimit:
@@ -208,6 +232,20 @@ def _require_ingest_concurrency(request: Request) -> _IngestConcurrencyLimit:
     limit = _IngestConcurrencyLimit(_DEFAULT_INGEST_MAX_CONCURRENT)
     request.app.state.ingest_concurrency = limit
     return limit
+
+
+def _ingest_request_timeout_seconds(request: Request) -> float:
+    settings: Settings | None = getattr(request.app.state, "settings", None)
+    if settings is None:
+        return 5.0
+    return settings.ingest_request_timeout_seconds
+
+
+async def _run_ingest_with_timeout(request: Request, operation) -> Any:
+    return await asyncio.wait_for(
+        operation,
+        timeout=_ingest_request_timeout_seconds(request),
+    )
 
 
 def _default_sidecar_classifier_command_json(settings: "Settings") -> str | None:
@@ -1085,7 +1123,8 @@ async def _api_only_lifespan(app: FastAPI, settings: Settings):
         sidecar_state=sidecar_state,
         capture_manager=capture_manager,
         ingest_concurrency=_IngestConcurrencyLimit(
-            settings.ingest_max_concurrent
+            settings.ingest_max_concurrent,
+            lease_timeout_seconds=settings.ingest_request_timeout_seconds,
         ),
     )
 
@@ -1191,7 +1230,8 @@ async def lifespan(app: FastAPI):
         sidecar_state=sidecar_state,
         capture_manager=capture_manager,
         ingest_concurrency=_IngestConcurrencyLimit(
-            settings.ingest_max_concurrent
+            settings.ingest_max_concurrent,
+            lease_timeout_seconds=settings.ingest_request_timeout_seconds,
         ),
     )
 
@@ -1373,26 +1413,50 @@ async def health(request: Request) -> dict:
 @app.post("/api/v1/ingest/frame", response_model=IngestFrameResponse)
 async def ingest_frame(payload: IngestFrameRequest, request: Request) -> IngestFrameResponse:
     state = _require_state(request)
-    async with _require_ingest_concurrency(request):
-        if _should_proxy_ingest_to_python_worker(state):
-            forwarded = await _proxy_ingest_post(
-                state,
-                endpoint_path="/api/v1/ingest/frame",
-                body=payload.model_dump_json().encode("utf-8"),
-                content_type="application/json",
+    try:
+        async with _require_ingest_concurrency(request):
+            return await _run_ingest_with_timeout(
+                request,
+                _ingest_frame_impl(state, payload),
             )
-            return IngestFrameResponse(**forwarded)
-        try:
-            return await state.fusion_node.ingest(payload)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="ingest request timed out",
+            headers={"Retry-After": "1"},
+        ) from exc
+
+
+async def _ingest_frame_impl(state, payload: IngestFrameRequest) -> IngestFrameResponse:
+    if _should_proxy_ingest_to_python_worker(state):
+        forwarded = await _proxy_ingest_post(
+            state,
+            endpoint_path="/api/v1/ingest/frame",
+            body=payload.model_dump_json().encode("utf-8"),
+            content_type="application/json",
+        )
+        return IngestFrameResponse(**forwarded)
+    try:
+        return await state.fusion_node.ingest(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/v1/ingest/store-forward", response_model=StoreForwardIngestResponse)
 async def ingest_store_forward(payload: StoreForwardIngestRequest, request: Request) -> StoreForwardIngestResponse:
     state = _require_state(request)
-    async with _require_ingest_concurrency(request):
-        return await _ingest_store_forward_impl(state, payload)
+    try:
+        async with _require_ingest_concurrency(request):
+            return await _run_ingest_with_timeout(
+                request,
+                _ingest_store_forward_impl(state, payload),
+            )
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="ingest request timed out",
+            headers={"Retry-After": "1"},
+        ) from exc
 
 
 async def _ingest_store_forward_impl(
@@ -1448,8 +1512,18 @@ async def _ingest_store_forward_impl(
 @app.post("/api/v1/ingest/binary", response_model=StoreForwardIngestResponse)
 async def ingest_binary(request: Request) -> StoreForwardIngestResponse:
     state = _require_state(request)
-    async with _require_ingest_concurrency(request):
-        return await _ingest_binary_impl(state, request)
+    try:
+        async with _require_ingest_concurrency(request):
+            return await _run_ingest_with_timeout(
+                request,
+                _ingest_binary_impl(state, request),
+            )
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="ingest request timed out",
+            headers={"Retry-After": "1"},
+        ) from exc
 
 
 async def _ingest_binary_impl(state, request: Request) -> StoreForwardIngestResponse:
@@ -2955,6 +3029,7 @@ async def get_system_diagnostics(request: Request) -> dict:
                 else None
             ),
         },
+        "request_timeout_seconds": settings.ingest_request_timeout_seconds,
     }
     if hasattr(state, "fusion_node"):
         fusion_status = await state.fusion_node.status()

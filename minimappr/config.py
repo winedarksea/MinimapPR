@@ -341,6 +341,7 @@ class Settings:
     ingest_host: str = "0.0.0.0"
     ingest_port: int = 8081
     ingest_max_concurrent: int = 64
+    ingest_request_timeout_seconds: float = 5.0
     ingest_base_url: str = ""
     ingest_backend: str = "python"
     db_path: Path = Path("data/minimappr.db")
@@ -545,6 +546,8 @@ class Settings:
             raise ValueError("MINIMAPPR_INGEST_PORT must be in [1, 65535]")
         if self.ingest_max_concurrent < 1:
             raise ValueError("MINIMAPPR_INGEST_MAX_CONCURRENT must be >= 1")
+        if self.ingest_request_timeout_seconds <= 0.0:
+            raise ValueError("MINIMAPPR_INGEST_REQUEST_TIMEOUT_SECONDS must be > 0")
         if not self.ingest_base_url:
             self.ingest_base_url = f"http://127.0.0.1:{self.ingest_port}"
         self.ingest_sidecar_port = self.ingest_port
@@ -874,6 +877,7 @@ class Settings:
             ingest_host=_env_str("MINIMAPPR_INGEST_HOST", "0.0.0.0"),
             ingest_port=ingest_port,
             ingest_max_concurrent=_env_int("MINIMAPPR_INGEST_MAX_CONCURRENT", 64),
+            ingest_request_timeout_seconds=_env_float("MINIMAPPR_INGEST_REQUEST_TIMEOUT_SECONDS", 5.0),
             ingest_base_url=_env_str("MINIMAPPR_INGEST_BASE_URL", ""),
             ingest_backend=ingest_backend,
             db_path=Path(_env_str("MINIMAPPR_DB_PATH", "data/minimappr.db")),
