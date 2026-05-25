@@ -8,7 +8,6 @@ pub fn StatusStrip() -> impl IntoView {
     let cop = state.cop_status;
     let fusion = state.fusion_status;
     let tracks = state.tracks;
-    let dets = state.detections;
     let alerts = state.alerts;
     let nodes = state.nodes;
 
@@ -22,16 +21,19 @@ pub fn StatusStrip() -> impl IntoView {
                         .unwrap_or_else(|| nodes.get().len() as i64)
                 })
                 tone=Signal::derive(move || "ok")
+                href="/settings"
             />
             <StatusChip
                 label="Degraded"
                 value=Signal::derive(move || cop.get().map(|c| c.degraded_nodes as i64).unwrap_or(0))
                 tone=Signal::derive(move || metric_tone(cop.get().map(|c| c.degraded_nodes as i64).unwrap_or(0)))
+                href="/settings"
             />
             <StatusChip
                 label="Offline"
                 value=Signal::derive(move || cop.get().map(|c| c.offline_nodes as i64).unwrap_or(0))
                 tone=Signal::derive(move || danger_metric_tone(cop.get().map(|c| c.offline_nodes as i64).unwrap_or(0)))
+                href="/settings"
             />
             <StatusChip
                 label="Tracks"
@@ -41,6 +43,7 @@ pub fn StatusStrip() -> impl IntoView {
                         .unwrap_or_else(|| tracks.get().len() as i64)
                 })
                 tone=Signal::derive(move || "info")
+                href="/cop"
             />
             <StatusChip
                 label="Alerts"
@@ -54,47 +57,54 @@ pub fn StatusStrip() -> impl IntoView {
                         .map(|c| c.open_alerts as i64)
                         .unwrap_or_else(|| alerts.get().len() as i64)
                 ))
-            />
-            <StatusChip
-                label="Det/60s"
-                value=Signal::derive(move || cop.get().map(|c| c.detections_last_60s as i64).unwrap_or(0))
-                tone=Signal::derive(move || "neutral")
+                href="/cop"
             />
             <StatusChipText
-                label="Pipeline Lag"
-                value=Signal::derive(move || pipeline_lag_text(&fusion))
-                tone=Signal::derive(move || pipeline_lag_tone(&fusion))
-            />
-            <StatusChipText
-                label="Last Detection"
-                value=Signal::derive(move || last_detection_age(&dets))
-                tone=Signal::derive(move || last_detection_tone(&dets))
+                label="Pipeline"
+                value=Signal::derive(move || pipeline_text(&fusion))
+                tone=Signal::derive(move || pipeline_tone(&fusion))
+                href="/settings/server"
             />
         </div>
     }
 }
 
-fn pipeline_lag_tone(
-    fusion: &RwSignal<Option<crate::state::FusionStatus>>,
-) -> &'static str {
-    let lag_seconds = fusion
-        .get()
-        .and_then(|status| status.realtime.pipeline_seconds_behind_realtime);
-    match lag_seconds {
-        Some(seconds) if seconds >= 30.0 => "danger",
-        Some(seconds) if seconds >= 5.0 => "warn",
-        Some(_) => "ok",
-        None => "neutral",
+fn pipeline_tone(fusion: &RwSignal<Option<crate::state::FusionStatus>>) -> &'static str {
+    let status = fusion.get();
+    let lag = status
+        .as_ref()
+        .and_then(|s| s.realtime.pipeline_seconds_behind_realtime);
+    let drought = status
+        .as_ref()
+        .and_then(|s| s.health.active_drought)
+        .unwrap_or(false);
+
+    if lag.map(|s| s >= 30.0).unwrap_or(false) {
+        return "danger";
     }
+    if lag.map(|s| s >= 5.0).unwrap_or(false) || drought {
+        return "warn";
+    }
+    if lag.is_some() {
+        return "ok";
+    }
+    "neutral"
 }
 
-fn pipeline_lag_text(
-    fusion: &RwSignal<Option<crate::state::FusionStatus>>,
-) -> String {
-    let lag_seconds = fusion
-        .get()
-        .and_then(|status| status.realtime.pipeline_seconds_behind_realtime);
-    match lag_seconds {
+fn pipeline_text(fusion: &RwSignal<Option<crate::state::FusionStatus>>) -> String {
+    let status = fusion.get();
+    let lag = status
+        .as_ref()
+        .and_then(|s| s.realtime.pipeline_seconds_behind_realtime);
+    let drought = status
+        .as_ref()
+        .and_then(|s| s.health.active_drought)
+        .unwrap_or(false);
+
+    if drought && lag.map(|s| s < 5.0).unwrap_or(true) {
+        return "drought".into();
+    }
+    match lag {
         Some(seconds) if seconds < 60.0 => format!("{seconds:.1}s"),
         Some(seconds) => format!("{:.1}m", seconds / 60.0),
         None => "—".into(),
@@ -106,12 +116,26 @@ fn StatusChip(
     label: &'static str,
     value: Signal<i64>,
     tone: Signal<&'static str>,
+    #[prop(optional)] href: Option<&'static str>,
 ) -> impl IntoView {
-    view! {
-        <span class=move || format!("strip-chip {}", tone.get())>
-            <span class="label">{label}</span>
-            <span class="value">{move || value.get()}</span>
-        </span>
+    let inner = view! {
+        <span class="label">{label}</span>
+        <span class="value">{move || value.get()}</span>
+    };
+    if let Some(path) = href {
+        view! {
+            <a href=path class=move || format!("strip-chip {}", tone.get())>
+                {inner}
+            </a>
+        }
+        .into_any()
+    } else {
+        view! {
+            <span class=move || format!("strip-chip {}", tone.get())>
+                {inner}
+            </span>
+        }
+        .into_any()
     }
 }
 
@@ -120,69 +144,33 @@ fn StatusChipText(
     label: &'static str,
     value: Signal<String>,
     tone: Signal<&'static str>,
+    #[prop(optional)] href: Option<&'static str>,
 ) -> impl IntoView {
-    view! {
-        <span class=move || format!("strip-chip {}", tone.get())>
-            <span class="label">{label}</span>
-            <span class="value">{move || value.get()}</span>
-        </span>
+    let inner = view! {
+        <span class="label">{label}</span>
+        <span class="value">{move || value.get()}</span>
+    };
+    if let Some(path) = href {
+        view! {
+            <a href=path class=move || format!("strip-chip {}", tone.get())>
+                {inner}
+            </a>
+        }
+        .into_any()
+    } else {
+        view! {
+            <span class=move || format!("strip-chip {}", tone.get())>
+                {inner}
+            </span>
+        }
+        .into_any()
     }
 }
 
 fn metric_tone(value: i64) -> &'static str {
-    if value > 0 {
-        "warn"
-    } else {
-        "neutral"
-    }
+    if value > 0 { "warn" } else { "neutral" }
 }
 
 fn danger_metric_tone(value: i64) -> &'static str {
-    if value > 0 {
-        "danger"
-    } else {
-        "neutral"
-    }
-}
-
-fn last_detection_tone(
-    dets: &RwSignal<std::collections::VecDeque<crate::state::Detection>>,
-) -> &'static str {
-    let ds = dets.get();
-    let Some(detection) = ds.front() else {
-        return "neutral";
-    };
-    let Some(received_ns) = detection.received_ns else {
-        return "neutral";
-    };
-    let age_seconds = ((js_sys::Date::now() - received_ns as f64 / 1_000_000.0) / 1000.0).max(0.0);
-    if age_seconds < 30.0 {
-        "ok"
-    } else if age_seconds < 120.0 {
-        "warn"
-    } else {
-        "danger"
-    }
-}
-
-fn last_detection_age(
-    dets: &RwSignal<std::collections::VecDeque<crate::state::Detection>>,
-) -> String {
-    let ds = dets.get();
-    let Some(d) = ds.front() else {
-        return "—".into();
-    };
-    let Some(ns) = d.received_ns else {
-        return "—".into();
-    };
-    let now_ms = js_sys::Date::now();
-    let sample_ms = ns as f64 / 1_000_000.0;
-    let age_s = ((now_ms - sample_ms) / 1000.0).max(0.0);
-    if age_s < 60.0 {
-        format!("{:.0}s", age_s)
-    } else if age_s < 3600.0 {
-        format!("{:.0}m", age_s / 60.0)
-    } else {
-        format!("{:.1}h", age_s / 3600.0)
-    }
+    if value > 0 { "danger" } else { "neutral" }
 }

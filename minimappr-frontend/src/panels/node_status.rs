@@ -259,6 +259,16 @@ fn NodeCard(node: NodeStatus) -> impl IntoView {
     let rms = node.rms_history.clone().unwrap_or_default();
     let path = sparkline_path(&rms, 180.0, 24.0);
 
+    let audio_status_label: Option<&'static str> = node
+        .audio_debug
+        .as_ref()
+        .and_then(|a| a.status.as_deref())
+        .map(|s| match s {
+            "recent" => "Audio ✓",
+            "stale" => "Audio stale",
+            _ => "Audio offline",
+        });
+
     let id_clone = node_id.clone();
     let id_clone2 = node_id.clone();
 
@@ -267,6 +277,9 @@ fn NodeCard(node: NodeStatus) -> impl IntoView {
             <div class="node-card-header">
                 <span class="node-id">{node_id.clone()}</span>
                 <span class=chip_class>{health.clone()}</span>
+                {audio_status_label.map(|lbl| view! {
+                    <span class="node-audio-status-label muted">{lbl}</span>
+                })}
             </div>
             <div class="node-meta">
                 {if !gps.is_empty() { view!(<span>{gps}</span>).into_any() } else { view!(<span></span>).into_any() }}

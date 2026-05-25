@@ -285,9 +285,44 @@ pub fn PipelineView() -> impl IntoView {
                             </div>
                         }.into_any();
                     }
-                    resp.nodes.into_iter().map(|node| {
+                    // Aggregate health metrics for the banner
+                    let healthy_nodes = resp.nodes.iter().filter(|n| n.audio_status == "recent").count();
+                    let total_nodes = resp.nodes.len();
+                    let total_drops: u64 = resp.nodes.iter()
+                        .flat_map(|n| n.stages.iter())
+                        .map(|s| s.drops)
+                        .sum();
+                    let lag = resp.pipeline_seconds_behind_realtime;
+                    let (banner_label, banner_chip) = if lag.map(|s| s >= 30.0).unwrap_or(false) {
+                        ("Critical", "health-chip offline")
+                    } else if healthy_nodes < total_nodes || total_drops > 0 || lag.map(|s| s >= 5.0).unwrap_or(false) {
+                        ("Degraded", "health-chip degraded")
+                    } else if lag.is_some() {
+                        ("Healthy", "health-chip online")
+                    } else {
+                        ("Unknown", "health-chip unknown")
+                    };
+                    let drop_label = if total_drops == 0 {
+                        "0 drops".to_string()
+                    } else {
+                        format!("{total_drops} drops")
+                    };
+                    let drop_cls = if total_drops > 0 { "pipeline-banner-warn" } else { "muted" };
+                    let audio_label = format!("{healthy_nodes}/{total_nodes} nodes audio healthy");
+                    let audio_cls = if healthy_nodes < total_nodes { "pipeline-banner-warn" } else { "muted" };
+
+                    let cards = resp.nodes.into_iter().map(|node| {
                         view! { <NodeCard node=node edits=edits is_rust=is_rust /> }
-                    }).collect_view().into_any()
+                    }).collect_view();
+
+                    view! {
+                        <div class="pipeline-health-banner">
+                            <span class=banner_chip>{banner_label}</span>
+                            <span class=audio_cls>{audio_label}</span>
+                            <span class=drop_cls>{drop_label}</span>
+                        </div>
+                        {cards}
+                    }.into_any()
                 }
             }}
         </div>
@@ -493,11 +528,20 @@ fn NodeCard(
                 }).collect_view()}
             </div>
 
-            // RMS sparkline (aggregate)
-            {has_rms_all.then(|| view! {
-                <svg width="120" height="24" class="rms-sparkline" style="margin:0.3rem 0;display:block">
-                    <path d=spark_all stroke="var(--md-sys-color-primary)" stroke-width="1.5" fill="none" />
-                </svg>
+            // RMS sparkline (aggregate) + quiet label when audio is healthy but low-amplitude
+            {has_rms_all.then(|| {
+                let rms_max = rms_all.iter().cloned().fold(0.0_f64, f64::max);
+                let is_quiet = audio_status == "recent" && rms_max < 0.01;
+                view! {
+                    <div style="display:flex;align-items:center;gap:0.5rem">
+                        <svg width="120" height="24" class="rms-sparkline" style="margin:0.3rem 0;display:block">
+                            <path d=spark_all stroke="var(--md-sys-color-primary)" stroke-width="1.5" fill="none" />
+                        </svg>
+                        {is_quiet.then(|| view! {
+                            <span class="muted" style="font-size:0.75rem">"audio quiet"</span>
+                        })}
+                    </div>
+                }
             })}
 
             // Mic settings

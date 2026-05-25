@@ -1,3 +1,4 @@
+use crate::state::AppState;
 use futures::StreamExt;
 use gloo_net::http::Request;
 use gloo_timers::future::IntervalStream;
@@ -206,6 +207,12 @@ struct PipelineMetrics {
     #[serde(default)]
     stage_drops_backpressure: u64,
     #[serde(default)]
+    localization_stage_in: u64,
+    #[serde(default)]
+    localization_stage_out: u64,
+    #[serde(default)]
+    localization_failures: u64,
+    #[serde(default)]
     classification_reuse_hits: u64,
     #[serde(default)]
     birdnet_chunk_dispatches_suppressed: u64,
@@ -252,6 +259,8 @@ fn fmt_optional_count(value: Option<u64>) -> String {
 
 #[component]
 pub fn ServerDiagnosticsView() -> impl IntoView {
+    let state = use_context::<AppState>().expect("AppState");
+    let fusion = state.fusion_status;
     let data: RwSignal<Option<Diagnostics>> = RwSignal::new(None);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
 
@@ -387,6 +396,43 @@ pub fn ServerDiagnosticsView() -> impl IntoView {
                                 </DiagCard>
 
                                 <DiagCard title="Pipeline">
+                                    {
+                                        // Health summary banner — computed from lag + drops + active_drought
+                                        let lag = pipeline.realtime.pipeline_seconds_behind_realtime;
+                                        let total_drops = pipeline.metrics.triggers_dropped_queue_full
+                                            + pipeline.metrics.stage_drops_backpressure;
+                                        let drought = fusion.get()
+                                            .and_then(|s| s.health.active_drought)
+                                            .unwrap_or(false);
+                                        let (status_label, status_class) = if lag.map(|s| s >= 30.0).unwrap_or(false) {
+                                            ("Critical", "health-chip offline")
+                                        } else if lag.map(|s| s >= 5.0).unwrap_or(false) || drought || total_drops > 0 {
+                                            ("Degraded", "health-chip degraded")
+                                        } else if lag.is_some() {
+                                            ("Healthy", "health-chip online")
+                                        } else {
+                                            ("Unknown", "health-chip unknown")
+                                        };
+                                        let loc_rate: Option<String> = if pipeline.metrics.localization_stage_in > 0 {
+                                            let rate = pipeline.metrics.localization_stage_out as f64
+                                                / pipeline.metrics.localization_stage_in as f64
+                                                * 100.0;
+                                            Some(format!("{rate:.0}%"))
+                                        } else {
+                                            None
+                                        };
+                                        view! {
+                                            <div class="diag-pipeline-health">
+                                                <span class=status_class>{status_label}</span>
+                                                {drought.then(|| view! {
+                                                    <span class="health-chip degraded" title="Pipeline is processing triggers but not emitting detections (>60 s gap)">"Active Drought"</span>
+                                                })}
+                                                {loc_rate.map(|r| view! {
+                                                    <span class="muted">"Localization: " {r} " yield"</span>
+                                                })}
+                                            </div>
+                                        }
+                                    }
                                     <DiagRow k="Behind real time".into() v=fmt_seconds(pipeline.realtime.pipeline_seconds_behind_realtime) />
                                     <DiagRow k="Last detection lag".into() v=fmt_seconds(pipeline.realtime.last_completed_lag_seconds) />
                                     <DiagRow k="Worst detection lag".into() v=fmt_seconds(pipeline.realtime.max_completed_lag_seconds) />

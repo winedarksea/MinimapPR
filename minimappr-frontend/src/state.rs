@@ -205,11 +205,23 @@ pub struct CopStatus {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
+pub struct FusionHealth {
+    #[serde(default)]
+    pub active_drought: Option<bool>,
+    #[serde(default)]
+    pub seconds_since_last_emission: Option<f64>,
+    #[serde(default)]
+    pub seconds_since_last_trigger: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub struct FusionStatus {
     #[serde(default)]
     pub realtime: FusionRealtime,
     #[serde(default)]
     pub metrics: serde_json::Value,
+    #[serde(default)]
+    pub health: FusionHealth,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
