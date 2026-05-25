@@ -124,8 +124,9 @@ impl NodeEdit {
 fn fmt_lag(lag_s: Option<f64>) -> String {
     match lag_s {
         Some(s) if s >= 60.0 => format!("{:.1}min", s / 60.0),
-        Some(s) => format!("{s:.2}s"),
-        None => "—".into(),
+        Some(s) if s >= 0.005 => format!("{s:.2}s"),
+        // < 5 ms or None: stage has nothing queued or in-flight (= caught up).
+        _ => "live".into(),
     }
 }
 
@@ -285,7 +286,8 @@ pub fn PipelineView() -> impl IntoView {
                             </div>
                         }.into_any();
                     }
-                    // Aggregate health metrics for the banner
+                    // Aggregate health metrics for the banner.
+                    // `lag == None` = pipeline has nothing in flight (= caught up = healthy).
                     let healthy_nodes = resp.nodes.iter().filter(|n| n.audio_status == "recent").count();
                     let total_nodes = resp.nodes.len();
                     let total_drops: u64 = resp.nodes.iter()
@@ -297,10 +299,13 @@ pub fn PipelineView() -> impl IntoView {
                         ("Critical", "health-chip offline")
                     } else if healthy_nodes < total_nodes || total_drops > 0 || lag.map(|s| s >= 5.0).unwrap_or(false) {
                         ("Degraded", "health-chip degraded")
-                    } else if lag.is_some() {
-                        ("Healthy", "health-chip online")
                     } else {
-                        ("Unknown", "health-chip unknown")
+                        ("Healthy", "health-chip online")
+                    };
+                    let lag_label = match lag {
+                        Some(s) if s >= 60.0 => format!("{:.1} min behind realtime", s / 60.0),
+                        Some(s) if s >= 0.005 => format!("{s:.2} s behind realtime"),
+                        _ => "live · caught up".to_string(),
                     };
                     let drop_label = if total_drops == 0 {
                         "0 drops".to_string()
@@ -320,6 +325,7 @@ pub fn PipelineView() -> impl IntoView {
                             <span class=banner_chip>{banner_label}</span>
                             <span class=audio_cls>{audio_label}</span>
                             <span class=drop_cls>{drop_label}</span>
+                            <span class="muted">{lag_label}</span>
                         </div>
                         {cards}
                     }.into_any()

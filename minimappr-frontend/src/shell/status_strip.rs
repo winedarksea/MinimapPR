@@ -71,6 +71,9 @@ pub fn StatusStrip() -> impl IntoView {
 
 fn pipeline_tone(fusion: &RwSignal<Option<crate::state::FusionStatus>>) -> &'static str {
     let status = fusion.get();
+    if status.is_none() {
+        return "neutral";
+    }
     let lag = status
         .as_ref()
         .and_then(|s| s.realtime.pipeline_seconds_behind_realtime);
@@ -85,14 +88,15 @@ fn pipeline_tone(fusion: &RwSignal<Option<crate::state::FusionStatus>>) -> &'sta
     if lag.map(|s| s >= 5.0).unwrap_or(false) || drought {
         return "warn";
     }
-    if lag.is_some() {
-        return "ok";
-    }
-    "neutral"
+    // Either a low lag value, or `None` (= no items in flight = fully caught up).
+    "ok"
 }
 
 fn pipeline_text(fusion: &RwSignal<Option<crate::state::FusionStatus>>) -> String {
     let status = fusion.get();
+    if status.is_none() {
+        return "…".into();
+    }
     let lag = status
         .as_ref()
         .and_then(|s| s.realtime.pipeline_seconds_behind_realtime);
@@ -105,9 +109,10 @@ fn pipeline_text(fusion: &RwSignal<Option<crate::state::FusionStatus>>) -> Strin
         return "drought".into();
     }
     match lag {
+        Some(seconds) if seconds < 1.0 => "live".into(),
         Some(seconds) if seconds < 60.0 => format!("{seconds:.1}s"),
         Some(seconds) => format!("{:.1}m", seconds / 60.0),
-        None => "—".into(),
+        None => "live".into(),
     }
 }
 

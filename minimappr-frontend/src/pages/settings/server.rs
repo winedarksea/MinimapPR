@@ -245,11 +245,26 @@ fn fmt_uptime(ns: i64) -> String {
     }
 }
 
-fn fmt_seconds(value: Option<f64>) -> String {
+/// Pipeline-stage lag formatter: a `None` value here means "no items in flight",
+/// which is the steady-state for a caught-up pipeline — render that as "live"
+/// rather than an em-dash that reads as "no data / offline".
+fn fmt_stage_lag(value: Option<f64>) -> String {
+    match value {
+        Some(seconds) if seconds >= 60.0 => format!("{:.1} min", seconds / 60.0),
+        Some(seconds) if seconds >= 0.005 => format!("{seconds:.2} s"),
+        // < 5 ms or None: pipeline is fully caught up
+        _ => "live".into(),
+    }
+}
+
+/// Completed-detection lag formatter: a `None` value means no detection has
+/// ever completed yet (cold start or a long fully-silent period). Show a
+/// clear text label so a healthy idle system doesn't look broken.
+fn fmt_completed_lag(value: Option<f64>) -> String {
     match value {
         Some(seconds) if seconds >= 60.0 => format!("{:.1} min", seconds / 60.0),
         Some(seconds) => format!("{seconds:.2} s"),
-        None => "—".into(),
+        None => "no detections yet".into(),
     }
 }
 
@@ -397,7 +412,9 @@ pub fn ServerDiagnosticsView() -> impl IntoView {
 
                                 <DiagCard title="Pipeline">
                                     {
-                                        // Health summary banner — computed from lag + drops + active_drought
+                                        // Health summary banner — computed from lag + drops + active_drought.
+                                        // `lag == None` means nothing is queued or in-flight (caught up), so
+                                        // treat that as healthy rather than "Unknown".
                                         let lag = pipeline.realtime.pipeline_seconds_behind_realtime;
                                         let total_drops = pipeline.metrics.triggers_dropped_queue_full
                                             + pipeline.metrics.stage_drops_backpressure;
@@ -408,10 +425,8 @@ pub fn ServerDiagnosticsView() -> impl IntoView {
                                             ("Critical", "health-chip offline")
                                         } else if lag.map(|s| s >= 5.0).unwrap_or(false) || drought || total_drops > 0 {
                                             ("Degraded", "health-chip degraded")
-                                        } else if lag.is_some() {
-                                            ("Healthy", "health-chip online")
                                         } else {
-                                            ("Unknown", "health-chip unknown")
+                                            ("Healthy", "health-chip online")
                                         };
                                         let loc_rate: Option<String> = if pipeline.metrics.localization_stage_in > 0 {
                                             let rate = pipeline.metrics.localization_stage_out as f64
@@ -421,6 +436,7 @@ pub fn ServerDiagnosticsView() -> impl IntoView {
                                         } else {
                                             None
                                         };
+                                        let detections_emitted = pipeline.metrics.detections_emitted;
                                         view! {
                                             <div class="diag-pipeline-health">
                                                 <span class=status_class>{status_label}</span>
@@ -430,12 +446,13 @@ pub fn ServerDiagnosticsView() -> impl IntoView {
                                                 {loc_rate.map(|r| view! {
                                                     <span class="muted">"Localization: " {r} " yield"</span>
                                                 })}
+                                                <span class="muted">{format!("{detections_emitted} detections emitted")}</span>
                                             </div>
                                         }
                                     }
-                                    <DiagRow k="Behind real time".into() v=fmt_seconds(pipeline.realtime.pipeline_seconds_behind_realtime) />
-                                    <DiagRow k="Last detection lag".into() v=fmt_seconds(pipeline.realtime.last_completed_lag_seconds) />
-                                    <DiagRow k="Worst detection lag".into() v=fmt_seconds(pipeline.realtime.max_completed_lag_seconds) />
+                                    <DiagRow k="Behind real time".into() v=fmt_stage_lag(pipeline.realtime.pipeline_seconds_behind_realtime) />
+                                    <DiagRow k="Last detection lag".into() v=fmt_completed_lag(pipeline.realtime.last_completed_lag_seconds) />
+                                    <DiagRow k="Worst detection lag".into() v=fmt_completed_lag(pipeline.realtime.max_completed_lag_seconds) />
                                     <DiagRow
                                         k="Queue depths".into()
                                         v=format!(
@@ -458,9 +475,9 @@ pub fn ServerDiagnosticsView() -> impl IntoView {
                                             pipeline.workers.rules_running,
                                         )
                                     />
-                                    <DiagRow k="Localization lag".into() v=fmt_seconds(localization_lag) />
-                                    <DiagRow k="Classification lag".into() v=fmt_seconds(classification_lag) />
-                                    <DiagRow k="Rules lag".into() v=fmt_seconds(rules_lag) />
+                                    <DiagRow k="Localization lag".into() v=fmt_stage_lag(localization_lag) />
+                                    <DiagRow k="Classification lag".into() v=fmt_stage_lag(classification_lag) />
+                                    <DiagRow k="Rules lag".into() v=fmt_stage_lag(rules_lag) />
                                     <DiagRow
                                         k="Backpressure".into()
                                         v=match pipeline.drop_on_backpressure {
