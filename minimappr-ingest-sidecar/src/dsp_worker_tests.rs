@@ -1319,6 +1319,34 @@ fn low_coverage_channel_drops_out_of_localization_set() {
 }
 
 #[test]
+fn resolve_localization_center_time_skips_invalid_clamp_when_buffer_is_shorter_than_window() {
+    let sample_rate_hz = 16_000;
+    let window_seconds = 512.0 / sample_rate_hz as f64;
+    let start_time_ns = 1_000_000_000_000_i128;
+    let end_time_ns = start_time_ns + (256 * 1_000_000_000_i128 / i128::from(sample_rate_hz));
+
+    let mut buffers: [SensorStreamBuffer; 4] =
+        core::array::from_fn(|_| SensorStreamBuffer::new(sample_rate_hz, 1.0));
+    for buffer in &mut buffers {
+        buffer
+            .append(start_time_ns, &vec![1.0; 256], Some(0), Some(256))
+            .unwrap();
+    }
+
+    let center_time_ns = resolve_localization_center_time_ns(
+        &buffers,
+        start_time_ns,
+        end_time_ns,
+        window_seconds,
+    );
+    assert_eq!(center_time_ns, start_time_ns);
+
+    let channel_states = localization_channel_states_centered(&buffers, center_time_ns, window_seconds);
+    assert!(channel_states.iter().all(|state| state.coverage.is_none()));
+    assert!(channel_states.iter().all(|state| state.window.is_empty()));
+}
+
+#[test]
 fn resolve_buffer_start_time_prefers_packet_toa_over_other_fallbacks() {
     let decoded = DecodedAudioPayload {
         channels: vec![vec![0.0; 16]; 4],

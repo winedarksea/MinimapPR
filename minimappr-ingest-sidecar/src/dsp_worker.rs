@@ -854,22 +854,12 @@ impl DspWorker {
             buffer_end_time_ns,
             owned.sr,
         );
-        let window_duration_ns = (self.config.window_seconds * 1_000_000_000.0).round() as i128;
-        let half_window_duration_ns = window_duration_ns / 2;
-        let buffered_range_start_ns = buffers
-            .first()
-            .and_then(|buffer| buffer.start_time_ns())
-            .unwrap_or(buffer_start_time_ns);
-        let buffered_range_end_ns = buffers
-            .first()
-            .and_then(|buffer| buffer.end_time_ns())
-            .unwrap_or(end_ns);
-        let center_time_ns = end_ns
-            .saturating_sub(half_window_duration_ns)
-            .clamp(
-                buffered_range_start_ns.saturating_add(half_window_duration_ns),
-                buffered_range_end_ns.saturating_sub(half_window_duration_ns),
-            );
+        let center_time_ns = resolve_localization_center_time_ns(
+            buffers,
+            buffer_start_time_ns,
+            end_ns,
+            self.config.window_seconds,
+        );
         let channel_states =
             localization_channel_states_centered(buffers, center_time_ns, self.config.window_seconds);
         // `buffers` borrow ends here; safe to take &self again for the
@@ -1679,6 +1669,37 @@ fn localization_channel_states_centered(
                 .unwrap_or_default(),
         })
         .collect()
+}
+
+fn resolve_localization_center_time_ns(
+    buffers: &[SensorStreamBuffer],
+    buffer_start_time_ns: i128,
+    end_ns: i128,
+    window_seconds: f64,
+) -> i128 {
+    let window_duration_ns = (window_seconds * 1_000_000_000.0).round() as i128;
+    let half_window_duration_ns = window_duration_ns / 2;
+    let buffered_range_start_ns = buffers
+        .first()
+        .and_then(|buffer| buffer.start_time_ns())
+        .unwrap_or(buffer_start_time_ns);
+    let buffered_range_end_ns = buffers
+        .first()
+        .and_then(|buffer| buffer.end_time_ns())
+        .unwrap_or(end_ns);
+    let unclamped_center_time_ns = end_ns.saturating_sub(half_window_duration_ns);
+    let centered_window_start_limit_ns =
+        buffered_range_start_ns.saturating_add(half_window_duration_ns);
+    let centered_window_end_limit_ns = buffered_range_end_ns.saturating_sub(half_window_duration_ns);
+
+    if centered_window_start_limit_ns <= centered_window_end_limit_ns {
+        unclamped_center_time_ns.clamp(
+            centered_window_start_limit_ns,
+            centered_window_end_limit_ns,
+        )
+    } else {
+        unclamped_center_time_ns
+    }
 }
 
 fn channel_windows_ending_at(
