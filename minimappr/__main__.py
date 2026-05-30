@@ -17,6 +17,11 @@ from typing import Sequence
 
 import uvicorn
 
+try:
+    import setproctitle as _setproctitle
+except ImportError:
+    _setproctitle = None  # type: ignore[assignment]
+
 from minimappr.cleanup_service import CleanupService
 from minimappr.config import Settings
 from minimappr.storage.db import Storage
@@ -63,20 +68,30 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _set_proc_title(role: str | None = None) -> None:
+    if _setproctitle is None:
+        return
+    title = "minimappr" if role is None else f"minimappr: {role}"
+    _setproctitle.setproctitle(title)
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     parser = _build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     if args.command in {None, "serve"}:
+        _set_proc_title()
         _run_server(no_sidecar=getattr(args, "no_sidecar", False))
         return
 
     if args.command == "api":
+        _set_proc_title("api")
         os.environ["MINIMAPPR_PROCESS_ROLE"] = "api"
         _run_server(no_sidecar=False)
         return
 
     if args.command == "ingest":
+        _set_proc_title("ingest")
         os.environ["MINIMAPPR_PROCESS_ROLE"] = "ingest"
         os.environ["MINIMAPPR_INGEST_BACKEND"] = "python"
         os.environ["MINIMAPPR_DIRECT_INGEST_ENABLED"] = "true"
