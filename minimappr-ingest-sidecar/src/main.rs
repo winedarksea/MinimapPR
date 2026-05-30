@@ -245,6 +245,13 @@ struct Args {
 
     #[arg(
         long,
+        env = "MINIMAPPR_GCC_PHAT_INTERP_FACTOR",
+        default_value_t = 4
+    )]
+    gcc_phat_interp_factor: usize,
+
+    #[arg(
+        long,
         env = "MINIMAPPR_LOCALIZATION_SRP_GRID_RESOLUTION_M",
         default_value_t = 0.5
     )]
@@ -459,6 +466,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     args.localization_band_min_hz,
                     args.localization_band_max_hz,
                 ],
+                gcc_phat_interp_factor: args.gcc_phat_interp_factor,
                 localization_srp_grid_resolution_m: args.localization_srp_grid_resolution_m,
                 localization_search_padding_m: args.localization_search_padding_m,
                 localization_far_field_default_range_m: args.localization_far_field_default_range_m,

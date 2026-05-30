@@ -41,6 +41,7 @@ pub fn gcc_phat(
         sample_rate_hz,
         max_lag_samples as f32 / sample_rate_hz.max(1) as f32,
         None,
+        4,
     )
     .tdoa
 }
@@ -51,6 +52,7 @@ pub(crate) fn phat_correlation(
     sample_rate_hz: u32,
     max_tau_s: f32,
     band_hz: Option<[f32; 2]>,
+    interp_factor: usize,
 ) -> GccPhatCorrelation {
     const EPSILON: f32 = 1e-9;
 
@@ -74,9 +76,9 @@ pub(crate) fn phat_correlation(
         static PLANNER: std::cell::RefCell<FftPlanner<f32>> = std::cell::RefCell::new(FftPlanner::new());
     }
 
-    let (fft, ifft) = PLANNER.with(|planner| {
+    let fft = PLANNER.with(|planner| {
         let mut p = planner.borrow_mut();
-        (p.plan_fft_forward(fft_len), p.plan_fft_inverse(fft_len))
+        p.plan_fft_forward(fft_len)
     });
 
     let mut x1: Vec<Complex32> = ch1[..n]
@@ -94,7 +96,7 @@ pub(crate) fn phat_correlation(
     fft.process(&mut x2);
 
     let effective_band = normalize_band_hz(band_hz, sample_rate_hz);
-    let mut cross_spectrum: Vec<Complex32> = x1
+    let cross_spectrum: Vec<Complex32> = x1
         .iter()
         .zip(x2.iter())
         .enumerate()
@@ -112,24 +114,30 @@ pub(crate) fn phat_correlation(
         })
         .collect();
 
-    ifft.process(&mut cross_spectrum);
+    let interp_factor = interp_factor.max(1);
+    let upsampled_fft_len = fft_len.saturating_mul(interp_factor);
+    let mut cross_correlation = zero_pad_hermitian_spectrum(&cross_spectrum, upsampled_fft_len);
+    let ifft = PLANNER.with(|planner| planner.borrow_mut().plan_fft_inverse(upsampled_fft_len));
+    ifft.process(&mut cross_correlation);
 
-    let scale = 1.0 / fft_len as f32;
-    let lag =
-        ((max_tau_s.max(1.0 / sample_rate_hz as f32)) * sample_rate_hz as f32).ceil() as usize;
-    let lag = lag.clamp(1, fft_len / 2);
+    let scale = 1.0 / upsampled_fft_len as f32;
+    let lag = ((max_tau_s.max(1.0 / sample_rate_hz as f32))
+        * sample_rate_hz as f32
+        * interp_factor as f32)
+        .ceil() as usize;
+    let lag = lag.clamp(1, upsampled_fft_len / 2);
 
     let mut lags_seconds = Vec::with_capacity((2 * lag) + 1);
     let mut magnitudes = Vec::with_capacity((2 * lag) + 1);
 
     for delay in (1..=lag).rev() {
-        lags_seconds.push(-(delay as f32) / sample_rate_hz as f32);
-        magnitudes.push((cross_spectrum[fft_len - delay].re * scale).abs());
+        lags_seconds.push(-(delay as f32) / (sample_rate_hz as f32 * interp_factor as f32));
+        magnitudes.push((cross_correlation[upsampled_fft_len - delay].re * scale).abs());
     }
     lags_seconds.push(0.0);
-    magnitudes.push((cross_spectrum[0].re * scale).abs());
-    for (delay, cross_val) in cross_spectrum.iter().enumerate().skip(1).take(lag) {
-        lags_seconds.push(delay as f32 / sample_rate_hz as f32);
+    magnitudes.push((cross_correlation[0].re * scale).abs());
+    for (delay, cross_val) in cross_correlation.iter().enumerate().skip(1).take(lag) {
+        lags_seconds.push(delay as f32 / (sample_rate_hz as f32 * interp_factor as f32));
         magnitudes.push((cross_val.re * scale).abs());
     }
 
@@ -139,8 +147,21 @@ pub(crate) fn phat_correlation(
         .enumerate()
         .max_by(|(_, left), (_, right)| left.partial_cmp(right).unwrap_or(Ordering::Equal))
         .unwrap_or((lag, 0.0));
-    let peak_offset = parabolic_peak_offset(&magnitudes, peak_index);
-    let delay_samples = (peak_index as f32 - lag as f32) + peak_offset;
+    let fractional_peak_offset = if peak_index > 0 && peak_index + 1 < magnitudes.len() {
+        let left_peak = magnitudes[peak_index - 1];
+        let center_peak = magnitudes[peak_index];
+        let right_peak = magnitudes[peak_index + 1];
+        let denominator = left_peak - (2.0 * center_peak) + right_peak;
+        if denominator.abs() > 1.0e-20 {
+            (0.5 * (left_peak - right_peak) / denominator).clamp(-0.5, 0.5)
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+    let delay_samples =
+        (peak_index as f32 + fractional_peak_offset - lag as f32) / interp_factor as f32;
 
     let mut sorted_peaks = magnitudes.clone();
     sorted_peaks.sort_by(|left, right| right.partial_cmp(left).unwrap_or(Ordering::Equal));
@@ -199,6 +220,7 @@ pub fn tetrahedral_gcc_phat(
             sample_rate_hz,
             max_tau_s,
             band_hz,
+            4,
         )
         .tdoa
     })
@@ -215,18 +237,28 @@ fn next_pow2(n: usize) -> usize {
     p
 }
 
-fn parabolic_peak_offset(magnitudes: &[f32], peak_index: usize) -> f32 {
-    if peak_index == 0 || peak_index + 1 >= magnitudes.len() {
-        return 0.0;
+fn zero_pad_hermitian_spectrum(spectrum: &[Complex32], target_len: usize) -> Vec<Complex32> {
+    if target_len <= spectrum.len() {
+        return spectrum.to_vec();
     }
-    let left = magnitudes[peak_index - 1];
-    let center = magnitudes[peak_index];
-    let right = magnitudes[peak_index + 1];
-    let denominator = left - (2.0 * center) + right;
-    if denominator.abs() < 1e-12 {
-        return 0.0;
+
+    let original_len = spectrum.len();
+    let half_len = original_len / 2;
+    let mut padded = vec![Complex32::new(0.0, 0.0); target_len];
+    padded[0] = spectrum[0];
+
+    if original_len % 2 == 0 {
+        padded[1..half_len].copy_from_slice(&spectrum[1..half_len]);
+        padded[target_len - (original_len - half_len - 1)..]
+            .copy_from_slice(&spectrum[half_len + 1..]);
+        padded[half_len] = spectrum[half_len] * 0.5;
+        padded[target_len - half_len] = spectrum[half_len] * 0.5;
+    } else {
+        padded[1..=half_len].copy_from_slice(&spectrum[1..=half_len]);
+        padded[target_len - half_len..].copy_from_slice(&spectrum[half_len + 1..]);
     }
-    (0.5 * (left - right) / denominator).clamp(-1.0, 1.0)
+
+    padded
 }
 
 fn normalize_band_hz(band_hz: Option<[f32; 2]>, sample_rate_hz: u32) -> Option<[f32; 2]> {
@@ -337,9 +369,9 @@ mod tests {
         let ch1 = low_component[..len].to_vec();
         let ch2 = low_component[4..len + 4].to_vec();
 
-        let unbanded = phat_correlation(&ch1, &ch2, sr, 6.0 / sr as f32, None).tdoa;
-        let banded =
-            phat_correlation(&ch1, &ch2, sr, 6.0 / sr as f32, Some([1_000.0, 3_200.0])).tdoa;
+        let unbanded = phat_correlation(&ch1, &ch2, sr, 6.0 / sr as f32, None, 4).tdoa;
+        let banded = phat_correlation(&ch1, &ch2, sr, 6.0 / sr as f32, Some([1_000.0, 3_200.0]), 4)
+            .tdoa;
 
         assert!(
             (unbanded.delay_samples - 4.0).abs() < 0.45,
@@ -373,8 +405,8 @@ mod tests {
 
         let ch1 = high_component[..len].to_vec();
         let ch2 = high_component[1..len + 1].to_vec();
-        let banded =
-            phat_correlation(&ch1, &ch2, sr, 6.0 / sr as f32, Some([1_000.0, 3_200.0])).tdoa;
+        let banded = phat_correlation(&ch1, &ch2, sr, 6.0 / sr as f32, Some([1_000.0, 3_200.0]), 4)
+            .tdoa;
 
         assert!(
             (banded.delay_samples - 1.0).abs() < 0.45,
@@ -382,6 +414,20 @@ mod tests {
             banded.delay_samples
         );
         assert!(banded.peak_value > 0.0);
+    }
+
+    #[test]
+    fn fractional_delay_recovers_three_halves_sample_shift() {
+        let sr = 16_000;
+        let signal = pseudo_random(640);
+        let ch1 = signal[..512].to_vec();
+        let ch2 = fractional_delay(&signal, 1.5, 512);
+        let result = phat_correlation(&ch1, &ch2, sr, 4.0 / sr as f32, None, 4).tdoa;
+        assert!(
+            (result.delay_samples + 1.5).abs() < 0.2,
+            "expected -1.5 ± 0.2, got {}",
+            result.delay_samples
+        );
     }
 
     fn pseudo_random_with_seed(mut seed: u32, len: usize) -> Vec<f32> {
@@ -403,5 +449,20 @@ mod tests {
             smoothed.push(mean);
         }
         smoothed
+    }
+
+    fn fractional_delay(source: &[f32], delay_samples: f32, output_len: usize) -> Vec<f32> {
+        (0..output_len)
+            .map(|sample_index| {
+                let source_index = sample_index as f32 - delay_samples;
+                if source_index < 0.0 || source_index + 1.0 >= source.len() as f32 {
+                    return 0.0;
+                }
+                let lower_index = source_index.floor() as usize;
+                let upper_index = lower_index + 1;
+                let fraction = source_index - lower_index as f32;
+                (source[lower_index] * (1.0 - fraction)) + (source[upper_index] * fraction)
+            })
+            .collect()
     }
 }

@@ -7,7 +7,7 @@ import math
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.optimize import least_squares
+from scipy.optimize import least_squares, minimize_scalar
 
 from minimappr.core.localization import LocalizationError, gcc_phat, speed_of_sound_mps
 from minimappr.core.localization_uncertainty import (
@@ -280,31 +280,36 @@ def _far_field_range_fit(
             dtype=np.float64,
         )
 
-    solved = least_squares(
-        residuals,
-        x0=np.asarray([initial_range_m], dtype=np.float64),
-        bounds=(np.asarray([0.05], dtype=np.float64), np.asarray([max_range_m], dtype=np.float64)),
-        method="trf",
-        loss="soft_l1",
+    def mean_squared_residual(radius_m: float) -> float:
+        residual = residuals(np.asarray([radius_m], dtype=np.float64))
+        if not np.all(np.isfinite(residual)):
+            return float("inf")
+        return float(np.mean(np.square(residual)))
+
+    solved = minimize_scalar(
+        mean_squared_residual,
+        bounds=(0.05, max_range_m),
+        method="bounded",
+        options={"xatol": 1.0e-4},
     )
     if not solved.success:
         radius = initial_range_m
         radial_std_m = max(initial_range_m, max_range_m * 0.5, 1.0)
     else:
-        radius = float(solved.x[0])
-        rmse_at_solution_s = float(
-            np.sqrt(np.mean(np.square(residuals(np.asarray([radius], dtype=np.float64)))))
-        )
-        radial_covariance_m2 = covariance_from_jacobian(
-            np.asarray(solved.jac, dtype=np.float64).reshape(-1, 1),
-            rmse_at_solution_s,
-            minimum_time_std_s=minimum_time_std_s,
-            minimum_std_m=max(sound_speed * minimum_time_std_s, 1.0),
-        )
+        radius = float(solved.x)
+        derivative_radius_delta_m = min(max(abs(radius) * 0.05, 0.5), max_range_m * 0.25)
+        left_radius_m = max(0.05, radius - derivative_radius_delta_m)
+        right_radius_m = min(max_range_m, radius + derivative_radius_delta_m)
+        derivative_span_m = max(right_radius_m - left_radius_m, EPSILON)
+        left_residual = residuals(np.asarray([left_radius_m], dtype=np.float64))
+        right_residual = residuals(np.asarray([right_radius_m], dtype=np.float64))
+        derivative = (right_residual - left_residual) / derivative_span_m
+        derivative_information = float(np.sum(np.square(derivative)))
+        time_std_s = max(float(np.sqrt(mean_squared_residual(radius))), minimum_time_std_s)
         radial_std_m = (
-            float(np.sqrt(max(float(radial_covariance_m2[0, 0]), EPSILON)))
-            if radial_covariance_m2 is not None
-            else max(initial_range_m, 1.0)
+            time_std_s / math.sqrt(derivative_information)
+            if derivative_information > EPSILON
+            else max(max_range_m * 0.5, 1.0)
         )
     position = centroid + direction * radius
     rmse_s = float(np.sqrt(np.mean(np.square(residuals(np.asarray([radius], dtype=np.float64))))))
@@ -313,6 +318,10 @@ def _far_field_range_fit(
     else:
         range_scale_m = max(abs(radius), 1.0)
         range_observability = float(np.clip(range_scale_m / (range_scale_m + radial_std_m), 0.0, 1.0))
+        sensor_ids = sorted(sensor_positions.keys())
+        aperture_m = _aperture_m(sensor_positions, sensor_ids)
+        geometric_range_observability = aperture_m / max(abs(radius), aperture_m, 1.0)
+        range_observability = float(min(range_observability, geometric_range_observability))
     prior_radius_tolerance_m = max(0.5, initial_range_m * 0.02)
     range_projection_mode = (
         "prior_projected"
@@ -594,9 +603,10 @@ class SRPPhatLocalizer:
             covariance_m2 = near_covariance_m2
             range_observability = near_range_observability
             range_projection_mode = "bounded_grid_boundary" if boundary_clamped else "range_refined"
-            far_selection_margin = 0.5 if boundary_clamped else 0.2
+            minimum_residual_improvement_s = 1.0 / max(sample_rate_hz * max(self.interp, 1), 1)
             if np.isfinite(far_rmse_s) and (
-                not np.isfinite(rmse_s) or far_rmse_s <= (rmse_s * far_selection_margin)
+                not np.isfinite(rmse_s)
+                or far_rmse_s + minimum_residual_improvement_s < rmse_s
             ):
                 scores = far_scores
                 best_idx = far_best_idx

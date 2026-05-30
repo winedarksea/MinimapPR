@@ -45,6 +45,7 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
             localization_band_hz: payload.config.localization_band_hz,
             grid_resolution_m: payload.config.localization_srp_grid_resolution_m,
             search_padding_m: payload.config.localization_search_padding_m,
+            interp_factor: payload.config.gcc_phat_interp_factor,
             far_field_default_range_m: payload.config.localization_far_field_default_range_m,
             far_field_max_range_m: payload.config.localization_far_field_max_range_m,
             ..SrpPhatConfig::default()

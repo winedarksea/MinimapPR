@@ -78,11 +78,21 @@ def gcc_phat(
     max_shift = max(1, min(max_shift, cross_corr.size // 2))
 
     cross_corr = np.concatenate((cross_corr[-max_shift:], cross_corr[: max_shift + 1]))
-    peak_index = int(np.argmax(np.abs(cross_corr)))
-    shift = peak_index - max_shift
+    magnitudes = np.abs(cross_corr)
+    peak_index = int(np.argmax(magnitudes))
+    fractional_peak_offset = 0.0
+    if 0 < peak_index < magnitudes.size - 1:
+        left_peak = float(magnitudes[peak_index - 1])
+        center_peak = float(magnitudes[peak_index])
+        right_peak = float(magnitudes[peak_index + 1])
+        parabola_denominator = left_peak - (2.0 * center_peak) + right_peak
+        if abs(parabola_denominator) > 1e-20:
+            fractional_peak_offset = 0.5 * (left_peak - right_peak) / parabola_denominator
+            fractional_peak_offset = float(np.clip(fractional_peak_offset, -0.5, 0.5))
+    shift = (peak_index + fractional_peak_offset) - max_shift
     tau = shift / float(interp * sample_rate_hz)
 
-    peak = float(np.abs(cross_corr[peak_index]))
+    peak = float(magnitudes[peak_index])
     return tau, peak
 
 
