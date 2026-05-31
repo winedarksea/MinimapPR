@@ -186,6 +186,19 @@ impl<'a> BinaryReader<'a> {
     }
 }
 
+fn read_binary_ingest_version(reader: &mut BinaryReader<'_>) -> Result<u8, String> {
+    let expected_version = match reader.read(4)? {
+        magic if magic == b"MMB1" => 1,
+        magic if magic == b"MMB2" => 2,
+        _ => return Err("invalid binary ingest magic".to_string()),
+    };
+    let version = reader.u8()?;
+    if version != expected_version {
+        return Err(format!("unsupported binary ingest version {version}"));
+    }
+    Ok(version)
+}
+
 pub fn parse_capture_envelope(
     endpoint: &str,
     raw_payload: &[u8],
@@ -197,22 +210,22 @@ pub fn parse_capture_envelope(
     }
 }
 
-/// Extracts node spec fields from the MMB1 binary header as a JSON value compatible
+/// Extracts node spec fields from the binary header as a JSON value compatible
 /// with NodeSpec model_validate. Returns None on parse error (binary is still valid
 /// for audio processing — this is best-effort metadata extraction only).
-pub fn extract_mmb1_node_json(raw_bytes: &[u8]) -> Option<serde_json::Value> {
+pub fn extract_binary_node_json(raw_bytes: &[u8]) -> Option<serde_json::Value> {
     let mut reader = BinaryReader::new(raw_bytes);
-    // Skip magic + version + sort_by_toa + frame_count (7 bytes)
-    reader.read(4).ok()?; // "MMB1"
-    reader.u8().ok()?; // version
+    let version = read_binary_ingest_version(&mut reader).ok()?;
     reader.u8().ok()?; // sort_by_toa
     reader.u16().ok()?; // frame_count
 
     let node_id = reader.string().ok()?;
     let node_type_code = reader.u8().ok()?;
-    let position_x = reader.f32().ok()?;
-    let position_y = reader.f32().ok()?;
-    let position_z = reader.f32().ok()?;
+    let legacy_position_m = if version == 1 {
+        Some((reader.f32().ok()?, reader.f32().ok()?, reader.f32().ok()?))
+    } else {
+        None
+    };
     let has_geo_position = reader.u8().ok()? != 0;
     let position_geo: Option<(f32, f32, f32)> = if has_geo_position {
         let lat = reader.f32().ok()?;
@@ -294,11 +307,13 @@ pub fn extract_mmb1_node_json(raw_bytes: &[u8]) -> Option<serde_json::Value> {
     let mut node_json = serde_json::json!({
         "id": node_id,
         "node_type": node_type_str,
-        "position_m": [position_x, position_y, position_z],
         "sensor_offsets_m": sensor_offsets,
         "capabilities": capabilities,
         "metadata": serde_json::Value::Object(metadata_map),
     });
+    if let Some((position_x, position_y, position_z)) = legacy_position_m {
+        node_json["position_m"] = serde_json::json!([position_x, position_y, position_z]);
+    }
     if let Some((lat, lon, alt)) = position_geo {
         node_json["position_geo"] = serde_json::json!({
             "lat": lat,
@@ -311,13 +326,7 @@ pub fn extract_mmb1_node_json(raw_bytes: &[u8]) -> Option<serde_json::Value> {
 
 fn parse_binary_capture_envelope(raw_payload: &[u8]) -> Result<CaptureEnvelope, String> {
     let mut reader = BinaryReader::new(raw_payload);
-    if reader.read(4)? != b"MMB1" {
-        return Err("invalid binary ingest magic".to_string());
-    }
-    let version = reader.u8()?;
-    if version != 1 {
-        return Err(format!("unsupported binary ingest version {version}"));
-    }
+    let version = read_binary_ingest_version(&mut reader)?;
 
     let _sort_by_toa = reader.u8()?;
     let frame_count = reader.u16()?;
@@ -327,9 +336,11 @@ fn parse_binary_capture_envelope(raw_payload: &[u8]) -> Result<CaptureEnvelope, 
 
     let node_id = reader.string()?;
     let _node_type_code = reader.u8()?;
-    let _position_x = reader.f32()?;
-    let _position_y = reader.f32()?;
-    let _position_z = reader.f32()?;
+    if version == 1 {
+        let _position_x = reader.f32()?;
+        let _position_y = reader.f32()?;
+        let _position_z = reader.f32()?;
+    }
     let has_geo_position = reader.u8()? != 0;
     if has_geo_position {
         let _lat = reader.f32()?;
@@ -399,7 +410,7 @@ fn parse_binary_capture_envelope(raw_payload: &[u8]) -> Result<CaptureEnvelope, 
         orientation_version: None,
         calibration_version: None,
         retention_hint: Some("ephemeral".to_string()),
-        payload_codec: "binary_mmb1_pcm16le".to_string(),
+        payload_codec: format!("binary_mmb{version}_pcm16le"),
         integrity_hash: sha256_hex(raw_payload),
         first_sequence: Some(first_frame.sequence),
         last_sequence,
@@ -661,10 +672,10 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_mmb1_node_json, parse_capture_envelope};
+    use super::{extract_binary_node_json, parse_capture_envelope};
 
     fn push_string(payload: &mut Vec<u8>, value: &str) {
-        payload.push(u8::try_from(value.len()).expect("test string fits in MMB1 length byte"));
+        payload.push(u8::try_from(value.len()).expect("test string fits in length byte"));
         payload.extend_from_slice(value.as_bytes());
     }
 
@@ -672,12 +683,14 @@ mod tests {
         payload.extend_from_slice(&value.to_le_bytes());
     }
 
-    fn push_binary_node_header(payload: &mut Vec<u8>) {
+    fn push_binary_node_header(payload: &mut Vec<u8>, version: u8) {
         push_string(payload, "sirith-tetra-1a15");
         payload.push(1); // sirith_tetra
-        push_f32(payload, 1.0);
-        push_f32(payload, 2.0);
-        push_f32(payload, 3.0);
+        if version == 1 {
+            push_f32(payload, 1.0);
+            push_f32(payload, 2.0);
+            push_f32(payload, 3.0);
+        }
         payload.push(1); // has_geo_position
         push_f32(payload, 44.987);
         push_f32(payload, -93.258);
@@ -696,13 +709,37 @@ mod tests {
         payload.extend_from_slice(&7_u32.to_le_bytes());
     }
 
-    fn binary_mmb1_header_only_payload() -> Vec<u8> {
+    fn push_binary_frame(payload: &mut Vec<u8>) {
+        payload.extend_from_slice(&1_000_u64.to_le_bytes());
+        payload.extend_from_slice(&2_000_u64.to_le_bytes());
+        payload.extend_from_slice(&0_u64.to_le_bytes());
+        payload.extend_from_slice(&2_u64.to_le_bytes());
+        payload.extend_from_slice(&16_000_u32.to_le_bytes());
+        payload.push(1); // channels
+        payload.extend_from_slice(&1_u64.to_le_bytes());
+        payload.extend_from_slice(&1_000_u64.to_le_bytes());
+        payload.extend_from_slice(&1_250_u64.to_le_bytes());
+        payload.push(0); // gps_locked
+        payload.push(0); // no timing diagnostics
+        payload.push(0); // no environment
+        payload.extend_from_slice(&2_u32.to_le_bytes());
+        payload.extend_from_slice(&0_i16.to_le_bytes());
+        payload.extend_from_slice(&32_767_i16.to_le_bytes());
+    }
+
+    fn binary_header_only_payload(version: u8) -> Vec<u8> {
         let mut payload = Vec::new();
-        payload.extend_from_slice(b"MMB1");
-        payload.push(1); // version
+        payload.extend_from_slice(if version == 1 { b"MMB1" } else { b"MMB2" });
+        payload.push(version);
         payload.push(1); // sort_by_toa
         payload.extend_from_slice(&1_u16.to_le_bytes());
-        push_binary_node_header(&mut payload);
+        push_binary_node_header(&mut payload, version);
+        payload
+    }
+
+    fn binary_single_frame_payload(version: u8) -> Vec<u8> {
+        let mut payload = binary_header_only_payload(version);
+        push_binary_frame(&mut payload);
         payload
     }
 
@@ -774,11 +811,12 @@ mod tests {
 
     #[test]
     fn binary_node_extraction_preserves_python_metadata_shape_for_gps_status() {
-        let node = extract_mmb1_node_json(&binary_mmb1_header_only_payload())
+        let node = extract_binary_node_json(&binary_header_only_payload(1))
             .expect("MMB1 node header should extract");
 
         assert_eq!(node["id"], "sirith-tetra-1a15");
         assert_eq!(node["node_type"], "sirith_tetra");
+        assert_eq!(node["position_m"][0].as_f64().unwrap() as f32, 1.0);
         assert_eq!(node["metadata"]["hardware"], "sirith-test-hardware");
         assert_eq!(node["metadata"]["firmware"], "sirith-test-firmware");
         assert_eq!(node["metadata"]["boot_count"], 7);
@@ -786,5 +824,31 @@ mod tests {
         assert_eq!(node["metadata"]["gps"]["position_source"], "gps_nmea_uart");
         assert_eq!(node["capabilities"][1], "gps_optional");
         assert_eq!(node["position_geo"]["lat"].as_f64().unwrap() as f32, 44.987);
+    }
+
+    #[test]
+    fn binary_mmb2_node_extraction_omits_legacy_position_m_but_preserves_geo() {
+        let node = extract_binary_node_json(&binary_header_only_payload(2))
+            .expect("MMB2 node header should extract");
+
+        assert_eq!(node["id"], "sirith-tetra-1a15");
+        assert!(node.get("position_m").is_none());
+        assert_eq!(node["metadata"]["gps"]["position_source"], "gps_nmea_uart");
+        assert_eq!(node["position_geo"]["lon"].as_f64().unwrap() as f32, -93.258);
+    }
+
+    #[test]
+    fn binary_capture_envelope_accepts_mmb2_payloads() {
+        let parsed = parse_capture_envelope(
+            "/api/v1/ingest/binary",
+            &binary_single_frame_payload(2),
+        )
+        .expect("MMB2 binary envelope should parse");
+
+        assert_eq!(parsed.node_id, "sirith-tetra-1a15");
+        assert_eq!(parsed.sample_rate_hz, Some(16_000));
+        assert_eq!(parsed.channel_count, Some(1));
+        assert_eq!(parsed.sample_count, Some(2));
+        assert_eq!(parsed.payload_codec, "binary_mmb2_pcm16le");
     }
 }

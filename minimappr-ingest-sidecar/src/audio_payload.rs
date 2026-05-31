@@ -78,22 +78,29 @@ impl<'a> BinaryReader<'a> {
     }
 }
 
+fn read_binary_ingest_version(reader: &mut BinaryReader<'_>) -> BoxedResult<u8> {
+    let expected_version = match reader.read(4)? {
+        magic if magic == b"MMB1" => 1,
+        magic if magic == b"MMB2" => 2,
+        _ => return Err("invalid binary ingest magic".into()),
+    };
+    let version = reader.u8()?;
+    if version != expected_version {
+        return Err(format!("unsupported binary ingest version {version}").into());
+    }
+    Ok(version)
+}
+
 pub fn decode_audio_payload(raw_payload: &[u8]) -> BoxedResult<DecodedAudioPayload> {
-    if raw_payload.starts_with(b"MMB1") {
-        return decode_binary_mmb1_audio(raw_payload);
+    if raw_payload.starts_with(b"MMB1") || raw_payload.starts_with(b"MMB2") {
+        return decode_binary_audio(raw_payload);
     }
     decode_store_forward_audio(raw_payload)
 }
 
-fn decode_binary_mmb1_audio(raw_payload: &[u8]) -> BoxedResult<DecodedAudioPayload> {
+fn decode_binary_audio(raw_payload: &[u8]) -> BoxedResult<DecodedAudioPayload> {
     let mut reader = BinaryReader::new(raw_payload);
-    if reader.read(4)? != b"MMB1" {
-        return Err("invalid binary ingest magic".into());
-    }
-    let version = reader.u8()?;
-    if version != 1 {
-        return Err(format!("unsupported binary ingest version {version}").into());
-    }
+    let version = read_binary_ingest_version(&mut reader)?;
 
     let _sort_by_toa = reader.u8()?;
     let frame_count = reader.u16()?;
@@ -101,7 +108,7 @@ fn decode_binary_mmb1_audio(raw_payload: &[u8]) -> BoxedResult<DecodedAudioPaylo
         return Err("binary ingest frame count must be between 1 and 2048".into());
     }
 
-    skip_binary_node(&mut reader)?;
+    skip_binary_node(&mut reader, version)?;
 
     let mut channels: Vec<Vec<f32>> = Vec::new();
     let mut sample_rate_hz: Option<u32> = None;
@@ -148,12 +155,14 @@ fn decode_binary_mmb1_audio(raw_payload: &[u8]) -> BoxedResult<DecodedAudioPaylo
     })
 }
 
-fn skip_binary_node(reader: &mut BinaryReader<'_>) -> BoxedResult<()> {
+fn skip_binary_node(reader: &mut BinaryReader<'_>, version: u8) -> BoxedResult<()> {
     let _node_id = reader.string()?;
     let _node_type_code = reader.u8()?;
-    let _position_x = reader.f32()?;
-    let _position_y = reader.f32()?;
-    let _position_z = reader.f32()?;
+    if version == 1 {
+        let _position_x = reader.f32()?;
+        let _position_y = reader.f32()?;
+        let _position_z = reader.f32()?;
+    }
     if reader.u8()? != 0 {
         let _lat = reader.f32()?;
         let _lon = reader.f32()?;
@@ -406,4 +415,86 @@ fn pcm16le_to_f32(bytes: &[u8]) -> Vec<f32> {
         .chunks_exact(2)
         .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]) as f32 / 32768.0)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_audio_payload;
+
+    fn push_string(payload: &mut Vec<u8>, value: &str) {
+        payload.push(u8::try_from(value.len()).expect("test string fits in length byte"));
+        payload.extend_from_slice(value.as_bytes());
+    }
+
+    fn push_f32(payload: &mut Vec<u8>, value: f32) {
+        payload.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn push_binary_node(payload: &mut Vec<u8>, version: u8) {
+        push_string(payload, "sirith-tetra-1a15");
+        payload.push(1); // sirith_tetra
+        if version == 1 {
+            push_f32(payload, 1.0);
+            push_f32(payload, 2.0);
+            push_f32(payload, 3.0);
+        }
+        payload.push(1); // has_geo_position
+        push_f32(payload, 44.987);
+        push_f32(payload, -93.258);
+        push_f32(payload, 281.5);
+        payload.push(1); // sensor_count
+        push_f32(payload, 0.0);
+        push_f32(payload, 0.0);
+        push_f32(payload, 0.0);
+        payload.push(1); // capability_count
+        push_string(payload, "audio");
+        push_string(payload, "sirith-test-hardware");
+        push_string(payload, "sirith-test-firmware");
+        push_string(payload, "fix_3d");
+        push_string(payload, "gps_nmea_uart");
+        payload.extend_from_slice(&7_u32.to_le_bytes());
+    }
+
+    fn push_binary_frame(payload: &mut Vec<u8>) {
+        payload.extend_from_slice(&1_000_u64.to_le_bytes());
+        payload.extend_from_slice(&2_000_u64.to_le_bytes());
+        payload.extend_from_slice(&0_u64.to_le_bytes());
+        payload.extend_from_slice(&2_u64.to_le_bytes());
+        payload.extend_from_slice(&16_000_u32.to_le_bytes());
+        payload.push(1); // channels
+        payload.extend_from_slice(&1_u64.to_le_bytes());
+        payload.extend_from_slice(&1_000_u64.to_le_bytes());
+        payload.extend_from_slice(&1_250_u64.to_le_bytes());
+        payload.push(0); // gps_locked
+        payload.push(0); // no timing diagnostics
+        payload.push(0); // no environment fields
+        payload.extend_from_slice(&2_u32.to_le_bytes());
+        payload.extend_from_slice(&0_i16.to_le_bytes());
+        payload.extend_from_slice(&32_767_i16.to_le_bytes());
+    }
+
+    fn binary_payload(version: u8) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(if version == 1 { b"MMB1" } else { b"MMB2" });
+        payload.push(version);
+        payload.push(0); // sort_by_toa
+        payload.extend_from_slice(&1_u16.to_le_bytes());
+        push_binary_node(&mut payload, version);
+        push_binary_frame(&mut payload);
+        payload
+    }
+
+    #[test]
+    fn decode_audio_payload_accepts_mmb2_binary_ingest() {
+        let decoded = decode_audio_payload(&binary_payload(2)).expect("MMB2 payload should decode");
+
+        assert_eq!(decoded.sample_rate_hz, 16_000);
+        assert_eq!(decoded.channels.len(), 1);
+        assert_eq!(decoded.channels[0].len(), 2);
+        assert_eq!(decoded.start_time_ns, Some(1_000));
+        assert_eq!(decoded.start_sample_index, Some(0));
+        assert_eq!(decoded.end_sample_index, Some(2));
+        assert_eq!(decoded.channels[0][0], 0.0);
+        assert!(decoded.channels[0][1] > 0.99);
+    }
 }

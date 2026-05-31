@@ -548,8 +548,15 @@ class IngestProcessor:
                 # No live GPS fix: hold last Kalman estimate if available, else raw geo fallback.
                 state = self._position_kalman.get(spec.id)
                 local_pos = (state.x, state.y, state.z) if (state and state.initialized) else raw_local
-            normalized = spec.model_copy(update={"position_m": local_pos})
-            return normalized, spec.position_geo
+            geo = self._coordinate_frame.local_to_geo(local_pos)
+            normalized = spec.model_copy(update={"position_m": local_pos, "position_geo": geo})
+            return normalized, geo
+
+        if spec.position_m is not None:
+            local_pos = (float(spec.position_m[0]), float(spec.position_m[1]), float(spec.position_m[2]))
+            geo = self._coordinate_frame.local_to_geo(local_pos)
+            normalized = spec.model_copy(update={"position_m": local_pos, "position_geo": geo})
+            return normalized, geo
 
         raise ValueError("NodeSpec must include position_geo")
 

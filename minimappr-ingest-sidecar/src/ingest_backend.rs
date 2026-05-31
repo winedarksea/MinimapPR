@@ -961,8 +961,8 @@ impl SegmentJournalBackend {
             raw_audio_frame: None,
             raw_audio_bytes: None,
         };
-        let node_value_opt = if raw_bytes.starts_with(b"MMB1") {
-            crate::envelope::extract_mmb1_node_json(raw_bytes)
+        let node_value_opt = if raw_bytes.starts_with(b"MMB1") || raw_bytes.starts_with(b"MMB2") {
+            crate::envelope::extract_binary_node_json(raw_bytes)
         } else {
             serde_json::from_slice::<serde_json::Value>(raw_bytes)
                 .ok()
