@@ -285,6 +285,9 @@ class FusionNode:
             preprocessor_factory=self.preprocessor_factory,
             environment_updater=EnvironmentUpdater(self.environment_provider),
             persist_observations_on_ingest=bool(settings.persist_observations_on_ingest),
+            node_position_kalman_q=settings.node_position_kalman_q,
+            node_position_kalman_r=settings.node_position_kalman_r,
+            node_position_kalman_init_p=settings.node_position_kalman_init_p,
         )
         self._classification_orchestrator = ClassificationOrchestrator(
             classifier=classifier,

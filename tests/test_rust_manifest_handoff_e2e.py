@@ -83,8 +83,8 @@ def _binary_node(*, node_id: str) -> bytes:
     payload = bytearray()
     payload += _binary_string(node_id)
     payload += struct.pack("<B", 0)
-    payload += struct.pack("<fff", 0.0, 0.0, 0.0)
-    payload += struct.pack("<B", 0)
+    payload += struct.pack("<fff", 0.0, 0.0, 0.0)  # positionM (MMB1 wire field)
+    payload += struct.pack("<B", 0)  # has_geo_position = false
     payload += struct.pack("<B", len(SIRITH_TETRA_SENSOR_OFFSETS_M))
     for offset_x, offset_y, offset_z in SIRITH_TETRA_SENSOR_OFFSETS_M:
         payload += struct.pack("<fff", offset_x, offset_y, offset_z)

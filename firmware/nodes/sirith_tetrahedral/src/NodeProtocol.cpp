@@ -166,10 +166,6 @@ bool appendBinaryNode(std::string& out, const NodeDescriptor& node) {
     return false;
   }
   appendLeU8(out, nodeTypeToBinary(node.type));
-  appendLeF32(out, node.positionM.x);
-  appendLeF32(out, node.positionM.y);
-  appendLeF32(out, node.positionM.z);
-
   appendLeU8(out, node.hasGeoPosition ? 1 : 0);
   if (node.hasGeoPosition) {
     appendLeF32(out, node.geoPosition.lat);
@@ -671,8 +667,8 @@ bool buildBinaryStoreForwardPayloadParts(
 
     if (i == 0) {
       part.prefix.reserve(256);
-      part.prefix.append("MMB1", 4);
-      appendLeU8(part.prefix, 1);
+      part.prefix.append("MMB2", 4);
+      appendLeU8(part.prefix, 2);
       appendLeU8(part.prefix, sortByToa ? 1 : 0);
       appendLeU16(part.prefix, static_cast<uint16_t>(frameCount));
       if (!appendBinaryNode(part.prefix, node)) {

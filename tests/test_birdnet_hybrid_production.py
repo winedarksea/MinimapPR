@@ -336,8 +336,8 @@ def _binary_node(*, node_id: str) -> bytes:
     payload = bytearray()
     payload += _binary_string(node_id)
     payload += struct.pack("<B", 0)
-    payload += struct.pack("<fff", 0.0, 0.0, 0.0)
-    payload += struct.pack("<B", 0)
+    payload += struct.pack("<B", 1)  # has_geo_position
+    payload += struct.pack("<fff", 44.987, -93.258, 0.0)  # fallback geo
     payload += struct.pack("<B", len(SIRITH_TETRA_SENSOR_OFFSETS_M))
     for offset_x, offset_y, offset_z in SIRITH_TETRA_SENSOR_OFFSETS_M:
         payload += struct.pack("<fff", offset_x, offset_y, offset_z)
@@ -416,8 +416,8 @@ def _binary_frame(
 
 def _binary_ingest_payload(*, node_id: str, frames: list[bytes]) -> bytes:
     payload = bytearray()
-    payload += b"MMB1"
-    payload += struct.pack("<BBH", 1, 0, len(frames))
+    payload += b"MMB2"
+    payload += struct.pack("<BBH", 2, 0, len(frames))
     payload += _binary_node(node_id=node_id)
     for frame in frames:
         payload += frame

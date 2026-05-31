@@ -32,8 +32,8 @@ def _binary_node(*, node_id: str = "binary-node-1", sensor_count: int = 1) -> by
     payload = bytearray()
     payload += _binary_string(node_id)
     payload += struct.pack("<B", 0)
-    payload += struct.pack("<fff", 0.0, 0.0, 0.0)
-    payload += struct.pack("<B", 0)
+    payload += struct.pack("<B", 1)  # has_geo_position
+    payload += struct.pack("<fff", 44.987, -93.258, 0.0)  # fallback geo
     payload += struct.pack("<B", sensor_count)
     for _ in range(sensor_count):
         payload += struct.pack("<fff", 0.0, 0.0, 0.0)
@@ -111,8 +111,8 @@ def _binary_ingest_payload(
     sensor_count: int = 1,
 ) -> bytes:
     payload = bytearray()
-    payload += b"MMB1"
-    payload += struct.pack("<BBH", 1, 1 if sort_by_toa else 0, len(frames))
+    payload += b"MMB2"
+    payload += struct.pack("<BBH", 2, 1 if sort_by_toa else 0, len(frames))
     payload += _binary_node(node_id=node_id, sensor_count=sensor_count)
     for frame in frames:
         payload += frame

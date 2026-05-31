@@ -53,6 +53,18 @@ class EnvironmentCounts:
 
 
 @dataclass(slots=True)
+class _NodePositionKalman:
+    """Per-node 1-D Kalman state for each ENU axis (x=east, y=north, z=up)."""
+    x: float = 0.0
+    y: float = 0.0
+    z: float = 0.0
+    px: float = 100.0
+    py: float = 100.0
+    pz: float = 100.0
+    initialized: bool = False
+
+
+@dataclass(slots=True)
 class IngestResult:
     """Result of processing a single ingest frame."""
 
@@ -114,6 +126,9 @@ class IngestProcessor:
         preprocessor_factory: NodePreprocessorFactory,
         environment_updater: EnvironmentUpdater | None = None,
         persist_observations_on_ingest: bool = True,
+        node_position_kalman_q: float = 0.5,
+        node_position_kalman_r: float = 25.0,
+        node_position_kalman_init_p: float = 100.0,
     ) -> None:
         self._localization_config = localization_config
         self._fusion_config = fusion_config
@@ -124,11 +139,15 @@ class IngestProcessor:
         self._preprocessor_factory = preprocessor_factory
         self._environment_updater = environment_updater
         self._persist_observations_on_ingest = persist_observations_on_ingest
+        self._kalman_q = node_position_kalman_q
+        self._kalman_r = node_position_kalman_r
+        self._kalman_init_p = node_position_kalman_init_p
 
         self._last_trigger_ns = 0
         self._accepted_frame_count = 0
         self._last_audio_summary_publish_ns_by_node: dict[str, int] = {}
         self._preprocess_locks_by_node: dict[str, asyncio.Lock] = {}
+        self._position_kalman: dict[str, _NodePositionKalman] = {}
 
     @property
     def last_trigger_ns(self) -> int:
@@ -489,6 +508,12 @@ class IngestProcessor:
             updated_ns=now_ns,
         )
 
+    @staticmethod
+    def _kalman_1d(x: float, p: float, z: float, q: float, r: float) -> tuple[float, float]:
+        p += q
+        k = p / (p + r)
+        return x + k * (z - x), p * (1.0 - k)
+
     def _normalize_node_spec(self, spec: NodeSpec) -> tuple[NodeSpec, GeoPoint]:
         gps_metadata = spec.metadata.get("gps") if isinstance(spec.metadata, dict) else None
         gps_position_source = (
@@ -501,23 +526,38 @@ class IngestProcessor:
             and gps_position_source.startswith("gps")
             and gps_position_source != "gps_fallback"
         )
-        if spec.position_geo is not None and (spec.position_m is None or has_trusted_gps_position):
-            local_pos = self._coordinate_frame.geo_to_local(spec.position_geo)
+
+        if spec.position_geo is not None:
+            raw_local = self._coordinate_frame.geo_to_local(spec.position_geo)
+            if has_trusted_gps_position:
+                state = self._position_kalman.get(spec.id)
+                if state is None or not state.initialized:
+                    state = _NodePositionKalman(
+                        x=raw_local[0], y=raw_local[1], z=raw_local[2],
+                        px=self._kalman_init_p, py=self._kalman_init_p, pz=self._kalman_init_p,
+                        initialized=True,
+                    )
+                else:
+                    nx, px = self._kalman_1d(state.x, state.px, raw_local[0], self._kalman_q, self._kalman_r)
+                    ny, py = self._kalman_1d(state.y, state.py, raw_local[1], self._kalman_q, self._kalman_r)
+                    nz, pz = self._kalman_1d(state.z, state.pz, raw_local[2], self._kalman_q, self._kalman_r)
+                    state = _NodePositionKalman(x=nx, y=ny, z=nz, px=px, py=py, pz=pz, initialized=True)
+                self._position_kalman[spec.id] = state
+                local_pos: tuple[float, float, float] = (state.x, state.y, state.z)
+            else:
+                # No live GPS fix: hold last Kalman estimate if available, else raw geo fallback.
+                state = self._position_kalman.get(spec.id)
+                local_pos = (state.x, state.y, state.z) if (state and state.initialized) else raw_local
             normalized = spec.model_copy(update={"position_m": local_pos})
             return normalized, spec.position_geo
 
         if spec.position_m is not None:
             local_pos = spec.position_m
-            geo = spec.position_geo or self._coordinate_frame.local_to_geo(local_pos)
+            geo = self._coordinate_frame.local_to_geo(local_pos)
             normalized = spec.model_copy(update={"position_m": local_pos, "position_geo": geo})
             return normalized, geo
 
-        if spec.position_geo is None:
-            raise ValueError("NodeSpec must include position_m or position_geo")
-
-        local_pos = self._coordinate_frame.geo_to_local(spec.position_geo)
-        normalized = spec.model_copy(update={"position_m": local_pos})
-        return normalized, spec.position_geo
+        raise ValueError("NodeSpec must include position_m or position_geo")
 
 
 # (Supporting dataclasses are defined at the top of the module.)

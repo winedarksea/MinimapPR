@@ -493,6 +493,14 @@ class Settings:
     cleanup_interval_seconds: float = 15.0
     node_degraded_after_seconds: float = 15.0
     node_offline_after_seconds: float = 45.0
+    # Per-node GPS position Kalman filter (1-D applied independently to each ENU axis).
+    # Q: process noise (m²/frame). At ~4 ingest frames/s, 0.5 m²/frame → ~1 m²/s uncertainty
+    #    growth; time constant ≈ R/Q ≈ 50 frames ≈ 12 s. Raise Q to track deliberate moves faster.
+    # R: measurement noise (m²). Consumer GNSS ~5 m 1-sigma → R = 25.
+    # init_p: initial variance (m²). First fix snaps to raw measurement, subsequent frames blend.
+    node_position_kalman_q: float = 0.5
+    node_position_kalman_r: float = 25.0
+    node_position_kalman_init_p: float = 100.0
     event_stale_seconds: float = 30.0
     retention_ephemeral_seconds: int = 900
     retention_short_seconds: int = 86_400
