@@ -1068,6 +1068,203 @@ async fn worker_publishes_omni_render_for_non_tetrahedral_channel_count() {
 }
 
 #[tokio::test]
+async fn clustered_single_channel_manifests_share_a_tetrahedral_localization_buffer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest_store = ManifestStore::new(tmp.path());
+    manifest_store.ensure_initialized().await.unwrap();
+    let derived_cache = DerivedCache::new(
+        tmp.path(),
+        DerivedCacheConfig {
+            budget_bytes: 16_777_216,
+            admission_reserve_bytes: 0,
+        },
+    );
+    derived_cache.ensure_initialized().await.unwrap();
+
+    let state: SharedDspState = Arc::new(RwLock::new(Default::default()));
+    let event_publisher = DspEventPublisher::new(state.clone(), 64, 64, 50);
+    let mut dsp_result_rx = event_publisher.subscribe();
+    let mut worker = DspWorker::new(
+        manifest_store.clone(),
+        derived_cache,
+        DspWorkerConfig {
+            classifier_render_min_interval_seconds: 0.0,
+            localization_cadence_ms: 0,
+            trigger_cooldown_seconds: 0.0,
+            localization_rms_gate: 0.0,
+            ..DspWorkerConfig::default()
+        },
+        state.clone(),
+    )
+    .with_dsp_event_publisher(event_publisher);
+
+    let cluster_sensor_positions = vec![
+        ("node-a:ch0".to_string(), [0.0, 0.0, 2.0]),
+        ("node-b:ch0".to_string(), [2.0, 0.0, 2.0]),
+        ("node-c:ch0".to_string(), [2.0, 2.0, 2.0]),
+        ("node-d:ch0".to_string(), [0.0, 2.0, 2.0]),
+    ];
+    for (index, node_id) in ["node-a", "node-b", "node-c", "node-d"].iter().enumerate() {
+        let payload = store_forward_payload_with_channel_count(
+            1_000_000_000,
+            0,
+            index as u64 + 1,
+            1,
+        );
+        let manifest = raw_manifest_for_payload_with_metadata(
+            tmp.path(),
+            &format!("manifest-clustered-{index}"),
+            &format!("seg-clustered-{index}"),
+            &format!("{node_id}__audio_main__{index:04x}"),
+            payload,
+            Some("cluster-square".to_string()),
+            Some(cluster_sensor_positions.clone()),
+        )
+        .await;
+        worker.process_one(manifest, 1).await;
+    }
+
+    let events = drain_published_manifests(&mut dsp_result_rx);
+    let clustered_localizations: Vec<_> = events
+        .iter()
+        .filter(|manifest| {
+            manifest.manifest_type == "localization_result"
+                && manifest.cluster_id.as_deref() == Some("cluster-square")
+                && manifest.localization.as_ref().is_some_and(|payload| payload.resolved_algorithm == "srp_phat")
+        })
+        .collect();
+
+    assert!(
+        !clustered_localizations.is_empty(),
+        "expected a real SRP localization from four clustered single-channel manifests"
+    );
+    let localization_manifest = clustered_localizations
+        .last()
+        .expect("clustered localization manifest");
+    let localization = localization_manifest
+        .localization
+        .as_ref()
+        .expect("clustered localization payload");
+    assert_eq!(localization.pair_tdoas.len(), 6);
+    assert_eq!(
+        localization_manifest
+            .cluster_sensor_positions
+            .as_ref()
+            .map(Vec::len),
+        Some(4)
+    );
+
+    let state = state.read().await;
+    assert!(state.total_localization_results >= 1);
+}
+
+#[tokio::test]
+async fn mixed_clustered_tetrahedral_and_point_manifests_share_one_localization_buffer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest_store = ManifestStore::new(tmp.path());
+    manifest_store.ensure_initialized().await.unwrap();
+    let derived_cache = DerivedCache::new(
+        tmp.path(),
+        DerivedCacheConfig {
+            budget_bytes: 16_777_216,
+            admission_reserve_bytes: 0,
+        },
+    );
+    derived_cache.ensure_initialized().await.unwrap();
+
+    let state: SharedDspState = Arc::new(RwLock::new(Default::default()));
+    let event_publisher = DspEventPublisher::new(state.clone(), 64, 64, 50);
+    let mut dsp_result_rx = event_publisher.subscribe();
+    let mut worker = DspWorker::new(
+        manifest_store.clone(),
+        derived_cache,
+        DspWorkerConfig {
+            classifier_render_min_interval_seconds: 0.0,
+            localization_cadence_ms: 0,
+            trigger_cooldown_seconds: 0.0,
+            localization_rms_gate: 0.0,
+            ..DspWorkerConfig::default()
+        },
+        state.clone(),
+    )
+    .with_dsp_event_publisher(event_publisher);
+
+    let cluster_sensor_positions = vec![
+        ("tetra-node:ch0".to_string(), [0.0, 0.0, 2.0]),
+        ("tetra-node:ch1".to_string(), [2.0, 0.0, 2.0]),
+        ("tetra-node:ch2".to_string(), [2.0, 2.0, 2.0]),
+        ("tetra-node:ch3".to_string(), [0.0, 2.0, 2.0]),
+        ("point-node:ch0".to_string(), [1.0, 1.0, 3.5]),
+    ];
+
+    let tetra_payload = store_forward_payload_with_channel_count(1_000_000_000, 0, 1, 4);
+    let tetra_manifest = raw_manifest_for_payload_with_metadata(
+        tmp.path(),
+        "manifest-mixed-tetra",
+        "seg-mixed-tetra",
+        "tetra-node__audio_main__0001",
+        tetra_payload,
+        Some("cluster-mixed".to_string()),
+        Some(cluster_sensor_positions.clone()),
+    )
+    .await;
+    worker.process_one(tetra_manifest, 1).await;
+
+    let point_payload = store_forward_payload_with_channel_count(1_000_000_000, 0, 2, 1);
+    let point_manifest = raw_manifest_for_payload_with_metadata(
+        tmp.path(),
+        "manifest-mixed-point",
+        "seg-mixed-point",
+        "point-node__audio_main__0002",
+        point_payload,
+        Some("cluster-mixed".to_string()),
+        Some(cluster_sensor_positions.clone()),
+    )
+    .await;
+    worker.process_one(point_manifest, 1).await;
+
+    let events = drain_published_manifests(&mut dsp_result_rx);
+    let mixed_cluster_localizations: Vec<_> = events
+        .iter()
+        .filter(|manifest| {
+            manifest.manifest_type == "localization_result"
+                && manifest.cluster_id.as_deref() == Some("cluster-mixed")
+                && manifest.localization.as_ref().is_some_and(|payload| payload.resolved_algorithm == "srp_phat")
+        })
+        .collect();
+
+    assert!(
+        !mixed_cluster_localizations.is_empty(),
+        "expected a real SRP localization from a mixed tetrahedral-plus-point cluster"
+    );
+    let localization_manifest = mixed_cluster_localizations
+        .iter()
+        .copied()
+        .find(|manifest| {
+            manifest
+                .localization
+                .as_ref()
+                .is_some_and(|payload| payload.pair_tdoas.len() == 10)
+        })
+        .expect("mixed cluster localization manifest with five-sensor pair diagnostics");
+    let localization = localization_manifest
+        .localization
+        .as_ref()
+        .expect("mixed cluster localization payload");
+    assert_eq!(localization.pair_tdoas.len(), 10);
+    assert_eq!(
+        localization_manifest
+            .cluster_sensor_positions
+            .as_ref()
+            .map(Vec::len),
+        Some(5)
+    );
+
+    let state = state.read().await;
+    assert!(state.total_localization_results >= 1);
+}
+
+#[tokio::test]
 async fn consume_manifest_standalone_skips_non_persisted_channel_manifests() {
     let tmp = tempfile::tempdir().unwrap();
     let manifest_store = ManifestStore::new(tmp.path());
@@ -1106,6 +1303,27 @@ async fn raw_manifest_for_payload(
     segment_id: &str,
     payload: String,
 ) -> DspManifest {
+    raw_manifest_for_payload_with_metadata(
+        root,
+        manifest_id,
+        segment_id,
+        "sirith-test__audio_main__abcd",
+        payload,
+        None,
+        None,
+    )
+    .await
+}
+
+async fn raw_manifest_for_payload_with_metadata(
+    root: &std::path::Path,
+    manifest_id: &str,
+    segment_id: &str,
+    stream_key: &str,
+    payload: String,
+    cluster_id: Option<String>,
+    cluster_sensor_positions: Option<Vec<(String, [f32; 3])>>,
+) -> DspManifest {
     let now_ns = system_now_ns();
     let payload_bytes = payload.into_bytes();
     let payload_length_bytes = payload_bytes.len() as u64;
@@ -1116,7 +1334,7 @@ async fn raw_manifest_for_payload(
         source_handles: vec![JournalPayloadHandle {
             journal_epoch: 1,
             segment_id: segment_id.to_string(),
-            stream_key: "sirith-test__audio_main__abcd".to_string(),
+            stream_key: stream_key.to_string(),
             payload_offset_bytes: 0,
             payload_length_bytes,
             toa_ns: None,
@@ -1135,8 +1353,8 @@ async fn raw_manifest_for_payload(
         promotion_ready: false,
         env_samples: None,
         node_context: None,
-        cluster_id: None,
-        cluster_sensor_positions: None,
+        cluster_id,
+        cluster_sensor_positions,
         raw_payload: Some(payload_bytes),
         raw_render_bytes: None,
         raw_audio_frame: None,

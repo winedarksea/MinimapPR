@@ -33,6 +33,7 @@ from minimappr.core.tracking import TrackManager
 from minimappr.core.zones import ZoneMatcher
 from minimappr.models import GeoPoint, NodeSpec, NodeType
 from minimappr.storage.db import Storage
+from minimappr.utils.audio import encode_pcm16le_b64
 from tests.helpers import SIRITH_TETRA_SENSOR_OFFSETS_M, prepend_noise_padding, synthesize_delayed_array_channels
 
 
@@ -291,6 +292,30 @@ def _wait_for_manifest_pair(spool_dir: Path, *, timeout_s: float = 15.0) -> list
     )
 
 
+def _wait_for_live_dsp_results(
+    port: int,
+    *,
+    predicate,
+    timeout_s: float = 15.0,
+    description: str,
+) -> list[dict]:
+    deadline = time.monotonic() + timeout_s
+    last_manifest_types: list[str] = []
+    while time.monotonic() < deadline:
+        payloads = _http_json(port, "/api/v1/dsp/results?limit=200")
+        assert isinstance(payloads, list)
+        last_manifest_types = [str(payload.get("manifest_type")) for payload in payloads]
+        if predicate(payloads):
+            return payloads
+        time.sleep(0.05)
+    status = _http_json(port, "/api/v1/dsp/status")
+    raise AssertionError(
+        f"Timed out waiting for live Rust DSP results matching {description}. "
+        f"Last manifest types: {last_manifest_types}. "
+        f"Status snapshot: {status}"
+    )
+
+
 def _write_fake_sidecar_classifier_helper(tmp_path: Path) -> Path:
     helper_path = tmp_path / "fake_sidecar_classifier_helper.py"
     helper_path.write_text(
@@ -445,6 +470,85 @@ def _synthesized_localizable_channels(sample_rate_hz: int) -> np.ndarray:
         sample_rate_hz,
         source_position_m=TEST_SOURCE_POSITION_M,
     )
+
+
+def _synthesized_mixed_cluster_channels(sample_rate_hz: int) -> tuple[np.ndarray, np.ndarray]:
+    duration_seconds = 0.8
+    timestamps_s = np.linspace(0.0, duration_seconds, int(round(duration_seconds * sample_rate_hz)), endpoint=False)
+    chirp = np.sin(2.0 * np.pi * (700.0 * timestamps_s + 850.0 * np.square(timestamps_s)))
+    tone = 0.35 * np.sin(2.0 * np.pi * 1700.0 * timestamps_s)
+    mono_signal = (0.65 * chirp + tone).astype(np.float32)
+    mono_signal *= np.hanning(mono_signal.size).astype(np.float32)
+    padded_signal = prepend_noise_padding(
+        mono_signal,
+        pad_samples=max(1, int(round(0.25 * sample_rate_hz))),
+        noise_rms=0.002,
+        seed=sample_rate_hz + 101,
+    )
+    tetra_channels = synthesize_delayed_array_channels(
+        padded_signal,
+        sample_rate_hz,
+        source_position_m=TEST_SOURCE_POSITION_M,
+    )
+    point_channel = synthesize_delayed_array_channels(
+        padded_signal,
+        sample_rate_hz,
+        source_position_m=TEST_SOURCE_POSITION_M,
+        sensor_offsets_m=((0.8, 0.6, 0.4),),
+    )
+    return tetra_channels, point_channel
+
+
+def _store_forward_payload(
+    *,
+    node_id: str,
+    node_type: str,
+    sensor_offsets_m: list[list[float]],
+    channels: np.ndarray,
+    start_time_ns: int,
+    sequence: int,
+    cluster_id: str,
+    cluster_sensor_positions: dict[str, list[float]],
+    sample_rate_hz: int,
+) -> dict:
+    samples_per_channel = int(channels.shape[1])
+    end_time_ns = start_time_ns + int(round(samples_per_channel / sample_rate_hz * 1_000_000_000))
+    return {
+        "node": {
+            "id": node_id,
+            "node_type": node_type,
+            "position_m": [0.0, 0.0, 0.0],
+            "sensor_offsets_m": sensor_offsets_m,
+            "capabilities": ["audio", "array_localization"],
+            "metadata": {},
+            "properties": {
+                "cluster_sensor_positions": cluster_sensor_positions,
+            },
+            "cluster_id": cluster_id,
+        },
+        "sort_by_toa": True,
+        "buffered_frames": [
+            {
+                "frame": {
+                    "start_time_ns": start_time_ns,
+                    "utc_start_ns": start_time_ns,
+                    "utc_end_ns": end_time_ns,
+                    "start_sample_index": 0,
+                    "end_sample_index": samples_per_channel,
+                    "sample_rate_hz": sample_rate_hz,
+                    "channels": int(channels.shape[0]),
+                    "encoding": "pcm16le",
+                    "samples_per_channel": samples_per_channel,
+                    "samples_b64": encode_pcm16le_b64(channels),
+                    "sequence": sequence,
+                    "time_quality": "gps_locked",
+                    "toa_ns": start_time_ns,
+                    "tor_ns": start_time_ns + 1_000_000,
+                    "source_type": "raw_sensor",
+                }
+            }
+        ],
+    }
 
 
 @pytest.mark.asyncio
@@ -757,3 +861,108 @@ def test_http_app_in_production_mode_consumes_memory_only_rust_sidecar(monkeypat
         streams_dir = journal_dir / "streams"
         assert not list(streams_dir.rglob("*.index.jsonl"))
         assert not list(streams_dir.rglob("*.bin"))
+
+
+def test_live_rust_sidecar_localizes_mixed_cluster_store_forward_payloads(tmp_path: Path) -> None:
+    sample_rate_hz = 16_000
+    start_time_ns = time.time_ns()
+    tetra_channels, point_channel = _synthesized_mixed_cluster_channels(sample_rate_hz)
+    cluster_id = "cluster-mixed-live"
+    cluster_sensor_positions = {
+        "tetra-node:ch0": [float(x) for x in SIRITH_TETRA_SENSOR_OFFSETS_M[0]],
+        "tetra-node:ch1": [float(x) for x in SIRITH_TETRA_SENSOR_OFFSETS_M[1]],
+        "tetra-node:ch2": [float(x) for x in SIRITH_TETRA_SENSOR_OFFSETS_M[2]],
+        "tetra-node:ch3": [float(x) for x in SIRITH_TETRA_SENSOR_OFFSETS_M[3]],
+        "point-node:ch0": [0.8, 0.6, 0.4],
+    }
+
+    tetra_payload = _store_forward_payload(
+        node_id="tetra-node",
+        node_type="sirith_tetra",
+        sensor_offsets_m=[[float(axis) for axis in offset] for offset in SIRITH_TETRA_SENSOR_OFFSETS_M],
+        channels=tetra_channels,
+        start_time_ns=start_time_ns,
+        sequence=1,
+        cluster_id=cluster_id,
+        cluster_sensor_positions=cluster_sensor_positions,
+        sample_rate_hz=sample_rate_hz,
+    )
+    point_payload = _store_forward_payload(
+        node_id="point-node",
+        node_type="point",
+        sensor_offsets_m=[[0.0, 0.0, 0.0]],
+        channels=point_channel,
+        start_time_ns=start_time_ns,
+        sequence=2,
+        cluster_id=cluster_id,
+        cluster_sensor_positions=cluster_sensor_positions,
+        sample_rate_hz=sample_rate_hz,
+    )
+
+    with _running_rust_sidecar(
+        tmp_path,
+        extra_env={
+            "MINIMAPPR_CLASSIFICATION_WINDOW_SECONDS": "15.0",
+            "MINIMAPPR_CLASSIFIER_RENDER_MIN_INTERVAL_SECONDS": "0.0",
+            "MINIMAPPR_DSP_LOCALIZATION_CADENCE_MS": "0",
+        },
+    ) as (port, spool_dir):
+        tetra_response = _http_json(
+            port,
+            "/api/v1/ingest/store-forward",
+            method="POST",
+            body=json.dumps(tetra_payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        assert tetra_response["accepted"] is True
+
+        point_response = _http_json(
+            port,
+            "/api/v1/ingest/store-forward",
+            method="POST",
+            body=json.dumps(point_payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        assert point_response["accepted"] is True
+
+        manifests = _wait_for_live_dsp_results(
+            port,
+            description="mixed-cluster localization and classifier render",
+            predicate=lambda payloads: any(
+                payload.get("manifest_type") == "localization_result"
+                and payload.get("cluster_id") == cluster_id
+                and isinstance(payload.get("localization"), dict)
+                and len(payload["localization"].get("pair_tdoas") or []) == 10
+                and str(payload["localization"].get("resolved_algorithm")) == "srp_phat"
+                for payload in payloads
+            ) and any(
+                payload.get("manifest_type") == "classifier_render"
+                and payload.get("cluster_id") == cluster_id
+                and isinstance(payload.get("classifier_render"), dict)
+                and int(payload["classifier_render"].get("source_channel_count") or 0) == 5
+                for payload in payloads
+            ),
+        )
+
+        localization_manifest = next(
+            payload
+            for payload in manifests
+            if payload.get("manifest_type") == "localization_result"
+            and payload.get("cluster_id") == cluster_id
+            and isinstance(payload.get("localization"), dict)
+            and len(payload["localization"].get("pair_tdoas") or []) == 10
+        )
+        classifier_manifest = next(
+            payload
+            for payload in manifests
+            if payload.get("manifest_type") == "classifier_render"
+            and payload.get("cluster_id") == cluster_id
+            and isinstance(payload.get("classifier_render"), dict)
+            and int(payload["classifier_render"].get("source_channel_count") or 0) == 5
+        )
+
+        assert localization_manifest["cluster_sensor_positions"] is not None
+        assert len(localization_manifest["cluster_sensor_positions"]) == 5
+        assert localization_manifest["localization"]["resolved_algorithm"] == "srp_phat"
+        assert len(localization_manifest["localization"]["pair_tdoas"]) == 10
+        assert classifier_manifest["classifier_render"]["source_channel_count"] == 5

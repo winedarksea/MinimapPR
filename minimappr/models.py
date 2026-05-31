@@ -278,6 +278,12 @@ class ContributorSummary(BaseModel):
     last_contributed_ns: int | None = None
 
 
+class DetectionReviewState(str, Enum):
+    UNREVIEWED = "unreviewed"
+    CONFIRMED = "confirmed"
+    REJECTED = "rejected"
+
+
 class DetectionEvent(BaseModel):
     id: str
     event_id: str | None = None
@@ -310,6 +316,13 @@ class DetectionEvent(BaseModel):
     tdoa_s: dict[str, float] = Field(default_factory=dict)
     classifier_scores: dict[str, float] = Field(default_factory=dict)
     feature_summary: dict[str, Any] = Field(default_factory=dict)
+    review_state: DetectionReviewState = DetectionReviewState.UNREVIEWED
+    review_label_id: LabelId | None = None
+    review_label: str | None = None
+    review_label_category: str | None = None
+    review_notes: str | None = None
+    review_updated_ns: int | None = None
+    promote_to_training: bool = False
     retention_tier: RetentionTier = RetentionTier.SHORT
     snippet_path: str | None = None
     contributors: list[ContributorSummary] = Field(default_factory=list)
@@ -325,7 +338,60 @@ class DetectionEvent(BaseModel):
         # Normalize legacy "ntp_sync" to canonical "ntp_disciplined"
         if self.time_quality == TimeQuality.NTP_SYNC:
             self.time_quality = TimeQuality.NTP_DISCIPLINED
+        if self.review_label is not None and self.review_label_category is None:
+            self.review_label_category = self.label_category
         return self
+
+
+class DetectionReviewUpdateRequest(BaseModel):
+    review_state: DetectionReviewState | None = None
+    review_label: str | None = Field(default=None, min_length=1)
+    review_label_category: str | None = Field(default=None, min_length=1)
+    review_notes: str | None = Field(default=None, max_length=4000)
+    promote_to_training: bool | None = None
+
+    @model_validator(mode="after")
+    def _normalize(self) -> "DetectionReviewUpdateRequest":
+        if self.review_label is not None:
+            self.review_label = self.review_label.strip() or None
+        if self.review_label_category is not None:
+            self.review_label_category = self.review_label_category.strip() or None
+        if self.review_notes is not None:
+            stripped_notes = self.review_notes.strip()
+            self.review_notes = stripped_notes or None
+        if self.review_label_category is not None and self.review_label is None:
+            raise ValueError("review_label_category requires review_label")
+        return self
+
+
+class ReviewedDetectionExportItem(BaseModel):
+    detection_id: str
+    event_id: str
+    timestamp_ns: int
+    observed_at_iso: str
+    track_id: str | None = None
+    source_node_id: str | None = None
+    reporting_modality: Literal["localized", "omni"]
+    position_geo: GeoPoint | None = None
+    original_label: str
+    original_label_category: str = "unknown"
+    reviewed_label: str | None = None
+    reviewed_label_category: str | None = None
+    effective_label: str
+    effective_label_category: str
+    review_state: DetectionReviewState
+    review_notes: str | None = None
+    promote_to_training: bool = False
+    audio_url: str | None = None
+    has_audio: bool = False
+
+
+class ReviewedDetectionExportPackage(BaseModel):
+    export_type: Literal["ebird_review_package"] = "ebird_review_package"
+    generated_at_ns: int
+    generated_at_iso: str
+    detection_count: int = Field(ge=0)
+    detections: list[ReviewedDetectionExportItem] = Field(default_factory=list)
 
 
 class TrackStatus(str, Enum):

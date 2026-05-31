@@ -185,6 +185,49 @@ export MINIMAPPR_RUNTIME_PROFILE=birdnet_hybrid_production
 
 That preset uses direct BirdNET, keeps omnidirectional classification on a 30 s reporting window, runs SRP-PHAT localization on a low-frequency band for the sirith tetrahedral array, and emits one canonical detection per label/reporting window with localized detections preferred over omni-only detections.
 
+## Detection Review And Export Workflow
+
+The current v1 bird workflow is review-driven rather than classifier-final:
+
+1. Inspect detections with `GET /api/v1/detections` or `GET /api/v1/detections/{detection_id}`.
+2. Review a detection with `PATCH /api/v1/detections/{detection_id}/review`.
+3. Export confirmed bird detections with `GET /api/v1/exports/ebird`.
+
+The review mutation supports:
+
+- `review_state`: `unreviewed`, `confirmed`, or `rejected`
+- `review_label`: optional corrected label override
+- `review_label_category`: optional corrected category
+- `review_notes`: free-text operator notes
+- `promote_to_training`: optional training-promotion flag, allowed only for confirmed reviews
+
+The eBird-oriented export surface currently supports:
+
+- `format=json` for a typed review package
+- `format=csv` for spreadsheet-friendly export
+- linked detection-audio download URLs when a snippet exists
+
+Example review call:
+
+```bash
+curl -X PATCH "http://127.0.0.1:8080/api/v1/detections/det-123/review" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "review_state": "confirmed",
+    "review_label": "song_sparrow",
+    "review_label_category": "bird",
+    "review_notes": "confirmed by operator",
+    "promote_to_training": true
+  }'
+```
+
+Example export calls:
+
+```bash
+curl "http://127.0.0.1:8080/api/v1/exports/ebird?format=json&since_hours=24"
+curl "http://127.0.0.1:8080/api/v1/exports/ebird?format=csv&since_hours=24" --output ebird_export.csv
+```
+
 ## API Endpoints
 - `GET /health`
 - `GET /api/v1/config`
@@ -193,12 +236,14 @@ That preset uses direct BirdNET, keeps omnidirectional classification on a 30 s 
 - `POST /api/v1/ingest/frame`
 - `GET /api/v1/nodes`
 - `GET /api/v1/detections?limit=100`
+- `PATCH /api/v1/detections/{detection_id}/review`
 - `GET /api/v1/tracks?limit=200&include_standby=false`
 - `GET /api/v1/cop/status`
 - `GET /api/v1/alerts?limit=100`
 - `GET /api/v1/environment?limit=500&node_id=...`
 - `GET /api/v1/environment/current?x=...&y=...&z=...`
 - `GET /api/v1/detections/{detection_id}/audio`
+- `GET /api/v1/exports/ebird?format=json|csv&limit=500&since_hours=24`
 - `GET /api/v1/nodes/{node_id}/audio/recent?seconds=10`
 - `POST /api/v1/federation/heartbeat` (peer-to-peer)
 - `POST /api/v1/federation/snapshot` (peer-to-peer)

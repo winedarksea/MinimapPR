@@ -39,8 +39,11 @@ pub(crate) struct ComputeMathResult {
 /// `run_io`, which is spawned onto the Tokio runtime after this returns.
 pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
     let localization_evaluation = if payload.run_srp && payload.channel_states.len() >= 4 {
-        let windows: [Vec<f32>; 4] =
-            core::array::from_fn(|ch| payload.channel_states[ch].window.clone());
+        let windows = payload
+            .channel_states
+            .iter()
+            .map(|state| state.window.clone())
+            .collect::<Vec<_>>();
         let srp_config = SrpPhatConfig {
             localization_band_hz: payload.config.localization_band_hz,
             grid_resolution_m: payload.config.localization_srp_grid_resolution_m,
@@ -51,7 +54,7 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
             ..SrpPhatConfig::default()
         };
         estimate_tetrahedral_steering(
-            &windows,
+            windows.as_slice(),
             &payload.active_channels,
             payload.mic_positions_m.as_slice(),
             payload.sr,

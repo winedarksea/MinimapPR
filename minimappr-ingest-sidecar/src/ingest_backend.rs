@@ -969,6 +969,9 @@ impl SegmentJournalBackend {
                 .and_then(|body_json| body_json.get("node").cloned())
         };
         if let Some(node_value) = node_value_opt {
+            manifest.cluster_id = Self::extract_cluster_id_from_node_json(&node_value);
+            manifest.cluster_sensor_positions =
+                Self::extract_cluster_sensor_positions_from_node_json(&node_value);
             manifest.node_context = Some(serde_json::json!({
                 "node": node_value,
                 "toa_ns": entry.toa_ns,
@@ -977,6 +980,67 @@ impl SegmentJournalBackend {
             }));
         }
         manifest
+    }
+
+    fn extract_cluster_id_from_node_json(node_value: &serde_json::Value) -> Option<String> {
+        node_value
+            .get("cluster_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| {
+                node_value
+                    .get("properties")
+                    .and_then(|value| value.get("cluster_id"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .or_else(|| {
+                node_value
+                    .get("metadata")
+                    .and_then(|value| value.get("cluster_id"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+    }
+
+    fn extract_cluster_sensor_positions_from_node_json(
+        node_value: &serde_json::Value,
+    ) -> Option<Vec<(String, [f32; 3])>> {
+        let encoded_positions = node_value
+            .get("cluster_sensor_positions")
+            .or_else(|| {
+                node_value
+                    .get("properties")
+                    .and_then(|value| value.get("cluster_sensor_positions"))
+            })
+            .or_else(|| {
+                node_value
+                    .get("metadata")
+                    .and_then(|value| value.get("cluster_sensor_positions"))
+            })?
+            .clone();
+
+        if let Ok(positions) =
+            serde_json::from_value::<Vec<(String, [f32; 3])>>(encoded_positions.clone())
+        {
+            if !positions.is_empty() {
+                return Some(positions);
+            }
+        }
+
+        let mapped_positions = encoded_positions
+            .as_object()
+            .and_then(|positions| {
+                positions
+                    .iter()
+                    .map(|(sensor_id, position)| {
+                        parse_cluster_position(position).map(|position_m| (sensor_id.clone(), position_m))
+                    })
+                    .collect::<Option<Vec<_>>>()
+            })
+            .filter(|positions| !positions.is_empty());
+
+        mapped_positions
     }
 
     fn finalize_raw_manifest_queue_permit(
@@ -1004,6 +1068,18 @@ impl SegmentJournalBackend {
         let _ = (active_index, now_ns);
         Ok(())
     }
+}
+
+fn parse_cluster_position(value: &serde_json::Value) -> Option<[f32; 3]> {
+    let coordinates = value.as_array()?;
+    if coordinates.len() != 3 {
+        return None;
+    }
+    Some([
+        coordinates[0].as_f64()? as f32,
+        coordinates[1].as_f64()? as f32,
+        coordinates[2].as_f64()? as f32,
+    ])
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1351,6 +1427,55 @@ mod tests {
         .to_string()
     }
 
+    fn store_forward_body_with_cluster_metadata(
+        node_id: &str,
+        sequence: u64,
+        start_sample_index: u64,
+    ) -> String {
+        json!({
+            "node": {
+                "id": node_id,
+                "node_type": "point",
+                "position_m": [0.0, 0.0, 0.0],
+                "sensor_offsets_m": [[0.0, 0.0, 0.0]],
+                "capabilities": ["audio"],
+                "metadata": {},
+                "properties": {
+                    "cluster_sensor_positions": {
+                        "node-a:ch0": [0.0, 0.0, 2.0],
+                        "node-b:ch0": [2.0, 0.0, 2.0],
+                        "node-c:ch0": [2.0, 2.0, 2.0],
+                        "node-d:ch0": [0.0, 2.0, 2.0]
+                    }
+                },
+                "cluster_id": "cluster-square"
+            },
+            "buffered_frames": [
+                {
+                    "frame": {
+                        "start_time_ns": 1000 + sequence,
+                        "utc_start_ns": 1000 + sequence,
+                        "utc_end_ns": 2000 + sequence,
+                        "start_sample_index": start_sample_index,
+                        "end_sample_index": start_sample_index + 4,
+                        "sample_rate_hz": 16000,
+                        "channels": 1,
+                        "encoding": "pcm16le",
+                        "samples_per_channel": 4,
+                        "samples_b64": "AA==",
+                        "sequence": sequence,
+                        "time_quality": "gps_locked",
+                        "toa_ns": 1000 + sequence,
+                        "tor_ns": 2000 + sequence,
+                        "source_type": "raw_sensor"
+                    }
+                }
+            ],
+            "sort_by_toa": true
+        })
+        .to_string()
+    }
+
     fn test_journal_runtime_config() -> JournalRuntimeConfig {
         JournalRuntimeConfig {
             total_journal_budget_bytes: 268_435_456,
@@ -1458,6 +1583,72 @@ mod tests {
         assert!(
             entries.next_entry().await.unwrap().is_none(),
             "raw ingest must stay on the in-memory channel, not raw_pending JSON files"
+        );
+    }
+
+    #[tokio::test]
+    async fn raw_capture_manifest_preserves_cluster_metadata_without_persisting_raw_audio() {
+        let tmp = tempfile::tempdir().unwrap();
+        let payload = store_forward_body_with_cluster_metadata("node-a", 7, 0);
+
+        let queue_backpressure = Arc::new(RawManifestQueueBackpressure::new(1_048_576));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let config = JournalRuntimeConfig {
+            raw_manifest_channel_capacity: 4,
+            raw_manifest_queue_backpressure: Some(queue_backpressure),
+            raw_manifest_tx: Some(tx),
+            ..test_journal_runtime_config()
+        };
+        let store_dir = tmp.path().join("store");
+        let backend = IngestBackend::open(
+            store_dir.clone(),
+            IngestStorageMode::Journal,
+            usize::MAX as u64,
+            config,
+        )
+        .await
+        .unwrap();
+
+        backend
+            .enqueue(
+                usize::MAX,
+                "/api/v1/ingest/store-forward",
+                HeaderMap::new(),
+                Body::from(payload),
+            )
+            .await
+            .unwrap();
+
+        let manifest = rx
+            .try_recv()
+            .expect("manifest delivered via channel")
+            .into_manifest();
+        assert!(manifest.raw_payload.is_some());
+        assert_eq!(manifest.cluster_id.as_deref(), Some("cluster-square"));
+        assert_eq!(
+            manifest
+                .cluster_sensor_positions
+                .as_ref()
+                .map(Vec::len),
+            Some(4)
+        );
+        assert_eq!(
+            manifest
+                .cluster_sensor_positions
+                .as_ref()
+                .and_then(|positions| positions.first())
+                .map(|(sensor_id, _)| sensor_id.as_str()),
+            Some("node-a:ch0")
+        );
+
+        let raw_pending_dir = store_dir
+            .join("journal")
+            .join("manifests")
+            .join("raw_pending");
+        let mut entries = tokio::fs::read_dir(&raw_pending_dir).await.unwrap();
+        assert!(
+            entries.next_entry().await.unwrap().is_none(),
+            "cluster metadata plumbing must not cause raw audio manifests to spill to disk"
         );
     }
 

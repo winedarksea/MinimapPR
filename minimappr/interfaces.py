@@ -214,6 +214,20 @@ class StorageBackend(Protocol):
     ) -> bool:
         ...
 
+    async def update_detection_review(
+        self,
+        *,
+        detection_id: str,
+        review_state: str,
+        review_label_id: LabelId | None,
+        review_label: str | None,
+        review_label_category: str | None,
+        review_notes: str | None,
+        promote_to_training: bool,
+        review_updated_ns: int,
+    ) -> bool:
+        ...
+
     async def find_detection_for_reporting_window(
         self,
         *,

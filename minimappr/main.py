@@ -103,6 +103,8 @@ from minimappr.models import (
     ClusterSpec,
     ContextSnapshot,
     CopStatusResponse,
+    DetectionReviewState,
+    DetectionReviewUpdateRequest,
     EnvironmentSampleIn,
     FederationAck,
     FederationHeartbeat,
@@ -118,6 +120,8 @@ from minimappr.models import (
     PipelineNodeView,
     PipelineNodesResponse,
     PipelineStageView,
+    ReviewedDetectionExportItem,
+    ReviewedDetectionExportPackage,
     StoreForwardBufferedFrameResponse,
     StoreForwardIngestRequest,
     StoreForwardIngestResponse,
@@ -2041,7 +2045,11 @@ async def list_bit_failures(request: Request) -> dict[str, list[str]]:
 
 
 @app.get("/api/v1/detections")
-async def list_detections(request: Request, limit: int = Query(default=100, ge=1, le=1000)) -> list[dict]:
+async def list_detections(
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=1000),
+    review_state: DetectionReviewState | None = Query(default=None),
+) -> list[dict]:
     state = _require_state(request)
     settings: Settings = state.settings
     effective_limit = min(limit, settings.cop_detections_max_items)
@@ -2050,6 +2058,7 @@ async def list_detections(request: Request, limit: int = Query(default=100, ge=1
         limit=effective_limit,
         since_ns=cutoff_ns,
         min_label_confidence=settings.detection_min_confidence,
+        review_state=review_state.value if review_state is not None else None,
     )
     for detection in detections:
         if detection.get("position_geo") is None and detection.get("position_m"):
@@ -3532,6 +3541,99 @@ async def get_detection_by_id(detection_id: str, request: Request) -> dict:
     return detection
 
 
+@app.patch("/api/v1/detections/{detection_id}/review")
+async def update_detection_review(
+    detection_id: str,
+    payload: DetectionReviewUpdateRequest,
+    request: Request,
+) -> dict:
+    state = _require_state(request)
+    if not payload.model_fields_set:
+        raise HTTPException(status_code=400, detail="Review update must include at least one field")
+
+    detection = await state.storage.get_detection(detection_id)
+    if detection is None:
+        raise HTTPException(status_code=404, detail="Detection not found")
+
+    fields_set = payload.model_fields_set
+    now_ns = time.time_ns()
+    review_state = detection.get("review_state") or DetectionReviewState.UNREVIEWED.value
+    review_label_id = detection.get("review_label_id")
+    review_label = detection.get("review_label")
+    review_label_category = detection.get("review_label_category")
+    review_notes = detection.get("review_notes")
+    promote_to_training = bool(detection.get("promote_to_training") or False)
+
+    if "review_state" in fields_set:
+        review_state = (
+            payload.review_state.value
+            if payload.review_state is not None
+            else DetectionReviewState.UNREVIEWED.value
+        )
+        if review_state == DetectionReviewState.UNREVIEWED.value:
+            if "review_label" not in fields_set:
+                review_label_id = None
+                review_label = None
+                review_label_category = None
+            if "promote_to_training" not in fields_set:
+                promote_to_training = False
+            if "review_notes" not in fields_set:
+                review_notes = None
+
+    if "review_label" in fields_set:
+        review_label = payload.review_label
+        if review_label is None:
+            review_label_id = None
+            review_label_category = None
+        elif "review_label_category" not in fields_set and not review_label_category:
+            review_label_category = detection.get("label_category") or "unknown"
+
+    if "review_label_category" in fields_set:
+        review_label_category = payload.review_label_category
+
+    if "review_notes" in fields_set:
+        review_notes = payload.review_notes
+
+    if "promote_to_training" in fields_set:
+        promote_to_training = bool(payload.promote_to_training) if payload.promote_to_training is not None else False
+
+    if review_state == DetectionReviewState.REJECTED.value and review_label is not None:
+        raise HTTPException(status_code=400, detail="Rejected detections cannot carry a review label")
+    if promote_to_training and review_state != DetectionReviewState.CONFIRMED.value:
+        raise HTTPException(status_code=400, detail="Training promotion requires confirmed review state")
+
+    if review_label is not None:
+        review_label_category = review_label_category or detection.get("label_category") or "unknown"
+        review_label_id = await state.storage.upsert_label(
+            name=review_label,
+            category=review_label_category,
+            source="review",
+            created_ns=now_ns,
+        )
+
+    updated = await state.storage.update_detection_review(
+        detection_id=detection_id,
+        review_state=review_state,
+        review_label_id=review_label_id,
+        review_label=review_label,
+        review_label_category=review_label_category,
+        review_notes=review_notes,
+        promote_to_training=promote_to_training,
+        review_updated_ns=now_ns,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Detection not found")
+
+    refreshed = await state.storage.get_detection(detection_id)
+    if refreshed is None:
+        raise HTTPException(status_code=404, detail="Detection not found")
+    if refreshed.get("position_geo") is None and refreshed.get("position_m"):
+        local = refreshed["position_m"]
+        geo = state.coordinate_frame.local_to_geo((float(local[0]), float(local[1]), float(local[2])))
+        refreshed["position_geo"] = geo.model_dump(mode="json")
+    return refreshed
+
+
 @app.get("/api/v1/detections/{detection_id}/audio")
 async def get_detection_audio(
     detection_id: str,
@@ -3555,6 +3657,131 @@ async def get_detection_audio(
         media_type="audio/wav",
         filename=filename,
         headers={"Content-Disposition": f'{content_disposition}; filename="{filename}"'},
+    )
+
+
+@app.get("/api/v1/exports/ebird")
+async def export_ebird_review_package(
+    request: Request,
+    format: Literal["json", "csv"] = Query(default="json"),
+    limit: int = Query(default=500, ge=1, le=5000),
+    since_hours: float = Query(default=24.0, ge=0.0, le=24.0 * 365.0),
+):
+    import csv
+    import io
+    from datetime import datetime, timezone
+
+    state = _require_state(request)
+    since_ns = time.time_ns() - int(since_hours * 3_600 * 1_000_000_000)
+    detections = await state.storage.list_detections(
+        limit=limit,
+        since_ns=since_ns,
+        min_label_confidence=state.settings.detection_min_confidence,
+        review_state=DetectionReviewState.CONFIRMED.value,
+    )
+    base_url = str(request.base_url).rstrip("/")
+    exported_items: list[ReviewedDetectionExportItem] = []
+
+    for detection in detections:
+        review_state = detection.get("review_state") or DetectionReviewState.UNREVIEWED.value
+        effective_label = detection.get("review_label") or detection.get("label")
+        effective_label_category = detection.get("review_label_category") or detection.get("label_category") or "unknown"
+        if review_state != DetectionReviewState.CONFIRMED.value or effective_label_category != "bird":
+            continue
+
+        if detection.get("position_geo") is None and detection.get("position_m"):
+            local = detection["position_m"]
+            geo = state.coordinate_frame.local_to_geo((float(local[0]), float(local[1]), float(local[2])))
+            detection["position_geo"] = geo.model_dump(mode="json")
+
+        timestamp_ns = int(detection["timestamp_ns"])
+        observed_at_iso = datetime.fromtimestamp(timestamp_ns / 1_000_000_000, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+        has_audio = bool(detection.get("snippet_path"))
+        audio_url = f"{base_url}/api/v1/detections/{detection['id']}/audio?download=true" if has_audio else None
+        exported_items.append(
+            ReviewedDetectionExportItem(
+                detection_id=detection["id"],
+                event_id=detection.get("event_id") or detection["id"],
+                timestamp_ns=timestamp_ns,
+                observed_at_iso=observed_at_iso,
+                track_id=detection.get("track_id"),
+                source_node_id=detection.get("source_node_id"),
+                reporting_modality=detection.get("reporting_modality") or "localized",
+                position_geo=GeoPoint.model_validate(detection["position_geo"]) if detection.get("position_geo") else None,
+                original_label=detection.get("label") or "unknown",
+                original_label_category=detection.get("label_category") or "unknown",
+                reviewed_label=detection.get("review_label"),
+                reviewed_label_category=detection.get("review_label_category"),
+                effective_label=effective_label,
+                effective_label_category=effective_label_category,
+                review_state=review_state,
+                review_notes=detection.get("review_notes"),
+                promote_to_training=bool(detection.get("promote_to_training") or False),
+                audio_url=audio_url,
+                has_audio=has_audio,
+            )
+        )
+
+    generated_at_ns = time.time_ns()
+    generated_at_iso = datetime.fromtimestamp(generated_at_ns / 1_000_000_000, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    export_package = ReviewedDetectionExportPackage(
+        generated_at_ns=generated_at_ns,
+        generated_at_iso=generated_at_iso,
+        detection_count=len(exported_items),
+        detections=exported_items,
+    )
+    if format == "json":
+        return export_package.model_dump(mode="json")
+
+    buffer = io.StringIO()
+    writer = csv.DictWriter(
+        buffer,
+        fieldnames=[
+            "detection_id",
+            "event_id",
+            "observed_at_iso",
+            "effective_label",
+            "effective_label_category",
+            "original_label",
+            "reviewed_label",
+            "review_state",
+            "track_id",
+            "source_node_id",
+            "latitude",
+            "longitude",
+            "alt_m",
+            "audio_url",
+            "promote_to_training",
+            "review_notes",
+        ],
+    )
+    writer.writeheader()
+    for item in exported_items:
+        writer.writerow(
+            {
+                "detection_id": item.detection_id,
+                "event_id": item.event_id,
+                "observed_at_iso": item.observed_at_iso,
+                "effective_label": item.effective_label,
+                "effective_label_category": item.effective_label_category,
+                "original_label": item.original_label,
+                "reviewed_label": item.reviewed_label or "",
+                "review_state": item.review_state.value,
+                "track_id": item.track_id or "",
+                "source_node_id": item.source_node_id or "",
+                "latitude": item.position_geo.lat if item.position_geo else "",
+                "longitude": item.position_geo.lon if item.position_geo else "",
+                "alt_m": item.position_geo.alt_m if item.position_geo else "",
+                "audio_url": item.audio_url or "",
+                "promote_to_training": item.promote_to_training,
+                "review_notes": item.review_notes or "",
+            }
+        )
+    filename = f"minimappr-ebird-review-export-{generated_at_ns}.csv"
+    return Response(
+        content=buffer.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

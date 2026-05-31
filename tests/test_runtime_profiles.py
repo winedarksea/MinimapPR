@@ -49,6 +49,15 @@ def test_birdnet_hybrid_production_respects_explicit_rules_path_override() -> No
     assert settings.rules_config_path == explicit_rules_path
 
 
+def test_birdnet_hybrid_production_keeps_beamformed_classification_gated() -> None:
+    settings = Settings(
+        runtime_profile="birdnet_hybrid_production",
+        beamformed_classification_enabled=True,
+    )
+
+    assert settings.beamformed_classification_enabled is False
+
+
 def test_classification_window_default_keeps_birdnet_context() -> None:
     settings = Settings(localization_window_seconds=0.12)
 

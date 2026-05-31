@@ -314,11 +314,14 @@ pub(crate) struct ComputePayload {
 struct OwnedManifestAudio {
     manifest: DspManifest,
     stream_key: String,
+    buffer_key: String,
     decoded: DecodedAudioPayload,
     source_ids: Vec<String>,
     sr: u32,
     now_ns: u128,
     channel_count: usize,
+    buffer_channel_count: usize,
+    buffer_channel_indices: Vec<usize>,
     classification_window_sec: f64,
     mic_positions_m: Vec<[f32; 3]>,
     effective_sound_speed_mps: f32,
@@ -341,6 +344,12 @@ struct BufferedManifestTimingGates {
     on_heartbeat_cadence: bool,
     run_classifier_render: bool,
     run_srp: bool,
+}
+
+struct ManifestBufferRouting {
+    buffer_key: String,
+    buffer_channel_count: usize,
+    buffer_channel_indices: Vec<usize>,
 }
 
 struct RawAudioFramePublishRequest<'a> {
@@ -730,17 +739,36 @@ impl DspWorker {
             .max(MIN_BIRDNET_CLASSIFICATION_WINDOW_SECONDS)
             .max(self.config.window_seconds);
         let mic_positions_m = mic_positions_from_manifest(&manifest);
+        let buffer_routing = resolve_cluster_buffer_routing(&manifest, &stream_key, channel_count);
+        let (buffer_key, buffer_channel_count, buffer_channel_indices) = buffer_routing
+            .map(|routing| {
+                (
+                    routing.buffer_key,
+                    routing.buffer_channel_count,
+                    routing.buffer_channel_indices,
+                )
+            })
+            .unwrap_or_else(|| {
+                (
+                    stream_key.clone(),
+                    channel_count,
+                    (0..channel_count).collect(),
+                )
+            });
         let start_sample_index = decoded.start_sample_index;
         let end_sample_index = decoded.end_sample_index;
 
         Some(OwnedManifestAudio {
             manifest,
             stream_key,
+            buffer_key,
             decoded,
             source_ids,
             sr,
             now_ns,
             channel_count,
+            buffer_channel_count,
+            buffer_channel_indices,
             classification_window_sec,
             mic_positions_m,
             effective_sound_speed_mps,
@@ -800,18 +828,23 @@ impl DspWorker {
     ) -> Option<BufferedManifestAudio> {
         let buffers = self
             .buffers
-            .entry(owned.stream_key.clone())
+            .entry(owned.buffer_key.clone())
             .or_insert_with(|| {
-                (0..owned.channel_count)
+                (0..owned.buffer_channel_count)
                     .map(|_| SensorStreamBuffer::new(owned.sr, self.config.max_buffer_seconds))
                     .collect()
             });
+        let reference_buffer_index = owned.buffer_channel_indices.first().copied().unwrap_or(0);
 
         let existing_sample_timeline_start_time_ns =
             if !owned.node_timestamp_is_available && !owned.buffer_uses_receipt_time {
                 owned
                     .start_sample_index
-                    .and_then(|sample_index| buffers[0].time_for_sample_index(sample_index))
+                    .and_then(|sample_index| {
+                        buffers
+                            .get(reference_buffer_index)
+                            .and_then(|buffer| buffer.time_for_sample_index(sample_index))
+                    })
             } else {
                 None
             };
@@ -827,9 +860,22 @@ impl DspWorker {
         };
 
         let mut reanchor_delta: u64 = 0;
-        for (channel_index, buffer) in buffers.iter_mut().enumerate() {
+        for (channel_index, &buffer_channel_index) in owned.buffer_channel_indices.iter().enumerate()
+        {
             let Some(channel_samples) = owned.decoded.channels.get(channel_index) else {
                 break;
+            };
+            let Some(buffer) = buffers.get_mut(buffer_channel_index) else {
+                self.note_failure().await;
+                warn!(
+                    manifest_id = %owned.manifest.manifest_id,
+                    stream_key = %owned.stream_key,
+                    buffer_key = %owned.buffer_key,
+                    buffer_channel_index,
+                    "DSP worker resolved an invalid cluster buffer channel index"
+                );
+                self.defer_source_manifest_consumption(&owned.manifest);
+                return None;
             };
             let pre_reanchor = buffer.reanchor_count();
             if let Err(err) = buffer.append(
@@ -857,6 +903,7 @@ impl DspWorker {
             owned.end_sample_index,
             buffer_end_time_ns,
             owned.sr,
+            reference_buffer_index,
         );
         let center_time_ns = resolve_localization_center_time_ns(
             buffers,
@@ -887,7 +934,7 @@ impl DspWorker {
         pending_backlog_depth: usize,
     ) -> Option<ComputePayload> {
         if !self.should_publish_classifier_render(
-            &owned.stream_key,
+            &owned.buffer_key,
             owned.now_ns,
             pending_backlog_depth,
         ) {
@@ -898,19 +945,21 @@ impl DspWorker {
         let omni_channels = owned.decoded.channels.clone();
         Some(ComputePayload {
             manifest: owned.manifest,
-            stream_key: owned.stream_key,
-            channel_states: (0..owned.channel_count)
+            stream_key: owned.buffer_key,
+            channel_states: (0..owned.buffer_channel_count)
                 .map(|_| LocalizationChannelState {
                     coverage: None,
                     window: Vec::new(),
                 })
                 .collect(),
             active_channels: Vec::new(),
-            classification_windows: (0..owned.channel_count).map(|_| Vec::new()).collect(),
-            listenable_classification_windows: (0..owned.channel_count)
+            classification_windows: (0..owned.buffer_channel_count)
                 .map(|_| Vec::new())
                 .collect(),
-            classification_coverage: (0..owned.channel_count).map(|_| None).collect(),
+            listenable_classification_windows: (0..owned.buffer_channel_count)
+                .map(|_| Vec::new())
+                .collect(),
+            classification_coverage: (0..owned.buffer_channel_count).map(|_| None).collect(),
             classifier_render_start_ns: Some(owned.buffer_start_time_ns.max(0) as u128),
             classifier_render_end_ns: Some(owned.buffer_end_time_ns.max(0) as u128),
             mic_positions_m: owned.mic_positions_m,
@@ -949,7 +998,7 @@ impl DspWorker {
             self.should_run_localization(stream_key, audio_end_ns, windows);
         let run_classifier_render =
             self.should_publish_classifier_render(stream_key, audio_end_ns, pending_backlog_depth);
-        let run_srp = channel_count == 4 && (on_localization_cadence || run_classifier_render);
+        let run_srp = channel_count >= 4 && (on_localization_cadence || run_classifier_render);
         let on_heartbeat_cadence =
             on_localization_cadence || self.should_emit_heartbeat(stream_key, audio_end_ns);
         BufferedManifestTimingGates {
@@ -971,7 +1020,7 @@ impl DspWorker {
             .all(|state| state.coverage.is_none())
         {
             let run_classifier_render = self.should_publish_classifier_render(
-                &owned.stream_key,
+                &owned.buffer_key,
                 buffered.audio_end_ns,
                 pending_backlog_depth,
             );
@@ -980,8 +1029,8 @@ impl DspWorker {
                     manifest_id = %owned.manifest.manifest_id,
                     "DSP worker: no localization coverage window after buffering; publishing omni fallback render"
                 );
-                let Some(buffers) = self.buffers.get(&owned.stream_key) else {
-                    error!(%owned.stream_key, "stream buffers missing after append in omni fallback path — skipping");
+                let Some(buffers) = self.buffers.get(&owned.buffer_key) else {
+                    error!(stream_key = %owned.stream_key, buffer_key = %owned.buffer_key, "stream buffers missing after append in omni fallback path — skipping");
                     return None;
                 };
                 let fallback_render_windows = channel_windows_ending_at(
@@ -1024,14 +1073,16 @@ impl DspWorker {
                     );
                 return Some(ComputePayload {
                     manifest: owned.manifest,
-                    stream_key: owned.stream_key,
+                    stream_key: owned.buffer_key,
                     channel_states: buffered.channel_states,
                     active_channels: eligible_coverage_channels(
                         &fallback_render_coverage,
                         self.config.min_coverage_ratio,
                     ),
-                    classification_windows: (0..owned.channel_count).map(|_| Vec::new()).collect(),
-                    listenable_classification_windows: (0..owned.channel_count)
+                    classification_windows: (0..owned.buffer_channel_count)
+                        .map(|_| Vec::new())
+                        .collect(),
+                    listenable_classification_windows: (0..owned.buffer_channel_count)
                         .map(|_| Vec::new())
                         .collect(),
                     classification_coverage: fallback_render_coverage,
@@ -1072,8 +1123,8 @@ impl DspWorker {
             .map(|state| state.window.clone())
             .collect();
         let timing_gates = self.resolve_buffered_manifest_timing_gates(
-            &owned.stream_key,
-            owned.channel_count,
+            &owned.buffer_key,
+            owned.buffer_channel_count,
             buffered.audio_end_ns,
             pending_backlog_depth,
             &windows,
@@ -1099,8 +1150,8 @@ impl DspWorker {
 
         let (classification_windows, listenable_classification_windows, classification_coverage) =
             if timing_gates.run_classifier_render {
-                let Some(buffers) = self.buffers.get(&owned.stream_key) else {
-                    error!(%owned.stream_key, "stream buffers missing after append in classifier render path — skipping");
+                let Some(buffers) = self.buffers.get(&owned.buffer_key) else {
+                    error!(stream_key = %owned.stream_key, buffer_key = %owned.buffer_key, "stream buffers missing after append in classifier render path — skipping");
                     return None;
                 };
                 (
@@ -1140,7 +1191,7 @@ impl DspWorker {
 
         Some(ComputePayload {
             manifest: owned.manifest,
-            stream_key: owned.stream_key,
+            stream_key: owned.buffer_key,
             channel_states: buffered.channel_states,
             active_channels,
             classification_windows,
@@ -1159,7 +1210,7 @@ impl DspWorker {
             run_srp: timing_gates.run_srp,
             run_classifier_render: timing_gates.run_classifier_render,
             skip_localization_result: false,
-            omni_fallback_reason: (owned.channel_count < 4)
+            omni_fallback_reason: (owned.buffer_channel_count < 4)
                 .then(|| "single_point_node".to_string()),
             omni_channels_override: None,
             listenable_omni_channels_override: None,
@@ -1909,6 +1960,7 @@ fn resolve_buffer_end_time_ns(
     end_sample_index: Option<i64>,
     fallback_end_time_ns: i128,
     _sample_rate_hz: u32,
+    reference_buffer_index: usize,
 ) -> i128 {
     // The buffer is anchored to the sample-index timeline, so windowing must
     // ride that timeline regardless of how far the publish-time TOA has drifted.
@@ -1921,10 +1973,53 @@ fn resolve_buffer_end_time_ns(
     end_sample_index
         .and_then(|sample_index| {
             buffers
-                .first()
+                .get(reference_buffer_index)
+                .or_else(|| buffers.first())
                 .and_then(|buffer| buffer.time_for_sample_index(sample_index))
         })
         .unwrap_or(fallback_end_time_ns)
+}
+
+fn resolve_cluster_buffer_routing(
+    manifest: &crate::manifests::DspManifest,
+    stream_key: &str,
+    decoded_channel_count: usize,
+) -> Option<ManifestBufferRouting> {
+    // Route any cluster-aware manifest into the shared sensor buffer when the
+    // cluster exposes enough geometry for SRP. This lets a tetrahedral node
+    // contribute its four channels alongside separate point nodes instead of
+    // forcing Rust to localize each manifest in isolation.
+    if decoded_channel_count == 0 {
+        return None;
+    }
+    let cluster_id = manifest.cluster_id.as_deref()?;
+    let cluster_sensor_positions = manifest.cluster_sensor_positions.as_ref()?;
+    if cluster_sensor_positions.len() < 4 {
+        return None;
+    }
+    let node_id = stream_key_node_id(stream_key);
+    let stream_id = stream_key_stream_id(stream_key).unwrap_or("audio_main");
+    let buffer_channel_indices = (0..decoded_channel_count)
+        .map(|channel_index| {
+            let sensor_id = format!("{node_id}:ch{channel_index}");
+            cluster_sensor_positions
+                .iter()
+                .position(|(candidate_sensor_id, _)| candidate_sensor_id == &sensor_id)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(ManifestBufferRouting {
+        buffer_key: format!("cluster::{cluster_id}::{stream_id}"),
+        buffer_channel_count: cluster_sensor_positions.len(),
+        buffer_channel_indices,
+    })
+}
+
+fn stream_key_node_id(stream_key: &str) -> &str {
+    stream_key.split("__").next().unwrap_or(stream_key)
+}
+
+fn stream_key_stream_id(stream_key: &str) -> Option<&str> {
+    stream_key.split("__").nth(1)
 }
 
 fn should_use_receipt_time_alignment(

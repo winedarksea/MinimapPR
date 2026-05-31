@@ -230,6 +230,13 @@ class Storage:
                 tdoa_json TEXT NOT NULL,
                 classifier_scores_json TEXT NOT NULL,
                 feature_summary_json TEXT NOT NULL,
+                review_state TEXT NOT NULL DEFAULT 'unreviewed',
+                review_label_id TEXT REFERENCES labels(id) ON DELETE SET NULL,
+                review_label TEXT,
+                review_label_category TEXT,
+                review_notes TEXT,
+                review_updated_ns INTEGER,
+                promote_to_training INTEGER NOT NULL DEFAULT 0,
                 retention_tier TEXT NOT NULL DEFAULT 'short',
                 snippet_path TEXT,
                 snippet_expires_ns INTEGER
@@ -237,6 +244,7 @@ class Storage:
             CREATE INDEX IF NOT EXISTS idx_detections_ts ON detections(timestamp_ns DESC);
             CREATE INDEX IF NOT EXISTS idx_detections_track ON detections(track_id, timestamp_ns DESC);
             CREATE INDEX IF NOT EXISTS idx_detections_label ON detections(label_category, timestamp_ns DESC);
+            CREATE INDEX IF NOT EXISTS idx_detections_review_state ON detections(review_state, timestamp_ns DESC);
             CREATE INDEX IF NOT EXISTS ix_detections_retention_tier_created
                 ON detections(retention_tier, timestamp_ns DESC);
             CREATE INDEX IF NOT EXISTS idx_detections_reporting_window
@@ -453,6 +461,13 @@ class Storage:
                 "spl_db": "REAL",
                 "source_observation_ids_json": "TEXT NOT NULL DEFAULT '[]'",
                 "zone_ids_json": "TEXT NOT NULL DEFAULT '[]'",
+                "review_state": "TEXT NOT NULL DEFAULT 'unreviewed'",
+                "review_label_id": "TEXT",
+                "review_label": "TEXT",
+                "review_label_category": "TEXT",
+                "review_notes": "TEXT",
+                "review_updated_ns": "INTEGER",
+                "promote_to_training": "INTEGER NOT NULL DEFAULT 0",
                 "retention_tier": "TEXT NOT NULL DEFAULT 'short'",
             },
         )
@@ -1631,47 +1646,74 @@ class Storage:
             return None
         return self._row_to_detection(row).model_dump(mode="json")
 
+    async def update_detection_review(
+        self,
+        *,
+        detection_id: str,
+        review_state: str,
+        review_label_id: str | None,
+        review_label: str | None,
+        review_label_category: str | None,
+        review_notes: str | None,
+        promote_to_training: bool,
+        review_updated_ns: int,
+    ) -> bool:
+        db = self._require_db()
+        async with self._write_guard():
+            cursor = await db.execute(
+                """
+                UPDATE detections
+                SET review_state = ?,
+                    review_label_id = ?,
+                    review_label = ?,
+                    review_label_category = ?,
+                    review_notes = ?,
+                    review_updated_ns = ?,
+                    promote_to_training = ?
+                WHERE id = ?
+                """,
+                (
+                    review_state,
+                    review_label_id,
+                    review_label,
+                    review_label_category,
+                    review_notes,
+                    review_updated_ns,
+                    1 if promote_to_training else 0,
+                    detection_id,
+                ),
+            )
+            await self._commit_if_needed(db)
+        return bool(cursor.rowcount)
+
     async def list_detections(
         self,
         limit: int = 100,
         *,
         since_ns: int | None = None,
         min_label_confidence: float | None = None,
+        review_state: str | None = None,
     ) -> list[dict]:
         db = self._require_db()
-        if since_ns is None and min_label_confidence is None:
-            rows = await (
-                await db.execute(
-                    "SELECT * FROM detections ORDER BY timestamp_ns DESC LIMIT ?",
-                    (limit,),
-                )
-            ).fetchall()
-        elif since_ns is None and min_label_confidence is not None:
-            rows = await (
-                await db.execute(
-                    "SELECT * FROM detections WHERE label_confidence >= ? ORDER BY timestamp_ns DESC LIMIT ?",
-                    (float(min_label_confidence), limit),
-                )
-            ).fetchall()
-        elif since_ns is not None and min_label_confidence is None:
-            rows = await (
-                await db.execute(
-                    "SELECT * FROM detections WHERE timestamp_ns >= ? ORDER BY timestamp_ns DESC LIMIT ?",
-                    (int(since_ns), limit),
-                )
-            ).fetchall()
-        else:
-            rows = await (
-                await db.execute(
-                    """
-                    SELECT * FROM detections
-                    WHERE timestamp_ns >= ? AND label_confidence >= ?
-                    ORDER BY timestamp_ns DESC
-                    LIMIT ?
-                    """,
-                    (int(since_ns), float(min_label_confidence), limit),
-                )
-            ).fetchall()
+        clauses: list[str] = []
+        params: list[object] = []
+        if since_ns is not None:
+            clauses.append("timestamp_ns >= ?")
+            params.append(int(since_ns))
+        if min_label_confidence is not None:
+            clauses.append("label_confidence >= ?")
+            params.append(float(min_label_confidence))
+        if review_state is not None:
+            clauses.append("review_state = ?")
+            params.append(str(review_state))
+
+        where_clause = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = await (
+            await db.execute(
+                f"SELECT * FROM detections{where_clause} ORDER BY timestamp_ns DESC LIMIT ?",
+                (*params, limit),
+            )
+        ).fetchall()
         detections = [self._row_to_detection(row).model_dump(mode="json") for row in rows]
         return await self.enrich_detections_with_contributor_summaries(detections)
 
@@ -3130,6 +3172,13 @@ class Storage:
             tdoa_s=_json_loads(row["tdoa_json"], {}),
             classifier_scores=_json_loads(row["classifier_scores_json"], {}),
             feature_summary=_json_loads(row["feature_summary_json"], {}),
+            review_state=row["review_state"] or "unreviewed",
+            review_label_id=row["review_label_id"],
+            review_label=row["review_label"],
+            review_label_category=row["review_label_category"],
+            review_notes=row["review_notes"],
+            review_updated_ns=row["review_updated_ns"],
+            promote_to_training=bool(row["promote_to_training"] or 0),
             retention_tier=row["retention_tier"] or "short",
             snippet_path=row["snippet_path"],
         )
