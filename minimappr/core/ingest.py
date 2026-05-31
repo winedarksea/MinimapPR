@@ -551,13 +551,7 @@ class IngestProcessor:
             normalized = spec.model_copy(update={"position_m": local_pos})
             return normalized, spec.position_geo
 
-        if spec.position_m is not None:
-            local_pos = spec.position_m
-            geo = self._coordinate_frame.local_to_geo(local_pos)
-            normalized = spec.model_copy(update={"position_m": local_pos, "position_geo": geo})
-            return normalized, geo
-
-        raise ValueError("NodeSpec must include position_m or position_geo")
+        raise ValueError("NodeSpec must include position_geo")
 
 
 # (Supporting dataclasses are defined at the top of the module.)

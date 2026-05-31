@@ -348,14 +348,6 @@ bool buildNodePayloadJson(const NodeDescriptor& node, std::string& outPayload) {
   outPayload += ",\"node_type\":";
   appendQuoted(outPayload, nodeTypeToWire(node.type));
 
-  outPayload += ",\"position_m\":[";
-  appendFloat(outPayload, node.positionM.x);
-  outPayload += ',';
-  appendFloat(outPayload, node.positionM.y);
-  outPayload += ',';
-  appendFloat(outPayload, node.positionM.z);
-  outPayload += ']';
-
   if (node.hasGeoPosition) {
     outPayload += ",\"position_geo\":{";
     outPayload += "\"lat\":";

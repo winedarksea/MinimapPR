@@ -22,8 +22,8 @@ from minimappr.models import (
 )
 
 
-_MAGIC_V1 = b"MMB1"
-_MAGIC_V2 = b"MMB2"
+_MAGIC = b"MMB2"
+_VERSION = 2
 
 
 @dataclass(slots=True)
@@ -91,11 +91,10 @@ class _BinaryReader:
 
 def parse_binary_ingest_payload(raw_payload: bytes) -> BinaryIngestPayload:
     reader = _BinaryReader(raw_payload)
-    magic = reader.read(4)
-    if magic not in (_MAGIC_V1, _MAGIC_V2):
+    if reader.read(4) != _MAGIC:
         raise ValueError("Invalid binary ingest magic")
     version = reader.u8()
-    if version not in (1, 2):
+    if version != _VERSION:
         raise ValueError(f"Unsupported binary ingest version {version}")
 
     sort_by_toa = bool(reader.u8())
@@ -103,24 +102,20 @@ def parse_binary_ingest_payload(raw_payload: bytes) -> BinaryIngestPayload:
     if frame_count < 1 or frame_count > 2048:
         raise ValueError("Binary ingest frame count must be between 1 and 2048")
 
-    node = _read_node(reader, version)
+    node = _read_node(reader)
     buffered_frames = [_read_frame(reader) for _ in range(frame_count)]
     if reader.remaining != 0:
         raise ValueError("Binary ingest payload has trailing bytes")
     return BinaryIngestPayload(node=node, buffered_frames=buffered_frames, sort_by_toa=sort_by_toa)
 
 
-def _read_node(reader: _BinaryReader, version: int) -> NodeSpec:
+def _read_node(reader: _BinaryReader) -> NodeSpec:
     node_id = reader.string()
     node_type_code = reader.u8()
     try:
         node_type = (NodeType.POINT, NodeType.SIRITH_TETRA, NodeType.ARRAY, NodeType.GATEWAY)[node_type_code]
     except IndexError as exc:
         raise ValueError(f"Unsupported binary node type {node_type_code}") from exc
-
-    if version == 1:
-        # v1 included a static local positionM before geoPosition; read and discard it.
-        reader.f32(); reader.f32(); reader.f32()
 
     has_geo_position = bool(reader.u8())
     position_geo = None
