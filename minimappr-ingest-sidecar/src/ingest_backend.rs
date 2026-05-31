@@ -1412,6 +1412,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn raw_capture_enqueue_does_not_persist_raw_manifest_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let payload = store_forward_body("node-a", 7, 0);
+
+        let queue_backpressure = Arc::new(RawManifestQueueBackpressure::new(1_048_576));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let config = JournalRuntimeConfig {
+            raw_manifest_channel_capacity: 4,
+            raw_manifest_queue_backpressure: Some(queue_backpressure),
+            raw_manifest_tx: Some(tx),
+            ..test_journal_runtime_config()
+        };
+        let store_dir = tmp.path().join("store");
+        let backend = IngestBackend::open(
+            store_dir.clone(),
+            IngestStorageMode::Journal,
+            usize::MAX as u64,
+            config,
+        )
+        .await
+        .unwrap();
+
+        backend
+            .enqueue(
+                usize::MAX,
+                "/api/v1/ingest/store-forward",
+                HeaderMap::new(),
+                Body::from(payload),
+            )
+            .await
+            .unwrap();
+
+        let manifest = rx
+            .try_recv()
+            .expect("manifest delivered via channel")
+            .into_manifest();
+        assert!(manifest.raw_payload.is_some());
+
+        let raw_pending_dir = store_dir
+            .join("journal")
+            .join("manifests")
+            .join("raw_pending");
+        let mut entries = tokio::fs::read_dir(&raw_pending_dir).await.unwrap();
+        assert!(
+            entries.next_entry().await.unwrap().is_none(),
+            "raw ingest must stay on the in-memory channel, not raw_pending JSON files"
+        );
+    }
+
+    #[tokio::test]
     async fn raw_capture_manifest_returns_backpressure_error_when_channel_is_full() {
         let tmp = tempfile::tempdir().unwrap();
         let payload = store_forward_body("node-a", 7, 0);

@@ -370,8 +370,8 @@ mod tests {
         let ch2 = low_component[4..len + 4].to_vec();
 
         let unbanded = phat_correlation(&ch1, &ch2, sr, 6.0 / sr as f32, None, 4).tdoa;
-        let banded = phat_correlation(&ch1, &ch2, sr, 6.0 / sr as f32, Some([1_000.0, 3_200.0]), 4)
-            .tdoa;
+        let banded =
+            phat_correlation(&ch1, &ch2, sr, 6.0 / sr as f32, Some([1_000.0, 3_200.0]), 4).tdoa;
 
         assert!(
             (unbanded.delay_samples - 4.0).abs() < 0.45,
@@ -405,8 +405,8 @@ mod tests {
 
         let ch1 = high_component[..len].to_vec();
         let ch2 = high_component[1..len + 1].to_vec();
-        let banded = phat_correlation(&ch1, &ch2, sr, 6.0 / sr as f32, Some([1_000.0, 3_200.0]), 4)
-            .tdoa;
+        let banded =
+            phat_correlation(&ch1, &ch2, sr, 6.0 / sr as f32, Some([1_000.0, 3_200.0]), 4).tdoa;
 
         assert!(
             (banded.delay_samples - 1.0).abs() < 0.45,

@@ -144,14 +144,20 @@ pub struct MvdrRenderRequestN {
 pub fn render_mvdr_n(request: MvdrRenderRequestN) -> MvdrRenderOutput {
     let m = request.channels.len().min(request.mic_positions_m.len());
     if m == 0 {
-        return MvdrRenderOutput { samples: vec![], sample_rate_hz: request.sample_rate_hz };
+        return MvdrRenderOutput {
+            samples: vec![],
+            sample_rate_hz: request.sample_rate_hz,
+        };
     }
     let n_samples = request.channels[0].len();
     for ch in &request.channels {
         assert_eq!(ch.len(), n_samples, "all channels must have equal length");
     }
     if n_samples == 0 {
-        return MvdrRenderOutput { samples: vec![], sample_rate_hz: request.sample_rate_hz };
+        return MvdrRenderOutput {
+            samples: vec![],
+            sample_rate_hz: request.sample_rate_hz,
+        };
     }
 
     let sr = request.sample_rate_hz as f32;
@@ -169,7 +175,10 @@ pub fn render_mvdr_n(request: MvdrRenderRequestN) -> MvdrRenderOutput {
     }
     let (fft, ifft) = PLANNER_N.with(|planner| {
         let mut p = planner.borrow_mut();
-        (p.plan_fft(block_size, FftDirection::Forward), p.plan_fft(block_size, FftDirection::Inverse))
+        (
+            p.plan_fft(block_size, FftDirection::Forward),
+            p.plan_fft(block_size, FftDirection::Inverse),
+        )
     });
 
     let first_dir = if request.trajectory.is_empty() {
@@ -189,24 +198,37 @@ pub fn render_mvdr_n(request: MvdrRenderRequestN) -> MvdrRenderOutput {
         let target_dir = waypoint_direction_at(&request.trajectory, start + hop / 2);
         current_dir = iir_slew(current_dir, target_dir, alpha);
 
-        let steering = steering_vector_n(&current_dir, &request.mic_positions_m[..m], sr, block_size);
+        let steering =
+            steering_vector_n(&current_dir, &request.mic_positions_m[..m], sr, block_size);
 
         // Build frequency-domain multi-channel block [M × block_size].
-        let x_freq: Vec<Vec<Complex32>> = (0..m).map(|ch| {
-            let mut buf: Vec<Complex32> = (0..block_size).map(|i| {
-                let s = if start + i < n_samples { request.channels[ch][start + i] * window[i] } else { 0.0 };
-                Complex32::new(s, 0.0)
-            }).collect();
-            fft.process(&mut buf);
-            buf
-        }).collect();
+        let x_freq: Vec<Vec<Complex32>> = (0..m)
+            .map(|ch| {
+                let mut buf: Vec<Complex32> = (0..block_size)
+                    .map(|i| {
+                        let s = if start + i < n_samples {
+                            request.channels[ch][start + i] * window[i]
+                        } else {
+                            0.0
+                        };
+                        Complex32::new(s, 0.0)
+                    })
+                    .collect();
+                fft.process(&mut buf);
+                buf
+            })
+            .collect();
 
         let mut beam_freq = vec![Complex32::ZERO; block_size];
         for k in 0..block_size {
             let x_k: Vec<Complex32> = (0..m).map(|ch| x_freq[ch][k]).collect();
             let d_k: Vec<Complex32> = (0..m).map(|ch| steering[ch][k]).collect();
             let w_k = mvdr_weight_scalar_n(&x_k, &d_k, REGULARIZATION);
-            beam_freq[k] = w_k.iter().zip(x_k.iter()).map(|(w, x)| w.conj() * x).fold(Complex32::ZERO, |a, v| a + v);
+            beam_freq[k] = w_k
+                .iter()
+                .zip(x_k.iter())
+                .map(|(w, x)| w.conj() * x)
+                .fold(Complex32::ZERO, |a, v| a + v);
         }
 
         ifft.process(&mut beam_freq);
@@ -215,38 +237,68 @@ pub fn render_mvdr_n(request: MvdrRenderRequestN) -> MvdrRenderOutput {
         let is_last = block_idx + 1 >= n_blocks;
         for i in 0..actual {
             let mut sample = beam_freq[i].re * scale;
-            if is_first && i < fade_len { sample *= i as f32 / fade_len as f32; }
-            if is_last { let rem = actual - i; if rem < fade_len { sample *= rem as f32 / fade_len as f32; } }
+            if is_first && i < fade_len {
+                sample *= i as f32 / fade_len as f32;
+            }
+            if is_last {
+                let rem = actual - i;
+                if rem < fade_len {
+                    sample *= rem as f32 / fade_len as f32;
+                }
+            }
             output[start + i] += sample * window[i];
             norm[start + i] += window[i] * window[i];
         }
     }
 
     for (out, n) in output.iter_mut().zip(norm.iter()) {
-        if *n > 1e-6 { *out /= n; }
+        if *n > 1e-6 {
+            *out /= n;
+        }
     }
-    MvdrRenderOutput { samples: output, sample_rate_hz: request.sample_rate_hz }
+    MvdrRenderOutput {
+        samples: output,
+        sample_rate_hz: request.sample_rate_hz,
+    }
 }
 
 /// Compute per-bin steering vectors d[channel][bin] for M mics with arbitrary geometry.
-fn steering_vector_n(dir: &[f32; 3], mic_positions: &[[f32; 3]], sample_rate_hz: f32, fft_size: usize) -> Vec<Vec<Complex32>> {
-    mic_positions.iter().map(|pos| {
-        let delay_s = -(pos[0] * dir[0] + pos[1] * dir[1] + pos[2] * dir[2]) / SPEED_OF_SOUND_MPS;
-        let delay_samples = delay_s * sample_rate_hz;
-        (0..fft_size).map(|k| {
-            let phase = -2.0 * PI * (k as f32 / fft_size as f32) * delay_samples;
-            Complex32::new(phase.cos(), phase.sin())
-        }).collect()
-    }).collect()
+fn steering_vector_n(
+    dir: &[f32; 3],
+    mic_positions: &[[f32; 3]],
+    sample_rate_hz: f32,
+    fft_size: usize,
+) -> Vec<Vec<Complex32>> {
+    mic_positions
+        .iter()
+        .map(|pos| {
+            let delay_s =
+                -(pos[0] * dir[0] + pos[1] * dir[1] + pos[2] * dir[2]) / SPEED_OF_SOUND_MPS;
+            let delay_samples = delay_s * sample_rate_hz;
+            (0..fft_size)
+                .map(|k| {
+                    let phase = -2.0 * PI * (k as f32 / fft_size as f32) * delay_samples;
+                    Complex32::new(phase.cos(), phase.sin())
+                })
+                .collect()
+        })
+        .collect()
 }
 
 /// Compute scalar MVDR weight vector for one frequency bin (M-channel generalisation).
 fn mvdr_weight_scalar_n(x: &[Complex32], d: &[Complex32], reg: f32) -> Vec<Complex32> {
     let m = x.len().min(d.len());
-    if m == 0 { return Vec::new(); }
+    if m == 0 {
+        return Vec::new();
+    }
     let reg_inv = 1.0 / reg;
-    let xhd: Complex32 = x[..m].iter().zip(d[..m].iter()).map(|(xi, di)| xi.conj() * di).sum();
-    let xhx_reg: Complex32 = x[..m].iter()
+    let xhd: Complex32 = x[..m]
+        .iter()
+        .zip(d[..m].iter())
+        .map(|(xi, di)| xi.conj() * di)
+        .sum();
+    let xhx_reg: Complex32 = x[..m]
+        .iter()
         .map(|xi| reg_inv * xi.norm_sqr())
         .fold(Complex32::ZERO, |a, v| a + Complex32::new(v, 0.0));
     let denom_inv = 1.0 / (Complex32::new(1.0, 0.0) + xhx_reg);
@@ -254,9 +306,19 @@ fn mvdr_weight_scalar_n(x: &[Complex32], d: &[Complex32], reg: f32) -> Vec<Compl
     let mut r_inv_d: Vec<Complex32> = (0..m)
         .map(|i| reg_inv * d[i] - x[i] * xhd_reg * denom_inv)
         .collect();
-    let dhrid: Complex32 = d[..m].iter().zip(r_inv_d.iter()).map(|(di, ri)| di.conj() * ri).sum();
-    let dhrid_safe = if dhrid.re.abs() < 1e-12 { Complex32::new(1e-12, 0.0) } else { dhrid };
-    for w in &mut r_inv_d { *w /= dhrid_safe; }
+    let dhrid: Complex32 = d[..m]
+        .iter()
+        .zip(r_inv_d.iter())
+        .map(|(di, ri)| di.conj() * ri)
+        .sum();
+    let dhrid_safe = if dhrid.re.abs() < 1e-12 {
+        Complex32::new(1e-12, 0.0)
+    } else {
+        dhrid
+    };
+    for w in &mut r_inv_d {
+        *w /= dhrid_safe;
+    }
     r_inv_d
 }
 

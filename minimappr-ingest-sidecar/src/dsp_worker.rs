@@ -593,7 +593,8 @@ impl DspWorker {
     ) -> Option<ComputePayload> {
         let owned = self.prepare_owned_manifest_audio(manifest).await?;
 
-        self.publish_raw_audio_frame_for_owned_manifest(&owned).await;
+        self.publish_raw_audio_frame_for_owned_manifest(&owned)
+            .await;
 
         if self
             .should_skip_stale_manifest_for_live_buffer(&owned)
@@ -675,25 +676,24 @@ impl DspWorker {
             .map(|handle| handle.segment_id.clone())
             .collect::<Vec<_>>();
         let sr = decoded.sample_rate_hz.max(1);
-        let (env_temp_c, env_humidity_fraction) = if decoded.temperature_c.is_none()
-            && decoded.humidity_fraction.is_none()
-        {
-            if let Some(cache) = &self.env_cache {
-                let query_ns = first_handle.toa_ns.unwrap_or(now_ns as u64);
-                let node_id = stream_key.split("__").next().unwrap_or(&stream_key);
-                cache
-                    .interpolate(node_id, query_ns)
-                    .await
-                    .map(|(temperature_c, humidity_fraction)| {
-                        (Some(temperature_c), Some(humidity_fraction))
-                    })
-                    .unwrap_or((None, None))
+        let (env_temp_c, env_humidity_fraction) =
+            if decoded.temperature_c.is_none() && decoded.humidity_fraction.is_none() {
+                if let Some(cache) = &self.env_cache {
+                    let query_ns = first_handle.toa_ns.unwrap_or(now_ns as u64);
+                    let node_id = stream_key.split("__").next().unwrap_or(&stream_key);
+                    cache
+                        .interpolate(node_id, query_ns)
+                        .await
+                        .map(|(temperature_c, humidity_fraction)| {
+                            (Some(temperature_c), Some(humidity_fraction))
+                        })
+                        .unwrap_or((None, None))
+                } else {
+                    (None, None)
+                }
             } else {
                 (None, None)
-            }
-        } else {
-            (None, None)
-        };
+            };
 
         let effective_temperature_c = decoded.temperature_c.or(env_temp_c);
         let effective_humidity_fraction = decoded.humidity_fraction.or(env_humidity_fraction);
@@ -707,8 +707,9 @@ impl DspWorker {
         let render_duration_ns =
             (frames_all as i128).saturating_mul(1_000_000_000) / i128::from(sr.max(1));
         let start_time_ns = resolve_buffer_start_time_ns(&decoded, first_handle, sr, now_ns);
-        let node_timestamp_is_available = decoded.start_time_ns.is_some_and(|start_ns| start_ns > 0)
-            || first_handle.toa_ns.is_some();
+        let node_timestamp_is_available =
+            decoded.start_time_ns.is_some_and(|start_ns| start_ns > 0)
+                || first_handle.toa_ns.is_some();
         let skew_ns = (start_time_ns - now_ns as i128).unsigned_abs();
         let max_skew_ns =
             (self.config.max_trusted_node_clock_skew_seconds * 1_000_000_000.0).round() as u128;
@@ -797,31 +798,33 @@ impl DspWorker {
         &mut self,
         owned: &OwnedManifestAudio,
     ) -> Option<BufferedManifestAudio> {
-        let buffers = self.buffers.entry(owned.stream_key.clone()).or_insert_with(|| {
-            (0..owned.channel_count)
-                .map(|_| SensorStreamBuffer::new(owned.sr, self.config.max_buffer_seconds))
-                .collect()
-        });
+        let buffers = self
+            .buffers
+            .entry(owned.stream_key.clone())
+            .or_insert_with(|| {
+                (0..owned.channel_count)
+                    .map(|_| SensorStreamBuffer::new(owned.sr, self.config.max_buffer_seconds))
+                    .collect()
+            });
 
-        let existing_sample_timeline_start_time_ns = if !owned.node_timestamp_is_available
-            && !owned.buffer_uses_receipt_time
-        {
-            owned
-                .start_sample_index
-                .and_then(|sample_index| buffers[0].time_for_sample_index(sample_index))
-        } else {
-            None
-        };
-        let (buffer_start_time_ns, buffer_end_time_ns) =
-            if let Some(existing_start_time_ns) = existing_sample_timeline_start_time_ns {
-                (
-                    existing_start_time_ns,
-                    existing_start_time_ns
-                        + (owned.buffer_end_time_ns - owned.buffer_start_time_ns),
-                )
+        let existing_sample_timeline_start_time_ns =
+            if !owned.node_timestamp_is_available && !owned.buffer_uses_receipt_time {
+                owned
+                    .start_sample_index
+                    .and_then(|sample_index| buffers[0].time_for_sample_index(sample_index))
             } else {
-                (owned.buffer_start_time_ns, owned.buffer_end_time_ns)
+                None
             };
+        let (buffer_start_time_ns, buffer_end_time_ns) = if let Some(existing_start_time_ns) =
+            existing_sample_timeline_start_time_ns
+        {
+            (
+                existing_start_time_ns,
+                existing_start_time_ns + (owned.buffer_end_time_ns - owned.buffer_start_time_ns),
+            )
+        } else {
+            (owned.buffer_start_time_ns, owned.buffer_end_time_ns)
+        };
 
         let mut reanchor_delta: u64 = 0;
         for (channel_index, buffer) in buffers.iter_mut().enumerate() {
@@ -845,9 +848,8 @@ impl DspWorker {
                 self.defer_source_manifest_consumption(&owned.manifest);
                 return None;
             }
-            reanchor_delta = reanchor_delta.saturating_add(
-                buffer.reanchor_count().saturating_sub(pre_reanchor),
-            );
+            reanchor_delta =
+                reanchor_delta.saturating_add(buffer.reanchor_count().saturating_sub(pre_reanchor));
         }
 
         let end_ns = resolve_buffer_end_time_ns(
@@ -862,8 +864,11 @@ impl DspWorker {
             end_ns,
             self.config.window_seconds,
         );
-        let channel_states =
-            localization_channel_states_centered(buffers, center_time_ns, self.config.window_seconds);
+        let channel_states = localization_channel_states_centered(
+            buffers,
+            center_time_ns,
+            self.config.window_seconds,
+        );
         // `buffers` borrow ends here; safe to take &self again for the
         // shared-state write.
         if reanchor_delta > 0 {
@@ -979,16 +984,22 @@ impl DspWorker {
                     error!(%owned.stream_key, "stream buffers missing after append in omni fallback path — skipping");
                     return None;
                 };
-                let fallback_render_windows =
-                    channel_windows_ending_at(buffers, buffered.end_ns, owned.classification_window_sec);
+                let fallback_render_windows = channel_windows_ending_at(
+                    buffers,
+                    buffered.end_ns,
+                    owned.classification_window_sec,
+                );
                 let listenable_fallback_render_windows =
                     channel_windows_ending_at_with_gap_concealment(
                         buffers,
                         buffered.end_ns,
                         owned.classification_window_sec,
                     );
-                let fallback_render_coverage =
-                    channel_coverage_ending_at(buffers, buffered.end_ns, owned.classification_window_sec);
+                let fallback_render_coverage = channel_coverage_ending_at(
+                    buffers,
+                    buffered.end_ns,
+                    owned.classification_window_sec,
+                );
                 let fallback_render_channels = if fallback_render_windows
                     .iter()
                     .any(|window| !window.is_empty())
@@ -1051,8 +1062,10 @@ impl DspWorker {
             }
         }
 
-        let active_channels =
-            eligible_localization_channels(&buffered.channel_states, self.config.min_coverage_ratio);
+        let active_channels = eligible_localization_channels(
+            &buffered.channel_states,
+            self.config.min_coverage_ratio,
+        );
         let windows: Vec<Vec<f32>> = buffered
             .channel_states
             .iter()
@@ -1091,13 +1104,21 @@ impl DspWorker {
                     return None;
                 };
                 (
-                    channel_windows_ending_at(buffers, buffered.end_ns, owned.classification_window_sec),
+                    channel_windows_ending_at(
+                        buffers,
+                        buffered.end_ns,
+                        owned.classification_window_sec,
+                    ),
                     channel_windows_ending_at_with_gap_concealment(
                         buffers,
                         buffered.end_ns,
                         owned.classification_window_sec,
                     ),
-                    channel_coverage_ending_at(buffers, buffered.end_ns, owned.classification_window_sec),
+                    channel_coverage_ending_at(
+                        buffers,
+                        buffered.end_ns,
+                        owned.classification_window_sec,
+                    ),
                 )
             } else {
                 (
@@ -1106,11 +1127,16 @@ impl DspWorker {
                     buffered.channel_states.iter().map(|_| None).collect(),
                 )
             };
-        let (classifier_render_start_ns, classifier_render_end_ns) = if timing_gates.run_classifier_render {
-            classifier_render_bounds_from_windows(buffered.end_ns, &classification_windows, owned.sr)
-        } else {
-            (None, None)
-        };
+        let (classifier_render_start_ns, classifier_render_end_ns) =
+            if timing_gates.run_classifier_render {
+                classifier_render_bounds_from_windows(
+                    buffered.end_ns,
+                    &classification_windows,
+                    owned.sr,
+                )
+            } else {
+                (None, None)
+            };
 
         Some(ComputePayload {
             manifest: owned.manifest,
@@ -1133,7 +1159,8 @@ impl DspWorker {
             run_srp: timing_gates.run_srp,
             run_classifier_render: timing_gates.run_classifier_render,
             skip_localization_result: false,
-            omni_fallback_reason: (owned.channel_count < 4).then(|| "single_point_node".to_string()),
+            omni_fallback_reason: (owned.channel_count < 4)
+                .then(|| "single_point_node".to_string()),
             omni_channels_override: None,
             listenable_omni_channels_override: None,
             manifest_store: self.manifest_store.clone(),
@@ -1270,8 +1297,7 @@ impl DspWorker {
     /// Mirrors the leases.rs `purge_expired_*` idiom. Called once per minute from
     /// `run_loop` to prevent RSS growth from node-ID churn (reflash, hostname change).
     async fn purge_stale_streams(&mut self) {
-        let ttl_ns =
-            (self.config.stream_inactivity_evict_seconds as u128) * 1_000_000_000;
+        let ttl_ns = (self.config.stream_inactivity_evict_seconds as u128) * 1_000_000_000;
         let now_ns = system_now_ns();
         let cutoff = now_ns.saturating_sub(ttl_ns);
         let stale: Vec<String> = self
@@ -1301,8 +1327,7 @@ impl DspWorker {
         }
         let evicted = stale.len() as u64;
         let mut st = self.state.write().await;
-        st.total_stale_streams_evicted =
-            st.total_stale_streams_evicted.saturating_add(evicted);
+        st.total_stale_streams_evicted = st.total_stale_streams_evicted.saturating_add(evicted);
         info!(count = evicted, "Evicted stale per-stream entries");
     }
 
@@ -1502,11 +1527,8 @@ async fn publish_raw_audio_frame_event(request: RawAudioFramePublishRequest<'_>)
     // is present at this point, so coverage is all-true. Matches Python's
     // AudioCoverageStats.to_json() 9-field shape at audio_buffer.py:30.
     let frame_coverage = vec![true; sample_count];
-    let coverage_stats_json = serde_json::to_value(coverage_stats(
-        &frame_coverage,
-        sample_rate_hz.max(1),
-    ))
-    .ok();
+    let coverage_stats_json =
+        serde_json::to_value(coverage_stats(&frame_coverage, sample_rate_hz.max(1))).ok();
     let raw_manifest = DspManifest {
         manifest_id: format!("raw-audio-{}", source_manifest.manifest_id),
         manifest_type: "raw_audio_frame".to_string(),
@@ -1692,13 +1714,11 @@ fn resolve_localization_center_time_ns(
     let unclamped_center_time_ns = end_ns.saturating_sub(half_window_duration_ns);
     let centered_window_start_limit_ns =
         buffered_range_start_ns.saturating_add(half_window_duration_ns);
-    let centered_window_end_limit_ns = buffered_range_end_ns.saturating_sub(half_window_duration_ns);
+    let centered_window_end_limit_ns =
+        buffered_range_end_ns.saturating_sub(half_window_duration_ns);
 
     if centered_window_start_limit_ns <= centered_window_end_limit_ns {
-        unclamped_center_time_ns.clamp(
-            centered_window_start_limit_ns,
-            centered_window_end_limit_ns,
-        )
+        unclamped_center_time_ns.clamp(centered_window_start_limit_ns, centered_window_end_limit_ns)
     } else {
         unclamped_center_time_ns
     }
@@ -1791,7 +1811,9 @@ fn eligible_coverage_channels(
 /// Extract per-channel mic positions from a manifest, checking cluster positions
 /// first, then falling back to node_context.node.sensor_offsets_m, and finally
 /// to the hardcoded Sirith tetrahedral positions for legacy payloads.
-pub(crate) fn mic_positions_from_manifest(manifest: &crate::manifests::DspManifest) -> Vec<[f32; 3]> {
+pub(crate) fn mic_positions_from_manifest(
+    manifest: &crate::manifests::DspManifest,
+) -> Vec<[f32; 3]> {
     // Cluster-resolved positions are authoritative when present.
     if let Some(ref cluster_pos) = manifest.cluster_sensor_positions {
         if !cluster_pos.is_empty() {
@@ -1803,7 +1825,9 @@ pub(crate) fn mic_positions_from_manifest(manifest: &crate::manifests::DspManife
 
 /// Extract per-channel mic positions from node_context.node.sensor_offsets_m.
 /// Falls back to the hardcoded Sirith tetrahedral positions if absent.
-pub(crate) fn mic_positions_from_node_context(node_context: &Option<serde_json::Value>) -> Vec<[f32; 3]> {
+pub(crate) fn mic_positions_from_node_context(
+    node_context: &Option<serde_json::Value>,
+) -> Vec<[f32; 3]> {
     let positions = node_context
         .as_ref()
         .and_then(|ctx| ctx.get("node"))
@@ -1964,8 +1988,8 @@ fn manifest_is_older_than_buffer_horizon(
     // gating is meant to protect live buffering from old queue backlog, so
     // a manifest that just arrived should not be dropped solely because its
     // embedded capture epoch is old.
-    let freshness_anchor_ns = newest_received_ns
-        .unwrap_or_else(|| newest_source_ns.max(manifest.created_ns));
+    let freshness_anchor_ns =
+        newest_received_ns.unwrap_or_else(|| newest_source_ns.max(manifest.created_ns));
     now_ns.saturating_sub(freshness_anchor_ns) > horizon_ns
 }
 

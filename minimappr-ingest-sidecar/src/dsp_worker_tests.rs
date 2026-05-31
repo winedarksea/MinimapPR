@@ -21,9 +21,7 @@ use tokio::sync::RwLock;
 fn sine_wave(frequency_hz: f64, sample_rate_hz: u32, samples: usize) -> Vec<f32> {
     let fs = f64::from(sample_rate_hz);
     (0..samples)
-        .map(|i| {
-            (2.0 * std::f64::consts::PI * frequency_hz * (i as f64) / fs).sin() as f32
-        })
+        .map(|i| (2.0 * std::f64::consts::PI * frequency_hz * (i as f64) / fs).sin() as f32)
         .collect()
 }
 
@@ -277,7 +275,6 @@ fn multi_stage_chain_applies_in_order() {
         "expected ~0.5× attenuation through gain+HP+LP at 1 kHz, got {attenuation}"
     );
 }
-
 
 #[test]
 fn mic_positions_from_manifest_prefers_cluster_sensor_positions() {
@@ -1333,15 +1330,12 @@ fn resolve_localization_center_time_skips_invalid_clamp_when_buffer_is_shorter_t
             .unwrap();
     }
 
-    let center_time_ns = resolve_localization_center_time_ns(
-        &buffers,
-        start_time_ns,
-        end_time_ns,
-        window_seconds,
-    );
+    let center_time_ns =
+        resolve_localization_center_time_ns(&buffers, start_time_ns, end_time_ns, window_seconds);
     assert_eq!(center_time_ns, start_time_ns);
 
-    let channel_states = localization_channel_states_centered(&buffers, center_time_ns, window_seconds);
+    let channel_states =
+        localization_channel_states_centered(&buffers, center_time_ns, window_seconds);
     assert!(channel_states.iter().all(|state| state.coverage.is_none()));
     assert!(channel_states.iter().all(|state| state.window.is_empty()));
 }
@@ -1729,25 +1723,52 @@ async fn purge_stale_streams_removes_idle_stream_entries() {
     let now_ns = system_now_ns();
     let two_hours_ago = now_ns.saturating_sub(2 * 3600 * 1_000_000_000);
 
-    worker.last_heartbeat_ns_by_stream.insert(old_key.clone(), two_hours_ago);
-    worker.last_heartbeat_ns_by_stream.insert(live_key.clone(), now_ns);
-    worker.last_localization_ns_by_stream.insert(old_key.clone(), two_hours_ago);
-    worker.last_localization_ns_by_stream.insert(live_key.clone(), now_ns);
-    worker.last_trigger_ns_by_stream.insert(old_key.clone(), two_hours_ago);
-    worker.last_trigger_ns_by_stream.insert(live_key.clone(), now_ns);
-    worker.last_classifier_render_ns_by_stream.insert(old_key.clone(), two_hours_ago);
-    worker.last_classifier_render_ns_by_stream.insert(live_key.clone(), now_ns);
+    worker
+        .last_heartbeat_ns_by_stream
+        .insert(old_key.clone(), two_hours_ago);
+    worker
+        .last_heartbeat_ns_by_stream
+        .insert(live_key.clone(), now_ns);
+    worker
+        .last_localization_ns_by_stream
+        .insert(old_key.clone(), two_hours_ago);
+    worker
+        .last_localization_ns_by_stream
+        .insert(live_key.clone(), now_ns);
+    worker
+        .last_trigger_ns_by_stream
+        .insert(old_key.clone(), two_hours_ago);
+    worker
+        .last_trigger_ns_by_stream
+        .insert(live_key.clone(), now_ns);
+    worker
+        .last_classifier_render_ns_by_stream
+        .insert(old_key.clone(), two_hours_ago);
+    worker
+        .last_classifier_render_ns_by_stream
+        .insert(live_key.clone(), now_ns);
 
     // TTL is 1h (3600s default); old stream (2h) should be evicted, live stream kept.
     worker.purge_stale_streams().await;
 
-    assert!(!worker.last_heartbeat_ns_by_stream.contains_key(&old_key), "stale stream should be evicted");
-    assert!(worker.last_heartbeat_ns_by_stream.contains_key(&live_key), "live stream should be retained");
+    assert!(
+        !worker.last_heartbeat_ns_by_stream.contains_key(&old_key),
+        "stale stream should be evicted"
+    );
+    assert!(
+        worker.last_heartbeat_ns_by_stream.contains_key(&live_key),
+        "live stream should be retained"
+    );
     assert!(!worker.last_localization_ns_by_stream.contains_key(&old_key));
-    assert!(worker.last_localization_ns_by_stream.contains_key(&live_key));
+    assert!(worker
+        .last_localization_ns_by_stream
+        .contains_key(&live_key));
 
     let st = worker.state.read().await;
-    assert_eq!(st.total_stale_streams_evicted, 1, "eviction counter should be 1");
+    assert_eq!(
+        st.total_stale_streams_evicted, 1,
+        "eviction counter should be 1"
+    );
 }
 
 #[tokio::test]
@@ -1758,13 +1779,19 @@ async fn purge_stale_streams_keeps_all_when_none_idle() {
     let now_ns = system_now_ns();
     for i in 0..3 {
         let key = format!("node-{i}__audio_main__0000");
-        worker.last_heartbeat_ns_by_stream.insert(key.clone(), now_ns);
+        worker
+            .last_heartbeat_ns_by_stream
+            .insert(key.clone(), now_ns);
         worker.last_localization_ns_by_stream.insert(key, now_ns);
     }
 
     worker.purge_stale_streams().await;
 
-    assert_eq!(worker.last_heartbeat_ns_by_stream.len(), 3, "no streams should be evicted");
+    assert_eq!(
+        worker.last_heartbeat_ns_by_stream.len(),
+        3,
+        "no streams should be evicted"
+    );
     let st = worker.state.read().await;
     assert_eq!(st.total_stale_streams_evicted, 0);
 }
@@ -1782,11 +1809,15 @@ async fn purge_stale_streams_evicts_node_audio_state_when_all_channels_gone() {
         let key = format!("stale-node__audio_main__{ch:04x}");
         worker.last_heartbeat_ns_by_stream.insert(key, stale_ns);
     }
-    worker.node_audio_state.insert("stale-node".to_string(), NodeAudioState::default());
+    worker
+        .node_audio_state
+        .insert("stale-node".to_string(), NodeAudioState::default());
 
     worker.purge_stale_streams().await;
 
     assert!(worker.last_heartbeat_ns_by_stream.is_empty());
-    assert!(!worker.node_audio_state.contains_key("stale-node"),
-        "node_audio_state should be removed when all its streams are evicted");
+    assert!(
+        !worker.node_audio_state.contains_key("stale-node"),
+        "node_audio_state should be removed when all its streams are evicted"
+    );
 }

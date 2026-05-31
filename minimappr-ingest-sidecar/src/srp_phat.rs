@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     dsp_worker::PairTdoa,
-    gcc_phat::{GccPhatCorrelation, pair_max_tau_s, phat_correlation},
+    gcc_phat::{pair_max_tau_s, phat_correlation, GccPhatCorrelation},
 };
 
 const EPSILON: f32 = 1e-9;
@@ -181,18 +181,20 @@ pub fn estimate_tetrahedral_steering(
                 && far.residual_rms_seconds.is_finite()
                 && far.residual_rms_seconds <= (near.residual_rms_seconds * 0.8) =>
         {
-            Some(near_field_candidate(
-                &ordered_channels,
-                &pair_observations,
-                reference_channel,
-                &measured_tdoa,
-                mic_positions_m,
-                sample_rate_hz,
-                sound_speed_mps,
-                config,
-                true,
+            Some(
+                near_field_candidate(
+                    &ordered_channels,
+                    &pair_observations,
+                    reference_channel,
+                    &measured_tdoa,
+                    mic_positions_m,
+                    sample_rate_hz,
+                    sound_speed_mps,
+                    config,
+                    true,
+                )
+                .unwrap_or(near),
             )
-            .unwrap_or(near))
         }
         (candidate, _) => candidate,
     };
@@ -218,7 +220,10 @@ pub fn estimate_tetrahedral_steering(
     let confidence = ((0.6 * fit_score)
         + (0.25 * peak_score.clamp(0.0, 1.0))
         + (0.15 * candidate.contrast_score.clamp(0.0, 1.0)))
-        * candidate.range_observability.unwrap_or(1.0).clamp(0.35, 1.0);
+        * candidate
+            .range_observability
+            .unwrap_or(1.0)
+            .clamp(0.35, 1.0);
 
     SrpPhatEvaluation {
         localization: SrpPhatLocalization {
@@ -500,9 +505,11 @@ fn near_field_candidate(
     let timing_resolution_seconds =
         1.0 / (sample_rate_hz.max(1) as f32 * config.interp_factor.max(1) as f32);
     let (mins, maxs) = padded_bounds(active_channels, mic_positions_m, config.search_padding_m);
-    let boundary_clamped = is_boundary_clamped(best_position_m, mins, maxs, config.grid_resolution_m)
-        && !is_well_inside_bounds(refined_position_m, mins, maxs, config.grid_resolution_m);
-    let boundary_radius_m = magnitude(sub(best_position_m, centroid_m)).max(config.grid_resolution_m.max(0.05));
+    let boundary_clamped =
+        is_boundary_clamped(best_position_m, mins, maxs, config.grid_resolution_m)
+            && !is_well_inside_bounds(refined_position_m, mins, maxs, config.grid_resolution_m);
+    let boundary_radius_m =
+        magnitude(sub(best_position_m, centroid_m)).max(config.grid_resolution_m.max(0.05));
 
     if boundary_clamped && allow_boundary_escape {
         const BOUNDARY_ESCAPE_SEED_SCALES: [f32; 4] = [2.0, 4.0, 8.0, 16.0];
@@ -630,8 +637,9 @@ fn select_candidate(
 ) -> Option<LocalizationCandidate> {
     match (near_field_candidate, far_field_candidate) {
         (Some(near), Some(far)) => {
-            let minimum_residual_improvement_seconds =
-                near.timing_resolution_seconds.max(far.timing_resolution_seconds);
+            let minimum_residual_improvement_seconds = near
+                .timing_resolution_seconds
+                .max(far.timing_resolution_seconds);
             let far_improves_enough = if far.range_projection_mode == Some("prior_projected")
                 && near.residual_rms_seconds.is_finite()
             {
@@ -773,7 +781,11 @@ fn fit_far_field_range(
         }
     }
     let radius_m = if fc.is_finite() || fd.is_finite() {
-        if fc <= fd { c_m } else { d_m }
+        if fc <= fd {
+            c_m
+        } else {
+            d_m
+        }
     } else {
         default_range_m
     };
@@ -820,8 +832,7 @@ fn fit_far_field_range(
         &(0..mic_positions_m.len()).collect::<Vec<_>>(),
         mic_positions_m,
     );
-    let geometric_range_observability =
-        aperture_m / radius_m.abs().max(aperture_m).max(1.0);
+    let geometric_range_observability = aperture_m / radius_m.abs().max(aperture_m).max(1.0);
     let range_observability = (range_scale_m / (range_scale_m + radial_std_m))
         .min(geometric_range_observability)
         .clamp(0.0, 1.0);
@@ -1096,8 +1107,8 @@ fn position_covariance_and_observability(
     let lateral_variance_m2 = ((trace - radial_variance_m2) * 0.5).max(EPSILON);
     let range_observability = (lateral_variance_m2
         / radial_variance_m2.max(lateral_variance_m2).max(EPSILON))
-        .sqrt()
-        .clamp(0.0, 1.0);
+    .sqrt()
+    .clamp(0.0, 1.0);
     (covariance_m2, range_observability)
 }
 
@@ -1449,7 +1460,8 @@ mod tests {
         ];
         let source_position_m = [1.5, 0.6, 0.4];
         let channel_count = 8_640_usize;
-        let channels = synthesize_point_source_channels(source_position_m, &mics, 48_000, channel_count);
+        let channels =
+            synthesize_point_source_channels(source_position_m, &mics, 48_000, channel_count);
         let evaluation = estimate_tetrahedral_steering(
             &channels,
             &[0, 1, 2, 3],
@@ -1510,7 +1522,10 @@ mod tests {
             config,
         );
 
-        let recovered_position_m = evaluation.localization.position_m.expect("mid-range position");
+        let recovered_position_m = evaluation
+            .localization
+            .position_m
+            .expect("mid-range position");
         let array_centroid_m = centroid(&[0, 1, 2, 3], &mics);
         let expected_direction = normalize_or_zero(sub(source_position_m, array_centroid_m));
         let recovered_direction = normalize_or_zero(sub(recovered_position_m, array_centroid_m));
@@ -1523,7 +1538,10 @@ mod tests {
             near_candidate,
             far_candidate,
         );
-        assert_ne!(evaluation.localization.range_projection_mode.as_deref(), Some("prior_projected"));
+        assert_ne!(
+            evaluation.localization.range_projection_mode.as_deref(),
+            Some("prior_projected")
+        );
     }
 
     #[test]
@@ -1536,7 +1554,8 @@ mod tests {
         ];
         let source_position_m = [4.0, -2.0, 1.0];
         let channel_count = 8_640_usize;
-        let channels = synthesize_point_source_channels(source_position_m, &mics, 48_000, channel_count);
+        let channels =
+            synthesize_point_source_channels(source_position_m, &mics, 48_000, channel_count);
         let evaluation = estimate_tetrahedral_steering(
             &channels,
             &[0, 1, 2, 3],
@@ -1598,7 +1617,10 @@ mod tests {
             config,
         );
 
-        let recovered_position_m = evaluation.localization.position_m.expect("far-edge position");
+        let recovered_position_m = evaluation
+            .localization
+            .position_m
+            .expect("far-edge position");
         let array_centroid_m = centroid(&[0, 1, 2, 3], &mics);
         let expected_direction = normalize_or_zero(sub(source_position_m, array_centroid_m));
         let recovered_direction = normalize_or_zero(sub(recovered_position_m, array_centroid_m));
@@ -1613,7 +1635,10 @@ mod tests {
             near_candidate,
             far_candidate,
         );
-        assert_ne!(evaluation.localization.range_projection_mode.as_deref(), Some("prior_projected"));
+        assert_ne!(
+            evaluation.localization.range_projection_mode.as_deref(),
+            Some("prior_projected")
+        );
     }
 
     #[test]
@@ -1655,7 +1680,10 @@ mod tests {
 
         let selected_interior = select_candidate(Some(near_interior), Some(marginal_far))
             .expect("interior near candidate");
-        assert_eq!(selected_interior.range_projection_mode, Some("range_refined"));
+        assert_eq!(
+            selected_interior.range_projection_mode,
+            Some("range_refined")
+        );
     }
 
     #[test]

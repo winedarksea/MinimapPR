@@ -21,13 +21,13 @@ mod runtime;
 mod srp_phat;
 mod storage_class;
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use std::collections::HashMap;
 
 use actors::environment::EnvironmentCache;
 use axum::{
@@ -52,7 +52,7 @@ use journal_reader::JournalPayloadHandle;
 use leases::{PinKind, PinLeaseRequest, PinTargetKind};
 use render_mvdr::{render_mvdr, MvdrRenderRequest, TrajectoryWaypoint};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, OwnedSemaphorePermit, RwLock, Semaphore};
 use tokio_stream::StreamExt;
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
@@ -73,6 +73,7 @@ const OVERLOAD_RETRY_AFTER_SECONDS: &str = "1";
 const DSP_EVENT_CHANNEL_CAPACITY: usize = 4096;
 const DSP_EVENT_REPLAY_CAPACITY: usize = 512;
 const DSP_RESULTS_RECENT_CAPACITY: usize = 50;
+const DEFAULT_MAX_DSP_SSE_CLIENTS: usize = 8;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "MinimapPR firmware ingest sidecar")]
@@ -128,9 +129,16 @@ struct Args {
     #[arg(
         long,
         env = "MINIMAPPR_SIDECAR_MEMORY_ONLY_LIVE_PATH",
-        default_value_t = false
+        default_value_t = true
     )]
     memory_only_live_path: bool,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_SIDECAR_MAX_DSP_SSE_CLIENTS",
+        default_value_t = DEFAULT_MAX_DSP_SSE_CLIENTS
+    )]
+    max_dsp_sse_clients: usize,
 
     #[arg(
         long,
@@ -341,6 +349,8 @@ struct AppState {
     env_cache: EnvironmentCache,
     raw_manifest_queue_backpressure: Arc<RawManifestQueueBackpressure>,
     dsp_event_publisher: DspEventPublisher,
+    dsp_sse_client_permits: Arc<Semaphore>,
+    dsp_sse_client_limit: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -511,6 +521,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         env_cache,
         raw_manifest_queue_backpressure,
         dsp_event_publisher,
+        dsp_sse_client_permits: Arc::new(Semaphore::new(args.max_dsp_sse_clients.max(1))),
+        dsp_sse_client_limit: args.max_dsp_sse_clients.max(1),
     };
 
     let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
@@ -894,6 +906,8 @@ struct DspStatusResponse {
     raw_manifest_queue_depth: usize,
     raw_manifest_queue_bytes: usize,
     raw_manifest_queue_byte_limit: usize,
+    dsp_sse_active_clients: usize,
+    dsp_sse_client_limit: usize,
     total_localization_attempts: u64,
     total_classification_attempts: u64,
     total_tdoa_results: u64,
@@ -921,6 +935,10 @@ async fn dsp_status(State(state): State<AppState>) -> Response {
         raw_manifest_queue_depth: state.raw_manifest_queue_backpressure.queued_messages(),
         raw_manifest_queue_bytes: state.raw_manifest_queue_backpressure.queued_bytes(),
         raw_manifest_queue_byte_limit: state.raw_manifest_queue_backpressure.byte_limit(),
+        dsp_sse_active_clients: state
+            .dsp_sse_client_limit
+            .saturating_sub(state.dsp_sse_client_permits.available_permits()),
+        dsp_sse_client_limit: state.dsp_sse_client_limit,
         total_localization_attempts: st.total_localization_attempts,
         total_classification_attempts: st.total_classification_attempts,
         total_tdoa_results: st.total_tdoa_results,
@@ -1068,12 +1086,11 @@ async fn dsp_results(
 /// SSE endpoint that streams DSP result manifests
 /// (localization_result, classifier_render, env_sample_append)
 /// to Python consumers in real-time, bypassing the filesystem entirely.
-async fn dsp_stream(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Sse<
-    impl tokio_stream::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
-> {
+async fn dsp_stream(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let sse_client_permit = match state.dsp_sse_client_permits.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => return overload_response("too many DSP SSE clients".to_string()),
+    };
     let last_event_id = headers
         .get("last-event-id")
         .and_then(|value| value.to_str().ok())
@@ -1089,7 +1106,8 @@ async fn dsp_stream(
         .map(|event| event.event_id)
         .or(last_event_id)
         .unwrap_or(0);
-    let mut replay_events = Vec::new();
+    let mut replay_events: Vec<Result<axum::response::sse::Event, std::convert::Infallible>> =
+        Vec::new();
     if replay_window.gap_detected {
         let data = serde_json::json!({
             "requested_after": last_event_id,
@@ -1112,6 +1130,7 @@ async fn dsp_stream(
             rx,
             last_delivered_event_id: replayed_through_event_id,
             close_after_yield: false,
+            _client_permit: sse_client_permit,
         },
         |mut stream_state| async move {
             if stream_state.close_after_yield {
@@ -1140,15 +1159,18 @@ async fn dsp_stream(
         },
     );
     let stream = replay_stream.chain(live_stream);
-    Sse::new(stream).keep_alive(
-        axum::response::sse::KeepAlive::new().interval(std::time::Duration::from_secs(15)),
-    )
+    Sse::new(stream)
+        .keep_alive(
+            axum::response::sse::KeepAlive::new().interval(std::time::Duration::from_secs(15)),
+        )
+        .into_response()
 }
 
 struct LiveDspEventStreamState {
     rx: tokio::sync::broadcast::Receiver<ReplayableDspEvent>,
     last_delivered_event_id: u64,
     close_after_yield: bool,
+    _client_permit: OwnedSemaphorePermit,
 }
 
 fn replayable_dsp_event_to_sse(event: ReplayableDspEvent) -> Option<axum::response::sse::Event> {

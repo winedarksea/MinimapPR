@@ -86,7 +86,8 @@ impl SensorStreamBuffer {
         if self.timeline_origin_ns.is_none() || self.samples.is_empty() {
             return None;
         }
-        self.sample_index_to_time_ns(self.buffer_start_sample_index).ok()
+        self.sample_index_to_time_ns(self.buffer_start_sample_index)
+            .ok()
     }
 
     fn sample_len(&self) -> usize {
