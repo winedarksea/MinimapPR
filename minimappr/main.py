@@ -97,6 +97,8 @@ from minimappr.models import (
     AlertStatus,
     BITReport,
     BITReportIn,
+    BITStatus,
+    BITTestResult,
     BITType,
     ClusterSpec,
     ContextSnapshot,
@@ -1526,6 +1528,65 @@ async def ingest_binary(request: Request) -> StoreForwardIngestResponse:
         ) from exc
 
 
+async def _emit_runner_cbit(state, node_id: str, delta: dict, timing_diag: dict) -> None:
+    """Submit a CBIT report on behalf of a node when firmware drop counters increase."""
+    new_overflows = delta["new_queue_overflows"]
+    total_overflows = delta["total_queue_overflows"]
+    results: list[BITTestResult] = [
+        BITTestResult(
+            test_name="publish_queue",
+            status=BITStatus.DEGRADED,
+            failure_code="CBIT_WARN: PUBLISH_QUEUE_OVERFLOW",
+            detail=(
+                f"{new_overflows} new firmware publish-queue overflow(s) detected "
+                f"({total_overflows} total since boot)"
+            ),
+            measured_value=float(new_overflows),
+            subsystem="audio",
+        )
+    ]
+    frames_dropped = int(timing_diag.get("runner_frames_dropped") or 0)
+    if frames_dropped:
+        results.append(BITTestResult(
+            test_name="audio_capture",
+            status=BITStatus.DEGRADED,
+            failure_code="CBIT_WARN: AUDIO_CAPTURE_DROPPED",
+            detail=f"{frames_dropped} total audio capture drops since boot",
+            measured_value=float(frames_dropped),
+            subsystem="audio",
+        ))
+    now_ns = time.time_ns()
+    report_in = BITReportIn(
+        report_type=BITType.CBIT,
+        timestamp_ns=now_ns,
+        results=results,
+    )
+    report = await state.bit_evaluator.submit_report(node_id, report_in, received_ns=now_ns)
+    await state.storage.insert_bit_report(
+        report_id=report.id,
+        node_id=report.node_id,
+        report_type=report.report_type.value,
+        overall_status=report.overall_status.value,
+        timestamp_ns=report.timestamp_ns,
+        received_ns=report.received_ns,
+        results_json=json.dumps([r.model_dump(mode="json") for r in report.results]),
+        failure_codes_json=json.dumps(report.failure_codes),
+        firmware_version=report.firmware_version,
+        uptime_seconds=report.uptime_seconds,
+        metadata_json=json.dumps(report.metadata),
+    )
+    await state.live_hub.broadcast(
+        {
+            "type": "bit_report",
+            "node_id": node_id,
+            "report_type": report.report_type.value,
+            "overall_status": report.overall_status.value,
+            "failure_codes": report.failure_codes,
+            "timestamp_ns": report.timestamp_ns,
+        }
+    )
+
+
 async def _ingest_binary_impl(state, request: Request) -> StoreForwardIngestResponse:
     if _should_proxy_ingest_to_python_worker(state):
         body = await request.body()
@@ -1543,6 +1604,7 @@ async def _ingest_binary_impl(state, request: Request) -> StoreForwardIngestResp
         payload = await asyncio.to_thread(parse_binary_ingest_payload, body)
         results = []
         if payload.buffered_frames:
+            last_timing_diag: dict | None = None
             for item in payload.buffered_frames:
                 req = IngestFrameRequest(
                     node=payload.node,
@@ -1559,6 +1621,14 @@ async def _ingest_binary_impl(state, request: Request) -> StoreForwardIngestResp
                     frame_energy=resp.frame_energy,
                     queued_event_id=resp.queued_event_id,
                 ))
+                if item.frame.timing_diagnostics:
+                    last_timing_diag = item.frame.timing_diagnostics
+            if last_timing_diag and payload.node.id:
+                drop_delta = state.fusion_node.observe_firmware_runner_stats(
+                    payload.node.id, last_timing_diag
+                )
+                if drop_delta:
+                    await _emit_runner_cbit(state, payload.node.id, drop_delta, last_timing_diag)
         else:
             # Heartbeat-only payload: touch last_seen so the node stays online.
             # Must go through _normalize_node_spec so position_m is always set

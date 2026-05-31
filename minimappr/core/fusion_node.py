@@ -168,6 +168,9 @@ class FusionMetrics:
     environment_samples_ingested: int = 0
     environment_samples_persisted: int = 0
     localization_fallback_count: int = 0
+    localization_tier_full_3d_count: int = 0
+    localization_tier_2d_count: int = 0
+    localization_config_bypassed_count: int = 0
     localization_band_aliased_count: int = 0
     localization_prior_projected_count: int = 0
     localization_covariance_missing_count: int = 0
@@ -341,6 +344,9 @@ class FusionNode:
         self._last_error: str | None = None
         self._started = False
         self._stopping = False
+        # Per-node baseline of firmware runner_queue_overflows, used to detect
+        # new publish-queue drops between successive ingest frames.
+        self._last_firmware_overflows: dict[str, int] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -657,6 +663,34 @@ class FusionNode:
             "drop_on_backpressure": self.fusion_config.drop_on_backpressure,
             "buffer_state": buffer_state,
             "health": health,
+        }
+
+    def observe_firmware_runner_stats(
+        self,
+        node_id: str,
+        timing_diagnostics: dict,
+    ) -> dict | None:
+        """Compare current firmware queue-overflow counter against the stored baseline.
+
+        Returns a delta dict on first new overflow (to trigger a CBIT report),
+        or None if no new drops since last call.  Always updates the baseline.
+        First call for a node establishes the baseline without returning a delta.
+        """
+        overflows = int(timing_diagnostics.get("runner_queue_overflows") or 0)
+        dropped = int(timing_diagnostics.get("runner_frames_dropped") or 0)
+
+        last = self._last_firmware_overflows.get(node_id)
+        self._last_firmware_overflows[node_id] = overflows
+        if last is None:
+            return None
+
+        delta = overflows - last
+        if delta <= 0:
+            return None
+        return {
+            "new_queue_overflows": delta,
+            "total_queue_overflows": overflows,
+            "total_frames_dropped": dropped,
         }
 
     def _compute_health_snapshot(self, *, now_ns: int) -> dict[str, Any]:
@@ -1087,6 +1121,7 @@ class FusionNode:
         weight_kwargs: dict = {"sensor_weights": sensor_weights} if sensor_weights is not None else {}
         localization_branch: LocalizationBranch | None = None
         if tier == "full_3d":
+            self._metrics.localization_tier_full_3d_count += 1
             try:
                 localization = await asyncio.to_thread(
                     self.localizer.localize,
@@ -1106,6 +1141,9 @@ class FusionNode:
             except LocalizationError:
                 self._metrics.localization_failures += 1
         elif tier == "2d" and hasattr(self.localizer, "localize_2d"):
+            self._metrics.localization_tier_2d_count += 1
+            if getattr(self.localizer, "default_algorithm", "gcc_phat") != "gcc_phat":
+                self._metrics.localization_config_bypassed_count += 1
             try:
                 mean_z = float(np.mean([pos[2] for pos in selected_positions.values()]))
                 localization = await asyncio.to_thread(

@@ -58,6 +58,8 @@ class LocalizationDispatcher:
     _last_algorithm: str = field(init=False, default="gcc_phat", repr=False)
     _last_attempted: str = field(init=False, default="gcc_phat", repr=False)
     _fallback_count: int = field(init=False, default=0, repr=False)
+    _config_bypassed_count: int = field(init=False, default=0, repr=False)
+    _config_bypass_warned: bool = field(init=False, default=False, repr=False)
 
     def __post_init__(self) -> None:
         if "gcc_phat" not in self.algorithms:
@@ -70,6 +72,8 @@ class LocalizationDispatcher:
         self._last_algorithm = "gcc_phat"
         self._last_attempted = "gcc_phat"
         self._fallback_count = 0
+        self._config_bypassed_count = 0
+        self._config_bypass_warned = False
 
     def last_algorithm_name(self) -> str:
         return self._last_algorithm
@@ -79,6 +83,9 @@ class LocalizationDispatcher:
 
     def fallback_count(self) -> int:
         return self._fallback_count
+
+    def config_bypassed_count(self) -> int:
+        return self._config_bypassed_count
 
     def _normalized_strategy(self) -> str:
         return self.strategy.strip().lower()
@@ -140,6 +147,15 @@ class LocalizationDispatcher:
                 sensor_weights=sensor_weights,
             )
         self._last_attempted = "gcc_phat"
+        if self.default_algorithm != "gcc_phat":
+            self._config_bypassed_count += 1
+            if not self._config_bypass_warned:
+                self._config_bypass_warned = True
+                logging.getLogger(__name__).warning(
+                    "localize_2d: configured algorithm %r is bypassed — 2D path always uses gcc_phat. "
+                    "Fix the position/geometry before treating this as the correct algorithm.",
+                    self.default_algorithm,
+                )
         if sensor_weights is not None and self._localizer_supports_sensor_weights(
             fallback,
             method_name="localize_2d",
