@@ -2672,6 +2672,22 @@ class Storage:
             await self._commit_if_needed(db)
             return cursor.rowcount > 0
 
+    async def delete_node(self, node_id: str) -> bool:
+        """Delete a node and all of its node-keyed records.
+
+        With ``PRAGMA foreign_keys=ON`` this cascades to ``observations``,
+        ``node_audio_summaries``, ``environment`` and ``bit_reports`` and NULLs
+        ``detections.source_node_id``. ``ingested_frames`` carries no FK
+        constraint, so it is cleaned up explicitly. Returns True if the node row
+        existed.
+        """
+        db = self._require_db()
+        async with self._write_guard():
+            await db.execute("DELETE FROM ingested_frames WHERE node_id = ?", (node_id,))
+            cursor = await db.execute("DELETE FROM nodes WHERE id = ?", (node_id,))
+            await self._commit_if_needed(db)
+            return cursor.rowcount > 0
+
     async def recent_alert_count(self, since_ns: int) -> int:
         db = self._require_db()
         row = await (

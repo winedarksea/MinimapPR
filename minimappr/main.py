@@ -1829,6 +1829,62 @@ async def _runtime_node_health_counts(
 # ------------------------------------------------------------------
 
 
+@app.delete("/api/v1/nodes/{node_id}")
+async def delete_node(node_id: str, request: Request) -> dict:
+    """Delete a stale node and its records from storage and live caches.
+
+    Only nodes that are currently offline may be deleted: an active node would
+    immediately repopulate from its next heartbeat, so deleting it is a no-op
+    that only confuses operators. The check uses the same effective
+    ``last_seen_ns`` (DB row merged with any live sidecar snapshot) as the node
+    list, making the backend authoritative even if a client bypasses the UI.
+    """
+    state = _require_state(request)
+    settings: Settings = state.settings
+    now_ns = time.time_ns()
+
+    db_node = await state.storage.get_node_by_id(node_id)
+    snapshot = _sidecar_stream_consumer_snapshots(state).get(node_id)
+    snapshot_last_seen = getattr(snapshot, "last_seen_ns", None) if snapshot is not None else None
+
+    last_seen_candidates = [
+        value
+        for value in (
+            int(db_node["last_seen_ns"]) if db_node and db_node.get("last_seen_ns") is not None else None,
+            int(snapshot_last_seen) if isinstance(snapshot_last_seen, int) else None,
+        )
+        if value is not None
+    ]
+    effective_last_seen_ns = max(last_seen_candidates) if last_seen_candidates else 0
+
+    if effective_last_seen_ns:
+        health = _heartbeat_health_status(
+            last_seen_ns=effective_last_seen_ns,
+            now_ns=now_ns,
+            degraded_after_seconds=settings.node_degraded_after_seconds,
+            offline_after_seconds=settings.node_offline_after_seconds,
+        )
+        if health != NodeHealthStatus.OFFLINE.value:
+            raise HTTPException(
+                status_code=409,
+                detail="Node is still active; only offline nodes can be deleted.",
+            )
+
+    deleted = await state.storage.delete_node(node_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Node not found")
+
+    # Purge in-memory caches so the deleted node cannot be re-served before the
+    # next poll. A truly-stale node stays gone; a live one would re-register.
+    await state.registry.delete_node(node_id)
+    consumer = getattr(state, "ingest_stream_consumer", None)
+    purge = getattr(consumer, "purge_node", None)
+    if callable(purge):
+        purge(node_id)
+
+    return {"ok": True, "node_id": node_id}
+
+
 @app.post("/api/v1/nodes/{node_id}/bit", response_model=BITReport)
 async def submit_bit_report(
     node_id: str,

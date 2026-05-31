@@ -129,6 +129,15 @@ def _audio_debug_from_context(node_context: dict[str, Any]) -> tuple[int | None,
     )
 
 
+def _peak_channel_rms(channels_first: Any) -> float:
+    """Largest per-channel RMS across a channels-first frame.
+
+    Pulled out as a module-level function so it can run via ``asyncio.to_thread``
+    off the SSE event loop.
+    """
+    return max(rms(channel) for channel in channels_first)
+
+
 def _environment_summary(sample: EnvironmentSampleIn | None) -> dict[str, Any]:
     if sample is None:
         return {}
@@ -167,6 +176,15 @@ class IngestStreamConsumer:
     def snapshot_nodes(self) -> dict[str, SidecarNodeSnapshot]:
         """Return the latest node state derived from sidecar heartbeat manifests."""
         return dict(self._latest_node_snapshots)
+
+    def purge_node(self, node_id: str) -> None:
+        """Drop any cached sidecar snapshot for a node.
+
+        Called after a node is deleted from storage so a lingering snapshot
+        cannot resurrect the row on the next ``/api/v1/nodes`` merge. A node
+        that is still streaming re-populates on its next manifest.
+        """
+        self._latest_node_snapshots.pop(node_id, None)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -387,8 +405,14 @@ class IngestStreamConsumer:
         if start_time_ns is None:
             start_time_ns = _coerce_int(manifest.get("created_ns")) or time.time_ns()
 
+        # Decode (base64 + int16->float) is O(samples) CPU work. The single SSE
+        # consumer serves every node, so running it inline head-of-line blocks
+        # all nodes under multi-node load. Offload to a worker thread, mirroring
+        # the ingest path (core/ingest.py decode/trigger_rms).
         try:
-            channels_first = decode_pcm16le_b64(raw_audio_bytes, channel_count)
+            channels_first = await asyncio.to_thread(
+                decode_pcm16le_b64, raw_audio_bytes, channel_count
+            )
         except ValueError as exc:
             logger.warning("raw_audio_frame PCM decode failed: %s", exc)
             return
@@ -402,11 +426,12 @@ class IngestStreamConsumer:
             )
             end_time_ns = start_time_ns + frame_duration_ns
 
+        peak_rms = await asyncio.to_thread(_peak_channel_rms, channels_first)
         audio_debug_context = dict(node_context)
         audio_debug_context["audio_debug"] = {
             "sample_rate_hz": sample_rate_hz,
             "active_sensor_count": channel_count,
-            "rms": max(rms(channel) for channel in channels_first),
+            "rms": peak_rms,
         }
         self._record_node_snapshot(
             node=node,

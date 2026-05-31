@@ -2,6 +2,7 @@ use crate::state::{AppState, NodeStatus};
 use crate::ui::health_chip_class;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen_futures::spawn_local;
 use web_sys::HtmlAudioElement;
 
 fn sparkline_path(rms: &[f64], width: f64, height: f64) -> String {
@@ -83,6 +84,16 @@ fn NodeCard(node: NodeStatus) -> impl IntoView {
     let node_id = node.node_id.clone();
     let health = node.health.clone();
     let chip_class = health_chip_class(&health);
+
+    // Stale-node deletion lives in the details panel and is only offered for
+    // offline nodes — an active node would just repopulate on the next poll
+    // (and the backend rejects deleting one with 409).
+    let nodes_signal = use_context::<AppState>().expect("AppState").nodes;
+    let health_is_offline = health == "offline";
+    let id_for_delete = node.node_id.clone();
+    let confirm_delete = RwSignal::new(false);
+    let deleting = RwSignal::new(false);
+    let delete_error = RwSignal::new(None::<String>);
 
     let gps_signal = node
         .metadata
@@ -365,6 +376,57 @@ fn NodeCard(node: NodeStatus) -> impl IntoView {
                         }).collect_view()}
                     </div>
                 </div>
+                {health_is_offline.then(move || view! {
+                    <div class="node-delete-row" style="margin-top: 8px">
+                        {move || if confirm_delete.get() {
+                            let id = id_for_delete.clone();
+                            view! {
+                                <div class="row-actions">
+                                    <button
+                                        class="btn-sm btn-sm--danger"
+                                        disabled=move || deleting.get()
+                                        on:click=move |_| {
+                                            deleting.set(true);
+                                            delete_error.set(None);
+                                            let id = id.clone();
+                                            spawn_local(async move {
+                                                match crate::api::delete_node(&id).await {
+                                                    Ok(()) => {
+                                                        nodes_signal.update(|list| {
+                                                            list.retain(|n| n.node_id != id)
+                                                        });
+                                                    }
+                                                    Err(e) => {
+                                                        delete_error.set(Some(e));
+                                                        deleting.set(false);
+                                                        confirm_delete.set(false);
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    >
+                                        {move || if deleting.get() { "Deleting…" } else { "Confirm delete" }}
+                                    </button>
+                                    <button class="btn-sm" on:click=move |_| confirm_delete.set(false)>
+                                        "Cancel"
+                                    </button>
+                                </div>
+                            }.into_any()
+                        } else {
+                            view! {
+                                <button
+                                    class="btn-sm btn-sm--danger"
+                                    on:click=move |_| confirm_delete.set(true)
+                                >
+                                    "Delete stale node"
+                                </button>
+                            }.into_any()
+                        }}
+                        {move || delete_error.get().map(|e| view! {
+                            <p class="row-error">{e}</p>
+                        })}
+                    </div>
+                })}
             </details>
         </div>
     }

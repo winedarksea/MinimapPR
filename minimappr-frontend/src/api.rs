@@ -68,6 +68,30 @@ pub fn start_polling(state: AppState) {
     });
 }
 
+/// Delete an offline node and its records. The backend rejects (409) any node
+/// that is still active, so this only sticks for truly-stale nodes.
+pub async fn delete_node(node_id: &str) -> Result<(), String> {
+    let encoded = js_sys::encode_uri_component(node_id)
+        .as_string()
+        .unwrap_or_default();
+    let url = format!("/api/v1/nodes/{encoded}");
+    let resp = Request::delete(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.ok() || resp.status() == 204 {
+        Ok(())
+    } else {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        Err(if body.is_empty() {
+            format!("HTTP {status}")
+        } else {
+            body
+        })
+    }
+}
+
 pub async fn patch_config(
     updates: serde_json::Value,
 ) -> Result<crate::state::ConfigSnapshot, String> {

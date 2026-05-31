@@ -74,6 +74,23 @@ class NodeRegistry:
                 self._sensors[sensor_id] = descriptor
         return runtime
 
+    async def delete_node(self, node_id: str) -> None:
+        """Drop a node and its sensors from the in-memory registry.
+
+        Used after a node is deleted from storage so a stale entry cannot be
+        re-served. A live node simply re-registers on its next ingest frame.
+        """
+        async with self._lock:
+            self._nodes.pop(node_id, None)
+            stale_sensor_ids = [
+                sensor_id
+                for sensor_id, descriptor in self._sensors.items()
+                if descriptor.node_id == node_id
+            ]
+            for sensor_id in stale_sensor_ids:
+                self._sensors.pop(sensor_id, None)
+                self._latest_observations.pop(sensor_id, None)
+
     async def list_nodes(self) -> list[NodeRuntime]:
         async with self._lock:
             return list(self._nodes.values())
