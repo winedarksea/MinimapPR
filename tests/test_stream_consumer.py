@@ -409,7 +409,6 @@ async def test_stream_consumer_records_environment_and_audio_debug_from_localiza
         ],
     )
 
-    assert transport.environment_samples == []
     assert transport.node_heartbeats == []
 
     snapshot = consumer.snapshot_nodes()["sirith-point-1"]
@@ -421,6 +420,14 @@ async def test_stream_consumer_records_environment_and_audio_debug_from_localiza
     assert snapshot.latest_environment["humidity_fraction"] == pytest.approx(0.44)
     assert snapshot.latest_environment["source"] == "sht45"
     assert snapshot.latest_environment["timestamp_ns"] == 123456790
+
+    # Environment from node_context must be forwarded to the provider, not only
+    # stored in the in-memory snapshot.
+    assert len(transport.environment_samples) == 1
+    env_node_id, env_sample = transport.environment_samples[0]
+    assert env_node_id == "sirith-point-1"
+    assert env_sample.temperature_c == pytest.approx(21.5)
+    assert env_sample.humidity_fraction == pytest.approx(0.44)
 
 
 @pytest.mark.asyncio
@@ -466,10 +473,16 @@ async def test_stream_consumer_keeps_localization_context_in_memory_only() -> No
     )
 
     assert transport.node_heartbeats == []
-    assert transport.environment_samples == []
     snapshot = consumer.snapshot_nodes()["sirith-point-2"]
     assert snapshot.latest_environment["temperature_c"] == pytest.approx(22.0)
     assert snapshot.latest_environment["humidity_fraction"] == pytest.approx(0.4)
+
+    # Environment must be forwarded to the provider, not only kept in the snapshot.
+    assert len(transport.environment_samples) == 1
+    env_node_id, env_sample = transport.environment_samples[0]
+    assert env_node_id == "sirith-point-2"
+    assert env_sample.temperature_c == pytest.approx(22.0)
+    assert env_sample.humidity_fraction == pytest.approx(0.4)
 
 
 @pytest.mark.asyncio

@@ -485,11 +485,16 @@ class IngestStreamConsumer:
         node_audio_time_ns = node_context.get("toa_ns")
         if not isinstance(node_audio_time_ns, int):
             node_audio_time_ns = int(manifest.get("created_ns") or time.time_ns())
-        self._record_node_snapshot(
+        env_sample = self._record_node_snapshot(
             node=node,
             node_context=node_context,
             node_audio_time_ns=node_audio_time_ns,
         )
+        if env_sample is not None:
+            await self._ingest_transport.deliver_environment_sample(
+                node_id=node.id,
+                sample=env_sample,
+            )
 
         # If the manifest carries an embedded classifier_render, deliver it as a
         # localized render so Python gets the full audio + classification bundle.
@@ -538,6 +543,32 @@ class IngestStreamConsumer:
 
     async def _handle_classifier_render(self, manifest: dict[str, Any]) -> None:
         """Deliver a standalone classifier_render manifest."""
+        # Extract node heartbeat + environment from the manifest's node_context.
+        # Mono nodes (single-sensor) skip localization_result entirely, so this
+        # is the only manifest path that carries their env data to the provider.
+        node_context = manifest.get("node_context")
+        if isinstance(node_context, dict):
+            node_payload = node_context.get("node")
+            if isinstance(node_payload, dict):
+                node_payload = _enrich_node_payload_from_context(node_payload, node_context)
+                try:
+                    node = NodeSpec.model_validate(node_payload)
+                    node_audio_time_ns = node_context.get("toa_ns")
+                    if not isinstance(node_audio_time_ns, int):
+                        node_audio_time_ns = int(manifest.get("created_ns") or time.time_ns())
+                    env_sample = self._record_node_snapshot(
+                        node=node,
+                        node_context=node_context,
+                        node_audio_time_ns=node_audio_time_ns,
+                    )
+                    if env_sample is not None:
+                        await self._ingest_transport.deliver_environment_sample(
+                            node_id=node.id,
+                            sample=env_sample,
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("classifier_render node snapshot failed: %s", exc)
+
         try:
             bundle = load_localized_render_manifest_bundle(
                 manifest_payload=manifest,
@@ -561,7 +592,7 @@ class IngestStreamConsumer:
         node: NodeSpec,
         node_context: dict[str, Any],
         node_audio_time_ns: int,
-    ) -> None:
+    ) -> "EnvironmentSampleIn | None":
         sample_rate_hz, active_sensor_count, rms = _audio_debug_from_context(node_context)
         environment_sample = _environment_sample_from_context(
             node_context,
@@ -589,3 +620,4 @@ class IngestStreamConsumer:
                 else existing.latest_environment if existing is not None else {}
             ),
         )
+        return environment_sample
