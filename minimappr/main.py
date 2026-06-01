@@ -2054,11 +2054,12 @@ async def list_detections(
     settings: Settings = state.settings
     effective_limit = min(limit, settings.cop_detections_max_items)
     cutoff_ns = time.time_ns() - int(settings.cop_detections_max_age_seconds * 1_000_000_000)
+    review_state_value = review_state.value if review_state is not None else None
     detections = await state.storage.list_detections(
         limit=effective_limit,
         since_ns=cutoff_ns,
-        min_label_confidence=settings.detection_min_confidence,
-        review_state=review_state.value if review_state is not None else None,
+        min_label_confidence=(None if review_state_value is not None else settings.detection_min_confidence),
+        review_state=review_state_value,
     )
     for detection in detections:
         if detection.get("position_geo") is None and detection.get("position_m"):
@@ -3528,6 +3529,15 @@ def _resolve_snippet_file(snippet_path: str | None, snippet_root: Path) -> Path 
     return snippet_file
 
 
+def _resolve_export_snippet_file(snippet_path: str | None, snippet_root: Path) -> Path | None:
+    if not snippet_path:
+        return None
+    try:
+        return _resolve_snippet_file(snippet_path, snippet_root)
+    except HTTPException:
+        return None
+
+
 @app.get("/api/v1/detections/{detection_id}")
 async def get_detection_by_id(detection_id: str, request: Request) -> dict:
     state = _require_state(request)
@@ -3561,6 +3571,7 @@ async def update_detection_review(
     review_label_id = detection.get("review_label_id")
     review_label = detection.get("review_label")
     review_label_category = detection.get("review_label_category")
+    detection_label_category = detection.get("label_category") or "unknown"
     review_notes = detection.get("review_notes")
     promote_to_training = bool(detection.get("promote_to_training") or False)
 
@@ -3570,23 +3581,31 @@ async def update_detection_review(
             if payload.review_state is not None
             else DetectionReviewState.UNREVIEWED.value
         )
-        if review_state == DetectionReviewState.UNREVIEWED.value:
+        if review_state in {
+            DetectionReviewState.UNREVIEWED.value,
+            DetectionReviewState.REJECTED.value,
+        }:
             if "review_label" not in fields_set:
                 review_label_id = None
                 review_label = None
                 review_label_category = None
             if "promote_to_training" not in fields_set:
                 promote_to_training = False
+        if review_state == DetectionReviewState.UNREVIEWED.value:
             if "review_notes" not in fields_set:
                 review_notes = None
 
     if "review_label" in fields_set:
+        previous_review_label = detection.get("review_label")
         review_label = payload.review_label
         if review_label is None:
             review_label_id = None
             review_label_category = None
-        elif "review_label_category" not in fields_set and not review_label_category:
-            review_label_category = detection.get("label_category") or "unknown"
+        elif "review_label_category" not in fields_set:
+            if review_label != previous_review_label:
+                review_label_category = detection_label_category
+            else:
+                review_label_category = review_label_category or detection_label_category
 
     if "review_label_category" in fields_set:
         review_label_category = payload.review_label_category
@@ -3603,7 +3622,7 @@ async def update_detection_review(
         raise HTTPException(status_code=400, detail="Training promotion requires confirmed review state")
 
     if review_label is not None:
-        review_label_category = review_label_category or detection.get("label_category") or "unknown"
+        review_label_category = review_label_category or detection_label_category
         review_label_id = await state.storage.upsert_label(
             name=review_label,
             category=review_label_category,
@@ -3676,10 +3695,10 @@ async def export_ebird_review_package(
     detections = await state.storage.list_detections(
         limit=limit,
         since_ns=since_ns,
-        min_label_confidence=state.settings.detection_min_confidence,
         review_state=DetectionReviewState.CONFIRMED.value,
     )
     base_url = str(request.base_url).rstrip("/")
+    snippet_root = state.settings.snippet_dir.resolve()
     exported_items: list[ReviewedDetectionExportItem] = []
 
     for detection in detections:
@@ -3696,7 +3715,7 @@ async def export_ebird_review_package(
 
         timestamp_ns = int(detection["timestamp_ns"])
         observed_at_iso = datetime.fromtimestamp(timestamp_ns / 1_000_000_000, tz=timezone.utc).isoformat().replace("+00:00", "Z")
-        has_audio = bool(detection.get("snippet_path"))
+        has_audio = _resolve_export_snippet_file(detection.get("snippet_path"), snippet_root) is not None
         audio_url = f"{base_url}/api/v1/detections/{detection['id']}/audio?download=true" if has_audio else None
         exported_items.append(
             ReviewedDetectionExportItem(

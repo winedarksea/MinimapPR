@@ -365,6 +365,42 @@ def test_detection_review_requires_confirmed_state_for_training_promotion(monkey
         assert response.json()["detail"] == "Training promotion requires confirmed review state"
 
 
+def test_detection_review_can_transition_from_confirmed_to_rejected_without_resending_label(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+
+    with TestClient(app) as client:
+        _ingest_single_frame(client, start_time_ns=time.time_ns())
+        detections = _wait_for_detections(client)
+        assert detections
+        detection_id = detections[0]["id"]
+
+        confirmed = client.patch(
+            f"/api/v1/detections/{detection_id}/review",
+            json={
+                "review_state": "confirmed",
+                "review_label": "song_sparrow",
+                "review_label_category": "bird",
+                "promote_to_training": True,
+            },
+        )
+        assert confirmed.status_code == 200
+
+        rejected = client.patch(
+            f"/api/v1/detections/{detection_id}/review",
+            json={"review_state": "rejected"},
+        )
+        assert rejected.status_code == 200
+        rejected_body = rejected.json()
+        assert rejected_body["review_state"] == "rejected"
+        assert rejected_body["review_label"] is None
+        assert rejected_body["review_label_category"] is None
+        assert rejected_body["review_label_id"] is None
+        assert rejected_body["promote_to_training"] is False
+
+
 def test_detections_endpoint_can_filter_by_review_state(monkeypatch, tmp_path: Path) -> None:
     _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
 
@@ -380,6 +416,8 @@ def test_detections_endpoint_can_filter_by_review_state(monkeypatch, tmp_path: P
         )
         assert review_response.status_code == 200
 
+        client.app.state.settings.detection_min_confidence = 0.999999
+
         confirmed = client.get("/api/v1/detections", params={"limit": 10, "review_state": "confirmed"})
         assert confirmed.status_code == 200
         confirmed_items = confirmed.json()
@@ -389,6 +427,45 @@ def test_detections_endpoint_can_filter_by_review_state(monkeypatch, tmp_path: P
         rejected = client.get("/api/v1/detections", params={"limit": 10, "review_state": "rejected"})
         assert rejected.status_code == 200
         assert rejected.json() == []
+
+
+def test_detection_review_label_change_without_category_does_not_reuse_stale_category(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=3600)
+
+    with TestClient(app) as client:
+        _ingest_single_frame(client, start_time_ns=time.time_ns())
+        detections = _wait_for_detections(client)
+        assert detections
+        detection = detections[0]
+        detection_id = detection["id"]
+        original_label_category = detection["label_category"]
+        assert original_label_category != "bird"
+
+        initial_review = client.patch(
+            f"/api/v1/detections/{detection_id}/review",
+            json={
+                "review_state": "confirmed",
+                "review_label": "song_sparrow",
+                "review_label_category": "bird",
+            },
+        )
+        assert initial_review.status_code == 200
+
+        updated_review = client.patch(
+            f"/api/v1/detections/{detection_id}/review",
+            json={"review_label": "car_alarm"},
+        )
+        assert updated_review.status_code == 200
+        updated_body = updated_review.json()
+        assert updated_body["review_label"] == "car_alarm"
+        assert updated_body["review_label_category"] == original_label_category
+
+        export_response = client.get("/api/v1/exports/ebird", params={"format": "json", "limit": 10})
+        assert export_response.status_code == 200
+        assert export_response.json()["detection_count"] == 0
 
 
 def test_ebird_export_packages_confirmed_reviewed_bird_detections(monkeypatch, tmp_path: Path) -> None:
@@ -412,6 +489,8 @@ def test_ebird_export_packages_confirmed_reviewed_bird_detections(monkeypatch, t
             },
         )
         assert review_response.status_code == 200
+
+        client.app.state.settings.detection_min_confidence = 0.999999
 
         export_response = client.get("/api/v1/exports/ebird", params={"format": "json", "limit": 10})
         assert export_response.status_code == 200
@@ -437,6 +516,43 @@ def test_ebird_export_packages_confirmed_reviewed_bird_detections(monkeypatch, t
         assert csv_response.headers["content-type"].startswith("text/csv")
         assert "song_sparrow" in csv_response.text
         assert detection_id in csv_response.text
+
+
+def test_ebird_export_omits_audio_link_when_snippet_file_is_missing(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=3600)
+
+    with TestClient(app) as client:
+        _ingest_single_frame(client, start_time_ns=time.time_ns())
+        detections = _wait_for_detections(client)
+        assert detections
+        detection_id = detections[0]["id"]
+
+        review_response = client.patch(
+            f"/api/v1/detections/{detection_id}/review",
+            json={
+                "review_state": "confirmed",
+                "review_label": "song_sparrow",
+                "review_label_category": "bird",
+            },
+        )
+        assert review_response.status_code == 200
+
+        detection_response = client.get(f"/api/v1/detections/{detection_id}")
+        assert detection_response.status_code == 200
+        snippet_path = Path(detection_response.json()["snippet_path"])
+        snippet_path.unlink()
+
+        export_response = client.get("/api/v1/exports/ebird", params={"format": "json", "limit": 10})
+        assert export_response.status_code == 200
+        export_body = export_response.json()
+        assert export_body["detection_count"] == 1
+        item = export_body["detections"][0]
+        assert item["detection_id"] == detection_id
+        assert item["has_audio"] is False
+        assert item["audio_url"] is None
+
+        missing_audio = client.get(f"/api/v1/detections/{detection_id}/audio", params={"download": True})
+        assert missing_audio.status_code == 404
 
 
 def test_cluster_api_rejects_overlapping_memberships(monkeypatch, tmp_path: Path) -> None:
