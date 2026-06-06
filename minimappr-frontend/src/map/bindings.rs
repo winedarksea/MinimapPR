@@ -14,8 +14,18 @@ extern "C" {
     #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "addDetectionMarker")]
     pub fn add_detection_marker(event_id: &str, lat: f64, lon: f64, label: &str);
 
+    #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "removeDetectionMarker")]
+    pub fn remove_detection_marker(event_id: &str);
+
     #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "setTrackMarker")]
-    pub fn set_track_marker(track_id: &str, lat: f64, lon: f64, label: &str, tqi: f64, status: &str);
+    pub fn set_track_marker(
+        track_id: &str,
+        lat: f64,
+        lon: f64,
+        label: &str,
+        tqi: f64,
+        status: &str,
+    );
 
     #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "setTrackVelocityVector")]
     pub fn set_track_velocity_vector(
@@ -45,11 +55,14 @@ extern "C" {
     #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "panTo")]
     pub fn pan_to(lat: f64, lon: f64);
 
-    #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "highlightTrack")]
-    pub fn highlight_track(track_id: &str);
+    #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "highlightCopItem")]
+    pub fn highlight_cop_item(kind: &str, id: &str);
 
-    #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "clearTrackHighlight")]
-    pub fn clear_track_highlight();
+    #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "clearCopHighlight")]
+    pub fn clear_cop_highlight();
+
+    #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "setCopSelectionCallback")]
+    pub fn set_cop_selection_callback(callback: &js_sys::Function);
 
     #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "setHeatmapPoints")]
     pub fn set_heatmap_points(points: &JsValue, max_intensity: f64);

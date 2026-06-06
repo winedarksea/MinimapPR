@@ -83,6 +83,7 @@ from minimappr.core.ambisonics import (
 from minimappr.core.audio_buffer import MultiSensorBuffer
 from minimappr.core.auth import extract_federation_token
 from minimappr.core.bit_report import BITReportEvaluator
+from minimappr.core.cluster_registry import ClusterRegistry
 from minimappr.core.environment import LiveEnvironmentProvider
 from minimappr.core.federation import FederationCoordinator
 from minimappr.core.fusion_node import FusionNode
@@ -472,6 +473,7 @@ async def _api_live_db_poll_loop(app: FastAPI) -> None:
     settings: Settings = state.settings
     last_detection_ts = time.time_ns()
     last_track_ts = last_detection_ts
+    last_environment_ts = 0
     seen_detection_ids: set[str] = set()
     seen_track_ids: set[str] = set()
     while True:
@@ -517,6 +519,39 @@ async def _api_live_db_poll_loop(app: FastAPI) -> None:
                     if len(seen_track_ids) > 512:
                         seen_track_ids = set(list(seen_track_ids)[-256:])
                 last_track_ts = max(last_track_ts, last_seen_ns)
+
+            # Hydrate the API-process environment provider from storage. In the
+            # split api/ingest deployment, environment ingest is proxied to the
+            # ingest worker, so this process's provider would otherwise stay
+            # empty and /api/v1/environment/current would report static_fallback.
+            environment_provider = getattr(state, "environment_provider", None)
+            if environment_provider is not None and hasattr(
+                environment_provider, "ingest_sample"
+            ):
+                latest_environment = await state.storage.list_latest_environment_per_node()
+                for reading in latest_environment:
+                    timestamp_ns = int(reading.get("timestamp_ns") or 0)
+                    if timestamp_ns <= last_environment_ts:
+                        continue
+                    position = reading.get("position_m")
+                    location_m = (
+                        tuple(float(value) for value in position)
+                        if position is not None
+                        else None
+                    )
+                    environment_provider.ingest_sample(
+                        node_id=str(reading.get("node_id") or ""),
+                        timestamp_ns=timestamp_ns,
+                        temperature_c=reading.get("temperature_c"),
+                        humidity_fraction=reading.get("humidity_fraction"),
+                        pressure_pa=reading.get("pressure_pa"),
+                        wind_speed_mps=reading.get("wind_speed_mps"),
+                        wind_dir_deg=reading.get("wind_dir_deg"),
+                        solar_lux=reading.get("solar_lux"),
+                        location_m=location_m,
+                        metadata=reading.get("metadata") or {},
+                    )
+                    last_environment_ts = max(last_environment_ts, timestamp_ns)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -1126,6 +1161,11 @@ async def _api_only_lifespan(app: FastAPI, settings: Settings):
         federation=federation,
         bit_evaluator=common_live_runtime_services.bit_evaluator,
         cleanup_service=common_live_runtime_services.cleanup_service,
+        # API-only role still serves the cluster CRUD endpoints; without an
+        # in-memory registry here those handlers raise KeyError on app.state.
+        # In split mode this registry is local to the API process and does not
+        # influence the ingest-process localizer (no cross-process sync yet).
+        cluster_registry=ClusterRegistry(),
         sidecar_state=sidecar_state,
         capture_manager=capture_manager,
         ingest_concurrency=_IngestConcurrencyLimit(
@@ -1790,6 +1830,12 @@ async def list_nodes(
                 "max_buffer_seconds": audio_summary["max_buffer_seconds"],
                 "status": audio_status,
             }
+            # Firmware NodeRunner counters are tracked from frame telemetry and
+            # persisted with the audio summary; the live-buffer summary above
+            # does not carry them, so merge them in for a consistent shape.
+            persisted_summary = latest_audio_summary_by_node.get(node["id"])
+            if isinstance(persisted_summary, dict) and persisted_summary.get("runner_stats"):
+                node["audio_debug"]["runner_stats"] = persisted_summary["runner_stats"]
         else:
             sensor_ids = _sensor_ids_from_node_row(node)
             sidecar_snapshot = sidecar_node_snapshots.get(node["id"])

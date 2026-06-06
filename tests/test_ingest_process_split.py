@@ -5,6 +5,7 @@ import json
 import time
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from minimappr import __main__ as minimappr_cli
@@ -682,3 +683,156 @@ def test_plain_minimappr_does_not_supervise_when_ingest_port_is_not_explicit(mon
         "host": "127.0.0.1",
         "port": 9090,
     }
+
+
+def test_split_api_role_clusters_endpoint_is_available(monkeypatch, tmp_path: Path) -> None:
+    # Regression: the API-only lifespan must bind cluster_registry; otherwise the
+    # cluster CRUD handlers raise KeyError on app.state and return HTTP 500.
+    monkeypatch.setenv("MINIMAPPR_PROCESS_ROLE", "api")
+    monkeypatch.setenv("MINIMAPPR_INGEST_BACKEND", "python")
+    monkeypatch.setenv("MINIMAPPR_DB_PATH", str(tmp_path / "api-clusters.db"))
+    monkeypatch.setenv("MINIMAPPR_SNIPPET_DIR", str(tmp_path / "snippets"))
+    monkeypatch.setenv("MINIMAPPR_LARGE_ARTIFACT_DIR", str(tmp_path / "artifacts"))
+    monkeypatch.setenv("MINIMAPPR_FEDERATION_ENABLED", "false")
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/clusters")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_split_api_role_environment_current_reflects_stored_reading(
+    monkeypatch, tmp_path: Path
+) -> None:
+    # Regression: in split mode environment ingest is proxied to the worker, so
+    # the API process's provider stays empty and /environment/current reports
+    # static_fallback. The live DB poll loop must hydrate it from storage.
+    db_path = tmp_path / "api-env.db"
+
+    async def seed_environment() -> None:
+        storage = Storage(db_path)
+        await storage.initialize()
+        try:
+            await storage.upsert_node(
+                NodeSpec(
+                    id="env-node-1",
+                    node_type=NodeType.SIRITH_TETRA,
+                    position_m=(1.0, 2.0, 3.0),
+                    sensor_offsets_m=[
+                        (0.0, 0.0, 0.0),
+                        (0.1, 0.0, 0.0),
+                        (0.0, 0.1, 0.0),
+                        (0.0, 0.0, 0.1),
+                    ],
+                    capabilities=["audio", "temperature", "humidity"],
+                ),
+                last_seen_ns=time.time_ns(),
+            )
+            await storage.insert_environment(
+                node_id="env-node-1",
+                timestamp_ns=time.time_ns(),
+                temperature_c=27.9,
+                pressure_pa=None,
+                humidity_fraction=0.55,
+                wind_speed_mps=None,
+                wind_dir_deg=None,
+                solar_lux=None,
+                metadata={"source": "sht45"},
+            )
+        finally:
+            await storage.close()
+
+    asyncio.run(seed_environment())
+    monkeypatch.setenv("MINIMAPPR_PROCESS_ROLE", "api")
+    monkeypatch.setenv("MINIMAPPR_INGEST_BACKEND", "python")
+    monkeypatch.setenv("MINIMAPPR_DB_PATH", str(db_path))
+    monkeypatch.setenv("MINIMAPPR_SNIPPET_DIR", str(tmp_path / "snippets"))
+    monkeypatch.setenv("MINIMAPPR_LARGE_ARTIFACT_DIR", str(tmp_path / "artifacts"))
+    monkeypatch.setenv("MINIMAPPR_FEDERATION_ENABLED", "false")
+
+    with TestClient(app) as client:
+        body = {}
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline:
+            response = client.get("/api/v1/environment/current")
+            assert response.status_code == 200
+            body = response.json()
+            if body.get("metadata", {}).get("source") != "static_fallback":
+                break
+            time.sleep(0.25)
+
+    assert body["metadata"]["source"] != "static_fallback"
+    assert body["temperature_c"] == pytest.approx(27.9, abs=1e-3)
+    # Real temperature feeds the speed-of-sound estimate (~349 m/s at 27.9 C),
+    # not the 20 C static-fallback value (~344 m/s).
+    assert body["speed_of_sound_mps"] > 347.0
+
+
+def test_split_api_role_surfaces_runner_stats_in_audio_debug(monkeypatch, tmp_path: Path) -> None:
+    # Firmware NodeRunner counters persisted with the audio summary must reach
+    # /api/v1/nodes so publish-queue/Wi-Fi health is monitorable in split mode.
+    db_path = tmp_path / "api-runner.db"
+
+    async def prepare_node() -> None:
+        storage = Storage(db_path)
+        await storage.initialize()
+        try:
+            await storage.upsert_node(
+                NodeSpec(
+                    id="runner-node",
+                    node_type=NodeType.SIRITH_TETRA,
+                    position_m=(1.0, 2.0, 3.0),
+                    sensor_offsets_m=[
+                        (0.0, 0.0, 0.0),
+                        (0.1, 0.0, 0.0),
+                        (0.0, 0.1, 0.0),
+                        (0.0, 0.0, 0.1),
+                    ],
+                    capabilities=["audio"],
+                ),
+                last_seen_ns=time.time_ns(),
+            )
+            await storage.upsert_node_audio_summary(
+                node_id="runner-node",
+                summary={
+                    "sensor_count": 4,
+                    "active_sensor_count": 4,
+                    "sample_rate_hz": 16000,
+                    "last_sample_time_ns": time.time_ns(),
+                    "age_seconds": 0.0,
+                    "rms": 0.02,
+                    "recent_coverage_ratio": 0.9,
+                    "recent_missing_ratio": 0.1,
+                    "recent_max_gap_seconds": 0.3,
+                    "max_buffer_samples": 160000,
+                    "max_buffer_seconds": 10.0,
+                    "status": "live_ingest_process",
+                    "runner_stats": {
+                        "runner_queue_overflows": 11,
+                        "runner_frames_dropped": 4,
+                        "runner_publish_wifi_down_failures": 6,
+                    },
+                },
+                updated_ns=time.time_ns(),
+            )
+        finally:
+            await storage.close()
+
+    asyncio.run(prepare_node())
+    monkeypatch.setenv("MINIMAPPR_PROCESS_ROLE", "api")
+    monkeypatch.setenv("MINIMAPPR_INGEST_BACKEND", "python")
+    monkeypatch.setenv("MINIMAPPR_DB_PATH", str(db_path))
+    monkeypatch.setenv("MINIMAPPR_SNIPPET_DIR", str(tmp_path / "snippets"))
+    monkeypatch.setenv("MINIMAPPR_LARGE_ARTIFACT_DIR", str(tmp_path / "artifacts"))
+    monkeypatch.setenv("MINIMAPPR_FEDERATION_ENABLED", "false")
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/nodes")
+
+    assert response.status_code == 200
+    node = response.json()[0]
+    runner_stats = node["audio_debug"]["runner_stats"]
+    assert runner_stats["runner_queue_overflows"] == 11
+    assert runner_stats["runner_frames_dropped"] == 4
+    assert runner_stats["runner_publish_wifi_down_failures"] == 6

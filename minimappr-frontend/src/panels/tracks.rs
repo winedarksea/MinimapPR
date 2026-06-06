@@ -1,7 +1,10 @@
 use crate::map::bindings::pan_to;
 use crate::panels::contributors::CompactContributorChips;
-use crate::state::AppState;
-use crate::ui::{classify_age_from_ns, short_id, track_status_chip_class, track_status_label};
+use crate::state::{AppState, CopItemKind, CopSelection};
+use crate::ui::{
+    classify_age_from_ns, cop_sidebar_element_id, is_cop_item_selected, short_id,
+    track_status_chip_class, track_status_label,
+};
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{HtmlAudioElement, Window};
@@ -40,7 +43,7 @@ fn trigger_track_download(track_id: &str) {
 pub fn TracksPane() -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState");
     let tracks = state.tracks;
-    let selected_track = state.selected_track;
+    let selected_cop_item = state.selected_cop_item;
     let audio_drawer_open = state.audio_drawer_open;
     let audio_drawer_detection_id = state.audio_drawer_detection_id;
     let audio_drawer_track_id = state.audio_drawer_track_id;
@@ -86,19 +89,21 @@ pub fn TracksPane() -> impl IntoView {
                             let track_id = t.track_id.clone();
                             let hover_id = track_id.clone();
                             let leave_id = track_id.clone();
-                            let row_tid = track_id.clone();
+                            let click_id = track_id.clone();
+                            let row_id = track_id.clone();
+                            let row_element_id = cop_sidebar_element_id(CopItemKind::Track, &track_id);
                             let contributors = t.contributors.clone();
                             let contributor_count = t.contributor_count.max(contributors.len() as u32);
                             let geo_for_pan = t.position_geo.clone();
 
                             let row_class = move || {
-                                let sel = selected_track.get();
-                                let is_sel = sel.as_deref() == Some(&row_tid);
+                                let sel = selected_cop_item.get();
+                                let is_sel = is_cop_item_selected(&sel, CopItemKind::Track, &row_id);
                                 let stale = age_class == "age-lost";
                                 match (stale, is_sel) {
-                                    (true, true)   => "compact-row track-row-stale track-row-selected",
+                                    (true, true)   => "compact-row track-row-stale cop-row-selected",
                                     (true, false)  => "compact-row track-row-stale",
-                                    (false, true)  => "compact-row track-row-selected",
+                                    (false, true)  => "compact-row cop-row-selected",
                                     (false, false) => "compact-row",
                                 }
                             };
@@ -106,13 +111,33 @@ pub fn TracksPane() -> impl IntoView {
                             view! {
                                 <li>
                                     <details
+                                        id=row_element_id
                                         class=row_class
-                                        on:mouseenter=move |_| selected_track.set(Some(hover_id.clone()))
+                                        on:mouseenter=move |_| {
+                                            selected_cop_item.set(Some(CopSelection::hovered(
+                                                CopItemKind::Track,
+                                                hover_id.clone(),
+                                            )));
+                                        }
+                                        on:click=move |_| {
+                                            selected_cop_item.set(Some(CopSelection::pinned(
+                                                CopItemKind::Track,
+                                                click_id.clone(),
+                                            )));
+                                        }
                                         on:mouseleave={
                                             let leave_id = leave_id.clone();
                                             move |_| {
-                                                if selected_track.get_untracked().as_deref() == Some(&leave_id) {
-                                                    selected_track.set(None);
+                                                let should_clear = selected_cop_item
+                                                    .get_untracked()
+                                                    .as_ref()
+                                                    .is_some_and(|selected| {
+                                                        selected.kind == CopItemKind::Track
+                                                            && selected.id == leave_id
+                                                            && !selected.pinned
+                                                    });
+                                                if should_clear {
+                                                    selected_cop_item.set(None);
                                                 }
                                             }
                                         }

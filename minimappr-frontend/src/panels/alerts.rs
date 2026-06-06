@@ -1,5 +1,8 @@
-use crate::state::AppState;
-use crate::ui::{alert_status_badge_class, classify_age_from_ns, severity_badge_class};
+use crate::state::{AppState, CopItemKind, CopSelection};
+use crate::ui::{
+    alert_status_badge_class, classify_age_from_ns, cop_sidebar_element_id, is_cop_item_selected,
+    severity_badge_class,
+};
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
@@ -48,6 +51,7 @@ pub fn AlertsPane() -> impl IntoView {
 #[component]
 fn AlertCard(alert: crate::state::Alert) -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState");
+    let selected_cop_item = state.selected_cop_item;
     let is_pending = RwSignal::new(false);
     let error_message = RwSignal::new(None::<String>);
 
@@ -68,6 +72,11 @@ fn AlertCard(alert: crate::state::Alert) -> impl IntoView {
     let severity_class = severity_badge_class(&severity);
     let status_class = alert_status_badge_class(&status);
     let alert_id = alert.alert_id.clone();
+    let hover_id = alert_id.clone();
+    let leave_id = alert_id.clone();
+    let click_id = alert_id.clone();
+    let row_id = alert_id.clone();
+    let row_element_id = cop_sidebar_element_id(CopItemKind::Alert, &alert_id);
     let is_actionable = status == "sent" || status == "escalated";
 
     let on_acknowledge = move |_| {
@@ -101,12 +110,46 @@ fn AlertCard(alert: crate::state::Alert) -> impl IntoView {
 
     view! {
         <article
+            id=row_element_id
             class=move || format!(
-                "alert-card {} {}{}",
+                "alert-card {} {}{}{}",
                 severity_class.replace("tone-badge ", "severity-"),
                 status_class.replace("tone-badge ", "status-"),
                 if is_actionable { " alert-live" } else { "" },
+                if is_cop_item_selected(&selected_cop_item.get(), CopItemKind::Alert, &row_id) {
+                    " cop-row-selected"
+                } else {
+                    ""
+                },
             )
+            on:mouseenter=move |_| {
+                selected_cop_item.set(Some(CopSelection::hovered(
+                    CopItemKind::Alert,
+                    hover_id.clone(),
+                )));
+            }
+            on:click=move |_| {
+                selected_cop_item.set(Some(CopSelection::pinned(
+                    CopItemKind::Alert,
+                    click_id.clone(),
+                )));
+            }
+            on:mouseleave={
+                let leave_id = leave_id.clone();
+                move |_| {
+                    let should_clear = selected_cop_item
+                        .get_untracked()
+                        .as_ref()
+                        .is_some_and(|selected| {
+                            selected.kind == CopItemKind::Alert
+                                && selected.id == leave_id
+                                && !selected.pinned
+                        });
+                    if should_clear {
+                        selected_cop_item.set(None);
+                    }
+                }
+            }
         >
             <details class="alert-details" open=is_actionable>
                 <summary class="alert-card-head">

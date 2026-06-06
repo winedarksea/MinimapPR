@@ -3,7 +3,10 @@ use crate::panels::{
     alerts::AlertsPane, detections::DetectionsPane, node_status::NodeStatusPanel,
     tracks::TracksPane,
 };
+use crate::state::{CopItemKind, CopSelection};
+use crate::ui::cop_sidebar_element_id;
 use leptos::prelude::*;
+use leptos::task::spawn_local;
 
 /// COP (Common Operating Picture) — three-column real-time view.
 /// Config lives under /settings now, so the right column has Tracks / Detections / Alerts only.
@@ -25,6 +28,27 @@ enum CopTab {
     Alerts,
 }
 
+fn tab_for_cop_item(kind: CopItemKind) -> CopTab {
+    match kind {
+        CopItemKind::Track => CopTab::Tracks,
+        CopItemKind::Detection => CopTab::Detections,
+        CopItemKind::Alert => CopTab::Alerts,
+    }
+}
+
+fn scroll_selected_sidebar_item_into_view(selection: CopSelection) {
+    spawn_local(async move {
+        gloo_timers::future::TimeoutFuture::new(25).await;
+        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+            return;
+        };
+        let element_id = cop_sidebar_element_id(selection.kind, &selection.id);
+        if let Some(element) = document.get_element_by_id(&element_id) {
+            element.scroll_into_view();
+        }
+    });
+}
+
 #[component]
 fn CopTabs() -> impl IntoView {
     use crate::state::AppState;
@@ -32,8 +56,18 @@ fn CopTabs() -> impl IntoView {
     let tracks = state.tracks;
     let dets = state.detections;
     let alerts = state.alerts;
+    let selected_cop_item = state.selected_cop_item;
 
     let active = RwSignal::new(CopTab::Tracks);
+
+    Effect::new(move |_| {
+        if let Some(selection) = selected_cop_item.get() {
+            active.set(tab_for_cop_item(selection.kind));
+            if selection.pinned {
+                scroll_selected_sidebar_item_into_view(selection);
+            }
+        }
+    });
 
     view! {
         <div class="panel tab-column">

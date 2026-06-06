@@ -1,7 +1,27 @@
 use js_sys::Date;
 
+use crate::state::{CopItemKind, CopSelection};
+
 pub fn short_id(value: &str, width: usize) -> String {
     value.chars().take(width).collect()
+}
+
+pub fn cop_sidebar_element_id(kind: CopItemKind, id: &str) -> String {
+    let mut escaped_id = String::with_capacity(id.len());
+    for ch in id.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            escaped_id.push(ch);
+        } else {
+            escaped_id.push('_');
+        }
+    }
+    format!("cop-{}-{escaped_id}", kind.as_js_kind())
+}
+
+pub fn is_cop_item_selected(selection: &Option<CopSelection>, kind: CopItemKind, id: &str) -> bool {
+    selection
+        .as_ref()
+        .is_some_and(|selected| selected.kind == kind && selected.id == id)
 }
 
 pub fn format_age_seconds(total_seconds: u64) -> String {

@@ -11,8 +11,9 @@
   const _zones = {};             // zone_id → L.Polygon
   const _gdop = {};              // key → L.Circle
   const _trackRemoveTimers = {}; // track_id → setTimeout handle for dropped cleanup
-  let _highlightedTrackId = null;
+  let _highlightedCopItem = null;
   let _highlightRing = null;
+  let _copSelectionCallback = null;
 
   const TILE_CACHE_NAME = "mmpr-osm-tiles-v2";
   const OSM_TEMPLATE = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
@@ -50,6 +51,33 @@
     if (status === "dropped") return 0.38;
     if (status === "lost")    return 0.62;
     return 1.0;
+  }
+
+  function markerKeyForCopItem(kind, id) {
+    if (kind === "track") return "track:" + id;
+    if (kind === "detection") return "det:" + id;
+    return null;
+  }
+
+  function colorForCopItem(kind) {
+    const colors = palette();
+    if (kind === "detection") return colors.detection;
+    return colors.track;
+  }
+
+  function setCopSelectionCallback(callback) {
+    _copSelectionCallback = typeof callback === "function" ? callback : null;
+  }
+
+  function emitCopSelection(kind, id) {
+    if (_copSelectionCallback) _copSelectionCallback(kind, id);
+  }
+
+  function attachCopSelectionHandler(marker, kind, id) {
+    marker.on("click", function (event) {
+      if (event && event.originalEvent) L.DomEvent.stop(event.originalEvent);
+      emitCopSelection(kind, id);
+    });
   }
 
   function divIcon(html, size, className) {
@@ -279,6 +307,7 @@
       for (const k in _zones)    delete _zones[k];
       for (const k in _gdop)     delete _gdop[k];
       for (const k in _trackRemoveTimers) { clearTimeout(_trackRemoveTimers[k]); delete _trackRemoveTimers[k]; }
+      clearCopHighlight();
     }
     try {
       _map = L.map(target, {
@@ -340,14 +369,28 @@
   function addDetectionMarker(eventId, lat, lon, label) {
     const colors = palette();
     const key = "det:" + eventId;
-    if (_markers[key]) return;
-    _markers[key] = L.marker([lat, lon], {
-      icon: makeDetectionIcon(colors.detection),
-    }).bindTooltip(label || "detection", { permanent: false }).addTo(_map);
-    // Auto-remove after 30s
-    setTimeout(() => {
-      if (_markers[key]) { _markers[key].remove(); delete _markers[key]; }
-    }, 30_000);
+    if (_markers[key]) {
+      _markers[key].setLatLng([lat, lon]);
+      _markers[key].setIcon(makeDetectionIcon(colors.detection));
+      _markers[key].setTooltipContent(label || "detection");
+    } else {
+      _markers[key] = L.marker([lat, lon], {
+        icon: makeDetectionIcon(colors.detection),
+      }).bindTooltip(label || "detection", { permanent: false }).addTo(_map);
+      attachCopSelectionHandler(_markers[key], "detection", eventId);
+    }
+
+    if (_highlightedCopItem && _highlightedCopItem.kind === "detection" && _highlightedCopItem.id === eventId) {
+      highlightCopItem("detection", eventId);
+    }
+  }
+
+  function removeDetectionMarker(eventId) {
+    if (_highlightedCopItem && _highlightedCopItem.kind === "detection" && _highlightedCopItem.id === eventId) {
+      clearCopHighlight();
+    }
+    const key = "det:" + eventId;
+    if (_markers[key]) { _markers[key].remove(); delete _markers[key]; }
   }
 
   // ── Track markers + velocity vectors ─────────────────────────
@@ -374,6 +417,11 @@
       _markers[key] = L.marker([lat, lon], {
         icon: makeTrackIcon(color, tqi, opacity),
       }).bindTooltip(tooltipText, { permanent: false }).addTo(_map);
+      attachCopSelectionHandler(_markers[key], "track", trackId);
+    }
+
+    if (_highlightedCopItem && _highlightedCopItem.kind === "track" && _highlightedCopItem.id === trackId) {
+      highlightCopItem("track", trackId);
     }
 
     // Schedule auto-removal for dropped tracks so they eventually clear even
@@ -406,36 +454,56 @@
       clearTimeout(_trackRemoveTimers[trackId]);
       delete _trackRemoveTimers[trackId];
     }
-    if (trackId === _highlightedTrackId) clearTrackHighlight();
+    if (_highlightedCopItem && _highlightedCopItem.kind === "track" && _highlightedCopItem.id === trackId) {
+      clearCopHighlight();
+    }
     const key = "track:" + trackId;
     if (_markers[key]) { _markers[key].remove(); delete _markers[key]; }
     if (_vectors[trackId]) { _vectors[trackId].remove(); delete _vectors[trackId]; }
     if (_ellipses[trackId]) { _ellipses[trackId].remove(); delete _ellipses[trackId]; }
   }
 
-  function highlightTrack(trackId) {
-    clearTrackHighlight();
-    _highlightedTrackId = trackId;
-    const key = "track:" + trackId;
+  function highlightCopItem(kind, id) {
+    clearCopHighlight();
+    const key = markerKeyForCopItem(kind, id);
+    if (!key) return;
     const marker = _markers[key];
     if (!marker || !_map) return;
-    marker.bringToFront();
+    _highlightedCopItem = { kind, id };
+    if (typeof marker.bringToFront === "function") marker.bringToFront();
+    if (typeof marker.setZIndexOffset === "function") marker.setZIndexOffset(1000);
+    const element = marker.getElement ? marker.getElement() : null;
+    if (element) element.classList.add("mmpr-map-icon-highlighted");
+    if (marker.openTooltip) marker.openTooltip();
     const latlng = marker.getLatLng();
-    const colors = palette();
     _highlightRing = L.circleMarker(latlng, {
-      radius: 24,
-      color: colors.track,
+      radius: kind === "detection" ? 20 : 24,
+      color: colorForCopItem(kind),
       weight: 2.5,
       fillOpacity: 0,
       opacity: 0.9,
-      className: "mmpr-track-highlight-ring",
+      interactive: false,
+      className: "mmpr-cop-highlight-ring",
     }).addTo(_map);
   }
 
-  function clearTrackHighlight() {
+  function clearCopHighlight() {
+    if (_highlightedCopItem) {
+      const key = markerKeyForCopItem(_highlightedCopItem.kind, _highlightedCopItem.id);
+      const marker = key ? _markers[key] : null;
+      if (marker) {
+        if (typeof marker.setZIndexOffset === "function") marker.setZIndexOffset(0);
+        const element = marker.getElement ? marker.getElement() : null;
+        if (element) element.classList.remove("mmpr-map-icon-highlighted");
+        if (marker.closeTooltip) marker.closeTooltip();
+      }
+    }
     if (_highlightRing) { _highlightRing.remove(); _highlightRing = null; }
-    _highlightedTrackId = null;
+    _highlightedCopItem = null;
   }
+
+  function highlightTrack(trackId) { highlightCopItem("track", trackId); }
+  function clearTrackHighlight() { clearCopHighlight(); }
 
   // ── Zone polygons ─────────────────────────────────────────────
   function setZone(zoneId, latlngs, label) {
@@ -515,8 +583,9 @@
   globalThis.leafletInterop = {
     init,
     setNodeMarker, removeNodeMarker,
-    addDetectionMarker,
+    addDetectionMarker, removeDetectionMarker,
     setTrackMarker, setTrackVelocityVector, removeTrack,
+    highlightCopItem, clearCopHighlight, setCopSelectionCallback,
     highlightTrack, clearTrackHighlight,
     setZone, removeZone,
     setGdopCircle, removeGdopCircle,

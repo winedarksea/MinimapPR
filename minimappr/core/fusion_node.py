@@ -341,6 +341,8 @@ class FusionNode:
         self._backpressure_warning_interval_seconds = 5.0
         self._drop_warning_last_logged_s: dict[tuple[str, str], float] = {}
         self._drop_warning_interval_seconds = 10.0
+        self._degraded_audio_warning_last_logged_s: dict[str, float] = {}
+        self._degraded_audio_warning_interval_seconds = 10.0
         self._last_error: str | None = None
         self._started = False
         self._stopping = False
@@ -1366,7 +1368,18 @@ class FusionNode:
         }
         if not degraded_stats:
             return
+        # Always count every degraded sensor; the cumulative metric is the
+        # authoritative signal for monitoring.
         self._metrics.frames_zero_padded_degraded += len(degraded_stats)
+        # Rate-limit the log per source node — a persistently degraded node
+        # would otherwise emit this warning on every candidate and saturate the
+        # log ring buffer (observed ~7 warnings/sec on a single-node deployment).
+        rate_key = candidate.source_node_id or ""
+        now_s = time.monotonic()
+        last_logged_s = self._degraded_audio_warning_last_logged_s.get(rate_key, 0.0)
+        if now_s - last_logged_s < self._degraded_audio_warning_interval_seconds:
+            return
+        self._degraded_audio_warning_last_logged_s[rate_key] = now_s
         logger.warning(
             "Zero-padded degraded audio coverage detected",
             extra={
@@ -1376,6 +1389,7 @@ class FusionNode:
                 "degraded_sensor_ids": sorted(degraded_stats.keys()),
                 "max_missing_ratio": max(stats.missing_ratio for stats in degraded_stats.values()),
                 "max_gap_seconds": max(stats.max_gap_seconds for stats in degraded_stats.values()),
+                "degraded_count_total": self._metrics.frames_zero_padded_degraded,
             },
         )
 

@@ -1,14 +1,15 @@
 use crate::audio::detection_actions::DetectionAudioActions;
 use crate::map::bindings::pan_to;
 use crate::panels::contributors::CompactContributorChips;
-use crate::state::AppState;
-use crate::ui::{classify_age_from_ns, short_id};
+use crate::state::{AppState, CopItemKind, CopSelection};
+use crate::ui::{classify_age_from_ns, cop_sidebar_element_id, is_cop_item_selected, short_id};
 use leptos::prelude::*;
 
 #[component]
 pub fn DetectionsPane() -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState");
     let detections = state.detections;
+    let selected_cop_item = state.selected_cop_item;
 
     view! {
         <div class="tab-pane">
@@ -28,6 +29,11 @@ pub fn DetectionsPane() -> impl IntoView {
                                 .unwrap_or_else(|| "—".to_string());
                             let has_audio = d.has_audio.unwrap_or(false) || d.snippet_path.is_some();
                             let eid = d.event_id.clone();
+                            let hover_id = eid.clone();
+                            let leave_id = eid.clone();
+                            let click_id = eid.clone();
+                            let row_id = eid.clone();
+                            let row_element_id = cop_sidebar_element_id(CopItemKind::Detection, &eid);
                             let (age_text, age_class) = classify_age_from_ns(d.received_ns, 30.0, 300.0);
 
                             let track_chip = d.track_id.as_ref().map(|tid| short_id(tid, 8));
@@ -37,10 +43,52 @@ pub fn DetectionsPane() -> impl IntoView {
                                 None => format!("{:.5}°N, {:.5}°E", g.lat, g.lon),
                             });
                             let geo_for_pan = d.position_geo.clone();
+                            let row_class = move || {
+                                if is_cop_item_selected(
+                                    &selected_cop_item.get(),
+                                    CopItemKind::Detection,
+                                    &row_id,
+                                ) {
+                                    "compact-row cop-row-selected"
+                                } else {
+                                    "compact-row"
+                                }
+                            };
 
                             view! {
                                 <li>
-                                    <details class="compact-row">
+                                    <details
+                                        id=row_element_id
+                                        class=row_class
+                                        on:mouseenter=move |_| {
+                                            selected_cop_item.set(Some(CopSelection::hovered(
+                                                CopItemKind::Detection,
+                                                hover_id.clone(),
+                                            )));
+                                        }
+                                        on:click=move |_| {
+                                            selected_cop_item.set(Some(CopSelection::pinned(
+                                                CopItemKind::Detection,
+                                                click_id.clone(),
+                                            )));
+                                        }
+                                        on:mouseleave={
+                                            let leave_id = leave_id.clone();
+                                            move |_| {
+                                                let should_clear = selected_cop_item
+                                                    .get_untracked()
+                                                    .as_ref()
+                                                    .is_some_and(|selected| {
+                                                        selected.kind == CopItemKind::Detection
+                                                            && selected.id == leave_id
+                                                            && !selected.pinned
+                                                    });
+                                                if should_clear {
+                                                    selected_cop_item.set(None);
+                                                }
+                                            }
+                                        }
+                                    >
                                         <summary>
                                             <span class=dot_class title=age_text.clone()></span>
                                             <span class="row-label">{label}</span>

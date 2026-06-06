@@ -5,6 +5,8 @@ use bindings::*;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use std::collections::HashSet;
+use wasm_bindgen::prelude::Closure;
+use wasm_bindgen::{JsCast, JsValue};
 
 #[component]
 pub fn LeafletMapPanel() -> impl IntoView {
@@ -13,11 +15,27 @@ pub fn LeafletMapPanel() -> impl IntoView {
     let tracks = state.tracks;
     let detections = state.detections;
     let theme = state.theme;
+    let selected_cop_item = state.selected_cop_item;
 
     // Init Leaflet once after the component first mounts.
     Effect::new(move |init_done: Option<bool>| {
         if init_done.is_none() {
             init(44.987, -93.258, 17);
+            let selected_cop_item = selected_cop_item;
+            let callback =
+                Closure::<dyn FnMut(JsValue, JsValue)>::new(move |kind: JsValue, id: JsValue| {
+                    let Some(kind) = kind.as_string() else {
+                        return;
+                    };
+                    let Some(id) = id.as_string() else {
+                        return;
+                    };
+                    if let Some(kind) = crate::state::CopItemKind::from_js_kind(&kind) {
+                        selected_cop_item.set(Some(crate::state::CopSelection::pinned(kind, id)));
+                    }
+                });
+            set_cop_selection_callback(callback.as_ref().unchecked_ref());
+            callback.forget();
             // Second invalidateSize after flex layout settles, matching heatmap timing.
             spawn_local(async move {
                 gloo_timers::future::TimeoutFuture::new(250).await;
@@ -75,7 +93,14 @@ pub fn LeafletMapPanel() -> impl IntoView {
                             // Rough local velocity → geo delta (1 m ≈ 9e-6 deg)
                             let dlat = vel[1] * 9e-6;
                             let dlon = vel[0] * 9e-6 / (geo.lat.to_radians().cos()).max(0.01);
-                            set_track_velocity_vector(&t.track_id, geo.lat, geo.lon, dlat, dlon, status);
+                            set_track_velocity_vector(
+                                &t.track_id,
+                                geo.lat,
+                                geo.lon,
+                                dlat,
+                                dlon,
+                                status,
+                            );
                         }
                     }
                 }
@@ -85,26 +110,41 @@ pub fn LeafletMapPanel() -> impl IntoView {
         });
     }
 
-    // Highlight the track hovered in the sidebar: ring + bringToFront.
+    // Highlight the COP item hovered/clicked in the sidebar or clicked on the map.
     {
-        let selected_track = state.selected_track;
-        Effect::new(move |_| match selected_track.get() {
-            Some(ref id) => highlight_track(id),
-            None => clear_track_highlight(),
+        let selected_cop_item = state.selected_cop_item;
+        Effect::new(move |_| match selected_cop_item.get() {
+            Some(selection) => highlight_cop_item(selection.kind.as_js_kind(), &selection.id),
+            None => clear_cop_highlight(),
         });
     }
 
-    // Sync detections → map markers (newest event only, JS shim auto-removes after 30s)
+    // Sync detections → map markers.
     {
-        Effect::new(move |_| {
+        Effect::new(move |prev_ids: Option<HashSet<String>>| {
             let _ = theme.get();
             let ds = detections.get();
-            if let Some(d) = ds.front() {
+
+            let current_ids: HashSet<String> = ds
+                .iter()
+                .filter(|d| d.position_geo.is_some())
+                .map(|d| d.event_id.clone())
+                .collect();
+
+            if let Some(ref prev) = prev_ids {
+                for id in prev.difference(&current_ids) {
+                    remove_detection_marker(id);
+                }
+            }
+
+            for d in &ds {
                 if let Some(geo) = &d.position_geo {
                     let label = d.label.as_deref().unwrap_or("detection");
                     add_detection_marker(&d.event_id, geo.lat, geo.lon, label);
                 }
             }
+
+            current_ids
         });
     }
 

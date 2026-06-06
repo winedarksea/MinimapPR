@@ -1,0 +1,126 @@
+"""Tests that firmware NodeRunner publish/queue counters are exposed via the API.
+
+The node ships counters such as runner_queue_overflows (which drive server-side
+frame sequence gaps) and a publish-failure breakdown inside each frame's
+timing_diagnostics. These are persisted with the node audio summary so they
+surface under /api/v1/nodes -> audio_debug.runner_stats for live monitoring.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from minimappr.classifiers.heuristic import HeuristicClassifier
+from minimappr.config import Settings
+from minimappr.core.audio_buffer import MultiSensorBuffer
+from minimappr.core.fusion_node import FusionNode
+from minimappr.core.geo import LocalCoordinateFrame
+from minimappr.core.ingest import _extract_runner_stats
+from minimappr.core.localization import LocalizationEngine
+from minimappr.core.node_registry import NodeRegistry
+from minimappr.core.tracking import TrackManager
+from minimappr.core.zones import ZoneMatcher
+from minimappr.models import GeoPoint, IngestFrameRequest, NodeSpec, NodeType
+from minimappr.storage.db import Storage
+from minimappr.utils.audio import encode_pcm16le_b64
+
+
+def test_extract_runner_stats_selects_known_counters() -> None:
+    timing = {
+        "runner_queue_overflows": 12,
+        "runner_frames_dropped": 5,
+        "runner_publish_timeout_failures": 3,
+        "runner_last_publish_status": -5,
+        "unrelated_field": 99,
+        "runner_publish_dns_failures": None,  # absent -> skipped
+    }
+    stats = _extract_runner_stats(timing)
+    assert stats == {
+        "runner_queue_overflows": 12,
+        "runner_frames_dropped": 5,
+        "runner_publish_timeout_failures": 3,
+        "runner_last_publish_status": -5,
+    }
+    # Nodes without runner telemetry leave the summary untouched.
+    assert _extract_runner_stats({}) is None
+    assert _extract_runner_stats(None) is None
+
+
+@pytest.mark.asyncio
+async def test_runner_stats_persisted_with_audio_summary(tmp_path: Path) -> None:
+    settings = Settings(
+        db_path=tmp_path / "runner_stats.db",
+        snippet_dir=tmp_path / "snippets",
+        snippet_retention_seconds=0,
+        trigger_rms=1.0,
+        trigger_cooldown_seconds=0.0,
+        localization_window_seconds=0.04,
+        classification_window_seconds=0.0,
+        max_sensor_buffer_seconds=2.0,
+        fusion_worker_count=1,
+    )
+    settings.db_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.snippet_dir.mkdir(parents=True, exist_ok=True)
+
+    storage = Storage(settings.db_path)
+    await storage.initialize()
+
+    fusion = FusionNode(
+        settings=settings,
+        registry=NodeRegistry(),
+        buffer=MultiSensorBuffer(max_duration_seconds=settings.max_sensor_buffer_seconds),
+        localizer=LocalizationEngine(max_tau_s=0.03),
+        classifier=HeuristicClassifier(),
+        tracker=TrackManager(settings),
+        storage=storage,
+        live_callback=lambda payload: asyncio.sleep(0, result=None),
+        coordinate_frame=LocalCoordinateFrame(
+            origin=GeoPoint(lat=37.0, lon=-122.0, alt_m=0.0), mode="flat"
+        ),
+        zone_matcher=ZoneMatcher(storage=storage),
+    )
+    await fusion.start()
+    try:
+        node = NodeSpec(
+            id="point-runner-stats",
+            node_type=NodeType.POINT,
+            position_m=(0.0, 0.0, 0.0),
+            sensor_offsets_m=[(0.0, 0.0, 0.0)],
+            capabilities=["audio"],
+            metadata={"boot_count": 1},
+        )
+        samples = np.zeros((1, 1024), dtype=np.float32)
+        response = await fusion.ingest(
+            IngestFrameRequest(
+                node=node,
+                frame={
+                    "start_time_ns": 1_739_810_500_000_000_000,
+                    "sample_rate_hz": 16_000,
+                    "channels": 1,
+                    "encoding": "pcm16le",
+                    "samples_b64": encode_pcm16le_b64(samples),
+                    "sequence": 1,
+                    "timing_diagnostics": {
+                        "runner_queue_overflows": 7,
+                        "runner_frames_dropped": 2,
+                        "runner_publish_wifi_down_failures": 4,
+                    },
+                },
+            )
+        )
+        assert response.accepted is True
+
+        summaries = await storage.list_node_audio_summaries()
+        by_node = {item["node_id"]: item for item in summaries}
+        runner_stats = by_node["point-runner-stats"].get("runner_stats")
+        assert runner_stats is not None
+        assert runner_stats["runner_queue_overflows"] == 7
+        assert runner_stats["runner_frames_dropped"] == 2
+        assert runner_stats["runner_publish_wifi_down_failures"] == 4
+    finally:
+        await fusion.stop()
+        await storage.close()

@@ -41,6 +41,44 @@ from minimappr.models import (
 from minimappr.utils.audio import decode_pcm16le_b64, trigger_rms
 
 
+# Firmware NodeRunner telemetry counters carried in frame timing_diagnostics.
+# Surfaced verbatim on the API so publish-queue/Wi-Fi health can be monitored
+# (queue overflows drive server-side frame sequence gaps; the publish-failure
+# breakdown distinguishes a saturated link from a slow consumer).
+_RUNNER_STAT_KEYS: tuple[str, ...] = (
+    "runner_frames_captured",
+    "runner_frames_dropped",
+    "runner_continuity_violations",
+    "runner_publish_errors",
+    "runner_consecutive_publish_failures",
+    "runner_queue_depth",
+    "runner_queue_overflows",
+    "runner_publish_timeout_failures",
+    "runner_publish_connect_or_reset_failures",
+    "runner_publish_dns_failures",
+    "runner_publish_wifi_down_failures",
+    "runner_last_publish_status",
+    "runner_last_publish_failure_stage",
+    "runner_last_publish_lwip_error",
+)
+
+
+def _extract_runner_stats(timing_diagnostics: dict | None) -> dict[str, Any] | None:
+    """Pull the firmware NodeRunner counters out of a frame's timing diagnostics.
+
+    Returns None when the node reports no runner telemetry (e.g. a synthetic or
+    non-firmware source), so the audio summary stays unchanged for those nodes.
+    """
+    if not isinstance(timing_diagnostics, dict):
+        return None
+    stats = {
+        key: timing_diagnostics[key]
+        for key in _RUNNER_STAT_KEYS
+        if timing_diagnostics.get(key) is not None
+    }
+    return stats or None
+
+
 # ---------------------------------------------------------------------------
 # Supporting dataclasses
 # ---------------------------------------------------------------------------
@@ -148,6 +186,10 @@ class IngestProcessor:
         self._last_audio_summary_publish_ns_by_node: dict[str, int] = {}
         self._preprocess_locks_by_node: dict[str, asyncio.Lock] = {}
         self._position_kalman: dict[str, _NodePositionKalman] = {}
+        # Rate-limit the per-frame sequence-gap warning per node; on a lossy
+        # link this fires on most frames and saturates the log ring buffer.
+        self._seq_gap_warning_last_logged_s: dict[str, float] = {}
+        self._seq_gap_warning_interval_seconds = 10.0
 
     @property
     def last_trigger_ns(self) -> int:
@@ -296,17 +338,25 @@ class IngestProcessor:
                     frame_sequence=frame.sequence,
                 )
                 if sequence_gap_count > 0 and frame.sequence is not None:
-                    expected_sequence = frame.sequence - sequence_gap_count
-                    _logger.warning(
-                        "Detected ingest frame sequence gap",
-                        extra={
-                            "node_id": normalized_node.id,
-                            "boot_session": boot_session or None,
-                            "expected_sequence": expected_sequence,
-                            "received_sequence": frame.sequence,
-                            "gap_size": sequence_gap_count,
-                        },
+                    # The cumulative gap count is aggregated downstream from the
+                    # IngestResult and is unaffected by this log throttle.
+                    now_s = time.monotonic()
+                    last_logged_s = self._seq_gap_warning_last_logged_s.get(
+                        normalized_node.id, 0.0
                     )
+                    if now_s - last_logged_s >= self._seq_gap_warning_interval_seconds:
+                        self._seq_gap_warning_last_logged_s[normalized_node.id] = now_s
+                        expected_sequence = frame.sequence - sequence_gap_count
+                        _logger.warning(
+                            "Detected ingest frame sequence gap",
+                            extra={
+                                "node_id": normalized_node.id,
+                                "boot_session": boot_session or None,
+                                "expected_sequence": expected_sequence,
+                                "received_sequence": frame.sequence,
+                                "gap_size": sequence_gap_count,
+                            },
+                        )
                 if environment_sample is not None:
                     await self._storage.insert_environment(
                         node_id=normalized_node.id,
@@ -396,6 +446,7 @@ class IngestProcessor:
             source_type=frame.source_type,
             time_quality=frame.time_quality.value,
             buffer_uses_receipt_time=buffer_uses_receipt_time,
+            timing_diagnostics=frame.timing_diagnostics,
         )
         half_window_ns = int(self._localization_config.localization_window_seconds * 0.5 * 1_000_000_000)
         # Anchor event_time_ns to the buffer's own sample-count timeline rather
@@ -476,6 +527,7 @@ class IngestProcessor:
         source_type: str,
         time_quality: str,
         buffer_uses_receipt_time: bool,
+        timing_diagnostics: dict | None = None,
     ) -> None:
         last_publish_ns = self._last_audio_summary_publish_ns_by_node.get(node_id, 0)
         if now_ns - last_publish_ns < _AUDIO_SUMMARY_PUBLISH_INTERVAL_NS:
@@ -502,6 +554,9 @@ class IngestProcessor:
             "buffer_uses_receipt_time": buffer_uses_receipt_time,
             "status": "live_ingest_process",
         }
+        runner_stats = _extract_runner_stats(timing_diagnostics)
+        if runner_stats is not None:
+            summary["runner_stats"] = runner_stats
         await self._storage.upsert_node_audio_summary(
             node_id=node_id,
             summary=summary,

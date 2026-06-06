@@ -259,6 +259,58 @@ pub struct FilterState {
     pub show_alerts: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CopItemKind {
+    Track,
+    Detection,
+    Alert,
+}
+
+impl CopItemKind {
+    pub fn as_js_kind(self) -> &'static str {
+        match self {
+            Self::Track => "track",
+            Self::Detection => "detection",
+            Self::Alert => "alert",
+        }
+    }
+
+    pub fn from_js_kind(kind: &str) -> Option<Self> {
+        match kind {
+            "track" => Some(Self::Track),
+            "detection" => Some(Self::Detection),
+            "alert" => Some(Self::Alert),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CopSelection {
+    pub kind: CopItemKind,
+    pub id: String,
+    /// Clicks pin the selection; hover-only highlights clear on mouse leave.
+    pub pinned: bool,
+}
+
+impl CopSelection {
+    pub fn hovered(kind: CopItemKind, id: String) -> Self {
+        Self {
+            kind,
+            id,
+            pinned: false,
+        }
+    }
+
+    pub fn pinned(kind: CopItemKind, id: String) -> Self {
+        Self {
+            kind,
+            id,
+            pinned: true,
+        }
+    }
+}
+
 // ── AppState ────────────────────────────────────────────────────
 
 /// **LiveState** — signals fed by WS + periodic polling. Always live.
@@ -282,8 +334,8 @@ pub struct AppState {
     /// Active recording session — persists across navigation so the backend
     /// session isn't lost if the user leaves the recording page.
     pub active_recording: RwSignal<Option<RecordingSession>>,
-    /// Track ID currently hovered in the sidebar; drives map highlight ring.
-    pub selected_track: RwSignal<Option<String>>,
+    /// COP item currently hovered or clicked; drives map and sidebar highlighting.
+    pub selected_cop_item: RwSignal<Option<CopSelection>>,
 }
 
 impl AppState {
@@ -303,7 +355,7 @@ impl AppState {
             audio_drawer_detection_id: RwSignal::new(None),
             audio_drawer_track_id: RwSignal::new(None),
             active_recording: RwSignal::new(None),
-            selected_track: RwSignal::new(None),
+            selected_cop_item: RwSignal::new(None),
         }
     }
 }
