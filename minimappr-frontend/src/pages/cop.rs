@@ -62,7 +62,13 @@ fn CopTabs() -> impl IntoView {
 
     Effect::new(move |_| {
         if let Some(selection) = selected_cop_item.get() {
-            active.set(tab_for_cop_item(selection.kind));
+            // Only switch tabs when the target differs. A plain `set` always
+            // notifies in Leptos, which would rebuild the active pane on every
+            // hover/same-tab click and reset open <details> rows mid-interaction.
+            let target = tab_for_cop_item(selection.kind);
+            if active.get_untracked() != target {
+                active.set(target);
+            }
             if selection.pinned {
                 scroll_selected_sidebar_item_into_view(selection);
             }

@@ -45,23 +45,38 @@ pub fn LeafletMapPanel() -> impl IntoView {
         true
     });
 
-    // Sync nodes → map markers (geodetic mode only; position_m is local-frame, use position_geo)
+    // Sync nodes → map markers (geodetic mode only; position_m is local-frame, use position_geo).
+    // On the first update that carries any GPS position, pan to the average of all node positions.
     {
         let config = state.config;
-        Effect::new(move |_| {
+        Effect::new(move |already_centered: Option<bool>| {
             let _ = theme.get();
             let ns = nodes.get();
             let is_geo = config
                 .get()
                 .map(|c| c.coordinate_mode == "geodetic")
                 .unwrap_or(false);
+            let was_centered = already_centered.unwrap_or(false);
             if is_geo {
+                let mut lat_sum = 0.0f64;
+                let mut lon_sum = 0.0f64;
+                let mut geo_count = 0usize;
                 for n in &ns {
                     if let Some(geo) = &n.position_geo {
                         set_node_marker(&n.node_id, geo.lat, geo.lon, &n.health);
+                        if !was_centered {
+                            lat_sum += geo.lat;
+                            lon_sum += geo.lon;
+                            geo_count += 1;
+                        }
                     }
                 }
+                if !was_centered && geo_count > 0 {
+                    pan_to(lat_sum / geo_count as f64, lon_sum / geo_count as f64);
+                    return true;
+                }
             }
+            was_centered
         });
     }
 

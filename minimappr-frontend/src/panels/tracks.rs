@@ -95,6 +95,7 @@ pub fn TracksPane() -> impl IntoView {
                             let contributors = t.contributors.clone();
                             let contributor_count = t.contributor_count.max(contributors.len() as u32);
                             let geo_for_pan = t.position_geo.clone();
+                            let summary_geo = t.position_geo.as_ref().map(|g| (g.lat, g.lon));
 
                             let row_class = move || {
                                 let sel = selected_cop_item.get();
@@ -119,12 +120,6 @@ pub fn TracksPane() -> impl IntoView {
                                                 hover_id.clone(),
                                             )));
                                         }
-                                        on:click=move |_| {
-                                            selected_cop_item.set(Some(CopSelection::pinned(
-                                                CopItemKind::Track,
-                                                click_id.clone(),
-                                            )));
-                                        }
                                         on:mouseleave={
                                             let leave_id = leave_id.clone();
                                             move |_| {
@@ -142,7 +137,17 @@ pub fn TracksPane() -> impl IntoView {
                                             }
                                         }
                                     >
-                                        <summary>
+                                        <summary
+                                            on:click=move |_| {
+                                                selected_cop_item.set(Some(CopSelection::pinned(
+                                                    CopItemKind::Track,
+                                                    click_id.clone(),
+                                                )));
+                                                if let Some((lat, lon)) = summary_geo {
+                                                    pan_to(lat, lon);
+                                                }
+                                            }
+                                        >
                                             <span class=st_class title=geo_title.clone()>{st_label}</span>
                                             <span class="row-label">{label_text}</span>
                                             <span class="row-summary-meta">

@@ -43,6 +43,7 @@ pub fn DetectionsPane() -> impl IntoView {
                                 None => format!("{:.5}°N, {:.5}°E", g.lat, g.lon),
                             });
                             let geo_for_pan = d.position_geo.clone();
+                            let summary_geo = d.position_geo.as_ref().map(|g| (g.lat, g.lon));
                             let row_class = move || {
                                 if is_cop_item_selected(
                                     &selected_cop_item.get(),
@@ -66,12 +67,6 @@ pub fn DetectionsPane() -> impl IntoView {
                                                 hover_id.clone(),
                                             )));
                                         }
-                                        on:click=move |_| {
-                                            selected_cop_item.set(Some(CopSelection::pinned(
-                                                CopItemKind::Detection,
-                                                click_id.clone(),
-                                            )));
-                                        }
                                         on:mouseleave={
                                             let leave_id = leave_id.clone();
                                             move |_| {
@@ -89,7 +84,17 @@ pub fn DetectionsPane() -> impl IntoView {
                                             }
                                         }
                                     >
-                                        <summary>
+                                        <summary
+                                            on:click=move |_| {
+                                                selected_cop_item.set(Some(CopSelection::pinned(
+                                                    CopItemKind::Detection,
+                                                    click_id.clone(),
+                                                )));
+                                                if let Some((lat, lon)) = summary_geo {
+                                                    pan_to(lat, lon);
+                                                }
+                                            }
+                                        >
                                             <span class=dot_class title=age_text.clone()></span>
                                             <span class="row-label">{label}</span>
                                             <span class="row-summary-meta">

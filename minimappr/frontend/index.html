@@ -32,8 +32,8 @@
   
   
 <script type="module">
-import init, * as bindings from '/minimappr-frontend-e5295f18a766602b.js';
-const wasm = await init({ module_or_path: '/minimappr-frontend-e5295f18a766602b_bg.wasm' });
+import init, * as bindings from '/minimappr-frontend-c36c6e05680dec08.js';
+const wasm = await init({ module_or_path: '/minimappr-frontend-c36c6e05680dec08_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -72,7 +72,7 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
       line-height: 1;
     }
   </style>
-<link rel="modulepreload" href="/minimappr-frontend-e5295f18a766602b.js" crossorigin="anonymous" integrity="sha384-ymXUQbCJxUO1RWFlCzcnC8zsY54iZXjaS351vPhu6JX9y7X1fZlD7KMNkbd1yS3b"><link rel="preload" href="/minimappr-frontend-e5295f18a766602b_bg.wasm" crossorigin="anonymous" integrity="sha384-ZgB+6yc6cavckyVXMQ4xRyGhkvC8HH+LwPmIx/qglqrhvA9FpqoVvBvNkAcQEMpP" as="fetch" type="application/wasm"></head>
+<link rel="modulepreload" href="/minimappr-frontend-c36c6e05680dec08.js" crossorigin="anonymous" integrity="sha384-HPWCopvY4h6ZKFQfEu0pKBQi2WviPD0IUuUc7o2OFhPjQlaBAJRdmUh5ptTAnPXt"><link rel="preload" href="/minimappr-frontend-c36c6e05680dec08_bg.wasm" crossorigin="anonymous" integrity="sha384-sPhKSSsU7rckQCGj+j/WO4dB1lcGAEWNXw0oUNiJsz6FuBlawlNmSMyoGuTUq2RO" as="fetch" type="application/wasm"></head>
 <body>
   <script src="leaflet-interop.js"></script>
   <script src="audio-interop.js"></script>
