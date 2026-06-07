@@ -84,6 +84,7 @@ from minimappr.core.audio_buffer import MultiSensorBuffer
 from minimappr.core.auth import extract_federation_token
 from minimappr.core.bit_report import BITReportEvaluator
 from minimappr.core.cluster_registry import ClusterRegistry
+from minimappr.core.node_registry import NodeRegistry
 from minimappr.core.environment import LiveEnvironmentProvider
 from minimappr.core.federation import FederationCoordinator
 from minimappr.core.fusion_node import FusionNode
@@ -1161,10 +1162,11 @@ async def _api_only_lifespan(app: FastAPI, settings: Settings):
         federation=federation,
         bit_evaluator=common_live_runtime_services.bit_evaluator,
         cleanup_service=common_live_runtime_services.cleanup_service,
-        # API-only role still serves the cluster CRUD endpoints; without an
-        # in-memory registry here those handlers raise KeyError on app.state.
-        # In split mode this registry is local to the API process and does not
-        # influence the ingest-process localizer (no cross-process sync yet).
+        # API-only role still serves the cluster/node CRUD endpoints; without
+        # in-memory registries here those handlers raise AttributeError on
+        # app.state.  In split mode these are local to the API process and do
+        # not influence the ingest-process localizer (no cross-process sync yet).
+        registry=NodeRegistry(),
         cluster_registry=ClusterRegistry(),
         sidecar_state=sidecar_state,
         capture_manager=capture_manager,
