@@ -19,6 +19,7 @@ from minimappr.models import (
     NodeSpec,
     NodeType,
     TimeQuality,
+    Vec3,
 )
 
 
@@ -89,7 +90,11 @@ class _BinaryReader:
         return self.read(length).decode("utf-8")
 
 
-def parse_binary_ingest_payload(raw_payload: bytes) -> BinaryIngestPayload:
+def parse_binary_ingest_payload(
+    raw_payload: bytes,
+    *,
+    fallback_position_m: Vec3 | None = None,
+) -> BinaryIngestPayload:
     reader = _BinaryReader(raw_payload)
     if reader.read(4) != _MAGIC:
         raise ValueError("Invalid binary ingest magic")
@@ -102,14 +107,14 @@ def parse_binary_ingest_payload(raw_payload: bytes) -> BinaryIngestPayload:
     if frame_count < 1 or frame_count > 2048:
         raise ValueError("Binary ingest frame count must be between 1 and 2048")
 
-    node = _read_node(reader)
+    node = _read_node(reader, fallback_position_m=fallback_position_m)
     buffered_frames = [_read_frame(reader) for _ in range(frame_count)]
     if reader.remaining != 0:
         raise ValueError("Binary ingest payload has trailing bytes")
     return BinaryIngestPayload(node=node, buffered_frames=buffered_frames, sort_by_toa=sort_by_toa)
 
 
-def _read_node(reader: _BinaryReader) -> NodeSpec:
+def _read_node(reader: _BinaryReader, *, fallback_position_m: Vec3 | None = None) -> NodeSpec:
     node_id = reader.string()
     node_type_code = reader.u8()
     try:
@@ -145,13 +150,30 @@ def _read_node(reader: _BinaryReader) -> NodeSpec:
         gps_metadata["signal"] = gps_signal
     if position_source:
         gps_metadata["position_source"] = position_source
+
+    # Legacy-firmware compatibility: older nodes predate the always-on static
+    # fallback geo descriptor and report neither position_geo nor position_m.
+    # NodeSpec (and downstream _normalize_node_spec) require a position, so such
+    # frames are otherwise rejected with HTTP 400 and the node never registers.
+    # When a server-side fallback is configured, stamp it as a local position so
+    # the node is accepted; nodes that *do* send a position are untouched.
+    position_m: Vec3 | None = None
+    if position_geo is None and fallback_position_m is not None:
+        position_m = (
+            float(fallback_position_m[0]),
+            float(fallback_position_m[1]),
+            float(fallback_position_m[2]),
+        )
+        gps_metadata.setdefault("position_source", "server_legacy_fallback")
+        gps_metadata["server_position_fallback"] = True
+
     if gps_metadata:
         metadata["gps"] = gps_metadata
 
     return NodeSpec(
         id=node_id,
         node_type=node_type,
-        position_m=None,
+        position_m=position_m,
         position_geo=position_geo,
         sensor_offsets_m=sensor_offsets_m,
         capabilities=capabilities,

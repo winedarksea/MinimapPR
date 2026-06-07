@@ -1645,7 +1645,11 @@ async def _ingest_binary_impl(state, request: Request) -> StoreForwardIngestResp
         raise HTTPException(status_code=410, detail="Direct ingest is disabled; send firmware ingest to the Rust sidecar")
     try:
         body = await request.body()
-        payload = await asyncio.to_thread(parse_binary_ingest_payload, body)
+        payload = await asyncio.to_thread(
+            parse_binary_ingest_payload,
+            body,
+            fallback_position_m=state.settings.legacy_ingest_fallback_position_m,
+        )
         results = []
         if payload.buffered_frames:
             last_timing_diag: dict | None = None

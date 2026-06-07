@@ -65,6 +65,26 @@ def _env_list(key: str, default: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(values) if values else default
 
 
+def _env_vec3_optional(
+    key: str, default: tuple[float, float, float] | None
+) -> tuple[float, float, float] | None:
+    """Parse a ``"x,y,z"`` env var into a Vec3, or ``None`` to disable.
+
+    An empty value (e.g. ``MINIMAPPR_...=``) explicitly disables the setting;
+    an unset var keeps ``default``.
+    """
+    raw = os.getenv(key)
+    if raw is None:
+        return default
+    text = raw.strip()
+    if not text:
+        return None
+    parts = [item.strip() for item in text.split(",") if item.strip()]
+    if len(parts) != 3:
+        raise ValueError(f"{key} must be 'x,y,z'; got {raw!r}")
+    return (float(parts[0]), float(parts[1]), float(parts[2]))
+
+
 @dataclass(slots=True)
 class LocalizationConfig:
     trigger_rms: float
@@ -501,6 +521,11 @@ class Settings:
     node_position_kalman_q: float = 0.5
     node_position_kalman_r: float = 25.0
     node_position_kalman_init_p: float = 100.0
+    # Local position stamped onto binary-ingest frames from legacy firmware that
+    # reports neither position_geo nor position_m (pre static-fallback-geo
+    # descriptor builds). Lets those nodes register instead of 400-ing on every
+    # frame. Set MINIMAPPR_LEGACY_INGEST_FALLBACK_POSITION_M="" to disable.
+    legacy_ingest_fallback_position_m: tuple[float, float, float] | None = (0.0, 0.0, 0.0)
     event_stale_seconds: float = 30.0
     retention_ephemeral_seconds: int = 900
     retention_short_seconds: int = 86_400
@@ -1112,6 +1137,9 @@ class Settings:
             cleanup_interval_seconds=_env_float("MINIMAPPR_CLEANUP_INTERVAL_SECONDS", 15.0),
             node_degraded_after_seconds=_env_float("MINIMAPPR_NODE_DEGRADED_AFTER_SECONDS", 15.0),
             node_offline_after_seconds=_env_float("MINIMAPPR_NODE_OFFLINE_AFTER_SECONDS", 45.0),
+            legacy_ingest_fallback_position_m=_env_vec3_optional(
+                "MINIMAPPR_LEGACY_INGEST_FALLBACK_POSITION_M", (0.0, 0.0, 0.0)
+            ),
             event_stale_seconds=_env_float("MINIMAPPR_EVENT_STALE_SECONDS", 30.0),
             retention_ephemeral_seconds=_env_int("MINIMAPPR_RETENTION_EPHEMERAL_SECONDS", 900),
             retention_short_seconds=_env_int("MINIMAPPR_RETENTION_SHORT_SECONDS", 86_400),
