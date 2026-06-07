@@ -1000,15 +1000,27 @@ a.strip-chip:hover { filter: brightness(1.12); }
 .track-row-stale td { opacity: 0.55; }
 .track-row-stale:hover td { opacity: 0.85; }
 
-/* Sidebar row highlight on hover — synced to map ring */
-.track-row-selected td { background: var(--md-sys-color-surface-container-high, #30363d); }
+/* Sidebar row highlight synced to the active COP marker. */
+.cop-row-selected {
+  border-color: color-mix(in srgb, var(--md-sys-color-primary) 45%, var(--md-sys-color-outline-variant));
+}
+.track-row-selected td,
+.cop-row-selected td {
+  background: var(--md-sys-color-surface-container-high, #30363d);
+}
 
-/* Map highlight ring — pulsing outline around the hovered track marker */
+/* Map highlight ring — pulsing outline around the active COP marker */
 @keyframes mmpr-ring-pulse {
   0%, 100% { opacity: 0.9; }
   50%       { opacity: 0.35; }
 }
-.mmpr-track-highlight-ring { animation: mmpr-ring-pulse 1.4s ease-in-out infinite; }
+.mmpr-cop-highlight-ring,
+.mmpr-track-highlight-ring {
+  animation: mmpr-ring-pulse 1.4s ease-in-out infinite;
+}
+.mmpr-map-icon-highlighted {
+  filter: brightness(1.22) saturate(1.18) drop-shadow(0 0 10px color-mix(in srgb, var(--md-sys-color-primary) 70%, transparent));
+}
 
 /* Track ID code in table — shows geo coords as native tooltip */
 .track-id-code {
@@ -1150,6 +1162,10 @@ a.strip-chip:hover { filter: brightness(1.12); }
 .alert-card:hover {
   transform: translateY(-1px);
   box-shadow: var(--md-sys-elevation-1);
+}
+.alert-card.cop-row-selected {
+  border-color: color-mix(in srgb, var(--md-sys-color-primary) 60%, var(--md-sys-color-outline-variant));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--md-sys-color-primary) 40%, transparent), var(--md-sys-elevation-1);
 }
 .alert-card.alert-live::before {
   content: "";
@@ -2499,10 +2515,13 @@ a.btn-sm {
 .compact-row > summary:hover {
   background: color-mix(in srgb, var(--md-sys-color-on-surface) 5%, transparent);
 }
+.compact-row.cop-row-selected > summary,
 .compact-row.track-row-selected > summary {
   background: var(--md-sys-color-surface-container-high, #30363d);
+  box-shadow: inset 3px 0 0 var(--md-sys-color-primary);
 }
 .compact-row.track-row-stale > summary { opacity: 0.6; }
+.compact-row.track-row-stale.cop-row-selected > summary,
 .compact-row.track-row-stale.track-row-selected > summary { opacity: 0.85; }
 
 .row-status-dot {
