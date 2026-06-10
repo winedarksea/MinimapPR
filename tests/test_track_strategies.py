@@ -193,6 +193,38 @@ def test_linear_filter_update_smooths() -> None:
     assert updated.position_m == pytest.approx((4.0, 0.0, 0.0), abs=1e-6)
 
 
+def test_linear_filter_uses_anisotropic_measurement_covariance() -> None:
+    filt = LinearTrackFilter(position_alpha=0.6, velocity_alpha=0.5, default_covariance_diagonal=5.0)
+    t0 = 1_000_000_000_000_000_000
+    state = TrackState(
+        id="trk-1",
+        first_seen_ns=t0,
+        last_seen_ns=t0,
+        position_m=(0.0, 0.0, 0.0),
+        velocity_mps=(0.0, 0.0, 0.0),
+        position_covariance_m2=[
+            [1.0, 0.0, 0.0],
+            [0.0, 100.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+    )
+
+    updated = filt.update(
+        state,
+        measurement_m=(10.0, 10.0, 10.0),
+        dt_s=1.0,
+        measurement_covariance_m2=[
+            [100.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 100.0],
+        ],
+    )
+
+    assert updated.position_m[0] < 0.2
+    assert updated.position_m[1] > 9.8
+    assert updated.position_m[2] < 0.2
+
+
 # ---------------------------------------------------------------------------
 # KalmanTrackFilter unit tests
 # ---------------------------------------------------------------------------

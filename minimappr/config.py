@@ -104,8 +104,6 @@ class LocalizationConfig:
     localization_strategy: str
     localization_srp_grid_resolution_m: float
     localization_search_padding_m: float
-    localization_far_field_default_range_m: float
-    localization_far_field_max_range_m: float
     localization_music_azimuth_step_deg: float
     localization_music_elevation_step_deg: float
     localization_subspace_freq_min_hz: float
@@ -121,6 +119,9 @@ class LocalizationConfig:
     pre_classification_highpass_hz: float
     pre_classification_lowpass_hz: float
     gcc_phat_interp_factor: int
+    # Retained for config-file compatibility; Cartesian localization ignores them.
+    localization_far_field_default_range_m: float = 50.0
+    localization_far_field_max_range_m: float = 250.0
     classification_window_seconds: float = 30.0
     localization_band_min_hz: float = 0.0
     localization_band_max_hz: float = 0.0

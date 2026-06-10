@@ -11,7 +11,6 @@ from minimappr.core.localization_uncertainty import (
     covariance_from_jacobian,
     covariance_to_nested_list,
     embed_planar_covariance_m2,
-    range_observability_from_covariance,
 )
 from minimappr.models import LocalizationResult
 from minimappr.utils.audio import rms
@@ -132,109 +131,52 @@ class LocalizationEngine:
         if len(sensor_windows) < 4:
             raise LocalizationError("Need at least 4 active sensors for 3D TDOA localization")
         self._validate_inputs(sensor_positions=sensor_positions, sensor_windows=sensor_windows)
+        from minimappr.core.cartesian_tdoa import (
+            localization_result_from_cartesian_solve,
+            measure_pair_tdoas,
+            reference_tdoas,
+            solve_cartesian_tdoa,
+        )
 
-        w = sensor_weights or {}
-        sensor_ids = sorted(sensor_windows.keys())
-        energies = {sensor_id: rms(sensor_windows[sensor_id]) for sensor_id in sensor_ids}
-        reference_sensor = max(energies.items(), key=lambda item: item[1])[0]
-        reference_signal = sensor_windows[reference_sensor]
-        ref_pos = sensor_positions[reference_sensor]
-        ref_weight = w.get(reference_sensor, 1.0)
-
-        tdoa_s: dict[str, float] = {}
-        pair_weights: dict[str, float] = {}
-        peaks: list[float] = []
-        meas_ids: list[str] = []
-
-        for sensor_id in sensor_ids:
-            if sensor_id == reference_sensor:
-                continue
-            tau_s, peak = gcc_phat(
-                signal=sensor_windows[sensor_id],
-                reference_signal=reference_signal,
-                sample_rate_hz=sample_rate_hz,
-                max_tau_s=self.max_tau_s,
-                interp=max(1, self.interp_factor),
-            )
-            if not np.isfinite(tau_s) or not np.isfinite(peak):
-                raise LocalizationError(f"Non-finite GCC-PHAT output for sensor {sensor_id}")
-            pw = min(ref_weight, w.get(sensor_id, 1.0))
-            tdoa_s[sensor_id] = tau_s
-            pair_weights[sensor_id] = pw
-            peaks.append(peak * pw)
-            meas_ids.append(sensor_id)
-
-        if len(meas_ids) < 3:
-            raise LocalizationError("Insufficient independent TDOA measurements")
-
-        sound_speed = speed_of_sound_mps(temperature_c=temperature_c, humidity_fraction=humidity_fraction)
-
-        points = np.vstack([sensor_positions[sid] for sid in sensor_ids])
-        x0 = np.mean(points, axis=0)
-
-        def residuals(position: np.ndarray) -> np.ndarray:
-            dist_ref = np.linalg.norm(position - ref_pos) + 1e-9
-            rows = []
-            for sid in meas_ids:
-                dist_i = np.linalg.norm(position - sensor_positions[sid]) + 1e-9
-                predicted = (dist_i - dist_ref) / sound_speed
-                rows.append(pair_weights.get(sid, 1.0) * (predicted - tdoa_s[sid]))
-            return np.asarray(rows, dtype=np.float64)
-
-        solved = least_squares(residuals, x0=x0, method="trf", loss="soft_l1")
-        if not solved.success:
-            raise LocalizationError("TDOA least-squares solve failed")
-
-        position = solved.x
-        if not np.all(np.isfinite(position)):
-            raise LocalizationError("Localization solver returned non-finite position")
-        residual = residuals(position)
-        if not np.all(np.isfinite(residual)):
-            raise LocalizationError("Localization residual contains non-finite values")
-        rmse_s = float(np.sqrt(np.mean(np.square(residual))))
-        tau_scale = max(max(abs(v) for v in tdoa_s.values()), 1e-5)
-        confidence = max(0.0, min(1.0, 1.0 - (rmse_s / tau_scale)))
-
-        gdop = self._gdop(
-            position=position,
-            meas_ids=meas_ids,
+        sensor_ids = sorted(sensor_id for sensor_id in sensor_positions if sensor_id in sensor_windows)
+        sound_speed = speed_of_sound_mps(
+            temperature_c=temperature_c,
+            humidity_fraction=humidity_fraction,
+        )
+        measurements = measure_pair_tdoas(
             sensor_positions=sensor_positions,
+            sensor_windows=sensor_windows,
+            sensor_ids=sensor_ids,
+            sample_rate_hz=sample_rate_hz,
+            sound_speed_mps=sound_speed,
+            max_tau_s=self.max_tau_s,
+            interpolation_factor=self.interp_factor,
+            sensor_weights=sensor_weights,
+            gcc_phat_function=gcc_phat,
+        )
+        if len(measurements) < 3:
+            raise LocalizationError("Insufficient finite TDOA pairs for Cartesian localization")
+        reference_sensor, reference_tdoa_s = reference_tdoas(
+            measurements=measurements,
+            sensor_windows=sensor_windows,
+            sensor_ids=sensor_ids,
+        )
+        try:
+            solve = solve_cartesian_tdoa(
+                sensor_positions={sensor_id: sensor_positions[sensor_id] for sensor_id in sensor_ids},
+                measurements=measurements,
+                sound_speed_mps=sound_speed,
+                sample_rate_hz=sample_rate_hz,
+                interpolation_factor=self.interp_factor,
+                reference_sensor=reference_sensor,
+                reference_tdoa_s=reference_tdoa_s,
+            )
+        except (ValueError, np.linalg.LinAlgError) as exc:
+            raise LocalizationError(str(exc)) from exc
+        return localization_result_from_cartesian_solve(
+            solve=solve,
             reference_sensor=reference_sensor,
-            sound_speed=sound_speed,
-        )
-        if np.isnan(gdop):
-            raise LocalizationError("GDOP computation produced NaN")
-
-        # Correlation peak quality can significantly degrade when SNR is poor.
-        if peaks:
-            confidence *= float(np.clip(np.mean(peaks), 0.0, 1.0))
-
-        minimum_position_std_m = _minimum_position_std_m(
-            sound_speed,
-            sample_rate_hz,
-            self.interp_factor,
-        )
-        position_covariance_m2 = covariance_from_jacobian(
-            solved.jac,
-            rmse_s,
-            minimum_time_std_s=1.0 / max(sample_rate_hz * max(self.interp_factor, 1), 1),
-            minimum_std_m=minimum_position_std_m,
-        )
-        range_observability = range_observability_from_covariance(
-            position_covariance_m2,
-            position - np.mean(points, axis=0),
-        )
-
-        return LocalizationResult(
-            position_m=(float(position[0]), float(position[1]), float(position[2])),
-            confidence=float(np.clip(confidence, 0.0, 1.0)),
-            gdop=gdop,
-            reference_sensor=reference_sensor,
-            tdoa_s=tdoa_s,
-            position_covariance_m2=covariance_to_nested_list(position_covariance_m2),
-            range_observability=range_observability,
-            residual_rms_seconds=rmse_s,
-            range_projection_mode="range_refined",
+            reference_tdoa_s=reference_tdoa_s,
         )
 
     def localize_2d(
@@ -343,11 +285,6 @@ class LocalizationEngine:
             vertical_std_m=minimum_position_std_m,
             minimum_std_m=minimum_position_std_m,
         )
-        range_observability = range_observability_from_covariance(
-            position_covariance_m2,
-            position - np.mean(points, axis=0),
-        )
-
         return LocalizationResult(
             position_m=(float(position[0]), float(position[1]), float(position[2])),
             confidence=float(np.clip(confidence, 0.0, 1.0)),
@@ -355,9 +292,7 @@ class LocalizationEngine:
             reference_sensor=reference_sensor,
             tdoa_s=tdoa_s,
             position_covariance_m2=covariance_to_nested_list(position_covariance_m2),
-            range_observability=range_observability,
             residual_rms_seconds=rmse_s,
-            range_projection_mode="range_refined",
         )
 
     @staticmethod
