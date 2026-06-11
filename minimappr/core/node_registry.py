@@ -99,6 +99,18 @@ class NodeRegistry:
         async with self._lock:
             return {sensor_id: descriptor.position_m.copy() for sensor_id, descriptor in self._sensors.items()}
 
+    async def sensor_node_ids(
+        self,
+        sensor_ids: list[str] | None = None,
+    ) -> dict[str, str]:
+        async with self._lock:
+            selected_ids = sensor_ids if sensor_ids is not None else list(self._sensors)
+            return {
+                sensor_id: self._sensors[sensor_id].node_id
+                for sensor_id in selected_ids
+                if sensor_id in self._sensors
+            }
+
     async def sensors_for_node(self, node_id: str) -> list[SensorDescriptor]:
         async with self._lock:
             return [descriptor for descriptor in self._sensors.values() if descriptor.node_id == node_id]
@@ -151,6 +163,16 @@ class NodeRegistry:
             if descriptor is not None:
                 descriptor.effective_sync_grade = grade
 
+    async def update_node_sensor_sync_grade(
+        self,
+        node_id: str,
+        grade: SyncGrade,
+    ) -> None:
+        async with self._lock:
+            for descriptor in self._sensors.values():
+                if descriptor.node_id == node_id:
+                    descriptor.effective_sync_grade = grade
+
     async def update_node_cluster(self, node_id: str, cluster_id: str | None) -> None:
         async with self._lock:
             for descriptor in self._sensors.values():
@@ -163,17 +185,31 @@ class NodeRegistry:
 
     async def gain_offset_db_for_sensor(self, sensor_id: str) -> float:
         async with self._lock:
-            descriptor = self._sensors.get(sensor_id)
-            if descriptor is None:
-                return 0.0
-            runtime = self._nodes.get(descriptor.node_id)
-            if runtime is None:
-                return 0.0
-            properties = runtime.spec.properties if isinstance(runtime.spec.properties, dict) else {}
-            raw = properties.get("gain_offset_db")
-            if raw is None and isinstance(properties.get("audio"), dict):
-                raw = properties["audio"].get("gain_offset_db")
-            try:
-                return float(raw)
-            except (TypeError, ValueError):
-                return 0.0
+            return self._gain_offset_db_for_sensor_unlocked(sensor_id)
+
+    async def sensor_gain_offsets_db(
+        self,
+        sensor_ids: list[str],
+    ) -> dict[str, float]:
+        async with self._lock:
+            return {
+                sensor_id: self._gain_offset_db_for_sensor_unlocked(sensor_id)
+                for sensor_id in sensor_ids
+                if sensor_id in self._sensors
+            }
+
+    def _gain_offset_db_for_sensor_unlocked(self, sensor_id: str) -> float:
+        descriptor = self._sensors.get(sensor_id)
+        if descriptor is None:
+            return 0.0
+        runtime = self._nodes.get(descriptor.node_id)
+        if runtime is None:
+            return 0.0
+        properties = runtime.spec.properties if isinstance(runtime.spec.properties, dict) else {}
+        raw = properties.get("gain_offset_db")
+        if raw is None and isinstance(properties.get("audio"), dict):
+            raw = properties["audio"].get("gain_offset_db")
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return 0.0

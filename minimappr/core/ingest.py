@@ -37,6 +37,7 @@ from minimappr.models import (
     IngestFrameResponse,
     NodeSpec,
     TimeQuality,
+    sync_grade_from_time_quality,
 )
 from minimappr.utils.audio import decode_pcm16le_b64, trigger_rms
 
@@ -224,6 +225,11 @@ class IngestProcessor:
         normalized_node, geo_position = self._normalize_node_spec(raw_node)
         server_received_ns = time.time_ns()
         runtime = await self._registry.upsert(normalized_node, server_received_ns)
+        frame_sync_grade = sync_grade_from_time_quality(frame.time_quality)
+        await self._registry.update_node_sensor_sync_grade(
+            runtime.spec.id,
+            frame_sync_grade,
+        )
         boot_session = _node_boot_session(normalized_node)
         toa_ns = frame.toa_ns or frame.start_time_ns
         tor_ns = frame.tor_ns if frame.tor_ns is not None else server_received_ns
@@ -819,6 +825,9 @@ def _buffer_timestamps_for_frame(
     # _MAX_TRUSTED_NODE_CLOCK_SKEW_NS from server wallclock, the Python ingest path
     # *overrides* the firmware timestamp with a server-receipt-derived timestamp so
     # debug audio remains roughly playable while the firmware lacks GPS/NTP lock.
+    # Such frames do not generate localization triggers, and localization
+    # excludes their cross-node TDOA pairs. Within-node bearings and
+    # gain-corrected amplitude ratios remain safe to use.
     #
     # Rust (dsp_worker.rs `should_use_receipt_time_alignment`): never overrides
     # firmware timestamps when they are present, no matter how skewed. TDOA
@@ -826,9 +835,9 @@ def _buffer_timestamps_for_frame(
     # well-defined wrong timestamp degrades gracefully under TDOA, while a
     # silently-corrected one looks correct but corrupts the spatial solution.
     #
-    # The asymmetry is *by design*: Python is a debug/dev reference path that may
-    # never feed multi-node TDOA, while the Rust sidecar is the real-time hot
-    # path that always does. Do not "fix" by aligning the two — fix by ensuring
+    # The asymmetry is *by design*: Python may use receipt alignment only for
+    # non-triggering debug audio, while the Rust sidecar is the real-time hot
+    # path that always preserves packet time. Do not "fix" by aligning the two — ensure
     # tests assert the intentional divergence on the FREE_RUNNING + skew case.
     duration_ns = int(round((sample_count / sample_rate_hz) * 1_000_000_000))
     node_clock_skew_ns = abs(frame_start_time_ns - server_received_ns)

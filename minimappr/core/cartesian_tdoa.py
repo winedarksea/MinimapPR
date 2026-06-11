@@ -10,6 +10,14 @@ import numpy as np
 from scipy.optimize import least_squares
 
 from minimappr.core.localization_uncertainty import covariance_to_nested_list
+from minimappr.core.spatial_constraints import (
+    AmplitudeRatioConstraint,
+    SpatialBearingConstraint,
+    bearing_intersection_initial_position,
+    broadband_direction_from_tdoas,
+    spatial_constraint_jacobian,
+    spatial_constraint_residual_seconds,
+)
 from minimappr.core.subspace_bearing import BearingPrior
 from minimappr.core.tdoa_measurements import (
     PairTdoaMeasurement,
@@ -45,6 +53,7 @@ def _array_aperture_m(sensor_positions: dict[str, np.ndarray], sensor_ids: list[
         ),
         default=0.0,
     )
+
 
 def _weighted_residual_seconds(
     position_m: np.ndarray,
@@ -97,32 +106,7 @@ def _weighted_tdoa_jacobian(
             (offset_a / distance_a_m) - (offset_b / distance_b_m)
         ) / sound_speed_mps
         rows.append(math.sqrt(measurement.weight) * gradient)
-    return np.vstack(rows)
-
-
-def _broadband_direction(
-    *,
-    sensor_positions: dict[str, np.ndarray],
-    measurements: list[PairTdoaMeasurement],
-    sound_speed_mps: float,
-) -> np.ndarray:
-    rows: list[np.ndarray] = []
-    targets: list[float] = []
-    weights: list[float] = []
-    for measurement in measurements:
-        rows.append(sensor_positions[measurement.sensor_b] - sensor_positions[measurement.sensor_a])
-        targets.append(sound_speed_mps * measurement.tdoa_seconds)
-        weights.append(math.sqrt(measurement.weight))
-    weighted_rows = np.vstack(rows) * np.asarray(weights)[:, None]
-    weighted_targets = np.asarray(targets, dtype=np.float64) * np.asarray(weights)
-    try:
-        direction, *_ = np.linalg.lstsq(weighted_rows, weighted_targets, rcond=None)
-    except np.linalg.LinAlgError as exc:
-        raise ValueError("TDOA bearing solve is singular") from exc
-    norm = float(np.linalg.norm(direction))
-    if norm < EPSILON:
-        raise ValueError("TDOA bearing solve is degenerate")
-    return direction / norm
+    return np.vstack(rows) if rows else np.zeros((0, 3), dtype=np.float64)
 
 
 def _algebraic_initial_position(
@@ -253,66 +237,100 @@ def solve_cartesian_tdoa(
     reference_sensor: str,
     reference_tdoa_s: dict[str, float],
     bearing_prior: BearingPrior | None = None,
+    bearing_constraints: list[SpatialBearingConstraint] | None = None,
+    amplitude_constraints: list[AmplitudeRatioConstraint] | None = None,
 ) -> CartesianTdoaSolve:
+    bearing_constraints = bearing_constraints or []
+    amplitude_constraints = amplitude_constraints or []
     sensor_ids = sorted(sensor_positions)
     centroid_m = np.mean(np.vstack([sensor_positions[sensor_id] for sensor_id in sensor_ids]), axis=0)
     aperture_m = _array_aperture_m(sensor_positions, sensor_ids)
     sample_time_std_s = 1.0 / max(sample_rate_hz * max(interpolation_factor, 1), 1)
     minimum_position_std_m = max(sound_speed_mps * sample_time_std_s, 0.05)
-    direction = _broadband_direction(
-        sensor_positions=sensor_positions,
-        measurements=measurements,
-        sound_speed_mps=sound_speed_mps,
+    has_tdoa_measurements = bool(measurements)
+    if has_tdoa_measurements:
+        direction = broadband_direction_from_tdoas(
+            sensor_positions=sensor_positions,
+            measurements=measurements,
+            sound_speed_mps=sound_speed_mps,
+        )
+        observability_boundary = _observability_boundary_position(
+            centroid_m=centroid_m,
+            direction=direction,
+            aperture_m=aperture_m,
+            time_std_s=sample_time_std_s,
+            sensor_positions=sensor_positions,
+            measurements=measurements,
+            sound_speed_mps=sound_speed_mps,
+        )
+        initial_positions = [
+            centroid_m,
+            centroid_m + direction * max(aperture_m, minimum_position_std_m),
+            observability_boundary,
+        ]
+    else:
+        search_scale_m = max(aperture_m, minimum_position_std_m)
+        direction = np.asarray([1.0, 0.0, 0.0], dtype=np.float64)
+        observability_boundary = centroid_m + direction * search_scale_m
+        initial_positions = [
+            centroid_m,
+            centroid_m + np.asarray([search_scale_m, 0.0, 0.0]),
+            centroid_m + np.asarray([0.0, search_scale_m, 0.0]),
+            centroid_m + np.asarray([0.0, 0.0, search_scale_m]),
+        ]
+    bearing_intersection_position = bearing_intersection_initial_position(
+        bearing_constraints
     )
-    observability_boundary = _observability_boundary_position(
-        centroid_m=centroid_m,
-        direction=direction,
-        aperture_m=aperture_m,
-        time_std_s=sample_time_std_s,
-        sensor_positions=sensor_positions,
-        measurements=measurements,
-        sound_speed_mps=sound_speed_mps,
-    )
-    initial_positions = [
-        centroid_m,
-        centroid_m + direction * max(aperture_m, minimum_position_std_m),
-        observability_boundary,
-    ]
+    if bearing_intersection_position is not None:
+        initial_positions.insert(0, bearing_intersection_position)
     if bearing_prior is not None:
         initial_positions.insert(
             0,
             centroid_m
             + bearing_prior.direction * max(aperture_m, minimum_position_std_m),
         )
-    algebraic_position = _algebraic_initial_position(
-        sensor_positions=sensor_positions,
-        reference_sensor=reference_sensor,
-        reference_tdoa_s=reference_tdoa_s,
-        sound_speed_mps=sound_speed_mps,
+    algebraic_position = (
+        _algebraic_initial_position(
+            sensor_positions=sensor_positions,
+            reference_sensor=reference_sensor,
+            reference_tdoa_s=reference_tdoa_s,
+            sound_speed_mps=sound_speed_mps,
+        )
+        if has_tdoa_measurements
+        else None
     )
     if algebraic_position is not None:
         initial_positions.insert(0, algebraic_position)
 
     candidate_solutions: list[tuple[float, float, np.ndarray]] = []
+    def combined_residual_seconds(position_m: np.ndarray) -> np.ndarray:
+        return np.concatenate(
+            (
+                _weighted_residual_seconds(
+                    position_m,
+                    sensor_positions=sensor_positions,
+                    measurements=measurements,
+                    sound_speed_mps=sound_speed_mps,
+                ),
+                _bearing_prior_residual_seconds(
+                    position_m,
+                    centroid_m=centroid_m,
+                    bearing_prior=bearing_prior,
+                    sample_time_std_s=sample_time_std_s,
+                ),
+                spatial_constraint_residual_seconds(
+                    position_m,
+                    bearing_constraints=bearing_constraints,
+                    amplitude_constraints=amplitude_constraints,
+                    residual_scale_seconds=sample_time_std_s,
+                ),
+            )
+        )
+
     for initial_position in initial_positions[:MAX_REFINEMENT_START_COUNT]:
         try:
             solved = least_squares(
-                lambda position: np.concatenate(
-                    (
-                        _weighted_residual_seconds(
-                            position,
-                            sensor_positions=sensor_positions,
-                            measurements=measurements,
-                            sound_speed_mps=sound_speed_mps,
-                        ),
-                        _bearing_prior_residual_seconds(
-                            position,
-                            centroid_m=centroid_m,
-                            bearing_prior=bearing_prior,
-                            sample_time_std_s=sample_time_std_s,
-                        ),
-                    )
-                ),
+                combined_residual_seconds,
                 x0=initial_position,
                 method="trf",
                 loss="soft_l1",
@@ -323,12 +341,7 @@ def solve_cartesian_tdoa(
             )
         except (ValueError, np.linalg.LinAlgError):
             continue
-        residual = _weighted_residual_seconds(
-            solved.x,
-            sensor_positions=sensor_positions,
-            measurements=measurements,
-            sound_speed_mps=sound_speed_mps,
-        )
+        residual = combined_residual_seconds(solved.x)
         cost = float(np.dot(residual, residual))
         if np.all(np.isfinite(solved.x)) and np.isfinite(cost):
             range_from_centroid_m = float(np.linalg.norm(solved.x - centroid_m))
@@ -349,19 +362,24 @@ def solve_cartesian_tdoa(
         key=lambda candidate: candidate[1],
     )
 
-    residual = _weighted_residual_seconds(
-        best_position,
-        sensor_positions=sensor_positions,
-        measurements=measurements,
-        sound_speed_mps=sound_speed_mps,
-    )
+    residual = combined_residual_seconds(best_position)
     residual_rms_s = float(np.sqrt(np.mean(np.square(residual))))
     effective_time_std_s = max(residual_rms_s, sample_time_std_s)
-    jacobian = _weighted_tdoa_jacobian(
-        best_position,
-        sensor_positions=sensor_positions,
-        measurements=measurements,
-        sound_speed_mps=sound_speed_mps,
+    jacobian = np.vstack(
+        (
+            _weighted_tdoa_jacobian(
+                best_position,
+                sensor_positions=sensor_positions,
+                measurements=measurements,
+                sound_speed_mps=sound_speed_mps,
+            ),
+            spatial_constraint_jacobian(
+                best_position,
+                bearing_constraints=bearing_constraints,
+                amplitude_constraints=amplitude_constraints,
+                residual_scale_seconds=sample_time_std_s,
+            ),
+        )
     )
     best_range_m = float(np.linalg.norm(best_position - centroid_m))
     radial_std_m = _radial_std_m(
@@ -370,21 +388,29 @@ def solve_cartesian_tdoa(
         jacobian=jacobian,
         time_std_s=effective_time_std_s,
     )
-    if radial_std_m >= max(best_range_m, aperture_m, minimum_position_std_m):
+    if (
+        has_tdoa_measurements
+        and radial_std_m >= max(best_range_m, aperture_m, minimum_position_std_m)
+    ):
         best_position = observability_boundary
-        residual = _weighted_residual_seconds(
-            best_position,
-            sensor_positions=sensor_positions,
-            measurements=measurements,
-            sound_speed_mps=sound_speed_mps,
-        )
+        residual = combined_residual_seconds(best_position)
         residual_rms_s = float(np.sqrt(np.mean(np.square(residual))))
         effective_time_std_s = max(residual_rms_s, sample_time_std_s)
-        jacobian = _weighted_tdoa_jacobian(
-            best_position,
-            sensor_positions=sensor_positions,
-            measurements=measurements,
-            sound_speed_mps=sound_speed_mps,
+        jacobian = np.vstack(
+            (
+                _weighted_tdoa_jacobian(
+                    best_position,
+                    sensor_positions=sensor_positions,
+                    measurements=measurements,
+                    sound_speed_mps=sound_speed_mps,
+                ),
+                spatial_constraint_jacobian(
+                    best_position,
+                    bearing_constraints=bearing_constraints,
+                    amplitude_constraints=amplitude_constraints,
+                    residual_scale_seconds=sample_time_std_s,
+                ),
+            )
         )
 
     solved_range_m = float(np.linalg.norm(best_position - centroid_m))
@@ -415,9 +441,22 @@ def solve_cartesian_tdoa(
     condition_observability = float(
         np.clip(math.sqrt(max(float(eigenvalues[0]), EPSILON) / max(float(eigenvalues[-1]), EPSILON)), 0.0, 1.0)
     )
-    peak_quality = float(
-        np.mean([normalized_pair_quality(measurement.correlation_peak) for measurement in measurements])
-    )
+    radial_observability = min(radial_observability, condition_observability)
+    if measurements:
+        peak_quality = float(
+            np.mean(
+                [
+                    normalized_pair_quality(measurement.correlation_peak)
+                    for measurement in measurements
+                ]
+            )
+        )
+    elif bearing_constraints:
+        peak_quality = float(
+            np.mean([constraint.quality for constraint in bearing_constraints])
+        )
+    else:
+        peak_quality = 0.5
     fit_scale_s = max(sample_time_std_s * 4.0, EPSILON)
     fit_quality = float(math.exp(-residual_rms_s / fit_scale_s))
     confidence = float(

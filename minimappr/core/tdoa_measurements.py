@@ -12,6 +12,7 @@ from minimappr.utils.audio import rms
 
 
 MAX_SELECTED_PAIR_COUNT = 32
+MINIMUM_CROSS_NODE_SYNCHRONIZATION_WEIGHT = 0.25
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,15 +41,31 @@ def measure_pair_tdoas(
     interpolation_factor: int,
     sensor_weights: dict[str, float] | None,
     gcc_phat_function: Callable[..., tuple[float, float]],
+    sensor_node_ids: dict[str, str] | None = None,
 ) -> list[PairTdoaMeasurement]:
     sensor_quality = sensor_weights or {}
     pair_candidates: list[tuple[float, str, str, float, float]] = []
     for sensor_a, sensor_b in itertools.combinations(sensor_ids, 2):
         baseline_m = float(np.linalg.norm(sensor_positions[sensor_a] - sensor_positions[sensor_b]))
-        synchronization_weight = min(
-            float(np.clip(sensor_quality.get(sensor_a, 1.0), 0.0, 1.0)),
-            float(np.clip(sensor_quality.get(sensor_b, 1.0), 0.0, 1.0)),
+        same_node = (
+            sensor_node_ids is not None
+            and sensor_node_ids.get(sensor_a) is not None
+            and sensor_node_ids.get(sensor_a) == sensor_node_ids.get(sensor_b)
         )
+        synchronization_weight = (
+            1.0
+            if same_node
+            else min(
+                float(np.clip(sensor_quality.get(sensor_a, 1.0), 0.0, 1.0)),
+                float(np.clip(sensor_quality.get(sensor_b, 1.0), 0.0, 1.0)),
+            )
+        )
+        if (
+            sensor_node_ids is not None
+            and not same_node
+            and synchronization_weight < MINIMUM_CROSS_NODE_SYNCHRONIZATION_WEIGHT
+        ):
+            continue
         pair_candidates.append(
             (
                 synchronization_weight * max(baseline_m, 0.01),

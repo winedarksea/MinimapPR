@@ -8,6 +8,18 @@ use std::collections::HashSet;
 use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 
+fn covariance_to_js_value(covariance: &[Vec<f64>]) -> JsValue {
+    let rows = js_sys::Array::new();
+    for row in covariance {
+        let values = js_sys::Array::new();
+        for value in row {
+            values.push(&JsValue::from_f64(*value));
+        }
+        rows.push(&values);
+    }
+    rows.into()
+}
+
 #[component]
 pub fn LeafletMapPanel() -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState");
@@ -129,8 +141,54 @@ pub fn LeafletMapPanel() -> impl IntoView {
     {
         let selected_cop_item = state.selected_cop_item;
         Effect::new(move |_| match selected_cop_item.get() {
-            Some(selection) => highlight_cop_item(selection.kind.as_js_kind(), &selection.id),
-            None => clear_cop_highlight(),
+            Some(selection) => {
+                let current_tracks = tracks.get();
+                let current_detections = detections.get();
+                highlight_cop_item(selection.kind.as_js_kind(), &selection.id);
+                clear_all_cop_uncertainty();
+                match selection.kind {
+                    crate::state::CopItemKind::Track => {
+                        if let Some(track) = current_tracks.iter().find(|track| track.track_id == selection.id) {
+                            if let (Some(geo), Some(covariance)) =
+                                (&track.position_geo, &track.position_covariance_m2)
+                            {
+                                let covariance_js = covariance_to_js_value(covariance);
+                                set_cop_uncertainty(
+                                    "track",
+                                    &track.track_id,
+                                    geo.lat,
+                                    geo.lon,
+                                    &covariance_js,
+                                );
+                            }
+                        }
+                    }
+                    crate::state::CopItemKind::Detection => {
+                        if let Some(detection) = current_detections
+                            .iter()
+                            .find(|detection| detection.event_id == selection.id)
+                        {
+                            if let (Some(geo), Some(covariance)) =
+                                (&detection.position_geo, &detection.position_covariance_m2)
+                            {
+                                let covariance_js = covariance_to_js_value(covariance);
+                                set_cop_uncertainty(
+                                    "detection",
+                                    &detection.event_id,
+                                    geo.lat,
+                                    geo.lon,
+                                    &covariance_js,
+                                );
+                            }
+                        }
+                    }
+                    crate::state::CopItemKind::Alert => {}
+                }
+            }
+            None => {
+                clear_cop_highlight();
+                clear_all_cop_uncertainty();
+            }
         });
     }
 

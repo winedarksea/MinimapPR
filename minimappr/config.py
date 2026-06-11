@@ -119,6 +119,8 @@ class LocalizationConfig:
     pre_classification_highpass_hz: float
     pre_classification_lowpass_hz: float
     gcc_phat_interp_factor: int
+    localization_node_bearing_strength: float = 1.0
+    localization_amplitude_ratio_strength: float = 0.15
     # Retained for config-file compatibility; Cartesian localization ignores them.
     localization_far_field_default_range_m: float = 50.0
     localization_far_field_max_range_m: float = 250.0
@@ -424,6 +426,8 @@ class Settings:
     localization_subspace_freq_max_hz: float = 3500.0
     localization_refine_confidence_threshold: float = 0.45
     localization_tight_array_aperture_m: float = 0.35
+    localization_node_bearing_strength: float = 1.0
+    localization_amplitude_ratio_strength: float = 0.15
     wavelength_gating_enabled: bool = True
     wavelength_penalty_floor: float = 0.25
     skip_localization_for_classification: bool = False
@@ -704,6 +708,10 @@ class Settings:
             raise ValueError("MINIMAPPR_LOCALIZATION_REFINE_CONFIDENCE_THRESHOLD must be in [0,1]")
         if self.localization_tight_array_aperture_m <= 0.0:
             raise ValueError("MINIMAPPR_LOCALIZATION_TIGHT_ARRAY_APERTURE_M must be > 0")
+        if self.localization_node_bearing_strength < 0.0:
+            raise ValueError("MINIMAPPR_LOCALIZATION_NODE_BEARING_STRENGTH must be >= 0")
+        if self.localization_amplitude_ratio_strength < 0.0:
+            raise ValueError("MINIMAPPR_LOCALIZATION_AMPLITUDE_RATIO_STRENGTH must be >= 0")
         if self.wavelength_penalty_floor < 0.0 or self.wavelength_penalty_floor > 1.0:
             raise ValueError("MINIMAPPR_WAVELENGTH_PENALTY_FLOOR must be in [0,1]")
         if self.gcc_phat_interp_factor < 1:
@@ -1015,6 +1023,14 @@ class Settings:
                 0.45,
             ),
             localization_tight_array_aperture_m=_env_float("MINIMAPPR_LOCALIZATION_TIGHT_ARRAY_APERTURE_M", 0.35),
+            localization_node_bearing_strength=_env_float(
+                "MINIMAPPR_LOCALIZATION_NODE_BEARING_STRENGTH",
+                1.0,
+            ),
+            localization_amplitude_ratio_strength=_env_float(
+                "MINIMAPPR_LOCALIZATION_AMPLITUDE_RATIO_STRENGTH",
+                0.15,
+            ),
             wavelength_gating_enabled=_env_bool("MINIMAPPR_WAVELENGTH_GATING_ENABLED", True),
             wavelength_penalty_floor=_env_float("MINIMAPPR_WAVELENGTH_PENALTY_FLOOR", 0.25),
             skip_localization_for_classification=_env_bool(
@@ -1201,6 +1217,8 @@ class Settings:
             localization_subspace_freq_max_hz=self.localization_subspace_freq_max_hz,
             localization_refine_confidence_threshold=self.localization_refine_confidence_threshold,
             localization_tight_array_aperture_m=self.localization_tight_array_aperture_m,
+            localization_node_bearing_strength=self.localization_node_bearing_strength,
+            localization_amplitude_ratio_strength=self.localization_amplitude_ratio_strength,
             wavelength_gating_enabled=self.wavelength_gating_enabled,
             wavelength_penalty_floor=self.wavelength_penalty_floor,
             skip_localization_for_classification=self.skip_localization_for_classification,

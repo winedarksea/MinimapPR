@@ -217,6 +217,7 @@ async def test_fusion_node_ingest_and_status(tmp_path: Path) -> None:
             "encoding": "pcm16le",
             "samples_b64": encode_pcm16le_b64(channels_first),
             "sequence": 1,
+            "time_quality": "gps_locked",
         },
     )
 
@@ -226,6 +227,10 @@ async def test_fusion_node_ingest_and_status(tmp_path: Path) -> None:
     assert response.frame_energy > 0.0
     assert response.triggered is True
     assert response.queued_event_id is not None
+    assert all(
+        grade.value == "gps_pps"
+        for grade in (await registry.sensor_sync_grades()).values()
+    )
 
     await asyncio.sleep(0.1)
 

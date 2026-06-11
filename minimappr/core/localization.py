@@ -99,6 +99,8 @@ def gcc_phat(
 class LocalizationEngine:
     max_tau_s: float = 0.02
     interp_factor: int = 4
+    node_bearing_strength: float = 1.0
+    amplitude_ratio_strength: float = 0.15
 
     def _validate_inputs(
         self,
@@ -127,6 +129,8 @@ class LocalizationEngine:
         temperature_c: float,
         humidity_fraction: float,
         sensor_weights: dict[str, float] | None = None,
+        sensor_node_ids: dict[str, str] | None = None,
+        sensor_gain_offsets_db: dict[str, float] | None = None,
     ) -> LocalizationResult:
         if len(sensor_windows) < 4:
             raise LocalizationError("Need at least 4 active sensors for 3D TDOA localization")
@@ -153,9 +157,30 @@ class LocalizationEngine:
             interpolation_factor=self.interp_factor,
             sensor_weights=sensor_weights,
             gcc_phat_function=gcc_phat,
+            sensor_node_ids=sensor_node_ids,
         )
-        if len(measurements) < 3:
-            raise LocalizationError("Insufficient finite TDOA pairs for Cartesian localization")
+        from minimappr.core.spatial_constraints import build_node_spatial_constraints
+
+        bearing_constraints, amplitude_constraints = build_node_spatial_constraints(
+            sensor_positions=sensor_positions,
+            sensor_windows=sensor_windows,
+            sensor_node_ids=sensor_node_ids,
+            sample_rate_hz=sample_rate_hz,
+            sound_speed_mps=sound_speed,
+            max_tau_s=self.max_tau_s,
+            interpolation_factor=self.interp_factor,
+            gcc_phat_function=gcc_phat,
+            bearing_strength=self.node_bearing_strength,
+            amplitude_ratio_strength=self.amplitude_ratio_strength,
+            pair_measurements=measurements,
+            sensor_gain_offsets_db=sensor_gain_offsets_db,
+        )
+        if (
+            len(measurements) < 3
+            and len(bearing_constraints) < 2
+            and len(amplitude_constraints) < 3
+        ):
+            raise LocalizationError("Insufficient TDOA, bearing, or amplitude constraints")
         reference_sensor, reference_tdoa_s = reference_tdoas(
             measurements=measurements,
             sensor_windows=sensor_windows,
@@ -170,6 +195,8 @@ class LocalizationEngine:
                 interpolation_factor=self.interp_factor,
                 reference_sensor=reference_sensor,
                 reference_tdoa_s=reference_tdoa_s,
+                bearing_constraints=bearing_constraints,
+                amplitude_constraints=amplitude_constraints,
             )
         except (ValueError, np.linalg.LinAlgError) as exc:
             raise LocalizationError(str(exc)) from exc

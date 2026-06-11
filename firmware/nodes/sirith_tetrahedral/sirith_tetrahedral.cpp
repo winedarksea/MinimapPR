@@ -1,3 +1,4 @@
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 
@@ -98,6 +99,7 @@ void pollActivityLed() {
 
 mmpr::Vec3 gTetraSensorOffsetsOrdered[kTetraMicCount] = {};
 uint8_t gActiveBaseRotationSteps = static_cast<uint8_t>(nodecfg::kBasePlaneRotationSteps % 3u);
+uint32_t gAppliedOrientationRevision = 0;
 
 mmpr::I2cBus gI2c;
 mmpr::Lis2mdlMagnetometer gMagnetometer(gI2c, mmpr::Lis2mdlMagConfig{
@@ -145,15 +147,24 @@ mmpr::NmeaGpsSourceConfig gGpsConfig = {
 };
 mmpr::NmeaGpsSource gGpsSource(gGpsConfig);
 
-uint8_t rotateBaseMic(uint8_t micIndex, uint8_t baseRotationSteps) {
-  if (micIndex >= 3) {
-    return micIndex;
-  }
-  const uint8_t rot = static_cast<uint8_t>(baseRotationSteps % 3u);
-  return static_cast<uint8_t>((micIndex + rot) % 3u);
+mmpr::Vec3 rotateSensorOffsetIntoWorld(
+    const mmpr::Vec3& sensorOffsetM,
+    float worldHeadingDeg) {
+  constexpr float kDegToRad = 0.01745329251994329577f;
+  const float angleRad = worldHeadingDeg * kDegToRad;
+  const float cosine = std::cos(angleRad);
+  const float sine = std::sin(angleRad);
+  return {
+      (cosine * sensorOffsetM.x) - (sine * sensorOffsetM.y),
+      (sine * sensorOffsetM.x) + (cosine * sensorOffsetM.y),
+      sensorOffsetM.z,
+  };
 }
 
-void buildOrderedOffsetsFromSlotMap(uint8_t baseRotationSteps) {
+void buildOrderedOffsetsFromSlotMap(float measuredWorldHeadingDeg) {
+  const float mountingCorrectionDeg =
+      120.0f * static_cast<float>(nodecfg::kBasePlaneRotationSteps % 3u);
+  const float appliedWorldHeadingDeg = measuredWorldHeadingDeg + mountingCorrectionDeg;
   for (uint8_t channel = 0; channel < kTetraMicCount; ++channel) {
     uint8_t slot = nodecfg::kOutputChannelToSlot[channel];
     if (slot >= kTetraMicCount) {
@@ -173,16 +184,16 @@ void buildOrderedOffsetsFromSlotMap(uint8_t baseRotationSteps) {
       rawMicIndex = 0;
     }
 
-    const uint8_t rotatedMicIndex = rotateBaseMic(rawMicIndex, baseRotationSteps);
-    gTetraSensorOffsetsOrdered[channel] = nodecfg::kPhysicalSensorOffsetsM[rotatedMicIndex];
+    gTetraSensorOffsetsOrdered[channel] = rotateSensorOffsetIntoWorld(
+        nodecfg::kPhysicalSensorOffsetsM[rawMicIndex],
+        appliedWorldHeadingDeg);
 
     std::printf(
-        "[sirith-pico] ch%u <- slot%u <- mic%u (rot=%u base=%u)\n",
+        "[sirith-pico] ch%u <- slot%u <- mic%u world_heading=%.1f deg\n",
         static_cast<unsigned>(channel),
         static_cast<unsigned>(slot + 1),
         static_cast<unsigned>(rawMicIndex),
-        static_cast<unsigned>(rotatedMicIndex),
-        static_cast<unsigned>(baseRotationSteps));
+        static_cast<double>(appliedWorldHeadingDeg));
   }
 }
 
@@ -213,7 +224,6 @@ void initNodeId() {
 mmpr::NodeDescriptor gNodeDescriptor = {
     gNodeIdBuf,  // populated by initNodeId() at boot
     nodecfg::kNodeType,
-    nodecfg::kNodePositionM,
     nodecfg::kNodeHasFallbackGeoPosition,
     {
         nodecfg::kNodeFallbackLatitudeDeg,
@@ -456,7 +466,7 @@ int main() {
   mmpr::FailureSnapshot::feedWatchdog();
   setStatusLed(true);
   if (nodecfg::kUseTdmAudio) {
-    buildOrderedOffsetsFromSlotMap(gActiveBaseRotationSteps);
+    buildOrderedOffsetsFromSlotMap(nodecfg::kProvisionedWorldHeadingDeg);
     std::printf(
         "[sirith-pico] tdm timing edge=%s bit_offset=%d bias=%s diag=%u\n",
         sampleEdgeName(nodecfg::kAudioTdmSampleEdge),
@@ -528,14 +538,21 @@ int main() {
   while (true) {
     if (nodecfg::kUseTdmAudio && gAutoOrientationEnabled) {
       uint8_t changedRotation = 0;
-      if (gAutoOrientation.poll(&changedRotation)) {
+      const bool rotationStepChanged = gAutoOrientation.poll(&changedRotation);
+      if (rotationStepChanged) {
         gActiveBaseRotationSteps = changedRotation;
         std::printf(
             "[sirith-pico] auto-rotation -> step=%u heading=%.1f deg\n",
             static_cast<unsigned>(gActiveBaseRotationSteps),
             static_cast<double>(gAutoOrientation.headingDeg()));
-        buildOrderedOffsetsFromSlotMap(gActiveBaseRotationSteps);
-      } else if (!gAutoOrientation.healthy()) {
+      }
+      if (
+          gAutoOrientation.hasHeadingEstimate() &&
+          gAutoOrientation.estimateRevision() != gAppliedOrientationRevision) {
+        gAppliedOrientationRevision = gAutoOrientation.estimateRevision();
+        buildOrderedOffsetsFromSlotMap(gAutoOrientation.worldHeadingDeg());
+      }
+      if (!gAutoOrientation.healthy()) {
         gAutoOrientationEnabled = false;
         std::printf("[sirith-pico] magnetometer read fault; holding current manual rotation\n");
       }

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 import numpy as np
 
@@ -11,6 +12,7 @@ from minimappr.core.cartesian_tdoa import (
     solve_cartesian_tdoa,
 )
 from minimappr.core.localization import LocalizationError, gcc_phat, speed_of_sound_mps
+from minimappr.core.spatial_constraints import build_node_spatial_constraints
 from minimappr.core.subspace_bearing import (
     BearingPrior,
     esprit_bearing_prior,
@@ -31,6 +33,17 @@ def _localize_cartesian(
     interpolation_factor: int,
     sensor_weights: dict[str, float] | None,
     bearing_prior: BearingPrior | None = None,
+    sensor_node_ids: dict[str, str] | None = None,
+    sensor_gain_offsets_db: dict[str, float] | None = None,
+    node_bearing_estimator: (
+        Callable[
+            [dict[str, np.ndarray], dict[str, np.ndarray], list[str]],
+            tuple[np.ndarray, float],
+        ]
+        | None
+    ) = None,
+    node_bearing_strength: float = 1.0,
+    amplitude_ratio_strength: float = 0.0,
 ) -> LocalizationResult:
     sensor_ids = sorted(sensor_id for sensor_id in sensor_positions if sensor_id in sensor_windows)
     if len(sensor_ids) < 4:
@@ -49,9 +62,29 @@ def _localize_cartesian(
         interpolation_factor=interpolation_factor,
         sensor_weights=sensor_weights,
         gcc_phat_function=gcc_phat,
+        sensor_node_ids=sensor_node_ids,
     )
-    if len(measurements) < 3:
-        raise LocalizationError("Insufficient finite TDOA pairs for Cartesian localization")
+    bearing_constraints, amplitude_constraints = build_node_spatial_constraints(
+        sensor_positions=sensor_positions,
+        sensor_windows=sensor_windows,
+        sensor_node_ids=sensor_node_ids,
+        sample_rate_hz=sample_rate_hz,
+        sound_speed_mps=sound_speed_mps,
+        max_tau_s=max_tau_s,
+        interpolation_factor=interpolation_factor,
+        gcc_phat_function=gcc_phat,
+        bearing_strength=node_bearing_strength,
+        amplitude_ratio_strength=amplitude_ratio_strength,
+        pair_measurements=measurements,
+        sensor_gain_offsets_db=sensor_gain_offsets_db,
+        node_bearing_estimator=node_bearing_estimator,
+    )
+    if (
+        len(measurements) < 3
+        and len(bearing_constraints) < 2
+        and len(amplitude_constraints) < 3
+    ):
+        raise LocalizationError("Insufficient TDOA, bearing, or amplitude constraints")
     reference_sensor, reference_tdoa_s = reference_tdoas(
         measurements=measurements,
         sensor_windows=sensor_windows,
@@ -67,6 +100,8 @@ def _localize_cartesian(
             reference_sensor=reference_sensor,
             reference_tdoa_s=reference_tdoa_s,
             bearing_prior=bearing_prior,
+            bearing_constraints=bearing_constraints,
+            amplitude_constraints=amplitude_constraints,
         )
     except (ValueError, np.linalg.LinAlgError) as exc:
         raise LocalizationError(str(exc)) from exc
@@ -90,6 +125,8 @@ class SRPPhatLocalizer:
     far_field_max_range_m: float = 250.0
     far_field_azimuth_step_deg: float = 6.0
     far_field_elevation_step_deg: float = 8.0
+    node_bearing_strength: float = 1.0
+    amplitude_ratio_strength: float = 0.15
 
     def localize(
         self,
@@ -99,6 +136,8 @@ class SRPPhatLocalizer:
         temperature_c: float,
         humidity_fraction: float,
         sensor_weights: dict[str, float] | None = None,
+        sensor_node_ids: dict[str, str] | None = None,
+        sensor_gain_offsets_db: dict[str, float] | None = None,
     ) -> LocalizationResult:
         return _localize_cartesian(
             sensor_positions=sensor_positions,
@@ -109,6 +148,10 @@ class SRPPhatLocalizer:
             max_tau_s=self.max_tau_s,
             interpolation_factor=self.interp,
             sensor_weights=sensor_weights,
+            sensor_node_ids=sensor_node_ids,
+            sensor_gain_offsets_db=sensor_gain_offsets_db,
+            node_bearing_strength=self.node_bearing_strength,
+            amplitude_ratio_strength=self.amplitude_ratio_strength,
         )
 
 
@@ -123,6 +166,8 @@ class MusicLocalizer:
     interp: int = 4
     far_field_default_range_m: float = 50.0
     far_field_max_range_m: float = 250.0
+    node_bearing_strength: float = 1.0
+    amplitude_ratio_strength: float = 0.15
 
     def localize(
         self,
@@ -132,6 +177,8 @@ class MusicLocalizer:
         temperature_c: float,
         humidity_fraction: float,
         sensor_weights: dict[str, float] | None = None,
+        sensor_node_ids: dict[str, str] | None = None,
+        sensor_gain_offsets_db: dict[str, float] | None = None,
     ) -> LocalizationResult:
         sensor_ids = sorted(
             sensor_id for sensor_id in sensor_positions if sensor_id in sensor_windows
@@ -140,8 +187,31 @@ class MusicLocalizer:
             temperature_c=temperature_c,
             humidity_fraction=humidity_fraction,
         )
+        def estimate_node_bearing(
+            node_positions: dict[str, np.ndarray],
+            node_windows: dict[str, np.ndarray],
+            node_sensor_ids: list[str],
+        ) -> tuple[np.ndarray, float]:
+            prior = music_bearing_prior(
+                sensor_positions=node_positions,
+                sensor_windows=node_windows,
+                sensor_ids=node_sensor_ids,
+                sample_rate_hz=sample_rate_hz,
+                sound_speed_mps=sound_speed_mps,
+                azimuth_step_deg=self.azimuth_step_deg,
+                elevation_step_deg=self.elevation_step_deg,
+                minimum_frequency_hz=self.freq_min_hz,
+                maximum_frequency_hz=self.freq_max_hz,
+                source_count=self.source_count,
+            )
+            return prior.direction, prior.quality
+
+        has_multiple_nodes = (
+            sensor_node_ids is not None
+            and len({sensor_node_ids.get(sensor_id) for sensor_id in sensor_ids}) > 1
+        )
         try:
-            bearing_prior = music_bearing_prior(
+            bearing_prior = None if has_multiple_nodes else music_bearing_prior(
                 sensor_positions=sensor_positions,
                 sensor_windows=sensor_windows,
                 sensor_ids=sensor_ids,
@@ -165,6 +235,11 @@ class MusicLocalizer:
             interpolation_factor=self.interp,
             sensor_weights=sensor_weights,
             bearing_prior=bearing_prior,
+            sensor_node_ids=sensor_node_ids,
+            sensor_gain_offsets_db=sensor_gain_offsets_db,
+            node_bearing_estimator=estimate_node_bearing if has_multiple_nodes else None,
+            node_bearing_strength=self.node_bearing_strength,
+            amplitude_ratio_strength=self.amplitude_ratio_strength,
         )
 
 
@@ -176,6 +251,8 @@ class EspritLocalizer:
     interp: int = 4
     far_field_default_range_m: float = 50.0
     far_field_max_range_m: float = 250.0
+    node_bearing_strength: float = 1.0
+    amplitude_ratio_strength: float = 0.15
 
     def localize(
         self,
@@ -185,6 +262,8 @@ class EspritLocalizer:
         temperature_c: float,
         humidity_fraction: float,
         sensor_weights: dict[str, float] | None = None,
+        sensor_node_ids: dict[str, str] | None = None,
+        sensor_gain_offsets_db: dict[str, float] | None = None,
     ) -> LocalizationResult:
         sensor_ids = sorted(
             sensor_id for sensor_id in sensor_positions if sensor_id in sensor_windows
@@ -193,8 +272,28 @@ class EspritLocalizer:
             temperature_c=temperature_c,
             humidity_fraction=humidity_fraction,
         )
+        def estimate_node_bearing(
+            node_positions: dict[str, np.ndarray],
+            node_windows: dict[str, np.ndarray],
+            node_sensor_ids: list[str],
+        ) -> tuple[np.ndarray, float]:
+            prior = esprit_bearing_prior(
+                sensor_positions=node_positions,
+                sensor_windows=node_windows,
+                sensor_ids=node_sensor_ids,
+                sample_rate_hz=sample_rate_hz,
+                sound_speed_mps=sound_speed_mps,
+                minimum_frequency_hz=self.freq_min_hz,
+                maximum_frequency_hz=self.freq_max_hz,
+            )
+            return prior.direction, prior.quality
+
+        has_multiple_nodes = (
+            sensor_node_ids is not None
+            and len({sensor_node_ids.get(sensor_id) for sensor_id in sensor_ids}) > 1
+        )
         try:
-            bearing_prior = esprit_bearing_prior(
+            bearing_prior = None if has_multiple_nodes else esprit_bearing_prior(
                 sensor_positions=sensor_positions,
                 sensor_windows=sensor_windows,
                 sensor_ids=sensor_ids,
@@ -215,4 +314,9 @@ class EspritLocalizer:
             interpolation_factor=self.interp,
             sensor_weights=sensor_weights,
             bearing_prior=bearing_prior,
+            sensor_node_ids=sensor_node_ids,
+            sensor_gain_offsets_db=sensor_gain_offsets_db,
+            node_bearing_estimator=estimate_node_bearing if has_multiple_nodes else None,
+            node_bearing_strength=self.node_bearing_strength,
+            amplitude_ratio_strength=self.amplitude_ratio_strength,
         )

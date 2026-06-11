@@ -108,6 +108,13 @@ class MagAutoOrientation {
   /// Most recent Kalman-filtered heading (degrees, 0–360).
   float headingDeg() const { return headingDeg_; }
 
+  /// Heading after applying the installation offset, suitable for rotating
+  /// sensor-frame microphone coordinates into the local world XY frame.
+  float worldHeadingDeg() const;
+
+  bool hasHeadingEstimate() const { return hasEstimate_; }
+  uint32_t estimateRevision() const { return estimateRevision_; }
+
   /// Current Kalman gain (useful for diagnostics / tuning).
   float kalmanGain() const { return lastGain_; }
 
@@ -130,6 +137,7 @@ class MagAutoOrientation {
   float covP_ = 400.0f;       // covariance
   float lastGain_ = 0.0f;
   bool hasEstimate_ = false;
+  uint32_t estimateRevision_ = 0;
 
   // Rotation step hysteresis.
   uint8_t rotationSteps_ = 0;

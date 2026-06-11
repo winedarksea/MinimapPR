@@ -50,6 +50,7 @@ bool MagAutoOrientation::begin(
 
   // Reset Kalman state.
   hasEstimate_ = false;
+  estimateRevision_ = 0;
   headingDeg_ = 0.0f;
   covP_ = config_.kalmanInitialP;
   lastGain_ = 0.0f;
@@ -134,6 +135,7 @@ bool MagAutoOrientation::poll(uint8_t* changedRotation) {
     covP_ = (1.0f - k) * pPred;
     lastGain_ = k;
   }
+  ++estimateRevision_;
 
   // ---- Map heading to rotation step with hysteresis ----
   const uint8_t candidate = headingToRotationSteps(headingDeg_);
@@ -179,6 +181,10 @@ float MagAutoOrientation::wrapPM180(float deg) {
     out += 360.0f;
   }
   return out - 180.0f;
+}
+
+float MagAutoOrientation::worldHeadingDeg() const {
+  return wrap360(headingDeg_ - config_.headingOffsetDeg);
 }
 
 uint8_t MagAutoOrientation::headingToRotationSteps(float heading) const {

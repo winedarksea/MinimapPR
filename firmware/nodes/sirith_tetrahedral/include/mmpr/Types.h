@@ -45,7 +45,6 @@ struct Vec3 {
 struct NodeDescriptor {
   const char* id;
   NodeType type;
-  Vec3 positionM;
   bool hasGeoPosition;
   GeoPoint geoPosition;
 

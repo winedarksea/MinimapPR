@@ -108,6 +108,8 @@ class LocalizationDispatcher:
         temperature_c: float,
         humidity_fraction: float,
         sensor_weights: dict[str, float] | None = None,
+        sensor_node_ids: dict[str, str] | None = None,
+        sensor_gain_offsets_db: dict[str, float] | None = None,
     ) -> LocalizationResult:
         result = self._localize_for_strategy(
             sensor_positions=sensor_positions,
@@ -116,6 +118,8 @@ class LocalizationDispatcher:
             temperature_c=temperature_c,
             humidity_fraction=humidity_fraction,
             sensor_weights=sensor_weights,
+            sensor_node_ids=sensor_node_ids,
+            sensor_gain_offsets_db=sensor_gain_offsets_db,
         )
         return self._apply_wavelength_penalty(
             result=result,
@@ -201,6 +205,8 @@ class LocalizationDispatcher:
         temperature_c: float,
         humidity_fraction: float,
         sensor_weights: dict[str, float] | None = None,
+        sensor_node_ids: dict[str, str] | None = None,
+        sensor_gain_offsets_db: dict[str, float] | None = None,
     ) -> LocalizationResult:
         if self._normalized_strategy() == "cascade":
             return self._localize_with_cascade(
@@ -210,6 +216,8 @@ class LocalizationDispatcher:
                 temperature_c=temperature_c,
                 humidity_fraction=humidity_fraction,
                 sensor_weights=sensor_weights,
+                sensor_node_ids=sensor_node_ids,
+                sensor_gain_offsets_db=sensor_gain_offsets_db,
             )
         return self._localize_selected_algorithm(
             name=self.select_algorithm_name(sensor_positions),
@@ -219,6 +227,8 @@ class LocalizationDispatcher:
             temperature_c=temperature_c,
             humidity_fraction=humidity_fraction,
             sensor_weights=sensor_weights,
+            sensor_node_ids=sensor_node_ids,
+            sensor_gain_offsets_db=sensor_gain_offsets_db,
         )
 
     def _localize_selected_algorithm(
@@ -231,6 +241,8 @@ class LocalizationDispatcher:
         temperature_c: float,
         humidity_fraction: float,
         sensor_weights: dict[str, float] | None = None,
+        sensor_node_ids: dict[str, str] | None = None,
+        sensor_gain_offsets_db: dict[str, float] | None = None,
     ) -> LocalizationResult:
         return self._run_algorithm(
             name=name,
@@ -240,6 +252,8 @@ class LocalizationDispatcher:
             temperature_c=temperature_c,
             humidity_fraction=humidity_fraction,
             sensor_weights=sensor_weights,
+            sensor_node_ids=sensor_node_ids,
+            sensor_gain_offsets_db=sensor_gain_offsets_db,
         )
 
     def _geometry_aware_choice(self, sensor_positions: dict[str, np.ndarray]) -> str:
@@ -263,6 +277,8 @@ class LocalizationDispatcher:
         temperature_c: float,
         humidity_fraction: float,
         sensor_weights: dict[str, float] | None = None,
+        sensor_node_ids: dict[str, str] | None = None,
+        sensor_gain_offsets_db: dict[str, float] | None = None,
     ) -> LocalizationResult:
         result = self._localize_selected_algorithm(
             name=self.default_algorithm,
@@ -272,6 +288,8 @@ class LocalizationDispatcher:
             temperature_c=temperature_c,
             humidity_fraction=humidity_fraction,
             sensor_weights=sensor_weights,
+            sensor_node_ids=sensor_node_ids,
+            sensor_gain_offsets_db=sensor_gain_offsets_db,
         )
         if not self._should_refine_cascade_result(result):
             return result
@@ -290,6 +308,8 @@ class LocalizationDispatcher:
                     temperature_c=temperature_c,
                     humidity_fraction=humidity_fraction,
                     sensor_weights=sensor_weights,
+                    sensor_node_ids=sensor_node_ids,
+                    sensor_gain_offsets_db=sensor_gain_offsets_db,
                 )
                 if candidate.confidence > best.confidence:
                     best = candidate
@@ -322,6 +342,8 @@ class LocalizationDispatcher:
         temperature_c: float,
         humidity_fraction: float,
         sensor_weights: dict[str, float] | None = None,
+        sensor_node_ids: dict[str, str] | None = None,
+        sensor_gain_offsets_db: dict[str, float] | None = None,
     ) -> LocalizationResult:
         localizer = self.algorithms.get(name, self._fallback)
         attempted = name if name in self.algorithms else "gcc_phat"
@@ -336,6 +358,8 @@ class LocalizationDispatcher:
                 temperature_c=temperature_c,
                 humidity_fraction=humidity_fraction,
                 sensor_weights=sensor_weights,
+                sensor_node_ids=sensor_node_ids,
+                sensor_gain_offsets_db=sensor_gain_offsets_db,
             )
             self._record_algorithm_provenance(
                 result,
@@ -355,6 +379,8 @@ class LocalizationDispatcher:
                 temperature_c=temperature_c,
                 humidity_fraction=humidity_fraction,
                 sensor_weights=sensor_weights,
+                sensor_node_ids=sensor_node_ids,
+                sensor_gain_offsets_db=sensor_gain_offsets_db,
             )
             self._fallback_count += 1
             self._record_algorithm_provenance(
@@ -462,13 +488,29 @@ class LocalizationDispatcher:
 
     @staticmethod
     def _localizer_supports_sensor_weights(localizer, *, method_name: str = "localize") -> bool:
+        return LocalizationDispatcher._localizer_supports_parameter(
+            localizer,
+            parameter_name="sensor_weights",
+            method_name=method_name,
+        )
+
+    @staticmethod
+    def _localizer_supports_parameter(
+        localizer,
+        *,
+        parameter_name: str,
+        method_name: str = "localize",
+    ) -> bool:
         method = getattr(localizer, method_name, None)
         if method is None:
             return False
         try:
-            return "sensor_weights" in inspect.signature(method).parameters
+            return parameter_name in inspect.signature(method).parameters
         except (TypeError, ValueError):
-            return isinstance(localizer, LocalizationEngine)
+            return isinstance(localizer, LocalizationEngine) and parameter_name in {
+                "sensor_weights",
+                "sensor_node_ids",
+            }
 
     @staticmethod
     def _call_localizer(
@@ -481,31 +523,45 @@ class LocalizationDispatcher:
         temperature_c: float,
         humidity_fraction: float,
         sensor_weights: dict[str, float] | None = None,
+        sensor_node_ids: dict[str, str] | None = None,
+        sensor_gain_offsets_db: dict[str, float] | None = None,
     ) -> LocalizationResult:
-        """Call localizer.localize(), passing sensor_weights only when supported."""
-        if sensor_weights is not None and LocalizationDispatcher._localizer_supports_sensor_weights(localizer):
-            return localizer.localize(
-                sensor_positions=sensor_positions,
-                sensor_windows=sensor_windows,
-                sample_rate_hz=sample_rate_hz,
-                temperature_c=temperature_c,
-                humidity_fraction=humidity_fraction,
-                sensor_weights=sensor_weights,
-            )
+        """Call a localizer while preserving compatibility with plugin implementations."""
+        localization_kwargs: dict[str, object] = {}
         if sensor_weights is not None:
-            logger.warning(
-                "Localization algorithm %s does not support sensor_weights; falling back to gcc_phat",
-                localizer_name,
+            if LocalizationDispatcher._localizer_supports_sensor_weights(localizer):
+                localization_kwargs["sensor_weights"] = sensor_weights
+            else:
+                logger.warning(
+                    "Localization algorithm %s does not support sensor_weights; falling back to gcc_phat",
+                    localizer_name,
+                )
+                raise LocalizationError(
+                    f"Localization algorithm '{localizer_name}' does not support sensor_weights"
+                )
+        if (
+            sensor_node_ids is not None
+            and LocalizationDispatcher._localizer_supports_parameter(
+                localizer,
+                parameter_name="sensor_node_ids",
             )
-            raise LocalizationError(
-                f"Localization algorithm '{localizer_name}' does not support sensor_weights"
+        ):
+            localization_kwargs["sensor_node_ids"] = sensor_node_ids
+        if (
+            sensor_gain_offsets_db is not None
+            and LocalizationDispatcher._localizer_supports_parameter(
+                localizer,
+                parameter_name="sensor_gain_offsets_db",
             )
+        ):
+            localization_kwargs["sensor_gain_offsets_db"] = sensor_gain_offsets_db
         return localizer.localize(
             sensor_positions=sensor_positions,
             sensor_windows=sensor_windows,
             sample_rate_hz=sample_rate_hz,
             temperature_c=temperature_c,
             humidity_fraction=humidity_fraction,
+            **localization_kwargs,
         )
 
 
@@ -514,6 +570,8 @@ def build_localizer_from_settings(settings: Settings | LocalizationConfig) -> Lo
     gcc = LocalizationEngine(
         max_tau_s=cfg.localization_max_tau_seconds,
         interp_factor=cfg.gcc_phat_interp_factor,
+        node_bearing_strength=cfg.localization_node_bearing_strength,
+        amplitude_ratio_strength=cfg.localization_amplitude_ratio_strength,
     )
     algorithms: dict[str, Localizer] = {
         "gcc_phat": gcc,
@@ -527,6 +585,8 @@ def build_localizer_from_settings(settings: Settings | LocalizationConfig) -> Lo
             far_field_max_range_m=cfg.localization_far_field_max_range_m,
             far_field_azimuth_step_deg=cfg.localization_music_azimuth_step_deg,
             far_field_elevation_step_deg=cfg.localization_music_elevation_step_deg,
+            node_bearing_strength=cfg.localization_node_bearing_strength,
+            amplitude_ratio_strength=cfg.localization_amplitude_ratio_strength,
         ),
         "music": MusicLocalizer(
             max_tau_s=cfg.localization_max_tau_seconds,
@@ -537,6 +597,8 @@ def build_localizer_from_settings(settings: Settings | LocalizationConfig) -> Lo
             interp=cfg.gcc_phat_interp_factor,
             far_field_default_range_m=cfg.localization_far_field_default_range_m,
             far_field_max_range_m=cfg.localization_far_field_max_range_m,
+            node_bearing_strength=cfg.localization_node_bearing_strength,
+            amplitude_ratio_strength=cfg.localization_amplitude_ratio_strength,
         ),
         "esprit": EspritLocalizer(
             max_tau_s=cfg.localization_max_tau_seconds,
@@ -545,6 +607,8 @@ def build_localizer_from_settings(settings: Settings | LocalizationConfig) -> Lo
             interp=cfg.gcc_phat_interp_factor,
             far_field_default_range_m=cfg.localization_far_field_default_range_m,
             far_field_max_range_m=cfg.localization_far_field_max_range_m,
+            node_bearing_strength=cfg.localization_node_bearing_strength,
+            amplitude_ratio_strength=cfg.localization_amplitude_ratio_strength,
         ),
     }
     return LocalizationDispatcher(

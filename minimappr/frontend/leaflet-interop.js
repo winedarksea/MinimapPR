@@ -7,7 +7,7 @@
   let _map = null;
   const _markers = {};           // key → L.Marker or L.CircleMarker
   const _vectors = {};           // track_id → L.Polyline (velocity)
-  const _ellipses = {};          // track_id → L.Ellipse (covariance)
+  const _ellipses = {};          // COP kind:id → L.Polygon (covariance)
   const _zones = {};             // zone_id → L.Polygon
   const _gdop = {};              // key → L.Circle
   const _trackRemoveTimers = {}; // track_id → setTimeout handle for dropped cleanup
@@ -391,6 +391,7 @@
     }
     const key = "det:" + eventId;
     if (_markers[key]) { _markers[key].remove(); delete _markers[key]; }
+    clearCopUncertainty("detection", eventId);
   }
 
   // ── Track markers + velocity vectors ─────────────────────────
@@ -460,7 +461,7 @@
     const key = "track:" + trackId;
     if (_markers[key]) { _markers[key].remove(); delete _markers[key]; }
     if (_vectors[trackId]) { _vectors[trackId].remove(); delete _vectors[trackId]; }
-    if (_ellipses[trackId]) { _ellipses[trackId].remove(); delete _ellipses[trackId]; }
+    clearCopUncertainty("track", trackId);
   }
 
   function highlightCopItem(kind, id) {
@@ -504,6 +505,68 @@
 
   function highlightTrack(trackId) { highlightCopItem("track", trackId); }
   function clearTrackHighlight() { clearCopHighlight(); }
+
+  function setCopUncertainty(kind, id, lat, lon, covariance) {
+    clearCopUncertainty(kind, id);
+    if (!_map || !covariance || covariance.length < 2) return;
+    const xx = Number(covariance[0] && covariance[0][0]);
+    const xy = Number(covariance[0] && covariance[0][1]);
+    const yy = Number(covariance[1] && covariance[1][1]);
+    if (![xx, xy, yy].every(Number.isFinite)) return;
+
+    const trace = xx + yy;
+    const discriminant = Math.sqrt(Math.max(0, ((xx - yy) * (xx - yy)) + (4 * xy * xy)));
+    const majorVariance = Math.max((trace + discriminant) / 2, 0);
+    const minorVariance = Math.max((trace - discriminant) / 2, 0);
+    const majorRadiusM = 2 * Math.sqrt(majorVariance);
+    const minorRadiusM = 2 * Math.sqrt(minorVariance);
+    if (!(majorRadiusM > 0) || !(minorRadiusM > 0)) return;
+
+    const majorAxisAngleRad = 0.5 * Math.atan2(2 * xy, xx - yy);
+    const metersPerLatitudeDegree = 111_320;
+    const metersPerLongitudeDegree = metersPerLatitudeDegree *
+      Math.max(Math.cos(lat * Math.PI / 180), 0.01);
+    const points = [];
+    for (let index = 0; index < 64; index += 1) {
+      const parameter = 2 * Math.PI * index / 64;
+      const majorComponentM = majorRadiusM * Math.cos(parameter);
+      const minorComponentM = minorRadiusM * Math.sin(parameter);
+      const eastM = (majorComponentM * Math.cos(majorAxisAngleRad)) -
+        (minorComponentM * Math.sin(majorAxisAngleRad));
+      const northM = (majorComponentM * Math.sin(majorAxisAngleRad)) +
+        (minorComponentM * Math.cos(majorAxisAngleRad));
+      points.push([
+        lat + (northM / metersPerLatitudeDegree),
+        lon + (eastM / metersPerLongitudeDegree),
+      ]);
+    }
+    const key = kind + ":" + id;
+    const color = colorForCopItem(kind);
+    _ellipses[key] = L.polygon(points, {
+      color,
+      weight: 2,
+      opacity: 0.9,
+      fillColor: color,
+      fillOpacity: 0.10,
+      interactive: false,
+      dashArray: "7,5",
+    }).addTo(_map);
+  }
+
+  function clearCopUncertainty(kind, id) {
+    const key = kind + ":" + id;
+    if (_ellipses[key]) {
+      _ellipses[key].remove();
+      delete _ellipses[key];
+    }
+  }
+
+  function clearAllCopUncertainty() {
+    for (const key in _ellipses) {
+      _ellipses[key].remove();
+      delete _ellipses[key];
+    }
+  }
 
   // ── Zone polygons ─────────────────────────────────────────────
   function setZone(zoneId, latlngs, label) {
@@ -586,6 +649,7 @@
     addDetectionMarker, removeDetectionMarker,
     setTrackMarker, setTrackVelocityVector, removeTrack,
     highlightCopItem, clearCopHighlight, setCopSelectionCallback,
+    setCopUncertainty, clearCopUncertainty, clearAllCopUncertainty,
     highlightTrack, clearTrackHighlight,
     setZone, removeZone,
     setGdopCircle, removeGdopCircle,

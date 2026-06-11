@@ -17,6 +17,7 @@ FusionNode owns the pipeline queues, worker lifecycle, and stage routing.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import itertools
 import logging
 import time
@@ -950,7 +951,12 @@ class FusionNode:
 
     async def _localize_candidate(self, candidate: EventCandidate) -> LocalizedCandidate | None:
         sensor_positions = await self.registry.sensor_positions()
-        sensor_weights: dict[str, float] | None = None
+        sensor_grades = await self.registry.sensor_sync_grades()
+        sensor_weights: dict[str, float] | None = {
+            sensor_id: grade.weight()
+            for sensor_id, grade in sensor_grades.items()
+            if sensor_id in sensor_positions
+        }
 
         if (
             self.localization_config.cluster_aware_localization
@@ -1068,6 +1074,10 @@ class FusionNode:
         tier = self.degradation_model.tier_for_sensor_count(len(selected_ids))
         selected_windows = {sensor_id: windows[sensor_id] for sensor_id in selected_ids}
         selected_positions = {sensor_id: sensor_positions[sensor_id] for sensor_id in selected_ids}
+        selected_sensor_node_ids = await self.registry.sensor_node_ids(selected_ids)
+        selected_sensor_gain_offsets_db = await self.registry.sensor_gain_offsets_db(
+            selected_ids
+        )
         localization_audio_quality = await self.buffer.get_synchronized_window_coverage_stats(
             sensor_ids=selected_ids,
             center_time_ns=candidate.event_time_ns,
@@ -1120,7 +1130,27 @@ class FusionNode:
                 for sensor_id, window in selected_windows.items()
             }
 
-        weight_kwargs: dict = {"sensor_weights": sensor_weights} if sensor_weights is not None else {}
+        localization_kwargs: dict[str, object] = {}
+        localize_parameters = inspect.signature(self.localizer.localize).parameters
+        if sensor_weights is not None and "sensor_weights" in localize_parameters:
+            localization_kwargs["sensor_weights"] = {
+                sensor_id: sensor_weights.get(sensor_id, 1.0)
+                for sensor_id in selected_ids
+            }
+        if "sensor_node_ids" in localize_parameters:
+            localization_kwargs["sensor_node_ids"] = selected_sensor_node_ids
+        if "sensor_gain_offsets_db" in localize_parameters:
+            localization_kwargs["sensor_gain_offsets_db"] = (
+                selected_sensor_gain_offsets_db
+            )
+        localization_2d_kwargs: dict[str, object] = {}
+        if hasattr(self.localizer, "localize_2d"):
+            localize_2d_parameters = inspect.signature(self.localizer.localize_2d).parameters
+            if sensor_weights is not None and "sensor_weights" in localize_2d_parameters:
+                localization_2d_kwargs["sensor_weights"] = {
+                    sensor_id: sensor_weights.get(sensor_id, 1.0)
+                    for sensor_id in selected_ids
+                }
         localization_branch: LocalizationBranch | None = None
         if tier == "full_3d":
             self._metrics.localization_tier_full_3d_count += 1
@@ -1132,7 +1162,7 @@ class FusionNode:
                     candidate.sample_rate_hz,
                     conditions.temperature_c,
                     conditions.humidity_fraction,
-                    **weight_kwargs,
+                    **localization_kwargs,
                 )
                 localization_branch = self._build_localization_branch(
                     localization=localization,
@@ -1156,7 +1186,7 @@ class FusionNode:
                     conditions.temperature_c,
                     conditions.humidity_fraction,
                     mean_z,
-                    **weight_kwargs,
+                    **localization_2d_kwargs,
                 )
                 localization_branch = self._build_localization_branch(
                     localization=localization,
