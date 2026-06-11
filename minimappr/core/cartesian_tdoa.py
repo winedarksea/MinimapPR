@@ -10,6 +10,7 @@ import numpy as np
 from scipy.optimize import least_squares
 
 from minimappr.core.localization_uncertainty import covariance_to_nested_list
+from minimappr.core.subspace_bearing import BearingPrior
 from minimappr.core.tdoa_measurements import (
     PairTdoaMeasurement,
     measure_pair_tdoas,
@@ -59,6 +60,24 @@ def _weighted_residual_seconds(
         predicted_tdoa_s = (distance_a_m - distance_b_m) / sound_speed_mps
         rows.append(math.sqrt(measurement.weight) * (predicted_tdoa_s - measurement.tdoa_seconds))
     return np.asarray(rows, dtype=np.float64)
+
+
+def _bearing_prior_residual_seconds(
+    position_m: np.ndarray,
+    *,
+    centroid_m: np.ndarray,
+    bearing_prior: BearingPrior | None,
+    sample_time_std_s: float,
+) -> np.ndarray:
+    if bearing_prior is None:
+        return np.zeros(0, dtype=np.float64)
+    offset_m = position_m - centroid_m
+    offset_norm_m = float(np.linalg.norm(offset_m))
+    if offset_norm_m < EPSILON:
+        return np.zeros(3, dtype=np.float64)
+    estimated_direction = offset_m / offset_norm_m
+    angular_error = estimated_direction - bearing_prior.direction
+    return angular_error * sample_time_std_s * math.sqrt(bearing_prior.strength)
 
 
 def _weighted_tdoa_jacobian(
@@ -233,6 +252,7 @@ def solve_cartesian_tdoa(
     interpolation_factor: int,
     reference_sensor: str,
     reference_tdoa_s: dict[str, float],
+    bearing_prior: BearingPrior | None = None,
 ) -> CartesianTdoaSolve:
     sensor_ids = sorted(sensor_positions)
     centroid_m = np.mean(np.vstack([sensor_positions[sensor_id] for sensor_id in sensor_ids]), axis=0)
@@ -258,6 +278,12 @@ def solve_cartesian_tdoa(
         centroid_m + direction * max(aperture_m, minimum_position_std_m),
         observability_boundary,
     ]
+    if bearing_prior is not None:
+        initial_positions.insert(
+            0,
+            centroid_m
+            + bearing_prior.direction * max(aperture_m, minimum_position_std_m),
+        )
     algebraic_position = _algebraic_initial_position(
         sensor_positions=sensor_positions,
         reference_sensor=reference_sensor,
@@ -271,11 +297,21 @@ def solve_cartesian_tdoa(
     for initial_position in initial_positions[:MAX_REFINEMENT_START_COUNT]:
         try:
             solved = least_squares(
-                lambda position: _weighted_residual_seconds(
-                    position,
-                    sensor_positions=sensor_positions,
-                    measurements=measurements,
-                    sound_speed_mps=sound_speed_mps,
+                lambda position: np.concatenate(
+                    (
+                        _weighted_residual_seconds(
+                            position,
+                            sensor_positions=sensor_positions,
+                            measurements=measurements,
+                            sound_speed_mps=sound_speed_mps,
+                        ),
+                        _bearing_prior_residual_seconds(
+                            position,
+                            centroid_m=centroid_m,
+                            bearing_prior=bearing_prior,
+                            sample_time_std_s=sample_time_std_s,
+                        ),
+                    )
                 ),
                 x0=initial_position,
                 method="trf",
@@ -425,5 +461,6 @@ def localization_result_from_cartesian_solve(
         reference_sensor=reference_sensor,
         tdoa_s=reference_tdoa_s,
         position_covariance_m2=covariance_to_nested_list(solve.covariance_m2),
+        range_observability=solve.radial_observability,
         residual_rms_seconds=solve.residual_rms_seconds,
     )

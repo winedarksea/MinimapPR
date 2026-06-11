@@ -1,4 +1,4 @@
-"""Phase 2 localizer interfaces backed by one broadband Cartesian TDOA solver."""
+"""Phase 2 localizers using distinct bearing methods and shared Cartesian range."""
 
 from __future__ import annotations
 
@@ -8,11 +8,15 @@ import numpy as np
 
 from minimappr.core.cartesian_tdoa import (
     localization_result_from_cartesian_solve,
-    measure_pair_tdoas,
-    reference_tdoas,
     solve_cartesian_tdoa,
 )
 from minimappr.core.localization import LocalizationError, gcc_phat, speed_of_sound_mps
+from minimappr.core.subspace_bearing import (
+    BearingPrior,
+    esprit_bearing_prior,
+    music_bearing_prior,
+)
+from minimappr.core.tdoa_measurements import measure_pair_tdoas, reference_tdoas
 from minimappr.models import LocalizationResult
 
 
@@ -26,6 +30,7 @@ def _localize_cartesian(
     max_tau_s: float,
     interpolation_factor: int,
     sensor_weights: dict[str, float] | None,
+    bearing_prior: BearingPrior | None = None,
 ) -> LocalizationResult:
     sensor_ids = sorted(sensor_id for sensor_id in sensor_positions if sensor_id in sensor_windows)
     if len(sensor_ids) < 4:
@@ -61,6 +66,7 @@ def _localize_cartesian(
             interpolation_factor=interpolation_factor,
             reference_sensor=reference_sensor,
             reference_tdoa_s=reference_tdoa_s,
+            bearing_prior=bearing_prior,
         )
     except (ValueError, np.linalg.LinAlgError) as exc:
         raise LocalizationError(str(exc)) from exc
@@ -108,7 +114,6 @@ class SRPPhatLocalizer:
 
 @dataclass(slots=True)
 class MusicLocalizer:
-    # Narrowband settings remain constructor-compatible; broadband TDOA owns position.
     max_tau_s: float = 0.02
     azimuth_step_deg: float = 6.0
     elevation_step_deg: float = 8.0
@@ -128,6 +133,28 @@ class MusicLocalizer:
         humidity_fraction: float,
         sensor_weights: dict[str, float] | None = None,
     ) -> LocalizationResult:
+        sensor_ids = sorted(
+            sensor_id for sensor_id in sensor_positions if sensor_id in sensor_windows
+        )
+        sound_speed_mps = speed_of_sound_mps(
+            temperature_c=temperature_c,
+            humidity_fraction=humidity_fraction,
+        )
+        try:
+            bearing_prior = music_bearing_prior(
+                sensor_positions=sensor_positions,
+                sensor_windows=sensor_windows,
+                sensor_ids=sensor_ids,
+                sample_rate_hz=sample_rate_hz,
+                sound_speed_mps=sound_speed_mps,
+                azimuth_step_deg=self.azimuth_step_deg,
+                elevation_step_deg=self.elevation_step_deg,
+                minimum_frequency_hz=self.freq_min_hz,
+                maximum_frequency_hz=self.freq_max_hz,
+                source_count=self.source_count,
+            )
+        except (ValueError, np.linalg.LinAlgError) as exc:
+            raise LocalizationError(str(exc)) from exc
         return _localize_cartesian(
             sensor_positions=sensor_positions,
             sensor_windows=sensor_windows,
@@ -137,12 +164,12 @@ class MusicLocalizer:
             max_tau_s=self.max_tau_s,
             interpolation_factor=self.interp,
             sensor_weights=sensor_weights,
+            bearing_prior=bearing_prior,
         )
 
 
 @dataclass(slots=True)
 class EspritLocalizer:
-    # Narrowband settings remain constructor-compatible; broadband TDOA owns position.
     max_tau_s: float = 0.02
     freq_min_hz: float = 300.0
     freq_max_hz: float = 3500.0
@@ -159,6 +186,25 @@ class EspritLocalizer:
         humidity_fraction: float,
         sensor_weights: dict[str, float] | None = None,
     ) -> LocalizationResult:
+        sensor_ids = sorted(
+            sensor_id for sensor_id in sensor_positions if sensor_id in sensor_windows
+        )
+        sound_speed_mps = speed_of_sound_mps(
+            temperature_c=temperature_c,
+            humidity_fraction=humidity_fraction,
+        )
+        try:
+            bearing_prior = esprit_bearing_prior(
+                sensor_positions=sensor_positions,
+                sensor_windows=sensor_windows,
+                sensor_ids=sensor_ids,
+                sample_rate_hz=sample_rate_hz,
+                sound_speed_mps=sound_speed_mps,
+                minimum_frequency_hz=self.freq_min_hz,
+                maximum_frequency_hz=self.freq_max_hz,
+            )
+        except (ValueError, np.linalg.LinAlgError) as exc:
+            raise LocalizationError(str(exc)) from exc
         return _localize_cartesian(
             sensor_positions=sensor_positions,
             sensor_windows=sensor_windows,
@@ -168,4 +214,5 @@ class EspritLocalizer:
             max_tau_s=self.max_tau_s,
             interpolation_factor=self.interp,
             sensor_weights=sensor_weights,
+            bearing_prior=bearing_prior,
         )

@@ -133,7 +133,8 @@ def test_tight_array_srp_far_field_uses_bounded_minimum_range_solution() -> None
     assert 0.05 < estimated_range_m < 10.0
     assert float(np.dot(estimated_direction, expected_direction)) > 0.97
     assert result.position_covariance_m2 is not None
-    assert result.range_observability is None
+    assert result.range_observability is not None
+    assert result.range_observability < 0.10
     assert result.residual_rms_seconds is not None
     assert result.range_projection_mode is None
     assert result.confidence < 0.25
@@ -203,7 +204,8 @@ def test_tight_array_srp_far_field_reports_bearing_with_honest_range_uncertainty
 
     assert float(np.dot(estimated_direction, expected_direction)) > 0.99
     assert result.range_projection_mode is None
-    assert result.range_observability is None
+    assert result.range_observability is not None
+    assert result.range_observability < 0.10
     assert result.confidence < 0.25
     assert radial_variance_m2 > lateral_variance_m2 * 100.0
 
@@ -352,7 +354,8 @@ def test_birdnet_hybrid_profile_uses_fixed_srp_for_tight_array_far_field() -> No
     assert result.attempted_algorithm == "srp_phat"
     assert result.resolved_algorithm == "srp_phat"
     assert result.range_projection_mode is None
-    assert result.range_observability is None
+    assert result.range_observability is not None
+    assert result.range_observability < 0.10
     assert result.confidence < 0.25
 
 

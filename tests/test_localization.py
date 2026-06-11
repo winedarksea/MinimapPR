@@ -48,7 +48,8 @@ def test_tdoa_localization_recovers_source_position() -> None:
     assert result.confidence > 0.1
     assert np.isfinite(result.gdop)
     assert result.position_covariance_m2 is not None
-    assert result.range_observability is None
+    assert result.range_observability is not None
+    assert result.range_observability > 0.1
     assert result.residual_rms_seconds is not None
     assert result.range_projection_mode is None
 
