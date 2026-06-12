@@ -572,6 +572,8 @@ def build_localizer_from_settings(settings: Settings | LocalizationConfig) -> Lo
         interp_factor=cfg.gcc_phat_interp_factor,
         node_bearing_strength=cfg.localization_node_bearing_strength,
         amplitude_ratio_strength=cfg.localization_amplitude_ratio_strength,
+        far_field_default_range_m=cfg.localization_far_field_default_range_m,
+        tight_array_aperture_m=cfg.localization_tight_array_aperture_m,
     )
     algorithms: dict[str, Localizer] = {
         "gcc_phat": gcc,

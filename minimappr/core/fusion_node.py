@@ -174,6 +174,8 @@ class FusionMetrics:
     localization_config_bypassed_count: int = 0
     localization_band_aliased_count: int = 0
     localization_prior_projected_count: int = 0
+    localization_range_asymptotic_count: int = 0
+    localization_solver_unconverged_count: int = 0
     localization_covariance_missing_count: int = 0
     localization_range_observability_low_count: int = 0
     localization_stage_total_time_ms: float = 0.0
@@ -1170,8 +1172,10 @@ class FusionNode:
                     classification_windows=classification_windows,
                     capability_tier=tier,
                 )
-            except LocalizationError:
+            except LocalizationError as exc:
                 self._metrics.localization_failures += 1
+                if "did not converge" in str(exc):
+                    self._metrics.localization_solver_unconverged_count += 1
         elif tier == "2d" and hasattr(self.localizer, "localize_2d"):
             self._metrics.localization_tier_2d_count += 1
             if getattr(self.localizer, "default_algorithm", "gcc_phat") != "gcc_phat":
@@ -1472,6 +1476,8 @@ class FusionNode:
             self._metrics.localization_range_observability_low_count += 1
         if localization.range_projection_mode == "prior_projected":
             self._metrics.localization_prior_projected_count += 1
+        if localization.range_projection_mode == "range_asymptotic":
+            self._metrics.localization_range_asymptotic_count += 1
         if (
             localization.attempted_algorithm
             and localization.resolved_algorithm

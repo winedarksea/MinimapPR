@@ -78,24 +78,15 @@ class LinearTrackFilter:
         dt_safe = max(dt_s, 1e-3)
         measured_velocity = (measured_position - previous_position) / dt_safe
 
-        covariance_update = self._covariance_weighted_position_update(
-            previous_position=previous_position,
-            previous_covariance_m2=state.position_covariance_m2,
-            measured_position=measured_position,
-            measurement_covariance_m2=measurement_covariance_m2,
+        smooth_position = (
+            self._position_alpha * previous_position
+            + (1.0 - self._position_alpha) * measured_position
         )
-        if covariance_update is None:
-            smooth_position = (
-                self._position_alpha * previous_position
-                + (1.0 - self._position_alpha) * measured_position
-            )
-            covariance = self._measurement_covariance_output(measurement_covariance_m2)
-        else:
-            smooth_position, covariance = covariance_update
         smooth_velocity = (
             self._velocity_alpha * previous_velocity
             + (1.0 - self._velocity_alpha) * measured_velocity
         )
+        covariance = self._measurement_covariance_output(measurement_covariance_m2)
 
         return state.model_copy(
             update={
@@ -112,61 +103,6 @@ class LinearTrackFilter:
                 "position_covariance_m2": covariance,
             },
         )
-
-    def _covariance_weighted_position_update(
-        self,
-        *,
-        previous_position: np.ndarray,
-        previous_covariance_m2: list[list[float]] | None,
-        measured_position: np.ndarray,
-        measurement_covariance_m2: list[list[float]] | None,
-    ) -> tuple[np.ndarray, list[list[float]]] | None:
-        measurement_covariance = self._coerce_covariance(measurement_covariance_m2)
-        if measurement_covariance is None:
-            return None
-        previous_covariance = self._coerce_covariance(previous_covariance_m2)
-        if previous_covariance is None:
-            previous_covariance = np.eye(3, dtype=np.float64) * self._default_covariance_diag_value
-
-        innovation_covariance = previous_covariance + measurement_covariance
-        try:
-            kalman_gain = np.linalg.solve(
-                innovation_covariance.T,
-                previous_covariance.T,
-            ).T
-        except np.linalg.LinAlgError:
-            return None
-        updated_position = previous_position + kalman_gain @ (measured_position - previous_position)
-        identity = np.eye(3, dtype=np.float64)
-        updated_covariance = (
-            (identity - kalman_gain)
-            @ previous_covariance
-            @ (identity - kalman_gain).T
-            + kalman_gain @ measurement_covariance @ kalman_gain.T
-        )
-        updated_covariance = 0.5 * (updated_covariance + updated_covariance.T)
-        return updated_position, updated_covariance.astype(float).tolist()
-
-    @staticmethod
-    def _coerce_covariance(
-        covariance_m2: list[list[float]] | None,
-    ) -> np.ndarray | None:
-        if covariance_m2 is None:
-            return None
-        try:
-            covariance = np.asarray(covariance_m2, dtype=np.float64)
-        except (TypeError, ValueError):
-            return None
-        if covariance.shape != (3, 3) or not np.all(np.isfinite(covariance)):
-            return None
-        covariance = 0.5 * (covariance + covariance.T)
-        try:
-            eigenvalues = np.linalg.eigvalsh(covariance)
-        except np.linalg.LinAlgError:
-            return None
-        if float(np.min(eigenvalues)) <= 0.0:
-            return None
-        return covariance
 
     def initialize_track(
         self,

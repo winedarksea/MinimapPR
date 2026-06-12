@@ -10,6 +10,10 @@ import numpy as np
 from scipy.optimize import least_squares
 
 from minimappr.core.localization_uncertainty import covariance_to_nested_list
+from minimappr.core.radial_range_refinement import (
+    adaptive_radial_refinement,
+    radial_standard_deviation,
+)
 from minimappr.core.spatial_constraints import (
     AmplitudeRatioConstraint,
     SpatialBearingConstraint,
@@ -30,9 +34,10 @@ from minimappr.models import LocalizationResult
 
 EPSILON = 1.0e-12
 MAX_REFINEMENT_START_COUNT = 4
-MAX_REFINEMENT_EVALUATIONS = 20
-RADIAL_UNOBSERVABLE_STD_TO_RANGE_RATIO = 1.0
-COMPACT_ARRAY_WEAK_RANGE_APERTURE_MULTIPLIER = 2.0
+MAX_REFINEMENT_EVALUATIONS = 100
+MAX_RETRY_REFINEMENT_EVALUATIONS = 500
+COMPACT_ARRAY_RADIAL_REFINEMENT_APERTURE_MULTIPLIER = 2.0
+PRIOR_DOMINATED_ASYMPTOTIC_RADIAL_STD_FRACTION = 0.9
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +48,7 @@ class CartesianTdoaSolve:
     gdop: float
     residual_rms_seconds: float
     radial_observability: float
+    range_projection_mode: str
 
 
 def _array_aperture_m(sensor_positions: dict[str, np.ndarray], sensor_ids: list[str]) -> float:
@@ -147,82 +153,23 @@ def _algebraic_initial_position(
     return position_m if np.all(np.isfinite(position_m)) else None
 
 
-def _radial_std_m(
-    *,
-    position_m: np.ndarray,
-    centroid_m: np.ndarray,
-    jacobian: np.ndarray,
-    time_std_s: float,
-) -> float:
-    radial_offset = position_m - centroid_m
-    radial_norm = float(np.linalg.norm(radial_offset))
-    if radial_norm < EPSILON:
-        return float("inf")
-    radial_axis = radial_offset / radial_norm
-    radial_information = float(np.linalg.norm(jacobian @ radial_axis))
-    if radial_information < EPSILON:
-        return float("inf")
-    return time_std_s / radial_information
-
-
-def _observability_boundary_position(
-    *,
-    centroid_m: np.ndarray,
-    direction: np.ndarray,
-    aperture_m: float,
-    time_std_s: float,
-    sensor_positions: dict[str, np.ndarray],
-    measurements: list[PairTdoaMeasurement],
-    sound_speed_mps: float,
-) -> np.ndarray:
-    minimum_radius_m = max(aperture_m * 0.5, 0.05)
-    radius_m = minimum_radius_m
-    maximum_radius_m = max(
-        10.0,
-        aperture_m * 100.0,
-        (aperture_m * aperture_m) / max(sound_speed_mps * time_std_s, EPSILON) * 4.0,
-    )
-    for _ in range(24):
-        candidate = centroid_m + direction * radius_m
-        jacobian = _weighted_tdoa_jacobian(
-            candidate,
-            sensor_positions=sensor_positions,
-            measurements=measurements,
-            sound_speed_mps=sound_speed_mps,
-        )
-        radial_std_m = _radial_std_m(
-            position_m=candidate,
-            centroid_m=centroid_m,
-            jacobian=jacobian,
-            time_std_s=time_std_s,
-        )
-        if radial_std_m >= radius_m * RADIAL_UNOBSERVABLE_STD_TO_RANGE_RATIO:
-            return candidate
-        radius_m = min(radius_m * 1.6, maximum_radius_m)
-        if radius_m >= maximum_radius_m:
-            break
-    return centroid_m + direction * maximum_radius_m
-
-
 def _covariance_from_svd(
     *,
     jacobian: np.ndarray,
     time_std_s: float,
     minimum_position_std_m: float,
-    maximum_position_std_m: float,
+    unobservable_position_std_m: float,
 ) -> np.ndarray:
     try:
         _, singular_values, right_vectors_t = np.linalg.svd(jacobian, full_matrices=False)
     except np.linalg.LinAlgError:
-        return np.eye(3, dtype=np.float64) * (maximum_position_std_m**2)
+        return np.eye(3, dtype=np.float64) * (unobservable_position_std_m**2)
     variance_floor_m2 = minimum_position_std_m**2
-    variance_ceiling_m2 = maximum_position_std_m**2
-    variances = np.full(3, variance_ceiling_m2, dtype=np.float64)
+    unobservable_variance_m2 = unobservable_position_std_m**2
+    variances = np.full(3, unobservable_variance_m2, dtype=np.float64)
     for index, singular_value in enumerate(singular_values[:3]):
         if singular_value > EPSILON:
-            variances[index] = float(
-                np.clip((time_std_s / singular_value) ** 2, variance_floor_m2, variance_ceiling_m2)
-            )
+            variances[index] = float(max((time_std_s / singular_value) ** 2, variance_floor_m2))
     covariance = right_vectors_t.T @ np.diag(variances) @ right_vectors_t
     return 0.5 * (covariance + covariance.T)
 
@@ -239,6 +186,8 @@ def solve_cartesian_tdoa(
     bearing_prior: BearingPrior | None = None,
     bearing_constraints: list[SpatialBearingConstraint] | None = None,
     amplitude_constraints: list[AmplitudeRatioConstraint] | None = None,
+    far_field_initial_range_m: float = 50.0,
+    radial_refinement_enabled: bool = True,
 ) -> CartesianTdoaSolve:
     bearing_constraints = bearing_constraints or []
     amplitude_constraints = amplitude_constraints or []
@@ -254,24 +203,14 @@ def solve_cartesian_tdoa(
             measurements=measurements,
             sound_speed_mps=sound_speed_mps,
         )
-        observability_boundary = _observability_boundary_position(
-            centroid_m=centroid_m,
-            direction=direction,
-            aperture_m=aperture_m,
-            time_std_s=sample_time_std_s,
-            sensor_positions=sensor_positions,
-            measurements=measurements,
-            sound_speed_mps=sound_speed_mps,
-        )
         initial_positions = [
             centroid_m,
             centroid_m + direction * max(aperture_m, minimum_position_std_m),
-            observability_boundary,
+            centroid_m + direction * max(aperture_m * 10.0, 1.0),
         ]
     else:
         search_scale_m = max(aperture_m, minimum_position_std_m)
         direction = np.asarray([1.0, 0.0, 0.0], dtype=np.float64)
-        observability_boundary = centroid_m + direction * search_scale_m
         initial_positions = [
             centroid_m,
             centroid_m + np.asarray([search_scale_m, 0.0, 0.0]),
@@ -302,7 +241,7 @@ def solve_cartesian_tdoa(
     if algebraic_position is not None:
         initial_positions.insert(0, algebraic_position)
 
-    candidate_solutions: list[tuple[float, float, np.ndarray]] = []
+    candidate_solutions: list[tuple[float, np.ndarray]] = []
     def combined_residual_seconds(position_m: np.ndarray) -> np.ndarray:
         return np.concatenate(
             (
@@ -328,6 +267,7 @@ def solve_cartesian_tdoa(
         )
 
     for initial_position in initial_positions[:MAX_REFINEMENT_START_COUNT]:
+        solved = None
         try:
             solved = least_squares(
                 combined_residual_seconds,
@@ -341,30 +281,106 @@ def solve_cartesian_tdoa(
             )
         except (ValueError, np.linalg.LinAlgError):
             continue
+        if not solved.success and np.all(np.isfinite(solved.x)):
+            try:
+                solved = least_squares(
+                    combined_residual_seconds,
+                    x0=solved.x,
+                    method="trf",
+                    loss="soft_l1",
+                    max_nfev=MAX_RETRY_REFINEMENT_EVALUATIONS,
+                    xtol=1.0e-11,
+                    ftol=1.0e-11,
+                    gtol=1.0e-11,
+                )
+            except (ValueError, np.linalg.LinAlgError):
+                continue
+        if not solved.success:
+            continue
         residual = combined_residual_seconds(solved.x)
         cost = float(np.dot(residual, residual))
-        if np.all(np.isfinite(solved.x)) and np.isfinite(cost):
-            range_from_centroid_m = float(np.linalg.norm(solved.x - centroid_m))
-            candidate_solutions.append((cost, range_from_centroid_m, solved.x))
+        if (
+            np.all(np.isfinite(solved.x))
+            and np.all(np.isfinite(residual))
+            and np.all(np.isfinite(solved.jac))
+            and np.isfinite(cost)
+        ):
+            candidate_solutions.append((cost, solved.x))
     if not candidate_solutions:
-        raise ValueError("Cartesian TDOA refinement failed")
-    minimum_cost = min(candidate[0] for candidate in candidate_solutions)
-    # Radially distinct solutions inside the timing noise floor are not distinguishable.
-    statistically_equivalent_cost = minimum_cost + (
-        len(measurements) * sample_time_std_s * sample_time_std_s
-    )
-    _, _, best_position = min(
-        (
-            candidate
-            for candidate in candidate_solutions
-            if candidate[0] <= statistically_equivalent_cost
-        ),
-        key=lambda candidate: candidate[1],
-    )
+        raise ValueError("Cartesian TDOA refinement did not converge")
+    _, best_position = min(candidate_solutions, key=lambda candidate: candidate[0])
 
     residual = combined_residual_seconds(best_position)
     residual_rms_s = float(np.sqrt(np.mean(np.square(residual))))
     effective_time_std_s = max(residual_rms_s, sample_time_std_s)
+    range_projection_mode = "range_refined"
+    radial_refinement_std_m: float | None = None
+    preliminary_jacobian = np.vstack(
+        (
+            _weighted_tdoa_jacobian(
+                best_position,
+                sensor_positions=sensor_positions,
+                measurements=measurements,
+                sound_speed_mps=sound_speed_mps,
+            ),
+            spatial_constraint_jacobian(
+                best_position,
+                bearing_constraints=bearing_constraints,
+                amplitude_constraints=amplitude_constraints,
+                residual_scale_seconds=sample_time_std_s,
+            ),
+        )
+    )
+    best_range_before_radial_refinement_m = float(
+        np.linalg.norm(best_position - centroid_m)
+    )
+    preliminary_radial_std_m = radial_standard_deviation(
+        position_m=best_position,
+        centroid_m=centroid_m,
+        jacobian=preliminary_jacobian,
+        time_std_s=effective_time_std_s,
+    )
+    weak_cartesian_range = preliminary_radial_std_m >= max(
+        best_range_before_radial_refinement_m,
+        aperture_m,
+        minimum_position_std_m,
+    )
+    compact_array_far_field_candidate = best_range_before_radial_refinement_m >= (
+        aperture_m * COMPACT_ARRAY_RADIAL_REFINEMENT_APERTURE_MULTIPLIER
+    )
+    if (
+        has_tdoa_measurements
+        and radial_refinement_enabled
+        and (weak_cartesian_range or compact_array_far_field_candidate)
+    ):
+        best_offset = best_position - centroid_m
+        best_offset_norm = float(np.linalg.norm(best_offset))
+        refinement_direction = best_offset / max(best_offset_norm, EPSILON)
+        radial_refinement = adaptive_radial_refinement(
+            centroid_m=centroid_m,
+            direction=refinement_direction,
+            initial_radius_m=max(
+                best_offset_norm,
+                far_field_initial_range_m,
+                aperture_m,
+                minimum_position_std_m,
+            ),
+            minimum_radius_m=max(aperture_m * 0.5, minimum_position_std_m),
+            residual_function=combined_residual_seconds,
+            effective_time_std_s=effective_time_std_s,
+            asymptotic_radial_std_fraction=(
+                PRIOR_DOMINATED_ASYMPTOTIC_RADIAL_STD_FRACTION
+                if bearing_prior is not None
+                else None
+            ),
+        )
+        if radial_refinement.fit_residual_rms_seconds < residual_rms_s * (1.0 - 1.0e-4):
+            best_position = radial_refinement.position_m
+            radial_refinement_std_m = radial_refinement.radial_std_m
+            range_projection_mode = radial_refinement.projection_mode
+            residual = combined_residual_seconds(best_position)
+            residual_rms_s = float(np.sqrt(np.mean(np.square(residual))))
+            effective_time_std_s = max(residual_rms_s, sample_time_std_s)
     jacobian = np.vstack(
         (
             _weighted_tdoa_jacobian(
@@ -381,52 +397,24 @@ def solve_cartesian_tdoa(
             ),
         )
     )
-    best_range_m = float(np.linalg.norm(best_position - centroid_m))
-    radial_std_m = _radial_std_m(
-        position_m=best_position,
-        centroid_m=centroid_m,
-        jacobian=jacobian,
-        time_std_s=effective_time_std_s,
-    )
-    if (
-        has_tdoa_measurements
-        and radial_std_m >= max(best_range_m, aperture_m, minimum_position_std_m)
-    ):
-        best_position = observability_boundary
-        residual = combined_residual_seconds(best_position)
-        residual_rms_s = float(np.sqrt(np.mean(np.square(residual))))
-        effective_time_std_s = max(residual_rms_s, sample_time_std_s)
-        jacobian = np.vstack(
-            (
-                _weighted_tdoa_jacobian(
-                    best_position,
-                    sensor_positions=sensor_positions,
-                    measurements=measurements,
-                    sound_speed_mps=sound_speed_mps,
-                ),
-                spatial_constraint_jacobian(
-                    best_position,
-                    bearing_constraints=bearing_constraints,
-                    amplitude_constraints=amplitude_constraints,
-                    residual_scale_seconds=sample_time_std_s,
-                ),
-            )
-        )
-
     solved_range_m = float(np.linalg.norm(best_position - centroid_m))
-    maximum_position_std_m = max(25.0, solved_range_m * 4.0, aperture_m * 100.0)
+    unobservable_position_std_m = max(
+        radial_refinement_std_m or 0.0,
+        solved_range_m,
+        aperture_m,
+        minimum_position_std_m,
+    )
     covariance_m2 = _covariance_from_svd(
         jacobian=jacobian,
         time_std_s=effective_time_std_s,
         minimum_position_std_m=minimum_position_std_m,
-        maximum_position_std_m=maximum_position_std_m,
+        unobservable_position_std_m=unobservable_position_std_m,
     )
     radial_axis = (best_position - centroid_m) / max(solved_range_m, EPSILON)
-    if solved_range_m >= aperture_m * COMPACT_ARRAY_WEAK_RANGE_APERTURE_MULTIPLIER:
-        # Evaluating at the bounded representative point must not invent radial precision.
+    if radial_refinement_std_m is not None:
         radial_variance_m2 = float(radial_axis @ covariance_m2 @ radial_axis)
         covariance_m2 += max(
-            (maximum_position_std_m**2) - radial_variance_m2,
+            (radial_refinement_std_m**2) - radial_variance_m2,
             0.0,
         ) * np.outer(radial_axis, radial_axis)
     eigenvalues = np.linalg.eigvalsh(covariance_m2)
@@ -442,6 +430,8 @@ def solve_cartesian_tdoa(
         np.clip(math.sqrt(max(float(eigenvalues[0]), EPSILON) / max(float(eigenvalues[-1]), EPSILON)), 0.0, 1.0)
     )
     radial_observability = min(radial_observability, condition_observability)
+    if range_projection_mode == "range_asymptotic":
+        radial_observability = min(radial_observability, 0.05)
     if measurements:
         peak_quality = float(
             np.mean(
@@ -466,6 +456,8 @@ def solve_cartesian_tdoa(
             1.0,
         )
     )
+    if range_projection_mode == "range_asymptotic":
+        confidence = min(confidence, 0.20)
     try:
         singular_values = np.linalg.svd(jacobian, compute_uv=False)
         inverse_squared = [
@@ -483,6 +475,7 @@ def solve_cartesian_tdoa(
         gdop=gdop,
         residual_rms_seconds=residual_rms_s,
         radial_observability=radial_observability,
+        range_projection_mode=range_projection_mode,
     )
 
 
@@ -502,4 +495,5 @@ def localization_result_from_cartesian_solve(
         position_covariance_m2=covariance_to_nested_list(solve.covariance_m2),
         range_observability=solve.radial_observability,
         residual_rms_seconds=solve.residual_rms_seconds,
+        range_projection_mode=solve.range_projection_mode,
     )

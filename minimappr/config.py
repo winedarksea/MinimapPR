@@ -121,7 +121,7 @@ class LocalizationConfig:
     gcc_phat_interp_factor: int
     localization_node_bearing_strength: float = 1.0
     localization_amplitude_ratio_strength: float = 0.15
-    # Retained for config-file compatibility; Cartesian localization ignores them.
+    # The default seeds unbounded radial search; max is retained but never limits results.
     localization_far_field_default_range_m: float = 50.0
     localization_far_field_max_range_m: float = 250.0
     classification_window_seconds: float = 30.0
@@ -691,11 +691,6 @@ class Settings:
             raise ValueError("MINIMAPPR_LOCALIZATION_SEARCH_PADDING_M must be > 0")
         if self.localization_far_field_default_range_m <= 0.0:
             raise ValueError("MINIMAPPR_LOCALIZATION_FAR_FIELD_DEFAULT_RANGE_M must be > 0")
-        if self.localization_far_field_max_range_m < self.localization_far_field_default_range_m:
-            raise ValueError(
-                "MINIMAPPR_LOCALIZATION_FAR_FIELD_MAX_RANGE_M must be >= "
-                "MINIMAPPR_LOCALIZATION_FAR_FIELD_DEFAULT_RANGE_M"
-            )
         if self.localization_subspace_freq_min_hz <= 0.0:
             raise ValueError("MINIMAPPR_LOCALIZATION_SUBSPACE_FREQ_MIN_HZ must be > 0")
         if self.localization_subspace_freq_max_hz <= self.localization_subspace_freq_min_hz:

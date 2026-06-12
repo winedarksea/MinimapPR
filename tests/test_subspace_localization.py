@@ -152,7 +152,7 @@ def test_music_grid_and_source_count_change_bearing_prior() -> None:
         ),
     ],
 )
-def test_subspace_compact_far_field_does_not_invent_range(localizer) -> None:
+def test_subspace_compact_far_field_preserves_distant_estimate(localizer) -> None:
     sample_rate_hz = 48_000
     sample_count = int(sample_rate_hz * 0.18)
     rng = np.random.default_rng(194)
@@ -187,7 +187,7 @@ def test_subspace_compact_far_field_does_not_invent_range(localizer) -> None:
     centroid_m = np.mean(np.vstack(list(sensor_positions.values())), axis=0)
     estimated_range_m = float(np.linalg.norm(np.asarray(result.position_m) - centroid_m))
 
-    assert estimated_range_m < 10.0
+    assert estimated_range_m > 20.0
     assert result.range_observability is not None
     assert result.range_observability < 0.10
-    assert result.range_projection_mode is None
+    assert result.range_projection_mode == "range_asymptotic"

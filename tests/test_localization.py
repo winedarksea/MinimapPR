@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
+import minimappr.core.cartesian_tdoa as cartesian_tdoa
+from minimappr.core.cartesian_tdoa import solve_cartesian_tdoa
 from minimappr.core.localization import LocalizationEngine, LocalizationError
-from minimappr.core.tdoa_measurements import measure_pair_tdoas
+from minimappr.core.tdoa_measurements import PairTdoaMeasurement, measure_pair_tdoas
 from tests.helpers import shift_signal
 
 
@@ -19,11 +23,11 @@ def test_tdoa_localization_recovers_source_position() -> None:
     sound_speed = 343.2
 
     sensor_positions = {
-        "s0": np.array([0.0, 0.0, 2.0]),
-        "s1": np.array([6.0, 0.0, 2.0]),
-        "s2": np.array([6.0, 0.4, 2.0]),
-        "s3": np.array([6.2, 0.2, 2.2]),
-        "s4": np.array([5.8, 0.2, 1.8]),
+        "s0": np.array([0.0, 0.0, 0.0]),
+        "s1": np.array([6.0, 0.0, 0.0]),
+        "s2": np.array([0.0, 6.0, 0.0]),
+        "s3": np.array([0.0, 0.0, 6.0]),
+        "s4": np.array([6.0, 6.0, 6.0]),
     }
     source = np.array([2.7, 3.3, 1.4])
 
@@ -51,7 +55,7 @@ def test_tdoa_localization_recovers_source_position() -> None:
     assert result.range_observability is not None
     assert result.range_observability > 0.1
     assert result.residual_rms_seconds is not None
-    assert result.range_projection_mode is None
+    assert result.range_projection_mode == "range_refined"
 
 
 def test_localization_rejects_non_finite_windows() -> None:
@@ -117,3 +121,93 @@ def test_large_cluster_limits_pair_correlations_before_measurement() -> None:
 
     assert correlation_call_count == 32
     assert len(measurements) == 32
+
+
+def _solver_test_measurements() -> tuple[
+    dict[str, np.ndarray],
+    list[PairTdoaMeasurement],
+]:
+    sensor_positions = {
+        "s0": np.asarray([0.0, 0.0, 0.0]),
+        "s1": np.asarray([1.0, 0.0, 0.0]),
+        "s2": np.asarray([0.0, 1.0, 0.0]),
+        "s3": np.asarray([0.0, 0.0, 1.0]),
+    }
+    measurements = [
+        PairTdoaMeasurement("s0", "s1", 1.0e-4, 1.0, 1.0),
+        PairTdoaMeasurement("s0", "s2", 1.5e-4, 1.0, 1.0),
+        PairTdoaMeasurement("s0", "s3", 2.0e-4, 1.0, 1.0),
+    ]
+    return sensor_positions, measurements
+
+
+def test_cartesian_solver_retries_then_rejects_unconverged_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sensor_positions, measurements = _solver_test_measurements()
+    evaluation_budgets: list[int] = []
+
+    def unconverged_least_squares(*_args, **kwargs):
+        evaluation_budgets.append(kwargs["max_nfev"])
+        return SimpleNamespace(
+            success=False,
+            x=np.asarray(kwargs["x0"], dtype=np.float64),
+            jac=np.eye(3, dtype=np.float64),
+        )
+
+    monkeypatch.setattr(
+        cartesian_tdoa,
+        "least_squares",
+        unconverged_least_squares,
+    )
+
+    with pytest.raises(ValueError, match="did not converge"):
+        solve_cartesian_tdoa(
+            sensor_positions=sensor_positions,
+            measurements=measurements,
+            sound_speed_mps=343.2,
+            sample_rate_hz=48_000,
+            interpolation_factor=4,
+            reference_sensor="s0",
+            reference_tdoa_s={"s1": 1.0e-4, "s2": 1.5e-4, "s3": 2.0e-4},
+            radial_refinement_enabled=False,
+        )
+
+    assert cartesian_tdoa.MAX_REFINEMENT_EVALUATIONS in evaluation_budgets
+    assert cartesian_tdoa.MAX_RETRY_REFINEMENT_EVALUATIONS in evaluation_budgets
+
+
+def test_cartesian_solver_accepts_successful_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sensor_positions, measurements = _solver_test_measurements()
+    call_count = 0
+
+    def retrying_least_squares(*_args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return SimpleNamespace(
+            success=call_count % 2 == 0,
+            x=np.asarray([2.0, 2.0, 2.0], dtype=np.float64),
+            jac=np.eye(3, dtype=np.float64),
+        )
+
+    monkeypatch.setattr(
+        cartesian_tdoa,
+        "least_squares",
+        retrying_least_squares,
+    )
+
+    result = solve_cartesian_tdoa(
+        sensor_positions=sensor_positions,
+        measurements=measurements,
+        sound_speed_mps=343.2,
+        sample_rate_hz=48_000,
+        interpolation_factor=4,
+        reference_sensor="s0",
+        reference_tdoa_s={"s1": 1.0e-4, "s2": 1.5e-4, "s3": 2.0e-4},
+        radial_refinement_enabled=False,
+    )
+
+    assert call_count >= 2
+    assert np.all(np.isfinite(result.position_m))

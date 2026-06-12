@@ -101,6 +101,8 @@ class LocalizationEngine:
     interp_factor: int = 4
     node_bearing_strength: float = 1.0
     amplitude_ratio_strength: float = 0.15
+    far_field_default_range_m: float = 50.0
+    tight_array_aperture_m: float = 0.35
 
     def _validate_inputs(
         self,
@@ -159,6 +161,14 @@ class LocalizationEngine:
             gcc_phat_function=gcc_phat,
             sensor_node_ids=sensor_node_ids,
         )
+        array_aperture_m = max(
+            (
+                float(np.linalg.norm(sensor_positions[a] - sensor_positions[b]))
+                for index, a in enumerate(sensor_ids)
+                for b in sensor_ids[index + 1 :]
+            ),
+            default=0.0,
+        )
         from minimappr.core.spatial_constraints import build_node_spatial_constraints
 
         bearing_constraints, amplitude_constraints = build_node_spatial_constraints(
@@ -197,6 +207,10 @@ class LocalizationEngine:
                 reference_tdoa_s=reference_tdoa_s,
                 bearing_constraints=bearing_constraints,
                 amplitude_constraints=amplitude_constraints,
+                far_field_initial_range_m=self.far_field_default_range_m,
+                radial_refinement_enabled=(
+                    array_aperture_m <= self.tight_array_aperture_m
+                ),
             )
         except (ValueError, np.linalg.LinAlgError) as exc:
             raise LocalizationError(str(exc)) from exc

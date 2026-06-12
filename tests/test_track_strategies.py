@@ -193,7 +193,7 @@ def test_linear_filter_update_smooths() -> None:
     assert updated.position_m == pytest.approx((4.0, 0.0, 0.0), abs=1e-6)
 
 
-def test_linear_filter_uses_anisotropic_measurement_covariance() -> None:
+def test_linear_filter_reports_measurement_covariance_without_freezing_position() -> None:
     filt = LinearTrackFilter(position_alpha=0.6, velocity_alpha=0.5, default_covariance_diagonal=5.0)
     t0 = 1_000_000_000_000_000_000
     state = TrackState(
@@ -220,9 +220,44 @@ def test_linear_filter_uses_anisotropic_measurement_covariance() -> None:
         ],
     )
 
-    assert updated.position_m[0] < 0.2
-    assert updated.position_m[1] > 9.8
-    assert updated.position_m[2] < 0.2
+    assert updated.position_m == pytest.approx((4.0, 4.0, 4.0), abs=1e-6)
+    assert updated.position_covariance_m2 == [
+        [100.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 100.0],
+    ]
+
+
+def test_linear_filter_remains_responsive_during_sustained_motion() -> None:
+    filt = LinearTrackFilter(
+        position_alpha=0.6,
+        velocity_alpha=0.5,
+        default_covariance_diagonal=5.0,
+    )
+    state = TrackState(
+        id="trk-moving",
+        first_seen_ns=0,
+        last_seen_ns=0,
+        position_m=(0.0, 0.0, 0.0),
+        velocity_mps=(0.0, 0.0, 0.0),
+    )
+    measurement_covariance = [
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ]
+
+    for position_x_m in range(1, 51):
+        state = filt.update(
+            state,
+            measurement_m=(float(position_x_m), 0.0, 0.0),
+            dt_s=1.0,
+            measurement_covariance_m2=measurement_covariance,
+        )
+
+    assert state.position_m[0] > 48.0
+    assert state.position_m[0] < 50.0
+    assert state.position_covariance_m2 == measurement_covariance
 
 
 # ---------------------------------------------------------------------------

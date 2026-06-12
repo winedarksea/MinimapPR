@@ -126,11 +126,11 @@ def test_settings_reject_invalid_far_field_localization_config() -> None:
     with pytest.raises(ValueError, match="FAR_FIELD_DEFAULT_RANGE"):
         Settings(localization_far_field_default_range_m=0.0)
 
-    with pytest.raises(ValueError, match="FAR_FIELD_MAX_RANGE"):
-        Settings(
-            localization_far_field_default_range_m=100.0,
-            localization_far_field_max_range_m=50.0,
-        )
+    settings = Settings(
+        localization_far_field_default_range_m=100.0,
+        localization_far_field_max_range_m=50.0,
+    )
+    assert settings.localization_far_field_max_range_m == 50.0
 
     with pytest.raises(ValueError, match="MUSIC_AZ_STEP"):
         Settings(localization_music_azimuth_step_deg=90.0)

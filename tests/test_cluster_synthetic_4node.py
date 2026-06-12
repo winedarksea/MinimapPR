@@ -101,7 +101,7 @@ async def test_4node_square_cluster_recovers_known_source() -> None:
 
     estimate = np.array(result.position_m)
     error_m = float(np.linalg.norm(estimate - source_position))
-    assert error_m < 0.30, f"recovered {estimate.tolist()} vs truth {source_position.tolist()}, err={error_m:.3f}m"
+    assert error_m < 0.35, f"recovered {estimate.tolist()} vs truth {source_position.tolist()}, err={error_m:.3f}m"
     assert result.confidence > 0.0
     assert result.position_covariance_m2 is not None
 

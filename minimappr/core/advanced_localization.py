@@ -44,6 +44,8 @@ def _localize_cartesian(
     ) = None,
     node_bearing_strength: float = 1.0,
     amplitude_ratio_strength: float = 0.0,
+    far_field_initial_range_m: float = 50.0,
+    tight_array_aperture_m: float = 0.35,
 ) -> LocalizationResult:
     sensor_ids = sorted(sensor_id for sensor_id in sensor_positions if sensor_id in sensor_windows)
     if len(sensor_ids) < 4:
@@ -63,6 +65,14 @@ def _localize_cartesian(
         sensor_weights=sensor_weights,
         gcc_phat_function=gcc_phat,
         sensor_node_ids=sensor_node_ids,
+    )
+    array_aperture_m = max(
+        (
+            float(np.linalg.norm(sensor_positions[a] - sensor_positions[b]))
+            for index, a in enumerate(sensor_ids)
+            for b in sensor_ids[index + 1 :]
+        ),
+        default=0.0,
     )
     bearing_constraints, amplitude_constraints = build_node_spatial_constraints(
         sensor_positions=sensor_positions,
@@ -102,6 +112,8 @@ def _localize_cartesian(
             bearing_prior=bearing_prior,
             bearing_constraints=bearing_constraints,
             amplitude_constraints=amplitude_constraints,
+            far_field_initial_range_m=far_field_initial_range_m,
+            radial_refinement_enabled=array_aperture_m <= tight_array_aperture_m,
         )
     except (ValueError, np.linalg.LinAlgError) as exc:
         raise LocalizationError(str(exc)) from exc
@@ -114,7 +126,7 @@ def _localize_cartesian(
 
 @dataclass(slots=True)
 class SRPPhatLocalizer:
-    # Legacy grid/range fields remain constructor-compatible but no longer affect solving.
+    # Legacy grid/max-range fields are ignored; default range seeds unbounded radial search.
     max_tau_s: float = 0.02
     grid_resolution_m: float = 0.5
     search_padding_m: float = 2.0
@@ -152,6 +164,8 @@ class SRPPhatLocalizer:
             sensor_gain_offsets_db=sensor_gain_offsets_db,
             node_bearing_strength=self.node_bearing_strength,
             amplitude_ratio_strength=self.amplitude_ratio_strength,
+            far_field_initial_range_m=self.far_field_default_range_m,
+            tight_array_aperture_m=self.tight_array_aperture_m,
         )
 
 
@@ -240,6 +254,7 @@ class MusicLocalizer:
             node_bearing_estimator=estimate_node_bearing if has_multiple_nodes else None,
             node_bearing_strength=self.node_bearing_strength,
             amplitude_ratio_strength=self.amplitude_ratio_strength,
+            far_field_initial_range_m=self.far_field_default_range_m,
         )
 
 
@@ -319,4 +334,5 @@ class EspritLocalizer:
             node_bearing_estimator=estimate_node_bearing if has_multiple_nodes else None,
             node_bearing_strength=self.node_bearing_strength,
             amplitude_ratio_strength=self.amplitude_ratio_strength,
+            far_field_initial_range_m=self.far_field_default_range_m,
         )

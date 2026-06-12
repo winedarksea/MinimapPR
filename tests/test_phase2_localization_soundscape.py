@@ -71,7 +71,7 @@ def test_phase2_localizers_return_reasonable_solution(localizer, max_error_m: fl
     assert result.residual_rms_seconds is not None
 
 
-def test_tight_array_srp_far_field_uses_bounded_minimum_range_solution() -> None:
+def test_tight_array_srp_far_field_is_not_replaced_with_near_array_position() -> None:
     sample_rate_hz = 48_000
     n = int(sample_rate_hz * 0.18)
     rng = np.random.default_rng(91)
@@ -79,10 +79,15 @@ def test_tight_array_srp_far_field_uses_bounded_minimum_range_solution() -> None
     sound_speed = 343.2
 
     sensor_positions = {
-        "s0": np.array([0.0, 0.0, 0.0]),
-        "s1": np.array([0.05, 0.0, 0.0]),
-        "s2": np.array([0.0, 0.05, 0.0]),
-        "s3": np.array([0.0, 0.0, 0.05]),
+        f"s{idx}": np.asarray(offset, dtype=np.float64)
+        for idx, offset in enumerate(
+            [
+                (-0.016238, 0.025000, -0.010205),
+                (0.027063, 0.000000, -0.010205),
+                (-0.016238, -0.025000, -0.010205),
+                (0.005413, 0.000000, 0.030615),
+            ]
+        )
     }
     source = np.asarray([82.0, 34.0, 11.0], dtype=np.float64)
     centroid = np.mean(np.vstack(list(sensor_positions.values())), axis=0)
@@ -115,7 +120,7 @@ def test_tight_array_srp_far_field_uses_bounded_minimum_range_solution() -> None
         max_tau_s=0.003,
         grid_resolution_m=0.5,
         search_padding_m=8.0,
-        far_field_default_range_m=5.0,
+        far_field_default_range_m=60.0,
         far_field_max_range_m=500.0,
     ).localize(
         sensor_positions=sensor_positions,
@@ -130,22 +135,23 @@ def test_tight_array_srp_far_field_uses_bounded_minimum_range_solution() -> None
     estimated_range_m = float(np.linalg.norm(estimated_offset))
     estimated_direction = estimated_offset / estimated_range_m
 
-    assert 0.05 < estimated_range_m < 10.0
+    assert estimated_range_m > 20.0
     assert float(np.dot(estimated_direction, expected_direction)) > 0.97
     assert result.position_covariance_m2 is not None
     assert result.range_observability is not None
     assert result.range_observability < 0.10
     assert result.residual_rms_seconds is not None
-    assert result.range_projection_mode is None
+    assert result.range_projection_mode == "range_asymptotic"
     assert result.confidence < 0.25
     np.testing.assert_allclose(
         result.position_m,
         result_with_different_legacy_ranges.position_m,
-        atol=1.0e-9,
+        rtol=1.0e-9,
+        atol=1.0e-6,
     )
 
 
-@pytest.mark.parametrize("source_range_m", [20.0, 50.0, 100.0, 150.0])
+@pytest.mark.parametrize("source_range_m", [20.0, 50.0, 100.0, 150.0, 500.0])
 def test_tight_array_srp_far_field_reports_bearing_with_honest_range_uncertainty(
     source_range_m: float,
 ) -> None:
@@ -203,7 +209,8 @@ def test_tight_array_srp_far_field_reports_bearing_with_honest_range_uncertainty
     lateral_variance_m2 = float((np.trace(covariance) - radial_variance_m2) / 2.0)
 
     assert float(np.dot(estimated_direction, expected_direction)) > 0.99
-    assert result.range_projection_mode is None
+    assert estimated_offset.dot(estimated_offset) > 250.0**2
+    assert result.range_projection_mode == "range_asymptotic"
     assert result.range_observability is not None
     assert result.range_observability < 0.10
     assert result.confidence < 0.25
@@ -259,7 +266,7 @@ def test_tight_array_srp_near_field_regression_keeps_bearing_and_covariance(
     estimated_direction /= np.linalg.norm(estimated_direction)
     assert float(np.dot(estimated_direction, expected_direction)) > 0.95
     assert position_error_m <= max_position_error_m
-    assert result.range_projection_mode is None
+    assert result.range_projection_mode == "range_refined"
     assert result.position_covariance_m2 is not None
 
 
@@ -301,7 +308,7 @@ def test_birdnet_hybrid_profile_uses_fixed_srp_for_tight_array_near_field() -> N
     assert float(np.linalg.norm(estimate - source)) <= 0.10
     assert result.attempted_algorithm == "srp_phat"
     assert result.resolved_algorithm == "srp_phat"
-    assert result.range_projection_mode is None
+    assert result.range_projection_mode == "range_refined"
     assert result.position_covariance_m2 is not None
 
 
@@ -312,10 +319,15 @@ def test_birdnet_hybrid_profile_uses_fixed_srp_for_tight_array_far_field() -> No
     excitation = (rng.standard_normal(n) * np.hanning(n)).astype(np.float32)
     sound_speed = 343.2
     sensor_positions = {
-        "s0": np.array([0.0, 0.0, 0.0]),
-        "s1": np.array([0.05, 0.0, 0.0]),
-        "s2": np.array([0.0, 0.05, 0.0]),
-        "s3": np.array([0.0, 0.0, 0.05]),
+        f"s{idx}": np.asarray(offset, dtype=np.float64)
+        for idx, offset in enumerate(
+            [
+                (-0.016238, 0.025000, -0.010205),
+                (0.027063, 0.000000, -0.010205),
+                (-0.016238, -0.025000, -0.010205),
+                (0.005413, 0.000000, 0.030615),
+            ]
+        )
     }
     source = np.asarray([82.0, 34.0, 11.0], dtype=np.float64)
     centroid = np.mean(np.vstack(list(sensor_positions.values())), axis=0)
@@ -349,11 +361,11 @@ def test_birdnet_hybrid_profile_uses_fixed_srp_for_tight_array_far_field() -> No
     estimated_offset = estimate - centroid
     estimated_range_m = float(np.linalg.norm(estimated_offset))
     estimated_direction = estimated_offset / estimated_range_m
-    assert 0.05 < estimated_range_m < 10.0
+    assert estimated_range_m > 20.0
     assert float(np.dot(estimated_direction, expected_direction)) > 0.97
     assert result.attempted_algorithm == "srp_phat"
     assert result.resolved_algorithm == "srp_phat"
-    assert result.range_projection_mode is None
+    assert result.range_projection_mode == "range_asymptotic"
     assert result.range_observability is not None
     assert result.range_observability < 0.10
     assert result.confidence < 0.25
