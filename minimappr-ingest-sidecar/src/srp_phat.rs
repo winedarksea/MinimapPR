@@ -1880,4 +1880,280 @@ mod tests {
             })
             .collect()
     }
+
+    // --- Distance-matrix coverage (single tetra + synchronized multi-node) ----
+    //
+    // The N-sensor synthesizers below generalize `synthesize_point_source_channels`
+    // (hard-typed to a 4-mic array) to any number of microphones, so the
+    // geometry-agnostic solver can be exercised with combined positions from
+    // several nodes. Like the Python `synthesize_multinode_windows` helper, a
+    // single *global* minimum delay is subtracted so inter-node arrival timing
+    // (the parallax that makes range observable) is preserved.
+
+    const SIRITH_TETRA_OFFSETS_M: [[f32; 3]; 4] = [
+        [-0.016238, 0.025000, -0.010205],
+        [0.027063, 0.000000, -0.010205],
+        [-0.016238, -0.025000, -0.010205],
+        [0.005413, 0.000000, 0.030615],
+    ];
+
+    fn relative_delays_samples(
+        source_position_m: [f32; 3],
+        mic_positions_m: &[[f32; 3]],
+        sample_rate_hz: u32,
+    ) -> Vec<f32> {
+        let delays: Vec<f32> = mic_positions_m
+            .iter()
+            .map(|position_m| {
+                euclidean_distance(source_position_m, *position_m) / 343.2 * sample_rate_hz as f32
+            })
+            .collect();
+        let min_delay = delays.iter().copied().fold(f32::INFINITY, f32::min);
+        delays.into_iter().map(|delay| delay - min_delay).collect()
+    }
+
+    fn synthesize_point_source_channels_n(
+        source_position_m: [f32; 3],
+        mic_positions_m: &[[f32; 3]],
+        sample_rate_hz: u32,
+        output_len: usize,
+    ) -> Vec<Vec<f32>> {
+        let relative = relative_delays_samples(source_position_m, mic_positions_m, sample_rate_hz);
+        let max_delay = relative.iter().copied().fold(0.0_f32, f32::max).ceil() as usize;
+        let source = pseudo_random_with_seed(0x1234_5678, output_len + max_delay + 64);
+        relative
+            .iter()
+            .map(|delay| fractional_delay(&source, *delay, output_len))
+            .collect()
+    }
+
+    fn synthesize_tone_source_channels_n(
+        source_position_m: [f32; 3],
+        mic_positions_m: &[[f32; 3]],
+        freq_hz: f32,
+        sample_rate_hz: u32,
+        output_len: usize,
+    ) -> Vec<Vec<f32>> {
+        let relative = relative_delays_samples(source_position_m, mic_positions_m, sample_rate_hz);
+        relative
+            .iter()
+            .map(|delay| {
+                (0..output_len)
+                    .map(|sample_index| {
+                        let t = (sample_index as f32 - delay) / sample_rate_hz as f32;
+                        if t < 0.0 {
+                            0.0
+                        } else {
+                            (2.0 * std::f32::consts::PI * freq_hz * t).sin()
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Flat microphone list for a tetra node at `tetra_origin_m` plus single-mic
+    /// "point" nodes at `point_origins_m`.
+    fn multinode_mics(tetra_origin_m: [f32; 3], point_origins_m: &[[f32; 3]]) -> Vec<[f32; 3]> {
+        let mut mics: Vec<[f32; 3]> = SIRITH_TETRA_OFFSETS_M
+            .iter()
+            .map(|offset| {
+                [
+                    tetra_origin_m[0] + offset[0],
+                    tetra_origin_m[1] + offset[1],
+                    tetra_origin_m[2] + offset[2],
+                ]
+            })
+            .collect();
+        mics.extend_from_slice(point_origins_m);
+        mics
+    }
+
+    fn array_centroid(mics: &[[f32; 3]]) -> [f32; 3] {
+        let channels: Vec<usize> = (0..mics.len()).collect();
+        centroid(&channels, mics)
+    }
+
+    fn bearing_dot(localization: &SrpPhatLocalization, expected_direction: [f32; 3]) -> f32 {
+        dot(localization.steering_direction, expected_direction)
+    }
+
+    const SINGLE_TETRA_DISTANCES_M: [f32; 4] = [2.0, 10.0, 100.0, 1000.0];
+
+    fn look_direction() -> [f32; 3] {
+        normalize_or_zero([0.6, 0.7, 0.39])
+    }
+
+    // Single tetra: a bearing instrument at every range. Direction is recovered
+    // accurately from 2 m to 1 km; range is not observable for a ~7 cm array
+    // (mirrors `test_single_tetra_distance_matrix` on the Python side).
+    #[test]
+    fn distance_matrix_single_tetra_reports_accurate_bearing() {
+        let mics: Vec<[f32; 3]> = SIRITH_TETRA_OFFSETS_M.to_vec();
+        let centroid_m = array_centroid(&mics);
+        let direction = look_direction();
+        for distance_m in SINGLE_TETRA_DISTANCES_M {
+            let source_position_m = [
+                centroid_m[0] + direction[0] * distance_m,
+                centroid_m[1] + direction[1] * distance_m,
+                centroid_m[2] + direction[2] * distance_m,
+            ];
+            let channels =
+                synthesize_point_source_channels_n(source_position_m, &mics, 16_000, 8_192);
+            let evaluation = estimate_tetrahedral_steering(
+                &channels,
+                &[0, 1, 2, 3],
+                &mics,
+                16_000,
+                343.2,
+                SrpPhatConfig {
+                    grid_resolution_m: 0.05,
+                    search_padding_m: 0.3,
+                    far_field_default_range_m: 60.0,
+                    far_field_max_range_m: 250.0,
+                    ..SrpPhatConfig::default()
+                },
+            );
+            let observed = bearing_dot(&evaluation.localization, direction);
+            assert!(
+                observed > 0.9,
+                "distance {distance_m} m: bearing dot {observed} too low (dir={:?})",
+                evaluation.localization.steering_direction,
+            );
+        }
+    }
+
+    // Synchronized multi-node fusion. The geometry-agnostic SRP-PHAT solver
+    // accepts the combined microphone positions of several nodes — here a 4-mic
+    // tetra plus three single-mic "point" nodes (7 sensors) — and fuses them
+    // into a single estimate.
+    //
+    // SCOPE: this solver is a *near-field grid* method. It fixes position for a
+    // source that falls within (roughly) the array aperture and reports bearing
+    // for anything well beyond it. Wide-baseline, long-range *position* fusion
+    // (e.g. a 1 km source) is the job of the Python cartesian-TDOA engine and is
+    // covered by tests/test_localization_distance_matrix.py. Here we verify (a)
+    // multi-node fusion produces an accurate position for an in-range source for
+    // both a tight and a wider cluster, and (b) a far source degrades gracefully
+    // to a bearing-only estimate with honestly collapsed range observability.
+    fn multinode_config() -> SrpPhatConfig {
+        SrpPhatConfig {
+            grid_resolution_m: 1.0,
+            search_padding_m: 10.0,
+            far_field_default_range_m: 250.0,
+            far_field_max_range_m: 2_000.0,
+            max_grid_points: 200_000,
+            ..SrpPhatConfig::default()
+        }
+    }
+
+    const MULTINODE_TIGHT_POINTS_M: [[f32; 3]; 3] = [[8.0, 0.0, 3.0], [0.0, 8.0, 1.0], [8.0, 8.0, 4.0]];
+    const MULTINODE_WIDE_POINTS_M: [[f32; 3]; 3] = [[50.0, 0.0, 6.0], [0.0, 50.0, 1.0], [50.0, 50.0, 9.0]];
+
+    fn localize_multinode(point_origins_m: &[[f32; 3]], distance_m: f32) -> (SrpPhatLocalization, [f32; 3], [f32; 3]) {
+        let direction = look_direction();
+        let mics = multinode_mics([0.0, 0.0, 1.5], point_origins_m);
+        let active: Vec<usize> = (0..mics.len()).collect();
+        let centroid_m = array_centroid(&mics);
+        let source_position_m = [
+            centroid_m[0] + direction[0] * distance_m,
+            centroid_m[1] + direction[1] * distance_m,
+            centroid_m[2] + direction[2] * distance_m,
+        ];
+        let channels = synthesize_point_source_channels_n(source_position_m, &mics, 16_000, 16_384);
+        let evaluation =
+            estimate_tetrahedral_steering(&channels, &active, &mics, 16_000, 343.2, multinode_config());
+        (evaluation.localization, source_position_m, direction)
+    }
+
+    #[test]
+    fn distance_matrix_multinode_near_field_position_fix() {
+        // (points, distance_m, max_error_m, min_bearing_dot)
+        let cases: [(&[[f32; 3]], f32, f32, f32); 3] = [
+            (&MULTINODE_TIGHT_POINTS_M, 2.0, 1.0, 0.95),
+            (&MULTINODE_TIGHT_POINTS_M, 10.0, 1.0, 0.95),
+            (&MULTINODE_WIDE_POINTS_M, 10.0, 3.0, 0.95),
+        ];
+        for (points, distance_m, max_error_m, min_bearing_dot) in cases {
+            let (localization, source_position_m, direction) = localize_multinode(points, distance_m);
+            let position_m = localization
+                .position_m
+                .unwrap_or_else(|| panic!("{distance_m} m: expected a fused position"));
+            let error_m = euclidean_distance(position_m, source_position_m);
+            assert!(
+                error_m <= max_error_m,
+                "{distance_m} m: fused position error {error_m:.2} m exceeded {max_error_m:.2} m (pos={position_m:?})",
+            );
+            let observed_bearing = bearing_dot(&localization, direction);
+            assert!(
+                observed_bearing > min_bearing_dot,
+                "{distance_m} m: bearing dot {observed_bearing} below {min_bearing_dot}",
+            );
+        }
+    }
+
+    #[test]
+    fn distance_matrix_multinode_far_source_is_bearing_only() {
+        // A 1 km source is far beyond the cluster aperture: the grid solver can
+        // no longer fix range, but the steering direction stays accurate and the
+        // reported range observability collapses.
+        let (localization, _source_position_m, direction) =
+            localize_multinode(&MULTINODE_TIGHT_POINTS_M, 1000.0);
+        let observed_bearing = bearing_dot(&localization, direction);
+        assert!(
+            observed_bearing > 0.99,
+            "far source bearing dot {observed_bearing} too low",
+        );
+        if let Some(observability) = localization.range_observability {
+            assert!(
+                observability < 0.10,
+                "expected collapsed range observability for a far source, got {observability}",
+            );
+        }
+    }
+
+    // Frequency sensitivity, scoped to the tight tetra where a pure tone is
+    // spatially unambiguous. The ~5 cm tetra baseline aliases above
+    // c / (2 * d_max) ≈ 3.2 kHz, so the band is sampled below that limit.
+    #[test]
+    fn distance_matrix_single_tetra_tone_band_bearing() {
+        let mics: Vec<[f32; 3]> = SIRITH_TETRA_OFFSETS_M.to_vec();
+        let centroid_m = array_centroid(&mics);
+        let direction = look_direction();
+        for freq_hz in [500.0_f32, 1500.0, 2500.0] {
+            for distance_m in [2.0_f32, 100.0] {
+                let source_position_m = [
+                    centroid_m[0] + direction[0] * distance_m,
+                    centroid_m[1] + direction[1] * distance_m,
+                    centroid_m[2] + direction[2] * distance_m,
+                ];
+                let channels = synthesize_tone_source_channels_n(
+                    source_position_m,
+                    &mics,
+                    freq_hz,
+                    16_000,
+                    8_192,
+                );
+                let evaluation = estimate_tetrahedral_steering(
+                    &channels,
+                    &[0, 1, 2, 3],
+                    &mics,
+                    16_000,
+                    343.2,
+                    SrpPhatConfig {
+                        grid_resolution_m: 0.05,
+                        search_padding_m: 0.3,
+                        far_field_default_range_m: 60.0,
+                        far_field_max_range_m: 250.0,
+                        ..SrpPhatConfig::default()
+                    },
+                );
+                let observed = bearing_dot(&evaluation.localization, direction);
+                assert!(
+                    observed > 0.85,
+                    "{freq_hz} Hz @ {distance_m} m: bearing dot {observed} too low",
+                );
+            }
+        }
+    }
 }

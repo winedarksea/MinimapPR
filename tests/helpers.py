@@ -27,6 +27,71 @@ def shift_signal(signal: np.ndarray, sample_rate_hz: int, delay_s: float) -> np.
     return np.interp(shifted_t, t, signal, left=0.0, right=0.0).astype(np.float32)
 
 
+def synthesize_multinode_windows(
+    excitation: np.ndarray,
+    sample_rate_hz: int,
+    *,
+    source_position_m: tuple[float, float, float] | np.ndarray,
+    node_origins_m: dict[str, tuple[float, float, float] | np.ndarray],
+    tetra_node_ids: tuple[str, ...] = (),
+    sound_speed_mps: float = 343.2,
+) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], dict[str, str]]:
+    """Build synchronized multi-node sensor windows for a single point source.
+
+    Nodes in *tetra_node_ids* are expanded into four microphones using
+    ``SIRITH_TETRA_SENSOR_OFFSETS_M``; every other node is a single-microphone
+    ("point") node placed at its origin. Sensor IDs follow the ``"{node}:ch{i}"``
+    convention used elsewhere in the suite.
+
+    Unlike the free-running mixed-node fixtures (which subtract a *per-node*
+    minimum delay), this helper subtracts a single **global** minimum delay so
+    inter-node arrival timing is preserved. That cross-node timing is exactly the
+    parallax that lets a synchronized multi-node cluster observe range. Amplitude
+    is uniform across sensors so far-range cases are not gated by per-channel RMS.
+
+    Returns ``(sensor_positions, sensor_windows, sensor_node_ids)``.
+    """
+    source = np.asarray(source_position_m, dtype=np.float64)
+
+    sensor_positions: dict[str, np.ndarray] = {}
+    sensor_node_ids: dict[str, str] = {}
+    for node_id, origin in node_origins_m.items():
+        origin_m = np.asarray(origin, dtype=np.float64)
+        if node_id in tetra_node_ids:
+            for index, offset_m in enumerate(SIRITH_TETRA_SENSOR_OFFSETS_M):
+                sensor_id = f"{node_id}:ch{index}"
+                sensor_positions[sensor_id] = origin_m + np.asarray(offset_m, dtype=np.float64)
+                sensor_node_ids[sensor_id] = node_id
+        else:
+            sensor_id = f"{node_id}:ch0"
+            sensor_positions[sensor_id] = origin_m
+            sensor_node_ids[sensor_id] = node_id
+
+    absolute_delays_s = {
+        sensor_id: float(np.linalg.norm(source - position) / sound_speed_mps)
+        for sensor_id, position in sensor_positions.items()
+    }
+    global_min_delay_s = min(absolute_delays_s.values())
+    max_relative_delay_s = max(absolute_delays_s.values()) - global_min_delay_s
+
+    # Pad so the most-delayed sensor's content still fits inside the window.
+    head_samples = sample_rate_hz // 100  # 10 ms head room
+    tail_samples = int(np.ceil(max_relative_delay_s * sample_rate_hz)) + head_samples
+    padded = np.concatenate(
+        [
+            np.zeros(head_samples, dtype=np.float32),
+            np.asarray(excitation, dtype=np.float32),
+            np.zeros(tail_samples, dtype=np.float32),
+        ]
+    )
+
+    sensor_windows = {
+        sensor_id: shift_signal(padded, sample_rate_hz, delay_s - global_min_delay_s)
+        for sensor_id, delay_s in absolute_delays_s.items()
+    }
+    return sensor_positions, sensor_windows, sensor_node_ids
+
+
 def load_wav_fixture_mono(path: Path) -> tuple[np.ndarray, int]:
     """Load a mono WAV fixture as float32 samples in [-1, 1]."""
     return read_wav_mono(path)
