@@ -14,6 +14,19 @@ OBU framing: 1-byte type/flags header | LEB128 size | payload.
 References:
   - Immersive Audio Model and Formats (IAMF) v1.0.0 specification
   - https://aomediacodec.github.io/iamf/
+
+NOT ON THE PRODUCTION PATH. `write_iamf()` and the OBJECT_BASED /
+SINGLE_POSITION helpers below (`_audio_element_object`, `_parameter_block`,
+`_single_position_*`, `_PARAM_SINGLE_POSITION`, `_AE_TYPE_OBJECT`) encode a
+draft IAMF extension added to the spec *after* v1.1.0. ffmpeg has no
+muxer/demuxer support for it as of 8.0.1, and real `.iamf` files produced by
+this writer fail to parse with ffmpeg's IAMF demuxer outright. The shipped
+2-element export (FOA bed + best-active-object mono, no embedded position
+automation) is produced by `_encode_iamf_ffmpeg()` in
+`minimappr/core/iamf_pipeline.py` via ffmpeg's native `-stream_group`
+support. These helpers are kept as a reference implementation for if/when
+ffmpeg and YouTube add OBJECT_BASED/SINGLE_POSITION support; see
+`_ffmpeg_supports_iamf_object_based()` in `iamf_pipeline.py`.
 """
 
 from __future__ import annotations
@@ -47,11 +60,11 @@ _PROFILE_BASE = 1
 # Audio element types
 _AE_TYPE_CHANNEL = 0
 _AE_TYPE_SCENE = 1
-_AE_TYPE_OBJECT = 2
+_AE_TYPE_OBJECT = 2  # post-v1.1 draft extension; see module docstring
 
 # Parameter definition types
 _PARAM_MIX_GAIN = 0
-_PARAM_SINGLE_POSITION = 3
+_PARAM_SINGLE_POSITION = 3  # post-v1.1 draft extension; see module docstring
 _BED_MIX_GAIN_PARAMETER_ID = 100
 _OBJECT_MIX_GAIN_PARAMETER_ID = 101
 _OUTPUT_MIX_GAIN_PARAMETER_ID = 200
@@ -153,7 +166,10 @@ def _audio_element_foa(
 
 
 def _audio_element_object(audio_element_id: int, codec_config_id: int, substream_id: int) -> bytes:
-    """Audio_Element_OBU (type 1) for a single-object OBJECT_BASED element."""
+    """Audio_Element_OBU (type 1) for a single-object OBJECT_BASED element.
+
+    Experimental / future-spec-version — see module docstring.
+    """
     payload = bytearray()
     payload += _leb128(audio_element_id)
     payload += bytes([(_AE_TYPE_OBJECT << 5) & 0xFF])
@@ -292,7 +308,10 @@ def _parameter_block(
     parameter_id: int,
     position: dict | None,
 ) -> bytes:
-    """Parameter_Block_OBU carrying SinglePositionParameterData for one object."""
+    """Parameter_Block_OBU carrying SinglePositionParameterData for one object.
+
+    Experimental / future-spec-version — see module docstring.
+    """
     payload = bytearray()
     payload += _leb128(parameter_id)
     payload += _single_position_parameter_data(position or {})
@@ -447,6 +466,10 @@ def write_iamf(
     samples_per_frame: int = 512,
 ) -> bytes:
     """Encode a FOA ambisonic bed + optional mono objects as IAMF v1.0 ipcm.
+
+    Experimental / future-spec-version — see module docstring. Not called
+    from `IamfPipeline`; the shipped export path is
+    `_encode_iamf_ffmpeg()` in `minimappr/core/iamf_pipeline.py`.
 
     Parameters
     ----------

@@ -126,19 +126,13 @@ Per decision: still attempt TDOA but multiply the reported confidence by a wavel
 
 ---
 
-### 8. IAMF Parameter_Block_OBU position payload — Python ↔ Rust parity (Gap F) — effort: **M**
+### 8. IAMF Parameter_Block_OBU position payload — Python ↔ Rust parity (Gap F) — **superseded, deferred**
 
-The Rust writer at [`minimappr-ingest-sidecar/src/iamf_writer.rs`](minimappr-ingest-sidecar/src/iamf_writer.rs) already encodes `ObjectPosition` (azimuth, elevation, distance_norm) with LINEAR animation across temporal units. The Python writer at [`core/iamf_writer.py:211-229`](minimappr/core/iamf_writer.py#L211-L229) emits `num_subblocks=0` despite the pipeline already computing `positions_per_unit`. Bring Python to parity with Rust.
+**Status (2026-06-13): re-scoped.** This item assumed the custom OBU writers' `OBJECT_BASED`/`SINGLE_POSITION` bitstream (Rust `ObjectPosition` in [`minimappr-ingest-sidecar/src/iamf_writer.rs`](minimappr-ingest-sidecar/src/iamf_writer.rs), Python `_parameter_block()` in [`core/iamf_writer.py`](minimappr/core/iamf_writer.py)) was the path to per-frame object positions in the IAMF deliverable. It is not: `OBJECT_BASED`/`SINGLE_POSITION` are draft extensions added to the IAMF spec *after* v1.1.0, ffmpeg 8.0.1 has no muxer/demuxer support for either, and YouTube only decodes v1.0. Real `.iamf` files produced by this writer (`data/captures/*/audio.iamf`, 2026-05-24) fail to parse with ffmpeg 8.0.1's IAMF demuxer outright (`Invalid Audio Element with id 1 referenced by Mix Parameters 0`).
 
-**Modify:**
-- [`minimappr/core/iamf_writer.py:211-229`](minimappr/core/iamf_writer.py#L211-L229) — extend `_parameter_block()` to accept the per-unit `positions: dict[int, dict]` already passed by callers and encode azimuth/elevation/distance fields using **the exact wire format the Rust writer uses**. Stop emitting empty bytes.
-- Keep the `iamf_positions.json` sidecar from [`iamf_pipeline.py:325-332`](minimappr/core/iamf_pipeline.py#L325-L332) as a debug artifact.
-- Reuse `_xyz_to_spherical()` and `_interpolate_waypoints()` from [`core/iamf_object_slot.py`](minimappr/core/iamf_object_slot.py).
+**Current shipped path:** the 2-element v1.0 export (4ch SCENE_BASED FOA bed + 1ch CHANNEL_BASED best-active-object mono) goes through `_encode_iamf_ffmpeg()`/`_try_iamf_mux()` in [`iamf_pipeline.py`](minimappr/core/iamf_pipeline.py) using ffmpeg's native `-stream_group` support — verified against ffmpeg 8.0.1 in `tests/test_iamf_pipeline_e2e.py`.
 
-**Tests:**
-- Extend `tests/test_iamf_writer.py` — round-trip a known trajectory through encode → parse and assert position fields recover within quantization tolerance.
-- New `tests/test_iamf_writer_python_rust_parity.py` (parallel to `test_atob_foa_tetra_bit_identical.py`) — Python writer and Rust writer produce **byte-identical** output for the same trajectory. This is the contract test for item 9 below.
-- Extend `tests/test_iamf_pipeline_e2e.py` — synthetic moving source, confirm encoded azimuth sweeps as expected through the full pipeline.
+**Deferred — blocked on upstream ffmpeg/IAMF spec support for OBJECT_BASED.** The Rust/Python-shared data layer is `positions_per_unit` / `*_object_positions.json` (azimuth_deg/elevation_deg/distance_norm per temporal unit, now persisted as a durable artifact via `insert_large_artifact_for_session(positions_path=...)` instead of being deleted). That JSON shape is what must stay consistent across ingest paths — see item 9a. The experimental OBU writers in `core/iamf_writer.py` (`_audio_element_object`, `_parameter_block`, `_PARAM_SINGLE_POSITION`) and `iamf_writer.rs` (`ObjectPosition`, `object_parameter_block`) are marked experimental/reference-only in their docstrings, are not on the production path, and are not being brought to parity. `_encode_iamf()` has a try/except-wrapped `_ffmpeg_supports_iamf_object_based()` probe + `_encode_iamf_ffmpeg_objects_v11()` stub that will pick up real ffmpeg OBJECT_BASED support automatically without touching the v1.0 path.
 
 ---
 
@@ -148,7 +142,7 @@ The two ingest paths have diverged in ways that are partly intentional (Rust = r
 
 **In-scope alignments:**
 
-a. **IAMF writer wire format**: covered by item 8 + the new parity test (`test_iamf_writer_python_rust_parity.py`).
+a. **IAMF object metadata shape**: per item 8's re-scope, the parity surface is the `positions_per_unit` / `*_object_positions.json` shape (azimuth_deg/elevation_deg/distance_norm, `unit_track_ids`, `active_ranges`, `handoff_gap_ranges` — see `_write_iamf_positions_sidecar()` in [`iamf_pipeline.py`](minimappr/core/iamf_pipeline.py)), not the OBU bitstream. Both ingest paths feed the same `_encode_iamf_ffmpeg()` via WAV files regardless of which backend (`_mvdr_beamform_rust` vs `_mvdr_beamform_python`) produced them, so the wire-format parity concern from the original item 8 doesn't apply to the shipped v1.0 export. If/when `_encode_iamf_ffmpeg_objects_v11()` (item 8) is implemented, add a parity test asserting Rust and Python ingest paths produce equivalent `*_object_positions.json` for the same trajectory.
 
 b. **Coverage stats emission**: both compute the same `AudioCoverageStats` struct (`audio_buffer.py:18-28` ≡ `sidecar/src/dsp.rs:7-18`) but Python uses it in-memory while Rust emits it as optional JSON. Pick one shape and document — recommend **emitting from both as a typed JSON block** so any consumer (status endpoint, manifests) sees the same keys. Touch:
    - `minimappr/core/audio_buffer.py` — add `to_json()` that matches the Rust serialization keys.

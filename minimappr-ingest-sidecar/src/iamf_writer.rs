@@ -13,6 +13,21 @@
 ///
 /// Reference:
 ///   https://aomediacodec.github.io/iamf/
+///
+/// NOT ON THE PRODUCTION PATH for object positions. The OBJECT_BASED /
+/// SINGLE_POSITION pieces (`audio_element_type::OBJECT_BASED`,
+/// `param_definition_type::SINGLE_POSITION`, `ObjectPosition`,
+/// `object_parameter_block`) encode a draft IAMF extension added to the spec
+/// *after* v1.1.0. ffmpeg has no muxer/demuxer support for it as of 8.0.1,
+/// and real `.iamf` files produced by this writer fail to parse with
+/// ffmpeg's IAMF demuxer outright. The Python `IamfPipeline` does not call
+/// the `/api/v1/capture/encode/iamf` endpoint backed by this writer; the
+/// shipped 2-element export (FOA bed + best-active-object mono, no embedded
+/// position automation) is produced ffmpeg-side via `_encode_iamf_ffmpeg()`
+/// in `minimappr/core/iamf_pipeline.py`. This writer is kept as a reference
+/// implementation for if/when ffmpeg and YouTube add OBJECT_BASED /
+/// SINGLE_POSITION support; see `_ffmpeg_supports_iamf_object_based()` in
+/// `iamf_pipeline.py`.
 use std::collections::HashMap;
 
 /// OBU type codes (5-bit field in the OBU header byte).
@@ -61,6 +76,8 @@ pub struct LoudnessInfo {
 }
 
 /// Position of one object in the mix at one point in time.
+///
+/// Experimental / future-spec-version — see module doc comment.
 #[derive(Clone, Debug)]
 pub struct ObjectPosition {
     /// Azimuth in degrees [−180, 180].
@@ -381,6 +398,7 @@ impl IamfWriter {
         out.extend_from_slice(&true_peak_q78.to_be_bytes());
     }
 
+    /// Experimental / future-spec-version — see module doc comment.
     fn object_parameter_block(&self, pos: &ObjectPosition) -> Vec<u8> {
         let mut payload = Vec::new();
         write_leb128(&mut payload, OBJECT_POSITION_PARAMETER_ID as u64);

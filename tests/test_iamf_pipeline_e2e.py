@@ -32,7 +32,9 @@ from minimappr.core.iamf_pipeline import (
     IamfPipeline,
     OUTPUT_RATE_HZ,
     _encode_iamf_ffmpeg,
+    _encode_iamf_ffmpeg_objects_v11,
     _ffmpeg_mux,
+    _ffmpeg_supports_iamf_object_based,
     _write_wav,
 )
 from minimappr.utils.audio import write_wav_mono
@@ -59,6 +61,46 @@ def _synthetic_4ch(duration_s: float = DURATION_S, sr: int = SAMPLE_RATE) -> np.
         phase = 2 * math.pi * 440.0 * (t - delay)
         channels[i] = (np.sin(phase) * 0.25).astype(np.float32)
     return channels
+
+
+def _assert_two_element_iamf_groups(groups: list[dict]) -> None:
+    """Assert ffprobe stream_groups describe the IAMF v1.0 2-element layout:
+    a 4-channel SCENE_BASED (ambisonic) bed, a 1-channel CHANNEL_BASED
+    (mono) object, and a Mix Presentation referencing both with loudness_info.
+    """
+    element_groups = [g for g in groups if g["type"] == "IAMF Audio Element"]
+    mix_groups = [g for g in groups if g["type"] == "IAMF Mix Presentation"]
+    assert len(element_groups) == 2, groups
+    assert len(mix_groups) == 1, groups
+
+    scene_groups = [
+        g for g in element_groups
+        if g["components"][0]["audio_element_type"] == 1
+    ]
+    object_groups = [
+        g for g in element_groups
+        if g["components"][0]["audio_element_type"] == 0
+    ]
+    assert len(scene_groups) == 1, element_groups
+    assert len(object_groups) == 1, element_groups
+    assert scene_groups[0]["nb_streams"] == 4, scene_groups[0]
+    assert object_groups[0]["nb_streams"] == 1, object_groups[0]
+    assert (
+        scene_groups[0]["components"][0]["subcomponents"][0]["channel_layout"]
+        == "ambisonic 1"
+    )
+    assert (
+        object_groups[0]["components"][0]["subcomponents"][0]["channel_layout"]
+        == "mono"
+    )
+
+    mix_group = mix_groups[0]
+    assert mix_group["nb_streams"] == 5, mix_group
+    submix = mix_group["components"][0]["subcomponents"][1]
+    assert submix["nb_elements"] == 2, submix
+    layout = submix["pieces"][-1]
+    assert "integrated_loudness" in layout, submix
+    assert "digital_peak" in layout, submix
 
 
 async def _populate_buffer(
@@ -492,6 +534,28 @@ class TestIamfPipelineE2E:
             [loudness],
         )
 
+        # The standalone .iamf must itself be a clean, decodable IAMF stream:
+        # 2 audio elements (4ch ambisonic scene + 1ch mono object) and 1 mix
+        # presentation referencing all 5 substreams with loudness_info filled in.
+        iamf_probe = subprocess.run(
+            [
+                "ffprobe",
+                "-hide_banner",
+                "-v",
+                "error",
+                "-show_stream_groups",
+                "-of",
+                "json",
+                str(iamf_path),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert iamf_probe.returncode == 0, iamf_probe.stderr
+        assert iamf_probe.stderr == ""
+        iamf_groups = json.loads(iamf_probe.stdout)["stream_groups"]
+        _assert_two_element_iamf_groups(iamf_groups)
+
         subprocess.run(
             [
                 "ffmpeg",
@@ -531,11 +595,42 @@ class TestIamfPipelineE2E:
                 "json",
                 str(output_path),
             ],
-            check=True,
             capture_output=True,
             text=True,
         )
+        assert probe.returncode == 0, probe.stderr
+        assert probe.stderr == ""
         assert "IAMF Mix Presentation" in probe.stdout
+        mp4_groups = json.loads(probe.stdout)["stream_groups"]
+        _assert_two_element_iamf_groups(mp4_groups)
+
+    @pytest.mark.asyncio
+    async def test_ffmpeg_object_based_iamf_not_yet_supported(self):
+        """OBJECT_BASED + SINGLE_POSITION are post-v1.1 draft IAMF extensions.
+
+        ffmpeg has no `-stream_group audio_element_type=object` support as
+        of 8.0.1, so the v1.1 groundwork stays a no-op. This test pins that
+        assumption: when ffmpeg adds support, the probe will start returning
+        True and this test will need updating alongside implementing
+        `_encode_iamf_ffmpeg_objects_v11`.
+        """
+        if shutil.which("ffmpeg") is None:
+            pytest.skip("ffmpeg not installed")
+
+        assert await _ffmpeg_supports_iamf_object_based() is False
+
+        with pytest.raises(NotImplementedError):
+            await _encode_iamf_ffmpeg_objects_v11(
+                Path("bed.wav"),
+                Path("object.wav"),
+                Path("positions.json"),
+                Path("out.iamf"),
+                __import__(
+                    "minimappr.core.iamf_pipeline",
+                    fromlist=["LoudnessMeasurement"],
+                ).LoudnessMeasurement(integrated_lufs=-20.0, true_peak_dbfs=-3.0),
+                [],
+            )
 
     @pytest.mark.asyncio
     async def test_full_pipeline_with_python_buffer(self, work_dir: Path, artifacts_dir: Path):
@@ -687,6 +782,143 @@ class TestIamfPipelineE2E:
         visual_files = list(artifacts_dir.glob("*_visual.mp4"))
         assert len(visual_files) == 1
         assert record.visual_path == visual_files[0]
+
+        # Object trajectory metadata (azimuth/elevation/distance per unit) is
+        # preserved as a durable artifact rather than discarded during cleanup.
+        positions_files = list(artifacts_dir.glob("*_object_positions.json"))
+        assert len(positions_files) == 1
+        assert record.positions_path == positions_files[0]
+        positions_data = json.loads(positions_files[0].read_text())
+        assert positions_data["sample_rate_hz"] == OUTPUT_RATE_HZ
+        assert positions_data["positions_per_unit"], "expected non-empty per-unit positions"
+        first_unit = next(iter(positions_data["positions_per_unit"][0].values()))
+        assert "azimuth_deg" in first_unit
+        assert "elevation_deg" in first_unit
+        assert "distance_norm" in first_unit
+
+    @pytest.mark.asyncio
+    async def test_full_pipeline_rust_mvdr_path_produces_two_element_iamf(
+        self,
+        work_dir: Path,
+        artifacts_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """The Rust-sidecar MVDR path feeds the same _encode_iamf_ffmpeg /
+        _ffmpeg_mux as the Python fallback path (covered by
+        test_full_pipeline_preserves_selected_object_review_wav): both
+        produce a 2-element v1.0 IAMF and a muxed YouTube MP4.
+        """
+        if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
+            pytest.skip("ffmpeg/ffprobe not installed")
+
+        sensor_ids = [f"test_node:ch{i}" for i in range(N_CHANNELS)]
+        buffer = MultiSensorBuffer(max_duration_seconds=30.0)
+
+        start_ns = time.time_ns()
+        await _populate_buffer(buffer, sensor_ids, start_ns)
+        end_ns = start_ns + int(DURATION_S * 1_000_000_000)
+        buffer.pin("test_session_rust", start_ns)
+
+        record = _make_session_record(
+            session_id="e2e_rust_session",
+            work_dir=work_dir,
+            start_ns=start_ns,
+            end_ns=end_ns,
+            sensor_ids=sensor_ids,
+        )
+
+        video_path = work_dir / "video.mp4"
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                f"testsrc2=size=320x240:rate=30:duration={DURATION_S}",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                str(video_path),
+            ],
+            check=True,
+        )
+        record.video_path = video_path
+
+        # sidecar_url set => self._http is not None => _mvdr_beamform prefers
+        # the Rust RPC path (_mvdr_beamform_rust), mocked below.
+        pipeline = IamfPipeline(
+            sidecar_url="http://127.0.0.1:9999",
+            db_storage=_StubStorageWithTrack(start_ns, end_ns),
+            multi_sensor_buffer=buffer,
+            artifact_dir=artifacts_dir,
+        )
+        assert pipeline._http is not None
+
+        async def _fake_visual_renderer(output_path: Path, *args, **kwargs) -> bool:
+            output_path.write_bytes(b"fake mp4")
+            return True
+
+        monkeypatch.setattr(
+            "minimappr.core.iamf_pipeline.render_recording_visual_mp4",
+            _fake_visual_renderer,
+        )
+
+        rust_mvdr_mock = AsyncMock(side_effect=pipeline._mvdr_beamform_python)
+        monkeypatch.setattr(pipeline, "_mvdr_beamform_rust", rust_mvdr_mock)
+
+        try:
+            await pipeline.run(record)
+        finally:
+            buffer.unpin("test_session_rust")
+            await pipeline._http.aclose()
+
+        assert record.error is None, f"Pipeline failed: {record.error}"
+        rust_mvdr_mock.assert_awaited()
+
+        iamf_files = list(artifacts_dir.glob("*_audio.iamf"))
+        assert len(iamf_files) == 1
+        iamf_probe = subprocess.run(
+            [
+                "ffprobe",
+                "-hide_banner",
+                "-v",
+                "error",
+                "-show_stream_groups",
+                "-of",
+                "json",
+                str(iamf_files[0]),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert iamf_probe.returncode == 0, iamf_probe.stderr
+        assert iamf_probe.stderr == ""
+        _assert_two_element_iamf_groups(json.loads(iamf_probe.stdout)["stream_groups"])
+
+        mp4_files = list(artifacts_dir.glob("*_youtube.mp4"))
+        assert len(mp4_files) == 1
+        mp4_probe = subprocess.run(
+            [
+                "ffprobe",
+                "-hide_banner",
+                "-v",
+                "error",
+                "-show_stream_groups",
+                "-of",
+                "json",
+                str(mp4_files[0]),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert mp4_probe.returncode == 0, mp4_probe.stderr
+        assert mp4_probe.stderr == ""
+        _assert_two_element_iamf_groups(json.loads(mp4_probe.stdout)["stream_groups"])
 
     @pytest.mark.asyncio
     async def test_ambisonics_only_pipeline(self, work_dir: Path, artifacts_dir: Path):

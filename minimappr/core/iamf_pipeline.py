@@ -33,6 +33,7 @@ import asyncio
 import json
 import logging
 import math
+import tempfile
 import time
 import wave
 from dataclasses import dataclass
@@ -399,7 +400,7 @@ class IamfPipeline:
 
         # ── 11. Cleanup intermediates ─────────────────────────────────────────
         logger.info("[%s] step 10: cleanup intermediates", record.session_id[:8])
-        for f in [bed_path, positions_path] + [
+        for f in [bed_path] + [
             work_dir / f"object_{tid}.wav" for tid in object_tracks
         ]:
             if f is not None:
@@ -428,6 +429,11 @@ class IamfPipeline:
             final_visual = artifacts_dir / f"{record.session_id}_visual.mp4"
             record.visual_path.replace(final_visual)
             record.visual_path = final_visual
+
+        if positions_path.exists():
+            final_positions = artifacts_dir / f"{record.session_id}_object_positions.json"
+            positions_path.replace(final_positions)
+            record.positions_path = final_positions
 
         if record.youtube_path and record.youtube_path.exists():
             final_mp4 = artifacts_dir / f"{record.session_id}_youtube.mp4"
@@ -715,6 +721,29 @@ class IamfPipeline:
             bed_loudness,
             object_loudness,
         )
+
+        # Groundwork for a future IAMF spec version: OBJECT_BASED audio
+        # elements with per-frame SINGLE_POSITION automation. No-op today
+        # (ffmpeg has no support for either as of 8.0.1); once ffmpeg adds
+        # `-stream_group audio_element_type=object` support, this starts
+        # producing a second, positional export alongside the v1.0 file
+        # above without affecting it.
+        try:
+            if object_path is not None and await _ffmpeg_supports_iamf_object_based():
+                v11_path = output_iamf_path.with_name(
+                    output_iamf_path.stem + "_objects_v11" + output_iamf_path.suffix
+                )
+                await _encode_iamf_ffmpeg_objects_v11(
+                    bed_path,
+                    object_path,
+                    positions_path,
+                    v11_path,
+                    bed_loudness,
+                    object_loudness,
+                )
+        except Exception:
+            logger.debug("v1.1 OBJECT_BASED IAMF export skipped", exc_info=True)
+
         return None
 
     async def _encode_iamf_rust(
@@ -771,6 +800,7 @@ class IamfPipeline:
                 object_path=str(record.object_path) if record.object_path else None,
                 visual_path=str(record.visual_path) if record.visual_path else None,
                 youtube_path=str(record.youtube_path) if record.youtube_path else None,
+                positions_path=str(record.positions_path) if record.positions_path else None,
                 created_ns=time.time_ns(),
             )
         except Exception as exc:
@@ -1541,6 +1571,78 @@ def _decode_pcm16le(raw: bytes, channel_count: int) -> NDArray[np.float32]:
 
 
 # ── ffmpeg helpers ────────────────────────────────────────────────────────────
+
+_ffmpeg_object_based_support: bool | None = None
+
+
+async def _ffmpeg_supports_iamf_object_based() -> bool:
+    """Probe whether the installed ffmpeg accepts audio_element_type=object.
+
+    IAMF's OBJECT_BASED audio element type (and the per-frame
+    SINGLE_POSITION parameter used to animate an object's position) were
+    added to the spec after v1.1.0 and have no `-stream_group` support in
+    ffmpeg as of 8.0.1 -- it rejects `audio_element_type=object` with
+    "Unable to parse option value". This runs a throwaway 1-frame encode to
+    detect support so a future ffmpeg with OBJECT_BASED support is picked up
+    automatically. The result is cached for the process lifetime.
+    """
+    global _ffmpeg_object_based_support
+    if _ffmpeg_object_based_support is not None:
+        return _ffmpeg_object_based_support
+
+    with tempfile.TemporaryDirectory() as tmp:
+        probe_path = Path(tmp) / "probe.iamf"
+        cmd = [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono:d=0.02",
+            "-c:a", "libopus",
+            "-stream_group",
+            "type=iamf_audio_element:id=1:st=0:audio_element_type=object,"
+            "layer=ch_layout=mono",
+            "-stream_group",
+            "type=iamf_mix_presentation:id=2:stg=0:"
+            "submix=parameter_id=100:parameter_rate=48000:default_mix_gain=0.0|"
+            "element=stg=0:headphones_rendering_mode=binaural:"
+            "parameter_id=101:parameter_rate=48000:default_mix_gain=0.0|"
+            "layout=sound_system=stereo:integrated_loudness=0:digital_peak=0",
+            str(probe_path),
+        ]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.communicate()
+            supported = proc.returncode == 0 and probe_path.exists()
+        except FileNotFoundError:
+            supported = False
+
+    _ffmpeg_object_based_support = supported
+    return supported
+
+
+async def _encode_iamf_ffmpeg_objects_v11(
+    bed_path: Path,
+    object_path: Path,
+    positions_path: Path,
+    output_iamf_path: Path,
+    bed_loudness: LoudnessMeasurement,
+    object_loudness: list[LoudnessMeasurement],
+) -> None:
+    """Encode an OBJECT_BASED export with per-frame SINGLE_POSITION automation.
+
+    Stub: only reached once `_ffmpeg_supports_iamf_object_based()` returns
+    True, which it does not for any ffmpeg release as of 8.0.1. When ffmpeg
+    adds `-stream_group` support for `audio_element_type=object` and a
+    per-frame position parameter, implement the encode here using
+    `positions_path` (`*_object_positions.json`, written by
+    `_write_iamf_positions_sidecar` -- `positions_per_unit` gives
+    azimuth_deg/elevation_deg/distance_norm per temporal unit) as the
+    parameter source.
+    """
+    raise NotImplementedError("ffmpeg OBJECT_BASED IAMF export not yet available")
+
 
 async def _ffmpeg_mux(
     video_path: Path,

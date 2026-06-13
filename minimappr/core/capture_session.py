@@ -75,6 +75,8 @@ class CaptureSessionRecord:
     """Selected mono IAMF object slot rendered for review."""
     visual_path: Optional[Path] = None
     """Deterministic COP-like MP4 visual for the selected IAMF object slot."""
+    positions_path: Optional[Path] = None
+    """Per-temporal-unit azimuth/elevation/distance of the selected IAMF object slot."""
 
 
 @dataclass

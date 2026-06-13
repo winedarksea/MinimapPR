@@ -2426,3 +2426,34 @@ def test_exception_counters_appear_in_status(tmp_path: Path) -> None:
     assert metrics["classification_exceptions_by_type"] == {"RuntimeError": 1}
     assert "localization_exceptions_by_type" in metrics
     assert "rules_exceptions_by_type" in metrics
+
+
+def test_fusion_node_module_never_imports_iamf_pipeline_or_writes_wav() -> None:
+    """The live FusionNode pipeline (ingest/localize/classify/track/rules)
+    must never produce raw recording audio. IamfPipeline.run() is only
+    reachable from the capture-session start/stop flow
+    (core/capture_session.py, main.py /api/v1/capture/*); pin that
+    core/fusion_node.py neither imports it nor writes .wav files directly,
+    so this boundary can't silently regress.
+    """
+    import ast
+    import minimappr.core.fusion_node as fusion_node_module
+
+    source_path = Path(fusion_node_module.__file__)
+    source_text = source_path.read_text()
+    tree = ast.parse(source_text)
+
+    imported_modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported_modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported_modules.add(node.module)
+
+    assert not any("iamf_pipeline" in mod for mod in imported_modules), (
+        f"core/fusion_node.py must not import iamf_pipeline: {imported_modules}"
+    )
+
+    wav_write_markers = ("import wave", "write_wav", '.wav"', ".wav'")
+    found = [m for m in wav_write_markers if m in source_text]
+    assert not found, f"core/fusion_node.py must not write .wav files directly: {found}"

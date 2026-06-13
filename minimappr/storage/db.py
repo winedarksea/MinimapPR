@@ -2552,6 +2552,7 @@ class Storage:
         object_path: str | None = None,
         visual_path: str | None = None,
         youtube_path: str | None = None,
+        positions_path: str | None = None,
         created_ns: int,
     ) -> str:
         """Insert a large_artifacts row for a completed capture session."""
@@ -2567,6 +2568,8 @@ class Storage:
             metadata["visual_path"] = visual_path
         if youtube_path:
             metadata["youtube_path"] = youtube_path
+        if positions_path:
+            metadata["positions_path"] = positions_path
         return await self.insert_large_artifact(
             artifact_type=artifact_type,
             path=path,
