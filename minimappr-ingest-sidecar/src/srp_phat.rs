@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     dsp_worker::PairTdoa,
     gcc_phat::{pair_max_tau_s, phat_correlation, GccPhatCorrelation},
+    range_projection::{RANGE_ASYMPTOTIC, RANGE_BOUNDARY, RANGE_REFINED},
 };
 
 const EPSILON: f32 = 1e-9;
@@ -567,9 +568,9 @@ fn near_field_candidate(
             range_observability
         }),
         range_projection_mode: Some(if boundary_clamped {
-            "bounded_grid_boundary"
+            RANGE_BOUNDARY
         } else {
-            "range_refined"
+            RANGE_REFINED
         }),
         is_boundary_clamped: boundary_clamped,
         timing_resolution_seconds,
@@ -612,7 +613,7 @@ fn far_field_candidate(
         .max(sound_speed_mps / sample_rate_hz.max(1) as f32);
     let radial_std_m = range_estimate.radial_std_m.max(lateral_std_m);
     let range_projection_mode = if aperture_m <= 0.35 {
-        "prior_projected"
+        RANGE_ASYMPTOTIC
     } else {
         range_estimate.range_projection_mode
     };
@@ -640,7 +641,7 @@ fn select_candidate(
             let minimum_residual_improvement_seconds = near
                 .timing_resolution_seconds
                 .max(far.timing_resolution_seconds);
-            let far_improves_enough = if far.range_projection_mode == Some("prior_projected")
+            let far_improves_enough = if far.range_projection_mode == Some(RANGE_ASYMPTOTIC)
                 && near.residual_rms_seconds.is_finite()
             {
                 far.residual_rms_seconds <= near.residual_rms_seconds * 0.12
@@ -841,9 +842,9 @@ fn fit_far_field_range(
         || range_observability < 0.10
         || radial_std_m >= radius_m.abs().max(1.0)
     {
-        "prior_projected"
+        RANGE_ASYMPTOTIC
     } else {
-        "range_refined"
+        RANGE_REFINED
     };
 
     FarFieldRangeEstimate {
@@ -1446,7 +1447,7 @@ mod tests {
         assert!(evaluation.localization.range_observability.is_some());
         assert_eq!(
             evaluation.localization.range_projection_mode.as_deref(),
-            Some("prior_projected")
+            Some("range_asymptotic")
         );
     }
 
@@ -1540,7 +1541,7 @@ mod tests {
         );
         assert_ne!(
             evaluation.localization.range_projection_mode.as_deref(),
-            Some("prior_projected")
+            Some("range_asymptotic")
         );
     }
 
@@ -1637,7 +1638,7 @@ mod tests {
         );
         assert_ne!(
             evaluation.localization.range_projection_mode.as_deref(),
-            Some("prior_projected")
+            Some("range_asymptotic")
         );
     }
 
@@ -1648,7 +1649,7 @@ mod tests {
             steering_direction: [1.0, 0.0, 0.0],
             position_covariance_m2: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             range_observability: Some(0.25),
-            range_projection_mode: Some("bounded_grid_boundary"),
+            range_projection_mode: Some("range_boundary"),
             is_boundary_clamped: true,
             timing_resolution_seconds: 1.0e-5,
             residual_rms_seconds: 1.0,
@@ -1664,7 +1665,7 @@ mod tests {
             steering_direction: [1.0, 0.0, 0.0],
             position_covariance_m2: [[4.0, 0.0, 0.0], [0.0, 4.0, 0.0], [0.0, 0.0, 4.0]],
             range_observability: Some(0.05),
-            range_projection_mode: Some("prior_projected"),
+            range_projection_mode: Some("range_asymptotic"),
             is_boundary_clamped: false,
             timing_resolution_seconds: 1.0e-5,
             residual_rms_seconds: 0.4,
@@ -1675,7 +1676,7 @@ mod tests {
             .expect("boundary-clamped near candidate");
         assert_eq!(
             selected_boundary.range_projection_mode,
-            Some("bounded_grid_boundary")
+            Some("range_boundary")
         );
 
         let selected_interior = select_candidate(Some(near_interior), Some(marginal_far))

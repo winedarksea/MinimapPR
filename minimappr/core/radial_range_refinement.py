@@ -9,6 +9,8 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.optimize import minimize_scalar
 
+from minimappr.core.range_projection import RANGE_ASYMPTOTIC, RANGE_REFINED
+
 
 EPSILON = 1.0e-12
 MAX_RADIAL_SEARCH_EXPANSIONS = 40
@@ -105,13 +107,13 @@ def adaptive_radial_refinement(
                 RADIAL_SEARCH_EXPANSION_FACTOR
             )
             projection_mode = (
-                "range_asymptotic"
+                RANGE_ASYMPTOTIC
                 if expansion_count > 0 and solved_radius_m >= expanded_boundary_radius_m
-                else "range_refined"
+                else RANGE_REFINED
             )
         else:
             solved_radius_m = center_radius_m
-            projection_mode = "range_asymptotic"
+            projection_mode = RANGE_ASYMPTOTIC
     else:
         finite_candidates = [
             (cost, log_radius)
@@ -126,7 +128,7 @@ def adaptive_radial_refinement(
             raise ValueError("Radial range refinement produced no finite candidate")
         _, farthest_finite_log_radius = max(finite_candidates, key=lambda item: item[1])
         solved_radius_m = math.exp(farthest_finite_log_radius)
-        projection_mode = "range_asymptotic"
+        projection_mode = RANGE_ASYMPTOTIC
 
     fitted_position_m = centroid_m + normalized_direction * solved_radius_m
     fitted_residual = residual_function(fitted_position_m)
@@ -154,15 +156,15 @@ def adaptive_radial_refinement(
         asymptotic_radial_std_fraction is not None
         and fitted_radial_std_m >= solved_radius_m * asymptotic_radial_std_fraction
     ):
-        projection_mode = "range_asymptotic"
+        projection_mode = RANGE_ASYMPTOTIC
     published_radius_m = (
         max(solved_radius_m, initial_radius_m)
-        if projection_mode == "range_asymptotic"
+        if projection_mode == RANGE_ASYMPTOTIC
         else solved_radius_m
     )
     published_position_m = centroid_m + normalized_direction * published_radius_m
     radial_std_m = radial_standard_deviation_at(published_radius_m)
-    if projection_mode == "range_asymptotic":
+    if projection_mode == RANGE_ASYMPTOTIC:
         radial_std_m = max(radial_std_m, published_radius_m)
     return RadialRefinement(
         position_m=published_position_m,

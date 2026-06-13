@@ -44,6 +44,14 @@ from minimappr.core.ingest import EnvironmentUpdater, IngestProcessor
 from minimappr.core.localization import LocalizationError
 from minimappr.core.node_registry import NodeRegistry
 from minimappr.core.pipeline_realtime import PipelineRealtimeTracker
+from minimappr.core.range_projection import (
+    LEGACY_PRIOR_PROJECTED,
+    RANGE_ASYMPTOTIC,
+    RANGE_BOUNDARY,
+    apply_unobservable_range_haircut,
+    normalize_range_mode,
+)
+from minimappr.core.rust_tdoa_solve import solve_localization_from_rust_tdoas
 from minimappr.core.preprocessing import (
     NodePreprocessorFactory,
     create_classification_preprocessor,
@@ -175,6 +183,9 @@ class FusionMetrics:
     localization_band_aliased_count: int = 0
     localization_prior_projected_count: int = 0
     localization_range_asymptotic_count: int = 0
+    localization_range_boundary_count: int = 0
+    localization_single_node_python_solved_count: int = 0
+    localization_single_node_python_fallback_count: int = 0
     localization_solver_unconverged_count: int = 0
     localization_covariance_missing_count: int = 0
     localization_range_observability_low_count: int = 0
@@ -502,6 +513,61 @@ class FusionNode:
             raise ValueError(f"Node {node.id!r} did not register any sensors")
 
         reference_sensor = selected_sensor_ids[0]
+
+        # Resolve the single-node localization. By default we trust the Rust
+        # sidecar's own SRP-PHAT estimate; when configured for "python_cartesian"
+        # we re-home the *solve* to Python using the sidecar's pairwise TDOAs +
+        # bearing so this path shares the multi-node Cartesian estimator. Either
+        # way the canonical range mode + observability/confidence haircut apply.
+        localization_position_m = payload.localization_position_m
+        localization_confidence = payload.localization_confidence
+        localization_gdop = payload.localization_gdop
+        localization_position_covariance_m2 = payload.localization_position_covariance_m2
+        localization_range_observability = payload.localization_range_observability
+        localization_residual_rms_seconds = payload.localization_residual_rms_seconds
+        raw_range_projection_mode = payload.localization_range_projection_mode
+        localization_method = payload.localization_method
+
+        if (
+            self.settings.localization_single_node_solver == "python_cartesian"
+            and payload.reporting_modality == "localized"
+            and payload.localization_pair_tdoas
+            and payload.localization_sound_speed_mps is not None
+        ):
+            solved = solve_localization_from_rust_tdoas(
+                sensor_positions=selected_positions,
+                ordered_sensor_ids=selected_sensor_ids,
+                pair_tdoas=payload.localization_pair_tdoas,
+                steering_direction=payload.localization_steering_direction,
+                sound_speed_mps=payload.localization_sound_speed_mps,
+                sample_rate_hz=payload.sample_rate_hz,
+                interpolation_factor=self.settings.gcc_phat_interp_factor,
+                tight_array_aperture_m=self.settings.localization_tight_array_aperture_m,
+                far_field_default_range_m=self.settings.localization_far_field_default_range_m,
+            )
+            if solved is not None:
+                localization_position_m = solved.position_m
+                localization_confidence = solved.confidence
+                localization_gdop = solved.gdop
+                localization_position_covariance_m2 = solved.position_covariance_m2
+                localization_range_observability = solved.range_observability
+                localization_residual_rms_seconds = solved.residual_rms_seconds
+                raw_range_projection_mode = solved.range_projection_mode
+                localization_method = "python_cartesian_rust_tdoa"
+                self._metrics.localization_single_node_python_solved_count += 1
+            else:
+                self._metrics.localization_single_node_python_fallback_count += 1
+
+        # Canonicalize the range mode and apply the path-agnostic haircut so a
+        # far-field single-node estimate cannot pass through over-confident.
+        localization_range_projection_mode = normalize_range_mode(raw_range_projection_mode)
+        self._record_range_projection_metrics(raw_range_projection_mode)
+        localization_confidence, localization_range_observability = apply_unobservable_range_haircut(
+            mode=localization_range_projection_mode,
+            confidence=localization_confidence,
+            range_observability=localization_range_observability,
+        )
+
         rust_audio_quality = (
             {reference_sensor: payload.audio_quality}
             if payload.audio_quality is not None
@@ -534,19 +600,19 @@ class FusionNode:
         localized_product = LocalizedCandidate(
             candidate=candidate,
             localization_branch=LocalizationBranch(
-                localization_position_m=payload.localization_position_m,
-                localization_confidence=payload.localization_confidence,
-                localization_gdop=payload.localization_gdop,
+                localization_position_m=localization_position_m,
+                localization_confidence=localization_confidence,
+                localization_gdop=localization_gdop,
                 reference_sensor=reference_sensor,
                 reference_signal=normalized_audio,
                 classification_reference_signal=normalized_audio,
                 tdoa_s={},
-                localization_method=payload.localization_method,
+                localization_method=localization_method,
                 capability_tier=capability_tier,
-                localization_position_covariance_m2=payload.localization_position_covariance_m2,
-                localization_range_observability=payload.localization_range_observability,
-                localization_residual_rms_seconds=payload.localization_residual_rms_seconds,
-                localization_range_projection_mode=payload.localization_range_projection_mode,
+                localization_position_covariance_m2=localization_position_covariance_m2,
+                localization_range_observability=localization_range_observability,
+                localization_residual_rms_seconds=localization_residual_rms_seconds,
+                localization_range_projection_mode=localization_range_projection_mode,
             ),
             selected_sensor_ids=selected_sensor_ids,
             selected_windows={},
@@ -554,7 +620,7 @@ class FusionNode:
             classification_selected_windows={},
             omni_reference_sensor=reference_sensor,
             omni_reference_signal=normalized_audio,
-            omni_position_m=payload.localization_position_m,
+            omni_position_m=localization_position_m,
             omni_classification_reference_signal=normalized_audio,
             localization_audio_quality=rust_audio_quality,
             classification_audio_quality=rust_audio_quality,
@@ -592,18 +658,18 @@ class FusionNode:
             product=localized_product,
             classified=classified,
             reporting_modality=payload.reporting_modality,
-            localization_position_m=payload.localization_position_m,
-            localization_confidence=payload.localization_confidence,
-            localization_gdop=payload.localization_gdop,
-            localization_position_covariance_m2=payload.localization_position_covariance_m2,
-            localization_range_observability=payload.localization_range_observability,
-            localization_residual_rms_seconds=payload.localization_residual_rms_seconds,
-            localization_range_projection_mode=payload.localization_range_projection_mode,
+            localization_position_m=localization_position_m,
+            localization_confidence=localization_confidence,
+            localization_gdop=localization_gdop,
+            localization_position_covariance_m2=localization_position_covariance_m2,
+            localization_range_observability=localization_range_observability,
+            localization_residual_rms_seconds=localization_residual_rms_seconds,
+            localization_range_projection_mode=localization_range_projection_mode,
             reference_sensor=reference_sensor,
             reference_signal=normalized_audio,
             tdoa_s={},
             capability_tier=capability_tier,
-            localization_method=payload.localization_method,
+            localization_method=localization_method,
         )
         if detection_product is None:
             return
@@ -1458,6 +1524,18 @@ class FusionNode:
             environment=environment_summary,
         )
 
+    def _record_range_projection_metrics(self, mode: str | None) -> None:
+        """Count range-projection states canonically across both ingest paths."""
+        canonical = normalize_range_mode(mode)
+        if canonical == RANGE_ASYMPTOTIC:
+            self._metrics.localization_range_asymptotic_count += 1
+        elif canonical == RANGE_BOUNDARY:
+            self._metrics.localization_range_boundary_count += 1
+        # Legacy telemetry: surfaces sidecars that have not yet been rebuilt with
+        # the canonical vocabulary (they still get the haircut via normalization).
+        if mode == LEGACY_PRIOR_PROJECTED:
+            self._metrics.localization_prior_projected_count += 1
+
     def _build_localization_branch(
         self,
         *,
@@ -1474,10 +1552,7 @@ class FusionNode:
             self._metrics.localization_covariance_missing_count += 1
         if localization.range_observability is not None and localization.range_observability < 0.10:
             self._metrics.localization_range_observability_low_count += 1
-        if localization.range_projection_mode == "prior_projected":
-            self._metrics.localization_prior_projected_count += 1
-        if localization.range_projection_mode == "range_asymptotic":
-            self._metrics.localization_range_asymptotic_count += 1
+        self._record_range_projection_metrics(localization.range_projection_mode)
         if (
             localization.attempted_algorithm
             and localization.resolved_algorithm
@@ -1486,14 +1561,20 @@ class FusionNode:
             self._metrics.localization_fallback_count += 1
         if localization.wavelength_factor is not None and localization.wavelength_factor < 1.0:
             self._metrics.localization_band_aliased_count += 1
+        range_projection_mode = normalize_range_mode(localization.range_projection_mode)
+        localization_confidence, localization_range_observability = apply_unobservable_range_haircut(
+            mode=range_projection_mode,
+            confidence=localization.confidence,
+            range_observability=localization.range_observability,
+        )
         return LocalizationBranch(
             localization_position_m=localization.position_m,
-            localization_confidence=localization.confidence,
+            localization_confidence=localization_confidence,
             localization_gdop=localization.gdop,
             localization_position_covariance_m2=localization.position_covariance_m2,
-            localization_range_observability=localization.range_observability,
+            localization_range_observability=localization_range_observability,
             localization_residual_rms_seconds=localization.residual_rms_seconds,
-            localization_range_projection_mode=localization.range_projection_mode,
+            localization_range_projection_mode=range_projection_mode,
             reference_sensor=localization.reference_sensor,
             reference_signal=reference_signal,
             classification_reference_signal=classification_windows.get(

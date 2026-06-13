@@ -14,6 +14,12 @@ from minimappr.core.radial_range_refinement import (
     adaptive_radial_refinement,
     radial_standard_deviation,
 )
+from minimappr.core.range_projection import (
+    RANGE_REFINED,
+    UNOBSERVABLE_CONFIDENCE_CAP,
+    UNOBSERVABLE_RANGE_OBSERVABILITY_CAP,
+    range_mode_is_unobservable,
+)
 from minimappr.core.spatial_constraints import (
     AmplitudeRatioConstraint,
     SpatialBearingConstraint,
@@ -313,7 +319,7 @@ def solve_cartesian_tdoa(
     residual = combined_residual_seconds(best_position)
     residual_rms_s = float(np.sqrt(np.mean(np.square(residual))))
     effective_time_std_s = max(residual_rms_s, sample_time_std_s)
-    range_projection_mode = "range_refined"
+    range_projection_mode = RANGE_REFINED
     radial_refinement_std_m: float | None = None
     preliminary_jacobian = np.vstack(
         (
@@ -430,8 +436,8 @@ def solve_cartesian_tdoa(
         np.clip(math.sqrt(max(float(eigenvalues[0]), EPSILON) / max(float(eigenvalues[-1]), EPSILON)), 0.0, 1.0)
     )
     radial_observability = min(radial_observability, condition_observability)
-    if range_projection_mode == "range_asymptotic":
-        radial_observability = min(radial_observability, 0.05)
+    if range_mode_is_unobservable(range_projection_mode):
+        radial_observability = min(radial_observability, UNOBSERVABLE_RANGE_OBSERVABILITY_CAP)
     if measurements:
         peak_quality = float(
             np.mean(
@@ -456,8 +462,8 @@ def solve_cartesian_tdoa(
             1.0,
         )
     )
-    if range_projection_mode == "range_asymptotic":
-        confidence = min(confidence, 0.20)
+    if range_mode_is_unobservable(range_projection_mode):
+        confidence = min(confidence, UNOBSERVABLE_CONFIDENCE_CAP)
     try:
         singular_values = np.linalg.svd(jacobian, compute_uv=False)
         inverse_squared = [

@@ -426,6 +426,10 @@ class Settings:
     localization_subspace_freq_max_hz: float = 3500.0
     localization_refine_confidence_threshold: float = 0.45
     localization_tight_array_aperture_m: float = 0.35
+    # Estimator for the single-node tetrahedral (Rust sidecar) path:
+    #   "python_cartesian"— feed the sidecar's pairwise TDOAs + bearing into the Python
+    #   "rust"            — trust the sidecar's own SRP-PHAT position (legacy behavior)
+    localization_single_node_solver: str = "python_cartesian"
     localization_node_bearing_strength: float = 1.0
     localization_amplitude_ratio_strength: float = 0.15
     wavelength_gating_enabled: bool = True
@@ -703,6 +707,10 @@ class Settings:
             raise ValueError("MINIMAPPR_LOCALIZATION_REFINE_CONFIDENCE_THRESHOLD must be in [0,1]")
         if self.localization_tight_array_aperture_m <= 0.0:
             raise ValueError("MINIMAPPR_LOCALIZATION_TIGHT_ARRAY_APERTURE_M must be > 0")
+        if self.localization_single_node_solver not in {"rust", "python_cartesian"}:
+            raise ValueError(
+                "MINIMAPPR_LOCALIZATION_SINGLE_NODE_SOLVER must be 'rust' or 'python_cartesian'"
+            )
         if self.localization_node_bearing_strength < 0.0:
             raise ValueError("MINIMAPPR_LOCALIZATION_NODE_BEARING_STRENGTH must be >= 0")
         if self.localization_amplitude_ratio_strength < 0.0:
@@ -1018,6 +1026,9 @@ class Settings:
                 0.45,
             ),
             localization_tight_array_aperture_m=_env_float("MINIMAPPR_LOCALIZATION_TIGHT_ARRAY_APERTURE_M", 0.35),
+            localization_single_node_solver=_env_str(
+                "MINIMAPPR_LOCALIZATION_SINGLE_NODE_SOLVER", "python_cartesian"
+            ).strip().lower(),
             localization_node_bearing_strength=_env_float(
                 "MINIMAPPR_LOCALIZATION_NODE_BEARING_STRENGTH",
                 1.0,

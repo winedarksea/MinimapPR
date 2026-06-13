@@ -16,6 +16,7 @@ mod ingest_backend;
 mod journal_reader;
 mod leases;
 mod manifests;
+mod range_projection;
 mod render_mvdr;
 mod runtime;
 mod srp_phat;
@@ -367,8 +368,84 @@ struct ErrorResponse {
     detail: String,
 }
 
+fn run_srp_oracle() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use std::io::Read;
+
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input)?;
+    let value: serde_json::Value = serde_json::from_str(&input)?;
+
+    let sample_rate_hz = value["sample_rate_hz"].as_u64().ok_or("sample_rate_hz")? as u32;
+    let sound_speed_mps = value["sound_speed_mps"].as_f64().ok_or("sound_speed_mps")? as f32;
+
+    let mut mic_positions_m: Vec<[f32; 3]> = Vec::new();
+    for mic in value["mic_positions_m"].as_array().ok_or("mic_positions_m")? {
+        let coords = mic.as_array().ok_or("mic entry")?;
+        mic_positions_m.push([
+            coords[0].as_f64().ok_or("mic x")? as f32,
+            coords[1].as_f64().ok_or("mic y")? as f32,
+            coords[2].as_f64().ok_or("mic z")? as f32,
+        ]);
+    }
+
+    let mut windows: Vec<Vec<f32>> = Vec::new();
+    for channel in value["channels"].as_array().ok_or("channels")? {
+        let samples = channel.as_array().ok_or("channel entry")?;
+        windows.push(
+            samples
+                .iter()
+                .map(|sample| sample.as_f64().unwrap_or(0.0) as f32)
+                .collect(),
+        );
+    }
+
+    let active_channels: Vec<usize> = (0..windows.len()).collect();
+    let evaluation = srp_phat::estimate_tetrahedral_steering(
+        &windows,
+        &active_channels,
+        &mic_positions_m,
+        sample_rate_hz,
+        sound_speed_mps,
+        srp_phat::SrpPhatConfig::default(),
+    );
+
+    let pair_tdoas: Vec<serde_json::Value> = evaluation
+        .pair_tdoas
+        .iter()
+        .map(|pair| {
+            serde_json::json!({
+                "ch_a": pair.ch_a,
+                "ch_b": pair.ch_b,
+                "lag_seconds": pair.tdoa.lag_seconds,
+                "delay_samples": pair.tdoa.delay_samples,
+            })
+        })
+        .collect();
+
+    let output = serde_json::json!({
+        "steering_direction": evaluation.localization.steering_direction,
+        "position_m": evaluation.localization.position_m,
+        "range_observability": evaluation.localization.range_observability,
+        "range_projection_mode": evaluation.localization.range_projection_mode,
+        "confidence": evaluation.localization.confidence,
+        "pair_tdoas": pair_tdoas,
+    });
+    println!("{}", serde_json::to_string(&output)?);
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Hidden test harness: run the single-node SRP-PHAT estimator on synthetic
+    // channels supplied as JSON on stdin and emit the localization as JSON on
+    // stdout. Used by the cross-language agreement test (tests/test_localization_
+    // cross_language_parity.py) to compare Rust vs the Python Cartesian solver on
+    // identical input. Intercepted before clap parsing so it needs no CLI flags.
+    let raw_args: Vec<String> = std::env::args().collect();
+    if raw_args.get(1).map(String::as_str) == Some("srp-oracle") {
+        return run_srp_oracle();
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();

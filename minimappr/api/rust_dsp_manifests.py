@@ -33,6 +33,12 @@ class LocalizedClassifierRenderRequest:
     localization_range_observability: float | None = None
     localization_residual_rms_seconds: float | None = None
     localization_range_projection_mode: str | None = None
+    # Front-end measurements the sidecar produced; used by the python_cartesian
+    # single-node solver to re-home the position solve to Python (see
+    # core/rust_tdoa_solve.py). Each entry: {ch_a, ch_b, lag_seconds, confidence}.
+    localization_pair_tdoas: list[dict] | None = None
+    localization_steering_direction: tuple[float, float, float] | None = None
+    localization_sound_speed_mps: float | None = None
     localization_method: str = "rust_dsp_worker"
     source_type: str = "raw_sensor"
     reporting_modality: Literal["localized", "omni"] = "localized"
@@ -153,6 +159,13 @@ def load_localized_render_manifest_bundle(
             or localization_payload.get("attempted_algorithm")
             or "rust_dsp_worker"
         )
+        localization_pair_tdoas = _coerce_pair_tdoas(localization_payload.get("pair_tdoas"))
+        localization_steering_direction = _coerce_vec3(
+            localization_payload.get("steering_direction")
+        )
+        localization_sound_speed_mps = _optional_nonnegative_float(
+            localization_payload.get("sound_speed_mps")
+        )
         reporting_modality: Literal["localized", "omni"] = "localized"
     else:
         if node.position_m is None:
@@ -163,6 +176,9 @@ def load_localized_render_manifest_bundle(
         localization_range_observability = None
         localization_residual_rms_seconds = None
         localization_range_projection_mode = None
+        localization_pair_tdoas = None
+        localization_steering_direction = None
+        localization_sound_speed_mps = None
         localization_method = "rust_classifier_render_fallback"
         reporting_modality = "omni"
 
@@ -180,6 +196,9 @@ def load_localized_render_manifest_bundle(
             localization_range_observability=localization_range_observability,
             localization_residual_rms_seconds=localization_residual_rms_seconds,
             localization_range_projection_mode=localization_range_projection_mode,
+            localization_pair_tdoas=localization_pair_tdoas,
+            localization_steering_direction=localization_steering_direction,
+            localization_sound_speed_mps=localization_sound_speed_mps,
             localization_method=localization_method,
             source_type=source_type,
             reporting_modality=reporting_modality,
@@ -272,6 +291,39 @@ def _coerce_covariance_matrix(value: Any) -> list[list[float]] | None:
             return None
         matrix.append(parsed_row)
     return matrix
+
+
+def _coerce_vec3(value: Any) -> tuple[float, float, float] | None:
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        return None
+    try:
+        parsed = tuple(float(component) for component in value)
+    except (TypeError, ValueError):
+        return None
+    if any(not np.isfinite(component) for component in parsed):
+        return None
+    return parsed  # type: ignore[return-value]
+
+
+def _coerce_pair_tdoas(value: Any) -> list[dict] | None:
+    if not isinstance(value, list) or not value:
+        return None
+    pairs: list[dict] = []
+    for entry in value:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            pairs.append(
+                {
+                    "ch_a": int(entry["ch_a"]),
+                    "ch_b": int(entry["ch_b"]),
+                    "lag_seconds": float(entry["lag_seconds"]),
+                    "confidence": float(entry.get("confidence", 0.0)),
+                }
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    return pairs or None
 
 
 def _audio_coverage_stats_from_mapping(payload: dict[str, Any]) -> AudioCoverageStats | None:

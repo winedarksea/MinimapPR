@@ -185,6 +185,33 @@ export MINIMAPPR_RUNTIME_PROFILE=birdnet_hybrid_production
 
 That preset uses direct BirdNET, keeps omnidirectional classification on a 30 s reporting window, runs SRP-PHAT localization on a low-frequency band for the sirith tetrahedral array, and emits one canonical detection per label/reporting window with localized detections preferred over omni-only detections.
 
+## Production Deployment Modes
+
+Production deployments use `MINIMAPPR_RUNTIME_PROFILE=birdnet_hybrid_production`
+combined with one of two ingest paths. Either way it's a single `minimappr`
+command; the difference is whether firmware posts directly to the Python API
+or to the Rust ingest sidecar.
+
+### Mode 1: Direct Python ingest (default)
+```bash
+export MINIMAPPR_RUNTIME_PROFILE=birdnet_hybrid_production
+.venv/bin/python -m minimappr
+```
+- Firmware posts to `POST /api/v1/ingest/frame` / `/api/v1/ingest/binary` on `:8080`.
+- No Rust process is started.
+
+### Mode 2: Rust ingest sidecar (managed)
+```bash
+export MINIMAPPR_RUNTIME_PROFILE=birdnet_hybrid_production
+export MINIMAPPR_DIRECT_INGEST_ENABLED=false
+.venv/bin/python -m minimappr
+```
+- Requires the sidecar binary at `dist/minimappr-ingest-sidecar` (build with `scripts/build_rust.sh --all`).
+- Python launches and supervises the Rust sidecar; firmware posts high-rate batch ingest to it on `:8081` (`/api/v1/ingest/binary`, `/api/v1/ingest/store-forward`).
+- The Rust sidecar's SRP-PHAT pairwise TDOAs feed Python's Cartesian solver for the position estimate (`MINIMAPPR_LOCALIZATION_SINGLE_NODE_SOLVER=python_cartesian`, the default).
+
+For a fully split two-process deployment, where the sidecar runs as its own independent process with its own lifecycle (e.g. separate hosts), see "Firmware Ingest Sidecar" below.
+
 ## Detection Review And Export Workflow
 
 The current v1 bird workflow is review-driven rather than classifier-final:
@@ -289,6 +316,7 @@ Key env vars:
 - `MINIMAPPR_DETECTION_MIN_CONFIDENCE` (default `0.05`; hides lower-confidence detections from detection APIs/UI and soundscape rendering)
 - `MINIMAPPR_SKIP_LOCALIZATION_FOR_CLASSIFICATION` (`false` default)
 - `MINIMAPPR_LOCALIZATION_BAND_MIN_HZ` / `MINIMAPPR_LOCALIZATION_BAND_MAX_HZ` (optional localization-only bandpass)
+- `MINIMAPPR_LOCALIZATION_SINGLE_NODE_SOLVER` (`python_cartesian` default — re-homes the single-node tetrahedral position solve onto Python's Cartesian TDOA solver using the Rust sidecar's pairwise TDOAs + bearing, falling back to the sidecar's own estimate if TDOAs are missing; set `rust` to trust the sidecar's own SRP-PHAT position/confidence directly, the legacy behavior)
 - `MINIMAPPR_REPORTING_WINDOW_SECONDS` (canonical detection dedupe window; default `30`)
 - `MINIMAPPR_TRACKING_FILTER` (`linear` default, or `kalman`)
 - `MINIMAPPR_KALMAN_PROCESS_NOISE` (default `2.0`)

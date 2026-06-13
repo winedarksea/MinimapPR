@@ -1502,9 +1502,13 @@ async def test_fusion_ingests_rust_localized_render_directly(tmp_path: Path) -> 
     detection = detections[0]
     assert detection["source_node_id"] == node.id
     assert detection["feature_summary"]["localization_method"] == "rust_srp_phat"
-    assert detection["feature_summary"]["localization_range_observability"] == pytest.approx(0.42)
+    # Legacy Rust "prior_projected" is canonicalized to "range_asymptotic" and, because
+    # range is unobservable, the path-agnostic haircut caps confidence (0.87 -> <=0.20)
+    # and range_observability (0.42 -> <=0.05) — the same treatment the Python solver applies.
+    assert detection["confidence"] <= 0.20
+    assert detection["feature_summary"]["localization_range_observability"] == pytest.approx(0.05)
     assert detection["feature_summary"]["localization_residual_rms_seconds"] == pytest.approx(2.5e-4)
-    assert detection["feature_summary"]["localization_range_projection_mode"] == "prior_projected"
+    assert detection["feature_summary"]["localization_range_projection_mode"] == "range_asymptotic"
     assert detection["feature_summary"]["position_geo_uncertainty"]["horizontal_major_std_m"] > 0.0
     assert detection["feature_summary"]["rust_render_kind"] == "birdnet_hybrid_spatial_blend"
     assert tuple(detection["position_m"]) == pytest.approx((1.5, -0.5, 0.0))
@@ -1530,6 +1534,109 @@ async def test_fusion_ingests_rust_localized_render_directly(tmp_path: Path) -> 
     assert summary["age_seconds"] is not None
     assert summary["age_seconds"] <= 1.0
     assert summary["rms"] is not None
+
+    await fusion.stop()
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_fusion_rust_render_python_cartesian_solver_rehomes_solve(tmp_path: Path) -> None:
+    import itertools
+
+    settings = Settings(
+        db_path=tmp_path / "fusion_rust_render_python_cartesian.db",
+        snippet_dir=tmp_path / "snippets",
+        snippet_retention_seconds=0,
+        fusion_worker_count=1,
+        fusion_event_queue_size=8,
+        localization_single_node_solver="python_cartesian",
+    )
+    settings.db_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.snippet_dir.mkdir(parents=True, exist_ok=True)
+
+    storage = Storage(settings.db_path)
+    await storage.initialize()
+
+    buffer = MultiSensorBuffer(max_duration_seconds=settings.max_sensor_buffer_seconds)
+    fusion = FusionNode(
+        settings=settings,
+        registry=NodeRegistry(),
+        buffer=buffer,
+        localizer=LocalizationEngine(max_tau_s=0.03),
+        classifier=HeuristicClassifier(),
+        tracker=TrackManager(settings),
+        storage=storage,
+        live_callback=lambda payload: asyncio.sleep(0, result=None),
+        coordinate_frame=LocalCoordinateFrame(origin=GeoPoint(lat=37.0, lon=-122.0, alt_m=0.0), mode="flat"),
+        zone_matcher=ZoneMatcher(storage=storage),
+    )
+    await fusion.start()
+
+    mic_offsets = [
+        (0.0, 0.050, 0.0),
+        (0.0433, 0.025, 0.0),
+        (0.0, 0.0, 0.0),
+        (0.02165, 0.025, 0.04082),
+    ]
+    node = NodeSpec(
+        id="sirith-python-cartesian",
+        node_type=NodeType.SIRITH_TETRA,
+        position_m=(0.0, 0.0, 0.0),
+        sensor_offsets_m=mic_offsets,
+        capabilities=["audio"],
+        metadata={},
+    )
+
+    sound_speed_mps = 343.2
+    mic_positions = [np.asarray(offset, dtype=np.float64) for offset in mic_offsets]
+    centroid = np.mean(mic_positions, axis=0)
+    source_m = np.array([0.20, 0.10, 0.15])
+    pair_tdoas = []
+    for channel_a, channel_b in itertools.combinations(range(4), 2):
+        lag = (
+            float(np.linalg.norm(source_m - mic_positions[channel_a]))
+            - float(np.linalg.norm(source_m - mic_positions[channel_b]))
+        ) / sound_speed_mps
+        pair_tdoas.append(
+            {"ch_a": channel_a, "ch_b": channel_b, "lag_seconds": lag, "confidence": 0.8}
+        )
+    steering = source_m - centroid
+    steering = steering / float(np.linalg.norm(steering))
+
+    audio = np.random.default_rng(902).normal(0.0, 0.3, size=48_000).astype(np.float32)
+    await fusion.ingest_localized_render(
+        LocalizedClassifierRenderRequest(
+            manifest_id="manifest-python-cartesian-1",
+            node=node,
+            event_time_ns=1_739_950_000_000_000_000,
+            sample_rate_hz=48_000,
+            decoded_audio=audio,
+            # The sidecar's own position is deliberately wrong; the python_cartesian
+            # solver must override it from the pairwise TDOAs + bearing.
+            localization_position_m=(99.0, 99.0, 99.0),
+            localization_confidence=0.9,
+            localization_range_projection_mode="range_refined",
+            localization_pair_tdoas=pair_tdoas,
+            localization_steering_direction=tuple(steering),
+            localization_sound_speed_mps=sound_speed_mps,
+            localization_method="rust_srp_phat",
+            environment={"temperature_c": 18.0, "humidity_fraction": 0.4},
+        )
+    )
+
+    assert fusion._metrics.localization_single_node_python_solved_count == 1
+    assert fusion._metrics.localization_single_node_python_fallback_count == 0
+
+    detections = await storage.list_detections(limit=10)
+    assert len(detections) == 1
+    detection = detections[0]
+    assert detection["feature_summary"]["localization_method"] == "python_cartesian_rust_tdoa"
+    # The Rust-supplied (99,99,99) must have been discarded for the Python solve.
+    position = np.asarray(detection["position_m"], dtype=np.float64)
+    assert np.linalg.norm(position - np.array([99.0, 99.0, 99.0])) > 1.0
+    recovered_bearing = (position - centroid) / float(np.linalg.norm(position - centroid))
+    true_bearing = (source_m - centroid) / float(np.linalg.norm(source_m - centroid))
+    assert float(np.dot(recovered_bearing, true_bearing)) > 0.9
 
     await fusion.stop()
     await storage.close()

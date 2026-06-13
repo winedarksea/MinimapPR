@@ -135,6 +135,25 @@ def reference_tdoas(
     sensor_ids: list[str],
 ) -> tuple[str, dict[str, float]]:
     reference_sensor = max(sensor_ids, key=lambda sensor_id: rms(sensor_windows[sensor_id]))
+    return reference_sensor, solve_reference_tdoas(
+        measurements=measurements,
+        sensor_ids=sensor_ids,
+        reference_sensor=reference_sensor,
+    )
+
+
+def solve_reference_tdoas(
+    *,
+    measurements: list[PairTdoaMeasurement],
+    sensor_ids: list[str],
+    reference_sensor: str,
+) -> dict[str, float]:
+    """Least-squares reference-relative delays from pairwise TDOAs.
+
+    Windowless counterpart of :func:`reference_tdoas`: the caller chooses the
+    reference sensor (e.g. for the Rust middle path, where per-sensor audio
+    windows are not available — only the pairwise TDOAs the sidecar measured).
+    """
     measured_sensor_ids = [sensor_id for sensor_id in sensor_ids if sensor_id != reference_sensor]
     sensor_column = {
         sensor_id: column_index
@@ -152,7 +171,7 @@ def reference_tdoas(
         rows.append(row * weight)
         targets.append(measurement.tdoa_seconds * weight)
     if not rows:
-        return reference_sensor, {}
+        return {}
     try:
         relative_delays, *_ = np.linalg.lstsq(
             np.vstack(rows),
@@ -160,8 +179,8 @@ def reference_tdoas(
             rcond=None,
         )
     except np.linalg.LinAlgError:
-        return reference_sensor, {}
-    return reference_sensor, {
+        return {}
+    return {
         sensor_id: float(relative_delays[column_index])
         for sensor_id, column_index in sensor_column.items()
     }

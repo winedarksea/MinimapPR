@@ -853,7 +853,9 @@ def test_http_app_in_production_mode_consumes_memory_only_rust_sidecar(monkeypat
         assert detection["label"] == "sparrow"
         assert detection["source_node_id"] == node_id
         assert detection["reporting_modality"] == "localized"
-        assert detection["feature_summary"]["localization_method"] == "srp_phat"
+        # Default solver re-homes the position solve onto Python's Cartesian
+        # TDOA solver using the sidecar's pairwise TDOAs + bearing.
+        assert detection["feature_summary"]["localization_method"] == "python_cartesian_rust_tdoa"
         assert detection["feature_summary"]["rust_manifest_id"]
         assert str(detection["feature_summary"]["rust_render_kind"]).startswith("birdnet_")
 
