@@ -45,6 +45,17 @@ MAX_RETRY_REFINEMENT_EVALUATIONS = 500
 COMPACT_ARRAY_RADIAL_REFINEMENT_APERTURE_MULTIPLIER = 2.0
 PRIOR_DOMINATED_ASYMPTOTIC_RADIAL_STD_FRACTION = 0.9
 
+# Fallback observability cutoff applied when no bearing prior is available
+# (mirrors Rust's unconditional ``radial_std_m >= radius_m`` far-field check
+# in fit_far_field_range). Without a bearing prior, the radial search has no
+# other safeguard and can settle on a finite "interior minimum" radius whose
+# Fisher uncertainty (radial_std_m) is many times the radius itself -- i.e. a
+# range estimate the data does not actually support. 5x is calibrated against
+# the near-field fixtures in test_localization_benchmark.py and
+# test_phase2_localization_soundscape.py (legitimate near-field refinements
+# stay below ~3x) while still catching collapsed far-field solves (26x-330x).
+DEFAULT_ASYMPTOTIC_RADIAL_STD_FRACTION = 5.0
+
 
 @dataclass(frozen=True, slots=True)
 class CartesianTdoaSolve:
@@ -377,7 +388,7 @@ def solve_cartesian_tdoa(
             asymptotic_radial_std_fraction=(
                 PRIOR_DOMINATED_ASYMPTOTIC_RADIAL_STD_FRACTION
                 if bearing_prior is not None
-                else None
+                else DEFAULT_ASYMPTOTIC_RADIAL_STD_FRACTION
             ),
         )
         if radial_refinement.fit_residual_rms_seconds < residual_rms_s * (1.0 - 1.0e-4):

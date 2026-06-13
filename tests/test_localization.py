@@ -7,9 +7,9 @@ import pytest
 
 import minimappr.core.cartesian_tdoa as cartesian_tdoa
 from minimappr.core.cartesian_tdoa import solve_cartesian_tdoa
-from minimappr.core.localization import LocalizationEngine, LocalizationError
+from minimappr.core.localization import LocalizationEngine, LocalizationError, speed_of_sound_mps
 from minimappr.core.tdoa_measurements import PairTdoaMeasurement, measure_pair_tdoas
-from tests.helpers import shift_signal
+from tests.helpers import SIRITH_TETRA_SENSOR_OFFSETS_M, shift_signal, synthesize_delayed_array_channels
 
 
 def test_tdoa_localization_recovers_source_position() -> None:
@@ -56,6 +56,47 @@ def test_tdoa_localization_recovers_source_position() -> None:
     assert result.range_observability > 0.1
     assert result.residual_rms_seconds is not None
     assert result.range_projection_mode == "range_refined"
+
+
+@pytest.mark.parametrize("distance_m", [1.0, 6.0])
+def test_compact_array_flags_range_asymptotic_without_bearing_prior(distance_m: float) -> None:
+    """A ~5cm-aperture array has no observable range axis at any distance, but
+    without a bearing_prior the radial search previously had no Fisher
+    observability check and could report a finite range_refined estimate
+    anyway. It must now match Rust's range_asymptotic classification.
+    """
+    sample_rate_hz = 48_000
+    temperature_c = 20.0
+    humidity_fraction = 0.0
+    sound_speed_mps = speed_of_sound_mps(temperature_c=temperature_c, humidity_fraction=humidity_fraction)
+
+    mic_positions_m = np.asarray(SIRITH_TETRA_SENSOR_OFFSETS_M, dtype=np.float64)
+    centroid_m = mic_positions_m.mean(axis=0)
+    direction = np.array([20.0, 10.0, 3.0])
+    direction = direction / np.linalg.norm(direction)
+    source_m = centroid_m + direction * distance_m
+
+    rng = np.random.default_rng(20260613)
+    mono = rng.normal(0.0, 0.3, size=8192).astype(np.float32)
+    channels = synthesize_delayed_array_channels(
+        mono,
+        sample_rate_hz,
+        source_position_m=tuple(source_m),
+        sensor_offsets_m=SIRITH_TETRA_SENSOR_OFFSETS_M,
+        sound_speed_mps=sound_speed_mps,
+    )
+    sensor_positions = {f"ch{i}": mic_positions_m[i] for i in range(len(mic_positions_m))}
+    sensor_windows = {f"ch{i}": channels[i].astype(np.float32) for i in range(len(channels))}
+
+    engine = LocalizationEngine(max_tau_s=0.02)
+    result = engine.localize(sensor_positions, sensor_windows, sample_rate_hz, temperature_c, humidity_fraction)
+
+    bearing = np.asarray(result.position_m, dtype=np.float64) - centroid_m
+    bearing /= np.linalg.norm(bearing)
+    assert float(np.dot(bearing, direction)) > 0.9
+    assert result.range_projection_mode == "range_asymptotic"
+    assert result.range_observability is not None
+    assert result.range_observability < 0.10
 
 
 def test_localization_rejects_non_finite_windows() -> None:

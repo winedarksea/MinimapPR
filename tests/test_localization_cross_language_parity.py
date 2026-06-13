@@ -98,7 +98,8 @@ def _python_localization(
     )
 
 
-def test_rust_and_python_agree_on_bearing_and_range_observability() -> None:
+@pytest.mark.parametrize("distance_m", [6.0, 22.0])
+def test_rust_and_python_agree_on_bearing_and_range_observability(distance_m: float) -> None:
     temperature_c = 20.0
     humidity_fraction = 0.0
     sound_speed_mps = speed_of_sound_mps(
@@ -107,12 +108,11 @@ def test_rust_and_python_agree_on_bearing_and_range_observability() -> None:
 
     mic_positions_m = np.asarray(SIRITH_TETRA_SENSOR_OFFSETS_M, dtype=np.float64)
     centroid = mic_positions_m.mean(axis=0)
-    # Unambiguously far source for a ~5 cm aperture (~22 m): range is unobservable,
-    # bearing is not. Chosen well into the far field so both engines reliably agree
-    # on range observability — nearer sources can leave the broadband Python solver
-    # collapsing onto a near solution (a known far-field detection limitation).
-    source_m = np.array([20.0, 10.0, 3.0])
-    true_bearing = _unit(source_m - centroid)
+    # Range is unobservable for a ~5 cm aperture at any distance along this
+    # bearing; both engines must agree regardless of how far the source is.
+    direction = _unit(np.array([20.0, 10.0, 3.0]))
+    source_m = centroid + direction * distance_m
+    true_bearing = direction
 
     rng = np.random.default_rng(20260613)
     mono = rng.normal(0.0, 0.3, size=8192).astype(np.float32)
