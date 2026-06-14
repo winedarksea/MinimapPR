@@ -58,37 +58,82 @@ pub fn LeafletMapPanel() -> impl IntoView {
     });
 
     // Sync nodes → map markers (geodetic mode only; position_m is local-frame, use position_geo).
-    // On the first update that carries any GPS position, pan to the average of all node positions.
     {
         let config = state.config;
-        Effect::new(move |already_centered: Option<bool>| {
+        Effect::new(move |_| {
             let _ = theme.get();
             let ns = nodes.get();
             let is_geo = config
                 .get()
                 .map(|c| c.coordinate_mode == "geodetic")
                 .unwrap_or(false);
-            let was_centered = already_centered.unwrap_or(false);
             if is_geo {
-                let mut lat_sum = 0.0f64;
-                let mut lon_sum = 0.0f64;
-                let mut geo_count = 0usize;
                 for n in &ns {
                     if let Some(geo) = &n.position_geo {
                         set_node_marker(&n.node_id, geo.lat, geo.lon, &n.health);
-                        if !was_centered {
-                            lat_sum += geo.lat;
-                            lon_sum += geo.lon;
-                            geo_count += 1;
-                        }
                     }
                 }
-                if !was_centered && geo_count > 0 {
-                    pan_to(lat_sum / geo_count as f64, lon_sum / geo_count as f64);
-                    return true;
-                }
             }
-            was_centered
+        });
+    }
+
+    // Auto-center the map on first load to the most relevant geo data, instead of
+    // leaving it parked at the hardcoded default. Priority:
+    //   1. most recent track with a geo position,
+    //   2. most recent detection with a geo position,
+    //   3. otherwise a node position (most recently seen).
+    // Runs on every data update until it succeeds once, so it works regardless of
+    // whether tracks, detections, or only node positions arrive first.
+    {
+        Effect::new(move |already_centered: Option<bool>| {
+            if already_centered.unwrap_or(false) {
+                return true;
+            }
+
+            let latest_track = tracks
+                .get()
+                .into_iter()
+                .filter(|t| t.position_geo.is_some())
+                .max_by_key(|t| t.last_update_ns.unwrap_or(i64::MIN))
+                .and_then(|t| {
+                    t.position_geo
+                        .as_ref()
+                        .map(|g| (t.last_update_ns.unwrap_or(i64::MIN), g.lat, g.lon))
+                });
+            let latest_detection = detections
+                .get()
+                .into_iter()
+                .filter(|d| d.position_geo.is_some())
+                .max_by_key(|d| d.received_ns.unwrap_or(i64::MIN))
+                .and_then(|d| {
+                    d.position_geo
+                        .as_ref()
+                        .map(|g| (d.received_ns.unwrap_or(i64::MIN), g.lat, g.lon))
+                });
+
+            // Prefer whichever of track/detection is the more recent observation.
+            let target = match (latest_track, latest_detection) {
+                (Some(t), Some(d)) => Some(if t.0 >= d.0 { t } else { d }),
+                (Some(t), None) => Some(t),
+                (None, Some(d)) => Some(d),
+                (None, None) => None,
+            }
+            .map(|(_, lat, lon)| (lat, lon))
+            .or_else(|| {
+                // Fall back to the most recently seen node with a geo position.
+                nodes
+                    .get()
+                    .into_iter()
+                    .filter(|n| n.position_geo.is_some())
+                    .max_by_key(|n| n.last_seen_ns.unwrap_or(i64::MIN))
+                    .and_then(|n| n.position_geo.as_ref().map(|g| (g.lat, g.lon)))
+            });
+
+            if let Some((lat, lon)) = target {
+                pan_to(lat, lon);
+                return true;
+            }
+            false
         });
     }
 
