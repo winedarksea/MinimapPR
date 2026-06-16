@@ -845,6 +845,22 @@ class TestPreprocessingStages:
         corr = abs(_correlation(out, tone))
         assert corr > 0.9, f"Expected high correlation with tone after gating, got {corr:.3f}"
 
+    def test_spectral_gate_uses_soft_mask(self) -> None:
+        stage = SpectralGateStage(threshold_factor=1.5)
+        t = np.arange(1024, dtype=np.float64) / 16_000
+        signal = (
+            0.5 * np.sin(2 * np.pi * 500.0 * t)
+            + 0.04 * np.sin(2 * np.pi * 1700.0 * t)
+        ).astype(np.float32)
+
+        out = stage.process(signal, 16_000)
+
+        assert out.shape == signal.shape
+        assert out.dtype == np.float32
+        assert 0.0 < float(np.sqrt(np.mean(out.astype(np.float64) ** 2))) < float(
+            np.sqrt(np.mean(signal.astype(np.float64) ** 2))
+        )
+
     def test_spectral_gate_short_signal(self) -> None:
         signal = np.ones(8, dtype=np.float32)
         stage = SpectralGateStage()

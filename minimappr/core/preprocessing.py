@@ -271,14 +271,16 @@ class NormalizationStage(AudioPreprocessor):
 
 @dataclass(slots=True)
 class SpectralGateStage(AudioPreprocessor):
-    """Simple spectral noise gate.
+    """Soft spectral noise gate.
 
-    FFT bins whose magnitude is below *threshold_factor* × median magnitude
-    are zeroed, then the signal is reconstructed via inverse FFT.
-    Useful for suppressing broadband background noise before classification.
+    A Wiener-style soft mask attenuates bins near the median noise floor instead
+    of hard-zeroing them. Processing uses Hann overlap-add inside each call to
+    reduce FFT frame edge artifacts before classification.
     """
 
     threshold_factor: float = 1.5
+    block_size: int = 1024
+    min_gain: float = 0.08
 
     def process(
         self,
@@ -291,12 +293,41 @@ class SpectralGateStage(AudioPreprocessor):
         del node_id, sample_rate_hz, channel_idx
         if samples.size < 16:
             return samples
-        spectrum = np.fft.rfft(samples.astype(np.float64))
+        arr = np.asarray(samples, dtype=np.float32).reshape(-1)
+        block_size = min(max(16, int(self.block_size)), arr.size)
+        if arr.size <= block_size:
+            return self._process_frame(arr.astype(np.float64)).astype(np.float32)
+
+        hop = max(1, block_size // 2)
+        window = np.hanning(block_size).astype(np.float64)
+        output = np.zeros(arr.size, dtype=np.float64)
+        norm = np.zeros(arr.size, dtype=np.float64)
+
+        for start in range(0, arr.size, hop):
+            end = min(start + block_size, arr.size)
+            frame_len = end - start
+            frame = np.zeros(block_size, dtype=np.float64)
+            frame[:frame_len] = arr[start:end]
+            frame *= window
+
+            processed_frame = self._process_frame(frame)
+            output[start:end] += processed_frame[:frame_len] * window[:frame_len]
+            norm[start:end] += window[:frame_len] ** 2
+
+        safe_norm = np.where(norm > 1e-12, norm, 1.0)
+        return (output / safe_norm).astype(np.float32)
+
+    def _process_frame(self, frame: np.ndarray) -> np.ndarray:
+        spectrum = np.fft.rfft(frame)
         magnitudes = np.abs(spectrum)
         median_mag = float(np.median(magnitudes))
-        gate_mask = magnitudes >= (self.threshold_factor * median_mag)
-        gated_spectrum = spectrum * gate_mask
-        return np.fft.irfft(gated_spectrum, n=samples.size).astype(np.float32)
+        if median_mag < 1e-12:
+            return frame
+        noise_floor = max(self.threshold_factor * median_mag, 1e-12)
+        power = magnitudes ** 2
+        gain = power / (power + noise_floor ** 2)
+        gain = np.maximum(gain, float(self.min_gain))
+        return np.fft.irfft(spectrum * gain, n=frame.size)
 
     def reset(self) -> None:
         return

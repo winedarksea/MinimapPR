@@ -31,6 +31,7 @@ from minimappr.core.capture_session import CaptureSessionRecord, CaptureState
 from minimappr.core.iamf_pipeline import (
     IamfPipeline,
     OUTPUT_RATE_HZ,
+    TrackTrajectory,
     _encode_iamf_ffmpeg,
     _encode_iamf_ffmpeg_objects_v11,
     _ffmpeg_mux,
@@ -467,6 +468,44 @@ class TestIamfPipelineE2E:
         python_mock.assert_called_once()
         np.testing.assert_allclose(result, expected)
         await pipeline._http.aclose()
+
+    def test_python_mvdr_fallback_overlap_adds_block_changes(
+        self,
+        artifacts_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        class _FakeMvdrBeamformer:
+            def __init__(self, diagonal_loading: float) -> None:
+                del diagonal_loading
+
+            def beamform(self, **kwargs) -> np.ndarray:
+                block_len = next(iter(kwargs["sensor_windows"].values())).size
+                steer_x = float(kwargs["steer_position_m"][0])
+                return np.full(block_len, steer_x, dtype=np.float32)
+
+        monkeypatch.setattr(
+            "minimappr.core.beamforming.MVDRBeamformer",
+            _FakeMvdrBeamformer,
+        )
+        pipeline = IamfPipeline(
+            sidecar_url=None,
+            db_storage=_StubStorage(),
+            artifact_dir=artifacts_dir,
+        )
+        n_samples = 2048
+        channels = np.ones((4, n_samples), dtype=np.float32)
+        trajectory = TrackTrajectory(
+            track_id="trk-ola",
+            waypoints=[(0, (0.0, 0.0, 0.0)), (n_samples - 1, (1.0, 0.0, 0.0))],
+        )
+
+        result = pipeline._mvdr_beamform_python(channels, trajectory, SAMPLE_RATE)
+
+        assert result.shape == (n_samples,)
+        assert result.dtype == np.float32
+        assert np.all(np.isfinite(result))
+        boundary_window = result[500:525]
+        assert float(np.max(np.abs(np.diff(boundary_window)))) < 0.01
 
     @pytest.mark.asyncio
     async def test_ffmpeg_mux_raises_when_iamf_mux_fails(

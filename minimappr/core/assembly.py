@@ -46,12 +46,14 @@ def _collapse_long_exact_zero_runs(
     *,
     sample_rate_hz: int,
     min_gap_seconds: float = 0.03,
+    crossfade_seconds: float = 0.005,
 ):
     """Remove long exact-zero spans that represent uncovered buffer gaps.
 
     Coverage holes are inserted as literal zeros by the audio buffer. Compacting
-    long zero runs for snippet rendering avoids playback dropouts while keeping
-    the classified content intact.
+    long zero runs for snippet rendering avoids playback dropouts. Boundaries
+    are briefly faded around removed holes so snippets do not splice unrelated
+    waveform phases with a hard step.
     """
     arr = np.asarray(signal, dtype=np.float32).reshape(-1)
     if arr.size == 0 or sample_rate_hz <= 0:
@@ -66,6 +68,7 @@ def _collapse_long_exact_zero_runs(
         return arr
 
     keep_mask = np.ones(arr.size, dtype=np.bool_)
+    removed_run_starts: list[int] = []
     in_zero_run = False
     run_start = 0
 
@@ -77,17 +80,33 @@ def _collapse_long_exact_zero_runs(
         if not is_zero and in_zero_run:
             run_length = index - run_start
             if run_length >= min_gap_samples:
+                removed_run_starts.append(run_start)
                 keep_mask[run_start:index] = False
             in_zero_run = False
 
     if in_zero_run:
         run_length = arr.size - run_start
         if run_length >= min_gap_samples:
+            removed_run_starts.append(run_start)
             keep_mask[run_start:] = False
 
     compacted = arr[keep_mask]
     if compacted.size == 0:
         return arr
+    fade_samples = int(round(crossfade_seconds * float(sample_rate_hz)))
+    if fade_samples < 2 or not removed_run_starts:
+        return compacted
+
+    kept_prefix_counts = np.cumsum(keep_mask, dtype=np.int64)
+    for run_start in removed_run_starts:
+        boundary = int(kept_prefix_counts[run_start - 1]) if run_start > 0 else 0
+        fade_len = min(fade_samples, boundary, compacted.size - boundary)
+        if fade_len < 2:
+            continue
+        fade_out = np.linspace(1.0, 0.0, fade_len, dtype=np.float32)
+        fade_in = np.linspace(0.0, 1.0, fade_len, dtype=np.float32)
+        compacted[boundary - fade_len:boundary] *= fade_out
+        compacted[boundary:boundary + fade_len] *= fade_in
     return compacted
 
 

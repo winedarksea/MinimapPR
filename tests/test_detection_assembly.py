@@ -18,6 +18,24 @@ def test_collapse_long_exact_zero_runs_removes_only_long_gaps() -> None:
     assert compacted.tolist() == [1.0, 1.0, 1.0, 0.0, 1.0]
 
 
+def test_collapse_long_exact_zero_runs_smooths_high_rate_splice() -> None:
+    sample_rate_hz = 1_000
+    signal = np.array(
+        [1.0, 1.0, 0.0, 0.0, 0.0, 0.0, -1.0, -1.0],
+        dtype=np.float32,
+    )
+
+    compacted = _collapse_long_exact_zero_runs(
+        signal,
+        sample_rate_hz=sample_rate_hz,
+        min_gap_seconds=0.003,
+        crossfade_seconds=0.002,
+    )
+
+    assert compacted.tolist() == [1.0, 0.0, -0.0, -1.0]
+    assert np.max(np.abs(np.diff(compacted))) <= 1.0
+
+
 def test_collapse_long_exact_zero_runs_keeps_signal_when_no_long_gap() -> None:
     sample_rate_hz = 100
     signal = np.array([0.25, 0.0, -0.1, 0.0, 0.4], dtype=np.float32)

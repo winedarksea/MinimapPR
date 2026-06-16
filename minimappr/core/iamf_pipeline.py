@@ -591,7 +591,11 @@ class IamfPipeline:
         capture_rate_hz: int,
         mic_positions_m: NDArray[np.float64] | None = None,
     ) -> NDArray[np.float32]:
-        """Pure-Python block-by-block MVDR beamformer for offline rendering."""
+        """Pure-Python MVDR beamformer for offline rendering.
+
+        The fallback uses Hann overlap-add so independently estimated MVDR
+        weights change smoothly instead of stepping at block boundaries.
+        """
         from minimappr.core.beamforming import MVDRBeamformer
 
         n_channels = channels.shape[0]
@@ -606,17 +610,21 @@ class IamfPipeline:
         }
 
         beamformer = MVDRBeamformer(diagonal_loading=1e-3)
-        output = np.zeros(n_samples, dtype=np.float32)
+        output = np.zeros(n_samples, dtype=np.float64)
+        norm = np.zeros(n_samples, dtype=np.float64)
 
         if not traj.waypoints:
-            return output
+            return output.astype(np.float32)
 
         first_active = traj.waypoints[0][0]
         last_active = traj.waypoints[-1][0]
         fade_samples = 100
+        block_size = SUBTRACT_BLOCK
+        hop = max(1, block_size // 2)
+        window = np.hanning(block_size).astype(np.float64)
 
-        for block_start in range(0, n_samples, SUBTRACT_BLOCK):
-            block_end = min(block_start + SUBTRACT_BLOCK, n_samples)
+        for block_start in range(0, n_samples, hop):
+            block_end = min(block_start + block_size, n_samples)
             block_len = block_end - block_start
 
             # Silence blocks entirely outside the track's active range.
@@ -626,8 +634,11 @@ class IamfPipeline:
             sample_mid = block_start + block_len // 2
             steer_pos = _interpolate_waypoints(traj.waypoints, sample_mid)
 
+            frame = np.zeros((n_channels, block_size), dtype=np.float32)
+            frame[:, :block_len] = channels[:, block_start:block_end]
+            frame *= window[np.newaxis, :].astype(np.float32)
             sensor_windows: dict[str, np.ndarray] = {
-                sid: channels[i, block_start:block_end]
+                sid: frame[i]
                 for i, sid in enumerate(sensor_ids)
                 if i < channels.shape[0]
             }
@@ -637,25 +648,31 @@ class IamfPipeline:
                 sample_rate_hz=capture_rate_hz,
                 steer_position_m=steer_pos,
             )
-            if block_out.size < block_len:
-                block_out = np.pad(block_out, (0, block_len - block_out.size))
-            output[block_start:block_end] = block_out[:block_len]
+            if block_out.size < block_size:
+                block_out = np.pad(block_out, (0, block_size - block_out.size))
+            output[block_start:block_end] += (
+                block_out[:block_len].astype(np.float64) * window[:block_len]
+            )
+            norm[block_start:block_end] += window[:block_len] ** 2
+
+        safe_norm = np.where(norm > 1e-12, norm, 1.0)
+        output /= safe_norm
 
         # Linear fade-in at the start of the active range.
         fade_in_start = max(0, first_active)
         fade_in_end = min(n_samples, first_active + fade_samples)
         if fade_in_end > fade_in_start:
-            ramp = np.linspace(0.0, 1.0, fade_in_end - fade_in_start, dtype=np.float32)
+            ramp = np.linspace(0.0, 1.0, fade_in_end - fade_in_start, dtype=np.float64)
             output[fade_in_start:fade_in_end] *= ramp
 
         # Linear fade-out at the end of the active range.
         fade_out_start = max(0, last_active - fade_samples)
         fade_out_end = min(n_samples, last_active)
         if fade_out_end > fade_out_start:
-            ramp = np.linspace(1.0, 0.0, fade_out_end - fade_out_start, dtype=np.float32)
+            ramp = np.linspace(1.0, 0.0, fade_out_end - fade_out_start, dtype=np.float64)
             output[fade_out_start:fade_out_end] *= ramp
 
-        return output
+        return output.astype(np.float32)
 
     async def _mvdr_beamform_rust(
         self,
