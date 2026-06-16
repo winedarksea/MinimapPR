@@ -69,8 +69,11 @@ pub fn render_mvdr(request: MvdrRenderRequest) -> MvdrRenderOutput {
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 fn hann_window(n: usize) -> Vec<f32> {
+    if n <= 1 {
+        return vec![1.0; n];
+    }
     (0..n)
-        .map(|i| 0.5 * (1.0 - (2.0 * PI * i as f32 / n as f32).cos()))
+        .map(|i| 0.5 * (1.0 - (2.0 * PI * i as f32 / (n - 1) as f32).cos()))
         .collect()
 }
 
@@ -351,6 +354,28 @@ mod tests {
             fade_samples: None,
         });
         assert!(result.samples.is_empty());
+    }
+
+    #[test]
+    fn hann_window_matches_numpy_hanning_shape() {
+        let window = hann_window(8);
+        let expected = [
+            0.0_f32,
+            0.1882551,
+            0.6112605,
+            0.9504844,
+            0.9504844,
+            0.6112605,
+            0.1882551,
+            0.0,
+        ];
+
+        for (actual, expected) in window.iter().zip(expected.iter()) {
+            assert!(
+                (actual - expected).abs() < 1.0e-6,
+                "window sample mismatch: got {actual}, expected {expected}"
+            );
+        }
     }
 
     #[test]
