@@ -834,16 +834,17 @@ mod tests {
         assert_eq!(node["id"], "sirith-tetra-1a15");
         assert!(node.get("position_m").is_none());
         assert_eq!(node["metadata"]["gps"]["position_source"], "gps_nmea_uart");
-        assert_eq!(node["position_geo"]["lon"].as_f64().unwrap() as f32, -93.258);
+        assert_eq!(
+            node["position_geo"]["lon"].as_f64().unwrap() as f32,
+            -93.258
+        );
     }
 
     #[test]
     fn binary_capture_envelope_accepts_mmb2_payloads() {
-        let parsed = parse_capture_envelope(
-            "/api/v1/ingest/binary",
-            &binary_single_frame_payload(2),
-        )
-        .expect("MMB2 binary envelope should parse");
+        let parsed =
+            parse_capture_envelope("/api/v1/ingest/binary", &binary_single_frame_payload(2))
+                .expect("MMB2 binary envelope should parse");
 
         assert_eq!(parsed.node_id, "sirith-tetra-1a15");
         assert_eq!(parsed.sample_rate_hz, Some(16_000));

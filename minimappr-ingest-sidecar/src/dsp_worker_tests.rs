@@ -1105,12 +1105,8 @@ async fn clustered_single_channel_manifests_share_a_tetrahedral_localization_buf
         ("node-d:ch0".to_string(), [0.0, 2.0, 2.0]),
     ];
     for (index, node_id) in ["node-a", "node-b", "node-c", "node-d"].iter().enumerate() {
-        let payload = store_forward_payload_with_channel_count(
-            1_000_000_000,
-            0,
-            index as u64 + 1,
-            1,
-        );
+        let payload =
+            store_forward_payload_with_channel_count(1_000_000_000, 0, index as u64 + 1, 1);
         let manifest = raw_manifest_for_payload_with_metadata(
             tmp.path(),
             &format!("manifest-clustered-{index}"),
@@ -1130,7 +1126,10 @@ async fn clustered_single_channel_manifests_share_a_tetrahedral_localization_buf
         .filter(|manifest| {
             manifest.manifest_type == "localization_result"
                 && manifest.cluster_id.as_deref() == Some("cluster-square")
-                && manifest.localization.as_ref().is_some_and(|payload| payload.resolved_algorithm == "srp_phat")
+                && manifest
+                    .localization
+                    .as_ref()
+                    .is_some_and(|payload| payload.resolved_algorithm == "srp_phat")
         })
         .collect();
 
@@ -1229,7 +1228,10 @@ async fn mixed_clustered_tetrahedral_and_point_manifests_share_one_localization_
         .filter(|manifest| {
             manifest.manifest_type == "localization_result"
                 && manifest.cluster_id.as_deref() == Some("cluster-mixed")
-                && manifest.localization.as_ref().is_some_and(|payload| payload.resolved_algorithm == "srp_phat")
+                && manifest
+                    .localization
+                    .as_ref()
+                    .is_some_and(|payload| payload.resolved_algorithm == "srp_phat")
         })
         .collect();
 

@@ -613,7 +613,6 @@ impl IngestBackend {
             BackendInner::Journal(b) => Some(b.derived_cache.clone()),
         }
     }
-
 }
 
 impl SegmentJournalBackend {
@@ -829,7 +828,7 @@ impl SegmentJournalBackend {
             &admitted.body_bytes,
             admitted.preflight_queue_permit,
         )
-            .await?;
+        .await?;
         Ok(journal_id)
     }
 
@@ -913,14 +912,11 @@ impl SegmentJournalBackend {
     }
 
     fn raw_manifest_sender(&self) -> BoxedResult<&mpsc::Sender<QueuedRawManifest>> {
-        self.runtime_config
-            .raw_manifest_tx
-            .as_ref()
-            .ok_or_else(|| {
-                Box::new(InvalidIngestEnvelopeError::new(
-                    "raw manifest channel not configured — DSP worker is not connected",
-                )) as BoxedError
-            })
+        self.runtime_config.raw_manifest_tx.as_ref().ok_or_else(|| {
+            Box::new(InvalidIngestEnvelopeError::new(
+                "raw manifest channel not configured — DSP worker is not connected",
+            )) as BoxedError
+        })
     }
 
     fn build_validated_raw_capture_manifest(
@@ -1034,7 +1030,8 @@ impl SegmentJournalBackend {
                 positions
                     .iter()
                     .map(|(sensor_id, position)| {
-                        parse_cluster_position(position).map(|position_m| (sensor_id.clone(), position_m))
+                        parse_cluster_position(position)
+                            .map(|position_m| (sensor_id.clone(), position_m))
                     })
                     .collect::<Option<Vec<_>>>()
             })
@@ -1626,10 +1623,7 @@ mod tests {
         assert!(manifest.raw_payload.is_some());
         assert_eq!(manifest.cluster_id.as_deref(), Some("cluster-square"));
         assert_eq!(
-            manifest
-                .cluster_sensor_positions
-                .as_ref()
-                .map(Vec::len),
+            manifest.cluster_sensor_positions.as_ref().map(Vec::len),
             Some(4)
         );
         assert_eq!(

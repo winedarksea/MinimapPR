@@ -360,14 +360,7 @@ mod tests {
     fn hann_window_matches_numpy_hanning_shape() {
         let window = hann_window(8);
         let expected = [
-            0.0_f32,
-            0.1882551,
-            0.6112605,
-            0.9504844,
-            0.9504844,
-            0.6112605,
-            0.1882551,
-            0.0,
+            0.0_f32, 0.1882551, 0.6112605, 0.9504844, 0.9504844, 0.6112605, 0.1882551, 0.0,
         ];
 
         for (actual, expected) in window.iter().zip(expected.iter()) {

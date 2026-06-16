@@ -9,6 +9,7 @@ use crate::{
 };
 
 const EPSILON: f32 = 1e-9;
+const FAR_FIELD_RANGE_CONVERGENCE_TOLERANCE_M: f32 = 0.05;
 
 #[derive(Clone, Copy, Debug)]
 pub struct SrpPhatConfig {
@@ -367,29 +368,28 @@ fn refine_reference_position(
     let mut damping_lambda = 1.0e-4_f32;
 
     for _ in 0..24 {
+        let reciprocal_sound_speed = 1.0 / sound_speed_mps.max(1.0);
         let reference_position_m = mic_positions_m[reference_channel];
-        let reference_distance_m = euclidean_distance(position_m, reference_position_m) + EPSILON;
+        let reference_offset_m = sub(position_m, reference_position_m);
+        let reference_distance_m = magnitude(reference_offset_m) + EPSILON;
+        let reference_jacobian_scale = reciprocal_sound_speed / reference_distance_m;
         let mut jacobian_rows = Vec::with_capacity(measurements.len());
         let mut residuals = Vec::with_capacity(measurements.len());
         for measurement in measurements {
             let sensor_position_m = mic_positions_m[measurement.channel_index];
-            let sensor_distance_m = euclidean_distance(position_m, sensor_position_m) + EPSILON;
+            let sensor_offset_m = sub(position_m, sensor_position_m);
+            let sensor_distance_m = magnitude(sensor_offset_m) + EPSILON;
+            let sensor_jacobian_scale = reciprocal_sound_speed / sensor_distance_m;
             let predicted_tdoa_s =
-                (sensor_distance_m - reference_distance_m) / sound_speed_mps.max(1.0);
+                (sensor_distance_m - reference_distance_m) * reciprocal_sound_speed;
             residuals.push(predicted_tdoa_s - measurement.tdoa_seconds);
             jacobian_rows.push([
-                ((position_m[0] - sensor_position_m[0])
-                    / (sensor_distance_m * sound_speed_mps.max(1.0)))
-                    - ((position_m[0] - reference_position_m[0])
-                        / (reference_distance_m * sound_speed_mps.max(1.0))),
-                ((position_m[1] - sensor_position_m[1])
-                    / (sensor_distance_m * sound_speed_mps.max(1.0)))
-                    - ((position_m[1] - reference_position_m[1])
-                        / (reference_distance_m * sound_speed_mps.max(1.0))),
-                ((position_m[2] - sensor_position_m[2])
-                    / (sensor_distance_m * sound_speed_mps.max(1.0)))
-                    - ((position_m[2] - reference_position_m[2])
-                        / (reference_distance_m * sound_speed_mps.max(1.0))),
+                (sensor_offset_m[0] * sensor_jacobian_scale)
+                    - (reference_offset_m[0] * reference_jacobian_scale),
+                (sensor_offset_m[1] * sensor_jacobian_scale)
+                    - (reference_offset_m[1] * reference_jacobian_scale),
+                (sensor_offset_m[2] * sensor_jacobian_scale)
+                    - (reference_offset_m[2] * reference_jacobian_scale),
             ]);
         }
 
@@ -486,22 +486,38 @@ fn near_field_candidate(
         .copied()
         .enumerate()
         .max_by(|(_, left), (_, right)| left.partial_cmp(right).unwrap_or(Ordering::Equal))?;
-    let best_position_m = grid[best_index];
     let centroid_m = centroid(active_channels, mic_positions_m);
-    let mut refined_position_m = refine_reference_position(
-        best_position_m,
-        reference_channel,
-        measurements,
-        mic_positions_m,
-        sound_speed_mps,
-    );
-    let mut residual_rms_seconds = residual_rms(
-        refined_position_m,
-        reference_channel,
-        measurements,
-        mic_positions_m,
-        sound_speed_mps,
-    );
+    let mut ranked_grid_points: Vec<(usize, f32)> = scores.iter().copied().enumerate().collect();
+    ranked_grid_points
+        .sort_by(|(_, left), (_, right)| right.partial_cmp(left).unwrap_or(Ordering::Equal));
+    const REFINED_SRP_SEED_COUNT: usize = 8;
+    ranked_grid_points.truncate(REFINED_SRP_SEED_COUNT.min(ranked_grid_points.len()));
+
+    let mut best_position_m = grid[best_index];
+    let mut refined_position_m = best_position_m;
+    let mut residual_rms_seconds = f32::INFINITY;
+    for (candidate_index, _) in ranked_grid_points {
+        let candidate_seed_m = grid[candidate_index];
+        let candidate_position_m = refine_reference_position(
+            candidate_seed_m,
+            reference_channel,
+            measurements,
+            mic_positions_m,
+            sound_speed_mps,
+        );
+        let candidate_residual_rms_seconds = residual_rms(
+            candidate_position_m,
+            reference_channel,
+            measurements,
+            mic_positions_m,
+            sound_speed_mps,
+        );
+        if candidate_residual_rms_seconds < residual_rms_seconds {
+            best_position_m = candidate_seed_m;
+            refined_position_m = candidate_position_m;
+            residual_rms_seconds = candidate_residual_rms_seconds;
+        }
+    }
     let minimum_std_m = (config.grid_resolution_m * 0.5).max(0.05);
     let timing_resolution_seconds =
         1.0 / (sample_rate_hz.max(1) as f32 * config.interp_factor.max(1) as f32);
@@ -644,9 +660,16 @@ fn select_candidate(
             let far_improves_enough = if far.range_projection_mode == Some(RANGE_ASYMPTOTIC)
                 && near.residual_rms_seconds.is_finite()
             {
+                let near_range_m = magnitude(near.position_m);
                 far.residual_rms_seconds <= near.residual_rms_seconds * 0.12
-                    || (magnitude(far.position_m) > 100.0
+                    || (near.is_boundary_clamped
+                        && near_range_m > 20.0
+                        && magnitude(far.position_m) > 100.0
                         && far.residual_rms_seconds < near.residual_rms_seconds)
+                    || (near.range_observability.unwrap_or(1.0) < 0.15
+                        && far.contrast_score >= near.contrast_score + 0.2
+                        && magnitude(far.position_m) > 100.0
+                        && far.residual_rms_seconds <= near.residual_rms_seconds * 0.25)
             } else {
                 far.residual_rms_seconds + minimum_residual_improvement_seconds
                     < near.residual_rms_seconds
@@ -751,6 +774,9 @@ fn fit_far_field_range(
         sound_speed_mps,
     );
     for _ in 0..48 {
+        if (right_m - left_m) <= FAR_FIELD_RANGE_CONVERGENCE_TOLERANCE_M {
+            break;
+        }
         if fc < fd {
             right_m = d_m;
             d_m = c_m;
@@ -1058,25 +1084,24 @@ fn position_covariance_and_observability(
     sound_speed_mps: f32,
     minimum_std_m: f32,
 ) -> ([[f32; 3]; 3], f32) {
+    let reciprocal_sound_speed = 1.0 / sound_speed_mps.max(1.0);
     let reference_position_m = mic_positions_m[reference_channel];
-    let reference_distance_m = euclidean_distance(position_m, reference_position_m) + EPSILON;
+    let reference_offset_m = sub(position_m, reference_position_m);
+    let reference_distance_m = magnitude(reference_offset_m) + EPSILON;
+    let reference_jacobian_scale = reciprocal_sound_speed / reference_distance_m;
     let mut normal_matrix = [[0.0_f32; 3]; 3];
     for measurement in measurements {
         let sensor_position_m = mic_positions_m[measurement.channel_index];
-        let sensor_distance_m = euclidean_distance(position_m, sensor_position_m) + EPSILON;
+        let sensor_offset_m = sub(position_m, sensor_position_m);
+        let sensor_distance_m = magnitude(sensor_offset_m) + EPSILON;
+        let sensor_jacobian_scale = reciprocal_sound_speed / sensor_distance_m;
         let jacobian_row = [
-            ((position_m[0] - sensor_position_m[0])
-                / (sensor_distance_m * sound_speed_mps.max(1.0)))
-                - ((position_m[0] - reference_position_m[0])
-                    / (reference_distance_m * sound_speed_mps.max(1.0))),
-            ((position_m[1] - sensor_position_m[1])
-                / (sensor_distance_m * sound_speed_mps.max(1.0)))
-                - ((position_m[1] - reference_position_m[1])
-                    / (reference_distance_m * sound_speed_mps.max(1.0))),
-            ((position_m[2] - sensor_position_m[2])
-                / (sensor_distance_m * sound_speed_mps.max(1.0)))
-                - ((position_m[2] - reference_position_m[2])
-                    / (reference_distance_m * sound_speed_mps.max(1.0))),
+            (sensor_offset_m[0] * sensor_jacobian_scale)
+                - (reference_offset_m[0] * reference_jacobian_scale),
+            (sensor_offset_m[1] * sensor_jacobian_scale)
+                - (reference_offset_m[1] * reference_jacobian_scale),
+            (sensor_offset_m[2] * sensor_jacobian_scale)
+                - (reference_offset_m[2] * reference_jacobian_scale),
         ];
         for out_axis in 0..3 {
             for in_axis in 0..3 {
@@ -1198,8 +1223,15 @@ fn sample_pair_correlation(correlation: &GccPhatCorrelation, tau_seconds: f32) -
     if !(0.0..=(correlation.magnitudes.len().saturating_sub(1) as f32)).contains(&position) {
         return 0.0;
     }
-    let nearest_index = position.round() as usize;
-    correlation.magnitudes[nearest_index]
+    let lower_index = position.floor() as usize;
+    let upper_index = position.ceil() as usize;
+    if lower_index == upper_index {
+        return correlation.magnitudes[lower_index];
+    }
+    let fraction = position - lower_index as f32;
+    let lower_value = correlation.magnitudes[lower_index];
+    let upper_value = correlation.magnitudes[upper_index];
+    lower_value + ((upper_value - lower_value) * fraction)
 }
 
 fn predicted_pair_tau_s(
@@ -1842,6 +1874,84 @@ mod tests {
         assert!(evaluation.localization.confidence < 0.2);
     }
 
+    #[test]
+    fn sample_pair_correlation_interpolates_between_adjacent_bins() {
+        let correlation = GccPhatCorrelation {
+            lags_seconds: vec![-0.001, 0.0, 0.001],
+            magnitudes: vec![0.2, 1.0, 0.4],
+            tdoa: crate::gcc_phat::TdoaResult {
+                delay_samples: 0.0,
+                lag_seconds: 0.0,
+                confidence: 1.0,
+                peak_value: 1.0,
+            },
+        };
+
+        assert_eq!(sample_pair_correlation(&correlation, -0.001), 0.2);
+        assert_eq!(sample_pair_correlation(&correlation, 0.0), 1.0);
+        assert!((sample_pair_correlation(&correlation, -0.0005) - 0.6).abs() < 1.0e-6);
+        assert!((sample_pair_correlation(&correlation, 0.0005) - 0.7).abs() < 1.0e-6);
+        assert_eq!(sample_pair_correlation(&correlation, -0.002), 0.0);
+        assert_eq!(sample_pair_correlation(&correlation, 0.002), 0.0);
+    }
+
+    #[test]
+    fn far_field_range_fit_converges_with_acoustic_tolerance() {
+        let mics = [
+            [0.0, 0.0, 0.0],
+            [10.0, 0.0, 0.0],
+            [0.0, 10.0, 0.0],
+            [0.0, 0.0, 10.0],
+        ];
+        let active_channels = [0, 1, 2, 3];
+        let centroid_m = centroid(&active_channels, &mics);
+        let direction = normalize_or_zero([0.84, 0.42, 0.34]);
+        let expected_radius_m = 80.0;
+        let source_position_m = add(centroid_m, scale(direction, expected_radius_m));
+        let reference_channel = 0;
+        let measurements: Vec<ReferenceMeasurement> = [1, 2, 3]
+            .into_iter()
+            .map(|channel_index| ReferenceMeasurement {
+                channel_index,
+                tdoa_seconds: predicted_reference_tau_s(
+                    source_position_m,
+                    mics[channel_index],
+                    mics[reference_channel],
+                    343.2,
+                ),
+                peak_value: 1.0,
+            })
+            .collect();
+
+        let range_estimate = fit_far_field_range(
+            direction,
+            centroid_m,
+            reference_channel,
+            &measurements,
+            &mics,
+            48_000,
+            343.2,
+            SrpPhatConfig {
+                far_field_default_range_m: 60.0,
+                far_field_max_range_m: 250.0,
+                ..SrpPhatConfig::default()
+            },
+        );
+
+        assert!(
+            (range_estimate.radius_m - expected_radius_m).abs() <= 0.10,
+            "expected radius near {expected_radius_m}, got {}",
+            range_estimate.radius_m,
+        );
+        assert!(
+            dot(
+                normalize_or_zero(sub(range_estimate.position_m, centroid_m)),
+                direction,
+            ) > 0.999
+        );
+        assert!(range_estimate.residual_rms_seconds.is_finite());
+    }
+
     fn synthesize_point_source_channels(
         source_position_m: [f32; 3],
         mic_positions_m: &[[f32; 3]; 4],
@@ -2048,10 +2158,15 @@ mod tests {
         }
     }
 
-    const MULTINODE_TIGHT_POINTS_M: [[f32; 3]; 3] = [[8.0, 0.0, 3.0], [0.0, 8.0, 1.0], [8.0, 8.0, 4.0]];
-    const MULTINODE_WIDE_POINTS_M: [[f32; 3]; 3] = [[50.0, 0.0, 6.0], [0.0, 50.0, 1.0], [50.0, 50.0, 9.0]];
+    const MULTINODE_TIGHT_POINTS_M: [[f32; 3]; 3] =
+        [[8.0, 0.0, 3.0], [0.0, 8.0, 1.0], [8.0, 8.0, 4.0]];
+    const MULTINODE_WIDE_POINTS_M: [[f32; 3]; 3] =
+        [[50.0, 0.0, 6.0], [0.0, 50.0, 1.0], [50.0, 50.0, 9.0]];
 
-    fn localize_multinode(point_origins_m: &[[f32; 3]], distance_m: f32) -> (SrpPhatLocalization, [f32; 3], [f32; 3]) {
+    fn localize_multinode(
+        point_origins_m: &[[f32; 3]],
+        distance_m: f32,
+    ) -> (SrpPhatLocalization, [f32; 3], [f32; 3]) {
         let direction = look_direction();
         let mics = multinode_mics([0.0, 0.0, 1.5], point_origins_m);
         let active: Vec<usize> = (0..mics.len()).collect();
@@ -2062,8 +2177,14 @@ mod tests {
             centroid_m[2] + direction[2] * distance_m,
         ];
         let channels = synthesize_point_source_channels_n(source_position_m, &mics, 16_000, 16_384);
-        let evaluation =
-            estimate_tetrahedral_steering(&channels, &active, &mics, 16_000, 343.2, multinode_config());
+        let evaluation = estimate_tetrahedral_steering(
+            &channels,
+            &active,
+            &mics,
+            16_000,
+            343.2,
+            multinode_config(),
+        );
         (evaluation.localization, source_position_m, direction)
     }
 
@@ -2076,7 +2197,8 @@ mod tests {
             (&MULTINODE_WIDE_POINTS_M, 10.0, 3.0, 0.95),
         ];
         for (points, distance_m, max_error_m, min_bearing_dot) in cases {
-            let (localization, source_position_m, direction) = localize_multinode(points, distance_m);
+            let (localization, source_position_m, direction) =
+                localize_multinode(points, distance_m);
             let position_m = localization
                 .position_m
                 .unwrap_or_else(|| panic!("{distance_m} m: expected a fused position"));

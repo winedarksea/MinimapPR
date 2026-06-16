@@ -252,11 +252,7 @@ struct Args {
     )]
     localization_band_max_hz: f32,
 
-    #[arg(
-        long,
-        env = "MINIMAPPR_GCC_PHAT_INTERP_FACTOR",
-        default_value_t = 4
-    )]
+    #[arg(long, env = "MINIMAPPR_GCC_PHAT_INTERP_FACTOR", default_value_t = 4)]
     gcc_phat_interp_factor: usize,
 
     #[arg(
@@ -379,7 +375,10 @@ fn run_srp_oracle() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let sound_speed_mps = value["sound_speed_mps"].as_f64().ok_or("sound_speed_mps")? as f32;
 
     let mut mic_positions_m: Vec<[f32; 3]> = Vec::new();
-    for mic in value["mic_positions_m"].as_array().ok_or("mic_positions_m")? {
+    for mic in value["mic_positions_m"]
+        .as_array()
+        .ok_or("mic_positions_m")?
+    {
         let coords = mic.as_array().ok_or("mic entry")?;
         mic_positions_m.push([
             coords[0].as_f64().ok_or("mic x")? as f32,
@@ -1048,9 +1047,7 @@ fn validate_preprocess_stages(stages: &[PreprocessStage]) -> Result<(), String> 
         match stage {
             PreprocessStage::Gain { db } => {
                 if !(-60.0..=60.0).contains(db) {
-                    return Err(format!(
-                        "stages[{idx}].db must be in [-60, 60] (got {db})"
-                    ));
+                    return Err(format!("stages[{idx}].db must be in [-60, 60] (got {db})"));
                 }
             }
             PreprocessStage::Highpass { cutoff_hz, order }
@@ -1072,9 +1069,7 @@ fn validate_preprocess_stages(stages: &[PreprocessStage]) -> Result<(), String> 
                 order,
             } => {
                 if !low_hz.is_finite() || *low_hz <= 0.0 {
-                    return Err(format!(
-                        "stages[{idx}].low_hz must be > 0 (got {low_hz})"
-                    ));
+                    return Err(format!("stages[{idx}].low_hz must be > 0 (got {low_hz})"));
                 }
                 if !high_hz.is_finite() || *high_hz <= *low_hz {
                     return Err(format!(
@@ -1536,8 +1531,7 @@ fn read_wav_channels_f32(path: &Path, expected_channels: usize) -> Result<[Vec<f
     let mut channels: [Vec<f32>; 4] = std::array::from_fn(|_| Vec::new());
     let mut sample_index = 0usize;
     for sample in reader.into_samples::<i16>() {
-        let value = sample
-            .map_err(|error| format!("failed reading {}: {error}", path.display()))?
+        let value = sample.map_err(|error| format!("failed reading {}: {error}", path.display()))?
             as f32
             / 32767.0;
         channels[sample_index % expected_channels].push(value);
@@ -1569,9 +1563,7 @@ fn read_wav_mono_f32(path: &Path) -> Result<Vec<f32>, String> {
     let mut samples = Vec::new();
     for sample in reader.into_samples::<i16>() {
         samples.push(
-            sample
-                .map_err(|error| format!("failed reading {}: {error}", path.display()))?
-                as f32
+            sample.map_err(|error| format!("failed reading {}: {error}", path.display()))? as f32
                 / 32767.0,
         );
     }

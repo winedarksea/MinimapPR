@@ -21,6 +21,24 @@ from minimappr.core.subspace_bearing import (
 from minimappr.core.tdoa_measurements import measure_pair_tdoas, reference_tdoas
 from minimappr.models import LocalizationResult
 
+BearingPriorEstimator = Callable[
+    [dict[str, np.ndarray], dict[str, np.ndarray], list[str], int, float],
+    BearingPrior,
+]
+NodeBearingEstimator = Callable[
+    [dict[str, np.ndarray], dict[str, np.ndarray], list[str]],
+    tuple[np.ndarray, float],
+]
+
+
+def _uses_multiple_sensor_nodes(
+    sensor_ids: list[str],
+    sensor_node_ids: dict[str, str] | None,
+) -> bool:
+    return sensor_node_ids is not None and len(
+        {sensor_node_ids.get(sensor_id) for sensor_id in sensor_ids}
+    ) > 1
+
 
 def _localize_cartesian(
     *,
@@ -33,15 +51,10 @@ def _localize_cartesian(
     interpolation_factor: int,
     sensor_weights: dict[str, float] | None,
     bearing_prior: BearingPrior | None = None,
+    bearing_prior_estimator: BearingPriorEstimator | None = None,
     sensor_node_ids: dict[str, str] | None = None,
     sensor_gain_offsets_db: dict[str, float] | None = None,
-    node_bearing_estimator: (
-        Callable[
-            [dict[str, np.ndarray], dict[str, np.ndarray], list[str]],
-            tuple[np.ndarray, float],
-        ]
-        | None
-    ) = None,
+    node_bearing_estimator: NodeBearingEstimator | None = None,
     node_bearing_strength: float = 1.0,
     amplitude_ratio_strength: float = 0.0,
     far_field_initial_range_m: float = 50.0,
@@ -54,6 +67,36 @@ def _localize_cartesian(
         temperature_c=temperature_c,
         humidity_fraction=humidity_fraction,
     )
+    has_multiple_nodes = _uses_multiple_sensor_nodes(sensor_ids, sensor_node_ids)
+    active_node_bearing_estimator = node_bearing_estimator
+    if bearing_prior_estimator is not None:
+        def estimate_bearing(
+            node_positions: dict[str, np.ndarray],
+            node_windows: dict[str, np.ndarray],
+            node_sensor_ids: list[str],
+        ) -> tuple[np.ndarray, float]:
+            prior = bearing_prior_estimator(
+                node_positions,
+                node_windows,
+                node_sensor_ids,
+                sample_rate_hz,
+                sound_speed_mps,
+            )
+            return prior.direction, prior.quality
+
+        if has_multiple_nodes:
+            active_node_bearing_estimator = estimate_bearing
+        elif bearing_prior is None:
+            try:
+                bearing_prior = bearing_prior_estimator(
+                    sensor_positions,
+                    sensor_windows,
+                    sensor_ids,
+                    sample_rate_hz,
+                    sound_speed_mps,
+                )
+            except (ValueError, np.linalg.LinAlgError) as exc:
+                raise LocalizationError(str(exc)) from exc
     measurements = measure_pair_tdoas(
         sensor_positions=sensor_positions,
         sensor_windows=sensor_windows,
@@ -87,7 +130,7 @@ def _localize_cartesian(
         amplitude_ratio_strength=amplitude_ratio_strength,
         pair_measurements=measurements,
         sensor_gain_offsets_db=sensor_gain_offsets_db,
-        node_bearing_estimator=node_bearing_estimator,
+        node_bearing_estimator=active_node_bearing_estimator,
     )
     if (
         len(measurements) < 3
@@ -194,51 +237,26 @@ class MusicLocalizer:
         sensor_node_ids: dict[str, str] | None = None,
         sensor_gain_offsets_db: dict[str, float] | None = None,
     ) -> LocalizationResult:
-        sensor_ids = sorted(
-            sensor_id for sensor_id in sensor_positions if sensor_id in sensor_windows
-        )
-        sound_speed_mps = speed_of_sound_mps(
-            temperature_c=temperature_c,
-            humidity_fraction=humidity_fraction,
-        )
-        def estimate_node_bearing(
-            node_positions: dict[str, np.ndarray],
-            node_windows: dict[str, np.ndarray],
-            node_sensor_ids: list[str],
-        ) -> tuple[np.ndarray, float]:
-            prior = music_bearing_prior(
-                sensor_positions=node_positions,
-                sensor_windows=node_windows,
-                sensor_ids=node_sensor_ids,
-                sample_rate_hz=sample_rate_hz,
-                sound_speed_mps=sound_speed_mps,
+        def estimate_bearing_prior(
+            estimator_sensor_positions: dict[str, np.ndarray],
+            estimator_sensor_windows: dict[str, np.ndarray],
+            estimator_sensor_ids: list[str],
+            estimator_sample_rate_hz: int,
+            estimator_sound_speed_mps: float,
+        ) -> BearingPrior:
+            return music_bearing_prior(
+                sensor_positions=estimator_sensor_positions,
+                sensor_windows=estimator_sensor_windows,
+                sensor_ids=estimator_sensor_ids,
+                sample_rate_hz=estimator_sample_rate_hz,
+                sound_speed_mps=estimator_sound_speed_mps,
                 azimuth_step_deg=self.azimuth_step_deg,
                 elevation_step_deg=self.elevation_step_deg,
                 minimum_frequency_hz=self.freq_min_hz,
                 maximum_frequency_hz=self.freq_max_hz,
                 source_count=self.source_count,
             )
-            return prior.direction, prior.quality
 
-        has_multiple_nodes = (
-            sensor_node_ids is not None
-            and len({sensor_node_ids.get(sensor_id) for sensor_id in sensor_ids}) > 1
-        )
-        try:
-            bearing_prior = None if has_multiple_nodes else music_bearing_prior(
-                sensor_positions=sensor_positions,
-                sensor_windows=sensor_windows,
-                sensor_ids=sensor_ids,
-                sample_rate_hz=sample_rate_hz,
-                sound_speed_mps=sound_speed_mps,
-                azimuth_step_deg=self.azimuth_step_deg,
-                elevation_step_deg=self.elevation_step_deg,
-                minimum_frequency_hz=self.freq_min_hz,
-                maximum_frequency_hz=self.freq_max_hz,
-                source_count=self.source_count,
-            )
-        except (ValueError, np.linalg.LinAlgError) as exc:
-            raise LocalizationError(str(exc)) from exc
         return _localize_cartesian(
             sensor_positions=sensor_positions,
             sensor_windows=sensor_windows,
@@ -248,10 +266,9 @@ class MusicLocalizer:
             max_tau_s=self.max_tau_s,
             interpolation_factor=self.interp,
             sensor_weights=sensor_weights,
-            bearing_prior=bearing_prior,
+            bearing_prior_estimator=estimate_bearing_prior,
             sensor_node_ids=sensor_node_ids,
             sensor_gain_offsets_db=sensor_gain_offsets_db,
-            node_bearing_estimator=estimate_node_bearing if has_multiple_nodes else None,
             node_bearing_strength=self.node_bearing_strength,
             amplitude_ratio_strength=self.amplitude_ratio_strength,
             far_field_initial_range_m=self.far_field_default_range_m,
@@ -280,45 +297,23 @@ class EspritLocalizer:
         sensor_node_ids: dict[str, str] | None = None,
         sensor_gain_offsets_db: dict[str, float] | None = None,
     ) -> LocalizationResult:
-        sensor_ids = sorted(
-            sensor_id for sensor_id in sensor_positions if sensor_id in sensor_windows
-        )
-        sound_speed_mps = speed_of_sound_mps(
-            temperature_c=temperature_c,
-            humidity_fraction=humidity_fraction,
-        )
-        def estimate_node_bearing(
-            node_positions: dict[str, np.ndarray],
-            node_windows: dict[str, np.ndarray],
-            node_sensor_ids: list[str],
-        ) -> tuple[np.ndarray, float]:
-            prior = esprit_bearing_prior(
-                sensor_positions=node_positions,
-                sensor_windows=node_windows,
-                sensor_ids=node_sensor_ids,
-                sample_rate_hz=sample_rate_hz,
-                sound_speed_mps=sound_speed_mps,
+        def estimate_bearing_prior(
+            estimator_sensor_positions: dict[str, np.ndarray],
+            estimator_sensor_windows: dict[str, np.ndarray],
+            estimator_sensor_ids: list[str],
+            estimator_sample_rate_hz: int,
+            estimator_sound_speed_mps: float,
+        ) -> BearingPrior:
+            return esprit_bearing_prior(
+                sensor_positions=estimator_sensor_positions,
+                sensor_windows=estimator_sensor_windows,
+                sensor_ids=estimator_sensor_ids,
+                sample_rate_hz=estimator_sample_rate_hz,
+                sound_speed_mps=estimator_sound_speed_mps,
                 minimum_frequency_hz=self.freq_min_hz,
                 maximum_frequency_hz=self.freq_max_hz,
             )
-            return prior.direction, prior.quality
 
-        has_multiple_nodes = (
-            sensor_node_ids is not None
-            and len({sensor_node_ids.get(sensor_id) for sensor_id in sensor_ids}) > 1
-        )
-        try:
-            bearing_prior = None if has_multiple_nodes else esprit_bearing_prior(
-                sensor_positions=sensor_positions,
-                sensor_windows=sensor_windows,
-                sensor_ids=sensor_ids,
-                sample_rate_hz=sample_rate_hz,
-                sound_speed_mps=sound_speed_mps,
-                minimum_frequency_hz=self.freq_min_hz,
-                maximum_frequency_hz=self.freq_max_hz,
-            )
-        except (ValueError, np.linalg.LinAlgError) as exc:
-            raise LocalizationError(str(exc)) from exc
         return _localize_cartesian(
             sensor_positions=sensor_positions,
             sensor_windows=sensor_windows,
@@ -328,10 +323,9 @@ class EspritLocalizer:
             max_tau_s=self.max_tau_s,
             interpolation_factor=self.interp,
             sensor_weights=sensor_weights,
-            bearing_prior=bearing_prior,
+            bearing_prior_estimator=estimate_bearing_prior,
             sensor_node_ids=sensor_node_ids,
             sensor_gain_offsets_db=sensor_gain_offsets_db,
-            node_bearing_estimator=estimate_node_bearing if has_multiple_nodes else None,
             node_bearing_strength=self.node_bearing_strength,
             amplitude_ratio_strength=self.amplitude_ratio_strength,
             far_field_initial_range_m=self.far_field_default_range_m,

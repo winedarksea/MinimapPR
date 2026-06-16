@@ -838,13 +838,11 @@ impl DspWorker {
 
         let existing_sample_timeline_start_time_ns =
             if !owned.node_timestamp_is_available && !owned.buffer_uses_receipt_time {
-                owned
-                    .start_sample_index
-                    .and_then(|sample_index| {
-                        buffers
-                            .get(reference_buffer_index)
-                            .and_then(|buffer| buffer.time_for_sample_index(sample_index))
-                    })
+                owned.start_sample_index.and_then(|sample_index| {
+                    buffers
+                        .get(reference_buffer_index)
+                        .and_then(|buffer| buffer.time_for_sample_index(sample_index))
+                })
             } else {
                 None
             };
@@ -860,7 +858,8 @@ impl DspWorker {
         };
 
         let mut reanchor_delta: u64 = 0;
-        for (channel_index, &buffer_channel_index) in owned.buffer_channel_indices.iter().enumerate()
+        for (channel_index, &buffer_channel_index) in
+            owned.buffer_channel_indices.iter().enumerate()
         {
             let Some(channel_samples) = owned.decoded.channels.get(channel_index) else {
                 break;
