@@ -4,6 +4,7 @@ import asyncio
 import functools
 import json
 import os
+import shutil
 import socket
 import sqlite3
 import struct
@@ -192,6 +193,8 @@ def _sidecar_output(process: subprocess.Popen[str]) -> str:
 
 @functools.lru_cache(maxsize=1)
 def _ensure_sidecar_binary() -> Path:
+    if shutil.which("cargo") is None:
+        pytest.skip("cargo toolchain not available; cannot build the Rust sidecar")
     sidecar_dir = MINIMAPPR_ROOT / "minimappr-ingest-sidecar"
     subprocess.run(
         ["cargo", "build", "--quiet", "--bin", "minimappr-ingest-sidecar"],
