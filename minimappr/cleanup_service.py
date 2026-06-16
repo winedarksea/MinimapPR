@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import shutil
 import time
@@ -25,6 +26,7 @@ class CleanupService:
     def __init__(self, *, settings: Settings, storage: StorageBackend | None = None) -> None:
         self._settings = settings
         self._storage = storage
+        self._last_sqlite_maintenance_ns: int | None = None
 
     @property
     def settings(self) -> Settings:
@@ -86,6 +88,7 @@ class CleanupService:
         *,
         now_ns: int | None = None,
         dry_run: bool = False,
+        force_sqlite_maintenance: bool = False,
     ) -> dict[str, Any]:
         if self._storage is None:
             raise RuntimeError("Housekeeping requires an initialized storage backend")
@@ -112,7 +115,14 @@ class CleanupService:
                 "dropped_tracks": self._settings.retention_dropped_tracks_seconds,
             },
         )
-        maintenance_summary = await self._storage.run_sqlite_maintenance()
+        sqlite_maintenance_due = self._sqlite_maintenance_due(
+            effective_now_ns,
+            force=force_sqlite_maintenance,
+        )
+        maintenance_summary = None
+        if sqlite_maintenance_due:
+            maintenance_summary = await self._storage.run_sqlite_maintenance()
+            self._last_sqlite_maintenance_ns = effective_now_ns
         return {
             "mode": "housekeeping",
             "dry_run": dry_run,
@@ -120,6 +130,8 @@ class CleanupService:
             "partial_cleanup": partial_summary["summary"],
             "retention_cleanup": retention_summary,
             "sqlite_maintenance": maintenance_summary,
+            "sqlite_maintenance_due": sqlite_maintenance_due,
+            "sqlite_maintenance_interval_seconds": self._settings.sqlite_maintenance_interval_seconds,
         }
 
     async def run_full_cleanup(self, *, dry_run: bool = False) -> dict[str, Any]:
@@ -129,14 +141,13 @@ class CleanupService:
         db_removed = False
         if self._settings.db_path.exists():
             if not dry_run:
-                self._settings.db_path.unlink(missing_ok=True)
+                await asyncio.to_thread(self._settings.db_path.unlink, missing_ok=True)
             db_removed = True
-        snippet_summary = _remove_tree(self._settings.snippet_dir, dry_run=dry_run)
-        artifact_summary = _remove_tree(self._settings.large_artifact_dir, dry_run=dry_run)
-        cache_summaries = [
-            _remove_path(path, dry_run=dry_run)
-            for path in _KNOWN_RUNTIME_CACHE_PATHS
-        ]
+        snippet_summary, artifact_summary, cache_summaries = await asyncio.gather(
+            _remove_tree_async(self._settings.snippet_dir, dry_run=dry_run),
+            _remove_tree_async(self._settings.large_artifact_dir, dry_run=dry_run),
+            _remove_known_runtime_cache_paths(dry_run=dry_run),
+        )
         return {
             "mode": "full",
             "dry_run": dry_run,
@@ -145,6 +156,33 @@ class CleanupService:
             "artifact_dir": artifact_summary,
             "cache_paths": cache_summaries,
         }
+
+    def _sqlite_maintenance_due(self, now_ns: int, *, force: bool) -> bool:
+        if force:
+            return True
+        if self._last_sqlite_maintenance_ns is None:
+            return True
+        interval_ns = int(self._settings.sqlite_maintenance_interval_seconds * 1_000_000_000)
+        return now_ns - self._last_sqlite_maintenance_ns >= interval_ns
+
+
+async def _remove_known_runtime_cache_paths(*, dry_run: bool) -> list[dict[str, Any]]:
+    return list(
+        await asyncio.gather(
+            *[
+                _remove_path_async(path, dry_run=dry_run)
+                for path in _KNOWN_RUNTIME_CACHE_PATHS
+            ]
+        )
+    )
+
+
+async def _remove_tree_async(path: Path, *, dry_run: bool) -> dict[str, Any]:
+    return await asyncio.to_thread(_remove_tree, path, dry_run=dry_run)
+
+
+async def _remove_path_async(path: Path, *, dry_run: bool) -> dict[str, Any]:
+    return await asyncio.to_thread(_remove_path, path, dry_run=dry_run)
 
 
 def _remove_tree(path: Path, *, dry_run: bool) -> dict[str, Any]:

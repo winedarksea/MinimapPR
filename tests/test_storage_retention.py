@@ -302,10 +302,43 @@ async def test_housekeeping_cycle_runs_sqlite_maintenance_and_retention_indexes(
     freelist_after_delete = int(freelist_after_delete_row[0])
     assert freelist_after_delete > 0
 
-    maintenance_summary = await service.run_housekeeping_cycle(now_ns=now_ns)
+    maintenance_summary = await service.run_housekeeping_cycle(
+        now_ns=now_ns,
+        force_sqlite_maintenance=True,
+    )
     sqlite_maintenance = maintenance_summary["sqlite_maintenance"]
+    assert maintenance_summary["sqlite_maintenance_due"] is True
     assert sqlite_maintenance["freelist_before"] == freelist_after_delete
     assert sqlite_maintenance["freelist_after"] < freelist_after_delete
+
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_housekeeping_cycle_throttles_sqlite_maintenance(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "maintenance-throttle.db")
+    await storage.initialize()
+
+    settings = Settings(
+        db_path=tmp_path / "maintenance-throttle.db",
+        snippet_dir=tmp_path / "snippets",
+        large_artifact_dir=tmp_path / "artifacts",
+        retention_policy_path=tmp_path / "cleanup-policy.json",
+        sqlite_maintenance_interval_seconds=3600.0,
+    )
+    service = CleanupService(settings=settings, storage=storage)
+
+    first = await service.run_housekeeping_cycle(now_ns=1_000_000_000)
+    assert first["sqlite_maintenance_due"] is True
+    assert first["sqlite_maintenance"] is not None
+
+    second = await service.run_housekeeping_cycle(now_ns=2_000_000_000)
+    assert second["sqlite_maintenance_due"] is False
+    assert second["sqlite_maintenance"] is None
+
+    third = await service.run_housekeeping_cycle(now_ns=3_601_000_000_000)
+    assert third["sqlite_maintenance_due"] is True
+    assert third["sqlite_maintenance"] is not None
 
     await storage.close()
 

@@ -520,6 +520,7 @@ class Settings:
     retention_long_security_confidence: float = 0.6
 
     cleanup_interval_seconds: float = 15.0
+    sqlite_maintenance_interval_seconds: float = 3600.0
     node_degraded_after_seconds: float = 15.0
     node_offline_after_seconds: float = 45.0
     # Per-node GPS position Kalman filter (1-D applied independently to each ENU axis).
@@ -597,11 +598,11 @@ class Settings:
         if self.ingest_sidecar_allow_non_tmpfs_journal is None:
             self.ingest_sidecar_allow_non_tmpfs_journal = platform.system() != "Linux"
         if self.persist_observations_on_ingest is None:
-            # BirdNET production favors real-time ingest and contiguous detection
+            # production favors real-time ingest and contiguous detection
             # snippets over dense raw-observation provenance at ingest time.
             # Persisting one observation row per sensor per frame amplifies DB I/O
             # and can starve HTTP ingest under sustained edge publish load.
-            self.persist_observations_on_ingest = self.runtime_profile != "birdnet_hybrid_production"
+            self.persist_observations_on_ingest = False
 
         if self.node_degraded_after_seconds <= 0.0:
             raise ValueError("MINIMAPPR_NODE_DEGRADED_AFTER_SECONDS must be > 0")
@@ -611,6 +612,8 @@ class Settings:
             raise ValueError("MINIMAPPR_EVENT_STALE_SECONDS must be > 0")
         if self.cleanup_interval_seconds <= 0.0:
             raise ValueError("MINIMAPPR_CLEANUP_INTERVAL_SECONDS must be > 0")
+        if self.sqlite_maintenance_interval_seconds <= 0.0:
+            raise ValueError("MINIMAPPR_SQLITE_MAINTENANCE_INTERVAL_SECONDS must be > 0")
         if self.capture_final_tracks_settle_seconds < 0.0:
             raise ValueError("MINIMAPPR_CAPTURE_FINAL_TRACKS_SETTLE_SECONDS must be >= 0")
         if self.ingest_spool_ready_ttl_seconds < 0.0:
@@ -1158,6 +1161,9 @@ class Settings:
             ),
             retention_long_security_confidence=_env_float("MINIMAPPR_RETENTION_LONG_SECURITY_CONFIDENCE", 0.6),
             cleanup_interval_seconds=_env_float("MINIMAPPR_CLEANUP_INTERVAL_SECONDS", 15.0),
+            sqlite_maintenance_interval_seconds=_env_float(
+                "MINIMAPPR_SQLITE_MAINTENANCE_INTERVAL_SECONDS", 3600.0
+            ),
             node_degraded_after_seconds=_env_float("MINIMAPPR_NODE_DEGRADED_AFTER_SECONDS", 15.0),
             node_offline_after_seconds=_env_float("MINIMAPPR_NODE_OFFLINE_AFTER_SECONDS", 45.0),
             legacy_ingest_fallback_position_m=_env_vec3_optional(
