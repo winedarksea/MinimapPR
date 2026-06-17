@@ -189,9 +189,13 @@ static constexpr mmpr::Vec3 kPointSensorOffsetsM[1] = {
     {0.0f, 0.0f, 0.0f},
 };
 
-// For calibration: rotate only the base plane indexing while keeping MK4 fixed.
-// 0 = no rotation, 1 = +120 degrees, 2 = +240 degrees.
+// Coarse installation correction retained for existing 120-degree mounts.
+// 0 = no correction, 1 = +120 degrees, 2 = +240 degrees.
 static constexpr uint8_t kBasePlaneRotationSteps = 0;
+// Clockwise installation heading from local-world +X, provisioned per node.
+// Current boards do not populate the compass hardware, so this value is the
+// authoritative orientation until a future board revision enables sensing.
+static constexpr float kProvisionedWorldHeadingDeg = 0.0f;
 
 // TDM slot mapping from ADAU7112 strap configuration.
 // Per schematic I2S / TDM channel assignments:
