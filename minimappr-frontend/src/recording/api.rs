@@ -12,7 +12,9 @@
 ///   DELETE /api/v1/recordings/{id}                    → 204
 ///   GET    /api/v1/cameras                            → Vec<CameraDevice>
 ///   GET    /api/v1/recordings/{id}/download?format=…  → file (ambisonics|iamf|visual|video)
-use crate::recording::{CameraDevice, RecordingLibraryEntry, RecordingSession, StartRecordingRequest};
+use crate::recording::{
+    CameraDevice, RecordingLibraryEntry, RecordingSession, StartRecordingRequest,
+};
 use gloo_net::http::Request;
 use js_sys::encode_uri_component;
 use serde_json::Value;
@@ -82,10 +84,7 @@ pub async fn stop_recording(session_id: &str) -> Result<RecordingSession, String
 #[allow(dead_code)]
 pub async fn fetch_recording(session_id: &str) -> Result<RecordingSession, String> {
     let url = format!("/api/v1/recordings/{}", enc(session_id));
-    let resp = Request::get(&url)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    let resp = Request::get(&url).send().await.map_err(|e| e.to_string())?;
     expect_json(resp).await
 }
 

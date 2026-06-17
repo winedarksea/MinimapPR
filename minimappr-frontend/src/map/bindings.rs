@@ -62,19 +62,16 @@ extern "C" {
     pub fn clear_cop_highlight();
 
     #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "setCopUncertainty")]
-    pub fn set_cop_uncertainty(
-        kind: &str,
-        id: &str,
-        lat: f64,
-        lon: f64,
-        covariance: &JsValue,
-    );
+    pub fn set_cop_uncertainty(kind: &str, id: &str, lat: f64, lon: f64, covariance: &JsValue);
 
     #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "clearAllCopUncertainty")]
     pub fn clear_all_cop_uncertainty();
 
     #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "setCopSelectionCallback")]
     pub fn set_cop_selection_callback(callback: &js_sys::Function);
+
+    #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "setCopSelectionCallback")]
+    pub fn set_cop_selection_callback_value(callback: &JsValue);
 
     #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "setHeatmapPoints")]
     pub fn set_heatmap_points(points: &JsValue, max_intensity: f64);

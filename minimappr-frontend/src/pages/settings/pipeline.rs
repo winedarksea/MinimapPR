@@ -12,54 +12,86 @@ use std::collections::HashMap;
 
 #[derive(Clone, Debug, Deserialize, Default, PartialEq)]
 struct PipelineStage {
-    #[serde(default)] name: String,
-    #[serde(default)] count_in: u64,
-    #[serde(default)] count_out: u64,
-    #[serde(default)] drops: u64,
-    #[serde(default)] queue_depth: u64,
-    #[serde(default)] queue_max: u64,
-    #[serde(default)] lag_s: Option<f64>,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    count_in: u64,
+    #[serde(default)]
+    count_out: u64,
+    #[serde(default)]
+    drops: u64,
+    #[serde(default)]
+    queue_depth: u64,
+    #[serde(default)]
+    queue_max: u64,
+    #[serde(default)]
+    lag_s: Option<f64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Default, PartialEq)]
 struct MicData {
-    #[serde(default)] index: u32,
-    #[serde(default)] label: String,
-    #[serde(default)] gain_db: f64,
-    #[serde(default)] hp_hz: f64,
-    #[serde(default)] lp_hz: f64,
-    #[serde(default)] smoothing: String,
-    #[serde(default)] rms_recent: Vec<f64>,
+    #[serde(default)]
+    index: u32,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    gain_db: f64,
+    #[serde(default)]
+    hp_hz: f64,
+    #[serde(default)]
+    lp_hz: f64,
+    #[serde(default)]
+    smoothing: String,
+    #[serde(default)]
+    rms_recent: Vec<f64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Default, PartialEq)]
 struct NodeAudioOverride {
-    #[serde(default)] mic_gains_db: Option<Vec<f64>>,
-    #[serde(default)] hp_hz: Option<f64>,
-    #[serde(default)] lp_hz: Option<f64>,
-    #[serde(default)] smoothing: Option<String>,
-    #[serde(default)] stages: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    mic_gains_db: Option<Vec<f64>>,
+    #[serde(default)]
+    hp_hz: Option<f64>,
+    #[serde(default)]
+    lp_hz: Option<f64>,
+    #[serde(default)]
+    smoothing: Option<String>,
+    #[serde(default)]
+    stages: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Default, PartialEq)]
 struct PipelineNode {
-    #[serde(default)] node_id: String,
-    #[serde(default)] node_type: String,
-    #[serde(default)] mics: Vec<MicData>,
-    #[serde(default)] stages: Vec<PipelineStage>,
-    #[serde(default)] audio_override: Option<NodeAudioOverride>,
-    #[serde(default)] frame_gaps: u64,
-    #[serde(default)] zero_padded_degraded: u64,
-    #[serde(default)] last_frame_ns: Option<i64>,
-    #[serde(default)] sample_rate_hz: Option<u32>,
-    #[serde(default)] audio_status: String,
+    #[serde(default)]
+    node_id: String,
+    #[serde(default)]
+    node_type: String,
+    #[serde(default)]
+    mics: Vec<MicData>,
+    #[serde(default)]
+    stages: Vec<PipelineStage>,
+    #[serde(default)]
+    audio_override: Option<NodeAudioOverride>,
+    #[serde(default)]
+    frame_gaps: u64,
+    #[serde(default)]
+    zero_padded_degraded: u64,
+    #[serde(default)]
+    last_frame_ns: Option<i64>,
+    #[serde(default)]
+    sample_rate_hz: Option<u32>,
+    #[serde(default)]
+    audio_status: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Default, PartialEq)]
 struct PipelineNodesResp {
-    #[serde(default)] active_pipeline: String,
-    #[serde(default)] nodes: Vec<PipelineNode>,
-    #[serde(default)] pipeline_seconds_behind_realtime: Option<f64>,
+    #[serde(default)]
+    active_pipeline: String,
+    #[serde(default)]
+    nodes: Vec<PipelineNode>,
+    #[serde(default)]
+    pipeline_seconds_behind_realtime: Option<f64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -100,13 +132,18 @@ impl NodeEdit {
                 mic_gains_db[index] = gain_db;
             }
         }
-        let stage_mode = override_stages.as_ref().map(|stages| !stages.is_empty()).unwrap_or(false);
+        let stage_mode = override_stages
+            .as_ref()
+            .map(|stages| !stages.is_empty())
+            .unwrap_or(false);
         NodeEdit {
             mic_gains_db,
             hp_hz: override_hp_hz.unwrap_or_else(|| first.map(|m| m.hp_hz).unwrap_or(0.0)),
             lp_hz: override_lp_hz.unwrap_or_else(|| first.map(|m| m.lp_hz).unwrap_or(0.0)),
             smoothing: override_smoothing.unwrap_or_else(|| {
-                first.map(|m| m.smoothing.clone()).unwrap_or_else(|| "off".into())
+                first
+                    .map(|m| m.smoothing.clone())
+                    .unwrap_or_else(|| "off".into())
             }),
             stage_mode,
             stage_json: override_stages
@@ -131,7 +168,9 @@ fn fmt_lag(lag_s: Option<f64>) -> String {
 }
 
 fn stage_chip_class(lag_s: Option<f64>, drops: u64) -> &'static str {
-    if drops > 0 { return "pipeline-stage-chip warn"; }
+    if drops > 0 {
+        return "pipeline-stage-chip warn";
+    }
     match lag_s {
         Some(s) if s >= 2.0 => "pipeline-stage-chip danger",
         Some(s) if s >= 0.5 => "pipeline-stage-chip warn",
@@ -140,28 +179,42 @@ fn stage_chip_class(lag_s: Option<f64>, drops: u64) -> &'static str {
 }
 
 fn fmt_count(n: u64) -> String {
-    if n >= 1_000_000 { format!("{:.1}M", n as f64 / 1_000_000.0) }
-    else if n >= 1_000 { format!("{:.1}k", n as f64 / 1_000.0) }
-    else { n.to_string() }
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
 }
 
 fn sparkline_path(rms: &[f64], width: f64, height: f64) -> String {
-    if rms.len() < 2 { return String::new(); }
-    let max = rms.iter().cloned().fold(f64::NEG_INFINITY, f64::max).max(1e-9);
+    if rms.len() < 2 {
+        return String::new();
+    }
+    let max = rms
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max)
+        .max(1e-9);
     let n = rms.len();
-    let pts: Vec<String> = rms.iter().enumerate().map(|(i, &v)| {
-        let x = i as f64 / (n - 1).max(1) as f64 * width;
-        let y = height - (v / max) * height;
-        format!("{x:.1},{y:.1}")
-    }).collect();
+    let pts: Vec<String> = rms
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| {
+            let x = i as f64 / (n - 1).max(1) as f64 * width;
+            let y = height - (v / max) * height;
+            format!("{x:.1},{y:.1}")
+        })
+        .collect();
     format!("M {}", pts.join(" L "))
 }
 
 fn audio_status_chip(status: &str) -> &'static str {
     match status {
         "recent" => "health-chip online",
-        "stale"  => "health-chip degraded",
-        _        => "health-chip offline",
+        "stale" => "health-chip degraded",
+        _ => "health-chip offline",
     }
 }
 
@@ -207,9 +260,13 @@ fn age_text(last_frame_ns: Option<i64>) -> Option<String> {
     let ns = last_frame_ns?;
     let now_ns = (js_sys::Date::now() * 1_000_000.0) as i64;
     let age_s = ((now_ns - ns) as f64 / 1_000_000_000.0).max(0.0);
-    Some(if age_s < 60.0 { format!("{age_s:.0}s ago") }
-         else if age_s < 3600.0 { format!("{:.0}m ago", age_s / 60.0) }
-         else { format!("{:.1}h ago", age_s / 3600.0) })
+    Some(if age_s < 60.0 {
+        format!("{age_s:.0}s ago")
+    } else if age_s < 3600.0 {
+        format!("{:.0}m ago", age_s / 60.0)
+    } else {
+        format!("{:.1}h ago", age_s / 3600.0)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -229,9 +286,12 @@ pub fn PipelineView() -> impl IntoView {
                     Ok(r) => {
                         edits.update(|map| {
                             for node in &r.nodes {
-                                let e = map.entry(node.node_id.clone())
+                                let e = map
+                                    .entry(node.node_id.clone())
                                     .or_insert_with(|| NodeEdit::from_node(node));
-                                if !e.dirty { *e = NodeEdit::from_node(node); }
+                                if !e.dirty {
+                                    *e = NodeEdit::from_node(node);
+                                }
                             }
                         });
                         data.set(Some(r));
@@ -240,7 +300,7 @@ pub fn PipelineView() -> impl IntoView {
                     Err(e) => error.set(Some(format!("parse: {e}"))),
                 },
                 Ok(resp) => error.set(Some(format!("HTTP {}", resp.status()))),
-                Err(e)   => error.set(Some(e.to_string())),
+                Err(e) => error.set(Some(e.to_string())),
             }
         });
     };
@@ -249,7 +309,9 @@ pub fn PipelineView() -> impl IntoView {
     Effect::new(move |_| {
         spawn_local(async move {
             let mut iv = IntervalStream::new(1_500);
-            while iv.next().await.is_some() { fetch(); }
+            while iv.next().await.is_some() {
+                fetch();
+            }
         });
     });
 
@@ -353,9 +415,16 @@ fn NodeCard(
     let audio_status = node.audio_status.clone();
     let sample_rate = node.sample_rate_hz;
     let last_ns = node.last_frame_ns;
-    let node_type_str = if node.node_type.is_empty() { "unknown".to_string() } else { node.node_type.clone() };
+    let node_type_str = if node.node_type.is_empty() {
+        "unknown".to_string()
+    } else {
+        node.node_type.clone()
+    };
     let age = age_text(last_ns);
-    let rms_all: Vec<f64> = mics.first().map(|m| m.rms_recent.clone()).unwrap_or_default();
+    let rms_all: Vec<f64> = mics
+        .first()
+        .map(|m| m.rms_recent.clone())
+        .unwrap_or_default();
     let spark_all = sparkline_path(&rms_all, 120.0, 24.0);
     let has_rms_all = !rms_all.is_empty();
     let has_gaps = frame_gaps > 0;
@@ -385,7 +454,9 @@ fn NodeCard(
         };
 
         saving.set(true);
-        let encoded = js_sys::encode_uri_component(&nid).as_string().unwrap_or_else(|| nid.clone());
+        let encoded = js_sys::encode_uri_component(&nid)
+            .as_string()
+            .unwrap_or_else(|| nid.clone());
         let url = format!("/api/v1/pipeline/nodes/{encoded}/audio");
 
         spawn_local(async move {
@@ -397,12 +468,15 @@ fn NodeCard(
                     .send()
                     .await
                     .map_err(|e| e.to_string())
-            }.await;
+            }
+            .await;
 
             match result {
                 Ok(resp) if resp.ok() => {
                     edits.update(|map| {
-                        if let Some(e) = map.get_mut(&nid) { e.dirty = false; }
+                        if let Some(e) = map.get_mut(&nid) {
+                            e.dirty = false;
+                        }
                     });
                     saving.set(false);
                     save_ok.set(true);
@@ -420,28 +494,40 @@ fn NodeCard(
     };
 
     // Pre-build mic rows to avoid borrow issues inside view!
-    let mic_rows: Vec<_> = mics.iter().enumerate().map(|(i, mic)| {
-        let label = mic.label.clone();
-        let spark = sparkline_path(&mic.rms_recent, 60.0, 16.0);
-        let has_rms = !mic.rms_recent.is_empty();
+    let mic_rows: Vec<_> = mics
+        .iter()
+        .enumerate()
+        .map(|(i, mic)| {
+            let label = mic.label.clone();
+            let spark = sparkline_path(&mic.rms_recent, 60.0, 16.0);
+            let has_rms = !mic.rms_recent.is_empty();
 
-        // Each closure needs its own node_id clone.
-        let nid_val  = node_id.clone();
-        let nid_chg  = node_id.clone();
+            // Each closure needs its own node_id clone.
+            let nid_val = node_id.clone();
+            let nid_chg = node_id.clone();
 
-        let gain_val  = move || edits.get().get(&nid_val).and_then(|e| e.mic_gains_db.get(i).copied()).unwrap_or(0.0);
-        let gain_chg  = move |ev: web_sys::Event| {
-            let val: f64 = event_target_value(&ev).parse().unwrap_or(0.0);
-            edits.update(|map| {
-                if let Some(e) = map.get_mut(&nid_chg) {
-                    if i < e.mic_gains_db.len() { e.mic_gains_db[i] = val; }
-                    e.dirty = true;
-                }
-            });
-        };
+            let gain_val = move || {
+                edits
+                    .get()
+                    .get(&nid_val)
+                    .and_then(|e| e.mic_gains_db.get(i).copied())
+                    .unwrap_or(0.0)
+            };
+            let gain_chg = move |ev: web_sys::Event| {
+                let val: f64 = event_target_value(&ev).parse().unwrap_or(0.0);
+                edits.update(|map| {
+                    if let Some(e) = map.get_mut(&nid_chg) {
+                        if i < e.mic_gains_db.len() {
+                            e.mic_gains_db[i] = val;
+                        }
+                        e.dirty = true;
+                    }
+                });
+            };
 
-        (label, spark, has_rms, gain_val, gain_chg)
-    }).collect();
+            (label, spark, has_rms, gain_val, gain_chg)
+        })
+        .collect();
 
     // HP / LP / smoothing — each closure needs its own clone.
     let nid_hp_val = node_id.clone();
@@ -450,19 +536,34 @@ fn NodeCard(
     let nid_lp_chg = node_id.clone();
     let nid_sm_chg = node_id.clone();
 
-    let hp_val  = move || edits.get().get(&nid_hp_val).map(|e| e.hp_hz).unwrap_or(0.0);
-    let hp_chg  = move |ev: web_sys::Event| {
+    let hp_val = move || edits.get().get(&nid_hp_val).map(|e| e.hp_hz).unwrap_or(0.0);
+    let hp_chg = move |ev: web_sys::Event| {
         let val: f64 = event_target_value(&ev).parse().unwrap_or(0.0);
-        edits.update(|map| { if let Some(e) = map.get_mut(&nid_hp_chg) { e.hp_hz = val; e.dirty = true; } });
+        edits.update(|map| {
+            if let Some(e) = map.get_mut(&nid_hp_chg) {
+                e.hp_hz = val;
+                e.dirty = true;
+            }
+        });
     };
-    let lp_val  = move || edits.get().get(&nid_lp_val).map(|e| e.lp_hz).unwrap_or(0.0);
-    let lp_chg  = move |ev: web_sys::Event| {
+    let lp_val = move || edits.get().get(&nid_lp_val).map(|e| e.lp_hz).unwrap_or(0.0);
+    let lp_chg = move |ev: web_sys::Event| {
         let val: f64 = event_target_value(&ev).parse().unwrap_or(0.0);
-        edits.update(|map| { if let Some(e) = map.get_mut(&nid_lp_chg) { e.lp_hz = val; e.dirty = true; } });
+        edits.update(|map| {
+            if let Some(e) = map.get_mut(&nid_lp_chg) {
+                e.lp_hz = val;
+                e.dirty = true;
+            }
+        });
     };
-    let sm_chg  = move |ev: web_sys::Event| {
+    let sm_chg = move |ev: web_sys::Event| {
         let val = event_target_value(&ev);
-        edits.update(|map| { if let Some(e) = map.get_mut(&nid_sm_chg) { e.smoothing = val; e.dirty = true; } });
+        edits.update(|map| {
+            if let Some(e) = map.get_mut(&nid_sm_chg) {
+                e.smoothing = val;
+                e.dirty = true;
+            }
+        });
     };
 
     let nid_mode_chg = node_id.clone();
@@ -471,7 +572,9 @@ fn NodeCard(
         edits.update(|map| {
             if let Some(edit) = map.get_mut(&nid_mode_chg) {
                 edit.stage_mode = value == "stages";
-                if edit.stage_mode && (edit.stage_json.trim().is_empty() || edit.stage_json.trim() == "[]") {
+                if edit.stage_mode
+                    && (edit.stage_json.trim().is_empty() || edit.stage_json.trim() == "[]")
+                {
                     edit.stage_json = default_stage_json();
                 }
                 edit.dirty = true;
@@ -481,7 +584,7 @@ fn NodeCard(
 
     // Smoothing option selected checks — one clone per option.
     let nid_sm_off = node_id.clone();
-    let nid_sm_50  = node_id.clone();
+    let nid_sm_50 = node_id.clone();
     let nid_sm_200 = node_id.clone();
     let nid_mode_legacy = node_id.clone();
     let nid_mode_stages = node_id.clone();
@@ -773,7 +876,8 @@ mod tests {
 
     #[test]
     fn build_audio_override_body_clears_stages_in_legacy_mode() {
-        let payload = build_audio_override_body(&sample_edit(false, &default_stage_json())).unwrap();
+        let payload =
+            build_audio_override_body(&sample_edit(false, &default_stage_json())).unwrap();
 
         assert_eq!(
             payload,
@@ -789,7 +893,11 @@ mod tests {
 
     #[test]
     fn build_audio_override_body_uses_stage_json_in_stage_mode() {
-        let payload = build_audio_override_body(&sample_edit(true, r#"[{"type":"highpass","cutoff_hz":120.0}]"#)).unwrap();
+        let payload = build_audio_override_body(&sample_edit(
+            true,
+            r#"[{"type":"highpass","cutoff_hz":120.0}]"#,
+        ))
+        .unwrap();
 
         assert_eq!(
             payload,
@@ -801,7 +909,8 @@ mod tests {
 
     #[test]
     fn build_audio_override_body_rejects_non_array_stage_json() {
-        let error = build_audio_override_body(&sample_edit(true, r#"{"type":"gain"}"#)).unwrap_err();
+        let error =
+            build_audio_override_body(&sample_edit(true, r#"{"type":"gain"}"#)).unwrap_err();
 
         assert!(error.contains("JSON array"));
     }

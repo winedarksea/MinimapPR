@@ -252,6 +252,18 @@ pub struct ConfigSnapshot {
     pub tracking_filter: String,
     pub fusion_worker_count: u32,
     pub coordinate_mode: String,
+    #[serde(default)]
+    pub site_origin: Option<SiteOriginSnapshot>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SiteOriginSnapshot {
+    pub lat: f64,
+    pub lon: f64,
+    pub alt_m: Option<f64>,
+    pub reconcile_delay_seconds: Option<f64>,
+    pub mode: Option<String>,
+    pub source: Option<String>,
 }
 
 // ── Filter state for WS server-side filtering ───────────────────

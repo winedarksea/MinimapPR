@@ -23,7 +23,6 @@ pub fn current_theme() -> String {
     root_attr("data-theme").unwrap_or_else(|| "dark".into())
 }
 
-
 fn root_attr(name: &str) -> Option<String> {
     let doc = web_sys::window()?.document()?;
     let root = doc.document_element()?;
@@ -58,4 +57,3 @@ pub fn toggle_theme() -> String {
     apply_theme(next);
     next.to_string()
 }
-

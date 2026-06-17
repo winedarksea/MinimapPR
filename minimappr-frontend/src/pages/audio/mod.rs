@@ -14,8 +14,7 @@ pub fn AudioLayout() -> impl IntoView {
 
     // Record is active on /audio/record.
     // Analysis is active on /audio/analysis (landing) OR /audio/d/:id (detail).
-    let is_record_active =
-        move || loc.pathname.get().starts_with("/audio/record");
+    let is_record_active = move || loc.pathname.get().starts_with("/audio/record");
     let is_analysis_active = move || {
         let p = loc.pathname.get();
         p.starts_with("/audio/analysis") || p.starts_with("/audio/d")

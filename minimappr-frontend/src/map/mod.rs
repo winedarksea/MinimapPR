@@ -8,16 +8,30 @@ use std::collections::HashSet;
 use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 
+const DEFAULT_MAP_LAT: f64 = 44.987;
+const DEFAULT_MAP_LON: f64 = -93.258;
+const DEFAULT_MAP_ZOOM: u32 = 17;
+const APPROX_DEGREES_LATITUDE_PER_METER: f64 = 9e-6;
+const MIN_VELOCITY_LONGITUDE_COSINE: f64 = 0.01;
+
 fn covariance_to_js_value(covariance: &[Vec<f64>]) -> JsValue {
-    let rows = js_sys::Array::new();
-    for row in covariance {
-        let values = js_sys::Array::new();
-        for value in row {
-            values.push(&JsValue::from_f64(*value));
-        }
-        rows.push(&values);
+    serde_wasm_bindgen::to_value(covariance).unwrap_or(JsValue::NULL)
+}
+
+fn map_initial_center(config: Option<crate::state::ConfigSnapshot>) -> (f64, f64) {
+    config
+        .and_then(|snapshot| snapshot.site_origin.map(|origin| (origin.lat, origin.lon)))
+        .unwrap_or((DEFAULT_MAP_LAT, DEFAULT_MAP_LON))
+}
+
+fn velocity_mps_to_geo_delta(lat: f64, velocity_mps: &[f64]) -> Option<(f64, f64)> {
+    if velocity_mps.len() < 2 {
+        return None;
     }
-    rows.into()
+    let dlat = velocity_mps[1] * APPROX_DEGREES_LATITUDE_PER_METER;
+    let dlon = velocity_mps[0] * APPROX_DEGREES_LATITUDE_PER_METER
+        / lat.to_radians().cos().max(MIN_VELOCITY_LONGITUDE_COSINE);
+    Some((dlat, dlon))
 }
 
 #[component]
@@ -28,11 +42,13 @@ pub fn LeafletMapPanel() -> impl IntoView {
     let detections = state.detections;
     let theme = state.theme;
     let selected_cop_item = state.selected_cop_item;
+    let config = state.config;
 
     // Init Leaflet once after the component first mounts.
     Effect::new(move |init_done: Option<bool>| {
         if init_done.is_none() {
-            init(44.987, -93.258, 17);
+            let (lat, lon) = map_initial_center(config.get_untracked());
+            init(lat, lon, DEFAULT_MAP_ZOOM);
             let selected_cop_item = selected_cop_item;
             let callback =
                 Closure::<dyn FnMut(JsValue, JsValue)>::new(move |kind: JsValue, id: JsValue| {
@@ -46,8 +62,14 @@ pub fn LeafletMapPanel() -> impl IntoView {
                         selected_cop_item.set(Some(crate::state::CopSelection::pinned(kind, id)));
                     }
                 });
-            set_cop_selection_callback(callback.as_ref().unchecked_ref());
-            callback.forget();
+            let callback = StoredValue::new_local(callback);
+            callback.with_value(|callback| {
+                set_cop_selection_callback(callback.as_ref().unchecked_ref());
+            });
+            on_cleanup(move || {
+                set_cop_selection_callback_value(&JsValue::NULL);
+                callback.dispose();
+            });
             // Second invalidateSize after flex layout settles, matching heatmap timing.
             spawn_local(async move {
                 gloo_timers::future::TimeoutFuture::new(250).await;
@@ -59,20 +81,20 @@ pub fn LeafletMapPanel() -> impl IntoView {
 
     // Sync nodes → map markers (geodetic mode only; position_m is local-frame, use position_geo).
     {
-        let config = state.config;
         Effect::new(move |_| {
             let _ = theme.get();
-            let ns = nodes.get();
             let is_geo = config
                 .get()
                 .map(|c| c.coordinate_mode == "geodetic")
                 .unwrap_or(false);
             if is_geo {
-                for n in &ns {
-                    if let Some(geo) = &n.position_geo {
-                        set_node_marker(&n.node_id, geo.lat, geo.lon, &n.health);
+                nodes.with(|ns| {
+                    for n in ns {
+                        if let Some(geo) = &n.position_geo {
+                            set_node_marker(&n.node_id, geo.lat, geo.lon, &n.health);
+                        }
                     }
-                }
+                });
             }
         });
     }
@@ -90,26 +112,26 @@ pub fn LeafletMapPanel() -> impl IntoView {
                 return true;
             }
 
-            let latest_track = tracks
-                .get()
-                .into_iter()
-                .filter(|t| t.position_geo.is_some())
-                .max_by_key(|t| t.last_update_ns.unwrap_or(i64::MIN))
-                .and_then(|t| {
-                    t.position_geo
-                        .as_ref()
-                        .map(|g| (t.last_update_ns.unwrap_or(i64::MIN), g.lat, g.lon))
-                });
-            let latest_detection = detections
-                .get()
-                .into_iter()
-                .filter(|d| d.position_geo.is_some())
-                .max_by_key(|d| d.received_ns.unwrap_or(i64::MIN))
-                .and_then(|d| {
-                    d.position_geo
-                        .as_ref()
-                        .map(|g| (d.received_ns.unwrap_or(i64::MIN), g.lat, g.lon))
-                });
+            let latest_track = tracks.with(|tracks| {
+                tracks
+                    .iter()
+                    .filter_map(|t| {
+                        t.position_geo
+                            .as_ref()
+                            .map(|g| (t.last_update_ns.unwrap_or(i64::MIN), g.lat, g.lon))
+                    })
+                    .max_by_key(|(last_update_ns, _, _)| *last_update_ns)
+            });
+            let latest_detection = detections.with(|detections| {
+                detections
+                    .iter()
+                    .filter_map(|d| {
+                        d.position_geo
+                            .as_ref()
+                            .map(|g| (d.received_ns.unwrap_or(i64::MIN), g.lat, g.lon))
+                    })
+                    .max_by_key(|(received_ns, _, _)| *received_ns)
+            });
 
             // Prefer whichever of track/detection is the more recent observation.
             let target = match (latest_track, latest_detection) {
@@ -121,12 +143,17 @@ pub fn LeafletMapPanel() -> impl IntoView {
             .map(|(_, lat, lon)| (lat, lon))
             .or_else(|| {
                 // Fall back to the most recently seen node with a geo position.
-                nodes
-                    .get()
-                    .into_iter()
-                    .filter(|n| n.position_geo.is_some())
-                    .max_by_key(|n| n.last_seen_ns.unwrap_or(i64::MIN))
-                    .and_then(|n| n.position_geo.as_ref().map(|g| (g.lat, g.lon)))
+                nodes.with(|nodes| {
+                    nodes
+                        .iter()
+                        .filter_map(|n| {
+                            n.position_geo
+                                .as_ref()
+                                .map(|g| (n.last_seen_ns.unwrap_or(i64::MIN), g.lat, g.lon))
+                        })
+                        .max_by_key(|(last_seen_ns, _, _)| *last_seen_ns)
+                        .map(|(_, lat, lon)| (lat, lon))
+                })
             });
 
             if let Some((lat, lon)) = target {
@@ -143,28 +170,27 @@ pub fn LeafletMapPanel() -> impl IntoView {
     {
         Effect::new(move |prev_ids: Option<HashSet<String>>| {
             let _ = theme.get();
-            let ts = tracks.get();
+            tracks.with(|ts| {
+                let current_ids: HashSet<String> = ts.iter().map(|t| t.track_id.clone()).collect();
 
-            let current_ids: HashSet<String> = ts.iter().map(|t| t.track_id.clone()).collect();
-
-            // Remove markers for tracks no longer in the server list.
-            if let Some(ref prev) = prev_ids {
-                for id in prev.difference(&current_ids) {
-                    remove_track(id);
+                // Remove markers for tracks no longer in the server list.
+                if let Some(ref prev) = prev_ids {
+                    for id in prev.difference(&current_ids) {
+                        remove_track(id);
+                    }
                 }
-            }
 
-            for t in &ts {
-                if let Some(geo) = &t.position_geo {
-                    let label = t.label.as_deref().unwrap_or("");
-                    let tqi = t.tqi.unwrap_or(0.0);
-                    let status = t.status.as_deref().unwrap_or("active");
-                    set_track_marker(&t.track_id, geo.lat, geo.lon, label, tqi, status);
-                    if let Some(vel) = &t.velocity_mps {
-                        if vel.len() >= 2 {
-                            // Rough local velocity → geo delta (1 m ≈ 9e-6 deg)
-                            let dlat = vel[1] * 9e-6;
-                            let dlon = vel[0] * 9e-6 / (geo.lat.to_radians().cos()).max(0.01);
+                for t in ts {
+                    if let Some(geo) = &t.position_geo {
+                        let label = t.label.as_deref().unwrap_or("");
+                        let tqi = t.tqi.unwrap_or(0.0);
+                        let status = t.status.as_deref().unwrap_or("active");
+                        set_track_marker(&t.track_id, geo.lat, geo.lon, label, tqi, status);
+                        if let Some((dlat, dlon)) = t
+                            .velocity_mps
+                            .as_deref()
+                            .and_then(|velocity| velocity_mps_to_geo_delta(geo.lat, velocity))
+                        {
                             set_track_velocity_vector(
                                 &t.track_id,
                                 geo.lat,
@@ -176,9 +202,9 @@ pub fn LeafletMapPanel() -> impl IntoView {
                         }
                     }
                 }
-            }
 
-            current_ids
+                current_ids
+            })
         });
     }
 
@@ -187,45 +213,50 @@ pub fn LeafletMapPanel() -> impl IntoView {
         let selected_cop_item = state.selected_cop_item;
         Effect::new(move |_| match selected_cop_item.get() {
             Some(selection) => {
-                let current_tracks = tracks.get();
-                let current_detections = detections.get();
                 highlight_cop_item(selection.kind.as_js_kind(), &selection.id);
                 clear_all_cop_uncertainty();
                 match selection.kind {
                     crate::state::CopItemKind::Track => {
-                        if let Some(track) = current_tracks.iter().find(|track| track.track_id == selection.id) {
-                            if let (Some(geo), Some(covariance)) =
-                                (&track.position_geo, &track.position_covariance_m2)
+                        tracks.with(|current_tracks| {
+                            if let Some(track) = current_tracks
+                                .iter()
+                                .find(|track| track.track_id == selection.id)
                             {
-                                let covariance_js = covariance_to_js_value(covariance);
-                                set_cop_uncertainty(
-                                    "track",
-                                    &track.track_id,
-                                    geo.lat,
-                                    geo.lon,
-                                    &covariance_js,
-                                );
+                                if let (Some(geo), Some(covariance)) =
+                                    (&track.position_geo, &track.position_covariance_m2)
+                                {
+                                    let covariance_js = covariance_to_js_value(covariance);
+                                    set_cop_uncertainty(
+                                        "track",
+                                        &track.track_id,
+                                        geo.lat,
+                                        geo.lon,
+                                        &covariance_js,
+                                    );
+                                }
                             }
-                        }
+                        });
                     }
                     crate::state::CopItemKind::Detection => {
-                        if let Some(detection) = current_detections
-                            .iter()
-                            .find(|detection| detection.event_id == selection.id)
-                        {
-                            if let (Some(geo), Some(covariance)) =
-                                (&detection.position_geo, &detection.position_covariance_m2)
+                        detections.with(|current_detections| {
+                            if let Some(detection) = current_detections
+                                .iter()
+                                .find(|detection| detection.event_id == selection.id)
                             {
-                                let covariance_js = covariance_to_js_value(covariance);
-                                set_cop_uncertainty(
-                                    "detection",
-                                    &detection.event_id,
-                                    geo.lat,
-                                    geo.lon,
-                                    &covariance_js,
-                                );
+                                if let (Some(geo), Some(covariance)) =
+                                    (&detection.position_geo, &detection.position_covariance_m2)
+                                {
+                                    let covariance_js = covariance_to_js_value(covariance);
+                                    set_cop_uncertainty(
+                                        "detection",
+                                        &detection.event_id,
+                                        geo.lat,
+                                        geo.lon,
+                                        &covariance_js,
+                                    );
+                                }
                             }
-                        }
+                        });
                     }
                     crate::state::CopItemKind::Alert => {}
                 }
@@ -241,28 +272,28 @@ pub fn LeafletMapPanel() -> impl IntoView {
     {
         Effect::new(move |prev_ids: Option<HashSet<String>>| {
             let _ = theme.get();
-            let ds = detections.get();
+            detections.with(|ds| {
+                let current_ids: HashSet<String> = ds
+                    .iter()
+                    .filter(|d| d.position_geo.is_some())
+                    .map(|d| d.event_id.clone())
+                    .collect();
 
-            let current_ids: HashSet<String> = ds
-                .iter()
-                .filter(|d| d.position_geo.is_some())
-                .map(|d| d.event_id.clone())
-                .collect();
-
-            if let Some(ref prev) = prev_ids {
-                for id in prev.difference(&current_ids) {
-                    remove_detection_marker(id);
+                if let Some(ref prev) = prev_ids {
+                    for id in prev.difference(&current_ids) {
+                        remove_detection_marker(id);
+                    }
                 }
-            }
 
-            for d in &ds {
-                if let Some(geo) = &d.position_geo {
-                    let label = d.label.as_deref().unwrap_or("detection");
-                    add_detection_marker(&d.event_id, geo.lat, geo.lon, label);
+                for d in ds {
+                    if let Some(geo) = &d.position_geo {
+                        let label = d.label.as_deref().unwrap_or("detection");
+                        add_detection_marker(&d.event_id, geo.lat, geo.lon, label);
+                    }
                 }
-            }
 
-            current_ids
+                current_ids
+            })
         });
     }
 

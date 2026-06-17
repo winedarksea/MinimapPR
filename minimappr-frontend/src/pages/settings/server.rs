@@ -269,7 +269,9 @@ fn fmt_completed_lag(value: Option<f64>) -> String {
 }
 
 fn fmt_optional_count(value: Option<u64>) -> String {
-    value.map(|count| count.to_string()).unwrap_or_else(|| "—".into())
+    value
+        .map(|count| count.to_string())
+        .unwrap_or_else(|| "—".into())
 }
 
 #[component]

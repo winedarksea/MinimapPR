@@ -1,4 +1,6 @@
-use crate::state::{Alert, AppState, CopStatus, Detection, FusionStatus, NodeStatus, Track, MAX_FEED_LEN};
+use crate::state::{
+    Alert, AppState, CopStatus, Detection, FusionStatus, NodeStatus, Track, MAX_FEED_LEN,
+};
 use futures::StreamExt;
 use gloo_net::http::Request;
 use gloo_timers::future::IntervalStream;

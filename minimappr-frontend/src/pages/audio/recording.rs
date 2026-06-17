@@ -305,7 +305,11 @@ fn RecordingControls(
             include_video: include_video.get_untracked(),
             camera_source: {
                 let s = camera_source.get_untracked();
-                if s.is_empty() { None } else { Some(s) }
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s)
+                }
             },
         };
         spawn_local(async move {
@@ -333,12 +337,8 @@ fn RecordingControls(
                 Ok(session) => {
                     active_recording.set(Some(session));
                     session_error.set(None);
-                    poll_recording_until_finished(
-                        session_id,
-                        active_recording,
-                        session_error,
-                    )
-                    .await;
+                    poll_recording_until_finished(session_id, active_recording, session_error)
+                        .await;
                 }
                 Err(e) => session_error.set(Some(e)),
             }
@@ -408,10 +408,7 @@ fn RecordingControls(
     }
 }
 
-fn recording_elapsed_seconds(
-    session: &crate::recording::RecordingSession,
-    now_ms: f64,
-) -> u32 {
+fn recording_elapsed_seconds(session: &crate::recording::RecordingSession, now_ms: f64) -> u32 {
     let end_ms = session.ended_at_ms.unwrap_or(now_ms);
     let elapsed_ms = (end_ms - session.started_at_ms).max(0.0);
     (elapsed_ms / 1_000.0).floor() as u32

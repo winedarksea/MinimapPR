@@ -173,9 +173,17 @@ fn StatusChipText(
 }
 
 fn metric_tone(value: i64) -> &'static str {
-    if value > 0 { "warn" } else { "neutral" }
+    if value > 0 {
+        "warn"
+    } else {
+        "neutral"
+    }
 }
 
 fn danger_metric_tone(value: i64) -> &'static str {
-    if value > 0 { "danger" } else { "neutral" }
+    if value > 0 {
+        "danger"
+    } else {
+        "neutral"
+    }
 }

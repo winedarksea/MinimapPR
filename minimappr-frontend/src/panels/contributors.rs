@@ -76,5 +76,6 @@ pub fn CompactContributorChips(
                 ().into_any()
             }}
         </div>
-    }.into_any()
+    }
+    .into_any()
 }
