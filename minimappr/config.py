@@ -128,7 +128,11 @@ class LocalizationConfig:
     localization_band_min_hz: float = 0.0
     localization_band_max_hz: float = 0.0
     skip_localization_for_classification: bool = False
-    cluster_aware_localization: bool = False
+    # Default ON: a defined cluster is the unit of cross-node localization on both
+    # the Python and Rust paths. When a node is not a member of any cluster,
+    # `cluster_for_node` returns None and the pipeline keeps its global-sensor
+    # pool, so this is behavior-preserving for single-cluster / no-cluster sites.
+    cluster_aware_localization: bool = True
     wavelength_gating_enabled: bool = True
     wavelength_penalty_floor: float = 0.25
     # Bound on how long _localize_candidate will wait for the per-node sensor
@@ -435,7 +439,7 @@ class Settings:
     wavelength_gating_enabled: bool = True
     wavelength_penalty_floor: float = 0.25
     skip_localization_for_classification: bool = False
-    cluster_aware_localization: bool = False
+    cluster_aware_localization: bool = True
     beamformed_classification_enabled: bool = False
     beamformer_type: str = "delay_and_sum"
     beamformed_classification_min_sensor_count: int = 2
@@ -1148,7 +1152,7 @@ class Settings:
                 "MINIMAPPR_BIRDNET_CHUNK_RETRY_ON_CLASSIFIER_ERROR",
                 False,
             ),
-            cluster_aware_localization=_env_bool("MINIMAPPR_CLUSTER_AWARE_LOCALIZATION", False),
+            cluster_aware_localization=_env_bool("MINIMAPPR_CLUSTER_AWARE_LOCALIZATION", True),
             drop_on_backpressure=_env_bool("MINIMAPPR_FUSION_DROP_ON_BACKPRESSURE", True),
             fusion_offline_replay_mode=_env_bool("MINIMAPPR_FUSION_OFFLINE_REPLAY_MODE", False),
             sensor_energy_threshold_multiplier=_env_float("MINIMAPPR_SENSOR_ENERGY_THRESHOLD_MULTIPLIER", 0.45),

@@ -1247,6 +1247,7 @@ async def test_fusion_ingest_deduplicates_replayed_frame(tmp_path: Path) -> None
         max_sensor_buffer_seconds=2.0,
         fusion_worker_count=1,
         fusion_event_queue_size=8,
+        persist_observations_on_ingest=True,
     )
     settings.db_path.parent.mkdir(parents=True, exist_ok=True)
     settings.snippet_dir.mkdir(parents=True, exist_ok=True)

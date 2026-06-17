@@ -120,34 +120,38 @@ Exit criteria:
 - provenance and classification-path behavior is covered by regression tests
 - the default gate remains in place until those checks pass
 
-#### Phase 2 - Implement the missing distributed localization path
+#### Phase 2 - Distributed localization path — DONE (re-scoped 2026-06-16)
 
 Goal: make the primary multi-node deployment story technically true.
 
-Current gap:
+Status: the grouping/combine mechanism is implemented on both ingest paths; the original
+"current gap" below is resolved. The remaining work is operational (firmware + live
+verification), not structural.
 
-- the Rust DSP worker still decides per manifest and per stream
-- SRP is still effectively gated on `channel_count == 4`
-- four separate one-channel nodes do not yet become one localization problem
+What was actually built (supersedes the old "current gap"):
 
-Work:
+- the Rust DSP worker groups manifests sharing a `cluster_id` into one shared buffer
+  (`resolve_cluster_buffer_routing`, dsp_worker.rs:1982); SRP gates on `buffer_channel_count`
+  (dsp_worker.rs:1124), so four one-channel nodes become one localization problem
+- cross-node timing alignment uses node packet timestamps; receipt-time fallback is refused for
+  TDOA correctness (dsp_worker.rs:2024)
+- mixed tetrahedral + point topologies are supported and tested
+- Python pools sensors across nodes in `_localize_candidate` (fusion_node.py:1020); cluster
+  scoping via `cluster_aware_localization` (now default ON)
 
-- add manifest grouping across synchronized streams so multiple single-channel nodes participate in one localization window
-- add timing alignment for cross-node network TDOA
-- cover mixed topologies: tetrahedral array nodes plus omnidirectional point nodes
-- keep latency and pipeline isolation intact while adding this grouping logic
+Exit criteria — MET (unit) / OUTSTANDING (live):
 
-Outputs:
-
-- cross-node localization path for distributed single-mic deployments
-- mixed-node localization support for realistic deployments
-- targeted regression coverage for both scenarios
-
-Exit criteria:
-
-- one test proving localization across four separate one-channel nodes
-- one test proving a mixed tetrahedral-plus-point-node localization scenario
-- no regression in the current hybrid bird flow
+- [x] test proving localization across four separate one-channel nodes:
+  `clustered_single_channel_manifests_share_a_tetrahedral_localization_buffer`
+  (dsp_worker_tests.rs:1071) + `test_cluster_aware_localization_uses_cluster_sensor_scope`
+  (tests/test_cluster_aware_integration.py:122)
+- [x] test proving a mixed tetrahedral-plus-point-node scenario:
+  `mixed_clustered_tetrahedral_and_point_manifests_share_one_localization_buffer`
+  (dsp_worker_tests.rs:1161)
+- [x] no regression in the hybrid bird flow (existing suite stays green)
+- [ ] **live** re-verification across four physical nodes with distinct GPS positions —
+  see `docs/distributed_localization_verification.md` (supersedes the 2026-05-30 test). This,
+  plus committing/flashing the firmware per-node position fix, is the only remaining work.
 
 #### Phase 3 - Add the minimal human review workflow
 

@@ -1646,6 +1646,7 @@ def test_node_recent_audio_endpoint_uses_receipt_time_for_free_running_skew(monk
 
 def test_nodes_endpoint_exposes_latest_firmware_timing_diagnostics(monkeypatch, tmp_path: Path) -> None:
     _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    monkeypatch.setenv("MINIMAPPR_PERSIST_OBSERVATIONS_ON_INGEST", "true")
 
     diagnostics = {
         "runner_frames_captured": 120,
