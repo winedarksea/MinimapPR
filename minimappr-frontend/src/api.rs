@@ -1,5 +1,6 @@
 use crate::state::{
-    Alert, AppState, CopStatus, Detection, FusionStatus, NodeStatus, Track, MAX_FEED_LEN,
+    Alert, AppState, CopStatus, Detection, FusionStatus, NodeOmniDetectionSummary, NodeStatus,
+    Track, MAX_FEED_LEN,
 };
 use futures::StreamExt;
 use gloo_net::http::Request;
@@ -34,6 +35,11 @@ async fn poll_once(state: AppState) {
                 d.pop_front();
             }
         });
+    }
+    if let Some(summaries) =
+        fetch_json::<Vec<NodeOmniDetectionSummary>>("/api/v1/nodes/omni-detection-summary").await
+    {
+        state.omni_detection_summaries.set(summaries);
     }
     if let Some(cop) = fetch_json::<CopStatus>("/api/v1/cop/status").await {
         state.cop_status.set(Some(cop));

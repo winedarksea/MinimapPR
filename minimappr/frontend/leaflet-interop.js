@@ -10,15 +10,20 @@
   const _ellipses = {};          // COP kind:id → L.Polygon (covariance)
   const _zones = {};             // zone_id → L.Polygon
   const _gdop = {};              // key → L.Circle
+  const _omniHalos = {};         // node_id → L.LayerGroup
   const _trackRemoveTimers = {}; // track_id → setTimeout handle for dropped cleanup
+  const _detectionRemoveTimers = {}; // event_id → setTimeout handle for event fade cleanup
   let _highlightedCopItem = null;
   let _highlightRing = null;
+  let _highlightBearingRay = null;
   let _copSelectionCallback = null;
 
   const TILE_CACHE_NAME = "mmpr-osm-tiles-v2";
   const OSM_TEMPLATE = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
   // Delay before a "dropped" track marker is auto-removed from the map.
   const DROPPED_TRACK_LINGER_MS = 30_000;
+  const DETECTION_MARKER_LINGER_MS = 5_000;
+  const MAX_DISPLAY_UNCERTAINTY_RADIUS_M = 500;
 
   function readCssColor(name, fallback) {
     const root = document.documentElement;
@@ -34,6 +39,8 @@
       trackCoasting: readCssColor("--mmp-sys-color-map-track-coasting", "#d29922"),
       trackDropped:  readCssColor("--mmp-sys-color-map-track-dropped",  "#6e7681"),
       detection:     readCssColor("--mmp-sys-color-map-detection",      "#f78166"),
+      bearing:       readCssColor("--mmp-sys-color-map-bearing",        "#9ca3af"),
+      omni:          readCssColor("--mmp-sys-color-map-omni",           "#c084fc"),
       warn:          readCssColor("--mmp-sys-color-warn",               "#d29922"),
       danger:        readCssColor("--mmp-sys-color-danger",             "#f85149"),
       surface:       readCssColor("--md-sys-color-surface-container-low", "#161b22"),
@@ -125,15 +132,29 @@
 
   function makeDetectionIcon(color) {
     return divIcon(
-      '<div style="width:28px;height:28px;filter:drop-shadow(0 2px 6px rgba(0,0,0,.42));">' +
+      '<div class="mmpr-detection-event-icon" style="width:28px;height:28px;filter:drop-shadow(0 2px 6px rgba(0,0,0,.42));">' +
         '<svg viewBox="0 0 28 28" width="28" height="28" aria-hidden="true">' +
-          '<circle cx="14" cy="14" r="8.4" fill="' + color + '" opacity="0.18"></circle>' +
-          '<circle cx="14" cy="14" r="6.2" fill="none" stroke="' + color + '" stroke-width="1.8" opacity="0.92"></circle>' +
-          '<circle cx="14" cy="14" r="3.4" fill="' + color + '"></circle>' +
+          '<circle cx="14" cy="14" r="8.4" fill="none" stroke="' + color + '" stroke-width="1.5" opacity="0.34"></circle>' +
+          '<circle cx="14" cy="14" r="5.9" fill="none" stroke="' + color + '" stroke-width="1.8" opacity="0.94"></circle>' +
+          '<path d="M14 4.8v4.3M14 18.9v4.3M4.8 14h4.3M18.9 14h4.3" stroke="' + color + '" stroke-width="1.7" stroke-linecap="round" opacity="0.92"></path>' +
         "</svg>" +
       "</div>",
       28,
       "mmpr-map-icon mmpr-map-icon-detection"
+    );
+  }
+
+  function makeBearingOnlyDetectionIcon(color) {
+    return divIcon(
+      '<div class="mmpr-detection-event-icon mmpr-bearing-event-icon" style="width:24px;height:24px;filter:drop-shadow(0 1px 4px rgba(0,0,0,.30));">' +
+        '<svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true">' +
+          '<circle cx="12" cy="12" r="6.6" fill="' + color + '" opacity="0.12"></circle>' +
+          '<circle cx="12" cy="12" r="4.8" fill="none" stroke="' + color + '" stroke-width="1.5" opacity="0.58"></circle>' +
+          '<circle cx="12" cy="12" r="2.2" fill="' + color + '" opacity="0.46"></circle>' +
+        "</svg>" +
+      "</div>",
+      24,
+      "mmpr-map-icon mmpr-map-icon-bearing-detection"
     );
   }
 
@@ -306,7 +327,9 @@
       for (const k in _ellipses) delete _ellipses[k];
       for (const k in _zones)    delete _zones[k];
       for (const k in _gdop)     delete _gdop[k];
+      for (const k in _omniHalos) delete _omniHalos[k];
       for (const k in _trackRemoveTimers) { clearTimeout(_trackRemoveTimers[k]); delete _trackRemoveTimers[k]; }
+      for (const k in _detectionRemoveTimers) { clearTimeout(_detectionRemoveTimers[k]); delete _detectionRemoveTimers[k]; }
       clearCopHighlight();
     }
     try {
@@ -365,10 +388,109 @@
     if (_markers[key]) { _markers[key].remove(); delete _markers[key]; }
   }
 
+  // ── Node-attached omni activity halos ────────────────────────
+  function summaryTopLabels(summary) {
+    const labels = Array.isArray(summary && summary.top_labels) ? summary.top_labels : [];
+    return labels.slice(0, 3).map(function (item) {
+      return (item.label || "unknown") + " ×" + (item.count || 0);
+    }).join(", ");
+  }
+
+  function setNodeOmniHalo(nodeId, lat, lon, summary) {
+    if (!_map) return;
+    const colors = palette();
+    removeNodeOmniHalo(nodeId);
+    const activeCount = Math.max(0, Number(summary && summary.active_count) || 0);
+    const recentCount = Math.max(activeCount, Number(summary && summary.recent_count) || 0);
+    if (activeCount <= 0 && recentCount <= 0) return;
+
+    const activeRadius = Math.min(48, 18 + Math.sqrt(activeCount) * 8);
+    const recentRadius = Math.min(66, activeRadius + Math.sqrt(Math.max(recentCount - activeCount, 0)) * 5 + 8);
+    const activeOpacity = Math.min(0.34, 0.10 + Math.log1p(activeCount) * 0.075);
+    const group = L.featureGroup();
+
+    L.circleMarker([lat, lon], {
+      radius: recentRadius,
+      color: colors.omni,
+      weight: 1.2,
+      opacity: 0.34,
+      fillColor: colors.omni,
+      fillOpacity: Math.min(0.12, Math.log1p(recentCount) * 0.025),
+      interactive: false,
+      className: "mmpr-node-omni-halo-recent",
+    }).addTo(group);
+    L.circleMarker([lat, lon], {
+      radius: activeRadius,
+      color: colors.omni,
+      weight: 2,
+      opacity: 0.78,
+      fillColor: colors.omni,
+      fillOpacity: activeOpacity,
+      interactive: true,
+      className: "mmpr-node-omni-halo-active",
+    }).addTo(group);
+
+    const labels = summaryTopLabels(summary);
+    const lastAge = summary && summary.last_detection_ns
+      ? Math.max(0, (Date.now() * 1_000_000 - Number(summary.last_detection_ns)) / 1_000_000_000).toFixed(0) + "s ago"
+      : "no recent timestamp";
+    const tooltip = nodeId + "\nOmni active: " + activeCount +
+      "\nOmni recent: " + recentCount +
+      (labels ? "\n" + labels : "") +
+      "\nLast: " + lastAge;
+    group.bindTooltip(tooltip, { permanent: false });
+    group.on("click", function (event) {
+      if (event && event.originalEvent) L.DomEvent.stop(event.originalEvent);
+      const samples = Array.isArray(summary && summary.sample_detection_ids) ? summary.sample_detection_ids : [];
+      if (samples.length > 0) emitCopSelection("detection", samples[0]);
+    });
+    group.addTo(_map);
+    _omniHalos[nodeId] = group;
+  }
+
+  function removeNodeOmniHalo(nodeId) {
+    if (_omniHalos[nodeId]) {
+      _omniHalos[nodeId].remove();
+      delete _omniHalos[nodeId];
+    }
+  }
+
+  function triggerNodeOmniRipple(nodeId, lat, lon, label) {
+    if (!_map) return;
+    const colors = palette();
+    const ripple = L.circleMarker([lat, lon], {
+      radius: 12,
+      color: colors.omni,
+      weight: 2.2,
+      opacity: 0.86,
+      fillColor: colors.omni,
+      fillOpacity: 0.18,
+      interactive: false,
+      className: "mmpr-node-omni-ripple",
+    }).bindTooltip(label || nodeId, { permanent: false }).addTo(_map);
+    let step = 0;
+    const timer = setInterval(function () {
+      step += 1;
+      ripple.setRadius(12 + step * 5);
+      ripple.setStyle({
+        opacity: Math.max(0, 0.86 - step * 0.11),
+        fillOpacity: Math.max(0, 0.18 - step * 0.025),
+      });
+      if (step >= 8) {
+        clearInterval(timer);
+        ripple.remove();
+      }
+    }, 90);
+  }
+
   // ── Detection markers ─────────────────────────────────────────
   function addDetectionMarker(eventId, lat, lon, label) {
     const colors = palette();
     const key = "det:" + eventId;
+    if (_detectionRemoveTimers[eventId]) {
+      clearTimeout(_detectionRemoveTimers[eventId]);
+      delete _detectionRemoveTimers[eventId];
+    }
     if (_markers[key]) {
       _markers[key].setLatLng([lat, lon]);
       _markers[key].setIcon(makeDetectionIcon(colors.detection));
@@ -379,13 +501,51 @@
       }).bindTooltip(label || "detection", { permanent: false }).addTo(_map);
       attachCopSelectionHandler(_markers[key], "detection", eventId);
     }
+    _markers[key]._mmprBearingSource = null;
+    _markers[key]._mmprHighlightColor = colors.detection;
 
     if (_highlightedCopItem && _highlightedCopItem.kind === "detection" && _highlightedCopItem.id === eventId) {
       highlightCopItem("detection", eventId);
     }
+    _detectionRemoveTimers[eventId] = setTimeout(function () {
+      removeDetectionMarker(eventId);
+    }, DETECTION_MARKER_LINGER_MS);
+  }
+
+  function addBearingOnlyDetectionMarker(eventId, lat, lon, label, sourceLat, sourceLon, hasSource) {
+    const colors = palette();
+    const key = "det:" + eventId;
+    if (_detectionRemoveTimers[eventId]) {
+      clearTimeout(_detectionRemoveTimers[eventId]);
+      delete _detectionRemoveTimers[eventId];
+    }
+    const tooltip = (label || "bearing/elevation estimate") + "\nBearing/elevation estimate; range weak.";
+    if (_markers[key]) {
+      _markers[key].setLatLng([lat, lon]);
+      _markers[key].setIcon(makeBearingOnlyDetectionIcon(colors.bearing));
+      _markers[key].setTooltipContent(tooltip);
+    } else {
+      _markers[key] = L.marker([lat, lon], {
+        icon: makeBearingOnlyDetectionIcon(colors.bearing),
+      }).bindTooltip(tooltip, { permanent: false }).addTo(_map);
+      attachCopSelectionHandler(_markers[key], "detection", eventId);
+    }
+    _markers[key]._mmprBearingSource = hasSource ? [sourceLat, sourceLon] : null;
+    _markers[key]._mmprHighlightColor = colors.bearing;
+
+    if (_highlightedCopItem && _highlightedCopItem.kind === "detection" && _highlightedCopItem.id === eventId) {
+      highlightCopItem("detection", eventId);
+    }
+    _detectionRemoveTimers[eventId] = setTimeout(function () {
+      removeDetectionMarker(eventId);
+    }, DETECTION_MARKER_LINGER_MS);
   }
 
   function removeDetectionMarker(eventId) {
+    if (_detectionRemoveTimers[eventId]) {
+      clearTimeout(_detectionRemoveTimers[eventId]);
+      delete _detectionRemoveTimers[eventId];
+    }
     if (_highlightedCopItem && _highlightedCopItem.kind === "detection" && _highlightedCopItem.id === eventId) {
       clearCopHighlight();
     }
@@ -464,6 +624,32 @@
     clearCopUncertainty("track", trackId);
   }
 
+  function pulseTrackMarker(trackId) {
+    const marker = _markers["track:" + trackId];
+    if (!marker || !_map) return;
+    const latlng = marker.getLatLng();
+    const colors = palette();
+    const pulse = L.circleMarker(latlng, {
+      radius: 18,
+      color: colors.track,
+      weight: 2,
+      opacity: 0.9,
+      fillOpacity: 0,
+      interactive: false,
+      className: "mmpr-track-update-pulse",
+    }).addTo(_map);
+    let step = 0;
+    const timer = setInterval(function () {
+      step += 1;
+      pulse.setRadius(18 + step * 3);
+      pulse.setStyle({ opacity: Math.max(0, 0.9 - step * 0.15) });
+      if (step >= 6) {
+        clearInterval(timer);
+        pulse.remove();
+      }
+    }, 80);
+  }
+
   function highlightCopItem(kind, id) {
     clearCopHighlight();
     const key = markerKeyForCopItem(kind, id);
@@ -479,13 +665,24 @@
     const latlng = marker.getLatLng();
     _highlightRing = L.circleMarker(latlng, {
       radius: kind === "detection" ? 20 : 24,
-      color: colorForCopItem(kind),
+      color: marker._mmprHighlightColor || colorForCopItem(kind),
       weight: 2.5,
       fillOpacity: 0,
       opacity: 0.9,
       interactive: false,
       className: "mmpr-cop-highlight-ring",
     }).addTo(_map);
+    if (kind === "detection" && marker._mmprBearingSource) {
+      const colors = palette();
+      _highlightBearingRay = L.polyline([marker._mmprBearingSource, [latlng.lat, latlng.lng]], {
+        color: colors.bearing,
+        weight: 1.6,
+        opacity: 0.72,
+        dashArray: "6,5",
+        interactive: false,
+        className: "mmpr-bearing-selected-ray",
+      }).addTo(_map);
+    }
   }
 
   function clearCopHighlight() {
@@ -500,6 +697,7 @@
       }
     }
     if (_highlightRing) { _highlightRing.remove(); _highlightRing = null; }
+    if (_highlightBearingRay) { _highlightBearingRay.remove(); _highlightBearingRay = null; }
     _highlightedCopItem = null;
   }
 
@@ -518,8 +716,8 @@
     const discriminant = Math.sqrt(Math.max(0, ((xx - yy) * (xx - yy)) + (4 * xy * xy)));
     const majorVariance = Math.max((trace + discriminant) / 2, 0);
     const minorVariance = Math.max((trace - discriminant) / 2, 0);
-    const majorRadiusM = 2 * Math.sqrt(majorVariance);
-    const minorRadiusM = 2 * Math.sqrt(minorVariance);
+    const majorRadiusM = Math.min(2 * Math.sqrt(majorVariance), MAX_DISPLAY_UNCERTAINTY_RADIUS_M);
+    const minorRadiusM = Math.min(2 * Math.sqrt(minorVariance), MAX_DISPLAY_UNCERTAINTY_RADIUS_M);
     if (!(majorRadiusM > 0) || !(minorRadiusM > 0)) return;
 
     const majorAxisAngleRad = 0.5 * Math.atan2(2 * xy, xx - yy);
@@ -646,8 +844,9 @@
   globalThis.leafletInterop = {
     init,
     setNodeMarker, removeNodeMarker,
-    addDetectionMarker, removeDetectionMarker,
-    setTrackMarker, setTrackVelocityVector, removeTrack,
+    setNodeOmniHalo, removeNodeOmniHalo, triggerNodeOmniRipple,
+    addDetectionMarker, addBearingOnlyDetectionMarker, removeDetectionMarker,
+    setTrackMarker, setTrackVelocityVector, removeTrack, pulseTrackMarker,
     highlightCopItem, clearCopHighlight, setCopSelectionCallback,
     setCopUncertainty, clearCopUncertainty, clearAllCopUncertainty,
     highlightTrack, clearTrackHighlight,

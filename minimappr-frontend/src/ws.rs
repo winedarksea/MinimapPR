@@ -1,3 +1,4 @@
+use crate::map::bindings::{pulse_track_marker, trigger_node_omni_ripple};
 use crate::state::{AppState, LiveEvent, WsStatus, MAX_FEED_LEN};
 use gloo_timers::future::TimeoutFuture;
 use leptos::prelude::*;
@@ -59,6 +60,36 @@ fn handle_message(state: &AppState, text: &str) {
     };
     match event {
         LiveEvent::Detection(det) => {
+            if let Some(track_id) = det.track_id.as_deref() {
+                let should_pulse = if det.spatial_display_mode() == "bearing_only" {
+                    state
+                        .tracks
+                        .with(|tracks| tracks.iter().any(|track| track.track_id == track_id))
+                } else {
+                    det.spatial_display_mode() == "localized"
+                };
+                if should_pulse {
+                    pulse_track_marker(track_id);
+                }
+            }
+            if det.spatial_display_mode() == "node_only" {
+                if let Some(node_id) = det.node_id.as_deref() {
+                    let node_geo = state.nodes.with(|nodes| {
+                        nodes
+                            .iter()
+                            .find(|node| node.node_id == node_id)
+                            .and_then(|node| node.position_geo.clone())
+                    });
+                    if let Some(geo) = node_geo {
+                        trigger_node_omni_ripple(
+                            node_id,
+                            geo.lat,
+                            geo.lon,
+                            det.label.as_deref().unwrap_or("omni detection"),
+                        );
+                    }
+                }
+            }
             state.detections.update(|d| {
                 d.push_front(det);
                 while d.len() > MAX_FEED_LEN {

@@ -10,6 +10,28 @@ from pydantic import BaseModel, Field, model_validator
 
 Vec3 = tuple[float, float, float]
 LabelId: TypeAlias = str
+SpatialDisplayMode: TypeAlias = Literal["node_only", "bearing_only", "localized"]
+
+
+WEAK_RANGE_OBSERVABILITY_THRESHOLD = 0.10
+UNOBSERVABLE_RANGE_DISPLAY_MODES = {"range_asymptotic", "range_boundary"}
+
+
+def spatial_display_mode_for_detection(
+    *,
+    reporting_modality: str,
+    feature_summary: dict[str, Any] | None,
+) -> SpatialDisplayMode:
+    if reporting_modality == "omni":
+        return "node_only"
+    features = feature_summary or {}
+    range_mode = features.get("localization_range_projection_mode")
+    if isinstance(range_mode, str) and range_mode in UNOBSERVABLE_RANGE_DISPLAY_MODES:
+        return "bearing_only"
+    range_observability = features.get("localization_range_observability")
+    if isinstance(range_observability, int | float) and range_observability <= WEAK_RANGE_OBSERVABILITY_THRESHOLD:
+        return "bearing_only"
+    return "localized"
 
 
 class TimeQuality(str, Enum):
@@ -297,6 +319,7 @@ class DetectionEvent(BaseModel):
     report_window_start_ns: int | None = None
     report_window_end_ns: int | None = None
     reporting_modality: Literal["localized", "omni"] = "localized"
+    spatial_display_mode: SpatialDisplayMode | None = None
     position_m: Vec3
     position_geo: GeoPoint | None = None
     position_covariance_m2: list[list[float]] | None = None
@@ -340,6 +363,11 @@ class DetectionEvent(BaseModel):
             self.time_quality = TimeQuality.NTP_DISCIPLINED
         if self.review_label is not None and self.review_label_category is None:
             self.review_label_category = self.label_category
+        if self.spatial_display_mode is None:
+            self.spatial_display_mode = spatial_display_mode_for_detection(
+                reporting_modality=self.reporting_modality,
+                feature_summary=self.feature_summary,
+            )
         return self
 
 

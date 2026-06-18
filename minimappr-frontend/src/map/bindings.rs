@@ -11,8 +11,28 @@ extern "C" {
     #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "removeNodeMarker")]
     pub fn remove_node_marker(node_id: &str);
 
+    #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "setNodeOmniHalo")]
+    pub fn set_node_omni_halo(node_id: &str, lat: f64, lon: f64, summary: &JsValue);
+
+    #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "removeNodeOmniHalo")]
+    pub fn remove_node_omni_halo(node_id: &str);
+
+    #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "triggerNodeOmniRipple")]
+    pub fn trigger_node_omni_ripple(node_id: &str, lat: f64, lon: f64, label: &str);
+
     #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "addDetectionMarker")]
     pub fn add_detection_marker(event_id: &str, lat: f64, lon: f64, label: &str);
+
+    #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "addBearingOnlyDetectionMarker")]
+    pub fn add_bearing_only_detection_marker(
+        event_id: &str,
+        lat: f64,
+        lon: f64,
+        label: &str,
+        source_lat: f64,
+        source_lon: f64,
+        has_source: bool,
+    );
 
     #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "removeDetectionMarker")]
     pub fn remove_detection_marker(event_id: &str);
@@ -39,6 +59,9 @@ extern "C" {
 
     #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "removeTrack")]
     pub fn remove_track(track_id: &str);
+
+    #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "pulseTrackMarker")]
+    pub fn pulse_track_marker(track_id: &str);
 
     #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "setZone")]
     pub fn set_zone(zone_id: &str, latlngs: &JsValue, label: &str);

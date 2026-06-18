@@ -1911,6 +1911,27 @@ async def list_nodes(
     return nodes
 
 
+@app.get("/api/v1/nodes/omni-detection-summary")
+async def list_node_omni_detection_summary(
+    request: Request,
+    active_seconds: float = Query(default=60.0, gt=0.0, le=3600.0),
+    recent_seconds: float = Query(default=600.0, gt=0.0, le=86400.0),
+    limit_per_node: int = Query(default=5, ge=1, le=20),
+) -> list[dict]:
+    state = _require_state(request)
+    settings: Settings = state.settings
+    now_ns = time.time_ns()
+    active_window_ns = int(active_seconds * 1_000_000_000)
+    recent_window_ns = max(int(recent_seconds * 1_000_000_000), active_window_ns)
+    return await state.storage.omni_detection_summary_by_node(
+        now_ns=now_ns,
+        active_window_ns=active_window_ns,
+        recent_window_ns=recent_window_ns,
+        limit_per_node=limit_per_node,
+        min_label_confidence=settings.detection_min_confidence,
+    )
+
+
 async def _runtime_node_health_counts(
     state,
     *,

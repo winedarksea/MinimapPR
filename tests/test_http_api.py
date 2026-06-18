@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 from minimappr.api.stream_consumer import SidecarNodeSnapshot
 from minimappr.config import Settings
 from minimappr.main import app
-from minimappr.models import TrackState
+from minimappr.models import DetectionEvent, GeoPoint, NodeSpec, NodeType, TrackState
 from minimappr.storage.db import _ingested_frame_key
 from minimappr.utils.audio import encode_pcm16le_b64
 
@@ -294,6 +294,101 @@ def test_cop_detections_and_tracks_include_contributor_summaries(monkeypatch, tm
         assert track_payload["contributors"]
         assert track_payload["contributor_count"] == len(track_payload["contributors"])
         assert track_payload["contributors"][0]["node_id"] == "http-node-1"
+
+
+def test_node_omni_detection_summary_groups_only_omni_detections(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+
+    now_ns = time.time_ns()
+
+    def detection(
+        detection_id: str,
+        *,
+        node_id: str,
+        timestamp_ns: int,
+        modality: str,
+        label: str,
+        category: str = "bird",
+        confidence: float = 0.9,
+    ) -> DetectionEvent:
+        return DetectionEvent(
+            id=detection_id,
+            event_id=detection_id,
+            source_node_id=node_id,
+            timestamp_ns=timestamp_ns,
+            reporting_modality=modality,
+            position_m=(0.0, 0.0, 0.0),
+            position_geo=GeoPoint(lat=44.987, lon=-93.258, alt_m=0.0),
+            confidence=0.2 if modality == "omni" else 0.8,
+            gdop=float("inf") if modality == "omni" else 1.0,
+            label=label,
+            label_category=category,
+            label_confidence=confidence,
+            reference_sensor=f"{node_id}:mic0",
+            source_sensors=[f"{node_id}:mic0"],
+        )
+
+    with TestClient(app) as client:
+        storage = client.app.state.storage
+
+        async def insert_fixture_data() -> None:
+            await storage.upsert_node(
+                NodeSpec(
+                    id="omni-node-1",
+                    node_type=NodeType.POINT,
+                    position_m=(0.0, 0.0, 0.0),
+                    position_geo=GeoPoint(lat=44.987, lon=-93.258, alt_m=0.0),
+                ),
+                last_seen_ns=now_ns,
+                position_geo=GeoPoint(lat=44.987, lon=-93.258, alt_m=0.0),
+            )
+            for item in (
+                detection(
+                    "det-omni-active",
+                    node_id="omni-node-1",
+                    timestamp_ns=now_ns - 10_000_000_000,
+                    modality="omni",
+                    label="sparrow",
+                ),
+                detection(
+                    "det-omni-recent",
+                    node_id="omni-node-1",
+                    timestamp_ns=now_ns - 120_000_000_000,
+                    modality="omni",
+                    label="sparrow",
+                ),
+                detection(
+                    "det-localized-ignored",
+                    node_id="omni-node-1",
+                    timestamp_ns=now_ns - 5_000_000_000,
+                    modality="localized",
+                    label="drone",
+                    category="security",
+                ),
+            ):
+                await storage.insert_detection(
+                    detection=item,
+                    snippet_path=None,
+                    snippet_expires_ns=None,
+                    retention_tier="short",
+                )
+
+        client.portal.call(insert_fixture_data)
+
+        response = client.get(
+            "/api/v1/nodes/omni-detection-summary",
+            params={"active_seconds": 60, "recent_seconds": 600, "limit_per_node": 3},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        summary = body[0]
+        assert summary["node_id"] == "omni-node-1"
+        assert summary["active_count"] == 1
+        assert summary["recent_count"] == 2
+        assert summary["last_detection_ns"] == now_ns - 10_000_000_000
+        assert summary["top_labels"] == [{"label": "sparrow", "count": 2}]
+        assert "det-localized-ignored" not in summary["sample_detection_ids"]
 
 
 def test_detection_review_patch_persists_and_round_trips(monkeypatch, tmp_path: Path) -> None:

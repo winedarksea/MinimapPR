@@ -40,6 +40,7 @@ pub fn LeafletMapPanel() -> impl IntoView {
     let nodes = state.nodes;
     let tracks = state.tracks;
     let detections = state.detections;
+    let omni_detection_summaries = state.omni_detection_summaries;
     let theme = state.theme;
     let selected_cop_item = state.selected_cop_item;
     let config = state.config;
@@ -96,6 +97,45 @@ pub fn LeafletMapPanel() -> impl IntoView {
                     }
                 });
             }
+        });
+    }
+
+    // Sync node-attached omnidirectional detection summaries -> halo overlays.
+    {
+        Effect::new(move |prev_ids: Option<HashSet<String>>| {
+            let _ = theme.get();
+            let node_positions = nodes.with(|ns| {
+                ns.iter()
+                    .filter_map(|node| {
+                        node.position_geo
+                            .as_ref()
+                            .map(|geo| (node.node_id.clone(), geo.lat, geo.lon))
+                    })
+                    .collect::<Vec<_>>()
+            });
+            omni_detection_summaries.with(|summaries| {
+                let mut current_ids = HashSet::new();
+                for summary in summaries {
+                    let Some((_, lat, lon)) = node_positions
+                        .iter()
+                        .find(|(node_id, _, _)| node_id == &summary.node_id)
+                    else {
+                        continue;
+                    };
+                    current_ids.insert(summary.node_id.clone());
+                    if let Ok(summary_js) = serde_wasm_bindgen::to_value(summary) {
+                        set_node_omni_halo(&summary.node_id, *lat, *lon, &summary_js);
+                    }
+                }
+
+                if let Some(ref prev) = prev_ids {
+                    for id in prev.difference(&current_ids) {
+                        remove_node_omni_halo(id);
+                    }
+                }
+
+                current_ids
+            })
         });
     }
 
@@ -275,7 +315,11 @@ pub fn LeafletMapPanel() -> impl IntoView {
             detections.with(|ds| {
                 let current_ids: HashSet<String> = ds
                     .iter()
-                    .filter(|d| d.position_geo.is_some())
+                    .filter(|d| {
+                        d.position_geo.is_some()
+                            && d.track_id.is_none()
+                            && d.spatial_display_mode() != "node_only"
+                    })
                     .map(|d| d.event_id.clone())
                     .collect();
 
@@ -285,10 +329,45 @@ pub fn LeafletMapPanel() -> impl IntoView {
                     }
                 }
 
+                let node_positions = nodes.with(|ns| {
+                    ns.iter()
+                        .filter_map(|node| {
+                            node.position_geo
+                                .as_ref()
+                                .map(|geo| (node.node_id.clone(), geo.lat, geo.lon))
+                        })
+                        .collect::<Vec<_>>()
+                });
                 for d in ds {
+                    if d.track_id.is_some() || d.spatial_display_mode() == "node_only" {
+                        continue;
+                    }
                     if let Some(geo) = &d.position_geo {
-                        let label = d.label.as_deref().unwrap_or("detection");
-                        add_detection_marker(&d.event_id, geo.lat, geo.lon, label);
+                        let base_label = d.label.as_deref().unwrap_or("detection");
+                        if d.spatial_display_mode() == "bearing_only" {
+                            let source = d.node_id.as_ref().and_then(|node_id| {
+                                node_positions
+                                    .iter()
+                                    .find(|(candidate, _, _)| candidate == node_id)
+                                    .map(|(_, lat, lon)| (*lat, *lon))
+                            });
+                            let (source_lat, source_lon, has_source) = source
+                                .map(|(lat, lon)| (lat, lon, true))
+                                .unwrap_or((0.0, 0.0, false));
+                            let label = format!("{base_label} · bearing/elevation, range weak");
+                            add_bearing_only_detection_marker(
+                                &d.event_id,
+                                geo.lat,
+                                geo.lon,
+                                &label,
+                                source_lat,
+                                source_lon,
+                                has_source,
+                            );
+                        } else {
+                            let label = format!("{base_label} · localized");
+                            add_detection_marker(&d.event_id, geo.lat, geo.lon, &label);
+                        }
                     }
                 }
 
@@ -343,7 +422,15 @@ pub fn LeafletMapPanel() -> impl IntoView {
                                 <div class="legend-group-label">"Events"</div>
                                 <span class="legend-item">
                                     <span class="legend-shape-detection"></span>
-                                    "Detection"
+                                    "Localized detection"
+                                </span>
+                                <span class="legend-item">
+                                    <span class="legend-shape-bearing-detection"></span>
+                                    "Bearing / weak range"
+                                </span>
+                                <span class="legend-item">
+                                    <span class="legend-shape-omni-halo"></span>
+                                    "Node omni activity"
                                 </span>
                             </div>
                         </div>

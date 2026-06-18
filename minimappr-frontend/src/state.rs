@@ -123,6 +123,13 @@ pub struct GeoPoint {
 pub struct Detection {
     pub event_id: String,
     pub node_id: Option<String>,
+    pub reporting_modality: Option<String>,
+    pub spatial_display_mode: Option<String>,
+    pub localization_range_projection_mode: Option<String>,
+    pub localization_range_observability: Option<f64>,
+    pub localization_method: Option<String>,
+    pub capability_tier: Option<String>,
+    pub position_geo_uncertainty: Option<serde_json::Value>,
     pub label: Option<String>,
     pub confidence: Option<f64>,
     pub label_confidence: Option<f64>,
@@ -142,6 +149,9 @@ struct DetectionWire {
     id: Option<String>,
     #[serde(alias = "source_node_id")]
     node_id: Option<String>,
+    reporting_modality: Option<String>,
+    spatial_display_mode: Option<String>,
+    feature_summary: Option<serde_json::Value>,
     label: Option<String>,
     confidence: Option<f64>,
     label_confidence: Option<f64>,
@@ -163,9 +173,30 @@ impl<'de> Deserialize<'de> for Detection {
         D: Deserializer<'de>,
     {
         let wire = DetectionWire::deserialize(deserializer)?;
+        let feature_summary = wire.feature_summary.as_ref();
         Ok(Self {
             event_id: wire.event_id.or(wire.id).unwrap_or_default(),
             node_id: wire.node_id,
+            reporting_modality: wire.reporting_modality,
+            spatial_display_mode: wire.spatial_display_mode,
+            localization_range_projection_mode: feature_summary
+                .and_then(|features| features.get("localization_range_projection_mode"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            localization_range_observability: feature_summary
+                .and_then(|features| features.get("localization_range_observability"))
+                .and_then(|value| value.as_f64()),
+            localization_method: feature_summary
+                .and_then(|features| features.get("localization_method"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            capability_tier: feature_summary
+                .and_then(|features| features.get("capability_tier"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            position_geo_uncertainty: feature_summary
+                .and_then(|features| features.get("position_geo_uncertainty"))
+                .cloned(),
             label: wire.label,
             confidence: wire.confidence,
             label_confidence: wire.label_confidence,
@@ -179,6 +210,49 @@ impl<'de> Deserialize<'de> for Detection {
             contributors: wire.contributors,
         })
     }
+}
+
+impl Detection {
+    pub fn spatial_display_mode(&self) -> &str {
+        self.spatial_display_mode.as_deref().unwrap_or_else(|| {
+            match self.reporting_modality.as_deref() {
+                Some("omni") => "node_only",
+                _ => "localized",
+            }
+        })
+    }
+
+    pub fn uncertainty_summary(&self) -> &'static str {
+        match self.spatial_display_mode() {
+            "node_only" => "Node heard this; no bearing/range localization.",
+            "bearing_only" => "Bearing/elevation estimate; range weak.",
+            _ => "Localized estimate; ellipse shows selected covariance.",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct OmniLabelSummary {
+    pub label: String,
+    pub count: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct OmniCategorySummary {
+    pub category: String,
+    pub count: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct NodeOmniDetectionSummary {
+    pub node_id: String,
+    pub active_count: u32,
+    pub recent_count: u32,
+    pub last_detection_ns: Option<i64>,
+    pub top_labels: Vec<OmniLabelSummary>,
+    pub top_categories: Vec<OmniCategorySummary>,
+    pub max_confidence: Option<f64>,
+    pub sample_detection_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -337,6 +411,7 @@ pub struct AppState {
     pub nodes: RwSignal<Vec<NodeStatus>>,
     pub tracks: RwSignal<Vec<Track>>,
     pub detections: RwSignal<VecDeque<Detection>>,
+    pub omni_detection_summaries: RwSignal<Vec<NodeOmniDetectionSummary>>,
     pub alerts: RwSignal<VecDeque<Alert>>,
     pub config: RwSignal<Option<ConfigSnapshot>>,
     pub cop_status: RwSignal<Option<CopStatus>>,
@@ -360,6 +435,7 @@ impl AppState {
             nodes: RwSignal::new(vec![]),
             tracks: RwSignal::new(vec![]),
             detections: RwSignal::new(VecDeque::new()),
+            omni_detection_summaries: RwSignal::new(vec![]),
             alerts: RwSignal::new(VecDeque::new()),
             config: RwSignal::new(None),
             cop_status: RwSignal::new(None),

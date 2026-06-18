@@ -1717,6 +1717,108 @@ class Storage:
         detections = [self._row_to_detection(row).model_dump(mode="json") for row in rows]
         return await self.enrich_detections_with_contributor_summaries(detections)
 
+    async def omni_detection_summary_by_node(
+        self,
+        *,
+        now_ns: int,
+        active_window_ns: int,
+        recent_window_ns: int,
+        limit_per_node: int = 5,
+        min_label_confidence: float | None = None,
+    ) -> list[dict[str, Any]]:
+        db = self._require_db()
+        recent_start_ns = int(now_ns - recent_window_ns)
+        active_start_ns = int(now_ns - active_window_ns)
+        clauses = [
+            "reporting_modality = 'omni'",
+            "source_node_id IS NOT NULL",
+            "timestamp_ns >= ?",
+            "timestamp_ns <= ?",
+        ]
+        params: list[object] = [recent_start_ns, int(now_ns)]
+        if min_label_confidence is not None:
+            clauses.append("label_confidence >= ?")
+            params.append(float(min_label_confidence))
+        where = " AND ".join(clauses)
+        rows = await (
+            await db.execute(
+                f"""
+                SELECT
+                    source_node_id,
+                    id,
+                    event_id,
+                    timestamp_ns,
+                    COALESCE(label, 'unknown') AS label,
+                    COALESCE(label_category, 'unknown') AS label_category,
+                    confidence,
+                    label_confidence
+                FROM detections
+                WHERE {where}
+                ORDER BY source_node_id ASC, timestamp_ns DESC
+                """,
+                tuple(params),
+            )
+        ).fetchall()
+
+        summaries_by_node: dict[str, dict[str, Any]] = {}
+        label_counts_by_node: dict[str, dict[str, int]] = {}
+        category_counts_by_node: dict[str, dict[str, int]] = {}
+        for row in rows:
+            node_id = str(row["source_node_id"])
+            summary = summaries_by_node.setdefault(
+                node_id,
+                {
+                    "node_id": node_id,
+                    "active_count": 0,
+                    "recent_count": 0,
+                    "last_detection_ns": None,
+                    "top_labels": [],
+                    "top_categories": [],
+                    "max_confidence": None,
+                    "sample_detection_ids": [],
+                },
+            )
+            label_counts = label_counts_by_node.setdefault(node_id, {})
+            category_counts = category_counts_by_node.setdefault(node_id, {})
+            timestamp_ns = int(row["timestamp_ns"])
+            confidence = float(
+                row["label_confidence"]
+                if row["label_confidence"] is not None
+                else row["confidence"]
+            )
+
+            summary["recent_count"] += 1
+            if timestamp_ns >= active_start_ns:
+                summary["active_count"] += 1
+            if summary["last_detection_ns"] is None or timestamp_ns > int(summary["last_detection_ns"]):
+                summary["last_detection_ns"] = timestamp_ns
+            if summary["max_confidence"] is None or confidence > float(summary["max_confidence"]):
+                summary["max_confidence"] = confidence
+            if len(summary["sample_detection_ids"]) < limit_per_node:
+                summary["sample_detection_ids"].append(row["event_id"] or row["id"])
+
+            label = str(row["label"] or "unknown")
+            category = str(row["label_category"] or "unknown")
+            label_counts[label] = label_counts.get(label, 0) + 1
+            category_counts[category] = category_counts.get(category, 0) + 1
+
+        for node_id, summary in summaries_by_node.items():
+            label_counts = label_counts_by_node[node_id]
+            category_counts = category_counts_by_node[node_id]
+            summary["top_labels"] = [
+                {"label": label, "count": count}
+                for label, count in sorted(label_counts.items(), key=lambda item: (-item[1], item[0]))[:limit_per_node]
+            ]
+            summary["top_categories"] = [
+                {"category": category, "count": count}
+                for category, count in sorted(category_counts.items(), key=lambda item: (-item[1], item[0]))[:limit_per_node]
+            ]
+
+        return sorted(
+            summaries_by_node.values(),
+            key=lambda item: (-(item["active_count"] or 0), -(item["recent_count"] or 0), item["node_id"]),
+        )
+
     async def detection_matrix(
         self,
         *,

@@ -27,6 +27,7 @@ from minimappr.models import (
     LabelId,
     RetentionTier,
     TrackState,
+    spatial_display_mode_for_detection,
 )
 from minimappr.utils.audio import rms, write_wav_mono
 
@@ -213,10 +214,50 @@ class DetectionAssembler:
             now_ns=event_time_ns,
         )
 
+        # -- feature summary ---------------------------------------------------
+        feature_summary = {}
+        if existing_detection is not None and isinstance(existing_detection.get("feature_summary"), dict):
+            feature_summary.update(existing_detection["feature_summary"])
+        feature_summary.update(classification_features)
+        feature_summary["capability_tier"] = capability_tier
+        feature_summary["localization_method"] = localization_method
+        if localization_range_observability is not None:
+            feature_summary["localization_range_observability"] = localization_range_observability
+        if localization_residual_rms_seconds is not None:
+            feature_summary["localization_residual_rms_seconds"] = localization_residual_rms_seconds
+        if localization_range_projection_mode is not None:
+            feature_summary["localization_range_projection_mode"] = localization_range_projection_mode
+        geo_uncertainty = self._coordinate_frame.local_covariance_to_geo_uncertainty(
+            localization_position_covariance_m2
+        )
+        if geo_uncertainty is not None:
+            feature_summary["position_geo_uncertainty"] = geo_uncertainty
+        feature_summary["classification_path"] = classification_path
+        feature_summary["omni_confidence"] = omni_confidence
+        feature_summary["environment"] = environment
+        feature_summary["branch_evidence"] = branch_evidence or {}
+        if audio_quality is not None:
+            feature_summary["audio_quality"] = audio_quality
+        if beamformed_classification_confidence is not None:
+            feature_summary["beamformed_confidence"] = beamformed_classification_confidence
+            feature_summary["beamformed_label"] = beamformed_classification_label
+        if beamforming_error:
+            feature_summary["beamforming_error"] = beamforming_error
+        if suppression_reasons:
+            feature_summary["zone_suppression"] = suppression_reasons
+        spatial_display_mode = spatial_display_mode_for_detection(
+            reporting_modality=reporting_modality,
+            feature_summary=feature_summary,
+        )
+
         # -- track update ------------------------------------------------------
         track: TrackState | None = None
         localizable_capability_tiers = {"2d", "full_3d"}
-        if not suppressed_by_zone and capability_tier in localizable_capability_tiers:
+        if (
+            spatial_display_mode == "localized"
+            and not suppressed_by_zone
+            and capability_tier in localizable_capability_tiers
+        ):
             track = await tracker.update(
                 timestamp_ns=event_time_ns,
                 position_m=localization_position_m,
@@ -255,38 +296,6 @@ class DetectionAssembler:
             suppressed_by_zone=suppressed_by_zone,
         )
 
-        # -- feature summary ---------------------------------------------------
-        feature_summary = {}
-        if existing_detection is not None and isinstance(existing_detection.get("feature_summary"), dict):
-            feature_summary.update(existing_detection["feature_summary"])
-        feature_summary.update(classification_features)
-        feature_summary["capability_tier"] = capability_tier
-        feature_summary["localization_method"] = localization_method
-        if localization_range_observability is not None:
-            feature_summary["localization_range_observability"] = localization_range_observability
-        if localization_residual_rms_seconds is not None:
-            feature_summary["localization_residual_rms_seconds"] = localization_residual_rms_seconds
-        if localization_range_projection_mode is not None:
-            feature_summary["localization_range_projection_mode"] = localization_range_projection_mode
-        geo_uncertainty = self._coordinate_frame.local_covariance_to_geo_uncertainty(
-            localization_position_covariance_m2
-        )
-        if geo_uncertainty is not None:
-            feature_summary["position_geo_uncertainty"] = geo_uncertainty
-        feature_summary["classification_path"] = classification_path
-        feature_summary["omni_confidence"] = omni_confidence
-        feature_summary["environment"] = environment
-        feature_summary["branch_evidence"] = branch_evidence or {}
-        if audio_quality is not None:
-            feature_summary["audio_quality"] = audio_quality
-        if beamformed_classification_confidence is not None:
-            feature_summary["beamformed_confidence"] = beamformed_classification_confidence
-            feature_summary["beamformed_label"] = beamformed_classification_label
-        if beamforming_error:
-            feature_summary["beamforming_error"] = beamforming_error
-        if suppression_reasons:
-            feature_summary["zone_suppression"] = suppression_reasons
-
         # -- build DetectionEvent ----------------------------------------------
         tor_ns = time.time_ns()
         stale_ns = event_time_ns + int(self._event_stale_seconds * 1_000_000_000)
@@ -307,6 +316,7 @@ class DetectionAssembler:
             report_window_start_ns=report_window_start_ns,
             report_window_end_ns=report_window_end_ns,
             reporting_modality=reporting_modality,
+            spatial_display_mode=spatial_display_mode,
             position_m=localization_position_m,
             position_geo=detection_geo,
             position_covariance_m2=(

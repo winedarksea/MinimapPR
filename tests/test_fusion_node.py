@@ -1510,6 +1510,8 @@ async def test_fusion_ingests_rust_localized_render_directly(tmp_path: Path) -> 
     assert detection["feature_summary"]["localization_range_observability"] == pytest.approx(0.05)
     assert detection["feature_summary"]["localization_residual_rms_seconds"] == pytest.approx(2.5e-4)
     assert detection["feature_summary"]["localization_range_projection_mode"] == "range_asymptotic"
+    assert detection["spatial_display_mode"] == "bearing_only"
+    assert detection["track_id"] is None
     assert detection["feature_summary"]["position_geo_uncertainty"]["horizontal_major_std_m"] > 0.0
     assert detection["feature_summary"]["rust_render_kind"] == "birdnet_hybrid_spatial_blend"
     assert tuple(detection["position_m"]) == pytest.approx((1.5, -0.5, 0.0))
@@ -1517,6 +1519,7 @@ async def test_fusion_ingests_rust_localized_render_directly(tmp_path: Path) -> 
         np.asarray(detection["position_covariance_m2"], dtype=np.float64),
         np.asarray([[2.0, 0.1, 0.0], [0.1, 1.5, 0.0], [0.0, 0.0, 3.0]], dtype=np.float64),
     )
+    assert await storage.list_tracks(limit=10) == []
 
     nodes = await storage.list_nodes(limit=10)
     assert len(nodes) == 1

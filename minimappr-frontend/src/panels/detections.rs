@@ -9,6 +9,7 @@ use leptos::prelude::*;
 pub fn DetectionsPane() -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState");
     let detections = state.detections;
+    let nodes = state.nodes;
     let selected_cop_item = state.selected_cop_item;
 
     view! {
@@ -23,6 +24,15 @@ pub fn DetectionsPane() -> impl IntoView {
                         {dets.into_iter().map(|d| {
                             let label = d.label.clone().unwrap_or_else(|| "—".to_string());
                             let node  = d.node_id.clone().unwrap_or_else(|| "—".to_string());
+                            let display_mode = d.spatial_display_mode().to_string();
+                            let is_node_only = display_mode == "node_only";
+                            let is_bearing_only = display_mode == "bearing_only";
+                            let mode_chip = match display_mode.as_str() {
+                                "node_only" => "node",
+                                "bearing_only" => "bearing",
+                                _ => "loc",
+                            }.to_string();
+                            let localization_note = d.uncertainty_summary().to_string();
                             let contributors = d.contributors.clone();
                             let conf  = d.label_confidence.or(d.confidence)
                                 .map(|c| format!("{:.0}%", c * 100.0))
@@ -38,12 +48,30 @@ pub fn DetectionsPane() -> impl IntoView {
 
                             let track_chip = d.track_id.as_ref().map(|tid| short_id(tid, 8));
                             let dot_class = format!("row-status-dot {age_class}");
-                            let geo_display = d.position_geo.as_ref().map(|g| match g.alt_m {
+                            let source_node_geo = if is_node_only {
+                                d.node_id.as_ref().and_then(|source_node_id| {
+                                    nodes.with(|nodes| {
+                                        nodes
+                                            .iter()
+                                            .find(|node| &node.node_id == source_node_id)
+                                            .and_then(|node| node.position_geo.clone())
+                                    })
+                                })
+                            } else {
+                                None
+                            };
+                            let geo_display = if is_node_only {
+                                Some(format!("Node-based near {node}"))
+                            } else {
+                                d.position_geo.as_ref().map(|g| match g.alt_m {
+                                Some(alt) if is_bearing_only => format!("{:.5}°N, {:.5}°E · {:.1} m · range weak", g.lat, g.lon, alt),
                                 Some(alt) => format!("{:.5}°N, {:.5}°E · {:.1} m", g.lat, g.lon, alt),
+                                None if is_bearing_only => format!("{:.5}°N, {:.5}°E · range weak", g.lat, g.lon),
                                 None => format!("{:.5}°N, {:.5}°E", g.lat, g.lon),
-                            });
-                            let geo_for_pan = d.position_geo.clone();
-                            let summary_geo = d.position_geo.as_ref().map(|g| (g.lat, g.lon));
+                                })
+                            };
+                            let geo_for_pan = if is_node_only { source_node_geo.clone() } else { d.position_geo.clone() };
+                            let summary_geo = geo_for_pan.as_ref().map(|g| (g.lat, g.lon));
                             let row_class = move || {
                                 if is_cop_item_selected(
                                     &selected_cop_item.get(),
@@ -98,6 +126,7 @@ pub fn DetectionsPane() -> impl IntoView {
                                             <span class=dot_class title=age_text.clone()></span>
                                             <span class="row-label">{label}</span>
                                             <span class="row-summary-meta">
+                                                <span class="conf-pill" title=localization_note.clone()>{mode_chip}</span>
                                                 <span class="conf-pill">{conf}</span>
                                                 <span class=age_class>{age_text.clone()}</span>
                                             </span>
@@ -130,7 +159,7 @@ pub fn DetectionsPane() -> impl IntoView {
                                                             view! {
                                                                 <button
                                                                     class="btn-sm"
-                                                                    title="Center map on detection"
+                                                                    title=if is_node_only { "Center map on source node" } else { "Center map on detection" }
                                                                     on:click=move |_| pan_to(lat, lon)
                                                                 >
                                                                     "Center on map"
@@ -141,6 +170,9 @@ pub fn DetectionsPane() -> impl IntoView {
                                                     }}
                                                 </div>
                                             </dd>
+
+                                            <dt>"Localization"</dt>
+                                            <dd>{localization_note}</dd>
 
                                             <dt>"Audio"</dt>
                                             <dd>
