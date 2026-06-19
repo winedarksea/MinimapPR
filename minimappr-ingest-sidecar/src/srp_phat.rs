@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     dsp_worker::PairTdoa,
     gcc_phat::{pair_max_tau_s, phat_correlation, GccPhatCorrelation},
-    range_projection::{RANGE_ASYMPTOTIC, RANGE_BOUNDARY, RANGE_REFINED},
+    range_projection::{RANGE_ASYMPTOTIC, RANGE_BEARING_PROJECTED, RANGE_BOUNDARY, RANGE_REFINED},
 };
 
 const EPSILON: f32 = 1e-9;
@@ -628,17 +628,29 @@ fn far_field_candidate(
         .max(aperture_m * 0.5)
         .max(sound_speed_mps / sample_rate_hz.max(1) as f32);
     let radial_std_m = range_estimate.radial_std_m.max(lateral_std_m);
-    let range_projection_mode = if aperture_m <= 0.35 {
-        RANGE_ASYMPTOTIC
-    } else {
-        range_estimate.range_projection_mode
-    };
+    // Replace the hard aperture gate (aperture <= 0.35 → RANGE_ASYMPTOTIC) with a
+    // bearing-quality check. When the range axis is unobservable but the direction
+    // fit is tight (residual < 0.5), emit RANGE_BEARING_PROJECTED so the Python
+    // fusion node can keep high confidence for the bearing while honestly marking
+    // range as uncertain. Also use an explicitly large radial std (4× solved range
+    // or 200 m) to construct a "cone of uncertainty" covariance.
+    let (range_projection_mode, cone_radial_std_m) =
+        if range_estimate.range_projection_mode == RANGE_ASYMPTOTIC {
+            if direction_fit_residual < 0.5 {
+                let r = (range_estimate.radius_m * 4.0).max(200.0);
+                (RANGE_BEARING_PROJECTED, r)
+            } else {
+                (RANGE_ASYMPTOTIC, radial_std_m)
+            }
+        } else {
+            (range_estimate.range_projection_mode, radial_std_m)
+        };
     let timing_resolution_seconds =
         1.0 / (sample_rate_hz.max(1) as f32 * config.interp_factor.max(1) as f32);
     Some(LocalizationCandidate {
         position_m: range_estimate.position_m,
         steering_direction: direction,
-        position_covariance_m2: directional_covariance(direction, lateral_std_m, radial_std_m),
+        position_covariance_m2: directional_covariance(direction, lateral_std_m, cone_radial_std_m),
         range_observability: Some(range_estimate.range_observability),
         range_projection_mode: Some(range_projection_mode),
         is_boundary_clamped: false,

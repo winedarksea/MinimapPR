@@ -23,6 +23,11 @@ from minimappr.models import LocalizationResult
 
 logger = logging.getLogger(__name__)
 
+# Aperture threshold (metres) that separates tight co-located arrays (e.g. 5 cm
+# tetrahedral) from distributed multi-node arrays. Used only for algorithm
+# selection; radial refinement is always attempted regardless of aperture.
+_TIGHT_ARRAY_APERTURE_M: float = 0.35
+
 
 def _array_aperture_m(sensor_positions: dict[str, np.ndarray]) -> float:
     sensor_ids = sorted(sensor_positions.keys())
@@ -50,7 +55,6 @@ class LocalizationDispatcher:
     strategy: str = "fixed"
     default_algorithm: str = "gcc_phat"
     refine_confidence_threshold: float = 0.45
-    tight_array_aperture_m: float = 0.35
     wavelength_gating_enabled: bool = True
     wavelength_penalty_floor: float = 0.25
     algorithms: dict[str, Localizer] = field(default_factory=dict)
@@ -260,9 +264,9 @@ class LocalizationDispatcher:
         sensor_count = len(sensor_positions)
         aperture = _array_aperture_m(sensor_positions)
 
-        if sensor_count >= 4 and aperture <= self.tight_array_aperture_m and "esprit" in self.algorithms:
+        if sensor_count >= 4 and aperture <= _TIGHT_ARRAY_APERTURE_M and "esprit" in self.algorithms:
             return "esprit"
-        if sensor_count >= 4 and aperture <= (self.tight_array_aperture_m * 5.0) and "music" in self.algorithms:
+        if sensor_count >= 4 and aperture <= (_TIGHT_ARRAY_APERTURE_M * 5.0) and "music" in self.algorithms:
             return "music"
         if sensor_count >= 4 and "srp_phat" in self.algorithms:
             return "srp_phat"
@@ -573,7 +577,6 @@ def build_localizer_from_settings(settings: Settings | LocalizationConfig) -> Lo
         node_bearing_strength=cfg.localization_node_bearing_strength,
         amplitude_ratio_strength=cfg.localization_amplitude_ratio_strength,
         far_field_default_range_m=cfg.localization_far_field_default_range_m,
-        tight_array_aperture_m=cfg.localization_tight_array_aperture_m,
     )
     algorithms: dict[str, Localizer] = {
         "gcc_phat": gcc,
@@ -582,7 +585,6 @@ def build_localizer_from_settings(settings: Settings | LocalizationConfig) -> Lo
             grid_resolution_m=cfg.localization_srp_grid_resolution_m,
             search_padding_m=cfg.localization_search_padding_m,
             interp=cfg.gcc_phat_interp_factor,
-            tight_array_aperture_m=cfg.localization_tight_array_aperture_m,
             far_field_default_range_m=cfg.localization_far_field_default_range_m,
             far_field_max_range_m=cfg.localization_far_field_max_range_m,
             far_field_azimuth_step_deg=cfg.localization_music_azimuth_step_deg,
@@ -617,7 +619,6 @@ def build_localizer_from_settings(settings: Settings | LocalizationConfig) -> Lo
         strategy=cfg.localization_strategy,
         default_algorithm=cfg.localization_algorithm,
         refine_confidence_threshold=cfg.localization_refine_confidence_threshold,
-        tight_array_aperture_m=cfg.localization_tight_array_aperture_m,
         wavelength_gating_enabled=cfg.wavelength_gating_enabled,
         wavelength_penalty_floor=cfg.wavelength_penalty_floor,
         algorithms=algorithms,

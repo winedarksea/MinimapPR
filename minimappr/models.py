@@ -28,6 +28,10 @@ def spatial_display_mode_for_detection(
     range_mode = features.get("localization_range_projection_mode")
     if isinstance(range_mode, str) and range_mode in UNOBSERVABLE_RANGE_DISPLAY_MODES:
         return "bearing_only"
+    # bearing_projected has a valid projected position along the bearing ray — render
+    # as localized so the covariance ellipsoid (elongated radially) appears on the COP.
+    if range_mode == "range_bearing_projected":
+        return "localized"
     range_observability = features.get("localization_range_observability")
     if isinstance(range_observability, int | float) and range_observability <= WEAK_RANGE_OBSERVABILITY_THRESHOLD:
         return "bearing_only"

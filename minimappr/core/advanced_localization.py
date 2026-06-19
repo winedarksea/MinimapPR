@@ -58,7 +58,6 @@ def _localize_cartesian(
     node_bearing_strength: float = 1.0,
     amplitude_ratio_strength: float = 0.0,
     far_field_initial_range_m: float = 50.0,
-    tight_array_aperture_m: float = 0.35,
 ) -> LocalizationResult:
     sensor_ids = sorted(sensor_id for sensor_id in sensor_positions if sensor_id in sensor_windows)
     if len(sensor_ids) < 4:
@@ -109,14 +108,6 @@ def _localize_cartesian(
         gcc_phat_function=gcc_phat,
         sensor_node_ids=sensor_node_ids,
     )
-    array_aperture_m = max(
-        (
-            float(np.linalg.norm(sensor_positions[a] - sensor_positions[b]))
-            for index, a in enumerate(sensor_ids)
-            for b in sensor_ids[index + 1 :]
-        ),
-        default=0.0,
-    )
     bearing_constraints, amplitude_constraints = build_node_spatial_constraints(
         sensor_positions=sensor_positions,
         sensor_windows=sensor_windows,
@@ -156,7 +147,7 @@ def _localize_cartesian(
             bearing_constraints=bearing_constraints,
             amplitude_constraints=amplitude_constraints,
             far_field_initial_range_m=far_field_initial_range_m,
-            radial_refinement_enabled=array_aperture_m <= tight_array_aperture_m,
+            radial_refinement_enabled=True,
         )
     except (ValueError, np.linalg.LinAlgError) as exc:
         raise LocalizationError(str(exc)) from exc
@@ -175,7 +166,6 @@ class SRPPhatLocalizer:
     search_padding_m: float = 2.0
     interp: int = 4
     max_grid_points: int = 60_000
-    tight_array_aperture_m: float = 0.35
     far_field_default_range_m: float = 50.0
     far_field_max_range_m: float = 250.0
     far_field_azimuth_step_deg: float = 6.0
@@ -208,7 +198,6 @@ class SRPPhatLocalizer:
             node_bearing_strength=self.node_bearing_strength,
             amplitude_ratio_strength=self.amplitude_ratio_strength,
             far_field_initial_range_m=self.far_field_default_range_m,
-            tight_array_aperture_m=self.tight_array_aperture_m,
         )
 
 

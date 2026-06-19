@@ -102,7 +102,6 @@ class LocalizationEngine:
     node_bearing_strength: float = 1.0
     amplitude_ratio_strength: float = 0.15
     far_field_default_range_m: float = 50.0
-    tight_array_aperture_m: float = 0.35
 
     def _validate_inputs(
         self,
@@ -208,9 +207,7 @@ class LocalizationEngine:
                 bearing_constraints=bearing_constraints,
                 amplitude_constraints=amplitude_constraints,
                 far_field_initial_range_m=self.far_field_default_range_m,
-                radial_refinement_enabled=(
-                    array_aperture_m <= self.tight_array_aperture_m
-                ),
+                radial_refinement_enabled=True,
             )
         except (ValueError, np.linalg.LinAlgError) as exc:
             raise LocalizationError(str(exc)) from exc

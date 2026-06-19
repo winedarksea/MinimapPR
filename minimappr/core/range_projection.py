@@ -24,6 +24,14 @@ RANGE_ASYMPTOTIC = "range_asymptotic"
 # likewise not observable from the data and must receive the same haircut.
 RANGE_BOUNDARY = "range_boundary"
 
+# Bearing is well-observed; position projected along bearing at the far-field
+# default range. Radial (range) axis is NOT observed — the covariance is
+# explicitly elongated along the bearing ray. Confidence reflects bearing quality
+# and is NOT penalised by UNOBSERVABLE_CONFIDENCE_CAP. Use this mode instead of
+# RANGE_ASYMPTOTIC when the bearing solve is well-conditioned so the detection
+# remains useful on the COP (known direction, uncertain range).
+RANGE_BEARING_PROJECTED = "range_bearing_projected"
+
 # Legacy strings emitted by un-migrated Rust sidecars. Kept so a sidecar that has
 # not yet been rebuilt with the canonical vocabulary still receives the correct
 # haircut. ``normalize_range_mode`` folds these into the canonical values.
@@ -39,15 +47,19 @@ _LEGACY_ALIASES: dict[str, str] = {
 # consumers cap confidence/observability uniformly for these regardless of which
 # estimator produced the result.
 UNOBSERVABLE_RANGE_MODES: frozenset[str] = frozenset(
-    {RANGE_ASYMPTOTIC, RANGE_BOUNDARY}
+    {RANGE_ASYMPTOTIC, RANGE_BOUNDARY, RANGE_BEARING_PROJECTED}
 )
 
-# Caps applied to any localization whose range axis is unobservable. These are
-# the single source of truth for both the Python solver (applied inline during
-# the Cartesian solve) and the path-agnostic downstream haircut in the fusion
-# node (which catches Rust-origin estimates).
+# Caps for RANGE_ASYMPTOTIC / RANGE_BOUNDARY — range AND bearing quality both
+# uncertain. Applied by the Python solver and the path-agnostic downstream haircut.
 UNOBSERVABLE_CONFIDENCE_CAP = 0.20
 UNOBSERVABLE_RANGE_OBSERVABILITY_CAP = 0.05
+
+# Caps for RANGE_BEARING_PROJECTED — bearing well-observed, range uncertain.
+# Confidence is not penalised heavily (bearing is still valid); only range
+# observability is driven to the floor to signal range uncertainty clearly.
+BEARING_PROJECTED_CONFIDENCE_CAP = 0.85
+BEARING_PROJECTED_RANGE_OBSERVABILITY_CAP = 0.05
 
 
 def normalize_range_mode(mode: str | None) -> str | None:
@@ -84,10 +96,13 @@ def apply_unobservable_range_haircut(
     produced it. Idempotent.
     """
 
-    if range_mode_is_unobservable(mode):
+    norm = normalize_range_mode(mode)
+    if norm in {RANGE_ASYMPTOTIC, RANGE_BOUNDARY}:
         confidence = min(confidence, UNOBSERVABLE_CONFIDENCE_CAP)
         if range_observability is not None:
-            range_observability = min(
-                range_observability, UNOBSERVABLE_RANGE_OBSERVABILITY_CAP
-            )
+            range_observability = min(range_observability, UNOBSERVABLE_RANGE_OBSERVABILITY_CAP)
+    elif norm == RANGE_BEARING_PROJECTED:
+        confidence = min(confidence, BEARING_PROJECTED_CONFIDENCE_CAP)
+        if range_observability is not None:
+            range_observability = min(range_observability, BEARING_PROJECTED_RANGE_OBSERVABILITY_CAP)
     return confidence, range_observability

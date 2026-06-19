@@ -59,11 +59,11 @@ def test_tdoa_localization_recovers_source_position() -> None:
 
 
 @pytest.mark.parametrize("distance_m", [1.0, 6.0])
-def test_compact_array_flags_range_asymptotic_without_bearing_prior(distance_m: float) -> None:
-    """A ~5cm-aperture array has no observable range axis at any distance, but
-    without a bearing_prior the radial search previously had no Fisher
-    observability check and could report a finite range_refined estimate
-    anyway. It must now match Rust's range_asymptotic classification.
+def test_compact_array_bearing_projected_without_bearing_prior(distance_m: float) -> None:
+    """A ~5cm-aperture array cannot observe range curvature, but bearing is
+    well-determined. The solver now emits range_bearing_projected (bearing
+    observed, range uncertain) rather than a plain range_asymptotic, so that
+    the detection renders as localized on the COP with an elongated covariance.
     """
     sample_rate_hz = 48_000
     temperature_c = 20.0
@@ -94,9 +94,14 @@ def test_compact_array_flags_range_asymptotic_without_bearing_prior(distance_m: 
     bearing = np.asarray(result.position_m, dtype=np.float64) - centroid_m
     bearing /= np.linalg.norm(bearing)
     assert float(np.dot(bearing, direction)) > 0.9
-    assert result.range_projection_mode == "range_asymptotic"
+    # Bearing is well-determined → bearing_projected instead of plain asymptotic
+    assert result.range_projection_mode == "range_bearing_projected"
+    # Range axis is still not observable; observability must be low
     assert result.range_observability is not None
     assert result.range_observability < 0.10
+    # Confidence must exceed the old UNOBSERVABLE_CONFIDENCE_CAP (0.20) since
+    # bearing is well-determined. The exact value depends on GCC-PHAT peak quality.
+    assert result.confidence > 0.20
 
 
 def test_localization_rejects_non_finite_windows() -> None:

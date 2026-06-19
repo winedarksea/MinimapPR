@@ -2220,7 +2220,6 @@ async def get_config(request: Request) -> dict:
         "localization_subspace_freq_min_hz": settings.localization_subspace_freq_min_hz,
         "localization_subspace_freq_max_hz": settings.localization_subspace_freq_max_hz,
         "localization_refine_confidence_threshold": settings.localization_refine_confidence_threshold,
-        "localization_tight_array_aperture_m": settings.localization_tight_array_aperture_m,
         "classifier_backend": settings.classifier_backend,
         "yamnet_min_confidence": settings.yamnet_min_confidence,
         "detection_min_confidence": settings.detection_min_confidence,

@@ -109,7 +109,6 @@ class LocalizationConfig:
     localization_subspace_freq_min_hz: float
     localization_subspace_freq_max_hz: float
     localization_refine_confidence_threshold: float
-    localization_tight_array_aperture_m: float
     beamformed_classification_enabled: bool
     beamformer_type: str
     beamformed_classification_min_sensor_count: int
@@ -429,7 +428,6 @@ class Settings:
     localization_subspace_freq_min_hz: float = 300.0
     localization_subspace_freq_max_hz: float = 3500.0
     localization_refine_confidence_threshold: float = 0.45
-    localization_tight_array_aperture_m: float = 0.35
     # Estimator for the single-node tetrahedral (Rust sidecar) path:
     #   "python_cartesian"— feed the sidecar's pairwise TDOAs + bearing into the Python
     #   "rust"            — trust the sidecar's own SRP-PHAT position (legacy behavior)
@@ -712,8 +710,6 @@ class Settings:
             raise ValueError("MINIMAPPR_LOCALIZATION_MUSIC_EL_STEP_DEG must be in (0,45]")
         if self.localization_refine_confidence_threshold < 0.0 or self.localization_refine_confidence_threshold > 1.0:
             raise ValueError("MINIMAPPR_LOCALIZATION_REFINE_CONFIDENCE_THRESHOLD must be in [0,1]")
-        if self.localization_tight_array_aperture_m <= 0.0:
-            raise ValueError("MINIMAPPR_LOCALIZATION_TIGHT_ARRAY_APERTURE_M must be > 0")
         if self.localization_single_node_solver not in {"rust", "python_cartesian"}:
             raise ValueError(
                 "MINIMAPPR_LOCALIZATION_SINGLE_NODE_SOLVER must be 'rust' or 'python_cartesian'"
@@ -1032,7 +1028,6 @@ class Settings:
                 "MINIMAPPR_LOCALIZATION_REFINE_CONFIDENCE_THRESHOLD",
                 0.45,
             ),
-            localization_tight_array_aperture_m=_env_float("MINIMAPPR_LOCALIZATION_TIGHT_ARRAY_APERTURE_M", 0.35),
             localization_single_node_solver=_env_str(
                 "MINIMAPPR_LOCALIZATION_SINGLE_NODE_SOLVER", "python_cartesian"
             ).strip().lower(),
@@ -1232,7 +1227,6 @@ class Settings:
             localization_subspace_freq_min_hz=self.localization_subspace_freq_min_hz,
             localization_subspace_freq_max_hz=self.localization_subspace_freq_max_hz,
             localization_refine_confidence_threshold=self.localization_refine_confidence_threshold,
-            localization_tight_array_aperture_m=self.localization_tight_array_aperture_m,
             localization_node_bearing_strength=self.localization_node_bearing_strength,
             localization_amplitude_ratio_strength=self.localization_amplitude_ratio_strength,
             wavelength_gating_enabled=self.wavelength_gating_enabled,

@@ -69,7 +69,6 @@ def test_bridge_recovers_bearing_for_near_field_source() -> None:
         sound_speed_mps=SOUND_SPEED_MPS,
         sample_rate_hz=SAMPLE_RATE_HZ,
         interpolation_factor=4,
-        tight_array_aperture_m=0.35,
         far_field_default_range_m=50.0,
     )
 
@@ -97,7 +96,6 @@ def test_bridge_recovers_bearing_for_far_source() -> None:
         sound_speed_mps=SOUND_SPEED_MPS,
         sample_rate_hz=SAMPLE_RATE_HZ,
         interpolation_factor=4,
-        tight_array_aperture_m=0.35,
         far_field_default_range_m=50.0,
     )
 
@@ -125,7 +123,6 @@ def test_bridge_applies_confidence_cap_when_range_unobservable() -> None:
         sound_speed_mps=SOUND_SPEED_MPS,
         sample_rate_hz=SAMPLE_RATE_HZ,
         interpolation_factor=4,
-        tight_array_aperture_m=0.35,
         far_field_default_range_m=50.0,
     )
 
@@ -153,7 +150,6 @@ def test_bridge_returns_none_for_insufficient_measurements(pair_tdoas: list[dict
         sound_speed_mps=SOUND_SPEED_MPS,
         sample_rate_hz=SAMPLE_RATE_HZ,
         interpolation_factor=4,
-        tight_array_aperture_m=0.35,
         far_field_default_range_m=50.0,
     )
     assert result is None
@@ -170,7 +166,6 @@ def test_bridge_returns_none_when_fewer_than_four_sensors() -> None:
         sound_speed_mps=SOUND_SPEED_MPS,
         sample_rate_hz=SAMPLE_RATE_HZ,
         interpolation_factor=4,
-        tight_array_aperture_m=0.35,
         far_field_default_range_m=50.0,
     )
     assert result is None

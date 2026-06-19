@@ -15,10 +15,15 @@ from minimappr.core.radial_range_refinement import (
     radial_standard_deviation,
 )
 from minimappr.core.range_projection import (
+    RANGE_ASYMPTOTIC,
+    RANGE_BEARING_PROJECTED,
+    RANGE_BOUNDARY,
     RANGE_REFINED,
+    BEARING_PROJECTED_CONFIDENCE_CAP,
+    BEARING_PROJECTED_RANGE_OBSERVABILITY_CAP,
     UNOBSERVABLE_CONFIDENCE_CAP,
     UNOBSERVABLE_RANGE_OBSERVABILITY_CAP,
-    range_mode_is_unobservable,
+    normalize_range_mode,
 )
 from minimappr.core.spatial_constraints import (
     AmplitudeRatioConstraint,
@@ -440,6 +445,27 @@ def solve_cartesian_tdoa(
         (float(np.trace(covariance_m2)) - radial_variance_m2) / 2.0,
         minimum_position_std_m**2,
     )
+    # When the range axis is unobservable (RANGE_ASYMPTOTIC) but the bearing is
+    # well-determined (Jacobian condition number < 1e8), upgrade to
+    # RANGE_BEARING_PROJECTED and replace the covariance with an explicit
+    # "cone of uncertainty" — tight laterally (from GCC-PHAT angular precision),
+    # very large radially (4× solved range or 200 m, whichever is greater).
+    if range_projection_mode == RANGE_ASYMPTOTIC and has_tdoa_measurements:
+        try:
+            bearing_cond = float(np.linalg.cond(preliminary_jacobian))
+        except np.linalg.LinAlgError:
+            bearing_cond = float("inf")
+        if bearing_cond < 1e8:
+            range_projection_mode = RANGE_BEARING_PROJECTED
+            cone_radial_std_m = max(solved_range_m * 4.0, far_field_initial_range_m, 200.0)
+            cone_lateral_std_m = math.sqrt(lateral_variance_m2)
+            covariance_m2 = (
+                cone_lateral_std_m**2 * (np.eye(3, dtype=np.float64) - np.outer(radial_axis, radial_axis))
+                + cone_radial_std_m**2 * np.outer(radial_axis, radial_axis)
+            )
+            eigenvalues = np.linalg.eigvalsh(covariance_m2)
+            radial_variance_m2 = cone_radial_std_m**2
+            lateral_variance_m2 = cone_lateral_std_m**2
     radial_observability = float(
         np.clip(math.sqrt(lateral_variance_m2 / max(radial_variance_m2, lateral_variance_m2)), 0.0, 1.0)
     )
@@ -447,8 +473,11 @@ def solve_cartesian_tdoa(
         np.clip(math.sqrt(max(float(eigenvalues[0]), EPSILON) / max(float(eigenvalues[-1]), EPSILON)), 0.0, 1.0)
     )
     radial_observability = min(radial_observability, condition_observability)
-    if range_mode_is_unobservable(range_projection_mode):
+    _norm_mode = normalize_range_mode(range_projection_mode)
+    if _norm_mode in {RANGE_ASYMPTOTIC, RANGE_BOUNDARY}:
         radial_observability = min(radial_observability, UNOBSERVABLE_RANGE_OBSERVABILITY_CAP)
+    elif _norm_mode == RANGE_BEARING_PROJECTED:
+        radial_observability = min(radial_observability, BEARING_PROJECTED_RANGE_OBSERVABILITY_CAP)
     if measurements:
         peak_quality = float(
             np.mean(
@@ -466,15 +495,18 @@ def solve_cartesian_tdoa(
         peak_quality = 0.5
     fit_scale_s = max(sample_time_std_s * 4.0, EPSILON)
     fit_quality = float(math.exp(-residual_rms_s / fit_scale_s))
-    confidence = float(
-        np.clip(
-            peak_quality * fit_quality * math.sqrt(max(condition_observability, radial_observability * 0.25)),
-            0.0,
-            1.0,
-        )
-    )
-    if range_mode_is_unobservable(range_projection_mode):
+    if _norm_mode == RANGE_BEARING_PROJECTED:
+        # The banana covariance has an intentionally huge radial eigenvalue, so
+        # condition_observability is artificially tiny and must not penalise the
+        # bearing quality. Use only peak and fit quality for the base score.
+        obs_factor = 1.0
+    else:
+        obs_factor = math.sqrt(max(condition_observability, radial_observability * 0.25))
+    confidence = float(np.clip(peak_quality * fit_quality * obs_factor, 0.0, 1.0))
+    if _norm_mode in {RANGE_ASYMPTOTIC, RANGE_BOUNDARY}:
         confidence = min(confidence, UNOBSERVABLE_CONFIDENCE_CAP)
+    elif _norm_mode == RANGE_BEARING_PROJECTED:
+        confidence = min(confidence, BEARING_PROJECTED_CONFIDENCE_CAP)
     try:
         singular_values = np.linalg.svd(jacobian, compute_uv=False)
         inverse_squared = [

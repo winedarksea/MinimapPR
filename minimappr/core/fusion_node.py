@@ -542,7 +542,6 @@ class FusionNode:
                 sound_speed_mps=payload.localization_sound_speed_mps,
                 sample_rate_hz=payload.sample_rate_hz,
                 interpolation_factor=self.settings.gcc_phat_interp_factor,
-                tight_array_aperture_m=self.settings.localization_tight_array_aperture_m,
                 far_field_default_range_m=self.settings.localization_far_field_default_range_m,
             )
             if solved is not None:

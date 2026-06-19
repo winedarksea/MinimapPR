@@ -190,4 +190,5 @@ def test_subspace_compact_far_field_preserves_distant_estimate(localizer) -> Non
     assert estimated_range_m > 20.0
     assert result.range_observability is not None
     assert result.range_observability < 0.10
-    assert result.range_projection_mode == "range_asymptotic"
+    # Bearing well-determined → bearing_projected instead of plain asymptotic
+    assert result.range_projection_mode == "range_bearing_projected"

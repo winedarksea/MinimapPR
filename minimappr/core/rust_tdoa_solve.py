@@ -33,17 +33,6 @@ from minimappr.models import LocalizationResult
 MIN_PAIR_MEASUREMENTS = 3
 
 
-def _array_aperture_m(sensor_positions: dict[str, np.ndarray], sensor_ids: list[str]) -> float:
-    return max(
-        (
-            float(np.linalg.norm(sensor_positions[a] - sensor_positions[b]))
-            for index, a in enumerate(sensor_ids)
-            for b in sensor_ids[index + 1 :]
-        ),
-        default=0.0,
-    )
-
-
 def _bearing_prior_from_direction(
     steering_direction: tuple[float, float, float] | None,
     *,
@@ -72,7 +61,6 @@ def solve_localization_from_rust_tdoas(
     sound_speed_mps: float,
     sample_rate_hz: int,
     interpolation_factor: int,
-    tight_array_aperture_m: float,
     far_field_default_range_m: float,
 ) -> LocalizationResult | None:
     """Return a Python Cartesian solve from Rust TDOAs, or None if not solvable.
@@ -128,7 +116,6 @@ def solve_localization_from_rust_tdoas(
 
     mean_confidence = float(np.mean([m.correlation_peak for m in measurements]))
     bearing_prior = _bearing_prior_from_direction(steering_direction, strength=mean_confidence)
-    aperture_m = _array_aperture_m(solve_positions, ordered_sensor_ids)
 
     try:
         solve = solve_cartesian_tdoa(
@@ -141,7 +128,7 @@ def solve_localization_from_rust_tdoas(
             reference_tdoa_s=reference_tdoa_s,
             bearing_prior=bearing_prior,
             far_field_initial_range_m=far_field_default_range_m,
-            radial_refinement_enabled=(aperture_m <= tight_array_aperture_m),
+            radial_refinement_enabled=True,
         )
     except (ValueError, np.linalg.LinAlgError):
         return None
