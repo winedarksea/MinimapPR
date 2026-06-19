@@ -669,8 +669,10 @@ fn select_candidate(
             let minimum_residual_improvement_seconds = near
                 .timing_resolution_seconds
                 .max(far.timing_resolution_seconds);
-            let far_improves_enough = if far.range_projection_mode == Some(RANGE_ASYMPTOTIC)
-                && near.residual_rms_seconds.is_finite()
+            let far_improves_enough = if matches!(
+                far.range_projection_mode,
+                Some(RANGE_ASYMPTOTIC) | Some(RANGE_BEARING_PROJECTED)
+            ) && near.residual_rms_seconds.is_finite()
             {
                 let near_range_m = magnitude(near.position_m);
                 far.residual_rms_seconds <= near.residual_rms_seconds * 0.12
@@ -1491,7 +1493,7 @@ mod tests {
         assert!(evaluation.localization.range_observability.is_some());
         assert_eq!(
             evaluation.localization.range_projection_mode.as_deref(),
-            Some("range_asymptotic")
+            Some("range_bearing_projected")
         );
     }
 

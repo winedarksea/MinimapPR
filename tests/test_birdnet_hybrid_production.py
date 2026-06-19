@@ -66,9 +66,10 @@ TIGHT_SRP_SEARCH_PADDING_M = 0.3
 # source range (~0.4 m) the spherical-wavefront curvature across the array
 # (~2.5 us) is below the inter-sample timing resolution (~5.2 us at 48 kHz), so
 # range is physically unobservable -- the array is a direction-of-arrival (DOA)
-# sensor, not a range sensor, and the solver correctly reports an asymptotic
-# (far-field) range.  These tests therefore assert *bearing* accuracy, the
-# quantity the geometry can actually recover.  Observed angular error is ~2-3 deg
+# sensor, not a range sensor, and the solver correctly reports RANGE_BEARING_PROJECTED
+# (bearing is well-determined; range is uncertain and explicitly marked so via an
+# elongated radial covariance).  These tests therefore assert *bearing* accuracy,
+# the quantity the geometry can actually recover.  Observed angular error is ~2-3 deg
 # at 48 kHz and ~6-9 deg at 16 kHz; 12 deg leaves margin for both rates.
 TIGHT_BEARING_MAX_ERROR_DEG = 12.0
 PRODUCTION_BIRDNET_CHUNK_OVERLAP_SECONDS = 2.0
@@ -1182,7 +1183,8 @@ def test_birdnet_hybrid_production_rust_sidecar_uses_reported_environment(
         assert localization["resolved_algorithm"] == "srp_phat"
         assert localization["sound_speed_mps"] == pytest.approx(expected_sound_speed_mps, rel=1e-4)
         assert localization["position_m"] is not None
-        assert _localization_error_m(localization["position_m"]) < 0.18
+        assert localization["range_projection_mode"] == "range_bearing_projected"
+        assert _bearing_error_deg(localization["position_m"]) < TIGHT_BEARING_MAX_ERROR_DEG
         assert localization_manifest["classifier_render"] is not None
         assert localization_manifest["classifier_render"]["sample_count"] > 0
 
