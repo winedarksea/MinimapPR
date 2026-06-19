@@ -17,6 +17,10 @@ from minimappr.core.localization import (
     dominant_frequency_hz,
     speed_of_sound_mps,
 )
+from minimappr.core.localization_uncertainty import (
+    apply_frequency_covariance_scaling,
+    covariance_to_nested_list,
+)
 from minimappr.interfaces import Localizer
 from minimappr.models import LocalizationResult
 
@@ -436,6 +440,25 @@ class LocalizationDispatcher:
         result.confidence = float(
             np.clip(result.confidence * observability.wavelength_factor, 0.0, 1.0)
         )
+        # Item B: inflate lateral covariance when signal frequency is well below
+        # alias cutoff — angular resolution degrades for low-frequency signals.
+        if result.position_covariance_m2 is not None:
+            centroid_m = np.mean(
+                np.vstack([
+                    np.asarray(sensor_positions[sid], dtype=np.float64)
+                    for sid in sorted(sensor_positions)
+                ]),
+                axis=0,
+            )
+            source_m = np.asarray(result.position_m, dtype=np.float64)
+            bearing_vec = source_m - centroid_m
+            scaled_cov = apply_frequency_covariance_scaling(
+                covariance_m2=np.asarray(result.position_covariance_m2, dtype=np.float64),
+                bearing_unit_vec=bearing_vec,
+                dominant_frequency_hz=observability.dominant_frequency_hz,
+                alias_cutoff_hz=observability.alias_cutoff_hz,
+            )
+            result.position_covariance_m2 = covariance_to_nested_list(scaled_cov)
         return result
 
     def _compute_wavelength_observability(

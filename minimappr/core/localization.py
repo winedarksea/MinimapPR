@@ -54,6 +54,45 @@ def dominant_frequency_hz(window: np.ndarray, sample_rate_hz: int) -> float:
     return float(np.sum(freqs * power) / total_power)
 
 
+def _phase_slope_tau(
+    cross_spectrum: np.ndarray,
+    sample_rate_hz: int,
+    n_fft: int,
+    max_tau_s: float,
+) -> float | None:
+    """Frequency-domain phase-slope delay estimator.
+
+    Fits a linear slope to the unwrapped cross-spectrum phase. More accurate
+    than parabolic time-domain interpolation for compact arrays where the
+    inter-element delay is a small fraction of one sample. Returns None when
+    the delay is too large for reliable phase unwrapping (dense wrapping).
+    """
+    freqs_hz = np.fft.rfftfreq(n_fft, d=1.0 / sample_rate_hz)
+    magnitudes = np.abs(cross_spectrum)
+    peak_mag = float(np.max(magnitudes)) if magnitudes.size > 0 else 0.0
+    if peak_mag < 1e-30:
+        return None
+    # Restrict to frequency bins where the cross-spectrum has meaningful energy
+    mask = magnitudes > (0.05 * peak_mag)
+    if int(np.sum(mask)) < 8 or float(np.max(freqs_hz[mask])) < 100.0:
+        return None
+    phase = np.angle(cross_spectrum[mask])
+    phase_unwrapped = np.unwrap(phase)
+    # If adjacent unwrapped samples still jump > 0.9π, the delay is too large
+    # relative to the frequency bin spacing for reliable unwrapping
+    if phase_unwrapped.size > 1 and np.any(np.abs(np.diff(phase_unwrapped)) > np.pi * 0.9):
+        return None
+    try:
+        coeffs = np.polyfit(freqs_hz[mask], phase_unwrapped, 1)
+    except (np.linalg.LinAlgError, ValueError):
+        return None
+    # phase(f) ≈ -2π·f·τ  →  slope = -2π·τ  →  τ = -slope / (2π)
+    tau = float(-coeffs[0] / (2.0 * np.pi))
+    if not np.isfinite(tau) or abs(tau) > max_tau_s:
+        return None
+    return tau
+
+
 def gcc_phat(
     signal: np.ndarray,
     reference_signal: np.ndarray,
@@ -90,6 +129,21 @@ def gcc_phat(
             fractional_peak_offset = float(np.clip(fractional_peak_offset, -0.5, 0.5))
     shift = (peak_index + fractional_peak_offset) - max_shift
     tau = shift / float(interp * sample_rate_hz)
+
+    # Attempt phase-slope estimation — more accurate than parabolic for compact
+    # arrays where the inter-element delay is a small fraction of one sample.
+    # Restrict to |τ| ≤ 200 μs: this covers a 5 cm tetrahedral (max ~146 μs)
+    # while excluding larger baselines where deep phase wrapping degrades accuracy.
+    _PHASE_SLOPE_MAX_TAU_S = 200e-6
+    if abs(tau) <= _PHASE_SLOPE_MAX_TAU_S:
+        phase_tau = _phase_slope_tau(
+            cross_spectrum=response,
+            sample_rate_hz=sample_rate_hz,
+            n_fft=n,
+            max_tau_s=max_tau_s,
+        )
+        if phase_tau is not None and abs(phase_tau - tau) < 1.0 / sample_rate_hz:
+            tau = phase_tau
 
     peak = float(magnitudes[peak_index])
     return tau, peak

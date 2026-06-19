@@ -294,6 +294,7 @@ class LocalizationResult(BaseModel):
     wavelength_factor: float | None = Field(default=None, ge=0.0, le=1.0)
     dominant_frequency_hz: float | None = Field(default=None, ge=0.0)
     alias_cutoff_hz: float | None = Field(default=None, ge=0.0)
+    condition_number: float | None = Field(default=None, ge=0.0)
 
 
 class ContributorSummary(BaseModel):

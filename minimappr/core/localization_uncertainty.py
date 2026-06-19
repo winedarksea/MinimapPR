@@ -143,6 +143,53 @@ def range_observability_from_covariance(
     return float(np.clip(np.sqrt(min_variance_m2 / max_variance_m2), 0.0, 1.0))
 
 
+def apply_frequency_covariance_scaling(
+    covariance_m2: np.ndarray,
+    bearing_unit_vec: np.ndarray,
+    dominant_frequency_hz: float,
+    alias_cutoff_hz: float,
+    *,
+    frequency_floor: float = 0.25,
+) -> np.ndarray:
+    """Inflate lateral covariance when signal frequency is well below alias cutoff.
+
+    Angular resolution degrades when the dominant signal frequency is much lower
+    than the array's spatial aliasing cutoff (c / 2·max_baseline). This function
+    widens the covariance along directions perpendicular to the bearing by the
+    factor (alias_cutoff_hz / dominant_frequency_hz)², making the uncertainty
+    representation more honest for low-frequency signals.
+
+    At or above alias_cutoff_hz the covariance is returned unchanged.
+    The inflation is capped at 1/frequency_floor² to avoid degenerate blowup.
+    """
+    if alias_cutoff_hz <= 0.0 or dominant_frequency_hz <= 0.0:
+        return covariance_m2
+    lateral_scale = float(np.clip(dominant_frequency_hz / alias_cutoff_hz, frequency_floor, 1.0))
+    if lateral_scale >= 1.0 - 1.0e-6:
+        return covariance_m2
+    e = np.asarray(bearing_unit_vec, dtype=np.float64).reshape(3)
+    norm = float(np.linalg.norm(e))
+    if norm < EPSILON:
+        return covariance_m2
+    e = e / norm
+    covariance = np.asarray(covariance_m2, dtype=np.float64)
+    if not np.all(np.isfinite(covariance)):
+        return covariance_m2
+    covariance = 0.5 * (covariance + covariance.T)
+    eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+    if not np.all(np.isfinite(eigenvalues)):
+        return covariance_m2
+    inflation = 1.0 / (lateral_scale ** 2)  # > 1: wider
+    scaled_eigenvalues = np.empty_like(eigenvalues)
+    for i, v in enumerate(eigenvectors.T):
+        # Fraction of this eigenvector that lies in the lateral plane
+        lateral_fraction = 1.0 - float(np.dot(e, v)) ** 2
+        scale = 1.0 + (inflation - 1.0) * lateral_fraction
+        scaled_eigenvalues[i] = eigenvalues[i] * max(scale, 1.0)
+    result = eigenvectors @ np.diag(scaled_eigenvalues) @ eigenvectors.T
+    return 0.5 * (result + result.T)
+
+
 def covariance_to_nested_list(covariance_m2: np.ndarray | None) -> list[list[float]] | None:
     if covariance_m2 is None:
         return None

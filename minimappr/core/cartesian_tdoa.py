@@ -62,6 +62,9 @@ PRIOR_DOMINATED_ASYMPTOTIC_RADIAL_STD_FRACTION = 0.9
 DEFAULT_ASYMPTOTIC_RADIAL_STD_FRACTION = 5.0
 
 
+_RANGE_PROJECTION_CONDITION_THRESHOLD: float = 1e6
+
+
 @dataclass(frozen=True, slots=True)
 class CartesianTdoaSolve:
     position_m: np.ndarray
@@ -71,6 +74,7 @@ class CartesianTdoaSolve:
     residual_rms_seconds: float
     radial_observability: float
     range_projection_mode: str
+    condition_number: float = float("inf")
 
 
 def _array_aperture_m(sensor_positions: dict[str, np.ndarray], sensor_ids: list[str]) -> float:
@@ -419,6 +423,26 @@ def solve_cartesian_tdoa(
             ),
         )
     )
+    # Compute main Jacobian SVD once: used for condition number gate (Item D),
+    # covariance, and GDOP to avoid three separate SVD calls.
+    try:
+        jacobian_singular_values = np.linalg.svd(jacobian, compute_uv=False)
+        main_cond_num = float(
+            jacobian_singular_values[0] / max(float(jacobian_singular_values[-1]), EPSILON)
+        )
+    except np.linalg.LinAlgError:
+        jacobian_singular_values = np.zeros(3)
+        main_cond_num = float("inf")
+    # When the full Jacobian is severely ill-conditioned (e.g. nearly collinear
+    # multi-node geometry or a compact single-array with a far source that the
+    # radial refinement didn't catch), force RANGE_ASYMPTOTIC so the existing
+    # bearing-condition check below can upgrade it to RANGE_BEARING_PROJECTED.
+    if (
+        range_projection_mode == RANGE_REFINED
+        and has_tdoa_measurements
+        and main_cond_num > _RANGE_PROJECTION_CONDITION_THRESHOLD
+    ):
+        range_projection_mode = RANGE_ASYMPTOTIC
     solved_range_m = float(np.linalg.norm(best_position - centroid_m))
     unobservable_position_std_m = max(
         radial_refinement_std_m or 0.0,
@@ -507,16 +531,12 @@ def solve_cartesian_tdoa(
         confidence = min(confidence, UNOBSERVABLE_CONFIDENCE_CAP)
     elif _norm_mode == RANGE_BEARING_PROJECTED:
         confidence = min(confidence, BEARING_PROJECTED_CONFIDENCE_CAP)
-    try:
-        singular_values = np.linalg.svd(jacobian, compute_uv=False)
-        inverse_squared = [
-            1.0 / (singular_value * singular_value)
-            for singular_value in singular_values
-            if singular_value > EPSILON
-        ]
-        gdop = float(math.sqrt(sum(inverse_squared))) if len(inverse_squared) == 3 else float("inf")
-    except np.linalg.LinAlgError:
-        gdop = float("inf")
+    inverse_squared = [
+        1.0 / (sv * sv)
+        for sv in jacobian_singular_values
+        if sv > EPSILON
+    ]
+    gdop = float(math.sqrt(sum(inverse_squared))) if len(inverse_squared) == 3 else float("inf")
     return CartesianTdoaSolve(
         position_m=best_position,
         covariance_m2=covariance_m2,
@@ -525,6 +545,7 @@ def solve_cartesian_tdoa(
         residual_rms_seconds=residual_rms_s,
         radial_observability=radial_observability,
         range_projection_mode=range_projection_mode,
+        condition_number=main_cond_num,
     )
 
 
@@ -545,4 +566,5 @@ def localization_result_from_cartesian_solve(
         range_observability=solve.radial_observability,
         residual_rms_seconds=solve.residual_rms_seconds,
         range_projection_mode=solve.range_projection_mode,
+        condition_number=solve.condition_number if math.isfinite(solve.condition_number) else None,
     )
