@@ -160,8 +160,27 @@ pub(crate) fn phat_correlation(
     } else {
         0.0
     };
-    let delay_samples =
+    let mut delay_samples =
         (peak_index as f32 + fractional_peak_offset - lag as f32) / interp_factor as f32;
+
+    // Phase-slope refinement — more accurate than parabolic interpolation for
+    // compact arrays where the inter-element delay is a small fraction of one
+    // sample (e.g. the 5 cm Sirith tetrahedral). Mirrors the Python estimator in
+    // `minimappr/core/localization.py::_phase_slope_tau`. Restricted to
+    // |τ| ≤ 200 μs (covers a 5 cm tetra; excludes larger baselines where deep
+    // phase wrapping degrades the fit) and only accepted when it agrees with the
+    // parabolic estimate to within one sample.
+    const PHASE_SLOPE_MAX_TAU_S: f32 = 200e-6;
+    let parabolic_tau_s = delay_samples / sample_rate_hz as f32;
+    if parabolic_tau_s.abs() <= PHASE_SLOPE_MAX_TAU_S {
+        if let Some(phase_tau_s) =
+            phase_slope_tau(&x1, &x2, fft_len, sample_rate_hz, effective_band, max_tau_s)
+        {
+            if (phase_tau_s - parabolic_tau_s).abs() < 1.0 / sample_rate_hz as f32 {
+                delay_samples = phase_tau_s * sample_rate_hz as f32;
+            }
+        }
+    }
 
     let mut sorted_peaks = magnitudes.clone();
     sorted_peaks.sort_by(|left, right| right.partial_cmp(left).unwrap_or(Ordering::Equal));
@@ -189,6 +208,151 @@ pub(crate) fn phat_correlation(
             peak_value,
         },
     }
+}
+
+/// Frequency-domain phase-slope delay estimator. Fits a linear slope to the
+/// unwrapped phase of the *raw* cross-spectrum (`x1·conj(x2)`) over in-band bins
+/// that carry meaningful energy. Mirrors the Python `_phase_slope_tau` in
+/// `minimappr/core/localization.py`.
+///
+/// NOTE: this operates on the raw cross product, not the PHAT-normalised
+/// spectrum used for the IFFT — the magnitude mask needs the true signal energy
+/// per bin. Returns `None` when the delay is too large for reliable unwrapping
+/// (dense wrapping) or the spectrum lacks broadband energy.
+fn phase_slope_tau(
+    x1: &[Complex32],
+    x2: &[Complex32],
+    fft_len: usize,
+    sample_rate_hz: u32,
+    band_hz: Option<[f32; 2]>,
+    max_tau_s: f32,
+) -> Option<f32> {
+    if fft_len == 0 || sample_rate_hz == 0 {
+        return None;
+    }
+    let half = (fft_len / 2).min(x1.len().min(x2.len()).saturating_sub(1));
+    let mut freqs: Vec<f32> = Vec::with_capacity(half + 1);
+    let mut magnitudes: Vec<f32> = Vec::with_capacity(half + 1);
+    let mut phases: Vec<f32> = Vec::with_capacity(half + 1);
+    for bin in 0..=half {
+        if !bin_in_band(bin, fft_len, sample_rate_hz, band_hz) {
+            continue;
+        }
+        let cross = x1[bin] * x2[bin].conj();
+        freqs.push(bin as f32 * sample_rate_hz as f32 / fft_len as f32);
+        magnitudes.push(cross.norm());
+        phases.push(cross.arg());
+    }
+
+    let peak_magnitude = magnitudes.iter().copied().fold(0.0_f32, f32::max);
+    if peak_magnitude < 1e-30 {
+        return None;
+    }
+    // Restrict to frequency bins with meaningful cross-spectrum energy.
+    let threshold = 0.05 * peak_magnitude;
+    let mut selected_freqs: Vec<f32> = Vec::new();
+    let mut selected_phases: Vec<f32> = Vec::new();
+    for index in 0..magnitudes.len() {
+        if magnitudes[index] > threshold {
+            selected_freqs.push(freqs[index]);
+            selected_phases.push(phases[index]);
+        }
+    }
+    if selected_freqs.len() < 8 {
+        return None;
+    }
+    let max_freq = selected_freqs.iter().copied().fold(0.0_f32, f32::max);
+    if max_freq < 100.0 {
+        return None;
+    }
+
+    // Unwrap phase (cumulative ±2π corrections); reject if any adjacent step
+    // still jumps > 0.9π — the delay is too large for reliable unwrapping.
+    let pi = std::f32::consts::PI;
+    let mut unwrapped: Vec<f32> = Vec::with_capacity(selected_phases.len());
+    unwrapped.push(selected_phases[0]);
+    for index in 1..selected_phases.len() {
+        let mut delta = selected_phases[index] - selected_phases[index - 1];
+        while delta > pi {
+            delta -= 2.0 * pi;
+        }
+        while delta < -pi {
+            delta += 2.0 * pi;
+        }
+        if delta.abs() > 0.9 * pi {
+            return None;
+        }
+        unwrapped.push(unwrapped[index - 1] + delta);
+    }
+
+    // Closed-form degree-1 least-squares fit: phase(f) ≈ slope·f + intercept.
+    let n = selected_freqs.len() as f32;
+    let sum_x: f32 = selected_freqs.iter().sum();
+    let sum_y: f32 = unwrapped.iter().sum();
+    let sum_xx: f32 = selected_freqs.iter().map(|f| f * f).sum();
+    let sum_xy: f32 = selected_freqs
+        .iter()
+        .zip(unwrapped.iter())
+        .map(|(f, p)| f * p)
+        .sum();
+    let denominator = n * sum_xx - sum_x * sum_x;
+    if denominator.abs() < 1e-12 {
+        return None;
+    }
+    let slope = (n * sum_xy - sum_x * sum_y) / denominator;
+    // phase(f) ≈ -2π·f·τ  →  slope = -2π·τ  →  τ = -slope / (2π)
+    let tau = -slope / (2.0 * pi);
+    if !tau.is_finite() || tau.abs() > max_tau_s {
+        return None;
+    }
+    Some(tau)
+}
+
+/// Power-weighted mean frequency (Hz) of a real signal. Mirrors the Python
+/// `dominant_frequency_hz` in `minimappr/core/localization.py`: mean-centre,
+/// apply a Hann taper, take the magnitude-squared spectrum, drop the DC bin, and
+/// return Σ(f·power)/Σ(power). Returns 0.0 for empty/silent input.
+pub(crate) fn dominant_frequency_hz(window: &[f32], sample_rate_hz: u32) -> f32 {
+    let n = window.len();
+    if n <= 1 || sample_rate_hz == 0 {
+        return 0.0;
+    }
+    let mean = window.iter().copied().sum::<f32>() / n as f32;
+    let centered: Vec<f32> = window.iter().map(|&sample| sample - mean).collect();
+    if !centered.iter().any(|&value| value.abs() > 1e-12) {
+        return 0.0;
+    }
+    // np.hanning(n): 0.5 - 0.5·cos(2π·i/(n-1))
+    let pi = std::f32::consts::PI;
+    let mut buffer: Vec<Complex32> = centered
+        .iter()
+        .enumerate()
+        .map(|(index, &value)| {
+            let taper = 0.5 - 0.5 * (2.0 * pi * index as f32 / (n as f32 - 1.0)).cos();
+            Complex32::new(value * taper, 0.0)
+        })
+        .collect();
+
+    thread_local! {
+        static PLANNER: std::cell::RefCell<FftPlanner<f32>> = std::cell::RefCell::new(FftPlanner::new());
+    }
+    let fft = PLANNER.with(|planner| planner.borrow_mut().plan_fft_forward(n));
+    fft.process(&mut buffer);
+
+    // rfft-equivalent positive-frequency bins, dropping DC (bin 0).
+    let half = n / 2;
+    let mut total_power = 0.0_f64;
+    let mut weighted_sum = 0.0_f64;
+    for bin in 1..=half {
+        let power = (buffer[bin].norm() as f64).powi(2);
+        let freq = bin as f64 * sample_rate_hz as f64 / n as f64;
+        total_power += power;
+        weighted_sum += freq * power;
+    }
+    if total_power <= 1e-12 {
+        return 0.0;
+    }
+    (weighted_sum / total_power) as f32
 }
 
 pub(crate) fn pair_max_tau_s(
@@ -428,6 +592,81 @@ mod tests {
             "expected -1.5 ± 0.2, got {}",
             result.delay_samples
         );
+    }
+
+    #[test]
+    fn phase_slope_tau_recovers_subsample_delay() {
+        use rustfft::FftPlanner;
+        let sr = 48_000u32;
+        let n = 1_024usize;
+        let signal = pseudo_random(n);
+        let fft_len = next_pow2(2 * n);
+        let fft = FftPlanner::<f32>::new().plan_fft_forward(fft_len);
+        let mut x1: Vec<Complex32> = signal
+            .iter()
+            .map(|&s| Complex32::new(s, 0.0))
+            .chain(std::iter::repeat_n(Complex32::new(0.0, 0.0), fft_len - n))
+            .collect();
+        fft.process(&mut x1);
+
+        // Construct x2 as a *true* fractional delay of x1 in the frequency domain:
+        // x2(f) = x1(f)·exp(-j2πf·d/sr) lags x1 by d samples. With cross = x1·conj(x2)
+        // the phase slope then encodes -d samples (positive delay_samples = ch2
+        // leads ch1). Only the positive-freq half read by phase_slope_tau matters.
+        let lag_samples = 0.4_f32;
+        let half = fft_len / 2;
+        let mut x2 = vec![Complex32::new(0.0, 0.0); fft_len];
+        for bin in 0..=half {
+            let freq = bin as f32 * sr as f32 / fft_len as f32;
+            let theta = -2.0 * std::f32::consts::PI * freq * lag_samples / sr as f32;
+            x2[bin] = x1[bin] * Complex32::new(theta.cos(), theta.sin());
+        }
+
+        let tau = phase_slope_tau(&x1, &x2, fft_len, sr, None, 8.0 / sr as f32)
+            .expect("phase slope should resolve a clean broadband sub-sample delay");
+        let recovered_samples = tau * sr as f32;
+        assert!(
+            (recovered_samples + lag_samples).abs() < 0.02,
+            "expected ~{} samples, got {}",
+            -lag_samples,
+            recovered_samples
+        );
+    }
+
+    #[test]
+    fn phase_slope_returns_none_without_enough_energy_bins() {
+        let sr = 48_000u32;
+        let fft_len = 2_048usize;
+        // Energy in only three bins → below the ≥ 8 broadband-energy-bin gate.
+        let mut x1 = vec![Complex32::new(0.0, 0.0); fft_len];
+        for &bin in &[40usize, 41, 42] {
+            x1[bin] = Complex32::new(1.0, 0.5);
+        }
+        let x2 = x1.clone();
+        let tau = phase_slope_tau(&x1, &x2, fft_len, sr, None, 8.0 / sr as f32);
+        assert!(tau.is_none(), "expected None for narrowband energy, got {tau:?}");
+    }
+
+    #[test]
+    fn dominant_frequency_recovers_tone() {
+        let sr = 48_000u32;
+        let n = 4_096usize;
+        let freq = 3_000.0f32;
+        let signal: Vec<f32> = (0..n)
+            .map(|i| (2.0 * std::f32::consts::PI * freq * i as f32 / sr as f32).sin())
+            .collect();
+        let dominant = dominant_frequency_hz(&signal, sr);
+        assert!(
+            (dominant - freq).abs() < 100.0,
+            "expected ~{freq} Hz, got {dominant}"
+        );
+    }
+
+    #[test]
+    fn dominant_frequency_zero_for_silence_or_empty() {
+        assert_eq!(dominant_frequency_hz(&vec![0.0; 1_024], 48_000), 0.0);
+        assert_eq!(dominant_frequency_hz(&[], 48_000), 0.0);
+        assert_eq!(dominant_frequency_hz(&[1.0], 48_000), 0.0);
     }
 
     fn pseudo_random_with_seed(mut seed: u32, len: usize) -> Vec<f32> {

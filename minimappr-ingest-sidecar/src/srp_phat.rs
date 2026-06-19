@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     dsp_worker::PairTdoa,
-    gcc_phat::{pair_max_tau_s, phat_correlation, GccPhatCorrelation},
+    gcc_phat::{dominant_frequency_hz, pair_max_tau_s, phat_correlation, GccPhatCorrelation},
     range_projection::{RANGE_ASYMPTOTIC, RANGE_BEARING_PROJECTED, RANGE_BOUNDARY, RANGE_REFINED},
 };
 
@@ -50,6 +50,12 @@ pub struct SrpPhatLocalization {
     pub confidence: f32,
     pub residual_rms_seconds: f32,
     pub sound_speed_mps: f32,
+    /// Power-weighted mean frequency (Hz) of the reference channel. Consumed by
+    /// the Python fusion node to scale lateral covariance for low-frequency
+    /// signals (frequency-dependent angular resolution). Mirrors the Python
+    /// `dominant_frequency_hz` in `minimappr/core/localization.py`.
+    #[serde(default)]
+    pub dominant_frequency_hz: Option<f32>,
 }
 
 pub struct SrpPhatEvaluation {
@@ -139,6 +145,8 @@ pub fn estimate_tetrahedral_steering(
             pair_tdoas,
         };
     }
+    let reference_dominant_frequency_hz =
+        dominant_frequency_hz(&windows[reference_channel], sample_rate_hz);
 
     let measured_tdoa = build_reference_measurements(reference_channel, &pair_observations);
     if measured_tdoa.len() < 3 {
@@ -239,6 +247,7 @@ pub fn estimate_tetrahedral_steering(
             confidence,
             residual_rms_seconds: candidate.residual_rms_seconds,
             sound_speed_mps,
+            dominant_frequency_hz: Some(reference_dominant_frequency_hz),
         },
         pair_tdoas,
     }
@@ -263,6 +272,7 @@ fn degraded_localization(resolved_algorithm: &str, sound_speed_mps: f32) -> SrpP
         confidence: 0.0,
         residual_rms_seconds: f32::INFINITY,
         sound_speed_mps,
+        dominant_frequency_hz: None,
     }
 }
 
@@ -680,10 +690,21 @@ fn select_candidate(
                         && near_range_m > 20.0
                         && magnitude(far.position_m) > 100.0
                         && far.residual_rms_seconds < near.residual_rms_seconds)
+                    // When the near-field range is unobservable, the residual gap
+                    // between near and far narrows because phase-slope-refined TDOAs
+                    // let both models fit the near-planar wavefront well. A genuine
+                    // near-field source still leaves the near fit clearly better
+                    // (far/near ratio ≈ 0.85), while a truly distant source lets the
+                    // far model fit appreciably better (ratio ≈ 0.5). Require far to
+                    // fit at least ~1.7× better (≤ 0.6) — relaxed from the old 0.25
+                    // which the cleaner TDOAs no longer reach — so distant sources
+                    // surface as a high-contrast far-field bearing_projected estimate
+                    // (known direction, honest range uncertainty) instead of an
+                    // overconfident near-field range guess.
                     || (near.range_observability.unwrap_or(1.0) < 0.15
                         && far.contrast_score >= near.contrast_score + 0.2
                         && magnitude(far.position_m) > 100.0
-                        && far.residual_rms_seconds <= near.residual_rms_seconds * 0.25)
+                        && far.residual_rms_seconds <= near.residual_rms_seconds * 0.6)
             } else {
                 far.residual_rms_seconds + minimum_residual_improvement_seconds
                     < near.residual_rms_seconds
@@ -1592,7 +1613,7 @@ mod tests {
     }
 
     #[test]
-    fn tetrahedral_solver_matches_python_near_field_regression_at_far_edge() {
+    fn tetrahedral_solver_far_edge_source_reports_bearing_projected() {
         let mics = [
             [0.0, 0.0, 0.0],
             [0.05, 0.0, 0.0],
@@ -1672,19 +1693,26 @@ mod tests {
         let expected_direction = normalize_or_zero(sub(source_position_m, array_centroid_m));
         let recovered_direction = normalize_or_zero(sub(recovered_position_m, array_centroid_m));
 
+        // The bearing must stay accurate even though the range is unobservable.
         assert!(dot(recovered_direction, expected_direction) > 0.95);
-        assert!(
-            euclidean_distance(recovered_position_m, source_position_m) <= 4.5,
-            "expected <= 4.5 m error, got recovered={:?} source={:?} mode={:?} near={:?} far={:?}",
-            recovered_position_m,
-            source_position_m,
+        // At ~4.6 m a 5 cm array cannot resolve range — wavefront curvature across
+        // the aperture is sub-sample. The honest, high-quality result is therefore
+        // a bearing projected along the ray with explicit range uncertainty
+        // (range_bearing_projected), never range_asymptotic and never a falsely
+        // precise near-field range.
+        assert_eq!(
+            evaluation.localization.range_projection_mode.as_deref(),
+            Some("range_bearing_projected"),
+            "expected range_bearing_projected, got mode={:?} recovered={:?} near={:?} far={:?}",
             evaluation.localization.range_projection_mode,
+            recovered_position_m,
             near_candidate,
             far_candidate,
         );
-        assert_ne!(
-            evaluation.localization.range_projection_mode.as_deref(),
-            Some("range_asymptotic")
+        assert!(
+            evaluation.localization.range_observability.unwrap_or(1.0) < 0.15,
+            "expected low range observability, got {:?}",
+            evaluation.localization.range_observability,
         );
     }
 

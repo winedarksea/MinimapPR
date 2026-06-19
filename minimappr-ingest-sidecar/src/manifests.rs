@@ -42,6 +42,8 @@ pub struct LocalizationManifestPayload {
     pub residual_rms_seconds: Option<f32>,
     pub sound_speed_mps: f32,
     pub effective_band_hz: Option<[f32; 2]>,
+    #[serde(default)]
+    pub dominant_frequency_hz: Option<f32>,
     pub pair_tdoas: Vec<PairTdoaDiagnostic>,
 }
 

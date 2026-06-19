@@ -23,12 +23,54 @@ pub const RANGE_BOUNDARY: &str = "range_boundary";
 /// (bearing is tight) even though range curvature is unresolvable.
 pub const RANGE_BEARING_PROJECTED: &str = "range_bearing_projected";
 
-/// Returns true when the range axis is not observable for `mode` and the
-/// estimate must receive the confidence/observability haircut.
+/// Confidence/observability caps applied when the range axis is unobservable.
+/// These mirror the canonical Python values in `minimappr/core/range_projection.py`
+/// and the shared `RANGE_PROJECTION_CONTRACT.md`. RANGE_ASYMPTOTIC / RANGE_BOUNDARY
+/// receive the harsh cap (range AND bearing both uncertain); RANGE_BEARING_PROJECTED
+/// keeps a high confidence cap (bearing is well-observed) while still driving range
+/// observability to the floor.
+#[allow(dead_code)]
+pub const UNOBSERVABLE_CONFIDENCE_CAP: f32 = 0.20;
+#[allow(dead_code)]
+pub const UNOBSERVABLE_RANGE_OBSERVABILITY_CAP: f32 = 0.05;
+#[allow(dead_code)]
+pub const BEARING_PROJECTED_CONFIDENCE_CAP: f32 = 0.85;
+#[allow(dead_code)]
+pub const BEARING_PROJECTED_RANGE_OBSERVABILITY_CAP: f32 = 0.05;
+
+/// Returns true when the range axis is not observable for `mode`. NOTE: this is
+/// true for RANGE_BEARING_PROJECTED as well — its *range* is unobservable — but
+/// its confidence cap is the gentle bearing cap, not the harsh unobservable one.
+/// Use `confidence_cap_for_mode` to apply the correct, mode-specific cap.
 #[allow(dead_code)]
 pub fn is_unobservable(mode: Option<&str>) -> bool {
     matches!(
         mode,
         Some(RANGE_ASYMPTOTIC) | Some(RANGE_BOUNDARY) | Some(RANGE_BEARING_PROJECTED)
     )
+}
+
+/// Confidence cap for `mode`, or `None` when the range is observable (no cap).
+/// RANGE_BEARING_PROJECTED gets the gentle bearing cap; the other unobservable
+/// modes get the harsh cap. Kept in lockstep with the Python haircut so a future
+/// Rust-side cap cannot diverge.
+#[allow(dead_code)]
+pub fn confidence_cap_for_mode(mode: Option<&str>) -> Option<f32> {
+    match mode {
+        Some(RANGE_ASYMPTOTIC) | Some(RANGE_BOUNDARY) => Some(UNOBSERVABLE_CONFIDENCE_CAP),
+        Some(RANGE_BEARING_PROJECTED) => Some(BEARING_PROJECTED_CONFIDENCE_CAP),
+        _ => None,
+    }
+}
+
+/// Range-observability cap for `mode`, or `None` when the range is observable.
+#[allow(dead_code)]
+pub fn range_observability_cap_for_mode(mode: Option<&str>) -> Option<f32> {
+    match mode {
+        Some(RANGE_ASYMPTOTIC) | Some(RANGE_BOUNDARY) => {
+            Some(UNOBSERVABLE_RANGE_OBSERVABILITY_CAP)
+        }
+        Some(RANGE_BEARING_PROJECTED) => Some(BEARING_PROJECTED_RANGE_OBSERVABILITY_CAP),
+        _ => None,
+    }
 }

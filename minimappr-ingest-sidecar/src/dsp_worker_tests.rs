@@ -445,6 +445,15 @@ async fn worker_publishes_localization_and_classifier_render_contract() {
     assert_eq!(localization.attempted_algorithm, "srp_phat");
     assert_eq!(localization.resolved_algorithm, "srp_phat");
     assert_eq!(localization.pair_tdoas.len(), 6);
+    // The reference-channel dominant frequency is computed and carried through the
+    // serialized manifest so the Python fusion node can scale lateral covariance.
+    let dominant_hz = localization
+        .dominant_frequency_hz
+        .expect("dominant_frequency_hz present in localization payload");
+    assert!(
+        dominant_hz > 0.0,
+        "expected a positive dominant frequency, got {dominant_hz}"
+    );
 
     // localization_result remains heartbeat/localization metadata only.
     assert!(localization_event.derived_handle.is_some());

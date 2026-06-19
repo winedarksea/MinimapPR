@@ -39,6 +39,10 @@ class LocalizedClassifierRenderRequest:
     localization_pair_tdoas: list[dict] | None = None
     localization_steering_direction: tuple[float, float, float] | None = None
     localization_sound_speed_mps: float | None = None
+    # Power-weighted mean frequency (Hz) of the reference channel reported by the
+    # sidecar. Used to scale lateral covariance for low-frequency signals on the
+    # single-node path (see fusion_node). Absent on un-rebuilt sidecars → None.
+    localization_dominant_frequency_hz: float | None = None
     localization_method: str = "rust_dsp_worker"
     source_type: str = "raw_sensor"
     reporting_modality: Literal["localized", "omni"] = "localized"
@@ -166,6 +170,9 @@ def load_localized_render_manifest_bundle(
         localization_sound_speed_mps = _optional_nonnegative_float(
             localization_payload.get("sound_speed_mps")
         )
+        localization_dominant_frequency_hz = _optional_nonnegative_float(
+            localization_payload.get("dominant_frequency_hz")
+        )
         reporting_modality: Literal["localized", "omni"] = "localized"
     else:
         if node.position_m is None:
@@ -179,6 +186,7 @@ def load_localized_render_manifest_bundle(
         localization_pair_tdoas = None
         localization_steering_direction = None
         localization_sound_speed_mps = None
+        localization_dominant_frequency_hz = None
         localization_method = "rust_classifier_render_fallback"
         reporting_modality = "omni"
 
@@ -199,6 +207,7 @@ def load_localized_render_manifest_bundle(
             localization_pair_tdoas=localization_pair_tdoas,
             localization_steering_direction=localization_steering_direction,
             localization_sound_speed_mps=localization_sound_speed_mps,
+            localization_dominant_frequency_hz=localization_dominant_frequency_hz,
             localization_method=localization_method,
             source_type=source_type,
             reporting_modality=reporting_modality,

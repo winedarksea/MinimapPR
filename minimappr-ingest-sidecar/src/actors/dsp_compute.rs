@@ -81,6 +81,7 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
                 confidence: 0.0,
                 residual_rms_seconds: f32::INFINITY,
                 sound_speed_mps: payload.effective_sound_speed_mps,
+                dominant_frequency_hz: None,
             },
             pair_tdoas: vec![],
         }
@@ -466,6 +467,7 @@ fn localization_manifest_payload(
             .then_some(result.residual_rms_seconds),
         sound_speed_mps: result.sound_speed_mps,
         effective_band_hz: Some(effective_band_hz),
+        dominant_frequency_hz: result.dominant_frequency_hz,
         pair_tdoas,
     }
 }

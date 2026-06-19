@@ -41,7 +41,12 @@ from minimappr.core.environment import StaticEnvironmentProvider
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.cluster_registry import ClusterRegistry
 from minimappr.core.ingest import EnvironmentUpdater, IngestProcessor
+from minimappr.core.ambi_atob import alias_cutoff_from_positions
 from minimappr.core.localization import LocalizationError
+from minimappr.core.localization_uncertainty import (
+    apply_frequency_covariance_scaling,
+    covariance_to_nested_list,
+)
 from minimappr.core.node_registry import NodeRegistry
 from minimappr.core.pipeline_realtime import PipelineRealtimeTracker
 from minimappr.core.range_projection import (
@@ -556,6 +561,36 @@ class FusionNode:
                 self._metrics.localization_single_node_python_solved_count += 1
             else:
                 self._metrics.localization_single_node_python_fallback_count += 1
+
+        # Frequency-dependent lateral covariance scaling for the single-node path.
+        # Angular resolution degrades when the dominant signal frequency falls well
+        # below the array's spatial-aliasing cutoff, so widen the covariance
+        # perpendicular to the bearing. The sidecar reports the dominant frequency
+        # (absent on un-rebuilt sidecars → skip); the alias cutoff is derived from
+        # node geometry. Mirrors the multi-node dispatcher's Item B scaling.
+        if (
+            localization_position_covariance_m2 is not None
+            and payload.localization_dominant_frequency_hz is not None
+            and payload.localization_sound_speed_mps is not None
+        ):
+            positions = np.vstack(
+                [
+                    np.asarray(selected_positions[sid], dtype=np.float64)
+                    for sid in sorted(selected_positions)
+                ]
+            )
+            alias_cutoff_hz = alias_cutoff_from_positions(
+                positions, c_sound=payload.localization_sound_speed_mps
+            )
+            centroid_m = np.mean(positions, axis=0)
+            bearing_vec = np.asarray(localization_position_m, dtype=np.float64) - centroid_m
+            scaled_cov = apply_frequency_covariance_scaling(
+                covariance_m2=np.asarray(localization_position_covariance_m2, dtype=np.float64),
+                bearing_unit_vec=bearing_vec,
+                dominant_frequency_hz=payload.localization_dominant_frequency_hz,
+                alias_cutoff_hz=alias_cutoff_hz,
+            )
+            localization_position_covariance_m2 = covariance_to_nested_list(scaled_cov)
 
         # Canonicalize the range mode and apply the path-agnostic haircut so a
         # far-field single-node estimate cannot pass through over-confident.

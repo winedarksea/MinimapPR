@@ -56,6 +56,10 @@ def test_tdoa_localization_recovers_source_position() -> None:
     assert result.range_observability > 0.1
     assert result.residual_rms_seconds is not None
     assert result.range_projection_mode == "range_refined"
+    # Item D: a well-spread multi-node geometry is well-conditioned, so the
+    # condition number must be populated and below the asymptotic-forcing gate.
+    assert result.condition_number is not None
+    assert result.condition_number < 1e6
 
 
 @pytest.mark.parametrize("distance_m", [1.0, 6.0])
@@ -102,6 +106,83 @@ def test_compact_array_bearing_projected_without_bearing_prior(distance_m: float
     # Confidence must exceed the old UNOBSERVABLE_CONFIDENCE_CAP (0.20) since
     # bearing is well-determined. The exact value depends on GCC-PHAT peak quality.
     assert result.confidence > 0.20
+    # Item D: the compact-array far-source solve is ill-conditioned along range,
+    # which is what drives the bearing_projected upgrade. The condition number is
+    # populated whenever it is finite.
+    if result.condition_number is not None:
+        assert result.condition_number > 1e3
+
+
+def test_phase_slope_tau_recovers_subsample_delay() -> None:
+    """Item A: the frequency-domain phase-slope estimator recovers a true
+    sub-sample delay far more precisely than parabolic interpolation can. ch2
+    lags ch1 by +0.4 samples; with cross = sig·conj(ref) the recovered tau
+    encodes -0.4 samples.
+    """
+    from minimappr.core.localization import _phase_slope_tau
+
+    sample_rate_hz = 48_000
+    n = 1_024
+    n_fft = 2 * n  # gcc_phat uses n = signal.size + reference_signal.size
+    rng = np.random.default_rng(7)
+    sig = np.fft.rfft(rng.standard_normal(n), n=n_fft)
+    freqs = np.fft.rfftfreq(n_fft, d=1.0 / sample_rate_hz)
+    lag_samples = 0.4
+    ref = sig * np.exp(-1j * 2.0 * np.pi * freqs * lag_samples / sample_rate_hz)
+    response = sig * np.conj(ref)
+
+    tau = _phase_slope_tau(
+        cross_spectrum=response,
+        sample_rate_hz=sample_rate_hz,
+        n_fft=n_fft,
+        max_tau_s=8.0 / sample_rate_hz,
+    )
+    assert tau is not None
+    assert abs(tau * sample_rate_hz + lag_samples) < 0.02
+
+
+def test_phase_slope_tau_none_without_broadband_energy() -> None:
+    """Item A: the estimator must decline (return None) when fewer than 8 bins
+    carry meaningful cross-spectrum energy, so gcc_phat falls back to parabolic.
+    """
+    from minimappr.core.localization import _phase_slope_tau
+
+    n_fft = 2_048
+    response = np.zeros(n_fft // 2 + 1, dtype=np.complex128)
+    for bin_index in (40, 41, 42):
+        response[bin_index] = 1.0 + 0.5j
+    tau = _phase_slope_tau(
+        cross_spectrum=response,
+        sample_rate_hz=48_000,
+        n_fft=n_fft,
+        max_tau_s=8.0 / 48_000,
+    )
+    assert tau is None
+
+
+def test_gcc_phat_subsample_delay_accuracy() -> None:
+    """Item A end-to-end: gcc_phat resolves a fractional inter-channel delay to
+    well within a tenth of a sample once phase-slope refinement is applied.
+    """
+    from minimappr.core.localization import gcc_phat
+
+    sample_rate_hz = 48_000
+    n = 2_048
+    rng = np.random.default_rng(11)
+    base = rng.standard_normal(n)
+    # Frequency-domain true fractional delay of +0.3 samples on the reference.
+    n_fft = 1
+    while n_fft < 2 * n:
+        n_fft *= 2
+    freqs = np.fft.rfftfreq(n_fft, d=1.0 / sample_rate_hz)
+    spectrum = np.fft.rfft(base, n=n_fft)
+    delayed = np.fft.irfft(
+        spectrum * np.exp(-1j * 2.0 * np.pi * freqs * 0.3 / sample_rate_hz), n=n_fft
+    )[:n]
+    tau, _ = gcc_phat(base, delayed, sample_rate_hz, max_tau_s=8.0 / sample_rate_hz)
+    # `delayed` lags `base` by 0.3 samples; with cross = X_base·conj(X_delayed)
+    # the recovered tau encodes -0.3 samples.
+    assert abs(tau * sample_rate_hz + 0.3) < 0.1
 
 
 def test_localization_rejects_non_finite_windows() -> None:
