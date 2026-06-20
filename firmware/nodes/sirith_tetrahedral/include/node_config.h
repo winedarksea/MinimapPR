@@ -163,7 +163,6 @@ static constexpr const char* kNodeIdPrefix = "sirith-tetra-";
 // Audio mode is expected to be chosen per board/configuration, not switched on
 // one deployed node identity at runtime.
 static constexpr mmpr::NodeType kNodeType = kUseTdmAudio ? mmpr::NodeType::kSirithTetra : mmpr::NodeType::kPoint;
-static constexpr mmpr::Vec3 kNodePositionM = {6.0f, 0.0f, 2.0f};
 static constexpr bool kNodeHasFallbackGeoPosition = true;
 static constexpr float kNodeFallbackLatitudeDeg = 44.98698840878797f;
 static constexpr float kNodeFallbackLongitudeDeg = -93.2579197515542f;

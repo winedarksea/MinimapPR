@@ -166,8 +166,10 @@ class IngestProcessor:
         environment_updater: EnvironmentUpdater | None = None,
         persist_observations_on_ingest: bool = True,
         node_position_kalman_q: float = 0.5,
+        node_position_kalman_q_stationary: float = 0.001,
         node_position_kalman_r: float = 25.0,
         node_position_kalman_init_p: float = 100.0,
+        node_position_gps_gate_m: float = 5.0,
     ) -> None:
         self._localization_config = localization_config
         self._fusion_config = fusion_config
@@ -179,8 +181,10 @@ class IngestProcessor:
         self._environment_updater = environment_updater
         self._persist_observations_on_ingest = persist_observations_on_ingest
         self._kalman_q = node_position_kalman_q
+        self._kalman_q_stationary = node_position_kalman_q_stationary
         self._kalman_r = node_position_kalman_r
         self._kalman_init_p = node_position_kalman_init_p
+        self._gps_gate_m = node_position_gps_gate_m
 
         self._last_trigger_ns = 0
         self._accepted_frame_count = 0
@@ -575,6 +579,18 @@ class IngestProcessor:
         k = p / (p + r)
         return x + k * (z - x), p * (1.0 - k)
 
+    def _is_gps_outlier(
+        self, state: "_NodePositionKalman", raw_local: tuple[float, float, float]
+    ) -> bool:
+        gate = self._gps_gate_m
+        if gate <= 0.0:
+            return False
+        return (
+            abs(raw_local[0] - state.x) > gate
+            or abs(raw_local[1] - state.y) > gate
+            or abs(raw_local[2] - state.z) > gate
+        )
+
     def _normalize_node_spec(self, spec: NodeSpec) -> tuple[NodeSpec, GeoPoint]:
         gps_metadata = spec.metadata.get("gps") if isinstance(spec.metadata, dict) else None
         gps_position_source = (
@@ -591,6 +607,10 @@ class IngestProcessor:
         if spec.position_geo is not None:
             raw_local = self._coordinate_frame.geo_to_local(spec.position_geo)
             if has_trusted_gps_position:
+                # Stationary nodes never move, so use a near-zero process noise to
+                # average out GNSS noise over many fixes instead of chasing it.
+                is_stationary = spec.mobility == "stationary"
+                q = self._kalman_q_stationary if is_stationary else self._kalman_q
                 state = self._position_kalman.get(spec.id)
                 if state is None or not state.initialized:
                     state = _NodePositionKalman(
@@ -598,10 +618,15 @@ class IngestProcessor:
                         px=self._kalman_init_p, py=self._kalman_init_p, pz=self._kalman_init_p,
                         initialized=True,
                     )
+                elif is_stationary and self._is_gps_outlier(state, raw_local):
+                    # A single fix that jumps more than the gate on any axis is treated
+                    # as an outlier and dropped; hold the prior estimate. Only applied to
+                    # stationary nodes — mobile nodes legitimately move between fixes.
+                    pass
                 else:
-                    nx, px = self._kalman_1d(state.x, state.px, raw_local[0], self._kalman_q, self._kalman_r)
-                    ny, py = self._kalman_1d(state.y, state.py, raw_local[1], self._kalman_q, self._kalman_r)
-                    nz, pz = self._kalman_1d(state.z, state.pz, raw_local[2], self._kalman_q, self._kalman_r)
+                    nx, px = self._kalman_1d(state.x, state.px, raw_local[0], q, self._kalman_r)
+                    ny, py = self._kalman_1d(state.y, state.py, raw_local[1], q, self._kalman_r)
+                    nz, pz = self._kalman_1d(state.z, state.pz, raw_local[2], q, self._kalman_r)
                     state = _NodePositionKalman(x=nx, y=ny, z=nz, px=px, py=py, pz=pz, initialized=True)
                 self._position_kalman[spec.id] = state
                 local_pos: tuple[float, float, float] = (state.x, state.y, state.z)

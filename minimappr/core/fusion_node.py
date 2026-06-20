@@ -45,6 +45,7 @@ from minimappr.core.ambi_atob import alias_cutoff_from_positions
 from minimappr.core.localization import LocalizationError
 from minimappr.core.localization_uncertainty import (
     apply_frequency_covariance_scaling,
+    clamp_covariance_eigenvalues,
     covariance_to_nested_list,
 )
 from minimappr.core.node_registry import NodeRegistry
@@ -194,6 +195,7 @@ class FusionMetrics:
     localization_solver_unconverged_count: int = 0
     localization_covariance_missing_count: int = 0
     localization_range_observability_low_count: int = 0
+    localization_rejected_out_of_range_count: int = 0
     localization_stage_total_time_ms: float = 0.0
     localization_stage_max_time_ms: float = 0.0
     stage_timeout_count: int = 0
@@ -308,8 +310,10 @@ class FusionNode:
             environment_updater=EnvironmentUpdater(self.environment_provider),
             persist_observations_on_ingest=bool(settings.persist_observations_on_ingest),
             node_position_kalman_q=settings.node_position_kalman_q,
+            node_position_kalman_q_stationary=settings.node_position_kalman_q_stationary,
             node_position_kalman_r=settings.node_position_kalman_r,
             node_position_kalman_init_p=settings.node_position_kalman_init_p,
+            node_position_gps_gate_m=settings.node_position_gps_gate_m,
         )
         self._classification_orchestrator = ClassificationOrchestrator(
             classifier=classifier,
@@ -600,6 +604,10 @@ class FusionNode:
             mode=localization_range_projection_mode,
             confidence=localization_confidence,
             range_observability=localization_range_observability,
+        )
+        localization_position_covariance_m2 = clamp_covariance_eigenvalues(
+            localization_position_covariance_m2,
+            maximum_std_m=self.localization_config.localization_max_position_std_m,
         )
 
         rust_audio_quality = (
@@ -1577,7 +1585,17 @@ class FusionNode:
         selected_windows: dict[str, np.ndarray],
         classification_windows: dict[str, np.ndarray],
         capability_tier: str,
-    ) -> LocalizationBranch:
+    ) -> LocalizationBranch | None:
+        # Sanity gate: drop unphysical solver blowups before they become a track. The
+        # candidate falls back to its omni branch (no localized position) instead.
+        max_range_m = self.localization_config.localization_max_range_m
+        if max_range_m > 0.0:
+            position = np.asarray(localization.position_m, dtype=np.float64)
+            if not np.all(np.isfinite(position)) or float(np.linalg.norm(position)) > max_range_m:
+                self._metrics.localization_rejected_out_of_range_count += 1
+                self._record_silent_drop(stage="localization", reason="position_out_of_range")
+                return None
+
         reference_signal = selected_windows[localization.reference_sensor]
         localization_method = self._current_localizer_name()
         self._metrics.last_localization_algorithm = localization.resolved_algorithm or localization_method
@@ -1601,11 +1619,17 @@ class FusionNode:
             confidence=localization.confidence,
             range_observability=localization.range_observability,
         )
+        # Cap covariance so unobservable-range / cone solves can't carry km-scale
+        # ellipses into tracking. Catches every covariance path (jacobian + cone).
+        capped_covariance_m2 = clamp_covariance_eigenvalues(
+            localization.position_covariance_m2,
+            maximum_std_m=self.localization_config.localization_max_position_std_m,
+        )
         return LocalizationBranch(
             localization_position_m=localization.position_m,
             localization_confidence=localization_confidence,
             localization_gdop=localization.gdop,
-            localization_position_covariance_m2=localization.position_covariance_m2,
+            localization_position_covariance_m2=capped_covariance_m2,
             localization_range_observability=localization_range_observability,
             localization_residual_rms_seconds=localization.residual_rms_seconds,
             localization_range_projection_mode=range_projection_mode,

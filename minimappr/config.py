@@ -123,6 +123,13 @@ class LocalizationConfig:
     # The default seeds unbounded radial search; max is retained but never limits results.
     localization_far_field_default_range_m: float = 50.0
     localization_far_field_max_range_m: float = 250.0
+    # Hard sanity gate (m): localizations whose solved position lies farther than this
+    # from the local origin are dropped before becoming detections/tracks. Guards
+    # against unphysical solver blowups (e.g. ill-conditioned single-array geometry).
+    localization_max_range_m: float = 500.0
+    # Ceiling (m) on per-axis position standard deviation. Covariance eigenvalues are
+    # clamped to this**2 so tracks never carry σ > this (no kilometre-scale ellipses).
+    localization_max_position_std_m: float = 250.0
     classification_window_seconds: float = 30.0
     localization_band_min_hz: float = 0.0
     localization_band_max_hz: float = 0.0
@@ -423,6 +430,8 @@ class Settings:
     localization_search_padding_m: float = 2.0
     localization_far_field_default_range_m: float = 50.0
     localization_far_field_max_range_m: float = 250.0
+    localization_max_range_m: float = 500.0
+    localization_max_position_std_m: float = 250.0
     localization_music_azimuth_step_deg: float = 6.0
     localization_music_elevation_step_deg: float = 8.0
     localization_subspace_freq_min_hz: float = 300.0
@@ -531,8 +540,17 @@ class Settings:
     # R: measurement noise (m²). Consumer GNSS ~5 m 1-sigma → R = 25.
     # init_p: initial variance (m²). First fix snaps to raw measurement, subsequent frames blend.
     node_position_kalman_q: float = 0.5
+    # Process noise for nodes that report mobility == "stationary". These never move,
+    # so Q should be ~0 to average out GNSS noise over many fixes (steady-state gain
+    # collapses toward 0). The default mobile Q (0.5) lets the estimate chase ~5-10 m
+    # 2-D GPS noise, which corrupts inter-node geometry.
+    node_position_kalman_q_stationary: float = 0.001
     node_position_kalman_r: float = 25.0
     node_position_kalman_init_p: float = 100.0
+    # Per-axis GNSS jump gate (m). Once a node's position estimate is initialized, a raw
+    # fix that deviates by more than this on any ENU axis is treated as an outlier and
+    # skipped, so a single bad 2-D fix cannot yank a stationary node's position.
+    node_position_gps_gate_m: float = 5.0
     # Local position stamped onto binary-ingest frames from legacy firmware that
     # reports neither position_geo nor position_m (pre static-fallback-geo
     # descriptor builds). Lets those nodes register instead of 400-ing on every
@@ -1020,6 +1038,11 @@ class Settings:
                 "MINIMAPPR_LOCALIZATION_FAR_FIELD_MAX_RANGE_M",
                 250.0,
             ),
+            localization_max_range_m=_env_float("MINIMAPPR_LOCALIZATION_MAX_RANGE_M", 500.0),
+            localization_max_position_std_m=_env_float(
+                "MINIMAPPR_LOCALIZATION_MAX_POSITION_STD_M",
+                250.0,
+            ),
             localization_music_azimuth_step_deg=_env_float("MINIMAPPR_LOCALIZATION_MUSIC_AZ_STEP_DEG", 6.0),
             localization_music_elevation_step_deg=_env_float("MINIMAPPR_LOCALIZATION_MUSIC_EL_STEP_DEG", 8.0),
             localization_subspace_freq_min_hz=_env_float("MINIMAPPR_LOCALIZATION_SUBSPACE_FREQ_MIN_HZ", 300.0),
@@ -1222,6 +1245,8 @@ class Settings:
             localization_search_padding_m=self.localization_search_padding_m,
             localization_far_field_default_range_m=self.localization_far_field_default_range_m,
             localization_far_field_max_range_m=self.localization_far_field_max_range_m,
+            localization_max_range_m=self.localization_max_range_m,
+            localization_max_position_std_m=self.localization_max_position_std_m,
             localization_music_azimuth_step_deg=self.localization_music_azimuth_step_deg,
             localization_music_elevation_step_deg=self.localization_music_elevation_step_deg,
             localization_subspace_freq_min_hz=self.localization_subspace_freq_min_hz,

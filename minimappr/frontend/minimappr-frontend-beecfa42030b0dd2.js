@@ -176,11 +176,11 @@ function __wbg_get_imports() {
         __wbg__wbg_cb_unref_b46c9b5a9f08ec37: function(arg0) {
             arg0._wbg_cb_unref();
         },
-        __wbg_addBearingOnlyDetectionMarker_ad1d1f06f8669f19: function(arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8) {
-            globalThis.leafletInterop.addBearingOnlyDetectionMarker(getStringFromWasm0(arg0, arg1), arg2, arg3, getStringFromWasm0(arg4, arg5), arg6, arg7, arg8 !== 0);
+        __wbg_addBearingOnlyDetectionMarker_77d0f69591c6fd1c: function(arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9) {
+            globalThis.leafletInterop.addBearingOnlyDetectionMarker(getStringFromWasm0(arg0, arg1), arg2, arg3, getStringFromWasm0(arg4, arg5), arg6, arg7, arg8 !== 0, arg9);
         },
-        __wbg_addDetectionMarker_49dce6e7b03bcc04: function(arg0, arg1, arg2, arg3, arg4, arg5) {
-            globalThis.leafletInterop.addDetectionMarker(getStringFromWasm0(arg0, arg1), arg2, arg3, getStringFromWasm0(arg4, arg5));
+        __wbg_addDetectionMarker_701980318119a586: function(arg0, arg1, arg2, arg3, arg4, arg5, arg6) {
+            globalThis.leafletInterop.addDetectionMarker(getStringFromWasm0(arg0, arg1), arg2, arg3, getStringFromWasm0(arg4, arg5), arg6);
         },
         __wbg_addEventListener_8176dab41b09531c: function() { return handleError(function (arg0, arg1, arg2, arg3) {
             arg0.addEventListener(getStringFromWasm0(arg1, arg2), arg3);
@@ -899,8 +899,8 @@ function __wbg_get_imports() {
             const ret = setTimeout(arg0, arg1);
             return ret;
         }, arguments); },
-        __wbg_setTrackMarker_0580e37130676b84: function(arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8) {
-            globalThis.leafletInterop.setTrackMarker(getStringFromWasm0(arg0, arg1), arg2, arg3, getStringFromWasm0(arg4, arg5), arg6, getStringFromWasm0(arg7, arg8));
+        __wbg_setTrackMarker_69a74136dab970b9: function(arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9) {
+            globalThis.leafletInterop.setTrackMarker(getStringFromWasm0(arg0, arg1), arg2, arg3, getStringFromWasm0(arg4, arg5), arg6, getStringFromWasm0(arg7, arg8), arg9);
         },
         __wbg_setTrackVelocityVector_0fc04c891ea27c78: function(arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7) {
             globalThis.leafletInterop.setTrackVelocityVector(getStringFromWasm0(arg0, arg1), arg2, arg3, arg4, arg5, getStringFromWasm0(arg6, arg7));

@@ -17,6 +17,7 @@
   let _highlightRing = null;
   let _highlightBearingRay = null;
   let _copSelectionCallback = null;
+  let _markerStackSequence = 0;
 
   const TILE_CACHE_NAME = "mmpr-osm-tiles-v2";
   const OSM_TEMPLATE = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
@@ -24,6 +25,8 @@
   const DROPPED_TRACK_LINGER_MS = 30_000;
   const DETECTION_MARKER_LINGER_MS = 5_000;
   const MAX_DISPLAY_UNCERTAINTY_RADIUS_M = 500;
+  const MARKER_STACK_STEP = 8;
+  const MARKER_SELECTED_Z_INDEX_OFFSET = 1_000_000;
 
   function readCssColor(name, fallback) {
     const root = document.documentElement;
@@ -84,6 +87,52 @@
     marker.on("click", function (event) {
       if (event && event.originalEvent) L.DomEvent.stop(event.originalEvent);
       emitCopSelection(kind, id);
+    });
+  }
+
+  function trackStackTier(status) {
+    if (status === "active" || status === "confirmed" || !status) return 4;
+    if (status === "coasting") return 3;
+    if (status === "lost") return 1;
+    if (status === "dropped") return 0;
+    return 2;
+  }
+
+  function markerStackTier(marker) {
+    if (!marker || !marker._mmprStacking) return -1;
+    if (marker._mmprStacking.kind === "track") {
+      return trackStackTier(marker._mmprStacking.status);
+    }
+    if (marker._mmprStacking.kind === "detection") return 2;
+    return -1;
+  }
+
+  function markerStackTimestamp(marker) {
+    const timestampNs = marker && marker._mmprStacking ? Number(marker._mmprStacking.timestampNs) : NaN;
+    return Number.isFinite(timestampNs) ? timestampNs : Number.NEGATIVE_INFINITY;
+  }
+
+  function refreshMarkerStacking() {
+    const stackableMarkers = Object.values(_markers).filter(function (marker) {
+      return marker && marker._mmprStacking && typeof marker.setZIndexOffset === "function";
+    });
+    stackableMarkers.sort(function (a, b) {
+      const tierDiff = markerStackTier(a) - markerStackTier(b);
+      if (tierDiff !== 0) return tierDiff;
+      const timestampDiff = markerStackTimestamp(a) - markerStackTimestamp(b);
+      if (timestampDiff !== 0) return timestampDiff;
+      return (a._mmprStacking.sequence || 0) - (b._mmprStacking.sequence || 0);
+    });
+    stackableMarkers.forEach(function (marker, index) {
+      let offset = (index + 1) * MARKER_STACK_STEP;
+      if (_highlightedCopItem && marker._mmprStacking.kind === _highlightedCopItem.kind &&
+          marker._mmprStacking.id === _highlightedCopItem.id) {
+        offset += MARKER_SELECTED_Z_INDEX_OFFSET;
+      }
+      marker.setZIndexOffset(offset);
+      if (offset >= MARKER_SELECTED_Z_INDEX_OFFSET && typeof marker.bringToFront === "function") {
+        marker.bringToFront();
+      }
     });
   }
 
@@ -484,7 +533,7 @@
   }
 
   // ── Detection markers ─────────────────────────────────────────
-  function addDetectionMarker(eventId, lat, lon, label) {
+  function addDetectionMarker(eventId, lat, lon, label, receivedNs) {
     const colors = palette();
     const key = "det:" + eventId;
     if (_detectionRemoveTimers[eventId]) {
@@ -503,6 +552,13 @@
     }
     _markers[key]._mmprBearingSource = null;
     _markers[key]._mmprHighlightColor = colors.detection;
+    _markers[key]._mmprStacking = {
+      kind: "detection",
+      id: eventId,
+      timestampNs: Number(receivedNs),
+      sequence: _markers[key]._mmprStacking ? _markers[key]._mmprStacking.sequence : ++_markerStackSequence,
+    };
+    refreshMarkerStacking();
 
     if (_highlightedCopItem && _highlightedCopItem.kind === "detection" && _highlightedCopItem.id === eventId) {
       highlightCopItem("detection", eventId);
@@ -512,7 +568,7 @@
     }, DETECTION_MARKER_LINGER_MS);
   }
 
-  function addBearingOnlyDetectionMarker(eventId, lat, lon, label, sourceLat, sourceLon, hasSource) {
+  function addBearingOnlyDetectionMarker(eventId, lat, lon, label, sourceLat, sourceLon, hasSource, receivedNs) {
     const colors = palette();
     const key = "det:" + eventId;
     if (_detectionRemoveTimers[eventId]) {
@@ -532,6 +588,13 @@
     }
     _markers[key]._mmprBearingSource = hasSource ? [sourceLat, sourceLon] : null;
     _markers[key]._mmprHighlightColor = colors.bearing;
+    _markers[key]._mmprStacking = {
+      kind: "detection",
+      id: eventId,
+      timestampNs: Number(receivedNs),
+      sequence: _markers[key]._mmprStacking ? _markers[key]._mmprStacking.sequence : ++_markerStackSequence,
+    };
+    refreshMarkerStacking();
 
     if (_highlightedCopItem && _highlightedCopItem.kind === "detection" && _highlightedCopItem.id === eventId) {
       highlightCopItem("detection", eventId);
@@ -552,10 +615,11 @@
     const key = "det:" + eventId;
     if (_markers[key]) { _markers[key].remove(); delete _markers[key]; }
     clearCopUncertainty("detection", eventId);
+    refreshMarkerStacking();
   }
 
   // ── Track markers + velocity vectors ─────────────────────────
-  function setTrackMarker(trackId, lat, lon, label, tqi, status) {
+  function setTrackMarker(trackId, lat, lon, label, tqi, status, lastUpdateNs) {
     const colors = palette();
     const color   = trackColorForStatus(status, colors);
     const opacity = trackOpacityForStatus(status);
@@ -580,6 +644,14 @@
       }).bindTooltip(tooltipText, { permanent: false }).addTo(_map);
       attachCopSelectionHandler(_markers[key], "track", trackId);
     }
+    _markers[key]._mmprStacking = {
+      kind: "track",
+      id: trackId,
+      status: status || "active",
+      timestampNs: Number(lastUpdateNs),
+      sequence: _markers[key]._mmprStacking ? _markers[key]._mmprStacking.sequence : ++_markerStackSequence,
+    };
+    refreshMarkerStacking();
 
     if (_highlightedCopItem && _highlightedCopItem.kind === "track" && _highlightedCopItem.id === trackId) {
       highlightCopItem("track", trackId);
@@ -622,6 +694,7 @@
     if (_markers[key]) { _markers[key].remove(); delete _markers[key]; }
     if (_vectors[trackId]) { _vectors[trackId].remove(); delete _vectors[trackId]; }
     clearCopUncertainty("track", trackId);
+    refreshMarkerStacking();
   }
 
   function pulseTrackMarker(trackId) {
@@ -657,8 +730,7 @@
     const marker = _markers[key];
     if (!marker || !_map) return;
     _highlightedCopItem = { kind, id };
-    if (typeof marker.bringToFront === "function") marker.bringToFront();
-    if (typeof marker.setZIndexOffset === "function") marker.setZIndexOffset(1000);
+    refreshMarkerStacking();
     const element = marker.getElement ? marker.getElement() : null;
     if (element) element.classList.add("mmpr-map-icon-highlighted");
     if (marker.openTooltip) marker.openTooltip();
@@ -690,7 +762,6 @@
       const key = markerKeyForCopItem(_highlightedCopItem.kind, _highlightedCopItem.id);
       const marker = key ? _markers[key] : null;
       if (marker) {
-        if (typeof marker.setZIndexOffset === "function") marker.setZIndexOffset(0);
         const element = marker.getElement ? marker.getElement() : null;
         if (element) element.classList.remove("mmpr-map-icon-highlighted");
         if (marker.closeTooltip) marker.closeTooltip();
@@ -699,6 +770,7 @@
     if (_highlightRing) { _highlightRing.remove(); _highlightRing = null; }
     if (_highlightBearingRay) { _highlightBearingRay.remove(); _highlightBearingRay = null; }
     _highlightedCopItem = null;
+    refreshMarkerStacking();
   }
 
   function highlightTrack(trackId) { highlightCopItem("track", trackId); }

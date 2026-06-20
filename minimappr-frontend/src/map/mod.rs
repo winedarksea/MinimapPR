@@ -225,7 +225,16 @@ pub fn LeafletMapPanel() -> impl IntoView {
                         let label = t.label.as_deref().unwrap_or("");
                         let tqi = t.tqi.unwrap_or(0.0);
                         let status = t.status.as_deref().unwrap_or("active");
-                        set_track_marker(&t.track_id, geo.lat, geo.lon, label, tqi, status);
+                        let last_update_ns = t.last_update_ns.unwrap_or(i64::MIN) as f64;
+                        set_track_marker(
+                            &t.track_id,
+                            geo.lat,
+                            geo.lon,
+                            label,
+                            tqi,
+                            status,
+                            last_update_ns,
+                        );
                         if let Some((dlat, dlon)) = t
                             .velocity_mps
                             .as_deref()
@@ -363,10 +372,17 @@ pub fn LeafletMapPanel() -> impl IntoView {
                                 source_lat,
                                 source_lon,
                                 has_source,
+                                d.received_ns.unwrap_or(i64::MIN) as f64,
                             );
                         } else {
                             let label = format!("{base_label} · localized");
-                            add_detection_marker(&d.event_id, geo.lat, geo.lon, &label);
+                            add_detection_marker(
+                                &d.event_id,
+                                geo.lat,
+                                geo.lon,
+                                &label,
+                                d.received_ns.unwrap_or(i64::MIN) as f64,
+                            );
                         }
                     }
                 }

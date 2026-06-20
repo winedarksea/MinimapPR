@@ -6,6 +6,40 @@ import numpy as np
 EPSILON = 1e-9
 
 
+def clamp_covariance_eigenvalues(
+    covariance_m2: list[list[float]] | np.ndarray | None,
+    *,
+    maximum_std_m: float,
+) -> list[list[float]] | None:
+    """Clamp a covariance matrix so no eigenvalue exceeds ``maximum_std_m**2``.
+
+    Applied at the localization seam to keep track position uncertainty physical
+    (no kilometre-scale ellipses) regardless of which solver produced the matrix,
+    including the explicit cone covariance that bypasses ``_stabilize_covariance``.
+    Returns a plain nested list (the wire/storage form) or ``None`` when the input
+    is missing or not a finite square matrix.
+    """
+    if covariance_m2 is None or maximum_std_m <= 0.0:
+        return covariance_m2 if isinstance(covariance_m2, list) or covariance_m2 is None else None
+    covariance = np.asarray(covariance_m2, dtype=np.float64)
+    if covariance.ndim != 2 or covariance.shape[0] != covariance.shape[1] or covariance.size == 0:
+        return None
+    if not np.all(np.isfinite(covariance)):
+        return None
+
+    ceiling_m2 = float(maximum_std_m) ** 2
+    covariance = 0.5 * (covariance + covariance.T)
+    eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+    if not np.all(np.isfinite(eigenvalues)):
+        return None
+    if np.all(eigenvalues <= ceiling_m2):
+        return covariance.tolist()
+    clamped = np.minimum(eigenvalues, ceiling_m2)
+    capped = eigenvectors @ np.diag(clamped) @ eigenvectors.T
+    capped = 0.5 * (capped + capped.T)
+    return capped.tolist()
+
+
 def _stabilize_covariance(
     covariance_m2: np.ndarray,
     *,

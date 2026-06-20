@@ -15,6 +15,19 @@ WGS84_F = 1.0 / 298.257223563
 WGS84_E2 = WGS84_F * (2.0 - WGS84_F)
 
 
+def _safe_geo_point(lat: float, lon: float, alt_m: float) -> GeoPoint:
+    """Build a GeoPoint, clamping lat/lon into valid WGS84 ranges.
+
+    A pathological local position (e.g. an unphysical localization that escaped the
+    sanity gate) can convert to lat/lon outside [-90, 90] / [-180, 180], which would
+    raise a Pydantic ValidationError and abort the whole localization. Clamping keeps
+    the pipeline alive; a clamped point is obviously wrong but non-fatal.
+    """
+    clamped_lat = min(90.0, max(-90.0, lat))
+    clamped_lon = min(180.0, max(-180.0, lon))
+    return GeoPoint(lat=clamped_lat, lon=clamped_lon, alt_m=alt_m)
+
+
 def _lla_to_ecef(lat_deg: float, lon_deg: float, alt_m: float) -> np.ndarray:
     lat = math.radians(lat_deg)
     lon = math.radians(lon_deg)
@@ -102,12 +115,12 @@ class LocalCoordinateFrame:
             lat = self.origin.lat + (north / max(self._meters_per_deg_lat, 1e-9))
             lon = self.origin.lon + (east / max(self._meters_per_deg_lon, 1e-9))
             alt_m = self.origin.alt_m + up
-            return GeoPoint(lat=lat, lon=lon, alt_m=alt_m)
+            return _safe_geo_point(lat, lon, alt_m)
 
         enu = np.asarray([east, north, up], dtype=np.float64)
         ecef = self._origin_ecef + (self._enu_to_ecef @ enu)
         lat, lon, alt = _ecef_to_lla(ecef)
-        return GeoPoint(lat=lat, lon=lon, alt_m=float(alt))
+        return _safe_geo_point(lat, lon, float(alt))
 
     def local_covariance_to_geo_uncertainty(
         self,

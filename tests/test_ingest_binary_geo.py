@@ -115,12 +115,15 @@ def _make_processor(coordinate_frame: LocalCoordinateFrame) -> IngestProcessor:
 
 
 def _node_spec(*, node_id: str, geo: GeoPoint, position_source: str) -> NodeSpec:
+    # Mobile so the position Kalman uses its reactive process noise and no jump gate;
+    # stationary nodes now strongly smooth and reject jumps (see test_localization_health_fixes).
     return NodeSpec(
         id=node_id,
         node_type=NodeType.POINT,
         position_geo=geo,
         sensor_offsets_m=[(0.0, 0.0, 0.0)],
         capabilities=["audio"],
+        mobility="mobile",
         metadata={"gps": {"signal": "fix_3d", "position_source": position_source}},
     )
 

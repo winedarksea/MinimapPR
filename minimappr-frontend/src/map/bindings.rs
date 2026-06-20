@@ -21,7 +21,7 @@ extern "C" {
     pub fn trigger_node_omni_ripple(node_id: &str, lat: f64, lon: f64, label: &str);
 
     #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "addDetectionMarker")]
-    pub fn add_detection_marker(event_id: &str, lat: f64, lon: f64, label: &str);
+    pub fn add_detection_marker(event_id: &str, lat: f64, lon: f64, label: &str, received_ns: f64);
 
     #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "addBearingOnlyDetectionMarker")]
     pub fn add_bearing_only_detection_marker(
@@ -32,6 +32,7 @@ extern "C" {
         source_lat: f64,
         source_lon: f64,
         has_source: bool,
+        received_ns: f64,
     );
 
     #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "removeDetectionMarker")]
@@ -45,6 +46,7 @@ extern "C" {
         label: &str,
         tqi: f64,
         status: &str,
+        last_update_ns: f64,
     );
 
     #[wasm_bindgen(js_namespace = ["globalThis", "leafletInterop"], js_name = "setTrackVelocityVector")]
