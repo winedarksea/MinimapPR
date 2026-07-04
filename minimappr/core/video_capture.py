@@ -160,8 +160,13 @@ class VideoCapture:
             self._reader_task.cancel()
             try:
                 await self._reader_task
-            except (asyncio.CancelledError, Exception):
-                pass
+            except asyncio.CancelledError:
+                # Expected: we cancelled the reader task above. But if *this*
+                # coroutine was the one cancelled, propagate rather than swallow.
+                if not self._reader_task.cancelled():
+                    raise
+            except Exception as exc:  # noqa: BLE001 - reader teardown must not block shutdown
+                logger.debug("video reader task raised during shutdown: %s", exc)
             self._reader_task = None
 
         self._process = None
