@@ -41,10 +41,15 @@ class NmeaGpsSource {
     bool hasAltitude = false;
     bool hasUtcDateTime = false;
     bool hasFixDimension = false;
+    // GSA is the authoritative NMEA source for the 2D/3D classification.
+    // Kept separate from hasFixDimension so a GSA sentence (which carries no
+    // location) never trips the no-fix reset path used by GGA/RMC/GLL.
+    bool hasGsaFixType = false;
     float latitudeDeg = 0.0f;
     float longitudeDeg = 0.0f;
     float altitudeM = 0.0f;
     uint8_t fixDimension = 0;
+    uint8_t gsaFixType = 0;  // 1 = no fix, 2 = 2D, 3 = 3D
     uint16_t year = 0;
     uint8_t month = 0;
     uint8_t day = 0;
@@ -72,6 +77,7 @@ class NmeaGpsSource {
   bool parseGgaSentence(char* body, ParsedSentence& outSentence) const;
   bool parseRmcSentence(char* body, ParsedSentence& outSentence) const;
   bool parseGllSentence(char* body, ParsedSentence& outSentence) const;
+  bool parseGsaSentence(char* body, ParsedSentence& outSentence) const;
   bool parseZdaSentence(char* body, ParsedSentence& outSentence) const;
 
   static bool validateChecksum(const char* line);
@@ -111,7 +117,9 @@ class NmeaGpsSource {
   bool haveSeenSentences_ = false;
   bool ppsConfigured_ = false;
   bool haveUtcForNextPps_ = false;
+  bool haveGsaFixType_ = false;
   uint8_t activeFixDimension_ = 0;
+  uint8_t gsaFixType_ = 0;
   GeoPoint activeGeoPosition_ = {};
   uint64_t lastSentenceUs_ = 0;
   uint64_t lastFixUs_ = 0;

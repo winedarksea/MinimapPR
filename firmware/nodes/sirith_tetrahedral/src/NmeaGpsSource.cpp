@@ -60,7 +60,9 @@ bool NmeaGpsSource::begin() {
   hasAltitude_ = false;
   haveSeenSentences_ = false;
   haveUtcForNextPps_ = false;
+  haveGsaFixType_ = false;
   activeFixDimension_ = 0;
+  gsaFixType_ = 0;
   activeGeoPosition_ = config_.fallbackGeoPosition;
   lineLength_ = 0;
   lastSentenceUs_ = 0;
@@ -168,6 +170,8 @@ void NmeaGpsSource::poll(NodeDescriptor& descriptor, NodeClock* clock) {
     haveAlignedPpsEpoch_ = false;
     ppsUtcLabelValidAfterMonotonicUs_ = 0;
     activeFixDimension_ = 0;
+    haveGsaFixType_ = false;
+    gsaFixType_ = 0;
     activeGeoPosition_ = config_.fallbackGeoPosition;
   } else if (hasFix_ && fixAgeUs > (static_cast<uint64_t>(config_.staleFixTimeoutMs) * kUsPerMs)) {
     hasFix_ = false;
@@ -176,6 +180,8 @@ void NmeaGpsSource::poll(NodeDescriptor& descriptor, NodeClock* clock) {
     haveAlignedPpsEpoch_ = false;
     ppsUtcLabelValidAfterMonotonicUs_ = 0;
     activeFixDimension_ = 0;
+    haveGsaFixType_ = false;
+    gsaFixType_ = 0;
     activeGeoPosition_ = config_.fallbackGeoPosition;
   }
 
@@ -305,7 +311,7 @@ void NmeaGpsSource::consumeLine(const char* line, NodeClock* clock) {
         }
         header[headerLength++] = *cursor;
       }
-      std::printf("[gps] valid but unsupported NMEA sentence %s; waiting for GGA/RMC/GLL/ZDA\n", header);
+      std::printf("[gps] valid but unsupported NMEA sentence %s; waiting for GGA/RMC/GLL/GSA/ZDA\n", header);
     }
     return;
   }
@@ -313,6 +319,18 @@ void NmeaGpsSource::consumeLine(const char* line, NodeClock* clock) {
   haveSeenSentences_ = true;
   healthy_ = true;
   lastSentenceUs_ = time_us_64();
+  // GSA carries the receiver's authoritative 2D/3D classification but no
+  // location; record it here and let the fix branch below apply it.
+  if (parsed.hasGsaFixType) {
+    if (parsed.gsaFixType >= 2) {
+      gsaFixType_ = parsed.gsaFixType;
+      haveGsaFixType_ = true;
+    } else {
+      // fixType 1 means the receiver reports no fix; drop the stale 2D/3D hint.
+      haveGsaFixType_ = false;
+      gsaFixType_ = 0;
+    }
+  }
   if (parsed.hasFix && parsed.hasLocation) {
     hasFix_ = true;
     activeGeoPosition_.lat = parsed.latitudeDeg;
@@ -323,16 +341,21 @@ void NmeaGpsSource::consumeLine(const char* line, NodeClock* clock) {
     } else if (!hasAltitude_) {
       activeGeoPosition_.altM = config_.fallbackGeoPosition.altM;
     }
-    if (parsed.hasFixDimension) {
-      activeFixDimension_ = parsed.fixDimension;
-    } else if (activeFixDimension_ == 0) {
-      activeFixDimension_ = 2;
+    // Prefer GSA's authoritative 2D/3D report; otherwise infer from whether we
+    // currently hold a real altitude. Never report a 3D fix while altitude is
+    // still the static fallback, since downstream uses it as a z-baseline.
+    uint8_t dimension = haveGsaFixType_ ? gsaFixType_ : (hasAltitude_ ? 3u : 2u);
+    if (dimension >= 3u && !hasAltitude_) {
+      dimension = 2u;
     }
+    activeFixDimension_ = dimension;
     lastFixUs_ = lastSentenceUs_;
   } else if (parsed.hasFixDimension && !parsed.hasFix) {
     hasFix_ = false;
     activeFixDimension_ = 0;
     hasAltitude_ = false;
+    haveGsaFixType_ = false;
+    gsaFixType_ = 0;
     haveUtcForNextPps_ = false;
     haveAlignedPpsEpoch_ = false;
     ppsUtcLabelValidAfterMonotonicUs_ = 0;
@@ -417,6 +440,9 @@ bool NmeaGpsSource::parseSentence(const char* line, ParsedSentence& outSentence)
   if (sentenceTypeMatches(body, "GLL")) {
     return parseGllSentence(body, outSentence);
   }
+  if (sentenceTypeMatches(body, "GSA")) {
+    return parseGsaSentence(body, outSentence);
+  }
   if (sentenceTypeMatches(body, "ZDA")) {
     return parseZdaSentence(body, outSentence);
   }
@@ -448,9 +474,9 @@ bool NmeaGpsSource::parseGgaSentence(char* body, ParsedSentence& outSentence) co
 
   outSentence.hasFix = true;
   outSentence.hasLocation = true;
-  outSentence.hasFixDimension = true;
-  outSentence.fixDimension = (fixQuality == 1) ? 2 : 3;
-
+  // GGA's fix-quality field (1 = GPS, 2 = DGPS, 4/5 = RTK, ...) does not encode
+  // 2D vs 3D; that comes from GSA or, failing that, altitude availability. Only
+  // the presence of a valid altitude below distinguishes the dimension here.
   float altitudeM = 0.0f;
   if (parseFloatField(altitudeField, altitudeM)) {
     outSentence.hasAltitude = true;
@@ -471,7 +497,6 @@ bool NmeaGpsSource::parseRmcSentence(char* body, ParsedSentence& outSentence) co
   const char* longitudeField = fieldAt(tokens, 5);
   const char* longitudeHemisphere = fieldAt(tokens, 6);
   const char* dateField = fieldAt(tokens, 9);
-  const char* modeField = fieldAt(tokens, 12);
 
   const bool active = (statusField != nullptr && statusField[0] == 'A');
   outSentence.hasFixDimension = true;
@@ -482,9 +507,9 @@ bool NmeaGpsSource::parseRmcSentence(char* body, ParsedSentence& outSentence) co
       parseLongitudeField(longitudeField, longitudeHemisphere, outSentence.longitudeDeg)) {
     outSentence.hasFix = true;
     outSentence.hasLocation = true;
-    if (modeField != nullptr && (modeField[0] == 'D' || modeField[0] == 'R' || modeField[0] == 'F')) {
-      outSentence.fixDimension = 3;
-    }
+    // RMC's mode field (A/D/R/F) reports fix quality, not dimensionality, and
+    // RMC carries no altitude. Leave the 2D/3D decision to GSA/GGA so we never
+    // label a 3D fix that has no altitude behind it.
   }
 
   if (parseUtcTimeField(
@@ -524,6 +549,23 @@ bool NmeaGpsSource::parseGllSentence(char* body, ParsedSentence& outSentence) co
 
   outSentence.hasFix = true;
   outSentence.hasLocation = true;
+  return true;
+}
+
+bool NmeaGpsSource::parseGsaSentence(char* body, ParsedSentence& outSentence) const {
+  TokenizedSentence tokens;
+  tokenizeBody(body, tokens);
+
+  // Field 2 is the fix type: 1 = no fix, 2 = 2D, 3 = 3D. GSA carries no
+  // location, so it only annotates the dimension of a fix reported elsewhere.
+  const char* fixTypeField = fieldAt(tokens, 2);
+  int fixType = 0;
+  if (!parseIntField(fixTypeField, fixType) || fixType < 1 || fixType > 3) {
+    return false;
+  }
+
+  outSentence.hasGsaFixType = true;
+  outSentence.gsaFixType = static_cast<uint8_t>(fixType);
   return true;
 }
 
