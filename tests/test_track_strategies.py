@@ -471,3 +471,130 @@ async def test_trackmanager_filter_lifecycle_initialize_and_remove() -> None:
     far_future = t0 + int(20 * 1_000_000_000)
     await manager.snapshot(now_ns=far_future)
     assert trk.id in spy.removed
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: cross-node cone fusion (configurable gate + contributor tracking)
+# ---------------------------------------------------------------------------
+
+def _cone_covariance(radial_axis, *, lateral_std_m: float, radial_std_m: float):
+    """Bearing-projected 'cone': tight laterally, huge radially along the bearing."""
+    r = np.asarray(radial_axis, dtype=np.float64)
+    r = r / (np.linalg.norm(r) + 1e-12)
+    lat = lateral_std_m**2 * (np.eye(3) - np.outer(r, r))
+    rad = radial_std_m**2 * np.outer(r, r)
+    return (lat + rad).tolist()
+
+
+def test_default_gate_blocks_cross_node_cone_fusion_regression() -> None:
+    """Regression: with the default gate (4x association_distance_m = 32 m), two
+    cones whose apexes are 60 m apart do NOT associate — behaviour is unchanged."""
+    assoc = NearestNeighborAssociator(association_distance_m=8.0)  # max gate 32 m
+    t0 = 1_000_000_000_000_000_000
+    # Track cone from node A pointing +x; a new detection 60 m away along +x.
+    tracks = [
+        TrackState(
+            id="trk-a",
+            first_seen_ns=t0,
+            last_seen_ns=t0,
+            position_m=(50.0, 0.0, 0.0),
+            position_covariance_m2=_cone_covariance([1, 0, 0], lateral_std_m=3.0, radial_std_m=400.0),
+        )
+    ]
+    result = assoc.associate(
+        timestamp_ns=t0 + 1_000_000_000,
+        position_m=(110.0, 0.0, 0.0),
+        existing_tracks=tracks,
+        measurement_covariance_m2=_cone_covariance([1, 0, 0], lateral_std_m=3.0, radial_std_m=400.0),
+    )
+    assert result is None
+
+
+def test_wide_gate_enables_cross_node_cone_fusion() -> None:
+    """With a widened gate, two crossing cones for the same distant source associate
+    via the Mahalanobis test even though their apexes are >32 m apart."""
+    assoc = NearestNeighborAssociator(association_distance_m=8.0, max_gate_m=500.0)
+    t0 = 1_000_000_000_000_000_000
+    # Node A at origin sees the source at ~200 m along +x → cone along +x.
+    tracks = [
+        TrackState(
+            id="trk-a",
+            first_seen_ns=t0,
+            last_seen_ns=t0,
+            position_m=(200.0, 0.0, 0.0),
+            position_covariance_m2=_cone_covariance([1, 0, 0], lateral_std_m=4.0, radial_std_m=500.0),
+        )
+    ]
+    # Node B 50 m off in +y sees the same source; its cone points slightly different,
+    # but the true source (200, 0, 0) lies inside track A's elongated cone.
+    matched = assoc.associate(
+        timestamp_ns=t0 + 1_000_000_000,
+        position_m=(205.0, 2.0, 0.0),
+        existing_tracks=tracks,
+        measurement_covariance_m2=_cone_covariance([0.97, -0.24, 0.0], lateral_std_m=4.0, radial_std_m=500.0),
+    )
+    assert matched == "trk-a"
+
+
+@pytest.mark.asyncio
+async def test_trackmanager_records_contributors_and_multi_node_metric() -> None:
+    cfg = Settings(
+        association_distance_m=8.0,
+        association_max_gate_m=500.0,
+        tracking_filter="kalman",
+    ).tracking_config()
+    manager = TrackManager(cfg)
+    t0 = 1_000_000_000_000_000_000
+    cone = _cone_covariance([1, 0, 0], lateral_std_m=4.0, radial_std_m=500.0)
+
+    # Node A detects the source cone.
+    first = await manager.update(
+        timestamp_ns=t0,
+        position_m=(200.0, 0.0, 0.0),
+        label="drone",
+        confidence=0.7,
+        measurement_covariance_m2=cone,
+        capability_tier="full_3d",
+        source_node_id="node-a",
+    )
+    assert first.contributor_node_ids == ["node-a"]
+    assert manager.multi_node_association_count() == 0
+
+    # Node B detects the same source a moment later; it associates to the same track.
+    second = await manager.update(
+        timestamp_ns=t0 + 300_000_000,
+        position_m=(203.0, 1.0, 0.0),
+        label="drone",
+        confidence=0.7,
+        measurement_covariance_m2=_cone_covariance([0.98, 0.2, 0.0], lateral_std_m=4.0, radial_std_m=500.0),
+        capability_tier="full_3d",
+        source_node_id="node-b",
+    )
+    assert second.id == first.id
+    assert set(second.contributor_node_ids) == {"node-a", "node-b"}
+    assert manager.multi_node_association_count() == 1
+    assert manager.multi_node_active_count() == 1
+
+    # The Kalman posterior after fusing two crossing cones is tighter than a single
+    # cone's radial variance (no longer 500 m along the shared bearing).
+    posterior = np.asarray(second.position_covariance_m2, dtype=np.float64)
+    assert float(np.max(np.linalg.eigvalsh(posterior))) < 500.0**2
+
+
+@pytest.mark.asyncio
+async def test_multi_node_tqi_boosted_over_single_node() -> None:
+    cfg = Settings(association_distance_m=8.0, association_max_gate_m=500.0).tracking_config()
+    manager = TrackManager(cfg)
+    t0 = 1_000_000_000_000_000_000
+    cone = _cone_covariance([1, 0, 0], lateral_std_m=4.0, radial_std_m=500.0)
+    a = await manager.update(
+        timestamp_ns=t0, position_m=(200.0, 0.0, 0.0), label="x", confidence=0.5,
+        measurement_covariance_m2=cone, capability_tier="full_3d", source_node_id="node-a",
+    )
+    single_node_tqi = a.tqi
+    b = await manager.update(
+        timestamp_ns=t0 + 200_000_000, position_m=(202.0, 1.0, 0.0), label="x", confidence=0.5,
+        measurement_covariance_m2=_cone_covariance([0.98, 0.2, 0.0], lateral_std_m=4.0, radial_std_m=500.0),
+        capability_tier="full_3d", source_node_id="node-b",
+    )
+    assert b.tqi > single_node_tqi

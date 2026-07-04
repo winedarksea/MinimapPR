@@ -40,6 +40,67 @@ def clamp_covariance_eigenvalues(
     return capped.tolist()
 
 
+def clamp_covariance_eigenvalues_range_proportional(
+    covariance_m2: list[list[float]] | np.ndarray | None,
+    *,
+    range_m: float,
+    std_factor: float,
+    floor_std_m: float,
+    ceiling_std_m: float,
+) -> tuple[list[list[float]] | None, bool]:
+    """Clamp covariance eigenvalues to a range-proportional ceiling.
+
+    A single fixed ``maximum_std_m`` ceiling is wrong across a 1 m–1000 m envelope:
+    it is absurdly loose up close and clips honest uncertainty far away. Instead the
+    effective per-axis std ceiling scales with the distance from the contributing
+    sensors::
+
+        effective_ceiling_std = min(max(std_factor * range_m, floor_std_m), ceiling_std_m)
+
+    ``ceiling_std_m`` is the absolute hard cap (kept for physicality / storage sanity);
+    ``floor_std_m`` keeps a sensible minimum near the array. When ``std_factor <= 0``
+    the range term is disabled and the legacy fixed ``ceiling_std_m`` clamp is used
+    (backward compatible).
+
+    Returns ``(clamped_nested_list_or_None, was_range_capped)`` where the flag is True
+    only when the range-proportional ceiling (below the absolute ceiling) actually
+    reduced an eigenvalue — used to drive the ``localization_covariance_range_capped``
+    metric. Mirrors :func:`clamp_covariance_eigenvalues` for the None/degenerate paths.
+    """
+    if covariance_m2 is None or ceiling_std_m <= 0.0:
+        passthrough = covariance_m2 if isinstance(covariance_m2, list) or covariance_m2 is None else None
+        return passthrough, False
+    if std_factor > 0.0:
+        effective_ceiling_std_m = min(
+            max(float(std_factor) * max(float(range_m), 0.0), float(floor_std_m)),
+            float(ceiling_std_m),
+        )
+    else:
+        effective_ceiling_std_m = float(ceiling_std_m)
+    range_capped = effective_ceiling_std_m < float(ceiling_std_m) - EPSILON
+
+    covariance = np.asarray(covariance_m2, dtype=np.float64)
+    if covariance.ndim != 2 or covariance.shape[0] != covariance.shape[1] or covariance.size == 0:
+        return None, False
+    if not np.all(np.isfinite(covariance)):
+        return None, False
+
+    ceiling_m2 = effective_ceiling_std_m ** 2
+    covariance = 0.5 * (covariance + covariance.T)
+    eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+    if not np.all(np.isfinite(eigenvalues)):
+        return None, False
+    if np.all(eigenvalues <= ceiling_m2):
+        return covariance.tolist(), False
+    clamped = np.minimum(eigenvalues, ceiling_m2)
+    capped = eigenvectors @ np.diag(clamped) @ eigenvectors.T
+    capped = 0.5 * (capped + capped.T)
+    # Only report a range-specific cap when the range term (not the absolute ceiling)
+    # is what bit — i.e. an eigenvalue exceeded the range-proportional ceiling while
+    # the ceiling itself is below the absolute cap.
+    return capped.tolist(), range_capped
+
+
 def _stabilize_covariance(
     covariance_m2: np.ndarray,
     *,

@@ -34,6 +34,10 @@ class NodeRegistry:
         self._nodes: dict[str, NodeRuntime] = {}
         self._sensors: dict[str, SensorDescriptor] = {}
         self._latest_observations: dict[str, str] = {}
+        # Phase 5: per-node position 1σ (m), fed from the ingest position-Kalman P.
+        # Absent → 0.0 (surveyed / trusted-GPS default). Used to down-weight
+        # cross-node TDOA pairs anchored on poorly-localized nodes.
+        self._node_position_std_m: dict[str, float] = {}
         self._lock = asyncio.Lock()
 
     async def upsert(self, spec: NodeSpec, last_seen_ns: int) -> NodeRuntime:
@@ -98,6 +102,23 @@ class NodeRegistry:
     async def sensor_positions(self) -> dict[str, np.ndarray]:
         async with self._lock:
             return {sensor_id: descriptor.position_m.copy() for sensor_id, descriptor in self._sensors.items()}
+
+    async def set_node_position_std_m(self, node_id: str, position_std_m: float) -> None:
+        """Record a node's position 1σ (m), e.g. from the ingest position-Kalman P."""
+        async with self._lock:
+            self._node_position_std_m[node_id] = max(float(position_std_m), 0.0)
+
+    async def sensor_position_std_m(self) -> dict[str, float]:
+        """Per-sensor position 1σ (m), inherited from the sensor's node.
+
+        Sensors on nodes without a recorded std default to 0.0 (surveyed / trusted
+        GPS). Consumed by the cross-node TDOA geometry weighting (Phase 5).
+        """
+        async with self._lock:
+            return {
+                sensor_id: self._node_position_std_m.get(descriptor.node_id, 0.0)
+                for sensor_id, descriptor in self._sensors.items()
+            }
 
     async def sensor_node_ids(
         self,

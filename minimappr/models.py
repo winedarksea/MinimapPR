@@ -453,6 +453,10 @@ class TrackState(BaseModel):
     capability_tier: Literal["full_3d", "2d", "classification_only", "alerting_only"] = "full_3d"
     contributor_count: int = Field(default=0, ge=0)
     contributors: list[ContributorSummary] = Field(default_factory=list)
+    # Phase 3: distinct source node IDs that have contributed detections to this
+    # track (bounded, insertion-ordered). A track corroborated by ≥2 nodes is a
+    # cross-node fusion and carries higher confidence than a single-array cone.
+    contributor_node_ids: list[str] = Field(default_factory=list)
 
 
 class FederationHeartbeat(BaseModel):

@@ -23,10 +23,27 @@ class NearestNeighborAssociator:
     require MHT or JPDA (Phase 3).
     """
 
-    def __init__(self, association_distance_m: float) -> None:
+    def __init__(
+        self,
+        association_distance_m: float,
+        *,
+        max_gate_m: float | None = None,
+        chi2_gate: float = 9.0,
+    ) -> None:
         if association_distance_m <= 0.0:
             raise ValueError("association_distance_m must be > 0")
         self._association_distance_m = association_distance_m
+        # Upper bound on the physical (Euclidean) association gate radius. Defaults to
+        # the legacy 4×association_distance_m clamp so behaviour is unchanged unless a
+        # deployment widens it for cross-node cone fusion (Phase 3).
+        self._max_gate_m = (
+            float(max_gate_m)
+            if max_gate_m is not None and max_gate_m > 0.0
+            else association_distance_m * 4.0
+        )
+        # Never let the configured max fall below the Euclidean shortcut radius.
+        self._max_gate_m = max(self._max_gate_m, association_distance_m)
+        self._chi2_gate = float(chi2_gate) if chi2_gate > 0.0 else 9.0
 
     def associate(
         self,
@@ -74,7 +91,7 @@ class NearestNeighborAssociator:
             score = self._mahalanobis_distance_squared(residual, mahalanobis_sq)
             if score is None:
                 continue
-            if score <= 9.0 and score < best_score:
+            if score <= self._chi2_gate and score < best_score:
                 best_score = score
                 best_track_id = track.id
 
@@ -105,7 +122,7 @@ class NearestNeighborAssociator:
             return None
         sigma = float(np.sqrt(largest_variance))
         physical_gate_radius_m = float(
-            np.clip(3.0 * sigma, self._association_distance_m, self._association_distance_m * 4.0)
+            np.clip(3.0 * sigma, self._association_distance_m, self._max_gate_m)
         )
         return covariance, physical_gate_radius_m
 

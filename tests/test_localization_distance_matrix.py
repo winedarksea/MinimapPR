@@ -249,3 +249,79 @@ def test_single_tetra_frequency_band_bearing(freq_hz: float, distance_m: float) 
     centroid_m = _centroid_m(sensor_positions)
     # Across the band the bearing must stay accurate regardless of range regime.
     assert _bearing_dot(result, centroid_m, EXPECTED_DIRECTION) >= 0.90
+
+
+# --------------------------------------------------------------------------- #
+# Phase 6: benchmark matrix + covariance-calibration observation
+# --------------------------------------------------------------------------- #
+def test_phase6_benchmark_matrix_summary(tmp_path) -> None:
+    """Sweep geometry x distance, asserting honest bearing/range behaviour and
+    emitting a markdown summary (bearing dot, range error, Mahalanobis of truth).
+
+    This is the Phase 6 benchmark deliverable. It also records — deliberately, not
+    as a failure — that the multi-node gcc_phat covariance is *optimistic* at range
+    (truth Mahalanobis > 3), which is why the range-proportional caps (Phase 1b) and
+    honest bearing cones (Phase 4) matter downstream. The assertions below only claim
+    what is physically true: bearing is always accurate, and the wide cluster fixes
+    range to within a range-proportional bound.
+    """
+    geometries = {
+        "single_tetra": ({"tetra-a": tuple(TETRA_ORIGIN_M)}, ("tetra-a",)),
+        "multi_wide": (MULTI_WIDE_NODES_M, ("tetra-a",)),
+    }
+    distances = [10.0, 100.0, 300.0, 1000.0]
+    rows: list[str] = ["| geometry | dist (m) | bearing·dot | range err (m) | truth Mahalanobis |",
+                       "|---|---|---|---|---|"]
+
+    for geom_name, (nodes, tetra_ids) in geometries.items():
+        centroid = np.mean(np.vstack([np.asarray(p) for p in nodes.values()]), axis=0)
+        localizer = (
+            _single_tetra_localizer() if geom_name == "single_tetra" else _multinode_dispatcher()
+        )
+        for distance_m in distances:
+            excitation = _broadband_excitation(seed=17)
+            source = centroid + EXPECTED_DIRECTION * distance_m
+            positions, windows, node_ids = synthesize_multinode_windows(
+                excitation,
+                SAMPLE_RATE_HZ,
+                source_position_m=source,
+                node_origins_m=nodes,
+                tetra_node_ids=tetra_ids,
+                sound_speed_mps=SOUND_SPEED_MPS,
+            )
+            result = localizer.localize(
+                sensor_positions=positions,
+                sensor_windows=windows,
+                sample_rate_hz=SAMPLE_RATE_HZ,
+                temperature_c=20.0,
+                humidity_fraction=0.5,
+                sensor_node_ids=node_ids,
+            )
+            estimate = np.asarray(result.position_m, dtype=np.float64)
+            bearing_dot = _bearing_dot(result, centroid, EXPECTED_DIRECTION)
+            range_err = float(abs(np.linalg.norm(estimate - centroid) - distance_m))
+            mahal = float("nan")
+            if result.position_covariance_m2 is not None:
+                cov = np.asarray(result.position_covariance_m2, dtype=np.float64)
+                err = estimate - source
+                try:
+                    mahal = float(np.sqrt(err @ np.linalg.solve(cov, err)))
+                except np.linalg.LinAlgError:
+                    pass
+            rows.append(
+                f"| {geom_name} | {distance_m:.0f} | {bearing_dot:.3f} | "
+                f"{range_err:.1f} | {mahal:.1f} |"
+            )
+
+            # Bearing is always accurate (the core single-node guarantee).
+            assert bearing_dot >= 0.9, f"{geom_name}@{distance_m}m bearing dot {bearing_dot:.3f}"
+            # The wide cluster observes range; assert a range-proportional bound.
+            if geom_name == "multi_wide":
+                assert range_err <= max(0.15 * distance_m, 5.0), (
+                    f"{geom_name}@{distance_m}m range err {range_err:.1f} m"
+                )
+
+    summary = "\n".join(rows)
+    (tmp_path / "phase6_benchmark_matrix.md").write_text(summary)
+    # Sanity: the table has a row per cell.
+    assert len(rows) == 2 + len(geometries) * len(distances)

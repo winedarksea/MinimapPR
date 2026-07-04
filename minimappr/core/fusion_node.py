@@ -22,7 +22,7 @@ import itertools
 import logging
 import time
 from contextlib import asynccontextmanager
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
 import aiosqlite
@@ -31,7 +31,14 @@ import numpy as np
 from minimappr.api.rust_dsp_manifests import LocalizedClassifierRenderRequest
 from minimappr.classifiers.base import AudioClassifier
 from minimappr.config import Settings
+from minimappr.core.amplitude_range import amplitude_range_prior_m
 from minimappr.core.assembly import DetectionAssembler
+from minimappr.core.multi_node_bearing_fusion import (
+    BearingFusionResult,
+    BearingFusionStore,
+    BearingObservation,
+    fuse_bearings,
+)
 from minimappr.core.audio_buffer import AudioCoverageStats, MultiSensorBuffer
 from minimappr.core.beamforming import create_beamformer
 from minimappr.core.classification_chunking import ClassificationChunkingPolicy
@@ -45,15 +52,18 @@ from minimappr.core.ambi_atob import alias_cutoff_from_positions
 from minimappr.core.localization import LocalizationError
 from minimappr.core.localization_uncertainty import (
     apply_frequency_covariance_scaling,
-    clamp_covariance_eigenvalues,
+    clamp_covariance_eigenvalues_range_proportional,
     covariance_to_nested_list,
+    range_observability_from_covariance,
 )
 from minimappr.core.node_registry import NodeRegistry
 from minimappr.core.pipeline_realtime import PipelineRealtimeTracker
 from minimappr.core.range_projection import (
     LEGACY_PRIOR_PROJECTED,
     RANGE_ASYMPTOTIC,
+    RANGE_BEARING_PROJECTED,
     RANGE_BOUNDARY,
+    RANGE_REFINED,
     apply_unobservable_range_haircut,
     normalize_range_mode,
 )
@@ -92,6 +102,12 @@ from minimappr.utils.audio import rms
 
 
 logger = logging.getLogger(__name__)
+
+# Absolute distance-from-origin backstop for the localization sanity gate. The
+# primary gate measures range from the contributing-sensor centroid (Phase 2), so a
+# node surveyed far from origin still gets its full 1 km envelope; this backstop only
+# catches runaway coordinates well beyond any plausible deployment footprint.
+_SANITY_GATE_ORIGIN_BACKSTOP_M = 5000.0
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +211,21 @@ class FusionMetrics:
     localization_solver_unconverged_count: int = 0
     localization_covariance_missing_count: int = 0
     localization_range_observability_low_count: int = 0
+    localization_covariance_range_capped_count: int = 0
+    localization_amplitude_prior_used_count: int = 0
+    localization_amplitude_prior_clamped_count: int = 0
+    track_multi_node_association_count: int = 0
+    tracks_multi_node_active: int = 0
+    localization_bearing_fusion_attempt_count: int = 0
+    localization_bearing_fusion_fused_count: int = 0
+    localization_bearing_fusion_degenerate_count: int = 0
+    localization_bearing_fusion_stale_count: int = 0
+    last_bearing_fusion_contributor_count: int = 0
+    localization_cross_node_pairs_measured_count: int = 0
+    localization_cross_node_pairs_rejected_sync_count: int = 0
+    localization_candidates_coalesced_count: int = 0
+    localization_cross_node_wait_timeout_count: int = 0
+    last_cross_node_pair_count: int = 0
     localization_rejected_out_of_range_count: int = 0
     localization_stage_total_time_ms: float = 0.0
     localization_stage_max_time_ms: float = 0.0
@@ -356,6 +387,12 @@ class FusionNode:
         self._classification_workers: list[asyncio.Task] = []
         self._rules_workers: list[asyncio.Task] = []
         self._metrics = FusionMetrics()
+        # Phase 4: windowed multi-node bearing triangulation store (server-side,
+        # feature-flagged off by default). Bounded + TTL-pruned.
+        self._bearing_fusion_store = BearingFusionStore(
+            max_entries=256,
+            ttl_seconds=self.settings.multi_node_bearing_ttl_seconds,
+        )
         self._realtime_tracker = PipelineRealtimeTracker(
             ("localization", "classification", "rules")
         )
@@ -543,6 +580,31 @@ class FusionNode:
             and payload.localization_pair_tdoas
             and payload.localization_sound_speed_mps is not None
         ):
+            # Amplitude/SNR-informed range prior (Phase 1c): when enabled and the
+            # sidecar reported a received level, derive the projection distance from
+            # inverse-square spreading instead of the fixed config default. Only
+            # affects unobservable-range projection (asymptotic / bearing cone apex);
+            # a range_refined solve ignores far_field_initial_range_m entirely.
+            far_field_range_m = self.settings.localization_far_field_default_range_m
+            far_field_prior_radial_std_m: float | None = None
+            cfg = self.localization_config
+            if (
+                cfg.localization_amplitude_range_prior_enabled
+                and payload.localization_received_level_dbfs is not None
+            ):
+                prior_range_m, prior_clamped = amplitude_range_prior_m(
+                    payload.localization_received_level_dbfs,
+                    reference_source_level_db=cfg.localization_amplitude_reference_level_db,
+                    min_range_m=cfg.localization_amplitude_prior_min_range_m,
+                    max_range_m=cfg.localization_amplitude_prior_max_range_m,
+                )
+                far_field_range_m = prior_range_m
+                far_field_prior_radial_std_m = (
+                    cfg.localization_amplitude_prior_std_factor * prior_range_m
+                )
+                self._metrics.localization_amplitude_prior_used_count += 1
+                if prior_clamped:
+                    self._metrics.localization_amplitude_prior_clamped_count += 1
             solved = solve_localization_from_rust_tdoas(
                 sensor_positions=selected_positions,
                 ordered_sensor_ids=selected_sensor_ids,
@@ -551,7 +613,8 @@ class FusionNode:
                 sound_speed_mps=payload.localization_sound_speed_mps,
                 sample_rate_hz=payload.sample_rate_hz,
                 interpolation_factor=self.settings.gcc_phat_interp_factor,
-                far_field_default_range_m=self.settings.localization_far_field_default_range_m,
+                far_field_default_range_m=far_field_range_m,
+                far_field_prior_radial_std_m=far_field_prior_radial_std_m,
             )
             if solved is not None:
                 localization_position_m = solved.position_m
@@ -605,9 +668,20 @@ class FusionNode:
             confidence=localization_confidence,
             range_observability=localization_range_observability,
         )
-        localization_position_covariance_m2 = clamp_covariance_eigenvalues(
+        rust_contributing_centroid_m = (
+            np.mean(
+                np.vstack(
+                    [np.asarray(selected_positions[sid], dtype=np.float64) for sid in selected_positions]
+                ),
+                axis=0,
+            )
+            if selected_positions
+            else None
+        )
+        localization_position_covariance_m2 = self._clamp_localization_covariance(
             localization_position_covariance_m2,
-            maximum_std_m=self.localization_config.localization_max_position_std_m,
+            position_m=localization_position_m,
+            contributing_centroid_m=rust_contributing_centroid_m,
         )
 
         rust_audio_quality = (
@@ -639,23 +713,31 @@ class FusionNode:
             rust_extra_features["rust_render_end_ns"] = int(payload.render_end_ns)
         if payload.fallback_reason is not None:
             rust_extra_features["rust_fallback_reason"] = payload.fallback_reason
+        rust_localization_branch = LocalizationBranch(
+            localization_position_m=localization_position_m,
+            localization_confidence=localization_confidence,
+            localization_gdop=localization_gdop,
+            reference_sensor=reference_sensor,
+            reference_signal=normalized_audio,
+            classification_reference_signal=normalized_audio,
+            tdoa_s={},
+            localization_method=localization_method,
+            capability_tier=capability_tier,
+            localization_position_covariance_m2=localization_position_covariance_m2,
+            localization_range_observability=localization_range_observability,
+            localization_residual_rms_seconds=localization_residual_rms_seconds,
+            localization_range_projection_mode=localization_range_projection_mode,
+        )
+        rust_localization_branch = await self._maybe_fuse_multi_node_bearing(
+            rust_localization_branch,
+            node_id=node.id,
+            contributing_centroid_m=rust_contributing_centroid_m,
+            event_time_ns=payload.event_time_ns,
+            sound_speed_mps=payload.localization_sound_speed_mps,
+        )
         localized_product = LocalizedCandidate(
             candidate=candidate,
-            localization_branch=LocalizationBranch(
-                localization_position_m=localization_position_m,
-                localization_confidence=localization_confidence,
-                localization_gdop=localization_gdop,
-                reference_sensor=reference_sensor,
-                reference_signal=normalized_audio,
-                classification_reference_signal=normalized_audio,
-                tdoa_s={},
-                localization_method=localization_method,
-                capability_tier=capability_tier,
-                localization_position_covariance_m2=localization_position_covariance_m2,
-                localization_range_observability=localization_range_observability,
-                localization_residual_rms_seconds=localization_residual_rms_seconds,
-                localization_range_projection_mode=localization_range_projection_mode,
-            ),
+            localization_branch=rust_localization_branch,
             selected_sensor_ids=selected_sensor_ids,
             selected_windows={},
             selected_positions=selected_positions,
@@ -751,6 +833,13 @@ class FusionNode:
         realtime = self._realtime_tracker.snapshot(now_ns=now_ns)
         buffer_state = await self.buffer.snapshot_state()
         health = self._compute_health_snapshot(now_ns=now_ns)
+        # Phase 3: cross-node track fusion telemetry (counter + live gauge).
+        if hasattr(self.tracker, "multi_node_association_count"):
+            self._metrics.track_multi_node_association_count = (
+                self.tracker.multi_node_association_count()
+            )
+        if hasattr(self.tracker, "multi_node_active_count"):
+            self._metrics.tracks_multi_node_active = self.tracker.multi_node_active_count()
         return {
             "started": self._started,
             "queue": {
@@ -1262,6 +1351,16 @@ class FusionNode:
                     for sensor_id in selected_ids
                 }
         localization_branch: LocalizationBranch | None = None
+        contributing_centroid_m = (
+            np.mean(
+                np.vstack(
+                    [np.asarray(pos, dtype=np.float64) for pos in selected_positions.values()]
+                ),
+                axis=0,
+            )
+            if selected_positions
+            else None
+        )
         if tier == "full_3d":
             self._metrics.localization_tier_full_3d_count += 1
             try:
@@ -1279,6 +1378,7 @@ class FusionNode:
                     selected_windows=selected_windows,
                     classification_windows=classification_windows,
                     capability_tier=tier,
+                    contributing_centroid_m=contributing_centroid_m,
                 )
             except LocalizationError as exc:
                 self._metrics.localization_failures += 1
@@ -1305,9 +1405,19 @@ class FusionNode:
                     selected_windows=selected_windows,
                     classification_windows=classification_windows,
                     capability_tier=tier,
+                    contributing_centroid_m=contributing_centroid_m,
                 )
             except LocalizationError:
                 self._metrics.localization_failures += 1
+
+        if localization_branch is not None:
+            localization_branch = await self._maybe_fuse_multi_node_bearing(
+                localization_branch,
+                node_id=candidate.source_node_id,
+                contributing_centroid_m=contributing_centroid_m,
+                event_time_ns=candidate.event_time_ns,
+                sound_speed_mps=None,
+            )
 
         return LocalizedCandidate(
             candidate=candidate,
@@ -1566,6 +1676,149 @@ class FusionNode:
             environment=environment_summary,
         )
 
+    def _clamp_localization_covariance(
+        self,
+        covariance_m2,
+        *,
+        position_m,
+        contributing_centroid_m,
+    ):
+        """Range-proportional covariance clamp shared by both ingest seams.
+
+        Effective per-axis std ceiling scales with distance from the contributing
+        sensors, so a 1 m near-field solve stays tight while a 1 km bearing cone can
+        carry honest uncertainty (up to the absolute ceiling). ``std_factor <= 0``
+        reproduces the legacy fixed clamp exactly.
+        """
+        cfg = self.localization_config
+        range_m = 0.0
+        if contributing_centroid_m is not None and position_m is not None:
+            pos = np.asarray(position_m, dtype=np.float64).reshape(-1)
+            cen = np.asarray(contributing_centroid_m, dtype=np.float64).reshape(-1)
+            if pos.size == 3 and cen.size == 3 and np.all(np.isfinite(pos)) and np.all(np.isfinite(cen)):
+                range_m = float(np.linalg.norm(pos - cen))
+        capped, range_capped = clamp_covariance_eigenvalues_range_proportional(
+            covariance_m2,
+            range_m=range_m,
+            std_factor=cfg.localization_std_range_factor,
+            floor_std_m=cfg.localization_position_std_floor_m,
+            ceiling_std_m=cfg.localization_max_position_std_m,
+        )
+        if range_capped:
+            self._metrics.localization_covariance_range_capped_count += 1
+        return capped
+
+    async def _maybe_fuse_multi_node_bearing(
+        self,
+        branch: LocalizationBranch,
+        *,
+        node_id: str,
+        contributing_centroid_m: np.ndarray | None,
+        event_time_ns: int,
+        sound_speed_mps: float | None,
+    ) -> LocalizationBranch:
+        """Opportunistically upgrade a single-node cone via bearing triangulation.
+
+        Server-side, feature-flagged (Phase 4). Registers this cone as a bearing
+        observation and, if another node's cone corroborates within the window,
+        intersects them to recover range — upgrading the branch in place. Earlier
+        detections are not retro-edited (Phase 3 track association merges them); this
+        is purely opportunistic on the second-arriving candidate, so cadence is
+        unchanged. Returns the branch unmodified when disabled, ineligible, or
+        degenerate.
+        """
+
+        if not self.settings.multi_node_bearing_fusion_enabled:
+            return branch
+        if contributing_centroid_m is None or branch.localization_position_covariance_m2 is None:
+            return branch
+        mode = branch.localization_range_projection_mode
+        obs_low = (
+            branch.localization_range_observability is not None
+            and branch.localization_range_observability < 0.10
+        )
+        # Only unobservable-range single-node cones benefit; a refined range is left
+        # alone unless its observability is low (marginal range).
+        if not (mode == RANGE_BEARING_PROJECTED or (mode == RANGE_REFINED and obs_low)):
+            return branch
+
+        position = np.asarray(branch.localization_position_m, dtype=np.float64)
+        centroid = np.asarray(contributing_centroid_m, dtype=np.float64).reshape(-1)
+        bearing = position - centroid
+        norm = float(np.linalg.norm(bearing))
+        if centroid.size != 3 or norm < 1e-9 or not np.all(np.isfinite(position)):
+            return branch
+        direction = bearing / norm
+        cov = np.asarray(branch.localization_position_covariance_m2, dtype=np.float64)
+        if cov.shape != (3, 3) or not np.all(np.isfinite(cov)):
+            return branch
+        radial_var = float(direction @ cov @ direction)
+        lateral_std_m = float(np.sqrt(max((float(np.trace(cov)) - radial_var) / 2.0, 1e-4)))
+
+        now_ns = time.time_ns()
+        ttl_ns = int(self.settings.multi_node_bearing_ttl_seconds * 1e9)
+        observation = BearingObservation(
+            node_id=node_id,
+            origin_m=centroid,
+            direction=direction,
+            lateral_std_m=lateral_std_m,
+            confidence=float(branch.localization_confidence),
+            event_time_ns=int(event_time_ns),
+            range_prior_m=norm,
+            expiry_ns=now_ns + ttl_ns,
+        )
+        await self._bearing_fusion_store.register(observation, now_ns=now_ns)
+        corroborators = await self._bearing_fusion_store.corroborators(
+            observation,
+            now_ns=now_ns,
+            window_seconds=self.settings.multi_node_bearing_window_seconds,
+        )
+        if not corroborators:
+            return branch
+
+        self._metrics.localization_bearing_fusion_attempt_count += 1
+        result = fuse_bearings(
+            [observation, *corroborators],
+            min_separation_deg=self.settings.multi_node_bearing_min_separation_deg,
+            max_condition=self.settings.multi_node_bearing_max_condition,
+            max_range_m=self.localization_config.localization_max_range_m,
+            sound_speed_mps=sound_speed_mps or 343.0,
+            window_seconds=self.settings.multi_node_bearing_window_seconds,
+        )
+        if not isinstance(result, BearingFusionResult):
+            if result == "stale":
+                self._metrics.localization_bearing_fusion_stale_count += 1
+            else:
+                self._metrics.localization_bearing_fusion_degenerate_count += 1
+            return branch
+
+        fused_position = result.position_m
+        fused_cov = self._clamp_localization_covariance(
+            result.covariance_m2.tolist(),
+            position_m=fused_position,
+            contributing_centroid_m=centroid,
+        )
+        observability = range_observability_from_covariance(
+            result.covariance_m2, fused_position - centroid
+        )
+        self._metrics.localization_bearing_fusion_fused_count += 1
+        self._metrics.last_bearing_fusion_contributor_count = len(result.contributor_node_ids)
+        return replace(
+            branch,
+            localization_position_m=(
+                float(fused_position[0]),
+                float(fused_position[1]),
+                float(fused_position[2]),
+            ),
+            localization_position_covariance_m2=fused_cov,
+            localization_range_observability=observability,
+            localization_range_projection_mode=RANGE_REFINED,
+            localization_confidence=min(
+                0.95, max(float(branch.localization_confidence), result.confidence)
+            ),
+            localization_method="multi_node_bearing_triangulation",
+        )
+
     def _record_range_projection_metrics(self, mode: str | None) -> None:
         """Count range-projection states canonically across both ingest paths."""
         canonical = normalize_range_mode(mode)
@@ -1585,13 +1838,28 @@ class FusionNode:
         selected_windows: dict[str, np.ndarray],
         classification_windows: dict[str, np.ndarray],
         capability_tier: str,
+        contributing_centroid_m: np.ndarray | None = None,
     ) -> LocalizationBranch | None:
         # Sanity gate: drop unphysical solver blowups before they become a track. The
         # candidate falls back to its omni branch (no localized position) instead.
+        # Range is measured from the contributing-sensor centroid (how far the source
+        # is from the array), NOT the site origin — a node surveyed far from origin
+        # must still be allowed a legitimate 1 km solve. A 5 km absolute origin
+        # backstop still catches runaway coordinates.
         max_range_m = self.localization_config.localization_max_range_m
         if max_range_m > 0.0:
             position = np.asarray(localization.position_m, dtype=np.float64)
-            if not np.all(np.isfinite(position)) or float(np.linalg.norm(position)) > max_range_m:
+            centroid = (
+                np.asarray(contributing_centroid_m, dtype=np.float64).reshape(-1)
+                if contributing_centroid_m is not None
+                else np.zeros(3, dtype=np.float64)
+            )
+            in_range = (
+                np.all(np.isfinite(position))
+                and (centroid.size != 3 or float(np.linalg.norm(position - centroid)) <= max_range_m)
+                and float(np.linalg.norm(position)) <= _SANITY_GATE_ORIGIN_BACKSTOP_M
+            )
+            if not in_range:
                 self._metrics.localization_rejected_out_of_range_count += 1
                 self._record_silent_drop(stage="localization", reason="position_out_of_range")
                 return None
@@ -1621,9 +1889,12 @@ class FusionNode:
         )
         # Cap covariance so unobservable-range / cone solves can't carry km-scale
         # ellipses into tracking. Catches every covariance path (jacobian + cone).
-        capped_covariance_m2 = clamp_covariance_eigenvalues(
+        # The ceiling scales with distance from the contributing sensors so honest
+        # uncertainty survives at range while near-field solves stay tight.
+        capped_covariance_m2 = self._clamp_localization_covariance(
             localization.position_covariance_m2,
-            maximum_std_m=self.localization_config.localization_max_position_std_m,
+            position_m=localization.position_m,
+            contributing_centroid_m=contributing_centroid_m,
         )
         return LocalizationBranch(
             localization_position_m=localization.position_m,

@@ -44,6 +44,11 @@ pub struct LocalizationManifestPayload {
     pub effective_band_hz: Option<[f32; 2]>,
     #[serde(default)]
     pub dominant_frequency_hz: Option<f32>,
+    /// Received level (dBFS) of the reference channel: 20·log10(rms) + gain_offset.
+    /// Feeds the Python amplitude/SNR range prior (Phase 1c). Mirrored in the Python
+    /// `LocalizedClassifierRenderRequest.localization_received_level_dbfs`.
+    #[serde(default)]
+    pub received_level_dbfs: Option<f32>,
     pub pair_tdoas: Vec<PairTdoaDiagnostic>,
 }
 

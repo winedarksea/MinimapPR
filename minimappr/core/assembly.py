@@ -8,7 +8,6 @@ independently testable component.
 from __future__ import annotations
 
 import asyncio
-import math
 import time
 import uuid
 from dataclasses import dataclass
@@ -17,6 +16,7 @@ from typing import Any
 
 import numpy as np
 
+from minimappr.core.amplitude_range import received_level_db_from_rms
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.node_registry import NodeRegistry
 from minimappr.core.retention import RetentionPolicy
@@ -251,6 +251,7 @@ class DetectionAssembler:
         )
 
         # -- track update ------------------------------------------------------
+        source_node_id = await self._registry.node_id_for_sensor(reference_sensor)
         track: TrackState | None = None
         localizable_capability_tiers = {"2d", "full_3d"}
         if (
@@ -269,6 +270,7 @@ class DetectionAssembler:
                 confidence=classification_confidence,
                 sensor_count=len(selected_sensor_ids),
                 capability_tier=capability_tier,
+                source_node_id=source_node_id,
             )
             track.position_geo = self._coordinate_frame.local_to_geo(track.position_m)
 
@@ -281,12 +283,9 @@ class DetectionAssembler:
             all_observation_ids = list(
                 dict.fromkeys([*existing_detection.get("source_observation_ids", []), *all_observation_ids])
             )
-        source_node_id = await self._registry.node_id_for_sensor(reference_sensor)
-
         # -- SPL ---------------------------------------------------------------
         gain_offset_db = await self._registry.gain_offset_db_for_sensor(reference_sensor)
-        ref_rms = max(rms(reference_signal), 1e-9)
-        spl_db = float(20.0 * math.log10(ref_rms)) + gain_offset_db
+        spl_db = received_level_db_from_rms(rms(reference_signal), gain_offset_db)
 
         # -- retention ---------------------------------------------------------
         retention_tier = self._retention_policy.tier_for_detection(

@@ -594,12 +594,23 @@ class LocalizationDispatcher:
 
 def build_localizer_from_settings(settings: Settings | LocalizationConfig) -> Localizer:
     cfg = settings.localization_config() if isinstance(settings, Settings) else settings
+    cross_node_enabled = bool(getattr(settings, "localization_cross_node_tdoa_enabled", False))
     gcc = LocalizationEngine(
         max_tau_s=cfg.localization_max_tau_seconds,
         interp_factor=cfg.gcc_phat_interp_factor,
         node_bearing_strength=cfg.localization_node_bearing_strength,
         amplitude_ratio_strength=cfg.localization_amplitude_ratio_strength,
         far_field_default_range_m=cfg.localization_far_field_default_range_m,
+        cross_node_max_tau_s=(
+            getattr(settings, "localization_cross_node_max_tau_seconds", None)
+            if cross_node_enabled
+            else None
+        ),
+        cross_node_min_sync_weight=(
+            getattr(settings, "localization_cross_node_min_sync_weight", None)
+            if cross_node_enabled
+            else None
+        ),
     )
     algorithms: dict[str, Localizer] = {
         "gcc_phat": gcc,

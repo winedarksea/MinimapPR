@@ -174,6 +174,14 @@ def build_ingest_sidecar_environment(
         "MINIMAPPR_LOCALIZATION_BAND_MAX_HZ": str(
             getattr(settings, "localization_band_max_hz", 3500.0)
         ),
+        # Phase 2: propagate the localization range envelope so the sidecar's
+        # far-field search matches the Python solver (default 1 km).
+        "MINIMAPPR_LOCALIZATION_FAR_FIELD_DEFAULT_RANGE_M": str(
+            getattr(settings, "localization_far_field_default_range_m", 50.0)
+        ),
+        "MINIMAPPR_LOCALIZATION_FAR_FIELD_MAX_RANGE_M": str(
+            getattr(settings, "localization_far_field_max_range_m", 1000.0)
+        ),
         "MINIMAPPR_DEFAULT_TEMPERATURE_C": str(getattr(settings, "default_temperature_c", 20.0)),
         "MINIMAPPR_DEFAULT_HUMIDITY": str(getattr(settings, "default_humidity", 0.5)),
         "MINIMAPPR_SITE_ORIGIN_LAT": str(getattr(settings, "site_origin_lat", 0.0)),

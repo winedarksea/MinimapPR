@@ -54,6 +54,43 @@ valid; only range observability is driven to the floor to signal range uncertain
 > *range* is unobservable), but the confidence cap differs — always go through
 > `confidence_cap_for_mode` rather than assuming the harsh cap.
 
+### Rust confidence parity (Phase 1a)
+
+The Rust SRP-PHAT confidence must match the identical Python solve:
+
+- The base score `0.6·fit + 0.25·peak + 0.15·contrast` is attenuated by
+  `range_observability.clamp(0.35, 1.0)` **only** for non–bearing-projected modes.
+  For `range_bearing_projected` the multiplier is skipped (mirrors Python's
+  `obs_factor = 1.0` branch), because the cone's huge radial eigenvalue makes
+  observability artificially tiny and it must not penalise a well-observed bearing.
+- The per-mode `confidence_cap_for_mode` / `range_observability_cap_for_mode` are
+  then applied Rust-side (idempotent with the Python ingest-seam haircut).
+
+## Amplitude/SNR range prior (Phase 1c)
+
+For unobservable-range modes only, the *projection distance* may be derived from the
+received level instead of a fixed 50 m guess, via inverse-square spreading:
+
+```
+r = 10 ^ ((L_ref − L_recv) / 20)     clamped to [min_range_m, max_range_m]
+```
+
+- `L_recv` = reference-channel received level (dBFS): `20·log10(rms) + gain_offset`.
+- `L_ref` = assumed source level at 1 m (`localization_amplitude_reference_level_db`,
+  default 100 dB). Clamp band default `[5 m, 1000 m]`.
+- Implemented identically in `minimappr/core/amplitude_range.py::amplitude_range_prior_m`
+  and `src/range_projection.rs::amplitude_range_prior_m`.
+- **Rule:** the prior only substitutes the projection distance for the
+  unobservable-range modes (`range_asymptotic` / `range_bearing_projected` /
+  `range_boundary`). It never overrides a `range_refined` solve, where the data
+  resolved range directly (`far_field_initial_range_m` is unused in that branch).
+- The prior's radial std is `std_factor × prior_range` (default `2.0`, ≈ ±6 dB
+  source-level uncertainty). The cone radial std is `max(4×range, prior_std, 200 m)`
+  in both languages (`cartesian_tdoa.py` and `srp_phat.rs`).
+- Ships disabled (`localization_amplitude_range_prior_enabled = false`); enable after
+  a per-node `gain_offset_db` calibration check. The Rust sidecar reports raw dBFS in
+  the manifest (`received_level_dbfs`); the Python path applies the prior on re-solve.
+
 ## Upgrade criteria (intentionally path-specific)
 
 The canonical single-node solver is `python_cartesian`: the sidecar's pairwise TDOAs

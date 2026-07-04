@@ -62,6 +62,7 @@ def solve_localization_from_rust_tdoas(
     sample_rate_hz: int,
     interpolation_factor: int,
     far_field_default_range_m: float,
+    far_field_prior_radial_std_m: float | None = None,
 ) -> LocalizationResult | None:
     """Return a Python Cartesian solve from Rust TDOAs, or None if not solvable.
 
@@ -128,6 +129,7 @@ def solve_localization_from_rust_tdoas(
             reference_tdoa_s=reference_tdoa_s,
             bearing_prior=bearing_prior,
             far_field_initial_range_m=far_field_default_range_m,
+            far_field_prior_radial_std_m=far_field_prior_radial_std_m,
             radial_refinement_enabled=True,
         )
     except (ValueError, np.linalg.LinAlgError):

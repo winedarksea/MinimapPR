@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(awk -F/ '{print $1}')",
+      "Bash(curl -s \"http://192.168.1.250:8081/api/v1/detections?limit=5\")",
+      "Bash(python3 -c ' *)",
+      "Bash(curl -s \"http://192.168.1.250:8081/api/v1/nodes/sirith-tetra-6b9b/audio/recent\")",
+      "Bash(curl -s \"http://192.168.1.250:8080/api/v1/nodes\")",
+      "Bash(curl -s \"http://192.168.1.250:8081/api/v1/pipeline/nodes/sirith-tetra-6b9b/audio\")",
+      "Bash(curl -s \"http://192.168.1.250:8081/api/v1/debug/config\")",
+      "Bash(curl -s \"http://192.168.1.250:8081/api/v1/system/logs?level=warning&limit=20\")",
+      "Bash(curl -s \"http://192.168.1.250:8081/api/v1/system/logs?level=warning&limit=3\")",
+      "Bash(curl -s \"http://192.168.1.28:8080/api/v1/tracks\")",
+      "Bash(curl -s \"http://192.168.1.28:8080/api/v1/system/diagnostics\")",
+      "Bash(.venv/bin/python -m pytest tests/ --ignore=tests/test_soak_harness.py --ignore=tests/test_beamforming_pipeline.py -q)",
+      "Bash(.venv/bin/python -m pytest tests/test_beamforming_pipeline.py -x -q)",
+      "Bash(curl -s -m 8 http://192.168.8.165:8080/api/v1/__TRACKED_VAR__)"
+    ]
+  }
+}

@@ -51,6 +51,14 @@ pub struct DspWorkerConfig {
     pub localization_search_padding_m: f32,
     pub localization_far_field_default_range_m: f32,
     pub localization_far_field_max_range_m: f32,
+    /// Amplitude/SNR range prior (Phase 1c). When enabled, the projection distance
+    /// for unobservable-range solves is derived from the reference-channel received
+    /// level via inverse-square spreading instead of the fixed default. Ships off.
+    pub localization_amplitude_range_prior_enabled: bool,
+    pub localization_amplitude_reference_level_db: f32,
+    pub localization_amplitude_prior_min_range_m: f32,
+    pub localization_amplitude_prior_max_range_m: f32,
+    pub localization_amplitude_prior_std_factor: f32,
     pub spatial_blend_band_hz: [f32; 2],
     pub pre_blend_highpass_hz: f32,
     pub min_localization_confidence: f32,
@@ -99,7 +107,12 @@ impl Default for DspWorkerConfig {
             localization_srp_grid_resolution_m: 0.5,
             localization_search_padding_m: 2.0,
             localization_far_field_default_range_m: 50.0,
-            localization_far_field_max_range_m: 250.0,
+            localization_far_field_max_range_m: 1000.0,
+            localization_amplitude_range_prior_enabled: false,
+            localization_amplitude_reference_level_db: 100.0,
+            localization_amplitude_prior_min_range_m: 5.0,
+            localization_amplitude_prior_max_range_m: 1000.0,
+            localization_amplitude_prior_std_factor: 2.0,
             spatial_blend_band_hz: [1000.0, 3400.0],
             pre_blend_highpass_hz: 100.0,
             min_localization_confidence: 0.20,

@@ -43,6 +43,10 @@ class LocalizedClassifierRenderRequest:
     # sidecar. Used to scale lateral covariance for low-frequency signals on the
     # single-node path (see fusion_node). Absent on un-rebuilt sidecars → None.
     localization_dominant_frequency_hz: float | None = None
+    # Received level (dBFS) of the reference channel reported by the sidecar. Feeds
+    # the amplitude/SNR-informed range prior on the single-node path (Phase 1c).
+    # Absent on un-rebuilt sidecars → None (falls back to the config default range).
+    localization_received_level_dbfs: float | None = None
     localization_method: str = "rust_dsp_worker"
     source_type: str = "raw_sensor"
     reporting_modality: Literal["localized", "omni"] = "localized"
@@ -173,6 +177,9 @@ def load_localized_render_manifest_bundle(
         localization_dominant_frequency_hz = _optional_nonnegative_float(
             localization_payload.get("dominant_frequency_hz")
         )
+        localization_received_level_dbfs = _optional_finite_float(
+            localization_payload.get("received_level_dbfs")
+        )
         reporting_modality: Literal["localized", "omni"] = "localized"
     else:
         if node.position_m is None:
@@ -187,6 +194,7 @@ def load_localized_render_manifest_bundle(
         localization_steering_direction = None
         localization_sound_speed_mps = None
         localization_dominant_frequency_hz = None
+        localization_received_level_dbfs = None
         localization_method = "rust_classifier_render_fallback"
         reporting_modality = "omni"
 
@@ -208,6 +216,7 @@ def load_localized_render_manifest_bundle(
             localization_steering_direction=localization_steering_direction,
             localization_sound_speed_mps=localization_sound_speed_mps,
             localization_dominant_frequency_hz=localization_dominant_frequency_hz,
+            localization_received_level_dbfs=localization_received_level_dbfs,
             localization_method=localization_method,
             source_type=source_type,
             reporting_modality=reporting_modality,
@@ -274,6 +283,19 @@ def _optional_nonnegative_float(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     if not np.isfinite(parsed) or parsed < 0.0:
+        return None
+    return parsed
+
+
+def _optional_finite_float(value: Any) -> float | None:
+    """Coerce to a finite float allowing negatives (e.g. dBFS received levels)."""
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(parsed):
         return None
     return parsed
 

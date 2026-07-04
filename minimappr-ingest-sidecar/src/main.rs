@@ -279,9 +279,44 @@ struct Args {
     #[arg(
         long,
         env = "MINIMAPPR_LOCALIZATION_FAR_FIELD_MAX_RANGE_M",
-        default_value_t = 250.0
+        default_value_t = 1000.0
     )]
     localization_far_field_max_range_m: f32,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_LOCALIZATION_AMPLITUDE_RANGE_PRIOR_ENABLED",
+        default_value_t = false
+    )]
+    localization_amplitude_range_prior_enabled: bool,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_LOCALIZATION_AMPLITUDE_REFERENCE_LEVEL_DB",
+        default_value_t = 100.0
+    )]
+    localization_amplitude_reference_level_db: f32,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_LOCALIZATION_AMPLITUDE_PRIOR_MIN_RANGE_M",
+        default_value_t = 5.0
+    )]
+    localization_amplitude_prior_min_range_m: f32,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_LOCALIZATION_AMPLITUDE_PRIOR_MAX_RANGE_M",
+        default_value_t = 1000.0
+    )]
+    localization_amplitude_prior_max_range_m: f32,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_LOCALIZATION_AMPLITUDE_PRIOR_STD_FACTOR",
+        default_value_t = 2.0
+    )]
+    localization_amplitude_prior_std_factor: f32,
 
     #[arg(
         long,
@@ -556,6 +591,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 localization_srp_grid_resolution_m: args.localization_srp_grid_resolution_m,
                 localization_search_padding_m: args.localization_search_padding_m,
                 localization_far_field_default_range_m: args.localization_far_field_default_range_m,
+                localization_amplitude_range_prior_enabled: args
+                    .localization_amplitude_range_prior_enabled,
+                localization_amplitude_reference_level_db: args
+                    .localization_amplitude_reference_level_db,
+                localization_amplitude_prior_min_range_m: args
+                    .localization_amplitude_prior_min_range_m,
+                localization_amplitude_prior_max_range_m: args
+                    .localization_amplitude_prior_max_range_m,
+                localization_amplitude_prior_std_factor: args
+                    .localization_amplitude_prior_std_factor,
                 localization_far_field_max_range_m: args.localization_far_field_max_range_m,
                 spatial_blend_band_hz: [
                     args.birdnet_spatial_blend_min_hz,

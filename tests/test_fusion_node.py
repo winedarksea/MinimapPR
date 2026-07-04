@@ -2461,3 +2461,341 @@ def test_fusion_node_module_never_imports_iamf_pipeline_or_writes_wav() -> None:
     wav_write_markers = ("import wave", "write_wav", '.wav"', ".wav'")
     found = [m for m in wav_write_markers if m in source_text]
     assert not found, f"core/fusion_node.py must not write .wav files directly: {found}"
+
+
+def _lateral_variance_perp_to_bearing(covariance, bearing_vec) -> float:
+    cov = np.asarray(covariance, dtype=np.float64)
+    b = np.asarray(bearing_vec, dtype=np.float64)
+    b = b / (float(np.linalg.norm(b)) + 1e-12)
+    radial_var = float(b @ cov @ b)
+    return (float(np.trace(cov)) - radial_var) / 2.0
+
+
+async def _ingest_single_node_render_covariance(
+    tmp_path: Path, *, dominant_frequency_hz: float, db_name: str
+):
+    import itertools
+
+    settings = Settings(
+        db_path=tmp_path / db_name,
+        snippet_dir=tmp_path / "snippets",
+        snippet_retention_seconds=0,
+        fusion_worker_count=1,
+        fusion_event_queue_size=8,
+        localization_single_node_solver="python_cartesian",
+    )
+    settings.db_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.snippet_dir.mkdir(parents=True, exist_ok=True)
+
+    storage = Storage(settings.db_path)
+    await storage.initialize()
+    fusion = FusionNode(
+        settings=settings,
+        registry=NodeRegistry(),
+        buffer=MultiSensorBuffer(max_duration_seconds=settings.max_sensor_buffer_seconds),
+        localizer=LocalizationEngine(max_tau_s=0.03),
+        classifier=HeuristicClassifier(),
+        tracker=TrackManager(settings),
+        storage=storage,
+        live_callback=lambda payload: asyncio.sleep(0, result=None),
+        coordinate_frame=LocalCoordinateFrame(
+            origin=GeoPoint(lat=37.0, lon=-122.0, alt_m=0.0), mode="flat"
+        ),
+        zone_matcher=ZoneMatcher(storage=storage),
+    )
+    await fusion.start()
+
+    mic_offsets = [
+        (0.0, 0.050, 0.0),
+        (0.0433, 0.025, 0.0),
+        (0.0, 0.0, 0.0),
+        (0.02165, 0.025, 0.04082),
+    ]
+    node = NodeSpec(
+        id="sirith-freq-scaling",
+        node_type=NodeType.SIRITH_TETRA,
+        position_m=(0.0, 0.0, 0.0),
+        sensor_offsets_m=mic_offsets,
+        capabilities=["audio"],
+        metadata={},
+    )
+    sound_speed_mps = 343.2
+    mic_positions = [np.asarray(off, dtype=np.float64) for off in mic_offsets]
+    centroid = np.mean(mic_positions, axis=0)
+    source_m = np.array([0.20, 0.10, 0.15])
+    pair_tdoas = []
+    for a, b in itertools.combinations(range(4), 2):
+        lag = (
+            float(np.linalg.norm(source_m - mic_positions[a]))
+            - float(np.linalg.norm(source_m - mic_positions[b]))
+        ) / sound_speed_mps
+        pair_tdoas.append({"ch_a": a, "ch_b": b, "lag_seconds": lag, "confidence": 0.8})
+    steering = source_m - centroid
+    steering = steering / float(np.linalg.norm(steering))
+    audio = np.random.default_rng(7).normal(0.0, 0.3, size=48_000).astype(np.float32)
+
+    await fusion.ingest_localized_render(
+        LocalizedClassifierRenderRequest(
+            manifest_id=f"manifest-freq-{int(dominant_frequency_hz)}",
+            node=node,
+            event_time_ns=1_739_950_000_000_000_000,
+            sample_rate_hz=48_000,
+            decoded_audio=audio,
+            localization_position_m=(0.20, 0.10, 0.15),
+            localization_confidence=0.9,
+            localization_range_projection_mode="range_refined",
+            localization_pair_tdoas=pair_tdoas,
+            localization_steering_direction=tuple(steering),
+            localization_sound_speed_mps=sound_speed_mps,
+            localization_dominant_frequency_hz=dominant_frequency_hz,
+            localization_method="rust_srp_phat",
+            environment={"temperature_c": 18.0, "humidity_fraction": 0.4},
+        )
+    )
+    detections = await storage.list_detections(limit=10)
+    assert len(detections) == 1
+    cov = detections[0]["position_covariance_m2"]
+    position = np.asarray(detections[0]["position_m"], dtype=np.float64)
+    bearing = position - centroid
+    await fusion.stop()
+    await storage.close()
+    assert cov is not None
+    return _lateral_variance_perp_to_bearing(cov, bearing)
+
+
+@pytest.mark.asyncio
+async def test_frequency_covariance_scaling_inflates_lateral_single_node_path(tmp_path: Path) -> None:
+    """Phase 1d: on the single-node Rust render seam (fusion_node), a low-frequency
+    source (well below the array alias cutoff) yields a laterally inflated covariance
+    versus a high-frequency source with the identical TDOA geometry."""
+    low = await _ingest_single_node_render_covariance(
+        tmp_path, dominant_frequency_hz=250.0, db_name="freq_low.db"
+    )
+    high = await _ingest_single_node_render_covariance(
+        tmp_path, dominant_frequency_hz=12_000.0, db_name="freq_high.db"
+    )
+    # Below the ~2 kHz alias cutoff the lateral covariance must inflate materially.
+    assert low > high * 1.5, f"expected lateral inflation, low={low} high={high}"
+
+
+def test_frequency_covariance_scaling_inflates_lateral_dispatch_path() -> None:
+    """Phase 1d: the multi-node dispatch seam (localization_dispatch) inflates lateral
+    covariance for a low-frequency tone relative to a high-frequency tone."""
+    from minimappr.core.localization_dispatch import build_localizer_from_settings
+
+    settings = Settings(localization_algorithm="gcc_phat", localization_strategy="fixed")
+    dispatcher = build_localizer_from_settings(settings)
+
+    # 5 cm tetra; alias cutoff ~2 kHz. Source in the near field so a covariance exists.
+    sensor_positions = {
+        "n:ch0": np.array([0.0, 0.050, 0.0]),
+        "n:ch1": np.array([0.0433, 0.025, 0.0]),
+        "n:ch2": np.array([0.0, 0.0, 0.0]),
+        "n:ch3": np.array([0.02165, 0.025, 0.04082]),
+    }
+    sample_rate_hz = 48_000
+    sound_speed_mps = 343.2
+    source_m = np.array([1.2, 0.6, 0.9])
+    n = 4096
+    t = np.arange(n, dtype=np.float64) / sample_rate_hz
+
+    def _windows(freq_hz: float) -> dict[str, np.ndarray]:
+        windows = {}
+        for sid, pos in sensor_positions.items():
+            delay_s = float(np.linalg.norm(source_m - pos)) / sound_speed_mps
+            sig = np.sin(2.0 * np.pi * freq_hz * (t - delay_s)).astype(np.float32)
+            windows[sid] = sig
+        return windows
+
+    def _lateral(freq_hz: float) -> float:
+        result = dispatcher.localize(
+            sensor_positions, _windows(freq_hz), sample_rate_hz, 18.0, 0.4
+        )
+        assert result.position_covariance_m2 is not None
+        centroid = np.mean(np.vstack(list(sensor_positions.values())), axis=0)
+        bearing = np.asarray(result.position_m) - centroid
+        return _lateral_variance_perp_to_bearing(result.position_covariance_m2, bearing)
+
+    low = _lateral(400.0)
+    high = _lateral(6_000.0)
+    assert low > high * 1.2, f"expected lateral inflation on dispatch path, low={low} high={high}"
+
+
+def _make_fusion_node(settings: Settings, storage: Storage) -> FusionNode:
+    return FusionNode(
+        settings=settings,
+        registry=NodeRegistry(),
+        buffer=MultiSensorBuffer(max_duration_seconds=settings.max_sensor_buffer_seconds),
+        localizer=LocalizationEngine(max_tau_s=0.03),
+        classifier=HeuristicClassifier(),
+        tracker=TrackManager(settings),
+        storage=storage,
+        live_callback=lambda payload: asyncio.sleep(0, result=None),
+        coordinate_frame=LocalCoordinateFrame(
+            origin=GeoPoint(lat=37.0, lon=-122.0, alt_m=0.0), mode="flat"
+        ),
+        zone_matcher=ZoneMatcher(storage=storage),
+    )
+
+
+@pytest.mark.asyncio
+async def test_phase2_sanity_gate_measures_range_from_centroid_not_origin(tmp_path: Path) -> None:
+    """Phase 2: a node surveyed far from the site origin must still get its full 1 km
+    envelope. The sanity gate measures range from the contributing-sensor centroid,
+    not the origin, with a 5 km absolute-origin backstop for runaway coordinates."""
+    settings = Settings(
+        db_path=tmp_path / "phase2_gate.db",
+        snippet_dir=tmp_path / "snippets",
+        snippet_retention_seconds=0,
+    )
+    settings.db_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.snippet_dir.mkdir(parents=True, exist_ok=True)
+    storage = Storage(settings.db_path)
+    await storage.initialize()
+    fusion = _make_fusion_node(settings, storage)
+
+    # Node array centroid surveyed 800 m from origin along +x.
+    centroid = np.array([800.0, 0.0, 0.0])
+    ref = "far-node:ch0"
+    windows = {ref: np.zeros(256, dtype=np.float32)}
+
+    def _loc(position):
+        return LocalizationResult(
+            position_m=(float(position[0]), float(position[1]), float(position[2])),
+            confidence=0.7,
+            gdop=2.0,
+            reference_sensor=ref,
+            tdoa_s={ref: 0.0},
+            position_covariance_m2=[[100.0, 0, 0], [0, 100.0, 0], [0, 0, 100.0]],
+            range_observability=0.5,
+            residual_rms_seconds=1e-4,
+            range_projection_mode="range_refined",
+            attempted_algorithm="gcc_phat",
+            resolved_algorithm="gcc_phat",
+        )
+
+    # Source 900 m from the array (1700 m from origin): allowed now, dropped under the
+    # legacy origin-relative 500 m gate.
+    branch = fusion._build_localization_branch(
+        localization=_loc(centroid + np.array([900.0, 0.0, 0.0])),
+        selected_windows=windows,
+        classification_windows=windows,
+        capability_tier="full_3d",
+        contributing_centroid_m=centroid,
+    )
+    assert branch is not None
+    assert fusion._metrics.localization_rejected_out_of_range_count == 0
+
+    # A runaway solve 5200 m from the array is still rejected (> max_range_m).
+    branch = fusion._build_localization_branch(
+        localization=_loc(centroid + np.array([5200.0, 0.0, 0.0])),
+        selected_windows=windows,
+        classification_windows=windows,
+        capability_tier="full_3d",
+        contributing_centroid_m=centroid,
+    )
+    assert branch is None
+    assert fusion._metrics.localization_rejected_out_of_range_count == 1
+
+    await storage.close()
+
+
+def _cone_branch(position, centroid, *, lateral_std_m=4.0, radial_std_m=500.0, confidence=0.8):
+    from minimappr.core.fusion_node import LocalizationBranch
+
+    pos = np.asarray(position, dtype=np.float64)
+    cen = np.asarray(centroid, dtype=np.float64)
+    r = (pos - cen) / np.linalg.norm(pos - cen)
+    cov = (lateral_std_m**2 * (np.eye(3) - np.outer(r, r)) + radial_std_m**2 * np.outer(r, r)).tolist()
+    return LocalizationBranch(
+        localization_position_m=(float(pos[0]), float(pos[1]), float(pos[2])),
+        localization_confidence=confidence,
+        localization_gdop=2.0,
+        localization_position_covariance_m2=cov,
+        localization_range_observability=0.05,
+        localization_residual_rms_seconds=1e-4,
+        localization_range_projection_mode="range_bearing_projected",
+        reference_sensor="n:ch0",
+        reference_signal=np.zeros(256, dtype=np.float32),
+        classification_reference_signal=np.zeros(256, dtype=np.float32),
+        tdoa_s={},
+        localization_method="python_cartesian_rust_tdoa",
+        capability_tier="full_3d",
+    )
+
+
+@pytest.mark.asyncio
+async def test_phase4_bearing_fusion_hook_upgrades_second_node_cone(tmp_path: Path) -> None:
+    """Phase 4: with the flag on, a second node's corroborating cone upgrades the
+    branch in place to a range-refined multi-node triangulation."""
+    settings = Settings(
+        db_path=tmp_path / "phase4.db",
+        snippet_dir=tmp_path / "snippets",
+        snippet_retention_seconds=0,
+        multi_node_bearing_fusion_enabled=True,
+    )
+    settings.db_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.snippet_dir.mkdir(parents=True, exist_ok=True)
+    storage = Storage(settings.db_path)
+    await storage.initialize()
+    fusion = _make_fusion_node(settings, storage)
+
+    source = np.array([15.0, 200.0, 0.0])
+    ca = np.array([0.0, 0.0, 0.0])
+    cb = np.array([30.0, 0.0, 0.0])
+    event_ns = 1_739_950_000_000_000_000
+
+    # Node A cone arrives first: no corroborator yet, branch is unchanged.
+    branch_a = await fusion._maybe_fuse_multi_node_bearing(
+        _cone_branch(source, ca),
+        node_id="node-a",
+        contributing_centroid_m=ca,
+        event_time_ns=event_ns,
+        sound_speed_mps=343.0,
+    )
+    assert branch_a.localization_range_projection_mode == "range_bearing_projected"
+    assert fusion._metrics.localization_bearing_fusion_fused_count == 0
+
+    # Node B cone arrives within the window: triangulation upgrades it.
+    branch_b = await fusion._maybe_fuse_multi_node_bearing(
+        _cone_branch(source, cb),
+        node_id="node-b",
+        contributing_centroid_m=cb,
+        event_time_ns=event_ns + 100_000_000,
+        sound_speed_mps=343.0,
+    )
+    assert branch_b.localization_range_projection_mode == "range_refined"
+    assert branch_b.localization_method == "multi_node_bearing_triangulation"
+    assert fusion._metrics.localization_bearing_fusion_fused_count == 1
+    assert fusion._metrics.last_bearing_fusion_contributor_count == 2
+    fused = np.asarray(branch_b.localization_position_m)
+    assert float(np.linalg.norm(fused - source)) / 200.0 < 0.15
+
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_phase4_bearing_fusion_disabled_by_default(tmp_path: Path) -> None:
+    """Regression: with the flag off (default), the hook is a no-op."""
+    settings = Settings(
+        db_path=tmp_path / "phase4_off.db",
+        snippet_dir=tmp_path / "snippets",
+        snippet_retention_seconds=0,
+    )
+    settings.db_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.snippet_dir.mkdir(parents=True, exist_ok=True)
+    storage = Storage(settings.db_path)
+    await storage.initialize()
+    fusion = _make_fusion_node(settings, storage)
+    source = np.array([15.0, 200.0, 0.0])
+    branch = _cone_branch(source, np.array([0.0, 0.0, 0.0]))
+    out = await fusion._maybe_fuse_multi_node_bearing(
+        branch,
+        node_id="node-a",
+        contributing_centroid_m=np.array([0.0, 0.0, 0.0]),
+        event_time_ns=1_000,
+        sound_speed_mps=343.0,
+    )
+    assert out is branch
+    assert fusion._metrics.localization_bearing_fusion_attempt_count == 0
+    await storage.close()

@@ -156,6 +156,10 @@ class LocalizationEngine:
     node_bearing_strength: float = 1.0
     amplitude_ratio_strength: float = 0.15
     far_field_default_range_m: float = 50.0
+    # Phase 5: cross-node TDOA. When set, cross-node pairs correlate over the wider
+    # tau ceiling and honour the configured sync gate. None → tier-c disabled.
+    cross_node_max_tau_s: float | None = None
+    cross_node_min_sync_weight: float | None = None
 
     def _validate_inputs(
         self,
@@ -186,6 +190,7 @@ class LocalizationEngine:
         sensor_weights: dict[str, float] | None = None,
         sensor_node_ids: dict[str, str] | None = None,
         sensor_gain_offsets_db: dict[str, float] | None = None,
+        node_position_std_m: dict[str, float] | None = None,
     ) -> LocalizationResult:
         if len(sensor_windows) < 4:
             raise LocalizationError("Need at least 4 active sensors for 3D TDOA localization")
@@ -213,6 +218,9 @@ class LocalizationEngine:
             sensor_weights=sensor_weights,
             gcc_phat_function=gcc_phat,
             sensor_node_ids=sensor_node_ids,
+            cross_node_max_tau_s=self.cross_node_max_tau_s,
+            cross_node_min_sync_weight=self.cross_node_min_sync_weight,
+            node_position_std_m=node_position_std_m,
         )
         array_aperture_m = max(
             (

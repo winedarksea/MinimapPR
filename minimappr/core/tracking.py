@@ -36,6 +36,7 @@ from minimappr.models import LabelId, TrackState, TrackStatus
 
 class TrackManager:
     CONFIRM_THRESHOLD: int = 2  # detections needed to confirm a track
+    _MAX_CONTRIBUTOR_NODE_IDS: int = 16  # bound on the per-track contributor set
 
     def __init__(
         self,
@@ -47,6 +48,7 @@ class TrackManager:
         cfg = settings.tracking_config() if isinstance(settings, Settings) else settings
         self._tracks: dict[str, TrackState] = {}
         self._id_counter = itertools.count(1)
+        self._multi_node_association_count = 0
         self._stale_ns = int(cfg.track_stale_seconds * 1_000_000_000)
         self._drop_ns = int(cfg.track_stale_seconds * cfg.track_drop_multiplier * 1_000_000_000)
         self._reap_ns = int(cfg.track_stale_seconds * cfg.track_reap_multiplier * 1_000_000_000)
@@ -59,7 +61,11 @@ class TrackManager:
         if associator is not None:
             self._associator: TrackAssociator = associator
         else:
-            self._associator = NearestNeighborAssociator(cfg.association_distance_m)
+            self._associator = NearestNeighborAssociator(
+                cfg.association_distance_m,
+                max_gate_m=getattr(cfg, "association_max_gate_m", None),
+                chi2_gate=getattr(cfg, "association_chi2_gate", 9.0),
+            )
 
         # Build default filter if not injected.
         if track_filter is not None:
@@ -137,6 +143,7 @@ class TrackManager:
         label_id: LabelId | None = None,
         capability_tier: str = "full_3d",
         measurement_covariance_m2: list[list[float]] | None = None,
+        source_node_id: str | None = None,
     ) -> TrackState:
         async with self._lock:
             self._age_tracks(timestamp_ns)
@@ -192,8 +199,9 @@ class TrackManager:
                     confidence=float(confidence),
                     update_count=1,
                     status=TrackStatus.TENTATIVE.value,
-                    tqi=self._compute_tqi(confidence, 1, 0.0, sensor_count),
+                    tqi=self._compute_tqi(confidence, 1, 0.0, sensor_count, contributor_count=1),
                     capability_tier=capability_tier,
+                    contributor_node_ids=[source_node_id] if source_node_id else [],
                 )
                 self._tracks[track_id] = created
                 self._filter.initialize_track(track_id, position_m)
@@ -234,6 +242,18 @@ class TrackManager:
             best_track.update_count += 1
             best_track.capability_tier = capability_tier
 
+            # Phase 3: record the contributing node (bounded, insertion-ordered).
+            # A newly-added second distinct node marks this as a cross-node fusion.
+            if source_node_id and source_node_id not in best_track.contributor_node_ids:
+                had_single_node = len(best_track.contributor_node_ids) <= 1
+                best_track.contributor_node_ids.append(source_node_id)
+                if len(best_track.contributor_node_ids) > self._MAX_CONTRIBUTOR_NODE_IDS:
+                    best_track.contributor_node_ids = best_track.contributor_node_ids[
+                        -self._MAX_CONTRIBUTOR_NODE_IDS :
+                    ]
+                if had_single_node and len(best_track.contributor_node_ids) >= 2:
+                    self._multi_node_association_count += 1
+
             # Lifecycle: tentative -> confirmed after enough detections.
             # Tracks at non-localizable tiers are capped at tentative — the
             # position is just the sensor location so "confirmed" would be
@@ -250,7 +270,11 @@ class TrackManager:
 
             age_s = (timestamp_ns - best_track.first_seen_ns) / 1_000_000_000.0
             best_track.tqi = self._compute_tqi(
-                best_track.confidence, best_track.update_count, age_s, sensor_count
+                best_track.confidence,
+                best_track.update_count,
+                age_s,
+                sensor_count,
+                contributor_count=max(len(best_track.contributor_node_ids), 1),
             )
             return best_track
 
@@ -292,18 +316,37 @@ class TrackManager:
         update_count: int,
         age_s: float,
         sensor_count: int,
+        contributor_count: int = 1,
     ) -> float:
         """Composite Track Quality Index.
 
         Components:
             - classification confidence (0-1)
-            - corroboration factor based on update count
+            - corroboration factor based on update count AND distinct contributing
+              nodes (a cross-node fusion is more trustworthy than repeat single-node
+              detections)
             - recency penalty (decays with age)
             - sensor diversity bonus
         """
-        corroboration = min(1.0, update_count / 5.0)
+        update_corroboration = min(1.0, update_count / 5.0)
+        # Distinct contributing nodes strongly corroborate: 2 nodes → full credit.
+        node_corroboration = min(1.0, max(contributor_count - 1, 0) / 1.0)
+        corroboration = max(update_corroboration, node_corroboration)
         recency = 1.0 / (1.0 + age_s / 30.0)
         sensor_factor = min(1.0, sensor_count / 4.0)
         w_conf, w_corr, w_rec, w_sensor = self._tqi_weights
         tqi = (w_conf * confidence) + (w_corr * corroboration) + (w_rec * recency) + (w_sensor * sensor_factor)
         return float(np.clip(tqi, 0.0, 1.0))
+
+    def multi_node_association_count(self) -> int:
+        """Cumulative count of tracks that gained a 2nd distinct contributing node."""
+        return self._multi_node_association_count
+
+    def multi_node_active_count(self) -> int:
+        """Current number of active tracks corroborated by >=2 distinct nodes."""
+        return sum(
+            1
+            for track in self._tracks.values()
+            if track.status in (TrackStatus.TENTATIVE.value, TrackStatus.CONFIRMED.value)
+            and len(track.contributor_node_ids) >= 2
+        )

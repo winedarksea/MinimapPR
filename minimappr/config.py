@@ -122,14 +122,16 @@ class LocalizationConfig:
     localization_amplitude_ratio_strength: float = 0.15
     # The default seeds unbounded radial search; max is retained but never limits results.
     localization_far_field_default_range_m: float = 50.0
-    localization_far_field_max_range_m: float = 250.0
+    # Phase 2: envelope extended to 1 km for long-range cross-node localization.
+    localization_far_field_max_range_m: float = 1000.0
     # Hard sanity gate (m): localizations whose solved position lies farther than this
-    # from the local origin are dropped before becoming detections/tracks. Guards
-    # against unphysical solver blowups (e.g. ill-conditioned single-array geometry).
-    localization_max_range_m: float = 500.0
-    # Ceiling (m) on per-axis position standard deviation. Covariance eigenvalues are
-    # clamped to this**2 so tracks never carry σ > this (no kilometre-scale ellipses).
-    localization_max_position_std_m: float = 250.0
+    # from the contributing-sensor centroid are dropped before becoming detections/
+    # tracks. Guards against unphysical solver blowups (ill-conditioned geometry).
+    localization_max_range_m: float = 1200.0
+    # Absolute ceiling (m) on per-axis position standard deviation. Under the
+    # range-proportional caps (Phase 1b) the effective ceiling scales with range up to
+    # this hard cap, so tracks never carry σ beyond a physical 1 km bound.
+    localization_max_position_std_m: float = 1000.0
     classification_window_seconds: float = 30.0
     localization_band_min_hz: float = 0.0
     localization_band_max_hz: float = 0.0
@@ -147,6 +149,20 @@ class LocalizationConfig:
     # legacy fixed-grace-sleep retry; 300 ms restores headroom for typical
     # per-sensor ingest jitter (see plan: valiant-launching-whale).
     localization_buffer_wait_max_seconds: float = 0.30
+    # Range-proportional covariance caps (Phase 1b). The effective per-axis std
+    # ceiling scales with distance from the contributing sensors:
+    #   min(max(std_range_factor * range_m, position_std_floor_m), max_position_std_m)
+    # std_range_factor <= 0 disables the range term (legacy fixed clamp at ceiling).
+    localization_std_range_factor: float = 1.0
+    localization_position_std_floor_m: float = 30.0
+    # Amplitude/SNR-informed range prior (Phase 1c). Substitutes the projection
+    # distance for unobservable-range modes only (never overrides range_refined).
+    # Ships disabled; enable after a per-node gain_offset_db field check.
+    localization_amplitude_range_prior_enabled: bool = False
+    localization_amplitude_reference_level_db: float = 100.0
+    localization_amplitude_prior_min_range_m: float = 5.0
+    localization_amplitude_prior_max_range_m: float = 1000.0
+    localization_amplitude_prior_std_factor: float = 2.0
 
     @property
     def localization_max_tau_s(self) -> float:
@@ -174,6 +190,13 @@ class TrackingConfig:
     tqi_weight_sensor: float
     track_drop_multiplier: float
     track_reap_multiplier: float
+    # Phase 3: upper bound (m) on the physical association gate radius. Default 32.0
+    # preserves the legacy 4×association_distance_m clamp; raise toward
+    # ~2×localization_max_position_std_m to allow cross-node cone fusion (two nodes'
+    # cones for the same distant source merging into one track).
+    association_max_gate_m: float = 32.0
+    # Chi-squared gate on the Mahalanobis association score (3 DoF; 9.0 ≈ ~97%).
+    association_chi2_gate: float = 9.0
 
 
 @dataclass(slots=True)
@@ -429,9 +452,29 @@ class Settings:
     localization_srp_grid_resolution_m: float = 0.5
     localization_search_padding_m: float = 2.0
     localization_far_field_default_range_m: float = 50.0
-    localization_far_field_max_range_m: float = 250.0
-    localization_max_range_m: float = 500.0
-    localization_max_position_std_m: float = 250.0
+    localization_far_field_max_range_m: float = 1000.0
+    localization_max_range_m: float = 1200.0
+    localization_max_position_std_m: float = 1000.0
+    localization_std_range_factor: float = 1.0
+    localization_position_std_floor_m: float = 30.0
+    localization_amplitude_range_prior_enabled: bool = False
+    localization_amplitude_reference_level_db: float = 100.0
+    localization_amplitude_prior_min_range_m: float = 5.0
+    localization_amplitude_prior_max_range_m: float = 1000.0
+    localization_amplitude_prior_std_factor: float = 2.0
+    # Phase 4: windowed multi-node bearing triangulation (tier b). Ships off.
+    multi_node_bearing_fusion_enabled: bool = False
+    multi_node_bearing_window_seconds: float = 1.5
+    multi_node_bearing_ttl_seconds: float = 4.0
+    multi_node_bearing_min_separation_deg: float = 5.0
+    multi_node_bearing_max_condition: float = 1e4
+    # Phase 5: true cross-node TDOA (tier c). Flag-gated; GPS-PPS/PTP nodes.
+    localization_cross_node_tdoa_enabled: bool = False
+    localization_cross_node_max_tau_seconds: float = 0.35
+    localization_cross_node_window_seconds: float = 1.0
+    localization_cross_node_max_baseline_m: float = 150.0
+    localization_cross_node_wait_seconds: float = 0.6
+    localization_cross_node_min_sync_weight: float = 0.25
     localization_music_azimuth_step_deg: float = 6.0
     localization_music_elevation_step_deg: float = 8.0
     localization_subspace_freq_min_hz: float = 300.0
@@ -496,6 +539,8 @@ class Settings:
     heuristic_unknown_score: float = 0.6
 
     association_distance_m: float = 8.0
+    association_max_gate_m: float = 32.0
+    association_chi2_gate: float = 9.0
     track_stale_seconds: float = 20.0
     tracking_filter: str = "linear"
     kalman_process_noise: float = 2.0
@@ -718,6 +763,37 @@ class Settings:
             raise ValueError("MINIMAPPR_LOCALIZATION_SEARCH_PADDING_M must be > 0")
         if self.localization_far_field_default_range_m <= 0.0:
             raise ValueError("MINIMAPPR_LOCALIZATION_FAR_FIELD_DEFAULT_RANGE_M must be > 0")
+        # Phase 2 envelope cross-validation: the range knobs must form a coherent
+        # ladder default ≤ far-field-max ≤ sanity-gate, and the covariance ceiling
+        # and range-proportional caps must be physical.
+        if self.localization_far_field_max_range_m < self.localization_far_field_default_range_m:
+            raise ValueError(
+                "MINIMAPPR_LOCALIZATION_FAR_FIELD_MAX_RANGE_M must be >= FAR_FIELD_DEFAULT_RANGE_M"
+            )
+        if self.localization_max_range_m <= 0.0:
+            raise ValueError("MINIMAPPR_LOCALIZATION_MAX_RANGE_M must be > 0")
+        if self.localization_max_range_m < self.localization_far_field_max_range_m:
+            raise ValueError(
+                "MINIMAPPR_LOCALIZATION_MAX_RANGE_M must be >= FAR_FIELD_MAX_RANGE_M"
+            )
+        if self.localization_max_position_std_m <= 0.0:
+            raise ValueError("MINIMAPPR_LOCALIZATION_MAX_POSITION_STD_M must be > 0")
+        if self.localization_std_range_factor < 0.0:
+            raise ValueError("MINIMAPPR_LOCALIZATION_STD_RANGE_FACTOR must be >= 0")
+        if self.localization_position_std_floor_m < 0.0:
+            raise ValueError("MINIMAPPR_LOCALIZATION_POSITION_STD_FLOOR_M must be >= 0")
+        if self.localization_position_std_floor_m > self.localization_max_position_std_m:
+            raise ValueError(
+                "MINIMAPPR_LOCALIZATION_POSITION_STD_FLOOR_M must be <= MAX_POSITION_STD_M"
+            )
+        if self.localization_amplitude_prior_min_range_m < 0.0:
+            raise ValueError("MINIMAPPR_LOCALIZATION_AMPLITUDE_PRIOR_MIN_RANGE_M must be >= 0")
+        if self.localization_amplitude_prior_max_range_m < self.localization_amplitude_prior_min_range_m:
+            raise ValueError(
+                "MINIMAPPR_LOCALIZATION_AMPLITUDE_PRIOR_MAX_RANGE_M must be >= MIN_RANGE_M"
+            )
+        if self.localization_amplitude_prior_std_factor < 0.0:
+            raise ValueError("MINIMAPPR_LOCALIZATION_AMPLITUDE_PRIOR_STD_FACTOR must be >= 0")
         if self.localization_subspace_freq_min_hz <= 0.0:
             raise ValueError("MINIMAPPR_LOCALIZATION_SUBSPACE_FREQ_MIN_HZ must be > 0")
         if self.localization_subspace_freq_max_hz <= self.localization_subspace_freq_min_hz:
@@ -1036,12 +1112,84 @@ class Settings:
             ),
             localization_far_field_max_range_m=_env_float(
                 "MINIMAPPR_LOCALIZATION_FAR_FIELD_MAX_RANGE_M",
-                250.0,
+                1000.0,
             ),
-            localization_max_range_m=_env_float("MINIMAPPR_LOCALIZATION_MAX_RANGE_M", 500.0),
+            localization_max_range_m=_env_float("MINIMAPPR_LOCALIZATION_MAX_RANGE_M", 1200.0),
             localization_max_position_std_m=_env_float(
                 "MINIMAPPR_LOCALIZATION_MAX_POSITION_STD_M",
-                250.0,
+                1000.0,
+            ),
+            localization_std_range_factor=_env_float(
+                "MINIMAPPR_LOCALIZATION_STD_RANGE_FACTOR",
+                1.0,
+            ),
+            localization_position_std_floor_m=_env_float(
+                "MINIMAPPR_LOCALIZATION_POSITION_STD_FLOOR_M",
+                30.0,
+            ),
+            localization_amplitude_range_prior_enabled=_env_bool(
+                "MINIMAPPR_LOCALIZATION_AMPLITUDE_RANGE_PRIOR_ENABLED",
+                False,
+            ),
+            localization_amplitude_reference_level_db=_env_float(
+                "MINIMAPPR_LOCALIZATION_AMPLITUDE_REFERENCE_LEVEL_DB",
+                100.0,
+            ),
+            localization_amplitude_prior_min_range_m=_env_float(
+                "MINIMAPPR_LOCALIZATION_AMPLITUDE_PRIOR_MIN_RANGE_M",
+                5.0,
+            ),
+            localization_amplitude_prior_max_range_m=_env_float(
+                "MINIMAPPR_LOCALIZATION_AMPLITUDE_PRIOR_MAX_RANGE_M",
+                1000.0,
+            ),
+            localization_amplitude_prior_std_factor=_env_float(
+                "MINIMAPPR_LOCALIZATION_AMPLITUDE_PRIOR_STD_FACTOR",
+                2.0,
+            ),
+            multi_node_bearing_fusion_enabled=_env_bool(
+                "MINIMAPPR_MULTI_NODE_BEARING_FUSION_ENABLED",
+                False,
+            ),
+            multi_node_bearing_window_seconds=_env_float(
+                "MINIMAPPR_MULTI_NODE_BEARING_WINDOW_SECONDS",
+                1.5,
+            ),
+            multi_node_bearing_ttl_seconds=_env_float(
+                "MINIMAPPR_MULTI_NODE_BEARING_TTL_SECONDS",
+                4.0,
+            ),
+            multi_node_bearing_min_separation_deg=_env_float(
+                "MINIMAPPR_MULTI_NODE_BEARING_MIN_SEPARATION_DEG",
+                5.0,
+            ),
+            multi_node_bearing_max_condition=_env_float(
+                "MINIMAPPR_MULTI_NODE_BEARING_MAX_CONDITION",
+                1e4,
+            ),
+            localization_cross_node_tdoa_enabled=_env_bool(
+                "MINIMAPPR_LOCALIZATION_CROSS_NODE_TDOA_ENABLED",
+                False,
+            ),
+            localization_cross_node_max_tau_seconds=_env_float(
+                "MINIMAPPR_LOCALIZATION_CROSS_NODE_MAX_TAU_SECONDS",
+                0.35,
+            ),
+            localization_cross_node_window_seconds=_env_float(
+                "MINIMAPPR_LOCALIZATION_CROSS_NODE_WINDOW_SECONDS",
+                1.0,
+            ),
+            localization_cross_node_max_baseline_m=_env_float(
+                "MINIMAPPR_LOCALIZATION_CROSS_NODE_MAX_BASELINE_M",
+                150.0,
+            ),
+            localization_cross_node_wait_seconds=_env_float(
+                "MINIMAPPR_LOCALIZATION_CROSS_NODE_WAIT_SECONDS",
+                0.6,
+            ),
+            localization_cross_node_min_sync_weight=_env_float(
+                "MINIMAPPR_LOCALIZATION_CROSS_NODE_MIN_SYNC_WEIGHT",
+                0.25,
             ),
             localization_music_azimuth_step_deg=_env_float("MINIMAPPR_LOCALIZATION_MUSIC_AZ_STEP_DEG", 6.0),
             localization_music_elevation_step_deg=_env_float("MINIMAPPR_LOCALIZATION_MUSIC_EL_STEP_DEG", 8.0),
@@ -1134,6 +1282,8 @@ class Settings:
             heuristic_unknown_min_score=_env_float("MINIMAPPR_HEURISTIC_UNKNOWN_MIN_SCORE", 0.2),
             heuristic_unknown_score=_env_float("MINIMAPPR_HEURISTIC_UNKNOWN_SCORE", 0.6),
             association_distance_m=_env_float("MINIMAPPR_ASSOCIATION_DISTANCE_M", 8.0),
+            association_max_gate_m=_env_float("MINIMAPPR_ASSOCIATION_MAX_GATE_M", 32.0),
+            association_chi2_gate=_env_float("MINIMAPPR_ASSOCIATION_CHI2_GATE", 9.0),
             track_stale_seconds=_env_float("MINIMAPPR_TRACK_STALE_SECONDS", 20.0),
             tracking_filter=_env_str("MINIMAPPR_TRACKING_FILTER", "linear"),
             kalman_process_noise=_env_float("MINIMAPPR_KALMAN_PROCESS_NOISE", 2.0),
@@ -1247,6 +1397,13 @@ class Settings:
             localization_far_field_max_range_m=self.localization_far_field_max_range_m,
             localization_max_range_m=self.localization_max_range_m,
             localization_max_position_std_m=self.localization_max_position_std_m,
+            localization_std_range_factor=self.localization_std_range_factor,
+            localization_position_std_floor_m=self.localization_position_std_floor_m,
+            localization_amplitude_range_prior_enabled=self.localization_amplitude_range_prior_enabled,
+            localization_amplitude_reference_level_db=self.localization_amplitude_reference_level_db,
+            localization_amplitude_prior_min_range_m=self.localization_amplitude_prior_min_range_m,
+            localization_amplitude_prior_max_range_m=self.localization_amplitude_prior_max_range_m,
+            localization_amplitude_prior_std_factor=self.localization_amplitude_prior_std_factor,
             localization_music_azimuth_step_deg=self.localization_music_azimuth_step_deg,
             localization_music_elevation_step_deg=self.localization_music_elevation_step_deg,
             localization_subspace_freq_min_hz=self.localization_subspace_freq_min_hz,
@@ -1273,6 +1430,8 @@ class Settings:
     def tracking_config(self) -> TrackingConfig:
         return TrackingConfig(
             association_distance_m=self.association_distance_m,
+            association_max_gate_m=self.association_max_gate_m,
+            association_chi2_gate=self.association_chi2_gate,
             track_stale_seconds=self.track_stale_seconds,
             tracking_filter=self.tracking_filter,
             kalman_process_noise=self.kalman_process_noise,

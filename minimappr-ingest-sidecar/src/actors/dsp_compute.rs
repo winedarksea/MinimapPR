@@ -44,6 +44,36 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
             .iter()
             .map(|state| state.window.clone())
             .collect::<Vec<_>>();
+        // Amplitude/SNR range prior (Phase 1c): when enabled, derive the projection
+        // distance for unobservable-range solves from the reference-channel received
+        // level instead of the fixed default. Ships off; both `None` reproduces the
+        // fixed-prior behaviour. The Python re-solve path applies its own prior from
+        // the manifest `received_level_dbfs`; this governs the Rust-native SRP solve.
+        let (range_prior_m, range_prior_std_m) =
+            if payload.config.localization_amplitude_range_prior_enabled {
+                match max_window_rms(&payload.channel_states) {
+                    Some(rms) => {
+                        let received_level_db = (20.0 * (rms.max(1.0e-9)).log10()) as f32;
+                        let (prior_range_m, _clamped) =
+                            crate::range_projection::amplitude_range_prior_m(
+                                received_level_db,
+                                payload.config.localization_amplitude_reference_level_db,
+                                payload.config.localization_amplitude_prior_min_range_m,
+                                payload.config.localization_amplitude_prior_max_range_m,
+                            );
+                        (
+                            Some(prior_range_m),
+                            Some(
+                                payload.config.localization_amplitude_prior_std_factor
+                                    * prior_range_m,
+                            ),
+                        )
+                    }
+                    None => (None, None),
+                }
+            } else {
+                (None, None)
+            };
         let srp_config = SrpPhatConfig {
             localization_band_hz: payload.config.localization_band_hz,
             grid_resolution_m: payload.config.localization_srp_grid_resolution_m,
@@ -51,6 +81,8 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
             interp_factor: payload.config.gcc_phat_interp_factor,
             far_field_default_range_m: payload.config.localization_far_field_default_range_m,
             far_field_max_range_m: payload.config.localization_far_field_max_range_m,
+            range_prior_m,
+            range_prior_std_m,
             ..SrpPhatConfig::default()
         };
         estimate_tetrahedral_steering(
@@ -214,10 +246,17 @@ pub async fn run_io(result: ComputeMathResult) {
         }
     }
 
+    // Received level (dBFS) of the loudest (reference) channel, for the Python
+    // amplitude/SNR range prior (Phase 1c). Per-node gain calibration is applied
+    // downstream; here we report the raw full-scale level.
+    let received_level_dbfs = max_window_rms(&payload.channel_states)
+        .map(|rms| 20.0 * (rms.max(1.0e-9)).log10())
+        .map(|db| db as f32);
     let localization_payload = localization_manifest_payload(
         &localization,
         payload.config.localization_band_hz,
         pair_diagnostics,
+        received_level_dbfs,
     );
 
     let has_classifier_render = render_result
@@ -450,6 +489,7 @@ fn localization_manifest_payload(
     result: &SrpPhatLocalization,
     effective_band_hz: [f32; 2],
     pair_tdoas: Vec<PairTdoaDiagnostic>,
+    received_level_dbfs: Option<f32>,
 ) -> LocalizationManifestPayload {
     LocalizationManifestPayload {
         attempted_algorithm: result.attempted_algorithm.clone(),
@@ -468,6 +508,7 @@ fn localization_manifest_payload(
         sound_speed_mps: result.sound_speed_mps,
         effective_band_hz: Some(effective_band_hz),
         dominant_frequency_hz: result.dominant_frequency_hz,
+        received_level_dbfs,
         pair_tdoas,
     }
 }

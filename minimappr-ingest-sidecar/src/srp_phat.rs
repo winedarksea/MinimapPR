@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
     dsp_worker::PairTdoa,
     gcc_phat::{dominant_frequency_hz, pair_max_tau_s, phat_correlation, GccPhatCorrelation},
-    range_projection::{RANGE_ASYMPTOTIC, RANGE_BEARING_PROJECTED, RANGE_BOUNDARY, RANGE_REFINED},
+    range_projection::{
+        confidence_cap_for_mode, range_observability_cap_for_mode, RANGE_ASYMPTOTIC,
+        RANGE_BEARING_PROJECTED, RANGE_BOUNDARY, RANGE_REFINED,
+    },
 };
 
 const EPSILON: f32 = 1e-9;
@@ -21,6 +24,13 @@ pub struct SrpPhatConfig {
     pub min_channel_rms: f32,
     pub far_field_default_range_m: f32,
     pub far_field_max_range_m: f32,
+    /// Amplitude/SNR-informed range prior (Phase 1c). When `Some`, overrides
+    /// `far_field_default_range_m` as the projection distance for unobservable-range
+    /// solves. `range_prior_std_m` (if `Some`) sets the cone radial std floor
+    /// (`std_factor × prior_range`); otherwise the projection distance itself is used.
+    /// Both `None` (the default) reproduces the fixed-prior behaviour exactly.
+    pub range_prior_m: Option<f32>,
+    pub range_prior_std_m: Option<f32>,
 }
 
 impl Default for SrpPhatConfig {
@@ -34,6 +44,8 @@ impl Default for SrpPhatConfig {
             min_channel_rms: 1.0e-4,
             far_field_default_range_m: 50.0,
             far_field_max_range_m: 250.0,
+            range_prior_m: None,
+            range_prior_std_m: None,
         }
     }
 }
@@ -226,14 +238,8 @@ pub fn estimate_tetrahedral_steering(
         .iter()
         .map(|measurement| measurement.tdoa_seconds.abs())
         .fold(1.0e-5_f32, f32::max);
-    let fit_score = (1.0 - (candidate.residual_rms_seconds / tau_scale)).clamp(0.0, 1.0);
-    let confidence = ((0.6 * fit_score)
-        + (0.25 * peak_score.clamp(0.0, 1.0))
-        + (0.15 * candidate.contrast_score.clamp(0.0, 1.0)))
-        * candidate
-            .range_observability
-            .unwrap_or(1.0)
-            .clamp(0.35, 1.0);
+    let (confidence, range_observability) =
+        candidate_confidence_and_observability(&candidate, peak_score, tau_scale);
 
     SrpPhatEvaluation {
         localization: SrpPhatLocalization {
@@ -242,7 +248,7 @@ pub fn estimate_tetrahedral_steering(
             steering_direction: candidate.steering_direction,
             position_m: Some(candidate.position_m),
             position_covariance_m2: Some(candidate.position_covariance_m2),
-            range_observability: candidate.range_observability,
+            range_observability,
             range_projection_mode: candidate.range_projection_mode.map(str::to_string),
             confidence,
             residual_rms_seconds: candidate.residual_rms_seconds,
@@ -251,6 +257,46 @@ pub fn estimate_tetrahedral_steering(
         },
         pair_tdoas,
     }
+}
+
+/// Fold a solved candidate's fit/peak/contrast scores into a final confidence and
+/// a (possibly capped) range observability, applying the canonical per-mode caps so
+/// a Rust-native result carries the same ceilings as the identical Python solve.
+/// See RANGE_PROJECTION_CONTRACT.md and `range_projection.rs`.
+fn candidate_confidence_and_observability(
+    candidate: &LocalizationCandidate,
+    peak_score: f32,
+    tau_scale: f32,
+) -> (f32, Option<f32>) {
+    let fit_score = (1.0 - (candidate.residual_rms_seconds / tau_scale)).clamp(0.0, 1.0);
+    let mode = candidate.range_projection_mode;
+    let base_confidence = (0.6 * fit_score)
+        + (0.25 * peak_score.clamp(0.0, 1.0))
+        + (0.15 * candidate.contrast_score.clamp(0.0, 1.0));
+    // Mirror Python's `obs_factor = 1.0` branch (cartesian_tdoa.py:522-528): a
+    // bearing-projected result has an intentionally huge radial eigenvalue, so its
+    // range_observability is artificially tiny and must NOT penalise the
+    // well-observed bearing. Every other mode still attenuates by observability.
+    let mut confidence = if mode == Some(RANGE_BEARING_PROJECTED) {
+        base_confidence
+    } else {
+        base_confidence
+            * candidate
+                .range_observability
+                .unwrap_or(1.0)
+                .clamp(0.35, 1.0)
+    };
+    // Apply the canonical per-mode confidence cap (idempotent with the Python
+    // ingest-seam haircut).
+    if let Some(cap) = confidence_cap_for_mode(mode) {
+        confidence = confidence.min(cap);
+    }
+    let range_observability =
+        match (candidate.range_observability, range_observability_cap_for_mode(mode)) {
+            (Some(obs), Some(cap)) => Some(obs.min(cap)),
+            (obs, _) => obs,
+        };
+    (confidence, range_observability)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -642,12 +688,18 @@ fn far_field_candidate(
     // bearing-quality check. When the range axis is unobservable but the direction
     // fit is tight (residual < 0.5), emit RANGE_BEARING_PROJECTED so the Python
     // fusion node can keep high confidence for the bearing while honestly marking
-    // range as uncertain. Also use an explicitly large radial std (4× solved range
-    // or 200 m) to construct a "cone of uncertainty" covariance.
+    // range as uncertain. Cone radial (range) std = loosest of 4× solved range, the
+    // amplitude-prior radial std (std_factor × prior_range, when supplied), and a
+    // 200 m floor. Mirrors cartesian_tdoa.py's cone construction (Phase 1c).
+    let prior_radial_std_m = config
+        .range_prior_std_m
+        .unwrap_or(config.range_prior_m.unwrap_or(0.0));
     let (range_projection_mode, cone_radial_std_m) =
         if range_estimate.range_projection_mode == RANGE_ASYMPTOTIC {
             if direction_fit_residual < 0.5 {
-                let r = (range_estimate.radius_m * 4.0).max(200.0);
+                let r = (range_estimate.radius_m * 4.0)
+                    .max(prior_radial_std_m)
+                    .max(200.0);
                 (RANGE_BEARING_PROJECTED, r)
             } else {
                 (RANGE_ASYMPTOTIC, radial_std_m)
@@ -784,7 +836,13 @@ fn fit_far_field_range(
         .far_field_max_range_m
         .max(config.far_field_default_range_m)
         .max(1.0);
-    let default_range_m = config.far_field_default_range_m.max(0.5).min(max_range_m);
+    // Amplitude/SNR range prior (Phase 1c) overrides the fixed default projection
+    // distance when supplied; otherwise the config default is used. Clamped into the
+    // valid search band exactly like the fixed default.
+    let prior_range_m = config
+        .range_prior_m
+        .unwrap_or(config.far_field_default_range_m);
+    let default_range_m = prior_range_m.max(0.5).min(max_range_m);
     let mut left_m = 0.05_f32;
     let mut right_m = max_range_m;
     let inverse_phi = 0.618_033_95_f32;
@@ -1714,6 +1772,79 @@ mod tests {
             "expected low range observability, got {:?}",
             evaluation.localization.range_observability,
         );
+        // Confidence-parity contract: a bearing-projected result must NOT be
+        // penalised by the ×range_observability.clamp(0.35, 1.0) multiplier (that
+        // would floor it near 0.35 despite a well-observed bearing). Instead it is
+        // capped at BEARING_PROJECTED_CONFIDENCE_CAP (0.85), mirroring the Python
+        // `obs_factor = 1.0` branch. With a tight bearing the confidence should
+        // comfortably exceed the 0.35 floor the old multiplier would have imposed.
+        assert!(
+            evaluation.localization.confidence > 0.35,
+            "bearing-projected confidence should not be floored by observability, got {}",
+            evaluation.localization.confidence,
+        );
+        assert!(
+            evaluation.localization.confidence <= 0.85 + 1e-6,
+            "bearing-projected confidence must be capped at 0.85, got {}",
+            evaluation.localization.confidence,
+        );
+    }
+
+    #[test]
+    fn confidence_caps_per_mode_match_contract() {
+        // Perfect fit/peak/contrast → base_confidence = 1.0. The per-mode caps then
+        // decide the final ceiling.
+        let base = LocalizationCandidate {
+            position_m: [60.0, 0.0, 0.0],
+            steering_direction: [1.0, 0.0, 0.0],
+            position_covariance_m2: [[9.0, 0.0, 0.0], [0.0, 9.0, 0.0], [0.0, 0.0, 9.0]],
+            range_observability: Some(0.9),
+            range_projection_mode: Some("range_refined"),
+            is_boundary_clamped: false,
+            timing_resolution_seconds: 1.0e-5,
+            residual_rms_seconds: 0.0,
+            contrast_score: 1.0,
+        };
+        let tau_scale = 1.0e-4;
+        let peak_score = 1.0;
+
+        // Asymptotic: range AND bearing uncertain → harsh 0.20 cap.
+        let asymptotic = LocalizationCandidate {
+            range_projection_mode: Some("range_asymptotic"),
+            ..base
+        };
+        let (conf, obs) =
+            candidate_confidence_and_observability(&asymptotic, peak_score, tau_scale);
+        assert!(
+            conf <= 0.20 + 1e-6,
+            "asymptotic confidence must be capped at 0.20, got {conf}"
+        );
+        assert!(obs.unwrap() <= 0.05 + 1e-6, "asymptotic obs cap 0.05, got {obs:?}");
+
+        // Bearing-projected with a tiny range_observability: the ×clamp(0.35,1.0)
+        // multiplier is skipped, so confidence rides the 0.85 cap, NOT ~0.35.
+        let bearing = LocalizationCandidate {
+            range_projection_mode: Some("range_bearing_projected"),
+            range_observability: Some(0.05),
+            ..base
+        };
+        let (conf, obs) = candidate_confidence_and_observability(&bearing, peak_score, tau_scale);
+        assert!(
+            (conf - 0.85).abs() < 1e-6,
+            "bearing-projected confidence should hit the 0.85 cap, got {conf}"
+        );
+        assert!(obs.unwrap() <= 0.05 + 1e-6, "bearing obs cap 0.05, got {obs:?}");
+
+        // Refined: no cap; low observability still attenuates via the multiplier.
+        let refined = LocalizationCandidate {
+            range_observability: Some(0.5),
+            ..base
+        };
+        let (conf, _obs) = candidate_confidence_and_observability(&refined, peak_score, tau_scale);
+        assert!(
+            (conf - 0.5).abs() < 1e-6,
+            "refined confidence should attenuate by observability (0.5), got {conf}"
+        );
     }
 
     #[test]
@@ -1992,6 +2123,124 @@ mod tests {
             ) > 0.999
         );
         assert!(range_estimate.residual_rms_seconds.is_finite());
+    }
+
+    #[test]
+    fn far_field_range_fit_converges_at_one_km_within_iteration_bound() {
+        // Phase 2 compute audit: at the 1 km envelope the golden-section search still
+        // converges to the 0.05 m tolerance well within the hard 48-iteration cap.
+        // Theoretical bound: iterations = ceil(ln(tol / range) / ln(phi)).
+        let max_range_m: f64 = 1000.0;
+        let tol_m: f64 = FAR_FIELD_RANGE_CONVERGENCE_TOLERANCE_M as f64;
+        let inverse_phi: f64 = 0.618_033_988_75;
+        let iterations = ((tol_m / max_range_m).ln() / inverse_phi.ln()).ceil() as i32;
+        assert!(
+            iterations <= 48,
+            "golden-section needs {iterations} iters at 1 km, exceeds the 48 cap"
+        );
+
+        // And it actually resolves a 900 m source with a wide (10 m) array.
+        let mics = [
+            [0.0, 0.0, 0.0],
+            [10.0, 0.0, 0.0],
+            [0.0, 10.0, 0.0],
+            [0.0, 0.0, 10.0],
+        ];
+        let active_channels = [0, 1, 2, 3];
+        let centroid_m = centroid(&active_channels, &mics);
+        let direction = normalize_or_zero([0.6, 0.5, 0.62]);
+        let expected_radius_m = 900.0;
+        let source_position_m = add(centroid_m, scale(direction, expected_radius_m));
+        let reference_channel = 0;
+        let measurements: Vec<ReferenceMeasurement> = [1, 2, 3]
+            .into_iter()
+            .map(|channel_index| ReferenceMeasurement {
+                channel_index,
+                tdoa_seconds: predicted_reference_tau_s(
+                    source_position_m,
+                    mics[channel_index],
+                    mics[reference_channel],
+                    343.2,
+                ),
+                peak_value: 1.0,
+            })
+            .collect();
+        let range_estimate = fit_far_field_range(
+            direction,
+            centroid_m,
+            reference_channel,
+            &measurements,
+            &mics,
+            48_000,
+            343.2,
+            SrpPhatConfig {
+                far_field_default_range_m: 50.0,
+                far_field_max_range_m: 1000.0,
+                ..SrpPhatConfig::default()
+            },
+        );
+        // A 10 m array resolves range at 900 m to within a few percent.
+        assert!(
+            (range_estimate.radius_m - expected_radius_m).abs() <= 0.05 * expected_radius_m,
+            "expected radius near {expected_radius_m}, got {}",
+            range_estimate.radius_m,
+        );
+        assert!(range_estimate.residual_rms_seconds.is_finite());
+    }
+
+    #[test]
+    fn fit_far_field_range_is_fast_at_one_km() {
+        // Phase 6 compute budget: the 1 km golden-section fit must stay well under
+        // 1 ms so it never threatens the localization cadence.
+        let mics = [
+            [0.0, 0.0, 0.0],
+            [10.0, 0.0, 0.0],
+            [0.0, 10.0, 0.0],
+            [0.0, 0.0, 10.0],
+        ];
+        let active_channels = [0, 1, 2, 3];
+        let centroid_m = centroid(&active_channels, &mics);
+        let direction = normalize_or_zero([0.6, 0.5, 0.62]);
+        let source_position_m = add(centroid_m, scale(direction, 900.0));
+        let reference_channel = 0;
+        let measurements: Vec<ReferenceMeasurement> = [1, 2, 3]
+            .into_iter()
+            .map(|channel_index| ReferenceMeasurement {
+                channel_index,
+                tdoa_seconds: predicted_reference_tau_s(
+                    source_position_m,
+                    mics[channel_index],
+                    mics[reference_channel],
+                    343.2,
+                ),
+                peak_value: 1.0,
+            })
+            .collect();
+        let config = SrpPhatConfig {
+            far_field_default_range_m: 50.0,
+            far_field_max_range_m: 1000.0,
+            ..SrpPhatConfig::default()
+        };
+        // Warm up, then time a batch to amortise timer overhead.
+        let iterations = 200;
+        let start = std::time::Instant::now();
+        for _ in 0..iterations {
+            let _ = fit_far_field_range(
+                direction,
+                centroid_m,
+                reference_channel,
+                &measurements,
+                &mics,
+                48_000,
+                343.2,
+                config,
+            );
+        }
+        let per_call = start.elapsed() / iterations;
+        assert!(
+            per_call < std::time::Duration::from_millis(1),
+            "fit_far_field_range at 1 km took {per_call:?}/call (budget <1 ms)"
+        );
     }
 
     fn synthesize_point_source_channels(

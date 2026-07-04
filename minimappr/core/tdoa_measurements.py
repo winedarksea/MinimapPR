@@ -42,9 +42,27 @@ def measure_pair_tdoas(
     sensor_weights: dict[str, float] | None,
     gcc_phat_function: Callable[..., tuple[float, float]],
     sensor_node_ids: dict[str, str] | None = None,
+    cross_node_max_tau_s: float | None = None,
+    cross_node_min_sync_weight: float | None = None,
+    node_position_std_m: dict[str, float] | None = None,
 ) -> list[PairTdoaMeasurement]:
+    """Measure pairwise TDOAs, optionally enabling true cross-node correlation.
+
+    ``cross_node_max_tau_s`` (Phase 5) lifts the tau search cap for *cross-node*
+    pairs so wide baselines (up to ~120 m at 0.35 s) can be correlated; same-node
+    pairs keep the tight ``max_tau_s``. ``cross_node_min_sync_weight`` overrides the
+    default cross-node sync gate (recommend 1.0 in the field → PPS/PTP-only TDOA).
+    ``node_position_std_m`` inflates cross-node pair weight by
+    ``baseline/(baseline + σ_a + σ_b)`` so poorly-surveyed nodes contribute less. All
+    default to ``None`` → behaviour unchanged.
+    """
     sensor_quality = sensor_weights or {}
-    pair_candidates: list[tuple[float, str, str, float, float]] = []
+    cross_node_sync_gate = (
+        float(cross_node_min_sync_weight)
+        if cross_node_min_sync_weight is not None
+        else MINIMUM_CROSS_NODE_SYNCHRONIZATION_WEIGHT
+    )
+    pair_candidates: list[tuple[float, str, str, float, float, bool]] = []
     for sensor_a, sensor_b in itertools.combinations(sensor_ids, 2):
         baseline_m = float(np.linalg.norm(sensor_positions[sensor_a] - sensor_positions[sensor_b]))
         same_node = (
@@ -63,25 +81,33 @@ def measure_pair_tdoas(
         if (
             sensor_node_ids is not None
             and not same_node
-            and synchronization_weight < MINIMUM_CROSS_NODE_SYNCHRONIZATION_WEIGHT
+            and synchronization_weight < cross_node_sync_gate
         ):
             continue
+        # Phase 5: geometry weighting — a wide baseline surveyed with small position
+        # std is far more informative than a short/uncertain one.
+        geometry_weight = 1.0
+        if not same_node and node_position_std_m is not None:
+            sigma_a = float(node_position_std_m.get(sensor_a, 0.0))
+            sigma_b = float(node_position_std_m.get(sensor_b, 0.0))
+            geometry_weight = baseline_m / max(baseline_m + sigma_a + sigma_b, 1e-6)
         pair_candidates.append(
             (
-                synchronization_weight * max(baseline_m, 0.01),
+                synchronization_weight * geometry_weight * max(baseline_m, 0.01),
                 sensor_a,
                 sensor_b,
                 baseline_m,
-                synchronization_weight,
+                synchronization_weight * geometry_weight,
+                same_node,
             )
         )
     if len(sensor_ids) > 8 and len(pair_candidates) > MAX_SELECTED_PAIR_COUNT:
         pair_candidates.sort(key=lambda item: item[0], reverse=True)
-        selected_pairs: list[tuple[float, str, str, float, float]] = []
+        selected_pairs: list[tuple[float, str, str, float, float, bool]] = []
         selected_pair_ids: set[tuple[str, str]] = set()
         covered_sensor_ids: set[str] = set()
         for candidate in pair_candidates:
-            _, sensor_a, sensor_b, _, _ = candidate
+            _, sensor_a, sensor_b, _, _, _ = candidate
             if sensor_a in covered_sensor_ids and sensor_b in covered_sensor_ids:
                 continue
             selected_pairs.append(candidate)
@@ -102,13 +128,18 @@ def measure_pair_tdoas(
         pair_candidates = selected_pairs
 
     measurements: list[PairTdoaMeasurement] = []
-    for _, sensor_a, sensor_b, baseline_m, synchronization_weight in pair_candidates:
+    for _, sensor_a, sensor_b, baseline_m, synchronization_weight, same_node in pair_candidates:
         physical_max_tau_s = (baseline_m / sound_speed_mps) + (1.0 / sample_rate_hz)
+        # Cross-node pairs may correlate over a much wider lag than the tight
+        # same-node cap when a cross-node tau ceiling is supplied (Phase 5).
+        effective_max_tau_s = max_tau_s
+        if not same_node and cross_node_max_tau_s is not None:
+            effective_max_tau_s = max(max_tau_s, float(cross_node_max_tau_s))
         tdoa_seconds, correlation_peak = gcc_phat_function(
             signal=sensor_windows[sensor_a],
             reference_signal=sensor_windows[sensor_b],
             sample_rate_hz=sample_rate_hz,
-            max_tau_s=min(max_tau_s, max(physical_max_tau_s, 1.0 / sample_rate_hz)),
+            max_tau_s=min(effective_max_tau_s, max(physical_max_tau_s, 1.0 / sample_rate_hz)),
             interp=max(1, interpolation_factor),
         )
         if not np.isfinite(tdoa_seconds) or not np.isfinite(correlation_peak):

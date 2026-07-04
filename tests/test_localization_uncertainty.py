@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import numpy as np
 
-from minimappr.core.localization_uncertainty import apply_frequency_covariance_scaling
+from minimappr.core.localization_uncertainty import (
+    apply_frequency_covariance_scaling,
+    clamp_covariance_eigenvalues_range_proportional,
+)
 
 
 def test_identity_at_or_above_alias_cutoff() -> None:
@@ -70,3 +73,81 @@ def test_degenerate_inputs_returned_unchanged() -> None:
     np.testing.assert_allclose(
         apply_frequency_covariance_scaling(cov, np.zeros(3), 1_000.0, 3_400.0), cov
     )
+
+
+def test_range_proportional_clamp_scales_ceiling_with_range() -> None:
+    """Phase 1b: the effective std ceiling grows with range, so an honest large
+    covariance at 800 m survives that would be clipped by a fixed 250 m ceiling."""
+    # Isotropic std = 400 m (variance 160000). At range 800 m with factor 1.0 the
+    # effective ceiling is min(max(1.0*800, floor), ceiling) = min(800, 1000) = 800,
+    # so a 400 m std passes through untouched.
+    cov = np.diag([400.0**2, 400.0**2, 400.0**2])
+    out, capped = clamp_covariance_eigenvalues_range_proportional(
+        cov,
+        range_m=800.0,
+        std_factor=1.0,
+        floor_std_m=30.0,
+        ceiling_std_m=1000.0,
+    )
+    assert capped is False
+    np.testing.assert_allclose(np.asarray(out), cov)
+
+
+def test_range_proportional_clamp_bites_close_in() -> None:
+    """Near-field: a bogus 400 m std at 10 m range is clamped to the floor (30 m)."""
+    cov = np.diag([400.0**2, 1.0, 1.0])
+    out, capped = clamp_covariance_eigenvalues_range_proportional(
+        cov,
+        range_m=10.0,
+        std_factor=1.0,
+        floor_std_m=30.0,
+        ceiling_std_m=1000.0,
+    )
+    assert capped is True
+    eigs = np.linalg.eigvalsh(np.asarray(out))
+    assert float(np.max(eigs)) <= 30.0**2 + 1e-6
+
+
+def test_range_proportional_clamp_absolute_ceiling_still_binds() -> None:
+    """The absolute ceiling caps the range term: at 5000 m the ceiling stays 1000 m."""
+    cov = np.diag([3000.0**2, 1.0, 1.0])
+    out, capped = clamp_covariance_eigenvalues_range_proportional(
+        cov,
+        range_m=5000.0,
+        std_factor=1.0,
+        floor_std_m=30.0,
+        ceiling_std_m=1000.0,
+    )
+    # Range term (5000) exceeds the absolute ceiling (1000), so the ceiling — not the
+    # range term — is what bit; range_capped is False (absolute ceiling, not range).
+    assert capped is False
+    eigs = np.linalg.eigvalsh(np.asarray(out))
+    assert float(np.max(eigs)) <= 1000.0**2 + 1e-3
+
+
+def test_range_proportional_clamp_factor_zero_is_legacy_fixed() -> None:
+    """std_factor <= 0 reproduces the legacy fixed clamp at the absolute ceiling."""
+    cov = np.diag([400.0**2, 1.0, 1.0])
+    out, capped = clamp_covariance_eigenvalues_range_proportional(
+        cov,
+        range_m=1000.0,
+        std_factor=0.0,
+        floor_std_m=30.0,
+        ceiling_std_m=250.0,
+    )
+    assert capped is False
+    eigs = np.linalg.eigvalsh(np.asarray(out))
+    assert float(np.max(eigs)) <= 250.0**2 + 1e-3
+
+
+def test_range_proportional_clamp_none_and_degenerate() -> None:
+    out, capped = clamp_covariance_eigenvalues_range_proportional(
+        None, range_m=100.0, std_factor=1.0, floor_std_m=30.0, ceiling_std_m=1000.0
+    )
+    assert out is None and capped is False
+    # ceiling_std_m <= 0 passes list through unchanged.
+    cov_list = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    out, capped = clamp_covariance_eigenvalues_range_proportional(
+        cov_list, range_m=100.0, std_factor=1.0, floor_std_m=30.0, ceiling_std_m=0.0
+    )
+    assert out == cov_list and capped is False

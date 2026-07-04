@@ -126,10 +126,10 @@ static constexpr bool kTdmEnableWordDiagnostics = MMPR_NODECFG_TDM_ENABLE_WORD_D
 static constexpr bool kUseTdmAudio = kAudioInputMode == AudioInputMode::kTdm4Mic;
 
 // --- Network and backend ---
-static constexpr const char* kWifiSsid = "REPLACE_WIFI_SSID";
-static constexpr const char* kWifiPassword = "REPLACE_WIFI_PASSWORD";
-static constexpr const char* kServerBaseUrl = "http://192.168.1.50:8080";
-static constexpr const char* kIngestPath = "/api/v1/ingest/frame";
+static constexpr const char* kWifiSsid = "catlin";
+static constexpr const char* kWifiPassword = "DarthWiFi";
+static constexpr const char* kServerBaseUrl = "http://192.168.1.250:8081";  // "http://192.168.1.28:8081" .8.165
+
 
 static constexpr uint32_t kWiFiConnectTimeoutMs = 15000;
 // Keep this below the DMA ring slack. At 16 kHz / 1024 samples / 16 buffered

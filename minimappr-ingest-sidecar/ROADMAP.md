@@ -101,3 +101,14 @@ YouTube AmbiX Mux: As a backup, the processor simultaneously outputs a derived 4
 **Audio-Video Synchronization**: The raw audio journal operates on absolute ns timestamps (aligned to GPS/NTP). The video capture uses the host OS clock, anchored to the first actual ffmpeg `pts_time`. The post-processor aligns the audio start exactly to this frame, applying a fractional-sample offset if `timing_diagnostics` indicate clock skew between the audio hardware clock and the host wall clock.
 
 **Tests** a short capture unittest should exist that confirms capture works and produces correctly formated files, then cleans up after itself. This will use a synthetic input as in test_birdnet_hybrid_production.py 
+
+## Acceptance Gates:
+Validate .iamf with iamf-tools or libiamf, not just byte-shape tests.
+Produce a final MP4 carrying IAMF audio, preferably Opus IAMF for YouTube, not AAC AmbiX.
+Decide profile limits. IAMF v1.0 Base has only 2 audio elements according to Google’s Eclipsa plugin post, so “FOA bed plus N mono objects” may require v1.1 Enhanced, object flattening, or a different representation. Note only IAMF v1.0 is supported by YouTube at the current time supporting 2 audio elements and 18 audio channels (v1.1 expands support to 28 audio elements and 28 audio channels).
+Define exact timestamp semantics for journal segment trimming, video first-frame clock anchoring, drift correction, and sample padding.
+Replace JSON bulk transport with files/shared artifacts/streaming IPC.
+Add end-to-end synthetic capture tests that run ffprobe plus IAMF decoder validation.
+
+# Future Extension
+Allow recording the COP map as part of the saved video (perhaps just as a screen recording channel in ffmpeg)

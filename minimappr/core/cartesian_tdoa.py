@@ -213,6 +213,7 @@ def solve_cartesian_tdoa(
     bearing_constraints: list[SpatialBearingConstraint] | None = None,
     amplitude_constraints: list[AmplitudeRatioConstraint] | None = None,
     far_field_initial_range_m: float = 50.0,
+    far_field_prior_radial_std_m: float | None = None,
     radial_refinement_enabled: bool = True,
 ) -> CartesianTdoaSolve:
     bearing_constraints = bearing_constraints or []
@@ -481,7 +482,16 @@ def solve_cartesian_tdoa(
             bearing_cond = float("inf")
         if bearing_cond < 1e8:
             range_projection_mode = RANGE_BEARING_PROJECTED
-            cone_radial_std_m = max(solved_range_m * 4.0, far_field_initial_range_m, 200.0)
+            # Cone radial (range) std: loosest of 4× the solved range, the amplitude
+            # prior's radial std (std_factor × prior_range, passed by the caller when
+            # the amplitude prior is active; otherwise the raw projection distance),
+            # and a 200 m floor. Mirrors srp_phat.rs's cone construction.
+            prior_radial_std_m = (
+                far_field_prior_radial_std_m
+                if far_field_prior_radial_std_m is not None
+                else far_field_initial_range_m
+            )
+            cone_radial_std_m = max(solved_range_m * 4.0, prior_radial_std_m, 200.0)
             cone_lateral_std_m = math.sqrt(lateral_variance_m2)
             covariance_m2 = (
                 cone_lateral_std_m**2 * (np.eye(3, dtype=np.float64) - np.outer(radial_axis, radial_axis))

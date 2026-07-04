@@ -126,11 +126,22 @@ def test_settings_reject_invalid_far_field_localization_config() -> None:
     with pytest.raises(ValueError, match="FAR_FIELD_DEFAULT_RANGE"):
         Settings(localization_far_field_default_range_m=0.0)
 
+    # Phase 2 cross-validation: the range knobs must form a coherent ladder, so a
+    # far-field-max below the default (which would silently clamp the seed range) is
+    # now rejected rather than accepted.
+    with pytest.raises(ValueError, match="FAR_FIELD_MAX_RANGE_M must be >="):
+        Settings(
+            localization_far_field_default_range_m=100.0,
+            localization_far_field_max_range_m=50.0,
+        )
+
+    # A coherent ladder (default <= far-max <= sanity-gate) is accepted.
     settings = Settings(
-        localization_far_field_default_range_m=100.0,
-        localization_far_field_max_range_m=50.0,
+        localization_far_field_default_range_m=50.0,
+        localization_far_field_max_range_m=800.0,
+        localization_max_range_m=900.0,
     )
-    assert settings.localization_far_field_max_range_m == 50.0
+    assert settings.localization_far_field_max_range_m == 800.0
 
     with pytest.raises(ValueError, match="MUSIC_AZ_STEP"):
         Settings(localization_music_azimuth_step_deg=90.0)
