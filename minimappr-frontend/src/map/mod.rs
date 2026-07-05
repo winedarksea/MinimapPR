@@ -121,7 +121,11 @@ pub fn LeafletMapPanel() -> impl IntoView {
 
                 for e in es {
                     if let Some(geo) = &e.position_geo {
-                        let bearing = e.status.as_ref().and_then(|s| s.pan_deg).unwrap_or(0.0);
+                        // pan_deg is relative to the camera's registered home
+                        // yaw; the wedge needs an absolute compass bearing.
+                        let home_yaw = e.orientation.as_ref().map(|o| o.yaw_deg).unwrap_or(0.0);
+                        let pan = e.status.as_ref().and_then(|s| s.pan_deg).unwrap_or(0.0);
+                        let bearing = (home_yaw + pan).rem_euclid(360.0);
                         let effector_state = e
                             .status
                             .as_ref()

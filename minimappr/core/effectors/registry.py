@@ -33,6 +33,8 @@ class EffectorRuntime:
     driver: Effector | None = None
     connect_error: str | None = None
     last_slew_ns: int | None = None
+    active_track_id: str | None = None
+    home_return_task: asyncio.Task[None] | None = None
 
 
 @dataclass(slots=True)
@@ -76,6 +78,10 @@ class EffectorManager:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        async with self._lock:
+            runtimes = list(self._runtimes.values())
+        for runtime in runtimes:
+            self._cancel_home_return(runtime)
 
     async def register(self, spec: EffectorSpec) -> EffectorSpec:
         await self._connect_and_register_runtime(spec, persist=True)
@@ -84,9 +90,20 @@ class EffectorManager:
 
     async def delete(self, effector_id: str) -> bool:
         async with self._lock:
-            self._runtimes.pop(effector_id, None)
+            runtime = self._runtimes.pop(effector_id, None)
+            registry_empty = not self._runtimes
+        if runtime is not None:
+            self._cancel_home_return(runtime)
         deleted = await self._storage.delete_effector(effector_id)
         await self._broadcast_status(effector_id)
+        if registry_empty:
+            # Back to fully dormant: no effectors means no background work.
+            task = self._poll_task
+            self._poll_task = None
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
         return deleted
 
     async def list_status(self) -> list[EffectorStatus]:
@@ -107,7 +124,11 @@ class EffectorManager:
         runtime = self._runtimes.get(effector_id)
         if runtime is None or runtime.driver is None:
             return None
-        caps = await runtime.driver.get_capabilities()
+        try:
+            caps = await runtime.driver.get_capabilities()
+        except Exception as exc:
+            logger.debug("effector %s get_capabilities failed: %s", effector_id, exc)
+            return None
         return {
             "movement_strategies": caps.movement_strategies,
             "selected_movement_strategy": caps.selected_movement_strategy,
@@ -148,6 +169,8 @@ class EffectorManager:
             result.execution_id = execution_id
         if result.status == "COMPLETED":
             runtime.last_slew_ns = time.time_ns()
+            runtime.active_track_id = track_id
+            self._schedule_home_return(runtime)
         await self._broadcast_status(effector_id)
         return result
 
@@ -231,6 +254,39 @@ class EffectorManager:
             return "rate_limited"
         return None
 
+    def _cancel_home_return(self, runtime: EffectorRuntime) -> None:
+        task = runtime.home_return_task
+        runtime.home_return_task = None
+        if task is not None:
+            task.cancel()
+
+    def _schedule_home_return(self, runtime: EffectorRuntime) -> None:
+        """After a configurable dwell on the slewed-to target, return the
+        camera to its home bearing. A newer slew supersedes (cancels) any
+        pending return; dwell <= 0 disables the behavior."""
+        self._cancel_home_return(runtime)
+        if self._config.slew_dwell_seconds <= 0.0:
+            return
+        if runtime.driver is None or not hasattr(runtime.driver, "go_home"):
+            return
+        runtime.home_return_task = asyncio.create_task(
+            self._home_return_after_dwell(runtime),
+            name=f"effector-home-return-{runtime.spec.id}",
+        )
+
+    async def _home_return_after_dwell(self, runtime: EffectorRuntime) -> None:
+        await asyncio.sleep(self._config.slew_dwell_seconds)
+        driver = runtime.driver
+        if driver is None:
+            return
+        try:
+            await driver.go_home()  # type: ignore[attr-defined]
+        except Exception as exc:
+            logger.warning("effector %s home return failed: %s", runtime.spec.id, exc)
+            return
+        runtime.active_track_id = None
+        await self._broadcast_status(runtime.spec.id)
+
     async def _connect_and_register_runtime(self, spec: EffectorSpec, *, persist: bool) -> None:
         if persist:
             await self._storage.upsert_effector(spec, time.time_ns())
@@ -258,15 +314,44 @@ class EffectorManager:
     async def _poll_loop(self) -> None:
         while True:
             await asyncio.sleep(self._config.status_poll_interval_seconds)
-            async with self._lock:
-                effector_ids = list(self._runtimes.keys())
-            for effector_id in effector_ids:
-                await self._broadcast_status(effector_id)
+            try:
+                await self._poll_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # One bad driver/cycle must never kill the status loop.
+                logger.warning("effector status poll iteration failed", exc_info=True)
+
+    async def _poll_once(self) -> None:
+        async with self._lock:
+            runtimes = list(self._runtimes.values())
+        for runtime in runtimes:
+            if runtime.driver is None:
+                await self._attempt_reconnect(runtime)
+            await self._broadcast_status(runtime.spec.id)
+
+    async def _attempt_reconnect(self, runtime: EffectorRuntime) -> None:
+        driver = _build_driver(runtime.spec, snapshot_dir=self._config.snapshot_dir)
+        if driver is None:
+            return
+        try:
+            await driver.connect()
+        except Exception as exc:
+            runtime.connect_error = str(exc)
+            logger.debug("effector %s reconnect attempt failed: %s", runtime.spec.id, exc)
+            return
+        runtime.driver = driver
+        runtime.connect_error = None
+        logger.info("effector %s connected after retry", runtime.spec.id)
 
     async def _status_for_runtime(self, runtime: EffectorRuntime) -> EffectorStatus:
         if runtime.driver is None:
             return EffectorStatus(effector_id=runtime.spec.id, state="offline", armed=False)
-        raw = await runtime.driver.get_status()
+        try:
+            raw = await runtime.driver.get_status()
+        except Exception as exc:
+            logger.debug("effector %s get_status failed: %s", runtime.spec.id, exc)
+            return EffectorStatus(effector_id=runtime.spec.id, state="error", armed=False)
         return EffectorStatus(
             effector_id=runtime.spec.id,
             state=raw.get("state", "offline"),
@@ -275,7 +360,7 @@ class EffectorManager:
             zoom=raw.get("zoom"),
             armed=bool(raw.get("armed", False)),
             last_seen_ns=time.time_ns(),
-            active_track_id=raw.get("active_track_id"),
+            active_track_id=raw.get("active_track_id") or runtime.active_track_id,
         )
 
     async def _broadcast_status(self, effector_id: str) -> None:

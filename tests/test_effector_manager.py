@@ -59,7 +59,13 @@ def _spec(effector_id: str) -> EffectorSpec:
     )
 
 
-async def _manager(tmp_path: Path, *, min_slew_interval_seconds: float = 3.0) -> tuple[EffectorManager, Storage, list[dict]]:
+async def _manager(
+    tmp_path: Path,
+    *,
+    min_slew_interval_seconds: float = 3.0,
+    status_poll_interval_seconds: float = 3600.0,
+    slew_dwell_seconds: float = 10.0,
+) -> tuple[EffectorManager, Storage, list[dict]]:
     storage = Storage(tmp_path / "effectors.db")
     await storage.initialize()
     events: list[dict] = []
@@ -70,7 +76,8 @@ async def _manager(tmp_path: Path, *, min_slew_interval_seconds: float = 3.0) ->
     config = EffectorManagerConfig(
         snapshot_dir=tmp_path / "snapshots",
         min_slew_interval_seconds=min_slew_interval_seconds,
-        status_poll_interval_seconds=3600.0,
+        status_poll_interval_seconds=status_poll_interval_seconds,
+        slew_dwell_seconds=slew_dwell_seconds,
     )
     manager = EffectorManager(storage=storage, live_callback=_live_callback, config=config)
     return manager, storage, events
@@ -239,6 +246,184 @@ async def test_capture_reports_failure_when_driver_raises(tmp_path: Path, monkey
     result = await manager.capture("cam-1")
     assert result.status == "FAILED"
     assert result.failure_class == "RuntimeError"
+
+
+class _HomingDriver(_MockDriver):
+    def __init__(self) -> None:
+        super().__init__()
+        self.home_calls = 0
+
+    async def go_home(self) -> None:
+        self.home_calls += 1
+
+
+@pytest.mark.asyncio
+async def test_slew_records_active_track_id_in_status(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    manager, storage, _ = await _manager(tmp_path)
+    mock_driver = _MockDriver()
+    monkeypatch.setattr(registry_module, "_build_driver", lambda spec, *, snapshot_dir: mock_driver)
+    await manager.register(_spec("cam-1"))
+
+    await manager.slew_to_target("cam-1", (5.0, 5.0, 0.0), track_id="trk-9")
+
+    status = await manager.get_status("cam-1")
+    assert status is not None
+    assert status.active_track_id == "trk-9"
+    await manager.stop()
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_camera_returns_home_after_dwell(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    manager, storage, _ = await _manager(tmp_path, slew_dwell_seconds=0.05)
+    driver = _HomingDriver()
+    monkeypatch.setattr(registry_module, "_build_driver", lambda spec, *, snapshot_dir: driver)
+    await manager.register(_spec("cam-1"))
+
+    result = await manager.slew_to_target("cam-1", (5.0, 5.0, 0.0), track_id="trk-1")
+    assert result.status == "COMPLETED"
+
+    await asyncio.sleep(0.15)
+
+    assert driver.home_calls == 1
+    status = await manager.get_status("cam-1")
+    assert status is not None
+    assert status.active_track_id is None
+    await manager.stop()
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_home_return_disabled_when_dwell_is_zero(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    manager, storage, _ = await _manager(tmp_path, slew_dwell_seconds=0.0)
+    driver = _HomingDriver()
+    monkeypatch.setattr(registry_module, "_build_driver", lambda spec, *, snapshot_dir: driver)
+    await manager.register(_spec("cam-1"))
+
+    await manager.slew_to_target("cam-1", (5.0, 5.0, 0.0))
+    await asyncio.sleep(0.1)
+
+    assert driver.home_calls == 0
+    await manager.stop()
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_new_slew_supersedes_pending_home_return(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    manager, storage, _ = await _manager(
+        tmp_path, min_slew_interval_seconds=0.0, slew_dwell_seconds=0.1
+    )
+    driver = _HomingDriver()
+    monkeypatch.setattr(registry_module, "_build_driver", lambda spec, *, snapshot_dir: driver)
+    await manager.register(_spec("cam-1"))
+
+    await manager.slew_to_target("cam-1", (5.0, 0.0, 0.0), track_id="trk-1")
+    await asyncio.sleep(0.05)
+    # Second slew inside the dwell window restarts the timer.
+    await manager.slew_to_target("cam-1", (0.0, 5.0, 0.0), track_id="trk-2")
+    await asyncio.sleep(0.06)
+
+    assert driver.home_calls == 0
+    await asyncio.sleep(0.08)
+    assert driver.home_calls == 1
+    await manager.stop()
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_status_reports_error_when_driver_get_status_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _FlakyStatusDriver(_MockDriver):
+        async def get_status(self) -> dict:
+            raise RuntimeError("camera unreachable")
+
+    manager, storage, _ = await _manager(tmp_path)
+    monkeypatch.setattr(registry_module, "_build_driver", lambda spec, *, snapshot_dir: _FlakyStatusDriver())
+    await manager.register(_spec("cam-1"))
+
+    statuses = await manager.list_status()
+    assert len(statuses) == 1
+    assert statuses[0].state == "error"
+    await manager.stop()
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_poll_loop_survives_driver_status_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+
+    class _FlakyStatusDriver(_MockDriver):
+        async def get_status(self) -> dict:
+            raise RuntimeError("camera unreachable")
+
+    manager, storage, events = await _manager(tmp_path, status_poll_interval_seconds=0.02)
+    monkeypatch.setattr(registry_module, "_build_driver", lambda spec, *, snapshot_dir: _FlakyStatusDriver())
+    await manager.register(_spec("cam-1"))
+
+    await asyncio.sleep(0.1)
+
+    assert manager._poll_task is not None
+    assert not manager._poll_task.done()
+    assert any(e.get("state") == "error" for e in events)
+    await manager.stop()
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_poll_loop_reconnects_previously_failed_driver(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+
+    attempts = {"count": 0}
+
+    class _EventuallyConnectingDriver(_MockDriver):
+        async def connect(self) -> None:
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise RuntimeError("camera booting")
+
+    driver = _EventuallyConnectingDriver()
+    manager, storage, _ = await _manager(tmp_path, status_poll_interval_seconds=0.02)
+    monkeypatch.setattr(registry_module, "_build_driver", lambda spec, *, snapshot_dir: driver)
+    await manager.register(_spec("cam-1"))
+
+    status = await manager.get_status("cam-1")
+    assert status is not None
+    assert status.state == "offline"
+
+    await asyncio.sleep(0.1)
+
+    status = await manager.get_status("cam-1")
+    assert status is not None
+    assert status.state == "idle"
+    assert attempts["count"] >= 2
+    await manager.stop()
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_deleting_last_effector_stops_poll_task(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, storage, _ = await _manager(tmp_path)
+    monkeypatch.setattr(registry_module, "_build_driver", lambda spec, *, snapshot_dir: _MockDriver())
+    await manager.register(_spec("cam-1"))
+    assert manager._poll_task is not None
+
+    await manager.delete("cam-1")
+
+    assert manager._poll_task is None
+    await storage.close()
 
 
 @pytest.mark.asyncio

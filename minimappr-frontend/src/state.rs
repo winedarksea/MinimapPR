@@ -268,6 +268,14 @@ pub struct EffectorStatusData {
     pub active_track_id: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
+pub struct EffectorOrientation {
+    #[serde(default)]
+    pub yaw_deg: f64,
+    #[serde(default)]
+    pub pitch_deg: f64,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Effector {
     pub id: String,
@@ -275,6 +283,8 @@ pub struct Effector {
     pub effector_type: String,
     pub position_m: Option<Vec<f64>>,
     pub position_geo: Option<GeoPoint>,
+    /// Camera home bearing; status.pan_deg is relative to this yaw.
+    pub orientation: Option<EffectorOrientation>,
     pub capabilities: Option<Vec<String>>,
     pub metadata: Option<serde_json::Value>,
     pub status: Option<EffectorStatusData>,

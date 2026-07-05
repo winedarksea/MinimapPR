@@ -118,6 +118,22 @@ async def test_probe_capabilities_continuous_only(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_probe_capabilities_detects_zoom_space(tmp_path: Path) -> None:
+    driver = _driver(tmp_path)
+    driver._ptz_service = AsyncMock()
+    driver._ptz_config_token = "cfg-1"
+    options = MagicMock()
+    spaces = _Spaces(absolute=True)
+    spaces.AbsoluteZoomPositionSpace = [object()]
+    options.Spaces = spaces
+    driver._ptz_service.GetConfigurationOptions.return_value = options
+
+    caps = await driver._probe_capabilities()
+
+    assert caps.has_zoom is True
+
+
+@pytest.mark.asyncio
 async def test_probe_capabilities_defaults_to_continuous_when_probe_fails(tmp_path: Path) -> None:
     """Reolink and similar consumer firmware often fail GetConfigurationOptions;
     ContinuousMove is the safe universal fallback rather than erroring out."""
@@ -179,12 +195,139 @@ async def test_execute_uses_continuous_move_and_stop_when_selected(tmp_path: Pat
     driver._media_profile_token = "prof-1"
     driver._ptz_service = AsyncMock()
 
-    # Target straight ahead of home view -> pan=tilt=0 -> minimal (fast) dwell.
-    result = await driver.execute(EffectorCommand(target_position_m=(0.0, 10.0, 2.0)))
+    # Small pan offset (~1.1 deg) -> real move required but minimal (fast) dwell.
+    result = await driver.execute(EffectorCommand(target_position_m=(0.2, 10.0, 2.0)))
 
     assert result.status == "COMPLETED"
     driver._ptz_service.ContinuousMove.assert_awaited_once()
     driver._ptz_service.Stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_continuous_move_skips_when_already_on_target(tmp_path: Path) -> None:
+    driver = _driver(tmp_path)
+    driver._capabilities = EffectorCapabilities(
+        movement_strategies=["ContinuousMove"], selected_movement_strategy="ContinuousMove"
+    )
+    driver._media_profile_token = "prof-1"
+    driver._ptz_service = AsyncMock()
+
+    # Target straight ahead of home view -> pan=tilt=0 -> nothing to do.
+    result = await driver.execute(EffectorCommand(target_position_m=(0.0, 10.0, 2.0)))
+
+    assert result.status == "COMPLETED"
+    driver._ptz_service.ContinuousMove.assert_not_awaited()
+    driver._ptz_service.Stop.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_continuous_move_velocity_is_proportional_per_axis(tmp_path: Path) -> None:
+    """A pan-only slew must not command any tilt velocity (and vice versa) —
+    fixed-magnitude velocities on both axes would overshoot the smaller one."""
+    driver = _driver(tmp_path)
+    driver._capabilities = EffectorCapabilities(
+        movement_strategies=["ContinuousMove"], selected_movement_strategy="ContinuousMove"
+    )
+    driver._media_profile_token = "prof-1"
+    driver._ptz_service = AsyncMock()
+
+    # Pan-only target (~2 deg right, level with the camera).
+    result = await driver.execute(EffectorCommand(target_position_m=(0.35, 10.0, 2.0)))
+
+    assert result.status == "COMPLETED"
+    velocity = driver._ptz_service.ContinuousMove.await_args.args[0]["Velocity"]["PanTilt"]
+    assert velocity["x"] > 0.0
+    assert velocity["y"] == 0.0
+
+
+# ── go_home ─────────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_go_home_uses_onvif_home_preset(tmp_path: Path) -> None:
+    driver = _driver(tmp_path)
+    driver._capabilities = EffectorCapabilities(
+        movement_strategies=["AbsoluteMove"], selected_movement_strategy="AbsoluteMove"
+    )
+    driver._media_profile_token = "prof-1"
+    driver._ptz_service = AsyncMock()
+    driver._last_pan_deg = 45.0
+    driver._last_tilt_deg = 10.0
+
+    await driver.go_home()
+
+    driver._ptz_service.GotoHomePosition.assert_awaited_once()
+    driver._ptz_service.AbsoluteMove.assert_not_awaited()
+    assert driver._last_pan_deg == 0.0
+    assert driver._last_tilt_deg == 0.0
+    assert driver._state == "idle"
+
+
+@pytest.mark.asyncio
+async def test_go_home_falls_back_to_slew_when_home_preset_unsupported(tmp_path: Path) -> None:
+    driver = _driver(tmp_path)
+    driver._capabilities = EffectorCapabilities(
+        movement_strategies=["AbsoluteMove"], selected_movement_strategy="AbsoluteMove"
+    )
+    driver._media_profile_token = "prof-1"
+    driver._ptz_service = AsyncMock()
+    driver._ptz_service.GotoHomePosition.side_effect = RuntimeError("not supported")
+
+    await driver.go_home()
+
+    driver._ptz_service.AbsoluteMove.assert_awaited_once()
+    position = driver._ptz_service.AbsoluteMove.await_args.args[0]["Position"]["PanTilt"]
+    assert position == {"x": 0.0, "y": 0.0}
+    assert driver._state == "idle"
+
+
+# ── live get_status ─────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_get_status_reads_live_onvif_position(tmp_path: Path) -> None:
+    driver = _driver(tmp_path)
+    driver._media_profile_token = "prof-1"
+    driver._ptz_service = AsyncMock()
+    driver._state = "idle"
+    status = MagicMock()
+    status.Position.PanTilt.x = 0.5
+    status.Position.PanTilt.y = -0.5
+    driver._ptz_service.GetStatus.return_value = status
+
+    raw = await driver.get_status()
+
+    assert raw["state"] == "idle"
+    assert raw["pan_deg"] == pytest.approx(90.0)
+    assert raw["tilt_deg"] == pytest.approx(-45.0)
+
+
+@pytest.mark.asyncio
+async def test_get_status_reports_error_when_camera_unreachable(tmp_path: Path) -> None:
+    driver = _driver(tmp_path)
+    driver._media_profile_token = "prof-1"
+    driver._ptz_service = AsyncMock()
+    driver._state = "idle"
+    driver._ptz_service.GetStatus.side_effect = RuntimeError("timeout")
+
+    raw = await driver.get_status()
+
+    assert raw["state"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_get_status_recovers_from_error_when_camera_answers(tmp_path: Path) -> None:
+    driver = _driver(tmp_path)
+    driver._media_profile_token = "prof-1"
+    driver._ptz_service = AsyncMock()
+    driver._state = "error"
+    status = MagicMock()
+    status.Position.PanTilt.x = 0.0
+    status.Position.PanTilt.y = 0.0
+    driver._ptz_service.GetStatus.return_value = status
+
+    raw = await driver.get_status()
+
+    assert raw["state"] == "idle"
+    assert driver._state == "idle"
 
 
 @pytest.mark.asyncio

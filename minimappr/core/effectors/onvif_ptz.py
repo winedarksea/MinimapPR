@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import math
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +32,15 @@ class OnvifPtzError(RuntimeError):
 _ABSOLUTE_SPACE_KEY = "AbsolutePanTiltPositionSpace"
 _RELATIVE_SPACE_KEY = "RelativePanTiltTranslationSpace"
 _CONTINUOUS_SPACE_KEY = "ContinuousPanTiltVelocitySpace"
+_ZOOM_SPACE_KEYS = (
+    "AbsoluteZoomPositionSpace",
+    "RelativeZoomTranslationSpace",
+    "ContinuousZoomVelocitySpace",
+)
+
+# Angular deltas below this are treated as already-on-target for the timed
+# ContinuousMove approximation (its positioning error is far coarser anyway).
+_MIN_MOVE_DEG = 0.5
 
 
 def select_movement_strategy(supported_spaces: set[str]) -> str:
@@ -156,6 +164,7 @@ class OnvifPtzDriver:
 
     async def _probe_capabilities(self) -> EffectorCapabilities:
         supported_spaces: set[str] = set()
+        has_zoom = False
         try:
             options = await self._ptz_service.GetConfigurationOptions(
                 {"ConfigurationToken": self._ptz_config_token}
@@ -168,6 +177,7 @@ class OnvifPtzDriver:
                     supported_spaces.add(_RELATIVE_SPACE_KEY)
                 if getattr(spaces, "ContinuousPanTiltVelocitySpace", None):
                     supported_spaces.add(_CONTINUOUS_SPACE_KEY)
+                has_zoom = any(getattr(spaces, key, None) for key in _ZOOM_SPACE_KEYS)
         except Exception as exc:  # pragma: no cover - defensive against quirky firmware
             logger.warning("PTZ capability probe failed for %s: %s", self._effector_id, exc)
 
@@ -183,7 +193,7 @@ class OnvifPtzDriver:
             selected_movement_strategy=strategy,
             snapshot_strategies=[],
             selected_snapshot_strategy=None,
-            has_zoom=False,
+            has_zoom=has_zoom,
         )
 
     async def _probe_snapshot_uri(self) -> str | None:
@@ -221,17 +231,11 @@ class OnvifPtzDriver:
             pan_deg, tilt_deg = compute_pan_tilt(
                 self._camera_pos, self._camera_orientation, command.target_position_m
             )
-            strategy = self._capabilities.selected_movement_strategy
+            if self._capabilities.selected_movement_strategy is None:
+                return ExecutionResult(status="FAILED", failure_class="no_movement_strategy")
             self._state = "slewing"
             try:
-                if strategy == "AbsoluteMove":
-                    await self._absolute_move(pan_deg, tilt_deg)
-                elif strategy == "RelativeMove":
-                    await self._relative_move(pan_deg, tilt_deg)
-                elif strategy == "ContinuousMove":
-                    await self._continuous_move_timed(pan_deg, tilt_deg)
-                else:
-                    return ExecutionResult(status="FAILED", failure_class="no_movement_strategy")
+                await self._move_via_selected_strategy(pan_deg, tilt_deg)
             except Exception as exc:
                 self._state = "error"
                 return ExecutionResult(status="FAILED", failure_class=f"{type(exc).__name__}", detail=str(exc))
@@ -239,6 +243,47 @@ class OnvifPtzDriver:
             self._last_tilt_deg = tilt_deg
             self._state = "idle"
             return ExecutionResult(status="COMPLETED")
+
+    async def go_home(self) -> None:
+        """Return the camera to its registered home bearing (pan=0, tilt=0).
+
+        Prefers the ONVIF home preset; many consumer PTZ firmwares don't
+        implement one, so falling back to a normal slew to the home bearing
+        is treated as an equally valid path, not an error.
+        """
+        async with self._lock:
+            if self._capabilities is None:
+                raise OnvifPtzError("driver not connected")
+            self._state = "slewing"
+            try:
+                try:
+                    await self._ptz_service.GotoHomePosition(
+                        {"ProfileToken": self._media_profile_token}
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        "GotoHomePosition unavailable for %s (%s); slewing to home bearing",
+                        self._effector_id,
+                        exc,
+                    )
+                    await self._move_via_selected_strategy(0.0, 0.0)
+            except Exception:
+                self._state = "error"
+                raise
+            self._last_pan_deg = 0.0
+            self._last_tilt_deg = 0.0
+            self._state = "idle"
+
+    async def _move_via_selected_strategy(self, pan_deg: float, tilt_deg: float) -> None:
+        strategy = self._capabilities.selected_movement_strategy if self._capabilities else None
+        if strategy == "AbsoluteMove":
+            await self._absolute_move(pan_deg, tilt_deg)
+        elif strategy == "RelativeMove":
+            await self._relative_move(pan_deg, tilt_deg)
+        elif strategy == "ContinuousMove":
+            await self._continuous_move_timed(pan_deg, tilt_deg)
+        else:
+            raise OnvifPtzError("no movement strategy selected")
 
     async def _absolute_move(self, pan_deg: float, tilt_deg: float) -> None:
         await self._ptz_service.AbsoluteMove(
@@ -275,11 +320,16 @@ class OnvifPtzDriver:
         current_tilt = self._last_tilt_deg or 0.0
         pan_delta = pan_deg - current_pan
         tilt_delta = tilt_deg - current_tilt
+        dominant_delta = max(abs(pan_delta), abs(tilt_delta))
+        if dominant_delta < _MIN_MOVE_DEG:
+            return
         assumed_deg_per_s = 30.0 * self._continuous_move_speed
-        duration_s = min(5.0, max(0.2, math.hypot(pan_delta, tilt_delta) / max(assumed_deg_per_s, 1e-6)))
+        duration_s = min(5.0, max(0.2, dominant_delta / max(assumed_deg_per_s, 1e-6)))
 
-        pan_velocity = self._continuous_move_speed if pan_delta >= 0 else -self._continuous_move_speed
-        tilt_velocity = self._continuous_move_speed if tilt_delta >= 0 else -self._continuous_move_speed
+        # Scale each axis by its share of the dominant delta so both axes
+        # arrive together and an axis that is already on target stays put.
+        pan_velocity = self._continuous_move_speed * (pan_delta / dominant_delta)
+        tilt_velocity = self._continuous_move_speed * (tilt_delta / dominant_delta)
 
         await self._ptz_service.ContinuousMove(
             {
@@ -291,9 +341,28 @@ class OnvifPtzDriver:
         await self._ptz_service.Stop({"ProfileToken": self._media_profile_token, "PanTilt": True})
 
     async def get_status(self) -> dict[str, Any]:
+        state = self._state
+        if self._ptz_service is not None and state != "slewing":
+            try:
+                status = await self._ptz_service.GetStatus(
+                    {"ProfileToken": self._media_profile_token}
+                )
+                pan_tilt = getattr(getattr(status, "Position", None), "PanTilt", None)
+                x = getattr(pan_tilt, "x", None)
+                y = getattr(pan_tilt, "y", None)
+                if x is not None:
+                    self._last_pan_deg = float(x) * 180.0
+                if y is not None:
+                    self._last_tilt_deg = float(y) * 90.0
+                if state == "error":
+                    # Camera is answering again after a failed move/snapshot.
+                    self._state = state = "idle"
+            except Exception as exc:
+                logger.debug("ONVIF GetStatus failed for %s: %s", self._effector_id, exc)
+                state = "error"
         return {
             "effector_id": self._effector_id,
-            "state": self._state,
+            "state": state,
             "armed": self._armed,
             "pan_deg": self._last_pan_deg,
             "tilt_deg": self._last_tilt_deg,
