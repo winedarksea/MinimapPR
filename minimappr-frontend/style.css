@@ -85,6 +85,7 @@
   --mmp-sys-color-armed:    #ff9030;
   --mmp-sys-color-on-armed: #2d1400;
   --mmp-sys-color-map-node:             var(--mmp-sys-color-info);
+  --mmp-sys-color-map-effector:         #f0883e;
   --mmp-sys-color-map-track:            #5fd6c4;
   --mmp-sys-color-map-track-coasting:   var(--mmp-sys-color-warn);
   --mmp-sys-color-map-track-dropped:    #6e7681;
@@ -243,6 +244,7 @@
   --mmp-sys-color-armed:    #c4480b;
   --mmp-sys-color-on-armed: #ffffff;
   --mmp-sys-color-map-node:             var(--mmp-sys-color-info);
+  --mmp-sys-color-map-effector:         #c4600a;
   --mmp-sys-color-map-track:            #006e65;
   --mmp-sys-color-map-track-coasting:   var(--mmp-sys-color-warn);
   --mmp-sys-color-map-track-dropped:    #8c959f;

@@ -255,6 +255,45 @@ pub struct NodeOmniDetectionSummary {
     pub sample_detection_ids: Vec<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
+pub struct EffectorStatusData {
+    #[serde(default)]
+    pub state: String,
+    pub pan_deg: Option<f64>,
+    pub tilt_deg: Option<f64>,
+    pub zoom: Option<f64>,
+    #[serde(default)]
+    pub armed: bool,
+    pub last_seen_ns: Option<i64>,
+    pub active_track_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct Effector {
+    pub id: String,
+    #[serde(default)]
+    pub effector_type: String,
+    pub position_m: Option<Vec<f64>>,
+    pub position_geo: Option<GeoPoint>,
+    pub capabilities: Option<Vec<String>>,
+    pub metadata: Option<serde_json::Value>,
+    pub status: Option<EffectorStatusData>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct EffectorStatusEvent {
+    pub effector_id: String,
+    #[serde(default)]
+    pub state: String,
+    pub pan_deg: Option<f64>,
+    pub tilt_deg: Option<f64>,
+    pub zoom: Option<f64>,
+    #[serde(default)]
+    pub armed: bool,
+    pub last_seen_ns: Option<i64>,
+    pub active_track_id: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Alert {
     #[serde(alias = "id")]
@@ -410,6 +449,9 @@ impl CopSelection {
 pub struct AppState {
     pub nodes: RwSignal<Vec<NodeStatus>>,
     pub tracks: RwSignal<Vec<Track>>,
+    /// Registered PTZ effectors. Empty unless a camera has been registered —
+    /// all effector UI is gated on this being non-empty.
+    pub effectors: RwSignal<Vec<Effector>>,
     pub detections: RwSignal<VecDeque<Detection>>,
     pub omni_detection_summaries: RwSignal<Vec<NodeOmniDetectionSummary>>,
     pub alerts: RwSignal<VecDeque<Alert>>,
@@ -434,6 +476,7 @@ impl AppState {
         Self {
             nodes: RwSignal::new(vec![]),
             tracks: RwSignal::new(vec![]),
+            effectors: RwSignal::new(vec![]),
             detections: RwSignal::new(VecDeque::new()),
             omni_detection_summaries: RwSignal::new(vec![]),
             alerts: RwSignal::new(VecDeque::new()),
@@ -463,6 +506,7 @@ pub enum LiveEvent {
     ConfigUpdated {
         config: ConfigSnapshot,
     },
+    EffectorStatus(EffectorStatusEvent),
     SetFilter,
     BitReport {
         #[serde(rename = "node_id")]

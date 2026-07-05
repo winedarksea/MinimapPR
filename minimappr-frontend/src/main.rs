@@ -57,11 +57,12 @@ fn App() -> impl IntoView {
                     </ParentRoute>
 
                     <ParentRoute path=path!("/settings") view=pages::settings::SettingsLayout>
-                        <Route path=path!("")         view=pages::settings::config::ConfigView />
-                        <Route path=path!("config")   view=pages::settings::config::ConfigView />
-                        <Route path=path!("server")   view=pages::settings::server::ServerDiagnosticsView />
-                        <Route path=path!("pipeline") view=pages::settings::pipeline::PipelineView />
-                        <Route path=path!("logs")     view=pages::settings::logs::ServerLogsView />
+                        <Route path=path!("")          view=pages::settings::config::ConfigView />
+                        <Route path=path!("config")    view=pages::settings::config::ConfigView />
+                        <Route path=path!("server")    view=pages::settings::server::ServerDiagnosticsView />
+                        <Route path=path!("pipeline")  view=pages::settings::pipeline::PipelineView />
+                        <Route path=path!("effectors") view=pages::settings::effectors::EffectorsView />
+                        <Route path=path!("logs")      view=pages::settings::logs::ServerLogsView />
                     </ParentRoute>
                 </Routes>
                 <audio::drawer::AudioAnalysisDrawer />

@@ -25,6 +25,8 @@ from minimappr.config import Settings
 from minimappr.core.bit_report import BITReportEvaluator
 from minimappr.core.capture_session import CaptureSessionManager
 from minimappr.core.diagnostics import DiagnosticsService
+from minimappr.core.effector_rules import EffectorRuleActionHandler
+from minimappr.core.effectors.registry import EffectorManager
 from minimappr.core.environment import LiveEnvironmentProvider
 from minimappr.core.federation import FederationCoordinator
 from minimappr.core.fusion_node import FusionNode
@@ -241,6 +243,29 @@ def _build_api_only_runtime_federation(
         track_supplier=_empty_local_tracks,
         live_callback=live_hub.broadcast,
     )
+
+
+def _build_effector_manager(
+    settings: Settings,
+    *,
+    storage: Storage,
+    live_hub: LiveEventHub,
+) -> EffectorManager:
+    """Build the (optional) effector subsystem.
+
+    Always constructed — start() is cheap/dormant when the `effectors` DB
+    table is empty, so no separate enable path is needed beyond the
+    `effectors_enabled` kill-switch checked by the caller before start().
+    """
+    return EffectorManager(
+        storage=storage,
+        live_callback=live_hub.broadcast,
+        config=settings.effector_manager_config(),
+    )
+
+
+def _wire_effector_rules_handler(fusion_node: FusionNode, effector_manager: EffectorManager) -> None:
+    fusion_node.set_action_handler("effector", EffectorRuleActionHandler(effector_manager))
 
 
 async def _initialize_storage_and_resolve_site_origin(

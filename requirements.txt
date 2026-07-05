@@ -26,6 +26,10 @@ tf-keras==2.18.*
 tensorflow-hub>=0.16,<1.0
 birdnet>=0.2.12,<1.0
 
+# PTZ camera effector (optional — lazily imported, only required once an
+# effector is registered)
+onvif-zeep-async>=3.1,<4.0
+
 # Dev / test
 pytest>=8.2,<9.0
 pytest-asyncio>=0.23,<2.0

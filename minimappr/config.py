@@ -8,6 +8,10 @@ import os
 import platform
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from minimappr.core.effectors.registry import EffectorManagerConfig
 
 
 DEFAULT_RULES_CONFIG_PATH = Path("data/rules.json")
@@ -627,6 +631,14 @@ class Settings:
     federation_deconflict_use_3d: bool = False
     federation_auth_token: str = ""
 
+    # Effector subsystem kill-switch only — the real gate is the `effectors` DB
+    # table being empty. Defaults True so UI-driven onboarding needs no config edit.
+    effectors_enabled: bool = True
+    effector_snapshot_dir: Path = Path("data/effector_snapshots")
+    effector_slew_dwell_seconds: float = 10.0
+    effector_min_slew_interval_seconds: float = 3.0
+    effector_status_poll_interval_seconds: float = 5.0
+
     node_audio_overrides: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -637,6 +649,7 @@ class Settings:
         self.rules_config_path = Path(self.rules_config_path)
         self.taxonomy_config_path = Path(self.taxonomy_config_path)
         self.model_chain_config_path = Path(self.model_chain_config_path)
+        self.effector_snapshot_dir = Path(self.effector_snapshot_dir)
         self.large_artifact_dir = Path(self.large_artifact_dir)
         self.federation_peers_config_path = Path(self.federation_peers_config_path)
 
@@ -978,6 +991,13 @@ class Settings:
         for peer in self.federation_peers:
             if peer.peer_id == self.federation_server_id:
                 raise ValueError("Federation peer_id cannot match MINIMAPPR_FEDERATION_SERVER_ID")
+
+        if self.effector_slew_dwell_seconds < 0.0:
+            raise ValueError("MINIMAPPR_EFFECTOR_SLEW_DWELL_SECONDS must be >= 0")
+        if self.effector_min_slew_interval_seconds < 0.0:
+            raise ValueError("MINIMAPPR_EFFECTOR_MIN_SLEW_INTERVAL_SECONDS must be >= 0")
+        if self.effector_status_poll_interval_seconds <= 0.0:
+            raise ValueError("MINIMAPPR_EFFECTOR_STATUS_POLL_INTERVAL_SECONDS must be > 0")
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -1369,6 +1389,13 @@ class Settings:
             federation_tqi_hysteresis=_env_float("MINIMAPPR_FEDERATION_TQI_HYSTERESIS", 0.05),
             federation_deconflict_use_3d=_env_bool("MINIMAPPR_FEDERATION_DECONFLICT_USE_3D", False),
             federation_auth_token=_env_str("MINIMAPPR_FEDERATION_AUTH_TOKEN", ""),
+            effectors_enabled=_env_bool("MINIMAPPR_EFFECTORS_ENABLED", True),
+            effector_snapshot_dir=Path(_env_str("MINIMAPPR_EFFECTOR_SNAPSHOT_DIR", "data/effector_snapshots")),
+            effector_slew_dwell_seconds=_env_float("MINIMAPPR_EFFECTOR_SLEW_DWELL_SECONDS", 10.0),
+            effector_min_slew_interval_seconds=_env_float("MINIMAPPR_EFFECTOR_MIN_SLEW_INTERVAL_SECONDS", 3.0),
+            effector_status_poll_interval_seconds=_env_float(
+                "MINIMAPPR_EFFECTOR_STATUS_POLL_INTERVAL_SECONDS", 5.0
+            ),
         )
 
     def localization_config(self) -> LocalizationConfig:
@@ -1582,6 +1609,16 @@ class Settings:
             tqi_hysteresis=self.federation_tqi_hysteresis,
             deconflict_use_3d=self.federation_deconflict_use_3d,
             auth_token=token or None,
+        )
+
+    def effector_manager_config(self) -> EffectorManagerConfig:
+        from minimappr.core.effectors.registry import EffectorManagerConfig
+
+        return EffectorManagerConfig(
+            snapshot_dir=self.effector_snapshot_dir,
+            min_slew_interval_seconds=self.effector_min_slew_interval_seconds,
+            status_poll_interval_seconds=self.effector_status_poll_interval_seconds,
+            slew_dwell_seconds=self.effector_slew_dwell_seconds,
         )
 
     def _apply_runtime_profile(self) -> None:

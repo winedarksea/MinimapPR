@@ -19,7 +19,7 @@ import urllib.request
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -60,12 +60,14 @@ from minimappr.runtime_bootstrap import (
     _build_combined_runtime_core_services,
     _build_combined_runtime_federation,
     _build_common_live_runtime_services,
+    _build_effector_manager,
     _initialize_storage_and_resolve_site_origin,
     _start_api_only_runtime_services,
     _stop_api_only_runtime_services,
     _shutdown_combined_runtime_services,
     _start_combined_runtime_background_tasks,
     _stop_combined_runtime_background_tasks,
+    _wire_effector_rules_handler,
 )
 from minimappr.core.capture_session import (
     CaptureSessionManager,
@@ -84,6 +86,7 @@ from minimappr.core.audio_buffer import MultiSensorBuffer
 from minimappr.core.auth import extract_federation_token
 from minimappr.core.bit_report import BITReportEvaluator
 from minimappr.core.cluster_registry import ClusterRegistry
+from minimappr.core.effectors.registry import EffectorManager
 from minimappr.core.node_registry import NodeRegistry
 from minimappr.core.environment import LiveEnvironmentProvider
 from minimappr.core.federation import FederationCoordinator
@@ -107,6 +110,7 @@ from minimappr.models import (
     CopStatusResponse,
     DetectionReviewState,
     DetectionReviewUpdateRequest,
+    EffectorSpec,
     EnvironmentSampleIn,
     FederationAck,
     FederationHeartbeat,
@@ -128,6 +132,7 @@ from minimappr.models import (
     StoreForwardIngestRequest,
     StoreForwardIngestResponse,
     TrackState,
+    Vec3,
     ZoneOccupancyState,
     ZoneSpec,
 )
@@ -362,6 +367,7 @@ def _clear_bound_runtime_state(state) -> None:
         "ingest_stream_consumer_enabled",
         "site_origin_resolution_source",
         "site_origin_contributing_node_ids",
+        "effector_manager",
     )
 
 
@@ -369,6 +375,7 @@ def _ensure_lifespan_runtime_directories(settings: Settings) -> None:
     settings.federation_peers_config_path.parent.mkdir(parents=True, exist_ok=True)
     settings.snippet_dir.mkdir(parents=True, exist_ok=True)
     settings.large_artifact_dir.mkdir(parents=True, exist_ok=True)
+    settings.effector_snapshot_dir.mkdir(parents=True, exist_ok=True)
 
 
 def _prepare_lifespan_runtime(state, settings: Settings) -> None:
@@ -1139,6 +1146,11 @@ async def _api_only_lifespan(app: FastAPI, settings: Settings):
         settings,
         live_hub=common_live_runtime_services.live_hub,
     )
+    effector_manager = _build_effector_manager(
+        settings,
+        storage=storage,
+        live_hub=common_live_runtime_services.live_hub,
+    )
 
     capture_manager = _build_capture_manager(
         settings,
@@ -1174,6 +1186,7 @@ async def _api_only_lifespan(app: FastAPI, settings: Settings):
             settings.ingest_max_concurrent,
             lease_timeout_seconds=settings.ingest_request_timeout_seconds,
         ),
+        effector_manager=effector_manager,
     )
 
     task_handles = _ApiOnlyRuntimeTaskHandles()
@@ -1185,6 +1198,8 @@ async def _api_only_lifespan(app: FastAPI, settings: Settings):
             federation=federation,
             storage=storage,
         )
+        if settings.effectors_enabled:
+            await effector_manager.start()
         yield
     finally:
         shutdown_timeout_s = 15.0
@@ -1194,6 +1209,7 @@ async def _api_only_lifespan(app: FastAPI, settings: Settings):
             force_kill_on_timeout=False,
             shutdown_timeout_seconds=shutdown_timeout_s,
         )
+        await effector_manager.stop()
         await _stop_api_only_runtime_services(
             app,
             task_handles,
@@ -1244,6 +1260,13 @@ async def lifespan(app: FastAPI):
         live_hub=common_live_runtime_services.live_hub,
         tracker=combined_runtime_core_services.tracker,
     )
+    effector_manager = _build_effector_manager(
+        settings,
+        storage=storage,
+        live_hub=common_live_runtime_services.live_hub,
+    )
+    if settings.effectors_enabled:
+        _wire_effector_rules_handler(combined_runtime_core_services.fusion_node, effector_manager)
 
     _python_ingest = settings.ingest_backend == "python"
     capture_manager = _build_capture_manager(
@@ -1281,6 +1304,7 @@ async def lifespan(app: FastAPI):
             settings.ingest_max_concurrent,
             lease_timeout_seconds=settings.ingest_request_timeout_seconds,
         ),
+        effector_manager=effector_manager,
     )
 
     ingest_stream_consumer_enabled = await _ensure_ingest_stream_consumer_running(app.state)
@@ -1302,6 +1326,8 @@ async def lifespan(app: FastAPI):
             should_schedule_site_origin_reconciliation=should_schedule_deferred_site_origin_reconciliation,
             storage=storage,
         )
+        if settings.effectors_enabled:
+            await effector_manager.start()
 
         yield
     finally:
@@ -1315,6 +1341,7 @@ async def lifespan(app: FastAPI):
             shutdown_timeout_seconds=shutdown_timeout_s,
         )
 
+        await effector_manager.stop()
         await _stop_combined_runtime_background_tasks(
             app,
             task_handles,
@@ -4111,6 +4138,176 @@ async def list_cameras():
         {"id": cam.id, "label": cam.label, "platform": cam.platform}
         for cam in cameras
     ]
+
+
+# ── Effector API ───────────────────────────────────────────────────────────────
+# PTZ camera registry, slew-to-track, and snapshot/live-view. Optional and
+# hidden: the UI renders effector controls only when this list is non-empty.
+
+
+def _redact_transport(effector: dict[str, Any]) -> dict[str, Any]:
+    """Strip ONVIF credentials from an effector row before it leaves the API.
+
+    Transport (host/port/username/password/rtsp_url) is write-only from the
+    API's perspective: accepted on register, never echoed back.
+    """
+    redacted = dict(effector)
+    redacted["transport"] = {}
+    return redacted
+
+
+def _enrich_effector_geo(effector: dict[str, Any], state) -> dict[str, Any]:
+    if effector.get("position_geo") is None and effector.get("position_m"):
+        local = effector["position_m"]
+        geo = state.coordinate_frame.local_to_geo((float(local[0]), float(local[1]), float(local[2])))
+        effector["position_geo"] = geo.model_dump(mode="json")
+    return effector
+
+
+class _EffectorAimBody(BaseModel):
+    track_id: str | None = None
+    target: Vec3 | None = None
+
+    @model_validator(mode="after")
+    def _validate(self) -> "_EffectorAimBody":
+        if self.track_id is None and self.target is None:
+            raise ValueError("Either track_id or target must be provided")
+        return self
+
+
+class _EffectorSnapshotBody(BaseModel):
+    track_id: str | None = None
+    detection_id: str | None = None
+
+
+@app.get("/api/v1/effectors")
+async def list_effectors(request: Request) -> list[dict]:
+    state = _require_state(request)
+    manager: EffectorManager = state.effector_manager
+    rows = await state.storage.list_effectors()
+    statuses = {status.effector_id: status for status in await manager.list_status()}
+    results = []
+    for row in rows:
+        effector = _enrich_effector_geo(_redact_transport(row), state)
+        status = statuses.get(effector["id"])
+        effector["status"] = status.model_dump(mode="json") if status is not None else None
+        results.append(effector)
+    return results
+
+
+@app.post("/api/v1/effectors", status_code=201)
+async def register_effector(payload: EffectorSpec, request: Request) -> dict:
+    state = _require_state(request)
+    manager: EffectorManager = state.effector_manager
+    spec = payload
+    if spec.position_m is None:
+        local = state.coordinate_frame.geo_to_local(spec.position_geo)
+        spec = spec.model_copy(update={"position_m": local})
+    await manager.register(spec)
+    row = await state.storage.get_effector_by_id(spec.id)
+    if row is None:
+        raise HTTPException(status_code=500, detail="Effector registration did not persist")
+    return _enrich_effector_geo(_redact_transport(row), state)
+
+
+@app.delete("/api/v1/effectors/{effector_id}")
+async def delete_effector(effector_id: str, request: Request) -> dict:
+    state = _require_state(request)
+    manager: EffectorManager = state.effector_manager
+    deleted = await manager.delete(effector_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Effector not found")
+    return {"ok": True, "effector_id": effector_id}
+
+
+@app.get("/api/v1/effectors/{effector_id}/status")
+async def get_effector_status(effector_id: str, request: Request) -> dict:
+    state = _require_state(request)
+    manager: EffectorManager = state.effector_manager
+    status = await manager.get_status(effector_id)
+    if status is None:
+        raise HTTPException(status_code=404, detail="Effector not found")
+    capabilities = await manager.get_capabilities(effector_id)
+    return {
+        "effector_id": effector_id,
+        "status": status.model_dump(mode="json"),
+        "capabilities": capabilities,
+    }
+
+
+@app.post("/api/v1/effectors/{effector_id}/aim")
+async def aim_effector(effector_id: str, payload: _EffectorAimBody, request: Request) -> JSONResponse:
+    state = _require_state(request)
+    manager: EffectorManager = state.effector_manager
+    target_pos = payload.target
+    if target_pos is None:
+        tracks = await state.storage.list_tracks(limit=1000)
+        track = next((t for t in tracks if t["id"] == payload.track_id), None)
+        if track is None:
+            raise HTTPException(status_code=404, detail="Track not found")
+        target_pos = tuple(float(v) for v in track["position_m"])
+
+    result = await manager.slew_to_target(effector_id, target_pos, track_id=payload.track_id)
+    if result.failure_class == "not_found":
+        raise HTTPException(status_code=404, detail="Effector not found")
+    status_code = 200 if result.status == "COMPLETED" else 409
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "status": result.status,
+            "execution_id": result.execution_id,
+            "failure_class": result.failure_class,
+        },
+    )
+
+
+@app.post("/api/v1/effectors/{effector_id}/snapshot")
+async def snapshot_effector(effector_id: str, payload: _EffectorSnapshotBody, request: Request) -> JSONResponse:
+    state = _require_state(request)
+    manager: EffectorManager = state.effector_manager
+    result = await manager.capture(
+        effector_id, track_id=payload.track_id, detection_id=payload.detection_id
+    )
+    if result.failure_class == "not_found":
+        raise HTTPException(status_code=404, detail="Effector not found")
+    status_code = 200 if result.status == "COMPLETED" else 409
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "status": result.status,
+            "execution_id": result.execution_id,
+            "failure_class": result.failure_class,
+            "artifact_ids": result.result_refs,
+        },
+    )
+
+
+@app.get("/api/v1/effectors/{effector_id}/snapshot.jpg")
+async def effector_snapshot_live(effector_id: str, request: Request) -> FileResponse:
+    state = _require_state(request)
+    manager: EffectorManager = state.effector_manager
+    try:
+        path = await manager.snapshot_live(effector_id)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Snapshot failed: {exc}") from exc
+    if path is None:
+        raise HTTPException(status_code=404, detail="Effector not found or snapshot unsupported")
+    return FileResponse(path=path, media_type="image/jpeg")
+
+
+@app.get("/api/v1/effector-artifacts/{artifact_id}")
+async def get_effector_artifact(artifact_id: str, request: Request) -> FileResponse:
+    state = _require_state(request)
+    row = await state.storage.get_effector_artifact(artifact_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    artifact_path = Path(row["path"]).resolve()
+    snapshot_root: Path = state.settings.effector_snapshot_dir.resolve()
+    if not artifact_path.exists():
+        raise HTTPException(status_code=404, detail="Artifact file no longer exists")
+    if not artifact_path.is_relative_to(snapshot_root):
+        raise HTTPException(status_code=403, detail="Artifact path is outside snapshot directory")
+    return FileResponse(path=artifact_path, media_type="image/jpeg")
 
 
 # ── Capture API ────────────────────────────────────────────────────────────────

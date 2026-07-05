@@ -560,6 +560,50 @@ class ContextSnapshot(BaseModel):
     system_health: str = "ok"
 
 
+class EffectorType(str, Enum):
+    CAMERA_PTZ = "camera_ptz"
+
+
+class EffectorOrientation(BaseModel):
+    """Home bearing of the effector, used as the geometry reference frame.
+
+    yaw_deg is measured clockwise from local-frame north (matching
+    LocalCoordinateFrame's east/north/up convention); pitch_deg is elevation
+    (positive = up) of the camera's home/rest position.
+    """
+    yaw_deg: float = Field(ge=-360.0, le=360.0, default=0.0)
+    pitch_deg: float = Field(ge=-90.0, le=90.0, default=0.0)
+
+
+class EffectorSpec(BaseModel):
+    id: str = Field(min_length=1)
+    effector_type: EffectorType
+    position_m: Vec3 | None = None
+    position_geo: GeoPoint | None = None
+    orientation: EffectorOrientation = Field(default_factory=EffectorOrientation)
+    capabilities: list[str] = Field(default_factory=list)
+    transport: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    properties: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _validate(self) -> "EffectorSpec":
+        if self.position_m is None and self.position_geo is None:
+            raise ValueError("Either position_m or position_geo must be provided")
+        return self
+
+
+class EffectorStatus(BaseModel):
+    effector_id: str
+    state: Literal["idle", "slewing", "streaming", "error", "offline"] = "offline"
+    pan_deg: float | None = None
+    tilt_deg: float | None = None
+    zoom: float | None = None
+    armed: bool = False
+    last_seen_ns: int | None = None
+    active_track_id: str | None = None
+
+
 class AlertStatus(str, Enum):
     SENT = "sent"
     ACKNOWLEDGED = "acknowledged"

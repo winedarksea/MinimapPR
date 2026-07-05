@@ -38,6 +38,7 @@
   function palette() {
     return {
       node:          readCssColor("--mmp-sys-color-map-node",           "#58a6ff"),
+      effector:      readCssColor("--mmp-sys-color-map-effector",       "#f0883e"),
       track:         readCssColor("--mmp-sys-color-map-track",          "#5fd6c4"),
       trackCoasting: readCssColor("--mmp-sys-color-map-track-coasting", "#d29922"),
       trackDropped:  readCssColor("--mmp-sys-color-map-track-dropped",  "#6e7681"),
@@ -157,6 +158,27 @@
       "</div>",
       34,
       "mmpr-map-icon mmpr-map-icon-node"
+    );
+  }
+
+  function makeEffectorIcon(color, bearingDeg, isOffline) {
+    const colors = palette();
+    const strokeColor = isOffline ? colors.trackDropped : color;
+    // Camera body + a field-of-view wedge rotated to the current pan bearing
+    // (0deg = north / up, matching Leaflet's screen-space rotation convention).
+    return divIcon(
+      '<div style="width:40px;height:40px;filter:drop-shadow(0 2px 6px rgba(0,0,0,.42));">' +
+        '<svg viewBox="0 0 40 40" width="40" height="40" aria-hidden="true">' +
+          '<g transform="rotate(' + bearingDeg + ' 20 20)">' +
+            '<path d="M20 20 L11 2 A20 20 0 0 1 29 2 Z" fill="' + strokeColor + '" opacity="0.22"></path>' +
+          "</g>" +
+          '<rect x="12" y="15" width="16" height="11" rx="2.5" fill="' + colors.surface + '" stroke="' + strokeColor + '" stroke-width="2"></rect>' +
+          '<circle cx="20" cy="20.5" r="3.4" fill="none" stroke="' + strokeColor + '" stroke-width="1.8"></circle>' +
+          '<rect x="24.5" y="12.5" width="5" height="4" rx="1" fill="' + colors.surface + '" stroke="' + strokeColor + '" stroke-width="1.6"></rect>' +
+        "</svg>" +
+      "</div>",
+      40,
+      "mmpr-map-icon mmpr-map-icon-effector"
     );
   }
 
@@ -434,6 +456,31 @@
 
   function removeNodeMarker(nodeId) {
     const key = "node:" + nodeId;
+    if (_markers[key]) { _markers[key].remove(); delete _markers[key]; }
+  }
+
+  // ── Effector (PTZ camera) markers ────────────────────────────
+  function setEffectorMarker(effectorId, lat, lon, bearingDeg, state) {
+    if (!_map) return;
+    const colors = palette();
+    const isOffline = state === "offline" || state === "error";
+    const color = state === "error" ? colors.danger
+                : state === "slewing" ? colors.warn
+                : colors.effector;
+    const key = "effector:" + effectorId;
+    const icon = makeEffectorIcon(color, bearingDeg, isOffline);
+    if (_markers[key]) {
+      _markers[key].setLatLng([lat, lon]);
+      _markers[key].setIcon(icon);
+    } else {
+      _markers[key] = L.marker([lat, lon], { icon })
+        .bindTooltip(effectorId, { permanent: false })
+        .addTo(_map);
+    }
+  }
+
+  function removeEffectorMarker(effectorId) {
+    const key = "effector:" + effectorId;
     if (_markers[key]) { _markers[key].remove(); delete _markers[key]; }
   }
 
@@ -916,6 +963,7 @@
   globalThis.leafletInterop = {
     init,
     setNodeMarker, removeNodeMarker,
+    setEffectorMarker, removeEffectorMarker,
     setNodeOmniHalo, removeNodeOmniHalo, triggerNodeOmniRipple,
     addDetectionMarker, addBearingOnlyDetectionMarker, removeDetectionMarker,
     setTrackMarker, setTrackVelocityVector, removeTrack, pulseTrackMarker,

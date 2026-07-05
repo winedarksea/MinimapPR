@@ -15,7 +15,15 @@ from typing import Any
 import aiosqlite
 
 from minimappr.cleanup_policy import CleanupPolicy
-from minimappr.models import ContributorSummary, DetectionEvent, GeoPoint, LabelId, NodeSpec, TrackState
+from minimappr.models import (
+    ContributorSummary,
+    DetectionEvent,
+    EffectorSpec,
+    GeoPoint,
+    LabelId,
+    NodeSpec,
+    TrackState,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -416,6 +424,36 @@ class Storage:
             );
             CREATE INDEX IF NOT EXISTS idx_capture_sessions_created ON capture_sessions(created_ns DESC);
             CREATE INDEX IF NOT EXISTS idx_capture_sessions_state ON capture_sessions(state);
+
+            CREATE TABLE IF NOT EXISTS effectors (
+                id TEXT PRIMARY KEY,
+                effector_type TEXT NOT NULL,
+                x REAL NOT NULL,
+                y REAL NOT NULL,
+                z REAL NOT NULL,
+                lat REAL,
+                lon REAL,
+                alt REAL,
+                yaw_deg REAL NOT NULL DEFAULT 0,
+                pitch_deg REAL NOT NULL DEFAULT 0,
+                capabilities_json TEXT NOT NULL DEFAULT '[]',
+                transport_json TEXT NOT NULL DEFAULT '{}',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                properties_json TEXT NOT NULL DEFAULT '{}',
+                last_seen_ns INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS effector_artifacts (
+                id TEXT PRIMARY KEY,
+                effector_id TEXT NOT NULL REFERENCES effectors(id) ON DELETE CASCADE,
+                track_id TEXT,
+                detection_id TEXT,
+                kind TEXT NOT NULL DEFAULT 'snapshot',
+                path TEXT NOT NULL,
+                created_ns INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_effector_artifacts_effector ON effector_artifacts(effector_id, created_ns DESC);
+            CREATE INDEX IF NOT EXISTS idx_effector_artifacts_track ON effector_artifacts(track_id, created_ns DESC);
             """
         )
 
@@ -2818,6 +2856,161 @@ class Storage:
             cursor = await db.execute("DELETE FROM zones WHERE id = ?", (zone_id,))
             await self._commit_if_needed(db)
             return cursor.rowcount > 0
+
+    # ── Effectors ──────────────────────────────────────────────────────────────
+
+    def _row_to_effector(self, row: aiosqlite.Row) -> dict[str, Any]:
+        position_geo = None
+        if row["lat"] is not None and row["lon"] is not None:
+            position_geo = {"lat": row["lat"], "lon": row["lon"], "alt_m": row["alt"] or 0.0}
+        return {
+            "id": row["id"],
+            "effector_type": row["effector_type"],
+            "position_m": [row["x"], row["y"], row["z"]],
+            "position_geo": position_geo,
+            "orientation": {"yaw_deg": row["yaw_deg"], "pitch_deg": row["pitch_deg"]},
+            "capabilities": _json_loads(row["capabilities_json"], []),
+            "transport": _json_loads(row["transport_json"], {}),
+            "metadata": _json_loads(row["metadata_json"], {}),
+            "properties": _json_loads(row["properties_json"], {}),
+            "last_seen_ns": row["last_seen_ns"],
+        }
+
+    async def upsert_effector(
+        self,
+        spec: EffectorSpec,
+        last_seen_ns: int,
+    ) -> None:
+        db = self._require_db()
+        if spec.position_m is None:
+            raise ValueError("EffectorSpec.position_m is required for persistence")
+        async with self._write_guard():
+            await db.execute(
+                """
+                INSERT INTO effectors (
+                    id, effector_type, x, y, z, lat, lon, alt,
+                    yaw_deg, pitch_deg, capabilities_json, transport_json,
+                    metadata_json, properties_json, last_seen_ns
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    effector_type=excluded.effector_type,
+                    x=excluded.x,
+                    y=excluded.y,
+                    z=excluded.z,
+                    lat=excluded.lat,
+                    lon=excluded.lon,
+                    alt=excluded.alt,
+                    yaw_deg=excluded.yaw_deg,
+                    pitch_deg=excluded.pitch_deg,
+                    capabilities_json=excluded.capabilities_json,
+                    transport_json=excluded.transport_json,
+                    metadata_json=excluded.metadata_json,
+                    properties_json=excluded.properties_json,
+                    last_seen_ns=excluded.last_seen_ns
+                """,
+                (
+                    spec.id,
+                    spec.effector_type.value,
+                    spec.position_m[0],
+                    spec.position_m[1],
+                    spec.position_m[2],
+                    spec.position_geo.lat if spec.position_geo is not None else None,
+                    spec.position_geo.lon if spec.position_geo is not None else None,
+                    spec.position_geo.alt_m if spec.position_geo is not None else None,
+                    spec.orientation.yaw_deg,
+                    spec.orientation.pitch_deg,
+                    _json_dumps(spec.capabilities),
+                    _json_dumps(spec.transport),
+                    _json_dumps(spec.metadata),
+                    _json_dumps(spec.properties),
+                    last_seen_ns,
+                ),
+            )
+            await self._commit_if_needed(db)
+
+    async def get_effector_by_id(self, effector_id: str) -> dict[str, Any] | None:
+        db = self._require_db()
+        row = await (
+            await db.execute("SELECT * FROM effectors WHERE id = ? LIMIT 1", (effector_id,))
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_effector(row)
+
+    async def list_effectors(self) -> list[dict[str, Any]]:
+        db = self._require_db()
+        rows = await (await db.execute("SELECT * FROM effectors ORDER BY id ASC")).fetchall()
+        return [self._row_to_effector(row) for row in rows]
+
+    async def delete_effector(self, effector_id: str) -> bool:
+        db = self._require_db()
+        async with self._write_guard():
+            cursor = await db.execute("DELETE FROM effectors WHERE id = ?", (effector_id,))
+            await self._commit_if_needed(db)
+            return cursor.rowcount > 0
+
+    async def insert_effector_artifact(
+        self,
+        *,
+        effector_id: str,
+        track_id: str | None,
+        detection_id: str | None,
+        kind: str = "snapshot",
+        path: str,
+        created_ns: int,
+        artifact_id: str | None = None,
+    ) -> str:
+        db = self._require_db()
+        final_id = artifact_id or f"efa-{uuid.uuid4().hex[:16]}"
+        async with self._write_guard():
+            await db.execute(
+                """
+                INSERT INTO effector_artifacts (
+                    id, effector_id, track_id, detection_id, kind, path, created_ns
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (final_id, effector_id, track_id, detection_id, kind, path, created_ns),
+            )
+            await self._commit_if_needed(db)
+        return final_id
+
+    async def get_effector_artifact(self, artifact_id: str) -> dict[str, Any] | None:
+        db = self._require_db()
+        row = await (
+            await db.execute(
+                "SELECT * FROM effector_artifacts WHERE id = ? LIMIT 1", (artifact_id,)
+            )
+        ).fetchone()
+        if row is None:
+            return None
+        return dict(row)
+
+    async def list_effector_artifacts(
+        self,
+        *,
+        effector_id: str | None = None,
+        track_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        db = self._require_db()
+        clauses: list[str] = []
+        params: list[object] = []
+        if effector_id is not None:
+            clauses.append("effector_id = ?")
+            params.append(effector_id)
+        if track_id is not None:
+            clauses.append("track_id = ?")
+            params.append(track_id)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        rows = await (
+            await db.execute(
+                f"SELECT * FROM effector_artifacts{where} ORDER BY created_ns DESC LIMIT ?",
+                (*params, limit),
+            )
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     async def delete_node(self, node_id: str) -> bool:
         """Delete a node and all of its node-keyed records.

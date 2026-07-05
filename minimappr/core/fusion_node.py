@@ -446,6 +446,14 @@ class FusionNode:
         self._classification_orchestrator.replace_classifier(classifier)
         self._detection_assembler.replace_coordinate_frame(coordinate_frame)
 
+    def set_action_handler(self, destination: str, handler: RuleActionHandler) -> None:
+        """Register (or replace) a rule-action handler for a destination.
+
+        Used to wire optional subsystems (e.g. effectors) that may not exist
+        yet at FusionNode construction time.
+        """
+        self._action_handlers[destination] = handler
+
     async def stop(self) -> None:
         if not self._started:
             return

@@ -117,6 +117,21 @@ fn handle_message(state: &AppState, text: &str) {
         LiveEvent::ConfigUpdated { config } => {
             state.config.set(Some(config));
         }
+        LiveEvent::EffectorStatus(update) => {
+            state.effectors.update(|effectors| {
+                if let Some(effector) = effectors.iter_mut().find(|e| e.id == update.effector_id) {
+                    effector.status = Some(crate::state::EffectorStatusData {
+                        state: update.state,
+                        pan_deg: update.pan_deg,
+                        tilt_deg: update.tilt_deg,
+                        zoom: update.zoom,
+                        armed: update.armed,
+                        last_seen_ns: update.last_seen_ns,
+                        active_track_id: update.active_track_id,
+                    });
+                }
+            });
+        }
         LiveEvent::SetFilter | LiveEvent::BitReport { .. } => {}
     }
 }

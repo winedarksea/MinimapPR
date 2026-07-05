@@ -1,6 +1,6 @@
 use crate::state::{
-    Alert, AppState, CopStatus, Detection, FusionStatus, NodeOmniDetectionSummary, NodeStatus,
-    Track, MAX_FEED_LEN,
+    Alert, AppState, CopStatus, Detection, Effector, FusionStatus, NodeOmniDetectionSummary,
+    NodeStatus, Track, MAX_FEED_LEN,
 };
 use futures::StreamExt;
 use gloo_net::http::Request;
@@ -62,6 +62,9 @@ async fn poll_once(state: AppState) {
         if let Some(cfg) = fetch_json("/api/v1/config").await {
             state.config.set(Some(cfg));
         }
+    }
+    if let Some(effectors) = fetch_json::<Vec<Effector>>("/api/v1/effectors").await {
+        state.effectors.set(effectors);
     }
 }
 
@@ -155,5 +158,95 @@ pub async fn patch_alert_status(
     } else {
         let body = resp.text().await.unwrap_or_default();
         Err(body)
+    }
+}
+
+// ── Effectors (PTZ cameras) ─────────────────────────────────────
+
+async fn post_json(url: &str, body: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let resp = Request::post(url)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(body).unwrap_or_default())
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.ok() {
+        resp.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    } else {
+        Err(resp.text().await.unwrap_or_default())
+    }
+}
+
+pub async fn register_effector(payload: serde_json::Value) -> Result<Effector, String> {
+    let resp = Request::post("/api/v1/effectors")
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&payload).unwrap_or_default())
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.ok() {
+        resp.json::<Effector>().await.map_err(|e| e.to_string())
+    } else {
+        Err(resp.text().await.unwrap_or_default())
+    }
+}
+
+pub async fn delete_effector(effector_id: &str) -> Result<(), String> {
+    let encoded = js_sys::encode_uri_component(effector_id)
+        .as_string()
+        .unwrap_or_default();
+    let url = format!("/api/v1/effectors/{encoded}");
+    let resp = Request::delete(&url).send().await.map_err(|e| e.to_string())?;
+    if resp.ok() {
+        Ok(())
+    } else {
+        Err(resp.text().await.unwrap_or_default())
+    }
+}
+
+/// Slew a registered camera at a track's current position.
+pub async fn aim_effector_at_track(effector_id: &str, track_id: &str) -> Result<(), String> {
+    let encoded = js_sys::encode_uri_component(effector_id)
+        .as_string()
+        .unwrap_or_default();
+    let url = format!("/api/v1/effectors/{encoded}/aim");
+    let body = serde_json::json!({ "track_id": track_id });
+    let result = post_json(&url, &body).await?;
+    match result.get("status").and_then(|v| v.as_str()) {
+        Some("COMPLETED") => Ok(()),
+        _ => Err(result
+            .get("failure_class")
+            .and_then(|v| v.as_str())
+            .unwrap_or("aim failed")
+            .to_string()),
+    }
+}
+
+/// Capture and persist a still from a camera, linked to a track/detection.
+pub async fn snapshot_effector(
+    effector_id: &str,
+    track_id: Option<&str>,
+) -> Result<String, String> {
+    let encoded = js_sys::encode_uri_component(effector_id)
+        .as_string()
+        .unwrap_or_default();
+    let url = format!("/api/v1/effectors/{encoded}/snapshot");
+    let body = serde_json::json!({ "track_id": track_id });
+    let result = post_json(&url, &body).await?;
+    match result.get("status").and_then(|v| v.as_str()) {
+        Some("COMPLETED") => Ok(result
+            .get("artifact_ids")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()),
+        _ => Err(result
+            .get("failure_class")
+            .and_then(|v| v.as_str())
+            .unwrap_or("snapshot failed")
+            .to_string()),
     }
 }

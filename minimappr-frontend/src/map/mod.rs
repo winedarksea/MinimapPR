@@ -39,6 +39,7 @@ pub fn LeafletMapPanel() -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState");
     let nodes = state.nodes;
     let tracks = state.tracks;
+    let effectors = state.effectors;
     let detections = state.detections;
     let omni_detection_summaries = state.omni_detection_summaries;
     let theme = state.theme;
@@ -97,6 +98,41 @@ pub fn LeafletMapPanel() -> impl IntoView {
                     }
                 });
             }
+        });
+    }
+
+    // Sync effectors (PTZ cameras) → map markers. Hidden entirely — the map
+    // simply never receives markers — when no effectors are registered.
+    {
+        Effect::new(move |prev_ids: Option<HashSet<String>>| {
+            let _ = theme.get();
+            effectors.with(|es| {
+                let current_ids: HashSet<String> = es
+                    .iter()
+                    .filter(|e| e.position_geo.is_some())
+                    .map(|e| e.id.clone())
+                    .collect();
+
+                if let Some(ref prev) = prev_ids {
+                    for id in prev.difference(&current_ids) {
+                        remove_effector_marker(id);
+                    }
+                }
+
+                for e in es {
+                    if let Some(geo) = &e.position_geo {
+                        let bearing = e.status.as_ref().and_then(|s| s.pan_deg).unwrap_or(0.0);
+                        let effector_state = e
+                            .status
+                            .as_ref()
+                            .map(|s| s.state.as_str())
+                            .unwrap_or("offline");
+                        set_effector_marker(&e.id, geo.lat, geo.lon, bearing, effector_state);
+                    }
+                }
+
+                current_ids
+            })
         });
     }
 
@@ -417,6 +453,16 @@ pub fn LeafletMapPanel() -> impl IntoView {
                                     "Offline"
                                 </span>
                             </div>
+                            // Effectors (PTZ cameras) — only shown once one exists.
+                            {move || (!effectors.get().is_empty()).then(|| view! {
+                                <div class="legend-group">
+                                    <div class="legend-group-label">"Effectors"</div>
+                                    <span class="legend-item">
+                                        <span class="legend-shape-node"></span>
+                                        "PTZ camera"
+                                    </span>
+                                </div>
+                            })}
                             // Tracks
                             <div class="legend-group">
                                 <div class="legend-group-label">"Tracks"</div>
