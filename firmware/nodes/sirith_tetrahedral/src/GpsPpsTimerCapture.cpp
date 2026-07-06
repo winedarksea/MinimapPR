@@ -213,14 +213,18 @@ void GpsPpsTimerCapture::onIrq() {
   while (!pio_sm_is_rx_fifo_empty(pio, static_cast<uint>(sm_))) {
     const uint32_t remainingTicks = pio_sm_get(pio, static_cast<uint>(sm_));
     const uint64_t elapsedLoops = static_cast<uint64_t>(kCounterReload - remainingTicks);
-    if (elapsedLoops == 0 && observedEdgeCount_ > 0) {
-      // A real PPS edge is ~1 s of loops; zero elapsed can only come from the
-      // PIO counter underflowing to the rising_edge fallthrough after ~68.7 s
-      // without an edge. Drop it so it neither counts as an edge nor pollutes
-      // the interval math; the lost time is recovered by the re-base below.
+    if (observedEdgeCount_ > 0 && (elapsedLoops == 0 || remainingTicks == 0)) {
+      // A real PPS edge is ~1 s of loops. The PIO counter underflowing to the
+      // rising_edge fallthrough after ~68.7 s without an edge pushes
+      // x = 0xffffffff (jmp x-- decrements unconditionally), i.e. zero
+      // elapsed; remainingTicks == 0 is also dropped defensively in case the
+      // decrement semantics ever differ. Dropping means the fake pulse
+      // neither counts as an edge nor pollutes the interval math; the lost
+      // time is recovered by the re-base below.
       continue;
     }
-    accumulatedTickCycles_ += elapsedLoops * static_cast<uint64_t>(kCyclesPerLoop);
+    accumulatedTickCycles_ +=
+        elapsedLoops * static_cast<uint64_t>(kCyclesPerLoop) + kInterEdgeOverheadCycles;
     ++observedEdgeCount_;
 
     GpsPpsCaptureEvent nextEvent = {};

@@ -45,6 +45,12 @@ class GpsPpsTimerCapture {
   // because it is a constant offset across nodes, so it cancels in PPS interval
   // estimation and inter-node TDOA comparisons.
   static constexpr uint32_t kFixedEdgePipelineCycles = 3u;
+  // Between two edge captures the SM additionally spends 4 cycles that the
+  // loop counter never sees: the taken `jmp pin`, `mov isr`, `push`, and
+  // `mov x, y`. These must be accumulated per edge or the tick-domain clock
+  // falls behind time_us_64() by 32 ns per second (at 125 MHz that reaches
+  // the 10 ms rebase threshold after ~3.6 days of healthy uptime).
+  static constexpr uint32_t kInterEdgeOverheadCycles = 4u;
   // Tick-domain time and time_us_64() derive from the same XOSC, so they do
   // not drift apart; divergence beyond IRQ latency means the PIO counter
   // wrapped during a PPS outage (~68.7 s at 125 MHz) and lost time. 10 ms is
