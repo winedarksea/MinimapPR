@@ -11,6 +11,10 @@ struct GpsPpsCaptureEvent {
   uint64_t monotonicUs = 0;
   uint64_t monotonicNs = 0;
   uint64_t tickCycles = 0;
+  // Set when the tick-domain timebase had to be re-aligned to the system timer
+  // (e.g. after a PPS outage long enough to wrap the PIO counter). Consumers
+  // must restart interval/lock acquisition instead of trusting continuity.
+  bool rebased = false;
   AudioProducerSnapshot audioProducerSnapshot = {};
 };
 
@@ -41,6 +45,11 @@ class GpsPpsTimerCapture {
   // because it is a constant offset across nodes, so it cancels in PPS interval
   // estimation and inter-node TDOA comparisons.
   static constexpr uint32_t kFixedEdgePipelineCycles = 3u;
+  // Tick-domain time and time_us_64() derive from the same XOSC, so they do
+  // not drift apart; divergence beyond IRQ latency means the PIO counter
+  // wrapped during a PPS outage (~68.7 s at 125 MHz) and lost time. 10 ms is
+  // generously above worst-case IRQ latency plus init skew.
+  static constexpr uint64_t kMaxTickTimerDivergenceUs = 10000u;
 
   int gpioPin_ = -1;
   bool configured_ = false;

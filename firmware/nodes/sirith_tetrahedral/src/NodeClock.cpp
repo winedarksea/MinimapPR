@@ -20,6 +20,8 @@ constexpr uint64_t kMaximumPpsIntervalUs = 1100000ULL;
 constexpr int64_t kLargeNtpPhaseCorrectionNs = 2LL * 1000000000LL;
 constexpr int64_t kGpsNtpSanityLimitNs = 2LL * 1000000000LL;
 constexpr uint64_t kRejectedGpsEpochLogIntervalUs = 10000000ULL;
+constexpr uint64_t kMaxSnapshotDelayNs = 50000000ULL;
+constexpr uint32_t kPpsPhaseStatReportInterval = 60;
 
 double clampScale(double scale) {
   return std::clamp(scale, 0.9995, 1.0005);
@@ -97,6 +99,10 @@ void NodeClock::begin(
   gpsStablePulseCount_ = 0;
   latestPpsEdgeCount_ = 0;
   latestPpsPhaseErrorNs_ = 0;
+  lastIgnoredSnapshotLogMonotonicUs_ = 0;
+  ppsPhaseStatCount_ = 0;
+  ppsPhaseSumSqNs_ = 0.0;
+  ppsPhaseMaxAbsNs_ = 0;
   filteredFrequencyPpm_ = 0.0;
 
   std::printf(
@@ -312,14 +318,23 @@ void NodeClock::applyGpsPpsObservation(uint64_t utcSecondNs, const GpsPpsCapture
       latestPpsEdgeCount_ > 0 &&
       ppsEvent.edgeCount > latestPpsEdgeCount_ &&
       ppsEvent.edgeCount != (latestPpsEdgeCount_ + 1u);
-  if (missedPpsEdges) {
+  if (missedPpsEdges || ppsEvent.rebased) {
     haveGpsInterval_ = false;
     gpsStablePulseCount_ = 0;
     latestPpsPhaseErrorNs_ = 0;
-    std::printf(
-        "[timing] PPS edge jump detected previous=%u current=%u; restarting GPS lock acquisition\n",
-        static_cast<unsigned>(latestPpsEdgeCount_),
-        static_cast<unsigned>(ppsEvent.edgeCount));
+    ppsPhaseStatCount_ = 0;
+    ppsPhaseSumSqNs_ = 0.0;
+    ppsPhaseMaxAbsNs_ = 0;
+    if (ppsEvent.rebased) {
+      std::printf(
+          "[timing] PPS timebase rebased at edge=%u; restarting GPS lock acquisition\n",
+          static_cast<unsigned>(ppsEvent.edgeCount));
+    } else {
+      std::printf(
+          "[timing] PPS edge jump detected previous=%u current=%u; restarting GPS lock acquisition\n",
+          static_cast<unsigned>(latestPpsEdgeCount_),
+          static_cast<unsigned>(ppsEvent.edgeCount));
+    }
   }
 
   double samplePosition = estimateSamplePositionAtMonotonicUs(monotonicUs);
@@ -327,19 +342,29 @@ void NodeClock::applyGpsPpsObservation(uint64_t utcSecondNs, const GpsPpsCapture
     const double samplePeriodNs =
         effectiveSamplePeriodNs_ > 0.0 ? effectiveSamplePeriodNs_ : nominalSamplePeriodNs_;
     const uint64_t snapshotMonotonicNs = ppsEvent.audioProducerSnapshot.capturedMonotonicUs * 1000ULL;
-    const uint64_t snapshotDelayUs =
-        snapshotMonotonicNs > monotonicNs
-            ? ((snapshotMonotonicNs - monotonicNs) / 1000ULL)
-            : 0ULL;
     const uint64_t snapshotDelayNs =
         snapshotMonotonicNs > monotonicNs ? (snapshotMonotonicNs - monotonicNs) : 0ULL;
-    const double delaySamples = samplePeriodNs > 0.0
-        ? (static_cast<double>(snapshotDelayNs) / samplePeriodNs)
-        : 0.0;
-    (void)snapshotDelayUs;
-    samplePosition = std::max<double>(0.0, ppsEvent.audioProducerSnapshot.samplePosition - delaySamples);
-    lastObservedCompletedBlockCount_ = ppsEvent.audioProducerSnapshot.completedBlockCount;
-    lastObservedDmaRingSlotIndex_ = ppsEvent.audioProducerSnapshot.dmaRingSlotIndex;
+    if (snapshotDelayNs > kMaxSnapshotDelayNs) {
+      // A snapshot this far behind the PPS edge means the tick and timer
+      // domains disagree beyond any plausible IRQ latency; keep the
+      // monotonic-time estimate instead of a wildly over-corrected position.
+      if (lastIgnoredSnapshotLogMonotonicUs_ == 0 ||
+          monotonicUs < lastIgnoredSnapshotLogMonotonicUs_ ||
+          (monotonicUs - lastIgnoredSnapshotLogMonotonicUs_) >= kRejectedGpsEpochLogIntervalUs) {
+        lastIgnoredSnapshotLogMonotonicUs_ = monotonicUs;
+        std::printf(
+            "[timing] ignored audio snapshot with delay_ns=%llu at PPS edge=%u\n",
+            static_cast<unsigned long long>(snapshotDelayNs),
+            static_cast<unsigned>(ppsEvent.edgeCount));
+      }
+    } else {
+      const double delaySamples = samplePeriodNs > 0.0
+          ? (static_cast<double>(snapshotDelayNs) / samplePeriodNs)
+          : 0.0;
+      samplePosition = std::max<double>(0.0, ppsEvent.audioProducerSnapshot.samplePosition - delaySamples);
+      lastObservedCompletedBlockCount_ = ppsEvent.audioProducerSnapshot.completedBlockCount;
+      lastObservedDmaRingSlotIndex_ = ppsEvent.audioProducerSnapshot.dmaRingSlotIndex;
+    }
   }
   const uint64_t gpsAgeUs =
       (lastGpsSyncMonotonicUs_ > 0 && monotonicUs >= lastGpsSyncMonotonicUs_)
@@ -411,6 +436,21 @@ void NodeClock::applyGpsPpsObservation(uint64_t utcSecondNs, const GpsPpsCapture
     latestPpsPhaseErrorNs_ =
         static_cast<int64_t>(utcSecondNs) - static_cast<int64_t>(utcAtSampleIndex(anchorSampleIndex));
     setSampleAnchor(samplePosition, utcSecondNs);
+    ++ppsPhaseStatCount_;
+    const double phaseErrorNs = static_cast<double>(latestPpsPhaseErrorNs_);
+    ppsPhaseSumSqNs_ += phaseErrorNs * phaseErrorNs;
+    ppsPhaseMaxAbsNs_ = std::max<int64_t>(ppsPhaseMaxAbsNs_, std::llabs(latestPpsPhaseErrorNs_));
+    if (ppsPhaseStatCount_ >= kPpsPhaseStatReportInterval) {
+      std::printf(
+          "[timing] pps phase stats n=%u rms_ns=%.0f max_ns=%lld ppm=%.3f\n",
+          static_cast<unsigned>(ppsPhaseStatCount_),
+          std::sqrt(ppsPhaseSumSqNs_ / static_cast<double>(ppsPhaseStatCount_)),
+          static_cast<long long>(ppsPhaseMaxAbsNs_),
+          filteredFrequencyPpm_);
+      ppsPhaseStatCount_ = 0;
+      ppsPhaseSumSqNs_ = 0.0;
+      ppsPhaseMaxAbsNs_ = 0;
+    }
   }
   latestPpsEdgeCount_ = ppsEvent.edgeCount;
   setWallReference(utcSecondNs, monotonicUs);

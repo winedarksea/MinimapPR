@@ -108,6 +108,11 @@ bool GpsPpsTimerCapture::initPioStateMachine() {
   pio_sm_exec(selectedPio, static_cast<uint>(selectedSm), pio_encode_pull(false, false));
   pio_sm_exec(selectedPio, static_cast<uint>(selectedSm), pio_encode_mov(pio_y, pio_osr));
   pio_sm_exec(selectedPio, static_cast<uint>(selectedSm), pio_encode_mov(pio_x, pio_y));
+  // The tick counter starts when the SM is enabled, so the timebase must be
+  // captured here rather than at the top of begin(); the setup work above
+  // would otherwise become a per-boot offset between the tick domain and
+  // time_us_64() that biases the PPS-to-audio snapshot delay correction.
+  monotonicBaseUs_ = time_us_64();
   pio_sm_set_enabled(selectedPio, static_cast<uint>(selectedSm), true);
 
   irqIndex_ = 0;
@@ -208,6 +213,13 @@ void GpsPpsTimerCapture::onIrq() {
   while (!pio_sm_is_rx_fifo_empty(pio, static_cast<uint>(sm_))) {
     const uint32_t remainingTicks = pio_sm_get(pio, static_cast<uint>(sm_));
     const uint64_t elapsedLoops = static_cast<uint64_t>(kCounterReload - remainingTicks);
+    if (elapsedLoops == 0 && observedEdgeCount_ > 0) {
+      // A real PPS edge is ~1 s of loops; zero elapsed can only come from the
+      // PIO counter underflowing to the rising_edge fallthrough after ~68.7 s
+      // without an edge. Drop it so it neither counts as an edge nor pollutes
+      // the interval math; the lost time is recovered by the re-base below.
+      continue;
+    }
     accumulatedTickCycles_ += elapsedLoops * static_cast<uint64_t>(kCyclesPerLoop);
     ++observedEdgeCount_;
 
@@ -216,6 +228,18 @@ void GpsPpsTimerCapture::onIrq() {
     nextEvent.tickCycles = accumulatedTickCycles_ + kFixedEdgePipelineCycles;
     nextEvent.monotonicNs =
         (monotonicBaseUs_ * 1000ULL) + ticksToNs(nextEvent.tickCycles, clkSysHz_);
+    const uint64_t timerNowUs = time_us_64();
+    const uint64_t tickNowUs = nextEvent.monotonicNs / 1000ULL;
+    const uint64_t divergenceUs =
+        timerNowUs > tickNowUs ? (timerNowUs - tickNowUs) : (tickNowUs - timerNowUs);
+    if (divergenceUs > kMaxTickTimerDivergenceUs) {
+      monotonicBaseUs_ = timerNowUs;
+      accumulatedTickCycles_ = 0;
+      nextEvent.tickCycles = kFixedEdgePipelineCycles;
+      nextEvent.monotonicNs =
+          (monotonicBaseUs_ * 1000ULL) + ticksToNs(nextEvent.tickCycles, clkSysHz_);
+      nextEvent.rebased = true;
+    }
     nextEvent.monotonicUs = nextEvent.monotonicNs / 1000ULL;
     if (audioSource_ != nullptr) {
       nextEvent.audioProducerSnapshot.valid =

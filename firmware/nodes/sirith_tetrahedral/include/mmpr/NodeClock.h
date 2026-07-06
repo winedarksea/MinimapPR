@@ -98,6 +98,10 @@ class NodeClock {
   uint32_t gpsStablePulseCount_ = 0;
   uint32_t latestPpsEdgeCount_ = 0;
   int64_t latestPpsPhaseErrorNs_ = 0;
+  uint64_t lastIgnoredSnapshotLogMonotonicUs_ = 0;
+  uint32_t ppsPhaseStatCount_ = 0;
+  double ppsPhaseSumSqNs_ = 0.0;
+  int64_t ppsPhaseMaxAbsNs_ = 0;
 };
 
 }  // namespace mmpr
