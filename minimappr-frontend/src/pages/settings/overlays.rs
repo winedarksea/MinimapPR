@@ -1,6 +1,7 @@
 use crate::api::{
     delete_overlay, list_overlays, patch_overlay, upload_overlay, MapOverlay, MapOverlayUpdate,
 };
+use crate::components::form_row::FormRow;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use wasm_bindgen::JsCast;
@@ -121,19 +122,19 @@ pub fn OverlaysView() -> impl IntoView {
 
             <section class="diag-card overlay-upload-card">
                 <div class="pipeline-section-label">"Upload overlay"</div>
-                <div class="settings-form-grid overlay-upload-grid">
-                    <label>"Name"
+                <div class="settings-field-rows">
+                    <FormRow label="Name">
                         <input
                             type="text"
-                            class="mic-input"
+                            class="settings-field-input"
                             placeholder="Barn floorplan"
                             prop:value=move || upload_name.get()
                             on:input=move |event| upload_name.set(event_target_value(&event))
                         />
-                    </label>
-                    <label>"Kind"
+                    </FormRow>
+                    <FormRow label="Kind">
                         <select
-                            class="mic-input"
+                            class="settings-field-input"
                             prop:value=move || upload_kind.get()
                             on:change=move |event| upload_kind.set(event_target_value(&event))
                         >
@@ -141,31 +142,31 @@ pub fn OverlaysView() -> impl IntoView {
                             <option value="svg">"SVG"</option>
                             <option value="geojson">"GeoJSON"</option>
                         </select>
-                    </label>
-                    <label>"Opacity"
+                    </FormRow>
+                    <FormRow label="Opacity">
                         <input
                             type="number"
                             min="0"
                             max="1"
                             step="0.05"
-                            class="mic-input"
+                            class="settings-field-input"
                             prop:value=move || upload_opacity.get()
                             on:input=move |event| upload_opacity.set(event_target_value(&event))
                         />
-                    </label>
-                    <label>"Storey"
+                    </FormRow>
+                    <FormRow label="Storey">
                         <input
                             type="text"
-                            class="mic-input"
+                            class="settings-field-input"
                             placeholder="L1"
                             prop:value=move || upload_storey.get()
                             on:input=move |event| upload_storey.set(event_target_value(&event))
                         />
-                    </label>
-                    <label>"File"
+                    </FormRow>
+                    <FormRow label="File">
                         <input
                             type="file"
-                            class="mic-input overlay-file-input"
+                            class="settings-field-input overlay-file-input"
                             accept=".png,.jpg,.jpeg,.webp,.svg,.json,.geojson"
                             on:change=move |event| {
                                 let input = event
@@ -175,11 +176,11 @@ pub fn OverlaysView() -> impl IntoView {
                                 upload_file.set(file);
                             }
                         />
-                    </label>
+                    </FormRow>
                 </div>
                 <label class="overlay-bounds-label">"Bounds JSON"
                     <textarea
-                        class="mic-input overlay-bounds-editor"
+                        class="settings-field-textarea overlay-bounds-editor"
                         placeholder="[[44.0,-93.0],[44.0,-92.9],[43.9,-92.9],[43.9,-93.0]]"
                         prop:value=move || upload_bounds.get()
                         on:input=move |event| upload_bounds.set(event_target_value(&event))
@@ -328,29 +329,30 @@ fn OverlayCard(overlay: MapOverlay, overlays: RwSignal<Vec<MapOverlay>>) -> impl
                 </div>
             </div>
 
-            <div class="settings-form-grid overlay-edit-grid">
+            <div class="settings-field-rows">
                 <label class="rule-enabled-toggle overlay-enabled-toggle">
                     <input
                         type="checkbox"
+                        class="settings-field-input"
                         prop:checked=overlay.enabled
                         on:change=move |event| patch_enabled(event_target_checked(&event))
                     />
                     <span>"Enabled"</span>
                 </label>
-                <label>"Opacity"
+                <FormRow label="Opacity">
                     <input
                         type="number"
                         min="0"
                         max="1"
                         step="0.05"
-                        class="mic-input"
+                        class="settings-field-input"
                         prop:value=move || opacity_text.get()
                         on:input=move |event| opacity_text.set(event_target_value(&event))
                     />
-                </label>
+                </FormRow>
                 <label class="overlay-bounds-label">"Bounds"
                     <textarea
-                        class="mic-input overlay-bounds-editor overlay-bounds-editor--compact"
+                        class="settings-field-textarea overlay-bounds-editor overlay-bounds-editor--compact"
                         prop:value=move || bounds_text.get()
                         on:input=move |event| bounds_text.set(event_target_value(&event))
                     />

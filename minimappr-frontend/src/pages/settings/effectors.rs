@@ -169,7 +169,7 @@ pub fn EffectorsView() -> impl IntoView {
                 view! {
                     <div class="diag-card" style="max-width:32rem">
                         <div class="pipeline-section-label">"Add camera"</div>
-                        <div class="settings-form-grid">
+                        <div class="compact-form-grid">
                             <label>"Camera ID"
                                 <input type="text" placeholder="cam-backyard"
                                     prop:value=move || form.get().id
@@ -438,7 +438,7 @@ fn EffectorSafetyCard(effector_id: String, effectors: RwSignal<Vec<Effector>>) -
                 </button>
             </div>
 
-            <div class="settings-form-grid effector-safety-grid">
+            <div class="compact-form-grid effector-safety-grid">
                 <label class="rule-enabled-toggle effector-checkbox-row">
                     <input
                         type="checkbox"

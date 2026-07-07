@@ -173,6 +173,7 @@ fn MapLayerControls(left_dock_width_px: RwSignal<f64>) -> impl IntoView {
     let heatmap_bin_count = state.live_heatmap_bin_count;
     let heatmap_error = state.live_heatmap_error;
     let map_layers = state.map_layers;
+    let menu_open = RwSignal::new(false);
 
     Effect::new(move |_| {
         map_layers.get().save();
@@ -186,39 +187,53 @@ fn MapLayerControls(left_dock_width_px: RwSignal<f64>) -> impl IntoView {
     };
 
     view! {
-        <section class="workspace-map-controls" style=controls_style aria-label="Map layers">
-            <div class="map-control-layer-grid">
-                {all_layer_defs()
-                    .iter()
-                    .copied()
-                    .map(|layer| view! {
-                        <LayerToggle layer map_layers />
-                    })
-                    .collect_view()}
-            </div>
-            <div class="map-control-row">
-                <label class="map-control-toggle">
-                    <input
-                        type="checkbox"
-                        prop:checked=move || heatmap_enabled.get()
-                        on:change=move |event| heatmap_enabled.set(event_target_checked(&event))
-                    />
-                    <span>"Heatmap"</span>
-                </label>
-                <span class="tone-badge neutral">
-                    {move || format!("{} bins", heatmap_bin_count.get())}
-                </span>
-            </div>
-            <div class="map-control-segments">
-                <HeatmapWindowButton label="5m" heatmap_window />
-                <HeatmapWindowButton label="1h" heatmap_window />
-                <HeatmapWindowButton label="24h" heatmap_window />
-                <HeatmapWindowButton label="7d" heatmap_window />
-            </div>
-            {move || heatmap_error.get().map(|message| view! {
-                <span class="daily-error map-control-error">{message}</span>
+        <div class="workspace-map-controls-anchor" style=controls_style>
+            <button
+                type="button"
+                class="map-toolbar-toggle"
+                aria-expanded=move || menu_open.get().to_string()
+                aria-label="Map layers"
+                on:click=move |_| menu_open.update(|open| *open = !*open)
+            >
+                <span class="material-symbols-rounded" aria-hidden="true">"layers"</span>
+                <span>"Layers"</span>
+            </button>
+            {move || menu_open.get().then(|| view! {
+                <section class="workspace-map-controls" aria-label="Map layers">
+                    <div class="map-control-layer-grid">
+                        {all_layer_defs()
+                            .iter()
+                            .copied()
+                            .map(|layer| view! {
+                                <LayerToggle layer map_layers />
+                            })
+                            .collect_view()}
+                    </div>
+                    <div class="map-control-row">
+                        <label class="map-control-toggle">
+                            <input
+                                type="checkbox"
+                                prop:checked=move || heatmap_enabled.get()
+                                on:change=move |event| heatmap_enabled.set(event_target_checked(&event))
+                            />
+                            <span>"Heatmap"</span>
+                        </label>
+                        <span class="tone-badge neutral">
+                            {move || format!("{} bins", heatmap_bin_count.get())}
+                        </span>
+                    </div>
+                    <div class="map-control-segments">
+                        <HeatmapWindowButton label="5m" heatmap_window />
+                        <HeatmapWindowButton label="1h" heatmap_window />
+                        <HeatmapWindowButton label="24h" heatmap_window />
+                        <HeatmapWindowButton label="7d" heatmap_window />
+                    </div>
+                    {move || heatmap_error.get().map(|message| view! {
+                        <span class="daily-error map-control-error">{message}</span>
+                    })}
+                </section>
             })}
-        </section>
+        </div>
     }
 }
 

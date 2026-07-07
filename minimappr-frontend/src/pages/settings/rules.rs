@@ -1,4 +1,5 @@
 use crate::api::{get_rules, put_rules, RuleAction, RuleCondition, RuleModel};
+use crate::components::form_row::FormRow;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
@@ -248,7 +249,7 @@ pub fn RulesView() -> impl IntoView {
             <details class="diag-card rules-raw-panel">
                 <summary>"Raw JSON"</summary>
                 <textarea
-                    class="mic-input rules-json-editor"
+                    class="settings-field-textarea rules-json-editor"
                     spellcheck="false"
                     prop:value=move || raw_payload.get()
                     on:input=move |event| raw_payload.set(event_target_value(&event))
@@ -306,11 +307,11 @@ fn RuleEditor(rules: RwSignal<Vec<RuleModel>>, index: usize) -> impl IntoView {
                 <button class="btn-sm btn-sm--danger" on:click=remove_rule>"Remove"</button>
             </div>
 
-            <div class="settings-form-grid rules-core-grid">
-                <label>"Rule ID"
+            <div class="settings-field-rows">
+                <FormRow label="Rule ID">
                     <input
                         type="text"
-                        class="mic-input"
+                        class="settings-field-input"
                         prop:value=move || rules.with(|items| items.get(index).map(|rule| rule.id.clone()).unwrap_or_default())
                         on:input=move |event| {
                             let value = event_target_value(&event);
@@ -321,10 +322,10 @@ fn RuleEditor(rules: RwSignal<Vec<RuleModel>>, index: usize) -> impl IntoView {
                             });
                         }
                     />
-                </label>
-                <label>"Scope"
+                </FormRow>
+                <FormRow label="Scope">
                     <select
-                        class="mic-input"
+                        class="settings-field-input"
                         on:change=move |event| {
                             let value = event_target_value(&event);
                             rules.update(|items| {
@@ -347,13 +348,13 @@ fn RuleEditor(rules: RwSignal<Vec<RuleModel>>, index: usize) -> impl IntoView {
                             "Track"
                         </option>
                     </select>
-                </label>
-                <label>"Cooldown seconds"
+                </FormRow>
+                <FormRow label="Cooldown seconds">
                     <input
                         type="number"
                         min="0"
                         step="0.1"
-                        class="mic-input"
+                        class="settings-field-input"
                         prop:value=move || rules.with(|items| {
                             items
                                 .get(index)
@@ -369,14 +370,14 @@ fn RuleEditor(rules: RwSignal<Vec<RuleModel>>, index: usize) -> impl IntoView {
                             });
                         }
                     />
-                </label>
-                <label>"Minimum confidence"
+                </FormRow>
+                <FormRow label="Minimum confidence">
                     <input
                         type="number"
                         min="0"
                         max="1"
                         step="0.01"
-                        class="mic-input"
+                        class="settings-field-input"
                         prop:value=move || rules.with(|items| {
                             items
                                 .get(index)
@@ -398,11 +399,11 @@ fn RuleEditor(rules: RwSignal<Vec<RuleModel>>, index: usize) -> impl IntoView {
                             });
                         }
                     />
-                </label>
+                </FormRow>
             </div>
 
             <div class="rules-section-label">"Match criteria"</div>
-            <div class="settings-form-grid rules-condition-grid">
+            <div class="compact-form-grid rules-condition-grid">
                 <CsvField rules=rules index=index field="label_categories" label="Label categories" />
                 <CsvField rules=rules index=index field="labels" label="Labels" />
                 <CsvField rules=rules index=index field="reporting_modalities" label="Reporting modalities" />
@@ -477,7 +478,7 @@ fn CsvField(
         <label>{label}
             <input
                 type="text"
-                class="mic-input"
+                class="settings-field-input"
                 prop:value=read_value
                 placeholder="comma-separated"
                 on:input=move |event| write_value(event_target_value(&event))
@@ -511,11 +512,11 @@ fn ActionEditor(
 
     view! {
         <div class="rule-action-card">
-            <div class="settings-form-grid rules-action-grid">
+            <div class="compact-form-grid rules-action-grid">
                 <label>"Type"
                     <input
                         type="text"
-                        class="mic-input"
+                        class="settings-field-input"
                         prop:value=move || {
                             rules.with(|items| {
                                 items
@@ -541,7 +542,7 @@ fn ActionEditor(
                 <label>"Destination"
                     <input
                         type="text"
-                        class="mic-input"
+                        class="settings-field-input"
                         prop:value=move || {
                             rules.with(|items| {
                                 items
@@ -566,7 +567,7 @@ fn ActionEditor(
                 </label>
                 <label>"Priority"
                     <select
-                        class="mic-input"
+                        class="settings-field-input"
                         on:change=move |event| {
                             let value = event_target_value(&event);
                             rules.update(|items| {
@@ -588,7 +589,7 @@ fn ActionEditor(
             </div>
             <label class="rules-payload-label">"Payload JSON"
                 <textarea
-                    class="mic-input rules-payload-editor"
+                    class="settings-field-textarea rules-payload-editor"
                     spellcheck="false"
                     prop:value=move || payload_text.get()
                     on:input=move |event| payload_text.set(event_target_value(&event))

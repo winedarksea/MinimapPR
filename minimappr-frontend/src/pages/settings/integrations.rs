@@ -1,4 +1,5 @@
 use crate::api::patch_config;
+use crate::components::form_row::FormRow;
 use crate::state::AppState;
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
@@ -89,9 +90,9 @@ pub fn IntegrationsView() -> impl IntoView {
     };
 
     view! {
-        <div class="settings-page integrations-page">
+        <div class="page-stub integrations-page">
             <section class="card integration-card">
-                <div class="card-head">
+                <div class="settings-card-head">
                     <div>
                         <h2>"Home Assistant"</h2>
                         <p class="muted">
@@ -101,48 +102,53 @@ pub fn IntegrationsView() -> impl IntoView {
                     <span class="tone-badge neutral">"backend pending"</span>
                 </div>
 
-                <div class="settings-form-grid integrations-grid">
+                <div class="settings-field-rows">
                     <label class="integration-enabled-toggle">
                         <input
                             type="checkbox"
+                            class="settings-field-input"
                             prop:checked=move || enabled.get()
                             on:change=move |event| enabled.set(event_target_checked(&event))
                         />
                         <span>"Enable Home Assistant bridge"</span>
                     </label>
-                    <label>"Base URL"
+                    <FormRow label="Base URL">
                         <input
                             type="url"
+                            class="settings-field-input"
                             placeholder="http://homeassistant.local:8123"
                             prop:value=move || base_url.get()
                             on:input=move |event| base_url.set(event_target_value(&event))
                         />
-                    </label>
-                    <label>"Long-lived access token"
+                    </FormRow>
+                    <FormRow label="Long-lived access token">
                         <input
                             type="password"
+                            class="settings-field-input"
                             placeholder="Stored server-side; redacted after save"
                             prop:value=move || token.get()
                             on:input=move |event| token.set(event_target_value(&event))
                         />
-                    </label>
-                    <label>"MQTT host"
+                    </FormRow>
+                    <FormRow label="MQTT host">
                         <input
                             type="text"
+                            class="settings-field-input"
                             placeholder="mqtt.local"
                             prop:value=move || mqtt_host.get()
                             on:input=move |event| mqtt_host.set(event_target_value(&event))
                         />
-                    </label>
-                    <label>"MQTT port"
+                    </FormRow>
+                    <FormRow label="MQTT port">
                         <input
                             type="number"
+                            class="settings-field-input"
                             min="1"
                             max="65535"
                             prop:value=move || mqtt_port.get()
                             on:input=move |event| mqtt_port.set(event_target_value(&event))
                         />
-                    </label>
+                    </FormRow>
                 </div>
 
                 <div class="overlay-card-actions">
@@ -162,7 +168,7 @@ pub fn IntegrationsView() -> impl IntoView {
             </section>
 
             <section class="card integration-card">
-                <div class="card-head">
+                <div class="settings-card-head">
                     <h2>"Planned Bridge Outputs"</h2>
                     <span class="mock-watermark">"MOCK - awaiting backend"</span>
                 </div>

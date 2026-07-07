@@ -25,6 +25,7 @@ pub fn MapPanel() -> impl IntoView {
     let detections = state.detections;
     let selected_cop_item = state.selected_cop_item;
     let config = state.config;
+    let legend_open = RwSignal::new(false);
     crate::layers::mount_core_marker_layers(&state);
 
     // Init MapLibre once after the component first mounts.
@@ -156,6 +157,17 @@ pub fn MapPanel() -> impl IntoView {
             <div class="leaflet-container-wrap">
                 <div id="mmp-map"></div>
                 <div class="map-overlay-stack map-overlay-bottom-right">
+                    <button
+                        type="button"
+                        class="map-toolbar-toggle"
+                        aria-expanded=move || legend_open.get().to_string()
+                        aria-label="Overlay legend"
+                        on:click=move |_| legend_open.update(|open| *open = !*open)
+                    >
+                        <span class="material-symbols-rounded" aria-hidden="true">"legend_toggle"</span>
+                        <span>"Legend"</span>
+                    </button>
+                    {move || legend_open.get().then(|| view! {
                     <section class="map-floating-panel">
                         <div class="map-floating-title">"Overlay Legend"</div>
                         <div class="legend">
@@ -223,6 +235,7 @@ pub fn MapPanel() -> impl IntoView {
                             </div>
                         </div>
                     </section>
+                    })}
                 </div>
             </div>
         </div>

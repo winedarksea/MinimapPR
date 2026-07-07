@@ -1,3 +1,4 @@
+use crate::components::form_row::FormRow;
 use crate::devices::registry::save_devices;
 use crate::devices::schema::{DeviceKind, DeviceRecord};
 use crate::state::AppState;
@@ -162,9 +163,9 @@ pub fn DevicesView() -> impl IntoView {
     };
 
     view! {
-        <div class="settings-page devices-page">
+        <div class="page-stub devices-page">
             <section class="card overlay-upload-card">
-                <div class="card-head">
+                <div class="settings-card-head">
                     <div>
                         <h2>"Devices"</h2>
                         <p class="muted">
@@ -174,9 +175,10 @@ pub fn DevicesView() -> impl IntoView {
                     <span class="tone-badge neutral">"local"</span>
                 </div>
 
-                <div class="settings-form-grid devices-form-grid">
-                    <label>"Kind"
+                <div class="settings-field-rows">
+                    <FormRow label="Kind">
                         <select
+                            class="settings-field-input"
                             prop:value=move || selected_kind.get()
                             on:change=move |event| selected_kind.set(event_target_value(&event))
                         >
@@ -184,38 +186,40 @@ pub fn DevicesView() -> impl IntoView {
                                 <option value=kind.as_str()>{kind.label()}</option>
                             }).collect_view()}
                         </select>
-                    </label>
-                    <label>"Device id"
+                    </FormRow>
+                    <FormRow label="Device id">
                         <input
                             type="text"
+                            class="settings-field-input"
                             prop:value=move || device_id.get()
                             on:input=move |event| device_id.set(event_target_value(&event))
                             placeholder="rf-north-1"
                         />
-                    </label>
-                    <label>"Label"
+                    </FormRow>
+                    <FormRow label="Label">
                         <input
                             type="text"
+                            class="settings-field-input"
                             prop:value=move || label.get()
                             on:input=move |event| label.set(event_target_value(&event))
                             placeholder="North ridge RF"
                         />
-                    </label>
-                    <label>"Latitude"
-                        <input type="number" step="0.000001" prop:value=move || lat.get() on:input=move |event| lat.set(event_target_value(&event)) />
-                    </label>
-                    <label>"Longitude"
-                        <input type="number" step="0.000001" prop:value=move || lon.get() on:input=move |event| lon.set(event_target_value(&event)) />
-                    </label>
-                    <label>"Altitude m"
-                        <input type="number" step="0.1" prop:value=move || alt_m.get() on:input=move |event| alt_m.set(event_target_value(&event)) />
-                    </label>
-                    <label>"Yaw deg"
-                        <input type="number" step="0.1" prop:value=move || yaw_deg.get() on:input=move |event| yaw_deg.set(event_target_value(&event)) />
-                    </label>
-                    <label>"Pitch deg"
-                        <input type="number" step="0.1" prop:value=move || pitch_deg.get() on:input=move |event| pitch_deg.set(event_target_value(&event)) />
-                    </label>
+                    </FormRow>
+                    <FormRow label="Latitude">
+                        <input type="number" step="0.000001" class="settings-field-input" prop:value=move || lat.get() on:input=move |event| lat.set(event_target_value(&event)) />
+                    </FormRow>
+                    <FormRow label="Longitude">
+                        <input type="number" step="0.000001" class="settings-field-input" prop:value=move || lon.get() on:input=move |event| lon.set(event_target_value(&event)) />
+                    </FormRow>
+                    <FormRow label="Altitude m">
+                        <input type="number" step="0.1" class="settings-field-input" prop:value=move || alt_m.get() on:input=move |event| alt_m.set(event_target_value(&event)) />
+                    </FormRow>
+                    <FormRow label="Yaw deg">
+                        <input type="number" step="0.1" class="settings-field-input" prop:value=move || yaw_deg.get() on:input=move |event| yaw_deg.set(event_target_value(&event)) />
+                    </FormRow>
+                    <FormRow label="Pitch deg">
+                        <input type="number" step="0.1" class="settings-field-input" prop:value=move || pitch_deg.get() on:input=move |event| pitch_deg.set(event_target_value(&event)) />
+                    </FormRow>
                 </div>
 
                 <div class="overlay-card-actions">
@@ -227,7 +231,7 @@ pub fn DevicesView() -> impl IntoView {
             </section>
 
             <section class="card overlay-upload-card">
-                <div class="card-head">
+                <div class="settings-card-head">
                     <h2>"Registered Devices"</h2>
                     <span class="tone-badge info">{move || devices.get().len().to_string()}</span>
                 </div>
@@ -276,12 +280,12 @@ pub fn DevicesView() -> impl IntoView {
             </section>
 
             <section class="card overlay-upload-card">
-                <div class="card-head">
+                <div class="settings-card-head">
                     <h2>"Import / Export"</h2>
                     <span class="tone-badge neutral">"mmp.devices.v1"</span>
                 </div>
                 <textarea
-                    class="devices-json-editor"
+                    class="settings-field-textarea devices-json-editor"
                     prop:value=move || import_json.get()
                     on:input=move |event| import_json.set(event_target_value(&event))
                     placeholder="Paste exported devices JSON"
