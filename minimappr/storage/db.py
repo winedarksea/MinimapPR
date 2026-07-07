@@ -373,6 +373,20 @@ class Storage:
                 created_ns INTEGER NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS map_overlays (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                mime TEXT NOT NULL,
+                bounds_json TEXT NOT NULL,
+                opacity REAL NOT NULL,
+                storey TEXT,
+                enabled INTEGER NOT NULL,
+                created_ns INTEGER NOT NULL,
+                metadata_json TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS environment (
                 id TEXT PRIMARY KEY,
                 node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
@@ -2806,6 +2820,93 @@ class Storage:
             )
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def _row_to_map_overlay(self, row: aiosqlite.Row) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "kind": row["kind"],
+            "file_path": row["file_path"],
+            "mime": row["mime"],
+            "bounds": _json_loads(row["bounds_json"], []),
+            "opacity": row["opacity"],
+            "storey": row["storey"],
+            "enabled": bool(row["enabled"]),
+            "created_ns": row["created_ns"],
+            "metadata": _json_loads(row["metadata_json"], {}),
+        }
+
+    async def upsert_map_overlay(
+        self,
+        *,
+        overlay_id: str,
+        name: str,
+        kind: str,
+        file_path: str,
+        mime: str,
+        bounds: list[list[float]],
+        opacity: float,
+        storey: str | None,
+        enabled: bool,
+        created_ns: int,
+        metadata: dict[str, Any] | None,
+    ) -> None:
+        db = self._require_db()
+        async with self._write_guard():
+            await db.execute(
+                """
+                INSERT INTO map_overlays (
+                    id, name, kind, file_path, mime, bounds_json, opacity,
+                    storey, enabled, created_ns, metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    name=excluded.name,
+                    kind=excluded.kind,
+                    file_path=excluded.file_path,
+                    mime=excluded.mime,
+                    bounds_json=excluded.bounds_json,
+                    opacity=excluded.opacity,
+                    storey=excluded.storey,
+                    enabled=excluded.enabled,
+                    metadata_json=excluded.metadata_json
+                """,
+                (
+                    overlay_id,
+                    name,
+                    kind,
+                    file_path,
+                    mime,
+                    _json_dumps(bounds),
+                    opacity,
+                    storey,
+                    1 if enabled else 0,
+                    created_ns,
+                    _json_dumps(metadata or {}),
+                ),
+            )
+            await self._commit_if_needed(db)
+
+    async def get_map_overlay(self, overlay_id: str) -> dict[str, Any] | None:
+        db = self._require_db()
+        row = await (
+            await db.execute("SELECT * FROM map_overlays WHERE id = ? LIMIT 1", (overlay_id,))
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_map_overlay(row)
+
+    async def list_map_overlays(self) -> list[dict[str, Any]]:
+        db = self._require_db()
+        rows = await (await db.execute("SELECT * FROM map_overlays ORDER BY created_ns DESC")).fetchall()
+        return [self._row_to_map_overlay(row) for row in rows]
+
+    async def delete_map_overlay(self, overlay_id: str) -> bool:
+        db = self._require_db()
+        async with self._write_guard():
+            cursor = await db.execute("DELETE FROM map_overlays WHERE id = ?", (overlay_id,))
+            await self._commit_if_needed(db)
+            return cursor.rowcount > 0
 
     async def list_zones(self) -> list[dict]:
         db = self._require_db()

@@ -1,13 +1,186 @@
 use crate::state::{
     Alert, AppState, CopStatus, Detection, Effector, FusionStatus, NodeOmniDetectionSummary,
-    NodeStatus, Track, MAX_FEED_LEN,
+    NodeStatus, Track, ZoneOccupancyState, ZoneSpec, MAX_FEED_LEN,
 };
 use futures::StreamExt;
 use gloo_net::http::Request;
 use gloo_timers::future::IntervalStream;
 use leptos::prelude::*;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use wasm_bindgen_futures::spawn_local;
+
+fn default_rule_action_type() -> String {
+    "alert".to_string()
+}
+
+fn default_rule_destination() -> String {
+    "cop".to_string()
+}
+
+fn default_rule_priority() -> String {
+    "normal".to_string()
+}
+
+fn default_rule_payload() -> serde_json::Value {
+    serde_json::json!({})
+}
+
+fn default_rule_enabled() -> bool {
+    true
+}
+
+fn default_rule_scope() -> String {
+    "detection".to_string()
+}
+
+fn default_rule_actions() -> Vec<RuleAction> {
+    vec![RuleAction::default()]
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct RuleAction {
+    #[serde(rename = "type")]
+    #[serde(default = "default_rule_action_type")]
+    pub action_type: String,
+    #[serde(default = "default_rule_destination")]
+    pub destination: String,
+    #[serde(default = "default_rule_priority")]
+    pub priority: String,
+    #[serde(default = "default_rule_payload")]
+    pub payload: serde_json::Value,
+}
+
+impl Default for RuleAction {
+    fn default() -> Self {
+        Self {
+            action_type: "alert".to_string(),
+            destination: "cop".to_string(),
+            priority: "normal".to_string(),
+            payload: serde_json::json!({}),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct RuleCondition {
+    #[serde(default)]
+    pub label_categories: Vec<String>,
+    #[serde(default)]
+    pub labels: Vec<String>,
+    #[serde(default)]
+    pub reporting_modalities: Vec<String>,
+    #[serde(default)]
+    pub zone_ids: Vec<String>,
+    #[serde(default)]
+    pub track_statuses: Vec<String>,
+    #[serde(default)]
+    pub source_types: Vec<String>,
+    #[serde(default)]
+    pub min_confidence: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct RuleModel {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default = "default_rule_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_rule_scope")]
+    pub scope: String,
+    #[serde(default)]
+    pub when: RuleCondition,
+    #[serde(default = "default_rule_actions")]
+    pub actions: Vec<RuleAction>,
+    #[serde(default)]
+    pub cooldown_seconds: f64,
+}
+
+impl Default for RuleModel {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            enabled: true,
+            scope: "detection".to_string(),
+            when: RuleCondition::default(),
+            actions: vec![RuleAction::default()],
+            cooldown_seconds: 0.0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct RulesConfigResponse {
+    pub rules: Vec<RuleModel>,
+    pub path: String,
+    pub source: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct EffectorSafetyConfig {
+    #[serde(default)]
+    pub require_arm_for_slew: bool,
+    #[serde(default)]
+    pub min_slew_interval_seconds: Option<f64>,
+    #[serde(default)]
+    pub no_go_zone_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct EffectorCommandResult {
+    pub status: String,
+    pub execution_id: String,
+    pub failure_class: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct MapOverlay {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub content_url: String,
+    pub mime: String,
+    #[serde(default)]
+    pub bounds: Vec<Vec<f64>>,
+    pub opacity: f64,
+    pub storey: Option<String>,
+    #[serde(default)]
+    pub enabled: bool,
+    pub created_ns: i64,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct MapOverlayUpdate {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bounds: Option<Vec<Vec<f64>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opacity: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storey: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct HeatmapBin {
+    pub lat: f64,
+    pub lon: f64,
+    pub weight: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct HeatmapResponse {
+    pub window: String,
+    pub bin_deg: f64,
+    pub now_ns: i64,
+    pub bins: Vec<HeatmapBin>,
+}
 
 async fn fetch_json<T: DeserializeOwned>(url: &str) -> Option<T> {
     let resp = Request::get(url).send().await.ok()?;
@@ -66,6 +239,19 @@ async fn poll_once(state: AppState) {
     if let Some(effectors) = fetch_json::<Vec<Effector>>("/api/v1/effectors").await {
         state.effectors.set(effectors);
     }
+    if let Some(zones) = fetch_json::<Vec<ZoneSpec>>("/api/v1/zones").await {
+        state.zones.set(zones);
+    }
+    if let Some(overlays) = fetch_json::<Vec<MapOverlay>>("/api/v1/overlays").await {
+        state.overlays.set(overlays);
+    }
+    if let Some(occupancy) = fetch_json::<Vec<ZoneOccupancyState>>("/api/v1/zones/occupancy").await
+    {
+        state.zone_occupancy.set(occupancy);
+    }
+    state
+        .live_heatmap_refresh_tick
+        .update(|tick| *tick = tick.wrapping_add(1));
 }
 
 pub fn start_polling(state: AppState) {
@@ -124,6 +310,190 @@ pub async fn patch_config(
     }
 }
 
+pub async fn get_rules() -> Result<RulesConfigResponse, String> {
+    let resp = Request::get("/api/v1/rules")
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+
+    if resp.ok() {
+        resp.json::<RulesConfigResponse>()
+            .await
+            .map_err(|error| error.to_string())
+    } else {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        Err(if body.is_empty() {
+            format!("HTTP {status}")
+        } else {
+            body
+        })
+    }
+}
+
+pub async fn put_rules(rules: Vec<RuleModel>) -> Result<RulesConfigResponse, String> {
+    let body = serde_json::json!({ "rules": rules });
+    let resp = Request::put("/api/v1/rules")
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&body).unwrap_or_default())
+        .map_err(|error| error.to_string())?
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+
+    if resp.ok() {
+        resp.json::<RulesConfigResponse>()
+            .await
+            .map_err(|error| error.to_string())
+    } else {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        Err(if body.is_empty() {
+            format!("HTTP {status}")
+        } else {
+            body
+        })
+    }
+}
+
+pub async fn list_overlays() -> Result<Vec<MapOverlay>, String> {
+    let resp = Request::get("/api/v1/overlays")
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if resp.ok() {
+        resp.json::<Vec<MapOverlay>>()
+            .await
+            .map_err(|error| error.to_string())
+    } else {
+        Err(resp.text().await.unwrap_or_default())
+    }
+}
+
+pub async fn upload_overlay(
+    file: web_sys::File,
+    name: &str,
+    kind: &str,
+    bounds_json: &str,
+    opacity: f64,
+    storey: &str,
+) -> Result<MapOverlay, String> {
+    let form = web_sys::FormData::new().map_err(|error| format!("{error:?}"))?;
+    form.append_with_str("name", name)
+        .map_err(|error| format!("{error:?}"))?;
+    form.append_with_str("kind", kind)
+        .map_err(|error| format!("{error:?}"))?;
+    form.append_with_str("opacity", &opacity.to_string())
+        .map_err(|error| format!("{error:?}"))?;
+    if !bounds_json.trim().is_empty() {
+        form.append_with_str("bounds", bounds_json)
+            .map_err(|error| format!("{error:?}"))?;
+    }
+    if !storey.trim().is_empty() {
+        form.append_with_str("storey", storey.trim())
+            .map_err(|error| format!("{error:?}"))?;
+    }
+    let filename = file.name();
+    form.append_with_blob_and_filename("file", &file, &filename)
+        .map_err(|error| format!("{error:?}"))?;
+
+    let resp = Request::post("/api/v1/overlays")
+        .body(form)
+        .map_err(|error| error.to_string())?
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if resp.ok() {
+        resp.json::<MapOverlay>()
+            .await
+            .map_err(|error| error.to_string())
+    } else {
+        Err(resp.text().await.unwrap_or_default())
+    }
+}
+
+pub async fn patch_overlay(
+    overlay_id: &str,
+    update: MapOverlayUpdate,
+) -> Result<MapOverlay, String> {
+    let encoded = js_sys::encode_uri_component(overlay_id)
+        .as_string()
+        .unwrap_or_default();
+    let url = format!("/api/v1/overlays/{encoded}");
+    let resp = Request::patch(&url)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&update).unwrap_or_default())
+        .map_err(|error| error.to_string())?
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if resp.ok() {
+        resp.json::<MapOverlay>()
+            .await
+            .map_err(|error| error.to_string())
+    } else {
+        Err(resp.text().await.unwrap_or_default())
+    }
+}
+
+pub async fn delete_overlay(overlay_id: &str) -> Result<(), String> {
+    let encoded = js_sys::encode_uri_component(overlay_id)
+        .as_string()
+        .unwrap_or_default();
+    let url = format!("/api/v1/overlays/{encoded}");
+    let resp = Request::delete(&url)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if resp.ok() {
+        Ok(())
+    } else {
+        Err(resp.text().await.unwrap_or_default())
+    }
+}
+
+pub async fn fetch_heatmap(window: &str) -> Result<HeatmapResponse, String> {
+    let encoded_window = js_sys::encode_uri_component(window)
+        .as_string()
+        .unwrap_or_else(|| "1h".to_string());
+    let url = format!("/api/v1/analytics/heatmap?window={encoded_window}&bin=0.0001&max_bins=5000");
+    let resp = Request::get(&url)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if resp.ok() {
+        resp.json::<HeatmapResponse>()
+            .await
+            .map_err(|error| error.to_string())
+    } else {
+        Err(resp.text().await.unwrap_or_default())
+    }
+}
+
+pub async fn patch_detection_review(
+    detection_id: &str,
+    payload: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let encoded = js_sys::encode_uri_component(detection_id)
+        .as_string()
+        .unwrap_or_default();
+    let url = format!("/api/v1/detections/{encoded}/review");
+    let resp = Request::patch(&url)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&payload).unwrap_or_default())
+        .map_err(|error| error.to_string())?
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if resp.ok() {
+        resp.json::<serde_json::Value>()
+            .await
+            .map_err(|error| error.to_string())
+    } else {
+        Err(resp.text().await.unwrap_or_default())
+    }
+}
+
 pub async fn patch_alert_status(
     alert_id: &str,
     status: &str,
@@ -172,7 +542,9 @@ async fn post_json(url: &str, body: &serde_json::Value) -> Result<serde_json::Va
         .await
         .map_err(|e| e.to_string())?;
     if resp.ok() {
-        resp.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+        resp.json::<serde_json::Value>()
+            .await
+            .map_err(|e| e.to_string())
     } else {
         Err(resp.text().await.unwrap_or_default())
     }
@@ -198,9 +570,93 @@ pub async fn delete_effector(effector_id: &str) -> Result<(), String> {
         .as_string()
         .unwrap_or_default();
     let url = format!("/api/v1/effectors/{encoded}");
-    let resp = Request::delete(&url).send().await.map_err(|e| e.to_string())?;
+    let resp = Request::delete(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
     if resp.ok() {
         Ok(())
+    } else {
+        Err(resp.text().await.unwrap_or_default())
+    }
+}
+
+pub async fn arm_effector(effector_id: &str) -> Result<EffectorCommandResult, String> {
+    let encoded = js_sys::encode_uri_component(effector_id)
+        .as_string()
+        .unwrap_or_default();
+    let url = format!("/api/v1/effectors/{encoded}/arm");
+    let resp = Request::post(&url)
+        .header("Content-Type", "application/json")
+        .body("{}")
+        .map_err(|error| error.to_string())?
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if resp.ok() {
+        resp.json::<EffectorCommandResult>()
+            .await
+            .map_err(|error| error.to_string())
+    } else {
+        Err(resp.text().await.unwrap_or_default())
+    }
+}
+
+pub async fn disarm_effector(effector_id: &str) -> Result<EffectorCommandResult, String> {
+    let encoded = js_sys::encode_uri_component(effector_id)
+        .as_string()
+        .unwrap_or_default();
+    let url = format!("/api/v1/effectors/{encoded}/disarm");
+    let resp = Request::post(&url)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if resp.ok() {
+        resp.json::<EffectorCommandResult>()
+            .await
+            .map_err(|error| error.to_string())
+    } else {
+        Err(resp.text().await.unwrap_or_default())
+    }
+}
+
+pub async fn get_effector_safety(effector_id: &str) -> Result<EffectorSafetyConfig, String> {
+    let encoded = js_sys::encode_uri_component(effector_id)
+        .as_string()
+        .unwrap_or_default();
+    let url = format!("/api/v1/effectors/{encoded}/safety");
+    let resp = Request::get(&url)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if resp.ok() {
+        resp.json::<EffectorSafetyConfig>()
+            .await
+            .map_err(|error| error.to_string())
+    } else {
+        Err(resp.text().await.unwrap_or_default())
+    }
+}
+
+pub async fn patch_effector_safety(
+    effector_id: &str,
+    safety: EffectorSafetyConfig,
+) -> Result<EffectorSafetyConfig, String> {
+    let encoded = js_sys::encode_uri_component(effector_id)
+        .as_string()
+        .unwrap_or_default();
+    let url = format!("/api/v1/effectors/{encoded}/safety");
+    let resp = Request::patch(&url)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&safety).unwrap_or_default())
+        .map_err(|error| error.to_string())?
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if resp.ok() {
+        resp.json::<EffectorSafetyConfig>()
+            .await
+            .map_err(|error| error.to_string())
     } else {
         Err(resp.text().await.unwrap_or_default())
     }
@@ -213,6 +669,24 @@ pub async fn aim_effector_at_track(effector_id: &str, track_id: &str) -> Result<
         .unwrap_or_default();
     let url = format!("/api/v1/effectors/{encoded}/aim");
     let body = serde_json::json!({ "track_id": track_id });
+    let result = post_json(&url, &body).await?;
+    match result.get("status").and_then(|v| v.as_str()) {
+        Some("COMPLETED") => Ok(()),
+        _ => Err(result
+            .get("failure_class")
+            .and_then(|v| v.as_str())
+            .unwrap_or("aim failed")
+            .to_string()),
+    }
+}
+
+/// Slew a registered camera at an explicit local ENU position.
+pub async fn aim_effector_at_position(effector_id: &str, target_m: [f64; 3]) -> Result<(), String> {
+    let encoded = js_sys::encode_uri_component(effector_id)
+        .as_string()
+        .unwrap_or_default();
+    let url = format!("/api/v1/effectors/{encoded}/aim");
+    let body = serde_json::json!({ "target": target_m });
     let result = post_json(&url, &body).await?;
     match result.get("status").and_then(|v| v.as_str()) {
         Some("COMPLETED") => Ok(()),

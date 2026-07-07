@@ -1,3 +1,5 @@
+use crate::api::MapOverlay;
+use crate::devices::schema::DeviceRecord;
 use crate::recording::RecordingSession;
 use leptos::prelude::*;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -214,7 +216,7 @@ impl<'de> Deserialize<'de> for Detection {
 
 impl Detection {
     pub fn spatial_display_mode(&self) -> &str {
-        self.spatial_display_mode.as_deref().unwrap_or_else(|| {
+        self.spatial_display_mode.as_deref().unwrap_or({
             match self.reporting_modality.as_deref() {
                 Some("omni") => "node_only",
                 _ => "localized",
@@ -311,12 +313,45 @@ pub struct Alert {
     #[serde(alias = "rule_id")]
     pub rule_name: Option<String>,
     #[serde(default)]
+    pub detection_id: Option<String>,
+    #[serde(default)]
+    pub track_id: Option<String>,
+    #[serde(default)]
+    pub destination: Option<String>,
+    #[serde(default)]
     pub message: Option<String>,
     #[serde(alias = "priority")]
     pub severity: Option<String>,
     pub status: Option<String>,
     #[serde(alias = "timestamp_ns")]
     pub triggered_ns: Option<i64>,
+    #[serde(default)]
+    pub payload: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ZoneSpec {
+    pub id: String,
+    pub name: String,
+    pub zone_type: String,
+    pub polygon_geo: Vec<Vec<f64>>,
+    #[serde(default)]
+    pub properties: serde_json::Value,
+    pub created_ns: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ZoneOccupancyState {
+    pub zone_id: String,
+    pub zone_name: String,
+    pub zone_type: String,
+    #[serde(default)]
+    pub occupied: bool,
+    #[serde(default)]
+    pub occupying_track_ids: Vec<String>,
+    #[serde(default)]
+    pub occupying_labels: Vec<String>,
+    pub updated_ns: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -376,7 +411,27 @@ pub struct ConfigSnapshot {
     pub fusion_worker_count: u32,
     pub coordinate_mode: String,
     #[serde(default)]
+    pub hass: HassConfigSnapshot,
+    #[serde(default)]
     pub site_origin: Option<SiteOriginSnapshot>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct HassConfigSnapshot {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub token: String,
+    #[serde(default)]
+    pub mqtt_host: String,
+    #[serde(default = "default_hass_mqtt_port")]
+    pub mqtt_port: u32,
+}
+
+fn default_hass_mqtt_port() -> u32 {
+    1883
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -387,6 +442,61 @@ pub struct SiteOriginSnapshot {
     pub reconcile_delay_seconds: Option<f64>,
     pub mode: Option<String>,
     pub source: Option<String>,
+}
+
+// ── Future modality feed types ──────────────────────────────────
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RfEmitterEstimate {
+    pub emitter_id: String,
+    pub rssi_dbm: f64,
+    pub lat: Option<f64>,
+    pub lon: Option<f64>,
+    pub drone_likelihood: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RfSpectrumFrame {
+    pub device_id: String,
+    pub center_mhz: f64,
+    pub bins: Vec<f64>,
+    pub emitters: Vec<RfEmitterEstimate>,
+    pub updated_ns: i64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SeismicTrace {
+    pub device_id: String,
+    pub samples: Vec<f64>,
+    pub peak_velocity_mms: f64,
+    pub event_count: u32,
+    pub updated_ns: i64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TranscriptLine {
+    pub line_id: String,
+    pub device_id: String,
+    pub text: String,
+    pub confidence: f64,
+    pub timestamp_ns: i64,
+}
+
+#[derive(Clone)]
+pub struct ModalityFeeds {
+    pub rf_spectra: RwSignal<Vec<RfSpectrumFrame>>,
+    pub seismic_traces: RwSignal<Vec<SeismicTrace>>,
+    pub speech_lines: RwSignal<VecDeque<TranscriptLine>>,
+}
+
+impl ModalityFeeds {
+    pub fn new() -> Self {
+        Self {
+            rf_spectra: RwSignal::new(vec![]),
+            seismic_traces: RwSignal::new(vec![]),
+            speech_lines: RwSignal::new(VecDeque::new()),
+        }
+    }
 }
 
 // ── Filter state for WS server-side filtering ───────────────────
@@ -403,6 +513,9 @@ pub enum CopItemKind {
     Track,
     Detection,
     Alert,
+    Node,
+    Effector,
+    Zone,
 }
 
 impl CopItemKind {
@@ -411,6 +524,20 @@ impl CopItemKind {
             Self::Track => "track",
             Self::Detection => "detection",
             Self::Alert => "alert",
+            Self::Node => "node",
+            Self::Effector => "effector",
+            Self::Zone => "zone",
+        }
+    }
+
+    pub fn as_label(self) -> &'static str {
+        match self {
+            Self::Track => "Track",
+            Self::Detection => "Detection",
+            Self::Alert => "Alert",
+            Self::Node => "Node",
+            Self::Effector => "Effector",
+            Self::Zone => "Zone",
         }
     }
 
@@ -419,6 +546,9 @@ impl CopItemKind {
             "track" => Some(Self::Track),
             "detection" => Some(Self::Detection),
             "alert" => Some(Self::Alert),
+            "node" => Some(Self::Node),
+            "effector" => Some(Self::Effector),
+            "zone" => Some(Self::Zone),
             _ => None,
         }
     }
@@ -450,6 +580,14 @@ impl CopSelection {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct MapContextMenuState {
+    pub lat: f64,
+    pub lon: f64,
+    pub screen_x: f64,
+    pub screen_y: f64,
+}
+
 // ── AppState ────────────────────────────────────────────────────
 
 /// **LiveState** — signals fed by WS + periodic polling. Always live.
@@ -465,6 +603,16 @@ pub struct AppState {
     pub detections: RwSignal<VecDeque<Detection>>,
     pub omni_detection_summaries: RwSignal<Vec<NodeOmniDetectionSummary>>,
     pub alerts: RwSignal<VecDeque<Alert>>,
+    pub zones: RwSignal<Vec<ZoneSpec>>,
+    pub zone_occupancy: RwSignal<Vec<ZoneOccupancyState>>,
+    pub overlays: RwSignal<Vec<MapOverlay>>,
+    pub devices: RwSignal<Vec<DeviceRecord>>,
+    pub modality: ModalityFeeds,
+    pub live_heatmap_enabled: RwSignal<bool>,
+    pub live_heatmap_window: RwSignal<String>,
+    pub live_heatmap_refresh_tick: RwSignal<u64>,
+    pub live_heatmap_bin_count: RwSignal<usize>,
+    pub live_heatmap_error: RwSignal<Option<String>>,
     pub config: RwSignal<Option<ConfigSnapshot>>,
     pub cop_status: RwSignal<Option<CopStatus>>,
     pub fusion_status: RwSignal<Option<FusionStatus>>,
@@ -479,6 +627,7 @@ pub struct AppState {
     pub active_recording: RwSignal<Option<RecordingSession>>,
     /// COP item currently hovered or clicked; drives map and sidebar highlighting.
     pub selected_cop_item: RwSignal<Option<CopSelection>>,
+    pub map_context_menu: RwSignal<Option<MapContextMenuState>>,
 }
 
 impl AppState {
@@ -490,6 +639,16 @@ impl AppState {
             detections: RwSignal::new(VecDeque::new()),
             omni_detection_summaries: RwSignal::new(vec![]),
             alerts: RwSignal::new(VecDeque::new()),
+            zones: RwSignal::new(vec![]),
+            zone_occupancy: RwSignal::new(vec![]),
+            overlays: RwSignal::new(vec![]),
+            devices: RwSignal::new(crate::devices::registry::load_devices()),
+            modality: ModalityFeeds::new(),
+            live_heatmap_enabled: RwSignal::new(false),
+            live_heatmap_window: RwSignal::new("1h".to_string()),
+            live_heatmap_refresh_tick: RwSignal::new(0),
+            live_heatmap_bin_count: RwSignal::new(0),
+            live_heatmap_error: RwSignal::new(None),
             config: RwSignal::new(None),
             cop_status: RwSignal::new(None),
             fusion_status: RwSignal::new(None),
@@ -501,6 +660,7 @@ impl AppState {
             audio_drawer_track_id: RwSignal::new(None),
             active_recording: RwSignal::new(None),
             selected_cop_item: RwSignal::new(None),
+            map_context_menu: RwSignal::new(None),
         }
     }
 }
@@ -517,6 +677,13 @@ pub enum LiveEvent {
         config: ConfigSnapshot,
     },
     EffectorStatus(EffectorStatusEvent),
+    RecordingStatus {
+        session: RecordingSession,
+    },
+    OverlayUpdated {
+        #[serde(rename = "overlay_id")]
+        _overlay_id: Option<String>,
+    },
     SetFilter,
     BitReport {
         #[serde(rename = "node_id")]

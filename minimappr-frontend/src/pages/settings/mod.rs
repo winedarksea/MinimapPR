@@ -1,7 +1,11 @@
 pub mod config;
+pub mod devices;
 pub mod effectors;
+pub mod integrations;
 pub mod logs;
+pub mod overlays;
 pub mod pipeline;
+pub mod rules;
 pub mod server;
 
 use crate::state::AppState;
@@ -17,6 +21,10 @@ pub fn SettingsLayout() -> impl IntoView {
         <div class="app-page">
             <nav class="subnav" aria-label="Settings sections">
                 <SubNavLink href="/settings/config"   label="Config" />
+                <SubNavLink href="/settings/rules"    label="Rules" />
+                <SubNavLink href="/settings/overlays" label="Overlays" />
+                <SubNavLink href="/settings/devices"  label="Devices" />
+                <SubNavLink href="/settings/integrations" label="Integrations" />
                 <SubNavLink href="/settings/server"   label="Server" />
                 <SubNavLink href="/settings/pipeline" label="Pipeline" />
                 // "Effectors" always reachable (it's the onboarding entry point for

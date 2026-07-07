@@ -4,4 +4,7 @@ pub mod contributors;
 pub mod detections;
 pub mod effector_view;
 pub mod node_status;
+pub mod rf_panel;
+pub mod seismic_panel;
+pub mod speech_panel;
 pub mod tracks;

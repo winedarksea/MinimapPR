@@ -219,6 +219,38 @@ def test_get_config_exposes_canonical_cleanup_keys(monkeypatch, tmp_path: Path) 
     assert body["classifier_stage_timeout_seconds"] == body["classification_stage_timeout_seconds"]
 
 
+def test_patch_hass_placeholder_config_redacts_token(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        resp = client.patch(
+            "/api/v1/config",
+            json={
+                "hass_enabled": True,
+                "hass_base_url": "http://homeassistant.local:8123",
+                "hass_token": "secret-token",
+                "hass_mqtt_host": "mqtt.local",
+                "hass_mqtt_port": 1884,
+            },
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["hass"]["enabled"] is True
+        assert body["hass"]["base_url"] == "http://homeassistant.local:8123"
+        assert body["hass"]["token"] == "***"
+        assert body["hass"]["mqtt_host"] == "mqtt.local"
+        assert body["hass"]["mqtt_port"] == 1884
+
+        get_body = client.get("/api/v1/config").json()
+        assert get_body["hass"]["token"] == "***"
+
+
+def test_patch_hass_mqtt_port_validation(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        resp = client.patch("/api/v1/config", json={"hass_mqtt_port": 0})
+        assert resp.status_code == 422
+
+
 # ---------------------------------------------------------------------------
 # Per-node audio overrides — round-trip via /api/v1/pipeline/nodes/{id}/audio
 # ---------------------------------------------------------------------------

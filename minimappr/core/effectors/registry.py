@@ -20,11 +20,19 @@ from typing import Any, Awaitable, Callable
 from minimappr.core.effectors.base import Effector, EffectorCommand, ExecutionResult
 from minimappr.core.effectors.onvif_ptz import OnvifPtzDriver
 from minimappr.interfaces import StorageBackend
-from minimappr.models import EffectorOrientation, EffectorSpec, EffectorStatus, EffectorType, Vec3
+from minimappr.models import (
+    EffectorOrientation,
+    EffectorSafetyConfig,
+    EffectorSpec,
+    EffectorStatus,
+    EffectorType,
+    Vec3,
+)
 
 logger = logging.getLogger(__name__)
 
 LiveCallback = Callable[[dict], Awaitable[None]]
+TargetZoneResolver = Callable[[Vec3], Awaitable[set[str]]]
 
 
 @dataclass(slots=True)
@@ -59,6 +67,7 @@ class EffectorManager:
         self._runtimes: dict[str, EffectorRuntime] = {}
         self._lock = asyncio.Lock()
         self._poll_task: asyncio.Task[None] | None = None
+        self._target_zone_resolver: TargetZoneResolver | None = None
 
     @property
     def enabled(self) -> bool:
@@ -87,6 +96,9 @@ class EffectorManager:
         await self._connect_and_register_runtime(spec, persist=True)
         self._ensure_poll_task()
         return spec
+
+    def set_target_zone_resolver(self, resolver: TargetZoneResolver | None) -> None:
+        self._target_zone_resolver = resolver
 
     async def delete(self, effector_id: str) -> bool:
         async with self._lock:
@@ -137,6 +149,66 @@ class EffectorManager:
             "has_zoom": caps.has_zoom,
         }
 
+    async def get_safety(self, effector_id: str) -> EffectorSafetyConfig | None:
+        runtime = self._runtimes.get(effector_id)
+        if runtime is not None:
+            return _safety_from_spec(runtime.spec)
+        row = await self._storage.get_effector_by_id(effector_id)
+        if row is None:
+            return None
+        return _safety_from_properties(row.get("properties", {}))
+
+    async def update_safety(
+        self,
+        effector_id: str,
+        safety: EffectorSafetyConfig,
+    ) -> EffectorSafetyConfig | None:
+        runtime = self._runtimes.get(effector_id)
+        if runtime is None:
+            row = await self._storage.get_effector_by_id(effector_id)
+            if row is None:
+                return None
+            spec = _spec_from_row(row)
+        else:
+            spec = runtime.spec
+
+        properties = dict(spec.properties or {})
+        properties["safety"] = safety.model_dump(mode="json")
+        updated_spec = spec.model_copy(update={"properties": properties})
+        await self._storage.upsert_effector(updated_spec, time.time_ns())
+        if runtime is not None:
+            runtime.spec = updated_spec
+        await self._broadcast_status(effector_id)
+        return safety
+
+    async def arm(self, effector_id: str, *, zone_id: str | None = None) -> ExecutionResult:
+        runtime = self._runtimes.get(effector_id)
+        if runtime is None or runtime.driver is None:
+            return ExecutionResult(status="FAILED", failure_class="not_found")
+        try:
+            accepted = await runtime.driver.arm(zone_id=zone_id)
+        except Exception as exc:
+            logger.warning("effector %s arm failed: %s", effector_id, exc)
+            return ExecutionResult(status="FAILED", failure_class=type(exc).__name__, detail=str(exc))
+        await self._broadcast_status(effector_id)
+        if not accepted:
+            return ExecutionResult(status="REJECTED", failure_class="driver_refused")
+        return ExecutionResult(status="COMPLETED")
+
+    async def disarm(self, effector_id: str) -> ExecutionResult:
+        runtime = self._runtimes.get(effector_id)
+        if runtime is None or runtime.driver is None:
+            return ExecutionResult(status="FAILED", failure_class="not_found")
+        try:
+            accepted = await runtime.driver.disarm()
+        except Exception as exc:
+            logger.warning("effector %s disarm failed: %s", effector_id, exc)
+            return ExecutionResult(status="FAILED", failure_class=type(exc).__name__, detail=str(exc))
+        await self._broadcast_status(effector_id)
+        if not accepted:
+            return ExecutionResult(status="REJECTED", failure_class="driver_refused")
+        return ExecutionResult(status="COMPLETED")
+
     async def slew_to_target(
         self,
         effector_id: str,
@@ -154,7 +226,7 @@ class EffectorManager:
                 failure_class="not_found",
             )
 
-        rejection = self._check_interlocks(effector_id, runtime)
+        rejection = await self._check_interlocks(effector_id, runtime, target_pos)
         if rejection is not None:
             logger.info("effector %s slew rejected by interlock: %s", effector_id, rejection)
             return ExecutionResult(
@@ -240,18 +312,38 @@ class EffectorManager:
 
     # ------------------------------------------------------------------
 
-    def _check_interlocks(self, effector_id: str, runtime: EffectorRuntime) -> str | None:
-        """Pre-execution safety gate. v1 implements a single check: per-effector
-        minimum slew interval, preventing camera thrashing between tracks. This
-        is the seam the Phase 5 interlock engine (master-arm, blue-force, zones)
-        later plugs into without touching call sites."""
-        del effector_id
+    async def _check_interlocks(
+        self,
+        effector_id: str,
+        runtime: EffectorRuntime,
+        target_pos: Vec3,
+    ) -> str | None:
+        """Pre-execution safety gate for camera movement commands."""
+        safety = _safety_from_spec(runtime.spec)
+        if safety.require_arm_for_slew:
+            status = await self._status_for_runtime(runtime)
+            if not status.armed:
+                return "interlock:disarmed"
+
         if runtime.last_slew_ns is None:
-            return None
-        min_interval_ns = int(self._config.min_slew_interval_seconds * 1_000_000_000)
-        elapsed_ns = time.time_ns() - runtime.last_slew_ns
-        if elapsed_ns < min_interval_ns:
-            return "rate_limited"
+            rate_limit_rejection = None
+        else:
+            min_interval_s = (
+                safety.min_slew_interval_seconds
+                if safety.min_slew_interval_seconds is not None
+                else self._config.min_slew_interval_seconds
+            )
+            min_interval_ns = int(min_interval_s * 1_000_000_000)
+            elapsed_ns = time.time_ns() - runtime.last_slew_ns
+            rate_limit_rejection = "rate_limited" if elapsed_ns < min_interval_ns else None
+        if rate_limit_rejection is not None:
+            return rate_limit_rejection
+
+        if safety.no_go_zone_ids and self._target_zone_resolver is not None:
+            target_zone_ids = await self._target_zone_resolver(target_pos)
+            no_go_ids = {zone_id.strip().lower() for zone_id in safety.no_go_zone_ids}
+            if {zone_id.strip().lower() for zone_id in target_zone_ids} & no_go_ids:
+                return "interlock:no_go_zone"
         return None
 
     def _cancel_home_return(self, runtime: EffectorRuntime) -> None:
@@ -394,6 +486,17 @@ def _spec_from_row(row: dict[str, Any]) -> EffectorSpec:
         metadata=row.get("metadata", {}),
         properties=row.get("properties", {}),
     )
+
+
+def _safety_from_spec(spec: EffectorSpec) -> EffectorSafetyConfig:
+    return _safety_from_properties(spec.properties)
+
+
+def _safety_from_properties(properties: dict[str, Any] | None) -> EffectorSafetyConfig:
+    raw = properties.get("safety") if isinstance(properties, dict) else None
+    if not isinstance(raw, dict):
+        raw = {}
+    return EffectorSafetyConfig.model_validate(raw)
 
 
 def _build_driver(spec: EffectorSpec, *, snapshot_dir: Path) -> Effector | None:

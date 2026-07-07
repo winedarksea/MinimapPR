@@ -1,3 +1,4 @@
+use crate::api::list_overlays;
 use crate::map::bindings::{pulse_track_marker, trigger_node_omni_ripple};
 use crate::state::{AppState, LiveEvent, WsStatus, MAX_FEED_LEN};
 use gloo_timers::future::TimeoutFuture;
@@ -129,6 +130,24 @@ fn handle_message(state: &AppState, text: &str) {
                         last_seen_ns: update.last_seen_ns,
                         active_track_id: update.active_track_id,
                     });
+                }
+            });
+        }
+        LiveEvent::RecordingStatus { session } => {
+            if session.status.is_active() {
+                state.active_recording.set(Some(session));
+            } else {
+                state.active_recording.set(None);
+            }
+        }
+        LiveEvent::OverlayUpdated { .. } => {
+            let overlays = state.overlays;
+            spawn_local(async move {
+                match list_overlays().await {
+                    Ok(items) => overlays.set(items),
+                    Err(error) => {
+                        log::warn!("overlay refresh failed after websocket update: {error}")
+                    }
                 }
             });
         }

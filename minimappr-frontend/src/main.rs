@@ -1,6 +1,10 @@
 mod api;
 mod audio;
+mod components;
+mod devices;
+mod inspector;
 mod map;
+mod mock;
 mod pages;
 mod panels;
 mod prefs;
@@ -8,6 +12,7 @@ mod recording;
 mod shell;
 mod state;
 mod ui;
+mod workspace;
 mod ws;
 
 use leptos::prelude::*;
@@ -29,6 +34,7 @@ fn App() -> impl IntoView {
     // Bootstrap WS + polling — live data flows regardless of which page is active.
     ws::start_ws(state.clone());
     api::start_polling(state.clone());
+    mock::start_mock_feeds(state.clone());
 
     view! {
         <Router>
@@ -59,6 +65,10 @@ fn App() -> impl IntoView {
                     <ParentRoute path=path!("/settings") view=pages::settings::SettingsLayout>
                         <Route path=path!("")          view=pages::settings::config::ConfigView />
                         <Route path=path!("config")    view=pages::settings::config::ConfigView />
+                        <Route path=path!("rules")     view=pages::settings::rules::RulesView />
+                        <Route path=path!("overlays")  view=pages::settings::overlays::OverlaysView />
+                        <Route path=path!("devices")   view=pages::settings::devices::DevicesView />
+                        <Route path=path!("integrations") view=pages::settings::integrations::IntegrationsView />
                         <Route path=path!("server")    view=pages::settings::server::ServerDiagnosticsView />
                         <Route path=path!("pipeline")  view=pages::settings::pipeline::PipelineView />
                         <Route path=path!("effectors") view=pages::settings::effectors::EffectorsView />

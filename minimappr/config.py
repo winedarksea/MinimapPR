@@ -433,6 +433,7 @@ class Settings:
     taxonomy_config_path: Path = Path("data/taxonomy.json")
     model_chain_config_path: Path = Path("data/model_chain.json")
     large_artifact_dir: Path = Path("data/artifacts")
+    map_overlay_dir: Path = Path("data/overlays")
     capture_final_tracks_settle_seconds: float = 30.0
     cors_allow_origins: tuple[str, ...] = ("http://localhost:8080", "http://127.0.0.1:8080")
     cors_allow_credentials: bool = False
@@ -630,6 +631,11 @@ class Settings:
     federation_tqi_hysteresis: float = 0.05
     federation_deconflict_use_3d: bool = False
     federation_auth_token: str = ""
+    hass_enabled: bool = False
+    hass_base_url: str = ""
+    hass_token: str = ""
+    hass_mqtt_host: str = ""
+    hass_mqtt_port: int = 1883
 
     # Effector subsystem kill-switch only — the real gate is the `effectors` DB
     # table being empty. Defaults True so UI-driven onboarding needs no config edit.
@@ -651,6 +657,7 @@ class Settings:
         self.model_chain_config_path = Path(self.model_chain_config_path)
         self.effector_snapshot_dir = Path(self.effector_snapshot_dir)
         self.large_artifact_dir = Path(self.large_artifact_dir)
+        self.map_overlay_dir = Path(self.map_overlay_dir)
         self.federation_peers_config_path = Path(self.federation_peers_config_path)
 
         self.coordinate_mode = self.coordinate_mode.strip().lower()
@@ -998,6 +1005,8 @@ class Settings:
             raise ValueError("MINIMAPPR_EFFECTOR_MIN_SLEW_INTERVAL_SECONDS must be >= 0")
         if self.effector_status_poll_interval_seconds <= 0.0:
             raise ValueError("MINIMAPPR_EFFECTOR_STATUS_POLL_INTERVAL_SECONDS must be > 0")
+        if self.hass_mqtt_port < 1 or self.hass_mqtt_port > 65535:
+            raise ValueError("MINIMAPPR_HASS_MQTT_PORT must be in [1, 65535]")
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -1096,6 +1105,7 @@ class Settings:
             taxonomy_config_path=Path(_env_str("MINIMAPPR_TAXONOMY_CONFIG_PATH", "data/taxonomy.json")),
             model_chain_config_path=Path(_env_str("MINIMAPPR_MODEL_CHAIN_CONFIG_PATH", "data/model_chain.json")),
             large_artifact_dir=Path(_env_str("MINIMAPPR_LARGE_ARTIFACT_DIR", "data/artifacts")),
+            map_overlay_dir=Path(_env_str("MINIMAPPR_MAP_OVERLAY_DIR", "data/overlays")),
             capture_final_tracks_settle_seconds=_env_float(
                 "MINIMAPPR_CAPTURE_FINAL_TRACKS_SETTLE_SECONDS",
                 30.0,
@@ -1389,6 +1399,11 @@ class Settings:
             federation_tqi_hysteresis=_env_float("MINIMAPPR_FEDERATION_TQI_HYSTERESIS", 0.05),
             federation_deconflict_use_3d=_env_bool("MINIMAPPR_FEDERATION_DECONFLICT_USE_3D", False),
             federation_auth_token=_env_str("MINIMAPPR_FEDERATION_AUTH_TOKEN", ""),
+            hass_enabled=_env_bool("MINIMAPPR_HASS_ENABLED", False),
+            hass_base_url=_env_str("MINIMAPPR_HASS_BASE_URL", ""),
+            hass_token=_env_str("MINIMAPPR_HASS_TOKEN", ""),
+            hass_mqtt_host=_env_str("MINIMAPPR_HASS_MQTT_HOST", ""),
+            hass_mqtt_port=_env_int("MINIMAPPR_HASS_MQTT_PORT", 1883),
             effectors_enabled=_env_bool("MINIMAPPR_EFFECTORS_ENABLED", True),
             effector_snapshot_dir=Path(_env_str("MINIMAPPR_EFFECTOR_SNAPSHOT_DIR", "data/effector_snapshots")),
             effector_slew_dwell_seconds=_env_float("MINIMAPPR_EFFECTOR_SLEW_DWELL_SECONDS", 10.0),

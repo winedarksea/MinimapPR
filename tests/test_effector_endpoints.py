@@ -24,6 +24,7 @@ from minimappr.storage.db import Storage
 class _MockDriver:
     def __init__(self) -> None:
         self.executed: list[EffectorCommand] = []
+        self.armed = False
 
     async def connect(self) -> None:
         return None
@@ -32,9 +33,11 @@ class _MockDriver:
         return EffectorCapabilities(movement_strategies=["AbsoluteMove"], selected_movement_strategy="AbsoluteMove")
 
     async def arm(self, *, zone_id: str | None = None) -> bool:
+        self.armed = True
         return True
 
     async def disarm(self) -> bool:
+        self.armed = False
         return True
 
     async def execute(self, command: EffectorCommand) -> ExecutionResult:
@@ -42,7 +45,7 @@ class _MockDriver:
         return ExecutionResult(status="COMPLETED")
 
     async def get_status(self) -> dict:
-        return {"state": "idle", "armed": False, "pan_deg": 0.0, "tilt_deg": 0.0}
+        return {"state": "idle", "armed": self.armed, "pan_deg": 0.0, "tilt_deg": 0.0}
 
     async def snapshot(self, *, dest_path: Path) -> Path:
         dest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -192,3 +195,55 @@ class TestEffectorEndpoints:
                 body_text = resp.text
                 assert "super-secret" not in body_text
                 assert "192.168.1.50" not in body_text
+
+    def test_arm_disarm_and_require_arm_safety_flow(self, monkeypatch, tmp_path):
+        _configure_env(monkeypatch, tmp_path)
+        with TestClient(app) as client:
+            register_resp = client.post("/api/v1/effectors", json=_register_payload("cam-1"))
+            assert register_resp.status_code == 201
+
+            default_safety = client.get("/api/v1/effectors/cam-1/safety")
+            assert default_safety.status_code == 200
+            assert default_safety.json()["require_arm_for_slew"] is False
+
+            patch_resp = client.patch(
+                "/api/v1/effectors/cam-1/safety",
+                json={
+                    "require_arm_for_slew": True,
+                    "min_slew_interval_seconds": 0,
+                    "no_go_zone_ids": [],
+                },
+            )
+            assert patch_resp.status_code == 200
+            assert patch_resp.json()["require_arm_for_slew"] is True
+
+            blocked = client.post("/api/v1/effectors/cam-1/aim", json={"target": [1.0, 2.0, 0.0]})
+            assert blocked.status_code == 409
+            assert blocked.json()["failure_class"] == "interlock:disarmed"
+
+            arm_resp = client.post("/api/v1/effectors/cam-1/arm", json={})
+            assert arm_resp.status_code == 200
+            assert arm_resp.json()["status"] == "COMPLETED"
+            assert client.get("/api/v1/effectors/cam-1/status").json()["status"]["armed"] is True
+
+            allowed = client.post("/api/v1/effectors/cam-1/aim", json={"target": [1.0, 2.0, 0.0]})
+            assert allowed.status_code == 200
+
+            disarm_resp = client.post("/api/v1/effectors/cam-1/disarm")
+            assert disarm_resp.status_code == 200
+            assert client.get("/api/v1/effectors/cam-1/status").json()["status"]["armed"] is False
+
+    def test_safety_unknown_effector_returns_404(self, monkeypatch, tmp_path):
+        _configure_env(monkeypatch, tmp_path)
+        with TestClient(app) as client:
+            assert client.get("/api/v1/effectors/ghost/safety").status_code == 404
+            assert client.patch(
+                "/api/v1/effectors/ghost/safety",
+                json={
+                    "require_arm_for_slew": False,
+                    "min_slew_interval_seconds": None,
+                    "no_go_zone_ids": [],
+                },
+            ).status_code == 404
+            assert client.post("/api/v1/effectors/ghost/arm", json={}).status_code == 404
+            assert client.post("/api/v1/effectors/ghost/disarm").status_code == 404

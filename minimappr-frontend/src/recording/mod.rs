@@ -9,6 +9,7 @@ pub enum RecordingStatus {
     #[default]
     Idle,
     Starting,
+    #[serde(alias = "recording")]
     Active,
     AwaitingFinalTracks,
     Stopping,

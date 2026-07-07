@@ -11,7 +11,7 @@ import pytest
 from minimappr.core.effectors import registry as registry_module
 from minimappr.core.effectors.base import EffectorCapabilities, EffectorCommand, ExecutionResult
 from minimappr.core.effectors.registry import EffectorManager, EffectorManagerConfig
-from minimappr.models import EffectorSpec, EffectorType
+from minimappr.models import EffectorSafetyConfig, EffectorSpec, EffectorType
 from minimappr.storage.db import Storage
 
 
@@ -204,6 +204,62 @@ async def test_rate_limit_interlock_allows_slew_after_interval_elapses(
     second = await manager.slew_to_target("cam-1", (2.0, 0.0, 0.0))
     assert second.status == "COMPLETED"
     assert len(mock_driver.executed) == 2
+
+
+@pytest.mark.asyncio
+async def test_require_arm_safety_interlock_blocks_until_armed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, storage, _ = await _manager(tmp_path, min_slew_interval_seconds=0.0)
+    mock_driver = _MockDriver()
+    monkeypatch.setattr(registry_module, "_build_driver", lambda spec, *, snapshot_dir: mock_driver)
+    await manager.register(_spec("cam-1"))
+
+    safety = EffectorSafetyConfig(require_arm_for_slew=True, min_slew_interval_seconds=0.0)
+    updated = await manager.update_safety("cam-1", safety)
+    assert updated == safety
+    row = await storage.get_effector_by_id("cam-1")
+    assert row is not None
+    assert row["properties"]["safety"]["require_arm_for_slew"] is True
+
+    blocked = await manager.slew_to_target("cam-1", (1.0, 0.0, 0.0))
+    assert blocked.status == "REJECTED"
+    assert blocked.failure_class == "interlock:disarmed"
+    assert mock_driver.executed == []
+
+    armed = await manager.arm("cam-1")
+    assert armed.status == "COMPLETED"
+    allowed = await manager.slew_to_target("cam-1", (1.0, 0.0, 0.0))
+    assert allowed.status == "COMPLETED"
+    assert len(mock_driver.executed) == 1
+
+
+@pytest.mark.asyncio
+async def test_no_go_zone_safety_interlock_uses_target_zone_resolver(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, _, _ = await _manager(tmp_path, min_slew_interval_seconds=0.0)
+    mock_driver = _MockDriver()
+    monkeypatch.setattr(registry_module, "_build_driver", lambda spec, *, snapshot_dir: mock_driver)
+    await manager.register(_spec("cam-1"))
+    await manager.update_safety(
+        "cam-1",
+        EffectorSafetyConfig(no_go_zone_ids=["no-go"], min_slew_interval_seconds=0.0),
+    )
+
+    async def _target_zone_resolver(target_pos) -> set[str]:
+        return {"no-go"} if target_pos[0] > 0 else set()
+
+    manager.set_target_zone_resolver(_target_zone_resolver)
+
+    blocked = await manager.slew_to_target("cam-1", (1.0, 0.0, 0.0))
+    assert blocked.status == "REJECTED"
+    assert blocked.failure_class == "interlock:no_go_zone"
+    assert mock_driver.executed == []
+
+    allowed = await manager.slew_to_target("cam-1", (-1.0, 0.0, 0.0))
+    assert allowed.status == "COMPLETED"
+    assert len(mock_driver.executed) == 1
 
 
 @pytest.mark.asyncio

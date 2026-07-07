@@ -58,6 +58,19 @@ class RuleCondition:
             min_confidence=min_conf,
         )
 
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "label_categories": sorted(self.label_categories),
+            "labels": sorted(self.labels),
+            "reporting_modalities": sorted(self.reporting_modalities),
+            "zone_ids": sorted(self.zone_ids),
+            "track_statuses": sorted(self.track_statuses),
+            "source_types": sorted(self.source_types),
+        }
+        if self.min_confidence is not None:
+            out["min_confidence"] = self.min_confidence
+        return out
+
 
 @dataclass(slots=True)
 class RuleDef:
@@ -103,6 +116,24 @@ class RuleDef:
             actions=actions,
             cooldown_seconds=max(0.0, cooldown_s),
         )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.rule_id,
+            "enabled": self.enabled,
+            "scope": self.scope,
+            "when": self.condition.to_dict(),
+            "actions": [
+                {
+                    "type": action.action_type,
+                    "destination": action.destination,
+                    "priority": action.priority,
+                    "payload": action.payload,
+                }
+                for action in self.actions
+            ],
+            "cooldown_seconds": self.cooldown_seconds,
+        }
 
 
 class ConfigRuleEngine(RuleEngine):
@@ -340,3 +371,7 @@ def default_rules() -> list[RuleDef]:
             cooldown_seconds=30.0,
         ),
     ]
+
+
+def default_rules_as_dicts() -> list[dict[str, Any]]:
+    return [rule.to_dict() for rule in default_rules()]

@@ -38,6 +38,19 @@ def spatial_display_mode_for_detection(
     return "localized"
 
 
+def _validate_overlay_bounds(bounds: list[list[float]]) -> None:
+    if not bounds:
+        return
+    if len(bounds) != 4:
+        raise ValueError("overlay bounds must contain exactly four [lat, lon] corners")
+    for corner in bounds:
+        if len(corner) != 2:
+            raise ValueError("overlay bound corners must be [lat, lon]")
+        lat, lon = float(corner[0]), float(corner[1])
+        if not -90.0 <= lat <= 90.0 or not -180.0 <= lon <= 180.0:
+            raise ValueError("overlay bounds contain invalid latitude or longitude")
+
+
 class TimeQuality(str, Enum):
     GPS_LOCKED = "gps_locked"
     GPS_HOLDOVER = "gps_holdover"
@@ -550,6 +563,83 @@ class ZoneOccupancyState(BaseModel):
     updated_ns: int
 
 
+class MapOverlayKind(str, Enum):
+    IMAGE = "image"
+    SVG = "svg"
+    GEOJSON = "geojson"
+
+
+class MapOverlaySpec(BaseModel):
+    id: str
+    name: str
+    kind: MapOverlayKind
+    content_url: str
+    mime: str
+    bounds: list[list[float]] = Field(default_factory=list)
+    opacity: float = Field(default=0.75, ge=0.0, le=1.0)
+    storey: str | None = None
+    enabled: bool = True
+    created_ns: int
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MapOverlayUpdate(BaseModel):
+    name: str | None = None
+    bounds: list[list[float]] | None = None
+    opacity: float | None = Field(default=None, ge=0.0, le=1.0)
+    storey: str | None = None
+    enabled: bool | None = None
+    metadata: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def _validate_bounds(self) -> "MapOverlayUpdate":
+        if self.bounds is not None:
+            _validate_overlay_bounds(self.bounds)
+        return self
+
+
+class RuleActionModel(BaseModel):
+    type: str = "alert"
+    destination: str = "cop"
+    priority: str = "normal"
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class RuleConditionModel(BaseModel):
+    label_categories: list[str] = Field(default_factory=list)
+    labels: list[str] = Field(default_factory=list)
+    reporting_modalities: list[str] = Field(default_factory=list)
+    zone_ids: list[str] = Field(default_factory=list)
+    track_statuses: list[str] = Field(default_factory=list)
+    source_types: list[str] = Field(default_factory=list)
+    min_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+class RuleModel(BaseModel):
+    id: str = Field(min_length=1)
+    enabled: bool = True
+    scope: Literal["detection", "track"] = "detection"
+    when: RuleConditionModel = Field(default_factory=RuleConditionModel)
+    actions: list[RuleActionModel] = Field(default_factory=lambda: [RuleActionModel()])
+    cooldown_seconds: float = Field(default=0.0, ge=0.0)
+
+    @model_validator(mode="after")
+    def _validate_actions(self) -> "RuleModel":
+        if not self.actions:
+            raise ValueError("rules must define at least one action")
+        return self
+
+
+class RulesConfigUpdate(BaseModel):
+    rules: list[RuleModel] = Field(default_factory=list)
+
+
+class RulesConfigResponse(BaseModel):
+    rules: list[RuleModel]
+    path: str
+    source: Literal["file", "default"]
+
+
 class ContextSnapshot(BaseModel):
     generated_ns: int
     active_tracks: list[dict[str, Any]] = Field(default_factory=list)
@@ -602,6 +692,23 @@ class EffectorStatus(BaseModel):
     armed: bool = False
     last_seen_ns: int | None = None
     active_track_id: str | None = None
+
+
+class EffectorSafetyConfig(BaseModel):
+    require_arm_for_slew: bool = False
+    min_slew_interval_seconds: float | None = Field(default=None, ge=0.0)
+    no_go_zone_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _normalize_zone_ids(self) -> "EffectorSafetyConfig":
+        self.no_go_zone_ids = sorted(
+            {
+                str(zone_id).strip()
+                for zone_id in self.no_go_zone_ids
+                if str(zone_id).strip()
+            }
+        )
+        return self
 
 
 class AlertStatus(str, Enum):

@@ -25,7 +25,7 @@ pub fn GeoHeatmapView() -> impl IntoView {
     let error: RwSignal<Option<String>> = RwSignal::new(None);
     let count = RwSignal::new(0usize);
 
-    // Init the Leaflet map then invalidate size so flex layout dimensions settle.
+    // Init the MapLibre map then invalidate size so flex layout dimensions settle.
     Effect::new(move |init_done: Option<bool>| {
         if init_done.is_none() {
             lfi::init(44.987, -93.258, 13);
@@ -102,7 +102,7 @@ pub fn GeoHeatmapView() -> impl IntoView {
                 <span class="daily-error">{move || error.get().unwrap_or_default()}</span>
             </div>
             <div class="leaflet-container-wrap" style="flex:1;min-height:400px;position:relative">
-                <div id="leaflet-map"></div>
+                <div id="mmp-map"></div>
                 {move || if count.get() == 0 && error.get().is_none() {
                     Some(view! {
                         <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:500">

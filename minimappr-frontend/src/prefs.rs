@@ -7,6 +7,8 @@ use wasm_bindgen::JsCast;
 use web_sys::{HtmlElement, Storage};
 
 pub const KEY_THEME: &str = "mmp.theme";
+pub const KEY_WORKSPACE: &str = "mmp.workspace.v1";
+pub const KEY_DEVICES: &str = "mmp.devices.v1";
 
 fn storage() -> Option<Storage> {
     web_sys::window()?.local_storage().ok().flatten()
@@ -15,6 +17,23 @@ fn storage() -> Option<Storage> {
 pub fn set(key: &str, value: &str) {
     if let Some(s) = storage() {
         let _ = s.set_item(key, value);
+    }
+}
+
+pub fn get_json<T>(key: &str) -> Option<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let value = storage()?.get_item(key).ok().flatten()?;
+    serde_json::from_str(&value).ok()
+}
+
+pub fn set_json<T>(key: &str, value: &T)
+where
+    T: serde::Serialize,
+{
+    if let Ok(serialized) = serde_json::to_string(value) {
+        set(key, &serialized);
     }
 }
 

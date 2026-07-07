@@ -20,6 +20,22 @@ struct LabelHit {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
+struct LabelSuggestion {
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    count: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+struct LabelSuggestionResponse {
+    #[serde(default)]
+    labels: Vec<LabelSuggestion>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 struct AudioQuality {
     #[serde(default)]
     source_window_type: Option<String>,
@@ -54,6 +70,8 @@ struct Detection {
     #[serde(default)]
     label: Option<String>,
     #[serde(default)]
+    label_category: Option<String>,
+    #[serde(default)]
     label_confidence: Option<f64>,
     #[serde(default)]
     label_hits: Vec<LabelHit>,
@@ -61,12 +79,53 @@ struct Detection {
     classification_label_hits: Option<Vec<LabelHit>>,
     #[serde(default)]
     feature_summary: Option<FeatureSummary>,
+    #[serde(default)]
+    review_state: Option<String>,
+    #[serde(default)]
+    review_label: Option<String>,
+    #[serde(default)]
+    review_label_category: Option<String>,
+    #[serde(default)]
+    review_notes: Option<String>,
+    #[serde(default)]
+    review_updated_ns: Option<i64>,
+    #[serde(default)]
+    promote_to_training: bool,
 }
 
 fn fmt_ts_ns(ns: i64) -> String {
     let ms = (ns as f64) / 1e6;
     let d = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ms));
     d.to_iso_string().as_string().unwrap_or_default()
+}
+
+fn form_value(id: &str) -> String {
+    web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.get_element_by_id(id))
+        .and_then(|element| {
+            element
+                .clone()
+                .dyn_into::<web_sys::HtmlInputElement>()
+                .ok()
+                .map(|input| input.value())
+                .or_else(|| {
+                    element
+                        .dyn_into::<web_sys::HtmlTextAreaElement>()
+                        .ok()
+                        .map(|input| input.value())
+                })
+        })
+        .unwrap_or_default()
+}
+
+fn review_state_class(state: &str) -> &'static str {
+    match state {
+        "confirmed" => "tone-badge ok",
+        "rejected" => "tone-badge danger",
+        "unreviewed" => "tone-badge neutral",
+        _ => "tone-badge neutral",
+    }
 }
 
 // ── Subcomponents ────────────────────────────────────────────────────────────
@@ -327,7 +386,13 @@ pub fn DetectionAudioAnalysisView(
                     is_playing=is_playing
                 />
                 {if load_detection_metadata {
-                    view! { <DetectionMetaPanel detection=detection /> }.into_any()
+                    view! {
+                        <DetectionMetaPanel detection=detection />
+                        <DetectionReviewPanel
+                            detection_id=detection_id.clone()
+                            detection=detection
+                        />
+                    }.into_any()
                 } else {
                     ().into_any()
                 }}
@@ -362,6 +427,11 @@ fn DetectionMetaPanel(detection: RwSignal<Option<Detection>>) -> impl IntoView {
                             <dt>"Timestamp"</dt><dd>{ts}</dd>
                             <dt>"Node"</dt><dd>{node}</dd>
                             <dt>"Primary label"</dt><dd>{primary} " " <span class="muted">{primary_conf}</span></dd>
+                            <dt>"Review"</dt><dd>
+                                <span class=review_state_class(d.review_state.as_deref().unwrap_or("unreviewed"))>
+                                    {d.review_state.clone().unwrap_or_else(|| "unreviewed".to_string())}
+                                </span>
+                            </dd>
                         </dl>
                         {audio_quality.map(|q| {
                             let missing = q.missing_ratio.unwrap_or(0.0);
@@ -409,6 +479,214 @@ fn DetectionMetaPanel(detection: RwSignal<Option<Detection>>) -> impl IntoView {
                     }.into_any()
                 }
             }}
+        </aside>
+    }
+}
+
+#[component]
+fn DetectionReviewPanel(
+    detection_id: String,
+    detection: RwSignal<Option<Detection>>,
+) -> impl IntoView {
+    let label_input_id = format!("review-label-{detection_id}");
+    let category_input_id = format!("review-category-{detection_id}");
+    let notes_input_id = format!("review-notes-{detection_id}");
+    let datalist_id = format!("review-label-options-{detection_id}");
+
+    let label_value = RwSignal::new(String::new());
+    let category_value = RwSignal::new(String::new());
+    let notes_value = RwSignal::new(String::new());
+    let promote_to_training = RwSignal::new(false);
+    let suggestions = RwSignal::new(Vec::<LabelSuggestion>::new());
+    let pending = RwSignal::new(false);
+    let review_message = RwSignal::new(None::<String>);
+    let review_error = RwSignal::new(None::<String>);
+    let label_input_id_for_submit = label_input_id.clone();
+    let category_input_id_for_submit = category_input_id.clone();
+    let notes_input_id_for_submit = notes_input_id.clone();
+
+    Effect::new(move |_| {
+        if let Some(d) = detection.get() {
+            label_value.set(
+                d.review_label
+                    .clone()
+                    .or(d.label.clone())
+                    .unwrap_or_default(),
+            );
+            category_value.set(
+                d.review_label_category
+                    .clone()
+                    .or(d.label_category.clone())
+                    .unwrap_or_else(|| "unknown".to_string()),
+            );
+            notes_value.set(d.review_notes.clone().unwrap_or_default());
+            promote_to_training.set(d.promote_to_training);
+        }
+    });
+
+    Effect::new(move |_| {
+        spawn_local(async move {
+            match Request::get("/api/v1/analytics/labels?window=365d")
+                .send()
+                .await
+            {
+                Ok(resp) if resp.ok() => match resp.json::<LabelSuggestionResponse>().await {
+                    Ok(payload) => suggestions.set(payload.labels),
+                    Err(error) => log::warn!("label suggestions parse failed: {error}"),
+                },
+                Ok(resp) => log::warn!("label suggestions HTTP {}", resp.status()),
+                Err(error) => log::warn!("label suggestions fetch failed: {error}"),
+            }
+        });
+    });
+
+    let submit_review = move |review_state: &'static str, include_label: bool| {
+        if pending.get_untracked() {
+            return;
+        }
+
+        let detection_id = detection_id.clone();
+        let label = form_value(&label_input_id_for_submit).trim().to_string();
+        let category = form_value(&category_input_id_for_submit).trim().to_string();
+        let notes = form_value(&notes_input_id_for_submit).trim().to_string();
+        let promote = promote_to_training.get_untracked();
+        let detection = detection;
+
+        let mut payload = serde_json::json!({
+            "review_state": review_state,
+            "review_notes": if notes.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(notes) },
+            "promote_to_training": promote && review_state == "confirmed",
+        });
+        if include_label && !label.is_empty() {
+            payload["review_label"] = serde_json::Value::String(label);
+            payload["review_label_category"] = serde_json::Value::String(if category.is_empty() {
+                "unknown".to_string()
+            } else {
+                category
+            });
+        } else if review_state == "rejected" {
+            payload["review_label"] = serde_json::Value::Null;
+            payload["review_label_category"] = serde_json::Value::Null;
+        }
+
+        pending.set(true);
+        review_error.set(None);
+        review_message.set(None);
+
+        spawn_local(async move {
+            match crate::api::patch_detection_review(&detection_id, payload).await {
+                Ok(value) => match serde_json::from_value::<Detection>(value) {
+                    Ok(updated) => {
+                        detection.set(Some(updated));
+                        review_message.set(Some("Review saved".to_string()));
+                    }
+                    Err(error) => review_error.set(Some(format!("parse: {error}"))),
+                },
+                Err(error) => review_error.set(Some(error)),
+            }
+            pending.set(false);
+        });
+    };
+
+    let confirm_review = {
+        let submit_review = submit_review.clone();
+        move |_| submit_review("confirmed", false)
+    };
+    let correct_review = {
+        let submit_review = submit_review.clone();
+        move |_| submit_review("confirmed", true)
+    };
+    let reject_review = move |_| submit_review("rejected", false);
+
+    view! {
+        <aside class="audio-meta detection-review-card">
+            <div class="detection-review-header">
+                <h3>"Review"</h3>
+                {move || {
+                    detection.get().map(|d| {
+                        let state = d.review_state.unwrap_or_else(|| "unreviewed".to_string());
+                        let state_class = review_state_class(&state);
+                        view! { <span class=state_class>{state}</span> }
+                    })
+                }}
+            </div>
+            <div class="detection-review-grid">
+                <label>
+                    <span>"Label"</span>
+                    <input
+                        id=label_input_id.clone()
+                        list=datalist_id.clone()
+                        type="text"
+                        prop:value=move || label_value.get()
+                        on:input=move |event| label_value.set(event_target_value(&event))
+                    />
+                </label>
+                <label>
+                    <span>"Category"</span>
+                    <input
+                        id=category_input_id.clone()
+                        type="text"
+                        prop:value=move || category_value.get()
+                        on:input=move |event| category_value.set(event_target_value(&event))
+                    />
+                </label>
+                <datalist id=datalist_id>
+                    {move || suggestions.get().into_iter().map(|suggestion| {
+                        let label = suggestion.label;
+                        let category = suggestion.category.unwrap_or_else(|| "unknown".to_string());
+                        let display = match suggestion.count {
+                            Some(count) => format!("{category} · {count}"),
+                            None => category,
+                        };
+                        view! { <option value=label label=display></option> }
+                    }).collect_view()}
+                </datalist>
+                <label class="detection-review-notes">
+                    <span>"Notes"</span>
+                    <textarea
+                        id=notes_input_id.clone()
+                        prop:value=move || notes_value.get()
+                        on:input=move |event| notes_value.set(event_target_value(&event))
+                    ></textarea>
+                </label>
+                <label class="review-training-toggle">
+                    <input
+                        type="checkbox"
+                        prop:checked=move || promote_to_training.get()
+                        on:change=move |event| promote_to_training.set(event_target_checked(&event))
+                    />
+                    <span>"Promote confirmed review to training/export set"</span>
+                </label>
+            </div>
+            <div class="detection-review-actions">
+                <button
+                    class="btn-sm"
+                    disabled=move || pending.get()
+                    on:click=confirm_review
+                >
+                    "Confirm"
+                </button>
+                <button
+                    class="btn-sm btn-primary"
+                    disabled=move || pending.get()
+                    on:click=correct_review
+                >
+                    "Correct label"
+                </button>
+                <button
+                    class="btn-sm btn-danger"
+                    disabled=move || pending.get()
+                    on:click=reject_review
+                >
+                    "Reject"
+                </button>
+            </div>
+            {move || review_message.get().map(|message| view! {
+                <span class="review-status-ok">{message}</span>
+            })}
+            {move || review_error.get().map(|message| view! {
+                <span class="daily-error">{message}</span>
+            })}
         </aside>
     }
 }

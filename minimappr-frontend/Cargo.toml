@@ -23,9 +23,13 @@ web-sys = { version = "0.3", features = [
     "HtmlInputElement",
     "HtmlSelectElement",
     "HtmlAudioElement",
+    "Blob",
     "Event",
     "KeyboardEvent",
     "EventTarget",
+    "File",
+    "FileList",
+    "FormData",
     "Window",
     "Document",
     "Element",
@@ -33,7 +37,9 @@ web-sys = { version = "0.3", features = [
     "CloseEvent",
     "ErrorEvent",
     "Storage",
+    "Clipboard",
     "Location",
+    "Navigator",
 ] }
 gloo-net = { version = "0.6", features = ["http", "websocket"] }
 gloo-timers = { version = "0.3", features = ["futures"] }

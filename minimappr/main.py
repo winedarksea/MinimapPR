@@ -10,6 +10,7 @@ import logging
 import os
 import sys
 import time
+import uuid
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -18,7 +19,7 @@ import urllib.error
 import urllib.request
 
 import numpy as np
-from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, model_validator
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -67,6 +68,7 @@ from minimappr.runtime_bootstrap import (
     _shutdown_combined_runtime_services,
     _start_combined_runtime_background_tasks,
     _stop_combined_runtime_background_tasks,
+    _wire_effector_zone_interlocks,
     _wire_effector_rules_handler,
 )
 from minimappr.core.capture_session import (
@@ -93,10 +95,12 @@ from minimappr.core.federation import FederationCoordinator
 from minimappr.core.fusion_node import FusionNode
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.logging_ring import install_global as install_log_ring, process_start_ns
+from minimappr.core.rules import RuleDef, default_rules_as_dicts
 from minimappr.core.site_origin import (
     resolve_site_origin_from_nodes,
     should_schedule_deferred_site_origin_reconciliation,
 )
+from minimappr.core.zones import ZoneMatcher
 from minimappr.core import system_info
 from minimappr.models import (
     AlertStatus,
@@ -110,6 +114,7 @@ from minimappr.models import (
     CopStatusResponse,
     DetectionReviewState,
     DetectionReviewUpdateRequest,
+    EffectorSafetyConfig,
     EffectorSpec,
     EnvironmentSampleIn,
     FederationAck,
@@ -117,6 +122,9 @@ from minimappr.models import (
     FederationStatusResponse,
     FederationTrackSnapshot,
     FusionStatusResponse,
+    MapOverlayKind,
+    MapOverlaySpec,
+    MapOverlayUpdate,
     GeoPoint,
     IngestFrameRequest,
     IngestFrameResponse,
@@ -126,6 +134,8 @@ from minimappr.models import (
     PipelineNodeView,
     PipelineNodesResponse,
     PipelineStageView,
+    RulesConfigResponse,
+    RulesConfigUpdate,
     ReviewedDetectionExportItem,
     ReviewedDetectionExportPackage,
     StoreForwardBufferedFrameResponse,
@@ -375,6 +385,7 @@ def _ensure_lifespan_runtime_directories(settings: Settings) -> None:
     settings.federation_peers_config_path.parent.mkdir(parents=True, exist_ok=True)
     settings.snippet_dir.mkdir(parents=True, exist_ok=True)
     settings.large_artifact_dir.mkdir(parents=True, exist_ok=True)
+    settings.map_overlay_dir.mkdir(parents=True, exist_ok=True)
     settings.effector_snapshot_dir.mkdir(parents=True, exist_ok=True)
 
 
@@ -1151,9 +1162,15 @@ async def _api_only_lifespan(app: FastAPI, settings: Settings):
         storage=storage,
         live_hub=common_live_runtime_services.live_hub,
     )
+    _wire_effector_zone_interlocks(
+        effector_manager,
+        coordinate_frame=common_live_runtime_services.coordinate_frame,
+        zone_matcher=ZoneMatcher(storage=storage),
+    )
 
     capture_manager = _build_capture_manager(
         settings,
+        live_hub=common_live_runtime_services.live_hub,
         sidecar_url=_ingest_runtime_base_url(settings),
         storage=storage,
     )
@@ -1265,12 +1282,18 @@ async def lifespan(app: FastAPI):
         storage=storage,
         live_hub=common_live_runtime_services.live_hub,
     )
+    _wire_effector_zone_interlocks(
+        effector_manager,
+        coordinate_frame=common_live_runtime_services.coordinate_frame,
+        zone_matcher=combined_runtime_core_services.zone_matcher,
+    )
     if settings.effectors_enabled:
         _wire_effector_rules_handler(combined_runtime_core_services.fusion_node, effector_manager)
 
     _python_ingest = settings.ingest_backend == "python"
     capture_manager = _build_capture_manager(
         settings,
+        live_hub=common_live_runtime_services.live_hub,
         sidecar_url=None if _python_ingest else _ingest_runtime_base_url(settings),
         storage=storage,
         multi_sensor_buffer=combined_runtime_core_services.audio_buffer if _python_ingest else None,
@@ -2299,6 +2322,13 @@ async def get_config(request: Request) -> dict:
             "deconflict_mahalanobis_gate": settings.federation_deconflict_mahalanobis_gate,
             "tqi_hysteresis": settings.federation_tqi_hysteresis,
         },
+        "hass": {
+            "enabled": settings.hass_enabled,
+            "base_url": settings.hass_base_url,
+            "token": "***" if settings.hass_token else "",
+            "mqtt_host": settings.hass_mqtt_host,
+            "mqtt_port": settings.hass_mqtt_port,
+        },
     }
 
 
@@ -2322,6 +2352,11 @@ _CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     "tracking_filter": str,
     "fusion_worker_count": int,
     "coordinate_mode": str,
+    "hass_enabled": bool,
+    "hass_base_url": str,
+    "hass_token": str,
+    "hass_mqtt_host": str,
+    "hass_mqtt_port": int,
 }
 
 _LOCALIZATION_ALGORITHMS = {"gcc_phat", "srp_phat", "music", "esprit"}
@@ -2330,6 +2365,68 @@ _BEAMFORMER_TYPES = {"delay_and_sum", "das", "freq_domain_das", "mvdr", "superdi
 _CLASSIFIER_BACKENDS = {"yamnet", "birdnet", "heuristic"}
 _TRACKING_FILTERS = {"linear", "kalman"}
 _COORDINATE_MODES = {"flat", "geodetic"}
+
+
+def _rules_config_payload_from_file(config_path: Path) -> tuple[list[dict[str, Any]], str]:
+    if not config_path.exists():
+        return default_rules_as_dicts(), "default"
+    try:
+        raw = json.loads(config_path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError("rules config must be a JSON object")
+        rules: list[dict[str, Any]] = []
+        for item in raw.get("rules", []):
+            if not isinstance(item, dict):
+                continue
+            rule = RuleDef.from_dict(item)
+            if rule is not None:
+                rules.append(rule.to_dict())
+        return (rules or default_rules_as_dicts()), "file"
+    except Exception as exc:
+        logger.warning("Failed to read rules config %s: %s", config_path, exc)
+        return default_rules_as_dicts(), "default"
+
+
+def _rules_response(settings: Settings) -> RulesConfigResponse:
+    rules, source = _rules_config_payload_from_file(settings.rules_config_path)
+    return RulesConfigResponse(rules=rules, path=str(settings.rules_config_path), source=source)
+
+
+@app.get("/api/v1/rules", response_model=RulesConfigResponse)
+async def get_rules_config(request: Request) -> RulesConfigResponse:
+    state = _require_state(request)
+    settings: Settings = state.settings
+    return _rules_response(settings)
+
+
+@app.put("/api/v1/rules", response_model=RulesConfigResponse)
+async def put_rules_config(payload: RulesConfigUpdate, request: Request) -> RulesConfigResponse:
+    state = _require_state(request)
+    settings: Settings = state.settings
+
+    canonical_rules: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for index, rule_model in enumerate(payload.rules):
+        raw_rule = rule_model.model_dump(mode="json")
+        parsed = RuleDef.from_dict(raw_rule)
+        if parsed is None:
+            errors.append(f"rules[{index}]: invalid rule")
+        else:
+            canonical_rules.append(parsed.to_dict())
+    if errors:
+        raise HTTPException(status_code=422, detail=errors)
+
+    config_path = settings.rules_config_path
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = config_path.with_name(f".{config_path.name}.tmp")
+    tmp_path.write_text(
+        json.dumps({"rules": canonical_rules}, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(tmp_path, config_path)
+
+    await state.live_hub.broadcast({"type": "rules_updated"})
+    return _rules_response(settings)
 
 
 @app.patch("/api/v1/config")
@@ -2403,6 +2500,8 @@ async def patch_config(request: Request) -> dict:
                 errors.append(f"coordinate_mode: must be one of {sorted(_COORDINATE_MODES)}")
             else:
                 value = v
+        elif key == "hass_mqtt_port" and (value < 1 or value > 65535):  # type: ignore[operator]
+            errors.append("hass_mqtt_port: must be in [1, 65535]")
 
         if not errors or key not in {e.split(":")[0] for e in errors}:
             coerced[key] = value
@@ -3036,6 +3135,174 @@ async def current_environment(
         "speed_of_sound_mps": state.environment_provider.get_speed_of_sound(location_m=location),
         "metadata": conditions.metadata,
     }
+
+
+_OVERLAY_MAX_BYTES = 20 * 1024 * 1024
+_OVERLAY_EXTENSIONS = {
+    MapOverlayKind.IMAGE: {".png", ".jpg", ".jpeg", ".webp"},
+    MapOverlayKind.SVG: {".svg"},
+    MapOverlayKind.GEOJSON: {".json", ".geojson"},
+}
+_OVERLAY_MIME_PREFIXES = {
+    MapOverlayKind.IMAGE: ("image/png", "image/jpeg", "image/webp"),
+    MapOverlayKind.SVG: ("image/svg+xml",),
+    MapOverlayKind.GEOJSON: ("application/json", "application/geo+json", "text/plain"),
+}
+
+
+def _overlay_row_to_spec(row: dict[str, Any]) -> MapOverlaySpec:
+    return MapOverlaySpec(
+        id=row["id"],
+        name=row["name"],
+        kind=row["kind"],
+        content_url=f"/api/v1/overlays/{row['id']}/content",
+        mime=row["mime"],
+        bounds=row.get("bounds") or [],
+        opacity=float(row.get("opacity", 0.75)),
+        storey=row.get("storey"),
+        enabled=bool(row.get("enabled", True)),
+        created_ns=int(row["created_ns"]),
+        metadata=row.get("metadata") or {},
+    )
+
+
+def _parse_overlay_bounds(bounds: str | None) -> list[list[float]]:
+    if bounds is None or not bounds.strip():
+        return []
+    try:
+        parsed = json.loads(bounds)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid bounds JSON: {exc}") from exc
+    update = MapOverlayUpdate(bounds=parsed)
+    return update.bounds or []
+
+
+def _overlay_extension_for_upload(filename: str, kind: MapOverlayKind) -> str:
+    suffix = Path(filename).suffix.lower()
+    if suffix not in _OVERLAY_EXTENSIONS[kind]:
+        raise HTTPException(status_code=415, detail=f"{kind.value} overlays do not accept {suffix or 'extensionless'} files")
+    return suffix
+
+
+def _validate_overlay_mime(content_type: str | None, kind: MapOverlayKind) -> str:
+    mime = (content_type or "application/octet-stream").split(";", 1)[0].strip().lower()
+    if mime not in _OVERLAY_MIME_PREFIXES[kind]:
+        raise HTTPException(status_code=415, detail=f"{kind.value} overlay MIME {mime!r} is not accepted")
+    return mime
+
+
+async def _broadcast_overlay_updated(state, overlay_id: str | None = None) -> None:
+    await state.live_hub.broadcast({"type": "overlay_updated", "overlay_id": overlay_id})
+
+
+@app.get("/api/v1/overlays", response_model=list[MapOverlaySpec])
+async def list_overlays(request: Request) -> list[MapOverlaySpec]:
+    state = _require_state(request)
+    return [_overlay_row_to_spec(row) for row in await state.storage.list_map_overlays()]
+
+
+@app.post("/api/v1/overlays", response_model=MapOverlaySpec, status_code=201)
+async def upload_overlay(
+    request: Request,
+    file: UploadFile = File(...),
+    name: str = Form(...),
+    kind: MapOverlayKind = Form(...),
+    bounds: str | None = Form(default=None),
+    storey: str | None = Form(default=None),
+    opacity: float = Form(default=0.75, ge=0.0, le=1.0),
+) -> MapOverlaySpec:
+    state = _require_state(request)
+    filename = file.filename or ""
+    extension = _overlay_extension_for_upload(filename, kind)
+    mime = _validate_overlay_mime(file.content_type, kind)
+    data = await file.read()
+    if len(data) > _OVERLAY_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="Overlay file exceeds 20 MB")
+    if not name.strip():
+        raise HTTPException(status_code=422, detail="Overlay name is required")
+    overlay_id = f"ovl-{uuid.uuid4().hex[:16]}"
+    overlay_dir: Path = state.settings.map_overlay_dir
+    overlay_dir.mkdir(parents=True, exist_ok=True)
+    file_path = overlay_dir / f"{overlay_id}{extension}"
+    file_path.write_bytes(data)
+    created_ns = time.time_ns()
+    parsed_bounds = _parse_overlay_bounds(bounds)
+    await state.storage.upsert_map_overlay(
+        overlay_id=overlay_id,
+        name=name.strip(),
+        kind=kind.value,
+        file_path=str(file_path),
+        mime=mime,
+        bounds=parsed_bounds,
+        opacity=float(opacity),
+        storey=storey.strip() if storey and storey.strip() else None,
+        enabled=True,
+        created_ns=created_ns,
+        metadata={},
+    )
+    await _broadcast_overlay_updated(state, overlay_id)
+    row = await state.storage.get_map_overlay(overlay_id)
+    if row is None:
+        raise HTTPException(status_code=500, detail="Overlay upload did not persist")
+    return _overlay_row_to_spec(row)
+
+
+@app.patch("/api/v1/overlays/{overlay_id}", response_model=MapOverlaySpec)
+async def patch_overlay(overlay_id: str, payload: MapOverlayUpdate, request: Request) -> MapOverlaySpec:
+    state = _require_state(request)
+    row = await state.storage.get_map_overlay(overlay_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Overlay not found")
+    await state.storage.upsert_map_overlay(
+        overlay_id=overlay_id,
+        name=payload.name.strip() if payload.name and payload.name.strip() else row["name"],
+        kind=row["kind"],
+        file_path=row["file_path"],
+        mime=row["mime"],
+        bounds=payload.bounds if payload.bounds is not None else row.get("bounds", []),
+        opacity=payload.opacity if payload.opacity is not None else float(row["opacity"]),
+        storey=payload.storey if payload.storey is not None else row.get("storey"),
+        enabled=payload.enabled if payload.enabled is not None else bool(row.get("enabled", True)),
+        created_ns=int(row["created_ns"]),
+        metadata=payload.metadata if payload.metadata is not None else row.get("metadata", {}),
+    )
+    await _broadcast_overlay_updated(state, overlay_id)
+    updated = await state.storage.get_map_overlay(overlay_id)
+    if updated is None:
+        raise HTTPException(status_code=500, detail="Overlay update did not persist")
+    return _overlay_row_to_spec(updated)
+
+
+@app.get("/api/v1/overlays/{overlay_id}/content")
+async def get_overlay_content(overlay_id: str, request: Request) -> FileResponse:
+    state = _require_state(request)
+    row = await state.storage.get_map_overlay(overlay_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Overlay not found")
+    overlay_root: Path = state.settings.map_overlay_dir.resolve()
+    overlay_path = Path(row["file_path"]).resolve()
+    if not overlay_path.exists():
+        raise HTTPException(status_code=404, detail="Overlay file no longer exists")
+    if not overlay_path.is_relative_to(overlay_root):
+        raise HTTPException(status_code=403, detail="Overlay path is outside overlay directory")
+    return FileResponse(path=overlay_path, media_type=row["mime"])
+
+
+@app.delete("/api/v1/overlays/{overlay_id}")
+async def delete_overlay(overlay_id: str, request: Request) -> dict:
+    state = _require_state(request)
+    row = await state.storage.get_map_overlay(overlay_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Overlay not found")
+    deleted = await state.storage.delete_map_overlay(overlay_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Overlay not found")
+    overlay_root: Path = state.settings.map_overlay_dir.resolve()
+    overlay_path = Path(row["file_path"]).resolve()
+    if overlay_path.is_relative_to(overlay_root):
+        overlay_path.unlink(missing_ok=True)
+    await _broadcast_overlay_updated(state, overlay_id)
+    return {"ok": True, "overlay_id": overlay_id}
 
 
 @app.get("/api/v1/zones")
@@ -4180,6 +4447,10 @@ class _EffectorSnapshotBody(BaseModel):
     detection_id: str | None = None
 
 
+class _EffectorArmBody(BaseModel):
+    zone_id: str | None = None
+
+
 @app.get("/api/v1/effectors")
 async def list_effectors(request: Request) -> list[dict]:
     state = _require_state(request)
@@ -4233,6 +4504,66 @@ async def get_effector_status(effector_id: str, request: Request) -> dict:
         "status": status.model_dump(mode="json"),
         "capabilities": capabilities,
     }
+
+
+@app.post("/api/v1/effectors/{effector_id}/arm")
+async def arm_effector(effector_id: str, payload: _EffectorArmBody, request: Request) -> JSONResponse:
+    state = _require_state(request)
+    manager: EffectorManager = state.effector_manager
+    result = await manager.arm(effector_id, zone_id=payload.zone_id)
+    if result.failure_class == "not_found":
+        raise HTTPException(status_code=404, detail="Effector not found")
+    status_code = 200 if result.status == "COMPLETED" else 409
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "status": result.status,
+            "execution_id": result.execution_id,
+            "failure_class": result.failure_class,
+        },
+    )
+
+
+@app.post("/api/v1/effectors/{effector_id}/disarm")
+async def disarm_effector(effector_id: str, request: Request) -> JSONResponse:
+    state = _require_state(request)
+    manager: EffectorManager = state.effector_manager
+    result = await manager.disarm(effector_id)
+    if result.failure_class == "not_found":
+        raise HTTPException(status_code=404, detail="Effector not found")
+    status_code = 200 if result.status == "COMPLETED" else 409
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "status": result.status,
+            "execution_id": result.execution_id,
+            "failure_class": result.failure_class,
+        },
+    )
+
+
+@app.get("/api/v1/effectors/{effector_id}/safety", response_model=EffectorSafetyConfig)
+async def get_effector_safety(effector_id: str, request: Request) -> EffectorSafetyConfig:
+    state = _require_state(request)
+    manager: EffectorManager = state.effector_manager
+    safety = await manager.get_safety(effector_id)
+    if safety is None:
+        raise HTTPException(status_code=404, detail="Effector not found")
+    return safety
+
+
+@app.patch("/api/v1/effectors/{effector_id}/safety", response_model=EffectorSafetyConfig)
+async def patch_effector_safety(
+    effector_id: str,
+    payload: EffectorSafetyConfig,
+    request: Request,
+) -> EffectorSafetyConfig:
+    state = _require_state(request)
+    manager: EffectorManager = state.effector_manager
+    safety = await manager.update_safety(effector_id, payload)
+    if safety is None:
+        raise HTTPException(status_code=404, detail="Effector not found")
+    return safety
 
 
 @app.post("/api/v1/effectors/{effector_id}/aim")
@@ -4357,6 +4688,7 @@ async def capture_start(request: Request, body: _CaptureStartBody):
 
     storage: Storage = state.storage
     await storage.upsert_capture_session(record)
+    await _broadcast_recording_status(state, record)
 
     return {
         "session_id": record.session_id,
@@ -4406,6 +4738,7 @@ async def capture_stop(session_id: str, request: Request):
 
     storage: Storage = state.storage
     await storage.upsert_capture_session(record)
+    await _broadcast_recording_status(state, record)
 
     return {
         "session_id": record.session_id,
@@ -4520,6 +4853,15 @@ def _session_record_to_recording_session(record: CaptureSessionRecord) -> dict:
     }
 
 
+async def _broadcast_recording_status(state, record: CaptureSessionRecord) -> None:
+    await state.live_hub.broadcast(
+        {
+            "type": "recording_status",
+            "session": _session_record_to_recording_session(record),
+        }
+    )
+
+
 class _StartRecordingBody(BaseModel):
     listener_node_id: str
     include_ambisonics: bool = True
@@ -4571,6 +4913,7 @@ async def recordings_start(request: Request, body: _StartRecordingBody):
         raise HTTPException(status_code=500, detail=record.error or "capture start failed")
 
     await storage.upsert_capture_session(record)
+    await _broadcast_recording_status(state, record)
     return _session_record_to_recording_session(record)
 
 
@@ -4609,6 +4952,7 @@ async def recordings_stop(session_id: str, request: Request):
 
     storage: Storage = state.storage
     await storage.upsert_capture_session(record)
+    await _broadcast_recording_status(state, record)
     return _session_record_to_recording_session(record)
 
 

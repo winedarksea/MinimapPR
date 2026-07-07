@@ -1,3 +1,5 @@
+use crate::components::meter::RmsMeter;
+use crate::components::strip_chart::StripChart;
 use futures::StreamExt;
 use gloo_net::http::Request;
 use gloo_timers::future::IntervalStream;
@@ -186,28 +188,6 @@ fn fmt_count(n: u64) -> String {
     } else {
         n.to_string()
     }
-}
-
-fn sparkline_path(rms: &[f64], width: f64, height: f64) -> String {
-    if rms.len() < 2 {
-        return String::new();
-    }
-    let max = rms
-        .iter()
-        .cloned()
-        .fold(f64::NEG_INFINITY, f64::max)
-        .max(1e-9);
-    let n = rms.len();
-    let pts: Vec<String> = rms
-        .iter()
-        .enumerate()
-        .map(|(i, &v)| {
-            let x = i as f64 / (n - 1).max(1) as f64 * width;
-            let y = height - (v / max) * height;
-            format!("{x:.1},{y:.1}")
-        })
-        .collect();
-    format!("M {}", pts.join(" L "))
 }
 
 fn audio_status_chip(status: &str) -> &'static str {
@@ -425,7 +405,6 @@ fn NodeCard(
         .first()
         .map(|m| m.rms_recent.clone())
         .unwrap_or_default();
-    let spark_all = sparkline_path(&rms_all, 120.0, 24.0);
     let has_rms_all = !rms_all.is_empty();
     let has_gaps = frame_gaps > 0;
     let has_zero_padded = zero_padded > 0;
@@ -499,8 +478,8 @@ fn NodeCard(
         .enumerate()
         .map(|(i, mic)| {
             let label = mic.label.clone();
-            let spark = sparkline_path(&mic.rms_recent, 60.0, 16.0);
             let has_rms = !mic.rms_recent.is_empty();
+            let samples = mic.rms_recent.clone();
 
             // Each closure needs its own node_id clone.
             let nid_val = node_id.clone();
@@ -525,7 +504,7 @@ fn NodeCard(
                 });
             };
 
-            (label, spark, has_rms, gain_val, gain_chg)
+            (label, samples, has_rms, gain_val, gain_chg)
         })
         .collect();
 
@@ -614,6 +593,28 @@ fn NodeCard(
                 </div>
             </div>
 
+            <div class="pipeline-chain-flow" aria-label="Audio pipeline flow">
+                <div class="pipeline-chain-node">
+                    <span class="material-symbols-rounded" aria-hidden="true">"mic"</span>
+                    <strong>{format!("{} mic(s)", mics.len())}</strong>
+                    <span class="muted">{sample_rate.map(|sr| format!("{sr} Hz")).unwrap_or_else(|| "sample rate unknown".to_string())}</span>
+                </div>
+                <div class="pipeline-chain-edge"></div>
+                <div class="pipeline-chain-node">
+                    <span class="material-symbols-rounded" aria-hidden="true">"memory"</span>
+                    <strong>{format!("{} stage(s)", stages.len())}</strong>
+                    <span class=if stages.iter().any(|stage| stage.drops > 0) { "pipeline-chain-warn" } else { "muted" }>
+                        {format!("{} drops", fmt_count(stages.iter().map(|stage| stage.drops).sum()))}
+                    </span>
+                </div>
+                <div class="pipeline-chain-edge"></div>
+                <div class="pipeline-chain-node">
+                    <span class="material-symbols-rounded" aria-hidden="true">"output"</span>
+                    <strong>"Output"</strong>
+                    <span>{fmt_lag(stages.iter().filter_map(|stage| stage.lag_s).max_by(|a, b| a.total_cmp(b)))}</span>
+                </div>
+            </div>
+
             // Stage chips
             <div class="pipeline-stage-row">
                 {stages.into_iter().map(|s| {
@@ -642,10 +643,9 @@ fn NodeCard(
                 let rms_max = rms_all.iter().cloned().fold(0.0_f64, f64::max);
                 let is_quiet = audio_status == "recent" && rms_max < 0.01;
                 view! {
-                    <div style="display:flex;align-items:center;gap:0.5rem">
-                        <svg width="120" height="24" class="rms-sparkline" style="margin:0.3rem 0;display:block">
-                            <path d=spark_all stroke="var(--md-sys-color-primary)" stroke-width="1.5" fill="none" />
-                        </svg>
+                    <div class="pipeline-rms-summary">
+                        <StripChart samples=rms_all.clone() width=120.0 height=24.0 />
+                        <RmsMeter samples=rms_all.clone() label="Aggregate RMS" />
                         {is_quiet.then(|| view! {
                             <span class="muted" style="font-size:0.75rem">"audio quiet"</span>
                         })}
@@ -669,9 +669,9 @@ fn NodeCard(
                     <div class="mic-table-row mic-table-header">
                         <span>"Mic"</span>
                         <span>"Gain (dB)"</span>
-                        <span>"RMS"</span>
+                        <span>"RMS / recent"</span>
                     </div>
-                    {mic_rows.into_iter().map(|(label, spark, has_rms, gain_val, gain_chg)| view! {
+                    {mic_rows.into_iter().map(|(label, samples, has_rms, gain_val, gain_chg)| view! {
                         <div class="mic-table-row">
                             <span class="mic-label">{label}</span>
                             <input
@@ -682,9 +682,10 @@ fn NodeCard(
                             />
                             {if has_rms {
                                 view! {
-                                    <svg width="60" height="16" class="rms-sparkline">
-                                        <path d=spark stroke="var(--md-sys-color-primary)" stroke-width="1.2" fill="none" />
-                                    </svg>
+                                    <div class="mic-rms-cell">
+                                        <StripChart samples=samples.clone() width=68.0 height=16.0 />
+                                        <RmsMeter samples=samples label="RMS" />
+                                    </div>
                                 }.into_any()
                             } else {
                                 view! { <span class="muted">"—"</span> }.into_any()

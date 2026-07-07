@@ -9,6 +9,7 @@ pub fn TopBar() -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState");
     let ws_status = state.ws_status;
     let theme = state.theme;
+    let active_recording = state.active_recording;
 
     let pill_class = move || match ws_status.get() {
         WsStatus::Connected => "ws-pill connected",
@@ -70,6 +71,12 @@ pub fn TopBar() -> impl IntoView {
 
             <div class="topbar-tools">
                 <span class=pill_class>{pill_text}</span>
+                {move || active_recording.get().filter(|session| session.status.is_active()).map(|session| view! {
+                    <A href="/audio/record" attr:class="topbar-rec-chip">
+                        <span class="rec-dot"></span>
+                        <span>{session.status.label()}</span>
+                    </A>
+                })}
                 <div class="topbar-clock" aria-label="Clock">
                     <div class="utc">{clock_utc}" UTC"</div>
                     <div class="local">{clock_local}" local"</div>

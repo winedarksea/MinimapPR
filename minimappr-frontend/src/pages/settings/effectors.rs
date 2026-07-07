@@ -1,5 +1,8 @@
-use crate::api::{delete_effector, register_effector};
-use crate::state::AppState;
+use crate::api::{
+    arm_effector, delete_effector, disarm_effector, get_effector_safety, patch_effector_safety,
+    register_effector, EffectorSafetyConfig,
+};
+use crate::state::{AppState, Effector};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
@@ -20,6 +23,43 @@ struct RegisterForm {
 
 fn parse_or(text: &str, default: f64) -> f64 {
     text.trim().parse::<f64>().unwrap_or(default)
+}
+
+fn parse_zone_ids(text: &str) -> Vec<String> {
+    text.split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn join_zone_ids(zone_ids: &[String]) -> String {
+    zone_ids.join(", ")
+}
+
+fn parse_optional_nonnegative_float(text: &str) -> Result<Option<f64>, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let value = trimmed
+        .parse::<f64>()
+        .map_err(|_| "Min slew interval must be a number".to_string())?;
+    if value < 0.0 {
+        return Err("Min slew interval cannot be negative".to_string());
+    }
+    Ok(Some(value))
+}
+
+fn update_effector_armed(effectors: RwSignal<Vec<Effector>>, effector_id: &str, armed: bool) {
+    effectors.update(|list| {
+        if let Some(effector) = list.iter_mut().find(|item| item.id == effector_id) {
+            if let Some(status) = effector.status.as_mut() {
+                status.armed = armed;
+                status.state = "idle".to_string();
+            }
+        }
+    });
 }
 
 fn build_register_payload(form: &RegisterForm) -> Result<serde_json::Value, String> {
@@ -114,39 +154,13 @@ pub fn EffectorsView() -> impl IntoView {
                     view! { <div class="empty-state"><p>"No cameras registered yet."</p></div> }.into_any()
                 } else {
                     view! {
-                        <ul class="compact-list">
+                        <div class="effector-card-grid">
                             {list.into_iter().map(|effector| {
-                                let delete_id = effector.id.clone();
-                                let state_label = effector.status.as_ref()
-                                    .map(|s| s.state.clone())
-                                    .unwrap_or_else(|| "offline".to_string());
-                                let chip_class = match state_label.as_str() {
-                                    "idle" | "slewing" | "streaming" => "health-chip online",
-                                    "error" => "health-chip offline",
-                                    _ => "health-chip degraded",
-                                };
                                 view! {
-                                    <li class="compact-row">
-                                        <span class=chip_class>{state_label}</span>
-                                        <span class="row-label">{effector.id.clone()}</span>
-                                        <button
-                                            class="btn-sm"
-                                            title="Remove camera"
-                                            on:click=move |_| {
-                                                let id = delete_id.clone();
-                                                spawn_local(async move {
-                                                    if delete_effector(&id).await.is_ok() {
-                                                        effectors.update(|list| list.retain(|e| e.id != id));
-                                                    }
-                                                });
-                                            }
-                                        >
-                                            "Remove"
-                                        </button>
-                                    </li>
+                                    <EffectorSafetyCard effector_id=effector.id.clone() effectors=effectors />
                                 }
                             }).collect_view()}
-                        </ul>
+                        </div>
                     }.into_any()
                 }
             }}
@@ -243,6 +257,232 @@ pub fn EffectorsView() -> impl IntoView {
     }
 }
 
+#[component]
+fn EffectorSafetyCard(effector_id: String, effectors: RwSignal<Vec<Effector>>) -> impl IntoView {
+    let safety = RwSignal::new(EffectorSafetyConfig::default());
+    let min_interval_text = RwSignal::new(String::new());
+    let no_go_zone_text = RwSignal::new(String::new());
+    let loading = RwSignal::new(true);
+    let saving = RwSignal::new(false);
+    let error: RwSignal<Option<String>> = RwSignal::new(None);
+    let notice: RwSignal<Option<String>> = RwSignal::new(None);
+
+    let load_safety = {
+        let effector_id = effector_id.clone();
+        move || {
+            loading.set(true);
+            error.set(None);
+            notice.set(None);
+            let id = effector_id.clone();
+            spawn_local(async move {
+                match get_effector_safety(&id).await {
+                    Ok(next) => {
+                        min_interval_text.set(
+                            next.min_slew_interval_seconds
+                                .map(|value| value.to_string())
+                                .unwrap_or_default(),
+                        );
+                        no_go_zone_text.set(join_zone_ids(&next.no_go_zone_ids));
+                        safety.set(next);
+                    }
+                    Err(message) => error.set(Some(message)),
+                }
+                loading.set(false);
+            });
+        }
+    };
+    load_safety();
+
+    let save_safety = {
+        let effector_id = effector_id.clone();
+        move |_| {
+            error.set(None);
+            notice.set(None);
+            let min_slew_interval_seconds =
+                match parse_optional_nonnegative_float(&min_interval_text.get_untracked()) {
+                    Ok(value) => value,
+                    Err(message) => {
+                        error.set(Some(message));
+                        return;
+                    }
+                };
+            let mut next = safety.get_untracked();
+            next.min_slew_interval_seconds = min_slew_interval_seconds;
+            next.no_go_zone_ids = parse_zone_ids(&no_go_zone_text.get_untracked());
+            saving.set(true);
+            let id = effector_id.clone();
+            spawn_local(async move {
+                match patch_effector_safety(&id, next).await {
+                    Ok(saved) => {
+                        min_interval_text.set(
+                            saved
+                                .min_slew_interval_seconds
+                                .map(|value| value.to_string())
+                                .unwrap_or_default(),
+                        );
+                        no_go_zone_text.set(join_zone_ids(&saved.no_go_zone_ids));
+                        safety.set(saved);
+                        notice.set(Some("Safety saved".to_string()));
+                    }
+                    Err(message) => error.set(Some(message)),
+                }
+                saving.set(false);
+            });
+        }
+    };
+
+    let on_arm = {
+        let effector_id = effector_id.clone();
+        move |_| {
+            error.set(None);
+            notice.set(None);
+            let id = effector_id.clone();
+            saving.set(true);
+            spawn_local(async move {
+                match arm_effector(&id).await {
+                    Ok(_) => {
+                        update_effector_armed(effectors, &id, true);
+                        notice.set(Some("Camera armed".to_string()));
+                    }
+                    Err(message) => error.set(Some(message)),
+                }
+                saving.set(false);
+            });
+        }
+    };
+
+    let on_disarm = {
+        let effector_id = effector_id.clone();
+        move |_| {
+            error.set(None);
+            notice.set(None);
+            let id = effector_id.clone();
+            saving.set(true);
+            spawn_local(async move {
+                match disarm_effector(&id).await {
+                    Ok(_) => {
+                        update_effector_armed(effectors, &id, false);
+                        notice.set(Some("Camera disarmed".to_string()));
+                    }
+                    Err(message) => error.set(Some(message)),
+                }
+                saving.set(false);
+            });
+        }
+    };
+
+    let on_delete = {
+        let effector_id = effector_id.clone();
+        move |_| {
+            let id = effector_id.clone();
+            spawn_local(async move {
+                if delete_effector(&id).await.is_ok() {
+                    effectors.update(|list| list.retain(|effector| effector.id != id));
+                }
+            });
+        }
+    };
+
+    let status_effector_id = effector_id.clone();
+    let status_label = Signal::derive(move || {
+        effectors.with(|list| {
+            list.iter()
+                .find(|item| item.id == status_effector_id)
+                .and_then(|effector| effector.status.as_ref())
+                .map(|status| status.state.clone())
+                .unwrap_or_else(|| "offline".to_string())
+        })
+    });
+    let armed_effector_id = effector_id.clone();
+    let armed = Signal::derive(move || {
+        effectors.with(|list| {
+            list.iter()
+                .find(|item| item.id == armed_effector_id)
+                .and_then(|effector| effector.status.as_ref())
+                .map(|status| status.armed)
+                .unwrap_or(false)
+        })
+    });
+    let health_class = move || match status_label.get().as_str() {
+        "idle" | "slewing" | "streaming" => "health-chip online",
+        "error" => "health-chip offline",
+        _ => "health-chip degraded",
+    };
+
+    view! {
+        <section class="diag-card effector-safety-card">
+            <div class="effector-card-header">
+                <div>
+                    <div class="pipeline-section-label">{effector_id.clone()}</div>
+                    <div class="effector-card-status">
+                        <span class=health_class>{move || status_label.get()}</span>
+                        <span class=move || if armed.get() { "tone-badge danger" } else { "tone-badge neutral" }>
+                            {move || if armed.get() { "armed" } else { "disarmed" }}
+                        </span>
+                    </div>
+                </div>
+                <button class="btn-sm btn-sm--danger" title="Remove camera" on:click=on_delete>
+                    "Remove"
+                </button>
+            </div>
+
+            <div class="effector-command-row">
+                <button class="btn-primary" disabled=move || saving.get() || armed.get() on:click=on_arm>
+                    "Arm"
+                </button>
+                <button class="btn-sm btn-sm--danger" disabled=move || saving.get() || !armed.get() on:click=on_disarm>
+                    "Disarm"
+                </button>
+                <button class="btn-sm" disabled=move || loading.get() || saving.get() on:click=move |_| load_safety()>
+                    "Reload safety"
+                </button>
+            </div>
+
+            <div class="settings-form-grid effector-safety-grid">
+                <label class="rule-enabled-toggle effector-checkbox-row">
+                    <input
+                        type="checkbox"
+                        prop:checked=move || safety.get().require_arm_for_slew
+                        on:change=move |event| {
+                            let checked = event_target_checked(&event);
+                            safety.update(|item| item.require_arm_for_slew = checked);
+                        }
+                    />
+                    <span>"Require arm for slew"</span>
+                </label>
+                <label>"Min slew interval override"
+                    <input
+                        type="number"
+                        min="0"
+                        step="0.1"
+                        class="mic-input"
+                        placeholder="global"
+                        prop:value=move || min_interval_text.get()
+                        on:input=move |event| min_interval_text.set(event_target_value(&event))
+                    />
+                </label>
+                <label>"No-go zone IDs"
+                    <input
+                        type="text"
+                        class="mic-input effector-zone-input"
+                        placeholder="zone-a, zone-b"
+                        prop:value=move || no_go_zone_text.get()
+                        on:input=move |event| no_go_zone_text.set(event_target_value(&event))
+                    />
+                </label>
+            </div>
+
+            <div class="pipeline-save-row">
+                <button class="btn-primary" disabled=move || loading.get() || saving.get() on:click=save_safety>
+                    {move || if saving.get() { "Saving..." } else { "Save safety" }}
+                </button>
+                {move || error.get().map(|message| view! { <span class="daily-error">{message}</span> })}
+                {move || notice.get().map(|message| view! { <span class="tone-badge ok">{message}</span> })}
+            </div>
+        </section>
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,6 +533,9 @@ mod tests {
         let mut form = sample_form();
         form.rtsp_url = "rtsp://192.168.1.50/stream1".into();
         let payload = build_register_payload(&form).unwrap();
-        assert_eq!(payload["transport"]["rtsp_url"], "rtsp://192.168.1.50/stream1");
+        assert_eq!(
+            payload["transport"]["rtsp_url"],
+            "rtsp://192.168.1.50/stream1"
+        );
     }
 }

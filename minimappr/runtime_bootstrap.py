@@ -24,6 +24,7 @@ from minimappr.cleanup_service import CleanupService
 from minimappr.config import Settings
 from minimappr.core.bit_report import BITReportEvaluator
 from minimappr.core.capture_session import CaptureSessionManager
+from minimappr.core.capture_session import CaptureSessionRecord, CaptureState
 from minimappr.core.diagnostics import DiagnosticsService
 from minimappr.core.effector_rules import EffectorRuleActionHandler
 from minimappr.core.effectors.registry import EffectorManager
@@ -117,6 +118,7 @@ def _build_common_live_runtime_services(
 def _build_capture_manager(
     settings: Settings,
     *,
+    live_hub: LiveEventHub,
     sidecar_url: str | None,
     storage: Storage,
     multi_sensor_buffer: MultiSensorBuffer | None = None,
@@ -133,9 +135,57 @@ def _build_capture_manager(
     async def _run_capture_post_processing(record):
         await iamf_pipeline.run(record)
 
+    async def _persist_and_broadcast_capture_session(record: CaptureSessionRecord) -> None:
+        await storage.upsert_capture_session(record)
+        await live_hub.broadcast(
+            {
+                "type": "recording_status",
+                "session": _session_record_to_recording_session(record),
+            }
+        )
+
     capture_manager.set_post_process_callback(_run_capture_post_processing)
-    capture_manager.set_session_update_callback(storage.upsert_capture_session)
+    capture_manager.set_session_update_callback(_persist_and_broadcast_capture_session)
     return capture_manager
+
+
+def _capture_state_to_recording_status(state: CaptureState) -> str:
+    mapping = {
+        CaptureState.PENDING: "starting",
+        CaptureState.RECORDING: "recording",
+        CaptureState.AWAITING_FINAL_TRACKS: "stopping",
+        CaptureState.PROCESSING: "stopping",
+        CaptureState.COMPLETED: "completed",
+        CaptureState.FAILED: "failed",
+    }
+    return mapping.get(state, "idle")
+
+
+def _session_record_to_recording_session(record: CaptureSessionRecord) -> dict:
+    started_at_ms = (record.start_time_ns / 1_000_000) if record.start_time_ns else None
+    ended_at_ms = (record.end_time_ns / 1_000_000) if record.end_time_ns else None
+    duration_seconds = None
+    if record.start_time_ns and record.end_time_ns:
+        duration_seconds = (record.end_time_ns - record.start_time_ns) / 1_000_000_000.0
+
+    return {
+        "session_id": record.session_id,
+        "status": _capture_state_to_recording_status(record.state),
+        "listener_node_id": record.stream_key,
+        "include_ambisonics": True,
+        "include_iamf": record.include_iamf,
+        "include_video": record.include_video,
+        "camera_source": None,
+        "started_at_ms": started_at_ms or 0.0,
+        "ended_at_ms": ended_at_ms,
+        "duration_seconds": duration_seconds,
+        "ambisonics_ready": record.ambix_path is not None and record.ambix_path.exists() if record.ambix_path else False,
+        "iamf_ready": record.iamf_path is not None and record.iamf_path.exists() if record.iamf_path else False,
+        "object_ready": record.object_path is not None and record.object_path.exists() if record.object_path else False,
+        "visual_ready": record.visual_path is not None and record.visual_path.exists() if record.visual_path else False,
+        "video_ready": record.youtube_path is not None and record.youtube_path.exists() if record.youtube_path else False,
+        "error_message": record.error,
+    }
 
 
 def _build_combined_runtime_core_services(
@@ -262,6 +312,19 @@ def _build_effector_manager(
         live_callback=live_hub.broadcast,
         config=settings.effector_manager_config(),
     )
+
+
+def _wire_effector_zone_interlocks(
+    effector_manager: EffectorManager,
+    *,
+    coordinate_frame: LocalCoordinateFrame,
+    zone_matcher: ZoneMatcher,
+) -> None:
+    async def _resolve_target_zone_ids(target_pos) -> set[str]:
+        geo = coordinate_frame.local_to_geo(target_pos)
+        return set(await zone_matcher.match_geo_point(geo.lat, geo.lon))
+
+    effector_manager.set_target_zone_resolver(_resolve_target_zone_ids)
 
 
 def _wire_effector_rules_handler(fusion_node: FusionNode, effector_manager: EffectorManager) -> None:
