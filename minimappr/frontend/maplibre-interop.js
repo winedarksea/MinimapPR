@@ -31,7 +31,7 @@
   const DETECTION_CLUSTER_COUNT_LAYER_ID = "detections-cluster-count";
   const DETECTION_POINT_LAYER_ID = "detections-points";
 
-  const TILE_CACHE_NAME = "mmpr-osm-tiles-v2";
+  const TILE_CACHE_NAME = "mmpr-osm-tiles-v3";
   const OSM_URLS = [
     "https://a.tile.openstreetmap.org/{z}/{x}/{y}.png",
     "https://b.tile.openstreetmap.org/{z}/{x}/{y}.png",
@@ -72,6 +72,16 @@
     return _map && !_map._removed ? _map : null;
   }
 
+  function canReuseMapWithContainer(map, container) {
+    if (!map || !container || typeof map.getContainer !== "function") return false;
+    const currentContainer = map.getContainer();
+    if (!currentContainer || currentContainer !== container) return false;
+    if (typeof currentContainer.isConnected === "boolean" && !currentContainer.isConnected) {
+      return false;
+    }
+    return true;
+  }
+
   function mapContainer() {
     return document.getElementById("mmp-map") || document.getElementById("leaflet-map");
   }
@@ -101,9 +111,59 @@
     return canvas.toDataURL("image/png");
   }
 
+  function dataUrlToArrayBuffer(dataUrl) {
+    const commaIndex = dataUrl.indexOf(",");
+    if (commaIndex < 0) return new Uint8Array().buffer;
+    const base64 = dataUrl.slice(commaIndex + 1);
+    const binary = globalThis.atob ? globalThis.atob(base64) : "";
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    return bytes.buffer;
+  }
+
   function osmTileUrl(z, x, y) {
     const template = OSM_URLS[Math.abs(x + y) % OSM_URLS.length];
     return template.replace("{z}", z).replace("{x}", x).replace("{y}", y);
+  }
+
+  function osmTileCandidateUrls(z, x, y) {
+    const preferred = osmTileUrl(z, x, y);
+    const urls = [preferred];
+    OSM_URLS.forEach(function (template) {
+      const candidate = template.replace("{z}", z).replace("{x}", x).replace("{y}", y);
+      if (candidate !== preferred) urls.push(candidate);
+    });
+    return urls;
+  }
+
+  async function readValidTileFromCache(cache, url) {
+    if (!cache) return null;
+    const cached = await cache.match(url);
+    if (!cached || !cached.ok) return null;
+    const data = await cached.arrayBuffer();
+    if (!data || data.byteLength < 64) {
+      try { await cache.delete(url); } catch (_) {}
+      return null;
+    }
+    return { data };
+  }
+
+  async function fetchAndMaybeCacheTile(url, cache, signal) {
+    try {
+      const response = await fetch(url, { mode: "cors", signal });
+      if (!response.ok) return null;
+      if (cache) {
+        try { await cache.put(url, response.clone()); } catch (_) {}
+      }
+      const data = await response.arrayBuffer();
+      if (!data || data.byteLength < 64) return null;
+      return { data };
+    } catch (error) {
+      if (error && error.name === "AbortError") return "aborted";
+      return null;
+    }
   }
 
   async function tileProtocolLoader(params, abortController) {
@@ -112,30 +172,62 @@
       throw new Error("invalid mmpr tile url");
     }
     const [, z, x, y] = match;
-    const url = osmTileUrl(z, x, y);
+    const urls = osmTileCandidateUrls(z, x, y);
+    let cache = null;
+    let staleCacheHit = null;
+    let sawAbortError = false;
     try {
-      if (globalThis.caches) {
-        const cache = await caches.open(TILE_CACHE_NAME);
-        const cached = await cache.match(url);
+      if (globalThis.caches && typeof caches.open === "function") {
+        cache = await caches.open(TILE_CACHE_NAME);
+      }
+
+      for (const url of urls) {
+        const cached = await readValidTileFromCache(cache, url);
         if (cached) {
-          return { data: await cached.arrayBuffer() };
+          staleCacheHit = cached;
+          return cached;
         }
-        const response = await fetch(url, { mode: "cors", signal: abortController?.signal });
-        if (response.ok) {
-          await cache.put(url, response.clone());
-          return { data: await response.arrayBuffer() };
+      }
+
+      for (const url of urls) {
+        const networkTile = await fetchAndMaybeCacheTile(url, cache, abortController?.signal);
+        if (networkTile === "aborted") {
+          sawAbortError = true;
+          continue;
         }
-      } else {
-        const response = await fetch(url, { mode: "cors", signal: abortController?.signal });
-        if (response.ok) {
-          return { data: await response.arrayBuffer() };
+        if (networkTile) {
+          return networkTile;
+        }
+      }
+
+      // Route transitions can cancel fetches via abort signals; retry once
+      // without a signal before dropping to generated fallback tiles.
+      if (sawAbortError) {
+        for (const url of urls) {
+          const retriedTile = await fetchAndMaybeCacheTile(url, cache, undefined);
+          if (retriedTile && retriedTile !== "aborted") {
+            return retriedTile;
+          }
+        }
+      }
+
+      // Last chance before generated fallback: allow stale cache even if a mirror fetch failed.
+      for (const url of urls) {
+        if (!cache) continue;
+        try {
+          const cached = await cache.match(url, { ignoreSearch: true });
+          if (cached && cached.ok) {
+            const data = await cached.arrayBuffer();
+            if (data && data.byteLength > 0) return { data };
+          }
+        } catch (_) {
+          // Keep trying alternates.
         }
       }
     } catch (_) {
-      // Fall through to generated offline tile.
+      if (staleCacheHit) return staleCacheHit;
     }
-    const fallback = await fetch(fallbackTileDataUrl(256));
-    return { data: await fallback.arrayBuffer() };
+    return { data: dataUrlToArrayBuffer(fallbackTileDataUrl(256)) };
   }
 
   function installProtocol() {
@@ -172,10 +264,11 @@
   function basemapPaintForTheme(theme) {
     if (theme === "light") {
       return {
-        "raster-saturation": -0.55,
-        "raster-contrast": 0.08,
-        "raster-brightness-min": 0.82,
-        "raster-brightness-max": 1.0,
+        // Keep light mode readable without flattening OSM detail.
+        "raster-saturation": -0.2,
+        "raster-contrast": 0.2,
+        "raster-brightness-min": 0.24,
+        "raster-brightness-max": 0.98,
       };
     }
     return {
@@ -199,15 +292,19 @@
     installProtocol();
     const container = mapContainer();
     if (!container || !globalThis.maplibregl) return;
-    if (_map && _containerId === container.id) {
+    if (canReuseMapWithContainer(_map, container)) {
       _map.jumpTo({ center: [lon, lat], zoom });
       _map.resize();
+      applyBasemapTheme();
       return;
     }
-    if (_resizeObserver) _resizeObserver.disconnect();
-    if (_map) {
-      try { _map.remove(); } catch (_) {}
+
+    const staleMap = ensureMap();
+    if (staleMap) {
+      try { staleMap.remove(); } catch (_) {}
     }
+
+    if (_resizeObserver) _resizeObserver.disconnect();
     _containerId = container.id;
     _detectionLayerHandlersInstalled = false;
     _map = new maplibregl.Map({
@@ -1110,12 +1207,15 @@
     startZoneDraw, startZoneEdit, cancelZoneDraw,
     _test: {
       fallbackTileDataUrl,
+      dataUrlToArrayBuffer,
       covarianceEllipseCoordinates,
       bearingWedgeCoordinates,
       readCssColor,
       latLngsToClosedCoordinates,
       coordinatesToLatLngs,
       basemapPaintForTheme,
+      osmTileCandidateUrls,
+      canReuseMapWithContainer,
     },
   };
 }());
