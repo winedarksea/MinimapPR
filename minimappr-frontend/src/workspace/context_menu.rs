@@ -1,10 +1,12 @@
-use crate::api::aim_effector_at_position;
+use crate::api::{aim_effector_at_position, upsert_zone};
 use crate::map::bindings::pan_to;
-use crate::state::{AppState, Effector, SiteOriginSnapshot};
+use crate::state::{AppState, Effector, SiteOriginSnapshot, ZoneDraft, ZoneSpec};
 use leptos::prelude::*;
+use serde_json::json;
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 
 const EARTH_RADIUS_M: f64 = 6_371_000.0;
+const DEFAULT_ZONE_RADIUS_M: f64 = 25.0;
 
 #[component]
 pub fn MapContextMenu() -> impl IntoView {
@@ -12,6 +14,7 @@ pub fn MapContextMenu() -> impl IntoView {
     let menu = state.map_context_menu;
     let effectors = state.effectors;
     let config = state.config;
+    let zone_draft = state.zone_draft;
     let action_status = RwSignal::new(None::<String>);
 
     let close_menu = move |_| {
@@ -68,7 +71,15 @@ pub fn MapContextMenu() -> impl IntoView {
                         >
                             "Center map here"
                         </button>
-                        <button type="button" disabled=true title="Zone draw/edit mode is backend pending in this slice">
+                        <button
+                            type="button"
+                            title="Create a starter square zone centered on this point"
+                            on:click=move |_| {
+                                zone_draft.set(Some(new_zone_draft(menu_state.lat, menu_state.lon)));
+                                action_status.set(None);
+                                menu.set(None);
+                            }
+                        >
                             "Draw zone from here"
                         </button>
                     </div>
@@ -132,6 +143,162 @@ pub fn MapContextMenu() -> impl IntoView {
     }
 }
 
+#[component]
+pub fn ZoneDraftDialog() -> impl IntoView {
+    let state = use_context::<AppState>().expect("AppState");
+    let zone_draft = state.zone_draft;
+    let zones = state.zones;
+    let selected_cop_item = state.selected_cop_item;
+    let error_message = RwSignal::new(None::<String>);
+
+    view! {
+        {move || {
+            let Some(draft) = zone_draft.get() else {
+                return ().into_any();
+            };
+            let id_signal = RwSignal::new(draft.id.clone());
+            let name_signal = RwSignal::new(draft.name.clone());
+            let type_signal = RwSignal::new(draft.zone_type.clone());
+            let radius_signal = RwSignal::new(draft.radius_m.to_string());
+            let center_lat = draft.center_lat;
+            let center_lon = draft.center_lon;
+
+            view! {
+                <div class="zone-draft-scrim" role="presentation">
+                    <section class="zone-draft-dialog" role="dialog" aria-modal="true" aria-label="Create zone">
+                        <header class="zone-draft-header">
+                            <div>
+                                <span class="tone-badge neutral">"New zone"</span>
+                                <h3>"Create map zone"</h3>
+                            </div>
+                            <button
+                                class="map-context-close"
+                                type="button"
+                                aria-label="Cancel zone creation"
+                                on:click=move |_| {
+                                    error_message.set(None);
+                                    zone_draft.set(None);
+                                }
+                            >
+                                <span class="material-symbols-rounded" aria-hidden="true">"close"</span>
+                            </button>
+                        </header>
+
+                        <label class="zone-draft-field">
+                            <span>"ID"</span>
+                            <input
+                                type="text"
+                                prop:value=move || id_signal.get()
+                                on:input=move |event| id_signal.set(event_target_value(&event))
+                            />
+                        </label>
+                        <label class="zone-draft-field">
+                            <span>"Name"</span>
+                            <input
+                                type="text"
+                                prop:value=move || name_signal.get()
+                                on:input=move |event| name_signal.set(event_target_value(&event))
+                            />
+                        </label>
+                        <label class="zone-draft-field">
+                            <span>"Type"</span>
+                            <select
+                                prop:value=move || type_signal.get()
+                                on:change=move |event| type_signal.set(event_target_value(&event))
+                            >
+                                <option value="interest_zone">"Interest"</option>
+                                <option value="alert_zone">"Alert"</option>
+                                <option value="exclusion_zone">"Exclusion"</option>
+                                <option value="coverage_zone">"Coverage"</option>
+                            </select>
+                        </label>
+                        <label class="zone-draft-field">
+                            <span>"Half-width meters"</span>
+                            <input
+                                type="number"
+                                min="1"
+                                max="10000"
+                                step="1"
+                                prop:value=move || radius_signal.get()
+                                on:input=move |event| radius_signal.set(event_target_value(&event))
+                            />
+                        </label>
+                        <code>{format!("{center_lat:.6}, {center_lon:.6}")}</code>
+                        {move || error_message.get().map(|message| view! {
+                            <span class="daily-error">{message}</span>
+                        })}
+                        <footer class="zone-draft-actions">
+                            <button
+                                class="btn-sm"
+                                type="button"
+                                on:click=move |_| {
+                                    error_message.set(None);
+                                    zone_draft.set(None);
+                                }
+                            >
+                                "Cancel"
+                            </button>
+                            <button
+                                class="btn-sm active"
+                                type="button"
+                                on:click=move |_| {
+                                    let id = id_signal.get().trim().to_string();
+                                    let name = name_signal.get().trim().to_string();
+                                    let zone_type = type_signal.get();
+                                    let radius_m = match radius_signal.get().parse::<f64>() {
+                                        Ok(value) if value.is_finite() && value > 0.0 => value,
+                                        _ => {
+                                            error_message.set(Some("Half-width must be a positive number".to_string()));
+                                            return;
+                                        }
+                                    };
+                                    if id.is_empty() || name.is_empty() {
+                                        error_message.set(Some("ID and name are required".to_string()));
+                                        return;
+                                    }
+                                    let zone = ZoneSpec {
+                                        id: id.clone(),
+                                        name,
+                                        zone_type,
+                                        polygon_geo: square_polygon_around(center_lat, center_lon, radius_m),
+                                        properties: json!({
+                                            "created_from": "map_context_menu",
+                                            "center_geo": [center_lat, center_lon],
+                                            "half_width_m": radius_m,
+                                        }),
+                                        created_ns: None,
+                                    };
+                                    spawn_local(async move {
+                                        match upsert_zone(zone.clone()).await {
+                                            Ok(()) => {
+                                                zones.update(|current| {
+                                                    if let Some(existing) = current.iter_mut().find(|item| item.id == zone.id) {
+                                                        *existing = zone.clone();
+                                                    } else {
+                                                        current.push(zone.clone());
+                                                    }
+                                                });
+                                                selected_cop_item.set(Some(crate::state::CopSelection::pinned(
+                                                    crate::state::CopItemKind::Zone,
+                                                    zone.id.clone(),
+                                                )));
+                                                zone_draft.set(None);
+                                            }
+                                            Err(reason) => error_message.set(Some(reason)),
+                                        }
+                                    });
+                                }
+                            >
+                                "Save zone"
+                            </button>
+                        </footer>
+                    </section>
+                </div>
+            }.into_any()
+        }}
+    }
+}
+
 fn nearby_effectors(effectors: &[Effector], lat: f64, lon: f64) -> Vec<Effector> {
     let mut positioned = effectors
         .iter()
@@ -185,6 +352,30 @@ async fn copy_text_to_clipboard(text: String) -> Result<(), String> {
         .map_err(|_| "Clipboard write failed".to_string())
 }
 
+fn new_zone_draft(lat: f64, lon: f64) -> ZoneDraft {
+    let timestamp_ms = js_sys::Date::now() as i64;
+    ZoneDraft {
+        id: format!("zone-{timestamp_ms}"),
+        name: "New map zone".to_string(),
+        zone_type: "interest_zone".to_string(),
+        center_lat: lat,
+        center_lon: lon,
+        radius_m: DEFAULT_ZONE_RADIUS_M,
+    }
+}
+
+fn square_polygon_around(lat: f64, lon: f64, half_width_m: f64) -> Vec<Vec<f64>> {
+    let delta_lat = (half_width_m / EARTH_RADIUS_M).to_degrees();
+    let lon_scale = lat.to_radians().cos().abs().max(0.01);
+    let delta_lon = (half_width_m / (EARTH_RADIUS_M * lon_scale)).to_degrees();
+    vec![
+        vec![lat - delta_lat, lon - delta_lon],
+        vec![lat - delta_lat, lon + delta_lon],
+        vec![lat + delta_lat, lon + delta_lon],
+        vec![lat + delta_lat, lon - delta_lon],
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,5 +396,17 @@ mod tests {
         assert!(local[0] > 78.0 && local[0] < 79.5);
         assert!(local[1] > 111.0 && local[1] < 112.0);
         assert_eq!(local[2], 0.0);
+    }
+
+    #[test]
+    fn square_polygon_uses_four_lat_lon_corners() {
+        let polygon = square_polygon_around(45.0, -93.0, 25.0);
+
+        assert_eq!(polygon.len(), 4);
+        assert!(polygon.iter().all(|point| point.len() == 2));
+        assert!(polygon[0][0] < 45.0);
+        assert!(polygon[2][0] > 45.0);
+        assert!(polygon[0][1] < -93.0);
+        assert!(polygon[1][1] > -93.0);
     }
 }

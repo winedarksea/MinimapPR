@@ -2,6 +2,10 @@
   "name": "minimappr-frontend-js",
   "private": true,
   "scripts": {
-    "test": "node --test tests/test-audio-interop.js tests/test-map-interop.js"
+    "test": "node --test tests/test-audio-interop.js tests/test-map-interop.js",
+    "test:smoke": "playwright test tests/smoke-cop.spec.js --reporter=line"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1"
   }
 }

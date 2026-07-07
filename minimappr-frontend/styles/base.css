@@ -1,0 +1,21 @@
+/* ═══ Document ══════════════════════════════════════════════════ */
+html, body { height: 100%; }
+body {
+  background: var(--md-sys-color-surface);
+  color: var(--md-sys-color-on-surface);
+  font-family: var(--md-sys-typescale-plain);
+  font-size: var(--md-sys-typescale-body-medium-size);
+  line-height: 1.4;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Tabular-nums utility for IDs / coords / timestamps / counters */
+.mono, code, .node-id, .tqi-bar, .conf-pill, .strip-stat .value {
+  font-family: var(--md-sys-typescale-mono);
+  font-variant-numeric: tabular-nums;
+}
+

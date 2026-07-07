@@ -5,6 +5,9 @@ extern "C" {
     #[wasm_bindgen(js_namespace = ["globalThis", "mapInterop"], js_name = "init")]
     pub fn init(lat: f64, lon: f64, zoom: u32);
 
+    #[wasm_bindgen(js_namespace = ["globalThis", "mapInterop"], js_name = "setTheme")]
+    pub fn set_theme(theme: &str);
+
     #[wasm_bindgen(js_namespace = ["globalThis", "mapInterop"], js_name = "setNodeMarker")]
     pub fn set_node_marker(node_id: &str, lat: f64, lon: f64, health_class: &str);
 
@@ -37,6 +40,12 @@ extern "C" {
 
     #[wasm_bindgen(js_namespace = ["globalThis", "mapInterop"], js_name = "removeDetectionMarker")]
     pub fn remove_detection_marker(event_id: &str);
+
+    #[wasm_bindgen(js_namespace = ["globalThis", "mapInterop"], js_name = "setDetectionLayerData")]
+    pub fn set_detection_layer_data(data: &JsValue);
+
+    #[wasm_bindgen(js_namespace = ["globalThis", "mapInterop"], js_name = "clearDetectionLayer")]
+    pub fn clear_detection_layer();
 
     #[wasm_bindgen(js_namespace = ["globalThis", "mapInterop"], js_name = "setTrackMarker")]
     pub fn set_track_marker(

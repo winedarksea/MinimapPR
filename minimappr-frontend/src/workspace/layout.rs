@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+pub const DEFAULT_DOCK_WIDTH_PX: f64 = 360.0;
+pub const MIN_DOCK_WIDTH_PX: f64 = 280.0;
+pub const MAX_DOCK_WIDTH_PX: f64 = 520.0;
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct WorkspaceLayout {
     pub nodes_open: bool,
@@ -11,6 +15,26 @@ pub struct WorkspaceLayout {
     pub rf_open: bool,
     pub seismic_open: bool,
     pub speech_open: bool,
+    #[serde(default = "default_left_dock_width_px")]
+    pub left_dock_width_px: f64,
+    #[serde(default = "default_right_dock_width_px")]
+    pub right_dock_width_px: f64,
+}
+
+fn default_left_dock_width_px() -> f64 {
+    DEFAULT_DOCK_WIDTH_PX
+}
+
+fn default_right_dock_width_px() -> f64 {
+    DEFAULT_DOCK_WIDTH_PX
+}
+
+pub fn clamp_dock_width(width_px: f64) -> f64 {
+    if width_px.is_finite() {
+        width_px.clamp(MIN_DOCK_WIDTH_PX, MAX_DOCK_WIDTH_PX)
+    } else {
+        DEFAULT_DOCK_WIDTH_PX
+    }
 }
 
 impl Default for WorkspaceLayout {
@@ -25,6 +49,8 @@ impl Default for WorkspaceLayout {
             rf_open: false,
             seismic_open: false,
             speech_open: false,
+            left_dock_width_px: DEFAULT_DOCK_WIDTH_PX,
+            right_dock_width_px: DEFAULT_DOCK_WIDTH_PX,
         }
     }
 }

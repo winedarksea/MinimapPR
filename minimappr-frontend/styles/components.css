@@ -1,0 +1,157 @@
+/* ═══ Panel base ════════════════════════════════════════════════ */
+.panel {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-right: 1px solid var(--md-sys-color-outline-variant);
+  min-height: 0;
+  background: var(--md-sys-color-surface);
+}
+.panel:last-child { border-right: none; }
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  gap: var(--mmp-density-gap-sm);
+  padding: var(--mmp-density-pad-cell) var(--mmp-density-pad-panel)
+           var(--mmp-density-pad-cell) calc(var(--mmp-density-pad-panel) - 3px);
+  background: var(--md-sys-color-surface-container-low);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  border-left: 3px solid var(--md-sys-color-primary);
+  font-size: var(--md-sys-typescale-label-medium-size);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--md-sys-color-on-surface-variant);
+  flex-shrink: 0;
+  min-height: var(--mmp-density-strip-h);
+}
+
+.panel-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--mmp-density-pad-panel);
+  min-height: 0;
+}
+
+/* ═══ Generic "card" (MD3 outlined card, C2 hairline) ══════════ */
+.card,
+.node-card {
+  background: var(--md-sys-color-surface-container-low);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-sm);
+  padding: var(--mmp-density-pad-panel);
+  margin-bottom: var(--mmp-density-gap-sm);
+}
+.node-card-header {
+  display: flex;
+  align-items: center;
+  gap: var(--mmp-density-gap-sm);
+  margin-bottom: var(--mmp-density-gap-xs);
+}
+.node-audio-status-label {
+  font-size: var(--md-sys-typescale-label-small-size);
+  margin-left: auto;
+  white-space: nowrap;
+}
+.node-id {
+  font-weight: 700;
+  font-size: var(--md-sys-typescale-body-medium-size);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ═══ Health / status chips ═════════════════════════════════════ */
+.health-chip {
+  padding: 1px 8px;
+  border-radius: var(--md-sys-shape-corner-full);
+  font-size: var(--md-sys-typescale-label-small-size);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  line-height: 1.5;
+}
+.health-chip.online   { background: var(--mmp-sys-color-ok-container);     color: var(--mmp-sys-color-on-ok-container); }
+.health-chip.degraded { background: var(--mmp-sys-color-warn-container);   color: var(--mmp-sys-color-on-warn-container); }
+.health-chip.offline  { background: var(--mmp-sys-color-danger-container); color: var(--mmp-sys-color-on-danger-container); }
+.health-chip.unknown  { background: var(--md-sys-color-surface-container-high); color: var(--md-sys-color-on-surface-variant); }
+
+.node-meta {
+  font-size: var(--md-sys-typescale-label-medium-size);
+  color: var(--md-sys-color-on-surface-variant);
+  margin-bottom: var(--mmp-density-gap-xs);
+  line-height: 1.5;
+}
+.node-meta span + span::before { content: " · "; }
+
+.sparkline-wrap { height: 28px; margin: var(--mmp-density-gap-xs) 0; }
+.sparkline-wrap svg { width: 100%; height: 100%; overflow: visible; }
+.sparkline-line { fill: none; stroke: var(--md-sys-color-primary); stroke-width: 1.5; }
+
+.node-actions { display: flex; gap: var(--mmp-density-gap-xs); margin-top: var(--mmp-density-gap-xs); flex-wrap: wrap; }
+.node-action-hint {
+  font-size: var(--md-sys-typescale-label-small-size);
+  color: var(--md-sys-color-on-surface-variant);
+  align-self: center;
+}
+
+/* ═══ Buttons (MD3 outlined / text, C2-tight) ═══════════════════ */
+.btn-sm {
+  font-size: var(--md-sys-typescale-label-medium-size);
+  padding: 3px 10px;
+  border-radius: var(--md-sys-shape-corner-full);
+  border: 1px solid var(--md-sys-color-outline);
+  background: transparent;
+  color: var(--md-sys-color-on-surface);
+  cursor: pointer;
+  white-space: nowrap;
+  font-weight: 600;
+  line-height: 1.5;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.btn-sm:hover {
+  background: color-mix(in srgb, var(--md-sys-color-primary) 10%, transparent);
+  border-color: var(--md-sys-color-primary);
+  color: var(--md-sys-color-primary);
+}
+.btn-sm:focus-visible {
+  outline: 2px solid var(--md-sys-color-primary);
+  outline-offset: 2px;
+}
+
+.node-details {
+  margin-top: var(--mmp-density-gap-xs);
+  border-top: 1px solid var(--md-sys-color-outline-variant);
+  padding-top: var(--mmp-density-gap-xs);
+}
+.node-details summary {
+  font-size: var(--md-sys-typescale-label-medium-size);
+  font-weight: 600;
+  color: var(--md-sys-color-on-surface-variant);
+  cursor: pointer;
+  user-select: none;
+}
+.node-details[open] summary {
+  color: var(--md-sys-color-on-surface);
+  margin-bottom: var(--mmp-density-gap-xs);
+}
+.node-details-grid {
+  display: grid;
+  grid-template-columns: minmax(100px, 120px) minmax(0, 1fr);
+  gap: 4px 8px;
+  font-size: var(--md-sys-typescale-label-medium-size);
+}
+.node-detail-label {
+  color: var(--md-sys-color-on-surface-variant);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: var(--md-sys-typescale-label-small-size);
+}
+.node-channel-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+

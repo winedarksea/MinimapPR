@@ -151,7 +151,7 @@ fn handle_message(state: &AppState, text: &str) {
                 }
             });
         }
-        LiveEvent::SetFilter | LiveEvent::BitReport { .. } => {}
+        LiveEvent::RulesUpdated | LiveEvent::SetFilter | LiveEvent::BitReport { .. } => {}
     }
 }
 

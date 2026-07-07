@@ -10,6 +10,9 @@
   let _markerStackSequence = 0;
   let _highlightedCopItem = null;
   let _highlightRing = null;
+  let _activeTheme = "dark";
+  let _zoneDrawSession = null;
+  let _detectionLayerHandlersInstalled = false;
 
   const _markers = {};
   const _vectors = {};
@@ -23,6 +26,10 @@
   const _imageOverlays = {};
   const _trackRemoveTimers = {};
   const _detectionRemoveTimers = {};
+  const DETECTION_SOURCE_ID = "detections";
+  const DETECTION_CLUSTER_LAYER_ID = "detections-clusters";
+  const DETECTION_CLUSTER_COUNT_LAYER_ID = "detections-cluster-count";
+  const DETECTION_POINT_LAYER_ID = "detections-points";
 
   const TILE_CACHE_NAME = "mmpr-osm-tiles-v2";
   const OSM_URLS = [
@@ -142,6 +149,7 @@
   }
 
   function baseStyle() {
+    const paint = basemapPaintForTheme(_activeTheme);
     return {
       version: 8,
       sources: {
@@ -156,14 +164,35 @@
         id: "osm",
         type: "raster",
         source: "osm",
-        paint: {
-          "raster-saturation": -0.75,
-          "raster-contrast": 0.22,
-          "raster-brightness-min": 0.08,
-          "raster-brightness-max": 0.72,
-        },
+        paint,
       }],
     };
+  }
+
+  function basemapPaintForTheme(theme) {
+    if (theme === "light") {
+      return {
+        "raster-saturation": -0.55,
+        "raster-contrast": 0.08,
+        "raster-brightness-min": 0.82,
+        "raster-brightness-max": 1.0,
+      };
+    }
+    return {
+      "raster-saturation": -0.75,
+      "raster-contrast": 0.22,
+      "raster-brightness-min": 0.08,
+      "raster-brightness-max": 0.72,
+    };
+  }
+
+  function applyBasemapTheme() {
+    const map = ensureMap();
+    if (!map || !map.getLayer("osm")) return;
+    const paint = basemapPaintForTheme(_activeTheme);
+    Object.keys(paint).forEach(function (property) {
+      try { map.setPaintProperty("osm", property, paint[property]); } catch (_) {}
+    });
   }
 
   function init(lat, lon, zoom) {
@@ -180,6 +209,7 @@
       try { _map.remove(); } catch (_) {}
     }
     _containerId = container.id;
+    _detectionLayerHandlersInstalled = false;
     _map = new maplibregl.Map({
       container,
       style: baseStyle(),
@@ -189,6 +219,7 @@
     });
     _map.addControl(new maplibregl.NavigationControl({ visualizePitch: false }), "bottom-right");
     _map.addControl(new maplibregl.AttributionControl({ compact: true }), "bottom-left");
+    _map.on("load", applyBasemapTheme);
     _map.on("contextmenu", function (event) {
       if (_contextMenuCallback) {
         _contextMenuCallback(event.lngLat.lat, event.lngLat.lng, event.point.x, event.point.y, []);
@@ -388,6 +419,98 @@
     removeMarker("det:" + eventId);
     removeGdopCircle("bearing:" + eventId);
     if (_detectionRemoveTimers[eventId]) clearTimeout(_detectionRemoveTimers[eventId]);
+  }
+
+  function ensureDetectionLayer() {
+    const map = ensureMap();
+    if (!map || !map.isStyleLoaded()) {
+      if (map) map.once("load", ensureDetectionLayer);
+      return null;
+    }
+    if (!map.getSource(DETECTION_SOURCE_ID)) {
+      map.addSource(DETECTION_SOURCE_ID, {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+        cluster: true,
+        clusterRadius: 44,
+        clusterMaxZoom: 15,
+      });
+    }
+    if (!map.getLayer(DETECTION_CLUSTER_LAYER_ID)) {
+      map.addLayer({
+        id: DETECTION_CLUSTER_LAYER_ID,
+        type: "circle",
+        source: DETECTION_SOURCE_ID,
+        filter: ["has", "point_count"],
+        paint: {
+          "circle-color": palette().detection,
+          "circle-opacity": 0.34,
+          "circle-radius": ["step", ["get", "point_count"], 16, 10, 22, 30, 30],
+          "circle-stroke-color": palette().surface,
+          "circle-stroke-width": 2,
+        },
+      });
+    }
+    if (!map.getLayer(DETECTION_POINT_LAYER_ID)) {
+      map.addLayer({
+        id: DETECTION_POINT_LAYER_ID,
+        type: "circle",
+        source: DETECTION_SOURCE_ID,
+        filter: ["!", ["has", "point_count"]],
+        paint: {
+          "circle-color": [
+            "case",
+            ["==", ["get", "display_mode"], "bearing_only"], palette().bearing,
+            palette().detection,
+          ],
+          "circle-radius": [
+            "interpolate", ["linear"], ["coalesce", ["get", "confidence"], 0.5],
+            0, 4,
+            1, 8,
+          ],
+          "circle-opacity": [
+            "interpolate", ["linear"], ["coalesce", ["get", "confidence"], 0.5],
+            0, 0.28,
+            1, 0.86,
+          ],
+          "circle-stroke-color": palette().surface,
+          "circle-stroke-width": 1.8,
+        },
+      });
+    }
+    if (!_detectionLayerHandlersInstalled) {
+      map.on("click", DETECTION_POINT_LAYER_ID, function (event) {
+        const feature = event.features && event.features[0];
+        const id = feature?.properties?.id;
+        if (id) emitSelection("detection", id);
+      });
+      map.on("mouseenter", DETECTION_POINT_LAYER_ID, function () {
+        map.getCanvas().style.cursor = "pointer";
+      });
+      map.on("mouseleave", DETECTION_POINT_LAYER_ID, function () {
+        if (!_zoneDrawSession) map.getCanvas().style.cursor = "";
+      });
+      _detectionLayerHandlersInstalled = true;
+    }
+    return map.getSource(DETECTION_SOURCE_ID);
+  }
+
+  function setDetectionLayerData(dataJson) {
+    const data = typeof dataJson === "string" ? JSON.parse(dataJson) : dataJson;
+    const source = ensureDetectionLayer();
+    if (source && typeof source.setData === "function") {
+      source.setData(data && data.type === "FeatureCollection" ? data : { type: "FeatureCollection", features: [] });
+    }
+    Object.keys(_detectionRemoveTimers).forEach(function (eventId) {
+      clearTimeout(_detectionRemoveTimers[eventId]);
+      delete _detectionRemoveTimers[eventId];
+      removeMarker("det:" + eventId);
+    });
+  }
+
+  function clearDetectionLayer() {
+    [DETECTION_CLUSTER_COUNT_LAYER_ID, DETECTION_CLUSTER_LAYER_ID, DETECTION_POINT_LAYER_ID].forEach(removeLayer);
+    removeLayer(DETECTION_SOURCE_ID);
   }
 
   function metersToDegreeOffsets(lat, radiusM, pointCount) {
@@ -788,10 +911,187 @@
     }
   }
 
-  function startZoneDraw(callback) { if (typeof callback === "function") callback([]); }
-  function startZoneEdit(zoneId, latlngs, callback) { if (typeof callback === "function") callback(latlngs || []); }
-  function cancelZoneDraw() {}
-  function setTheme() {}
+  function latLngsToClosedCoordinates(latlngs) {
+    const coordinates = Array.isArray(latlngs)
+      ? latlngs
+        .filter(function (point) { return Array.isArray(point) && point.length >= 2; })
+        .map(function (point) { return [Number(point[1]), Number(point[0])]; })
+        .filter(function (point) { return Number.isFinite(point[0]) && Number.isFinite(point[1]); })
+      : [];
+    if (coordinates.length >= 3) {
+      const first = coordinates[0];
+      const last = coordinates[coordinates.length - 1];
+      if (first[0] !== last[0] || first[1] !== last[1]) coordinates.push(first);
+    }
+    return coordinates;
+  }
+
+  function coordinatesToLatLngs(coordinates) {
+    if (!Array.isArray(coordinates)) return [];
+    const result = coordinates
+      .map(function (point) { return [Number(point[1]), Number(point[0])]; })
+      .filter(function (point) { return Number.isFinite(point[0]) && Number.isFinite(point[1]); });
+    if (result.length > 1) {
+      const first = result[0];
+      const last = result[result.length - 1];
+      if (first[0] === last[0] && first[1] === last[1]) result.pop();
+    }
+    return result;
+  }
+
+  function updateZoneDraftLayer(latlngs) {
+    const coordinates = latLngsToClosedCoordinates(latlngs);
+    if (coordinates.length < 2) {
+      removeLayer("zone-draft");
+      removeLayer("zone-draft-line");
+      return;
+    }
+    const lineCoordinates = coordinates.length >= 3 ? coordinates : coordinates.slice();
+    if (coordinates.length >= 3) {
+      upsertGeojsonLayer("zone-draft", "zone-draft", {
+        type: "FeatureCollection",
+        features: [{ type: "Feature", geometry: { type: "Polygon", coordinates: [coordinates] }, properties: {} }],
+      }, {
+        type: "fill",
+        paint: {
+          "fill-color": palette().warn,
+          "fill-opacity": 0.13,
+        },
+      });
+    } else {
+      removeLayer("zone-draft");
+    }
+    upsertGeojsonLayer("zone-draft-line", "zone-draft-line", {
+      type: "FeatureCollection",
+      features: [{ type: "Feature", geometry: { type: "LineString", coordinates: lineCoordinates }, properties: {} }],
+    }, {
+      type: "line",
+      paint: {
+        "line-color": palette().warn,
+        "line-opacity": 0.9,
+        "line-width": 2,
+        "line-dasharray": [2, 1],
+      },
+    });
+  }
+
+  function finishZoneSession() {
+    if (!_zoneDrawSession) return;
+    const session = _zoneDrawSession;
+    if (session.latlngs.length >= 3 && typeof session.callback === "function") {
+      session.callback(session.latlngs);
+    }
+    cancelZoneDraw();
+  }
+
+  function startZoneDraw(callback) {
+    const map = ensureMap();
+    if (!map) return;
+    cancelZoneDraw();
+    const session = {
+      mode: "draw",
+      callback,
+      latlngs: [],
+      markers: [],
+      handlers: {},
+    };
+    session.handlers.click = function (event) {
+      session.latlngs.push([event.lngLat.lat, event.lngLat.lng]);
+      updateZoneDraftLayer(session.latlngs);
+    };
+    session.handlers.dblclick = function (event) {
+      event.preventDefault();
+      finishZoneSession();
+    };
+    session.handlers.keydown = function (event) {
+      if (event.key === "Enter") finishZoneSession();
+      if (event.key === "Escape") cancelZoneDraw();
+    };
+    _zoneDrawSession = session;
+    try { map.doubleClickZoom.disable(); } catch (_) {}
+    map.getCanvas().style.cursor = "crosshair";
+    map.on("click", session.handlers.click);
+    map.on("dblclick", session.handlers.dblclick);
+    document.addEventListener("keydown", session.handlers.keydown);
+  }
+
+  function startZoneEdit(zoneId, latlngs, callback) {
+    const map = ensureMap();
+    if (!map) return;
+    cancelZoneDraw();
+    const session = {
+      mode: "edit",
+      zoneId,
+      callback,
+      latlngs: Array.isArray(latlngs) ? latlngs.map(function (point) { return [Number(point[0]), Number(point[1])]; }) : [],
+      markers: [],
+      handlers: {},
+    };
+    function emitEdit() {
+      updateZoneDraftLayer(session.latlngs);
+      if (typeof session.callback === "function") session.callback(session.latlngs);
+    }
+    session.latlngs.forEach(function (point, index) {
+      if (!Number.isFinite(point[0]) || !Number.isFinite(point[1])) return;
+      const marker = new maplibregl.Marker({ draggable: true })
+        .setLngLat([point[1], point[0]])
+        .addTo(map);
+      marker.on("dragend", function () {
+        const lngLat = marker.getLngLat();
+        session.latlngs[index] = [lngLat.lat, lngLat.lng];
+        emitEdit();
+      });
+      session.markers.push(marker);
+    });
+    session.handlers.click = function (event) {
+      const nextIndex = session.latlngs.length;
+      session.latlngs.push([event.lngLat.lat, event.lngLat.lng]);
+      const marker = new maplibregl.Marker({ draggable: true })
+        .setLngLat([event.lngLat.lng, event.lngLat.lat])
+        .addTo(map);
+      marker.on("dragend", function () {
+        const lngLat = marker.getLngLat();
+        session.latlngs[nextIndex] = [lngLat.lat, lngLat.lng];
+        emitEdit();
+      });
+      session.markers.push(marker);
+      emitEdit();
+    };
+    session.handlers.keydown = function (event) {
+      if (event.key === "Escape") cancelZoneDraw();
+      if (event.key === "Enter") finishZoneSession();
+    };
+    _zoneDrawSession = session;
+    map.getCanvas().style.cursor = "crosshair";
+    map.on("click", session.handlers.click);
+    document.addEventListener("keydown", session.handlers.keydown);
+    emitEdit();
+  }
+
+  function cancelZoneDraw() {
+    const map = ensureMap();
+    const session = _zoneDrawSession;
+    if (session && map) {
+      if (session.handlers.click) map.off("click", session.handlers.click);
+      if (session.handlers.dblclick) map.off("dblclick", session.handlers.dblclick);
+      try { map.doubleClickZoom.enable(); } catch (_) {}
+      map.getCanvas().style.cursor = "";
+    }
+    if (session && session.handlers.keydown) {
+      document.removeEventListener("keydown", session.handlers.keydown);
+    }
+    if (session) {
+      session.markers.forEach(function (marker) { try { marker.remove(); } catch (_) {} });
+    }
+    _zoneDrawSession = null;
+    removeLayer("zone-draft");
+    removeLayer("zone-draft-line");
+  }
+
+  function setTheme(theme) {
+    _activeTheme = theme === "light" ? "light" : "dark";
+    applyBasemapTheme();
+  }
 
   globalThis.mapInterop = {
     init, resize, invalidateMapSize: resize, panTo, flyTo, fitBoundsLatLons, setTheme,
@@ -800,6 +1100,7 @@
     setContextMenuCallback,
     setNodeMarker, removeNodeMarker, setNodeOmniHalo, removeNodeOmniHalo, triggerNodeOmniRipple,
     addDetectionMarker, addBearingOnlyDetectionMarker, removeDetectionMarker,
+    setDetectionLayerData, clearDetectionLayer,
     setTrackMarker, setTrackVelocityVector, removeTrack, pulseTrackMarker,
     setEffectorMarker, removeEffectorMarker, setZone, removeZone, setGdopCircle, removeGdopCircle,
     highlightCopItem, clearCopHighlight, setCopUncertainty, clearAllCopUncertainty,
@@ -807,6 +1108,14 @@
     setHeatmapPoints, clearHeatmap,
     ensureLayer, setLayerData, setLayerVisible, removeLayer, setImageOverlay, setGeoJsonOverlay, removeMapOverlay,
     startZoneDraw, startZoneEdit, cancelZoneDraw,
-    _test: { fallbackTileDataUrl, covarianceEllipseCoordinates, bearingWedgeCoordinates, readCssColor },
+    _test: {
+      fallbackTileDataUrl,
+      covarianceEllipseCoordinates,
+      bearingWedgeCoordinates,
+      readCssColor,
+      latLngsToClosedCoordinates,
+      coordinatesToLatLngs,
+      basemapPaintForTheme,
+    },
   };
 }());

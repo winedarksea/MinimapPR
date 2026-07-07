@@ -1,10 +1,12 @@
 use crate::state::AppState;
 use leptos::prelude::*;
+use leptos_router::hooks::use_location;
 
 /// Persistent below-top-bar strip — summary metrics always visible.
 #[component]
 pub fn StatusStrip() -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState");
+    let location = use_location();
     let cop = state.cop_status;
     let fusion = state.fusion_status;
     let tracks = state.tracks;
@@ -12,60 +14,67 @@ pub fn StatusStrip() -> impl IntoView {
     let nodes = state.nodes;
 
     view! {
-        <div class="system-strip" role="status">
-            <StatusChip
-                label="Online"
-                value=Signal::derive(move || {
-                    cop.get()
-                        .map(|c| c.active_nodes as i64)
-                        .unwrap_or_else(|| nodes.get().len() as i64)
-                })
-                tone=Signal::derive(move || "ok")
-                href="/settings"
-            />
-            <StatusChip
-                label="Degraded"
-                value=Signal::derive(move || cop.get().map(|c| c.degraded_nodes as i64).unwrap_or(0))
-                tone=Signal::derive(move || metric_tone(cop.get().map(|c| c.degraded_nodes as i64).unwrap_or(0)))
-                href="/settings"
-            />
-            <StatusChip
-                label="Offline"
-                value=Signal::derive(move || cop.get().map(|c| c.offline_nodes as i64).unwrap_or(0))
-                tone=Signal::derive(move || danger_metric_tone(cop.get().map(|c| c.offline_nodes as i64).unwrap_or(0)))
-                href="/settings"
-            />
-            <StatusChip
-                label="Tracks"
-                value=Signal::derive(move || {
-                    cop.get()
-                        .map(|c| c.active_tracks as i64)
-                        .unwrap_or_else(|| tracks.get().len() as i64)
-                })
-                tone=Signal::derive(move || "info")
-                href="/cop"
-            />
-            <StatusChip
-                label="Alerts"
-                value=Signal::derive(move || {
-                    cop.get()
-                        .map(|c| c.open_alerts as i64)
-                        .unwrap_or_else(|| alerts.get().len() as i64)
-                })
-                tone=Signal::derive(move || danger_metric_tone(
-                    cop.get()
-                        .map(|c| c.open_alerts as i64)
-                        .unwrap_or_else(|| alerts.get().len() as i64)
-                ))
-                href="/cop"
-            />
-            <StatusChipText
-                label="Pipeline"
-                value=Signal::derive(move || pipeline_text(&fusion))
-                tone=Signal::derive(move || pipeline_tone(&fusion))
-                href="/settings/server"
-            />
-        </div>
+        {move || {
+            if location.pathname.get().starts_with("/cop") {
+                return ().into_any();
+            }
+            view! {
+                <div class="system-strip" role="status">
+                    <StatusChip
+                        label="Online"
+                        value=Signal::derive(move || {
+                            cop.get()
+                                .map(|c| c.active_nodes as i64)
+                                .unwrap_or_else(|| nodes.get().len() as i64)
+                        })
+                        tone=Signal::derive(move || "ok")
+                        href="/settings"
+                    />
+                    <StatusChip
+                        label="Degraded"
+                        value=Signal::derive(move || cop.get().map(|c| c.degraded_nodes as i64).unwrap_or(0))
+                        tone=Signal::derive(move || metric_tone(cop.get().map(|c| c.degraded_nodes as i64).unwrap_or(0)))
+                        href="/settings"
+                    />
+                    <StatusChip
+                        label="Offline"
+                        value=Signal::derive(move || cop.get().map(|c| c.offline_nodes as i64).unwrap_or(0))
+                        tone=Signal::derive(move || danger_metric_tone(cop.get().map(|c| c.offline_nodes as i64).unwrap_or(0)))
+                        href="/settings"
+                    />
+                    <StatusChip
+                        label="Tracks"
+                        value=Signal::derive(move || {
+                            cop.get()
+                                .map(|c| c.active_tracks as i64)
+                                .unwrap_or_else(|| tracks.get().len() as i64)
+                        })
+                        tone=Signal::derive(move || "info")
+                        href="/cop"
+                    />
+                    <StatusChip
+                        label="Alerts"
+                        value=Signal::derive(move || {
+                            cop.get()
+                                .map(|c| c.open_alerts as i64)
+                                .unwrap_or_else(|| alerts.get().len() as i64)
+                        })
+                        tone=Signal::derive(move || danger_metric_tone(
+                            cop.get()
+                                .map(|c| c.open_alerts as i64)
+                                .unwrap_or_else(|| alerts.get().len() as i64)
+                        ))
+                        href="/cop"
+                    />
+                    <StatusChipText
+                        label="Pipeline"
+                        value=Signal::derive(move || pipeline_text(&fusion))
+                        tone=Signal::derive(move || pipeline_tone(&fusion))
+                        href="/settings/server"
+                    />
+                </div>
+            }.into_any()
+        }}
     }
 }
 

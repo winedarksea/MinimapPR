@@ -1,5 +1,8 @@
 use crate::devices::schema::{DeviceKind, DeviceRecord};
-use crate::state::{AppState, RfEmitterEstimate, RfSpectrumFrame, SeismicTrace, TranscriptLine};
+use crate::state::{
+    AcousticMapLayer, AcousticMapSample, AppState, RfEmitterEstimate, RfSpectrumFrame,
+    SeismicTrace, TranscriptLine,
+};
 use futures::StreamExt;
 use gloo_timers::future::IntervalStream;
 use js_sys::Date;
@@ -18,6 +21,7 @@ pub fn start_mock_feeds(state: AppState) {
             publish_rf_frames(&state, &devices, tick);
             publish_seismic_traces(&state, &devices, tick);
             publish_speech_lines(&state, &devices, tick);
+            publish_acoustic_map(&state, tick);
         }
     });
 }
@@ -61,6 +65,69 @@ fn publish_speech_lines(state: &AppState, devices: &[DeviceRecord], tick: u64) {
             lines.pop_back();
         }
     });
+}
+
+fn publish_acoustic_map(state: &AppState, tick: u64) {
+    let node_positions = state
+        .nodes
+        .get_untracked()
+        .into_iter()
+        .filter_map(|node| {
+            node.position_geo
+                .map(|geo| (node.node_id, geo.lat, geo.lon, node.rms_history))
+        })
+        .collect::<Vec<_>>();
+    if node_positions.is_empty() {
+        state.modality.acoustic_maps.set(vec![]);
+        return;
+    }
+
+    let mut samples = Vec::new();
+    let mut min_lat = f64::INFINITY;
+    let mut min_lon = f64::INFINITY;
+    let mut max_lat = f64::NEG_INFINITY;
+    let mut max_lon = f64::NEG_INFINITY;
+
+    for (node_id, lat, lon, rms_history) in node_positions {
+        let seed = stable_seed(&node_id);
+        let rms = rms_history
+            .as_ref()
+            .and_then(|values| values.last().copied())
+            .unwrap_or(0.12);
+        for row in -1_i32..=1 {
+            for col in -1_i32..=1 {
+                let sample_lat = lat + row as f64 * 0.00016;
+                let sample_lon = lon + col as f64 * 0.00016;
+                let phase = tick as f64 * 0.19 + seed as f64 * 0.0003 + row as f64 + col as f64;
+                let falloff = 1.0 - ((row.abs() + col.abs()) as f64 * 0.18);
+                let value = (rms * 0.65 + ((phase.sin() + 1.0) * 0.18)) * falloff;
+                samples.push(AcousticMapSample {
+                    lat: sample_lat,
+                    lon: sample_lon,
+                    value: value.clamp(0.0, 1.0),
+                });
+                min_lat = min_lat.min(sample_lat);
+                min_lon = min_lon.min(sample_lon);
+                max_lat = max_lat.max(sample_lat);
+                max_lon = max_lon.max(sample_lon);
+            }
+        }
+    }
+
+    state.modality.acoustic_maps.set(vec![AcousticMapLayer {
+        layer_id: "mock-acoustic-spl".to_string(),
+        data_type: "spl_density".to_string(),
+        time_window: "live_mock".to_string(),
+        storey: None,
+        bounds: vec![
+            vec![min_lat, min_lon],
+            vec![min_lat, max_lon],
+            vec![max_lat, max_lon],
+            vec![max_lat, min_lon],
+        ],
+        samples,
+        updated_ns: now_ns(),
+    }]);
 }
 
 fn rf_frame_for_device(device: &DeviceRecord, tick: u64) -> RfSpectrumFrame {

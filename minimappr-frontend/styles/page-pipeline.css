@@ -1,0 +1,355 @@
+/* ---------------------------------------------------------------------------
+   Pipeline / Nodes view
+   --------------------------------------------------------------------------- */
+
+.pipeline-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.pipeline-node-card {
+  margin-bottom: 1rem;
+  padding: 1rem;
+}
+
+.pipeline-node-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+/* Aggregate health banner above node cards */
+.pipeline-health-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 0.75rem;
+  border-radius: var(--md-sys-shape-corner-medium);
+  background: var(--md-sys-color-surface-container);
+  font-size: var(--md-sys-typescale-body-small-size);
+}
+.pipeline-banner-warn {
+  color: var(--mmp-sys-color-warn);
+  font-weight: 600;
+}
+
+/* Stage flow row: horizontal chip strip */
+.pipeline-chain-flow {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) 34px minmax(120px, 1fr) 34px minmax(120px, 1fr);
+  align-items: stretch;
+  gap: 0.35rem;
+  margin: 0.75rem 0;
+}
+
+.pipeline-chain-node {
+  min-height: 64px;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  column-gap: 0.45rem;
+  row-gap: 0.15rem;
+  align-items: center;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-sm);
+  background: color-mix(in srgb, var(--md-sys-color-surface-container-high) 70%, transparent);
+}
+
+.pipeline-chain-node .material-symbols-rounded {
+  grid-row: 1 / 3;
+  font-size: 20px;
+  color: var(--md-sys-color-primary);
+}
+
+.pipeline-chain-node strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--md-sys-typescale-label-large-size);
+}
+
+.pipeline-chain-node span:last-child {
+  font-family: var(--md-sys-typescale-mono);
+  font-size: var(--md-sys-typescale-label-small-size);
+  font-variant-numeric: tabular-nums;
+}
+
+.pipeline-chain-edge {
+  min-height: 2px;
+  align-self: center;
+  background:
+    linear-gradient(90deg,
+      var(--md-sys-color-outline-variant),
+      var(--md-sys-color-primary));
+  position: relative;
+}
+
+.pipeline-chain-edge::after {
+  content: "";
+  position: absolute;
+  right: -1px;
+  top: 50%;
+  width: 8px;
+  height: 8px;
+  border-top: 2px solid var(--md-sys-color-primary);
+  border-right: 2px solid var(--md-sys-color-primary);
+  transform: translateY(-50%) rotate(45deg);
+}
+
+.pipeline-chain-warn {
+  color: var(--mmp-sys-color-warn);
+  font-weight: 700;
+}
+
+.pipeline-stage-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+}
+
+.pipeline-stage-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 4.5rem;
+  padding: 0.25rem 0.5rem;
+  border-radius: 6px;
+  font-size: var(--md-sys-typescale-label-small-size);
+  font-variant-numeric: tabular-nums;
+  border: 1px solid transparent;
+}
+
+.pipeline-stage-chip.ok {
+  background: color-mix(in srgb, var(--mmp-sys-color-ok) 12%, transparent);
+  border-color: color-mix(in srgb, var(--mmp-sys-color-ok) 35%, transparent);
+  color: var(--md-sys-color-on-surface);
+}
+
+.pipeline-stage-chip.warn {
+  background: color-mix(in srgb, var(--mmp-sys-color-warn) 15%, transparent);
+  border-color: color-mix(in srgb, var(--mmp-sys-color-warn) 45%, transparent);
+  color: var(--md-sys-color-on-surface);
+}
+
+.pipeline-stage-chip.danger {
+  background: color-mix(in srgb, var(--mmp-sys-color-danger) 15%, transparent);
+  border-color: color-mix(in srgb, var(--mmp-sys-color-danger) 45%, transparent);
+  color: var(--md-sys-color-on-surface);
+}
+
+.pipeline-stage-name {
+  font-weight: 600;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.pipeline-stage-lag {
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.pipeline-stage-queue {
+  font-size: 0.7rem;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.pipeline-stage-drops {
+  font-size: 0.75rem;
+  color: var(--mmp-sys-color-danger);
+  font-weight: 600;
+}
+
+/* Mic settings table */
+.mic-table {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0.25rem 0;
+}
+
+.mic-table-row {
+  display: grid;
+  grid-template-columns: max-content 1fr 1fr;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.mic-table-header span {
+  font-size: var(--md-sys-typescale-label-small-size);
+  color: var(--md-sys-color-on-surface-variant);
+  font-weight: 600;
+}
+
+.mic-label {
+  font-size: var(--md-sys-typescale-label-medium-size);
+  font-weight: 500;
+  color: var(--md-sys-color-on-surface-variant);
+  min-width: 2.5rem;
+}
+
+.mic-input {
+  background: var(--md-sys-color-surface-container);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: 4px;
+  color: var(--md-sys-color-on-surface);
+  padding: 0.2rem 0.4rem;
+  font-size: var(--md-sys-typescale-body-small-size);
+  font-family: inherit;
+  width: 100%;
+  max-width: 7rem;
+}
+
+.mic-input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.mic-input:focus {
+  outline: 2px solid var(--md-sys-color-primary);
+  outline-offset: 1px;
+}
+
+.pipeline-rms-summary {
+  display: grid;
+  grid-template-columns: 120px minmax(180px, 1fr) auto;
+  gap: 0.65rem;
+  align-items: center;
+  margin: 0.55rem 0;
+}
+
+.mic-rms-cell {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 68px minmax(120px, 1fr);
+  gap: 0.45rem;
+  align-items: center;
+}
+
+.strip-chart {
+  display: block;
+  overflow: visible;
+}
+
+.rms-meter {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: max-content minmax(42px, 1fr) 48px;
+  gap: 0.4rem;
+  align-items: center;
+  font-size: var(--md-sys-typescale-label-small-size);
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.rms-meter-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rms-meter-track {
+  height: 7px;
+  overflow: hidden;
+  border-radius: var(--md-sys-shape-corner-full);
+  background: var(--md-sys-color-outline-variant);
+}
+
+.rms-meter-fill {
+  display: block;
+  height: 100%;
+  min-width: 2px;
+  border-radius: inherit;
+  background: var(--mmp-sys-color-ok);
+}
+
+.rms-meter-quiet .rms-meter-fill {
+  background: var(--mmp-sys-color-warn);
+}
+
+.rms-meter-danger .rms-meter-fill {
+  background: var(--mmp-sys-color-danger);
+}
+
+.rms-meter-empty .rms-meter-fill {
+  background: var(--md-sys-color-outline);
+}
+
+.rms-meter-value {
+  font-family: var(--md-sys-typescale-mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.pipeline-section-label {
+  font-size: var(--md-sys-typescale-label-medium-size);
+  font-weight: 600;
+  color: var(--md-sys-color-on-surface-variant);
+  margin-bottom: 0.35rem;
+  display: flex;
+  align-items: center;
+}
+
+.pipeline-mode-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  align-items: flex-start;
+}
+
+.pipeline-mode-row .mic-input {
+  max-width: 12rem;
+}
+
+.pipeline-stage-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  margin-top: 0.5rem;
+}
+
+.pipeline-stage-json {
+  width: 100%;
+  max-width: 100%;
+  min-height: 10rem;
+  font-family: var(--md-sys-typescale-mono);
+  font-variant-numeric: tabular-nums;
+  resize: vertical;
+}
+
+.pipeline-save-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin-top: 0.6rem;
+}
+
+.settings-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 0.65rem;
+  align-items: end;
+}
+
+.settings-form-grid label,
+.rules-payload-label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: var(--md-sys-typescale-label-small-size);
+  font-weight: 600;
+}
+

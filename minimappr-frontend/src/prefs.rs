@@ -8,6 +8,7 @@ use web_sys::{HtmlElement, Storage};
 
 pub const KEY_THEME: &str = "mmp.theme";
 pub const KEY_WORKSPACE: &str = "mmp.workspace.v1";
+pub const KEY_LAYERS: &str = "mmp.layers.v1";
 pub const KEY_DEVICES: &str = "mmp.devices.v1";
 
 fn storage() -> Option<Storage> {

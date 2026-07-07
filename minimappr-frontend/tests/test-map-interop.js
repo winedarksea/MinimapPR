@@ -47,3 +47,34 @@ test("css color fallback is returned without a DOM", () => {
   const color = globalThis.mapInterop._test.readCssColor("--missing", "#abc123");
   assert.equal(color, "#abc123");
 });
+
+test("zone lat/lon input is converted to closed maplibre coordinates", () => {
+  const coordinates = globalThis.mapInterop._test.latLngsToClosedCoordinates([
+    [45.0, -93.0],
+    [45.0, -92.99],
+    [45.01, -92.99],
+  ]);
+  assert.deepEqual(coordinates[0], [-93.0, 45.0]);
+  assert.deepEqual(coordinates[coordinates.length - 1], coordinates[0]);
+});
+
+test("closed maplibre coordinates convert back to open lat/lon vertices", () => {
+  const latlngs = globalThis.mapInterop._test.coordinatesToLatLngs([
+    [-93.0, 45.0],
+    [-92.99, 45.0],
+    [-92.99, 45.01],
+    [-93.0, 45.0],
+  ]);
+  assert.deepEqual(latlngs, [
+    [45.0, -93.0],
+    [45.0, -92.99],
+    [45.01, -92.99],
+  ]);
+});
+
+test("basemap theme paint changes brightness budget", () => {
+  const dark = globalThis.mapInterop._test.basemapPaintForTheme("dark");
+  const light = globalThis.mapInterop._test.basemapPaintForTheme("light");
+  assert.ok(dark["raster-brightness-max"] < light["raster-brightness-max"]);
+  assert.ok(dark["raster-brightness-min"] < light["raster-brightness-min"]);
+});

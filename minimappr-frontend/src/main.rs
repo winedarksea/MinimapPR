@@ -3,6 +3,7 @@ mod audio;
 mod components;
 mod devices;
 mod inspector;
+mod layers;
 mod map;
 mod mock;
 mod pages;

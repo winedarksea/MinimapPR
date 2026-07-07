@@ -1,0 +1,163 @@
+/* ═══ Config form ═══════════════════════════════════════════════ */
+.config-notice {
+  font-size: var(--md-sys-typescale-label-medium-size);
+  color: var(--mmp-sys-color-on-warn-container);
+  background: var(--mmp-sys-color-warn-container);
+  border: 1px solid color-mix(in srgb, var(--mmp-sys-color-warn) 35%, transparent);
+  padding: 8px 12px;
+  border-radius: var(--md-sys-shape-corner-sm);
+  margin-bottom: var(--mmp-density-gap-md);
+}
+.config-group {
+  background: var(--md-sys-color-surface-container-low);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-sm);
+  margin-bottom: var(--mmp-density-gap-md);
+  overflow: hidden;
+}
+.config-group-header {
+  padding: 8px 12px;
+  background: var(--md-sys-color-surface-container);
+  font-size: var(--md-sys-typescale-label-medium-size);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--md-sys-color-on-surface-variant);
+  display: flex;
+  align-items: center;
+  gap: var(--mmp-density-gap-sm);
+}
+.dirty-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--mmp-sys-color-warn);
+  display: none;
+}
+.dirty-dot.visible { display: inline-block; }
+
+.config-fields { padding: var(--mmp-density-pad-panel); display: flex; flex-direction: column; gap: var(--mmp-density-gap-sm); }
+.config-field {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  align-items: center;
+  gap: var(--mmp-density-gap-sm);
+}
+.config-field label {
+  font-size: var(--md-sys-typescale-label-large-size);
+  color: var(--md-sys-color-on-surface-variant);
+}
+.config-field input[type="number"],
+.config-field input[type="text"],
+.config-field select {
+  background: var(--md-sys-color-surface-container-lowest);
+  border: 1px solid var(--md-sys-color-outline);
+  border-radius: var(--md-sys-shape-corner-xs);
+  color: var(--md-sys-color-on-surface);
+  padding: 6px 10px;
+  font-size: var(--md-sys-typescale-label-large-size);
+  width: 100%;
+  font-family: inherit;
+}
+.config-field input[type="number"]:focus,
+.config-field input[type="text"]:focus,
+.config-field select:focus {
+  outline: none;
+  border-color: var(--md-sys-color-primary);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--md-sys-color-primary) 25%, transparent);
+}
+.config-field input[type="checkbox"] {
+  accent-color: var(--md-sys-color-primary);
+  width: 16px; height: 16px;
+  cursor: pointer;
+}
+
+.config-group-footer {
+  padding: var(--mmp-density-pad-panel);
+  display: flex;
+  gap: var(--mmp-density-gap-sm);
+  align-items: center;
+  border-top: 1px solid var(--md-sys-color-outline-variant);
+}
+.btn-save {
+  padding: 6px 16px;
+  background: var(--md-sys-color-primary);
+  color: var(--md-sys-color-on-primary);
+  border: none;
+  border-radius: var(--md-sys-shape-corner-full);
+  font-size: var(--md-sys-typescale-label-large-size);
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.12s ease, box-shadow 0.12s ease;
+}
+.btn-save:hover { background: color-mix(in srgb, var(--md-sys-color-primary) 88%, white); }
+.btn-save:disabled { opacity: 0.4; cursor: not-allowed; }
+.save-error { font-size: var(--md-sys-typescale-label-medium-size); color: var(--mmp-sys-color-danger); }
+.save-ok    { font-size: var(--md-sys-typescale-label-medium-size); color: var(--mmp-sys-color-ok); }
+
+/* ═══ Audio player ══════════════════════════════════════════════ */
+audio { display: none; }
+
+/* ═══ Empty states ══════════════════════════════════════════════ */
+.empty-state {
+  text-align: center;
+  color: var(--md-sys-color-on-surface-variant);
+  padding: 32px 16px;
+  font-size: var(--md-sys-typescale-body-medium-size);
+}
+
+/* ═══ Placeholder page panel (stubs) ════════════════════════════ */
+.page-stub {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--mmp-density-gap-md);
+  padding: 48px;
+  color: var(--md-sys-color-on-surface-variant);
+  text-align: center;
+}
+.page-stub h2 {
+  font-size: var(--md-sys-typescale-headline-small-size);
+  color: var(--md-sys-color-on-surface);
+  font-weight: 600;
+}
+.page-stub p { max-width: 42rem; font-size: var(--md-sys-typescale-body-medium-size); line-height: 1.6; }
+
+/* ═══ Subnav (nested layout tabs on Analysis/Settings) ══════════ */
+.subnav {
+  display: flex;
+  gap: 0;
+  background: var(--md-sys-color-surface-container-low);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  padding: 0 var(--mmp-density-pad-panel);
+  flex-shrink: 0;
+  overflow-x: auto;
+}
+.subnav a {
+  padding: 10px 16px;
+  color: var(--md-sys-color-on-surface-variant);
+  text-decoration: none;
+  font-size: var(--md-sys-typescale-label-large-size);
+  font-weight: 600;
+  border-bottom: 2px solid transparent;
+  transition: color 0.12s ease, border-color 0.12s ease;
+  white-space: nowrap;
+}
+.subnav a:hover { color: var(--md-sys-color-on-surface); }
+.subnav a.active {
+  color: var(--md-sys-color-primary);
+  border-bottom-color: var(--md-sys-color-primary);
+}
+
+/* ═══ Page content area (below shell + subnav) ═════════════════ */
+.page-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+  padding: var(--mmp-density-pad-panel);
+  min-height: 0;
+  background: var(--md-sys-color-surface);
+}
+

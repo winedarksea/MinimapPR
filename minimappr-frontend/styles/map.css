@@ -1,0 +1,218 @@
+/* ═══ Map column ═══════════════════════════════════════════════ */
+.map-column { display: flex; flex-direction: column; }
+.leaflet-container-wrap {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+}
+#mmp-map {
+  position: absolute;
+  inset: 0;
+  background: var(--md-sys-color-surface-dim);
+}
+#mmp-map .maplibregl-canvas {
+  outline: none;
+}
+#mmp-map .maplibregl-ctrl {
+  background: var(--mmp-glass-bg);
+  border: 1px solid var(--mmp-glass-border);
+  color: var(--md-sys-color-on-surface);
+  box-shadow: var(--md-sys-elevation-1);
+}
+#mmp-map .maplibregl-ctrl button {
+  color: var(--md-sys-color-on-surface);
+}
+.mmpr-map-pulse {
+  animation: mmpr-map-pulse 800ms var(--mmp-motion-easing-standard);
+}
+@keyframes mmpr-map-pulse {
+  0% { transform: scale(1); }
+  45% { transform: scale(1.22); }
+  100% { transform: scale(1); }
+}
+.map-overlay-stack {
+  position: absolute;
+  z-index: 420;
+  display: flex;
+  flex-direction: column;
+  gap: var(--mmp-density-gap-sm);
+  pointer-events: none;
+}
+.map-overlay-top-left {
+  top: var(--mmp-density-gap-md);
+  left: var(--mmp-density-gap-md);
+}
+.map-overlay-bottom-right {
+  right: var(--mmp-density-gap-md);
+  bottom: var(--mmp-density-gap-md);
+}
+.map-floating-panel {
+  min-width: 220px;
+  max-width: min(320px, calc(100vw - 32px));
+  padding: 12px 14px;
+  border-radius: var(--md-sys-shape-corner-md);
+  border: 1px solid var(--mmp-glass-border);
+  background: var(--mmp-glass-bg);
+  backdrop-filter: blur(16px);
+  box-shadow: var(--md-sys-elevation-2);
+  pointer-events: auto;
+}
+.map-floating-title {
+  margin-bottom: 8px;
+  font-size: var(--md-sys-typescale-label-small-size);
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--md-sys-color-on-surface-variant);
+}
+.map-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--mmp-density-gap-xs);
+}
+.map-floating-caption {
+  margin-top: 10px;
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: var(--md-sys-typescale-label-medium-size);
+}
+.map-picture-card .strip-chip {
+  box-shadow: none;
+}
+.legend {
+  display: flex;
+  gap: var(--mmp-density-gap-md);
+  flex-wrap: wrap;
+}
+.legend-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.legend-group-label {
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--md-sys-color-on-surface-variant);
+  margin-bottom: 2px;
+}
+.legend-item {
+  display: flex; align-items: center; gap: 6px;
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: var(--md-sys-typescale-label-small-size);
+}
+
+/* ── Legend shapes (CSS-only, match actual map icons) ── */
+/* Node: rounded square with center dot */
+.legend-shape-node {
+  width: 11px; height: 11px;
+  border: 1.5px solid var(--mmp-sys-color-map-node);
+  border-radius: 3px;
+  position: relative;
+  flex-shrink: 0;
+}
+.legend-shape-node::after {
+  content: "";
+  position: absolute;
+  top: 50%; left: 50%;
+  width: 3.5px; height: 3.5px;
+  background: var(--mmp-sys-color-map-node);
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+}
+.legend-shape-node.degraded { border-color: var(--mmp-sys-color-warn); }
+.legend-shape-node.degraded::after { background: var(--mmp-sys-color-warn); }
+.legend-shape-node.offline  { border-color: var(--mmp-sys-color-danger); }
+.legend-shape-node.offline::after  { background: var(--mmp-sys-color-danger); }
+
+/* Track: rotated square (diamond) with center dot */
+.legend-shape-track {
+  width: 9px; height: 9px;
+  border: 1.5px solid var(--mmp-sys-color-map-track);
+  transform: rotate(45deg);
+  position: relative;
+  flex-shrink: 0;
+  margin: 1px 2px; /* compensate for rotation expanding bounding box */
+}
+.legend-shape-track::after {
+  content: "";
+  position: absolute;
+  top: 50%; left: 50%;
+  width: 3px; height: 3px;
+  background: var(--mmp-sys-color-map-track);
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+}
+.legend-shape-track.coasting { border-color: var(--mmp-sys-color-map-track-coasting); }
+.legend-shape-track.coasting::after { background: var(--mmp-sys-color-map-track-coasting); }
+.legend-shape-track.dropped {
+  border-color: var(--mmp-sys-color-map-track-dropped);
+  opacity: 0.55;
+}
+.legend-shape-track.dropped::after { background: var(--mmp-sys-color-map-track-dropped); }
+
+/* Detection: concentric rings */
+.legend-shape-detection {
+  width: 11px; height: 11px;
+  border: 1.5px solid var(--mmp-sys-color-map-detection);
+  border-radius: 50%;
+  position: relative;
+  flex-shrink: 0;
+}
+.legend-shape-detection::after {
+  content: "";
+  position: absolute;
+  top: 50%; left: 50%;
+  width: 3.5px; height: 3.5px;
+  background: var(--mmp-sys-color-map-detection);
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.legend-shape-bearing-detection {
+  width: 10px; height: 10px;
+  border: 1.5px solid var(--mmp-sys-color-map-bearing);
+  border-radius: 50%;
+  opacity: 0.62;
+  position: relative;
+  flex-shrink: 0;
+}
+.legend-shape-bearing-detection::after {
+  content: "";
+  position: absolute;
+  top: 50%; left: 50%;
+  width: 3px; height: 3px;
+  background: var(--mmp-sys-color-map-bearing);
+  border-radius: 50%;
+  opacity: 0.55;
+  transform: translate(-50%, -50%);
+}
+
+.legend-shape-bearing-wedge {
+  width: 16px;
+  height: 14px;
+  clip-path: polygon(50% 100%, 6% 0, 94% 0);
+  background: color-mix(in srgb, var(--mmp-sys-color-map-bearing) 42%, transparent);
+  border: 1px solid color-mix(in srgb, var(--mmp-sys-color-map-bearing) 70%, transparent);
+  flex-shrink: 0;
+}
+
+.legend-shape-omni-halo {
+  width: 13px; height: 13px;
+  border: 1.5px solid var(--mmp-sys-color-map-omni);
+  border-radius: 50%;
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--mmp-sys-color-map-omni) 18%, transparent);
+  position: relative;
+  flex-shrink: 0;
+}
+.legend-shape-omni-halo::after {
+  content: "";
+  position: absolute;
+  top: 50%; left: 50%;
+  width: 4px; height: 4px;
+  background: var(--mmp-sys-color-map-omni);
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+}
+

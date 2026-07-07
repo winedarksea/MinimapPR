@@ -1,0 +1,311 @@
+/* ─── App root layout (shell) ──────────────────────────────────── */
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  overflow: hidden;
+  background: var(--md-sys-color-surface);
+}
+
+.app-page {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ═══ Top bar (MD3 top app bar, compact density) ════════════════ */
+.topbar {
+  height: var(--md-sys-typescale-body-medium-size, 14px);
+  height: var(--mmp-density-header-h);
+  display: flex;
+  align-items: center;
+  gap: var(--mmp-density-gap-md);
+  padding: 0 var(--mmp-density-gap-lg);
+  background: var(--md-sys-color-surface-container);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  flex-shrink: 0;
+  background-image: repeating-linear-gradient(
+    0deg,
+    transparent 0px,
+    transparent 3px,
+    rgba(0, 0, 0, 0.05) 3px,
+    rgba(0, 0, 0, 0.05) 4px
+  );
+}
+.topbar-brand {
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  font-size: var(--md-sys-typescale-title-medium-size);
+  color: var(--md-sys-color-on-surface);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--mmp-density-gap-sm);
+}
+.topbar-brand::before {
+  content: "";
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background-image: url("favicon.svg");
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: contain;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--md-sys-color-primary) 35%, transparent);
+}
+.topbar-brand-tag {
+  padding: 2px 8px;
+  border-radius: var(--md-sys-shape-corner-full);
+  background: color-mix(in srgb, var(--md-sys-color-primary) 18%, transparent);
+  color: var(--md-sys-color-primary);
+  font-size: var(--md-sys-typescale-label-small-size);
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.topbar-nav {
+  display: flex;
+  align-items: center;
+  gap: var(--mmp-density-gap-xs);
+  margin-left: var(--mmp-density-gap-lg);
+}
+.topbar-nav a {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border-radius: var(--md-sys-shape-corner-full);
+  color: var(--md-sys-color-on-surface-variant);
+  text-decoration: none;
+  font-size: var(--md-sys-typescale-label-large-size);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  position: relative;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.topbar-nav a:hover {
+  background: color-mix(in srgb, var(--md-sys-color-on-surface) 8%, transparent);
+  color: var(--md-sys-color-on-surface);
+}
+.topbar-nav a.active {
+  background: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+}
+
+.topbar-spacer { flex: 1; }
+
+.topbar-tools {
+  display: flex;
+  align-items: center;
+  gap: var(--mmp-density-gap-sm);
+}
+.topbar-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-full);
+  background: color-mix(in srgb, var(--md-sys-color-surface-container-high) 84%, transparent);
+  color: var(--md-sys-color-on-surface);
+  cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease, color 0.12s ease;
+}
+.topbar-toggle:hover {
+  border-color: color-mix(in srgb, var(--md-sys-color-primary) 45%, transparent);
+  background: color-mix(in srgb, var(--md-sys-color-primary) 10%, var(--md-sys-color-surface-container-high));
+}
+.topbar-toggle-label {
+  font-size: var(--md-sys-typescale-label-small-size);
+  color: var(--md-sys-color-on-surface-variant);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.topbar-toggle-value {
+  font-family: var(--md-sys-typescale-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--md-sys-typescale-label-medium-size);
+  font-weight: 700;
+}
+.topbar-clock {
+  font-family: var(--md-sys-typescale-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--md-sys-typescale-label-medium-size);
+  color: var(--md-sys-color-on-surface-variant);
+  line-height: 1.1;
+  text-align: right;
+}
+.topbar-clock .utc { color: var(--md-sys-color-on-surface); font-weight: 600; }
+.topbar-clock .local { font-size: 10px; }
+
+.topbar-nav .material-symbols-rounded {
+  font-size: 16px;
+  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 20;
+}
+.topbar-nav a.active .material-symbols-rounded {
+  font-variation-settings: 'FILL' 1, 'wght' 500, 'GRAD' 0, 'opsz' 20;
+}
+
+.topbar-iconbtn {
+  width: 32px; height: 32px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--md-sys-shape-corner-full);
+  color: var(--md-sys-color-on-surface-variant);
+  cursor: pointer;
+  font-size: 16px;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.topbar-iconbtn:hover {
+  background: color-mix(in srgb, var(--md-sys-color-on-surface) 8%, transparent);
+  color: var(--md-sys-color-on-surface);
+}
+
+/* Compat: legacy .header rule is preserved but unused. */
+.header {
+  height: var(--mmp-density-header-h);
+  display: flex;
+  align-items: center;
+  gap: var(--mmp-density-gap-md);
+  padding: 0 var(--mmp-density-gap-lg);
+  background: var(--md-sys-color-surface-container);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  flex-shrink: 0;
+}
+.header-title {
+  font-weight: 700;
+  font-size: var(--md-sys-typescale-title-medium-size);
+  letter-spacing: 0.04em;
+}
+
+/* ═══ WS status pill ════════════════════════════════════════════ */
+.ws-pill {
+  padding: 2px 10px;
+  border-radius: var(--md-sys-shape-corner-full);
+  font-size: var(--md-sys-typescale-label-small-size);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ws-pill::before {
+  content: "";
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 30%, transparent);
+}
+.ws-pill.connected    { background: var(--mmp-sys-color-ok-container);    color: var(--mmp-sys-color-on-ok-container); }
+.ws-pill.reconnecting { background: var(--mmp-sys-color-warn-container);  color: var(--mmp-sys-color-on-warn-container); }
+.ws-pill.disconnected { background: var(--mmp-sys-color-danger-container);color: var(--mmp-sys-color-on-danger-container); }
+
+.topbar-rec-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+  padding: 2px 10px;
+  border-radius: var(--md-sys-shape-corner-full);
+  background: color-mix(in srgb, var(--mmp-sys-color-danger-container) 72%, var(--md-sys-color-surface-container));
+  color: var(--mmp-sys-color-danger);
+  text-decoration: none;
+  font-size: var(--md-sys-typescale-label-small-size);
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.topbar-rec-chip .rec-dot {
+  width: 7px;
+  height: 7px;
+}
+
+/* ═══ Status strip (below top bar) ══════════════════════════════ */
+.system-strip {
+  min-height: var(--mmp-density-strip-h);
+  display: flex;
+  align-items: center;
+  gap: var(--mmp-density-gap-sm);
+  flex-wrap: wrap;
+  padding: 0 var(--mmp-density-gap-lg);
+  background: var(--md-sys-color-surface-container-low);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  flex-shrink: 0;
+  font-size: var(--md-sys-typescale-label-medium-size);
+}
+.strip-stat,
+.strip-chip {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+}
+.strip-stat .label,
+.strip-chip .label {
+  color: var(--md-sys-color-on-surface-variant);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: var(--md-sys-typescale-label-small-size);
+}
+.strip-stat .value,
+.strip-chip .value {
+  color: var(--md-sys-color-on-surface);
+  font-weight: 700;
+  font-size: var(--md-sys-typescale-title-small-size);
+}
+.strip-chip {
+  min-height: calc(var(--mmp-density-chip-h) + 4px);
+  padding: 2px 10px;
+  border-radius: var(--md-sys-shape-corner-full);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  background: color-mix(in srgb, var(--md-sys-color-surface-container-high) 86%, transparent);
+  transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease, transform 0.18s ease;
+}
+.strip-chip.ok {
+  background: color-mix(in srgb, var(--mmp-sys-color-ok-container) 88%, transparent);
+  border-color: color-mix(in srgb, var(--mmp-sys-color-ok) 38%, transparent);
+}
+.strip-chip.warn {
+  background: color-mix(in srgb, var(--mmp-sys-color-warn-container) 88%, transparent);
+  border-color: color-mix(in srgb, var(--mmp-sys-color-warn) 40%, transparent);
+}
+.strip-chip.danger {
+  background: color-mix(in srgb, var(--mmp-sys-color-danger-container) 84%, transparent);
+  border-color: color-mix(in srgb, var(--mmp-sys-color-danger) 45%, transparent);
+  animation: strip-alert-pulse 1.8s ease-in-out infinite;
+}
+.strip-chip.info {
+  background: color-mix(in srgb, var(--mmp-sys-color-info-container) 88%, transparent);
+  border-color: color-mix(in srgb, var(--mmp-sys-color-info) 40%, transparent);
+}
+.strip-chip.neutral {
+  background: color-mix(in srgb, var(--md-sys-color-surface-container-high) 86%, transparent);
+}
+@keyframes strip-alert-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 transparent; }
+  50% { box-shadow: 0 0 0 1px color-mix(in srgb, var(--mmp-sys-color-danger) 55%, transparent); }
+}
+.strip-chip.danger .value {
+  text-shadow: 0 0 6px color-mix(in srgb, var(--mmp-sys-color-danger) 50%, transparent);
+}
+a.strip-chip {
+  text-decoration: none;
+  cursor: pointer;
+  transition: filter 0.1s;
+}
+a.strip-chip:hover { filter: brightness(1.12); }
+
+/* ═══ Main grid (COP page — three columns) ══════════════════════ */
+.main-grid {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(300px, 1fr) minmax(0, 2.2fr) minmax(340px, 1.1fr);
+  gap: 0;
+  overflow: hidden;
+  min-height: 0;
+}
+

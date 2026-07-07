@@ -2,6 +2,7 @@ use crate::state::{
     AppState, CopItemKind, CopSelection, Detection, Effector, NodeStatus, Track, ZoneSpec,
 };
 use crate::ui::short_id;
+use crate::workspace::layout::clamp_dock_width;
 use leptos::prelude::*;
 
 fn confidence_text(value: Option<f64>) -> String {
@@ -39,9 +40,15 @@ fn selection_title(selection: &CopSelection) -> String {
 }
 
 #[component]
-pub fn EntityInspector() -> impl IntoView {
+pub fn EntityInspector(right_dock_width_px: RwSignal<f64>) -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState");
     let selected = state.selected_cop_item;
+    let inspector_style = move || {
+        format!(
+            "right: calc({:.0}px + var(--mmp-density-gap-lg) + var(--mmp-density-gap-sm));",
+            clamp_dock_width(right_dock_width_px.get())
+        )
+    };
 
     view! {
         {move || {
@@ -53,7 +60,11 @@ pub fn EntityInspector() -> impl IntoView {
             }
 
             view! {
-                <aside class="entity-inspector" aria-label="Selected entity inspector">
+                <aside
+                    class="entity-inspector"
+                    style=inspector_style
+                    aria-label="Selected entity inspector"
+                >
                     <div class="entity-inspector-header">
                         <div>
                             <div class="entity-inspector-eyebrow">{selection.kind.as_label()}</div>

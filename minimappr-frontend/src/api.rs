@@ -452,6 +452,26 @@ pub async fn delete_overlay(overlay_id: &str) -> Result<(), String> {
     }
 }
 
+pub async fn upsert_zone(zone: ZoneSpec) -> Result<(), String> {
+    let encoded = js_sys::encode_uri_component(&zone.id)
+        .as_string()
+        .unwrap_or_default();
+    let url = format!("/api/v1/zones/{encoded}");
+    let resp = Request::put(&url)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&zone).unwrap_or_default())
+        .map_err(|error| error.to_string())?
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+
+    if resp.ok() {
+        Ok(())
+    } else {
+        Err(resp.text().await.unwrap_or_default())
+    }
+}
+
 pub async fn fetch_heatmap(window: &str) -> Result<HeatmapResponse, String> {
     let encoded_window = js_sys::encode_uri_component(window)
         .as_string()
