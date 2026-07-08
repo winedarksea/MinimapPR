@@ -469,6 +469,62 @@ class TestIamfPipelineE2E:
         np.testing.assert_allclose(result, expected)
         await pipeline._http.aclose()
 
+    @pytest.mark.asyncio
+    async def test_mvdr_rust_file_ipc_writes_and_reads_wav(
+        self,
+        tmp_path: Path,
+        artifacts_dir: Path,
+    ):
+        pipeline = IamfPipeline(
+            sidecar_url="http://sidecar",
+            db_storage=_StubStorage(),
+            artifact_dir=artifacts_dir,
+        )
+        channels = _synthetic_4ch(duration_s=0.1)
+        trajectory = TrackTrajectory(
+            track_id="trk/file ipc",
+            waypoints=[(0, (1.0, 0.0, 0.0)), (channels.shape[1] - 1, (1.0, 0.0, 0.0))],
+        )
+        expected = np.linspace(-0.1, 0.1, channels.shape[1], dtype=np.float32)
+        seen_payloads: list[dict] = []
+
+        class _Response:
+            def __init__(self, payload: dict):
+                self._payload = payload
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict:
+                return self._payload
+
+        class _FakeHttp:
+            async def post(self, url: str, *, json: dict):
+                seen_payloads.append({"url": url, "json": json})
+                assert "channels" not in json
+                input_path = Path(json["input_wav_path"])
+                assert input_path.exists()
+                output_path = Path(json["output_wav_path"])
+                write_wav_mono(output_path, expected, SAMPLE_RATE)
+                return _Response(
+                    {
+                        "output_wav_path": str(output_path),
+                        "sample_rate_hz": SAMPLE_RATE,
+                        "samples_per_channel": expected.shape[0],
+                    }
+                )
+
+        pipeline._http = _FakeHttp()  # type: ignore[assignment]
+        result = await pipeline._mvdr_beamform_rust_file(
+            channels,
+            trajectory,
+            SAMPLE_RATE,
+            tmp_path,
+        )
+
+        assert seen_payloads[0]["url"].endswith("/api/v1/capture/render/mvdr-file")
+        np.testing.assert_allclose(result, expected, atol=2.0 / 32767.0)
+
     def test_python_mvdr_fallback_overlap_adds_block_changes(
         self,
         artifacts_dir: Path,
@@ -907,7 +963,16 @@ class TestIamfPipelineE2E:
             _fake_visual_renderer,
         )
 
-        rust_mvdr_mock = AsyncMock(side_effect=pipeline._mvdr_beamform_python)
+        async def _fake_rust_mvdr(
+            channels: np.ndarray,
+            traj: TrackTrajectory,
+            capture_rate_hz: int,
+            work_dir: Path | None = None,
+        ) -> np.ndarray:
+            del work_dir
+            return pipeline._mvdr_beamform_python(channels, traj, capture_rate_hz)
+
+        rust_mvdr_mock = AsyncMock(side_effect=_fake_rust_mvdr)
         monkeypatch.setattr(pipeline, "_mvdr_beamform_rust", rust_mvdr_mock)
 
         try:

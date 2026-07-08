@@ -55,6 +55,11 @@ from minimappr.core.ambi_atob import (
 from minimappr.core.capture_session import CaptureSessionRecord
 from minimappr.core.iamf_object_slot import IamfObjectSlot, select_iamf_object_slot
 from minimappr.core.recording_visual import render_recording_visual_mp4
+from minimappr.spatial_audio import encode_ambisonics
+from minimappr.spatial_audio.objects import (
+    subtract_object_slot_from_bed,
+    subtract_objects_from_bed,
+)
 from minimappr.utils.audio import read_wav_mono
 
 logger = logging.getLogger(__name__)
@@ -115,12 +120,14 @@ class IamfPipeline:
         multi_sensor_buffer: Optional[Any] = None,  # minimappr.core.audio_buffer.MultiSensorBuffer
         executor: Optional[asyncio.AbstractEventLoop] = None,
         artifact_dir: Optional[Path] = None,
+        iamf_ambi_profile: str = "parametric_v2",
     ) -> None:
         self._sidecar_url = sidecar_url
         self._db = db_storage
         self._multi_sensor_buffer = multi_sensor_buffer
         self._artifact_dir = artifact_dir or ARTIFACTS_DIR
         self._http = httpx.AsyncClient(timeout=60.0) if sidecar_url else None
+        self._iamf_ambi_profile = iamf_ambi_profile
 
     async def run(self, record: CaptureSessionRecord) -> None:
         """Execute all pipeline steps for the given session record."""
@@ -165,9 +172,15 @@ class IamfPipeline:
         ]
 
         # ── 2. A-to-B matrix ─────────────────────────────────────────────────
-        logger.info("[%s] step 2: A-to-B ambisonics matrix", record.session_id[:8])
-        bed_full = await loop.run_in_executor(
-            None, atob_foa, raw_channels, capture_rate_hz
+        logger.info(
+            "[%s] step 2: A-to-B ambisonics profile=%s",
+            record.session_id[:8],
+            self._iamf_ambi_profile,
+        )
+        bed_full = await self._encode_ambisonic_bed(
+            raw_channels,
+            capture_rate_hz,
+            work_dir,
         )
 
         # When IAMF encoding is disabled, produce ambisonics-only output.
@@ -217,7 +230,12 @@ class IamfPipeline:
             if traj.rendered_object_samples is not None:
                 mono = traj.rendered_object_samples
             else:
-                mono = await self._mvdr_beamform(raw_channels, traj, capture_rate_hz)
+                mono = await self._mvdr_beamform(
+                    raw_channels,
+                    traj,
+                    capture_rate_hz,
+                    work_dir=work_dir,
+                )
             obj_path = work_dir / f"object_{traj.track_id}.wav"
             _write_wav_mono(obj_path, mono, capture_rate_hz)
             object_tracks[traj.track_id] = mono
@@ -255,6 +273,7 @@ class IamfPipeline:
             capture_slot,
             capture_samples_per_unit,
             n_capture_samples,
+            capture_rate_hz,
         )
         bed_full_path.unlink(missing_ok=True)
 
@@ -560,6 +579,7 @@ class IamfPipeline:
         traj: TrackTrajectory,
         capture_rate_hz: int,
         mic_positions_m: NDArray[np.float64] | None = None,
+        work_dir: Path | None = None,
     ) -> NDArray[np.float32]:
         """Beamform one track trajectory to a mono object signal.
 
@@ -571,7 +591,7 @@ class IamfPipeline:
         """
         if self._http is not None:
             try:
-                return await self._mvdr_beamform_rust(channels, traj, capture_rate_hz)
+                return await self._mvdr_beamform_rust(channels, traj, capture_rate_hz, work_dir)
             except (httpx.HTTPError, KeyError, ValueError) as exc:
                 logger.warning(
                     "MVDR rust beamform failed for track %s; falling back to Python beamformer: %s",
@@ -583,6 +603,63 @@ class IamfPipeline:
         return await loop.run_in_executor(
             None, self._mvdr_beamform_python, channels, traj, capture_rate_hz, mic_positions_m
         )
+
+    async def _encode_ambisonic_bed(
+        self,
+        raw_channels: NDArray[np.float32],
+        capture_rate_hz: int,
+        work_dir: Path,
+    ) -> NDArray[np.float32]:
+        if self._http is not None:
+            try:
+                return await self._encode_ambisonic_bed_rust(
+                    raw_channels,
+                    capture_rate_hz,
+                    work_dir,
+                )
+            except (httpx.HTTPError, KeyError, ValueError, OSError) as exc:
+                logger.warning(
+                    "ambisonics rust render failed; falling back to Python encoder: %s",
+                    str(exc) or exc.__class__.__name__,
+                )
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None,
+            _encode_ambisonic_bed,
+            raw_channels,
+            capture_rate_hz,
+            self._iamf_ambi_profile,
+        )
+
+    async def _encode_ambisonic_bed_rust(
+        self,
+        raw_channels: NDArray[np.float32],
+        capture_rate_hz: int,
+        work_dir: Path,
+    ) -> NDArray[np.float32]:
+        assert self._http is not None
+        input_path = work_dir / "ambisonics_input.wav"
+        output_path = work_dir / "ambisonics_sidecar.wav"
+        _write_wav(input_path, raw_channels, capture_rate_hz)
+        payload = {
+            "input_wav_path": str(input_path),
+            "output_wav_path": str(output_path),
+            "mic_positions_m": SIRITH_MIC_POSITIONS_M.tolist(),
+            "profile": self._iamf_ambi_profile,
+        }
+        response = await self._http.post(
+            f"{self._sidecar_url}/api/v1/capture/render/ambisonics",
+            json=payload,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if int(data.get("sample_rate_hz", 0)) != int(capture_rate_hz):
+            raise ValueError("ambisonics sidecar returned a mismatched sample rate")
+        channels, sample_rate_hz = _read_wav_channels(output_path, expected_channels=4)
+        if sample_rate_hz != capture_rate_hz:
+            raise ValueError("ambisonics sidecar WAV has a mismatched sample rate")
+        return channels
 
     def _mvdr_beamform_python(
         self,
@@ -618,7 +695,7 @@ class IamfPipeline:
 
         first_active = traj.waypoints[0][0]
         last_active = traj.waypoints[-1][0]
-        fade_samples = 100
+        fade_samples = max(512, int(round(0.012 * capture_rate_hz)))
         block_size = SUBTRACT_BLOCK
         hop = max(1, block_size // 2)
         window = np.hanning(block_size).astype(np.float64)
@@ -679,14 +756,25 @@ class IamfPipeline:
         channels: NDArray[np.float32],
         traj: TrackTrajectory,
         capture_rate_hz: int,
+        work_dir: Path | None = None,
     ) -> NDArray[np.float32]:
-        """Call the Rust MVDR endpoint for one track trajectory.
-
-        NOTE: Channels are serialized as JSON here, which is RAM-intensive for
-        long recordings (~150 MB JSON for 5 min × 16 kHz × 4 ch). A future
-        Rust endpoint change to accept WAV file paths is needed for Pi safety.
-        """
+        """Call the Rust MVDR endpoint for one track trajectory."""
         assert self._http is not None
+        if work_dir is not None:
+            try:
+                return await self._mvdr_beamform_rust_file(
+                    channels,
+                    traj,
+                    capture_rate_hz,
+                    work_dir,
+                )
+            except (httpx.HTTPError, KeyError, ValueError, OSError) as exc:
+                logger.warning(
+                    "MVDR rust file render failed for track %s; falling back to JSON RPC: %s",
+                    traj.track_id,
+                    str(exc) or exc.__class__.__name__,
+                )
+
         n_samples = channels.shape[1]
         estimated_json_mb = n_samples * 4 * 8 / 1_000_000  # ~8 bytes per float in JSON
         if estimated_json_mb > 50:
@@ -711,6 +799,42 @@ class IamfPipeline:
         resp.raise_for_status()
         data = resp.json()
         return np.asarray(data["samples"], dtype=np.float32)
+
+    async def _mvdr_beamform_rust_file(
+        self,
+        channels: NDArray[np.float32],
+        traj: TrackTrajectory,
+        capture_rate_hz: int,
+        work_dir: Path,
+    ) -> NDArray[np.float32]:
+        assert self._http is not None
+        safe_track_id = "".join(
+            ch if ch.isalnum() or ch in {"-", "_"} else "_"
+            for ch in traj.track_id
+        )[:80] or "track"
+        input_path = work_dir / f"mvdr_input_{safe_track_id}.wav"
+        output_path = work_dir / f"mvdr_object_{safe_track_id}.wav"
+        _write_wav(input_path, channels, capture_rate_hz)
+        waypoints_dto = [
+            {"sample_offset": s, "position_m": list(pos)}
+            for s, pos in traj.waypoints
+        ]
+        response = await self._http.post(
+            f"{self._sidecar_url}/api/v1/capture/render/mvdr-file",
+            json={
+                "input_wav_path": str(input_path),
+                "output_wav_path": str(output_path),
+                "trajectory": waypoints_dto,
+            },
+        )
+        response.raise_for_status()
+        data = response.json()
+        if int(data.get("sample_rate_hz", 0)) != int(capture_rate_hz):
+            raise ValueError("MVDR sidecar returned a mismatched sample rate")
+        mono, sample_rate_hz = read_wav_mono(output_path)
+        if sample_rate_hz != capture_rate_hz:
+            raise ValueError("MVDR sidecar WAV has a mismatched sample rate")
+        return mono.astype(np.float32, copy=False)
 
     async def _encode_iamf(
         self,
@@ -826,41 +950,35 @@ class IamfPipeline:
 
 # ── Pure-Python DSP helpers ───────────────────────────────────────────────────
 
+def _encode_ambisonic_bed(
+    raw_channels: NDArray[np.float32],
+    capture_rate_hz: int,
+    iamf_ambi_profile: str,
+) -> NDArray[np.float32]:
+    if iamf_ambi_profile == "linear_v1":
+        return atob_foa(raw_channels, capture_rate_hz)
+    return encode_ambisonics(
+        raw_channels,
+        capture_rate_hz,
+        profile=iamf_ambi_profile,
+    )
+
+
 def _subtract_object_slot(
     bed_full: NDArray[np.float32],
     slot: IamfObjectSlot | None,
     samples_per_unit: int,
     n_samples: int,
+    sample_rate_hz: int = SAMPLE_RATE_HZ,
 ) -> NDArray[np.float32]:
     """Remove only the selected IAMF object slot from the Ambisonic bed."""
-    if slot is None:
-        return bed_full.astype(np.float32).copy()
-
-    bed = bed_full.astype(np.float64).copy()
-    samples_per_unit = max(1, samples_per_unit)
-    n = min(n_samples, slot.samples.shape[0])
-
-    for unit_idx, unit_positions in enumerate(slot.positions_per_unit):
-        pos = unit_positions.get(slot.slot_id)
-        if not pos:
-            continue
-        start = unit_idx * samples_per_unit
-        end = min(start + samples_per_unit, n)
-        if end <= start:
-            continue
-        azimuth_deg = 0.5 * (
-            float(pos["azimuth_deg"]) + float(pos.get("end_azimuth_deg", pos["azimuth_deg"]))
-        )
-        elevation_deg = 0.5 * (
-            float(pos["elevation_deg"]) + float(pos.get("end_elevation_deg", pos["elevation_deg"]))
-        )
-        block_bfmt = encode_mono_to_bformat(
-            slot.samples[start:end],
-            _spherical_to_unit_xyz(azimuth_deg, elevation_deg),
-        ).astype(np.float64)
-        bed[:, start:end] -= block_bfmt
-
-    return bed.astype(np.float32)
+    return subtract_object_slot_from_bed(
+        bed_full,
+        slot,
+        samples_per_unit,
+        n_samples,
+        sample_rate_hz=sample_rate_hz,
+    )
 
 
 def _subtract_objects(
@@ -868,6 +986,7 @@ def _subtract_objects(
     object_tracks: dict[str, NDArray[np.float32]],
     trajectories: list[TrackTrajectory],
     n_samples: int,
+    sample_rate_hz: int = SAMPLE_RATE_HZ,
 ) -> NDArray[np.float32]:
     """B_clean(t) = B_full(t) − Σᵢ Y_obj_i(t) · O_i(t).
 
@@ -875,24 +994,13 @@ def _subtract_objects(
     direction is interpolated from the track's waypoints, so the subtraction
     tracks the actual acoustic trajectory rather than a static mean position.
     """
-    traj_by_id = {t.track_id: t for t in trajectories}
-    bed = bed_full.astype(np.float64).copy()
-
-    for track_id, mono in object_tracks.items():
-        traj = traj_by_id.get(track_id)
-        if traj is None or not traj.waypoints:
-            continue
-        n = min(n_samples, mono.shape[0])
-        for block_start in range(0, n, SUBTRACT_BLOCK):
-            block_end = min(block_start + SUBTRACT_BLOCK, n)
-            sample_mid = block_start + (block_end - block_start) // 2
-            pos = _interpolate_waypoints(traj.waypoints, sample_mid)
-            block_bfmt = encode_mono_to_bformat(
-                mono[block_start:block_end], pos
-            ).astype(np.float64)
-            bed[:, block_start:block_end] -= block_bfmt
-
-    return bed.astype(np.float32)
+    return subtract_objects_from_bed(
+        bed_full,
+        object_tracks,
+        trajectories,
+        n_samples,
+        sample_rate_hz=sample_rate_hz,
+    )
 
 
 def render_cluster_audio(
@@ -901,6 +1009,7 @@ def render_cluster_audio(
     sensor_positions: dict[str, NDArray],
     sensor_grades: dict[str, "Any"],  # minimappr.models.SyncGrade
     capture_rate_hz: int,
+    node_specs: dict[str, "Any"] | None = None,  # minimappr.models.NodeSpec
 ) -> "ClusterRenderResult":
     """DSP-layer render for a node cluster.
 
@@ -911,11 +1020,12 @@ def render_cluster_audio(
     This function does no I/O.  The full pipeline (loudness measurement, IAMF
     encode, resampling, artifact registration) is performed by IamfPipeline.run().
 
-    AUTO mode partition rules (from the plan):
-    * High-grade = GPS_PPS or PTP sensors only.
-    * If cluster has ≥ 4 high-grade sensors AND geometry is FOA-suitable
-      → FOA bed from high-grade sensors + N-mono from NTP sensors.
-    * Otherwise → all-N-mono.
+    AUTO mode partition rules:
+    * Prefer one intact high-grade tetra node as the FOA anchor bed.
+    * Never build a coherent FOA bed across distributed nodes.
+    * Non-anchor sensors are emitted as mono side streams for object/remote
+      context rather than blended coherently into the bed.
+    * If no suitable anchor tetra exists, fall back to all-N-mono.
     """
     from minimappr.models import ClusterSpec, IamfRenderMode, SyncGrade
     from minimappr.core.iamf_writer import MonoSubstreamMeta, NMonoBundle
@@ -927,28 +1037,46 @@ def render_cluster_audio(
 
     # Resolve ordered sensor lists.
     sensor_ids = sorted(channels.keys())
+    node_specs = node_specs or {}
 
     if mode == IamfRenderMode.AUTO:
         high_ids = [sid for sid in sensor_ids if sensor_grades.get(sid) in _HIGH_GRADES]
-        ntp_ids  = [sid for sid in sensor_ids if sensor_grades.get(sid) not in _HIGH_GRADES]
-        if len(high_ids) >= 4:
-            high_positions = np.array([sensor_positions[sid] for sid in high_ids], dtype=np.float64)
-            suitable, _ = foa_geometry_suitable(high_positions, cluster_spec.max_baseline_m_for_foa)
+        anchor_node_id, anchor_sensor_ids = _select_anchor_tetra_sensor_ids(
+            high_ids,
+            sensor_positions,
+            cluster_spec.max_baseline_m_for_foa,
+        )
+        if anchor_sensor_ids:
+            high_ids = anchor_sensor_ids
+            ntp_ids = [sid for sid in sensor_ids if sid not in set(anchor_sensor_ids)]
+            suitable = True
         else:
             suitable = False
             ntp_ids = sensor_ids
             high_ids = []
+            anchor_node_id = None
         mode = IamfRenderMode.FOA_BED if suitable else IamfRenderMode.N_MONO_OBJECTS
     else:
         high_ids = sensor_ids
         ntp_ids = []
+        anchor_node_id = _node_id_from_sensor_id(sensor_ids[0]) if sensor_ids else None
 
     if mode == IamfRenderMode.FOA_BED:
         # Stack channels in sensor_id order; build matching position array.
         foa_ids = high_ids if high_ids else sensor_ids
         stacked = np.array([channels[sid] for sid in foa_ids], dtype=np.float32)
-        mic_pos = np.array([sensor_positions[sid] for sid in foa_ids], dtype=np.float64)
-        bed = atob_foa(stacked, capture_rate_hz, mic_positions_m=mic_pos)
+        mic_pos = _mic_positions_for_sensor_ids(
+            foa_ids,
+            sensor_positions,
+            node_specs,
+            anchor_node_id,
+        )
+        bed = encode_ambisonics(
+            stacked,
+            capture_rate_hz,
+            profile="parametric_v2",
+            mic_positions_m=mic_pos,
+        )
 
         ntp_bundle: NMonoBundle | None = None
         if ntp_ids:
@@ -969,6 +1097,7 @@ def render_cluster_audio(
             render_mode=IamfRenderMode.FOA_BED,
             foa_bed=bed,
             foa_sensor_ids=foa_ids,
+            anchor_node_id=anchor_node_id,
             ntp_mono_bundle=ntp_bundle,
             capture_rate_hz=capture_rate_hz,
         )
@@ -1004,8 +1133,88 @@ class ClusterRenderResult:
     capture_rate_hz: int
     foa_bed: NDArray[np.float32] | None = None
     foa_sensor_ids: list[str] | None = None
+    anchor_node_id: str | None = None
     ntp_mono_bundle: "Any | None" = None  # NMonoBundle for NTP sensors in AUTO+FOA mode
     mono_bundle: "Any | None" = None       # NMonoBundle for full N-mono mode
+
+
+def _select_anchor_tetra_sensor_ids(
+    high_grade_sensor_ids: list[str],
+    sensor_positions: dict[str, NDArray],
+    max_baseline_m_for_foa: float,
+) -> tuple[str | None, list[str]]:
+    grouped: dict[str, list[str]] = {}
+    for sensor_id in high_grade_sensor_ids:
+        grouped.setdefault(_node_id_from_sensor_id(sensor_id), []).append(sensor_id)
+
+    candidates: list[tuple[float, str, list[str]]] = []
+    for node_id, ids in grouped.items():
+        if len(ids) < 4:
+            continue
+        ordered = sorted(ids, key=_sensor_channel_sort_key)[:4]
+        positions = np.array([sensor_positions[sid] for sid in ordered], dtype=np.float64)
+        suitable, _ = foa_geometry_suitable(positions, max_baseline_m_for_foa)
+        if not suitable:
+            continue
+        baseline = _max_pairwise_baseline_m(positions)
+        candidates.append((baseline, node_id, ordered))
+
+    if not candidates:
+        return None, []
+    # Prefer the tightest suitable tetra geometry; tie-break by node id for determinism.
+    _, node_id, ordered = min(candidates, key=lambda item: (item[0], item[1]))
+    return node_id, ordered
+
+
+def _mic_positions_for_sensor_ids(
+    sensor_ids: list[str],
+    sensor_positions: dict[str, NDArray],
+    node_specs: dict[str, "Any"],
+    anchor_node_id: str | None,
+) -> NDArray[np.float64]:
+    from minimappr.spatial_audio.geometry import rotate_positions
+
+    if anchor_node_id and anchor_node_id in node_specs:
+        node = node_specs[anchor_node_id]
+        offsets = np.asarray(getattr(node, "sensor_offsets_m", []), dtype=np.float64)
+        if offsets.shape[0] >= len(sensor_ids) and offsets.ndim == 2 and offsets.shape[1] == 3:
+            channel_indices = [_sensor_channel_index(sensor_id) for sensor_id in sensor_ids]
+            if all(index is not None and index < offsets.shape[0] for index in channel_indices):
+                selected = np.asarray([offsets[int(index)] for index in channel_indices], dtype=np.float64)
+                rotated = rotate_positions(selected, getattr(node, "orientation", None))
+                position_m = getattr(node, "position_m", None)
+                if position_m is not None:
+                    rotated = rotated + np.asarray(position_m, dtype=np.float64)
+                return rotated.astype(np.float64)
+
+    return np.array([sensor_positions[sid] for sid in sensor_ids], dtype=np.float64)
+
+
+def _node_id_from_sensor_id(sensor_id: str) -> str:
+    return sensor_id.split(":", 1)[0]
+
+
+def _sensor_channel_sort_key(sensor_id: str) -> tuple[int, str]:
+    index = _sensor_channel_index(sensor_id)
+    return (index if index is not None else 10_000, sensor_id)
+
+
+def _sensor_channel_index(sensor_id: str) -> int | None:
+    suffix = sensor_id.rsplit(":", 1)[-1]
+    if suffix.startswith("ch") and suffix[2:].isdigit():
+        return int(suffix[2:])
+    return None
+
+
+def _max_pairwise_baseline_m(positions: NDArray[np.float64]) -> float:
+    max_distance = 0.0
+    for first_index in range(positions.shape[0]):
+        for second_index in range(first_index + 1, positions.shape[0]):
+            max_distance = max(
+                max_distance,
+                float(np.linalg.norm(positions[first_index] - positions[second_index])),
+            )
+    return max_distance
 
 
 def _build_recording_source_inventory(
@@ -1570,6 +1779,30 @@ def _write_wav(path: Path, channels_first: NDArray, sample_rate_hz: int) -> None
 
 def _write_wav_mono(path: Path, samples: NDArray, sample_rate_hz: int) -> None:
     _write_wav(path, samples[np.newaxis, :], sample_rate_hz)
+
+
+def _read_wav_channels(
+    path: Path,
+    *,
+    expected_channels: int | None = None,
+) -> tuple[NDArray[np.float32], int]:
+    with wave.open(str(path), "rb") as wav_file:
+        channel_count = int(wav_file.getnchannels())
+        sample_width = int(wav_file.getsampwidth())
+        sample_rate_hz = int(wav_file.getframerate())
+        frame_count = int(wav_file.getnframes())
+        raw = wav_file.readframes(frame_count)
+
+    if expected_channels is not None and channel_count != expected_channels:
+        raise ValueError(
+            f"{path} has {channel_count} channels, expected {expected_channels}"
+        )
+    if sample_width != 2:
+        raise ValueError(f"{path} must be 16-bit PCM, got {sample_width * 8} bits")
+    data = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32767.0
+    if data.size % channel_count != 0:
+        raise ValueError(f"{path} sample count is not divisible by channel count")
+    return data.reshape(-1, channel_count).T.astype(np.float32), sample_rate_hz
 
 
 def _decode_pcm16le_4ch(raw: bytes) -> NDArray[np.float32]:

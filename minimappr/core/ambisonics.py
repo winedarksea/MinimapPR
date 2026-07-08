@@ -13,6 +13,7 @@ import numpy as np
 
 EPSILON = 1e-12
 FOA_CHANNELS = 4
+ENCODE_PEAK_TARGET = 0.98
 
 
 @dataclass(slots=True)
@@ -75,7 +76,7 @@ class AmbisonicSpatialEncoder:
             bformat[2] += source_gain * y * padded
             bformat[3] += source_gain * z * padded
 
-        return np.clip(bformat, -1.0, 1.0).astype(np.float32)
+        return _scale_for_encode(bformat)
 
 
 def foa_to_5_1(foa_channels_first: np.ndarray) -> np.ndarray:
@@ -90,7 +91,14 @@ def foa_to_5_1(foa_channels_first: np.ndarray) -> np.ndarray:
     surround_left = (0.707 * w) - (0.35 * x) + (0.55 * y)
     surround_right = (0.707 * w) - (0.35 * x) - (0.55 * y)
     out = np.vstack([left, right, center, lfe, surround_left, surround_right])
-    return np.clip(out, -1.0, 1.0).astype(np.float32)
+    return _scale_for_encode(out)
+
+
+def _scale_for_encode(channels_first: np.ndarray) -> np.ndarray:
+    peak = float(np.max(np.abs(channels_first))) if channels_first.size else 0.0
+    if peak <= ENCODE_PEAK_TARGET or peak <= EPSILON:
+        return channels_first.astype(np.float32, copy=False)
+    return (channels_first.astype(np.float64) * (ENCODE_PEAK_TARGET / peak)).astype(np.float32)
 
 
 def write_wav_multichannel(path: Path, channels_first: np.ndarray, sample_rate_hz: int) -> None:

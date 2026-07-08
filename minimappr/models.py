@@ -127,12 +127,21 @@ class GeoPoint(BaseModel):
     alt_m: float = 0.0
 
 
+class NodeOrientation(BaseModel):
+    """Node-local sensor frame orientation in the site east/north/up frame."""
+
+    yaw_deg: float = Field(ge=-360.0, le=360.0, default=0.0)
+    pitch_deg: float = Field(ge=-90.0, le=90.0, default=0.0)
+    roll_deg: float = Field(ge=-180.0, le=180.0, default=0.0)
+
+
 class NodeSpec(BaseModel):
     id: str = Field(min_length=1)
     node_type: NodeType
     position_m: Vec3 | None = None
     position_geo: GeoPoint | None = None
     sensor_offsets_m: list[Vec3] = Field(default_factory=lambda: [(0.0, 0.0, 0.0)])
+    orientation: NodeOrientation = Field(default_factory=NodeOrientation)
     capabilities: list[str] = Field(default_factory=list)
     mobility: Literal["stationary", "mobile"] = "stationary"
     metadata: dict[str, Any] = Field(default_factory=dict)

@@ -20,7 +20,8 @@ import pytest
 from minimappr.core.ambi_atob import SIRITH_MIC_POSITIONS_M, foa_geometry_suitable
 from minimappr.core.iamf_pipeline import ClusterRenderResult, render_cluster_audio
 from minimappr.core.iamf_writer import NMonoBundle, write_n_mono_substreams
-from minimappr.models import ClusterSpec, IamfRenderMode, SyncGrade
+from minimappr.models import ClusterSpec, IamfRenderMode, NodeOrientation, NodeSpec, NodeType, SyncGrade
+from tests.helpers import SIRITH_TETRA_SENSOR_OFFSETS_M
 
 
 SAMPLE_RATE_HZ = 16_000
@@ -147,6 +148,72 @@ def test_auto_mode_partitions_pps_into_foa_and_ntp_into_objects() -> None:
     assert ntp_sids == set(ntp_positions.keys())
     for meta, _ in ntp_bundle.streams:
         assert meta.sync_grade == "ntp"
+
+
+def test_auto_mode_uses_single_tetra_anchor_not_distributed_high_grade_foa() -> None:
+    n = 2048
+    anchor_ids = [f"anchor:ch{i}" for i in range(4)]
+    anchor_positions = {sid: SIRITH_MIC_POSITIONS_M[i] for i, sid in enumerate(anchor_ids)}
+    remote_positions = {
+        "remote_a:ch0": np.array([8.0, 0.0, 0.0]),
+        "remote_b:ch0": np.array([0.0, 8.0, 0.0]),
+        "remote_c:ch0": np.array([8.0, 8.0, 0.0]),
+        "remote_d:ch0": np.array([4.0, 8.0, 0.0]),
+    }
+    positions = {**anchor_positions, **remote_positions}
+    channels = {sid: _tone(n) for sid in positions}
+    grades = {sid: SyncGrade.GPS_PPS for sid in positions}
+    spec = ClusterSpec(
+        id="mixed_anchor",
+        member_node_ids=["anchor", "remote_a", "remote_b", "remote_c", "remote_d"],
+        declared_sync_grade=SyncGrade.GPS_PPS,
+        iamf_render_mode=IamfRenderMode.AUTO,
+        max_baseline_m_for_foa=0.5,
+    )
+
+    result = render_cluster_audio(spec, channels, positions, grades, SAMPLE_RATE_HZ)
+
+    assert result.render_mode == IamfRenderMode.FOA_BED
+    assert result.anchor_node_id == "anchor"
+    assert result.foa_sensor_ids == anchor_ids
+    assert result.ntp_mono_bundle is not None
+    remote_sids = {meta.sensor_id for meta, _ in result.ntp_mono_bundle.streams}
+    assert remote_sids == set(remote_positions)
+
+
+def test_auto_mode_can_derive_anchor_geometry_from_oriented_node_spec() -> None:
+    n = 2048
+    anchor_ids = [f"anchor:ch{i}" for i in range(4)]
+    channels = {sid: _tone(n) for sid in anchor_ids}
+    grades = {sid: SyncGrade.GPS_PPS for sid in anchor_ids}
+    raw_positions = {sid: np.asarray(SIRITH_TETRA_SENSOR_OFFSETS_M[i], dtype=np.float64) for i, sid in enumerate(anchor_ids)}
+    node = NodeSpec(
+        id="anchor",
+        node_type=NodeType.SIRITH_TETRA,
+        position_m=(10.0, 20.0, 0.0),
+        sensor_offsets_m=list(SIRITH_TETRA_SENSOR_OFFSETS_M),
+        orientation=NodeOrientation(yaw_deg=90.0),
+    )
+    spec = ClusterSpec(
+        id="oriented_anchor",
+        member_node_ids=["anchor"],
+        declared_sync_grade=SyncGrade.GPS_PPS,
+        iamf_render_mode=IamfRenderMode.AUTO,
+        max_baseline_m_for_foa=0.5,
+    )
+
+    result = render_cluster_audio(
+        spec,
+        channels,
+        raw_positions,
+        grades,
+        SAMPLE_RATE_HZ,
+        node_specs={"anchor": node},
+    )
+
+    assert result.render_mode == IamfRenderMode.FOA_BED
+    assert result.anchor_node_id == "anchor"
+    assert result.foa_sensor_ids == anchor_ids
 
 
 def test_auto_mode_falls_back_to_all_n_mono_when_no_foa_eligible_set() -> None:

@@ -19,6 +19,7 @@ mod manifests;
 mod range_projection;
 mod render_mvdr;
 mod runtime;
+mod spatial_audio;
 mod srp_phat;
 mod storage_class;
 
@@ -52,6 +53,7 @@ use ingest_backend::{
 use journal_reader::JournalPayloadHandle;
 use leases::{PinKind, PinLeaseRequest, PinTargetKind};
 use render_mvdr::{render_mvdr, MvdrRenderRequest, TrajectoryWaypoint};
+use spatial_audio::{encode_ambisonics, AmbisonicsProfile, AmbisonicsRenderRequest};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, OwnedSemaphorePermit, RwLock, Semaphore};
 use tokio_stream::StreamExt;
@@ -468,6 +470,67 @@ fn run_srp_oracle() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
+fn run_ambi_oracle() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use std::io::Read;
+
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input)?;
+    let value: serde_json::Value = serde_json::from_str(&input)?;
+
+    let sample_rate_hz = value["sample_rate_hz"].as_u64().ok_or("sample_rate_hz")? as u32;
+    let profile = value["profile"].as_str().unwrap_or("linear_v1");
+    let profile_config = AmbisonicsProfile::from_name(profile)?;
+    let block_size = value["block_size"].as_u64().unwrap_or(4096) as usize;
+    let hop_size = value["hop_size"]
+        .as_u64()
+        .map(|value| value as usize)
+        .unwrap_or(block_size / 2);
+
+    let mut mic_positions_m: Vec<[f64; 3]> = Vec::new();
+    for mic in value["mic_positions_m"]
+        .as_array()
+        .ok_or("mic_positions_m")?
+    {
+        let coords = mic.as_array().ok_or("mic entry")?;
+        mic_positions_m.push([
+            coords[0].as_f64().ok_or("mic x")?,
+            coords[1].as_f64().ok_or("mic y")?,
+            coords[2].as_f64().ok_or("mic z")?,
+        ]);
+    }
+
+    let mut channels: Vec<Vec<f32>> = Vec::new();
+    for channel in value["channels"].as_array().ok_or("channels")? {
+        let samples = channel.as_array().ok_or("channel entry")?;
+        channels.push(
+            samples
+                .iter()
+                .map(|sample| sample.as_f64().unwrap_or(0.0) as f32)
+                .collect(),
+        );
+    }
+
+    let output = encode_ambisonics(
+        spatial_audio::AmbisonicsRenderRequest {
+            channels,
+            mic_positions_m,
+            sample_rate_hz,
+            block_size,
+            hop_size,
+        },
+        &profile_config,
+    );
+    println!(
+        "{}",
+        serde_json::to_string(&serde_json::json!({
+            "profile": profile,
+            "sample_rate_hz": output.sample_rate_hz,
+            "bformat": output.bformat,
+        }))?
+    );
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Hidden test harness: run the single-node SRP-PHAT estimator on synthetic
@@ -478,6 +541,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let raw_args: Vec<String> = std::env::args().collect();
     if raw_args.get(1).map(String::as_str) == Some("srp-oracle") {
         return run_srp_oracle();
+    }
+    if raw_args.get(1).map(String::as_str) == Some("ambi-oracle") {
+        return run_ambi_oracle();
     }
 
     tracing_subscriber::fmt()
@@ -705,6 +771,14 @@ fn app(state: AppState) -> Router {
         .route("/api/v1/dsp/config", post(post_dsp_config))
         // Capture pipeline: MVDR beamforming
         .route("/api/v1/capture/render/mvdr", post(render_mvdr_endpoint))
+        .route(
+            "/api/v1/capture/render/mvdr-file",
+            post(render_mvdr_file_endpoint),
+        )
+        .route(
+            "/api/v1/capture/render/ambisonics",
+            post(render_ambisonics_endpoint),
+        )
         // Capture pipeline: IAMF encoding
         .route("/api/v1/capture/encode/iamf", post(encode_iamf))
         .layer(TraceLayer::new_for_http())
@@ -1335,6 +1409,40 @@ struct MvdrResponse {
     sample_rate_hz: u32,
 }
 
+#[derive(Deserialize)]
+struct MvdrFileRequest {
+    input_wav_path: PathBuf,
+    output_wav_path: PathBuf,
+    trajectory: Vec<MvdrWaypointDto>,
+    fade_samples: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct MvdrFileResponse {
+    output_wav_path: PathBuf,
+    sample_rate_hz: u32,
+    samples_per_channel: usize,
+}
+
+#[derive(Deserialize)]
+struct AmbisonicsRenderPathRequest {
+    input_wav_path: PathBuf,
+    output_wav_path: PathBuf,
+    mic_positions_m: Vec<[f64; 3]>,
+    profile: Option<String>,
+    block_size: Option<usize>,
+    hop_size: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct AmbisonicsRenderPathResponse {
+    output_wav_path: PathBuf,
+    sample_rate_hz: u32,
+    channels: usize,
+    samples_per_channel: usize,
+    profile: String,
+}
+
 async fn render_mvdr_endpoint(Json(request): Json<MvdrRequest>) -> Response {
     let waypoints = request
         .trajectory
@@ -1355,6 +1463,92 @@ async fn render_mvdr_endpoint(Json(request): Json<MvdrRequest>) -> Response {
     Json(MvdrResponse {
         samples: output.samples,
         sample_rate_hz: output.sample_rate_hz,
+    })
+    .into_response()
+}
+
+async fn render_mvdr_file_endpoint(Json(request): Json<MvdrFileRequest>) -> Response {
+    let (channels_vec, sample_rate_hz) = match read_wav_any_channels_f32(&request.input_wav_path) {
+        Ok(value) => value,
+        Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
+    };
+    let channels: [Vec<f32>; 4] = match channels_vec.try_into() {
+        Ok(channels) => channels,
+        Err(channels) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("MVDR expects 4 channels, got {}", channels.len()),
+            )
+                .into_response()
+        }
+    };
+    let waypoints = request
+        .trajectory
+        .into_iter()
+        .map(|wp| TrajectoryWaypoint {
+            sample_offset: wp.sample_offset,
+            position_m: wp.position_m,
+        })
+        .collect();
+    let output = render_mvdr(MvdrRenderRequest {
+        channels,
+        sample_rate_hz,
+        trajectory: waypoints,
+        fade_samples: request.fade_samples,
+    });
+    if let Err(error) =
+        write_wav_mono_f32(&request.output_wav_path, &output.samples, output.sample_rate_hz)
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to write MVDR WAV: {error}"),
+        )
+            .into_response();
+    }
+    Json(MvdrFileResponse {
+        output_wav_path: request.output_wav_path,
+        sample_rate_hz: output.sample_rate_hz,
+        samples_per_channel: output.samples.len(),
+    })
+    .into_response()
+}
+
+async fn render_ambisonics_endpoint(Json(request): Json<AmbisonicsRenderPathRequest>) -> Response {
+    let profile = request.profile.unwrap_or_else(|| "linear_v1".to_string());
+    let profile_config = match AmbisonicsProfile::from_name(&profile) {
+        Ok(profile_config) => profile_config,
+        Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
+    };
+    let (channels, sample_rate_hz) = match read_wav_any_channels_f32(&request.input_wav_path) {
+        Ok(value) => value,
+        Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
+    };
+    let block_size = request.block_size.unwrap_or(4096).max(2).next_power_of_two();
+    let hop_size = request.hop_size.unwrap_or(block_size / 2).max(1);
+    let output = encode_ambisonics(
+        AmbisonicsRenderRequest {
+            channels,
+            mic_positions_m: request.mic_positions_m,
+            sample_rate_hz,
+            block_size,
+            hop_size,
+        },
+        &profile_config,
+    );
+    if let Err(error) = write_wav_channels_f32(&request.output_wav_path, &output.bformat, sample_rate_hz)
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to write ambisonics WAV: {error}"),
+        )
+            .into_response();
+    }
+    Json(AmbisonicsRenderPathResponse {
+        output_wav_path: request.output_wav_path,
+        sample_rate_hz,
+        channels: output.bformat.len(),
+        samples_per_channel: output.bformat.first().map(Vec::len).unwrap_or(0),
+        profile,
     })
     .into_response()
 }
@@ -1583,6 +1777,76 @@ fn read_wav_channels_f32(path: &Path, expected_channels: usize) -> Result<[Vec<f
         sample_index += 1;
     }
     Ok(channels)
+}
+
+fn read_wav_any_channels_f32(path: &Path) -> Result<(Vec<Vec<f32>>, u32), String> {
+    let reader = hound::WavReader::open(path)
+        .map_err(|error| format!("failed to open WAV {}: {error}", path.display()))?;
+    let spec = reader.spec();
+    let channel_count = spec.channels as usize;
+    if channel_count == 0 {
+        return Err(format!("{} has no channels", path.display()));
+    }
+    if spec.sample_format != hound::SampleFormat::Int || spec.bits_per_sample != 16 {
+        return Err(format!(
+            "{} must be 16-bit PCM (got {:?}/{} bits)",
+            path.display(),
+            spec.sample_format,
+            spec.bits_per_sample,
+        ));
+    }
+
+    let mut channels = vec![Vec::new(); channel_count];
+    for (sample_index, sample) in reader.into_samples::<i16>().enumerate() {
+        let value = sample.map_err(|error| format!("failed reading {}: {error}", path.display()))?
+            as f32
+            / 32767.0;
+        channels[sample_index % channel_count].push(value);
+    }
+    Ok((channels, spec.sample_rate))
+}
+
+fn write_wav_channels_f32(
+    path: &Path,
+    channels: &[Vec<f32>],
+    sample_rate_hz: u32,
+) -> Result<(), String> {
+    if channels.is_empty() {
+        return Err("cannot write empty channel set".to_string());
+    }
+    let sample_count = channels[0].len();
+    for channel in channels {
+        if channel.len() != sample_count {
+            return Err("all channels must have the same sample count".to_string());
+        }
+    }
+    let spec = hound::WavSpec {
+        channels: channels.len() as u16,
+        sample_rate: sample_rate_hz,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("failed creating {}: {error}", parent.display()))?;
+    }
+    let mut writer = hound::WavWriter::create(path, spec)
+        .map_err(|error| format!("failed creating {}: {error}", path.display()))?;
+    for sample_index in 0..sample_count {
+        for channel in channels {
+            let sample = (channel[sample_index].clamp(-1.0, 1.0) * 32767.0).round() as i16;
+            writer
+                .write_sample(sample)
+                .map_err(|error| format!("failed writing {}: {error}", path.display()))?;
+        }
+    }
+    writer
+        .finalize()
+        .map_err(|error| format!("failed finalizing {}: {error}", path.display()))
+}
+
+fn write_wav_mono_f32(path: &Path, samples: &[f32], sample_rate_hz: u32) -> Result<(), String> {
+    write_wav_channels_f32(path, &[samples.to_vec()], sample_rate_hz)
 }
 
 fn read_wav_mono_f32(path: &Path) -> Result<Vec<f32>, String> {

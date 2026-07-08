@@ -1,0 +1,24 @@
+{
+  "linear_v1": {
+    "frame_duration_ms": 64.0,
+    "hop_fraction": 0.25,
+    "min_parametric_hz": 100.0,
+    "max_parametric_fraction_of_nyquist": 0.9,
+    "intensity_smoothing_ms": 60.0,
+    "diffuseness_smoothing_ms": 120.0,
+    "max_parametric_blend": 0.0,
+    "min_confidence_for_blend": 0.12,
+    "output_peak_target": 0.98
+  },
+  "parametric_v2": {
+    "frame_duration_ms": 64.0,
+    "hop_fraction": 0.25,
+    "min_parametric_hz": 100.0,
+    "max_parametric_fraction_of_nyquist": 0.9,
+    "intensity_smoothing_ms": 60.0,
+    "diffuseness_smoothing_ms": 120.0,
+    "max_parametric_blend": 0.85,
+    "min_confidence_for_blend": 0.12,
+    "output_peak_target": 0.98
+  }
+}

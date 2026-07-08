@@ -139,6 +139,7 @@ class Storage:
                 sensor_offsets_json TEXT NOT NULL,
                 capabilities_json TEXT NOT NULL,
                 mobility TEXT NOT NULL DEFAULT 'stationary',
+                orientation_json TEXT NOT NULL DEFAULT '{}',
                 metadata_json TEXT NOT NULL,
                 properties_json TEXT NOT NULL DEFAULT '{}',
                 last_seen_ns INTEGER NOT NULL
@@ -479,6 +480,7 @@ class Storage:
                 "lon": "REAL",
                 "alt": "REAL",
                 "mobility": "TEXT NOT NULL DEFAULT 'stationary'",
+                "orientation_json": "TEXT NOT NULL DEFAULT '{}'",
                 "properties_json": "TEXT NOT NULL DEFAULT '{}'",
             },
         )
@@ -894,9 +896,9 @@ class Storage:
                 INSERT INTO nodes (
                     id, node_type, x, y, z, lat, lon, alt,
                     sensor_offsets_json, capabilities_json, mobility,
-                    metadata_json, properties_json, last_seen_ns
+                    orientation_json, metadata_json, properties_json, last_seen_ns
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     node_type=CASE
                         WHEN excluded.last_seen_ns >= nodes.last_seen_ns THEN excluded.node_type
@@ -938,6 +940,10 @@ class Storage:
                         WHEN excluded.last_seen_ns >= nodes.last_seen_ns THEN excluded.mobility
                         ELSE nodes.mobility
                     END,
+                    orientation_json=CASE
+                        WHEN excluded.last_seen_ns >= nodes.last_seen_ns THEN excluded.orientation_json
+                        ELSE nodes.orientation_json
+                    END,
                     metadata_json=CASE
                         WHEN excluded.last_seen_ns >= nodes.last_seen_ns THEN excluded.metadata_json
                         ELSE nodes.metadata_json
@@ -963,6 +969,7 @@ class Storage:
                     _json_dumps(spec.sensor_offsets_m),
                     _json_dumps(spec.capabilities),
                     spec.mobility,
+                    _json_dumps(spec.orientation.model_dump(mode="json")),
                     _json_dumps(spec.metadata),
                     _json_dumps(spec.properties),
                     last_seen_ns,
@@ -1653,6 +1660,7 @@ class Storage:
                     "sensor_offsets_m": _json_loads(row["sensor_offsets_json"], []),
                     "capabilities": _json_loads(row["capabilities_json"], []),
                     "mobility": row["mobility"] or "stationary",
+                    "orientation": _json_loads(row["orientation_json"], {}),
                     "metadata": _json_loads(row["metadata_json"], {}),
                     "properties": _json_loads(row["properties_json"], {}),
                     "last_seen_ns": row["last_seen_ns"],
@@ -1676,6 +1684,7 @@ class Storage:
             "sensor_offsets_m": _json_loads(row["sensor_offsets_json"], []),
             "capabilities": _json_loads(row["capabilities_json"], []),
             "mobility": row["mobility"] or "stationary",
+            "orientation": _json_loads(row["orientation_json"], {}),
             "metadata": _json_loads(row["metadata_json"], {}),
             "properties": _json_loads(row["properties_json"], {}),
             "last_seen_ns": row["last_seen_ns"],
