@@ -7,8 +7,8 @@ import math
 import numpy as np
 from numpy.typing import NDArray
 
-from minimappr.core.ambi_atob import atob_foa
 from minimappr.spatial_audio.geometry import SIRITH_MIC_POSITIONS_M, rotate_positions
+from minimappr.spatial_audio.linear_atob import atob_foa
 from minimappr.spatial_audio.profiles import AmbisonicsProfile, get_profile
 from minimappr.spatial_audio.stft import istft_channels, sqrt_hann_window, stft_channels
 

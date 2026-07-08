@@ -52,6 +52,7 @@ def test_settings_from_env_populates_subconfigs_with_cleanup_defaults(monkeypatc
     assert sidecar_startup.ready_poll_interval_seconds == pytest.approx(0.1)
     assert sidecar_startup.healthcheck_timeout_seconds == pytest.approx(0.5)
     assert settings.ingest_max_concurrent == 64
+    assert settings.iamf_ambi_profile == "parametric_v2"
 
 
 def test_settings_from_env_accepts_legacy_cleanup_env_keys(monkeypatch, tmp_path) -> None:
@@ -115,6 +116,21 @@ def test_settings_from_env_reads_ingest_max_concurrent(monkeypatch, tmp_path) ->
     settings = Settings.from_env()
 
     assert settings.ingest_max_concurrent == 7
+
+
+def test_settings_from_env_reads_iamf_ambi_profile(monkeypatch, tmp_path) -> None:
+    _clear_minimappr_env(monkeypatch)
+    monkeypatch.setenv("MINIMAPPR_FEDERATION_PEERS_CONFIG_PATH", str(tmp_path / "missing-peers.json"))
+    monkeypatch.setenv("MINIMAPPR_IAMF_AMBI_PROFILE", "linear_v1")
+
+    settings = Settings.from_env()
+
+    assert settings.iamf_ambi_profile == "linear_v1"
+
+
+def test_settings_rejects_unknown_iamf_ambi_profile() -> None:
+    with pytest.raises(ValueError, match="MINIMAPPR_IAMF_AMBI_PROFILE"):
+        Settings(iamf_ambi_profile="not-a-profile")
 
 
 def test_settings_reject_non_positive_ingest_max_concurrent() -> None:

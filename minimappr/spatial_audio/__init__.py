@@ -10,6 +10,7 @@ from minimappr.spatial_audio.geometry import (
     foa_geometry_suitable,
     rotate_positions,
 )
+from minimappr.spatial_audio.linear_atob import atob_foa, encode_mono_to_bformat
 from minimappr.spatial_audio.parametric import encode_ambisonics, enhance_foa_parametric
 from minimappr.spatial_audio.objects import (
     DEFAULT_OBJECT_SUBTRACTION_PROFILE,
@@ -37,8 +38,10 @@ __all__ = [
     "PARAMETRIC_V2",
     "PROFILES",
     "alias_cutoff_from_positions",
+    "atob_foa",
     "centroid_corrected_positions",
     "encode_ambisonics",
+    "encode_mono_to_bformat",
     "enhance_foa_parametric",
     "foa_geometry_suitable",
     "get_profile",

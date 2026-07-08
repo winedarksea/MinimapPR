@@ -435,6 +435,7 @@ class Settings:
     large_artifact_dir: Path = Path("data/artifacts")
     map_overlay_dir: Path = Path("data/overlays")
     capture_final_tracks_settle_seconds: float = 30.0
+    iamf_ambi_profile: str = "parametric_v2"
     cors_allow_origins: tuple[str, ...] = ("http://localhost:8080", "http://127.0.0.1:8080")
     cors_allow_credentials: bool = False
 
@@ -701,6 +702,14 @@ class Settings:
             raise ValueError("MINIMAPPR_SQLITE_MAINTENANCE_INTERVAL_SECONDS must be > 0")
         if self.capture_final_tracks_settle_seconds < 0.0:
             raise ValueError("MINIMAPPR_CAPTURE_FINAL_TRACKS_SETTLE_SECONDS must be >= 0")
+        from minimappr.spatial_audio.profiles import PROFILES
+
+        if self.iamf_ambi_profile not in PROFILES:
+            known_profiles = ", ".join(sorted(PROFILES))
+            raise ValueError(
+                "MINIMAPPR_IAMF_AMBI_PROFILE must be one of "
+                f"{known_profiles}; got {self.iamf_ambi_profile!r}"
+            )
         if self.ingest_spool_ready_ttl_seconds < 0.0:
             raise ValueError("MINIMAPPR_INGEST_SPOOL_READY_TTL_SECONDS must be >= 0")
         if self.ingest_spool_failed_ttl_seconds < 0.0:
@@ -1110,6 +1119,7 @@ class Settings:
                 "MINIMAPPR_CAPTURE_FINAL_TRACKS_SETTLE_SECONDS",
                 30.0,
             ),
+            iamf_ambi_profile=_env_str("MINIMAPPR_IAMF_AMBI_PROFILE", "parametric_v2"),
             cors_allow_origins=_env_list(
                 "MINIMAPPR_CORS_ALLOW_ORIGINS",
                 ("http://localhost:8080", "http://127.0.0.1:8080"),
