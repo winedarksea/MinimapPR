@@ -7,6 +7,9 @@
   let _selectionCallback = null;
   let _contextMenuCallback = null;
   let _resizeObserver = null;
+  let _parkedContainer = null;
+  let _parkedContainerOriginalId = null;
+  let _parkedReattachObserver = null;
   let _markerStackSequence = 0;
   let _highlightedCopItem = null;
   let _highlightRing = null;
@@ -195,19 +198,211 @@
     });
   }
 
+  function elementIsLiveInDocument(element) {
+    if (!element) return false;
+    if (typeof element.isConnected === "boolean") return element.isConnected;
+    if (typeof document === "undefined") return false;
+    return !!(document.documentElement && document.documentElement.contains(element));
+  }
+
+  function canReuseExistingMap(existingMap, currentContainer, previousContainerId) {
+    if (!existingMap || existingMap._removed || !currentContainer) return false;
+    if (previousContainerId !== currentContainer.id) return false;
+    if (!elementIsLiveInDocument(currentContainer)) return false;
+    if (typeof existingMap.getContainer !== "function") return false;
+    return existingMap.getContainer() === currentContainer;
+  }
+
+  function canReattachParkedMap(existingMap, currentContainer, previousContainerId, parkedContainer, parkedContainerOriginalId) {
+    if (!existingMap || existingMap._removed || !currentContainer || !parkedContainer) return false;
+    if (previousContainerId !== currentContainer.id) return false;
+    if (parkedContainerOriginalId !== currentContainer.id) return false;
+    if (!elementIsLiveInDocument(currentContainer)) return false;
+    if (typeof existingMap.getContainer !== "function") return false;
+    return existingMap.getContainer() === parkedContainer;
+  }
+
+  function disconnectResizeObserver() {
+    if (_resizeObserver) {
+      try { _resizeObserver.disconnect(); } catch (_) {}
+      _resizeObserver = null;
+    }
+  }
+
+  function disconnectParkedReattachObserver() {
+    if (_parkedReattachObserver) {
+      try { _parkedReattachObserver.disconnect(); } catch (_) {}
+      _parkedReattachObserver = null;
+    }
+  }
+
+  function observeMapContainer(container) {
+    if (!container || typeof ResizeObserver === "undefined") return;
+    disconnectResizeObserver();
+    _resizeObserver = new ResizeObserver(function () {
+      if (_map) _map.resize();
+    });
+    _resizeObserver.observe(container);
+  }
+
+  function mapParkingLot() {
+    if (typeof document === "undefined" || !document.body) return null;
+    let lot = document.getElementById("mmp-map-parking-lot");
+    if (!lot) {
+      lot = document.createElement("div");
+      lot.id = "mmp-map-parking-lot";
+      lot.setAttribute("aria-hidden", "true");
+      lot.style.position = "fixed";
+      lot.style.left = "-100000px";
+      lot.style.top = "-100000px";
+      lot.style.width = "1px";
+      lot.style.height = "1px";
+      lot.style.overflow = "hidden";
+      lot.style.pointerEvents = "none";
+      document.body.appendChild(lot);
+    }
+    return lot;
+  }
+
+  function parkExistingMap(clearCallbacks) {
+    if (_parkedContainer) {
+      if (clearCallbacks) {
+        _selectionCallback = null;
+        _contextMenuCallback = null;
+      }
+      return;
+    }
+    disconnectResizeObserver();
+    if (_zoneDrawSession) cancelZoneDraw();
+
+    const map = ensureMap();
+    const container = map && typeof map.getContainer === "function" ? map.getContainer() : null;
+    const lot = mapParkingLot();
+    if (map && container && lot) {
+      _parkedContainerOriginalId = container.id;
+      container.dataset.mmpOriginalMapId = container.id;
+      container.id = container.id + "-parked";
+      container.style.width = "1px";
+      container.style.height = "1px";
+      lot.appendChild(container);
+      _parkedContainer = container;
+      try { map.resize(); } catch (_) {}
+      watchForMapPlaceholder();
+    } else {
+      disposeExistingMap(clearCallbacks);
+      return;
+    }
+
+    if (clearCallbacks) {
+      _selectionCallback = null;
+      _contextMenuCallback = null;
+    }
+  }
+
+  function reattachParkedMap(currentContainer) {
+    if (!_parkedContainer || !_parkedContainerOriginalId) return null;
+    disconnectParkedReattachObserver();
+    const container = _parkedContainer;
+    container.id = _parkedContainerOriginalId;
+    delete container.dataset.mmpOriginalMapId;
+    container.style.width = "";
+    container.style.height = "";
+    if (currentContainer.parentNode) {
+      currentContainer.parentNode.replaceChild(container, currentContainer);
+    }
+    _parkedContainer = null;
+    _parkedContainerOriginalId = null;
+    observeMapContainer(container);
+    return container;
+  }
+
+  function refreshAttachedMap(container) {
+    const map = ensureMap();
+    if (!map || !container) return;
+    map.resize();
+    ensureBasemapStyle();
+    try { map.triggerRepaint(); } catch (_) {}
+    setTimeout(function () {
+      if (_map && elementIsLiveInDocument(container)) {
+        _map.resize();
+        try { _map.triggerRepaint(); } catch (_) {}
+      }
+    }, 100);
+  }
+
+  function tryReattachParkedMap() {
+    const container = mapContainer();
+    if (!canReattachParkedMap(_map, container, _containerId, _parkedContainer, _parkedContainerOriginalId)) {
+      return false;
+    }
+    refreshAttachedMap(reattachParkedMap(container));
+    return true;
+  }
+
+  function watchForMapPlaceholder() {
+    if (tryReattachParkedMap()) return;
+    if (typeof MutationObserver === "undefined" || typeof document === "undefined" || !document.body) return;
+    disconnectParkedReattachObserver();
+    _parkedReattachObserver = new MutationObserver(function () {
+      if (tryReattachParkedMap()) disconnectParkedReattachObserver();
+    });
+    _parkedReattachObserver.observe(document.body, { childList: true, subtree: true });
+  }
+
+  function ensureBasemapStyle() {
+    const map = ensureMap();
+    if (!map || typeof map.getStyle !== "function") return;
+    try {
+      if (!map.getSource("osm") || !map.getLayer("osm")) {
+        map.setStyle(baseStyle());
+        map.once("load", applyBasemapTheme);
+      } else {
+        applyBasemapTheme();
+      }
+    } catch (_) {}
+  }
+
+  function disposeExistingMap(clearCallbacks) {
+    disconnectResizeObserver();
+    if (_zoneDrawSession) cancelZoneDraw();
+    if (_map) {
+      try { _map.remove(); } catch (_) {}
+    }
+    if (_parkedContainer) {
+      try { _parkedContainer.remove(); } catch (_) {}
+    }
+    disconnectParkedReattachObserver();
+    _map = null;
+    _containerId = null;
+    _parkedContainer = null;
+    _parkedContainerOriginalId = null;
+    _detectionLayerHandlersInstalled = false;
+    if (clearCallbacks) {
+      _selectionCallback = null;
+      _contextMenuCallback = null;
+    }
+  }
+
+  function disposeCopMap() {
+    parkExistingMap(true);
+  }
+
   function init(lat, lon, zoom) {
     installProtocol();
     const container = mapContainer();
     if (!container || !globalThis.maplibregl) return;
-    if (_map && _containerId === container.id) {
+    if (canReuseExistingMap(_map, container, _containerId)) {
       _map.jumpTo({ center: [lon, lat], zoom });
-      _map.resize();
+      refreshAttachedMap(container);
       return;
     }
-    if (_resizeObserver) _resizeObserver.disconnect();
-    if (_map) {
-      try { _map.remove(); } catch (_) {}
+    if (canReattachParkedMap(_map, container, _containerId, _parkedContainer, _parkedContainerOriginalId)) {
+      const reattachedContainer = reattachParkedMap(container);
+      _map.jumpTo({ center: [lon, lat], zoom });
+      refreshAttachedMap(reattachedContainer);
+      return;
     }
+    disposeExistingMap(false);
     _containerId = container.id;
     _detectionLayerHandlersInstalled = false;
     _map = new maplibregl.Map({
@@ -225,10 +420,7 @@
         _contextMenuCallback(event.lngLat.lat, event.lngLat.lng, event.point.x, event.point.y, []);
       }
     });
-    _resizeObserver = new ResizeObserver(function () {
-      if (_map) _map.resize();
-    });
-    _resizeObserver.observe(container);
+    observeMapContainer(container);
   }
 
   function resize() {
@@ -1094,7 +1286,7 @@
   }
 
   globalThis.mapInterop = {
-    init, resize, invalidateMapSize: resize, panTo, flyTo, fitBoundsLatLons, setTheme,
+    init, disposeCopMap, resize, invalidateMapSize: resize, panTo, flyTo, fitBoundsLatLons, setTheme,
     setSelectionCallback: setCopSelectionCallback,
     setCopSelectionCallback,
     setContextMenuCallback,
@@ -1116,6 +1308,8 @@
       latLngsToClosedCoordinates,
       coordinatesToLatLngs,
       basemapPaintForTheme,
+      canReuseExistingMap,
+      canReattachParkedMap,
     },
   };
 }());

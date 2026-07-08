@@ -5,6 +5,9 @@ extern "C" {
     #[wasm_bindgen(js_namespace = ["globalThis", "mapInterop"], js_name = "init")]
     pub fn init(lat: f64, lon: f64, zoom: u32);
 
+    #[wasm_bindgen(js_namespace = ["globalThis", "mapInterop"], js_name = "disposeCopMap")]
+    pub fn dispose_cop_map();
+
     #[wasm_bindgen(js_namespace = ["globalThis", "mapInterop"], js_name = "setTheme")]
     pub fn set_theme(theme: &str);
 

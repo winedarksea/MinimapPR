@@ -7,14 +7,13 @@ pub mod status_ribbon;
 use crate::components::drawer_shell::DrawerShell;
 use crate::devices::schema::DeviceKind;
 use crate::inspector::EntityInspector;
-use crate::layers::{all_layer_defs, LayerDef};
 use crate::map::bindings::pan_to;
 use crate::map::MapPanel;
 use crate::panels::{
     alerts::AlertsPane, detections::DetectionsPane, node_status::NodeStatusPanel,
     rf_panel::RfPanel, seismic_panel::SeismicPanel, speech_panel::SpeechPanel, tracks::TracksPane,
 };
-use crate::state::{AppState, CopItemKind, CopSelection, MapLayerVisibility, ZoneSpec};
+use crate::state::{AppState, CopItemKind, CopSelection, ZoneSpec};
 use layout::{clamp_dock_width, WorkspaceLayout};
 use leptos::prelude::*;
 use registry::DrawerId;
@@ -107,7 +106,6 @@ pub fn MapWorkspace() -> impl IntoView {
             </div>
 
             <status_ribbon::StatusRibbon />
-            <MapLayerControls left_dock_width_px />
 
             <dock::WorkspaceDock side="left" width_px=left_dock_width_px>
                 <DrawerShell title=DrawerId::Nodes.title() icon="hub" open=nodes_open badge=node_count>
@@ -162,124 +160,6 @@ pub fn MapWorkspace() -> impl IntoView {
             <context_menu::MapContextMenu />
             <context_menu::ZoneDraftDialog />
         </main>
-    }
-}
-
-#[component]
-fn MapLayerControls(left_dock_width_px: RwSignal<f64>) -> impl IntoView {
-    let state = use_context::<AppState>().expect("AppState");
-    let heatmap_enabled = state.live_heatmap_enabled;
-    let heatmap_window = state.live_heatmap_window;
-    let heatmap_bin_count = state.live_heatmap_bin_count;
-    let heatmap_error = state.live_heatmap_error;
-    let map_layers = state.map_layers;
-    let menu_open = RwSignal::new(false);
-
-    Effect::new(move |_| {
-        map_layers.get().save();
-    });
-
-    let controls_style = move || {
-        format!(
-            "left: calc({:.0}px + var(--mmp-density-gap-lg));",
-            clamp_dock_width(left_dock_width_px.get())
-        )
-    };
-
-    view! {
-        <div class="workspace-map-controls-anchor" style=controls_style>
-            <button
-                type="button"
-                class="map-toolbar-toggle"
-                aria-expanded=move || menu_open.get().to_string()
-                aria-label="Map layers"
-                on:click=move |_| menu_open.update(|open| *open = !*open)
-            >
-                <span class="material-symbols-rounded" aria-hidden="true">"layers"</span>
-                <span>"Layers"</span>
-            </button>
-            {move || menu_open.get().then(|| view! {
-                <section class="workspace-map-controls" aria-label="Map layers">
-                    <div class="map-control-layer-grid">
-                        {all_layer_defs()
-                            .iter()
-                            .copied()
-                            .map(|layer| view! {
-                                <LayerToggle layer map_layers />
-                            })
-                            .collect_view()}
-                    </div>
-                    <div class="map-control-row">
-                        <label class="map-control-toggle">
-                            <input
-                                type="checkbox"
-                                prop:checked=move || heatmap_enabled.get()
-                                on:change=move |event| heatmap_enabled.set(event_target_checked(&event))
-                            />
-                            <span>"Heatmap"</span>
-                        </label>
-                        <span class="tone-badge neutral">
-                            {move || format!("{} bins", heatmap_bin_count.get())}
-                        </span>
-                    </div>
-                    <div class="map-control-segments">
-                        <HeatmapWindowButton label="5m" heatmap_window />
-                        <HeatmapWindowButton label="1h" heatmap_window />
-                        <HeatmapWindowButton label="24h" heatmap_window />
-                        <HeatmapWindowButton label="7d" heatmap_window />
-                    </div>
-                    {move || heatmap_error.get().map(|message| view! {
-                        <span class="daily-error map-control-error">{message}</span>
-                    })}
-                </section>
-            })}
-        </div>
-    }
-}
-
-#[component]
-fn LayerToggle(layer: LayerDef, map_layers: RwSignal<MapLayerVisibility>) -> impl IntoView {
-    let checked = move || (layer.get_visible)(&map_layers.get());
-    let input_id = format!("map-layer-{}", layer.id);
-    let label_for = input_id.clone();
-    view! {
-        <label
-            class="map-control-toggle map-control-toggle-compact"
-            for=label_for
-            data-layer-id=layer.id
-            data-layer-group=layer.group.as_str()
-            data-default-visible=layer.default_visible.to_string()
-        >
-            <input
-                id=input_id
-                type="checkbox"
-                prop:checked=checked
-                on:change=move |event| {
-                    let next_checked = event_target_checked(&event);
-                    map_layers.update(|layers| (layer.set_visible)(layers, next_checked));
-                }
-            />
-            <span>{layer.title}</span>
-        </label>
-    }
-}
-
-#[component]
-fn HeatmapWindowButton(label: &'static str, heatmap_window: RwSignal<String>) -> impl IntoView {
-    view! {
-        <button
-            type="button"
-            class=move || {
-                if heatmap_window.get() == label {
-                    "btn-sm active"
-                } else {
-                    "btn-sm"
-                }
-            }
-            on:click=move |_| heatmap_window.set(label.to_string())
-        >
-            {label}
-        </button>
     }
 }
 

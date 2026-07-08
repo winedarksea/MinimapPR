@@ -43,6 +43,11 @@
   top: var(--mmp-density-gap-md);
   left: var(--mmp-density-gap-md);
 }
+.map-overlay-bottom-left {
+  left: var(--mmp-density-gap-md);
+  bottom: var(--mmp-density-gap-md);
+  align-items: flex-start;
+}
 .map-overlay-bottom-right {
   right: var(--mmp-density-gap-md);
   bottom: var(--mmp-density-gap-md);
@@ -80,9 +85,9 @@
   box-shadow: none;
 }
 .legend {
-  display: flex;
-  gap: var(--mmp-density-gap-md);
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem 0.85rem;
 }
 .legend-group {
   display: flex;
@@ -101,6 +106,7 @@
   display: flex; align-items: center; gap: 6px;
   color: var(--md-sys-color-on-surface-variant);
   font-size: var(--md-sys-typescale-label-small-size);
+  min-width: 0;
 }
 
 /* ── Legend shapes (CSS-only, match actual map icons) ── */
@@ -215,4 +221,3 @@
   border-radius: 50%;
   transform: translate(-50%, -50%);
 }
-

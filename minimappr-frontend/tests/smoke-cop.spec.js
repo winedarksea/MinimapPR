@@ -20,6 +20,8 @@ test("COP workspace renders full-bleed map chrome", async ({ page }) => {
   await expect(page.locator(".workspace-dock-left")).toBeVisible();
   await expect(page.locator(".workspace-dock-right")).toBeVisible();
   await expect(page.locator(".workspace-status-ribbon")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Map layers" })).toBeVisible();
+  await page.getByRole("button", { name: "Map layers" }).click();
   await expect(page.locator(".workspace-map-controls")).toBeVisible();
   await expect(page.locator(".system-strip")).toHaveCount(0);
 
@@ -36,6 +38,20 @@ test("COP workspace renders full-bleed map chrome", async ({ page }) => {
   ];
   for (const layerId of expectedLayerIds) {
     await expect(page.locator(`[data-layer-id="${layerId}"]`)).toBeVisible();
+  }
+
+  for (let routeCycle = 0; routeCycle < 2; routeCycle += 1) {
+    await page.getByRole("link", { name: "Analysis" }).click();
+    await expect(page).toHaveURL(/\/analysis$/);
+    await expect(page.locator(".subnav")).toBeVisible();
+    await expect(page.locator("#mmp-map-parking-lot > [data-mmp-original-map-id]")).toHaveCount(1);
+
+    await page.getByRole("link", { name: "COP" }).click();
+    await expect(page).toHaveURL(/\/cop$/);
+    await expect(page.locator("#mmp-map")).toBeVisible();
+    await expect(page.locator("#mmp-map canvas")).toHaveCount(1);
+    await expect(page.locator("#mmp-map canvas").first()).toBeVisible();
+    await expect(page.locator("#mmp-map-parking-lot > [data-mmp-original-map-id]")).toHaveCount(0);
   }
 
   expect(pageErrors).toEqual([]);

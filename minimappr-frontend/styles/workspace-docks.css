@@ -39,6 +39,7 @@
 
 .workspace-dock-left {
   left: var(--mmp-density-gap-md);
+  bottom: calc(var(--mmp-density-gap-md) + 4.75rem);
 }
 
 .workspace-dock-right {
@@ -312,4 +313,3 @@
   letter-spacing: 0.05em;
   text-transform: uppercase;
 }
-

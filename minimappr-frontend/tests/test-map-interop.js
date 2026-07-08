@@ -78,3 +78,74 @@ test("basemap theme paint changes brightness budget", () => {
   assert.ok(dark["raster-brightness-max"] < light["raster-brightness-max"]);
   assert.ok(dark["raster-brightness-min"] < light["raster-brightness-min"]);
 });
+
+test("existing map is reused only for the same live container element", () => {
+  const container = { id: "mmp-map", isConnected: true };
+  const existingMap = {
+    getContainer() {
+      return container;
+    },
+  };
+
+  assert.equal(
+    globalThis.mapInterop._test.canReuseExistingMap(existingMap, container, "mmp-map"),
+    true,
+  );
+});
+
+test("same map id with a replaced container forces map recreation", () => {
+  const oldContainer = { id: "mmp-map", isConnected: false };
+  const newContainer = { id: "mmp-map", isConnected: true };
+  const existingMap = {
+    getContainer() {
+      return oldContainer;
+    },
+  };
+
+  assert.equal(
+    globalThis.mapInterop._test.canReuseExistingMap(existingMap, newContainer, "mmp-map"),
+    false,
+  );
+});
+
+test("parked map can be reattached to a replacement live container", () => {
+  const parkedContainer = { id: "mmp-map-parked", isConnected: true };
+  const replacementContainer = { id: "mmp-map", isConnected: true };
+  const existingMap = {
+    getContainer() {
+      return parkedContainer;
+    },
+  };
+
+  assert.equal(
+    globalThis.mapInterop._test.canReattachParkedMap(
+      existingMap,
+      replacementContainer,
+      "mmp-map",
+      parkedContainer,
+      "mmp-map",
+    ),
+    true,
+  );
+});
+
+test("parked map is not reattached to the wrong container id", () => {
+  const parkedContainer = { id: "mmp-map-parked", isConnected: true };
+  const replacementContainer = { id: "other-map", isConnected: true };
+  const existingMap = {
+    getContainer() {
+      return parkedContainer;
+    },
+  };
+
+  assert.equal(
+    globalThis.mapInterop._test.canReattachParkedMap(
+      existingMap,
+      replacementContainer,
+      "mmp-map",
+      parkedContainer,
+      "mmp-map",
+    ),
+    false,
+  );
+});

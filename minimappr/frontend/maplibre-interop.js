@@ -7,6 +7,9 @@
   let _selectionCallback = null;
   let _contextMenuCallback = null;
   let _resizeObserver = null;
+  let _parkedContainer = null;
+  let _parkedContainerOriginalId = null;
+  let _parkedReattachObserver = null;
   let _markerStackSequence = 0;
   let _highlightedCopItem = null;
   let _highlightRing = null;
@@ -31,7 +34,7 @@
   const DETECTION_CLUSTER_COUNT_LAYER_ID = "detections-cluster-count";
   const DETECTION_POINT_LAYER_ID = "detections-points";
 
-  const TILE_CACHE_NAME = "mmpr-osm-tiles-v3";
+  const TILE_CACHE_NAME = "mmpr-osm-tiles-v2";
   const OSM_URLS = [
     "https://a.tile.openstreetmap.org/{z}/{x}/{y}.png",
     "https://b.tile.openstreetmap.org/{z}/{x}/{y}.png",
@@ -72,16 +75,6 @@
     return _map && !_map._removed ? _map : null;
   }
 
-  function canReuseMapWithContainer(map, container) {
-    if (!map || !container || typeof map.getContainer !== "function") return false;
-    const currentContainer = map.getContainer();
-    if (!currentContainer || currentContainer !== container) return false;
-    if (typeof currentContainer.isConnected === "boolean" && !currentContainer.isConnected) {
-      return false;
-    }
-    return true;
-  }
-
   function mapContainer() {
     return document.getElementById("mmp-map") || document.getElementById("leaflet-map");
   }
@@ -111,59 +104,9 @@
     return canvas.toDataURL("image/png");
   }
 
-  function dataUrlToArrayBuffer(dataUrl) {
-    const commaIndex = dataUrl.indexOf(",");
-    if (commaIndex < 0) return new Uint8Array().buffer;
-    const base64 = dataUrl.slice(commaIndex + 1);
-    const binary = globalThis.atob ? globalThis.atob(base64) : "";
-    const bytes = new Uint8Array(binary.length);
-    for (let index = 0; index < binary.length; index += 1) {
-      bytes[index] = binary.charCodeAt(index);
-    }
-    return bytes.buffer;
-  }
-
   function osmTileUrl(z, x, y) {
     const template = OSM_URLS[Math.abs(x + y) % OSM_URLS.length];
     return template.replace("{z}", z).replace("{x}", x).replace("{y}", y);
-  }
-
-  function osmTileCandidateUrls(z, x, y) {
-    const preferred = osmTileUrl(z, x, y);
-    const urls = [preferred];
-    OSM_URLS.forEach(function (template) {
-      const candidate = template.replace("{z}", z).replace("{x}", x).replace("{y}", y);
-      if (candidate !== preferred) urls.push(candidate);
-    });
-    return urls;
-  }
-
-  async function readValidTileFromCache(cache, url) {
-    if (!cache) return null;
-    const cached = await cache.match(url);
-    if (!cached || !cached.ok) return null;
-    const data = await cached.arrayBuffer();
-    if (!data || data.byteLength < 64) {
-      try { await cache.delete(url); } catch (_) {}
-      return null;
-    }
-    return { data };
-  }
-
-  async function fetchAndMaybeCacheTile(url, cache, signal) {
-    try {
-      const response = await fetch(url, { mode: "cors", signal });
-      if (!response.ok) return null;
-      if (cache) {
-        try { await cache.put(url, response.clone()); } catch (_) {}
-      }
-      const data = await response.arrayBuffer();
-      if (!data || data.byteLength < 64) return null;
-      return { data };
-    } catch (error) {
-      if (error && error.name === "AbortError") return "aborted";
-      return null;
-    }
   }
 
   async function tileProtocolLoader(params, abortController) {
@@ -172,62 +115,30 @@
       throw new Error("invalid mmpr tile url");
     }
     const [, z, x, y] = match;
-    const urls = osmTileCandidateUrls(z, x, y);
-    let cache = null;
-    let staleCacheHit = null;
-    let sawAbortError = false;
+    const url = osmTileUrl(z, x, y);
     try {
-      if (globalThis.caches && typeof caches.open === "function") {
-        cache = await caches.open(TILE_CACHE_NAME);
-      }
-
-      for (const url of urls) {
-        const cached = await readValidTileFromCache(cache, url);
+      if (globalThis.caches) {
+        const cache = await caches.open(TILE_CACHE_NAME);
+        const cached = await cache.match(url);
         if (cached) {
-          staleCacheHit = cached;
-          return cached;
+          return { data: await cached.arrayBuffer() };
         }
-      }
-
-      for (const url of urls) {
-        const networkTile = await fetchAndMaybeCacheTile(url, cache, abortController?.signal);
-        if (networkTile === "aborted") {
-          sawAbortError = true;
-          continue;
+        const response = await fetch(url, { mode: "cors", signal: abortController?.signal });
+        if (response.ok) {
+          await cache.put(url, response.clone());
+          return { data: await response.arrayBuffer() };
         }
-        if (networkTile) {
-          return networkTile;
-        }
-      }
-
-      // Route transitions can cancel fetches via abort signals; retry once
-      // without a signal before dropping to generated fallback tiles.
-      if (sawAbortError) {
-        for (const url of urls) {
-          const retriedTile = await fetchAndMaybeCacheTile(url, cache, undefined);
-          if (retriedTile && retriedTile !== "aborted") {
-            return retriedTile;
-          }
-        }
-      }
-
-      // Last chance before generated fallback: allow stale cache even if a mirror fetch failed.
-      for (const url of urls) {
-        if (!cache) continue;
-        try {
-          const cached = await cache.match(url, { ignoreSearch: true });
-          if (cached && cached.ok) {
-            const data = await cached.arrayBuffer();
-            if (data && data.byteLength > 0) return { data };
-          }
-        } catch (_) {
-          // Keep trying alternates.
+      } else {
+        const response = await fetch(url, { mode: "cors", signal: abortController?.signal });
+        if (response.ok) {
+          return { data: await response.arrayBuffer() };
         }
       }
     } catch (_) {
-      if (staleCacheHit) return staleCacheHit;
+      // Fall through to generated offline tile.
     }
-    return { data: dataUrlToArrayBuffer(fallbackTileDataUrl(256)) };
+    const fallback = await fetch(fallbackTileDataUrl(256));
+    return { data: await fallback.arrayBuffer() };
   }
 
   function installProtocol() {
@@ -264,11 +175,10 @@
   function basemapPaintForTheme(theme) {
     if (theme === "light") {
       return {
-        // Keep light mode readable without flattening OSM detail.
-        "raster-saturation": -0.2,
-        "raster-contrast": 0.2,
-        "raster-brightness-min": 0.24,
-        "raster-brightness-max": 0.98,
+        "raster-saturation": -0.55,
+        "raster-contrast": 0.08,
+        "raster-brightness-min": 0.82,
+        "raster-brightness-max": 1.0,
       };
     }
     return {
@@ -288,23 +198,211 @@
     });
   }
 
+  function elementIsLiveInDocument(element) {
+    if (!element) return false;
+    if (typeof element.isConnected === "boolean") return element.isConnected;
+    if (typeof document === "undefined") return false;
+    return !!(document.documentElement && document.documentElement.contains(element));
+  }
+
+  function canReuseExistingMap(existingMap, currentContainer, previousContainerId) {
+    if (!existingMap || existingMap._removed || !currentContainer) return false;
+    if (previousContainerId !== currentContainer.id) return false;
+    if (!elementIsLiveInDocument(currentContainer)) return false;
+    if (typeof existingMap.getContainer !== "function") return false;
+    return existingMap.getContainer() === currentContainer;
+  }
+
+  function canReattachParkedMap(existingMap, currentContainer, previousContainerId, parkedContainer, parkedContainerOriginalId) {
+    if (!existingMap || existingMap._removed || !currentContainer || !parkedContainer) return false;
+    if (previousContainerId !== currentContainer.id) return false;
+    if (parkedContainerOriginalId !== currentContainer.id) return false;
+    if (!elementIsLiveInDocument(currentContainer)) return false;
+    if (typeof existingMap.getContainer !== "function") return false;
+    return existingMap.getContainer() === parkedContainer;
+  }
+
+  function disconnectResizeObserver() {
+    if (_resizeObserver) {
+      try { _resizeObserver.disconnect(); } catch (_) {}
+      _resizeObserver = null;
+    }
+  }
+
+  function disconnectParkedReattachObserver() {
+    if (_parkedReattachObserver) {
+      try { _parkedReattachObserver.disconnect(); } catch (_) {}
+      _parkedReattachObserver = null;
+    }
+  }
+
+  function observeMapContainer(container) {
+    if (!container || typeof ResizeObserver === "undefined") return;
+    disconnectResizeObserver();
+    _resizeObserver = new ResizeObserver(function () {
+      if (_map) _map.resize();
+    });
+    _resizeObserver.observe(container);
+  }
+
+  function mapParkingLot() {
+    if (typeof document === "undefined" || !document.body) return null;
+    let lot = document.getElementById("mmp-map-parking-lot");
+    if (!lot) {
+      lot = document.createElement("div");
+      lot.id = "mmp-map-parking-lot";
+      lot.setAttribute("aria-hidden", "true");
+      lot.style.position = "fixed";
+      lot.style.left = "-100000px";
+      lot.style.top = "-100000px";
+      lot.style.width = "1px";
+      lot.style.height = "1px";
+      lot.style.overflow = "hidden";
+      lot.style.pointerEvents = "none";
+      document.body.appendChild(lot);
+    }
+    return lot;
+  }
+
+  function parkExistingMap(clearCallbacks) {
+    if (_parkedContainer) {
+      if (clearCallbacks) {
+        _selectionCallback = null;
+        _contextMenuCallback = null;
+      }
+      return;
+    }
+    disconnectResizeObserver();
+    if (_zoneDrawSession) cancelZoneDraw();
+
+    const map = ensureMap();
+    const container = map && typeof map.getContainer === "function" ? map.getContainer() : null;
+    const lot = mapParkingLot();
+    if (map && container && lot) {
+      _parkedContainerOriginalId = container.id;
+      container.dataset.mmpOriginalMapId = container.id;
+      container.id = container.id + "-parked";
+      container.style.width = "1px";
+      container.style.height = "1px";
+      lot.appendChild(container);
+      _parkedContainer = container;
+      try { map.resize(); } catch (_) {}
+      watchForMapPlaceholder();
+    } else {
+      disposeExistingMap(clearCallbacks);
+      return;
+    }
+
+    if (clearCallbacks) {
+      _selectionCallback = null;
+      _contextMenuCallback = null;
+    }
+  }
+
+  function reattachParkedMap(currentContainer) {
+    if (!_parkedContainer || !_parkedContainerOriginalId) return null;
+    disconnectParkedReattachObserver();
+    const container = _parkedContainer;
+    container.id = _parkedContainerOriginalId;
+    delete container.dataset.mmpOriginalMapId;
+    container.style.width = "";
+    container.style.height = "";
+    if (currentContainer.parentNode) {
+      currentContainer.parentNode.replaceChild(container, currentContainer);
+    }
+    _parkedContainer = null;
+    _parkedContainerOriginalId = null;
+    observeMapContainer(container);
+    return container;
+  }
+
+  function refreshAttachedMap(container) {
+    const map = ensureMap();
+    if (!map || !container) return;
+    map.resize();
+    ensureBasemapStyle();
+    try { map.triggerRepaint(); } catch (_) {}
+    setTimeout(function () {
+      if (_map && elementIsLiveInDocument(container)) {
+        _map.resize();
+        try { _map.triggerRepaint(); } catch (_) {}
+      }
+    }, 100);
+  }
+
+  function tryReattachParkedMap() {
+    const container = mapContainer();
+    if (!canReattachParkedMap(_map, container, _containerId, _parkedContainer, _parkedContainerOriginalId)) {
+      return false;
+    }
+    refreshAttachedMap(reattachParkedMap(container));
+    return true;
+  }
+
+  function watchForMapPlaceholder() {
+    if (tryReattachParkedMap()) return;
+    if (typeof MutationObserver === "undefined" || typeof document === "undefined" || !document.body) return;
+    disconnectParkedReattachObserver();
+    _parkedReattachObserver = new MutationObserver(function () {
+      if (tryReattachParkedMap()) disconnectParkedReattachObserver();
+    });
+    _parkedReattachObserver.observe(document.body, { childList: true, subtree: true });
+  }
+
+  function ensureBasemapStyle() {
+    const map = ensureMap();
+    if (!map || typeof map.getStyle !== "function") return;
+    try {
+      if (!map.getSource("osm") || !map.getLayer("osm")) {
+        map.setStyle(baseStyle());
+        map.once("load", applyBasemapTheme);
+      } else {
+        applyBasemapTheme();
+      }
+    } catch (_) {}
+  }
+
+  function disposeExistingMap(clearCallbacks) {
+    disconnectResizeObserver();
+    if (_zoneDrawSession) cancelZoneDraw();
+    if (_map) {
+      try { _map.remove(); } catch (_) {}
+    }
+    if (_parkedContainer) {
+      try { _parkedContainer.remove(); } catch (_) {}
+    }
+    disconnectParkedReattachObserver();
+    _map = null;
+    _containerId = null;
+    _parkedContainer = null;
+    _parkedContainerOriginalId = null;
+    _detectionLayerHandlersInstalled = false;
+    if (clearCallbacks) {
+      _selectionCallback = null;
+      _contextMenuCallback = null;
+    }
+  }
+
+  function disposeCopMap() {
+    parkExistingMap(true);
+  }
+
   function init(lat, lon, zoom) {
     installProtocol();
     const container = mapContainer();
     if (!container || !globalThis.maplibregl) return;
-    if (canReuseMapWithContainer(_map, container)) {
+    if (canReuseExistingMap(_map, container, _containerId)) {
       _map.jumpTo({ center: [lon, lat], zoom });
-      _map.resize();
-      applyBasemapTheme();
+      refreshAttachedMap(container);
       return;
     }
-
-    const staleMap = ensureMap();
-    if (staleMap) {
-      try { staleMap.remove(); } catch (_) {}
+    if (canReattachParkedMap(_map, container, _containerId, _parkedContainer, _parkedContainerOriginalId)) {
+      const reattachedContainer = reattachParkedMap(container);
+      _map.jumpTo({ center: [lon, lat], zoom });
+      refreshAttachedMap(reattachedContainer);
+      return;
     }
-
-    if (_resizeObserver) _resizeObserver.disconnect();
+    disposeExistingMap(false);
     _containerId = container.id;
     _detectionLayerHandlersInstalled = false;
     _map = new maplibregl.Map({
@@ -322,10 +420,7 @@
         _contextMenuCallback(event.lngLat.lat, event.lngLat.lng, event.point.x, event.point.y, []);
       }
     });
-    _resizeObserver = new ResizeObserver(function () {
-      if (_map) _map.resize();
-    });
-    _resizeObserver.observe(container);
+    observeMapContainer(container);
   }
 
   function resize() {
@@ -1191,7 +1286,7 @@
   }
 
   globalThis.mapInterop = {
-    init, resize, invalidateMapSize: resize, panTo, flyTo, fitBoundsLatLons, setTheme,
+    init, disposeCopMap, resize, invalidateMapSize: resize, panTo, flyTo, fitBoundsLatLons, setTheme,
     setSelectionCallback: setCopSelectionCallback,
     setCopSelectionCallback,
     setContextMenuCallback,
@@ -1207,15 +1302,14 @@
     startZoneDraw, startZoneEdit, cancelZoneDraw,
     _test: {
       fallbackTileDataUrl,
-      dataUrlToArrayBuffer,
       covarianceEllipseCoordinates,
       bearingWedgeCoordinates,
       readCssColor,
       latLngsToClosedCoordinates,
       coordinatesToLatLngs,
       basemapPaintForTheme,
-      osmTileCandidateUrls,
-      canReuseMapWithContainer,
+      canReuseExistingMap,
+      canReattachParkedMap,
     },
   };
 }());

@@ -21,8 +21,8 @@
   display: none;
 }
 
-.cop-workspace .map-overlay-stack {
-  right: calc(var(--mmp-workspace-dock-width-md) + var(--mmp-density-gap-lg));
+.cop-workspace .map-overlay-bottom-left {
+  left: var(--mmp-density-gap-lg);
   bottom: var(--mmp-density-gap-lg);
 }
 
@@ -45,9 +45,8 @@
 }
 
 .workspace-map-controls-anchor {
-  position: absolute;
+  position: relative;
   z-index: var(--mmp-z-toolbar);
-  top: calc(var(--mmp-density-gap-md) + var(--mmp-workspace-toolbar-size) + var(--mmp-density-gap-sm));
   display: grid;
   gap: var(--mmp-density-gap-sm);
   pointer-events: none;
@@ -91,6 +90,17 @@
   backdrop-filter: blur(12px);
   box-shadow: var(--md-sys-elevation-2);
   pointer-events: auto;
+}
+
+.cop-workspace .map-floating-panel {
+  max-width: min(360px, calc(100vw - 32px));
+  padding: 0.65rem;
+  border-radius: 6px;
+}
+
+.cop-workspace .map-floating-title {
+  margin-bottom: 0.5rem;
+  letter-spacing: 0.1em;
 }
 
 .map-control-row,
@@ -299,4 +309,3 @@
   font-family: var(--md-sys-typescale-mono);
   font-size: var(--md-sys-typescale-label-small-size);
 }
-
