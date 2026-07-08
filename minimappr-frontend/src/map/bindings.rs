@@ -89,18 +89,6 @@ extern "C" {
     #[wasm_bindgen(js_namespace = ["globalThis", "mapInterop"], js_name = "removeGdopCircle")]
     pub fn remove_gdop_circle(key: &str);
 
-    #[wasm_bindgen(js_namespace = ["globalThis", "mapInterop"], js_name = "setEffectorMarker")]
-    pub fn set_effector_marker(
-        effector_id: &str,
-        lat: f64,
-        lon: f64,
-        bearing_deg: f64,
-        state: &str,
-    );
-
-    #[wasm_bindgen(js_namespace = ["globalThis", "mapInterop"], js_name = "removeEffectorMarker")]
-    pub fn remove_effector_marker(effector_id: &str);
-
     #[wasm_bindgen(js_namespace = ["globalThis", "mapInterop"], js_name = "panTo")]
     pub fn pan_to(lat: f64, lon: f64);
 

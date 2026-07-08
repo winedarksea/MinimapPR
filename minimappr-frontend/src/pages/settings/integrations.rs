@@ -175,7 +175,7 @@ pub fn IntegrationsView() -> impl IntoView {
                 <div class="integration-output-grid">
                     <div><strong>"Semantic sensors"</strong><span>"Zone occupancy, SPL, node health, and active track counts."</span></div>
                     <div><strong>"Priority alerts"</strong><span>"Rule-triggered notifications with detection and track context."</span></div>
-                    <div><strong>"Device bus"</strong><span>"Future bidirectional state sync for physical devices and effectors."</span></div>
+                    <div><strong>"Node capability bus"</strong><span>"Future bidirectional sync for node transports, safety, and capability drivers."</span></div>
                 </div>
             </section>
         </div>

@@ -76,6 +76,20 @@ async def test_handle_uses_detection_position_when_no_track() -> None:
 
 
 @pytest.mark.asyncio
+async def test_handle_accepts_node_id_payload() -> None:
+    manager = AsyncMock()
+    manager.slew_to_target.return_value = ExecutionResult(status="COMPLETED")
+    handler = EffectorRuleActionHandler(manager)
+    descriptor = ActionDescriptor(action_type="cue", destination="effector", payload={"node_id": "cam-node"})
+
+    await handler.handle(descriptor, track=_track())
+
+    manager.slew_to_target.assert_awaited_once_with(
+        "cam-node", (3.0, 4.0, 0.0), track_id="trk-1", detection_id=None
+    )
+
+
+@pytest.mark.asyncio
 async def test_handle_capture_action_type_calls_capture() -> None:
     manager = AsyncMock()
     manager.capture.return_value = ExecutionResult(status="COMPLETED", result_refs=["art-1"])

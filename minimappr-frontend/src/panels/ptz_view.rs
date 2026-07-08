@@ -1,15 +1,15 @@
-use crate::api::snapshot_effector;
+use crate::api::snapshot_ptz_node;
 use futures::StreamExt;
 use gloo_timers::future::IntervalStream;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
-/// Snapshot-refresh live view for a PTZ effector: an `<img>` whose `src` is
+/// Snapshot-refresh live view for a PTZ-capable node: an `<img>` whose `src` is
 /// re-fetched on a timer (no HLS/WebRTC in v1 — see plan scope boundary),
 /// plus a "Capture still" button that persists + links an evidence artifact.
 #[component]
-pub fn EffectorLiveView(
-    effector_id: String,
+pub fn PtzLiveView(
+    node_id: String,
     track_id: Option<String>,
     #[prop(into)] on_close: Callback<()>,
 ) -> impl IntoView {
@@ -28,11 +28,11 @@ pub fn EffectorLiveView(
     });
 
     let img_src = {
-        let effector_id = effector_id.clone();
+        let node_id = node_id.clone();
         move || {
             format!(
-                "/api/v1/effectors/{}/snapshot.jpg?t={}",
-                js_sys::encode_uri_component(&effector_id)
+                "/api/v1/nodes/{}/effector/snapshot.jpg?t={}",
+                js_sys::encode_uri_component(&node_id)
                     .as_string()
                     .unwrap_or_default(),
                 refresh_tick.get()
@@ -41,16 +41,16 @@ pub fn EffectorLiveView(
     };
 
     let on_capture = {
-        let effector_id = effector_id.clone();
+        let node_id = node_id.clone();
         let track_id = track_id.clone();
         move |_| {
-            let effector_id = effector_id.clone();
+            let node_id = node_id.clone();
             let track_id = track_id.clone();
             capturing.set(true);
             capture_error.set(None);
             captured_artifact_id.set(None);
             spawn_local(async move {
-                match snapshot_effector(&effector_id, track_id.as_deref()).await {
+                match snapshot_ptz_node(&node_id, track_id.as_deref()).await {
                     Ok(artifact_id) => {
                         captured_artifact_id.set(Some(artifact_id));
                     }
@@ -64,7 +64,7 @@ pub fn EffectorLiveView(
     view! {
         <div class="effector-live-view">
             <div class="effector-live-view-header">
-                <span class="muted" style="font-size:0.8rem">{format!("Camera: {}", effector_id)}</span>
+                <span class="muted" style="font-size:0.8rem">{format!("Camera: {}", node_id)}</span>
                 <button class="btn-sm" title="Close live view" on:click=move |_| on_close.run(())>
                     "✕"
                 </button>

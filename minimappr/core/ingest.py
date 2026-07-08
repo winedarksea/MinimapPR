@@ -195,6 +195,7 @@ class IngestProcessor:
         # link this fires on most frames and saturates the log ring buffer.
         self._seq_gap_warning_last_logged_s: dict[str, float] = {}
         self._seq_gap_warning_interval_seconds = 10.0
+        self._unknown_capability_warning_node_ids: set[str] = set()
 
     @property
     def last_trigger_ns(self) -> int:
@@ -592,6 +593,19 @@ class IngestProcessor:
         )
 
     def _normalize_node_spec(self, spec: NodeSpec) -> tuple[NodeSpec, GeoPoint]:
+        unrecognized_capabilities = spec.metadata.get("unrecognized_capabilities")
+        if (
+            spec.id not in self._unknown_capability_warning_node_ids
+            and isinstance(unrecognized_capabilities, list)
+            and unrecognized_capabilities
+        ):
+            self._unknown_capability_warning_node_ids.add(spec.id)
+            _logger.warning(
+                "node %s reported unsupported capabilities that were ignored: %s",
+                spec.id,
+                ", ".join(str(capability) for capability in unrecognized_capabilities),
+            )
+
         gps_metadata = spec.metadata.get("gps") if isinstance(spec.metadata, dict) else None
         gps_position_source = (
             gps_metadata.get("position_source")

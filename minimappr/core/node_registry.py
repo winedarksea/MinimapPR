@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from minimappr.models import NodeSpec, SyncGrade
+from minimappr.models import NodeOverrides, NodeSpec, SyncGrade
 
 
 @dataclass(slots=True)
@@ -38,9 +38,25 @@ class NodeRegistry:
         # Absent → 0.0 (surveyed / trusted-GPS default). Used to down-weight
         # cross-node TDOA pairs anchored on poorly-localized nodes.
         self._node_position_std_m: dict[str, float] = {}
+        self._overrides: dict[str, NodeOverrides] = {}
         self._lock = asyncio.Lock()
 
     async def upsert(self, spec: NodeSpec, last_seen_ns: int) -> NodeRuntime:
+        override = self._overrides.get(spec.id)
+        if override is not None:
+            update: dict[str, object] = {}
+            if override.position_m is not None:
+                update["position_m"] = override.position_m
+            if override.position_geo is not None:
+                update["position_geo"] = override.position_geo
+            if override.orientation is not None:
+                update["orientation"] = override.orientation
+            if override.mobility is not None:
+                update["mobility"] = override.mobility
+            if override.capabilities is not None:
+                update["capabilities"] = override.capabilities
+            if update:
+                spec = spec.model_copy(update=update)
         if spec.position_m is None:
             raise ValueError("NodeSpec.position_m must be present for runtime registration")
         base = np.asarray(spec.position_m, dtype=np.float64)
@@ -77,6 +93,23 @@ class NodeRegistry:
             for sensor_id, descriptor in sensor_descriptors.items():
                 self._sensors[sensor_id] = descriptor
         return runtime
+
+    async def load_overrides(self, overrides_by_node_id: dict[str, dict]) -> None:
+        parsed: dict[str, NodeOverrides] = {}
+        for node_id, payload in overrides_by_node_id.items():
+            if not isinstance(payload, dict) or not payload:
+                continue
+            parsed[node_id] = NodeOverrides.model_validate(payload)
+        async with self._lock:
+            self._overrides = parsed
+
+    async def set_overrides(self, node_id: str, overrides: NodeOverrides | dict) -> None:
+        parsed = overrides if isinstance(overrides, NodeOverrides) else NodeOverrides.model_validate(overrides)
+        async with self._lock:
+            if parsed.model_dump(exclude_none=True):
+                self._overrides[node_id] = parsed
+            else:
+                self._overrides.pop(node_id, None)
 
     async def delete_node(self, node_id: str) -> None:
         """Drop a node and its sensors from the in-memory registry.

@@ -1,12 +1,11 @@
-use crate::devices::schema::DeviceRecord;
-use crate::state::{AppState, RfSpectrumFrame};
+use crate::state::{AppState, NodeStatus, RfSpectrumFrame};
 use leptos::prelude::*;
 
 #[component]
 pub fn RfPanel() -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState");
     let frames = state.modality.rf_spectra;
-    let devices = state.devices;
+    let nodes = state.nodes;
 
     view! {
         <div class="tab-pane modality-panel">
@@ -17,13 +16,13 @@ pub fn RfPanel() -> impl IntoView {
             {move || {
                 let current_frames = frames.get();
                 if current_frames.is_empty() {
-                    return view! { <div class="empty-state">"Register an SDR/RF or radar device to enable RF mock feeds"</div> }.into_any();
+                    return view! { <div class="empty-state">"Add a node with sdr or radar_24g capability to enable RF feeds"</div> }.into_any();
                 }
-                let current_devices = devices.get();
+                let current_nodes = nodes.get();
                 view! {
                     <div class="future-modality-list">
                         {current_frames.into_iter().map(|frame| {
-                            let label = device_label(&current_devices, &frame.device_id);
+                            let label = node_label(&current_nodes, &frame.device_id);
                             view! { <RfFrameCard frame label /> }
                         }).collect_view()}
                     </div>
@@ -70,10 +69,10 @@ fn RfFrameCard(frame: RfSpectrumFrame, label: String) -> impl IntoView {
     }
 }
 
-fn device_label(devices: &[DeviceRecord], device_id: &str) -> String {
-    devices
+fn node_label(nodes: &[NodeStatus], node_id: &str) -> String {
+    nodes
         .iter()
-        .find(|device| device.id == device_id)
-        .map(DeviceRecord::display_label)
-        .unwrap_or_else(|| device_id.to_string())
+        .find(|node| node.node_id == node_id)
+        .map(|node| node.node_id.clone())
+        .unwrap_or_else(|| node_id.to_string())
 }

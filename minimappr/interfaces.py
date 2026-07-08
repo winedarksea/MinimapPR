@@ -11,7 +11,6 @@ from minimappr.cleanup_policy import CleanupPolicy
 from minimappr.models import (
     ClassificationResult,
     DetectionEvent,
-    EffectorSpec,
     EnvironmentSampleIn,
     GeoPoint,
     IngestFrameRequest,
@@ -416,43 +415,6 @@ class StorageBackend(Protocol):
         ...
 
     def begin_batch(self) -> AsyncContextManager[None]:
-        ...
-
-    async def upsert_effector(self, spec: EffectorSpec, last_seen_ns: int) -> None:
-        ...
-
-    async def get_effector_by_id(self, effector_id: str) -> dict[str, Any] | None:
-        ...
-
-    async def list_effectors(self) -> list[dict[str, Any]]:
-        ...
-
-    async def delete_effector(self, effector_id: str) -> bool:
-        ...
-
-    async def insert_effector_artifact(
-        self,
-        *,
-        effector_id: str,
-        track_id: str | None,
-        detection_id: str | None,
-        kind: str = "snapshot",
-        path: str,
-        created_ns: int,
-        artifact_id: str | None = None,
-    ) -> str:
-        ...
-
-    async def get_effector_artifact(self, artifact_id: str) -> dict[str, Any] | None:
-        ...
-
-    async def list_effector_artifacts(
-        self,
-        *,
-        effector_id: str | None = None,
-        track_id: str | None = None,
-        limit: int = 100,
-    ) -> list[dict[str, Any]]:
         ...
 
 

@@ -9,7 +9,7 @@ use web_sys::{HtmlElement, Storage};
 pub const KEY_THEME: &str = "mmp.theme";
 pub const KEY_WORKSPACE: &str = "mmp.workspace.v1";
 pub const KEY_LAYERS: &str = "mmp.layers.v1";
-pub const KEY_DEVICES: &str = "mmp.devices.v1";
+pub const KEY_MOCK_FEEDS: &str = "mmp.mock_feeds";
 
 fn storage() -> Option<Storage> {
     web_sys::window()?.local_storage().ok().flatten()
@@ -19,6 +19,10 @@ pub fn set(key: &str, value: &str) {
     if let Some(s) = storage() {
         let _ = s.set_item(key, value);
     }
+}
+
+pub fn get(key: &str) -> Option<String> {
+    storage()?.get_item(key).ok().flatten()
 }
 
 pub fn get_json<T>(key: &str) -> Option<T>

@@ -218,44 +218,6 @@
   justify-content: flex-end;
 }
 
-.devices-page {
-  align-items: stretch;
-  max-width: 78rem;
-}
-
-.device-list {
-  display: grid;
-  gap: 0.75rem;
-}
-
-.device-card {
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  padding: 0.7rem;
-  border: 1px solid var(--md-sys-color-outline-variant);
-  border-radius: 6px;
-  background: var(--md-sys-color-surface-container-low);
-}
-
-.device-card-main {
-  min-width: 15rem;
-}
-
-.device-card-meta {
-  color: var(--md-sys-color-on-surface-variant);
-  font-size: var(--md-sys-typescale-label-small-size);
-  font-variant-numeric: tabular-nums;
-}
-
-.devices-json-editor {
-  width: 100%;
-  min-height: 9rem;
-  font-family: var(--md-sys-typescale-mono);
-  font-size: var(--md-sys-typescale-label-small-size);
-  resize: vertical;
-}
-
 .integrations-page {
   align-items: stretch;
   max-width: 72rem;
@@ -375,4 +337,3 @@
 
 .btn-primary:hover { opacity: 0.88; }
 .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
-

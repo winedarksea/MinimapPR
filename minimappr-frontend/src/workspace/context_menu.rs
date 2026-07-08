@@ -1,6 +1,6 @@
-use crate::api::{aim_effector_at_position, upsert_zone};
+use crate::api::{aim_ptz_node_at_position, upsert_zone};
 use crate::map::bindings::pan_to;
-use crate::state::{AppState, Effector, SiteOriginSnapshot, ZoneDraft, ZoneSpec};
+use crate::state::{AppState, NodeStatus, SiteOriginSnapshot, ZoneDraft, ZoneSpec};
 use leptos::prelude::*;
 use serde_json::json;
 use wasm_bindgen_futures::{spawn_local, JsFuture};
@@ -12,7 +12,7 @@ const DEFAULT_ZONE_RADIUS_M: f64 = 25.0;
 pub fn MapContextMenu() -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState");
     let menu = state.map_context_menu;
-    let effectors = state.effectors;
+    let nodes = state.nodes;
     let config = state.config;
     let zone_draft = state.zone_draft;
     let action_status = RwSignal::new(None::<String>);
@@ -31,7 +31,7 @@ pub fn MapContextMenu() -> impl IntoView {
                 .get()
                 .and_then(|snapshot| snapshot.site_origin)
                 .map(|origin| geo_to_local_m(&origin, menu_state.lat, menu_state.lon));
-            let positioned_effectors = nearby_effectors(&effectors.get(), menu_state.lat, menu_state.lon);
+            let positioned_ptz_nodes = nearby_ptz_nodes(&nodes.get(), menu_state.lat, menu_state.lon);
             let position_style = format!(
                 "left: {:.0}px; top: {:.0}px;",
                 menu_state.screen_x.clamp(12.0, 9_999.0),
@@ -86,14 +86,14 @@ pub fn MapContextMenu() -> impl IntoView {
 
                     <div class="map-context-section">
                         <span class="map-context-label">"Slew camera"</span>
-                        {if positioned_effectors.is_empty() {
+                        {if positioned_ptz_nodes.is_empty() {
                             view! { <div class="map-context-empty">"No registered cameras"</div> }.into_any()
                         } else {
                             view! {
                                 <div class="map-context-effector-list">
-                                    {positioned_effectors.into_iter().take(4).map(|effector| {
-                                        let effector_id = effector.id.clone();
-                                        let armed = effector.status.as_ref().map(|status| status.armed).unwrap_or(false);
+                                    {positioned_ptz_nodes.into_iter().take(4).map(|node| {
+                                        let node_id = node.node_id.clone();
+                                        let armed = node.ptz_status.as_ref().map(|status| status.armed).unwrap_or(false);
                                         let disabled_reason = if target_m.is_none() {
                                             Some("Site origin required for lat/lon targeting")
                                         } else if !armed {
@@ -101,7 +101,7 @@ pub fn MapContextMenu() -> impl IntoView {
                                         } else {
                                             None
                                         };
-                                        let button_label = effector.id.clone();
+                                        let button_label = node.node_id.clone();
                                         view! {
                                             <button
                                                 type="button"
@@ -112,12 +112,12 @@ pub fn MapContextMenu() -> impl IntoView {
                                                         action_status.set(Some("Site origin required for lat/lon targeting".to_string()));
                                                         return;
                                                     };
-                                                    let effector_id = effector_id.clone();
-                                                    action_status.set(Some(format!("Slewing {effector_id}...")));
+                                                    let node_id = node_id.clone();
+                                                    action_status.set(Some(format!("Slewing {node_id}...")));
                                                     spawn_local(async move {
-                                                        match aim_effector_at_position(&effector_id, target_m).await {
+                                                        match aim_ptz_node_at_position(&node_id, target_m).await {
                                                             Ok(()) => {
-                                                                action_status.set(Some(format!("Slew command sent to {effector_id}")));
+                                                                action_status.set(Some(format!("Slew command sent to {node_id}")));
                                                                 menu.set(None);
                                                             }
                                                             Err(reason) => action_status.set(Some(reason)),
@@ -299,10 +299,10 @@ pub fn ZoneDraftDialog() -> impl IntoView {
     }
 }
 
-fn nearby_effectors(effectors: &[Effector], lat: f64, lon: f64) -> Vec<Effector> {
-    let mut positioned = effectors
+fn nearby_ptz_nodes(nodes: &[NodeStatus], lat: f64, lon: f64) -> Vec<NodeStatus> {
+    let mut positioned = nodes
         .iter()
-        .filter(|effector| effector.position_geo.is_some())
+        .filter(|node| node.has_capability("ptz_camera") && node.position_geo.is_some())
         .cloned()
         .collect::<Vec<_>>();
     positioned.sort_by(|left, right| {

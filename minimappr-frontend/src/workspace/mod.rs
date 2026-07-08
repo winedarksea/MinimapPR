@@ -5,7 +5,6 @@ pub mod registry;
 pub mod status_ribbon;
 
 use crate::components::drawer_shell::DrawerShell;
-use crate::devices::schema::DeviceKind;
 use crate::inspector::EntityInspector;
 use crate::map::bindings::pan_to;
 use crate::map::MapPanel;
@@ -57,28 +56,28 @@ pub fn MapWorkspace() -> impl IntoView {
     let detection_count = Signal::derive(move || state.detections.get().len());
     let alert_count = Signal::derive(move || state.alerts.get().len());
     let zone_count = Signal::derive(move || state.zones.get().len());
-    let rf_device_count = Signal::derive(move || {
+    let rf_node_count = Signal::derive(move || {
         state
-            .devices
+            .nodes
             .get()
             .into_iter()
-            .filter(|device| matches!(device.kind, DeviceKind::SdrRf | DeviceKind::Radar24G))
+            .filter(|node| node.has_capability("sdr") || node.has_capability("radar_24g"))
             .count()
     });
-    let seismic_device_count = Signal::derive(move || {
+    let seismic_node_count = Signal::derive(move || {
         state
-            .devices
+            .nodes
             .get()
             .into_iter()
-            .filter(|device| device.kind == DeviceKind::Seismic)
+            .filter(|node| node.has_capability("seismic"))
             .count()
     });
-    let speech_device_count = Signal::derive(move || {
+    let speech_node_count = Signal::derive(move || {
         state
-            .devices
+            .nodes
             .get()
             .into_iter()
-            .filter(|device| device.kind == DeviceKind::SpeechNode)
+            .filter(|node| node.has_capability("speech"))
             .count()
     });
     let rf_badge_count = Signal::derive(move || {
@@ -139,17 +138,17 @@ pub fn MapWorkspace() -> impl IntoView {
                         </button>
                     </div>
                 </DrawerShell>
-                {move || (rf_device_count.get() > 0).then(|| view! {
+                {move || (rf_node_count.get() > 0).then(|| view! {
                     <DrawerShell title=DrawerId::Rf.title() icon="settings_input_antenna" open=rf_open badge=rf_badge_count>
                         <RfPanel />
                     </DrawerShell>
                 })}
-                {move || (seismic_device_count.get() > 0).then(|| view! {
+                {move || (seismic_node_count.get() > 0).then(|| view! {
                     <DrawerShell title=DrawerId::Seismic.title() icon="monitor_heart" open=seismic_open badge=seismic_badge_count>
                         <SeismicPanel />
                     </DrawerShell>
                 })}
-                {move || (speech_device_count.get() > 0).then(|| view! {
+                {move || (speech_node_count.get() > 0).then(|| view! {
                     <DrawerShell title=DrawerId::Speech.title() icon="record_voice_over" open=speech_open badge=speech_badge_count>
                         <SpeechPanel />
                     </DrawerShell>

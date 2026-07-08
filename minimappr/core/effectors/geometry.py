@@ -10,12 +10,12 @@ from __future__ import annotations
 
 import math
 
-from minimappr.models import EffectorOrientation, Vec3
+from minimappr.models import NodeOrientation, Vec3
 
 
 def compute_pan_tilt(
     camera_pos: Vec3,
-    camera_orientation: EffectorOrientation,
+    camera_orientation: NodeOrientation,
     target_pos: Vec3,
 ) -> tuple[float, float]:
     """Return (pan_deg, tilt_deg) to aim from camera_pos at target_pos.

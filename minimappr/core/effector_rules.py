@@ -22,7 +22,8 @@ logger = logging.getLogger(__name__)
 class EffectorRuleActionHandler(RuleActionHandler):
     """Handles action_type="cue"/"capture" rules with destination="effector".
 
-    Expects ``descriptor.payload["effector_id"]`` to name the target effector.
+    Expects ``descriptor.payload["node_id"]`` to name the target PTZ-capable node.
+    Legacy stored rules with ``effector_id`` are still accepted.
     """
 
     def __init__(self, effector_manager: EffectorManager) -> None:
@@ -35,8 +36,8 @@ class EffectorRuleActionHandler(RuleActionHandler):
         detection: DetectionEvent | None = None,
         track: TrackState | None = None,
     ) -> dict[str, Any]:
-        effector_id = descriptor.payload.get("effector_id")
-        if not effector_id:
+        node_id = descriptor.payload.get("node_id") or descriptor.payload.get("effector_id")
+        if not node_id:
             return {"delivered": False, "handler": "effector", "status": "missing_effector_id"}
 
         target_pos = track.position_m if track is not None else (
@@ -50,11 +51,11 @@ class EffectorRuleActionHandler(RuleActionHandler):
 
         if descriptor.action_type == "capture":
             result = await self._effector_manager.capture(
-                effector_id, track_id=track_id, detection_id=detection_id
+                node_id, track_id=track_id, detection_id=detection_id
             )
         else:
             result = await self._effector_manager.slew_to_target(
-                effector_id, target_pos, track_id=track_id, detection_id=detection_id
+                node_id, target_pos, track_id=track_id, detection_id=detection_id
             )
 
         return {

@@ -114,8 +114,6 @@ from minimappr.models import (
     CopStatusResponse,
     DetectionReviewState,
     DetectionReviewUpdateRequest,
-    EffectorSafetyConfig,
-    EffectorSpec,
     EnvironmentSampleIn,
     FederationAck,
     FederationHeartbeat,
@@ -129,8 +127,14 @@ from minimappr.models import (
     IngestFrameRequest,
     IngestFrameResponse,
     MicView,
+    NodeCapability,
     NodeHealthStatus,
     NodeAudioOverride,
+    NodeOverrides,
+    NodePatchRequest,
+    NodeRegistrationRequest,
+    NodeSafetyConfig,
+    NodeSpec,
     PipelineNodeView,
     PipelineNodesResponse,
     PipelineStageView,
@@ -1180,6 +1184,9 @@ async def _api_only_lifespan(app: FastAPI, settings: Settings):
         startup_failure_log_message="Ingest sidecar startup failed in API role",
     )
 
+    registry = NodeRegistry()
+    await registry.load_overrides(await storage.list_node_overrides())
+
     _bind_runtime_state(
         app.state,
         resolved_site_origin=resolved_site_origin,
@@ -1195,7 +1202,7 @@ async def _api_only_lifespan(app: FastAPI, settings: Settings):
         # in-memory registries here those handlers raise AttributeError on
         # app.state.  In split mode these are local to the API process and do
         # not influence the ingest-process localizer (no cross-process sync yet).
-        registry=NodeRegistry(),
+        registry=registry,
         cluster_registry=ClusterRegistry(),
         sidecar_state=sidecar_state,
         capture_manager=capture_manager,
@@ -1264,6 +1271,7 @@ async def lifespan(app: FastAPI):
         storage=storage,
         tracking_cfg=tracking_cfg,
     )
+    await combined_runtime_core_services.registry.load_overrides(await storage.list_node_overrides())
 
     sidecar_state, sidecar_supervision_task = await _launch_managed_ingest_sidecar(
         settings,
@@ -1824,6 +1832,11 @@ async def list_nodes(
     latest_audio_summary_by_node = {
         row["node_id"]: row for row in latest_audio_summary_rows if row.get("node_id") is not None
     }
+    effector_manager: EffectorManager = state.effector_manager
+    ptz_status_by_node = {
+        status.node_id: status
+        for status in await effector_manager.list_status()
+    }
     sidecar_node_snapshots = (
         _sidecar_stream_consumer_snapshots(state)
         if settings.ingest_backend == "rust"
@@ -1855,6 +1868,16 @@ async def list_nodes(
             failure_codes.extend(report.failure_codes)
         if failure_codes:
             node["bit_failure_codes"] = failure_codes
+
+        if _node_has_capability(node, NodeCapability.PTZ_CAMERA):
+            ptz_status = ptz_status_by_node.get(node["id"])
+            node["ptz_status"] = ptz_status.model_dump(mode="json") if ptz_status is not None else None
+
+        node_capabilities = {str(capability) for capability in node.get("capabilities", [])}
+        should_enrich_audio = not node_capabilities or NodeCapability.AUDIO.value in node_capabilities
+        if not should_enrich_audio:
+            await asyncio.sleep(0)
+            continue
 
         use_live_audio_buffer_summary = _has_live_ingest_runtime(state) and (
             settings.ingest_backend == "python" or settings.direct_ingest_enabled
@@ -1982,6 +2005,282 @@ async def list_node_omni_detection_summary(
     )
 
 
+def _node_has_capability(node: dict[str, Any], capability: NodeCapability) -> bool:
+    return capability.value in {str(item) for item in node.get("capabilities", [])}
+
+
+def _redact_node_transport(node: dict[str, Any]) -> dict[str, Any]:
+    redacted = dict(node)
+    redacted["transport"] = {}
+    return redacted
+
+
+class _EffectorAimBody(BaseModel):
+    track_id: str | None = None
+    target: Vec3 | None = None
+
+    @model_validator(mode="after")
+    def _validate(self) -> "_EffectorAimBody":
+        if self.track_id is None and self.target is None:
+            raise ValueError("Either track_id or target must be provided")
+        return self
+
+
+class _EffectorSnapshotBody(BaseModel):
+    track_id: str | None = None
+    detection_id: str | None = None
+
+
+class _EffectorArmBody(BaseModel):
+    zone_id: str | None = None
+
+
+def _node_row_to_runtime_spec(node: dict[str, Any]) -> NodeSpec:
+    return NodeSpec(
+        id=node["id"],
+        node_type=node["node_type"],
+        position_m=tuple(node["position_m"]) if node.get("position_m") else None,
+        position_geo=node.get("position_geo"),
+        sensor_offsets_m=node.get("sensor_offsets_m") or [(0.0, 0.0, 0.0)],
+        orientation=node.get("orientation") or {},
+        capabilities=node.get("capabilities") or [],
+        mobility=node.get("mobility") or "stationary",
+        metadata=node.get("metadata") or {},
+        properties=node.get("properties") or {},
+        transport=node.get("transport") or {},
+        capability_config=node.get("capability_config") or {},
+        safety=node.get("safety") or {},
+        permissions=node.get("permissions") or {},
+    )
+
+
+async def _broadcast_node_updated(state, node_id: str) -> None:
+    live_hub = getattr(state, "live_hub", None)
+    if live_hub is None:
+        return
+    try:
+        await live_hub.broadcast({"type": "node_updated", "node_id": node_id})
+    except Exception:
+        logger.debug("node_updated broadcast failed for %s", node_id, exc_info=True)
+
+
+async def _enriched_node_detail(state, node_id: str) -> dict[str, Any] | None:
+    node = await state.storage.get_node_by_id(node_id)
+    if node is None:
+        return None
+    if node.get("position_geo") is None and node.get("position_m"):
+        local = node["position_m"]
+        geo = state.coordinate_frame.local_to_geo((float(local[0]), float(local[1]), float(local[2])))
+        node["position_geo"] = geo.model_dump(mode="json")
+    now_ns = time.time_ns()
+    await _apply_runtime_health_statuses(
+        [node],
+        bit_evaluator=state.bit_evaluator,
+        now_ns=now_ns,
+        degraded_after_seconds=state.settings.node_degraded_after_seconds,
+        offline_after_seconds=state.settings.node_offline_after_seconds,
+    )
+    bit_reports = await state.bit_evaluator.latest_reports_for_node(node_id)
+    failure_codes: list[str] = []
+    for report in bit_reports:
+        failure_codes.extend(report.failure_codes)
+    if failure_codes:
+        node["bit_failure_codes"] = failure_codes
+    if _node_has_capability(node, NodeCapability.PTZ_CAMERA):
+        manager: EffectorManager = state.effector_manager
+        status = await manager.get_status(node_id)
+        node["ptz_status"] = status.model_dump(mode="json") if status is not None else None
+    return _redact_node_transport(node)
+
+
+@app.get("/api/v1/nodes/{node_id}")
+async def get_node_detail(node_id: str, request: Request) -> dict:
+    state = _require_state(request)
+    node = await _enriched_node_detail(state, node_id)
+    if node is None:
+        raise HTTPException(status_code=404, detail="Node not found")
+    return node
+
+
+@app.post("/api/v1/nodes", status_code=201)
+async def register_node(payload: NodeRegistrationRequest, request: Request) -> dict:
+    state = _require_state(request)
+    existing = await state.storage.get_node_by_id(payload.id)
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="Node already exists")
+    spec = payload.to_node_spec()
+    if spec.position_m is None and spec.position_geo is not None:
+        spec = spec.model_copy(update={"position_m": state.coordinate_frame.geo_to_local(spec.position_geo)})
+    await state.storage.insert_node_registration(spec, origin="operator")
+    await state.registry.upsert(spec, last_seen_ns=0)
+    if NodeCapability.PTZ_CAMERA in spec.capabilities:
+        manager: EffectorManager = state.effector_manager
+        node_row = await state.storage.get_node_by_id(spec.id)
+        if node_row is not None:
+            await manager.register_node(node_row)
+    await _broadcast_node_updated(state, spec.id)
+    node = await _enriched_node_detail(state, spec.id)
+    if node is None:
+        raise HTTPException(status_code=500, detail="Node registration did not persist")
+    return node
+
+
+@app.patch("/api/v1/nodes/{node_id}")
+async def patch_node(node_id: str, payload: NodePatchRequest, request: Request) -> dict:
+    state = _require_state(request)
+    node = await state.storage.get_node_by_id(node_id)
+    if node is None:
+        raise HTTPException(status_code=404, detail="Node not found")
+    changed_transport = payload.transport is not None
+    await state.storage.update_node_operator_fields(
+        node_id,
+        transport=payload.transport,
+        capability_config=payload.capability_config,
+        safety=payload.safety.model_dump(mode="json") if payload.safety is not None else None,
+        permissions=payload.permissions,
+        metadata=payload.metadata,
+    )
+    existing_overrides = dict(node.get("overrides") or {})
+    for field_name in payload.clear_overrides:
+        existing_overrides.pop(field_name, None)
+    if payload.overrides is not None:
+        override_payload = payload.overrides.model_dump(mode="json", exclude_none=True)
+        existing_overrides.update(override_payload)
+    if payload.overrides is not None or payload.clear_overrides:
+        if existing_overrides:
+            existing_overrides["updated_ns"] = time.time_ns()
+        await state.storage.set_node_overrides(node_id, existing_overrides)
+        await state.registry.set_overrides(node_id, existing_overrides)
+    updated = await state.storage.get_node_by_id(node_id)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Node not found")
+    if changed_transport and _node_has_capability(updated, NodeCapability.PTZ_CAMERA):
+        manager: EffectorManager = state.effector_manager
+        await manager.detach(node_id)
+        await manager.register_node(updated)
+    await _broadcast_node_updated(state, node_id)
+    return _redact_node_transport(updated)
+
+
+@app.get("/api/v1/nodes/{node_id}/safety", response_model=NodeSafetyConfig)
+async def get_node_safety(node_id: str, request: Request) -> NodeSafetyConfig:
+    state = _require_state(request)
+    node = await state.storage.get_node_by_id(node_id)
+    if node is None:
+        raise HTTPException(status_code=404, detail="Node not found")
+    return NodeSafetyConfig.model_validate(node.get("safety") or {})
+
+
+@app.patch("/api/v1/nodes/{node_id}/safety", response_model=NodeSafetyConfig)
+async def patch_node_safety(node_id: str, payload: NodeSafetyConfig, request: Request) -> NodeSafetyConfig:
+    state = _require_state(request)
+    updated = await state.storage.update_node_operator_fields(
+        node_id,
+        safety=payload.model_dump(mode="json"),
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Node not found")
+    await _broadcast_node_updated(state, node_id)
+    return payload
+
+
+async def _require_ptz_node(state, node_id: str) -> None:
+    node = await state.storage.get_node_by_id(node_id)
+    if node is None:
+        raise HTTPException(status_code=404, detail="Node not found")
+    if not _node_has_capability(node, NodeCapability.PTZ_CAMERA):
+        raise HTTPException(status_code=404, detail="node has no effector capability")
+
+
+@app.get("/api/v1/nodes/{node_id}/effector/status")
+async def get_node_effector_status(node_id: str, request: Request) -> dict:
+    state = _require_state(request)
+    await _require_ptz_node(state, node_id)
+    manager: EffectorManager = state.effector_manager
+    status = await manager.get_status(node_id)
+    capabilities = await manager.get_capabilities(node_id)
+    return {
+        "node_id": node_id,
+        "status": status.model_dump(mode="json") if status is not None else None,
+        "capabilities": capabilities,
+    }
+
+
+@app.post("/api/v1/nodes/{node_id}/effector/arm")
+async def arm_node_effector(node_id: str, payload: _EffectorArmBody, request: Request) -> JSONResponse:
+    state = _require_state(request)
+    await _require_ptz_node(state, node_id)
+    result = await state.effector_manager.arm(node_id, zone_id=payload.zone_id)
+    status_code = 200 if result.status == "COMPLETED" else 409
+    return JSONResponse(status_code=status_code, content=result.model_dump(mode="json"))
+
+
+@app.post("/api/v1/nodes/{node_id}/effector/disarm")
+async def disarm_node_effector(node_id: str, request: Request) -> JSONResponse:
+    state = _require_state(request)
+    await _require_ptz_node(state, node_id)
+    result = await state.effector_manager.disarm(node_id)
+    status_code = 200 if result.status == "COMPLETED" else 409
+    return JSONResponse(status_code=status_code, content=result.model_dump(mode="json"))
+
+
+@app.post("/api/v1/nodes/{node_id}/effector/aim")
+async def aim_node_effector(node_id: str, payload: _EffectorAimBody, request: Request) -> JSONResponse:
+    state = _require_state(request)
+    await _require_ptz_node(state, node_id)
+    target_pos = payload.target
+    if target_pos is None:
+        tracks = await state.storage.list_tracks(limit=1000)
+        track = next((t for t in tracks if t["id"] == payload.track_id), None)
+        if track is None:
+            raise HTTPException(status_code=404, detail="Track not found")
+        target_pos = tuple(float(v) for v in track["position_m"])
+    result = await state.effector_manager.slew_to_target(node_id, target_pos, track_id=payload.track_id)
+    status_code = 200 if result.status == "COMPLETED" else 409
+    return JSONResponse(status_code=status_code, content=result.model_dump(mode="json"))
+
+
+@app.post("/api/v1/nodes/{node_id}/effector/snapshot")
+async def snapshot_node_effector(node_id: str, payload: _EffectorSnapshotBody, request: Request) -> JSONResponse:
+    state = _require_state(request)
+    await _require_ptz_node(state, node_id)
+    result = await state.effector_manager.capture(
+        node_id,
+        track_id=payload.track_id,
+        detection_id=payload.detection_id,
+    )
+    status_code = 200 if result.status == "COMPLETED" else 409
+    return JSONResponse(status_code=status_code, content=result.model_dump(mode="json"))
+
+
+@app.get("/api/v1/nodes/{node_id}/effector/snapshot.jpg")
+async def node_effector_snapshot_live(node_id: str, request: Request) -> FileResponse:
+    state = _require_state(request)
+    await _require_ptz_node(state, node_id)
+    try:
+        path = await state.effector_manager.snapshot_live(node_id)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Snapshot failed: {exc}") from exc
+    if path is None:
+        raise HTTPException(status_code=404, detail="Effector not found or snapshot unsupported")
+    return FileResponse(path=path, media_type="image/jpeg")
+
+
+@app.get("/api/v1/node-artifacts/{artifact_id}")
+async def get_node_artifact(artifact_id: str, request: Request) -> FileResponse:
+    state = _require_state(request)
+    row = await state.storage.get_node_artifact(artifact_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    artifact_path = Path(row["path"]).resolve()
+    snapshot_root: Path = state.settings.effector_snapshot_dir.resolve()
+    if not artifact_path.exists():
+        raise HTTPException(status_code=404, detail="Artifact file no longer exists")
+    if not artifact_path.is_relative_to(snapshot_root):
+        raise HTTPException(status_code=403, detail="Artifact path is outside snapshot directory")
+    return FileResponse(path=artifact_path, media_type="image/jpeg")
+
+
 async def _runtime_node_health_counts(
     state,
     *,
@@ -2073,6 +2372,7 @@ async def delete_node(node_id: str, request: Request) -> dict:
 
     # Purge in-memory caches so the deleted node cannot be re-served before the
     # next poll. A truly-stale node stays gone; a live one would re-register.
+    await state.effector_manager.detach(node_id)
     await state.registry.delete_node(node_id)
     consumer = getattr(state, "ingest_stream_consumer", None)
     purge = getattr(consumer, "purge_node", None)
@@ -4407,238 +4707,7 @@ async def list_cameras():
     ]
 
 
-# ── Effector API ───────────────────────────────────────────────────────────────
-# PTZ camera registry, slew-to-track, and snapshot/live-view. Optional and
-# hidden: the UI renders effector controls only when this list is non-empty.
-
-
-def _redact_transport(effector: dict[str, Any]) -> dict[str, Any]:
-    """Strip ONVIF credentials from an effector row before it leaves the API.
-
-    Transport (host/port/username/password/rtsp_url) is write-only from the
-    API's perspective: accepted on register, never echoed back.
-    """
-    redacted = dict(effector)
-    redacted["transport"] = {}
-    return redacted
-
-
-def _enrich_effector_geo(effector: dict[str, Any], state) -> dict[str, Any]:
-    if effector.get("position_geo") is None and effector.get("position_m"):
-        local = effector["position_m"]
-        geo = state.coordinate_frame.local_to_geo((float(local[0]), float(local[1]), float(local[2])))
-        effector["position_geo"] = geo.model_dump(mode="json")
-    return effector
-
-
-class _EffectorAimBody(BaseModel):
-    track_id: str | None = None
-    target: Vec3 | None = None
-
-    @model_validator(mode="after")
-    def _validate(self) -> "_EffectorAimBody":
-        if self.track_id is None and self.target is None:
-            raise ValueError("Either track_id or target must be provided")
-        return self
-
-
-class _EffectorSnapshotBody(BaseModel):
-    track_id: str | None = None
-    detection_id: str | None = None
-
-
-class _EffectorArmBody(BaseModel):
-    zone_id: str | None = None
-
-
-@app.get("/api/v1/effectors")
-async def list_effectors(request: Request) -> list[dict]:
-    state = _require_state(request)
-    manager: EffectorManager = state.effector_manager
-    rows = await state.storage.list_effectors()
-    statuses = {status.effector_id: status for status in await manager.list_status()}
-    results = []
-    for row in rows:
-        effector = _enrich_effector_geo(_redact_transport(row), state)
-        status = statuses.get(effector["id"])
-        effector["status"] = status.model_dump(mode="json") if status is not None else None
-        results.append(effector)
-    return results
-
-
-@app.post("/api/v1/effectors", status_code=201)
-async def register_effector(payload: EffectorSpec, request: Request) -> dict:
-    state = _require_state(request)
-    manager: EffectorManager = state.effector_manager
-    spec = payload
-    if spec.position_m is None:
-        local = state.coordinate_frame.geo_to_local(spec.position_geo)
-        spec = spec.model_copy(update={"position_m": local})
-    await manager.register(spec)
-    row = await state.storage.get_effector_by_id(spec.id)
-    if row is None:
-        raise HTTPException(status_code=500, detail="Effector registration did not persist")
-    return _enrich_effector_geo(_redact_transport(row), state)
-
-
-@app.delete("/api/v1/effectors/{effector_id}")
-async def delete_effector(effector_id: str, request: Request) -> dict:
-    state = _require_state(request)
-    manager: EffectorManager = state.effector_manager
-    deleted = await manager.delete(effector_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="Effector not found")
-    return {"ok": True, "effector_id": effector_id}
-
-
-@app.get("/api/v1/effectors/{effector_id}/status")
-async def get_effector_status(effector_id: str, request: Request) -> dict:
-    state = _require_state(request)
-    manager: EffectorManager = state.effector_manager
-    status = await manager.get_status(effector_id)
-    if status is None:
-        raise HTTPException(status_code=404, detail="Effector not found")
-    capabilities = await manager.get_capabilities(effector_id)
-    return {
-        "effector_id": effector_id,
-        "status": status.model_dump(mode="json"),
-        "capabilities": capabilities,
-    }
-
-
-@app.post("/api/v1/effectors/{effector_id}/arm")
-async def arm_effector(effector_id: str, payload: _EffectorArmBody, request: Request) -> JSONResponse:
-    state = _require_state(request)
-    manager: EffectorManager = state.effector_manager
-    result = await manager.arm(effector_id, zone_id=payload.zone_id)
-    if result.failure_class == "not_found":
-        raise HTTPException(status_code=404, detail="Effector not found")
-    status_code = 200 if result.status == "COMPLETED" else 409
-    return JSONResponse(
-        status_code=status_code,
-        content={
-            "status": result.status,
-            "execution_id": result.execution_id,
-            "failure_class": result.failure_class,
-        },
-    )
-
-
-@app.post("/api/v1/effectors/{effector_id}/disarm")
-async def disarm_effector(effector_id: str, request: Request) -> JSONResponse:
-    state = _require_state(request)
-    manager: EffectorManager = state.effector_manager
-    result = await manager.disarm(effector_id)
-    if result.failure_class == "not_found":
-        raise HTTPException(status_code=404, detail="Effector not found")
-    status_code = 200 if result.status == "COMPLETED" else 409
-    return JSONResponse(
-        status_code=status_code,
-        content={
-            "status": result.status,
-            "execution_id": result.execution_id,
-            "failure_class": result.failure_class,
-        },
-    )
-
-
-@app.get("/api/v1/effectors/{effector_id}/safety", response_model=EffectorSafetyConfig)
-async def get_effector_safety(effector_id: str, request: Request) -> EffectorSafetyConfig:
-    state = _require_state(request)
-    manager: EffectorManager = state.effector_manager
-    safety = await manager.get_safety(effector_id)
-    if safety is None:
-        raise HTTPException(status_code=404, detail="Effector not found")
-    return safety
-
-
-@app.patch("/api/v1/effectors/{effector_id}/safety", response_model=EffectorSafetyConfig)
-async def patch_effector_safety(
-    effector_id: str,
-    payload: EffectorSafetyConfig,
-    request: Request,
-) -> EffectorSafetyConfig:
-    state = _require_state(request)
-    manager: EffectorManager = state.effector_manager
-    safety = await manager.update_safety(effector_id, payload)
-    if safety is None:
-        raise HTTPException(status_code=404, detail="Effector not found")
-    return safety
-
-
-@app.post("/api/v1/effectors/{effector_id}/aim")
-async def aim_effector(effector_id: str, payload: _EffectorAimBody, request: Request) -> JSONResponse:
-    state = _require_state(request)
-    manager: EffectorManager = state.effector_manager
-    target_pos = payload.target
-    if target_pos is None:
-        tracks = await state.storage.list_tracks(limit=1000)
-        track = next((t for t in tracks if t["id"] == payload.track_id), None)
-        if track is None:
-            raise HTTPException(status_code=404, detail="Track not found")
-        target_pos = tuple(float(v) for v in track["position_m"])
-
-    result = await manager.slew_to_target(effector_id, target_pos, track_id=payload.track_id)
-    if result.failure_class == "not_found":
-        raise HTTPException(status_code=404, detail="Effector not found")
-    status_code = 200 if result.status == "COMPLETED" else 409
-    return JSONResponse(
-        status_code=status_code,
-        content={
-            "status": result.status,
-            "execution_id": result.execution_id,
-            "failure_class": result.failure_class,
-        },
-    )
-
-
-@app.post("/api/v1/effectors/{effector_id}/snapshot")
-async def snapshot_effector(effector_id: str, payload: _EffectorSnapshotBody, request: Request) -> JSONResponse:
-    state = _require_state(request)
-    manager: EffectorManager = state.effector_manager
-    result = await manager.capture(
-        effector_id, track_id=payload.track_id, detection_id=payload.detection_id
-    )
-    if result.failure_class == "not_found":
-        raise HTTPException(status_code=404, detail="Effector not found")
-    status_code = 200 if result.status == "COMPLETED" else 409
-    return JSONResponse(
-        status_code=status_code,
-        content={
-            "status": result.status,
-            "execution_id": result.execution_id,
-            "failure_class": result.failure_class,
-            "artifact_ids": result.result_refs,
-        },
-    )
-
-
-@app.get("/api/v1/effectors/{effector_id}/snapshot.jpg")
-async def effector_snapshot_live(effector_id: str, request: Request) -> FileResponse:
-    state = _require_state(request)
-    manager: EffectorManager = state.effector_manager
-    try:
-        path = await manager.snapshot_live(effector_id)
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Snapshot failed: {exc}") from exc
-    if path is None:
-        raise HTTPException(status_code=404, detail="Effector not found or snapshot unsupported")
-    return FileResponse(path=path, media_type="image/jpeg")
-
-
-@app.get("/api/v1/effector-artifacts/{artifact_id}")
-async def get_effector_artifact(artifact_id: str, request: Request) -> FileResponse:
-    state = _require_state(request)
-    row = await state.storage.get_effector_artifact(artifact_id)
-    if row is None:
-        raise HTTPException(status_code=404, detail="Artifact not found")
-    artifact_path = Path(row["path"]).resolve()
-    snapshot_root: Path = state.settings.effector_snapshot_dir.resolve()
-    if not artifact_path.exists():
-        raise HTTPException(status_code=404, detail="Artifact file no longer exists")
-    if not artifact_path.is_relative_to(snapshot_root):
-        raise HTTPException(status_code=403, detail="Artifact path is outside snapshot directory")
-    return FileResponse(path=artifact_path, media_type="image/jpeg")
+# PTZ camera controls live under each node's effector capability subroutes.
 
 
 # ── Capture API ────────────────────────────────────────────────────────────────

@@ -75,6 +75,23 @@ class NodeType(str, Enum):
     GATEWAY = "gateway"
 
 
+class NodeCapability(str, Enum):
+    # Extending the node capability vocabulary means adding one enum member here.
+    AUDIO = "audio"
+    ARRAY_LOCALIZATION = "array_localization"
+    ENVIRONMENT = "environment"
+    TEMPERATURE = "temperature"
+    HUMIDITY = "humidity"
+    SEISMIC = "seismic"
+    RADAR_24G = "radar_24g"
+    SDR = "sdr"
+    SPEECH = "speech"
+    PTZ_CAMERA = "ptz_camera"
+    RELAY = "relay"
+    GPS = "gps"
+    GPS_OPTIONAL = "gps_optional"
+
+
 class SyncGrade(str, Enum):
     """Per-sensor time-synchronisation quality, ordered high → low."""
     GPS_PPS = "gps_pps"
@@ -135,6 +152,54 @@ class NodeOrientation(BaseModel):
     roll_deg: float = Field(ge=-180.0, le=180.0, default=0.0)
 
 
+class NodeSafetyConfig(BaseModel):
+    require_arm_for_action: bool = False
+    min_action_interval_seconds: float | None = Field(default=None, ge=0.0)
+    require_arm_for_slew: bool | None = None
+    min_slew_interval_seconds: float | None = Field(default=None, ge=0.0)
+    no_go_zone_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_legacy_effector_keys(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        migrated = dict(value)
+        if "require_arm_for_action" not in migrated and "require_arm_for_slew" in migrated:
+            migrated["require_arm_for_action"] = migrated.get("require_arm_for_slew")
+        if "min_action_interval_seconds" not in migrated and "min_slew_interval_seconds" in migrated:
+            migrated["min_action_interval_seconds"] = migrated.get("min_slew_interval_seconds")
+        return migrated
+
+    @model_validator(mode="after")
+    def _normalize_zone_ids(self) -> "NodeSafetyConfig":
+        if self.require_arm_for_slew is not None:
+            self.require_arm_for_action = self.require_arm_for_slew
+        else:
+            self.require_arm_for_slew = self.require_arm_for_action
+        if self.min_slew_interval_seconds is not None:
+            self.min_action_interval_seconds = self.min_slew_interval_seconds
+        else:
+            self.min_slew_interval_seconds = self.min_action_interval_seconds
+        self.no_go_zone_ids = sorted(
+            {
+                str(zone_id).strip()
+                for zone_id in self.no_go_zone_ids
+                if str(zone_id).strip()
+            }
+        )
+        return self
+
+
+class NodeOverrides(BaseModel):
+    position_m: Vec3 | None = None
+    position_geo: GeoPoint | None = None
+    orientation: NodeOrientation | None = None
+    mobility: Literal["stationary", "mobile"] | None = None
+    capabilities: list[NodeCapability] | None = None
+    updated_ns: int | None = Field(default=None, ge=0)
+
+
 class NodeSpec(BaseModel):
     id: str = Field(min_length=1)
     node_type: NodeType
@@ -142,11 +207,43 @@ class NodeSpec(BaseModel):
     position_geo: GeoPoint | None = None
     sensor_offsets_m: list[Vec3] = Field(default_factory=lambda: [(0.0, 0.0, 0.0)])
     orientation: NodeOrientation = Field(default_factory=NodeOrientation)
-    capabilities: list[str] = Field(default_factory=list)
+    capabilities: list[NodeCapability] = Field(default_factory=list)
     mobility: Literal["stationary", "mobile"] = "stationary"
     metadata: dict[str, Any] = Field(default_factory=dict)
     properties: dict[str, Any] = Field(default_factory=dict)
     cluster_id: str | None = None
+    transport: dict[str, Any] = Field(default_factory=dict)
+    capability_config: dict[str, Any] = Field(default_factory=dict)
+    safety: NodeSafetyConfig = Field(default_factory=NodeSafetyConfig)
+    permissions: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_capabilities(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        raw_capabilities = value.get("capabilities")
+        if not isinstance(raw_capabilities, list):
+            return value
+        recognized_values = {capability.value for capability in NodeCapability}
+        recognized: list[str] = []
+        unrecognized: list[str] = []
+        for capability in raw_capabilities:
+            capability_value = capability.value if isinstance(capability, NodeCapability) else str(capability)
+            if capability_value in recognized_values:
+                recognized.append(capability_value)
+            else:
+                unrecognized.append(capability_value)
+        if not unrecognized:
+            return value
+        normalized = dict(value)
+        metadata = dict(normalized.get("metadata") or {})
+        existing = metadata.get("unrecognized_capabilities")
+        existing_list = existing if isinstance(existing, list) else []
+        metadata["unrecognized_capabilities"] = sorted({*map(str, existing_list), *unrecognized})
+        normalized["metadata"] = metadata
+        normalized["capabilities"] = recognized
+        return normalized
 
     @model_validator(mode="after")
     def _validate(self) -> "NodeSpec":
@@ -155,6 +252,59 @@ class NodeSpec(BaseModel):
         if self.position_m is None and self.position_geo is None:
             raise ValueError("Either position_m or position_geo must be provided")
         return self
+
+
+class NodeRegistrationRequest(BaseModel):
+    id: str = Field(min_length=1)
+    node_type: NodeType = NodeType.POINT
+    position_m: Vec3 | None = None
+    position_geo: GeoPoint | None = None
+    sensor_offsets_m: list[Vec3] = Field(default_factory=lambda: [(0.0, 0.0, 0.0)])
+    orientation: NodeOrientation = Field(default_factory=NodeOrientation)
+    capabilities: list[NodeCapability] = Field(default_factory=list)
+    mobility: Literal["stationary", "mobile"] = "stationary"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    properties: dict[str, Any] = Field(default_factory=dict)
+    transport: dict[str, Any] = Field(default_factory=dict)
+    capability_config: dict[str, Any] = Field(default_factory=dict)
+    safety: NodeSafetyConfig = Field(default_factory=NodeSafetyConfig)
+    permissions: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _validate(self) -> "NodeRegistrationRequest":
+        if not self.sensor_offsets_m:
+            raise ValueError("sensor_offsets_m cannot be empty")
+        if self.position_m is None and self.position_geo is None:
+            raise ValueError("Either position_m or position_geo must be provided")
+        return self
+
+    def to_node_spec(self) -> NodeSpec:
+        return NodeSpec(
+            id=self.id,
+            node_type=self.node_type,
+            position_m=self.position_m,
+            position_geo=self.position_geo,
+            sensor_offsets_m=self.sensor_offsets_m,
+            orientation=self.orientation,
+            capabilities=self.capabilities,
+            mobility=self.mobility,
+            metadata=self.metadata,
+            properties=self.properties,
+            transport=self.transport,
+            capability_config=self.capability_config,
+            safety=self.safety,
+            permissions=self.permissions,
+        )
+
+
+class NodePatchRequest(BaseModel):
+    overrides: NodeOverrides | None = None
+    clear_overrides: list[str] = Field(default_factory=list)
+    transport: dict[str, Any] | None = None
+    capability_config: dict[str, Any] | None = None
+    safety: NodeSafetyConfig | None = None
+    permissions: dict[str, Any] | None = None
+    metadata: dict[str, Any] | None = None
 
 
 class AudioFrameIn(BaseModel):
@@ -659,41 +809,8 @@ class ContextSnapshot(BaseModel):
     system_health: str = "ok"
 
 
-class EffectorType(str, Enum):
-    CAMERA_PTZ = "camera_ptz"
-
-
-class EffectorOrientation(BaseModel):
-    """Home bearing of the effector, used as the geometry reference frame.
-
-    yaw_deg is measured clockwise from local-frame north (matching
-    LocalCoordinateFrame's east/north/up convention); pitch_deg is elevation
-    (positive = up) of the camera's home/rest position.
-    """
-    yaw_deg: float = Field(ge=-360.0, le=360.0, default=0.0)
-    pitch_deg: float = Field(ge=-90.0, le=90.0, default=0.0)
-
-
-class EffectorSpec(BaseModel):
-    id: str = Field(min_length=1)
-    effector_type: EffectorType
-    position_m: Vec3 | None = None
-    position_geo: GeoPoint | None = None
-    orientation: EffectorOrientation = Field(default_factory=EffectorOrientation)
-    capabilities: list[str] = Field(default_factory=list)
-    transport: dict[str, Any] = Field(default_factory=dict)
-    metadata: dict[str, Any] = Field(default_factory=dict)
-    properties: dict[str, Any] = Field(default_factory=dict)
-
-    @model_validator(mode="after")
-    def _validate(self) -> "EffectorSpec":
-        if self.position_m is None and self.position_geo is None:
-            raise ValueError("Either position_m or position_geo must be provided")
-        return self
-
-
-class EffectorStatus(BaseModel):
-    effector_id: str
+class PtzStatus(BaseModel):
+    node_id: str
     state: Literal["idle", "slewing", "streaming", "error", "offline"] = "offline"
     pan_deg: float | None = None
     tilt_deg: float | None = None
@@ -701,23 +818,6 @@ class EffectorStatus(BaseModel):
     armed: bool = False
     last_seen_ns: int | None = None
     active_track_id: str | None = None
-
-
-class EffectorSafetyConfig(BaseModel):
-    require_arm_for_slew: bool = False
-    min_slew_interval_seconds: float | None = Field(default=None, ge=0.0)
-    no_go_zone_ids: list[str] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def _normalize_zone_ids(self) -> "EffectorSafetyConfig":
-        self.no_go_zone_ids = sorted(
-            {
-                str(zone_id).strip()
-                for zone_id in self.no_go_zone_ids
-                if str(zone_id).strip()
-            }
-        )
-        return self
 
 
 class AlertStatus(str, Enum):

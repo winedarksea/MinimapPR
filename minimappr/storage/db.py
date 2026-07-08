@@ -18,10 +18,12 @@ from minimappr.cleanup_policy import CleanupPolicy
 from minimappr.models import (
     ContributorSummary,
     DetectionEvent,
-    EffectorSpec,
     GeoPoint,
     LabelId,
+    NodeCapability,
+    NodeOverrides,
     NodeSpec,
+    NodeType,
     TrackState,
 )
 
@@ -142,6 +144,12 @@ class Storage:
                 orientation_json TEXT NOT NULL DEFAULT '{}',
                 metadata_json TEXT NOT NULL,
                 properties_json TEXT NOT NULL DEFAULT '{}',
+                transport_json TEXT NOT NULL DEFAULT '{}',
+                capability_config_json TEXT NOT NULL DEFAULT '{}',
+                safety_json TEXT NOT NULL DEFAULT '{}',
+                permissions_json TEXT NOT NULL DEFAULT '{}',
+                overrides_json TEXT NOT NULL DEFAULT '{}',
+                origin TEXT NOT NULL DEFAULT 'ingest',
                 last_seen_ns INTEGER NOT NULL
             );
 
@@ -469,6 +477,18 @@ class Storage:
             );
             CREATE INDEX IF NOT EXISTS idx_effector_artifacts_effector ON effector_artifacts(effector_id, created_ns DESC);
             CREATE INDEX IF NOT EXISTS idx_effector_artifacts_track ON effector_artifacts(track_id, created_ns DESC);
+
+            CREATE TABLE IF NOT EXISTS node_artifacts (
+                id TEXT PRIMARY KEY,
+                node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+                track_id TEXT,
+                detection_id TEXT,
+                kind TEXT NOT NULL DEFAULT 'snapshot',
+                path TEXT NOT NULL,
+                created_ns INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_node_artifacts_node ON node_artifacts(node_id, created_ns DESC);
+            CREATE INDEX IF NOT EXISTS idx_node_artifacts_track ON node_artifacts(track_id, created_ns DESC);
             """
         )
 
@@ -482,6 +502,12 @@ class Storage:
                 "mobility": "TEXT NOT NULL DEFAULT 'stationary'",
                 "orientation_json": "TEXT NOT NULL DEFAULT '{}'",
                 "properties_json": "TEXT NOT NULL DEFAULT '{}'",
+                "transport_json": "TEXT NOT NULL DEFAULT '{}'",
+                "capability_config_json": "TEXT NOT NULL DEFAULT '{}'",
+                "safety_json": "TEXT NOT NULL DEFAULT '{}'",
+                "permissions_json": "TEXT NOT NULL DEFAULT '{}'",
+                "overrides_json": "TEXT NOT NULL DEFAULT '{}'",
+                "origin": "TEXT NOT NULL DEFAULT 'ingest'",
             },
         )
         await self._ensure_columns(
@@ -566,6 +592,7 @@ class Storage:
         )
         await self._deduplicate_reporting_window_canonicals()
         await self._ensure_reporting_window_uniqueness_index()
+        await self._migrate_effectors_into_nodes()
         await db.commit()
 
     async def _open_connection(self) -> None:
@@ -827,6 +854,110 @@ class Storage:
             """
         )
 
+    async def _table_exists(self, table: str) -> bool:
+        db = self._require_db()
+        row = await (
+            await db.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+                (table,),
+            )
+        ).fetchone()
+        return row is not None
+
+    async def _migrate_effectors_into_nodes(self) -> None:
+        db = self._require_db()
+        if not await self._table_exists("effectors"):
+            return
+        valid_capabilities = {capability.value for capability in NodeCapability}
+        rows = await (await db.execute("SELECT * FROM effectors ORDER BY id ASC")).fetchall()
+        for row in rows:
+            raw_capabilities = _json_loads(row["capabilities_json"], [])
+            capabilities = [
+                str(capability)
+                for capability in raw_capabilities
+                if str(capability) in valid_capabilities
+            ]
+            if NodeCapability.PTZ_CAMERA.value not in capabilities:
+                capabilities.append(NodeCapability.PTZ_CAMERA.value)
+            metadata = _json_loads(row["metadata_json"], {})
+            properties = _json_loads(row["properties_json"], {})
+            safety = {}
+            if isinstance(properties, dict) and isinstance(properties.get("safety"), dict):
+                safety = dict(properties["safety"])
+            existing = await (
+                await db.execute("SELECT * FROM nodes WHERE id = ? LIMIT 1", (row["id"],))
+            ).fetchone()
+            if existing is None:
+                await db.execute(
+                    """
+                    INSERT INTO nodes (
+                        id, node_type, x, y, z, lat, lon, alt,
+                        sensor_offsets_json, capabilities_json, mobility,
+                        orientation_json, metadata_json, properties_json,
+                        transport_json, capability_config_json, safety_json,
+                        permissions_json, overrides_json, origin, last_seen_ns
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'stationary', ?, ?, ?, ?, '{}', ?, '{}', '{}', 'operator', ?)
+                    """,
+                    (
+                        row["id"],
+                        NodeType.POINT.value,
+                        row["x"],
+                        row["y"],
+                        row["z"],
+                        row["lat"],
+                        row["lon"],
+                        row["alt"],
+                        _json_dumps([[0.0, 0.0, 0.0]]),
+                        _json_dumps(capabilities),
+                        _json_dumps(
+                            {
+                                "yaw_deg": row["yaw_deg"],
+                                "pitch_deg": row["pitch_deg"],
+                                "roll_deg": 0.0,
+                            }
+                        ),
+                        _json_dumps(metadata if isinstance(metadata, dict) else {}),
+                        _json_dumps(properties if isinstance(properties, dict) else {}),
+                        row["transport_json"],
+                        _json_dumps(safety),
+                        row["last_seen_ns"],
+                    ),
+                )
+            else:
+                existing_capabilities = _json_loads(existing["capabilities_json"], [])
+                merged_capabilities = sorted({*map(str, existing_capabilities), *capabilities})
+                await db.execute(
+                    """
+                    UPDATE nodes
+                    SET capabilities_json = ?,
+                        transport_json = CASE WHEN transport_json = '{}' THEN ? ELSE transport_json END,
+                        safety_json = CASE WHEN safety_json = '{}' THEN ? ELSE safety_json END
+                    WHERE id = ?
+                    """,
+                    (
+                        _json_dumps(merged_capabilities),
+                        row["transport_json"],
+                        _json_dumps(safety),
+                        row["id"],
+                    ),
+                )
+
+        if await self._table_exists("effector_artifacts"):
+            await db.execute(
+                """
+                INSERT OR IGNORE INTO node_artifacts (
+                    id, node_id, track_id, detection_id, kind, path, created_ns
+                )
+                SELECT id, effector_id, track_id, detection_id, kind, path, created_ns
+                FROM effector_artifacts
+                """
+            )
+        if not await self._table_exists("effectors_backup_v1"):
+            await db.execute("ALTER TABLE effectors RENAME TO effectors_backup_v1")
+        if await self._table_exists("effector_artifacts") and not await self._table_exists("effector_artifacts_backup_v1"):
+            await db.execute("ALTER TABLE effector_artifacts RENAME TO effector_artifacts_backup_v1")
+
     async def _table_columns(self, table: str) -> set[str]:
         db = self._require_db()
         rows = await (await db.execute(f"PRAGMA table_info({table})")).fetchall()
@@ -896,9 +1027,11 @@ class Storage:
                 INSERT INTO nodes (
                     id, node_type, x, y, z, lat, lon, alt,
                     sensor_offsets_json, capabilities_json, mobility,
-                    orientation_json, metadata_json, properties_json, last_seen_ns
+                    orientation_json, metadata_json, properties_json,
+                    transport_json, capability_config_json, safety_json,
+                    permissions_json, overrides_json, origin, last_seen_ns
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', '{}', '{}', '{}', '{}', 'ingest', ?)
                 ON CONFLICT(id) DO UPDATE SET
                     node_type=CASE
                         WHEN excluded.last_seen_ns >= nodes.last_seen_ns THEN excluded.node_type
@@ -1639,55 +1772,169 @@ class Storage:
             )
             await self._commit_if_needed(db)
 
+    def _row_to_node(self, row: aiosqlite.Row) -> dict[str, Any]:
+        reported_position_m = [row["x"], row["y"], row["z"]]
+        reported_position_geo = None
+        if row["lat"] is not None and row["lon"] is not None:
+            reported_position_geo = {"lat": row["lat"], "lon": row["lon"], "alt_m": row["alt"] or 0.0}
+        reported_orientation = _json_loads(row["orientation_json"], {})
+        reported_capabilities = _json_loads(row["capabilities_json"], [])
+        reported_mobility = row["mobility"] or "stationary"
+        overrides = _json_loads(row["overrides_json"], {})
+        if not isinstance(overrides, dict):
+            overrides = {}
+        effective_position_m = overrides.get("position_m", reported_position_m)
+        effective_position_geo = overrides.get("position_geo", reported_position_geo)
+        effective_orientation = overrides.get("orientation", reported_orientation)
+        effective_capabilities = overrides.get("capabilities", reported_capabilities)
+        effective_mobility = overrides.get("mobility", reported_mobility)
+        return {
+            "id": row["id"],
+            "node_type": row["node_type"],
+            "position_m": effective_position_m,
+            "position_geo": effective_position_geo,
+            "reported_position_m": reported_position_m,
+            "reported_position_geo": reported_position_geo,
+            "sensor_offsets_m": _json_loads(row["sensor_offsets_json"], []),
+            "capabilities": effective_capabilities,
+            "reported_capabilities": reported_capabilities,
+            "mobility": effective_mobility,
+            "reported_mobility": reported_mobility,
+            "orientation": effective_orientation,
+            "reported_orientation": reported_orientation,
+            "metadata": _json_loads(row["metadata_json"], {}),
+            "properties": _json_loads(row["properties_json"], {}),
+            "transport": _json_loads(row["transport_json"], {}),
+            "capability_config": _json_loads(row["capability_config_json"], {}),
+            "safety": _json_loads(row["safety_json"], {}),
+            "permissions": _json_loads(row["permissions_json"], {}),
+            "overrides": overrides,
+            "origin": row["origin"] or "ingest",
+            "last_seen_ns": row["last_seen_ns"],
+        }
+
     async def list_nodes(self, limit: int | None = None) -> list[dict]:
         db = self._require_db()
         if limit is not None and limit > 0:
             rows = await (await db.execute("SELECT * FROM nodes ORDER BY id ASC LIMIT ?", (limit,))).fetchall()
         else:
             rows = await (await db.execute("SELECT * FROM nodes ORDER BY id ASC")).fetchall()
-
-        result = []
-        for row in rows:
-            position_geo = None
-            if row["lat"] is not None and row["lon"] is not None:
-                position_geo = {"lat": row["lat"], "lon": row["lon"], "alt_m": row["alt"] or 0.0}
-            result.append(
-                {
-                    "id": row["id"],
-                    "node_type": row["node_type"],
-                    "position_m": [row["x"], row["y"], row["z"]],
-                    "position_geo": position_geo,
-                    "sensor_offsets_m": _json_loads(row["sensor_offsets_json"], []),
-                    "capabilities": _json_loads(row["capabilities_json"], []),
-                    "mobility": row["mobility"] or "stationary",
-                    "orientation": _json_loads(row["orientation_json"], {}),
-                    "metadata": _json_loads(row["metadata_json"], {}),
-                    "properties": _json_loads(row["properties_json"], {}),
-                    "last_seen_ns": row["last_seen_ns"],
-                }
-            )
-        return result
+        return [self._row_to_node(row) for row in rows]
 
     async def get_node_by_id(self, node_id: str) -> dict | None:
         db = self._require_db()
         row = await (await db.execute("SELECT * FROM nodes WHERE id = ? LIMIT 1", (node_id,))).fetchone()
         if row is None:
             return None
-        position_geo = None
-        if row["lat"] is not None and row["lon"] is not None:
-            position_geo = {"lat": row["lat"], "lon": row["lon"], "alt_m": row["alt"] or 0.0}
+        return self._row_to_node(row)
+
+    async def insert_node_registration(
+        self,
+        spec: NodeSpec,
+        *,
+        origin: str = "operator",
+        last_seen_ns: int | None = None,
+    ) -> None:
+        db = self._require_db()
+        if spec.position_m is None:
+            raise ValueError("NodeSpec.position_m is required for operator registration")
+        position_geo = spec.position_geo
+        created_ns = last_seen_ns if last_seen_ns is not None else 0
+        async with self._write_guard():
+            await db.execute(
+                """
+                INSERT INTO nodes (
+                    id, node_type, x, y, z, lat, lon, alt,
+                    sensor_offsets_json, capabilities_json, mobility,
+                    orientation_json, metadata_json, properties_json,
+                    transport_json, capability_config_json, safety_json,
+                    permissions_json, overrides_json, origin, last_seen_ns
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?)
+                """,
+                (
+                    spec.id,
+                    spec.node_type.value,
+                    spec.position_m[0],
+                    spec.position_m[1],
+                    spec.position_m[2],
+                    position_geo.lat if position_geo is not None else None,
+                    position_geo.lon if position_geo is not None else None,
+                    position_geo.alt_m if position_geo is not None else None,
+                    _json_dumps(spec.sensor_offsets_m),
+                    _json_dumps([capability.value for capability in spec.capabilities]),
+                    spec.mobility,
+                    _json_dumps(spec.orientation.model_dump(mode="json")),
+                    _json_dumps(spec.metadata),
+                    _json_dumps(spec.properties),
+                    _json_dumps(spec.transport),
+                    _json_dumps(spec.capability_config),
+                    _json_dumps(spec.safety.model_dump(mode="json")),
+                    _json_dumps(spec.permissions),
+                    origin,
+                    created_ns,
+                ),
+            )
+            await self._commit_if_needed(db)
+
+    async def update_node_operator_fields(
+        self,
+        node_id: str,
+        *,
+        transport: dict[str, Any] | None = None,
+        capability_config: dict[str, Any] | None = None,
+        safety: dict[str, Any] | None = None,
+        permissions: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        assignments: list[str] = []
+        params: list[Any] = []
+        if transport is not None:
+            assignments.append("transport_json = ?")
+            params.append(_json_dumps(transport))
+        if capability_config is not None:
+            assignments.append("capability_config_json = ?")
+            params.append(_json_dumps(capability_config))
+        if safety is not None:
+            assignments.append("safety_json = ?")
+            params.append(_json_dumps(safety))
+        if permissions is not None:
+            assignments.append("permissions_json = ?")
+            params.append(_json_dumps(permissions))
+        if metadata is not None:
+            assignments.append("metadata_json = ?")
+            params.append(_json_dumps(metadata))
+        if not assignments:
+            return await self.get_node_by_id(node_id) is not None
+        db = self._require_db()
+        async with self._write_guard():
+            cursor = await db.execute(
+                f"UPDATE nodes SET {', '.join(assignments)} WHERE id = ?",
+                (*params, node_id),
+            )
+            await self._commit_if_needed(db)
+        return cursor.rowcount > 0
+
+    async def set_node_overrides(self, node_id: str, overrides: NodeOverrides | dict[str, Any]) -> bool:
+        payload = overrides.model_dump(mode="json", exclude_none=True) if isinstance(overrides, NodeOverrides) else dict(overrides)
+        db = self._require_db()
+        async with self._write_guard():
+            cursor = await db.execute(
+                "UPDATE nodes SET overrides_json = ? WHERE id = ?",
+                (_json_dumps(payload), node_id),
+            )
+            await self._commit_if_needed(db)
+        return cursor.rowcount > 0
+
+    async def list_node_overrides(self) -> dict[str, dict[str, Any]]:
+        db = self._require_db()
+        rows = await (
+            await db.execute("SELECT id, overrides_json FROM nodes WHERE overrides_json != '{}'")
+        ).fetchall()
         return {
-            "id": row["id"],
-            "node_type": row["node_type"],
-            "position_m": [row["x"], row["y"], row["z"]],
-            "position_geo": position_geo,
-            "sensor_offsets_m": _json_loads(row["sensor_offsets_json"], []),
-            "capabilities": _json_loads(row["capabilities_json"], []),
-            "mobility": row["mobility"] or "stationary",
-            "orientation": _json_loads(row["orientation_json"], {}),
-            "metadata": _json_loads(row["metadata_json"], {}),
-            "properties": _json_loads(row["properties_json"], {}),
-            "last_seen_ns": row["last_seen_ns"],
+            row["id"]: overrides
+            for row in rows
+            if isinstance((overrides := _json_loads(row["overrides_json"], {})), dict) and overrides
         }
 
     async def get_detection_by_event_id(self, event_id: str) -> dict | None:
@@ -2967,103 +3214,12 @@ class Storage:
             await self._commit_if_needed(db)
             return cursor.rowcount > 0
 
-    # ── Effectors ──────────────────────────────────────────────────────────────
+    # ── Node Artifacts ───────────────────────────────────────────────────────
 
-    def _row_to_effector(self, row: aiosqlite.Row) -> dict[str, Any]:
-        position_geo = None
-        if row["lat"] is not None and row["lon"] is not None:
-            position_geo = {"lat": row["lat"], "lon": row["lon"], "alt_m": row["alt"] or 0.0}
-        return {
-            "id": row["id"],
-            "effector_type": row["effector_type"],
-            "position_m": [row["x"], row["y"], row["z"]],
-            "position_geo": position_geo,
-            "orientation": {"yaw_deg": row["yaw_deg"], "pitch_deg": row["pitch_deg"]},
-            "capabilities": _json_loads(row["capabilities_json"], []),
-            "transport": _json_loads(row["transport_json"], {}),
-            "metadata": _json_loads(row["metadata_json"], {}),
-            "properties": _json_loads(row["properties_json"], {}),
-            "last_seen_ns": row["last_seen_ns"],
-        }
-
-    async def upsert_effector(
-        self,
-        spec: EffectorSpec,
-        last_seen_ns: int,
-    ) -> None:
-        db = self._require_db()
-        if spec.position_m is None:
-            raise ValueError("EffectorSpec.position_m is required for persistence")
-        async with self._write_guard():
-            await db.execute(
-                """
-                INSERT INTO effectors (
-                    id, effector_type, x, y, z, lat, lon, alt,
-                    yaw_deg, pitch_deg, capabilities_json, transport_json,
-                    metadata_json, properties_json, last_seen_ns
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    effector_type=excluded.effector_type,
-                    x=excluded.x,
-                    y=excluded.y,
-                    z=excluded.z,
-                    lat=excluded.lat,
-                    lon=excluded.lon,
-                    alt=excluded.alt,
-                    yaw_deg=excluded.yaw_deg,
-                    pitch_deg=excluded.pitch_deg,
-                    capabilities_json=excluded.capabilities_json,
-                    transport_json=excluded.transport_json,
-                    metadata_json=excluded.metadata_json,
-                    properties_json=excluded.properties_json,
-                    last_seen_ns=excluded.last_seen_ns
-                """,
-                (
-                    spec.id,
-                    spec.effector_type.value,
-                    spec.position_m[0],
-                    spec.position_m[1],
-                    spec.position_m[2],
-                    spec.position_geo.lat if spec.position_geo is not None else None,
-                    spec.position_geo.lon if spec.position_geo is not None else None,
-                    spec.position_geo.alt_m if spec.position_geo is not None else None,
-                    spec.orientation.yaw_deg,
-                    spec.orientation.pitch_deg,
-                    _json_dumps(spec.capabilities),
-                    _json_dumps(spec.transport),
-                    _json_dumps(spec.metadata),
-                    _json_dumps(spec.properties),
-                    last_seen_ns,
-                ),
-            )
-            await self._commit_if_needed(db)
-
-    async def get_effector_by_id(self, effector_id: str) -> dict[str, Any] | None:
-        db = self._require_db()
-        row = await (
-            await db.execute("SELECT * FROM effectors WHERE id = ? LIMIT 1", (effector_id,))
-        ).fetchone()
-        if row is None:
-            return None
-        return self._row_to_effector(row)
-
-    async def list_effectors(self) -> list[dict[str, Any]]:
-        db = self._require_db()
-        rows = await (await db.execute("SELECT * FROM effectors ORDER BY id ASC")).fetchall()
-        return [self._row_to_effector(row) for row in rows]
-
-    async def delete_effector(self, effector_id: str) -> bool:
-        db = self._require_db()
-        async with self._write_guard():
-            cursor = await db.execute("DELETE FROM effectors WHERE id = ?", (effector_id,))
-            await self._commit_if_needed(db)
-            return cursor.rowcount > 0
-
-    async def insert_effector_artifact(
+    async def insert_node_artifact(
         self,
         *,
-        effector_id: str,
+        node_id: str,
         track_id: str | None,
         detection_id: str | None,
         kind: str = "snapshot",
@@ -3072,55 +3228,62 @@ class Storage:
         artifact_id: str | None = None,
     ) -> str:
         db = self._require_db()
-        final_id = artifact_id or f"efa-{uuid.uuid4().hex[:16]}"
+        final_id = artifact_id or f"na-{uuid.uuid4().hex[:16]}"
         async with self._write_guard():
             await db.execute(
                 """
-                INSERT INTO effector_artifacts (
-                    id, effector_id, track_id, detection_id, kind, path, created_ns
+                INSERT INTO node_artifacts (
+                    id, node_id, track_id, detection_id, kind, path, created_ns
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (final_id, effector_id, track_id, detection_id, kind, path, created_ns),
+                (final_id, node_id, track_id, detection_id, kind, path, created_ns),
             )
             await self._commit_if_needed(db)
         return final_id
 
-    async def get_effector_artifact(self, artifact_id: str) -> dict[str, Any] | None:
+    async def get_node_artifact(self, artifact_id: str) -> dict[str, Any] | None:
         db = self._require_db()
         row = await (
             await db.execute(
-                "SELECT * FROM effector_artifacts WHERE id = ? LIMIT 1", (artifact_id,)
+                "SELECT * FROM node_artifacts WHERE id = ? LIMIT 1", (artifact_id,)
             )
         ).fetchone()
         if row is None:
             return None
-        return dict(row)
+        result = dict(row)
+        result.setdefault("effector_id", result.get("node_id"))
+        return result
 
-    async def list_effector_artifacts(
+    async def list_node_artifacts(
         self,
         *,
-        effector_id: str | None = None,
+        node_id: str | None = None,
         track_id: str | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         db = self._require_db()
         clauses: list[str] = []
         params: list[object] = []
-        if effector_id is not None:
-            clauses.append("effector_id = ?")
-            params.append(effector_id)
+        if node_id is not None:
+            clauses.append("node_id = ?")
+            params.append(node_id)
         if track_id is not None:
             clauses.append("track_id = ?")
             params.append(track_id)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         rows = await (
             await db.execute(
-                f"SELECT * FROM effector_artifacts{where} ORDER BY created_ns DESC LIMIT ?",
+                f"SELECT * FROM node_artifacts{where} ORDER BY created_ns DESC LIMIT ?",
                 (*params, limit),
             )
         ).fetchall()
-        return [dict(row) for row in rows]
+        results = []
+        for row in rows:
+            result = dict(row)
+            result.setdefault("effector_id", result.get("node_id"))
+            results.append(result)
+        return results
 
     async def delete_node(self, node_id: str) -> bool:
         """Delete a node and all of its node-keyed records.

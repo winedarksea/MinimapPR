@@ -260,6 +260,7 @@ fn NodeCard(node: NodeStatus) -> impl IntoView {
         .filter(|caps| !caps.is_empty())
         .map(|caps| caps.join(", "))
         .unwrap_or_else(|| "-".to_string());
+    let capability_chips = node.capabilities.clone().unwrap_or_default();
     let bit_codes_text = node
         .bit_failure_codes
         .as_ref()
@@ -301,6 +302,11 @@ fn NodeCard(node: NodeStatus) -> impl IntoView {
                 {if !env_age.is_empty() { view!(<span>{env_age}</span>).into_any() } else { view!(<span></span>).into_any() }}
                 {if !fw.is_empty()   { view!(<span>{fw}</span>).into_any()   } else { view!(<span></span>).into_any() }}
             </div>
+            <div class="node-meta">
+                {capability_chips.into_iter().map(|capability| view! {
+                    <span class="tone-badge tone-blue">{capability}</span>
+                }).collect_view()}
+            </div>
             {if !path.is_empty() {
                 view! {
                     <div class="sparkline-wrap">
@@ -319,6 +325,7 @@ fn NodeCard(node: NodeStatus) -> impl IntoView {
                 } else {
                     view! { <span class="node-action-hint">"No channel telemetry"</span> }.into_any()
                 }}
+                <a class="btn-sm" href=format!("/settings/nodes/{}", node_id.clone())>"Configure"</a>
             </div>
             <details class="node-details">
                 <summary>"Show details"</summary>

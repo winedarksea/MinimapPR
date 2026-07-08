@@ -1,9 +1,8 @@
-"""EffectorManager: optional effector subsystem (registry + lifecycle + status broadcast).
+"""EffectorManager: optional PTZ capability driver (lifecycle + status broadcast).
 
 Template: ``FederationCoordinator`` (core/federation.py) — an optional subsystem
 that is fully dormant (no background work) when unconfigured, and activates
-without a restart once the first effector is registered. Here "unconfigured"
-means the ``effectors`` DB table is empty.
+without a restart once the first PTZ-capable node is registered.
 """
 
 from __future__ import annotations
@@ -21,11 +20,10 @@ from minimappr.core.effectors.base import Effector, EffectorCommand, ExecutionRe
 from minimappr.core.effectors.onvif_ptz import OnvifPtzDriver
 from minimappr.interfaces import StorageBackend
 from minimappr.models import (
-    EffectorOrientation,
-    EffectorSafetyConfig,
-    EffectorSpec,
-    EffectorStatus,
-    EffectorType,
+    NodeCapability,
+    NodeOrientation,
+    NodeSafetyConfig,
+    PtzStatus,
     Vec3,
 )
 
@@ -36,8 +34,19 @@ TargetZoneResolver = Callable[[Vec3], Awaitable[set[str]]]
 
 
 @dataclass(slots=True)
-class EffectorRuntime:
-    spec: EffectorSpec
+class PtzNodeSpec:
+    id: str
+    position_m: Vec3 | None
+    orientation: NodeOrientation
+    transport: dict[str, Any]
+    metadata: dict[str, Any]
+    properties: dict[str, Any]
+    safety: NodeSafetyConfig
+
+
+@dataclass(slots=True)
+class PtzRuntime:
+    spec: PtzNodeSpec
     driver: Effector | None = None
     connect_error: str | None = None
     last_slew_ns: int | None = None
@@ -64,7 +73,7 @@ class EffectorManager:
         self._storage = storage
         self._live_callback = live_callback
         self._config = config
-        self._runtimes: dict[str, EffectorRuntime] = {}
+        self._runtimes: dict[str, PtzRuntime] = {}
         self._lock = asyncio.Lock()
         self._poll_task: asyncio.Task[None] | None = None
         self._target_zone_resolver: TargetZoneResolver | None = None
@@ -74,9 +83,11 @@ class EffectorManager:
         return len(self._runtimes) > 0
 
     async def start(self) -> None:
-        specs = await self._storage.list_effectors()
-        for row in specs:
-            spec = _spec_from_row(row)
+        nodes = await self._storage.list_nodes()
+        for row in nodes:
+            if NodeCapability.PTZ_CAMERA.value not in {str(capability) for capability in row.get("capabilities", [])}:
+                continue
+            spec = _ptz_spec_from_node_row(row)
             await self._connect_and_register_runtime(spec, persist=False)
         self._ensure_poll_task()
 
@@ -92,7 +103,8 @@ class EffectorManager:
         for runtime in runtimes:
             self._cancel_home_return(runtime)
 
-    async def register(self, spec: EffectorSpec) -> EffectorSpec:
+    async def register_node(self, node: dict[str, Any]) -> PtzNodeSpec:
+        spec = _ptz_spec_from_node_row(node)
         await self._connect_and_register_runtime(spec, persist=True)
         self._ensure_poll_task()
         return spec
@@ -100,46 +112,45 @@ class EffectorManager:
     def set_target_zone_resolver(self, resolver: TargetZoneResolver | None) -> None:
         self._target_zone_resolver = resolver
 
-    async def delete(self, effector_id: str) -> bool:
+    async def detach(self, node_id: str) -> bool:
         async with self._lock:
-            runtime = self._runtimes.pop(effector_id, None)
+            runtime = self._runtimes.pop(node_id, None)
             registry_empty = not self._runtimes
         if runtime is not None:
             self._cancel_home_return(runtime)
-        deleted = await self._storage.delete_effector(effector_id)
-        await self._broadcast_status(effector_id)
+        await self._broadcast_status(node_id)
         if registry_empty:
-            # Back to fully dormant: no effectors means no background work.
+            # Back to fully dormant: no PTZ nodes means no background work.
             task = self._poll_task
             self._poll_task = None
             if task is not None:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
-        return deleted
+        return runtime is not None
 
-    async def list_status(self) -> list[EffectorStatus]:
-        results: list[EffectorStatus] = []
+    async def list_status(self) -> list[PtzStatus]:
+        results: list[PtzStatus] = []
         async with self._lock:
             runtimes = list(self._runtimes.values())
         for runtime in runtimes:
             results.append(await self._status_for_runtime(runtime))
         return results
 
-    async def get_status(self, effector_id: str) -> EffectorStatus | None:
-        runtime = self._runtimes.get(effector_id)
+    async def get_status(self, node_id: str) -> PtzStatus | None:
+        runtime = self._runtimes.get(node_id)
         if runtime is None:
             return None
         return await self._status_for_runtime(runtime)
 
-    async def get_capabilities(self, effector_id: str) -> dict[str, Any] | None:
-        runtime = self._runtimes.get(effector_id)
+    async def get_capabilities(self, node_id: str) -> dict[str, Any] | None:
+        runtime = self._runtimes.get(node_id)
         if runtime is None or runtime.driver is None:
             return None
         try:
             caps = await runtime.driver.get_capabilities()
         except Exception as exc:
-            logger.debug("effector %s get_capabilities failed: %s", effector_id, exc)
+            logger.debug("ptz node %s get_capabilities failed: %s", node_id, exc)
             return None
         return {
             "movement_strategies": caps.movement_strategies,
@@ -149,76 +160,66 @@ class EffectorManager:
             "has_zoom": caps.has_zoom,
         }
 
-    async def get_safety(self, effector_id: str) -> EffectorSafetyConfig | None:
-        runtime = self._runtimes.get(effector_id)
+    async def get_safety(self, node_id: str) -> NodeSafetyConfig | None:
+        runtime = self._runtimes.get(node_id)
         if runtime is not None:
-            return _safety_from_spec(runtime.spec)
-        row = await self._storage.get_effector_by_id(effector_id)
+            return runtime.spec.safety
+        row = await self._storage.get_node_by_id(node_id)
         if row is None:
             return None
-        return _safety_from_properties(row.get("properties", {}))
+        return NodeSafetyConfig.model_validate(row.get("safety") or {})
 
     async def update_safety(
         self,
-        effector_id: str,
-        safety: EffectorSafetyConfig,
-    ) -> EffectorSafetyConfig | None:
-        runtime = self._runtimes.get(effector_id)
-        if runtime is None:
-            row = await self._storage.get_effector_by_id(effector_id)
-            if row is None:
-                return None
-            spec = _spec_from_row(row)
-        else:
-            spec = runtime.spec
-
-        properties = dict(spec.properties or {})
-        properties["safety"] = safety.model_dump(mode="json")
-        updated_spec = spec.model_copy(update={"properties": properties})
-        await self._storage.upsert_effector(updated_spec, time.time_ns())
+        node_id: str,
+        safety: NodeSafetyConfig,
+    ) -> NodeSafetyConfig | None:
+        if not await self._storage.update_node_operator_fields(node_id, safety=safety.model_dump(mode="json")):
+            return None
+        runtime = self._runtimes.get(node_id)
         if runtime is not None:
-            runtime.spec = updated_spec
-        await self._broadcast_status(effector_id)
+            runtime.spec.safety = safety
+        await self._broadcast_status(node_id)
         return safety
 
-    async def arm(self, effector_id: str, *, zone_id: str | None = None) -> ExecutionResult:
-        runtime = self._runtimes.get(effector_id)
+    async def arm(self, node_id: str, *, zone_id: str | None = None) -> ExecutionResult:
+        runtime = self._runtimes.get(node_id)
         if runtime is None or runtime.driver is None:
             return ExecutionResult(status="FAILED", failure_class="not_found")
         try:
             accepted = await runtime.driver.arm(zone_id=zone_id)
         except Exception as exc:
-            logger.warning("effector %s arm failed: %s", effector_id, exc)
+            logger.warning("ptz node %s arm failed: %s", node_id, exc)
             return ExecutionResult(status="FAILED", failure_class=type(exc).__name__, detail=str(exc))
-        await self._broadcast_status(effector_id)
+        await self._broadcast_status(node_id)
         if not accepted:
             return ExecutionResult(status="REJECTED", failure_class="driver_refused")
         return ExecutionResult(status="COMPLETED")
 
-    async def disarm(self, effector_id: str) -> ExecutionResult:
-        runtime = self._runtimes.get(effector_id)
+    async def disarm(self, node_id: str) -> ExecutionResult:
+        runtime = self._runtimes.get(node_id)
         if runtime is None or runtime.driver is None:
             return ExecutionResult(status="FAILED", failure_class="not_found")
         try:
             accepted = await runtime.driver.disarm()
         except Exception as exc:
-            logger.warning("effector %s disarm failed: %s", effector_id, exc)
+            logger.warning("ptz node %s disarm failed: %s", node_id, exc)
             return ExecutionResult(status="FAILED", failure_class=type(exc).__name__, detail=str(exc))
-        await self._broadcast_status(effector_id)
+        await self._broadcast_status(node_id)
         if not accepted:
             return ExecutionResult(status="REJECTED", failure_class="driver_refused")
         return ExecutionResult(status="COMPLETED")
 
     async def slew_to_target(
         self,
-        effector_id: str,
+        node_id: str,
         target_pos: Vec3,
         *,
         track_id: str | None = None,
         detection_id: str | None = None,
         execution_id: str | None = None,
     ) -> ExecutionResult:
-        runtime = self._runtimes.get(effector_id)
+        runtime = self._runtimes.get(node_id)
         if runtime is None or runtime.driver is None:
             return ExecutionResult(
                 status="FAILED",
@@ -226,9 +227,9 @@ class EffectorManager:
                 failure_class="not_found",
             )
 
-        rejection = await self._check_interlocks(effector_id, runtime, target_pos)
+        rejection = await self._check_interlocks(node_id, runtime, target_pos)
         if rejection is not None:
-            logger.info("effector %s slew rejected by interlock: %s", effector_id, rejection)
+            logger.info("ptz node %s slew rejected by interlock: %s", node_id, rejection)
             return ExecutionResult(
                 status="REJECTED",
                 execution_id=execution_id or uuid.uuid4().hex,
@@ -243,18 +244,18 @@ class EffectorManager:
             runtime.last_slew_ns = time.time_ns()
             runtime.active_track_id = track_id
             self._schedule_home_return(runtime)
-        await self._broadcast_status(effector_id)
+        await self._broadcast_status(node_id)
         return result
 
     async def capture(
         self,
-        effector_id: str,
+        node_id: str,
         *,
         track_id: str | None = None,
         detection_id: str | None = None,
         execution_id: str | None = None,
     ) -> ExecutionResult:
-        runtime = self._runtimes.get(effector_id)
+        runtime = self._runtimes.get(node_id)
         if runtime is None or runtime.driver is None:
             return ExecutionResult(
                 status="FAILED",
@@ -269,11 +270,11 @@ class EffectorManager:
             )
 
         now_ns = time.time_ns()
-        dest_path = self._config.snapshot_dir / f"{effector_id}-{now_ns}.jpg"
+        dest_path = self._config.snapshot_dir / f"{node_id}-{now_ns}.jpg"
         try:
             await runtime.driver.snapshot(dest_path=dest_path)  # type: ignore[attr-defined]
         except Exception as exc:
-            logger.warning("effector %s snapshot failed: %s", effector_id, exc)
+            logger.warning("ptz node %s snapshot failed: %s", node_id, exc)
             return ExecutionResult(
                 status="FAILED",
                 execution_id=execution_id or uuid.uuid4().hex,
@@ -281,32 +282,32 @@ class EffectorManager:
                 detail=str(exc),
             )
 
-        artifact_id = await self._storage.insert_effector_artifact(
-            effector_id=effector_id,
+        artifact_id = await self._storage.insert_node_artifact(
+            node_id=node_id,
             track_id=track_id,
             detection_id=detection_id,
             kind="snapshot",
             path=str(dest_path),
             created_ns=now_ns,
         )
-        await self._broadcast_status(effector_id)
+        await self._broadcast_status(node_id)
         return ExecutionResult(
             status="COMPLETED",
             execution_id=execution_id or uuid.uuid4().hex,
             result_refs=[artifact_id],
         )
 
-    async def snapshot_live(self, effector_id: str) -> Path | None:
+    async def snapshot_live(self, node_id: str) -> Path | None:
         """Grab a fresh frame for the snapshot-refresh <img> live view.
 
-        Overwrites a single per-effector file rather than persisting an
+        Overwrites a single per-node file rather than persisting an
         artifact record — this is a live-view poll, not an evidence capture
         (see ``capture()`` for the persisted/linked variant).
         """
-        runtime = self._runtimes.get(effector_id)
+        runtime = self._runtimes.get(node_id)
         if runtime is None or runtime.driver is None or not hasattr(runtime.driver, "snapshot"):
             return None
-        dest_path = self._config.snapshot_dir / f"{effector_id}-live.jpg"
+        dest_path = self._config.snapshot_dir / f"{node_id}-live.jpg"
         await runtime.driver.snapshot(dest_path=dest_path)  # type: ignore[attr-defined]
         return dest_path
 
@@ -314,13 +315,13 @@ class EffectorManager:
 
     async def _check_interlocks(
         self,
-        effector_id: str,
-        runtime: EffectorRuntime,
+        node_id: str,
+        runtime: PtzRuntime,
         target_pos: Vec3,
     ) -> str | None:
         """Pre-execution safety gate for camera movement commands."""
-        safety = _safety_from_spec(runtime.spec)
-        if safety.require_arm_for_slew:
+        safety = runtime.spec.safety
+        if safety.require_arm_for_action:
             status = await self._status_for_runtime(runtime)
             if not status.armed:
                 return "interlock:disarmed"
@@ -329,8 +330,8 @@ class EffectorManager:
             rate_limit_rejection = None
         else:
             min_interval_s = (
-                safety.min_slew_interval_seconds
-                if safety.min_slew_interval_seconds is not None
+                safety.min_action_interval_seconds
+                if safety.min_action_interval_seconds is not None
                 else self._config.min_slew_interval_seconds
             )
             min_interval_ns = int(min_interval_s * 1_000_000_000)
@@ -346,13 +347,13 @@ class EffectorManager:
                 return "interlock:no_go_zone"
         return None
 
-    def _cancel_home_return(self, runtime: EffectorRuntime) -> None:
+    def _cancel_home_return(self, runtime: PtzRuntime) -> None:
         task = runtime.home_return_task
         runtime.home_return_task = None
         if task is not None:
             task.cancel()
 
-    def _schedule_home_return(self, runtime: EffectorRuntime) -> None:
+    def _schedule_home_return(self, runtime: PtzRuntime) -> None:
         """After a configurable dwell on the slewed-to target, return the
         camera to its home bearing. A newer slew supersedes (cancels) any
         pending return; dwell <= 0 disables the behavior."""
@@ -363,10 +364,10 @@ class EffectorManager:
             return
         runtime.home_return_task = asyncio.create_task(
             self._home_return_after_dwell(runtime),
-            name=f"effector-home-return-{runtime.spec.id}",
+            name=f"ptz-home-return-{runtime.spec.id}",
         )
 
-    async def _home_return_after_dwell(self, runtime: EffectorRuntime) -> None:
+    async def _home_return_after_dwell(self, runtime: PtzRuntime) -> None:
         await asyncio.sleep(self._config.slew_dwell_seconds)
         driver = runtime.driver
         if driver is None:
@@ -374,16 +375,21 @@ class EffectorManager:
         try:
             await driver.go_home()  # type: ignore[attr-defined]
         except Exception as exc:
-            logger.warning("effector %s home return failed: %s", runtime.spec.id, exc)
+            logger.warning("ptz node %s home return failed: %s", runtime.spec.id, exc)
             return
         runtime.active_track_id = None
         await self._broadcast_status(runtime.spec.id)
 
-    async def _connect_and_register_runtime(self, spec: EffectorSpec, *, persist: bool) -> None:
+    async def _connect_and_register_runtime(self, spec: PtzNodeSpec, *, persist: bool) -> None:
         if persist:
-            await self._storage.upsert_effector(spec, time.time_ns())
+            await self._storage.update_node_operator_fields(
+                spec.id,
+                transport=spec.transport,
+                safety=spec.safety.model_dump(mode="json"),
+                metadata=spec.metadata,
+            )
 
-        runtime = EffectorRuntime(spec=spec)
+        runtime = PtzRuntime(spec=spec)
         driver = _build_driver(spec, snapshot_dir=self._config.snapshot_dir)
         if driver is not None:
             try:
@@ -391,7 +397,7 @@ class EffectorManager:
                 runtime.driver = driver
             except Exception as exc:
                 runtime.connect_error = str(exc)
-                logger.warning("effector %s failed to connect: %s", spec.id, exc)
+                logger.warning("ptz node %s failed to connect: %s", spec.id, exc)
         async with self._lock:
             self._runtimes[spec.id] = runtime
         await self._broadcast_status(spec.id)
@@ -401,7 +407,7 @@ class EffectorManager:
             return
         if self._poll_task is not None and not self._poll_task.done():
             return
-        self._poll_task = asyncio.create_task(self._poll_loop(), name="effector-status-poll")
+        self._poll_task = asyncio.create_task(self._poll_loop(), name="ptz-status-poll")
 
     async def _poll_loop(self) -> None:
         while True:
@@ -412,7 +418,7 @@ class EffectorManager:
                 raise
             except Exception:
                 # One bad driver/cycle must never kill the status loop.
-                logger.warning("effector status poll iteration failed", exc_info=True)
+                logger.warning("ptz status poll iteration failed", exc_info=True)
 
     async def _poll_once(self) -> None:
         async with self._lock:
@@ -422,7 +428,7 @@ class EffectorManager:
                 await self._attempt_reconnect(runtime)
             await self._broadcast_status(runtime.spec.id)
 
-    async def _attempt_reconnect(self, runtime: EffectorRuntime) -> None:
+    async def _attempt_reconnect(self, runtime: PtzRuntime) -> None:
         driver = _build_driver(runtime.spec, snapshot_dir=self._config.snapshot_dir)
         if driver is None:
             return
@@ -430,22 +436,22 @@ class EffectorManager:
             await driver.connect()
         except Exception as exc:
             runtime.connect_error = str(exc)
-            logger.debug("effector %s reconnect attempt failed: %s", runtime.spec.id, exc)
+            logger.debug("ptz node %s reconnect attempt failed: %s", runtime.spec.id, exc)
             return
         runtime.driver = driver
         runtime.connect_error = None
-        logger.info("effector %s connected after retry", runtime.spec.id)
+        logger.info("ptz node %s connected after retry", runtime.spec.id)
 
-    async def _status_for_runtime(self, runtime: EffectorRuntime) -> EffectorStatus:
+    async def _status_for_runtime(self, runtime: PtzRuntime) -> PtzStatus:
         if runtime.driver is None:
-            return EffectorStatus(effector_id=runtime.spec.id, state="offline", armed=False)
+            return PtzStatus(node_id=runtime.spec.id, state="offline", armed=False)
         try:
             raw = await runtime.driver.get_status()
         except Exception as exc:
-            logger.debug("effector %s get_status failed: %s", runtime.spec.id, exc)
-            return EffectorStatus(effector_id=runtime.spec.id, state="error", armed=False)
-        return EffectorStatus(
-            effector_id=runtime.spec.id,
+            logger.debug("ptz node %s get_status failed: %s", runtime.spec.id, exc)
+            return PtzStatus(node_id=runtime.spec.id, state="error", armed=False)
+        return PtzStatus(
+            node_id=runtime.spec.id,
             state=raw.get("state", "offline"),
             pan_deg=raw.get("pan_deg"),
             tilt_deg=raw.get("tilt_deg"),
@@ -455,57 +461,54 @@ class EffectorManager:
             active_track_id=raw.get("active_track_id") or runtime.active_track_id,
         )
 
-    async def _broadcast_status(self, effector_id: str) -> None:
+    async def _broadcast_status(self, node_id: str) -> None:
         if self._live_callback is None:
             return
-        runtime = self._runtimes.get(effector_id)
+        runtime = self._runtimes.get(node_id)
         if runtime is None:
-            payload = {"type": "effector_status", "effector_id": effector_id, "state": "deleted"}
+            payload = {
+                "type": "node_capability_status",
+                "node_id": node_id,
+                "effector_id": node_id,
+                "capability": "ptz_camera",
+                "status": {"state": "deleted"},
+                "state": "deleted",
+            }
         else:
             status = await self._status_for_runtime(runtime)
-            payload = {"type": "effector_status", **status.model_dump(mode="json")}
+            status_payload = status.model_dump(mode="json")
+            payload = {
+                "type": "node_capability_status",
+                "node_id": node_id,
+                "effector_id": node_id,
+                "capability": "ptz_camera",
+                "status": status_payload,
+                **status_payload,
+            }
         try:
             await self._live_callback(payload)
         except Exception:
-            logger.debug("effector status broadcast failed for %s", effector_id, exc_info=True)
+            logger.debug("ptz status broadcast failed for %s", node_id, exc_info=True)
 
 
-def _spec_from_row(row: dict[str, Any]) -> EffectorSpec:
+def _ptz_spec_from_node_row(row: dict[str, Any]) -> PtzNodeSpec:
     orientation_row = row.get("orientation") or {}
-    return EffectorSpec(
+    return PtzNodeSpec(
         id=row["id"],
-        effector_type=EffectorType(row["effector_type"]),
         position_m=tuple(row["position_m"]) if row.get("position_m") else None,
-        position_geo=row.get("position_geo"),
-        orientation=EffectorOrientation(
-            yaw_deg=orientation_row.get("yaw_deg", 0.0),
-            pitch_deg=orientation_row.get("pitch_deg", 0.0),
-        ),
-        capabilities=row.get("capabilities", []),
-        transport=row.get("transport", {}),
-        metadata=row.get("metadata", {}),
-        properties=row.get("properties", {}),
+        orientation=NodeOrientation.model_validate(orientation_row),
+        transport=dict(row.get("transport") or {}),
+        metadata=dict(row.get("metadata") or {}),
+        properties=dict(row.get("properties") or {}),
+        safety=NodeSafetyConfig.model_validate(row.get("safety") or {}),
     )
 
 
-def _safety_from_spec(spec: EffectorSpec) -> EffectorSafetyConfig:
-    return _safety_from_properties(spec.properties)
-
-
-def _safety_from_properties(properties: dict[str, Any] | None) -> EffectorSafetyConfig:
-    raw = properties.get("safety") if isinstance(properties, dict) else None
-    if not isinstance(raw, dict):
-        raw = {}
-    return EffectorSafetyConfig.model_validate(raw)
-
-
-def _build_driver(spec: EffectorSpec, *, snapshot_dir: Path) -> Effector | None:
-    if spec.effector_type != EffectorType.CAMERA_PTZ:
-        return None
+def _build_driver(spec: PtzNodeSpec, *, snapshot_dir: Path) -> Effector | None:
     transport = spec.transport or {}
     host = transport.get("host")
     if not host:
-        logger.warning("effector %s has no transport.host; driver not created", spec.id)
+        logger.warning("ptz node %s has no transport.host; driver not created", spec.id)
         return None
     return OnvifPtzDriver(
         effector_id=spec.id,

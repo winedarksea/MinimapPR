@@ -1,6 +1,4 @@
-use crate::state::{
-    AppState, CopItemKind, CopSelection, Detection, Effector, NodeStatus, Track, ZoneSpec,
-};
+use crate::state::{AppState, CopItemKind, CopSelection, Detection, NodeStatus, Track, ZoneSpec};
 use crate::ui::short_id;
 use crate::workspace::layout::clamp_dock_width;
 use leptos::prelude::*;
@@ -148,16 +146,6 @@ fn render_selection_body(state: &AppState, selection: &CopSelection) -> AnyView 
             })
             .map(render_node)
             .unwrap_or_else(|| render_missing(selection)),
-        CopItemKind::Effector => state
-            .effectors
-            .with(|effectors| {
-                effectors
-                    .iter()
-                    .find(|effector| effector.id == selection.id)
-                    .cloned()
-            })
-            .map(render_effector)
-            .unwrap_or_else(|| render_missing(selection)),
         CopItemKind::Zone => {
             let occupancy = state.zone_occupancy.get();
             state
@@ -201,63 +189,39 @@ fn render_node(node: NodeStatus) -> AnyView {
         .latest_time_quality
         .clone()
         .unwrap_or_else(|| "-".to_string());
+    let ptz_state = node
+        .ptz_status
+        .as_ref()
+        .map(|status| status.state.clone())
+        .unwrap_or_else(|| "-".to_string());
+    let ptz_armed = node
+        .ptz_status
+        .as_ref()
+        .map(|status| status.armed.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let capabilities = node.capabilities.clone().unwrap_or_default().join(", ");
+    let node_type = node.node_type.clone().unwrap_or_else(|| "-".to_string());
+    let mobility = node.mobility.clone().unwrap_or_else(|| "-".to_string());
+    let health = node.health.clone();
+    let has_ptz = node.has_capability("ptz_camera");
 
     view! {
         <div class="entity-inspector-body">
-            <Kv label="Health" value=node.health />
-            <Kv label="Type" value=node.node_type.unwrap_or_else(|| "-".to_string()) />
-            <Kv label="Mobility" value=node.mobility.unwrap_or_else(|| "-".to_string()) />
+            <Kv label="Health" value=health />
+            <Kv label="Type" value=node_type />
+            <Kv label="Mobility" value=mobility />
             <Kv label="Geo" value=geo />
             <Kv label="Local" value=local_position />
             <Kv label="Audio" value=audio_status />
             <Kv label="RMS" value=rms />
             <Kv label="Clock" value=time_quality />
-        </div>
-    }
-    .into_any()
-}
-
-fn render_effector(effector: Effector) -> AnyView {
-    let geo = effector
-        .position_geo
-        .as_ref()
-        .map(|point| geo_text(point.lat, point.lon, point.alt_m))
-        .unwrap_or_else(|| "-".to_string());
-    let state = effector
-        .status
-        .as_ref()
-        .map(|status| status.state.clone())
-        .unwrap_or_else(|| "-".to_string());
-    let armed = effector
-        .status
-        .as_ref()
-        .map(|status| status.armed.to_string())
-        .unwrap_or_else(|| "-".to_string());
-    let pan = effector
-        .status
-        .as_ref()
-        .and_then(|status| status.pan_deg)
-        .map(|value| format!("{value:.1} deg"))
-        .unwrap_or_else(|| "-".to_string());
-    let tilt = effector
-        .status
-        .as_ref()
-        .and_then(|status| status.tilt_deg)
-        .map(|value| format!("{value:.1} deg"))
-        .unwrap_or_else(|| "-".to_string());
-
-    view! {
-        <div class="entity-inspector-body">
-            <Kv label="Type" value=effector.effector_type />
-            <Kv label="State" value=state />
-            <Kv label="Armed" value=armed />
-            <Kv label="Geo" value=geo />
-            <Kv label="Pan" value=pan />
-            <Kv label="Tilt" value=tilt />
-            <Kv
-                label="Capabilities"
-                value=effector.capabilities.unwrap_or_default().join(", ")
-            />
+            <Kv label="Capabilities" value=capabilities />
+            {has_ptz.then(|| view! {
+                <>
+                    <Kv label="PTZ State" value=ptz_state />
+                    <Kv label="Armed" value=ptz_armed />
+                </>
+            })}
         </div>
     }
     .into_any()

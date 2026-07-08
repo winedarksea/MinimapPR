@@ -14,6 +14,14 @@ pub struct NodeStatus {
     pub capabilities: Option<Vec<String>>,
     pub position_m: Option<Vec<f64>>,
     pub position_geo: Option<GeoPoint>,
+    pub reported_position_m: Option<Vec<f64>>,
+    #[serde(default)]
+    pub overrides: serde_json::Value,
+    #[serde(default)]
+    pub safety: serde_json::Value,
+    #[serde(default)]
+    pub permissions: serde_json::Value,
+    pub ptz_status: Option<PtzStatusData>,
     pub gps_fix: Option<bool>,
     pub temperature_c: Option<f64>,
     #[serde(alias = "humidity_fraction")]
@@ -26,6 +34,15 @@ pub struct NodeStatus {
     pub latest_environment: Option<NodeEnvironment>,
     pub metadata: Option<NodeMetadata>,
     pub latest_time_quality: Option<String>,
+}
+
+impl NodeStatus {
+    pub fn has_capability(&self, capability: &str) -> bool {
+        self.capabilities
+            .as_ref()
+            .map(|capabilities| capabilities.iter().any(|item| item == capability))
+            .unwrap_or(false)
+    }
 }
 
 fn default_node_health() -> String {
@@ -243,7 +260,7 @@ pub struct NodeOmniDetectionSummary {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
-pub struct EffectorStatusData {
+pub struct PtzStatusData {
     #[serde(default)]
     pub state: String,
     pub pan_deg: Option<f64>,
@@ -253,42 +270,18 @@ pub struct EffectorStatusData {
     pub armed: bool,
     pub last_seen_ns: Option<i64>,
     pub active_track_id: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
-pub struct EffectorOrientation {
-    #[serde(default)]
-    pub yaw_deg: f64,
-    #[serde(default)]
-    pub pitch_deg: f64,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-pub struct Effector {
-    pub id: String,
-    #[serde(default)]
-    pub effector_type: String,
-    pub position_m: Option<Vec<f64>>,
-    pub position_geo: Option<GeoPoint>,
-    /// Camera home bearing; status.pan_deg is relative to this yaw.
-    pub orientation: Option<EffectorOrientation>,
-    pub capabilities: Option<Vec<String>>,
-    pub metadata: Option<serde_json::Value>,
-    pub status: Option<EffectorStatusData>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
-pub struct EffectorStatusEvent {
-    pub effector_id: String,
-    #[serde(default)]
-    pub state: String,
-    pub pan_deg: Option<f64>,
-    pub tilt_deg: Option<f64>,
-    pub zoom: Option<f64>,
-    #[serde(default)]
-    pub armed: bool,
-    pub last_seen_ns: Option<i64>,
-    pub active_track_id: Option<String>,
+pub struct NodeCapabilityStatusEvent {
+    pub node_id: String,
+    pub capability: String,
+    pub status: PtzStatusData,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct NodeUpdatedEvent {
+    pub node_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

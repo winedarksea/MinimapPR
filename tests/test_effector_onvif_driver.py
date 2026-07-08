@@ -20,7 +20,7 @@ from minimappr.core.effectors.onvif_ptz import (
     select_movement_strategy,
     select_snapshot_strategy,
 )
-from minimappr.models import EffectorOrientation
+from minimappr.models import NodeOrientation
 
 
 def _driver(tmp_path: Path) -> OnvifPtzDriver:
@@ -31,7 +31,7 @@ def _driver(tmp_path: Path) -> OnvifPtzDriver:
         username="admin",
         password="secret",
         camera_pos=(0.0, 0.0, 2.0),
-        camera_orientation=EffectorOrientation(),
+        camera_orientation=NodeOrientation(),
         snapshot_dir=tmp_path,
         rtsp_url="rtsp://192.168.1.50/stream1",
     )
@@ -406,7 +406,7 @@ async def test_snapshot_raises_when_no_uri_and_no_rtsp_configured(tmp_path: Path
         username="",
         password="",
         camera_pos=(0.0, 0.0, 0.0),
-        camera_orientation=EffectorOrientation(),
+        camera_orientation=NodeOrientation(),
         snapshot_dir=tmp_path,
         rtsp_url=None,
     )

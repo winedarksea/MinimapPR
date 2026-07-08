@@ -1,6 +1,7 @@
 use crate::api::list_overlays;
 use crate::map::bindings::{pulse_track_marker, trigger_node_omni_ripple};
-use crate::state::{AppState, LiveEvent, WsStatus, MAX_FEED_LEN};
+use crate::state::{AppState, LiveEvent, NodeStatus, WsStatus, MAX_FEED_LEN};
+use gloo_net::http::Request;
 use gloo_timers::future::TimeoutFuture;
 use leptos::prelude::*;
 use wasm_bindgen::prelude::*;
@@ -118,18 +119,25 @@ fn handle_message(state: &AppState, text: &str) {
         LiveEvent::ConfigUpdated { config } => {
             state.config.set(Some(config));
         }
-        LiveEvent::EffectorStatus(update) => {
-            state.effectors.update(|effectors| {
-                if let Some(effector) = effectors.iter_mut().find(|e| e.id == update.effector_id) {
-                    effector.status = Some(crate::state::EffectorStatusData {
-                        state: update.state,
-                        pan_deg: update.pan_deg,
-                        tilt_deg: update.tilt_deg,
-                        zoom: update.zoom,
-                        armed: update.armed,
-                        last_seen_ns: update.last_seen_ns,
-                        active_track_id: update.active_track_id,
-                    });
+        LiveEvent::NodeCapabilityStatus(update) => {
+            if update.capability == "ptz_camera" {
+                state.nodes.update(|nodes| {
+                    if let Some(node) = nodes.iter_mut().find(|node| node.node_id == update.node_id) {
+                        node.ptz_status = Some(update.status.clone());
+                    }
+                });
+            }
+        }
+        LiveEvent::NodeUpdated(update) => {
+            let nodes_signal = state.nodes;
+            spawn_local(async move {
+                match Request::get("/api/v1/nodes?limit=64").send().await {
+                    Ok(resp) if resp.ok() => match resp.json::<Vec<NodeStatus>>().await {
+                        Ok(nodes) => nodes_signal.set(nodes),
+                        Err(error) => log::warn!("node refresh parse failed after websocket update for {}: {error}", update.node_id),
+                    },
+                    Ok(resp) => log::warn!("node refresh failed after websocket update for {}: HTTP {}", update.node_id, resp.status()),
+                    Err(error) => log::warn!("node refresh failed after websocket update for {}: {error}", update.node_id),
                 }
             });
         }

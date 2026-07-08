@@ -1,7 +1,6 @@
-use crate::devices::schema::{DeviceKind, DeviceRecord};
 use crate::state::{
     AcousticMapLayer, AcousticMapSample, AppState, RfEmitterEstimate, RfSpectrumFrame,
-    SeismicTrace, TranscriptLine,
+    NodeStatus, SeismicTrace, TranscriptLine,
 };
 use futures::StreamExt;
 use gloo_timers::future::IntervalStream;
@@ -12,54 +11,83 @@ use wasm_bindgen_futures::spawn_local;
 const MAX_TRANSCRIPT_LINES: usize = 48;
 
 pub fn start_mock_feeds(state: AppState) {
+    if !mock_feeds_enabled() {
+        return;
+    }
     spawn_local(async move {
         let mut tick: u64 = 0;
         let mut interval = IntervalStream::new(1_500);
         while interval.next().await.is_some() {
             tick = tick.wrapping_add(1);
-            let devices = state.devices.get_untracked();
-            publish_rf_frames(&state, &devices, tick);
-            publish_seismic_traces(&state, &devices, tick);
-            publish_speech_lines(&state, &devices, tick);
+            let nodes = state.nodes.get_untracked();
+            publish_rf_frames(&state, &nodes, tick);
+            publish_seismic_traces(&state, &nodes, tick);
+            publish_speech_lines(&state, &nodes, tick);
             publish_acoustic_map(&state, tick);
         }
     });
 }
 
-fn publish_rf_frames(state: &AppState, devices: &[DeviceRecord], tick: u64) {
-    let frames = devices
+fn mock_feeds_enabled() -> bool {
+    let Some(window) = web_sys::window() else {
+        return false;
+    };
+    let search = window.location().search().unwrap_or_default();
+    if search.contains("mock=1") || search.contains("mock=true") {
+        crate::prefs::set(crate::prefs::KEY_MOCK_FEEDS, "1");
+        return true;
+    }
+    crate::prefs::get(crate::prefs::KEY_MOCK_FEEDS)
+        .map(|value| value == "1" || value == "true")
+        .unwrap_or(false)
+}
+
+fn has_capability(node: &NodeStatus, capability: &str) -> bool {
+    node.has_capability(capability)
+}
+
+fn node_label(node: &NodeStatus) -> String {
+    node.metadata
+        .as_ref()
+        .and_then(|metadata| serde_json::to_value(metadata).ok())
+        .and_then(|metadata| metadata.get("label").and_then(|value| value.as_str()).map(str::to_string))
+        .unwrap_or_else(|| node.node_id.clone())
+}
+
+fn publish_rf_frames(state: &AppState, nodes: &[NodeStatus], tick: u64) {
+    let frames = nodes
         .iter()
-        .filter(|device| matches!(device.kind, DeviceKind::SdrRf | DeviceKind::Radar24G))
-        .map(|device| rf_frame_for_device(device, tick))
+        .filter(|node| has_capability(node, "sdr") || has_capability(node, "radar_24g"))
+        .map(|node| rf_frame_for_node(node, tick))
         .collect::<Vec<_>>();
     state.modality.rf_spectra.set(frames);
 }
 
-fn publish_seismic_traces(state: &AppState, devices: &[DeviceRecord], tick: u64) {
-    let traces = devices
+fn publish_seismic_traces(state: &AppState, nodes: &[NodeStatus], tick: u64) {
+    let traces = nodes
         .iter()
-        .filter(|device| device.kind == DeviceKind::Seismic)
-        .map(|device| seismic_trace_for_device(device, tick))
+        .filter(|node| has_capability(node, "seismic"))
+        .map(|node| seismic_trace_for_node(node, tick))
         .collect::<Vec<_>>();
     state.modality.seismic_traces.set(traces);
 }
 
-fn publish_speech_lines(state: &AppState, devices: &[DeviceRecord], tick: u64) {
-    let speech_devices = devices
+fn publish_speech_lines(state: &AppState, nodes: &[NodeStatus], tick: u64) {
+    let speech_nodes = nodes
         .iter()
-        .filter(|device| device.kind == DeviceKind::SpeechNode)
+        .filter(|node| has_capability(node, "speech"))
         .collect::<Vec<_>>();
-    if speech_devices.is_empty() {
+    if speech_nodes.is_empty() {
         state.modality.speech_lines.set(Default::default());
         return;
     }
 
     state.modality.speech_lines.update(|lines| {
-        for device in speech_devices {
-            if !(tick + stable_seed(&device.id)).is_multiple_of(3) {
+        for node in speech_nodes {
+            if !(tick + stable_seed(&node.node_id)).is_multiple_of(3) {
                 continue;
             }
-            lines.push_front(transcript_line_for_device(device, tick));
+            lines.push_front(transcript_line_for_node(node, tick));
         }
         while lines.len() > MAX_TRANSCRIPT_LINES {
             lines.pop_back();
@@ -130,8 +158,8 @@ fn publish_acoustic_map(state: &AppState, tick: u64) {
     }]);
 }
 
-fn rf_frame_for_device(device: &DeviceRecord, tick: u64) -> RfSpectrumFrame {
-    let seed = stable_seed(&device.id);
+fn rf_frame_for_node(node: &NodeStatus, tick: u64) -> RfSpectrumFrame {
+    let seed = stable_seed(&node.node_id);
     let phase = tick as f64 * 0.23 + seed as f64 * 0.001;
     let bins = (0..36)
         .map(|index| {
@@ -144,11 +172,17 @@ fn rf_frame_for_device(device: &DeviceRecord, tick: u64) -> RfSpectrumFrame {
         .collect::<Vec<_>>();
 
     let emitter_id = format!("RF-{:04X}", (seed as u16) ^ ((tick as u16) << 2));
-    let lat = device.lat.map(|lat| lat + ((phase * 0.7).sin() * 0.00025));
-    let lon = device.lon.map(|lon| lon + ((phase * 0.5).cos() * 0.00025));
+    let lat = node
+        .position_geo
+        .as_ref()
+        .map(|geo| geo.lat + ((phase * 0.7).sin() * 0.00025));
+    let lon = node
+        .position_geo
+        .as_ref()
+        .map(|geo| geo.lon + ((phase * 0.5).cos() * 0.00025));
     RfSpectrumFrame {
-        device_id: device.id.clone(),
-        center_mhz: if device.kind == DeviceKind::Radar24G {
+        device_id: node.node_id.clone(),
+        center_mhz: if has_capability(node, "radar_24g") {
             24_125.0
         } else {
             915.0 + (seed % 5) as f64 * 2.0
@@ -165,8 +199,8 @@ fn rf_frame_for_device(device: &DeviceRecord, tick: u64) -> RfSpectrumFrame {
     }
 }
 
-fn seismic_trace_for_device(device: &DeviceRecord, tick: u64) -> SeismicTrace {
-    let seed = stable_seed(&device.id);
+fn seismic_trace_for_node(node: &NodeStatus, tick: u64) -> SeismicTrace {
+    let seed = stable_seed(&node.node_id);
     let phase = tick as f64 * 0.31 + seed as f64 * 0.0007;
     let samples = (0..48)
         .map(|index| {
@@ -180,7 +214,7 @@ fn seismic_trace_for_device(device: &DeviceRecord, tick: u64) -> SeismicTrace {
     let peak = samples.iter().copied().fold(0.0, f64::max);
 
     SeismicTrace {
-        device_id: device.id.clone(),
+        device_id: node.node_id.clone(),
         samples,
         peak_velocity_mms: peak * 14.0,
         event_count: ((tick + seed) % 7) as u32,
@@ -188,7 +222,7 @@ fn seismic_trace_for_device(device: &DeviceRecord, tick: u64) -> SeismicTrace {
     }
 }
 
-fn transcript_line_for_device(device: &DeviceRecord, tick: u64) -> TranscriptLine {
+fn transcript_line_for_node(node: &NodeStatus, tick: u64) -> TranscriptLine {
     let phrases = [
         "voice activity bearing east",
         "short command-like utterance",
@@ -196,12 +230,12 @@ fn transcript_line_for_device(device: &DeviceRecord, tick: u64) -> TranscriptLin
         "uncertain human vocalization",
         "radio-adjacent speech burst",
     ];
-    let seed = stable_seed(&device.id);
+    let seed = stable_seed(&node.node_id);
     let phrase = phrases[((seed + tick) as usize) % phrases.len()];
     TranscriptLine {
-        line_id: format!("{}-{tick}", device.id),
-        device_id: device.id.clone(),
-        text: phrase.to_string(),
+        line_id: format!("{}-{tick}", node.node_id),
+        device_id: node.node_id.clone(),
+        text: format!("{}: {phrase}", node_label(node)),
         confidence: 0.52 + (((tick + seed) % 37) as f64 / 100.0),
         timestamp_ns: now_ns(),
     }

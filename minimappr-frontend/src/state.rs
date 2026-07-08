@@ -1,5 +1,4 @@
 use crate::api::MapOverlay;
-use crate::devices::schema::DeviceRecord;
 use crate::recording::RecordingSession;
 use leptos::prelude::RwSignal;
 use serde::{Deserialize, Serialize};
@@ -33,7 +32,6 @@ pub enum CopItemKind {
     Detection,
     Alert,
     Node,
-    Effector,
     Zone,
 }
 
@@ -44,7 +42,6 @@ impl CopItemKind {
             Self::Detection => "detection",
             Self::Alert => "alert",
             Self::Node => "node",
-            Self::Effector => "effector",
             Self::Zone => "zone",
         }
     }
@@ -55,7 +52,6 @@ impl CopItemKind {
             Self::Detection => "Detection",
             Self::Alert => "Alert",
             Self::Node => "Node",
-            Self::Effector => "Effector",
             Self::Zone => "Zone",
         }
     }
@@ -66,7 +62,6 @@ impl CopItemKind {
             "detection" => Some(Self::Detection),
             "alert" => Some(Self::Alert),
             "node" => Some(Self::Node),
-            "effector" => Some(Self::Effector),
             "zone" => Some(Self::Zone),
             _ => None,
         }
@@ -122,12 +117,10 @@ pub struct MapLayerVisibility {
     pub nodes: bool,
     pub tracks: bool,
     pub detections: bool,
-    pub effectors: bool,
     pub omni: bool,
     pub zones: bool,
     pub overlays: bool,
     pub acoustic: bool,
-    pub future_modalities: bool,
 }
 
 impl Default for MapLayerVisibility {
@@ -136,12 +129,10 @@ impl Default for MapLayerVisibility {
             nodes: true,
             tracks: true,
             detections: true,
-            effectors: true,
             omni: true,
             zones: true,
             overlays: true,
             acoustic: true,
-            future_modalities: true,
         }
     }
 }
@@ -165,16 +156,12 @@ impl MapLayerVisibility {
 pub struct AppState {
     pub nodes: RwSignal<Vec<NodeStatus>>,
     pub tracks: RwSignal<Vec<Track>>,
-    /// Registered PTZ effectors. Empty unless a camera has been registered —
-    /// all effector UI is gated on this being non-empty.
-    pub effectors: RwSignal<Vec<Effector>>,
     pub detections: RwSignal<VecDeque<Detection>>,
     pub omni_detection_summaries: RwSignal<Vec<NodeOmniDetectionSummary>>,
     pub alerts: RwSignal<VecDeque<Alert>>,
     pub zones: RwSignal<Vec<ZoneSpec>>,
     pub zone_occupancy: RwSignal<Vec<ZoneOccupancyState>>,
     pub overlays: RwSignal<Vec<MapOverlay>>,
-    pub devices: RwSignal<Vec<DeviceRecord>>,
     pub modality: ModalityFeeds,
     pub live_heatmap_enabled: RwSignal<bool>,
     pub live_heatmap_window: RwSignal<String>,
@@ -205,14 +192,12 @@ impl AppState {
         Self {
             nodes: RwSignal::new(vec![]),
             tracks: RwSignal::new(vec![]),
-            effectors: RwSignal::new(vec![]),
             detections: RwSignal::new(VecDeque::new()),
             omni_detection_summaries: RwSignal::new(vec![]),
             alerts: RwSignal::new(VecDeque::new()),
             zones: RwSignal::new(vec![]),
             zone_occupancy: RwSignal::new(vec![]),
             overlays: RwSignal::new(vec![]),
-            devices: RwSignal::new(crate::devices::registry::load_devices()),
             modality: ModalityFeeds::new(),
             live_heatmap_enabled: RwSignal::new(false),
             live_heatmap_window: RwSignal::new("1h".to_string()),
@@ -248,7 +233,8 @@ pub enum LiveEvent {
     ConfigUpdated {
         config: ConfigSnapshot,
     },
-    EffectorStatus(EffectorStatusEvent),
+    NodeCapabilityStatus(NodeCapabilityStatusEvent),
+    NodeUpdated(NodeUpdatedEvent),
     RecordingStatus {
         session: RecordingSession,
     },

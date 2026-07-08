@@ -24,7 +24,6 @@ pub fn MapPanel() -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState");
     let nodes = state.nodes;
     let tracks = state.tracks;
-    let effectors = state.effectors;
     let detections = state.detections;
     let selected_cop_item = state.selected_cop_item;
     let config = state.config;
@@ -200,16 +199,6 @@ pub fn MapPanel() -> impl IntoView {
                                     "Offline"
                                 </span>
                             </div>
-                            // Effectors (PTZ cameras) — only shown once one exists.
-                            {move || (!effectors.get().is_empty()).then(|| view! {
-                                <div class="legend-group">
-                                    <div class="legend-group-label">"Effectors"</div>
-                                    <span class="legend-item">
-                                        <span class="legend-shape-node"></span>
-                                        "PTZ camera"
-                                    </span>
-                                </div>
-                            })}
                             // Tracks
                             <div class="legend-group">
                                 <div class="legend-group-label">"Tracks"</div>

@@ -14,7 +14,7 @@ from typing import Any
 
 from minimappr.core.effectors.base import EffectorCapabilities, EffectorCommand, ExecutionResult
 from minimappr.core.effectors.geometry import compute_pan_tilt
-from minimappr.models import EffectorOrientation, Vec3
+from minimappr.models import NodeOrientation, Vec3
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +106,7 @@ class OnvifPtzDriver:
         username: str,
         password: str,
         camera_pos: Vec3,
-        camera_orientation: EffectorOrientation,
+        camera_orientation: NodeOrientation,
         snapshot_dir: Path,
         rtsp_url: str | None = None,
         continuous_move_speed: float = 0.5,

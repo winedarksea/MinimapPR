@@ -1,7 +1,7 @@
-use crate::api::aim_effector_at_track;
+use crate::api::aim_ptz_node_at_track;
 use crate::map::bindings::pan_to;
 use crate::panels::contributors::CompactContributorChips;
-use crate::panels::effector_view::EffectorLiveView;
+use crate::panels::ptz_view::PtzLiveView;
 use crate::state::{AppState, CopItemKind, CopSelection};
 use crate::ui::{
     classify_age_from_ns, cop_sidebar_element_id, is_cop_item_selected, short_id,
@@ -46,12 +46,12 @@ fn trigger_track_download(track_id: &str) {
 pub fn TracksPane() -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState");
     let tracks = state.tracks;
-    let effectors = state.effectors;
+    let nodes = state.nodes;
     let selected_cop_item = state.selected_cop_item;
     let audio_drawer_open = state.audio_drawer_open;
     let audio_drawer_detection_id = state.audio_drawer_detection_id;
     let audio_drawer_track_id = state.audio_drawer_track_id;
-    // (track_id, effector_id) of the track currently showing a live camera view.
+    // (track_id, node_id) of the track currently showing a live camera view.
     // Only one live view is shown at a time to keep the sidebar compact.
     let active_live_view: RwSignal<Option<(String, String)>> = RwSignal::new(None);
     let aim_error: RwSignal<Option<String>> = RwSignal::new(None);
@@ -242,16 +242,20 @@ pub fn TracksPane() -> impl IntoView {
                                                 </div>
                                             </dd>
 
-                                            // Effector controls: entirely absent unless a camera is registered.
+                                            // PTZ controls: entirely absent unless a camera-capable node is registered.
                                             {move || {
-                                                let effector_list = effectors.get();
-                                                if effector_list.is_empty() {
+                                                let ptz_nodes = nodes
+                                                    .get()
+                                                    .into_iter()
+                                                    .filter(|node| node.has_capability("ptz_camera"))
+                                                    .collect::<Vec<_>>();
+                                                if ptz_nodes.is_empty() {
                                                     return ().into_any();
                                                 }
-                                                let first_effector_id = effector_list[0].id.clone();
+                                                let first_node_id = ptz_nodes[0].node_id.clone();
                                                 let aim_track_id = aim_track_id.clone();
                                                 let click_track_id = aim_track_id.clone();
-                                                let click_effector_id = first_effector_id.clone();
+                                                let click_node_id = first_node_id.clone();
                                                 let live_view_track_id = live_view_track_id.clone();
                                                 let is_live = active_live_view.get()
                                                     .as_ref()
@@ -266,12 +270,12 @@ pub fn TracksPane() -> impl IntoView {
                                                                 title="Aim camera at this track"
                                                                 on:click=move |_| {
                                                                     let track_id = click_track_id.clone();
-                                                                    let effector_id = click_effector_id.clone();
+                                                                    let node_id = click_node_id.clone();
                                                                     aim_error.set(None);
                                                                     spawn_local(async move {
-                                                                        match aim_effector_at_track(&effector_id, &track_id).await {
+                                                                        match aim_ptz_node_at_track(&node_id, &track_id).await {
                                                                             Ok(()) => {
-                                                                                active_live_view.set(Some((track_id, effector_id)));
+                                                                                active_live_view.set(Some((track_id, node_id)));
                                                                             }
                                                                             Err(e) => aim_error.set(Some(e)),
                                                                         }
@@ -285,10 +289,10 @@ pub fn TracksPane() -> impl IntoView {
                                                             })}
                                                         </div>
                                                         {move || {
-                                                            active_live_view.get().filter(|(t, _)| *t == live_view_track_id).map(|(t, effector_id)| {
+                                                            active_live_view.get().filter(|(t, _)| *t == live_view_track_id).map(|(t, node_id)| {
                                                                 view! {
-                                                                    <EffectorLiveView
-                                                                        effector_id=effector_id
+                                                                    <PtzLiveView
+                                                                        node_id=node_id
                                                                         track_id=Some(t)
                                                                         on_close=move |_: ()| active_live_view.set(None)
                                                                     />

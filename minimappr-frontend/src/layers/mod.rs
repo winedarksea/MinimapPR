@@ -1,7 +1,5 @@
 pub mod acoustic;
 pub mod detections;
-pub mod effectors;
-pub mod future_modalities;
 pub mod heatmap;
 pub mod nodes;
 pub mod omni;
@@ -17,7 +15,6 @@ pub enum LayerGroup {
     Entities,
     Context,
     Analytics,
-    Modalities,
 }
 
 impl LayerGroup {
@@ -26,7 +23,6 @@ impl LayerGroup {
             Self::Entities => "entities",
             Self::Context => "context",
             Self::Analytics => "analytics",
-            Self::Modalities => "modalities",
         }
     }
 }
@@ -67,14 +63,6 @@ pub const LAYER_DEFS: &[LayerDef] = &[
         set_visible: |layers, visible| layers.detections = visible,
     },
     LayerDef {
-        id: "effectors",
-        title: "Effectors",
-        group: LayerGroup::Entities,
-        default_visible: true,
-        get_visible: |layers| layers.effectors,
-        set_visible: |layers, visible| layers.effectors = visible,
-    },
-    LayerDef {
         id: "omni",
         title: "Omni",
         group: LayerGroup::Entities,
@@ -106,14 +94,6 @@ pub const LAYER_DEFS: &[LayerDef] = &[
         get_visible: |layers| layers.acoustic,
         set_visible: |layers, visible| layers.acoustic = visible,
     },
-    LayerDef {
-        id: "future_modalities",
-        title: "Modalities",
-        group: LayerGroup::Modalities,
-        default_visible: true,
-        get_visible: |layers| layers.future_modalities,
-        set_visible: |layers, visible| layers.future_modalities = visible,
-    },
 ];
 
 pub fn all_layer_defs() -> &'static [LayerDef] {
@@ -123,13 +103,11 @@ pub fn all_layer_defs() -> &'static [LayerDef] {
 pub fn mount_core_marker_layers(state: &AppState) {
     nodes::mount(state);
     detections::mount(state);
-    effectors::mount(state);
     omni::mount(state);
     tracks::mount(state);
     zones::mount(state);
     heatmap::mount(state);
     overlays::mount(state);
     acoustic::mount(state);
-    future_modalities::mount(state);
     uncertainty::mount(state);
 }

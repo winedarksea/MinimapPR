@@ -449,17 +449,6 @@
       "</svg>", 34, 34));
   }
 
-  function makeEffectorElement(color, bearingDeg, offline) {
-    const c = palette();
-    const stroke = offline ? c.trackDropped : color;
-    return markerElement("mmpr-map-icon mmpr-map-icon-effector", divSvg(
-      '<svg viewBox="0 0 40 40" width="40" height="40" aria-hidden="true">' +
-        '<g transform="rotate(' + bearingDeg + ' 20 20)"><path d="M20 20 L11 2 A20 20 0 0 1 29 2 Z" fill="' + stroke + '" opacity="0.22"></path></g>' +
-        '<rect x="12" y="15" width="16" height="11" rx="2.5" fill="' + c.surface + '" stroke="' + stroke + '" stroke-width="2"></rect>' +
-        '<circle cx="20" cy="20.5" r="3.4" fill="none" stroke="' + stroke + '" stroke-width="1.8"></circle>' +
-      "</svg>", 40, 40));
-  }
-
   function makeTrackElement(color, tqi, opacity) {
     const c = palette();
     const size = 34 + Math.round((tqi || 0) * 6);
@@ -495,7 +484,6 @@
     if (kind === "track") return "track:" + id;
     if (kind === "detection") return "det:" + id;
     if (kind === "node") return "node:" + id;
-    if (kind === "effector") return "effector:" + id;
     return null;
   }
 
@@ -547,13 +535,6 @@
   }
 
   function removeNodeMarker(nodeId) { removeMarker("node:" + nodeId); }
-
-  function setEffectorMarker(effectorId, lat, lon, bearingDeg, state) {
-    const c = palette();
-    setMarker("effector:" + effectorId, new maplibregl.Marker({ element: makeEffectorElement(c.effector, bearingDeg, state === "offline") }).setLngLat([lon, lat]), "effector", effectorId, 0, state);
-  }
-
-  function removeEffectorMarker(effectorId) { removeMarker("effector:" + effectorId); }
 
   function setTrackMarker(trackId, lat, lon, label, tqi, status, lastUpdateNs) {
     const c = palette();
@@ -1294,7 +1275,7 @@
     addDetectionMarker, addBearingOnlyDetectionMarker, removeDetectionMarker,
     setDetectionLayerData, clearDetectionLayer,
     setTrackMarker, setTrackVelocityVector, removeTrack, pulseTrackMarker,
-    setEffectorMarker, removeEffectorMarker, setZone, removeZone, setGdopCircle, removeGdopCircle,
+    setZone, removeZone, setGdopCircle, removeGdopCircle,
     highlightCopItem, clearCopHighlight, setCopUncertainty, clearAllCopUncertainty,
     setBearingWedge, removeBearingWedge, clearBearingWedges,
     setHeatmapPoints, clearHeatmap,

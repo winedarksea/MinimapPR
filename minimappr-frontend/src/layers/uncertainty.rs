@@ -61,10 +61,7 @@ pub fn mount(state: &AppState) {
                         }
                     });
                 }
-                CopItemKind::Alert
-                | CopItemKind::Node
-                | CopItemKind::Effector
-                | CopItemKind::Zone => {}
+                CopItemKind::Alert | CopItemKind::Node | CopItemKind::Zone => {}
             }
         }
         None => {
