@@ -52,6 +52,20 @@ AsyncConnectState& asyncConnectState() {
   return state;
 }
 
+void disableCyw43PowerSave() {
+  // The CYW43 default power-save mode (PERFORMANCE_PM) lets the WLAN chip
+  // sleep between beacons. Under sustained audio throughput this causes
+  // intermittent do_ioctl() timeouts that abort active TCP publishes and
+  // create multi-second audio gaps, which in turn drives the COP node status
+  // to "degraded". Disable power save so the radio stays awake.
+  const int pmRc = cyw43_wifi_pm(&cyw43_state, CYW43_NONE_PM);
+  if (pmRc != PICO_OK) {
+    std::printf("[wifi] warning: failed to disable power save rc=%d\n", pmRc);
+  } else {
+    std::printf("[wifi] power save disabled\n");
+  }
+}
+
 bool startWiFiConnectAsync(const char* ssid, const char* password, uint32_t auth) {
   const int rc = cyw43_arch_wifi_connect_async(ssid, password, auth);
   if (rc != PICO_OK) {
@@ -85,6 +99,7 @@ bool connectWiFiBlocking(const char* ssid, const char* password, uint32_t timeou
   const int rc = cyw43_arch_wifi_connect_timeout_ms(ssid, password, auth, timeoutMs);
   if (rc == PICO_OK) {
     std::printf("[wifi] connected status=%s(%d)\n", linkStatusName(linkStatus()), linkStatus());
+    disableCyw43PowerSave();
     return true;
   }
 
@@ -101,6 +116,7 @@ void ensureWiFiConnected(const char* ssid, const char* password, uint32_t timeou
   AsyncConnectState& asyncState = asyncConnectState();
   static uint32_t lastCheckMs = 0;
   static int lastLoggedStatus = 999;
+  static bool powerSaveDisabled = false;
   const uint32_t nowMs = millis32();
   if ((nowMs - lastCheckMs) < checkIntervalMs) {
     return;
@@ -115,8 +131,14 @@ void ensureWiFiConnected(const char* ssid, const char* password, uint32_t timeou
 
   if (status == CYW43_LINK_UP) {
     asyncState.inFlight = false;
+    if (!powerSaveDisabled) {
+      powerSaveDisabled = true;
+      disableCyw43PowerSave();
+    }
     return;
   }
+
+  powerSaveDisabled = false;
 
   if (asyncState.inFlight) {
     if ((nowMs - asyncState.startedAtMs) >= timeoutMs ||
