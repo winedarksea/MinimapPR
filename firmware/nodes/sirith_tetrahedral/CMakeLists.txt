@@ -31,7 +31,21 @@ include(pico_sdk_import.cmake)
 project(sirith_tetrahedral C CXX ASM)
 
 set(PICO_CXX_ENABLE_EXCEPTIONS 1)
-option(MMPR_ENABLE_BLE_SCAN "Enable passive BLE RSSI scanner and JSON reports" OFF)
+
+# MMPR_ENABLE_BLE_SCAN is derived from node_config.h (single source of truth) instead
+# of a separate CMake flag, so flipping the #define there and rebuilding is enough --
+# no `-DMMPR_ENABLE_BLE_SCAN=ON` needed. Re-added to CMAKE_CONFIGURE_DEPENDS so that
+# editing the header alone triggers a reconfigure (otherwise a stale cached value from
+# a prior configure would silently win, which is exactly the bug this replaces).
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_LIST_DIR}/include/node_config.h")
+file(STRINGS "${CMAKE_CURRENT_LIST_DIR}/include/node_config.h" MMPR_BLE_SCAN_DEFINE_LINE
+        REGEX "^#define[ \t]+MMPR_ENABLE_BLE_SCAN[ \t]+[0-9]+")
+if(MMPR_BLE_SCAN_DEFINE_LINE MATCHES "MMPR_ENABLE_BLE_SCAN[ \t]+([0-9]+)")
+    set(MMPR_ENABLE_BLE_SCAN ${CMAKE_MATCH_1})
+else()
+    message(FATAL_ERROR "Could not find '#define MMPR_ENABLE_BLE_SCAN <0|1>' in node_config.h")
+endif()
 
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
@@ -132,10 +146,6 @@ if(DEFINED MMPR_NODECFG_SERVER_BASE_URL)
             sirith_tetrahedral
             PRIVATE MMPR_NODECFG_SERVER_BASE_URL="${MMPR_NODECFG_SERVER_BASE_URL}")
 endif()
-
-target_compile_definitions(
-        sirith_tetrahedral
-        PRIVATE MMPR_ENABLE_BLE_SCAN=$<IF:$<BOOL:${MMPR_ENABLE_BLE_SCAN}>,1,0>)
 
 # Add any user requested libraries
 target_link_libraries(sirith_tetrahedral 
