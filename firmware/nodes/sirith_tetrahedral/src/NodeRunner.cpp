@@ -17,7 +17,13 @@ constexpr int kPublishSkippedForBackoffStatus = -5;
 constexpr size_t kDefaultQueuedPacketSlots = 40;
 constexpr size_t kDefaultPublishBatchByteBudget = 20480;
 constexpr uint32_t kQueueDepthBypassThreshold = 32;
-constexpr uint32_t kSlowTelemetryRefreshMs = 1000;
+// The RSSI read is a blocking SPI round-trip to the WiFi chip
+// (cyw43_do_ioctl); under load it can stall for up to CYW43_IOCTL_TIMEOUT_US
+// (500 ms) if the chip doesn't respond in time, which starves audio capture
+// and GPS polling for that whole loop iteration. Keep this infrequent and
+// skip it entirely while a publish is in flight so it never contends with
+// active TCP traffic over the same SPI bus.
+constexpr uint32_t kSlowTelemetryRefreshMs = 15000;
 
 uint64_t nextUtcSecondBoundary(uint64_t utcNs) {
   return ((utcNs / kNsPerSecond) + 1ULL) * kNsPerSecond;
@@ -355,6 +361,12 @@ void NodeRunner::refreshSlowTelemetry(uint32_t nowMs) {
 
   if (lastTelemetryRefreshMs_ != 0 &&
       !deadlineReached(nowMs, lastTelemetryRefreshMs_ + kSlowTelemetryRefreshMs)) {
+    return;
+  }
+  if (publisher_.publishInProgress()) {
+    // Defer to the next call rather than resetting lastTelemetryRefreshMs_,
+    // so we retry as soon as the in-flight publish clears instead of waiting
+    // a full extra period.
     return;
   }
   lastTelemetryRefreshMs_ = nowMs;
