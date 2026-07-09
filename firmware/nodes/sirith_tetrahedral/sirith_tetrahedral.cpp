@@ -338,7 +338,8 @@ mmpr::NodeRunner gRunner(
     nodecfg::kPublishBatchFrames,
     nodecfg::kPublishBatchByteBudget,
     nodecfg::kUsePublishBatchByteBudget,
-    nodecfg::kAudioQueueSlots);
+    nodecfg::kAudioQueueSlots,
+    nodecfg::kPublishBatchMaxRetries);
 
 mmpr::BleReportPublisher gBleReportPublisher(
     gBleHttpPublisher,

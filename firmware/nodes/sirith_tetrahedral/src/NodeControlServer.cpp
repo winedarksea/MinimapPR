@@ -323,7 +323,7 @@ bool NodeControlServer::prepareStatsBody(char* bodyBuffer, size_t bodyBufferByte
       bodyBufferBytes,
       "{\"frames_captured\":%llu,\"frames_published\":%llu,\"frames_dropped\":%llu,"
       "\"publish_errors\":%llu,\"packet_continuity_violations\":%llu,"
-      "\"queue_overflows\":%llu,\"queue_depth\":%u,\"queue_slots_high_water\":%u,"
+      "\"queue_overflows\":%llu,\"discarded_batches\":%llu,\"queue_depth\":%u,\"queue_slots_high_water\":%u,"
       "\"queue_slots_capacity\":%u,\"ring_frames_high_water\":%u,\"ring_frames_capacity\":%u,"
       "\"last_publish_status\":%d,\"last_publish_failure_stage\":%u,"
       "\"last_publish_lwip_error\":%ld,\"consecutive_publish_failures\":%u,"
@@ -336,6 +336,7 @@ bool NodeControlServer::prepareStatsBody(char* bodyBuffer, size_t bodyBufferByte
       static_cast<unsigned long long>(stats.publishErrors),
       static_cast<unsigned long long>(stats.packetContinuityViolations),
       static_cast<unsigned long long>(stats.queueOverflows),
+      static_cast<unsigned long long>(stats.discardedBatches),
       static_cast<unsigned>(stats.queueDepth),
       static_cast<unsigned>(stats.queueSlotsHighWater),
       static_cast<unsigned>(stats.queueSlotsCapacity),

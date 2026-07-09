@@ -97,8 +97,10 @@ enum class AudioDataPinBias : uint8_t {
 #define MMPR_NODECFG_GPS_PPS_PIN 10
 #endif
 
+// frequency is more radio limited now than memory.
+// if losing packets, 32 khz, or perhaps 16 khz, would be a useful test for that condition
 #ifndef MMPR_NODECFG_AUDIO_SAMPLE_RATE_HZ
-#define MMPR_NODECFG_AUDIO_SAMPLE_RATE_HZ 16000
+#define MMPR_NODECFG_AUDIO_SAMPLE_RATE_HZ 44100
 #endif
 
 #ifndef MMPR_NODECFG_AUDIO_CHANNELS
@@ -109,20 +111,13 @@ enum class AudioDataPinBias : uint8_t {
 #define MMPR_NODECFG_AUDIO_FRAME_SAMPLES 512
 #endif
 
-#ifndef MMPR_NODECFG_AUDIO_RING_FRAMES
-#define MMPR_NODECFG_AUDIO_RING_FRAMES 16
-#endif
-
-#ifndef MMPR_NODECFG_AUDIO_QUEUE_SLOTS
-#define MMPR_NODECFG_AUDIO_QUEUE_SLOTS 40
-#endif
+// kAudioRingFrames, kAudioQueueSlots, and kPublishBatchFrames are derived at
+// compile time from the audio data rate (see "Dynamic buffer sizing" below).
+// Define MMPR_NODECFG_AUDIO_RING_FRAMES / _AUDIO_QUEUE_SLOTS /
+// _PUBLISH_BATCH_FRAMES (e.g. via -D) only to override the derived defaults.
 
 #ifndef MMPR_NODECFG_PUBLISH_BATCH_BYTE_BUDGET
 #define MMPR_NODECFG_PUBLISH_BATCH_BYTE_BUDGET 20480
-#endif
-
-#ifndef MMPR_NODECFG_PUBLISH_BATCH_FRAMES
-#define MMPR_NODECFG_PUBLISH_BATCH_FRAMES 4
 #endif
 
 #ifndef MMPR_NODECFG_USE_PUBLISH_BATCH_BYTE_BUDGET
@@ -133,12 +128,20 @@ enum class AudioDataPinBias : uint8_t {
 #define MMPR_ENABLE_BLE_SCAN 0
 #endif
 
+// BLE scan timing. Units are 0.625 ms each. The scanner is PASSIVE
+// it only *listens*, and BLE therefore costs shared-radio RECEIVE time, never a
+// TX collision on the audio uplink. Duty = window/interval is the airtime the
+// CYW43439 steals from Wi-Fi; keep it low so 44.1 kHz audio is not starved.
+// Window must exceed BLE's 0-10 ms advertising jitter to catch reliably, hence >= ~20 ms.
+// intermittently -- fine for approximate, slow-updating RSSI triangulation).
+// Raise the window (e.g. 0x0030) for snappier coverage at higher airtime cost,
+// or lengthen the interval (e.g. 0x0800 = 1280 ms) for an even lighter footprint.
 #ifndef MMPR_NODECFG_BLE_SCAN_INTERVAL_UNITS
-#define MMPR_NODECFG_BLE_SCAN_INTERVAL_UNITS 0x01E0
+#define MMPR_NODECFG_BLE_SCAN_INTERVAL_UNITS 0x0400
 #endif
 
 #ifndef MMPR_NODECFG_BLE_SCAN_WINDOW_UNITS
-#define MMPR_NODECFG_BLE_SCAN_WINDOW_UNITS 0x0030
+#define MMPR_NODECFG_BLE_SCAN_WINDOW_UNITS 0x0020
 #endif
 
 #ifndef MMPR_NODECFG_BLE_REPORT_INTERVAL_MS
@@ -178,6 +181,118 @@ static constexpr bool kTdmEnableWordDiagnostics = MMPR_NODECFG_TDM_ENABLE_WORD_D
 static constexpr bool kUseTdmAudio = kAudioInputMode == AudioInputMode::kTdm4Mic;
 static constexpr bool kUseSyntheticAudio = kAudioInputMode == AudioInputMode::kSynthetic;
 
+// ============================================================================
+// Dynamic buffer sizing
+// ============================================================================
+// The DMA ring, publish queue, publish batch, and HTTP timeout are derived from
+// the audio data rate (channels x sample rate x bytes) so a higher rate or more
+// mics automatically provisions more buffering -- while always fitting under a
+// fixed RAM ceiling on the Pico 2W (RP2350, 520 KiB SRAM; audio budget capped
+// well below that to leave room for the CYW43/lwIP heap and stacks).
+
+namespace detail {
+constexpr uint32_t ceilDivU32(uint64_t num, uint64_t den) {
+  return den == 0 ? 0u : static_cast<uint32_t>((num + den - 1ull) / den);
+}
+constexpr uint32_t clampU32(uint32_t value, uint32_t lo, uint32_t hi) {
+  return value < lo ? lo : (value > hi ? hi : value);
+}
+constexpr size_t clampSize(size_t value, size_t lo, size_t hi) {
+  return value < lo ? lo : (value > hi ? hi : value);
+}
+}
+
+// --- Intent knobs (primary tunables) ---
+static constexpr uint32_t kTargetRingMs = 200;             // capture-side DMA absorb window
+static constexpr uint32_t kTargetQueueMs = 300;            // publish-side jitter buffer
+static constexpr size_t kTargetPublishBytes = 28u * 1024u; // amortize HTTP overhead per round-trip
+// Hard ceiling for ring + queue + active batch on the RP2350's 520 KiB SRAM.
+// Reduced when BLE is enabled: the CYW43439 is a shared Wi-Fi/BLE part and
+// enabling BLE pulls btstack + HCI buffers into RP2350 SRAM, so audio must leave
+// heapFreeBytes telemetry is not currently populated, so an over-commit surfaces
+// only as a bad_alloc -> watchdog reboot, not a graceful signal.
+static constexpr size_t kAudioBufferRamCeiling =
+    (MMPR_ENABLE_BLE_SCAN == 1 ? 240u : 300u) * 1024u;
+static constexpr uint32_t kAssumedFloorKbitPerSec = 1500;  // conservative CYW43 goodput, for timeout sizing
+
+// --- Raw data-rate inputs (both TDM and I2S-mono capture at this rate/frame) ---
+static constexpr uint32_t kDerivSampleRateHz = MMPR_NODECFG_AUDIO_SAMPLE_RATE_HZ;
+static constexpr uint32_t kDerivFrameSamples = MMPR_NODECFG_AUDIO_FRAME_SAMPLES;
+static constexpr uint32_t kDerivChannels =
+    kUseTdmAudio ? 4u
+                 : (kUseSyntheticAudio ? static_cast<uint32_t>(MMPR_NODECFG_AUDIO_CHANNELS) : 1u);
+
+static constexpr size_t kDerivPacketSlotBytes =
+    static_cast<size_t>(kDerivFrameSamples) * kDerivChannels * sizeof(int16_t);
+static constexpr size_t kDerivRingFrameBytes =
+    static_cast<size_t>(kDerivFrameSamples) * kDerivChannels * sizeof(uint32_t);
+
+// Ring frames: capture-side absorb window, clamped to the PIO ring limit [8, 32].
+static constexpr uint32_t kAudioRingFramesAuto = detail::clampU32(
+    detail::ceilDivU32(static_cast<uint64_t>(kDerivSampleRateHz) * kTargetRingMs,
+                       1000ull * kDerivFrameSamples),
+    8u, 32u);
+
+// Publish batch frames: enough packets to reach the target payload, clamp [1, 16].
+static constexpr size_t kPublishBatchFramesAuto = detail::clampSize(
+    kDerivPacketSlotBytes > 0 ? (kTargetPublishBytes / kDerivPacketSlotBytes) : 1u,
+    1u, 16u);
+
+// Queue slots: publish-side jitter buffer sized by time, then shrunk to fit the
+// RAM ceiling after the ring (capture safety) and active batch are reserved.
+static constexpr uint32_t kAudioQueueSlotsWant = detail::clampU32(
+    detail::ceilDivU32(static_cast<uint64_t>(kDerivSampleRateHz) * kTargetQueueMs,
+                       1000ull * kDerivFrameSamples),
+    8u, 96u);
+static constexpr size_t kDerivRingBytes =
+    static_cast<size_t>(kAudioRingFramesAuto) * kDerivRingFrameBytes;
+static constexpr size_t kDerivActiveBatchBytes = kPublishBatchFramesAuto * kDerivPacketSlotBytes;
+static constexpr size_t kDerivQueueBudgetBytes =
+    kAudioBufferRamCeiling > (kDerivRingBytes + kDerivActiveBatchBytes)
+        ? (kAudioBufferRamCeiling - kDerivRingBytes - kDerivActiveBatchBytes)
+        : kDerivPacketSlotBytes;
+static constexpr uint32_t kAudioQueueSlotsFit = kDerivPacketSlotBytes > 0
+    ? static_cast<uint32_t>(kDerivQueueBudgetBytes / kDerivPacketSlotBytes)
+    : kAudioQueueSlotsWant;
+static constexpr uint32_t kAudioQueueSlotsAuto = detail::clampU32(
+    kAudioQueueSlotsWant < kAudioQueueSlotsFit ? kAudioQueueSlotsWant : kAudioQueueSlotsFit,
+    4u, 96u);
+
+// HTTP timeout: time to push one batch at the assumed floor goodput, doubled for
+// margin plus a fixed setup allowance, clamped [150, 850] ms. Kept short so a
+// stalled publish is abandoned quickly and the next fresh batch goes out.
+static constexpr uint32_t kHttpTimeoutSendMs = static_cast<uint32_t>(
+    (static_cast<uint64_t>(kPublishBatchFramesAuto) * kDerivPacketSlotBytes * 8ull) /
+    (kAssumedFloorKbitPerSec == 0 ? 1u : kAssumedFloorKbitPerSec));
+static constexpr uint32_t kHttpTimeoutMsAuto =
+    detail::clampU32(kHttpTimeoutSendMs * 2u + 120u, 150u, 850u);
+
+// Final values: derived by default, overridable via -D for bring-up/bench work.
+#ifdef MMPR_NODECFG_AUDIO_RING_FRAMES
+static constexpr uint32_t kAudioRingFrames = MMPR_NODECFG_AUDIO_RING_FRAMES;
+#else
+static constexpr uint32_t kAudioRingFrames = kAudioRingFramesAuto;
+#endif
+#ifdef MMPR_NODECFG_AUDIO_QUEUE_SLOTS
+static constexpr size_t kAudioQueueSlots = MMPR_NODECFG_AUDIO_QUEUE_SLOTS;
+#else
+static constexpr size_t kAudioQueueSlots = kAudioQueueSlotsAuto;
+#endif
+#ifdef MMPR_NODECFG_PUBLISH_BATCH_FRAMES
+static constexpr size_t kPublishBatchFrames = MMPR_NODECFG_PUBLISH_BATCH_FRAMES;
+#else
+static constexpr size_t kPublishBatchFrames = kPublishBatchFramesAuto;
+#endif
+#ifdef MMPR_NODECFG_HTTP_TIMEOUT_MS
+static constexpr uint32_t kHttpTimeoutMs = MMPR_NODECFG_HTTP_TIMEOUT_MS;
+#else
+static constexpr uint32_t kHttpTimeoutMs = kHttpTimeoutMsAuto;
+#endif
+
+// Publish retry policy: after this many retries of the SAME batch fail, discard
+// it so fresh audio flows (losing a stuck batch beats falling permanently behind).
+static constexpr uint32_t kPublishBatchMaxRetries = 1;
+
 // --- Network and backend ---
 static constexpr const char* kServerBaseUrl = MMPR_NODECFG_SERVER_BASE_URL;
 static constexpr bool kEnableBleScan = MMPR_ENABLE_BLE_SCAN == 1;
@@ -189,20 +304,17 @@ static constexpr const char* kBleIngestPath = MMPR_NODECFG_BLE_INGEST_PATH;
 
 
 static constexpr uint32_t kWiFiConnectTimeoutMs = 15000;
-// This bounds the async store-forward request (HttpFramePublisher::pollPublish
-// is non-blocking and polled from the main loop, so a slow publish does not
-// steal time from drainAvailableAudioFrames()/capture). Packets are batched
-// one per UTC-second boundary; at 4 ch x 16 kHz x 2 bytes that's ~128 KB per
-// publish, which needs >2.3 Mbit/s to clear in 450 ms -- above what the Pico
-// W's SPI-linked CYW43439 reliably sustains.
-static constexpr uint32_t kHttpTimeoutMs = 850;
+// kHttpTimeoutMs is derived above (see "Dynamic buffer sizing"). It bounds the
+// async store-forward request; HttpFramePublisher::pollPublish is non-blocking
+// and polled from the main loop, so a slow publish does not steal time from
+// drainAvailableAudioFrames()/capture. Kept short so a stalled publish is
+// abandoned quickly rather than backing up the capture queue.
 // After a failed publish, skip network attempts briefly so capture and Wi-Fi polling recover.
 static constexpr uint32_t kPublishFailureBackoffMs = 0;
 // ingest control
 static constexpr const char* kIngestPath = "/api/v1/ingest/binary";
-static constexpr size_t kAudioQueueSlots = MMPR_NODECFG_AUDIO_QUEUE_SLOTS;
+// kAudioQueueSlots and kPublishBatchFrames are derived above.
 static constexpr size_t kPublishBatchByteBudget = MMPR_NODECFG_PUBLISH_BATCH_BYTE_BUDGET;
-static constexpr size_t kPublishBatchFrames = MMPR_NODECFG_PUBLISH_BATCH_FRAMES;
 static constexpr bool kUsePublishBatchByteBudget = MMPR_NODECFG_USE_PUBLISH_BATCH_BYTE_BUDGET == 1;
 
 // Tiny debug/control listener for reading and chaning the current publish target
@@ -318,7 +430,7 @@ static constexpr uint8_t kTdmWsPin = 9;    // FSYNC/WS output (must be BCLK + 1)
 
 static constexpr uint32_t kAudioSampleRateHz = MMPR_NODECFG_AUDIO_SAMPLE_RATE_HZ;
 static constexpr uint32_t kAudioFrameSamples = MMPR_NODECFG_AUDIO_FRAME_SAMPLES;
-static constexpr uint32_t kAudioRingFrames = MMPR_NODECFG_AUDIO_RING_FRAMES;
+// kAudioRingFrames is derived from the data rate (see "Dynamic buffer sizing").
 static constexpr uint8_t kAudioValidBits = 24;  // ADAU7112 emits 24-bit PCM in 32-bit slots.
 static constexpr uint8_t kAudioTdmSlots = 4;
 static constexpr uint8_t kAudioSlotBits = 32;
@@ -470,11 +582,18 @@ static_assert(kAudioRingFrames > 0 && kAudioRingFrames <= 32, "audio ring frames
 static_assert(kAudioQueueSlots > 0 && kAudioQueueSlots <= 96, "audio queue slots must be 1-96");
 static_assert(kPublishBatchFrames > 0 && kPublishBatchFrames <= 16, "publish batch frames must be 1-16");
 static_assert(kPublishBatchByteBudget >= 4096 && kPublishBatchByteBudget <= 32768, "publish byte budget must be 4-32 KiB");
+// Ring (32-bit DMA words) + publish queue (int16 packets) + active publish batch
+// must fit under the RAM ceiling. Derivation guarantees this; the assert also
+// guards any manual -D override that would blow the budget.
 static_assert(
     (static_cast<size_t>(kAudioFrameSamples) * static_cast<size_t>(kActiveAudioChannels) * sizeof(uint32_t) *
          static_cast<size_t>(kAudioRingFrames)) +
         (static_cast<size_t>(kMaxPacketSamplesPerChannel) * static_cast<size_t>(kActiveAudioChannels) *
-         sizeof(int16_t) * static_cast<size_t>(kAudioQueueSlots)) <= 300u * 1024u,
-    "audio ring + queue budget exceeds 300 KiB");
+         sizeof(int16_t) *
+         (static_cast<size_t>(kAudioQueueSlots) +
+          (kPublishBatchFrames < static_cast<size_t>(kAudioQueueSlots)
+               ? kPublishBatchFrames
+               : static_cast<size_t>(kAudioQueueSlots)))) <= kAudioBufferRamCeiling,
+    "audio ring + queue + active batch budget exceeds kAudioBufferRamCeiling");
 
 }  // namespace nodecfg

@@ -42,7 +42,8 @@ NodeRunner::NodeRunner(
     size_t publishBatchFrames,
     size_t publishBatchByteBudget,
     bool usePublishBatchByteBudget,
-    size_t queueSlots)
+    size_t queueSlots,
+    uint32_t publishBatchMaxRetries)
     : descriptor_(descriptor),
       audioSource_(audioSource),
       publisher_(publisher),
@@ -54,6 +55,7 @@ NodeRunner::NodeRunner(
       publishBatchFrames_(publishBatchFrames > 0 ? publishBatchFrames : kDefaultPublishBatchFrames),
       publishBatchByteBudget_(publishBatchByteBudget > 0 ? publishBatchByteBudget : kDefaultPublishBatchByteBudget) {
   usePublishBatchByteBudget_ = usePublishBatchByteBudget;
+  publishBatchMaxRetries_ = publishBatchMaxRetries;
   stats_.queueSlotsCapacity = static_cast<uint32_t>(queueSlots > 0 ? queueSlots : kDefaultQueuedPacketSlots);
 }
 
@@ -324,6 +326,7 @@ void NodeRunner::clearActivePublishBatch() {
   }
   activePublishBatchSize_ = 0;
   activePublishBatchValid_ = false;
+  activeBatchAttempts_ = 0;
   stats_.queueDepth = effectiveQueueDepth();
 }
 
@@ -388,6 +391,7 @@ void NodeRunner::onPublishSuccess() {
 void NodeRunner::onPublishFailure(const PublishResult& result, uint32_t nowMs) {
   ++stats_.publishErrors;
   ++stats_.consecutivePublishFailures;
+  ++activeBatchAttempts_;
   stats_.lastPublishFailureStage = result.failureStage;
   stats_.lastPublishLwipError = result.lwipError;
 
@@ -431,6 +435,15 @@ void NodeRunner::onPublishFailure(const PublishResult& result, uint32_t nowMs) {
       static_cast<unsigned long>(activePublishBatchSize_),
       static_cast<unsigned>(effectiveQueueDepth()),
       static_cast<unsigned long>(backoffMs));
+
+  // Losing audio beats falling permanently behind: after the batch has used up
+  // its retry budget, discard it so the next publish assembles a fresh batch
+  // from the live queue instead of re-sending stale packets forever. Backoff
+  // still applies, so a dead server is not hammered.
+  if (activeBatchAttempts_ > publishBatchMaxRetries_) {
+    ++stats_.discardedBatches;
+    clearActivePublishBatch();  // also resets activeBatchAttempts_
+  }
   stats_.queueDepth = effectiveQueueDepth();
 }
 
@@ -657,6 +670,7 @@ void NodeRunner::loopOnce() {
     std::printf(
         "[node] blocks=%" PRIu64 " published=%" PRIu64 " dropped=%" PRIu64
         " continuity=%" PRIu64 " errors=%" PRIu64 " queue=%u overflows=%" PRIu64
+        " discarded=%" PRIu64
         " last_status=%d latency_ms=%u ewma_ms=%u max_ms=%u rssi=%d\n",
         stats_.framesCaptured,
         stats_.framesPublished,
@@ -665,6 +679,7 @@ void NodeRunner::loopOnce() {
         stats_.publishErrors,
         static_cast<unsigned>(stats_.queueDepth),
         stats_.queueOverflows,
+        stats_.discardedBatches,
         stats_.lastPublishStatus,
         static_cast<unsigned>(stats_.publishLatencyLastMs),
         static_cast<unsigned>(stats_.publishLatencyEwmaMs),

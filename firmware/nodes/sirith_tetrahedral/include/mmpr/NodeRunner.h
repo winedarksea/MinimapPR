@@ -19,6 +19,7 @@ struct RunnerStats {
   uint64_t publishErrors = 0;
   uint64_t packetContinuityViolations = 0;
   uint64_t queueOverflows = 0;
+  uint64_t discardedBatches = 0;
   uint32_t queueDepth = 0;
   int lastPublishStatus = 0;
   PublishFailureStage lastPublishFailureStage = PublishFailureStage::kNone;
@@ -54,7 +55,8 @@ class NodeRunner {
       size_t publishBatchFrames = 4,
       size_t publishBatchByteBudget = 0,
       bool usePublishBatchByteBudget = false,
-      size_t queueSlots = 0);
+      size_t queueSlots = 0,
+      uint32_t publishBatchMaxRetries = 1);
 
   bool begin(
       bool syncNtp,
@@ -131,6 +133,8 @@ class NodeRunner {
   std::vector<const EnvironmentalSample*> publishEnvironmentScratch_;
   size_t activePublishBatchSize_ = 0;
   bool activePublishBatchValid_ = false;
+  uint32_t activeBatchAttempts_ = 0;
+  uint32_t publishBatchMaxRetries_ = 1;
   uint32_t lastTelemetryRefreshMs_ = 0;
 
   RunnerStats stats_ = {};
