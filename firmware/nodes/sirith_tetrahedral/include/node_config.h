@@ -6,12 +6,43 @@
 
 namespace nodecfg {
 
+// ============================================================================
+// Frequently edited settings
+// ============================================================================
+// These are the values changed most often per-deployment or per-board. Less
+// common tunables live further down in their own sections; all static_asserts
+// that validate the macros below live at the very bottom of this file.
+
+// --- Audio input mode ---
+// Selects which capture path the board uses; see AudioInputMode values below.
 enum class AudioInputMode : uint8_t {
-  kTdm4Mic = 0,
-  kI2sMono = 1,
-  kPdmDirect = 2,
-  kSynthetic = 3,
+  kTdm4Mic = 0,     // 4-mic TDM array (ADAU7112)
+  kI2sMono = 1,     // single-channel I2S mic
+  kPdmDirect = 2,   // reserved for future PDM hardware, not implemented
+  kSynthetic = 3,   // no hardware, synthetic/simulated audio
 };
+
+#ifndef MMPR_NODECFG_AUDIO_INPUT_MODE
+#define MMPR_NODECFG_AUDIO_INPUT_MODE 0  // 0=TDM 4-mic, 1=I2S mono, 2=reserved, 3=synthetic
+#endif
+
+// --- Ingest/backend server ---
+// Full base URL including scheme, host, and port. This must point at the
+// ingest API, which normally runs on port 8081 -- the main server/UI is a
+// separate service on 8080. Include the ":8081" unless your deployment routes
+// ingest traffic elsewhere.
+#ifndef MMPR_NODECFG_SERVER_BASE_URL
+#define MMPR_NODECFG_SERVER_BASE_URL "http://192.168.8.165:8081"
+#endif
+
+// --- GPS UART baud rate ---
+// 9600 for the SparkFun GPS carrier board, 38400 for a bare ublox NEO-M10Q.
+// A mismatch here is a common cause of GPS_MISSING status.
+static constexpr uint32_t kGpsUartBaud = 9600;
+
+// ============================================================================
+// Audio input — remaining tunables
+// ============================================================================
 
 enum class I2sMonoChannelSide : uint8_t {
   kLeft = 0,
@@ -27,10 +58,6 @@ enum class AudioDataPinBias : uint8_t {
   kDisabled = 0,
   kPullDown = 1,
 };
-
-#ifndef MMPR_NODECFG_AUDIO_INPUT_MODE
-#define MMPR_NODECFG_AUDIO_INPUT_MODE 0
-#endif
 
 #ifndef MMPR_NODECFG_I2S_MONO_CHANNEL_SIDE
 #define MMPR_NODECFG_I2S_MONO_CHANNEL_SIDE 0
@@ -113,10 +140,6 @@ enum class AudioDataPinBias : uint8_t {
 #define MMPR_NODECFG_USE_PUBLISH_BATCH_BYTE_BUDGET 0
 #endif
 
-#ifndef MMPR_NODECFG_SERVER_BASE_URL
-#define MMPR_NODECFG_SERVER_BASE_URL "http://192.168.8.165:8081" // ingest usually 8081, server itself 8080
-#endif
-
 #ifndef MMPR_ENABLE_BLE_SCAN
 #define MMPR_ENABLE_BLE_SCAN 0
 #endif
@@ -140,41 +163,6 @@ enum class AudioDataPinBias : uint8_t {
 #ifndef MMPR_NODECFG_BLE_INGEST_PATH
 #define MMPR_NODECFG_BLE_INGEST_PATH "/api/v1/ingest/ble"
 #endif
-
-static_assert(
-    MMPR_NODECFG_AUDIO_INPUT_MODE == 0 || MMPR_NODECFG_AUDIO_INPUT_MODE == 1 ||
-        MMPR_NODECFG_AUDIO_INPUT_MODE == 2 || MMPR_NODECFG_AUDIO_INPUT_MODE == 3,
-    "MMPR_NODECFG_AUDIO_INPUT_MODE must be 0 (TDM), 1 (I2S mono), 2 (reserved PDM), or 3 (synthetic)");
-static_assert(
-    MMPR_NODECFG_AUDIO_INPUT_MODE != 2,
-    "MMPR_NODECFG_AUDIO_INPUT_MODE=2 reserves future PDM_DIRECT hardware and is not implemented yet");
-static_assert(
-    MMPR_NODECFG_I2S_MONO_CHANNEL_SIDE == 0 || MMPR_NODECFG_I2S_MONO_CHANNEL_SIDE == 1,
-    "MMPR_NODECFG_I2S_MONO_CHANNEL_SIDE must be 0 (left) or 1 (right)");
-static_assert(
-    MMPR_NODECFG_I2S_MONO_SAMPLE_EDGE == 0 || MMPR_NODECFG_I2S_MONO_SAMPLE_EDGE == 1,
-    "MMPR_NODECFG_I2S_MONO_SAMPLE_EDGE must be 0 (rising) or 1 (falling)");
-static_assert(
-    MMPR_NODECFG_I2S_MONO_CAPTURE_BIT_OFFSET >= -8 && MMPR_NODECFG_I2S_MONO_CAPTURE_BIT_OFFSET <= 8,
-    "MMPR_NODECFG_I2S_MONO_CAPTURE_BIT_OFFSET must be in [-8, 8]");
-static_assert(
-    MMPR_NODECFG_I2S_MONO_DATA_PIN_BIAS == 0 || MMPR_NODECFG_I2S_MONO_DATA_PIN_BIAS == 1,
-    "MMPR_NODECFG_I2S_MONO_DATA_PIN_BIAS must be 0 (disabled) or 1 (pull-down)");
-static_assert(
-    MMPR_NODECFG_I2S_MONO_ENABLE_WORD_DIAGNOSTICS == 0 || MMPR_NODECFG_I2S_MONO_ENABLE_WORD_DIAGNOSTICS == 1,
-    "MMPR_NODECFG_I2S_MONO_ENABLE_WORD_DIAGNOSTICS must be 0 or 1");
-static_assert(
-    MMPR_NODECFG_TDM_SAMPLE_EDGE == 0 || MMPR_NODECFG_TDM_SAMPLE_EDGE == 1,
-    "MMPR_NODECFG_TDM_SAMPLE_EDGE must be 0 (rising) or 1 (falling)");
-static_assert(
-    MMPR_NODECFG_TDM_CAPTURE_BIT_OFFSET >= -8 && MMPR_NODECFG_TDM_CAPTURE_BIT_OFFSET <= 8,
-    "MMPR_NODECFG_TDM_CAPTURE_BIT_OFFSET must be in [-8, 8]");
-static_assert(
-    MMPR_NODECFG_TDM_DATA_PIN_BIAS == 0 || MMPR_NODECFG_TDM_DATA_PIN_BIAS == 1,
-    "MMPR_NODECFG_TDM_DATA_PIN_BIAS must be 0 (disabled) or 1 (pull-down)");
-static_assert(
-    MMPR_NODECFG_TDM_ENABLE_WORD_DIAGNOSTICS == 0 || MMPR_NODECFG_TDM_ENABLE_WORD_DIAGNOSTICS == 1,
-    "MMPR_NODECFG_TDM_ENABLE_WORD_DIAGNOSTICS must be 0 or 1");
 
 static constexpr AudioInputMode kAudioInputMode = (MMPR_NODECFG_AUDIO_INPUT_MODE == 3)
     ? AudioInputMode::kSynthetic
@@ -398,23 +386,10 @@ static constexpr uint32_t kActiveAudioFrameSamples = kUseTdmAudio ? kAudioFrameS
 static constexpr uint8_t kActiveAudioChannels = kUseTdmAudio
     ? 4u
     : (kUseSyntheticAudio ? static_cast<uint8_t>(MMPR_NODECFG_AUDIO_CHANNELS) : 1u);
-static_assert(kAudioSampleRateHz >= 12000 && kAudioSampleRateHz <= 96000, "audio sample rate must be 12-96 kHz");
-static_assert(kAudioFrameSamples > 0 && kAudioFrameSamples <= 4096, "audio frame samples out of supported range");
-static_assert(kAudioRingFrames > 0 && kAudioRingFrames <= 32, "audio ring frames must be 1-32");
-static_assert(kAudioQueueSlots > 0 && kAudioQueueSlots <= 96, "audio queue slots must be 1-96");
-static_assert(kPublishBatchFrames > 0 && kPublishBatchFrames <= 16, "publish batch frames must be 1-16");
-static_assert(kPublishBatchByteBudget >= 4096 && kPublishBatchByteBudget <= 32768, "publish byte budget must be 4-32 KiB");
-static_assert(
-    (static_cast<size_t>(kAudioFrameSamples) * static_cast<size_t>(kActiveAudioChannels) * sizeof(uint32_t) *
-         static_cast<size_t>(kAudioRingFrames)) +
-        (static_cast<size_t>(kMaxPacketSamplesPerChannel) * static_cast<size_t>(kActiveAudioChannels) *
-         sizeof(int16_t) * static_cast<size_t>(kAudioQueueSlots)) <= 300u * 1024u,
-    "audio ring + queue budget exceeds 300 KiB");
 
 // --- Optional GPS/PPS (M10Q style) ---
 static constexpr bool kEnableGpsUart = true;
 // we might want a "PSS active but NMEA failing" GPS status to help with this
-static constexpr uint32_t kGpsUartBaud = 9600; // 9600 for sparkfun, 38400 for ublox NEO-M10Q. THIS IS A COMMON CAUSE OF GPS_MISSING
 static constexpr uint32_t kGpsBaudScanIntervalMs = 3000;
 // Pin names are MCU-relative: module TX must connect to kGpsRxPin (GP13) for
 // incoming NMEA; kGpsTxPin (GP12) is only MCU TX to the module RX.
@@ -474,5 +449,58 @@ static constexpr int kDaylightOffsetSeconds = 0;
 
 // --- Runtime logging ---
 static constexpr uint32_t kLogEveryFrames = 100;
+
+// ============================================================================
+// Validation (static_asserts)
+// ============================================================================
+// Kept out of the way at the bottom of the file; edit the settings above, not
+// these.
+
+static_assert(
+    MMPR_NODECFG_AUDIO_INPUT_MODE == 0 || MMPR_NODECFG_AUDIO_INPUT_MODE == 1 ||
+        MMPR_NODECFG_AUDIO_INPUT_MODE == 2 || MMPR_NODECFG_AUDIO_INPUT_MODE == 3,
+    "MMPR_NODECFG_AUDIO_INPUT_MODE must be 0 (TDM), 1 (I2S mono), 2 (reserved PDM), or 3 (synthetic)");
+static_assert(
+    MMPR_NODECFG_AUDIO_INPUT_MODE != 2,
+    "MMPR_NODECFG_AUDIO_INPUT_MODE=2 reserves future PDM_DIRECT hardware and is not implemented yet");
+static_assert(
+    MMPR_NODECFG_I2S_MONO_CHANNEL_SIDE == 0 || MMPR_NODECFG_I2S_MONO_CHANNEL_SIDE == 1,
+    "MMPR_NODECFG_I2S_MONO_CHANNEL_SIDE must be 0 (left) or 1 (right)");
+static_assert(
+    MMPR_NODECFG_I2S_MONO_SAMPLE_EDGE == 0 || MMPR_NODECFG_I2S_MONO_SAMPLE_EDGE == 1,
+    "MMPR_NODECFG_I2S_MONO_SAMPLE_EDGE must be 0 (rising) or 1 (falling)");
+static_assert(
+    MMPR_NODECFG_I2S_MONO_CAPTURE_BIT_OFFSET >= -8 && MMPR_NODECFG_I2S_MONO_CAPTURE_BIT_OFFSET <= 8,
+    "MMPR_NODECFG_I2S_MONO_CAPTURE_BIT_OFFSET must be in [-8, 8]");
+static_assert(
+    MMPR_NODECFG_I2S_MONO_DATA_PIN_BIAS == 0 || MMPR_NODECFG_I2S_MONO_DATA_PIN_BIAS == 1,
+    "MMPR_NODECFG_I2S_MONO_DATA_PIN_BIAS must be 0 (disabled) or 1 (pull-down)");
+static_assert(
+    MMPR_NODECFG_I2S_MONO_ENABLE_WORD_DIAGNOSTICS == 0 || MMPR_NODECFG_I2S_MONO_ENABLE_WORD_DIAGNOSTICS == 1,
+    "MMPR_NODECFG_I2S_MONO_ENABLE_WORD_DIAGNOSTICS must be 0 or 1");
+static_assert(
+    MMPR_NODECFG_TDM_SAMPLE_EDGE == 0 || MMPR_NODECFG_TDM_SAMPLE_EDGE == 1,
+    "MMPR_NODECFG_TDM_SAMPLE_EDGE must be 0 (rising) or 1 (falling)");
+static_assert(
+    MMPR_NODECFG_TDM_CAPTURE_BIT_OFFSET >= -8 && MMPR_NODECFG_TDM_CAPTURE_BIT_OFFSET <= 8,
+    "MMPR_NODECFG_TDM_CAPTURE_BIT_OFFSET must be in [-8, 8]");
+static_assert(
+    MMPR_NODECFG_TDM_DATA_PIN_BIAS == 0 || MMPR_NODECFG_TDM_DATA_PIN_BIAS == 1,
+    "MMPR_NODECFG_TDM_DATA_PIN_BIAS must be 0 (disabled) or 1 (pull-down)");
+static_assert(
+    MMPR_NODECFG_TDM_ENABLE_WORD_DIAGNOSTICS == 0 || MMPR_NODECFG_TDM_ENABLE_WORD_DIAGNOSTICS == 1,
+    "MMPR_NODECFG_TDM_ENABLE_WORD_DIAGNOSTICS must be 0 or 1");
+static_assert(kAudioSampleRateHz >= 12000 && kAudioSampleRateHz <= 96000, "audio sample rate must be 12-96 kHz");
+static_assert(kAudioFrameSamples > 0 && kAudioFrameSamples <= 4096, "audio frame samples out of supported range");
+static_assert(kAudioRingFrames > 0 && kAudioRingFrames <= 32, "audio ring frames must be 1-32");
+static_assert(kAudioQueueSlots > 0 && kAudioQueueSlots <= 96, "audio queue slots must be 1-96");
+static_assert(kPublishBatchFrames > 0 && kPublishBatchFrames <= 16, "publish batch frames must be 1-16");
+static_assert(kPublishBatchByteBudget >= 4096 && kPublishBatchByteBudget <= 32768, "publish byte budget must be 4-32 KiB");
+static_assert(
+    (static_cast<size_t>(kAudioFrameSamples) * static_cast<size_t>(kActiveAudioChannels) * sizeof(uint32_t) *
+         static_cast<size_t>(kAudioRingFrames)) +
+        (static_cast<size_t>(kMaxPacketSamplesPerChannel) * static_cast<size_t>(kActiveAudioChannels) *
+         sizeof(int16_t) * static_cast<size_t>(kAudioQueueSlots)) <= 300u * 1024u,
+    "audio ring + queue budget exceeds 300 KiB");
 
 }  // namespace nodecfg
