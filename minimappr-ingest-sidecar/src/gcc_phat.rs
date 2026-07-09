@@ -343,8 +343,8 @@ pub(crate) fn dominant_frequency_hz(window: &[f32], sample_rate_hz: u32) -> f32 
     let half = n / 2;
     let mut total_power = 0.0_f64;
     let mut weighted_sum = 0.0_f64;
-    for bin in 1..=half {
-        let power = (buffer[bin].norm() as f64).powi(2);
+    for (bin, value) in buffer.iter().enumerate().take(half + 1).skip(1) {
+        let power = (value.norm() as f64).powi(2);
         let freq = bin as f64 * sample_rate_hz as f64 / n as f64;
         total_power += power;
         weighted_sum += freq * power;
@@ -411,7 +411,7 @@ fn zero_pad_hermitian_spectrum(spectrum: &[Complex32], target_len: usize) -> Vec
     let mut padded = vec![Complex32::new(0.0, 0.0); target_len];
     padded[0] = spectrum[0];
 
-    if original_len % 2 == 0 {
+    if original_len.is_multiple_of(2) {
         padded[1..half_len].copy_from_slice(&spectrum[1..half_len]);
         padded[target_len - (original_len - half_len - 1)..]
             .copy_from_slice(&spectrum[half_len + 1..]);

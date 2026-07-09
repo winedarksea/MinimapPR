@@ -219,7 +219,10 @@ fn CameraBranch(nodes: RwSignal<Vec<NodeStatus>>, on_close: Callback<()>) -> imp
             match register_node(payload).await {
                 Ok(node) => {
                     nodes.update(|items| {
-                        if !items.iter().any(|existing| existing.node_id == node.node_id) {
+                        if !items
+                            .iter()
+                            .any(|existing| existing.node_id == node.node_id)
+                        {
                             items.push(node);
                         }
                     });

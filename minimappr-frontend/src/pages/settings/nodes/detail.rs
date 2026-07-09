@@ -137,7 +137,10 @@ pub fn NodeDetailView() -> impl IntoView {
 #[component]
 fn DetailBody(node: NodeDetail, reload: Callback<()>) -> impl IntoView {
     let health = node.health.clone().unwrap_or_else(|| "unknown".to_string());
-    let node_type = node.node_type.clone().unwrap_or_else(|| "unknown".to_string());
+    let node_type = node
+        .node_type
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
     let capabilities = node.capabilities.clone();
     let firmware = node.firmware_version.clone();
     let bit_codes = node.bit_failure_codes.clone().unwrap_or_default();
@@ -212,7 +215,8 @@ fn permission_rows(permissions: &serde_json::Value) -> impl IntoView {
                     view! { <div><dt>{key}</dt><dd>{value}</dd></div> }
                 }).collect_view()}
             </dl>
-        }.into_any(),
+        }
+        .into_any(),
         _ => view! { <p class="muted">"No permissions configured for this node."</p> }.into_any(),
     }
 }
@@ -228,7 +232,8 @@ fn LocationSection(node: NodeDetail, reload: Callback<()>) -> impl IntoView {
 
     let reported = node.reported_position_m.clone().unwrap_or_default();
     let effective = node.position_m.clone().unwrap_or_default();
-    let position_pinned = node.override_pinned("position_m") || node.override_pinned("position_geo");
+    let position_pinned =
+        node.override_pinned("position_m") || node.override_pinned("position_geo");
 
     // Editable position fields, seeded from the effective value.
     let pos_x = RwSignal::new(effective.first().copied().unwrap_or(0.0).to_string());
@@ -437,10 +442,14 @@ fn SafetySection(node_id: String) -> impl IntoView {
                 let encoded = js_sys::encode_uri_component(&node_id)
                     .as_string()
                     .unwrap_or_default();
-                if let Ok(resp) = Request::get(&format!("/api/v1/nodes/{encoded}/safety")).send().await {
+                if let Ok(resp) = Request::get(&format!("/api/v1/nodes/{encoded}/safety"))
+                    .send()
+                    .await
+                {
                     if let Ok(cfg) = resp.json::<SafetyConfig>().await {
                         require_arm.set(cfg.require_arm_for_action);
-                        min_interval.set(cfg.min_action_interval_seconds.unwrap_or(0.0).to_string());
+                        min_interval
+                            .set(cfg.min_action_interval_seconds.unwrap_or(0.0).to_string());
                         no_go_zone_ids.set(cfg.no_go_zone_ids);
                     }
                 }

@@ -122,7 +122,8 @@ fn handle_message(state: &AppState, text: &str) {
         LiveEvent::NodeCapabilityStatus(update) => {
             if update.capability == "ptz_camera" {
                 state.nodes.update(|nodes| {
-                    if let Some(node) = nodes.iter_mut().find(|node| node.node_id == update.node_id) {
+                    if let Some(node) = nodes.iter_mut().find(|node| node.node_id == update.node_id)
+                    {
                         node.ptz_status = Some(update.status.clone());
                     }
                 });
@@ -134,10 +135,20 @@ fn handle_message(state: &AppState, text: &str) {
                 match Request::get("/api/v1/nodes?limit=64").send().await {
                     Ok(resp) if resp.ok() => match resp.json::<Vec<NodeStatus>>().await {
                         Ok(nodes) => nodes_signal.set(nodes),
-                        Err(error) => log::warn!("node refresh parse failed after websocket update for {}: {error}", update.node_id),
+                        Err(error) => log::warn!(
+                            "node refresh parse failed after websocket update for {}: {error}",
+                            update.node_id
+                        ),
                     },
-                    Ok(resp) => log::warn!("node refresh failed after websocket update for {}: HTTP {}", update.node_id, resp.status()),
-                    Err(error) => log::warn!("node refresh failed after websocket update for {}: {error}", update.node_id),
+                    Ok(resp) => log::warn!(
+                        "node refresh failed after websocket update for {}: HTTP {}",
+                        update.node_id,
+                        resp.status()
+                    ),
+                    Err(error) => log::warn!(
+                        "node refresh failed after websocket update for {}: {error}",
+                        update.node_id
+                    ),
                 }
             });
         }

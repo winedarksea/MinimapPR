@@ -602,10 +602,7 @@ pub async fn aim_ptz_node_at_position(node_id: &str, target_m: [f64; 3]) -> Resu
 }
 
 /// Capture and persist a still from a camera, linked to a track/detection.
-pub async fn snapshot_ptz_node(
-    node_id: &str,
-    track_id: Option<&str>,
-) -> Result<String, String> {
+pub async fn snapshot_ptz_node(node_id: &str, track_id: Option<&str>) -> Result<String, String> {
     let encoded = js_sys::encode_uri_component(node_id)
         .as_string()
         .unwrap_or_default();

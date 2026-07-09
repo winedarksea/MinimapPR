@@ -392,11 +392,7 @@ impl SequenceTracker {
                 // Use saturating arithmetic to defend against an adversarial
                 // prev_last = u64::MAX (not reachable in practice but cheap to guard).
                 let expected = prev_last.saturating_add(1);
-                let gap = if first_sequence > expected {
-                    first_sequence - expected
-                } else {
-                    0
-                };
+                let gap = first_sequence.saturating_sub(expected);
                 // Only advance the high-water mark when this payload extends
                 // it. Out-of-order/duplicate payloads observe but do not rewrite.
                 (gap, last_sequence > prev_last)

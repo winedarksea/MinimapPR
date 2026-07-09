@@ -1,6 +1,6 @@
 use crate::state::{
-    AcousticMapLayer, AcousticMapSample, AppState, RfEmitterEstimate, RfSpectrumFrame,
-    NodeStatus, SeismicTrace, TranscriptLine,
+    AcousticMapLayer, AcousticMapSample, AppState, NodeStatus, RfEmitterEstimate, RfSpectrumFrame,
+    SeismicTrace, TranscriptLine,
 };
 use futures::StreamExt;
 use gloo_timers::future::IntervalStream;
@@ -50,7 +50,12 @@ fn node_label(node: &NodeStatus) -> String {
     node.metadata
         .as_ref()
         .and_then(|metadata| serde_json::to_value(metadata).ok())
-        .and_then(|metadata| metadata.get("label").and_then(|value| value.as_str()).map(str::to_string))
+        .and_then(|metadata| {
+            metadata
+                .get("label")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
         .unwrap_or_else(|| node.node_id.clone())
 }
 

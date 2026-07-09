@@ -50,10 +50,7 @@ fn is_pinned(node: &NodeStatus) -> bool {
 }
 
 /// PATCH a node's operator-owned fields / overrides. Shared by the detail sections.
-pub(crate) async fn patch_node(
-    node_id: &str,
-    body: serde_json::Value,
-) -> Result<(), String> {
+pub(crate) async fn patch_node(node_id: &str, body: serde_json::Value) -> Result<(), String> {
     let encoded = js_sys::encode_uri_component(node_id)
         .as_string()
         .unwrap_or_default();
@@ -139,7 +136,10 @@ pub fn NodesView() -> impl IntoView {
 fn NodeRow(node: NodeStatus, nodes: RwSignal<Vec<NodeStatus>>) -> impl IntoView {
     let node_id = node.node_id.clone();
     let detail_href = format!("/settings/nodes/{node_id}");
-    let node_type = node.node_type.clone().unwrap_or_else(|| "unknown".to_string());
+    let node_type = node
+        .node_type
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
     let health = node.health.clone();
     let last_seen = node
         .last_seen_seconds_ago

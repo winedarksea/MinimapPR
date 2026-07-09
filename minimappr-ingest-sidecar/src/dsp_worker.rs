@@ -1366,7 +1366,8 @@ impl DspWorker {
         let stale: Vec<String> = self
             .last_heartbeat_ns_by_stream
             .iter()
-            .filter_map(|(k, &v)| (v < cutoff).then(|| k.clone()))
+            .filter(|(_, v)| **v < cutoff)
+            .map(|(k, _)| k.clone())
             .collect();
         if stale.is_empty() {
             return;
