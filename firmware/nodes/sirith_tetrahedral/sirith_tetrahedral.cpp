@@ -626,16 +626,6 @@ int main() {
     mmpr::FailureSnapshot::updateProgressMarker(static_cast<uint32_t>(gRunner.stats().framesCaptured));
     pollActivityLed();
 
-    if (nodecfg::kEnableGpsUart) {
-      gGpsSource.poll(gNodeDescriptor, &gClock);
-      gGpsRuntimeStats = gGpsSource.stats();
-      gGpsRuntimeStats.clockQuality = gClock.timeQuality();
-    }
-
-    if (nodecfg::kEnableNtpSync) {
-      gNtpClient.poll();
-    }
-
     // Heartbeat blink on GP26 (P-channel FET: LOW=on, HIGH=off).
     static uint32_t ledCounter = 0;
     static bool ledState = false;
