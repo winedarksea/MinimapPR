@@ -85,11 +85,20 @@ enum class AudioDataPinBias : uint8_t {
 #endif
 
 #ifndef MMPR_NODECFG_AUDIO_RING_FRAMES
-#define MMPR_NODECFG_AUDIO_RING_FRAMES 12
+// Pre-refactor this was a fixed kBufferedFrames=16; the refactor made it
+// configurable but dropped the default to 12, shrinking DMA capture slack by
+// 25% at the same 16 kHz/4ch rate. That leaves far less room to absorb a
+// consumer-side stall before DMA itself starts dropping blocks. Restore 16
+// (fits comfortably under the 300 KiB ring+queue budget below).
+#define MMPR_NODECFG_AUDIO_RING_FRAMES 16
 #endif
 
 #ifndef MMPR_NODECFG_AUDIO_QUEUE_SLOTS
-#define MMPR_NODECFG_AUDIO_QUEUE_SLOTS 24
+// Same story as the ring above: fixed at 40 pre-refactor, dropped to 24 by
+// this config's default. A 24-slot queue only absorbs ~768 ms of production
+// (at ~32 ms/packet) before overflowing on a single slow publish; 40 slots
+// restores the original ~1.28 s of slack.
+#define MMPR_NODECFG_AUDIO_QUEUE_SLOTS 40
 #endif
 
 #ifndef MMPR_NODECFG_PUBLISH_BATCH_BYTE_BUDGET
@@ -197,10 +206,16 @@ static constexpr const char* kBleIngestPath = MMPR_NODECFG_BLE_INGEST_PATH;
 
 
 static constexpr uint32_t kWiFiConnectTimeoutMs = 15000;
-// Keep this below the DMA ring slack. At 16 kHz / 1024 samples / 16 buffered
-// blocks, the capture ring holds about 1.0 s; longer synchronous publishes
-// overrun capture and make the heartbeat look randomly slow.
-static constexpr uint32_t kHttpTimeoutMs = 450;
+// This bounds the async store-forward request (HttpFramePublisher::pollPublish
+// is non-blocking and polled from the main loop, so a slow publish does not
+// steal time from drainAvailableAudioFrames()/capture). Packets are batched
+// one per UTC-second boundary; at 4 ch x 16 kHz x 2 bytes that's ~128 KB per
+// publish, which needs >2.3 Mbit/s to clear in 450 ms -- above what the Pico
+// W's SPI-linked CYW43439 reliably sustains. That mismatch was the dominant
+// cause of the post-refactor stage=6 (timeout) publish failures, which in
+// turn produced thousands of sequence gaps in the ingest journal and
+// suppressed all detections. Give it real headroom instead.
+static constexpr uint32_t kHttpTimeoutMs = 2500;
 // After a failed publish, skip network attempts briefly so capture and Wi-Fi
 // polling recover. Keep this short: a multi-second backoff discards dozens of
 // audio packets and makes the debug stream sparse even after transient stalls.

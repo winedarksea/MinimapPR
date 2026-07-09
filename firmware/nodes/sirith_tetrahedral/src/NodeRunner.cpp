@@ -665,7 +665,7 @@ void NodeRunner::loopOnce() {
     std::printf(
         "[node] blocks=%" PRIu64 " published=%" PRIu64 " dropped=%" PRIu64
         " continuity=%" PRIu64 " errors=%" PRIu64 " queue=%u overflows=%" PRIu64
-        " last_status=%d\n",
+        " last_status=%d latency_ms=%u ewma_ms=%u max_ms=%u rssi=%d\n",
         stats_.framesCaptured,
         stats_.framesPublished,
         stats_.framesDropped,
@@ -673,7 +673,11 @@ void NodeRunner::loopOnce() {
         stats_.publishErrors,
         static_cast<unsigned>(stats_.queueDepth),
         stats_.queueOverflows,
-        stats_.lastPublishStatus);
+        stats_.lastPublishStatus,
+        static_cast<unsigned>(stats_.publishLatencyLastMs),
+        static_cast<unsigned>(stats_.publishLatencyEwmaMs),
+        static_cast<unsigned>(stats_.publishLatencyMaxMs),
+        static_cast<int>(stats_.wifiRssiDbm));
   }
 }
 
