@@ -1,6 +1,6 @@
 use crate::api::MapOverlay;
 use crate::recording::RecordingSession;
-use leptos::prelude::RwSignal;
+use leptos::prelude::{Get, Memo, RwSignal};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
@@ -155,6 +155,9 @@ impl MapLayerVisibility {
 #[derive(Clone)]
 pub struct AppState {
     pub nodes: RwSignal<Vec<NodeStatus>>,
+    /// Camera-capable nodes (`ptz_camera`), derived from `nodes`. Shared source of
+    /// truth for PTZ UI (map context menu, track panel) so the filter isn't duplicated.
+    pub ptz_nodes: Memo<Vec<NodeStatus>>,
     pub tracks: RwSignal<Vec<Track>>,
     pub detections: RwSignal<VecDeque<Detection>>,
     pub omni_detection_summaries: RwSignal<Vec<NodeOmniDetectionSummary>>,
@@ -189,8 +192,17 @@ pub struct AppState {
 
 impl AppState {
     pub fn new() -> Self {
+        let nodes: RwSignal<Vec<NodeStatus>> = RwSignal::new(vec![]);
+        let ptz_nodes = Memo::new(move |_| {
+            nodes
+                .get()
+                .into_iter()
+                .filter(|node| node.has_capability("ptz_camera"))
+                .collect::<Vec<_>>()
+        });
         Self {
-            nodes: RwSignal::new(vec![]),
+            nodes,
+            ptz_nodes,
             tracks: RwSignal::new(vec![]),
             detections: RwSignal::new(VecDeque::new()),
             omni_detection_summaries: RwSignal::new(vec![]),

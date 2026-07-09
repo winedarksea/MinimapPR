@@ -46,7 +46,7 @@ fn trigger_track_download(track_id: &str) {
 pub fn TracksPane() -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState");
     let tracks = state.tracks;
-    let nodes = state.nodes;
+    let ptz_nodes = state.ptz_nodes;
     let selected_cop_item = state.selected_cop_item;
     let audio_drawer_open = state.audio_drawer_open;
     let audio_drawer_detection_id = state.audio_drawer_detection_id;
@@ -244,11 +244,7 @@ pub fn TracksPane() -> impl IntoView {
 
                                             // PTZ controls: entirely absent unless a camera-capable node is registered.
                                             {move || {
-                                                let ptz_nodes = nodes
-                                                    .get()
-                                                    .into_iter()
-                                                    .filter(|node| node.has_capability("ptz_camera"))
-                                                    .collect::<Vec<_>>();
+                                                let ptz_nodes = ptz_nodes.get();
                                                 if ptz_nodes.is_empty() {
                                                     return ().into_any();
                                                 }

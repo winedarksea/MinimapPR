@@ -1,3 +1,10 @@
+//! Per-node audio-pipeline editor, rendered as a section inside the node detail
+//! view. Ported from the former standalone `pages/settings/pipeline.rs`; the data
+//! source (`GET /api/v1/pipeline/nodes`) and save path
+//! (`PATCH /api/v1/pipeline/nodes/{id}/audio`, which forwards to the Rust sidecar
+//! `/api/v1/dsp/config` when active) are unchanged — the response is just filtered
+//! to a single node.
+
 use crate::components::meter::RmsMeter;
 use crate::components::strip_chart::StripChart;
 use futures::StreamExt;
@@ -250,43 +257,56 @@ fn age_text(last_frame_ns: Option<i64>) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// PipelineView
+// AudioPipelineSection — single-node editor embedded in the node detail view.
 // ---------------------------------------------------------------------------
 
 #[component]
-pub fn PipelineView() -> impl IntoView {
-    let data: RwSignal<Option<PipelineNodesResp>> = RwSignal::new(None);
+pub fn AudioPipelineSection(node_id: String) -> impl IntoView {
+    let node_data: RwSignal<Option<PipelineNode>> = RwSignal::new(None);
+    let is_rust = RwSignal::new(false);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
+    let loaded = RwSignal::new(false);
     let edits: RwSignal<HashMap<String, NodeEdit>> = RwSignal::new(HashMap::new());
 
-    let fetch = move || {
-        spawn_local(async move {
-            match Request::get("/api/v1/pipeline/nodes").send().await {
-                Ok(resp) if resp.ok() => match resp.json::<PipelineNodesResp>().await {
-                    Ok(r) => {
-                        edits.update(|map| {
-                            for node in &r.nodes {
-                                let e = map
-                                    .entry(node.node_id.clone())
-                                    .or_insert_with(|| NodeEdit::from_node(node));
-                                if !e.dirty {
-                                    *e = NodeEdit::from_node(node);
-                                }
+    let fetch = {
+        let node_id = node_id.clone();
+        move || {
+            let node_id = node_id.clone();
+            spawn_local(async move {
+                match Request::get("/api/v1/pipeline/nodes").send().await {
+                    Ok(resp) if resp.ok() => match resp.json::<PipelineNodesResp>().await {
+                        Ok(r) => {
+                            is_rust.set(r.active_pipeline == "rust");
+                            let found = r.nodes.into_iter().find(|n| n.node_id == node_id);
+                            if let Some(node) = &found {
+                                edits.update(|map| {
+                                    let e = map
+                                        .entry(node.node_id.clone())
+                                        .or_insert_with(|| NodeEdit::from_node(node));
+                                    if !e.dirty {
+                                        *e = NodeEdit::from_node(node);
+                                    }
+                                });
                             }
-                        });
-                        data.set(Some(r));
-                        error.set(None);
-                    }
-                    Err(e) => error.set(Some(format!("parse: {e}"))),
-                },
-                Ok(resp) => error.set(Some(format!("HTTP {}", resp.status()))),
-                Err(e) => error.set(Some(e.to_string())),
-            }
-        });
+                            node_data.set(found);
+                            loaded.set(true);
+                            error.set(None);
+                        }
+                        Err(e) => error.set(Some(format!("parse: {e}"))),
+                    },
+                    Ok(resp) => error.set(Some(format!("HTTP {}", resp.status()))),
+                    Err(e) => error.set(Some(e.to_string())),
+                }
+            });
+        }
     };
 
-    Effect::new(move |_| fetch());
+    {
+        let fetch = fetch.clone();
+        Effect::new(move |_| fetch());
+    }
     Effect::new(move |_| {
+        let fetch = fetch.clone();
         spawn_local(async move {
             let mut iv = IntervalStream::new(1_500);
             while iv.next().await.is_some() {
@@ -296,82 +316,14 @@ pub fn PipelineView() -> impl IntoView {
     });
 
     view! {
-        <div class="page-stub">
-            <div class="pipeline-header">
-                <h2 style="margin:0">"Node Audio Pipeline"</h2>
-                {move || error.get().map(|e| view! { <span class="daily-error">{e}</span> })}
-                {move || data.get().map(|d| {
-                    let chip_cls = if d.active_pipeline == "rust" { "tone-badge tone-blue" } else { "tone-badge tone-green" };
-                    let label = if d.active_pipeline == "rust" { "Rust sidecar" } else { "Python" };
-                    let lag = d.pipeline_seconds_behind_realtime
-                        .map(|s| format!(" · {s:.2}s behind realtime")).unwrap_or_default();
-                    view! {
-                        <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap">
-                            <span class=chip_cls>{label}</span>
-                            <span class="muted" style="font-size:0.85rem">
-                                {format!("{} node(s){}", d.nodes.len(), lag)}
-                            </span>
-                        </div>
-                    }
-                })}
-            </div>
-
-            {move || match data.get() {
-                None => view! { <div class="muted">"Loading…"</div> }.into_any(),
-                Some(resp) => {
-                    let is_rust = resp.active_pipeline == "rust";
-                    if resp.nodes.is_empty() {
-                        return view! {
-                            <div class="empty-state">
-                                <p>"No nodes have sent audio frames yet."</p>
-                                <p class="muted">"Nodes appear here after their first ingest frame is received."</p>
-                            </div>
-                        }.into_any();
-                    }
-                    // Aggregate health metrics for the banner.
-                    // `lag == None` = pipeline has nothing in flight (= caught up = healthy).
-                    let healthy_nodes = resp.nodes.iter().filter(|n| n.audio_status == "recent").count();
-                    let total_nodes = resp.nodes.len();
-                    let total_drops: u64 = resp.nodes.iter()
-                        .flat_map(|n| n.stages.iter())
-                        .map(|s| s.drops)
-                        .sum();
-                    let lag = resp.pipeline_seconds_behind_realtime;
-                    let (banner_label, banner_chip) = if lag.map(|s| s >= 30.0).unwrap_or(false) {
-                        ("Critical", "health-chip offline")
-                    } else if healthy_nodes < total_nodes || total_drops > 0 || lag.map(|s| s >= 5.0).unwrap_or(false) {
-                        ("Degraded", "health-chip degraded")
-                    } else {
-                        ("Healthy", "health-chip online")
-                    };
-                    let lag_label = match lag {
-                        Some(s) if s >= 60.0 => format!("{:.1} min behind realtime", s / 60.0),
-                        Some(s) if s >= 0.005 => format!("{s:.2} s behind realtime"),
-                        _ => "live · caught up".to_string(),
-                    };
-                    let drop_label = if total_drops == 0 {
-                        "0 drops".to_string()
-                    } else {
-                        format!("{total_drops} drops")
-                    };
-                    let drop_cls = if total_drops > 0 { "pipeline-banner-warn" } else { "muted" };
-                    let audio_label = format!("{healthy_nodes}/{total_nodes} nodes audio healthy");
-                    let audio_cls = if healthy_nodes < total_nodes { "pipeline-banner-warn" } else { "muted" };
-
-                    let cards = resp.nodes.into_iter().map(|node| {
-                        view! { <NodeCard node=node edits=edits is_rust=is_rust /> }
-                    }).collect_view();
-
-                    view! {
-                        <div class="pipeline-health-banner">
-                            <span class=banner_chip>{banner_label}</span>
-                            <span class=audio_cls>{audio_label}</span>
-                            <span class=drop_cls>{drop_label}</span>
-                            <span class="muted">{lag_label}</span>
-                        </div>
-                        {cards}
-                    }.into_any()
-                }
+        <div>
+            {move || error.get().map(|e| view! { <span class="daily-error">{e}</span> })}
+            {move || match node_data.get() {
+                Some(node) => view! { <NodeCard node=node edits=edits is_rust=is_rust.get() /> }.into_any(),
+                None if loaded.get() => view! {
+                    <p class="muted">"No audio frames received from this node yet. Settings appear once its first ingest frame lands."</p>
+                }.into_any(),
+                None => view! { <p class="muted">"Loading…"</p> }.into_any(),
             }}
         </div>
     }
@@ -395,11 +347,6 @@ fn NodeCard(
     let audio_status = node.audio_status.clone();
     let sample_rate = node.sample_rate_hz;
     let last_ns = node.last_frame_ns;
-    let node_type_str = if node.node_type.is_empty() {
-        "unknown".to_string()
-    } else {
-        node.node_type.clone()
-    };
     let age = age_text(last_ns);
     let rms_all: Vec<f64> = mics
         .first()
@@ -574,24 +521,7 @@ fn NodeCard(
     let nid_dirty = node_id.clone();
 
     view! {
-        <div class="diag-card pipeline-node-card">
-
-            // Header
-            <div class="pipeline-node-header">
-                <div>
-                    <h3 style="margin:0">{node_id.clone()}</h3>
-                    <span class="muted" style="font-size:0.8rem">{node_type_str}</span>
-                </div>
-                <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap">
-                    <span class=audio_status_chip(&audio_status)>{audio_status.clone()}</span>
-                    {sample_rate.map(|sr| view! {
-                        <span class="muted" style="font-size:0.8rem">{format!("{sr} Hz")}</span>
-                    })}
-                    {age.map(|t| view! {
-                        <span class="muted" style="font-size:0.8rem">{t}</span>
-                    })}
-                </div>
-            </div>
+        <div class="pipeline-node-card">
 
             <div class="pipeline-chain-flow" aria-label="Audio pipeline flow">
                 <div class="pipeline-chain-node">
@@ -613,6 +543,8 @@ fn NodeCard(
                     <strong>"Output"</strong>
                     <span>{fmt_lag(stages.iter().filter_map(|stage| stage.lag_s).max_by(|a, b| a.total_cmp(b)))}</span>
                 </div>
+                <span class=audio_status_chip(&audio_status) style="margin-left:auto">{audio_status.clone()}</span>
+                {age.map(|t| view! { <span class="muted" style="font-size:0.8rem">{t}</span> })}
             </div>
 
             // Stage chips

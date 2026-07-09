@@ -627,3 +627,46 @@ pub async fn snapshot_ptz_node(
             .to_string()),
     }
 }
+
+/// Arm a camera node's PTZ effector so it will accept slew/aim actions.
+pub async fn arm_ptz_node(node_id: &str) -> Result<(), String> {
+    let encoded = js_sys::encode_uri_component(node_id)
+        .as_string()
+        .unwrap_or_default();
+    let url = format!("/api/v1/nodes/{encoded}/effector/arm");
+    ptz_action(&url, &serde_json::json!({})).await
+}
+
+/// Disarm a camera node's PTZ effector.
+pub async fn disarm_ptz_node(node_id: &str) -> Result<(), String> {
+    let encoded = js_sys::encode_uri_component(node_id)
+        .as_string()
+        .unwrap_or_default();
+    let url = format!("/api/v1/nodes/{encoded}/effector/disarm");
+    ptz_action(&url, &serde_json::json!({})).await
+}
+
+/// POST a PTZ action and interpret the `{status, failure_class}` result. The
+/// backend returns 409 (not 2xx) when an action is refused, so read the body in
+/// both cases rather than treating non-2xx as an opaque error.
+async fn ptz_action(url: &str, body: &serde_json::Value) -> Result<(), String> {
+    let resp = Request::post(url)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(body).unwrap_or_default())
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let result = resp
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())?;
+    match result.get("status").and_then(|v| v.as_str()) {
+        Some("COMPLETED") => Ok(()),
+        _ => Err(result
+            .get("failure_class")
+            .and_then(|v| v.as_str())
+            .unwrap_or("action failed")
+            .to_string()),
+    }
+}

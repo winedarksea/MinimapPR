@@ -304,9 +304,10 @@ def _build_effector_manager(
 ) -> EffectorManager:
     """Build the (optional) effector subsystem.
 
-    Always constructed — start() is cheap/dormant when the `effectors` DB
-    table is empty, so no separate enable path is needed beyond the
-    `effectors_enabled` kill-switch checked by the caller before start().
+    Always constructed — start() lists nodes and attaches only those with the
+    `ptz_camera` capability, so it is cheap/dormant when no camera nodes exist.
+    No separate enable path is needed beyond the `effectors_enabled` kill-switch
+    checked by the caller before start().
     """
     return EffectorManager(
         storage=storage,

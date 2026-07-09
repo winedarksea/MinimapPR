@@ -59,10 +59,15 @@ test("Nodes settings opens node table and add-node wizard", async ({ page }) => 
   await page.goto(`${baseUrl}/settings/nodes`, { waitUntil: "domcontentloaded" });
 
   await expect(page.getByRole("heading", { name: "Nodes" })).toBeVisible();
-  await expect(page.locator(".compact-table")).toBeVisible();
-  await page.getByRole("button", { name: "Add Node" }).click();
-  await expect(page.getByText("Add Node").nth(1)).toBeVisible();
+  // Either the node table or the empty state renders depending on seeded data.
+  await expect(page.locator(".nodes-page")).toBeVisible();
+  await page.getByRole("button", { name: /Add Node/ }).click();
+  await expect(page.locator(".node-wizard")).toBeVisible();
   await expect(page.getByRole("button", { name: "Audio / Sensor" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Camera / PTZ" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Scan & Pair" })).toBeDisabled();
+  // Scan & Pair is a disabled placeholder card.
+  await expect(page.locator(".node-wizard-card.is-disabled")).toHaveAttribute(
+    "aria-disabled",
+    "true",
+  );
 });

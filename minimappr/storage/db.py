@@ -448,36 +448,10 @@ class Storage:
             CREATE INDEX IF NOT EXISTS idx_capture_sessions_created ON capture_sessions(created_ns DESC);
             CREATE INDEX IF NOT EXISTS idx_capture_sessions_state ON capture_sessions(state);
 
-            CREATE TABLE IF NOT EXISTS effectors (
-                id TEXT PRIMARY KEY,
-                effector_type TEXT NOT NULL,
-                x REAL NOT NULL,
-                y REAL NOT NULL,
-                z REAL NOT NULL,
-                lat REAL,
-                lon REAL,
-                alt REAL,
-                yaw_deg REAL NOT NULL DEFAULT 0,
-                pitch_deg REAL NOT NULL DEFAULT 0,
-                capabilities_json TEXT NOT NULL DEFAULT '[]',
-                transport_json TEXT NOT NULL DEFAULT '{}',
-                metadata_json TEXT NOT NULL DEFAULT '{}',
-                properties_json TEXT NOT NULL DEFAULT '{}',
-                last_seen_ns INTEGER NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS effector_artifacts (
-                id TEXT PRIMARY KEY,
-                effector_id TEXT NOT NULL REFERENCES effectors(id) ON DELETE CASCADE,
-                track_id TEXT,
-                detection_id TEXT,
-                kind TEXT NOT NULL DEFAULT 'snapshot',
-                path TEXT NOT NULL,
-                created_ns INTEGER NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_effector_artifacts_effector ON effector_artifacts(effector_id, created_ns DESC);
-            CREATE INDEX IF NOT EXISTS idx_effector_artifacts_track ON effector_artifacts(track_id, created_ns DESC);
-
+            -- NOTE: the legacy `effectors` / `effector_artifacts` tables are intentionally
+            -- NOT created here. They are migrated into `nodes` / `node_artifacts` by
+            -- `_migrate_effectors_into_nodes()` and renamed to `*_backup_v1`. Recreating
+            -- them here would resurrect empty tables every boot and re-arm the migration.
             CREATE TABLE IF NOT EXISTS node_artifacts (
                 id TEXT PRIMARY KEY,
                 node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,

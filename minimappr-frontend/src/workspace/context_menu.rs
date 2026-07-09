@@ -12,7 +12,7 @@ const DEFAULT_ZONE_RADIUS_M: f64 = 25.0;
 pub fn MapContextMenu() -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState");
     let menu = state.map_context_menu;
-    let nodes = state.nodes;
+    let ptz_nodes = state.ptz_nodes;
     let config = state.config;
     let zone_draft = state.zone_draft;
     let action_status = RwSignal::new(None::<String>);
@@ -31,7 +31,7 @@ pub fn MapContextMenu() -> impl IntoView {
                 .get()
                 .and_then(|snapshot| snapshot.site_origin)
                 .map(|origin| geo_to_local_m(&origin, menu_state.lat, menu_state.lon));
-            let positioned_ptz_nodes = nearby_ptz_nodes(&nodes.get(), menu_state.lat, menu_state.lon);
+            let positioned_ptz_nodes = nearby_ptz_nodes(&ptz_nodes.get(), menu_state.lat, menu_state.lon);
             let position_style = format!(
                 "left: {:.0}px; top: {:.0}px;",
                 menu_state.screen_x.clamp(12.0, 9_999.0),
@@ -299,10 +299,13 @@ pub fn ZoneDraftDialog() -> impl IntoView {
     }
 }
 
+// `nodes` is expected to already be filtered to `ptz_camera`-capable nodes
+// (see AppState::ptz_nodes); this only narrows to those with a geo position and
+// sorts by distance to the clicked point.
 fn nearby_ptz_nodes(nodes: &[NodeStatus], lat: f64, lon: f64) -> Vec<NodeStatus> {
     let mut positioned = nodes
         .iter()
-        .filter(|node| node.has_capability("ptz_camera") && node.position_geo.is_some())
+        .filter(|node| node.position_geo.is_some())
         .cloned()
         .collect::<Vec<_>>();
     positioned.sort_by(|left, right| {

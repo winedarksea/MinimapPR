@@ -110,6 +110,13 @@ class LiveEventHub:
         detection = payload.get("detection") if isinstance(payload.get("detection"), dict) else {}
         track = payload.get("track") if isinstance(payload.get("track"), dict) else {}
 
+        # Content filters (zones/labels/categories/confidence/statuses) only apply to
+        # detection/track payloads. System/state events (e.g. node_updated,
+        # node_capability_status) carry neither, so always deliver them — otherwise a
+        # subscriber with any content filter set would silently miss node-state events.
+        if not detection and not track:
+            return True
+
         if flt.zone_ids:
             zone_ids = {
                 str(item).strip().lower()
