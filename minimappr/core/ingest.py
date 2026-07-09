@@ -27,6 +27,7 @@ import numpy as np
 from minimappr.config import FusionConfig, LocalizationConfig
 from minimappr.core.audio_buffer import MultiSensorBuffer
 from minimappr.core.geo import LocalCoordinateFrame
+from minimappr.core.ingest_health import IngestHealthClassifier, runner_stats_from_timing_diagnostics
 from minimappr.core.node_registry import NodeRegistry
 from minimappr.core.preprocessing import NodePreprocessorFactory
 from minimappr.interfaces import AudioPreprocessor, StorageBackend
@@ -46,40 +47,6 @@ from minimappr.utils.audio import decode_pcm16le_b64, trigger_rms
 # Surfaced verbatim on the API so publish-queue/Wi-Fi health can be monitored
 # (queue overflows drive server-side frame sequence gaps; the publish-failure
 # breakdown distinguishes a saturated link from a slow consumer).
-_RUNNER_STAT_KEYS: tuple[str, ...] = (
-    "runner_frames_captured",
-    "runner_frames_dropped",
-    "runner_continuity_violations",
-    "runner_publish_errors",
-    "runner_consecutive_publish_failures",
-    "runner_queue_depth",
-    "runner_queue_overflows",
-    "runner_publish_timeout_failures",
-    "runner_publish_connect_or_reset_failures",
-    "runner_publish_dns_failures",
-    "runner_publish_wifi_down_failures",
-    "runner_last_publish_status",
-    "runner_last_publish_failure_stage",
-    "runner_last_publish_lwip_error",
-)
-
-
-def _extract_runner_stats(timing_diagnostics: dict | None) -> dict[str, Any] | None:
-    """Pull the firmware NodeRunner counters out of a frame's timing diagnostics.
-
-    Returns None when the node reports no runner telemetry (e.g. a synthetic or
-    non-firmware source), so the audio summary stays unchanged for those nodes.
-    """
-    if not isinstance(timing_diagnostics, dict):
-        return None
-    stats = {
-        key: timing_diagnostics[key]
-        for key in _RUNNER_STAT_KEYS
-        if timing_diagnostics.get(key) is not None
-    }
-    return stats or None
-
-
 # ---------------------------------------------------------------------------
 # Supporting dataclasses
 # ---------------------------------------------------------------------------
@@ -196,6 +163,7 @@ class IngestProcessor:
         self._seq_gap_warning_last_logged_s: dict[str, float] = {}
         self._seq_gap_warning_interval_seconds = 10.0
         self._unknown_capability_warning_node_ids: set[str] = set()
+        self._ingest_health = IngestHealthClassifier()
 
     @property
     def last_trigger_ns(self) -> int:
@@ -458,6 +426,7 @@ class IngestProcessor:
             time_quality=frame.time_quality.value,
             buffer_uses_receipt_time=buffer_uses_receipt_time,
             timing_diagnostics=frame.timing_diagnostics,
+            sequence_gap_count=sequence_gap_count,
         )
         half_window_ns = int(self._localization_config.localization_window_seconds * 0.5 * 1_000_000_000)
         # Anchor event_time_ns to the buffer's own sample-count timeline rather
@@ -539,6 +508,7 @@ class IngestProcessor:
         time_quality: str,
         buffer_uses_receipt_time: bool,
         timing_diagnostics: dict | None = None,
+        sequence_gap_count: int = 0,
     ) -> None:
         last_publish_ns = self._last_audio_summary_publish_ns_by_node.get(node_id, 0)
         if now_ns - last_publish_ns < _AUDIO_SUMMARY_PUBLISH_INTERVAL_NS:
@@ -565,9 +535,14 @@ class IngestProcessor:
             "buffer_uses_receipt_time": buffer_uses_receipt_time,
             "status": "live_ingest_process",
         }
-        runner_stats = _extract_runner_stats(timing_diagnostics)
+        runner_stats = runner_stats_from_timing_diagnostics(timing_diagnostics)
         if runner_stats is not None:
             summary["runner_stats"] = runner_stats
+        summary["ingest_health"] = self._ingest_health.observe(
+            node_id=node_id,
+            sequence_gap_count=sequence_gap_count,
+            timing_diagnostics=timing_diagnostics,
+        )
         await self._storage.upsert_node_audio_summary(
             node_id=node_id,
             summary=summary,

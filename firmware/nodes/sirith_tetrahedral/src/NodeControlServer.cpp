@@ -14,8 +14,8 @@ namespace {
 
 constexpr size_t kMaxMethodBytes = 8;
 constexpr size_t kMaxTargetBytes = 192;
-constexpr size_t kMaxBodyBytes = 320;
-constexpr size_t kMaxResponseBytes = 512;
+constexpr size_t kMaxBodyBytes = 1024;
+constexpr size_t kMaxResponseBytes = 1536;
 constexpr uint8_t kIdlePollAbortThreshold = 12;
 
 bool appendCopy(char* dest, size_t destBytes, const char* src, size_t srcBytes) {
@@ -37,11 +37,19 @@ NodeControlServer::NodeControlServer(
     HttpFramePublisher& publisher,
     uint16_t listenPort,
     const char* routePath,
-    bool allowRuntimePortChange)
+    bool allowRuntimePortChange,
+    const RunnerStats* runnerStats,
+    const char* statsPath,
+    const BleScannerStats* bleScannerStats,
+    const BleReportPublisherStats* bleReportStats)
     : publisher_(publisher),
       listenPort_(listenPort),
       routePath_(routePath != nullptr ? routePath : "/api/v1/publish-target"),
-      allowRuntimePortChange_(allowRuntimePortChange) {}
+      statsPath_(statsPath != nullptr ? statsPath : "/api/v1/stats"),
+      allowRuntimePortChange_(allowRuntimePortChange),
+      runnerStats_(runnerStats),
+      bleScannerStats_(bleScannerStats),
+      bleReportStats_(bleReportStats) {}
 
 NodeControlServer::~NodeControlServer() {
   closeActiveClient(true);
@@ -260,6 +268,87 @@ bool NodeControlServer::prepareStateBody(
   return written > 0 && static_cast<size_t>(written) < bodyBufferBytes;
 }
 
+bool NodeControlServer::prepareStatsBody(char* bodyBuffer, size_t bodyBufferBytes) const {
+  if (bodyBuffer == nullptr || bodyBufferBytes == 0 || runnerStats_ == nullptr) {
+    return false;
+  }
+  const RunnerStats& stats = *runnerStats_;
+  int written = std::snprintf(
+      bodyBuffer,
+      bodyBufferBytes,
+      "{\"frames_captured\":%llu,\"frames_published\":%llu,\"frames_dropped\":%llu,"
+      "\"publish_errors\":%llu,\"packet_continuity_violations\":%llu,"
+      "\"queue_overflows\":%llu,\"queue_depth\":%u,\"queue_slots_high_water\":%u,"
+      "\"queue_slots_capacity\":%u,\"ring_frames_high_water\":%u,\"ring_frames_capacity\":%u,"
+      "\"last_publish_status\":%d,\"last_publish_failure_stage\":%u,"
+      "\"last_publish_lwip_error\":%ld,\"consecutive_publish_failures\":%u,"
+      "\"publish_latency_last_ms\":%u,\"publish_latency_ewma_ms\":%u,"
+      "\"publish_latency_max_ms\":%u,\"wifi_rssi_dbm\":%d,\"heap_free_bytes\":%lu,"
+      "\"boot_id\":%lu}",
+      static_cast<unsigned long long>(stats.framesCaptured),
+      static_cast<unsigned long long>(stats.framesPublished),
+      static_cast<unsigned long long>(stats.framesDropped),
+      static_cast<unsigned long long>(stats.publishErrors),
+      static_cast<unsigned long long>(stats.packetContinuityViolations),
+      static_cast<unsigned long long>(stats.queueOverflows),
+      static_cast<unsigned>(stats.queueDepth),
+      static_cast<unsigned>(stats.queueSlotsHighWater),
+      static_cast<unsigned>(stats.queueSlotsCapacity),
+      static_cast<unsigned>(stats.ringFramesHighWater),
+      static_cast<unsigned>(stats.ringFramesCapacity),
+      stats.lastPublishStatus,
+      static_cast<unsigned>(stats.lastPublishFailureStage),
+      static_cast<long>(stats.lastPublishLwipError),
+      static_cast<unsigned>(stats.consecutivePublishFailures),
+      static_cast<unsigned>(stats.publishLatencyLastMs),
+      static_cast<unsigned>(stats.publishLatencyEwmaMs),
+      static_cast<unsigned>(stats.publishLatencyMaxMs),
+      static_cast<int>(stats.wifiRssiDbm),
+      static_cast<unsigned long>(stats.heapFreeBytes),
+      static_cast<unsigned long>(stats.bootId));
+  if (written <= 0 || static_cast<size_t>(written) >= bodyBufferBytes) {
+    return false;
+  }
+  size_t usedBytes = static_cast<size_t>(written);
+  if (bleScannerStats_ != nullptr) {
+    const BleScannerStats& ble = *bleScannerStats_;
+    written = std::snprintf(
+        bodyBuffer + usedBytes - 1u,
+        bodyBufferBytes - usedBytes + 1u,
+        ",\"ble_scan\":{\"initialized\":%s,\"scanning\":%s,"
+        "\"advertisements_observed\":%llu,\"advertisements_dropped\":%llu,"
+        "\"table_evictions\":%llu,\"active_advertisers\":%lu}}",
+        boolJson(ble.initialized),
+        boolJson(ble.scanning),
+        static_cast<unsigned long long>(ble.advertisementsObserved),
+        static_cast<unsigned long long>(ble.advertisementsDropped),
+        static_cast<unsigned long long>(ble.tableEvictions),
+        static_cast<unsigned long>(ble.activeAdvertisers));
+    if (written <= 0 || static_cast<size_t>(written) >= bodyBufferBytes - usedBytes + 1u) {
+      return false;
+    }
+    usedBytes += static_cast<size_t>(written) - 1u;
+  }
+  if (bleReportStats_ != nullptr) {
+    const BleReportPublisherStats& ble = *bleReportStats_;
+    written = std::snprintf(
+        bodyBuffer + usedBytes - 1u,
+        bodyBufferBytes - usedBytes + 1u,
+        ",\"ble_reports\":{\"reports_sent\":%llu,\"reports_dropped\":%llu,"
+        "\"report_publish_errors\":%llu,\"last_report_observation_count\":%lu,"
+        "\"last_report_status\":%lu}}",
+        static_cast<unsigned long long>(ble.reportsSent),
+        static_cast<unsigned long long>(ble.reportsDropped),
+        static_cast<unsigned long long>(ble.reportPublishErrors),
+        static_cast<unsigned long>(ble.lastReportObservationCount),
+        static_cast<unsigned long>(ble.lastReportStatus));
+    if (written <= 0 || static_cast<size_t>(written) >= bodyBufferBytes - usedBytes + 1u) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool NodeControlServer::tryParseRequest(char* method, size_t methodBytes, char* target, size_t targetBytes) const {
   if (method == nullptr || target == nullptr || methodBytes == 0 || targetBytes == 0) {
     return false;
@@ -379,6 +468,16 @@ err_t NodeControlServer::handleControlRequest(tcp_pcb* tpcb) {
   char body[kMaxBodyBytes] = {};
   if (!tryParseRequest(method, sizeof(method), target, sizeof(target))) {
     return sendJsonAndClose(tpcb, 400, "Bad Request", "{\"detail\":\"unable to parse HTTP request line\"}");
+  }
+
+  const size_t statsRouteLen = std::strlen(statsPath_);
+  if (std::strcmp(method, "GET") == 0 &&
+      std::strncmp(target, statsPath_, statsRouteLen) == 0 &&
+      (target[statsRouteLen] == '\0' || target[statsRouteLen] == '?')) {
+    if (!prepareStatsBody(body, sizeof(body))) {
+      return sendJsonAndClose(tpcb, 500, "Internal Server Error", "{\"detail\":\"stats unavailable\"}");
+    }
+    return sendJsonAndClose(tpcb, 200, "OK", body);
   }
 
   const size_t routeLen = std::strlen(routePath_);

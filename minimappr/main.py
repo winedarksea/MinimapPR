@@ -86,6 +86,8 @@ from minimappr.core.ambisonics import (
 )
 from minimappr.core.audio_buffer import MultiSensorBuffer
 from minimappr.core.auth import extract_federation_token
+from minimappr.core.ble_multilateration import estimate_ble_device_position
+from minimappr.core.ble_observations import BleObservationStore
 from minimappr.core.bit_report import BITReportEvaluator
 from minimappr.core.cluster_registry import ClusterRegistry
 from minimappr.core.effectors.registry import EffectorManager
@@ -109,6 +111,7 @@ from minimappr.models import (
     BITStatus,
     BITTestResult,
     BITType,
+    BleIngestRequest,
     ClusterSpec,
     ContextSnapshot,
     CopStatusResponse,
@@ -360,6 +363,7 @@ def _clear_bound_runtime_state(state) -> None:
         "storage",
         "registry",
         "cluster_registry",
+        "ble_observation_store",
         "audio_buffer",
         "localizer",
         "classifier",
@@ -594,6 +598,14 @@ class _EnvironmentIngestSample(BaseModel):
 
 class _EnvironmentIngestBody(BaseModel):
     samples: list[_EnvironmentIngestSample]
+
+
+def _ble_observation_store(state) -> BleObservationStore:
+    store = getattr(state, "ble_observation_store", None)
+    if store is None:
+        store = BleObservationStore()
+        setattr(state, "ble_observation_store", store)
+    return store
 
 
 def _ingest_sidecar_is_running(state) -> bool:
@@ -1204,6 +1216,7 @@ async def _api_only_lifespan(app: FastAPI, settings: Settings):
         # not influence the ingest-process localizer (no cross-process sync yet).
         registry=registry,
         cluster_registry=ClusterRegistry(),
+        ble_observation_store=BleObservationStore(),
         sidecar_state=sidecar_state,
         capture_manager=capture_manager,
         ingest_concurrency=_IngestConcurrencyLimit(
@@ -1314,6 +1327,7 @@ async def lifespan(app: FastAPI):
         storage=storage,
         registry=combined_runtime_core_services.registry,
         cluster_registry=combined_runtime_core_services.cluster_registry,
+        ble_observation_store=BleObservationStore(),
         audio_buffer=combined_runtime_core_services.audio_buffer,
         localizer=combined_runtime_core_services.localizer,
         classifier=combined_runtime_core_services.classifier,
@@ -1812,6 +1826,70 @@ async def ingest_environment(payload: _EnvironmentIngestBody, request: Request) 
     return {"accepted": accepted, "queued": False}
 
 
+@app.post("/api/v1/ingest/ble")
+async def ingest_ble(payload: BleIngestRequest, request: Request) -> dict:
+    state = _require_state(request)
+    if len(payload.observations) > 256:
+        raise HTTPException(status_code=413, detail="BLE batch exceeds 256 observations")
+    now_ns = time.time_ns()
+    accepted = await _ble_observation_store(state).ingest(
+        node_id=payload.node_id,
+        observations=payload.observations,
+        recv_ns=now_ns,
+        boot_count=payload.boot_count,
+        boot_id=payload.boot_id,
+        monotonic_ms=payload.monotonic_ms,
+    )
+    return {"accepted": accepted, "queued": False}
+
+
+async def _ble_node_positions(state, *, limit: int = 5000) -> dict[str, tuple[float, float, float]]:
+    node_rows = await state.storage.list_nodes(limit=limit)
+    positions: dict[str, tuple[float, float, float]] = {}
+    for node in node_rows:
+        position = node.get("position_m")
+        if position is None:
+            continue
+        try:
+            positions[str(node["id"])] = (
+                float(position[0]),
+                float(position[1]),
+                float(position[2]),
+            )
+        except (KeyError, TypeError, ValueError, IndexError):
+            continue
+    return positions
+
+
+@app.get("/api/v1/ble/devices")
+async def list_ble_devices(
+    request: Request,
+    limit: int = Query(default=500, ge=1, le=5000),
+) -> dict:
+    state = _require_state(request)
+    now_ns = time.time_ns()
+    grouped = await _ble_observation_store(state).latest_by_device(now_ns=now_ns)
+    node_positions = await _ble_node_positions(state)
+    devices: list[dict] = []
+    for mac, observations in sorted(grouped.items()):
+        raw_observations = [observation.as_raw_api_dict() for observation in observations]
+        estimate = estimate_ble_device_position(
+            mac,
+            observations,
+            node_positions,
+            now_ns=now_ns,
+        )
+        devices.append({
+            "mac": mac,
+            "receiver_count": len({observation.node_id for observation in observations}),
+            "last_seen_ns": max(observation.recv_ns for observation in observations),
+            "observations": raw_observations,
+            "estimate": estimate.as_api_dict() if estimate is not None else None,
+        })
+    devices.sort(key=lambda item: item["last_seen_ns"], reverse=True)
+    return {"devices": devices[:limit]}
+
+
 @app.get("/api/v1/nodes")
 async def list_nodes(
     request: Request,
@@ -1873,6 +1951,10 @@ async def list_nodes(
             ptz_status = ptz_status_by_node.get(node["id"])
             node["ptz_status"] = ptz_status.model_dump(mode="json") if ptz_status is not None else None
 
+        ble_observations = await _ble_observation_store(state).latest_for_node(node["id"], now_ns=now_ns)
+        if ble_observations:
+            node["ble_observations"] = [observation.as_raw_api_dict() for observation in ble_observations]
+
         node_capabilities = {str(capability) for capability in node.get("capabilities", [])}
         should_enrich_audio = not node_capabilities or NodeCapability.AUDIO.value in node_capabilities
         if not should_enrich_audio:
@@ -1915,6 +1997,8 @@ async def list_nodes(
             persisted_summary = latest_audio_summary_by_node.get(node["id"])
             if isinstance(persisted_summary, dict) and persisted_summary.get("runner_stats"):
                 node["audio_debug"]["runner_stats"] = persisted_summary["runner_stats"]
+            if isinstance(persisted_summary, dict) and persisted_summary.get("ingest_health"):
+                node["audio_debug"]["ingest_health"] = persisted_summary["ingest_health"]
         else:
             sensor_ids = _sensor_ids_from_node_row(node)
             sidecar_snapshot = sidecar_node_snapshots.get(node["id"])
@@ -2090,6 +2174,9 @@ async def _enriched_node_detail(state, node_id: str) -> dict[str, Any] | None:
         manager: EffectorManager = state.effector_manager
         status = await manager.get_status(node_id)
         node["ptz_status"] = status.model_dump(mode="json") if status is not None else None
+    ble_observations = await _ble_observation_store(state).latest_for_node(node_id, now_ns=now_ns)
+    if ble_observations:
+        node["ble_observations"] = [observation.as_raw_api_dict() for observation in ble_observations]
     return _redact_node_transport(node)
 
 

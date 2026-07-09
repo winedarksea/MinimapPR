@@ -24,6 +24,7 @@ struct SirithPicoTdmConfig {
   int8_t captureBitOffset = 0;
   PicoSerialDataPinBias dataPinBias = PicoSerialDataPinBias::kDisabled;
   bool enableWordDiagnostics = false;
+  uint32_t ringFrames = 16;
 
   // Output channel index -> TDM slot index (0-based).
   uint8_t outputChannelToSlot[4] = {0, 1, 3, 2};
@@ -41,11 +42,14 @@ class SirithPicoTdmSource final : public IAudioSource {
   uint32_t sampleRateHz() const override { return config_.sampleRateHz; }
   uint8_t channels() const override { return 4; }
   size_t frameSamples() const override { return config_.frameSamples; }
+  AudioSourceType sourceType() const override { return AudioSourceType::kTdm; }
   bool readFrame(
       int16_t* interleavedOut,
       size_t samplesPerChannel,
       AudioCaptureTimestamp* captureTimestamp = nullptr) override;
   uint32_t availableFrames() const override;
+  uint32_t ringFramesCapacity() const override { return ringFramesCapacity_; }
+  uint32_t ringFramesHighWater() const override { return ringFramesHighWater_; }
   bool readFrameNonblocking(
       int16_t* interleavedOut,
       size_t samplesPerChannel,
@@ -57,7 +61,7 @@ class SirithPicoTdmSource final : public IAudioSource {
  private:
   // Leave about 1 s of capture slack so a single slow publish does not
   // immediately overrun DMA while the node is waiting on the network stack.
-  static constexpr uint32_t kBufferedFrames = 16;
+  static constexpr uint32_t kMaxBufferedFrames = 32;
 
   bool validateConfig() const;
   bool initPioStateMachine();
@@ -81,14 +85,16 @@ class SirithPicoTdmSource final : public IAudioSource {
   bool programInstalled_ = false;
   int dmaChannel_ = -1;
   uint32_t* dmaFrameWords_ = nullptr;
-  uint64_t blockStartSampleIndex_[kBufferedFrames] = {};
-  uint64_t blockEndMonotonicUs_[kBufferedFrames] = {};
-  uint64_t completedBlockCountBySlot_[kBufferedFrames] = {};
+  uint32_t ringFramesCapacity_ = 16;
+  uint64_t blockStartSampleIndex_[kMaxBufferedFrames] = {};
+  uint64_t blockEndMonotonicUs_[kMaxBufferedFrames] = {};
+  uint64_t completedBlockCountBySlot_[kMaxBufferedFrames] = {};
   uint64_t nextProducedStartSampleIndex_ = 0;
   uint64_t nextCompletedBlockCount_ = 0;
   volatile uint32_t dmaWriteFrameIndex_ = 0;
   volatile uint32_t dmaReadFrameIndex_ = 0;
   volatile uint32_t completedFrameCount_ = 0;
+  volatile uint32_t ringFramesHighWater_ = 0;
   volatile uint32_t droppedFrameCount_ = 0;
   uint32_t reportedDroppedFrameCount_ = 0;
 };

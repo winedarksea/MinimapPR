@@ -53,8 +53,8 @@ use ingest_backend::{
 use journal_reader::JournalPayloadHandle;
 use leases::{PinKind, PinLeaseRequest, PinTargetKind};
 use render_mvdr::{render_mvdr, MvdrRenderRequest, TrajectoryWaypoint};
-use spatial_audio::{encode_ambisonics, AmbisonicsProfile, AmbisonicsRenderRequest};
 use serde::{Deserialize, Serialize};
+use spatial_audio::{encode_ambisonics, AmbisonicsProfile, AmbisonicsRenderRequest};
 use tokio::sync::{mpsc, OwnedSemaphorePermit, RwLock, Semaphore};
 use tokio_stream::StreamExt;
 use tower_http::trace::TraceLayer;
@@ -1496,9 +1496,11 @@ async fn render_mvdr_file_endpoint(Json(request): Json<MvdrFileRequest>) -> Resp
         trajectory: waypoints,
         fade_samples: request.fade_samples,
     });
-    if let Err(error) =
-        write_wav_mono_f32(&request.output_wav_path, &output.samples, output.sample_rate_hz)
-    {
+    if let Err(error) = write_wav_mono_f32(
+        &request.output_wav_path,
+        &output.samples,
+        output.sample_rate_hz,
+    ) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("failed to write MVDR WAV: {error}"),
@@ -1523,7 +1525,11 @@ async fn render_ambisonics_endpoint(Json(request): Json<AmbisonicsRenderPathRequ
         Ok(value) => value,
         Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
     };
-    let block_size = request.block_size.unwrap_or(4096).max(2).next_power_of_two();
+    let block_size = request
+        .block_size
+        .unwrap_or(4096)
+        .max(2)
+        .next_power_of_two();
     let hop_size = request.hop_size.unwrap_or(block_size / 2).max(1);
     let output = encode_ambisonics(
         AmbisonicsRenderRequest {
@@ -1535,7 +1541,8 @@ async fn render_ambisonics_endpoint(Json(request): Json<AmbisonicsRenderPathRequ
         },
         &profile_config,
     );
-    if let Err(error) = write_wav_channels_f32(&request.output_wav_path, &output.bformat, sample_rate_hz)
+    if let Err(error) =
+        write_wav_channels_f32(&request.output_wav_path, &output.bformat, sample_rate_hz)
     {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,

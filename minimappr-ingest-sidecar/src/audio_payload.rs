@@ -82,6 +82,7 @@ fn read_binary_ingest_version(reader: &mut BinaryReader<'_>) -> BoxedResult<u8> 
     let expected_version = match reader.read(4)? {
         magic if magic == b"MMB1" => 1,
         magic if magic == b"MMB2" => 2,
+        magic if magic == b"MMB3" => 3,
         _ => return Err("invalid binary ingest magic".into()),
     };
     let version = reader.u8()?;
@@ -92,7 +93,10 @@ fn read_binary_ingest_version(reader: &mut BinaryReader<'_>) -> BoxedResult<u8> 
 }
 
 pub fn decode_audio_payload(raw_payload: &[u8]) -> BoxedResult<DecodedAudioPayload> {
-    if raw_payload.starts_with(b"MMB1") || raw_payload.starts_with(b"MMB2") {
+    if raw_payload.starts_with(b"MMB1")
+        || raw_payload.starts_with(b"MMB2")
+        || raw_payload.starts_with(b"MMB3")
+    {
         return decode_binary_audio(raw_payload);
     }
     decode_store_forward_audio(raw_payload)
@@ -208,14 +212,32 @@ fn read_binary_audio_frame(reader: &mut BinaryReader<'_>) -> BoxedResult<BinaryA
     let end_sample_index = reader.u64()?;
     let sample_rate_hz = reader.u32()?;
     let channels = usize::from(reader.u8()?);
+    if channels == 0 {
+        return Err("binary frame must include at least one channel".into());
+    }
+    if reader.remaining() == 0 {
+        return Err("binary frame ended before sequence".into());
+    }
+    let version3_source_type = if reader.payload.starts_with(b"MMB3") {
+        Some(reader.u8()?)
+    } else {
+        None
+    };
     let _sequence = reader.u64()?;
     let _toa_ns = reader.u64()?;
     let _tor_ns = reader.u64()?;
     let _time_quality = reader.u8()?;
-    skip_binary_timing_diagnostics(reader)?;
-    let environment = read_binary_environment(reader)?;
-    let samples_per_channel = usize::try_from(reader.u32()?)?;
-    if channels == 0 || samples_per_channel == 0 {
+    let environment;
+    let samples_per_channel;
+    if version3_source_type.is_some() {
+        samples_per_channel = usize::try_from(reader.u32()?)?;
+        environment = read_binary_v3_sections(reader)?;
+    } else {
+        skip_binary_timing_diagnostics(reader)?;
+        environment = read_binary_environment(reader)?;
+        samples_per_channel = usize::try_from(reader.u32()?)?;
+    }
+    if samples_per_channel == 0 {
         return Err("binary frame must include at least one channel and sample".into());
     }
     let expected_end = start_sample_index.saturating_add(samples_per_channel as u64);
@@ -238,6 +260,74 @@ fn read_binary_audio_frame(reader: &mut BinaryReader<'_>) -> BoxedResult<BinaryA
         humidity_fraction: environment.humidity_fraction,
         environment_source: environment.source,
     })
+}
+
+fn read_binary_v3_sections(reader: &mut BinaryReader<'_>) -> BoxedResult<BinaryEnvironmentSample> {
+    let section_flags = reader.u16()?;
+    let mut environment = BinaryEnvironmentSample {
+        temperature_c: None,
+        humidity_fraction: None,
+        source: None,
+    };
+    for bit_index in 0..16 {
+        let section_bit = 1_u16 << bit_index;
+        if section_flags & section_bit == 0 {
+            continue;
+        }
+        let section_len = usize::from(reader.u16()?);
+        let section_payload = reader.read(section_len)?;
+        let mut section_reader = BinaryReader::new(section_payload);
+        match section_bit {
+            0x0001 => skip_binary_timing_diagnostics_v3(&mut section_reader)?,
+            0x0002 => environment = read_binary_environment(&mut section_reader)?,
+            0x0004 => skip_binary_transport_health(&mut section_reader)?,
+            _ => {}
+        }
+        if section_reader.remaining() != 0 {
+            return Err(
+                format!("binary ingest section 0x{section_bit:04x} has trailing bytes").into(),
+            );
+        }
+    }
+    Ok(environment)
+}
+
+fn skip_binary_timing_diagnostics_v3(reader: &mut BinaryReader<'_>) -> BoxedResult<()> {
+    let _gps_anchor = reader.u8()?;
+    let _pps_edge_count = reader.u32()?;
+    let _dma_ring_slot_index = reader.u32()?;
+    let _pps_phase_error_ns = reader.i64()?;
+    let _estimated_ppm = reader.f64()?;
+    let _runner_frames_captured = reader.u64()?;
+    let _runner_frames_dropped = reader.u64()?;
+    let _runner_continuity_violations = reader.u64()?;
+    let _runner_publish_errors = reader.u64()?;
+    let _runner_queue_depth = reader.u32()?;
+    let _runner_queue_overflows = reader.u64()?;
+    let _runner_last_publish_status = reader.i32()?;
+    let _packet_age_us = reader.u64()?;
+    let _runner_last_publish_failure_stage = reader.u8()?;
+    let _runner_last_publish_lwip_error = reader.i32()?;
+    let _runner_consecutive_publish_failures = reader.u32()?;
+    let _runner_publish_timeout_failures = reader.u64()?;
+    let _runner_publish_connect_or_reset_failures = reader.u64()?;
+    let _runner_publish_dns_failures = reader.u64()?;
+    let _runner_publish_wifi_down_failures = reader.u64()?;
+    Ok(())
+}
+
+fn skip_binary_transport_health(reader: &mut BinaryReader<'_>) -> BoxedResult<()> {
+    let _ring_frames_high_water = reader.u16()?;
+    let _ring_frames_capacity = reader.u16()?;
+    let _queue_slots_high_water = reader.u16()?;
+    let _queue_slots_capacity = reader.u16()?;
+    let _publish_latency_last_ms = reader.u16()?;
+    let _publish_latency_ewma_ms = reader.u16()?;
+    let _publish_latency_max_ms = reader.u16()?;
+    let _wifi_rssi_dbm = reader.u8()?;
+    let _heap_free_bytes = reader.u32()?;
+    let _boot_id = reader.u32()?;
+    Ok(())
 }
 
 fn skip_binary_timing_diagnostics(reader: &mut BinaryReader<'_>) -> BoxedResult<()> {
@@ -455,32 +545,106 @@ mod tests {
         payload.extend_from_slice(&7_u32.to_le_bytes());
     }
 
-    fn push_binary_frame(payload: &mut Vec<u8>) {
+    fn push_binary_section(payload: &mut Vec<u8>, section: &[u8]) {
+        payload.extend_from_slice(
+            &u16::try_from(section.len())
+                .expect("test section length fits in u16")
+                .to_le_bytes(),
+        );
+        payload.extend_from_slice(section);
+    }
+
+    fn binary_timing_section() -> Vec<u8> {
+        let mut section = Vec::new();
+        section.push(1); // has_gps_anchor
+        section.extend_from_slice(&11_u32.to_le_bytes());
+        section.extend_from_slice(&3_u32.to_le_bytes());
+        section.extend_from_slice(&(-123_i64).to_le_bytes());
+        section.extend_from_slice(&0.25_f64.to_le_bytes());
+        section.extend_from_slice(&42_u64.to_le_bytes());
+        section.extend_from_slice(&0_u64.to_le_bytes());
+        section.extend_from_slice(&0_u64.to_le_bytes());
+        section.extend_from_slice(&0_u64.to_le_bytes());
+        section.extend_from_slice(&2_u32.to_le_bytes());
+        section.extend_from_slice(&0_u64.to_le_bytes());
+        section.extend_from_slice(&200_i32.to_le_bytes());
+        section.extend_from_slice(&500_u64.to_le_bytes());
+        section.push(0);
+        section.extend_from_slice(&0_i32.to_le_bytes());
+        section.extend_from_slice(&0_u32.to_le_bytes());
+        section.extend_from_slice(&0_u64.to_le_bytes());
+        section.extend_from_slice(&0_u64.to_le_bytes());
+        section.extend_from_slice(&0_u64.to_le_bytes());
+        section.extend_from_slice(&0_u64.to_le_bytes());
+        section
+    }
+
+    fn binary_environment_section() -> Vec<u8> {
+        let mut section = Vec::new();
+        section.push(0x07);
+        section.extend_from_slice(&21.5_f32.to_le_bytes());
+        section.extend_from_slice(&0.55_f32.to_le_bytes());
+        push_string(&mut section, "bme280");
+        section
+    }
+
+    fn binary_transport_health_section() -> Vec<u8> {
+        let mut section = Vec::new();
+        section.extend_from_slice(&4_u16.to_le_bytes());
+        section.extend_from_slice(&16_u16.to_le_bytes());
+        section.extend_from_slice(&12_u16.to_le_bytes());
+        section.extend_from_slice(&40_u16.to_le_bytes());
+        section.extend_from_slice(&25_u16.to_le_bytes());
+        section.extend_from_slice(&31_u16.to_le_bytes());
+        section.extend_from_slice(&90_u16.to_le_bytes());
+        section.push((-62_i8) as u8);
+        section.extend_from_slice(&128_000_u32.to_le_bytes());
+        section.extend_from_slice(&0x1234_5678_u32.to_le_bytes());
+        section
+    }
+
+    fn push_binary_frame(payload: &mut Vec<u8>, version: u8) {
         payload.extend_from_slice(&1_000_u64.to_le_bytes());
         payload.extend_from_slice(&2_000_u64.to_le_bytes());
         payload.extend_from_slice(&0_u64.to_le_bytes());
         payload.extend_from_slice(&2_u64.to_le_bytes());
         payload.extend_from_slice(&16_000_u32.to_le_bytes());
         payload.push(1); // channels
+        if version == 3 {
+            payload.push(3); // synthetic audio source
+        }
         payload.extend_from_slice(&1_u64.to_le_bytes());
         payload.extend_from_slice(&1_000_u64.to_le_bytes());
         payload.extend_from_slice(&1_250_u64.to_le_bytes());
         payload.push(0); // gps_locked
-        payload.push(0); // no timing diagnostics
-        payload.push(0); // no environment fields
-        payload.extend_from_slice(&2_u32.to_le_bytes());
+        if version == 3 {
+            payload.extend_from_slice(&2_u32.to_le_bytes());
+            payload.extend_from_slice(&0x0007_u16.to_le_bytes());
+            push_binary_section(payload, &binary_timing_section());
+            push_binary_section(payload, &binary_environment_section());
+            push_binary_section(payload, &binary_transport_health_section());
+        } else {
+            payload.push(0); // no timing diagnostics
+            payload.push(0); // no environment fields
+            payload.extend_from_slice(&2_u32.to_le_bytes());
+        }
         payload.extend_from_slice(&0_i16.to_le_bytes());
         payload.extend_from_slice(&32_767_i16.to_le_bytes());
     }
 
     fn binary_payload(version: u8) -> Vec<u8> {
         let mut payload = Vec::new();
-        payload.extend_from_slice(if version == 1 { b"MMB1" } else { b"MMB2" });
+        payload.extend_from_slice(match version {
+            1 => b"MMB1",
+            2 => b"MMB2",
+            3 => b"MMB3",
+            _ => panic!("unsupported test version"),
+        });
         payload.push(version);
         payload.push(0); // sort_by_toa
         payload.extend_from_slice(&1_u16.to_le_bytes());
         push_binary_node(&mut payload, version);
-        push_binary_frame(&mut payload);
+        push_binary_frame(&mut payload, version);
         payload
     }
 
@@ -496,5 +660,20 @@ mod tests {
         assert_eq!(decoded.end_sample_index, Some(2));
         assert_eq!(decoded.channels[0][0], 0.0);
         assert!(decoded.channels[0][1] > 0.99);
+    }
+
+    #[test]
+    fn decode_audio_payload_accepts_mmb3_binary_ingest() {
+        let decoded = decode_audio_payload(&binary_payload(3)).expect("MMB3 payload should decode");
+
+        assert_eq!(decoded.sample_rate_hz, 16_000);
+        assert_eq!(decoded.channels.len(), 1);
+        assert_eq!(decoded.channels[0].len(), 2);
+        assert_eq!(decoded.start_time_ns, Some(1_000));
+        assert_eq!(decoded.start_sample_index, Some(0));
+        assert_eq!(decoded.end_sample_index, Some(2));
+        assert_eq!(decoded.temperature_c, Some(21.5));
+        assert_eq!(decoded.humidity_fraction, Some(0.55));
+        assert_eq!(decoded.environment_source.as_deref(), Some("bme280"));
     }
 }

@@ -7,9 +7,9 @@
 
 namespace mmpr {
 
-class SilenceAudioSource final : public IAudioSource {
+class SyntheticAudioSource final : public IAudioSource {
  public:
-  SilenceAudioSource(uint32_t sampleRateHz, size_t frameSamples, uint8_t channels);
+  SyntheticAudioSource(uint32_t sampleRateHz, size_t frameSamples, uint8_t channels);
 
   bool begin() override;
   uint32_t sampleRateHz() const override { return sampleRateHz_; }
@@ -27,6 +27,8 @@ class SilenceAudioSource final : public IAudioSource {
       AudioCaptureTimestamp* captureTimestamp = nullptr) override;
 
  private:
+  int16_t sampleValue(uint64_t sampleIndex, uint8_t channel) const;
+
   uint32_t sampleRateHz_;
   size_t frameSamples_;
   uint8_t channels_;

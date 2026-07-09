@@ -5,6 +5,13 @@
 
 namespace mmpr {
 
+enum class AudioSourceType : uint8_t {
+  kTdm = 0,
+  kI2sMono = 1,
+  kPdmDirect = 2,
+  kSynthetic = 3,
+};
+
 struct AudioProducerSnapshot {
   bool valid = false;
   uint64_t capturedMonotonicUs = 0;
@@ -33,6 +40,7 @@ class IAudioSource {
   virtual uint32_t sampleRateHz() const = 0;
   virtual uint8_t channels() const = 0;
   virtual size_t frameSamples() const = 0;
+  virtual AudioSourceType sourceType() const = 0;
 
   virtual bool readFrame(
       int16_t* interleavedOut,
@@ -40,6 +48,8 @@ class IAudioSource {
       AudioCaptureTimestamp* captureTimestamp = nullptr) = 0;
 
   virtual uint32_t availableFrames() const { return 0; }
+  virtual uint32_t ringFramesCapacity() const { return 0; }
+  virtual uint32_t ringFramesHighWater() const { return 0; }
 
   virtual bool readFrameNonblocking(
       int16_t* interleavedOut,

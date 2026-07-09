@@ -19,7 +19,7 @@ from minimappr.config import Settings
 from minimappr.core.audio_buffer import MultiSensorBuffer
 from minimappr.core.fusion_node import FusionNode
 from minimappr.core.geo import LocalCoordinateFrame
-from minimappr.core.ingest import _extract_runner_stats
+from minimappr.core.ingest_health import IngestHealthClassifier, runner_stats_from_timing_diagnostics
 from minimappr.core.localization import LocalizationEngine
 from minimappr.core.node_registry import NodeRegistry
 from minimappr.core.tracking import TrackManager
@@ -38,7 +38,7 @@ def test_extract_runner_stats_selects_known_counters() -> None:
         "unrelated_field": 99,
         "runner_publish_dns_failures": None,  # absent -> skipped
     }
-    stats = _extract_runner_stats(timing)
+    stats = runner_stats_from_timing_diagnostics(timing)
     assert stats == {
         "runner_queue_overflows": 12,
         "runner_frames_dropped": 5,
@@ -46,8 +46,71 @@ def test_extract_runner_stats_selects_known_counters() -> None:
         "runner_last_publish_status": -5,
     }
     # Nodes without runner telemetry leave the summary untouched.
-    assert _extract_runner_stats({}) is None
-    assert _extract_runner_stats(None) is None
+    assert runner_stats_from_timing_diagnostics({}) is None
+    assert runner_stats_from_timing_diagnostics(None) is None
+
+
+def test_extract_runner_stats_includes_mmb3_transport_health() -> None:
+    stats = runner_stats_from_timing_diagnostics({
+        "runner_queue_overflows": 2,
+        "transport_health": {
+            "queue_slots_high_water": 39,
+            "queue_slots_capacity": 40,
+            "boot_id": 123,
+        },
+    })
+
+    assert stats == {
+        "runner_queue_overflows": 2,
+        "transport_health": {
+            "queue_slots_high_water": 39,
+            "queue_slots_capacity": 40,
+            "boot_id": 123,
+        },
+    }
+
+
+def test_ingest_health_classifies_gap_causes() -> None:
+    classifier = IngestHealthClassifier()
+    base = {
+        "runner_queue_overflows": 0,
+        "runner_frames_dropped": 0,
+        "runner_publish_errors": 0,
+        "transport_health": {
+            "ring_frames_high_water": 1,
+            "ring_frames_capacity": 16,
+            "queue_slots_high_water": 1,
+            "queue_slots_capacity": 40,
+            "wifi_rssi_dbm": -55,
+            "boot_id": 10,
+        },
+    }
+    assert classifier.observe(node_id="n1", sequence_gap_count=0, timing_diagnostics=base)["verdict"] == "HEALTHY"
+
+    rate_limited = {
+        **base,
+        "runner_queue_overflows": 1,
+    }
+    assert classifier.observe(node_id="n1", sequence_gap_count=3, timing_diagnostics=rate_limited)["verdict"] == "LOSSY_RATE_LIMITED"
+
+    wifi = {
+        **rate_limited,
+        "runner_publish_errors": 2,
+        "transport_health": {**base["transport_health"], "queue_slots_high_water": 1},
+    }
+    assert classifier.observe(node_id="n1", sequence_gap_count=2, timing_diagnostics=wifi)["verdict"] == "LOSSY_WIFI"
+
+    restarted = {
+        **wifi,
+        "transport_health": {**base["transport_health"], "boot_id": 11},
+    }
+    assert classifier.observe(node_id="n1", sequence_gap_count=1, timing_diagnostics=restarted)["verdict"] == "NODE_RESTARTED"
+
+    server_gap = {
+        **restarted,
+        "transport_health": {**base["transport_health"], "boot_id": 11},
+    }
+    assert classifier.observe(node_id="n1", sequence_gap_count=1, timing_diagnostics=server_gap)["verdict"] == "SERVER_GAP_ONLY"
 
 
 @pytest.mark.asyncio
@@ -108,6 +171,14 @@ async def test_runner_stats_persisted_with_audio_summary(tmp_path: Path) -> None
                         "runner_queue_overflows": 7,
                         "runner_frames_dropped": 2,
                         "runner_publish_wifi_down_failures": 4,
+                        "transport_health": {
+                            "ring_frames_high_water": 1,
+                            "ring_frames_capacity": 16,
+                            "queue_slots_high_water": 2,
+                            "queue_slots_capacity": 40,
+                            "wifi_rssi_dbm": -53,
+                            "boot_id": 999,
+                        },
                     },
                 },
             )
@@ -121,6 +192,10 @@ async def test_runner_stats_persisted_with_audio_summary(tmp_path: Path) -> None
         assert runner_stats["runner_queue_overflows"] == 7
         assert runner_stats["runner_frames_dropped"] == 2
         assert runner_stats["runner_publish_wifi_down_failures"] == 4
+        assert runner_stats["transport_health"]["boot_id"] == 999
+        ingest_health = by_node["point-runner-stats"].get("ingest_health")
+        assert ingest_health is not None
+        assert ingest_health["verdict"] == "LOSSY_RATE_LIMITED"
     finally:
         await fusion.stop()
         await storage.close()

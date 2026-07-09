@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <vector>
 
+#include "pico/cyw43_arch.h"
 #include "pico/time.h"
 
 namespace mmpr {
@@ -13,8 +14,10 @@ namespace {
 
 constexpr uint64_t kNsPerSecond = 1000000000ULL;
 constexpr int kPublishSkippedForBackoffStatus = -5;
-constexpr size_t kQueuedPacketSlots = 40;
+constexpr size_t kDefaultQueuedPacketSlots = 40;
+constexpr size_t kDefaultPublishBatchByteBudget = 20480;
 constexpr uint32_t kQueueDepthBypassThreshold = 32;
+constexpr uint32_t kSlowTelemetryRefreshMs = 1000;
 
 uint64_t nextUtcSecondBoundary(uint64_t utcNs) {
   return ((utcNs / kNsPerSecond) + 1ULL) * kNsPerSecond;
@@ -22,6 +25,10 @@ uint64_t nextUtcSecondBoundary(uint64_t utcNs) {
 
 bool deadlineReached(uint32_t nowMs, uint32_t deadlineMs) {
   return static_cast<int32_t>(nowMs - deadlineMs) >= 0;
+}
+
+bool isWiFiConnected() {
+  return cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) == CYW43_LINK_UP;
 }
 
 }  // namespace
@@ -35,7 +42,8 @@ NodeRunner::NodeRunner(
     IEnvironmentalSource* environmentalSource,
     size_t maxPacketSamplesPerChannel,
     uint32_t publishFailureBackoffMs,
-    size_t storeForwardBatchFrames)
+    size_t publishBatchByteBudget,
+    size_t queueSlots)
     : descriptor_(descriptor),
       audioSource_(audioSource),
       publisher_(publisher),
@@ -44,7 +52,9 @@ NodeRunner::NodeRunner(
       logEveryFrames_(logEveryFrames),
       maxPacketSamplesPerChannel_(maxPacketSamplesPerChannel),
       publishFailureBackoffMs_(publishFailureBackoffMs),
-      storeForwardBatchFrames_(std::max<size_t>(1, storeForwardBatchFrames)) {}
+      publishBatchByteBudget_(publishBatchByteBudget > 0 ? publishBatchByteBudget : kDefaultPublishBatchByteBudget) {
+  stats_.queueSlotsCapacity = static_cast<uint32_t>(queueSlots > 0 ? queueSlots : kDefaultQueuedPacketSlots);
+}
 
 bool NodeRunner::begin(bool syncNtp, const char* ntpServer, long gmtOffsetSeconds, int daylightOffsetSeconds) {
   if (!audioSource_.begin()) {
@@ -66,6 +76,7 @@ bool NodeRunner::begin(bool syncNtp, const char* ntpServer, long gmtOffsetSecond
       ntpServer,
       gmtOffsetSeconds,
       daylightOffsetSeconds);
+  stats_.bootId = static_cast<uint32_t>(time_us_64() ^ (reinterpret_cast<uintptr_t>(this) >> 2));
 
   if (environmentalSource_ != nullptr) {
     environmentalSourceReady_ = environmentalSource_->begin();
@@ -90,17 +101,25 @@ bool NodeRunner::begin(bool syncNtp, const char* ntpServer, long gmtOffsetSecond
                                           : audioSource_.sampleRateHz();
     packetInterleavedSamples_.reserve(
         maxSamplesPerChannel * static_cast<size_t>(audioSource_.channels()));
-    queuedPackets_.resize(kQueuedPacketSlots);
+    const size_t queueSlots = std::max<size_t>(1, stats_.queueSlotsCapacity);
+    queuedPackets_.resize(queueSlots);
     for (QueuedAudioPacket& packet : queuedPackets_) {
       packet.interleavedSamples.reserve(
           maxSamplesPerChannel * static_cast<size_t>(audioSource_.channels()));
     }
-    activePublishPackets_.resize(storeForwardBatchFrames_);
+    const size_t packetBytes =
+        maxSamplesPerChannel * static_cast<size_t>(audioSource_.channels()) * sizeof(int16_t);
+    const size_t maxActivePacketsByBudget =
+        packetBytes > 0 ? std::max<size_t>(1, publishBatchByteBudget_ / packetBytes) : 1;
+    activePublishPackets_.resize(std::min(queueSlots, maxActivePacketsByBudget));
     for (QueuedAudioPacket& packet : activePublishPackets_) {
       packet.interleavedSamples.reserve(
           maxSamplesPerChannel * static_cast<size_t>(audioSource_.channels()));
     }
   }
+  stats_.queueSlotsCapacity = static_cast<uint32_t>(queuedPackets_.size());
+  stats_.ringFramesCapacity = audioSource_.ringFramesCapacity();
+  stats_.ringFramesHighWater = audioSource_.ringFramesHighWater();
 
   std::printf(
       "[node] started id=%s channels=%u sample_rate=%lu frame_samples=%u endpoint=%s\n",
@@ -148,6 +167,9 @@ bool NodeRunner::enqueueCurrentPacket(
   }
   ++queueDepth_;
   stats_.queueDepth = effectiveQueueDepth();
+  if (stats_.queueDepth > stats_.queueSlotsHighWater) {
+    stats_.queueSlotsHighWater = stats_.queueDepth;
+  }
 
   packetOpen_ = false;
   packetInterleavedSamples_.clear();
@@ -213,6 +235,7 @@ AudioFrame NodeRunner::buildFrameForPacket(const QueuedAudioPacket& packet, uint
       packet.endSampleIndex,
       audioSource_.sampleRateHz(),
       audioSource_.channels(),
+      audioSource_.sourceType(),
       packet.sequence,
       utcStartNs,
       receiptNs,
@@ -240,6 +263,16 @@ AudioFrame NodeRunner::buildFrameForPacket(const QueuedAudioPacket& packet, uint
       stats_.publishConnectOrResetFailures,
       stats_.publishDnsFailures,
       stats_.publishWifiDownFailures,
+      audioSource_.ringFramesHighWater(),
+      audioSource_.ringFramesCapacity(),
+      stats_.queueSlotsHighWater,
+      stats_.queueSlotsCapacity,
+      stats_.publishLatencyLastMs,
+      stats_.publishLatencyEwmaMs,
+      stats_.publishLatencyMaxMs,
+      stats_.wifiRssiDbm,
+      stats_.heapFreeBytes,
+      stats_.bootId,
   };
   return frame;
 }
@@ -254,12 +287,22 @@ bool NodeRunner::fillActivePublishBatch() {
   }
 
   activePublishBatchSize_ = 0;
-  const size_t targetCount = std::min(storeForwardBatchFrames_, queueDepth_);
-  while (activePublishBatchSize_ < targetCount) {
+  size_t accumulatedAudioBytes = 0;
+  while (queueDepth_ > 0 && activePublishBatchSize_ < activePublishPackets_.size()) {
     QueuedAudioPacket& packet = activePublishPackets_[activePublishBatchSize_];
     if (!popQueuedPacket(packet)) {
       break;
     }
+    const size_t packetBytes = packet.interleavedSamples.size() * sizeof(int16_t);
+    if (activePublishBatchSize_ > 0 &&
+        accumulatedAudioBytes + packetBytes > publishBatchByteBudget_) {
+      const size_t writeIndex = (queueHead_ + queuedPackets_.size() - 1u) % queuedPackets_.size();
+      queuedPackets_[writeIndex] = packet;
+      queueHead_ = writeIndex;
+      ++queueDepth_;
+      break;
+    }
+    accumulatedAudioBytes += packetBytes;
     ++activePublishBatchSize_;
   }
   activePublishBatchValid_ = activePublishBatchSize_ > 0;
@@ -296,6 +339,32 @@ uint32_t NodeRunner::adaptivePublishBackoffMs() const {
 
 bool NodeRunner::shouldBypassAdaptiveBackoff() const {
   return effectiveQueueDepth() >= kQueueDepthBypassThreshold;
+}
+
+void NodeRunner::refreshSlowTelemetry(uint32_t nowMs) {
+  stats_.ringFramesCapacity = audioSource_.ringFramesCapacity();
+  stats_.ringFramesHighWater = audioSource_.ringFramesHighWater();
+
+  if (lastTelemetryRefreshMs_ != 0 &&
+      !deadlineReached(nowMs, lastTelemetryRefreshMs_ + kSlowTelemetryRefreshMs)) {
+    return;
+  }
+  lastTelemetryRefreshMs_ = nowMs;
+
+  if (!isWiFiConnected()) {
+    stats_.wifiRssiDbm = 0;
+    return;
+  }
+
+  int32_t rssiDbm = 0;
+  if (cyw43_wifi_get_rssi(&cyw43_state, &rssiDbm) == 0) {
+    if (rssiDbm < -128) {
+      rssiDbm = -128;
+    } else if (rssiDbm > 127) {
+      rssiDbm = 127;
+    }
+    stats_.wifiRssiDbm = static_cast<int8_t>(rssiDbm);
+  }
 }
 
 void NodeRunner::onPublishSuccess() {
@@ -360,6 +429,16 @@ void NodeRunner::pumpPublisher() {
   PublishResult result = {};
   if (publisher_.pollPublish(result)) {
     stats_.lastPublishStatus = result.statusCode;
+    stats_.publishLatencyLastMs = result.latencyMs;
+    if (result.latencyMs > stats_.publishLatencyMaxMs) {
+      stats_.publishLatencyMaxMs = result.latencyMs;
+    }
+    if (stats_.publishLatencyEwmaMs == 0) {
+      stats_.publishLatencyEwmaMs = result.latencyMs;
+    } else {
+      stats_.publishLatencyEwmaMs =
+          ((stats_.publishLatencyEwmaMs * 7u) + result.latencyMs + 4u) / 8u;
+    }
     if (result.ok) {
       onPublishSuccess();
     } else {
@@ -420,6 +499,8 @@ void NodeRunner::startNextPublishIfPossible() {
     onPublishFailure(immediateResult, nowMs);
   }
   stats_.queueDepth = effectiveQueueDepth();
+  stats_.ringFramesCapacity = audioSource_.ringFramesCapacity();
+  stats_.ringFramesHighWater = audioSource_.ringFramesHighWater();
 }
 
 void NodeRunner::processCapturedFrame(
@@ -551,6 +632,8 @@ void NodeRunner::loopOnce() {
     return;
   }
 
+  const uint32_t nowMs = to_ms_since_boot(get_absolute_time());
+  refreshSlowTelemetry(nowMs);
   pumpPublisher();
   drainAvailableAudioFrames();
   pumpPublisher();

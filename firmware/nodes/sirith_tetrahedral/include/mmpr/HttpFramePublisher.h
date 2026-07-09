@@ -46,6 +46,10 @@ class HttpFramePublisher {
       bool sortByToa,
       bool keepResponseBody,
       PublishResult& immediateResult);
+  bool beginJsonPost(
+      const std::string& jsonBody,
+      bool keepResponseBody,
+      PublishResult& immediateResult);
   bool pollPublish(PublishResult& result);
   bool publishInProgress() const;
   void cancelPublish();

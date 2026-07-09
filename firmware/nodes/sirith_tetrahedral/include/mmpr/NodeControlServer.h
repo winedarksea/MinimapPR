@@ -4,6 +4,9 @@
 #include <cstdint>
 
 #include "lwip/err.h"
+#include "mmpr/BleReportPublisher.h"
+#include "mmpr/BleRssiScanner.h"
+#include "mmpr/NodeRunner.h"
 
 struct pbuf;
 struct tcp_pcb;
@@ -18,7 +21,11 @@ class NodeControlServer {
       HttpFramePublisher& publisher,
       uint16_t listenPort,
       const char* routePath,
-      bool allowRuntimePortChange);
+      bool allowRuntimePortChange,
+      const RunnerStats* runnerStats = nullptr,
+      const char* statsPath = "/api/v1/stats",
+      const BleScannerStats* bleScannerStats = nullptr,
+      const BleReportPublisherStats* bleReportStats = nullptr);
   ~NodeControlServer();
 
   NodeControlServer(const NodeControlServer&) = delete;
@@ -43,6 +50,7 @@ class NodeControlServer {
   err_t closeActiveClient(bool abortConnection);
   bool requestHeadersComplete() const;
   bool prepareStateBody(char* bodyBuffer, size_t bodyBufferBytes, bool includeChangedField, bool changed) const;
+  bool prepareStatsBody(char* bodyBuffer, size_t bodyBufferBytes) const;
   bool tryParseRequest(char* method, size_t methodBytes, char* target, size_t targetBytes) const;
   bool tryParsePortQuery(const char* target, uint16_t* outPort) const;
   err_t sendJsonAndClose(tcp_pcb* tpcb, int statusCode, const char* reason, const char* jsonBody);
@@ -51,7 +59,11 @@ class NodeControlServer {
   HttpFramePublisher& publisher_;
   uint16_t listenPort_ = 0;
   const char* routePath_ = nullptr;
+  const char* statsPath_ = nullptr;
   bool allowRuntimePortChange_ = false;
+  const RunnerStats* runnerStats_ = nullptr;
+  const BleScannerStats* bleScannerStats_ = nullptr;
+  const BleReportPublisherStats* bleReportStats_ = nullptr;
   tcp_pcb* listenPcb_ = nullptr;
   tcp_pcb* activeClientPcb_ = nullptr;
   size_t requestBytes_ = 0;

@@ -154,6 +154,7 @@ struct HttpFramePublisher::TransportState {
   bool asyncPublishActive = false;
   absolute_time_t requestDeadline = {};
   uint32_t requestTimeoutMs = 0;
+  uint32_t requestStartedMs = 0;
   HttpFramePublisher::BackgroundPollCallback backgroundPollCallback = nullptr;
   void* backgroundPollContext = nullptr;
   PublishFailureStage failureStage = PublishFailureStage::kNone;
@@ -238,6 +239,7 @@ void resetRequestState(HttpFramePublisher::TransportState& state, bool keepRespo
   state.asyncPublishActive = false;
   state.requestDeadline = {};
   state.requestTimeoutMs = 0;
+  state.requestStartedMs = 0;
   state.requestDone = false;
   state.err = ERR_OK;
   state.failureStage = PublishFailureStage::kNone;
@@ -312,8 +314,8 @@ bool writeStringSegment(
     if (chunk > sndbuf) {
       chunk = sndbuf;
     }
-    if (chunk > 2048) {
-      chunk = 2048;
+    if (chunk > 8192) {
+      chunk = 8192;
     }
 
     const err_t writeErr = tcp_write(
@@ -352,7 +354,7 @@ bool refillAudioChunk(HttpFramePublisher::TransportState& state) {
   }
 
   constexpr size_t kRawAudioChunkBytes = 768;
-  constexpr size_t kBinaryAudioChunkBytes = 2048;
+  constexpr size_t kBinaryAudioChunkBytes = 8192;
   if (state.binaryAudio) {
     const size_t remaining = segment.rawAudioBytes - state.audioOffset;
     size_t rawChunkBytes = remaining;
@@ -596,6 +598,7 @@ err_t onConnected(void* arg, tcp_pcb* tpcb, err_t err) {
   }
 
   state->connected = true;
+  tcp_nagle_disable(tpcb);
   refreshRequestDeadline(*state);
   flushTx(*state, tpcb);
   return ERR_OK;
@@ -711,6 +714,7 @@ bool ensureConnected(
   }
 
   tcp_arg(state.pcb, &state);
+  tcp_nagle_disable(state.pcb);
   tcp_recv(state.pcb, &onRecv);
   tcp_sent(state.pcb, &onSent);
   tcp_poll(state.pcb, &onPoll, 2);
@@ -766,6 +770,7 @@ bool beginConnection(
   }
 
   tcp_arg(state.pcb, &state);
+  tcp_nagle_disable(state.pcb);
   tcp_recv(state.pcb, &onRecv);
   tcp_sent(state.pcb, &onSent);
   tcp_poll(state.pcb, &onPoll, 2);
@@ -783,6 +788,9 @@ bool beginConnection(
 
 PublishResult finishRequestResult(HttpFramePublisher::TransportState& state, bool keepResponseBody) {
   PublishResult result = {};
+  if (state.requestStartedMs != 0) {
+    result.latencyMs = to_ms_since_boot(get_absolute_time()) - state.requestStartedMs;
+  }
   result.failureStage = PublishFailureStage::kNone;
   result.lwipError = static_cast<int32_t>(state.err);
   if (state.statusCode > 0) {
@@ -847,6 +855,7 @@ PublishResult post(
   state.audioSegments = std::move(audioSegments);
   state.binaryAudio = binaryAudio;
   state.requestTimeoutMs = timeoutMs;
+  state.requestStartedMs = to_ms_since_boot(get_absolute_time());
   refreshRequestDeadline(state);
 
   const absolute_time_t deadline = make_timeout_time_ms(timeoutMs);
@@ -855,6 +864,7 @@ PublishResult post(
     result.failureStage =
         (state.err == ERR_TIMEOUT) ? PublishFailureStage::kTimeout : state.failureStage;
     result.lwipError = static_cast<int32_t>(state.err);
+    result.latencyMs = to_ms_since_boot(get_absolute_time()) - state.requestStartedMs;
     return result;
   }
 
@@ -876,6 +886,7 @@ PublishResult post(
     result.statusCode = -4;
     result.failureStage = PublishFailureStage::kTimeout;
     result.lwipError = static_cast<int32_t>(ERR_TIMEOUT);
+    result.latencyMs = to_ms_since_boot(get_absolute_time()) - state.requestStartedMs;
     if (keepResponseBody) {
       result.responseBody = state.response;
     }
@@ -1014,6 +1025,7 @@ bool HttpFramePublisher::beginPublish(
   transportState_->audioSegments.push_back(reinterpret_cast<const uint8_t*>(frame.interleavedSamples));
   transportState_->binaryAudio = false;
   transportState_->requestTimeoutMs = timeoutMs_;
+  transportState_->requestStartedMs = to_ms_since_boot(get_absolute_time());
   refreshRequestDeadline(*transportState_);
 
   if (!beginConnection(host_, port_, *transportState_)) {
@@ -1103,6 +1115,7 @@ bool HttpFramePublisher::beginStoreForwardPublish(
   transportState_->audioSegments = std::move(audioSegments);
   transportState_->binaryAudio = false;
   transportState_->requestTimeoutMs = timeoutMs_;
+  transportState_->requestStartedMs = to_ms_since_boot(get_absolute_time());
   refreshRequestDeadline(*transportState_);
 
   if (!beginConnection(host_, port_, *transportState_)) {
@@ -1197,6 +1210,71 @@ bool HttpFramePublisher::beginBinaryStoreForwardPublish(
   transportState_->audioSegments = std::move(audioSegments);
   transportState_->binaryAudio = true;
   transportState_->requestTimeoutMs = timeoutMs_;
+  transportState_->requestStartedMs = to_ms_since_boot(get_absolute_time());
+  refreshRequestDeadline(*transportState_);
+
+  if (!beginConnection(host_, port_, *transportState_)) {
+    immediateResult.statusCode = -3;
+    immediateResult.failureStage = transportState_->failureStage;
+    immediateResult.lwipError = static_cast<int32_t>(transportState_->err);
+    closeConnection(*transportState_);
+    return false;
+  }
+
+  transportState_->asyncPublishActive = true;
+  return true;
+}
+
+bool HttpFramePublisher::beginJsonPost(
+    const std::string& jsonBody,
+    bool keepResponseBody,
+    PublishResult& immediateResult) {
+  immediateResult = {};
+  immediateResult.ok = false;
+  immediateResult.statusCode = -1;
+  immediateResult.failureStage = PublishFailureStage::kNone;
+  immediateResult.lwipError = 0;
+
+  if (transportState_ == nullptr || transportState_->asyncPublishActive) {
+    immediateResult.statusCode = -7;
+    return false;
+  }
+  if (!endpointValid_) {
+    immediateResult.statusCode = -3;
+    immediateResult.failureStage = PublishFailureStage::kResponseParse;
+    return false;
+  }
+  if (!isWiFiConnected()) {
+    immediateResult.statusCode = -1;
+    immediateResult.failureStage = PublishFailureStage::kWiFiDisconnected;
+    return false;
+  }
+
+  IngestPayloadParts payloadPart;
+  try {
+    payloadPart.prefix = jsonBody;
+    payloadPart.rawAudioBytes = 0;
+    payloadPart.encodedAudioBytes = 0;
+    payloadPart.suffix.clear();
+  } catch (const std::bad_alloc&) {
+    immediateResult.statusCode = -6;
+    return false;
+  }
+
+  resetRequestState(*transportState_, keepResponseBody);
+  transportState_->requestHeader = buildRequestHeader(
+      host_,
+      port_,
+      path_,
+      jsonBody.size(),
+      "application/json");
+  transportState_->payloadParts.clear();
+  transportState_->payloadParts.push_back(std::move(payloadPart));
+  transportState_->audioSegments.clear();
+  transportState_->audioSegments.push_back(nullptr);
+  transportState_->binaryAudio = false;
+  transportState_->requestTimeoutMs = timeoutMs_;
+  transportState_->requestStartedMs = to_ms_since_boot(get_absolute_time());
   refreshRequestDeadline(*transportState_);
 
   if (!beginConnection(host_, port_, *transportState_)) {
@@ -1236,6 +1314,7 @@ bool HttpFramePublisher::pollPublish(PublishResult& result) {
     result.statusCode = -4;
     result.failureStage = PublishFailureStage::kTimeout;
     result.lwipError = static_cast<int32_t>(ERR_TIMEOUT);
+    result.latencyMs = to_ms_since_boot(get_absolute_time()) - transportState_->requestStartedMs;
     if (transportState_->keepResponse) {
       result.responseBody = transportState_->response;
     }

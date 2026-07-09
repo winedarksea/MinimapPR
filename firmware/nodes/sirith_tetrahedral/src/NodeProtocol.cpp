@@ -1,6 +1,7 @@
 #include "mmpr/NodeProtocol.h"
 
 #include <inttypes.h>
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <utility>
@@ -131,6 +132,20 @@ bool appendBinaryString(std::string& out, const char* value) {
   return true;
 }
 
+uint8_t audioSourceTypeToBinary(AudioSourceType type) {
+  switch (type) {
+    case AudioSourceType::kTdm:
+      return 0;
+    case AudioSourceType::kI2sMono:
+      return 1;
+    case AudioSourceType::kPdmDirect:
+      return 2;
+    case AudioSourceType::kSynthetic:
+    default:
+      return 3;
+  }
+}
+
 uint8_t nodeTypeToBinary(NodeType type) {
   switch (type) {
     case NodeType::kSirithTetra:
@@ -208,53 +223,86 @@ bool appendBinaryFrameHeader(
   appendLeU64(out, frame.endSampleIndex);
   appendLeU32(out, frame.sampleRateHz);
   appendLeU8(out, frame.channels);
+  appendLeU8(out, audioSourceTypeToBinary(frame.audioSourceType));
   appendLeU64(out, frame.sequence);
   appendLeU64(out, frame.toaNs);
   appendLeU64(out, frame.torNs);
   appendLeU8(out, timeQualityToBinary(frame.timeQuality));
+  appendLeU32(out, static_cast<uint32_t>(frame.samplesPerChannel));
 
-  appendLeU8(out, frame.hasTimingDiagnostics ? 1 : 0);
+  uint16_t sectionFlags = 0;
   if (frame.hasTimingDiagnostics) {
-    appendLeU8(out, frame.timingHasGpsAnchor ? 1 : 0);
-    appendLeU32(out, frame.ppsEdgeCount);
-    appendLeU32(out, frame.dmaRingSlotIndex);
-    appendLeI64(out, frame.ppsPhaseErrorNs);
-    appendLeF64(out, frame.estimatedPpm);
-    appendLeU64(out, frame.runnerFramesCaptured);
-    appendLeU64(out, frame.runnerFramesDropped);
-    appendLeU64(out, frame.runnerContinuityViolations);
-    appendLeU64(out, frame.runnerPublishErrors);
-    appendLeU32(out, frame.runnerQueueDepth);
-    appendLeU64(out, frame.runnerQueueOverflows);
-    appendLeI32(out, static_cast<int32_t>(frame.runnerLastPublishStatus));
-    appendLeU64(out, frame.packetAgeUs);
-    appendLeU8(out, static_cast<uint8_t>(frame.runnerLastPublishFailureStage));
-    appendLeI32(out, frame.runnerLastPublishLwipError);
-    appendLeU32(out, frame.runnerConsecutivePublishFailures);
-    appendLeU64(out, frame.runnerPublishTimeoutFailures);
-    appendLeU64(out, frame.runnerPublishConnectOrResetFailures);
-    appendLeU64(out, frame.runnerPublishDnsFailures);
-    appendLeU64(out, frame.runnerPublishWifiDownFailures);
+    sectionFlags |= 0x0001u;
   }
-
   uint8_t environmentFlags = 0;
   if (environment != nullptr) {
     environmentFlags |= environment->hasTemperatureC ? 0x01 : 0;
     environmentFlags |= environment->hasHumidityFraction ? 0x02 : 0;
     environmentFlags |= environment->temperatureSource != nullptr ? 0x04 : 0;
   }
-  appendLeU8(out, environmentFlags);
-  if ((environmentFlags & 0x01) != 0) {
-    appendLeF32(out, environment->temperatureC);
+  if (environmentFlags != 0) {
+    sectionFlags |= 0x0002u;
   }
-  if ((environmentFlags & 0x02) != 0) {
-    appendLeF32(out, environment->humidityFraction);
-  }
-  if ((environmentFlags & 0x04) != 0 && !appendBinaryString(out, environment->temperatureSource)) {
-    return false;
+  sectionFlags |= 0x0004u;
+  appendLeU16(out, sectionFlags);
+
+  if ((sectionFlags & 0x0001u) != 0) {
+    std::string section;
+    appendLeU8(section, frame.timingHasGpsAnchor ? 1 : 0);
+    appendLeU32(section, frame.ppsEdgeCount);
+    appendLeU32(section, frame.dmaRingSlotIndex);
+    appendLeI64(section, frame.ppsPhaseErrorNs);
+    appendLeF64(section, frame.estimatedPpm);
+    appendLeU64(section, frame.runnerFramesCaptured);
+    appendLeU64(section, frame.runnerFramesDropped);
+    appendLeU64(section, frame.runnerContinuityViolations);
+    appendLeU64(section, frame.runnerPublishErrors);
+    appendLeU32(section, frame.runnerQueueDepth);
+    appendLeU64(section, frame.runnerQueueOverflows);
+    appendLeI32(section, static_cast<int32_t>(frame.runnerLastPublishStatus));
+    appendLeU64(section, frame.packetAgeUs);
+    appendLeU8(section, static_cast<uint8_t>(frame.runnerLastPublishFailureStage));
+    appendLeI32(section, frame.runnerLastPublishLwipError);
+    appendLeU32(section, frame.runnerConsecutivePublishFailures);
+    appendLeU64(section, frame.runnerPublishTimeoutFailures);
+    appendLeU64(section, frame.runnerPublishConnectOrResetFailures);
+    appendLeU64(section, frame.runnerPublishDnsFailures);
+    appendLeU64(section, frame.runnerPublishWifiDownFailures);
+    appendLeU16(out, static_cast<uint16_t>(section.size()));
+    out += section;
   }
 
-  appendLeU32(out, static_cast<uint32_t>(frame.samplesPerChannel));
+  if ((sectionFlags & 0x0002u) != 0) {
+    std::string section;
+    appendLeU8(section, environmentFlags);
+    if ((environmentFlags & 0x01) != 0) {
+      appendLeF32(section, environment->temperatureC);
+    }
+    if ((environmentFlags & 0x02) != 0) {
+      appendLeF32(section, environment->humidityFraction);
+    }
+    if ((environmentFlags & 0x04) != 0 && !appendBinaryString(section, environment->temperatureSource)) {
+      return false;
+    }
+    appendLeU16(out, static_cast<uint16_t>(section.size()));
+    out += section;
+  }
+
+  if ((sectionFlags & 0x0004u) != 0) {
+    std::string section;
+    appendLeU16(section, static_cast<uint16_t>(std::min<uint32_t>(frame.ringFramesHighWater, UINT16_MAX)));
+    appendLeU16(section, static_cast<uint16_t>(std::min<uint32_t>(frame.ringFramesCapacity, UINT16_MAX)));
+    appendLeU16(section, static_cast<uint16_t>(std::min<uint32_t>(frame.queueSlotsHighWater, UINT16_MAX)));
+    appendLeU16(section, static_cast<uint16_t>(std::min<uint32_t>(frame.queueSlotsCapacity, UINT16_MAX)));
+    appendLeU16(section, static_cast<uint16_t>(std::min<uint32_t>(frame.publishLatencyLastMs, UINT16_MAX)));
+    appendLeU16(section, static_cast<uint16_t>(std::min<uint32_t>(frame.publishLatencyEwmaMs, UINT16_MAX)));
+    appendLeU16(section, static_cast<uint16_t>(std::min<uint32_t>(frame.publishLatencyMaxMs, UINT16_MAX)));
+    appendLeU8(section, static_cast<uint8_t>(frame.wifiRssiDbm));
+    appendLeU32(section, frame.heapFreeBytes);
+    appendLeU32(section, frame.bootId);
+    appendLeU16(out, static_cast<uint16_t>(section.size()));
+    out += section;
+  }
   return true;
 }
 
@@ -659,8 +707,8 @@ bool buildBinaryStoreForwardPayloadParts(
 
     if (i == 0) {
       part.prefix.reserve(256);
-      part.prefix.append("MMB2", 4);
-      appendLeU8(part.prefix, 2);
+      part.prefix.append("MMB3", 4);
+      appendLeU8(part.prefix, 3);
       appendLeU8(part.prefix, sortByToa ? 1 : 0);
       appendLeU16(part.prefix, static_cast<uint16_t>(frameCount));
       if (!appendBinaryNode(part.prefix, node)) {

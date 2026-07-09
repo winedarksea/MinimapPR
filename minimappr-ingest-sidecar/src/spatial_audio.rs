@@ -100,7 +100,8 @@ pub fn encode_ambisonics(
             sample_rate_hz: linear.sample_rate_hz,
         };
     }
-    let enhanced = enhance_foa_parametric(&linear.bformat, linear.sample_rate_hz, profile, frame_size);
+    let enhanced =
+        enhance_foa_parametric(&linear.bformat, linear.sample_rate_hz, profile, frame_size);
     AmbisonicsRenderOutput {
         bformat: scale_true_peak(enhanced, profile.output_peak_target),
         sample_rate_hz: linear.sample_rate_hz,
@@ -123,7 +124,11 @@ pub fn atob_foa_linear(request: AmbisonicsRenderRequest) -> AmbisonicsRenderOutp
         };
     }
     for channel in &request.channels {
-        assert_eq!(channel.len(), n_samples, "all channels must have equal length");
+        assert_eq!(
+            channel.len(),
+            n_samples,
+            "all channels must have equal length"
+        );
     }
 
     let block_size = request.block_size.max(2).next_power_of_two();
@@ -153,9 +158,9 @@ pub fn atob_foa_linear(request: AmbisonicsRenderRequest) -> AmbisonicsRenderOutp
         for channel_index in 0..mic_count {
             let mut buffer = vec![Complex64::new(0.0, 0.0); block_size];
             for sample_index in 0..actual {
-                buffer[sample_index].re =
-                    request.channels[channel_index][start + sample_index] as f64
-                        * window[sample_index];
+                buffer[sample_index].re = request.channels[channel_index][start + sample_index]
+                    as f64
+                    * window[sample_index];
             }
             fft.process(&mut buffer);
             a_freq[channel_index][..bin_count].copy_from_slice(&buffer[..bin_count]);
@@ -255,13 +260,17 @@ fn enhance_foa_parametric(
             let confidence = energy / (energy + energy_floor + 1e-12);
             let mut blend =
                 profile.max_parametric_blend * (1.0 - diffuseness[frame][bin]) * confidence;
-            if confidence < profile.min_confidence_for_blend || *freq_hz < low_hz || *freq_hz > high_hz {
+            if confidence < profile.min_confidence_for_blend
+                || *freq_hz < low_hz
+                || *freq_hz > high_hz
+            {
                 blend = 0.0;
             }
             blend = blend.clamp(0.0, profile.max_parametric_blend);
             output_spectra[0][frame][bin] = spectra[0][frame][bin];
             for axis in 0..3 {
-                let parametric_xyz = spectra[0][frame][bin] * (2.0f64.sqrt() * directions[frame][axis]);
+                let parametric_xyz =
+                    spectra[0][frame][bin] * (2.0f64.sqrt() * directions[frame][axis]);
                 output_spectra[axis + 1][frame][bin] =
                     spectra[axis + 1][frame][bin] * (1.0 - blend) + parametric_xyz * blend;
             }
@@ -347,7 +356,8 @@ fn istft_channels(
         }
         for channel_index in 0..channel_count {
             let mut spectrum = vec![Complex64::new(0.0, 0.0); frame_size];
-            spectrum[..bin_count].copy_from_slice(&spectra[channel_index][frame_index][..bin_count]);
+            spectrum[..bin_count]
+                .copy_from_slice(&spectra[channel_index][frame_index][..bin_count]);
             for bin in 1..(frame_size / 2) {
                 spectrum[frame_size - bin] = spectrum[bin].conj();
             }
@@ -426,8 +436,8 @@ fn smoothed_diffuseness(
             let total_velocity_energy = spectra[1][frame][bin].norm_sqr()
                 + spectra[2][frame][bin].norm_sqr()
                 + spectra[3][frame][bin].norm_sqr();
-            raw[frame][bin] = (1.0 - (directional_energy / (total_velocity_energy + 1e-12)))
-                .clamp(0.0, 1.0);
+            raw[frame][bin] =
+                (1.0 - (directional_energy / (total_velocity_energy + 1e-12))).clamp(0.0, 1.0);
         }
     }
     let mut previous = raw[0].clone();
@@ -680,7 +690,11 @@ mod tests {
         let output = atob_foa_linear(request);
         assert_eq!(output.bformat.len(), 4);
         assert_eq!(output.bformat[0].len(), n);
-        assert!(output.bformat.iter().flatten().all(|sample| sample.is_finite()));
+        assert!(output
+            .bformat
+            .iter()
+            .flatten()
+            .all(|sample| sample.is_finite()));
     }
 
     #[test]
@@ -704,6 +718,10 @@ mod tests {
         );
         assert_eq!(output.bformat.len(), 4);
         assert_eq!(output.bformat[0].len(), n);
-        assert!(output.bformat.iter().flatten().all(|sample| sample.is_finite()));
+        assert!(output
+            .bformat
+            .iter()
+            .flatten()
+            .all(|sample| sample.is_finite()));
     }
 }

@@ -10,6 +10,8 @@
 
 #include "node_config.h"
 
+#include "mmpr/BleReportPublisher.h"
+#include "mmpr/BleRssiScanner.h"
 #include "mmpr/HttpFramePublisher.h"
 #include "mmpr/NtpClient.h"
 #include "mmpr/FallbackEnvironmentalSource.h"
@@ -25,6 +27,7 @@
 #include "mmpr/Sht4xEnvironmentalSource.h"
 #include "mmpr/SilenceAudioSource.h"
 #include "mmpr/SirithPicoTdmSource.h"
+#include "mmpr/SyntheticAudioSource.h"
 #include "mmpr/TemperatureEnvironmentalSource.h"
 #include "mmpr/WiFiSupport.h"
 
@@ -257,6 +260,7 @@ mmpr::SirithPicoTdmConfig gTdmConfig = {
     nodecfg::kAudioTdmCaptureBitOffset,
     toPicoSerialDataPinBias(nodecfg::kAudioTdmDataPinBias),
     nodecfg::kAudioTdmEnableWordDiagnostics,
+    nodecfg::kAudioRingFrames,
     {
         nodecfg::kOutputChannelToSlot[0],
         nodecfg::kOutputChannelToSlot[1],
@@ -284,6 +288,7 @@ mmpr::PicoI2SMonoConfig gI2sMonoConfig = {
     nodecfg::kAudioI2sMonoCaptureBitOffset,
     toPicoSerialDataPinBias(nodecfg::kAudioI2sMonoDataPinBias),
     nodecfg::kAudioI2sMonoEnableWordDiagnostics,
+    nodecfg::kAudioRingFrames,
     nodecfg::kUseSafeDriveStrength,
 };
 
@@ -293,17 +298,20 @@ mmpr::SilenceAudioSource gSilenceAudioSource(
     nodecfg::kActiveAudioSampleRateHz,
     nodecfg::kActiveAudioFrameSamples,
     nodecfg::kActiveAudioChannels);
+mmpr::SyntheticAudioSource gSyntheticAudioSource(
+    nodecfg::kActiveAudioSampleRateHz,
+    nodecfg::kActiveAudioFrameSamples,
+    nodecfg::kActiveAudioChannels);
 mmpr::HttpFramePublisher gPublisher(nodecfg::kServerBaseUrl, nodecfg::kIngestPath, nodecfg::kHttpTimeoutMs);
-mmpr::NodeControlServer gControlServer(
-  gPublisher,
-  nodecfg::kPublishTargetControlPort,
-  nodecfg::kPublishTargetControlPath,
-  nodecfg::kAllowRuntimePublishPortChange);
+mmpr::HttpFramePublisher gBleHttpPublisher(nodecfg::kServerBaseUrl, nodecfg::kBleIngestPath, nodecfg::kHttpTimeoutMs);
+mmpr::BleRssiScanner gBleScanner(nodecfg::kBleScanIntervalUnits, nodecfg::kBleScanWindowUnits);
 mmpr::NodeClock gClock;
 
 mmpr::IAudioSource& gConfiguredAudioSource = nodecfg::kUseTdmAudio
     ? static_cast<mmpr::IAudioSource&>(gTdmAudioSource)
-    : static_cast<mmpr::IAudioSource&>(gI2sMonoAudioSource);
+    : (nodecfg::kUseSyntheticAudio
+        ? static_cast<mmpr::IAudioSource&>(gSyntheticAudioSource)
+        : static_cast<mmpr::IAudioSource&>(gI2sMonoAudioSource));
 
 mmpr::IAudioSource& gSelectedAudioSource = nodecfg::kEnableExternalAudioHardware
     ? gConfiguredAudioSource
@@ -326,7 +334,25 @@ mmpr::NodeRunner gRunner(
     gEnvironmentalSource,
     nodecfg::kMaxPacketSamplesPerChannel,
     nodecfg::kPublishFailureBackoffMs,
-    nodecfg::kStoreForwardBatchFrames);
+    nodecfg::kPublishBatchByteBudget,
+    nodecfg::kAudioQueueSlots);
+
+mmpr::BleReportPublisher gBleReportPublisher(
+    gBleHttpPublisher,
+    gBleScanner,
+    gNodeDescriptor,
+    nodecfg::kBleReportIntervalMs,
+    nodecfg::kBleReportMaxObservations);
+
+mmpr::NodeControlServer gControlServer(
+  gPublisher,
+  nodecfg::kPublishTargetControlPort,
+  nodecfg::kPublishTargetControlPath,
+  nodecfg::kAllowRuntimePublishPortChange,
+  &gRunner.stats(),
+  "/api/v1/stats",
+  &gBleScanner.stats(),
+  &gBleReportPublisher.stats());
 
 void pollTimingSourcesDuringNetworkWait(void*) {
   if (nodecfg::kEnableGpsUart) {
@@ -453,6 +479,18 @@ int main() {
     }
   }
 
+  if (nodecfg::kEnableBleScan) {
+    if (gBleScanner.begin()) {
+      std::printf(
+          "[ble] passive scan enabled interval_units=%u window_units=%u report_ms=%lu\n",
+          static_cast<unsigned>(nodecfg::kBleScanIntervalUnits),
+          static_cast<unsigned>(nodecfg::kBleScanWindowUnits),
+          static_cast<unsigned long>(nodecfg::kBleReportIntervalMs));
+    } else {
+      std::printf("[ble] passive scan unavailable in this build\n");
+    }
+  }
+
   if (nodecfg::kEnablePublishTargetControlServer) {
     if (!gControlServer.begin()) {
       std::printf(
@@ -572,6 +610,11 @@ int main() {
     }
 
     gRunner.loopOnce();
+    if (nodecfg::kEnableBleScan) {
+      gBleReportPublisher.poll(
+          to_ms_since_boot(get_absolute_time()),
+          gRunner.stats().bootId);
+    }
     mmpr::FailureSnapshot::updateProgressMarker(static_cast<uint32_t>(gRunner.stats().framesCaptured));
     pollActivityLed();
 

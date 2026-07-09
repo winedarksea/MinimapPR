@@ -383,6 +383,27 @@ class EnvironmentSampleIn(BaseModel):
         )
 
 
+class BleObservationIn(BaseModel):
+    mac: str = Field(min_length=1)
+    addr_type: int = Field(ge=0, le=3)
+    rssi_last: int = Field(ge=-127, le=20)
+    rssi_ewma: float = Field(ge=-127.0, le=20.0)
+    rssi_min: int = Field(ge=-127, le=20)
+    rssi_max: int = Field(ge=-127, le=20)
+    count: int = Field(ge=1)
+    age_ms: int = Field(default=0, ge=0)
+    adv_type: int | None = Field(default=None, ge=0, le=255)
+    name: str | None = Field(default=None, max_length=64)
+
+
+class BleIngestRequest(BaseModel):
+    node_id: str = Field(min_length=1)
+    boot_count: int | None = Field(default=None, ge=0)
+    boot_id: int | None = Field(default=None, ge=0)
+    monotonic_ms: int | None = Field(default=None, ge=0)
+    observations: list[BleObservationIn] = Field(default_factory=list)
+
+
 class IngestFrameRequest(BaseModel):
     node: NodeSpec
     frame: AudioFrameIn

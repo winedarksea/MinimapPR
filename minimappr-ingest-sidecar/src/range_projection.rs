@@ -86,9 +86,7 @@ pub fn amplitude_range_prior_m(
 /// Range-observability cap for `mode`, or `None` when the range is observable.
 pub fn range_observability_cap_for_mode(mode: Option<&str>) -> Option<f32> {
     match mode {
-        Some(RANGE_ASYMPTOTIC) | Some(RANGE_BOUNDARY) => {
-            Some(UNOBSERVABLE_RANGE_OBSERVABILITY_CAP)
-        }
+        Some(RANGE_ASYMPTOTIC) | Some(RANGE_BOUNDARY) => Some(UNOBSERVABLE_RANGE_OBSERVABILITY_CAP),
         Some(RANGE_BEARING_PROJECTED) => Some(BEARING_PROJECTED_RANGE_OBSERVABILITY_CAP),
         _ => None,
     }

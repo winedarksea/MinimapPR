@@ -23,8 +23,7 @@ from minimappr.models import (
 )
 
 
-_MAGIC = b"MMB2"
-_VERSION = 2
+_SUPPORTED_MAGIC_VERSIONS = {b"MMB2": 2, b"MMB3": 3}
 
 
 @dataclass(slots=True)
@@ -96,10 +95,12 @@ def parse_binary_ingest_payload(
     fallback_position_m: Vec3 | None = None,
 ) -> BinaryIngestPayload:
     reader = _BinaryReader(raw_payload)
-    if reader.read(4) != _MAGIC:
+    magic = reader.read(4)
+    expected_version = _SUPPORTED_MAGIC_VERSIONS.get(magic)
+    if expected_version is None:
         raise ValueError("Invalid binary ingest magic")
     version = reader.u8()
-    if version != _VERSION:
+    if version != expected_version:
         raise ValueError(f"Unsupported binary ingest version {version}")
 
     sort_by_toa = bool(reader.u8())
@@ -108,7 +109,7 @@ def parse_binary_ingest_payload(
         raise ValueError("Binary ingest frame count must be between 1 and 2048")
 
     node = _read_node(reader, fallback_position_m=fallback_position_m)
-    buffered_frames = [_read_frame(reader) for _ in range(frame_count)]
+    buffered_frames = [_read_frame(reader, version=version) for _ in range(frame_count)]
     if reader.remaining != 0:
         raise ValueError("Binary ingest payload has trailing bytes")
     return BinaryIngestPayload(node=node, buffered_frames=buffered_frames, sort_by_toa=sort_by_toa)
@@ -182,20 +183,27 @@ def _read_node(reader: _BinaryReader, *, fallback_position_m: Vec3 | None = None
     )
 
 
-def _read_frame(reader: _BinaryReader) -> BinaryBufferedFrame:
+def _read_frame(reader: _BinaryReader, *, version: int) -> BinaryBufferedFrame:
     start_time_ns = reader.u64()
     end_time_ns = reader.u64()
     start_sample_index = reader.u64()
     end_sample_index = reader.u64()
     sample_rate_hz = reader.u32()
     channels = reader.u8()
+    audio_source_type = reader.u8() if version >= 3 else 0
     sequence = reader.u64()
     toa_ns = reader.u64()
     tor_ns = reader.u64()
     time_quality = _read_time_quality(reader.u8())
-    timing_diagnostics = _read_timing_diagnostics(reader)
-    environment = _read_environment(reader)
-    samples_per_channel = reader.u32()
+    if version >= 3:
+        samples_per_channel = reader.u32()
+        timing_diagnostics, environment = _read_v3_sections(reader)
+    else:
+        timing_diagnostics = _read_timing_diagnostics(reader)
+        environment = _read_environment(reader)
+        samples_per_channel = reader.u32()
+    if version >= 3:
+        timing_diagnostics["audio_source_type"] = _read_audio_source_type(audio_source_type)
 
     if channels < 1:
         raise ValueError("Binary frame must have at least one channel")
@@ -246,6 +254,108 @@ def _read_time_quality(value: int) -> TimeQuality:
         return qualities[value]
     except IndexError as exc:
         raise ValueError(f"Unsupported binary time quality {value}") from exc
+
+
+def _read_audio_source_type(value: int) -> str:
+    sources = ("tdm", "i2s_mono", "pdm_direct", "synthetic")
+    try:
+        return sources[value]
+    except IndexError as exc:
+        raise ValueError(f"Unsupported binary audio source type {value}") from exc
+
+
+def _section_reader(reader: _BinaryReader) -> _BinaryReader:
+    return _BinaryReader(reader.read(reader.u16()))
+
+
+def _read_v3_sections(reader: _BinaryReader) -> tuple[dict, EnvironmentSampleIn | None]:
+    section_flags = reader.u16()
+    timing_diagnostics: dict = {}
+    environment: EnvironmentSampleIn | None = None
+    for bit_index in range(16):
+        section_bit = 1 << bit_index
+        if section_flags & section_bit == 0:
+            continue
+        section = _section_reader(reader)
+        if section_bit == 0x0001:
+            timing_diagnostics.update(_read_timing_diagnostics_v3(section))
+        elif section_bit == 0x0002:
+            environment = _read_environment(section)
+        elif section_bit == 0x0004:
+            timing_diagnostics["transport_health"] = _read_transport_health(section)
+        elif section_bit == 0x0008:
+            timing_diagnostics["aux_sensors"] = _read_aux_sensors(section)
+        if section.remaining != 0:
+            raise ValueError(f"Binary ingest section 0x{section_bit:04x} has trailing bytes")
+    return timing_diagnostics, environment
+
+
+def _read_timing_diagnostics_v3(reader: _BinaryReader) -> dict:
+    return {
+        "gps_anchor": bool(reader.u8()),
+        "pps_edge_count": reader.u32(),
+        "dma_ring_slot_index": reader.u32(),
+        "pps_phase_error_ns": reader.i64(),
+        "estimated_ppm": reader.f64(),
+        "runner_frames_captured": reader.u64(),
+        "runner_frames_dropped": reader.u64(),
+        "runner_continuity_violations": reader.u64(),
+        "runner_publish_errors": reader.u64(),
+        "runner_queue_depth": reader.u32(),
+        "runner_queue_overflows": reader.u64(),
+        "runner_last_publish_status": reader.i32(),
+        "packet_age_us": reader.u64(),
+        "runner_last_publish_failure_stage": _read_publish_failure_stage(reader.u8()),
+        "runner_last_publish_lwip_error": reader.i32(),
+        "runner_consecutive_publish_failures": reader.u32(),
+        "runner_publish_timeout_failures": reader.u64(),
+        "runner_publish_connect_or_reset_failures": reader.u64(),
+        "runner_publish_dns_failures": reader.u64(),
+        "runner_publish_wifi_down_failures": reader.u64(),
+    }
+
+
+def _read_transport_health(reader: _BinaryReader) -> dict:
+    return {
+        "ring_frames_high_water": reader.u16(),
+        "ring_frames_capacity": reader.u16(),
+        "queue_slots_high_water": reader.u16(),
+        "queue_slots_capacity": reader.u16(),
+        "publish_latency_last_ms": reader.u16(),
+        "publish_latency_ewma_ms": reader.u16(),
+        "publish_latency_max_ms": reader.u16(),
+        "wifi_rssi_dbm": struct.unpack("<b", reader.read(1))[0],
+        "heap_free_bytes": reader.u32(),
+        "boot_id": reader.u32(),
+    }
+
+
+def _read_aux_sensors(reader: _BinaryReader) -> list[dict]:
+    stream_count = reader.u8()
+    streams = []
+    for _ in range(stream_count):
+        sensor_type = reader.u8()
+        values_per_sample = reader.u8()
+        sample_count = reader.u16()
+        first_sample_utc_ns = reader.u64()
+        sample_interval_us = reader.u32()
+        if values_per_sample < 1:
+            raise ValueError("Aux sensor stream must include at least one value per sample")
+        values = [
+            reader.f32()
+            for _ in range(int(values_per_sample) * int(sample_count))
+        ]
+        streams.append(
+            {
+                "sensor_type": sensor_type,
+                "values_per_sample": values_per_sample,
+                "sample_count": sample_count,
+                "first_sample_utc_ns": first_sample_utc_ns,
+                "sample_interval_us": sample_interval_us,
+                "values": values,
+            }
+        )
+    return streams
 
 
 def _read_timing_diagnostics(reader: _BinaryReader) -> dict:

@@ -29,6 +29,7 @@ struct PicoI2SMonoConfig {
   int8_t captureBitOffset = 0;
   PicoSerialDataPinBias dataPinBias = PicoSerialDataPinBias::kDisabled;
   bool enableWordDiagnostics = false;
+  uint32_t ringFrames = 16;
   bool useSafeDriveStrength = true;
 };
 
@@ -43,11 +44,14 @@ class PicoI2SMonoSource final : public IAudioSource {
   uint32_t sampleRateHz() const override { return config_.sampleRateHz; }
   uint8_t channels() const override { return 1; }
   size_t frameSamples() const override { return config_.frameSamples; }
+  AudioSourceType sourceType() const override { return AudioSourceType::kI2sMono; }
   bool readFrame(
       int16_t* interleavedOut,
       size_t samplesPerChannel,
       AudioCaptureTimestamp* captureTimestamp = nullptr) override;
   uint32_t availableFrames() const override;
+  uint32_t ringFramesCapacity() const override { return ringFramesCapacity_; }
+  uint32_t ringFramesHighWater() const override { return ringFramesHighWater_; }
   bool readFrameNonblocking(
       int16_t* interleavedOut,
       size_t samplesPerChannel,
@@ -59,7 +63,7 @@ class PicoI2SMonoSource final : public IAudioSource {
  private:
   // Keep >1 s of capture slack in mono mode so short Wi-Fi stalls do not
   // immediately overflow the DMA ring while the main loop is publishing.
-  static constexpr uint32_t kBufferedFrames = 16;
+  static constexpr uint32_t kMaxBufferedFrames = 32;
 
   bool validateConfig() const;
   bool initPioStateMachine();
@@ -83,14 +87,16 @@ class PicoI2SMonoSource final : public IAudioSource {
   bool programInstalled_ = false;
   int dmaChannel_ = -1;
   uint32_t* dmaFrameWords_ = nullptr;
-  uint64_t blockStartSampleIndex_[kBufferedFrames] = {};
-  uint64_t blockEndMonotonicUs_[kBufferedFrames] = {};
-  uint64_t completedBlockCountBySlot_[kBufferedFrames] = {};
+  uint32_t ringFramesCapacity_ = 16;
+  uint64_t blockStartSampleIndex_[kMaxBufferedFrames] = {};
+  uint64_t blockEndMonotonicUs_[kMaxBufferedFrames] = {};
+  uint64_t completedBlockCountBySlot_[kMaxBufferedFrames] = {};
   uint64_t nextProducedStartSampleIndex_ = 0;
   uint64_t nextCompletedBlockCount_ = 0;
   volatile uint32_t dmaWriteFrameIndex_ = 0;
   volatile uint32_t dmaReadFrameIndex_ = 0;
   volatile uint32_t completedFrameCount_ = 0;
+  volatile uint32_t ringFramesHighWater_ = 0;
   volatile uint32_t droppedFrameCount_ = 0;
   uint32_t reportedDroppedFrameCount_ = 0;
 };

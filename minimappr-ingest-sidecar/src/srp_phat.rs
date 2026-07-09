@@ -291,11 +291,13 @@ fn candidate_confidence_and_observability(
     if let Some(cap) = confidence_cap_for_mode(mode) {
         confidence = confidence.min(cap);
     }
-    let range_observability =
-        match (candidate.range_observability, range_observability_cap_for_mode(mode)) {
-            (Some(obs), Some(cap)) => Some(obs.min(cap)),
-            (obs, _) => obs,
-        };
+    let range_observability = match (
+        candidate.range_observability,
+        range_observability_cap_for_mode(mode),
+    ) {
+        (Some(obs), Some(cap)) => Some(obs.min(cap)),
+        (obs, _) => obs,
+    };
     (confidence, range_observability)
 }
 
@@ -1819,7 +1821,10 @@ mod tests {
             conf <= 0.20 + 1e-6,
             "asymptotic confidence must be capped at 0.20, got {conf}"
         );
-        assert!(obs.unwrap() <= 0.05 + 1e-6, "asymptotic obs cap 0.05, got {obs:?}");
+        assert!(
+            obs.unwrap() <= 0.05 + 1e-6,
+            "asymptotic obs cap 0.05, got {obs:?}"
+        );
 
         // Bearing-projected with a tiny range_observability: the ×clamp(0.35,1.0)
         // multiplier is skipped, so confidence rides the 0.85 cap, NOT ~0.35.
@@ -1833,7 +1838,10 @@ mod tests {
             (conf - 0.85).abs() < 1e-6,
             "bearing-projected confidence should hit the 0.85 cap, got {conf}"
         );
-        assert!(obs.unwrap() <= 0.05 + 1e-6, "bearing obs cap 0.05, got {obs:?}");
+        assert!(
+            obs.unwrap() <= 0.05 + 1e-6,
+            "bearing obs cap 0.05, got {obs:?}"
+        );
 
         // Refined: no cap; low observability still attenuates via the multiplier.
         let refined = LocalizationCandidate {

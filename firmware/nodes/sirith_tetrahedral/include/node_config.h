@@ -9,6 +9,8 @@ namespace nodecfg {
 enum class AudioInputMode : uint8_t {
   kTdm4Mic = 0,
   kI2sMono = 1,
+  kPdmDirect = 2,
+  kSynthetic = 3,
 };
 
 enum class I2sMonoChannelSide : uint8_t {
@@ -70,9 +72,65 @@ enum class AudioDataPinBias : uint8_t {
 #define MMPR_NODECFG_GPS_PPS_PIN 10
 #endif
 
+#ifndef MMPR_NODECFG_AUDIO_SAMPLE_RATE_HZ
+#define MMPR_NODECFG_AUDIO_SAMPLE_RATE_HZ 16000
+#endif
+
+#ifndef MMPR_NODECFG_AUDIO_CHANNELS
+#define MMPR_NODECFG_AUDIO_CHANNELS 4
+#endif
+
+#ifndef MMPR_NODECFG_AUDIO_FRAME_SAMPLES
+#define MMPR_NODECFG_AUDIO_FRAME_SAMPLES 512
+#endif
+
+#ifndef MMPR_NODECFG_AUDIO_RING_FRAMES
+#define MMPR_NODECFG_AUDIO_RING_FRAMES 16
+#endif
+
+#ifndef MMPR_NODECFG_AUDIO_QUEUE_SLOTS
+#define MMPR_NODECFG_AUDIO_QUEUE_SLOTS 40
+#endif
+
+#ifndef MMPR_NODECFG_PUBLISH_BATCH_BYTE_BUDGET
+#define MMPR_NODECFG_PUBLISH_BATCH_BYTE_BUDGET 20480
+#endif
+
+#ifndef MMPR_NODECFG_SERVER_BASE_URL
+#define MMPR_NODECFG_SERVER_BASE_URL "http://192.168.8.165:8080"
+#endif
+
+#ifndef MMPR_ENABLE_BLE_SCAN
+#define MMPR_ENABLE_BLE_SCAN 0
+#endif
+
+#ifndef MMPR_NODECFG_BLE_SCAN_INTERVAL_UNITS
+#define MMPR_NODECFG_BLE_SCAN_INTERVAL_UNITS 0x01E0
+#endif
+
+#ifndef MMPR_NODECFG_BLE_SCAN_WINDOW_UNITS
+#define MMPR_NODECFG_BLE_SCAN_WINDOW_UNITS 0x0030
+#endif
+
+#ifndef MMPR_NODECFG_BLE_REPORT_INTERVAL_MS
+#define MMPR_NODECFG_BLE_REPORT_INTERVAL_MS 1000
+#endif
+
+#ifndef MMPR_NODECFG_BLE_REPORT_MAX_OBSERVATIONS
+#define MMPR_NODECFG_BLE_REPORT_MAX_OBSERVATIONS 48
+#endif
+
+#ifndef MMPR_NODECFG_BLE_INGEST_PATH
+#define MMPR_NODECFG_BLE_INGEST_PATH "/api/v1/ingest/ble"
+#endif
+
 static_assert(
-    MMPR_NODECFG_AUDIO_INPUT_MODE == 0 || MMPR_NODECFG_AUDIO_INPUT_MODE == 1,
-    "MMPR_NODECFG_AUDIO_INPUT_MODE must be 0 (TDM) or 1 (I2S mono)");
+    MMPR_NODECFG_AUDIO_INPUT_MODE == 0 || MMPR_NODECFG_AUDIO_INPUT_MODE == 1 ||
+        MMPR_NODECFG_AUDIO_INPUT_MODE == 2 || MMPR_NODECFG_AUDIO_INPUT_MODE == 3,
+    "MMPR_NODECFG_AUDIO_INPUT_MODE must be 0 (TDM), 1 (I2S mono), 2 (reserved PDM), or 3 (synthetic)");
+static_assert(
+    MMPR_NODECFG_AUDIO_INPUT_MODE != 2,
+    "MMPR_NODECFG_AUDIO_INPUT_MODE=2 reserves future PDM_DIRECT hardware and is not implemented yet");
 static_assert(
     MMPR_NODECFG_I2S_MONO_CHANNEL_SIDE == 0 || MMPR_NODECFG_I2S_MONO_CHANNEL_SIDE == 1,
     "MMPR_NODECFG_I2S_MONO_CHANNEL_SIDE must be 0 (left) or 1 (right)");
@@ -101,9 +159,9 @@ static_assert(
     MMPR_NODECFG_TDM_ENABLE_WORD_DIAGNOSTICS == 0 || MMPR_NODECFG_TDM_ENABLE_WORD_DIAGNOSTICS == 1,
     "MMPR_NODECFG_TDM_ENABLE_WORD_DIAGNOSTICS must be 0 or 1");
 
-static constexpr AudioInputMode kAudioInputMode = (MMPR_NODECFG_AUDIO_INPUT_MODE == 1)
-    ? AudioInputMode::kI2sMono
-    : AudioInputMode::kTdm4Mic;
+static constexpr AudioInputMode kAudioInputMode = (MMPR_NODECFG_AUDIO_INPUT_MODE == 3)
+    ? AudioInputMode::kSynthetic
+    : ((MMPR_NODECFG_AUDIO_INPUT_MODE == 1) ? AudioInputMode::kI2sMono : AudioInputMode::kTdm4Mic);
 static constexpr I2sMonoChannelSide kI2sMonoChannelSide = (MMPR_NODECFG_I2S_MONO_CHANNEL_SIDE == 1)
     ? I2sMonoChannelSide::kRight
     : I2sMonoChannelSide::kLeft;
@@ -124,11 +182,18 @@ static constexpr AudioDataPinBias kTdmDataPinBias = (MMPR_NODECFG_TDM_DATA_PIN_B
     : AudioDataPinBias::kDisabled;
 static constexpr bool kTdmEnableWordDiagnostics = MMPR_NODECFG_TDM_ENABLE_WORD_DIAGNOSTICS == 1;
 static constexpr bool kUseTdmAudio = kAudioInputMode == AudioInputMode::kTdm4Mic;
+static constexpr bool kUseSyntheticAudio = kAudioInputMode == AudioInputMode::kSynthetic;
 
 // --- Network and backend ---
 static constexpr const char* kWifiSsid = "catlin";
 static constexpr const char* kWifiPassword = "DarthWiFi";
-static constexpr const char* kServerBaseUrl = "http://192.168.1.250:8081";  // "http://192.168.1.28:8081" .8.165
+static constexpr const char* kServerBaseUrl = MMPR_NODECFG_SERVER_BASE_URL;
+static constexpr bool kEnableBleScan = MMPR_ENABLE_BLE_SCAN == 1;
+static constexpr uint16_t kBleScanIntervalUnits = MMPR_NODECFG_BLE_SCAN_INTERVAL_UNITS;
+static constexpr uint16_t kBleScanWindowUnits = MMPR_NODECFG_BLE_SCAN_WINDOW_UNITS;
+static constexpr uint32_t kBleReportIntervalMs = MMPR_NODECFG_BLE_REPORT_INTERVAL_MS;
+static constexpr size_t kBleReportMaxObservations = MMPR_NODECFG_BLE_REPORT_MAX_OBSERVATIONS;
+static constexpr const char* kBleIngestPath = MMPR_NODECFG_BLE_INGEST_PATH;
 
 
 static constexpr uint32_t kWiFiConnectTimeoutMs = 15000;
@@ -142,7 +207,8 @@ static constexpr uint32_t kHttpTimeoutMs = 450;
 static constexpr uint32_t kPublishFailureBackoffMs = 0;
 // ingest control
 static constexpr const char* kIngestPath = "/api/v1/ingest/binary";
-static constexpr size_t kStoreForwardBatchFrames = 4;
+static constexpr size_t kAudioQueueSlots = MMPR_NODECFG_AUDIO_QUEUE_SLOTS;
+static constexpr size_t kPublishBatchByteBudget = MMPR_NODECFG_PUBLISH_BATCH_BYTE_BUDGET;
 
 // Tiny debug/control listener for reading and chaning the current publish target
 // Changes are RAM-only and reset on reboot.
@@ -154,7 +220,7 @@ static constexpr const char* kPublishTargetControlPath = "/api/v1/publish-target
 // Max samples per channel in a single published packet. Keep diagnostic HTTP
 // POSTs near one TCP send window so a timeout does not leave body bytes that
 // uvicorn parses as a malformed follow-up request.
-static constexpr size_t kMaxPacketSamplesPerChannel = 512;
+static constexpr size_t kMaxPacketSamplesPerChannel = MMPR_NODECFG_AUDIO_FRAME_SAMPLES;
 
 // --- Node identity ---
 // Prefix only — the full node ID is built at runtime by appending the chip's
@@ -261,8 +327,9 @@ static constexpr uint8_t kTdmDataPin = 7;  // SDATA input
 static constexpr uint8_t kTdmBclkPin = 8;  // BCLK output
 static constexpr uint8_t kTdmWsPin = 9;    // FSYNC/WS output (must be BCLK + 1)
 
-static constexpr uint32_t kAudioSampleRateHz = 16000;
-static constexpr uint32_t kAudioFrameSamples = 512;
+static constexpr uint32_t kAudioSampleRateHz = MMPR_NODECFG_AUDIO_SAMPLE_RATE_HZ;
+static constexpr uint32_t kAudioFrameSamples = MMPR_NODECFG_AUDIO_FRAME_SAMPLES;
+static constexpr uint32_t kAudioRingFrames = MMPR_NODECFG_AUDIO_RING_FRAMES;
 static constexpr uint8_t kAudioValidBits = 24;  // ADAU7112 emits 24-bit PCM in 32-bit slots.
 static constexpr uint8_t kAudioTdmSlots = 4;
 static constexpr uint8_t kAudioSlotBits = 32;
@@ -285,8 +352,8 @@ static constexpr bool kUseSafeDriveStrength = true;
 static constexpr uint8_t kI2sMonoDataPin = kTdmDataPin;
 static constexpr uint8_t kI2sMonoBclkPin = kTdmBclkPin;
 static constexpr uint8_t kI2sMonoWsPin = kTdmWsPin;
-static constexpr uint32_t kI2sMonoSampleRateHz = 16000;
-static constexpr uint32_t kI2sMonoFrameSamples = 1024;
+static constexpr uint32_t kI2sMonoSampleRateHz = MMPR_NODECFG_AUDIO_SAMPLE_RATE_HZ;
+static constexpr uint32_t kI2sMonoFrameSamples = MMPR_NODECFG_AUDIO_FRAME_SAMPLES;
 static constexpr uint8_t kI2sMonoSlotBits = 32;
 static constexpr uint8_t kI2sMonoValidBits = 24;
 // ICS-43434 uses standard I2S timing with the MSB delayed by one BCLK after
@@ -303,7 +370,20 @@ static constexpr bool kI2sMonoPinsAliasTdmPins =
 
 static constexpr uint32_t kActiveAudioSampleRateHz = kUseTdmAudio ? kAudioSampleRateHz : kI2sMonoSampleRateHz;
 static constexpr uint32_t kActiveAudioFrameSamples = kUseTdmAudio ? kAudioFrameSamples : kI2sMonoFrameSamples;
-static constexpr uint8_t kActiveAudioChannels = kUseTdmAudio ? 4u : 1u;
+static constexpr uint8_t kActiveAudioChannels = kUseTdmAudio
+    ? 4u
+    : (kUseSyntheticAudio ? static_cast<uint8_t>(MMPR_NODECFG_AUDIO_CHANNELS) : 1u);
+static_assert(kAudioSampleRateHz >= 12000 && kAudioSampleRateHz <= 96000, "audio sample rate must be 12-96 kHz");
+static_assert(kAudioFrameSamples > 0 && kAudioFrameSamples <= 4096, "audio frame samples out of supported range");
+static_assert(kAudioRingFrames > 0 && kAudioRingFrames <= 32, "audio ring frames must be 1-32");
+static_assert(kAudioQueueSlots > 0 && kAudioQueueSlots <= 96, "audio queue slots must be 1-96");
+static_assert(kPublishBatchByteBudget >= 4096 && kPublishBatchByteBudget <= 32768, "publish byte budget must be 4-32 KiB");
+static_assert(
+    (static_cast<size_t>(kAudioFrameSamples) * static_cast<size_t>(kActiveAudioChannels) * sizeof(uint32_t) *
+         static_cast<size_t>(kAudioRingFrames)) +
+        (static_cast<size_t>(kMaxPacketSamplesPerChannel) * static_cast<size_t>(kActiveAudioChannels) *
+         sizeof(int16_t) * static_cast<size_t>(kAudioQueueSlots)) <= 300u * 1024u,
+    "audio ring + queue budget exceeds 300 KiB");
 
 // --- Optional GPS/PPS (M10Q style) ---
 static constexpr bool kEnableGpsUart = true;

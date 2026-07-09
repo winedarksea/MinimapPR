@@ -31,6 +31,7 @@ include(pico_sdk_import.cmake)
 project(sirith_tetrahedral C CXX ASM)
 
 set(PICO_CXX_ENABLE_EXCEPTIONS 1)
+option(MMPR_ENABLE_BLE_SCAN "Enable passive BLE RSSI scanner and JSON reports" OFF)
 
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
@@ -42,6 +43,8 @@ set(MMPR_AUDIO_PICO_DIR ${CMAKE_CURRENT_LIST_DIR}/../../lib/minimap_audio_pico)
 add_executable(sirith_tetrahedral
         sirith_tetrahedral.cpp
         src/Base64.cpp
+        src/BleReportPublisher.cpp
+        src/BleRssiScanner.cpp
         src/FailureSnapshot.cpp
         src/FallbackEnvironmentalSource.cpp
         src/GpsPpsTimerCapture.cpp
@@ -57,6 +60,7 @@ add_executable(sirith_tetrahedral
         src/NodeRunner.cpp
         src/Sht4xEnvironmentalSource.cpp
         src/SilenceAudioSource.cpp
+        src/SyntheticAudioSource.cpp
         src/TemperatureEnvironmentalSource.cpp
         src/WiFiSupport.cpp
         ${MMPR_AUDIO_PICO_DIR}/src/PicoI2SMonoSource.cpp
@@ -91,6 +95,41 @@ target_include_directories(sirith_tetrahedral PRIVATE
         ${MMPR_AUDIO_PICO_DIR}/include
 )
 
+foreach(MMPR_NODECFG_DEFINE
+        AUDIO_INPUT_MODE
+        AUDIO_SAMPLE_RATE_HZ
+        AUDIO_CHANNELS
+        AUDIO_FRAME_SAMPLES
+        AUDIO_RING_FRAMES
+        AUDIO_QUEUE_SLOTS
+        PUBLISH_BATCH_BYTE_BUDGET
+        GPS_PPS_PIN
+        I2S_MONO_CHANNEL_SIDE
+        I2S_MONO_SAMPLE_EDGE
+        I2S_MONO_CAPTURE_BIT_OFFSET
+        I2S_MONO_DATA_PIN_BIAS
+        I2S_MONO_ENABLE_WORD_DIAGNOSTICS
+        TDM_SAMPLE_EDGE
+        TDM_CAPTURE_BIT_OFFSET
+        TDM_DATA_PIN_BIAS
+        TDM_ENABLE_WORD_DIAGNOSTICS)
+    if(DEFINED MMPR_NODECFG_${MMPR_NODECFG_DEFINE})
+        target_compile_definitions(
+                sirith_tetrahedral
+                PRIVATE MMPR_NODECFG_${MMPR_NODECFG_DEFINE}=${MMPR_NODECFG_${MMPR_NODECFG_DEFINE}})
+    endif()
+endforeach()
+
+if(DEFINED MMPR_NODECFG_SERVER_BASE_URL)
+    target_compile_definitions(
+            sirith_tetrahedral
+            PRIVATE MMPR_NODECFG_SERVER_BASE_URL="${MMPR_NODECFG_SERVER_BASE_URL}")
+endif()
+
+target_compile_definitions(
+        sirith_tetrahedral
+        PRIVATE MMPR_ENABLE_BLE_SCAN=$<IF:$<BOOL:${MMPR_ENABLE_BLE_SCAN}>,1,0>)
+
 # Add any user requested libraries
 target_link_libraries(sirith_tetrahedral 
         hardware_dma
@@ -103,5 +142,12 @@ target_link_libraries(sirith_tetrahedral
         pico_cyw43_arch_lwip_poll
         pico_unique_id
         )
+
+if(MMPR_ENABLE_BLE_SCAN)
+    target_link_libraries(sirith_tetrahedral
+            pico_btstack_ble
+            pico_btstack_cyw43)
+    target_compile_definitions(sirith_tetrahedral PRIVATE CYW43_ENABLE_BLUETOOTH=1)
+endif()
 
 pico_add_extra_outputs(sirith_tetrahedral)

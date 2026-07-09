@@ -132,6 +132,9 @@ bool SirithPicoTdmSource::validateConfig() const {
   if (config_.sampleRateHz == 0 || config_.frameSamples == 0) {
     return false;
   }
+  if (config_.ringFrames == 0 || config_.ringFrames > kMaxBufferedFrames) {
+    return false;
+  }
 
   if (config_.tdmSlots != 4 || config_.slotBits != 32 || config_.validBits == 0 ||
       config_.validBits > config_.slotBits) {
@@ -280,7 +283,8 @@ bool SirithPicoTdmSource::initDmaCapture() {
     return false;
   }
 
-  dmaFrameWords_ = new (std::nothrow) uint32_t[wordsPerFrame_ * kBufferedFrames];
+  ringFramesCapacity_ = config_.ringFrames;
+  dmaFrameWords_ = new (std::nothrow) uint32_t[wordsPerFrame_ * ringFramesCapacity_];
   if (dmaFrameWords_ == nullptr) {
     MMPR_PICO_LOG_LINE("[sirith-pico] unable to allocate DMA frame ring");
     return false;
@@ -303,6 +307,7 @@ bool SirithPicoTdmSource::initDmaCapture() {
   dmaWriteFrameIndex_ = 0;
   dmaReadFrameIndex_ = 0;
   completedFrameCount_ = 0;
+  ringFramesHighWater_ = 0;
   droppedFrameCount_ = 0;
   reportedDroppedFrameCount_ = 0;
 
@@ -374,6 +379,7 @@ void SirithPicoTdmSource::deinitDmaCapture() {
   dmaWriteFrameIndex_ = 0;
   dmaReadFrameIndex_ = 0;
   completedFrameCount_ = 0;
+  ringFramesHighWater_ = 0;
   droppedFrameCount_ = 0;
   reportedDroppedFrameCount_ = 0;
   nextProducedStartSampleIndex_ = 0;
@@ -444,7 +450,7 @@ bool SirithPicoTdmSource::readFrame(
       // advanced the read index only AFTER the copy, which let the consumer
       // write an older index back and re-read stale slots, producing backward
       // sample-index jumps and repeated packet ranges at the node layer.
-      dmaReadFrameIndex_ = (readFrameIndex + 1u) % kBufferedFrames;
+      dmaReadFrameIndex_ = (readFrameIndex + 1u) % ringFramesCapacity_;
       --completedFrameCount_;
       restore_interrupts(irqState);
     }
@@ -544,14 +550,17 @@ void SirithPicoTdmSource::onDmaIrq() {
   nextProducedStartSampleIndex_ += config_.frameSamples;
   blockEndMonotonicUs_[dmaWriteFrameIndex_] = time_us_64();
   completedBlockCountBySlot_[dmaWriteFrameIndex_] = ++nextCompletedBlockCount_;
-  if (completedFrameCount_ == kBufferedFrames) {
-    dmaReadFrameIndex_ = (dmaReadFrameIndex_ + 1u) % kBufferedFrames;
+  if (completedFrameCount_ == ringFramesCapacity_) {
+    dmaReadFrameIndex_ = (dmaReadFrameIndex_ + 1u) % ringFramesCapacity_;
     ++droppedFrameCount_;
   } else {
     ++completedFrameCount_;
+    if (completedFrameCount_ > ringFramesHighWater_) {
+      ringFramesHighWater_ = completedFrameCount_;
+    }
   }
 
-  dmaWriteFrameIndex_ = (dmaWriteFrameIndex_ + 1u) % kBufferedFrames;
+  dmaWriteFrameIndex_ = (dmaWriteFrameIndex_ + 1u) % ringFramesCapacity_;
   dma_channel_set_write_addr(
       static_cast<uint>(dmaChannel_),
       dmaFrameWords_ + (dmaWriteFrameIndex_ * wordsPerFrame_),

@@ -28,6 +28,16 @@ struct RunnerStats {
   uint64_t publishConnectOrResetFailures = 0;
   uint64_t publishDnsFailures = 0;
   uint64_t publishWifiDownFailures = 0;
+  uint32_t queueSlotsHighWater = 0;
+  uint32_t queueSlotsCapacity = 0;
+  uint32_t publishLatencyLastMs = 0;
+  uint32_t publishLatencyEwmaMs = 0;
+  uint32_t publishLatencyMaxMs = 0;
+  uint32_t ringFramesHighWater = 0;
+  uint32_t ringFramesCapacity = 0;
+  int8_t wifiRssiDbm = 0;
+  uint32_t heapFreeBytes = 0;
+  uint32_t bootId = 0;
 };
 
 class NodeRunner {
@@ -41,7 +51,8 @@ class NodeRunner {
       IEnvironmentalSource* environmentalSource = nullptr,
       size_t maxPacketSamplesPerChannel = 0,
       uint32_t publishFailureBackoffMs = 0,
-      size_t storeForwardBatchFrames = 1);
+      size_t publishBatchByteBudget = 0,
+      size_t queueSlots = 0);
 
   bool begin(
       bool syncNtp,
@@ -83,6 +94,7 @@ class NodeRunner {
   uint32_t adaptivePublishBackoffMs() const;
   bool shouldBypassAdaptiveBackoff() const;
   uint32_t effectiveQueueDepth() const;
+  void refreshSlowTelemetry(uint32_t nowMs);
 
   const NodeDescriptor& descriptor_;
   IAudioSource& audioSource_;
@@ -105,7 +117,7 @@ class NodeRunner {
   uint64_t lastLoggedFrameCount_ = 0;
   size_t maxPacketSamplesPerChannel_ = 0;
   uint32_t publishFailureBackoffMs_ = 0;
-  size_t storeForwardBatchFrames_ = 1;
+  size_t publishBatchByteBudget_ = 0;
   uint32_t nextPublishAttemptMs_ = 0;
   std::vector<QueuedAudioPacket> queuedPackets_;
   size_t queueHead_ = 0;
@@ -113,6 +125,7 @@ class NodeRunner {
   std::vector<QueuedAudioPacket> activePublishPackets_;
   size_t activePublishBatchSize_ = 0;
   bool activePublishBatchValid_ = false;
+  uint32_t lastTelemetryRefreshMs_ = 0;
 
   RunnerStats stats_ = {};
 };

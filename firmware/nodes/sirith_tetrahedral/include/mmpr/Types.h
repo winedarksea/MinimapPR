@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <string>
 
+#include "mmpr/IAudioSource.h"
+
 namespace mmpr {
 
 enum class PublishFailureStage : uint8_t {
@@ -72,6 +74,7 @@ struct AudioFrame {
   uint64_t endSampleIndex;
   uint32_t sampleRateHz;
   uint8_t channels;
+  AudioSourceType audioSourceType = AudioSourceType::kSynthetic;
   uint64_t sequence;
   uint64_t toaNs;
   uint64_t torNs;
@@ -99,6 +102,16 @@ struct AudioFrame {
   uint64_t runnerPublishConnectOrResetFailures = 0;
   uint64_t runnerPublishDnsFailures = 0;
   uint64_t runnerPublishWifiDownFailures = 0;
+  uint32_t ringFramesHighWater = 0;
+  uint32_t ringFramesCapacity = 0;
+  uint32_t queueSlotsHighWater = 0;
+  uint32_t queueSlotsCapacity = 0;
+  uint32_t publishLatencyLastMs = 0;
+  uint32_t publishLatencyEwmaMs = 0;
+  uint32_t publishLatencyMaxMs = 0;
+  int8_t wifiRssiDbm = 0;
+  uint32_t heapFreeBytes = 0;
+  uint32_t bootId = 0;
 };
 
 struct EnvironmentalSample {
@@ -114,6 +127,7 @@ struct PublishResult {
   int statusCode = -1;
   PublishFailureStage failureStage = PublishFailureStage::kNone;
   int32_t lwipError = 0;
+  uint32_t latencyMs = 0;
   std::string responseBody;
 };
 

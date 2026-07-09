@@ -57,17 +57,20 @@ def _binary_node_no_geo(*, position_source: str) -> bytes:
     return bytes(payload)
 
 
-def _binary_frame() -> bytes:
-    samples = struct.pack("<hh", 0, 32767)
+def _binary_frame(*, sample_rate_hz: int = 16_000, channels: int = 1, samples_per_channel: int = 2) -> bytes:
+    samples = b"".join(
+        struct.pack("<h", 32767 if sample_index % 2 else 0)
+        for sample_index in range(samples_per_channel * channels)
+    )
     payload = bytearray()
     payload += struct.pack(
         "<QQQQIBQQQB",
         1_000,
         2_000,
         0,
-        2,
-        16_000,
-        1,
+        samples_per_channel,
+        sample_rate_hz,
+        channels,
         1,
         1_000,
         1_250,
@@ -75,17 +78,74 @@ def _binary_frame() -> bytes:
     )
     payload += struct.pack("<B", 0)
     payload += struct.pack("<B", 0)
-    payload += struct.pack("<I", 2)
+    payload += struct.pack("<I", samples_per_channel)
     payload += samples
     return bytes(payload)
 
 
-def _binary_ingest_payload(*, position_source: str, geo: GeoPoint) -> bytes:
+def _binary_frame_mmb3(
+    *,
+    sample_rate_hz: int = 16_000,
+    channels: int = 1,
+    samples_per_channel: int = 2,
+    include_aux_sensors: bool = False,
+) -> bytes:
+    samples = b"".join(
+        struct.pack("<h", 32767 if sample_index % 2 else 0)
+        for sample_index in range(samples_per_channel * channels)
+    )
+    payload = bytearray()
+    section_flags = 0x0004 | (0x0008 if include_aux_sensors else 0)
+    payload += struct.pack(
+        "<QQQQIBBQQQBIH",
+        1_000,
+        2_000,
+        0,
+        samples_per_channel,
+        sample_rate_hz,
+        channels,
+        3,  # synthetic audio source
+        1,
+        1_000,
+        1_250,
+        0,
+        samples_per_channel,
+        section_flags,
+    )
+    transport_health = bytearray()
+    transport_health += struct.pack("<HHHHHHH", 1, 16, 2, 40, 10, 11, 12)
+    transport_health += struct.pack("<bII", -55, 0, 0x12345678)
+    payload += struct.pack("<H", len(transport_health))
+    payload += transport_health
+    if include_aux_sensors:
+        aux_sensors = bytearray()
+        aux_sensors += struct.pack("<B", 1)  # stream count
+        aux_sensors += struct.pack("<BBH", 0, 3, 2)
+        aux_sensors += struct.pack("<QI", 123_456_789, 4_000)
+        aux_sensors += struct.pack("<ffffff", 1.0, 2.0, 3.0, 1.5, 2.5, 3.5)
+        payload += struct.pack("<H", len(aux_sensors))
+        payload += aux_sensors
+    payload += samples
+    return bytes(payload)
+
+
+def _binary_ingest_payload(
+    *,
+    position_source: str,
+    geo: GeoPoint,
+    sample_rate_hz: int = 16_000,
+    channels: int = 1,
+    samples_per_channel: int = 2,
+) -> bytes:
     payload = bytearray()
     payload += b"MMB2"
     payload += struct.pack("<BBH", 2, 0, 1)
     payload += _binary_node(position_source=position_source, geo=geo)
-    payload += _binary_frame()
+    payload += _binary_frame(
+        sample_rate_hz=sample_rate_hz,
+        channels=channels,
+        samples_per_channel=samples_per_channel,
+    )
     return bytes(payload)
 
 
@@ -95,6 +155,28 @@ def _binary_ingest_payload_no_geo(*, position_source: str = "fallback_static") -
     payload += struct.pack("<BBH", 2, 0, 1)
     payload += _binary_node_no_geo(position_source=position_source)
     payload += _binary_frame()
+    return bytes(payload)
+
+
+def _binary_ingest_payload_mmb3(
+    *,
+    position_source: str,
+    geo: GeoPoint,
+    sample_rate_hz: int = 16_000,
+    channels: int = 1,
+    samples_per_channel: int = 2,
+    include_aux_sensors: bool = False,
+) -> bytes:
+    payload = bytearray()
+    payload += b"MMB3"
+    payload += struct.pack("<BBH", 3, 0, 1)
+    payload += _binary_node(position_source=position_source, geo=geo)
+    payload += _binary_frame_mmb3(
+        sample_rate_hz=sample_rate_hz,
+        channels=channels,
+        samples_per_channel=samples_per_channel,
+        include_aux_sensors=include_aux_sensors,
+    )
     return bytes(payload)
 
 
@@ -140,6 +222,100 @@ def test_parse_binary_ingest_payload_mmb2_uses_geo_only_node_position() -> None:
     assert payload.node.position_geo.lat == pytest.approx(geo.lat)
     assert payload.node.position_geo.lon == pytest.approx(geo.lon)
     assert payload.node.metadata["gps"]["position_source"] == "gps_nmea_uart"
+
+
+def test_parse_binary_ingest_payload_mmb3_parses_transport_health_section() -> None:
+    geo = GeoPoint(lat=44.987, lon=-93.258, alt_m=281.5)
+
+    payload = parse_binary_ingest_payload(
+        _binary_ingest_payload_mmb3(position_source="gps_nmea_uart", geo=geo)
+    )
+
+    frame = payload.buffered_frames[0].frame
+    assert frame.sample_rate_hz == 16_000
+    assert frame.timing_diagnostics["audio_source_type"] == "synthetic"
+    assert frame.timing_diagnostics["transport_health"] == {
+        "ring_frames_high_water": 1,
+        "ring_frames_capacity": 16,
+        "queue_slots_high_water": 2,
+        "queue_slots_capacity": 40,
+        "publish_latency_last_ms": 10,
+        "publish_latency_ewma_ms": 11,
+        "publish_latency_max_ms": 12,
+        "wifi_rssi_dbm": -55,
+        "heap_free_bytes": 0,
+        "boot_id": 0x12345678,
+    }
+
+
+def test_parse_binary_ingest_payload_mmb3_parses_aux_sensor_section() -> None:
+    geo = GeoPoint(lat=44.987, lon=-93.258, alt_m=281.5)
+
+    payload = parse_binary_ingest_payload(
+        _binary_ingest_payload_mmb3(
+            position_source="gps_nmea_uart",
+            geo=geo,
+            include_aux_sensors=True,
+        )
+    )
+
+    aux_sensors = payload.buffered_frames[0].frame.timing_diagnostics["aux_sensors"]
+    assert aux_sensors == [
+        {
+            "sensor_type": 0,
+            "values_per_sample": 3,
+            "sample_count": 2,
+            "first_sample_utc_ns": 123_456_789,
+            "sample_interval_us": 4_000,
+            "values": pytest.approx([1.0, 2.0, 3.0, 1.5, 2.5, 3.5]),
+        }
+    ]
+
+
+@pytest.mark.parametrize("version", [2, 3])
+@pytest.mark.parametrize(
+    ("sample_rate_hz", "channels", "samples_per_channel"),
+    [
+        (32_000, 4, 512),
+        (48_000, 4, 512),
+        (76_800, 1, 768),
+        (96_000, 1, 960),
+    ],
+)
+def test_parse_binary_ingest_payload_accepts_high_rate_matrix(
+    version: int,
+    sample_rate_hz: int,
+    channels: int,
+    samples_per_channel: int,
+) -> None:
+    geo = GeoPoint(lat=44.987, lon=-93.258, alt_m=281.5)
+    payload_bytes = (
+        _binary_ingest_payload_mmb3(
+            position_source="gps_nmea_uart",
+            geo=geo,
+            sample_rate_hz=sample_rate_hz,
+            channels=channels,
+            samples_per_channel=samples_per_channel,
+        )
+        if version == 3
+        else _binary_ingest_payload(
+            position_source="gps_nmea_uart",
+            geo=geo,
+            sample_rate_hz=sample_rate_hz,
+            channels=channels,
+            samples_per_channel=samples_per_channel,
+        )
+    )
+
+    payload = parse_binary_ingest_payload(payload_bytes)
+
+    frame = payload.buffered_frames[0].frame
+    decoded_audio = payload.buffered_frames[0].decoded_audio
+    assert frame.sample_rate_hz == sample_rate_hz
+    assert frame.channels == channels
+    assert frame.samples_per_channel == samples_per_channel
+    assert frame.end_sample_index == samples_per_channel
+    assert decoded_audio.shape == (channels, samples_per_channel)
 
 
 def test_normalize_node_spec_keeps_geo_consistent_with_smoothed_local_position() -> None:

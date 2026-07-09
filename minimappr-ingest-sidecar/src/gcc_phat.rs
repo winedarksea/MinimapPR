@@ -644,7 +644,10 @@ mod tests {
         }
         let x2 = x1.clone();
         let tau = phase_slope_tau(&x1, &x2, fft_len, sr, None, 8.0 / sr as f32);
-        assert!(tau.is_none(), "expected None for narrowband energy, got {tau:?}");
+        assert!(
+            tau.is_none(),
+            "expected None for narrowband energy, got {tau:?}"
+        );
     }
 
     #[test]
