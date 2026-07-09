@@ -82,6 +82,7 @@ class NodeCapability(str, Enum):
     ENVIRONMENT = "environment"
     TEMPERATURE = "temperature"
     HUMIDITY = "humidity"
+    BLE_RSSI = "ble_rssi"
     SEISMIC = "seismic"
     RADAR_24G = "radar_24g"
     SDR = "sdr"

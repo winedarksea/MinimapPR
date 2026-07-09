@@ -64,8 +64,8 @@ def test_node_spec_strips_unknown_capabilities_into_metadata() -> None:
         id="node-capabilities",
         node_type=NodeType.POINT,
         position_m=(0.0, 0.0, 0.0),
-        capabilities=["gps_optional", "bogus"],
+        capabilities=["gps_optional", "ble_rssi", "bogus"],
     )
 
-    assert [capability.value for capability in spec.capabilities] == ["gps_optional"]
+    assert [capability.value for capability in spec.capabilities] == ["gps_optional", "ble_rssi"]
     assert spec.metadata["unrecognized_capabilities"] == ["bogus"]

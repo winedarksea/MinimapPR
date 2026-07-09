@@ -304,7 +304,7 @@ mmpr::SyntheticAudioSource gSyntheticAudioSource(
     nodecfg::kActiveAudioFrameSamples,
     nodecfg::kActiveAudioChannels);
 mmpr::HttpFramePublisher gPublisher(nodecfg::kServerBaseUrl, nodecfg::kIngestPath, nodecfg::kHttpTimeoutMs);
-mmpr::HttpFramePublisher gBleHttpPublisher(nodecfg::kServerBaseUrl, nodecfg::kBleIngestPath, nodecfg::kHttpTimeoutMs);
+mmpr::HttpFramePublisher gBleHttpPublisher(nodecfg::kBleServerBaseUrl, nodecfg::kBleIngestPath, nodecfg::kHttpTimeoutMs);
 mmpr::BleRssiScanner gBleScanner(nodecfg::kBleScanIntervalUnits, nodecfg::kBleScanWindowUnits);
 mmpr::NodeClock gClock;
 

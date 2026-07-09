@@ -109,6 +109,10 @@ target_include_directories(sirith_tetrahedral PRIVATE
         ${MMPR_AUDIO_PICO_DIR}/include
 )
 
+target_compile_definitions(
+        sirith_tetrahedral
+        PRIVATE MMPR_ENABLE_BLE_SCAN=${MMPR_ENABLE_BLE_SCAN})
+
 foreach(MMPR_NODECFG_DEFINE
         AUDIO_INPUT_MODE
         AUDIO_SAMPLE_RATE_HZ
@@ -145,6 +149,12 @@ if(DEFINED MMPR_NODECFG_SERVER_BASE_URL)
     target_compile_definitions(
             sirith_tetrahedral
             PRIVATE MMPR_NODECFG_SERVER_BASE_URL="${MMPR_NODECFG_SERVER_BASE_URL}")
+endif()
+
+if(DEFINED MMPR_NODECFG_BLE_SERVER_BASE_URL)
+    target_compile_definitions(
+            sirith_tetrahedral
+            PRIVATE MMPR_NODECFG_BLE_SERVER_BASE_URL="${MMPR_NODECFG_BLE_SERVER_BASE_URL}")
 endif()
 
 # Add any user requested libraries
