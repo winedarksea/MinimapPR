@@ -260,9 +260,14 @@ fn render_track(track: Track) -> AnyView {
         .as_ref()
         .map(|point| geo_text(point.lat, point.lon, point.alt_m))
         .unwrap_or_else(|| "-".to_string());
+    let source = match track.track_kind.as_deref() {
+        Some("ble") => "Bluetooth",
+        _ => "Acoustic",
+    };
     view! {
         <div class="entity-inspector-body">
             <Kv label="Label" value=track.label.unwrap_or_else(|| "-".to_string()) />
+            <Kv label="Source" value=source.to_string() />
             <Kv label="Confidence" value=confidence_text(track.confidence) />
             <Kv label="TQI" value=track.tqi.map(|value| format!("{value:.2}")).unwrap_or_else(|| "-".to_string()) />
             <Kv label="Status" value=track.status.unwrap_or_else(|| "-".to_string()) />

@@ -646,6 +646,15 @@ class Settings:
     effector_min_slew_interval_seconds: float = 3.0
     effector_status_poll_interval_seconds: float = 5.0
 
+    # BLE-device-as-track subsystem. A background loop periodically trilaterates
+    # BLE observations and feeds a dedicated TrackManager so BLE devices show up
+    # as first-class tracks. Gating knobs default looser than the acoustic
+    # associator because RSSI positions are coarse and jittery.
+    ble_tracking_enabled: bool = True
+    ble_tracking_period_s: float = 2.0
+    ble_track_association_distance_m: float = 12.0
+    ble_track_max_gate_m: float = 40.0
+
     node_audio_overrides: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -1421,6 +1430,12 @@ class Settings:
             effector_status_poll_interval_seconds=_env_float(
                 "MINIMAPPR_EFFECTOR_STATUS_POLL_INTERVAL_SECONDS", 5.0
             ),
+            ble_tracking_enabled=_env_bool("MINIMAPPR_BLE_TRACKING_ENABLED", True),
+            ble_tracking_period_s=_env_float("MINIMAPPR_BLE_TRACKING_PERIOD_S", 2.0),
+            ble_track_association_distance_m=_env_float(
+                "MINIMAPPR_BLE_TRACK_ASSOCIATION_DISTANCE_M", 12.0
+            ),
+            ble_track_max_gate_m=_env_float("MINIMAPPR_BLE_TRACK_MAX_GATE_M", 40.0),
         )
 
     def localization_config(self) -> LocalizationConfig:
@@ -1499,6 +1514,17 @@ class Settings:
             track_drop_multiplier=self.track_drop_multiplier,
             track_reap_multiplier=self.track_reap_multiplier,
         )
+
+    def ble_tracking_config(self) -> TrackingConfig:
+        """Tracking config for the dedicated BLE TrackManager.
+
+        Mirrors ``tracking_config`` but with looser association gating so coarse,
+        jittery RSSI positions don't spawn a churn of short-lived tracks.
+        """
+        cfg = self.tracking_config()
+        cfg.association_distance_m = self.ble_track_association_distance_m
+        cfg.association_max_gate_m = self.ble_track_max_gate_m
+        return cfg
 
     def classifier_config(self) -> ClassifierConfig:
         return ClassifierConfig(

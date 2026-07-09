@@ -88,6 +88,7 @@ from minimappr.core.audio_buffer import MultiSensorBuffer
 from minimappr.core.auth import extract_federation_token
 from minimappr.core.ble_multilateration import estimate_ble_device_position
 from minimappr.core.ble_observations import BleObservationStore
+from minimappr.core.ble_tracking import BleTracker
 from minimappr.core.bit_report import BITReportEvaluator
 from minimappr.core.cluster_registry import ClusterRegistry
 from minimappr.core.effectors.registry import EffectorManager
@@ -340,6 +341,36 @@ async def _cleanup_loop(app: FastAPI) -> None:
         await asyncio.sleep(settings.cleanup_interval_seconds)
 
 
+async def _ble_tracking_loop(app: FastAPI) -> None:
+    """Periodically trilaterate BLE observations into first-class tracks.
+
+    Runs in whichever process owns the BLE observation store + tracks storage
+    (both the combined runtime and the API-only role). Direct-broadcasts each
+    updated track so WS clients see BLE devices in all deployment modes.
+    """
+    state = app.state
+    settings: Settings = state.settings
+    ble_tracker: BleTracker = state.ble_tracker
+    period_s = max(float(settings.ble_tracking_period_s), 0.1)
+    while True:
+        try:
+            now_ns = time.time_ns()
+            node_positions = await _ble_node_positions(state)
+            await ble_tracker.run_tick(
+                storage=state.storage,
+                observation_store=_ble_observation_store(state),
+                node_positions=node_positions,
+                now_ns=now_ns,
+                live_hub=state.live_hub,
+                coordinate_frame=getattr(state, "coordinate_frame", None),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.exception("BLE tracking tick failed")
+        await asyncio.sleep(period_s)
+
+
 def _apply_site_origin_resolution(state, resolved_site_origin) -> None:
     settings: Settings = state.settings
     _apply_settings_site_origin_resolution(settings, resolved_site_origin)
@@ -364,6 +395,7 @@ def _clear_bound_runtime_state(state) -> None:
         "registry",
         "cluster_registry",
         "ble_observation_store",
+        "ble_tracker",
         "audio_buffer",
         "localizer",
         "classifier",
@@ -1217,6 +1249,7 @@ async def _api_only_lifespan(app: FastAPI, settings: Settings):
         registry=registry,
         cluster_registry=ClusterRegistry(),
         ble_observation_store=BleObservationStore(),
+        ble_tracker=BleTracker(settings.ble_tracking_config()),
         sidecar_state=sidecar_state,
         capture_manager=capture_manager,
         ingest_concurrency=_IngestConcurrencyLimit(
@@ -1231,6 +1264,7 @@ async def _api_only_lifespan(app: FastAPI, settings: Settings):
         task_handles = await _start_api_only_runtime_services(
             app,
             api_live_db_poll_loop=_api_live_db_poll_loop,
+            ble_tracking_loop=_ble_tracking_loop,
             environment_provider=common_live_runtime_services.environment_provider,
             federation=federation,
             storage=storage,
@@ -1328,6 +1362,7 @@ async def lifespan(app: FastAPI):
         registry=combined_runtime_core_services.registry,
         cluster_registry=combined_runtime_core_services.cluster_registry,
         ble_observation_store=BleObservationStore(),
+        ble_tracker=BleTracker(settings.ble_tracking_config()),
         audio_buffer=combined_runtime_core_services.audio_buffer,
         localizer=combined_runtime_core_services.localizer,
         classifier=combined_runtime_core_services.classifier,
@@ -1359,6 +1394,7 @@ async def lifespan(app: FastAPI):
         task_handles = await _start_combined_runtime_background_tasks(
             app,
             cleanup_loop=_cleanup_loop,
+            ble_tracking_loop=_ble_tracking_loop,
             environment_provider=common_live_runtime_services.environment_provider,
             federation=federation,
             fusion_node=combined_runtime_core_services.fusion_node,

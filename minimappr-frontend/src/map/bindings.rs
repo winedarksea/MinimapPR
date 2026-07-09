@@ -59,6 +59,7 @@ extern "C" {
         tqi: f64,
         status: &str,
         last_update_ns: f64,
+        track_kind: &str,
     );
 
     #[wasm_bindgen(js_namespace = ["globalThis", "mapInterop"], js_name = "setTrackVelocityVector")]

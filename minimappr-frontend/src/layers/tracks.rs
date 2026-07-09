@@ -46,6 +46,7 @@ pub fn mount(state: &AppState) {
                     let tqi = t.tqi.unwrap_or(0.0);
                     let status = t.status.as_deref().unwrap_or("active");
                     let last_update_ns = t.last_update_ns.unwrap_or(i64::MIN) as f64;
+                    let track_kind = t.track_kind.as_deref().unwrap_or("acoustic");
                     set_track_marker(
                         &t.track_id,
                         geo.lat,
@@ -54,6 +55,7 @@ pub fn mount(state: &AppState) {
                         tqi,
                         status,
                         last_update_ns,
+                        track_kind,
                     );
                     if let Some((dlat, dlon)) = t
                         .velocity_mps

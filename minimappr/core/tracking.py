@@ -44,8 +44,12 @@ class TrackManager:
         *,
         associator: TrackAssociator | None = None,
         track_filter: TrackFilter | None = None,
+        default_track_kind: str = "acoustic",
+        track_id_prefix: str = "trk-",
     ) -> None:
         cfg = settings.tracking_config() if isinstance(settings, Settings) else settings
+        self._default_track_kind = default_track_kind
+        self._track_id_prefix = track_id_prefix
         self._tracks: dict[str, TrackState] = {}
         self._id_counter = itertools.count(1)
         self._multi_node_association_count = 0
@@ -175,7 +179,7 @@ class TrackManager:
 
             if matched_id is None:
                 # --- New track ---
-                track_id = f"trk-{next(self._id_counter):05d}"
+                track_id = f"{self._track_id_prefix}{next(self._id_counter):05d}"
                 p_var = self._initial_position_variance
                 created = TrackState(
                     id=track_id,
@@ -201,6 +205,7 @@ class TrackManager:
                     status=TrackStatus.TENTATIVE.value,
                     tqi=self._compute_tqi(confidence, 1, 0.0, sensor_count, contributor_count=1),
                     capability_tier=capability_tier,
+                    track_kind=self._default_track_kind,
                     contributor_node_ids=[source_node_id] if source_node_id else [],
                 )
                 self._tracks[track_id] = created

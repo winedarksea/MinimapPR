@@ -43,6 +43,14 @@ def _json_loads(raw: str | None, fallback: Any) -> Any:
         return fallback
 
 
+def _row_value(row: aiosqlite.Row, key: str, default: Any = None) -> Any:
+    """Read a column from a sqlite Row, tolerating rows that predate the column."""
+    try:
+        return row[key]
+    except (IndexError, KeyError):
+        return default
+
+
 def _slugify(text: str) -> str:
     cleaned = re.sub(r"[^a-z0-9]+", "-", text.strip().lower())
     cleaned = cleaned.strip("-")
@@ -542,6 +550,7 @@ class Storage:
                 "label_category": "TEXT NOT NULL DEFAULT 'unknown'",
                 "iff_category": "TEXT NOT NULL DEFAULT 'unknown'",
                 "capability_tier": "TEXT NOT NULL DEFAULT 'full_3d'",
+                "track_kind": "TEXT NOT NULL DEFAULT 'acoustic'",
             },
         )
         await self._ensure_columns(
@@ -1692,9 +1701,9 @@ class Storage:
                     x, y, z, lat, lon, alt, covariance_json,
                     vx, vy, vz,
                     label_id, label, label_category, iff_category,
-                    confidence, update_count, status, capability_tier, tqi
+                    confidence, update_count, status, capability_tier, tqi, track_kind
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     last_seen_ns=excluded.last_seen_ns,
                     x=excluded.x,
@@ -1715,7 +1724,8 @@ class Storage:
                     update_count=excluded.update_count,
                     status=excluded.status,
                     capability_tier=excluded.capability_tier,
-                    tqi=excluded.tqi
+                    tqi=excluded.tqi,
+                    track_kind=excluded.track_kind
                 """,
                 (
                     track.id,
@@ -1742,6 +1752,7 @@ class Storage:
                     track.status,
                     track.capability_tier,
                     track.tqi,
+                    track.track_kind,
                 ),
             )
             await self._commit_if_needed(db)
@@ -3746,6 +3757,7 @@ class Storage:
             status=row["status"],
             capability_tier=row["capability_tier"] or "full_3d",
             tqi=float(row["tqi"]),
+            track_kind=(_row_value(row, "track_kind") or "acoustic"),
         )
 
     @staticmethod

@@ -103,6 +103,9 @@ pub struct Track {
     #[serde(default)]
     pub contributors: Vec<ContributorSummary>,
     pub status: Option<String>,
+    /// Sensing modality provenance: "acoustic" (default) or "ble".
+    #[serde(default)]
+    pub track_kind: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

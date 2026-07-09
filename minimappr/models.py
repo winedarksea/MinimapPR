@@ -644,6 +644,10 @@ class TrackState(BaseModel):
     status: str = TrackStatus.TENTATIVE.value
     tqi: float = Field(default=0.0, ge=0.0, description="Track Quality Index")
     capability_tier: Literal["full_3d", "2d", "classification_only", "alerting_only"] = "full_3d"
+    # Provenance of the sensing modality that produced this track. "acoustic" is
+    # the default so existing tracks and serialization are unchanged; "ble"
+    # marks tracks produced by the BLE RSSI multilateration loop.
+    track_kind: Literal["acoustic", "ble"] = "acoustic"
     contributor_count: int = Field(default=0, ge=0)
     contributors: list[ContributorSummary] = Field(default_factory=list)
     # Phase 3: distinct source node IDs that have contributed detections to this

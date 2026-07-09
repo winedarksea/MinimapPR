@@ -125,7 +125,7 @@ enum class AudioDataPinBias : uint8_t {
 #endif
 
 #ifndef MMPR_ENABLE_BLE_SCAN
-#define MMPR_ENABLE_BLE_SCAN 0
+#define MMPR_ENABLE_BLE_SCAN 1
 #endif
 
 // BLE scan timing. Units are 0.625 ms each. The scanner is PASSIVE
@@ -373,6 +373,24 @@ static constexpr float kProvisionedWorldHeadingDeg = 0.0f;
 //   TDM4 (slot 3) = MK3 = mic 2   (DATA2-Right, i2s2)
 static constexpr uint8_t kSlotToPhysicalMic[4] = {1, 0, 3, 2};
 
+#if MMPR_ENABLE_BLE_SCAN
+static constexpr const char* kTdmCapabilities[] = {
+    "audio",
+    "array_localization",
+    "gps_optional",
+    "temperature",
+    "humidity",
+    "ble_rssi",
+};
+
+static constexpr const char* kI2sMonoCapabilities[] = {
+    "audio",
+    "gps_optional",
+    "temperature",
+    "humidity",
+    "ble_rssi",
+};
+#else
 static constexpr const char* kTdmCapabilities[] = {
     "audio",
     "array_localization",
@@ -387,6 +405,7 @@ static constexpr const char* kI2sMonoCapabilities[] = {
     "temperature",
     "humidity",
 };
+#endif
 
 static constexpr const char* const* kCapabilities = kUseTdmAudio ? kTdmCapabilities : kI2sMonoCapabilities;
 static constexpr size_t kCapabilityCount = kUseTdmAudio

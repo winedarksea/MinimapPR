@@ -83,11 +83,33 @@ class _CombinedRuntimeTaskHandles:
     site_origin_reconcile_task: asyncio.Task | None = None
     ingest_spool_tasks: list[asyncio.Task] = field(default_factory=list)
     ingest_stream_consumer_watchdog_task: asyncio.Task | None = None
+    ble_tracking_task: asyncio.Task | None = None
 
 
 @dataclass
 class _ApiOnlyRuntimeTaskHandles:
     live_db_poll_task: asyncio.Task | None = None
+    ble_tracking_task: asyncio.Task | None = None
+
+
+def _maybe_start_ble_tracking_task(app, *, ble_tracking_loop) -> asyncio.Task | None:
+    """Start the BLE tracking loop when enabled and a tracker is bound."""
+    settings = getattr(app.state, "settings", None)
+    if settings is None or not getattr(settings, "ble_tracking_enabled", False):
+        return None
+    if getattr(app.state, "ble_tracker", None) is None:
+        return None
+    task = asyncio.create_task(ble_tracking_loop(app))
+    app.state.ble_tracking_task = task
+    return task
+
+
+async def _cancel_task(task: asyncio.Task | None, *, timeout_seconds: float) -> None:
+    if task is None:
+        return
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+        await asyncio.wait_for(task, timeout=timeout_seconds)
 
 
 def _build_common_live_runtime_services(
@@ -362,6 +384,7 @@ async def _start_api_only_runtime_services(
     app,
     *,
     api_live_db_poll_loop,
+    ble_tracking_loop,
     environment_provider: LiveEnvironmentProvider,
     federation: FederationCoordinator,
     storage: Storage,
@@ -370,6 +393,9 @@ async def _start_api_only_runtime_services(
     environment_provider.bootstrap(await storage.list_latest_environment_per_node(limit=1024))
     await federation.start()
     task_handles.live_db_poll_task = asyncio.create_task(api_live_db_poll_loop(app))
+    task_handles.ble_tracking_task = _maybe_start_ble_tracking_task(
+        app, ble_tracking_loop=ble_tracking_loop
+    )
     return task_handles
 
 
@@ -382,6 +408,7 @@ async def _stop_api_only_runtime_services(
     shutdown_timeout_seconds: float,
     storage: Storage,
 ) -> None:
+    await _cancel_task(task_handles.ble_tracking_task, timeout_seconds=shutdown_timeout_seconds)
     if task_handles.live_db_poll_task is not None:
         task_handles.live_db_poll_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
@@ -396,6 +423,7 @@ async def _start_combined_runtime_background_tasks(
     app,
     *,
     cleanup_loop,
+    ble_tracking_loop,
     environment_provider: LiveEnvironmentProvider,
     federation: FederationCoordinator,
     fusion_node: FusionNode,
@@ -415,6 +443,9 @@ async def _start_combined_runtime_background_tasks(
 
     task_handles.cleanup_task = asyncio.create_task(cleanup_loop(app))
     app.state.cleanup_task = task_handles.cleanup_task
+    task_handles.ble_tracking_task = _maybe_start_ble_tracking_task(
+        app, ble_tracking_loop=ble_tracking_loop
+    )
     if ingest_stream_consumer_enabled:
         task_handles.ingest_stream_consumer_watchdog_task = asyncio.create_task(
             maintain_ingest_stream_consumer(app)
@@ -446,6 +477,7 @@ async def _stop_combined_runtime_background_tasks(
     clear_transient_ingest_runtime_state,
     shutdown_timeout_seconds: float,
 ) -> None:
+    await _cancel_task(task_handles.ble_tracking_task, timeout_seconds=shutdown_timeout_seconds)
     if task_handles.site_origin_reconcile_task is not None:
         task_handles.site_origin_reconcile_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):

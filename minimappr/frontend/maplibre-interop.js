@@ -449,13 +449,22 @@
       "</svg>", 34, 34));
   }
 
-  function makeTrackElement(color, tqi, opacity) {
+  function makeTrackElement(color, tqi, opacity, trackKind) {
     const c = palette();
     const size = 34 + Math.round((tqi || 0) * 6);
+    // Bluetooth glyph overlaid in the corner for BLE-sourced tracks. The
+    // diamond marker (status color/size) is otherwise unchanged.
+    const bleBadge = trackKind === "ble"
+      ? '<g transform="translate(23.5 3) scale(0.42)">' +
+          '<circle cx="9" cy="9" r="9" fill="' + c.surface + '" stroke="' + color + '" stroke-width="1.6"></circle>' +
+          '<path d="M9 3.4v11.2l3.4-3.4-6-6M9 14.6V3.4l-3.4 3.4 6 6" fill="none" stroke="' + color + '" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"></path>' +
+        '</g>'
+      : "";
     return markerElement("mmpr-map-icon mmpr-map-icon-track", divSvg(
       '<svg viewBox="0 0 34 34" width="' + size + '" height="' + size + '" aria-hidden="true" style="opacity:' + (opacity ?? 1) + '">' +
         '<polygon points="17,4 30,17 17,30 4,17" fill="' + c.surface + '" stroke="' + color + '" stroke-width="2.2"></polygon>' +
         '<circle cx="17" cy="17" r="4.4" fill="' + color + '"></circle>' +
+        bleBadge +
       "</svg>", size, size));
   }
 
@@ -536,10 +545,10 @@
 
   function removeNodeMarker(nodeId) { removeMarker("node:" + nodeId); }
 
-  function setTrackMarker(trackId, lat, lon, label, tqi, status, lastUpdateNs) {
+  function setTrackMarker(trackId, lat, lon, label, tqi, status, lastUpdateNs, trackKind) {
     const c = palette();
     const color = trackColorForStatus(status, c);
-    setMarker("track:" + trackId, new maplibregl.Marker({ element: makeTrackElement(color, tqi, trackOpacityForStatus(status)) }).setLngLat([lon, lat]), "track", trackId, lastUpdateNs, status);
+    setMarker("track:" + trackId, new maplibregl.Marker({ element: makeTrackElement(color, tqi, trackOpacityForStatus(status), trackKind) }).setLngLat([lon, lat]), "track", trackId, lastUpdateNs, status);
     if (_trackRemoveTimers[trackId]) clearTimeout(_trackRemoveTimers[trackId]);
     if (status === "dropped") {
       _trackRemoveTimers[trackId] = setTimeout(function () { removeTrack(trackId); }, DROPPED_TRACK_LINGER_MS);
