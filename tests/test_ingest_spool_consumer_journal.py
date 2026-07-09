@@ -210,7 +210,7 @@ def _write_journal_item(
         "orientation_version": None,
         "calibration_version": None,
         "retention_hint": "ephemeral",
-        "payload_codec": "binary_mmb2_pcm16le" if body.startswith(b"MMB2") else "binary_mmb1_pcm16le",
+        "payload_codec": "binary_mmb3_pcm16le" if body.startswith(b"MMB3") else "binary_mmb2_pcm16le",
         "integrity_hash": payload_integrity_hash,
         "endpoint": endpoint,
         "content_type": "application/octet-stream",

@@ -11,7 +11,7 @@ pub struct EnvSample {
 }
 
 /// Per-node ring buffer of recent environmental readings, used for sound-speed
-/// interpolation when MMB1 flag-byte data is absent.
+/// interpolation when binary payload environment data is absent.
 #[derive(Clone, Debug, Default)]
 pub struct EnvironmentCache {
     inner: Arc<RwLock<HashMap<String, Vec<EnvSample>>>>,

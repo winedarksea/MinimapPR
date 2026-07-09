@@ -212,7 +212,6 @@ impl<'a> BinaryReader<'a> {
 
 fn read_binary_ingest_version(reader: &mut BinaryReader<'_>) -> Result<u8, String> {
     let expected_version = match reader.read(4)? {
-        magic if magic == b"MMB1" => 1,
         magic if magic == b"MMB2" => 2,
         magic if magic == b"MMB3" => 3,
         _ => return Err("invalid binary ingest magic".to_string()),
@@ -240,17 +239,12 @@ pub fn parse_capture_envelope(
 /// for audio processing — this is best-effort metadata extraction only).
 pub fn extract_binary_node_json(raw_bytes: &[u8]) -> Option<serde_json::Value> {
     let mut reader = BinaryReader::new(raw_bytes);
-    let version = read_binary_ingest_version(&mut reader).ok()?;
+    let _version = read_binary_ingest_version(&mut reader).ok()?;
     reader.u8().ok()?; // sort_by_toa
     reader.u16().ok()?; // frame_count
 
     let node_id = reader.string().ok()?;
     let node_type_code = reader.u8().ok()?;
-    let legacy_position_m = if version == 1 {
-        Some((reader.f32().ok()?, reader.f32().ok()?, reader.f32().ok()?))
-    } else {
-        None
-    };
     let has_geo_position = reader.u8().ok()? != 0;
     let position_geo: Option<(f32, f32, f32)> = if has_geo_position {
         let lat = reader.f32().ok()?;
@@ -336,9 +330,6 @@ pub fn extract_binary_node_json(raw_bytes: &[u8]) -> Option<serde_json::Value> {
         "capabilities": capabilities,
         "metadata": serde_json::Value::Object(metadata_map),
     });
-    if let Some((position_x, position_y, position_z)) = legacy_position_m {
-        node_json["position_m"] = serde_json::json!([position_x, position_y, position_z]);
-    }
     if let Some((lat, lon, alt)) = position_geo {
         node_json["position_geo"] = serde_json::json!({
             "lat": lat,
@@ -360,21 +351,13 @@ pub fn extract_binary_first_frame_timing_json(raw_bytes: &[u8]) -> Option<serde_
     if frame_count == 0 {
         return None;
     }
-    skip_binary_node_header_after_frame_count(&mut reader, version).ok()?;
+    skip_binary_node_header_after_frame_count(&mut reader).ok()?;
     read_binary_first_frame_timing_json(&mut reader).ok()
 }
 
-fn skip_binary_node_header_after_frame_count(
-    reader: &mut BinaryReader<'_>,
-    version: u8,
-) -> Result<(), String> {
+fn skip_binary_node_header_after_frame_count(reader: &mut BinaryReader<'_>) -> Result<(), String> {
     let _node_id = reader.string()?;
     let _node_type_code = reader.u8()?;
-    if version == 1 {
-        let _position_x = reader.f32()?;
-        let _position_y = reader.f32()?;
-        let _position_z = reader.f32()?;
-    }
     let has_geo_position = reader.u8()? != 0;
     if has_geo_position {
         let _lat = reader.f32()?;
@@ -630,11 +613,6 @@ fn parse_binary_capture_envelope(raw_payload: &[u8]) -> Result<CaptureEnvelope, 
 
     let node_id = reader.string()?;
     let _node_type_code = reader.u8()?;
-    if version == 1 {
-        let _position_x = reader.f32()?;
-        let _position_y = reader.f32()?;
-        let _position_z = reader.f32()?;
-    }
     let has_geo_position = reader.u8()? != 0;
     if has_geo_position {
         let _lat = reader.f32()?;
@@ -1068,14 +1046,9 @@ mod tests {
         payload.extend_from_slice(&value.to_le_bytes());
     }
 
-    fn push_binary_node_header(payload: &mut Vec<u8>, version: u8) {
+    fn push_binary_node_header(payload: &mut Vec<u8>) {
         push_string(payload, "sirith-tetra-1a15");
         payload.push(1); // sirith_tetra
-        if version == 1 {
-            push_f32(payload, 1.0);
-            push_f32(payload, 2.0);
-            push_f32(payload, 3.0);
-        }
         payload.push(1); // has_geo_position
         push_f32(payload, 44.987);
         push_f32(payload, -93.258);
@@ -1184,7 +1157,6 @@ mod tests {
     fn binary_header_only_payload(version: u8) -> Vec<u8> {
         let mut payload = Vec::new();
         payload.extend_from_slice(match version {
-            1 => b"MMB1",
             2 => b"MMB2",
             3 => b"MMB3",
             _ => panic!("unsupported test version"),
@@ -1192,7 +1164,7 @@ mod tests {
         payload.push(version);
         payload.push(1); // sort_by_toa
         payload.extend_from_slice(&1_u16.to_le_bytes());
-        push_binary_node_header(&mut payload, version);
+        push_binary_node_header(&mut payload);
         payload
     }
 
@@ -1270,12 +1242,12 @@ mod tests {
 
     #[test]
     fn binary_node_extraction_preserves_python_metadata_shape_for_gps_status() {
-        let node = extract_binary_node_json(&binary_header_only_payload(1))
-            .expect("MMB1 node header should extract");
+        let node = extract_binary_node_json(&binary_header_only_payload(2))
+            .expect("MMB2 node header should extract");
 
         assert_eq!(node["id"], "sirith-tetra-1a15");
         assert_eq!(node["node_type"], "sirith_tetra");
-        assert_eq!(node["position_m"][0].as_f64().unwrap() as f32, 1.0);
+        assert!(node.get("position_m").is_none());
         assert_eq!(node["metadata"]["hardware"], "sirith-test-hardware");
         assert_eq!(node["metadata"]["firmware"], "sirith-test-firmware");
         assert_eq!(node["metadata"]["boot_count"], 7);
@@ -1286,7 +1258,7 @@ mod tests {
     }
 
     #[test]
-    fn binary_mmb2_node_extraction_omits_legacy_position_m_but_preserves_geo() {
+    fn binary_mmb2_node_extraction_omits_position_m_but_preserves_geo() {
         let node = extract_binary_node_json(&binary_header_only_payload(2))
             .expect("MMB2 node header should extract");
 

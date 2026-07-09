@@ -80,7 +80,6 @@ impl<'a> BinaryReader<'a> {
 
 fn read_binary_ingest_version(reader: &mut BinaryReader<'_>) -> BoxedResult<u8> {
     let expected_version = match reader.read(4)? {
-        magic if magic == b"MMB1" => 1,
         magic if magic == b"MMB2" => 2,
         magic if magic == b"MMB3" => 3,
         _ => return Err("invalid binary ingest magic".into()),
@@ -93,10 +92,7 @@ fn read_binary_ingest_version(reader: &mut BinaryReader<'_>) -> BoxedResult<u8> 
 }
 
 pub fn decode_audio_payload(raw_payload: &[u8]) -> BoxedResult<DecodedAudioPayload> {
-    if raw_payload.starts_with(b"MMB1")
-        || raw_payload.starts_with(b"MMB2")
-        || raw_payload.starts_with(b"MMB3")
-    {
+    if raw_payload.starts_with(b"MMB2") || raw_payload.starts_with(b"MMB3") {
         return decode_binary_audio(raw_payload);
     }
     decode_store_forward_audio(raw_payload)
@@ -104,7 +100,7 @@ pub fn decode_audio_payload(raw_payload: &[u8]) -> BoxedResult<DecodedAudioPaylo
 
 fn decode_binary_audio(raw_payload: &[u8]) -> BoxedResult<DecodedAudioPayload> {
     let mut reader = BinaryReader::new(raw_payload);
-    let version = read_binary_ingest_version(&mut reader)?;
+    let _version = read_binary_ingest_version(&mut reader)?;
 
     let _sort_by_toa = reader.u8()?;
     let frame_count = reader.u16()?;
@@ -112,7 +108,7 @@ fn decode_binary_audio(raw_payload: &[u8]) -> BoxedResult<DecodedAudioPayload> {
         return Err("binary ingest frame count must be between 1 and 2048".into());
     }
 
-    skip_binary_node(&mut reader, version)?;
+    skip_binary_node(&mut reader)?;
 
     let mut channels: Vec<Vec<f32>> = Vec::new();
     let mut sample_rate_hz: Option<u32> = None;
@@ -159,14 +155,9 @@ fn decode_binary_audio(raw_payload: &[u8]) -> BoxedResult<DecodedAudioPayload> {
     })
 }
 
-fn skip_binary_node(reader: &mut BinaryReader<'_>, version: u8) -> BoxedResult<()> {
+fn skip_binary_node(reader: &mut BinaryReader<'_>) -> BoxedResult<()> {
     let _node_id = reader.string()?;
     let _node_type_code = reader.u8()?;
-    if version == 1 {
-        let _position_x = reader.f32()?;
-        let _position_y = reader.f32()?;
-        let _position_z = reader.f32()?;
-    }
     if reader.u8()? != 0 {
         let _lat = reader.f32()?;
         let _lon = reader.f32()?;
@@ -520,14 +511,9 @@ mod tests {
         payload.extend_from_slice(&value.to_le_bytes());
     }
 
-    fn push_binary_node(payload: &mut Vec<u8>, version: u8) {
+    fn push_binary_node(payload: &mut Vec<u8>) {
         push_string(payload, "sirith-tetra-1a15");
         payload.push(1); // sirith_tetra
-        if version == 1 {
-            push_f32(payload, 1.0);
-            push_f32(payload, 2.0);
-            push_f32(payload, 3.0);
-        }
         payload.push(1); // has_geo_position
         push_f32(payload, 44.987);
         push_f32(payload, -93.258);
@@ -635,7 +621,6 @@ mod tests {
     fn binary_payload(version: u8) -> Vec<u8> {
         let mut payload = Vec::new();
         payload.extend_from_slice(match version {
-            1 => b"MMB1",
             2 => b"MMB2",
             3 => b"MMB3",
             _ => panic!("unsupported test version"),
@@ -643,7 +628,7 @@ mod tests {
         payload.push(version);
         payload.push(0); // sort_by_toa
         payload.extend_from_slice(&1_u16.to_le_bytes());
-        push_binary_node(&mut payload, version);
+        push_binary_node(&mut payload);
         push_binary_frame(&mut payload, version);
         payload
     }
