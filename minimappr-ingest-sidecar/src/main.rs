@@ -1775,13 +1775,11 @@ fn read_wav_channels_f32(path: &Path, expected_channels: usize) -> Result<[Vec<f
     }
 
     let mut channels: [Vec<f32>; 4] = std::array::from_fn(|_| Vec::new());
-    let mut sample_index = 0usize;
-    for sample in reader.into_samples::<i16>() {
+    for (sample_index, sample) in reader.into_samples::<i16>().enumerate() {
         let value = sample.map_err(|error| format!("failed reading {}: {error}", path.display()))?
             as f32
             / 32767.0;
         channels[sample_index % expected_channels].push(value);
-        sample_index += 1;
     }
     Ok(channels)
 }

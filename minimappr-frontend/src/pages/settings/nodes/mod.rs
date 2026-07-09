@@ -174,11 +174,12 @@ fn NodeRow(node: NodeStatus, nodes: RwSignal<Vec<NodeStatus>>) -> impl IntoView 
             <td>
                 {move || if confirming.get() {
                     let id = delete_id.clone();
+                    let nodes_for_delete = nodes;
                     let on_delete = move |_| {
                         let id = id.clone();
                         spawn_local(async move {
                             if delete_node(&id).await.is_ok() {
-                                nodes.update(|items| items.retain(|node| node.node_id != id));
+                                nodes_for_delete.update(|items| items.retain(|node| node.node_id != id));
                             }
                         });
                     };
