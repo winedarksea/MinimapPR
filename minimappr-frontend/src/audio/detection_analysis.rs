@@ -22,7 +22,7 @@ struct LabelHit {
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 struct LabelSuggestion {
     #[serde(default)]
-    label: String,
+    name: String,
     #[serde(default)]
     category: Option<String>,
     #[serde(default)]
@@ -33,6 +33,17 @@ struct LabelSuggestion {
 struct LabelSuggestionResponse {
     #[serde(default)]
     labels: Vec<LabelSuggestion>,
+}
+
+fn suggested_category_for_label(suggestions: &[LabelSuggestion], label: &str) -> Option<String> {
+    suggestions
+        .iter()
+        .find(|suggestion| suggestion.name == label)
+        .and_then(|suggestion| suggestion.category.clone())
+}
+
+fn training_kind_for_review(review_state: &str, selected_kind: &str) -> Option<String> {
+    (review_state == "confirmed" && selected_kind != "none").then(|| selected_kind.to_string())
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -91,6 +102,8 @@ struct Detection {
     review_updated_ns: Option<i64>,
     #[serde(default)]
     promote_to_training: bool,
+    #[serde(default)]
+    training_example_kind: Option<String>,
 }
 
 fn fmt_ts_ns(ns: i64) -> String {
@@ -496,7 +509,7 @@ fn DetectionReviewPanel(
     let label_value = RwSignal::new(String::new());
     let category_value = RwSignal::new(String::new());
     let notes_value = RwSignal::new(String::new());
-    let promote_to_training = RwSignal::new(false);
+    let training_example_kind = RwSignal::new("none".to_string());
     let suggestions = RwSignal::new(Vec::<LabelSuggestion>::new());
     let pending = RwSignal::new(false);
     let review_message = RwSignal::new(None::<String>);
@@ -520,16 +533,18 @@ fn DetectionReviewPanel(
                     .unwrap_or_else(|| "unknown".to_string()),
             );
             notes_value.set(d.review_notes.clone().unwrap_or_default());
-            promote_to_training.set(d.promote_to_training);
+            training_example_kind.set(if d.promote_to_training {
+                d.training_example_kind
+                    .unwrap_or_else(|| "positive".to_string())
+            } else {
+                "none".to_string()
+            });
         }
     });
 
     Effect::new(move |_| {
         spawn_local(async move {
-            match Request::get("/api/v1/analytics/labels?window=365d")
-                .send()
-                .await
-            {
+            match Request::get("/api/v1/labels").send().await {
                 Ok(resp) if resp.ok() => match resp.json::<LabelSuggestionResponse>().await {
                     Ok(payload) => suggestions.set(payload.labels),
                     Err(error) => log::warn!("label suggestions parse failed: {error}"),
@@ -549,14 +564,20 @@ fn DetectionReviewPanel(
         let label = form_value(&label_input_id_for_submit).trim().to_string();
         let category = form_value(&category_input_id_for_submit).trim().to_string();
         let notes = form_value(&notes_input_id_for_submit).trim().to_string();
-        let promote = promote_to_training.get_untracked();
+        let selected_training_kind = training_example_kind.get_untracked();
+        let selected_training_kind =
+            training_kind_for_review(review_state, &selected_training_kind);
+        let promote = selected_training_kind.is_some();
         let detection = detection;
 
         let mut payload = serde_json::json!({
             "review_state": review_state,
             "review_notes": if notes.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(notes) },
-            "promote_to_training": promote && review_state == "confirmed",
+            "promote_to_training": promote,
         });
+        if let Some(training_kind) = selected_training_kind {
+            payload["training_example_kind"] = serde_json::Value::String(training_kind);
+        }
         if include_label && !label.is_empty() {
             payload["review_label"] = serde_json::Value::String(label);
             payload["review_label_category"] = serde_json::Value::String(if category.is_empty() {
@@ -578,7 +599,11 @@ fn DetectionReviewPanel(
                 Ok(value) => match serde_json::from_value::<Detection>(value) {
                     Ok(updated) => {
                         detection.set(Some(updated));
-                        review_message.set(Some("Review saved".to_string()));
+                        review_message.set(Some(if promote {
+                            "Review saved; training example stored".to_string()
+                        } else {
+                            "Review saved".to_string()
+                        }));
                     }
                     Err(error) => review_error.set(Some(format!("parse: {error}"))),
                 },
@@ -588,11 +613,11 @@ fn DetectionReviewPanel(
         });
     };
 
-    let confirm_review = {
+    let save_unconfirmed_review = {
         let submit_review = submit_review.clone();
-        move |_| submit_review("confirmed", false)
+        move |_| submit_review("unreviewed", true)
     };
-    let correct_review = {
+    let confirm_review = {
         let submit_review = submit_review.clone();
         move |_| submit_review("confirmed", true)
     };
@@ -618,7 +643,16 @@ fn DetectionReviewPanel(
                         list=datalist_id.clone()
                         type="text"
                         prop:value=move || label_value.get()
-                        on:input=move |event| label_value.set(event_target_value(&event))
+                        on:input=move |event| {
+                            let value = event_target_value(&event);
+                            label_value.set(value.clone());
+                            if let Some(category) = suggested_category_for_label(
+                                &suggestions.get_untracked(),
+                                &value,
+                            ) {
+                                category_value.set(category);
+                            }
+                        }
                     />
                 </label>
                 <label>
@@ -632,7 +666,7 @@ fn DetectionReviewPanel(
                 </label>
                 <datalist id=datalist_id>
                     {move || suggestions.get().into_iter().map(|suggestion| {
-                        let label = suggestion.label;
+                        let label = suggestion.name;
                         let category = suggestion.category.unwrap_or_else(|| "unknown".to_string());
                         let display = match suggestion.count {
                             Some(count) => format!("{category} · {count}"),
@@ -650,28 +684,31 @@ fn DetectionReviewPanel(
                     ></textarea>
                 </label>
                 <label class="review-training-toggle">
-                    <input
-                        type="checkbox"
-                        prop:checked=move || promote_to_training.get()
-                        on:change=move |event| promote_to_training.set(event_target_checked(&event))
-                    />
-                    <span>"Promote confirmed review to training/export set"</span>
+                    <span>"Training dataset"</span>
+                    <select
+                        prop:value=move || training_example_kind.get()
+                        on:change=move |event| training_example_kind.set(event_target_value(&event))
+                    >
+                        <option value="none">"Do not include"</option>
+                        <option value="positive">"Positive example"</option>
+                        <option value="negative">"Negative / background example"</option>
+                    </select>
                 </label>
             </div>
             <div class="detection-review-actions">
                 <button
                     class="btn-sm"
                     disabled=move || pending.get()
-                    on:click=confirm_review
+                    on:click=save_unconfirmed_review
                 >
-                    "Confirm"
+                    "Save unconfirmed"
                 </button>
                 <button
                     class="btn-sm btn-primary"
                     disabled=move || pending.get()
-                    on:click=correct_review
+                    on:click=confirm_review
                 >
-                    "Correct label"
+                    "Confirm"
                 </button>
                 <button
                     class="btn-sm btn-danger"
@@ -688,5 +725,42 @@ fn DetectionReviewPanel(
                 <span class="daily-error">{message}</span>
             })}
         </aside>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{suggested_category_for_label, training_kind_for_review, LabelSuggestion};
+
+    #[test]
+    fn suggestion_selection_autofills_category_without_restricting_free_text() {
+        let suggestions = vec![LabelSuggestion {
+            name: "ambient".to_string(),
+            category: Some("background".to_string()),
+            count: None,
+        }];
+
+        assert_eq!(
+            suggested_category_for_label(&suggestions, "ambient"),
+            Some("background".to_string())
+        );
+        assert_eq!(
+            suggested_category_for_label(&suggestions, "custom label"),
+            None
+        );
+    }
+
+    #[test]
+    fn only_confirmed_reviews_can_create_training_examples() {
+        assert_eq!(
+            training_kind_for_review("confirmed", "positive"),
+            Some("positive".to_string())
+        );
+        assert_eq!(
+            training_kind_for_review("confirmed", "negative"),
+            Some("negative".to_string())
+        );
+        assert_eq!(training_kind_for_review("unreviewed", "positive"), None);
+        assert_eq!(training_kind_for_review("confirmed", "none"), None);
     }
 }

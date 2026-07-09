@@ -150,9 +150,15 @@ from minimappr.models import (
     StoreForwardIngestRequest,
     StoreForwardIngestResponse,
     TrackState,
+    TrainingExampleKind,
     Vec3,
     ZoneOccupancyState,
     ZoneSpec,
+)
+from minimappr.training_dataset import (
+    TrainingDatasetError,
+    delete_training_example_files,
+    materialize_training_example,
 )
 from minimappr.storage.db import Storage
 from minimappr.utils.audio import mono_mix, read_wav_mono
@@ -3857,6 +3863,23 @@ async def get_analytics_daily(
     }
 
 
+@app.get("/api/v1/labels")
+async def list_known_labels(request: Request) -> dict:
+    """Return every classifier- or operator-known label for editable UI suggestions."""
+    state = _require_state(request)
+    labels = await state.storage.list_labels()
+    return {
+        "labels": [
+            {
+                "name": row["name"],
+                "category": row.get("category") or "unknown",
+                "source": row.get("source"),
+            }
+            for row in labels
+        ]
+    }
+
+
 @app.get("/api/v1/analytics/labels")
 async def get_analytics_labels(
     request: Request,
@@ -4368,6 +4391,7 @@ async def update_detection_review(
     detection_label_category = detection.get("label_category") or "unknown"
     review_notes = detection.get("review_notes")
     promote_to_training = bool(detection.get("promote_to_training") or False)
+    training_example_kind = detection.get("training_example_kind")
 
     if "review_state" in fields_set:
         review_state = (
@@ -4385,6 +4409,7 @@ async def update_detection_review(
                 review_label_category = None
             if "promote_to_training" not in fields_set:
                 promote_to_training = False
+                training_example_kind = None
         if review_state == DetectionReviewState.UNREVIEWED.value:
             if "review_notes" not in fields_set:
                 review_notes = None
@@ -4409,11 +4434,20 @@ async def update_detection_review(
 
     if "promote_to_training" in fields_set:
         promote_to_training = bool(payload.promote_to_training) if payload.promote_to_training is not None else False
+        if not promote_to_training:
+            training_example_kind = None
+
+    if "training_example_kind" in fields_set:
+        training_example_kind = (
+            payload.training_example_kind.value if payload.training_example_kind is not None else None
+        )
 
     if review_state == DetectionReviewState.REJECTED.value and review_label is not None:
         raise HTTPException(status_code=400, detail="Rejected detections cannot carry a review label")
     if promote_to_training and review_state != DetectionReviewState.CONFIRMED.value:
         raise HTTPException(status_code=400, detail="Training promotion requires confirmed review state")
+    if promote_to_training:
+        training_example_kind = training_example_kind or TrainingExampleKind.POSITIVE.value
 
     if review_label is not None:
         review_label_category = review_label_category or detection_label_category
@@ -4424,6 +4458,62 @@ async def update_detection_review(
             created_ns=now_ns,
         )
 
+    effective_label = review_label or detection.get("label")
+    effective_label_category = review_label_category or detection_label_category
+    materialized_example: tuple[str, str] | None = None
+    if promote_to_training:
+        if not effective_label or not effective_label.strip():
+            raise HTTPException(status_code=400, detail="Training promotion requires an effective label")
+        source_audio = _resolve_snippet_file(
+            detection.get("snippet_path"), state.settings.snippet_dir.resolve()
+        )
+        if source_audio is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Detection audio is unavailable; it may have expired before promotion",
+            )
+        manifest = {
+            "schema_version": 1,
+            "detection_id": detection_id,
+            "audio_filename": f"{detection_id}.wav",
+            "training": {
+                "label": effective_label,
+                "label_category": effective_label_category,
+                "example_kind": training_example_kind,
+                "promoted_at_ns": now_ns,
+            },
+            "review": {
+                "state": review_state,
+                "label": review_label,
+                "label_category": review_label_category,
+                "notes": review_notes,
+            },
+            "detection": {
+                "event_id": detection.get("event_id") or detection_id,
+                "timestamp_ns": detection.get("timestamp_ns"),
+                "source_node_id": detection.get("source_node_id"),
+                "reporting_modality": detection.get("reporting_modality"),
+                "position_geo": detection.get("position_geo"),
+                "position_m": detection.get("position_m"),
+                "label": detection.get("label"),
+                "label_category": detection.get("label_category"),
+                "label_confidence": detection.get("label_confidence"),
+                "classifier_scores": detection.get("classifier_scores"),
+                "feature_summary": detection.get("feature_summary"),
+            },
+        }
+        try:
+            materialized_example = await materialize_training_example(
+                dataset_dir=state.settings.training_dataset_dir,
+                detection_id=detection_id,
+                source_audio_path=source_audio,
+                manifest=manifest,
+            )
+        except TrainingDatasetError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except OSError as error:
+            raise HTTPException(status_code=500, detail=f"Could not save training example: {error}") from error
+
     updated = await state.storage.update_detection_review(
         detection_id=detection_id,
         review_state=review_state,
@@ -4432,10 +4522,29 @@ async def update_detection_review(
         review_label_category=review_label_category,
         review_notes=review_notes,
         promote_to_training=promote_to_training,
+        training_example_kind=training_example_kind,
         review_updated_ns=now_ns,
     )
     if not updated:
         raise HTTPException(status_code=404, detail="Detection not found")
+
+    if materialized_example is not None:
+        audio_path, manifest_path = materialized_example
+        existing_example = await state.storage.get_training_example(detection_id)
+        await state.storage.upsert_training_example(
+            detection_id=detection_id,
+            label=effective_label,
+            label_category=effective_label_category,
+            example_kind=training_example_kind,
+            audio_path=audio_path,
+            manifest_path=manifest_path,
+            created_ns=(existing_example or {}).get("created_ns", now_ns),
+            updated_ns=now_ns,
+        )
+    elif not promote_to_training:
+        removed_example = await state.storage.delete_training_example(detection_id)
+        if removed_example is not None:
+            await delete_training_example_files(state.settings.training_dataset_dir, removed_example)
 
     refreshed = await state.storage.get_detection(detection_id)
     if refreshed is None:

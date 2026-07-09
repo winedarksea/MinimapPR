@@ -262,6 +262,7 @@ class Storage:
                 review_notes TEXT,
                 review_updated_ns INTEGER,
                 promote_to_training INTEGER NOT NULL DEFAULT 0,
+                training_example_kind TEXT,
                 retention_tier TEXT NOT NULL DEFAULT 'short',
                 snippet_path TEXT,
                 snippet_expires_ns INTEGER
@@ -274,6 +275,18 @@ class Storage:
                 ON detections(retention_tier, timestamp_ns DESC);
             CREATE INDEX IF NOT EXISTS idx_detections_reporting_window
                 ON detections(source_node_id, label, report_window_start_ns DESC);
+
+            CREATE TABLE IF NOT EXISTS training_examples (
+                detection_id TEXT PRIMARY KEY REFERENCES detections(id) ON DELETE CASCADE,
+                label TEXT NOT NULL,
+                label_category TEXT NOT NULL,
+                example_kind TEXT NOT NULL CHECK(example_kind IN ('positive', 'negative')),
+                audio_path TEXT NOT NULL,
+                manifest_path TEXT NOT NULL,
+                created_ns INTEGER NOT NULL,
+                updated_ns INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_training_examples_updated ON training_examples(updated_ns DESC);
 
             CREATE TABLE IF NOT EXISTS tracks (
                 id TEXT PRIMARY KEY,
@@ -530,6 +543,7 @@ class Storage:
                 "review_notes": "TEXT",
                 "review_updated_ns": "INTEGER",
                 "promote_to_training": "INTEGER NOT NULL DEFAULT 0",
+                "training_example_kind": "TEXT",
                 "retention_tier": "TEXT NOT NULL DEFAULT 'short'",
             },
         )
@@ -1949,6 +1963,7 @@ class Storage:
         review_label_category: str | None,
         review_notes: str | None,
         promote_to_training: bool,
+        training_example_kind: str | None,
         review_updated_ns: int,
     ) -> bool:
         db = self._require_db()
@@ -1962,7 +1977,8 @@ class Storage:
                     review_label_category = ?,
                     review_notes = ?,
                     review_updated_ns = ?,
-                    promote_to_training = ?
+                    promote_to_training = ?,
+                    training_example_kind = ?
                 WHERE id = ?
                 """,
                 (
@@ -1973,11 +1989,78 @@ class Storage:
                     review_notes,
                     review_updated_ns,
                     1 if promote_to_training else 0,
+                    training_example_kind,
                     detection_id,
                 ),
             )
             await self._commit_if_needed(db)
         return bool(cursor.rowcount)
+
+    async def get_training_example(self, detection_id: str) -> dict | None:
+        db = self._require_db()
+        row = await (
+            await db.execute(
+                "SELECT * FROM training_examples WHERE detection_id = ? LIMIT 1",
+                (detection_id,),
+            )
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    async def upsert_training_example(
+        self,
+        *,
+        detection_id: str,
+        label: str,
+        label_category: str,
+        example_kind: str,
+        audio_path: str,
+        manifest_path: str,
+        created_ns: int,
+        updated_ns: int,
+    ) -> None:
+        db = self._require_db()
+        async with self._write_guard():
+            await db.execute(
+                """
+                INSERT INTO training_examples (
+                    detection_id, label, label_category, example_kind, audio_path,
+                    manifest_path, created_ns, updated_ns
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(detection_id) DO UPDATE SET
+                    label = excluded.label,
+                    label_category = excluded.label_category,
+                    example_kind = excluded.example_kind,
+                    audio_path = excluded.audio_path,
+                    manifest_path = excluded.manifest_path,
+                    updated_ns = excluded.updated_ns
+                """,
+                (
+                    detection_id,
+                    label,
+                    label_category,
+                    example_kind,
+                    audio_path,
+                    manifest_path,
+                    created_ns,
+                    updated_ns,
+                ),
+            )
+            await self._commit_if_needed(db)
+
+    async def delete_training_example(self, detection_id: str) -> dict | None:
+        db = self._require_db()
+        async with self._write_guard():
+            row = await (
+                await db.execute(
+                    "SELECT * FROM training_examples WHERE detection_id = ? LIMIT 1",
+                    (detection_id,),
+                )
+            ).fetchone()
+            if row is None:
+                return None
+            await db.execute("DELETE FROM training_examples WHERE detection_id = ?", (detection_id,))
+            await self._commit_if_needed(db)
+        return dict(row)
 
     async def list_detections(
         self,
@@ -3735,6 +3818,7 @@ class Storage:
             review_notes=row["review_notes"],
             review_updated_ns=row["review_updated_ns"],
             promote_to_training=bool(row["promote_to_training"] or 0),
+            training_example_kind=_row_value(row, "training_example_kind"),
             retention_tier=row["retention_tier"] or "short",
             snippet_path=row["snippet_path"],
         )

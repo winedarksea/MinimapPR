@@ -232,6 +232,7 @@ class ClassifierConfig:
 class StorageConfig:
     db_path: Path
     snippet_dir: Path
+    training_dataset_dir: Path
     # Precedence: retention_policy_path overrides this default per label.
     snippet_retention_seconds: int
     retention_policy_path: Path
@@ -406,6 +407,7 @@ class Settings:
     ingest_backend: str = "python"
     db_path: Path = Path("data/minimappr.db")
     snippet_dir: Path = Path("data/snippets")
+    training_dataset_dir: Path = Path("data/training")
     # Precedence: retention_policy_path overrides this default per label.
     snippet_retention_seconds: int = 3600
     ingest_spool_dir: Path = Path("data/spool")
@@ -1071,6 +1073,7 @@ class Settings:
             ingest_backend=ingest_backend,
             db_path=Path(_env_str("MINIMAPPR_DB_PATH", "data/minimappr.db")),
             snippet_dir=Path(_env_str("MINIMAPPR_SNIPPET_DIR", "data/snippets")),
+            training_dataset_dir=Path(_env_str("MINIMAPPR_TRAINING_DATASET_DIR", "data/training")),
             snippet_retention_seconds=_env_int("MINIMAPPR_SNIPPET_RETENTION_SECONDS", 3600),
             ingest_spool_dir=Path(_env_str("MINIMAPPR_INGEST_SPOOL_DIR", "data/spool")),
             ingest_spool_ready_ttl_seconds=_env_float("MINIMAPPR_INGEST_SPOOL_READY_TTL_SECONDS", 60.0),
@@ -1555,6 +1558,7 @@ class Settings:
         return StorageConfig(
             db_path=self.db_path,
             snippet_dir=self.snippet_dir,
+            training_dataset_dir=self.training_dataset_dir,
             snippet_retention_seconds=self.snippet_retention_seconds,
             retention_policy_path=self.retention_policy_path,
             retention_ephemeral_seconds=self.retention_ephemeral_seconds,

@@ -227,8 +227,29 @@ class StorageBackend(Protocol):
         review_label_category: str | None,
         review_notes: str | None,
         promote_to_training: bool,
+        training_example_kind: str | None,
         review_updated_ns: int,
     ) -> bool:
+        ...
+
+    async def get_training_example(self, detection_id: str) -> dict[str, Any] | None:
+        ...
+
+    async def upsert_training_example(
+        self,
+        *,
+        detection_id: str,
+        label: str,
+        label_category: str,
+        example_kind: str,
+        audio_path: str,
+        manifest_path: str,
+        created_ns: int,
+        updated_ns: int,
+    ) -> None:
+        ...
+
+    async def delete_training_example(self, detection_id: str) -> dict[str, Any] | None:
         ...
 
     async def find_detection_for_reporting_window(

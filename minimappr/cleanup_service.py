@@ -38,6 +38,7 @@ class CleanupService:
         db_path: Path | None = None,
         snippet_dir: Path | None = None,
         artifact_dir: Path | None = None,
+        training_dataset_dir: Path | None = None,
         retention_policy_path: Path | None = None,
     ) -> "CleanupService":
         return CleanupService(
@@ -46,6 +47,7 @@ class CleanupService:
                 db_path=db_path or self._settings.db_path,
                 snippet_dir=snippet_dir or self._settings.snippet_dir,
                 large_artifact_dir=artifact_dir or self._settings.large_artifact_dir,
+                training_dataset_dir=training_dataset_dir or self._settings.training_dataset_dir,
                 retention_policy_path=retention_policy_path or self._settings.retention_policy_path,
             ),
             storage=self._storage,
@@ -143,9 +145,10 @@ class CleanupService:
             if not dry_run:
                 await asyncio.to_thread(self._settings.db_path.unlink, missing_ok=True)
             db_removed = True
-        snippet_summary, artifact_summary, cache_summaries = await asyncio.gather(
+        snippet_summary, artifact_summary, training_dataset_summary, cache_summaries = await asyncio.gather(
             _remove_tree_async(self._settings.snippet_dir, dry_run=dry_run),
             _remove_tree_async(self._settings.large_artifact_dir, dry_run=dry_run),
+            _remove_tree_async(self._settings.training_dataset_dir, dry_run=dry_run),
             _remove_known_runtime_cache_paths(dry_run=dry_run),
         )
         return {
@@ -154,6 +157,7 @@ class CleanupService:
             "db_removed": db_removed,
             "snippet_dir": snippet_summary,
             "artifact_dir": artifact_summary,
+            "training_dataset_dir": training_dataset_summary,
             "cache_paths": cache_summaries,
         }
 

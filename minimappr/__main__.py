@@ -56,6 +56,7 @@ def _build_parser() -> argparse.ArgumentParser:
     full_parser.add_argument("--db-path", type=Path, help="Override the configured database path")
     full_parser.add_argument("--snippet-dir", type=Path, help="Override the configured snippet directory")
     full_parser.add_argument("--artifact-dir", type=Path, help="Override the configured artifact directory")
+    full_parser.add_argument("--training-dataset-dir", type=Path, help="Override the configured training dataset directory")
 
     partial_parser = cleanup_subparsers.add_parser(
         "partial",
@@ -245,6 +246,7 @@ async def _run_cleanup(*, args: argparse.Namespace, settings: Settings, parser: 
                 db_path=args.db_path or settings.db_path,
                 snippet_dir=args.snippet_dir or settings.snippet_dir,
                 large_artifact_dir=args.artifact_dir or settings.large_artifact_dir,
+                training_dataset_dir=args.training_dataset_dir or settings.training_dataset_dir,
             )
         )
         summary = await cleanup_service.run_full_cleanup(dry_run=bool(args.dry_run))

@@ -505,6 +505,11 @@ class DetectionReviewState(str, Enum):
     REJECTED = "rejected"
 
 
+class TrainingExampleKind(str, Enum):
+    POSITIVE = "positive"
+    NEGATIVE = "negative"
+
+
 class DetectionEvent(BaseModel):
     id: str
     event_id: str | None = None
@@ -545,6 +550,7 @@ class DetectionEvent(BaseModel):
     review_notes: str | None = None
     review_updated_ns: int | None = None
     promote_to_training: bool = False
+    training_example_kind: TrainingExampleKind | None = None
     retention_tier: RetentionTier = RetentionTier.SHORT
     snippet_path: str | None = None
     contributors: list[ContributorSummary] = Field(default_factory=list)
@@ -576,6 +582,7 @@ class DetectionReviewUpdateRequest(BaseModel):
     review_label_category: str | None = Field(default=None, min_length=1)
     review_notes: str | None = Field(default=None, max_length=4000)
     promote_to_training: bool | None = None
+    training_example_kind: TrainingExampleKind | None = None
 
     @model_validator(mode="after")
     def _normalize(self) -> "DetectionReviewUpdateRequest":
@@ -588,6 +595,8 @@ class DetectionReviewUpdateRequest(BaseModel):
             self.review_notes = stripped_notes or None
         if self.review_label_category is not None and self.review_label is None:
             raise ValueError("review_label_category requires review_label")
+        if self.training_example_kind is not None and self.promote_to_training is False:
+            raise ValueError("training_example_kind requires promote_to_training")
         return self
 
 

@@ -127,6 +127,7 @@ def _configure_env(
     spool_dir = tmp_path / "spool"
     monkeypatch.setenv("MINIMAPPR_DB_PATH", str(db_path))
     monkeypatch.setenv("MINIMAPPR_SNIPPET_DIR", str(snippet_dir))
+    monkeypatch.setenv("MINIMAPPR_TRAINING_DATASET_DIR", str(tmp_path / "training"))
     monkeypatch.setenv("MINIMAPPR_LARGE_ARTIFACT_DIR", str(artifact_dir))
     monkeypatch.setenv("MINIMAPPR_INGEST_SPOOL_DIR", str(spool_dir))
     monkeypatch.setenv("MINIMAPPR_INGEST_STORAGE_MODE", "spool")
@@ -392,7 +393,7 @@ def test_node_omni_detection_summary_groups_only_omni_detections(monkeypatch, tm
 
 
 def test_detection_review_patch_persists_and_round_trips(monkeypatch, tmp_path: Path) -> None:
-    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=3600)
 
     with TestClient(app) as client:
         _ingest_single_frame(client, start_time_ns=time.time_ns())
@@ -440,6 +441,114 @@ def test_detection_review_patch_persists_and_round_trips(monkeypatch, tmp_path: 
         assert stored["promote_to_training"] is True
 
 
+def test_confirmed_review_materializes_negative_training_example_and_unconfirmed_removes_it(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=3600)
+
+    with TestClient(app) as client:
+        _ingest_single_frame(client, start_time_ns=time.time_ns())
+        detection_id = _wait_for_detections(client)[0]["id"]
+
+        promoted = client.patch(
+            f"/api/v1/detections/{detection_id}/review",
+            json={
+                "review_state": "confirmed",
+                "review_label": "ambient",
+                "review_label_category": "background",
+                "promote_to_training": True,
+                "training_example_kind": "negative",
+            },
+        )
+        assert promoted.status_code == 200
+        assert promoted.json()["training_example_kind"] == "negative"
+
+        training_dir = tmp_path / "training"
+        audio_file = training_dir / f"{detection_id}.wav"
+        manifest_file = training_dir / f"{detection_id}.json"
+        assert audio_file.read_bytes().startswith(b"RIFF")
+        manifest = json.loads(manifest_file.read_text())
+        assert manifest["training"] == {
+            "example_kind": "negative",
+            "label": "ambient",
+            "label_category": "background",
+            "promoted_at_ns": manifest["training"]["promoted_at_ns"],
+        }
+        stored_example = asyncio.run(client.app.state.storage.get_training_example(detection_id))
+        assert stored_example is not None
+        assert stored_example["example_kind"] == "negative"
+
+        updated = client.patch(
+            f"/api/v1/detections/{detection_id}/review",
+            json={
+                "review_label": "empty",
+                "review_label_category": "background",
+                "training_example_kind": "positive",
+            },
+        )
+        assert updated.status_code == 200
+        assert updated.json()["promote_to_training"] is True
+        assert json.loads(manifest_file.read_text())["training"]["label"] == "empty"
+        updated_example = asyncio.run(client.app.state.storage.get_training_example(detection_id))
+        assert updated_example is not None
+        assert updated_example["example_kind"] == "positive"
+
+        unconfirmed = client.patch(
+            f"/api/v1/detections/{detection_id}/review",
+            json={
+                "review_state": "unreviewed",
+                "review_label": "ambient",
+                "review_label_category": "background",
+                "promote_to_training": False,
+            },
+        )
+        assert unconfirmed.status_code == 200
+        assert unconfirmed.json()["review_label"] == "ambient"
+        assert unconfirmed.json()["promote_to_training"] is False
+        assert not audio_file.exists()
+        assert not manifest_file.exists()
+        assert asyncio.run(client.app.state.storage.get_training_example(detection_id)) is None
+
+
+def test_training_promotion_rejects_missing_audio_without_changing_review(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=3600)
+
+    with TestClient(app) as client:
+        _ingest_single_frame(client, start_time_ns=time.time_ns())
+        detection_id = _wait_for_detections(client)[0]["id"]
+        detection = client.get(f"/api/v1/detections/{detection_id}").json()
+        Path(detection["snippet_path"]).unlink()
+
+        response = client.patch(
+            f"/api/v1/detections/{detection_id}/review",
+            json={"review_state": "confirmed", "promote_to_training": True},
+        )
+        assert response.status_code == 409
+        assert "audio is unavailable" in response.json()["detail"]
+        unchanged = client.get(f"/api/v1/detections/{detection_id}").json()
+        assert unchanged["review_state"] == "unreviewed"
+        assert unchanged["promote_to_training"] is False
+
+
+def test_known_labels_include_classifier_and_review_labels(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+
+    with TestClient(app) as client:
+        _ingest_single_frame(client, start_time_ns=time.time_ns())
+        detection = _wait_for_detections(client)[0]
+        response = client.patch(
+            f"/api/v1/detections/{detection['id']}/review",
+            json={"review_label": "ambient", "review_label_category": "background"},
+        )
+        assert response.status_code == 200
+
+        labels_response = client.get("/api/v1/labels")
+        assert labels_response.status_code == 200
+        labels = {row["name"]: row for row in labels_response.json()["labels"]}
+        assert detection["label"] in labels
+        assert labels["ambient"]["category"] == "background"
+
+
 def test_detection_review_requires_confirmed_state_for_training_promotion(monkeypatch, tmp_path: Path) -> None:
     _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
 
@@ -464,7 +573,7 @@ def test_detection_review_can_transition_from_confirmed_to_rejected_without_rese
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=3600)
 
     with TestClient(app) as client:
         _ingest_single_frame(client, start_time_ns=time.time_ns())

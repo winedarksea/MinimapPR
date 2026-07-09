@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,31 @@ from minimappr.cleanup_service import CleanupService
 from minimappr.config import Settings
 from minimappr.models import DetectionEvent, NodeSpec, NodeType, TrackState
 from minimappr.storage.db import Storage
+
+
+@pytest.mark.asyncio
+async def test_training_dataset_survives_partial_cleanup_and_is_removed_by_full_cleanup(tmp_path: Path) -> None:
+    training_dir = tmp_path / "training"
+    training_dir.mkdir()
+    (training_dir / "det-1.wav").write_bytes(b"wav")
+    (training_dir / "det-1.json").write_text("{}")
+    settings = Settings(
+        db_path=tmp_path / "training-cleanup.db",
+        snippet_dir=tmp_path / "snippets",
+        large_artifact_dir=tmp_path / "artifacts",
+        training_dataset_dir=training_dir,
+        retention_policy_path=tmp_path / "missing-policy.json",
+    )
+    storage = Storage(settings.db_path)
+    await storage.initialize()
+    service = CleanupService(settings=settings, storage=storage)
+
+    await service.run_partial_cleanup(now_ns=time.time_ns())
+    assert (training_dir / "det-1.wav").exists()
+
+    summary = await service.run_full_cleanup()
+    assert summary["training_dataset_dir"]["removed"] is True
+    assert not training_dir.exists()
 
 
 @pytest.mark.asyncio
