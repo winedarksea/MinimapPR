@@ -9,9 +9,6 @@ namespace nodecfg {
 // ============================================================================
 // Frequently edited settings
 // ============================================================================
-// These are the values changed most often per-deployment or per-board. Less
-// common tunables live further down in their own sections; all static_asserts
-// that validate the macros below live at the very bottom of this file.
 
 // --- Audio input mode ---
 // Selects which capture path the board uses; see AudioInputMode values below.
@@ -28,12 +25,13 @@ enum class AudioInputMode : uint8_t {
 
 // --- Ingest/backend server ---
 // Full base URL including scheme, host, and port. This must point at the
-// ingest API, which normally runs on port 8081 -- the main server/UI is a
-// separate service on 8080. Include the ":8081" unless your deployment routes
-// ingest traffic elsewhere.
+// ingest API, which defaults to running on port 8081
 #ifndef MMPR_NODECFG_SERVER_BASE_URL
 #define MMPR_NODECFG_SERVER_BASE_URL "http://192.168.8.165:8081"
 #endif
+
+static constexpr const char* kWifiSsid = "catlin";
+static constexpr const char* kWifiPassword = "TEST";
 
 // --- GPS UART baud rate ---
 // 9600 for the SparkFun GPS carrier board, 38400 for a bare ublox NEO-M10Q.
@@ -112,19 +110,10 @@ enum class AudioDataPinBias : uint8_t {
 #endif
 
 #ifndef MMPR_NODECFG_AUDIO_RING_FRAMES
-// Pre-refactor this was a fixed kBufferedFrames=16; the refactor made it
-// configurable but dropped the default to 12, shrinking DMA capture slack by
-// 25% at the same 16 kHz/4ch rate. That leaves far less room to absorb a
-// consumer-side stall before DMA itself starts dropping blocks. Restore 16
-// (fits comfortably under the 300 KiB ring+queue budget below).
 #define MMPR_NODECFG_AUDIO_RING_FRAMES 16
 #endif
 
 #ifndef MMPR_NODECFG_AUDIO_QUEUE_SLOTS
-// Same story as the ring above: fixed at 40 pre-refactor, dropped to 24 by
-// this config's default. A 24-slot queue only absorbs ~768 ms of production
-// (at ~32 ms/packet) before overflowing on a single slow publish; 40 slots
-// restores the original ~1.28 s of slack.
 #define MMPR_NODECFG_AUDIO_QUEUE_SLOTS 40
 #endif
 
@@ -190,8 +179,6 @@ static constexpr bool kUseTdmAudio = kAudioInputMode == AudioInputMode::kTdm4Mic
 static constexpr bool kUseSyntheticAudio = kAudioInputMode == AudioInputMode::kSynthetic;
 
 // --- Network and backend ---
-static constexpr const char* kWifiSsid = "catlin";
-static constexpr const char* kWifiPassword = "DarthWiFi";
 static constexpr const char* kServerBaseUrl = MMPR_NODECFG_SERVER_BASE_URL;
 static constexpr bool kEnableBleScan = MMPR_ENABLE_BLE_SCAN == 1;
 static constexpr uint16_t kBleScanIntervalUnits = MMPR_NODECFG_BLE_SCAN_INTERVAL_UNITS;
@@ -207,14 +194,9 @@ static constexpr uint32_t kWiFiConnectTimeoutMs = 15000;
 // steal time from drainAvailableAudioFrames()/capture). Packets are batched
 // one per UTC-second boundary; at 4 ch x 16 kHz x 2 bytes that's ~128 KB per
 // publish, which needs >2.3 Mbit/s to clear in 450 ms -- above what the Pico
-// W's SPI-linked CYW43439 reliably sustains. That mismatch was the dominant
-// cause of the post-refactor stage=6 (timeout) publish failures, which in
-// turn produced thousands of sequence gaps in the ingest journal and
-// suppressed all detections. Give it real headroom instead.
+// W's SPI-linked CYW43439 reliably sustains.
 static constexpr uint32_t kHttpTimeoutMs = 850;
-// After a failed publish, skip network attempts briefly so capture and Wi-Fi
-// polling recover. Keep this short: a multi-second backoff discards dozens of
-// audio packets and makes the debug stream sparse even after transient stalls.
+// After a failed publish, skip network attempts briefly so capture and Wi-Fi polling recover.
 static constexpr uint32_t kPublishFailureBackoffMs = 0;
 // ingest control
 static constexpr const char* kIngestPath = "/api/v1/ingest/binary";
@@ -230,17 +212,14 @@ static constexpr bool kAllowRuntimePublishPortChange = true;
 static constexpr uint16_t kPublishTargetControlPort = 8082;
 static constexpr const char* kPublishTargetControlPath = "/api/v1/publish-target";
 
-// Max samples per channel in a single published packet. Keep diagnostic HTTP
-// POSTs near one TCP send window so a timeout does not leave body bytes that
-// uvicorn parses as a malformed follow-up request.
+// Max samples per channel in a single published packet. Keep diagnostic HTTP POSTs near one TCP send window
 static constexpr size_t kMaxPacketSamplesPerChannel = MMPR_NODECFG_AUDIO_FRAME_SAMPLES;
 
 // --- Node identity ---
 // Prefix only — the full node ID is built at runtime by appending the chip's
 // unique board ID (last 4 hex digits) so each physical device is distinct.
 static constexpr const char* kNodeIdPrefix = "sirith-tetra-";
-// Audio mode is expected to be chosen per board/configuration, not switched on
-// one deployed node identity at runtime.
+// Audio mode is expected to be chosen per board/configuration
 static constexpr mmpr::NodeType kNodeType = kUseTdmAudio ? mmpr::NodeType::kSirithTetra : mmpr::NodeType::kPoint;
 static constexpr bool kNodeHasFallbackGeoPosition = true;
 static constexpr float kNodeFallbackLatitudeDeg = 44.98698840878797f;
@@ -271,8 +250,7 @@ static constexpr mmpr::Vec3 kPointSensorOffsetsM[1] = {
 // 0 = no correction, 1 = +120 degrees, 2 = +240 degrees.
 static constexpr uint8_t kBasePlaneRotationSteps = 0;
 // Clockwise installation heading from local-world +X, provisioned per node.
-// Current boards do not populate the compass hardware, so this value is the
-// authoritative orientation until a future board revision enables sensing.
+// This is the authoritative orientation when automatic compass orientation is not available
 static constexpr float kProvisionedWorldHeadingDeg = 0.0f;
 
 // TDM slot mapping from ADAU7112 strap configuration.
@@ -312,8 +290,7 @@ static constexpr size_t kSensorOffsetCount = kUseTdmAudio
     : (sizeof(kPointSensorOffsetsM) / sizeof(kPointSensorOffsetsM[0]));
 
 // --- Bring-up mode ---
-// Bare-board validation avoids driving external buses so firmware can be
-// verified without risking the mic array.
+// Bare-board validation avoids driving external buses
 static constexpr bool kBareBoardValidationMode = false;
 // GP26 controls a switched Vin rail through a FET and also drives an board LED.
 // This rail does not power anything right now, and is optional
@@ -325,15 +302,14 @@ static constexpr bool kEnableExternalPeripheralBuses = !kBareBoardValidationMode
 // P-channel FET on GP26 controls LED + switchable 3V3 power header.
 // LOW = FET on (LED lit), HIGH = FET off (LED dark).
 static constexpr uint8_t kLedPin = 26;
-static constexpr uint32_t kLedBlinkFrames = 8;  // Toggle every N frames (~0.5s at 16kHz/1024)
+static constexpr uint32_t kLedBlinkFrames = 32;  // Toggle every N frames (~0.5s at 16kHz/1024)
 
 // GP27 I2C activity LED.
 // Hardware PWM dims average current (kActivityLedDimPercent% duty = ~2.6 mA at 33 mA full).
 // Each I2C bus read triggers a brief full-brightness pulse; PWM resets to dim after
-// kActivityLedPulseMs.  The PWM peripheral runs autonomously — no CPU cost at steady state.
 static constexpr uint8_t kActivityLedPin = 27;
 static constexpr uint8_t kActivityLedDimPercent = 2;  // 2/100 duty => <1.0 mA
-static constexpr uint32_t kActivityLedPulseMs = 80;   // visible flash duration
+static constexpr uint32_t kActivityLedPulseMs = 40;   // visible flash duration
 
 // --- Audio capture (TDM master) ---
 static constexpr uint8_t kTdmDataPin = 7;  // SDATA input
@@ -453,8 +429,6 @@ static constexpr uint32_t kLogEveryFrames = 100;
 // ============================================================================
 // Validation (static_asserts)
 // ============================================================================
-// Kept out of the way at the bottom of the file; edit the settings above, not
-// these.
 
 static_assert(
     MMPR_NODECFG_AUDIO_INPUT_MODE == 0 || MMPR_NODECFG_AUDIO_INPUT_MODE == 1 ||
