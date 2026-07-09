@@ -105,8 +105,16 @@ enum class AudioDataPinBias : uint8_t {
 #define MMPR_NODECFG_PUBLISH_BATCH_BYTE_BUDGET 20480
 #endif
 
+#ifndef MMPR_NODECFG_PUBLISH_BATCH_FRAMES
+#define MMPR_NODECFG_PUBLISH_BATCH_FRAMES 4
+#endif
+
+#ifndef MMPR_NODECFG_USE_PUBLISH_BATCH_BYTE_BUDGET
+#define MMPR_NODECFG_USE_PUBLISH_BATCH_BYTE_BUDGET 0
+#endif
+
 #ifndef MMPR_NODECFG_SERVER_BASE_URL
-#define MMPR_NODECFG_SERVER_BASE_URL "http://192.168.8.165:8081"
+#define MMPR_NODECFG_SERVER_BASE_URL "http://192.168.8.165:8081" // ingest usually 8081, server itself 8080
 #endif
 
 #ifndef MMPR_ENABLE_BLE_SCAN
@@ -215,7 +223,7 @@ static constexpr uint32_t kWiFiConnectTimeoutMs = 15000;
 // cause of the post-refactor stage=6 (timeout) publish failures, which in
 // turn produced thousands of sequence gaps in the ingest journal and
 // suppressed all detections. Give it real headroom instead.
-static constexpr uint32_t kHttpTimeoutMs = 2500;
+static constexpr uint32_t kHttpTimeoutMs = 850;
 // After a failed publish, skip network attempts briefly so capture and Wi-Fi
 // polling recover. Keep this short: a multi-second backoff discards dozens of
 // audio packets and makes the debug stream sparse even after transient stalls.
@@ -224,6 +232,8 @@ static constexpr uint32_t kPublishFailureBackoffMs = 0;
 static constexpr const char* kIngestPath = "/api/v1/ingest/binary";
 static constexpr size_t kAudioQueueSlots = MMPR_NODECFG_AUDIO_QUEUE_SLOTS;
 static constexpr size_t kPublishBatchByteBudget = MMPR_NODECFG_PUBLISH_BATCH_BYTE_BUDGET;
+static constexpr size_t kPublishBatchFrames = MMPR_NODECFG_PUBLISH_BATCH_FRAMES;
+static constexpr bool kUsePublishBatchByteBudget = MMPR_NODECFG_USE_PUBLISH_BATCH_BYTE_BUDGET == 1;
 
 // Tiny debug/control listener for reading and chaning the current publish target
 // Changes are RAM-only and reset on reboot.
@@ -392,6 +402,7 @@ static_assert(kAudioSampleRateHz >= 12000 && kAudioSampleRateHz <= 96000, "audio
 static_assert(kAudioFrameSamples > 0 && kAudioFrameSamples <= 4096, "audio frame samples out of supported range");
 static_assert(kAudioRingFrames > 0 && kAudioRingFrames <= 32, "audio ring frames must be 1-32");
 static_assert(kAudioQueueSlots > 0 && kAudioQueueSlots <= 96, "audio queue slots must be 1-96");
+static_assert(kPublishBatchFrames > 0 && kPublishBatchFrames <= 16, "publish batch frames must be 1-16");
 static_assert(kPublishBatchByteBudget >= 4096 && kPublishBatchByteBudget <= 32768, "publish byte budget must be 4-32 KiB");
 static_assert(
     (static_cast<size_t>(kAudioFrameSamples) * static_cast<size_t>(kActiveAudioChannels) * sizeof(uint32_t) *
@@ -403,7 +414,7 @@ static_assert(
 // --- Optional GPS/PPS (M10Q style) ---
 static constexpr bool kEnableGpsUart = true;
 // we might want a "PSS active but NMEA failing" GPS status to help with this
-static constexpr uint32_t kGpsUartBaud = 38400; // 9600 for sparkfun, 38400 for ublox NEO-M10Q.
+static constexpr uint32_t kGpsUartBaud = 9600; // 9600 for sparkfun, 38400 for ublox NEO-M10Q. THIS IS A COMMON CAUSE OF GPS_MISSING
 static constexpr uint32_t kGpsBaudScanIntervalMs = 3000;
 // Pin names are MCU-relative: module TX must connect to kGpsRxPin (GP13) for
 // incoming NMEA; kGpsTxPin (GP12) is only MCU TX to the module RX.

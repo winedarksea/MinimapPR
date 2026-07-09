@@ -11,6 +11,26 @@
 
 namespace mmpr {
 
+struct GpsRuntimeStats {
+  bool uartStarted = false;
+  bool nmeaHealthy = false;
+  bool hasFix = false;
+  bool hasDateTime = false;
+  bool ppsConfigured = false;
+  bool ppsObserved = false;
+  bool ppsEpochAligned = false;
+  TimeQuality clockQuality = TimeQuality::kFreeRunning;
+  uint8_t fixDimension = 0;
+  uint32_t currentBaudRate = 0;
+  uint32_t sentenceAgeMs = 0;
+  uint32_t fixAgeMs = 0;
+  uint32_t ppsAgeMs = 0;
+  uint64_t uartBytesReceived = 0;
+  uint64_t validSentences = 0;
+  uint64_t invalidChecksumSentences = 0;
+  uint64_t unsupportedSentences = 0;
+};
+
 struct NmeaGpsSourceConfig {
   uart_inst_t* uart = uart0;
   uint32_t baudRate = 9600;
@@ -21,6 +41,7 @@ struct NmeaGpsSourceConfig {
   size_t maxBytesPerPoll = 128;
   uint32_t missingSentenceTimeoutMs = 5000;
   uint32_t staleFixTimeoutMs = 5000;
+  uint32_t baudScanIntervalMs = 3000;
 };
 
 class NmeaGpsSource {
@@ -33,6 +54,7 @@ class NmeaGpsSource {
 
   bool healthy() const { return healthy_; }
   bool hasFix() const { return hasFix_; }
+  GpsRuntimeStats stats() const;
 
  private:
   struct ParsedSentence {
@@ -71,6 +93,8 @@ class NmeaGpsSource {
 
   void updateDescriptor(NodeDescriptor& descriptor) const;
   void ensurePpsCaptureStarted();
+  void maybeScanBaudRate();
+  void switchBaudRate(uint32_t baudRate);
   void consumePendingPps(NodeClock* clock);
   void consumeLine(const char* line, NodeClock* clock);
   bool parseSentence(const char* line, ParsedSentence& outSentence) const;
@@ -115,6 +139,13 @@ class NmeaGpsSource {
   bool hasDateTime_ = false;
   bool hasAltitude_ = false;
   bool haveSeenSentences_ = false;
+  uint32_t currentBaudRate_ = 0;
+  uint32_t baudScanIndex_ = 0;
+  uint64_t lastBaudScanUs_ = 0;
+  uint64_t uartBytesReceived_ = 0;
+  uint64_t validSentences_ = 0;
+  uint64_t invalidChecksumSentences_ = 0;
+  uint64_t unsupportedSentences_ = 0;
   bool ppsConfigured_ = false;
   bool haveUtcForNextPps_ = false;
   bool haveGsaFixType_ = false;

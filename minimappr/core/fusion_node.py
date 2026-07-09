@@ -533,6 +533,10 @@ class FusionNode:
         metadata = dict(payload.node.metadata)
         metadata["time_quality"] = payload.time_quality.value
         node = payload.node.model_copy(update={"metadata": metadata})
+        if node.position_m is None and node.position_geo is not None:
+            node = node.model_copy(
+                update={"position_m": self.coordinate_frame.geo_to_local(node.position_geo)}
+            )
 
         # Localized classifier renders are derived products, not raw sensor frames.
         # Keep event-time semantics for localization/classification, but update

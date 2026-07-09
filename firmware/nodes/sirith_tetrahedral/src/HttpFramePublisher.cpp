@@ -152,7 +152,8 @@ struct HttpFramePublisher::TransportState {
   bool responseMustClose = false;
   bool sawResponseClose = false;
   bool asyncPublishActive = false;
-  absolute_time_t requestDeadline = {};
+  absolute_time_t idleDeadline = {};
+  absolute_time_t totalDeadline = {};
   uint32_t requestTimeoutMs = 0;
   uint32_t requestStartedMs = 0;
   HttpFramePublisher::BackgroundPollCallback backgroundPollCallback = nullptr;
@@ -170,7 +171,7 @@ void runBackgroundPoll(HttpFramePublisher::TransportState& state) {
 
 void refreshRequestDeadline(HttpFramePublisher::TransportState& state) {
   if (state.requestTimeoutMs > 0) {
-    state.requestDeadline = make_timeout_time_ms(state.requestTimeoutMs);
+    state.idleDeadline = make_timeout_time_ms(state.requestTimeoutMs);
   }
 }
 
@@ -237,7 +238,8 @@ void resetRequestState(HttpFramePublisher::TransportState& state, bool keepRespo
   state.responseMustClose = false;
   state.sawResponseClose = false;
   state.asyncPublishActive = false;
-  state.requestDeadline = {};
+  state.idleDeadline = {};
+  state.totalDeadline = {};
   state.requestTimeoutMs = 0;
   state.requestStartedMs = 0;
   state.requestDone = false;
@@ -856,6 +858,7 @@ PublishResult post(
   state.binaryAudio = binaryAudio;
   state.requestTimeoutMs = timeoutMs;
   state.requestStartedMs = to_ms_since_boot(get_absolute_time());
+  state.totalDeadline = make_timeout_time_ms(timeoutMs);
   refreshRequestDeadline(state);
 
   const absolute_time_t deadline = make_timeout_time_ms(timeoutMs);
@@ -873,7 +876,7 @@ PublishResult post(
   while (!state.requestDone) {
     cyw43_arch_poll();
     runBackgroundPoll(state);
-    if (time_reached(state.requestDeadline)) {
+    if (time_reached(state.idleDeadline) || time_reached(state.totalDeadline)) {
       break;
     }
     sleep_ms(1);
@@ -1026,6 +1029,7 @@ bool HttpFramePublisher::beginPublish(
   transportState_->binaryAudio = false;
   transportState_->requestTimeoutMs = timeoutMs_;
   transportState_->requestStartedMs = to_ms_since_boot(get_absolute_time());
+  transportState_->totalDeadline = make_timeout_time_ms(timeoutMs_);
   refreshRequestDeadline(*transportState_);
 
   if (!beginConnection(host_, port_, *transportState_)) {
@@ -1116,6 +1120,7 @@ bool HttpFramePublisher::beginStoreForwardPublish(
   transportState_->binaryAudio = false;
   transportState_->requestTimeoutMs = timeoutMs_;
   transportState_->requestStartedMs = to_ms_since_boot(get_absolute_time());
+  transportState_->totalDeadline = make_timeout_time_ms(timeoutMs_);
   refreshRequestDeadline(*transportState_);
 
   if (!beginConnection(host_, port_, *transportState_)) {
@@ -1211,6 +1216,7 @@ bool HttpFramePublisher::beginBinaryStoreForwardPublish(
   transportState_->binaryAudio = true;
   transportState_->requestTimeoutMs = timeoutMs_;
   transportState_->requestStartedMs = to_ms_since_boot(get_absolute_time());
+  transportState_->totalDeadline = make_timeout_time_ms(timeoutMs_);
   refreshRequestDeadline(*transportState_);
 
   if (!beginConnection(host_, port_, *transportState_)) {
@@ -1275,6 +1281,7 @@ bool HttpFramePublisher::beginJsonPost(
   transportState_->binaryAudio = false;
   transportState_->requestTimeoutMs = timeoutMs_;
   transportState_->requestStartedMs = to_ms_since_boot(get_absolute_time());
+  transportState_->totalDeadline = make_timeout_time_ms(timeoutMs_);
   refreshRequestDeadline(*transportState_);
 
   if (!beginConnection(host_, port_, *transportState_)) {
@@ -1306,7 +1313,8 @@ bool HttpFramePublisher::pollPublish(PublishResult& result) {
     flushTx(*transportState_, transportState_->pcb);
   }
 
-  if (!transportState_->requestDone && time_reached(transportState_->requestDeadline)) {
+  if (!transportState_->requestDone &&
+      (time_reached(transportState_->idleDeadline) || time_reached(transportState_->totalDeadline))) {
     transportState_->err = ERR_TIMEOUT;
     transportState_->failureStage = PublishFailureStage::kTimeout;
     abortConnection(*transportState_);

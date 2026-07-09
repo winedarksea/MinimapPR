@@ -2014,6 +2014,11 @@ async def list_nodes(
             persisted_summary = latest_audio_summary_by_node.get(node["id"])
             if sidecar_audio_debug is not None:
                 node["audio_debug"] = sidecar_audio_debug
+                latest_sidecar_timing = getattr(
+                    sidecar_snapshot, "latest_timing_diagnostics", None
+                )
+                if isinstance(latest_sidecar_timing, dict) and latest_sidecar_timing:
+                    node["latest_timing_diagnostics"] = latest_sidecar_timing
             elif persisted_summary is not None:
                 last_sample_time_ns = persisted_summary.get("last_sample_time_ns")
                 age_seconds = persisted_summary.get("age_seconds")

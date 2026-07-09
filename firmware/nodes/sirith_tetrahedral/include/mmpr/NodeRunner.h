@@ -51,7 +51,9 @@ class NodeRunner {
       IEnvironmentalSource* environmentalSource = nullptr,
       size_t maxPacketSamplesPerChannel = 0,
       uint32_t publishFailureBackoffMs = 0,
+      size_t publishBatchFrames = 4,
       size_t publishBatchByteBudget = 0,
+      bool usePublishBatchByteBudget = false,
       size_t queueSlots = 0);
 
   bool begin(
@@ -117,12 +119,16 @@ class NodeRunner {
   uint64_t lastLoggedFrameCount_ = 0;
   size_t maxPacketSamplesPerChannel_ = 0;
   uint32_t publishFailureBackoffMs_ = 0;
+  size_t publishBatchFrames_ = 4;
   size_t publishBatchByteBudget_ = 0;
+  bool usePublishBatchByteBudget_ = false;
   uint32_t nextPublishAttemptMs_ = 0;
   std::vector<QueuedAudioPacket> queuedPackets_;
   size_t queueHead_ = 0;
   size_t queueDepth_ = 0;
   std::vector<QueuedAudioPacket> activePublishPackets_;
+  std::vector<AudioFrame> publishFrameScratch_;
+  std::vector<const EnvironmentalSample*> publishEnvironmentScratch_;
   size_t activePublishBatchSize_ = 0;
   bool activePublishBatchValid_ = false;
   uint32_t lastTelemetryRefreshMs_ = 0;

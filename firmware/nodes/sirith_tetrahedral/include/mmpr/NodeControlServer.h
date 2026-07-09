@@ -6,6 +6,7 @@
 #include "lwip/err.h"
 #include "mmpr/BleReportPublisher.h"
 #include "mmpr/BleRssiScanner.h"
+#include "mmpr/NmeaGpsSource.h"
 #include "mmpr/NodeRunner.h"
 
 struct pbuf;
@@ -25,7 +26,8 @@ class NodeControlServer {
       const RunnerStats* runnerStats = nullptr,
       const char* statsPath = "/api/v1/stats",
       const BleScannerStats* bleScannerStats = nullptr,
-      const BleReportPublisherStats* bleReportStats = nullptr);
+      const BleReportPublisherStats* bleReportStats = nullptr,
+      const GpsRuntimeStats* gpsStats = nullptr);
   ~NodeControlServer();
 
   NodeControlServer(const NodeControlServer&) = delete;
@@ -64,6 +66,7 @@ class NodeControlServer {
   const RunnerStats* runnerStats_ = nullptr;
   const BleScannerStats* bleScannerStats_ = nullptr;
   const BleReportPublisherStats* bleReportStats_ = nullptr;
+  const GpsRuntimeStats* gpsStats_ = nullptr;
   tcp_pcb* listenPcb_ = nullptr;
   tcp_pcb* activeClientPcb_ = nullptr;
   size_t requestBytes_ = 0;

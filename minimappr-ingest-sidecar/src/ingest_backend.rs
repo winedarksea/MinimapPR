@@ -22,7 +22,9 @@ use tokio::{
 
 use crate::derived_cache::{DerivedCache, DerivedCacheConfig};
 use crate::dsp::coverage_stats;
-use crate::envelope::{parse_capture_envelope, CaptureEnvelope};
+use crate::envelope::{
+    extract_binary_first_frame_timing_json, parse_capture_envelope, CaptureEnvelope,
+};
 use crate::journal_reader::{stable_segment_path, JournalPayloadHandle};
 use crate::leases::{LeaseStore, PinLeaseRequest, PinLeaseResponse};
 use crate::manifests::{DspManifest, ManifestStore};
@@ -967,12 +969,19 @@ impl SegmentJournalBackend {
             manifest.cluster_id = Self::extract_cluster_id_from_node_json(&node_value);
             manifest.cluster_sensor_positions =
                 Self::extract_cluster_sensor_positions_from_node_json(&node_value);
-            manifest.node_context = Some(serde_json::json!({
+            let mut node_context = serde_json::json!({
                 "node": node_value,
                 "toa_ns": entry.toa_ns,
                 "time_quality": entry.time_quality,
                 "source_type": entry.source_type,
-            }));
+            });
+            if raw_bytes.starts_with(b"MMB3") {
+                if let Some(timing_diagnostics) = extract_binary_first_frame_timing_json(raw_bytes)
+                {
+                    node_context["timing_diagnostics"] = timing_diagnostics;
+                }
+            }
+            manifest.node_context = Some(node_context);
         }
         manifest
     }

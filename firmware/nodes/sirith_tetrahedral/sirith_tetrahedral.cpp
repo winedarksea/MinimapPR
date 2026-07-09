@@ -147,6 +147,7 @@ mmpr::NmeaGpsSourceConfig gGpsConfig = {
     512,
     nodecfg::kGpsMissingSentenceTimeoutMs,
     nodecfg::kGpsStaleFixTimeoutMs,
+    nodecfg::kGpsBaudScanIntervalMs,
 };
 mmpr::NmeaGpsSource gGpsSource(gGpsConfig);
 
@@ -334,7 +335,9 @@ mmpr::NodeRunner gRunner(
     gEnvironmentalSource,
     nodecfg::kMaxPacketSamplesPerChannel,
     nodecfg::kPublishFailureBackoffMs,
+    nodecfg::kPublishBatchFrames,
     nodecfg::kPublishBatchByteBudget,
+    nodecfg::kUsePublishBatchByteBudget,
     nodecfg::kAudioQueueSlots);
 
 mmpr::BleReportPublisher gBleReportPublisher(
@@ -344,6 +347,8 @@ mmpr::BleReportPublisher gBleReportPublisher(
     nodecfg::kBleReportIntervalMs,
     nodecfg::kBleReportMaxObservations);
 
+mmpr::GpsRuntimeStats gGpsRuntimeStats = {};
+
 mmpr::NodeControlServer gControlServer(
   gPublisher,
   nodecfg::kPublishTargetControlPort,
@@ -352,7 +357,8 @@ mmpr::NodeControlServer gControlServer(
   &gRunner.stats(),
   "/api/v1/stats",
   &gBleScanner.stats(),
-  &gBleReportPublisher.stats());
+  &gBleReportPublisher.stats(),
+  &gGpsRuntimeStats);
 
 void pollTimingSourcesDuringNetworkWait(void*) {
   if (nodecfg::kEnableGpsUart) {
@@ -603,6 +609,8 @@ int main() {
 
     if (nodecfg::kEnableGpsUart) {
       gGpsSource.poll(gNodeDescriptor, &gClock);
+      gGpsRuntimeStats = gGpsSource.stats();
+      gGpsRuntimeStats.clockQuality = gClock.timeQuality();
     }
 
     if (nodecfg::kEnableNtpSync) {
@@ -620,6 +628,8 @@ int main() {
 
     if (nodecfg::kEnableGpsUart) {
       gGpsSource.poll(gNodeDescriptor, &gClock);
+      gGpsRuntimeStats = gGpsSource.stats();
+      gGpsRuntimeStats.clockQuality = gClock.timeQuality();
     }
 
     if (nodecfg::kEnableNtpSync) {

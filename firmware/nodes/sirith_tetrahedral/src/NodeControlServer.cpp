@@ -14,8 +14,8 @@ namespace {
 
 constexpr size_t kMaxMethodBytes = 8;
 constexpr size_t kMaxTargetBytes = 192;
-constexpr size_t kMaxBodyBytes = 1024;
-constexpr size_t kMaxResponseBytes = 1536;
+constexpr size_t kMaxBodyBytes = 2048;
+constexpr size_t kMaxResponseBytes = 2048;
 constexpr uint8_t kIdlePollAbortThreshold = 12;
 
 bool appendCopy(char* dest, size_t destBytes, const char* src, size_t srcBytes) {
@@ -31,6 +31,49 @@ const char* boolJson(bool value) {
   return value ? "true" : "false";
 }
 
+const char* gpsFixStatusJson(const GpsRuntimeStats& gps) {
+  if (!gps.uartStarted || !gps.nmeaHealthy) {
+    return "missing";
+  }
+  if (!gps.hasFix) {
+    return "no_fix";
+  }
+  if (gps.fixDimension >= 3) {
+    return "fix_3d";
+  }
+  if (gps.fixDimension == 2) {
+    return "fix_2d";
+  }
+  return "fix";
+}
+
+const char* gpsPpsStatusJson(const GpsRuntimeStats& gps) {
+  if (!gps.ppsConfigured) {
+    return "unconfigured";
+  }
+  if (!gps.ppsObserved) {
+    return "missing";
+  }
+  if (!gps.ppsEpochAligned) {
+    return "unanchored";
+  }
+  return "anchored";
+}
+
+const char* timeQualityJson(TimeQuality quality) {
+  switch (quality) {
+    case TimeQuality::kGpsLocked:
+      return "gps_locked";
+    case TimeQuality::kGpsHoldover:
+      return "gps_holdover";
+    case TimeQuality::kNtpDisciplined:
+      return "ntp_disciplined";
+    case TimeQuality::kFreeRunning:
+    default:
+      return "free_running";
+  }
+}
+
 }  // namespace
 
 NodeControlServer::NodeControlServer(
@@ -41,7 +84,8 @@ NodeControlServer::NodeControlServer(
     const RunnerStats* runnerStats,
     const char* statsPath,
     const BleScannerStats* bleScannerStats,
-    const BleReportPublisherStats* bleReportStats)
+    const BleReportPublisherStats* bleReportStats,
+    const GpsRuntimeStats* gpsStats)
     : publisher_(publisher),
       listenPort_(listenPort),
       routePath_(routePath != nullptr ? routePath : "/api/v1/publish-target"),
@@ -49,7 +93,8 @@ NodeControlServer::NodeControlServer(
       allowRuntimePortChange_(allowRuntimePortChange),
       runnerStats_(runnerStats),
       bleScannerStats_(bleScannerStats),
-      bleReportStats_(bleReportStats) {}
+      bleReportStats_(bleReportStats),
+      gpsStats_(gpsStats) {}
 
 NodeControlServer::~NodeControlServer() {
   closeActiveClient(true);
@@ -342,6 +387,43 @@ bool NodeControlServer::prepareStatsBody(char* bodyBuffer, size_t bodyBufferByte
         static_cast<unsigned long long>(ble.reportPublishErrors),
         static_cast<unsigned long>(ble.lastReportObservationCount),
         static_cast<unsigned long>(ble.lastReportStatus));
+    if (written <= 0 || static_cast<size_t>(written) >= bodyBufferBytes - usedBytes + 1u) {
+      return false;
+    }
+    usedBytes += static_cast<size_t>(written) - 1u;
+  }
+  if (gpsStats_ != nullptr) {
+    const GpsRuntimeStats& gps = *gpsStats_;
+    written = std::snprintf(
+        bodyBuffer + usedBytes - 1u,
+        bodyBufferBytes - usedBytes + 1u,
+        ",\"gps\":{\"uart_started\":%s,\"nmea_healthy\":%s,\"has_fix\":%s,"
+        "\"fix_status\":\"%s\","
+        "\"has_datetime\":%s,\"pps_configured\":%s,\"pps_observed\":%s,"
+        "\"pps_epoch_aligned\":%s,\"pps_status\":\"%s\",\"clock_quality\":\"%s\","
+        "\"fix_dimension\":%u,\"current_baud_rate\":%lu,"
+        "\"sentence_age_ms\":%lu,\"fix_age_ms\":%lu,\"pps_age_ms\":%lu,"
+        "\"uart_bytes_received\":%llu,\"valid_sentences\":%llu,"
+        "\"invalid_checksum_sentences\":%llu,\"unsupported_sentences\":%llu}}",
+        boolJson(gps.uartStarted),
+        boolJson(gps.nmeaHealthy),
+        boolJson(gps.hasFix),
+        gpsFixStatusJson(gps),
+        boolJson(gps.hasDateTime),
+        boolJson(gps.ppsConfigured),
+        boolJson(gps.ppsObserved),
+        boolJson(gps.ppsEpochAligned),
+        gpsPpsStatusJson(gps),
+        timeQualityJson(gps.clockQuality),
+        static_cast<unsigned>(gps.fixDimension),
+        static_cast<unsigned long>(gps.currentBaudRate),
+        static_cast<unsigned long>(gps.sentenceAgeMs),
+        static_cast<unsigned long>(gps.fixAgeMs),
+        static_cast<unsigned long>(gps.ppsAgeMs),
+        static_cast<unsigned long long>(gps.uartBytesReceived),
+        static_cast<unsigned long long>(gps.validSentences),
+        static_cast<unsigned long long>(gps.invalidChecksumSentences),
+        static_cast<unsigned long long>(gps.unsupportedSentences));
     if (written <= 0 || static_cast<size_t>(written) >= bodyBufferBytes - usedBytes + 1u) {
       return false;
     }

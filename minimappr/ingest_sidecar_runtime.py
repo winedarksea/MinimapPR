@@ -224,6 +224,7 @@ def ingest_stream_consumer_runtime(
         ),
         "ingest_transport": ingest_transport,
         "audio_buffer": getattr(state, "audio_buffer", None),
+        "coordinate_frame": getattr(state, "coordinate_frame", None),
     }
 
 
@@ -245,6 +246,7 @@ def build_ingest_stream_consumer(
         config=runtime["config"],
         ingest_transport=runtime["ingest_transport"],
         audio_buffer=runtime["audio_buffer"],
+        coordinate_frame=runtime["coordinate_frame"],
     )
 
 
@@ -295,15 +297,18 @@ async def ensure_ingest_stream_consumer_running(
     desired_config = runtime["config"]
     desired_transport = runtime["ingest_transport"]
     desired_audio_buffer = runtime["audio_buffer"]
+    desired_coordinate_frame = runtime["coordinate_frame"]
     consumer_already_present = consumer is not None
     if consumer is not None:
         consumer_config = getattr(consumer, "_config", None)
         consumer_transport = getattr(consumer, "_ingest_transport", None)
         consumer_audio_buffer = getattr(consumer, "_audio_buffer", None)
+        consumer_coordinate_frame = getattr(consumer, "_coordinate_frame", None)
         if (
             getattr(consumer_config, "sidecar_base_url", None) != desired_config.sidecar_base_url
             or consumer_transport is not desired_transport
             or consumer_audio_buffer is not desired_audio_buffer
+            or consumer_coordinate_frame is not desired_coordinate_frame
         ):
             if not await _stop_ingest_stream_consumer(
                 state,
@@ -321,6 +326,7 @@ async def ensure_ingest_stream_consumer_running(
             config=desired_config,
             ingest_transport=desired_transport,
             audio_buffer=desired_audio_buffer,
+            coordinate_frame=desired_coordinate_frame,
         )
         state.ingest_stream_consumer = consumer
     if consumer.is_running:

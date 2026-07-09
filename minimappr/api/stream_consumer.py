@@ -27,6 +27,7 @@ from minimappr.utils.audio import decode_pcm16le_b64, rms
 
 if TYPE_CHECKING:
     from minimappr.core.audio_buffer import MultiSensorBuffer
+    from minimappr.core.geo import LocalCoordinateFrame
 
 logger = logging.getLogger(__name__)
 
@@ -59,11 +60,14 @@ class SidecarNodeSnapshot:
     active_sensor_count: int | None = None
     rms: float | None = None
     latest_environment: dict[str, Any] = field(default_factory=dict)
+    latest_timing_diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
 def _enrich_node_payload_from_context(
     node_payload: dict[str, Any],
     node_context: dict[str, Any],
+    *,
+    coordinate_frame: "LocalCoordinateFrame | None" = None,
 ) -> dict[str, Any]:
     """Merge frame-level fields from node_context into the node payload dict.
 
@@ -73,10 +77,25 @@ def _enrich_node_payload_from_context(
     into ``node.metadata`` ensures every ``upsert_node`` call carries a
     complete picture regardless of which manifest type triggered it.
     """
+    node_payload = dict(node_payload)
+    if (
+        coordinate_frame is not None
+        and node_payload.get("position_m") is None
+        and isinstance(node_payload.get("position_geo"), dict)
+    ):
+        try:
+            node = NodeSpec.model_validate(node_payload)
+            if node.position_m is None and node.position_geo is not None:
+                node = node.model_copy(
+                    update={"position_m": coordinate_frame.geo_to_local(node.position_geo)}
+                )
+                node_payload = node.model_dump(mode="json")
+        except Exception:  # noqa: BLE001
+            pass
+
     time_quality = node_context.get("time_quality")
     if not isinstance(time_quality, str) or not time_quality:
         return node_payload
-    node_payload = dict(node_payload)
     metadata: dict[str, Any] = dict(node_payload.get("metadata") or {})
     metadata["time_quality"] = time_quality
     node_payload["metadata"] = metadata
@@ -164,10 +183,12 @@ class IngestStreamConsumer:
         config: StreamConsumerConfig,
         ingest_transport: IngestTransport,
         audio_buffer: "MultiSensorBuffer | None" = None,
+        coordinate_frame: "LocalCoordinateFrame | None" = None,
     ) -> None:
         self._config = config
         self._ingest_transport = ingest_transport
         self._audio_buffer = audio_buffer
+        self._coordinate_frame = coordinate_frame
         self._running = False
         self._task: asyncio.Task | None = None
         self._last_event_id: str | None = None
@@ -381,7 +402,13 @@ class IngestStreamConsumer:
             logger.warning("raw_audio_frame missing inline PCM bytes; skipping")
             return
 
-        node_payload = _enrich_node_payload_from_context(node_payload, node_context)
+        node_payload = _enrich_node_payload_from_context(
+            node_payload,
+            node_context,
+            coordinate_frame=self._coordinate_frame,
+        )
+        node_context = dict(node_context)
+        node_context["node"] = node_payload
         try:
             node = NodeSpec.model_validate(node_payload)
         except Exception as exc:  # noqa: BLE001
@@ -472,7 +499,15 @@ class IngestStreamConsumer:
         # so the DB record stays current.  Without this, cadence heartbeats
         # (every ~250ms) overwrite the metadata with no time_quality, undoing
         # what the 30s classifier-render path correctly sets.
-        node_payload = _enrich_node_payload_from_context(node_payload, node_context)
+        node_payload = _enrich_node_payload_from_context(
+            node_payload,
+            node_context,
+            coordinate_frame=self._coordinate_frame,
+        )
+        node_context = dict(node_context)
+        node_context["node"] = node_payload
+        manifest = dict(manifest)
+        manifest["node_context"] = node_context
 
         try:
             node = NodeSpec.model_validate(node_payload)
@@ -550,7 +585,15 @@ class IngestStreamConsumer:
         if isinstance(node_context, dict):
             node_payload = node_context.get("node")
             if isinstance(node_payload, dict):
-                node_payload = _enrich_node_payload_from_context(node_payload, node_context)
+                node_payload = _enrich_node_payload_from_context(
+                    node_payload,
+                    node_context,
+                    coordinate_frame=self._coordinate_frame,
+                )
+                node_context = dict(node_context)
+                node_context["node"] = node_payload
+                manifest = dict(manifest)
+                manifest["node_context"] = node_context
                 try:
                     node = NodeSpec.model_validate(node_payload)
                     node_audio_time_ns = node_context.get("toa_ns")
@@ -598,6 +641,8 @@ class IngestStreamConsumer:
             node_context,
             fallback_timestamp_ns=node_audio_time_ns,
         )
+        timing_diagnostics = node_context.get("timing_diagnostics")
+        timing_summary = dict(timing_diagnostics) if isinstance(timing_diagnostics, dict) else {}
         existing = self._latest_node_snapshots.get(node.id)
         self._latest_node_snapshots[node.id] = SidecarNodeSnapshot(
             node_payload=node.model_dump(mode="json"),
@@ -618,6 +663,11 @@ class IngestStreamConsumer:
                 _environment_summary(environment_sample)
                 if environment_sample is not None
                 else existing.latest_environment if existing is not None else {}
+            ),
+            latest_timing_diagnostics=(
+                timing_summary
+                if timing_summary
+                else existing.latest_timing_diagnostics if existing is not None else {}
             ),
         )
         return environment_sample

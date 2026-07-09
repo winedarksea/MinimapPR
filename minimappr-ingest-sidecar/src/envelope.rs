@@ -115,6 +115,30 @@ struct BinaryFrameSummary {
     clock_drift_ppm: Option<f64>,
 }
 
+fn binary_audio_source_type(value: u8) -> &'static str {
+    match value {
+        0 => "tdm",
+        1 => "i2s_mono",
+        2 => "pdm_direct",
+        3 => "synthetic",
+        4 => "silence",
+        _ => "unknown",
+    }
+}
+
+fn binary_publish_failure_stage(value: u8) -> &'static str {
+    match value {
+        1 => "dns",
+        2 => "connect",
+        3 => "send",
+        4 => "recv",
+        5 => "response_parse",
+        6 => "timeout",
+        7 => "wifi_disconnected",
+        _ => "none",
+    }
+}
+
 struct BinaryReader<'a> {
     payload: &'a [u8],
     offset: usize,
@@ -323,6 +347,275 @@ pub fn extract_binary_node_json(raw_bytes: &[u8]) -> Option<serde_json::Value> {
         });
     }
     Some(node_json)
+}
+
+pub fn extract_binary_first_frame_timing_json(raw_bytes: &[u8]) -> Option<serde_json::Value> {
+    let mut reader = BinaryReader::new(raw_bytes);
+    let version = read_binary_ingest_version(&mut reader).ok()?;
+    if version < 3 {
+        return None;
+    }
+    reader.u8().ok()?; // sort_by_toa
+    let frame_count = reader.u16().ok()?;
+    if frame_count == 0 {
+        return None;
+    }
+    skip_binary_node_header_after_frame_count(&mut reader, version).ok()?;
+    read_binary_first_frame_timing_json(&mut reader).ok()
+}
+
+fn skip_binary_node_header_after_frame_count(
+    reader: &mut BinaryReader<'_>,
+    version: u8,
+) -> Result<(), String> {
+    let _node_id = reader.string()?;
+    let _node_type_code = reader.u8()?;
+    if version == 1 {
+        let _position_x = reader.f32()?;
+        let _position_y = reader.f32()?;
+        let _position_z = reader.f32()?;
+    }
+    let has_geo_position = reader.u8()? != 0;
+    if has_geo_position {
+        let _lat = reader.f32()?;
+        let _lon = reader.f32()?;
+        let _alt = reader.f32()?;
+    }
+    let sensor_count = reader.u8()?;
+    for _ in 0..sensor_count {
+        let _x = reader.f32()?;
+        let _y = reader.f32()?;
+        let _z = reader.f32()?;
+    }
+    let capability_count = reader.u8()?;
+    for _ in 0..capability_count {
+        let _capability = reader.string()?;
+    }
+    let _hardware = reader.string()?;
+    let _firmware = reader.string()?;
+    let _gps_signal = reader.string()?;
+    let _position_source = reader.string()?;
+    let _boot_count = reader.u32()?;
+    Ok(())
+}
+
+fn read_binary_first_frame_timing_json(
+    reader: &mut BinaryReader<'_>,
+) -> Result<serde_json::Value, String> {
+    let _start_time_ns = reader.u64()?;
+    let _end_time_ns = reader.u64()?;
+    let start_sample_index = reader.u64()?;
+    let end_sample_index = reader.u64()?;
+    let sample_rate_hz = reader.u32()?;
+    let channels = reader.u8()?;
+    let audio_source_type = reader.u8()?;
+    let sequence = reader.u64()?;
+    let toa_ns = reader.u64()?;
+    let tor_ns = reader.u64()?;
+    let time_quality = read_binary_time_quality(reader.u8()?)?;
+    let samples_per_channel = reader.u32()?;
+    let section_flags = reader.u16()?;
+
+    let mut timing = serde_json::Map::new();
+    timing.insert(
+        "audio_source_type".to_string(),
+        serde_json::Value::String(binary_audio_source_type(audio_source_type).to_string()),
+    );
+    timing.insert("sequence".to_string(), serde_json::Value::from(sequence));
+    timing.insert("toa_ns".to_string(), serde_json::Value::from(toa_ns));
+    timing.insert("tor_ns".to_string(), serde_json::Value::from(tor_ns));
+    timing.insert(
+        "time_quality".to_string(),
+        serde_json::Value::String(time_quality.as_str().to_string()),
+    );
+    timing.insert(
+        "sample_rate_hz".to_string(),
+        serde_json::Value::from(sample_rate_hz),
+    );
+    timing.insert("channels".to_string(), serde_json::Value::from(channels));
+    timing.insert(
+        "start_sample_index".to_string(),
+        serde_json::Value::from(start_sample_index),
+    );
+    timing.insert(
+        "end_sample_index".to_string(),
+        serde_json::Value::from(end_sample_index),
+    );
+    timing.insert(
+        "samples_per_channel".to_string(),
+        serde_json::Value::from(samples_per_channel),
+    );
+
+    for bit_index in 0..16 {
+        let section_bit = 1_u16 << bit_index;
+        if section_flags & section_bit == 0 {
+            continue;
+        }
+        let section_len = usize::from(reader.u16()?);
+        let section_payload = reader.read(section_len)?;
+        let mut section_reader = BinaryReader::new(section_payload);
+        match section_bit {
+            0x0001 => {
+                timing.extend(read_binary_timing_diagnostics_v3_json(&mut section_reader)?);
+            }
+            0x0002 => skip_binary_environment(&mut section_reader)?,
+            0x0004 => {
+                timing.insert(
+                    "transport_health".to_string(),
+                    read_binary_transport_health_json(&mut section_reader)?,
+                );
+            }
+            _ => {}
+        }
+        if section_reader.remaining() != 0 {
+            return Err(format!(
+                "binary ingest section 0x{section_bit:04x} has trailing bytes"
+            ));
+        }
+    }
+    Ok(serde_json::Value::Object(timing))
+}
+
+fn read_binary_timing_diagnostics_v3_json(
+    reader: &mut BinaryReader<'_>,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let gps_anchor = reader.u8()? != 0;
+    let pps_edge_count = reader.u32()?;
+    let dma_ring_slot_index = reader.u32()?;
+    let pps_phase_error_ns = reader.i64()?;
+    let estimated_ppm = reader.f64()?;
+    let runner_frames_captured = reader.u64()?;
+    let runner_frames_dropped = reader.u64()?;
+    let runner_continuity_violations = reader.u64()?;
+    let runner_publish_errors = reader.u64()?;
+    let runner_queue_depth = reader.u32()?;
+    let runner_queue_overflows = reader.u64()?;
+    let runner_last_publish_status = reader.i32()?;
+    let packet_age_us = reader.u64()?;
+    let runner_last_publish_failure_stage = reader.u8()?;
+    let runner_last_publish_lwip_error = reader.i32()?;
+    let runner_consecutive_publish_failures = reader.u32()?;
+    let runner_publish_timeout_failures = reader.u64()?;
+    let runner_publish_connect_or_reset_failures = reader.u64()?;
+    let runner_publish_dns_failures = reader.u64()?;
+    let runner_publish_wifi_down_failures = reader.u64()?;
+
+    let mut timing = serde_json::Map::new();
+    timing.insert(
+        "gps_anchor".to_string(),
+        serde_json::Value::from(gps_anchor),
+    );
+    timing.insert(
+        "pps_edge_count".to_string(),
+        serde_json::Value::from(pps_edge_count),
+    );
+    timing.insert(
+        "dma_ring_slot_index".to_string(),
+        serde_json::Value::from(dma_ring_slot_index),
+    );
+    timing.insert(
+        "pps_phase_error_ns".to_string(),
+        serde_json::Value::from(pps_phase_error_ns),
+    );
+    timing.insert(
+        "estimated_ppm".to_string(),
+        serde_json::Value::from(estimated_ppm),
+    );
+    timing.insert(
+        "runner_frames_captured".to_string(),
+        serde_json::Value::from(runner_frames_captured),
+    );
+    timing.insert(
+        "runner_frames_dropped".to_string(),
+        serde_json::Value::from(runner_frames_dropped),
+    );
+    timing.insert(
+        "runner_continuity_violations".to_string(),
+        serde_json::Value::from(runner_continuity_violations),
+    );
+    timing.insert(
+        "runner_publish_errors".to_string(),
+        serde_json::Value::from(runner_publish_errors),
+    );
+    timing.insert(
+        "runner_queue_depth".to_string(),
+        serde_json::Value::from(runner_queue_depth),
+    );
+    timing.insert(
+        "runner_queue_overflows".to_string(),
+        serde_json::Value::from(runner_queue_overflows),
+    );
+    timing.insert(
+        "runner_last_publish_status".to_string(),
+        serde_json::Value::from(runner_last_publish_status),
+    );
+    timing.insert(
+        "packet_age_us".to_string(),
+        serde_json::Value::from(packet_age_us),
+    );
+    timing.insert(
+        "runner_last_publish_failure_stage".to_string(),
+        serde_json::Value::String(
+            binary_publish_failure_stage(runner_last_publish_failure_stage).to_string(),
+        ),
+    );
+    timing.insert(
+        "runner_last_publish_failure_stage_code".to_string(),
+        serde_json::Value::from(runner_last_publish_failure_stage),
+    );
+    timing.insert(
+        "runner_last_publish_lwip_error".to_string(),
+        serde_json::Value::from(runner_last_publish_lwip_error),
+    );
+    timing.insert(
+        "runner_consecutive_publish_failures".to_string(),
+        serde_json::Value::from(runner_consecutive_publish_failures),
+    );
+    timing.insert(
+        "runner_publish_timeout_failures".to_string(),
+        serde_json::Value::from(runner_publish_timeout_failures),
+    );
+    timing.insert(
+        "runner_publish_connect_or_reset_failures".to_string(),
+        serde_json::Value::from(runner_publish_connect_or_reset_failures),
+    );
+    timing.insert(
+        "runner_publish_dns_failures".to_string(),
+        serde_json::Value::from(runner_publish_dns_failures),
+    );
+    timing.insert(
+        "runner_publish_wifi_down_failures".to_string(),
+        serde_json::Value::from(runner_publish_wifi_down_failures),
+    );
+    Ok(timing)
+}
+
+fn read_binary_transport_health_json(
+    reader: &mut BinaryReader<'_>,
+) -> Result<serde_json::Value, String> {
+    let ring_frames_high_water = reader.u16()?;
+    let ring_frames_capacity = reader.u16()?;
+    let queue_slots_high_water = reader.u16()?;
+    let queue_slots_capacity = reader.u16()?;
+    let publish_latency_last_ms = reader.u16()?;
+    let publish_latency_ewma_ms = reader.u16()?;
+    let publish_latency_max_ms = reader.u16()?;
+    let wifi_rssi_dbm = i8::from_le_bytes([reader.u8()?]);
+    let heap_free_bytes = reader.u32()?;
+    let boot_id = reader.u32()?;
+
+    Ok(serde_json::json!({
+        "ring_frames_high_water": ring_frames_high_water,
+        "ring_frames_capacity": ring_frames_capacity,
+        "queue_slots_high_water": queue_slots_high_water,
+        "queue_slots_capacity": queue_slots_capacity,
+        "publish_latency_last_ms": publish_latency_last_ms,
+        "publish_latency_ewma_ms": publish_latency_ewma_ms,
+        "publish_latency_max_ms": publish_latency_max_ms,
+        "wifi_rssi_dbm": wifi_rssi_dbm,
+        "heap_free_bytes": heap_free_bytes,
+        "boot_id": boot_id,
+    }))
 }
 
 fn parse_binary_capture_envelope(raw_payload: &[u8]) -> Result<CaptureEnvelope, String> {

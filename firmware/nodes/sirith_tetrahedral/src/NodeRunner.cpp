@@ -15,14 +15,9 @@ namespace {
 constexpr uint64_t kNsPerSecond = 1000000000ULL;
 constexpr int kPublishSkippedForBackoffStatus = -5;
 constexpr size_t kDefaultQueuedPacketSlots = 40;
+constexpr size_t kDefaultPublishBatchFrames = 4;
 constexpr size_t kDefaultPublishBatchByteBudget = 20480;
 constexpr uint32_t kQueueDepthBypassThreshold = 32;
-// The RSSI read is a blocking SPI round-trip to the WiFi chip
-// (cyw43_do_ioctl); under load it can stall for up to CYW43_IOCTL_TIMEOUT_US
-// (500 ms) if the chip doesn't respond in time, which starves audio capture
-// and GPS polling for that whole loop iteration. Keep this infrequent and
-// skip it entirely while a publish is in flight so it never contends with
-// active TCP traffic over the same SPI bus.
 constexpr uint32_t kSlowTelemetryRefreshMs = 15000;
 
 uint64_t nextUtcSecondBoundary(uint64_t utcNs) {
@@ -31,10 +26,6 @@ uint64_t nextUtcSecondBoundary(uint64_t utcNs) {
 
 bool deadlineReached(uint32_t nowMs, uint32_t deadlineMs) {
   return static_cast<int32_t>(nowMs - deadlineMs) >= 0;
-}
-
-bool isWiFiConnected() {
-  return cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) == CYW43_LINK_UP;
 }
 
 }  // namespace
@@ -48,7 +39,9 @@ NodeRunner::NodeRunner(
     IEnvironmentalSource* environmentalSource,
     size_t maxPacketSamplesPerChannel,
     uint32_t publishFailureBackoffMs,
+    size_t publishBatchFrames,
     size_t publishBatchByteBudget,
+    bool usePublishBatchByteBudget,
     size_t queueSlots)
     : descriptor_(descriptor),
       audioSource_(audioSource),
@@ -58,7 +51,9 @@ NodeRunner::NodeRunner(
       logEveryFrames_(logEveryFrames),
       maxPacketSamplesPerChannel_(maxPacketSamplesPerChannel),
       publishFailureBackoffMs_(publishFailureBackoffMs),
+      publishBatchFrames_(publishBatchFrames > 0 ? publishBatchFrames : kDefaultPublishBatchFrames),
       publishBatchByteBudget_(publishBatchByteBudget > 0 ? publishBatchByteBudget : kDefaultPublishBatchByteBudget) {
+  usePublishBatchByteBudget_ = usePublishBatchByteBudget;
   stats_.queueSlotsCapacity = static_cast<uint32_t>(queueSlots > 0 ? queueSlots : kDefaultQueuedPacketSlots);
 }
 
@@ -115,13 +110,19 @@ bool NodeRunner::begin(bool syncNtp, const char* ntpServer, long gmtOffsetSecond
     }
     const size_t packetBytes =
         maxSamplesPerChannel * static_cast<size_t>(audioSource_.channels()) * sizeof(int16_t);
-    const size_t maxActivePacketsByBudget =
-        packetBytes > 0 ? std::max<size_t>(1, publishBatchByteBudget_ / packetBytes) : 1;
-    activePublishPackets_.resize(std::min(queueSlots, maxActivePacketsByBudget));
+    const size_t maxActivePacketsByBudget = packetBytes > 0
+        ? std::max<size_t>(1, publishBatchByteBudget_ / packetBytes)
+        : publishBatchFrames_;
+    const size_t activePacketSlots = usePublishBatchByteBudget_
+        ? maxActivePacketsByBudget
+        : publishBatchFrames_;
+    activePublishPackets_.resize(std::min(queueSlots, std::max<size_t>(1, activePacketSlots)));
     for (QueuedAudioPacket& packet : activePublishPackets_) {
       packet.interleavedSamples.reserve(
           maxSamplesPerChannel * static_cast<size_t>(audioSource_.channels()));
     }
+    publishFrameScratch_.reserve(activePublishPackets_.size());
+    publishEnvironmentScratch_.reserve(activePublishPackets_.size());
   }
   stats_.queueSlotsCapacity = static_cast<uint32_t>(queuedPackets_.size());
   stats_.ringFramesCapacity = audioSource_.ringFramesCapacity();
@@ -300,7 +301,7 @@ bool NodeRunner::fillActivePublishBatch() {
       break;
     }
     const size_t packetBytes = packet.interleavedSamples.size() * sizeof(int16_t);
-    if (activePublishBatchSize_ > 0 &&
+    if (usePublishBatchByteBudget_ && activePublishBatchSize_ > 0 &&
         accumulatedAudioBytes + packetBytes > publishBatchByteBudget_) {
       const size_t writeIndex = (queueHead_ + queuedPackets_.size() - 1u) % queuedPackets_.size();
       queuedPackets_[writeIndex] = packet;
@@ -370,21 +371,9 @@ void NodeRunner::refreshSlowTelemetry(uint32_t nowMs) {
     return;
   }
   lastTelemetryRefreshMs_ = nowMs;
-
-  if (!isWiFiConnected()) {
-    stats_.wifiRssiDbm = 0;
-    return;
-  }
-
-  int32_t rssiDbm = 0;
-  if (cyw43_wifi_get_rssi(&cyw43_state, &rssiDbm) == 0) {
-    if (rssiDbm < -128) {
-      rssiDbm = -128;
-    } else if (rssiDbm > 127) {
-      rssiDbm = 127;
-    }
-    stats_.wifiRssiDbm = static_cast<int8_t>(rssiDbm);
-  }
+  // cyw43_wifi_get_rssi() is a blocking SPI ioctl that can stall long enough
+  // to overrun the DMA capture ring. Keep Wi-Fi RSSI at its last known value
+  // until a non-audio telemetry path can sample it safely.
 }
 
 void NodeRunner::onPublishSuccess() {
@@ -484,14 +473,12 @@ void NodeRunner::startNextPublishIfPossible() {
     return;
   }
   const uint64_t publishMonotonicUs = time_us_64();
-  std::vector<AudioFrame> frames;
-  std::vector<const EnvironmentalSample*> environments;
   try {
-    frames.reserve(activePublishBatchSize_);
-    environments.reserve(activePublishBatchSize_);
+    publishFrameScratch_.clear();
+    publishEnvironmentScratch_.clear();
     for (size_t i = 0; i < activePublishBatchSize_; ++i) {
-      frames.push_back(buildFrameForPacket(activePublishPackets_[i], publishMonotonicUs));
-      environments.push_back(
+      publishFrameScratch_.push_back(buildFrameForPacket(activePublishPackets_[i], publishMonotonicUs));
+      publishEnvironmentScratch_.push_back(
           activePublishPackets_[i].hasEnvironmentalSample
               ? &activePublishPackets_[i].environmentalSample
               : nullptr);
@@ -507,7 +494,13 @@ void NodeRunner::startNextPublishIfPossible() {
     return;
   }
   PublishResult immediateResult = {};
-  if (publisher_.beginBinaryStoreForwardPublish(descriptor_, frames, environments, false, false, immediateResult)) {
+  if (publisher_.beginBinaryStoreForwardPublish(
+          descriptor_,
+          publishFrameScratch_,
+          publishEnvironmentScratch_,
+          false,
+          false,
+          immediateResult)) {
     stats_.queueDepth = effectiveQueueDepth();
     return;
   }
@@ -653,10 +646,9 @@ void NodeRunner::loopOnce() {
   }
 
   const uint32_t nowMs = to_ms_since_boot(get_absolute_time());
-  refreshSlowTelemetry(nowMs);
-  pumpPublisher();
   drainAvailableAudioFrames();
   pumpPublisher();
+  refreshSlowTelemetry(nowMs);
 
   if (logEveryFrames_ > 0 &&
       stats_.framesCaptured != lastLoggedFrameCount_ &&

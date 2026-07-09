@@ -27,6 +27,7 @@ constexpr uint64_t kPpsFallbackTimeoutUs = 3000000ULL;
 // correction in no-PPS mode so the fallback discipline does not carry a
 // systematic ~100-200 ms late bias. PPS remains the high-precision path.
 constexpr uint64_t kNmeaSerialLatencyUs = 150000ULL;
+constexpr uint32_t kBaudScanCandidates[] = {38400, 9600, 115200};
 
 int64_t daysFromCivil(int year, unsigned month, unsigned day) {
   year -= month <= 2;
@@ -42,8 +43,39 @@ int64_t daysFromCivil(int year, unsigned month, unsigned day) {
 NmeaGpsSource::NmeaGpsSource(const NmeaGpsSourceConfig& config)
     : config_(config), activeGeoPosition_(config.fallbackGeoPosition) {}
 
+GpsRuntimeStats NmeaGpsSource::stats() const {
+  const uint64_t nowUs = time_us_64();
+  auto ageMs = [nowUs](uint64_t timestampUs) -> uint32_t {
+    if (timestampUs == 0 || nowUs < timestampUs) {
+      return UINT32_MAX;
+    }
+    const uint64_t age = (nowUs - timestampUs) / kUsPerMs;
+    return age > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(age);
+  };
+
+  GpsRuntimeStats out = {};
+  out.uartStarted = uartStarted_;
+  out.nmeaHealthy = healthy_;
+  out.hasFix = hasFix_;
+  out.hasDateTime = hasDateTime_;
+  out.ppsConfigured = ppsConfigured_;
+  out.ppsObserved = ppsSignalCurrentlyObserved_;
+  out.ppsEpochAligned = haveAlignedPpsEpoch_;
+  out.fixDimension = activeFixDimension_;
+  out.currentBaudRate = currentBaudRate_;
+  out.sentenceAgeMs = ageMs(lastSentenceUs_);
+  out.fixAgeMs = ageMs(lastFixUs_);
+  out.ppsAgeMs = ageMs(lastPpsEdgeUs_);
+  out.uartBytesReceived = uartBytesReceived_;
+  out.validSentences = validSentences_;
+  out.invalidChecksumSentences = invalidChecksumSentences_;
+  out.unsupportedSentences = unsupportedSentences_;
+  return out;
+}
+
 bool NmeaGpsSource::begin() {
-  uart_init(config_.uart, config_.baudRate);
+  currentBaudRate_ = config_.baudRate;
+  uart_init(config_.uart, currentBaudRate_);
   gpio_set_function(config_.txPin, GPIO_FUNC_UART);
   gpio_set_function(config_.rxPin, GPIO_FUNC_UART);
   gpio_pull_up(config_.rxPin);
@@ -63,6 +95,12 @@ bool NmeaGpsSource::begin() {
   haveGsaFixType_ = false;
   activeFixDimension_ = 0;
   gsaFixType_ = 0;
+  baudScanIndex_ = 0;
+  lastBaudScanUs_ = time_us_64();
+  uartBytesReceived_ = 0;
+  validSentences_ = 0;
+  invalidChecksumSentences_ = 0;
+  unsupportedSentences_ = 0;
   activeGeoPosition_ = config_.fallbackGeoPosition;
   lineLength_ = 0;
   lastSentenceUs_ = 0;
@@ -112,6 +150,38 @@ void NmeaGpsSource::ensurePpsCaptureStarted() {
   }
 }
 
+void NmeaGpsSource::switchBaudRate(uint32_t baudRate) {
+  if (baudRate == 0 || baudRate == currentBaudRate_) {
+    return;
+  }
+  currentBaudRate_ = uart_set_baudrate(config_.uart, baudRate);
+  lineLength_ = 0;
+  std::printf("[gps] scanning UART baud=%lu for NMEA\n", static_cast<unsigned long>(currentBaudRate_));
+}
+
+void NmeaGpsSource::maybeScanBaudRate() {
+  if (config_.baudScanIntervalMs == 0 || healthy_ || hasFix_) {
+    return;
+  }
+  const uint64_t nowUs = time_us_64();
+  const uint64_t intervalUs = static_cast<uint64_t>(config_.baudScanIntervalMs) * kUsPerMs;
+  if (lastBaudScanUs_ > 0 && nowUs >= lastBaudScanUs_ && (nowUs - lastBaudScanUs_) < intervalUs) {
+    return;
+  }
+  lastBaudScanUs_ = nowUs;
+
+  constexpr size_t candidateCount = sizeof(kBaudScanCandidates) / sizeof(kBaudScanCandidates[0]);
+  for (size_t attempt = 0; attempt < candidateCount + 1; ++attempt) {
+    const uint32_t candidate =
+        (baudScanIndex_ == 0) ? config_.baudRate : kBaudScanCandidates[(baudScanIndex_ - 1u) % candidateCount];
+    baudScanIndex_ = (baudScanIndex_ + 1u) % (candidateCount + 1u);
+    if (candidate != currentBaudRate_) {
+      switchBaudRate(candidate);
+      return;
+    }
+  }
+}
+
 void NmeaGpsSource::poll(NodeDescriptor& descriptor, NodeClock* clock) {
   if (!uartStarted_) {
     updateDescriptor(descriptor);
@@ -124,6 +194,7 @@ void NmeaGpsSource::poll(NodeDescriptor& descriptor, NodeClock* clock) {
   while (uart_is_readable(config_.uart) && bytesConsumed < config_.maxBytesPerPoll) {
     const char byte = static_cast<char>(uart_getc(config_.uart));
     ++bytesConsumed;
+    ++uartBytesReceived_;
     if (!loggedUartBytes_) {
       loggedUartBytes_ = true;
       std::printf("[gps] UART bytes received on GP%d; waiting for valid NMEA sentences\n", config_.rxPin);
@@ -213,6 +284,7 @@ void NmeaGpsSource::poll(NodeDescriptor& descriptor, NodeClock* clock) {
     }
   }
 
+  maybeScanBaudRate();
   updateDescriptor(descriptor);
 }
 
@@ -292,6 +364,7 @@ void NmeaGpsSource::consumeLine(const char* line, NodeClock* clock) {
   }
 
   if (!validateChecksum(line)) {
+    ++invalidChecksumSentences_;
     if (!loggedInvalidNmeaChecksum_) {
       loggedInvalidNmeaChecksum_ = true;
       std::printf("[gps] ignoring NMEA-looking line with invalid checksum\n");
@@ -301,6 +374,7 @@ void NmeaGpsSource::consumeLine(const char* line, NodeClock* clock) {
 
   ParsedSentence parsed = {};
   if (!parseSentence(line, parsed)) {
+    ++unsupportedSentences_;
     if (!loggedUnsupportedNmeaSentence_) {
       loggedUnsupportedNmeaSentence_ = true;
       char header[8] = {};
@@ -318,6 +392,7 @@ void NmeaGpsSource::consumeLine(const char* line, NodeClock* clock) {
 
   haveSeenSentences_ = true;
   healthy_ = true;
+  ++validSentences_;
   lastSentenceUs_ = time_us_64();
   // GSA carries the receiver's authoritative 2D/3D classification but no
   // location; record it here and let the fix branch below apply it.
