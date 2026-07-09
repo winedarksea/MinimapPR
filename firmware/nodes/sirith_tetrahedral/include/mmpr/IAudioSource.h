@@ -10,6 +10,7 @@ enum class AudioSourceType : uint8_t {
   kI2sMono = 1,
   kPdmDirect = 2,
   kSynthetic = 3,
+  kSilence = 4,
 };
 
 struct AudioProducerSnapshot {

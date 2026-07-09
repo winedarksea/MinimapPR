@@ -15,7 +15,7 @@ class SilenceAudioSource final : public IAudioSource {
   uint32_t sampleRateHz() const override { return sampleRateHz_; }
   uint8_t channels() const override { return channels_; }
   size_t frameSamples() const override { return frameSamples_; }
-  AudioSourceType sourceType() const override { return AudioSourceType::kSynthetic; }
+  AudioSourceType sourceType() const override { return AudioSourceType::kSilence; }
   bool readFrame(
       int16_t* interleavedOut,
       size_t samplesPerChannel,

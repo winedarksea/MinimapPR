@@ -338,6 +338,14 @@ uint32_t NodeRunner::adaptivePublishBackoffMs() const {
 }
 
 bool NodeRunner::shouldBypassAdaptiveBackoff() const {
+  // Never bypass backoff for HTTP 4xx responses. The server is explicitly
+  // rejecting the request (e.g., 410 Gone when direct ingest is disabled),
+  // so retrying immediately just saturates CPU and Wi-Fi without making
+  // forward progress. Transient transport failures still bypass when the
+  // queue is deep so we can drain before audio is dropped.
+  if (stats_.lastPublishStatus >= 400 && stats_.lastPublishStatus < 500) {
+    return false;
+  }
   return effectiveQueueDepth() >= kQueueDepthBypassThreshold;
 }
 

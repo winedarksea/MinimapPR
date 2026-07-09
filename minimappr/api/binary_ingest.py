@@ -257,7 +257,7 @@ def _read_time_quality(value: int) -> TimeQuality:
 
 
 def _read_audio_source_type(value: int) -> str:
-    sources = ("tdm", "i2s_mono", "pdm_direct", "synthetic")
+    sources = ("tdm", "i2s_mono", "pdm_direct", "synthetic", "silence")
     try:
         return sources[value]
     except IndexError as exc:
