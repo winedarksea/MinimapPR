@@ -45,10 +45,18 @@ class _FakeProcess:
 
 
 class _FakeIngestStreamConsumer:
-    def __init__(self, *, config, ingest_transport, audio_buffer=None) -> None:
+    def __init__(
+        self,
+        *,
+        config,
+        ingest_transport,
+        audio_buffer=None,
+        coordinate_frame=None,
+    ) -> None:
         self._config = config
         self._ingest_transport = ingest_transport
         self._audio_buffer = audio_buffer
+        self._coordinate_frame = coordinate_frame
         self._running = False
         self.start_calls = 0
         self.stop_calls = 0

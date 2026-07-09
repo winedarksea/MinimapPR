@@ -988,10 +988,18 @@ def test_system_diagnostics_reports_stream_consumer_state(monkeypatch, tmp_path:
     class _FakeIngestStreamConsumer:
         instances: list["_FakeIngestStreamConsumer"] = []
 
-        def __init__(self, *, config, ingest_transport, audio_buffer=None) -> None:
+        def __init__(
+            self,
+            *,
+            config,
+            ingest_transport,
+            audio_buffer=None,
+            coordinate_frame=None,
+        ) -> None:
             self._config = config
             self._ingest_transport = ingest_transport
             self._audio_buffer = audio_buffer
+            self._coordinate_frame = coordinate_frame
             self._running = False
             self._last_event_id = "27"
             self.start_calls = 0
