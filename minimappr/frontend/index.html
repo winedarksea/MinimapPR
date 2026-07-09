@@ -6,34 +6,38 @@
   <title>MinimapPR COP</title>
   <link rel="icon" type="image/svg+xml" href="favicon.svg" />
 
-  <!-- Material Symbols (Rounded, variable) -->
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet"
-        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" />
-  <link rel="stylesheet"
-        href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..24,300..700,0..1,-25..200" />
+  
+  
+  <link rel="stylesheet" href="/fonts-9bff27209ed48361.css" integrity="sha384-P00zYWRMgJ/86KYYEAi0FWXlBd3X2ubmMWKq/9tAcB4NiMceDR19l17arndT2qj9"/>
+  <link rel="stylesheet" href="maplibre/maplibre-gl.css" />
+  <script src="maplibre/maplibre-gl.js"></script>
 
-  <!-- Leaflet core -->
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-        integrity="sha384-sHL9NAb7lN7rfvG5lfHpm643Xkcjzp4jFvuavGOndn6pjVqS6ny56CAt3nsEVT4H"
-        crossorigin="anonymous" />
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-          integrity="sha384-cxOPjt7s7Iz04uaHJceBmS+qpjv2JkIHNVcuOrM+YHwZOmJGBXI00mdUXEq65HTH"
-          crossorigin="anonymous"></script>
-
-  <!-- Leaflet.heat for geo-heatmap view (phase 5) -->
-  <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"
-          crossorigin="anonymous"></script>
-
-  <link rel="stylesheet" href="/style-dc0d85028dd47a0e.css" integrity="sha384-s0dwm/aawieB42oww1r6AdpIXEx8DHRzsb2vgk1Fx7jGQgxbzJtpk6K3Q/lI4Dad"/>
+  <link rel="stylesheet" href="/tokens-61eb261840e376e3.css" integrity="sha384-8saQArEuWmS3lZBk82uKzhfyd4x51s9bXU4R8LRY2wU9quWuLeKhuSQ5IBR+4M1L"/>
+  <link rel="stylesheet" href="/base-b201fcfabc50cd23.css" integrity="sha384-wa0vpzUA1husINcgxTew5dyoqxC1YipoacneGcFK/5wnGz9lPgKT64kqoMdrKSR1"/>
+  <link rel="stylesheet" href="/shell-c0d149cc05cd96d5.css" integrity="sha384-ny9sn5HkOC9EWk7gE1m8vPCBt1OiWNfN9jJryUw2GDzb+co75Kh1mVg8OruBk5no"/>
+  <link rel="stylesheet" href="/workspace-map-b8d4647d63500c24.css" integrity="sha384-I6KDkxrq6SkrZsvLIzrzw9fnWeq1WSQBLIXsEmidshcH/l7BEhhTvj7jKeVXhSNJ"/>
+  <link rel="stylesheet" href="/workspace-docks-fc6d215ac08d2ea0.css" integrity="sha384-hwZJQtbNPg5y5piHPubiytv29j21JSqiOgzNrM5tmb2cpBT8NCRZPu9tstOjRN9F"/>
+  <link rel="stylesheet" href="/workspace-inspector-f6772b90e69d0498.css" integrity="sha384-3J4ewVHXoGprpNWhH/SxITTQjlMuCHJEBgOleb2DTD7Pj7vH3OhAHYQay3s+oYfB"/>
+  <link rel="stylesheet" href="/components-5984543c5771ac78.css" integrity="sha384-hwEFm4O8DBMkO0T778pUuJ6ibUz4k/cNUvGYxayD8sghoS+uzTgvSfikpfWivBx4"/>
+  <link rel="stylesheet" href="/map-3c32ae3d88711131.css" integrity="sha384-rnELsRJInynpzHjZ+Ig72gTMQK9fB/0BO5SIqPZx924jPJxNko1MnR/UuJf7K4x+"/>
+  <link rel="stylesheet" href="/page-common-7b89486b1e4516cd.css" integrity="sha384-aGq3kfpL//L/zjPwBG4B+z5wcXIQL/vOqTJc1H5pnVzA7KGuSE7qVGgUGYro1lbI"/>
+  <link rel="stylesheet" href="/page-alerts-be02339b1fbf4d6d.css" integrity="sha384-YJocHACtUHsnpQ+LJ6Em3VC3Tu3wUqQ7XC5doPcr4haT6uEqXH3KQ2InvbwO/rgv"/>
+  <link rel="stylesheet" href="/page-forms-247d5c730ad728b1.css" integrity="sha384-OUrSbxGC/V17l6DEtMaZCr6Z/sVFv9okTuM2gTi9dmCu/SrV89VhI3IlQKATzyr6"/>
+  <link rel="stylesheet" href="/page-analysis-3a6b1ff43f2f3d33.css" integrity="sha384-SymE6oLzv2xZRQ/P52rfUo3xXlIMEtdNSYQTvb7NOvT0l/KITydOcMwmH216aSSA"/>
+  <link rel="stylesheet" href="/page-diagnostics-b306717813d391e7.css" integrity="sha384-83GsEbFxusTs/dtoXfUsL/sEju9+z3xTNbOMVnvvWRgFqgkk1ZCKRbBwKruBstC/"/>
+  <link rel="stylesheet" href="/page-audio-9028f02d7bb95eea.css" integrity="sha384-QiMDM5z2JHlqrh95hT2TD9m5Eyy0sDUfV2NQERHJM6ZMMtGYAq+VYazSK1E0K6cN"/>
+  <link rel="stylesheet" href="/page-recording-14b1f1e3a693953.css" integrity="sha384-kAqnC6xvQMuBuL7TU0y5U0wn+e3hhwGt0cbL5j2hUpGbGWUB34FR9yqugwcuTL2a"/>
+  <link rel="stylesheet" href="/page-pipeline-2c0ddce5496d93d9.css" integrity="sha384-wBAQca1rpA51+ktz25fDdhgg/x8haZat+hu+QIm80Rb3d2NRgVVgnECGPcPGsjQq"/>
+  <link rel="stylesheet" href="/page-nodes-3bad0a5695c05655.css" integrity="sha384-6ox/gIjwBuBEc9qk/D5HMe8n0DKYEkPuso517CVx70w9VRlIZ5J5Cp4CGbf1djRu"/>
+  <link rel="stylesheet" href="/page-settings-9a64c020af2484bf.css" integrity="sha384-WW866YB925E6Ql9SUOMiay6N9i8owwNKta2UgyW3/COchW3Fb7ySp0InaGSBJBl/"/>
+  <link rel="stylesheet" href="/page-compact-ea4b1f41c16f439a.css" integrity="sha384-wsKDpi423MUfOBCOCXs7/iuyFxdhSOdTROBbBe1h1rEUdK9gY+Qt8wa6XPrIu6bG"/>
   
   
   
   
 <script type="module">
-import init, * as bindings from '/minimappr-frontend-beecfa42030b0dd2.js';
-const wasm = await init({ module_or_path: '/minimappr-frontend-beecfa42030b0dd2_bg.wasm' });
+import init, * as bindings from '/minimappr-frontend-616ec343479ef19f.js';
+const wasm = await init({ module_or_path: '/minimappr-frontend-616ec343479ef19f_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -66,15 +70,16 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
 
   <style>
     .material-symbols-rounded {
+      font-family: 'Material Symbols Rounded';
       font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 20;
       font-size: 20px;
       user-select: none;
       line-height: 1;
     }
   </style>
-<link rel="modulepreload" href="/minimappr-frontend-beecfa42030b0dd2.js" crossorigin="anonymous" integrity="sha384-ID3QBY7dllxqqKvlIehkOhIWRU4hOlJIm7QNTDaYG9513Zv52AAtFOZZZ/D99RNE"><link rel="preload" href="/minimappr-frontend-beecfa42030b0dd2_bg.wasm" crossorigin="anonymous" integrity="sha384-T79hgJivhH15+PN0+ThJqF7vELcv326GJtMFeWgh0oMynjk800I1PnuKLULQWro+" as="fetch" type="application/wasm"></head>
+<link rel="modulepreload" href="/minimappr-frontend-616ec343479ef19f.js" crossorigin="anonymous" integrity="sha384-3Qs1ap+fp3m+uLcbaluUEO0egyS1qYyPxKhvY819cpIsqKBPoNgo0tahu9nQzqcU"><link rel="preload" href="/minimappr-frontend-616ec343479ef19f_bg.wasm" crossorigin="anonymous" integrity="sha384-Z6Sz4MSgv0axAWgorhpE7UDLA0OR3t6ke+mhagVuxHo8qOa7t6CKWyEqMTgZxHA3" as="fetch" type="application/wasm"></head>
 <body>
-  <script src="leaflet-interop.js"></script>
+  <script src="maplibre-interop.js"></script>
   <script src="audio-interop.js"></script>
 </body>
 </html>

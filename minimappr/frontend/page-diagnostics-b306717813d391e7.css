@@ -1,0 +1,86 @@
+/* ── Diagnostics cards ─────────────────────────────────────── */
+.diag-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 12px;
+  margin-top: 8px;
+}
+.diag-card {
+  background: var(--md-sys-color-surface-container);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-md);
+  padding: 12px 14px;
+}
+.diag-card h3 {
+  margin: 0 0 8px 0;
+  font-size: var(--md-sys-typescale-title-small-size);
+  color: var(--md-sys-color-on-surface);
+}
+.diag-card-body { display: flex; flex-direction: column; gap: 4px; }
+.diag-pipeline-health {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding-bottom: 6px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+}
+.diag-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: var(--md-sys-typescale-body-medium-size);
+}
+.diag-val { font-variant-numeric: tabular-nums; color: var(--md-sys-color-on-surface); }
+.diag-disk { margin: 6px 0; }
+.diag-disk-head { display: flex; justify-content: space-between; gap: 8px; font-size: var(--md-sys-typescale-body-small-size); }
+.diag-disk-bar {
+  height: 6px;
+  background: var(--md-sys-color-surface-variant);
+  border-radius: 3px;
+  overflow: hidden;
+  margin: 4px 0;
+}
+.diag-disk-fill {
+  height: 100%;
+  background: var(--md-sys-color-primary);
+  transition: width 120ms linear;
+}
+.diag-disk-meta { font-size: var(--md-sys-typescale-body-small-size); font-variant-numeric: tabular-nums; }
+
+/* ── Log tail ──────────────────────────────────────────────── */
+.log-list {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  max-height: calc(100vh - 260px);
+  overflow-y: auto;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-sm);
+  background: var(--md-sys-color-surface-container-low);
+}
+.log-row {
+  display: grid;
+  grid-template-columns: 88px 64px 180px 1fr;
+  gap: 8px;
+  padding: 2px 8px;
+  border-left: 3px solid transparent;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.log-row:hover { background: var(--md-sys-color-surface-container); }
+.log-ts { color: color-mix(in srgb, var(--md-sys-color-on-surface) 70%, transparent); font-variant-numeric: tabular-nums; }
+.log-level { font-weight: 600; }
+.log-logger { color: color-mix(in srgb, var(--md-sys-color-on-surface) 60%, transparent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.log-msg { color: var(--md-sys-color-on-surface); }
+.log-exc { grid-column: 1 / -1; margin: 4px 0 6px; padding: 6px 8px; background: var(--md-sys-color-surface-container); border-radius: 4px; font-size: 11px; }
+.log-debug    { border-left-color: color-mix(in srgb, var(--md-sys-color-on-surface) 20%, transparent); opacity: 0.75; }
+.log-info     { border-left-color: var(--mmp-sys-color-info); }
+.log-warn     { border-left-color: var(--mmp-sys-color-warn); }
+.log-error    { border-left-color: var(--mmp-sys-color-danger); background: color-mix(in srgb, var(--mmp-sys-color-danger) 6%, transparent); }
+.log-critical { border-left-color: var(--mmp-sys-color-danger); background: color-mix(in srgb, var(--mmp-sys-color-danger) 14%, transparent); font-weight: 600; }
+

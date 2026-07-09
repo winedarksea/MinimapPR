@@ -1,0 +1,210 @@
+/* ── Audio Analysis page ───────────────────────────────────── */
+.audio-page { padding: 12px 16px; }
+.audio-layout {
+  display: grid;
+  grid-template-columns: 1fr 340px;
+  grid-template-rows: auto 1fr;
+  gap: 12px;
+}
+.audio-header {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+.audio-canvases { display: flex; flex-direction: column; gap: 12px; }
+.audio-canvas-row {
+  background: var(--md-sys-color-surface-container);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-md);
+  padding: 8px 10px;
+}
+.audio-canvas-row label { display: block; margin-bottom: 4px; font-size: var(--md-sys-typescale-label-small-size); }
+.audio-canvas-row canvas {
+  display: block;
+  width: 100%;
+  height: 160px;
+  background: var(--md-sys-color-surface-container-low);
+  border-radius: var(--md-sys-shape-corner-sm);
+}
+.audio-meta {
+  background: var(--md-sys-color-surface-container);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-md);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.audio-meta h3 { margin: 0 0 4px 0; font-size: var(--md-sys-typescale-title-small-size); }
+.audio-meta-dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; margin: 0; font-size: var(--md-sys-typescale-body-medium-size); }
+.audio-meta-dl dt { color: color-mix(in srgb, var(--md-sys-color-on-surface) 60%, transparent); }
+.audio-meta-dl dd { margin: 0; font-variant-numeric: tabular-nums; }
+.audio-hits { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.audio-hit-row { display: flex; justify-content: space-between; font-size: var(--md-sys-typescale-body-medium-size); }
+.audio-hit-conf { font-variant-numeric: tabular-nums; color: color-mix(in srgb, var(--md-sys-color-on-surface) 70%, transparent); }
+
+.detection-review-card {
+  grid-column: 2;
+  gap: 0.75rem;
+}
+
+.detection-review-header,
+.detection-review-actions,
+.review-training-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
+.detection-review-header {
+  justify-content: space-between;
+}
+
+.detection-review-grid {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.detection-review-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: var(--md-sys-typescale-label-small-size);
+  font-weight: 700;
+}
+
+.detection-review-grid input[type="text"],
+.detection-review-grid textarea {
+  width: 100%;
+}
+
+.detection-review-notes textarea {
+  min-height: 5rem;
+  resize: vertical;
+}
+
+.review-training-toggle {
+  flex-direction: row !important;
+  color: var(--md-sys-color-on-surface);
+  font-size: var(--md-sys-typescale-label-medium-size);
+}
+
+.detection-review-actions {
+  justify-content: flex-start;
+}
+
+.review-status-ok {
+  color: var(--mmp-sys-color-ok);
+  font-size: var(--md-sys-typescale-label-medium-size);
+  font-weight: 700;
+}
+
+/* In-COP audio analysis drawer (right-side slide-over) */
+.audio-drawer-root {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  justify-content: flex-end;
+}
+.audio-drawer-overlay {
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, var(--md-sys-color-scrim) 52%, transparent);
+}
+.audio-drawer-panel {
+  position: relative;
+  width: min(980px, 84vw);
+  height: 100%;
+  background: var(--md-sys-color-surface);
+  border-left: 1px solid var(--md-sys-color-outline-variant);
+  box-shadow: var(--md-sys-elevation-3);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.audio-drawer-panel:focus { outline: none; }
+.audio-drawer-topbar {
+  height: var(--mmp-density-header-h);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  background: var(--md-sys-color-surface-container-low);
+}
+.audio-drawer-topbar h3 {
+  margin: 0;
+  font-size: var(--md-sys-typescale-title-medium-size);
+}
+.audio-drawer-content {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px;
+}
+.audio-drawer-empty { padding: 12px; }
+
+@media (max-width: 900px) {
+  .audio-layout { grid-template-columns: 1fr; }
+  .detection-review-card { grid-column: auto; }
+  .audio-drawer-panel { width: 100vw; }
+}
+
+/* ═══ Muted text utility (used site-wide) ═══════════════════════ */
+.muted { color: var(--md-sys-color-on-surface-variant); }
+
+/* Anchor buttons: strip underline, match button layout */
+a.btn-sm {
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.btn-sm .material-symbols-rounded {
+  font-size: 14px;
+  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 20;
+  vertical-align: -2px;
+}
+.btn-sm--danger {
+  border-color: color-mix(in srgb, var(--mmp-sys-color-danger) 45%, var(--md-sys-color-outline));
+  color: var(--mmp-sys-color-danger);
+}
+.btn-sm--danger:hover {
+  background: color-mix(in srgb, var(--mmp-sys-color-danger-container) 50%, transparent);
+  border-color: var(--mmp-sys-color-danger);
+  color: var(--mmp-sys-color-on-danger-container);
+}
+.btn-sm:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+/* ─── Format / status badges ─────────────────────────────────── */
+.badge {
+  display: inline-block;
+  font-size: var(--md-sys-typescale-label-small-size);
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  padding: 1px 8px;
+  border-radius: var(--md-sys-shape-corner-full);
+  background: color-mix(in srgb, var(--md-sys-color-primary) 14%, transparent);
+  color: var(--md-sys-color-primary);
+  border: 1px solid color-mix(in srgb, var(--md-sys-color-primary) 28%, transparent);
+  white-space: nowrap;
+}
+.badge--active {
+  background: color-mix(in srgb, var(--mmp-sys-color-danger) 18%, transparent);
+  color: var(--mmp-sys-color-danger);
+  border-color: color-mix(in srgb, var(--mmp-sys-color-danger) 34%, transparent);
+}
+.badge--dim {
+  background: var(--md-sys-color-surface-container-high);
+  color: var(--md-sys-color-on-surface-variant);
+  border-color: var(--md-sys-color-outline-variant);
+}
+

@@ -1,0 +1,253 @@
+/* ═══ Daily detections matrix (Analysis → Daily) ═══════════════ */
+.daily-view {
+  display: flex;
+  flex-direction: column;
+  gap: var(--mmp-density-gap-md);
+  flex: 1;
+  min-height: 0;
+}
+.daily-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--mmp-density-gap-sm);
+  flex-wrap: wrap;
+}
+.daily-window-label {
+  margin-left: var(--mmp-density-gap-sm);
+  color: var(--md-sys-color-on-surface-variant);
+  font-family: var(--md-sys-typescale-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--md-sys-typescale-label-medium-size);
+}
+.daily-loading {
+  margin-left: auto;
+  color: var(--md-sys-color-on-surface-variant);
+  opacity: 0;
+  font-size: var(--md-sys-typescale-label-small-size);
+  transition: opacity 0.15s ease;
+}
+.daily-loading.visible { opacity: 1; }
+.daily-error { color: var(--mmp-sys-color-danger); font-size: var(--md-sys-typescale-label-medium-size); }
+
+.daily-card {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: var(--mmp-density-gap-sm);
+  overflow: hidden;
+  overflow-x: auto;
+}
+.daily-grid-wrap {
+  flex: 1;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.daily-grid-row {
+  display: grid;
+  gap: 2px;
+  padding: 2px 0;
+}
+
+/* Top: hourly-total histogram (aligned to the 24 matrix columns) */
+.daily-histogram {
+  height: 64px;
+  align-items: end;
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  padding-bottom: 2px;
+  padding-left: 120px; /* reserve the label-column gutter so bars align w/ matrix cells */
+}
+.hist-cell {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 0 1px;
+}
+.hist-bar {
+  width: 100%;
+  background: var(--md-sys-color-primary);
+  border-radius: 2px 2px 0 0;
+  min-height: 0;
+}
+
+.daily-hour-axis {
+  padding: 4px 0 6px 120px;
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  font-family: var(--md-sys-typescale-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  color: var(--md-sys-color-on-surface-variant);
+  position: sticky;
+  top: 64px;
+  background: var(--md-sys-color-surface-container-low);
+  z-index: 1;
+}
+.hour-tick { text-align: center; }
+
+.daily-matrix-row {
+  align-items: center;
+  border-bottom: 1px solid color-mix(in srgb, var(--md-sys-color-outline-variant) 40%, transparent);
+}
+
+.daily-label-cell {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 2px 8px 2px 2px;
+  font-size: var(--md-sys-typescale-label-medium-size);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.daily-label {
+  color: var(--md-sys-color-on-surface);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.daily-label-total {
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: var(--md-sys-typescale-label-small-size);
+}
+
+.daily-cell {
+  --cell-alpha: 0;
+  height: 24px;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: 3px;
+  background: color-mix(in srgb,
+    var(--md-sys-color-primary) calc(var(--cell-alpha) * 100%),
+    var(--md-sys-color-surface-container-lowest));
+  color: var(--md-sys-color-on-primary-container);
+  font-family: var(--md-sys-typescale-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  transition: box-shadow 0.1s ease, transform 0.05s ease;
+}
+.daily-cell.zero {
+  cursor: default;
+  background: transparent;
+  color: transparent;
+}
+.daily-cell:not(.zero):hover {
+  box-shadow: 0 0 0 2px var(--md-sys-color-primary);
+  z-index: 1;
+}
+.daily-cell:focus-visible {
+  outline: 2px solid var(--md-sys-color-primary);
+  outline-offset: 1px;
+}
+.cell-count {
+  font-weight: 700;
+  color: var(--md-sys-color-on-surface);
+}
+
+/* ═══ Labels table / detail view ══════════════════════════════ */
+.labels-view { display: flex; flex-direction: column; gap: var(--mmp-density-gap-md); min-height: 0; }
+.labels-table tr td .btn-sm { text-decoration: none; }
+.labels-table .tqi-bar { display: block; max-width: 140px; }
+
+.btn-sm.active {
+  background: var(--md-sys-color-primary);
+  color: var(--md-sys-color-on-primary);
+  border-color: transparent;
+}
+
+.label-detail-grid {
+  display: grid;
+  gap: var(--mmp-density-gap-md);
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
+.hist-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  padding: 12px;
+  min-height: 72px;
+}
+.hist-slot {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.hist-slot .hist-bar {
+  width: 100%;
+  background: var(--md-sys-color-primary);
+  border-radius: 2px 2px 0 0;
+  min-height: 0;
+}
+.hist-tick {
+  font-family: var(--md-sys-typescale-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+/* ═══ Heatmap view ════════════════════════════════════════════ */
+.heatmap-view {
+  display: flex;
+  flex-direction: column;
+  gap: var(--mmp-density-gap-md);
+  min-height: 0;
+  flex: 1;
+}
+
+/* ═══ Scrollbar polish (WebKit) ═══════════════════════════════════ */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--md-sys-color-outline-variant);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--md-sys-color-outline); background-clip: content-box; }
+
+/* ═══ Responsive ═══════════════════════════════════════════════ */
+@media (max-width: 1080px) {
+  .main-grid {
+    grid-template-columns: 1fr minmax(340px, 1.1fr);
+    grid-template-rows: auto 1fr;
+  }
+  .main-grid .panel:first-child {
+    grid-column: 1 / -1;
+    max-height: 220px;
+  }
+}
+
+@media (max-width: 760px) {
+  .main-grid {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto auto 1fr;
+  }
+  .main-grid .panel:first-child { max-height: 200px; }
+  .leaflet-container-wrap { min-height: 200px; }
+  .topbar-nav a { padding: 6px 10px; font-size: var(--md-sys-typescale-label-medium-size); }
+  .topbar-clock { display: none; }
+  .topbar-toggle-label { display: none; }
+  .map-overlay-stack {
+    position: static;
+    padding: var(--mmp-density-gap-sm);
+  }
+  .map-overlay-top-left,
+  .map-overlay-bottom-right {
+    top: auto;
+    right: auto;
+    bottom: auto;
+    left: auto;
+  }
+  .map-floating-panel {
+    max-width: none;
+    width: 100%;
+  }
+}
+

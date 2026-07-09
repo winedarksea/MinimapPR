@@ -1,0 +1,291 @@
+/* Legacy dot classes kept for any external references */
+.legend-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.legend-dot.node { background: var(--mmp-sys-color-map-node); }
+.legend-dot.track { background: var(--mmp-sys-color-map-track); }
+.legend-dot.detection { background: var(--mmp-sys-color-map-detection); }
+
+/* ═══ Tab strip (MD3 primary tabs) ═════════════════════════════ */
+.tab-column { display: flex; flex-direction: column; min-height: 0; }
+
+.tab-strip {
+  display: flex;
+  background: var(--md-sys-color-surface-container-low);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  flex-shrink: 0;
+  overflow-x: auto;
+}
+.tab-btn {
+  padding: calc(var(--mmp-density-pad-cell) + 2px) calc(var(--mmp-density-pad-panel) + 4px);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: var(--md-sys-typescale-label-large-size);
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.tab-btn:hover {
+  color: var(--md-sys-color-on-surface);
+  background: color-mix(in srgb, var(--md-sys-color-on-surface) 5%, transparent);
+}
+.tab-btn.active {
+  color: var(--md-sys-color-primary);
+  border-bottom-color: var(--md-sys-color-primary);
+}
+.tab-badge {
+  background: var(--mmp-sys-color-danger-container);
+  color: var(--mmp-sys-color-on-danger-container);
+  border-radius: var(--md-sys-shape-corner-full);
+  padding: 0 6px;
+  font-size: var(--md-sys-typescale-label-small-size);
+  font-weight: 700;
+  min-width: 18px;
+  text-align: center;
+  font-family: var(--md-sys-typescale-mono);
+  font-variant-numeric: tabular-nums;
+}
+.tab-badge.zero { display: none; }
+
+.tab-content { flex: 1; overflow: hidden; display: flex; flex-direction: column; min-height: 0; }
+.tab-pane { flex: 1; overflow-y: auto; padding: var(--mmp-density-pad-panel); min-height: 0; }
+
+/* ═══ Data tables (C2-dense) ════════════════════════════════════ */
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--md-sys-typescale-label-large-size);
+}
+.data-table th {
+  text-align: left;
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: var(--md-sys-typescale-label-small-size);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: var(--mmp-density-pad-cell) calc(var(--mmp-density-pad-panel) - 2px);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  position: sticky;
+  top: 0;
+  background: var(--md-sys-color-surface-container);
+  z-index: 1;
+}
+.data-table td {
+  padding: var(--mmp-density-pad-cell) calc(var(--mmp-density-pad-panel) - 2px);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  vertical-align: middle;
+}
+.data-table tr:last-child td { border-bottom: none; }
+.data-table tr:hover td {
+  background: color-mix(in srgb, var(--md-sys-color-on-surface) 5%, transparent);
+}
+
+.tqi-bar {
+  display: inline-block;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--md-sys-color-primary);
+  min-width: 2px;
+}
+.conf-pill {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: var(--md-sys-shape-corner-full);
+  font-size: var(--md-sys-typescale-label-small-size);
+  font-weight: 700;
+  background: var(--md-sys-color-surface-container-high);
+  color: var(--md-sys-color-on-surface);
+  border: 1px solid var(--md-sys-color-outline-variant);
+}
+.play-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--md-sys-color-primary);
+  font-size: var(--md-sys-typescale-title-small-size);
+  padding: 0 4px;
+  line-height: 1;
+}
+.play-btn:hover { color: var(--md-sys-color-on-surface); }
+
+/* ═══ Track / detection age staleness ══════════════════════════ */
+.age-fresh   { color: var(--mmp-sys-color-ok);   font-family: var(--md-sys-typescale-mono); font-variant-numeric: tabular-nums; font-size: var(--md-sys-typescale-label-small-size); font-weight: 700; }
+.age-stale   { color: var(--mmp-sys-color-warn);  font-family: var(--md-sys-typescale-mono); font-variant-numeric: tabular-nums; font-size: var(--md-sys-typescale-label-small-size); font-weight: 700; }
+.age-lost    { color: var(--mmp-sys-color-danger); font-family: var(--md-sys-typescale-mono); font-variant-numeric: tabular-nums; font-size: var(--md-sys-typescale-label-small-size); font-weight: 700; text-shadow: 0 0 8px color-mix(in srgb, var(--mmp-sys-color-danger) 55%, transparent); }
+.age-unknown { color: var(--md-sys-color-on-surface-variant); font-family: var(--md-sys-typescale-mono); font-size: var(--md-sys-typescale-label-small-size); }
+
+/* Entire row dims when track is truly lost */
+.track-row-stale td { opacity: 0.55; }
+.track-row-stale:hover td { opacity: 0.85; }
+
+/* Sidebar row highlight synced to the active COP marker. */
+.cop-row-selected {
+  border-color: color-mix(in srgb, var(--md-sys-color-primary) 45%, var(--md-sys-color-outline-variant));
+}
+.track-row-selected td,
+.cop-row-selected td {
+  background: var(--md-sys-color-surface-container-high, #30363d);
+}
+
+/* Map highlight ring — pulsing outline around the active COP marker */
+@keyframes mmpr-ring-pulse {
+  0%, 100% { opacity: 0.9; }
+  50%       { opacity: 0.35; }
+}
+.mmpr-cop-highlight-ring,
+.mmpr-track-highlight-ring {
+  animation: mmpr-ring-pulse 1.4s ease-in-out infinite;
+}
+.mmpr-map-icon-highlighted {
+  filter: brightness(1.22) saturate(1.18) drop-shadow(0 0 10px color-mix(in srgb, var(--md-sys-color-primary) 70%, transparent));
+}
+
+@keyframes mmpr-detection-event-fade {
+  0%   { opacity: 1; transform: scale(1); }
+  72%  { opacity: 0.72; transform: scale(0.98); }
+  100% { opacity: 0; transform: scale(0.88); }
+}
+.mmpr-detection-event-icon {
+  animation: mmpr-detection-event-fade 5s ease-out forwards;
+  transform-origin: center;
+}
+.mmpr-node-omni-halo-active {
+  filter: drop-shadow(0 0 8px color-mix(in srgb, var(--mmp-sys-color-map-omni) 70%, transparent));
+}
+.mmpr-node-omni-ripple,
+.mmpr-track-update-pulse,
+.mmpr-bearing-selected-ray {
+  pointer-events: none;
+}
+.mmpr-bearing-event-icon {
+  opacity: 0.72;
+}
+
+/* Track ID code in table — shows geo coords as native tooltip */
+.track-id-code {
+  cursor: help;
+  border-bottom: 1px dashed var(--md-sys-color-outline-variant);
+  font-size: var(--md-sys-typescale-label-small-size);
+}
+
+/* Node identifier chip in detections table */
+.node-chip {
+  font-size: var(--md-sys-typescale-label-small-size);
+  color: var(--md-sys-color-on-surface-variant);
+  background: var(--md-sys-color-surface-container-high);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-xs);
+  padding: 1px 5px;
+  max-width: 9ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: inline-block;
+  white-space: nowrap;
+}
+
+.contributor-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.contributor-chip-pair {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.contributor-chip {
+  max-width: 10ch;
+}
+
+.contributor-role-pill {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--md-sys-color-primary);
+  background: color-mix(in srgb, var(--md-sys-color-primary) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--md-sys-color-primary) 24%, transparent);
+  border-radius: var(--md-sys-shape-corner-xs);
+  padding: 1px 4px;
+  text-transform: uppercase;
+}
+
+.contributor-overflow {
+  min-height: 18px;
+  padding: 0 6px;
+}
+
+.label-with-contributors {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.track-id-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.track-contributor-count {
+  font-size: var(--md-sys-typescale-label-small-size);
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+/* Fused-track link chip in detections table */
+.track-link-chip {
+  font-size: var(--md-sys-typescale-label-small-size);
+  color: var(--md-sys-color-primary);
+  background: color-mix(in srgb, var(--md-sys-color-primary) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--md-sys-color-primary) 30%, transparent);
+  border-radius: var(--md-sys-shape-corner-xs);
+  padding: 1px 5px;
+}
+
+.tone-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 1px 8px;
+  border-radius: var(--md-sys-shape-corner-full);
+  border: 1px solid transparent;
+  font-size: var(--md-sys-typescale-label-small-size);
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.tone-badge.ok {
+  background: var(--mmp-sys-color-ok-container);
+  color: var(--mmp-sys-color-on-ok-container);
+  border-color: color-mix(in srgb, var(--mmp-sys-color-ok) 35%, transparent);
+}
+.tone-badge.warn {
+  background: var(--mmp-sys-color-warn-container);
+  color: var(--mmp-sys-color-on-warn-container);
+  border-color: color-mix(in srgb, var(--mmp-sys-color-warn) 35%, transparent);
+}
+.tone-badge.danger {
+  background: var(--mmp-sys-color-danger-container);
+  color: var(--mmp-sys-color-on-danger-container);
+  border-color: color-mix(in srgb, var(--mmp-sys-color-danger) 35%, transparent);
+}
+.tone-badge.info {
+  background: var(--mmp-sys-color-info-container);
+  color: var(--mmp-sys-color-on-info-container);
+  border-color: color-mix(in srgb, var(--mmp-sys-color-info) 35%, transparent);
+}
+.tone-badge.neutral {
+  background: var(--md-sys-color-surface-container-high);
+  color: var(--md-sys-color-on-surface);
+  border-color: var(--md-sys-color-outline-variant);
+}
+
