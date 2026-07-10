@@ -256,33 +256,8 @@ class IngestProcessor:
             allow_receipt_time_fallback="gps_optional" in normalized_node.capabilities,
         )
 
-        # -- claim the processed frame and persist only durable domain data ----
+        # -- persist bounded metadata before reserving buffer insertion --------
         observation_ids: list[str] = []
-        frame_registered = await self._live_ingest_state.claim_processed_frame(
-            FrameIdentity.from_frame(
-                node_id=normalized_node.id,
-                boot_session=boot_session,
-                source_type=frame.source_type,
-                start_sample_index=frame.start_sample_index,
-                end_sample_index=frame.end_sample_index,
-                start_time_ns=frame.start_time_ns,
-                frame_sequence=frame.sequence,
-            )
-        )
-        if not frame_registered:
-            return IngestResult(
-                response=IngestFrameResponse(
-                    accepted=True,
-                    duplicate=True,
-                    triggered=False,
-                    frame_energy=0.0,
-                    detection_id=None,
-                    queued_event_id=None,
-                    queue_depth=0,
-                ),
-                triggered=False,
-            )
-
         persist_node_registration = await self._live_ingest_state.should_persist_node_registration(
             normalized_node
         )
@@ -368,22 +343,52 @@ class IngestProcessor:
                     )
                     observation_ids.append(observation_id)
 
-        # -- buffer insertion --------------------------------------------------
-        for channel_index, sensor_id in enumerate(runtime.sensor_ids):
-            await self._buffer.append(
-                sensor_id=sensor_id,
-                sample_rate_hz=frame.sample_rate_hz,
-                start_time_ns=buffer_start_time_ns,
-                samples=processed[channel_index],
-                start_sample_index=frame.start_sample_index,
-                end_sample_index=frame.end_sample_index,
-                end_time_ns=buffer_end_time_ns,
+        # -- reserve, insert, then commit live audio --------------------------
+        # A retransmit that races this request is held in-memory. Crucially, a
+        # failed insert releases its reservation so it cannot turn a transient
+        # error into a permanent audio gap.
+        frame_identity = FrameIdentity.from_frame(
+            node_id=normalized_node.id,
+            boot_session=boot_session,
+            source_type=frame.source_type,
+            start_sample_index=frame.start_sample_index,
+            end_sample_index=frame.end_sample_index,
+            start_time_ns=frame.start_time_ns,
+            frame_sequence=frame.sequence,
+        )
+        if not await self._live_ingest_state.reserve_frame(frame_identity):
+            return IngestResult(
+                response=IngestFrameResponse(
+                    accepted=True,
+                    duplicate=True,
+                    triggered=False,
+                    frame_energy=0.0,
+                    detection_id=None,
+                    queued_event_id=None,
+                    queue_depth=0,
+                ),
+                triggered=False,
             )
-            if self._persist_observations_on_ingest:
-                await self._registry.record_observation(
+        try:
+            for channel_index, sensor_id in enumerate(runtime.sensor_ids):
+                await self._buffer.append(
                     sensor_id=sensor_id,
-                    observation_id=observation_ids[channel_index],
+                    sample_rate_hz=frame.sample_rate_hz,
+                    start_time_ns=buffer_start_time_ns,
+                    samples=processed[channel_index],
+                    start_sample_index=frame.start_sample_index,
+                    end_sample_index=frame.end_sample_index,
+                    end_time_ns=buffer_end_time_ns,
                 )
+                if self._persist_observations_on_ingest:
+                    await self._registry.record_observation(
+                        sensor_id=sensor_id,
+                        observation_id=observation_ids[channel_index],
+                    )
+        except BaseException:
+            await self._live_ingest_state.release_reserved_frame(frame_identity)
+            raise
+        await self._live_ingest_state.commit_reserved_frame(frame_identity)
 
         # -- trigger evaluation ------------------------------------------------
         # `trigger_rms` is an O(N) numpy reduction over the processed frame.

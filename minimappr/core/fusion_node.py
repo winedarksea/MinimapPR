@@ -417,9 +417,13 @@ class FusionNode:
         self._last_error: str | None = None
         self._started = False
         self._stopping = False
-        # Per-node baseline of firmware runner_queue_overflows, used to detect
-        # new publish-queue drops between successive ingest frames.
-        self._last_firmware_overflows: dict[str, int] = {}
+        # Per-node firmware transport baselines support edge-triggered degraded
+        # CBIT reports and a bounded, explicit recovery report.
+        self._last_firmware_runner_counters: dict[str, tuple[int, int]] = {}
+        self._firmware_transport_degraded_since_ns: dict[str, int] = {}
+        self._firmware_transport_recovery_ns = int(
+            settings.node_degraded_after_seconds * 1_000_000_000
+        )
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -1012,28 +1016,34 @@ class FusionNode:
         node_id: str,
         timing_diagnostics: dict,
     ) -> dict | None:
-        """Compare current firmware queue-overflow counter against the stored baseline.
-
-        Returns a delta dict on first new overflow (to trigger a CBIT report),
-        or None if no new drops since last call.  Always updates the baseline.
-        First call for a node establishes the baseline without returning a delta.
-        """
+        """Return edge-triggered degraded and recovered firmware transport states."""
         overflows = int(timing_diagnostics.get("runner_queue_overflows") or 0)
         dropped = int(timing_diagnostics.get("runner_frames_dropped") or 0)
-
-        last = self._last_firmware_overflows.get(node_id)
-        self._last_firmware_overflows[node_id] = overflows
+        now_ns = time.monotonic_ns()
+        last = self._last_firmware_runner_counters.get(node_id)
+        self._last_firmware_runner_counters[node_id] = (overflows, dropped)
         if last is None:
             return None
-
-        delta = overflows - last
-        if delta <= 0:
-            return None
-        return {
-            "new_queue_overflows": delta,
-            "total_queue_overflows": overflows,
-            "total_frames_dropped": dropped,
-        }
+        overflow_delta = max(0, overflows - last[0])
+        dropped_delta = max(0, dropped - last[1])
+        if overflow_delta > 0 or dropped_delta > 0:
+            self._firmware_transport_degraded_since_ns[node_id] = now_ns
+            return {
+                "state": "degraded",
+                "new_queue_overflows": overflow_delta,
+                "new_frames_dropped": dropped_delta,
+                "total_queue_overflows": overflows,
+                "total_frames_dropped": dropped,
+            }
+        degraded_since_ns = self._firmware_transport_degraded_since_ns.get(node_id)
+        if degraded_since_ns is not None and now_ns - degraded_since_ns >= self._firmware_transport_recovery_ns:
+            del self._firmware_transport_degraded_since_ns[node_id]
+            return {
+                "state": "recovered",
+                "total_queue_overflows": overflows,
+                "total_frames_dropped": dropped,
+            }
+        return None
 
     def _compute_health_snapshot(self, *, now_ns: int) -> dict[str, Any]:
         """Derive watchdog signals from FusionMetrics emission timestamps.

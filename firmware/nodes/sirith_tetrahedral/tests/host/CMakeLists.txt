@@ -19,3 +19,10 @@ if (NOT MSVC)
 endif()
 
 add_test(NAME clock_holdover_model COMMAND test_clock_holdover_model)
+
+add_executable(test_audio_transport_qos test_audio_transport_qos.cpp)
+target_include_directories(test_audio_transport_qos PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../include)
+if (NOT MSVC)
+  target_compile_options(test_audio_transport_qos PRIVATE -Wall -Wextra)
+endif()
+add_test(NAME audio_transport_qos COMMAND test_audio_transport_qos)

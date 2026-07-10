@@ -72,35 +72,59 @@ class LiveIngestState:
         self._environment_persistence_interval_ns = int(
             environment_persistence_interval_seconds * 1_000_000_000
         )
-        self._frame_keys_by_node: dict[str, OrderedDict[FrameIdentity, int]] = {}
+        self._completed_frame_keys_by_node: dict[str, OrderedDict[FrameIdentity, int]] = {}
+        self._reserved_frame_keys_by_node: dict[str, set[FrameIdentity]] = {}
         self._node_fingerprints: dict[str, str] = {}
         self._last_environment_bucket_by_node: dict[str, int] = {}
         self._audio_summaries_by_node: dict[str, dict[str, Any]] = {}
         self._lock = asyncio.Lock()
 
-    async def claim_processed_frame(self, identity: FrameIdentity) -> bool:
-        """Atomically claim a frame after successful decode/preprocessing.
+    async def reserve_frame(self, identity: FrameIdentity) -> bool:
+        """Reserve a frame until its buffer insertion commits or aborts.
 
-        ``True`` means this task owns downstream buffer insertion; ``False``
-        means another task already processed the same live frame.  The state is
-        deliberately process-local so a restart never turns old diagnostics into
-        durable packet-rate database writes.
+        A reservation prevents concurrent retransmits from being processed
+        twice, but deliberately does not turn an exception into permanent data
+        loss. Callers must commit after buffer insertion or release on failure.
         """
         now_ns = time.monotonic_ns()
         async with self._lock:
-            entries = self._frame_keys_by_node.setdefault(identity.node_id, OrderedDict())
+            entries = self._completed_frame_keys_by_node.setdefault(identity.node_id, OrderedDict())
+            reservations = self._reserved_frame_keys_by_node.setdefault(identity.node_id, set())
             expires_before_ns = now_ns - self._frame_dedup_window_ns
             while entries:
                 _, inserted_ns = next(iter(entries.items()))
                 if inserted_ns > expires_before_ns:
                     break
                 entries.popitem(last=False)
-            if identity in entries:
+            if identity in entries or identity in reservations:
                 return False
+            reservations.add(identity)
+            return True
+
+    async def commit_reserved_frame(self, identity: FrameIdentity) -> None:
+        """Mark a successfully buffered frame as a completed live ingest."""
+        now_ns = time.monotonic_ns()
+        async with self._lock:
+            reservations = self._reserved_frame_keys_by_node.setdefault(identity.node_id, set())
+            reservations.discard(identity)
+            entries = self._completed_frame_keys_by_node.setdefault(identity.node_id, OrderedDict())
             entries[identity] = now_ns
             while len(entries) > self._frame_dedup_max_entries_per_node:
                 entries.popitem(last=False)
-            return True
+
+    async def release_reserved_frame(self, identity: FrameIdentity) -> None:
+        """Allow a retransmit after processing failed before buffer insertion."""
+        async with self._lock:
+            reservations = self._reserved_frame_keys_by_node.get(identity.node_id)
+            if reservations is not None:
+                reservations.discard(identity)
+
+    async def claim_processed_frame(self, identity: FrameIdentity) -> bool:
+        """Compatibility helper for callers that have already completed work."""
+        if not await self.reserve_frame(identity):
+            return False
+        await self.commit_reserved_frame(identity)
+        return True
 
     async def should_persist_node_registration(self, node: NodeSpec) -> bool:
         """Persist only a new or materially reconfigured node registration."""

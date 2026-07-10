@@ -107,6 +107,51 @@ def test_ingest_health_classifies_gap_causes() -> None:
     assert classifier.observe(node_id="n1", sequence_gap_count=1, timing_diagnostics=server_gap)["verdict"] == "SERVER_GAP_ONLY"
 
 
+def test_ingest_health_ignores_boot_lifetime_high_water_after_recovery() -> None:
+    classifier = IngestHealthClassifier()
+    recovered = {
+        "runner_queue_overflows": 0,
+        "runner_frames_dropped": 0,
+        "runner_queue_depth": 2,
+        "transport_health": {
+            # This reproduces the prior incompatible 24 active+queued / 17
+            # queued-only report. It must stay diagnostic-only.
+            "queue_slots_high_water": 24,
+            "queue_slots_capacity": 17,
+            "boot_id": 44,
+        },
+    }
+    assert classifier.observe(node_id="n1", sequence_gap_count=0, timing_diagnostics=recovered)["verdict"] == "HEALTHY"
+
+    pressured = {**recovered, "runner_queue_depth": 23, "transport_health": {
+        **recovered["transport_health"], "queue_slots_capacity": 24,
+    }}
+    assert classifier.observe(node_id="n1", sequence_gap_count=0, timing_diagnostics=pressured)["verdict"] == "LOSSY_RATE_LIMITED"
+
+
+def test_firmware_runner_cbit_transitions_back_to_recovered_after_quiet_window() -> None:
+    fusion = object.__new__(FusionNode)
+    fusion._last_firmware_runner_counters = {}
+    fusion._firmware_transport_degraded_since_ns = {}
+    fusion._firmware_transport_recovery_ns = 0
+
+    baseline = {"runner_queue_overflows": 3, "runner_frames_dropped": 1}
+    assert fusion.observe_firmware_runner_stats("node-1", baseline) is None
+
+    degraded = fusion.observe_firmware_runner_stats(
+        "node-1", {"runner_queue_overflows": 4, "runner_frames_dropped": 1}
+    )
+    assert degraded is not None
+    assert degraded["state"] == "degraded"
+    assert degraded["new_queue_overflows"] == 1
+
+    recovered = fusion.observe_firmware_runner_stats(
+        "node-1", {"runner_queue_overflows": 4, "runner_frames_dropped": 1}
+    )
+    assert recovered is not None
+    assert recovered["state"] == "recovered"
+
+
 @pytest.mark.asyncio
 async def test_runner_stats_remain_in_live_audio_summary(tmp_path: Path) -> None:
     settings = Settings(

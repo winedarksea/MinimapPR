@@ -51,9 +51,9 @@ def runner_stats_from_timing_diagnostics(timing_diagnostics: dict | None) -> dic
 class IngestHealthClassifier:
     """Stateful per-node verdicts for sequence gaps and transport stress."""
 
-    def __init__(self, *, saturated_high_water_ratio: float = 0.95, weak_wifi_rssi_dbm: int = -75) -> None:
+    def __init__(self, *, saturated_current_queue_ratio: float = 0.95, weak_wifi_rssi_dbm: int = -75) -> None:
         self._snapshots: dict[str, IngestHealthSnapshot] = {}
-        self._saturated_high_water_ratio = saturated_high_water_ratio
+        self._saturated_current_queue_ratio = saturated_current_queue_ratio
         self._weak_wifi_rssi_dbm = weak_wifi_rssi_dbm
 
     def observe(
@@ -65,7 +65,11 @@ class IngestHealthClassifier:
     ) -> dict[str, Any]:
         transport_health = {}
         if isinstance(timing_diagnostics, dict) and isinstance(timing_diagnostics.get("transport_health"), dict):
-            transport_health = timing_diagnostics["transport_health"]
+            transport_health = dict(timing_diagnostics["transport_health"])
+        if isinstance(timing_diagnostics, dict):
+            queue_depth = self._optional_int(timing_diagnostics.get("runner_queue_depth"))
+            if queue_depth is not None:
+                transport_health["current_queue_depth"] = queue_depth
 
         current_counters = self._extract_counters(timing_diagnostics)
         current_boot_id = self._optional_int(transport_health.get("boot_id"))
@@ -119,17 +123,18 @@ class IngestHealthClassifier:
         if deltas.get("runner_frames_dropped", 0) > 0 or deltas.get("runner_queue_overflows", 0) > 0:
             return True
 
-        for high_key, cap_key in (
-            ("ring_frames_high_water", "ring_frames_capacity"),
-            ("queue_slots_high_water", "queue_slots_capacity"),
-        ):
-            high_water = self._optional_int(transport_health.get(high_key))
-            capacity = self._optional_int(transport_health.get(cap_key))
-            if high_water is None or capacity is None or capacity <= 0:
-                continue
-            if high_water >= int(capacity * self._saturated_high_water_ratio):
-                return True
-        return False
+        # High-water marks are boot-lifetime diagnostics. Using them as current
+        # pressure keeps a node degraded forever after a single burst. The
+        # firmware reports current depth on every packet and advertises a
+        # capacity including the active publish batch.
+        queue_depth = self._optional_int(transport_health.get("current_queue_depth"))
+        capacity = self._optional_int(transport_health.get("queue_slots_capacity"))
+        return (
+            queue_depth is not None
+            and capacity is not None
+            and capacity > 0
+            and queue_depth >= int(capacity * self._saturated_current_queue_ratio)
+        )
 
     def _wifi_loss(self, *, deltas: dict[str, int], transport_health: dict[str, Any]) -> bool:
         publish_delta = (

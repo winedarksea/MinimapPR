@@ -20,7 +20,15 @@ struct RunnerStats {
   uint64_t packetContinuityViolations = 0;
   uint64_t queueOverflows = 0;
   uint64_t discardedBatches = 0;
+  uint32_t queuedPacketDepth = 0;
+  uint32_t queuedPacketCapacity = 0;
+  uint32_t activePublishPacketDepth = 0;
+  uint32_t activePublishPacketCapacity = 0;
   uint32_t queueDepth = 0;
+  uint64_t lastPacketAgeUs = 0;
+  uint32_t lastAudioDrainDurationUs = 0;
+  uint32_t lastPublisherPumpDurationUs = 0;
+  uint32_t lastHoldoverMaintenanceDurationUs = 0;
   int lastPublishStatus = 0;
   PublishFailureStage lastPublishFailureStage = PublishFailureStage::kNone;
   int32_t lastPublishLwipError = 0;
@@ -56,7 +64,8 @@ class NodeRunner {
       size_t publishBatchByteBudget = 0,
       bool usePublishBatchByteBudget = false,
       size_t queueSlots = 0,
-      uint32_t publishBatchMaxRetries = 1);
+      uint32_t publishBatchMaxRetries = 1,
+      bool enableClockHoldoverMaintenance = true);
 
   bool begin(
       bool syncNtp,
@@ -67,6 +76,12 @@ class NodeRunner {
   void loopOnce();
 
   const RunnerStats& stats() const { return stats_; }
+  bool shouldDeferAuxiliaryTransport(
+      uint32_t nowMs,
+      uint32_t queueHighWaterPackets,
+      uint32_t queueLowWaterPackets,
+      uint32_t packetAgeLimitMs,
+      uint32_t recoveryCooldownMs) const;
 
  private:
   struct QueuedAudioPacket {
@@ -84,7 +99,7 @@ class NodeRunner {
       const EnvironmentalSample* environmentalSample);
   void dropOldestQueuedPacket();
   bool popQueuedPacket(QueuedAudioPacket& packet);
-  AudioFrame buildFrameForPacket(const QueuedAudioPacket& packet, uint64_t publishMonotonicUs) const;
+  AudioFrame buildFrameForPacket(const QueuedAudioPacket& packet, uint64_t publishMonotonicUs);
   bool fillActivePublishBatch();
   void clearActivePublishBatch();
   void drainAvailableAudioFrames();
@@ -98,6 +113,7 @@ class NodeRunner {
   uint32_t adaptivePublishBackoffMs() const;
   bool shouldBypassAdaptiveBackoff() const;
   uint32_t effectiveQueueDepth() const;
+  uint32_t effectiveQueueCapacity() const;
   void refreshSlowTelemetry(uint32_t nowMs);
 
   const NodeDescriptor& descriptor_;
@@ -136,6 +152,8 @@ class NodeRunner {
   uint32_t activeBatchAttempts_ = 0;
   uint32_t publishBatchMaxRetries_ = 1;
   uint32_t lastTelemetryRefreshMs_ = 0;
+  uint32_t lastAudioTransportFailureMs_ = 0;
+  bool enableClockHoldoverMaintenance_ = true;
 
   RunnerStats stats_ = {};
 };

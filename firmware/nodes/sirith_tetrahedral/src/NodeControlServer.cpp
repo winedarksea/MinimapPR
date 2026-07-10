@@ -324,7 +324,11 @@ bool NodeControlServer::prepareStatsBody(char* bodyBuffer, size_t bodyBufferByte
       "{\"frames_captured\":%llu,\"frames_published\":%llu,\"frames_dropped\":%llu,"
       "\"publish_errors\":%llu,\"packet_continuity_violations\":%llu,"
       "\"queue_overflows\":%llu,\"discarded_batches\":%llu,\"queue_depth\":%u,\"queue_slots_high_water\":%u,"
-      "\"queue_slots_capacity\":%u,\"ring_frames_high_water\":%u,\"ring_frames_capacity\":%u,"
+      "\"queue_slots_capacity\":%u,\"queued_packet_depth\":%u,\"queued_packet_capacity\":%u,"
+      "\"active_publish_packet_depth\":%u,\"active_publish_packet_capacity\":%u,\"last_packet_age_us\":%llu,"
+      "\"last_audio_drain_duration_us\":%u,\"last_publisher_pump_duration_us\":%u,"
+      "\"last_holdover_maintenance_duration_us\":%u,"
+      "\"ring_frames_high_water\":%u,\"ring_frames_capacity\":%u,"
       "\"last_publish_status\":%d,\"last_publish_failure_stage\":%u,"
       "\"last_publish_lwip_error\":%ld,\"consecutive_publish_failures\":%u,"
       "\"publish_latency_last_ms\":%u,\"publish_latency_ewma_ms\":%u,"
@@ -340,6 +344,14 @@ bool NodeControlServer::prepareStatsBody(char* bodyBuffer, size_t bodyBufferByte
       static_cast<unsigned>(stats.queueDepth),
       static_cast<unsigned>(stats.queueSlotsHighWater),
       static_cast<unsigned>(stats.queueSlotsCapacity),
+      static_cast<unsigned>(stats.queuedPacketDepth),
+      static_cast<unsigned>(stats.queuedPacketCapacity),
+      static_cast<unsigned>(stats.activePublishPacketDepth),
+      static_cast<unsigned>(stats.activePublishPacketCapacity),
+      static_cast<unsigned long long>(stats.lastPacketAgeUs),
+      static_cast<unsigned>(stats.lastAudioDrainDurationUs),
+      static_cast<unsigned>(stats.lastPublisherPumpDurationUs),
+      static_cast<unsigned>(stats.lastHoldoverMaintenanceDurationUs),
       static_cast<unsigned>(stats.ringFramesHighWater),
       static_cast<unsigned>(stats.ringFramesCapacity),
       stats.lastPublishStatus,
@@ -381,12 +393,15 @@ bool NodeControlServer::prepareStatsBody(char* bodyBuffer, size_t bodyBufferByte
         bodyBuffer + usedBytes - 1u,
         bodyBufferBytes - usedBytes + 1u,
         ",\"ble_reports\":{\"reports_sent\":%llu,\"reports_dropped\":%llu,"
-        "\"report_publish_errors\":%llu,\"last_report_observation_count\":%lu,"
+        "\"report_publish_errors\":%llu,\"reports_deferred_for_audio\":%llu,"
+        "\"last_report_observation_count\":%lu,\"last_poll_duration_us\":%lu,"
         "\"last_report_status\":%lu}}",
         static_cast<unsigned long long>(ble.reportsSent),
         static_cast<unsigned long long>(ble.reportsDropped),
         static_cast<unsigned long long>(ble.reportPublishErrors),
+        static_cast<unsigned long long>(ble.reportsDeferredForAudio),
         static_cast<unsigned long>(ble.lastReportObservationCount),
+        static_cast<unsigned long>(ble.lastPollDurationUs),
         static_cast<unsigned long>(ble.lastReportStatus));
     if (written <= 0 || static_cast<size_t>(written) >= bodyBufferBytes - usedBytes + 1u) {
       return false;

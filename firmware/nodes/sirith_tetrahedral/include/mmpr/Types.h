@@ -112,6 +112,7 @@ struct AudioFrame {
   int8_t wifiRssiDbm = 0;
   uint32_t heapFreeBytes = 0;
   uint32_t bootId = 0;
+  bool hasClockHoldoverDiagnostics = false;
   // Clock holdover diagnostics (telemetry only). Appended at the struct tail so
   // the positional aggregate init in NodeRunner stays valid; these are assigned
   // by name after that init.

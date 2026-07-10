@@ -328,6 +328,22 @@ def test_parse_binary_ingest_payload_mmb3_parses_clock_holdover_section() -> Non
     assert clock_holdover["temp_resid_rms_ppm"] == pytest.approx(0.05)
 
 
+def test_parse_binary_ingest_payload_mmb3_accepts_holdover_gate_without_section() -> None:
+    geo = GeoPoint(lat=44.987, lon=-93.258, alt_m=281.5)
+
+    payload = parse_binary_ingest_payload(
+        _binary_ingest_payload_mmb3(
+            position_source="gps_nmea_uart",
+            geo=geo,
+            include_clock_holdover=False,
+        )
+    )
+
+    timing = payload.buffered_frames[0].frame.timing_diagnostics
+    assert "clock_holdover" not in timing
+    assert timing["transport_health"]["queue_slots_capacity"] == 40
+
+
 def test_parse_binary_ingest_payload_mmb3_skips_unknown_section_without_raising() -> None:
     geo = GeoPoint(lat=44.987, lon=-93.258, alt_m=281.5)
 

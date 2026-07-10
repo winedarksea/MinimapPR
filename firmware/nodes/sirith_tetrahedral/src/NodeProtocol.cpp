@@ -244,7 +244,7 @@ bool appendBinaryFrameHeader(
     sectionFlags |= 0x0002u;
   }
   sectionFlags |= 0x0004u;
-  if (frame.hasTimingDiagnostics) {
+  if (frame.hasClockHoldoverDiagnostics) {
     sectionFlags |= 0x0010u;
   }
   appendLeU16(out, sectionFlags);

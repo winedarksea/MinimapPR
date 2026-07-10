@@ -339,14 +339,20 @@ mmpr::NodeRunner gRunner(
     nodecfg::kPublishBatchByteBudget,
     nodecfg::kUsePublishBatchByteBudget,
     nodecfg::kAudioQueueSlots,
-    nodecfg::kPublishBatchMaxRetries);
+    nodecfg::kPublishBatchMaxRetries,
+    nodecfg::kEnableClockHoldoverMaintenance);
 
 mmpr::BleReportPublisher gBleReportPublisher(
     gBleHttpPublisher,
     gBleScanner,
     gNodeDescriptor,
     nodecfg::kBleReportIntervalMs,
-    nodecfg::kBleReportMaxObservations);
+    nodecfg::kBleReportMaxObservations,
+    &gRunner,
+    nodecfg::kBleAudioQueueHighWaterPackets,
+    nodecfg::kBleAudioQueueLowWaterPackets,
+    nodecfg::kBleAudioPacketAgeLimitMs,
+    nodecfg::kBleAudioRecoveryCooldownMs);
 
 mmpr::GpsRuntimeStats gGpsRuntimeStats = {};
 

@@ -1,6 +1,10 @@
 #include "mmpr/BleReportPublisher.h"
 
+#include "mmpr/NodeRunner.h"
+
 #include <algorithm>
+
+#include "pico/time.h"
 
 namespace mmpr {
 namespace {
@@ -16,14 +20,25 @@ BleReportPublisher::BleReportPublisher(
     BleRssiScanner& scanner,
     const NodeDescriptor& node,
     uint32_t reportIntervalMs,
-    size_t maxObservations)
+    size_t maxObservations,
+    const NodeRunner* audioRunner,
+    uint32_t audioQueueHighWaterPackets,
+    uint32_t audioQueueLowWaterPackets,
+    uint32_t audioPacketAgeLimitMs,
+    uint32_t audioRecoveryCooldownMs)
     : publisher_(publisher),
       scanner_(scanner),
       node_(node),
       reportIntervalMs_(reportIntervalMs),
-      maxObservations_(std::min<size_t>(maxObservations, 48)) {}
+      maxObservations_(std::min<size_t>(maxObservations, 48)),
+      audioRunner_(audioRunner),
+      audioQueueHighWaterPackets_(audioQueueHighWaterPackets),
+      audioQueueLowWaterPackets_(audioQueueLowWaterPackets),
+      audioPacketAgeLimitMs_(audioPacketAgeLimitMs),
+      audioRecoveryCooldownMs_(audioRecoveryCooldownMs) {}
 
 void BleReportPublisher::poll(uint32_t nowMs, uint32_t bootId) {
+  const uint64_t startedUs = time_us_64();
   scanner_.poll();
 
   PublishResult result = {};
@@ -38,9 +53,21 @@ void BleReportPublisher::poll(uint32_t nowMs, uint32_t bootId) {
   }
 
   if (publishInFlight_ || publisher_.publishInProgress()) {
+    stats_.lastPollDurationUs = static_cast<uint32_t>(time_us_64() - startedUs);
+    return;
+  }
+  if (audioRunner_ != nullptr && audioRunner_->shouldDeferAuxiliaryTransport(
+          nowMs,
+          audioQueueHighWaterPackets_,
+          audioQueueLowWaterPackets_,
+          audioPacketAgeLimitMs_,
+          audioRecoveryCooldownMs_)) {
+    ++stats_.reportsDeferredForAudio;
+    stats_.lastPollDurationUs = static_cast<uint32_t>(time_us_64() - startedUs);
     return;
   }
   if (nextReportMs_ != 0 && !deadlineReached(nowMs, nextReportMs_)) {
+    stats_.lastPollDurationUs = static_cast<uint32_t>(time_us_64() - startedUs);
     return;
   }
   nextReportMs_ = nowMs + reportIntervalMs_;
@@ -49,22 +76,26 @@ void BleReportPublisher::poll(uint32_t nowMs, uint32_t bootId) {
   uint32_t observationCount = 0;
   if (!buildReportJson(nowMs, bootId, json, observationCount)) {
     ++stats_.reportsDropped;
+    stats_.lastPollDurationUs = static_cast<uint32_t>(time_us_64() - startedUs);
     return;
   }
   stats_.lastReportObservationCount = observationCount;
   if (observationCount == 0) {
+    stats_.lastPollDurationUs = static_cast<uint32_t>(time_us_64() - startedUs);
     return;
   }
 
   PublishResult immediateResult = {};
   if (publisher_.beginJsonPost(json, false, immediateResult)) {
     publishInFlight_ = true;
+    stats_.lastPollDurationUs = static_cast<uint32_t>(time_us_64() - startedUs);
     return;
   }
   stats_.lastReportStatus = static_cast<uint32_t>(immediateResult.statusCode);
   if (!immediateResult.ok) {
     ++stats_.reportPublishErrors;
   }
+  stats_.lastPollDurationUs = static_cast<uint32_t>(time_us_64() - startedUs);
 }
 
 bool BleReportPublisher::buildReportJson(

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <vector>
 
+#include "mmpr/AudioTransportQos.h"
 #include "pico/cyw43_arch.h"
 #include "pico/time.h"
 
@@ -43,7 +44,8 @@ NodeRunner::NodeRunner(
     size_t publishBatchByteBudget,
     bool usePublishBatchByteBudget,
     size_t queueSlots,
-    uint32_t publishBatchMaxRetries)
+    uint32_t publishBatchMaxRetries,
+    bool enableClockHoldoverMaintenance)
     : descriptor_(descriptor),
       audioSource_(audioSource),
       publisher_(publisher),
@@ -56,6 +58,7 @@ NodeRunner::NodeRunner(
       publishBatchByteBudget_(publishBatchByteBudget > 0 ? publishBatchByteBudget : kDefaultPublishBatchByteBudget) {
   usePublishBatchByteBudget_ = usePublishBatchByteBudget;
   publishBatchMaxRetries_ = publishBatchMaxRetries;
+  enableClockHoldoverMaintenance_ = enableClockHoldoverMaintenance;
   stats_.queueSlotsCapacity = static_cast<uint32_t>(queueSlots > 0 ? queueSlots : kDefaultQueuedPacketSlots);
 }
 
@@ -127,6 +130,8 @@ bool NodeRunner::begin(bool syncNtp, const char* ntpServer, long gmtOffsetSecond
     publishEnvironmentScratch_.reserve(activePublishPackets_.size());
   }
   stats_.queueSlotsCapacity = static_cast<uint32_t>(queuedPackets_.size());
+  stats_.queuedPacketCapacity = stats_.queueSlotsCapacity;
+  stats_.activePublishPacketCapacity = static_cast<uint32_t>(activePublishPackets_.size());
   stats_.ringFramesCapacity = audioSource_.ringFramesCapacity();
   stats_.ringFramesHighWater = audioSource_.ringFramesHighWater();
 
@@ -175,9 +180,10 @@ bool NodeRunner::enqueueCurrentPacket(
     packet.environmentalSample = *environmentalSample;
   }
   ++queueDepth_;
+  stats_.queuedPacketDepth = static_cast<uint32_t>(queueDepth_);
   stats_.queueDepth = effectiveQueueDepth();
-  if (stats_.queueDepth > stats_.queueSlotsHighWater) {
-    stats_.queueSlotsHighWater = stats_.queueDepth;
+  if (stats_.queuedPacketDepth > stats_.queueSlotsHighWater) {
+    stats_.queueSlotsHighWater = stats_.queuedPacketDepth;
   }
 
   packetOpen_ = false;
@@ -193,6 +199,7 @@ void NodeRunner::dropOldestQueuedPacket() {
   }
   queueHead_ = (queueHead_ + 1u) % queuedPackets_.size();
   --queueDepth_;
+  stats_.queuedPacketDepth = static_cast<uint32_t>(queueDepth_);
   ++stats_.queueOverflows;
 }
 
@@ -205,6 +212,7 @@ bool NodeRunner::popQueuedPacket(QueuedAudioPacket& packet) {
   queuedPackets_[queueHead_].hasEnvironmentalSample = false;
   queueHead_ = (queueHead_ + 1u) % queuedPackets_.size();
   --queueDepth_;
+  stats_.queuedPacketDepth = static_cast<uint32_t>(queueDepth_);
   stats_.queueDepth = effectiveQueueDepth();
   return true;
 }
@@ -213,7 +221,31 @@ uint32_t NodeRunner::effectiveQueueDepth() const {
   return static_cast<uint32_t>(queueDepth_ + (activePublishBatchValid_ ? activePublishBatchSize_ : 0u));
 }
 
-AudioFrame NodeRunner::buildFrameForPacket(const QueuedAudioPacket& packet, uint64_t publishMonotonicUs) const {
+uint32_t NodeRunner::effectiveQueueCapacity() const {
+  return static_cast<uint32_t>(queuedPackets_.size() + activePublishPackets_.size());
+}
+
+bool NodeRunner::shouldDeferAuxiliaryTransport(
+    uint32_t nowMs,
+    uint32_t queueHighWaterPackets,
+    uint32_t queueLowWaterPackets,
+    uint32_t packetAgeLimitMs,
+    uint32_t recoveryCooldownMs) const {
+  return mmpr::shouldDeferAuxiliaryTransport({
+      publisher_.publishInProgress(),
+      static_cast<uint32_t>(queueDepth_),
+      stats_.lastPacketAgeUs,
+      lastAudioTransportFailureMs_ != 0,
+      lastAudioTransportFailureMs_,
+      nowMs,
+      queueHighWaterPackets,
+      queueLowWaterPackets,
+      packetAgeLimitMs,
+      recoveryCooldownMs,
+  });
+}
+
+AudioFrame NodeRunner::buildFrameForPacket(const QueuedAudioPacket& packet, uint64_t publishMonotonicUs) {
   // Stamp TOA from the current UTC epoch plus the DMA-captured monotonic age of
   // the packet. This keeps recent audio tied to the clock correction that is
   // valid at publish time while preserving the precise capture offset.
@@ -275,7 +307,7 @@ AudioFrame NodeRunner::buildFrameForPacket(const QueuedAudioPacket& packet, uint
       audioSource_.ringFramesHighWater(),
       audioSource_.ringFramesCapacity(),
       stats_.queueSlotsHighWater,
-      stats_.queueSlotsCapacity,
+      effectiveQueueCapacity(),
       stats_.publishLatencyLastMs,
       stats_.publishLatencyEwmaMs,
       stats_.publishLatencyMaxMs,
@@ -286,6 +318,7 @@ AudioFrame NodeRunner::buildFrameForPacket(const QueuedAudioPacket& packet, uint
   // Holdover diagnostics are tail-appended fields; assign by name after the
   // positional aggregate init above.
   frame.holdoverActive = timingDiagnostics.holdoverActive;
+  frame.hasClockHoldoverDiagnostics = enableClockHoldoverMaintenance_;
   frame.holdoverAgeMs = timingDiagnostics.holdoverAgeMs;
   frame.predictedErrorNs = timingDiagnostics.predictedErrorNs;
   frame.ltValid = timingDiagnostics.ltValid;
@@ -295,6 +328,7 @@ AudioFrame NodeRunner::buildFrameForPacket(const QueuedAudioPacket& packet, uint
   frame.tempCompApplied = timingDiagnostics.tempCompApplied;
   frame.tempSlopePpmPerC = static_cast<float>(timingDiagnostics.tempSlopePpmPerC);
   frame.tempResidRmsPpm = static_cast<float>(timingDiagnostics.tempResidRmsPpm);
+  stats_.lastPacketAgeUs = packetAgeNs / 1000ULL;
   return frame;
 }
 
@@ -327,6 +361,8 @@ bool NodeRunner::fillActivePublishBatch() {
     ++activePublishBatchSize_;
   }
   activePublishBatchValid_ = activePublishBatchSize_ > 0;
+  stats_.activePublishPacketDepth = static_cast<uint32_t>(activePublishBatchSize_);
+  stats_.queuedPacketDepth = static_cast<uint32_t>(queueDepth_);
   stats_.queueDepth = effectiveQueueDepth();
   return activePublishBatchValid_;
 }
@@ -338,6 +374,7 @@ void NodeRunner::clearActivePublishBatch() {
   }
   activePublishBatchSize_ = 0;
   activePublishBatchValid_ = false;
+  stats_.activePublishPacketDepth = 0;
   activeBatchAttempts_ = 0;
   stats_.queueDepth = effectiveQueueDepth();
 }
@@ -388,7 +425,11 @@ void NodeRunner::refreshSlowTelemetry(uint32_t nowMs) {
   lastTelemetryRefreshMs_ = nowMs;
   // Holdover maintenance runs at this slow cadence (never per loop iteration).
   // maintain() fast-exits on a couple of integer compares while PPS is fresh.
-  clock_.maintain(time_us_64());
+  if (enableClockHoldoverMaintenance_) {
+    const uint64_t startedUs = time_us_64();
+    clock_.maintain(time_us_64());
+    stats_.lastHoldoverMaintenanceDurationUs = static_cast<uint32_t>(time_us_64() - startedUs);
+  }
   // cyw43_wifi_get_rssi() is a blocking SPI ioctl that can stall long enough
   // to overrun the DMA capture ring. Keep Wi-Fi RSSI at its last known value
   // until a non-audio telemetry path can sample it safely.
@@ -407,6 +448,7 @@ void NodeRunner::onPublishFailure(const PublishResult& result, uint32_t nowMs) {
   ++stats_.publishErrors;
   ++stats_.consecutivePublishFailures;
   ++activeBatchAttempts_;
+  lastAudioTransportFailureMs_ = nowMs;
   stats_.lastPublishFailureStage = result.failureStage;
   stats_.lastPublishLwipError = result.lwipError;
 
@@ -679,8 +721,12 @@ void NodeRunner::loopOnce() {
   }
 
   const uint32_t nowMs = to_ms_since_boot(get_absolute_time());
+  const uint64_t drainStartedUs = time_us_64();
   drainAvailableAudioFrames();
+  stats_.lastAudioDrainDurationUs = static_cast<uint32_t>(time_us_64() - drainStartedUs);
+  const uint64_t publisherStartedUs = time_us_64();
   pumpPublisher();
+  stats_.lastPublisherPumpDurationUs = static_cast<uint32_t>(time_us_64() - publisherStartedUs);
   refreshSlowTelemetry(nowMs);
 
   if (logEveryFrames_ > 0 &&

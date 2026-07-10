@@ -33,6 +33,20 @@ async def test_live_frame_claim_is_atomic_and_process_local() -> None:
 
 
 @pytest.mark.asyncio
+async def test_reserved_frame_is_retryable_until_buffer_insertion_commits() -> None:
+    state = LiveIngestState()
+    identity = _identity()
+
+    assert await state.reserve_frame(identity)
+    assert not await state.reserve_frame(identity)
+
+    await state.release_reserved_frame(identity)
+    assert await state.reserve_frame(identity)
+    await state.commit_reserved_frame(identity)
+    assert not await state.reserve_frame(identity)
+
+
+@pytest.mark.asyncio
 async def test_environment_persistence_is_limited_to_one_sample_per_minute() -> None:
     state = LiveIngestState(environment_persistence_interval_seconds=60.0)
 

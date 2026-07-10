@@ -1689,32 +1689,24 @@ async def ingest_binary(request: Request) -> StoreForwardIngestResponse:
 
 
 async def _emit_runner_cbit(state, node_id: str, delta: dict, timing_diag: dict) -> None:
-    """Submit a CBIT report on behalf of a node when firmware drop counters increase."""
-    new_overflows = delta["new_queue_overflows"]
-    total_overflows = delta["total_queue_overflows"]
-    results: list[BITTestResult] = [
-        BITTestResult(
-            test_name="publish_queue",
-            status=BITStatus.DEGRADED,
-            failure_code="CBIT_WARN: PUBLISH_QUEUE_OVERFLOW",
-            detail=(
-                f"{new_overflows} new firmware publish-queue overflow(s) detected "
-                f"({total_overflows} total since boot)"
+    """Submit an edge-triggered CBIT degradation or recovery for firmware transport."""
+    if delta.get("state") == "recovered":
+        results = [
+            BITTestResult(
+                test_name="publish_queue",
+                status=BITStatus.PASS,
+                detail="No new firmware queue overflows or capture drops during recovery window",
+                subsystem="audio",
             ),
-            measured_value=float(new_overflows),
-            subsystem="audio",
-        )
-    ]
-    frames_dropped = int(timing_diag.get("runner_frames_dropped") or 0)
-    if frames_dropped:
-        results.append(BITTestResult(
-            test_name="audio_capture",
-            status=BITStatus.DEGRADED,
-            failure_code="CBIT_WARN: AUDIO_CAPTURE_DROPPED",
-            detail=f"{frames_dropped} total audio capture drops since boot",
-            measured_value=float(frames_dropped),
-            subsystem="audio",
-        ))
+            BITTestResult(
+                test_name="audio_capture",
+                status=BITStatus.PASS,
+                detail="Firmware capture transport recovered",
+                subsystem="audio",
+            ),
+        ]
+    else:
+        results = _runner_degraded_cbit_results(delta, timing_diag)
     now_ns = time.time_ns()
     report_in = BITReportIn(
         report_type=BITType.CBIT,
@@ -1745,6 +1737,36 @@ async def _emit_runner_cbit(state, node_id: str, delta: dict, timing_diag: dict)
             "timestamp_ns": report.timestamp_ns,
         }
     )
+
+
+def _runner_degraded_cbit_results(delta: dict, timing_diag: dict) -> list[BITTestResult]:
+    """Build degradation results without retaining a stale CBIT after recovery."""
+    new_overflows = delta["new_queue_overflows"]
+    total_overflows = delta["total_queue_overflows"]
+    results: list[BITTestResult] = []
+    if new_overflows:
+        results.append(BITTestResult(
+            test_name="publish_queue",
+            status=BITStatus.DEGRADED,
+            failure_code="CBIT_WARN: PUBLISH_QUEUE_OVERFLOW",
+            detail=(
+                f"{new_overflows} new firmware publish-queue overflow(s) detected "
+                f"({total_overflows} total since boot)"
+            ),
+            measured_value=float(new_overflows),
+            subsystem="audio",
+        ))
+    frames_dropped = int(timing_diag.get("runner_frames_dropped") or 0)
+    if delta.get("new_frames_dropped", 0) > 0:
+        results.append(BITTestResult(
+            test_name="audio_capture",
+            status=BITStatus.DEGRADED,
+            failure_code="CBIT_WARN: AUDIO_CAPTURE_DROPPED",
+            detail=f"{frames_dropped} total audio capture drops since boot",
+            measured_value=float(frames_dropped),
+            subsystem="audio",
+        ))
+    return results
 
 
 async def _ingest_binary_impl(state, request: Request) -> StoreForwardIngestResponse:
