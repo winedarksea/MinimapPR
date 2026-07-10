@@ -19,6 +19,26 @@ test("covariance ellipse produces a closed polygon", () => {
   assert.ok(Math.abs(coordinates[0][1] - coordinates[coordinates.length - 1][1]) < 1e-12);
 });
 
+test("covariance ellipse preserves an anisotropic covariance shape", () => {
+  const centerLat = 44.987;
+  const centerLon = -93.258;
+  const coordinates = globalThis.mapInterop._test.covarianceEllipseCoordinates(
+    centerLat,
+    centerLon,
+    [[100, 0], [0, 4]],
+  );
+  const eastRadiusDegrees = Math.abs(coordinates[0][0] - centerLon);
+  const northPoint = coordinates[18];
+  const northRadiusDegrees = Math.abs(northPoint[1] - centerLat);
+
+  // The expected axes are 10 m east/west and 2 m north/south.  Longitude
+  // degrees are shorter at this latitude, so compare after the conversion.
+  const eastRadiusM = eastRadiusDegrees * 111_320 * Math.cos(centerLat * Math.PI / 180);
+  const northRadiusM = northRadiusDegrees * 111_320;
+  assert.ok(Math.abs(eastRadiusM - 10) < 0.01);
+  assert.ok(Math.abs(northRadiusM - 2) < 0.01);
+});
+
 test("invalid covariance is ignored", () => {
   assert.equal(
     globalThis.mapInterop._test.covarianceEllipseCoordinates(44.987, -93.258, null),

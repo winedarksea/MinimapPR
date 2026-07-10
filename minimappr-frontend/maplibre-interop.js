@@ -849,14 +849,33 @@
     const coordinates = covarianceEllipseCoordinates(lat, lon, covariance);
     if (!coordinates) return;
     const layerId = "uncertainty:" + kind + ":" + id;
+    const outlineLayerId = layerId + "-outline";
     const color = kind === "detection" ? palette().detection : palette().track;
     const data = { type: "FeatureCollection", features: [{ type: "Feature", geometry: { type: "Polygon", coordinates: [coordinates] }, properties: {} }] };
+
+    // The generic selection ring has a fixed radius.  Once we have covariance,
+    // it must give way to the actual confidence contour or it visually disguises
+    // a small or elongated ellipse as a constant-sized circle.
+    const highlightLayerId = "highlight:" + kind + ":" + id;
+    if (_highlightRing === highlightLayerId) {
+      removeLayer(highlightLayerId);
+      removeLayer(highlightLayerId + "-line");
+      _highlightRing = null;
+    }
+
     upsertGeojsonLayer(layerId, layerId, data, { type: "fill", paint: { "fill-color": color, "fill-opacity": 0.14 } });
+    upsertGeojsonLayer(layerId, outlineLayerId, data, {
+      type: "line",
+      paint: { "line-color": color, "line-opacity": 0.9, "line-width": 2 },
+    });
     _ellipses[layerId] = true;
   }
 
   function clearAllCopUncertainty() {
-    Object.keys(_ellipses).forEach(removeLayer);
+    Object.keys(_ellipses).forEach(function (layerId) {
+      removeLayer(layerId + "-outline");
+      removeLayer(layerId);
+    });
     Object.keys(_ellipses).forEach(function (id) { delete _ellipses[id]; });
   }
 
