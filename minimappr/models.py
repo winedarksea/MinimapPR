@@ -142,7 +142,10 @@ class ClusterSpec(BaseModel):
 class GeoPoint(BaseModel):
     lat: float = Field(ge=-90.0, le=90.0)
     lon: float = Field(ge=-180.0, le=180.0)
-    alt_m: float = 0.0
+    # Earth surface through the Kármán line. Acoustic detections cannot be
+    # physically meaningful outside this envelope, and bounding it keeps corrupt
+    # local-to-geographic conversions from entering persistence or API payloads.
+    alt_m: float = Field(default=0.0, ge=-12_000.0, le=100_000.0)
 
 
 class NodeOrientation(BaseModel):

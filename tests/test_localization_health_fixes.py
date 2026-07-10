@@ -129,17 +129,18 @@ def test_mobile_node_still_uses_reactive_q() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Fix 2: local_to_geo clamp guard
+# Fix 2: local_to_geo real-world bounds guard
 # --------------------------------------------------------------------------- #
 
 
 def test_local_to_geo_clamps_out_of_range_position() -> None:
-    """An absurd local position must produce a clamped GeoPoint, not raise."""
+    """An absurd local position must produce an Earth-bounded GeoPoint, not raise."""
     frame = LocalCoordinateFrame(origin=GeoPoint(lat=44.98, lon=-93.26, alt_m=250.0), mode="flat")
     # ~1e7 m east/north drives lat/lon far outside valid bounds.
-    geo = frame.local_to_geo((50_000_000.0, 50_000_000.0, 0.0))
+    geo = frame.local_to_geo((50_000_000.0, 50_000_000.0, 500_000.0))
     assert -90.0 <= geo.lat <= 90.0
     assert -180.0 <= geo.lon <= 180.0
+    assert -12_000.0 <= geo.alt_m <= 100_000.0
 
 
 def test_local_to_geo_normal_position_unchanged() -> None:

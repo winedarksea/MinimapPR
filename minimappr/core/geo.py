@@ -13,19 +13,22 @@ from minimappr.models import GeoPoint, Vec3
 WGS84_A = 6378137.0
 WGS84_F = 1.0 / 298.257223563
 WGS84_E2 = WGS84_F * (2.0 - WGS84_F)
+MIN_REAL_WORLD_ALTITUDE_M = -12_000.0
+MAX_REAL_WORLD_ALTITUDE_M = 100_000.0
 
 
 def _safe_geo_point(lat: float, lon: float, alt_m: float) -> GeoPoint:
-    """Build a GeoPoint, clamping lat/lon into valid WGS84 ranges.
+    """Build a GeoPoint within the physically reachable Earth envelope.
 
     A pathological local position (e.g. an unphysical localization that escaped the
-    sanity gate) can convert to lat/lon outside [-90, 90] / [-180, 180], which would
-    raise a Pydantic ValidationError and abort the whole localization. Clamping keeps
-    the pipeline alive; a clamped point is obviously wrong but non-fatal.
+    sanity gate) can convert outside the WGS84 latitude/longitude limits or beyond
+    the Earth-surface-to-Kármán-line altitude envelope. Clamping keeps the pipeline
+    alive; upstream localization gates decide whether the result is reportable.
     """
     clamped_lat = min(90.0, max(-90.0, lat))
     clamped_lon = min(180.0, max(-180.0, lon))
-    return GeoPoint(lat=clamped_lat, lon=clamped_lon, alt_m=alt_m)
+    clamped_alt_m = min(MAX_REAL_WORLD_ALTITUDE_M, max(MIN_REAL_WORLD_ALTITUDE_M, alt_m))
+    return GeoPoint(lat=clamped_lat, lon=clamped_lon, alt_m=clamped_alt_m)
 
 
 def _lla_to_ecef(lat_deg: float, lon_deg: float, alt_m: float) -> np.ndarray:
