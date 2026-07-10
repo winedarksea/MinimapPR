@@ -152,6 +152,10 @@ enum class AudioDataPinBias : uint8_t {
 #define MMPR_NODECFG_BLE_REPORT_MAX_OBSERVATIONS 48
 #endif
 
+#ifndef MMPR_NODECFG_BLE_SERVER_BASE_URL
+#define MMPR_NODECFG_BLE_SERVER_BASE_URL "http://192.168.8.165:8080"
+#endif
+
 #ifndef MMPR_NODECFG_BLE_INGEST_PATH
 #define MMPR_NODECFG_BLE_INGEST_PATH "/api/v1/ingest/ble"
 #endif
@@ -300,6 +304,7 @@ static constexpr uint16_t kBleScanIntervalUnits = MMPR_NODECFG_BLE_SCAN_INTERVAL
 static constexpr uint16_t kBleScanWindowUnits = MMPR_NODECFG_BLE_SCAN_WINDOW_UNITS;
 static constexpr uint32_t kBleReportIntervalMs = MMPR_NODECFG_BLE_REPORT_INTERVAL_MS;
 static constexpr size_t kBleReportMaxObservations = MMPR_NODECFG_BLE_REPORT_MAX_OBSERVATIONS;
+static constexpr const char* kBleServerBaseUrl = MMPR_NODECFG_BLE_SERVER_BASE_URL;
 static constexpr const char* kBleIngestPath = MMPR_NODECFG_BLE_INGEST_PATH;
 
 
@@ -553,6 +558,17 @@ static constexpr bool kEnableNtpSync = true;
 static constexpr const char* kNtpServer = "pool.ntp.org";
 static constexpr long kGmtOffsetSeconds = 0;
 static constexpr int kDaylightOffsetSeconds = 0;
+
+// --- GPS holdover / crystal frequency model ---
+// Error-budget-based holdover window and temperature-compensation controls.
+// Defaults reproduce the legacy fixed 60 s holdover on the cheap crystal
+// (1 ppm x 60 s = 60000 ns). A TCXO hardware rev only lowers the drift
+// uncertainty (e.g. 0.1 ppm -> 600 s at the same budget). Temperature
+// compensation is shadow-mode only until the flag below is enabled.
+static constexpr bool kEnableHoldoverTempComp = false;        // shadow mode
+static constexpr double kHoldoverDriftUncertaintyPpm = 1.0;   // cheap XO; TCXO rev: 0.1
+static constexpr uint64_t kHoldoverErrorBudgetNs = 60000ULL;  // = legacy 60 s @ 1 ppm
+static constexpr uint64_t kHoldoverMaxAgeUs = 900000000ULL;   // 15 min hard cap
 
 // --- Runtime logging ---
 static constexpr uint32_t kLogEveryFrames = 100;
