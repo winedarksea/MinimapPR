@@ -121,6 +121,11 @@ def load_localized_render_manifest_bundle(
     if birdnet_payload is None and paired_classifier_manifest_payload is not None:
         birdnet_payload = paired_classifier_manifest_payload.get("birdnet")
     birdnet_payload = birdnet_payload if isinstance(birdnet_payload, dict) else {}
+    render_kind = _optional_nonempty_string(classifier_render_payload.get("render_kind"))
+    fallback_reason = _optional_nonempty_string(
+        birdnet_payload.get("fallback_reason")
+        or classifier_render_payload.get("fallback_reason")
+    )
     authoritative_classification = _load_authoritative_classification(birdnet_payload)
     manifest_id = str(manifest_payload.get("manifest_id") or "")
     if not manifest_id and paired_classifier_manifest_payload is not None:
@@ -180,7 +185,14 @@ def load_localized_render_manifest_bundle(
         localization_received_level_dbfs = _optional_finite_float(
             localization_payload.get("received_level_dbfs")
         )
-        reporting_modality: Literal["localized", "omni"] = "localized"
+        # The classifier render's fallback contract overrides the retained solver
+        # diagnostics. An omni PCM render must be reported at its node, not at a
+        # speculative localization vector carried alongside it.
+        reporting_modality: Literal["localized", "omni"] = (
+            "omni"
+            if render_kind == "birdnet_omni_fallback" or fallback_reason is not None
+            else "localized"
+        )
     else:
         if node.position_m is None:
             raise ValueError("Standalone classifier render manifest requires node.position_m")
@@ -222,20 +234,12 @@ def load_localized_render_manifest_bundle(
             reporting_modality=reporting_modality,
             time_quality=time_quality,
             environment=environment,
-            render_kind=str(
-                classifier_render_payload.get("render_kind")
-                or birdnet_payload.get("spatial_blend_mode")
-                or ""
-            )
-            or None,
+            render_kind=render_kind or _optional_nonempty_string(
+                birdnet_payload.get("spatial_blend_mode")
+            ),
             render_start_ns=_optional_int(classifier_render_payload.get("render_start_ns")),
             render_end_ns=_optional_int(classifier_render_payload.get("render_end_ns")),
-            fallback_reason=str(
-                birdnet_payload.get("fallback_reason")
-                or classifier_render_payload.get("fallback_reason")
-                or ""
-            )
-            or None,
+            fallback_reason=fallback_reason,
             audio_quality=audio_quality,
             authoritative_classification=authoritative_classification,
         ),

@@ -507,6 +507,7 @@ fn DetectionReviewPanel(
     let datalist_id = format!("review-label-options-{detection_id}");
 
     let label_value = RwSignal::new(String::new());
+    let selected_known_label = RwSignal::new(String::new());
     let category_value = RwSignal::new(String::new());
     let notes_value = RwSignal::new(String::new());
     let training_example_kind = RwSignal::new("none".to_string());
@@ -521,6 +522,12 @@ fn DetectionReviewPanel(
     Effect::new(move |_| {
         if let Some(d) = detection.get() {
             label_value.set(
+                d.review_label
+                    .clone()
+                    .or(d.label.clone())
+                    .unwrap_or_default(),
+            );
+            selected_known_label.set(
                 d.review_label
                     .clone()
                     .or(d.label.clone())
@@ -650,10 +657,41 @@ fn DetectionReviewPanel(
                                 &suggestions.get_untracked(),
                                 &value,
                             ) {
+                                selected_known_label.set(value);
                                 category_value.set(category);
+                            } else {
+                                selected_known_label.set(String::new());
                             }
                         }
                     />
+                </label>
+                <label>
+                    <span>"Known label"</span>
+                    <select
+                        prop:value=move || selected_known_label.get()
+                        on:change=move |event| {
+                            let selected_label = event_target_value(&event);
+                            selected_known_label.set(selected_label.clone());
+                            label_value.set(selected_label.clone());
+                            if let Some(category) = suggested_category_for_label(
+                                &suggestions.get_untracked(),
+                                &selected_label,
+                            ) {
+                                category_value.set(category);
+                            }
+                        }
+                    >
+                        <option value="">"Select a known label…"</option>
+                        {move || suggestions.get().into_iter().map(|suggestion| {
+                            let label = suggestion.name;
+                            let category = suggestion.category.unwrap_or_else(|| "unknown".to_string());
+                            let display = match suggestion.count {
+                                Some(count) => format!("{label} — {category} · {count}"),
+                                None => format!("{label} — {category}"),
+                            };
+                            view! { <option value=label>{display}</option> }
+                        }).collect_view()}
+                    </select>
                 </label>
                 <label>
                     <span>"Category"</span>

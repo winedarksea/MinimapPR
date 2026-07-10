@@ -538,6 +538,17 @@ class FusionNode:
                 update={"position_m": self.coordinate_frame.geo_to_local(node.position_geo)}
             )
 
+        # A classifier render may retain the DSP localization payload for
+        # diagnostics even after the sidecar deliberately selected an omni render
+        # (for example, low-confidence SRP-PHAT). That payload is not a reportable
+        # position. Treat the render contract as authoritative so an ill-conditioned
+        # solve cannot turn an omni detection into a far-away localized track.
+        reporting_modality = payload.reporting_modality
+        if payload.render_kind == "birdnet_omni_fallback" or payload.fallback_reason is not None:
+            reporting_modality = "omni"
+        if reporting_modality == "omni" and node.position_m is None:
+            raise ValueError("Omni classifier render requires node.position_m")
+
         # Localized classifier renders are derived products, not raw sensor frames.
         # Keep event-time semantics for localization/classification, but update
         # node heartbeat freshness from server receipt time so online/offline
@@ -588,7 +599,7 @@ class FusionNode:
 
         if (
             self.settings.localization_single_node_solver == "python_cartesian"
-            and payload.reporting_modality == "localized"
+            and reporting_modality == "localized"
             and payload.localization_pair_tdoas
             and payload.localization_sound_speed_mps is not None
         ):
@@ -641,6 +652,32 @@ class FusionNode:
             else:
                 self._metrics.localization_single_node_python_fallback_count += 1
 
+        rust_contributing_centroid_m = (
+            np.mean(
+                np.vstack(
+                    [np.asarray(selected_positions[sid], dtype=np.float64) for sid in selected_positions]
+                ),
+                axis=0,
+            )
+            if selected_positions
+            else None
+        )
+        localization_rejected_out_of_range = (
+            reporting_modality == "localized"
+            and not self._localization_position_is_reportable(
+                localization_position_m,
+                rust_contributing_centroid_m,
+            )
+        )
+        if localization_rejected_out_of_range:
+            # This ingress path receives a precomputed position and used to bypass
+            # _build_localization_branch(), where the normal solver path is gated.
+            # Preserve the classification as an omni observation at its node instead
+            # of allowing a bogus geographic position into a localized track.
+            self._metrics.localization_rejected_out_of_range_count += 1
+            self._record_silent_drop(stage="localization", reason="position_out_of_range")
+            reporting_modality = "omni"
+
         # Frequency-dependent lateral covariance scaling for the single-node path.
         # Angular resolution degrades when the dominant signal frequency falls well
         # below the array's spatial-aliasing cutoff, so widen the covariance
@@ -680,16 +717,6 @@ class FusionNode:
             confidence=localization_confidence,
             range_observability=localization_range_observability,
         )
-        rust_contributing_centroid_m = (
-            np.mean(
-                np.vstack(
-                    [np.asarray(selected_positions[sid], dtype=np.float64) for sid in selected_positions]
-                ),
-                axis=0,
-            )
-            if selected_positions
-            else None
-        )
         localization_position_covariance_m2 = self._clamp_localization_covariance(
             localization_position_covariance_m2,
             position_m=localization_position_m,
@@ -703,7 +730,7 @@ class FusionNode:
         )
         capability_tier = (
             "full_3d"
-            if payload.reporting_modality == "localized"
+            if reporting_modality == "localized"
             and len(selected_sensor_ids) >= self.settings.min_sensors_for_3d
             else "classification_only"
         )
@@ -725,6 +752,19 @@ class FusionNode:
             rust_extra_features["rust_render_end_ns"] = int(payload.render_end_ns)
         if payload.fallback_reason is not None:
             rust_extra_features["rust_fallback_reason"] = payload.fallback_reason
+        if localization_rejected_out_of_range:
+            rust_extra_features["localization_rejected_reason"] = "position_out_of_range"
+        if reporting_modality == "omni":
+            # Keep the raw sidecar localization only as provenance above; an omni
+            # detection is positioned at its source node and cannot create a track.
+            localization_position_m = tuple(float(value) for value in node.position_m)
+            localization_confidence = self.fusion_config.fallback_localization_confidence
+            localization_gdop = float("inf")
+            localization_position_covariance_m2 = None
+            localization_range_observability = None
+            localization_residual_rms_seconds = None
+            localization_range_projection_mode = None
+            localization_method = "rust_classifier_render_fallback"
         rust_localization_branch = LocalizationBranch(
             localization_position_m=localization_position_m,
             localization_confidence=localization_confidence,
@@ -740,13 +780,14 @@ class FusionNode:
             localization_residual_rms_seconds=localization_residual_rms_seconds,
             localization_range_projection_mode=localization_range_projection_mode,
         )
-        rust_localization_branch = await self._maybe_fuse_multi_node_bearing(
-            rust_localization_branch,
-            node_id=node.id,
-            contributing_centroid_m=rust_contributing_centroid_m,
-            event_time_ns=payload.event_time_ns,
-            sound_speed_mps=payload.localization_sound_speed_mps,
-        )
+        if reporting_modality == "localized":
+            rust_localization_branch = await self._maybe_fuse_multi_node_bearing(
+                rust_localization_branch,
+                node_id=node.id,
+                contributing_centroid_m=rust_contributing_centroid_m,
+                event_time_ns=payload.event_time_ns,
+                sound_speed_mps=payload.localization_sound_speed_mps,
+            )
         localized_product = LocalizedCandidate(
             candidate=candidate,
             localization_branch=rust_localization_branch,
@@ -793,7 +834,7 @@ class FusionNode:
         detection_product = await self._assemble_reporting_branch(
             product=localized_product,
             classified=classified,
-            reporting_modality=payload.reporting_modality,
+            reporting_modality=reporting_modality,
             localization_position_m=localization_position_m,
             localization_confidence=localization_confidence,
             localization_gdop=localization_gdop,
@@ -1843,6 +1884,28 @@ class FusionNode:
         if mode == LEGACY_PRIOR_PROJECTED:
             self._metrics.localization_prior_projected_count += 1
 
+    def _localization_position_is_reportable(
+        self,
+        position_m,
+        contributing_centroid_m: np.ndarray | None,
+    ) -> bool:
+        """Apply the shared physical localization envelope to an inbound position."""
+        position = np.asarray(position_m, dtype=np.float64).reshape(-1)
+        if position.size != 3 or not np.all(np.isfinite(position)):
+            return False
+        if float(np.linalg.norm(position)) > _SANITY_GATE_ORIGIN_BACKSTOP_M:
+            return False
+
+        max_range_m = self.localization_config.localization_max_range_m
+        if max_range_m <= 0.0:
+            return True
+        centroid = (
+            np.asarray(contributing_centroid_m, dtype=np.float64).reshape(-1)
+            if contributing_centroid_m is not None
+            else np.zeros(3, dtype=np.float64)
+        )
+        return centroid.size != 3 or float(np.linalg.norm(position - centroid)) <= max_range_m
+
     def _build_localization_branch(
         self,
         *,
@@ -1858,23 +1921,14 @@ class FusionNode:
         # is from the array), NOT the site origin — a node surveyed far from origin
         # must still be allowed a legitimate 1 km solve. A 5 km absolute origin
         # backstop still catches runaway coordinates.
-        max_range_m = self.localization_config.localization_max_range_m
-        if max_range_m > 0.0:
-            position = np.asarray(localization.position_m, dtype=np.float64)
-            centroid = (
-                np.asarray(contributing_centroid_m, dtype=np.float64).reshape(-1)
-                if contributing_centroid_m is not None
-                else np.zeros(3, dtype=np.float64)
-            )
-            in_range = (
-                np.all(np.isfinite(position))
-                and (centroid.size != 3 or float(np.linalg.norm(position - centroid)) <= max_range_m)
-                and float(np.linalg.norm(position)) <= _SANITY_GATE_ORIGIN_BACKSTOP_M
-            )
-            if not in_range:
-                self._metrics.localization_rejected_out_of_range_count += 1
-                self._record_silent_drop(stage="localization", reason="position_out_of_range")
-                return None
+        if not FusionNode._localization_position_is_reportable(
+            self,
+            localization.position_m,
+            contributing_centroid_m,
+        ):
+            self._metrics.localization_rejected_out_of_range_count += 1
+            self._record_silent_drop(stage="localization", reason="position_out_of_range")
+            return None
 
         reference_signal = selected_windows[localization.reference_sensor]
         localization_method = self._current_localizer_name()

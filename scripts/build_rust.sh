@@ -23,7 +23,8 @@ done
 
 if [[ "$BUILD_FRONTEND" -eq 1 ]]; then
   cd "$REPO_ROOT/minimappr-frontend"
-  trunk build --release
+  # Trunk 0.21 passes NO_COLOR through to Cargo, which only accepts true/false.
+  NO_COLOR=false trunk build --release
   DIST="$REPO_ROOT/minimappr/frontend"
   echo "Frontend built -> $DIST"
   ls -lh "$DIST/"

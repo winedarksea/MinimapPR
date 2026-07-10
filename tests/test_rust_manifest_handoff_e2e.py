@@ -711,6 +711,10 @@ async def test_fusion_classifies_non_authoritative_rust_render_immediately_in_pr
         assert len(detections) == 1
         detection = detections[0]
         assert detection["label"] == "sparrow"
+        assert detection["reporting_modality"] == "omni"
+        assert tuple(detection["position_m"]) == pytest.approx(
+            _node_spec("sirith-rust-python-classify").position_m
+        )
         assert detection["feature_summary"]["rust_manifest_id"] == "manifest-rust-python-classify-1"
         assert detection["feature_summary"]["classification_path"] == "omni"
         status = await fusion.status()
