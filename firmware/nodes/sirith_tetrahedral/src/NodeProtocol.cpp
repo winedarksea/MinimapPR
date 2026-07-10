@@ -244,6 +244,9 @@ bool appendBinaryFrameHeader(
     sectionFlags |= 0x0002u;
   }
   sectionFlags |= 0x0004u;
+  if (frame.hasTimingDiagnostics) {
+    sectionFlags |= 0x0010u;
+  }
   appendLeU16(out, sectionFlags);
 
   if ((sectionFlags & 0x0001u) != 0) {
@@ -300,6 +303,25 @@ bool appendBinaryFrameHeader(
     appendLeU8(section, static_cast<uint8_t>(frame.wifiRssiDbm));
     appendLeU32(section, frame.heapFreeBytes);
     appendLeU32(section, frame.bootId);
+    appendLeU16(out, static_cast<uint16_t>(section.size()));
+    out += section;
+  }
+
+  if ((sectionFlags & 0x0010u) != 0) {
+    // Clock holdover diagnostics — 25 bytes, matching the server decoder.
+    std::string section;
+    uint8_t holdoverFlags = 0;
+    holdoverFlags |= frame.holdoverActive ? 0x01u : 0u;
+    holdoverFlags |= frame.ltValid ? 0x02u : 0u;
+    holdoverFlags |= frame.tempModelValid ? 0x04u : 0u;
+    holdoverFlags |= frame.tempCompApplied ? 0x08u : 0u;
+    appendLeU8(section, holdoverFlags);
+    appendLeU32(section, frame.holdoverAgeMs);
+    appendLeU32(section, frame.predictedErrorNs);
+    appendLeF32(section, frame.ltPpm);
+    appendLeF32(section, frame.ltSigmaPpm);
+    appendLeF32(section, frame.tempSlopePpmPerC);
+    appendLeF32(section, frame.tempResidRmsPpm);
     appendLeU16(out, static_cast<uint16_t>(section.size()));
     out += section;
   }
@@ -571,6 +593,28 @@ bool buildFramePayloadParts(
     appendUint64(suffix, frame.runnerPublishDnsFailures);
     suffix += ",\"runner_publish_wifi_down_failures\":";
     appendUint64(suffix, frame.runnerPublishWifiDownFailures);
+    suffix += ",\"clock_holdover\":{";
+    suffix += "\"holdover_active\":";
+    suffix += frame.holdoverActive ? "true" : "false";
+    suffix += ",\"lt_valid\":";
+    suffix += frame.ltValid ? "true" : "false";
+    suffix += ",\"temp_model_valid\":";
+    suffix += frame.tempModelValid ? "true" : "false";
+    suffix += ",\"temp_comp_applied\":";
+    suffix += frame.tempCompApplied ? "true" : "false";
+    suffix += ",\"holdover_age_ms\":";
+    appendUint32(suffix, frame.holdoverAgeMs);
+    suffix += ",\"predicted_error_ns\":";
+    appendUint32(suffix, frame.predictedErrorNs);
+    suffix += ",\"lt_ppm\":";
+    appendFloat(suffix, frame.ltPpm);
+    suffix += ",\"lt_ppm_sigma\":";
+    appendFloat(suffix, frame.ltSigmaPpm);
+    suffix += ",\"temp_slope_ppm_per_c\":";
+    appendFloat(suffix, frame.tempSlopePpmPerC);
+    suffix += ",\"temp_resid_rms_ppm\":";
+    appendFloat(suffix, frame.tempResidRmsPpm);
+    suffix += "}";
     suffix += "}";
   }
 

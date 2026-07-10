@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import aiosqlite
+from pydantic import ValidationError
 
 from minimappr.cleanup_policy import CleanupPolicy
 from minimappr.models import (
@@ -3754,7 +3755,14 @@ class Storage:
     def _row_to_geo(row: aiosqlite.Row) -> GeoPoint | None:
         if row["lat"] is None or row["lon"] is None:
             return None
-        return GeoPoint(lat=float(row["lat"]), lon=float(row["lon"]), alt_m=float(row["alt"] or 0.0))
+        try:
+            return GeoPoint(lat=float(row["lat"]), lon=float(row["lon"]), alt_m=float(row["alt"] or 0.0))
+        except ValidationError:
+            # A corrupt local->geographic conversion (e.g. an out-of-envelope
+            # altitude) may have been persisted by an older write path. Drop the
+            # geo rather than 500 the read endpoint; lat/lon/alt outside the
+            # GeoPoint envelope are not physically meaningful anyway.
+            return None
 
     @staticmethod
     def _row_to_environment(row: aiosqlite.Row) -> dict[str, Any]:

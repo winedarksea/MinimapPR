@@ -34,6 +34,8 @@ pub struct NodeStatus {
     pub latest_environment: Option<NodeEnvironment>,
     pub metadata: Option<NodeMetadata>,
     pub latest_time_quality: Option<String>,
+    #[serde(default)]
+    pub latest_timing_diagnostics: Option<serde_json::Value>,
 }
 
 impl NodeStatus {

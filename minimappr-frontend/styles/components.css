@@ -154,4 +154,11 @@
   flex-wrap: wrap;
   gap: 4px;
 }
+/* Secondary holdover metrics (age + predicted error) shown after the GPS
+   Holdover time-precision label. Muted so the primary quality label leads. */
+.node-holdover-detail {
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: var(--md-sys-typescale-label-small-size);
+  font-variant-numeric: tabular-nums;
+}
 

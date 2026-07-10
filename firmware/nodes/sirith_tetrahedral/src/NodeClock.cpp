@@ -22,6 +22,25 @@ constexpr int64_t kGpsNtpSanityLimitNs = 2LL * 1000000000LL;
 constexpr uint64_t kRejectedGpsEpochLogIntervalUs = 10000000ULL;
 constexpr uint64_t kMaxSnapshotDelayNs = 50000000ULL;
 constexpr uint32_t kPpsPhaseStatReportInterval = 60;
+constexpr uint64_t kHoldoverEnterAgeUs = 2500000ULL;      // coast after 2.5 s of no PPS
+constexpr uint64_t kHoldoverLogIntervalUs = 10000000ULL;  // 10 s holdover status cadence
+constexpr uint32_t kReacquireRejectLimit = 10;            // accept override after N rejects
+constexpr uint64_t kReacquireMinAllowedNs = 2000ULL;      // 2 us re-acquisition floor
+constexpr double kHoldoverTempCompReanchorPpm = 0.02;     // re-anchor when |Δppm| exceeds this
+
+const char* timeQualityName(TimeQuality quality) {
+  switch (quality) {
+    case TimeQuality::kGpsLocked:
+      return "gps_locked";
+    case TimeQuality::kGpsHoldover:
+      return "gps_holdover";
+    case TimeQuality::kNtpDisciplined:
+      return "ntp_disciplined";
+    case TimeQuality::kFreeRunning:
+    default:
+      return "free_running";
+  }
+}
 
 double clampScale(double scale) {
   return std::clamp(scale, 0.9995, 1.0005);
@@ -104,6 +123,18 @@ void NodeClock::begin(
   ppsPhaseSumSqNs_ = 0.0;
   ppsPhaseMaxAbsNs_ = 0;
   filteredFrequencyPpm_ = 0.0;
+  // Holdover scalar state resets. The frequency/temperature models are
+  // intentionally NOT wiped here — begin() runs once at boot when they are
+  // already default-constructed, and their learned state must survive dropouts.
+  holdoverActive_ = false;
+  reacquireRejectCount_ = 0;
+  haveTemperature_ = false;
+  latestTemperatureC_ = 0.0;
+  latestTemperatureMonotonicUs_ = 0;
+  holdoverEntryTempC_ = 0.0;
+  lastHoldoverLogMonotonicUs_ = 0;
+  lastMedianPpm_ = 0.0;
+  longTermModel_.resetWindow();
 
   std::printf(
       "[node] clock boot anchor %llu ns; awaiting NTP or GPS discipline\n",
@@ -158,9 +189,9 @@ TimeQuality NodeClock::timeQuality() const {
     if (gpsAgeUs <= kGpsFreshUs) {
       return TimeQuality::kGpsLocked;
     }
-    if (gpsAgeUs <= kGpsHoldoverUs) {
-      return TimeQuality::kGpsHoldover;
-    }
+    // gpsDisciplineAvailable already enforced the (budget or legacy) holdover
+    // window, so anything past "fresh" but still available is holdover.
+    return TimeQuality::kGpsHoldover;
   }
 
   if (lastNtpSyncMonotonicUs_ > 0 && (nowUs - lastNtpSyncMonotonicUs_) <= kNtpFreshUs) {
@@ -203,6 +234,37 @@ void NodeClock::applyNtpObservation(uint64_t utcNs, uint64_t monotonicUs, uint64
     std::printf(
         "[node] NTP sanity check rejected GPS PPS epoch error_ns=%lld; recovering with NTP\n",
         static_cast<long long>(phaseErrorNs));
+  }
+
+  // NTP interplay during a budgeted GPS holdover: RTT-noisy NTP must not
+  // discipline rate or phase — that would corrupt a precise multi-minute coast.
+  // Keep the >2 s sanity rescue (a gross disagreement still breaks a bad
+  // holdover), update NTP bookkeeping so freshness/fallback keep working, and
+  // otherwise defer before any rate/phase discipline.
+  if (holdoverActive_ && gpsDisciplineAvailable(monotonicUs)) {
+    const double samplePositionAtObservation = estimateSamplePositionAtMonotonicUs(monotonicUs);
+    const uint64_t estimatedUtcNs = utcAtSamplePosition(samplePositionAtObservation);
+    const int64_t phaseErrorNs =
+        static_cast<int64_t>(utcNs) - static_cast<int64_t>(estimatedUtcNs);
+    if (std::llabs(phaseErrorNs) > kGpsNtpSanityLimitNs) {
+      holdoverActive_ = false;
+      reacquireRejectCount_ = 0;
+      haveGpsInterval_ = false;
+      gpsStablePulseCount_ = 0;
+      lastGpsSyncMonotonicUs_ = 0;
+      lastGpsSyncMonotonicNs_ = 0;
+      std::printf(
+          "[node] NTP sanity broke GPS holdover error_ns=%lld; recovering with NTP\n",
+          static_cast<long long>(phaseErrorNs));
+      // Fall through to normal NTP discipline below.
+    } else {
+      haveNtpObservation_ = true;
+      previousNtpUtcNs_ = utcNs;
+      previousNtpMonotonicUs_ = monotonicUs;
+      lastNtpSyncMonotonicUs_ = monotonicUs;
+      std::printf("[node] NTP rate/phase deferred during GPS holdover\n");
+      return;
+    }
   }
 
   if (!haveNtpObservation_) {
@@ -325,6 +387,9 @@ void NodeClock::applyGpsPpsObservation(uint64_t utcSecondNs, const GpsPpsCapture
     ppsPhaseStatCount_ = 0;
     ppsPhaseSumSqNs_ = 0.0;
     ppsPhaseMaxAbsNs_ = 0;
+    // Discard only the partial median window; the learned long-term frequency
+    // must survive re-acquisition (this is the fix for the legacy reset defect).
+    longTermModel_.resetWindow();
     if (ppsEvent.rebased) {
       std::printf(
           "[timing] PPS timebase rebased at edge=%u; restarting GPS lock acquisition\n",
@@ -370,7 +435,7 @@ void NodeClock::applyGpsPpsObservation(uint64_t utcSecondNs, const GpsPpsCapture
       (lastGpsSyncMonotonicUs_ > 0 && monotonicUs >= lastGpsSyncMonotonicUs_)
           ? (monotonicUs - lastGpsSyncMonotonicUs_)
           : UINT64_MAX;
-  const bool gpsWasFresh = gpsAgeUs <= kGpsHoldoverUs;
+  const bool gpsWasFresh = ageWithinHoldover(gpsAgeUs);
 
   if (haveGpsInterval_ && monotonicUs > previousGpsMonotonicUs_) {
     const uint64_t localIntervalNs =
@@ -385,6 +450,7 @@ void NodeClock::applyGpsPpsObservation(uint64_t utcSecondNs, const GpsPpsCapture
       gpsStablePulseCount_ = 1;
       latestPpsEdgeCount_ = ppsEvent.edgeCount;
       latestPpsPhaseErrorNs_ = 0;
+      longTermModel_.resetWindow();  // keep learned frequency; drop partial window only
       std::printf(
           "[timing] PPS interval out of range interval_us=%llu edge=%u; waiting for stable 1 Hz PPS\n",
           static_cast<unsigned long long>(localIntervalUs),
@@ -395,6 +461,27 @@ void NodeClock::applyGpsPpsObservation(uint64_t utcSecondNs, const GpsPpsCapture
     const double localToUtcScale = clampScale(static_cast<double>(kNsPerSecond) / static_cast<double>(localIntervalNs));
     updateEffectiveSamplePeriod(localToUtcScale, true);
     gpsStablePulseCount_ = std::min<uint32_t>(gpsStablePulseCount_ + 1U, kGpsStablePulseTarget);
+
+    // Long-term crystal frequency learning: only fully-locked pulses feed the
+    // model. The median-of-9 prefilter rejects degraded pulses at jamming onset.
+    if (gpsStablePulseCount_ >= kGpsStablePulseTarget) {
+      const double ppmInst = (localToUtcScale - 1.0) * kPpmScale;
+      const LtSampleResult lt = longTermModel_.addLockedSample(ppmInst);
+      if (lt.accepted) {
+        lastMedianPpm_ = lt.medianPpm;
+        // Shadow temperature model: feed the accepted median against a fresh
+        // (< 10 s) on-node temperature sample when one exists.
+        if (haveTemperature_ && monotonicUs >= latestTemperatureMonotonicUs_ &&
+            (monotonicUs - latestTemperatureMonotonicUs_) <= kTemperatureFreshUs) {
+          tempModel_.addSample(latestTemperatureC_, lt.medianPpm);
+        }
+        if (lt.reseeded) {
+          std::printf(
+              "[timing] lt-freq reseed lt_ppm=%.3f; sustained frequency shift detected\n",
+              longTermModel_.ltPpm());
+        }
+      }
+    }
   } else {
     haveGpsInterval_ = true;
     gpsStablePulseCount_ = 1;
@@ -425,8 +512,38 @@ void NodeClock::applyGpsPpsObservation(uint64_t utcSecondNs, const GpsPpsCapture
     return;
   }
 
+  // Re-acquisition sanity: while coasting in a budgeted holdover, don't hard
+  // re-anchor on a returning PPS UTC label that contradicts the held-over clock
+  // beyond a few multiples of the predicted holdover error. A dropped wrap pulse
+  // can leave the GPS source's edge label stale, so a mismatched first label is
+  // treated as suspect rather than trusted. After a bounded number of rejects we
+  // accept anyway (the clock genuinely shifted).
+  if (holdoverActive_ && longTermModel_.valid() && withinHoldoverBudget(gpsAgeUs)) {
+    const uint64_t predErrNs = predictedHoldoverErrorNs(gpsAgeUs);
+    const uint64_t allowedNs = std::max<uint64_t>(kReacquireMinAllowedNs, 4ULL * predErrNs);
+    if (static_cast<uint64_t>(std::llabs(gpsEpochErrorNs)) > allowedNs) {
+      ++reacquireRejectCount_;
+      latestPpsEdgeCount_ = ppsEvent.edgeCount;  // preserve edge continuity
+      std::printf(
+          "[timing] re-acquisition label mismatch error_ns=%lld allowed_ns=%llu reject=%u; holding over\n",
+          static_cast<long long>(gpsEpochErrorNs),
+          static_cast<unsigned long long>(allowedNs),
+          static_cast<unsigned>(reacquireRejectCount_));
+      if (reacquireRejectCount_ < kReacquireRejectLimit) {
+        // Holdover continues; lastGpsSyncMonotonicUs_ deliberately untouched.
+        return;
+      }
+      std::printf(
+          "[timing] re-acquisition override after %u rejects; accepting GPS anchor\n",
+          static_cast<unsigned>(reacquireRejectCount_));
+    }
+  }
+
   lastGpsSyncMonotonicUs_ = monotonicUs;
   lastGpsSyncMonotonicNs_ = monotonicNs;
+  // Any accepted anchor ends holdover coasting and clears the reject counter.
+  holdoverActive_ = false;
+  reacquireRejectCount_ = 0;
   const uint64_t anchorSampleIndex =
       samplePosition <= 0.0 ? 0ULL : static_cast<uint64_t>(std::llround(samplePosition));
   if (!gpsWasFresh || !haveSampleAnchor_ || gpsStablePulseCount_ == 1) {
@@ -450,6 +567,26 @@ void NodeClock::applyGpsPpsObservation(uint64_t utcSecondNs, const GpsPpsCapture
       ppsPhaseStatCount_ = 0;
       ppsPhaseSumSqNs_ = 0.0;
       ppsPhaseMaxAbsNs_ = 0;
+      // Shadow-mode model telemetry at the same 60-pulse cadence as the phase
+      // stats line above (no new logging cadence introduced).
+      std::printf(
+          "[timing] lt-freq lt_ppm=%.3f sigma_ppm=%.3f n=%u ewma_ppm=%.3f\n",
+          longTermModel_.ltPpm(),
+          longTermModel_.sigmaPpm(),
+          static_cast<unsigned>(longTermModel_.updateCount()),
+          filteredFrequencyPpm_);
+      if (haveTemperature_) {
+        std::printf(
+            "[timing] tempmodel T=%.2fC meas_ppm=%.3f pred_ppm=%.3f slope_ppm_c=%.4f "
+            "n_eff=%.0f rms_ppm=%.4f valid=%d\n",
+            latestTemperatureC_,
+            lastMedianPpm_,
+            tempModel_.predictPpm(latestTemperatureC_),
+            tempModel_.slopePpmPerC(),
+            tempModel_.nEff(),
+            tempModel_.residRmsPpm(),
+            tempModel_.valid() ? 1 : 0);
+      }
     }
   }
   latestPpsEdgeCount_ = ppsEvent.edgeCount;
@@ -506,20 +643,164 @@ void NodeClock::updateEffectiveSamplePeriod(double localToUtcScale, bool preferI
   filteredFrequencyPpm_ = nsToPpm(nominalSamplePeriodNs_, effectiveSamplePeriodNs_);
 }
 
+bool NodeClock::ageWithinHoldover(uint64_t ageUs) const {
+  // Error-budget window once the long-term model is characterized; legacy fixed
+  // 60 s until then (boot behavior identical, model-less nodes unchanged).
+  return longTermModel_.valid() ? withinHoldoverBudget(ageUs) : (ageUs <= kGpsHoldoverUs);
+}
+
 bool NodeClock::gpsDisciplineAvailable(uint64_t monotonicUs) const {
-  return gpsStablePulseCount_ >= kGpsStablePulseTarget &&
-         lastGpsSyncMonotonicUs_ > 0 &&
-         monotonicUs >= lastGpsSyncMonotonicUs_ &&
-         (monotonicUs - lastGpsSyncMonotonicUs_) <= kGpsHoldoverUs;
+  if (gpsStablePulseCount_ < kGpsStablePulseTarget || lastGpsSyncMonotonicUs_ == 0 ||
+      monotonicUs < lastGpsSyncMonotonicUs_) {
+    return false;
+  }
+  return ageWithinHoldover(monotonicUs - lastGpsSyncMonotonicUs_);
 }
 
 bool NodeClock::currentPacketTimingDiagnostics(PacketTimingDiagnostics& outDiagnostics) const {
-  outDiagnostics.hasGpsAnchor = gpsDisciplineAvailable(time_us_64());
+  const uint64_t nowUs = time_us_64();
+  outDiagnostics.hasGpsAnchor = gpsDisciplineAvailable(nowUs);
   outDiagnostics.ppsEdgeCount = latestPpsEdgeCount_;
   outDiagnostics.dmaRingSlotIndex = lastObservedDmaRingSlotIndex_;
   outDiagnostics.ppsPhaseErrorNs = latestPpsPhaseErrorNs_;
   outDiagnostics.estimatedPpm = filteredFrequencyPpm_;
-  return outDiagnostics.hasGpsAnchor || latestPpsEdgeCount_ > 0 || filteredFrequencyPpm_ != 0.0;
+
+  const uint64_t gpsAgeUs =
+      (lastGpsSyncMonotonicUs_ > 0 && nowUs >= lastGpsSyncMonotonicUs_)
+          ? (nowUs - lastGpsSyncMonotonicUs_)
+          : 0ULL;
+  outDiagnostics.holdoverActive = holdoverActive_;
+  outDiagnostics.holdoverAgeMs =
+      holdoverActive_ ? static_cast<uint32_t>(std::min<uint64_t>(gpsAgeUs / 1000ULL, UINT32_MAX)) : 0;
+  outDiagnostics.predictedErrorNs =
+      holdoverActive_
+          ? static_cast<uint32_t>(std::min<uint64_t>(predictedHoldoverErrorNs(gpsAgeUs), UINT32_MAX))
+          : 0;
+  outDiagnostics.ltValid = longTermModel_.valid();
+  outDiagnostics.ltPpm = longTermModel_.ltPpm();
+  outDiagnostics.ltSigmaPpm = longTermModel_.sigmaPpm();
+  outDiagnostics.tempModelValid = tempModel_.valid();
+  outDiagnostics.tempCompApplied =
+      holdoverActive_ && holdoverConfig_.enableTempComp && tempModel_.valid();
+  outDiagnostics.tempSlopePpmPerC = tempModel_.slopePpmPerC();
+  outDiagnostics.tempResidRmsPpm = tempModel_.residRmsPpm();
+
+  return outDiagnostics.hasGpsAnchor || latestPpsEdgeCount_ > 0 || filteredFrequencyPpm_ != 0.0 ||
+         holdoverActive_ || longTermModel_.seeded();
+}
+
+void NodeClock::observeTemperature(double temperatureC, uint64_t monotonicUs) {
+  latestTemperatureC_ = temperatureC;
+  latestTemperatureMonotonicUs_ = monotonicUs;
+  haveTemperature_ = true;
+}
+
+uint64_t NodeClock::predictedHoldoverErrorNs(uint64_t ageUs) const {
+  const double drift =
+      effectiveHoldoverDriftPpm(holdoverConfig_.driftUncertaintyPpm, longTermModel_.sigmaPpm());
+  return mmpr::predictedHoldoverErrorNs(ageUs, drift);
+}
+
+bool NodeClock::withinHoldoverBudget(uint64_t ageUs) const {
+  return predictedHoldoverErrorNs(ageUs) <= holdoverConfig_.errorBudgetNs &&
+         ageUs <= holdoverConfig_.maxAgeUs;
+}
+
+void NodeClock::maintain(uint64_t nowMonotonicUs) {
+  if (!holdoverActive_) {
+    // Common case (PPS fresh): a couple of integer comparisons and out. No
+    // model math, no allocation, no blocking.
+    if (lastGpsSyncMonotonicUs_ == 0 || nowMonotonicUs < lastGpsSyncMonotonicUs_) {
+      return;
+    }
+    const uint64_t ageUs = nowMonotonicUs - lastGpsSyncMonotonicUs_;
+    if (ageUs <= kHoldoverEnterAgeUs) {
+      return;
+    }
+    // Beyond here only during an actual PPS gap. Require a characterized model
+    // and a prior stable lock; otherwise fall back to legacy passive coasting.
+    if (!longTermModel_.valid() || gpsStablePulseCount_ < kGpsStablePulseTarget) {
+      return;
+    }
+    enterHoldover(nowMonotonicUs, ageUs);
+    return;
+  }
+  maintainActiveHoldover(nowMonotonicUs);
+}
+
+void NodeClock::enterHoldover(uint64_t nowMonotonicUs, uint64_t ageUs) {
+  const double ewmaPpmBefore = filteredFrequencyPpm_;
+
+  // 1. Continuity re-anchor with the OLD slope: pin both timebases to the
+  //    current instant so the timestamp value at "now" is unchanged.
+  const double samplePos = estimateSamplePositionAtMonotonicUs(nowMonotonicUs);
+  const uint64_t utcNow = utcAtMonotonicUs(nowMonotonicUs);
+  setSampleAnchor(samplePos, utcNow);
+  setWallReference(utcNow, nowMonotonicUs);
+
+  // 2. Swap the slope to the learned long-term frequency. Temperature comp (if
+  //    enabled) is relative to entry temperature, so its correction is zero at
+  //    entry; it is applied incrementally in maintainActiveHoldover().
+  holdoverEntryTempC_ = latestTemperatureC_;
+  const bool tempComp =
+      holdoverConfig_.enableTempComp && tempModel_.valid() && haveTemperature_;
+  const double holdoverPpm = longTermModel_.ltPpm();
+  const double newScale = clampScale(1.0 + holdoverPpm / kPpmScale);
+  localToUtcScale_ = newScale;
+  effectiveSamplePeriodNs_ = nominalSamplePeriodNs_ * newScale;
+  filteredFrequencyPpm_ = nsToPpm(nominalSamplePeriodNs_, effectiveSamplePeriodNs_);
+
+  holdoverActive_ = true;
+  lastHoldoverLogMonotonicUs_ = nowMonotonicUs;
+  std::printf(
+      "[timing] holdover enter age_ms=%llu ewma_ppm=%.3f lt_ppm=%.3f sigma_ppm=%.3f temp_comp=%d\n",
+      static_cast<unsigned long long>(ageUs / 1000ULL),
+      ewmaPpmBefore,
+      holdoverPpm,
+      longTermModel_.sigmaPpm(),
+      tempComp ? 1 : 0);
+}
+
+void NodeClock::maintainActiveHoldover(uint64_t nowMonotonicUs) {
+  const uint64_t ageUs =
+      (lastGpsSyncMonotonicUs_ > 0 && nowMonotonicUs >= lastGpsSyncMonotonicUs_)
+          ? (nowMonotonicUs - lastGpsSyncMonotonicUs_)
+          : 0ULL;
+
+  // Relative temperature prediction (computed for logging regardless of the
+  // flag; only APPLIED when temp-comp is enabled).
+  double tempPredPpm = 0.0;
+  if (tempModel_.valid() && haveTemperature_) {
+    tempPredPpm = tempModel_.predictRelativePpm(latestTemperatureC_ - holdoverEntryTempC_);
+  }
+  if (holdoverConfig_.enableTempComp && tempModel_.valid() && haveTemperature_) {
+    const double targetPpm = longTermModel_.ltPpm() + tempPredPpm;
+    if (std::fabs(targetPpm - filteredFrequencyPpm_) > kHoldoverTempCompReanchorPpm) {
+      // Continuity re-anchor, then swap to the temperature-compensated slope.
+      const double samplePos = estimateSamplePositionAtMonotonicUs(nowMonotonicUs);
+      const uint64_t utcNow = utcAtMonotonicUs(nowMonotonicUs);
+      setSampleAnchor(samplePos, utcNow);
+      setWallReference(utcNow, nowMonotonicUs);
+      const double newScale = clampScale(1.0 + targetPpm / kPpmScale);
+      localToUtcScale_ = newScale;
+      effectiveSamplePeriodNs_ = nominalSamplePeriodNs_ * newScale;
+      filteredFrequencyPpm_ = nsToPpm(nominalSamplePeriodNs_, effectiveSamplePeriodNs_);
+    }
+  }
+
+  if (lastHoldoverLogMonotonicUs_ == 0 || nowMonotonicUs < lastHoldoverLogMonotonicUs_ ||
+      (nowMonotonicUs - lastHoldoverLogMonotonicUs_) >= kHoldoverLogIntervalUs) {
+    lastHoldoverLogMonotonicUs_ = nowMonotonicUs;
+    std::printf(
+        "[timing] holdover age_ms=%llu pred_err_ns=%llu lt_ppm=%.3f temp_pred_ppm=%.3f "
+        "applied_ppm=%.3f quality=%s\n",
+        static_cast<unsigned long long>(ageUs / 1000ULL),
+        static_cast<unsigned long long>(predictedHoldoverErrorNs(ageUs)),
+        longTermModel_.ltPpm(),
+        tempPredPpm,
+        filteredFrequencyPpm_,
+        timeQualityName(timeQuality()));
+  }
 }
 
 }  // namespace mmpr

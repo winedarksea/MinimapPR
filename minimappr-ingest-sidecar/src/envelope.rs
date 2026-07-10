@@ -448,7 +448,19 @@ fn read_binary_first_frame_timing_json(
                     read_binary_transport_health_json(&mut section_reader)?,
                 );
             }
-            _ => {}
+            0x0010 => {
+                timing.insert(
+                    "clock_holdover".to_string(),
+                    read_binary_clock_holdover_json(&mut section_reader)?,
+                );
+            }
+            _ => {
+                // Forward-compatibility: consume unknown/future sections so newer
+                // firmware does not break sidecar ingest. The section was already
+                // length-delimited above.
+                let remaining = section_reader.remaining();
+                let _ = section_reader.read(remaining)?;
+            }
         }
         if section_reader.remaining() != 0 {
             return Err(format!(
@@ -457,6 +469,61 @@ fn read_binary_first_frame_timing_json(
         }
     }
     Ok(serde_json::Value::Object(timing))
+}
+
+fn read_binary_clock_holdover_json(
+    reader: &mut BinaryReader<'_>,
+) -> Result<serde_json::Value, String> {
+    let flags = reader.u8()?;
+    let holdover_age_ms = reader.u32()?;
+    let predicted_error_ns = reader.u32()?;
+    let lt_ppm = reader.f32()?;
+    let lt_ppm_sigma = reader.f32()?;
+    let temp_slope_ppm_per_c = reader.f32()?;
+    let temp_resid_rms_ppm = reader.f32()?;
+
+    let mut clock = serde_json::Map::new();
+    clock.insert(
+        "holdover_active".to_string(),
+        serde_json::Value::from(flags & 0x01 != 0),
+    );
+    clock.insert(
+        "lt_valid".to_string(),
+        serde_json::Value::from(flags & 0x02 != 0),
+    );
+    clock.insert(
+        "temp_model_valid".to_string(),
+        serde_json::Value::from(flags & 0x04 != 0),
+    );
+    clock.insert(
+        "temp_comp_applied".to_string(),
+        serde_json::Value::from(flags & 0x08 != 0),
+    );
+    clock.insert(
+        "holdover_age_ms".to_string(),
+        serde_json::Value::from(holdover_age_ms),
+    );
+    clock.insert(
+        "predicted_error_ns".to_string(),
+        serde_json::Value::from(predicted_error_ns),
+    );
+    clock.insert(
+        "lt_ppm".to_string(),
+        serde_json::Value::from(f64::from(lt_ppm)),
+    );
+    clock.insert(
+        "lt_ppm_sigma".to_string(),
+        serde_json::Value::from(f64::from(lt_ppm_sigma)),
+    );
+    clock.insert(
+        "temp_slope_ppm_per_c".to_string(),
+        serde_json::Value::from(f64::from(temp_slope_ppm_per_c)),
+    );
+    clock.insert(
+        "temp_resid_rms_ppm".to_string(),
+        serde_json::Value::from(f64::from(temp_resid_rms_ppm)),
+    );
+    Ok(serde_json::Value::Object(clock))
 }
 
 fn read_binary_timing_diagnostics_v3_json(
@@ -775,7 +842,12 @@ fn read_binary_v3_summary_sections(
             }
             0x0002 => skip_binary_environment(&mut section_reader)?,
             0x0004 => skip_binary_transport_health(&mut section_reader)?,
-            _ => {}
+            _ => {
+                // Forward-compatibility: consume unknown/future sections (e.g.
+                // 0x0010 clock holdover, not needed for this summary).
+                let remaining = section_reader.remaining();
+                let _ = section_reader.read(remaining)?;
+            }
         }
         if section_reader.remaining() != 0 {
             return Err(format!(
@@ -1035,7 +1107,9 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_binary_node_json, parse_capture_envelope};
+    use super::{
+        extract_binary_first_frame_timing_json, extract_binary_node_json, parse_capture_envelope,
+    };
 
     fn push_string(payload: &mut Vec<u8>, value: &str) {
         payload.push(u8::try_from(value.len()).expect("test string fits in length byte"));
@@ -1123,6 +1197,74 @@ mod tests {
         section.extend_from_slice(&128_000_u32.to_le_bytes());
         section.extend_from_slice(&0x1234_5678_u32.to_le_bytes());
         section
+    }
+
+    fn binary_clock_holdover_section() -> Vec<u8> {
+        let mut section = Vec::new();
+        // flags: holdover_active | lt_valid | temp_model_valid | temp_comp_applied
+        section.push(0x0F);
+        section.extend_from_slice(&34_000_u32.to_le_bytes()); // holdover_age_ms
+        section.extend_from_slice(&12_300_u32.to_le_bytes()); // predicted_error_ns
+        section.extend_from_slice(&(-3.5_f32).to_le_bytes()); // lt_ppm
+        section.extend_from_slice(&0.25_f32.to_le_bytes()); // lt_ppm_sigma
+        section.extend_from_slice(&(-0.8_f32).to_le_bytes()); // temp_slope_ppm_per_c
+        section.extend_from_slice(&0.05_f32.to_le_bytes()); // temp_resid_rms_ppm
+        section
+    }
+
+    // Builds an MMB3 single-frame payload carrying the timing (0x0001),
+    // transport-health (0x0004), and clock-holdover (0x0010) sections, plus an
+    // optional unknown future section (0x0020) to exercise forward-compat.
+    fn binary_single_frame_payload_with_holdover(include_unknown: bool) -> Vec<u8> {
+        let mut payload = binary_header_only_payload(3);
+        payload.extend_from_slice(&1_000_u64.to_le_bytes());
+        payload.extend_from_slice(&2_000_u64.to_le_bytes());
+        payload.extend_from_slice(&0_u64.to_le_bytes());
+        payload.extend_from_slice(&2_u64.to_le_bytes());
+        payload.extend_from_slice(&16_000_u32.to_le_bytes());
+        payload.push(1); // channels
+        payload.push(3); // synthetic audio source
+        payload.extend_from_slice(&1_u64.to_le_bytes());
+        payload.extend_from_slice(&1_000_u64.to_le_bytes());
+        payload.extend_from_slice(&1_250_u64.to_le_bytes());
+        payload.push(0); // gps_locked
+        payload.extend_from_slice(&2_u32.to_le_bytes());
+        let flags: u16 = 0x0001 | 0x0004 | 0x0010 | if include_unknown { 0x0020 } else { 0 };
+        payload.extend_from_slice(&flags.to_le_bytes());
+        // Sections in ascending bit order, matching the firmware emission.
+        push_binary_section(&mut payload, &binary_timing_section());
+        push_binary_section(&mut payload, &binary_transport_health_section());
+        push_binary_section(&mut payload, &binary_clock_holdover_section());
+        if include_unknown {
+            push_binary_section(&mut payload, &[0xDE, 0xAD, 0xBE, 0xEF]);
+        }
+        payload.extend_from_slice(&0_i16.to_le_bytes());
+        payload.extend_from_slice(&32_767_i16.to_le_bytes());
+        payload
+    }
+
+    #[test]
+    fn timing_json_decodes_clock_holdover_section() {
+        let payload = binary_single_frame_payload_with_holdover(false);
+        let timing = extract_binary_first_frame_timing_json(&payload).expect("timing json");
+        let clock = timing.get("clock_holdover").expect("clock_holdover present");
+        assert_eq!(clock["holdover_active"], serde_json::json!(true));
+        assert_eq!(clock["lt_valid"], serde_json::json!(true));
+        assert_eq!(clock["temp_model_valid"], serde_json::json!(true));
+        assert_eq!(clock["temp_comp_applied"], serde_json::json!(true));
+        assert_eq!(clock["holdover_age_ms"], serde_json::json!(34_000));
+        assert_eq!(clock["predicted_error_ns"], serde_json::json!(12_300));
+        assert!((clock["lt_ppm"].as_f64().unwrap() - (-3.5)).abs() < 1e-5);
+        assert!((clock["lt_ppm_sigma"].as_f64().unwrap() - 0.25).abs() < 1e-5);
+    }
+
+    #[test]
+    fn timing_json_skips_unknown_future_section_without_error() {
+        // An unknown 0x0020 section must not break decoding of the known ones.
+        let payload = binary_single_frame_payload_with_holdover(true);
+        let timing = extract_binary_first_frame_timing_json(&payload).expect("timing json");
+        assert!(timing.get("clock_holdover").is_some());
+        assert!(timing.get("transport_health").is_some());
     }
 
     fn push_binary_frame(payload: &mut Vec<u8>, version: u8) {

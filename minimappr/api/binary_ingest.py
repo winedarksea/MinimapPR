@@ -7,6 +7,7 @@ endian; audio samples are interleaved signed 16-bit PCM.
 
 from __future__ import annotations
 
+import logging
 import struct
 from dataclasses import dataclass
 
@@ -24,6 +25,8 @@ from minimappr.models import (
 
 
 _SUPPORTED_MAGIC_VERSIONS = {b"MMB2": 2, b"MMB3": 3}
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -285,6 +288,20 @@ def _read_v3_sections(reader: _BinaryReader) -> tuple[dict, EnvironmentSampleIn 
             timing_diagnostics["transport_health"] = _read_transport_health(section)
         elif section_bit == 0x0008:
             timing_diagnostics["aux_sensors"] = _read_aux_sensors(section)
+        elif section_bit == 0x0010:
+            timing_diagnostics["clock_holdover"] = _read_clock_holdover(section)
+        else:
+            # Forward-compatibility: a newer firmware may set section bits this
+            # server does not understand. Consume the section (it was already
+            # length-delimited by _section_reader) and warn rather than raising,
+            # so old servers keep ingesting audio from new nodes. The strict
+            # trailing-bytes check below only applies to sections we decoded.
+            _logger.warning(
+                "Binary ingest: skipping unknown section 0x%04x (%d bytes)",
+                section_bit,
+                section.remaining,
+            )
+            continue
         if section.remaining != 0:
             raise ValueError(f"Binary ingest section 0x{section_bit:04x} has trailing bytes")
     return timing_diagnostics, environment
@@ -312,6 +329,33 @@ def _read_timing_diagnostics_v3(reader: _BinaryReader) -> dict:
         "runner_publish_connect_or_reset_failures": reader.u64(),
         "runner_publish_dns_failures": reader.u64(),
         "runner_publish_wifi_down_failures": reader.u64(),
+    }
+
+
+def _read_clock_holdover(reader: _BinaryReader) -> dict:
+    """Decode the 25-byte clock holdover diagnostics section (bit 0x0010).
+
+    Layout (little-endian): u8 flags, u32 holdover_age_ms, u32 predicted_error_ns,
+    f32 lt_ppm, f32 lt_ppm_sigma, f32 temp_slope_ppm_per_c, f32 temp_resid_rms_ppm.
+    """
+    flags = reader.u8()
+    holdover_age_ms = reader.u32()
+    predicted_error_ns = reader.u32()
+    lt_ppm = reader.f32()
+    lt_ppm_sigma = reader.f32()
+    temp_slope_ppm_per_c = reader.f32()
+    temp_resid_rms_ppm = reader.f32()
+    return {
+        "holdover_active": bool(flags & 0x01),
+        "lt_valid": bool(flags & 0x02),
+        "temp_model_valid": bool(flags & 0x04),
+        "temp_comp_applied": bool(flags & 0x08),
+        "holdover_age_ms": holdover_age_ms,
+        "predicted_error_ns": predicted_error_ns,
+        "lt_ppm": lt_ppm,
+        "lt_ppm_sigma": lt_ppm_sigma,
+        "temp_slope_ppm_per_c": temp_slope_ppm_per_c,
+        "temp_resid_rms_ppm": temp_resid_rms_ppm,
     }
 
 

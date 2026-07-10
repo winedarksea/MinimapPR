@@ -272,7 +272,16 @@ fn read_binary_v3_sections(reader: &mut BinaryReader<'_>) -> BoxedResult<BinaryE
             0x0001 => skip_binary_timing_diagnostics_v3(&mut section_reader)?,
             0x0002 => environment = read_binary_environment(&mut section_reader)?,
             0x0004 => skip_binary_transport_health(&mut section_reader)?,
-            _ => {}
+            _ => {
+                // Forward-compatibility: consume unknown/future sections (e.g.
+                // 0x0008 aux sensors, 0x0010 clock holdover) so newer firmware
+                // does not break ingest on an older sidecar. The section was
+                // already length-delimited above; just skip its bytes. The
+                // strict trailing-bytes check below still applies to the known
+                // sections that under-read.
+                let remaining = section_reader.remaining();
+                let _ = section_reader.read(remaining)?;
+            }
         }
         if section_reader.remaining() != 0 {
             return Err(

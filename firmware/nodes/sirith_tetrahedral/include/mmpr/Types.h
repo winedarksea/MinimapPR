@@ -112,6 +112,19 @@ struct AudioFrame {
   int8_t wifiRssiDbm = 0;
   uint32_t heapFreeBytes = 0;
   uint32_t bootId = 0;
+  // Clock holdover diagnostics (telemetry only). Appended at the struct tail so
+  // the positional aggregate init in NodeRunner stays valid; these are assigned
+  // by name after that init.
+  bool holdoverActive = false;
+  uint32_t holdoverAgeMs = 0;
+  uint32_t predictedErrorNs = 0;
+  bool ltValid = false;
+  float ltPpm = 0.0f;
+  float ltSigmaPpm = 0.0f;
+  bool tempModelValid = false;
+  bool tempCompApplied = false;
+  float tempSlopePpmPerC = 0.0f;
+  float tempResidRmsPpm = 0.0f;
 };
 
 struct EnvironmentalSample {

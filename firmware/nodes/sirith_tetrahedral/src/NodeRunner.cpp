@@ -237,7 +237,7 @@ AudioFrame NodeRunner::buildFrameForPacket(const QueuedAudioPacket& packet, uint
   }
   PacketTimingDiagnostics timingDiagnostics = {};
   const bool haveTimingDiagnostics = clock_.currentPacketTimingDiagnostics(timingDiagnostics);
-  const AudioFrame frame = {
+  AudioFrame frame = {
       utcStartNs,
       utcEndNs,
       packet.startSampleIndex,
@@ -283,6 +283,18 @@ AudioFrame NodeRunner::buildFrameForPacket(const QueuedAudioPacket& packet, uint
       stats_.heapFreeBytes,
       stats_.bootId,
   };
+  // Holdover diagnostics are tail-appended fields; assign by name after the
+  // positional aggregate init above.
+  frame.holdoverActive = timingDiagnostics.holdoverActive;
+  frame.holdoverAgeMs = timingDiagnostics.holdoverAgeMs;
+  frame.predictedErrorNs = timingDiagnostics.predictedErrorNs;
+  frame.ltValid = timingDiagnostics.ltValid;
+  frame.ltPpm = static_cast<float>(timingDiagnostics.ltPpm);
+  frame.ltSigmaPpm = static_cast<float>(timingDiagnostics.ltSigmaPpm);
+  frame.tempModelValid = timingDiagnostics.tempModelValid;
+  frame.tempCompApplied = timingDiagnostics.tempCompApplied;
+  frame.tempSlopePpmPerC = static_cast<float>(timingDiagnostics.tempSlopePpmPerC);
+  frame.tempResidRmsPpm = static_cast<float>(timingDiagnostics.tempResidRmsPpm);
   return frame;
 }
 
@@ -374,6 +386,9 @@ void NodeRunner::refreshSlowTelemetry(uint32_t nowMs) {
     return;
   }
   lastTelemetryRefreshMs_ = nowMs;
+  // Holdover maintenance runs at this slow cadence (never per loop iteration).
+  // maintain() fast-exits on a couple of integer compares while PPS is fresh.
+  clock_.maintain(time_us_64());
   // cyw43_wifi_get_rssi() is a blocking SPI ioctl that can stall long enough
   // to overrun the DMA capture ring. Keep Wi-Fi RSSI at its last known value
   // until a non-audio telemetry path can sample it safely.
@@ -644,6 +659,11 @@ void NodeRunner::drainAvailableAudioFrames() {
     const EnvironmentalSample* environmentalPtr = nullptr;
     if (environmentalSourceReady_ && environmentalSource_ != nullptr && environmentalSource_->read(environmental)) {
       environmentalPtr = &environmental;
+      if (environmental.hasTemperatureC) {
+        // Feed the shadow temperature model (3 field stores, no math).
+        clock_.observeTemperature(
+            static_cast<double>(environmental.temperatureC), time_us_64());
+      }
     }
     processCapturedFrame(captureTimestamp, environmentalPtr);
   }

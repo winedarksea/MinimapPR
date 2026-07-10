@@ -37,6 +37,68 @@ fn time_quality_label_and_color(tq: &str) -> (&'static str, &'static str) {
     }
 }
 
+/// Format a predicted holdover phase error (nanoseconds) as a signed magnitude
+/// with an adaptive unit: ns under 1 us, us under 1 ms, otherwise ms.
+fn format_predicted_error_ns(error_ns: f64) -> String {
+    let e = error_ns.abs();
+    if e < 1_000.0 {
+        format!("±{e:.0} ns")
+    } else if e < 1_000_000.0 {
+        format!("±{:.1} µs", e / 1_000.0)
+    } else {
+        format!("±{:.1} ms", e / 1_000_000.0)
+    }
+}
+
+/// When a node is in GPS holdover, extract "age · ±error" from its timing
+/// diagnostics `clock_holdover` block. Returns None if not actively holding over
+/// or the diagnostics are absent. Tolerant of missing/partial fields.
+fn holdover_detail_text(diagnostics: Option<&serde_json::Value>) -> Option<String> {
+    let clock = diagnostics?.get("clock_holdover")?;
+    if !clock
+        .get("holdover_active")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let age_ms = clock
+        .get("holdover_age_ms")
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or(0.0);
+    let age = age_text_from_seconds(age_ms / 1000.0);
+    let detail = match clock
+        .get("predicted_error_ns")
+        .and_then(serde_json::Value::as_f64)
+    {
+        Some(error_ns) => format!("{age} · {}", format_predicted_error_ns(error_ns)),
+        None => age,
+    };
+    Some(detail)
+}
+
+/// Learned long-term crystal frequency as "-3.5 ppm ±0.25" once the model is
+/// characterized. Returns None when the model has not yet validated or the
+/// diagnostics are absent.
+fn crystal_drift_text(diagnostics: Option<&serde_json::Value>) -> Option<String> {
+    let clock = diagnostics?.get("clock_holdover")?;
+    if !clock
+        .get("lt_valid")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let lt_ppm = clock.get("lt_ppm").and_then(serde_json::Value::as_f64)?;
+    let sigma = clock
+        .get("lt_ppm_sigma")
+        .and_then(serde_json::Value::as_f64);
+    Some(match sigma {
+        Some(sigma) => format!("{lt_ppm:.2} ppm ±{sigma:.2}"),
+        None => format!("{lt_ppm:.2} ppm"),
+    })
+}
+
 fn age_text_from_seconds(age_seconds: f64) -> String {
     if age_seconds < 60.0 {
         format!("{:.0}s", age_seconds)
@@ -251,6 +313,14 @@ fn NodeCard(node: NodeStatus) -> impl IntoView {
         .latest_time_quality
         .as_deref()
         .map(time_quality_label_and_color);
+    // Only surface the holdover age/error suffix while the node reports it as
+    // actively holding over (defends against stale diagnostics after re-lock).
+    let holdover_detail = if node.latest_time_quality.as_deref() == Some("gps_holdover") {
+        holdover_detail_text(node.latest_timing_diagnostics.as_ref())
+    } else {
+        None
+    };
+    let crystal_drift = crystal_drift_text(node.latest_timing_diagnostics.as_ref());
 
     let node_type_text = node.node_type.clone().unwrap_or_else(|| "-".to_string());
     let mobility_text = node.mobility.clone().unwrap_or_else(|| "-".to_string());
@@ -341,10 +411,23 @@ fn NodeCard(node: NodeStatus) -> impl IntoView {
                         {match time_quality_display {
                             Some((label, color)) => view! {
                                 <span style=format!("color: {color}; font-weight: 600")>{label}</span>
+                                {match holdover_detail {
+                                    Some(detail) => view! {
+                                        <span class="node-holdover-detail">{format!(" · {detail}")}</span>
+                                    }.into_any(),
+                                    None => ().into_any(),
+                                }}
                             }.into_any(),
                             None => view! { <span>"-"</span> }.into_any(),
                         }}
                     </div>
+                    {match crystal_drift {
+                        Some(drift) => view! {
+                            <div class="node-detail-label">"Clock drift"</div>
+                            <div>{drift}</div>
+                        }.into_any(),
+                        None => ().into_any(),
+                    }}
                     <div class="node-detail-label">"Type"</div>
                     <div>{node_type_text}</div>
                     <div class="node-detail-label">"Mobility"</div>

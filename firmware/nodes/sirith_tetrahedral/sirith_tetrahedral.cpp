@@ -478,6 +478,17 @@ int main() {
     std::printf("[sirith-pico] bare-board validation mode enabled\n");
   }
 
+  // Wire the holdover / crystal-frequency model from node config. NodeClock is
+  // kept free of node_config.h, so the injection happens here in main.
+  {
+    mmpr::NodeClockHoldoverConfig holdoverConfig;
+    holdoverConfig.enableTempComp = nodecfg::kEnableHoldoverTempComp;
+    holdoverConfig.driftUncertaintyPpm = nodecfg::kHoldoverDriftUncertaintyPpm;
+    holdoverConfig.errorBudgetNs = nodecfg::kHoldoverErrorBudgetNs;
+    holdoverConfig.maxAgeUs = nodecfg::kHoldoverMaxAgeUs;
+    gClock.setHoldoverConfig(holdoverConfig);
+  }
+
   mmpr::FailureSnapshot::updatePhase(mmpr::FatalLifecyclePhase::kWiFiInit);
   if (cyw43_arch_init()) {
     std::printf("[sirith-pico] fatal: Wi-Fi init failed\n");

@@ -83,12 +83,27 @@ def _binary_frame(*, sample_rate_hz: int = 16_000, channels: int = 1, samples_pe
     return bytes(payload)
 
 
+def _clock_holdover_section() -> bytes:
+    section = bytearray()
+    # flags: holdover_active | lt_valid | temp_model_valid | temp_comp_applied
+    section += struct.pack("<B", 0x01 | 0x02 | 0x04 | 0x08)
+    section += struct.pack("<I", 34_000)  # holdover_age_ms
+    section += struct.pack("<I", 12_300)  # predicted_error_ns
+    section += struct.pack("<f", -3.5)    # lt_ppm
+    section += struct.pack("<f", 0.25)    # lt_ppm_sigma
+    section += struct.pack("<f", -0.8)    # temp_slope_ppm_per_c
+    section += struct.pack("<f", 0.05)    # temp_resid_rms_ppm
+    return bytes(section)
+
+
 def _binary_frame_mmb3(
     *,
     sample_rate_hz: int = 16_000,
     channels: int = 1,
     samples_per_channel: int = 2,
     include_aux_sensors: bool = False,
+    include_clock_holdover: bool = False,
+    include_unknown_section: bool = False,
 ) -> bytes:
     samples = b"".join(
         struct.pack("<h", 32767 if sample_index % 2 else 0)
@@ -96,6 +111,10 @@ def _binary_frame_mmb3(
     )
     payload = bytearray()
     section_flags = 0x0004 | (0x0008 if include_aux_sensors else 0)
+    if include_clock_holdover:
+        section_flags |= 0x0010
+    if include_unknown_section:
+        section_flags |= 0x0020
     payload += struct.pack(
         "<QQQQIBBQQQBIH",
         1_000,
@@ -125,6 +144,15 @@ def _binary_frame_mmb3(
         aux_sensors += struct.pack("<ffffff", 1.0, 2.0, 3.0, 1.5, 2.5, 3.5)
         payload += struct.pack("<H", len(aux_sensors))
         payload += aux_sensors
+    # Sections are emitted in ascending bit order to match the firmware loop.
+    if include_clock_holdover:
+        holdover = _clock_holdover_section()
+        payload += struct.pack("<H", len(holdover))
+        payload += holdover
+    if include_unknown_section:
+        unknown = b"\xde\xad\xbe\xef"  # opaque future payload
+        payload += struct.pack("<H", len(unknown))
+        payload += unknown
     payload += samples
     return bytes(payload)
 
@@ -166,6 +194,8 @@ def _binary_ingest_payload_mmb3(
     channels: int = 1,
     samples_per_channel: int = 2,
     include_aux_sensors: bool = False,
+    include_clock_holdover: bool = False,
+    include_unknown_section: bool = False,
 ) -> bytes:
     payload = bytearray()
     payload += b"MMB3"
@@ -176,6 +206,8 @@ def _binary_ingest_payload_mmb3(
         channels=channels,
         samples_per_channel=samples_per_channel,
         include_aux_sensors=include_aux_sensors,
+        include_clock_holdover=include_clock_holdover,
+        include_unknown_section=include_unknown_section,
     )
     return bytes(payload)
 
@@ -270,6 +302,51 @@ def test_parse_binary_ingest_payload_mmb3_parses_aux_sensor_section() -> None:
             "values": pytest.approx([1.0, 2.0, 3.0, 1.5, 2.5, 3.5]),
         }
     ]
+
+
+def test_parse_binary_ingest_payload_mmb3_parses_clock_holdover_section() -> None:
+    geo = GeoPoint(lat=44.987, lon=-93.258, alt_m=281.5)
+
+    payload = parse_binary_ingest_payload(
+        _binary_ingest_payload_mmb3(
+            position_source="gps_nmea_uart",
+            geo=geo,
+            include_clock_holdover=True,
+        )
+    )
+
+    clock_holdover = payload.buffered_frames[0].frame.timing_diagnostics["clock_holdover"]
+    assert clock_holdover["holdover_active"] is True
+    assert clock_holdover["lt_valid"] is True
+    assert clock_holdover["temp_model_valid"] is True
+    assert clock_holdover["temp_comp_applied"] is True
+    assert clock_holdover["holdover_age_ms"] == 34_000
+    assert clock_holdover["predicted_error_ns"] == 12_300
+    assert clock_holdover["lt_ppm"] == pytest.approx(-3.5)
+    assert clock_holdover["lt_ppm_sigma"] == pytest.approx(0.25)
+    assert clock_holdover["temp_slope_ppm_per_c"] == pytest.approx(-0.8)
+    assert clock_holdover["temp_resid_rms_ppm"] == pytest.approx(0.05)
+
+
+def test_parse_binary_ingest_payload_mmb3_skips_unknown_section_without_raising() -> None:
+    geo = GeoPoint(lat=44.987, lon=-93.258, alt_m=281.5)
+
+    # An unknown future section (bit 0x0020) must be consumed and ignored, not
+    # raise — this is what lets old servers keep ingesting from newer firmware.
+    payload = parse_binary_ingest_payload(
+        _binary_ingest_payload_mmb3(
+            position_source="gps_nmea_uart",
+            geo=geo,
+            include_clock_holdover=True,
+            include_unknown_section=True,
+        )
+    )
+
+    frame = payload.buffered_frames[0].frame
+    # Known sections around the unknown one still decode correctly.
+    assert "clock_holdover" in frame.timing_diagnostics
+    assert "transport_health" in frame.timing_diagnostics
+    assert frame.samples_per_channel == 2
 
 
 @pytest.mark.parametrize("version", [2, 3])
