@@ -18,6 +18,7 @@ use std::f32::consts::PI;
 use num_complex::Complex32;
 use rustfft::{FftDirection, FftPlanner};
 
+use crate::dsp_math::{hann_window, norm3, scale3};
 use crate::dsp_worker::SIRITH_MIC_POSITIONS_M;
 
 const SPEED_OF_SOUND_MPS: f32 = 343.2;
@@ -68,21 +69,12 @@ pub fn render_mvdr(request: MvdrRenderRequest) -> MvdrRenderOutput {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-fn hann_window(n: usize) -> Vec<f32> {
-    if n <= 1 {
-        return vec![1.0; n];
-    }
-    (0..n)
-        .map(|i| 0.5 * (1.0 - (2.0 * PI * i as f32 / (n - 1) as f32).cos()))
-        .collect()
-}
-
 fn normalise_vec3(v: [f32; 3]) -> [f32; 3] {
-    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    let len = norm3(v);
     if len < 1e-9 {
         return [1.0, 0.0, 0.0];
     }
-    [v[0] / len, v[1] / len, v[2] / len]
+    scale3(v, 1.0 / len)
 }
 
 fn iir_slew(current: [f32; 3], target: [f32; 3], alpha: f32) -> [f32; 3] {

@@ -259,6 +259,7 @@ class StorageBackend(Protocol):
         label: str,
         report_window_start_ns: int,
         report_window_end_ns: int,
+        any_node: bool = False,
     ) -> dict[str, Any] | None:
         ...
 

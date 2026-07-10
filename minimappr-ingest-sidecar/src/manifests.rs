@@ -67,6 +67,10 @@ pub struct ClassifierRenderManifestPayload {
     pub effective_spatial_band: Option<[f32; 2]>,
     pub source_channel_count: usize,
     pub fallback_reason: Option<String>,
+    #[serde(default)]
+    pub alias_cutoff_hz: Option<f32>,
+    #[serde(default)]
+    pub steering_model: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -83,6 +87,10 @@ pub struct BirdnetHybridProvenance {
     pub label_confidence: Option<f32>,
     #[serde(default)]
     pub scores: Option<BTreeMap<String, f32>>,
+    #[serde(default)]
+    pub alias_cutoff_hz: Option<f32>,
+    #[serde(default)]
+    pub steering_model: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

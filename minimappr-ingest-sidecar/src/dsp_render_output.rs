@@ -2,7 +2,8 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::{
-    birdnet_render::{render_hybrid_pcm16le, render_omni_pcm16le, HybridRenderConfig},
+    birdnet_render::{render_band_split_pcm16le, render_omni_pcm16le, BandSplitRenderConfig},
+    dsp_math::{norm3, scale3},
     dsp_worker::DspWorkerConfig,
     journal_reader::JournalPayloadHandle,
     manifests::{BirdnetHybridProvenance, ClassifierRenderManifestPayload, DspManifest},
@@ -30,6 +31,8 @@ pub struct RenderMeta {
     pub confidence: Option<f32>,
     pub effective_fallback_reason: Option<String>,
     pub source_channel_count: usize,
+    pub alias_cutoff_hz: Option<f32>,
+    pub steering_model: Option<String>,
 }
 
 pub struct RenderComputeRequest<'a> {
@@ -66,23 +69,30 @@ pub fn compute_render_bytes(request: RenderComputeRequest<'_>) -> (Vec<u8>, Rend
     });
 
     if let Some(solution) = use_hybrid {
-        let hybrid_config = HybridRenderConfig {
-            spatial_band_hz: config.spatial_blend_band_hz,
-            pre_blend_highpass_hz: config.pre_blend_highpass_hz,
+        let band_split_config = BandSplitRenderConfig {
+            highpass_hz: config.band_split_highpass_hz,
+            low_crossover_width_hz: config.band_split_low_crossover_width_hz,
+            high_crossover_width_min_hz: config.band_split_high_crossover_width_min_hz,
+            high_crossover_width_fraction: config.band_split_high_crossover_width_fraction,
             sound_speed_mps,
+            band_max_clamp_hz: config.band_split_max_clamp_hz,
         };
-        let bytes = render_hybrid_pcm16le(
+        // Contract §1 steer-position rule: range_refined solves steer at the
+        // solved position (near-field); range-unobservable modes project the
+        // bearing at the solved/default range.
+        let (steer_position_m, steering_model) = resolve_steer_position(solution, config);
+        let output = render_band_split_pcm16le(
             channels,
-            solution.steering_direction,
+            steer_position_m,
             mic_positions_m,
             sample_rate_hz,
-            hybrid_config,
+            band_split_config,
         );
         let meta = RenderMeta {
-            render_kind: "birdnet_hybrid_spatial_blend".to_string(),
+            render_kind: "birdnet_band_split_das".to_string(),
             render_start_ns,
             render_end_ns,
-            spatial_band: Some(config.spatial_blend_band_hz),
+            spatial_band: Some(output.effective_spatial_band),
             steering_solution: Some(format!(
                 "srp_phat:{:.4},{:.4},{:.4}",
                 solution.steering_direction[0],
@@ -92,8 +102,10 @@ pub fn compute_render_bytes(request: RenderComputeRequest<'_>) -> (Vec<u8>, Rend
             confidence: Some(solution.confidence),
             effective_fallback_reason: None,
             source_channel_count,
+            alias_cutoff_hz: Some(output.alias_cutoff_hz),
+            steering_model: Some(steering_model.to_string()),
         };
-        (bytes, meta)
+        (output.pcm_bytes, meta)
     } else {
         let bytes = render_omni_pcm16le(channels);
         let confidence = localization.map(|sol| sol.confidence);
@@ -108,9 +120,35 @@ pub fn compute_render_bytes(request: RenderComputeRequest<'_>) -> (Vec<u8>, Rend
             confidence,
             effective_fallback_reason,
             source_channel_count,
+            alias_cutoff_hz: None,
+            steering_model: None,
         };
         (bytes, meta)
     }
+}
+
+/// Resolve the steer position per BEAMFORMED_RENDER_CONTRACT.md §1.
+fn resolve_steer_position(
+    solution: &SrpPhatLocalization,
+    config: &DspWorkerConfig,
+) -> ([f32; 3], &'static str) {
+    let mode = solution.range_projection_mode.as_deref();
+    if mode == Some(crate::range_projection::RANGE_REFINED) {
+        if let Some(position) = solution.position_m {
+            return (position, "near_field");
+        }
+    }
+    // Range-unobservable (or position missing): project the bearing at the
+    // solved range when available, else the far-field default.
+    let range_m = solution
+        .position_m
+        .map(norm3)
+        .filter(|r| r.is_finite() && *r > 1e-3)
+        .unwrap_or(config.localization_far_field_default_range_m);
+    (
+        scale3(solution.steering_direction, range_m),
+        "bearing_projected",
+    )
 }
 
 /// Build the classifier_render manifest and return raw PCM bytes in memory.
@@ -157,6 +195,8 @@ pub fn build_render_result(
         effective_spatial_band: meta.spatial_band,
         source_channel_count: meta.source_channel_count,
         fallback_reason: meta.effective_fallback_reason.clone(),
+        alias_cutoff_hz: meta.alias_cutoff_hz,
+        steering_model: meta.steering_model.clone(),
     };
     let pending = DspManifest {
         manifest_id: format!("manifest-{}", Uuid::new_v4()),
@@ -176,6 +216,8 @@ pub fn build_render_result(
             label: None,
             label_confidence: None,
             scores: None,
+            alias_cutoff_hz: meta.alias_cutoff_hz,
+            steering_model: meta.steering_model,
         }),
         coverage_stats,
         promotion_ready: true,

@@ -121,6 +121,8 @@ class IamfPipeline:
         executor: Optional[asyncio.AbstractEventLoop] = None,
         artifact_dir: Optional[Path] = None,
         iamf_ambi_profile: str = "parametric_v2",
+        mvdr_diagonal_loading: float = 1e-3,
+        iamf_object_band_split_enabled: bool = True,
     ) -> None:
         self._sidecar_url = sidecar_url
         self._db = db_storage
@@ -128,6 +130,10 @@ class IamfPipeline:
         self._artifact_dir = artifact_dir or ARTIFACTS_DIR
         self._http = httpx.AsyncClient(timeout=60.0) if sidecar_url else None
         self._iamf_ambi_profile = iamf_ambi_profile
+        # Object rendering intentionally uses the configured loading WITHOUT
+        # the classifier ×10 recall widening — objects want selectivity.
+        self._mvdr_diagonal_loading = mvdr_diagonal_loading
+        self._iamf_object_band_split_enabled = iamf_object_band_split_enabled
 
     async def run(self, record: CaptureSessionRecord) -> None:
         """Execute all pipeline steps for the given session record."""
@@ -226,6 +232,9 @@ class IamfPipeline:
             start_ns, end_ns, n_capture_samples, capture_rate_hz
         )
         object_tracks: dict[str, NDArray[np.float32]] = {}
+        registered_mic_positions = await self._registered_mic_positions(
+            record.stream_key, int(raw_channels.shape[0])
+        )
         for traj in trajectories:
             if traj.rendered_object_samples is not None:
                 mono = traj.rendered_object_samples
@@ -234,6 +243,7 @@ class IamfPipeline:
                     raw_channels,
                     traj,
                     capture_rate_hz,
+                    mic_positions_m=registered_mic_positions,
                     work_dir=work_dir,
                 )
             obj_path = work_dir / f"object_{traj.track_id}.wav"
@@ -573,6 +583,37 @@ class IamfPipeline:
 
         return trajectories
 
+    async def _registered_mic_positions(
+        self,
+        stream_key: str,
+        channel_count: int,
+    ) -> NDArray[np.float64] | None:
+        """Registered node geometry for the recording's node, when available.
+
+        Falls back to None (Sirith default downstream) when the node is
+        unknown or its sensor offsets don't match the channel count.
+        """
+        node_id = _node_id_from_sensor_id(stream_key)
+        lookup = getattr(self._db, "get_node_by_id", None)
+        if not callable(lookup):
+            return None
+        try:
+            node = await lookup(node_id)
+        except Exception:  # pragma: no cover - storage backends vary in tests
+            return None
+        if not isinstance(node, dict):
+            return None
+        offsets = node.get("sensor_offsets_m")
+        if not isinstance(offsets, list) or len(offsets) < channel_count:
+            return None
+        try:
+            positions = np.asarray(offsets[:channel_count], dtype=np.float64)
+        except (TypeError, ValueError):
+            return None
+        if positions.shape != (channel_count, 3):
+            return None
+        return positions
+
     async def _mvdr_beamform(
         self,
         channels: NDArray[np.float32],
@@ -670,86 +711,28 @@ class IamfPipeline:
     ) -> NDArray[np.float32]:
         """Pure-Python MVDR beamformer for offline rendering.
 
-        The fallback uses Hann overlap-add so independently estimated MVDR
-        weights change smoothly instead of stepping at block boundaries.
+        Delegates to :class:`BlockTrajectoryRenderer` (Hann overlap-add) so
+        independently estimated MVDR weights change smoothly instead of
+        stepping at block boundaries. Trajectory interpolation stays here.
         """
-        from minimappr.core.beamforming import MVDRBeamformer
-
-        n_channels = channels.shape[0]
-        n_samples = channels.shape[1]
-
-        positions = mic_positions_m if mic_positions_m is not None else SIRITH_MIC_POSITIONS_M
-        sensor_ids = [f"ch{i}" for i in range(n_channels)]
-        sensor_positions: dict[str, np.ndarray] = {
-            sid: positions[i]
-            for i, sid in enumerate(sensor_ids)
-            if i < len(positions)
-        }
-
-        beamformer = MVDRBeamformer(diagonal_loading=1e-3)
-        output = np.zeros(n_samples, dtype=np.float64)
-        norm = np.zeros(n_samples, dtype=np.float64)
+        from minimappr.core.beamforming import BlockTrajectoryRenderer, MVDRBeamformer
 
         if not traj.waypoints:
-            return output.astype(np.float32)
+            return np.zeros(channels.shape[1], dtype=np.float32)
 
-        first_active = traj.waypoints[0][0]
-        last_active = traj.waypoints[-1][0]
-        fade_samples = max(512, int(round(0.012 * capture_rate_hz)))
-        block_size = SUBTRACT_BLOCK
-        hop = max(1, block_size // 2)
-        window = np.hanning(block_size).astype(np.float64)
-
-        for block_start in range(0, n_samples, hop):
-            block_end = min(block_start + block_size, n_samples)
-            block_len = block_end - block_start
-
-            # Silence blocks entirely outside the track's active range.
-            if block_end <= first_active or block_start >= last_active:
-                continue
-
-            sample_mid = block_start + block_len // 2
-            steer_pos = _interpolate_waypoints(traj.waypoints, sample_mid)
-
-            frame = np.zeros((n_channels, block_size), dtype=np.float32)
-            frame[:, :block_len] = channels[:, block_start:block_end]
-            frame *= window[np.newaxis, :].astype(np.float32)
-            sensor_windows: dict[str, np.ndarray] = {
-                sid: frame[i]
-                for i, sid in enumerate(sensor_ids)
-                if i < channels.shape[0]
-            }
-            block_out = beamformer.beamform(
-                sensor_positions=sensor_positions,
-                sensor_windows=sensor_windows,
-                sample_rate_hz=capture_rate_hz,
-                steer_position_m=steer_pos,
-            )
-            if block_out.size < block_size:
-                block_out = np.pad(block_out, (0, block_size - block_out.size))
-            output[block_start:block_end] += (
-                block_out[:block_len].astype(np.float64) * window[:block_len]
-            )
-            norm[block_start:block_end] += window[:block_len] ** 2
-
-        safe_norm = np.where(norm > 1e-12, norm, 1.0)
-        output /= safe_norm
-
-        # Linear fade-in at the start of the active range.
-        fade_in_start = max(0, first_active)
-        fade_in_end = min(n_samples, first_active + fade_samples)
-        if fade_in_end > fade_in_start:
-            ramp = np.linspace(0.0, 1.0, fade_in_end - fade_in_start, dtype=np.float64)
-            output[fade_in_start:fade_in_end] *= ramp
-
-        # Linear fade-out at the end of the active range.
-        fade_out_start = max(0, last_active - fade_samples)
-        fade_out_end = min(n_samples, last_active)
-        if fade_out_end > fade_out_start:
-            ramp = np.linspace(1.0, 0.0, fade_out_end - fade_out_start, dtype=np.float64)
-            output[fade_out_start:fade_out_end] *= ramp
-
-        return output.astype(np.float32)
+        positions = mic_positions_m if mic_positions_m is not None else SIRITH_MIC_POSITIONS_M
+        renderer = BlockTrajectoryRenderer(
+            beamformer=MVDRBeamformer(diagonal_loading=self._mvdr_diagonal_loading),
+            block_size=SUBTRACT_BLOCK,
+            omni_blend_above_cutoff=self._iamf_object_band_split_enabled,
+        )
+        return renderer.render(
+            channels,
+            np.asarray(positions, dtype=np.float64),
+            capture_rate_hz,
+            lambda sample_mid: _interpolate_waypoints(traj.waypoints, sample_mid),
+            active_range=(traj.waypoints[0][0], traj.waypoints[-1][0]),
+        )
 
     async def _mvdr_beamform_rust(
         self,

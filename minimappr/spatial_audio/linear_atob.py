@@ -29,22 +29,14 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
 
-# ── Geometry ──────────────────────────────────────────────────────────────────
+# ── Geometry (canonical definitions live in spatial_audio.geometry) ──────────
 
-SIRITH_MIC_POSITIONS_M: NDArray[np.float64] = np.array(
-    [
-        [0.0, 0.050, 0.0],
-        [0.0433, 0.025, 0.0],
-        [0.0, 0.0, 0.0],
-        [0.02165, 0.025, 0.04082],
-    ],
-    dtype=np.float64,
+from minimappr.spatial_audio.geometry import (  # noqa: E402
+    ALIAS_CUTOFF_HZ,
+    SIRITH_MIC_POSITIONS_M,
+    SPEED_OF_SOUND_MPS,
+    alias_cutoff_from_positions,
 )
-
-SPEED_OF_SOUND_MPS: float = 343.2
-
-# Spatial-aliasing cutoff for the default Sirith geometry (edge ≈ 0.05 m).
-ALIAS_CUTOFF_HZ: float = SPEED_OF_SOUND_MPS / (2.0 * 0.05)
 
 # Tikhonov regularisation floor at DC (dimensionless noise floor).
 TIKHONOV_LAMBDA_0: float = 1e-3
@@ -227,17 +219,6 @@ def _max_baseline_m(positions: NDArray[np.float64]) -> float:
             if d > max_d:
                 max_d = d
     return max_d
-
-
-def alias_cutoff_from_positions(
-    positions: NDArray[np.float64],
-    c_sound: float = SPEED_OF_SOUND_MPS,
-) -> float:
-    """Spatial-aliasing cutoff for the given mic geometry: c / (2 * max_edge)."""
-    baseline = _max_baseline_m(positions)
-    if baseline < 1e-6:
-        return ALIAS_CUTOFF_HZ  # degenerate geometry: fall back to default
-    return float(c_sound) / (2.0 * baseline)
 
 
 def _build_encoding_matrix(

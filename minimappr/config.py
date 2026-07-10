@@ -267,6 +267,8 @@ class FusionConfig:
     sensor_energy_threshold_multiplier: float
     fallback_localization_confidence: float
     reporting_window_seconds: float
+    omni_suppression_scope: str
+    omni_suppression_max_distance_m: float
     taxonomy_refresh_interval_seconds: float
     retention_permanent_labels: tuple[str, ...]
     retention_long_security_confidence: float
@@ -438,6 +440,9 @@ class Settings:
     map_overlay_dir: Path = Path("data/overlays")
     capture_final_tracks_settle_seconds: float = 30.0
     iamf_ambi_profile: str = "parametric_v2"
+    # Raised-cosine omni blend above the alias cutoff for IAMF object renders
+    # so objects keep full bandwidth (contract §7 rung 2 semantics, offline).
+    iamf_object_band_split_enabled: bool = True
     cors_allow_origins: tuple[str, ...] = ("http://localhost:8080", "http://127.0.0.1:8080")
     cors_allow_credentials: bool = False
 
@@ -498,10 +503,14 @@ class Settings:
     wavelength_penalty_floor: float = 0.25
     skip_localization_for_classification: bool = False
     cluster_aware_localization: bool = True
-    beamformed_classification_enabled: bool = False
-    beamformer_type: str = "delay_and_sum"
+    beamformed_classification_enabled: bool = True
+    beamformer_type: str = "band_split_das"
     beamformed_classification_min_sensor_count: int = 2
     beamformed_classification_confidence_margin: float = 0.0
+    beamform_render_highpass_hz: float = 100.0
+    beamform_low_crossover_width_hz: float = 100.0
+    beamform_high_crossover_width_min_hz: float = 400.0
+    beamform_high_crossover_width_fraction: float = 0.15
     mvdr_diagonal_loading: float = 1e-3
     classifier_diagonal_loading_scale: float = 10.0
     classifier_stage_timeout_seconds: float = 30.0
@@ -578,7 +587,19 @@ class Settings:
     fusion_offline_replay_mode: bool = False
     sensor_energy_threshold_multiplier: float = 0.45
     fallback_localization_confidence: float = 0.25
+    # Cross-node audio for classification (BEAMFORMED_RENDER_CONTRACT Phase 6).
+    # Off by default: each event's extra classifier invocations cost real CPU.
+    cross_node_beam_enabled: bool = False
+    cross_node_beam_max_range_m: float = 75.0
+    cross_node_beam_max_nodes: int = 3
     reporting_window_seconds: float = 30.0
+    # Scope of the omni→localized suppression check: "site" consults detections
+    # from every node in the reporting window; "node" keeps the legacy per-node
+    # check. Insert/upgrade paths always stay per-node keyed.
+    omni_suppression_scope: str = "site"
+    # Escape hatch: skip site-wide suppression when the localized detection is
+    # farther than this from the omni-reporting node (0 = disabled).
+    omni_suppression_max_distance_m: float = 0.0
     taxonomy_refresh_interval_seconds: float = 10.0
     retention_permanent_labels: tuple[str, ...] = ("gunshot", "explosion", "artillery", "fusillade")
     retention_long_security_confidence: float = 0.6
@@ -863,7 +884,18 @@ class Settings:
             # Preserve the more descriptive config name internally while
             # still accepting the historical shorthand.
             self.beamformer_type = "delay_and_sum"
-        _valid_beamformers = {"delay_and_sum", "das", "freq_domain_das", "mvdr", "superdirective", "gevd"}
+        if self.beamformer_type == "band_split":
+            self.beamformer_type = "band_split_das"
+        _valid_beamformers = {
+            "delay_and_sum",
+            "das",
+            "freq_domain_das",
+            "band_split_das",
+            "band_split",
+            "mvdr",
+            "superdirective",
+            "gevd",
+        }
         if self.beamformer_type not in _valid_beamformers:
             raise ValueError(
                 f"MINIMAPPR_BEAMFORMER_TYPE must be one of {sorted(_valid_beamformers)}"
@@ -890,12 +922,29 @@ class Settings:
             raise ValueError("MINIMAPPR_BEAMFORMED_CLASSIFICATION_CONFIDENCE_MARGIN must be >= 0")
         if self.mvdr_diagonal_loading <= 0.0:
             raise ValueError("MINIMAPPR_MVDR_DIAGONAL_LOADING must be > 0")
+        if self.beamform_render_highpass_hz < 0.0:
+            raise ValueError("MINIMAPPR_BEAMFORM_RENDER_HIGHPASS_HZ must be >= 0")
+        if self.beamform_low_crossover_width_hz < 0.0:
+            raise ValueError("MINIMAPPR_BEAMFORM_LOW_CROSSOVER_WIDTH_HZ must be >= 0")
+        if self.beamform_high_crossover_width_min_hz < 0.0:
+            raise ValueError("MINIMAPPR_BEAMFORM_HIGH_CROSSOVER_WIDTH_MIN_HZ must be >= 0")
+        if not 0.0 <= self.beamform_high_crossover_width_fraction < 1.0:
+            raise ValueError("MINIMAPPR_BEAMFORM_HIGH_CROSSOVER_WIDTH_FRACTION must be in [0,1)")
         if self.sensor_energy_threshold_multiplier <= 0.0:
             raise ValueError("MINIMAPPR_SENSOR_ENERGY_THRESHOLD_MULTIPLIER must be > 0")
         if self.fallback_localization_confidence < 0.0 or self.fallback_localization_confidence > 1.0:
             raise ValueError("MINIMAPPR_FALLBACK_LOCALIZATION_CONFIDENCE must be in [0,1]")
         if self.reporting_window_seconds <= 0.0:
             raise ValueError("MINIMAPPR_REPORTING_WINDOW_SECONDS must be > 0")
+        if self.cross_node_beam_max_range_m <= 0.0:
+            raise ValueError("MINIMAPPR_CROSS_NODE_BEAM_MAX_RANGE_M must be > 0")
+        if self.cross_node_beam_max_nodes < 1:
+            raise ValueError("MINIMAPPR_CROSS_NODE_BEAM_MAX_NODES must be >= 1")
+        self.omni_suppression_scope = self.omni_suppression_scope.strip().lower()
+        if self.omni_suppression_scope not in {"site", "node"}:
+            raise ValueError("MINIMAPPR_OMNI_SUPPRESSION_SCOPE must be 'site' or 'node'")
+        if self.omni_suppression_max_distance_m < 0.0:
+            raise ValueError("MINIMAPPR_OMNI_SUPPRESSION_MAX_DISTANCE_M must be >= 0")
         if self.birdnet_chunk_overlap_seconds < 0.0:
             raise ValueError("MINIMAPPR_BIRDNET_CHUNK_OVERLAP_SECONDS must be >= 0")
         if self.birdnet_chunk_max_retries_per_chunk < 0:
@@ -1132,6 +1181,7 @@ class Settings:
                 30.0,
             ),
             iamf_ambi_profile=_env_str("MINIMAPPR_IAMF_AMBI_PROFILE", "parametric_v2"),
+            iamf_object_band_split_enabled=_env_bool("MINIMAPPR_IAMF_OBJECT_BAND_SPLIT_ENABLED", True),
             cors_allow_origins=_env_list(
                 "MINIMAPPR_CORS_ALLOW_ORIGINS",
                 ("http://localhost:8080", "http://127.0.0.1:8080"),
@@ -1268,8 +1318,18 @@ class Settings:
                 "MINIMAPPR_SKIP_LOCALIZATION_FOR_CLASSIFICATION",
                 False,
             ),
-            beamformed_classification_enabled=_env_bool("MINIMAPPR_BEAMFORMED_CLASSIFICATION_ENABLED", False),
-            beamformer_type=_env_str("MINIMAPPR_BEAMFORMER_TYPE", "delay_and_sum"),
+            beamformed_classification_enabled=_env_bool("MINIMAPPR_BEAMFORMED_CLASSIFICATION_ENABLED", True),
+            beamformer_type=_env_str("MINIMAPPR_BEAMFORMER_TYPE", "band_split_das"),
+            beamform_render_highpass_hz=_env_float("MINIMAPPR_BEAMFORM_RENDER_HIGHPASS_HZ", 100.0),
+            beamform_low_crossover_width_hz=_env_float("MINIMAPPR_BEAMFORM_LOW_CROSSOVER_WIDTH_HZ", 100.0),
+            beamform_high_crossover_width_min_hz=_env_float(
+                "MINIMAPPR_BEAMFORM_HIGH_CROSSOVER_WIDTH_MIN_HZ",
+                400.0,
+            ),
+            beamform_high_crossover_width_fraction=_env_float(
+                "MINIMAPPR_BEAMFORM_HIGH_CROSSOVER_WIDTH_FRACTION",
+                0.15,
+            ),
             beamformed_classification_min_sensor_count=_env_int(
                 "MINIMAPPR_BEAMFORMED_CLASSIFICATION_MIN_SENSOR_COUNT",
                 2,
@@ -1377,7 +1437,12 @@ class Settings:
             fusion_offline_replay_mode=_env_bool("MINIMAPPR_FUSION_OFFLINE_REPLAY_MODE", False),
             sensor_energy_threshold_multiplier=_env_float("MINIMAPPR_SENSOR_ENERGY_THRESHOLD_MULTIPLIER", 0.45),
             fallback_localization_confidence=_env_float("MINIMAPPR_FALLBACK_LOCALIZATION_CONFIDENCE", 0.25),
+            cross_node_beam_enabled=_env_bool("MINIMAPPR_CROSS_NODE_BEAM_ENABLED", False),
+            cross_node_beam_max_range_m=_env_float("MINIMAPPR_CROSS_NODE_BEAM_MAX_RANGE_M", 75.0),
+            cross_node_beam_max_nodes=_env_int("MINIMAPPR_CROSS_NODE_BEAM_MAX_NODES", 3),
             reporting_window_seconds=_env_float("MINIMAPPR_REPORTING_WINDOW_SECONDS", 30.0),
+            omni_suppression_scope=_env_str("MINIMAPPR_OMNI_SUPPRESSION_SCOPE", "site"),
+            omni_suppression_max_distance_m=_env_float("MINIMAPPR_OMNI_SUPPRESSION_MAX_DISTANCE_M", 0.0),
             taxonomy_refresh_interval_seconds=_env_float("MINIMAPPR_TAXONOMY_REFRESH_INTERVAL_SECONDS", 10.0),
             retention_permanent_labels=_env_list(
                 "MINIMAPPR_RETENTION_PERMANENT_LABELS",
@@ -1592,6 +1657,8 @@ class Settings:
             sensor_energy_threshold_multiplier=self.sensor_energy_threshold_multiplier,
             fallback_localization_confidence=self.fallback_localization_confidence,
             reporting_window_seconds=self.reporting_window_seconds,
+            omni_suppression_scope=self.omni_suppression_scope,
+            omni_suppression_max_distance_m=self.omni_suppression_max_distance_m,
             taxonomy_refresh_interval_seconds=self.taxonomy_refresh_interval_seconds,
             retention_permanent_labels=self.retention_permanent_labels,
             retention_long_security_confidence=self.retention_long_security_confidence,

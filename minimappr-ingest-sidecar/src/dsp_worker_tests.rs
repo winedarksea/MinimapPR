@@ -729,7 +729,7 @@ async fn tetra_classifier_render_forces_srp_between_localization_cadence_ticks()
         manifest
             .classifier_render
             .as_ref()
-            .is_some_and(|payload| payload.render_kind == "birdnet_hybrid_spatial_blend")
+            .is_some_and(|payload| payload.render_kind == "birdnet_band_split_das")
     }));
     assert!(render_events.iter().all(|manifest| {
         manifest.classifier_render.as_ref().is_some_and(|payload| {

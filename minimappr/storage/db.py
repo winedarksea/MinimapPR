@@ -1615,9 +1615,27 @@ class Storage:
         label: str,
         report_window_start_ns: int,
         report_window_end_ns: int,
+        any_node: bool = False,
     ) -> dict[str, Any] | None:
         db = self._require_db()
-        if source_node_id is None:
+        if any_node:
+            # Site-wide lookup: ignore node keying entirely; prefer localized
+            # detections so an omni row never masks a localized one elsewhere.
+            row = await (
+                await db.execute(
+                    """
+                    SELECT * FROM detections
+                    WHERE label = ?
+                      AND report_window_start_ns = ?
+                      AND report_window_end_ns = ?
+                    ORDER BY CASE WHEN reporting_modality = 'localized' THEN 0 ELSE 1 END,
+                             timestamp_ns DESC
+                    LIMIT 1
+                    """,
+                    (label, report_window_start_ns, report_window_end_ns),
+                )
+            ).fetchone()
+        elif source_node_id is None:
             row = await (
                 await db.execute(
                     """

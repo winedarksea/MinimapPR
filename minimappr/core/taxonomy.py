@@ -37,7 +37,13 @@ class RuntimeTaxonomyProvider(TaxonomyProvider):
         *,
         label_to_category: dict[str, str] | None = None,
         category_to_iff: dict[str, str] | None = None,
+        label_aliases: dict[str, str] | None = None,
     ) -> None:
+        self._label_aliases = {
+            str(key).strip().lower(): str(value).strip().lower()
+            for key, value in (label_aliases or {}).items()
+            if str(key).strip() and str(value).strip()
+        }
         self._label_to_category = {
             str(key).strip().lower(): str(value).strip().lower()
             for key, value in (label_to_category or {}).items()
@@ -62,6 +68,7 @@ class RuntimeTaxonomyProvider(TaxonomyProvider):
         return cls(
             label_to_category=_extract_map(raw.get("label_to_category")),
             category_to_iff=_extract_map(raw.get("category_to_iff")),
+            label_aliases=_extract_map(raw.get("label_aliases")),
         )
 
     def merge_labels(self, rows: list[dict[str, Any]]) -> None:
@@ -76,6 +83,15 @@ class RuntimeTaxonomyProvider(TaxonomyProvider):
         if not label.strip():
             return
         self._label_to_category[label.strip().lower()] = category.strip().lower() or "unknown"
+
+    def canonical_label(self, label: str) -> str:
+        """Resolve alias labels to their canonical form (identity when unmapped).
+
+        Matching is label-level: canonicalization normalizes the *incoming*
+        label before dedupe queries; rows already stored under a different
+        alias are not re-keyed.
+        """
+        return self._label_aliases.get(label.strip().lower(), label)
 
     def category_for_label(self, label: str) -> str:
         key = label.strip().lower()

@@ -217,6 +217,11 @@ pub async fn run_io(result: ComputeMathResult) {
         localization_coverage_json,
     } = result;
 
+    // INVARIANT: runtime telemetry must be enriched onto node_context BEFORE
+    // build_render_result / write_render_to_cache clones payload.manifest's
+    // node_context into the classifier_render manifest. Reordering this drops
+    // telemetry from downstream manifests (historical node-offline bug in
+    // memory-only mode — see project notes on dsp_render_output.rs).
     enrich_node_context_with_runtime_telemetry(&mut payload);
 
     // Build the classifier_render manifest and keep PCM bytes in memory.

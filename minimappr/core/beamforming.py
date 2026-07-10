@@ -20,6 +20,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from minimappr.spatial_audio.geometry import alias_cutoff_from_positions
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +164,281 @@ class FrequencyDomainDelayAndSumBeamformer:
             summed_spectrum *= np.asarray(frequency_weights, dtype=np.float64)
 
         output = np.fft.irfft(summed_spectrum, n=n_samples)
+        return output.astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
+# Band-split delay-and-sum renderer (see BEAMFORMED_RENDER_CONTRACT.md)
+# ---------------------------------------------------------------------------
+
+def raised_cosine_band_weights(
+    freqs: np.ndarray,
+    *,
+    low_center_hz: float,
+    low_width_hz: float,
+    high_center_hz: float,
+    high_width_hz: float,
+) -> np.ndarray:
+    """Steered-band weight w(f) in [0, 1] with raised-cosine crossovers.
+
+    w ramps 0→1 across ``low_center_hz ± low_width_hz/2`` and 1→0 across
+    ``high_center_hz ± high_width_hz/2``. The high ramp is centered at the
+    alias cutoff per the contract (recall-biased). Shared by classification,
+    IAMF, and the cross-language parity expectations.
+    """
+    f = np.asarray(freqs, dtype=np.float64)
+    weights = np.ones_like(f)
+
+    lo_start = low_center_hz - low_width_hz / 2.0
+    lo_end = low_center_hz + low_width_hz / 2.0
+    if lo_end > lo_start:
+        x = np.clip((f - lo_start) / (lo_end - lo_start), 0.0, 1.0)
+        weights *= 0.5 * (1.0 - np.cos(np.pi * x))
+    else:
+        weights *= (f >= low_center_hz).astype(np.float64)
+
+    hi_start = high_center_hz - high_width_hz / 2.0
+    hi_end = high_center_hz + high_width_hz / 2.0
+    if hi_end > hi_start:
+        x = np.clip((f - hi_start) / (hi_end - hi_start), 0.0, 1.0)
+        weights *= 0.5 * (1.0 + np.cos(np.pi * x))
+    else:
+        weights *= (f <= high_center_hz).astype(np.float64)
+
+    return weights
+
+
+@dataclass(slots=True)
+class BandSplitRenderConfig:
+    """Crossover parameters for :class:`BandSplitDasRenderer`."""
+
+    highpass_hz: float = 100.0
+    low_crossover_width_hz: float = 100.0
+    high_crossover_width_min_hz: float = 400.0
+    high_crossover_width_fraction: float = 0.15
+    sound_speed_mps: float = 343.2
+
+
+@dataclass(slots=True)
+class BandSplitDasRenderer:
+    """Band-split delay-and-sum: steered below the alias cutoff, omni elsewhere.
+
+    Implements the normative algorithm of BEAMFORMED_RENDER_CONTRACT.md: one
+    rFFT per channel; omni = mean spectrum; steered = mean of phase-advanced
+    spectra; raised-cosine blend with the high ramp centered at the
+    geometry-derived alias cutoff. Recall-biased: everything outside the
+    physically-steerable band passes through as omni (including below the
+    highpass — low rumble is kept for the classifier).
+
+    ``alias_cutoff_hz = None`` computes the cutoff from the sensor positions
+    at render time (c / (2·max_baseline)).
+    """
+
+    config: BandSplitRenderConfig = None  # type: ignore[assignment]
+    alias_cutoff_hz: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.config is None:
+            self.config = BandSplitRenderConfig()
+
+    def beamform(
+        self,
+        sensor_positions: dict[str, np.ndarray],
+        sensor_windows: dict[str, np.ndarray],
+        sample_rate_hz: int,
+        steer_position_m: tuple[float, float, float],
+        sound_speed_mps: float = 343.2,
+        frequency_weights: np.ndarray | None = None,
+    ) -> np.ndarray:
+        sensor_ids = _ordered_sensor_ids(sensor_positions, sensor_windows)
+        if not sensor_ids:
+            return np.zeros(0, dtype=np.float32)
+        if len(sensor_ids) == 1:
+            return sensor_windows[sensor_ids[0]].astype(np.float32, copy=True)
+
+        x = np.vstack([sensor_windows[sid] for sid in sensor_ids]).astype(np.float64)
+        n_samples = x.shape[1]
+        if n_samples == 0:
+            return np.zeros(0, dtype=np.float32)
+
+        cutoff_hz = self.alias_cutoff_hz
+        if cutoff_hz is None or not math.isfinite(cutoff_hz) or cutoff_hz <= 0.0:
+            positions = np.vstack([sensor_positions[sid] for sid in sensor_ids])
+            cutoff_hz = alias_cutoff_from_positions(positions, sound_speed_mps)
+
+        delays = _steering_delays_s(
+            sensor_positions=sensor_positions,
+            sensor_ids=sensor_ids,
+            steer_position_m=steer_position_m,
+            sound_speed_mps=sound_speed_mps,
+        )
+
+        spectra = np.fft.rfft(x, axis=1)  # (M, F)
+        freqs = np.fft.rfftfreq(n_samples, d=1.0 / sample_rate_hz)
+
+        omni_spectrum = np.mean(spectra, axis=0)
+        phase_shifts = np.exp(1j * 2.0 * np.pi * delays[:, None] * freqs[None, :])
+        steered_spectrum = np.mean(spectra * phase_shifts, axis=0)
+
+        weights = self.band_weights(freqs, cutoff_hz)
+        blended = weights * steered_spectrum + (1.0 - weights) * omni_spectrum
+
+        if frequency_weights is not None and frequency_weights.size == freqs.size:
+            blended *= np.asarray(frequency_weights, dtype=np.float64)
+
+        output = np.fft.irfft(blended, n=n_samples)
+        return output.astype(np.float32)
+
+    def band_weights(self, freqs: np.ndarray, alias_cutoff_hz: float) -> np.ndarray:
+        """Contract crossover weights for a given cutoff."""
+        cfg = self.config
+        high_width = max(
+            cfg.high_crossover_width_min_hz,
+            cfg.high_crossover_width_fraction * alias_cutoff_hz,
+        )
+        return raised_cosine_band_weights(
+            freqs,
+            low_center_hz=cfg.highpass_hz,
+            low_width_hz=cfg.low_crossover_width_hz,
+            high_center_hz=alias_cutoff_hz,
+            high_width_hz=high_width,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Block trajectory rendering (Hann overlap-add over a moving steer position)
+# ---------------------------------------------------------------------------
+
+@dataclass(slots=True)
+class BlockTrajectoryRenderer:
+    """Hann overlap-add block loop driving any duck-typed beamformer along a
+    per-block steer trajectory.
+
+    Extracted from the IAMF pipeline's offline MVDR loop; this is also the
+    per-track continuous-stream primitive (contract §8) — a live stream is the
+    same loop driven by a track trajectory, so no separate streaming plumbing
+    is built until needed.
+
+    ``omni_blend_above_cutoff`` applies the contract's raised-cosine omni
+    blend above the geometry-derived alias cutoff so rendered objects keep
+    full bandwidth (MVDR/DAS output is not physically steerable up there).
+    """
+
+    beamformer: object  # duck-typed: anything with .beamform(...)
+    block_size: int = 512
+    fade_seconds: float = 0.012
+    omni_blend_above_cutoff: bool = False
+    high_crossover_width_min_hz: float = 400.0
+    high_crossover_width_fraction: float = 0.15
+    sound_speed_mps: float = 343.2
+
+    def render(
+        self,
+        channels: np.ndarray,
+        mic_positions_m: np.ndarray,
+        sample_rate_hz: int,
+        steer_for_sample,
+        active_range: tuple[int, int] | None = None,
+    ) -> np.ndarray:
+        """Render ``channels`` (C, N) to a mono object signal.
+
+        ``steer_for_sample(sample_index) -> (x, y, z)`` supplies the steer
+        position for each block (evaluated at the block midpoint).
+        ``active_range=(first, last)`` silences blocks outside the range and
+        applies linear fades at its edges.
+        """
+        n_channels = int(channels.shape[0])
+        n_samples = int(channels.shape[1])
+        positions = np.asarray(mic_positions_m, dtype=np.float64)
+        sensor_ids = [f"ch{i}" for i in range(n_channels)]
+        sensor_positions = {
+            sid: positions[i] for i, sid in enumerate(sensor_ids) if i < len(positions)
+        }
+
+        output = np.zeros(n_samples, dtype=np.float64)
+        norm = np.zeros(n_samples, dtype=np.float64)
+        first_active, last_active = active_range if active_range is not None else (0, n_samples)
+        if last_active <= first_active:
+            return output.astype(np.float32)
+
+        block_size = self.block_size
+        hop = max(1, block_size // 2)
+        window = np.hanning(block_size).astype(np.float64)
+
+        blend_weights: np.ndarray | None = None
+        if self.omni_blend_above_cutoff and n_channels > 1:
+            cutoff_hz = alias_cutoff_from_positions(
+                positions[:n_channels], self.sound_speed_mps
+            )
+            freqs = np.fft.rfftfreq(block_size, d=1.0 / sample_rate_hz)
+            high_width = max(
+                self.high_crossover_width_min_hz,
+                self.high_crossover_width_fraction * cutoff_hz,
+            )
+            # Low crossover degenerate (0 Hz / 0 width) keeps the steered
+            # output untouched below the cutoff; only the high ramp blends.
+            blend_weights = raised_cosine_band_weights(
+                freqs,
+                low_center_hz=0.0,
+                low_width_hz=0.0,
+                high_center_hz=cutoff_hz,
+                high_width_hz=high_width,
+            )
+
+        for block_start in range(0, n_samples, hop):
+            block_end = min(block_start + block_size, n_samples)
+            block_len = block_end - block_start
+
+            # Silence blocks entirely outside the active range.
+            if block_end <= first_active or block_start >= last_active:
+                continue
+
+            sample_mid = block_start + block_len // 2
+            steer_pos = steer_for_sample(sample_mid)
+
+            frame = np.zeros((n_channels, block_size), dtype=np.float32)
+            frame[:, :block_len] = channels[:, block_start:block_end]
+            frame *= window[np.newaxis, :].astype(np.float32)
+            sensor_windows = {
+                sid: frame[i] for i, sid in enumerate(sensor_ids) if i < n_channels
+            }
+            block_out = self.beamformer.beamform(
+                sensor_positions=sensor_positions,
+                sensor_windows=sensor_windows,
+                sample_rate_hz=sample_rate_hz,
+                steer_position_m=steer_pos,
+                sound_speed_mps=self.sound_speed_mps,
+            )
+            if block_out.size < block_size:
+                block_out = np.pad(block_out, (0, block_size - block_out.size))
+
+            if blend_weights is not None:
+                omni_block = np.mean(frame.astype(np.float64), axis=0)
+                steered_spec = np.fft.rfft(block_out[:block_size].astype(np.float64))
+                omni_spec = np.fft.rfft(omni_block)
+                blended = blend_weights * steered_spec + (1.0 - blend_weights) * omni_spec
+                block_out = np.fft.irfft(blended, n=block_size)
+
+            output[block_start:block_end] += (
+                block_out[:block_len].astype(np.float64) * window[:block_len]
+            )
+            norm[block_start:block_end] += window[:block_len] ** 2
+
+        safe_norm = np.where(norm > 1e-12, norm, 1.0)
+        output /= safe_norm
+
+        fade_samples = max(512, int(round(self.fade_seconds * sample_rate_hz)))
+        fade_in_start = max(0, first_active)
+        fade_in_end = min(n_samples, first_active + fade_samples)
+        if fade_in_end > fade_in_start and active_range is not None:
+            ramp = np.linspace(0.0, 1.0, fade_in_end - fade_in_start, dtype=np.float64)
+            output[fade_in_start:fade_in_end] *= ramp
+        fade_out_start = max(0, last_active - fade_samples)
+        fade_out_end = min(n_samples, last_active)
+        if fade_out_end > fade_out_start and active_range is not None:
+            ramp = np.linspace(1.0, 0.0, fade_out_end - fade_out_start, dtype=np.float64)
+            output[fade_out_start:fade_out_end] *= ramp
+
         return output.astype(np.float32)
 
 
@@ -611,6 +887,7 @@ _BEAMFORMER_TYPES = {
     "delay_and_sum": "Time-domain delay-and-sum (linear interpolation)",
     "das": "Time-domain delay-and-sum (linear interpolation)",
     "freq_domain_das": "FFT-based delay-and-sum (exact fractional delays)",
+    "band_split_das": "Band-split delay-and-sum (steered below alias cutoff, omni elsewhere)",
     "mvdr": "Minimum Variance Distortionless Response",
     "superdirective": "Superdirective (analytical diffuse-noise model)",
     "gevd": "Generalized Eigenvalue Decomposition / MaxSNR",
@@ -621,6 +898,8 @@ _BEAMFORMER_TYPE_ALIASES = {
     "das": "delay_and_sum",
     "delay_and_sum": "delay_and_sum",
     "freq_domain_das": "freq_domain_das",
+    "band_split_das": "band_split_das",
+    "band_split": "band_split_das",
     "mvdr": "mvdr",
     "superdirective": "superdirective",
     "gevd": "gevd",
@@ -639,7 +918,7 @@ def create_beamformer(
     classifier_diagonal_loading_scale: float = 1.0,
     freq_min_hz: float = 200.0,
     freq_max_hz: float = 5000.0,
-) -> "DelayAndSumBeamformer | FrequencyDomainDelayAndSumBeamformer | MVDRBeamformer | SuperdirectiveBeamformer | GEVDBeamformer":
+) -> "DelayAndSumBeamformer | FrequencyDomainDelayAndSumBeamformer | BandSplitDasRenderer | MVDRBeamformer | SuperdirectiveBeamformer | GEVDBeamformer":
     """Instantiate a beamformer by name.
 
     When *classifier_diagonal_loading_scale* > 1 the effective diagonal
@@ -655,6 +934,8 @@ def create_beamformer(
 
     if name == "freq_domain_das":
         return FrequencyDomainDelayAndSumBeamformer()
+    if name == "band_split_das":
+        return BandSplitDasRenderer()
     if name == "mvdr":
         return MVDRBeamformer(
             diagonal_loading=effective_loading,

@@ -153,6 +153,8 @@ def _build_capture_manager(
         multi_sensor_buffer=multi_sensor_buffer,
         artifact_dir=settings.large_artifact_dir,
         iamf_ambi_profile=settings.iamf_ambi_profile,
+        mvdr_diagonal_loading=settings.mvdr_diagonal_loading,
+        iamf_object_band_split_enabled=settings.iamf_object_band_split_enabled,
     )
 
     async def _run_capture_post_processing(record):

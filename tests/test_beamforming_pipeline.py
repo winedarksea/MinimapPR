@@ -185,6 +185,185 @@ class TestFrequencyDomainDAS:
 
 
 # ---------------------------------------------------------------------------
+# BandSplitDasRenderer (BEAMFORMED_RENDER_CONTRACT.md)
+# ---------------------------------------------------------------------------
+
+class TestBandSplitDasRenderer:
+    def _tetra_positions(self) -> dict[str, np.ndarray]:
+        from minimappr.spatial_audio.geometry import SIRITH_MIC_POSITIONS_M
+
+        return {f"m{i}": SIRITH_MIC_POSITIONS_M[i].copy() for i in range(4)}
+
+    def test_single_sensor_passthrough(self) -> None:
+        from minimappr.core.beamforming import BandSplitDasRenderer
+
+        positions = {"s0": np.array([0.0, 0.0, 0.0])}
+        signal = np.random.default_rng(3).normal(0, 0.1, 512).astype(np.float32)
+        out = BandSplitDasRenderer().beamform(positions, {"s0": signal}, 16_000, (1.0, 0.0, 0.0))
+        np.testing.assert_allclose(out, signal, atol=1e-5)
+
+    def test_empty_returns_empty(self) -> None:
+        from minimappr.core.beamforming import BandSplitDasRenderer
+
+        out = BandSplitDasRenderer().beamform({}, {}, 16_000, (0, 0, 0))
+        assert out.size == 0
+
+    def test_in_band_interferer_attenuated_target_preserved(self) -> None:
+        """A steered in-band tone survives; an off-axis in-band interferer is
+        attenuated; content above the alias cutoff passes through as omni."""
+        from minimappr.core.beamforming import BandSplitDasRenderer
+        from minimappr.spatial_audio.geometry import alias_cutoff_from_positions
+
+        positions = _make_sensor_layout()  # 0.2 m array → cutoff ≈ 607 Hz
+        pos_arr = np.vstack(list(positions.values()))
+        cutoff = alias_cutoff_from_positions(pos_arr)
+        assert 500.0 < cutoff < 700.0
+
+        sr = 16_000
+        n = 4096
+        t = np.arange(n, dtype=np.float64) / sr
+        target = np.array([5.0, 0.0, 0.0])
+        interferer = np.array([0.0, -5.0, 0.0])
+        c = 343.2
+        f_in_band = 400.0     # steered band
+        f_above = 5_000.0     # above cutoff → omni passthrough
+
+        windows: dict[str, np.ndarray] = {}
+        for sid, p in positions.items():
+            d_t = float(np.linalg.norm(target - p)) / c
+            d_i = float(np.linalg.norm(interferer - p)) / c
+            sig = (
+                np.sin(2 * np.pi * f_in_band * (t - d_t))
+                + np.sin(2 * np.pi * f_in_band * 1.11 * (t - d_i))  # interferer, in band
+                + 0.5 * np.sin(2 * np.pi * f_above * (t - d_t))
+            )
+            windows[sid] = sig.astype(np.float32)
+
+        out = BandSplitDasRenderer().beamform(
+            positions, windows, sr, tuple(target), 343.2,
+        )
+        omni = np.mean(np.vstack([windows[s] for s in sorted(windows)]), axis=0)
+
+        spec_out = np.abs(np.fft.rfft(out.astype(np.float64)))
+        spec_omni = np.abs(np.fft.rfft(omni.astype(np.float64)))
+        freqs = np.fft.rfftfreq(n, d=1.0 / sr)
+
+        def band_power(spec: np.ndarray, f0: float, half_bw: float = 30.0) -> float:
+            mask = (freqs > f0 - half_bw) & (freqs < f0 + half_bw)
+            return float(np.sum(spec[mask] ** 2))
+
+        # Steered target tone at least as strong as omni (coherent sum).
+        assert band_power(spec_out, f_in_band) > 0.8 * band_power(spec_omni, f_in_band)
+        # Off-axis interferer attenuated relative to omni.
+        assert band_power(spec_out, f_in_band * 1.11) < 0.9 * band_power(spec_omni, f_in_band * 1.11)
+        # Above-cutoff content preserved (omni passthrough, full bandwidth kept).
+        hi_out = band_power(spec_out, f_above, half_bw=100.0)
+        hi_omni = band_power(spec_omni, f_above, half_bw=100.0)
+        assert hi_out > 0.5 * hi_omni
+
+    def test_crossover_weights_continuous(self) -> None:
+        """No step larger than 0.5 dB-equivalent in the blend weights."""
+        from minimappr.core.beamforming import BandSplitDasRenderer
+
+        renderer = BandSplitDasRenderer()
+        freqs = np.fft.rfftfreq(16_384, d=1.0 / 44_100)
+        w = renderer.band_weights(freqs, alias_cutoff_hz=3432.0)
+        assert np.all(w >= 0.0) and np.all(w <= 1.0)
+        # Fully steered mid-band, fully omni at extremes.
+        assert w[np.argmin(np.abs(freqs - 1500.0))] > 0.99
+        assert w[0] == pytest.approx(0.0, abs=1e-9)
+        assert w[np.argmin(np.abs(freqs - 8000.0))] < 1e-9
+        # High ramp centered at the cutoff → w ≈ 0.5 there (recall-biased).
+        assert w[np.argmin(np.abs(freqs - 3432.0))] == pytest.approx(0.5, abs=0.05)
+        # Continuity: max per-bin step bounded by the ramp slope (π/2 per
+        # ramp-width); at this resolution the 100 Hz low ramp dominates.
+        assert float(np.max(np.abs(np.diff(w)))) < 0.05
+
+    def test_explicit_alias_cutoff_overrides_geometry(self) -> None:
+        from minimappr.core.beamforming import BandSplitDasRenderer
+
+        positions = self._tetra_positions()
+        rng = np.random.default_rng(7)
+        windows = {k: rng.normal(0, 0.1, 2048).astype(np.float32) for k in positions}
+        low = BandSplitDasRenderer(alias_cutoff_hz=500.0)
+        auto = BandSplitDasRenderer()
+        out_low = low.beamform(positions, windows, 44_100, (10.0, 0.0, 0.0))
+        out_auto = auto.beamform(positions, windows, 44_100, (10.0, 0.0, 0.0))
+        assert not np.allclose(out_low, out_auto)
+
+    def test_factory_registration(self) -> None:
+        from minimappr.core.beamforming import BandSplitDasRenderer, create_beamformer
+
+        assert isinstance(create_beamformer("band_split_das"), BandSplitDasRenderer)
+        assert isinstance(create_beamformer("band_split"), BandSplitDasRenderer)
+        assert "band_split_das" in available_beamformers()
+
+    def test_default_settings_enable_band_split(self) -> None:
+        settings = Settings()
+        assert settings.beamformed_classification_enabled is True
+        assert settings.beamformer_type == "band_split_das"
+
+    def test_orchestrator_beamform_error_callback(self) -> None:
+        """A failing beamformer degrades to omni, logs, and fires the hook."""
+        from minimappr.core.classification import ClassificationOrchestrator
+
+        class _ExplodingBeamformer:
+            def beamform(self, *args, **kwargs):
+                raise RuntimeError("boom")
+
+        class _StubClassifier(AudioClassifier):
+            def classify(self, signal, sample_rate_hz):
+                return ClassificationResult(label="bird", confidence=0.5, scores={}, features={})
+
+            def cancel_pending(self) -> None:
+                pass
+
+        class _StubTaxonomy:
+            def category_for_label(self, label):
+                return "wildlife"
+
+            def iff_for_category(self, category):
+                return "neutral"
+
+        class _StubEnv:
+            def get_speed_of_sound(self, position):
+                return 343.2
+
+        class _StubStorage:
+            async def upsert_label(self, **kwargs):
+                return None
+
+        errors: list[str] = []
+        orchestrator = ClassificationOrchestrator(
+            classifier=_StubClassifier(),
+            storage=_StubStorage(),
+            taxonomy_provider=_StubTaxonomy(),
+            environment_provider=_StubEnv(),
+            beamformer=_ExplodingBeamformer(),
+            beamformed_classification_min_sensor_count=2,
+            on_beamform_error=errors.append,
+        )
+        positions = _make_sensor_layout()
+        windows = {k: np.zeros(512, dtype=np.float32) for k in positions}
+        result = asyncio.run(
+            orchestrator.classify(
+                reference_signal=np.zeros(512, dtype=np.float32),
+                sample_rate_hz=16_000,
+                capability_tier="full",
+                selected_sensor_ids=list(positions),
+                selected_positions=positions,
+                selected_windows=windows,
+                localization_position_m=(1.0, 0.0, 0.0),
+                event_time_ns=0,
+                alias_cutoff_hz=3432.0,
+            )
+        )
+        assert result.classification_path == "omni"
+        assert result.beamforming_error is not None and "boom" in result.beamforming_error
+        assert errors and "boom" in errors[0]
+
+
+# ---------------------------------------------------------------------------
 # MVDRBeamformer (vectorised)
 # ---------------------------------------------------------------------------
 

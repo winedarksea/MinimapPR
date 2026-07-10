@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, replace
+from typing import Any, Callable
 
 import numpy as np
 
@@ -89,10 +89,11 @@ class ClassificationOrchestrator:
         environment_provider: EnvironmentProvider,
         beamformer: Beamformer | None = None,
         classification_preprocessor: AudioPreprocessor | None = None,
-        beamformed_classification_min_sensor_count: int = 3,
+        beamformed_classification_min_sensor_count: int = 2,
         beamformed_classification_confidence_margin: float = 0.0,
         stage_timeout_seconds: float = 30.0,
         classifier_backend_name: str = "heuristic",
+        on_beamform_error: Callable[[str], None] | None = None,
     ) -> None:
         self._classifier = classifier
         self._storage = storage
@@ -104,6 +105,7 @@ class ClassificationOrchestrator:
         self._confidence_margin = max(0.0, beamformed_classification_confidence_margin)
         self._stage_timeout_seconds = max(0.001, float(stage_timeout_seconds))
         self._classifier_backend_name = classifier_backend_name
+        self._on_beamform_error = on_beamform_error
 
     def replace_classifier(self, classifier: AudioClassifier) -> None:
         self._classifier = classifier
@@ -119,6 +121,7 @@ class ClassificationOrchestrator:
         selected_windows: dict[str, np.ndarray],
         localization_position_m: tuple[float, float, float],
         event_time_ns: int,
+        alias_cutoff_hz: float | None = None,
     ) -> ClassifiedResult:
         """Run classification pipeline and return the best result with taxonomy."""
         omni_candidate = await self._classify_omni_candidate(
@@ -133,6 +136,7 @@ class ClassificationOrchestrator:
             selected_positions=selected_positions,
             selected_windows=selected_windows,
             localization_position_m=localization_position_m,
+            alias_cutoff_hz=alias_cutoff_hz,
         )
         winning_candidate = self._select_winning_candidate(
             omni_candidate=omni_candidate,
@@ -242,6 +246,7 @@ class ClassificationOrchestrator:
         selected_positions: dict[str, np.ndarray],
         selected_windows: dict[str, np.ndarray],
         localization_position_m: tuple[float, float, float],
+        alias_cutoff_hz: float | None = None,
     ) -> _BeamformedClassificationAttempt:
         if not self._should_attempt_beamformed_classification(
             capability_tier=capability_tier,
@@ -250,10 +255,11 @@ class ClassificationOrchestrator:
             return _BeamformedClassificationAttempt(candidate=None)
 
         assert self._beamformer is not None
+        beamformer = self._resolve_beamformer(alias_cutoff_hz)
         try:
             sound_speed = self._environment_provider.get_speed_of_sound(localization_position_m)
             beamformed_signal = await asyncio.to_thread(
-                self._beamformer.beamform,
+                beamformer.beamform,
                 selected_positions,
                 selected_windows,
                 sample_rate_hz,
@@ -272,10 +278,27 @@ class ClassificationOrchestrator:
                 )
             )
         except Exception as exc:  # pragma: no cover - resilience path
-            return _BeamformedClassificationAttempt(
-                candidate=None,
-                error=f"{type(exc).__name__}: {exc}",
-            )
+            error = f"{type(exc).__name__}: {exc}"
+            logger.warning("Beamformed classification failed; falling back to omni: %s", error)
+            if self._on_beamform_error is not None:
+                try:
+                    self._on_beamform_error(error)
+                except Exception:  # noqa: BLE001 - metrics hook must not break classification
+                    logger.exception("on_beamform_error hook failed")
+            return _BeamformedClassificationAttempt(candidate=None, error=error)
+
+    def _resolve_beamformer(self, alias_cutoff_hz: float | None) -> Beamformer:
+        """Return the beamformer, specialised with the event's alias cutoff.
+
+        A per-call copy keeps the shared instance immutable under concurrent
+        classification tasks.
+        """
+        assert self._beamformer is not None
+        from minimappr.core.beamforming import BandSplitDasRenderer
+
+        if alias_cutoff_hz is not None and isinstance(self._beamformer, BandSplitDasRenderer):
+            return replace(self._beamformer, alias_cutoff_hz=float(alias_cutoff_hz))
+        return self._beamformer
 
     def _select_winning_candidate(
         self,

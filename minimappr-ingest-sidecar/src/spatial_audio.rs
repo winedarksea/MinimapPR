@@ -530,22 +530,7 @@ fn centroid_corrected_positions(positions: &[[f64; 3]]) -> Vec<[f64; 3]> {
 }
 
 fn alias_cutoff_from_positions(positions: &[[f64; 3]]) -> f64 {
-    let mut max_baseline_m = 0.0f64;
-    for first_index in 0..positions.len() {
-        for second_index in (first_index + 1)..positions.len() {
-            let first = positions[first_index];
-            let second = positions[second_index];
-            let dx = first[0] - second[0];
-            let dy = first[1] - second[1];
-            let dz = first[2] - second[2];
-            max_baseline_m = max_baseline_m.max((dx * dx + dy * dy + dz * dz).sqrt());
-        }
-    }
-    if max_baseline_m < 1e-6 {
-        SPEED_OF_SOUND_MPS / (2.0 * 0.05)
-    } else {
-        SPEED_OF_SOUND_MPS / (2.0 * max_baseline_m)
-    }
+    crate::dsp_math::alias_cutoff_from_positions_f64(positions, SPEED_OF_SOUND_MPS)
 }
 
 fn apply_atob_matrix(

@@ -5,6 +5,7 @@ mod classifier_helper;
 mod derived_cache;
 mod dsp;
 mod dsp_events;
+mod dsp_math;
 mod dsp_render_output;
 mod dsp_worker;
 mod env_payload;
@@ -341,19 +342,11 @@ struct Args {
     )]
     trigger_cooldown_seconds: f64,
 
-    #[arg(
-        long,
-        env = "MINIMAPPR_BIRDNET_SPATIAL_BLEND_MIN_HZ",
-        default_value_t = 1000.0
-    )]
-    birdnet_spatial_blend_min_hz: f32,
-
-    #[arg(
-        long,
-        env = "MINIMAPPR_BIRDNET_SPATIAL_BLEND_MAX_HZ",
-        default_value_t = 3400.0
-    )]
-    birdnet_spatial_blend_max_hz: f32,
+    /// Legacy override: clamps the top of the steered band. The band-split
+    /// render derives its top from array geometry (alias cutoff); when set,
+    /// the effective top is min(this, alias_cutoff_hz).
+    #[arg(long, env = "MINIMAPPR_BIRDNET_SPATIAL_BLEND_MAX_HZ")]
+    birdnet_spatial_blend_max_hz: Option<f32>,
 
     #[arg(
         long,
@@ -470,6 +463,90 @@ fn run_srp_oracle() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
+/// Hidden test harness: run the live band-split DAS render on synthetic
+/// channels supplied as JSON on stdin and emit the rendered samples as JSON on
+/// stdout. Used by tests/test_beamform_cross_language_parity.py to compare the
+/// Rust live render against the Python BandSplitDasRenderer per
+/// BEAMFORMED_RENDER_CONTRACT.md.
+fn run_beamform_oracle() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use std::io::Read;
+
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input)?;
+    let value: serde_json::Value = serde_json::from_str(&input)?;
+
+    let sample_rate_hz = value["sample_rate_hz"].as_u64().ok_or("sample_rate_hz")? as u32;
+    let steer = value["steer_position_m"]
+        .as_array()
+        .ok_or("steer_position_m")?;
+    let steer_position_m = [
+        steer[0].as_f64().ok_or("steer x")? as f32,
+        steer[1].as_f64().ok_or("steer y")? as f32,
+        steer[2].as_f64().ok_or("steer z")? as f32,
+    ];
+
+    let mut mic_positions_m: Vec<[f32; 3]> = Vec::new();
+    for mic in value["mic_positions_m"]
+        .as_array()
+        .ok_or("mic_positions_m")?
+    {
+        let coords = mic.as_array().ok_or("mic entry")?;
+        mic_positions_m.push([
+            coords[0].as_f64().ok_or("mic x")? as f32,
+            coords[1].as_f64().ok_or("mic y")? as f32,
+            coords[2].as_f64().ok_or("mic z")? as f32,
+        ]);
+    }
+
+    let mut channels: Vec<Vec<f32>> = Vec::new();
+    for channel in value["channels"].as_array().ok_or("channels")? {
+        let samples = channel.as_array().ok_or("channel entry")?;
+        channels.push(
+            samples
+                .iter()
+                .map(|sample| sample.as_f64().unwrap_or(0.0) as f32)
+                .collect(),
+        );
+    }
+
+    let mut config = birdnet_render::BandSplitRenderConfig::default();
+    if let Some(hp) = value["highpass_hz"].as_f64() {
+        config.highpass_hz = hp as f32;
+    }
+    if let Some(w) = value["low_crossover_width_hz"].as_f64() {
+        config.low_crossover_width_hz = w as f32;
+    }
+    if let Some(w) = value["high_crossover_width_min_hz"].as_f64() {
+        config.high_crossover_width_min_hz = w as f32;
+    }
+    if let Some(f) = value["high_crossover_width_fraction"].as_f64() {
+        config.high_crossover_width_fraction = f as f32;
+    }
+    if let Some(c) = value["sound_speed_mps"].as_f64() {
+        config.sound_speed_mps = c as f32;
+    }
+    if let Some(clamp) = value["band_max_clamp_hz"].as_f64() {
+        config.band_max_clamp_hz = Some(clamp as f32);
+    }
+
+    let output = birdnet_render::render_band_split_f32(
+        &channels,
+        steer_position_m,
+        &mic_positions_m,
+        sample_rate_hz,
+        config,
+    );
+    println!(
+        "{}",
+        serde_json::to_string(&serde_json::json!({
+            "samples": output.samples,
+            "effective_spatial_band": output.effective_spatial_band,
+            "alias_cutoff_hz": output.alias_cutoff_hz,
+        }))?
+    );
+    Ok(())
+}
+
 fn run_ambi_oracle() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use std::io::Read;
 
@@ -544,6 +621,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
     if raw_args.get(1).map(String::as_str) == Some("ambi-oracle") {
         return run_ambi_oracle();
+    }
+    if raw_args.get(1).map(String::as_str) == Some("beamform-oracle") {
+        return run_beamform_oracle();
     }
 
     tracing_subscriber::fmt()
@@ -668,11 +748,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 localization_amplitude_prior_std_factor: args
                     .localization_amplitude_prior_std_factor,
                 localization_far_field_max_range_m: args.localization_far_field_max_range_m,
-                spatial_blend_band_hz: [
-                    args.birdnet_spatial_blend_min_hz,
-                    args.birdnet_spatial_blend_max_hz,
-                ],
-                pre_blend_highpass_hz: args.birdnet_pre_blend_highpass_hz,
+                band_split_highpass_hz: args.birdnet_pre_blend_highpass_hz,
+                band_split_max_clamp_hz: args.birdnet_spatial_blend_max_hz,
                 default_temperature_c: args.default_temperature_c,
                 default_humidity_fraction: args.default_humidity_fraction,
                 classifier_command_json: args.classifier_command_json.clone(),

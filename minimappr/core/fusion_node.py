@@ -233,6 +233,8 @@ class FusionMetrics:
     last_localization_algorithm: str = "gcc_phat"
     last_attempted_algorithm: str = "gcc_phat"
     classification_reuse_hits: int = 0
+    beamform_renders: int = 0
+    beamform_failures: int = 0
     birdnet_chunk_dispatches_suppressed: int = 0
     # Silent-drop visibility: each pipeline stage may return without emitting a
     # downstream item (e.g. localization buffer miss, classifier suppression).
@@ -323,6 +325,9 @@ class FusionNode:
         self.reporting_policy = ReportingFusionPolicy(
             storage=storage,
             reporting_window_seconds=self.fusion_config.reporting_window_seconds,
+            omni_suppression_scope=self.fusion_config.omni_suppression_scope,
+            omni_suppression_max_distance_m=self.fusion_config.omni_suppression_max_distance_m,
+            taxonomy_provider=self.taxonomy_provider,
         )
         self._action_handlers = action_handlers or {
             "cop": WebsocketRuleActionHandler(live_callback),
@@ -357,6 +362,7 @@ class FusionNode:
             beamformed_classification_confidence_margin=settings.beamformed_classification_confidence_margin,
             stage_timeout_seconds=self.classifier_config.stage_timeout_seconds,
             classifier_backend_name=settings.classifier_backend,
+            on_beamform_error=self._record_beamform_failure,
         )
         self._detection_assembler = DetectionAssembler(
             storage=storage,
@@ -1508,7 +1514,10 @@ class FusionNode:
                 selected_windows=product.classification_selected_windows,
                 localization_position_m=product.localization_branch.localization_position_m,
                 event_time_ns=product.candidate.event_time_ns,
+                alias_cutoff_hz=product.localization_branch.alias_cutoff_hz,
             )
+            if localized.beamformed_classification is not None:
+                self._metrics.beamform_renders += 1
             if extra_features:
                 localized.classification.features.update(extra_features)
             maybe_detection = await self._assemble_reporting_branch(
@@ -2291,6 +2300,9 @@ class FusionNode:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _record_beamform_failure(self, error: str) -> None:
+        self._metrics.beamform_failures += 1
+
     def _create_beamformer(self) -> Beamformer | None:
         """Create the classification beamformer with recall-biased settings.
 
@@ -2301,6 +2313,17 @@ class FusionNode:
         """
         if not self.settings.beamformed_classification_enabled:
             return None
+        if self.settings.beamformer_type == "band_split_das":
+            from minimappr.core.beamforming import BandSplitDasRenderer, BandSplitRenderConfig
+
+            return BandSplitDasRenderer(
+                config=BandSplitRenderConfig(
+                    highpass_hz=self.settings.beamform_render_highpass_hz,
+                    low_crossover_width_hz=self.settings.beamform_low_crossover_width_hz,
+                    high_crossover_width_min_hz=self.settings.beamform_high_crossover_width_min_hz,
+                    high_crossover_width_fraction=self.settings.beamform_high_crossover_width_fraction,
+                )
+            )
         return create_beamformer(
             beamformer_type=self.settings.beamformer_type,
             diagonal_loading=self.settings.mvdr_diagonal_loading,
