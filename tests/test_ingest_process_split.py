@@ -107,24 +107,6 @@ def test_split_api_role_lists_nodes_from_storage_without_live_registry(monkeypat
                 ),
                 last_seen_ns=time.time_ns(),
             )
-            await storage.upsert_node_audio_summary(
-                node_id="api-node-1",
-                summary={
-                    "sensor_count": 4,
-                    "active_sensor_count": 4,
-                    "sample_rate_hz": 16000,
-                    "last_sample_time_ns": time.time_ns(),
-                    "age_seconds": 0.0,
-                    "rms": 0.031,
-                    "recent_coverage_ratio": 1.0,
-                    "recent_missing_ratio": 0.0,
-                    "recent_max_gap_seconds": 0.0,
-                    "max_buffer_samples": 160000,
-                    "max_buffer_seconds": 10.0,
-                    "status": "live_ingest_process",
-                },
-                updated_ns=time.time_ns(),
-            )
         finally:
             await storage.close()
 
@@ -144,12 +126,9 @@ def test_split_api_role_lists_nodes_from_storage_without_live_registry(monkeypat
     assert response.status_code == 200
     body = response.json()
     assert body[0]["id"] == "api-node-1"
-    assert body[0]["audio_debug"]["status"] == "recent"
+    assert body[0]["audio_debug"]["status"] == "external_ingest_process"
     assert body[0]["audio_debug"]["sensor_count"] == 4
-    assert body[0]["audio_debug"]["active_sensor_count"] == 4
-    assert body[0]["audio_debug"]["sample_rate_hz"] == 16000
-    assert body[0]["audio_debug"]["rms"] == 0.031
-    assert body[0]["audio_debug"]["recent_coverage_ratio"] == 1.0
+    assert body[0]["audio_debug"]["active_sensor_count"] == 0
     assert tracks_response.status_code == 200
     assert recent_audio_response.status_code == 404
 
@@ -769,9 +748,7 @@ def test_split_api_role_environment_current_reflects_stored_reading(
     assert body["speed_of_sound_mps"] > 347.0
 
 
-def test_split_api_role_surfaces_runner_stats_in_audio_debug(monkeypatch, tmp_path: Path) -> None:
-    # Firmware NodeRunner counters persisted with the audio summary must reach
-    # /api/v1/nodes so publish-queue/Wi-Fi health is monitorable in split mode.
+def test_split_api_role_does_not_use_sqlite_audio_heartbeat_summaries(monkeypatch, tmp_path: Path) -> None:
     db_path = tmp_path / "api-runner.db"
 
     async def prepare_node() -> None:
@@ -793,29 +770,6 @@ def test_split_api_role_surfaces_runner_stats_in_audio_debug(monkeypatch, tmp_pa
                 ),
                 last_seen_ns=time.time_ns(),
             )
-            await storage.upsert_node_audio_summary(
-                node_id="runner-node",
-                summary={
-                    "sensor_count": 4,
-                    "active_sensor_count": 4,
-                    "sample_rate_hz": 16000,
-                    "last_sample_time_ns": time.time_ns(),
-                    "age_seconds": 0.0,
-                    "rms": 0.02,
-                    "recent_coverage_ratio": 0.9,
-                    "recent_missing_ratio": 0.1,
-                    "recent_max_gap_seconds": 0.3,
-                    "max_buffer_samples": 160000,
-                    "max_buffer_seconds": 10.0,
-                    "status": "live_ingest_process",
-                    "runner_stats": {
-                        "runner_queue_overflows": 11,
-                        "runner_frames_dropped": 4,
-                        "runner_publish_wifi_down_failures": 6,
-                    },
-                },
-                updated_ns=time.time_ns(),
-            )
         finally:
             await storage.close()
 
@@ -832,7 +786,5 @@ def test_split_api_role_surfaces_runner_stats_in_audio_debug(monkeypatch, tmp_pa
 
     assert response.status_code == 200
     node = response.json()[0]
-    runner_stats = node["audio_debug"]["runner_stats"]
-    assert runner_stats["runner_queue_overflows"] == 11
-    assert runner_stats["runner_frames_dropped"] == 4
-    assert runner_stats["runner_publish_wifi_down_failures"] == 6
+    assert node["audio_debug"]["status"] == "external_ingest_process"
+    assert "runner_stats" not in node["audio_debug"]

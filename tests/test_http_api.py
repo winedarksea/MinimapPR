@@ -19,7 +19,7 @@ from minimappr.api.stream_consumer import SidecarNodeSnapshot
 from minimappr.config import Settings
 from minimappr.main import app
 from minimappr.models import DetectionEvent, GeoPoint, NodeSpec, NodeType, TrackState
-from minimappr.storage.db import _ingested_frame_key
+from minimappr.core.live_ingest_state import frame_identity_key
 from minimappr.utils.audio import encode_pcm16le_b64
 
 
@@ -1269,7 +1269,7 @@ def test_http_ingest_duplicate_frame_is_idempotent(monkeypatch, tmp_path: Path) 
 
 
 def test_free_running_dedupe_key_does_not_depend_on_receipt_bucket() -> None:
-    key_a = _ingested_frame_key(
+    key_a = frame_identity_key(
         node_id="http-node-free-running",
         boot_session="boot-11",
         frame_sequence=11,
@@ -1281,7 +1281,7 @@ def test_free_running_dedupe_key_does_not_depend_on_receipt_bucket() -> None:
         time_quality="free_running",
         tor_ns=1_800_000_000_000_000_000,
     )
-    key_b = _ingested_frame_key(
+    key_b = frame_identity_key(
         node_id="http-node-free-running",
         boot_session="boot-11",
         frame_sequence=11,
@@ -1298,7 +1298,7 @@ def test_free_running_dedupe_key_does_not_depend_on_receipt_bucket() -> None:
 
 
 def test_free_running_dedupe_key_distinguishes_reboots() -> None:
-    key_a = _ingested_frame_key(
+    key_a = frame_identity_key(
         node_id="http-node-free-running",
         boot_session="boot-11",
         frame_sequence=11,
@@ -1310,7 +1310,7 @@ def test_free_running_dedupe_key_distinguishes_reboots() -> None:
         time_quality="free_running",
         tor_ns=1_800_000_000_000_000_000,
     )
-    key_b = _ingested_frame_key(
+    key_b = frame_identity_key(
         node_id="http-node-free-running",
         boot_session="boot-12",
         frame_sequence=11,
@@ -1327,7 +1327,7 @@ def test_free_running_dedupe_key_distinguishes_reboots() -> None:
 
 
 def test_sample_index_dedupe_key_ignores_retry_timestamp_correction() -> None:
-    key_a = _ingested_frame_key(
+    key_a = frame_identity_key(
         node_id="http-node-free-running",
         boot_session="boot-11",
         frame_sequence=11,
@@ -1339,7 +1339,7 @@ def test_sample_index_dedupe_key_ignores_retry_timestamp_correction() -> None:
         time_quality="ntp_disciplined",
         tor_ns=1_800_000_000_000_000_000,
     )
-    key_b = _ingested_frame_key(
+    key_b = frame_identity_key(
         node_id="http-node-free-running",
         boot_session="boot-11",
         frame_sequence=11,
@@ -2026,7 +2026,6 @@ def test_rust_snapshot_health_aggregation_skips_node_detail_queries(monkeypatch,
         monkeypatch.setattr(client.app.state.storage, "list_latest_environment_per_node", _unexpected)
         monkeypatch.setattr(client.app.state.storage, "list_latest_time_quality_per_node", _unexpected)
         monkeypatch.setattr(client.app.state.storage, "list_latest_observation_metadata_per_node", _unexpected)
-        monkeypatch.setattr(client.app.state.storage, "list_node_audio_summaries", _unexpected)
 
         cop_response = client.get("/api/v1/cop/status")
         assert cop_response.status_code == 200

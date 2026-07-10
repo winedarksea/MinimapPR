@@ -67,17 +67,6 @@ async def test_delete_node_removes_node_and_keyed_records(tmp_path: Path) -> Non
         uptime_seconds=1.0,
         metadata_json="{}",
     )
-    await storage.register_ingested_frame(
-        node_id="node-del",
-        frame_sequence=1,
-        start_time_ns=now_ns,
-        utc_end_ns=now_ns + 1_000_000,
-        start_sample_index=0,
-        end_sample_index=16000,
-        toa_ns=now_ns,
-        tor_ns=now_ns,
-        source_type="live",
-    )
 
     deleted = await storage.delete_node("node-del")
     assert deleted is True
@@ -85,22 +74,6 @@ async def test_delete_node_removes_node_and_keyed_records(tmp_path: Path) -> Non
     assert await storage.get_node_by_id("node-del") is None
     assert await storage.list_environment(node_id="node-del") == []
     assert await storage.list_bit_reports("node-del") == []
-    # ingested_frames has no FK cascade; delete_node clears it explicitly.
-    assert (
-        await storage.has_ingested_frame(
-            node_id="node-del",
-            boot_session="",
-            frame_sequence=1,
-            start_time_ns=now_ns,
-            utc_end_ns=now_ns + 1_000_000,
-            start_sample_index=0,
-            end_sample_index=16000,
-            source_type="live",
-            time_quality="",
-            tor_ns=now_ns,
-        )
-        is False
-    )
 
     # Deleting an unknown node reports no rows removed.
     assert await storage.delete_node("does-not-exist") is False

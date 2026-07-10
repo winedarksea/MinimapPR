@@ -1308,18 +1308,13 @@ async def test_fusion_ingest_deduplicates_replayed_frame(tmp_path: Path) -> None
             (node.id,),
         )
     ).fetchone()
-    receipts_row = await (
+    assert int(observations_row["c"]) == 1
+    receipt_table = await (
         await db.execute(
-            """
-            SELECT COUNT(1) AS c
-            FROM ingested_frames
-            WHERE node_id = ?
-            """,
-            (node.id,),
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'ingested_frames'"
         )
     ).fetchone()
-    assert int(observations_row["c"]) == 1
-    assert int(receipts_row["c"]) == 1
+    assert receipt_table is None
 
     await storage.close()
 
@@ -1399,18 +1394,13 @@ async def test_fusion_ingest_skips_observation_rows_for_staged_journal_profile(t
             (node.id,),
         )
     ).fetchone()
-    receipts_row = await (
+    assert int(observations_row["c"]) == 0
+    receipt_table = await (
         await db.execute(
-            """
-            SELECT COUNT(1) AS c
-            FROM ingested_frames
-            WHERE node_id = ?
-            """,
-            (node.id,),
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'ingested_frames'"
         )
     ).fetchone()
-    assert int(observations_row["c"]) == 0
-    assert int(receipts_row["c"]) == 1
+    assert receipt_table is None
 
     await storage.close()
 

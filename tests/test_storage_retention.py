@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import time
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,26 @@ from minimappr.cleanup_service import CleanupService
 from minimappr.config import Settings
 from minimappr.models import DetectionEvent, NodeSpec, NodeType, TrackState
 from minimappr.storage.db import Storage
+
+
+@pytest.mark.asyncio
+async def test_storage_initialization_removes_legacy_live_ingest_tables(tmp_path: Path) -> None:
+    db_path = tmp_path / "legacy-live-ingest.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("CREATE TABLE ingested_frames (frame_key TEXT PRIMARY KEY)")
+        connection.execute("CREATE TABLE node_audio_summaries (node_id TEXT PRIMARY KEY)")
+
+    storage = Storage(db_path)
+    await storage.initialize()
+    try:
+        rows = await (
+            await storage._require_db().execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('ingested_frames', 'node_audio_summaries')"
+            )
+        ).fetchall()
+        assert rows == []
+    finally:
+        await storage.close()
 
 
 @pytest.mark.asyncio
@@ -153,20 +174,6 @@ async def test_storage_retention_cleanup_removes_expired_records(tmp_path: Path)
         status="sent",
         payload={"message": "old"},
     )
-    await storage.register_ingested_frame(
-        node_id="node-1",
-        boot_session="boot-a",
-        frame_sequence=42,
-        start_time_ns=old_ns,
-        utc_end_ns=old_ns + 1_000_000,
-        start_sample_index=0,
-        end_sample_index=255,
-        toa_ns=old_ns,
-        tor_ns=old_ns,
-        created_ns=old_ns,
-        source_type="audio",
-        time_quality="gps",
-    )
     await storage.insert_bit_report(
         report_id="bit-old",
         node_id="node-1",
@@ -210,7 +217,6 @@ async def test_storage_retention_cleanup_removes_expired_records(tmp_path: Path)
         now_ns=now_ns,
         tier_ttls_seconds={"short": 1, "experiment": 1},
         operational_ttls_seconds={
-            "ingested_frames": 1,
             "bit_reports": 1,
             "pings": 1,
             "track_updates": 1,
@@ -226,7 +232,6 @@ async def test_storage_retention_cleanup_removes_expired_records(tmp_path: Path)
     assert summary["alerts"] >= 1
     assert summary["environment"] >= 1
     assert summary["dropped_tracks"] >= 1
-    assert summary["ingested_frames"] >= 1
     assert summary["bit_reports"] >= 1
     assert snippet_file.exists() is False
     assert artifact.exists() is False
@@ -283,7 +288,6 @@ async def test_housekeeping_cycle_runs_sqlite_maintenance_and_retention_indexes(
         large_artifact_dir=tmp_path / "artifacts",
         retention_policy_path=tmp_path / "cleanup-policy.json",
         retention_bit_reports_seconds=1,
-        retention_ingested_frames_seconds=1,
         retention_pings_seconds=1,
         retention_track_updates_seconds=1,
         retention_alerts_seconds=1,

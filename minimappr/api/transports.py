@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import time
 
 from minimappr.api.binary_ingest import BinaryIngestPayload
 from minimappr.api.rust_dsp_manifests import LocalizedClassifierRenderRequest
@@ -53,84 +52,31 @@ class HttpIngestTransport(IngestTransport):
         active_sensor_count: int | None = None,
         rms: float | None = None,
     ) -> None:
-        normalized_node, geo_position = self._fusion_node._ingest_processor._normalize_node_spec(node)
+        normalized_node = await self._fusion_node.refresh_live_node(node)
         sensor_count = len(normalized_node.sensor_offsets_m or [])
-        audio_summary = {
-            "sensor_count": sensor_count,
-            "active_sensor_count": active_sensor_count if active_sensor_count is not None else sensor_count,
-            "sample_rate_hz": sample_rate_hz,
-            "last_sample_time_ns": last_sample_time_ns,
-            "age_seconds": None,
-            "rms": rms,
-            "recent_coverage_ratio": None,
-            "recent_missing_ratio": None,
-            "recent_max_gap_seconds": None,
-            "max_buffer_samples": None,
-            "max_buffer_seconds": None,
-            "status": "sidecar_stream_consumer",
-        }
-        async with self._fusion_node._storage_batch():
-            await self._fusion_node.storage.upsert_node(
-                spec=normalized_node,
-                last_seen_ns=time.time_ns(),
-                position_geo=geo_position,
-            )
-            await self._fusion_node.storage.upsert_node_audio_summary(
-                node_id=normalized_node.id,
-                summary=audio_summary,
-                updated_ns=time.time_ns(),
-            )
+        await self._fusion_node.record_live_audio_summary(
+            node_id=normalized_node.id,
+            summary={
+                "sensor_count": sensor_count,
+                "active_sensor_count": active_sensor_count if active_sensor_count is not None else sensor_count,
+                "sample_rate_hz": sample_rate_hz,
+                "last_sample_time_ns": last_sample_time_ns,
+                "age_seconds": None,
+                "rms": rms,
+                "recent_coverage_ratio": None,
+                "recent_missing_ratio": None,
+                "recent_max_gap_seconds": None,
+                "max_buffer_samples": None,
+                "max_buffer_seconds": None,
+                "status": "sidecar_stream_consumer",
+            },
+        )
 
     async def deliver_environment_sample(self, *, node_id: str, sample: EnvironmentSampleIn) -> None:
         if not sample.has_any_measurement():
             return
 
-        timestamp_ns = sample.timestamp_ns or time.time_ns()
-        metadata = dict(sample.metadata)
-        if sample.source:
-            metadata = {"source": sample.source, **metadata}
-
-        async with self._fusion_node._storage_batch():
-            await self._fusion_node.storage.insert_environment(
-                node_id=node_id,
-                timestamp_ns=timestamp_ns,
-                temperature_c=sample.temperature_c,
-                pressure_pa=sample.pressure_pa,
-                humidity_fraction=sample.humidity_fraction,
-                wind_speed_mps=sample.wind_speed_mps,
-                wind_dir_deg=sample.wind_dir_deg,
-                solar_lux=sample.solar_lux,
-                metadata=metadata,
-            )
-
-            existing_node = await self._fusion_node.storage.get_node_by_id(node_id)
-            if isinstance(existing_node, dict):
-                try:
-                    node_spec = NodeSpec.model_validate(existing_node)
-                except Exception:  # noqa: BLE001
-                    node_spec = None
-                if node_spec is not None:
-                    normalized_node, geo_position = self._fusion_node._ingest_processor._normalize_node_spec(node_spec)
-                    await self._fusion_node.storage.upsert_node(
-                        spec=normalized_node,
-                        last_seen_ns=time.time_ns(),
-                        position_geo=geo_position,
-                    )
-
-        environment_provider = getattr(self._fusion_node, "environment_provider", None)
-        if environment_provider is not None and hasattr(environment_provider, "ingest_sample"):
-            environment_provider.ingest_sample(
-                node_id=node_id,
-                timestamp_ns=timestamp_ns,
-                temperature_c=sample.temperature_c,
-                humidity_fraction=sample.humidity_fraction,
-                pressure_pa=sample.pressure_pa,
-                wind_speed_mps=sample.wind_speed_mps,
-                wind_dir_deg=sample.wind_dir_deg,
-                solar_lux=sample.solar_lux,
-                location_m=None,
-                metadata=metadata,
-            )
+        await self._fusion_node.ingest_environment_sample(node_id=node_id, sample=sample)
 
     async def _deliver_buffered_frames(self, *, node, buffered_frames, sort_by_toa: bool) -> StoreForwardIngestResponse:
         ordered_frames = buffered_frames

@@ -1794,16 +1794,9 @@ async def _ingest_binary_impl(state, request: Request) -> StoreForwardIngestResp
                 if drop_delta:
                     await _emit_runner_cbit(state, payload.node.id, drop_delta, last_timing_diag)
         else:
-            # Heartbeat-only payload: touch last_seen so the node stays online.
-            # Must go through _normalize_node_spec so position_m is always set
-            # (upsert_node requires it) and position_geo is correctly derived.
-            normalized_node, geo_position = state.fusion_node._ingest_processor._normalize_node_spec(payload.node)
-            async with state.fusion_node._storage_batch():
-                await state.fusion_node.storage.upsert_node(
-                    spec=normalized_node,
-                    last_seen_ns=time.time_ns(),
-                    position_geo=geo_position,
-                )
+            # Heartbeats stay in the live registry; the node record is written
+            # only when this process first sees a registration change.
+            await state.fusion_node.refresh_live_node(payload.node)
         return StoreForwardIngestResponse(
             accepted=True,
             total_frames=len(payload.buffered_frames),
@@ -1833,37 +1826,11 @@ async def ingest_environment(payload: _EnvironmentIngestBody, request: Request) 
         raise HTTPException(status_code=413, detail="environment batch exceeds 64 samples")
 
     accepted = 0
-    now_ns = time.time_ns()
     for item in payload.samples:
         sample = item.sample
         if not sample.has_any_measurement():
             continue
-        timestamp_ns = sample.timestamp_ns or now_ns
-        await state.storage.insert_environment(
-            node_id=item.node_id,
-            timestamp_ns=timestamp_ns,
-            temperature_c=sample.temperature_c,
-            pressure_pa=sample.pressure_pa,
-            humidity_fraction=sample.humidity_fraction,
-            wind_speed_mps=sample.wind_speed_mps,
-            wind_dir_deg=sample.wind_dir_deg,
-            solar_lux=sample.solar_lux,
-            metadata={"source": sample.source, **sample.metadata} if sample.source else sample.metadata,
-        )
-        environment_provider = getattr(state, "environment_provider", None)
-        if environment_provider is not None and hasattr(environment_provider, "ingest_sample"):
-            environment_provider.ingest_sample(
-                node_id=item.node_id,
-                timestamp_ns=timestamp_ns,
-                temperature_c=sample.temperature_c,
-                humidity_fraction=sample.humidity_fraction,
-                pressure_pa=sample.pressure_pa,
-                wind_speed_mps=sample.wind_speed_mps,
-                wind_dir_deg=sample.wind_dir_deg,
-                solar_lux=sample.solar_lux,
-                location_m=None,
-                metadata={"source": sample.source, **sample.metadata} if sample.source else sample.metadata,
-            )
+        await state.fusion_node.ingest_environment_sample(node_id=item.node_id, sample=sample)
         accepted += 1
     return {"accepted": accepted, "queued": False}
 
@@ -1942,15 +1909,22 @@ async def list_nodes(
     bit_evaluator: BITReportEvaluator = state.bit_evaluator
     now_ns = time.time_ns()
     nodes = await state.storage.list_nodes(limit=limit)
+    if _has_live_ingest_runtime(state):
+        live_nodes = {
+            runtime.spec.id: runtime
+            for runtime in await state.registry.list_nodes()
+        }
+        for node in nodes:
+            runtime = live_nodes.get(str(node.get("id")))
+            if runtime is None:
+                continue
+            node.update(runtime.spec.model_dump(mode="json"))
+            node["last_seen_ns"] = runtime.last_seen_ns
     latest_environment_rows = await state.storage.list_latest_environment_per_node(limit=limit)
     latest_time_quality_by_node = await state.storage.list_latest_time_quality_per_node()
     latest_observation_metadata_by_node = await state.storage.list_latest_observation_metadata_per_node()
-    latest_audio_summary_rows = await state.storage.list_node_audio_summaries(limit=limit)
     latest_environment_by_node = {
         row["node_id"]: row for row in latest_environment_rows if row.get("node_id") is not None
-    }
-    latest_audio_summary_by_node = {
-        row["node_id"]: row for row in latest_audio_summary_rows if row.get("node_id") is not None
     }
     effector_manager: EffectorManager = state.effector_manager
     ptz_status_by_node = {
@@ -2006,6 +1980,11 @@ async def list_nodes(
         use_live_audio_buffer_summary = _has_live_ingest_runtime(state) and (
             settings.ingest_backend == "python" or settings.direct_ingest_enabled
         )
+        live_summary = (
+            await state.fusion_node.live_audio_summary(node["id"])
+            if _has_live_ingest_runtime(state)
+            else None
+        )
         if use_live_audio_buffer_summary:
             sensor_descriptors = await state.registry.sensors_for_node(node["id"])
             sensor_ids = [descriptor.sensor_id for descriptor in sensor_descriptors]
@@ -2033,14 +2012,10 @@ async def list_nodes(
                 "max_buffer_seconds": audio_summary["max_buffer_seconds"],
                 "status": audio_status,
             }
-            # Firmware NodeRunner counters are tracked from frame telemetry and
-            # persisted with the audio summary; the live-buffer summary above
-            # does not carry them, so merge them in for a consistent shape.
-            persisted_summary = latest_audio_summary_by_node.get(node["id"])
-            if isinstance(persisted_summary, dict) and persisted_summary.get("runner_stats"):
-                node["audio_debug"]["runner_stats"] = persisted_summary["runner_stats"]
-            if isinstance(persisted_summary, dict) and persisted_summary.get("ingest_health"):
-                node["audio_debug"]["ingest_health"] = persisted_summary["ingest_health"]
+            if isinstance(live_summary, dict):
+                for key in ("runner_stats", "ingest_health"):
+                    if key in live_summary:
+                        node["audio_debug"][key] = live_summary[key]
         else:
             sensor_ids = _sensor_ids_from_node_row(node)
             sidecar_snapshot = sidecar_node_snapshots.get(node["id"])
@@ -2053,7 +2028,6 @@ async def list_nodes(
                 if sidecar_snapshot is not None
                 else None
             )
-            persisted_summary = latest_audio_summary_by_node.get(node["id"])
             if sidecar_audio_debug is not None:
                 node["audio_debug"] = sidecar_audio_debug
                 latest_sidecar_timing = getattr(
@@ -2061,22 +2035,8 @@ async def list_nodes(
                 )
                 if isinstance(latest_sidecar_timing, dict) and latest_sidecar_timing:
                     node["latest_timing_diagnostics"] = latest_sidecar_timing
-            elif persisted_summary is not None:
-                last_sample_time_ns = persisted_summary.get("last_sample_time_ns")
-                age_seconds = persisted_summary.get("age_seconds")
-                if isinstance(last_sample_time_ns, int):
-                    age_seconds = max(0.0, (now_ns - last_sample_time_ns) / 1_000_000_000.0)
-                if age_seconds is None:
-                    audio_status = "external_ingest_process"
-                elif float(age_seconds) <= settings.node_degraded_after_seconds:
-                    audio_status = "recent"
-                else:
-                    audio_status = "stale"
-                persisted_summary["sensor_count"] = int(persisted_summary.get("sensor_count") or len(sensor_ids))
-                persisted_summary["active_sensor_count"] = int(persisted_summary.get("active_sensor_count") or 0)
-                persisted_summary["age_seconds"] = age_seconds
-                persisted_summary["status"] = audio_status
-                node["audio_debug"] = persisted_summary
+            elif isinstance(live_summary, dict):
+                node["audio_debug"] = live_summary
             else:
                 node["audio_debug"] = {
                     "sensor_count": len(sensor_ids),

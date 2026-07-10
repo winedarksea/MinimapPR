@@ -240,7 +240,6 @@ class StorageConfig:
     retention_short_seconds: int
     retention_long_seconds: int
     retention_experiment_seconds: int
-    retention_ingested_frames_seconds: int
     retention_bit_reports_seconds: int
     retention_pings_seconds: int
     retention_track_updates_seconds: int
@@ -635,7 +634,6 @@ class Settings:
     retention_short_seconds: int = 86_400
     retention_long_seconds: int = 2_592_000
     retention_experiment_seconds: int = 21_600
-    retention_ingested_frames_seconds: int = 86_400
     retention_bit_reports_seconds: int = 604_800
     retention_pings_seconds: int = 86_400
     retention_track_updates_seconds: int = 604_800
@@ -1008,7 +1006,6 @@ class Settings:
             "retention_short_seconds",
             "retention_long_seconds",
             "retention_experiment_seconds",
-            "retention_ingested_frames_seconds",
             "retention_bit_reports_seconds",
             "retention_pings_seconds",
             "retention_track_updates_seconds",
@@ -1463,7 +1460,6 @@ class Settings:
             retention_short_seconds=_env_int("MINIMAPPR_RETENTION_SHORT_SECONDS", 86_400),
             retention_long_seconds=_env_int("MINIMAPPR_RETENTION_LONG_SECONDS", 2_592_000),
             retention_experiment_seconds=_env_int("MINIMAPPR_RETENTION_EXPERIMENT_SECONDS", 21_600),
-            retention_ingested_frames_seconds=_env_int("MINIMAPPR_RETENTION_INGESTED_FRAMES_SECONDS", 86_400),
             retention_bit_reports_seconds=_env_int("MINIMAPPR_RETENTION_BIT_REPORTS_SECONDS", 604_800),
             retention_pings_seconds=_env_int("MINIMAPPR_RETENTION_PINGS_SECONDS", 86_400),
             retention_track_updates_seconds=_env_int("MINIMAPPR_RETENTION_TRACK_UPDATES_SECONDS", 604_800),
@@ -1630,7 +1626,6 @@ class Settings:
             retention_short_seconds=self.retention_short_seconds,
             retention_long_seconds=self.retention_long_seconds,
             retention_experiment_seconds=self.retention_experiment_seconds,
-            retention_ingested_frames_seconds=self.retention_ingested_frames_seconds,
             retention_bit_reports_seconds=self.retention_bit_reports_seconds,
             retention_pings_seconds=self.retention_pings_seconds,
             retention_track_updates_seconds=self.retention_track_updates_seconds,

@@ -48,6 +48,7 @@ from minimappr.core.environment import StaticEnvironmentProvider
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.cluster_registry import ClusterRegistry
 from minimappr.core.ingest import EnvironmentUpdater, IngestProcessor
+from minimappr.core.live_ingest_state import LiveIngestState
 from minimappr.core.ambi_atob import alias_cutoff_from_positions
 from minimappr.core.localization import LocalizationError
 from minimappr.core.localization_uncertainty import (
@@ -91,9 +92,11 @@ from minimappr.interfaces import (
 )
 from minimappr.models import (
     DetectionEvent,
+    EnvironmentSampleIn,
     GeoPoint,
     IngestFrameRequest,
     IngestFrameResponse,
+    NodeSpec,
     RetentionTier,
     TimeQuality,
     TrackState,
@@ -333,6 +336,7 @@ class FusionNode:
             "cop": WebsocketRuleActionHandler(live_callback),
             "log": LoggingRuleActionHandler(),
         }
+        self._live_ingest_state = LiveIngestState()
 
         # -- extracted subsystem components ------------------------------------
         self._ingest_processor = IngestProcessor(
@@ -343,6 +347,7 @@ class FusionNode:
             storage=storage,
             coordinate_frame=coordinate_frame,
             preprocessor_factory=self.preprocessor_factory,
+            live_ingest_state=self._live_ingest_state,
             environment_updater=EnvironmentUpdater(self.environment_provider),
             persist_observations_on_ingest=bool(settings.persist_observations_on_ingest),
             node_position_kalman_q=settings.node_position_kalman_q,
@@ -524,6 +529,82 @@ class FusionNode:
     async def ingest_decoded(self, request: IngestFrameRequest, decoded_audio: np.ndarray) -> IngestFrameResponse:
         return await self._ingest_request(request, decoded_audio=decoded_audio)
 
+    async def refresh_live_node(
+        self,
+        node: NodeSpec,
+        *,
+        last_seen_ns: int | None = None,
+    ) -> NodeSpec:
+        """Refresh runtime liveness and persist only a changed registration."""
+        normalized_node, position_geo = self._ingest_processor._normalize_node_spec(node)
+        effective_last_seen_ns = time.time_ns() if last_seen_ns is None else last_seen_ns
+        await self.registry.upsert(normalized_node, effective_last_seen_ns)
+        await self._persist_node_registration_if_changed(
+            normalized_node,
+            last_seen_ns=effective_last_seen_ns,
+            position_geo=position_geo,
+        )
+        return normalized_node
+
+    async def record_live_audio_summary(self, *, node_id: str, summary: dict[str, Any]) -> None:
+        await self._live_ingest_state.record_audio_summary(node_id=node_id, summary=summary)
+
+    async def live_audio_summary(self, node_id: str) -> dict[str, Any] | None:
+        return await self._live_ingest_state.audio_summary(node_id)
+
+    async def ingest_environment_sample(self, *, node_id: str, sample: EnvironmentSampleIn) -> bool:
+        """Update live environment state and persist its bounded history."""
+        if not sample.has_any_measurement():
+            return False
+        timestamp_ns = sample.timestamp_ns or time.time_ns()
+        metadata = {"source": sample.source, **sample.metadata} if sample.source else dict(sample.metadata)
+        ingest_fn = getattr(self.environment_provider, "ingest_sample", None)
+        if callable(ingest_fn):
+            ingest_fn(
+                node_id=node_id,
+                timestamp_ns=timestamp_ns,
+                temperature_c=sample.temperature_c,
+                humidity_fraction=sample.humidity_fraction,
+                pressure_pa=sample.pressure_pa,
+                wind_speed_mps=sample.wind_speed_mps,
+                wind_dir_deg=sample.wind_dir_deg,
+                solar_lux=sample.solar_lux,
+                location_m=None,
+                metadata=metadata,
+            )
+        if not await self._live_ingest_state.should_persist_environment_sample(
+            node_id=node_id,
+            timestamp_ns=timestamp_ns,
+        ):
+            return False
+        await self.storage.insert_environment(
+            node_id=node_id,
+            timestamp_ns=timestamp_ns,
+            temperature_c=sample.temperature_c,
+            pressure_pa=sample.pressure_pa,
+            humidity_fraction=sample.humidity_fraction,
+            wind_speed_mps=sample.wind_speed_mps,
+            wind_dir_deg=sample.wind_dir_deg,
+            solar_lux=sample.solar_lux,
+            metadata=metadata,
+        )
+        return True
+
+    async def _persist_node_registration_if_changed(
+        self,
+        node: NodeSpec,
+        *,
+        last_seen_ns: int,
+        position_geo: GeoPoint | None,
+    ) -> None:
+        if not await self._live_ingest_state.should_persist_node_registration(node):
+            return
+        await self.storage.upsert_node(
+            spec=node,
+            last_seen_ns=last_seen_ns,
+            position_geo=position_geo,
+        )
+
     async def ingest_localized_render(self, payload: LocalizedClassifierRenderRequest) -> None:
         if self._stopping:
             raise ValueError("Fusion node is stopping")
@@ -563,8 +644,8 @@ class FusionNode:
         position_geo = node.position_geo
         if position_geo is None and node.position_m is not None:
             position_geo = self.coordinate_frame.local_to_geo(node.position_m)
-        await self.storage.upsert_node(
-            spec=node,
+        await self._persist_node_registration_if_changed(
+            node,
             last_seen_ns=server_received_ns,
             position_geo=position_geo,
         )

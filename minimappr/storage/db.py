@@ -79,27 +79,6 @@ def _contributor_role_priority(roles: list[str]) -> int:
     return 3
 
 
-def _ingested_frame_key(
-    *,
-    node_id: str,
-    boot_session: str = "",
-    frame_sequence: int | None,
-    start_time_ns: int,
-    utc_end_ns: int | None,
-    start_sample_index: int | None,
-    end_sample_index: int | None,
-    source_type: str,
-    time_quality: str = "",
-    tor_ns: int | None = None,
-) -> str:
-    _ = (time_quality, tor_ns)
-    boot_prefix = f"{node_id}:{boot_session or 'boot-unknown'}:{source_type}:"
-    if start_sample_index is not None and end_sample_index is not None:
-        return f"{boot_prefix}{start_sample_index}:{end_sample_index}"
-    sequence_token = str(frame_sequence) if frame_sequence is not None else "none"
-    return f"{boot_prefix}{start_time_ns}:{sequence_token}"
-
-
 class Storage:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
@@ -135,6 +114,12 @@ class Storage:
 
     async def _initialize_schema_and_migrations(self) -> None:
         db = self._require_db()
+
+        # Receipt and heartbeat tables used to write at packet cadence.  Live
+        # ingest now owns those concerns in bounded process memory, so discard
+        # old diagnostic state as part of the forward-only schema migration.
+        await db.execute("DROP TABLE IF EXISTS ingested_frames")
+        await db.execute("DROP TABLE IF EXISTS node_audio_summaries")
 
         await db.executescript(
             """
@@ -184,29 +169,6 @@ class Storage:
             CREATE INDEX IF NOT EXISTS idx_observations_sensor ON observations(sensor_id, toa_ns DESC);
             CREATE INDEX IF NOT EXISTS idx_observations_event_id ON observations(event_id);
             CREATE INDEX IF NOT EXISTS idx_observations_node_id ON observations(node_id);
-
-            CREATE TABLE IF NOT EXISTS ingested_frames (
-                frame_key TEXT PRIMARY KEY,
-                node_id TEXT NOT NULL,
-                source_type TEXT NOT NULL,
-                start_time_ns INTEGER NOT NULL,
-                end_time_ns INTEGER,
-                start_sample_index INTEGER,
-                end_sample_index INTEGER,
-                frame_sequence INTEGER,
-                toa_ns INTEGER NOT NULL,
-                tor_ns INTEGER NOT NULL,
-                created_ns INTEGER NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_ingested_frames_node_start ON ingested_frames(node_id, start_time_ns DESC);
-            CREATE INDEX IF NOT EXISTS idx_ingested_frames_node_seq ON ingested_frames(node_id, frame_sequence, start_time_ns DESC);
-
-            CREATE TABLE IF NOT EXISTS node_audio_summaries (
-                node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
-                summary_json TEXT NOT NULL,
-                updated_ns INTEGER NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_node_audio_summaries_updated ON node_audio_summaries(updated_ns DESC);
 
             CREATE TABLE IF NOT EXISTS labels (
                 id TEXT PRIMARY KEY,
@@ -504,14 +466,6 @@ class Storage:
                 "permissions_json": "TEXT NOT NULL DEFAULT '{}'",
                 "overrides_json": "TEXT NOT NULL DEFAULT '{}'",
                 "origin": "TEXT NOT NULL DEFAULT 'ingest'",
-            },
-        )
-        await self._ensure_columns(
-            "ingested_frames",
-            {
-                "end_time_ns": "INTEGER",
-                "start_sample_index": "INTEGER",
-                "end_sample_index": "INTEGER",
             },
         )
         await self._ensure_columns(
@@ -1108,53 +1062,6 @@ class Storage:
             )
             await self._commit_if_needed(db)
 
-    async def upsert_node_audio_summary(
-        self,
-        *,
-        node_id: str,
-        summary: dict[str, Any],
-        updated_ns: int,
-    ) -> None:
-        db = self._require_db()
-        async with self._write_guard():
-            await db.execute(
-                """
-                INSERT INTO node_audio_summaries (node_id, summary_json, updated_ns)
-                VALUES (?, ?, ?)
-                ON CONFLICT(node_id) DO UPDATE SET
-                    summary_json=excluded.summary_json,
-                    updated_ns=excluded.updated_ns
-                """,
-                (node_id, _json_dumps(summary), updated_ns),
-            )
-            await self._commit_if_needed(db)
-
-    async def list_node_audio_summaries(self, limit: int | None = None) -> list[dict[str, Any]]:
-        db = self._require_db()
-        if limit is not None and limit > 0:
-            rows = await (
-                await db.execute(
-                    "SELECT node_id, summary_json, updated_ns FROM node_audio_summaries ORDER BY updated_ns DESC LIMIT ?",
-                    (limit,),
-                )
-            ).fetchall()
-        else:
-            rows = await (
-                await db.execute(
-                    "SELECT node_id, summary_json, updated_ns FROM node_audio_summaries ORDER BY updated_ns DESC"
-                )
-            ).fetchall()
-
-        result: list[dict[str, Any]] = []
-        for row in rows:
-            summary = _json_loads(row["summary_json"], {})
-            if not isinstance(summary, dict):
-                summary = {}
-            summary["node_id"] = row["node_id"]
-            summary["updated_ns"] = row["updated_ns"]
-            result.append(summary)
-        return result
-
     # ------------------------------------------------------------------
     # BIT Reports
     # ------------------------------------------------------------------
@@ -1329,103 +1236,6 @@ class Storage:
             )
             await self._commit_if_needed(db)
         return observation_id
-
-    async def has_ingested_frame(
-        self,
-        *,
-        node_id: str,
-        boot_session: str = "",
-        frame_sequence: int | None,
-        start_time_ns: int,
-        utc_end_ns: int | None,
-        start_sample_index: int | None,
-        end_sample_index: int | None,
-        source_type: str,
-        time_quality: str = "",
-        tor_ns: int | None = None,
-    ) -> bool:
-        db = self._require_db()
-        frame_key = _ingested_frame_key(
-            node_id=node_id,
-            boot_session=boot_session,
-            frame_sequence=frame_sequence,
-            start_time_ns=start_time_ns,
-            utc_end_ns=utc_end_ns,
-            start_sample_index=start_sample_index,
-            end_sample_index=end_sample_index,
-            source_type=source_type,
-            time_quality=time_quality,
-            tor_ns=tor_ns,
-        )
-        row = await (
-            await db.execute(
-                """
-                SELECT 1
-                FROM ingested_frames
-                WHERE frame_key = ?
-                LIMIT 1
-                """,
-                (frame_key,),
-            )
-        ).fetchone()
-        return row is not None
-
-    async def register_ingested_frame(
-        self,
-        *,
-        node_id: str,
-        boot_session: str = "",
-        frame_sequence: int | None,
-        start_time_ns: int,
-        utc_end_ns: int | None,
-        start_sample_index: int | None,
-        end_sample_index: int | None,
-        toa_ns: int,
-        tor_ns: int,
-        created_ns: int | None = None,
-        source_type: str,
-        time_quality: str = "",
-    ) -> bool:
-        db = self._require_db()
-        frame_key = _ingested_frame_key(
-            node_id=node_id,
-            boot_session=boot_session,
-            frame_sequence=frame_sequence,
-            start_time_ns=start_time_ns,
-            utc_end_ns=utc_end_ns,
-            start_sample_index=start_sample_index,
-            end_sample_index=end_sample_index,
-            source_type=source_type,
-            time_quality=time_quality,
-            tor_ns=tor_ns,
-        )
-        async with self._write_guard():
-            cursor = await db.execute(
-                """
-                INSERT INTO ingested_frames (
-                    frame_key, node_id, source_type, start_time_ns,
-                    end_time_ns, start_sample_index, end_sample_index,
-                    frame_sequence, toa_ns, tor_ns, created_ns
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(frame_key) DO NOTHING
-                """,
-                (
-                    frame_key,
-                    node_id,
-                    source_type,
-                    start_time_ns,
-                    utc_end_ns,
-                    start_sample_index,
-                    end_sample_index,
-                    frame_sequence,
-                    toa_ns,
-                    tor_ns,
-                    created_ns if created_ns is not None else tor_ns,
-                ),
-            )
-            await self._commit_if_needed(db)
-            return cursor.rowcount > 0
 
     async def upsert_label(
         self,
@@ -3376,14 +3186,11 @@ class Storage:
         """Delete a node and all of its node-keyed records.
 
         With ``PRAGMA foreign_keys=ON`` this cascades to ``observations``,
-        ``node_audio_summaries``, ``environment`` and ``bit_reports`` and NULLs
-        ``detections.source_node_id``. ``ingested_frames`` carries no FK
-        constraint, so it is cleaned up explicitly. Returns True if the node row
-        existed.
+        ``environment`` and ``bit_reports`` and NULLs ``detections.source_node_id``.
+        Returns True if the node row existed.
         """
         db = self._require_db()
         async with self._write_guard():
-            await db.execute("DELETE FROM ingested_frames WHERE node_id = ?", (node_id,))
             cursor = await db.execute("DELETE FROM nodes WHERE id = ?", (node_id,))
             await self._commit_if_needed(db)
             return cursor.rowcount > 0
@@ -3606,7 +3413,6 @@ class Storage:
             "detections": 0,
             "pings": 0,
             "large_artifacts": 0,
-            "ingested_frames": 0,
             "bit_reports": 0,
             "track_updates": 0,
             "alerts": 0,
@@ -3697,20 +3503,6 @@ class Storage:
                     (tier, now_ns, threshold_ns),
                 )
                 summary["large_artifacts"] += max(0, artifact_cursor.rowcount)
-
-            ingest_receipt_ttl_seconds = operational_ttls.get("ingested_frames")
-            if ingest_receipt_ttl_seconds is None:
-                ingest_receipt_ttl_seconds = max(0, int(tier_ttls_seconds.get("short", 0)))
-            if ingest_receipt_ttl_seconds >= 0:
-                ingest_threshold_ns = now_ns - int(int(ingest_receipt_ttl_seconds) * 1_000_000_000)
-                ingested_frames_cursor = await db.execute(
-                    """
-                    DELETE FROM ingested_frames
-                    WHERE created_ns <= ?
-                    """,
-                    (ingest_threshold_ns,),
-                )
-                summary["ingested_frames"] += max(0, ingested_frames_cursor.rowcount)
 
             for key, sql in (
                 (

@@ -108,7 +108,6 @@ class CleanupService:
                 "experiment": self._settings.retention_experiment_seconds,
             },
             operational_ttls_seconds={
-                "ingested_frames": self._settings.retention_ingested_frames_seconds,
                 "bit_reports": self._settings.retention_bit_reports_seconds,
                 "pings": self._settings.retention_pings_seconds,
                 "track_updates": self._settings.retention_track_updates_seconds,

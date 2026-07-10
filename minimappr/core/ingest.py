@@ -28,6 +28,7 @@ from minimappr.config import FusionConfig, LocalizationConfig
 from minimappr.core.audio_buffer import MultiSensorBuffer
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.ingest_health import IngestHealthClassifier, runner_stats_from_timing_diagnostics
+from minimappr.core.live_ingest_state import FrameIdentity, LiveIngestState
 from minimappr.core.node_registry import NodeRegistry
 from minimappr.core.preprocessing import NodePreprocessorFactory
 from minimappr.interfaces import AudioPreprocessor, StorageBackend
@@ -130,6 +131,7 @@ class IngestProcessor:
         storage: StorageBackend,
         coordinate_frame: LocalCoordinateFrame,
         preprocessor_factory: NodePreprocessorFactory,
+        live_ingest_state: LiveIngestState | None = None,
         environment_updater: EnvironmentUpdater | None = None,
         persist_observations_on_ingest: bool = True,
         node_position_kalman_q: float = 0.5,
@@ -145,6 +147,7 @@ class IngestProcessor:
         self._storage = storage
         self._coordinate_frame = coordinate_frame
         self._preprocessor_factory = preprocessor_factory
+        self._live_ingest_state = live_ingest_state or LiveIngestState()
         self._environment_updater = environment_updater
         self._persist_observations_on_ingest = persist_observations_on_ingest
         self._kalman_q = node_position_kalman_q
@@ -207,38 +210,6 @@ class IngestProcessor:
         toa_ns = frame.toa_ns or frame.start_time_ns
         tor_ns = frame.tor_ns if frame.tor_ns is not None else server_received_ns
 
-        # -- duplicate check --------------------------------------------------
-        duplicate_ingest = await self._storage.has_ingested_frame(
-            node_id=normalized_node.id,
-            boot_session=boot_session,
-            frame_sequence=frame.sequence,
-            start_time_ns=frame.start_time_ns,
-            utc_end_ns=frame.utc_end_ns,
-            start_sample_index=frame.start_sample_index,
-            end_sample_index=frame.end_sample_index,
-            source_type=frame.source_type,
-            time_quality=frame.time_quality.value,
-            tor_ns=tor_ns,
-        )
-        if duplicate_ingest:
-            await self._storage.upsert_node(
-                spec=normalized_node,
-                last_seen_ns=server_received_ns,
-                position_geo=geo_position,
-            )
-            return IngestResult(
-                response=IngestFrameResponse(
-                    accepted=True,
-                    duplicate=True,
-                    triggered=False,
-                    frame_energy=0.0,
-                    detection_id=None,
-                    queued_event_id=None,
-                    queue_depth=0,
-                ),
-                triggered=False,
-            )
-
         # -- decode PCM --------------------------------------------------------
         audio = await asyncio.to_thread(
             _decode_audio_frame,
@@ -285,38 +256,55 @@ class IngestProcessor:
             allow_receipt_time_fallback="gps_optional" in normalized_node.capabilities,
         )
 
-        # -- register frame and optionally persist observations ---------------
+        # -- claim the processed frame and persist only durable domain data ----
         observation_ids: list[str] = []
-        frame_registered = False
+        frame_registered = await self._live_ingest_state.claim_processed_frame(
+            FrameIdentity.from_frame(
+                node_id=normalized_node.id,
+                boot_session=boot_session,
+                source_type=frame.source_type,
+                start_sample_index=frame.start_sample_index,
+                end_sample_index=frame.end_sample_index,
+                start_time_ns=frame.start_time_ns,
+                frame_sequence=frame.sequence,
+            )
+        )
+        if not frame_registered:
+            return IngestResult(
+                response=IngestFrameResponse(
+                    accepted=True,
+                    duplicate=True,
+                    triggered=False,
+                    frame_energy=0.0,
+                    detection_id=None,
+                    queued_event_id=None,
+                    queue_depth=0,
+                ),
+                triggered=False,
+            )
+
+        persist_node_registration = await self._live_ingest_state.should_persist_node_registration(
+            normalized_node
+        )
+        persist_environment_sample = environment_sample is not None and await self._live_ingest_state.should_persist_environment_sample(
+            node_id=normalized_node.id,
+            timestamp_ns=int(environment_sample["timestamp_ns"]),
+        )
         sequence_gap_count = 0
 
         async with storage_batch_ctx():
-            await self._storage.upsert_node(
-                spec=normalized_node,
-                last_seen_ns=server_received_ns,
-                position_geo=geo_position,
-            )
-            frame_registered = await self._storage.register_ingested_frame(
+            if persist_node_registration:
+                await self._storage.upsert_node(
+                    spec=normalized_node,
+                    last_seen_ns=server_received_ns,
+                    position_geo=geo_position,
+                )
+            sequence_gap_count = await self._registry.record_frame_sequence(
                 node_id=normalized_node.id,
                 boot_session=boot_session,
                 frame_sequence=frame.sequence,
-                start_time_ns=frame.start_time_ns,
-                utc_end_ns=frame.utc_end_ns,
-                start_sample_index=frame.start_sample_index,
-                end_sample_index=frame.end_sample_index,
-                toa_ns=toa_ns,
-                tor_ns=tor_ns,
-                created_ns=server_received_ns,
-                source_type=frame.source_type,
-                time_quality=frame.time_quality.value,
             )
-            if frame_registered:
-                sequence_gap_count = await self._registry.record_frame_sequence(
-                    node_id=normalized_node.id,
-                    boot_session=boot_session,
-                    frame_sequence=frame.sequence,
-                )
-                if sequence_gap_count > 0 and frame.sequence is not None:
+            if sequence_gap_count > 0 and frame.sequence is not None:
                     # The cumulative gap count is aggregated downstream from the
                     # IngestResult and is unaffected by this log throttle.
                     now_s = time.monotonic()
@@ -336,7 +324,8 @@ class IngestProcessor:
                                 "gap_size": sequence_gap_count,
                             },
                         )
-                if environment_sample is not None:
+            if environment_sample is not None:
+                if persist_environment_sample:
                     await self._storage.insert_environment(
                         node_id=normalized_node.id,
                         timestamp_ns=environment_sample["timestamp_ns"],
@@ -348,11 +337,11 @@ class IngestProcessor:
                         solar_lux=environment_sample["solar_lux"],
                         metadata=environment_sample["metadata"],
                     )
-                    if self._environment_updater is not None:
-                        self._environment_updater.update(environment_sample)
-                if self._persist_observations_on_ingest:
-                    for channel_index, sensor_id in enumerate(runtime.sensor_ids):
-                        observation_id = await self._storage.insert_observation(
+                if self._environment_updater is not None:
+                    self._environment_updater.update(environment_sample)
+            if self._persist_observations_on_ingest:
+                for channel_index, sensor_id in enumerate(runtime.sensor_ids):
+                    observation_id = await self._storage.insert_observation(
                             node_id=normalized_node.id,
                             sensor_id=sensor_id,
                             sensor_type="audio",
@@ -376,22 +365,8 @@ class IngestProcessor:
                                 "timing_diagnostics": frame.timing_diagnostics,
                                 "preprocess": normalized_node.properties.get("preprocess", {}),
                             },
-                        )
-                        observation_ids.append(observation_id)
-
-        if not frame_registered:
-            return IngestResult(
-                response=IngestFrameResponse(
-                    accepted=True,
-                    duplicate=True,
-                    triggered=False,
-                    frame_energy=0.0,
-                    detection_id=None,
-                    queued_event_id=None,
-                    queue_depth=0,
-                ),
-                triggered=False,
-            )
+                    )
+                    observation_ids.append(observation_id)
 
         # -- buffer insertion --------------------------------------------------
         for channel_index, sensor_id in enumerate(runtime.sensor_ids):
@@ -463,7 +438,7 @@ class IngestProcessor:
 
         env_counts = EnvironmentCounts(
             ingested=1 if environment_sample is not None else 0,
-            persisted=1 if environment_sample is not None and frame_registered else 0,
+            persisted=1 if persist_environment_sample else 0,
         )
 
         self._accepted_frame_count += 1
@@ -543,11 +518,7 @@ class IngestProcessor:
             sequence_gap_count=sequence_gap_count,
             timing_diagnostics=timing_diagnostics,
         )
-        await self._storage.upsert_node_audio_summary(
-            node_id=node_id,
-            summary=summary,
-            updated_ns=now_ns,
-        )
+        await self._live_ingest_state.record_audio_summary(node_id=node_id, summary=summary)
 
     @staticmethod
     def _kalman_1d(x: float, p: float, z: float, q: float, r: float) -> tuple[float, float]:

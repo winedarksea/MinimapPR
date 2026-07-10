@@ -1,10 +1,4 @@
-"""Tests that firmware NodeRunner publish/queue counters are exposed via the API.
-
-The node ships counters such as runner_queue_overflows (which drive server-side
-frame sequence gaps) and a publish-failure breakdown inside each frame's
-timing_diagnostics. These are persisted with the node audio summary so they
-surface under /api/v1/nodes -> audio_debug.runner_stats for live monitoring.
-"""
+"""Tests that firmware NodeRunner counters remain available in live state."""
 
 from __future__ import annotations
 
@@ -114,7 +108,7 @@ def test_ingest_health_classifies_gap_causes() -> None:
 
 
 @pytest.mark.asyncio
-async def test_runner_stats_persisted_with_audio_summary(tmp_path: Path) -> None:
+async def test_runner_stats_remain_in_live_audio_summary(tmp_path: Path) -> None:
     settings = Settings(
         db_path=tmp_path / "runner_stats.db",
         snippet_dir=tmp_path / "snippets",
@@ -185,15 +179,15 @@ async def test_runner_stats_persisted_with_audio_summary(tmp_path: Path) -> None
         )
         assert response.accepted is True
 
-        summaries = await storage.list_node_audio_summaries()
-        by_node = {item["node_id"]: item for item in summaries}
-        runner_stats = by_node["point-runner-stats"].get("runner_stats")
+        summary = await fusion.live_audio_summary("point-runner-stats")
+        assert summary is not None
+        runner_stats = summary.get("runner_stats")
         assert runner_stats is not None
         assert runner_stats["runner_queue_overflows"] == 7
         assert runner_stats["runner_frames_dropped"] == 2
         assert runner_stats["runner_publish_wifi_down_failures"] == 4
         assert runner_stats["transport_health"]["boot_id"] == 999
-        ingest_health = by_node["point-runner-stats"].get("ingest_health")
+        ingest_health = summary.get("ingest_health")
         assert ingest_health is not None
         assert ingest_health["verdict"] == "LOSSY_RATE_LIMITED"
     finally:

@@ -140,18 +140,6 @@ class StorageBackend(Protocol):
     ) -> None:
         ...
 
-    async def upsert_node_audio_summary(
-        self,
-        *,
-        node_id: str,
-        summary: dict[str, Any],
-        updated_ns: int,
-    ) -> None:
-        ...
-
-    async def list_node_audio_summaries(self, limit: int | None = None) -> list[dict[str, Any]]:
-        ...
-
     async def insert_observation(
         self,
         *,
@@ -380,39 +368,6 @@ class StorageBackend(Protocol):
         detection_id: str | None = None,
         track_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        ...
-
-    async def has_ingested_frame(
-        self,
-        *,
-        node_id: str,
-        frame_sequence: int | None,
-        start_time_ns: int,
-        utc_end_ns: int | None,
-        start_sample_index: int | None,
-        end_sample_index: int | None,
-        source_type: str,
-        time_quality: str = "",
-        tor_ns: int | None = None,
-    ) -> bool:
-        ...
-
-    async def register_ingested_frame(
-        self,
-        *,
-        node_id: str,
-        boot_session: str = "",
-        frame_sequence: int | None,
-        start_time_ns: int,
-        utc_end_ns: int | None,
-        start_sample_index: int | None,
-        end_sample_index: int | None,
-        toa_ns: int,
-        tor_ns: int,
-        created_ns: int | None = None,
-        source_type: str,
-        time_quality: str = "",
-    ) -> bool:
         ...
 
     async def cleanup_policy_managed_files(
