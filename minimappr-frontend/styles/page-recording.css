@@ -432,6 +432,7 @@
   color: var(--md-sys-color-on-surface-variant);
 }
 .gt-field--wide { grid-column: 1 / -1; }
+.gt-field.hidden { display: none; }
 .gt-time-input {
   display: flex;
   gap: 6px;

@@ -9,7 +9,6 @@
 use crate::recording::api;
 use crate::recording::CalibrationManifest;
 use leptos::prelude::*;
-use std::rc::Rc;
 use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
@@ -145,18 +144,15 @@ pub fn WaveformTrimmer(
         let _ = document.add_event_listener_with_callback("mousemove", on_move_ref);
 
         let cleanup_document = document.clone();
-        let on_move_value = Rc::new(on_move);
-        let on_move_for_cleanup = on_move_value.clone();
+        // `on_move` moves into this closure and is dropped once it fires
+        // (after detaching the listener), instead of being leaked forever.
         let on_up = Closure::<dyn FnMut(web_sys::MouseEvent)>::once(move |_| {
-            let _ = cleanup_document.remove_event_listener_with_callback(
-                "mousemove",
-                on_move_for_cleanup.as_ref().as_ref().unchecked_ref(),
-            );
+            let _ = cleanup_document
+                .remove_event_listener_with_callback("mousemove", on_move.as_ref().unchecked_ref());
         });
         let _ =
             document.add_event_listener_with_callback("mouseup", on_up.as_ref().unchecked_ref());
         on_up.forget();
-        std::mem::forget(on_move_value);
     };
 
     let toggle_play = move |_| {
