@@ -1,7 +1,10 @@
+use super::waveform_trimmer::WaveformTrimmer;
 use crate::recording::api;
 use crate::recording::{
-    GroundTruthEvent, GroundTruthEventIn, RecordingLibraryEntry, RecordingStatus,
+    CalibrationManifest, GroundTruthEvent, GroundTruthEventIn, RecordingLibraryEntry,
+    RecordingStatus,
 };
+use crate::state::AppState;
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
@@ -290,9 +293,20 @@ fn GroundTruthPanel(session_id: String) -> impl IntoView {
     let events: RwSignal<Vec<GroundTruthEvent>> = RwSignal::new(vec![]);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
 
-    // Form state.
+    let state = use_context::<AppState>().expect("AppState");
+    let node_ids = Signal::derive(move || {
+        state
+            .nodes
+            .get()
+            .into_iter()
+            .map(|n| n.node_id)
+            .collect::<Vec<_>>()
+    });
+
+    // Form state. Empty source_node = manual lat/lon entry.
     let label = RwSignal::new(String::new());
     let category = RwSignal::new(String::from("unknown"));
+    let source_node = RwSignal::new(String::new());
     let lat = RwSignal::new(String::new());
     let lon = RwSignal::new(String::new());
     let alt_m = RwSignal::new(String::from("0"));
@@ -300,6 +314,31 @@ fn GroundTruthPanel(session_id: String) -> impl IntoView {
     let end_ns = RwSignal::new(String::new());
     let notes = RwSignal::new(String::new());
     let saving = RwSignal::new(false);
+
+    // Waveform trimmer: manifest loaded once per session; the viewed node
+    // defaults to the ground-truth source node, else the manifest's first
+    // node, but can be changed independently (the trim window is shared).
+    let manifest: RwSignal<Option<CalibrationManifest>> = RwSignal::new(None);
+    let view_node = RwSignal::new(String::new());
+    {
+        let session_id = session_id.clone();
+        spawn_local(async move {
+            if let Ok(m) = api::fetch_calibration_manifest(&session_id).await {
+                if view_node.get_untracked().is_empty() {
+                    if let Some(first) = m.nodes.first() {
+                        view_node.set(first.node_id.clone());
+                    }
+                }
+                manifest.set(Some(m));
+            }
+        });
+    }
+    Effect::new(move |_| {
+        let node = source_node.get();
+        if !node.is_empty() {
+            view_node.set(node);
+        }
+    });
 
     let load = {
         let session_id = session_id.clone();
@@ -328,18 +367,25 @@ fn GroundTruthPanel(session_id: String) -> impl IntoView {
             let session_id = session_id.clone();
             let load = load.clone();
             let parse = |signal: RwSignal<String>| signal.get_untracked().trim().parse::<f64>();
-            let (Ok(lat_v), Ok(lon_v), Ok(alt_v), Ok(start_v), Ok(end_v)) = (
-                parse(lat),
-                parse(lon),
-                parse(alt_m),
-                parse(start_ns),
-                parse(end_ns),
-            ) else {
-                error.set(Some(
-                    "Latitude, longitude, altitude, and start/end times are required numbers."
-                        .into(),
-                ));
+            let (Ok(start_v), Ok(end_v)) = (parse(start_ns), parse(end_ns)) else {
+                error.set(Some("Start/end times are required numbers.".into()));
                 return;
+            };
+            let node_v = source_node.get_untracked().trim().to_string();
+            let (lat_v, lon_v, alt_v) = if node_v.is_empty() {
+                // Manual entry: position is required.
+                let (Ok(lat_v), Ok(lon_v), Ok(alt_v)) = (parse(lat), parse(lon), parse(alt_m))
+                else {
+                    error.set(Some(
+                        "Latitude, longitude, and altitude are required numbers \
+                         (or pick a ground-truth node)."
+                            .into(),
+                    ));
+                    return;
+                };
+                (Some(lat_v), Some(lon_v), Some(alt_v))
+            } else {
+                (None, None, None)
             };
             let label_v = label.get_untracked().trim().to_string();
             if label_v.is_empty() {
@@ -356,6 +402,7 @@ fn GroundTruthPanel(session_id: String) -> impl IntoView {
                 lat: lat_v,
                 lon: lon_v,
                 alt_m: alt_v,
+                source_node_id: if node_v.is_empty() { None } else { Some(node_v) },
                 start_ns: start_v,
                 end_ns: end_v,
                 notes: {
@@ -387,7 +434,8 @@ fn GroundTruthPanel(session_id: String) -> impl IntoView {
                     "Ground Truth Events"
                 </h4>
                 <span class="muted">
-                    "Known source position + time window for this capture (static sources)"
+                    "Known source position + time window for this capture (static sources). \
+                     Pick a ground-truth node placed at the source to skip manual coordinates."
                 </span>
             </div>
 
@@ -412,8 +460,9 @@ fn GroundTruthPanel(session_id: String) -> impl IntoView {
                                 {list.into_iter().map(|event| {
                                     let event_id = event.event_id.clone();
                                     let load = load.clone();
-                                    let position = match (event.lat, event.lon) {
-                                        (Some(lat), Some(lon)) => format!(
+                                    let position = match (&event.source_node_id, event.lat, event.lon) {
+                                        (Some(node_id), _, _) => format!("node: {node_id}"),
+                                        (None, Some(lat), Some(lon)) => format!(
                                             "{lat:.6}, {lon:.6} @ {:.0} m",
                                             event.alt_m.unwrap_or(0.0)
                                         ),
@@ -457,6 +506,13 @@ fn GroundTruthPanel(session_id: String) -> impl IntoView {
             }}
 
             <div class="ground-truth-form">
+                <WaveformTrimmer
+                    session_id=session_id.clone()
+                    manifest=manifest
+                    view_node_id=view_node
+                    start_ns=start_ns
+                    end_ns=end_ns
+                />
                 <div class="ground-truth-form-grid">
                     <label class="gt-field">
                         <span>"Label"</span>
@@ -471,18 +527,29 @@ fn GroundTruthPanel(session_id: String) -> impl IntoView {
                             on:input=move |ev| category.set(event_target_value(&ev)) />
                     </label>
                     <label class="gt-field">
+                        <span>"Ground-truth node"</span>
+                        <select class="form-input"
+                            prop:value=move || source_node.get()
+                            on:change=move |ev| source_node.set(event_target_value(&ev))>
+                            <option value="">"— manual position —"</option>
+                            {move || node_ids.get().into_iter().map(|id| view! {
+                                <option value=id.clone()>{id.clone()}</option>
+                            }).collect::<Vec<_>>()}
+                        </select>
+                    </label>
+                    <label class="gt-field" class:hidden=move || !source_node.get().is_empty()>
                         <span>"Latitude"</span>
                         <input type="text" class="form-input" placeholder="44.9871"
                             prop:value=move || lat.get()
                             on:input=move |ev| lat.set(event_target_value(&ev)) />
                     </label>
-                    <label class="gt-field">
+                    <label class="gt-field" class:hidden=move || !source_node.get().is_empty()>
                         <span>"Longitude"</span>
                         <input type="text" class="form-input" placeholder="-93.2582"
                             prop:value=move || lon.get()
                             on:input=move |ev| lon.set(event_target_value(&ev)) />
                     </label>
-                    <label class="gt-field">
+                    <label class="gt-field" class:hidden=move || !source_node.get().is_empty()>
                         <span>"Altitude (m)"</span>
                         <input type="text" class="form-input"
                             prop:value=move || alt_m.get()

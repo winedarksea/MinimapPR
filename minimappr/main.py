@@ -5512,6 +5512,7 @@ def _calibration_gt_row_to_event(row: dict) -> CalibrationGroundTruthEvent:
         lat=row.get("lat"),
         lon=row.get("lon"),
         alt_m=row.get("alt_m"),
+        source_node_id=row.get("source_node_id"),
         start_ns=row["start_ns"],
         end_ns=row["end_ns"],
         notes=row.get("notes"),
@@ -5529,19 +5530,67 @@ async def _require_calibration_session(storage: Storage, session_id: str) -> dic
     return row
 
 
+async def _resolve_ground_truth_node_position(
+    request: Request, session_row: dict, node_id: str
+) -> tuple[float, float, float]:
+    """Resolve a ground-truth node's lat/lon/alt.
+
+    Prefers the session's calibration manifest (capture-time snapshot, and
+    proof the node has audio in the bundle); falls back to the live node
+    registry. Snapshotting into the row keeps exported bundles self-contained.
+    """
+    manifest_path = session_row.get("calibration_manifest_path")
+    if manifest_path and Path(manifest_path).exists():
+        try:
+            manifest = json.loads(Path(manifest_path).read_text())
+        except (OSError, json.JSONDecodeError):
+            manifest = {}
+        for node in manifest.get("nodes", []):
+            if node.get("node_id") != node_id:
+                continue
+            geo = node.get("position_geo")
+            if isinstance(geo, dict) and geo.get("lat") is not None:
+                return float(geo["lat"]), float(geo["lon"]), float(geo.get("alt_m") or 0.0)
+            break
+
+    storage: Storage = request.app.state.storage
+    node_row = await storage.get_node_by_id(node_id)
+    if node_row is not None:
+        geo = node_row.get("position_geo")
+        if isinstance(geo, dict) and geo.get("lat") is not None:
+            return float(geo["lat"]), float(geo["lon"]), float(geo.get("alt_m") or 0.0)
+        raw_local = node_row.get("position_m")
+        frame = getattr(request.app.state, "coordinate_frame", None)
+        if frame is not None and isinstance(raw_local, (list, tuple)) and len(raw_local) >= 3:
+            geo_point = frame.local_to_geo(
+                (float(raw_local[0]), float(raw_local[1]), float(raw_local[2]))
+            )
+            return geo_point.lat, geo_point.lon, geo_point.alt_m
+    raise HTTPException(
+        status_code=422,
+        detail=f"ground-truth node {node_id} not found or has no position",
+    )
+
+
 @app.post("/api/v1/calibration/{session_id}/ground-truth")
 async def calibration_ground_truth_add(
     session_id: str, body: CalibrationGroundTruthIn, request: Request
 ):
     storage: Storage = request.app.state.storage
-    await _require_calibration_session(storage, session_id)
+    session_row = await _require_calibration_session(storage, session_id)
+    lat, lon, alt_m = body.lat, body.lon, body.alt_m
+    if body.source_node_id is not None:
+        lat, lon, alt_m = await _resolve_ground_truth_node_position(
+            request, session_row, body.source_node_id
+        )
     row = await storage.insert_calibration_ground_truth(
         session_id=session_id,
         label=body.label,
         label_category=body.label_category,
-        lat=body.lat,
-        lon=body.lon,
-        alt_m=body.alt_m,
+        lat=lat,
+        lon=lon,
+        alt_m=alt_m,
+        source_node_id=body.source_node_id,
         start_ns=body.start_ns,
         end_ns=body.end_ns,
         notes=body.notes,
@@ -5570,6 +5619,13 @@ async def calibration_ground_truth_update(
     end_ns = updates.get("end_ns", existing["end_ns"])
     if end_ns < start_ns:
         raise HTTPException(status_code=422, detail="end_ns must be >= start_ns")
+    new_node_id = updates.get("source_node_id")
+    if new_node_id is not None and new_node_id != existing.get("source_node_id"):
+        session_row = await storage.get_capture_session(existing["session_id"])
+        lat, lon, alt_m = await _resolve_ground_truth_node_position(
+            request, session_row or {}, new_node_id
+        )
+        updates.update(lat=lat, lon=lon, alt_m=alt_m)
     row = await storage.update_calibration_ground_truth(event_id, updates)
     return _calibration_gt_row_to_event(row)
 
@@ -5583,17 +5639,62 @@ async def calibration_ground_truth_delete(event_id: str, request: Request):
     return Response(status_code=204)
 
 
-@app.get("/api/v1/calibration/{session_id}/bundle")
-async def calibration_bundle_download(session_id: str, request: Request):
-    storage: Storage = request.app.state.storage
-    row = await _require_calibration_session(storage, session_id)
-    manifest_path = row.get("calibration_manifest_path")
+def _load_calibration_manifest(session_row: dict) -> dict:
+    manifest_path = session_row.get("calibration_manifest_path")
     if not manifest_path or not Path(manifest_path).exists():
         raise HTTPException(
             status_code=409,
             detail="calibration session has no artifact yet (still processing or failed)",
         )
-    artifact_dir = Path(manifest_path).parent
+    return json.loads(Path(manifest_path).read_text())
+
+
+@app.get("/api/v1/calibration/{session_id}/manifest")
+async def calibration_manifest_get(session_id: str, request: Request):
+    """Lightweight manifest view for the frontend waveform trimmer.
+
+    Exposes only what the trimmer needs (node id, audio window, sample rate)
+    without requiring a full bundle export.
+    """
+    storage: Storage = request.app.state.storage
+    session_row = await _require_calibration_session(storage, session_id)
+    manifest = _load_calibration_manifest(session_row)
+    return {
+        "session_id": session_id,
+        "time_window": manifest.get("time_window"),
+        "nodes": [
+            {
+                "node_id": node["node_id"],
+                "audio_start_time_ns": node.get("audio_start_time_ns") or 0,
+                "sample_rate_hz": node.get("sample_rate_hz"),
+            }
+            for node in manifest.get("nodes", [])
+        ],
+    }
+
+
+@app.get("/api/v1/calibration/{session_id}/audio/{node_id}")
+async def calibration_node_audio_get(session_id: str, node_id: str, request: Request):
+    """Stream one node's raw multichannel WAV for browser-side waveform decode."""
+    storage: Storage = request.app.state.storage
+    session_row = await _require_calibration_session(storage, session_id)
+    manifest = _load_calibration_manifest(session_row)
+    node = next((n for n in manifest.get("nodes", []) if n.get("node_id") == node_id), None)
+    if node is None:
+        raise HTTPException(status_code=404, detail=f"node {node_id} not in session {session_id}")
+    artifact_dir = Path(session_row["calibration_manifest_path"]).parent
+    wav_path = artifact_dir / node["audio_file"]
+    if not wav_path.exists():
+        raise HTTPException(status_code=404, detail=f"audio for node {node_id} not found")
+    return FileResponse(wav_path, media_type="audio/wav", filename=wav_path.name)
+
+
+@app.get("/api/v1/calibration/{session_id}/bundle")
+async def calibration_bundle_download(session_id: str, request: Request):
+    storage: Storage = request.app.state.storage
+    row = await _require_calibration_session(storage, session_id)
+    _load_calibration_manifest(row)  # raises 409 while processing
+    artifact_dir = Path(row["calibration_manifest_path"]).parent
     ground_truth_rows = await storage.list_calibration_ground_truth(session_id)
     ground_truth_payload = build_ground_truth_payload(ground_truth_rows)
     bundle_path = artifact_dir / f"calibration_{session_id}.zip"

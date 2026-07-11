@@ -1,5 +1,6 @@
 pub mod recording;
 pub mod recordings_library;
+pub mod waveform_trimmer;
 
 use crate::audio::detection_analysis::DetectionAudioAnalysisView;
 use leptos::prelude::*;

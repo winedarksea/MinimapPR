@@ -8,15 +8,16 @@ harness. A bundle is a zip per field scenario:
     detections.json        live system outputs during the window (reference)
     expectations.json      optional pass thresholds (harness defaults if absent)
     audio/{node_id}.wav    per-node multichannel PCM16; channel i == channel_sensor_ids[i]
-    reference_audio/       RESERVED, empty in v1. Future: audio from a node
-                           flagged as ground-truth reference (placed at the
-                           source, excluded from localization) or an
-                           operator-uploaded omni WAV, used as a timing/label
-                           oracle during replay.
+    reference_audio/{event_id}.wav
+                           mono mixdown of the event's ground-truth node
+                           (a node placed at the source, excluded from
+                           localization during replay by default), used as a
+                           timing/label oracle and for beamforming tuning.
 """
 
 from __future__ import annotations
 
+import io
 import json
 import wave
 import zipfile
@@ -29,9 +30,10 @@ import numpy as np
 SCHEMA_VERSION = 1
 
 _REFERENCE_AUDIO_README = (
-    "Reserved for v2: ground-truth reference audio captured at the source\n"
-    "(reference node or operator-uploaded omni WAV) for replay timing/label\n"
-    "oracles and beamforming tuning.\n"
+    "Ground-truth reference audio captured at the source: one mono WAV per\n"
+    "node-sourced ground-truth event ({event_id}.wav, mean of the node's\n"
+    "channels over the event window), used as a replay timing/label oracle\n"
+    "and for beamforming tuning.\n"
 )
 
 
@@ -40,26 +42,77 @@ def build_ground_truth_payload(rows: list[dict]) -> dict:
     events = []
     for row in rows:
         geometry_kind = row.get("geometry_kind") or "static"
-        events.append(
-            {
-                "event_id": row["id"],
-                "label": row["label"],
-                "label_category": row.get("label_category") or "unknown",
-                "source": "manual",
-                "geometry": {
-                    "type": geometry_kind,
-                    "position_geo": {
-                        "lat": row.get("lat"),
-                        "lon": row.get("lon"),
-                        "alt_m": row.get("alt_m") or 0.0,
-                    },
+        source_node_id = row.get("source_node_id")
+        event = {
+            "event_id": row["id"],
+            "label": row["label"],
+            "label_category": row.get("label_category") or "unknown",
+            "source": "node" if source_node_id else "manual",
+            "geometry": {
+                "type": geometry_kind,
+                "position_geo": {
+                    "lat": row.get("lat"),
+                    "lon": row.get("lon"),
+                    "alt_m": row.get("alt_m") or 0.0,
                 },
-                "start_ns": int(row["start_ns"]),
-                "end_ns": int(row["end_ns"]),
-                "notes": row.get("notes"),
-            }
-        )
+            },
+            "start_ns": int(row["start_ns"]),
+            "end_ns": int(row["end_ns"]),
+            "notes": row.get("notes"),
+        }
+        if source_node_id:
+            event["source_node_id"] = source_node_id
+            event["reference_audio"] = f"reference_audio/{row['id']}.wav"
+        events.append(event)
     return {"schema_version": SCHEMA_VERSION, "events": events}
+
+
+def _slice_reference_audio(
+    session_artifact_dir: Path,
+    manifest: dict,
+    event: dict,
+) -> bytes | None:
+    """Mono-mix the ground-truth node's audio over the event window as PCM16 WAV.
+
+    Returns None when the node has no audio in the bundle or the window falls
+    entirely outside the recording.
+    """
+    node = next(
+        (
+            n
+            for n in manifest.get("nodes", [])
+            if n.get("node_id") == event.get("source_node_id")
+        ),
+        None,
+    )
+    if node is None:
+        return None
+    wav_path = session_artifact_dir / node["audio_file"]
+    if not wav_path.exists():
+        return None
+    with wave.open(str(wav_path)) as w:
+        n_channels = w.getnchannels()
+        sample_rate_hz = w.getframerate()
+        total_samples = w.getnframes()
+        audio_start_ns = int(node.get("audio_start_time_ns") or 0)
+        start_sample = int((int(event["start_ns"]) - audio_start_ns) * sample_rate_hz // 1_000_000_000)
+        end_sample = int((int(event["end_ns"]) - audio_start_ns) * sample_rate_hz // 1_000_000_000)
+        start_sample = max(0, min(start_sample, total_samples))
+        end_sample = max(0, min(end_sample, total_samples))
+        if end_sample <= start_sample:
+            return None
+        w.setpos(start_sample)
+        frames = w.readframes(end_sample - start_sample)
+    interleaved = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32767.0
+    mono = interleaved.reshape(-1, n_channels).mean(axis=1)
+    pcm = (np.clip(mono, -1.0, 1.0) * 32767.0).astype("<i2")
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as out:
+        out.setnchannels(1)
+        out.setsampwidth(2)
+        out.setframerate(sample_rate_hz)
+        out.writeframes(pcm.tobytes())
+    return buffer.getvalue()
 
 
 def write_bundle_zip(
@@ -94,6 +147,13 @@ def write_bundle_zip(
         if audio_dir.is_dir():
             for wav_path in sorted(audio_dir.glob("*.wav")):
                 zf.write(wav_path, f"audio/{wav_path.name}")
+        manifest = json.loads(manifest_path.read_text())
+        for event in ground_truth_payload.get("events", []):
+            if not event.get("source_node_id"):
+                continue
+            wav_bytes = _slice_reference_audio(session_artifact_dir, manifest, event)
+            if wav_bytes is not None:
+                zf.writestr(f"reference_audio/{event['event_id']}.wav", wav_bytes)
         zf.writestr("reference_audio/README.txt", _REFERENCE_AUDIO_README)
     return out_path
 
@@ -132,6 +192,23 @@ class CalibrationBundle:
         result = (channels_first, sample_rate_hz)
         self._audio_cache[node_id] = result
         return result
+
+    def event_reference_audio(self, event_id: str) -> tuple[np.ndarray, int] | None:
+        """Return (mono float32 in [-1, 1], sample_rate_hz) for a node-sourced event."""
+        event = next((e for e in self.events if e.get("event_id") == event_id), None)
+        if event is None or not event.get("reference_audio"):
+            return None
+        with zipfile.ZipFile(self.zip_path) as zf:
+            if event["reference_audio"] not in zf.namelist():
+                return None
+            with zf.open(event["reference_audio"]) as raw:
+                with wave.open(raw) as w:
+                    sample_rate_hz = w.getframerate()
+                    if w.getsampwidth() != 2 or w.getnchannels() != 1:
+                        raise ValueError("reference audio must be mono PCM16")
+                    frames = w.readframes(w.getnframes())
+        mono = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32767.0
+        return mono, sample_rate_hz
 
 
 def load_bundle(zip_path: Path) -> CalibrationBundle:

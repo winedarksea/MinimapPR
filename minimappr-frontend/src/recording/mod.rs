@@ -136,6 +136,8 @@ pub struct GroundTruthEvent {
     pub lat: Option<f64>,
     pub lon: Option<f64>,
     pub alt_m: Option<f64>,
+    #[serde(default)]
+    pub source_node_id: Option<String>,
     pub start_ns: f64,
     pub end_ns: f64,
     #[serde(default)]
@@ -143,16 +145,39 @@ pub struct GroundTruthEvent {
 }
 
 /// Request body for POST /api/v1/calibration/{session_id}/ground-truth.
+///
+/// Position is either an explicit lat/lon or a `source_node_id` (a node
+/// placed at the source); the server resolves the node's position.
 #[derive(Clone, Debug, Serialize)]
 pub struct GroundTruthEventIn {
     pub label: String,
     pub label_category: String,
-    pub lat: f64,
-    pub lon: f64,
-    pub alt_m: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lat: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lon: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alt_m: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_node_id: Option<String>,
     pub start_ns: f64,
     pub end_ns: f64,
     pub notes: Option<String>,
+}
+
+/// One node's audio window within a calibration session, for the waveform
+/// trimmer's ns↔pixel math (GET /api/v1/calibration/{session_id}/manifest).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct CalibrationManifestNode {
+    pub node_id: String,
+    pub audio_start_time_ns: f64,
+    pub sample_rate_hz: Option<f64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct CalibrationManifest {
+    pub session_id: String,
+    pub nodes: Vec<CalibrationManifestNode>,
 }
 
 /// A camera/video capture device returned by GET /api/v1/cameras.

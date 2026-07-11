@@ -122,6 +122,33 @@ def _event_body(**overrides) -> dict:
     return body
 
 
+class TestCalibrationManifestAndAudio:
+    def test_manifest_and_node_audio(self, monkeypatch, tmp_path):
+        db_path = _configure_env(monkeypatch, tmp_path)
+        artifact_dir = tmp_path / "artifacts" / f"{SESSION_ID}_calibration"
+        _seed_calibration_session(db_path, artifact_dir)
+
+        with TestClient(app) as client:
+            resp = client.get(f"/api/v1/calibration/{SESSION_ID}/manifest")
+            assert resp.status_code == 200, resp.text
+            manifest = resp.json()
+            assert manifest["session_id"] == SESSION_ID
+            assert manifest["nodes"] == [
+                {"node_id": "node-a", "audio_start_time_ns": 0, "sample_rate_hz": 16_000}
+            ]
+
+            resp = client.get(f"/api/v1/calibration/{SESSION_ID}/audio/node-a")
+            assert resp.status_code == 200
+            assert resp.headers["content-type"] == "audio/wav"
+            assert resp.content[:4] == b"RIFF"
+
+            resp = client.get(f"/api/v1/calibration/{SESSION_ID}/audio/node-missing")
+            assert resp.status_code == 404
+
+            resp = client.get("/api/v1/calibration/nope/manifest")
+            assert resp.status_code == 404
+
+
 class TestCalibrationGroundTruthApi:
     def test_round_trip_and_bundle(self, monkeypatch, tmp_path):
         db_path = _configure_env(monkeypatch, tmp_path)
@@ -188,6 +215,66 @@ class TestCalibrationGroundTruthApi:
         assert np.allclose(channels[0], 0.25, atol=0.01)
         with zipfile.ZipFile(bundle_path) as zf:
             assert "reference_audio/README.txt" in zf.namelist()
+
+    def test_node_sourced_event_and_reference_audio(self, monkeypatch, tmp_path):
+        db_path = _configure_env(monkeypatch, tmp_path)
+        artifact_dir = tmp_path / "artifacts" / f"{SESSION_ID}_calibration"
+        _seed_calibration_session(db_path, artifact_dir)
+
+        with TestClient(app) as client:
+            # missing position AND node → 422
+            body = _event_body()
+            for key in ("lat", "lon"):
+                body.pop(key)
+            resp = client.post(
+                f"/api/v1/calibration/{SESSION_ID}/ground-truth", json=body
+            )
+            assert resp.status_code == 422
+
+            # unknown node → 422
+            resp = client.post(
+                f"/api/v1/calibration/{SESSION_ID}/ground-truth",
+                json={**body, "source_node_id": "node-missing"},
+            )
+            assert resp.status_code == 422
+
+            # node-sourced event resolves position from the session manifest
+            # (window covers samples 800..1600 of the 16 kHz WAV: 50–100 ms)
+            resp = client.post(
+                f"/api/v1/calibration/{SESSION_ID}/ground-truth",
+                json={
+                    "label": "drone",
+                    "label_category": "drone",
+                    "source_node_id": "node-a",
+                    "start_ns": 50_000_000,
+                    "end_ns": 100_000_000,
+                },
+            )
+            assert resp.status_code == 200, resp.text
+            event = resp.json()
+            assert event["source_node_id"] == "node-a"
+            assert event["lat"] == 45.0
+            assert event["lon"] == -93.0
+            assert event["alt_m"] == 250.0
+            event_id = event["event_id"]
+
+            resp = client.get(f"/api/v1/calibration/{SESSION_ID}/bundle")
+            assert resp.status_code == 200
+            bundle_path = tmp_path / "bundle_node.zip"
+            bundle_path.write_bytes(resp.content)
+
+        bundle = load_bundle(bundle_path)
+        event = bundle.events[0]
+        assert event["source"] == "node"
+        assert event["source_node_id"] == "node-a"
+        assert event["reference_audio"] == f"reference_audio/{event_id}.wav"
+        reference = bundle.event_reference_audio(event_id)
+        assert reference is not None
+        mono, sample_rate_hz = reference
+        assert sample_rate_hz == 16_000
+        assert mono.shape == (800,)  # 50 ms at 16 kHz
+        # channel 0 is 0.25, others 0 → mono mean ≈ 0.0625
+        assert np.allclose(mono, 0.0625, atol=0.01)
 
 
 def test_write_and_load_bundle_pure(tmp_path):

@@ -41,6 +41,11 @@ web-sys = { version = "0.3", features = [
     "Clipboard",
     "Location",
     "Navigator",
+    "HtmlCanvasElement",
+    "CanvasRenderingContext2d",
+    "AudioContext",
+    "AudioBuffer",
+    "DomRect",
 ] }
 gloo-net = { version = "0.6", features = ["http", "websocket"] }
 gloo-timers = { version = "0.3", features = ["futures"] }

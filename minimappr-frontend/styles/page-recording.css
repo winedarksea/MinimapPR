@@ -442,3 +442,29 @@
   display: flex;
   justify-content: flex-end;
 }
+
+.waveform-trimmer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.waveform-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.waveform-node-select {
+  max-width: 220px;
+}
+.waveform-hint {
+  font-size: var(--md-sys-typescale-label-small-size);
+}
+.waveform-canvas {
+  width: 100%;
+  height: 100px;
+  display: block;
+  border-radius: var(--md-sys-shape-corner-small, 6px);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  cursor: col-resize;
+}

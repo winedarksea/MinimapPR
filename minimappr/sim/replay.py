@@ -41,7 +41,14 @@ from minimappr.utils.audio import encode_pcm16le_b64
 
 DEFAULT_EXPECTATIONS: dict[str, Any] = {
     "schema_version": 1,
-    "runtime": {"classifier_backend": "yamnet", "settings_overrides": {}},
+    # replay_reference_nodes: when True, nodes referenced as a ground-truth
+    # source (placed at the sound source) are replayed like any other node
+    # instead of being excluded from localization input.
+    "runtime": {
+        "classifier_backend": "yamnet",
+        "settings_overrides": {},
+        "replay_reference_nodes": False,
+    },
     "classification": {
         "min_label_accuracy": 0.5,
         "match": "category",
@@ -198,8 +205,28 @@ async def replay_bundle(
     bundle: CalibrationBundle,
     *,
     frame_samples: int = 1024,
+    include_reference_nodes: bool | None = None,
 ) -> int:
-    """Stream every node's audio through fusion.ingest, interleaved by timestamp."""
+    """Stream every node's audio through fusion.ingest, interleaved by timestamp.
+
+    Nodes referenced as a ground-truth source sit at the sound source, so they
+    are excluded from localization input by default; opt back in via the
+    bundle's expectations runtime `replay_reference_nodes` or the keyword.
+    """
+    if include_reference_nodes is None:
+        runtime = (bundle.expectations or DEFAULT_EXPECTATIONS).get("runtime", {})
+        include_reference_nodes = bool(runtime.get("replay_reference_nodes", False))
+    reference_node_ids = {
+        event["source_node_id"]
+        for event in bundle.events
+        if event.get("source_node_id")
+    }
+    manifest_nodes = bundle.manifest.get("nodes", [])
+    excluded = set() if include_reference_nodes else reference_node_ids
+    if excluded and all(node.get("node_id") in excluded for node in manifest_nodes):
+        # Excluding every node would make the bundle unreplayable.
+        excluded = set()
+
     environment = bundle.manifest.get("environment", {})
     environment_in = EnvironmentSampleIn(
         temperature_c=environment.get("temperature_c"),
@@ -207,12 +234,16 @@ async def replay_bundle(
         source="calibration_bundle",
     )
 
+    replay_nodes = [
+        node for node in manifest_nodes if node.get("node_id") not in excluded
+    ]
+
     # heap entries: (frame_start_ns, tiebreak, node_index, frame)
     heap: list[tuple[int, int, int, np.ndarray]] = []
     node_specs: list[NodeSpec] = []
     sequences: list[int] = []
     tiebreak = 0
-    for node_index, node in enumerate(bundle.manifest.get("nodes", [])):
+    for node_index, node in enumerate(replay_nodes):
         node_specs.append(_node_spec_from_manifest(node))
         sequences.append(0)
         channels, sample_rate_hz = bundle.node_audio(node["node_id"])
@@ -231,7 +262,7 @@ async def replay_bundle(
     accepted = 0
     while heap:
         frame_start_ns, _, node_index, frame = heapq.heappop(heap)
-        node = bundle.manifest["nodes"][node_index]
+        node = replay_nodes[node_index]
         sequences[node_index] += 1
         response = await fusion.ingest(
             IngestFrameRequest(
@@ -295,11 +326,20 @@ def evaluate_bundle(
         ),
         mode=site.get("coordinate_mode", "flat"),
     )
+    reference_node_ids = {
+        event.get("source_node_id") for event in bundle.events if event.get("source_node_id")
+    }
     node_positions = [
         np.asarray(node["position_m"], dtype=np.float64)
         for node in bundle.manifest.get("nodes", [])
-        if node.get("position_m")
+        if node.get("position_m") and node.get("node_id") not in reference_node_ids
     ]
+    if not node_positions:
+        node_positions = [
+            np.asarray(node["position_m"], dtype=np.float64)
+            for node in bundle.manifest.get("nodes", [])
+            if node.get("position_m")
+        ]
     centroid = (
         np.mean(node_positions, axis=0) if node_positions else np.zeros(3, dtype=np.float64)
     )

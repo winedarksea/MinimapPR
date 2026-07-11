@@ -53,15 +53,13 @@ def _stationary_node(coordinate_frame: LocalCoordinateFrame, local_xyz) -> NodeS
     )
 
 
-def test_stationary_kalman_averages_out_gps_noise() -> None:
+def test_stationary_kde_averages_out_gps_noise() -> None:
     """A stationary node fed noisy fixes around a true point converges near it and
     does not chase the noise the way the mobile Q would."""
     frame = LocalCoordinateFrame(origin=GeoPoint(lat=44.98, lon=-93.26, alt_m=250.0), mode="flat")
     processor = _make_processor(
         frame,
-        node_position_kalman_q_stationary=0.001,
-        node_position_kalman_r=25.0,
-        node_position_gps_gate_m=50.0,  # wide gate so noise is averaged, not rejected
+        node_position_kde_warmup_fixes=30,
     )
     rng = np.random.default_rng(7)
     true_xyz = (2.0, -1.0, 0.5)
@@ -81,7 +79,7 @@ def test_stationary_kalman_averages_out_gps_noise() -> None:
     assert abs(last_local[2] - true_xyz[2]) < 1.0
 
 
-def test_stationary_kalman_rejects_single_large_jump() -> None:
+def test_explicit_stationary_kalman_rejects_single_large_jump() -> None:
     """Once initialized, a fix that jumps more than the gate is dropped, holding the
     prior estimate."""
     frame = LocalCoordinateFrame(origin=GeoPoint(lat=44.98, lon=-93.26, alt_m=250.0), mode="flat")
@@ -93,12 +91,12 @@ def test_stationary_kalman_rejects_single_large_jump() -> None:
     )
     # Initialize at origin.
     init = _stationary_node(frame, (0.0, 0.0, 0.0))
-    normalized_init, _ = processor._normalize_node_spec(init)
+    normalized_init, _ = processor._normalize_node_spec(init, position_filter="kalman")
     assert normalized_init.position_m == pytest.approx((0.0, 0.0, 0.0), abs=1e-6)
 
     # A 100 m jump (>> 5 m gate) must be rejected.
     jump = _stationary_node(frame, (100.0, 0.0, 0.0))
-    normalized_jump, _ = processor._normalize_node_spec(jump)
+    normalized_jump, _ = processor._normalize_node_spec(jump, position_filter="kalman")
     assert normalized_jump.position_m == pytest.approx((0.0, 0.0, 0.0), abs=1e-6)
 
 

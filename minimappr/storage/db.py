@@ -449,6 +449,7 @@ class Storage:
                 lat REAL,
                 lon REAL,
                 alt_m REAL,
+                source_node_id TEXT,  -- node placed at the source; position resolved from it
                 trajectory_json TEXT,  -- reserved for future GPX/CSV trajectory import
                 start_ns INTEGER NOT NULL,
                 end_ns INTEGER NOT NULL,
@@ -575,6 +576,12 @@ class Storage:
             "training_examples",
             {
                 "embedding_path": "TEXT",
+            },
+        )
+        await self._ensure_columns(
+            "calibration_ground_truth",
+            {
+                "source_node_id": "TEXT",
             },
         )
         await self._deduplicate_reporting_window_canonicals()
@@ -2986,6 +2993,7 @@ class Storage:
         end_ns: int,
         notes: str | None = None,
         geometry_kind: str = "static",
+        source_node_id: str | None = None,
         event_id: str | None = None,
     ) -> dict:
         db = self._require_db()
@@ -2996,9 +3004,9 @@ class Storage:
                 """
                 INSERT INTO calibration_ground_truth (
                     id, session_id, label, label_category, geometry_kind,
-                    lat, lon, alt_m, trajectory_json, start_ns, end_ns, notes,
-                    created_ns, updated_ns
-                ) VALUES (?,?,?,?,?,?,?,?,NULL,?,?,?,?,?)
+                    lat, lon, alt_m, source_node_id, trajectory_json,
+                    start_ns, end_ns, notes, created_ns, updated_ns
+                ) VALUES (?,?,?,?,?,?,?,?,?,NULL,?,?,?,?,?)
                 """,
                 (
                     final_id,
@@ -3009,6 +3017,7 @@ class Storage:
                     lat,
                     lon,
                     alt_m,
+                    source_node_id,
                     int(start_ns),
                     int(end_ns),
                     notes,

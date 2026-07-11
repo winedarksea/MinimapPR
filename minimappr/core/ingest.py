@@ -685,9 +685,17 @@ class IngestProcessor:
         ))
         if due and node_id not in self._kde_evaluation_tasks:
             samples = list(state.samples)
-            self._kde_evaluation_tasks[node_id] = asyncio.create_task(
-                self._evaluate_kde_in_background(node_id, samples), name=f"node-kde-{node_id}"
-            )
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                # Pure-logic callers (not the live audio path) have no event
+                # loop; compute deterministically so unit tests remain useful.
+                state.estimate, state.horizontal_std_m = compute_stationary_kde(samples, self._kde_bandwidth_m)
+                state.last_evaluated_seen_count, state.last_evaluated_monotonic_s = state.seen_count, now
+            else:
+                self._kde_evaluation_tasks[node_id] = asyncio.create_task(
+                    self._evaluate_kde_in_background(node_id, samples), name=f"node-kde-{node_id}"
+                )
         self._maybe_checkpoint_kde(node_id, state, now)
         return state.estimate or raw_local
 

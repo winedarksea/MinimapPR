@@ -13,8 +13,8 @@
 ///   GET    /api/v1/cameras                            → Vec<CameraDevice>
 ///   GET    /api/v1/recordings/{id}/download?format=…  → file (ambisonics|iamf|visual|video)
 use crate::recording::{
-    CameraDevice, GroundTruthEvent, GroundTruthEventIn, RecordingLibraryEntry, RecordingSession,
-    StartRecordingRequest,
+    CalibrationManifest, CameraDevice, GroundTruthEvent, GroundTruthEventIn,
+    RecordingLibraryEntry, RecordingSession, StartRecordingRequest,
 };
 use gloo_net::http::Request;
 use js_sys::encode_uri_component;
@@ -183,6 +183,41 @@ pub async fn delete_ground_truth(event_id: &str) -> Result<(), String> {
 /// Download URL for a calibration session's replayable bundle zip.
 pub fn calibration_bundle_url(session_id: &str) -> String {
     format!("/api/v1/calibration/{}/bundle", enc(session_id))
+}
+
+/// Lightweight manifest (node ids + audio window) for the waveform trimmer.
+pub async fn fetch_calibration_manifest(session_id: &str) -> Result<CalibrationManifest, String> {
+    let url = format!("/api/v1/calibration/{}/manifest", enc(session_id));
+    let resp = Request::get(&url).send().await.map_err(|e| e.to_string())?;
+    expect_json(resp).await
+}
+
+/// URL for one node's raw multichannel WAV (fetched + decoded client-side).
+pub fn calibration_audio_url(session_id: &str, node_id: &str) -> String {
+    format!(
+        "/api/v1/calibration/{}/audio/{}",
+        enc(session_id),
+        enc(node_id)
+    )
+}
+
+/// Fetch a node's raw WAV bytes for client-side waveform decode.
+pub async fn fetch_calibration_audio_bytes(
+    session_id: &str,
+    node_id: &str,
+) -> Result<Vec<u8>, String> {
+    let url = calibration_audio_url(session_id, node_id);
+    let resp = Request::get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(if body.is_empty() {
+            format!("HTTP {status}")
+        } else {
+            extract_error_detail(&body).unwrap_or(body)
+        });
+    }
+    resp.binary().await.map_err(|e| e.to_string())
 }
 
 /// Build the download URL for a completed recording.

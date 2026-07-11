@@ -1017,13 +1017,18 @@ class CalibrationGroundTruthIn(BaseModel):
 
     v1 supports static sources only; the bundle schema reserves a trajectory
     geometry kind for future GPX/CSV import.
+
+    Position comes from either an explicit lat/lon or `source_node_id` — a
+    capture node placed at the source, whose position (and mono-mixed audio
+    as reference_audio) the server resolves at insert time.
     """
 
     label: str
     label_category: str = "unknown"
-    lat: float
-    lon: float
+    lat: float | None = None
+    lon: float | None = None
     alt_m: float = 0.0
+    source_node_id: str | None = None
     start_ns: int
     end_ns: int
     notes: str | None = None
@@ -1032,6 +1037,8 @@ class CalibrationGroundTruthIn(BaseModel):
     def _validate_window(self) -> "CalibrationGroundTruthIn":
         if self.end_ns < self.start_ns:
             raise ValueError("end_ns must be >= start_ns")
+        if self.source_node_id is None and (self.lat is None or self.lon is None):
+            raise ValueError("either source_node_id or lat+lon is required")
         return self
 
 
@@ -1041,6 +1048,7 @@ class CalibrationGroundTruthUpdate(BaseModel):
     lat: float | None = None
     lon: float | None = None
     alt_m: float | None = None
+    source_node_id: str | None = None
     start_ns: int | None = None
     end_ns: int | None = None
     notes: str | None = None
@@ -1055,6 +1063,7 @@ class CalibrationGroundTruthEvent(BaseModel):
     lat: float | None = None
     lon: float | None = None
     alt_m: float | None = None
+    source_node_id: str | None = None
     start_ns: int
     end_ns: int
     notes: str | None = None
