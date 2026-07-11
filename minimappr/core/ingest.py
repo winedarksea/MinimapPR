@@ -30,6 +30,7 @@ from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.ingest_health import IngestHealthClassifier, runner_stats_from_timing_diagnostics
 from minimappr.core.live_ingest_state import FrameIdentity, LiveIngestState
 from minimappr.core.node_registry import NodeRegistry
+from minimappr.core.node_position_estimator import StationaryKdeState, compute_stationary_kde
 from minimappr.core.preprocessing import NodePreprocessorFactory
 from minimappr.interfaces import AudioPreprocessor, StorageBackend
 from minimappr.models import (
@@ -139,6 +140,12 @@ class IngestProcessor:
         node_position_kalman_r: float = 25.0,
         node_position_kalman_init_p: float = 100.0,
         node_position_gps_gate_m: float = 5.0,
+        node_position_kde_bandwidth_m: float = 2.5,
+        node_position_kde_reservoir_capacity: int = 2048,
+        node_position_kde_warmup_fixes: int = 30,
+        node_position_kde_recompute_seconds: float = 30.0,
+        node_position_kde_checkpoint_seconds: float = 60.0,
+        node_position_kde_acceptance_radius_m: float = 100.0,
     ) -> None:
         self._localization_config = localization_config
         self._fusion_config = fusion_config
@@ -155,12 +162,21 @@ class IngestProcessor:
         self._kalman_r = node_position_kalman_r
         self._kalman_init_p = node_position_kalman_init_p
         self._gps_gate_m = node_position_gps_gate_m
+        self._kde_bandwidth_m = node_position_kde_bandwidth_m
+        self._kde_reservoir_capacity = max(1, node_position_kde_reservoir_capacity)
+        self._kde_warmup_fixes = max(1, node_position_kde_warmup_fixes)
+        self._kde_recompute_seconds = max(0.1, node_position_kde_recompute_seconds)
+        self._kde_checkpoint_seconds = max(1.0, node_position_kde_checkpoint_seconds)
+        self._kde_acceptance_radius_m = max(0.0, node_position_kde_acceptance_radius_m)
 
         self._last_trigger_ns = 0
         self._accepted_frame_count = 0
         self._last_audio_summary_publish_ns_by_node: dict[str, int] = {}
         self._preprocess_locks_by_node: dict[str, asyncio.Lock] = {}
         self._position_kalman: dict[str, _NodePositionKalman] = {}
+        self._position_kde: dict[str, StationaryKdeState] = {}
+        self._position_filter_by_node: dict[str, str] = {}
+        self._kde_evaluation_tasks: dict[str, asyncio.Task] = {}
         # Rate-limit the per-frame sequence-gap warning per node; on a lossy
         # link this fires on most frames and saturates the log ring buffer.
         self._seq_gap_warning_last_logged_s: dict[str, float] = {}
@@ -178,6 +194,39 @@ class IngestProcessor:
 
     def replace_coordinate_frame(self, coordinate_frame: LocalCoordinateFrame) -> None:
         self._coordinate_frame = coordinate_frame
+
+    async def hydrate_position_estimator_states(self) -> None:
+        loader = getattr(self._storage, "list_node_position_estimator_states", None)
+        if not callable(loader):
+            return
+        for node_id, row in (await loader()).items():
+            state = row.get("state") if isinstance(row, dict) else None
+            if isinstance(state, dict):
+                self._position_kde[node_id] = StationaryKdeState.from_snapshot(state)
+                self._position_filter_by_node[node_id] = "kde"
+
+    async def reset_position_estimator(self, node_id: str) -> None:
+        self._position_kde.pop(node_id, None)
+        self._position_kalman.pop(node_id, None)
+        self._position_filter_by_node.pop(node_id, None)
+        task = self._kde_evaluation_tasks.pop(node_id, None)
+        if task is not None:
+            task.cancel()
+        deleter = getattr(self._storage, "delete_node_position_estimator_state", None)
+        if callable(deleter):
+            await deleter(node_id)
+
+    def position_estimator_diagnostics(self, node_id: str) -> dict[str, Any]:
+        state = self._position_kde.get(node_id)
+        effective = self._position_filter_by_node.get(node_id)
+        if state is None:
+            return {"effective_filter": effective, "status": "inactive", "sample_count": 0}
+        return {
+            "effective_filter": effective or "kde",
+            "status": "ready" if state.estimate is not None else "warming",
+            "sample_count": state.seen_count,
+            "horizontal_std_m": state.horizontal_std_m,
+        }
 
     def confirm_trigger(self, event_time_ns: int) -> None:
         """Commit the cooldown timestamp after a trigger was successfully enqueued."""
@@ -198,7 +247,9 @@ class IngestProcessor:
         """
         frame = request.frame
         raw_node = request.node
-        normalized_node, geo_position = self._normalize_node_spec(raw_node)
+        mobility, position_filter = self._registry.position_policy_for(raw_node.id, raw_node.mobility)
+        raw_node = raw_node.model_copy(update={"mobility": mobility})
+        normalized_node, geo_position = self._normalize_node_spec(raw_node, position_filter=position_filter)
         server_received_ns = time.time_ns()
         runtime = await self._registry.upsert(normalized_node, server_received_ns)
         frame_sync_grade = sync_grade_from_time_quality(frame.time_quality)
@@ -543,7 +594,7 @@ class IngestProcessor:
             or abs(raw_local[2] - state.z) > gate
         )
 
-    def _normalize_node_spec(self, spec: NodeSpec) -> tuple[NodeSpec, GeoPoint]:
+    def _normalize_node_spec(self, spec: NodeSpec, *, position_filter: str | None = None) -> tuple[NodeSpec, GeoPoint]:
         unrecognized_capabilities = spec.metadata.get("unrecognized_capabilities")
         if (
             spec.id not in self._unknown_capability_warning_node_ids
@@ -572,33 +623,42 @@ class IngestProcessor:
         if spec.position_geo is not None:
             raw_local = self._coordinate_frame.geo_to_local(spec.position_geo)
             if has_trusted_gps_position:
-                # Stationary nodes never move, so use a near-zero process noise to
-                # average out GNSS noise over many fixes instead of chasing it.
-                is_stationary = spec.mobility == "stationary"
-                q = self._kalman_q_stationary if is_stationary else self._kalman_q
-                state = self._position_kalman.get(spec.id)
-                if state is None or not state.initialized:
-                    state = _NodePositionKalman(
-                        x=raw_local[0], y=raw_local[1], z=raw_local[2],
-                        px=self._kalman_init_p, py=self._kalman_init_p, pz=self._kalman_init_p,
-                        initialized=True,
-                    )
-                elif is_stationary and self._is_gps_outlier(state, raw_local):
-                    # A single fix that jumps more than the gate on any axis is treated
-                    # as an outlier and dropped; hold the prior estimate. Only applied to
-                    # stationary nodes — mobile nodes legitimately move between fixes.
-                    pass
+                effective_filter = position_filter or ("kalman" if spec.mobility == "mobile" else "kde")
+                previous_filter = self._position_filter_by_node.get(spec.id)
+                if effective_filter == "kde" and previous_filter not in (None, "kde"):
+                    # Returning a relocated node to fixed operation must not blend
+                    # its former installation into the new geometry.
+                    self._position_kde.pop(spec.id, None)
+                    deleter = getattr(self._storage, "delete_node_position_estimator_state", None)
+                    if callable(deleter):
+                        asyncio.create_task(deleter(spec.id))
+                self._position_filter_by_node[spec.id] = effective_filter
+                if effective_filter == "raw":
+                    local_pos = raw_local
+                elif effective_filter == "kde":
+                    local_pos = self._update_stationary_kde(spec.id, raw_local)
                 else:
-                    nx, px = self._kalman_1d(state.x, state.px, raw_local[0], q, self._kalman_r)
-                    ny, py = self._kalman_1d(state.y, state.py, raw_local[1], q, self._kalman_r)
-                    nz, pz = self._kalman_1d(state.z, state.pz, raw_local[2], q, self._kalman_r)
-                    state = _NodePositionKalman(x=nx, y=ny, z=nz, px=px, py=py, pz=pz, initialized=True)
-                self._position_kalman[spec.id] = state
-                local_pos: tuple[float, float, float] = (state.x, state.y, state.z)
+                    # Kalman remains selectable for either mobility class.
+                    is_stationary = spec.mobility == "stationary"
+                    q = self._kalman_q_stationary if is_stationary else self._kalman_q
+                    state = self._position_kalman.get(spec.id)
+                    if state is None or not state.initialized:
+                        state = _NodePositionKalman(x=raw_local[0], y=raw_local[1], z=raw_local[2], px=self._kalman_init_p, py=self._kalman_init_p, pz=self._kalman_init_p, initialized=True)
+                    elif not (is_stationary and self._is_gps_outlier(state, raw_local)):
+                        nx, px = self._kalman_1d(state.x, state.px, raw_local[0], q, self._kalman_r)
+                        ny, py = self._kalman_1d(state.y, state.py, raw_local[1], q, self._kalman_r)
+                        nz, pz = self._kalman_1d(state.z, state.pz, raw_local[2], q, self._kalman_r)
+                        state = _NodePositionKalman(x=nx, y=ny, z=nz, px=px, py=py, pz=pz, initialized=True)
+                    self._position_kalman[spec.id] = state
+                    local_pos = (state.x, state.y, state.z)
             else:
-                # No live GPS fix: hold last Kalman estimate if available, else raw geo fallback.
+                # No live GPS fix: retain the most recent estimator output.
                 state = self._position_kalman.get(spec.id)
-                local_pos = (state.x, state.y, state.z) if (state and state.initialized) else raw_local
+                kde_state = self._position_kde.get(spec.id)
+                local_pos = (
+                    kde_state.estimate if kde_state and kde_state.estimate is not None
+                    else (state.x, state.y, state.z) if state and state.initialized else raw_local
+                )
             geo = self._coordinate_frame.local_to_geo(local_pos)
             normalized = spec.model_copy(update={"position_m": local_pos, "position_geo": geo})
             return normalized, geo
@@ -610,6 +670,46 @@ class IngestProcessor:
             return normalized, geo
 
         raise ValueError("NodeSpec must include position_geo")
+
+    def _update_stationary_kde(self, node_id: str, raw_local: tuple[float, float, float]) -> tuple[float, float, float]:
+        state = self._position_kde.setdefault(node_id, StationaryKdeState())
+        if state.estimate is not None and self._kde_acceptance_radius_m > 0:
+            distance = float(np.linalg.norm(np.asarray(raw_local[:2]) - np.asarray(state.estimate[:2])))
+            if distance > self._kde_acceptance_radius_m:
+                return state.estimate
+        state.add(raw_local, self._kde_reservoir_capacity)
+        now = time.monotonic()
+        due = (state.seen_count >= self._kde_warmup_fixes and (
+            state.estimate is None or state.seen_count - state.last_evaluated_seen_count >= 128
+            or now - state.last_evaluated_monotonic_s >= self._kde_recompute_seconds
+        ))
+        if due and node_id not in self._kde_evaluation_tasks:
+            samples = list(state.samples)
+            self._kde_evaluation_tasks[node_id] = asyncio.create_task(
+                self._evaluate_kde_in_background(node_id, samples), name=f"node-kde-{node_id}"
+            )
+        self._maybe_checkpoint_kde(node_id, state, now)
+        return state.estimate or raw_local
+
+    async def _evaluate_kde_in_background(self, node_id: str, samples: list[tuple[float, float, float]]) -> None:
+        try:
+            estimate, std = await asyncio.to_thread(compute_stationary_kde, samples, self._kde_bandwidth_m)
+            state = self._position_kde.get(node_id)
+            if state is not None:
+                state.estimate, state.horizontal_std_m = estimate, std
+                state.last_evaluated_seen_count, state.last_evaluated_monotonic_s = state.seen_count, time.monotonic()
+                await self._registry.set_node_position_std_m(node_id, std)
+                self._maybe_checkpoint_kde(node_id, state, time.monotonic(), force=True)
+        finally:
+            self._kde_evaluation_tasks.pop(node_id, None)
+
+    def _maybe_checkpoint_kde(self, node_id: str, state: StationaryKdeState, now: float, *, force: bool = False) -> None:
+        if not force and now - state.last_checkpoint_monotonic_s < self._kde_checkpoint_seconds:
+            return
+        writer = getattr(self._storage, "upsert_node_position_estimator_state", None)
+        if callable(writer):
+            state.last_checkpoint_monotonic_s = now
+            asyncio.create_task(writer(node_id, state.snapshot()))
 
 
 # (Supporting dataclasses are defined at the top of the module.)

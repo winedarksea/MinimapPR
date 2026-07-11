@@ -628,6 +628,14 @@ class Settings:
     # fix that deviates by more than this on any ENU axis is treated as an outlier and
     # skipped, so a single bad 2-D fix cannot yank a stationary node's position.
     node_position_gps_gate_m: float = 5.0
+    # Stationary GPS KDE.  Reservoir sampling retains a representative long-term
+    # distribution without persisting a per-fix location history.
+    node_position_kde_bandwidth_m: float = 2.5
+    node_position_kde_reservoir_capacity: int = 2048
+    node_position_kde_warmup_fixes: int = 30
+    node_position_kde_recompute_seconds: float = 30.0
+    node_position_kde_checkpoint_seconds: float = 60.0
+    node_position_kde_acceptance_radius_m: float = 100.0
     # Local position stamped onto binary-ingest frames from legacy firmware that
     # reports neither position_geo nor position_m (pre static-fallback-geo
     # descriptor builds). Lets those nodes register instead of 400-ing on every

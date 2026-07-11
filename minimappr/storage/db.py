@@ -148,6 +148,13 @@ class Storage:
                 last_seen_ns INTEGER NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS node_position_estimator_states (
+                node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+                version INTEGER NOT NULL,
+                state_json TEXT NOT NULL,
+                updated_ns INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS observations (
                 id TEXT PRIMARY KEY,
                 event_id TEXT NOT NULL,
@@ -1644,6 +1651,10 @@ class Storage:
         effective_orientation = overrides.get("orientation", reported_orientation)
         effective_capabilities = overrides.get("capabilities", reported_capabilities)
         effective_mobility = overrides.get("mobility", reported_mobility)
+        requested_position_filter = overrides.get("position_filter")
+        effective_position_filter = requested_position_filter or (
+            "kalman" if effective_mobility == "mobile" else "kde"
+        )
         return {
             "id": row["id"],
             "node_type": row["node_type"],
@@ -1656,6 +1667,8 @@ class Storage:
             "reported_capabilities": reported_capabilities,
             "mobility": effective_mobility,
             "reported_mobility": reported_mobility,
+            "position_filter": requested_position_filter,
+            "effective_position_filter": effective_position_filter,
             "orientation": effective_orientation,
             "reported_orientation": reported_orientation,
             "metadata": _json_loads(row["metadata_json"], {}),
@@ -1668,6 +1681,37 @@ class Storage:
             "origin": row["origin"] or "ingest",
             "last_seen_ns": row["last_seen_ns"],
         }
+
+    async def list_node_position_estimator_states(self) -> dict[str, dict[str, Any]]:
+        db = self._require_db()
+        rows = await (await db.execute(
+            "SELECT node_id, version, state_json, updated_ns FROM node_position_estimator_states"
+        )).fetchall()
+        return {
+            row["node_id"]: {
+                "version": row["version"], "state": _json_loads(row["state_json"], {}),
+                "updated_ns": row["updated_ns"],
+            }
+            for row in rows
+        }
+
+    async def upsert_node_position_estimator_state(self, node_id: str, state: dict[str, Any]) -> None:
+        db = self._require_db()
+        async with self._write_guard():
+            await db.execute(
+                """INSERT INTO node_position_estimator_states(node_id, version, state_json, updated_ns)
+                   VALUES (?, 1, ?, ?)
+                   ON CONFLICT(node_id) DO UPDATE SET version=excluded.version,
+                       state_json=excluded.state_json, updated_ns=excluded.updated_ns""",
+                (node_id, _json_dumps(state), time.time_ns()),
+            )
+            await self._commit_if_needed(db)
+
+    async def delete_node_position_estimator_state(self, node_id: str) -> None:
+        db = self._require_db()
+        async with self._write_guard():
+            await db.execute("DELETE FROM node_position_estimator_states WHERE node_id = ?", (node_id,))
+            await self._commit_if_needed(db)
 
     async def list_nodes(self, limit: int | None = None) -> list[dict]:
         db = self._require_db()

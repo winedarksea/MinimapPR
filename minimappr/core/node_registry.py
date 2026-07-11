@@ -111,6 +111,18 @@ class NodeRegistry:
             else:
                 self._overrides.pop(node_id, None)
 
+    def position_policy_for(self, node_id: str, reported_mobility: str) -> tuple[str, str]:
+        """Return operator-effective mobility and position filter without I/O.
+
+        This is deliberately available before ingest normalization: applying the
+        override only in ``upsert`` is too late to affect GPS processing.
+        """
+        override = self._overrides.get(node_id)
+        mobility = override.mobility if override and override.mobility else reported_mobility
+        mobility = "mobile" if mobility == "mobile" else "stationary"
+        explicit_filter = override.position_filter if override else None
+        return mobility, explicit_filter or ("kalman" if mobility == "mobile" else "kde")
+
     async def delete_node(self, node_id: str) -> None:
         """Drop a node and its sensors from the in-memory registry.
 

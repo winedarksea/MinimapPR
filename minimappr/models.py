@@ -200,6 +200,9 @@ class NodeOverrides(BaseModel):
     position_geo: GeoPoint | None = None
     orientation: NodeOrientation | None = None
     mobility: Literal["stationary", "mobile"] | None = None
+    # Absent means the server derives the filter from mobility: KDE for fixed
+    # installations and Kalman for mobile nodes.
+    position_filter: Literal["raw", "kalman", "kde"] | None = None
     capabilities: list[NodeCapability] | None = None
     updated_ns: int | None = Field(default=None, ge=0)
 

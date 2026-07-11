@@ -355,6 +355,12 @@ class FusionNode:
             node_position_kalman_r=settings.node_position_kalman_r,
             node_position_kalman_init_p=settings.node_position_kalman_init_p,
             node_position_gps_gate_m=settings.node_position_gps_gate_m,
+            node_position_kde_bandwidth_m=settings.node_position_kde_bandwidth_m,
+            node_position_kde_reservoir_capacity=settings.node_position_kde_reservoir_capacity,
+            node_position_kde_warmup_fixes=settings.node_position_kde_warmup_fixes,
+            node_position_kde_recompute_seconds=settings.node_position_kde_recompute_seconds,
+            node_position_kde_checkpoint_seconds=settings.node_position_kde_checkpoint_seconds,
+            node_position_kde_acceptance_radius_m=settings.node_position_kde_acceptance_radius_m,
         )
         self._classification_orchestrator = ClassificationOrchestrator(
             classifier=classifier,
@@ -434,6 +440,7 @@ class FusionNode:
             return
 
         self._stopping = False
+        await self._ingest_processor.hydrate_position_estimator_states()
         await self._refresh_taxonomy(force=True)
         worker_count = max(1, self.fusion_config.worker_count)
         self._localization_workers = [
@@ -453,6 +460,12 @@ class FusionNode:
     @property
     def accepted_frame_count(self) -> int:
         return self._ingest_processor.accepted_frame_count
+
+    def node_position_estimator_diagnostics(self, node_id: str) -> dict[str, Any]:
+        return self._ingest_processor.position_estimator_diagnostics(node_id)
+
+    async def reset_node_position_estimator(self, node_id: str) -> None:
+        await self._ingest_processor.reset_position_estimator(node_id)
 
     def rebind_runtime_dependencies(self, *, classifier: AudioClassifier, coordinate_frame: LocalCoordinateFrame) -> None:
         self.classifier = classifier

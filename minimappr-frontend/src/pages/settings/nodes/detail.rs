@@ -33,6 +33,18 @@ struct PtzStatus {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+struct PositionEstimator {
+    #[serde(default)]
+    effective_filter: Option<String>,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    sample_count: u64,
+    #[serde(default)]
+    horizontal_std_m: Option<f64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 struct NodeDetail {
     #[serde(alias = "node_id")]
     id: String,
@@ -46,6 +58,14 @@ struct NodeDetail {
     position_m: Option<Vec<f64>>,
     #[serde(default)]
     reported_position_m: Option<Vec<f64>>,
+    #[serde(default)]
+    mobility: Option<String>,
+    #[serde(default)]
+    position_filter: Option<String>,
+    #[serde(default)]
+    effective_position_filter: Option<String>,
+    #[serde(default)]
+    position_estimator: Option<PositionEstimator>,
     #[serde(default)]
     orientation: Option<Orientation>,
     #[serde(default)]
@@ -243,6 +263,11 @@ fn LocationSection(node: NodeDetail, reload: Callback<()>) -> impl IntoView {
     let reported_orient = node.reported_orientation.clone().unwrap_or_default();
     let effective_orient = node.orientation.clone().unwrap_or_default();
     let orient_pinned = node.override_pinned("orientation");
+    let mobility_pinned = node.override_pinned("mobility");
+    let filter_pinned = node.override_pinned("position_filter");
+    let mobility = RwSignal::new(node.mobility.clone().unwrap_or_else(|| "stationary".to_string()));
+    let position_filter = RwSignal::new(node.position_filter.clone().unwrap_or_else(|| "automatic".to_string()));
+    let estimator = node.position_estimator.clone().unwrap_or_default();
     let yaw = RwSignal::new(effective_orient.yaw_deg.to_string());
     let pitch = RwSignal::new(effective_orient.pitch_deg.to_string());
     let roll = RwSignal::new(effective_orient.roll_deg.to_string());
@@ -289,6 +314,36 @@ fn LocationSection(node: NodeDetail, reload: Callback<()>) -> impl IntoView {
         let apply = apply.clone();
         move |_| apply(serde_json::json!({ "clear_overrides": ["orientation"] }))
     };
+    let save_position_processing = {
+        let apply = apply.clone();
+        move |_| {
+            let mobility_value = mobility.get_untracked();
+            let filter_value = position_filter.get_untracked();
+            if filter_value == "automatic" {
+                apply(serde_json::json!({
+                    "overrides": { "mobility": mobility_value },
+                    "clear_overrides": ["position_filter"]
+                }));
+            } else {
+                apply(serde_json::json!({
+                    "overrides": { "mobility": mobility_value, "position_filter": filter_value }
+                }));
+            }
+        }
+    };
+    let reset_estimator = {
+        let id = node_id.clone();
+        move |_| {
+            let id = id.clone();
+            spawn_local(async move {
+                let encoded = js_sys::encode_uri_component(&id).as_string().unwrap_or_default();
+                if Request::post(&format!("/api/v1/nodes/{encoded}/position-estimator/reset")).send().await
+                    .map(|response| response.ok()).unwrap_or(false) {
+                    reload.run(());
+                }
+            });
+        }
+    };
 
     let fmt_vec = |values: &[f64]| {
         if values.is_empty() {
@@ -305,6 +360,44 @@ fn LocationSection(node: NodeDetail, reload: Callback<()>) -> impl IntoView {
     view! {
         <section class="node-section-card">
             <h3 class="node-section-title">"Location & Orientation"</h3>
+
+            <div class="node-field-block">
+                <div class="node-field-head">
+                    <span>"Position processing"</span>
+                    <span class=if mobility_pinned || filter_pinned { "pin-indicator is-pinned" } else { "pin-indicator" }>
+                        {if mobility_pinned || filter_pinned { "📌 overridden" } else { "automatic" }}
+                    </span>
+                </div>
+                <label class="node-inline-field">
+                    "Mobility"
+                    <select prop:value=move || mobility.get() on:change=move |ev| mobility.set(event_target_value(&ev))>
+                        <option value="stationary">"Stationary"</option>
+                        <option value="mobile">"Mobile"</option>
+                    </select>
+                </label>
+                <label class="node-inline-field">
+                    "Position filter"
+                    <select prop:value=move || position_filter.get() on:change=move |ev| position_filter.set(event_target_value(&ev))>
+                        <option value="automatic">"Automatic"</option>
+                        <option value="raw">"Raw"</option>
+                        <option value="kalman">"Kalman"</option>
+                        <option value="kde">"KDE"</option>
+                    </select>
+                </label>
+                <p class="muted node-reported-line">
+                    {format!("Effective: {} · {} · {} fixes{}",
+                        node.effective_position_filter.clone().unwrap_or_else(|| estimator.effective_filter.clone().unwrap_or_else(|| "kde".to_string())),
+                        estimator.status,
+                        estimator.sample_count,
+                        estimator.horizontal_std_m.map(|value| format!(" · {:.1} m σ", value)).unwrap_or_default())}
+                </p>
+                <div class="node-field-actions">
+                    <button class="btn-sm btn-primary" on:click=save_position_processing>"Save processing"</button>
+                    {(node.effective_position_filter.as_deref() == Some("kde")).then(|| view! {
+                        <button class="btn-sm" on:click=reset_estimator>"Reset learned position"</button>
+                    })}
+                </div>
+            </div>
 
             <div class="node-field-block">
                 <div class="node-field-head">

@@ -2240,6 +2240,9 @@ async def _enriched_node_detail(state, node_id: str) -> dict[str, Any] | None:
     ble_observations = await _ble_observation_store(state).latest_for_node(node_id, now_ns=now_ns)
     if ble_observations:
         node["ble_observations"] = [observation.as_raw_api_dict() for observation in ble_observations]
+    fusion_node = getattr(state, "fusion_node", None)
+    if fusion_node is not None:
+        node["position_estimator"] = fusion_node.node_position_estimator_diagnostics(node_id)
     return _redact_node_transport(node)
 
 
@@ -2282,6 +2285,7 @@ async def patch_node(node_id: str, payload: NodePatchRequest, request: Request) 
     if node is None:
         raise HTTPException(status_code=404, detail="Node not found")
     changed_transport = payload.transport is not None
+    previous_effective_filter = node.get("effective_position_filter")
     await state.storage.update_node_operator_fields(
         node_id,
         transport=payload.transport,
@@ -2304,12 +2308,32 @@ async def patch_node(node_id: str, payload: NodePatchRequest, request: Request) 
     updated = await state.storage.get_node_by_id(node_id)
     if updated is None:
         raise HTTPException(status_code=404, detail="Node not found")
+    if updated.get("effective_position_filter") == "kde" and previous_effective_filter != "kde":
+        fusion_node = getattr(state, "fusion_node", None)
+        if fusion_node is not None:
+            await fusion_node.reset_node_position_estimator(node_id)
+        else:
+            await state.storage.delete_node_position_estimator_state(node_id)
     if changed_transport and _node_has_capability(updated, NodeCapability.PTZ_CAMERA):
         manager: EffectorManager = state.effector_manager
         await manager.detach(node_id)
         await manager.register_node(updated)
     await _broadcast_node_updated(state, node_id)
     return _redact_node_transport(updated)
+
+
+@app.post("/api/v1/nodes/{node_id}/position-estimator/reset")
+async def reset_node_position_estimator(node_id: str, request: Request) -> dict:
+    state = _require_state(request)
+    if await state.storage.get_node_by_id(node_id) is None:
+        raise HTTPException(status_code=404, detail="Node not found")
+    fusion_node = getattr(state, "fusion_node", None)
+    if fusion_node is not None:
+        await fusion_node.reset_node_position_estimator(node_id)
+    else:
+        await state.storage.delete_node_position_estimator_state(node_id)
+    await _broadcast_node_updated(state, node_id)
+    return {"node_id": node_id, "reset": True}
 
 
 @app.get("/api/v1/nodes/{node_id}/safety", response_model=NodeSafetyConfig)
