@@ -32,6 +32,7 @@ from minimappr.core.environment import LiveEnvironmentProvider
 from minimappr.core.federation import FederationCoordinator
 from minimappr.core.fusion_node import FusionNode
 from minimappr.core.geo import LocalCoordinateFrame
+from minimappr.calibration.pipeline import CalibrationPipeline
 from minimappr.core.iamf_pipeline import IamfPipeline
 from minimappr.core.localization_dispatch import build_localizer_from_settings
 from minimappr.core.site_origin import resolve_site_origin_from_nodes
@@ -144,6 +145,8 @@ def _build_capture_manager(
     sidecar_url: str | None,
     storage: Storage,
     multi_sensor_buffer: MultiSensorBuffer | None = None,
+    coordinate_frame: LocalCoordinateFrame | None = None,
+    environment_provider: LiveEnvironmentProvider | None = None,
 ) -> CaptureSessionManager:
     capture_manager = CaptureSessionManager()
     capture_manager.set_final_track_settle_seconds(settings.capture_final_tracks_settle_seconds)
@@ -156,8 +159,22 @@ def _build_capture_manager(
         mvdr_diagonal_loading=settings.mvdr_diagonal_loading,
         iamf_object_band_split_enabled=settings.iamf_object_band_split_enabled,
     )
+    calibration_pipeline: CalibrationPipeline | None = None
+    if coordinate_frame is not None and environment_provider is not None:
+        calibration_pipeline = CalibrationPipeline(
+            storage=storage,
+            coordinate_frame=coordinate_frame,
+            environment_provider=environment_provider,
+            artifact_dir=settings.large_artifact_dir,
+            settings=settings,
+        )
 
     async def _run_capture_post_processing(record):
+        if getattr(record, "capture_kind", "recording") == "calibration":
+            if calibration_pipeline is None:
+                raise RuntimeError("calibration pipeline is not configured in this runtime role")
+            await calibration_pipeline.run(record)
+            return
         await iamf_pipeline.run(record)
 
     async def _persist_and_broadcast_capture_session(record: CaptureSessionRecord) -> None:
@@ -197,6 +214,7 @@ def _session_record_to_recording_session(record: CaptureSessionRecord) -> dict:
         "session_id": record.session_id,
         "status": _capture_state_to_recording_status(record.state),
         "listener_node_id": record.stream_key,
+        "capture_kind": getattr(record, "capture_kind", "recording") or "recording",
         "include_ambisonics": True,
         "include_iamf": record.include_iamf,
         "include_video": record.include_video,

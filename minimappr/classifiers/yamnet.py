@@ -66,6 +66,7 @@ class YAMNetClassifier(AudioClassifier):
         *,
         target_rms: float = _YAMNET_TARGET_RMS,
         max_input_gain: float = _YAMNET_MAX_INPUT_GAIN,
+        keep_embeddings: bool = False,
     ) -> None:
         try:
             import tensorflow as tf
@@ -80,6 +81,10 @@ class YAMNetClassifier(AudioClassifier):
         self._min_confidence = min_confidence
         self._target_rms = float(target_rms)
         self._max_input_gain = float(max_input_gain)
+        # Off on the hot path: 1024-d embeddings would bloat feature_summary_json
+        # and the sidecar classifier bridge. Enabled only for offline extraction
+        # at training-promotion time (minimappr/calibration/embeddings.py).
+        self._keep_embeddings = bool(keep_embeddings)
 
     def classify(self, samples: np.ndarray, sample_rate_hz: int) -> ClassificationResult:
         waveform = samples.astype(np.float32)
@@ -91,7 +96,7 @@ class YAMNetClassifier(AudioClassifier):
             max_input_gain=self._max_input_gain,
         )
 
-        scores, _, _ = self._model(waveform)
+        scores, embeddings, _ = self._model(waveform)
         mean_scores = np.mean(scores.numpy(), axis=0)
         top_idx = int(np.argmax(mean_scores))
         top_conf = float(mean_scores[top_idx])
@@ -103,11 +108,17 @@ class YAMNetClassifier(AudioClassifier):
         top_k = np.argsort(mean_scores)[-5:][::-1]
         scores_map = {self._class_name(int(index)): float(mean_scores[int(index)]) for index in top_k}
 
+        features: dict = {"model": "yamnet"}
+        if self._keep_embeddings:
+            features["embedding"] = np.mean(embeddings.numpy(), axis=0).astype(np.float32)
+            features["embedding_model"] = "yamnet/1"
+            features["embedding_dim"] = int(features["embedding"].shape[0])
+
         return ClassificationResult(
             label=label,
             confidence=max(0.0, min(1.0, top_conf)),
             scores=scores_map,
-            features={"model": "yamnet"},
+            features=features,
         )
 
     def _class_name(self, index: int) -> str:

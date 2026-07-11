@@ -77,6 +77,12 @@ class CaptureSessionRecord:
     """Deterministic COP-like MP4 visual for the selected IAMF object slot."""
     positions_path: Optional[Path] = None
     """Per-temporal-unit azimuth/elevation/distance of the selected IAMF object slot."""
+    capture_kind: str = "recording"
+    """"recording" (IAMF studio render) or "calibration" (multi-node raw training capture)."""
+    node_channel_map: dict[str, list[str]] = field(default_factory=dict)
+    """Calibration only: node_id → ordered sensor ids captured for that node."""
+    calibration_manifest_path: Optional[Path] = None
+    """Calibration only: path to the manifest.json produced by CalibrationPipeline."""
 
 
 @dataclass
@@ -98,6 +104,10 @@ class CaptureStartRequest:
     """When False, skip ffmpeg video capture entirely (audio-only recording)."""
     include_iamf: bool = True
     """When False, skip IAMF encoding step in the post-processing pipeline."""
+    capture_kind: str = "recording"
+    """"recording" | "calibration". Calibration mirrors every node in node_channel_map."""
+    node_channel_map: dict[str, list[str]] = field(default_factory=dict)
+    """Calibration only: node_id → ordered sensor ids; the capture buffer mirrors the union."""
 
 
 PostProcessCallback = Callable[
@@ -144,6 +154,20 @@ class CaptureSessionManager:
         work_dir = request.work_dir / session_id
         work_dir.mkdir(parents=True, exist_ok=True)
 
+        is_calibration = request.capture_kind == "calibration"
+        channel_sensor_ids = list(request.channel_sensor_ids)
+        if is_calibration:
+            # Calibration captures raw multichannel audio from every node in
+            # node_channel_map through a single session buffer; video and IAMF
+            # rendering never apply.
+            channel_sensor_ids = [
+                sensor_id
+                for sensor_ids in request.node_channel_map.values()
+                for sensor_id in sensor_ids
+            ]
+            request.record_video = False
+            request.include_iamf = False
+
         now_ns = time.time_ns()
         record = CaptureSessionRecord(
             session_id=session_id,
@@ -162,6 +186,8 @@ class CaptureSessionManager:
             created_ns=now_ns,
             include_iamf=request.include_iamf,
             include_video=request.record_video,
+            capture_kind=request.capture_kind,
+            node_channel_map={k: list(v) for k, v in request.node_channel_map.items()},
         )
         self._sessions[session_id] = record
 
@@ -175,13 +201,13 @@ class CaptureSessionManager:
                 return record
             record.capture_audio_buffer = await request.multi_sensor_buffer.start_capture(
                 session_id,
-                request.channel_sensor_ids,
+                channel_sensor_ids,
                 max_duration_seconds=request.max_duration_s,
             )
             self._python_buffers[session_id] = request.multi_sensor_buffer
             record.start_time_ns = now_ns
             record.use_python_ingest = True
-            record.channel_sensor_ids = list(request.channel_sensor_ids)
+            record.channel_sensor_ids = channel_sensor_ids
             logger.info(
                 "session %s started (python ingest): stream=%s channels=%s",
                 session_id,

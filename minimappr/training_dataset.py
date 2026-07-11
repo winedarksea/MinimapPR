@@ -85,7 +85,11 @@ async def materialize_training_example(
 
 def _delete_example_files(dataset_dir: Path, example: dict) -> None:
     root = dataset_dir.resolve()
-    for raw_path in (example.get("audio_path"), example.get("manifest_path")):
+    for raw_path in (
+        example.get("audio_path"),
+        example.get("manifest_path"),
+        example.get("embedding_path"),
+    ):
         if not raw_path:
             continue
         path = Path(raw_path).resolve()

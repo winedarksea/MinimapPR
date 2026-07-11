@@ -186,6 +186,13 @@ cython_debug/
 data/
 .DS_Store
 
+# Calibration test bundles: keep the directory + README tracked, but the bare
+# data/ rule above would hide tests/data entirely, so re-include explicitly.
+!tests/data/
+!tests/data/calibration/
+!tests/data/calibration/README.md
+tests/data/calibration/*.zip
+
 # PlatformIO / embedded build output
 .pio/
 .pioenvs/

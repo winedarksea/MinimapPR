@@ -13,7 +13,8 @@
 ///   GET    /api/v1/cameras                            → Vec<CameraDevice>
 ///   GET    /api/v1/recordings/{id}/download?format=…  → file (ambisonics|iamf|visual|video)
 use crate::recording::{
-    CameraDevice, RecordingLibraryEntry, RecordingSession, StartRecordingRequest,
+    CameraDevice, GroundTruthEvent, GroundTruthEventIn, RecordingLibraryEntry, RecordingSession,
+    StartRecordingRequest,
 };
 use gloo_net::http::Request;
 use js_sys::encode_uri_component;
@@ -133,6 +134,55 @@ pub async fn fetch_cameras() -> Result<Vec<CameraDevice>, String> {
         return Ok(vec![]);
     }
     expect_json(resp).await
+}
+
+/// List ground-truth events for a calibration session.
+pub async fn fetch_ground_truth(session_id: &str) -> Result<Vec<GroundTruthEvent>, String> {
+    let url = format!("/api/v1/calibration/{}/ground-truth", enc(session_id));
+    let resp = Request::get(&url).send().await.map_err(|e| e.to_string())?;
+    expect_json(resp).await
+}
+
+/// Add a ground-truth event to a calibration session.
+pub async fn add_ground_truth(
+    session_id: &str,
+    event: GroundTruthEventIn,
+) -> Result<GroundTruthEvent, String> {
+    let body = serde_json::to_string(&event).map_err(|e| e.to_string())?;
+    let url = format!("/api/v1/calibration/{}/ground-truth", enc(session_id));
+    let resp = Request::post(&url)
+        .header("Content-Type", "application/json")
+        .body(body)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    expect_json(resp).await
+}
+
+/// Delete a ground-truth event.
+pub async fn delete_ground_truth(event_id: &str) -> Result<(), String> {
+    let url = format!("/api/v1/calibration/ground-truth/{}", enc(event_id));
+    let resp = Request::delete(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.ok() || resp.status() == 204 {
+        Ok(())
+    } else {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        Err(if body.is_empty() {
+            format!("HTTP {status}")
+        } else {
+            extract_error_detail(&body).unwrap_or(body)
+        })
+    }
+}
+
+/// Download URL for a calibration session's replayable bundle zip.
+pub fn calibration_bundle_url(session_id: &str) -> String {
+    format!("/api/v1/calibration/{}/bundle", enc(session_id))
 }
 
 /// Build the download URL for a completed recording.

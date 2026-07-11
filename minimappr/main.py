@@ -105,9 +105,14 @@ from minimappr.core.site_origin import (
 )
 from minimappr.core.zones import ZoneMatcher
 from minimappr.core import system_info
+from minimappr.calibration.bundle import build_ground_truth_payload, write_bundle_zip
+from minimappr.calibration.embeddings import extract_embedding_npy
 from minimappr.models import (
     AlertStatus,
     BITReport,
+    CalibrationGroundTruthEvent,
+    CalibrationGroundTruthIn,
+    CalibrationGroundTruthUpdate,
     BITReportIn,
     BITStatus,
     BITTestResult,
@@ -881,12 +886,37 @@ async def _build_capture_start_request(
     deployment_profile: str = "auto",
     record_video: bool = True,
     include_iamf: bool = True,
+    capture_kind: str = "recording",
 ) -> CaptureStartRequest:
     settings: Settings = state.settings
     storage: Storage = state.storage
     audio_buffer = getattr(state, "audio_buffer", None)
 
     if audio_buffer is not None:
+        if capture_kind == "calibration":
+            # Capture every registered audio-capable node through one session
+            # buffer; extraction is per node because sample rates may differ.
+            node_channel_map: dict[str, list[str]] = {}
+            for node in await storage.list_nodes(limit=4096):
+                sensor_ids = _sensor_ids_from_node_row(node)
+                if sensor_ids:
+                    node_channel_map[str(node["id"])] = sensor_ids
+            if not node_channel_map:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Calibration capture requires at least one registered node with sensor offsets",
+                )
+            return CaptureStartRequest(
+                stream_key="calibration",
+                work_dir=work_dir_path,
+                sidecar_url=None,
+                multi_sensor_buffer=audio_buffer,
+                max_duration_s=min(max_duration_s, settings.calibration_max_duration_s),
+                record_video=False,
+                include_iamf=False,
+                capture_kind="calibration",
+                node_channel_map=node_channel_map,
+            )
         return CaptureStartRequest(
             stream_key=stream_key,
             work_dir=work_dir_path,
@@ -1227,6 +1257,8 @@ async def _api_only_lifespan(app: FastAPI, settings: Settings):
         live_hub=common_live_runtime_services.live_hub,
         sidecar_url=_ingest_runtime_base_url(settings),
         storage=storage,
+        coordinate_frame=common_live_runtime_services.coordinate_frame,
+        environment_provider=common_live_runtime_services.environment_provider,
     )
 
     sidecar_state, sidecar_supervision_task = await _launch_managed_ingest_sidecar(
@@ -1358,6 +1390,8 @@ async def lifespan(app: FastAPI):
         sidecar_url=None if _python_ingest else _ingest_runtime_base_url(settings),
         storage=storage,
         multi_sensor_buffer=combined_runtime_core_services.audio_buffer if _python_ingest else None,
+        coordinate_frame=common_live_runtime_services.coordinate_frame,
+        environment_provider=common_live_runtime_services.environment_provider,
     )
 
     _bind_runtime_state(
@@ -4484,6 +4518,12 @@ async def update_detection_review(
                 "feature_summary": detection.get("feature_summary"),
             },
         }
+        embedding_info = await extract_embedding_npy(
+            source_audio,
+            state.settings.training_dataset_dir / f"{detection_id}.npy",
+        )
+        if embedding_info is not None:
+            manifest["embedding"] = embedding_info
         try:
             materialized_example = await materialize_training_example(
                 dataset_dir=state.settings.training_dataset_dir,
@@ -4522,6 +4562,7 @@ async def update_detection_review(
             manifest_path=manifest_path,
             created_ns=(existing_example or {}).get("created_ns", now_ns),
             updated_ns=now_ns,
+            embedding_path=(manifest.get("embedding") or {}).get("path"),
         )
     elif not promote_to_training:
         removed_example = await state.storage.delete_training_example(detection_id)
@@ -4938,6 +4979,7 @@ class _CaptureStartBody(BaseModel):
     libcamera_mode: bool = False
     deployment_profile: str = "auto"
     work_dir: str | None = None
+    capture_kind: str = "recording"
 
 
 @app.post("/api/v1/capture/start")
@@ -4968,6 +5010,7 @@ async def capture_start(request: Request, body: _CaptureStartBody):
         video_source=body.video_source,
         libcamera_mode=body.libcamera_mode,
         deployment_profile=body.deployment_profile,
+        capture_kind=body.capture_kind,
     )
     record = await manager.start(req)
 
@@ -5156,6 +5199,7 @@ class _StartRecordingBody(BaseModel):
     include_iamf: bool = True
     include_video: bool = True
     camera_source: str | None = None
+    capture_kind: str = "recording"
 
 
 @app.post("/api/v1/recordings")
@@ -5190,10 +5234,13 @@ async def recordings_start(request: Request, body: _StartRecordingBody):
         state,
         stream_key=stream_key,
         work_dir_path=work_dir_path,
-        max_duration_s=300.0,
+        max_duration_s=(
+            settings.calibration_max_duration_s if body.capture_kind == "calibration" else 300.0
+        ),
         video_source=body.camera_source,
         record_video=body.include_video,
         include_iamf=body.include_iamf,
+        capture_kind=body.capture_kind,
     )
 
     record = await manager.start(req)
@@ -5278,6 +5325,7 @@ async def recordings_get(session_id: str, request: Request):
         youtube_path=Path(row["youtube_path"]) if row.get("youtube_path") else None,
         error=row.get("error"),
         created_ns=row.get("created_ns", 0),
+        capture_kind=row.get("capture_kind") or "recording",
     )
     return _session_record_to_recording_session(record)
 
@@ -5309,6 +5357,7 @@ async def recordings_list(request: Request):
             "ended_at_ms": ended_at_ms,
             "duration_seconds": duration_seconds,
             "listener_node_id": row["stream_key"],
+            "capture_kind": row.get("capture_kind") or "recording",
             "ambisonics_available": ambix_path is not None and ambix_path.exists() if ambix_path else False,
             "iamf_available": iamf_path is not None and iamf_path.exists() if iamf_path else False,
             "object_available": object_path is not None and object_path.exists() if object_path else False,
@@ -5425,6 +5474,113 @@ async def recordings_download(session_id: str, format: str = Query(...), request
         raise HTTPException(status_code=404, detail="Recording visual not available")
     else:
         raise HTTPException(status_code=400, detail=f"Unknown format: {format}. Use ambisonics, object, iamf, visual, or video.")
+
+
+# ── Calibration ground truth + bundle export ──────────────────────────────────
+
+def _calibration_gt_row_to_event(row: dict) -> CalibrationGroundTruthEvent:
+    return CalibrationGroundTruthEvent(
+        event_id=row["id"],
+        session_id=row["session_id"],
+        label=row["label"],
+        label_category=row.get("label_category") or "unknown",
+        geometry_kind=row.get("geometry_kind") or "static",
+        lat=row.get("lat"),
+        lon=row.get("lon"),
+        alt_m=row.get("alt_m"),
+        start_ns=row["start_ns"],
+        end_ns=row["end_ns"],
+        notes=row.get("notes"),
+        created_ns=row.get("created_ns") or 0,
+        updated_ns=row.get("updated_ns") or 0,
+    )
+
+
+async def _require_calibration_session(storage: Storage, session_id: str) -> dict:
+    row = await storage.get_capture_session(session_id)
+    if row is None or (row.get("capture_kind") or "recording") != "calibration":
+        raise HTTPException(
+            status_code=404, detail=f"calibration session {session_id} not found"
+        )
+    return row
+
+
+@app.post("/api/v1/calibration/{session_id}/ground-truth")
+async def calibration_ground_truth_add(
+    session_id: str, body: CalibrationGroundTruthIn, request: Request
+):
+    storage: Storage = request.app.state.storage
+    await _require_calibration_session(storage, session_id)
+    row = await storage.insert_calibration_ground_truth(
+        session_id=session_id,
+        label=body.label,
+        label_category=body.label_category,
+        lat=body.lat,
+        lon=body.lon,
+        alt_m=body.alt_m,
+        start_ns=body.start_ns,
+        end_ns=body.end_ns,
+        notes=body.notes,
+    )
+    return _calibration_gt_row_to_event(row)
+
+
+@app.get("/api/v1/calibration/{session_id}/ground-truth")
+async def calibration_ground_truth_list(session_id: str, request: Request):
+    storage: Storage = request.app.state.storage
+    await _require_calibration_session(storage, session_id)
+    rows = await storage.list_calibration_ground_truth(session_id)
+    return [_calibration_gt_row_to_event(row) for row in rows]
+
+
+@app.patch("/api/v1/calibration/ground-truth/{event_id}")
+async def calibration_ground_truth_update(
+    event_id: str, body: CalibrationGroundTruthUpdate, request: Request
+):
+    storage: Storage = request.app.state.storage
+    existing = await storage.get_calibration_ground_truth(event_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail=f"ground-truth event {event_id} not found")
+    updates = body.model_dump(exclude_none=True)
+    start_ns = updates.get("start_ns", existing["start_ns"])
+    end_ns = updates.get("end_ns", existing["end_ns"])
+    if end_ns < start_ns:
+        raise HTTPException(status_code=422, detail="end_ns must be >= start_ns")
+    row = await storage.update_calibration_ground_truth(event_id, updates)
+    return _calibration_gt_row_to_event(row)
+
+
+@app.delete("/api/v1/calibration/ground-truth/{event_id}")
+async def calibration_ground_truth_delete(event_id: str, request: Request):
+    storage: Storage = request.app.state.storage
+    deleted = await storage.delete_calibration_ground_truth(event_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"ground-truth event {event_id} not found")
+    return Response(status_code=204)
+
+
+@app.get("/api/v1/calibration/{session_id}/bundle")
+async def calibration_bundle_download(session_id: str, request: Request):
+    storage: Storage = request.app.state.storage
+    row = await _require_calibration_session(storage, session_id)
+    manifest_path = row.get("calibration_manifest_path")
+    if not manifest_path or not Path(manifest_path).exists():
+        raise HTTPException(
+            status_code=409,
+            detail="calibration session has no artifact yet (still processing or failed)",
+        )
+    artifact_dir = Path(manifest_path).parent
+    ground_truth_rows = await storage.list_calibration_ground_truth(session_id)
+    ground_truth_payload = build_ground_truth_payload(ground_truth_rows)
+    bundle_path = artifact_dir / f"calibration_{session_id}.zip"
+    await asyncio.to_thread(
+        write_bundle_zip, artifact_dir, ground_truth_payload, bundle_path
+    )
+    return FileResponse(
+        bundle_path,
+        media_type="application/zip",
+        filename=bundle_path.name,
+    )
 
 
 @app.websocket("/ws/live")

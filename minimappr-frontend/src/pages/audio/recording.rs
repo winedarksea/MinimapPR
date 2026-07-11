@@ -17,6 +17,9 @@ pub fn RecordingPage() -> impl IntoView {
     let selected_node_id = RwSignal::new(String::new());
     let include_iamf = RwSignal::new(false);
     let include_video = RwSignal::new(false);
+    // Calibration capture: raw multichannel audio from all nodes for
+    // ground-truth training bundles (no video/IAMF render).
+    let calibration_mode = RwSignal::new(false);
     // Camera source: populated from API or typed manually.
     let camera_source = RwSignal::new(String::new());
     let cameras: RwSignal<Vec<CameraDevice>> = RwSignal::new(vec![]);
@@ -50,21 +53,52 @@ pub fn RecordingPage() -> impl IntoView {
             <div class="recording-config-card">
                 <h3 class="section-title">"Spatial Recording"</h3>
 
-                <ListenerSelector selected_node_id />
+                <div class="form-row">
+                    <label class="form-label">"Mode"</label>
+                    <div class="format-checks">
+                        <label
+                            class="check-item"
+                            title="Capture raw multichannel audio from every registered node, plus geometry + environment metadata, for ground-truth training bundles"
+                        >
+                            <input
+                                type="checkbox"
+                                prop:checked=move || calibration_mode.get()
+                                on:change=move |ev| calibration_mode.set(event_target_checked(&ev))
+                            />
+                            <span>"Calibration capture (all nodes, raw multichannel)"</span>
+                            <span class="badge">"training"</span>
+                        </label>
+                    </div>
+                </div>
 
-                <FormatOptions
-                    include_iamf
-                    include_video
-                    camera_source
-                    cameras
-                    cameras_loaded
-                />
+                {move || if calibration_mode.get() {
+                    view! {
+                        <p class="muted calibration-mode-note">
+                            "Raw per-microphone audio from every node is captured for the "
+                            "session window. Add ground-truth events afterwards in the "
+                            "library below, then download the replayable bundle."
+                        </p>
+                    }.into_any()
+                } else {
+                    view! {
+                        <ListenerSelector selected_node_id />
+
+                        <FormatOptions
+                            include_iamf
+                            include_video
+                            camera_source
+                            cameras
+                            cameras_loaded
+                        />
+                    }.into_any()
+                }}
 
                 <RecordingControls
                     selected_node_id
                     include_iamf
                     include_video
                     camera_source
+                    calibration_mode
                     session_error
                 />
             </div>
@@ -257,6 +291,7 @@ fn RecordingControls(
     include_iamf: RwSignal<bool>,
     include_video: RwSignal<bool>,
     camera_source: RwSignal<String>,
+    calibration_mode: RwSignal<bool>,
     session_error: RwSignal<Option<String>>,
 ) -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState");
@@ -282,7 +317,8 @@ fn RecordingControls(
             .unwrap_or(false)
     };
 
-    let can_start = move || !selected_node_id.get().is_empty() && !is_busy();
+    let can_start =
+        move || (calibration_mode.get() || !selected_node_id.get().is_empty()) && !is_busy();
 
     let status_label = move || {
         active_recording
@@ -292,25 +328,40 @@ fn RecordingControls(
     };
 
     let on_start = move |_| {
+        let calibration = calibration_mode.get_untracked();
         let node_id = selected_node_id.get_untracked();
-        if node_id.is_empty() {
+        if node_id.is_empty() && !calibration {
             session_error.set(Some("Select a listener node first.".into()));
             return;
         }
         session_error.set(None);
-        let req = StartRecordingRequest {
-            listener_node_id: node_id,
-            include_ambisonics: true,
-            include_iamf: include_iamf.get_untracked(),
-            include_video: include_video.get_untracked(),
-            camera_source: {
-                let s = camera_source.get_untracked();
-                if s.is_empty() {
-                    None
-                } else {
-                    Some(s)
-                }
-            },
+        let req = if calibration {
+            StartRecordingRequest {
+                // Backend captures all registered nodes; the sentinel key marks
+                // the session as node-independent.
+                listener_node_id: "calibration".into(),
+                include_ambisonics: false,
+                include_iamf: false,
+                include_video: false,
+                camera_source: None,
+                capture_kind: "calibration".into(),
+            }
+        } else {
+            StartRecordingRequest {
+                listener_node_id: node_id,
+                include_ambisonics: true,
+                include_iamf: include_iamf.get_untracked(),
+                include_video: include_video.get_untracked(),
+                camera_source: {
+                    let s = camera_source.get_untracked();
+                    if s.is_empty() {
+                        None
+                    } else {
+                        Some(s)
+                    }
+                },
+                capture_kind: "recording".into(),
+            }
         };
         spawn_local(async move {
             match api::start_recording(req).await {
@@ -364,13 +415,22 @@ fn RecordingControls(
                             <span class="rec-status">{status_label()}</span>
                             <span class="rec-elapsed">{elapsed_str}</span>
                             <div class="rec-format-badges">
-                                <span class="badge badge--active">"Ambisonics"</span>
-                                {session.include_iamf.then(|| view! {
-                                    <span class="badge badge--active">"IAMF"</span>
-                                })}
-                                {session.include_video.then(|| view! {
-                                    <span class="badge badge--active">"Video"</span>
-                                })}
+                                {if session.capture_kind == "calibration" {
+                                    view! {
+                                        <span class="badge badge--active">"Calibration"</span>
+                                        <span class="badge">"all nodes"</span>
+                                    }.into_any()
+                                } else {
+                                    view! {
+                                        <span class="badge badge--active">"Ambisonics"</span>
+                                        {session.include_iamf.then(|| view! {
+                                            <span class="badge badge--active">"IAMF"</span>
+                                        })}
+                                        {session.include_video.then(|| view! {
+                                            <span class="badge badge--active">"Video"</span>
+                                        })}
+                                    }.into_any()
+                                }}
                             </div>
                         </div>
                     }.into_any()

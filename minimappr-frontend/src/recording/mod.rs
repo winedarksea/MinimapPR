@@ -62,6 +62,13 @@ pub struct RecordingSession {
     pub video_ready: bool,
     #[serde(default)]
     pub error_message: Option<String>,
+    /// "recording" (IAMF studio render) or "calibration" (multi-node raw capture).
+    #[serde(default = "default_capture_kind")]
+    pub capture_kind: String,
+}
+
+pub fn default_capture_kind() -> String {
+    "recording".into()
 }
 
 /// Request body for POST /api/v1/recordings.
@@ -85,6 +92,9 @@ pub struct StartRecordingRequest {
     /// On macOS: AVFoundation device index string (e.g., "0").
     /// On Linux/RPi: v4l2 device path (e.g., "/dev/video0").
     pub camera_source: Option<String>,
+    /// "recording" | "calibration" — calibration captures raw multichannel
+    /// audio from every registered node for ground-truth training bundles.
+    pub capture_kind: String,
 }
 
 /// A completed or in-progress recording returned by GET /api/v1/recordings.
@@ -108,6 +118,41 @@ pub struct RecordingLibraryEntry {
     pub status: RecordingStatus,
     #[serde(default)]
     pub error_message: Option<String>,
+    #[serde(default = "default_capture_kind")]
+    pub capture_kind: String,
+}
+
+/// Operator-entered ground-truth event for a calibration capture session.
+///
+/// Nanosecond timestamps are carried as f64 (browser JSON): precision loss is
+/// sub-microsecond, well inside the harness's ±2 s match slop.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct GroundTruthEvent {
+    pub event_id: String,
+    pub session_id: String,
+    pub label: String,
+    #[serde(default)]
+    pub label_category: String,
+    pub lat: Option<f64>,
+    pub lon: Option<f64>,
+    pub alt_m: Option<f64>,
+    pub start_ns: f64,
+    pub end_ns: f64,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+/// Request body for POST /api/v1/calibration/{session_id}/ground-truth.
+#[derive(Clone, Debug, Serialize)]
+pub struct GroundTruthEventIn {
+    pub label: String,
+    pub label_category: String,
+    pub lat: f64,
+    pub lon: f64,
+    pub alt_m: f64,
+    pub start_ns: f64,
+    pub end_ns: f64,
+    pub notes: Option<String>,
 }
 
 /// A camera/video capture device returned by GET /api/v1/cameras.

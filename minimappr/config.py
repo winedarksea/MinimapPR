@@ -438,6 +438,10 @@ class Settings:
     large_artifact_dir: Path = Path("data/artifacts")
     map_overlay_dir: Path = Path("data/overlays")
     capture_final_tracks_settle_seconds: float = 30.0
+    # Calibration captures mirror raw f32 audio for every registered node in
+    # RAM (~0.7 MB/s/node at 44.1 kHz × 4 ch): 2 min × 4 nodes ≈ 340 MB peak.
+    # Hard cap enforced at session start rather than silently truncating.
+    calibration_max_duration_s: float = 120.0
     iamf_ambi_profile: str = "parametric_v2"
     # Raised-cosine omni blend above the alias cutoff for IAMF object renders
     # so objects keep full bandwidth (contract §7 rung 2 semantics, offline).

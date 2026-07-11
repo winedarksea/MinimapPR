@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import sqlite3
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -432,6 +433,25 @@ class Storage:
             CREATE INDEX IF NOT EXISTS idx_capture_sessions_created ON capture_sessions(created_ns DESC);
             CREATE INDEX IF NOT EXISTS idx_capture_sessions_state ON capture_sessions(state);
 
+            CREATE TABLE IF NOT EXISTS calibration_ground_truth (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL REFERENCES capture_sessions(session_id) ON DELETE CASCADE,
+                label TEXT NOT NULL,
+                label_category TEXT NOT NULL DEFAULT 'unknown',
+                geometry_kind TEXT NOT NULL DEFAULT 'static',
+                lat REAL,
+                lon REAL,
+                alt_m REAL,
+                trajectory_json TEXT,  -- reserved for future GPX/CSV trajectory import
+                start_ns INTEGER NOT NULL,
+                end_ns INTEGER NOT NULL,
+                notes TEXT,
+                created_ns INTEGER NOT NULL,
+                updated_ns INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_calibration_gt_session
+                ON calibration_ground_truth(session_id, start_ns);
+
             -- NOTE: the legacy `effectors` / `effector_artifacts` tables are intentionally
             -- NOT created here. They are migrated into `nodes` / `node_artifacts` by
             -- `_migrate_effectors_into_nodes()` and renamed to `*_backup_v1`. Recreating
@@ -540,6 +560,14 @@ class Storage:
                 "ambix_path": "TEXT",
                 "object_path": "TEXT",
                 "visual_path": "TEXT",
+                "capture_kind": "TEXT NOT NULL DEFAULT 'recording'",
+                "calibration_manifest_path": "TEXT",
+            },
+        )
+        await self._ensure_columns(
+            "training_examples",
+            {
+                "embedding_path": "TEXT",
             },
         )
         await self._deduplicate_reporting_window_canonicals()
@@ -1846,6 +1874,7 @@ class Storage:
         manifest_path: str,
         created_ns: int,
         updated_ns: int,
+        embedding_path: str | None = None,
     ) -> None:
         db = self._require_db()
         async with self._write_guard():
@@ -1853,15 +1882,16 @@ class Storage:
                 """
                 INSERT INTO training_examples (
                     detection_id, label, label_category, example_kind, audio_path,
-                    manifest_path, created_ns, updated_ns
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    manifest_path, created_ns, updated_ns, embedding_path
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(detection_id) DO UPDATE SET
                     label = excluded.label,
                     label_category = excluded.label_category,
                     example_kind = excluded.example_kind,
                     audio_path = excluded.audio_path,
                     manifest_path = excluded.manifest_path,
-                    updated_ns = excluded.updated_ns
+                    updated_ns = excluded.updated_ns,
+                    embedding_path = excluded.embedding_path
                 """,
                 (
                     detection_id,
@@ -1872,6 +1902,7 @@ class Storage:
                     manifest_path,
                     created_ns,
                     updated_ns,
+                    embedding_path,
                 ),
             )
             await self._commit_if_needed(db)
@@ -1896,6 +1927,7 @@ class Storage:
         limit: int = 100,
         *,
         since_ns: int | None = None,
+        until_ns: int | None = None,
         min_label_confidence: float | None = None,
         review_state: str | None = None,
     ) -> list[dict]:
@@ -1905,6 +1937,9 @@ class Storage:
         if since_ns is not None:
             clauses.append("timestamp_ns >= ?")
             params.append(int(since_ns))
+        if until_ns is not None:
+            clauses.append("timestamp_ns <= ?")
+            params.append(int(until_ns))
         if min_label_confidence is not None:
             clauses.append("label_confidence >= ?")
             params.append(float(min_label_confidence))
@@ -2785,8 +2820,8 @@ class Storage:
                 session_id, state, stream_key, range_lease_id,
                 start_time_ns, end_time_ns, first_frame_pts_ns,
                     work_dir, video_path, ambix_path, iamf_path, object_path, visual_path, youtube_path,
-                    error, created_ns
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    error, created_ns, capture_kind, calibration_manifest_path
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     record.session_id,
@@ -2805,6 +2840,10 @@ class Storage:
                     str(record.youtube_path) if record.youtube_path else None,
                     record.error,
                     record.created_ns,
+                    getattr(record, "capture_kind", "recording") or "recording",
+                    str(record.calibration_manifest_path)
+                    if getattr(record, "calibration_manifest_path", None)
+                    else None,
                 ),
             )
             await self._commit_if_needed(db)
@@ -2887,6 +2926,104 @@ class Storage:
             expires_ns=None,
             metadata=metadata,
         )
+
+    # ── Calibration ground truth ───────────────────────────────────────────────
+
+    async def insert_calibration_ground_truth(
+        self,
+        *,
+        session_id: str,
+        label: str,
+        label_category: str,
+        lat: float | None,
+        lon: float | None,
+        alt_m: float | None,
+        start_ns: int,
+        end_ns: int,
+        notes: str | None = None,
+        geometry_kind: str = "static",
+        event_id: str | None = None,
+    ) -> dict:
+        db = self._require_db()
+        now_ns = time.time_ns()
+        final_id = event_id or f"cgt-{uuid.uuid4().hex[:16]}"
+        async with self._write_guard():
+            await db.execute(
+                """
+                INSERT INTO calibration_ground_truth (
+                    id, session_id, label, label_category, geometry_kind,
+                    lat, lon, alt_m, trajectory_json, start_ns, end_ns, notes,
+                    created_ns, updated_ns
+                ) VALUES (?,?,?,?,?,?,?,?,NULL,?,?,?,?,?)
+                """,
+                (
+                    final_id,
+                    session_id,
+                    label,
+                    label_category,
+                    geometry_kind,
+                    lat,
+                    lon,
+                    alt_m,
+                    int(start_ns),
+                    int(end_ns),
+                    notes,
+                    now_ns,
+                    now_ns,
+                ),
+            )
+            await self._commit_if_needed(db)
+        row = await self.get_calibration_ground_truth(final_id)
+        assert row is not None
+        return row
+
+    async def get_calibration_ground_truth(self, event_id: str) -> dict | None:
+        db = self._require_db()
+        row = await (
+            await db.execute(
+                "SELECT * FROM calibration_ground_truth WHERE id=?", (event_id,)
+            )
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    async def list_calibration_ground_truth(self, session_id: str) -> list[dict]:
+        db = self._require_db()
+        rows = await (
+            await db.execute(
+                "SELECT * FROM calibration_ground_truth WHERE session_id=? ORDER BY start_ns ASC",
+                (session_id,),
+            )
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    async def update_calibration_ground_truth(
+        self, event_id: str, updates: dict[str, Any]
+    ) -> dict | None:
+        allowed = {
+            "label", "label_category", "lat", "lon", "alt_m",
+            "start_ns", "end_ns", "notes",
+        }
+        fields = {k: v for k, v in updates.items() if k in allowed}
+        if not fields:
+            return await self.get_calibration_ground_truth(event_id)
+        db = self._require_db()
+        set_clause = ", ".join(f"{k}=?" for k in fields)
+        async with self._write_guard():
+            await db.execute(
+                f"UPDATE calibration_ground_truth SET {set_clause}, updated_ns=? WHERE id=?",
+                (*fields.values(), time.time_ns(), event_id),
+            )
+            await self._commit_if_needed(db)
+        return await self.get_calibration_ground_truth(event_id)
+
+    async def delete_calibration_ground_truth(self, event_id: str) -> bool:
+        db = self._require_db()
+        async with self._write_guard():
+            cursor = await db.execute(
+                "DELETE FROM calibration_ground_truth WHERE id=?", (event_id,)
+            )
+            await self._commit_if_needed(db)
+        return cursor.rowcount > 0
 
     # ── Track / detection range queries (for iamf_pipeline) ──────────────────
 

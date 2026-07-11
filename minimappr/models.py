@@ -1005,3 +1005,55 @@ class PipelineNodesResponse(BaseModel):
     active_pipeline: Literal["python", "rust"]
     nodes: list[PipelineNodeView] = Field(default_factory=list)
     pipeline_seconds_behind_realtime: float | None = None
+
+
+# ── Calibration ground truth (training-data bundles) ─────────────────────────
+
+class CalibrationGroundTruthIn(BaseModel):
+    """Operator-entered ground-truth event for a calibration capture session.
+
+    v1 supports static sources only; the bundle schema reserves a trajectory
+    geometry kind for future GPX/CSV import.
+    """
+
+    label: str
+    label_category: str = "unknown"
+    lat: float
+    lon: float
+    alt_m: float = 0.0
+    start_ns: int
+    end_ns: int
+    notes: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_window(self) -> "CalibrationGroundTruthIn":
+        if self.end_ns < self.start_ns:
+            raise ValueError("end_ns must be >= start_ns")
+        return self
+
+
+class CalibrationGroundTruthUpdate(BaseModel):
+    label: str | None = None
+    label_category: str | None = None
+    lat: float | None = None
+    lon: float | None = None
+    alt_m: float | None = None
+    start_ns: int | None = None
+    end_ns: int | None = None
+    notes: str | None = None
+
+
+class CalibrationGroundTruthEvent(BaseModel):
+    event_id: str
+    session_id: str
+    label: str
+    label_category: str = "unknown"
+    geometry_kind: str = "static"
+    lat: float | None = None
+    lon: float | None = None
+    alt_m: float | None = None
+    start_ns: int
+    end_ns: int
+    notes: str | None = None
+    created_ns: int = 0
+    updated_ns: int = 0
