@@ -1,0 +1,93 @@
+name: Publish to PyPI
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      test_pypi:
+        description: 'Publish to TestPyPI instead of PyPI'
+        type: boolean
+        default: false
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: minimappr-frontend
+
+      - name: Install trunk
+        run: |
+          curl -LsSf https://github.com/trunk-rs/trunk/releases/latest/download/trunk-x86_64-unknown-linux-gnu.tar.gz \
+            | tar -xzf- -C ~/.cargo/bin
+
+      - name: Build frontend
+        run: scripts/build_frontend.sh
+
+      - name: Verify frontend wasm bundled
+        run: ls minimappr/frontend/*.wasm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install build tooling
+        run: python -m pip install --upgrade build
+
+      - name: Sync package version from release tag
+        if: github.event_name == 'release'
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          VERSION="${TAG#v}"
+          python - "$VERSION" <<'EOF'
+          import re
+          import sys
+
+          version = sys.argv[1]
+          path = "pyproject.toml"
+          with open(path) as f:
+              content = f.read()
+          new_content = re.sub(
+              r'^version = ".*"$',
+              f'version = "{version}"',
+              content,
+              count=1,
+              flags=re.MULTILINE,
+          )
+          if new_content == content:
+              raise SystemExit("version line not found/updated in pyproject.toml")
+          with open(path, "w") as f:
+              f.write(new_content)
+          print(f"pyproject.toml version set to {version}")
+          EOF
+
+      - name: Build sdist and wheel
+        run: |
+          rm -rf dist
+          python -m build
+
+      - name: Sanity-check wheel contains frontend wasm
+        run: unzip -l dist/*.whl | grep frontend | grep -q '\.wasm'
+
+      - name: Publish to TestPyPI
+        if: github.event_name == 'workflow_dispatch' && inputs.test_pypi
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+      - name: Publish to PyPI
+        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && !inputs.test_pypi)
+        uses: pypa/gh-action-pypi-publish@release/v1

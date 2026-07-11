@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MinimapPR — Realtime Environmental Awareness</title>
+<meta name="description" content="Self-hosted real-time acoustic localization, classification, and common operating picture. Single node or a synced array. Install with one command.">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<style>
+  :root {
+    color-scheme: dark;
+    --primary: #9ecaff;
+    --primary-strong: #4E7CFF;
+    --on-primary: #003260;
+    --primary-container: #16345c;
+    --surface: #0f1319;
+    --surface-dim: #0a0d12;
+    --surface-container: #161b22;
+    --surface-container-high: #1e242d;
+    --surface-container-highest: #262d38;
+    --on-surface: #e2e5ea;
+    --on-surface-variant: #a8adb7;
+    --outline: #30363d;
+    --ok: #22c55e;
+    --warn: #ff9030;
+    --danger: #ffb4ab;
+    --radius: 14px;
+    --mono: "SF Mono", "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+    --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--surface);
+    color: var(--on-surface);
+    font-family: var(--sans);
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    background:
+      radial-gradient(circle at 18% 12%, rgba(78,124,255,0.14), transparent 45%),
+      radial-gradient(circle at 82% 78%, rgba(34,197,94,0.10), transparent 45%),
+      var(--surface-dim);
+  }
+  a { color: var(--primary); }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+  code, pre, .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+  header.topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 18px 24px;
+    max-width: 1080px;
+    margin: 0 auto;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: 0.02em; }
+  .brand img { width: 28px; height: 28px; }
+  nav.toplinks { display: flex; gap: 20px; font-size: 0.92rem; }
+  nav.toplinks a { color: var(--on-surface-variant); text-decoration: none; }
+  nav.toplinks a:hover { color: var(--on-surface); }
+
+  .hero {
+    position: relative;
+    padding: 64px 24px 48px;
+    text-align: center;
+    overflow: hidden;
+  }
+  .radar-scope {
+    position: absolute;
+    top: 50%; left: 50%;
+    width: 900px; height: 900px;
+    transform: translate(-50%, -50%);
+    border-radius: 50%;
+    border: 1px solid rgba(158,202,255,0.06);
+    background:
+      repeating-radial-gradient(circle, rgba(158,202,255,0.05) 0, rgba(158,202,255,0.05) 1px, transparent 1px, transparent 120px);
+    z-index: -1;
+    pointer-events: none;
+  }
+  .hero h1 {
+    font-size: clamp(1.8rem, 4.4vw, 3rem);
+    line-height: 1.15;
+    margin: 0 auto 16px;
+    max-width: 760px;
+    font-weight: 800;
+    letter-spacing: -0.01em;
+  }
+  .hero h1 span { color: var(--primary); }
+  .hero p.sub {
+    max-width: 640px;
+    margin: 0 auto 32px;
+    color: var(--on-surface-variant);
+    font-size: 1.05rem;
+  }
+  .cta-row { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; align-items: center; }
+  .install-copy {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: var(--surface-container);
+    border: 1px solid var(--outline);
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-family: var(--mono);
+    font-size: 0.88rem;
+    color: var(--on-surface);
+  }
+  .install-copy button {
+    background: var(--primary-container);
+    color: var(--primary);
+    border: none;
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 0.78rem;
+    font-family: var(--sans);
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .install-copy button:hover { filter: brightness(1.15); }
+  .btn-secondary {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 11px 18px;
+    border-radius: 10px;
+    border: 1px solid var(--outline);
+    color: var(--on-surface);
+    text-decoration: none;
+    font-size: 0.92rem;
+    font-weight: 600;
+  }
+  .btn-secondary:hover { background: var(--surface-container-high); }
+
+  section { padding: 56px 24px; }
+  section.alt { background: rgba(255,255,255,0.012); border-top: 1px solid var(--outline); border-bottom: 1px solid var(--outline); }
+  h2.section-title {
+    font-size: 1.5rem;
+    margin: 0 0 8px;
+    text-align: center;
+  }
+  p.section-sub {
+    text-align: center;
+    color: var(--on-surface-variant);
+    max-width: 620px;
+    margin: 0 auto 36px;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 18px;
+    max-width: 1080px;
+    margin: 0 auto;
+  }
+  .card {
+    background: var(--surface-container);
+    border: 1px solid var(--outline);
+    border-radius: var(--radius);
+    padding: 20px;
+  }
+  .card .icon {
+    width: 36px; height: 36px;
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--primary-container);
+    color: var(--primary);
+    margin-bottom: 12px;
+    font-size: 1.1rem;
+  }
+  .card h3 { margin: 0 0 6px; font-size: 1.02rem; }
+  .card p { margin: 0; color: var(--on-surface-variant); font-size: 0.92rem; }
+  .grid.secondary .card { background: var(--surface-container-high); }
+
+  .install-section .tabs {
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+    margin-bottom: 18px;
+  }
+  .install-section .tab {
+    padding: 8px 16px;
+    border-radius: 8px;
+    border: 1px solid var(--outline);
+    background: var(--surface-container);
+    color: var(--on-surface-variant);
+    font-size: 0.86rem;
+    cursor: pointer;
+  }
+  .install-section .tab.active { color: var(--on-surface); border-color: var(--primary-strong); background: var(--primary-container); }
+  .install-block {
+    max-width: 720px;
+    margin: 0 auto;
+    background: var(--surface-container);
+    border: 1px solid var(--outline);
+    border-radius: var(--radius);
+    padding: 18px 20px;
+  }
+  .install-block pre {
+    margin: 0;
+    padding: 12px 14px;
+    background: var(--surface-container-highest);
+    border-radius: 8px;
+    overflow-x: auto;
+    font-size: 0.86rem;
+  }
+  .install-block[hidden] { display: none; }
+  .install-notes { margin-top: 16px; font-size: 0.88rem; color: var(--on-surface-variant); }
+  .install-notes code { background: var(--surface-container-highest); padding: 1px 6px; border-radius: 4px; }
+
+  .hw-card {
+    max-width: 720px;
+    margin: 0 auto;
+    background: var(--surface-container);
+    border: 1px dashed var(--outline);
+    border-radius: var(--radius);
+    padding: 22px;
+    text-align: center;
+    color: var(--on-surface-variant);
+  }
+  .hw-card h3 { color: var(--on-surface); margin: 0 0 8px; }
+  .hw-card .badge {
+    display: inline-block;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--warn);
+    border: 1px solid var(--warn);
+    border-radius: 20px;
+    padding: 2px 10px;
+    margin-bottom: 12px;
+  }
+
+  footer {
+    padding: 32px 24px 48px;
+    text-align: center;
+    color: var(--on-surface-variant);
+    font-size: 0.86rem;
+  }
+  footer .footlinks { display: flex; gap: 18px; justify-content: center; margin-bottom: 10px; flex-wrap: wrap; }
+  footer .footlinks a { color: var(--on-surface-variant); text-decoration: none; }
+  footer .footlinks a:hover { color: var(--primary); }
+
+  @media (prefers-color-scheme: light) {
+    :root {
+      color-scheme: dark;
+    }
+  }
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <img src="/favicon.svg" alt="MinimapPR">
+    MinimapPR
+  </div>
+  <nav class="toplinks">
+    <a href="#features">Features</a>
+    <a href="#install">Install</a>
+    <a href="#hardware">Hardware</a>
+    <a href="https://github.com/winedarksea/MinimapPR">GitHub</a>
+  </nav>
+</header>
+
+<section class="hero">
+  <div class="radar-scope" aria-hidden="true"></div>
+  <div class="wrap">
+    <h1>Realtime environmental awareness: <span>distributed sound localization</span> + classification + common operating picture.</h1>
+    <p class="sub">Self-hosted. Point a mic array (or several, PPS/GPS-synced) at the world and get a live map of what's making noise, where it is, and whether you should care.</p>
+    <div class="cta-row">
+      <div class="install-copy">
+        <code id="install-oneliner">curl -LsSf https://minimappr.com/install.sh | sh</code>
+        <button type="button" onclick="copyInstall()" id="copy-btn">Copy</button>
+      </div>
+      <a class="btn-secondary" href="https://github.com/winedarksea/MinimapPR">
+        View on GitHub
+      </a>
+    </div>
+  </div>
+</section>
+
+<section id="features">
+  <h2 class="section-title">Primary features</h2>
+  <p class="section-sub">One binary. A browser tab. Everything below runs locally on your hardware.</p>
+  <div class="grid">
+    <div class="card">
+      <div class="icon">◎</div>
+      <h3>Live common operating picture</h3>
+      <p>Full-bleed map, filtered live websocket feed, entity symbology, and uncertainty ellipses on every localized track.</p>
+    </div>
+    <div class="card">
+      <div class="icon">▦</div>
+      <h3>Single node or synced array</h3>
+      <p>Run one node standalone, or scale to a PPS/GPS-synced array with cross-node SRP-PHAT fusion and multi-server federation.</p>
+    </div>
+    <div class="card">
+      <div class="icon">♪</div>
+      <h3>BirdNET species ID + localization</h3>
+      <p>Identify bird species by call and place them on the map — not just a classification, a located, tracked entity.</p>
+    </div>
+    <div class="card">
+      <div class="icon">✎</div>
+      <h3>Speech-to-text with keyword alerting</h3>
+      <p>Transcribe speech in range and fire alerts on matched keywords, with the triggering snippet attached as evidence.</p>
+    </div>
+    <div class="card">
+      <div class="icon">⚑</div>
+      <h3>Configurable classifier alerting</h3>
+      <p>Coyote detection ships as a default rule out-of-the-box; drones, gunshots, and anything else are supported via classifier labels plus your own rules.</p>
+    </div>
+    <div class="card">
+      <div class="icon">◉</div>
+      <h3>Ambisonics / IAMF spatial audio</h3>
+      <p>Offline studio render pipeline exports spatial recordings to IAMF/MP4 for post-hoc listening and review.</p>
+    </div>
+  </div>
+</section>
+
+<section class="alt">
+  <h2 class="section-title">Also included</h2>
+  <div class="grid secondary">
+    <div class="card">
+      <div class="icon">⌖</div>
+      <h3>PTZ camera integration</h3>
+      <p>ONVIF slew-to-track: point a PTZ camera at a localized sound event automatically.</p>
+    </div>
+    <div class="card">
+      <div class="icon">▨</div>
+      <h3>BLE device localization</h3>
+      <p>RSSI multilateration to place Bluetooth devices on the same operating picture as audio tracks.</p>
+    </div>
+    <div class="card">
+      <div class="icon">≈</div>
+      <h3>Environmental sensing</h3>
+      <p>Per-node temperature/humidity sensing feeds live speed-of-sound correction for tighter localization.</p>
+    </div>
+  </div>
+</section>
+
+<section id="install" class="install-section">
+  <h2 class="section-title">Install</h2>
+  <p class="section-sub">Installs <a href="https://astral.sh/uv">uv</a>, then <code class="mono">uv tool install</code>'s MinimapPR. Cross-platform, no manual Python setup.</p>
+
+  <div class="tabs">
+    <button type="button" class="tab active" onclick="showTab('unix')" id="tab-unix">macOS / Linux</button>
+    <button type="button" class="tab" onclick="showTab('win')" id="tab-win">Windows</button>
+  </div>
+
+  <div class="install-block" id="block-unix">
+    <pre><code>curl -LsSf https://minimappr.com/install.sh | sh</code></pre>
+  </div>
+  <div class="install-block" id="block-win" hidden>
+    <pre><code>irm https://minimappr.com/install.ps1 | iex</code></pre>
+  </div>
+
+  <div class="install-notes">
+    The installer prompts to add a desktop shortcut and to launch MinimapPR now. Once running,
+    the UI is at <code>http://127.0.0.1:8080</code>. To install without the BirdNET/YAMNet/ONVIF
+    extras, pass <code>--base</code> to <code>install.sh</code>. Start it any time with
+    <code>minimappr</code>; uninstall with <code>uv tool uninstall minimappr</code>.
+  </div>
+</section>
+
+<section id="hardware">
+  <h2 class="section-title">Nodes &amp; hardware</h2>
+  <div class="hw-card">
+    <span class="badge">Coming soon</span>
+    <h3>Sirith tetrahedral array</h3>
+    <p>
+      MinimapPR's reference node design is a 4-mic tetrahedral array (PPS-synced for
+      multi-node fusion). A full node build/setup tutorial is on the way — in the meantime,
+      see the
+      <a href="https://github.com/winedarksea/MinimapPR/blob/main/firmware/README.md">firmware README</a>
+      and
+      <a href="https://github.com/winedarksea/MinimapPR/blob/main/firmware/nodes/sirith_tetrahedral/include/node_config.h">node_config.h</a>
+      for node settings.
+    </p>
+  </div>
+</section>
+
+<footer>
+  <div class="footlinks">
+    <a href="https://github.com/winedarksea/MinimapPR">GitHub</a>
+    <a href="https://pypi.org/project/minimappr/">PyPI</a>
+    <a href="https://github.com/winedarksea/MinimapPR/blob/main/LICENSE">GPL-3.0</a>
+  </div>
+  <div>MinimapPR — self-hosted, open source.</div>
+</footer>
+
+<script>
+  function copyInstall() {
+    var text = document.getElementById('install-oneliner').textContent;
+    navigator.clipboard.writeText(text).then(function () {
+      var btn = document.getElementById('copy-btn');
+      var prev = btn.textContent;
+      btn.textContent = 'Copied';
+      setTimeout(function () { btn.textContent = prev; }, 1500);
+    });
+  }
+  function showTab(which) {
+    var isUnix = which === 'unix';
+    document.getElementById('block-unix').hidden = !isUnix;
+    document.getElementById('block-win').hidden = isUnix;
+    document.getElementById('tab-unix').classList.toggle('active', isUnix);
+    document.getElementById('tab-win').classList.toggle('active', !isUnix);
+    document.getElementById('install-oneliner').textContent = isUnix
+      ? 'curl -LsSf https://minimappr.com/install.sh | sh'
+      : 'irm https://minimappr.com/install.ps1 | iex';
+  }
+</script>
+
+</body>
+</html>
