@@ -12,6 +12,7 @@ use crate::{
     audio_payload::{decode_audio_payload, DecodedAudioPayload},
     classifier_helper::ManifestClassificationAnnotator,
     derived_cache::DerivedCache,
+    diagnostics::IngestDiagnostics,
     dsp::{coverage_stats, AudioCoverageStats, SensorStreamBuffer},
     dsp_events::DspEventPublisher,
     gcc_phat::TdoaResult,
@@ -331,6 +332,7 @@ pub(crate) struct ComputePayload {
     pub(crate) dsp_event_publisher: Option<DspEventPublisher>,
     pub(crate) config: DspWorkerConfig,
     pub(crate) consumed_since_prune: Arc<AtomicU64>,
+    pub(crate) diagnostics: Option<Arc<IngestDiagnostics>>,
 }
 
 struct OwnedManifestAudio {
@@ -415,6 +417,9 @@ pub struct DspWorker {
     env_cache: Option<EnvironmentCache>,
     /// Shared publisher for DSP result manifests streamed to Python via SSE.
     dsp_event_publisher: Option<DspEventPublisher>,
+    /// Lock-free queue-wait/processing-latency + overload counters, mirrored
+    /// against the Python `FusionMetrics` equivalents. See `diagnostics.rs`.
+    diagnostics: Option<Arc<IngestDiagnostics>>,
 }
 
 impl DspWorker {
@@ -454,6 +459,7 @@ impl DspWorker {
             deferred_source_manifest_ids: Vec::new(),
             env_cache: None,
             dsp_event_publisher: None,
+            diagnostics: None,
         }
     }
 
@@ -500,6 +506,12 @@ impl DspWorker {
     /// Signals the worker to stop after the ingest channel has been fully drained.
     pub fn with_shutdown_signal(mut self, shutdown_requested: Arc<AtomicBool>) -> Self {
         self.shutdown_requested = Some(shutdown_requested);
+        self
+    }
+
+    /// Injects the shared diagnostics counters used by `/api/v1/diagnostics/summary`.
+    pub fn with_diagnostics(mut self, diagnostics: Arc<IngestDiagnostics>) -> Self {
+        self.diagnostics = Some(diagnostics);
         self
     }
 
@@ -653,6 +665,13 @@ impl DspWorker {
                 .await;
             return None;
         };
+
+        if let (Some(diagnostics), Some(received_ns)) =
+            (&self.diagnostics, first_handle.received_ns)
+        {
+            let wait_ms = now_ns.saturating_sub(received_ns) / 1_000_000;
+            diagnostics.record_queue_wait_ms(wait_ms as u64);
+        }
 
         let stream_key = first_handle.stream_key.clone();
         let arrived_via_channel = manifest.raw_payload.is_some();
@@ -1004,6 +1023,7 @@ impl DspWorker {
             dsp_event_publisher: self.dsp_event_publisher.clone(),
             config: self.config.clone(),
             consumed_since_prune: self.consumed_manifests_since_prune.clone(),
+            diagnostics: self.diagnostics.clone(),
         })
     }
 
@@ -1130,6 +1150,7 @@ impl DspWorker {
                     dsp_event_publisher: self.dsp_event_publisher.clone(),
                     config: self.config.clone(),
                     consumed_since_prune: self.consumed_manifests_since_prune.clone(),
+                    diagnostics: self.diagnostics.clone(),
                 });
             }
         }
@@ -1242,6 +1263,7 @@ impl DspWorker {
             dsp_event_publisher: self.dsp_event_publisher.clone(),
             config: self.config.clone(),
             consumed_since_prune: self.consumed_manifests_since_prune.clone(),
+            diagnostics: self.diagnostics.clone(),
         })
     }
 

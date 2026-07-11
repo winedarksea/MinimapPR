@@ -126,6 +126,11 @@ class EventCandidate:
     source_type: str
     time_quality: TimeQuality
     source_observation_ids: list[str]
+    # Wall-clock time the candidate was enqueued onto `_localization_queue`.
+    # Used to compute queue-wait latency (mirrors the Rust sidecar's
+    # `IngestDiagnostics.record_queue_wait_ms`, see diagnostics.rs) for the
+    # `/api/v1/diagnostics/summary` side-by-side comparison.
+    enqueued_ns: int = 0
 
 
 @dataclass(slots=True)
@@ -232,6 +237,17 @@ class FusionMetrics:
     localization_rejected_out_of_range_count: int = 0
     localization_stage_total_time_ms: float = 0.0
     localization_stage_max_time_ms: float = 0.0
+    # Ingest-to-DSP-result latency, split into queue wait vs. compute time so
+    # "slow because of load" and "slow because of compute" are distinguishable.
+    # Mirrors the Rust sidecar's `IngestDiagnostics` (`diagnostics.rs`) —
+    # field names/semantics are kept parallel for the
+    # `/api/v1/diagnostics/summary` side-by-side comparison.
+    ingest_queue_wait_total_ms: float = 0.0
+    ingest_queue_wait_max_ms: float = 0.0
+    ingest_queue_wait_count: int = 0
+    ingest_processing_total_ms: float = 0.0
+    ingest_processing_max_ms: float = 0.0
+    ingest_processing_count: int = 0
     stage_timeout_count: int = 0
     last_localization_algorithm: str = "gcc_phat"
     last_attempted_algorithm: str = "gcc_phat"
@@ -1106,6 +1122,14 @@ class FusionNode:
             if candidate is None:
                 self._localization_queue.task_done()
                 return
+            if candidate.enqueued_ns:
+                queue_wait_ms = max(0.0, (time.time_ns() - candidate.enqueued_ns) / 1_000_000.0)
+                self._metrics.ingest_queue_wait_total_ms += queue_wait_ms
+                self._metrics.ingest_queue_wait_max_ms = max(
+                    self._metrics.ingest_queue_wait_max_ms,
+                    queue_wait_ms,
+                )
+                self._metrics.ingest_queue_wait_count += 1
             self._realtime_tracker.mark_started(stage_name="localization", item_id=candidate.id)
             self._metrics.localization_stage_in += 1
             try:
@@ -1120,6 +1144,12 @@ class FusionNode:
                     self._metrics.localization_stage_max_time_ms,
                     elapsed_ms,
                 )
+                self._metrics.ingest_processing_total_ms += elapsed_ms
+                self._metrics.ingest_processing_max_ms = max(
+                    self._metrics.ingest_processing_max_ms,
+                    elapsed_ms,
+                )
+                self._metrics.ingest_processing_count += 1
                 if product is not None:
                     if await self._enqueue_stage(self._classification_queue, product):
                         self._metrics.localization_stage_out += 1
@@ -2535,6 +2565,7 @@ class FusionNode:
         if not result.triggered:
             return
 
+        enqueued_ns = time.time_ns()
         candidate = EventCandidate(
             id=f"evt-{next(self._candidate_counter):08d}",
             source_node_id=request.node.id,
@@ -2543,11 +2574,12 @@ class FusionNode:
             source_type=result.source_type,
             time_quality=result.time_quality,
             source_observation_ids=result.observation_ids or [],
+            enqueued_ns=enqueued_ns,
         )
         if await self._enqueue_stage(self._localization_queue, candidate):
             self._ingest_processor.confirm_trigger(result.event_time_ns)
             self._metrics.triggers_enqueued += 1
-            self._metrics.last_trigger_enqueue_ns = time.time_ns()
+            self._metrics.last_trigger_enqueue_ns = enqueued_ns
             result.response.queued_event_id = candidate.id
             return
 

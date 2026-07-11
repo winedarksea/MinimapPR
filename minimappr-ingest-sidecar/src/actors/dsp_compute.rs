@@ -476,7 +476,17 @@ fn rms_for_window(window: &[f32]) -> Option<f64> {
 
 /// Entry point dispatched onto the Rayon pool from `process_pending`.
 pub fn run_compute(payload: ComputePayload, handle: tokio::runtime::Handle) {
-    let result = run_math(payload);
+    let diagnostics = payload.diagnostics.clone();
+    let result = {
+        // Timer records elapsed compute time on drop regardless of which
+        // branch `run_math` returns through — mirrors the Python
+        // `localization_stage_total_time_ms` measurement window (pure
+        // compute, excluding ingest queue wait and result persistence I/O).
+        let _timer = diagnostics
+            .as_deref()
+            .map(crate::diagnostics::ScopedProcessingTimer::start);
+        run_math(payload)
+    };
     handle.spawn(run_io(result));
 }
 

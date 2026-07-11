@@ -1247,7 +1247,9 @@ mod tests {
     fn timing_json_decodes_clock_holdover_section() {
         let payload = binary_single_frame_payload_with_holdover(false);
         let timing = extract_binary_first_frame_timing_json(&payload).expect("timing json");
-        let clock = timing.get("clock_holdover").expect("clock_holdover present");
+        let clock = timing
+            .get("clock_holdover")
+            .expect("clock_holdover present");
         assert_eq!(clock["holdover_active"], serde_json::json!(true));
         assert_eq!(clock["lt_valid"], serde_json::json!(true));
         assert_eq!(clock["temp_model_valid"], serde_json::json!(true));

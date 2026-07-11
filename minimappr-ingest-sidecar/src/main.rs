@@ -3,6 +3,7 @@ mod audio_payload;
 mod birdnet_render;
 mod classifier_helper;
 mod derived_cache;
+mod diagnostics;
 mod dsp;
 mod dsp_events;
 mod dsp_math;
@@ -43,6 +44,7 @@ use axum::{
 };
 use clap::Parser;
 use derived_cache::DerivedCache;
+use diagnostics::IngestDiagnostics;
 use dsp_events::{DspEventPublisher, ReplayableDspEvent};
 use dsp_worker::{DspWorker, DspWorkerConfig, NodeAudioConfig, PreprocessStage, SharedDspState};
 use env_payload::{EnvIngestPayload, EnvIngestResponse};
@@ -378,6 +380,8 @@ struct AppState {
     dsp_event_publisher: DspEventPublisher,
     dsp_sse_client_permits: Arc<Semaphore>,
     dsp_sse_client_limit: usize,
+    diagnostics: Arc<IngestDiagnostics>,
+    process_start: std::time::Instant,
 }
 
 #[derive(Debug, Serialize)]
@@ -645,6 +649,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (raw_manifest_tx, raw_manifest_rx) =
         mpsc::channel::<ingest_backend::QueuedRawManifest>(raw_manifest_channel_capacity);
     let accepting_ingest = Arc::new(AtomicBool::new(true));
+    let diagnostics = Arc::new(IngestDiagnostics::default());
+    let process_start = std::time::Instant::now();
     let journal_runtime_config = JournalRuntimeConfig {
         total_journal_budget_bytes: args.total_journal_budget_bytes,
         admission_reserve_bytes: args.admission_reserve_bytes,
@@ -765,6 +771,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let worker = worker.with_env_cache(env_cache.clone());
         let worker = worker.with_dsp_event_publisher(dsp_event_publisher.clone());
         let worker = worker.with_shutdown_signal(accepting_ingest.clone());
+        let worker = worker.with_diagnostics(diagnostics.clone());
         let (worker, classification_worker) = worker.with_classification_worker(64);
         if let Some(cw) = classification_worker {
             classification_worker_handle = Some(tokio::spawn(cw.run_loop()));
@@ -787,6 +794,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         dsp_event_publisher,
         dsp_sse_client_permits: Arc::new(Semaphore::new(args.max_dsp_sse_clients.max(1))),
         dsp_sse_client_limit: args.max_dsp_sse_clients.max(1),
+        diagnostics,
+        process_start,
     };
 
     let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
@@ -843,6 +852,7 @@ fn app(state: AppState) -> Router {
             axum::routing::delete(release_pin_lease),
         )
         .route("/api/v1/dsp/status", get(dsp_status))
+        .route("/api/v1/diagnostics/summary", get(diagnostics_summary))
         .route("/api/v1/dsp/results", get(dsp_results))
         .route("/api/v1/dsp/stream", get(dsp_stream))
         .route("/api/v1/dsp/config", post(post_dsp_config))
@@ -1034,15 +1044,18 @@ async fn enqueue_request(
                     .into_response();
             }
             if err.downcast_ref::<JournalCapacityExceededError>().is_some() {
+                state.diagnostics.record_overload_rejection();
                 return overload_response(err.to_string());
             }
             if err.downcast_ref::<RawManifestChannelFullError>().is_some() {
+                state.diagnostics.record_overload_rejection();
                 return overload_response(err.to_string());
             }
             if err
                 .downcast_ref::<RawManifestQueueBytesExceededError>()
                 .is_some()
             {
+                state.diagnostics.record_overload_rejection();
                 return overload_response(err.to_string());
             }
             warn!(endpoint, error = %err, "failed to enqueue ingest request");
@@ -1223,6 +1236,69 @@ async fn dsp_status(State(state): State<AppState>) -> Response {
         total_window_underrun_drops: st.total_window_underrun_drops,
         total_stale_streams_evicted: st.total_stale_streams_evicted,
         dsp_worker_running: st.worker_running,
+    })
+    .into_response()
+}
+
+/// Simple, side-by-side-comparable summary for benchmarking this backend
+/// against the Python ingest path's `GET /api/v1/diagnostics/summary`. Field
+/// names are kept identical across both so a diff/dashboard can compare them
+/// directly. Pull-based aggregation only — reads existing shared state, does
+/// not touch the ingest/DSP hot path.
+#[derive(Debug, Serialize)]
+struct DiagnosticsSummaryResponse {
+    backend: &'static str,
+    uptime_seconds: f64,
+    frames_received: u64,
+    frames_processed: u64,
+    frames_dropped_total: u64,
+    overload_rejections: u64,
+    packet_loss_total: u64,
+    queue_depth: usize,
+    queue_capacity: usize,
+    queue_wait_avg_ms: f64,
+    queue_wait_max_ms: u64,
+    processing_avg_ms: f64,
+    processing_max_ms: u64,
+    frames_per_s: f64,
+    packet_loss_per_s: f64,
+}
+
+async fn diagnostics_summary(State(state): State<AppState>) -> Response {
+    let st = state.dsp_state.read().await;
+    let diag = state.diagnostics.snapshot();
+    let sequence_gaps = match state.backend.health().await {
+        Ok(health) => health.sequence_gaps.total_gap_count,
+        Err(_) => 0,
+    };
+    let uptime_seconds = state.process_start.elapsed().as_secs_f64();
+    let rate = |count: u64| -> f64 {
+        if uptime_seconds > 0.0 {
+            count as f64 / uptime_seconds
+        } else {
+            0.0
+        }
+    };
+    let frames_dropped_total = st.total_failures
+        + st.total_classification_drops
+        + st.total_window_underrun_drops
+        + st.total_stale_manifest_skips;
+    Json(DiagnosticsSummaryResponse {
+        backend: "rust",
+        uptime_seconds,
+        frames_received: diag.frames_received,
+        frames_processed: diag.frames_processed,
+        frames_dropped_total,
+        overload_rejections: diag.overload_rejections,
+        packet_loss_total: sequence_gaps,
+        queue_depth: state.raw_manifest_queue_backpressure.queued_messages(),
+        queue_capacity: state.raw_manifest_queue_backpressure.byte_limit(),
+        queue_wait_avg_ms: diag.queue_wait_avg_ms,
+        queue_wait_max_ms: diag.queue_wait_max_ms,
+        processing_avg_ms: diag.processing_avg_ms,
+        processing_max_ms: diag.processing_max_ms,
+        frames_per_s: rate(diag.frames_received),
+        packet_loss_per_s: rate(sequence_gaps),
     })
     .into_response()
 }

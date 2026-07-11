@@ -2,9 +2,7 @@ use num_complex::Complex32;
 use rustfft::FftPlanner;
 use serde::{Deserialize, Serialize};
 
-use crate::dsp_math::{
-    alias_cutoff_from_positions, raised_cosine_band_weight, steering_delays_s,
-};
+use crate::dsp_math::{alias_cutoff_from_positions, raised_cosine_band_weight, steering_delays_s};
 
 /// Band-split delay-and-sum render config (BEAMFORMED_RENDER_CONTRACT.md).
 #[derive(Clone, Copy, Debug)]
@@ -331,7 +329,10 @@ mod tests {
             "steered {steered_rms} should exceed off-target {away_rms}"
         );
         // 0.25-amplitude sine → RMS ≈ 0.177 when coherently reconstructed.
-        assert!(steered_rms > 0.15, "steered RMS {steered_rms} should stay near 0.177");
+        assert!(
+            steered_rms > 0.15,
+            "steered RMS {steered_rms} should stay near 0.177"
+        );
     }
 
     #[test]
