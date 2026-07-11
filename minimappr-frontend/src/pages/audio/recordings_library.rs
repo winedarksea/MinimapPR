@@ -12,6 +12,7 @@ use wasm_bindgen_futures::spawn_local;
 
 #[component]
 pub fn RecordingsLibrary() -> impl IntoView {
+    let state = use_context::<AppState>().expect("AppState");
     let entries: RwSignal<Vec<RecordingLibraryEntry>> = RwSignal::new(vec![]);
     let loading = RwSignal::new(true);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
@@ -33,6 +34,16 @@ pub fn RecordingsLibrary() -> impl IntoView {
 
     // Initial fetch on mount.
     load();
+
+    // Recording finalization happens asynchronously. The controls (and live
+    // status updates) bump this tick once it completes, keeping this library
+    // current without making users manually refresh it.
+    let recordings_library_refresh_tick = state.recordings_library_refresh_tick;
+    Effect::new(move |_| {
+        if recordings_library_refresh_tick.get() > 0 {
+            load();
+        }
+    });
 
     view! {
         <div class="recordings-library">

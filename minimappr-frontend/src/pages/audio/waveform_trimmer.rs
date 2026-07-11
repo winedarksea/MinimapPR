@@ -91,8 +91,8 @@ pub fn WaveformTrimmer(
         if width <= 0.0 {
             return;
         }
-        let x = event.client_x() as f64 - rect.left();
-        let ns_at_x = data.audio_start_ns + (x / width).clamp(0.0, 1.0) * data.duration_ns;
+        let x = (event.client_x() as f64 - rect.left()).clamp(0.0, width);
+        let ns_at_x = data.audio_start_ns + (x / width) * data.duration_ns;
 
         let default_start = data.audio_start_ns;
         let default_end = data.audio_start_ns + data.duration_ns;
@@ -106,7 +106,13 @@ pub fn WaveformTrimmer(
             .trim()
             .parse::<f64>()
             .unwrap_or(default_end);
-        let dragging_start = (ns_at_x - start_v).abs() <= (ns_at_x - end_v).abs();
+        // Select by on-screen distance, not epoch-nanosecond distance. The
+        // latter loses useful precision in JavaScript f64 values and made the
+        // red end handle unreliable for real-world Unix timestamps.
+        let ns_to_x = |ns: f64| {
+            ((ns - data.audio_start_ns) / data.duration_ns).clamp(0.0, 1.0) * width
+        };
+        let dragging_start = (x - ns_to_x(start_v)).abs() <= (x - ns_to_x(end_v)).abs();
 
         let Some(document) = web_sys::window().and_then(|w| w.document()) else {
             return;
@@ -140,6 +146,13 @@ pub fn WaveformTrimmer(
                 }
             },
         );
+        // A press is also a valid placement action. Updating immediately
+        // makes both markers usable without requiring a long drag gesture.
+        if dragging_start {
+            start_ns.set(format!("{}", ns_at_x.min(end_v) as i64));
+        } else {
+            end_ns.set(format!("{}", ns_at_x.max(start_v) as i64));
+        }
         let on_move_ref = on_move.as_ref().unchecked_ref();
         let _ = document.add_event_listener_with_callback("mousemove", on_move_ref);
 
@@ -356,12 +369,20 @@ fn draw_waveform(
     }
     ctx.stroke();
 
-    if let Some(s) = start_ns {
-        draw_marker(&ctx, ns_to_x(s), height, "#3fb950");
-    }
-    if let Some(e) = end_ns {
-        draw_marker(&ctx, ns_to_x(e), height, "#f85149");
-    }
+    // Draw the default boundaries too. This both communicates the editable
+    // range before values are entered and keeps each handle visibly targetable.
+    draw_marker(
+        &ctx,
+        ns_to_x(start_ns.unwrap_or(data.audio_start_ns)),
+        height,
+        "#3fb950",
+    );
+    draw_marker(
+        &ctx,
+        ns_to_x(end_ns.unwrap_or(data.audio_start_ns + data.duration_ns)),
+        height,
+        "#f85149",
+    );
     if let Some(p) = playhead_ns {
         draw_marker(&ctx, ns_to_x(p), height, "#e6edf3");
     }

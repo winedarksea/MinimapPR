@@ -2713,6 +2713,7 @@ async def get_config(request: Request) -> dict:
         "ingest_base_url": settings.ingest_base_url,
         "trigger_cooldown_seconds": settings.trigger_cooldown_seconds,
         "localization_window_seconds": settings.localization_window_seconds,
+        "capture_final_tracks_settle_seconds": settings.capture_final_tracks_settle_seconds,
         "snippet_retention_seconds": settings.snippet_retention_seconds,
         "retention_policy_path": str(settings.retention_policy_path),
         "retention": {
@@ -2998,6 +2999,59 @@ async def fusion_status(request: Request) -> dict:
     if not hasattr(state, "fusion_node"):
         raise HTTPException(status_code=503, detail="Fusion pipeline runs in the ingest process")
     return await state.fusion_node.status()
+
+
+@app.get("/api/v1/diagnostics/summary")
+async def diagnostics_summary(request: Request) -> dict:
+    """Simple, side-by-side-comparable summary for benchmarking this backend
+    against the Rust sidecar's `GET /api/v1/diagnostics/summary`. Field names
+    match the Rust response exactly. Pull-based aggregation only — reads
+    `FusionMetrics` counters that are already maintained on the hot path, does
+    not add any new work there beyond the counters themselves.
+    """
+    state = _require_state(request)
+    if not hasattr(state, "fusion_node"):
+        raise HTTPException(status_code=503, detail="Fusion pipeline runs in the ingest process")
+    fusion_status_snapshot = await state.fusion_node.status()
+    metrics = fusion_status_snapshot["metrics"]
+    queue = fusion_status_snapshot["queue"]
+
+    ingest_concurrency = getattr(state, "ingest_concurrency", None)
+    overload_rejections = (
+        ingest_concurrency.total_shed if isinstance(ingest_concurrency, _IngestConcurrencyLimit) else 0
+    )
+
+    uptime_seconds = max(0.0, (time.time_ns() - process_start_ns()) / 1_000_000_000.0)
+
+    def _rate(count: int) -> float:
+        return count / uptime_seconds if uptime_seconds > 0 else 0.0
+
+    def _avg(total: float, count: int) -> float:
+        return total / count if count > 0 else 0.0
+
+    frames_received = metrics["frames_accepted"]
+    frames_dropped_total = (
+        metrics["frames_rejected"] + metrics["stage_drops_backpressure"] + metrics["triggers_dropped_queue_full"]
+    )
+    packet_loss_total = metrics["frame_sequence_gaps"]
+
+    return {
+        "backend": "python",
+        "uptime_seconds": uptime_seconds,
+        "frames_received": frames_received,
+        "frames_processed": metrics["ingest_processing_count"],
+        "frames_dropped_total": frames_dropped_total,
+        "overload_rejections": overload_rejections,
+        "packet_loss_total": packet_loss_total,
+        "queue_depth": queue["localization_depth"],
+        "queue_capacity": queue["localization_max"],
+        "queue_wait_avg_ms": _avg(metrics["ingest_queue_wait_total_ms"], metrics["ingest_queue_wait_count"]),
+        "queue_wait_max_ms": metrics["ingest_queue_wait_max_ms"],
+        "processing_avg_ms": _avg(metrics["ingest_processing_total_ms"], metrics["ingest_processing_count"]),
+        "processing_max_ms": metrics["ingest_processing_max_ms"],
+        "frames_per_s": _rate(frames_received),
+        "packet_loss_per_s": _rate(packet_loss_total),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -5170,9 +5224,7 @@ def _capture_state_to_recording_status(state: CaptureState) -> str:
     mapping = {
         CaptureState.PENDING: "starting",
         CaptureState.RECORDING: "active",
-        # Keep the frontend adapter wire-compatible with already-loaded WASM
-        # clients; the raw capture endpoint still exposes awaiting_final_tracks.
-        CaptureState.AWAITING_FINAL_TRACKS: "stopping",
+        CaptureState.AWAITING_FINAL_TRACKS: "awaiting_final_tracks",
         CaptureState.PROCESSING: "stopping",
         CaptureState.COMPLETED: "completed",
         CaptureState.FAILED: "failed",

@@ -20,6 +20,12 @@ use gloo_net::http::Request;
 use js_sys::encode_uri_component;
 use serde_json::Value;
 
+#[derive(serde::Deserialize)]
+struct RecordingConfigResponse {
+    #[serde(default)]
+    capture_final_tracks_settle_seconds: Option<f64>,
+}
+
 fn enc(s: &str) -> String {
     encode_uri_component(s).as_string().unwrap_or_default()
 }
@@ -99,6 +105,18 @@ pub async fn fetch_recordings() -> Result<Vec<RecordingLibraryEntry>, String> {
         return Ok(vec![]);
     }
     expect_json(resp).await
+}
+
+/// Fetch the configured grace period for late audio/detections after stop.
+pub async fn fetch_final_tracks_settle_seconds() -> Result<f64, String> {
+    let resp = Request::get("/api/v1/config")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let config: RecordingConfigResponse = expect_json(resp).await?;
+    config
+        .capture_final_tracks_settle_seconds
+        .ok_or_else(|| "Server did not report the recording finalization delay.".into())
 }
 
 /// Delete a recording and all associated output files.

@@ -157,6 +157,9 @@ fn handle_message(state: &AppState, text: &str) {
                 state.active_recording.set(Some(session));
             } else {
                 state.active_recording.set(None);
+                state
+                    .recordings_library_refresh_tick
+                    .update(|tick| *tick = tick.wrapping_add(1));
             }
         }
         LiveEvent::OverlayUpdated { .. } => {

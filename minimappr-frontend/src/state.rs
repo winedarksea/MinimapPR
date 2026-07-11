@@ -185,6 +185,9 @@ pub struct AppState {
     /// Active recording session — persists across navigation so the backend
     /// session isn't lost if the user leaves the recording page.
     pub active_recording: RwSignal<Option<RecordingSession>>,
+    /// Incremented when a recording reaches a terminal state so consumers can
+    /// reload persisted recording data without coupling to the controls.
+    pub recordings_library_refresh_tick: RwSignal<u64>,
     /// COP item currently hovered or clicked; drives map and sidebar highlighting.
     pub selected_cop_item: RwSignal<Option<CopSelection>>,
     pub map_context_menu: RwSignal<Option<MapContextMenuState>>,
@@ -229,6 +232,7 @@ impl AppState {
             audio_drawer_detection_id: RwSignal::new(None),
             audio_drawer_track_id: RwSignal::new(None),
             active_recording: RwSignal::new(None),
+            recordings_library_refresh_tick: RwSignal::new(0),
             selected_cop_item: RwSignal::new(None),
             map_context_menu: RwSignal::new(None),
             zone_draft: RwSignal::new(None),

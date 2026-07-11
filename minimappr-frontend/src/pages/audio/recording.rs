@@ -7,6 +7,8 @@ use gloo_timers::future::TimeoutFuture;
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
+const DEFAULT_FINAL_TRACKS_SETTLE_SECONDS: f64 = 30.0;
+
 // ── Top-level page ───────────────────────────────────────────────
 
 #[component]
@@ -296,6 +298,17 @@ fn RecordingControls(
 ) -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState");
     let active_recording = state.active_recording;
+    let recordings_library_refresh_tick = state.recordings_library_refresh_tick;
+    let final_tracks_settle_seconds = RwSignal::new(DEFAULT_FINAL_TRACKS_SETTLE_SECONDS);
+
+    // Read the server setting rather than baking the default into the UI; the
+    // delay is intentionally configurable for deployments with different
+    // audio/network buffering characteristics.
+    spawn_local(async move {
+        if let Ok(seconds) = api::fetch_final_tracks_settle_seconds().await {
+            final_tracks_settle_seconds.set(seconds);
+        }
+    });
 
     let now_ms: RwSignal<f64> = RwSignal::new(js_sys::Date::now());
     let (timer_abort_handle, timer_abort_registration) = AbortHandle::new_pair();
@@ -388,8 +401,13 @@ fn RecordingControls(
                 Ok(session) => {
                     active_recording.set(Some(session));
                     session_error.set(None);
-                    poll_recording_until_finished(session_id, active_recording, session_error)
-                        .await;
+                    poll_recording_until_finished(
+                        session_id,
+                        active_recording,
+                        session_error,
+                        recordings_library_refresh_tick,
+                    )
+                    .await;
                 }
                 Err(e) => session_error.set(Some(e)),
             }
@@ -432,6 +450,14 @@ fn RecordingControls(
                                     }.into_any()
                                 }}
                             </div>
+                            {matches!(session.status, crate::recording::RecordingStatus::AwaitingFinalTracks).then(|| {
+                                let seconds = format_settle_seconds(final_tracks_settle_seconds.get());
+                                view! {
+                                    <p class="rec-finalization-note">
+                                        "Waiting about " {seconds} " for late audio and detections to arrive before saving."
+                                    </p>
+                                }
+                            })}
                         </div>
                     }.into_any()
                 } else {
@@ -478,6 +504,7 @@ async fn poll_recording_until_finished(
     session_id: String,
     active_recording: RwSignal<Option<crate::recording::RecordingSession>>,
     session_error: RwSignal<Option<String>>,
+    recordings_library_refresh_tick: RwSignal<u64>,
 ) {
     for _ in 0..120 {
         TimeoutFuture::new(1_000).await;
@@ -487,6 +514,7 @@ async fn poll_recording_until_finished(
                 active_recording.set(Some(session));
                 session_error.set(None);
                 if finished {
+                    recordings_library_refresh_tick.update(|tick| *tick = tick.wrapping_add(1));
                     break;
                 }
             }
@@ -495,5 +523,13 @@ async fn poll_recording_until_finished(
                 break;
             }
         }
+    }
+}
+
+fn format_settle_seconds(seconds: f64) -> String {
+    if (seconds.fract()).abs() < f64::EPSILON {
+        format!("{} seconds", seconds as u64)
+    } else {
+        format!("{seconds:.1} seconds")
     }
 }
