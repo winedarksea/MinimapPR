@@ -17,6 +17,7 @@ from minimappr.core.fusion_node import FusionNode
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.localization import LocalizationEngine, LocalizationResult
 from minimappr.core.node_registry import NodeRegistry
+from minimappr.core.omni_scanner import OmniScanResult
 from minimappr.core.tracking import TrackManager
 from minimappr.core.zones import ZoneMatcher
 from minimappr.models import GeoPoint, IngestFrameRequest, NodeSpec, NodeType
@@ -1772,6 +1773,74 @@ async def test_fusion_ingests_rust_classifier_render_fallback_as_omni(tmp_path: 
     assert detection["feature_summary"]["localization_method"] == "rust_classifier_render_fallback"
     assert detection["feature_summary"]["rust_fallback_reason"] == "single_point_node"
     assert tuple(detection["position_m"]) == pytest.approx(node.position_m)
+
+    await fusion.stop()
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_continuous_omni_scan_persists_raw_sensor_detection_and_broadcasts(tmp_path: Path) -> None:
+    settings = Settings(
+        db_path=tmp_path / "continuous_omni.db",
+        snippet_dir=tmp_path / "snippets",
+        snippet_retention_seconds=0,
+        fusion_worker_count=1,
+        stt_enabled=False,
+    )
+    settings.db_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.snippet_dir.mkdir(parents=True, exist_ok=True)
+    storage = Storage(settings.db_path)
+    await storage.initialize()
+    live_events: list[dict] = []
+    registry = NodeRegistry()
+    fusion = FusionNode(
+        settings=settings,
+        registry=registry,
+        buffer=MultiSensorBuffer(max_duration_seconds=settings.max_sensor_buffer_seconds),
+        localizer=LocalizationEngine(max_tau_s=0.03),
+        classifier=HeuristicClassifier(),
+        tracker=TrackManager(settings),
+        storage=storage,
+        live_callback=lambda payload: live_events.append(payload) or asyncio.sleep(0),
+        coordinate_frame=LocalCoordinateFrame(origin=GeoPoint(lat=37.0, lon=-122.0, alt_m=0.0), mode="flat"),
+        zone_matcher=ZoneMatcher(storage=storage),
+    )
+    node = NodeSpec(
+        id="continuous-omni-node",
+        node_type=NodeType.POINT,
+        position_m=(3.0, 1.0, 2.0),
+        sensor_offsets_m=[(0.0, 0.0, 0.0)],
+        capabilities=["audio"],
+    )
+    await registry.upsert(node, 1_739_950_000_000_000_000)
+    await storage.upsert_node(
+        spec=node,
+        last_seen_ns=1_739_950_000_000_000_000,
+        position_geo=GeoPoint(lat=37.0, lon=-122.0, alt_m=0.0),
+    )
+    await fusion.start()
+    audio = np.full(16_000, 0.2, dtype=np.float32)
+
+    await fusion.ingest_continuous_scan_result(
+        OmniScanResult(
+            node=node,
+            sensor_id=f"{node.id}:ch0",
+            audio=audio,
+            sample_rate_hz=16_000,
+            end_time_ns=1_739_950_000_000_000_100,
+            classification=ClassificationResult(
+                label="drone", confidence=0.5, scores={"drone": 0.5}, features={}
+            ),
+            rms=0.2,
+        )
+    )
+
+    detections = await storage.list_detections(limit=10)
+    assert len(detections) == 1
+    assert detections[0]["source_type"] == "raw_sensor"
+    assert detections[0]["reporting_modality"] == "omni"
+    assert detections[0]["feature_summary"]["omni_continuous_scan"] is True
+    assert any(event.get("type") == "detection" for event in live_events)
 
     await fusion.stop()
     await storage.close()

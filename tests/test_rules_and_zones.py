@@ -7,7 +7,7 @@ import pytest
 
 from minimappr.core.rules import ConfigRuleEngine
 from minimappr.core.zones import ZoneMatcher
-from minimappr.models import DetectionEvent
+from minimappr.models import DetectionEvent, TranscriptRecord
 from minimappr.storage.db import Storage
 
 
@@ -107,3 +107,41 @@ async def test_rules_engine_config_and_cooldown(tmp_path: Path) -> None:
     assert second
     assert second[0].matched is False
     assert second[0].reason == "cooldown"
+
+
+@pytest.mark.asyncio
+async def test_default_drone_rule_alerts_at_head_acceptance_threshold(tmp_path: Path) -> None:
+    engine = ConfigRuleEngine(tmp_path / "missing-rules.json")
+    detection = DetectionEvent(
+        id="det-drone",
+        timestamp_ns=1_700_000_000_000_000_000,
+        position_m=(0.0, 0.0, 0.0),
+        confidence=0.5,
+        gdop=1.2,
+        label="drone",
+        label_category="security",
+        label_confidence=0.5,
+        reference_sensor="node-a:ch0",
+    )
+    evaluations = await engine.evaluate(detection=detection, track=None)
+    drone = next(item for item in evaluations if item.rule_id == "drone_alert")
+    assert drone.matched is True
+
+
+@pytest.mark.asyncio
+async def test_transcript_rule_matches_text(tmp_path: Path) -> None:
+    engine = ConfigRuleEngine(tmp_path / "missing-rules.json")
+    transcript = TranscriptRecord(
+        id="txt-001",
+        node_id="node-a",
+        sensor_id="node-a:ch0",
+        start_ns=1,
+        end_ns=2,
+        text="please help me now",
+        model="test",
+        trigger_confidence=0.9,
+        created_ns=3,
+    )
+    evaluations = await engine.evaluate_transcript(transcript)
+    help_me = next(item for item in evaluations if item.rule_id == "help_me_alert")
+    assert help_me.matched is True

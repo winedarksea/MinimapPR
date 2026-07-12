@@ -52,7 +52,8 @@ effector = [
     "onvif-zeep-async>=3.1,<4.0",
 ]
 stt = [
-    "useful-moonshine-onnx",
+    "huggingface-hub>=0.30,<1.0",
+    "transformers>=4.48,<5.0",
 ]
 train = [
     "tf2onnx>=1.16",
@@ -61,7 +62,8 @@ train = [
 full = [
     "birdnet>=0.2.12,<1.0",
     "onvif-zeep-async>=3.1,<4.0",
-    "useful-moonshine-onnx",
+    "huggingface-hub>=0.30,<1.0",
+    "transformers>=4.48,<5.0",
 ]
 process-title = [
     "setproctitle>=1.3",

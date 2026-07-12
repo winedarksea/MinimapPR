@@ -1059,7 +1059,11 @@ class FusionNode:
             source_node_id=node.id,
             event_time_ns=scan.end_time_ns,
             sample_rate_hz=scan.sample_rate_hz,
-            source_type="omni_continuous_scan",
+            # source_type identifies the physical upstream producer.  A
+            # continuous scan is still raw sensor audio; its scan provenance
+            # is retained below in classification features instead of
+            # inventing a value outside the persisted DetectionEvent contract.
+            source_type="raw_sensor",
             time_quality=TimeQuality.FREE_RUNNING,
             source_observation_ids=[],
         )

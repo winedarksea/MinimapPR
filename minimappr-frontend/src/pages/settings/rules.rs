@@ -60,8 +60,11 @@ fn validate_and_normalize_rules(input_rules: &[RuleModel]) -> Result<Vec<RuleMod
             return Err(format!("Rule {} needs an id", index + 1));
         }
         rule.scope = rule.scope.trim().to_lowercase();
-        if rule.scope != "detection" && rule.scope != "track" {
-            return Err(format!("Rule {} scope must be detection or track", rule.id));
+        if rule.scope != "detection" && rule.scope != "track" && rule.scope != "transcript" {
+            return Err(format!(
+                "Rule {} scope must be detection, track, or transcript",
+                rule.id
+            ));
         }
         if rule.cooldown_seconds < 0.0 {
             return Err(format!("Rule {} cooldown cannot be negative", rule.id));
@@ -347,6 +350,12 @@ fn RuleEditor(rules: RwSignal<Vec<RuleModel>>, index: usize) -> impl IntoView {
                         >
                             "Track"
                         </option>
+                        <option
+                            value="transcript"
+                            selected=move || rules.with(|items| items.get(index).map(|rule| rule.scope == "transcript").unwrap_or(false))
+                        >
+                            "Transcript"
+                        </option>
                     </select>
                 </FormRow>
                 <FormRow label="Cooldown seconds">
@@ -410,6 +419,7 @@ fn RuleEditor(rules: RwSignal<Vec<RuleModel>>, index: usize) -> impl IntoView {
                 <CsvField rules=rules index=index field="zone_ids" label="Zone IDs" />
                 <CsvField rules=rules index=index field="track_statuses" label="Track statuses" />
                 <CsvField rules=rules index=index field="source_types" label="Source types" />
+                <CsvField rules=rules index=index field="transcript_contains" label="Transcript contains" />
             </div>
 
             <div class="rules-section-row">
@@ -453,6 +463,7 @@ fn CsvField(
                 "zone_ids" => join_csv(&rule.when.zone_ids),
                 "track_statuses" => join_csv(&rule.when.track_statuses),
                 "source_types" => join_csv(&rule.when.source_types),
+                "transcript_contains" => join_csv(&rule.when.transcript_contains),
                 _ => String::new(),
             }
         })
@@ -468,6 +479,7 @@ fn CsvField(
                     "zone_ids" => rule.when.zone_ids = parsed,
                     "track_statuses" => rule.when.track_statuses = parsed,
                     "source_types" => rule.when.source_types = parsed,
+                    "transcript_contains" => rule.when.transcript_contains = parsed,
                     _ => {}
                 }
             }

@@ -27,7 +27,6 @@ pub fn MapWorkspace() -> impl IntoView {
     let detections_open = RwSignal::new(persisted_layout.detections_open);
     let alerts_open = RwSignal::new(persisted_layout.alerts_open);
     let zones_open = RwSignal::new(persisted_layout.zones_open);
-    let audio_open = RwSignal::new(persisted_layout.audio_open);
     let rf_open = RwSignal::new(persisted_layout.rf_open);
     let seismic_open = RwSignal::new(persisted_layout.seismic_open);
     let speech_open = RwSignal::new(persisted_layout.speech_open);
@@ -41,7 +40,6 @@ pub fn MapWorkspace() -> impl IntoView {
             detections_open: detections_open.get(),
             alerts_open: alerts_open.get(),
             zones_open: zones_open.get(),
-            audio_open: audio_open.get(),
             rf_open: rf_open.get(),
             seismic_open: seismic_open.get(),
             speech_open: speech_open.get(),
@@ -72,14 +70,6 @@ pub fn MapWorkspace() -> impl IntoView {
             .filter(|node| node.has_capability("seismic"))
             .count()
     });
-    let speech_node_count = Signal::derive(move || {
-        state
-            .nodes
-            .get()
-            .into_iter()
-            .filter(|node| node.has_capability("speech"))
-            .count()
-    });
     let rf_badge_count = Signal::derive(move || {
         state
             .modality
@@ -91,12 +81,6 @@ pub fn MapWorkspace() -> impl IntoView {
     });
     let seismic_badge_count = Signal::derive(move || state.modality.seismic_traces.get().len());
     let speech_badge_count = Signal::derive(move || state.modality.speech_lines.get().len());
-    let audio_badge = Signal::derive(move || {
-        usize::from(
-            state.audio_drawer_detection_id.get().is_some()
-                || state.audio_drawer_track_id.get().is_some(),
-        )
-    });
 
     view! {
         <main class="cop-workspace">
@@ -125,18 +109,8 @@ pub fn MapWorkspace() -> impl IntoView {
                 <DrawerShell title=DrawerId::Zones.title() icon="polyline" open=zones_open badge=zone_count>
                     <ZonesPane />
                 </DrawerShell>
-                <DrawerShell title=DrawerId::Audio.title() icon="equalizer" open=audio_open badge=audio_badge>
-                    <div class="workspace-audio-drawer">
-                        <p class="muted">
-                            "Audio review opens as a focused slide-over so playback and analysis stay stable while the map remains live."
-                        </p>
-                        <button
-                            class="btn-sm"
-                            on:click=move |_| state.audio_drawer_open.set(true)
-                        >
-                            "Open audio analysis"
-                        </button>
-                    </div>
+                <DrawerShell title=DrawerId::Speech.title() icon="record_voice_over" open=speech_open badge=speech_badge_count>
+                    <SpeechPanel />
                 </DrawerShell>
                 {move || (rf_node_count.get() > 0).then(|| view! {
                     <DrawerShell title=DrawerId::Rf.title() icon="settings_input_antenna" open=rf_open badge=rf_badge_count>
@@ -146,11 +120,6 @@ pub fn MapWorkspace() -> impl IntoView {
                 {move || (seismic_node_count.get() > 0).then(|| view! {
                     <DrawerShell title=DrawerId::Seismic.title() icon="monitor_heart" open=seismic_open badge=seismic_badge_count>
                         <SeismicPanel />
-                    </DrawerShell>
-                })}
-                {move || (speech_node_count.get() > 0).then(|| view! {
-                    <DrawerShell title=DrawerId::Speech.title() icon="record_voice_over" open=speech_open badge=speech_badge_count>
-                        <SpeechPanel />
                     </DrawerShell>
                 })}
             </dock::WorkspaceDock>

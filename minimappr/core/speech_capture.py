@@ -53,7 +53,12 @@ class SpeechCaptureManager:
         self._settings = settings
         self._buffer = buffer
         self._storage = storage
-        self._transcriber_factory = transcriber_factory or (lambda: MoonshineTranscriber())
+        self._transcriber_factory = transcriber_factory or (
+            lambda: MoonshineTranscriber(
+                model_id=self._settings.stt_model_id,
+                cache_dir=self._settings.stt_model_cache_dir,
+            )
+        )
         self._transcriber: MoonshineTranscriber | None = None
         self._transcriber_unavailable = False
         self._sessions: dict[str, _Session] = {}

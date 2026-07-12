@@ -826,13 +826,14 @@ class RuleConditionModel(BaseModel):
     zone_ids: list[str] = Field(default_factory=list)
     track_statuses: list[str] = Field(default_factory=list)
     source_types: list[str] = Field(default_factory=list)
+    transcript_contains: list[str] = Field(default_factory=list)
     min_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 class RuleModel(BaseModel):
     id: str = Field(min_length=1)
     enabled: bool = True
-    scope: Literal["detection", "track"] = "detection"
+    scope: Literal["detection", "track", "transcript"] = "detection"
     when: RuleConditionModel = Field(default_factory=RuleConditionModel)
     actions: list[RuleActionModel] = Field(default_factory=lambda: [RuleActionModel()])
     cooldown_seconds: float = Field(default=0.0, ge=0.0)

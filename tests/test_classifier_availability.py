@@ -38,13 +38,15 @@ def test_backend_available_reflects_installed_modules(monkeypatch: pytest.Monkey
     monkeypatch.setattr(
         availability.importlib.util,
         "find_spec",
-        _fake_find_spec({"birdnet", "tensorflow", "tensorflow_hub", "onnxruntime"}),
+        _fake_find_spec(
+            {"birdnet", "tensorflow", "tensorflow_hub", "onnxruntime", "huggingface_hub", "transformers"}
+        ),
     )
     availability.probe_backends.cache_clear()
     assert availability.backend_available("birdnet") is True
     assert availability.backend_available("yamnet") is True
     assert availability.backend_available("drone_head") is True
-    assert availability.backend_available("moonshine_stt") is False
+    assert availability.backend_available("moonshine_stt") is True
     assert availability.backend_available("nonexistent") is False
 
 

@@ -77,6 +77,8 @@ pub struct RuleCondition {
     #[serde(default)]
     pub source_types: Vec<String>,
     #[serde(default)]
+    pub transcript_contains: Vec<String>,
+    #[serde(default)]
     pub min_confidence: Option<f64>,
 }
 

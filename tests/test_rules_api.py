@@ -134,3 +134,21 @@ def test_put_rules_rejects_bad_confidence(monkeypatch: pytest.MonkeyPatch, tmp_p
         response = client.put("/api/v1/rules", json={"rules": [rule]})
 
     assert response.status_code == 422
+
+
+def test_rules_api_round_trips_transcript_rule(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path)
+    transcript_rule = {
+        "id": "spoken_help",
+        "enabled": True,
+        "scope": "transcript",
+        "when": {"transcript_contains": ["help me"]},
+        "actions": [{"type": "alert", "destination": "cop", "priority": "critical"}],
+        "cooldown_seconds": 0.0,
+    }
+
+    with TestClient(app) as client:
+        response = client.put("/api/v1/rules", json={"rules": [transcript_rule]})
+        assert response.status_code == 200
+        assert response.json()["rules"][0]["scope"] == "transcript"
+        assert response.json()["rules"][0]["when"]["transcript_contains"] == ["help me"]

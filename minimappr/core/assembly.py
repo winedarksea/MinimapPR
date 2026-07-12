@@ -348,7 +348,9 @@ class DetectionAssembler:
         # -- snippet writing ---------------------------------------------------
         snippet_path: str | None = None
         snippet_expires_ns: int | None = None
-        classifier_source = str(classification.features.get("winner_member") or "yamnet").strip().lower()
+        classifier_source = str(
+            classification_features.get("winner_member") or "yamnet"
+        ).strip().lower()
         classifier_audio_retention_seconds = self._classifier_audio_retention_seconds.get(
             classifier_source, self._snippet_retention_seconds
         )

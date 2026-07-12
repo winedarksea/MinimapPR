@@ -2769,6 +2769,8 @@ async def get_config(request: Request) -> dict:
         "drone_head_model_path": str(settings.drone_head_model_path),
         "drone_head_min_confidence": settings.drone_head_min_confidence,
         "stt_enabled": settings.stt_enabled,
+        "stt_model_id": settings.stt_model_id,
+        "stt_model_cache_dir": str(settings.stt_model_cache_dir),
         "stt_trigger_min_confidence": settings.stt_trigger_min_confidence,
         "transcript_retention_seconds": settings.transcript_retention_seconds,
         "omni_scan_enabled": settings.omni_scan_enabled,

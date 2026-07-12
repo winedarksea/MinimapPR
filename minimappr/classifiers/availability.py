@@ -20,7 +20,7 @@ _BACKEND_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     "heuristic": (),
     "yamnet": ("tensorflow", "tensorflow_hub"),
     "birdnet": ("birdnet",),
-    "moonshine_stt": ("moonshine_onnx",),
+    "moonshine_stt": ("huggingface_hub", "transformers", "onnxruntime"),
     "drone_head": ("onnxruntime",),
 }
 
