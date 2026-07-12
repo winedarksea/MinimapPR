@@ -111,6 +111,22 @@ def _collapse_long_exact_zero_runs(
     return compacted
 
 
+# Drone-head labels that represent a non-detection: audio is never materialized
+# for these. Positive classes (drone, coyote, ...) keep their snippet.
+_DRONE_HEAD_NEGATIVE_LABELS = {"unknown", "ambient", "no_drone"}
+
+
+def _drone_head_retains_audio(classifier_source: str, label: str) -> bool:
+    """Whether a drone-head result should keep its audio snippet.
+
+    Only negative labels (unknown/ambient/no_drone) are discarded; every positive
+    class is retained. Non-drone-head sources are unaffected (always True here).
+    """
+    if classifier_source != "drone_head":
+        return True
+    return label.strip().lower() not in _DRONE_HEAD_NEGATIVE_LABELS
+
+
 class DetectionAssembler:
     """Assembles DetectionEvent records from classification output.
 
@@ -360,9 +376,10 @@ class DetectionAssembler:
                 classifier_source, self._snippet_retention_seconds
             )
         )
-        # The drone head reports unknown for a negative.  Never materialize an
-        # audio file for that negative result; metadata remains available.
-        if classifier_source == "drone_head" and classification_label.strip().lower() != "drone":
+        # The drone head reports a negative label ("unknown"/"ambient"/"no_drone")
+        # for non-detections. Never materialize an audio file for those; positive
+        # classes (drone, coyote, ...) keep their audio. Metadata remains available.
+        if not _drone_head_retains_audio(classifier_source, classification_label):
             classifier_audio_retention_seconds = 0
         if classifier_audio_retention_seconds > 0 and retention_tier not in {"ephemeral", "experiment"}:
             snippet_signal = classification_signal

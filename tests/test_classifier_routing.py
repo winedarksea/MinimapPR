@@ -237,3 +237,28 @@ def test_embedding_chain_skipped_without_embeddings() -> None:
     result = chained.classify(np.zeros(16000, dtype=np.float32), 16000)
     assert not head.received
     assert result.label == "engine"
+
+
+class StubThreeClassHead(EmbeddingClassifier):
+    """Mimics an N-class drone head emitting per-class scores for all labels."""
+
+    def classify_embedding(self, frames: np.ndarray) -> ClassificationResult:
+        return ClassificationResult(
+            label="coyote",
+            confidence=0.8,
+            scores={"ambient": 0.1, "drone": 0.3, "coyote": 0.8},
+            features={"model": "drone_head"},
+        )
+
+
+def test_three_label_head_namespaces_all_class_scores() -> None:
+    base = StubClassifier("engine", 0.6, features={"embedding": np.ones(1024, dtype=np.float32)})
+    head = StubThreeClassHead()
+    chained = ChainedClassifier(
+        base_classifier=base,
+        stages=[ChainStage(stage_id="drone_head", classifier=head, input_kind="embedding")],
+    )
+    result = chained.classify(np.zeros(16000, dtype=np.float32), 16000)
+    assert result.scores["drone_head:coyote"] == 0.8
+    assert result.scores["drone_head:drone"] == 0.3
+    assert result.scores["drone_head:ambient"] == 0.1

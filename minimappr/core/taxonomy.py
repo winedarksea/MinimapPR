@@ -20,7 +20,7 @@ DEFAULT_CATEGORY_TO_IFF = {
 
 def _heuristic_category_for_name(label: str) -> str:
     value = label.strip().lower()
-    if any(token in value for token in ("bird", "wild", "animal", "canid", "feline", "dog", "cat", "hawk")):
+    if any(token in value for token in ("bird", "wild", "animal", "canid", "feline", "dog", "cat", "hawk", "coyote")):
         return "wildlife"
     if any(token in value for token in ("speech", "voice", "shout", "scream", "human", "talk")):
         return "human"

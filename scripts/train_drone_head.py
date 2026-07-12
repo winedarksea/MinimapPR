@@ -1,194 +1,371 @@
 #!/usr/bin/env python3
-"""Train the drone-head classifier on YAMNet embeddings and export int8 ONNX.
+"""Train the drone-head classifier from WAV audio and export int8 ONNX.
 
-The drone head is a small dense classifier that consumes YAMNet embedding
-frames (``[1024]`` float32) and emits a binary ``no_drone``/``drone`` softmax.
-It is chained after YAMNet at runtime (see ``classifiers/drone_head.py`` and the
-``chains`` block of ``data/classifier_routing.json``).
+The drone head is a small dense classifier over YAMNet embedding frames
+(``[1024]`` float32) that emits an N-class softmax over
+``["ambient", "drone", "coyote"]`` (index 0 = negative class). It is chained
+after YAMNet at runtime (see ``classifiers/drone_head.py`` and the ``chains``
+block of ``data/classifier_routing.json``).
 
-Dataset layout (``drone_dataset/``)::
+Dataset layout is **WAV-only** — all training audio is embedded via YAMNet at
+training time with the *identical* runtime conditioning
+(:func:`minimappr.classifiers.yamnet.prepare_waveform_for_yamnet`), so train and
+serve see the same input.
 
-    drone/{matrice,mavic3,mavicmini}/<ts>_<idx>.tfdata   # tf.io.serialize_tensor'd [2,1024] f32
-    no_drone/<ts>_<idx>.tfdata
+    drone_dataset/wav/<label>/**/*.wav      # drop-dir; FPs go to wav/ambient/
+    data/training/{id}.json + .wav / .npy   # server-promoted examples
 
-Each ``.tfdata`` holds two YAMNet embedding frames for a ~1s clip. Optional
-promoted examples (``data/training/{id}.npy``, 1024-d mean-pooled) can be folded
-in with ``--promoted-dir``.
+Long recordings are chopped into overlapping segments; scarce classes are
+multiplied with deterministic waveform augmentation; the negative class is
+hardened with synthetic ambience. Augmentation and synthetic windows are
+train-only (val/test see real audio only).
 
 Outputs (``data/models/`` by default):
 
     drone_head.onnx            int8 QDQ model shipped + loaded at runtime
-    drone_head.metadata.json   labels, input shape, thresholds, metrics, counts
+    drone_head.metadata.json   schema v2: labels, negative_label, preprocessing,
+                               per-class thresholds/metrics, dataset counts
     drone_head.float.onnx      float32 reference (gitignored)
     drone_head.tflite          int8 TFLite (gitignored)
-    eval_report.json           frame/clip metrics + threshold sweep (gitignored)
-
-Group-aware split keys on the filename timestamp truncated to the minute so
-consecutive near-duplicate clips never straddle train/val/test.
+    eval_report.json           per-class metrics + threshold sweeps (gitignored)
 
 Usage::
 
-    python scripts/train_drone_head.py \
-        --dataset-dir drone_dataset --out-dir data/models --epochs 40
+    python scripts/train_drone_head.py --wav-dir drone_dataset/wav \\
+        --promoted-dir data/training --out-dir data/models \\
+        --cache-dir drone_dataset/.embed_cache --labels ambient,drone,coyote \\
+        --epochs 40 --aug-copies 1 --aug-copies-per-label coyote=8 \\
+        --synth-ambient-count 1000
 
 Requires the ``train`` extra: ``pip install -e '.[train]'`` (tf2onnx, onnx) plus
-onnxruntime (already a core dependency).
+tensorflow / tensorflow-hub / onnxruntime (core dependencies).
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import logging
-import re
+import wave
 from pathlib import Path
 from typing import Iterable
 
 import numpy as np
 
-LABELS = ["no_drone", "drone"]  # index order = softmax output order
-LABEL_TO_INDEX = {name: i for i, name in enumerate(LABELS)}
-EMBEDDING_DIM = 1024
+from minimappr.classifiers.yamnet import (
+    YAMNET_MAX_INPUT_GAIN,
+    YAMNET_PREPROCESS_VERSION,
+    YAMNET_TARGET_RMS,
+)
+from minimappr.training.augment import augment_waveform, synthesize_ambient_windows
+from minimappr.training.embedding_cache import (
+    EMBEDDING_DIM,
+    EmbeddingCache,
+    YamnetEmbedder,
+    file_content_hash,
+)
+from minimappr.training.wav_dataset import (
+    WavExample,
+    discover_wavs,
+    load_promoted,
+)
+
+DEFAULT_LABELS = ["ambient", "drone", "coyote"]
+NEGATIVE_LABEL = "ambient"
 OPSET = 13
+SAMPLE_RATE = 16_000
+
+# Reliability floor for weak positive classes (marks "reliable": false).
+_RELIABLE_MIN_GROUPS = 5
+_RELIABLE_MIN_FRAMES = 50
 
 logger = logging.getLogger("train_drone_head")
 
-# Group key = date + hour:minute from a "YYYY-MM-DD_HH-MM-SS_idx" style stem.
-_TS_RE = re.compile(r"(\d{4}-\d{2}-\d{2})[_T](\d{2})[-:](\d{2})")
-
 
 # --------------------------------------------------------------------------- #
-# Loading
+# WAV reading
 # --------------------------------------------------------------------------- #
-def _group_key(path: Path) -> str:
-    """Minute-resolution group so near-duplicate consecutive clips stay together."""
-    m = _TS_RE.search(path.stem)
-    if m:
-        return f"{m.group(1)}_{m.group(2)}-{m.group(3)}"
-    # Fall back to a stable per-file group (no leakage risk, just no grouping).
-    return hashlib.sha1(path.stem.encode()).hexdigest()[:12]
+def read_wav_waveform(
+    path: Path, offset_s: float = 0.0, duration_s: float = 0.0
+) -> tuple[np.ndarray, int]:
+    """Read a mono float32 waveform (segment) from a WAV file at its native rate.
 
-
-def _parse_tfdata(path: Path) -> np.ndarray:
-    """Return a ``[n_frames, 1024]`` float32 array from a serialized tensor file."""
-    import tensorflow as tf  # local import: heavy, optional at module import time
-
-    raw = tf.io.read_file(str(path))
-    tensor = tf.io.parse_tensor(raw, out_type=tf.float32).numpy()
-    tensor = np.asarray(tensor, dtype=np.float32)
-    if tensor.ndim == 1:
-        tensor = tensor[None, :]
-    if tensor.shape[-1] != EMBEDDING_DIM:
-        raise ValueError(f"{path}: expected last dim {EMBEDDING_DIM}, got {tensor.shape}")
-    return tensor.reshape(-1, EMBEDDING_DIM)
-
-
-def load_dataset(dataset_dir: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
-    """Load every ``.tfdata`` under ``drone/`` and ``no_drone/``.
-
-    Returns ``(frames[N,1024], labels[N], groups[N], drone_types[N])`` where each
-    embedding frame is a separate training example. ``drone_types`` records the
-    drone-model subdir (or ``"none"``) for future multi-class work.
+    ``duration_s <= 0`` reads to end. Returns ``(waveform, sample_rate)``.
     """
-    frames: list[np.ndarray] = []
-    labels: list[int] = []
-    groups: list[str] = []
-    drone_types: list[str] = []
+    with wave.open(str(path), "rb") as wav:
+        rate = wav.getframerate()
+        n_channels = wav.getnchannels()
+        sampwidth = wav.getsampwidth()
+        total = wav.getnframes()
+        start = int(round(offset_s * rate)) if offset_s > 0 else 0
+        start = max(0, min(start, total))
+        if duration_s and duration_s > 0:
+            count = int(round(duration_s * rate))
+        else:
+            count = total - start
+        count = max(0, min(count, total - start))
+        wav.setpos(start)
+        raw = wav.readframes(count)
 
-    for label_name in LABELS:
-        base = dataset_dir / label_name
-        if not base.exists():
-            logger.warning("Missing label dir %s; skipping", base)
+    if sampwidth == 2:
+        data = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+    elif sampwidth == 4:
+        data = np.frombuffer(raw, dtype=np.int32).astype(np.float32) / 2147483648.0
+    elif sampwidth == 1:
+        data = (np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
+    else:
+        raise ValueError(f"{path}: unsupported sample width {sampwidth}")
+
+    if n_channels > 1:
+        data = data.reshape(-1, n_channels).mean(axis=1)
+    return data.astype(np.float32), rate
+
+
+# --------------------------------------------------------------------------- #
+# Variant planning + embedding
+# --------------------------------------------------------------------------- #
+class PlannedVariant:
+    """One embedding job: a WavExample (or synthetic window) + variant tag."""
+
+    __slots__ = ("example", "label", "group", "variant", "seed", "synth_wave", "train_only")
+
+    def __init__(self, *, example, label, group, variant, seed=0, synth_wave=None, train_only=False):
+        self.example = example
+        self.label = label
+        self.group = group
+        self.variant = variant
+        self.seed = seed
+        self.synth_wave = synth_wave
+        self.train_only = train_only
+
+
+def _aug_copies_for(label: str, base: int, per_label: dict[str, int]) -> int:
+    return per_label.get(label, base)
+
+
+def build_variant_plan(
+    examples: list[WavExample],
+    labels: list[str],
+    *,
+    aug_copies: int,
+    aug_copies_per_label: dict[str, int],
+    synth_ambient_count: int,
+    segment_seconds: float,
+    seed: int,
+) -> list[PlannedVariant]:
+    """Return the full list of embedding jobs (orig + aug copies + synth ambience)."""
+    plan: list[PlannedVariant] = []
+    for ex in examples:
+        plan.append(PlannedVariant(example=ex, label=ex.label, group=ex.group, variant="orig"))
+        # promoted_npy has no waveform to augment.
+        if ex.origin == "promoted_npy":
             continue
-        files = sorted(base.rglob("*.tfdata"))
-        logger.info("%s: %d files", label_name, len(files))
-        for path in files:
-            try:
-                clip = _parse_tfdata(path)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Skipping %s: %s", path, exc)
-                continue
-            subdir = path.parent.name if path.parent.name != label_name else "none"
-            group = _group_key(path)
-            for frame in clip:
-                frames.append(frame)
-                labels.append(LABEL_TO_INDEX[label_name])
-                groups.append(group)
-                drone_types.append(subdir if label_name == "drone" else "none")
+        n_aug = _aug_copies_for(ex.label, aug_copies, aug_copies_per_label)
+        for k in range(n_aug):
+            plan.append(
+                PlannedVariant(
+                    example=ex,
+                    label=ex.label,
+                    group=ex.group,  # aug inherits source group (train-only drop later)
+                    variant=f"aug{k}-s{seed}",
+                    seed=seed + k + 1,
+                    train_only=True,
+                )
+            )
+    # Synthetic ambience: forced train-only, its own groups.
+    for variant_key, wave_arr in synthesize_ambient_windows(
+        synth_ambient_count, segment_seconds, seed
+    ):
+        plan.append(
+            PlannedVariant(
+                example=None,
+                label=NEGATIVE_LABEL if NEGATIVE_LABEL in labels else labels[0],
+                group=f"synth:{variant_key}",
+                variant=variant_key,
+                synth_wave=wave_arr,
+                train_only=True,
+            )
+        )
+    return plan
 
+
+def embed_plan(
+    plan: list[PlannedVariant],
+    embedder: YamnetEmbedder,
+    cache: EmbeddingCache,
+    labels: list[str],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]:
+    """Embed every planned variant, returning frame-level arrays + per-label counts.
+
+    Returns ``(frames, y, groups, train_only_mask, counts)``.
+    """
+    label_to_index = {name: i for i, name in enumerate(labels)}
+    content_hashes: dict[Path, str] = {}
+    frames: list[np.ndarray] = []
+    y: list[int] = []
+    groups: list[str] = []
+    train_only: list[bool] = []
+    counts: dict[str, dict[str, int]] = {
+        name: {"files": 0, "real": 0, "aug": 0, "synth": 0, "promoted": 0} for name in labels
+    }
+    seen_files: dict[str, set] = {name: set() for name in labels}
+
+    total = len(plan)
+    for idx, pv in enumerate(plan):
+        if idx % 200 == 0:
+            logger.info("Embedding %d/%d (cache hit rate %.2f)", idx, total, cache.hit_rate)
+        emb = _embed_variant(pv, embedder, cache, content_hashes)
+        if emb.shape[0] == 0:
+            continue
+        li = label_to_index[pv.label]
+        for frame in emb:
+            frames.append(frame.astype(np.float32))
+            y.append(li)
+            groups.append(pv.group)
+            train_only.append(pv.train_only)
+
+        # Bookkeeping.
+        n = emb.shape[0]
+        if pv.synth_wave is not None:
+            counts[pv.label]["synth"] += n
+        elif pv.variant == "orig":
+            if pv.example is not None and pv.example.origin in {"promoted", "promoted_npy"}:
+                counts[pv.label]["promoted"] += n
+            else:
+                counts[pv.label]["real"] += n
+            if pv.example is not None:
+                seen_files[pv.label].add(str(pv.example.path))
+        else:
+            counts[pv.label]["aug"] += n
+
+    for name in labels:
+        counts[name]["files"] = len(seen_files[name])
+
+    logger.info(
+        "Embedded %d frames (cache hits=%d misses=%d hit_rate=%.2f)",
+        len(frames), cache.hits, cache.misses, cache.hit_rate,
+    )
     if not frames:
-        raise SystemExit(f"No .tfdata examples found under {dataset_dir}")
+        raise SystemExit("No embeddings produced — check --wav-dir / --promoted-dir")
     return (
         np.stack(frames).astype(np.float32),
-        np.asarray(labels, dtype=np.int64),
+        np.asarray(y, dtype=np.int64),
         np.asarray(groups, dtype=object),
-        np.asarray(drone_types, dtype=object),
+        np.asarray(train_only, dtype=bool),
+        counts,
     )
 
 
-def load_promoted(promoted_dir: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Optionally load promoted mean-pooled examples from ``data/training``.
+def _embed_variant(pv, embedder, cache, content_hashes) -> np.ndarray:
+    # Synthetic ambience: waveform is in-memory, cache by its self-describing key.
+    if pv.synth_wave is not None:
+        key = cache.make_key("synth", variant=pv.variant)
+        return cache.get_or_compute(key, lambda: embedder.embed(pv.synth_wave, SAMPLE_RATE))
 
-    Expects ``{id}.npy`` (1024-d) plus a sibling ``manifest.json`` mapping id -> label.
-    Each promoted example is its own group so it can land anywhere in the split.
-    """
-    manifest_path = promoted_dir / "manifest.json"
-    if not manifest_path.exists():
-        logger.info("No promoted manifest at %s; skipping promoted examples", manifest_path)
-        return np.empty((0, EMBEDDING_DIM), np.float32), np.empty((0,), np.int64), np.empty((0,), object)
-    manifest = json.loads(manifest_path.read_text())
-    frames: list[np.ndarray] = []
-    labels: list[int] = []
-    groups: list[str] = []
-    for example_id, label_name in manifest.items():
-        if label_name not in LABEL_TO_INDEX:
-            continue
-        npy = promoted_dir / f"{example_id}.npy"
-        if not npy.exists():
-            continue
-        vec = np.load(npy).astype(np.float32).reshape(-1)
-        if vec.shape[0] != EMBEDDING_DIM:
-            continue
-        frames.append(vec)
-        labels.append(LABEL_TO_INDEX[label_name])
-        groups.append(f"promoted:{example_id}")
-    if not frames:
-        return np.empty((0, EMBEDDING_DIM), np.float32), np.empty((0,), np.int64), np.empty((0,), object)
-    logger.info("Loaded %d promoted examples", len(frames))
-    return np.stack(frames).astype(np.float32), np.asarray(labels, np.int64), np.asarray(groups, object)
+    ex: WavExample = pv.example
+    # Promoted npy: a precomputed mean-pooled 1024-d vector (no waveform).
+    if ex.origin == "promoted_npy":
+        def _load_npy():
+            vec = np.load(ex.path).astype(np.float32).reshape(-1)
+            if vec.shape[0] != EMBEDDING_DIM:
+                logger.warning("%s: bad npy dim %d; skipping", ex.path, vec.shape[0])
+                return np.zeros((0, EMBEDDING_DIM), np.float32)
+            return vec[None, :]
+        return _load_npy()
+
+    path = ex.path
+    if path not in content_hashes:
+        content_hashes[path] = file_content_hash(path)
+    chash = content_hashes[path]
+    offset_ms = int(round(ex.offset_s * 1000))
+    dur_ms = int(round(ex.duration_s * 1000))
+    key = cache.make_key(chash, offset_ms=offset_ms, dur_ms=dur_ms, variant=pv.variant)
+
+    def _compute():
+        wave_arr, rate = read_wav_waveform(path, ex.offset_s, ex.duration_s)
+        if pv.variant != "orig":
+            wave_arr = augment_waveform(wave_arr, pv.seed)
+        return embedder.embed(wave_arr, rate)
+
+    return cache.get_or_compute(key, _compute)
 
 
 # --------------------------------------------------------------------------- #
 # Split
 # --------------------------------------------------------------------------- #
-def group_split(
-    groups: np.ndarray, seed: int, val_frac: float = 0.1, test_frac: float = 0.1
+def per_class_group_split(
+    y: np.ndarray,
+    groups: np.ndarray,
+    train_only: np.ndarray,
+    labels: list[str],
+    seed: int,
+    val_frac: float = 0.1,
+    test_frac: float = 0.1,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Group-aware split returning boolean masks (train, val, test).
+    """Group-aware split done independently per class.
 
-    Whole groups are assigned to a single fold so near-duplicate frames never
-    leak across folds. Pure numpy, no sklearn dependency.
+    Groups are split on their **real** (non-``train_only``) frames, so splitting
+    each label's groups independently guarantees scarce classes (e.g. coyote with
+    ~4 source groups) land at least one group in val AND test. Then:
+
+    * real frames follow their group's fold;
+    * augmentation frames whose source group landed in val/test are **dropped**
+      (excluded from every fold) so an aug copy never sits beside its source;
+    * augmentation frames in a train group, and synthetic frames (whose groups
+      have no real frames), go to train.
+
+    Dropped frames are in none of the returned masks — the three masks partition
+    only the kept frames.
     """
-    unique = np.unique(groups)
+    n = len(y)
+    is_train = np.zeros(n, dtype=bool)
+    is_val = np.zeros(n, dtype=bool)
+    is_test = np.zeros(n, dtype=bool)
     rng = np.random.default_rng(seed)
-    rng.shuffle(unique)
-    n = len(unique)
-    n_test = max(1, int(round(n * test_frac)))
-    n_val = max(1, int(round(n * val_frac)))
-    test_groups = set(unique[:n_test])
-    val_groups = set(unique[n_test : n_test + n_val])
 
-    is_test = np.array([g in test_groups for g in groups])
-    is_val = np.array([g in val_groups for g in groups])
-    is_train = ~(is_test | is_val)
+    real = ~train_only
+    for li in range(len(labels)):
+        cls_mask = y == li
+        # Groups eligible for splitting: those with at least one real frame.
+        real_groups = np.array(
+            sorted(set(np.unique(groups[cls_mask & real]))), dtype=object
+        )
+        rng.shuffle(real_groups)
+        m = len(real_groups)
+        if m <= 1:
+            val_groups: set = set()
+            test_groups: set = set()
+        elif m == 2:
+            test_groups, val_groups = {real_groups[0]}, set()
+        else:
+            n_test = max(1, int(round(m * test_frac)))
+            n_val = max(1, int(round(m * val_frac)))
+            test_groups = set(real_groups[:n_test])
+            val_groups = set(real_groups[n_test : n_test + n_val])
+
+        for i in np.flatnonzero(cls_mask):
+            g = groups[i]
+            in_val = g in val_groups
+            in_test = g in test_groups
+            if real[i]:
+                if in_test:
+                    is_test[i] = True
+                elif in_val:
+                    is_val[i] = True
+                else:
+                    is_train[i] = True
+            else:
+                # Augmentation / synthetic: keep only in train, drop from val/test.
+                if in_val or in_test:
+                    continue  # dropped
+                is_train[i] = True
     return is_train, is_val, is_test
 
 
 # --------------------------------------------------------------------------- #
 # Model
 # --------------------------------------------------------------------------- #
-def build_model():
+def build_model(n_labels: int):
     import tensorflow as tf
 
     model = tf.keras.Sequential(
@@ -197,29 +374,49 @@ def build_model():
             tf.keras.layers.Dropout(0.3),
             tf.keras.layers.Dense(128, activation="relu"),
             tf.keras.layers.Dropout(0.2),
-            tf.keras.layers.Dense(len(LABELS), activation="softmax", name="probs"),
+            tf.keras.layers.Dense(n_labels, activation="softmax", name="probs"),
         ]
     )
     model.compile(
         optimizer=tf.keras.optimizers.Adam(1e-3),
         loss="sparse_categorical_crossentropy",
-        metrics=["accuracy"],  # AUC is computed manually at eval (2-class softmax)
+        metrics=["accuracy"],
     )
     return model
 
 
-def class_weights(labels: np.ndarray) -> dict[int, float]:
-    counts = np.bincount(labels, minlength=len(LABELS)).astype(np.float64)
+def class_weights(labels_int: np.ndarray, n_labels: int, cap: float) -> dict[int, float]:
+    counts = np.bincount(labels_int, minlength=n_labels).astype(np.float64)
     counts[counts == 0] = 1.0
     total = counts.sum()
-    return {i: float(total / (len(LABELS) * counts[i])) for i in range(len(LABELS))}
+    weights = {i: float(total / (n_labels * counts[i])) for i in range(n_labels)}
+    if cap and cap > 0:
+        weights = {i: min(w, cap) for i, w in weights.items()}
+    return weights
 
 
 # --------------------------------------------------------------------------- #
 # Evaluation
 # --------------------------------------------------------------------------- #
-def _binary_metrics(probs_drone: np.ndarray, y: np.ndarray, threshold: float) -> dict:
-    pred = (probs_drone >= threshold).astype(np.int64)
+def _roc_auc(scores: np.ndarray, y: np.ndarray) -> float:
+    pos = scores[y == 1]
+    neg = scores[y == 0]
+    if len(pos) == 0 or len(neg) == 0:
+        return float("nan")
+    order = np.argsort(scores, kind="mergesort")
+    ranks = np.empty(len(scores), dtype=np.float64)
+    ranks[order] = np.arange(1, len(scores) + 1)
+    _, inv, counts = np.unique(scores, return_inverse=True, return_counts=True)
+    sums = np.zeros(len(counts))
+    np.add.at(sums, inv, ranks)
+    avg = sums / counts
+    ranks = avg[inv]
+    r_pos = ranks[y == 1].sum()
+    return float((r_pos - len(pos) * (len(pos) + 1) / 2) / (len(pos) * len(neg)))
+
+
+def _binary_metrics(scores: np.ndarray, y: np.ndarray, threshold: float) -> dict:
+    pred = (scores >= threshold).astype(np.int64)
     tp = int(np.sum((pred == 1) & (y == 1)))
     fp = int(np.sum((pred == 1) & (y == 0)))
     fn = int(np.sum((pred == 0) & (y == 1)))
@@ -236,52 +433,23 @@ def _binary_metrics(probs_drone: np.ndarray, y: np.ndarray, threshold: float) ->
     }
 
 
-def _roc_auc(scores: np.ndarray, y: np.ndarray) -> float:
-    """Rank-based AUC (Mann–Whitney U), no sklearn."""
-    pos = scores[y == 1]
-    neg = scores[y == 0]
-    if len(pos) == 0 or len(neg) == 0:
-        return float("nan")
-    order = np.argsort(scores, kind="mergesort")
-    ranks = np.empty(len(scores), dtype=np.float64)
-    ranks[order] = np.arange(1, len(scores) + 1)
-    # average ranks for ties
-    _, inv, counts = np.unique(scores, return_inverse=True, return_counts=True)
-    sums = np.zeros(len(counts))
-    np.add.at(sums, inv, ranks)
-    avg = sums / counts
-    ranks = avg[inv]
-    r_pos = ranks[y == 1].sum()
-    auc = (r_pos - len(pos) * (len(pos) + 1) / 2) / (len(pos) * len(neg))
-    return float(auc)
-
-
-def clip_probs_from_frames(
-    frame_probs: np.ndarray, groups: np.ndarray, y_frame: np.ndarray
-) -> tuple[np.ndarray, np.ndarray]:
-    """Aggregate frame drone-probabilities to clip level via max over the group."""
-    clip_scores: list[float] = []
-    clip_labels: list[int] = []
-    for g in np.unique(groups):
-        mask = groups == g
-        clip_scores.append(float(frame_probs[mask].max()))
-        clip_labels.append(int(y_frame[mask].max()))  # any drone frame => drone clip
-    return np.asarray(clip_scores), np.asarray(clip_labels, dtype=np.int64)
-
-
-def sweep_thresholds(
-    scores: np.ndarray, y: np.ndarray, min_precision: float = 0.95
-) -> tuple[dict, dict, list[dict]]:
-    """Return (alert_metrics, detect_metrics, full_sweep).
-
-    ``alert`` = lowest threshold whose precision ≥ ``min_precision`` (or the
-    highest-precision point if none clears). ``detect`` = best-F1 threshold.
-    """
+def sweep_thresholds(scores: np.ndarray, y: np.ndarray, min_precision: float = 0.95):
     sweep = [_binary_metrics(scores, y, t) for t in np.linspace(0.05, 0.95, 19)]
     passing = [m for m in sweep if m["precision"] >= min_precision]
     alert = min(passing, key=lambda m: m["threshold"]) if passing else max(sweep, key=lambda m: m["precision"])
     detect = max(sweep, key=lambda m: m["f1"])
     return alert, detect, sweep
+
+
+def clip_max_by_group(frame_scores: np.ndarray, groups: np.ndarray, y_pos: np.ndarray):
+    """Aggregate per-frame scores to clip level via group max; label = any-positive."""
+    clip_scores: list[float] = []
+    clip_labels: list[int] = []
+    for g in np.unique(groups):
+        mask = groups == g
+        clip_scores.append(float(frame_scores[mask].max()))
+        clip_labels.append(int(y_pos[mask].max()))
+    return np.asarray(clip_scores), np.asarray(clip_labels, dtype=np.int64)
 
 
 # --------------------------------------------------------------------------- #
@@ -292,7 +460,6 @@ def export_onnx(model, float_path: Path) -> None:
     import tensorflow as tf
     import tf2onnx
 
-    # from_function is Keras-3 safe (from_keras trips on keras_tensor output names).
     @tf.function(input_signature=[tf.TensorSpec((None, EMBEDDING_DIM), tf.float32, name="embedding")])
     def _forward(embedding):
         return tf.identity(model(embedding, training=False), name="probs")
@@ -306,37 +473,19 @@ def export_onnx(model, float_path: Path) -> None:
 
 
 def quantize_int8(float_path: Path, int8_path: Path) -> None:
-    """Export a per-channel, dynamic-int8 ONNX model.
-
-    Static activation quantization produced large probability errors for this
-    small embedding head even when calibrated on the complete training split.
-    Dynamic quantization keeps the runtime activations in their observed range
-    and quantizes the dense weights to int8, which preserves alert thresholds
-    without shipping a float-weight model.
-    """
     from onnxruntime.quantization import QuantType, quantize_dynamic
 
-    quantize_dynamic(
-        str(float_path),
-        str(int8_path),
-        per_channel=True,
-        weight_type=QuantType.QInt8,
-    )
+    quantize_dynamic(str(float_path), str(int8_path), per_channel=True, weight_type=QuantType.QInt8)
 
 
 def export_tflite(model, tflite_path: Path, calib: np.ndarray) -> None:
     import tensorflow as tf
 
-    # TensorFlow 2.18/Keras 3 can fail while traversing a Keras model directly
-    # (``'NoneType' object is not callable``). Converting the explicit serving
-    # function retains the same inference-only graph across those versions.
     @tf.function(input_signature=[tf.TensorSpec((None, EMBEDDING_DIM), tf.float32, name="embedding")])
     def _serve(embedding):
         return model(embedding, training=False)
 
-    converter = tf.lite.TFLiteConverter.from_concrete_functions(
-        [_serve.get_concrete_function()], model
-    )
+    converter = tf.lite.TFLiteConverter.from_concrete_functions([_serve.get_concrete_function()], model)
     converter.optimizations = [tf.lite.Optimize.DEFAULT]
 
     def _rep():
@@ -361,33 +510,78 @@ def onnx_predict(model_path: Path, x: np.ndarray) -> np.ndarray:
 # --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
+def _parse_per_label(raw: str | None) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for pair in (raw or "").split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        key, _, value = pair.partition("=")
+        try:
+            out[key.strip().lower()] = int(value)
+        except ValueError:
+            continue
+    return out
+
+
 def main(argv: Iterable[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset-dir", type=Path, default=Path("drone_dataset"))
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--wav-dir", type=Path, default=Path("drone_dataset/wav"))
     parser.add_argument("--promoted-dir", type=Path, default=None)
     parser.add_argument("--out-dir", type=Path, default=Path("data/models"))
+    parser.add_argument("--cache-dir", type=Path, default=Path("drone_dataset/.embed_cache"))
+    parser.add_argument("--labels", default=",".join(DEFAULT_LABELS))
     parser.add_argument("--epochs", type=int, default=40)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--seed", type=int, default=1234)
+    parser.add_argument("--segment-seconds", type=float, default=4.0)
+    parser.add_argument("--segment-overlap", type=float, default=0.5)
+    parser.add_argument("--aug-copies", type=int, default=1)
+    parser.add_argument("--aug-copies-per-label", default="coyote=8")
+    parser.add_argument("--synth-ambient-count", type=int, default=1000)
+    parser.add_argument("--max-files-per-label", type=int, default=0)
     parser.add_argument("--calib-size", type=int, default=512)
     parser.add_argument("--parity-tol", type=float, default=0.05)
+    parser.add_argument("--class-weight-cap", type=float, default=10.0)
+    parser.add_argument("--no-tflite", action="store_true")
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
-    frames, labels, groups, drone_types = load_dataset(args.dataset_dir)
+    labels = [x.strip().lower() for x in args.labels.split(",") if x.strip()]
+    if NEGATIVE_LABEL not in labels:
+        logger.warning("Negative label %r not in labels %s", NEGATIVE_LABEL, labels)
+    n_labels = len(labels)
+
+    # ---- Discover ----
+    examples = discover_wavs(
+        args.wav_dir, labels,
+        segment_seconds=args.segment_seconds, segment_overlap=args.segment_overlap,
+    )
     if args.promoted_dir is not None:
-        pf, pl, pg = load_promoted(args.promoted_dir)
-        if len(pf):
-            frames = np.concatenate([frames, pf])
-            labels = np.concatenate([labels, pl])
-            groups = np.concatenate([groups, pg])
-            drone_types = np.concatenate([drone_types, np.array(["promoted"] * len(pf), object)])
+        examples += load_promoted(args.promoted_dir, labels)
+    if args.max_files_per_label > 0:
+        examples = _cap_per_label(examples, labels, args.max_files_per_label)
+    logger.info("Discovered %d WAV/promoted examples", len(examples))
 
-    logger.info("Total frames: %d (%d drone, %d no_drone), %d groups",
-                len(frames), int((labels == 1).sum()), int((labels == 0).sum()), len(np.unique(groups)))
+    aug_per_label = _parse_per_label(args.aug_copies_per_label)
+    plan = build_variant_plan(
+        examples, labels,
+        aug_copies=args.aug_copies, aug_copies_per_label=aug_per_label,
+        synth_ambient_count=args.synth_ambient_count,
+        segment_seconds=args.segment_seconds, seed=args.seed,
+    )
+    logger.info("Variant plan: %d embedding jobs", len(plan))
 
-    is_train, is_val, is_test = group_split(groups, args.seed)
+    # ---- Embed ----
+    embedder = YamnetEmbedder()
+    cache = EmbeddingCache(args.cache_dir)
+    frames, y, groups, train_only, counts = embed_plan(plan, embedder, cache, labels)
+
+    logger.info("Frames per label: %s", {labels[i]: int((y == i).sum()) for i in range(n_labels)})
+
+    # ---- Split (per-class, group-aware) ----
+    is_train, is_val, is_test = per_class_group_split(y, groups, train_only, labels, args.seed)
     logger.info("Split frames: train=%d val=%d test=%d", is_train.sum(), is_val.sum(), is_test.sum())
 
     import tensorflow as tf
@@ -395,76 +589,142 @@ def main(argv: Iterable[str] | None = None) -> int:
     tf.random.set_seed(args.seed)
     np.random.seed(args.seed)
 
-    model = build_model()
+    # Class weights from REAL frames only (exclude aug/synth train-only).
+    real_train = is_train & ~train_only
+    weights = class_weights(y[real_train] if real_train.any() else y[is_train], n_labels, args.class_weight_cap)
+    logger.info("Class weights: %s", {labels[i]: round(w, 3) for i, w in weights.items()})
+
+    model = build_model(n_labels)
+    val_data = (frames[is_val], y[is_val]) if is_val.any() else None
+    callbacks = []
+    if val_data is not None:
+        callbacks.append(tf.keras.callbacks.EarlyStopping(
+            monitor="val_loss", mode="min", patience=6, restore_best_weights=True))
     model.fit(
-        frames[is_train], labels[is_train],
-        validation_data=(frames[is_val], labels[is_val]),
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        class_weight=class_weights(labels[is_train]),
-        callbacks=[tf.keras.callbacks.EarlyStopping(
-            monitor="val_loss", mode="min", patience=6, restore_best_weights=True)],
-        verbose=2,
+        frames[is_train], y[is_train],
+        validation_data=val_data,
+        epochs=args.epochs, batch_size=args.batch_size,
+        class_weight=weights, callbacks=callbacks, verbose=2,
     )
 
-    # ---- Evaluate (Keras float) ----
-    test_probs = model.predict(frames[is_test], verbose=0)[:, LABEL_TO_INDEX["drone"]]
-    frame_auc = _roc_auc(test_probs, labels[is_test])
-    clip_scores, clip_labels = clip_probs_from_frames(test_probs, groups[is_test], labels[is_test])
-    clip_auc = _roc_auc(clip_scores, clip_labels)
-    alert, detect, sweep = sweep_thresholds(clip_scores, clip_labels)
-    logger.info("frame AUC=%.4f  clip AUC=%.4f  alert=%s  detect=%s",
-                frame_auc, clip_auc, alert, detect)
+    # ---- Evaluate on real-only test frames ----
+    real_test = is_test  # is_test already excludes train-only groups by construction
+    test_frames = frames[real_test]
+    test_y = y[real_test]
+    test_groups = groups[real_test]
+    probs = model.predict(test_frames, verbose=0) if len(test_frames) else np.zeros((0, n_labels))
 
+    per_class: dict[str, dict] = {}
+    thresholds: dict[str, dict] = {}
+    weak_classes: list[str] = []
+    for li, name in enumerate(labels):
+        if name == NEGATIVE_LABEL:
+            continue
+        if len(probs) == 0:
+            per_class[name] = {"frame_auc": None, "clip_auc": None, "reliable": False, "note": "no test frames"}
+            weak_classes.append(name)
+            continue
+        pos = (test_y == li).astype(np.int64)
+        frame_scores = probs[:, li]
+        frame_auc = _roc_auc(frame_scores, pos)
+        clip_scores, clip_labels = clip_max_by_group(frame_scores, test_groups, pos)
+        clip_auc = _roc_auc(clip_scores, clip_labels)
+        alert, detect, sweep = sweep_thresholds(clip_scores, clip_labels)
+        n_pos_groups = int(len(np.unique(test_groups[pos == 1]))) if pos.any() else 0
+        n_pos_frames = int(pos.sum())
+        reliable = n_pos_groups >= _RELIABLE_MIN_GROUPS and n_pos_frames >= _RELIABLE_MIN_FRAMES
+        if not reliable:
+            weak_classes.append(name)
+        per_class[name] = {
+            "frame_auc": round(frame_auc, 4) if frame_auc == frame_auc else None,
+            "clip_auc": round(clip_auc, 4) if clip_auc == clip_auc else None,
+            "test_groups": n_pos_groups,
+            "test_frames": n_pos_frames,
+            "reliable": reliable,
+            "sweep": sweep,
+        }
+        thresholds[name] = {"alert": alert["threshold"], "detect": detect["threshold"]}
+        logger.info("%s: frame AUC=%s clip AUC=%s reliable=%s alert=%s detect=%s",
+                    name, per_class[name]["frame_auc"], per_class[name]["clip_auc"],
+                    reliable, alert["threshold"], detect["threshold"])
+
+    # ---- Export ----
     args.out_dir.mkdir(parents=True, exist_ok=True)
     float_path = args.out_dir / "drone_head.float.onnx"
     int8_path = args.out_dir / "drone_head.onnx"
     tflite_path = args.out_dir / "drone_head.tflite"
 
-    # ---- Export ----
     export_onnx(model, float_path)
     rng = np.random.default_rng(args.seed)
-    calib_idx = rng.choice(np.flatnonzero(is_train), size=min(args.calib_size, int(is_train.sum())), replace=False)
+    train_idx = np.flatnonzero(is_train)
+    calib_idx = rng.choice(train_idx, size=min(args.calib_size, len(train_idx)), replace=False)
     calib = frames[calib_idx]
     quantize_int8(float_path, int8_path)
-    try:
-        export_tflite(model, tflite_path, calib)
-    except Exception as exc:  # noqa: BLE001 — TFLite is a nice-to-have artifact
-        logger.warning("TFLite export failed (non-fatal): %s", exc)
+    if not args.no_tflite:
+        try:
+            export_tflite(model, tflite_path, calib)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("TFLite export failed (non-fatal): %s", exc)
 
-    # ---- Parity gate ----
-    float_pred = onnx_predict(float_path, frames[is_test])[:, LABEL_TO_INDEX["drone"]]
-    int8_pred = onnx_predict(int8_path, frames[is_test])[:, LABEL_TO_INDEX["drone"]]
-    max_diff = float(np.max(np.abs(float_pred - int8_pred)))
-    logger.info("int8 vs float32 max prob diff: %.4f (tol %.3f)", max_diff, args.parity_tol)
+    # ---- Parity gate over ALL class probs ----
+    max_diff = 0.0
+    if len(test_frames):
+        float_pred = onnx_predict(float_path, test_frames)
+        int8_pred = onnx_predict(int8_path, test_frames)
+        max_diff = float(np.max(np.abs(float_pred - int8_pred)))
+    logger.info("int8 vs float32 max prob diff (all classes): %.4f (tol %.3f)", max_diff, args.parity_tol)
     if max_diff > args.parity_tol:
         logger.error("Parity gate FAILED: %.4f > %.3f", max_diff, args.parity_tol)
         return 1
 
-    # ---- Metadata + report ----
+    # ---- Metadata v2 + report ----
     metadata = {
-        "labels": LABELS,
+        "schema_version": 2,
+        "labels": labels,
+        "negative_label": NEGATIVE_LABEL,
         "input_shape": [1, EMBEDDING_DIM],
         "embedding_model": "yamnet",
         "opset": OPSET,
-        "thresholds": {"alert": alert["threshold"], "detect": detect["threshold"]},
-        "metrics": {"frame_auc": round(frame_auc, 4), "clip_auc": round(clip_auc, 4)},
-        "dataset_counts": {
-            "total_frames": int(len(frames)),
-            "drone_frames": int((labels == 1).sum()),
-            "no_drone_frames": int((labels == 0).sum()),
-            "groups": int(len(np.unique(groups))),
+        "preprocessing": {
+            "version": YAMNET_PREPROCESS_VERSION,
+            "target_rms": YAMNET_TARGET_RMS,
+            "max_input_gain": YAMNET_MAX_INPUT_GAIN,
+        },
+        "thresholds": thresholds,
+        "metrics": {name: {"frame_auc": v.get("frame_auc"), "clip_auc": v.get("clip_auc")}
+                    for name, v in per_class.items()},
+        "dataset_counts": counts,
+        "weak_classes": sorted(set(weak_classes)),
+        "augmentation": {
+            "aug_copies": args.aug_copies,
+            "aug_copies_per_label": aug_per_label,
+            "synth_ambient_count": args.synth_ambient_count,
+            "segment_seconds": args.segment_seconds,
+            "segment_overlap": args.segment_overlap,
         },
         "int8_parity_max_diff": round(max_diff, 4),
     }
     (args.out_dir / "drone_head.metadata.json").write_text(json.dumps(metadata, indent=2))
-    (args.out_dir / "eval_report.json").write_text(json.dumps(
-        {"alert": alert, "detect": detect, "sweep": sweep, "metadata": metadata}, indent=2))
+    (args.out_dir / "eval_report.json").write_text(
+        json.dumps({"per_class": per_class, "thresholds": thresholds, "metadata": metadata}, indent=2)
+    )
 
-    logger.info("Wrote %s + metadata (clip AUC %.4f)", int8_path, clip_auc)
-    if clip_auc < 0.95:
-        logger.warning("clip AUC %.4f below expected 0.95 — inspect eval_report.json", clip_auc)
+    logger.info("Wrote %s + metadata v2 (weak_classes=%s)", int8_path, metadata["weak_classes"])
     return 0
+
+
+def _cap_per_label(examples: list[WavExample], labels: list[str], cap: int) -> list[WavExample]:
+    """Keep at most ``cap`` distinct source files per label (deterministic by path)."""
+    by_label: dict[str, list[WavExample]] = {name: [] for name in labels}
+    for ex in examples:
+        by_label.setdefault(ex.label, []).append(ex)
+    kept: list[WavExample] = []
+    for name, exs in by_label.items():
+        # Rank files by path; keep all segments of the first `cap` files.
+        files = sorted({ex.path for ex in exs}, key=str)[:cap]
+        keep_files = set(files)
+        kept += [ex for ex in exs if ex.path in keep_files]
+    return kept
 
 
 if __name__ == "__main__":

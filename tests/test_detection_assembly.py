@@ -3,6 +3,25 @@ import numpy as np
 from minimappr.core.assembly import _collapse_long_exact_zero_runs
 
 
+from minimappr.core.assembly import _drone_head_retains_audio
+
+
+def test_drone_head_retains_audio_for_positive_classes() -> None:
+    assert _drone_head_retains_audio("drone_head", "drone")
+    assert _drone_head_retains_audio("drone_head", "coyote")
+    assert _drone_head_retains_audio("drone_head", "Coyote")
+
+
+def test_drone_head_discards_audio_for_negative_labels() -> None:
+    assert not _drone_head_retains_audio("drone_head", "unknown")
+    assert not _drone_head_retains_audio("drone_head", "ambient")
+    assert not _drone_head_retains_audio("drone_head", "no_drone")
+
+
+def test_non_drone_head_source_always_retains() -> None:
+    assert _drone_head_retains_audio("yamnet", "unknown")
+
+
 def test_collapse_long_exact_zero_runs_removes_only_long_gaps() -> None:
     sample_rate_hz = 100
     # 1.0, 1.0, then 50 ms zero gap, then 1.0, then 10 ms zero gap, then 1.0

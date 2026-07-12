@@ -23,14 +23,27 @@ from minimappr.models import ClassificationResult
 EMBEDDING_DIM = 1024
 
 
-def _write_tiny_head(path: Path, labels=("no_drone", "drone")) -> Path:
-    """Softmax(Gemm(embedding, W, B)) where drone logit = +mean, no_drone = -mean."""
+def _write_tiny_head(path: Path, labels=("no_drone", "drone"), metadata=None) -> Path:
+    """Softmax(Gemm(embedding, W, B)) with a per-class slice detector.
+
+    Class ``c`` responds to the mean of its own contiguous slice of the embedding
+    dims, so an input that is high in slice ``c`` (and low elsewhere) makes class
+    ``c`` win. For the legacy 2-class case this reduces to drone=+mean/no_drone=−mean.
+    """
     from onnx import TensorProto, helper, numpy_helper
 
-    w = np.zeros((EMBEDDING_DIM, 2), dtype=np.float32)
-    w[:, 0] = -1.0 / EMBEDDING_DIM  # no_drone
-    w[:, 1] = 1.0 / EMBEDDING_DIM   # drone
-    b = np.zeros((2,), dtype=np.float32)
+    n = len(labels)
+    w = np.zeros((EMBEDDING_DIM, n), dtype=np.float32)
+    if n == 2:
+        w[:, 0] = -1.0 / EMBEDDING_DIM
+        w[:, 1] = 1.0 / EMBEDDING_DIM
+    else:
+        slice_size = EMBEDDING_DIM // n
+        for c in range(n):
+            lo = c * slice_size
+            hi = EMBEDDING_DIM if c == n - 1 else (c + 1) * slice_size
+            w[lo:hi, c] = 4.0 / max(1, hi - lo)
+    b = np.zeros((n,), dtype=np.float32)
 
     nodes = [
         helper.make_node("Gemm", ["embedding", "W", "B"], ["logits"]),
@@ -40,17 +53,28 @@ def _write_tiny_head(path: Path, labels=("no_drone", "drone")) -> Path:
         nodes,
         "drone_head",
         [helper.make_tensor_value_info("embedding", TensorProto.FLOAT, [None, EMBEDDING_DIM])],
-        [helper.make_tensor_value_info("probs", TensorProto.FLOAT, [None, 2])],
+        [helper.make_tensor_value_info("probs", TensorProto.FLOAT, [None, n])],
         [numpy_helper.from_array(w, "W"), numpy_helper.from_array(b, "B")],
     )
     model = helper.make_model(graph, opset_imports=[helper.make_operatorsetid("", 13)])
     model.ir_version = 9
     onnx.save(model, str(path))
 
-    (path.parent / (path.stem + ".metadata.json")).write_text(
-        json.dumps({"labels": list(labels), "input_shape": [1, EMBEDDING_DIM]})
-    )
+    meta = {"labels": list(labels), "input_shape": [1, EMBEDDING_DIM]}
+    if metadata:
+        meta.update(metadata)
+    (path.parent / (path.stem + ".metadata.json")).write_text(json.dumps(meta))
     return path
+
+
+def _slice_embedding(class_index: int, n_classes: int) -> np.ndarray:
+    """Embedding that is high in class_index's slice, zero elsewhere."""
+    emb = np.zeros(EMBEDDING_DIM, dtype=np.float32)
+    slice_size = EMBEDDING_DIM // n_classes
+    lo = class_index * slice_size
+    hi = EMBEDDING_DIM if class_index == n_classes - 1 else (class_index + 1) * slice_size
+    emb[lo:hi] = 1.0
+    return emb
 
 
 def test_classify_embedding_positive_is_drone(tmp_path):
@@ -59,7 +83,69 @@ def test_classify_embedding_positive_is_drone(tmp_path):
     result = clf.classify_embedding(np.ones(EMBEDDING_DIM, dtype=np.float32))
     assert result.label == "drone"
     assert result.confidence > 0.5
-    assert abs(result.scores["drone"] + result.scores["no_drone"] - 1.0) < 1e-5
+    assert "drone" in result.scores and "no_drone" in result.scores
+
+
+LABELS_3 = ("ambient", "drone", "coyote")
+
+
+def test_three_class_coyote_dominant(tmp_path):
+    model = _write_tiny_head(
+        tmp_path / "drone_head.onnx", labels=LABELS_3, metadata={"negative_label": "ambient"}
+    )
+    clf = DroneHeadClassifier(model, min_confidence=0.4)
+    result = clf.classify_embedding(_slice_embedding(2, 3))  # coyote slice
+    assert result.label == "coyote"
+    assert set(result.scores) == {"ambient", "drone", "coyote"}
+    assert result.features["coyote_prob_max"] > result.features["drone_prob_max"]
+
+
+def test_three_class_ambient_dominant_is_unknown(tmp_path):
+    model = _write_tiny_head(
+        tmp_path / "drone_head.onnx", labels=LABELS_3, metadata={"negative_label": "ambient"}
+    )
+    clf = DroneHeadClassifier(model, min_confidence=0.5)
+    result = clf.classify_embedding(_slice_embedding(0, 3))  # ambient slice
+    # Negative class wins => never emitted; falls back to unknown.
+    assert result.label == "unknown"
+
+
+def test_three_class_per_class_max_across_frames(tmp_path):
+    model = _write_tiny_head(
+        tmp_path / "drone_head.onnx", labels=LABELS_3, metadata={"negative_label": "ambient"}
+    )
+    clf = DroneHeadClassifier(model, min_confidence=0.4)
+    # One drone frame, one coyote frame: coyote frame should still be captured.
+    frames = np.stack([_slice_embedding(1, 3), _slice_embedding(2, 3)]).astype(np.float32)
+    result = clf.classify_embedding(frames)
+    assert result.features["drone_prob_max"] > 0.4
+    assert result.features["coyote_prob_max"] > 0.4
+
+
+def test_missing_metadata_defaults_to_no_drone_negative(tmp_path):
+    # No metadata file at all -> default binary labels, no_drone negative.
+    from onnx import TensorProto, helper, numpy_helper
+
+    w = np.zeros((EMBEDDING_DIM, 2), dtype=np.float32)
+    w[:, 0] = -1.0 / EMBEDDING_DIM
+    w[:, 1] = 1.0 / EMBEDDING_DIM
+    graph = helper.make_graph(
+        [
+            helper.make_node("Gemm", ["embedding", "W", "B"], ["logits"]),
+            helper.make_node("Softmax", ["logits"], ["probs"], axis=1),
+        ],
+        "drone_head",
+        [helper.make_tensor_value_info("embedding", TensorProto.FLOAT, [None, EMBEDDING_DIM])],
+        [helper.make_tensor_value_info("probs", TensorProto.FLOAT, [None, 2])],
+        [numpy_helper.from_array(w, "W"), numpy_helper.from_array(np.zeros(2, np.float32), "B")],
+    )
+    m = helper.make_model(graph, opset_imports=[helper.make_operatorsetid("", 13)])
+    m.ir_version = 9
+    path = tmp_path / "bare.onnx"
+    onnx.save(m, str(path))
+    clf = DroneHeadClassifier(path, min_confidence=0.5)
+    assert clf.classify_embedding(np.ones(EMBEDDING_DIM, dtype=np.float32)).label == "drone"
+    assert clf.classify_embedding(-np.ones(EMBEDDING_DIM, dtype=np.float32)).label == "unknown"
 
 
 def test_classify_embedding_negative_is_unknown(tmp_path):

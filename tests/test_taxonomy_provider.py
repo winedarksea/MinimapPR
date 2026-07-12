@@ -33,3 +33,9 @@ def test_taxonomy_provider_loads_file_and_merges_labels(tmp_path: Path) -> None:
 
     provider.merge_labels([{"name": "glass_break", "category": "security"}])
     assert provider.category_for_label("glass_break") == "security"
+
+
+def test_coyote_heuristic_maps_to_wildlife() -> None:
+    provider = RuntimeTaxonomyProvider()
+    assert provider.category_for_label("coyote") == "wildlife"
+    assert provider.iff_for_category("wildlife") == "friendly"

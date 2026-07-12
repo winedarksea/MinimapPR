@@ -24,6 +24,14 @@ _YAMNET_TARGET_RMS = 0.10
 _YAMNET_MAX_INPUT_GAIN = 32.0
 _EPSILON = 1e-12
 
+# Bumped whenever `_prepare_waveform_for_yamnet` changes so embedding caches and
+# model metadata can invalidate on preprocessing drift (train/serve consistency).
+YAMNET_PREPROCESS_VERSION = "yamnet-prep-v1"
+
+# Public aliases of the conditioning constants for training-time metadata.
+YAMNET_TARGET_RMS = _YAMNET_TARGET_RMS
+YAMNET_MAX_INPUT_GAIN = _YAMNET_MAX_INPUT_GAIN
+
 
 def _prepare_waveform_for_yamnet(
     waveform: np.ndarray,
@@ -52,6 +60,11 @@ def _prepare_waveform_for_yamnet(
     gain = max(gain, min(1.0, gain_from_headroom))
 
     return (centered * gain).astype(np.float32)
+
+
+# Public alias so training code (embedding_cache) applies identical conditioning
+# without reaching into a private symbol. Same function, no behavior change.
+prepare_waveform_for_yamnet = _prepare_waveform_for_yamnet
 
 
 class YAMNetClassifier(AudioClassifier):
