@@ -10,7 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from minimappr.cleanup_policy import CleanupPolicy
+from minimappr.cleanup_policy import CleanupPolicy, RetentionActions, RetentionMatchCriteria, RetentionRule
 from minimappr.config import Settings
 from minimappr.interfaces import StorageBackend
 
@@ -55,11 +55,21 @@ class CleanupService:
 
     def load_policy(self, policy_path: Path | None = None) -> CleanupPolicy:
         path = policy_path or self._settings.retention_policy_path
-        return CleanupPolicy.from_file(
+        policy = CleanupPolicy.from_file(
             path,
             default_snippet_max_age_seconds=self._settings.retention_short_seconds,
             default_artifact_max_age_seconds=self._settings.retention_experiment_seconds,
         )
+        # Classifier defaults are policy rules so user-managed label rules in
+        # retention_policy.json remain an additive, backwards-compatible escape
+        # hatch.  The alert rule is deliberately last: alert evidence wins.
+        defaults = [
+            RetentionRule("builtin-yamnet", -100, RetentionMatchCriteria(classifier="yamnet"), RetentionActions(snippet_max_age_seconds=self._settings.retention_yamnet_audio_seconds, artifact_max_age_seconds=self._settings.retention_yamnet_audio_seconds)),
+            RetentionRule("builtin-birdnet", -100, RetentionMatchCriteria(classifier="birdnet"), RetentionActions(snippet_max_age_seconds=self._settings.retention_birdnet_audio_seconds, artifact_max_age_seconds=self._settings.retention_birdnet_audio_seconds)),
+            RetentionRule("builtin-drone", -100, RetentionMatchCriteria(classifier="drone_head"), RetentionActions(snippet_max_age_seconds=self._settings.retention_drone_audio_seconds, artifact_max_age_seconds=self._settings.retention_drone_audio_seconds)),
+            RetentionRule("builtin-alert", 10_000, RetentionMatchCriteria(trigger_source="alert"), RetentionActions(snippet_max_age_seconds=self._settings.retention_alert_audio_seconds, artifact_max_age_seconds=self._settings.retention_alert_audio_seconds)),
+        ]
+        return CleanupPolicy(version=policy.version, defaults=policy.defaults, rules=[*defaults, *policy.rules])
 
     async def run_partial_cleanup(
         self,
@@ -102,10 +112,12 @@ class CleanupService:
         retention_summary = await self._storage.cleanup_retention(
             now_ns=effective_now_ns,
             tier_ttls_seconds={
-                "ephemeral": self._settings.retention_ephemeral_seconds,
-                "short": self._settings.retention_short_seconds,
-                "long": self._settings.retention_long_seconds,
-                "experiment": self._settings.retention_experiment_seconds,
+                # Detection rows are intentionally lightweight evidence.  Audio
+                # is pruned by the policy pass above; retain the metadata here.
+                "ephemeral": self._settings.retention_detection_metadata_seconds,
+                "short": self._settings.retention_detection_metadata_seconds,
+                "long": self._settings.retention_detection_metadata_seconds,
+                "experiment": self._settings.retention_detection_metadata_seconds,
             },
             operational_ttls_seconds={
                 "bit_reports": self._settings.retention_bit_reports_seconds,

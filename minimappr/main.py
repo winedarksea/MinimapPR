@@ -32,6 +32,11 @@ from minimappr.api.spool_consumer import IngestSpoolConsumer
 from minimappr.api.stream_consumer import IngestStreamConsumer, StreamConsumerConfig
 from minimappr.classifiers.availability import probe_backends
 from minimappr.classifiers.factory import create_classifier
+from minimappr.classifiers.routing import (
+    load_routing_file,
+    parse_routing_document,
+    routing_to_dict,
+)
 from minimappr.config import IngestSidecarProcessConfig, IngestSidecarStartupConfig, Settings
 from minimappr.settings_store import CONFIG_PATCH_ALLOWLIST, load_overrides, save_overrides
 from minimappr.ingest_sidecar_runtime import (
@@ -120,6 +125,8 @@ from minimappr.models import (
     BITTestResult,
     BITType,
     BleIngestRequest,
+    ClassifierRoutingConfigResponse,
+    ClassifierRoutingConfigUpdate,
     ClusterSpec,
     ContextSnapshot,
     CopStatusResponse,
@@ -319,7 +326,7 @@ def _parse_window_ns(window: str) -> int:
             raise HTTPException(status_code=400, detail=f"Invalid window '{window}'") from exc
     try:
         amount = int(window[:-1])
-    except ValueError as exc:
+    except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=f"Invalid window '{window}'") from exc
     multipliers = {
         "s": 1_000_000_000,
@@ -2721,6 +2728,11 @@ async def get_config(request: Request) -> dict:
         "localization_window_seconds": settings.localization_window_seconds,
         "capture_final_tracks_settle_seconds": settings.capture_final_tracks_settle_seconds,
         "snippet_retention_seconds": settings.snippet_retention_seconds,
+        "retention_yamnet_audio_seconds": settings.retention_yamnet_audio_seconds,
+        "retention_birdnet_audio_seconds": settings.retention_birdnet_audio_seconds,
+        "retention_drone_audio_seconds": settings.retention_drone_audio_seconds,
+        "retention_alert_audio_seconds": settings.retention_alert_audio_seconds,
+        "retention_detection_metadata_seconds": settings.retention_detection_metadata_seconds,
         "retention_policy_path": str(settings.retention_policy_path),
         "retention": {
             "ephemeral_seconds": settings.retention_ephemeral_seconds,
@@ -2887,6 +2899,65 @@ def _rules_response(settings: Settings) -> RulesConfigResponse:
     return RulesConfigResponse(rules=rules, path=str(settings.rules_config_path), source=source)
 
 
+def _classifier_routing_response(
+    settings: Settings,
+    *,
+    restart_required: bool = False,
+) -> ClassifierRoutingConfigResponse:
+    config_path = settings.classifier_routing_config_path
+    source = "file" if config_path.exists() else "default"
+    try:
+        routing = load_routing_file(config_path)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Invalid classifier routing config at {config_path}: {exc}",
+        ) from exc
+    return ClassifierRoutingConfigResponse(
+        routing=routing_to_dict(routing),
+        path=str(config_path),
+        source=source,
+        restart_required=restart_required,
+    )
+
+
+@app.get("/api/v1/classifier-routing", response_model=ClassifierRoutingConfigResponse)
+async def get_classifier_routing_config(request: Request) -> ClassifierRoutingConfigResponse:
+    """Return the canonical routing document, without applying kill switches."""
+    state = _require_state(request)
+    return _classifier_routing_response(state.settings)
+
+
+@app.put("/api/v1/classifier-routing", response_model=ClassifierRoutingConfigResponse)
+async def put_classifier_routing_config(
+    payload: ClassifierRoutingConfigUpdate,
+    request: Request,
+) -> ClassifierRoutingConfigResponse:
+    """Validate and atomically save routing; callers restart runtime processes to apply it."""
+    state = _require_state(request)
+    try:
+        routing = parse_routing_document(payload.routing, source="request body")
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    config_path = state.settings.classifier_routing_config_path
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = config_path.with_name(f".{config_path.name}.tmp")
+    try:
+        tmp_path.write_text(
+            json.dumps(routing_to_dict(routing), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(tmp_path, config_path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    # The FusionNode and Rust helper own instantiated models. Updating that graph
+    # live risks concurrent model teardown on the audio path, so API clients must
+    # restart both processes after this durable configuration change.
+    return _classifier_routing_response(state.settings, restart_required=True)
+
+
 @app.get("/api/v1/rules", response_model=RulesConfigResponse)
 async def get_rules_config(request: Request) -> RulesConfigResponse:
     state = _require_state(request)
@@ -3008,6 +3079,14 @@ async def patch_config(request: Request) -> dict:
             "omni_scan_interval_seconds",
             "omni_scan_window_seconds",
         } and value <= 0.0:  # type: ignore[operator]
+            errors.append(f"{key}: must be > 0")
+        elif key in {
+            "retention_yamnet_audio_seconds",
+            "retention_birdnet_audio_seconds",
+            "retention_drone_audio_seconds",
+            "retention_alert_audio_seconds",
+            "retention_detection_metadata_seconds",
+        } and value <= 0:
             errors.append(f"{key}: must be > 0")
         elif key in {"localization_band_min_hz", "localization_band_max_hz"} and value < 0.0:  # type: ignore[operator]
             errors.append(f"{key}: must be >= 0")

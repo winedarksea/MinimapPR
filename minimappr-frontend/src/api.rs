@@ -1,6 +1,6 @@
 use crate::state::{
     Alert, AppState, CopStatus, Detection, FusionStatus, NodeOmniDetectionSummary, NodeStatus,
-    Track, ZoneOccupancyState, ZoneSpec, MAX_FEED_LEN,
+    Track, TranscriptLine, ZoneOccupancyState, ZoneSpec, MAX_FEED_LEN,
 };
 use futures::StreamExt;
 use gloo_net::http::Request;
@@ -116,6 +116,15 @@ pub struct RulesConfigResponse {
     pub source: String,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct TranscriptResponse {
+    id: String,
+    node_id: Option<String>,
+    end_ns: i64,
+    text: String,
+    trigger_confidence: Option<f64>,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct MapOverlay {
     pub id: String,
@@ -171,6 +180,43 @@ async fn fetch_json<T: DeserializeOwned>(url: &str) -> Option<T> {
         resp.json().await.ok()
     } else {
         None
+    }
+}
+
+pub(crate) fn upsert_transcript_line(state: &AppState, line: TranscriptLine) {
+    state.modality.speech_lines.update(|lines| {
+        if let Some(index) = lines
+            .iter()
+            .position(|existing| existing.line_id == line.line_id)
+        {
+            lines.remove(index);
+        }
+        lines.push_front(line);
+        while lines.len() > MAX_FEED_LEN {
+            lines.pop_back();
+        }
+    });
+}
+
+async fn fetch_transcript_history(state: &AppState) {
+    let Some(transcripts) =
+        fetch_json::<Vec<TranscriptResponse>>("/api/v1/transcripts?limit=50").await
+    else {
+        return;
+    };
+    // The server returns newest first. Insert oldest first so the shared
+    // upsert helper preserves the same newest-first ordering as live events.
+    for transcript in transcripts.into_iter().rev() {
+        upsert_transcript_line(
+            state,
+            TranscriptLine {
+                line_id: transcript.id,
+                device_id: transcript.node_id.unwrap_or_default(),
+                text: transcript.text,
+                confidence: transcript.trigger_confidence.unwrap_or(0.0),
+                timestamp_ns: transcript.end_ns,
+            },
+        );
     }
 }
 
@@ -237,6 +283,7 @@ async fn poll_once(state: AppState) {
 pub fn start_polling(state: AppState) {
     let s = state.clone();
     spawn_local(async move {
+        fetch_transcript_history(&s).await;
         poll_once(s.clone()).await;
         let mut interval = IntervalStream::new(3_000);
         while interval.next().await.is_some() {

@@ -35,6 +35,12 @@ OPTIONAL_BACKENDS = {"birdnet", "moonshine_stt"}
 CONTEXT_DETECTION_TRIGGER = "detection_trigger"
 CONTEXT_LOCALIZED_RENDER = "localized_render"
 CONTEXT_OMNI_CONTINUOUS = "omni_continuous"
+KNOWN_CONTEXTS = {
+    CONTEXT_DETECTION_TRIGGER,
+    CONTEXT_LOCALIZED_RENDER,
+    CONTEXT_OMNI_CONTINUOUS,
+}
+KNOWN_TRIGGER_ACTIONS = {"speech_capture"}
 
 
 @dataclass(slots=True)
@@ -153,20 +159,31 @@ def _to_label_set(value: Any) -> frozenset[str]:
 
 
 def _parse_routing(raw: dict[str, Any], source: str) -> RoutingConfig:
+    version = int(raw.get("version", 1))
+    if version != 1:
+        raise ValueError(f"{source}: version must be 1 (got {version})")
     classifiers: dict[str, ClassifierSpec] = {}
     for member_id, spec in (raw.get("classifiers") or {}).items():
         if not isinstance(spec, dict):
             raise ValueError(f"{source}: classifiers[{member_id!r}] must be an object")
+        normalized_member_id = str(member_id).strip()
+        if not normalized_member_id:
+            raise ValueError(f"{source}: classifier member ids must not be empty")
         backend = str(spec.get("backend") or "").strip().lower()
         if backend not in KNOWN_BACKENDS:
             raise ValueError(
                 f"{source}: classifiers[{member_id!r}].backend {backend!r} "
                 f"is not one of {sorted(KNOWN_BACKENDS)}"
             )
-        classifiers[str(member_id)] = ClassifierSpec(
-            member_id=str(member_id),
+        min_confidence = float(spec.get("min_confidence", 0.0) or 0.0)
+        if not 0.0 <= min_confidence <= 1.0:
+            raise ValueError(
+                f"{source}: classifiers[{member_id!r}].min_confidence must be in [0, 1]"
+            )
+        classifiers[normalized_member_id] = ClassifierSpec(
+            member_id=normalized_member_id,
             backend=backend,
-            min_confidence=float(spec.get("min_confidence", 0.0) or 0.0),
+            min_confidence=min_confidence,
             keep_embeddings=bool(spec.get("keep_embeddings", False)),
             model_path=(str(spec["model_path"]) if spec.get("model_path") else None),
         )
@@ -175,6 +192,10 @@ def _parse_routing(raw: dict[str, Any], source: str) -> RoutingConfig:
     for name, spec in (raw.get("contexts") or {}).items():
         if not isinstance(spec, dict):
             raise ValueError(f"{source}: contexts[{name!r}] must be an object")
+        if str(name) not in KNOWN_CONTEXTS:
+            raise ValueError(
+                f"{source}: contexts[{name!r}] is not one of {sorted(KNOWN_CONTEXTS)}"
+            )
         run = spec.get("run", [])
         if not isinstance(run, list):
             raise ValueError(f"{source}: contexts[{name!r}].run must be a list")
@@ -190,16 +211,25 @@ def _parse_routing(raw: dict[str, Any], source: str) -> RoutingConfig:
                     f"and cannot appear in contexts[{name!r}].run — attach it as a chain with "
                     'input: "embedding"'
                 )
+        interval_seconds = (
+            float(spec["interval_seconds"]) if spec.get("interval_seconds") is not None else None
+        )
+        window_seconds = (
+            float(spec["window_seconds"]) if spec.get("window_seconds") is not None else None
+        )
+        min_rms = float(spec["min_rms"]) if spec.get("min_rms") is not None else None
+        if interval_seconds is not None and interval_seconds <= 0.0:
+            raise ValueError(f"{source}: contexts[{name!r}].interval_seconds must be > 0")
+        if window_seconds is not None and window_seconds <= 0.0:
+            raise ValueError(f"{source}: contexts[{name!r}].window_seconds must be > 0")
+        if min_rms is not None and min_rms < 0.0:
+            raise ValueError(f"{source}: contexts[{name!r}].min_rms must be >= 0")
         contexts[str(name)] = ContextSpec(
             name=str(name),
             run=tuple(str(member_id) for member_id in run),
-            interval_seconds=(
-                float(spec["interval_seconds"]) if spec.get("interval_seconds") is not None else None
-            ),
-            window_seconds=(
-                float(spec["window_seconds"]) if spec.get("window_seconds") is not None else None
-            ),
-            min_rms=(float(spec["min_rms"]) if spec.get("min_rms") is not None else None),
+            interval_seconds=interval_seconds,
+            window_seconds=window_seconds,
+            min_rms=min_rms,
         )
 
     chains: list[ChainSpec] = []
@@ -218,15 +248,28 @@ def _parse_routing(raw: dict[str, Any], source: str) -> RoutingConfig:
             raise ValueError(
                 f"{source}: chain {chain_id!r} backend is embedding-only; input must be 'embedding'"
             )
+        after = str(item.get("after") or "").strip()
+        if after not in classifiers:
+            raise ValueError(
+                f"{source}: chain {chain_id!r}.after references unknown classifier {after!r}"
+            )
+        if after == chain_id:
+            raise ValueError(f"{source}: chain {chain_id!r} cannot run after itself")
+        min_confidence = float(item.get("min_confidence", 0.0) or 0.0)
+        score_weight = float(item.get("score_weight", 1.0) or 1.0)
+        if not 0.0 <= min_confidence <= 1.0:
+            raise ValueError(f"{source}: chain {chain_id!r}.min_confidence must be in [0, 1]")
+        if score_weight < 0.0:
+            raise ValueError(f"{source}: chain {chain_id!r}.score_weight must be >= 0")
         chains.append(
             ChainSpec(
                 chain_id=chain_id,
-                after=str(item.get("after") or "").strip(),
+                after=after,
                 input=input_kind,
                 trigger_labels=_to_label_set(item.get("trigger_labels")),
                 trigger_categories=_to_label_set(item.get("trigger_categories")),
-                min_confidence=float(item.get("min_confidence", 0.0) or 0.0),
-                score_weight=float(item.get("score_weight", 1.0) or 1.0),
+                min_confidence=min_confidence,
+                score_weight=score_weight,
             )
         )
 
@@ -234,23 +277,90 @@ def _parse_routing(raw: dict[str, Any], source: str) -> RoutingConfig:
     for item in raw.get("triggers") or []:
         if not isinstance(item, dict):
             raise ValueError(f"{source}: triggers entries must be objects")
+        trigger_id = str(item.get("id") or "").strip()
+        on = str(item.get("on") or "").strip()
+        action = str(item.get("action") or "").strip()
+        if not trigger_id:
+            raise ValueError(f"{source}: trigger id must not be empty")
+        if on not in classifiers:
+            raise ValueError(f"{source}: trigger {trigger_id!r}.on references unknown classifier {on!r}")
+        if action not in KNOWN_TRIGGER_ACTIONS:
+            raise ValueError(
+                f"{source}: trigger {trigger_id!r}.action is not one of {sorted(KNOWN_TRIGGER_ACTIONS)}"
+            )
+        min_confidence = float(item.get("min_confidence", 0.0) or 0.0)
+        if not 0.0 <= min_confidence <= 1.0:
+            raise ValueError(f"{source}: trigger {trigger_id!r}.min_confidence must be in [0, 1]")
         triggers.append(
             TriggerSpec(
-                trigger_id=str(item.get("id") or "").strip(),
-                on=str(item.get("on") or "").strip(),
-                action=str(item.get("action") or "").strip(),
+                trigger_id=trigger_id,
+                on=on,
+                action=action,
                 labels=_to_label_set(item.get("labels")),
-                min_confidence=float(item.get("min_confidence", 0.0) or 0.0),
+                min_confidence=min_confidence,
             )
         )
 
     return RoutingConfig(
-        version=int(raw.get("version", 1)),
+        version=version,
         classifiers=classifiers,
         contexts=contexts,
         chains=tuple(chains),
         triggers=tuple(triggers),
     )
+
+
+def routing_to_dict(routing: RoutingConfig) -> dict[str, Any]:
+    """Serialize a routing config into the stable API/file representation."""
+    classifiers: dict[str, dict[str, Any]] = {}
+    for member_id, spec in routing.classifiers.items():
+        value: dict[str, Any] = {
+            "backend": spec.backend,
+            "min_confidence": spec.min_confidence,
+            "keep_embeddings": spec.keep_embeddings,
+        }
+        if spec.model_path is not None:
+            value["model_path"] = spec.model_path
+        classifiers[member_id] = value
+
+    contexts: dict[str, dict[str, Any]] = {}
+    for name, spec in routing.contexts.items():
+        value: dict[str, Any] = {"run": list(spec.run)}
+        if spec.interval_seconds is not None:
+            value["interval_seconds"] = spec.interval_seconds
+        if spec.window_seconds is not None:
+            value["window_seconds"] = spec.window_seconds
+        if spec.min_rms is not None:
+            value["min_rms"] = spec.min_rms
+        contexts[name] = value
+
+    return {
+        "version": routing.version,
+        "classifiers": classifiers,
+        "contexts": contexts,
+        "chains": [
+            {
+                "id": chain.chain_id,
+                "after": chain.after,
+                "input": chain.input,
+                "trigger_labels": sorted(chain.trigger_labels),
+                "trigger_categories": sorted(chain.trigger_categories),
+                "min_confidence": chain.min_confidence,
+                "score_weight": chain.score_weight,
+            }
+            for chain in routing.chains
+        ],
+        "triggers": [
+            {
+                "id": trigger.trigger_id,
+                "on": trigger.on,
+                "action": trigger.action,
+                "labels": sorted(trigger.labels),
+                "min_confidence": trigger.min_confidence,
+            }
+            for trigger in routing.triggers
+        ],
+    }
 
 
 def load_routing_file(path: Path) -> RoutingConfig:
@@ -267,7 +377,14 @@ def load_routing_file(path: Path) -> RoutingConfig:
         raise ValueError(f"Unable to parse classifier routing config {path}: {exc}") from exc
     if not isinstance(raw, dict):
         raise ValueError(f"Classifier routing config {path} must be a JSON object")
-    return _parse_routing(raw, source=str(path))
+    return parse_routing_document(raw, source=str(path))
+
+
+def parse_routing_document(raw: dict[str, Any], *, source: str = "routing config") -> RoutingConfig:
+    """Validate an in-memory routing document for the API and tests."""
+    if not isinstance(raw, dict):
+        raise ValueError(f"Classifier routing config {source} must be a JSON object")
+    return _parse_routing(raw, source=source)
 
 
 def apply_settings(routing: RoutingConfig, settings: Any) -> RoutingConfig:
@@ -374,6 +491,7 @@ __all__ = [
     "ContextSpec",
     "EMBEDDING_ONLY_BACKENDS",
     "KNOWN_BACKENDS",
+    "KNOWN_CONTEXTS",
     "OPTIONAL_BACKENDS",
     "RoutingConfig",
     "TriggerSpec",
@@ -381,4 +499,6 @@ __all__ = [
     "default_routing",
     "load_routing",
     "load_routing_file",
+    "parse_routing_document",
+    "routing_to_dict",
 ]

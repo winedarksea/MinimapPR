@@ -43,11 +43,17 @@ pub fn ConfigPane() -> impl IntoView {
                             localization_band_max_hz=c.localization_band_max_hz
                         />
                         <ClassificationGroup
-                            classifier_backend=c.classifier_backend.clone()
-                            classifier_backend_resolved=c.classifier_backend_resolved.clone()
-                            classifier_backends_available=c.classifier_backends_available.clone()
                             classification_audio_source=c.classification_audio_source.clone()
                             min_localization_confidence=c.min_localization_confidence
+                            birdnet_enabled=c.birdnet_enabled
+                            drone_head_enabled=c.drone_head_enabled
+                            drone_head_min_confidence=c.drone_head_min_confidence
+                            stt_enabled=c.stt_enabled
+                            stt_trigger_min_confidence=c.stt_trigger_min_confidence
+                            transcript_retention_seconds=c.transcript_retention_seconds
+                            omni_scan_enabled=c.omni_scan_enabled
+                            omni_scan_interval_seconds=c.omni_scan_interval_seconds
+                            omni_scan_window_seconds=c.omni_scan_window_seconds
                             birdnet_chunked_dispatch_enabled=c.birdnet_chunked_dispatch_enabled
                             birdnet_trigger_min_confidence=c.birdnet_trigger_min_confidence
                             birdnet_geo_min_confidence=c.birdnet_geo_min_confidence
@@ -341,11 +347,17 @@ fn LocalizationGroup(
 
 #[component]
 fn ClassificationGroup(
-    classifier_backend: String,
-    classifier_backend_resolved: String,
-    classifier_backends_available: Vec<crate::state::models::BackendAvailability>,
     classification_audio_source: String,
     min_localization_confidence: f64,
+    birdnet_enabled: bool,
+    drone_head_enabled: bool,
+    drone_head_min_confidence: f64,
+    stt_enabled: bool,
+    stt_trigger_min_confidence: f64,
+    transcript_retention_seconds: f64,
+    omni_scan_enabled: bool,
+    omni_scan_interval_seconds: f64,
+    omni_scan_window_seconds: f64,
     birdnet_chunked_dispatch_enabled: bool,
     birdnet_trigger_min_confidence: f64,
     birdnet_geo_min_confidence: f64,
@@ -354,9 +366,17 @@ fn ClassificationGroup(
     beamformer_type: String,
 ) -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState");
-    let backend = RwSignal::new(classifier_backend.clone());
     let audio_source = RwSignal::new(classification_audio_source);
     let min_loc_conf = RwSignal::new(min_localization_confidence.to_string());
+    let birdnet = RwSignal::new(birdnet_enabled);
+    let drone_head = RwSignal::new(drone_head_enabled);
+    let drone_confidence = RwSignal::new(drone_head_min_confidence.to_string());
+    let stt = RwSignal::new(stt_enabled);
+    let stt_confidence = RwSignal::new(stt_trigger_min_confidence.to_string());
+    let transcript_retention_days = RwSignal::new((transcript_retention_seconds / 86_400.0).to_string());
+    let omni_scan = RwSignal::new(omni_scan_enabled);
+    let omni_interval = RwSignal::new(omni_scan_interval_seconds.to_string());
+    let omni_window = RwSignal::new(omni_scan_window_seconds.to_string());
     let chunked = RwSignal::new(birdnet_chunked_dispatch_enabled);
     let birdnet_trigger = RwSignal::new(birdnet_trigger_min_confidence.to_string());
     let birdnet_geo = RwSignal::new(birdnet_geo_min_confidence.to_string());
@@ -365,28 +385,21 @@ fn ClassificationGroup(
     let beamform = RwSignal::new(beamformer_type);
     let gs = RwSignal::new(GroupState::default());
 
-    // Backend options: "auto" plus each registered backend; unavailable backends
-    // are shown disabled with an "(not installed)" reason tooltip.
-    let mut backend_opts: Vec<(String, String, bool, String)> =
-        vec![("auto".to_string(), "auto".to_string(), false, String::new())];
-    for entry in &classifier_backends_available {
-        let label = if entry.available {
-            entry.name.clone()
-        } else {
-            format!("{} (not installed)", entry.name)
-        };
-        backend_opts.push((entry.name.clone(), label, !entry.available, entry.reason.clone()));
-    }
-    let resolved_note = classifier_backend_resolved.clone();
-    let backend_for_note = backend.clone();
-
     let dirty = move || gs.get().dirty;
 
     let save = move || {
         let body = json!({
-            "classifier_backend": backend.get(),
             "classification_audio_source": audio_source.get(),
             "min_localization_confidence": min_loc_conf.get().parse::<f64>().unwrap_or(0.20),
+            "birdnet_enabled": birdnet.get(),
+            "drone_head_enabled": drone_head.get(),
+            "drone_head_min_confidence": drone_confidence.get().parse::<f64>().unwrap_or(0.50),
+            "stt_enabled": stt.get(),
+            "stt_trigger_min_confidence": stt_confidence.get().parse::<f64>().unwrap_or(0.50),
+            "transcript_retention_seconds": transcript_retention_days.get().parse::<f64>().unwrap_or(7.0) * 86_400.0,
+            "omni_scan_enabled": omni_scan.get(),
+            "omni_scan_interval_seconds": omni_interval.get().parse::<f64>().unwrap_or(30.0),
+            "omni_scan_window_seconds": omni_window.get().parse::<f64>().unwrap_or(15.0),
             "birdnet_chunked_dispatch_enabled": chunked.get(),
             "birdnet_trigger_min_confidence": birdnet_trigger.get().parse::<f64>().unwrap_or(0.40),
             "birdnet_geo_min_confidence": birdnet_geo.get().parse::<f64>().unwrap_or(0.03),
@@ -424,18 +437,27 @@ fn ClassificationGroup(
     view! {
         <div class="config-group">
             <div class="config-group-header">
-                "Classification"
+                "Classifier Services"
                 <span class="dirty-dot" class:visible=dirty></span>
             </div>
             <div class="config-fields">
-                {select_input_opts("Backend", backend, gs, backend_opts)}
-                {move || {
-                    (backend_for_note.get() == "auto").then(|| view! {
-                        <div class="config-field">
-                            <span class="muted">{format!("Resolved backend: {}", resolved_note)}</span>
-                        </div>
-                    })
-                }}
+                <div class="config-routing-note">
+                    <strong>"YAMNet is always active."</strong>
+                    " Use the service switches below for common controls. Advanced per-context routing is managed through the classifier-routing API and requires restart."
+                </div>
+                <div class="config-subsection">"Detection models"</div>
+                {bool_input("Run BirdNET", birdnet, gs)}
+                {bool_input("Run drone detector", drone_head, gs)}
+                {num_input("Drone alert confidence", drone_confidence, gs, 0.0, 1.0, 0.01)}
+                <div class="config-subsection">"Speech capture"</div>
+                {bool_input("Transcribe YAMNet speech", stt, gs)}
+                {num_input("Speech trigger confidence", stt_confidence, gs, 0.0, 1.0, 0.01)}
+                {num_input("Transcript retention (days)", transcript_retention_days, gs, 1.0, 365.0, 1.0)}
+                <div class="config-subsection">"Continuous omni scan"</div>
+                {bool_input("Scan omni nodes continuously", omni_scan, gs)}
+                {num_input("Scan interval (s)", omni_interval, gs, 1.0, 3600.0, 1.0)}
+                {num_input("Audio window (s)", omni_window, gs, 0.5, 300.0, 0.5)}
+                <div class="config-subsection">"Audio and model thresholds"</div>
                 {select_input_opts("Audio Source", audio_source, gs, vec![
                     ("beamformed".to_string(), "beamformed".to_string(), false, String::new()),
                     ("omni".to_string(), "omni".to_string(), false, String::new()),

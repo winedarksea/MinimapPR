@@ -1,4 +1,4 @@
-use crate::api::list_overlays;
+use crate::api::{list_overlays, upsert_transcript_line};
 use crate::map::bindings::{pulse_track_marker, trigger_node_omni_ripple};
 use crate::state::{AppState, LiveEvent, NodeStatus, WsStatus, MAX_FEED_LEN};
 use gloo_net::http::Request;
@@ -174,18 +174,16 @@ fn handle_message(state: &AppState, text: &str) {
             });
         }
         LiveEvent::Transcript { transcript } => {
-            state.modality.speech_lines.update(|lines| {
-                lines.push_front(crate::state::TranscriptLine {
+            upsert_transcript_line(
+                state,
+                crate::state::TranscriptLine {
                     line_id: transcript.id,
                     device_id: transcript.node_id.unwrap_or_default(),
                     text: transcript.text,
                     confidence: transcript.trigger_confidence.unwrap_or(0.0),
                     timestamp_ns: transcript.end_ns,
-                });
-                while lines.len() > MAX_FEED_LEN {
-                    lines.pop_back();
-                }
-            });
+                },
+            );
         }
         LiveEvent::RulesUpdated | LiveEvent::SetFilter | LiveEvent::BitReport { .. } => {}
     }

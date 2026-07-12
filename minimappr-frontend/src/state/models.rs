@@ -384,11 +384,6 @@ pub struct ConfigSnapshot {
     pub audio_lowpass_hz: f64,
     pub localization_algorithm: String,
     pub localization_strategy: String,
-    pub classifier_backend: String,
-    #[serde(default)]
-    pub classifier_backend_resolved: String,
-    #[serde(default)]
-    pub classifier_backends_available: Vec<BackendAvailability>,
     #[serde(default = "default_classification_audio_source")]
     pub classification_audio_source: String,
     #[serde(default)]
@@ -405,6 +400,24 @@ pub struct ConfigSnapshot {
     pub birdnet_trigger_min_confidence: f64,
     #[serde(default)]
     pub birdnet_geo_min_confidence: f64,
+    #[serde(default)]
+    pub birdnet_enabled: bool,
+    #[serde(default)]
+    pub drone_head_enabled: bool,
+    #[serde(default)]
+    pub drone_head_min_confidence: f64,
+    #[serde(default)]
+    pub stt_enabled: bool,
+    #[serde(default)]
+    pub stt_trigger_min_confidence: f64,
+    #[serde(default)]
+    pub transcript_retention_seconds: f64,
+    #[serde(default)]
+    pub omni_scan_enabled: bool,
+    #[serde(default)]
+    pub omni_scan_interval_seconds: f64,
+    #[serde(default)]
+    pub omni_scan_window_seconds: f64,
     #[serde(default)]
     pub persisted_override_keys: Vec<String>,
     pub yamnet_min_confidence: f64,
@@ -424,15 +437,6 @@ pub struct ConfigSnapshot {
 
 fn default_classification_audio_source() -> String {
     "beamformed".to_string()
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
-pub struct BackendAvailability {
-    pub name: String,
-    #[serde(default)]
-    pub available: bool,
-    #[serde(default)]
-    pub reason: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]

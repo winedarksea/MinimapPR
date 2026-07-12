@@ -12,12 +12,11 @@ pub fn SpeechPanel() -> impl IntoView {
         <div class="tab-pane modality-panel">
             <div class="future-modality-header">
                 <span class="tone-badge neutral">"Speech"</span>
-                <span class="mock-watermark">"MOCK - awaiting backend"</span>
             </div>
             {move || {
                 let current_lines = lines.get();
                 if current_lines.is_empty() {
-                    return view! { <div class="empty-state">"Add a node with speech capability to enable the transcript ticker"</div> }.into_any();
+                    return view! { <div class="empty-state">"No captured transcripts yet"</div> }.into_any();
                 }
                 let current_nodes = nodes.get();
                 view! {

@@ -42,6 +42,22 @@ a non-trimmed install) raises at startup with a remediation message.
 editing the JSON: `birdnet_enabled`, `drone_head_enabled`, `stt_enabled`,
 `omni_scan_enabled`.
 
+## Power-user API
+
+`GET /api/v1/classifier-routing` returns the canonical routing document along
+with its configured path and source (`file` or `default`).
+
+`PUT /api/v1/classifier-routing` accepts `{"routing": { ... }}` containing the
+complete document. The server validates it with the same schema used at startup
+and atomically replaces the configured file. Its successful response sets
+`restart_required: true`: restart Fusion and the Rust classifier helper before
+expecting the changed graph to run. Routing is deliberately not hot-reloaded so
+model lifecycle work cannot interrupt the audio pipeline.
+
+This API changes the routing document only. The PATCHable kill switches above
+remain a separate operational override and may remove configured members,
+chains, or triggers from the effective runtime graph.
+
 ## Migration from `classifier_backend` / `model_chain.json`
 
 - `classifier_backend`, `model_chain_config_path`, and

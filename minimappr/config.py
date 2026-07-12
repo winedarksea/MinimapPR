@@ -530,6 +530,14 @@ class Settings:
     training_dataset_dir: Path = Path("data/training")
     # Precedence: retention_policy_path overrides this default per label.
     snippet_retention_seconds: int = 3600
+    # Bulky detection audio is governed independently from the lightweight
+    # detection record.  These defaults intentionally mirror the classifier
+    # routing members, not the legacy retention tiers.
+    retention_yamnet_audio_seconds: int = 259_200
+    retention_birdnet_audio_seconds: int = 2_592_000
+    retention_drone_audio_seconds: int = 2_592_000
+    retention_alert_audio_seconds: int = 2_592_000
+    retention_detection_metadata_seconds: int = 63_072_000
     ingest_spool_dir: Path = Path("data/spool")
     ingest_spool_ready_ttl_seconds: float = 60.0
     ingest_spool_failed_ttl_seconds: float = 86_400.0
@@ -1083,6 +1091,15 @@ class Settings:
             raise ValueError("MINIMAPPR_STT_MAX_UTTERANCE_SECONDS must be > 0")
         if self.transcript_retention_seconds <= 0.0:
             raise ValueError("MINIMAPPR_TRANSCRIPT_RETENTION_SECONDS must be > 0")
+        for field_name in (
+            "retention_yamnet_audio_seconds",
+            "retention_birdnet_audio_seconds",
+            "retention_drone_audio_seconds",
+            "retention_alert_audio_seconds",
+            "retention_detection_metadata_seconds",
+        ):
+            if getattr(self, field_name) <= 0:
+                raise ValueError(f"{field_name} must be > 0")
         if self.omni_scan_interval_seconds <= 0.0:
             raise ValueError("MINIMAPPR_OMNI_SCAN_INTERVAL_SECONDS must be > 0")
         if self.omni_scan_window_seconds <= 0.0:
@@ -1336,6 +1353,11 @@ class Settings:
             snippet_dir=Path(_env_str("MINIMAPPR_SNIPPET_DIR", "data/snippets")),
             training_dataset_dir=Path(_env_str("MINIMAPPR_TRAINING_DATASET_DIR", "data/training")),
             snippet_retention_seconds=_env_int("MINIMAPPR_SNIPPET_RETENTION_SECONDS", 3600),
+            retention_yamnet_audio_seconds=_env_int("MINIMAPPR_RETENTION_YAMNET_AUDIO_SECONDS", 259_200),
+            retention_birdnet_audio_seconds=_env_int("MINIMAPPR_RETENTION_BIRDNET_AUDIO_SECONDS", 2_592_000),
+            retention_drone_audio_seconds=_env_int("MINIMAPPR_RETENTION_DRONE_AUDIO_SECONDS", 2_592_000),
+            retention_alert_audio_seconds=_env_int("MINIMAPPR_RETENTION_ALERT_AUDIO_SECONDS", 2_592_000),
+            retention_detection_metadata_seconds=_env_int("MINIMAPPR_RETENTION_DETECTION_METADATA_SECONDS", 63_072_000),
             ingest_spool_dir=Path(_env_str("MINIMAPPR_INGEST_SPOOL_DIR", "data/spool")),
             ingest_spool_ready_ttl_seconds=_env_float("MINIMAPPR_INGEST_SPOOL_READY_TTL_SECONDS", 60.0),
             ingest_spool_failed_ttl_seconds=_env_float("MINIMAPPR_INGEST_SPOOL_FAILED_TTL_SECONDS", 86_400.0),
@@ -1988,4 +2010,3 @@ class Settings:
             status_poll_interval_seconds=self.effector_status_poll_interval_seconds,
             slew_dwell_seconds=self.effector_slew_dwell_seconds,
         )
-

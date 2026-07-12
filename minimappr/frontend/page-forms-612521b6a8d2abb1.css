@@ -36,6 +36,31 @@
 .dirty-dot.visible { display: inline-block; }
 
 .config-fields { padding: var(--mmp-density-pad-panel); display: flex; flex-direction: column; gap: var(--mmp-density-gap-sm); }
+.config-subsection {
+  margin-top: var(--mmp-density-gap-sm);
+  padding-top: var(--mmp-density-gap-sm);
+  border-top: 1px solid var(--md-sys-color-outline-variant);
+  color: var(--md-sys-color-primary);
+  font-size: var(--md-sys-typescale-label-medium-size);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.config-subsection:first-of-type {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+.config-routing-note {
+  padding: 8px 10px;
+  background: var(--md-sys-color-surface-container);
+  border-left: 3px solid var(--md-sys-color-primary);
+  border-radius: var(--md-sys-shape-corner-xs);
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: var(--md-sys-typescale-body-small-size);
+  line-height: 1.4;
+}
+.config-routing-note strong { color: var(--md-sys-color-on-surface); }
 .config-field,
 .settings-field-row {
   display: grid;
@@ -126,6 +151,13 @@
 .save-error { font-size: var(--md-sys-typescale-label-medium-size); color: var(--mmp-sys-color-danger); }
 .save-ok    { font-size: var(--md-sys-typescale-label-medium-size); color: var(--mmp-sys-color-ok); }
 
+@media (max-width: 560px) {
+  .config-field,
+  .settings-field-row { grid-template-columns: 1fr; }
+  .config-field input[type="checkbox"] { justify-self: start; }
+  .config-group-footer { align-items: flex-start; flex-wrap: wrap; }
+}
+
 /* ═══ Audio player ══════════════════════════════════════════════ */
 audio { display: none; }
 
@@ -192,4 +224,3 @@ audio { display: none; }
   min-height: 0;
   background: var(--md-sys-color-surface);
 }
-

@@ -854,6 +854,19 @@ class RulesConfigResponse(BaseModel):
     source: Literal["file", "default"]
 
 
+class ClassifierRoutingConfigUpdate(BaseModel):
+    """Complete routing document submitted by the power-user API."""
+
+    routing: dict[str, Any]
+
+
+class ClassifierRoutingConfigResponse(BaseModel):
+    routing: dict[str, Any]
+    path: str
+    source: Literal["file", "default"]
+    restart_required: bool = False
+
+
 class ContextSnapshot(BaseModel):
     generated_ns: int
     active_tracks: list[dict[str, Any]] = Field(default_factory=list)

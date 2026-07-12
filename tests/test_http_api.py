@@ -1615,6 +1615,69 @@ def test_patch_config_rejects_invalid_audio_source(monkeypatch, tmp_path: Path) 
         assert resp.status_code == 422
 
 
+def test_classifier_routing_api_returns_defaults_when_file_is_missing(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    routing_path = tmp_path / "missing-routing.json"
+    monkeypatch.setenv("MINIMAPPR_CLASSIFIER_ROUTING_CONFIG_PATH", str(routing_path))
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/classifier-routing")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["source"] == "default"
+    assert body["path"] == str(routing_path)
+    assert body["restart_required"] is False
+    assert body["routing"]["contexts"]["detection_trigger"]["run"] == ["yamnet", "birdnet"]
+
+
+def test_classifier_routing_api_put_validates_writes_and_round_trips(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    routing_path = tmp_path / "classifier-routing.json"
+    monkeypatch.setenv("MINIMAPPR_CLASSIFIER_ROUTING_CONFIG_PATH", str(routing_path))
+    document = {
+        "version": 1,
+        "classifiers": {"heuristic": {"backend": "heuristic"}},
+        "contexts": {
+            "detection_trigger": {"run": ["heuristic"]},
+            "localized_render": {"run": ["heuristic"]},
+            "omni_continuous": {"run": []},
+        },
+        "chains": [],
+        "triggers": [],
+    }
+
+    with TestClient(app) as client:
+        put = client.put("/api/v1/classifier-routing", json={"routing": document})
+        get = client.get("/api/v1/classifier-routing")
+
+    assert put.status_code == 200, put.text
+    assert put.json()["restart_required"] is True
+    assert put.json()["source"] == "file"
+    assert get.status_code == 200, get.text
+    assert get.json()["routing"] == put.json()["routing"]
+    assert not (routing_path.parent / f".{routing_path.name}.tmp").exists()
+    assert json.loads(routing_path.read_text(encoding="utf-8")) == get.json()["routing"]
+
+
+def test_classifier_routing_api_rejects_invalid_chain(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    monkeypatch.setenv("MINIMAPPR_CLASSIFIER_ROUTING_CONFIG_PATH", str(tmp_path / "routing.json"))
+    invalid_document = {
+        "version": 1,
+        "classifiers": {"heuristic": {"backend": "heuristic"}},
+        "contexts": {"detection_trigger": {"run": ["heuristic"]}},
+        "chains": [{"id": "heuristic", "after": "missing", "input": "audio"}],
+        "triggers": [],
+    }
+
+    with TestClient(app) as client:
+        response = client.put("/api/v1/classifier-routing", json={"routing": invalid_document})
+
+    assert response.status_code == 422
+    assert "unknown classifier" in response.json()["detail"]
+
+
 def test_cop_detections_and_tracks_apply_configured_caps(monkeypatch, tmp_path: Path) -> None:
     _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
     monkeypatch.setenv("MINIMAPPR_COP_DETECTIONS_MAX_ITEMS", "7")

@@ -22,7 +22,7 @@
   <link rel="stylesheet" href="/map-3c32ae3d88711131.css" integrity="sha384-rnELsRJInynpzHjZ+Ig72gTMQK9fB/0BO5SIqPZx924jPJxNko1MnR/UuJf7K4x+"/>
   <link rel="stylesheet" href="/page-common-7b89486b1e4516cd.css" integrity="sha384-aGq3kfpL//L/zjPwBG4B+z5wcXIQL/vOqTJc1H5pnVzA7KGuSE7qVGgUGYro1lbI"/>
   <link rel="stylesheet" href="/page-alerts-be02339b1fbf4d6d.css" integrity="sha384-YJocHACtUHsnpQ+LJ6Em3VC3Tu3wUqQ7XC5doPcr4haT6uEqXH3KQ2InvbwO/rgv"/>
-  <link rel="stylesheet" href="/page-forms-247d5c730ad728b1.css" integrity="sha384-OUrSbxGC/V17l6DEtMaZCr6Z/sVFv9okTuM2gTi9dmCu/SrV89VhI3IlQKATzyr6"/>
+  <link rel="stylesheet" href="/page-forms-612521b6a8d2abb1.css" integrity="sha384-RnALBf19P8bZSwja1/mAiQbshehEdPhPx9qBr7pMy80TA4pqz4TvijjIBa58cDB1"/>
   <link rel="stylesheet" href="/page-analysis-3a6b1ff43f2f3d33.css" integrity="sha384-SymE6oLzv2xZRQ/P52rfUo3xXlIMEtdNSYQTvb7NOvT0l/KITydOcMwmH216aSSA"/>
   <link rel="stylesheet" href="/page-diagnostics-b306717813d391e7.css" integrity="sha384-83GsEbFxusTs/dtoXfUsL/sEju9+z3xTNbOMVnvvWRgFqgkk1ZCKRbBwKruBstC/"/>
   <link rel="stylesheet" href="/page-audio-9028f02d7bb95eea.css" integrity="sha384-QiMDM5z2JHlqrh95hT2TD9m5Eyy0sDUfV2NQERHJM6ZMMtGYAq+VYazSK1E0K6cN"/>
@@ -36,8 +36,8 @@
   
   
 <script type="module">
-import init, * as bindings from '/minimappr-frontend-8abea9e4b4c0e958.js';
-const wasm = await init({ module_or_path: '/minimappr-frontend-8abea9e4b4c0e958_bg.wasm' });
+import init, * as bindings from '/minimappr-frontend-b4e9811bb6d745ea.js';
+const wasm = await init({ module_or_path: '/minimappr-frontend-b4e9811bb6d745ea_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -77,7 +77,7 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
       line-height: 1;
     }
   </style>
-<link rel="modulepreload" href="/minimappr-frontend-8abea9e4b4c0e958.js" crossorigin="anonymous" integrity="sha384-ZloLCNHFNJk3UEZ8eiSMLS/KpvL8ZFgjnFVbtVfSWXyJBDpatClj5f5YF7JuXWd6"><link rel="preload" href="/minimappr-frontend-8abea9e4b4c0e958_bg.wasm" crossorigin="anonymous" integrity="sha384-OKGzvCazhN7XEXzmlfAa9KcpFEGKPWCRlhf1xMSbDDG9aZASQoQIIblgwXeBdtfx" as="fetch" type="application/wasm"></head>
+<link rel="modulepreload" href="/minimappr-frontend-b4e9811bb6d745ea.js" crossorigin="anonymous" integrity="sha384-KLewmckN3laDJPyEt+cT1Sw0ltxg6jUnaZyZMlt/rU0gIoNQ+Lig8IUPtQEeItwz"><link rel="preload" href="/minimappr-frontend-b4e9811bb6d745ea_bg.wasm" crossorigin="anonymous" integrity="sha384-keEd2nKvzGM8eO0X/w57pqSs6uRhR8d4joW0haqBh+GAw7xL7f/NsNTUXIKTPzo1" as="fetch" type="application/wasm"></head>
 <body>
   <script src="maplibre-interop.js"></script>
   <script src="audio-interop.js"></script>
