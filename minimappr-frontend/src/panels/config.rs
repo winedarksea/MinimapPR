@@ -51,6 +51,11 @@ pub fn ConfigPane() -> impl IntoView {
                             stt_enabled=c.stt_enabled
                             stt_trigger_min_confidence=c.stt_trigger_min_confidence
                             transcript_retention_seconds=c.transcript_retention_seconds
+                            retention_yamnet_audio_seconds=c.retention_yamnet_audio_seconds
+                            retention_birdnet_audio_seconds=c.retention_birdnet_audio_seconds
+                            retention_drone_audio_seconds=c.retention_drone_audio_seconds
+                            retention_alert_audio_seconds=c.retention_alert_audio_seconds
+                            retention_detection_metadata_seconds=c.retention_detection_metadata_seconds
                             omni_scan_enabled=c.omni_scan_enabled
                             omni_scan_interval_seconds=c.omni_scan_interval_seconds
                             omni_scan_window_seconds=c.omni_scan_window_seconds
@@ -97,6 +102,38 @@ fn num_input(
                     gs.update(|s| { s.dirty = true; s.saved = false; });
                 }
             />
+        </div>
+    }
+}
+
+/// A retention control carries its data scope beside the number so operators
+/// do not have to infer whether a value deletes audio or lightweight history.
+fn retention_input(
+    label: &'static str,
+    description: &'static str,
+    sig: RwSignal<String>,
+    gs: RwSignal<GroupState>,
+) -> impl IntoView {
+    view! {
+        <div class="retention-field">
+            <label>
+                <span class="retention-field-title">{label}</span>
+                <span class="retention-field-description">{description}</span>
+            </label>
+            <div class="retention-input-wrap">
+                <input
+                    type="number"
+                    min="1"
+                    max="3650"
+                    step="1"
+                    prop:value=move || sig.get()
+                    on:input=move |ev| {
+                        sig.set(event_target_value(&ev));
+                        gs.update(|s| { s.dirty = true; s.saved = false; });
+                    }
+                />
+                <span aria-hidden="true">"days"</span>
+            </div>
         </div>
     }
 }
@@ -355,6 +392,11 @@ fn ClassificationGroup(
     stt_enabled: bool,
     stt_trigger_min_confidence: f64,
     transcript_retention_seconds: f64,
+    retention_yamnet_audio_seconds: f64,
+    retention_birdnet_audio_seconds: f64,
+    retention_drone_audio_seconds: f64,
+    retention_alert_audio_seconds: f64,
+    retention_detection_metadata_seconds: f64,
     omni_scan_enabled: bool,
     omni_scan_interval_seconds: f64,
     omni_scan_window_seconds: f64,
@@ -374,6 +416,11 @@ fn ClassificationGroup(
     let stt = RwSignal::new(stt_enabled);
     let stt_confidence = RwSignal::new(stt_trigger_min_confidence.to_string());
     let transcript_retention_days = RwSignal::new((transcript_retention_seconds / 86_400.0).to_string());
+    let yamnet_retention_days = RwSignal::new((retention_yamnet_audio_seconds / 86_400.0).to_string());
+    let birdnet_retention_days = RwSignal::new((retention_birdnet_audio_seconds / 86_400.0).to_string());
+    let drone_retention_days = RwSignal::new((retention_drone_audio_seconds / 86_400.0).to_string());
+    let alert_retention_days = RwSignal::new((retention_alert_audio_seconds / 86_400.0).to_string());
+    let metadata_retention_days = RwSignal::new((retention_detection_metadata_seconds / 86_400.0).to_string());
     let omni_scan = RwSignal::new(omni_scan_enabled);
     let omni_interval = RwSignal::new(omni_scan_interval_seconds.to_string());
     let omni_window = RwSignal::new(omni_scan_window_seconds.to_string());
@@ -397,6 +444,11 @@ fn ClassificationGroup(
             "stt_enabled": stt.get(),
             "stt_trigger_min_confidence": stt_confidence.get().parse::<f64>().unwrap_or(0.50),
             "transcript_retention_seconds": transcript_retention_days.get().parse::<f64>().unwrap_or(7.0) * 86_400.0,
+            "retention_yamnet_audio_seconds": yamnet_retention_days.get().parse::<f64>().unwrap_or(3.0) * 86_400.0,
+            "retention_birdnet_audio_seconds": birdnet_retention_days.get().parse::<f64>().unwrap_or(30.0) * 86_400.0,
+            "retention_drone_audio_seconds": drone_retention_days.get().parse::<f64>().unwrap_or(30.0) * 86_400.0,
+            "retention_alert_audio_seconds": alert_retention_days.get().parse::<f64>().unwrap_or(30.0) * 86_400.0,
+            "retention_detection_metadata_seconds": metadata_retention_days.get().parse::<f64>().unwrap_or(730.0) * 86_400.0,
             "omni_scan_enabled": omni_scan.get(),
             "omni_scan_interval_seconds": omni_interval.get().parse::<f64>().unwrap_or(30.0),
             "omni_scan_window_seconds": omni_window.get().parse::<f64>().unwrap_or(15.0),
@@ -453,6 +505,18 @@ fn ClassificationGroup(
                 {bool_input("Transcribe YAMNet speech", stt, gs)}
                 {num_input("Speech trigger confidence", stt_confidence, gs, 0.0, 1.0, 0.01)}
                 {num_input("Transcript retention (days)", transcript_retention_days, gs, 1.0, 365.0, 1.0)}
+                <div class="config-subsection">"Audio retention"</div>
+                <div class="retention-settings" aria-label="Audio and detection retention">
+                    {retention_input("YAMNet detections", "Detection audio only", yamnet_retention_days, gs)}
+                    {retention_input("BirdNET detections", "Detection audio only", birdnet_retention_days, gs)}
+                    {retention_input("Positive drone detections", "Negative drone results are never written", drone_retention_days, gs)}
+                    {retention_input("Alerted audio", "Overrides classifier and label retention", alert_retention_days, gs)}
+                    {retention_input("Detection metadata", "Minimal what / where / when history", metadata_retention_days, gs)}
+                </div>
+                <div class="retention-protection-note">
+                    <strong>"Always kept: "</strong>
+                    "IAMF and calibration recordings remain until explicitly deleted or included in a full purge. Label-specific overrides are managed in the retention policy."
+                </div>
                 <div class="config-subsection">"Continuous omni scan"</div>
                 {bool_input("Scan omni nodes continuously", omni_scan, gs)}
                 {num_input("Scan interval (s)", omni_interval, gs, 1.0, 3600.0, 1.0)}

@@ -134,6 +134,7 @@ class DetectionAssembler:
         retention_policy: RetentionPolicy,
         snippet_dir: Path | str,
         snippet_retention_seconds: float,
+        classifier_audio_retention_seconds: dict[str, float] | None = None,
         event_stale_seconds: float,
     ) -> None:
         self._storage = storage
@@ -143,6 +144,7 @@ class DetectionAssembler:
         self._retention_policy = retention_policy
         self._snippet_dir = Path(snippet_dir)
         self._snippet_retention_seconds = snippet_retention_seconds
+        self._classifier_audio_retention_seconds = classifier_audio_retention_seconds or {}
         self._event_stale_seconds = event_stale_seconds
 
     def replace_coordinate_frame(self, coordinate_frame: LocalCoordinateFrame) -> None:
@@ -346,7 +348,15 @@ class DetectionAssembler:
         # -- snippet writing ---------------------------------------------------
         snippet_path: str | None = None
         snippet_expires_ns: int | None = None
-        if self._snippet_retention_seconds > 0 and retention_tier not in {"ephemeral", "experiment"}:
+        classifier_source = str(classification.features.get("winner_member") or "yamnet").strip().lower()
+        classifier_audio_retention_seconds = self._classifier_audio_retention_seconds.get(
+            classifier_source, self._snippet_retention_seconds
+        )
+        # The drone head reports unknown for a negative.  Never materialize an
+        # audio file for that negative result; metadata remains available.
+        if classifier_source == "drone_head" and classification_label.strip().lower() != "drone":
+            classifier_audio_retention_seconds = 0
+        if classifier_audio_retention_seconds > 0 and retention_tier not in {"ephemeral", "experiment"}:
             snippet_signal = classification_signal
             if isinstance(audio_quality, dict):
                 missing_ratio = float(audio_quality.get("missing_ratio") or 0.0)
@@ -361,7 +371,7 @@ class DetectionAssembler:
             )
             snippet_path = str(snippet_file)
             snippet_expires_ns = event_time_ns + int(
-                self._snippet_retention_seconds * 1_000_000_000
+                classifier_audio_retention_seconds * 1_000_000_000
             )
             detection.snippet_path = snippet_path
 

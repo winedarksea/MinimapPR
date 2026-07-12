@@ -413,6 +413,16 @@ pub struct ConfigSnapshot {
     #[serde(default)]
     pub transcript_retention_seconds: f64,
     #[serde(default)]
+    pub retention_yamnet_audio_seconds: f64,
+    #[serde(default)]
+    pub retention_birdnet_audio_seconds: f64,
+    #[serde(default)]
+    pub retention_drone_audio_seconds: f64,
+    #[serde(default)]
+    pub retention_alert_audio_seconds: f64,
+    #[serde(default)]
+    pub retention_detection_metadata_seconds: f64,
+    #[serde(default)]
     pub omni_scan_enabled: bool,
     #[serde(default)]
     pub omni_scan_interval_seconds: f64,

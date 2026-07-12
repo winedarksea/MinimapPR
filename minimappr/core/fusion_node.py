@@ -399,6 +399,11 @@ class FusionNode:
             retention_policy=self.retention_policy,
             snippet_dir=settings.snippet_dir,
             snippet_retention_seconds=settings.snippet_retention_seconds,
+            classifier_audio_retention_seconds={
+                "yamnet": settings.retention_yamnet_audio_seconds,
+                "birdnet": settings.retention_birdnet_audio_seconds,
+                "drone_head": settings.retention_drone_audio_seconds,
+            },
             event_stale_seconds=settings.event_stale_seconds,
         )
 

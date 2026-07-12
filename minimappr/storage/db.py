@@ -3070,7 +3070,9 @@ class Storage:
         return await self.insert_large_artifact(
             artifact_type=artifact_type,
             path=path,
-            retention_tier="long",
+            # Capture exports are operator-authored recordings, not disposable
+            # detection evidence.  Only explicit deletion/full purge removes them.
+            retention_tier="permanent",
             source_detection_id=None,
             source_track_id=None,
             created_ns=created_ns,
@@ -3617,9 +3619,11 @@ class Storage:
             snippet_rows = await (
                 await db.execute(
                     """
-                    SELECT id, snippet_path, timestamp_ns, label, retention_tier
-                    FROM detections
-                    WHERE snippet_path IS NOT NULL
+                    SELECT d.id, d.snippet_path, d.timestamp_ns, d.label, d.retention_tier,
+                           d.feature_summary_json,
+                           EXISTS(SELECT 1 FROM alerts a WHERE a.detection_id = d.id) AS has_alert
+                    FROM detections d
+                    WHERE d.snippet_path IS NOT NULL
                     """
                 )
             ).fetchall()
@@ -3627,7 +3631,13 @@ class Storage:
             for row in snippet_rows:
                 if row["retention_tier"] in protected_tiers:
                     continue
-                max_age_seconds = policy.snippet_max_age_seconds_for_label(row["label"])
+                features = _json_loads(row["feature_summary_json"], {})
+                max_age_seconds = policy.resolve_for_context({
+                    "label": row["label"],
+                    "classifier": features.get("winner_member"),
+                    "retention_tier": row["retention_tier"],
+                    "trigger_source": "alert" if row["has_alert"] else None,
+                }).snippet_max_age_seconds
                 if max_age_seconds is None:
                     continue
                 threshold_ns = now_ns - int(max_age_seconds * 1_000_000_000)
@@ -3653,7 +3663,9 @@ class Storage:
                 await db.execute(
                     """
                     SELECT la.id, la.path, la.created_ns, la.retention_tier,
-                           COALESCE(d.label, t.label) AS label
+                           COALESCE(d.label, t.label) AS label,
+                           d.feature_summary_json,
+                           EXISTS(SELECT 1 FROM alerts a WHERE a.detection_id = d.id) AS has_alert
                     FROM large_artifacts la
                     LEFT JOIN detections d ON d.id = la.source_detection_id
                     LEFT JOIN tracks t ON t.id = la.source_track_id
@@ -3664,7 +3676,13 @@ class Storage:
             for row in artifact_rows:
                 if row["retention_tier"] in protected_tiers:
                     continue
-                max_age_seconds = policy.artifact_max_age_seconds_for_label(row["label"])
+                features = _json_loads(row["feature_summary_json"], {})
+                max_age_seconds = policy.resolve_for_context({
+                    "label": row["label"],
+                    "classifier": features.get("winner_member"),
+                    "retention_tier": row["retention_tier"],
+                    "trigger_source": "alert" if row["has_alert"] else None,
+                }).artifact_max_age_seconds
                 if max_age_seconds is None:
                     continue
                 threshold_ns = now_ns - int(max_age_seconds * 1_000_000_000)

@@ -135,7 +135,7 @@ class CalibrationPipeline:
         await self._storage.insert_large_artifact(
             artifact_type="calibration",
             path=str(record.calibration_manifest_path),
-            retention_tier="long",
+            retention_tier="permanent",
             source_detection_id=None,
             source_track_id=None,
             created_ns=time.time_ns(),

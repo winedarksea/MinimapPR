@@ -61,6 +61,64 @@
   line-height: 1.4;
 }
 .config-routing-note strong { color: var(--md-sys-color-on-surface); }
+.retention-settings {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--mmp-density-gap-sm);
+}
+.retention-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--mmp-density-gap-sm);
+  padding: 10px;
+  background: var(--md-sys-color-surface-container);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-xs);
+}
+.retention-field label { min-width: 0; }
+.retention-field-title,
+.retention-field-description { display: block; }
+.retention-field-title {
+  color: var(--md-sys-color-on-surface);
+  font-size: var(--md-sys-typescale-label-large-size);
+  font-weight: 700;
+}
+.retention-field-description {
+  margin-top: 2px;
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: var(--md-sys-typescale-body-small-size);
+  line-height: 1.3;
+}
+.retention-input-wrap { display: flex; align-items: center; gap: 5px; }
+.retention-input-wrap input {
+  width: 5.5rem;
+  background: var(--md-sys-color-surface-container-lowest);
+  border: 1px solid var(--md-sys-color-outline);
+  border-radius: var(--md-sys-shape-corner-xs);
+  color: var(--md-sys-color-on-surface);
+  padding: 6px 8px;
+  font: inherit;
+}
+.retention-input-wrap input:focus {
+  outline: none;
+  border-color: var(--md-sys-color-primary);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--md-sys-color-primary) 25%, transparent);
+}
+.retention-input-wrap span {
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: var(--md-sys-typescale-label-medium-size);
+}
+.retention-protection-note {
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, var(--mmp-sys-color-ok) 35%, transparent);
+  border-radius: var(--md-sys-shape-corner-xs);
+  background: color-mix(in srgb, var(--mmp-sys-color-ok) 10%, var(--md-sys-color-surface-container));
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: var(--md-sys-typescale-body-small-size);
+  line-height: 1.4;
+}
+.retention-protection-note strong { color: var(--md-sys-color-on-surface); }
 .config-field,
 .settings-field-row {
   display: grid;
@@ -156,6 +214,7 @@
   .settings-field-row { grid-template-columns: 1fr; }
   .config-field input[type="checkbox"] { justify-self: start; }
   .config-group-footer { align-items: flex-start; flex-wrap: wrap; }
+  .retention-settings { grid-template-columns: 1fr; }
 }
 
 /* ═══ Audio player ══════════════════════════════════════════════ */

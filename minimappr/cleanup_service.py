@@ -167,10 +167,12 @@ class CleanupService:
             if not dry_run:
                 await asyncio.to_thread(self._settings.db_path.unlink, missing_ok=True)
             db_removed = True
-        snippet_summary, artifact_summary, training_dataset_summary, cache_summaries = await asyncio.gather(
+        snippet_summary, speech_summary, artifact_summary, training_dataset_summary, spool_summary, cache_summaries = await asyncio.gather(
             _remove_tree_async(self._settings.snippet_dir, dry_run=dry_run),
+            _remove_tree_async(self._settings.speech_audio_dir, dry_run=dry_run),
             _remove_tree_async(self._settings.large_artifact_dir, dry_run=dry_run),
             _remove_tree_async(self._settings.training_dataset_dir, dry_run=dry_run),
+            _remove_tree_async(self._settings.ingest_spool_dir, dry_run=dry_run),
             _remove_known_runtime_cache_paths(dry_run=dry_run),
         )
         return {
@@ -178,8 +180,10 @@ class CleanupService:
             "dry_run": dry_run,
             "db_removed": db_removed,
             "snippet_dir": snippet_summary,
+            "speech_audio_dir": speech_summary,
             "artifact_dir": artifact_summary,
             "training_dataset_dir": training_dataset_summary,
+            "spool_dir": spool_summary,
             "cache_paths": cache_summaries,
         }
 
