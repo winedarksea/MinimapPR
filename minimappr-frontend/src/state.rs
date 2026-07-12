@@ -266,6 +266,30 @@ pub enum LiveEvent {
         #[serde(rename = "node_id")]
         _node_id: String,
     },
+    Transcript {
+        transcript: TranscriptEvent,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct TranscriptEvent {
+    pub id: String,
+    pub node_id: Option<String>,
+    #[allow(dead_code)]
+    pub sensor_id: Option<String>,
+    #[allow(dead_code)]
+    pub start_ns: i64,
+    pub end_ns: i64,
+    pub text: String,
+    #[allow(dead_code)]
+    pub model: Option<String>,
+    pub trigger_confidence: Option<f64>,
+    #[allow(dead_code)]
+    pub audio_path: Option<String>,
+    #[allow(dead_code)]
+    pub detection_id: Option<String>,
+    #[allow(dead_code)]
+    pub created_ns: i64,
 }
 
 pub const MAX_FEED_LEN: usize = 50;

@@ -200,3 +200,8 @@ tests/data/calibration/*.zip
 firmware/nodes/sirith_tetrahedral/build-test/
 
 drone_dataset/*
+
+# Drone-head training artifacts — commit int8 drone_head.onnx + metadata only.
+data/models/drone_head.float.onnx
+data/models/drone_head.tflite
+data/models/eval_report.json

@@ -36,6 +36,7 @@ impl ClassificationWorker {
                         bn.label = Some(cls.label);
                         bn.label_confidence = Some(cls.label_confidence);
                         bn.scores = Some(cls.scores);
+                        bn.features = cls.features;
                     }
                 }
                 Ok(None) => {}

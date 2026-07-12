@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from minimappr.interfaces import ActionDescriptor, RuleActionHandler, RuleEngine, RuleEvaluationResult
-from minimappr.models import DetectionEvent, TrackState
+from minimappr.models import DetectionEvent, TrackState, TranscriptRecord
 
 
 logger = logging.getLogger(__name__)
@@ -39,6 +39,7 @@ class RuleCondition:
     track_statuses: set[str] = field(default_factory=set)
     source_types: set[str] = field(default_factory=set)
     min_confidence: float | None = None
+    transcript_contains: set[str] = field(default_factory=set)
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "RuleCondition":
@@ -56,6 +57,7 @@ class RuleCondition:
             track_statuses=_as_set(raw.get("track_statuses")),
             source_types=_as_set(raw.get("source_types")),
             min_confidence=min_conf,
+            transcript_contains=_as_set(raw.get("transcript_contains")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -66,6 +68,7 @@ class RuleCondition:
             "zone_ids": sorted(self.zone_ids),
             "track_statuses": sorted(self.track_statuses),
             "source_types": sorted(self.source_types),
+            "transcript_contains": sorted(self.transcript_contains),
         }
         if self.min_confidence is not None:
             out["min_confidence"] = self.min_confidence
@@ -189,6 +192,41 @@ class ConfigRuleEngine(RuleEngine):
             match, reason = _matches(rule, detection=detection, track=track)
             if not match:
                 out.append(RuleEvaluationResult(rule_id=rule.rule_id, matched=False, reason=reason))
+                continue
+
+            if rule.cooldown_seconds > 0.0:
+                key = rule.rule_id
+                last = self._last_fire_ns.get(key)
+                if last is not None and now_ns - last < int(rule.cooldown_seconds * 1_000_000_000):
+                    out.append(RuleEvaluationResult(rule_id=rule.rule_id, matched=False, reason="cooldown"))
+                    continue
+                self._last_fire_ns[key] = now_ns
+
+            out.append(
+                RuleEvaluationResult(
+                    rule_id=rule.rule_id,
+                    matched=True,
+                    descriptors=list(rule.actions),
+                )
+            )
+        return out
+
+    async def evaluate_transcript(
+        self, transcript: TranscriptRecord
+    ) -> list[RuleEvaluationResult]:
+        self.reload()
+        now_ns = time.time_ns()
+        out: list[RuleEvaluationResult] = []
+        lowered_text = transcript.text.strip().lower()
+        for rule in self._rules:
+            if not rule.enabled or rule.scope != "transcript":
+                continue
+            cond = rule.condition
+            if not cond.transcript_contains:
+                out.append(RuleEvaluationResult(rule_id=rule.rule_id, matched=False, reason="no_condition"))
+                continue
+            if not any(needle in lowered_text for needle in cond.transcript_contains):
+                out.append(RuleEvaluationResult(rule_id=rule.rule_id, matched=False, reason="transcript_text"))
                 continue
 
             if rule.cooldown_seconds > 0.0:
@@ -369,6 +407,57 @@ def default_rules() -> list[RuleDef]:
                 ActionDescriptor(action_type="alert", destination="log", priority="high"),
             ],
             cooldown_seconds=30.0,
+        ),
+        RuleDef(
+            rule_id="gunshot_alert",
+            enabled=True,
+            scope="detection",
+            condition=RuleCondition(
+                labels={"gunshot", "gunshot, gunfire", "machine gun"},
+                min_confidence=0.5,
+            ),
+            actions=[
+                ActionDescriptor(
+                    action_type="alert",
+                    destination="cop",
+                    priority="high",
+                    payload={"message": "Gunshot detected"},
+                ),
+                ActionDescriptor(action_type="alert", destination="log", priority="high"),
+            ],
+            cooldown_seconds=5.0,
+        ),
+        RuleDef(
+            rule_id="drone_alert",
+            enabled=True,
+            scope="detection",
+            condition=RuleCondition(labels={"drone"}, min_confidence=0.85),
+            actions=[
+                ActionDescriptor(
+                    action_type="alert",
+                    destination="cop",
+                    priority="high",
+                    payload={"message": "Drone detected"},
+                ),
+                ActionDescriptor(action_type="alert", destination="log", priority="high"),
+            ],
+            cooldown_seconds=30.0,
+        ),
+        RuleDef(
+            rule_id="help_me_alert",
+            enabled=True,
+            scope="transcript",
+            condition=RuleCondition(transcript_contains={"help me"}),
+            actions=[
+                ActionDescriptor(
+                    action_type="alert",
+                    destination="cop",
+                    priority="critical",
+                    payload={"message": "Speech transcript contained \"help me\""},
+                ),
+                ActionDescriptor(action_type="alert", destination="log", priority="critical"),
+            ],
+            cooldown_seconds=10.0,
         ),
     ]
 

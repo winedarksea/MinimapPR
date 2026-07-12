@@ -16,6 +16,9 @@ pub struct AuthoritativeClassification {
     pub label: String,
     pub label_confidence: f32,
     pub scores: BTreeMap<String, f32>,
+    /// JSON-safe feature bag from the helper (ensemble breakdown, drone_head:*
+    /// scores, etc). Passed through opaquely — Rust never inspects it.
+    pub features: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -34,6 +37,8 @@ struct ClassifierResponse {
     label_confidence: Option<f32>,
     #[serde(default)]
     scores: Option<BTreeMap<String, f32>>,
+    #[serde(default)]
+    features: Option<serde_json::Value>,
     #[serde(default)]
     error: Option<String>,
 }
@@ -205,6 +210,7 @@ impl ManifestClassificationAnnotator {
             label,
             label_confidence: response.label_confidence.unwrap_or(0.0).clamp(0.0, 1.0),
             scores: response.scores.unwrap_or_default(),
+            features: response.features,
         }))
     }
 }

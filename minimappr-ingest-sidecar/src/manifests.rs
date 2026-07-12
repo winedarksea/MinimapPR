@@ -87,6 +87,10 @@ pub struct BirdnetHybridProvenance {
     pub label_confidence: Option<f32>,
     #[serde(default)]
     pub scores: Option<BTreeMap<String, f32>>,
+    /// JSON-safe feature bag from the classifier helper (ensemble breakdown,
+    /// drone_head:* scores, etc), passed through opaquely to Python.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub features: Option<serde_json::Value>,
     #[serde(default)]
     pub alias_cutoff_hz: Option<f32>,
     #[serde(default)]

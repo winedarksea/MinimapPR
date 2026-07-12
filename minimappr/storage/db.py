@@ -365,6 +365,21 @@ class Storage:
             CREATE INDEX IF NOT EXISTS ix_large_artifacts_retention_tier_expires
                 ON large_artifacts(retention_tier, expires_ns, created_ns DESC);
 
+            CREATE TABLE IF NOT EXISTS transcripts (
+                id TEXT PRIMARY KEY,
+                node_id TEXT,
+                sensor_id TEXT,
+                start_ns INTEGER NOT NULL,
+                end_ns INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                model TEXT,
+                trigger_confidence REAL,
+                audio_path TEXT,
+                detection_id TEXT REFERENCES detections(id) ON DELETE SET NULL,
+                created_ns INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_transcripts_created ON transcripts(created_ns DESC);
+
             CREATE TABLE IF NOT EXISTS zones (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -2616,6 +2631,91 @@ class Storage:
             )
             await self._commit_if_needed(db)
         return True
+
+    async def insert_transcript(
+        self,
+        *,
+        node_id: str | None,
+        sensor_id: str | None,
+        start_ns: int,
+        end_ns: int,
+        text: str,
+        model: str | None,
+        trigger_confidence: float | None,
+        audio_path: str | None,
+        detection_id: str | None,
+        created_ns: int,
+        transcript_id: str | None = None,
+    ) -> str:
+        db = self._require_db()
+        final_id = transcript_id or f"txt-{uuid.uuid4().hex[:16]}"
+        async with self._write_guard():
+            await db.execute(
+                """
+                INSERT INTO transcripts (
+                    id, node_id, sensor_id, start_ns, end_ns, text, model,
+                    trigger_confidence, audio_path, detection_id, created_ns
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    final_id,
+                    node_id,
+                    sensor_id,
+                    start_ns,
+                    end_ns,
+                    text,
+                    model,
+                    trigger_confidence,
+                    audio_path,
+                    detection_id,
+                    created_ns,
+                ),
+            )
+            await self._commit_if_needed(db)
+        return final_id
+
+    async def list_transcripts(
+        self, *, since_ns: int | None = None, limit: int = 200
+    ) -> list[dict]:
+        db = self._require_db()
+        if since_ns is not None:
+            rows = await (
+                await db.execute(
+                    "SELECT * FROM transcripts WHERE created_ns >= ? "
+                    "ORDER BY created_ns DESC LIMIT ?",
+                    (since_ns, limit),
+                )
+            ).fetchall()
+        else:
+            rows = await (
+                await db.execute(
+                    "SELECT * FROM transcripts ORDER BY created_ns DESC LIMIT ?", (limit,)
+                )
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    async def get_transcript(self, transcript_id: str) -> dict | None:
+        db = self._require_db()
+        row = await (
+            await db.execute(
+                "SELECT * FROM transcripts WHERE id = ? LIMIT 1", (transcript_id,)
+            )
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    async def delete_transcripts_older_than(self, cutoff_ns: int) -> list[str]:
+        """Delete transcript rows older than cutoff_ns; return their audio_paths."""
+        db = self._require_db()
+        async with self._write_guard():
+            rows = await (
+                await db.execute(
+                    "SELECT audio_path FROM transcripts WHERE created_ns < ?", (cutoff_ns,)
+                )
+            ).fetchall()
+            await db.execute("DELETE FROM transcripts WHERE created_ns < ?", (cutoff_ns,))
+            await self._commit_if_needed(db)
+        return [row["audio_path"] for row in rows if row["audio_path"]]
 
     async def list_pings(self, limit: int = 500) -> list[dict]:
         db = self._require_db()

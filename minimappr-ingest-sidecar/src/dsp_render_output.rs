@@ -238,6 +238,7 @@ pub fn build_render_result(
             label: None,
             label_confidence: None,
             scores: None,
+            features: None,
             alias_cutoff_hz: meta.alias_cutoff_hz,
             steering_model: meta.steering_model,
         }),

@@ -479,6 +479,20 @@ class ClassificationResult(BaseModel):
     features: dict[str, Any] = Field(default_factory=dict)
 
 
+class TranscriptRecord(BaseModel):
+    id: str
+    node_id: str | None = None
+    sensor_id: str | None = None
+    start_ns: int
+    end_ns: int
+    text: str
+    model: str | None = None
+    trigger_confidence: float | None = None
+    audio_path: str | None = None
+    detection_id: str | None = None
+    created_ns: int
+
+
 class LocalizationResult(BaseModel):
     position_m: Vec3
     confidence: float = Field(ge=0.0, le=1.0)

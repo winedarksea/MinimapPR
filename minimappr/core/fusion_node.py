@@ -100,6 +100,7 @@ from minimappr.models import (
     RetentionTier,
     TimeQuality,
     TrackState,
+    TranscriptRecord,
 )
 from minimappr.utils.audio import rms
 
@@ -445,6 +446,19 @@ class FusionNode:
         self._firmware_transport_recovery_ns = int(
             settings.node_degraded_after_seconds * 1_000_000_000
         )
+        # Continuous omni scanner (Phase 4) — constructed lazily in start() so the
+        # omni_continuous classifier (models) is only built when enabled.
+        self._omni_scanner: Any = None
+        # Speech capture (Phase 6) — constructed eagerly (no model load until a
+        # session actually transcribes) so triggers can fire from the first frame.
+        self._speech_capture: Any = None
+        if self.settings.stt_enabled:
+            from minimappr.core.speech_capture import SpeechCaptureManager
+
+            self._speech_capture = SpeechCaptureManager(
+                settings=self.settings, buffer=self.buffer, storage=self.storage
+            )
+            self._speech_capture.add_consumer(self._on_transcript)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -470,7 +484,29 @@ class FusionNode:
             asyncio.create_task(self._rules_worker_loop(index), name=f"fusion-rules-{index}")
             for index in range(1)
         ]
+        await self._start_omni_scanner()
         self._started = True
+
+    async def _start_omni_scanner(self) -> None:
+        if not self.settings.omni_scan_enabled or self._omni_scanner is not None:
+            return
+        try:
+            from minimappr.classifiers.factory import create_context_classifier
+            from minimappr.classifiers.routing import CONTEXT_OMNI_CONTINUOUS
+            from minimappr.core.omni_scanner import ContinuousOmniScanner
+
+            classifier = create_context_classifier(self.settings, CONTEXT_OMNI_CONTINUOUS)
+            self._omni_scanner = ContinuousOmniScanner(
+                settings=self.settings,
+                classifier=classifier,
+                registry=self.registry,
+                buffer=self.buffer,
+                sink=self.ingest_continuous_scan_result,
+            )
+            await self._omni_scanner.start()
+        except Exception:  # noqa: BLE001 — scanner is best-effort, must not block startup
+            logger.exception("Failed to start continuous omni scanner; continuing without it.")
+            self._omni_scanner = None
 
     @property
     def accepted_frame_count(self) -> int:
@@ -503,6 +539,15 @@ class FusionNode:
 
         self._stopping = True
         self._started = False
+
+        if self._omni_scanner is not None:
+            try:
+                await self._omni_scanner.stop()
+            finally:
+                self._omni_scanner = None
+
+        if self._speech_capture is not None:
+            self._speech_capture.close()
 
         # Bound shutdown wait time so lifespan teardown cannot hang indefinitely
         # if in-flight work stalls inside an external backend.
@@ -950,6 +995,12 @@ class FusionNode:
                 event_time_ns=payload.event_time_ns,
             )
         classified.classification.features.update(rust_extra_features)
+        await self._maybe_trigger_speech_capture(
+            node_id=node.id,
+            sensor_id=reference_sensor,
+            event_time_ns=payload.event_time_ns,
+            scores=classified.classification.scores,
+        )
         detection_product = await self._assemble_reporting_branch(
             product=localized_product,
             classified=classified,
@@ -966,6 +1017,108 @@ class FusionNode:
             tdoa_s={},
             capability_tier=capability_tier,
             localization_method=localization_method,
+        )
+        if detection_product is None:
+            return
+        await self._process_rules_and_delivery(detection_product)
+
+    async def ingest_continuous_scan_result(self, scan) -> None:
+        """Sink for :class:`ContinuousOmniScanner`.
+
+        Adopts the pre-computed ``omni_continuous`` classification authoritatively
+        and routes it through the standard omni reporting-branch assembly so the
+        site-wide omni dedupe (reporting_fusion) suppresses duplicates of a
+        concurrently trigger-driven detection automatically.
+        """
+        if self._stopping:
+            return
+        node = scan.node
+        if node.position_m is None:
+            return
+
+        sensor_descriptors = await self.registry.sensors_for_node(node.id)
+        if not sensor_descriptors:
+            return
+        selected_positions = {
+            descriptor.sensor_id: descriptor.position_m for descriptor in sensor_descriptors
+        }
+        selected_sensor_ids = [descriptor.sensor_id for descriptor in sensor_descriptors]
+        reference_sensor = (
+            scan.sensor_id if scan.sensor_id in selected_positions else selected_sensor_ids[0]
+        )
+        audio = np.asarray(scan.audio, dtype=np.float32)
+        node_position_m = tuple(float(value) for value in node.position_m)
+
+        candidate = EventCandidate(
+            id=f"omni-scan-{node.id}-{scan.end_time_ns}",
+            source_node_id=node.id,
+            event_time_ns=scan.end_time_ns,
+            sample_rate_hz=scan.sample_rate_hz,
+            source_type="omni_continuous_scan",
+            time_quality=TimeQuality.FREE_RUNNING,
+            source_observation_ids=[],
+        )
+        localization_branch = LocalizationBranch(
+            localization_position_m=node_position_m,
+            localization_confidence=self.fusion_config.fallback_localization_confidence,
+            localization_gdop=float("inf"),
+            localization_position_covariance_m2=None,
+            localization_range_observability=None,
+            localization_residual_rms_seconds=None,
+            localization_range_projection_mode=None,
+            reference_sensor=reference_sensor,
+            reference_signal=audio,
+            classification_reference_signal=audio,
+            tdoa_s={},
+            localization_method="omni_continuous_scan",
+            capability_tier="classification_only",
+        )
+        product = LocalizedCandidate(
+            candidate=candidate,
+            localization_branch=localization_branch,
+            selected_sensor_ids=selected_sensor_ids,
+            selected_windows={},
+            selected_positions=selected_positions,
+            classification_selected_windows={},
+            omni_reference_sensor=reference_sensor,
+            omni_reference_signal=audio,
+            omni_position_m=node_position_m,
+            omni_classification_reference_signal=audio,
+            localization_audio_quality={},
+            classification_audio_quality={},
+            classification_audio_quality_source="omni_continuous_scan",
+            environment={},
+            extra_classification_features={"omni_scan_rms": float(scan.rms)},
+        )
+        classified = await self._classification_orchestrator.adopt_authoritative_classification(
+            classification=scan.classification,
+            event_time_ns=scan.end_time_ns,
+            classification_signal=audio,
+            classification_path="omni_continuous",
+        )
+        classified.classification.features["omni_continuous_scan"] = True
+        await self._maybe_trigger_speech_capture(
+            node_id=node.id,
+            sensor_id=reference_sensor,
+            event_time_ns=scan.end_time_ns,
+            scores=classified.classification.scores,
+        )
+        detection_product = await self._assemble_reporting_branch(
+            product=product,
+            classified=classified,
+            reporting_modality="omni",
+            localization_position_m=node_position_m,
+            localization_confidence=self.fusion_config.fallback_localization_confidence,
+            localization_gdop=float("inf"),
+            localization_position_covariance_m2=None,
+            localization_range_observability=None,
+            localization_residual_rms_seconds=None,
+            localization_range_projection_mode=None,
+            reference_sensor=reference_sensor,
+            reference_signal=audio,
+            tdoa_s={},
+            capability_tier="classification_only",
+            localization_method="omni_continuous_scan",
         )
         if detection_product is None:
             return
@@ -1037,6 +1190,7 @@ class FusionNode:
             "drop_on_backpressure": self.fusion_config.drop_on_backpressure,
             "buffer_state": buffer_state,
             "health": health,
+            "omni_scanner": self._omni_scanner.stats() if self._omni_scanner is not None else {"enabled": bool(self.settings.omni_scan_enabled), "running": False},
         }
 
     def observe_firmware_runner_stats(
@@ -1667,6 +1821,12 @@ class FusionNode:
                 self._metrics.beamform_renders += 1
             if extra_features:
                 localized.classification.features.update(extra_features)
+            await self._maybe_trigger_speech_capture(
+                node_id=product.candidate.source_node_id,
+                sensor_id=product.localization_branch.reference_sensor,
+                event_time_ns=product.candidate.event_time_ns,
+                scores=localized.classification.scores,
+            )
             maybe_detection = await self._assemble_reporting_branch(
                 product=product,
                 classified=localized,
@@ -1694,6 +1854,13 @@ class FusionNode:
         )
         if extra_features and omni is not localized_result_for_omni:
             omni.classification.features.update(extra_features)
+        if omni is not localized_result_for_omni:
+            await self._maybe_trigger_speech_capture(
+                node_id=product.candidate.source_node_id,
+                sensor_id=product.omni_reference_sensor,
+                event_time_ns=product.candidate.event_time_ns,
+                scores=omni.classification.scores,
+            )
         maybe_detection = await self._assemble_reporting_branch(
             product=product,
             classified=omni,
@@ -2478,6 +2645,47 @@ class FusionNode:
             status=status,
             updated_ns=time.time_ns(),
             payload_patch=patch,
+        )
+
+    async def _on_transcript(self, record: TranscriptRecord) -> None:
+        payload = {
+            "type": "transcript",
+            "event_type": "transcript",
+            "transcript": record.model_dump(mode="json"),
+            "server_time_ns": time.time_ns(),
+        }
+        await self.live_callback(payload)
+
+        evaluations = await self.rules_engine.evaluate_transcript(record)
+        for evaluation in evaluations:
+            if not evaluation.matched:
+                continue
+            for descriptor in evaluation.descriptors:
+                await self._dispatch_rule_action(
+                    descriptor=descriptor,
+                    rule_id=evaluation.rule_id,
+                    detection=None,
+                    track=None,
+                )
+
+    async def _maybe_trigger_speech_capture(
+        self,
+        *,
+        node_id: str,
+        sensor_id: str,
+        event_time_ns: int,
+        scores: dict[str, float],
+    ) -> None:
+        if self._speech_capture is None:
+            return
+        speech_confidence = scores.get("Speech")
+        if speech_confidence is None:
+            return
+        await self._speech_capture.maybe_trigger(
+            node_id=node_id,
+            sensor_id=sensor_id,
+            event_time_ns=event_time_ns,
+            speech_confidence=float(speech_confidence),
         )
 
     # ------------------------------------------------------------------

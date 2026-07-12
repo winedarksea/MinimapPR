@@ -3693,6 +3693,28 @@ async def list_pings(request: Request, limit: int = Query(default=500, ge=1, le=
     return await state.storage.list_pings(limit=limit)
 
 
+@app.get("/api/v1/transcripts")
+async def list_transcripts(
+    request: Request,
+    since_ns: int | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=2000),
+) -> list[dict]:
+    state = _require_state(request)
+    return await state.storage.list_transcripts(since_ns=since_ns, limit=limit)
+
+
+@app.get("/api/v1/transcripts/{transcript_id}/audio")
+async def get_transcript_audio(transcript_id: str, request: Request) -> FileResponse:
+    state = _require_state(request)
+    row = await state.storage.get_transcript(transcript_id)
+    if row is None or not row.get("audio_path"):
+        raise HTTPException(status_code=404, detail="Transcript audio not found")
+    audio_path = Path(str(row["audio_path"]))
+    if not audio_path.exists():
+        raise HTTPException(status_code=404, detail="Transcript audio not found")
+    return FileResponse(path=audio_path, media_type="audio/wav")
+
+
 @app.get("/api/v1/environment")
 async def list_environment(
     request: Request,

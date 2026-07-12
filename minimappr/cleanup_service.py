@@ -116,6 +116,16 @@ class CleanupService:
                 "dropped_tracks": self._settings.retention_dropped_tracks_seconds,
             },
         )
+        transcript_cutoff_ns = effective_now_ns - int(
+            self._settings.transcript_retention_seconds * 1_000_000_000
+        )
+        transcripts_deleted = 0
+        if not dry_run:
+            audio_paths = await self._storage.delete_transcripts_older_than(transcript_cutoff_ns)
+            transcripts_deleted = len(audio_paths)
+            for audio_path in audio_paths:
+                with contextlib.suppress(OSError):
+                    Path(audio_path).unlink(missing_ok=True)
         sqlite_maintenance_due = self._sqlite_maintenance_due(
             effective_now_ns,
             force=force_sqlite_maintenance,
@@ -130,6 +140,7 @@ class CleanupService:
             "now_ns": effective_now_ns,
             "partial_cleanup": partial_summary["summary"],
             "retention_cleanup": retention_summary,
+            "transcripts_deleted": transcripts_deleted,
             "sqlite_maintenance": maintenance_summary,
             "sqlite_maintenance_due": sqlite_maintenance_due,
             "sqlite_maintenance_interval_seconds": self._settings.sqlite_maintenance_interval_seconds,

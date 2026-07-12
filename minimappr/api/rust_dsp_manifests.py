@@ -411,6 +411,9 @@ def _load_authoritative_classification(
                 continue
 
     features: dict[str, Any] = {}
+    helper_features = birdnet_payload.get("features")
+    if isinstance(helper_features, dict):
+        features.update(helper_features)
     classifier_source_node = birdnet_payload.get("classifier_source_node")
     if classifier_source_node is not None:
         features["rust_classifier_source_node"] = str(classifier_source_node)
