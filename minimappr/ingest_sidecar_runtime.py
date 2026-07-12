@@ -13,6 +13,7 @@ import functools
 import json
 import os
 import platform
+import signal
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -414,6 +415,10 @@ async def shutdown_managed_ingest_sidecar(
         return
 
     logger.info("Stopping ingest sidecar (pid %d)", current_sidecar.pid)
+    # SIGTERM only the sidecar leader. It closes the classifier helper's stdin,
+    # allowing the helper's `finally: classifier.close()` to release BirdNET's
+    # multiprocessing semaphores and shared-memory blocks. Signaling the whole
+    # group here skips that cleanup and leaves resource_tracker warnings.
     current_sidecar.terminate()
     if not force_kill_on_timeout:
         with contextlib.suppress(asyncio.TimeoutError):
@@ -424,8 +429,27 @@ async def shutdown_managed_ingest_sidecar(
         await asyncio.wait_for(current_sidecar.wait(), timeout=shutdown_timeout_seconds)
     except asyncio.TimeoutError:
         logger.warning("Ingest sidecar did not exit cleanly; sending SIGKILL")
-        current_sidecar.kill()
+        _signal_ingest_sidecar_process_tree(current_sidecar, signal.SIGKILL, logger=logger)
         await current_sidecar.wait()
+
+
+def _signal_ingest_sidecar_process_tree(process, sig: signal.Signals, *, logger) -> None:
+    """Signal the managed sidecar and its classifier-worker descendants."""
+    if os.name == "posix" and process.pid is not None:
+        try:
+            os.killpg(process.pid, sig)
+            return
+        except ProcessLookupError:
+            return
+        except OSError as exc:
+            logger.warning(
+                "Failed to signal ingest sidecar process group; signaling the leader only: %s",
+                exc,
+            )
+    if sig == signal.SIGKILL:
+        process.kill()
+    else:
+        process.terminate()
 
 
 def fetch_ingest_sidecar_health(port: int, timeout_seconds: float = 0.5) -> dict[str, object] | None:
@@ -534,7 +558,14 @@ async def start_ingest_sidecar(
         process_config.admission_reserve_bytes,
         process_config.allow_non_tmpfs_journal,
     )
-    process = await create_subprocess_exec(str(binary), env=env)
+    subprocess_kwargs: dict[str, object] = {"env": env}
+    if os.name == "posix":
+        # The sidecar launches the classifier helper, which in turn launches
+        # BirdNET multiprocessing workers. Give that entire tree a separate
+        # session so an operator's Ctrl-C only interrupts this Uvicorn process;
+        # lifespan shutdown can then stop the child tree deliberately.
+        subprocess_kwargs["start_new_session"] = True
+    process = await create_subprocess_exec(str(binary), **subprocess_kwargs)
     await wait_for_ready(
         process,
         port=process_config.sidecar_port,

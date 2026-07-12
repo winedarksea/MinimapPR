@@ -1095,7 +1095,7 @@ async def test_start_ingest_sidecar_passes_classifier_helper_env(monkeypatch, tm
         async def wait(self) -> int:
             return 0
 
-    async def fake_create_subprocess_exec(*argv, env):
+    async def fake_create_subprocess_exec(*argv, env, **kwargs):
         captured["argv"] = argv
         captured["env"] = env
         return _FakeProcess()

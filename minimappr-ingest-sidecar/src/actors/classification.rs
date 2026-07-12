@@ -46,6 +46,7 @@ impl ClassificationWorker {
             }
             self.publish(manifest).await;
         }
+        self.annotator.shutdown().await;
     }
 
     async fn publish(&self, manifest: DspManifest) {

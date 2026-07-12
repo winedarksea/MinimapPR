@@ -9,7 +9,11 @@ import pytest
 
 from minimappr import main
 from minimappr.config import Settings
-from minimappr.ingest_sidecar_runtime import ensure_ingest_stream_consumer_running
+from minimappr.ingest_sidecar_runtime import (
+    IngestSidecarRuntimeState,
+    ensure_ingest_stream_consumer_running,
+    shutdown_managed_ingest_sidecar,
+)
 
 
 class _FakeResponse:
@@ -35,6 +39,9 @@ class _FakeProcess:
         self.wait_calls = 0
 
     def terminate(self) -> None:
+        self.terminate_calls += 1
+
+    def kill(self) -> None:
         self.terminate_calls += 1
 
     async def wait(self) -> int:
@@ -216,6 +223,7 @@ async def test_start_ingest_sidecar_waits_for_healthcheck(
     async def fake_create_subprocess_exec(*args, **kwargs):
         observed["argv"] = args
         observed["env"] = kwargs["env"]
+        observed["start_new_session"] = kwargs.get("start_new_session")
         return process
 
     async def fake_wait_for_ingest_sidecar_ready(process_arg, *, port: int, **kwargs) -> None:
@@ -248,10 +256,29 @@ async def test_start_ingest_sidecar_waits_for_healthcheck(
     assert observed["poll_interval_seconds"] == pytest.approx(0.1)
     assert callable(observed["probe_ready"])
     assert observed["argv"] == (str(binary_path),)
+    if sys.platform != "win32":
+        assert observed["start_new_session"] is True
     assert observed["env"]["MINIMAPPR_SIDECAR_ALLOW_NON_TMPFS_JOURNAL"] == "true"
     assert observed["env"]["MINIMAPPR_SIDECAR_MEMORY_ONLY_LIVE_PATH"] == "true"
     assert observed["env"]["MINIMAPPR_INGEST_PORT"] == "18081"
     assert observed["env"]["MINIMAPPR_SIDECAR_PORT"] == "18081"
+
+
+@pytest.mark.asyncio
+async def test_managed_sidecar_shutdown_signals_leader_for_graceful_helper_cleanup(
+) -> None:
+    process = _FakeProcess(pid=5432)
+    state = IngestSidecarRuntimeState()
+    state._current_process = process
+    await shutdown_managed_ingest_sidecar(
+        state,
+        None,
+        force_kill_on_timeout=False,
+        logger=SimpleNamespace(info=lambda *args, **kwargs: None, warning=lambda *args, **kwargs: None),
+        shutdown_timeout_seconds=1.0,
+    )
+
+    assert process.terminate_calls == 1
 
 
 @pytest.mark.asyncio

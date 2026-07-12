@@ -305,32 +305,38 @@ def export_onnx(model, float_path: Path) -> None:
     onnx.save(onnx_model, str(float_path))
 
 
-def quantize_int8(float_path: Path, int8_path: Path, calib: np.ndarray) -> None:
-    from onnxruntime.quantization import CalibrationDataReader, QuantType, quantize_static
-    from onnxruntime.quantization.quant_utils import QuantFormat
+def quantize_int8(float_path: Path, int8_path: Path) -> None:
+    """Export a per-channel, dynamic-int8 ONNX model.
 
-    class _Reader(CalibrationDataReader):
-        def __init__(self, data: np.ndarray) -> None:
-            self._rows = iter([{"embedding": row[None, :].astype(np.float32)} for row in data])
+    Static activation quantization produced large probability errors for this
+    small embedding head even when calibrated on the complete training split.
+    Dynamic quantization keeps the runtime activations in their observed range
+    and quantizes the dense weights to int8, which preserves alert thresholds
+    without shipping a float-weight model.
+    """
+    from onnxruntime.quantization import QuantType, quantize_dynamic
 
-        def get_next(self):
-            return next(self._rows, None)
-
-    quantize_static(
+    quantize_dynamic(
         str(float_path),
         str(int8_path),
-        _Reader(calib),
-        quant_format=QuantFormat.QDQ,
-        per_channel=False,
+        per_channel=True,
         weight_type=QuantType.QInt8,
-        activation_type=QuantType.QInt8,
     )
 
 
 def export_tflite(model, tflite_path: Path, calib: np.ndarray) -> None:
     import tensorflow as tf
 
-    converter = tf.lite.TFLiteConverter.from_keras_model(model)
+    # TensorFlow 2.18/Keras 3 can fail while traversing a Keras model directly
+    # (``'NoneType' object is not callable``). Converting the explicit serving
+    # function retains the same inference-only graph across those versions.
+    @tf.function(input_signature=[tf.TensorSpec((None, EMBEDDING_DIM), tf.float32, name="embedding")])
+    def _serve(embedding):
+        return model(embedding, training=False)
+
+    converter = tf.lite.TFLiteConverter.from_concrete_functions(
+        [_serve.get_concrete_function()], model
+    )
     converter.optimizations = [tf.lite.Optimize.DEFAULT]
 
     def _rep():
@@ -420,7 +426,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     rng = np.random.default_rng(args.seed)
     calib_idx = rng.choice(np.flatnonzero(is_train), size=min(args.calib_size, int(is_train.sum())), replace=False)
     calib = frames[calib_idx]
-    quantize_int8(float_path, int8_path, calib)
+    quantize_int8(float_path, int8_path)
     try:
         export_tflite(model, tflite_path, calib)
     except Exception as exc:  # noqa: BLE001 — TFLite is a nice-to-have artifact

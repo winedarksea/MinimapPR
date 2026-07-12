@@ -10,6 +10,7 @@ use tokio::{
 use tracing::warn;
 
 const _CLASSIFIER_HELPER_TIMEOUT: Duration = Duration::from_secs(120);
+const CLASSIFIER_HELPER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug)]
 pub struct AuthoritativeClassification {
@@ -183,6 +184,44 @@ impl ManifestClassificationAnnotator {
             stdin,
             stdout: BufReader::new(stdout),
         })
+    }
+
+    /// Close the helper's stdin and wait for its normal Python cleanup path.
+    ///
+    /// The helper owns BirdNET's multiprocessing session. EOF takes it through
+    /// its `finally: classifier.close()` block, which unlinks semaphore and
+    /// shared-memory resources. Killing the helper directly bypasses that
+    /// cleanup and leaves resource_tracker warnings at server shutdown.
+    pub async fn shutdown(&mut self) {
+        let Some(bridge) = self.bridge.take() else {
+            return;
+        };
+        let ClassifierBridge {
+            mut child,
+            stdin,
+            stdout,
+        } = bridge;
+        drop(stdin);
+        drop(stdout);
+
+        match timeout(CLASSIFIER_HELPER_SHUTDOWN_TIMEOUT, child.wait()).await {
+            Ok(Ok(status)) if status.success() => {}
+            Ok(Ok(status)) => {
+                warn!(%status, "classifier helper exited unsuccessfully during shutdown");
+            }
+            Ok(Err(error)) => {
+                warn!(%error, "failed to wait for classifier helper during shutdown");
+            }
+            Err(_) => {
+                warn!("classifier helper did not exit after stdin close; terminating it");
+                if let Err(error) = child.start_kill() {
+                    warn!(%error, "failed to terminate classifier helper after shutdown timeout");
+                }
+                if let Err(error) = child.wait().await {
+                    warn!(%error, "failed to reap classifier helper after shutdown timeout");
+                }
+            }
+        }
     }
 
     fn parse_response(
