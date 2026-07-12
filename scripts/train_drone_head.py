@@ -35,7 +35,12 @@ Usage::
         --promoted-dir data/training --out-dir data/models \\
         --cache-dir drone_dataset/.embed_cache --labels ambient,drone,coyote \\
         --epochs 40 --aug-copies 1 --aug-copies-per-label coyote=8 \\
-        --synth-ambient-count 1000
+        --auto-balance-ratio 3.0 --synth-ambient-count 1000
+
+``--auto-balance-ratio`` (default 3.0) automatically raises aug-copy counts,
+on top of any manual ``--aug-copies-per-label`` floor, so no class's estimated
+real-audio size trails the largest class by more than that ratio. Set to 0 to
+disable and rely purely on manual per-label counts.
 
 Requires the ``train`` extra: ``pip install -e '.[train]'`` (tf2onnx, onnx) plus
 tensorflow / tensorflow-hub / onnxruntime (core dependencies).
@@ -141,6 +146,60 @@ class PlannedVariant:
 
 def _aug_copies_for(label: str, base: int, per_label: dict[str, int]) -> int:
     return per_label.get(label, base)
+
+
+def estimate_real_frame_weights(
+    examples: list[WavExample], labels: list[str], segment_seconds: float
+) -> dict[str, float]:
+    """Cheap per-label size estimate, in seconds of real (pre-augmentation) audio.
+
+    Avoids running YAMNet just to count frames: seconds scale linearly with frame
+    count for a fixed hop, so ratios computed from duration match ratios computed
+    from frames. ``promoted`` WAV examples carry ``duration_s == 0`` (whole file,
+    unread here); ``promoted_npy`` examples are a single mean-pooled vector. Both
+    are approximated as one ``segment_seconds`` window — a deliberate estimate,
+    not an exact count.
+    """
+    weights = {name: 0.0 for name in labels}
+    for ex in examples:
+        dur = ex.duration_s if ex.duration_s > 0 else segment_seconds
+        weights[ex.label] = weights.get(ex.label, 0.0) + dur
+    return weights
+
+
+def compute_auto_balance_aug_copies(
+    weights: dict[str, float],
+    target_ratio: float,
+    manual_per_label: dict[str, int],
+    base_aug_copies: int,
+) -> dict[str, int]:
+    """Bump aug-copy counts so no label's estimated size trails the largest by
+    more than ``target_ratio`` (e.g. ``3.0`` => no class smaller than 1/3 of the
+    biggest after augmentation).
+
+    Manual ``--aug-copies-per-label`` values are a floor, never lowered — this
+    only adds copies on top when a class would otherwise fall short of the ratio.
+    Labels with zero real examples are left alone (nothing to multiply).
+    """
+    result = dict(manual_per_label)
+    if target_ratio <= 0 or not weights:
+        return result
+    max_weight = max(weights.values(), default=0.0)
+    if max_weight <= 0:
+        return result
+    target_weight = max_weight / target_ratio
+
+    for label, weight in weights.items():
+        if weight <= 0:
+            continue
+        manual_copies = manual_per_label.get(label, base_aug_copies)
+        effective_weight = weight * (1 + manual_copies)
+        if effective_weight >= target_weight:
+            continue
+        needed_multiplier = target_weight / weight  # total copies factor incl. original
+        needed_copies = max(manual_copies, int(np.ceil(needed_multiplier)) - 1)
+        result[label] = needed_copies
+    return result
 
 
 def build_variant_plan(
@@ -538,6 +597,12 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--segment-overlap", type=float, default=0.5)
     parser.add_argument("--aug-copies", type=int, default=1)
     parser.add_argument("--aug-copies-per-label", default="coyote=8")
+    parser.add_argument(
+        "--auto-balance-ratio", type=float, default=3.0,
+        help="Bump aug copies so no label's estimated real-audio size trails the "
+             "largest by more than this ratio (e.g. 3.0 = no class below 1/3 of "
+             "the biggest). Never lowers --aug-copies-per-label values. 0 disables.",
+    )
     parser.add_argument("--synth-ambient-count", type=int, default=1000)
     parser.add_argument("--max-files-per-label", type=int, default=0)
     parser.add_argument("--calib-size", type=int, default=512)
@@ -565,6 +630,18 @@ def main(argv: Iterable[str] | None = None) -> int:
     logger.info("Discovered %d WAV/promoted examples", len(examples))
 
     aug_per_label = _parse_per_label(args.aug_copies_per_label)
+    if args.auto_balance_ratio > 0:
+        real_weights = estimate_real_frame_weights(examples, labels, args.segment_seconds)
+        balanced = compute_auto_balance_aug_copies(
+            real_weights, args.auto_balance_ratio, aug_per_label, args.aug_copies
+        )
+        if balanced != aug_per_label:
+            logger.info(
+                "Auto-balance (ratio=%.1f) adjusted aug copies: %s -> %s (weights_s=%s)",
+                args.auto_balance_ratio, aug_per_label, balanced,
+                {k: round(v, 1) for k, v in real_weights.items()},
+            )
+        aug_per_label = balanced
     plan = build_variant_plan(
         examples, labels,
         aug_copies=args.aug_copies, aug_copies_per_label=aug_per_label,
@@ -698,6 +775,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         "augmentation": {
             "aug_copies": args.aug_copies,
             "aug_copies_per_label": aug_per_label,
+            "auto_balance_ratio": args.auto_balance_ratio,
             "synth_ambient_count": args.synth_ambient_count,
             "segment_seconds": args.segment_seconds,
             "segment_overlap": args.segment_overlap,

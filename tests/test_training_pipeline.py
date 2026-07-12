@@ -255,6 +255,70 @@ def test_per_class_group_split_invariants():
     assert is_tr[synth].all()
 
 
+# --------------------------------------------------------------------------- #
+# auto-balance
+# --------------------------------------------------------------------------- #
+def test_estimate_real_frame_weights_sums_durations():
+    from minimappr.training.wav_dataset import WavExample
+    from scripts.train_drone_head import estimate_real_frame_weights
+
+    examples = [
+        WavExample(Path("a.wav"), "drone", "g1", 0.0, 4.0, "wav"),
+        WavExample(Path("b.wav"), "drone", "g2", 0.0, 4.0, "wav"),
+        WavExample(Path("c.wav"), "coyote", "g3", 0.0, 2.0, "wav"),
+        WavExample(Path("promoted.wav"), "ambient", "promoted:x", 0.0, 0.0, "promoted"),  # whole-file
+    ]
+    weights = estimate_real_frame_weights(examples, ["ambient", "drone", "coyote"], segment_seconds=4.0)
+    assert weights["drone"] == pytest.approx(8.0)
+    assert weights["coyote"] == pytest.approx(2.0)
+    # duration_s == 0 (whole-file) falls back to segment_seconds.
+    assert weights["ambient"] == pytest.approx(4.0)
+
+
+def test_auto_balance_boosts_only_classes_below_ratio():
+    from scripts.train_drone_head import compute_auto_balance_aug_copies
+
+    weights = {"ambient": 6000.0, "drone": 10000.0, "coyote": 200.0}
+    manual = {"coyote": 8}
+    result = compute_auto_balance_aug_copies(weights, target_ratio=3.0, manual_per_label=manual, base_aug_copies=1)
+
+    # drone is the reference class and ambient is already within ratio -> not
+    # added to the result dict, so callers fall back to base_aug_copies (1).
+    assert result.get("drone", 1) == 1
+    assert result.get("ambient", 1) == 1
+    # coyote: manual floor of 8 copies (200*9=1800) still short of target (10000/3=3333.3)
+    # -> bumped up so 200*(1+copies) >= 3333.3  =>  copies >= 15.67 -> 16.
+    assert result["coyote"] == 16
+
+
+def test_auto_balance_never_lowers_manual_value():
+    from scripts.train_drone_head import compute_auto_balance_aug_copies
+
+    # Manual copies already exceed what the ratio requires -> left untouched.
+    weights = {"ambient": 1000.0, "coyote": 900.0}
+    result = compute_auto_balance_aug_copies(
+        weights, target_ratio=3.0, manual_per_label={"coyote": 50}, base_aug_copies=1
+    )
+    assert result["coyote"] == 50
+
+
+def test_auto_balance_disabled_at_zero_ratio():
+    from scripts.train_drone_head import compute_auto_balance_aug_copies
+
+    weights = {"ambient": 6000.0, "coyote": 10.0}
+    manual = {"coyote": 8}
+    result = compute_auto_balance_aug_copies(weights, target_ratio=0.0, manual_per_label=manual, base_aug_copies=1)
+    assert result == manual  # untouched, pass-through
+
+
+def test_auto_balance_skips_zero_weight_labels():
+    from scripts.train_drone_head import compute_auto_balance_aug_copies
+
+    weights = {"ambient": 6000.0, "coyote": 0.0}  # no coyote examples discovered at all
+    result = compute_auto_balance_aug_copies(weights, target_ratio=3.0, manual_per_label={}, base_aug_copies=1)
+    assert "coyote" not in result or result.get("coyote", 1) == 1  # nothing to multiply
+
+
 def test_per_class_split_gives_coyote_val_and_test():
     from scripts.train_drone_head import per_class_group_split
 
