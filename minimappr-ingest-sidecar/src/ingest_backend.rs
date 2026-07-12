@@ -639,6 +639,20 @@ impl SegmentJournalBackend {
                 let storage_class_report =
                     validate_journal_storage_class(&journal_root, runtime_config.enforce_tmpfs)
                         .map_err(|error| -> BoxedError { Box::new(error) })?;
+                if !storage_class_report.tmpfs_backed {
+                    // Enforcement is off (dev convenience / explicit opt-out), so we got
+                    // here instead of erroring. Be loud: raw PCM frames journaled to a
+                    // non-tmpfs mount land on physical disk instead of RAM.
+                    tracing::warn!(
+                        journal_root = %journal_root.display(),
+                        storage_class = %storage_class_report.storage_class,
+                        "journal root is not tmpfs/ramfs and tmpfs enforcement is disabled: \
+                         raw audio frames will be written to physical disk. This is expected \
+                         for local development but should NOT happen in production — set \
+                         MINIMAPPR_SIDECAR_ALLOW_NON_TMPFS_JOURNAL=false and mount the journal \
+                         root on tmpfs/ramfs."
+                    );
+                }
                 let journal_epoch = open_or_advance_epoch(&journal_root, &streams_dir).await?;
                 let (streams, total_journal_bytes) = recover_stream_states(&streams_dir).await?;
                 (

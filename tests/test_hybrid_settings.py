@@ -27,6 +27,7 @@ except Exception as exc:  # pragma: no cover - environment-dependent optional de
         allow_module_level=True,
     )
 
+from tests.hybrid_settings import hybrid_production_settings
 from minimappr.classifiers.birdnet import BirdNETClassifier
 from minimappr.classifiers.factory import create_classifier
 from minimappr.config import Settings
@@ -183,7 +184,6 @@ def _build_profile_settings(
     localization_search_padding_m: float | None = None,
 ) -> Settings:
     settings_kwargs = dict(
-        runtime_profile="birdnet_hybrid_production",
         db_path=tmp_path / f"birdnet_hybrid_{sample_rate_hz}.db",
         snippet_dir=tmp_path / f"snippets_{sample_rate_hz}",
         snippet_retention_seconds=snippet_retention_seconds,
@@ -205,7 +205,7 @@ def _build_profile_settings(
         settings_kwargs["localization_srp_grid_resolution_m"] = localization_srp_grid_resolution_m
     if localization_search_padding_m is not None:
         settings_kwargs["localization_search_padding_m"] = localization_search_padding_m
-    settings = Settings(**settings_kwargs)
+    settings = hybrid_production_settings(**settings_kwargs)
     settings.db_path.parent.mkdir(parents=True, exist_ok=True)
     settings.snippet_dir.mkdir(parents=True, exist_ok=True)
     return settings
@@ -863,8 +863,7 @@ def test_synthesized_house_finch_localizes_with_tight_srp(
         )
     }
 
-    settings = Settings(
-        runtime_profile="birdnet_hybrid_production",
+    settings = hybrid_production_settings(
         localization_srp_grid_resolution_m=TIGHT_SRP_GRID_RESOLUTION_M,
         localization_search_padding_m=TIGHT_SRP_SEARCH_PADDING_M,
         model_chain_config_path=Path("missing_model_chain.json"),
@@ -980,8 +979,7 @@ def test_house_finch_fixture_expands_to_four_sensor_wavs_with_expected_relative_
     assert np.max(np.abs(observed_relative_samples - expected_relative_samples)) <= 1
 
     result = build_localizer_from_settings(
-        Settings(
-            runtime_profile="birdnet_hybrid_production",
+        hybrid_production_settings(
             localization_srp_grid_resolution_m=TIGHT_SRP_GRID_RESOLUTION_M,
             localization_search_padding_m=TIGHT_SRP_SEARCH_PADDING_M,
             model_chain_config_path=Path("missing_model_chain.json"),
@@ -1286,8 +1284,7 @@ def test_synthesized_house_finch_localizes_tightly_in_geodetic_space(
             strict=True,
         )
     }
-    settings = Settings(
-        runtime_profile="birdnet_hybrid_production",
+    settings = hybrid_production_settings(
         localization_srp_grid_resolution_m=TIGHT_SRP_GRID_RESOLUTION_M,
         localization_search_padding_m=TIGHT_SRP_SEARCH_PADDING_M,
         site_origin_lat=DEFAULT_SITE_ORIGIN.lat,

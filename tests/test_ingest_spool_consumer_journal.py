@@ -288,8 +288,6 @@ class _RecordingIngestTransport:
 def _journal_consumer(
     spool_dir: Path,
     transport: _RecordingIngestTransport,
-    *,
-    runtime_profile: str = "default",
 ) -> IngestSpoolConsumer:
     return IngestSpoolConsumer(
         config=IngestSpoolConfig(
@@ -300,7 +298,6 @@ def _journal_consumer(
             poll_interval_seconds=0.05,
             worker_count=1,
             storage_mode="journal",
-            runtime_profile=runtime_profile,
         ),
         ingest_transport=transport,
     )
@@ -656,7 +653,6 @@ async def test_journal_consumer_prefers_rust_dsp_manifest_pair(tmp_path: Path) -
     consumer = _journal_consumer(
         spool_dir,
         transport,
-        runtime_profile="birdnet_hybrid_production",
     )
     now_ns = time.time_ns()
     stream_key = "sirith-array__audio_main__test"
@@ -734,7 +730,6 @@ async def test_journal_consumer_localization_only_manifest_updates_node_heartbea
     consumer = _journal_consumer(
         spool_dir,
         transport,
-        runtime_profile="birdnet_hybrid_production",
     )
     now_ns = time.time_ns()
     stream_key = "sirith-array-heartbeat__audio_main__test"
@@ -768,7 +763,6 @@ async def test_rust_manifest_claim_uses_claim_time_for_ttl_not_event_time(tmp_pa
     consumer = _journal_consumer(
         spool_dir,
         transport,
-        runtime_profile="birdnet_hybrid_production",
     )
     now_ns = time.time_ns()
     stream_key = "sirith-array-ttl__audio_main__test"
@@ -822,7 +816,6 @@ async def test_journal_consumer_loads_authoritative_rust_classification(tmp_path
     consumer = _journal_consumer(
         spool_dir,
         transport,
-        runtime_profile="birdnet_hybrid_production",
     )
 
     now_ns = time.time_ns()

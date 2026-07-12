@@ -385,6 +385,28 @@ pub struct ConfigSnapshot {
     pub localization_algorithm: String,
     pub localization_strategy: String,
     pub classifier_backend: String,
+    #[serde(default)]
+    pub classifier_backend_resolved: String,
+    #[serde(default)]
+    pub classifier_backends_available: Vec<BackendAvailability>,
+    #[serde(default = "default_classification_audio_source")]
+    pub classification_audio_source: String,
+    #[serde(default)]
+    pub min_localization_confidence: f64,
+    #[serde(default)]
+    pub skip_localization_for_classification: bool,
+    #[serde(default)]
+    pub localization_band_min_hz: f64,
+    #[serde(default)]
+    pub localization_band_max_hz: f64,
+    #[serde(default)]
+    pub birdnet_chunked_dispatch_enabled: bool,
+    #[serde(default)]
+    pub birdnet_trigger_min_confidence: f64,
+    #[serde(default)]
+    pub birdnet_geo_min_confidence: f64,
+    #[serde(default)]
+    pub persisted_override_keys: Vec<String>,
     pub yamnet_min_confidence: f64,
     pub detection_min_confidence: f64,
     pub beamformer_type: String,
@@ -395,6 +417,22 @@ pub struct ConfigSnapshot {
     pub hass: HassConfigSnapshot,
     #[serde(default)]
     pub site_origin: Option<SiteOriginSnapshot>,
+    /// Populated only on PATCH responses: sidecar-restart-required patched keys.
+    #[serde(default)]
+    pub restart_required: Vec<String>,
+}
+
+fn default_classification_audio_source() -> String {
+    "beamformed".to_string()
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct BackendAvailability {
+    pub name: String,
+    #[serde(default)]
+    pub available: bool,
+    #[serde(default)]
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]

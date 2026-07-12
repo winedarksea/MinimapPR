@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from tests.hybrid_settings import hybrid_production_settings
 from minimappr.classifiers.base import AudioClassifier
 from minimappr.config import Settings
 from minimappr.core.advanced_localization import EspritLocalizer, MusicLocalizer, SRPPhatLocalizer
@@ -296,8 +297,7 @@ def test_birdnet_hybrid_profile_uses_fixed_srp_for_tight_array_near_field() -> N
         sensor_id: shift_signal(excitation, sample_rate_hz, (distance / 343.2) - min_delay_s)
         for sensor_id, distance in distances.items()
     }
-    settings = Settings(
-        runtime_profile="birdnet_hybrid_production",
+    settings = hybrid_production_settings(
         localization_srp_grid_resolution_m=0.05,
         localization_search_padding_m=0.3,
     )
@@ -347,8 +347,7 @@ def test_birdnet_hybrid_profile_uses_fixed_srp_for_tight_array_far_field() -> No
         sensor_id: shift_signal(excitation, sample_rate_hz, (distance / sound_speed) - min_delay_s)
         for sensor_id, distance in distances.items()
     }
-    settings = Settings(
-        runtime_profile="birdnet_hybrid_production",
+    settings = hybrid_production_settings(
         localization_srp_grid_resolution_m=0.5,
         localization_search_padding_m=1.0,
         localization_far_field_default_range_m=60.0,
@@ -581,7 +580,7 @@ async def test_fusion_node_beamformed_classification_selects_higher_confidence(t
         classification_window_seconds=0.0,
         max_sensor_buffer_seconds=2.0,
         fusion_worker_count=1,
-        beamformed_classification_enabled=True,
+        classification_audio_source="beamformed",
         beamformer_type="delay_and_sum",
         beamformed_classification_min_sensor_count=2,
     )

@@ -1639,17 +1639,31 @@ class FusionNode:
         extra_features = product.extra_classification_features
 
         if product.localization_branch is not None:
-            localized = await self._classification_orchestrator.classify(
-                reference_signal=product.localization_branch.classification_reference_signal,
-                sample_rate_hz=product.candidate.sample_rate_hz,
-                capability_tier=product.localization_branch.capability_tier,
-                selected_sensor_ids=product.selected_sensor_ids,
-                selected_positions=product.selected_positions,
-                selected_windows=product.classification_selected_windows,
-                localization_position_m=product.localization_branch.localization_position_m,
-                event_time_ns=product.candidate.event_time_ns,
-                alias_cutoff_hz=product.localization_branch.alias_cutoff_hz,
-            )
+            nearest_sensor_id = self._nearest_node_omni_sensor(product)
+            if nearest_sensor_id is not None:
+                nearest_signal = product.classification_selected_windows.get(
+                    nearest_sensor_id,
+                    product.localization_branch.classification_reference_signal,
+                )
+                localized = await self._classification_orchestrator.classify_omni_only(
+                    reference_signal=nearest_signal,
+                    sample_rate_hz=product.candidate.sample_rate_hz,
+                    event_time_ns=product.candidate.event_time_ns,
+                    path="nearest_node_omni",
+                )
+                localized.classification.features["nearest_node_sensor_id"] = nearest_sensor_id
+            else:
+                localized = await self._classification_orchestrator.classify(
+                    reference_signal=product.localization_branch.classification_reference_signal,
+                    sample_rate_hz=product.candidate.sample_rate_hz,
+                    capability_tier=product.localization_branch.capability_tier,
+                    selected_sensor_ids=product.selected_sensor_ids,
+                    selected_positions=product.selected_positions,
+                    selected_windows=product.classification_selected_windows,
+                    localization_position_m=product.localization_branch.localization_position_m,
+                    event_time_ns=product.candidate.event_time_ns,
+                    alias_cutoff_hz=product.localization_branch.alias_cutoff_hz,
+                )
             if localized.beamformed_classification is not None:
                 self._metrics.beamform_renders += 1
             if extra_features:
@@ -1839,6 +1853,43 @@ class FusionNode:
                 "max_gap_seconds": max(stats.max_gap_seconds for stats in degraded_stats.values()),
                 "degraded_count_total": self._metrics.frames_zero_padded_degraded,
             },
+        )
+
+    @staticmethod
+    def _nearest_reference_sensor(
+        selected_positions: dict[str, np.ndarray],
+        position_m: tuple[float, float, float],
+    ) -> str | None:
+        """Sensor id whose position is closest to ``position_m`` (argmin distance)."""
+        if not selected_positions:
+            return None
+        target = np.asarray(position_m, dtype=np.float64)
+        best_id: str | None = None
+        best_dist = float("inf")
+        for sensor_id, pos in selected_positions.items():
+            dist = float(np.linalg.norm(np.asarray(pos, dtype=np.float64) - target))
+            if dist < best_dist:
+                best_dist = dist
+                best_id = sensor_id
+        return best_id
+
+    def _nearest_node_omni_sensor(self, product: LocalizedCandidate) -> str | None:
+        """Return the nearest sensor id for nearest_node_omni classification.
+
+        Only active when ``classification_audio_source == "nearest_node_omni"`` and
+        the localized branch's confidence clears ``min_localization_confidence``;
+        otherwise ``None`` so the caller falls back to the loudest-mic/omni path.
+        """
+        if self.settings.classification_audio_source != "nearest_node_omni":
+            return None
+        branch = product.localization_branch
+        if branch is None:
+            return None
+        if branch.localization_confidence < self.settings.min_localization_confidence:
+            return None
+        return self._nearest_reference_sensor(
+            product.selected_positions,
+            branch.localization_position_m,
         )
 
     def _build_reference_sensor_candidate(

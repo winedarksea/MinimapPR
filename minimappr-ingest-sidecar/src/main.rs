@@ -160,8 +160,26 @@ struct Args {
     )]
     derived_cache_admission_reserve_bytes: u64,
 
-    #[arg(long, env = "MINIMAPPR_RUNTIME_PROFILE", default_value = "default")]
-    runtime_profile: String,
+    #[arg(
+        long,
+        env = "MINIMAPPR_SIDECAR_HYBRID_RENDER_ENABLED",
+        default_value_t = false
+    )]
+    hybrid_render_enabled: bool,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_CLASSIFICATION_AUDIO_SOURCE",
+        default_value = "beamformed"
+    )]
+    classification_audio_source: String,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_MIN_LOCALIZATION_CONFIDENCE",
+        default_value_t = 0.20
+    )]
+    min_localization_confidence: f64,
 
     #[arg(
         long,
@@ -687,7 +705,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         (backend.manifest_store(), backend.derived_cache())
     {
         let localization_window_seconds = args.localization_window_seconds.max(512.0 / 16_000.0);
-        let birdnet_hybrid_render_enabled = args.runtime_profile == "birdnet_hybrid_production";
+        let birdnet_hybrid_render_enabled = args.hybrid_render_enabled;
         let classification_window_seconds = if birdnet_hybrid_render_enabled {
             if args.classification_window_seconds <= 0.0 {
                 DEFAULT_BIRDNET_CLASSIFICATION_WINDOW_SECONDS
@@ -762,6 +780,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 localization_cadence_ms: args.dsp_localization_cadence_ms,
                 localization_rms_gate: args.dsp_localization_rms_gate,
                 trigger_cooldown_seconds,
+                classification_audio_source: args.classification_audio_source.clone(),
+                min_localization_confidence: args.min_localization_confidence as f32,
                 query_persisted_raw_manifests: false,
                 ..DspWorkerConfig::default()
             },

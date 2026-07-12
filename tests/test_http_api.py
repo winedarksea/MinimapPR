@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
+from tests.hybrid_settings import hybrid_production_settings
 from minimappr.api.stream_consumer import SidecarNodeSnapshot
 from minimappr.config import Settings
 from minimappr.main import app
@@ -1118,8 +1119,7 @@ async def test_start_ingest_sidecar_passes_classifier_helper_env(monkeypatch, tm
     monkeypatch.setattr("minimappr.main._probe_ingest_sidecar_ready", lambda *args, **kwargs: False)
     monkeypatch.delenv("MINIMAPPR_SIDECAR_CLASSIFIER_COMMAND_JSON", raising=False)
 
-    settings = Settings(
-        runtime_profile="birdnet_hybrid_production",
+    settings = hybrid_production_settings(
         ingest_sidecar_binary_path=binary_path,
         ingest_spool_dir=tmp_path / "spool",
         ingest_storage_mode="journal",
@@ -1580,6 +1580,43 @@ def test_config_exposes_updated_detection_threshold_and_cop_defaults(monkeypatch
         assert body["cop"]["tracks_max_items"] == 150
         assert abs(float(body["cop"]["detections_max_age_seconds"]) - 86_400.0) < 1e-9
         assert abs(float(body["cop"]["tracks_max_age_seconds"]) - 86_400.0) < 1e-9
+
+
+def test_patch_config_persists_and_exposes_new_fields(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    config_path = tmp_path / "config.yml"
+    monkeypatch.setenv("MINIMAPPR_CONFIG_PATH", str(config_path))
+
+    with TestClient(app) as client:
+        get = client.get("/api/v1/config").json()
+        assert "classification_audio_source" in get
+        assert "classifier_backend_resolved" in get
+        assert "classifier_backends_available" in get
+        assert "persisted_override_keys" in get
+
+        resp = client.patch(
+            "/api/v1/config",
+            json={"classification_audio_source": "nearest_node_omni", "min_localization_confidence": 0.4},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["classification_audio_source"] == "nearest_node_omni"
+        assert "restart_required" in body
+
+    # Persisted to YAML and re-read on the next GET.
+    from minimappr.settings_store import load_overrides
+
+    persisted = load_overrides(config_path)
+    assert persisted["classification_audio_source"] == "nearest_node_omni"
+    assert persisted["min_localization_confidence"] == 0.4
+
+
+def test_patch_config_rejects_invalid_audio_source(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    monkeypatch.setenv("MINIMAPPR_CONFIG_PATH", str(tmp_path / "config.yml"))
+    with TestClient(app) as client:
+        resp = client.patch("/api/v1/config", json={"classification_audio_source": "bogus"})
+        assert resp.status_code == 422
 
 
 def test_cop_detections_and_tracks_apply_configured_caps(monkeypatch, tmp_path: Path) -> None:

@@ -30,8 +30,10 @@ from minimappr.api.binary_ingest import parse_binary_ingest_payload
 from minimappr.api.live import LiveEventHub
 from minimappr.api.spool_consumer import IngestSpoolConsumer
 from minimappr.api.stream_consumer import IngestStreamConsumer, StreamConsumerConfig
+from minimappr.classifiers.availability import probe_backends
 from minimappr.classifiers.factory import create_classifier
 from minimappr.config import IngestSidecarProcessConfig, IngestSidecarStartupConfig, Settings
+from minimappr.settings_store import CONFIG_PATCH_ALLOWLIST, load_overrides, save_overrides
 from minimappr.ingest_sidecar_runtime import (
     IngestSidecarRuntimeState as _RuntimeSidecarState,
     build_ingest_stream_consumer as _runtime_build_ingest_stream_consumer,
@@ -2756,7 +2758,20 @@ async def get_config(request: Request) -> dict:
         },
         "yamnet_input_target_rms": settings.yamnet_input_target_rms,
         "yamnet_max_input_gain": settings.yamnet_max_input_gain,
-        "beamformed_classification_enabled": settings.beamformed_classification_enabled,
+        "classification_audio_source": settings.classification_audio_source,
+        "min_localization_confidence": settings.min_localization_confidence,
+        "skip_localization_for_classification": settings.skip_localization_for_classification,
+        "classifier_backend_resolved": settings.resolved_classifier_backend(),
+        "classifier_backends_available": [
+            {"name": entry.name, "available": entry.available, "reason": entry.reason}
+            for entry in probe_backends()
+        ],
+        "localization_band_min_hz": settings.localization_band_min_hz,
+        "localization_band_max_hz": settings.localization_band_max_hz,
+        "birdnet_chunked_dispatch_enabled": settings.birdnet_chunked_dispatch_enabled,
+        "birdnet_trigger_min_confidence": settings.birdnet_trigger_min_confidence,
+        "birdnet_geo_min_confidence": settings.birdnet_geo_min_confidence,
+        "persisted_override_keys": sorted(load_overrides(settings.config_overrides_path)),
         "beamformer_type": settings.beamformer_type,
         "beamformed_classification_min_sensor_count": settings.beamformed_classification_min_sensor_count,
         "beamformed_classification_confidence_margin": settings.beamformed_classification_confidence_margin,
@@ -2807,37 +2822,30 @@ async def get_config(request: Request) -> dict:
     }
 
 
-_CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
-    "trigger_rms": float,
-    "trigger_cooldown_seconds": float,
-    "localization_window_seconds": float,
-    "preprocess_enabled": bool,
-    "audio_highpass_hz": float,
-    "audio_lowpass_hz": float,
-    "localization_algorithm": str,
-    "localization_strategy": str,
-    "classifier_backend": str,
-    "yamnet_min_confidence": float,
-    "detection_min_confidence": float,
-    "cop_detections_max_items": int,
-    "cop_tracks_max_items": int,
-    "cop_detections_max_age_seconds": float,
-    "cop_tracks_max_age_seconds": float,
-    "beamformer_type": str,
-    "tracking_filter": str,
-    "fusion_worker_count": int,
-    "coordinate_mode": str,
-    "hass_enabled": bool,
-    "hass_base_url": str,
-    "hass_token": str,
-    "hass_mqtt_host": str,
-    "hass_mqtt_port": int,
+# Single source of truth lives in settings_store so the persisted-overrides file
+# and this HTTP allowlist can never drift apart.
+_CONFIG_PATCH_ALLOWLIST = CONFIG_PATCH_ALLOWLIST
+
+# Patched keys that only reach the Rust sidecar via spawn env — a running sidecar
+# must be restarted to pick them up (surfaced as ``restart_required`` in PATCH).
+_SIDECAR_RESTART_REQUIRED_KEYS = {
+    "classification_audio_source",
+    "classifier_backend",
+    "min_localization_confidence",
+    "localization_band_min_hz",
+    "localization_band_max_hz",
+    "localization_window_seconds",
+    "birdnet_trigger_min_confidence",
+    "birdnet_geo_min_confidence",
+    "trigger_rms",
+    "trigger_cooldown_seconds",
 }
 
 _LOCALIZATION_ALGORITHMS = {"gcc_phat", "srp_phat", "music", "esprit"}
 _LOCALIZATION_STRATEGIES = {"fixed", "geometry_aware", "cascade"}
 _BEAMFORMER_TYPES = {"delay_and_sum", "das", "freq_domain_das", "mvdr", "superdirective", "gevd"}
-_CLASSIFIER_BACKENDS = {"yamnet", "birdnet", "heuristic"}
+_CLASSIFIER_BACKENDS = {"auto", "yamnet", "birdnet", "heuristic"}
+_CLASSIFICATION_AUDIO_SOURCES = {"beamformed", "omni", "nearest_node_omni"}
 _TRACKING_FILTERS = {"linear", "kalman"}
 _COORDINATE_MODES = {"flat", "geodetic"}
 
@@ -2965,8 +2973,28 @@ async def patch_config(request: Request) -> dict:
                 errors.append(f"beamformer_type: must be one of {sorted(_BEAMFORMER_TYPES)}")
             else:
                 value = v
-        elif key == "classifier_backend" and value not in _CLASSIFIER_BACKENDS:
-            errors.append(f"classifier_backend: must be one of {sorted(_CLASSIFIER_BACKENDS)}")
+        elif key == "classifier_backend":
+            v = str(value).strip().lower()
+            if v not in _CLASSIFIER_BACKENDS:
+                errors.append(f"classifier_backend: must be one of {sorted(_CLASSIFIER_BACKENDS)}")
+            else:
+                value = v
+        elif key == "classification_audio_source":
+            v = str(value).strip().lower()
+            if v not in _CLASSIFICATION_AUDIO_SOURCES:
+                errors.append(
+                    f"classification_audio_source: must be one of {sorted(_CLASSIFICATION_AUDIO_SOURCES)}"
+                )
+            else:
+                value = v
+        elif key == "min_localization_confidence" and not (0.0 <= value <= 1.0):  # type: ignore[operator]
+            errors.append("min_localization_confidence: must be in [0, 1]")
+        elif key in {"birdnet_trigger_min_confidence", "birdnet_geo_min_confidence"} and not (
+            0.0 <= value <= 1.0  # type: ignore[operator]
+        ):
+            errors.append(f"{key}: must be in [0, 1]")
+        elif key in {"localization_band_min_hz", "localization_band_max_hz"} and value < 0.0:  # type: ignore[operator]
+            errors.append(f"{key}: must be >= 0")
         elif key == "tracking_filter" and value not in _TRACKING_FILTERS:
             errors.append(f"tracking_filter: must be one of {sorted(_TRACKING_FILTERS)}")
         elif key == "coordinate_mode":
@@ -2981,16 +3009,33 @@ async def patch_config(request: Request) -> dict:
         if not errors or key not in {e.split(":")[0] for e in errors}:
             coerced[key] = value
 
+    settings: Settings = state.settings
+    # Cross-field: localization band max must exceed min when the band is enabled.
+    band_min = coerced.get("localization_band_min_hz", settings.localization_band_min_hz)
+    band_max = coerced.get("localization_band_max_hz", settings.localization_band_max_hz)
+    if float(band_max) > 0.0 and float(band_max) <= float(band_min):
+        errors.append("localization_band_max_hz: must be > localization_band_min_hz when enabled")
+
     if errors:
         raise HTTPException(status_code=422, detail=errors)
 
-    settings: Settings = state.settings
     for key, value in coerced.items():
         object.__setattr__(settings, key, value)
 
+    # Persist UI-set overrides (UI-saved value wins over env on restart).
+    persisted = load_overrides(settings.config_overrides_path)
+    persisted.update(coerced)
+    save_overrides(settings.config_overrides_path, persisted)
+
+    restart_required = sorted(
+        key
+        for key in coerced
+        if key in _SIDECAR_RESTART_REQUIRED_KEYS and settings.ingest_backend == "rust"
+    )
+
     snapshot = await get_config(request)
     await state.live_hub.broadcast({"type": "config_updated", "config": snapshot})
-    return snapshot
+    return {**snapshot, "restart_required": restart_required}
 
 
 @app.get("/api/v1/fusion/status", response_model=FusionStatusResponse)

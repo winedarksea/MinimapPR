@@ -69,6 +69,9 @@ pub struct DspWorkerConfig {
     pub band_split_high_crossover_width_fraction: f32,
     pub band_split_max_clamp_hz: Option<f32>,
     pub min_localization_confidence: f32,
+    /// Classification audio source: "beamformed" (default) | "omni" | "nearest_node_omni".
+    /// Selects the render path in `dsp_render_output::compute_render_bytes`.
+    pub classification_audio_source: String,
     pub skip_stale_manifests_for_live_buffer: bool,
     pub consumed_manifest_retention_max_files: usize,
     pub consumed_manifest_prune_interval: u64,
@@ -126,6 +129,7 @@ impl Default for DspWorkerConfig {
             band_split_high_crossover_width_fraction: 0.15,
             band_split_max_clamp_hz: None,
             min_localization_confidence: 0.20,
+            classification_audio_source: "beamformed".to_string(),
             skip_stale_manifests_for_live_buffer: false,
             consumed_manifest_retention_max_files: 20_000,
             consumed_manifest_prune_interval: 256,

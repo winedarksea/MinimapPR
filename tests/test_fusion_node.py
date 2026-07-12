@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from tests.hybrid_settings import hybrid_production_settings
 from minimappr.api.rust_dsp_manifests import LocalizedClassifierRenderRequest
 from minimappr.classifiers.base import AudioClassifier, ClassificationResult
 from minimappr.classifiers.heuristic import HeuristicClassifier
@@ -528,7 +529,7 @@ async def test_fusion_reuses_localized_classification_for_matching_omni_referenc
         classification_window_seconds=0.08,
         max_sensor_buffer_seconds=2.0,
         fusion_worker_count=1,
-        beamformed_classification_enabled=False,
+        classification_audio_source="omni",
         preprocess_enabled=False,
     )
     settings.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -620,7 +621,7 @@ async def test_fusion_records_wavelength_alias_metrics_and_features(tmp_path: Pa
         classification_window_seconds=0.08,
         max_sensor_buffer_seconds=2.0,
         fusion_worker_count=1,
-        beamformed_classification_enabled=False,
+        classification_audio_source="omni",
         preprocess_enabled=False,
     )
     settings.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1321,8 +1322,7 @@ async def test_fusion_ingest_deduplicates_replayed_frame(tmp_path: Path) -> None
 
 @pytest.mark.asyncio
 async def test_fusion_ingest_skips_observation_rows_for_staged_journal_profile(tmp_path: Path) -> None:
-    settings = Settings(
-        runtime_profile="birdnet_hybrid_production",
+    settings = hybrid_production_settings(
         db_path=tmp_path / "fusion_journal_stage.db",
         snippet_dir=tmp_path / "snippets",
         snippet_retention_seconds=0,
@@ -1406,8 +1406,7 @@ async def test_fusion_ingest_skips_observation_rows_for_staged_journal_profile(t
 
 
 def test_settings_default_skip_observation_rows_for_birdnet_hybrid_direct_ingest(tmp_path: Path) -> None:
-    settings = Settings(
-        runtime_profile="birdnet_hybrid_production",
+    settings = hybrid_production_settings(
         db_path=tmp_path / "fusion_birdnet_direct.db",
         snippet_dir=tmp_path / "snippets",
         direct_ingest_enabled=True,
@@ -1638,11 +1637,10 @@ async def test_fusion_rust_render_python_cartesian_solver_rehomes_solve(tmp_path
 
 @pytest.mark.asyncio
 async def test_rust_render_production_classification_is_coalesced(tmp_path: Path) -> None:
-    settings = Settings(
+    settings = hybrid_production_settings(
         db_path=tmp_path / "fusion_rust_render_coalesced.db",
         snippet_dir=tmp_path / "snippets",
         snippet_retention_seconds=0,
-        runtime_profile="birdnet_hybrid_production",
         fusion_worker_count=1,
         fusion_classification_queue_size=8,
     )

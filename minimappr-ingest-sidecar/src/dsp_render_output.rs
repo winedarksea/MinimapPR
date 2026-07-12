@@ -62,6 +62,28 @@ pub fn compute_render_bytes(request: RenderComputeRequest<'_>) -> (Vec<u8>, Rend
         render_end_ns,
     } = request;
     let source_channel_count = channels.len();
+
+    // Nearest-node omni source: always render the raw omni mix (no beamforming),
+    // but preserve localization provenance so the Python side can pick the nearest
+    // node / stamp confidence. The distinct render_kind lets the IAMF pipeline
+    // treat it as a plain omni fallback (it only special-cases "birdnet_hybrid_*").
+    if config.classification_audio_source == "nearest_node_omni" {
+        let bytes = render_omni_pcm16le(channels);
+        let meta = RenderMeta {
+            render_kind: "nearest_node_omni".to_string(),
+            render_start_ns,
+            render_end_ns,
+            spatial_band: None,
+            steering_solution: None,
+            confidence: localization.map(|sol| sol.confidence),
+            effective_fallback_reason: fallback_reason,
+            source_channel_count,
+            alias_cutoff_hz: None,
+            steering_model: None,
+        };
+        return (bytes, meta);
+    }
+
     let use_hybrid = localization.filter(|sol| {
         sol.confidence >= config.min_localization_confidence
             && fallback_reason.is_none()
@@ -274,4 +296,56 @@ pub async fn write_render_to_cache(
         now_ns,
         sample_rate_hz,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config_with_source(source: &str) -> DspWorkerConfig {
+        DspWorkerConfig {
+            classification_audio_source: source.to_string(),
+            ..DspWorkerConfig::default()
+        }
+    }
+
+    #[test]
+    fn nearest_node_omni_always_renders_omni_kind() {
+        let config = config_with_source("nearest_node_omni");
+        let channels = vec![vec![0.1_f32, -0.2, 0.3, -0.1], vec![0.2_f32, 0.1, -0.3, 0.0]];
+        let mic_positions_m = [[0.0_f32, 0.0, 0.0], [0.1, 0.0, 0.0]];
+        let (bytes, meta) = compute_render_bytes(RenderComputeRequest {
+            config: &config,
+            sound_speed_mps: 343.0,
+            channels: &channels,
+            mic_positions_m: &mic_positions_m,
+            sample_rate_hz: 16_000,
+            localization: None,
+            fallback_reason: None,
+            render_start_ns: None,
+            render_end_ns: None,
+        });
+        assert_eq!(meta.render_kind, "nearest_node_omni");
+        assert!(meta.spatial_band.is_none());
+        assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn beamformed_source_falls_back_to_omni_without_localization() {
+        let config = config_with_source("beamformed");
+        let channels = vec![vec![0.1_f32, -0.2, 0.3, -0.1]];
+        let mic_positions_m = [[0.0_f32, 0.0, 0.0]];
+        let (_bytes, meta) = compute_render_bytes(RenderComputeRequest {
+            config: &config,
+            sound_speed_mps: 343.0,
+            channels: &channels,
+            mic_positions_m: &mic_positions_m,
+            sample_rate_hz: 16_000,
+            localization: None,
+            fallback_reason: None,
+            render_start_ns: None,
+            render_end_ns: None,
+        });
+        assert_eq!(meta.render_kind, "birdnet_omni_fallback");
+    }
 }

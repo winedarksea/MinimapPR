@@ -19,6 +19,7 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
+from tests.hybrid_settings import hybrid_production_settings
 from minimappr.api.rust_dsp_manifests import LocalizedClassifierRenderRequest
 from minimappr.api.spool_consumer import IngestSpoolConfig, IngestSpoolConsumer
 from minimappr.api.transports import HttpIngestTransport
@@ -241,7 +242,11 @@ def _running_rust_sidecar(tmp_path: Path, *, extra_env: dict[str, str] | None = 
         "MINIMAPPR_INGEST_SPOOL_DIR": str(spool_dir),
         "MINIMAPPR_SIDECAR_STORAGE_MODE": "journal",
         "MINIMAPPR_SIDECAR_ALLOW_NON_TMPFS_JOURNAL": "true",
-        "MINIMAPPR_RUNTIME_PROFILE": "birdnet_hybrid_production",
+        "MINIMAPPR_SIDECAR_HYBRID_RENDER_ENABLED": "true",
+        "MINIMAPPR_CLASSIFICATION_AUDIO_SOURCE": "beamformed",
+        "MINIMAPPR_LOCALIZATION_BAND_MIN_HZ": "300.0",
+        "MINIMAPPR_LOCALIZATION_BAND_MAX_HZ": "3500.0",
+        "MINIMAPPR_CLASSIFICATION_WINDOW_SECONDS": "30.0",
         "MINIMAPPR_LOCALIZATION_SRP_GRID_RESOLUTION_M": "0.05",
         "MINIMAPPR_LOCALIZATION_SEARCH_PADDING_M": "0.3",
         "MINIMAPPR_DEFAULT_TEMPERATURE_C": "20.0",
@@ -366,7 +371,15 @@ def _configure_http_app_sidecar_env(monkeypatch, tmp_path: Path, *, sidecar_port
     monkeypatch.setenv("MINIMAPPR_INGEST_SIDECAR_BINARY_PATH", str(binary_path))
     monkeypatch.setenv("MINIMAPPR_SIDECAR_PORT", str(sidecar_port))
     monkeypatch.setenv("MINIMAPPR_SIDECAR_ALLOW_NON_TMPFS_JOURNAL", "true")
-    monkeypatch.setenv("MINIMAPPR_RUNTIME_PROFILE", "birdnet_hybrid_production")
+    monkeypatch.setenv("MINIMAPPR_CLASSIFIER", "birdnet")
+    monkeypatch.setenv("MINIMAPPR_CLASSIFICATION_AUDIO_SOURCE", "beamformed")
+    monkeypatch.setenv("MINIMAPPR_LOCALIZATION_ALGORITHM", "srp_phat")
+    monkeypatch.setenv("MINIMAPPR_LOCALIZATION_STRATEGY", "fixed")
+    monkeypatch.setenv("MINIMAPPR_LOCALIZATION_BAND_MIN_HZ", "300.0")
+    monkeypatch.setenv("MINIMAPPR_LOCALIZATION_BAND_MAX_HZ", "3500.0")
+    monkeypatch.setenv("MINIMAPPR_BIRDNET_CHUNKED_DISPATCH_ENABLED", "true")
+    monkeypatch.setenv("MINIMAPPR_CLASSIFICATION_WINDOW_SECONDS", "30.0")
+    monkeypatch.setenv("MINIMAPPR_MAX_SENSOR_BUFFER_SECONDS", "32.0")
     monkeypatch.setenv("MINIMAPPR_LOCALIZATION_SRP_GRID_RESOLUTION_M", "0.05")
     monkeypatch.setenv("MINIMAPPR_LOCALIZATION_SEARCH_PADDING_M", "0.3")
     monkeypatch.setenv("MINIMAPPR_DEFAULT_TEMPERATURE_C", "20.0")
@@ -558,8 +571,7 @@ def _store_forward_payload(
 async def test_fusion_prefers_authoritative_rust_classification_over_python_reclassify(
     tmp_path: Path,
 ) -> None:
-    settings = Settings(
-        runtime_profile="birdnet_hybrid_production",
+    settings = hybrid_production_settings(
         db_path=tmp_path / "authoritative-rust.db",
         snippet_dir=tmp_path / "snippets",
         snippet_retention_seconds=0,
@@ -657,8 +669,7 @@ async def test_fusion_prefers_authoritative_rust_classification_over_python_recl
 async def test_fusion_classifies_non_authoritative_rust_render_immediately_in_production(
     tmp_path: Path,
 ) -> None:
-    settings = Settings(
-        runtime_profile="birdnet_hybrid_production",
+    settings = hybrid_production_settings(
         db_path=tmp_path / "non-authoritative-rust.db",
         snippet_dir=tmp_path / "snippets",
         snippet_retention_seconds=0,
@@ -736,8 +747,9 @@ async def test_live_rust_sidecar_emits_authoritative_classification_fields(monke
         "MINIMAPPR_SIDECAR_CLASSIFIER_COMMAND_JSON",
         json.dumps([sys.executable, str(helper_path)]),
     )
-    monkeypatch.setenv("MINIMAPPR_CLASSIFICATION_WINDOW_SECONDS", "2.0")
-    monkeypatch.setenv("MINIMAPPR_MAX_SENSOR_BUFFER_SECONDS", "4.0")
+    # Classification window / buffer inherit the hybrid defaults (30s/32s) from
+    # _configure_http_app_sidecar_env: with birdnet + chunked dispatch enabled,
+    # the chunk overlap (2.0s) must stay below the classification window.
     payload = _binary_ingest_payload(
         node_id=node_id,
         frames=[

@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 def create_classifier(settings: Settings) -> AudioClassifier:
-    backend = settings.classifier_backend.strip().lower()
+    backend = settings.resolved_classifier_backend()
     base_classifier: AudioClassifier
     yamnet_active = False
     if backend == "yamnet":

@@ -165,8 +165,13 @@ class ClassificationOrchestrator:
         reference_signal: np.ndarray,
         sample_rate_hz: int,
         event_time_ns: int,
+        path: str = "omni",
     ) -> ClassifiedResult:
-        """Classify a full-band omni signal without beamforming."""
+        """Classify a full-band omni signal without beamforming.
+
+        ``path`` stamps the classification provenance (e.g. ``"nearest_node_omni"``
+        for the raw nearest-node source); defaults to ``"omni"``.
+        """
         omni_candidate = await self._classify_omni_candidate(
             reference_signal=reference_signal,
             sample_rate_hz=sample_rate_hz,
@@ -176,7 +181,7 @@ class ClassificationOrchestrator:
             classification=omni_candidate.classification,
             omni_classification=omni_candidate.classification,
             beamformed_classification=None,
-            classification_path=omni_candidate.path,
+            classification_path=path,
             classification_signal=omni_candidate.signal,
             beamforming_error=None,
             event_time_ns=event_time_ns,

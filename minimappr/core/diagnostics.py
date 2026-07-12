@@ -37,7 +37,8 @@ class DiagnosticsService:
             "runtime": {
                 "python_version": platform.python_version(),
                 "platform": platform.platform(),
-                "runtime_profile": self._settings.runtime_profile,
+                "classification_audio_source": self._settings.classification_audio_source,
+                "classifier_backend_resolved": self._settings.resolved_classifier_backend(),
                 "classifier": classifier_runtime,
                 "beamforming": {
                     "enabled": self._settings.beamformed_classification_enabled,

@@ -53,6 +53,9 @@ class CrossNodeBeamConfig:
     max_nodes: int = 3
     sound_speed_mps: float = 343.2
     render_config: BandSplitRenderConfig = field(default_factory=BandSplitRenderConfig)
+    # "beamformed" (default) runs multi-node band-split late fusion; "nearest_node_omni"
+    # classifies only the nearest node's raw omni mix (no beam, no late fusion).
+    classification_audio_source: str = "beamformed"
 
 
 @dataclass(slots=True)
@@ -133,6 +136,16 @@ def select_nodes(
         ranked.append((candidate, distance))
     ranked.sort(key=lambda item: item[1])
     return ranked[: max(1, config.max_nodes)] if ranked else []
+
+
+def omni_mix(candidate: NodeAudioCandidate) -> np.ndarray:
+    """Mean of the candidate node's mic channels — a raw omni reference window."""
+    channels = np.asarray(candidate.channels, dtype=np.float64)
+    if channels.ndim == 1:
+        return channels
+    if channels.shape[0] == 0:
+        return np.zeros(0, dtype=np.float64)
+    return channels.mean(axis=0)
 
 
 def render_node_beam(
@@ -223,6 +236,27 @@ class CrossNodeBeamformer:
         selected = select_nodes(candidates, source_position_m, self.config)
         if not selected:
             return None
+        if self.config.classification_audio_source == "nearest_node_omni":
+            # Distance ranking already applied by select_nodes; take the nearest.
+            nearest_candidate = selected[0][0]
+            mix = omni_mix(nearest_candidate)
+            if mix.size == 0:
+                return None
+            scores = await classify_fn(mix, nearest_candidate.sample_rate_hz)
+            fused = fuse_label_scores({nearest_candidate.node_id: scores})
+            if fused is None:
+                return None
+            return {
+                "label": fused.label,
+                "confidence": fused.confidence,
+                "fusion_method": "nearest_node_omni",
+                "best_node_id": nearest_candidate.node_id,
+                "contributing_node_ids": [nearest_candidate.node_id],
+                "per_node_confidence": fused.per_node_confidence,
+                "canonical_beam": mix,
+                "canonical_alias_cutoff_hz": None,
+                "node_count": 1,
+            }
         renders: dict[str, NodeBeamRender] = {}
         per_node_scores: dict[str, dict[str, float]] = {}
         for candidate, _distance in selected:
@@ -262,6 +296,7 @@ __all__ = [
     "NodeAudioCandidate",
     "NodeBeamRender",
     "fuse_label_scores",
+    "omni_mix",
     "position_source_trusted",
     "propagation_delay_s",
     "render_node_beam",

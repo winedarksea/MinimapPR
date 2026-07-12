@@ -12,6 +12,7 @@ import contextlib
 import functools
 import json
 import os
+import platform
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -86,6 +87,19 @@ def ingest_sidecar_process_config(settings) -> IngestSidecarProcessConfig:
     )
 
 
+def _sidecar_hybrid_render_enabled(settings) -> bool:
+    """Whether the sidecar should run the BirdNET hybrid band-split render.
+
+    Replaces the old ``runtime_profile == "birdnet_hybrid_production"`` gate:
+    hybrid render is enabled when the resolved classifier backend is BirdNET
+    and the classification audio source is beamformed.
+    """
+    resolve = getattr(settings, "resolved_classifier_backend", None)
+    backend = resolve() if callable(resolve) else getattr(settings, "classifier_backend", "")
+    audio_source = getattr(settings, "classification_audio_source", "beamformed")
+    return str(backend).strip().lower() == "birdnet" and str(audio_source).strip().lower() == "beamformed"
+
+
 def sidecar_classification_window_seconds(settings) -> float:
     classification_window_seconds = float(getattr(settings, "classification_window_seconds", 0.0))
     if classification_window_seconds > 0.0:
@@ -153,7 +167,15 @@ def build_ingest_sidecar_environment(
         "MINIMAPPR_SIDECAR_MEMORY_ONLY_LIVE_PATH": str(
             process_config.memory_only_live_path
         ).lower(),
-        "MINIMAPPR_RUNTIME_PROFILE": str(getattr(settings, "runtime_profile", "default")),
+        "MINIMAPPR_SIDECAR_HYBRID_RENDER_ENABLED": str(
+            _sidecar_hybrid_render_enabled(settings)
+        ).lower(),
+        "MINIMAPPR_CLASSIFICATION_AUDIO_SOURCE": str(
+            getattr(settings, "classification_audio_source", "beamformed")
+        ),
+        "MINIMAPPR_MIN_LOCALIZATION_CONFIDENCE": str(
+            getattr(settings, "min_localization_confidence", 0.20)
+        ),
         "MINIMAPPR_LOCALIZATION_WINDOW_SECONDS": str(
             getattr(settings, "localization_window_seconds", 0.08)
         ),
@@ -492,6 +514,15 @@ async def start_ingest_sidecar(
         settings,
         default_classifier_command_json_builder=default_classifier_command_json_builder,
     )
+    if process_config.allow_non_tmpfs_journal and platform.system() == "Linux":
+        logger.warning(
+            "Ingest sidecar journal tmpfs enforcement is DISABLED on Linux "
+            "(ingest_sidecar_allow_non_tmpfs_journal=True). Raw audio frames may be "
+            "written to physical disk instead of RAM. Set "
+            "MINIMAPPR_SIDECAR_ALLOW_NON_TMPFS_JOURNAL=false and mount the journal "
+            "root (%s/journal) on tmpfs/ramfs for production.",
+            process_config.spool_dir,
+        )
     logger.info(
         "Starting ingest sidecar: %s (port %d, storage %s, spool %s, journal budget %d, reserve %d, allow non-tmpfs %s)",
         binary,

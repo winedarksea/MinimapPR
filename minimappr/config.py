@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import platform
@@ -10,9 +11,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from minimappr.settings_store import (
+    allowlisted_overrides,
+    config_overrides_path,
+    load_overrides,
+)
+
 if TYPE_CHECKING:
     from minimappr.core.effectors.registry import EffectorManagerConfig
 
+
+_config_logger = logging.getLogger(__name__)
 
 DEFAULT_RULES_CONFIG_PATH = Path("data/rules.json")
 DEFAULT_BIRDNET_HYBRID_RULES_CONFIG_PATH = Path("data/rules_birdnet_hybrid_production.json")
@@ -89,6 +98,84 @@ def _env_vec3_optional(
     return (float(parts[0]), float(parts[1]), float(parts[2]))
 
 
+_RUNTIME_PROFILE_MIGRATIONS: dict[str, tuple[str, ...]] = {
+    "birdnet_hybrid_production": (
+        "MINIMAPPR_CLASSIFIER=birdnet",
+        "MINIMAPPR_LOCALIZATION_ALGORITHM=srp_phat",
+        "MINIMAPPR_LOCALIZATION_STRATEGY=fixed",
+        "MINIMAPPR_CLASSIFICATION_AUDIO_SOURCE=omni",
+        "MINIMAPPR_BIRDNET_CHUNKED_DISPATCH_ENABLED=true",
+        "MINIMAPPR_BIRDNET_CHUNK_OVERLAP_SECONDS=2.0",
+        "MINIMAPPR_CLASSIFICATION_WINDOW_SECONDS=30.0",
+        "MINIMAPPR_MAX_SENSOR_BUFFER_SECONDS=32.0",
+        "MINIMAPPR_LOCALIZATION_BAND_MIN_HZ=300.0",
+        "MINIMAPPR_LOCALIZATION_BAND_MAX_HZ=3500.0",
+        "MINIMAPPR_REPORTING_WINDOW_SECONDS=30.0",
+        f"MINIMAPPR_RULES_CONFIG_PATH={DEFAULT_BIRDNET_HYBRID_RULES_CONFIG_PATH}",
+    ),
+    "birdnet_omni_testing": (
+        "MINIMAPPR_CLASSIFIER=birdnet",
+        "MINIMAPPR_CLASSIFICATION_AUDIO_SOURCE=omni",
+        "MINIMAPPR_SKIP_LOCALIZATION_FOR_CLASSIFICATION=true",
+        "MINIMAPPR_BIRDNET_CHUNKED_DISPATCH_ENABLED=true",
+        "MINIMAPPR_BIRDNET_CHUNK_OVERLAP_SECONDS=2.0",
+        "MINIMAPPR_CLASSIFICATION_WINDOW_SECONDS=30.0",
+        "MINIMAPPR_MAX_SENSOR_BUFFER_SECONDS=32.0",
+    ),
+}
+
+
+def _reject_runtime_profile_env() -> None:
+    """Fail fast if the removed ``MINIMAPPR_RUNTIME_PROFILE`` mode is still set.
+
+    Silently ignoring it would change deployed behavior (the profile used to
+    force a set of classifier/localization settings). Raise with the exact
+    equivalent env vars so operators can migrate deterministically.
+    """
+    raw = os.getenv("MINIMAPPR_RUNTIME_PROFILE")
+    if raw is None:
+        return
+    value = raw.strip().lower()
+    if value in ("", "default"):
+        return
+    equivalents = _RUNTIME_PROFILE_MIGRATIONS.get(value)
+    if equivalents is None:
+        raise ValueError(
+            f"MINIMAPPR_RUNTIME_PROFILE is removed (got {raw!r}). Unset it; the "
+            "'mode' system no longer exists — configure settings directly."
+        )
+    listing = "\n  ".join(equivalents)
+    raise ValueError(
+        f"MINIMAPPR_RUNTIME_PROFILE is removed (got {raw!r}). The 'mode' system "
+        "no longer exists. Unset MINIMAPPR_RUNTIME_PROFILE and set the equivalent "
+        f"env vars instead:\n  {listing}"
+    )
+
+
+def _resolve_classification_audio_source_env() -> str:
+    """Resolve the classification audio source, honoring the deprecated bool.
+
+    Prefers the new ``MINIMAPPR_CLASSIFICATION_AUDIO_SOURCE``; when that is unset
+    but the legacy ``MINIMAPPR_BEAMFORMED_CLASSIFICATION_ENABLED`` bool is set,
+    map it onto the enum (True -> beamformed, False -> omni) with a deprecation log.
+    """
+    new_value = os.getenv("MINIMAPPR_CLASSIFICATION_AUDIO_SOURCE")
+    if new_value is not None and new_value.strip():
+        return new_value.strip().lower()
+    legacy = os.getenv("MINIMAPPR_BEAMFORMED_CLASSIFICATION_ENABLED")
+    if legacy is not None:
+        enabled = legacy.strip().lower() in {"1", "true", "yes", "on"}
+        mapped = "beamformed" if enabled else "omni"
+        _config_logger.warning(
+            "MINIMAPPR_BEAMFORMED_CLASSIFICATION_ENABLED is deprecated; use "
+            "MINIMAPPR_CLASSIFICATION_AUDIO_SOURCE. Mapping %r -> %s.",
+            legacy,
+            mapped,
+        )
+        return mapped
+    return "beamformed"
+
+
 @dataclass(slots=True)
 class LocalizationConfig:
     trigger_rms: float
@@ -113,7 +200,6 @@ class LocalizationConfig:
     localization_subspace_freq_min_hz: float
     localization_subspace_freq_max_hz: float
     localization_refine_confidence_threshold: float
-    beamformed_classification_enabled: bool
     beamformer_type: str
     beamformed_classification_min_sensor_count: int
     beamformed_classification_confidence_margin: float
@@ -140,6 +226,12 @@ class LocalizationConfig:
     localization_band_min_hz: float = 0.0
     localization_band_max_hz: float = 0.0
     skip_localization_for_classification: bool = False
+    # Classification audio source: "beamformed" | "omni" | "nearest_node_omni".
+    # Mirrors Settings.classification_audio_source so the fusion node can read it
+    # from the localization snapshot.
+    classification_audio_source: str = "beamformed"
+    # Min localization confidence for nearest-node omni selection (else omni fallback).
+    min_localization_confidence: float = 0.20
     # Default ON: a defined cluster is the unit of cross-node localization on both
     # the Python and Rust paths. When a node is not a member of any cluster,
     # `cluster_for_node` returns None and the pipeline keeps its global-sensor
@@ -175,6 +267,10 @@ class LocalizationConfig:
     @localization_max_tau_s.setter
     def localization_max_tau_s(self, value: float) -> None:
         self.localization_max_tau_seconds = value
+
+    @property
+    def beamformed_classification_enabled(self) -> bool:
+        return self.classification_audio_source == "beamformed"
 
 
 @dataclass(slots=True)
@@ -271,6 +367,8 @@ class FusionConfig:
     taxonomy_refresh_interval_seconds: float
     retention_permanent_labels: tuple[str, ...]
     retention_long_security_confidence: float
+    classification_audio_source: str = "beamformed"
+    min_localization_confidence: float = 0.20
 
 
 @dataclass(slots=True)
@@ -396,7 +494,6 @@ def _load_federation_peers(*, raw_json: str | None, config_path: Path) -> tuple[
 
 @dataclass(slots=True)
 class Settings:
-    runtime_profile: str = "default"
     process_role: str = "combined"
     host: str = "0.0.0.0"
     port: int = 8080
@@ -506,7 +603,17 @@ class Settings:
     wavelength_penalty_floor: float = 0.25
     skip_localization_for_classification: bool = False
     cluster_aware_localization: bool = True
-    beamformed_classification_enabled: bool = True
+    # Classification audio source (replaces the old beamforming on/off bool):
+    #   "beamformed"        — DAS / band-split render feeds the classifier (default)
+    #   "omni"              — raw loudest-mic / reporting-node omni window
+    #   "nearest_node_omni" — raw omni of the sensor/node nearest the localized
+    #                         source (falls back to loudest-mic omni when
+    #                         localization confidence is below the threshold);
+    #                         disables cross-node beamformed late fusion.
+    classification_audio_source: str = "beamformed"
+    # Minimum localization confidence for nearest_node_omni sensor selection.
+    # Previously hardcoded 0.20 in the Rust dsp_worker; now configurable both sides.
+    min_localization_confidence: float = 0.20
     beamformer_type: str = "band_split_das"
     beamformed_classification_min_sensor_count: int = 2
     beamformed_classification_confidence_margin: float = 0.0
@@ -532,7 +639,9 @@ class Settings:
     site_origin_alt_m: float = 0.0
     coordinate_mode: str = "flat"
 
-    classifier_backend: str = "yamnet"
+    # "auto" resolves via installed-package detection (birdnet > yamnet >
+    # heuristic); an explicit backend name is honored as-is.
+    classifier_backend: str = "auto"
     yamnet_min_confidence: float = 0.25
     yamnet_input_target_rms: float = 0.10
     yamnet_max_input_gain: float = 32.0
@@ -690,6 +799,9 @@ class Settings:
 
     node_audio_overrides: dict = field(default_factory=dict)
 
+    # Persisted UI-set overrides file (sparse YAML). See settings_store.py.
+    config_overrides_path: Path = Path("data/config.yml")
+
     def __post_init__(self) -> None:
         self.db_path = Path(self.db_path)
         self.snippet_dir = Path(self.snippet_dir)
@@ -702,11 +814,20 @@ class Settings:
         self.large_artifact_dir = Path(self.large_artifact_dir)
         self.map_overlay_dir = Path(self.map_overlay_dir)
         self.federation_peers_config_path = Path(self.federation_peers_config_path)
+        self.config_overrides_path = Path(self.config_overrides_path)
 
         self.coordinate_mode = self.coordinate_mode.strip().lower()
         if self.coordinate_mode not in {"flat", "geodetic"}:
             raise ValueError("MINIMAPPR_COORDINATE_MODE must be 'flat' or 'geodetic'")
-        self.runtime_profile = self.runtime_profile.strip().lower() or "default"
+        self.classification_audio_source = self.classification_audio_source.strip().lower() or "beamformed"
+        if self.classification_audio_source not in {"beamformed", "omni", "nearest_node_omni"}:
+            raise ValueError(
+                "MINIMAPPR_CLASSIFICATION_AUDIO_SOURCE must be one of "
+                "beamformed/omni/nearest_node_omni"
+            )
+        if not (0.0 <= self.min_localization_confidence <= 1.0):
+            raise ValueError("MINIMAPPR_MIN_LOCALIZATION_CONFIDENCE must be in [0,1]")
+        self.classifier_backend = self.classifier_backend.strip().lower() or "auto"
         self.process_role = self.process_role.strip().lower() or "combined"
         if self.process_role not in {"combined", "api", "ingest"}:
             raise ValueError("MINIMAPPR_PROCESS_ROLE must be one of combined/api/ingest")
@@ -722,7 +843,6 @@ class Settings:
         if not self.ingest_base_url:
             self.ingest_base_url = f"http://127.0.0.1:{self.ingest_port}"
         self.ingest_sidecar_port = self.ingest_port
-        self._apply_runtime_profile()
         if self.ingest_sidecar_allow_non_tmpfs_journal is None:
             self.ingest_sidecar_allow_non_tmpfs_journal = platform.system() != "Linux"
         if self.persist_observations_on_ingest is None:
@@ -963,7 +1083,7 @@ class Settings:
             raise ValueError("MINIMAPPR_BIRDNET_CHUNK_MIN_RETRY_PROGRESS_SECONDS must be >= 0")
         if (
             self.birdnet_chunked_dispatch_enabled
-            and self.classifier_backend == "birdnet"
+            and self.resolved_classifier_backend() == "birdnet"
             and self.birdnet_chunk_overlap_seconds >= self.classification_window_seconds
         ):
             raise ValueError(
@@ -971,7 +1091,7 @@ class Settings:
             )
         if (
             self.birdnet_chunked_dispatch_enabled
-            and self.classifier_backend == "birdnet"
+            and self.resolved_classifier_backend() == "birdnet"
             and self.birdnet_chunk_overlap_seconds > 2.0
         ):
             raise ValueError(
@@ -1086,8 +1206,26 @@ class Settings:
         if self.hass_mqtt_port < 1 or self.hass_mqtt_port > 65535:
             raise ValueError("MINIMAPPR_HASS_MQTT_PORT must be in [1, 65535]")
 
+    @property
+    def beamformed_classification_enabled(self) -> bool:
+        """Back-compat derived flag: True only when beamformed audio feeds the
+        classifier. ``omni`` / ``nearest_node_omni`` sources disable beamforming."""
+        return self.classification_audio_source == "beamformed"
+
+    def resolved_classifier_backend(self) -> str:
+        """Concrete classifier backend, resolving ``"auto"`` via installed packages.
+
+        Imported inside the method to avoid a config <-> classifiers import cycle
+        (``availability`` is stdlib-only).
+        """
+        from minimappr.classifiers.availability import resolve_backend
+
+        return resolve_backend(self.classifier_backend)
+
     @classmethod
     def from_env(cls) -> "Settings":
+        _reject_runtime_profile_env()
+        classification_audio_source = _resolve_classification_audio_source_env()
         peers_config_path = Path(_env_str("MINIMAPPR_FEDERATION_PEERS_CONFIG_PATH", "data/federation_peers.json"))
         peers = _load_federation_peers(
             raw_json=os.getenv("MINIMAPPR_FEDERATION_PEERS_JSON"),
@@ -1118,8 +1256,7 @@ class Settings:
             )
         else:
             ingest_backend = ingest_backend_raw
-        return cls(
-            runtime_profile=_env_str("MINIMAPPR_RUNTIME_PROFILE", "default"),
+        kwargs: dict[str, object] = dict(
             process_role=_env_str("MINIMAPPR_PROCESS_ROLE", "combined"),
             host=_env_str("MINIMAPPR_HOST", "0.0.0.0"),
             port=_env_int("MINIMAPPR_PORT", 8080),
@@ -1327,7 +1464,8 @@ class Settings:
                 "MINIMAPPR_SKIP_LOCALIZATION_FOR_CLASSIFICATION",
                 False,
             ),
-            beamformed_classification_enabled=_env_bool("MINIMAPPR_BEAMFORMED_CLASSIFICATION_ENABLED", True),
+            classification_audio_source=classification_audio_source,
+            min_localization_confidence=_env_float("MINIMAPPR_MIN_LOCALIZATION_CONFIDENCE", 0.20),
             beamformer_type=_env_str("MINIMAPPR_BEAMFORMER_TYPE", "band_split_das"),
             beamform_render_highpass_hz=_env_float("MINIMAPPR_BEAMFORM_RENDER_HIGHPASS_HZ", 100.0),
             beamform_low_crossover_width_hz=_env_float("MINIMAPPR_BEAMFORM_LOW_CROSSOVER_WIDTH_HZ", 100.0),
@@ -1374,7 +1512,7 @@ class Settings:
             site_origin_lon=_env_float("MINIMAPPR_SITE_ORIGIN_LON", -93.2579197515542),
             site_origin_alt_m=_env_float("MINIMAPPR_SITE_ORIGIN_ALT_M", 0.0),
             coordinate_mode=_env_str("MINIMAPPR_COORDINATE_MODE", "flat"),
-            classifier_backend=_env_str("MINIMAPPR_CLASSIFIER", "yamnet"),
+            classifier_backend=_env_str("MINIMAPPR_CLASSIFIER", "auto"),
             yamnet_min_confidence=_env_float("MINIMAPPR_YAMNET_MIN_CONFIDENCE", 0.25),
             yamnet_input_target_rms=_env_float("MINIMAPPR_YAMNET_INPUT_TARGET_RMS", 0.10),
             yamnet_max_input_gain=_env_float("MINIMAPPR_YAMNET_MAX_INPUT_GAIN", 32.0),
@@ -1514,6 +1652,20 @@ class Settings:
             ble_track_max_gate_m=_env_float("MINIMAPPR_BLE_TRACK_MAX_GATE_M", 40.0),
         )
 
+        overrides_path = config_overrides_path(os.getenv("MINIMAPPR_CONFIG_PATH"))
+        kwargs["config_overrides_path"] = overrides_path
+
+        # Overlay persisted UI-set overrides (highest precedence). Restricted to
+        # the allowlist; each applied key is logged so file-over-env precedence is
+        # never silent. cls(**kwargs) below re-runs __post_init__ validation on the
+        # merged result.
+        file_overrides = allowlisted_overrides(load_overrides(overrides_path))
+        for key, value in file_overrides.items():
+            kwargs[key] = value
+            _config_logger.info("Applying persisted config override: %s=%r", key, value)
+
+        return cls(**kwargs)
+
     def localization_config(self) -> LocalizationConfig:
         return LocalizationConfig(
             trigger_rms=self.trigger_rms,
@@ -1557,8 +1709,9 @@ class Settings:
             wavelength_gating_enabled=self.wavelength_gating_enabled,
             wavelength_penalty_floor=self.wavelength_penalty_floor,
             skip_localization_for_classification=self.skip_localization_for_classification,
+            classification_audio_source=self.classification_audio_source,
+            min_localization_confidence=self.min_localization_confidence,
             cluster_aware_localization=self.cluster_aware_localization,
-            beamformed_classification_enabled=self.beamformed_classification_enabled,
             beamformer_type=self.beamformer_type,
             beamformed_classification_min_sensor_count=self.beamformed_classification_min_sensor_count,
             beamformed_classification_confidence_margin=self.beamformed_classification_confidence_margin,
@@ -1669,6 +1822,8 @@ class Settings:
             taxonomy_refresh_interval_seconds=self.taxonomy_refresh_interval_seconds,
             retention_permanent_labels=self.retention_permanent_labels,
             retention_long_security_confidence=self.retention_long_security_confidence,
+            classification_audio_source=self.classification_audio_source,
+            min_localization_confidence=self.min_localization_confidence,
         )
 
     def ingest_sidecar_startup_config(self) -> IngestSidecarStartupConfig:
@@ -1750,43 +1905,3 @@ class Settings:
             slew_dwell_seconds=self.effector_slew_dwell_seconds,
         )
 
-    def _apply_runtime_profile(self) -> None:
-        if self.runtime_profile == "default":
-            return
-        if self.runtime_profile == "birdnet_omni_testing":
-            # BirdNET needs a much longer omni clip than the TDOA/localization path.
-            self.classifier_backend = "birdnet"
-            self.beamformed_classification_enabled = False
-            self.skip_localization_for_classification = True
-            self.birdnet_chunked_dispatch_enabled = True
-            self.birdnet_chunk_overlap_seconds = min(self.birdnet_chunk_overlap_seconds, 2.0)
-            self.classification_window_seconds = max(self.classification_window_seconds, 30.0)
-            self.max_sensor_buffer_seconds = max(
-                self.max_sensor_buffer_seconds,
-                self.classification_window_seconds + 2.0,
-            )
-            return
-        if self.runtime_profile == "birdnet_hybrid_production":
-            self.classifier_backend = "birdnet"
-            self.localization_algorithm = "srp_phat"
-            self.localization_strategy = "fixed"
-            self.beamformed_classification_enabled = False
-            self.skip_localization_for_classification = False
-            self.birdnet_chunked_dispatch_enabled = True
-            self.birdnet_chunk_overlap_seconds = min(self.birdnet_chunk_overlap_seconds, 2.0)
-            if self.rules_config_path == DEFAULT_RULES_CONFIG_PATH:
-                # Wildlife deployments should not page on generic human/security
-                # categories unless operators explicitly provide a broader rules file.
-                self.rules_config_path = DEFAULT_BIRDNET_HYBRID_RULES_CONFIG_PATH
-            self.classification_window_seconds = max(self.classification_window_seconds, 30.0)
-            self.max_sensor_buffer_seconds = max(
-                self.max_sensor_buffer_seconds,
-                self.classification_window_seconds + 2.0,
-            )
-            self.localization_band_min_hz = 300.0
-            self.localization_band_max_hz = 3500.0
-            self.reporting_window_seconds = max(self.reporting_window_seconds, 30.0)
-            return
-        raise ValueError(
-            "MINIMAPPR_RUNTIME_PROFILE must be 'default', 'birdnet_omni_testing', or 'birdnet_hybrid_production'"
-        )

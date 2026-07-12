@@ -278,7 +278,6 @@ def _build_combined_runtime_core_services(
             worker_count=settings.ingest_spool_worker_count,
             storage_mode=settings.ingest_storage_mode,
             consumer_name=settings.ingest_consumer_name,
-            runtime_profile=settings.runtime_profile,
         ),
         ingest_transport=ingest_transport,
     )

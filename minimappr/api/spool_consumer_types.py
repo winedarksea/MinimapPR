@@ -24,7 +24,6 @@ class IngestSpoolConfig:
     worker_count: int
     storage_mode: IngestStorageMode = "spool"
     consumer_name: str = "python-ingest"
-    runtime_profile: str = "default"
     rust_dsp_claim_batch_size: int = 2
 
     @property
