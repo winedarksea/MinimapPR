@@ -10,6 +10,7 @@ from minimappr.classifiers.base import AudioClassifier
 from minimappr.classifiers.chaining import ChainStage, ChainedClassifier
 from minimappr.classifiers import factory
 from minimappr.classifiers.heuristic import HeuristicClassifier
+from minimappr.classifiers.routing import default_routing, load_routing
 from minimappr.classifiers.yamnet import _prepare_waveform_for_yamnet
 from minimappr.config import Settings
 from minimappr.models import ClassificationResult
@@ -104,35 +105,39 @@ def test_chained_classifier_skips_non_matching_stage() -> None:
     assert result.features["chain_stage_count"] == 0.0
 
 
-def test_default_yamnet_to_birdnet_chain_uses_recall_biased_threshold(monkeypatch) -> None:
+def test_create_context_classifier_builds_yamnet_birdnet_composite(monkeypatch) -> None:
+    """Default routing: YAMNet and BirdNET both always run (composite, not chained)."""
+
+    class _StubYAMNetClassifier(AudioClassifier):
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def classify(self, samples: np.ndarray, sample_rate_hz: int) -> ClassificationResult:
+            del samples, sample_rate_hz
+            return ClassificationResult(label="bird", confidence=0.4, scores={"bird": 0.4})
+
     class _StubBirdNETClassifier(AudioClassifier):
-        def __init__(
-            self,
-            min_confidence: float = 0.1,
-            *,
-            latitude: float | None = None,
-            longitude: float | None = None,
-            geo_min_confidence: float = 0.03,
-        ) -> None:
-            self.min_confidence = min_confidence
-            self.latitude = latitude
-            self.longitude = longitude
-            self.geo_min_confidence = geo_min_confidence
+        def __init__(self, *args, **kwargs) -> None:
+            pass
 
         def classify(self, samples: np.ndarray, sample_rate_hz: int) -> ClassificationResult:
             del samples, sample_rate_hz
             return ClassificationResult(label="robin", confidence=0.9, scores={"robin": 0.9})
 
+    monkeypatch.setattr(factory, "YAMNetClassifier", _StubYAMNetClassifier)
     stub_module = types.ModuleType("minimappr.classifiers.birdnet")
     stub_module.BirdNETClassifier = _StubBirdNETClassifier
     monkeypatch.setitem(sys.modules, "minimappr.classifiers.birdnet", stub_module)
 
-    settings = Settings(birdnet_trigger_min_confidence=0.05)
-    stages = factory._default_chain_stages(settings)
+    settings = Settings()
+    routing = default_routing()
+    classifier = factory.create_context_classifier(settings, "detection_trigger", routing=routing)
 
-    assert len(stages) == 1
-    assert stages[0].stage_id == "birdnet_species"
-    assert stages[0].min_confidence == 0.05
+    result = classifier.classify(np.zeros(64, dtype=np.float32), 16_000)
+    assert result.label == "robin"
+    assert result.features["winner_member"] == "birdnet"
+    assert result.scores["bird"] == pytest.approx(0.4)
+    assert result.scores["birdnet:robin"] == pytest.approx(0.9)
 
 
 def test_prepare_waveform_for_yamnet_boosts_low_level_audio() -> None:
@@ -181,6 +186,7 @@ def test_create_classifier_passes_yamnet_conditioning_settings(monkeypatch, tmp_
             *,
             target_rms: float = 0.10,
             max_input_gain: float = 32.0,
+            keep_embeddings: bool = False,
         ) -> None:
             captured["min_confidence"] = min_confidence
             captured["target_rms"] = target_rms
@@ -193,16 +199,18 @@ def test_create_classifier_passes_yamnet_conditioning_settings(monkeypatch, tmp_
     monkeypatch.setattr(factory, "YAMNetClassifier", _StubYAMNetClassifier)
 
     settings = Settings(
-        classifier_backend="yamnet",
         yamnet_min_confidence=0.31,
         yamnet_input_target_rms=0.22,
         yamnet_max_input_gain=11.0,
-        model_chain_config_path=tmp_path / "missing_model_chain.json",
+        birdnet_enabled=False,
     )
+    routing = load_routing(settings)
 
-    _ = factory.create_classifier(settings)
+    _ = factory.create_context_classifier(settings, "detection_trigger", routing=routing)
 
-    assert captured["min_confidence"] == pytest.approx(0.31)
+    # routing spec min_confidence (0.25) wins over the settings default here;
+    # the conditioning knobs pass through from settings.
+    assert captured["min_confidence"] == pytest.approx(0.25)
     assert captured["target_rms"] == pytest.approx(0.22)
     assert captured["max_input_gain"] == pytest.approx(11.0)
 
@@ -232,13 +240,11 @@ def test_create_classifier_uses_birdnet_as_primary_backend(monkeypatch, tmp_path
     stub_module.BirdNETClassifier = _StubBirdNETClassifier
     monkeypatch.setitem(sys.modules, "minimappr.classifiers.birdnet", stub_module)
 
-    settings = Settings(
-        classifier_backend="birdnet",
-        birdnet_trigger_min_confidence=0.07,
-        model_chain_config_path=tmp_path / "missing_model_chain.json",
-    )
-
-    classifier = factory.create_classifier(settings)
+    settings = Settings(birdnet_trigger_min_confidence=0.07)
+    routing = default_routing()
+    routing.contexts["detection_trigger"].run = ("birdnet",)
+    routing.classifiers["birdnet"].min_confidence = 0.0
+    classifier = factory.create_context_classifier(settings, "detection_trigger", routing=routing)
     result = classifier.classify(np.zeros(64, dtype=np.float32), 16_000)
 
     assert captured["min_confidence"] == pytest.approx(0.07)

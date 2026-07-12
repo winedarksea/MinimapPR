@@ -90,7 +90,6 @@ async def _start_fusion(
         classification_window_seconds=classification_window_seconds,
         max_sensor_buffer_seconds=max(2.0, classification_window_seconds + 0.5),
         fusion_worker_count=1,
-        classifier_backend="heuristic",
         preprocess_enabled=False,
         classification_audio_source="omni",
         localization_band_min_hz=300.0,

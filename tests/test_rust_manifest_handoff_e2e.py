@@ -371,7 +371,7 @@ def _configure_http_app_sidecar_env(monkeypatch, tmp_path: Path, *, sidecar_port
     monkeypatch.setenv("MINIMAPPR_INGEST_SIDECAR_BINARY_PATH", str(binary_path))
     monkeypatch.setenv("MINIMAPPR_SIDECAR_PORT", str(sidecar_port))
     monkeypatch.setenv("MINIMAPPR_SIDECAR_ALLOW_NON_TMPFS_JOURNAL", "true")
-    monkeypatch.setenv("MINIMAPPR_CLASSIFIER", "birdnet")
+    monkeypatch.setenv("MINIMAPPR_BIRDNET_ENABLED", "true")
     monkeypatch.setenv("MINIMAPPR_CLASSIFICATION_AUDIO_SOURCE", "beamformed")
     monkeypatch.setenv("MINIMAPPR_LOCALIZATION_ALGORITHM", "srp_phat")
     monkeypatch.setenv("MINIMAPPR_LOCALIZATION_STRATEGY", "fixed")

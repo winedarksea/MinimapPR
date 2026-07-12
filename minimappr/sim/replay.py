@@ -119,7 +119,6 @@ async def build_fusion_for_bundle(
         coordinate_mode=site.get("coordinate_mode", "flat"),
         default_temperature_c=environment.get("temperature_c", 20.0),
         default_humidity=environment.get("humidity_fraction", 0.5),
-        model_chain_config_path=tmp_path / "missing_model_chain.json",
     )
     expectations = bundle.expectations or DEFAULT_EXPECTATIONS
     runtime = expectations.get("runtime", {})

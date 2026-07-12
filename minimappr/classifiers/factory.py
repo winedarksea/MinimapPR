@@ -1,15 +1,32 @@
-"""Classifier backend selection."""
+"""Build per-context classifiers from the routing config.
+
+``create_context_classifier(settings, context)`` resolves the routing config's
+``run`` list for that context into a CompositeClassifier (unwrapped when only
+one member survives), attaching chain stages to their parent members.
+
+Failure policy (mirrors routing.OPTIONAL_BACKENDS): a missing optional backend
+(BirdNET, Moonshine) drops the member with one INFO log; a YAMNet build
+failure is a hard startup error — YAMNet is bundled and load-bearing (drone
+head chain, speech triggers). A missing drone-head model file drops the chain
+with a WARNING (the artifact ships separately from the code).
+"""
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
-from typing import Any
 
 from minimappr.classifiers.base import AudioClassifier
 from minimappr.classifiers.chaining import ChainStage, ChainedClassifier
+from minimappr.classifiers.composite import CompositeClassifier, CompositeMember
 from minimappr.classifiers.heuristic import HeuristicClassifier
+from minimappr.classifiers.routing import (
+    CONTEXT_DETECTION_TRIGGER,
+    ChainSpec,
+    ClassifierSpec,
+    RoutingConfig,
+    load_routing,
+)
 from minimappr.config import Settings
 from minimappr.core.taxonomy import label_category_for_name
 
@@ -22,166 +39,159 @@ logger = logging.getLogger(__name__)
 
 
 def create_classifier(settings: Settings) -> AudioClassifier:
-    backend = settings.resolved_classifier_backend()
-    base_classifier: AudioClassifier
-    yamnet_active = False
-    if backend == "yamnet":
-        try:
-            if YAMNetClassifier is None:
-                raise RuntimeError("YAMNet backend requires tensorflow and tensorflow-hub")
-            base_classifier = YAMNetClassifier(
-                min_confidence=settings.yamnet_min_confidence,
-                target_rms=settings.yamnet_input_target_rms,
-                max_input_gain=settings.yamnet_max_input_gain,
-            )
-            yamnet_active = True
-        except Exception as exc:  # pragma: no cover - optional runtime backend
-            logger.warning("YAMNet unavailable (%s). Falling back to heuristic classifier.", exc)
-            base_classifier = _create_heuristic(settings)
-    elif backend == "birdnet":
-        try:
-            from minimappr.classifiers.birdnet import BirdNETClassifier  # noqa: PLC0415
+    """Classifier for the detection-trigger pipeline (back-compat entry point)."""
+    return create_context_classifier(settings, CONTEXT_DETECTION_TRIGGER)
 
-            base_classifier = BirdNETClassifier(
-                min_confidence=settings.birdnet_trigger_min_confidence,
-                latitude=settings.site_origin_lat,
-                longitude=settings.site_origin_lon,
-                geo_min_confidence=settings.birdnet_geo_min_confidence,
-            )
-        except Exception as exc:  # pragma: no cover - optional runtime backend
-            logger.warning("BirdNET unavailable (%s). Falling back to heuristic classifier.", exc)
-            base_classifier = _create_heuristic(settings)
-    else:
-        base_classifier = _create_heuristic(settings)
 
-    stages = _load_chain_stages(settings.model_chain_config_path, settings)
-    if not stages and yamnet_active:
-        # When no explicit chain config exists and YAMNet is active, apply the
-        # default beta chain: bird-like detections trigger BirdNET for species ID.
-        stages = _default_chain_stages(settings)
+def create_context_classifier(
+    settings: Settings,
+    context: str,
+    routing: RoutingConfig | None = None,
+) -> AudioClassifier:
+    if routing is None:
+        routing = load_routing(settings)
+    _warn_on_legacy_chain_config(settings)
+
+    context_spec = routing.context(context)
+    members: list[CompositeMember] = []
+    for member_id in context_spec.run:
+        spec = routing.classifiers.get(member_id)
+        if spec is None:
+            continue
+        classifier = _build_member(spec, settings, routing.chains_for_member(member_id), routing)
+        if classifier is None:
+            continue
+        members.append(CompositeMember(member_id=member_id, classifier=classifier))
+
+    if not members:
+        logger.info(
+            "Classifier routing resolved zero members for context %r; using heuristic.",
+            context,
+        )
+        return _create_heuristic(settings)
+    if len(members) == 1:
+        return members[0].classifier
+    return CompositeClassifier(members)
+
+
+def _build_member(
+    spec: ClassifierSpec,
+    settings: Settings,
+    chains: tuple[ChainSpec, ...],
+    routing: RoutingConfig,
+) -> AudioClassifier | None:
+    base = _build_backend(spec, settings, needs_embeddings=any(c.input == "embedding" for c in chains))
+    if base is None:
+        return None
+    stages = [
+        stage
+        for stage in (_build_chain_stage(chain, settings, routing) for chain in chains)
+        if stage is not None
+    ]
     if not stages:
-        return base_classifier
+        return base
     return ChainedClassifier(
-        base_classifier=base_classifier,
+        base_classifier=base,
         stages=stages,
         category_for_label=label_category_for_name,
     )
 
 
-def _load_chain_stages(path: Path, settings: Settings) -> list[ChainStage]:
-    if not path.exists():
-        return []
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        logger.warning("Unable to read model chain config: %s", path)
-        return []
-    if not isinstance(raw, dict):
-        return []
-    out: list[ChainStage] = []
-    for item in raw.get("stages", []):
-        if not isinstance(item, dict):
-            continue
-        stage = _build_stage(item, settings)
-        if stage is not None:
-            out.append(stage)
-    return out
-
-
-def _build_stage(raw: dict[str, Any], settings: Settings) -> ChainStage | None:
-    stage_id = str(raw.get("id") or "").strip()
-    backend = str(raw.get("backend") or "heuristic").strip().lower()
-    if not stage_id:
-        return None
-    classifier: AudioClassifier
+def _build_backend(
+    spec: ClassifierSpec,
+    settings: Settings,
+    *,
+    needs_embeddings: bool = False,
+) -> AudioClassifier | None:
+    backend = spec.backend
     if backend == "yamnet":
-        try:
-            if YAMNetClassifier is None:
-                raise RuntimeError("YAMNet unavailable")
-            classifier = YAMNetClassifier(
-                min_confidence=settings.yamnet_min_confidence,
-                target_rms=settings.yamnet_input_target_rms,
-                max_input_gain=settings.yamnet_max_input_gain,
+        if YAMNetClassifier is None:
+            raise RuntimeError(
+                "YAMNet classifier is required by the routing config but tensorflow/"
+                "tensorflow-hub failed to import. Install the core dependencies "
+                "(pip install minimappr) or remove 'yamnet' from the routing config."
             )
-        except Exception:
-            return None
-    elif backend == "birdnet":
+        return YAMNetClassifier(
+            min_confidence=spec.min_confidence or settings.yamnet_min_confidence,
+            target_rms=settings.yamnet_input_target_rms,
+            max_input_gain=settings.yamnet_max_input_gain,
+            keep_embeddings=spec.keep_embeddings or needs_embeddings,
+        )
+    if backend == "birdnet":
         try:
             from minimappr.classifiers.birdnet import BirdNETClassifier  # noqa: PLC0415
-            classifier = BirdNETClassifier(
-                min_confidence=float(raw.get("min_confidence", 0.1) or 0.1),
+
+            return BirdNETClassifier(
+                min_confidence=spec.min_confidence or settings.birdnet_trigger_min_confidence,
                 latitude=settings.site_origin_lat,
                 longitude=settings.site_origin_lon,
                 geo_min_confidence=settings.birdnet_geo_min_confidence,
             )
-        except Exception as exc:
-            logger.warning("BirdNET backend unavailable (%s). Skipping chain stage '%s'.", exc, stage_id)
+        except Exception as exc:  # pragma: no cover - optional runtime backend
+            logger.info(
+                "BirdNET unavailable (%s); dropping routing member %r. Install with: pip install birdnet",
+                exc,
+                spec.member_id,
+            )
             return None
-    else:
-        classifier = _create_heuristic(settings)
+    if backend == "drone_head":
+        try:
+            from minimappr.classifiers.drone_head import DroneHeadClassifier  # noqa: PLC0415
 
-    labels = _to_set(raw.get("trigger_labels"))
-    categories = _to_set(raw.get("trigger_categories"))
-    min_conf = float(raw.get("min_confidence", 0.0) or 0.0)
-    weight = float(raw.get("score_weight", 1.0) or 1.0)
+            return DroneHeadClassifier(
+                model_path=spec.model_path or settings.drone_head_model_path,
+                min_confidence=spec.min_confidence,
+            )
+        except FileNotFoundError as exc:
+            logger.warning("Drone head model missing; dropping member %r: %s", spec.member_id, exc)
+            return None
+        except Exception as exc:
+            logger.warning("Drone head unavailable (%s); dropping member %r.", exc, spec.member_id)
+            return None
+    if backend == "heuristic":
+        return _create_heuristic(settings)
+    logger.warning("Unknown classifier backend %r; dropping member %r.", backend, spec.member_id)
+    return None
+
+
+def _build_chain_stage(
+    chain: ChainSpec,
+    settings: Settings,
+    routing: RoutingConfig,
+) -> ChainStage | None:
+    spec = routing.classifiers.get(chain.chain_id)
+    if spec is None:
+        return None
+    classifier = _build_backend(spec, settings)
+    if classifier is None:
+        return None
     return ChainStage(
-        stage_id=stage_id,
+        stage_id=chain.chain_id,
         classifier=classifier,
-        trigger_labels=labels,
-        trigger_categories=categories,
-        min_confidence=max(0.0, min(1.0, min_conf)),
-        score_weight=max(0.0, weight),
+        trigger_labels=set(chain.trigger_labels),
+        trigger_categories=set(chain.trigger_categories),
+        min_confidence=max(0.0, min(1.0, chain.min_confidence)),
+        score_weight=max(0.0, chain.score_weight),
+        input_kind=chain.input,
     )
 
 
-def _default_chain_stages(settings: Settings) -> list[ChainStage]:
-    """Return the default beta chain when no model_chain.json config file exists.
+_legacy_chain_warned = False
 
-    Triggers BirdNET species identification whenever YAMNet classifies audio
-    in the 'bird' category with configurable recall-biased confidence. BirdNET is loaded
-    lazily — the stage is silently omitted if the birdnet package is not installed.
-    """
-    try:
-        from minimappr.classifiers.birdnet import BirdNETClassifier  # noqa: PLC0415
-        birdnet_classifier: AudioClassifier = BirdNETClassifier(
-            min_confidence=0.1,
-            latitude=settings.site_origin_lat,
-            longitude=settings.site_origin_lon,
-            geo_min_confidence=settings.birdnet_geo_min_confidence,
+
+def _warn_on_legacy_chain_config(settings: Settings) -> None:
+    global _legacy_chain_warned
+    if _legacy_chain_warned:
+        return
+    _legacy_chain_warned = True
+    legacy_path = Path("data/model_chain.json")
+    if legacy_path.exists():
+        logger.error(
+            "model_chain.json is no longer read (%s). Classifier chains now live in "
+            "the routing config (%s) — migrate your stages there and delete the old file.",
+            legacy_path,
+            getattr(settings, "classifier_routing_config_path", "data/classifier_routing.json"),
         )
-    except Exception as exc:
-        logger.info(
-            "BirdNET package not available (%s). Default chain will omit species ID stage."
-            " Install with: pip install birdnet",
-            exc,
-        )
-        return []
-
-    return [
-        ChainStage(
-            stage_id="birdnet_species",
-            classifier=birdnet_classifier,
-            # Trigger on YAMNet 'bird' category OR common bird labels.
-            trigger_categories={"bird"},
-            trigger_labels={"bird", "bird_like", "bird sound", "bird vocalization", "songbird"},
-            min_confidence=settings.birdnet_trigger_min_confidence,
-            score_weight=1.2,  # Prefer species-level label over coarse 'bird_like'.
-        )
-    ]
-
-
-def _to_set(value: Any) -> set[str]:
-    if isinstance(value, str):
-        text = value.strip().lower()
-        return {text} if text else set()
-    if isinstance(value, (list, tuple, set)):
-        out: set[str] = set()
-        for item in value:
-            text = str(item).strip().lower()
-            if text:
-                out.add(text)
-        return out
-    return set()
 
 
 def _create_heuristic(settings: Settings) -> HeuristicClassifier:
@@ -202,3 +212,6 @@ def _create_heuristic(settings: Settings) -> HeuristicClassifier:
         unknown_min_score=cfg.heuristic_unknown_min_score,
         unknown_score=cfg.heuristic_unknown_score,
     )
+
+
+__all__ = ["create_classifier", "create_context_classifier"]

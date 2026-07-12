@@ -110,7 +110,12 @@ class YAMNetClassifier(AudioClassifier):
 
         features: dict = {"model": "yamnet"}
         if self._keep_embeddings:
-            features["embedding"] = np.mean(embeddings.numpy(), axis=0).astype(np.float32)
+            embedding_frames = embeddings.numpy().astype(np.float32)
+            features["embedding"] = np.mean(embedding_frames, axis=0).astype(np.float32)
+            # Per-frame [N, 1024] embeddings for embedding-input chain stages
+            # (e.g. the drone head). Stripped before feature_summary_json by
+            # ChainedClassifier/CompositeClassifier.
+            features["embedding_frames"] = embedding_frames
             features["embedding_model"] = "yamnet/1"
             features["embedding_dim"] = int(features["embedding"].shape[0])
 

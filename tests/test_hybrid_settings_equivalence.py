@@ -20,16 +20,13 @@ from tests.hybrid_settings import hybrid_production_settings
 @pytest.fixture(autouse=True)
 def _clear_backend_cache():
     availability.probe_backends.cache_clear()
-    availability.resolve_backend.cache_clear()
     yield
     availability.probe_backends.cache_clear()
-    availability.resolve_backend.cache_clear()
 
 
 def test_hybrid_settings_reproduce_profile_fields() -> None:
     s = hybrid_production_settings()
-    assert s.classifier_backend == "birdnet"
-    assert s.resolved_classifier_backend() == "birdnet"  # explicit passes through
+    assert s.birdnet_enabled is True
     assert s.localization_algorithm == "srp_phat"
     assert s.localization_strategy == "fixed"
     assert s.classification_audio_source == "omni"
@@ -43,7 +40,7 @@ def test_hybrid_settings_reproduce_profile_fields() -> None:
 
 def test_hybrid_render_flag_requires_beamformed_source() -> None:
     # Old profile classified from the Rust hybrid render. Under the new formula the
-    # hybrid render flag needs backend=birdnet AND audio_source=beamformed.
+    # hybrid render flag needs birdnet active AND audio_source=beamformed.
     omni = hybrid_production_settings()  # audio_source="omni"
     assert _sidecar_hybrid_render_enabled(omni) is False
 

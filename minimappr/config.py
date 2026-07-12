@@ -100,7 +100,7 @@ def _env_vec3_optional(
 
 _RUNTIME_PROFILE_MIGRATIONS: dict[str, tuple[str, ...]] = {
     "birdnet_hybrid_production": (
-        "MINIMAPPR_CLASSIFIER=birdnet",
+        "MINIMAPPR_BIRDNET_ENABLED=true",
         "MINIMAPPR_LOCALIZATION_ALGORITHM=srp_phat",
         "MINIMAPPR_LOCALIZATION_STRATEGY=fixed",
         "MINIMAPPR_CLASSIFICATION_AUDIO_SOURCE=omni",
@@ -114,7 +114,7 @@ _RUNTIME_PROFILE_MIGRATIONS: dict[str, tuple[str, ...]] = {
         f"MINIMAPPR_RULES_CONFIG_PATH={DEFAULT_BIRDNET_HYBRID_RULES_CONFIG_PATH}",
     ),
     "birdnet_omni_testing": (
-        "MINIMAPPR_CLASSIFIER=birdnet",
+        "MINIMAPPR_BIRDNET_ENABLED=true",
         "MINIMAPPR_CLASSIFICATION_AUDIO_SOURCE=omni",
         "MINIMAPPR_SKIP_LOCALIZATION_FOR_CLASSIFICATION=true",
         "MINIMAPPR_BIRDNET_CHUNKED_DISPATCH_ENABLED=true",
@@ -123,6 +123,30 @@ _RUNTIME_PROFILE_MIGRATIONS: dict[str, tuple[str, ...]] = {
         "MINIMAPPR_MAX_SENSOR_BUFFER_SECONDS=32.0",
     ),
 }
+
+
+def _reject_removed_classifier_env() -> None:
+    """Fail fast if the removed single-backend classifier env vars are set.
+
+    ``MINIMAPPR_CLASSIFIER`` / ``MINIMAPPR_MODEL_CHAIN_CONFIG_PATH`` are gone:
+    classification is now always-on per-context routing configured via
+    ``data/classifier_routing.json``. Silently ignoring the old vars would
+    change which models run on live audio.
+    """
+    if os.getenv("MINIMAPPR_CLASSIFIER") is not None:
+        raise ValueError(
+            "MINIMAPPR_CLASSIFIER is removed. Classifiers are now routed per context "
+            "via the routing config (data/classifier_routing.json, override with "
+            "MINIMAPPR_CLASSIFIER_ROUTING_CONFIG_PATH). Kill switches: "
+            "MINIMAPPR_BIRDNET_ENABLED, MINIMAPPR_DRONE_HEAD_ENABLED, "
+            "MINIMAPPR_STT_ENABLED, MINIMAPPR_OMNI_SCAN_ENABLED. Unset MINIMAPPR_CLASSIFIER."
+        )
+    if os.getenv("MINIMAPPR_MODEL_CHAIN_CONFIG_PATH") is not None:
+        raise ValueError(
+            "MINIMAPPR_MODEL_CHAIN_CONFIG_PATH is removed. Chain stages now live in the "
+            "'chains' section of the classifier routing config "
+            "(data/classifier_routing.json). Unset MINIMAPPR_MODEL_CHAIN_CONFIG_PATH."
+        )
 
 
 def _reject_runtime_profile_env() -> None:
@@ -301,7 +325,6 @@ class TrackingConfig:
 
 @dataclass(slots=True)
 class ClassifierConfig:
-    backend: str
     stage_timeout_seconds: float
     yamnet_min_confidence: float
     yamnet_input_target_rms: float
@@ -396,7 +419,6 @@ class IngestSidecarProcessConfig:
 class RulesConfig:
     rules_config_path: Path
     taxonomy_config_path: Path
-    model_chain_config_path: Path
 
 
 @dataclass(slots=True)
@@ -531,7 +553,6 @@ class Settings:
     retention_policy_path: Path = Path("data/retention_policy.json")
     rules_config_path: Path = DEFAULT_RULES_CONFIG_PATH
     taxonomy_config_path: Path = Path("data/taxonomy.json")
-    model_chain_config_path: Path = Path("data/model_chain.json")
     large_artifact_dir: Path = Path("data/artifacts")
     map_overlay_dir: Path = Path("data/overlays")
     capture_final_tracks_settle_seconds: float = 30.0
@@ -639,9 +660,24 @@ class Settings:
     site_origin_alt_m: float = 0.0
     coordinate_mode: str = "flat"
 
-    # "auto" resolves via installed-package detection (birdnet > yamnet >
-    # heuristic); an explicit backend name is honored as-is.
-    classifier_backend: str = "auto"
+    # Per-context classifier routing (see minimappr/classifiers/routing.py).
+    # Replaces the removed single-backend ``classifier_backend`` setting.
+    classifier_routing_config_path: Path = Path("data/classifier_routing.json")
+    birdnet_enabled: bool = True
+    drone_head_enabled: bool = True
+    drone_head_model_path: Path = Path("data/models/drone_head.onnx")
+    drone_head_min_confidence: float = 0.5
+    stt_enabled: bool = True
+    stt_trigger_min_confidence: float = 0.5
+    stt_pre_roll_seconds: float = 3.0
+    stt_hangover_seconds: float = 2.0
+    stt_max_utterance_seconds: float = 30.0
+    speech_audio_dir: Path = Path("data/speech")
+    transcript_retention_seconds: float = 604_800.0
+    omni_scan_enabled: bool = True
+    omni_scan_interval_seconds: float = 30.0
+    omni_scan_window_seconds: float = 15.0
+    omni_scan_min_rms: float = 0.0
     yamnet_min_confidence: float = 0.25
     yamnet_input_target_rms: float = 0.10
     yamnet_max_input_gain: float = 32.0
@@ -809,7 +845,9 @@ class Settings:
         self.retention_policy_path = Path(self.retention_policy_path)
         self.rules_config_path = Path(self.rules_config_path)
         self.taxonomy_config_path = Path(self.taxonomy_config_path)
-        self.model_chain_config_path = Path(self.model_chain_config_path)
+        self.classifier_routing_config_path = Path(self.classifier_routing_config_path)
+        self.drone_head_model_path = Path(self.drone_head_model_path)
+        self.speech_audio_dir = Path(self.speech_audio_dir)
         self.effector_snapshot_dir = Path(self.effector_snapshot_dir)
         self.large_artifact_dir = Path(self.large_artifact_dir)
         self.map_overlay_dir = Path(self.map_overlay_dir)
@@ -827,7 +865,6 @@ class Settings:
             )
         if not (0.0 <= self.min_localization_confidence <= 1.0):
             raise ValueError("MINIMAPPR_MIN_LOCALIZATION_CONFIDENCE must be in [0,1]")
-        self.classifier_backend = self.classifier_backend.strip().lower() or "auto"
         self.process_role = self.process_role.strip().lower() or "combined"
         if self.process_role not in {"combined", "api", "ingest"}:
             raise ValueError("MINIMAPPR_PROCESS_ROLE must be one of combined/api/ingest")
@@ -1034,6 +1071,44 @@ class Settings:
             raise ValueError("MINIMAPPR_CLASSIFIER_DIAGONAL_LOADING_SCALE must be >= 1.0")
         if self.classifier_stage_timeout_seconds <= 0.0:
             raise ValueError("MINIMAPPR_CLASSIFIER_STAGE_TIMEOUT_SECONDS must be > 0")
+        if not (0.0 <= self.drone_head_min_confidence <= 1.0):
+            raise ValueError("MINIMAPPR_DRONE_HEAD_MIN_CONFIDENCE must be in [0, 1]")
+        if not (0.0 <= self.stt_trigger_min_confidence <= 1.0):
+            raise ValueError("MINIMAPPR_STT_TRIGGER_MIN_CONFIDENCE must be in [0, 1]")
+        if self.stt_pre_roll_seconds < 0.0:
+            raise ValueError("MINIMAPPR_STT_PRE_ROLL_SECONDS must be >= 0")
+        if self.stt_hangover_seconds < 0.0:
+            raise ValueError("MINIMAPPR_STT_HANGOVER_SECONDS must be >= 0")
+        if self.stt_max_utterance_seconds <= 0.0:
+            raise ValueError("MINIMAPPR_STT_MAX_UTTERANCE_SECONDS must be > 0")
+        if self.transcript_retention_seconds <= 0.0:
+            raise ValueError("MINIMAPPR_TRANSCRIPT_RETENTION_SECONDS must be > 0")
+        if self.omni_scan_interval_seconds <= 0.0:
+            raise ValueError("MINIMAPPR_OMNI_SCAN_INTERVAL_SECONDS must be > 0")
+        if self.omni_scan_window_seconds <= 0.0:
+            raise ValueError("MINIMAPPR_OMNI_SCAN_WINDOW_SECONDS must be > 0")
+        if self.omni_scan_min_rms < 0.0:
+            raise ValueError("MINIMAPPR_OMNI_SCAN_MIN_RMS must be >= 0")
+        # An utterance capture needs pre-roll + utterance + hangover of audio to
+        # still be resident in the ring buffers when it closes. Clamp (rather
+        # than raise: the defaults 3+30+2 slightly exceed the 32s buffer).
+        stt_span = self.stt_pre_roll_seconds + self.stt_max_utterance_seconds + self.stt_hangover_seconds
+        if self.stt_enabled and stt_span > self.max_sensor_buffer_seconds:
+            clamped = max(
+                1.0,
+                self.max_sensor_buffer_seconds
+                - self.stt_pre_roll_seconds
+                - self.stt_hangover_seconds,
+            )
+            logging.getLogger(__name__).warning(
+                "STT pre_roll+max_utterance+hangover (%.1fs) exceeds max_sensor_buffer_seconds "
+                "(%.1fs); clamping stt_max_utterance_seconds %.1f -> %.1f",
+                stt_span,
+                self.max_sensor_buffer_seconds,
+                self.stt_max_utterance_seconds,
+                clamped,
+            )
+            self.stt_max_utterance_seconds = clamped
         for field_name in (
             "fusion_event_queue_size",
             "fusion_localization_queue_size",
@@ -1083,7 +1158,7 @@ class Settings:
             raise ValueError("MINIMAPPR_BIRDNET_CHUNK_MIN_RETRY_PROGRESS_SECONDS must be >= 0")
         if (
             self.birdnet_chunked_dispatch_enabled
-            and self.resolved_classifier_backend() == "birdnet"
+            and self.birdnet_enabled
             and self.birdnet_chunk_overlap_seconds >= self.classification_window_seconds
         ):
             raise ValueError(
@@ -1091,7 +1166,7 @@ class Settings:
             )
         if (
             self.birdnet_chunked_dispatch_enabled
-            and self.resolved_classifier_backend() == "birdnet"
+            and self.birdnet_enabled
             and self.birdnet_chunk_overlap_seconds > 2.0
         ):
             raise ValueError(
@@ -1212,19 +1287,10 @@ class Settings:
         classifier. ``omni`` / ``nearest_node_omni`` sources disable beamforming."""
         return self.classification_audio_source == "beamformed"
 
-    def resolved_classifier_backend(self) -> str:
-        """Concrete classifier backend, resolving ``"auto"`` via installed packages.
-
-        Imported inside the method to avoid a config <-> classifiers import cycle
-        (``availability`` is stdlib-only).
-        """
-        from minimappr.classifiers.availability import resolve_backend
-
-        return resolve_backend(self.classifier_backend)
-
     @classmethod
     def from_env(cls) -> "Settings":
         _reject_runtime_profile_env()
+        _reject_removed_classifier_env()
         classification_audio_source = _resolve_classification_audio_source_env()
         peers_config_path = Path(_env_str("MINIMAPPR_FEDERATION_PEERS_CONFIG_PATH", "data/federation_peers.json"))
         peers = _load_federation_peers(
@@ -1319,7 +1385,6 @@ class Settings:
             retention_policy_path=Path(_env_str("MINIMAPPR_RETENTION_POLICY_PATH", "data/retention_policy.json")),
             rules_config_path=Path(_env_str("MINIMAPPR_RULES_CONFIG_PATH", "data/rules.json")),
             taxonomy_config_path=Path(_env_str("MINIMAPPR_TAXONOMY_CONFIG_PATH", "data/taxonomy.json")),
-            model_chain_config_path=Path(_env_str("MINIMAPPR_MODEL_CHAIN_CONFIG_PATH", "data/model_chain.json")),
             large_artifact_dir=Path(_env_str("MINIMAPPR_LARGE_ARTIFACT_DIR", "data/artifacts")),
             map_overlay_dir=Path(_env_str("MINIMAPPR_MAP_OVERLAY_DIR", "data/overlays")),
             capture_final_tracks_settle_seconds=_env_float(
@@ -1512,7 +1577,28 @@ class Settings:
             site_origin_lon=_env_float("MINIMAPPR_SITE_ORIGIN_LON", -93.2579197515542),
             site_origin_alt_m=_env_float("MINIMAPPR_SITE_ORIGIN_ALT_M", 0.0),
             coordinate_mode=_env_str("MINIMAPPR_COORDINATE_MODE", "flat"),
-            classifier_backend=_env_str("MINIMAPPR_CLASSIFIER", "auto"),
+            classifier_routing_config_path=Path(
+                _env_str("MINIMAPPR_CLASSIFIER_ROUTING_CONFIG_PATH", "data/classifier_routing.json")
+            ),
+            birdnet_enabled=_env_bool("MINIMAPPR_BIRDNET_ENABLED", True),
+            drone_head_enabled=_env_bool("MINIMAPPR_DRONE_HEAD_ENABLED", True),
+            drone_head_model_path=Path(
+                _env_str("MINIMAPPR_DRONE_HEAD_MODEL_PATH", "data/models/drone_head.onnx")
+            ),
+            drone_head_min_confidence=_env_float("MINIMAPPR_DRONE_HEAD_MIN_CONFIDENCE", 0.5),
+            stt_enabled=_env_bool("MINIMAPPR_STT_ENABLED", True),
+            stt_trigger_min_confidence=_env_float("MINIMAPPR_STT_TRIGGER_MIN_CONFIDENCE", 0.5),
+            stt_pre_roll_seconds=_env_float("MINIMAPPR_STT_PRE_ROLL_SECONDS", 3.0),
+            stt_hangover_seconds=_env_float("MINIMAPPR_STT_HANGOVER_SECONDS", 2.0),
+            stt_max_utterance_seconds=_env_float("MINIMAPPR_STT_MAX_UTTERANCE_SECONDS", 30.0),
+            speech_audio_dir=Path(_env_str("MINIMAPPR_SPEECH_AUDIO_DIR", "data/speech")),
+            transcript_retention_seconds=_env_float(
+                "MINIMAPPR_TRANSCRIPT_RETENTION_SECONDS", 604_800.0
+            ),
+            omni_scan_enabled=_env_bool("MINIMAPPR_OMNI_SCAN_ENABLED", True),
+            omni_scan_interval_seconds=_env_float("MINIMAPPR_OMNI_SCAN_INTERVAL_SECONDS", 30.0),
+            omni_scan_window_seconds=_env_float("MINIMAPPR_OMNI_SCAN_WINDOW_SECONDS", 15.0),
+            omni_scan_min_rms=_env_float("MINIMAPPR_OMNI_SCAN_MIN_RMS", 0.0),
             yamnet_min_confidence=_env_float("MINIMAPPR_YAMNET_MIN_CONFIDENCE", 0.25),
             yamnet_input_target_rms=_env_float("MINIMAPPR_YAMNET_INPUT_TARGET_RMS", 0.10),
             yamnet_max_input_gain=_env_float("MINIMAPPR_YAMNET_MAX_INPUT_GAIN", 32.0),
@@ -1757,7 +1843,6 @@ class Settings:
 
     def classifier_config(self) -> ClassifierConfig:
         return ClassifierConfig(
-            backend=self.classifier_backend,
             stage_timeout_seconds=self.classifier_stage_timeout_seconds,
             yamnet_min_confidence=self.yamnet_min_confidence,
             yamnet_input_target_rms=self.yamnet_input_target_rms,
@@ -1875,7 +1960,6 @@ class Settings:
         return RulesConfig(
             rules_config_path=self.rules_config_path,
             taxonomy_config_path=self.taxonomy_config_path,
-            model_chain_config_path=self.model_chain_config_path,
         )
 
     def federation_config(self) -> FederationConfig:

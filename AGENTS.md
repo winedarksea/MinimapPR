@@ -34,10 +34,11 @@ This document provides guidelines for agents working on the MinimapPR codebase.
 - **Refactor When Useful:** Code base is not deployed in production. Breaking changes are fine when they add clear value.
 
 # Core Release Requirements
-* Make sure there are no gaps (lost packets) in the detection audio.
+* Minimize gaps (lost packets) in the detection audio.
 * Make sure realistic localization is occurring. Our goal is to be able to localize from 1 meter out to a kilometer or more (when enough nodes are active)
-* Make sure nothing is blocking the audio pipeline (ie UI requests don't hold up audio processing requests)
-* Make sure detections have lat/long of their track (or of their node, if omnidirectional)
-* Precise TDOA is important. This means using carefully precise GPS (or NTP if no GPS) timestamps on firmware's outgoing audio packets which the server then uses (using the timestamp on packet, not server time) to process localizations.
-* Streaming audio should not be landing on disk until it is localized and classified. Most audio should be discarded (exceptions: some detections, IAMF recordings) without ever being written to disk on the server. This also should have minimal other tracking bloat (indexes, etc) being landed to disk, and generally what is landing should be landing in the SQLite, which should have proper cleanup policies automatically cleaning up old data.
-* IAMF audio and ambisonic audio able to be recorded and export, with the localized and tracked audio passed in as proper objects to the IAMF (Atmos style) audio format. The goal is also for this to have a basic video start to a server connected webcam such that high quality video is recorded perfectly in sync with the audio, ready for upload to YouTube.
+* Try to keep secondary processes from blocking the audio pipeline hot path
+* Precise TDOA is important. This means using carefully precise GPS (or NTP if no GPS) timestamps on firmware's outgoing audio packets which the server then uses (using the timestamp on packet, not server time).
+* Streaming audio should not be landing on disk until it is localized and classified. Most audio should be discarded (exceptions: some detections, IAMF recordings) without ever being written to disk on the server.
+* Cleanup policies automatically cleaning up old data should cover all data.
+* The preferred format for nn models is quantized onnx runtimes, although others may be used where practical.
+* IAMF audio and ambisonic audio should be able to be recorded and export, with the localized and tracked audio passed in as proper objects to the IAMF (Atmos style) audio format.

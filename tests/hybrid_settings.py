@@ -21,7 +21,7 @@ def hybrid_production_kwargs(**overrides) -> dict:
         float(overrides.get("classification_window_seconds", 30.0)), 30.0
     )
     kwargs.update(
-        classifier_backend="birdnet",
+        birdnet_enabled=True,
         localization_algorithm="srp_phat",
         localization_strategy="fixed",
         # The old profile forced omni (Python beamformer off); allow tests to vary

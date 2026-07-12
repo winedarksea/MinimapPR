@@ -92,7 +92,7 @@ class ClassificationOrchestrator:
         beamformed_classification_min_sensor_count: int = 2,
         beamformed_classification_confidence_margin: float = 0.0,
         stage_timeout_seconds: float = 30.0,
-        classifier_backend_name: str = "heuristic",
+        classifier_backend_name: str = "routing",
         on_beamform_error: Callable[[str], None] | None = None,
     ) -> None:
         self._classifier = classifier
@@ -418,10 +418,13 @@ class ClassificationOrchestrator:
     ) -> ClassifiedResult:
         label_category = self._taxonomy_provider.category_for_label(classification.label)
         iff_category = self._taxonomy_provider.iff_for_category(label_category)
+        # Provenance: the winning ensemble member (set by CompositeClassifier)
+        # names the actual model; fall back to the configured pipeline name.
+        winner_member = classification.features.get("winner_member")
         label_id = await self._storage.upsert_label(
             name=classification.label,
             category=label_category,
-            source=self._classifier_backend_name,
+            source=str(winner_member) if winner_member else self._classifier_backend_name,
             created_ns=event_time_ns,
         )
         if hasattr(self._taxonomy_provider, "register_label"):

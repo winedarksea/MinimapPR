@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from minimappr.classifiers.base import AudioClassifier
+from minimappr.classifiers.base import AudioClassifier, EmbeddingClassifier
 from minimappr.models import ClassificationResult
 
 
@@ -18,6 +18,9 @@ class ChainStage:
     trigger_categories: set[str] = field(default_factory=set)
     min_confidence: float = 0.0
     score_weight: float = 1.0
+    # "audio" re-classifies the stage window; "embedding" consumes the base
+    # classifier's in-memory embedding frames (requires an EmbeddingClassifier).
+    input_kind: str = "audio"
 
 
 class ChainedClassifier(AudioClassifier):
@@ -39,6 +42,11 @@ class ChainedClassifier(AudioClassifier):
         for stage in self._stages:
             stage.classifier.close()
 
+    def cancel_pending(self) -> None:
+        self._base.cancel_pending()
+        for stage in self._stages:
+            stage.classifier.cancel_pending()
+
     def classify(self, samples: np.ndarray, sample_rate_hz: int) -> ClassificationResult:
         base = self._base.classify(samples, sample_rate_hz)
         combined_scores = dict(base.scores)
@@ -56,7 +64,18 @@ class ChainedClassifier(AudioClassifier):
             if base.confidence < stage.min_confidence:
                 continue
 
-            result = stage.classifier.classify(samples, sample_rate_hz)
+            if stage.input_kind == "embedding":
+                frames = base.features.get("embedding_frames")
+                if frames is None:
+                    embedding = base.features.get("embedding")
+                    if embedding is None:
+                        continue
+                    frames = np.asarray(embedding, dtype=np.float32)[None, :]
+                if not isinstance(stage.classifier, EmbeddingClassifier):
+                    continue
+                result = stage.classifier.classify_embedding(np.asarray(frames))
+            else:
+                result = stage.classifier.classify(samples, sample_rate_hz)
             chain_meta.append(
                 {
                     "stage_id": stage.stage_id,
@@ -73,6 +92,11 @@ class ChainedClassifier(AudioClassifier):
                 winner_label = result.label
             for key, value in result.features.items():
                 feature_summary[f"{stage.stage_id}:{key}"] = float(value) if isinstance(value, (int, float)) else value
+
+        # ndarrays must never reach feature_summary_json; embedding provenance
+        # (embedding_model / embedding_dim) stays.
+        feature_summary.pop("embedding", None)
+        feature_summary.pop("embedding_frames", None)
 
         feature_summary["chain_stage_count"] = float(len(chain_meta))
         if chain_meta:

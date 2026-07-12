@@ -293,7 +293,11 @@ async def _run_ingest_with_timeout(request: Request, operation) -> Any:
 
 
 def _default_sidecar_classifier_command_json(settings: "Settings") -> str | None:
-    if getattr(settings, "classifier_backend", "").lower() == "birdnet":
+    # The helper runs the localized_render routing composite; spawn it whenever
+    # any model-backed member could resolve (YAMNet is required, BirdNET optional).
+    from minimappr.classifiers.availability import backend_available
+
+    if backend_available("yamnet") or backend_available("birdnet"):
         return json.dumps([sys.executable, "-m", "minimappr.sidecar_classifier_helper"])
     return None
 
@@ -1600,7 +1604,7 @@ async def health(request: Request) -> dict:
         "process_role": settings.process_role,
         "ingest_backend": settings.ingest_backend,
         "ingest_port": settings.ingest_port,
-        "classifier": settings.classifier_backend,
+        "classifier": "routing",
         "fusion_queue_depth": fusion_queue_depth,
         "fusion_workers_running": running,
         "federation_enabled": federation_status["enabled"],
@@ -2747,7 +2751,18 @@ async def get_config(request: Request) -> dict:
         "localization_subspace_freq_min_hz": settings.localization_subspace_freq_min_hz,
         "localization_subspace_freq_max_hz": settings.localization_subspace_freq_max_hz,
         "localization_refine_confidence_threshold": settings.localization_refine_confidence_threshold,
-        "classifier_backend": settings.classifier_backend,
+        "classifier_routing_config_path": str(settings.classifier_routing_config_path),
+        "birdnet_enabled": settings.birdnet_enabled,
+        "drone_head_enabled": settings.drone_head_enabled,
+        "drone_head_model_path": str(settings.drone_head_model_path),
+        "drone_head_min_confidence": settings.drone_head_min_confidence,
+        "stt_enabled": settings.stt_enabled,
+        "stt_trigger_min_confidence": settings.stt_trigger_min_confidence,
+        "transcript_retention_seconds": settings.transcript_retention_seconds,
+        "omni_scan_enabled": settings.omni_scan_enabled,
+        "omni_scan_interval_seconds": settings.omni_scan_interval_seconds,
+        "omni_scan_window_seconds": settings.omni_scan_window_seconds,
+        "omni_scan_min_rms": settings.omni_scan_min_rms,
         "yamnet_min_confidence": settings.yamnet_min_confidence,
         "detection_min_confidence": settings.detection_min_confidence,
         "cop": {
@@ -2761,7 +2776,6 @@ async def get_config(request: Request) -> dict:
         "classification_audio_source": settings.classification_audio_source,
         "min_localization_confidence": settings.min_localization_confidence,
         "skip_localization_for_classification": settings.skip_localization_for_classification,
-        "classifier_backend_resolved": settings.resolved_classifier_backend(),
         "classifier_backends_available": [
             {"name": entry.name, "available": entry.available, "reason": entry.reason}
             for entry in probe_backends()
@@ -2789,7 +2803,6 @@ async def get_config(request: Request) -> dict:
         "fusion_offline_replay_mode": settings.fusion_offline_replay_mode,
         "rules_config_path": str(settings.rules_config_path),
         "taxonomy_config_path": str(settings.taxonomy_config_path),
-        "model_chain_config_path": str(settings.model_chain_config_path),
         "site_origin": {
             "lat": settings.site_origin_lat,
             "lon": settings.site_origin_lon,
@@ -2830,7 +2843,7 @@ _CONFIG_PATCH_ALLOWLIST = CONFIG_PATCH_ALLOWLIST
 # must be restarted to pick them up (surfaced as ``restart_required`` in PATCH).
 _SIDECAR_RESTART_REQUIRED_KEYS = {
     "classification_audio_source",
-    "classifier_backend",
+    "birdnet_enabled",
     "min_localization_confidence",
     "localization_band_min_hz",
     "localization_band_max_hz",
@@ -2844,7 +2857,6 @@ _SIDECAR_RESTART_REQUIRED_KEYS = {
 _LOCALIZATION_ALGORITHMS = {"gcc_phat", "srp_phat", "music", "esprit"}
 _LOCALIZATION_STRATEGIES = {"fixed", "geometry_aware", "cascade"}
 _BEAMFORMER_TYPES = {"delay_and_sum", "das", "freq_domain_das", "mvdr", "superdirective", "gevd"}
-_CLASSIFIER_BACKENDS = {"auto", "yamnet", "birdnet", "heuristic"}
 _CLASSIFICATION_AUDIO_SOURCES = {"beamformed", "omni", "nearest_node_omni"}
 _TRACKING_FILTERS = {"linear", "kalman"}
 _COORDINATE_MODES = {"flat", "geodetic"}
@@ -2973,12 +2985,6 @@ async def patch_config(request: Request) -> dict:
                 errors.append(f"beamformer_type: must be one of {sorted(_BEAMFORMER_TYPES)}")
             else:
                 value = v
-        elif key == "classifier_backend":
-            v = str(value).strip().lower()
-            if v not in _CLASSIFIER_BACKENDS:
-                errors.append(f"classifier_backend: must be one of {sorted(_CLASSIFIER_BACKENDS)}")
-            else:
-                value = v
         elif key == "classification_audio_source":
             v = str(value).strip().lower()
             if v not in _CLASSIFICATION_AUDIO_SOURCES:
@@ -2993,6 +2999,16 @@ async def patch_config(request: Request) -> dict:
             0.0 <= value <= 1.0  # type: ignore[operator]
         ):
             errors.append(f"{key}: must be in [0, 1]")
+        elif key in {"drone_head_min_confidence", "stt_trigger_min_confidence"} and not (
+            0.0 <= value <= 1.0  # type: ignore[operator]
+        ):
+            errors.append(f"{key}: must be in [0, 1]")
+        elif key in {
+            "transcript_retention_seconds",
+            "omni_scan_interval_seconds",
+            "omni_scan_window_seconds",
+        } and value <= 0.0:  # type: ignore[operator]
+            errors.append(f"{key}: must be > 0")
         elif key in {"localization_band_min_hz", "localization_band_max_hz"} and value < 0.0:  # type: ignore[operator]
             errors.append(f"{key}: must be >= 0")
         elif key == "tracking_filter" and value not in _TRACKING_FILTERS:

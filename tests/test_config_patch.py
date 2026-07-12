@@ -53,12 +53,20 @@ def test_patch_enum_localization_algorithm(monkeypatch, tmp_path: Path) -> None:
         assert resp.json()["localization_algorithm"] == "srp_phat"
 
 
-def test_patch_enum_classifier_backend(monkeypatch, tmp_path: Path) -> None:
+def test_patch_classifier_routing_toggles(monkeypatch, tmp_path: Path) -> None:
     _configure_env(monkeypatch, tmp_path)
     with TestClient(app) as client:
-        resp = client.patch("/api/v1/config", json={"classifier_backend": "heuristic"})
+        resp = client.patch(
+            "/api/v1/config",
+            json={"birdnet_enabled": False, "stt_trigger_min_confidence": 0.7},
+        )
         assert resp.status_code == 200
-        assert resp.json()["classifier_backend"] == "heuristic"
+        body = resp.json()
+        assert body["birdnet_enabled"] is False
+        assert body["stt_trigger_min_confidence"] == 0.7
+        # removed key rejected
+        resp = client.patch("/api/v1/config", json={"classifier_backend": "heuristic"})
+        assert resp.status_code == 422
 
 
 def test_patch_multiple_fields(monkeypatch, tmp_path: Path) -> None:

@@ -197,7 +197,6 @@ def _build_profile_settings(
         site_origin_lon=DEFAULT_SITE_ORIGIN.lon,
         site_origin_alt_m=DEFAULT_SITE_ORIGIN.alt_m,
         coordinate_mode=coordinate_mode,
-        model_chain_config_path=tmp_path / "missing_model_chain.json",
         birdnet_trigger_min_confidence=0.05,
         birdnet_chunk_overlap_seconds=PRODUCTION_BIRDNET_CHUNK_OVERLAP_SECONDS,
     )
@@ -866,7 +865,6 @@ def test_synthesized_house_finch_localizes_with_tight_srp(
     settings = hybrid_production_settings(
         localization_srp_grid_resolution_m=TIGHT_SRP_GRID_RESOLUTION_M,
         localization_search_padding_m=TIGHT_SRP_SEARCH_PADDING_M,
-        model_chain_config_path=Path("missing_model_chain.json"),
     )
     localizer = build_localizer_from_settings(settings)
     result = localizer.localize(
@@ -982,7 +980,6 @@ def test_house_finch_fixture_expands_to_four_sensor_wavs_with_expected_relative_
         hybrid_production_settings(
             localization_srp_grid_resolution_m=TIGHT_SRP_GRID_RESOLUTION_M,
             localization_search_padding_m=TIGHT_SRP_SEARCH_PADDING_M,
-            model_chain_config_path=Path("missing_model_chain.json"),
         )
     ).localize(
         sensor_positions=_sensor_positions(),
@@ -1291,7 +1288,6 @@ def test_synthesized_house_finch_localizes_tightly_in_geodetic_space(
         site_origin_lon=DEFAULT_SITE_ORIGIN.lon,
         site_origin_alt_m=DEFAULT_SITE_ORIGIN.alt_m,
         coordinate_mode="geodetic",
-        model_chain_config_path=Path("missing_model_chain.json"),
     )
     localizer = build_localizer_from_settings(settings)
     coordinate_frame = LocalCoordinateFrame(origin=DEFAULT_SITE_ORIGIN, mode="geodetic")

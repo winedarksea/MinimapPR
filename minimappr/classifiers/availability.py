@@ -5,10 +5,8 @@ Stdlib-only (``importlib.util.find_spec``) so it can be imported from
 ``config`` <-> ``classifiers`` import cycle.
 
 A backend is a named registry entry with a set of Python packages it needs.
-``probe_backends()`` reports which are importable; ``resolve_backend()`` maps a
-configured value (possibly ``"auto"``) onto a concrete backend, preferring the
-most capable installed one. Adding a future backend (e.g. speech-to-text) is a
-single registry entry here plus its factory wiring.
+``probe_backends()`` reports which are importable. Adding a future backend is a
+single registry entry here plus its routing/factory wiring.
 """
 
 from __future__ import annotations
@@ -17,15 +15,13 @@ import importlib.util
 from dataclasses import dataclass
 from functools import lru_cache
 
-# Preference order for ``"auto"`` resolution: most capable first. Heuristic is
-# always available and is the guaranteed terminal fallback.
-_AUTO_PREFERENCE: tuple[str, ...] = ("birdnet", "yamnet", "heuristic")
-
 # name -> required importable module specs. Empty tuple = always available.
 _BACKEND_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     "heuristic": (),
     "yamnet": ("tensorflow", "tensorflow_hub"),
     "birdnet": ("birdnet",),
+    "moonshine_stt": ("moonshine_onnx",),
+    "drone_head": ("onnxruntime",),
 }
 
 
@@ -59,7 +55,8 @@ def _probe_one(name: str, requirements: tuple[str, ...]) -> BackendAvailability:
 def probe_backends() -> tuple[BackendAvailability, ...]:
     """Probe every registered backend once per process (lru_cached)."""
     return tuple(
-        _probe_one(name, _BACKEND_REQUIREMENTS[name]) for name in _AUTO_PREFERENCE
+        _probe_one(name, requirements)
+        for name, requirements in _BACKEND_REQUIREMENTS.items()
     )
 
 
@@ -70,27 +67,8 @@ def backend_available(name: str) -> bool:
     return False
 
 
-@lru_cache(maxsize=8)
-def resolve_backend(configured: str) -> str:
-    """Resolve a configured backend value onto a concrete backend name.
-
-    An explicit backend name passes through unchanged (even if not installed —
-    the factory keeps its own per-backend try/except fallback). ``"auto"``
-    selects the first available backend in preference order (birdnet > yamnet >
-    heuristic), always terminating at heuristic.
-    """
-    value = (configured or "").strip().lower()
-    if value and value != "auto":
-        return value
-    for entry in probe_backends():
-        if entry.available:
-            return entry.name
-    return "heuristic"
-
-
 __all__ = [
     "BackendAvailability",
     "backend_available",
     "probe_backends",
-    "resolve_backend",
 ]

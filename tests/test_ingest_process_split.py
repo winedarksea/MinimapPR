@@ -141,8 +141,6 @@ def test_python_ingest_role_exposes_ingest_endpoints_and_hides_ui(monkeypatch, t
     monkeypatch.setenv("MINIMAPPR_DB_PATH", str(tmp_path / "ingest.db"))
     monkeypatch.setenv("MINIMAPPR_SNIPPET_DIR", str(tmp_path / "snippets"))
     monkeypatch.setenv("MINIMAPPR_LARGE_ARTIFACT_DIR", str(tmp_path / "artifacts"))
-    monkeypatch.setenv("MINIMAPPR_CLASSIFIER", "heuristic")
-    monkeypatch.setenv("MINIMAPPR_MODEL_CHAIN_CONFIG_PATH", str(tmp_path / "missing-model-chain.json"))
     monkeypatch.setenv("MINIMAPPR_FEDERATION_ENABLED", "false")
 
     with TestClient(app) as client:
@@ -396,8 +394,6 @@ def test_capture_start_uses_live_buffer_for_python_ingest(
     monkeypatch.setenv("MINIMAPPR_DB_PATH", str(tmp_path / "capture-python-live.db"))
     monkeypatch.setenv("MINIMAPPR_SNIPPET_DIR", str(tmp_path / "snippets"))
     monkeypatch.setenv("MINIMAPPR_LARGE_ARTIFACT_DIR", str(tmp_path / "artifacts"))
-    monkeypatch.setenv("MINIMAPPR_CLASSIFIER", "heuristic")
-    monkeypatch.setenv("MINIMAPPR_MODEL_CHAIN_CONFIG_PATH", str(tmp_path / "missing-model-chain.json"))
     monkeypatch.setenv("MINIMAPPR_FEDERATION_ENABLED", "false")
     observed: dict[str, object] = {}
 
@@ -448,8 +444,6 @@ def test_recording_stop_is_idempotent_after_worker_completed_session(
     monkeypatch.setenv("MINIMAPPR_DB_PATH", str(tmp_path / "recording-stop-completed.db"))
     monkeypatch.setenv("MINIMAPPR_SNIPPET_DIR", str(tmp_path / "snippets"))
     monkeypatch.setenv("MINIMAPPR_LARGE_ARTIFACT_DIR", str(tmp_path / "artifacts"))
-    monkeypatch.setenv("MINIMAPPR_CLASSIFIER", "heuristic")
-    monkeypatch.setenv("MINIMAPPR_MODEL_CHAIN_CONFIG_PATH", str(tmp_path / "missing-model-chain.json"))
     monkeypatch.setenv("MINIMAPPR_FEDERATION_ENABLED", "false")
 
     completed_record = CaptureSessionRecord(
@@ -555,8 +549,6 @@ def test_recording_delete_removes_capture_session_row_and_artifacts(
     monkeypatch.setenv("MINIMAPPR_DB_PATH", str(db_path))
     monkeypatch.setenv("MINIMAPPR_SNIPPET_DIR", str(tmp_path / "snippets"))
     monkeypatch.setenv("MINIMAPPR_LARGE_ARTIFACT_DIR", str(artifact_dir))
-    monkeypatch.setenv("MINIMAPPR_CLASSIFIER", "heuristic")
-    monkeypatch.setenv("MINIMAPPR_MODEL_CHAIN_CONFIG_PATH", str(tmp_path / "missing-model-chain.json"))
     monkeypatch.setenv("MINIMAPPR_FEDERATION_ENABLED", "false")
 
     with TestClient(app) as client:

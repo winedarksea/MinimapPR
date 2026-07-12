@@ -38,7 +38,6 @@ class DiagnosticsService:
                 "python_version": platform.python_version(),
                 "platform": platform.platform(),
                 "classification_audio_source": self._settings.classification_audio_source,
-                "classifier_backend_resolved": self._settings.resolved_classifier_backend(),
                 "classifier": classifier_runtime,
                 "beamforming": {
                     "enabled": self._settings.beamformed_classification_enabled,
@@ -66,7 +65,7 @@ class DiagnosticsService:
                     "large_artifact_dir": str(self._settings.large_artifact_dir),
                     "rules_config_path": str(self._settings.rules_config_path),
                     "taxonomy_config_path": str(self._settings.taxonomy_config_path),
-                    "model_chain_config_path": str(self._settings.model_chain_config_path),
+                    "classifier_routing_config_path": str(self._settings.classifier_routing_config_path),
                 },
             },
             "thresholds": {
@@ -243,7 +242,7 @@ class DiagnosticsService:
                 for stage in classifier._stages
             ]
         return {
-            "requested_backend": self._settings.classifier_backend,
+            "routing_config_path": str(self._settings.classifier_routing_config_path),
             "active_classifier_class": classifier.__class__.__name__,
             "base_classifier_class": base.__class__.__name__,
             "chain_stages": stages,

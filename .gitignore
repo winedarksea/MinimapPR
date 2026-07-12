@@ -198,3 +198,5 @@ tests/data/calibration/*.zip
 .pioenvs/
 .piolibdeps/
 firmware/nodes/sirith_tetrahedral/build-test/
+
+drone_dataset/*

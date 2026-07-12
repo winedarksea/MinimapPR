@@ -388,7 +388,6 @@ class FusionNode:
             beamformed_classification_min_sensor_count=settings.beamformed_classification_min_sensor_count,
             beamformed_classification_confidence_margin=settings.beamformed_classification_confidence_margin,
             stage_timeout_seconds=self.classifier_config.stage_timeout_seconds,
-            classifier_backend_name=settings.classifier_backend,
             on_beamform_error=self._record_beamform_failure,
         )
         self._detection_assembler = DetectionAssembler(
@@ -2518,7 +2517,7 @@ class FusionNode:
     def _build_classification_chunking_policy(self) -> ClassificationChunkingPolicy | None:
         if not self.fusion_config.birdnet_chunked_dispatch_enabled:
             return None
-        if self.settings.classifier_backend.strip().lower() != "birdnet":
+        if not self.settings.birdnet_enabled:
             return None
         stride_seconds = max(
             self.localization_config.localization_window_seconds,

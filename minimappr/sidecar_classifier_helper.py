@@ -1,4 +1,8 @@
-"""Persistent stdin/stdout helper that classifies sidecar render audio with BirdNET."""
+"""Persistent stdin/stdout helper classifying sidecar render audio.
+
+Runs the ``localized_render`` routing composite (YAMNet + BirdNET, plus any
+chains such as the drone head) on renders handed over by the Rust sidecar.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +14,8 @@ from typing import Any
 
 import numpy as np
 
-from minimappr.classifiers.birdnet import BirdNETClassifier
+from minimappr.classifiers.factory import create_context_classifier
+from minimappr.classifiers.routing import CONTEXT_LOCALIZED_RENDER
 from minimappr.config import Settings
 
 
@@ -25,6 +30,19 @@ def _decode_pcm16le_mono_bytes(raw_bytes: bytes) -> np.ndarray:
     return np.frombuffer(raw_bytes, dtype="<i2").astype(np.float32) / 32768.0
 
 
+def _json_safe_features(features: dict[str, Any]) -> dict[str, Any]:
+    """Drop anything json.dumps can't serialize (defensive: composite/chained
+    classifiers already strip embedding ndarrays)."""
+    safe: dict[str, Any] = {}
+    for key, value in features.items():
+        try:
+            json.dumps(value)
+        except (TypeError, ValueError):
+            continue
+        safe[key] = value
+    return safe
+
+
 def _emit_response(payload: dict[str, Any]) -> None:
     sys.stdout.write(json.dumps(payload) + "\n")
     sys.stdout.flush()
@@ -32,12 +50,7 @@ def _emit_response(payload: dict[str, Any]) -> None:
 
 def main() -> None:
     settings = Settings.from_env()
-    classifier = BirdNETClassifier(
-        min_confidence=settings.birdnet_trigger_min_confidence,
-        latitude=settings.site_origin_lat,
-        longitude=settings.site_origin_lon,
-        geo_min_confidence=settings.birdnet_geo_min_confidence,
-    )
+    classifier = create_context_classifier(settings, CONTEXT_LOCALIZED_RENDER)
     try:
         for line in sys.stdin:
             line = line.strip()
@@ -65,6 +78,7 @@ def main() -> None:
                         "label": classification.label,
                         "label_confidence": classification.confidence,
                         "scores": classification.scores,
+                        "features": _json_safe_features(classification.features),
                     }
                 )
             except Exception as exc:  # noqa: BLE001

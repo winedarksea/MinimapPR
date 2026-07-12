@@ -36,28 +36,32 @@ dependencies = [
     "aiosqlite>=0.21,<1.0",
     "httpx>=0.28,<1.0",
     "pyyaml>=6.0,<7.0",
-]
-
-[project.optional-dependencies]
-yamnet = [
     # tensorflow-metal 1.2.0 on Apple Silicon requires tensorflow==2.18.*;
     # loosen the lower bound so Mac installs are not blocked.
     "tensorflow>=2.18,<3.0",
     "tf-keras>=2.18,<3.0",
     "tensorflow-hub>=0.16,<1.0",
+    "onnxruntime>=1.18,<2.0",
 ]
+
+[project.optional-dependencies]
 birdnet = [
     "birdnet>=0.2.12,<1.0",
 ]
 effector = [
     "onvif-zeep-async>=3.1,<4.0",
 ]
+stt = [
+    "useful-moonshine-onnx",
+]
+train = [
+    "tf2onnx>=1.16",
+    "onnx>=1.16",
+]
 full = [
-    "tensorflow>=2.18,<3.0",
-    "tf-keras>=2.18,<3.0",
-    "tensorflow-hub>=0.16,<1.0",
     "birdnet>=0.2.12,<1.0",
     "onvif-zeep-async>=3.1,<4.0",
+    "useful-moonshine-onnx",
 ]
 process-title = [
     "setproctitle>=1.3",

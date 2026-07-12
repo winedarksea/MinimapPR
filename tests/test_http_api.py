@@ -120,7 +120,6 @@ def _configure_env(
     tmp_path: Path,
     *,
     snippet_retention_seconds: int,
-    classifier_backend: str = "heuristic",
 ) -> Path:
     db_path = tmp_path / "http_api.db"
     snippet_dir = tmp_path / "snippets"
@@ -135,8 +134,6 @@ def _configure_env(
     monkeypatch.setenv("MINIMAPPR_DIRECT_INGEST_ENABLED", "true")
     monkeypatch.setenv("MINIMAPPR_INGEST_SIDECAR_ENABLED", "false")
     monkeypatch.setenv("MINIMAPPR_INGEST_SPOOL_POLL_INTERVAL_SECONDS", "3600")
-    monkeypatch.setenv("MINIMAPPR_CLASSIFIER", classifier_backend)
-    monkeypatch.setenv("MINIMAPPR_MODEL_CHAIN_CONFIG_PATH", str(tmp_path / "missing-model-chain.json"))
     monkeypatch.setenv("MINIMAPPR_TRIGGER_RMS", "0.000001")
     monkeypatch.setenv("MINIMAPPR_TRIGGER_COOLDOWN_SECONDS", "0")
     monkeypatch.setenv("MINIMAPPR_LOCALIZATION_WINDOW_SECONDS", "0.02")
@@ -1186,7 +1183,7 @@ def test_debug_endpoints_expose_runtime_and_event_provenance(monkeypatch, tmp_pa
         config_response = client.get("/api/v1/debug/config")
         assert config_response.status_code == 200
         config_body = config_response.json()
-        assert config_body["runtime"]["classifier"]["requested_backend"] == "heuristic"
+        assert config_body["runtime"]["classifier"]["active_classifier_class"] == "HeuristicClassifier"
         assert "python_version" in config_body["runtime"]
 
         selftest_response = client.get("/api/v1/debug/selftest")
@@ -1211,19 +1208,18 @@ def test_debug_endpoints_expose_runtime_and_event_provenance(monkeypatch, tmp_pa
             assert any(update.get("detection_id") == detection["id"] for update in tracking_updates)
 
 
-def test_debug_config_reports_requested_yamnet_backend(monkeypatch, tmp_path: Path) -> None:
+def test_debug_config_reports_routing_config_path(monkeypatch, tmp_path: Path) -> None:
     _configure_env(
         monkeypatch,
         tmp_path,
         snippet_retention_seconds=0,
-        classifier_backend="yamnet",
     )
 
     with TestClient(app) as client:
         config_response = client.get("/api/v1/debug/config")
         assert config_response.status_code == 200
         config_body = config_response.json()
-        assert config_body["runtime"]["classifier"]["requested_backend"] == "yamnet"
+        assert "routing_config_path" in config_body["runtime"]["classifier"]
         assert "yamnet_input_target_rms" in config_body["thresholds"]
         assert "yamnet_max_input_gain" in config_body["thresholds"]
         assert "python_version" in config_body["runtime"]
@@ -1590,8 +1586,8 @@ def test_patch_config_persists_and_exposes_new_fields(monkeypatch, tmp_path: Pat
     with TestClient(app) as client:
         get = client.get("/api/v1/config").json()
         assert "classification_audio_source" in get
-        assert "classifier_backend_resolved" in get
         assert "classifier_backends_available" in get
+        assert "classifier_routing_config_path" in get
         assert "persisted_override_keys" in get
 
         resp = client.patch(

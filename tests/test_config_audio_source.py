@@ -20,7 +20,7 @@ def test_runtime_profile_env_raises_with_guidance(monkeypatch: pytest.MonkeyPatc
     with pytest.raises(ValueError) as exc:
         Settings.from_env()
     msg = str(exc.value)
-    assert "MINIMAPPR_CLASSIFIER=birdnet" in msg
+    assert "MINIMAPPR_BIRDNET_ENABLED=true" in msg
     assert "MINIMAPPR_CLASSIFICATION_AUDIO_SOURCE=omni" in msg
 
 

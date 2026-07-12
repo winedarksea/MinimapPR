@@ -94,10 +94,11 @@ def _sidecar_hybrid_render_enabled(settings) -> bool:
     hybrid render is enabled when the resolved classifier backend is BirdNET
     and the classification audio source is beamformed.
     """
-    resolve = getattr(settings, "resolved_classifier_backend", None)
-    backend = resolve() if callable(resolve) else getattr(settings, "classifier_backend", "")
+    from minimappr.classifiers.availability import backend_available
+
+    birdnet_active = bool(getattr(settings, "birdnet_enabled", True)) and backend_available("birdnet")
     audio_source = getattr(settings, "classification_audio_source", "beamformed")
-    return str(backend).strip().lower() == "birdnet" and str(audio_source).strip().lower() == "beamformed"
+    return birdnet_active and str(audio_source).strip().lower() == "beamformed"
 
 
 def sidecar_classification_window_seconds(settings) -> float:
