@@ -667,6 +667,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (raw_manifest_tx, raw_manifest_rx) =
         mpsc::channel::<ingest_backend::QueuedRawManifest>(raw_manifest_channel_capacity);
     let accepting_ingest = Arc::new(AtomicBool::new(true));
+    // This is deliberately separate from `accepting_ingest`: graceful HTTP
+    // shutdown first rejects new requests, then Axum waits for requests that
+    // were already in flight.  Only after that wait may the DSP worker decide
+    // its manifest queue is fully drained.
+    let dsp_shutdown_requested = Arc::new(AtomicBool::new(false));
     let diagnostics = Arc::new(IngestDiagnostics::default());
     let process_start = std::time::Instant::now();
     let journal_runtime_config = JournalRuntimeConfig {
@@ -790,7 +795,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let worker = worker.with_raw_manifest_receiver(raw_manifest_rx);
         let worker = worker.with_env_cache(env_cache.clone());
         let worker = worker.with_dsp_event_publisher(dsp_event_publisher.clone());
-        let worker = worker.with_shutdown_signal(accepting_ingest.clone());
+        let worker = worker.with_shutdown_signal(dsp_shutdown_requested.clone());
         let worker = worker.with_diagnostics(diagnostics.clone());
         let (worker, classification_worker) = worker.with_classification_worker(64);
         if let Some(cw) = classification_worker {
@@ -838,6 +843,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let server_result = axum::serve(listener, app(state))
         .with_graceful_shutdown(shutdown_signal(accepting_ingest.clone()))
         .await;
+    // The backend retains the manifest sender for its lifetime, so waiting
+    // for the channel to close would deadlock shutdown. Axum has now drained
+    // all accepted HTTP requests; the worker can safely process its remaining
+    // queued manifests and exit when it observes an empty queue.
+    dsp_shutdown_requested.store(true, Ordering::Release);
     if let Some(handle) = dsp_worker_handle {
         if let Err(error) = handle.await {
             warn!(error = %error, "DSP worker task join failed during shutdown");

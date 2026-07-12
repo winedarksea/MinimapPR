@@ -313,7 +313,10 @@ mod tests {
     #[test]
     fn nearest_node_omni_always_renders_omni_kind() {
         let config = config_with_source("nearest_node_omni");
-        let channels = vec![vec![0.1_f32, -0.2, 0.3, -0.1], vec![0.2_f32, 0.1, -0.3, 0.0]];
+        let channels = vec![
+            vec![0.1_f32, -0.2, 0.3, -0.1],
+            vec![0.2_f32, 0.1, -0.3, 0.0],
+        ];
         let mic_positions_m = [[0.0_f32, 0.0, 0.0], [0.1, 0.0, 0.0]];
         let (bytes, meta) = compute_render_bytes(RenderComputeRequest {
             config: &config,

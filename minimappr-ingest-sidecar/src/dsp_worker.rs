@@ -507,7 +507,8 @@ impl DspWorker {
         self
     }
 
-    /// Signals the worker to stop after the ingest channel has been fully drained.
+    /// Signals the worker to stop after the HTTP server has finished draining
+    /// accepted requests and this worker has emptied its manifest queue.
     pub fn with_shutdown_signal(mut self, shutdown_requested: Arc<AtomicBool>) -> Self {
         self.shutdown_requested = Some(shutdown_requested);
         self
@@ -554,13 +555,11 @@ impl DspWorker {
         let shutdown_requested = self
             .shutdown_requested
             .as_ref()
-            .is_some_and(|flag| !flag.load(Ordering::Acquire));
+            .is_some_and(|flag| flag.load(Ordering::Acquire));
         if !shutdown_requested || processed_manifest_count > 0 {
             return false;
         }
-        self.raw_manifest_rx
-            .as_ref()
-            .is_none_or(|rx| rx.is_closed() && rx.is_empty())
+        self.raw_manifest_rx.as_ref().is_none_or(|rx| rx.is_empty())
     }
 
     async fn process_pending(&mut self) -> usize {

@@ -8,7 +8,7 @@ use crate::{
 };
 use base64::engine::general_purpose::STANDARD;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
 use tokio::sync::RwLock;
@@ -1938,6 +1938,26 @@ async fn make_test_worker(tmp: &tempfile::TempDir) -> DspWorker {
         DspWorkerConfig::default(),
         state,
     )
+}
+
+#[tokio::test]
+async fn worker_shutdown_exits_after_drain_while_backend_sender_remains_open() {
+    let tmp = tempfile::tempdir().unwrap();
+    let shutdown_requested = Arc::new(AtomicBool::new(false));
+    let (_backend_sender, receiver) = tokio::sync::mpsc::channel(1);
+    let worker = make_test_worker(&tmp)
+        .await
+        .with_raw_manifest_receiver(receiver)
+        .with_shutdown_signal(shutdown_requested.clone());
+
+    assert!(!worker.should_exit_after_drain(0));
+
+    shutdown_requested.store(true, Ordering::Release);
+
+    // The backend owns the sender until process teardown. Requiring the
+    // receiver to close here would leave the sidecar waiting forever.
+    assert!(worker.should_exit_after_drain(0));
+    assert!(!worker.should_exit_after_drain(1));
 }
 
 #[tokio::test]
