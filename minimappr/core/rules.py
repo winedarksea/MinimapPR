@@ -184,6 +184,8 @@ class ConfigRuleEngine(RuleEngine):
         for rule in self._rules:
             if not rule.enabled:
                 continue
+            if rule.scope not in {"detection", "track"}:
+                continue
             if rule.scope == "detection" and detection is None:
                 continue
             if rule.scope == "track" and track is None:

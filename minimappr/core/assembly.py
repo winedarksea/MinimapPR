@@ -351,8 +351,14 @@ class DetectionAssembler:
         classifier_source = str(
             classification_features.get("winner_member") or "yamnet"
         ).strip().lower()
-        classifier_audio_retention_seconds = self._classifier_audio_retention_seconds.get(
-            classifier_source, self._snippet_retention_seconds
+        # An explicit zero global retention is a privacy/storage opt-out for all
+        # classifier outputs; per-classifier defaults must not override it.
+        classifier_audio_retention_seconds = (
+            0
+            if self._snippet_retention_seconds <= 0
+            else self._classifier_audio_retention_seconds.get(
+                classifier_source, self._snippet_retention_seconds
+            )
         )
         # The drone head reports unknown for a negative.  Never materialize an
         # audio file for that negative result; metadata remains available.

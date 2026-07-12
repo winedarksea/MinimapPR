@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 TranscriptConsumer = Callable[[TranscriptRecord], Awaitable[None]]
 
-_WATCHDOG_INTERVAL_SECONDS = 0.5
+_WATCHDOG_INTERVAL_SECONDS = 0.1
 
 
 @dataclass
