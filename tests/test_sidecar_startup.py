@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -13,6 +14,10 @@ from minimappr.ingest_sidecar_runtime import (
     IngestSidecarRuntimeState,
     ensure_ingest_stream_consumer_running,
     shutdown_managed_ingest_sidecar,
+)
+from minimappr.runtime_bootstrap import (
+    _CombinedRuntimeTaskHandles,
+    _stop_combined_ingest_stream_consumer,
 )
 
 
@@ -279,6 +284,80 @@ async def test_managed_sidecar_shutdown_signals_leader_for_graceful_helper_clean
     )
 
     assert process.terminate_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_combined_shutdown_closes_sse_before_gracefully_terminating_sidecar() -> None:
+    shutdown_events: list[str] = []
+    watchdog_started = asyncio.Event()
+    never_complete = asyncio.Event()
+
+    class _RecordingConsumer:
+        def __init__(self) -> None:
+            self.running = True
+            self.stop_calls = 0
+
+        async def stop(self) -> None:
+            if self.running:
+                shutdown_events.append("consumer.stop")
+                self.running = False
+                self.stop_calls += 1
+
+    async def watchdog() -> None:
+        watchdog_started.set()
+        try:
+            await never_complete.wait()
+        finally:
+            shutdown_events.append("watchdog.cancelled")
+
+    consumer = _RecordingConsumer()
+    watchdog_task = asyncio.create_task(watchdog())
+    await watchdog_started.wait()
+    app = SimpleNamespace(state=SimpleNamespace(ingest_stream_consumer=consumer))
+    task_handles = _CombinedRuntimeTaskHandles(
+        ingest_stream_consumer_watchdog_task=watchdog_task,
+    )
+
+    await _stop_combined_ingest_stream_consumer(
+        app,
+        task_handles,
+        shutdown_timeout_seconds=1.0,
+    )
+    await _stop_combined_ingest_stream_consumer(
+        app,
+        task_handles,
+        shutdown_timeout_seconds=1.0,
+    )
+
+    class _SseDependentSidecarProcess(_FakeProcess):
+        def terminate(self) -> None:
+            assert shutdown_events == ["watchdog.cancelled", "consumer.stop"]
+            shutdown_events.append("sidecar.terminate")
+            super().terminate()
+
+    process = _SseDependentSidecarProcess(pid=5432)
+    state = IngestSidecarRuntimeState()
+    state._current_process = process
+    await shutdown_managed_ingest_sidecar(
+        state,
+        None,
+        force_kill_on_timeout=True,
+        logger=SimpleNamespace(info=lambda *args, **kwargs: None, warning=lambda *args, **kwargs: None),
+        shutdown_timeout_seconds=1.0,
+    )
+
+    assert consumer.stop_calls == 1
+    assert process.terminate_calls == 1
+    assert shutdown_events == ["watchdog.cancelled", "consumer.stop", "sidecar.terminate"]
+
+
+@pytest.mark.asyncio
+async def test_combined_ingest_stream_shutdown_is_a_noop_without_runtime_tasks() -> None:
+    await _stop_combined_ingest_stream_consumer(
+        SimpleNamespace(state=SimpleNamespace()),
+        _CombinedRuntimeTaskHandles(),
+        shutdown_timeout_seconds=1.0,
+    )
 
 
 @pytest.mark.asyncio

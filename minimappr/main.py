@@ -72,6 +72,7 @@ from minimappr.runtime_bootstrap import (
     _initialize_storage_and_resolve_site_origin,
     _start_api_only_runtime_services,
     _stop_api_only_runtime_services,
+    _stop_combined_ingest_stream_consumer,
     _shutdown_combined_runtime_services,
     _start_combined_runtime_background_tasks,
     _stop_combined_runtime_background_tasks,
@@ -1466,8 +1467,17 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         shutdown_timeout_s = 15.0
-        # Stop the ingest sidecar first so startup/bind failures do not leave
-        # the Rust process running after the Python server begins teardown.
+        # The sidecar's Axum shutdown waits for open SSE requests.  Release our
+        # stream before SIGTERM so the sidecar can drain normally instead of
+        # requiring the 15-second SIGKILL fallback.
+        await _stop_combined_ingest_stream_consumer(
+            app,
+            task_handles,
+            shutdown_timeout_seconds=shutdown_timeout_s,
+        )
+
+        # Stop the ingest sidecar before tearing down the rest of the Python
+        # runtime so startup/bind failures do not leave it running.
         await _shutdown_managed_ingest_sidecar(
             sidecar_state,
             sidecar_supervision_task,

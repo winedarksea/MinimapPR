@@ -516,6 +516,27 @@ async def _stop_combined_runtime_background_tasks(
                 asyncio.gather(*task_handles.ingest_spool_tasks),
                 timeout=shutdown_timeout_seconds,
             )
+    await _stop_combined_ingest_stream_consumer(
+        app,
+        task_handles,
+        shutdown_timeout_seconds=shutdown_timeout_seconds,
+    )
+    clear_transient_ingest_runtime_state(app.state)
+
+
+async def _stop_combined_ingest_stream_consumer(
+    app,
+    task_handles: _CombinedRuntimeTaskHandles,
+    *,
+    shutdown_timeout_seconds: float,
+) -> None:
+    """Stop the sidecar SSE client before asking the sidecar to drain.
+
+    Axum's graceful shutdown waits for accepted SSE requests.  The managed
+    sidecar therefore cannot exit while this process keeps its stream open.
+    Cancelling the watchdog first also prevents it from recreating the client
+    during the short interval before the sidecar is terminated.
+    """
     if task_handles.ingest_stream_consumer_watchdog_task is not None:
         task_handles.ingest_stream_consumer_watchdog_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
@@ -526,7 +547,6 @@ async def _stop_combined_runtime_background_tasks(
     ingest_stream_consumer: IngestStreamConsumer | None = getattr(app.state, "ingest_stream_consumer", None)
     if ingest_stream_consumer is not None:
         await ingest_stream_consumer.stop()
-    clear_transient_ingest_runtime_state(app.state)
 
 
 def _cleanup_multiprocessing_shutdown_resources() -> None:
