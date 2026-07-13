@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from minimappr.core.localization import LocalizationEngine, gcc_phat
+from minimappr.core.localization_dispatch import LocalizationDispatcher
 from minimappr.core.tdoa_measurements import measure_pair_tdoas
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.models import GeoPoint
@@ -90,6 +91,58 @@ def test_two_and_three_node_scenes_localize_with_cross_node_tdoa(
     )
     result = _localize(scene)
     assert float(np.linalg.norm(np.asarray(result.position_m) - scene.source_position_m)) < 20.0
+
+
+@pytest.mark.parametrize(
+    ("node_origins_m", "max_error_m"),
+    [
+        (
+            {
+                "point-a": (0.0, 0.0, 0.0),
+                "point-b": (30.0, 0.0, 0.0),
+                "point-c": (0.0, 30.0, 0.0),
+            },
+            2.0,
+        ),
+        (
+            {
+                "point-a": (0.0, 0.0, 0.0),
+                "point-b": (30.0, 0.0, 0.0),
+                "point-c": (0.0, 30.0, 0.0),
+                "point-d": (30.0, 30.0, 0.0),
+            },
+            1.0,
+        ),
+    ],
+)
+def test_three_and_four_single_microphone_nodes_localize_in_2d(
+    node_origins_m: dict[str, tuple[float, float, float]],
+    max_error_m: float,
+) -> None:
+    """Point-only arrays use the production 2D fallback, not tetrahedral 3D solve."""
+    scene = synthesize_cross_node_scene(
+        source_position_m=(12.0, 9.0, 0.0),
+        node_origins_m=node_origins_m,
+        seed=41,
+        additive_noise_std=0.03,
+    )
+    dispatcher = LocalizationDispatcher(
+        algorithms={"gcc_phat": LocalizationEngine(max_tau_s=0.35, interp_factor=8)}
+    )
+    result = dispatcher.localize_2d(
+        sensor_positions=scene.reported_sensor_positions_m,
+        sensor_windows=scene.sensor_windows,
+        sample_rate_hz=SAMPLE_RATE_HZ,
+        temperature_c=20.0,
+        humidity_fraction=0.5,
+        fixed_z_m=0.0,
+    )
+
+    assert result.resolved_algorithm == "gcc_phat"
+    assert float(np.linalg.norm(np.asarray(result.position_m) - scene.source_position_m)) < max_error_m
+    covariance = np.asarray(result.position_covariance_m2, dtype=np.float64)
+    assert np.all(np.isfinite(covariance))
+    assert np.min(np.linalg.eigvalsh(covariance)) >= -1e-9
 
 
 def test_rust_auto_gps_flat_geometry_matches_server_coordinate_frame() -> None:
