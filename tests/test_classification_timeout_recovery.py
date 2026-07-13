@@ -53,6 +53,17 @@ class _AlwaysFailingClassifier(AudioClassifier):
         raise RuntimeError("birdnet worker crashed")
 
 
+class _BirdNETClassifierWithUnmappedSpecies(AudioClassifier):
+    def classify(self, samples: np.ndarray, sample_rate_hz: int) -> ClassificationResult:
+        del samples, sample_rate_hz
+        return ClassificationResult(
+            label="cerulean warbler",
+            confidence=0.91,
+            scores={"cerulean warbler": 0.91},
+            features={"model": "birdnet_v2m4"},
+        )
+
+
 class _FirstCallHangsThenRecoversClassifier(AudioClassifier):
     def __init__(self) -> None:
         self.calls = 0
@@ -146,6 +157,24 @@ async def test_classifier_exception_degrades_to_unknown() -> None:
 
     assert result.classification.label == "unknown"
     assert result.classification.features.get("reason") == "classification_error"
+
+
+@pytest.mark.asyncio
+async def test_birdnet_unmapped_species_uses_model_category() -> None:
+    orchestrator = ClassificationOrchestrator(
+        classifier=_BirdNETClassifierWithUnmappedSpecies(),
+        storage=_StorageStub(),
+        taxonomy_provider=_TaxonomyStub(),
+        environment_provider=_EnvironmentStub(),
+    )
+
+    result = await orchestrator.classify_omni_only(
+        reference_signal=np.zeros(1024, dtype=np.float32),
+        sample_rate_hz=16_000,
+        event_time_ns=123,
+    )
+
+    assert result.label_category == "birdnet_v2m4"
 
 
 @pytest.mark.asyncio

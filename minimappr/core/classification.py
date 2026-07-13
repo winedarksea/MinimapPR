@@ -31,6 +31,27 @@ from minimappr.models import LabelId
 logger = logging.getLogger(__name__)
 
 
+_BIRDNET_MODEL_CATEGORY = "birdnet_v2m4"
+
+
+def _resolve_label_category(
+    classification: ClassificationResult,
+    taxonomy_provider: TaxonomyProvider,
+) -> str:
+    """Resolve taxonomy first, retaining BirdNET provenance for unmapped species.
+
+    BirdNET species labels are open-ended, so name-only taxonomy heuristics cannot
+    reliably identify every result as BirdNET-derived.  A configured or heuristic
+    category remains authoritative; model provenance is only the unknown fallback.
+    """
+    taxonomy_category = taxonomy_provider.category_for_label(classification.label)
+    if taxonomy_category.strip().lower() != "unknown":
+        return taxonomy_category
+    if classification.features.get("model") == _BIRDNET_MODEL_CATEGORY:
+        return _BIRDNET_MODEL_CATEGORY
+    return taxonomy_category
+
+
 @dataclass(slots=True)
 class ClassifiedResult:
     """Output of the classification orchestrator.
@@ -416,7 +437,7 @@ class ClassificationOrchestrator:
         event_time_ns: int,
         backend_failed: bool = False,
     ) -> ClassifiedResult:
-        label_category = self._taxonomy_provider.category_for_label(classification.label)
+        label_category = _resolve_label_category(classification, self._taxonomy_provider)
         iff_category = self._taxonomy_provider.iff_for_category(label_category)
         # Provenance: the winning ensemble member (set by CompositeClassifier)
         # names the actual model; fall back to the configured pipeline name.
