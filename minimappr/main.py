@@ -3809,6 +3809,16 @@ async def list_transcripts(
     return await state.storage.list_transcripts(since_ns=since_ns, limit=limit)
 
 
+@app.get("/api/v1/transcripts/{transcript_id}")
+async def get_transcript(transcript_id: str, request: Request) -> dict:
+    """Return one persisted transcript for the transcript-review view."""
+    state = _require_state(request)
+    row = await state.storage.get_transcript(transcript_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    return row
+
+
 @app.get("/api/v1/transcripts/{transcript_id}/audio")
 async def get_transcript_audio(transcript_id: str, request: Request) -> FileResponse:
     state = _require_state(request)

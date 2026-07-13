@@ -1,6 +1,7 @@
 use crate::map::bindings::pan_to;
 use crate::state::{AppState, NodeStatus, TranscriptLine};
 use leptos::prelude::*;
+use leptos_router::components::A;
 
 #[component]
 pub fn SpeechPanel() -> impl IntoView {
@@ -47,22 +48,34 @@ fn TranscriptRow(line: TranscriptLine, node: Option<NodeStatus>) -> impl IntoVie
     let row_title = coordinates
         .map(|(lat, lon)| format!("Pan to {lat:.5}, {lon:.5}"))
         .unwrap_or_else(|| "Speech source has no registered position".to_string());
+    let transcript_href = format!("/audio/t/{}", js_sys::encode_uri_component(&line.line_id));
 
     view! {
-        <button
-            type="button"
-            class="speech-ticker-row"
-            title=row_title
-            disabled=coordinates.is_none()
-            on:click=move |_| {
-                if let Some((lat, lon)) = coordinates {
-                    pan_to(lat, lon);
-                }
-            }
-        >
+        <article class="speech-ticker-row">
             <span class="speech-ticker-source">{label}</span>
             <span class="speech-ticker-text">{line.text}</span>
             <span class="conf-pill">{format!("{:.0}%", line.confidence * 100.0)}</span>
-        </button>
+            <div class="speech-ticker-actions">
+                <A href=transcript_href attr:class="btn-sm">"Review"</A>
+                {if coordinates.is_some() {
+                    view! {
+                        <button
+                            type="button"
+                            class="btn-sm"
+                            title=row_title
+                            on:click=move |_| {
+                                if let Some((lat, lon)) = coordinates {
+                                    pan_to(lat, lon);
+                                }
+                            }
+                        >
+                            "Map"
+                        </button>
+                    }.into_any()
+                } else {
+                    ().into_any()
+                }}
+            </div>
+        </article>
     }
 }

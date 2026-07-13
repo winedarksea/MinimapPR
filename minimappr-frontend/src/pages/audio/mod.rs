@@ -3,6 +3,7 @@ pub mod recordings_library;
 pub mod waveform_trimmer;
 
 use crate::audio::detection_analysis::DetectionAudioAnalysisView;
+use crate::audio::transcript_analysis::TranscriptAudioAnalysisView;
 use leptos::prelude::*;
 use leptos_router::components::{Outlet, A};
 use leptos_router::hooks::{use_location, use_params_map};
@@ -14,11 +15,11 @@ pub fn AudioLayout() -> impl IntoView {
     let loc = use_location();
 
     // Record is active on /audio/record.
-    // Analysis is active on /audio/analysis (landing) OR /audio/d/:id (detail).
+    // Analysis is active on the landing page and either persisted-audio detail route.
     let is_record_active = move || loc.pathname.get().starts_with("/audio/record");
     let is_analysis_active = move || {
         let p = loc.pathname.get();
-        p.starts_with("/audio/analysis") || p.starts_with("/audio/d")
+        p.starts_with("/audio/analysis") || p.starts_with("/audio/d") || p.starts_with("/audio/t")
     };
 
     view! {
@@ -40,6 +41,23 @@ pub fn AudioLayout() -> impl IntoView {
             <div class="page-content">
                 <Outlet />
             </div>
+        </div>
+    }
+}
+
+/// Transcript review page, kept in the Audio Analysis surface rather than the
+/// detection-only analysis route because transcripts have their own lifecycle.
+#[component]
+pub fn TranscriptAnalysisPage() -> impl IntoView {
+    let params = use_params_map();
+    let id_sig: Signal<Option<String>> = Signal::derive(move || params.read().get("id"));
+
+    view! {
+        <div class="audio-page">
+            {move || match id_sig.get() {
+                None => view! { <div class="daily-error">"Transcript ID is missing."</div> }.into_any(),
+                Some(id) => view! { <TranscriptAudioAnalysisView transcript_id=id /> }.into_any(),
+            }}
         </div>
     }
 }

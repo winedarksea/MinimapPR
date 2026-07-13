@@ -60,6 +60,7 @@ fn App() -> impl IntoView {
                         <Route path=path!("record")      view=pages::audio::recording::RecordingPage />
                         <Route path=path!("analysis")    view=pages::audio::AudioAnalysisPage />
                         <Route path=path!("d/:id")       view=pages::audio::AudioAnalysisPage />
+                        <Route path=path!("t/:id")       view=pages::audio::TranscriptAnalysisPage />
                     </ParentRoute>
 
                     <ParentRoute path=path!("/settings") view=pages::settings::SettingsLayout>

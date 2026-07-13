@@ -71,3 +71,30 @@ test("Nodes settings opens node table and add-node wizard", async ({ page }) => 
     "true",
   );
 });
+
+test("transcript review displays the complete persisted text", async ({ page }) => {
+  const fullTranscript = "This is the complete transcript, including the words that do not fit in the COP preview.";
+  await page.route("**/api/v1/transcripts/txt-review-ui", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        id: "txt-review-ui",
+        node_id: "node-a",
+        sensor_id: "node-a:ch0",
+        start_ns: 1700000000000000000,
+        end_ns: 1700000005000000000,
+        text: fullTranscript,
+        model: "moonshine",
+        trigger_confidence: 0.92,
+        detection_id: null,
+        created_ns: 1700000006000000000,
+      }),
+    });
+  });
+
+  await page.goto(`${baseUrl}/audio/t/txt-review-ui`, { waitUntil: "domcontentloaded" });
+
+  await expect(page.locator(".transcript-review-card")).toBeVisible();
+  await expect(page.locator(".transcript-review-text")).toHaveText(fullTranscript);
+  await expect(page.getByRole("link", { name: "Analysis" })).toHaveClass(/active/);
+});
