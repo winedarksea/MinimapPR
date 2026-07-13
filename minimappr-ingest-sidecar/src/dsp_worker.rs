@@ -28,6 +28,8 @@ use tracing::{debug, error, info, warn};
 const MIN_BIRDNET_CLASSIFICATION_WINDOW_SECONDS: f64 = 15.0;
 const DEFAULT_BIRDNET_CLASSIFICATION_WINDOW_SECONDS: f64 = 30.0;
 const DEFAULT_CLASSIFIER_RENDER_OVERLAP_SECONDS: f64 = 2.0;
+const AUTOMATIC_GPS_CLUSTER_ID: &str = "auto-gps";
+const EARTH_RADIUS_M: f64 = 6_371_000.0;
 
 /// Centroid-relative Sirith tetrahedral mic positions [MK1, MK2, MK3, MK4].
 pub(crate) const SIRITH_MIC_POSITIONS_M: [[f32; 3]; 4] = [
@@ -380,6 +382,59 @@ struct ManifestBufferRouting {
     buffer_channel_indices: Vec<usize>,
 }
 
+/// Incrementally-built geometry for the automatic, GPS-defined array. Sensor
+/// order never changes after insertion because buffer indices are long-lived.
+/// Re-sorting after a new node joins would silently associate prior audio with
+/// the wrong position.
+#[derive(Default)]
+struct AutomaticGpsGeometry {
+    origin: Option<ReportedGpsPosition>,
+    sensor_positions: Vec<(String, [f32; 3])>,
+    sensor_indices_by_id: HashMap<String, usize>,
+}
+
+#[derive(Clone, Copy)]
+struct ReportedGpsPosition {
+    lat_deg: f64,
+    lon_deg: f64,
+    alt_m: f64,
+}
+
+impl AutomaticGpsGeometry {
+    fn update_from_manifest(
+        &mut self,
+        manifest: &DspManifest,
+        node_id: &str,
+        channel_count: usize,
+    ) -> Option<Vec<(String, [f32; 3])>> {
+        let node = manifest.node_context.as_ref()?.get("node")?;
+        let position = reported_gps_position(node)?;
+        let origin = *self.origin.get_or_insert(position);
+        let node_origin_m = gps_position_to_local_m(position, origin);
+        let offsets = sensor_offsets_for_channel_count(node, channel_count);
+        if offsets.len() != channel_count {
+            return None;
+        }
+
+        for (channel_index, offset_m) in offsets.into_iter().enumerate() {
+            let sensor_id = format!("{node_id}:ch{channel_index}");
+            let sensor_position = [
+                node_origin_m[0] + offset_m[0],
+                node_origin_m[1] + offset_m[1],
+                node_origin_m[2] + offset_m[2],
+            ];
+            if let Some(index) = self.sensor_indices_by_id.get(&sensor_id).copied() {
+                self.sensor_positions[index].1 = sensor_position;
+            } else {
+                let index = self.sensor_positions.len();
+                self.sensor_indices_by_id.insert(sensor_id.clone(), index);
+                self.sensor_positions.push((sensor_id, sensor_position));
+            }
+        }
+        Some(self.sensor_positions.clone())
+    }
+}
+
 struct RawAudioFramePublishRequest<'a> {
     publisher: &'a Option<DspEventPublisher>,
     source_manifest: &'a DspManifest,
@@ -401,6 +456,10 @@ pub struct DspWorker {
     raw_manifest_rx: Option<mpsc::Receiver<QueuedRawManifest>>,
     shutdown_requested: Option<Arc<AtomicBool>>,
     buffers: HashMap<String, Vec<SensorStreamBuffer>>,
+    /// Geometry synthesized from live node GPS reports when no explicit cluster
+    /// topology accompanies a manifest. This is the Rust counterpart of the
+    /// Python server's coordinate-frame-backed NodeRegistry geometry.
+    automatic_gps_geometry: AutomaticGpsGeometry,
     /// Per-node preprocessing state (biquad memory etc.). Keyed by `node_id`
     /// extracted from the stream_key prefix, matching how `node_audio_overrides`
     /// is keyed in [`DspWorkerState`]. Lives outside the shared RwLock so frame
@@ -452,6 +511,7 @@ impl DspWorker {
             raw_manifest_rx: None,
             shutdown_requested: None,
             buffers: HashMap::new(),
+            automatic_gps_geometry: AutomaticGpsGeometry::default(),
             node_audio_state: HashMap::new(),
             last_classifier_render_ns_by_stream: HashMap::new(),
             last_localization_ns_by_stream: HashMap::new(),
@@ -660,7 +720,7 @@ impl DspWorker {
 
     async fn prepare_owned_manifest_audio(
         &mut self,
-        manifest: DspManifest,
+        mut manifest: DspManifest,
     ) -> Option<OwnedManifestAudio> {
         let now_ns = system_now_ns();
         let Some(first_handle) = manifest.source_handles.first() else {
@@ -777,6 +837,7 @@ impl DspWorker {
         };
 
         let channel_count = decoded.channels.len();
+        self.apply_automatic_gps_geometry(&mut manifest, &stream_key, channel_count);
         let classification_window_sec = self
             .config
             .classification_window_seconds
@@ -824,6 +885,29 @@ impl DspWorker {
             buffer_uses_receipt_time,
             arrived_via_channel,
         })
+    }
+
+    fn apply_automatic_gps_geometry(
+        &mut self,
+        manifest: &mut DspManifest,
+        stream_key: &str,
+        channel_count: usize,
+    ) {
+        // Explicit cluster geometry is still an operator-directed boundary.
+        // Otherwise every GPS-reporting node on the same audio stream joins the
+        // automatic array, exactly as the Python global sensor pool does.
+        if manifest.cluster_id.is_some() || manifest.cluster_sensor_positions.is_some() {
+            return;
+        }
+        let node_id = stream_key_node_id(stream_key);
+        let Some(sensor_positions) =
+            self.automatic_gps_geometry
+                .update_from_manifest(manifest, node_id, channel_count)
+        else {
+            return;
+        };
+        manifest.cluster_id = Some(AUTOMATIC_GPS_CLUSTER_ID.to_string());
+        manifest.cluster_sensor_positions = Some(sensor_positions);
     }
 
     async fn publish_raw_audio_frame_for_owned_manifest(&self, owned: &OwnedManifestAudio) {
@@ -878,6 +962,12 @@ impl DspWorker {
                     .map(|_| SensorStreamBuffer::new(owned.sr, self.config.max_buffer_seconds))
                     .collect()
             });
+        while buffers.len() < owned.buffer_channel_count {
+            buffers.push(SensorStreamBuffer::new(
+                owned.sr,
+                self.config.max_buffer_seconds,
+            ));
+        }
         let reference_buffer_index = owned.buffer_channel_indices.first().copied().unwrap_or(0);
 
         let existing_sample_timeline_start_time_ns =
@@ -2059,6 +2149,75 @@ fn resolve_cluster_buffer_routing(
         buffer_channel_count: cluster_sensor_positions.len(),
         buffer_channel_indices,
     })
+}
+
+fn reported_gps_position(node: &serde_json::Value) -> Option<ReportedGpsPosition> {
+    let position = node.get("position_geo")?;
+    let lat_deg = position.get("lat")?.as_f64()?;
+    let lon_deg = position.get("lon")?.as_f64()?;
+    let alt_m = position
+        .get("alt_m")
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or(0.0);
+    if !lat_deg.is_finite()
+        || !lon_deg.is_finite()
+        || !alt_m.is_finite()
+        || !(-90.0..=90.0).contains(&lat_deg)
+        || !(-180.0..=180.0).contains(&lon_deg)
+    {
+        return None;
+    }
+    Some(ReportedGpsPosition {
+        lat_deg,
+        lon_deg,
+        alt_m,
+    })
+}
+
+fn sensor_offsets_for_channel_count(
+    node: &serde_json::Value,
+    channel_count: usize,
+) -> Vec<[f32; 3]> {
+    let offsets = node
+        .get("sensor_offsets_m")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|values| {
+            values
+                .iter()
+                .take(channel_count)
+                .map(|value| {
+                    let values = value.as_array()?;
+                    if values.len() < 3 {
+                        return None;
+                    }
+                    Some([
+                        values[0].as_f64()? as f32,
+                        values[1].as_f64()? as f32,
+                        values[2].as_f64()? as f32,
+                    ])
+                })
+                .collect::<Option<Vec<_>>>()
+        });
+    match offsets {
+        Some(offsets) if offsets.len() == channel_count => offsets,
+        _ if channel_count == SIRITH_MIC_POSITIONS_M.len() => SIRITH_MIC_POSITIONS_M.to_vec(),
+        _ if channel_count == 1 => vec![[0.0, 0.0, 0.0]],
+        _ => Vec::new(),
+    }
+}
+
+fn gps_position_to_local_m(position: ReportedGpsPosition, origin: ReportedGpsPosition) -> [f32; 3] {
+    let radians_per_degree = std::f64::consts::PI / 180.0;
+    let east_m = (position.lon_deg - origin.lon_deg)
+        * radians_per_degree
+        * EARTH_RADIUS_M
+        * origin.lat_deg.to_radians().cos();
+    let north_m = (position.lat_deg - origin.lat_deg) * radians_per_degree * EARTH_RADIUS_M;
+    [
+        east_m as f32,
+        north_m as f32,
+        (position.alt_m - origin.alt_m) as f32,
+    ]
 }
 
 fn stream_key_node_id(stream_key: &str) -> &str {

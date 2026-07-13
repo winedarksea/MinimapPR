@@ -74,6 +74,59 @@ fn node_audio_config_empty_means_passthrough() {
 }
 
 #[test]
+fn automatic_gps_geometry_uses_reported_positions_with_stable_sensor_indices() {
+    let mut geometry = AutomaticGpsGeometry::default();
+    let mut first = DspManifest {
+        manifest_id: "first".to_string(),
+        manifest_type: "raw_journal_append".to_string(),
+        created_ns: 0,
+        source_handles: Vec::new(),
+        derived_handle: None,
+        localization: None,
+        classifier_render: None,
+        birdnet: None,
+        coverage_stats: None,
+        promotion_ready: false,
+        env_samples: None,
+        node_context: Some(serde_json::json!({
+            "node": {
+                "position_geo": {"lat": 45.0, "lon": -93.0, "alt_m": 300.0},
+                "sensor_offsets_m": [[0.0, 0.0, 0.0]]
+            }
+        })),
+        cluster_id: None,
+        cluster_sensor_positions: None,
+        raw_payload: None,
+        raw_render_bytes: None,
+        raw_audio_frame: None,
+        raw_audio_bytes: None,
+    };
+    let first_positions = geometry
+        .update_from_manifest(&first, "node-a", 1)
+        .expect("first GPS geometry");
+    assert_eq!(
+        first_positions,
+        vec![("node-a:ch0".to_string(), [0.0, 0.0, 0.0])]
+    );
+
+    first.node_context = Some(serde_json::json!({
+        "node": {
+            "position_geo": {"lat": 45.0, "lon": -92.9999873, "alt_m": 301.5},
+            "sensor_offsets_m": [[0.0, 0.0, 0.0]]
+        }
+    }));
+    let second_positions = geometry
+        .update_from_manifest(&first, "node-b", 1)
+        .expect("second GPS geometry");
+
+    assert_eq!(second_positions.len(), 2);
+    assert_eq!(second_positions[0].0, "node-a:ch0");
+    assert_eq!(second_positions[1].0, "node-b:ch0");
+    assert!(second_positions[1].1[0] > 0.9 && second_positions[1].1[0] < 1.1);
+    assert_eq!(second_positions[1].1[2], 1.5);
+}
+
+#[test]
 fn gain_stage_applies_linear_multiplier_within_tolerance() {
     let mut state = NodeAudioState::default();
     let cfg = NodeAudioConfig {

@@ -39,6 +39,7 @@ def test_settings_from_env_populates_subconfigs_with_cleanup_defaults(monkeypatc
     assert isinstance(sidecar_startup, IngestSidecarStartupConfig)
     assert settings.localization_max_tau_seconds == 0.02
     assert localization.localization_max_tau_seconds == 0.02
+    assert settings.localization_cross_node_tdoa_enabled is True
     assert settings.classifier_stage_timeout_seconds == 30.0
     assert classifier.stage_timeout_seconds == 30.0
     assert fusion.event_queue_size == 512
@@ -70,6 +71,16 @@ def test_settings_from_env_accepts_legacy_cleanup_env_keys(monkeypatch, tmp_path
     assert settings.classification_stage_timeout_seconds == pytest.approx(0.75)
     assert settings.drop_on_backpressure is False
     assert settings.fusion_drop_on_backpressure is False
+
+
+def test_settings_from_env_can_disable_automatic_cross_node_tdoa(monkeypatch, tmp_path) -> None:
+    _clear_minimappr_env(monkeypatch)
+    monkeypatch.setenv("MINIMAPPR_FEDERATION_PEERS_CONFIG_PATH", str(tmp_path / "missing-peers.json"))
+    monkeypatch.setenv("MINIMAPPR_LOCALIZATION_CROSS_NODE_TDOA_ENABLED", "false")
+
+    settings = Settings.from_env()
+
+    assert settings.localization_cross_node_tdoa_enabled is False
 
 
 def test_settings_cleanup_alias_properties_track_canonical_fields() -> None:

@@ -610,8 +610,10 @@ class Settings:
     multi_node_bearing_ttl_seconds: float = 4.0
     multi_node_bearing_min_separation_deg: float = 5.0
     multi_node_bearing_max_condition: float = 1e4
-    # Phase 5: true cross-node TDOA (tier c). Flag-gated; GPS-PPS/PTP nodes.
-    localization_cross_node_tdoa_enabled: bool = False
+    # True enables cross-node TDOA automatically whenever the localization window
+    # contains sensors from two or more nodes.  A single-node window has no
+    # cross-node pairs, so it retains the normal per-node behavior.
+    localization_cross_node_tdoa_enabled: bool = True
     localization_cross_node_max_tau_seconds: float = 0.35
     localization_cross_node_window_seconds: float = 1.0
     localization_cross_node_max_baseline_m: float = 150.0
@@ -1508,7 +1510,7 @@ class Settings:
             ),
             localization_cross_node_tdoa_enabled=_env_bool(
                 "MINIMAPPR_LOCALIZATION_CROSS_NODE_TDOA_ENABLED",
-                False,
+                True,
             ),
             localization_cross_node_max_tau_seconds=_env_float(
                 "MINIMAPPR_LOCALIZATION_CROSS_NODE_MAX_TAU_SECONDS",

@@ -594,7 +594,10 @@ class LocalizationDispatcher:
 
 def build_localizer_from_settings(settings: Settings | LocalizationConfig) -> Localizer:
     cfg = settings.localization_config() if isinstance(settings, Settings) else settings
-    cross_node_enabled = bool(getattr(settings, "localization_cross_node_tdoa_enabled", False))
+    # A LocalizationConfig has no separate toggle: its default behavior is the
+    # same automatic policy as Settings.  With only one node represented in the
+    # window, no cross-node pair is formed, so this is intrinsically a no-op.
+    cross_node_enabled = bool(getattr(settings, "localization_cross_node_tdoa_enabled", True))
     gcc = LocalizationEngine(
         max_tau_s=cfg.localization_max_tau_seconds,
         interp_factor=cfg.gcc_phat_interp_factor,
