@@ -197,23 +197,11 @@ class BirdNETClassifier(AudioClassifier):
             except Exception:  # noqa: BLE001
                 pass
 
-        deadline = time.monotonic() + 2.0
-        while time.monotonic() < deadline:
-            with self._session_lock:
-                if not self._inflight_sessions:
-                    break
-            time.sleep(0.05)
-
-        # Exit all pooled session context managers to cleanly shut down their
-        # underlying predict worker subprocesses. Safe now that workers are
-        # dead/cancelled: ctx.__exit__ joins with no timeout then unlinks shm.
-        for ctx in self._session_ctxs:
-            try:
-                ctx.__exit__(None, None, None)
-            except Exception:  # noqa: BLE001
-                pass
-
-        # Terminate-then-join only this instance's own worker processes.
+        # BirdNET's session __exit__ calls Process.join() with no timeout. Its
+        # idle workers wait on a start signal and do not observe session.end(),
+        # so calling __exit__ first can strand the shutdown thread forever.
+        # Kill our workers before that unbounded join; they are no longer
+        # usable after cancellation and the join then returns immediately.
         for proc in self._child_procs:
             try:
                 proc.terminate()
@@ -222,6 +210,22 @@ class BirdNETClassifier(AudioClassifier):
         for proc in self._child_procs:
             try:
                 proc.join(timeout=1.0)
+            except Exception:  # noqa: BLE001
+                pass
+
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            with self._session_lock:
+                if not self._inflight_sessions:
+                    break
+            time.sleep(0.05)
+
+        # Context exit releases shared memory and BirdNET's daemon helper
+        # threads. It is safe only after the owned worker processes above have
+        # exited because its internal joins have no timeout.
+        for ctx in self._session_ctxs:
+            try:
+                ctx.__exit__(None, None, None)
             except Exception:  # noqa: BLE001
                 pass
 

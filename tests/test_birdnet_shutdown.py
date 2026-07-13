@@ -40,10 +40,13 @@ class _FakeSession:
 
 
 class _FakeCtx:
-    def __init__(self) -> None:
+    def __init__(self, process: "_FakeProc | None" = None) -> None:
         self.exit_calls = 0
+        self._process = process
 
     def __exit__(self, *exc_info) -> None:
+        if self._process is not None:
+            assert not self._process.is_alive()
         self.exit_calls += 1
 
 
@@ -157,6 +160,19 @@ def test_close_never_terminates_processes_outside_child_procs(monkeypatch):
 
     assert own_proc.terminate_calls == 1
     assert sibling_proc.terminate_calls == 0
+
+
+def test_close_terminates_owned_workers_before_context_exit():
+    clf = _make_classifier()
+    own_proc = _FakeProc("own")
+    clf._child_procs = [own_proc]
+    clf._session_ctxs = [_FakeCtx(process=own_proc)]
+    clf._all_sessions = [_FakeSession("s0")]
+
+    clf.close()
+
+    assert own_proc.terminate_calls == 1
+    assert own_proc.join_calls == 1
 
 
 def test_pool_size_greater_than_one_tracks_and_cancels_every_session_idempotent():
