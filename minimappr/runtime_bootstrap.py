@@ -551,8 +551,34 @@ async def _stop_combined_ingest_stream_consumer(
 
 def _cleanup_multiprocessing_shutdown_resources() -> None:
     # Wait briefly for active children so resource_tracker can unregister
-    # shared_memory objects before the event loop closes.
-    for proc in multiprocessing.active_children():
+    # shared_memory objects before the event loop closes. This is
+    # belt-and-suspenders: classifier.close() should already have left
+    # nothing here, but escalate to terminate()/kill() for stragglers.
+    survivors = multiprocessing.active_children()
+    for proc in survivors:
+        try:
+            proc.join(timeout=1.0)
+        except Exception:  # noqa: BLE001
+            pass
+
+    survivors = [proc for proc in survivors if proc.is_alive()]
+    for proc in survivors:
+        try:
+            proc.terminate()
+        except Exception:  # noqa: BLE001
+            pass
+    for proc in survivors:
+        try:
+            proc.join(timeout=1.0)
+        except Exception:  # noqa: BLE001
+            pass
+
+    survivors = [proc for proc in survivors if proc.is_alive()]
+    for proc in survivors:
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
         try:
             proc.join(timeout=1.0)
         except Exception:  # noqa: BLE001
@@ -574,8 +600,12 @@ async def _shutdown_combined_runtime_services(
 
     # Cancel any in-flight BirdNET predictions and terminate their worker
     # subprocesses before stopping the fusion node so queue consumers can drain.
+    # close() can block briefly on subprocess join/cancel, so run it off the
+    # event loop thread.
     try:
-        classifier.close()
+        await asyncio.wait_for(
+            asyncio.to_thread(classifier.close), timeout=shutdown_timeout_seconds
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("Classifier close failed during shutdown: %s", exc)
 

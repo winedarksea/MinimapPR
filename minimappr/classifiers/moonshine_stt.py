@@ -79,7 +79,19 @@ class MoonshineTranscriber:
         self._max_positions = int(self._config.max_position_embeddings)
 
     def transcribe(self, samples: np.ndarray, sample_rate_hz: int) -> str:
-        waveform = samples.astype(np.float32, copy=False)
+        waveform = np.asarray(samples, dtype=np.float32)
+        # MultiSensorBuffer uses the (channels, samples) convention, including
+        # for a one-channel extraction. Moonshine accepts one mono waveform per
+        # batch item, so collapse that channel axis before adding the batch axis
+        # below. Without this, a single channel becomes (1, 1, samples) and
+        # ONNX Runtime rejects the encoder's rank-2 input.
+        if waveform.ndim == 2:
+            waveform = waveform.mean(axis=0, dtype=np.float32)
+        elif waveform.ndim != 1:
+            raise ValueError(
+                "Moonshine STT expects mono samples or a (channels, samples) array; "
+                f"received shape {waveform.shape}"
+            )
         if sample_rate_hz != _TARGET_SAMPLE_RATE_HZ and waveform.size > 0:
             waveform = resample_poly(
                 waveform, up=_TARGET_SAMPLE_RATE_HZ, down=sample_rate_hz

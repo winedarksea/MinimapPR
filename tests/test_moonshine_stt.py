@@ -39,7 +39,7 @@ class _Tokenizer:
         return ["  drone overhead  "]
 
 
-def test_direct_onnx_transcriber_resamples_decodes_and_stops_at_eos() -> None:
+def _build_transcriber() -> tuple[MoonshineTranscriber, _DecoderSession]:
     transcriber = MoonshineTranscriber.__new__(MoonshineTranscriber)
     transcriber._encoder_session = _EncoderSession()
     decoder = _DecoderSession()
@@ -51,6 +51,11 @@ def test_direct_onnx_transcriber_resamples_decodes_and_stops_at_eos() -> None:
     transcriber._key_value_heads = 1
     transcriber._key_value_dimension = 1
     transcriber._max_positions = 32
+    return transcriber, decoder
+
+
+def test_direct_onnx_transcriber_resamples_decodes_and_stops_at_eos() -> None:
+    transcriber, decoder = _build_transcriber()
 
     text = transcriber.transcribe(np.ones(8_000, dtype=np.float32), sample_rate_hz=8_000)
 
@@ -59,3 +64,12 @@ def test_direct_onnx_transcriber_resamples_decodes_and_stops_at_eos() -> None:
     assert bool(decoder.calls[0]["use_cache_branch"].item()) is False
     assert bool(decoder.calls[1]["use_cache_branch"].item()) is True
     assert decoder.calls[1]["past_key_values.0.decoder.key"].shape[-2] == 1
+
+
+def test_direct_onnx_transcriber_accepts_single_channel_buffer_extraction() -> None:
+    transcriber, decoder = _build_transcriber()
+
+    text = transcriber.transcribe(np.ones((1, 8_000), dtype=np.float32), sample_rate_hz=8_000)
+
+    assert text == "drone overhead"
+    assert len(decoder.calls) == 2

@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -1499,6 +1500,20 @@ async def lifespan(app: FastAPI):
             shutdown_timeout_seconds=shutdown_timeout_s,
             storage=storage,
         )
+
+        # Regression tripwire: if a non-daemon, non-main thread is still
+        # alive here, the interpreter will hang at exit waiting to join it.
+        surviving = [
+            t
+            for t in threading.enumerate()
+            if t is not threading.main_thread() and not t.daemon and t.is_alive()
+        ]
+        if surviving:
+            logger.warning(
+                "Shutdown teardown finished but %d non-daemon thread(s) are still alive: %s",
+                len(surviving),
+                [t.name for t in surviving],
+            )
 
 
 app = FastAPI(title="MinimapPR", version="0.1.0", lifespan=lifespan)

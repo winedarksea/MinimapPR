@@ -107,6 +107,10 @@ class ContinuousOmniScanner:
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
             self._task = None
+        try:
+            await asyncio.wait_for(asyncio.to_thread(self._classifier.close), timeout=10.0)
+        except Exception:  # noqa: BLE001
+            logger.warning("Omni scanner classifier close failed or timed out", exc_info=True)
 
     # ------------------------------------------------------------------ #
     # Loop

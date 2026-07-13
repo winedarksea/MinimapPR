@@ -43,6 +43,7 @@ class _StubBuffer:
 class _StubClassifier:
     def __init__(self, label="Bird", confidence=0.7):
         self.calls = 0
+        self.close_calls = 0
         self._label = label
         self._conf = confidence
 
@@ -52,7 +53,9 @@ class _StubClassifier:
             label=self._label, confidence=self._conf, scores={self._label: self._conf}, features={}
         )
 
-    def close(self): ...
+    def close(self):
+        self.close_calls += 1
+
     def cancel_pending(self): ...
 
 
@@ -138,6 +141,25 @@ async def test_disabled_scanner_does_not_start():
     await scanner.start()
     assert scanner.stats()["running"] is False
     await scanner.stop()
+
+
+@pytest.mark.asyncio
+async def test_stop_closes_classifier_exactly_once():
+    classifier = _StubClassifier()
+    scanner = ContinuousOmniScanner(
+        settings=_Settings(),
+        classifier=classifier,
+        registry=_StubRegistry([]),
+        buffer=_StubBuffer({}),
+        sink=lambda r: _noop(),
+    )
+    await scanner.start()
+    await scanner.stop()
+    assert classifier.close_calls == 1
+
+    # Double-stop must be safe and not double-close.
+    await scanner.stop()
+    assert classifier.close_calls == 2
 
 
 async def _noop():

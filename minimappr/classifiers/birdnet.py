@@ -6,6 +6,7 @@ import logging
 import multiprocessing
 import queue
 import threading
+import time
 from typing import Any
 
 import numpy as np
@@ -58,17 +59,19 @@ class BirdNETClassifier(AudioClassifier):
             geo_min_confidence=geo_min_confidence,
         )
         self._model = model_loader.load("acoustic", "2.4", "tf", library="tflite")
-        # Tracks the active prediction session so close() can cancel it from
+        # Tracks in-flight prediction sessions so close() can cancel them from
         # another thread during server shutdown without waiting for subprocess I/O.
         self._session_lock: threading.Lock = threading.Lock()
-        self._current_session: Any = None
+        self._inflight_sessions: set[Any] = set()
         self._closed: bool = False
 
         # Pre-create a pool of predict_sessions so the TFLite model worker
         # subprocess is only spawned once, amortizing ~125 MB load overhead
         # across all classify() calls.
         self._session_ctxs: list[Any] = []
+        self._all_sessions: list[Any] = []
         self._session_pool: queue.Queue[Any] = queue.Queue()
+        children_before = set(multiprocessing.active_children())
         for _ in range(pool_size):
             ctx = self._model.predict_session(
                 top_k=_SCORES_MAP_TOP_K,
@@ -78,7 +81,13 @@ class BirdNETClassifier(AudioClassifier):
                 custom_species_list=self._custom_species_list,
             )
             self._session_ctxs.append(ctx)
-            self._session_pool.put(ctx.__enter__())
+            session = ctx.__enter__()
+            self._all_sessions.append(session)
+            self._session_pool.put(session)
+        # Only this instance's worker processes — never touch siblings' children.
+        self._child_procs: list[Any] = [
+            proc for proc in multiprocessing.active_children() if proc not in children_before
+        ]
 
     def classify(self, samples: np.ndarray, sample_rate_hz: int) -> ClassificationResult:
         if self._closed:
@@ -92,20 +101,31 @@ class BirdNETClassifier(AudioClassifier):
                 down=sample_rate_hz,
             ).astype(np.float32)
 
-        # Acquire a pooled session; blocks until one is free (timeout guards
-        # against permanent deadlock if a session is never returned).
-        try:
-            session = self._session_pool.get(timeout=120.0)
-        except queue.Empty as exc:
-            raise RuntimeError("BirdNETClassifier: no session available in pool") from exc
+        # Acquire a pooled session with a short-poll loop (bounded by an overall
+        # 120s deadline) so close() can unblock us promptly via a None sentinel
+        # instead of us waiting out a single long queue.get().
+        deadline = time.monotonic() + 120.0
+        session = None
+        while True:
+            if self._closed:
+                raise RuntimeError("BirdNETClassifier has been closed")
+            try:
+                session = self._session_pool.get(timeout=0.5)
+            except queue.Empty:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("BirdNETClassifier: no session available in pool")
+                continue
+            if session is None:
+                raise RuntimeError("BirdNETClassifier has been closed")
+            break
 
         with self._session_lock:
-            self._current_session = session
+            self._inflight_sessions.add(session)
         try:
             result = session.run_arrays([(audio, _BIRDNET_SAMPLE_RATE_HZ)])
         finally:
             with self._session_lock:
-                self._current_session = None
+                self._inflight_sessions.discard(session)
             if not self._closed:
                 self._session_pool.put(session)
 
@@ -148,47 +168,72 @@ class BirdNETClassifier(AudioClassifier):
     def close(self) -> None:
         """Cancel any in-flight prediction and terminate BirdNET worker subprocesses.
 
-        BirdNET spawns multiprocessing workers that load TensorFlow models.  On
-        SIGINT those workers die without signalling the result queue, leaving the
-        Consumer thread blocked forever.  Calling cancel() on the active session
-        unblocks the Consumer; terminating active_children() ensures stale
-        processes do not prevent the thread pool from draining.
+        Idempotent. BirdNET spawns multiprocessing workers that load TensorFlow
+        models. On SIGINT those workers can die without signalling the result
+        queue, leaving a Consumer thread blocked forever in ``run_arrays`` or a
+        thread parked in the session-pool ``get()``. This sequence wakes every
+        such waiter before touching subprocesses: pool sentinels unblock
+        ``classify()``'s pool-get loop, then ``cancel()`` unblocks any
+        ``run_arrays`` already in flight (~1s per birdnet's Consumer poll), then
+        only *this instance's* worker processes (``_child_procs``) are
+        terminated/joined — never the process-global ``active_children()``,
+        which would kill siblings (e.g. a second BirdNETClassifier instance).
         """
+        if self._closed:
+            return
         self._closed = True
-        with self._session_lock:
-            session = self._current_session
-        if session is not None:
+
+        # Wake any thread parked in classify()'s session_pool.get() immediately.
+        for _ in self._session_ctxs:
+            self._session_pool.put(None)
+
+        # Cancel every session — pooled (idle) or in-flight — to unblock any
+        # run_arrays() call within ~1s, and to guard against a thread that
+        # grabs a real idle session from the queue in the brief race window
+        # right after the None sentinels above are enqueued.
+        for session in self._all_sessions:
             try:
                 session.cancel()
             except Exception:  # noqa: BLE001
                 pass
 
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            with self._session_lock:
+                if not self._inflight_sessions:
+                    break
+            time.sleep(0.05)
+
         # Exit all pooled session context managers to cleanly shut down their
-        # underlying predict worker subprocesses.
+        # underlying predict worker subprocesses. Safe now that workers are
+        # dead/cancelled: ctx.__exit__ joins with no timeout then unlinks shm.
         for ctx in self._session_ctxs:
             try:
                 ctx.__exit__(None, None, None)
             except Exception:  # noqa: BLE001
                 pass
 
-        # Terminate any BirdNET worker/producer subprocesses that received
-        # SIGINT and may be mid-init (stuck in tf.saved_model.load), preventing
-        # their finish_signals from ever being set.
-        for child in multiprocessing.active_children():
-            child.terminate()
-        for child in multiprocessing.active_children():
-            child.join(timeout=1.0)
+        # Terminate-then-join only this instance's own worker processes.
+        for proc in self._child_procs:
+            try:
+                proc.terminate()
+            except Exception:  # noqa: BLE001
+                pass
+        for proc in self._child_procs:
+            try:
+                proc.join(timeout=1.0)
+            except Exception:  # noqa: BLE001
+                pass
 
     def cancel_pending(self) -> None:
-        """Best-effort cancellation of the currently running BirdNET session."""
+        """Best-effort cancellation of all currently running BirdNET sessions."""
         with self._session_lock:
-            session = self._current_session
-        if session is None:
-            return
-        try:
-            session.cancel()
-        except Exception:  # noqa: BLE001
-            pass
+            sessions = set(self._inflight_sessions)
+        for session in sessions:
+            try:
+                session.cancel()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 # ---------------------------------------------------------------------------
