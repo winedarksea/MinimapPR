@@ -113,7 +113,6 @@ pub fn NodesView() -> impl IntoView {
                                         <th>"Type"</th>
                                         <th>"Capabilities"</th>
                                         <th>"Health"</th>
-                                        <th>"Last seen"</th>
                                         <th></th>
                                         <th></th>
                                     </tr>
@@ -141,10 +140,6 @@ fn NodeRow(node: NodeStatus, nodes: RwSignal<Vec<NodeStatus>>) -> impl IntoView 
         .clone()
         .unwrap_or_else(|| "unknown".to_string());
     let health = node.health.clone();
-    let last_seen = node
-        .last_seen_seconds_ago
-        .map(|seconds| format!("{seconds:.1}s ago"))
-        .unwrap_or_else(|| "never".to_string());
     let pinned = is_pinned(&node);
     let capabilities = capability_list(&node);
     let delete_id = node_id.clone();
@@ -167,7 +162,6 @@ fn NodeRow(node: NodeStatus, nodes: RwSignal<Vec<NodeStatus>>) -> impl IntoView 
                 </div>
             </td>
             <td><span class=format!("health-chip {}", health)>{health.clone()}</span></td>
-            <td class="muted">{last_seen}</td>
             <td>
                 <a class="btn-sm" href=format!("/settings/nodes/{}", node.node_id)>"Configure"</a>
             </td>

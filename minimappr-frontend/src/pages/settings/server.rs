@@ -1,4 +1,3 @@
-use crate::prefs;
 use crate::state::AppState;
 use futures::StreamExt;
 use gloo_net::http::Request;
@@ -281,17 +280,6 @@ pub fn ServerDiagnosticsView() -> impl IntoView {
     let fusion = state.fusion_status;
     let data: RwSignal<Option<Diagnostics>> = RwSignal::new(None);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
-    let mock_feeds_enabled = RwSignal::new(
-        prefs::get(prefs::KEY_MOCK_FEEDS)
-            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-            .unwrap_or(false),
-    );
-    let toggle_mock_feeds = move |_| {
-        mock_feeds_enabled.update(|enabled| {
-            *enabled = !*enabled;
-            prefs::set(prefs::KEY_MOCK_FEEDS, if *enabled { "1" } else { "0" });
-        });
-    };
 
     let fetch = move || {
         spawn_local(async move {
@@ -325,14 +313,6 @@ pub fn ServerDiagnosticsView() -> impl IntoView {
         <div class="page-stub">
             <div class="daily-toolbar">
                 <h2 style="margin:0">"Server diagnostics"</h2>
-                <label class="toggle-row">
-                    <input
-                        type="checkbox"
-                        prop:checked=move || mock_feeds_enabled.get()
-                        on:change=toggle_mock_feeds
-                    />
-                    <span>"Mock feeds"</span>
-                </label>
                 <span class="daily-error">{move || error.get().unwrap_or_default()}</span>
             </div>
 
