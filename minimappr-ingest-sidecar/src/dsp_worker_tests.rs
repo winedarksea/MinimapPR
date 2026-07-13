@@ -1220,6 +1220,98 @@ async fn clustered_single_channel_manifests_share_a_tetrahedral_localization_buf
 }
 
 #[tokio::test]
+async fn automatic_gps_single_channel_manifests_share_a_localization_buffer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest_store = ManifestStore::new(tmp.path());
+    manifest_store.ensure_initialized().await.unwrap();
+    let derived_cache = DerivedCache::new(
+        tmp.path(),
+        DerivedCacheConfig {
+            budget_bytes: 16_777_216,
+            admission_reserve_bytes: 0,
+        },
+    );
+    derived_cache.ensure_initialized().await.unwrap();
+
+    let state: SharedDspState = Arc::new(RwLock::new(Default::default()));
+    let event_publisher = DspEventPublisher::new(state.clone(), 64, 64, 50);
+    let mut dsp_result_rx = event_publisher.subscribe();
+    let mut worker = DspWorker::new(
+        manifest_store.clone(),
+        derived_cache,
+        DspWorkerConfig {
+            classifier_render_min_interval_seconds: 0.0,
+            localization_cadence_ms: 0,
+            trigger_cooldown_seconds: 0.0,
+            localization_rms_gate: 0.0,
+            ..DspWorkerConfig::default()
+        },
+        state,
+    )
+    .with_dsp_event_publisher(event_publisher);
+
+    // Approximately a two-metre square at 45°N. The manifests intentionally
+    // omit every cluster field: GPS reports alone must create the shared route.
+    for (index, (node_id, lat, lon)) in [
+        ("gps-a", 45.0, -93.0),
+        ("gps-b", 45.0, -92.9999746),
+        ("gps-c", 45.0000180, -92.9999746),
+        ("gps-d", 45.0000180, -93.0),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let payload =
+            store_forward_payload_with_channel_count(1_000_000_000, 0, index as u64 + 1, 1);
+        let mut manifest = raw_manifest_for_payload_with_metadata(
+            tmp.path(),
+            &format!("manifest-auto-gps-{index}"),
+            &format!("seg-auto-gps-{index}"),
+            &format!("{node_id}__audio_main__{index:04x}"),
+            payload,
+            None,
+            None,
+        )
+        .await;
+        manifest.node_context = Some(serde_json::json!({
+            "node": {
+                "id": node_id,
+                "position_geo": {"lat": lat, "lon": lon, "alt_m": 2.0},
+                "sensor_offsets_m": [[0.0, 0.0, 0.0]]
+            }
+        }));
+        worker.process_one(manifest, 1).await;
+    }
+
+    let events = drain_published_manifests(&mut dsp_result_rx);
+    let localization = events
+        .iter()
+        .rev()
+        .find(|manifest| {
+            manifest.manifest_type == "localization_result"
+                && manifest.cluster_id.as_deref() == Some(AUTOMATIC_GPS_CLUSTER_ID)
+                && manifest
+                    .localization
+                    .as_ref()
+                    .is_some_and(|payload| payload.resolved_algorithm == "srp_phat")
+        })
+        .expect("automatic GPS geometry must produce a cross-node SRP result");
+    assert_eq!(
+        localization.cluster_sensor_positions.as_ref().map(Vec::len),
+        Some(4)
+    );
+    assert_eq!(
+        localization
+            .localization
+            .as_ref()
+            .expect("localization payload")
+            .pair_tdoas
+            .len(),
+        6
+    );
+}
+
+#[tokio::test]
 async fn mixed_clustered_tetrahedral_and_point_manifests_share_one_localization_buffer() {
     let tmp = tempfile::tempdir().unwrap();
     let manifest_store = ManifestStore::new(tmp.path());

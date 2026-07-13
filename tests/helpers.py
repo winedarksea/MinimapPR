@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -17,6 +18,87 @@ SIRITH_TETRA_SENSOR_OFFSETS_M: tuple[tuple[float, float, float], ...] = (
     (-0.016238, -0.025000, -0.010205),
     (0.005413, 0.000000, 0.030615),
 )
+
+
+@dataclass(frozen=True)
+class CrossNodeSyntheticScene:
+    """Deterministic, physically delayed multi-node scene for TDOA regressions.
+
+    ``true_sensor_positions_m`` drives propagation, while ``reported_sensor_positions_m``
+    is what a localizer receives. Keeping those distinct lets tests model GPS survey error
+    without corrupting the acoustic ground truth.
+    """
+
+    source_position_m: np.ndarray
+    true_sensor_positions_m: dict[str, np.ndarray]
+    reported_sensor_positions_m: dict[str, np.ndarray]
+    sensor_windows: dict[str, np.ndarray]
+    sensor_node_ids: dict[str, str]
+
+
+def synthesize_cross_node_scene(
+    *,
+    source_position_m: tuple[float, float, float] | np.ndarray,
+    node_origins_m: dict[str, tuple[float, float, float] | np.ndarray],
+    tetra_node_ids: tuple[str, ...] = (),
+    sample_rate_hz: int = 48_000,
+    duration_seconds: float = 0.4,
+    seed: int = 0,
+    sound_speed_mps: float = 343.2,
+    additive_noise_std: float = 0.0,
+    reflection_delay_seconds: float | None = None,
+    reflection_gain: float = 0.0,
+    node_clock_offsets_s: dict[str, float] | None = None,
+    node_position_errors_m: dict[str, tuple[float, float, float] | np.ndarray] | None = None,
+    missing_sensor_ids: set[str] | None = None,
+) -> CrossNodeSyntheticScene:
+    """Generate a broadband scene with deterministic acoustic and metadata faults.
+
+    A single global propagation reference preserves inter-node delay. Reflection and
+    noise are deliberately simple but repeatable; they exercise correlation ambiguity
+    without making the tests depend on a room simulator.
+    """
+    rng = np.random.default_rng(seed)
+    sample_count = int(round(sample_rate_hz * duration_seconds))
+    excitation = (rng.standard_normal(sample_count) * np.hanning(sample_count)).astype(np.float32)
+    if reflection_delay_seconds is not None and reflection_gain:
+        excitation = excitation + float(reflection_gain) * shift_signal(
+            excitation, sample_rate_hz, float(reflection_delay_seconds)
+        )
+
+    true_positions, windows, node_ids = synthesize_multinode_windows(
+        excitation,
+        sample_rate_hz,
+        source_position_m=source_position_m,
+        node_origins_m=node_origins_m,
+        tetra_node_ids=tetra_node_ids,
+        sound_speed_mps=sound_speed_mps,
+    )
+    clock_offsets = node_clock_offsets_s or {}
+    missing = missing_sensor_ids or set()
+    reported_positions: dict[str, np.ndarray] = {}
+    adjusted_windows: dict[str, np.ndarray] = {}
+    position_errors = node_position_errors_m or {}
+    for sensor_id, true_position in true_positions.items():
+        node_id = node_ids[sensor_id]
+        error_m = np.asarray(position_errors.get(node_id, (0.0, 0.0, 0.0)), dtype=np.float64)
+        reported_positions[sensor_id] = np.asarray(true_position, dtype=np.float64) + error_m
+        window = windows[sensor_id]
+        if node_id in clock_offsets:
+            window = shift_signal(window, sample_rate_hz, float(clock_offsets[node_id]))
+        if sensor_id in missing:
+            window = np.zeros_like(window)
+        if additive_noise_std:
+            window = window + rng.normal(0.0, additive_noise_std, size=window.size).astype(np.float32)
+        adjusted_windows[sensor_id] = window.astype(np.float32, copy=False)
+
+    return CrossNodeSyntheticScene(
+        source_position_m=np.asarray(source_position_m, dtype=np.float64),
+        true_sensor_positions_m=true_positions,
+        reported_sensor_positions_m=reported_positions,
+        sensor_windows=adjusted_windows,
+        sensor_node_ids=node_ids,
+    )
 
 
 def shift_signal(signal: np.ndarray, sample_rate_hz: int, delay_s: float) -> np.ndarray:

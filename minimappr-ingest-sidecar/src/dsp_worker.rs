@@ -2131,7 +2131,11 @@ fn resolve_cluster_buffer_routing(
     }
     let cluster_id = manifest.cluster_id.as_deref()?;
     let cluster_sensor_positions = manifest.cluster_sensor_positions.as_ref()?;
-    if cluster_sensor_positions.len() < 4 {
+    // An automatic GPS array must begin sharing audio as soon as its first
+    // node arrives. Waiting for four sensors routes those early frames into
+    // isolated buffers, so the fourth node sees only itself. Explicit legacy
+    // clusters retain their historical four-sensor minimum.
+    if cluster_sensor_positions.len() < 4 && cluster_id != AUTOMATIC_GPS_CLUSTER_ID {
         return None;
     }
     let node_id = stream_key_node_id(stream_key);
