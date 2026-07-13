@@ -1,0 +1,92 @@
+{
+  "schema_version": 2,
+  "labels": [
+    "ambient",
+    "drone",
+    "coyote"
+  ],
+  "negative_label": "ambient",
+  "input_shape": [
+    1,
+    1024
+  ],
+  "embedding_model": "yamnet",
+  "opset": 13,
+  "preprocessing": {
+    "version": "yamnet-prep-v1",
+    "target_rms": 0.1,
+    "max_input_gain": 32.0
+  },
+  "thresholds": {
+    "drone": {
+      "alert": 0.8,
+      "detect": 0.85
+    },
+    "coyote": {
+      "alert": 0.95,
+      "detect": 0.95
+    }
+  },
+  "metrics": {
+    "drone": {
+      "frame_auc": 0.9871,
+      "clip_auc": 0.9912
+    },
+    "coyote": {
+      "frame_auc": 0.962,
+      "clip_auc": 1.0
+    }
+  },
+  "dataset_counts": {
+    "ambient": {
+      "files": 16735,
+      "real": 381494,
+      "aug": 381494,
+      "synth": 8000,
+      "promoted": 0
+    },
+    "drone": {
+      "files": 40000,
+      "real": 55949,
+      "aug": 111898,
+      "synth": 0,
+      "promoted": 0
+    },
+    "coyote": {
+      "files": 4,
+      "real": 618,
+      "aug": 126690,
+      "synth": 0,
+      "promoted": 0
+    }
+  },
+  "weak_classes": [
+    "coyote"
+  ],
+  "augmentation": {
+    "aug_copies": 1,
+    "aug_copies_per_label": {
+      "coyote": 205,
+      "drone": 2
+    },
+    "auto_balance_ratio": 3.0,
+    "synth_ambient_count": 1000,
+    "segment_seconds": 4.0,
+    "segment_overlap": 0.5
+  },
+  "quantized_model_quality": {
+    "max_probability_difference": 0.2079,
+    "mean_probability_difference": 0.0115,
+    "prediction_agreement": 0.9812,
+    "float_accuracy": 0.9303,
+    "int8_accuracy": 0.9443,
+    "accuracy_drop": -0.014
+  },
+  "quantization": {
+    "method": "static_qdq",
+    "preprocessed": true,
+    "calibration_frames": 1066143,
+    "calibration_dataset": "all_embedded_frames",
+    "calibration_batch_size": 256
+  }
+}

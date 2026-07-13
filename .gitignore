@@ -183,7 +183,11 @@ cython_debug/
 .cursorindexingignore
 
 # Local runtime artifacts
-data/
+data/*
+!data/models/
+data/models/*
+!data/models/drone_head.onnx
+!data/models/drone_head.metadata.json
 .DS_Store
 
 # Calibration test bundles: keep the directory + README tracked, but the bare

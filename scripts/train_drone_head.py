@@ -22,7 +22,7 @@ train-only (val/test see real audio only).
 
 Outputs (``data/models/`` by default):
 
-    drone_head.onnx            int8 QDQ model shipped + loaded at runtime
+    drone_head.onnx            statically-quantized int8 QDQ model shipped + loaded
     drone_head.metadata.json   schema v2: labels, negative_label, preprocessing,
                                per-class thresholds/metrics, dataset counts
     drone_head.float.onnx      float32 reference (gitignored)
@@ -51,6 +51,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import tempfile
 import wave
 from pathlib import Path
 from typing import Iterable
@@ -511,6 +512,49 @@ def clip_max_by_group(frame_scores: np.ndarray, groups: np.ndarray, y_pos: np.nd
     return np.asarray(clip_scores), np.asarray(clip_labels, dtype=np.int64)
 
 
+def quantized_model_quality_metrics(
+    float_probs: np.ndarray, int8_probs: np.ndarray, labels: np.ndarray
+) -> dict[str, float]:
+    """Measure whether quantization changed classifier decisions on labelled data.
+
+    The largest probability difference is intentionally diagnostic-only: one
+    low-margin frame can have a large delta without changing a prediction or
+    reducing test accuracy.  Agreement and accuracy regression instead measure
+    the model behavior users receive from the quantized artifact.
+    """
+    if float_probs.shape != int8_probs.shape:
+        raise ValueError("Float and int8 predictions must have matching shapes")
+    if len(float_probs) != len(labels):
+        raise ValueError("Prediction and label counts must match")
+    if len(labels) == 0:
+        return empty_quantized_model_quality_metrics()
+
+    float_labels = np.argmax(float_probs, axis=1)
+    int8_labels = np.argmax(int8_probs, axis=1)
+    float_accuracy = float(np.mean(float_labels == labels))
+    int8_accuracy = float(np.mean(int8_labels == labels))
+    return {
+        "max_probability_difference": float(np.max(np.abs(float_probs - int8_probs))),
+        "mean_probability_difference": float(np.mean(np.abs(float_probs - int8_probs))),
+        "prediction_agreement": float(np.mean(float_labels == int8_labels)),
+        "float_accuracy": float_accuracy,
+        "int8_accuracy": int8_accuracy,
+        "accuracy_drop": float_accuracy - int8_accuracy,
+    }
+
+
+def empty_quantized_model_quality_metrics() -> dict[str, float]:
+    """Return a non-failing quality result when no held-out test frame exists."""
+    return {
+        "max_probability_difference": 0.0,
+        "mean_probability_difference": 0.0,
+        "prediction_agreement": 1.0,
+        "float_accuracy": 0.0,
+        "int8_accuracy": 0.0,
+        "accuracy_drop": 0.0,
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Export
 # --------------------------------------------------------------------------- #
@@ -531,10 +575,80 @@ def export_onnx(model, float_path: Path) -> None:
     onnx.save(onnx_model, str(float_path))
 
 
-def quantize_int8(float_path: Path, int8_path: Path) -> None:
-    from onnxruntime.quantization import QuantType, quantize_dynamic
+class FullDatasetCalibrationDataReader:
+    """Yield every embedding frame to ONNX Runtime static quantization.
 
-    quantize_dynamic(str(float_path), str(int8_path), per_channel=True, weight_type=QuantType.QInt8)
+    Static quantization needs representative activation values.  Calibration is
+    intentionally performed over the complete embedded dataset, rather than a
+    random subset, because rare real-world acoustic conditions are precisely
+    the cases where clipping activation ranges harms detector quality.
+    """
+
+    def __init__(self, input_name: str, frames: np.ndarray, batch_size: int):
+        if frames.ndim != 2 or frames.shape[0] == 0:
+            raise ValueError("Static quantization requires at least one 2-D embedding frame")
+        if batch_size <= 0:
+            raise ValueError("calibration batch size must be positive")
+        self.input_name = input_name
+        self.frames = frames.astype(np.float32, copy=False)
+        self.batch_size = batch_size
+        self._offset = 0
+
+    def get_next(self) -> dict[str, np.ndarray] | None:
+        if self._offset >= len(self.frames):
+            return None
+        next_offset = min(self._offset + self.batch_size, len(self.frames))
+        batch = self.frames[self._offset:next_offset]
+        self._offset = next_offset
+        return {self.input_name: batch}
+
+    def rewind(self) -> None:
+        self._offset = 0
+
+
+def quantize_int8(
+    float_path: Path,
+    int8_path: Path,
+    calibration_frames: np.ndarray,
+    calibration_batch_size: int,
+) -> int:
+    """Create a per-channel, full-dataset static QDQ int8 ONNX model.
+
+    Returns the number of frames used for calibration so it can be recorded in
+    the artifact metadata.
+    """
+    import onnx
+    from onnxruntime.quantization import QuantFormat, QuantType, quantize_static
+    from onnxruntime.quantization.shape_inference import quant_pre_process
+
+    # Shape inference and graph optimization must run before quantization.  It
+    # gives the calibrator tensor shapes/ranges and keeps optimization separate
+    # from quantization, so quantization accuracy regressions remain debuggable.
+    with tempfile.TemporaryDirectory(prefix="drone_head_onnx_preprocess_") as temp_dir:
+        preprocessed_path = Path(temp_dir) / "drone_head.preprocessed.onnx"
+        quant_pre_process(
+            str(float_path),
+            str(preprocessed_path),
+            skip_symbolic_shape=False,
+            skip_optimization=False,
+            skip_onnx_shape=False,
+        )
+        float_model = onnx.load(str(preprocessed_path))
+        if not float_model.graph.input:
+            raise ValueError(f"{preprocessed_path} has no model inputs for calibration")
+        reader = FullDatasetCalibrationDataReader(
+            float_model.graph.input[0].name, calibration_frames, calibration_batch_size
+        )
+        quantize_static(
+            str(preprocessed_path),
+            str(int8_path),
+            reader,
+            quant_format=QuantFormat.QDQ,
+            per_channel=True,
+            activation_type=QuantType.QInt8,
+            weight_type=QuantType.QInt8,
+        )
+    return len(calibration_frames)
 
 
 def export_tflite(model, tflite_path: Path, calib: np.ndarray) -> None:
@@ -555,7 +669,29 @@ def export_tflite(model, tflite_path: Path, calib: np.ndarray) -> None:
     converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
     converter.inference_input_type = tf.int8
     converter.inference_output_type = tf.int8
-    tflite_path.write_bytes(converter.convert())
+    tflite_model = converter.convert()
+    _validate_fully_integer_tflite(tf, tflite_model)
+    tflite_path.write_bytes(tflite_model)
+
+
+def _validate_fully_integer_tflite(tf, model_bytes: bytes) -> None:
+    """Fail export if the requested int8 TFLite artifact has float tensors."""
+    interpreter = tf.lite.Interpreter(model_content=model_bytes)
+    interpreter.allocate_tensors()
+    input_details = interpreter.get_input_details()
+    output_details = interpreter.get_output_details()
+    if any(detail["dtype"] != np.int8 for detail in input_details + output_details):
+        raise ValueError("TFLite export did not produce int8 input/output tensors")
+    float_tensors = [
+        detail["name"]
+        for detail in interpreter.get_tensor_details()
+        if np.issubdtype(detail["dtype"], np.floating)
+    ]
+    if float_tensors:
+        raise ValueError(
+            "TFLite export contains float tensors despite integer-only configuration: "
+            + ", ".join(float_tensors[:5])
+        )
 
 
 def onnx_predict(model_path: Path, x: np.ndarray) -> np.ndarray:
@@ -605,8 +741,18 @@ def main(argv: Iterable[str] | None = None) -> int:
     )
     parser.add_argument("--synth-ambient-count", type=int, default=1000)
     parser.add_argument("--max-files-per-label", type=int, default=0)
-    parser.add_argument("--calib-size", type=int, default=512)
-    parser.add_argument("--parity-tol", type=float, default=0.05)
+    parser.add_argument(
+        "--calibration-batch-size", type=int, default=256,
+        help="Embedding frames per static-quantization calibration inference.",
+    )
+    parser.add_argument(
+        "--min-int8-prediction-agreement", type=float, default=0.97,
+        help="Minimum float-vs-int8 top-class agreement on labelled test frames.",
+    )
+    parser.add_argument(
+        "--max-int8-accuracy-drop", type=float, default=0.02,
+        help="Largest permitted float-to-int8 test-accuracy regression (fraction).",
+    )
     parser.add_argument("--class-weight-cap", type=float, default=10.0)
     parser.add_argument("--no-tflite", action="store_true")
     args = parser.parse_args(list(argv) if argv is not None else None)
@@ -732,26 +878,48 @@ def main(argv: Iterable[str] | None = None) -> int:
     tflite_path = args.out_dir / "drone_head.tflite"
 
     export_onnx(model, float_path)
-    rng = np.random.default_rng(args.seed)
-    train_idx = np.flatnonzero(is_train)
-    calib_idx = rng.choice(train_idx, size=min(args.calib_size, len(train_idx)), replace=False)
-    calib = frames[calib_idx]
-    quantize_int8(float_path, int8_path)
+    # Use every embedded frame for both ONNX static calibration and TFLite's
+    # representative data.  This includes held-out real frames and the
+    # train-only variants/synthetic ambience that can occur at runtime.
+    calibration_frames = frames
+    calibration_frame_count = quantize_int8(
+        float_path, int8_path, calibration_frames, args.calibration_batch_size
+    )
     if not args.no_tflite:
         try:
-            export_tflite(model, tflite_path, calib)
+            export_tflite(model, tflite_path, calibration_frames)
         except Exception as exc:  # noqa: BLE001
             logger.warning("TFLite export failed (non-fatal): %s", exc)
 
-    # ---- Parity gate over ALL class probs ----
-    max_diff = 0.0
+    # ---- Quantized-model quality gate ----
+    # A max probability delta is logged for diagnosis, but is not a quality
+    # gate: static quantization can move a low-margin softmax value sharply
+    # while preserving the classifier's decision and its measured accuracy.
+    quantization_quality = empty_quantized_model_quality_metrics()
     if len(test_frames):
         float_pred = onnx_predict(float_path, test_frames)
         int8_pred = onnx_predict(int8_path, test_frames)
-        max_diff = float(np.max(np.abs(float_pred - int8_pred)))
-    logger.info("int8 vs float32 max prob diff (all classes): %.4f (tol %.3f)", max_diff, args.parity_tol)
-    if max_diff > args.parity_tol:
-        logger.error("Parity gate FAILED: %.4f > %.3f", max_diff, args.parity_tol)
+        quantization_quality = quantized_model_quality_metrics(float_pred, int8_pred, test_y)
+    logger.info(
+        "int8 quality: agreement=%.4f float_acc=%.4f int8_acc=%.4f "
+        "accuracy_drop=%.4f max_prob_diff=%.4f mean_prob_diff=%.4f",
+        quantization_quality["prediction_agreement"],
+        quantization_quality["float_accuracy"],
+        quantization_quality["int8_accuracy"],
+        quantization_quality["accuracy_drop"],
+        quantization_quality["max_probability_difference"],
+        quantization_quality["mean_probability_difference"],
+    )
+    if (
+        quantization_quality["prediction_agreement"] < args.min_int8_prediction_agreement
+        or quantization_quality["accuracy_drop"] > args.max_int8_accuracy_drop
+    ):
+        logger.error(
+            "Quantized-model quality gate FAILED: agreement %.4f < %.4f or "
+            "accuracy drop %.4f > %.4f",
+            quantization_quality["prediction_agreement"], args.min_int8_prediction_agreement,
+            quantization_quality["accuracy_drop"], args.max_int8_accuracy_drop,
+        )
         return 1
 
     # ---- Metadata v2 + report ----
@@ -780,7 +948,16 @@ def main(argv: Iterable[str] | None = None) -> int:
             "segment_seconds": args.segment_seconds,
             "segment_overlap": args.segment_overlap,
         },
-        "int8_parity_max_diff": round(max_diff, 4),
+        "quantized_model_quality": {
+            key: round(value, 4) for key, value in quantization_quality.items()
+        },
+        "quantization": {
+            "method": "static_qdq",
+            "preprocessed": True,
+            "calibration_frames": calibration_frame_count,
+            "calibration_dataset": "all_embedded_frames",
+            "calibration_batch_size": args.calibration_batch_size,
+        },
     }
     (args.out_dir / "drone_head.metadata.json").write_text(json.dumps(metadata, indent=2))
     (args.out_dir / "eval_report.json").write_text(

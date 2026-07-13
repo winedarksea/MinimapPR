@@ -203,6 +203,52 @@ def test_embedding_cache_atomic_no_tmp_left(tmp_path):
 # --------------------------------------------------------------------------- #
 # per-class group split
 # --------------------------------------------------------------------------- #
+def test_static_quantization_reader_yields_every_embedding_frame_in_batches():
+    from scripts.train_drone_head import FullDatasetCalibrationDataReader
+
+    frames = np.arange(5 * 1024, dtype=np.float64).reshape(5, 1024)
+    reader = FullDatasetCalibrationDataReader("embedding", frames, batch_size=2)
+
+    batches = []
+    while (item := reader.get_next()) is not None:
+        assert set(item) == {"embedding"}
+        batches.append(item["embedding"])
+
+    assert [len(batch) for batch in batches] == [2, 2, 1]
+    received = np.concatenate(batches)
+    assert received.dtype == np.float32
+    assert np.array_equal(received, frames.astype(np.float32))
+
+    reader.rewind()
+    assert np.array_equal(reader.get_next()["embedding"], frames[:2].astype(np.float32))
+
+
+def test_quantized_model_quality_metrics_prioritize_decisions_over_single_prob_delta():
+    from scripts.train_drone_head import quantized_model_quality_metrics
+
+    labels = np.array([0, 1, 1])
+    float_probs = np.array([[0.95, 0.05], [0.05, 0.95], [0.01, 0.99]], dtype=np.float32)
+    # One softmax score moves by 0.45, but neither prediction nor accuracy changes.
+    int8_probs = np.array([[0.51, 0.49], [0.49, 0.51], [0.46, 0.54]], dtype=np.float32)
+
+    metrics = quantized_model_quality_metrics(float_probs, int8_probs, labels)
+
+    assert metrics["max_probability_difference"] == pytest.approx(0.45)
+    assert metrics["prediction_agreement"] == 1.0
+    assert metrics["float_accuracy"] == 1.0
+    assert metrics["int8_accuracy"] == 1.0
+    assert metrics["accuracy_drop"] == 0.0
+
+
+def test_empty_quantized_model_quality_metrics_allows_datasets_without_test_frames():
+    from scripts.train_drone_head import empty_quantized_model_quality_metrics
+
+    metrics = empty_quantized_model_quality_metrics()
+
+    assert metrics["prediction_agreement"] == 1.0
+    assert metrics["accuracy_drop"] == 0.0
+
+
 def test_per_class_group_split_invariants():
     from scripts.train_drone_head import per_class_group_split
 
