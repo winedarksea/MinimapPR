@@ -156,6 +156,9 @@ def _build_backend(
             min_confidence=spec.min_confidence or settings.t3t4_min_confidence,
             tone_band_low_hz=settings.t3t4_tone_band_low_hz,
             tone_band_high_hz=settings.t3t4_tone_band_high_hz,
+            tolerance=settings.t3t4_tolerance,
+            hysteresis_hi_ratio=settings.t3t4_hysteresis_hi_ratio,
+            hysteresis_lo_ratio=settings.t3t4_hysteresis_lo_ratio,
         )
     if backend == "heuristic":
         return _create_heuristic(settings)

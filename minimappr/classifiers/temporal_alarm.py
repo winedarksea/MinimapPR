@@ -120,7 +120,7 @@ def _tone_envelope(
 
 
 def _binarize_hysteresis(
-    envelope: np.ndarray, *, hi_ratio: float = 4.0, lo_ratio: float = 2.0
+    envelope: np.ndarray, *, hi_ratio: float = 5.0, lo_ratio: float = 2.5
 ) -> np.ndarray:
     """Hysteresis on/off gate relative to a noise-floor estimate.
 
@@ -143,6 +143,38 @@ def _binarize_hysteresis(
             on = value >= hi
         state[i] = on
     return state
+
+
+def _despeckle_runs(
+    runs: list[tuple[int, float]], min_event_seconds: float
+) -> list[tuple[int, float]]:
+    """Absorb runs shorter than any real T3/T4 event into their neighbours.
+
+    Every genuine T3/T4 pulse and gap is >=0.4s (0.5s nominal, minus template
+    tolerance), so any run shorter than ``min_event_seconds`` is chatter — a
+    one-frame envelope blip during a long gap, or a momentary dropout mid-pulse.
+    Left in place, a single such speck permanently desyncs the fixed-stride
+    cycle matcher (each cycle consumes exactly ``len(template)`` runs), which is
+    the dominant true-positive loss on real, noisy audio. Removing the shortest
+    sub-threshold run merges its two same-state neighbours back together;
+    repeating until none remain restores the clean on/off run structure. Total
+    signal duration is preserved. ``runs`` is small (tens of entries), so the
+    naive shortest-first loop is inexpensive.
+    """
+    runs = list(runs)
+    while len(runs) > 1:
+        idx = min(range(len(runs)), key=lambda i: runs[i][1])
+        if runs[idx][1] >= min_event_seconds:
+            break
+        dur = runs[idx][1]
+        if idx == 0:
+            runs = [(runs[1][0], runs[1][1] + dur), *runs[2:]]
+        elif idx == len(runs) - 1:
+            runs = [*runs[:-2], (runs[-2][0], runs[-2][1] + dur)]
+        else:
+            merged = (runs[idx - 1][0], runs[idx - 1][1] + dur + runs[idx + 1][1])
+            runs = [*runs[: idx - 1], merged, *runs[idx + 2 :]]
+    return runs
 
 
 def _segment_runs(state: np.ndarray, hop_seconds: float) -> list[tuple[int, float]]:
@@ -216,7 +248,10 @@ class TemporalAlarmClassifier(AudioClassifier):
         tone_band_high_hz: float = 3500.0,
         num_tone_bins: int = 5,
         frame_seconds: float = 0.02,
-        tolerance: float = 0.3,
+        tolerance: float = 0.18,
+        hysteresis_hi_ratio: float = 5.0,
+        hysteresis_lo_ratio: float = 2.5,
+        min_event_seconds: float = 0.12,
     ) -> None:
         self.min_repeats = max(2, int(min_repeats))
         self.min_confidence = float(np.clip(min_confidence, 0.0, 1.0))
@@ -225,6 +260,13 @@ class TemporalAlarmClassifier(AudioClassifier):
         self.num_tone_bins = max(1, int(num_tone_bins))
         self.frame_seconds = float(frame_seconds)
         self.tolerance = float(tolerance)
+        # Hysteresis gate: ``hi_ratio`` (turn-on) must exceed ``lo_ratio``
+        # (turn-off) or the gate would chatter; clamp defensively.
+        self.hysteresis_hi_ratio = max(1.0, float(hysteresis_hi_ratio))
+        self.hysteresis_lo_ratio = float(
+            np.clip(hysteresis_lo_ratio, 1.0, self.hysteresis_hi_ratio)
+        )
+        self.min_event_seconds = max(0.0, float(min_event_seconds))
 
     def classify(self, samples: np.ndarray, sample_rate_hz: int) -> ClassificationResult:
         samples = np.asarray(samples)
@@ -247,8 +289,12 @@ class TemporalAlarmClassifier(AudioClassifier):
         if tone_energy.size == 0:
             return ClassificationResult(label="unknown", confidence=0.0, scores={}, features=empty_features)
 
-        state = _binarize_hysteresis(tone_energy)
-        runs = _segment_runs(state, hop_seconds)
+        state = _binarize_hysteresis(
+            tone_energy,
+            hi_ratio=self.hysteresis_hi_ratio,
+            lo_ratio=self.hysteresis_lo_ratio,
+        )
+        runs = _despeckle_runs(_segment_runs(state, hop_seconds), self.min_event_seconds)
 
         t3_count, t3_err = _best_match(runs, T3_TEMPLATE, self.tolerance)
         t4_count, t4_err = _best_match(runs, T4_TEMPLATE, self.tolerance)
