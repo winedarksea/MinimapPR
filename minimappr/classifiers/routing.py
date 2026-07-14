@@ -24,7 +24,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-KNOWN_BACKENDS = {"yamnet", "birdnet", "heuristic", "drone_head", "moonshine_stt"}
+KNOWN_BACKENDS = {"yamnet", "birdnet", "heuristic", "drone_head", "moonshine_stt", "t3t4_alarm"}
 # Backends that consume embedding frames instead of audio: valid only as
 # ``input: "embedding"`` chain stages, never in a context ``run`` list.
 EMBEDDING_ONLY_BACKENDS = {"drone_head"}
@@ -118,6 +118,7 @@ def default_routing() -> RoutingConfig:
                 model_path="data/models/drone_head.onnx",
             ),
             "stt": ClassifierSpec(member_id="stt", backend="moonshine_stt"),
+            "t3t4_alarm": ClassifierSpec(member_id="t3t4_alarm", backend="t3t4_alarm", min_confidence=0.5),
         },
         contexts={
             CONTEXT_DETECTION_TRIGGER: ContextSpec(
@@ -128,9 +129,9 @@ def default_routing() -> RoutingConfig:
             ),
             CONTEXT_OMNI_CONTINUOUS: ContextSpec(
                 name=CONTEXT_OMNI_CONTINUOUS,
-                run=("birdnet",),
+                run=("birdnet", "t3t4_alarm"),
                 interval_seconds=30.0,
-                window_seconds=15.0,
+                window_seconds=21.0,
                 min_rms=0.001,
             ),
         },
@@ -403,6 +404,8 @@ def apply_settings(routing: RoutingConfig, settings: Any) -> RoutingConfig:
             return True
         if spec.backend == "birdnet" and not getattr(settings, "birdnet_enabled", True):
             return True
+        if spec.backend == "t3t4_alarm" and not getattr(settings, "t3t4_enabled", True):
+            return True
         return False
 
     contexts = {
@@ -440,6 +443,13 @@ def apply_settings(routing: RoutingConfig, settings: Any) -> RoutingConfig:
                     getattr(settings, "drone_head_model_path", spec.model_path or "")
                 )
                 or spec.model_path,
+            )
+        if spec.backend == "t3t4_alarm":
+            classifiers[member_id] = replace(
+                spec,
+                min_confidence=float(
+                    getattr(settings, "t3t4_min_confidence", spec.min_confidence)
+                ),
             )
 
     triggers = tuple(

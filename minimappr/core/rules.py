@@ -430,6 +430,22 @@ def default_rules() -> list[RuleDef]:
             cooldown_seconds=5.0,
         ),
         RuleDef(
+            rule_id="temporal_alarm_alert",
+            enabled=True,
+            scope="detection",
+            condition=RuleCondition(labels={"alarm_t3", "alarm_t4"}, min_confidence=0.5),
+            actions=[
+                ActionDescriptor(
+                    action_type="alert",
+                    destination="cop",
+                    priority="high",
+                    payload={"message": "T3/T4 temporal alarm cadence detected"},
+                ),
+                ActionDescriptor(action_type="alert", destination="log", priority="high"),
+            ],
+            cooldown_seconds=90.0,
+        ),
+        RuleDef(
             rule_id="drone_alert",
             enabled=True,
             scope="detection",

@@ -103,12 +103,26 @@ def test_unknown_backend_raises(tmp_path: Path) -> None:
 
 
 def test_kill_switches_strip_members_chains_triggers() -> None:
-    settings = Settings(birdnet_enabled=False, drone_head_enabled=False, stt_enabled=False)
+    settings = Settings(
+        birdnet_enabled=False, drone_head_enabled=False, stt_enabled=False, t3t4_enabled=False
+    )
     routing = apply_settings(default_routing(), settings)
     assert routing.context(CONTEXT_DETECTION_TRIGGER).run == ("yamnet",)
     assert routing.context(CONTEXT_OMNI_CONTINUOUS).run == ()
     assert routing.chains == ()
     assert routing.triggers == ()
+
+
+def test_t3t4_kill_switch_strips_omni_member_only() -> None:
+    settings = Settings(t3t4_enabled=False)
+    routing = apply_settings(default_routing(), settings)
+    assert routing.context(CONTEXT_OMNI_CONTINUOUS).run == ("birdnet",)
+
+
+def test_t3t4_threshold_override() -> None:
+    settings = Settings(t3t4_min_confidence=0.8)
+    routing = apply_settings(default_routing(), settings)
+    assert routing.classifiers["t3t4_alarm"].min_confidence == 0.8
 
 
 def test_settings_override_thresholds_and_omni_params() -> None:

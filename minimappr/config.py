@@ -688,8 +688,13 @@ class Settings:
     transcript_retention_seconds: float = 604_800.0
     omni_scan_enabled: bool = True
     omni_scan_interval_seconds: float = 30.0
-    omni_scan_window_seconds: float = 15.0
+    omni_scan_window_seconds: float = 21.0
     omni_scan_min_rms: float = 0.0
+    t3t4_enabled: bool = True
+    t3t4_min_confidence: float = 0.5
+    t3t4_min_repeats: int = 3
+    t3t4_tone_band_low_hz: float = 2800.0
+    t3t4_tone_band_high_hz: float = 3500.0
     yamnet_min_confidence: float = 0.25
     yamnet_input_target_rms: float = 0.10
     yamnet_max_input_gain: float = 32.0
@@ -1112,6 +1117,12 @@ class Settings:
             raise ValueError("MINIMAPPR_OMNI_SCAN_WINDOW_SECONDS must be > 0")
         if self.omni_scan_min_rms < 0.0:
             raise ValueError("MINIMAPPR_OMNI_SCAN_MIN_RMS must be >= 0")
+        if self.t3t4_min_repeats < 2:
+            raise ValueError("MINIMAPPR_T3T4_MIN_REPEATS must be >= 2")
+        if not 0.0 <= self.t3t4_min_confidence <= 1.0:
+            raise ValueError("MINIMAPPR_T3T4_MIN_CONFIDENCE must be in [0, 1]")
+        if self.t3t4_tone_band_low_hz <= 0.0 or self.t3t4_tone_band_high_hz <= self.t3t4_tone_band_low_hz:
+            raise ValueError("MINIMAPPR_T3T4_TONE_BAND_HIGH_HZ must be > MINIMAPPR_T3T4_TONE_BAND_LOW_HZ > 0")
         # An utterance capture needs pre-roll + utterance + hangover of audio to
         # still be resident in the ring buffers when it closes. Clamp (rather
         # than raise: the defaults 3+30+2 slightly exceed the 32s buffer).
@@ -1629,8 +1640,13 @@ class Settings:
             ),
             omni_scan_enabled=_env_bool("MINIMAPPR_OMNI_SCAN_ENABLED", True),
             omni_scan_interval_seconds=_env_float("MINIMAPPR_OMNI_SCAN_INTERVAL_SECONDS", 30.0),
-            omni_scan_window_seconds=_env_float("MINIMAPPR_OMNI_SCAN_WINDOW_SECONDS", 15.0),
+            omni_scan_window_seconds=_env_float("MINIMAPPR_OMNI_SCAN_WINDOW_SECONDS", 21.0),
             omni_scan_min_rms=_env_float("MINIMAPPR_OMNI_SCAN_MIN_RMS", 0.0),
+            t3t4_enabled=_env_bool("MINIMAPPR_T3T4_ENABLED", True),
+            t3t4_min_confidence=_env_float("MINIMAPPR_T3T4_MIN_CONFIDENCE", 0.5),
+            t3t4_min_repeats=_env_int("MINIMAPPR_T3T4_MIN_REPEATS", 3),
+            t3t4_tone_band_low_hz=_env_float("MINIMAPPR_T3T4_TONE_BAND_LOW_HZ", 2800.0),
+            t3t4_tone_band_high_hz=_env_float("MINIMAPPR_T3T4_TONE_BAND_HIGH_HZ", 3500.0),
             yamnet_min_confidence=_env_float("MINIMAPPR_YAMNET_MIN_CONFIDENCE", 0.25),
             yamnet_input_target_rms=_env_float("MINIMAPPR_YAMNET_INPUT_TARGET_RMS", 0.10),
             yamnet_max_input_gain=_env_float("MINIMAPPR_YAMNET_MAX_INPUT_GAIN", 32.0),

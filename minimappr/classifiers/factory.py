@@ -148,6 +148,15 @@ def _build_backend(
         except Exception as exc:
             logger.warning("Drone head unavailable (%s); dropping member %r.", exc, spec.member_id)
             return None
+    if backend == "t3t4_alarm":
+        from minimappr.classifiers.temporal_alarm import TemporalAlarmClassifier  # noqa: PLC0415
+
+        return TemporalAlarmClassifier(
+            min_repeats=settings.t3t4_min_repeats,
+            min_confidence=spec.min_confidence or settings.t3t4_min_confidence,
+            tone_band_low_hz=settings.t3t4_tone_band_low_hz,
+            tone_band_high_hz=settings.t3t4_tone_band_high_hz,
+        )
     if backend == "heuristic":
         return _create_heuristic(settings)
     logger.warning("Unknown classifier backend %r; dropping member %r.", backend, spec.member_id)
