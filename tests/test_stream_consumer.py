@@ -216,6 +216,130 @@ async def test_stream_consumer_mirrors_raw_audio_frame_into_audio_buffer() -> No
 
 
 @pytest.mark.asyncio
+async def test_stream_consumer_drops_bad_raw_coverage_and_advances_event_cursor(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    audio_buffer = MultiSensorBuffer(max_duration_seconds=2.0)
+    consumer = IngestStreamConsumer(
+        config=StreamConsumerConfig(sidecar_base_url="http://127.0.0.1:8081"),
+        ingest_transport=_RecordingIngestTransport(),
+        audio_buffer=audio_buffer,
+    )
+    samples = np.array([[0.10, 0.20, 0.30, 0.40]], dtype=np.float32)
+
+    def raw_event(*, end_sample_index: int) -> str:
+        return json.dumps(
+            {
+                "manifest_type": "raw_audio_frame",
+                "created_ns": 10_000,
+                "node_context": {
+                    "toa_ns": 1_000_000_000,
+                    "time_quality": "gps_locked",
+                    "node": {
+                        "id": "sirith-coverage-guard",
+                        "node_type": "sirith_tetra",
+                        "position_m": [0.0, 0.0, 0.0],
+                        "sensor_offsets_m": [[0.0, 0.0, 0.0]],
+                        "capabilities": ["audio"],
+                        "metadata": {},
+                    },
+                },
+                "raw_audio_frame": {
+                    "stream_key": "sirith-coverage-guard",
+                    "sample_rate_hz": 4,
+                    "channel_count": 1,
+                    "sample_count": 4,
+                    "sample_format": "pcm16le",
+                    "start_time_ns": 1_000_000_000,
+                    "end_time_ns": 2_000_000_000,
+                    "start_sample_index": 400,
+                    "end_sample_index": end_sample_index,
+                    "source_manifest_id": "source-coverage-guard",
+                },
+                "raw_audio_bytes": encode_pcm16le_b64(samples),
+            }
+        )
+
+    with caplog.at_level("WARNING", logger="minimappr.api.stream_consumer"):
+        await consumer._dispatch_sse_event(
+            event_type="message",
+            event_id="200",
+            data_lines=[raw_event(end_sample_index=408)],
+        )
+
+    assert consumer._stream_request_headers()["Last-Event-ID"] == "200"
+    assert consumer.snapshot_nodes() == {}
+    assert await audio_buffer.get_recent_window_for_sensors(
+        ["sirith-coverage-guard:ch0"], window_seconds=1.0
+    ) is None
+    assert "raw_audio_frame coverage validation failed" in caplog.text
+
+    await consumer._dispatch_sse_event(
+        event_type="message",
+        event_id="201",
+        data_lines=[raw_event(end_sample_index=404)],
+    )
+
+    assert consumer._stream_request_headers()["Last-Event-ID"] == "201"
+    assert "sirith-coverage-guard" in consumer.snapshot_nodes()
+    recent = await audio_buffer.get_recent_window_for_sensors(
+        ["sirith-coverage-guard:ch0"], window_seconds=1.0
+    )
+    assert recent is not None
+    assert recent[0]["sirith-coverage-guard:ch0"] == pytest.approx(samples[0], abs=4e-5)
+
+
+@pytest.mark.asyncio
+async def test_stream_consumer_contains_raw_buffer_value_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class _RejectingAudioBuffer:
+        async def append(self, **_kwargs) -> None:
+            raise ValueError("synthetic append rejection")
+
+    consumer = IngestStreamConsumer(
+        config=StreamConsumerConfig(sidecar_base_url="http://127.0.0.1:8081"),
+        ingest_transport=_RecordingIngestTransport(),
+        audio_buffer=_RejectingAudioBuffer(),  # type: ignore[arg-type]
+    )
+    samples = np.array([[0.10, 0.20]], dtype=np.float32)
+    payload = json.dumps(
+        {
+            "manifest_type": "raw_audio_frame",
+            "node_context": {
+                "node": {
+                    "id": "sirith-value-error",
+                    "node_type": "sirith_tetra",
+                    "position_m": [0.0, 0.0, 0.0],
+                    "sensor_offsets_m": [[0.0, 0.0, 0.0]],
+                    "capabilities": ["audio"],
+                    "metadata": {},
+                }
+            },
+            "raw_audio_frame": {
+                "sample_rate_hz": 2,
+                "channel_count": 1,
+                "sample_count": 2,
+                "start_time_ns": 1_000_000_000,
+                "end_time_ns": 2_000_000_000,
+                "start_sample_index": 20,
+                "end_sample_index": 22,
+            },
+            "raw_audio_bytes": encode_pcm16le_b64(samples),
+        }
+    )
+
+    with caplog.at_level("WARNING", logger="minimappr.api.stream_consumer"):
+        await consumer._dispatch_sse_event(
+            event_type="message", event_id="300", data_lines=[payload]
+        )
+
+    assert consumer._stream_request_headers()["Last-Event-ID"] == "300"
+    assert consumer.snapshot_nodes() == {}
+    assert "raw_audio_frame buffer append failed; dropping event" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_stream_consumer_raw_audio_frame_matches_direct_buffer_append_for_late_gap_fill() -> None:
     transport = _RecordingIngestTransport()
     mirrored_buffer = MultiSensorBuffer(max_duration_seconds=4.0)

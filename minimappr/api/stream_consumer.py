@@ -453,6 +453,33 @@ class IngestStreamConsumer:
             )
             end_time_ns = start_time_ns + frame_duration_ns
 
+        decoded_sample_count = int(channels_first.shape[1])
+        declared_sample_count = _coerce_int(frame_payload.get("sample_count"))
+        start_sample_index = _coerce_int(frame_payload.get("start_sample_index"))
+        end_sample_index = _coerce_int(frame_payload.get("end_sample_index"))
+        coverage_error: str | None = None
+        if declared_sample_count is not None and declared_sample_count != decoded_sample_count:
+            coverage_error = "declared sample_count does not match decoded PCM"
+        elif start_sample_index is not None and end_sample_index is not None:
+            if end_sample_index < start_sample_index:
+                coverage_error = "end_sample_index is before start_sample_index"
+            elif end_sample_index - start_sample_index != decoded_sample_count:
+                coverage_error = "explicit sample coverage does not match decoded PCM"
+        if coverage_error is not None:
+            logger.warning(
+                "raw_audio_frame coverage validation failed: %s",
+                coverage_error,
+                extra={
+                    "node_id": node.id,
+                    "source_manifest_id": frame_payload.get("source_manifest_id"),
+                    "start_sample_index": start_sample_index,
+                    "end_sample_index": end_sample_index,
+                    "declared_sample_count": declared_sample_count,
+                    "decoded_sample_count": decoded_sample_count,
+                },
+            )
+            return
+
         peak_rms = await asyncio.to_thread(_peak_channel_rms, channels_first)
         audio_debug_context = dict(node_context)
         audio_debug_context["audio_debug"] = {
@@ -460,26 +487,38 @@ class IngestStreamConsumer:
             "active_sensor_count": channel_count,
             "rms": peak_rms,
         }
+        if self._audio_buffer is not None:
+            try:
+                for channel_index, samples in enumerate(channels_first):
+                    await self._audio_buffer.append(
+                        sensor_id=f"{node.id}:ch{channel_index}",
+                        sample_rate_hz=sample_rate_hz,
+                        start_time_ns=start_time_ns,
+                        samples=samples,
+                        start_sample_index=start_sample_index,
+                        end_sample_index=end_sample_index,
+                        end_time_ns=end_time_ns,
+                    )
+            except ValueError as exc:
+                logger.warning(
+                    "raw_audio_frame buffer append failed; dropping event: %s",
+                    exc,
+                    extra={
+                        "node_id": node.id,
+                        "source_manifest_id": frame_payload.get("source_manifest_id"),
+                        "start_sample_index": start_sample_index,
+                        "end_sample_index": end_sample_index,
+                        "declared_sample_count": declared_sample_count,
+                        "decoded_sample_count": decoded_sample_count,
+                    },
+                )
+                return
+
         self._record_node_snapshot(
             node=node,
             node_context=audio_debug_context,
             node_audio_time_ns=end_time_ns,
         )
-
-        if self._audio_buffer is None:
-            return
-        start_sample_index = _coerce_int(frame_payload.get("start_sample_index"))
-        end_sample_index = _coerce_int(frame_payload.get("end_sample_index"))
-        for channel_index, samples in enumerate(channels_first):
-            await self._audio_buffer.append(
-                sensor_id=f"{node.id}:ch{channel_index}",
-                sample_rate_hz=sample_rate_hz,
-                start_time_ns=start_time_ns,
-                samples=samples,
-                start_sample_index=start_sample_index,
-                end_sample_index=end_sample_index,
-                end_time_ns=end_time_ns,
-            )
 
     async def _handle_localization_result(self, manifest: dict[str, Any]) -> None:
         """Deliver a localization result (with optional embedded classifier_render)."""

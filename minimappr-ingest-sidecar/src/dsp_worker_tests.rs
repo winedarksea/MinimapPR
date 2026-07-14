@@ -503,6 +503,7 @@ async fn worker_publishes_localization_and_classifier_render_contract() {
         .iter()
         .find(|m| m.manifest_type == "raw_audio_frame")
         .expect("raw_audio_frame SSE event");
+    assert_eq!(raw_audio_event.manifest_id, "raw-audio-manifest-raw-test");
     let render_event = events
         .iter()
         .find(|m| m.manifest_type == "classifier_render")
@@ -567,6 +568,90 @@ async fn worker_publishes_localization_and_classifier_render_contract() {
     assert_eq!(state.total_tdoa_results, 1);
     assert_eq!(state.total_localization_results, 1);
     assert_eq!(state.total_classifier_renders, 1);
+}
+
+#[tokio::test]
+async fn worker_splits_gapped_batch_before_raw_publication_and_buffering() {
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest_store = ManifestStore::new(tmp.path());
+    manifest_store.ensure_initialized().await.unwrap();
+    let derived_cache = DerivedCache::new(
+        tmp.path(),
+        DerivedCacheConfig {
+            budget_bytes: 16_777_216,
+            admission_reserve_bytes: 0,
+        },
+    );
+    derived_cache.ensure_initialized().await.unwrap();
+
+    let state: SharedDspState = Arc::new(RwLock::new(Default::default()));
+    let event_publisher = DspEventPublisher::new(state.clone(), 32, 32, 50);
+    let mut dsp_result_rx = event_publisher.subscribe();
+    let mut worker = DspWorker::new(
+        manifest_store,
+        derived_cache,
+        DspWorkerConfig {
+            max_buffer_seconds: 2.0,
+            max_trusted_node_clock_skew_seconds: f64::MAX,
+            ..DspWorkerConfig::default()
+        },
+        state,
+    )
+    .with_dsp_event_publisher(event_publisher);
+
+    let manifest = raw_manifest_for_payload(
+        tmp.path(),
+        "manifest-gapped-batch",
+        "segment-gapped-batch",
+        store_forward_payload_with_internal_gap(),
+    )
+    .await;
+    worker.process_one(manifest, 1).await;
+
+    let events = drain_published_manifests(&mut dsp_result_rx);
+    let raw_events = events
+        .iter()
+        .filter(|manifest| manifest.manifest_type == "raw_audio_frame")
+        .collect::<Vec<_>>();
+    assert_eq!(raw_events.len(), 2);
+    assert_eq!(
+        raw_events[0].manifest_id,
+        "raw-audio-manifest-gapped-batch-segment-0"
+    );
+    assert_eq!(
+        raw_events[1].manifest_id,
+        "raw-audio-manifest-gapped-batch-segment-1"
+    );
+    assert_eq!(
+        raw_events[0].raw_audio_frame.as_ref().unwrap()["start_sample_index"],
+        0
+    );
+    assert_eq!(
+        raw_events[0].raw_audio_frame.as_ref().unwrap()["end_sample_index"],
+        512
+    );
+    assert_eq!(
+        raw_events[1].raw_audio_frame.as_ref().unwrap()["start_sample_index"],
+        1024
+    );
+    assert_eq!(
+        raw_events[1].raw_audio_frame.as_ref().unwrap()["end_sample_index"],
+        1536
+    );
+    assert!(raw_events.iter().all(|event| {
+        event.raw_audio_frame.as_ref().unwrap()["sample_count"] == 512
+            && event.raw_audio_frame.as_ref().unwrap()["source_manifest_id"]
+                == "manifest-gapped-batch"
+    }));
+
+    let first_channel_buffer = &worker.buffers["sirith-test__audio_main__abcd"][0];
+    let coverage = first_channel_buffer
+        .coverage_ending_at(1_096_000_000, 0.096)
+        .expect("coverage through both segments");
+    assert_eq!(coverage.sample_count, 1536);
+    assert_eq!(coverage.covered_samples, 1024);
+    assert_eq!(coverage.missing_samples, 512);
+    assert_eq!(coverage.max_gap_samples, 512);
 }
 
 #[tokio::test]
@@ -1630,6 +1715,21 @@ fn store_forward_payload_with_channel_count(
                 "time_quality": "gps_locked"
             }
         }]
+    })
+    .to_string()
+}
+
+fn store_forward_payload_with_internal_gap() -> String {
+    let first: serde_json::Value =
+        serde_json::from_str(&store_forward_payload_with_timing(1_000_000_000, 0, 1)).unwrap();
+    let second: serde_json::Value =
+        serde_json::from_str(&store_forward_payload_with_timing(1_064_000_000, 1024, 2)).unwrap();
+    serde_json::json!({
+        "node": first["node"].clone(),
+        "buffered_frames": [
+            first["buffered_frames"][0].clone(),
+            second["buffered_frames"][0].clone()
+        ]
     })
     .to_string()
 }

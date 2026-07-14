@@ -91,14 +91,14 @@ fn read_binary_ingest_version(reader: &mut BinaryReader<'_>) -> BoxedResult<u8> 
     Ok(version)
 }
 
-pub fn decode_audio_payload(raw_payload: &[u8]) -> BoxedResult<DecodedAudioPayload> {
+pub fn decode_audio_payload_segments(raw_payload: &[u8]) -> BoxedResult<Vec<DecodedAudioPayload>> {
     if raw_payload.starts_with(b"MMB2") || raw_payload.starts_with(b"MMB3") {
         return decode_binary_audio(raw_payload);
     }
     decode_store_forward_audio(raw_payload)
 }
 
-fn decode_binary_audio(raw_payload: &[u8]) -> BoxedResult<DecodedAudioPayload> {
+fn decode_binary_audio(raw_payload: &[u8]) -> BoxedResult<Vec<DecodedAudioPayload>> {
     let mut reader = BinaryReader::new(raw_payload);
     let _version = read_binary_ingest_version(&mut reader)?;
 
@@ -110,14 +110,10 @@ fn decode_binary_audio(raw_payload: &[u8]) -> BoxedResult<DecodedAudioPayload> {
 
     skip_binary_node(&mut reader)?;
 
-    let mut channels: Vec<Vec<f32>> = Vec::new();
+    let mut segments = Vec::new();
+    let mut current_segment: Option<DecodedAudioPayload> = None;
     let mut sample_rate_hz: Option<u32> = None;
-    let mut first_start_time_ns: Option<i128> = None;
-    let mut first_start_sample_index: Option<i64> = None;
-    let mut last_end_sample_index: Option<i64> = None;
-    let mut latest_temperature_c: Option<f32> = None;
-    let mut latest_humidity_fraction: Option<f32> = None;
-    let mut latest_environment_source: Option<String> = None;
+    let mut channel_count: Option<usize> = None;
     for _ in 0..frame_count {
         let frame = read_binary_audio_frame(&mut reader)?;
         if let Some(existing_rate) = sample_rate_hz {
@@ -126,33 +122,45 @@ fn decode_binary_audio(raw_payload: &[u8]) -> BoxedResult<DecodedAudioPayload> {
             }
         }
         sample_rate_hz = Some(frame.sample_rate_hz);
-        first_start_time_ns.get_or_insert(frame.start_time_ns as i128);
-        first_start_sample_index.get_or_insert(frame.start_sample_index as i64);
-        last_end_sample_index = Some(frame.end_sample_index as i64);
-        if frame.temperature_c.is_some() {
-            latest_temperature_c = frame.temperature_c;
+        if channel_count.is_some_and(|existing| existing != frame.channels) {
+            return Err("binary ingest frames mixed channel counts".into());
         }
-        if frame.humidity_fraction.is_some() {
-            latest_humidity_fraction = frame.humidity_fraction;
+        channel_count = Some(frame.channels);
+        let frame_start_sample_index = i64::try_from(frame.start_sample_index)?;
+        let frame_end_sample_index = i64::try_from(frame.end_sample_index)?;
+        let starts_new_segment = current_segment
+            .as_ref()
+            .is_some_and(|segment| segment.end_sample_index != Some(frame_start_sample_index));
+        if starts_new_segment {
+            segments.push(current_segment.take().expect("current segment exists"));
         }
-        if frame.environment_source.is_some() {
-            latest_environment_source = frame.environment_source;
-        }
-        append_channels(&mut channels, frame.channels, frame.samples);
+        let segment = current_segment.get_or_insert_with(|| DecodedAudioPayload {
+            channels: Vec::new(),
+            sample_rate_hz: frame.sample_rate_hz,
+            start_time_ns: Some(frame.start_time_ns as i128),
+            start_sample_index: Some(frame_start_sample_index),
+            end_sample_index: Some(frame_start_sample_index),
+            temperature_c: None,
+            humidity_fraction: None,
+            environment_source: None,
+        });
+        append_channels(&mut segment.channels, frame.channels, frame.samples);
+        segment.end_sample_index = Some(frame_end_sample_index);
+        update_segment_environment(
+            segment,
+            frame.temperature_c,
+            frame.humidity_fraction,
+            frame.environment_source,
+        );
     }
     if reader.remaining() != 0 {
         return Err("binary ingest payload has trailing bytes".into());
     }
-    Ok(DecodedAudioPayload {
-        channels,
-        sample_rate_hz: sample_rate_hz.ok_or("binary ingest payload contained no audio")?,
-        start_time_ns: first_start_time_ns,
-        start_sample_index: first_start_sample_index,
-        end_sample_index: last_end_sample_index,
-        temperature_c: latest_temperature_c,
-        humidity_fraction: latest_humidity_fraction,
-        environment_source: latest_environment_source,
-    })
+    if let Some(segment) = current_segment {
+        segments.push(segment);
+    }
+    sample_rate_hz.ok_or("binary ingest payload contained no audio")?;
+    Ok(segments)
 }
 
 fn skip_binary_node(reader: &mut BinaryReader<'_>) -> BoxedResult<()> {
@@ -415,28 +423,16 @@ struct StoreForwardFrame {
     samples_b64: String,
 }
 
-fn decode_store_forward_audio(raw_payload: &[u8]) -> BoxedResult<DecodedAudioPayload> {
+fn decode_store_forward_audio(raw_payload: &[u8]) -> BoxedResult<Vec<DecodedAudioPayload>> {
     let envelope: StoreForwardEnvelope = serde_json::from_slice(raw_payload)?;
-    let mut channels: Vec<Vec<f32>> = Vec::new();
+    let mut segments = Vec::new();
+    let mut current_segment: Option<DecodedAudioPayload> = None;
+    let mut previous_frame_end_sample_index: Option<i64> = None;
+    let mut current_segment_has_complete_indices = true;
     let mut sample_rate_hz: Option<u32> = None;
-    let mut first_start_time_ns: Option<i128> = None;
-    let mut first_start_sample_index: Option<i64> = None;
-    let mut last_end_sample_index: Option<i64> = None;
-    let mut latest_temperature_c: Option<f32> = None;
-    let mut latest_humidity_fraction: Option<f32> = None;
-    let mut latest_environment_source: Option<String> = None;
+    let mut channel_count: Option<usize> = None;
     for buffered in envelope.buffered_frames {
-        if let Some(environment) = buffered.environment {
-            if environment.temperature_c.is_some() {
-                latest_temperature_c = environment.temperature_c;
-            }
-            if environment.humidity_fraction.is_some() {
-                latest_humidity_fraction = environment.humidity_fraction;
-            }
-            if environment.source.is_some() {
-                latest_environment_source = environment.source;
-            }
-        }
+        let environment = buffered.environment;
         let frame = buffered.frame;
         if frame.channels == 0 {
             return Err("store-forward frame must have at least one channel".into());
@@ -446,6 +442,10 @@ fn decode_store_forward_audio(raw_payload: &[u8]) -> BoxedResult<DecodedAudioPay
                 return Err("store-forward frames mixed sample rates".into());
             }
         }
+        if channel_count.is_some_and(|existing| existing != frame.channels) {
+            return Err("store-forward frames mixed channel counts".into());
+        }
+        channel_count = Some(frame.channels);
         let raw_audio = STANDARD.decode(frame.samples_b64.as_bytes())?;
         let decoded = pcm16le_to_f32(&raw_audio);
         if !decoded.len().is_multiple_of(frame.channels) {
@@ -457,33 +457,88 @@ fn decode_store_forward_audio(raw_payload: &[u8]) -> BoxedResult<DecodedAudioPay
                 return Err("store-forward samples_per_channel does not match PCM payload".into());
             }
         }
+        let frame_start_sample_index = frame.start_sample_index.map(i64::try_from).transpose()?;
+        let frame_end_sample_index = match (frame_start_sample_index, frame.end_sample_index) {
+            (Some(start), Some(end)) => {
+                let end = i64::try_from(end)?;
+                if end < start || usize::try_from(end - start)? != frame_samples {
+                    return Err(
+                        "store-forward frame sample indices do not match PCM payload".into(),
+                    );
+                }
+                Some(end)
+            }
+            (Some(start), None) => Some(start.saturating_add(i64::try_from(frame_samples)?)),
+            (None, _) => None,
+        };
         sample_rate_hz = Some(frame.sample_rate_hz);
-        first_start_time_ns.get_or_insert(
-            frame
-                .start_time_ns
-                .or(frame.utc_start_ns)
-                .unwrap_or_default() as i128,
-        );
-        if let Some(start) = frame.start_sample_index {
-            first_start_sample_index.get_or_insert(start as i64);
-            last_end_sample_index = Some(
+        let starts_new_segment = previous_frame_end_sample_index
+            .zip(frame_start_sample_index)
+            .is_some_and(|(previous_end, next_start)| previous_end != next_start);
+        if starts_new_segment {
+            let mut completed_segment = current_segment.take().expect("current segment exists");
+            if !current_segment_has_complete_indices {
+                completed_segment.start_sample_index = None;
+                completed_segment.end_sample_index = None;
+            }
+            segments.push(completed_segment);
+            current_segment_has_complete_indices = true;
+        }
+        let segment = current_segment.get_or_insert_with(|| DecodedAudioPayload {
+            channels: Vec::new(),
+            sample_rate_hz: frame.sample_rate_hz,
+            start_time_ns: Some(
                 frame
-                    .end_sample_index
-                    .unwrap_or(start.saturating_add(frame_samples as u64)) as i64,
+                    .start_time_ns
+                    .or(frame.utc_start_ns)
+                    .unwrap_or_default() as i128,
+            ),
+            start_sample_index: frame_start_sample_index,
+            end_sample_index: frame_end_sample_index,
+            temperature_c: None,
+            humidity_fraction: None,
+            environment_source: None,
+        });
+        append_channels(&mut segment.channels, frame.channels, decoded);
+        current_segment_has_complete_indices &=
+            frame_start_sample_index.is_some() && frame_end_sample_index.is_some();
+        segment.end_sample_index = frame_end_sample_index;
+        if let Some(environment) = environment {
+            update_segment_environment(
+                segment,
+                environment.temperature_c,
+                environment.humidity_fraction,
+                environment.source,
             );
         }
-        append_channels(&mut channels, frame.channels, decoded);
+        previous_frame_end_sample_index = frame_end_sample_index;
     }
-    Ok(DecodedAudioPayload {
-        channels,
-        sample_rate_hz: sample_rate_hz.ok_or("store-forward payload contained no audio")?,
-        start_time_ns: first_start_time_ns,
-        start_sample_index: first_start_sample_index,
-        end_sample_index: last_end_sample_index,
-        temperature_c: latest_temperature_c,
-        humidity_fraction: latest_humidity_fraction,
-        environment_source: latest_environment_source,
-    })
+    if let Some(mut segment) = current_segment {
+        if !current_segment_has_complete_indices {
+            segment.start_sample_index = None;
+            segment.end_sample_index = None;
+        }
+        segments.push(segment);
+    }
+    sample_rate_hz.ok_or("store-forward payload contained no audio")?;
+    Ok(segments)
+}
+
+fn update_segment_environment(
+    segment: &mut DecodedAudioPayload,
+    temperature_c: Option<f32>,
+    humidity_fraction: Option<f32>,
+    environment_source: Option<String>,
+) {
+    if temperature_c.is_some() {
+        segment.temperature_c = temperature_c;
+    }
+    if humidity_fraction.is_some() {
+        segment.humidity_fraction = humidity_fraction;
+    }
+    if environment_source.is_some() {
+        segment.environment_source = environment_source;
+    }
 }
 
 fn append_channels(
@@ -509,7 +564,9 @@ fn pcm16le_to_f32(bytes: &[u8]) -> Vec<f32> {
 
 #[cfg(test)]
 mod tests {
-    use super::decode_audio_payload;
+    use super::decode_audio_payload_segments;
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use serde_json::json;
 
     fn push_string(payload: &mut Vec<u8>, value: &str) {
         payload.push(u8::try_from(value.len()).expect("test string fits in length byte"));
@@ -598,19 +655,25 @@ mod tests {
         section
     }
 
-    fn push_binary_frame(payload: &mut Vec<u8>, version: u8) {
-        payload.extend_from_slice(&1_000_u64.to_le_bytes());
-        payload.extend_from_slice(&2_000_u64.to_le_bytes());
-        payload.extend_from_slice(&0_u64.to_le_bytes());
-        payload.extend_from_slice(&2_u64.to_le_bytes());
+    fn push_binary_frame_at(
+        payload: &mut Vec<u8>,
+        version: u8,
+        start_time_ns: u64,
+        start_sample_index: u64,
+        sequence: u64,
+    ) {
+        payload.extend_from_slice(&start_time_ns.to_le_bytes());
+        payload.extend_from_slice(&(start_time_ns + 125_000).to_le_bytes());
+        payload.extend_from_slice(&start_sample_index.to_le_bytes());
+        payload.extend_from_slice(&(start_sample_index + 2).to_le_bytes());
         payload.extend_from_slice(&16_000_u32.to_le_bytes());
         payload.push(1); // channels
         if version == 3 {
             payload.push(3); // synthetic audio source
         }
-        payload.extend_from_slice(&1_u64.to_le_bytes());
-        payload.extend_from_slice(&1_000_u64.to_le_bytes());
-        payload.extend_from_slice(&1_250_u64.to_le_bytes());
+        payload.extend_from_slice(&sequence.to_le_bytes());
+        payload.extend_from_slice(&start_time_ns.to_le_bytes());
+        payload.extend_from_slice(&(start_time_ns + 250).to_le_bytes());
         payload.push(0); // gps_locked
         if version == 3 {
             payload.extend_from_slice(&2_u32.to_le_bytes());
@@ -625,6 +688,10 @@ mod tests {
         }
         payload.extend_from_slice(&0_i16.to_le_bytes());
         payload.extend_from_slice(&32_767_i16.to_le_bytes());
+    }
+
+    fn push_binary_frame(payload: &mut Vec<u8>, version: u8) {
+        push_binary_frame_at(payload, version, 1_000, 0, 1);
     }
 
     fn binary_payload(version: u8) -> Vec<u8> {
@@ -642,9 +709,38 @@ mod tests {
         payload
     }
 
+    fn binary_payload_with_sample_starts(version: u8, sample_starts: &[u64]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(match version {
+            2 => b"MMB2",
+            3 => b"MMB3",
+            _ => panic!("unsupported test version"),
+        });
+        payload.push(version);
+        payload.push(0);
+        payload.extend_from_slice(
+            &u16::try_from(sample_starts.len())
+                .expect("test frame count fits in u16")
+                .to_le_bytes(),
+        );
+        push_binary_node(&mut payload);
+        for (frame_index, start_sample_index) in sample_starts.iter().copied().enumerate() {
+            push_binary_frame_at(
+                &mut payload,
+                version,
+                1_000 + u64::try_from(frame_index).unwrap() * 125_000,
+                start_sample_index,
+                u64::try_from(frame_index).unwrap() + 1,
+            );
+        }
+        payload
+    }
+
     #[test]
     fn decode_audio_payload_accepts_mmb2_binary_ingest() {
-        let decoded = decode_audio_payload(&binary_payload(2)).expect("MMB2 payload should decode");
+        let decoded_segments =
+            decode_audio_payload_segments(&binary_payload(2)).expect("MMB2 payload should decode");
+        let decoded = &decoded_segments[0];
 
         assert_eq!(decoded.sample_rate_hz, 16_000);
         assert_eq!(decoded.channels.len(), 1);
@@ -658,7 +754,9 @@ mod tests {
 
     #[test]
     fn decode_audio_payload_accepts_mmb3_binary_ingest() {
-        let decoded = decode_audio_payload(&binary_payload(3)).expect("MMB3 payload should decode");
+        let decoded_segments =
+            decode_audio_payload_segments(&binary_payload(3)).expect("MMB3 payload should decode");
+        let decoded = &decoded_segments[0];
 
         assert_eq!(decoded.sample_rate_hz, 16_000);
         assert_eq!(decoded.channels.len(), 1);
@@ -669,5 +767,93 @@ mod tests {
         assert_eq!(decoded.temperature_c, Some(21.5));
         assert_eq!(decoded.humidity_fraction, Some(0.55));
         assert_eq!(decoded.environment_source.as_deref(), Some("bme280"));
+    }
+
+    #[test]
+    fn binary_decoder_splits_gap_and_overlap_boundaries() {
+        for version in [2, 3] {
+            let decoded_segments = decode_audio_payload_segments(
+                &binary_payload_with_sample_starts(version, &[0, 2, 8, 6]),
+            )
+            .expect("gapped binary payload should decode into segments");
+
+            assert_eq!(decoded_segments.len(), 3);
+            assert_eq!(decoded_segments[0].start_sample_index, Some(0));
+            assert_eq!(decoded_segments[0].end_sample_index, Some(4));
+            assert_eq!(decoded_segments[0].channels[0].len(), 4);
+            assert_eq!(decoded_segments[1].start_sample_index, Some(8));
+            assert_eq!(decoded_segments[1].end_sample_index, Some(10));
+            assert_eq!(decoded_segments[2].start_sample_index, Some(6));
+            assert_eq!(decoded_segments[2].end_sample_index, Some(8));
+        }
+    }
+
+    #[test]
+    fn store_forward_decoder_splits_gaps_and_preserves_missing_index_compatibility() {
+        let pcm = STANDARD.encode(
+            [0_i16, 1_i16]
+                .into_iter()
+                .flat_map(i16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        );
+        let indexed_payload = json!({
+            "buffered_frames": [
+                {"frame": {"sample_rate_hz": 16_000, "channels": 1, "start_time_ns": 1_000,
+                    "start_sample_index": 0, "end_sample_index": 2, "samples_per_channel": 2,
+                    "samples_b64": pcm}},
+                {"frame": {"sample_rate_hz": 16_000, "channels": 1, "start_time_ns": 2_000,
+                    "start_sample_index": 6, "end_sample_index": 8, "samples_per_channel": 2,
+                    "samples_b64": pcm}}
+            ]
+        });
+        let segments =
+            decode_audio_payload_segments(&serde_json::to_vec(&indexed_payload).unwrap())
+                .expect("indexed store-forward payload should decode");
+        assert_eq!(segments.len(), 2);
+        assert_eq!(
+            (segments[0].start_sample_index, segments[0].end_sample_index),
+            (Some(0), Some(2))
+        );
+        assert_eq!(
+            (segments[1].start_sample_index, segments[1].end_sample_index),
+            (Some(6), Some(8))
+        );
+
+        let unindexed_payload = json!({
+            "buffered_frames": [
+                {"frame": {"sample_rate_hz": 16_000, "channels": 1, "start_time_ns": 1_000,
+                    "samples_per_channel": 2, "samples_b64": pcm}},
+                {"frame": {"sample_rate_hz": 16_000, "channels": 1, "start_time_ns": 9_000,
+                    "samples_per_channel": 2, "samples_b64": pcm}}
+            ]
+        });
+        let segments =
+            decode_audio_payload_segments(&serde_json::to_vec(&unindexed_payload).unwrap())
+                .expect("unindexed store-forward payload should retain legacy concatenation");
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].channels[0].len(), 4);
+        assert_eq!(segments[0].start_sample_index, None);
+        assert_eq!(segments[0].end_sample_index, None);
+    }
+
+    #[test]
+    fn store_forward_decoder_rejects_frame_coverage_mismatch() {
+        let pcm = STANDARD.encode(
+            [0_i16, 1_i16]
+                .into_iter()
+                .flat_map(i16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        );
+        let payload = json!({
+            "buffered_frames": [{"frame": {
+                "sample_rate_hz": 16_000, "channels": 1, "start_time_ns": 1_000,
+                "start_sample_index": 0, "end_sample_index": 4, "samples_per_channel": 2,
+                "samples_b64": pcm
+            }}]
+        });
+
+        let error = decode_audio_payload_segments(&serde_json::to_vec(&payload).unwrap())
+            .expect_err("mismatched coverage must be rejected");
+        assert!(error.to_string().contains("sample indices"));
     }
 }

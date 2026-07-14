@@ -9,7 +9,7 @@ use std::{
 
 use crate::{
     actors::{classification::ClassificationWorker, environment::EnvironmentCache},
-    audio_payload::{decode_audio_payload, DecodedAudioPayload},
+    audio_payload::{decode_audio_payload_segments, DecodedAudioPayload},
     classifier_helper::ManifestClassificationAnnotator,
     derived_cache::DerivedCache,
     diagnostics::IngestDiagnostics,
@@ -449,6 +449,8 @@ struct RawAudioFramePublishRequest<'a> {
     start_time_ns: i128,
     end_time_ns: i128,
     created_ns: u128,
+    segment_index: usize,
+    segment_count: usize,
 }
 
 pub struct DspWorker {
@@ -702,33 +704,50 @@ impl DspWorker {
         manifest: DspManifest,
         pending_backlog_depth: usize,
     ) -> Option<ComputePayload> {
-        let owned = self.prepare_owned_manifest_audio(manifest).await?;
+        let owned_segments = self.prepare_owned_manifest_audio(manifest).await?;
 
-        self.publish_raw_audio_frame_for_owned_manifest(&owned)
+        for (segment_index, owned) in owned_segments.iter().enumerate() {
+            self.publish_raw_audio_frame_for_owned_manifest(
+                owned,
+                segment_index,
+                owned_segments.len(),
+            )
             .await;
+        }
 
         if self
-            .should_skip_stale_manifest_for_live_buffer(&owned)
+            .should_skip_stale_manifest_for_live_buffer(owned_segments.first()?)
             .await
         {
             return None;
         }
 
-        if owned.channel_count > 4 {
-            return self.dispatch_large_array_manifest(owned, pending_backlog_depth);
+        if owned_segments.last()?.channel_count > 4 {
+            // Large-array fallback rendering bypasses the rolling buffer. Use
+            // only the newest contiguous segment rather than falsely joining
+            // audio across an explicit capture gap.
+            return self.dispatch_large_array_manifest(
+                owned_segments.into_iter().last()?,
+                pending_backlog_depth,
+            );
         }
 
-        let buffered = self.buffer_owned_manifest_audio(&owned).await?;
-        self.dispatch_buffered_manifest(owned, buffered, pending_backlog_depth)
+        let mut final_owned_and_buffered = None;
+        for owned in owned_segments {
+            let buffered = self.buffer_owned_manifest_audio(&owned).await?;
+            final_owned_and_buffered = Some((owned, buffered));
+        }
+        let (final_owned, final_buffered) = final_owned_and_buffered?;
+        self.dispatch_buffered_manifest(final_owned, final_buffered, pending_backlog_depth)
             .await
     }
 
     async fn prepare_owned_manifest_audio(
         &mut self,
         mut manifest: DspManifest,
-    ) -> Option<OwnedManifestAudio> {
+    ) -> Option<Vec<OwnedManifestAudio>> {
         let now_ns = system_now_ns();
-        let Some(first_handle) = manifest.source_handles.first() else {
+        let Some(first_handle) = manifest.source_handles.first().cloned() else {
             self.mark_source_manifest_consumed_if_persisted(&manifest)
                 .await;
             return None;
@@ -754,8 +773,8 @@ impl DspWorker {
             return None;
         };
 
-        let mut decoded = match decode_audio_payload(&raw_payload) {
-            Ok(decoded) => decoded,
+        let decoded_segments = match decode_audio_payload_segments(&raw_payload) {
+            Ok(decoded_segments) => decoded_segments,
             Err(err) => {
                 self.note_failure().await;
                 warn!(
@@ -768,82 +787,23 @@ impl DspWorker {
                 return None;
             }
         };
-        if decoded.channels.is_empty() {
+        if decoded_segments.is_empty()
+            || decoded_segments
+                .iter()
+                .any(|decoded| decoded.channels.is_empty())
+        {
             self.mark_source_manifest_consumed_if_persisted(&manifest)
                 .await;
             return None;
         }
 
-        {
-            let node_id_key = stream_key.split("__").next().unwrap_or(&stream_key);
-            let st = self.state.read().await;
-            let cfg = st.node_audio_overrides.get(node_id_key).cloned();
-            drop(st);
-            let cfg = cfg.unwrap_or_else(|| self.config.default_audio_config.clone());
-            if !cfg.effective_stages().is_empty() {
-                let node_state = self
-                    .node_audio_state
-                    .entry(node_id_key.to_string())
-                    .or_default();
-                node_state.apply(&mut decoded.channels, &cfg, decoded.sample_rate_hz);
-            }
-        }
-
+        let channel_count = decoded_segments[0].channels.len();
+        self.apply_automatic_gps_geometry(&mut manifest, &stream_key, channel_count);
         let source_ids = manifest
             .source_handles
             .iter()
             .map(|handle| handle.segment_id.clone())
             .collect::<Vec<_>>();
-        let sr = decoded.sample_rate_hz.max(1);
-        let (env_temp_c, env_humidity_fraction) =
-            if decoded.temperature_c.is_none() && decoded.humidity_fraction.is_none() {
-                if let Some(cache) = &self.env_cache {
-                    let query_ns = first_handle.toa_ns.unwrap_or(now_ns as u64);
-                    let node_id = stream_key.split("__").next().unwrap_or(&stream_key);
-                    cache
-                        .interpolate(node_id, query_ns)
-                        .await
-                        .map(|(temperature_c, humidity_fraction)| {
-                            (Some(temperature_c), Some(humidity_fraction))
-                        })
-                        .unwrap_or((None, None))
-                } else {
-                    (None, None)
-                }
-            } else {
-                (None, None)
-            };
-
-        let effective_temperature_c = decoded.temperature_c.or(env_temp_c);
-        let effective_humidity_fraction = decoded.humidity_fraction.or(env_humidity_fraction);
-        let effective_sound_speed_mps = resolve_effective_sound_speed_mps(
-            &self.config,
-            effective_temperature_c,
-            effective_humidity_fraction,
-        );
-
-        let frames_all = decoded.channels.iter().map(Vec::len).min().unwrap_or(0);
-        let render_duration_ns =
-            (frames_all as i128).saturating_mul(1_000_000_000) / i128::from(sr.max(1));
-        let start_time_ns = resolve_buffer_start_time_ns(&decoded, first_handle, sr, now_ns);
-        let node_timestamp_is_available =
-            decoded.start_time_ns.is_some_and(|start_ns| start_ns > 0)
-                || first_handle.toa_ns.is_some();
-        let skew_ns = (start_time_ns - now_ns as i128).unsigned_abs();
-        let max_skew_ns =
-            (self.config.max_trusted_node_clock_skew_seconds * 1_000_000_000.0).round() as u128;
-        let buffer_uses_receipt_time =
-            should_use_receipt_time_alignment(node_timestamp_is_available, skew_ns, max_skew_ns);
-        let (buffer_start_time_ns, buffer_end_time_ns) = if buffer_uses_receipt_time {
-            let anchor_ns = first_handle.tor_ns.unwrap_or(now_ns as u64) as i128;
-            let start_ns = anchor_ns.saturating_sub(render_duration_ns).max(1);
-            (start_ns, anchor_ns)
-        } else {
-            (start_time_ns, start_time_ns + render_duration_ns)
-        };
-
-        let channel_count = decoded.channels.len();
-        self.apply_automatic_gps_geometry(&mut manifest, &stream_key, channel_count);
         let classification_window_sec = self
             .config
             .classification_window_seconds
@@ -866,31 +826,113 @@ impl DspWorker {
                     (0..channel_count).collect(),
                 )
             });
-        let start_sample_index = decoded.start_sample_index;
-        let end_sample_index = decoded.end_sample_index;
+        let segment_count = decoded_segments.len();
+        let mut manifest_for_final_segment = Some(manifest);
+        let mut owned_segments = Vec::with_capacity(segment_count);
+        for (segment_index, mut decoded) in decoded_segments.into_iter().enumerate() {
+            {
+                let node_id_key = stream_key.split("__").next().unwrap_or(&stream_key);
+                let st = self.state.read().await;
+                let cfg = st.node_audio_overrides.get(node_id_key).cloned();
+                drop(st);
+                let cfg = cfg.unwrap_or_else(|| self.config.default_audio_config.clone());
+                if !cfg.effective_stages().is_empty() {
+                    let node_state = self
+                        .node_audio_state
+                        .entry(node_id_key.to_string())
+                        .or_default();
+                    node_state.apply(&mut decoded.channels, &cfg, decoded.sample_rate_hz);
+                }
+            }
 
-        Some(OwnedManifestAudio {
-            manifest,
-            stream_key,
-            buffer_key,
-            decoded,
-            source_ids,
-            sr,
-            now_ns,
-            channel_count,
-            buffer_channel_count,
-            buffer_channel_indices,
-            classification_window_sec,
-            mic_positions_m,
-            effective_sound_speed_mps,
-            buffer_start_time_ns,
-            buffer_end_time_ns,
-            start_sample_index,
-            end_sample_index,
-            node_timestamp_is_available,
-            buffer_uses_receipt_time,
-            arrived_via_channel,
-        })
+            let sr = decoded.sample_rate_hz.max(1);
+            let (env_temp_c, env_humidity_fraction) =
+                if decoded.temperature_c.is_none() && decoded.humidity_fraction.is_none() {
+                    if let Some(cache) = &self.env_cache {
+                        let query_ns = first_handle.toa_ns.unwrap_or(now_ns as u64);
+                        let node_id = stream_key.split("__").next().unwrap_or(&stream_key);
+                        cache
+                            .interpolate(node_id, query_ns)
+                            .await
+                            .map(|(temperature_c, humidity_fraction)| {
+                                (Some(temperature_c), Some(humidity_fraction))
+                            })
+                            .unwrap_or((None, None))
+                    } else {
+                        (None, None)
+                    }
+                } else {
+                    (None, None)
+                };
+
+            let effective_temperature_c = decoded.temperature_c.or(env_temp_c);
+            let effective_humidity_fraction = decoded.humidity_fraction.or(env_humidity_fraction);
+            let effective_sound_speed_mps = resolve_effective_sound_speed_mps(
+                &self.config,
+                effective_temperature_c,
+                effective_humidity_fraction,
+            );
+
+            let frames_all = decoded.channels.iter().map(Vec::len).min().unwrap_or(0);
+            let render_duration_ns =
+                (frames_all as i128).saturating_mul(1_000_000_000) / i128::from(sr.max(1));
+            let start_time_ns = resolve_buffer_start_time_ns(&decoded, &first_handle, sr, now_ns);
+            let node_timestamp_is_available =
+                decoded.start_time_ns.is_some_and(|start_ns| start_ns > 0)
+                    || first_handle.toa_ns.is_some();
+            let skew_ns = (start_time_ns - now_ns as i128).unsigned_abs();
+            let max_skew_ns =
+                (self.config.max_trusted_node_clock_skew_seconds * 1_000_000_000.0).round() as u128;
+            let buffer_uses_receipt_time = should_use_receipt_time_alignment(
+                node_timestamp_is_available,
+                skew_ns,
+                max_skew_ns,
+            );
+            let (buffer_start_time_ns, buffer_end_time_ns) = if buffer_uses_receipt_time {
+                let anchor_ns = first_handle.tor_ns.unwrap_or(now_ns as u64) as i128;
+                let start_ns = anchor_ns.saturating_sub(render_duration_ns).max(1);
+                (start_ns, anchor_ns)
+            } else {
+                (start_time_ns, start_time_ns + render_duration_ns)
+            };
+
+            let start_sample_index = decoded.start_sample_index;
+            let end_sample_index = decoded.end_sample_index;
+            let segment_manifest = if segment_index + 1 == segment_count {
+                manifest_for_final_segment
+                    .take()
+                    .expect("final segment owns source manifest")
+            } else {
+                manifest_for_final_segment
+                    .as_ref()
+                    .expect("source manifest remains available")
+                    .clone()
+            };
+
+            owned_segments.push(OwnedManifestAudio {
+                manifest: segment_manifest,
+                stream_key: stream_key.clone(),
+                buffer_key: buffer_key.clone(),
+                decoded,
+                source_ids: source_ids.clone(),
+                sr,
+                now_ns,
+                channel_count,
+                buffer_channel_count,
+                buffer_channel_indices: buffer_channel_indices.clone(),
+                classification_window_sec,
+                mic_positions_m: mic_positions_m.clone(),
+                effective_sound_speed_mps,
+                buffer_start_time_ns,
+                buffer_end_time_ns,
+                start_sample_index,
+                end_sample_index,
+                node_timestamp_is_available,
+                buffer_uses_receipt_time,
+                arrived_via_channel,
+            });
+        }
+        Some(owned_segments)
     }
 
     fn apply_automatic_gps_geometry(
@@ -916,7 +958,12 @@ impl DspWorker {
         manifest.cluster_sensor_positions = Some(sensor_positions);
     }
 
-    async fn publish_raw_audio_frame_for_owned_manifest(&self, owned: &OwnedManifestAudio) {
+    async fn publish_raw_audio_frame_for_owned_manifest(
+        &self,
+        owned: &OwnedManifestAudio,
+        segment_index: usize,
+        segment_count: usize,
+    ) {
         publish_raw_audio_frame_event(RawAudioFramePublishRequest {
             publisher: &self.dsp_event_publisher,
             source_manifest: &owned.manifest,
@@ -926,6 +973,8 @@ impl DspWorker {
             start_time_ns: owned.buffer_start_time_ns,
             end_time_ns: owned.buffer_end_time_ns,
             created_ns: owned.now_ns,
+            segment_index,
+            segment_count,
         })
         .await;
     }
@@ -1708,6 +1757,8 @@ async fn publish_raw_audio_frame_event(request: RawAudioFramePublishRequest<'_>)
         start_time_ns,
         end_time_ns,
         created_ns,
+        segment_index,
+        segment_count,
     } = request;
     let Some(publisher) = publisher else {
         return;
@@ -1723,8 +1774,16 @@ async fn publish_raw_audio_frame_event(request: RawAudioFramePublishRequest<'_>)
     let frame_coverage = vec![true; sample_count];
     let coverage_stats_json =
         serde_json::to_value(coverage_stats(&frame_coverage, sample_rate_hz.max(1))).ok();
+    let raw_audio_manifest_id = if segment_count == 1 {
+        format!("raw-audio-{}", source_manifest.manifest_id)
+    } else {
+        format!(
+            "raw-audio-{}-segment-{}",
+            source_manifest.manifest_id, segment_index
+        )
+    };
     let raw_manifest = DspManifest {
-        manifest_id: format!("raw-audio-{}", source_manifest.manifest_id),
+        manifest_id: raw_audio_manifest_id,
         manifest_type: "raw_audio_frame".to_string(),
         created_ns,
         source_handles: source_manifest.source_handles.clone(),

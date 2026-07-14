@@ -100,7 +100,7 @@ enum class AudioDataPinBias : uint8_t {
 // frequency is more radio limited now than memory.
 // if losing packets, 32 khz, or perhaps 16 khz, would be a useful test for that condition
 #ifndef MMPR_NODECFG_AUDIO_SAMPLE_RATE_HZ
-#define MMPR_NODECFG_AUDIO_SAMPLE_RATE_HZ 44100
+#define MMPR_NODECFG_AUDIO_SAMPLE_RATE_HZ 32000
 #endif
 
 #ifndef MMPR_NODECFG_AUDIO_CHANNELS
@@ -131,7 +131,7 @@ enum class AudioDataPinBias : uint8_t {
 // BLE scan timing. Units are 0.625 ms each. The scanner is PASSIVE
 // it only *listens*, and BLE therefore costs shared-radio RECEIVE time, never a
 // TX collision on the audio uplink. Duty = window/interval is the airtime the
-// CYW43439 steals from Wi-Fi; keep it low so 44.1 kHz audio is not starved.
+// CYW43439 steals from Wi-Fi
 // Window must exceed BLE's 0-10 ms advertising jitter to catch reliably, hence >= ~20 ms.
 // intermittently -- fine for approximate, slow-updating RSSI triangulation).
 // Raise the window (e.g. 0x0030) for snappier coverage at higher airtime cost,
@@ -150,6 +150,25 @@ enum class AudioDataPinBias : uint8_t {
 
 #ifndef MMPR_NODECFG_BLE_REPORT_MAX_OBSERVATIONS
 #define MMPR_NODECFG_BLE_REPORT_MAX_OBSERVATIONS 48
+#endif
+
+// BLE remains enabled, but its HTTP reporting is auxiliary traffic. Preserve
+// observations while audio is congested and send their newest snapshot once the
+// audio publisher has recovered.
+#ifndef MMPR_NODECFG_BLE_AUDIO_QUEUE_HIGH_WATER_PACKETS
+#define MMPR_NODECFG_BLE_AUDIO_QUEUE_HIGH_WATER_PACKETS 8
+#endif
+
+#ifndef MMPR_NODECFG_BLE_AUDIO_QUEUE_LOW_WATER_PACKETS
+#define MMPR_NODECFG_BLE_AUDIO_QUEUE_LOW_WATER_PACKETS 3
+#endif
+
+#ifndef MMPR_NODECFG_BLE_AUDIO_PACKET_AGE_LIMIT_MS
+#define MMPR_NODECFG_BLE_AUDIO_PACKET_AGE_LIMIT_MS 180
+#endif
+
+#ifndef MMPR_NODECFG_BLE_AUDIO_RECOVERY_COOLDOWN_MS
+#define MMPR_NODECFG_BLE_AUDIO_RECOVERY_COOLDOWN_MS 1500
 #endif
 
 #ifndef MMPR_NODECFG_BLE_SERVER_BASE_URL
@@ -304,6 +323,10 @@ static constexpr uint16_t kBleScanIntervalUnits = MMPR_NODECFG_BLE_SCAN_INTERVAL
 static constexpr uint16_t kBleScanWindowUnits = MMPR_NODECFG_BLE_SCAN_WINDOW_UNITS;
 static constexpr uint32_t kBleReportIntervalMs = MMPR_NODECFG_BLE_REPORT_INTERVAL_MS;
 static constexpr size_t kBleReportMaxObservations = MMPR_NODECFG_BLE_REPORT_MAX_OBSERVATIONS;
+static constexpr uint32_t kBleAudioQueueHighWaterPackets = MMPR_NODECFG_BLE_AUDIO_QUEUE_HIGH_WATER_PACKETS;
+static constexpr uint32_t kBleAudioQueueLowWaterPackets = MMPR_NODECFG_BLE_AUDIO_QUEUE_LOW_WATER_PACKETS;
+static constexpr uint32_t kBleAudioPacketAgeLimitMs = MMPR_NODECFG_BLE_AUDIO_PACKET_AGE_LIMIT_MS;
+static constexpr uint32_t kBleAudioRecoveryCooldownMs = MMPR_NODECFG_BLE_AUDIO_RECOVERY_COOLDOWN_MS;
 static constexpr const char* kBleServerBaseUrl = MMPR_NODECFG_BLE_SERVER_BASE_URL;
 static constexpr const char* kBleIngestPath = MMPR_NODECFG_BLE_INGEST_PATH;
 
@@ -569,6 +592,15 @@ static constexpr bool kEnableHoldoverTempComp = false;        // shadow mode
 static constexpr double kHoldoverDriftUncertaintyPpm = 1.0;   // cheap XO; TCXO rev: 0.1
 static constexpr uint64_t kHoldoverErrorBudgetNs = 60000ULL;  // = legacy 60 s @ 1 ppm
 static constexpr uint64_t kHoldoverMaxAgeUs = 900000000ULL;   // 15 min hard cap
+
+// Isolation switch for hardware regression testing. It disables only the
+// optional holdover maintenance and MMB3 holdover telemetry; NTP/GPS time
+// discipline remains active.
+#ifndef MMPR_NODECFG_ENABLE_CLOCK_HOLDOVER_MAINTENANCE
+#define MMPR_NODECFG_ENABLE_CLOCK_HOLDOVER_MAINTENANCE 1
+#endif
+static constexpr bool kEnableClockHoldoverMaintenance =
+    MMPR_NODECFG_ENABLE_CLOCK_HOLDOVER_MAINTENANCE == 1;
 
 // --- Runtime logging ---
 static constexpr uint32_t kLogEveryFrames = 100;
