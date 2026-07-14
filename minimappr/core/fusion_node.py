@@ -330,7 +330,7 @@ class FusionNode:
             temperature_c=settings.default_temperature_c,
             humidity_fraction=settings.default_humidity,
         )
-        self.preprocessor_factory = preprocessor_factory or NodePreprocessorFactory(self.localization_config)
+        self.preprocessor_factory = preprocessor_factory or NodePreprocessorFactory(settings)
         self.degradation_model = degradation_model or CapabilityDegradationModel(
             min_sensors_for_3d=settings.min_sensors_for_3d,
             min_sensors_for_2d=settings.min_sensors_for_2d,
@@ -360,10 +360,10 @@ class FusionNode:
             localization_config=self.localization_config,
             fusion_config=self.fusion_config,
             registry=registry,
+            preprocessor_factory=self.preprocessor_factory,
             buffer=buffer,
             storage=storage,
             coordinate_frame=coordinate_frame,
-            preprocessor_factory=self.preprocessor_factory,
             live_ingest_state=self._live_ingest_state,
             environment_updater=EnvironmentUpdater(self.environment_provider),
             persist_observations_on_ingest=bool(settings.persist_observations_on_ingest),
@@ -396,6 +396,7 @@ class FusionNode:
             coordinate_frame=coordinate_frame,
             zone_matcher=zone_matcher,
             registry=registry,
+            preprocessor_factory=self.preprocessor_factory,
             retention_policy=self.retention_policy,
             snippet_dir=settings.snippet_dir,
             snippet_retention_seconds=settings.snippet_retention_seconds,

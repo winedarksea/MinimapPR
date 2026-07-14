@@ -14,12 +14,14 @@ with a WARNING (the artifact ships separately from the code).
 from __future__ import annotations
 
 import logging
+import inspect
 from pathlib import Path
 
 from minimappr.classifiers.base import AudioClassifier
 from minimappr.classifiers.chaining import ChainStage, ChainedClassifier
 from minimappr.classifiers.composite import CompositeClassifier, CompositeMember
 from minimappr.classifiers.heuristic import HeuristicClassifier
+from minimappr.classifiers.preprocessed import PreprocessedClassifier
 from minimappr.classifiers.routing import (
     CONTEXT_DETECTION_TRIGGER,
     ChainSpec,
@@ -28,6 +30,11 @@ from minimappr.classifiers.routing import (
     load_routing,
 )
 from minimappr.config import Settings
+from minimappr.audio_processing.chain import build_preprocessing_chain
+from minimappr.audio_processing.profiles import (
+    load_audio_processing_configuration,
+    profile_fingerprint,
+)
 from minimappr.core.taxonomy import label_category_for_name
 
 try:
@@ -71,7 +78,12 @@ def create_context_classifier(
         return _create_heuristic(settings)
     if len(members) == 1:
         return members[0].classifier
-    return CompositeClassifier(members)
+    # Members may advertise safety-critical labels (e.g. the T3/T4 alarm
+    # detector) that must not be masked by a higher-scoring sibling.
+    priority_labels: frozenset[str] = frozenset()
+    for member in members:
+        priority_labels |= getattr(member.classifier, "PRIORITY_LABELS", frozenset())
+    return CompositeClassifier(members, priority_labels=priority_labels)
 
 
 def _build_member(
@@ -83,6 +95,7 @@ def _build_member(
     base = _build_backend(spec, settings, needs_embeddings=any(c.input == "embedding" for c in chains))
     if base is None:
         return None
+    base = _apply_member_preprocessor(base, spec, settings)
     stages = [
         stage
         for stage in (_build_chain_stage(chain, settings, routing) for chain in chains)
@@ -111,12 +124,22 @@ def _build_backend(
                 "tensorflow-hub failed to import. Install the core dependencies "
                 "(pip install minimappr) or remove 'yamnet' from the routing config."
             )
-        return YAMNetClassifier(
-            min_confidence=spec.min_confidence or settings.yamnet_min_confidence,
-            target_rms=settings.yamnet_input_target_rms,
-            max_input_gain=settings.yamnet_max_input_gain,
-            keep_embeddings=spec.keep_embeddings or needs_embeddings,
-        )
+        preprocess_profile = None
+        if spec.preprocess_profile:
+            preprocess_profile = load_audio_processing_configuration(
+                settings.audio_processing_config_path
+            ).profile(spec.preprocess_profile)
+        constructor_kwargs = {
+            "min_confidence": spec.min_confidence or settings.yamnet_min_confidence,
+            "target_rms": settings.yamnet_input_target_rms,
+            "max_input_gain": settings.yamnet_max_input_gain,
+            "keep_embeddings": spec.keep_embeddings or needs_embeddings,
+        }
+        # Signature probing keeps lightweight test and downstream compatibility
+        # stubs usable while the concrete backend adopts profile binding.
+        if "preprocess_profile" in inspect.signature(YAMNetClassifier).parameters:
+            constructor_kwargs["preprocess_profile"] = preprocess_profile
+        return YAMNetClassifier(**constructor_kwargs)
     if backend == "birdnet":
         try:
             from minimappr.classifiers.birdnet import BirdNETClassifier  # noqa: PLC0415
@@ -136,12 +159,21 @@ def _build_backend(
             return None
     if backend == "drone_head":
         try:
-            from minimappr.classifiers.drone_head import DroneHeadClassifier  # noqa: PLC0415
+            from minimappr.classifiers.drone_head import (  # noqa: PLC0415
+                DroneHeadClassifier,
+                PreprocessingProfileMismatchError,
+            )
+            yamnet_profile = load_audio_processing_configuration(
+                settings.audio_processing_config_path
+            ).profile("yamnet")
 
             return DroneHeadClassifier(
                 model_path=spec.model_path or settings.drone_head_model_path,
                 min_confidence=spec.min_confidence,
+                expected_preprocessing_fingerprint=profile_fingerprint(yamnet_profile),
             )
+        except PreprocessingProfileMismatchError:
+            raise
         except FileNotFoundError as exc:
             logger.warning("Drone head model missing; dropping member %r: %s", spec.member_id, exc)
             return None
@@ -177,6 +209,8 @@ def _build_chain_stage(
     classifier = _build_backend(spec, settings)
     if classifier is None:
         return None
+    if chain.input == "audio":
+        classifier = _apply_member_preprocessor(classifier, spec, settings)
     return ChainStage(
         stage_id=chain.chain_id,
         classifier=classifier,
@@ -185,6 +219,22 @@ def _build_chain_stage(
         min_confidence=max(0.0, min(1.0, chain.min_confidence)),
         score_weight=max(0.0, chain.score_weight),
         input_kind=chain.input,
+    )
+
+
+def _apply_member_preprocessor(
+    classifier: AudioClassifier,
+    spec: ClassifierSpec,
+    settings: Settings,
+) -> AudioClassifier:
+    if not spec.preprocess_profile or spec.backend == "yamnet":
+        return classifier
+    processing = load_audio_processing_configuration(settings.audio_processing_config_path)
+    profile = processing.profile(spec.preprocess_profile)
+    return PreprocessedClassifier(
+        classifier=classifier,
+        preprocessor=build_preprocessing_chain([dict(stage) for stage in profile.stages]),
+        profile_name=profile.name,
     )
 
 

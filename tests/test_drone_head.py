@@ -17,7 +17,10 @@ pytest.importorskip("onnxruntime")
 
 from minimappr.classifiers.base import AudioClassifier, EmbeddingClassifier
 from minimappr.classifiers.chaining import ChainStage, ChainedClassifier
-from minimappr.classifiers.drone_head import DroneHeadClassifier
+from minimappr.classifiers.drone_head import (
+    DroneHeadClassifier,
+    PreprocessingProfileMismatchError,
+)
 from minimappr.models import ClassificationResult
 
 EMBEDDING_DIM = 1024
@@ -168,6 +171,15 @@ def test_clip_prob_is_max_over_frames(tmp_path):
 def test_missing_model_raises_filenotfound(tmp_path):
     with pytest.raises(FileNotFoundError):
         DroneHeadClassifier(tmp_path / "nope.onnx")
+
+
+def test_preprocessing_fingerprint_mismatch_fails_model_startup(tmp_path):
+    model = _write_tiny_head(
+        tmp_path / "drone_head.onnx",
+        metadata={"preprocessing": {"profile": "yamnet", "fingerprint": "trained-profile"}},
+    )
+    with pytest.raises(PreprocessingProfileMismatchError, match="preprocessing mismatch"):
+        DroneHeadClassifier(model, expected_preprocessing_fingerprint="runtime-profile")
 
 
 class _StubYamnet(AudioClassifier):

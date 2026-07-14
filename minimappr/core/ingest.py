@@ -279,13 +279,14 @@ class IngestProcessor:
         preprocessor: AudioPreprocessor = self._preprocessor_factory.for_node(normalized_node)
         preprocess_lock = self._preprocess_locks_by_node.setdefault(normalized_node.id, asyncio.Lock())
         async with preprocess_lock:
-            processed = await asyncio.to_thread(
+            processed, processing_metrics = await asyncio.to_thread(
                 _preprocess_audio_frame,
                 audio,
                 frame.sample_rate_hz,
                 normalized_node.id,
                 preprocessor,
             )
+        self._preprocessor_factory.record_frame_metrics(normalized_node.id, processing_metrics)
 
         # -- environment extraction -------------------------------------------
         environment_sample = _extract_environment_sample(
@@ -753,7 +754,7 @@ def _preprocess_audio_frame(
     sample_rate_hz: int,
     node_id: str,
     preprocessor: AudioPreprocessor,
-) -> np.ndarray:
+) -> tuple[np.ndarray, dict[str, float | int]]:
     processed = np.zeros_like(audio, dtype=np.float32)
     for channel_idx in range(audio.shape[0]):
         processed[channel_idx] = preprocessor.process(
@@ -762,7 +763,18 @@ def _preprocess_audio_frame(
             node_id=node_id,
             channel_idx=channel_idx,
         )
-    return processed
+    input_rms = float(np.sqrt(np.mean(np.square(audio), dtype=np.float64) + 1e-12))
+    output_rms = float(np.sqrt(np.mean(np.square(processed), dtype=np.float64) + 1e-12))
+    input_peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+    output_peak = float(np.max(np.abs(processed))) if processed.size else 0.0
+    return processed, {
+        "input_rms": input_rms,
+        "output_rms": output_rms,
+        "input_peak": input_peak,
+        "output_peak": output_peak,
+        "observed_level_delta_db": 20.0 * float(np.log10(output_rms / input_rms)) if input_rms > 1e-12 else 0.0,
+        "clipping_risk_sample_count": int(np.count_nonzero(np.abs(processed) > 1.0)),
+    }
 
 
 def _extract_environment_sample(

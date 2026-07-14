@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "profiles": {
+    "yamnet": {
+      "stages": [
+        { "type": "mean_center" },
+        {
+          "type": "bounded_rms_gain",
+          "target_rms_dbfs": -20.0,
+          "max_gain_db": 30.10299956639812,
+          "peak_ceiling_dbfs": -0.175478486150103,
+          "boost_only": true
+        }
+      ]
+    },
+    "listening": {
+      "stages": [
+        { "type": "mean_center" },
+        {
+          "type": "bounded_rms_gain",
+          "target_rms_dbfs": -24.0,
+          "max_gain_db": 24.0,
+          "peak_ceiling_dbfs": -1.0,
+          "boost_only": true
+        }
+      ]
+    }
+  }
+}

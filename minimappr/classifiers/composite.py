@@ -30,10 +30,22 @@ class CompositeMember:
 
 
 class CompositeClassifier(AudioClassifier):
-    def __init__(self, members: list[CompositeMember]) -> None:
+    def __init__(
+        self,
+        members: list[CompositeMember],
+        *,
+        priority_labels: frozenset[str] = frozenset(),
+    ) -> None:
         if not members:
             raise ValueError("CompositeClassifier requires at least one member")
         self._members = members
+        # Labels that must surface even when another member scores higher.
+        # A plain highest-confidence winner would let a loud, confident bird
+        # call in the same omni window mask a safety-critical alarm cadence,
+        # silently dropping the detection the alerting rules key off. Any
+        # member emitting one of these labels is promoted to winner (highest
+        # confidence among them if several); empty set = pure winner-take-all.
+        self._priority_labels = priority_labels
 
     @property
     def members(self) -> list[CompositeMember]:
@@ -57,6 +69,7 @@ class CompositeClassifier(AudioClassifier):
         winner_label: str | None = None
         winner_conf = 0.0
         winner_member = primary_id
+        priority_best: tuple[float, str, str] | None = None  # (conf, label, member_id)
 
         for member in self._members:
             try:
@@ -86,8 +99,16 @@ class CompositeClassifier(AudioClassifier):
                 winner_conf = weighted_conf
                 winner_label = result.label
                 winner_member = member.member_id
+            if result.label in self._priority_labels and (
+                priority_best is None or float(result.confidence) > priority_best[0]
+            ):
+                priority_best = (float(result.confidence), result.label, member.member_id)
 
-        if winner_label is None:
+        if priority_best is not None:
+            # A safety-critical label was detected: surface it regardless of a
+            # higher-scoring non-priority member (see _priority_labels).
+            winner_conf, winner_label, winner_member = priority_best
+        elif winner_label is None:
             # All-unknown ensemble: report the first successful member's result.
             winner_label = first_result.label if first_result is not None else "unknown"
             winner_conf = float(first_result.confidence) if first_result is not None else 0.0

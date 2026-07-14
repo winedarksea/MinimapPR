@@ -673,6 +673,7 @@ class Settings:
     # Per-context classifier routing (see minimappr/classifiers/routing.py).
     # Replaces the removed single-backend ``classifier_backend`` setting.
     classifier_routing_config_path: Path = Path("data/classifier_routing.json")
+    audio_processing_config_path: Path = Path("data/audio_processing.json")
     birdnet_enabled: bool = True
     drone_head_enabled: bool = True
     drone_head_model_path: Path = Path("data/models/drone_head.onnx")
@@ -866,6 +867,7 @@ class Settings:
         self.rules_config_path = Path(self.rules_config_path)
         self.taxonomy_config_path = Path(self.taxonomy_config_path)
         self.classifier_routing_config_path = Path(self.classifier_routing_config_path)
+        self.audio_processing_config_path = Path(self.audio_processing_config_path)
         self.drone_head_model_path = Path(self.drone_head_model_path)
         self.speech_audio_dir = Path(self.speech_audio_dir)
         self.effector_snapshot_dir = Path(self.effector_snapshot_dir)
@@ -1344,6 +1346,13 @@ class Settings:
         )
         allow_non_tmpfs_journal_raw = os.getenv("MINIMAPPR_SIDECAR_ALLOW_NON_TMPFS_JOURNAL")
         persist_observations_on_ingest_raw = os.getenv("MINIMAPPR_PERSIST_OBSERVATIONS_ON_INGEST")
+        legacy_ingest_gain_raw = os.getenv("MINIMAPPR_INGEST_GAIN_MULTIPLIER")
+        if legacy_ingest_gain_raw is not None:
+            _config_logger.warning(
+                "MINIMAPPR_INGEST_GAIN_MULTIPLIER is deprecated; express calibrated fixed "
+                "gain in the sensor ingest profile or per-node stages. The explicit legacy "
+                "value remains active during migration."
+            )
         ingest_storage_mode = _env_str("MINIMAPPR_INGEST_STORAGE_MODE", "spool").strip().lower()
         if ingest_storage_mode not in {"spool", "journal"}:
             raise ValueError(
@@ -1454,7 +1463,7 @@ class Settings:
             classification_window_seconds=_env_float("MINIMAPPR_CLASSIFICATION_WINDOW_SECONDS", 30.0),
             max_sensor_buffer_seconds=_env_float("MINIMAPPR_MAX_SENSOR_BUFFER_SECONDS", 32.0),
             preprocess_enabled=_env_bool("MINIMAPPR_PREPROCESS_ENABLED", True),
-            ingest_gain_multiplier=_env_float("MINIMAPPR_INGEST_GAIN_MULTIPLIER", 4.0),
+            ingest_gain_multiplier=_env_float("MINIMAPPR_INGEST_GAIN_MULTIPLIER", 1.0),
             audio_highpass_hz=_env_float("MINIMAPPR_AUDIO_HIGHPASS_HZ", 50.0),
             audio_lowpass_hz=_env_float("MINIMAPPR_AUDIO_LOWPASS_HZ", 0.0),
             min_sensors_for_3d=_env_int("MINIMAPPR_MIN_SENSORS_FOR_3D", 4),
@@ -1629,6 +1638,9 @@ class Settings:
             coordinate_mode=_env_str("MINIMAPPR_COORDINATE_MODE", "flat"),
             classifier_routing_config_path=Path(
                 _env_str("MINIMAPPR_CLASSIFIER_ROUTING_CONFIG_PATH", "data/classifier_routing.json")
+            ),
+            audio_processing_config_path=Path(
+                _env_str("MINIMAPPR_AUDIO_PROCESSING_CONFIG_PATH", "data/audio_processing.json")
             ),
             birdnet_enabled=_env_bool("MINIMAPPR_BIRDNET_ENABLED", True),
             drone_head_enabled=_env_bool("MINIMAPPR_DRONE_HEAD_ENABLED", True),

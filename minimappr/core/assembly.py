@@ -19,6 +19,7 @@ import numpy as np
 from minimappr.core.amplitude_range import received_level_db_from_rms
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.node_registry import NodeRegistry
+from minimappr.audio_processing.chain import NodePreprocessorFactory
 from minimappr.core.retention import RetentionPolicy
 from minimappr.core.zones import ZoneMatcher
 from minimappr.interfaces import StorageBackend
@@ -147,6 +148,7 @@ class DetectionAssembler:
         coordinate_frame: LocalCoordinateFrame,
         zone_matcher: ZoneMatcher,
         registry: NodeRegistry,
+        preprocessor_factory: NodePreprocessorFactory,
         retention_policy: RetentionPolicy,
         snippet_dir: Path | str,
         snippet_retention_seconds: float,
@@ -157,6 +159,7 @@ class DetectionAssembler:
         self._coordinate_frame = coordinate_frame
         self._zone_matcher = zone_matcher
         self._registry = registry
+        self._preprocessor_factory = preprocessor_factory
         self._retention_policy = retention_policy
         self._snippet_dir = Path(snippet_dir)
         self._snippet_retention_seconds = snippet_retention_seconds
@@ -303,7 +306,11 @@ class DetectionAssembler:
             )
         # -- SPL ---------------------------------------------------------------
         gain_offset_db = await self._registry.gain_offset_db_for_sensor(reference_sensor)
-        spl_db = received_level_db_from_rms(rms(reference_signal), gain_offset_db)
+        digital_trim_db = self._preprocessor_factory.fixed_gain_db_for_sensor(reference_sensor)
+        spl_db = received_level_db_from_rms(
+            rms(reference_signal),
+            gain_offset_db - digital_trim_db,
+        )
 
         # -- retention ---------------------------------------------------------
         retention_tier = self._retention_policy.tier_for_detection(

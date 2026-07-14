@@ -95,9 +95,9 @@ def _sidecar_hybrid_render_enabled(settings) -> bool:
     hybrid render is enabled when the resolved classifier backend is BirdNET
     and the classification audio source is beamformed.
     """
-    from minimappr.classifiers.availability import backend_available
-
-    birdnet_active = bool(getattr(settings, "birdnet_enabled", True)) and backend_available("birdnet")
+    # Resolve from configuration, not imports in the API process. The sidecar
+    # classifier environment may intentionally contain different model extras.
+    birdnet_active = bool(getattr(settings, "birdnet_enabled", True))
     audio_source = getattr(settings, "classification_audio_source", "beamformed")
     return birdnet_active and str(audio_source).strip().lower() == "beamformed"
 
@@ -169,6 +169,12 @@ def build_ingest_sidecar_environment(
         "MINIMAPPR_SIDECAR_MEMORY_ONLY_LIVE_PATH": str(
             process_config.memory_only_live_path
         ).lower(),
+        "MINIMAPPR_INGEST_PREPROCESS_STAGES_JSON": json.dumps(
+            _resolved_default_ingest_stages(settings), separators=(",", ":")
+        ),
+        "MINIMAPPR_NODE_AUDIO_OVERRIDES_JSON": json.dumps(
+            _canonical_node_audio_overrides(settings), separators=(",", ":")
+        ),
         "MINIMAPPR_SIDECAR_HYBRID_RENDER_ENABLED": str(
             _sidecar_hybrid_render_enabled(settings)
         ).lower(),
@@ -225,6 +231,46 @@ def build_ingest_sidecar_environment(
     if classifier_command_json is not None:
         env["MINIMAPPR_SIDECAR_CLASSIFIER_COMMAND_JSON"] = classifier_command_json
     return env
+
+
+def _resolved_default_ingest_stages(settings) -> list[dict[str, object]]:
+    """Resolve the same fixed/causal default chain used by Python ingest."""
+    if not bool(getattr(settings, "preprocess_enabled", True)):
+        return []
+    stages: list[dict[str, object]] = []
+    gain = float(getattr(settings, "ingest_gain_multiplier", 1.0))
+    if gain != 1.0:
+        import math
+
+        stages.append({"type": "gain", "db": 20.0 * math.log10(gain)})
+    highpass_hz = float(getattr(settings, "audio_highpass_hz", 0.0))
+    lowpass_hz = float(getattr(settings, "audio_lowpass_hz", 0.0))
+    if highpass_hz > 0.0:
+        stages.append({"type": "highpass", "cutoff_hz": highpass_hz, "order": 4})
+    if lowpass_hz > 0.0:
+        stages.append({"type": "lowpass", "cutoff_hz": lowpass_hz, "order": 4})
+    return stages
+
+
+def _canonical_node_audio_overrides(settings) -> dict[str, dict[str, object]]:
+    resolved: dict[str, dict[str, object]] = {}
+    for node_id, raw in dict(getattr(settings, "node_audio_overrides", {}) or {}).items():
+        override = dict(raw)
+        if isinstance(override.get("stages"), list):
+            resolved[str(node_id)] = {"stages": override["stages"]}
+            continue
+        stages: list[dict[str, object]] = []
+        gains = override.get("channel_gains_db", override.get("mic_gains_db"))
+        if isinstance(gains, list) and gains:
+            stages.append({"type": "channel_gain", "db_by_channel": gains})
+        elif float(override.get("gain_db", 0.0)) != 0.0:
+            stages.append({"type": "gain", "db": float(override["gain_db"])})
+        if float(override.get("hp_hz", 0.0) or 0.0) > 0.0:
+            stages.append({"type": "highpass", "cutoff_hz": float(override["hp_hz"]), "order": 4})
+        if float(override.get("lp_hz", 0.0) or 0.0) > 0.0:
+            stages.append({"type": "lowpass", "cutoff_hz": float(override["lp_hz"]), "order": 4})
+        resolved[str(node_id)] = {"stages": stages}
+    return resolved
 
 
 def ingest_stream_consumer_runtime(

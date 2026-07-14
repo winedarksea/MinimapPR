@@ -8,6 +8,10 @@ from pathlib import Path
 from typing import Any
 
 from minimappr.classifiers.chaining import ChainedClassifier
+from minimappr.audio_processing.profiles import (
+    load_audio_processing_configuration,
+    profile_fingerprint,
+)
 from minimappr.config import Settings
 from minimappr.interfaces import StorageBackend
 
@@ -33,6 +37,13 @@ class DiagnosticsService:
 
     async def config_snapshot(self) -> dict[str, Any]:
         classifier_runtime = self._classifier_runtime()
+        processing_configuration = load_audio_processing_configuration(
+            self._settings.audio_processing_config_path
+        )
+        processing_fingerprints = {
+            name: profile_fingerprint(profile)
+            for name, profile in processing_configuration.profiles.items()
+        }
         return {
             "runtime": {
                 "python_version": platform.python_version(),
@@ -66,6 +77,14 @@ class DiagnosticsService:
                     "rules_config_path": str(self._settings.rules_config_path),
                     "taxonomy_config_path": str(self._settings.taxonomy_config_path),
                     "classifier_routing_config_path": str(self._settings.classifier_routing_config_path),
+                    "audio_processing_config_path": str(self._settings.audio_processing_config_path),
+                },
+                "audio_processing": {
+                    "ingest_backend": self._settings.ingest_backend,
+                    "default_ingest_gain_multiplier": self._settings.ingest_gain_multiplier,
+                    "configuration_version": processing_configuration.version,
+                    "profile_fingerprints": processing_fingerprints,
+                    "node_metrics": self._fusion_node.preprocessor_factory.metrics_snapshot(),
                 },
             },
             "thresholds": {

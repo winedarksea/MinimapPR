@@ -1,0 +1,80 @@
+"""Configuration-driven audio processing shared by ingest and model boundaries."""
+
+from minimappr.audio_processing.chain import (
+    AudioProcessingChain,
+    NodePreprocessorFactory,
+    available_stages,
+    build_chain_from_rust_stages,
+    build_preprocessing_chain,
+    create_classification_preprocessor,
+    create_localization_preprocessor,
+    create_stage,
+    register_stage,
+)
+from minimappr.audio_processing.levels import (
+    AudioLevelReport,
+    apply_bounded_rms_gain,
+    apply_level_profile,
+    apply_listening_level,
+)
+from minimappr.audio_processing.profiles import (
+    AudioProcessingConfiguration,
+    AudioProcessingProfile,
+    DEFAULT_AUDIO_PROCESSING_CONFIGURATION,
+    LISTENING_PROFILE_NAME,
+    YAMNET_PROFILE_NAME,
+    load_audio_processing_configuration,
+    profile_fingerprint,
+)
+from minimappr.audio_processing.stages import (
+    BandpassFilterStage,
+    BoundedRmsGainStage,
+    ChannelGainStage,
+    DCBlockStage,
+    DCRemovalStage,
+    GainStage,
+    HighpassFilterStage,
+    LowpassFilterStage,
+    MeanCenterStage,
+    NormalizationStage,
+    PassthroughStage,
+    SpectralGateStage,
+)
+
+AudioPreprocessingChain = AudioProcessingChain
+
+__all__ = [
+    "AudioLevelReport",
+    "AudioProcessingChain",
+    "AudioProcessingConfiguration",
+    "AudioProcessingProfile",
+    "AudioPreprocessingChain",
+    "BandpassFilterStage",
+    "BoundedRmsGainStage",
+    "ChannelGainStage",
+    "DCBlockStage",
+    "DCRemovalStage",
+    "DEFAULT_AUDIO_PROCESSING_CONFIGURATION",
+    "GainStage",
+    "HighpassFilterStage",
+    "LISTENING_PROFILE_NAME",
+    "LowpassFilterStage",
+    "MeanCenterStage",
+    "NodePreprocessorFactory",
+    "NormalizationStage",
+    "PassthroughStage",
+    "SpectralGateStage",
+    "YAMNET_PROFILE_NAME",
+    "apply_bounded_rms_gain",
+    "apply_level_profile",
+    "apply_listening_level",
+    "available_stages",
+    "build_chain_from_rust_stages",
+    "build_preprocessing_chain",
+    "create_classification_preprocessor",
+    "create_localization_preprocessor",
+    "create_stage",
+    "load_audio_processing_configuration",
+    "profile_fingerprint",
+    "register_stage",
+]

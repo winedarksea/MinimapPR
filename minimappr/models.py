@@ -993,6 +993,7 @@ class NodeAudioOverride(BaseModel):
     """
 
     mic_gains_db: list[float] | None = None
+    channel_gains_db: list[float] | None = Field(default=None, exclude=True)
     hp_hz: float | None = None
     lp_hz: float | None = None
     smoothing: Literal["off", "ema_50ms", "ema_200ms"] | None = None

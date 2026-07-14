@@ -1519,6 +1519,16 @@ def test_detection_audio_endpoint_supports_explicit_download(monkeypatch, tmp_pa
         inline_disposition = inline_response.headers.get("content-disposition", "")
         assert "inline" in inline_disposition
         assert detection_id in inline_disposition
+        assert inline_response.headers["x-minimappr-audio-level-profile"] == "listening"
+        assert float(inline_response.headers["x-minimappr-output-peak-dbfs"]) <= -0.99
+
+        canonical_response = client.get(
+            f"/api/v1/detections/{detection_id}/audio",
+            params={"level": "canonical"},
+        )
+        assert canonical_response.status_code == 200
+        assert canonical_response.headers["x-minimappr-audio-level-profile"] == "canonical"
+        assert "_canonical.wav" in canonical_response.headers["content-disposition"]
 
         download_response = client.get(
             f"/api/v1/detections/{detection_id}/audio",
@@ -1555,6 +1565,7 @@ def test_track_audio_endpoint_returns_latest_detection_snippet(monkeypatch, tmp_
         disposition = response.headers.get("content-disposition", "")
         assert "inline" in disposition
         assert track_id in disposition
+        assert response.headers["x-minimappr-audio-level-profile"] == "listening"
 
         download_response = client.get(f"/api/v1/tracks/{track_id}/audio", params={"download": True})
         assert download_response.status_code == 200

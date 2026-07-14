@@ -26,6 +26,7 @@ from minimappr.classifiers.yamnet import (
     YAMNET_PREPROCESS_VERSION,
     prepare_waveform_for_yamnet,
 )
+from minimappr.audio_processing.profiles import AudioProcessingProfile
 
 logger = logging.getLogger(__name__)
 
@@ -39,19 +40,22 @@ _CHUNK_SAMPLES = 60 * SAMPLE_RATE
 class YamnetEmbedder:
     """Wraps tfhub YAMNet embedding extraction with runtime-parity preprocessing."""
 
-    def __init__(self) -> None:
+    def __init__(self, preprocess_profile: AudioProcessingProfile | None = None) -> None:
         try:
             import tensorflow_hub as hub  # noqa: PLC0415
         except Exception as exc:  # pragma: no cover - optional dependency
             raise RuntimeError("YAMNet embedder requires tensorflow and tensorflow-hub") from exc
         self._model = hub.load("https://tfhub.dev/google/yamnet/1")
+        self._preprocess_profile = preprocess_profile
 
     def embed(self, waveform: np.ndarray, sample_rate: int = SAMPLE_RATE) -> np.ndarray:
         """Return ``[n_frames, 1024]`` float32 embeddings for ``waveform``."""
         waveform = np.asarray(waveform, dtype=np.float32).reshape(-1)
         if sample_rate != SAMPLE_RATE and waveform.size:
             waveform = resample_poly(waveform, up=SAMPLE_RATE, down=sample_rate).astype(np.float32)
-        waveform = prepare_waveform_for_yamnet(waveform)
+        waveform = prepare_waveform_for_yamnet(
+            waveform, preprocess_profile=self._preprocess_profile
+        )
         if waveform.size == 0:
             return np.zeros((0, EMBEDDING_DIM), dtype=np.float32)
 

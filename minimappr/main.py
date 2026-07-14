@@ -94,6 +94,9 @@ from minimappr.core.ambisonics import (
     wav_multichannel_bytes,
 )
 from minimappr.core.audio_buffer import MultiSensorBuffer
+from minimappr.audio_processing.levels import apply_level_profile
+from minimappr.audio_processing.profiles import LISTENING_PROFILE_NAME, load_audio_processing_configuration
+from minimappr.audio_processing.wav_serving import listening_wav_bytes, level_report_headers
 from minimappr.core.auth import extract_federation_token
 from minimappr.core.ble_multilateration import estimate_ble_device_position
 from minimappr.core.ble_observations import BleObservationStore
@@ -302,13 +305,12 @@ async def _run_ingest_with_timeout(request: Request, operation) -> Any:
 
 
 def _default_sidecar_classifier_command_json(settings: "Settings") -> str | None:
-    # The helper runs the localized_render routing composite; spawn it whenever
-    # any model-backed member could resolve (YAMNet is required, BirdNET optional).
-    from minimappr.classifiers.availability import backend_available
-
-    if backend_available("yamnet") or backend_available("birdnet"):
-        return json.dumps([sys.executable, "-m", "minimappr.sidecar_classifier_helper"])
-    return None
+    # Availability is evaluated inside the helper's deployment environment.
+    # The API process may intentionally have fewer model extras installed than
+    # the ingest/classifier process, so probing imports here creates false
+    # negatives and silently disables the configured classifier bridge.
+    del settings
+    return json.dumps([sys.executable, "-m", "minimappr.sidecar_classifier_helper"])
 
 
 def _build_runtime_classifier(settings: Settings):
@@ -3527,6 +3529,24 @@ def _canonicalize_preprocess_stages(raw_stages: list[dict[str, Any]]) -> list[di
                 )
             canonical_stages.append({"type": "gain", "db": db})
             continue
+        if stage_type == "channel_gain":
+            raw_gains = raw_stage.get("db_by_channel")
+            if not isinstance(raw_gains, list) or not raw_gains:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"stages[{stage_index}].db_by_channel must be a non-empty list",
+                )
+            gains = [
+                _validate_stage_float(value, stage_index=stage_index, field_name="db_by_channel")
+                for value in raw_gains
+            ]
+            if any(value < -60.0 or value > 60.0 for value in gains):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"stages[{stage_index}].db_by_channel values must be in [-60, 60]",
+                )
+            canonical_stages.append({"type": "channel_gain", "db_by_channel": gains})
+            continue
         if stage_type in {"highpass", "lowpass"}:
             cutoff_hz = _validate_stage_float(
                 raw_stage.get("cutoff_hz"),
@@ -3574,7 +3594,7 @@ def _canonicalize_preprocess_stages(raw_stages: list[dict[str, Any]]) -> list[di
         raise HTTPException(
             status_code=422,
             detail=(
-                f"stages[{stage_index}].type must be one of: gain, highpass, lowpass, "
+                f"stages[{stage_index}].type must be one of: gain, channel_gain, highpass, lowpass, "
                 "bandpass, dc_block, passthrough"
             ),
         )
@@ -3583,20 +3603,30 @@ def _canonicalize_preprocess_stages(raw_stages: list[dict[str, Any]]) -> list[di
 
 def _build_legacy_node_audio_override(body: NodeAudioOverride) -> dict[str, object]:
     override_dict: dict[str, object] = {}
-    if body.mic_gains_db is not None:
-        for db in body.mic_gains_db:
+    channel_gains_db = body.channel_gains_db if body.channel_gains_db is not None else body.mic_gains_db
+    if channel_gains_db is not None:
+        for db in channel_gains_db:
             if db < -60.0 or db > 60.0:
-                raise HTTPException(status_code=422, detail="mic_gains_db values must be in [-60, 60] dB")
-        override_dict["mic_gains_db"] = body.mic_gains_db
-        override_dict["gain_db"] = body.mic_gains_db[0] if body.mic_gains_db else 0.0
+                raise HTTPException(status_code=422, detail="channel gain values must be in [-60, 60] dB")
+        override_dict["mic_gains_db"] = channel_gains_db
+        override_dict["channel_gains_db"] = channel_gains_db
+        override_dict["stages"] = [{"type": "channel_gain", "db_by_channel": channel_gains_db}]
     if body.hp_hz is not None:
         if body.hp_hz < 0.0:
             raise HTTPException(status_code=422, detail="hp_hz must be >= 0")
         override_dict["hp_hz"] = body.hp_hz
+        if "stages" in override_dict and body.hp_hz > 0.0:
+            override_dict["stages"].append(
+                {"type": "highpass", "cutoff_hz": body.hp_hz, "order": 4}
+            )
     if body.lp_hz is not None:
         if body.lp_hz < 0.0:
             raise HTTPException(status_code=422, detail="lp_hz must be >= 0")
         override_dict["lp_hz"] = body.lp_hz
+        if "stages" in override_dict and body.lp_hz > 0.0:
+            override_dict["stages"].append(
+                {"type": "lowpass", "cutoff_hz": body.lp_hz, "order": 4}
+            )
     if body.smoothing is not None:
         override_dict["smoothing"] = body.smoothing
     return override_dict
@@ -3611,6 +3641,8 @@ def _canonicalize_node_audio_override(
         canonical_stages = _canonicalize_preprocess_stages(body.stages)
         if canonical_stages:
             return {"stages": canonical_stages}
+        return legacy_override
+    if "stages" in legacy_override:
         return legacy_override
     existing_stages = existing_override.get("stages") if isinstance(existing_override, dict) else None
     if isinstance(existing_stages, list) and existing_stages:
@@ -3636,9 +3668,11 @@ async def patch_node_audio(node_id: str, body: NodeAudioOverride, request: Reque
     rust_active = _ingest_sidecar_is_running(state) and settings.ingest_backend == "rust"
     sidecar_forward_ok = False
 
-    if fusion_node is not None and not rust_active:
+    if fusion_node is not None:
+        # The Python-side factory remains the source of diagnostics and digital-trim
+        # compensation even when Rust owns the actual ingest processing.
         fusion_node.apply_node_audio_override(node_id, override_dict if override_dict else None)
-    elif rust_active:
+    if rust_active:
         # Forward to the Rust sidecar so it takes effect in the live DSP path.
         sidecar_payload = {"node_id": node_id, **override_dict}
         # Remove None values — sidecar treats missing keys as "unchanged".
@@ -3656,7 +3690,7 @@ async def patch_node_audio(node_id: str, body: NodeAudioOverride, request: Reque
     return {
         "node_id": node_id,
         "override": override_dict,
-        "applied_to_pipeline": (fusion_node is not None and not rust_active) or sidecar_forward_ok,
+        "applied_to_pipeline": (fusion_node is not None) or sidecar_forward_ok,
         "rust_sidecar_active": rust_active,
         "rust_sidecar_forwarded": sidecar_forward_ok,
     }
@@ -4861,7 +4895,8 @@ async def get_detection_audio(
     detection_id: str,
     request: Request,
     download: bool = Query(default=False),
-) -> FileResponse:
+    level: Literal["listening", "canonical"] = Query(default="listening"),
+) -> Response:
     state = _require_state(request)
     settings: Settings = state.settings
     snippet_path = await state.storage.snippet_path_for_detection(detection_id)
@@ -4872,13 +4907,28 @@ async def get_detection_audio(
     if snippet_file is None:
         raise HTTPException(status_code=404, detail="Snippet file no longer exists")
 
-    filename = f"{detection_id}.wav"
+    filename = f"{detection_id}_{level}.wav"
     content_disposition = "attachment" if download else "inline"
+    if level == "listening":
+        wav_bytes, report = await asyncio.to_thread(
+            listening_wav_bytes, snippet_file, settings.audio_processing_config_path
+        )
+        return Response(
+            content=wav_bytes,
+            media_type="audio/wav",
+            headers={
+                "Content-Disposition": f'{content_disposition}; filename="{filename}"',
+                **level_report_headers(report),
+            },
+        )
     return FileResponse(
         path=snippet_file,
         media_type="audio/wav",
         filename=filename,
-        headers={"Content-Disposition": f'{content_disposition}; filename="{filename}"'},
+        headers={
+            "Content-Disposition": f'{content_disposition}; filename="{filename}"',
+            "X-Minimappr-Audio-Level-Profile": "canonical",
+        },
     )
 
 
@@ -5012,7 +5062,8 @@ async def get_track_audio(
     track_id: str,
     request: Request,
     download: bool = Query(default=False),
-) -> FileResponse:
+    level: Literal["listening", "canonical"] = Query(default="listening"),
+) -> Response:
     state = _require_state(request)
     settings: Settings = state.settings
     latest = await state.storage.latest_detection_audio_for_track(track_id)
@@ -5024,13 +5075,28 @@ async def get_track_audio(
     if snippet_file is None:
         raise HTTPException(status_code=404, detail="Snippet file no longer exists")
 
-    filename = f"track_{track_id}__detection_{detection_id}.wav"
+    filename = f"track_{track_id}__detection_{detection_id}_{level}.wav"
     content_disposition = "attachment" if download else "inline"
+    if level == "listening":
+        wav_bytes, report = await asyncio.to_thread(
+            listening_wav_bytes, snippet_file, settings.audio_processing_config_path
+        )
+        return Response(
+            content=wav_bytes,
+            media_type="audio/wav",
+            headers={
+                "Content-Disposition": f'{content_disposition}; filename="{filename}"',
+                **level_report_headers(report),
+            },
+        )
     return FileResponse(
         path=snippet_file,
         media_type="audio/wav",
         filename=filename,
-        headers={"Content-Disposition": f'{content_disposition}; filename="{filename}"'},
+        headers={
+            "Content-Disposition": f'{content_disposition}; filename="{filename}"',
+            "X-Minimappr-Audio-Level-Profile": "canonical",
+        },
     )
 
 
@@ -5041,6 +5107,7 @@ async def get_recent_node_audio(
     seconds: float = Query(default=10.0, ge=1.0, le=30.0),
     channel: int | None = Query(default=None, ge=0),
     render: Literal["auto", "mix", "multichannel"] = Query(default="auto"),
+    level: Literal["listening", "canonical"] = Query(default="listening"),
 ) -> Response:
     state = _require_state(request)
     settings: Settings = state.settings
@@ -5084,13 +5151,14 @@ async def get_recent_node_audio(
     _render = render
     _sample_rate_hz = sample_rate_hz
     _node_id = node_id
+    _level = level
 
     # numpy stacking and WAV encoding are CPU-bound; run them off the event loop.
     def _encode_audio():
         channels_first = np.vstack([ch[-common_samples:] for ch in raw_channels])
         if _channel is not None:
             if _channel >= channels_first.shape[0]:
-                return None, None, None, None
+                return None, None, None, None, None
             r_mode = "single_channel"
             rendered = channels_first[_channel : _channel + 1]
             sel_ch = str(_channel)
@@ -5113,18 +5181,36 @@ async def get_recent_node_audio(
             r_mode = "auto_mix"
             rendered = mono_mix(channels_first)[None, :]
             sel_ch = "mix"
-        return wav_multichannel_bytes(rendered, sample_rate_hz=_sample_rate_hz), r_mode, sel_ch, len(raw_channels)
+        report = None
+        if _level == "listening":
+            profile = load_audio_processing_configuration(
+                settings.audio_processing_config_path
+            ).profile(LISTENING_PROFILE_NAME)
+            rendered, report = apply_level_profile(rendered, profile)
+        return (
+            wav_multichannel_bytes(rendered, sample_rate_hz=_sample_rate_hz),
+            r_mode,
+            sel_ch,
+            len(raw_channels),
+            report,
+        )
 
-    wav_bytes, render_mode, selected_channel, n_channels = await asyncio.to_thread(_encode_audio)
+    wav_bytes, render_mode, selected_channel, n_channels, level_report = await asyncio.to_thread(_encode_audio)
 
     if wav_bytes is None:
         raise HTTPException(status_code=404, detail="Requested audio channel is unavailable for node")
 
+    level_headers = (
+        level_report_headers(level_report)
+        if level_report is not None
+        else {"X-Minimappr-Audio-Level-Profile": "canonical"}
+    )
     return Response(
         content=wav_bytes,
         media_type="audio/wav",
         headers={
-            "Content-Disposition": f'inline; filename="{_node_id}_recent.wav"',
+            "Content-Disposition": f'inline; filename="{_node_id}_recent_{_level}.wav"',
+            **level_headers,
             "X-Minimappr-Node-Id": _node_id,
             "X-Minimappr-Sample-Rate": str(_sample_rate_hz),
             "X-Minimappr-Source-Channels": str(n_channels),

@@ -164,6 +164,48 @@ def test_composite_merges_scores_and_picks_winner() -> None:
     assert [entry["member_id"] for entry in ensemble] == ["yamnet", "birdnet"]
 
 
+def test_composite_promotes_priority_label_over_higher_scorer() -> None:
+    # A louder, higher-confidence bird call must not mask a safety-critical
+    # alarm cadence in the same window: the priority label wins even at lower
+    # confidence, so the alerting rules still see it.
+    composite = CompositeClassifier(
+        [
+            CompositeMember("birdnet", StubClassifier("coyote", 0.9)),
+            CompositeMember("t3t4_alarm", StubClassifier("alarm_t3", 0.6)),
+        ],
+        priority_labels=frozenset({"alarm_t3", "alarm_t4"}),
+    )
+    result = composite.classify(np.zeros(1600, dtype=np.float32), 16000)
+    assert result.label == "alarm_t3"
+    assert result.confidence == pytest.approx(0.6)
+    assert result.features["winner_member"] == "t3t4_alarm"
+    # The masked sibling is still recorded (birdnet is the primary/unprefixed member).
+    assert result.scores["coyote"] == pytest.approx(0.9)
+
+
+def test_composite_without_priority_labels_is_pure_winner_take_all() -> None:
+    composite = CompositeClassifier(
+        [
+            CompositeMember("birdnet", StubClassifier("coyote", 0.9)),
+            CompositeMember("t3t4_alarm", StubClassifier("alarm_t3", 0.6)),
+        ]
+    )
+    result = composite.classify(np.zeros(1600, dtype=np.float32), 16000)
+    assert result.label == "coyote"
+
+
+def test_context_classifier_wires_alarm_priority_labels() -> None:
+    # End-to-end: the omni context's composite must carry the alarm labels so
+    # promotion is active in the running system, not just when hand-constructed.
+    from minimappr.classifiers.factory import create_context_classifier
+
+    classifier = create_context_classifier(Settings(), CONTEXT_OMNI_CONTINUOUS)
+    if isinstance(classifier, CompositeClassifier):
+        assert {"alarm_t3", "alarm_t4"} <= classifier._priority_labels
+    else:  # BirdNET absent -> single t3t4 member, promotion is moot
+        assert getattr(classifier, "PRIORITY_LABELS", frozenset()) >= {"alarm_t3", "alarm_t4"}
+
+
 def test_composite_all_unknown_falls_back_to_primary() -> None:
     composite = CompositeClassifier(
         [

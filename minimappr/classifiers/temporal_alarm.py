@@ -239,6 +239,11 @@ def _best_match(
 class TemporalAlarmClassifier(AudioClassifier):
     """Detects T3/T4 temporal alarm cadences via narrowband envelope + template matching."""
 
+    # Safety-critical labels the composite must surface even when a co-running
+    # member (e.g. BirdNET) scores higher on the same window — see
+    # ``CompositeClassifier`` priority-label promotion.
+    PRIORITY_LABELS: frozenset[str] = frozenset({"alarm_t3", "alarm_t4"})
+
     def __init__(
         self,
         *,

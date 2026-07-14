@@ -46,7 +46,10 @@ use clap::Parser;
 use derived_cache::DerivedCache;
 use diagnostics::IngestDiagnostics;
 use dsp_events::{DspEventPublisher, ReplayableDspEvent};
-use dsp_worker::{DspWorker, DspWorkerConfig, NodeAudioConfig, PreprocessStage, SharedDspState};
+use dsp_worker::{
+    DspWorker, DspWorkerConfig, DspWorkerState, NodeAudioConfig, NodeAudioState, PreprocessStage,
+    SharedDspState,
+};
 use env_payload::{EnvIngestPayload, EnvIngestResponse};
 use ingest_backend::{
     BodyTooLargeError, ClientDisconnectError, IngestBackend, IngestStorageMode,
@@ -103,6 +106,20 @@ struct Args {
         default_value_t = 33_554_432
     )]
     max_body_bytes: usize,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_INGEST_PREPROCESS_STAGES_JSON",
+        default_value = "[]"
+    )]
+    ingest_preprocess_stages_json: String,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_NODE_AUDIO_OVERRIDES_JSON",
+        default_value = "{}"
+    )]
+    node_audio_overrides_json: String,
 
     #[arg(
         long,
@@ -485,6 +502,34 @@ fn run_srp_oracle() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
+/// Hidden golden-vector harness for Python/Rust ingest preprocessing parity.
+fn run_preprocess_oracle() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use std::io::Read;
+
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input)?;
+    let value: serde_json::Value = serde_json::from_str(&input)?;
+    let sample_rate_hz = value["sample_rate_hz"].as_u64().ok_or("sample_rate_hz")? as u32;
+    let stages: Vec<PreprocessStage> = serde_json::from_value(value["stages"].clone())?;
+    validate_preprocess_stages(&stages).map_err(|error| format!("invalid stages: {error}"))?;
+    let config = NodeAudioConfig {
+        stages,
+        ..NodeAudioConfig::default()
+    };
+    let mut state = NodeAudioState::default();
+    let mut output_frames: Vec<Vec<Vec<f32>>> = Vec::new();
+    for raw_frame in value["frames"].as_array().ok_or("frames")? {
+        let mut channels: Vec<Vec<f32>> = serde_json::from_value(raw_frame.clone())?;
+        state.apply(&mut channels, &config, sample_rate_hz);
+        output_frames.push(channels);
+    }
+    println!(
+        "{}",
+        serde_json::to_string(&serde_json::json!({"frames": output_frames}))?
+    );
+    Ok(())
+}
+
 /// Hidden test harness: run the live band-split DAS render on synthetic
 /// channels supplied as JSON on stdin and emit the rendered samples as JSON on
 /// stdout. Used by tests/test_beamform_cross_language_parity.py to compare the
@@ -647,6 +692,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if raw_args.get(1).map(String::as_str) == Some("beamform-oracle") {
         return run_beamform_oracle();
     }
+    if raw_args.get(1).map(String::as_str) == Some("preprocess-oracle") {
+        return run_preprocess_oracle();
+    }
 
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -658,6 +706,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     }
     let args = Args::parse();
+    let default_preprocess_stages: Vec<PreprocessStage> =
+        serde_json::from_str(&args.ingest_preprocess_stages_json)
+            .map_err(|error| format!("invalid MINIMAPPR_INGEST_PREPROCESS_STAGES_JSON: {error}"))?;
+    validate_preprocess_stages(&default_preprocess_stages)
+        .map_err(|error| format!("invalid default ingest preprocessing: {error}"))?;
+    let node_audio_overrides: HashMap<String, NodeAudioConfig> =
+        serde_json::from_str(&args.node_audio_overrides_json)
+            .map_err(|error| format!("invalid MINIMAPPR_NODE_AUDIO_OVERRIDES_JSON: {error}"))?;
+    for (node_id, config) in &node_audio_overrides {
+        validate_preprocess_stages(&config.stages)
+            .map_err(|error| format!("invalid preprocessing override for {node_id}: {error}"))?;
+    }
     let storage_dir = args.storage_dir.clone();
     let raw_manifest_channel_capacity = args.dsp_raw_manifest_channel_capacity.max(1);
     let raw_manifest_queue_byte_limit = args.dsp_raw_manifest_queue_byte_limit.max(1);
@@ -693,7 +753,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     )
     .await?;
 
-    let dsp_state: SharedDspState = Arc::new(RwLock::new(Default::default()));
+    let dsp_state: SharedDspState = Arc::new(RwLock::new(DspWorkerState {
+        node_audio_overrides,
+        ..DspWorkerState::default()
+    }));
     let env_cache = EnvironmentCache::new();
 
     let dsp_event_publisher = DspEventPublisher::new(
@@ -746,6 +809,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             manifest_store,
             derived_cache,
             DspWorkerConfig {
+                default_audio_config: NodeAudioConfig {
+                    stages: default_preprocess_stages,
+                    ..NodeAudioConfig::default()
+                },
                 window_seconds: localization_window_seconds,
                 classification_window_seconds,
                 classifier_render_min_interval_seconds,
@@ -1350,6 +1417,15 @@ fn validate_preprocess_stages(stages: &[PreprocessStage]) -> Result<(), String> 
             PreprocessStage::Gain { db } => {
                 if !(-60.0..=60.0).contains(db) {
                     return Err(format!("stages[{idx}].db must be in [-60, 60] (got {db})"));
+                }
+            }
+            PreprocessStage::ChannelGain { db_by_channel } => {
+                if db_by_channel.is_empty()
+                    || db_by_channel.iter().any(|db| !(-60.0..=60.0).contains(db))
+                {
+                    return Err(format!(
+                        "stages[{idx}].db_by_channel must contain finite values in [-60, 60]"
+                    ));
                 }
             }
             PreprocessStage::Highpass { cutoff_hz, order }

@@ -41,6 +41,8 @@ pub(crate) const SIRITH_MIC_POSITIONS_M: [[f32; 3]; 4] = [
 
 #[derive(Clone, Debug)]
 pub struct DspWorkerConfig {
+    /// Global fixed/causal ingest chain used when a node has no replacement override.
+    pub default_audio_config: NodeAudioConfig,
     pub poll_interval_ms: u64,
     pub pending_manifest_batch_size: usize,
     pub window_seconds: f64,
@@ -105,6 +107,7 @@ impl Default for DspWorkerConfig {
         let default_temperature_c = 20.0;
         let default_humidity_fraction = 0.5;
         Self {
+            default_audio_config: NodeAudioConfig::default(),
             poll_interval_ms: 20,
             pending_manifest_batch_size: 128,
             window_seconds: 512.0 / 16_000.0,
@@ -169,6 +172,8 @@ pub struct PairTdoa {
 pub enum PreprocessStage {
     /// Apply a linear gain expressed in dB. `db == 0.0` is a no-op.
     Gain { db: f64 },
+    /// Per-channel calibration trim. Missing entries leave later channels unchanged.
+    ChannelGain { db_by_channel: Vec<f64> },
     /// Butterworth highpass — even order ≥ 2. Default order = 4.
     Highpass {
         cutoff_hz: f64,
@@ -774,7 +779,8 @@ impl DspWorker {
             let st = self.state.read().await;
             let cfg = st.node_audio_overrides.get(node_id_key).cloned();
             drop(st);
-            if let Some(cfg) = cfg {
+            let cfg = cfg.unwrap_or_else(|| self.config.default_audio_config.clone());
+            if !cfg.effective_stages().is_empty() {
                 let node_state = self
                     .node_audio_state
                     .entry(node_id_key.to_string())
@@ -2433,6 +2439,9 @@ enum CompiledStage {
     Gain {
         linear: f32,
     },
+    ChannelGain {
+        linear_by_channel: Vec<f32>,
+    },
     /// IIR cascade — coefficients are shared across channels; biquad memory is per-channel.
     Cascade {
         coeffs: Vec<BiquadCoefficients>,
@@ -2462,6 +2471,18 @@ impl CompiledStage {
                 };
                 CompiledStage::Gain { linear }
             }
+            PreprocessStage::ChannelGain { db_by_channel } => CompiledStage::ChannelGain {
+                linear_by_channel: db_by_channel
+                    .iter()
+                    .map(|db| {
+                        if db.is_finite() {
+                            10f64.powf(*db / 20.0) as f32
+                        } else {
+                            1.0
+                        }
+                    })
+                    .collect(),
+            },
             PreprocessStage::Highpass { cutoff_hz, order } => {
                 let coeffs = butter_highpass_sos(*cutoff_hz, sample_rate_hz, *order);
                 let state = vec![vec![BiquadState::default(); coeffs.len()]; channel_count];
@@ -2507,6 +2528,14 @@ impl CompiledStage {
                 for ch in channels.iter_mut() {
                     for sample in ch.iter_mut() {
                         *sample *= *linear;
+                    }
+                }
+            }
+            CompiledStage::ChannelGain { linear_by_channel } => {
+                for (channel_index, channel) in channels.iter_mut().enumerate() {
+                    let linear = linear_by_channel.get(channel_index).copied().unwrap_or(1.0);
+                    for sample in channel.iter_mut() {
+                        *sample *= linear;
                     }
                 }
             }

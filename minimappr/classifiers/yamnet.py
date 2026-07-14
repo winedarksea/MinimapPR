@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
+import json
 import logging
 import urllib.request
 from pathlib import Path
@@ -13,6 +15,10 @@ from scipy.signal import resample_poly
 
 from minimappr.classifiers.base import AudioClassifier
 from minimappr.models import ClassificationResult
+from minimappr.audio_processing.levels import apply_bounded_rms_gain, apply_level_profile
+from minimappr.audio_processing.profiles import (
+    AudioProcessingProfile,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -27,6 +33,28 @@ _EPSILON = 1e-12
 # Bumped whenever `_prepare_waveform_for_yamnet` changes so embedding caches and
 # model metadata can invalidate on preprocessing drift (train/serve consistency).
 YAMNET_PREPROCESS_VERSION = "yamnet-prep-v1"
+def yamnet_preprocess_fingerprint(
+    target_rms: float = _YAMNET_TARGET_RMS,
+    max_input_gain: float = _YAMNET_MAX_INPUT_GAIN,
+) -> str:
+    document = {
+        "name": "yamnet",
+        "stages": [
+            {"type": "mean_center"},
+            {
+                "type": "bounded_rms_gain",
+                "target_rms_dbfs": 20.0 * float(np.log10(target_rms)),
+                "max_gain_db": 20.0 * float(np.log10(max_input_gain)),
+                "peak_ceiling_dbfs": 20.0 * float(np.log10(0.98)),
+                "boost_only": True,
+            },
+        ],
+    }
+    canonical = json.dumps(document, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
+YAMNET_PREPROCESS_FINGERPRINT = yamnet_preprocess_fingerprint()
 
 # Public aliases of the conditioning constants for training-time metadata.
 YAMNET_TARGET_RMS = _YAMNET_TARGET_RMS
@@ -38,6 +66,7 @@ def _prepare_waveform_for_yamnet(
     *,
     target_rms: float = _YAMNET_TARGET_RMS,
     max_input_gain: float = _YAMNET_MAX_INPUT_GAIN,
+    preprocess_profile: AudioProcessingProfile | None = None,
 ) -> np.ndarray:
     """Normalize low-level waveforms so YAMNet sees stable input energy.
 
@@ -48,18 +77,18 @@ def _prepare_waveform_for_yamnet(
     if waveform.size == 0:
         return waveform.astype(np.float32, copy=False)
 
-    centered = waveform.astype(np.float32, copy=False) - np.mean(waveform, dtype=np.float32)
-    rms = float(np.sqrt(np.mean(np.square(centered), dtype=np.float64) + _EPSILON))
-    peak = float(np.max(np.abs(centered)) + _EPSILON)
-
-    # Gain floor is 1.0 so we avoid attenuating normal signals unless headroom
-    # would otherwise clip after prior preprocessing.
-    gain_from_rms = max(1.0, float(target_rms) / max(rms, _EPSILON))
-    gain_from_headroom = 0.98 / peak
-    gain = min(float(max_input_gain), gain_from_rms, gain_from_headroom)
-    gain = max(gain, min(1.0, gain_from_headroom))
-
-    return (centered * gain).astype(np.float32)
+    if preprocess_profile is not None:
+        conditioned, _ = apply_level_profile(waveform, preprocess_profile)
+    else:
+        conditioned, _ = apply_bounded_rms_gain(
+            waveform,
+            target_rms=float(target_rms),
+            max_gain=float(max_input_gain),
+            peak_ceiling=0.98,
+            center=True,
+            boost_only=True,
+        )
+    return conditioned
 
 
 # Public alias so training code (embedding_cache) applies identical conditioning
@@ -80,6 +109,7 @@ class YAMNetClassifier(AudioClassifier):
         target_rms: float = _YAMNET_TARGET_RMS,
         max_input_gain: float = _YAMNET_MAX_INPUT_GAIN,
         keep_embeddings: bool = False,
+        preprocess_profile: AudioProcessingProfile | None = None,
     ) -> None:
         try:
             import tensorflow as tf
@@ -94,6 +124,7 @@ class YAMNetClassifier(AudioClassifier):
         self._min_confidence = min_confidence
         self._target_rms = float(target_rms)
         self._max_input_gain = float(max_input_gain)
+        self._preprocess_profile = preprocess_profile
         # Off on the hot path: 1024-d embeddings would bloat feature_summary_json
         # and the sidecar classifier bridge. Enabled only for offline extraction
         # at training-promotion time (minimappr/calibration/embeddings.py).
@@ -107,6 +138,7 @@ class YAMNetClassifier(AudioClassifier):
             waveform,
             target_rms=self._target_rms,
             max_input_gain=self._max_input_gain,
+            preprocess_profile=self._preprocess_profile,
         )
 
         scores, embeddings, _ = self._model(waveform)
@@ -180,4 +212,3 @@ class YAMNetClassifier(AudioClassifier):
 def _parse_class_map_csv(text: str) -> list[str]:
     rows = csv.DictReader(io.StringIO(text))
     return [row["display_name"] for row in rows if "display_name" in row]
-

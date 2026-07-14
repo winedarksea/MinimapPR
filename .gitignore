@@ -184,6 +184,7 @@ cython_debug/
 
 # Local runtime artifacts
 data/*
+!data/audio_processing.json
 !data/models/
 data/models/*
 !data/models/drone_head.onnx

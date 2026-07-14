@@ -143,6 +143,23 @@ fn gain_stage_applies_linear_multiplier_within_tolerance() {
 }
 
 #[test]
+fn channel_gain_stage_applies_independent_calibration_trim() {
+    let config = NodeAudioConfig {
+        stages: vec![PreprocessStage::ChannelGain {
+            db_by_channel: vec![6.020_599_913, -6.020_599_913],
+        }],
+        ..NodeAudioConfig::default()
+    };
+    let mut channels = vec![vec![0.1_f32, -0.1], vec![0.1_f32, -0.1]];
+    let mut state = NodeAudioState::default();
+
+    state.apply(&mut channels, &config, 16_000);
+
+    assert!((channels[0][0] - 0.2).abs() < 1.0e-5);
+    assert!((channels[1][0] - 0.05).abs() < 1.0e-5);
+}
+
+#[test]
 fn lowpass_attenuates_high_frequency_more_than_low_frequency() {
     let cfg = NodeAudioConfig {
         stages: vec![PreprocessStage::Lowpass {

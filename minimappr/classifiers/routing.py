@@ -50,6 +50,7 @@ class ClassifierSpec:
     min_confidence: float = 0.0
     keep_embeddings: bool = False
     model_path: str | None = None
+    preprocess_profile: str | None = None
 
 
 @dataclass(slots=True)
@@ -108,7 +109,8 @@ def default_routing() -> RoutingConfig:
         version=1,
         classifiers={
             "yamnet": ClassifierSpec(
-                member_id="yamnet", backend="yamnet", min_confidence=0.25, keep_embeddings=True
+                member_id="yamnet", backend="yamnet", min_confidence=0.25,
+                keep_embeddings=True, preprocess_profile="yamnet"
             ),
             "birdnet": ClassifierSpec(member_id="birdnet", backend="birdnet", min_confidence=0.40),
             "drone_head": ClassifierSpec(
@@ -187,6 +189,10 @@ def _parse_routing(raw: dict[str, Any], source: str) -> RoutingConfig:
             min_confidence=min_confidence,
             keep_embeddings=bool(spec.get("keep_embeddings", False)),
             model_path=(str(spec["model_path"]) if spec.get("model_path") else None),
+            preprocess_profile=(
+                str(spec["preprocess_profile"]).strip()
+                if spec.get("preprocess_profile") else None
+            ),
         )
 
     contexts: dict[str, ContextSpec] = {}
@@ -322,6 +328,8 @@ def routing_to_dict(routing: RoutingConfig) -> dict[str, Any]:
         }
         if spec.model_path is not None:
             value["model_path"] = spec.model_path
+        if spec.preprocess_profile is not None:
+            value["preprocess_profile"] = spec.preprocess_profile
         classifiers[member_id] = value
 
     contexts: dict[str, dict[str, Any]] = {}

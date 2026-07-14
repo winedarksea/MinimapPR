@@ -63,6 +63,10 @@ from minimappr.classifiers.yamnet import (
     YAMNET_PREPROCESS_VERSION,
     YAMNET_TARGET_RMS,
 )
+from minimappr.audio_processing.profiles import (
+    load_audio_processing_configuration,
+    profile_fingerprint,
+)
 from minimappr.training.augment import augment_waveform, synthesize_ambient_windows
 from minimappr.training.embedding_cache import (
     EMBEDDING_DIM,
@@ -725,6 +729,11 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--promoted-dir", type=Path, default=None)
     parser.add_argument("--out-dir", type=Path, default=Path("data/models"))
     parser.add_argument("--cache-dir", type=Path, default=Path("drone_dataset/.embed_cache"))
+    parser.add_argument(
+        "--audio-processing-config",
+        type=Path,
+        default=Path("data/audio_processing.json"),
+    )
     parser.add_argument("--labels", default=",".join(DEFAULT_LABELS))
     parser.add_argument("--epochs", type=int, default=40)
     parser.add_argument("--batch-size", type=int, default=256)
@@ -797,8 +806,13 @@ def main(argv: Iterable[str] | None = None) -> int:
     logger.info("Variant plan: %d embedding jobs", len(plan))
 
     # ---- Embed ----
-    embedder = YamnetEmbedder()
-    cache = EmbeddingCache(args.cache_dir)
+    yamnet_profile = load_audio_processing_configuration(args.audio_processing_config).profile("yamnet")
+    yamnet_profile_fingerprint = profile_fingerprint(yamnet_profile)
+    embedder = YamnetEmbedder(yamnet_profile)
+    cache = EmbeddingCache(
+        args.cache_dir,
+        prep_version=f"{YAMNET_PREPROCESS_VERSION}-{yamnet_profile_fingerprint}",
+    )
     frames, y, groups, train_only, counts = embed_plan(plan, embedder, cache, labels)
 
     logger.info("Frames per label: %s", {labels[i]: int((y == i).sum()) for i in range(n_labels)})
@@ -932,6 +946,8 @@ def main(argv: Iterable[str] | None = None) -> int:
         "opset": OPSET,
         "preprocessing": {
             "version": YAMNET_PREPROCESS_VERSION,
+            "profile": "yamnet",
+            "fingerprint": yamnet_profile_fingerprint,
             "target_rms": YAMNET_TARGET_RMS,
             "max_input_gain": YAMNET_MAX_INPUT_GAIN,
         },

@@ -29,12 +29,17 @@ _DEFAULT_LABELS = ("no_drone", "drone")
 _NEGATIVE_LABEL_CANDIDATES = ("ambient", "no_drone")
 
 
+class PreprocessingProfileMismatchError(RuntimeError):
+    """The embedding head was trained with a different waveform profile."""
+
+
 class DroneHeadClassifier(EmbeddingClassifier):
     def __init__(
         self,
         model_path: str | Path = "data/models/drone_head.onnx",
         *,
         min_confidence: float = 0.5,
+        expected_preprocessing_fingerprint: str | None = None,
     ) -> None:
         try:
             import onnxruntime as ort  # noqa: PLC0415
@@ -70,6 +75,17 @@ class DroneHeadClassifier(EmbeddingClassifier):
                     self._negative_label = negative_label.strip().lower()
             except (OSError, json.JSONDecodeError) as exc:
                 logger.warning("Unable to read drone head metadata %s: %s", metadata_path, exc)
+
+        trained_fingerprint = (self._metadata.get("preprocessing") or {}).get("fingerprint")
+        if (
+            expected_preprocessing_fingerprint
+            and trained_fingerprint
+            and trained_fingerprint != expected_preprocessing_fingerprint
+        ):
+            raise PreprocessingProfileMismatchError(
+                "Drone head preprocessing mismatch: model expects "
+                f"{trained_fingerprint}, runtime resolved {expected_preprocessing_fingerprint}"
+            )
 
         # Resolve the negative class: explicit metadata wins; otherwise pick the
         # first known negative candidate present in labels, else labels[0].
@@ -139,4 +155,4 @@ class DroneHeadClassifier(EmbeddingClassifier):
         )
 
 
-__all__ = ["DroneHeadClassifier"]
+__all__ = ["DroneHeadClassifier", "PreprocessingProfileMismatchError"]
