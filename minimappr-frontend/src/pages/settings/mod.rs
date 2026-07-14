@@ -3,6 +3,7 @@ pub mod integrations;
 pub mod logs;
 pub mod nodes;
 pub mod overlays;
+pub mod pipeline;
 pub mod rules;
 pub mod server;
 
@@ -20,6 +21,7 @@ pub fn SettingsLayout() -> impl IntoView {
             <nav class="subnav" aria-label="Settings sections">
                 <SubNavLink href="/settings/config"   label="Config" />
                 <SubNavLink href="/settings/nodes"    label="Nodes" />
+                <SubNavLink href="/settings/pipeline" label="Pipeline" />
                 <SubNavLink href="/settings/rules"    label="Rules" />
                 <SubNavLink href="/settings/overlays" label="Overlays" />
                 <SubNavLink href="/settings/integrations" label="Integrations" />

@@ -34,10 +34,13 @@ from minimappr.api.stream_consumer import IngestStreamConsumer, StreamConsumerCo
 from minimappr.classifiers.availability import probe_backends
 from minimappr.classifiers.factory import create_classifier
 from minimappr.classifiers.routing import (
+    load_routing,
     load_routing_file,
     parse_routing_document,
     routing_to_dict,
 )
+from minimappr.core.config_groups import group_flat_config
+from minimappr.core.pipeline_graph import build_pipeline_graph
 from minimappr.config import IngestSidecarProcessConfig, IngestSidecarStartupConfig, Settings
 from minimappr.settings_store import CONFIG_PATCH_ALLOWLIST, load_overrides, save_overrides
 from minimappr.ingest_sidecar_runtime import (
@@ -110,7 +113,7 @@ from minimappr.core.federation import FederationCoordinator
 from minimappr.core.fusion_node import FusionNode
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.logging_ring import install_global as install_log_ring, process_start_ns
-from minimappr.core.rules import RuleDef, default_rules_as_dicts
+from minimappr.core.rules import ConfigRuleEngine, RuleDef, default_rules_as_dicts
 from minimappr.core.site_origin import (
     resolve_site_origin_from_nodes,
     should_schedule_deferred_site_origin_reconciliation,
@@ -158,6 +161,7 @@ from minimappr.models import (
     NodeRegistrationRequest,
     NodeSafetyConfig,
     NodeSpec,
+    PipelineGraph,
     PipelineNodeView,
     PipelineNodesResponse,
     PipelineStageView,
@@ -2876,6 +2880,20 @@ async def get_config(request: Request) -> dict:
     }
 
 
+@app.get("/api/v1/config/structured")
+async def get_config_structured(request: Request) -> dict:
+    """Read-only stage-grouped projection of ``GET /api/v1/config``.
+
+    Additive: calls ``get_config`` once and regroups the flat keys into the
+    pipeline-stage vocabulary (see ``core/config_groups.py``). The flat
+    GET/PATCH ``/api/v1/config`` surface is unchanged — this is purely a
+    presentation projection used for the DAG's ``/settings/config#{group}``
+    deep links.
+    """
+    flat = await get_config(request)
+    return group_flat_config(flat)
+
+
 # Single source of truth lives in settings_store so the persisted-overrides file
 # and this HTTP allowlist can never drift apart.
 _CONFIG_PATCH_ALLOWLIST = CONFIG_PATCH_ALLOWLIST
@@ -3466,6 +3484,65 @@ async def get_pipeline_nodes(request: Request) -> PipelineNodesResponse:
         nodes=nodes_out,
         pipeline_seconds_behind_realtime=float(overall_lag) if overall_lag is not None else None,
     )
+
+@app.get("/api/v1/pipeline/graph", response_model=PipelineGraph)
+async def get_pipeline_graph(request: Request) -> PipelineGraph:
+    """Read-only pipeline-flow DAG (structure + live status overlays).
+
+    Single endpoint for initial load and status polling; ``structure_hash``
+    lets the frontend skip re-layout when only status changed. Always returns
+    200 — when no fusion node / sidecar is available the graph still renders
+    with ``fusion_available=False`` and ``unknown`` health.
+    """
+    state = _require_state(request)
+    settings: Settings = state.settings
+    now_ns = time.time_ns()
+
+    # Nodes: prefer live registry specs, fall back to stored specs.
+    node_specs: dict[str, NodeSpec] = {}
+    for row in await state.storage.list_nodes(limit=4096):
+        try:
+            spec = NodeSpec.model_validate(row)
+        except Exception:
+            continue
+        node_specs[spec.id] = spec
+    if _has_live_ingest_runtime(state):
+        for runtime in await state.registry.list_nodes():
+            node_specs[runtime.spec.id] = runtime.spec
+
+    routing = load_routing(settings)
+
+    fusion_node: FusionNode | None = getattr(state, "fusion_node", None)
+    fusion_status: dict | None = None
+    rules_engine = None
+    if fusion_node is not None:
+        fusion_status = await fusion_node.status()
+        rules_engine = fusion_node.rules_engine
+    if rules_engine is None:
+        rules_engine = ConfigRuleEngine(settings.rules_config_path)
+    rules = rules_engine.rules()
+
+    sidecar_dsp_status: dict | None = None
+    active_pipeline = "python"
+    if _ingest_sidecar_is_running(state) and settings.ingest_backend == "rust":
+        active_pipeline = "rust"
+        sidecar_dsp_status = await asyncio.to_thread(
+            _fetch_json_from_sidecar,
+            _ingest_runtime_base_url(settings),
+            "/api/v1/dsp/status",
+        )
+
+    return build_pipeline_graph(
+        settings=settings,
+        nodes=list(node_specs.values()),
+        routing=routing,
+        rules=rules,
+        fusion_status=fusion_status,
+        sidecar_dsp_status=sidecar_dsp_status,
+        active_pipeline=active_pipeline,
+        now_ns=now_ns,
+    )
+
 
 def _validate_stage_float(raw_value: object, *, stage_index: int, field_name: str) -> float:
     if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):

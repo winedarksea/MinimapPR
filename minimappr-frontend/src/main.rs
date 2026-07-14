@@ -70,6 +70,7 @@ fn App() -> impl IntoView {
                         <Route path=path!("overlays")  view=pages::settings::overlays::OverlaysView />
                         <Route path=path!("nodes")     view=pages::settings::nodes::NodesView />
                         <Route path=path!("nodes/:id") view=pages::settings::nodes::NodeDetailView />
+                        <Route path=path!("pipeline")  view=pages::settings::pipeline::PipelineGraphView />
                         <Route path=path!("integrations") view=pages::settings::integrations::IntegrationsView />
                         <Route path=path!("server")    view=pages::settings::server::ServerDiagnosticsView />
                         <Route path=path!("logs")      view=pages::settings::logs::ServerLogsView />

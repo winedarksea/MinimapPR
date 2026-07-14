@@ -213,6 +213,14 @@ class ConfigRuleEngine(RuleEngine):
             )
         return out
 
+    def rules(self) -> list[RuleDef]:
+        """Read-only snapshot of the parsed rule definitions (reloads first).
+
+        Used by the pipeline-graph builder to render the rules/alerts stage.
+        """
+        self.reload()
+        return list(self._rules)
+
     async def evaluate_transcript(
         self, transcript: TranscriptRecord
     ) -> list[RuleEvaluationResult]:

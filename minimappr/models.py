@@ -1039,6 +1039,95 @@ class PipelineNodesResponse(BaseModel):
     pipeline_seconds_behind_realtime: float | None = None
 
 
+# ---------------------------------------------------------------------------
+# Pipeline Flow DAG — read-only structural + status graph for /settings/pipeline
+#
+# These models are the first-class contract between the backend builder
+# (minimappr/core/pipeline_graph.py) and the Leptos DAG view. IDs are stable
+# structural handles (see PipelineGraphNode.id) — never derived from display
+# titles — so the frontend can key selection/layout off them across polls.
+# Every new pipeline stage or routing concept MUST be registered in
+# pipeline_graph.py and config_groups.py; tests enforce config-key coverage.
+# ---------------------------------------------------------------------------
+
+
+class PipelineStageKind(str, Enum):
+    SOURCE = "source"
+    PREPROCESS = "preprocess"
+    GATE = "gate"
+    LOCALIZATION = "localization"
+    BEAMFORM = "beamform"
+    CLASSIFIER = "classifier"
+    TRACKING = "tracking"
+    RULES = "rules"
+    ALERT = "alert"
+
+
+class PipelineParam(BaseModel):
+    label: str
+    value: str  # pre-formatted for display
+    config_key: str | None = None  # flat config key → config deep link
+
+
+class PipelineStageStatus(BaseModel):
+    health: Literal["ok", "warn", "danger", "idle", "off", "unknown"] = "unknown"
+    summary: str = ""
+    metrics: list[PipelineParam] = Field(default_factory=list)
+
+
+class PipelineGraphNode(BaseModel):
+    # id is a stable structural contract, e.g. `src:{node_id}:audio`,
+    # `loc:site:tdoa`, `cls:ctx:omni_continuous`, `cls:member:yamnet`. Never
+    # derive it from display titles — the frontend keys layout/selection on it.
+    id: str
+    stage: PipelineStageKind
+    column: str
+    lane: str  # node_id or "site"
+    title: str
+    subtitle: str = ""
+    modality: Literal["audio", "ble", "video", "environment"] = "audio"
+    enabled: bool = True
+    node_type: str | None = None  # → array icon
+    params: list[PipelineParam] = Field(default_factory=list)
+    status: PipelineStageStatus = Field(default_factory=PipelineStageStatus)
+    link: str | None = None  # deep-link path
+
+
+class PipelineGraphEdge(BaseModel):
+    id: str
+    source: str
+    target: str
+    kind: Literal["audio", "embedding", "trigger", "metadata", "alert"] = "audio"
+    label: str = ""
+    active: bool = True  # config-enabled; inactive renders dimmed/dashed
+
+
+class PipelineGraphColumn(BaseModel):
+    id: str
+    title: str
+    order: int
+
+
+class PipelineGraphLane(BaseModel):
+    id: str
+    title: str
+    node_type: str | None = None
+    health: str | None = None  # NodeHealthStatus value
+    link: str | None = None
+    order: int = 0
+
+
+class PipelineGraph(BaseModel):
+    generated_ns: int
+    active_pipeline: Literal["python", "rust"]
+    structure_hash: str  # sha1 of structural fields (excludes status)
+    fusion_available: bool = True  # False when no fusion node; never 503
+    columns: list[PipelineGraphColumn] = Field(default_factory=list)
+    lanes: list[PipelineGraphLane] = Field(default_factory=list)
+    nodes: list[PipelineGraphNode] = Field(default_factory=list)
+    edges: list[PipelineGraphEdge] = Field(default_factory=list)
+
+
 # ── Calibration ground truth (training-data bundles) ─────────────────────────
 
 class CalibrationGroundTruthIn(BaseModel):

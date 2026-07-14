@@ -1,0 +1,169 @@
+"""Tests for the pipeline-flow DAG builder and GET /api/v1/pipeline/graph."""
+
+from __future__ import annotations
+
+import time
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+from minimappr.classifiers.routing import default_routing
+from minimappr.config import Settings
+from minimappr.core.config_groups import EXPOSED_CONFIG_KEYS
+from minimappr.core.pipeline_graph import build_pipeline_graph
+from minimappr.core.rules import default_rules
+from minimappr.main import app
+from minimappr.models import (
+    NodeCapability,
+    NodeSpec,
+    NodeType,
+    PipelineGraph,
+)
+
+
+def _tetra(node_id: str) -> NodeSpec:
+    return NodeSpec(
+        id=node_id,
+        node_type=NodeType.SIRITH_TETRA,
+        position_m=(0.0, 0.0, 0.0),
+        sensor_offsets_m=[(0.0, 0.0, 0.0), (0.1, 0, 0), (0, 0.1, 0), (0, 0, 0.1)],
+        capabilities=[NodeCapability.AUDIO, NodeCapability.ARRAY_LOCALIZATION],
+    )
+
+
+def _point_ble(node_id: str) -> NodeSpec:
+    return NodeSpec(
+        id=node_id,
+        node_type=NodeType.POINT,
+        position_m=(5.0, 0.0, 0.0),
+        sensor_offsets_m=[(0.0, 0.0, 0.0)],
+        capabilities=[NodeCapability.AUDIO, NodeCapability.BLE_RSSI],
+    )
+
+
+def _build(settings=None, nodes=None, fusion_status=None, **kw) -> PipelineGraph:
+    settings = settings or Settings()
+    nodes = nodes if nodes is not None else [_tetra("t1"), _tetra("t2"), _point_ble("p1")]
+    return build_pipeline_graph(
+        settings=settings,
+        nodes=nodes,
+        routing=kw.pop("routing", None) or default_routing(),
+        rules=kw.pop("rules", None) or default_rules(),
+        fusion_status=fusion_status,
+        sidecar_dsp_status=None,
+        active_pipeline=kw.pop("active_pipeline", "python"),
+        now_ns=time.time_ns(),
+    )
+
+
+class TestBuilderTopology:
+    def test_lanes_columns_present(self):
+        g = _build()
+        lane_ids = {l.id for l in g.lanes}
+        assert lane_ids == {"site", "t1", "t2", "p1"}
+        assert [c.id for c in g.columns] == [
+            "sources", "preprocess", "gates", "localize",
+            "beamform", "classify", "track", "alert",
+        ]
+
+    def test_all_edge_endpoints_exist(self):
+        g = _build(fusion_status={"metrics": {}})
+        node_ids = {n.id for n in g.nodes}
+        for e in g.edges:
+            assert e.source in node_ids, f"missing edge source {e.source}"
+            assert e.target in node_ids, f"missing edge target {e.target}"
+
+    def test_ids_unique(self):
+        g = _build()
+        ids = [n.id for n in g.nodes]
+        assert len(ids) == len(set(ids))
+        edge_ids = [e.id for e in g.edges]
+        assert len(edge_ids) == len(set(edge_ids))
+
+    def test_tdoa_present_iff_enabled(self):
+        g = _build()
+        assert any(n.id == "loc:site:tdoa" for n in g.nodes)
+        s = Settings()
+        s.localization_cross_node_tdoa_enabled = False
+        g2 = _build(settings=s)
+        assert not any(n.id == "loc:site:tdoa" for n in g2.nodes)
+
+    def test_doa_only_for_array_nodes(self):
+        g = _build()
+        assert any(n.id == "doa:t1" for n in g.nodes)
+        assert not any(n.id == "doa:p1" for n in g.nodes)  # point node has no array cap
+
+    def test_ble_stub_source_and_tracking(self):
+        g = _build()
+        assert any(n.id == "src:p1:ble" for n in g.nodes)
+        assert any(n.id == "ble:site:tracking" for n in g.nodes)
+
+    def test_kill_switch_removes_member(self):
+        s = Settings()
+        s.birdnet_enabled = False
+        g = _build(settings=s, routing=None)  # routing rebuilt from default within _build
+        # default routing kill-switches are applied by load_routing, not default_routing;
+        # emulate by passing a routing without birdnet.
+        from minimappr.classifiers.routing import load_routing
+        g = _build(settings=s, routing=load_routing(s))
+        assert not any(n.id == "cls:member:birdnet" for n in g.nodes)
+        # no edges reference the removed member
+        for e in g.edges:
+            assert "birdnet" not in e.source and "birdnet" not in e.target
+
+
+class TestBuilderStatus:
+    def test_structure_hash_stable_across_status_change(self):
+        g1 = _build(fusion_status={"metrics": {"localization_stage_out": 1}})
+        g2 = _build(fusion_status={"metrics": {"localization_stage_out": 999, "beamform_renders": 5}})
+        assert g1.structure_hash == g2.structure_hash
+
+    def test_structure_hash_changes_on_config_change(self):
+        g1 = _build()
+        s = Settings()
+        s.beamformer_type = "delay_and_sum"
+        g2 = _build(settings=s)
+        assert g1.structure_hash != g2.structure_hash
+
+    def test_fusion_none_marks_unavailable(self):
+        g = _build(fusion_status=None)
+        assert g.fusion_available is False
+        solve = next(n for n in g.nodes if n.id == "loc:site:solve")
+        assert solve.status.health == "unknown"
+
+    def test_fusion_present_available(self):
+        g = _build(fusion_status={"metrics": {"localization_stage_out": 3}})
+        assert g.fusion_available is True
+
+
+class TestConfigKeyCoverage:
+    def test_every_config_key_is_exposed(self):
+        g = _build(fusion_status={"metrics": {}})
+        for n in g.nodes:
+            for p in list(n.params) + list(n.status.metrics):
+                if p.config_key is not None:
+                    assert p.config_key in EXPOSED_CONFIG_KEYS
+
+
+# ---------------------------------------------------------------------------
+# Endpoint
+# ---------------------------------------------------------------------------
+
+def _configure_env(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("MINIMAPPR_DB_PATH", str(tmp_path / "test.db"))
+    monkeypatch.setenv("MINIMAPPR_SNIPPET_DIR", str(tmp_path / "snippets"))
+    monkeypatch.setenv("MINIMAPPR_LARGE_ARTIFACT_DIR", str(tmp_path / "artifacts"))
+    monkeypatch.setenv("MINIMAPPR_INGEST_SIDECAR_ENABLED", "false")
+    monkeypatch.setenv("MINIMAPPR_INGEST_BACKEND", "python")
+
+
+class TestGraphEndpoint:
+    def test_returns_200_and_parses(self, monkeypatch, tmp_path):
+        _configure_env(monkeypatch, tmp_path)
+        with TestClient(app) as client:
+            resp = client.get("/api/v1/pipeline/graph")
+            assert resp.status_code == 200
+            graph = PipelineGraph.model_validate(resp.json())
+            assert graph.active_pipeline == "python"
+            assert any(c.id == "sources" for c in graph.columns)

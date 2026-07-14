@@ -28,6 +28,9 @@ This document provides guidelines for agents working on the MinimapPR codebase.
 - **Explain "Why", Not "What":** Comments should explain the reasoning behind complex algorithms or architectural decisions.
 - **Be Token-Efficient in Comments:** Use concise, informative language. Focus on documenting interface contracts and capability tiers.
 
+### 2.5 Pipeline Flow DAG Alignment
+- **Register New Stages:** Any new pipeline stage, classifier-routing concept, or Settings key that should appear in `/settings/pipeline` must be added to both `minimappr/core/pipeline_graph.py` (the DAG builder) and `minimappr/core/config_groups.py` (the stage-grouped config projection). `tests/test_config_structured.py` enforces that every flat config key lives in exactly one group.
+
 ## 3. Testing & Benchmarking
 - **Shared Fixtures:** Place reusable fixtures into a shared helper module if reused across 3+ files.
 - **Avoid Test Duplication:** If the same setup appears in multiple test files, factor it into a fixture or a helper module.
