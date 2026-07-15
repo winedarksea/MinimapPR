@@ -301,6 +301,22 @@ def test_per_class_group_split_invariants():
     assert is_tr[synth].all()
 
 
+def test_retained_train_frame_counts_include_only_frames_that_contribute_loss():
+    from scripts.train_drone_head import retained_train_frame_counts
+
+    labels = ["ambient", "drone", "coyote"]
+    # Two real ambient frames and one synthetic ambient frame are retained. The
+    # final coyote augmentation was dropped with its held-out source group.
+    y = np.asarray([0, 0, 0, 1, 2, 2], dtype=np.int64)
+    is_train = np.asarray([True, True, True, True, True, False], dtype=bool)
+
+    assert retained_train_frame_counts(y, is_train, labels) == {
+        "ambient": 3,
+        "drone": 1,
+        "coyote": 1,
+    }
+
+
 # --------------------------------------------------------------------------- #
 # auto-balance
 # --------------------------------------------------------------------------- #

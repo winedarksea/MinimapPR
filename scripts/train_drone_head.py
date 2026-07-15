@@ -449,14 +449,19 @@ def build_model(n_labels: int):
     return model
 
 
-def class_weights(labels_int: np.ndarray, n_labels: int, cap: float) -> dict[int, float]:
-    counts = np.bincount(labels_int, minlength=n_labels).astype(np.float64)
-    counts[counts == 0] = 1.0
-    total = counts.sum()
-    weights = {i: float(total / (n_labels * counts[i])) for i in range(n_labels)}
-    if cap and cap > 0:
-        weights = {i: min(w, cap) for i, w in weights.items()}
-    return weights
+def retained_train_frame_counts(
+    labels_int: np.ndarray, train_mask: np.ndarray, labels: list[str]
+) -> dict[str, int]:
+    """Count the frames that actually contribute loss for each label.
+
+    The train mask excludes augmented copies whose source group was reserved for
+    validation or test, so these counts are the authoritative class balance for
+    training rather than the broader embedding-plan counts.
+    """
+    if labels_int.shape != train_mask.shape:
+        raise ValueError("labels_int and train_mask must have matching shapes")
+    counts = np.bincount(labels_int[train_mask], minlength=len(labels))
+    return {label: int(counts[index]) for index, label in enumerate(labels)}
 
 
 # --------------------------------------------------------------------------- #
@@ -762,7 +767,6 @@ def main(argv: Iterable[str] | None = None) -> int:
         "--max-int8-accuracy-drop", type=float, default=0.02,
         help="Largest permitted float-to-int8 test-accuracy regression (fraction).",
     )
-    parser.add_argument("--class-weight-cap", type=float, default=10.0)
     parser.add_argument("--no-tflite", action="store_true")
     args = parser.parse_args(list(argv) if argv is not None else None)
 
@@ -820,16 +824,13 @@ def main(argv: Iterable[str] | None = None) -> int:
     # ---- Split (per-class, group-aware) ----
     is_train, is_val, is_test = per_class_group_split(y, groups, train_only, labels, args.seed)
     logger.info("Split frames: train=%d val=%d test=%d", is_train.sum(), is_val.sum(), is_test.sum())
+    train_frame_counts = retained_train_frame_counts(y, is_train, labels)
+    logger.info("Training frames per label (resampling controls class balance): %s", train_frame_counts)
 
     import tensorflow as tf
 
     tf.random.set_seed(args.seed)
     np.random.seed(args.seed)
-
-    # Class weights from REAL frames only (exclude aug/synth train-only).
-    real_train = is_train & ~train_only
-    weights = class_weights(y[real_train] if real_train.any() else y[is_train], n_labels, args.class_weight_cap)
-    logger.info("Class weights: %s", {labels[i]: round(w, 3) for i, w in weights.items()})
 
     model = build_model(n_labels)
     val_data = (frames[is_val], y[is_val]) if is_val.any() else None
@@ -841,7 +842,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         frames[is_train], y[is_train],
         validation_data=val_data,
         epochs=args.epochs, batch_size=args.batch_size,
-        class_weight=weights, callbacks=callbacks, verbose=2,
+        callbacks=callbacks, verbose=2,
     )
 
     # ---- Evaluate on real-only test frames ----
@@ -955,6 +956,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         "metrics": {name: {"frame_auc": v.get("frame_auc"), "clip_auc": v.get("clip_auc")}
                     for name, v in per_class.items()},
         "dataset_counts": counts,
+        "training_frame_counts": train_frame_counts,
         "weak_classes": sorted(set(weak_classes)),
         "augmentation": {
             "aug_copies": args.aug_copies,
