@@ -429,6 +429,8 @@ pub struct ConfigSnapshot {
     #[serde(default)]
     pub omni_scan_window_seconds: f64,
     #[serde(default)]
+    pub omni_scan_min_rms: f64,
+    #[serde(default)]
     pub persisted_override_keys: Vec<String>,
     pub yamnet_min_confidence: f64,
     pub detection_min_confidence: f64,

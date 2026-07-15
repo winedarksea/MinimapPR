@@ -106,6 +106,7 @@ pub fn alias_cutoff_from_positions_f64(positions: &[[f64; 3]], sound_speed_mps: 
 /// `min_pair_spacing_m`. Where processing is per mic-pair, the closest pair sets
 /// the highest alias-free frequency (planar's 25 mm pairs → ~6.9 kHz vs the
 /// 50 mm diagonal's 3.43 kHz). Returns 0 for <2 mics / all-coincident.
+#[allow(dead_code)] // retained for the geometry contract and future pairwise render paths
 pub fn min_pair_spacing_m(positions: &[[f32; 3]]) -> f32 {
     let mut min_spacing_m = f32::INFINITY;
     for i in 0..positions.len() {
@@ -127,6 +128,7 @@ pub fn min_pair_spacing_m(positions: &[[f32; 3]]) -> f32 {
 /// [`alias_cutoff_from_positions`] (which uses the widest baseline); keeps the
 /// max-baseline default for tetra unless a caller explicitly wants the narrower
 /// planar pairs. Degenerate geometry falls back to the default 50 mm baseline.
+#[allow(dead_code)] // retained for the geometry contract and future pairwise render paths
 pub fn alias_cutoff_min_pair_from_positions(positions: &[[f32; 3]], sound_speed_mps: f32) -> f32 {
     let spacing_m = min_pair_spacing_m(positions);
     if spacing_m < 1e-6 {
@@ -140,6 +142,7 @@ pub fn alias_cutoff_min_pair_from_positions(positions: &[[f32; 3]], sound_speed_
 /// centroid-referenced positions. ~0 for a coplanar array (planar node),
 /// non-trivial for a 3D array (tetra). Mirrors the Python
 /// `array_out_of_plane_extent_m`.
+#[allow(dead_code)] // retained for the geometry contract and future array validation paths
 pub fn array_out_of_plane_extent_m(positions: &[[f32; 3]]) -> f32 {
     let n = positions.len();
     if n < 3 {
@@ -182,6 +185,7 @@ pub fn array_out_of_plane_extent_m(positions: &[[f32; 3]]) -> f32 {
 }
 
 /// True if all mics lie within `tolerance_m` of a common plane (planar node).
+#[allow(dead_code)] // retained for the geometry contract and future array validation paths
 pub fn is_coplanar(positions: &[[f32; 3]], tolerance_m: f32) -> bool {
     array_out_of_plane_extent_m(positions) <= tolerance_m
 }
@@ -346,6 +350,19 @@ mod tests {
         assert!(!is_coplanar(&sirith, 1e-3));
         assert!(array_out_of_plane_extent_m(&planar_positions()) < 1e-4);
         assert!(array_out_of_plane_extent_m(&sirith) > 1e-2);
+    }
+
+    #[test]
+    fn degenerate_geometry_uses_safe_alias_cutoff_fallbacks() {
+        let coincident = [[0.0_f32, 0.0, 0.0], [0.0, 0.0, 0.0]];
+
+        assert_eq!(min_pair_spacing_m(&coincident), 0.0);
+        assert_eq!(array_out_of_plane_extent_m(&coincident), 0.0);
+        assert!(is_coplanar(&coincident, 0.0));
+        assert_eq!(
+            alias_cutoff_min_pair_from_positions(&coincident, SPEED_OF_SOUND_MPS),
+            SPEED_OF_SOUND_MPS / (2.0 * 0.05)
+        );
     }
 
     #[test]

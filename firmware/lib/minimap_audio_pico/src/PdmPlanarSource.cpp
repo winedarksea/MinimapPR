@@ -18,6 +18,7 @@
 #include <pico/time.h>
 
 #include <algorithm>
+#include <cmath>
 #include <new>
 
 #include "mmpr_pdm_rx.pio.h"
@@ -423,12 +424,13 @@ bool PdmPlanarSource::snapshotProducerState(
   const uint32_t clampedRemaining = std::min<uint32_t>(wordsRemaining, static_cast<uint32_t>(kPdmRawWordsPerBlock));
   const uint32_t wordsTransferred = static_cast<uint32_t>(kPdmRawWordsPerBlock) - clampedRemaining;
 
-  // D4: raw word index -> per-channel chip index (x4, one chip/channel/word
-  // -period... each word is 4 periods) -> decimated sample index is an
-  // exact /64 (32 CIC x 2 halfband). Then subtract the constant group delay
-  // so the reported position is acoustic-arrival-time, not capture-time.
+  // D4: each raw word contains four PDM clock periods, with one chip from
+  // each microphone on both half-cycles: 8 chips/channel/word. Convert that
+  // chip index to the decimated sample index using the exact /64 (32 CIC x 2
+  // halfband), then subtract the constant group delay so the reported
+  // position is acoustic-arrival-time, not capture-time.
   const double totalWords = static_cast<double>(blockStartWordIndex) + static_cast<double>(wordsTransferred);
-  const double chipIndex = totalWords * 4.0;
+  const double chipIndex = totalWords * 8.0;
   const double decimatedSamplePosition = chipIndex / static_cast<double>(PdmCicDecimator::totalDecimation());
   const double groupDelaySamples =
       PdmCicDecimator::groupDelayMicroseconds() * 1e-6 * static_cast<double>(config_.sampleRateHz);

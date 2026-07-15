@@ -52,7 +52,7 @@ struct PdmPlanarConfig {
 // small and a single named constant so it is easy to bump if core-1
 // scheduling latency ever needs more slack (Phase 6 note in node_config.h
 // about PSRAM headroom applies here too).
-static constexpr size_t kPdmRawWordsPerBlock = 256;   // 256 words = 1024 PDM periods = 4096 chips/channel
+static constexpr size_t kPdmRawWordsPerBlock = 256;   // 256 words = 1024 PDM periods = 2048 chips/channel
 static constexpr size_t kPdmRawBlockRingSize = 8;     // SPSC ring depth, core0->core1
 
 class PdmPlanarSource final : public IAudioSource {
