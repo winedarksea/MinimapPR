@@ -364,9 +364,44 @@
   gap: 1rem;
 }
 
-.pipeline-dag-scroll {
-  overflow-x: auto;
-  padding-bottom: 0.5rem;
+.pipeline-dag-workspace {
+  min-width: 0;
+}
+
+.pipeline-dag-controls {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.35rem;
+  margin: 0 0 0.45rem;
+}
+.pipeline-dag-controls button,
+.pipeline-dag-detail-close {
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-sm);
+  background: var(--md-sys-color-surface-container-high);
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  padding: 0.3rem 0.55rem;
+}
+
+.pipeline-dag-viewport {
+  position: relative;
+  height: clamp(28rem, 62vh, 48rem);
+  overflow: hidden;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-medium);
+  background: var(--md-sys-color-surface);
+  cursor: grab;
+  touch-action: none;
+}
+.pipeline-dag-viewport:active { cursor: grabbing; }
+.pipeline-dag-surface {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: top left;
+  will-change: transform;
 }
 
 .pipeline-dag-column-headers {
@@ -392,6 +427,10 @@
 
 .pipeline-dag-svg {
   overflow: visible;
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
 }
 
 .pipeline-dag-edge {
@@ -412,6 +451,16 @@
   opacity: 0.25;
   stroke-dasharray: 2 4;
 }
+.pipeline-dag-edge-label {
+  fill: var(--md-sys-color-on-surface-variant);
+  font-size: 10px;
+  font-weight: 600;
+  paint-order: stroke;
+  stroke: var(--md-sys-color-surface);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+.pipeline-dag-edge-label.inactive { opacity: 0.4; }
 
 .pipeline-dag-card {
   position: absolute;
@@ -490,8 +539,28 @@
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-corner-medium);
   background: var(--md-sys-color-surface-container);
-  max-width: 32rem;
+  max-width: 52rem;
 }
+.pipeline-dag-detail-drawer {
+  position: sticky;
+  bottom: 0.5rem;
+  z-index: 2;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+  padding: 0.5rem;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-medium);
+  background: color-mix(in srgb, var(--md-sys-color-surface-container) 96%, transparent);
+  box-shadow: 0 -4px 16px color-mix(in srgb, #000 12%, transparent);
+}
+.pipeline-dag-detail-drawer .pipeline-dag-detail {
+  flex: 1;
+  max-height: min(42vh, 28rem);
+  overflow: auto;
+}
+.pipeline-dag-detail-close { flex: 0 0 auto; }
 .pipeline-dag-detail-header {
   display: flex;
   align-items: center;

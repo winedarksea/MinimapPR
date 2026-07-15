@@ -112,6 +112,24 @@ class TestBuilderTopology:
         for e in g.edges:
             assert "birdnet" not in e.source and "birdnet" not in e.target
 
+    def test_classifier_contexts_are_named_direct_edges(self):
+        g = _build(fusion_status={"metrics": {}})
+        assert not any(n.id.startswith("cls:ctx:") for n in g.nodes)
+        birdnet = "cls:member:birdnet"
+        birdnet_labels = {e.label for e in g.edges if e.target == birdnet}
+        assert {"Detection Trigger", "Localized Render", "Omni Continuous"} <= birdnet_labels
+        assert sum(n.id == birdnet for n in g.nodes) == 1
+
+    def test_context_routes_with_shared_endpoints_have_unique_ids(self):
+        g = _build(fusion_status={"metrics": {}})
+        edge_ids = [e.id for e in g.edges]
+        assert len(edge_ids) == len(set(edge_ids))
+        birdnet_from_t1 = [
+            e for e in g.edges
+            if e.source == "gate:t1" and e.target == "cls:member:birdnet"
+        ]
+        assert {e.label for e in birdnet_from_t1} == {"Detection Trigger", "Omni Continuous"}
+
 
 class TestBuilderStatus:
     def test_structure_hash_stable_across_status_change(self):
@@ -135,6 +153,31 @@ class TestBuilderStatus:
     def test_fusion_present_available(self):
         g = _build(fusion_status={"metrics": {"localization_stage_out": 3}})
         assert g.fusion_available is True
+
+    def test_enabled_zero_work_site_stages_are_ok(self):
+        g = _build(fusion_status={"metrics": {}})
+        health_by_id = {n.id: n.status.health for n in g.nodes}
+        assert health_by_id["loc:site:tdoa"] == "ok"
+        assert health_by_id["loc:site:solve"] == "ok"
+        assert health_by_id["beam:site"] == "ok"
+        assert health_by_id["track:site"] == "ok"
+
+    def test_disabled_beamformer_is_off(self):
+        settings = Settings()
+        settings.classification_audio_source = "omni"
+        g = _build(settings=settings, fusion_status={"metrics": {}})
+        beam = next(n for n in g.nodes if n.id == "beam:site")
+        assert beam.status.health == "off"
+
+    def test_tracking_uses_tracking_telemetry(self):
+        g = _build(fusion_status={"metrics": {
+            "track_multi_node_association_count": 7,
+            "tracks_multi_node_active": 2,
+            "classification_stage_out": 999,
+        }})
+        track = next(n for n in g.nodes if n.id == "track:site")
+        metrics = {p.label: p.value for p in track.status.metrics}
+        assert metrics == {"Multi-node associations": "7", "Active multi-node tracks": "2"}
 
 
 class TestConfigKeyCoverage:

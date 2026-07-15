@@ -28,6 +28,8 @@ pub struct EdgePath {
     pub d: String,
     pub kind: String,
     pub label: String,
+    pub label_x: f64,
+    pub label_y: f64,
     pub active: bool,
 }
 
@@ -77,7 +79,12 @@ pub fn compute_layout(graph: &PipelineGraph) -> GraphLayout {
         let lane = *lane_order.get(node.lane.as_str()).unwrap_or(&0);
         let slot = *cell_counts.entry((lane, col)).or_insert(0);
         cell_counts.insert((lane, col), slot + 1);
-        placed.push(Placed { id: &node.id, col, lane, slot });
+        placed.push(Placed {
+            id: &node.id,
+            col,
+            lane,
+            slot,
+        });
     }
 
     // Row height per lane = max stack depth in any column for that lane.
@@ -117,16 +124,29 @@ pub fn compute_layout(graph: &PipelineGraph) -> GraphLayout {
 
     let total_width = columns_sorted.len() as f64 * (COLUMN_WIDTH + COLUMN_GUTTER);
 
+    let mut parallel_edge_counts: HashMap<(&str, &str), usize> = HashMap::new();
+    for edge in &graph.edges {
+        *parallel_edge_counts
+            .entry((&edge.source, &edge.target))
+            .or_insert(0) += 1;
+    }
+    let mut parallel_edge_indices: HashMap<(&str, &str), usize> = HashMap::new();
+
     let edge_paths = graph
         .edges
         .iter()
         .filter_map(|e: &PipelineGraphEdge| {
             let (sx, sy) = pos_by_id.get(&e.source)?;
             let (tx, ty) = pos_by_id.get(&e.target)?;
+            let pair = (e.source.as_str(), e.target.as_str());
+            let index = parallel_edge_indices.entry(pair).or_insert(0);
+            let count = *parallel_edge_counts.get(&pair).unwrap_or(&1);
+            let offset = (*index as f64 - (count.saturating_sub(1) as f64 / 2.0)) * 12.0;
+            *index += 1;
             let x1 = sx + COLUMN_WIDTH;
-            let y1 = sy + CARD_HEIGHT / 2.0;
+            let y1 = sy + CARD_HEIGHT / 2.0 + offset;
             let x2 = *tx;
-            let y2 = ty + CARD_HEIGHT / 2.0;
+            let y2 = ty + CARD_HEIGHT / 2.0 + offset;
             let d = format!(
                 "M {x1:.1},{y1:.1} C {c1:.1},{y1:.1} {c2:.1},{y2:.1} {x2:.1},{y2:.1}",
                 c1 = x1 + 40.0,
@@ -137,6 +157,8 @@ pub fn compute_layout(graph: &PipelineGraph) -> GraphLayout {
                 d,
                 kind: e.kind.clone(),
                 label: e.label.clone(),
+                label_x: (x1 + x2) / 2.0,
+                label_y: (y1 + y2) / 2.0 - 5.0,
                 active: e.active,
             })
         })
@@ -152,11 +174,11 @@ pub fn compute_layout(graph: &PipelineGraph) -> GraphLayout {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::types::{
         PipelineGraph, PipelineGraphColumn, PipelineGraphEdge, PipelineGraphLane,
         PipelineGraphNode, PipelineStageStatus,
     };
+    use super::*;
 
     fn node(id: &str, column: &str, lane: &str) -> PipelineGraphNode {
         PipelineGraphNode {
@@ -182,12 +204,25 @@ mod tests {
             structure_hash: "x".to_string(),
             fusion_available: true,
             columns: vec![
-                PipelineGraphColumn { id: "sources".into(), title: "Sources".into(), order: 0 },
-                PipelineGraphColumn { id: "gates".into(), title: "Gates".into(), order: 1 },
+                PipelineGraphColumn {
+                    id: "sources".into(),
+                    title: "Sources".into(),
+                    order: 0,
+                },
+                PipelineGraphColumn {
+                    id: "gates".into(),
+                    title: "Gates".into(),
+                    order: 1,
+                },
             ],
-            lanes: vec![
-                PipelineGraphLane { id: "n1".into(), title: "n1".into(), node_type: None, health: None, link: None, order: 0 },
-            ],
+            lanes: vec![PipelineGraphLane {
+                id: "n1".into(),
+                title: "n1".into(),
+                node_type: None,
+                health: None,
+                link: None,
+                order: 0,
+            }],
             nodes: vec![
                 node("src:n1", "sources", "n1"),
                 node("gate:n1", "gates", "n1"),
@@ -218,6 +253,7 @@ mod tests {
         let path = &layout.edge_paths[0];
         assert!(path.d.starts_with("M "));
         assert!(path.d.contains('C'));
+        assert!(path.label_x > 0.0);
     }
 
     #[test]
@@ -241,7 +277,28 @@ mod tests {
         g.nodes.push(node("src:n1:extra", "sources", "n1"));
         let layout = compute_layout(&g);
         let a = layout.positions.iter().find(|p| p.id == "src:n1").unwrap();
-        let b = layout.positions.iter().find(|p| p.id == "src:n1:extra").unwrap();
+        let b = layout
+            .positions
+            .iter()
+            .find(|p| p.id == "src:n1:extra")
+            .unwrap();
         assert!((a.y - b.y).abs() >= CARD_HEIGHT);
+    }
+
+    #[test]
+    fn parallel_edges_have_distinct_paths_and_label_positions() {
+        let mut g = sample_graph();
+        g.edges.push(PipelineGraphEdge {
+            id: "src:n1->gate:n1:second".into(),
+            source: "src:n1".into(),
+            target: "gate:n1".into(),
+            kind: "audio".into(),
+            label: "alternate route".into(),
+            active: true,
+        });
+        let layout = compute_layout(&g);
+        assert_eq!(layout.edge_paths.len(), 2);
+        assert_ne!(layout.edge_paths[0].d, layout.edge_paths[1].d);
+        assert_ne!(layout.edge_paths[0].label_y, layout.edge_paths[1].label_y);
     }
 }

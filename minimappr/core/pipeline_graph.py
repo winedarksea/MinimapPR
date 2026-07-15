@@ -117,10 +117,21 @@ def build_pipeline_graph(
         graph_nodes.append(n)
         return n
 
-    def add_edge(source: str, target: str, *, kind: str = "audio", label: str = "", active: bool = True) -> None:
+    def add_edge(
+        source: str,
+        target: str,
+        *,
+        kind: str = "audio",
+        label: str = "",
+        active: bool = True,
+        edge_id: str | None = None,
+    ) -> None:
         graph_edges.append(
             PipelineGraphEdge(
-                id=f"{source}->{target}",
+                # Context routes can deliberately connect the same pair of
+                # cards more than once. Their routing identity must survive
+                # even though they share endpoints.
+                id=edge_id or f"{source}->{target}",
                 source=source,
                 target=target,
                 kind=kind,
@@ -351,7 +362,10 @@ def build_pipeline_graph(
             _param("MVDR loading", float(settings.mvdr_diagonal_loading), "mvdr_diagonal_loading"),
             _param("Cross-node beam", bool(settings.cross_node_beam_enabled), "cross_node_beam_enabled"),
         ],
-        status=_beam_status(metrics, fusion_available),
+        status=(
+            _beam_status(metrics, fusion_available)
+            if beam_active else PipelineStageStatus(health="off", summary="disabled by classification audio source")
+        ),
         link="/settings/config#beamform",
     )
     add_edge(solve_id, beam_id, kind="audio", label="steer")
@@ -474,41 +488,6 @@ def _add_classifiers(*, routing, settings, gate_ids, beam_id, add_node, add_edge
     source_label = settings.classification_audio_source
 
     ctx_order = [CONTEXT_DETECTION_TRIGGER, CONTEXT_LOCALIZED_RENDER, CONTEXT_OMNI_CONTINUOUS]
-    for ctx_name in ctx_order:
-        ctx = routing.contexts.get(ctx_name)
-        if ctx is None:
-            continue
-        ctx_id = f"cls:ctx:{ctx_name}"
-        params: list[PipelineParam] = []
-        if ctx.interval_seconds is not None:
-            params.append(_param("Interval", float(ctx.interval_seconds), suffix=" s"))
-        if ctx.window_seconds is not None:
-            params.append(_param("Window", float(ctx.window_seconds), suffix=" s"))
-        if ctx.min_rms is not None:
-            params.append(_param("Min RMS", float(ctx.min_rms)))
-        params.append(_param("Members", ", ".join(ctx.run) or "—"))
-        add_node(
-            id=ctx_id,
-            stage=PipelineStageKind.CLASSIFIER,
-            column="classify",
-            lane="site",
-            title=ctx_name.replace("_", " ").title(),
-            subtitle="context",
-            modality="audio",
-            enabled=bool(ctx.run),
-            params=params,
-            status=PipelineStageStatus(health=health),
-            link="/settings/config#classification",
-        )
-        # Input edges per context.
-        if ctx_name == CONTEXT_DETECTION_TRIGGER:
-            for gate_id in gate_ids:
-                add_edge(gate_id, ctx_id, kind="audio", label=source_label)
-        elif ctx_name == CONTEXT_LOCALIZED_RENDER:
-            add_edge(beam_id, ctx_id, kind="audio", label="beamformed", active=source_label == "beamformed")
-        elif ctx_name == CONTEXT_OMNI_CONTINUOUS:
-            for gate_id in gate_ids:
-                add_edge(gate_id, ctx_id, kind="audio", label="omni")
 
     # Members (deduped across contexts).
     seen_members: set[str] = set()
@@ -542,11 +521,44 @@ def _add_classifiers(*, routing, settings, gate_ids, beam_id, add_node, add_edge
                 status=PipelineStageStatus(health=health),
                 link="/settings/config#classification",
             )
-            # context → member edges
-            for ctx_name in ("detection_trigger", "localized_render", "omni_continuous"):
-                ctx = routing.contexts.get(ctx_name)
-                if ctx and member_id in ctx.run:
-                    add_edge(f"cls:ctx:{ctx_name}", member_node_id, kind="audio")
+
+    # Contexts describe routes rather than processing stages. Showing them as
+    # named direct edges keeps a classifier's card singular while retaining
+    # the important distinction between trigger, render, and periodic scans.
+    for ctx_name in ctx_order:
+        ctx = routing.contexts.get(ctx_name)
+        if ctx is None:
+            continue
+        label = ctx_name.replace("_", " ").title()
+        for member_id in ctx.run:
+            target = f"cls:member:{member_id}"
+            if ctx_name == CONTEXT_DETECTION_TRIGGER:
+                for gate_id in gate_ids:
+                    add_edge(
+                        gate_id,
+                        target,
+                        kind="audio",
+                        label=label,
+                        edge_id=f"{gate_id}->{target}:detection_trigger",
+                    )
+            elif ctx_name == CONTEXT_LOCALIZED_RENDER:
+                add_edge(
+                    beam_id,
+                    target,
+                    kind="audio",
+                    label=label,
+                    active=source_label == "beamformed",
+                    edge_id=f"{beam_id}->{target}:localized_render",
+                )
+            elif ctx_name == CONTEXT_OMNI_CONTINUOUS:
+                for gate_id in gate_ids:
+                    add_edge(
+                        gate_id,
+                        target,
+                        kind="audio",
+                        label=label,
+                        edge_id=f"{gate_id}->{target}:omni_continuous",
+                    )
 
     # Chain edges (embedding).
     for chain in routing.chains:
@@ -611,10 +623,10 @@ def _tdoa_status(metrics: dict, fusion_available: bool) -> PipelineStageStatus:
         return PipelineStageStatus(health="unknown")
     measured = int(metrics.get("localization_cross_node_pairs_measured_count") or 0)
     rejected = int(metrics.get("localization_cross_node_pairs_rejected_sync_count") or 0)
-    health = "ok" if measured > 0 else "idle"
+    health = "warn" if rejected > 0 and measured == 0 else "ok"
     return PipelineStageStatus(
         health=health,
-        summary=f"{measured} pairs measured",
+        summary=(f"{measured} pairs measured" if measured else "configured; no pairs measured yet"),
         metrics=[
             _param("Pairs measured", measured),
             _param("Rejected (sync)", rejected),
@@ -629,10 +641,13 @@ def _solve_status(metrics: dict, fusion_available: bool) -> PipelineStageStatus:
     out = int(metrics.get("localization_stage_out") or 0)
     fails = int(metrics.get("localization_failures") or 0)
     fallback = int(metrics.get("localization_fallback_count") or 0)
-    health = "ok" if out > 0 else ("warn" if fails > 0 else "idle")
+    health = "ok" if out > 0 else ("warn" if fails > 0 else "ok")
     return PipelineStageStatus(
         health=health,
-        summary=f"last: {metrics.get('last_localization_algorithm', '?')}",
+        summary=(
+            f"last: {metrics.get('last_localization_algorithm', '?')}"
+            if out else "configured; no solves yet"
+        ),
         metrics=[
             _param("Solved", out),
             _param("Failures", fails),
@@ -647,10 +662,10 @@ def _beam_status(metrics: dict, fusion_available: bool) -> PipelineStageStatus:
         return PipelineStageStatus(health="unknown")
     renders = int(metrics.get("beamform_renders") or 0)
     failures = int(metrics.get("beamform_failures") or 0)
-    health = "ok" if renders > 0 else ("warn" if failures > 0 else "idle")
+    health = "ok" if renders > 0 else ("warn" if failures > 0 else "ok")
     return PipelineStageStatus(
         health=health,
-        summary=f"{renders} renders",
+        summary=f"{renders} renders" if renders else "configured; no renders yet",
         metrics=[_param("Renders", renders), _param("Failures", failures)],
     )
 
@@ -658,12 +673,15 @@ def _beam_status(metrics: dict, fusion_available: bool) -> PipelineStageStatus:
 def _track_status(metrics: dict, fusion_available: bool) -> PipelineStageStatus:
     if not fusion_available:
         return PipelineStageStatus(health="unknown")
-    cin = int(metrics.get("classification_stage_in") or 0)
-    cout = int(metrics.get("classification_stage_out") or 0)
+    associations = int(metrics.get("track_multi_node_association_count") or 0)
+    active_tracks = int(metrics.get("tracks_multi_node_active") or 0)
     return PipelineStageStatus(
-        health="ok" if cout > 0 else "idle",
-        summary=f"{cout} classified",
-        metrics=[_param("In", cin), _param("Out", cout)],
+        health="ok",
+        summary=(f"{active_tracks} active multi-node tracks" if active_tracks else "configured; no active tracks"),
+        metrics=[
+            _param("Multi-node associations", associations),
+            _param("Active multi-node tracks", active_tracks),
+        ],
     )
 
 
