@@ -728,7 +728,7 @@ class Settings:
     association_max_gate_m: float = 32.0
     association_chi2_gate: float = 9.0
     track_stale_seconds: float = 20.0
-    tracking_filter: str = "linear"
+    tracking_filter: str = "kalman"
     kalman_process_noise: float = 2.0
     kalman_measurement_noise: float = 1.5
     kalman_initial_position_variance: float = 4.0
@@ -1704,7 +1704,7 @@ class Settings:
             association_max_gate_m=_env_float("MINIMAPPR_ASSOCIATION_MAX_GATE_M", 32.0),
             association_chi2_gate=_env_float("MINIMAPPR_ASSOCIATION_CHI2_GATE", 9.0),
             track_stale_seconds=_env_float("MINIMAPPR_TRACK_STALE_SECONDS", 20.0),
-            tracking_filter=_env_str("MINIMAPPR_TRACKING_FILTER", "linear"),
+            tracking_filter=_env_str("MINIMAPPR_TRACKING_FILTER", "kalman"),
             kalman_process_noise=_env_float("MINIMAPPR_KALMAN_PROCESS_NOISE", 2.0),
             kalman_measurement_noise=_env_float("MINIMAPPR_KALMAN_MEASUREMENT_NOISE", 1.5),
             kalman_initial_position_variance=_env_float(

@@ -318,7 +318,7 @@ Key env vars:
 - `MINIMAPPR_LOCALIZATION_BAND_MIN_HZ` / `MINIMAPPR_LOCALIZATION_BAND_MAX_HZ` (optional localization-only bandpass)
 - `MINIMAPPR_LOCALIZATION_SINGLE_NODE_SOLVER` (`python_cartesian` default — re-homes the single-node tetrahedral position solve onto Python's Cartesian TDOA solver using the Rust sidecar's pairwise TDOAs + bearing, falling back to the sidecar's own estimate if TDOAs are missing; set `rust` to trust the sidecar's own SRP-PHAT position/confidence directly, the legacy behavior)
 - `MINIMAPPR_REPORTING_WINDOW_SECONDS` (canonical detection dedupe window; default `30`)
-- `MINIMAPPR_TRACKING_FILTER` (`linear` default, or `kalman`)
+- `MINIMAPPR_TRACKING_FILTER` (`kalman` default, or `linear`)
 - `MINIMAPPR_KALMAN_PROCESS_NOISE` (default `2.0`)
 - `MINIMAPPR_KALMAN_MEASUREMENT_NOISE` (default `1.5`)
 - `MINIMAPPR_KALMAN_INITIAL_POSITION_VARIANCE` (default `4.0`)

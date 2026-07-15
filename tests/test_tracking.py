@@ -8,7 +8,7 @@ from minimappr.models import TrackStatus
 
 
 @pytest.mark.asyncio
-async def test_tracking_defaults_to_linear_smoother() -> None:
+async def test_tracking_defaults_to_kalman_filter() -> None:
     manager = TrackManager(Settings(association_distance_m=20.0))
     t0 = 1_700_000_000_000_000_000
 
@@ -27,9 +27,10 @@ async def test_tracking_defaults_to_linear_smoother() -> None:
         confidence=0.6,
     )
 
-    # Existing linear smoother behavior should remain the default.
-    assert second.position_m == pytest.approx((6.0, 0.0, 0.0), abs=1e-6)
-    assert second.velocity_mps == pytest.approx((5.0, 0.0, 0.0), abs=1e-6)
+    # The default Kalman filter trusts this low-uncertainty position measurement
+    # more than the legacy alpha-beta smoother and estimates a matching velocity.
+    assert second.position_m == pytest.approx((9.318181818181818, 0.0, 0.0), abs=1e-6)
+    assert second.velocity_mps == pytest.approx((7.727272727272727, 0.0, 0.0), abs=1e-6)
     assert second.status == TrackStatus.CONFIRMED.value
 
 
