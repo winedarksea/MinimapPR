@@ -78,6 +78,22 @@ CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     "hass_token": str,
     "hass_mqtt_host": str,
     "hass_mqtt_port": int,
+    # Track association / Kalman "greediness" knobs (see core/track_associators.py,
+    # core/track_filters.py). Previously env-var-only (MINIMAPPR_*); exposed here so
+    # they can be tuned from a live deployment without a process restart+redeploy.
+    "association_distance_m": float,
+    "association_max_gate_m": float,
+    "association_chi2_gate": float,
+    "kalman_process_noise": float,
+    "kalman_measurement_noise": float,
+    "track_stale_seconds": float,
+    # DOA/TDOA solve blend + cross-node bearing-fusion "greediness" knobs (see
+    # core/cartesian_tdoa.py, core/multi_node_bearing_fusion.py).
+    "localization_node_bearing_strength": float,
+    "multi_node_bearing_window_seconds": float,
+    "multi_node_bearing_min_separation_deg": float,
+    "multi_node_bearing_ttl_seconds": float,
+    "multi_node_bearing_max_condition": float,
 }
 
 

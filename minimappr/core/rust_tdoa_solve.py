@@ -36,19 +36,32 @@ MIN_PAIR_MEASUREMENTS = 3
 def _bearing_prior_from_direction(
     steering_direction: tuple[float, float, float] | None,
     *,
-    strength: float,
+    quality: float,
+    bearing_strength: float = 1.0,
 ) -> BearingPrior | None:
+    """Build a ``BearingPrior`` from the sidecar's single-node steering direction.
+
+    ``quality`` is the TDOA-pair-derived confidence in that direction (mean
+    GCC-PHAT correlation peak); ``bearing_strength`` is the operator-configured
+    ``localization_node_bearing_strength`` knob. Combining them the same way
+    ``core/spatial_constraints.py`` does (``strength = bearing_strength *
+    quality``) keeps this single-node Rust-fed path responsive to the same
+    "how much do I trust the bearing" dial as the direct multi-node Python
+    solve path (``core/localization_dispatch.py``) — previously this path
+    ignored the config knob entirely and always solved as if strength == 1.0.
+    """
     if steering_direction is None:
         return None
     direction = np.asarray(steering_direction, dtype=np.float64)
     norm = float(np.linalg.norm(direction))
     if not np.isfinite(norm) or norm <= 1.0e-9:
         return None
-    clipped_strength = float(np.clip(strength, 0.01, 1.0))
+    clipped_quality = float(np.clip(quality, 0.0, 1.0))
+    strength = max(float(bearing_strength) * clipped_quality, 0.01)
     return BearingPrior(
         direction=direction / norm,
-        strength=clipped_strength,
-        quality=clipped_strength,
+        strength=strength,
+        quality=clipped_quality,
     )
 
 
@@ -63,11 +76,16 @@ def solve_localization_from_rust_tdoas(
     interpolation_factor: int,
     far_field_default_range_m: float,
     far_field_prior_radial_std_m: float | None = None,
+    bearing_strength: float = 1.0,
 ) -> LocalizationResult | None:
     """Return a Python Cartesian solve from Rust TDOAs, or None if not solvable.
 
     None signals the caller to fall back to the sidecar's own estimate (missing
     TDOAs/geometry, degenerate input, or solver failure).
+
+    ``bearing_strength`` should be ``Settings.localization_node_bearing_strength``
+    so this single-node path honours the same operator-configured DOA-vs-TDOA
+    trust dial as the multi-node dispatch path in ``core/localization_dispatch.py``.
     """
     if sample_rate_hz <= 0 or sound_speed_mps <= 0.0:
         return None
@@ -116,7 +134,11 @@ def solve_localization_from_rust_tdoas(
     )
 
     mean_confidence = float(np.mean([m.correlation_peak for m in measurements]))
-    bearing_prior = _bearing_prior_from_direction(steering_direction, strength=mean_confidence)
+    bearing_prior = _bearing_prior_from_direction(
+        steering_direction,
+        quality=mean_confidence,
+        bearing_strength=bearing_strength,
+    )
 
     try:
         solve = solve_cartesian_tdoa(

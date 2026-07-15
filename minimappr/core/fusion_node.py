@@ -808,6 +808,7 @@ class FusionNode:
                 interpolation_factor=self.settings.gcc_phat_interp_factor,
                 far_field_default_range_m=far_field_range_m,
                 far_field_prior_radial_std_m=far_field_prior_radial_std_m,
+                bearing_strength=cfg.localization_node_bearing_strength,
             )
             if solved is not None:
                 localization_position_m = solved.position_m

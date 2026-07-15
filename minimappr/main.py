@@ -2883,6 +2883,17 @@ async def get_config(request: Request) -> dict:
         "beamformed_classification_confidence_margin": settings.beamformed_classification_confidence_margin,
         "mvdr_diagonal_loading": settings.mvdr_diagonal_loading,
         "tracking_filter": settings.tracking_filter,
+        "association_distance_m": settings.association_distance_m,
+        "association_max_gate_m": settings.association_max_gate_m,
+        "association_chi2_gate": settings.association_chi2_gate,
+        "kalman_process_noise": settings.kalman_process_noise,
+        "kalman_measurement_noise": settings.kalman_measurement_noise,
+        "track_stale_seconds": settings.track_stale_seconds,
+        "localization_node_bearing_strength": settings.localization_node_bearing_strength,
+        "multi_node_bearing_window_seconds": settings.multi_node_bearing_window_seconds,
+        "multi_node_bearing_min_separation_deg": settings.multi_node_bearing_min_separation_deg,
+        "multi_node_bearing_ttl_seconds": settings.multi_node_bearing_ttl_seconds,
+        "multi_node_bearing_max_condition": settings.multi_node_bearing_max_condition,
         "classifier_stage_timeout_seconds": settings.classifier_stage_timeout_seconds,
         "classification_stage_timeout_seconds": settings.classification_stage_timeout_seconds,
         "fusion_worker_count": settings.fusion_worker_count,
@@ -3195,6 +3206,28 @@ async def patch_config(request: Request) -> dict:
             errors.append(f"{key}: must be >= 0")
         elif key == "tracking_filter" and value not in _TRACKING_FILTERS:
             errors.append(f"tracking_filter: must be one of {sorted(_TRACKING_FILTERS)}")
+        elif key == "association_distance_m" and value <= 0.0:  # type: ignore[operator]
+            errors.append("association_distance_m: must be > 0")
+        elif key == "association_max_gate_m" and value <= 0.0:  # type: ignore[operator]
+            errors.append("association_max_gate_m: must be > 0")
+        elif key == "association_chi2_gate" and value <= 0.0:  # type: ignore[operator]
+            errors.append("association_chi2_gate: must be > 0")
+        elif key == "kalman_process_noise" and value < 0.0:  # type: ignore[operator]
+            errors.append("kalman_process_noise: must be >= 0")
+        elif key == "kalman_measurement_noise" and value <= 0.0:  # type: ignore[operator]
+            errors.append("kalman_measurement_noise: must be > 0")
+        elif key == "track_stale_seconds" and value <= 0.0:  # type: ignore[operator]
+            errors.append("track_stale_seconds: must be > 0")
+        elif key == "localization_node_bearing_strength" and value < 0.0:  # type: ignore[operator]
+            errors.append("localization_node_bearing_strength: must be >= 0")
+        elif key == "multi_node_bearing_window_seconds" and value <= 0.0:  # type: ignore[operator]
+            errors.append("multi_node_bearing_window_seconds: must be > 0")
+        elif key == "multi_node_bearing_min_separation_deg" and not (0.0 <= value <= 90.0):  # type: ignore[operator]
+            errors.append("multi_node_bearing_min_separation_deg: must be in [0, 90]")
+        elif key == "multi_node_bearing_ttl_seconds" and value <= 0.0:  # type: ignore[operator]
+            errors.append("multi_node_bearing_ttl_seconds: must be > 0")
+        elif key == "multi_node_bearing_max_condition" and value <= 0.0:  # type: ignore[operator]
+            errors.append("multi_node_bearing_max_condition: must be > 0")
         elif key == "coordinate_mode":
             v = str(value).strip().lower()
             if v not in _COORDINATE_MODES:

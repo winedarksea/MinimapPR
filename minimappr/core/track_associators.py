@@ -59,11 +59,26 @@ class NearestNeighborAssociator:
         ``existing_tracks`` should contain predicted (extrapolated)
         positions so that the gate comparison uses the expected location
         at ``timestamp_ns``, not the last-observed location.
+
+        A detection within the plain ``association_distance_m`` Euclidean gate
+        is always eligible for a track regardless of that track's covariance
+        (an operator-configured wide gate must not be silently tightened by a
+        well-converged track's own uncertainty) — but its score is expressed
+        in the same chi-squared units as the covariance-aware path, calibrated
+        so ``distance == association_distance_m`` sits exactly at the chi2
+        gate boundary. That keeps ``best_score`` comparable across every
+        candidate track in this call, instead of mixing raw meters with
+        chi-squared numbers when both a close plain-distance match and a
+        farther covariance-gated match are both in play.
         """
         measurement = np.asarray(position_m, dtype=np.float64)
         best_track_id: str | None = None
         best_score = float("inf")
         measurement_covariance = self._coerce_covariance(measurement_covariance_m2)
+        # Isotropic per-axis variance implied by the legacy Euclidean gate: solving
+        # distance^2 / fallback_variance == chi2_gate for distance ==
+        # association_distance_m.
+        fallback_variance = (self._association_distance_m**2) / self._chi2_gate
 
         for track in existing_tracks:
             if track.status == TrackStatus.DROPPED.value:
@@ -71,30 +86,36 @@ class NearestNeighborAssociator:
             track_position = np.asarray(track.position_m, dtype=np.float64)
             residual = measurement - track_position
             distance = float(np.linalg.norm(residual))
-            if distance < self._association_distance_m and distance < best_score:
-                best_score = distance
-                best_track_id = track.id
+
+            if distance < self._association_distance_m:
+                score = (distance * distance) / fallback_variance
+                if score < best_score:
+                    best_score = score
+                    best_track_id = track.id
                 continue
+
             gate = self._association_gate(
                 measurement_covariance=measurement_covariance,
                 track_covariance=self._coerce_covariance(track.position_covariance_m2),
             )
             if gate is None:
-                if distance < self._association_distance_m and distance < best_score:
-                    best_score = distance
-                    best_track_id = track.id
                 continue
-
-            mahalanobis_sq, physical_gate_radius_m = gate
+            covariance, physical_gate_radius_m = gate
             if distance > physical_gate_radius_m:
                 continue
-            score = self._mahalanobis_distance_squared(residual, mahalanobis_sq)
+            score = self._mahalanobis_distance_squared(residual, covariance)
             if score is None:
                 continue
             if score <= self._chi2_gate and score < best_score:
                 best_score = score
                 best_track_id = track.id
 
+        # TODO(tracking): this is still a per-detection greedy nearest-score match.
+        # If simultaneous crossing detections start mis-associating, consider
+        # batching all detections in a fusion tick and resolving them jointly with
+        # scipy.optimize.linear_sum_assignment (Hungarian algorithm) over the score
+        # matrix, the way core/federation.py already does for peer-track
+        # deconfliction.
         return best_track_id
 
     def _association_gate(
