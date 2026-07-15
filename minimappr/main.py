@@ -2962,7 +2962,16 @@ _SIDECAR_RESTART_REQUIRED_KEYS = {
 
 _LOCALIZATION_ALGORITHMS = {"gcc_phat", "srp_phat", "music", "esprit"}
 _LOCALIZATION_STRATEGIES = {"fixed", "geometry_aware", "cascade"}
-_BEAMFORMER_TYPES = {"delay_and_sum", "das", "freq_domain_das", "mvdr", "superdirective", "gevd"}
+_BEAMFORMER_TYPES = {
+    "delay_and_sum",
+    "das",
+    "freq_domain_das",
+    "band_split_das",
+    "band_split",
+    "mvdr",
+    "superdirective",
+    "gevd",
+}
 _CLASSIFICATION_AUDIO_SOURCES = {"beamformed", "omni", "nearest_node_omni"}
 _TRACKING_FILTERS = {"linear", "kalman"}
 _COORDINATE_MODES = {"flat", "geodetic"}

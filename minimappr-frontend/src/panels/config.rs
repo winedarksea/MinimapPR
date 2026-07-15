@@ -59,6 +59,7 @@ pub fn ConfigPane() -> impl IntoView {
                             omni_scan_enabled=c.omni_scan_enabled
                             omni_scan_interval_seconds=c.omni_scan_interval_seconds
                             omni_scan_window_seconds=c.omni_scan_window_seconds
+                            omni_scan_min_rms=c.omni_scan_min_rms
                             birdnet_chunked_dispatch_enabled=c.birdnet_chunked_dispatch_enabled
                             birdnet_trigger_min_confidence=c.birdnet_trigger_min_confidence
                             birdnet_geo_min_confidence=c.birdnet_geo_min_confidence
@@ -400,6 +401,7 @@ fn ClassificationGroup(
     omni_scan_enabled: bool,
     omni_scan_interval_seconds: f64,
     omni_scan_window_seconds: f64,
+    omni_scan_min_rms: f64,
     birdnet_chunked_dispatch_enabled: bool,
     birdnet_trigger_min_confidence: f64,
     birdnet_geo_min_confidence: f64,
@@ -424,6 +426,7 @@ fn ClassificationGroup(
     let omni_scan = RwSignal::new(omni_scan_enabled);
     let omni_interval = RwSignal::new(omni_scan_interval_seconds.to_string());
     let omni_window = RwSignal::new(omni_scan_window_seconds.to_string());
+    let omni_min_rms = RwSignal::new(omni_scan_min_rms.to_string());
     let chunked = RwSignal::new(birdnet_chunked_dispatch_enabled);
     let birdnet_trigger = RwSignal::new(birdnet_trigger_min_confidence.to_string());
     let birdnet_geo = RwSignal::new(birdnet_geo_min_confidence.to_string());
@@ -452,6 +455,7 @@ fn ClassificationGroup(
             "omni_scan_enabled": omni_scan.get(),
             "omni_scan_interval_seconds": omni_interval.get().parse::<f64>().unwrap_or(30.0),
             "omni_scan_window_seconds": omni_window.get().parse::<f64>().unwrap_or(15.0),
+            "omni_scan_min_rms": omni_min_rms.get().parse::<f64>().unwrap_or(0.001),
             "birdnet_chunked_dispatch_enabled": chunked.get(),
             "birdnet_trigger_min_confidence": birdnet_trigger.get().parse::<f64>().unwrap_or(0.40),
             "birdnet_geo_min_confidence": birdnet_geo.get().parse::<f64>().unwrap_or(0.03),
@@ -521,6 +525,7 @@ fn ClassificationGroup(
                 {bool_input("Scan omni nodes continuously", omni_scan, gs)}
                 {num_input("Scan interval (s)", omni_interval, gs, 1.0, 3600.0, 1.0)}
                 {num_input("Audio window (s)", omni_window, gs, 0.5, 300.0, 0.5)}
+                {num_input("Minimum RMS", omni_min_rms, gs, 0.0, 1.0, 0.0001)}
                 <div class="config-subsection">"Audio and model thresholds"</div>
                 {select_input_opts("Audio Source", audio_source, gs, vec![
                     ("beamformed".to_string(), "beamformed".to_string(), false, String::new()),
@@ -533,7 +538,7 @@ fn ClassificationGroup(
                 {num_input("BirdNET Geo Confidence", birdnet_geo, gs, 0.0, 1.0, 0.01)}
                 {num_input("YAMNet Min Confidence", yamnet, gs, 0.0, 1.0, 0.01)}
                 {num_input("Detection Min Confidence", detection, gs, 0.0, 1.0, 0.01)}
-                {select_input("Beamformer", beamform, gs, &["delay_and_sum", "freq_domain_das", "mvdr", "superdirective", "gevd"])}
+                {select_input("Beamformer", beamform, gs, &["delay_and_sum", "freq_domain_das", "band_split_das", "mvdr", "superdirective", "gevd"])}
             </div>
             {group_footer(gs, save)}
         </div>

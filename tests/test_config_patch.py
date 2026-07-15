@@ -170,6 +170,22 @@ def test_patch_beamformer_type_das_alias(monkeypatch, tmp_path: Path) -> None:
         assert resp.json()["beamformer_type"] == "delay_and_sum"
 
 
+def test_patch_beamformer_type_band_split_das(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        resp = client.patch("/api/v1/config", json={"beamformer_type": "band_split_das"})
+        assert resp.status_code == 200
+        assert resp.json()["beamformer_type"] == "band_split_das"
+
+
+def test_patch_omni_scan_min_rms(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        resp = client.patch("/api/v1/config", json={"omni_scan_min_rms": 0.002})
+        assert resp.status_code == 200
+        assert resp.json()["omni_scan_min_rms"] == 0.002
+
+
 def test_patch_coordinate_mode(monkeypatch, tmp_path: Path) -> None:
     _configure_env(monkeypatch, tmp_path)
     with TestClient(app) as client:

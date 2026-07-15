@@ -57,6 +57,7 @@ CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     "omni_scan_enabled": bool,
     "omni_scan_interval_seconds": float,
     "omni_scan_window_seconds": float,
+    "omni_scan_min_rms": float,
     "min_localization_confidence": float,
     "skip_localization_for_classification": bool,
     "yamnet_min_confidence": float,
