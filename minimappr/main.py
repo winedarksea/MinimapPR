@@ -111,6 +111,7 @@ from minimappr.core.node_registry import NodeRegistry
 from minimappr.core.environment import LiveEnvironmentProvider
 from minimappr.core.federation import FederationCoordinator
 from minimappr.core.fusion_node import FusionNode
+from minimappr.core.geo_restriction import excludes_audio_ingest
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.logging_ring import install_global as install_log_ring, process_start_ns
 from minimappr.core.rules import ConfigRuleEngine, RuleDef, default_rules_as_dicts
@@ -1668,6 +1669,13 @@ async def ingest_frame(payload: IngestFrameRequest, request: Request) -> IngestF
 
 
 async def _ingest_frame_impl(state, payload: IngestFrameRequest) -> IngestFrameResponse:
+    if excludes_audio_ingest(payload.node.position_geo):
+        return IngestFrameResponse(
+            accepted=True,
+            triggered=False,
+            frame_energy=0.0,
+            detail="incorrect geo",
+        )
     if _should_proxy_ingest_to_python_worker(state):
         forwarded = await _proxy_ingest_post(
             state,
@@ -1702,6 +1710,25 @@ async def ingest_store_forward(payload: StoreForwardIngestRequest, request: Requ
 async def _ingest_store_forward_impl(
     state, payload: StoreForwardIngestRequest
 ) -> StoreForwardIngestResponse:
+    if excludes_audio_ingest(payload.node.position_geo):
+        results = [
+            StoreForwardBufferedFrameResponse(
+                sequence=item.frame.sequence,
+                start_time_ns=item.frame.start_time_ns,
+                accepted=False,
+                detail="incorrect geo",
+            )
+            for item in payload.buffered_frames
+        ]
+        return StoreForwardIngestResponse(
+            accepted=True,
+            total_frames=len(results),
+            accepted_frames=0,
+            duplicate_frames=0,
+            rejected_frames=len(results),
+            queued_events=0,
+            results=results,
+        )
     if _should_proxy_ingest_to_python_worker(state):
         forwarded = await _proxy_ingest_post(
             state,
@@ -1866,6 +1893,25 @@ async def _ingest_binary_impl(state, request: Request) -> StoreForwardIngestResp
             body,
             fallback_position_m=state.settings.legacy_ingest_fallback_position_m,
         )
+        if excludes_audio_ingest(payload.node.position_geo):
+            results = [
+                StoreForwardBufferedFrameResponse(
+                    sequence=item.frame.sequence,
+                    start_time_ns=item.frame.start_time_ns,
+                    accepted=False,
+                    detail="incorrect geo",
+                )
+                for item in payload.buffered_frames
+            ]
+            return StoreForwardIngestResponse(
+                accepted=True,
+                total_frames=len(results),
+                accepted_frames=0,
+                duplicate_frames=0,
+                rejected_frames=len(results),
+                queued_events=0,
+                results=results,
+            )
         results = []
         if payload.buffered_frames:
             last_timing_diag: dict | None = None
