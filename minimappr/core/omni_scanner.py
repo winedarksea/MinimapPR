@@ -173,8 +173,26 @@ class ContinuousOmniScanner:
             self._scans_skipped_no_audio += 1
             return
         aligned, sample_rate_hz, end_time_ns = window
-        # Reference/omni sensor = loudest available channel for this node.
-        sensor_id, audio = max(aligned.items(), key=lambda kv: _rms(kv[1]))
+        # Use a normalized sum rather than one microphone. For a coherent
+        # source this preserves the sum's SNR improvement without changing the
+        # RMS scale used by the configured gate. It is intentionally not a
+        # steerable beamformer: phase differences at higher frequencies can
+        # reduce, rather than improve, a particular source.
+        sensor_id, _ = max(aligned.items(), key=lambda kv: _rms(kv[1]))
+        common_sample_count = min(channel.size for channel in aligned.values())
+        if common_sample_count == 0:
+            self._scans_skipped_no_audio += 1
+            return
+        audio = np.mean(
+            np.stack(
+                [
+                    np.asarray(channel[:common_sample_count], dtype=np.float32)
+                    for channel in aligned.values()
+                ]
+            ),
+            axis=0,
+            dtype=np.float32,
+        )
         rms = _rms(audio)
         if rms < self._min_rms:
             self._scans_skipped_rms += 1

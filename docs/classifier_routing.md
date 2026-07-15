@@ -22,6 +22,17 @@ raises with a migration message if either is still present/set).
   (`detection_trigger`, `localized_render`, `omni_continuous`). Every member in
   `run` executes on that context's audio — this is how BirdNET runs "always on",
   not chained behind YAMNet.
+
+The shipped default leaves `detection_trigger` empty: it is the inexpensive
+RMS/cooldown admission gate, not a model-inference context. YAMNet and BirdNET
+run on `localized_render` (the beamformed track render); BirdNET also runs on
+`omni_continuous`. Operators can add YAMNet to `omni_continuous` in their
+routing JSON when that trade-off is desired.
+
+`omni_continuous` uses a normalized sum of each node's synchronized microphone
+windows and RMS-gates that mix before inference. The default minimum RMS is
+`0.001` (`MINIMAPPR_OMNI_SCAN_MIN_RMS`). A normalized sum preserves the gate's
+amplitude scale while retaining the SNR benefit for coherent sources.
 - **`chains`**: a stage attached after a parent member. `input: "embedding"`
   feeds the parent's per-frame YAMNet embeddings directly (no re-inference) —
   this is how the drone head rides YAMNet for free in every context where

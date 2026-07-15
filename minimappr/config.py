@@ -690,7 +690,7 @@ class Settings:
     omni_scan_enabled: bool = True
     omni_scan_interval_seconds: float = 30.0
     omni_scan_window_seconds: float = 21.0
-    omni_scan_min_rms: float = 0.0
+    omni_scan_min_rms: float = 0.001
     t3t4_enabled: bool = True
     t3t4_min_confidence: float = 0.5
     t3t4_min_repeats: int = 3
@@ -1664,7 +1664,7 @@ class Settings:
             omni_scan_enabled=_env_bool("MINIMAPPR_OMNI_SCAN_ENABLED", True),
             omni_scan_interval_seconds=_env_float("MINIMAPPR_OMNI_SCAN_INTERVAL_SECONDS", 30.0),
             omni_scan_window_seconds=_env_float("MINIMAPPR_OMNI_SCAN_WINDOW_SECONDS", 21.0),
-            omni_scan_min_rms=_env_float("MINIMAPPR_OMNI_SCAN_MIN_RMS", 0.0),
+            omni_scan_min_rms=_env_float("MINIMAPPR_OMNI_SCAN_MIN_RMS", 0.001),
             t3t4_enabled=_env_bool("MINIMAPPR_T3T4_ENABLED", True),
             t3t4_min_confidence=_env_float("MINIMAPPR_T3T4_MIN_CONFIDENCE", 0.5),
             t3t4_min_repeats=_env_int("MINIMAPPR_T3T4_MIN_REPEATS", 3),

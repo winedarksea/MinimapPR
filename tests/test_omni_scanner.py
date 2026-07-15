@@ -76,7 +76,7 @@ def _node(node_id="node-a"):
 
 
 @pytest.mark.asyncio
-async def test_scan_once_produces_result_for_loudest_sensor():
+async def test_scan_once_uses_normalized_sum_and_retains_loudest_sensor_as_provenance():
     loud = np.full(16000, 0.2, dtype=np.float32)
     quiet = np.full(16000, 0.02, dtype=np.float32)
     windows = {"node-a:ch0": quiet, "node-a:ch1": loud}
@@ -93,6 +93,7 @@ async def test_scan_once_produces_result_for_loudest_sensor():
 
     assert len(results) == 1
     assert results[0].sensor_id == "node-a:ch1"  # loudest
+    assert np.allclose(results[0].audio, 0.11)  # normalized sum of 0.02 and 0.2
     assert results[0].classification.label == "Bird"
     assert scanner.stats()["scans_completed"] == 1
 

@@ -1797,38 +1797,29 @@ class FusionNode:
     # ------------------------------------------------------------------
 
     async def _classify_and_assemble(self, product: LocalizedCandidate) -> list[DetectionProduct]:
-        """Classify localized and omni branches, then apply reporting fusion."""
+        """Classify a localized candidate's beamformed render.
+
+        Raw omni inference is intentionally reserved for ContinuousOmniScanner.
+        This keeps triggered work spatially meaningful and avoids re-running
+        BirdNET/YAMNet over the same ambient window.
+        """
         detection_products: list[DetectionProduct] = []
         extra_features = product.extra_classification_features
 
         if product.localization_branch is not None:
-            nearest_sensor_id = self._nearest_node_omni_sensor(product)
-            if nearest_sensor_id is not None:
-                nearest_signal = product.classification_selected_windows.get(
-                    nearest_sensor_id,
-                    product.localization_branch.classification_reference_signal,
-                )
-                localized = await self._classification_orchestrator.classify_omni_only(
-                    reference_signal=nearest_signal,
-                    sample_rate_hz=product.candidate.sample_rate_hz,
-                    event_time_ns=product.candidate.event_time_ns,
-                    path="nearest_node_omni",
-                )
-                localized.classification.features["nearest_node_sensor_id"] = nearest_sensor_id
-            else:
-                localized = await self._classification_orchestrator.classify(
-                    reference_signal=product.localization_branch.classification_reference_signal,
-                    sample_rate_hz=product.candidate.sample_rate_hz,
-                    capability_tier=product.localization_branch.capability_tier,
-                    selected_sensor_ids=product.selected_sensor_ids,
-                    selected_positions=product.selected_positions,
-                    selected_windows=product.classification_selected_windows,
-                    localization_position_m=product.localization_branch.localization_position_m,
-                    event_time_ns=product.candidate.event_time_ns,
-                    alias_cutoff_hz=product.localization_branch.alias_cutoff_hz,
-                )
-            if localized.beamformed_classification is not None:
-                self._metrics.beamform_renders += 1
+            localized = await self._classification_orchestrator.classify_beamformed_only(
+                sample_rate_hz=product.candidate.sample_rate_hz,
+                capability_tier=product.localization_branch.capability_tier,
+                selected_sensor_ids=product.selected_sensor_ids,
+                selected_positions=product.selected_positions,
+                selected_windows=product.classification_selected_windows,
+                localization_position_m=product.localization_branch.localization_position_m,
+                event_time_ns=product.candidate.event_time_ns,
+                alias_cutoff_hz=product.localization_branch.alias_cutoff_hz,
+            )
+            if localized is None:
+                return detection_products
+            self._metrics.beamform_renders += 1
             if extra_features:
                 localized.classification.features.update(extra_features)
             await self._maybe_trigger_speech_capture(
@@ -1856,41 +1847,6 @@ class FusionNode:
             )
             if maybe_detection is not None:
                 detection_products.append(maybe_detection)
-
-        localized_result_for_omni = localized if product.localization_branch is not None else None
-        omni = await self._classify_omni_branch(
-            product=product,
-            localized_result=localized_result_for_omni,
-        )
-        if extra_features and omni is not localized_result_for_omni:
-            omni.classification.features.update(extra_features)
-        if omni is not localized_result_for_omni:
-            await self._maybe_trigger_speech_capture(
-                node_id=product.candidate.source_node_id,
-                sensor_id=product.omni_reference_sensor,
-                event_time_ns=product.candidate.event_time_ns,
-                scores=omni.classification.scores,
-            )
-        maybe_detection = await self._assemble_reporting_branch(
-            product=product,
-            classified=omni,
-            reporting_modality="omni",
-            localization_position_m=product.omni_position_m,
-            localization_confidence=self.fusion_config.fallback_localization_confidence,
-            localization_gdop=float("inf"),
-            localization_position_covariance_m2=None,
-            localization_range_observability=None,
-            localization_residual_rms_seconds=None,
-            localization_range_projection_mode=None,
-            reference_sensor=product.omni_reference_sensor,
-            reference_signal=product.omni_reference_signal,
-            tdoa_s={},
-            capability_tier="classification_only",
-            localization_method="omni_reporting_window",
-        )
-        if maybe_detection is not None:
-            detection_products.append(maybe_detection)
-
         return detection_products
 
     async def _classify_omni_branch(

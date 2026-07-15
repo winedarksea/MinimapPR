@@ -748,9 +748,10 @@ async def test_full_pipeline_localize_beamform_preprocess_classify_chain(tmp_pat
     latest = detections[0]
     features = latest["feature_summary"]
 
-    # Beamformed path was selected (amplifying beamformer boosts confidence).
+    # Triggered classification is beamformed-only; raw omni is handled by the
+    # independent continuous scanner.
     assert features["classification_path"].startswith("beamformed:")
-    assert float(features["beamformed_confidence"]) > float(features["omni_confidence"])
+    assert float(features["beamformed_confidence"]) == float(features["omni_confidence"])
 
     # The secondary classifier in the chain was triggered: its scores appear.
     classifier_scores = latest.get("classifier_scores", {})

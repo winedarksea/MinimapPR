@@ -13,6 +13,7 @@ from minimappr.classifiers.chaining import ChainStage, ChainedClassifier
 from minimappr.classifiers.composite import CompositeClassifier, CompositeMember
 from minimappr.classifiers.routing import (
     CONTEXT_DETECTION_TRIGGER,
+    CONTEXT_LOCALIZED_RENDER,
     CONTEXT_OMNI_CONTINUOUS,
     apply_settings,
     default_routing,
@@ -68,7 +69,8 @@ def test_default_routing_matches_shipped_json() -> None:
 def test_missing_file_yields_defaults(tmp_path: Path) -> None:
     routing = load_routing_file(tmp_path / "nope.json")
     assert "yamnet" in routing.classifiers
-    assert routing.context(CONTEXT_DETECTION_TRIGGER).run == ("yamnet", "birdnet")
+    assert routing.context(CONTEXT_DETECTION_TRIGGER).run == ()
+    assert routing.context(CONTEXT_LOCALIZED_RENDER).run == ("yamnet", "birdnet")
 
 
 def test_malformed_file_raises(tmp_path: Path) -> None:
@@ -107,7 +109,7 @@ def test_kill_switches_strip_members_chains_triggers() -> None:
         birdnet_enabled=False, drone_head_enabled=False, stt_enabled=False, t3t4_enabled=False
     )
     routing = apply_settings(default_routing(), settings)
-    assert routing.context(CONTEXT_DETECTION_TRIGGER).run == ("yamnet",)
+    assert routing.context(CONTEXT_DETECTION_TRIGGER).run == ()
     assert routing.context(CONTEXT_OMNI_CONTINUOUS).run == ()
     assert routing.chains == ()
     assert routing.triggers == ()

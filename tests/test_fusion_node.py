@@ -519,7 +519,7 @@ async def test_fusion_backpressure_drops_when_queue_full(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_fusion_reuses_localized_classification_for_matching_omni_reference(tmp_path: Path) -> None:
+async def test_fusion_does_not_fall_back_to_omni_without_a_beamformed_render(tmp_path: Path) -> None:
     settings = Settings(
         db_path=tmp_path / "fusion_reuse.db",
         snippet_dir=tmp_path / "snippets",
@@ -598,8 +598,8 @@ async def test_fusion_reuses_localized_classification_for_matching_omni_referenc
     await asyncio.sleep(0.2)
 
     status = await fusion.status()
-    assert classifier.calls == 1
-    assert status["metrics"]["classification_reuse_hits"] == 1
+    assert classifier.calls == 0
+    assert status["metrics"]["classification_reuse_hits"] == 0
     assert status["metrics"]["localization_stage_in"] >= 1
     assert status["metrics"]["localization_stage_out"] >= 1
     assert status["metrics"]["localization_stage_total_time_ms"] >= 4.0
@@ -694,19 +694,16 @@ async def test_fusion_records_wavelength_alias_metrics_and_features(tmp_path: Pa
     status = await fusion.status()
     assert status["metrics"]["localization_band_aliased_count"] == 1
 
-    detections = await storage.list_detections(limit=10)
-    assert len(detections) == 1
-    feature_summary = detections[0]["feature_summary"]
-    assert feature_summary["wavelength_factor"] == pytest.approx(0.4)
-    assert feature_summary["dominant_frequency_hz"] == pytest.approx(12_000.0)
-    assert feature_summary["alias_cutoff_hz"] == pytest.approx(3_200.0)
+    # A localized result without a beamformed render is intentionally not
+    # classified on raw omni audio.
+    assert await storage.list_detections(limit=10) == []
 
     await fusion.stop()
     await storage.close()
 
 
 @pytest.mark.asyncio
-async def test_birdnet_chunked_dispatch_suppresses_overlapping_candidates(tmp_path: Path) -> None:
+async def test_triggered_point_audio_does_not_run_birdnet_chunk_dispatch(tmp_path: Path) -> None:
     settings = Settings(
         db_path=tmp_path / "fusion_chunking.db",
         snippet_dir=tmp_path / "snippets",
@@ -790,7 +787,7 @@ async def test_birdnet_chunked_dispatch_suppresses_overlapping_candidates(tmp_pa
     await asyncio.sleep(0.25)
 
     status = await fusion.status()
-    assert classifier.calls == 1
+    assert classifier.calls == 0
     assert status["metrics"]["birdnet_chunk_dispatches_suppressed"] == 1
 
     await fusion.stop()
@@ -798,7 +795,7 @@ async def test_birdnet_chunked_dispatch_suppresses_overlapping_candidates(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_birdnet_chunked_dispatch_retries_after_non_actionable_result(tmp_path: Path) -> None:
+async def test_triggered_point_audio_skips_birdnet_retry_dispatch(tmp_path: Path) -> None:
     settings = Settings(
         db_path=tmp_path / "fusion_chunk_retry.db",
         snippet_dir=tmp_path / "snippets",
@@ -883,7 +880,7 @@ async def test_birdnet_chunked_dispatch_retries_after_non_actionable_result(tmp_
     await asyncio.sleep(0.25)
 
     status = await fusion.status()
-    assert classifier.calls == 2
+    assert classifier.calls == 0
     assert status["metrics"]["birdnet_chunk_dispatches_suppressed"] == 0
 
     await fusion.stop()

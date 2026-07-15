@@ -209,6 +209,50 @@ class ClassificationOrchestrator:
             backend_failed=backend_failed,
         )
 
+    async def classify_beamformed_only(
+        self,
+        *,
+        sample_rate_hz: int,
+        capability_tier: str,
+        selected_sensor_ids: list[str],
+        selected_positions: dict[str, np.ndarray],
+        selected_windows: dict[str, np.ndarray],
+        localization_position_m: tuple[float, float, float],
+        event_time_ns: int,
+        alias_cutoff_hz: float | None = None,
+    ) -> ClassifiedResult | None:
+        """Classify only a spatial render, returning nothing when unavailable.
+
+        The trigger pipeline must not quietly fall back to raw omni inference:
+        continuous omni scanning owns that responsibility.  Returning ``None``
+        also makes an insufficient array a clear no-classification outcome.
+        """
+        beamformed_attempt = await self._classify_beamformed_candidate_if_eligible(
+            capability_tier=capability_tier,
+            sample_rate_hz=sample_rate_hz,
+            selected_sensor_ids=selected_sensor_ids,
+            selected_positions=selected_positions,
+            selected_windows=selected_windows,
+            localization_position_m=localization_position_m,
+            alias_cutoff_hz=alias_cutoff_hz,
+        )
+        candidate = beamformed_attempt.candidate
+        if candidate is None:
+            return None
+        backend_failed = self._classification_backend_failed(candidate.classification)
+        return await self._build_result(
+            classification=candidate.classification,
+            # Preserve the existing reporting contract's scalar omni field
+            # without claiming an additional raw-omni inference occurred.
+            omni_classification=candidate.classification,
+            beamformed_classification=candidate.classification,
+            classification_path=candidate.path,
+            classification_signal=candidate.signal,
+            beamforming_error=beamformed_attempt.error,
+            event_time_ns=event_time_ns,
+            backend_failed=backend_failed,
+        )
+
     async def adopt_authoritative_classification(
         self,
         *,

@@ -32,8 +32,9 @@ from minimappr.api.live import LiveEventHub
 from minimappr.api.spool_consumer import IngestSpoolConsumer
 from minimappr.api.stream_consumer import IngestStreamConsumer, StreamConsumerConfig
 from minimappr.classifiers.availability import probe_backends
-from minimappr.classifiers.factory import create_classifier
+from minimappr.classifiers.factory import create_context_classifier
 from minimappr.classifiers.routing import (
+    CONTEXT_LOCALIZED_RENDER,
     load_routing,
     load_routing_file,
     parse_routing_document,
@@ -319,7 +320,7 @@ def _default_sidecar_classifier_command_json(settings: "Settings") -> str | None
 
 
 def _build_runtime_classifier(settings: Settings):
-    return create_classifier(settings)
+    return create_context_classifier(settings, CONTEXT_LOCALIZED_RENDER)
 
 
 def _parse_window_ns(window: str) -> int:

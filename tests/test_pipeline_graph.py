@@ -117,7 +117,7 @@ class TestBuilderTopology:
         assert not any(n.id.startswith("cls:ctx:") for n in g.nodes)
         birdnet = "cls:member:birdnet"
         birdnet_labels = {e.label for e in g.edges if e.target == birdnet}
-        assert {"Detection Trigger", "Localized Render", "Omni Continuous"} <= birdnet_labels
+        assert {"Localized Render", "Omni Continuous"} <= birdnet_labels
         assert sum(n.id == birdnet for n in g.nodes) == 1
 
     def test_context_routes_with_shared_endpoints_have_unique_ids(self):
@@ -128,7 +128,7 @@ class TestBuilderTopology:
             e for e in g.edges
             if e.source == "gate:t1" and e.target == "cls:member:birdnet"
         ]
-        assert {e.label for e in birdnet_from_t1} == {"Detection Trigger", "Omni Continuous"}
+        assert {e.label for e in birdnet_from_t1} == {"Omni Continuous"}
 
 
 class TestBuilderStatus:

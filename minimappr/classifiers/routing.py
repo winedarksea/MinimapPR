@@ -124,7 +124,7 @@ def default_routing() -> RoutingConfig:
         },
         contexts={
             CONTEXT_DETECTION_TRIGGER: ContextSpec(
-                name=CONTEXT_DETECTION_TRIGGER, run=("yamnet", "birdnet")
+                name=CONTEXT_DETECTION_TRIGGER, run=()
             ),
             CONTEXT_LOCALIZED_RENDER: ContextSpec(
                 name=CONTEXT_LOCALIZED_RENDER, run=("yamnet", "birdnet")

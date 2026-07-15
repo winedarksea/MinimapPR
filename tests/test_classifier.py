@@ -106,7 +106,7 @@ def test_chained_classifier_skips_non_matching_stage() -> None:
 
 
 def test_create_context_classifier_builds_yamnet_birdnet_composite(monkeypatch) -> None:
-    """Default routing: YAMNet and BirdNET both always run (composite, not chained)."""
+    """Localized-render routing runs YAMNet and BirdNET as a composite."""
 
     class _StubYAMNetClassifier(AudioClassifier):
         def __init__(self, *args, **kwargs) -> None:
@@ -131,7 +131,7 @@ def test_create_context_classifier_builds_yamnet_birdnet_composite(monkeypatch) 
 
     settings = Settings()
     routing = default_routing()
-    classifier = factory.create_context_classifier(settings, "detection_trigger", routing=routing)
+    classifier = factory.create_context_classifier(settings, "localized_render", routing=routing)
 
     result = classifier.classify(np.zeros(64, dtype=np.float32), 16_000)
     assert result.label == "robin"
@@ -206,7 +206,7 @@ def test_create_classifier_passes_yamnet_conditioning_settings(monkeypatch, tmp_
     )
     routing = load_routing(settings)
 
-    _ = factory.create_context_classifier(settings, "detection_trigger", routing=routing)
+    _ = factory.create_context_classifier(settings, "localized_render", routing=routing)
 
     # routing spec min_confidence (0.25) wins over the settings default here;
     # the conditioning knobs pass through from settings.
