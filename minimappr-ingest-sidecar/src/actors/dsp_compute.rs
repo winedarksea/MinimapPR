@@ -83,6 +83,7 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
             far_field_max_range_m: payload.config.localization_far_field_max_range_m,
             range_prior_m,
             range_prior_std_m,
+            half_space: payload.half_space,
             ..SrpPhatConfig::default()
         };
         estimate_tetrahedral_steering(
@@ -262,6 +263,7 @@ pub async fn run_io(result: ComputeMathResult) {
         payload.config.localization_band_hz,
         pair_diagnostics,
         received_level_dbfs,
+        payload.half_space != crate::srp_phat::HalfSpace::None,
     );
 
     let has_classifier_render = render_result
@@ -505,6 +507,7 @@ fn localization_manifest_payload(
     effective_band_hz: [f32; 2],
     pair_tdoas: Vec<PairTdoaDiagnostic>,
     received_level_dbfs: Option<f32>,
+    half_space_applied: bool,
 ) -> LocalizationManifestPayload {
     LocalizationManifestPayload {
         attempted_algorithm: result.attempted_algorithm.clone(),
@@ -524,6 +527,7 @@ fn localization_manifest_payload(
         effective_band_hz: Some(effective_band_hz),
         dominant_frequency_hz: result.dominant_frequency_hz,
         received_level_dbfs,
+        half_space_applied,
         pair_tdoas,
     }
 }

@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <vector>
 
-#include "mmpr/HttpFramePublisher.h"
+#include "mmpr/IUplinkTransport.h"
 #include "mmpr/IAudioSource.h"
 #include "mmpr/IEnvironmentalSource.h"
 #include "mmpr/NodeClock.h"
@@ -54,7 +54,7 @@ class NodeRunner {
   NodeRunner(
       const NodeDescriptor& descriptor,
       IAudioSource& audioSource,
-      HttpFramePublisher& publisher,
+      IUplinkTransport& publisher,
       NodeClock& clock,
       uint32_t logEveryFrames = 100,
       IEnvironmentalSource* environmentalSource = nullptr,
@@ -118,7 +118,7 @@ class NodeRunner {
 
   const NodeDescriptor& descriptor_;
   IAudioSource& audioSource_;
-  HttpFramePublisher& publisher_;
+  IUplinkTransport& publisher_;
   IEnvironmentalSource* environmentalSource_ = nullptr;
   bool environmentalSourceReady_ = false;
   NodeClock& clock_;

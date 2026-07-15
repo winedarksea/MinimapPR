@@ -32,64 +32,27 @@ project(sirith_tetrahedral C CXX ASM)
 
 set(PICO_CXX_ENABLE_EXCEPTIONS 1)
 
-# MMPR_ENABLE_BLE_SCAN is derived from node_config.h (single source of truth) instead
-# of a separate CMake flag, so flipping the #define there and rebuilding is enough --
-# no `-DMMPR_ENABLE_BLE_SCAN=ON` needed. Re-added to CMAKE_CONFIGURE_DEPENDS so that
-# editing the header alone triggers a reconfigure (otherwise a stale cached value from
-# a prior configure would silently win, which is exactly the bug this replaces).
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-        "${CMAKE_CURRENT_LIST_DIR}/include/node_config.h")
-file(STRINGS "${CMAKE_CURRENT_LIST_DIR}/include/node_config.h" MMPR_BLE_SCAN_DEFINE_LINE
-        REGEX "^#define[ \t]+MMPR_ENABLE_BLE_SCAN[ \t]+[0-9]+")
-if(MMPR_BLE_SCAN_DEFINE_LINE MATCHES "MMPR_ENABLE_BLE_SCAN[ \t]+([0-9]+)")
-    set(MMPR_ENABLE_BLE_SCAN ${CMAKE_MATCH_1})
-else()
-    message(FATAL_ERROR "Could not find '#define MMPR_ENABLE_BLE_SCAN <0|1>' in node_config.h")
-endif()
-
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
 
-set(MMPR_AUDIO_PICO_DIR ${CMAKE_CURRENT_LIST_DIR}/../../lib/minimap_audio_pico)
+# Shared firmware libraries (INTERFACE) + the nodecfg forwarding helper.
+set(FIRMWARE_LIB_DIR ${CMAKE_CURRENT_LIST_DIR}/../../lib)
+include(${FIRMWARE_LIB_DIR}/cmake/mmpr_nodecfg.cmake)
+add_subdirectory(${FIRMWARE_LIB_DIR}/minimap_node_runtime
+        ${CMAKE_BINARY_DIR}/minimap_node_runtime)
+add_subdirectory(${FIRMWARE_LIB_DIR}/minimap_transport_cyw43
+        ${CMAKE_BINARY_DIR}/minimap_transport_cyw43)
+add_subdirectory(${FIRMWARE_LIB_DIR}/minimap_audio_pico
+        ${CMAKE_BINARY_DIR}/minimap_audio_pico)
 
 # Add executable. Default name is the project name, version 0.1
-
 add_executable(sirith_tetrahedral
         sirith_tetrahedral.cpp
-        src/Base64.cpp
-        src/BleReportPublisher.cpp
-        src/BleRssiScanner.cpp
-        src/FailureSnapshot.cpp
-        src/FallbackEnvironmentalSource.cpp
-        src/GpsPpsTimerCapture.cpp
-        src/HttpFramePublisher.cpp
-        src/Lis2mdlMagnetometer.cpp
-        src/Lsm6TemperatureSensor.cpp
-        src/MagAutoOrientation.cpp
-        src/NmeaGpsSource.cpp
-        src/NtpClient.cpp
-        src/NodeControlServer.cpp
-        src/NodeClock.cpp
-        src/NodeProtocol.cpp
-        src/NodeRunner.cpp
-        src/Sht4xEnvironmentalSource.cpp
-        src/SilenceAudioSource.cpp
-        src/SyntheticAudioSource.cpp
-        src/TemperatureEnvironmentalSource.cpp
-        src/WiFiSupport.cpp
-        ${MMPR_AUDIO_PICO_DIR}/src/PicoI2SMonoSource.cpp
-        ${MMPR_AUDIO_PICO_DIR}/src/SirithPicoTdmSource.cpp
         )
 
-pico_generate_pio_header(
-        sirith_tetrahedral
-        ${MMPR_AUDIO_PICO_DIR}/src/mmpr_audio_rx.pio
-)
-
-pico_generate_pio_header(
-        sirith_tetrahedral
-        ${CMAKE_CURRENT_LIST_DIR}/src/gps_pps_capture.pio
-)
+# Generated PIO headers (need the concrete executable target).
+minimap_audio_pico_generate_pio(sirith_tetrahedral)
+minimap_node_runtime_generate_pio(sirith_tetrahedral)
 
 pico_set_program_name(sirith_tetrahedral "sirith_tetrahedral")
 pico_set_program_version(sirith_tetrahedral "0.1")
@@ -98,77 +61,21 @@ pico_set_program_version(sirith_tetrahedral "0.1")
 pico_enable_stdio_uart(sirith_tetrahedral 0)
 pico_enable_stdio_usb(sirith_tetrahedral 1)
 
-# Add the standard library to the build
-target_link_libraries(sirith_tetrahedral
-        pico_stdlib)
-
-# Add the standard include files to the build
+# Node-local include (node_config.h).
 target_include_directories(sirith_tetrahedral PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
         ${CMAKE_CURRENT_LIST_DIR}/include
-        ${MMPR_AUDIO_PICO_DIR}/include
 )
 
-target_compile_definitions(
-        sirith_tetrahedral
-        PRIVATE MMPR_ENABLE_BLE_SCAN=${MMPR_ENABLE_BLE_SCAN})
-
-foreach(MMPR_NODECFG_DEFINE
-        AUDIO_INPUT_MODE
-        AUDIO_SAMPLE_RATE_HZ
-        AUDIO_CHANNELS
-        AUDIO_FRAME_SAMPLES
-        AUDIO_RING_FRAMES
-        AUDIO_QUEUE_SLOTS
-        PUBLISH_BATCH_FRAMES
-        PUBLISH_BATCH_BYTE_BUDGET
-        USE_PUBLISH_BATCH_BYTE_BUDGET
-        HTTP_TIMEOUT_MS
-        BLE_SCAN_INTERVAL_UNITS
-        BLE_SCAN_WINDOW_UNITS
-        BLE_REPORT_INTERVAL_MS
-        BLE_REPORT_MAX_OBSERVATIONS
-        GPS_PPS_PIN
-        I2S_MONO_CHANNEL_SIDE
-        I2S_MONO_SAMPLE_EDGE
-        I2S_MONO_CAPTURE_BIT_OFFSET
-        I2S_MONO_DATA_PIN_BIAS
-        I2S_MONO_ENABLE_WORD_DIAGNOSTICS
-        TDM_SAMPLE_EDGE
-        TDM_CAPTURE_BIT_OFFSET
-        TDM_DATA_PIN_BIAS
-        TDM_ENABLE_WORD_DIAGNOSTICS)
-    if(DEFINED MMPR_NODECFG_${MMPR_NODECFG_DEFINE})
-        target_compile_definitions(
-                sirith_tetrahedral
-                PRIVATE MMPR_NODECFG_${MMPR_NODECFG_DEFINE}=${MMPR_NODECFG_${MMPR_NODECFG_DEFINE}})
-    endif()
-endforeach()
-
-if(DEFINED MMPR_NODECFG_SERVER_BASE_URL)
-    target_compile_definitions(
-            sirith_tetrahedral
-            PRIVATE MMPR_NODECFG_SERVER_BASE_URL="${MMPR_NODECFG_SERVER_BASE_URL}")
-endif()
-
-if(DEFINED MMPR_NODECFG_BLE_SERVER_BASE_URL)
-    target_compile_definitions(
-            sirith_tetrahedral
-            PRIVATE MMPR_NODECFG_BLE_SERVER_BASE_URL="${MMPR_NODECFG_BLE_SERVER_BASE_URL}")
-endif()
-
-# Add any user requested libraries
-target_link_libraries(sirith_tetrahedral 
-        hardware_dma
-        hardware_i2c
-        hardware_pwm
-        hardware_pio
-        hardware_uart
-        hardware_clocks
-        hardware_watchdog
-        pico_cyw43_arch_lwip_poll
-        pico_unique_id
+# Runtime + transports + audio capture come from the shared libs.
+target_link_libraries(sirith_tetrahedral
+        minimap_node_runtime
+        minimap_transport_cyw43
+        minimap_audio_pico
         )
+
+# Forward node_config.h-derived settings (also exports MMPR_ENABLE_BLE_SCAN).
+mmpr_apply_nodecfg(sirith_tetrahedral ${CMAKE_CURRENT_LIST_DIR}/include/node_config.h)
 
 if(MMPR_ENABLE_BLE_SCAN)
     target_link_libraries(sirith_tetrahedral

@@ -7,7 +7,6 @@
 #include <vector>
 
 #include "mmpr/AudioTransportQos.h"
-#include "pico/cyw43_arch.h"
 #include "pico/time.h"
 
 namespace mmpr {
@@ -34,7 +33,7 @@ bool deadlineReached(uint32_t nowMs, uint32_t deadlineMs) {
 NodeRunner::NodeRunner(
     const NodeDescriptor& descriptor,
     IAudioSource& audioSource,
-    HttpFramePublisher& publisher,
+    IUplinkTransport& publisher,
     NodeClock& clock,
     uint32_t logEveryFrames,
     IEnvironmentalSource* environmentalSource,

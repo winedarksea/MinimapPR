@@ -14,6 +14,31 @@ use crate::{
 const EPSILON: f32 = 1e-9;
 const FAR_FIELD_RANGE_CONVERGENCE_TOLERANCE_M: f32 = 0.05;
 
+/// Coplanar-array up/down constraint (D7). A planar array's TDOA geometry is
+/// mirror-symmetric across its own plane, so without an external constraint
+/// the near-field grid search wastes half its points (and the solver is
+/// ambiguous) on the side of the array nothing can physically occupy. Only
+/// the z-axis case (a horizontal array plane) is implemented; a pitched or
+/// rolled planar node needs the array's rotated normal, not the raw z-axis —
+/// tracked as a follow-up (plan risk #5).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HalfSpace {
+    Upper,
+    Lower,
+    #[default]
+    None,
+}
+
+impl HalfSpace {
+    pub fn from_wire_str(value: &str) -> Self {
+        match value {
+            "upper" => HalfSpace::Upper,
+            "lower" => HalfSpace::Lower,
+            _ => HalfSpace::None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct SrpPhatConfig {
     pub localization_band_hz: [f32; 2],
@@ -31,6 +56,9 @@ pub struct SrpPhatConfig {
     /// Both `None` (the default) reproduces the fixed-prior behaviour exactly.
     pub range_prior_m: Option<f32>,
     pub range_prior_std_m: Option<f32>,
+    /// Coplanar array up/down constraint (D7); `HalfSpace::None` (default)
+    /// reproduces unconstrained tetra behaviour exactly.
+    pub half_space: HalfSpace,
 }
 
 impl Default for SrpPhatConfig {
@@ -46,6 +74,7 @@ impl Default for SrpPhatConfig {
             far_field_max_range_m: 250.0,
             range_prior_m: None,
             range_prior_std_m: None,
+            half_space: HalfSpace::None,
         }
     }
 }
@@ -521,6 +550,7 @@ fn near_field_candidate(
         config.search_padding_m,
         config.grid_resolution_m,
         config.max_grid_points,
+        config.half_space,
     );
     if grid.is_empty() {
         return None;
@@ -1258,17 +1288,33 @@ fn grid_from_bounds(
     search_padding_m: f32,
     grid_resolution_m: f32,
     max_grid_points: usize,
+    half_space: HalfSpace,
 ) -> Vec<[f32; 3]> {
     let padding_m = search_padding_m.max(0.05);
     let resolution_m = grid_resolution_m.max(0.05);
 
     let mut mins = [f32::INFINITY; 3];
     let mut maxs = [f32::NEG_INFINITY; 3];
+    let mut plane_z_sum = 0.0_f32;
     for &channel_index in active_channels {
         let position_m = mic_positions_m[channel_index];
         for axis in 0..3 {
             mins[axis] = mins[axis].min(position_m[axis] - padding_m);
             maxs[axis] = maxs[axis].max(position_m[axis] + padding_m);
+        }
+        plane_z_sum += position_m[2];
+    }
+
+    // D7: a coplanar array's TDOA solution is mirror-symmetric across its own
+    // plane. Clamping the z-search bound to the array's own mean-z plane
+    // halves the grid to the physically-constrained side instead of wasting
+    // points (and solver ambiguity) on the unreachable side.
+    if !active_channels.is_empty() {
+        let plane_z_m = plane_z_sum / active_channels.len() as f32;
+        match half_space {
+            HalfSpace::Upper => mins[2] = mins[2].max(plane_z_m),
+            HalfSpace::Lower => maxs[2] = maxs[2].min(plane_z_m),
+            HalfSpace::None => {}
         }
     }
 
@@ -2577,5 +2623,66 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn planar_mics() -> [[f32; 3]; 5] {
+        let r = 0.025 * std::f32::consts::FRAC_1_SQRT_2;
+        [
+            [r, r, 0.0],
+            [-r, r, 0.0],
+            [-r, -r, 0.0],
+            [r, -r, 0.0],
+            [0.0, 0.0, 0.0],
+        ]
+    }
+
+    #[test]
+    fn half_space_none_produces_symmetric_grid_around_array_plane() {
+        let mics = planar_mics();
+        let grid = grid_from_bounds(&[0, 1, 2, 3, 4], &mics, 0.1, 0.05, 60_000, HalfSpace::None);
+        assert!(grid.iter().any(|p| p[2] < 0.0));
+        assert!(grid.iter().any(|p| p[2] > 0.0));
+    }
+
+    #[test]
+    fn half_space_upper_clamps_grid_to_non_negative_z() {
+        let mics = planar_mics();
+        let grid = grid_from_bounds(&[0, 1, 2, 3, 4], &mics, 0.1, 0.05, 60_000, HalfSpace::Upper);
+        assert!(!grid.is_empty());
+        assert!(grid.iter().all(|p| p[2] >= -1e-6));
+        assert!(grid.iter().any(|p| p[2] > 0.0));
+    }
+
+    #[test]
+    fn half_space_lower_clamps_grid_to_non_positive_z() {
+        let mics = planar_mics();
+        let grid = grid_from_bounds(&[0, 1, 2, 3, 4], &mics, 0.1, 0.05, 60_000, HalfSpace::Lower);
+        assert!(!grid.is_empty());
+        assert!(grid.iter().all(|p| p[2] <= 1e-6));
+        assert!(grid.iter().any(|p| p[2] < 0.0));
+    }
+
+    #[test]
+    fn half_space_clamps_relative_to_pitched_array_plane_not_world_origin() {
+        // A "pitched" node: the array plane itself sits off the world-frame
+        // z=0 origin (e.g. mounted at a 2m height offset carried through in
+        // mic_positions_m). The clamp must key off the array's own mean-z
+        // plane, not an assumed world origin.
+        let mut mics = planar_mics();
+        for m in &mut mics {
+            m[2] += 2.0;
+        }
+        let grid = grid_from_bounds(&[0, 1, 2, 3, 4], &mics, 0.1, 0.05, 60_000, HalfSpace::Upper);
+        assert!(!grid.is_empty());
+        assert!(grid.iter().all(|p| p[2] >= 2.0 - 1e-6));
+        assert!(grid.iter().any(|p| p[2] > 2.0));
+    }
+
+    #[test]
+    fn half_space_from_wire_str_matches_node_spec_values() {
+        assert_eq!(HalfSpace::from_wire_str("upper"), HalfSpace::Upper);
+        assert_eq!(HalfSpace::from_wire_str("lower"), HalfSpace::Lower);
+        assert_eq!(HalfSpace::from_wire_str("none"), HalfSpace::None);
+        assert_eq!(HalfSpace::from_wire_str("garbage"), HalfSpace::None);
     }
 }

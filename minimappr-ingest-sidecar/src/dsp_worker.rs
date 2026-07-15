@@ -30,6 +30,12 @@ const DEFAULT_BIRDNET_CLASSIFICATION_WINDOW_SECONDS: f64 = 30.0;
 const DEFAULT_CLASSIFIER_RENDER_OVERLAP_SECONDS: f64 = 2.0;
 const AUTOMATIC_GPS_CLUSTER_ID: &str = "auto-gps";
 const EARTH_RADIUS_M: f64 = 6_371_000.0;
+/// Largest mic array the spatial pipeline (SRP-PHAT / GCC-PHAT / render_mvdr_n)
+/// will run on. Sirith Planar (5 mics) fits; anything larger falls back to omni.
+const MAX_SPATIAL_CHANNELS: usize = 8;
+/// Minimum out-of-collinearity span (in meters) required for an array's
+/// geometry to be usable by the spatial pipeline.
+const SPATIAL_GEOMETRY_MIN_SPAN_M: f32 = 0.005;
 
 /// Centroid-relative Sirith tetrahedral mic positions [MK1, MK2, MK3, MK4].
 pub(crate) const SIRITH_MIC_POSITIONS_M: [[f32; 3]; 4] = [
@@ -319,6 +325,8 @@ pub(crate) struct ComputePayload {
     pub(crate) classifier_render_end_ns: Option<u128>,
     /// Per-channel mic positions extracted from node_context.sensor_offsets_m.
     pub(crate) mic_positions_m: Vec<[f32; 3]>,
+    /// Coplanar array up/down constraint extracted from node_context.node.half_space.
+    pub(crate) half_space: crate::srp_phat::HalfSpace,
     pub(crate) source_ids: Vec<String>,
     pub(crate) sr: u32,
     pub(crate) now_ns: u128,
@@ -359,6 +367,7 @@ struct OwnedManifestAudio {
     buffer_channel_indices: Vec<usize>,
     classification_window_sec: f64,
     mic_positions_m: Vec<[f32; 3]>,
+    half_space: crate::srp_phat::HalfSpace,
     effective_sound_speed_mps: f32,
     buffer_start_time_ns: i128,
     buffer_end_time_ns: i128,
@@ -722,14 +731,39 @@ impl DspWorker {
             return None;
         }
 
-        if owned_segments.last()?.channel_count > 4 {
-            // Large-array fallback rendering bypasses the rolling buffer. Use
-            // only the newest contiguous segment rather than falsely joining
-            // audio across an explicit capture gap.
-            return self.dispatch_large_array_manifest(
-                owned_segments.into_iter().last()?,
-                pending_backlog_depth,
-            );
+        // Arrays with up to MAX_SPATIAL_CHANNELS mics run the full spatial
+        // pipeline (SRP-PHAT / GCC-PHAT / render_mvdr_n are all N-mic). This is
+        // what lets the 5-mic planar array localize rather than fall straight to
+        // omni. Arrays beyond that cap, or whose geometry is missing/degenerate
+        // (wrong offset count, single sensor, or collinear mics), take the
+        // large-array omni fallback with a specific reason. Behaviour for the
+        // 1-4 channel tetra/point path is unchanged (never enters this block).
+        {
+            let last = owned_segments.last()?;
+            if last.channel_count > 4 {
+                let geometry_usable = last.channel_count <= MAX_SPATIAL_CHANNELS
+                    && last.mic_positions_m.len() == last.channel_count
+                    && crate::dsp_math::array_spans_at_least_2d(
+                        &last.mic_positions_m,
+                        SPATIAL_GEOMETRY_MIN_SPAN_M,
+                    );
+                if !geometry_usable {
+                    let reason = if last.channel_count > MAX_SPATIAL_CHANNELS {
+                        "array_exceeds_max_spatial_channels"
+                    } else {
+                        "non_tetrahedral_array_geometry_unusable"
+                    };
+                    // Large-array fallback rendering bypasses the rolling buffer.
+                    // Use only the newest contiguous segment rather than falsely
+                    // joining audio across an explicit capture gap.
+                    return self.dispatch_large_array_manifest(
+                        owned_segments.into_iter().last()?,
+                        pending_backlog_depth,
+                        reason,
+                    );
+                }
+                // else: fall through to the normal spatial buffered path.
+            }
         }
 
         let mut final_owned_and_buffered = None;
@@ -810,6 +844,7 @@ impl DspWorker {
             .max(MIN_BIRDNET_CLASSIFICATION_WINDOW_SECONDS)
             .max(self.config.window_seconds);
         let mic_positions_m = mic_positions_from_manifest(&manifest);
+        let half_space = half_space_from_node_context(&manifest.node_context);
         let buffer_routing = resolve_cluster_buffer_routing(&manifest, &stream_key, channel_count);
         let (buffer_key, buffer_channel_count, buffer_channel_indices) = buffer_routing
             .map(|routing| {
@@ -922,6 +957,7 @@ impl DspWorker {
                 buffer_channel_indices: buffer_channel_indices.clone(),
                 classification_window_sec,
                 mic_positions_m: mic_positions_m.clone(),
+                half_space,
                 effective_sound_speed_mps,
                 buffer_start_time_ns,
                 buffer_end_time_ns,
@@ -1120,6 +1156,7 @@ impl DspWorker {
         &mut self,
         owned: OwnedManifestAudio,
         pending_backlog_depth: usize,
+        reason: &str,
     ) -> Option<ComputePayload> {
         if !self.should_publish_classifier_render(
             &owned.buffer_key,
@@ -1151,6 +1188,7 @@ impl DspWorker {
             classifier_render_start_ns: Some(owned.buffer_start_time_ns.max(0) as u128),
             classifier_render_end_ns: Some(owned.buffer_end_time_ns.max(0) as u128),
             mic_positions_m: owned.mic_positions_m,
+            half_space: owned.half_space,
             source_ids: owned.source_ids,
             sr: owned.sr,
             now_ns: owned.now_ns,
@@ -1161,7 +1199,7 @@ impl DspWorker {
             run_srp: false,
             run_classifier_render: true,
             skip_localization_result: true,
-            omni_fallback_reason: Some("single_sensor_or_non_tetrahedral_array".to_string()),
+            omni_fallback_reason: Some(reason.to_string()),
             omni_channels_override: Some(omni_channels.clone()),
             listenable_omni_channels_override: Some(omni_channels),
             manifest_store: self.manifest_store.clone(),
@@ -1278,6 +1316,7 @@ impl DspWorker {
                     classifier_render_start_ns,
                     classifier_render_end_ns,
                     mic_positions_m: owned.mic_positions_m,
+                    half_space: owned.half_space,
                     source_ids: owned.source_ids,
                     sr: owned.sr,
                     now_ns: owned.now_ns,
@@ -1390,6 +1429,7 @@ impl DspWorker {
             classifier_render_start_ns,
             classifier_render_end_ns,
             mic_positions_m: owned.mic_positions_m,
+            half_space: owned.half_space,
             source_ids: owned.source_ids,
             sr: owned.sr,
             now_ns: owned.now_ns,
@@ -2103,6 +2143,21 @@ pub(crate) fn mic_positions_from_node_context(
         })
         .filter(|v| !v.is_empty());
     positions.unwrap_or_else(|| SIRITH_MIC_POSITIONS_M.to_vec())
+}
+
+/// Extract the coplanar half-space constraint from node_context.node.half_space
+/// ("upper" | "lower" | "none"). Absent or unrecognized values default to
+/// `HalfSpace::None` (no constraint), matching non-planar arrays.
+pub(crate) fn half_space_from_node_context(
+    node_context: &Option<serde_json::Value>,
+) -> crate::srp_phat::HalfSpace {
+    node_context
+        .as_ref()
+        .and_then(|ctx| ctx.get("node"))
+        .and_then(|node| node.get("half_space"))
+        .and_then(|v| v.as_str())
+        .map(crate::srp_phat::HalfSpace::from_wire_str)
+        .unwrap_or(crate::srp_phat::HalfSpace::None)
 }
 
 fn resolve_effective_sound_speed_mps(

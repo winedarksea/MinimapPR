@@ -1633,6 +1633,14 @@ class FusionNode:
         selected_sensor_gain_offsets_db = await self.registry.sensor_gain_offsets_db(
             selected_ids
         )
+        # Half-space (D7) is a single coplanar node's own up/down constraint; it
+        # only applies unambiguously when every selected sensor belongs to one node.
+        selected_node_ids = set(selected_sensor_node_ids.values())
+        selected_half_space = (
+            await self.registry.node_half_space(next(iter(selected_node_ids)))
+            if len(selected_node_ids) == 1
+            else None
+        )
         localization_audio_quality = await self.buffer.get_synchronized_window_coverage_stats(
             sensor_ids=selected_ids,
             center_time_ns=candidate.event_time_ns,
@@ -1698,6 +1706,8 @@ class FusionNode:
             localization_kwargs["sensor_gain_offsets_db"] = (
                 selected_sensor_gain_offsets_db
             )
+        if selected_half_space is not None and "half_space" in localize_parameters:
+            localization_kwargs["half_space"] = selected_half_space
         localization_2d_kwargs: dict[str, object] = {}
         if hasattr(self.localizer, "localize_2d"):
             localize_2d_parameters = inspect.signature(self.localizer.localize_2d).parameters

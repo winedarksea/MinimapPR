@@ -536,3 +536,56 @@ def test_node_with_geo_ignores_fallback_position() -> None:
     assert payload.node.position_m is None
     assert payload.node.position_geo is not None
     assert "server_position_fallback" not in payload.node.metadata.get("gps", {})
+
+
+def _binary_node_planar(*, geo: GeoPoint, position_source: str = "gps_nmea_uart") -> bytes:
+    """5-mic PDM planar node descriptor: node_type binary code 4, 5 sensors."""
+    r = 0.025 * 0.7071067811865476
+    corners = [
+        (r, r, 0.0),
+        (-r, r, 0.0),
+        (-r, -r, 0.0),
+        (r, -r, 0.0),
+        (0.0, 0.0, 0.0),
+    ]
+    payload = bytearray()
+    payload += _binary_string("planar-node-1")
+    payload += struct.pack("<B", 4)  # node_type code 4 = sirith_planar
+    payload += struct.pack("<B", 1)  # has_geo_position
+    payload += struct.pack("<fff", geo.lat, geo.lon, geo.alt_m)
+    payload += struct.pack("<B", len(corners))  # sensor count = 5
+    for off in corners:
+        payload += struct.pack("<fff", *off)
+    payload += struct.pack("<B", 2)  # capability count
+    payload += _binary_string("audio")
+    payload += _binary_string("array_localization")
+    payload += _binary_string("sirith-planar-5pdm-rp2354a")
+    payload += _binary_string("test-firmware")
+    payload += _binary_string("fix_3d")
+    payload += _binary_string(position_source)
+    payload += struct.pack("<I", 3)  # boot count
+    return bytes(payload)
+
+
+def _binary_ingest_payload_planar(*, geo: GeoPoint) -> bytes:
+    payload = bytearray()
+    payload += b"MMB2"
+    payload += struct.pack("<BBH", 2, 0, 1)
+    payload += _binary_node_planar(geo=geo)
+    payload += _binary_frame(sample_rate_hz=48_000, channels=5, samples_per_channel=2)
+    return bytes(payload)
+
+
+def test_parse_binary_ingest_payload_decodes_sirith_planar_five_channel() -> None:
+    geo = GeoPoint(lat=44.987, lon=-93.258, alt_m=281.5)
+
+    payload = parse_binary_ingest_payload(_binary_ingest_payload_planar(geo=geo))
+
+    assert payload.node.node_type == NodeType.SIRITH_PLANAR
+    assert len(payload.node.sensor_offsets_m) == 5
+    # Center mic is the 5th sensor at the array origin.
+    assert payload.node.sensor_offsets_m[4] == pytest.approx((0.0, 0.0, 0.0))
+    # All mics coplanar (z == 0).
+    assert all(off[2] == pytest.approx(0.0) for off in payload.node.sensor_offsets_m)
+    assert len(payload.buffered_frames) == 1
+    assert payload.buffered_frames[0].frame.channels == 5

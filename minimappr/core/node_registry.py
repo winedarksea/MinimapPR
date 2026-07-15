@@ -177,6 +177,15 @@ class NodeRegistry:
                 if sensor_id in self._sensors
             }
 
+    async def node_half_space(self, node_id: str) -> str | None:
+        """Coplanar array up/down constraint (D7) for the given node, or None
+        if the node doesn't declare one (e.g. non-coplanar arrays)."""
+        async with self._lock:
+            runtime = self._nodes.get(node_id)
+            if runtime is None:
+                return None
+            return runtime.spec.half_space
+
     async def sensors_for_node(self, node_id: str) -> list[SensorDescriptor]:
         async with self._lock:
             return [descriptor for descriptor in self._sensors.values() if descriptor.node_id == node_id]

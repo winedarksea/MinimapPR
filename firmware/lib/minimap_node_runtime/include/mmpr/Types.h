@@ -22,6 +22,7 @@ enum class PublishFailureStage : uint8_t {
 enum class NodeType {
   kPoint,
   kSirithTetra,
+  kSirithPlanar,
   kUnknown,
 };
 

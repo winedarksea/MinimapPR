@@ -122,7 +122,13 @@ def _read_node(reader: _BinaryReader, *, fallback_position_m: Vec3 | None = None
     node_id = reader.string()
     node_type_code = reader.u8()
     try:
-        node_type = (NodeType.POINT, NodeType.SIRITH_TETRA, NodeType.ARRAY, NodeType.GATEWAY)[node_type_code]
+        node_type = (
+            NodeType.POINT,        # 0
+            NodeType.SIRITH_TETRA,  # 1
+            NodeType.ARRAY,         # 2
+            NodeType.GATEWAY,       # 3
+            NodeType.SIRITH_PLANAR,  # 4 (firmware nodeTypeToBinary)
+        )[node_type_code]
     except IndexError as exc:
         raise ValueError(f"Unsupported binary node type {node_type_code}") from exc
 

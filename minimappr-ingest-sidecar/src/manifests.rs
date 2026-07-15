@@ -49,6 +49,11 @@ pub struct LocalizationManifestPayload {
     /// `LocalizedClassifierRenderRequest.localization_received_level_dbfs`.
     #[serde(default)]
     pub received_level_dbfs: Option<f32>,
+    /// True when a coplanar array's up/down half-space constraint (D7) was
+    /// active for this solve (`SrpPhatConfig::half_space != HalfSpace::None`).
+    /// `false` for tetra/unconstrained arrays and legacy payloads.
+    #[serde(default)]
+    pub half_space_applied: bool,
     pub pair_tdoas: Vec<PairTdoaDiagnostic>,
 }
 

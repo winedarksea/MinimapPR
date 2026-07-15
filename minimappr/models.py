@@ -71,6 +71,7 @@ class RetentionTier(str, Enum):
 class NodeType(str, Enum):
     POINT = "point"
     SIRITH_TETRA = "sirith_tetra"
+    SIRITH_PLANAR = "sirith_planar"
     ARRAY = "array"
     GATEWAY = "gateway"
 
@@ -223,6 +224,11 @@ class NodeSpec(BaseModel):
     capability_config: dict[str, Any] = Field(default_factory=dict)
     safety: NodeSafetyConfig = Field(default_factory=NodeSafetyConfig)
     permissions: dict[str, Any] = Field(default_factory=dict)
+    # Up/down half-space constraint for planar (coplanar) arrays, which have a
+    # mirror ambiguity about their plane. "upper"/"lower" fold mirror-symmetric
+    # solutions into the chosen half; "none" disables the constraint. Left as
+    # None here and defaulted by node_type in _validate (planar -> "upper").
+    half_space: Literal["upper", "lower", "none"] | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -258,6 +264,12 @@ class NodeSpec(BaseModel):
             raise ValueError("sensor_offsets_m cannot be empty")
         if self.position_m is None and self.position_geo is None:
             raise ValueError("Either position_m or position_geo must be provided")
+        if self.half_space is None:
+            # Planar (coplanar) arrays default to the upper half-space; every
+            # other node type defaults to no constraint.
+            self.half_space = (
+                "upper" if self.node_type == NodeType.SIRITH_PLANAR else "none"
+            )
         return self
 
 
@@ -510,6 +522,7 @@ class LocalizationResult(BaseModel):
     dominant_frequency_hz: float | None = Field(default=None, ge=0.0)
     alias_cutoff_hz: float | None = Field(default=None, ge=0.0)
     condition_number: float | None = Field(default=None, ge=0.0)
+    half_space_applied: bool = False
 
 
 class ContributorSummary(BaseModel):

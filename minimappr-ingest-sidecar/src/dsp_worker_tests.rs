@@ -1221,7 +1221,7 @@ async fn worker_publishes_omni_render_for_non_tetrahedral_channel_count() {
             .classifier_render
             .as_ref()
             .and_then(|payload| payload.fallback_reason.as_deref()),
-        Some("single_sensor_or_non_tetrahedral_array")
+        Some("non_tetrahedral_array_geometry_unusable")
     );
 
     let state = state.read().await;
@@ -1229,6 +1229,93 @@ async fn worker_publishes_omni_render_for_non_tetrahedral_channel_count() {
     assert_eq!(state.total_classification_attempts, 1);
     assert_eq!(state.total_localization_results, 0);
     assert_eq!(state.total_classifier_renders, 1);
+}
+
+#[tokio::test]
+async fn worker_dispatches_five_channel_planar_array_through_spatial_pipeline_not_omni() {
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest_store = ManifestStore::new(tmp.path());
+    manifest_store.ensure_initialized().await.unwrap();
+    let derived_cache = DerivedCache::new(
+        tmp.path(),
+        DerivedCacheConfig {
+            budget_bytes: 16_777_216,
+            admission_reserve_bytes: 0,
+        },
+    );
+    derived_cache.ensure_initialized().await.unwrap();
+
+    let state: SharedDspState = Arc::new(RwLock::new(Default::default()));
+    let event_publisher = DspEventPublisher::new(state.clone(), 32, 32, 50);
+    let mut dsp_result_rx = event_publisher.subscribe();
+    let mut worker = DspWorker::new(
+        manifest_store.clone(),
+        derived_cache,
+        DspWorkerConfig {
+            ..DspWorkerConfig::default()
+        },
+        state.clone(),
+    )
+    .with_dsp_event_publisher(event_publisher);
+
+    let r = 0.025 * std::f32::consts::FRAC_1_SQRT_2;
+    let payload = store_forward_payload_with_planar_five_channel(Some("upper"));
+    let mut manifest = raw_manifest_for_payload(
+        tmp.path(),
+        "manifest-raw-planar-five-channel",
+        "seg-planar-five-channel",
+        payload,
+    )
+    .await;
+    manifest.node_context = Some(serde_json::json!({
+        "node": {
+            "id": "sirith-planar-test",
+            "half_space": "upper",
+            "sensor_offsets_m": [
+                [r, r, 0.0],
+                [-r, r, 0.0],
+                [-r, -r, 0.0],
+                [r, -r, 0.0],
+                [0.0, 0.0, 0.0],
+            ]
+        }
+    }));
+
+    worker.process_one(manifest, 1).await;
+
+    let events = drain_published_manifests(&mut dsp_result_rx);
+    let localization_count = events
+        .iter()
+        .filter(|m| m.manifest_type == "localization_result")
+        .count();
+    let render = events
+        .iter()
+        .find(|m| m.manifest_type == "classifier_render")
+        .expect("classifier render event");
+
+    // Valid non-collinear 5-mic geometry must NOT hit the large-array omni
+    // fallback gate (dsp_worker.rs's `array_spans_at_least_2d` check) even
+    // though channel_count > 4. The synthetic pseudo-random test audio is not
+    // a coherent point source, so a low-confidence fallback is expected —
+    // what matters here is that it's *not* the geometry/channel-cap gate.
+    let fallback_reason = render
+        .classifier_render
+        .as_ref()
+        .and_then(|payload| payload.fallback_reason.as_deref());
+    assert_ne!(
+        fallback_reason,
+        Some("non_tetrahedral_array_geometry_unusable"),
+        "5-ch planar array with valid, non-collinear geometry incorrectly hit the geometry gate"
+    );
+    assert_ne!(
+        fallback_reason,
+        Some("array_exceeds_max_spatial_channels"),
+        "5-ch planar array incorrectly hit the channel-cap gate"
+    );
+    assert_eq!(localization_count, 1);
+
+    let state = state.read().await;
+    assert_eq!(state.total_localization_attempts, 1);
 }
 
 #[tokio::test]
@@ -1712,6 +1799,53 @@ fn store_forward_payload_with_channel_count(
                 "samples_per_channel": 512,
                 "samples_b64": encode_pcm16le_b64(&channels),
                 "sequence": sequence,
+                "time_quality": "gps_locked"
+            }
+        }]
+    })
+    .to_string()
+}
+
+/// 5-channel planar array payload with real (non-collinear) 25mm-radius
+/// corner+center geometry, so the dispatch gate's `array_spans_at_least_2d`
+/// check admits it into the spatial pipeline instead of the omni fallback.
+fn store_forward_payload_with_planar_five_channel(half_space: Option<&str>) -> String {
+    let sr = 16_000;
+    let samples = pseudo_random(520);
+    let channels = (0..5)
+        .map(|channel_index| samples[channel_index..channel_index + 512].to_vec())
+        .collect::<Vec<_>>();
+    let r = 0.025 * std::f32::consts::FRAC_1_SQRT_2;
+    let sensor_offsets = vec![
+        vec![r, r, 0.0],
+        vec![-r, r, 0.0],
+        vec![-r, -r, 0.0],
+        vec![r, -r, 0.0],
+        vec![0.0, 0.0, 0.0],
+    ];
+    let mut node = serde_json::json!({
+        "id": "sirith-planar-test",
+        "sensor_offsets_m": sensor_offsets,
+        "metadata": {}
+    });
+    if let Some(half_space) = half_space {
+        node["half_space"] = serde_json::Value::String(half_space.to_string());
+    }
+    serde_json::json!({
+        "node": node,
+        "buffered_frames": [{
+            "frame": {
+                "start_time_ns": 1_000_000_000u64,
+                "utc_start_ns": 1_000_000_000u64,
+                "utc_end_ns": 1_000_000_000u64 + 32_000_000,
+                "start_sample_index": 0,
+                "end_sample_index": 512,
+                "sample_rate_hz": sr,
+                "channels": 5,
+                "encoding": "pcm16le",
+                "samples_per_channel": 512,
+                "samples_b64": encode_pcm16le_b64(&channels),
+                "sequence": 1,
                 "time_quality": "gps_locked"
             }
         }]

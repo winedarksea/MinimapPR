@@ -1,0 +1,40 @@
+.program mmpr_pdm_rx
+.side_set 1
+
+; sirith_planar 5-mic PDM capture (D2/D3 in the firmware plan). Drives the
+; PDM clock (side-set, GP4) and captures 3 data lines (GP1-3, `in pins,3`)
+; on both the rising and falling half-cycle, giving the 2+2+1 mic-sharing
+; scheme two chip samples per clock period.
+;
+; Cycle budget: D2 requires an *integer* clk_sys/PDM-clock ratio to avoid
+; fractional-clkdiv edge dither. clk_sys differs between the bench overclock
+; (153.6 MHz = 50 x 3.072 MHz) and the final TCXO-derived clock
+; (122.88 MHz = 40 x 3.072 MHz), so the per-half-cycle cycle count (25 vs 20)
+; is a host-loaded runtime parameter rather than a hardcoded delay immediate
+; -- the same idiom mmpr_sirith_tdm_in (mmpr_audio_rx.pio) uses for its
+; frame-bit count: the host computes
+; Y = round(clk_sys / (2 * 3072000)) - 3 and preloads it via the TX FIFO
+; before starting the SM (see PdmPlanarSource::initPioStateMachine()).
+; clkdiv is left at 1.0 in both cases; only Y changes.
+;
+; The settle loop (mov x,y; jmp x--) exists to push the `in pins,3` sample
+; point later into the half-cycle, toward the mic's data-valid window
+; (~130-155 ns after the clock edge per HARDWARE_REVIEW.md) rather than
+; sampling immediately at the edge. This has NOT been bench-verified against
+; real PDM mic timing -- see PDM_DESIGN.md.
+;
+; Autopush at 24 bits (host sets shift-left, threshold 24): the
+; chronologically-first 3-bit group of each 24-bit word ends up in the
+; word's most-significant bits, matching the layout documented in
+; PdmCicDecimator::processRawWords().
+
+.wrap_target
+    mov x, y            side 1
+settle_high:
+    jmp x--, settle_high side 1
+    in pins, 3          side 1   ; rising-half sample (line0->ch0, line1->ch2, line2->ch4)
+    mov x, y            side 0
+settle_low:
+    jmp x--, settle_low  side 0
+    in pins, 3           side 0   ; falling-half sample (line0->ch1, line1->ch3, line2 unused)
+.wrap

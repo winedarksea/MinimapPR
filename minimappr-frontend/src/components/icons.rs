@@ -5,7 +5,7 @@
 use leptos::prelude::*;
 
 /// Renders a small array-type glyph for the given `node_type` string
-/// (`"point"`, `"sirith_tetra"`, `"array"`, `"gateway"`), falling back to the
+/// (`"point"`, `"sirith_tetra"`, `"sirith_planar"`, `"array"`, `"gateway"`), falling back to the
 /// Material `hub` icon for unknown/gateway types.
 #[component]
 pub fn ArrayTypeIcon(node_type: String, #[prop(default = 18)] size: u32) -> impl IntoView {
@@ -25,6 +25,16 @@ pub fn ArrayTypeIcon(node_type: String, #[prop(default = 18)] size: u32) -> impl
                 <circle cx="21" cy="19" r="1.6" fill="currentColor" />
                 <circle cx="3" cy="19" r="1.6" fill="currentColor" />
                 <circle cx="12" cy="14" r="1.6" fill="currentColor" />
+            </svg>
+        }.into_any(),
+        "sirith_planar" => view! {
+            <svg width=size_str.clone() height=size_str viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <rect x="5" y="5" width="14" height="14" rx="1" stroke="currentColor" stroke-width="1.4" fill="none" />
+                <circle cx="5" cy="5" r="1.6" fill="currentColor" />
+                <circle cx="19" cy="5" r="1.6" fill="currentColor" />
+                <circle cx="5" cy="19" r="1.6" fill="currentColor" />
+                <circle cx="19" cy="19" r="1.6" fill="currentColor" />
+                <circle cx="12" cy="12" r="1.6" fill="currentColor" />
             </svg>
         }.into_any(),
         "array" => view! {

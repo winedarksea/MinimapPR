@@ -288,12 +288,13 @@ pub fn extract_binary_node_json(raw_bytes: &[u8]) -> Option<serde_json::Value> {
     let position_source = reader.string().unwrap_or_default();
     let boot_count = reader.u32().unwrap_or_default();
 
-    // node_type_code: 0=point, 1=sirith_tetra, 2=array, 3=gateway
+    // node_type_code: 0=point, 1=sirith_tetra, 2=array, 3=gateway, 4=sirith_planar
     let node_type_str = match node_type_code {
         0 => "point",
         1 => "sirith_tetra",
         2 => "array",
         3 => "gateway",
+        4 => "sirith_planar",
         _ => "point",
     };
 
@@ -1158,6 +1159,51 @@ mod tests {
         push_string(payload, "fix_3d");
         push_string(payload, "gps_nmea_uart");
         payload.extend_from_slice(&7_u32.to_le_bytes());
+    }
+
+    // 5-mic PDM planar node: node_type binary code 4, 5 coplanar sensor offsets.
+    fn push_binary_planar_node_header(payload: &mut Vec<u8>) {
+        push_string(payload, "sirith-planar-1a15");
+        payload.push(4); // sirith_planar
+        payload.push(1); // has_geo_position
+        push_f32(payload, 44.987);
+        push_f32(payload, -93.258);
+        push_f32(payload, 281.5);
+        payload.push(5); // sensor_count (4 corners + center)
+        let r = 0.025_f32 * std::f32::consts::FRAC_1_SQRT_2;
+        for (x, y) in [(r, r), (-r, r), (-r, -r), (r, -r), (0.0, 0.0)] {
+            push_f32(payload, x);
+            push_f32(payload, y);
+            push_f32(payload, 0.0);
+        }
+        payload.push(2); // capability_count
+        push_string(payload, "audio");
+        push_string(payload, "array_localization");
+        push_string(payload, "sirith-planar-5pdm-rp2354a");
+        push_string(payload, "sirith-test-firmware");
+        push_string(payload, "fix_3d");
+        push_string(payload, "gps_nmea_uart");
+        payload.extend_from_slice(&7_u32.to_le_bytes());
+    }
+
+    fn binary_planar_header_only_payload() -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"MMB2");
+        payload.push(2);
+        payload.push(1); // sort_by_toa
+        payload.extend_from_slice(&1_u16.to_le_bytes());
+        push_binary_planar_node_header(&mut payload);
+        payload
+    }
+
+    #[test]
+    fn binary_node_extraction_decodes_sirith_planar_node_type() {
+        let node = extract_binary_node_json(&binary_planar_header_only_payload())
+            .expect("planar MMB2 node header should extract");
+
+        assert_eq!(node["id"], "sirith-planar-1a15");
+        assert_eq!(node["node_type"], "sirith_planar");
+        assert_eq!(node["metadata"]["hardware"], "sirith-planar-5pdm-rp2354a");
     }
 
     fn push_binary_section(payload: &mut Vec<u8>, section: &[u8]) {

@@ -102,6 +102,161 @@ pub fn alias_cutoff_from_positions_f64(positions: &[[f64; 3]], sound_speed_mps: 
     }
 }
 
+/// Smallest non-degenerate pairwise mic spacing (metres). Mirrors the Python
+/// `min_pair_spacing_m`. Where processing is per mic-pair, the closest pair sets
+/// the highest alias-free frequency (planar's 25 mm pairs → ~6.9 kHz vs the
+/// 50 mm diagonal's 3.43 kHz). Returns 0 for <2 mics / all-coincident.
+pub fn min_pair_spacing_m(positions: &[[f32; 3]]) -> f32 {
+    let mut min_spacing_m = f32::INFINITY;
+    for i in 0..positions.len() {
+        for j in (i + 1)..positions.len() {
+            let d = norm3(sub3(positions[i], positions[j]));
+            if d > 1e-6 {
+                min_spacing_m = min_spacing_m.min(d);
+            }
+        }
+    }
+    if min_spacing_m.is_infinite() {
+        0.0
+    } else {
+        min_spacing_m
+    }
+}
+
+/// Per-pair spatial-alias cutoff c / (2·min_pair_spacing). Opt-in counterpart to
+/// [`alias_cutoff_from_positions`] (which uses the widest baseline); keeps the
+/// max-baseline default for tetra unless a caller explicitly wants the narrower
+/// planar pairs. Degenerate geometry falls back to the default 50 mm baseline.
+pub fn alias_cutoff_min_pair_from_positions(positions: &[[f32; 3]], sound_speed_mps: f32) -> f32 {
+    let spacing_m = min_pair_spacing_m(positions);
+    if spacing_m < 1e-6 {
+        sound_speed_mps / (2.0 * 0.05)
+    } else {
+        sound_speed_mps / (2.0 * spacing_m)
+    }
+}
+
+/// Out-of-plane extent (metres): smallest principal-axis spread of the
+/// centroid-referenced positions. ~0 for a coplanar array (planar node),
+/// non-trivial for a 3D array (tetra). Mirrors the Python
+/// `array_out_of_plane_extent_m`.
+pub fn array_out_of_plane_extent_m(positions: &[[f32; 3]]) -> f32 {
+    let n = positions.len();
+    if n < 3 {
+        return 0.0;
+    }
+    let mut centroid = [0.0_f64; 3];
+    for p in positions {
+        centroid[0] += p[0] as f64;
+        centroid[1] += p[1] as f64;
+        centroid[2] += p[2] as f64;
+    }
+    for c in &mut centroid {
+        *c /= n as f64;
+    }
+    // Covariance matrix of the centered points; its smallest eigenvalue's sqrt
+    // is proportional to the thinnest-axis spread. Full SVD is overkill for 3x3,
+    // so use the covariance eigenvalues via a symmetric 3x3 solve.
+    let mut cov = [[0.0_f64; 3]; 3];
+    for p in positions {
+        let d = [
+            p[0] as f64 - centroid[0],
+            p[1] as f64 - centroid[1],
+            p[2] as f64 - centroid[2],
+        ];
+        for r in 0..3 {
+            for c in 0..3 {
+                cov[r][c] += d[r] * d[c];
+            }
+        }
+    }
+    let inv_n = 1.0 / n as f64;
+    for r in 0..3 {
+        for c in 0..3 {
+            cov[r][c] *= inv_n;
+        }
+    }
+    let eigs = symmetric_3x3_eigenvalues_desc(cov);
+    let min_eig = eigs[2].max(0.0);
+    (min_eig.sqrt() * (n as f64).sqrt()) as f32
+}
+
+/// True if all mics lie within `tolerance_m` of a common plane (planar node).
+pub fn is_coplanar(positions: &[[f32; 3]], tolerance_m: f32) -> bool {
+    array_out_of_plane_extent_m(positions) <= tolerance_m
+}
+
+/// True if the array spans at least two spatial dimensions (i.e. the mics are
+/// not all collinear) with the second principal-axis spread exceeding
+/// `tolerance_m`. Spatial localization (2-D DOA) needs at least this; a single
+/// sensor or a collinear line of mics cannot resolve an unambiguous bearing.
+pub fn array_spans_at_least_2d(positions: &[[f32; 3]], tolerance_m: f32) -> bool {
+    let n = positions.len();
+    if n < 3 {
+        return false;
+    }
+    let mut centroid = [0.0_f64; 3];
+    for p in positions {
+        for k in 0..3 {
+            centroid[k] += p[k] as f64;
+        }
+    }
+    for c in &mut centroid {
+        *c /= n as f64;
+    }
+    let mut cov = [[0.0_f64; 3]; 3];
+    for p in positions {
+        let d = [
+            p[0] as f64 - centroid[0],
+            p[1] as f64 - centroid[1],
+            p[2] as f64 - centroid[2],
+        ];
+        for r in 0..3 {
+            for c in 0..3 {
+                cov[r][c] += d[r] * d[c];
+            }
+        }
+    }
+    let inv_n = 1.0 / n as f64;
+    for r in 0..3 {
+        for c in 0..3 {
+            cov[r][c] *= inv_n;
+        }
+    }
+    // Second-largest eigenvalue's sqrt is the spread along the second principal
+    // axis; > tol means the array is not collinear.
+    let second = symmetric_3x3_eigenvalues_desc(cov)[1].max(0.0);
+    (second.sqrt() * (n as f64).sqrt()) > tolerance_m as f64
+}
+
+/// Eigenvalues of a symmetric 3x3 matrix (descending) via the closed-form trig
+/// method (Smith 1961). Robust enough for coplanarity / collinearity tests.
+fn symmetric_3x3_eigenvalues_desc(a: [[f64; 3]; 3]) -> [f64; 3] {
+    let p1 = a[0][1] * a[0][1] + a[0][2] * a[0][2] + a[1][2] * a[1][2];
+    let q = (a[0][0] + a[1][1] + a[2][2]) / 3.0;
+    if p1 <= 1e-30 {
+        // Diagonal matrix: eigenvalues are the diagonal entries.
+        let mut d = [a[0][0], a[1][1], a[2][2]];
+        d.sort_by(|x, y| y.partial_cmp(x).unwrap_or(std::cmp::Ordering::Equal));
+        return d;
+    }
+    let p2 = (a[0][0] - q).powi(2) + (a[1][1] - q).powi(2) + (a[2][2] - q).powi(2) + 2.0 * p1;
+    let p = (p2 / 6.0).sqrt();
+    let mut b = a;
+    for i in 0..3 {
+        b[i][i] -= q;
+    }
+    let det_b = b[0][0] * (b[1][1] * b[2][2] - b[1][2] * b[2][1])
+        - b[0][1] * (b[1][0] * b[2][2] - b[1][2] * b[2][0])
+        + b[0][2] * (b[1][0] * b[2][1] - b[1][1] * b[2][0]);
+    let r = (det_b / (2.0 * p.powi(3))).clamp(-1.0, 1.0);
+    let phi = r.acos() / 3.0;
+    let eig1 = q + 2.0 * p * phi.cos();
+    let eig3 = q + 2.0 * p * (phi + 2.0 * std::f64::consts::PI / 3.0).cos();
+    let eig2 = 3.0 * q - eig1 - eig3; // trace invariant
+    [eig1, eig2, eig3]
+}
+
 /// Near-field point-source steering delays: τ_m = |p_m − p_steer| / c with the
 /// minimum subtracted (closest sensor has delay 0). Mirrors the Python
 /// `_steering_delays_s` (core/beamforming.py).
@@ -155,6 +310,43 @@ pub fn raised_cosine_band_weight(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn planar_positions() -> [[f32; 3]; 5] {
+        let r = 0.025_f32 * std::f32::consts::FRAC_1_SQRT_2;
+        [
+            [r, r, 0.0],
+            [-r, r, 0.0],
+            [-r, -r, 0.0],
+            [r, -r, 0.0],
+            [0.0, 0.0, 0.0],
+        ]
+    }
+
+    #[test]
+    fn planar_min_pair_cutoff_raises_usable_band() {
+        let p = planar_positions();
+        // Max-baseline (50 mm diagonal) matches tetra-style ~3.43 kHz.
+        let max_baseline = alias_cutoff_from_positions(&p, 343.2);
+        assert!((max_baseline - 3432.0).abs() < 20.0, "got {max_baseline}");
+        // Min-pair (25 mm corner-to-center) roughly doubles it.
+        let min_pair = alias_cutoff_min_pair_from_positions(&p, 343.2);
+        assert!((min_pair - 6864.0).abs() < 40.0, "got {min_pair}");
+        assert!((min_pair_spacing_m(&p) - 0.025).abs() < 1e-4);
+    }
+
+    #[test]
+    fn planar_is_coplanar_tetra_is_not() {
+        assert!(is_coplanar(&planar_positions(), 1e-3));
+        let sirith = [
+            [0.0_f32, 0.050, 0.0],
+            [0.0433, 0.025, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.02165, 0.025, 0.04082],
+        ];
+        assert!(!is_coplanar(&sirith, 1e-3));
+        assert!(array_out_of_plane_extent_m(&planar_positions()) < 1e-4);
+        assert!(array_out_of_plane_extent_m(&sirith) > 1e-2);
+    }
 
     #[test]
     fn tetra_alias_cutoff_matches_python() {

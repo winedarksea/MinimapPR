@@ -191,6 +191,7 @@ class LocalizationEngine:
         sensor_node_ids: dict[str, str] | None = None,
         sensor_gain_offsets_db: dict[str, float] | None = None,
         node_position_std_m: dict[str, float] | None = None,
+        half_space: str | None = None,
     ) -> LocalizationResult:
         if len(sensor_windows) < 4:
             raise LocalizationError("Need at least 4 active sensors for 3D TDOA localization")
@@ -273,11 +274,37 @@ class LocalizationEngine:
             )
         except (ValueError, np.linalg.LinAlgError) as exc:
             raise LocalizationError(str(exc)) from exc
-        return localization_result_from_cartesian_solve(
+        if half_space in ("upper", "lower"):
+            from dataclasses import replace
+
+            from minimappr.spatial_audio.geometry import (
+                reflect_covariance_into_half_space,
+                reflect_position_into_half_space,
+            )
+
+            plane_z_m = float(
+                np.mean([sensor_positions[sensor_id][2] for sensor_id in sensor_ids])
+            )
+            reflected_position = reflect_position_into_half_space(
+                solve.position_m, plane_z_m, half_space
+            )
+            was_reflected = not np.allclose(reflected_position, solve.position_m)
+            if was_reflected:
+                solve = replace(
+                    solve,
+                    position_m=reflected_position,
+                    covariance_m2=reflect_covariance_into_half_space(
+                        solve.covariance_m2, was_reflected
+                    ),
+                )
+        result = localization_result_from_cartesian_solve(
             solve=solve,
             reference_sensor=reference_sensor,
             reference_tdoa_s=reference_tdoa_s,
         )
+        if half_space in ("upper", "lower"):
+            result = result.model_copy(update={"half_space_applied": True})
+        return result
 
     def localize_2d(
         self,

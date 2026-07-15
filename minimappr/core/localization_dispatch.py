@@ -118,6 +118,7 @@ class LocalizationDispatcher:
         sensor_weights: dict[str, float] | None = None,
         sensor_node_ids: dict[str, str] | None = None,
         sensor_gain_offsets_db: dict[str, float] | None = None,
+        half_space: str | None = None,
     ) -> LocalizationResult:
         result = self._localize_for_strategy(
             sensor_positions=sensor_positions,
@@ -128,6 +129,7 @@ class LocalizationDispatcher:
             sensor_weights=sensor_weights,
             sensor_node_ids=sensor_node_ids,
             sensor_gain_offsets_db=sensor_gain_offsets_db,
+            half_space=half_space,
         )
         return self._apply_wavelength_penalty(
             result=result,
@@ -215,6 +217,7 @@ class LocalizationDispatcher:
         sensor_weights: dict[str, float] | None = None,
         sensor_node_ids: dict[str, str] | None = None,
         sensor_gain_offsets_db: dict[str, float] | None = None,
+        half_space: str | None = None,
     ) -> LocalizationResult:
         if self._normalized_strategy() == "cascade":
             return self._localize_with_cascade(
@@ -226,6 +229,7 @@ class LocalizationDispatcher:
                 sensor_weights=sensor_weights,
                 sensor_node_ids=sensor_node_ids,
                 sensor_gain_offsets_db=sensor_gain_offsets_db,
+                half_space=half_space,
             )
         return self._localize_selected_algorithm(
             name=self.select_algorithm_name(sensor_positions),
@@ -237,6 +241,7 @@ class LocalizationDispatcher:
             sensor_weights=sensor_weights,
             sensor_node_ids=sensor_node_ids,
             sensor_gain_offsets_db=sensor_gain_offsets_db,
+            half_space=half_space,
         )
 
     def _localize_selected_algorithm(
@@ -251,6 +256,7 @@ class LocalizationDispatcher:
         sensor_weights: dict[str, float] | None = None,
         sensor_node_ids: dict[str, str] | None = None,
         sensor_gain_offsets_db: dict[str, float] | None = None,
+        half_space: str | None = None,
     ) -> LocalizationResult:
         return self._run_algorithm(
             name=name,
@@ -262,6 +268,7 @@ class LocalizationDispatcher:
             sensor_weights=sensor_weights,
             sensor_node_ids=sensor_node_ids,
             sensor_gain_offsets_db=sensor_gain_offsets_db,
+            half_space=half_space,
         )
 
     def _geometry_aware_choice(self, sensor_positions: dict[str, np.ndarray]) -> str:
@@ -287,6 +294,7 @@ class LocalizationDispatcher:
         sensor_weights: dict[str, float] | None = None,
         sensor_node_ids: dict[str, str] | None = None,
         sensor_gain_offsets_db: dict[str, float] | None = None,
+        half_space: str | None = None,
     ) -> LocalizationResult:
         result = self._localize_selected_algorithm(
             name=self.default_algorithm,
@@ -298,6 +306,7 @@ class LocalizationDispatcher:
             sensor_weights=sensor_weights,
             sensor_node_ids=sensor_node_ids,
             sensor_gain_offsets_db=sensor_gain_offsets_db,
+            half_space=half_space,
         )
         if not self._should_refine_cascade_result(result):
             return result
@@ -318,6 +327,7 @@ class LocalizationDispatcher:
                     sensor_weights=sensor_weights,
                     sensor_node_ids=sensor_node_ids,
                     sensor_gain_offsets_db=sensor_gain_offsets_db,
+                    half_space=half_space,
                 )
                 if candidate.confidence > best.confidence:
                     best = candidate
@@ -352,6 +362,7 @@ class LocalizationDispatcher:
         sensor_weights: dict[str, float] | None = None,
         sensor_node_ids: dict[str, str] | None = None,
         sensor_gain_offsets_db: dict[str, float] | None = None,
+        half_space: str | None = None,
     ) -> LocalizationResult:
         localizer = self.algorithms.get(name, self._fallback)
         attempted = name if name in self.algorithms else "gcc_phat"
@@ -368,6 +379,7 @@ class LocalizationDispatcher:
                 sensor_weights=sensor_weights,
                 sensor_node_ids=sensor_node_ids,
                 sensor_gain_offsets_db=sensor_gain_offsets_db,
+                half_space=half_space,
             )
             self._record_algorithm_provenance(
                 result,
@@ -389,6 +401,7 @@ class LocalizationDispatcher:
                 sensor_weights=sensor_weights,
                 sensor_node_ids=sensor_node_ids,
                 sensor_gain_offsets_db=sensor_gain_offsets_db,
+                half_space=half_space,
             )
             self._fallback_count += 1
             self._record_algorithm_provenance(
@@ -552,6 +565,7 @@ class LocalizationDispatcher:
         sensor_weights: dict[str, float] | None = None,
         sensor_node_ids: dict[str, str] | None = None,
         sensor_gain_offsets_db: dict[str, float] | None = None,
+        half_space: str | None = None,
     ) -> LocalizationResult:
         """Call a localizer while preserving compatibility with plugin implementations."""
         localization_kwargs: dict[str, object] = {}
@@ -582,6 +596,14 @@ class LocalizationDispatcher:
             )
         ):
             localization_kwargs["sensor_gain_offsets_db"] = sensor_gain_offsets_db
+        if (
+            half_space is not None
+            and LocalizationDispatcher._localizer_supports_parameter(
+                localizer,
+                parameter_name="half_space",
+            )
+        ):
+            localization_kwargs["half_space"] = half_space
         return localizer.localize(
             sensor_positions=sensor_positions,
             sensor_windows=sensor_windows,

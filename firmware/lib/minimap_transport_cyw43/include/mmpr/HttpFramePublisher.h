@@ -4,14 +4,15 @@
 #include <string>
 #include <vector>
 
+#include "mmpr/IUplinkTransport.h"
 #include "mmpr/Types.h"
 
 namespace mmpr {
 
-class HttpFramePublisher {
+class HttpFramePublisher : public IUplinkTransport {
  public:
   struct TransportState;
-  using BackgroundPollCallback = void (*)(void*);
+  using BackgroundPollCallback = IUplinkTransport::BackgroundPollCallback;
 
   HttpFramePublisher(const char* serverBaseUrl, const char* ingestPath, uint32_t timeoutMs);
   ~HttpFramePublisher();
@@ -45,20 +46,20 @@ class HttpFramePublisher {
       const std::vector<const EnvironmentalSample*>& environments,
       bool sortByToa,
       bool keepResponseBody,
-      PublishResult& immediateResult);
+      PublishResult& immediateResult) override;
   bool beginJsonPost(
       const std::string& jsonBody,
       bool keepResponseBody,
       PublishResult& immediateResult);
-  bool pollPublish(PublishResult& result);
-  bool publishInProgress() const;
-  void cancelPublish();
+  bool pollPublish(PublishResult& result) override;
+  bool publishInProgress() const override;
+  void cancelPublish() override;
     bool setEndpointPort(uint16_t port);
 
-  const std::string& endpointUrl() const { return endpointUrl_; }
+  const std::string& endpointUrl() const override { return endpointUrl_; }
     uint16_t endpointPort() const { return port_; }
     bool endpointValid() const { return endpointValid_; }
-  void setBackgroundPollCallback(BackgroundPollCallback callback, void* context);
+  void setBackgroundPollCallback(BackgroundPollCallback callback, void* context) override;
 
  private:
   bool parseEndpoint();

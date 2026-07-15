@@ -150,6 +150,8 @@ uint8_t nodeTypeToBinary(NodeType type) {
   switch (type) {
     case NodeType::kSirithTetra:
       return 1;
+    case NodeType::kSirithPlanar:
+      return 4;
     case NodeType::kPoint:
     case NodeType::kUnknown:
     default:
@@ -336,6 +338,8 @@ const char* nodeTypeToWire(NodeType type) {
       return "point";
     case NodeType::kSirithTetra:
       return "sirith_tetra";
+    case NodeType::kSirithPlanar:
+      return "sirith_planar";
     default:
       return "unknown";
   }

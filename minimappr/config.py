@@ -224,6 +224,7 @@ class LocalizationConfig:
     localization_subspace_freq_min_hz: float
     localization_subspace_freq_max_hz: float
     localization_refine_confidence_threshold: float
+    localization_planar_half_space: str
     beamformer_type: str
     beamformed_classification_min_sensor_count: int
     beamformed_classification_confidence_margin: float
@@ -624,6 +625,9 @@ class Settings:
     localization_subspace_freq_min_hz: float = 300.0
     localization_subspace_freq_max_hz: float = 3500.0
     localization_refine_confidence_threshold: float = 0.45
+    # Default up/down half-space constraint for coplanar (planar) arrays that
+    # don't set their own NodeSpec.half_space. "upper" | "lower" | "none".
+    localization_planar_half_space: str = "upper"
     # Estimator for the single-node tetrahedral (Rust sidecar) path:
     #   "python_cartesian"— feed the sidecar's pairwise TDOAs + bearing into the Python
     #   "rust"            — trust the sidecar's own SRP-PHAT position (legacy behavior)
@@ -1567,6 +1571,7 @@ class Settings:
             localization_music_elevation_step_deg=_env_float("MINIMAPPR_LOCALIZATION_MUSIC_EL_STEP_DEG", 8.0),
             localization_subspace_freq_min_hz=_env_float("MINIMAPPR_LOCALIZATION_SUBSPACE_FREQ_MIN_HZ", 300.0),
             localization_subspace_freq_max_hz=_env_float("MINIMAPPR_LOCALIZATION_SUBSPACE_FREQ_MAX_HZ", 3500.0),
+            localization_planar_half_space=_env_str("MINIMAPPR_LOCALIZATION_PLANAR_HALF_SPACE", "upper"),
             localization_refine_confidence_threshold=_env_float(
                 "MINIMAPPR_LOCALIZATION_REFINE_CONFIDENCE_THRESHOLD",
                 0.45,
@@ -1863,6 +1868,7 @@ class Settings:
             localization_music_elevation_step_deg=self.localization_music_elevation_step_deg,
             localization_subspace_freq_min_hz=self.localization_subspace_freq_min_hz,
             localization_subspace_freq_max_hz=self.localization_subspace_freq_max_hz,
+            localization_planar_half_space=self.localization_planar_half_space,
             localization_refine_confidence_threshold=self.localization_refine_confidence_threshold,
             localization_node_bearing_strength=self.localization_node_bearing_strength,
             localization_amplitude_ratio_strength=self.localization_amplitude_ratio_strength,

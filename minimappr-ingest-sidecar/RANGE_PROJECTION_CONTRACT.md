@@ -120,3 +120,35 @@ These two criteria operate on different representations (Jacobian conditioning v
 direction-fit residual). They are not expected to produce bit-identical
 classifications on the same input; `python_cartesian` is authoritative for the
 emitted position and mode.
+
+## Coplanar half-space constraint (D7)
+
+A coplanar array (e.g. the 5-mic Sirith Planar node) cannot resolve which side of
+its own plane a source sits on: the TDOA measurements are identical for a source and
+its mirror image reflected across the array plane. `NodeSpec.half_space`
+(`"upper"` | `"lower"` | `"none"`, default `"upper"` for planar nodes, `"none"`
+otherwise) disambiguates which side is physically valid, and both engines report
+whether the constraint was actually applied to this estimate via
+`half_space_applied`:
+
+- **Rust** (`src/srp_phat.rs`): `SrpPhatConfig::half_space` clamps the near-field
+  grid's z-bound to the array's own mean-z plane in `grid_from_bounds` before the
+  search runs (`HalfSpace::Upper`/`Lower` restrict; `HalfSpace::None`, the tetra
+  default, is a no-op). `half_space_applied` on `LocalizationManifestPayload` is set
+  whenever `half_space != HalfSpace::None` for that manifest — it reflects
+  configuration, not whether the estimate actually landed off-plane.
+- **Python** (`core/localization.py::LocalizationEngine.localize`): the
+  unconstrained Cartesian solve is free to converge on either mirror image;
+  `spatial_audio/geometry.py::reflect_position_into_half_space` mirrors the
+  solved position (and `reflect_covariance_into_half_space` the covariance's
+  xz/yz cross terms) back across the array's mean-z plane when it lands on the
+  wrong side. `LocalizationResult.half_space_applied` is `True` whenever
+  `half_space` was `"upper"`/`"lower"` for the call (regardless of whether a
+  reflection was actually needed).
+- Only the z-axis case (a horizontal array plane) is implemented in both engines.
+  A pitched or rolled planar node needs the array's rotated normal, not the raw
+  z-axis — tracked as a follow-up (plan risk #5).
+- Multi-node bearing fusion (`core/multi_node_bearing_fusion.py`) needs no
+  separate half-space logic: `BearingObservation.direction` is derived from the
+  already-corrected single-node position (`fusion_node.py`), so the elevation
+  sign is inherited automatically once the single-node solve applies D7.
