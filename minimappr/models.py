@@ -428,6 +428,7 @@ class IngestFrameResponse(BaseModel):
     duplicate: bool = False
     triggered: bool
     frame_energy: float
+    detail: str | None = None
     detection_id: str | None = None
     queued_event_id: str | None = None
     queue_depth: int | None = None

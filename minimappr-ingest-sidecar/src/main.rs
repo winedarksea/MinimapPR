@@ -12,6 +12,7 @@ mod dsp_worker;
 mod env_payload;
 mod envelope;
 mod gcc_phat;
+mod geo_restriction;
 #[allow(dead_code)]
 mod iamf_writer;
 mod ingest_backend;
@@ -424,6 +425,8 @@ struct EnqueueResponse {
     accepted: bool,
     queued: bool,
     journal_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1094,12 +1097,23 @@ async fn enqueue_request(
         .enqueue(state.max_body_bytes, endpoint, headers, body)
         .await
     {
-        Ok(journal_id) => (
+        Ok(ingest_backend::EnqueueOutcome::Queued(journal_id)) => (
             StatusCode::ACCEPTED,
             Json(EnqueueResponse {
                 accepted: true,
                 queued: true,
                 journal_id,
+                detail: None,
+            }),
+        )
+            .into_response(),
+        Ok(ingest_backend::EnqueueOutcome::Discarded) => (
+            StatusCode::ACCEPTED,
+            Json(EnqueueResponse {
+                accepted: true,
+                queued: false,
+                journal_id: String::new(),
+                detail: Some("incorrect geo"),
             }),
         )
             .into_response(),

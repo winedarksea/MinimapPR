@@ -25,6 +25,7 @@ use crate::dsp::coverage_stats;
 use crate::envelope::{
     extract_binary_first_frame_timing_json, parse_capture_envelope, CaptureEnvelope,
 };
+use crate::geo_restriction::excludes_audio_ingest;
 use crate::journal_reader::{stable_segment_path, JournalPayloadHandle};
 use crate::leases::{LeaseStore, PinLeaseRequest, PinLeaseResponse};
 use crate::manifests::{DspManifest, ManifestStore};
@@ -232,6 +233,12 @@ pub enum IngestStorageMode {
 #[derive(Clone, Debug)]
 pub struct IngestBackend {
     inner: Arc<BackendInner>,
+}
+
+#[derive(Debug)]
+pub enum EnqueueOutcome {
+    Queued(String),
+    Discarded,
 }
 
 #[derive(Debug)]
@@ -567,7 +574,7 @@ impl IngestBackend {
         endpoint: &'static str,
         headers: HeaderMap,
         body: Body,
-    ) -> BoxedResult<String> {
+    ) -> BoxedResult<EnqueueOutcome> {
         match self.inner.as_ref() {
             BackendInner::Journal(backend) => {
                 backend
@@ -747,11 +754,16 @@ impl SegmentJournalBackend {
         endpoint: &'static str,
         headers: HeaderMap,
         body: Body,
-    ) -> BoxedResult<String> {
+    ) -> BoxedResult<EnqueueOutcome> {
         let admitted = self
             .admit_enqueue_request(max_body_bytes, endpoint, headers, body)
             .await?;
-        self.enqueue_channel_only(endpoint, admitted).await
+        if excludes_audio_ingest(admitted.capture_envelope.position_geo) {
+            return Ok(EnqueueOutcome::Discarded);
+        }
+        self.enqueue_channel_only(endpoint, admitted)
+            .await
+            .map(EnqueueOutcome::Queued)
     }
 
     async fn admit_enqueue_request(
@@ -1553,6 +1565,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restricted_geo_is_discarded_before_journal_or_manifest_admission() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut payload: serde_json::Value =
+            serde_json::from_str(&store_forward_body("restricted-node", 7, 0)).unwrap();
+        payload["node"]["position_geo"] = serde_json::json!({
+            "lat": 55.7558,
+            "lon": 37.6173,
+            "alt_m": 0.0,
+        });
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let backend = IngestBackend::open(
+            tmp.path().join("store"),
+            IngestStorageMode::Journal,
+            usize::MAX as u64,
+            JournalRuntimeConfig {
+                raw_manifest_channel_capacity: 1,
+                raw_manifest_tx: Some(tx),
+                ..test_journal_runtime_config()
+            },
+        )
+        .await
+        .unwrap();
+
+        let outcome = backend
+            .enqueue(
+                usize::MAX,
+                "/api/v1/ingest/store-forward",
+                HeaderMap::new(),
+                Body::from(payload.to_string()),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, EnqueueOutcome::Discarded));
+        assert!(
+            rx.try_recv().is_err(),
+            "restricted audio must not produce a manifest"
+        );
+    }
+
+    #[tokio::test]
     async fn raw_capture_enqueue_does_not_persist_raw_manifest_file() {
         let tmp = tempfile::tempdir().unwrap();
         let payload = store_forward_body("node-a", 7, 0);
@@ -1863,7 +1916,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let journal_id = reopened
+        let outcome = reopened
             .enqueue(
                 usize::MAX,
                 "/api/v1/ingest/store-forward",
@@ -1873,6 +1926,9 @@ mod tests {
             .await
             .unwrap();
 
+        let EnqueueOutcome::Queued(journal_id) = outcome else {
+            panic!("reopened enqueue should be queued");
+        };
         assert!(journal_id.contains("-00000000000000000002-"));
     }
 

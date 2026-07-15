@@ -4,6 +4,7 @@ use sha2::{Digest, Sha256};
 #[derive(Clone, Debug)]
 pub struct CaptureEnvelope {
     pub node_id: String,
+    pub position_geo: Option<(f32, f32)>,
     pub stream_id: String,
     pub stream_key: String,
     pub sensor_type: String,
@@ -50,9 +51,17 @@ struct StoreForwardEnvelope {
 struct StoreForwardNode {
     id: String,
     #[serde(default)]
+    position_geo: Option<StoreForwardGeoPosition>,
+    #[serde(default)]
     sensor_offsets_m: Vec<[f32; 3]>,
     #[serde(default)]
     metadata: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct StoreForwardGeoPosition {
+    lat: f32,
+    lon: f32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -681,11 +690,14 @@ fn parse_binary_capture_envelope(raw_payload: &[u8]) -> Result<CaptureEnvelope, 
     let node_id = reader.string()?;
     let _node_type_code = reader.u8()?;
     let has_geo_position = reader.u8()? != 0;
-    if has_geo_position {
-        let _lat = reader.f32()?;
-        let _lon = reader.f32()?;
+    let position_geo = if has_geo_position {
+        let lat = reader.f32()?;
+        let lon = reader.f32()?;
         let _alt = reader.f32()?;
-    }
+        Some((lat, lon))
+    } else {
+        None
+    };
     let sensor_count = reader.u8()?;
     if sensor_count == 0 {
         return Err("binary node must declare at least one sensor".to_string());
@@ -728,6 +740,7 @@ fn parse_binary_capture_envelope(raw_payload: &[u8]) -> Result<CaptureEnvelope, 
     let channel_count = Some(first_frame.channels.max(u16::from(sensor_count)));
     Ok(CaptureEnvelope {
         node_id: node_id.clone(),
+        position_geo,
         stream_id: stream_id.clone(),
         stream_key: stream_key_from_parts(&node_id, &stream_id),
         sensor_type: "audio".to_string(),
@@ -977,6 +990,11 @@ fn parse_store_forward_capture_envelope(raw_payload: &[u8]) -> Result<CaptureEnv
             });
 
     let node_id = envelope.node.id.clone();
+    let position_geo = envelope
+        .node
+        .position_geo
+        .as_ref()
+        .map(|position| (position.lat, position.lon));
     let stream_id = "audio_main".to_string();
     let time_quality = first_frame.frame.time_quality.clone();
     let encoding = first_frame
@@ -997,6 +1015,7 @@ fn parse_store_forward_capture_envelope(raw_payload: &[u8]) -> Result<CaptureEnv
     let metadata = &envelope.node.metadata;
     Ok(CaptureEnvelope {
         node_id: node_id.clone(),
+        position_geo,
         stream_id: stream_id.clone(),
         stream_key: stream_key_from_parts(&node_id, &stream_id),
         sensor_type: "audio".to_string(),
@@ -1323,6 +1342,7 @@ mod tests {
         let payload = serde_json::json!({
             "node": {
                 "id": "point-node-1",
+                "position_geo": {"lat": 50.4501, "lon": 30.5234, "alt_m": 0.0},
                 "metadata": {}
             },
             "buffered_frames": [
@@ -1348,6 +1368,7 @@ mod tests {
         .expect("store-forward envelope should parse without sensor offsets");
 
         assert_eq!(parsed.node_id, "point-node-1");
+        assert_eq!(parsed.position_geo, Some((50.4501, 30.5234)));
         assert_eq!(parsed.channel_count, Some(1));
         assert_eq!(parsed.sample_count, Some(4));
     }
@@ -1422,6 +1443,7 @@ mod tests {
                 .expect("MMB2 binary envelope should parse");
 
         assert_eq!(parsed.node_id, "sirith-tetra-1a15");
+        assert_eq!(parsed.position_geo, Some((44.987, -93.258)));
         assert_eq!(parsed.sample_rate_hz, Some(16_000));
         assert_eq!(parsed.channel_count, Some(1));
         assert_eq!(parsed.sample_count, Some(2));
