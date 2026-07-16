@@ -40,7 +40,6 @@ dependencies = [
     # loosen the lower bound so Mac installs are not blocked.
     "tensorflow>=2.18,<3.0",
     "tf-keras>=2.18,<3.0",
-    "tensorflow-hub>=0.16,<1.0",
     "onnxruntime>=1.18,<2.0",
     # STT is enabled by default, so its runtime must be present in every
     # standard server install rather than only in the optional extra.
@@ -91,7 +90,10 @@ minimappr-demo = "minimappr.sim.run_demo:main"
 include = ["minimappr*"]
 
 [tool.setuptools.package-data]
-minimappr = ["frontend/*.html", "frontend/*.css", "frontend/*.js", "frontend/*.wasm", "frontend/*.ts"]
+minimappr = [
+    "frontend/*.html", "frontend/*.css", "frontend/*.js", "frontend/*.wasm", "frontend/*.ts",
+    "assets/yamnet/**",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

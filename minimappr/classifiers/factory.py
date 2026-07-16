@@ -120,8 +120,8 @@ def _build_backend(
     if backend == "yamnet":
         if YAMNetClassifier is None:
             raise RuntimeError(
-                "YAMNet classifier is required by the routing config but tensorflow/"
-                "tensorflow-hub failed to import. Install the core dependencies "
+                "YAMNet classifier is required by the routing config but its dependencies "
+                "failed to import. Install the core dependencies "
                 "(pip install minimappr) or remove 'yamnet' from the routing config."
             )
         preprocess_profile = None

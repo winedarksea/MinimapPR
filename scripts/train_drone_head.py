@@ -43,7 +43,7 @@ real-audio size trails the largest class by more than that ratio. Set to 0 to
 disable and rely purely on manual per-label counts.
 
 Requires the ``train`` extra: ``pip install -e '.[train]'`` (tf2onnx, onnx) plus
-tensorflow / tensorflow-hub / onnxruntime (core dependencies).
+tensorflow / onnxruntime (core dependencies). YAMNet is a bundled project asset.
 """
 
 from __future__ import annotations

@@ -18,7 +18,7 @@ from functools import lru_cache
 # name -> required importable module specs. Empty tuple = always available.
 _BACKEND_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     "heuristic": (),
-    "yamnet": ("tensorflow", "tensorflow_hub"),
+    "yamnet": ("tensorflow",),
     "birdnet": ("birdnet",),
     "moonshine_stt": ("huggingface_hub", "transformers", "onnxruntime"),
     "drone_head": ("onnxruntime",),

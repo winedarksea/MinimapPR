@@ -7,8 +7,6 @@ import hashlib
 import io
 import json
 import logging
-import urllib.request
-from pathlib import Path
 
 import numpy as np
 from scipy.signal import resample_poly
@@ -19,13 +17,14 @@ from minimappr.audio_processing.levels import apply_bounded_rms_gain, apply_leve
 from minimappr.audio_processing.profiles import (
     AudioProcessingProfile,
 )
+from minimappr.classifiers.yamnet_model import (
+    load_bundled_yamnet_model,
+    yamnet_model_asset_directory,
+)
 
 
 logger = logging.getLogger(__name__)
 
-# Local fallback path for the class map so the server starts offline after the
-# first successful fetch.  Relative to CWD (the project root when run normally).
-_CLASS_MAP_CACHE_PATH = Path("data/yamnet_class_map.csv")
 _YAMNET_TARGET_RMS = 0.10
 _YAMNET_MAX_INPUT_GAIN = 32.0
 _EPSILON = 1e-12
@@ -97,11 +96,6 @@ prepare_waveform_for_yamnet = _prepare_waveform_for_yamnet
 
 
 class YAMNetClassifier(AudioClassifier):
-    CLASS_MAP_URL = (
-        "https://raw.githubusercontent.com/tensorflow/models/master/"
-        "research/audioset/yamnet/yamnet_class_map.csv"
-    )
-
     def __init__(
         self,
         min_confidence: float = 0.25,
@@ -113,13 +107,11 @@ class YAMNetClassifier(AudioClassifier):
     ) -> None:
         try:
             import tensorflow as tf
-            import tensorflow_hub as hub
         except Exception as exc:  # pragma: no cover - optional dependency
-            raise RuntimeError("YAMNet backend requires tensorflow and tensorflow-hub") from exc
+            raise RuntimeError("YAMNet backend requires tensorflow") from exc
 
         self._tf = tf
-        self._hub = hub
-        self._model = hub.load("https://tfhub.dev/google/yamnet/1")
+        self._model = load_bundled_yamnet_model()
         self._class_names = self._load_class_names()
         self._min_confidence = min_confidence
         self._target_rms = float(target_rms)
@@ -177,34 +169,19 @@ class YAMNetClassifier(AudioClassifier):
         return f"class_{index}"
 
     def _load_class_names(self) -> list[str]:
-        # 1. Try the local disk cache written by a previous successful fetch.
-        if _CLASS_MAP_CACHE_PATH.exists():
-            try:
-                text = _CLASS_MAP_CACHE_PATH.read_text(encoding="utf-8")
-                names = _parse_class_map_csv(text)
-                if names:
-                    return names
-            except Exception:
-                pass  # Fall through to network fetch.
-
-        # 2. Fetch from upstream and persist to disk for future offline starts.
         try:
-            with urllib.request.urlopen(self.CLASS_MAP_URL, timeout=10) as response:  # nosec B310
-                text = response.read().decode("utf-8")
+            class_map_path = yamnet_model_asset_directory() / "assets" / "yamnet_class_map.csv"
+            text = class_map_path.read_text(encoding="utf-8")
             names = _parse_class_map_csv(text)
-            if names:
-                try:
-                    _CLASS_MAP_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-                    _CLASS_MAP_CACHE_PATH.write_text(text, encoding="utf-8")
-                except Exception:
-                    pass  # Cache write failure is non-fatal.
+            if not names:
+                raise ValueError("class map contains no display names")
             return names
         except Exception as exc:
             logger.warning(
-                "YAMNet class map unavailable (network: %s; cache: %s). "
+                "Bundled YAMNet class map unavailable (%s; path: %s). "
                 "Class names will fall back to 'class_N' indices.",
                 exc,
-                _CLASS_MAP_CACHE_PATH,
+                yamnet_model_asset_directory() / "assets" / "yamnet_class_map.csv",
             )
             return []
 

@@ -61,7 +61,6 @@ def test_extract_embedding_graceful_without_tf(monkeypatch, tmp_path: Path, _wav
 
 def test_extract_embedding_real_yamnet(tmp_path: Path, _wav: Path) -> None:
     pytest.importorskip("tensorflow")
-    pytest.importorskip("tensorflow_hub")
     from minimappr.classifiers.yamnet import YAMNetClassifier
 
     try:

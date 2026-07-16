@@ -21,11 +21,9 @@ pyyaml>=6.0,<7.0
 #   Required pinned versions for this machine:
 #     tensorflow==2.18.1
 #     tensorflow-metal==1.2.0  (install separately: pip install tensorflow-metal==1.2.0)
-#     tf-keras==2.18.0         (must match TF; required by tensorflow-hub internals)
-#     setuptools<81            (newer setuptools drops pkg_resources used by tensorflow-hub)
+#     tf-keras==2.18.0         (must match TensorFlow)
 tensorflow==2.18.*
 tf-keras==2.18.*
-tensorflow-hub>=0.16,<1.0
 birdnet>=0.2.12,<1.0
 
 # PTZ camera effector (optional — lazily imported, only required once an

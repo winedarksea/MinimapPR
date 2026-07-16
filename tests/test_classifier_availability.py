@@ -39,7 +39,7 @@ def test_backend_available_reflects_installed_modules(monkeypatch: pytest.Monkey
         availability.importlib.util,
         "find_spec",
         _fake_find_spec(
-            {"birdnet", "tensorflow", "tensorflow_hub", "onnxruntime", "huggingface_hub", "transformers"}
+            {"birdnet", "tensorflow", "onnxruntime", "huggingface_hub", "transformers"}
         ),
     )
     availability.probe_backends.cache_clear()
@@ -50,14 +50,14 @@ def test_backend_available_reflects_installed_modules(monkeypatch: pytest.Monkey
     assert availability.backend_available("nonexistent") is False
 
 
-def test_partial_yamnet_install_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_yamnet_without_tensorflow_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        availability.importlib.util, "find_spec", _fake_find_spec({"tensorflow"})
+        availability.importlib.util, "find_spec", _fake_find_spec(set())
     )
     availability.probe_backends.cache_clear()
     assert availability.backend_available("yamnet") is False
     reasons = {e.name: e.reason for e in availability.probe_backends()}
-    assert "tensorflow_hub" in reasons["yamnet"]
+    assert "tensorflow" in reasons["yamnet"]
 
 
 # Ensure the module is importable stdlib-only (no numpy/tensorflow import cycle).
