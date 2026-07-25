@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import numpy as np
 import pytest
 
@@ -568,3 +570,129 @@ async def test_multi_sensor_buffer_snapshot_state_shape() -> None:
     by_id = {row["sensor_id"]: row for row in snapshot_missing}
     assert by_id["s"]["present"] is True
     assert by_id["ghost"]["present"] is False
+
+
+def _assert_state_self_consistent(state, sample_rate_hz: int, frame_samples: int) -> None:
+    """Any observable buffer state must pair its samples with the matching
+    start index and start time — a stale start index against pruned samples
+    (the pre-fix torn read) shifts the window by the pruned sample count."""
+    assert state.coverage.size == state.samples.size
+    if state.start_time_ns is None:
+        assert state.samples.size == 0
+        return
+    expected_start_ns = state.timeline_origin_ns + SensorStreamBuffer._round_divide(
+        (state.buffer_start_sample_index - state.timeline_origin_sample_index) * 1_000_000_000,
+        sample_rate_hz,
+    )
+    assert state.start_time_ns == expected_start_ns
+    # Frame i is filled with the constant value i+1, so the content at any
+    # global sample index g must equal g // frame_samples + 1.
+    first_value = float(state.buffer_start_sample_index // frame_samples + 1)
+    last_index = state.buffer_start_sample_index + state.samples.size - 1
+    last_value = float(last_index // frame_samples + 1)
+    assert state.samples[0] == first_value
+    assert state.samples[-1] == last_value
+
+
+def test_sensor_stream_buffer_publishes_state_atomically_across_prune(monkeypatch) -> None:
+    """A reader landing at any point inside append() — including mid-merge and
+    mid-prune — must observe either the complete previous state or the complete
+    new state, never new samples paired with a stale start index."""
+    sample_rate_hz = 16_000
+    frame_samples = 1024
+    frame_duration_ns = int(round(frame_samples * 1_000_000_000 / sample_rate_hz))
+    capacity_frames = 4
+    buf = SensorStreamBuffer(
+        sample_rate_hz=sample_rate_hz,
+        max_duration_seconds=capacity_frames * frame_samples / sample_rate_hz,
+    )
+    origin = 1_000_000_000_000_000_000
+
+    mid_append_states = []
+    original_pruned = SensorStreamBuffer._pruned
+
+    def observing_pruned(self, state, protected_from_ns=None):
+        # Simulates a concurrent reader capturing the published state at the
+        # deepest point inside append(), after the merge has been computed but
+        # before the new state is published.
+        mid_append_states.append(self._state)
+        return original_pruned(self, state, protected_from_ns)
+
+    monkeypatch.setattr(SensorStreamBuffer, "_pruned", observing_pruned)
+
+    n_frames = 12
+    for i in range(n_frames):
+        pre_state = buf._state
+        buf.append(
+            start_time_ns=origin + i * frame_duration_ns,
+            samples=np.full(frame_samples, float(i + 1), dtype=np.float32),
+        )
+        assert mid_append_states[-1] is pre_state
+        _assert_state_self_consistent(buf._state, sample_rate_hz, frame_samples)
+
+    for observed in mid_append_states:
+        _assert_state_self_consistent(observed, sample_rate_hz, frame_samples)
+
+    assert buf.samples.size == capacity_frames * frame_samples
+    assert buf._buffer_start_sample_index == (n_frames - capacity_frames) * frame_samples
+
+
+@pytest.mark.asyncio
+async def test_multi_sensor_buffer_concurrent_reads_are_not_torn() -> None:
+    """Interleave threaded appends (with constant pruning) and event-loop reads;
+    every returned window's content must match the timing metadata returned by
+    the same call — a torn read offsets the content by the pruned count."""
+    sample_rate_hz = 16_000
+    frame_samples = 1024
+    frame_duration_ns = int(round(frame_samples * 1_000_000_000 / sample_rate_hz))
+    buffer = MultiSensorBuffer(max_duration_seconds=2 * frame_samples / sample_rate_hz)
+    origin = 1_000_000_000_000_000_000
+    n_frames = 40
+    done = False
+
+    def time_to_index(time_ns: int) -> int:
+        return SensorStreamBuffer._round_divide((time_ns - origin) * sample_rate_hz, 1_000_000_000)
+
+    async def check_recent_window() -> bool:
+        recent = await buffer.get_recent_window_for_sensors(
+            sensor_ids=["s"],
+            window_seconds=frame_samples / sample_rate_hz,
+        )
+        if recent is None:
+            return False
+        windows, rate, latest_end_ns = recent
+        assert rate == sample_rate_hz
+        window = windows["s"]
+        end_idx = time_to_index(latest_end_ns)
+        # Sample values equal their global sample index, so a consistent
+        # window is exactly the consecutive run of indices ending at end_idx.
+        expected = np.arange(end_idx - window.size, end_idx, dtype=np.float32)
+        assert np.array_equal(window, expected)
+        snapshot = await buffer.snapshot_state(["s"])
+        row = snapshot[0]
+        if row["present"] and row["sample_count"]:
+            start_idx = time_to_index(row["start_time_ns"])
+            assert time_to_index(row["end_time_ns"]) - start_idx == row["sample_count"]
+        return True
+
+    async def writer() -> None:
+        nonlocal done
+        try:
+            for i in range(n_frames):
+                frame = np.arange(i * frame_samples, (i + 1) * frame_samples, dtype=np.float32)
+                await buffer.append(
+                    sensor_id="s",
+                    sample_rate_hz=sample_rate_hz,
+                    start_time_ns=origin + i * frame_duration_ns,
+                    samples=frame,
+                )
+        finally:
+            done = True
+
+    async def reader() -> None:
+        while not done:
+            await check_recent_window()
+            await asyncio.sleep(0)
+
+    await asyncio.gather(writer(), reader())
+    assert await check_recent_window()
