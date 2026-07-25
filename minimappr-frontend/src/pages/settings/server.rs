@@ -213,8 +213,6 @@ struct PipelineMetrics {
     #[serde(default)]
     localization_failures: u64,
     #[serde(default)]
-    classification_reuse_hits: u64,
-    #[serde(default)]
     birdnet_chunk_dispatches_suppressed: u64,
     #[serde(default)]
     detections_emitted: u64,

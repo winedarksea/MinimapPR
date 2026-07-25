@@ -51,6 +51,10 @@ class ReportingFusionPolicy:
         self._taxonomy_provider = taxonomy_provider
 
     def _canonical_label(self, label: str) -> str:
+        # Only the site-wide lookup canonicalizes, which resolves an incoming alias
+        # against a stored canonical row. The reverse (a row persisted under an
+        # alias) is still missed, because rows persist the raw label; closing that
+        # gap requires canonicalizing at persist time.
         resolver = getattr(self._taxonomy_provider, "canonical_label", None)
         if callable(resolver):
             return str(resolver(label))
