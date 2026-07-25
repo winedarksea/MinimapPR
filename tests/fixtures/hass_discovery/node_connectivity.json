@@ -1,0 +1,23 @@
+{
+  "availability_topic": "minimappr/status",
+  "device": {
+    "identifiers": [
+      "minimappr_minimappr"
+    ],
+    "manufacturer": "MinimapPR",
+    "model": "Acoustic Localization COP",
+    "name": "MinimapPR",
+    "sw_version": "test"
+  },
+  "device_class": "connectivity",
+  "entity_category": "diagnostic",
+  "json_attributes_topic": "minimappr/node/node_a/attributes",
+  "name": "Node node-a",
+  "object_id": "minimappr_node_online_node_a",
+  "payload_available": "online",
+  "payload_not_available": "offline",
+  "payload_off": "OFF",
+  "payload_on": "ON",
+  "state_topic": "minimappr/node/node_a/connectivity",
+  "unique_id": "minimappr_minimappr_node_online_node_a"
+}

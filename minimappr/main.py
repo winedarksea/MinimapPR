@@ -15,7 +15,7 @@ import uuid
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Awaitable, Callable, Literal
 import urllib.error
 import urllib.request
 
@@ -74,6 +74,7 @@ from minimappr.runtime_bootstrap import (
     _build_combined_runtime_federation,
     _build_common_live_runtime_services,
     _build_effector_manager,
+    _build_hass_bridge,
     _initialize_storage_and_resolve_site_origin,
     _start_api_only_runtime_services,
     _stop_api_only_runtime_services,
@@ -83,6 +84,8 @@ from minimappr.runtime_bootstrap import (
     _stop_combined_runtime_background_tasks,
     _wire_effector_zone_interlocks,
     _wire_effector_rules_handler,
+    _wire_hass_live_event_tee,
+    _wire_hass_rules_handler,
 )
 from minimappr.core.capture_session import (
     CaptureSessionManager,
@@ -111,6 +114,14 @@ from minimappr.core.effectors.registry import EffectorManager
 from minimappr.core.node_registry import NodeRegistry
 from minimappr.core.environment import LiveEnvironmentProvider
 from minimappr.core.federation import FederationCoordinator
+from minimappr.core.hass.state_mapper import (
+    HassStateSnapshot,
+    NodeStateInput,
+    SystemStateInput,
+    ZoneStateInput,
+)
+from minimappr.core.hass.topics import is_valid_topic_level
+from minimappr.core.hass.track_slots import TrackSlotCandidate
 from minimappr.core.fusion_node import FusionNode
 from minimappr.core.geo_restriction import excludes_audio_ingest
 from minimappr.core.geo import LocalCoordinateFrame
@@ -146,6 +157,7 @@ from minimappr.models import (
     FederationAck,
     FederationHeartbeat,
     FederationStatusResponse,
+    HassBridgeStatusResponse,
     FederationTrackSnapshot,
     FusionStatusResponse,
     MapOverlayKind,
@@ -452,6 +464,7 @@ def _clear_bound_runtime_state(state) -> None:
         "site_origin_resolution_source",
         "site_origin_contributing_node_ids",
         "effector_manager",
+        "hass_bridge",
     )
 
 
@@ -475,6 +488,18 @@ def _bind_runtime_state(state, *, resolved_site_origin=None, **state_fields) -> 
         setattr(state, name, value)
     if resolved_site_origin is not None:
         _apply_site_origin_resolution(state, resolved_site_origin)
+
+
+def _request_hass_reconcile(state) -> None:
+    """Nudge the HA bridge after zone/node CRUD so entities appear/vanish now.
+
+    Synchronous by design: these are request handlers, and the bridge only sets a
+    flag its publisher picks up next cycle. The periodic reconcile is the safety
+    net if a call site is ever missed.
+    """
+    bridge = getattr(state, "hass_bridge", None)
+    if bridge is not None:
+        bridge.request_reconcile()
 
 
 def _warn_when_direct_ingest_falls_back(settings: Settings, sidecar_state: _SidecarState) -> None:
@@ -1406,6 +1431,13 @@ async def lifespan(app: FastAPI):
     if settings.effectors_enabled:
         _wire_effector_rules_handler(combined_runtime_core_services.fusion_node, effector_manager)
 
+    hass_bridge = _build_hass_bridge(settings, live_hub=common_live_runtime_services.live_hub)
+    unsubscribe_hass_tee = _wire_hass_live_event_tee(
+        common_live_runtime_services.live_hub, hass_bridge
+    )
+    if settings.hass_enabled:
+        _wire_hass_rules_handler(combined_runtime_core_services.fusion_node, hass_bridge)
+
     _python_ingest = settings.ingest_backend == "python"
     capture_manager = _build_capture_manager(
         settings,
@@ -1448,7 +1480,11 @@ async def lifespan(app: FastAPI):
             lease_timeout_seconds=settings.ingest_request_timeout_seconds,
         ),
         effector_manager=effector_manager,
+        hass_bridge=hass_bridge,
     )
+    # Late-bound, mirroring set_target_zone_resolver: the provider closes over
+    # runtime state (tracker, zone_matcher, storage) that only exists post-bind.
+    hass_bridge.set_state_snapshot_provider(_build_hass_state_snapshot_provider(app.state))
 
     ingest_stream_consumer_enabled = await _ensure_ingest_stream_consumer_running(app.state)
 
@@ -1472,6 +1508,10 @@ async def lifespan(app: FastAPI):
         )
         if settings.effectors_enabled:
             await effector_manager.start()
+        if settings.hass_enabled:
+            # Only outside the api-only role: two processes publishing the same
+            # retained topics would fight over every entity's state.
+            await hass_bridge.start()
 
         yield
     finally:
@@ -1494,6 +1534,8 @@ async def lifespan(app: FastAPI):
             shutdown_timeout_seconds=shutdown_timeout_s,
         )
 
+        unsubscribe_hass_tee()
+        await hass_bridge.stop()
         await effector_manager.stop()
         await _stop_combined_runtime_background_tasks(
             app,
@@ -2363,6 +2405,7 @@ async def register_node(payload: NodeRegistrationRequest, request: Request) -> d
         if node_row is not None:
             await manager.register_node(node_row)
     await _broadcast_node_updated(state, spec.id)
+    _request_hass_reconcile(state)
     node = await _enriched_node_detail(state, spec.id)
     if node is None:
         raise HTTPException(status_code=500, detail="Node registration did not persist")
@@ -2643,6 +2686,7 @@ async def delete_node(node_id: str, request: Request) -> dict:
     purge = getattr(consumer, "purge_node", None)
     if callable(purge):
         purge(node_id)
+    _request_hass_reconcile(state)
 
     return {"ok": True, "node_id": node_id}
 
@@ -2928,12 +2972,42 @@ async def get_config(request: Request) -> dict:
             "deconflict_mahalanobis_gate": settings.federation_deconflict_mahalanobis_gate,
             "tqi_hysteresis": settings.federation_tqi_hysteresis,
         },
+        # Reads stay nested (matching the `federation` block above) while writes
+        # are flat `hass_*` keys — so adding fields here changes nothing about
+        # flat-key group coverage in /api/v1/config/structured.
         "hass": {
             "enabled": settings.hass_enabled,
             "base_url": settings.hass_base_url,
-            "token": "***" if settings.hass_token else "",
+            "token": _REDACTED_SECRET_PLACEHOLDER if settings.hass_token else "",
             "mqtt_host": settings.hass_mqtt_host,
             "mqtt_port": settings.hass_mqtt_port,
+            "mqtt_username": settings.hass_mqtt_username,
+            "mqtt_password": _REDACTED_SECRET_PLACEHOLDER if settings.hass_mqtt_password else "",
+            "mqtt_client_id": settings.hass_mqtt_client_id,
+            "mqtt_keepalive_seconds": settings.hass_mqtt_keepalive_seconds,
+            "mqtt_tls_enabled": settings.hass_mqtt_tls_enabled,
+            "mqtt_tls_insecure": settings.hass_mqtt_tls_insecure,
+            "discovery_prefix": settings.hass_discovery_prefix,
+            "base_topic": settings.hass_base_topic,
+            "device_id": settings.hass_device_id,
+            "device_name": settings.hass_device_name,
+            "publish_interval_seconds": settings.hass_publish_interval_seconds,
+            "publish_min_interval_seconds": settings.hass_publish_min_interval_seconds,
+            "reconcile_interval_seconds": settings.hass_reconcile_interval_seconds,
+            "queue_size": settings.hass_queue_size,
+            "reconnect_backoff_initial_seconds": settings.hass_reconnect_backoff_initial_seconds,
+            "reconnect_backoff_max_seconds": settings.hass_reconnect_backoff_max_seconds,
+            "detection_off_delay_seconds": settings.hass_detection_off_delay_seconds,
+            "detection_classes": list(settings.hass_detection_classes),
+            "track_slot_count": settings.hass_track_slot_count,
+            "zone_spl_window_seconds": settings.hass_zone_spl_window_seconds,
+            "publish_zone_occupancy": settings.hass_publish_zone_occupancy,
+            "publish_zone_spl": settings.hass_publish_zone_spl,
+            "publish_detection_classes": settings.hass_publish_detection_classes,
+            "publish_node_status": settings.hass_publish_node_status,
+            "publish_system_health": settings.hass_publish_system_health,
+            "publish_events": settings.hass_publish_events,
+            "publish_track_slots": settings.hass_publish_track_slots,
         },
     }
 
@@ -2986,6 +3060,12 @@ _BEAMFORMER_TYPES = {
 _CLASSIFICATION_AUDIO_SOURCES = {"beamformed", "omni", "nearest_node_omni"}
 _TRACKING_FILTERS = {"linear", "kalman"}
 _COORDINATE_MODES = {"flat", "geodetic"}
+
+# Secrets are redacted to this placeholder in GET /api/v1/config. A PATCH
+# carrying it back means "unchanged", never "set the secret to '***'".
+_REDACTED_SECRET_PLACEHOLDER = "***"
+_SECRET_CONFIG_KEYS = {"hass_token", "hass_mqtt_password"}
+_HASS_TOPIC_LEVEL_KEYS = {"hass_discovery_prefix", "hass_base_topic", "hass_device_id"}
 
 
 def _rules_config_payload_from_file(config_path: Path) -> tuple[list[dict[str, Any]], str]:
@@ -3123,6 +3203,11 @@ async def patch_config(request: Request) -> dict:
 
     for key, raw in body.items():
         target_type = _CONFIG_PATCH_ALLOWLIST[key]
+        if key in _SECRET_CONFIG_KEYS and str(raw) == _REDACTED_SECRET_PLACEHOLDER:
+            # GET redacts secrets to "***"; a UI that round-trips the whole block
+            # would otherwise overwrite the real secret with the redaction.
+            # Treat the placeholder as "unchanged" rather than as a new value.
+            continue
         try:
             if target_type is bool:
                 if not isinstance(raw, bool):
@@ -3236,6 +3321,29 @@ async def patch_config(request: Request) -> dict:
                 value = v
         elif key == "hass_mqtt_port" and (value < 1 or value > 65535):  # type: ignore[operator]
             errors.append("hass_mqtt_port: must be in [1, 65535]")
+        elif key == "hass_mqtt_keepalive_seconds" and value < 1:  # type: ignore[operator]
+            errors.append("hass_mqtt_keepalive_seconds: must be >= 1")
+        elif key == "hass_publish_interval_seconds" and value < 1.0:  # type: ignore[operator]
+            # Each cycle recomputes zone occupancy (O(zones x tracks) point-in-polygon).
+            errors.append("hass_publish_interval_seconds: must be >= 1.0")
+        elif key == "hass_publish_min_interval_seconds" and value < 0.0:  # type: ignore[operator]
+            errors.append("hass_publish_min_interval_seconds: must be >= 0")
+        elif key == "hass_reconcile_interval_seconds" and value <= 0.0:  # type: ignore[operator]
+            errors.append("hass_reconcile_interval_seconds: must be > 0")
+        elif key == "hass_queue_size" and value < 1:  # type: ignore[operator]
+            errors.append("hass_queue_size: must be >= 1")
+        elif key == "hass_reconnect_backoff_initial_seconds" and value <= 0.0:  # type: ignore[operator]
+            errors.append("hass_reconnect_backoff_initial_seconds: must be > 0")
+        elif key == "hass_reconnect_backoff_max_seconds" and value <= 0.0:  # type: ignore[operator]
+            errors.append("hass_reconnect_backoff_max_seconds: must be > 0")
+        elif key == "hass_detection_off_delay_seconds" and value < 1:  # type: ignore[operator]
+            errors.append("hass_detection_off_delay_seconds: must be >= 1")
+        elif key == "hass_track_slot_count" and (value < 0 or value > 64):  # type: ignore[operator]
+            errors.append("hass_track_slot_count: must be in [0, 64]")
+        elif key == "hass_zone_spl_window_seconds" and value <= 0.0:  # type: ignore[operator]
+            errors.append("hass_zone_spl_window_seconds: must be > 0")
+        elif key in _HASS_TOPIC_LEVEL_KEYS and not is_valid_topic_level(str(value)):
+            errors.append(f"{key}: must be a single non-empty topic level (no +, #, or /)")
 
         if not errors or key not in {e.split(":")[0] for e in errors}:
             coerced[key] = value
@@ -3246,6 +3354,24 @@ async def patch_config(request: Request) -> dict:
     band_max = coerced.get("localization_band_max_hz", settings.localization_band_max_hz)
     if float(band_max) > 0.0 and float(band_max) <= float(band_min):
         errors.append("localization_band_max_hz: must be > localization_band_min_hz when enabled")
+
+    backoff_initial = float(
+        coerced.get(
+            "hass_reconnect_backoff_initial_seconds",
+            settings.hass_reconnect_backoff_initial_seconds,
+        )
+    )
+    backoff_max = float(
+        coerced.get("hass_reconnect_backoff_max_seconds", settings.hass_reconnect_backoff_max_seconds)
+    )
+    if backoff_max < backoff_initial:
+        errors.append(
+            "hass_reconnect_backoff_max_seconds: must be >= hass_reconnect_backoff_initial_seconds"
+        )
+    hass_enabled = bool(coerced.get("hass_enabled", settings.hass_enabled))
+    hass_host = str(coerced.get("hass_mqtt_host", settings.hass_mqtt_host)).strip()
+    if hass_enabled and not hass_host:
+        errors.append("hass_enabled: requires a non-empty hass_mqtt_host")
 
     if errors:
         raise HTTPException(status_code=422, detail=errors)
@@ -3895,6 +4021,66 @@ async def federation_status(request: Request) -> dict:
     return await state.federation.status()
 
 
+@app.get("/api/v1/integrations/hass/status", response_model=HassBridgeStatusResponse)
+async def hass_status(request: Request) -> dict:
+    """Live bridge state. 200 with ``connection_state="disabled"`` when absent —
+    the Settings page needs something to render in every deployment shape,
+    including the api-only role where no bridge is built."""
+    state = _require_state(request)
+    bridge = getattr(state, "hass_bridge", None)
+    if bridge is None:
+        from minimappr.core.hass.aiomqtt_transport import aiomqtt_available
+
+        settings: Settings = state.settings
+        return {
+            "enabled": False,
+            "connection_state": "disabled",
+            "transport": None,
+            "transport_available": aiomqtt_available(),
+            "mqtt_host": settings.hass_mqtt_host,
+            "mqtt_port": settings.hass_mqtt_port,
+            "mqtt_tls_enabled": settings.hass_mqtt_tls_enabled,
+            "discovery_prefix": settings.hass_discovery_prefix,
+            "base_topic": settings.hass_base_topic,
+            "device_id": settings.hass_device_id,
+        }
+    return bridge.status()
+
+
+def _require_hass_bridge(state):
+    """503 rather than a silent success: an operator clicking "purge" needs to
+    know nothing happened."""
+    bridge = getattr(state, "hass_bridge", None)
+    if bridge is None or not bridge.enabled:
+        raise HTTPException(status_code=503, detail="The Home Assistant bridge is not enabled")
+    return bridge
+
+
+@app.post("/api/v1/integrations/hass/republish-discovery")
+async def hass_republish_discovery(request: Request) -> dict:
+    """Force a full reconcile + snapshot next cycle.
+
+    Recovery path after purging retained messages on the broker by hand: the
+    ledger would otherwise consider every entity already-published and skip it.
+    """
+    bridge = _require_hass_bridge(_require_state(request))
+    bridge.forget_published_state()
+    bridge.request_reconcile()
+    return {"ok": True, "connection_state": bridge.connection_state}
+
+
+@app.post("/api/v1/integrations/hass/purge-discovery")
+async def hass_purge_discovery(request: Request) -> dict:
+    """Blank every retained topic we published and clear the ledger.
+
+    Run this before uninstalling, or HA keeps the entities forever as
+    permanently-unavailable rows in its registry.
+    """
+    bridge = _require_hass_bridge(_require_state(request))
+    queued = await bridge.purge_discovery()
+    return {"ok": True, "queued_removals": queued}
+
+
 @app.post("/api/v1/federation/heartbeat", response_model=FederationAck)
 async def federation_heartbeat(payload: FederationHeartbeat, request: Request) -> FederationAck:
     state = _require_state(request)
@@ -4251,6 +4437,7 @@ async def upsert_zone(zone_id: str, payload: ZoneSpec, request: Request) -> dict
         properties=payload.properties,
         created_ns=time.time_ns(),
     )
+    _request_hass_reconcile(state)
     return {"ok": True, "zone_id": zone_id}
 
 
@@ -4260,6 +4447,7 @@ async def delete_zone(zone_id: str, request: Request) -> dict:
     deleted = await state.storage.delete_zone(zone_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Zone not found")
+    _request_hass_reconcile(state)
     return {"ok": True, "zone_id": zone_id}
 
 
@@ -4722,6 +4910,107 @@ async def delete_cluster(request: Request, cluster_id: str) -> None:
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Cluster '{cluster_id}' not found")
     await state.cluster_registry.update_node_memberships(state.registry)
+
+
+def _build_hass_state_snapshot_provider(state) -> Callable[[], Awaitable[HassStateSnapshot]]:
+    """Poll-side state gathering for the HA bridge.
+
+    Zone occupancy, node health, and track counts are never broadcast over the
+    live hub, so they cannot be tee'd — they have to be pulled. This is the cost
+    driver of the publish interval (``compute_occupancy`` is O(zones x tracks)
+    with a point-in-polygon test per pair), which is why the interval has a
+    validated 1.0 s floor.
+    """
+
+    async def provider() -> HassStateSnapshot:
+        now_ns = time.time_ns()
+        tracks = await state.tracker.snapshot(now_ns=now_ns)
+        for track in tracks:
+            if track.position_geo is None:
+                track.position_geo = state.coordinate_frame.local_to_geo(track.position_m)
+        occupancy = await state.zone_matcher.compute_occupancy(
+            tracks=tracks,
+            coordinate_frame=state.coordinate_frame,
+            now_ns=now_ns,
+        )
+        node_rows = await state.storage.list_nodes(limit=5000)
+        await _apply_runtime_health_statuses(
+            node_rows,
+            bit_evaluator=state.bit_evaluator,
+            now_ns=now_ns,
+            degraded_after_seconds=state.settings.node_degraded_after_seconds,
+            offline_after_seconds=state.settings.node_offline_after_seconds,
+        )
+        counts = {"online_nodes": 0, "degraded_nodes": 0, "offline_nodes": 0}
+        nodes: list[NodeStateInput] = []
+        for row in node_rows:
+            health = str(row.get("health_status") or "")
+            if health == NodeHealthStatus.ONLINE.value:
+                counts["online_nodes"] += 1
+            elif health == NodeHealthStatus.OFFLINE.value:
+                counts["offline_nodes"] += 1
+            else:
+                counts["degraded_nodes"] += 1
+            nodes.append(
+                NodeStateInput(
+                    node_id=str(row["id"]),
+                    node_name=str(row.get("name") or row["id"]),
+                    health_status=health,
+                    last_seen_ns=row.get("last_seen_ns"),
+                    detail={"capabilities": list(row.get("capabilities") or [])},
+                )
+            )
+
+        return HassStateSnapshot(
+            zones=tuple(
+                ZoneStateInput(
+                    zone_id=item.zone_id,
+                    zone_name=item.zone_name,
+                    zone_type=item.zone_type,
+                    occupied=item.occupied,
+                    occupying_track_ids=tuple(item.occupying_track_ids),
+                    occupying_labels=tuple(item.occupying_labels),
+                    updated_ns=item.updated_ns,
+                )
+                for item in occupancy
+            ),
+            nodes=tuple(nodes),
+            system=SystemStateInput(
+                system_health=_derive_system_health(counts),
+                active_track_count=len(tracks),
+                online_nodes=counts["online_nodes"],
+                degraded_nodes=counts["degraded_nodes"],
+                offline_nodes=counts["offline_nodes"],
+                generated_ns=now_ns,
+            ),
+            tracks=tuple(
+                TrackSlotCandidate(
+                    track_id=track.id,
+                    tqi=track.tqi,
+                    label=track.label,
+                    lat=track.position_geo.lat if track.position_geo else None,
+                    lon=track.position_geo.lon if track.position_geo else None,
+                    altitude_m=track.position_m[2],
+                    status=track.status,
+                    confidence=track.confidence,
+                )
+                for track in tracks
+            ),
+        )
+
+    return provider
+
+
+def _derive_system_health(counts: dict[str, int]) -> str:
+    """Same derivation as GET /api/v1/context/current, so HA and the COP agree."""
+    offline = counts.get("offline_nodes", 0)
+    degraded = counts.get("degraded_nodes", 0)
+    total = offline + degraded + counts.get("online_nodes", 0)
+    if total > 0 and offline == total:
+        return "error"
+    if degraded > 0 or offline > 0:
+        return "degraded"
+    return "ok"
 
 
 @app.get("/api/v1/zones/occupancy", response_model=list[ZoneOccupancyState])

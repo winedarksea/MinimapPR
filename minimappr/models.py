@@ -745,6 +745,33 @@ class FederationStatusResponse(BaseModel):
     track_ttl_seconds: float
 
 
+class HassBridgeStatusResponse(BaseModel):
+    """Live state of the outbound Home Assistant MQTT bridge.
+
+    Returned with ``connection_state="disabled"`` (not a 404) when the bridge is
+    absent or unconfigured, so the Settings page always has something to render.
+    """
+    enabled: bool
+    connection_state: Literal["disabled", "disconnected", "connecting", "connected", "error"]
+    transport: str | None = None
+    transport_available: bool = False
+    mqtt_host: str = ""
+    mqtt_port: int = 1883
+    mqtt_tls_enabled: bool = False
+    discovery_prefix: str = "homeassistant"
+    base_topic: str = "minimappr"
+    device_id: str = "minimappr"
+    connected_since_ns: int | None = None
+    last_connect_error: str | None = None
+    last_publish_ns: int | None = None
+    last_reconcile_ns: int | None = None
+    queue_depth: int = 0
+    queue_capacity: int = 0
+    discovery_entity_count: int = 0
+    published_state_topic_count: int = 0
+    metrics: dict[str, int] = Field(default_factory=dict)
+
+
 class CopStatusResponse(BaseModel):
     active_nodes: int
     degraded_nodes: int

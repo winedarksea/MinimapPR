@@ -1,0 +1,21 @@
+{
+  "availability_topic": "minimappr/status",
+  "device": {
+    "identifiers": [
+      "minimappr_minimappr"
+    ],
+    "manufacturer": "MinimapPR",
+    "model": "Acoustic Localization COP",
+    "name": "MinimapPR",
+    "sw_version": "test"
+  },
+  "entity_category": "diagnostic",
+  "name": "Active tracks",
+  "object_id": "minimappr_active_track_count",
+  "payload_available": "online",
+  "payload_not_available": "offline",
+  "state_class": "measurement",
+  "state_topic": "minimappr/system/active_track_count",
+  "unique_id": "minimappr_minimappr_active_track_count",
+  "unit_of_measurement": "tracks"
+}

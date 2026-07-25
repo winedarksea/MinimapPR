@@ -291,7 +291,9 @@ pub struct NodeUpdatedEvent {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Alert {
-    #[serde(alias = "id")]
+    /// Defaulted so a live alert from a handler that has no row id still renders
+    /// rather than failing the whole event's deserialization.
+    #[serde(alias = "id", default)]
     pub alert_id: String,
     #[serde(alias = "rule_id")]
     pub rule_name: Option<String>,
@@ -451,10 +453,14 @@ fn default_classification_audio_source() -> String {
     "beamformed".to_string()
 }
 
+/// Every field is `#[serde(default)]` with a default matching the backend, so an
+/// older backend that does not yet send the MQTT-bridge fields still
+/// deserializes rather than blanking the whole config snapshot.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct HassConfigSnapshot {
     #[serde(default)]
     pub enabled: bool,
+    /// Inbound enrichment client only — unused by the outbound MQTT bridge.
     #[serde(default)]
     pub base_url: String,
     #[serde(default)]
@@ -463,10 +469,171 @@ pub struct HassConfigSnapshot {
     pub mqtt_host: String,
     #[serde(default = "default_hass_mqtt_port")]
     pub mqtt_port: u32,
+    #[serde(default)]
+    pub mqtt_username: String,
+    #[serde(default)]
+    pub mqtt_password: String,
+    #[serde(default = "default_hass_client_id")]
+    pub mqtt_client_id: String,
+    #[serde(default = "default_hass_keepalive")]
+    pub mqtt_keepalive_seconds: u32,
+    #[serde(default)]
+    pub mqtt_tls_enabled: bool,
+    #[serde(default)]
+    pub mqtt_tls_insecure: bool,
+    #[serde(default = "default_hass_discovery_prefix")]
+    pub discovery_prefix: String,
+    #[serde(default = "default_hass_base_topic")]
+    pub base_topic: String,
+    #[serde(default = "default_hass_base_topic")]
+    pub device_id: String,
+    #[serde(default = "default_hass_device_name")]
+    pub device_name: String,
+    #[serde(default = "default_hass_publish_interval")]
+    pub publish_interval_seconds: f64,
+    #[serde(default = "default_hass_publish_min_interval")]
+    pub publish_min_interval_seconds: f64,
+    #[serde(default = "default_hass_reconcile_interval")]
+    pub reconcile_interval_seconds: f64,
+    #[serde(default = "default_hass_queue_size")]
+    pub queue_size: u32,
+    #[serde(default = "default_hass_backoff_initial")]
+    pub reconnect_backoff_initial_seconds: f64,
+    #[serde(default = "default_hass_backoff_max")]
+    pub reconnect_backoff_max_seconds: f64,
+    #[serde(default = "default_hass_off_delay")]
+    pub detection_off_delay_seconds: u32,
+    #[serde(default)]
+    pub detection_classes: Vec<String>,
+    #[serde(default = "default_hass_track_slot_count")]
+    pub track_slot_count: u32,
+    #[serde(default = "default_hass_spl_window")]
+    pub zone_spl_window_seconds: f64,
+    #[serde(default = "default_true")]
+    pub publish_zone_occupancy: bool,
+    #[serde(default = "default_true")]
+    pub publish_zone_spl: bool,
+    #[serde(default = "default_true")]
+    pub publish_detection_classes: bool,
+    #[serde(default = "default_true")]
+    pub publish_node_status: bool,
+    #[serde(default = "default_true")]
+    pub publish_system_health: bool,
+    #[serde(default = "default_true")]
+    pub publish_events: bool,
+    #[serde(default)]
+    pub publish_track_slots: bool,
 }
 
 fn default_hass_mqtt_port() -> u32 {
     1883
+}
+
+fn default_hass_client_id() -> String {
+    "minimappr".to_string()
+}
+
+fn default_hass_keepalive() -> u32 {
+    60
+}
+
+fn default_hass_discovery_prefix() -> String {
+    "homeassistant".to_string()
+}
+
+fn default_hass_base_topic() -> String {
+    "minimappr".to_string()
+}
+
+fn default_hass_device_name() -> String {
+    "MinimapPR".to_string()
+}
+
+fn default_hass_publish_interval() -> f64 {
+    5.0
+}
+
+fn default_hass_publish_min_interval() -> f64 {
+    1.0
+}
+
+fn default_hass_reconcile_interval() -> f64 {
+    60.0
+}
+
+fn default_hass_queue_size() -> u32 {
+    2000
+}
+
+fn default_hass_backoff_initial() -> f64 {
+    1.0
+}
+
+fn default_hass_backoff_max() -> f64 {
+    60.0
+}
+
+fn default_hass_off_delay() -> u32 {
+    30
+}
+
+fn default_hass_track_slot_count() -> u32 {
+    8
+}
+
+fn default_hass_spl_window() -> f64 {
+    60.0
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// 1:1 with the backend `HassBridgeStatusResponse`.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct HassBridgeStatus {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_hass_connection_state")]
+    pub connection_state: String,
+    #[serde(default)]
+    pub transport: Option<String>,
+    #[serde(default)]
+    pub transport_available: bool,
+    #[serde(default)]
+    pub mqtt_host: String,
+    #[serde(default = "default_hass_mqtt_port")]
+    pub mqtt_port: u32,
+    #[serde(default)]
+    pub mqtt_tls_enabled: bool,
+    #[serde(default = "default_hass_discovery_prefix")]
+    pub discovery_prefix: String,
+    #[serde(default = "default_hass_base_topic")]
+    pub base_topic: String,
+    #[serde(default = "default_hass_base_topic")]
+    pub device_id: String,
+    #[serde(default)]
+    pub connected_since_ns: Option<i64>,
+    #[serde(default)]
+    pub last_connect_error: Option<String>,
+    #[serde(default)]
+    pub last_publish_ns: Option<i64>,
+    #[serde(default)]
+    pub last_reconcile_ns: Option<i64>,
+    #[serde(default)]
+    pub queue_depth: u32,
+    #[serde(default)]
+    pub queue_capacity: u32,
+    #[serde(default)]
+    pub discovery_entity_count: u32,
+    #[serde(default)]
+    pub published_state_topic_count: u32,
+    #[serde(default)]
+    pub metrics: std::collections::BTreeMap<String, i64>,
+}
+
+fn default_hass_connection_state() -> String {
+    "disabled".to_string()
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

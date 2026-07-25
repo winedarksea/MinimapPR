@@ -243,7 +243,7 @@ def test_get_config_exposes_canonical_cleanup_keys(monkeypatch, tmp_path: Path) 
     assert body["classifier_stage_timeout_seconds"] == body["classification_stage_timeout_seconds"]
 
 
-def test_patch_hass_placeholder_config_redacts_token(monkeypatch, tmp_path: Path) -> None:
+def test_patch_hass_config_redacts_secrets(monkeypatch, tmp_path: Path) -> None:
     _configure_env(monkeypatch, tmp_path)
     with TestClient(app) as client:
         resp = client.patch(
@@ -254,6 +254,7 @@ def test_patch_hass_placeholder_config_redacts_token(monkeypatch, tmp_path: Path
                 "hass_token": "secret-token",
                 "hass_mqtt_host": "mqtt.local",
                 "hass_mqtt_port": 1884,
+                "hass_mqtt_password": "broker-secret",
             },
         )
         assert resp.status_code == 200
@@ -261,18 +262,97 @@ def test_patch_hass_placeholder_config_redacts_token(monkeypatch, tmp_path: Path
         assert body["hass"]["enabled"] is True
         assert body["hass"]["base_url"] == "http://homeassistant.local:8123"
         assert body["hass"]["token"] == "***"
+        assert body["hass"]["mqtt_password"] == "***"
         assert body["hass"]["mqtt_host"] == "mqtt.local"
         assert body["hass"]["mqtt_port"] == 1884
 
         get_body = client.get("/api/v1/config").json()
         assert get_body["hass"]["token"] == "***"
+        assert get_body["hass"]["mqtt_password"] == "***"
 
 
-def test_patch_hass_mqtt_port_validation(monkeypatch, tmp_path: Path) -> None:
+def test_patch_hass_secret_placeholder_is_ignored(monkeypatch, tmp_path: Path) -> None:
+    """Echoing the "***" redaction back must not destroy the stored secret."""
     _configure_env(monkeypatch, tmp_path)
     with TestClient(app) as client:
-        resp = client.patch("/api/v1/config", json={"hass_mqtt_port": 0})
+        client.patch(
+            "/api/v1/config",
+            json={
+                "hass_enabled": True,
+                "hass_mqtt_host": "mqtt.local",
+                "hass_token": "real-token",
+                "hass_mqtt_password": "real-password",
+            },
+        ).raise_for_status()
+
+        # A UI that round-trips the whole redacted block.
+        resp = client.patch(
+            "/api/v1/config",
+            json={"hass_token": "***", "hass_mqtt_password": "***", "hass_mqtt_port": 1885},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["hass"]["mqtt_port"] == 1885
+
+    settings = app.state.settings
+    assert settings.hass_token == "real-token"
+    assert settings.hass_mqtt_password == "real-password"
+
+
+def test_patch_hass_enabled_requires_a_broker_host(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        resp = client.patch("/api/v1/config", json={"hass_enabled": True})
         assert resp.status_code == 422
+        assert any("hass_mqtt_host" in item for item in resp.json()["detail"])
+
+
+@pytest.mark.parametrize(
+    "patch_body",
+    [
+        {"hass_mqtt_port": 0},
+        {"hass_mqtt_port": 70000},
+        {"hass_mqtt_keepalive_seconds": 0},
+        {"hass_publish_interval_seconds": 0.5},
+        {"hass_publish_min_interval_seconds": -1.0},
+        {"hass_reconcile_interval_seconds": 0.0},
+        {"hass_queue_size": 0},
+        {"hass_reconnect_backoff_initial_seconds": 0.0},
+        {"hass_reconnect_backoff_initial_seconds": 10.0, "hass_reconnect_backoff_max_seconds": 5.0},
+        {"hass_detection_off_delay_seconds": 0},
+        {"hass_track_slot_count": -1},
+        {"hass_track_slot_count": 65},
+        {"hass_zone_spl_window_seconds": 0.0},
+        {"hass_discovery_prefix": "a/b"},
+        {"hass_base_topic": "a+b"},
+        {"hass_base_topic": ""},
+        {"hass_device_id": "a#"},
+    ],
+)
+def test_patch_hass_numeric_and_topic_validation(monkeypatch, tmp_path: Path, patch_body: dict) -> None:
+    _configure_env(monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        resp = client.patch("/api/v1/config", json=patch_body)
+        assert resp.status_code == 422, f"{patch_body} should have been rejected"
+
+
+def test_patch_hass_entity_toggles_round_trip(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        resp = client.patch(
+            "/api/v1/config",
+            json={
+                "hass_publish_zone_occupancy": False,
+                "hass_publish_track_slots": True,
+                "hass_track_slot_count": 4,
+                "hass_base_topic": "site_a",
+            },
+        )
+        assert resp.status_code == 200
+        hass = resp.json()["hass"]
+        assert hass["publish_zone_occupancy"] is False
+        assert hass["publish_track_slots"] is True
+        assert hass["track_slot_count"] == 4
+        assert hass["base_topic"] == "site_a"
 
 
 # ---------------------------------------------------------------------------

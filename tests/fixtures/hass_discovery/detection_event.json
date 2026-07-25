@@ -1,0 +1,25 @@
+{
+  "availability_topic": "minimappr/status",
+  "device": {
+    "identifiers": [
+      "minimappr_minimappr"
+    ],
+    "manufacturer": "MinimapPR",
+    "model": "Acoustic Localization COP",
+    "name": "MinimapPR",
+    "sw_version": "test"
+  },
+  "event_types": [
+    "human",
+    "security",
+    "unknown",
+    "vehicle",
+    "wildlife"
+  ],
+  "name": "Detection",
+  "object_id": "minimappr_detection",
+  "payload_available": "online",
+  "payload_not_available": "offline",
+  "state_topic": "minimappr/event/detection",
+  "unique_id": "minimappr_minimappr_detection"
+}

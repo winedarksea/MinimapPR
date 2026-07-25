@@ -477,7 +477,17 @@ class RuleActionHandler(Protocol):
         *,
         detection: DetectionEvent | None = None,
         track: TrackState | None = None,
+        alert_id: str | None = None,
+        rule_id: str | None = None,
     ) -> dict[str, Any]:
+        """Deliver one rule action.
+
+        ``alert_id``/``rule_id`` identify the alert row ``_dispatch_rule_action``
+        inserted just before calling us. Handlers that emit the alert onward need
+        them so their payload matches the shape the REST alert list returns —
+        without the id, a websocket-delivered alert cannot be correlated with the
+        stored row.
+        """
         ...
 
 

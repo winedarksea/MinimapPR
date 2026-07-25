@@ -60,6 +60,11 @@ def test_structured_endpoint_shape(monkeypatch, tmp_path):
         group_ids = {g["id"] for g in body["groups"]}
         assert "localization" in group_ids
         assert "classification" in group_ids
+        # The "hass" block lives in its own group, not under rules_alerts; the id
+        # matches the /settings/integrations route that edits it.
+        assert "integrations" in group_ids
+        integrations = next(g for g in body["groups"] if g["id"] == "integrations")
+        assert [entry["key"] for entry in integrations["entries"]] == ["hass"]
         # ungrouped only holds the explicit meta keys.
         for key in body["ungrouped"]:
             assert key in UNGROUPED_KEYS

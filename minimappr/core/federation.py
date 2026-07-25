@@ -277,6 +277,9 @@ class FederationCoordinator:
 
         if self._live_callback is not None:
             payload = {
+                # "type" is what the frontend's LiveEvent enum is tagged on;
+                # without it every federation snapshot logged a parse error.
+                "type": "peer_track_snapshot",
                 "event_type": "peer_track_snapshot",
                 "source_type": "peer_track",
                 "server_id": snapshot.server_id,

@@ -185,7 +185,13 @@ fn handle_message(state: &AppState, text: &str) {
                 },
             );
         }
-        LiveEvent::RulesUpdated | LiveEvent::SetFilter | LiveEvent::BitReport { .. } => {}
+        LiveEvent::HassStatus { status } => {
+            state.hass_status.set(Some(status));
+        }
+        LiveEvent::RulesUpdated
+        | LiveEvent::SetFilter
+        | LiveEvent::BitReport { .. }
+        | LiveEvent::Unknown => {}
     }
 }
 

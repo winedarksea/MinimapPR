@@ -1,0 +1,26 @@
+{
+  "availability_topic": "minimappr/status",
+  "device": {
+    "identifiers": [
+      "minimappr_minimappr"
+    ],
+    "manufacturer": "MinimapPR",
+    "model": "Acoustic Localization COP",
+    "name": "MinimapPR",
+    "sw_version": "test"
+  },
+  "device_class": "enum",
+  "entity_category": "diagnostic",
+  "json_attributes_topic": "minimappr/system/attributes",
+  "name": "System health",
+  "object_id": "minimappr_system_health",
+  "options": [
+    "ok",
+    "degraded",
+    "error"
+  ],
+  "payload_available": "online",
+  "payload_not_available": "offline",
+  "state_topic": "minimappr/system/health",
+  "unique_id": "minimappr_minimappr_system_health"
+}

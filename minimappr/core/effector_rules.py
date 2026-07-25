@@ -2,7 +2,7 @@
 
 Registered in ``FusionNode._action_handlers`` keyed by ``"effector"`` when the
 effector subsystem is enabled; dispatch already routes by ``descriptor.destination``
-(see ``FusionNode._deliver_action`` in ``core/fusion_node.py``), so no rule-engine
+(see ``FusionNode._dispatch_rule_action`` in ``core/fusion_node.py``), so no rule-engine
 change is required. Not exercised by the default rules in v1 (no auto-cue rules
 ship yet), but present so a user can add a cue rule immediately.
 """
@@ -35,6 +35,8 @@ class EffectorRuleActionHandler(RuleActionHandler):
         *,
         detection: DetectionEvent | None = None,
         track: TrackState | None = None,
+        alert_id: str | None = None,
+        rule_id: str | None = None,
     ) -> dict[str, Any]:
         node_id = descriptor.payload.get("node_id") or descriptor.payload.get("effector_id")
         if not node_id:

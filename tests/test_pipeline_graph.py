@@ -180,6 +180,35 @@ class TestBuilderStatus:
         assert metrics == {"Multi-node associations": "7", "Active multi-node tracks": "2"}
 
 
+class TestHassBridgeStage:
+    """AGENTS §2.5: a new pipeline stage must register in the DAG builder."""
+
+    def test_absent_when_hass_is_disabled(self):
+        graph = _build(settings=Settings())
+        assert not any(node.id == "alert:hass_bridge" for node in graph.nodes)
+
+    def test_present_with_an_edge_from_rules_when_enabled(self):
+        graph = _build(settings=Settings(hass_enabled=True, hass_mqtt_host="mqtt.local"))
+        node = next(node for node in graph.nodes if node.id == "alert:hass_bridge")
+        assert node.title == "Home Assistant"
+        assert node.link == "/settings/integrations"
+        assert any(
+            edge.source == "rules:site" and edge.target == "alert:hass_bridge"
+            for edge in graph.edges
+        )
+
+    def test_params_surface_the_broker_and_base_topic(self):
+        graph = _build(
+            settings=Settings(
+                hass_enabled=True, hass_mqtt_host="mqtt.local", hass_base_topic="site_a"
+            )
+        )
+        node = next(node for node in graph.nodes if node.id == "alert:hass_bridge")
+        values = {param.label: param.value for param in node.params}
+        assert values["Broker"] == "mqtt.local"
+        assert values["Base topic"] == "site_a"
+
+
 class TestConfigKeyCoverage:
     def test_every_config_key_is_exposed(self):
         g = _build(fusion_status={"metrics": {}})

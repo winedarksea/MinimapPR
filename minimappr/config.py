@@ -19,6 +19,7 @@ from minimappr.settings_store import (
 
 if TYPE_CHECKING:
     from minimappr.core.effectors.registry import EffectorManagerConfig
+    from minimappr.core.hass.bridge import HassBridgeConfig
 
 
 _config_logger = logging.getLogger(__name__)
@@ -835,11 +836,49 @@ class Settings:
     federation_tqi_hysteresis: float = 0.05
     federation_deconflict_use_3d: bool = False
     federation_auth_token: str = ""
+    # Home Assistant integration. Only `hass_enabled` + `hass_mqtt_host` are ever
+    # required; everything below has a working default. `hass_base_url`/`hass_token`
+    # are for the not-yet-implemented inbound enrichment client, NOT the MQTT bridge.
     hass_enabled: bool = False
     hass_base_url: str = ""
     hass_token: str = ""
     hass_mqtt_host: str = ""
     hass_mqtt_port: int = 1883
+    hass_mqtt_username: str = ""
+    hass_mqtt_password: str = ""
+    hass_mqtt_client_id: str = "minimappr"
+    hass_mqtt_keepalive_seconds: int = 60
+    hass_mqtt_tls_enabled: bool = False
+    hass_mqtt_tls_insecure: bool = False
+    hass_discovery_prefix: str = "homeassistant"
+    hass_base_topic: str = "minimappr"
+    hass_device_id: str = "minimappr"
+    hass_device_name: str = "MinimapPR"
+    # Floor of 1.0s enforced in validation: each cycle runs ZoneMatcher.compute_occupancy,
+    # which is O(zones x tracks) with a point-in-polygon test per pair.
+    hass_publish_interval_seconds: float = 5.0
+    hass_publish_min_interval_seconds: float = 1.0
+    hass_reconcile_interval_seconds: float = 60.0
+    hass_queue_size: int = 2000
+    hass_reconnect_backoff_initial_seconds: float = 1.0
+    hass_reconnect_backoff_max_seconds: float = 60.0
+    hass_detection_off_delay_seconds: int = 30
+    # Matched against a detection's label AND its label_category, so the default
+    # (the closed taxonomy category set) always yields populated sensors while an
+    # operator can add specific labels like "gunshot".
+    hass_detection_classes: tuple[str, ...] = ("security", "human", "vehicle", "wildlife")
+    hass_track_slot_count: int = 8
+    hass_zone_spl_window_seconds: float = 60.0
+    hass_discovery_ledger_path: Path = Path("data/hass_discovery_ledger.json")
+    hass_publish_zone_occupancy: bool = True
+    hass_publish_zone_spl: bool = True
+    hass_publish_detection_classes: bool = True
+    hass_publish_node_status: bool = True
+    hass_publish_system_health: bool = True
+    hass_publish_events: bool = True
+    # Off by default: device_tracker slots consume HA entity-registry rows forever,
+    # so an operator opts in rather than discovering 8 unwanted trackers.
+    hass_publish_track_slots: bool = False
 
     # Effector subsystem kill-switch only — the real gate is the `effectors` DB
     # table being empty. Defaults True so UI-driven onboarding needs no config edit.
@@ -878,6 +917,7 @@ class Settings:
         self.large_artifact_dir = Path(self.large_artifact_dir)
         self.map_overlay_dir = Path(self.map_overlay_dir)
         self.federation_peers_config_path = Path(self.federation_peers_config_path)
+        self.hass_discovery_ledger_path = Path(self.hass_discovery_ledger_path)
         self.config_overrides_path = Path(self.config_overrides_path)
 
         self.coordinate_mode = self.coordinate_mode.strip().lower()
@@ -1331,6 +1371,51 @@ class Settings:
             raise ValueError("MINIMAPPR_EFFECTOR_STATUS_POLL_INTERVAL_SECONDS must be > 0")
         if self.hass_mqtt_port < 1 or self.hass_mqtt_port > 65535:
             raise ValueError("MINIMAPPR_HASS_MQTT_PORT must be in [1, 65535]")
+        self._validate_hass()
+
+    def _validate_hass(self) -> None:
+        """Home Assistant bridge validation.
+
+        Enabled-with-no-broker raises rather than degrading to a silent no-op:
+        an operator who ticked the box and typed no host has a config error, and
+        discovering that from an absent entity in HA is far worse than a startup
+        failure naming the field.
+        """
+        if self.hass_enabled and not self.hass_mqtt_host.strip():
+            raise ValueError("MINIMAPPR_HASS_ENABLED requires MINIMAPPR_HASS_MQTT_HOST")
+        if self.hass_mqtt_keepalive_seconds < 1:
+            raise ValueError("MINIMAPPR_HASS_MQTT_KEEPALIVE_SECONDS must be >= 1")
+        if self.hass_publish_interval_seconds < 1.0:
+            raise ValueError("MINIMAPPR_HASS_PUBLISH_INTERVAL_SECONDS must be >= 1.0")
+        if self.hass_publish_min_interval_seconds < 0.0:
+            raise ValueError("MINIMAPPR_HASS_PUBLISH_MIN_INTERVAL_SECONDS must be >= 0")
+        if self.hass_reconcile_interval_seconds <= 0.0:
+            raise ValueError("MINIMAPPR_HASS_RECONCILE_INTERVAL_SECONDS must be > 0")
+        if self.hass_queue_size < 1:
+            raise ValueError("MINIMAPPR_HASS_QUEUE_SIZE must be >= 1")
+        if self.hass_reconnect_backoff_initial_seconds <= 0.0:
+            raise ValueError("MINIMAPPR_HASS_RECONNECT_BACKOFF_INITIAL_SECONDS must be > 0")
+        if self.hass_reconnect_backoff_max_seconds < self.hass_reconnect_backoff_initial_seconds:
+            raise ValueError(
+                "MINIMAPPR_HASS_RECONNECT_BACKOFF_MAX_SECONDS must be >= "
+                "MINIMAPPR_HASS_RECONNECT_BACKOFF_INITIAL_SECONDS"
+            )
+        if self.hass_detection_off_delay_seconds < 1:
+            raise ValueError("MINIMAPPR_HASS_DETECTION_OFF_DELAY_SECONDS must be >= 1")
+        if self.hass_track_slot_count < 0 or self.hass_track_slot_count > 64:
+            raise ValueError("MINIMAPPR_HASS_TRACK_SLOT_COUNT must be in [0, 64]")
+        if self.hass_zone_spl_window_seconds <= 0.0:
+            raise ValueError("MINIMAPPR_HASS_ZONE_SPL_WINDOW_SECONDS must be > 0")
+
+        from minimappr.core.hass.topics import is_valid_topic_level
+
+        for env_name, value in (
+            ("MINIMAPPR_HASS_DISCOVERY_PREFIX", self.hass_discovery_prefix),
+            ("MINIMAPPR_HASS_BASE_TOPIC", self.hass_base_topic),
+            ("MINIMAPPR_HASS_DEVICE_ID", self.hass_device_id),
+        ):
+            if not is_valid_topic_level(value):
+                raise ValueError(f"{env_name} must be a single non-empty topic level (no +, #, or /)")
 
     @property
     def beamformed_classification_enabled(self) -> bool:
@@ -1802,6 +1887,51 @@ class Settings:
             hass_token=_env_str("MINIMAPPR_HASS_TOKEN", ""),
             hass_mqtt_host=_env_str("MINIMAPPR_HASS_MQTT_HOST", ""),
             hass_mqtt_port=_env_int("MINIMAPPR_HASS_MQTT_PORT", 1883),
+            hass_mqtt_username=_env_str("MINIMAPPR_HASS_MQTT_USERNAME", ""),
+            hass_mqtt_password=_env_str("MINIMAPPR_HASS_MQTT_PASSWORD", ""),
+            hass_mqtt_client_id=_env_str("MINIMAPPR_HASS_MQTT_CLIENT_ID", "minimappr"),
+            hass_mqtt_keepalive_seconds=_env_int("MINIMAPPR_HASS_MQTT_KEEPALIVE_SECONDS", 60),
+            hass_mqtt_tls_enabled=_env_bool("MINIMAPPR_HASS_MQTT_TLS_ENABLED", False),
+            hass_mqtt_tls_insecure=_env_bool("MINIMAPPR_HASS_MQTT_TLS_INSECURE", False),
+            hass_discovery_prefix=_env_str("MINIMAPPR_HASS_DISCOVERY_PREFIX", "homeassistant"),
+            hass_base_topic=_env_str("MINIMAPPR_HASS_BASE_TOPIC", "minimappr"),
+            hass_device_id=_env_str("MINIMAPPR_HASS_DEVICE_ID", "minimappr"),
+            hass_device_name=_env_str("MINIMAPPR_HASS_DEVICE_NAME", "MinimapPR"),
+            hass_publish_interval_seconds=_env_float("MINIMAPPR_HASS_PUBLISH_INTERVAL_SECONDS", 5.0),
+            hass_publish_min_interval_seconds=_env_float(
+                "MINIMAPPR_HASS_PUBLISH_MIN_INTERVAL_SECONDS", 1.0
+            ),
+            hass_reconcile_interval_seconds=_env_float(
+                "MINIMAPPR_HASS_RECONCILE_INTERVAL_SECONDS", 60.0
+            ),
+            hass_queue_size=_env_int("MINIMAPPR_HASS_QUEUE_SIZE", 2000),
+            hass_reconnect_backoff_initial_seconds=_env_float(
+                "MINIMAPPR_HASS_RECONNECT_BACKOFF_INITIAL_SECONDS", 1.0
+            ),
+            hass_reconnect_backoff_max_seconds=_env_float(
+                "MINIMAPPR_HASS_RECONNECT_BACKOFF_MAX_SECONDS", 60.0
+            ),
+            hass_detection_off_delay_seconds=_env_int(
+                "MINIMAPPR_HASS_DETECTION_OFF_DELAY_SECONDS", 30
+            ),
+            hass_detection_classes=_env_list(
+                "MINIMAPPR_HASS_DETECTION_CLASSES",
+                ("security", "human", "vehicle", "wildlife"),
+            ),
+            hass_track_slot_count=_env_int("MINIMAPPR_HASS_TRACK_SLOT_COUNT", 8),
+            hass_zone_spl_window_seconds=_env_float("MINIMAPPR_HASS_ZONE_SPL_WINDOW_SECONDS", 60.0),
+            hass_discovery_ledger_path=Path(
+                _env_str("MINIMAPPR_HASS_DISCOVERY_LEDGER_PATH", "data/hass_discovery_ledger.json")
+            ),
+            hass_publish_zone_occupancy=_env_bool("MINIMAPPR_HASS_PUBLISH_ZONE_OCCUPANCY", True),
+            hass_publish_zone_spl=_env_bool("MINIMAPPR_HASS_PUBLISH_ZONE_SPL", True),
+            hass_publish_detection_classes=_env_bool(
+                "MINIMAPPR_HASS_PUBLISH_DETECTION_CLASSES", True
+            ),
+            hass_publish_node_status=_env_bool("MINIMAPPR_HASS_PUBLISH_NODE_STATUS", True),
+            hass_publish_system_health=_env_bool("MINIMAPPR_HASS_PUBLISH_SYSTEM_HEALTH", True),
+            hass_publish_events=_env_bool("MINIMAPPR_HASS_PUBLISH_EVENTS", True),
+            hass_publish_track_slots=_env_bool("MINIMAPPR_HASS_PUBLISH_TRACK_SLOTS", False),
             effectors_enabled=_env_bool("MINIMAPPR_EFFECTORS_ENABLED", True),
             effector_snapshot_dir=Path(_env_str("MINIMAPPR_EFFECTOR_SNAPSHOT_DIR", "data/effector_snapshots")),
             effector_slew_dwell_seconds=_env_float("MINIMAPPR_EFFECTOR_SLEW_DWELL_SECONDS", 10.0),
@@ -2057,6 +2187,48 @@ class Settings:
             tqi_hysteresis=self.federation_tqi_hysteresis,
             deconflict_use_3d=self.federation_deconflict_use_3d,
             auth_token=token or None,
+        )
+
+    def hass_config(self) -> "HassBridgeConfig":
+        from minimappr import __version__
+        from minimappr.core.hass.bridge import HassBridgeConfig
+
+        host = self.hass_mqtt_host.strip()
+        return HassBridgeConfig(
+            # Mirrors federation_config(): "enabled" means the flag is set AND the
+            # subsystem has what it needs to actually do anything.
+            enabled=self.hass_enabled and bool(host),
+            mqtt_host=host,
+            mqtt_port=self.hass_mqtt_port,
+            mqtt_username=self.hass_mqtt_username,
+            mqtt_password=self.hass_mqtt_password,
+            mqtt_client_id=self.hass_mqtt_client_id,
+            mqtt_keepalive_seconds=self.hass_mqtt_keepalive_seconds,
+            mqtt_tls_enabled=self.hass_mqtt_tls_enabled,
+            mqtt_tls_insecure=self.hass_mqtt_tls_insecure,
+            discovery_prefix=self.hass_discovery_prefix,
+            base_topic=self.hass_base_topic,
+            device_id=self.hass_device_id,
+            device_name=self.hass_device_name,
+            publish_interval_seconds=self.hass_publish_interval_seconds,
+            publish_min_interval_seconds=self.hass_publish_min_interval_seconds,
+            reconcile_interval_seconds=self.hass_reconcile_interval_seconds,
+            queue_size=self.hass_queue_size,
+            reconnect_backoff_initial_seconds=self.hass_reconnect_backoff_initial_seconds,
+            reconnect_backoff_max_seconds=self.hass_reconnect_backoff_max_seconds,
+            detection_off_delay_seconds=self.hass_detection_off_delay_seconds,
+            detection_classes=tuple(self.hass_detection_classes),
+            track_slot_count=self.hass_track_slot_count,
+            zone_spl_window_seconds=self.hass_zone_spl_window_seconds,
+            discovery_ledger_path=self.hass_discovery_ledger_path,
+            publish_zone_occupancy=self.hass_publish_zone_occupancy,
+            publish_zone_spl=self.hass_publish_zone_spl,
+            publish_detection_classes=self.hass_publish_detection_classes,
+            publish_node_status=self.hass_publish_node_status,
+            publish_system_health=self.hass_publish_system_health,
+            publish_events=self.hass_publish_events,
+            publish_track_slots=self.hass_publish_track_slots,
+            version=__version__,
         )
 
     def effector_manager_config(self) -> EffectorManagerConfig:

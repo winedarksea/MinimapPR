@@ -192,6 +192,10 @@ pub struct AppState {
     pub selected_cop_item: RwSignal<Option<CopSelection>>,
     pub map_context_menu: RwSignal<Option<MapContextMenuState>>,
     pub zone_draft: RwSignal<Option<ZoneDraft>>,
+    /// Outbound Home Assistant bridge state. Pushed on transition by the server;
+    /// the Settings page also polls while mounted so it stays correct with the
+    /// websocket down.
+    pub hass_status: RwSignal<Option<HassBridgeStatus>>,
 }
 
 impl AppState {
@@ -236,6 +240,7 @@ impl AppState {
             selected_cop_item: RwSignal::new(None),
             map_context_menu: RwSignal::new(None),
             zone_draft: RwSignal::new(None),
+            hass_status: RwSignal::new(None),
         }
     }
 }
@@ -269,6 +274,18 @@ pub enum LiveEvent {
     Transcript {
         transcript: TranscriptEvent,
     },
+    HassStatus {
+        status: HassBridgeStatus,
+    },
+    /// Catch-all for server events this build does not know about.
+    ///
+    /// Without it, every unrecognized `type` fails the whole enum's
+    /// deserialization and logs a parse warning — which is exactly what happens
+    /// when the backend gains an event (`hass_status`, `peer_track_snapshot`)
+    /// that a not-yet-rebuilt frontend has never heard of. Unknown events are a
+    /// normal version-skew condition, not an error.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Clone, Debug, Deserialize)]

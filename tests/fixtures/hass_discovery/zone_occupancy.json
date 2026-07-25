@@ -1,0 +1,22 @@
+{
+  "availability_topic": "minimappr/status",
+  "device": {
+    "identifiers": [
+      "minimappr_minimappr"
+    ],
+    "manufacturer": "MinimapPR",
+    "model": "Acoustic Localization COP",
+    "name": "MinimapPR",
+    "sw_version": "test"
+  },
+  "device_class": "safety",
+  "json_attributes_topic": "minimappr/zone/front_lawn/attributes",
+  "name": "Front Lawn occupancy",
+  "object_id": "minimappr_zone_occupancy_front_lawn",
+  "payload_available": "online",
+  "payload_not_available": "offline",
+  "payload_off": "OFF",
+  "payload_on": "ON",
+  "state_topic": "minimappr/zone/front_lawn/occupancy",
+  "unique_id": "minimappr_minimappr_zone_occupancy_front_lawn"
+}

@@ -674,6 +674,51 @@ pub async fn snapshot_ptz_node(node_id: &str, track_id: Option<&str>) -> Result<
     }
 }
 
+/// Live state of the outbound Home Assistant MQTT bridge. Always 200 — a bridge
+/// that was never built reports `connection_state: "disabled"`.
+pub async fn get_hass_status() -> Result<crate::state::HassBridgeStatus, String> {
+    let resp = Request::get("/api/v1/integrations/hass/status")
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if !resp.ok() {
+        return Err(resp.text().await.unwrap_or_default());
+    }
+    resp.json::<crate::state::HassBridgeStatus>()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Force a full discovery reconcile + snapshot on the bridge's next cycle.
+pub async fn hass_republish_discovery() -> Result<(), String> {
+    hass_action("/api/v1/integrations/hass/republish-discovery").await
+}
+
+/// Blank every retained topic the bridge published and clear its ledger.
+pub async fn hass_purge_discovery() -> Result<(), String> {
+    hass_action("/api/v1/integrations/hass/purge-discovery").await
+}
+
+/// Both actions return 503 when the bridge is absent or disabled, so surface the
+/// body rather than treating non-2xx as an opaque failure.
+async fn hass_action(url: &str) -> Result<(), String> {
+    let resp = Request::post(url)
+        .header("Content-Type", "application/json")
+        .body("{}")
+        .map_err(|error| error.to_string())?
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if resp.ok() {
+        return Ok(());
+    }
+    let body = resp.text().await.unwrap_or_default();
+    let detail = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|value| value.get("detail").and_then(|d| d.as_str()).map(String::from));
+    Err(detail.unwrap_or(body))
+}
+
 /// Arm a camera node's PTZ effector so it will accept slew/aim actions.
 pub async fn arm_ptz_node(node_id: &str) -> Result<(), String> {
     let encoded = js_sys::encode_uri_component(node_id)

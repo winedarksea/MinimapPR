@@ -469,6 +469,26 @@ def build_pipeline_graph(
         )
         add_edge(rules_id, alert_id, kind="alert", label=kind)
 
+    if settings.hass_enabled:
+        hass_id = "alert:hass_bridge"
+        add_node(
+            id=hass_id,
+            stage=PipelineStageKind.ALERT,
+            column="alert",
+            lane="site",
+            title="Home Assistant",
+            subtitle="MQTT bridge",
+            modality="audio",
+            enabled=True,
+            params=[
+                _param("Broker", settings.hass_mqtt_host or "unset"),
+                _param("Base topic", settings.hass_base_topic),
+            ],
+            status=PipelineStageStatus(health="ok" if fusion_available else "unknown"),
+            link="/settings/integrations",
+        )
+        add_edge(rules_id, hass_id, kind="alert", label="hass")
+
     structure_hash = _structure_hash(columns, lanes, graph_nodes, graph_edges)
     return PipelineGraph(
         generated_ns=now_ns,

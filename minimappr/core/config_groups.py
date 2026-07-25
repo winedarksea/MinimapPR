@@ -148,7 +148,7 @@ CONFIG_STAGE_GROUPS: tuple[tuple[str, str, PipelineStageKind | None, tuple[str, 
         "rules_alerts",
         "Rules & Alerts",
         PipelineStageKind.RULES,
-        ("rules_config_path", "hass"),
+        ("rules_config_path",),
     ),
     (
         "storage_retention",
@@ -172,6 +172,15 @@ CONFIG_STAGE_GROUPS: tuple[tuple[str, str, PipelineStageKind | None, tuple[str, 
         "Federation",
         None,
         ("federation",),
+    ),
+    (
+        # The "hass" block moved here out of rules_alerts once the MQTT bridge
+        # became real: it is an integration in its own right, not a rules knob,
+        # and this group id lines up with the /settings/integrations page.
+        "integrations",
+        "Integrations",
+        None,
+        ("hass",),
     ),
     (
         "system",

@@ -31,6 +31,7 @@ from minimappr.core.effectors.registry import EffectorManager
 from minimappr.core.environment import LiveEnvironmentProvider
 from minimappr.core.federation import FederationCoordinator
 from minimappr.core.fusion_node import FusionNode
+from minimappr.core.hass.bridge import HassBridge
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.calibration.pipeline import CalibrationPipeline
 from minimappr.core.iamf_pipeline import IamfPipeline
@@ -372,6 +373,38 @@ def _wire_effector_zone_interlocks(
 
 def _wire_effector_rules_handler(fusion_node: FusionNode, effector_manager: EffectorManager) -> None:
     fusion_node.set_action_handler("effector", EffectorRuleActionHandler(effector_manager))
+
+
+def _build_hass_bridge(
+    settings: Settings,
+    *,
+    live_hub: LiveEventHub,
+) -> HassBridge:
+    """Build the (optional) Home Assistant MQTT bridge.
+
+    Always constructed so the status endpoint can report ``disabled`` rather than
+    404, and so ``request_reconcile()`` hooks in CRUD routes need no None guard
+    beyond the ``getattr`` on app state. ``start()`` is a no-op when the config
+    resolves to disabled, which keeps it fully dormant (no task, no queues, no
+    ledger read) exactly like ``EffectorManager`` with no PTZ nodes.
+    """
+    return HassBridge(config=settings.hass_config(), live_callback=live_hub.broadcast)
+
+
+def _wire_hass_live_event_tee(live_hub: LiveEventHub, hass_bridge: HassBridge) -> Callable[[], None]:
+    """Tee live events into the bridge. Returns the unsubscribe callable.
+
+    ``handle_live_event`` is a bare ``put_nowait`` — it runs inside
+    ``LiveEventHub.broadcast()`` on the fusion hot path, so all interpretation
+    happens later in the publisher task.
+    """
+    return live_hub.subscribe("hass_bridge", hass_bridge.handle_live_event)
+
+
+def _wire_hass_rules_handler(fusion_node: FusionNode, hass_bridge: HassBridge) -> None:
+    from minimappr.core.hass.rules_handler import HassRuleActionHandler
+
+    fusion_node.set_action_handler("hass", HassRuleActionHandler(hass_bridge))
 
 
 async def _initialize_storage_and_resolve_site_origin(

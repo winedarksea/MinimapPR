@@ -2609,7 +2609,13 @@ class FusionNode:
         status = "sent"
         patch: dict[str, Any] = {}
         try:
-            result = await handler.handle(descriptor, detection=detection, track=track)
+            result = await handler.handle(
+                descriptor,
+                detection=detection,
+                track=track,
+                alert_id=alert_id,
+                rule_id=rule_id,
+            )
             patch = result if isinstance(result, dict) else {}
             delivered = bool(patch.get("delivered", True))
             if not delivered:
