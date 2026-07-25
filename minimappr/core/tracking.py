@@ -237,13 +237,17 @@ class TrackManager:
             best_track.position_m = filtered.position_m
             best_track.velocity_mps = filtered.velocity_mps
             best_track.position_covariance_m2 = filtered.position_covariance_m2
+            label_changed = label != best_track.label
             best_track.label_id = label_id
             best_track.label = label
             best_track.label_category = label_category
             best_track.iff_category = (
                 iff_category if iff_category in {"friendly", "unknown", "hostile"} else "unknown"
             )
-            best_track.confidence = float(max(best_track.confidence, confidence))
+            if label_changed:
+                best_track.confidence = float(confidence)
+            else:
+                best_track.confidence = float(max(best_track.confidence, confidence))
             best_track.update_count += 1
             best_track.capability_tier = capability_tier
 
@@ -273,11 +277,10 @@ class TrackManager:
             elif can_confirm:
                 best_track.status = TrackStatus.CONFIRMED.value
 
-            age_s = (timestamp_ns - best_track.first_seen_ns) / 1_000_000_000.0
             best_track.tqi = self._compute_tqi(
                 best_track.confidence,
                 best_track.update_count,
-                age_s,
+                dt_s,
                 sensor_count,
                 contributor_count=max(len(best_track.contributor_node_ids), 1),
             )
@@ -319,7 +322,7 @@ class TrackManager:
         self,
         confidence: float,
         update_count: int,
-        age_s: float,
+        seconds_since_last_update: float,
         sensor_count: int,
         contributor_count: int = 1,
     ) -> float:
@@ -330,14 +333,15 @@ class TrackManager:
             - corroboration factor based on update count AND distinct contributing
               nodes (a cross-node fusion is more trustworthy than repeat single-node
               detections)
-            - recency penalty (decays with age)
+            - recency penalty (decays with the gap since the previous update, not
+              total track age)
             - sensor diversity bonus
         """
         update_corroboration = min(1.0, update_count / 5.0)
         # Distinct contributing nodes strongly corroborate: 2 nodes → full credit.
         node_corroboration = min(1.0, max(contributor_count - 1, 0) / 1.0)
         corroboration = max(update_corroboration, node_corroboration)
-        recency = 1.0 / (1.0 + age_s / 30.0)
+        recency = 1.0 / (1.0 + seconds_since_last_update / 30.0)
         sensor_factor = min(1.0, sensor_count / 4.0)
         w_conf, w_corr, w_rec, w_sensor = self._tqi_weights
         tqi = (w_conf * confidence) + (w_corr * corroboration) + (w_rec * recency) + (w_sensor * sensor_factor)
