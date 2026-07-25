@@ -68,6 +68,9 @@ class LocalizationDispatcher:
     _fallback_count: int = field(init=False, default=0, repr=False)
     _config_bypassed_count: int = field(init=False, default=0, repr=False)
     _config_bypass_warned: bool = field(init=False, default=False, repr=False)
+    _supports_cache: dict[tuple[int, str, str], tuple[object, bool]] = field(
+        init=False, repr=False, default_factory=dict
+    )
 
     def __post_init__(self) -> None:
         if "gcc_phat" not in self.algorithms:
@@ -82,6 +85,7 @@ class LocalizationDispatcher:
         self._fallback_count = 0
         self._config_bypassed_count = 0
         self._config_bypass_warned = False
+        self._supports_cache = {}
 
     def last_algorithm_name(self) -> str:
         return self._last_algorithm
@@ -526,20 +530,42 @@ class LocalizationDispatcher:
             )
         )
 
-    @staticmethod
-    def _localizer_supports_sensor_weights(localizer, *, method_name: str = "localize") -> bool:
-        return LocalizationDispatcher._localizer_supports_parameter(
+    def _localizer_supports_sensor_weights(self, localizer, *, method_name: str = "localize") -> bool:
+        return self._localizer_supports_parameter(
             localizer,
             parameter_name="sensor_weights",
             method_name=method_name,
         )
 
-    @staticmethod
     def _localizer_supports_parameter(
+        self,
         localizer,
         *,
         parameter_name: str,
         method_name: str = "localize",
+    ) -> bool:
+        # Memoized per (localizer, method, parameter): inspect.signature() is
+        # expensive on the localize hot path and the algorithms dict is fixed at
+        # construction. The cached localizer reference keeps the object alive so
+        # its id cannot be recycled.
+        key = (id(localizer), method_name, parameter_name)
+        cached = self._supports_cache.get(key)
+        if cached is not None and cached[0] is localizer:
+            return cached[1]
+        supported = self._probe_localizer_parameter(
+            localizer,
+            parameter_name=parameter_name,
+            method_name=method_name,
+        )
+        self._supports_cache[key] = (localizer, supported)
+        return supported
+
+    @staticmethod
+    def _probe_localizer_parameter(
+        localizer,
+        *,
+        parameter_name: str,
+        method_name: str,
     ) -> bool:
         method = getattr(localizer, method_name, None)
         if method is None:
@@ -552,8 +578,8 @@ class LocalizationDispatcher:
                 "sensor_node_ids",
             }
 
-    @staticmethod
     def _call_localizer(
+        self,
         *,
         localizer,
         localizer_name: str,
@@ -570,7 +596,7 @@ class LocalizationDispatcher:
         """Call a localizer while preserving compatibility with plugin implementations."""
         localization_kwargs: dict[str, object] = {}
         if sensor_weights is not None:
-            if LocalizationDispatcher._localizer_supports_sensor_weights(localizer):
+            if self._localizer_supports_sensor_weights(localizer):
                 localization_kwargs["sensor_weights"] = sensor_weights
             else:
                 logger.warning(
@@ -582,7 +608,7 @@ class LocalizationDispatcher:
                 )
         if (
             sensor_node_ids is not None
-            and LocalizationDispatcher._localizer_supports_parameter(
+            and self._localizer_supports_parameter(
                 localizer,
                 parameter_name="sensor_node_ids",
             )
@@ -590,7 +616,7 @@ class LocalizationDispatcher:
             localization_kwargs["sensor_node_ids"] = sensor_node_ids
         if (
             sensor_gain_offsets_db is not None
-            and LocalizationDispatcher._localizer_supports_parameter(
+            and self._localizer_supports_parameter(
                 localizer,
                 parameter_name="sensor_gain_offsets_db",
             )
@@ -598,7 +624,7 @@ class LocalizationDispatcher:
             localization_kwargs["sensor_gain_offsets_db"] = sensor_gain_offsets_db
         if (
             half_space is not None
-            and LocalizationDispatcher._localizer_supports_parameter(
+            and self._localizer_supports_parameter(
                 localizer,
                 parameter_name="half_space",
             )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -154,14 +155,30 @@ class LiveEventHub:
             return
 
         _SEND_TIMEOUT_S = 2.0
-        stale: list[WebSocket] = []
-        for client in clients:
-            if not self._matches_filter(payload, filters.get(client, LiveSubscriptionFilter())):
-                continue
-            try:
-                await asyncio.wait_for(client.send_json(payload), timeout=_SEND_TIMEOUT_S)
-            except (Exception, asyncio.TimeoutError):
-                stale.append(client)
+        targets = [
+            client
+            for client in clients
+            if self._matches_filter(payload, filters.get(client, LiveSubscriptionFilter()))
+        ]
+        if not targets:
+            return
+
+        # Serialize once and fan out concurrently so one stalled client cannot
+        # delay delivery to the others. Matches starlette's send_json wire
+        # format (json.dumps with compact separators, ensure_ascii=False).
+        text = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+
+        async def _send(client: WebSocket) -> None:
+            await asyncio.wait_for(client.send_text(text), timeout=_SEND_TIMEOUT_S)
+
+        results = await asyncio.gather(
+            *(_send(client) for client in targets), return_exceptions=True
+        )
+        stale = [
+            client
+            for client, result in zip(targets, results)
+            if isinstance(result, BaseException)
+        ]
 
         if stale:
             async with self._lock:

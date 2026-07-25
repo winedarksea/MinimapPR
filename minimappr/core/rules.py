@@ -140,16 +140,33 @@ class RuleDef:
 
 
 class ConfigRuleEngine(RuleEngine):
-    def __init__(self, config_path: Path) -> None:
+    def __init__(self, config_path: Path, *, reload_ttl_seconds: float = 1.0) -> None:
         self._config_path = config_path
+        self._reload_ttl_s = max(0.0, float(reload_ttl_seconds))
         self._rules: list[RuleDef] = []
         self._last_mtime_ns: int | None = None
         self._last_fire_ns: dict[str, int] = {}
-        self.reload()
+        self._last_check_monotonic: float | None = None
+        self._default_rules: list[RuleDef] | None = None
+        self.reload(force=True)
 
-    def reload(self) -> None:
+    def reload(self, *, force: bool = False) -> None:
+        # evaluate() calls reload() on every detection; throttle the filesystem
+        # stat to at most once per TTL so a rules-file edit may take up to
+        # ~reload_ttl_seconds to be observed.
+        now = time.monotonic()
+        if (
+            not force
+            and self._last_check_monotonic is not None
+            and now - self._last_check_monotonic < self._reload_ttl_s
+        ):
+            return
+        self._last_check_monotonic = now
         if not self._config_path.exists():
-            self._rules = default_rules()
+            self._last_mtime_ns = None
+            if self._default_rules is None:
+                self._default_rules = default_rules()
+            self._rules = self._default_rules
             return
         try:
             stat = self._config_path.stat()

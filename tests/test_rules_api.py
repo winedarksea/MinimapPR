@@ -110,7 +110,9 @@ def test_put_rules_validates_and_round_trips(monkeypatch: pytest.MonkeyPatch, tm
 async def test_put_rules_hot_reloads_existing_engine(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     rules_path = _configure_env(monkeypatch, tmp_path)
     rules_path.write_text(json.dumps({"rules": [_sample_rule("initial_rule")]}), encoding="utf-8")
-    engine = ConfigRuleEngine(rules_path)
+    # TTL 0 so the engine re-stats the file on every evaluate; the production
+    # default throttles the stat to ~1s, which would make this test flaky.
+    engine = ConfigRuleEngine(rules_path, reload_ttl_seconds=0.0)
 
     first = await engine.evaluate(detection=_security_detection(), track=None)
     assert first[0].rule_id == "initial_rule"
