@@ -3185,6 +3185,12 @@ async def put_rules_config(payload: RulesConfigUpdate, request: Request) -> Rule
     )
     os.replace(tmp_path, config_path)
 
+    # The engine throttles its own config stat, so an explicit edit must force a
+    # reload rather than wait out the TTL before the new rules can fire.
+    rules_engine = getattr(getattr(state, "fusion_node", None), "rules_engine", None)
+    if rules_engine is not None and hasattr(rules_engine, "reload"):
+        rules_engine.reload(force=True)
+
     await state.live_hub.broadcast({"type": "rules_updated"})
     return _rules_response(settings)
 
