@@ -20,7 +20,8 @@ from minimappr.core.node_registry import NodeRegistry
 from minimappr.core.omni_scanner import OmniScanResult
 from minimappr.core.tracking import TrackManager
 from minimappr.core.zones import ZoneMatcher
-from minimappr.models import GeoPoint, IngestFrameRequest, NodeSpec, NodeType
+from minimappr.core.multi_node_bearing_fusion import BearingObservation
+from minimappr.models import DetectionEvent, GeoPoint, IngestFrameRequest, NodeSpec, NodeType
 from minimappr.storage.db import Storage
 from minimappr.utils.audio import encode_pcm16le_b64, mono_mix, rms
 
@@ -599,7 +600,6 @@ async def test_fusion_does_not_fall_back_to_omni_without_a_beamformed_render(tmp
 
     status = await fusion.status()
     assert classifier.calls == 0
-    assert status["metrics"]["classification_reuse_hits"] == 0
     assert status["metrics"]["localization_stage_in"] >= 1
     assert status["metrics"]["localization_stage_out"] >= 1
     assert status["metrics"]["localization_stage_total_time_ms"] >= 4.0
@@ -2853,3 +2853,324 @@ async def test_phase4_bearing_fusion_disabled_by_default(tmp_path: Path) -> None
     assert out is branch
     assert fusion._metrics.localization_bearing_fusion_attempt_count == 0
     await storage.close()
+
+
+def _tetra_node_spec(node_id: str, position_m: tuple[float, float, float] | None) -> NodeSpec:
+    return NodeSpec(
+        id=node_id,
+        node_type=NodeType.SIRITH_TETRA,
+        position_m=position_m,
+        sensor_offsets_m=[
+            (0.0, 0.05, 0.0),
+            (0.0433, 0.025, 0.0),
+            (0.0, 0.0, 0.0),
+            (0.02165, 0.025, 0.04082),
+        ],
+        capabilities=["audio"],
+        metadata={},
+    )
+
+
+def _cone_covariance(position_m, centroid_m, *, lateral_std_m=4.0, radial_std_m=400.0):
+    pos = np.asarray(position_m, dtype=np.float64)
+    cen = np.asarray(centroid_m, dtype=np.float64)
+    r = (pos - cen) / np.linalg.norm(pos - cen)
+    return (
+        lateral_std_m**2 * (np.eye(3) - np.outer(r, r)) + radial_std_m**2 * np.outer(r, r)
+    ).tolist()
+
+
+@pytest.mark.asyncio
+async def test_bearing_fusion_upgrade_carries_into_rust_render_detection(tmp_path: Path) -> None:
+    """Regression: ingest_localized_render must persist the FUSED branch. A
+    corroborating cone from another node upgrades the branch via bearing
+    triangulation; the resulting detection must carry the fused position and
+    localization_method, not the pre-fusion single-node cone."""
+    settings = Settings(
+        db_path=tmp_path / "bearing_carry.db",
+        snippet_dir=tmp_path / "snippets",
+        snippet_retention_seconds=0,
+        multi_node_bearing_fusion_enabled=True,
+    )
+    settings.db_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.snippet_dir.mkdir(parents=True, exist_ok=True)
+    storage = Storage(settings.db_path)
+    await storage.initialize()
+    fusion = _make_fusion_node(settings, storage)
+
+    source = np.array([15.0, 200.0, 0.0])
+    origin_a = np.array([0.0, 0.0, 0.0])
+    event_ns = 1_739_950_000_000_000_000
+    now_ns = time.time_ns()
+
+    # Prime the store with node A's corroborating cone (points at the source).
+    direction_a = (source - origin_a) / np.linalg.norm(source - origin_a)
+    await fusion._bearing_fusion_store.register(
+        BearingObservation(
+            node_id="node-a",
+            origin_m=origin_a,
+            direction=direction_a,
+            lateral_std_m=4.0,
+            confidence=0.8,
+            event_time_ns=event_ns,
+            range_prior_m=float(np.linalg.norm(source - origin_a)),
+            expiry_ns=now_ns + 10**12,
+        ),
+        now_ns=now_ns,
+    )
+
+    # Node B's cone points along the correct bearing but with the wrong range:
+    # the payload position sits at twice the true range along the same ray.
+    node_b_pos = np.array([30.0, 0.0, 0.0])
+    wrong_range_position = node_b_pos + 2.0 * (source - node_b_pos)
+    node = _tetra_node_spec("node-b", tuple(float(v) for v in node_b_pos))
+    audio = np.random.default_rng(77).normal(0.0, 0.3, size=48_000).astype(np.float32)
+    await fusion.ingest_localized_render(
+        LocalizedClassifierRenderRequest(
+            manifest_id="manifest-bearing-carry-1",
+            node=node,
+            event_time_ns=event_ns + 100_000_000,
+            sample_rate_hz=48_000,
+            decoded_audio=audio,
+            localization_position_m=tuple(float(v) for v in wrong_range_position),
+            localization_confidence=0.8,
+            localization_gdop=2.0,
+            localization_position_covariance_m2=_cone_covariance(
+                wrong_range_position, node_b_pos
+            ),
+            localization_range_observability=0.05,
+            localization_residual_rms_seconds=1e-4,
+            localization_range_projection_mode="range_bearing_projected",
+            localization_method="rust_srp_phat",
+            localization_sound_speed_mps=343.0,
+            authoritative_classification=ClassificationResult(
+                label="drone", confidence=0.9, scores={"drone": 0.9}
+            ),
+        )
+    )
+
+    assert fusion._metrics.localization_bearing_fusion_fused_count == 1
+    detections = await storage.list_detections(limit=10)
+    assert len(detections) == 1
+    detection = detections[0]
+    assert detection["feature_summary"]["localization_method"] == "multi_node_bearing_triangulation"
+    assert detection["feature_summary"]["localization_range_projection_mode"] == "range_refined"
+    fused = np.asarray(detection["position_m"], dtype=np.float64)
+    # Triangulation recovers the true source; the pre-fusion payload position sat
+    # ~200 m further out along the ray and would fail this bound.
+    assert float(np.linalg.norm(fused - source)) < 30.0
+
+    await storage.close()
+
+
+async def _seed_localized_detection(
+    storage: Storage,
+    fusion: FusionNode,
+    *,
+    event_time_ns: int,
+    label: str,
+    node_id: str,
+    position_m: tuple[float, float, float],
+) -> DetectionEvent:
+    await storage.upsert_node(
+        NodeSpec(id=node_id, node_type=NodeType.SIRITH_TETRA, position_m=position_m),
+        last_seen_ns=event_time_ns,
+    )
+    window_start_ns, window_end_ns = fusion.reporting_policy.report_window_bounds(event_time_ns)
+    detection = DetectionEvent(
+        id=f"det-seed-{node_id}-{label}",
+        timestamp_ns=event_time_ns,
+        source_node_id=node_id,
+        report_window_start_ns=window_start_ns,
+        report_window_end_ns=window_end_ns,
+        reporting_modality="localized",
+        position_m=position_m,
+        confidence=0.8,
+        gdop=1.5,
+        label=label,
+        label_confidence=0.9,
+        reference_sensor=f"{node_id}:ch0",
+    )
+    await storage.insert_detection(detection, snippet_path=None, snippet_expires_ns=None)
+    return detection
+
+
+def _omni_render_payload(node: NodeSpec, *, event_time_ns: int, label: str):
+    audio = np.random.default_rng(19).normal(0.0, 0.3, size=48_000).astype(np.float32)
+    return LocalizedClassifierRenderRequest(
+        manifest_id=f"manifest-omni-{node.id}",
+        node=node,
+        event_time_ns=event_time_ns,
+        sample_rate_hz=48_000,
+        decoded_audio=audio,
+        localization_position_m=(0.0, 0.0, 0.0),
+        localization_confidence=0.3,
+        reporting_modality="omni",
+        authoritative_classification=ClassificationResult(
+            label=label, confidence=0.9, scores={label: 0.9}
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_omni_suppression_distance_gate_allows_far_insert(tmp_path: Path) -> None:
+    """omni_suppression_max_distance_m is wired through _assemble_reporting_branch:
+    a localized detection far beyond the gate no longer swallows the omni report."""
+    settings = Settings(
+        db_path=tmp_path / "gate_far.db",
+        snippet_dir=tmp_path / "snippets",
+        snippet_retention_seconds=0,
+        omni_suppression_max_distance_m=50.0,
+    )
+    settings.db_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.snippet_dir.mkdir(parents=True, exist_ok=True)
+    storage = Storage(settings.db_path)
+    await storage.initialize()
+    fusion = _make_fusion_node(settings, storage)
+
+    event_ns = 1_739_950_000_000_000_000
+    await _seed_localized_detection(
+        storage,
+        fusion,
+        event_time_ns=event_ns,
+        label="coyote",
+        node_id="node-far",
+        position_m=(500.0, 0.0, 0.0),
+    )
+
+    node = _tetra_node_spec("node-b", (0.0, 0.0, 0.0))
+    await fusion.ingest_localized_render(
+        _omni_render_payload(node, event_time_ns=event_ns + 1_000_000, label="coyote")
+    )
+
+    detections = await storage.list_detections(limit=10)
+    assert len(detections) == 2
+    modalities = sorted(d["reporting_modality"] for d in detections)
+    assert modalities == ["localized", "omni"]
+
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_omni_suppression_distance_gate_still_enriches_near(tmp_path: Path) -> None:
+    settings = Settings(
+        db_path=tmp_path / "gate_near.db",
+        snippet_dir=tmp_path / "snippets",
+        snippet_retention_seconds=0,
+        omni_suppression_max_distance_m=50.0,
+    )
+    settings.db_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.snippet_dir.mkdir(parents=True, exist_ok=True)
+    storage = Storage(settings.db_path)
+    await storage.initialize()
+    fusion = _make_fusion_node(settings, storage)
+
+    event_ns = 1_739_950_000_000_000_000
+    seeded = await _seed_localized_detection(
+        storage,
+        fusion,
+        event_time_ns=event_ns,
+        label="coyote",
+        node_id="node-near",
+        position_m=(10.0, 0.0, 0.0),
+    )
+
+    node = _tetra_node_spec("node-b", (0.0, 0.0, 0.0))
+    await fusion.ingest_localized_render(
+        _omni_render_payload(node, event_time_ns=event_ns + 1_000_000, label="coyote")
+    )
+
+    detections = await storage.list_detections(limit=10)
+    assert len(detections) == 1
+    detection = detections[0]
+    assert detection["id"] == seeded.id
+    omni_evidence = detection["feature_summary"]["branch_evidence"]["omni"]
+    assert omni_evidence["suppressed"] is True
+    assert omni_evidence["suppression_reason"] == "localized_detection_site_wide"
+
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_localized_render_degraded_to_omni_without_node_position_raises(tmp_path: Path) -> None:
+    """A render arriving as "localized" that is degraded to omni by the
+    out-of-range rejection must fail with the same clean ValueError as an
+    arriving-omni render when the node has no position_m (not a TypeError)."""
+    settings = Settings(
+        db_path=tmp_path / "degrade_guard.db",
+        snippet_dir=tmp_path / "snippets",
+        snippet_retention_seconds=0,
+    )
+    settings.db_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.snippet_dir.mkdir(parents=True, exist_ok=True)
+    storage = Storage(settings.db_path)
+    await storage.initialize()
+    fusion = _make_fusion_node(settings, storage)
+
+    # The node itself reports no position; a registry override supplies one so
+    # runtime registration succeeds, but the payload node keeps position_m=None.
+    # NodeSpec validation normally requires position_m or position_geo, so use a
+    # non-validating model_copy to simulate a malformed payload reaching ingest.
+    valid = _tetra_node_spec("node-no-pos", (0.0, 0.0, 0.0))
+    node = valid.model_copy(update={"position_m": None, "position_geo": None})
+    await fusion.registry.set_overrides("node-no-pos", {"position_m": (0.0, 0.0, 0.0)})
+
+    audio = np.random.default_rng(23).normal(0.0, 0.3, size=48_000).astype(np.float32)
+
+    def _payload(manifest_id: str) -> LocalizedClassifierRenderRequest:
+        return LocalizedClassifierRenderRequest(
+            manifest_id=manifest_id,
+            node=node,
+            event_time_ns=1_739_950_000_000_000_000,
+            sample_rate_hz=48_000,
+            decoded_audio=audio,
+            # Beyond the 5 km origin backstop: rejected out of range, degraded to omni.
+            localization_position_m=(50_000.0, 0.0, 0.0),
+            localization_confidence=0.8,
+        )
+
+    # First ingest dies earlier, at node persistence — but it records the node
+    # fingerprint, so the second identical render skips persistence and reaches
+    # the out-of-range degrade path.
+    with pytest.raises(ValueError, match="required for persistence"):
+        await fusion.ingest_localized_render(_payload("manifest-degrade-guard-1"))
+    with pytest.raises(ValueError, match="Omni classifier render requires node.position_m"):
+        await fusion.ingest_localized_render(_payload("manifest-degrade-guard-2"))
+    assert fusion._metrics.localization_rejected_out_of_range_count == 1
+
+    await storage.close()
+
+
+def test_localizer_signature_parameters_cached_per_instance(tmp_path: Path) -> None:
+    settings = Settings(
+        db_path=tmp_path / "sig_cache.db",
+        snippet_dir=tmp_path / "snippets",
+    )
+    fusion = _make_fusion_node(settings, Storage(settings.db_path))
+
+    params, params_2d = fusion._localizer_signature_parameters()
+    assert "sensor_weights" in params
+    assert params_2d is not None
+    # Second call serves the cache (same parameter mappings, no re-reflection).
+    again, again_2d = fusion._localizer_signature_parameters()
+    assert again is params
+    assert again_2d is params_2d
+
+    class _MinimalLocalizer:
+        def localize(
+            self,
+            sensor_positions,
+            sensor_windows,
+            sample_rate_hz,
+            temperature_c,
+            humidity_fraction,
+            custom_kw=None,
+        ):
+            raise NotImplementedError
+
+    # Swapping the localizer instance must invalidate the cache.
+    fusion.localizer = _MinimalLocalizer()
+    swapped, swapped_2d = fusion._localizer_signature_parameters()
+    assert "custom_kw" in swapped
+    assert "sensor_weights" not in swapped
+    assert swapped_2d is None

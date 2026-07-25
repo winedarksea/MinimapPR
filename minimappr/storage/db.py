@@ -246,6 +246,8 @@ class Storage:
                 ON detections(retention_tier, timestamp_ns DESC);
             CREATE INDEX IF NOT EXISTS idx_detections_reporting_window
                 ON detections(source_node_id, label, report_window_start_ns DESC);
+            CREATE INDEX IF NOT EXISTS idx_detections_label_window
+                ON detections(label, report_window_start_ns DESC);
 
             CREATE TABLE IF NOT EXISTS training_examples (
                 detection_id TEXT PRIMARY KEY REFERENCES detections(id) ON DELETE CASCADE,

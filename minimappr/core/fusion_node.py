@@ -252,7 +252,6 @@ class FusionMetrics:
     stage_timeout_count: int = 0
     last_localization_algorithm: str = "gcc_phat"
     last_attempted_algorithm: str = "gcc_phat"
-    classification_reuse_hits: int = 0
     beamform_renders: int = 0
     beamform_failures: int = 0
     birdnet_chunk_dispatches_suppressed: int = 0
@@ -318,6 +317,9 @@ class FusionNode:
         self.cluster_registry = cluster_registry
         self.buffer = buffer
         self.localizer = localizer
+        # Lazy per-localizer-instance cache for _localizer_signature_parameters();
+        # avoids inspect.signature() reflection on the per-candidate hot path.
+        self._localizer_signature_cache: tuple[Any, Any, Any] | None = None
         self.classifier = classifier
         self.tracker = tracker
         self.storage = storage
@@ -926,6 +928,11 @@ class FusionNode:
         if localization_rejected_out_of_range:
             rust_extra_features["localization_rejected_reason"] = "position_out_of_range"
         if reporting_modality == "omni":
+            # A render that arrived as "localized" can be degraded to omni above
+            # (out-of-range rejection); it needs the same node-position guard as a
+            # render that arrived omni.
+            if node.position_m is None:
+                raise ValueError("Omni classifier render requires node.position_m")
             # Keep the raw sidecar localization only as provenance above; an omni
             # detection is positioned at its source node and cannot create a track.
             localization_position_m = tuple(float(value) for value in node.position_m)
@@ -959,6 +966,26 @@ class FusionNode:
                 event_time_ns=payload.event_time_ns,
                 sound_speed_mps=payload.localization_sound_speed_mps,
             )
+            # Bearing fusion may have upgraded the branch (fused position, refined
+            # range, new covariance/confidence/method). Re-extract the locals so the
+            # product below and the reporting branch carry the fused values instead of
+            # the pre-fusion single-node cone.
+            localization_position_m = rust_localization_branch.localization_position_m
+            localization_confidence = rust_localization_branch.localization_confidence
+            localization_gdop = rust_localization_branch.localization_gdop
+            localization_position_covariance_m2 = (
+                rust_localization_branch.localization_position_covariance_m2
+            )
+            localization_range_observability = (
+                rust_localization_branch.localization_range_observability
+            )
+            localization_residual_rms_seconds = (
+                rust_localization_branch.localization_residual_rms_seconds
+            )
+            localization_range_projection_mode = (
+                rust_localization_branch.localization_range_projection_mode
+            )
+            localization_method = rust_localization_branch.localization_method
         localized_product = LocalizedCandidate(
             candidate=candidate,
             localization_branch=rust_localization_branch,
@@ -1505,6 +1532,28 @@ class FusionNode:
                 return False, snapshot
             await asyncio.sleep(poll_interval_s)
 
+    def _localizer_signature_parameters(self):
+        """Cached ``inspect.signature`` parameters for the bound localizer.
+
+        Returns ``(localize_parameters, localize_2d_parameters)`` where the second
+        element is ``None`` when the localizer has no ``localize_2d``. Reflection
+        runs once per localizer instance instead of per candidate; the cache is
+        keyed on object identity so a swapped localizer can never serve a stale
+        signature.
+        """
+        localizer = self.localizer
+        cached = self._localizer_signature_cache
+        if cached is not None and cached[0] is localizer:
+            return cached[1], cached[2]
+        localize_parameters = inspect.signature(localizer.localize).parameters
+        localize_2d_parameters = (
+            inspect.signature(localizer.localize_2d).parameters
+            if hasattr(localizer, "localize_2d")
+            else None
+        )
+        self._localizer_signature_cache = (localizer, localize_parameters, localize_2d_parameters)
+        return localize_parameters, localize_2d_parameters
+
     async def _localize_candidate(self, candidate: EventCandidate) -> LocalizedCandidate | None:
         sensor_positions = await self.registry.sensor_positions()
         sensor_grades = await self.registry.sensor_sync_grades()
@@ -1695,7 +1744,7 @@ class FusionNode:
             }
 
         localization_kwargs: dict[str, object] = {}
-        localize_parameters = inspect.signature(self.localizer.localize).parameters
+        localize_parameters, localize_2d_parameters = self._localizer_signature_parameters()
         if sensor_weights is not None and "sensor_weights" in localize_parameters:
             localization_kwargs["sensor_weights"] = {
                 sensor_id: sensor_weights.get(sensor_id, 1.0)
@@ -1710,8 +1759,7 @@ class FusionNode:
         if selected_half_space is not None and "half_space" in localize_parameters:
             localization_kwargs["half_space"] = selected_half_space
         localization_2d_kwargs: dict[str, object] = {}
-        if hasattr(self.localizer, "localize_2d"):
-            localize_2d_parameters = inspect.signature(self.localizer.localize_2d).parameters
+        if localize_2d_parameters is not None:
             if sensor_weights is not None and "sensor_weights" in localize_2d_parameters:
                 localization_2d_kwargs["sensor_weights"] = {
                     sensor_id: sensor_weights.get(sensor_id, 1.0)
@@ -1860,38 +1908,6 @@ class FusionNode:
                 detection_products.append(maybe_detection)
         return detection_products
 
-    async def _classify_omni_branch(
-        self,
-        *,
-        product: LocalizedCandidate,
-        localized_result,
-    ):
-        if localized_result is not None and self._can_reuse_localized_result_for_omni(
-            product=product,
-            localized_result=localized_result,
-        ):
-            self._metrics.classification_reuse_hits += 1
-            return localized_result
-        return await self._classification_orchestrator.classify_omni_only(
-            reference_signal=product.omni_classification_reference_signal,
-            sample_rate_hz=product.candidate.sample_rate_hz,
-            event_time_ns=product.candidate.event_time_ns,
-        )
-
-    @staticmethod
-    def _can_reuse_localized_result_for_omni(
-        *,
-        product: LocalizedCandidate,
-        localized_result,
-    ) -> bool:
-        if product.localization_branch is None:
-            return False
-        if localized_result.beamformed_classification is not None:
-            return False
-        if localized_result.classification_path != "omni":
-            return False
-        return product.localization_branch.reference_sensor == product.omni_reference_sensor
-
     async def _classification_windows_for_event(
         self,
         *,
@@ -1996,43 +2012,6 @@ class FusionNode:
                 "max_gap_seconds": max(stats.max_gap_seconds for stats in degraded_stats.values()),
                 "degraded_count_total": self._metrics.frames_zero_padded_degraded,
             },
-        )
-
-    @staticmethod
-    def _nearest_reference_sensor(
-        selected_positions: dict[str, np.ndarray],
-        position_m: tuple[float, float, float],
-    ) -> str | None:
-        """Sensor id whose position is closest to ``position_m`` (argmin distance)."""
-        if not selected_positions:
-            return None
-        target = np.asarray(position_m, dtype=np.float64)
-        best_id: str | None = None
-        best_dist = float("inf")
-        for sensor_id, pos in selected_positions.items():
-            dist = float(np.linalg.norm(np.asarray(pos, dtype=np.float64) - target))
-            if dist < best_dist:
-                best_dist = dist
-                best_id = sensor_id
-        return best_id
-
-    def _nearest_node_omni_sensor(self, product: LocalizedCandidate) -> str | None:
-        """Return the nearest sensor id for nearest_node_omni classification.
-
-        Only active when ``classification_audio_source == "nearest_node_omni"`` and
-        the localized branch's confidence clears ``min_localization_confidence``;
-        otherwise ``None`` so the caller falls back to the loudest-mic/omni path.
-        """
-        if self.settings.classification_audio_source != "nearest_node_omni":
-            return None
-        branch = product.localization_branch
-        if branch is None:
-            return None
-        if branch.localization_confidence < self.settings.min_localization_confidence:
-            return None
-        return self._nearest_reference_sensor(
-            product.selected_positions,
-            branch.localization_position_m,
         )
 
     def _build_reference_sensor_candidate(
@@ -2389,6 +2368,7 @@ class FusionNode:
             label=classified.classification.label,
             reporting_modality=reporting_modality,
             branch_details=branch_details,
+            source_position_m=product.omni_position_m,
         )
         if decision.action == "suppress":
             return None
