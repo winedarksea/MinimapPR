@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Optional
 
 import numpy as np
@@ -101,27 +101,74 @@ def _coverage_stats(coverage: np.ndarray, sample_rate_hz: int) -> AudioCoverageS
     )
 
 
-@dataclass(slots=True)
-class SensorStreamBuffer:
-    sample_rate_hz: int
-    max_duration_seconds: float
-    max_samples: int = field(init=False)
-    start_time_ns: int | None = field(init=False, default=None)
-    samples: np.ndarray = field(init=False, default_factory=lambda: np.zeros(0, dtype=np.float32))
-    coverage: np.ndarray = field(init=False, default_factory=lambda: np.zeros(0, dtype=np.bool_))
-    _timeline_origin_ns: int | None = field(init=False, default=None)
-    _timeline_origin_sample_index: int = field(init=False, default=0)
-    _buffer_start_sample_index: int = field(init=False, default=0)
-    # Diagnostic counter: incremented when append() resets the timeline anchor
-    # (NTP/GPS correction or a frame so far ahead/behind that allocating the
-    # in-between zero gap would be unbounded). Long-uptime drift between this
-    # and the rate-mismatch wipe count was the leading hypothesis for the
-    # 2026-05 silent-window-drop incident — see the corresponding counter on
-    # MultiSensorBuffer for wipes, which survive buffer replacement.
-    reanchor_count: int = field(init=False, default=0)
+@dataclass(frozen=True, slots=True)
+class _BufferState:
+    """Immutable snapshot of a SensorStreamBuffer's mutable timeline state.
 
-    def __post_init__(self) -> None:
-        self.max_samples = max(1, int(round(self.max_duration_seconds * self.sample_rate_hz)))
+    append()/prune compute the next state locally and publish it with a single
+    attribute assignment (atomic under the GIL), so a reader on another thread
+    sees either the old or the new state — never new `samples` paired with a
+    stale `buffer_start_sample_index`.
+    """
+
+    samples: np.ndarray
+    coverage: np.ndarray
+    buffer_start_sample_index: int
+    timeline_origin_ns: int | None
+    timeline_origin_sample_index: int
+    start_time_ns: int | None
+
+
+def _empty_buffer_state() -> _BufferState:
+    return _BufferState(
+        samples=np.zeros(0, dtype=np.float32),
+        coverage=np.zeros(0, dtype=np.bool_),
+        buffer_start_sample_index=0,
+        timeline_origin_ns=None,
+        timeline_origin_sample_index=0,
+        start_time_ns=None,
+    )
+
+
+class SensorStreamBuffer:
+    __slots__ = ("sample_rate_hz", "max_duration_seconds", "max_samples", "reanchor_count", "_state")
+
+    def __init__(self, sample_rate_hz: int, max_duration_seconds: float) -> None:
+        self.sample_rate_hz = sample_rate_hz
+        self.max_duration_seconds = max_duration_seconds
+        self.max_samples = max(1, int(round(max_duration_seconds * sample_rate_hz)))
+        # Diagnostic counter: incremented when append() resets the timeline anchor
+        # (NTP/GPS correction or a frame so far ahead/behind that allocating the
+        # in-between zero gap would be unbounded). Long-uptime drift between this
+        # and the rate-mismatch wipe count was the leading hypothesis for the
+        # 2026-05 silent-window-drop incident — see the corresponding counter on
+        # MultiSensorBuffer for wipes, which survive buffer replacement.
+        self.reanchor_count = 0
+        self._state = _empty_buffer_state()
+
+    @property
+    def samples(self) -> np.ndarray:
+        return self._state.samples
+
+    @property
+    def coverage(self) -> np.ndarray:
+        return self._state.coverage
+
+    @property
+    def start_time_ns(self) -> int | None:
+        return self._state.start_time_ns
+
+    @property
+    def _buffer_start_sample_index(self) -> int:
+        return self._state.buffer_start_sample_index
+
+    @property
+    def _timeline_origin_ns(self) -> int | None:
+        return self._state.timeline_origin_ns
+
+    @property
+    def _timeline_origin_sample_index(self) -> int:
+        return self._state.timeline_origin_sample_index
 
     def append(
         self,
@@ -145,26 +192,24 @@ class SensorStreamBuffer:
             if (end_sample_index - start_sample_index) != samples.size:
                 raise ValueError("Explicit sample coverage must match appended sample count")
 
-        if self.start_time_ns is None:
-            self._timeline_origin_ns = start_time_ns
-            self._timeline_origin_sample_index = start_sample_index or 0
-            self._buffer_start_sample_index = start_sample_index or 0
-            self.start_time_ns = start_time_ns
-            self.samples = samples.copy()
-            self.coverage = np.ones(samples.size, dtype=np.bool_)
-            self._prune(_protected_from_ns)
+        state = self._state
+        if state.start_time_ns is None:
+            self._state = self._pruned(
+                self._anchored_state(start_time_ns, samples, start_sample_index),
+                _protected_from_ns,
+            )
             return
 
         if samples.size == 0:
             return
 
-        current_start_sample_index = self._buffer_start_sample_index
-        current_end_sample_index = current_start_sample_index + self.samples.size
+        current_start_sample_index = state.buffer_start_sample_index
+        current_end_sample_index = current_start_sample_index + state.samples.size
         incoming_start_sample_index = (
-            start_sample_index if explicit_sample_coverage else self._time_to_sample_index(start_time_ns)
+            start_sample_index if explicit_sample_coverage else self._time_to_sample_index(state, start_time_ns)
         )
         if explicit_sample_coverage:
-            expected_start_time_ns = self._sample_index_to_time_ns(incoming_start_sample_index)
+            expected_start_time_ns = self._sample_index_to_time_ns(state, incoming_start_sample_index)
             timestamp_correction_ns = abs(start_time_ns - expected_start_time_ns)
             reset_threshold_ns = int(round(self.max_duration_seconds * 1_000_000_000))
             if timestamp_correction_ns > reset_threshold_ns:
@@ -181,13 +226,10 @@ class SensorStreamBuffer:
                         "reanchor_count": self.reanchor_count,
                     },
                 )
-                self._timeline_origin_ns = start_time_ns
-                self._timeline_origin_sample_index = start_sample_index or 0
-                self._buffer_start_sample_index = start_sample_index or 0
-                self.start_time_ns = start_time_ns
-                self.samples = samples.copy()
-                self.coverage = np.ones(samples.size, dtype=np.bool_)
-                self._prune(_protected_from_ns)
+                self._state = self._pruned(
+                    self._anchored_state(start_time_ns, samples, start_sample_index),
+                    _protected_from_ns,
+                )
                 return
 
         # If the incoming frame is more than max_samples away from the current buffer
@@ -210,13 +252,10 @@ class SensorStreamBuffer:
                     "reanchor_count": self.reanchor_count,
                 },
             )
-            self._timeline_origin_ns = start_time_ns
-            self._timeline_origin_sample_index = start_sample_index or 0
-            self._buffer_start_sample_index = start_sample_index or 0
-            self.start_time_ns = start_time_ns
-            self.samples = samples.copy()
-            self.coverage = np.ones(samples.size, dtype=np.bool_)
-            self._prune(_protected_from_ns)
+            self._state = self._pruned(
+                self._anchored_state(start_time_ns, samples, start_sample_index),
+                _protected_from_ns,
+            )
             return
 
         # Snap to sample-contiguous when the apparent gap or overlap is smaller than
@@ -242,8 +281,8 @@ class SensorStreamBuffer:
         merged_coverage = np.zeros(merged_end_sample_index - merged_start_sample_index, dtype=np.bool_)
 
         existing_offset = current_start_sample_index - merged_start_sample_index
-        merged[existing_offset : existing_offset + self.samples.size] = self.samples
-        merged_coverage[existing_offset : existing_offset + self.coverage.size] = self.coverage
+        merged[existing_offset : existing_offset + state.samples.size] = state.samples
+        merged_coverage[existing_offset : existing_offset + state.coverage.size] = state.coverage
 
         incoming_offset = incoming_start_sample_index - merged_start_sample_index
         # Late-arriving frames should overwrite previously padded zeros rather than
@@ -251,22 +290,45 @@ class SensorStreamBuffer:
         merged[incoming_offset : incoming_offset + samples.size] = samples
         merged_coverage[incoming_offset : incoming_offset + samples.size] = True
 
-        self.samples = merged
-        self.coverage = merged_coverage
-        self._buffer_start_sample_index = merged_start_sample_index
-        self._refresh_start_time_ns()
-        self._prune(_protected_from_ns)
+        self._state = self._pruned(
+            _BufferState(
+                samples=merged,
+                coverage=merged_coverage,
+                buffer_start_sample_index=merged_start_sample_index,
+                timeline_origin_ns=state.timeline_origin_ns,
+                timeline_origin_sample_index=state.timeline_origin_sample_index,
+                start_time_ns=self._sample_index_to_time_ns(state, merged_start_sample_index),
+            ),
+            _protected_from_ns,
+        )
+
+    def _anchored_state(
+        self,
+        start_time_ns: int,
+        samples: np.ndarray,
+        start_sample_index: int | None,
+    ) -> _BufferState:
+        anchor_sample_index = start_sample_index or 0
+        return _BufferState(
+            samples=samples.copy(),
+            coverage=np.ones(samples.size, dtype=np.bool_),
+            buffer_start_sample_index=anchor_sample_index,
+            timeline_origin_ns=start_time_ns,
+            timeline_origin_sample_index=anchor_sample_index,
+            start_time_ns=start_time_ns,
+        )
 
     def get_range(self, start_ns: int, end_ns: int) -> np.ndarray:
         """Return samples for [start_ns, end_ns), zero-padding any coverage gaps.
 
         Returns an empty array if the entire range lies outside the buffer.
         """
-        if self.start_time_ns is None or self.samples.size == 0:
+        state = self._state
+        if state.start_time_ns is None or state.samples.size == 0:
             return np.zeros(0, dtype=np.float32)
 
-        start_idx = self._time_to_sample_index(start_ns)
-        end_idx = self._time_to_sample_index(end_ns)
+        start_idx = self._time_to_sample_index(state, start_ns)
+        end_idx = self._time_to_sample_index(state, end_ns)
         n_out = max(0, end_idx - start_idx)
         if n_out == 0:
             return np.zeros(0, dtype=np.float32)
@@ -274,8 +336,8 @@ class SensorStreamBuffer:
         out = np.zeros(n_out, dtype=np.float32)
         cov_out = np.zeros(n_out, dtype=np.bool_)
 
-        buf_start = self._buffer_start_sample_index
-        buf_end = buf_start + self.samples.size
+        buf_start = state.buffer_start_sample_index
+        buf_end = buf_start + state.samples.size
 
         # Overlap of requested range with buffered range.
         overlap_start = max(start_idx, buf_start)
@@ -285,48 +347,54 @@ class SensorStreamBuffer:
             out_offset = overlap_start - start_idx
             buf_offset = overlap_start - buf_start
             length = overlap_end - overlap_start
-            out[out_offset : out_offset + length] = self.samples[buf_offset : buf_offset + length]
-            cov_out[out_offset : out_offset + length] = self.coverage[buf_offset : buf_offset + length]
+            out[out_offset : out_offset + length] = state.samples[buf_offset : buf_offset + length]
+            cov_out[out_offset : out_offset + length] = state.coverage[buf_offset : buf_offset + length]
 
         # Zero-out any uncovered samples (coverage gaps inside the buffered range).
         out[~cov_out] = 0.0
         return out
 
-    def _prune(self, protected_from_ns: Optional[int] = None) -> None:
-        if self.samples.size <= self.max_samples:
-            return
+    def _pruned(self, state: _BufferState, protected_from_ns: Optional[int] = None) -> _BufferState:
+        if state.samples.size <= self.max_samples:
+            return state
 
-        drop = self.samples.size - self.max_samples
+        drop = state.samples.size - self.max_samples
 
         # If a pin is active, do not evict samples at or after the pin timestamp.
-        if protected_from_ns is not None and self._timeline_origin_ns is not None:
-            protected_idx = self._time_to_sample_index(protected_from_ns)
-            max_drop = max(0, protected_idx - self._buffer_start_sample_index)
+        if protected_from_ns is not None and state.timeline_origin_ns is not None:
+            protected_idx = self._time_to_sample_index(state, protected_from_ns)
+            max_drop = max(0, protected_idx - state.buffer_start_sample_index)
             drop = min(drop, max_drop)
             if drop <= 0:
-                return
+                return state
 
-        self.samples = self.samples[drop:]
-        self.coverage = self.coverage[drop:]
-        self._buffer_start_sample_index += drop
-        self._refresh_start_time_ns()
+        pruned_start_sample_index = state.buffer_start_sample_index + drop
+        return _BufferState(
+            samples=state.samples[drop:],
+            coverage=state.coverage[drop:],
+            buffer_start_sample_index=pruned_start_sample_index,
+            timeline_origin_ns=state.timeline_origin_ns,
+            timeline_origin_sample_index=state.timeline_origin_sample_index,
+            start_time_ns=self._sample_index_to_time_ns(state, pruned_start_sample_index),
+        )
 
     def get_window(self, center_time_ns: int, window_seconds: float) -> np.ndarray | None:
-        if self.start_time_ns is None or self.samples.size == 0:
+        state = self._state
+        if state.start_time_ns is None or state.samples.size == 0:
             return None
 
         window_samples = max(1, int(round(window_seconds * self.sample_rate_hz)))
-        center_sample_index = self._time_to_sample_index(center_time_ns)
+        center_sample_index = self._time_to_sample_index(state, center_time_ns)
         start_sample_index = center_sample_index - (window_samples // 2)
         end_sample_index = start_sample_index + window_samples
 
-        relative_start_index = start_sample_index - self._buffer_start_sample_index
-        relative_end_index = end_sample_index - self._buffer_start_sample_index
+        relative_start_index = start_sample_index - state.buffer_start_sample_index
+        relative_end_index = end_sample_index - state.buffer_start_sample_index
 
-        if relative_start_index < 0 or relative_end_index > self.samples.size:
+        if relative_start_index < 0 or relative_end_index > state.samples.size:
             return None
 
-        return self.samples[relative_start_index:relative_end_index].copy()
+        return state.samples[relative_start_index:relative_end_index].copy()
 
     def get_window_coverage_stats(self, center_time_ns: int, window_seconds: float) -> AudioCoverageStats | None:
         coverage = self._coverage_window(center_time_ns=center_time_ns, window_seconds=window_seconds)
@@ -335,14 +403,15 @@ class SensorStreamBuffer:
         return _coverage_stats(coverage, self.sample_rate_hz)
 
     def get_window_ending_at(self, end_time_ns: int, window_seconds: float) -> np.ndarray | None:
-        if self.start_time_ns is None or self.samples.size == 0:
+        state = self._state
+        if state.start_time_ns is None or state.samples.size == 0:
             return None
 
         window_samples = max(1, int(round(window_seconds * self.sample_rate_hz)))
-        end_sample_index = self._time_to_sample_index(end_time_ns)
+        end_sample_index = self._time_to_sample_index(state, end_time_ns)
         start_sample_index = end_sample_index - window_samples
-        end_offset_samples = end_sample_index - self._buffer_start_sample_index
-        start_offset_samples = start_sample_index - self._buffer_start_sample_index
+        end_offset_samples = end_sample_index - state.buffer_start_sample_index
+        start_offset_samples = start_sample_index - state.buffer_start_sample_index
 
         # Clamp the start to the beginning of the buffer so partial windows (e.g.
         # when the buffer has less than classification_window_seconds of history) return
@@ -351,11 +420,11 @@ class SensorStreamBuffer:
         # for BirdNET and produced only "unknown" (0.0) classifications.
         # We still return None when the end is beyond what has been buffered because
         # that would require future samples.
-        if end_offset_samples > self.samples.size:
+        if end_offset_samples > state.samples.size:
             return None
         start_offset_samples = max(0, start_offset_samples)
 
-        return self.samples[start_offset_samples:end_offset_samples].copy()
+        return state.samples[start_offset_samples:end_offset_samples].copy()
 
     def get_window_ending_at_coverage_stats(
         self,
@@ -368,53 +437,52 @@ class SensorStreamBuffer:
         return _coverage_stats(coverage, self.sample_rate_hz)
 
     def end_time_ns(self) -> int | None:
-        if self.start_time_ns is None or self.samples.size == 0:
-            return None
-        return self._sample_index_to_time_ns(self._buffer_start_sample_index + self.samples.size)
+        return self._state_end_time_ns(self._state)
 
-    def _refresh_start_time_ns(self) -> None:
-        if self._timeline_origin_ns is None:
-            self.start_time_ns = None
-            return
-        self.start_time_ns = self._sample_index_to_time_ns(self._buffer_start_sample_index)
+    def _state_end_time_ns(self, state: _BufferState) -> int | None:
+        if state.start_time_ns is None or state.samples.size == 0:
+            return None
+        return self._sample_index_to_time_ns(state, state.buffer_start_sample_index + state.samples.size)
 
     def _coverage_window(self, center_time_ns: int, window_seconds: float) -> np.ndarray | None:
-        if self.start_time_ns is None or self.coverage.size == 0:
+        state = self._state
+        if state.start_time_ns is None or state.coverage.size == 0:
             return None
         window_samples = max(1, int(round(window_seconds * self.sample_rate_hz)))
-        center_sample_index = self._time_to_sample_index(center_time_ns)
+        center_sample_index = self._time_to_sample_index(state, center_time_ns)
         start_sample_index = center_sample_index - (window_samples // 2)
         end_sample_index = start_sample_index + window_samples
-        relative_start_index = start_sample_index - self._buffer_start_sample_index
-        relative_end_index = end_sample_index - self._buffer_start_sample_index
-        if relative_start_index < 0 or relative_end_index > self.coverage.size:
+        relative_start_index = start_sample_index - state.buffer_start_sample_index
+        relative_end_index = end_sample_index - state.buffer_start_sample_index
+        if relative_start_index < 0 or relative_end_index > state.coverage.size:
             return None
-        return self.coverage[relative_start_index:relative_end_index].copy()
+        return state.coverage[relative_start_index:relative_end_index].copy()
 
     def _coverage_window_ending_at(self, end_time_ns: int, window_seconds: float) -> np.ndarray | None:
-        if self.start_time_ns is None or self.coverage.size == 0:
+        state = self._state
+        if state.start_time_ns is None or state.coverage.size == 0:
             return None
         window_samples = max(1, int(round(window_seconds * self.sample_rate_hz)))
-        end_sample_index = self._time_to_sample_index(end_time_ns)
+        end_sample_index = self._time_to_sample_index(state, end_time_ns)
         start_sample_index = end_sample_index - window_samples
-        end_offset_samples = end_sample_index - self._buffer_start_sample_index
-        start_offset_samples = start_sample_index - self._buffer_start_sample_index
-        if end_offset_samples > self.coverage.size:
+        end_offset_samples = end_sample_index - state.buffer_start_sample_index
+        start_offset_samples = start_sample_index - state.buffer_start_sample_index
+        if end_offset_samples > state.coverage.size:
             return None
         start_offset_samples = max(0, start_offset_samples)
-        return self.coverage[start_offset_samples:end_offset_samples].copy()
+        return state.coverage[start_offset_samples:end_offset_samples].copy()
 
-    def _time_to_sample_index(self, time_ns: int) -> int:
-        if self._timeline_origin_ns is None:
+    def _time_to_sample_index(self, state: _BufferState, time_ns: int) -> int:
+        if state.timeline_origin_ns is None:
             raise ValueError("SensorStreamBuffer timeline origin is not initialized")
-        delta_ns = time_ns - self._timeline_origin_ns
-        return self._timeline_origin_sample_index + self._round_divide(delta_ns * self.sample_rate_hz, 1_000_000_000)
+        delta_ns = time_ns - state.timeline_origin_ns
+        return state.timeline_origin_sample_index + self._round_divide(delta_ns * self.sample_rate_hz, 1_000_000_000)
 
-    def _sample_index_to_time_ns(self, sample_index: int) -> int:
-        if self._timeline_origin_ns is None:
+    def _sample_index_to_time_ns(self, state: _BufferState, sample_index: int) -> int:
+        if state.timeline_origin_ns is None:
             raise ValueError("SensorStreamBuffer timeline origin is not initialized")
-        return self._timeline_origin_ns + self._round_divide(
-            (sample_index - self._timeline_origin_sample_index) * 1_000_000_000,
+        return state.timeline_origin_ns + self._round_divide(
+            (sample_index - state.timeline_origin_sample_index) * 1_000_000_000,
             self.sample_rate_hz,
         )
 
@@ -473,7 +541,7 @@ class MultiSensorBuffer:
         Enforces a 5-minute hard cap so a stuck session cannot cause OOM.
 
         Performance note: SensorStreamBuffer uses a grow-and-prune pattern.
-        While a pin is active, _prune() cannot evict old frames, so the buffer
+        While a pin is active, pruning cannot evict old frames, so the buffer
         grows by one frame on every append() call.  Each append() allocates and
         copies (current_buffer_size + new_frame) samples — O(N) per frame.
         At 16 kHz × 4 ch × 5 min this peaks at ~19 MB per append on a 300 s
@@ -525,7 +593,7 @@ class MultiSensorBuffer:
         metadata. The actual numpy slicing happens outside the lock so that
         incoming real-time frames are not blocked during post-processing of a
         potentially multi-minute recording.  CPython reference counting keeps
-        the snapshotted numpy arrays alive even after _prune() replaces them.
+        the snapshotted numpy arrays alive even after pruning replaces them.
         """
         # ── Phase 1: snapshot under lock (cheap — just captures references) ───
         # Each entry is (samples_ref, coverage_ref, buf_start_idx, sr, origin_ns, origin_sample_idx)
@@ -538,26 +606,32 @@ class MultiSensorBuffer:
         async with self._lock:
             for sensor_id in sensor_ids:
                 buf = self._buffers.get(sensor_id)
-                if buf is None or buf.samples.size == 0 or buf._timeline_origin_ns is None:
+                if buf is None:
+                    snapshots.append(None)
+                    continue
+                buf_state = buf._state
+                if buf_state.samples.size == 0 or buf_state.timeline_origin_ns is None:
                     snapshots.append(None)
                     continue
                 if sample_rate_hz == 0:
                     sample_rate_hz = buf.sample_rate_hz
-                if buf.start_time_ns is not None:
-                    actual_start_ns = max(actual_start_ns, buf.start_time_ns)
-                end_buf = buf.end_time_ns()
+                if buf_state.start_time_ns is not None:
+                    actual_start_ns = max(actual_start_ns, buf_state.start_time_ns)
+                end_buf = buf._state_end_time_ns(buf_state)
                 if end_buf is not None:
                     actual_end_ns = min(actual_end_ns, end_buf)
-                # Snapshot the array *references* (not copies) plus index metadata.
-                # After lock release, buf.samples may be replaced by append(), but
-                # CPython keeps the old array alive as long as we hold this reference.
+                # Snapshot the array *references* (not copies) plus index metadata,
+                # all taken from one immutable _BufferState so they are mutually
+                # consistent. After lock release, buf._state may be replaced by
+                # append(), but CPython keeps the old arrays alive as long as we
+                # hold these references.
                 snapshots.append((
-                    buf.samples,                       # numpy ref — safe to read after unlock
-                    buf.coverage,
-                    buf._buffer_start_sample_index,
+                    buf_state.samples,                 # numpy ref — safe to read after unlock
+                    buf_state.coverage,
+                    buf_state.buffer_start_sample_index,
                     buf.sample_rate_hz,
-                    buf._timeline_origin_ns,
-                    buf._timeline_origin_sample_index,
+                    buf_state.timeline_origin_ns,
+                    buf_state.timeline_origin_sample_index,
                 ))
 
         # ── Phase 2: slice from snapshots — lock NOT held ─────────────────────
@@ -791,14 +865,15 @@ class MultiSensorBuffer:
                 if buffer is None:
                     state.append({"sensor_id": sensor_id, "present": False})
                     continue
-                end_time_ns = buffer.end_time_ns()
+                buffer_state = buffer._state
+                end_time_ns = buffer._state_end_time_ns(buffer_state)
                 state.append(
                     {
                         "sensor_id": sensor_id,
                         "present": True,
                         "sample_rate_hz": buffer.sample_rate_hz,
-                        "sample_count": int(buffer.samples.size),
-                        "start_time_ns": buffer.start_time_ns,
+                        "sample_count": int(buffer_state.samples.size),
+                        "start_time_ns": buffer_state.start_time_ns,
                         "end_time_ns": end_time_ns,
                         "reanchor_count": int(buffer.reanchor_count),
                         "rate_mismatch_wipes": int(self._rate_mismatch_wipes.get(sensor_id, 0)),
@@ -873,13 +948,16 @@ class MultiSensorBuffer:
         window_seconds: float,
     ) -> tuple[dict[str, np.ndarray], int, int] | None:
         async with self._lock:
-            available: list[tuple[str, SensorStreamBuffer]] = []
+            available: list[tuple[str, SensorStreamBuffer, _BufferState]] = []
             sample_rate_counts: dict[int, int] = {}
             for sensor_id in sensor_ids:
                 buffer = self._buffers.get(sensor_id)
-                if buffer is None or buffer.start_time_ns is None or buffer.samples.size == 0:
+                if buffer is None:
                     continue
-                available.append((sensor_id, buffer))
+                buffer_state = buffer._state
+                if buffer_state.start_time_ns is None or buffer_state.samples.size == 0:
+                    continue
+                available.append((sensor_id, buffer, buffer_state))
                 sample_rate_counts[buffer.sample_rate_hz] = sample_rate_counts.get(buffer.sample_rate_hz, 0) + 1
 
             if not available:
@@ -895,14 +973,14 @@ class MultiSensorBuffer:
             window_samples = max(1, int(round(window_seconds * dominant_sample_rate_hz)))
             latest_end_ns = 0
             recent: dict[str, np.ndarray] = {}
-            for sensor_id, buffer in available:
+            for sensor_id, buffer, buffer_state in available:
                 if buffer.sample_rate_hz != dominant_sample_rate_hz:
                     continue
-                tail = buffer.samples[-window_samples:].copy()
+                tail = buffer_state.samples[-window_samples:].copy()
                 if tail.size == 0:
                     continue
                 recent[sensor_id] = tail
-                end_ns = buffer.end_time_ns()
+                end_ns = buffer._state_end_time_ns(buffer_state)
                 if end_ns is None:
                     continue
                 latest_end_ns = max(latest_end_ns, end_ns)
@@ -937,9 +1015,11 @@ class MultiSensorBuffer:
         """Return a list of n_buckets RMS values spanning the stored sample window for one sensor."""
         async with self._lock:
             buffer = self._buffers.get(sensor_id)
-            if buffer is None or buffer.samples.size < n_buckets:
+            if buffer is None:
                 return []
-            samples = buffer.samples
+            samples = buffer._state.samples
+            if samples.size < n_buckets:
+                return []
             n = samples.size
             chunk_size = max(1, n // n_buckets)
             result: list[float] = []
@@ -966,22 +1046,25 @@ class MultiSensorBuffer:
             latest_sample_time_ns: int | None = None
             for sensor_id in sensor_ids:
                 buffer = self._buffers.get(sensor_id)
-                if buffer is None or buffer.start_time_ns is None or buffer.samples.size == 0:
+                if buffer is None:
+                    continue
+                buffer_state = buffer._state
+                if buffer_state.start_time_ns is None or buffer_state.samples.size == 0:
                     continue
 
                 active_sensor_count += 1
                 sample_rate_counts[buffer.sample_rate_hz] = sample_rate_counts.get(buffer.sample_rate_hz, 0) + 1
                 max_buffer_samples = max(max_buffer_samples, buffer.max_samples)
                 max_buffer_seconds = max(max_buffer_seconds, buffer.max_duration_seconds)
-                end_ns = buffer.end_time_ns()
+                end_ns = buffer._state_end_time_ns(buffer_state)
                 if end_ns is None:
                     continue
                 latest_sample_time_ns = end_ns if latest_sample_time_ns is None else max(latest_sample_time_ns, end_ns)
 
-                tail_samples = max(1, min(buffer.samples.size, buffer.sample_rate_hz // 2))
-                tail = buffer.samples[-tail_samples:]
+                tail_samples = max(1, min(buffer_state.samples.size, buffer.sample_rate_hz // 2))
+                tail = buffer_state.samples[-tail_samples:]
                 rms_values.append(float(np.sqrt(np.mean(np.square(tail)) + 1e-12)))
-                coverage_tail = buffer.coverage[-tail_samples:]
+                coverage_tail = buffer_state.coverage[-tail_samples:]
                 coverage_stats = _coverage_stats(coverage_tail, buffer.sample_rate_hz)
                 coverage_ratios.append(coverage_stats.coverage_ratio)
                 missing_ratios.append(coverage_stats.missing_ratio)
