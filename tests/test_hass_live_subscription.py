@@ -8,6 +8,7 @@ blocked by websocket clients, and must not let a broken subscriber escape into
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -21,8 +22,8 @@ class _FakeWebSocket:
     async def accept(self) -> None:
         return None
 
-    async def send_json(self, payload: dict) -> None:
-        self.sent.append(payload)
+    async def send_text(self, text: str) -> None:
+        self.sent.append(json.loads(text))
 
 
 @pytest.mark.asyncio
