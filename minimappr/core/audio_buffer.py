@@ -1040,6 +1040,8 @@ class MultiSensorBuffer:
             rms_values: list[float] = []
             coverage_ratios: list[float] = []
             missing_ratios: list[float] = []
+            per_sensor: list[dict[str, float | int | str | None]] = []
+            coverage_window_seconds = 0.0
             max_gap_seconds = 0.0
             max_buffer_samples = 0
             max_buffer_seconds = 0.0
@@ -1062,13 +1064,30 @@ class MultiSensorBuffer:
                 latest_sample_time_ns = end_ns if latest_sample_time_ns is None else max(latest_sample_time_ns, end_ns)
 
                 tail_samples = max(1, min(buffer_state.samples.size, buffer.sample_rate_hz // 2))
+                coverage_window_seconds = max(
+                    coverage_window_seconds, tail_samples / float(buffer.sample_rate_hz or 1)
+                )
                 tail = buffer_state.samples[-tail_samples:]
-                rms_values.append(float(np.sqrt(np.mean(np.square(tail)) + 1e-12)))
+                sensor_rms = float(np.sqrt(np.mean(np.square(tail)) + 1e-12))
+                rms_values.append(sensor_rms)
                 coverage_tail = buffer_state.coverage[-tail_samples:]
                 coverage_stats = _coverage_stats(coverage_tail, buffer.sample_rate_hz)
                 coverage_ratios.append(coverage_stats.coverage_ratio)
                 missing_ratios.append(coverage_stats.missing_ratio)
                 max_gap_seconds = max(max_gap_seconds, coverage_stats.max_gap_seconds)
+                # Per-sensor detail: the aggregates below are means, and a channel
+                # that is dead-but-present (silent or stuck) barely moves a mean
+                # across four mics. A failed mic stayed invisible in node health
+                # for weeks this way while the pipeline quietly solved on three.
+                per_sensor.append(
+                    {
+                        "sensor_id": sensor_id,
+                        "rms": sensor_rms,
+                        "coverage_ratio": coverage_stats.coverage_ratio,
+                        "max_gap_seconds": coverage_stats.max_gap_seconds,
+                        "age_seconds": max(0.0, (now_ns - end_ns) / 1_000_000_000.0),
+                    }
+                )
 
             dominant_sample_rate_hz: int | None = None
             if sample_rate_counts:
@@ -1098,6 +1117,19 @@ class MultiSensorBuffer:
                 "recent_coverage_ratio": coverage_ratio,
                 "recent_missing_ratio": missing_ratio,
                 "recent_max_gap_seconds": max_gap_seconds if coverage_ratios else None,
+                # The "recent_*" figures above cover only the last ~0.5 s and are
+                # means across sensors. Reported explicitly because a 1.0 here was
+                # read as "healthy" while the pipeline, measuring over its 30 s
+                # classification window, was simultaneously seeing 3.6% missing
+                # samples and 1.1 s gaps on the same node. Both were correct: a
+                # 0.5 s window cannot contain a 1.1 s gap.
+                "recent_coverage_window_seconds": coverage_window_seconds or None,
+                "recent_min_coverage_ratio": (
+                    float(np.min(np.asarray(coverage_ratios, dtype=np.float64)))
+                    if coverage_ratios
+                    else None
+                ),
+                "per_sensor": per_sensor or None,
                 "max_buffer_samples": max_buffer_samples or None,
                 "max_buffer_seconds": max_buffer_seconds or None,
             }

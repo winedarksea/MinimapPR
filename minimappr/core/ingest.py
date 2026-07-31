@@ -176,6 +176,10 @@ class IngestProcessor:
         self._position_kalman: dict[str, _NodePositionKalman] = {}
         self._position_kde: dict[str, StationaryKdeState] = {}
         self._position_filter_by_node: dict[str, str] = {}
+        # Last altitude that came from an actual 3D fix, held so a later 2D fix
+        # (which does not solve altitude at all) cannot move the node vertically.
+        self._last_trusted_altitude_m: dict[str, float] = {}
+        self._untrusted_altitude_warned_node_ids: set[str] = set()
         self._kde_evaluation_tasks: dict[str, asyncio.Task] = {}
         # Rate-limit the per-frame sequence-gap warning per node; on a lossy
         # link this fires on most frames and saturates the log ring buffer.
@@ -627,9 +631,39 @@ class IngestProcessor:
             and gps_position_source.startswith("gps")
             and gps_position_source != "gps_fallback"
         )
+        # A 2D fix solves latitude and longitude only — its altitude is not a
+        # measurement. Two co-sited nodes were reporting altitudes 25 m apart
+        # because a fix_2d node's altitude was accepted and smoothed like any
+        # other axis, becoming the vertical baseline for every track it produced.
+        gps_signal = gps_metadata.get("signal") if isinstance(gps_metadata, dict) else None
+        has_trusted_gps_altitude = isinstance(gps_signal, str) and gps_signal.strip().lower() == "fix_3d"
 
         if spec.position_geo is not None:
             raw_local = self._coordinate_frame.geo_to_local(spec.position_geo)
+            if has_trusted_gps_position and not has_trusted_gps_altitude:
+                # Substitute the last altitude that came from a real 3D fix before
+                # any filtering, so the horizontal axes still track normally and the
+                # vertical filter state is never advanced by an unmeasured value.
+                #
+                # Only a genuine 3D fix qualifies. A node that has never had one has
+                # no better altitude available, so its readings are left to the normal
+                # filters — freezing z at the first sample would discard the averaging
+                # that at least suppresses noise. The warning below is the signal that
+                # such a node's altitude should not be trusted.
+                retained_altitude_m = self._last_trusted_altitude_m.get(spec.id)
+                if retained_altitude_m is not None:
+                    raw_local = (raw_local[0], raw_local[1], retained_altitude_m)
+                if spec.id not in self._untrusted_altitude_warned_node_ids:
+                    self._untrusted_altitude_warned_node_ids.add(spec.id)
+                    _logger.warning(
+                        "node %s reports GPS signal %r; altitude is not solved by a 2D fix "
+                        "and will be held rather than tracked",
+                        spec.id,
+                        gps_signal,
+                    )
+            elif has_trusted_gps_position and has_trusted_gps_altitude:
+                self._last_trusted_altitude_m[spec.id] = float(raw_local[2])
+                self._untrusted_altitude_warned_node_ids.discard(spec.id)
             if has_trusted_gps_position:
                 effective_filter = position_filter or ("kalman" if spec.mobility == "mobile" else "kde")
                 previous_filter = self._position_filter_by_node.get(spec.id)

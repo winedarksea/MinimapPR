@@ -304,10 +304,10 @@ class DetectionAssembler:
             all_observation_ids = list(
                 dict.fromkeys([*existing_detection.get("source_observation_ids", []), *all_observation_ids])
             )
-        # -- SPL ---------------------------------------------------------------
+        # -- received level (dB relative to full scale, NOT SPL) ---------------
         gain_offset_db = await self._registry.gain_offset_db_for_sensor(reference_sensor)
         digital_trim_db = self._preprocessor_factory.fixed_gain_db_for_sensor(reference_sensor)
-        spl_db = received_level_db_from_rms(
+        received_level_db = received_level_db_from_rms(
             rms(reference_signal),
             gain_offset_db - digital_trim_db,
         )
@@ -355,7 +355,7 @@ class DetectionAssembler:
             label_category=label_category,
             iff_category=iff_category,
             label_confidence=classification_confidence,
-            spl_db=spl_db,
+            received_level_db=received_level_db,
             track_id=track.id if track is not None and not suppressed_by_zone else None,
             source_sensors=sorted(selected_sensor_ids),
             source_observation_ids=all_observation_ids,
@@ -431,7 +431,7 @@ class DetectionAssembler:
                     ping_type="acoustic",
                     label=detection.label,
                     label_id=detection.label_id,
-                    spl_db=detection.spl_db,
+                    received_level_db=detection.received_level_db,
                     position_m=detection.position_m,
                     position_geo=detection.position_geo,
                     source_detection_id=detection.id,

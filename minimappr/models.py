@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Literal, TypeAlias
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, model_serializer, model_validator
 
 
 Vec3 = tuple[float, float, float]
@@ -568,7 +568,12 @@ class DetectionEvent(BaseModel):
     label_category: str = "unknown"
     iff_category: Literal["friendly", "unknown", "hostile"] = "unknown"
     label_confidence: float
-    spl_db: float | None = None
+    # NOT sound pressure level. This is 20*log10(rms) + the node's calibration gain
+    # offset, i.e. a level relative to digital full scale, so values are normally
+    # negative (field data: -40 to -59). It was called ``spl_db`` for a long time,
+    # which silently invited rules written against real SPL thresholds — those can
+    # never match. ``spl_db`` remains readable as a deprecated alias.
+    received_level_db: float | None = None
     track_id: str | None = None
     source_sensors: list[str] = Field(default_factory=list)
     source_observation_ids: list[str] = Field(default_factory=list)
@@ -608,6 +613,23 @@ class DetectionEvent(BaseModel):
                 feature_summary=self.feature_summary,
             )
         return self
+
+    @property
+    def spl_db(self) -> float | None:
+        """Deprecated alias for :attr:`received_level_db`.
+
+        The value was never sound pressure level; see the field comment. Retained
+        so existing readers keep working across the rename.
+        """
+        return self.received_level_db
+
+    @model_serializer(mode="wrap")
+    def _serialize_with_legacy_alias(self, handler):  # type: ignore[no-untyped-def]
+        data = handler(self)
+        # Emit both names so API consumers pinned to the old key keep working.
+        if isinstance(data, dict) and "received_level_db" in data:
+            data["spl_db"] = data["received_level_db"]
+        return data
 
 
 class DetectionReviewUpdateRequest(BaseModel):
@@ -738,7 +760,12 @@ class FederationStatusResponse(BaseModel):
     peer_count: int
     peer_track_count: int
     peers: list[dict[str, Any]]
-    metrics: dict[str, int]
+    # ``dict[str, Any]`` (not ``dict[str, int]``): FederationCoordinator.status()
+    # nests FederationMetrics.rates() — a dict of floats — under the "rates" key
+    # alongside the integer counters. Declaring int here made every call to
+    # /api/v1/federation/status raise ResponseValidationError. Mirrors
+    # FusionStatusResponse.metrics above.
+    metrics: dict[str, Any]
     publish_interval_seconds: float
     heartbeat_interval_seconds: float
     link_timeout_seconds: float

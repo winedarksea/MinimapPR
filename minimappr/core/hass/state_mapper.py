@@ -325,8 +325,13 @@ class HassStateMapper:
         """
         zone_ids = [str(item) for item in detection.get("zone_ids") or []]
         timestamp_ns = _as_int(detection.get("timestamp_ns"), now_ns)
+        # Prefer the current field name; fall back to the legacy key so a payload
+        # produced before the rename still reports a level.
+        received_level_db = detection.get("received_level_db")
+        if received_level_db is None:
+            received_level_db = detection.get("spl_db")
         self._spl.observe(
-            zone_ids=zone_ids, spl_db=detection.get("spl_db"), timestamp_ns=timestamp_ns
+            zone_ids=zone_ids, received_level_db=received_level_db, timestamp_ns=timestamp_ns
         )
 
         messages: list[MqttPublish] = []
@@ -356,9 +361,10 @@ class HassStateMapper:
                 "zone_ids": zone_ids,
                 "timestamp_ns": timestamp_ns,
             }
-            spl_db = detection.get("spl_db")
-            if spl_db is not None:
-                payload["spl_db"] = spl_db
+            if received_level_db is not None:
+                payload["received_level_db"] = received_level_db
+                # Legacy key retained so existing HA templates keep resolving.
+                payload["spl_db"] = received_level_db
             position = detection.get("position_geo")
             if isinstance(position, dict):
                 payload["latitude"] = position.get("lat")

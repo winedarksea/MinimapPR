@@ -217,7 +217,7 @@ class Storage:
                 label_category TEXT NOT NULL DEFAULT 'unknown',
                 iff_category TEXT NOT NULL DEFAULT 'unknown',
                 label_confidence REAL NOT NULL,
-                spl_db REAL,
+                received_level_db REAL,
                 track_id TEXT REFERENCES tracks(id) ON DELETE SET NULL,
                 reference_sensor TEXT NOT NULL,
                 source_sensors_json TEXT NOT NULL,
@@ -342,7 +342,7 @@ class Storage:
                 ping_type TEXT NOT NULL,
                 label_id TEXT REFERENCES labels(id) ON DELETE SET NULL,
                 label TEXT,
-                spl_db REAL,
+                received_level_db REAL,
                 source_detection_id TEXT REFERENCES detections(id) ON DELETE SET NULL,
                 source_observation_id TEXT REFERENCES observations(id) ON DELETE SET NULL,
                 source_track_id TEXT REFERENCES tracks(id) ON DELETE SET NULL,
@@ -496,6 +496,7 @@ class Storage:
         )
 
         # Migration-safe additions for older DBs.
+        await self._migrate_spl_db_to_received_level()
         await self._ensure_columns(
             "nodes",
             {
@@ -533,7 +534,7 @@ class Storage:
                 "label_id": "TEXT",
                 "label_category": "TEXT NOT NULL DEFAULT 'unknown'",
                 "iff_category": "TEXT NOT NULL DEFAULT 'unknown'",
-                "spl_db": "REAL",
+                "received_level_db": "REAL",
                 "source_observation_ids_json": "TEXT NOT NULL DEFAULT '[]'",
                 "zone_ids_json": "TEXT NOT NULL DEFAULT '[]'",
                 "review_state": "TEXT NOT NULL DEFAULT 'unreviewed'",
@@ -974,6 +975,28 @@ class Storage:
         rows = await (await db.execute(f"PRAGMA table_info({table})")).fetchall()
         return {row["name"] for row in rows}
 
+    async def _migrate_spl_db_to_received_level(self) -> None:
+        """Rename the legacy ``spl_db`` column to ``received_level_db``.
+
+        The value was never sound pressure level — it is 20*log10(rms) plus the
+        node's calibration gain offset, so it is a level relative to full scale and
+        normally negative. The old name invited rules written against real SPL
+        thresholds, which could never match.
+
+        Uses ALTER TABLE ... RENAME COLUMN so existing rows keep their values; the
+        additive ``_ensure_columns`` pass would otherwise add an empty
+        ``received_level_db`` beside the populated ``spl_db`` and orphan the data.
+        Must therefore run before that pass. No-op once migrated.
+        """
+        db = self._require_db()
+        for table in ("detections", "pings"):
+            columns = await self._table_columns(table)
+            if "spl_db" not in columns or "received_level_db" in columns:
+                continue
+            await db.execute(
+                f"ALTER TABLE {table} RENAME COLUMN spl_db TO received_level_db"
+            )
+
     async def _ensure_columns(self, table: str, expected: dict[str, str]) -> None:
         db = self._require_db()
         current = await self._table_columns(table)
@@ -1355,7 +1378,7 @@ class Storage:
                     report_window_start_ns, report_window_end_ns, reporting_modality,
                     x, y, z, lat, lon, alt, covariance_json,
                     confidence, gdop, label_id, label, label_category, iff_category,
-                    label_confidence, spl_db, track_id,
+                    label_confidence, received_level_db, track_id,
                     reference_sensor, source_sensors_json, source_observation_ids_json,
                     zone_ids_json, tdoa_json, classifier_scores_json, feature_summary_json,
                     retention_tier, snippet_path, snippet_expires_ns
@@ -1391,7 +1414,7 @@ class Storage:
                     detection.label_category,
                     detection.iff_category,
                     detection.label_confidence,
-                    detection.spl_db,
+                    detection.received_level_db,
                     detection.track_id,
                     detection.reference_sensor,
                     _json_dumps(detection.source_sensors),
@@ -1424,7 +1447,7 @@ class Storage:
                     report_window_start_ns = ?, report_window_end_ns = ?, reporting_modality = ?,
                     x = ?, y = ?, z = ?, lat = ?, lon = ?, alt = ?, covariance_json = ?,
                     confidence = ?, gdop = ?, label_id = ?, label = ?, label_category = ?, iff_category = ?,
-                    label_confidence = ?, spl_db = ?, track_id = ?,
+                    label_confidence = ?, received_level_db = ?, track_id = ?,
                     reference_sensor = ?, source_sensors_json = ?, source_observation_ids_json = ?,
                     zone_ids_json = ?, tdoa_json = ?, classifier_scores_json = ?, feature_summary_json = ?,
                     retention_tier = ?, snippet_path = COALESCE(?, snippet_path),
@@ -1459,7 +1482,7 @@ class Storage:
                     detection.label_category,
                     detection.iff_category,
                     detection.label_confidence,
-                    detection.spl_db,
+                    detection.received_level_db,
                     detection.track_id,
                     detection.reference_sensor,
                     _json_dumps(detection.source_sensors),
@@ -2407,19 +2430,39 @@ class Storage:
         ).fetchall()
         return [{"lat": float(row["lat"]), "lon": float(row["lon"]), "weight": int(row["weight"])} for row in rows]
 
-    async def list_tracks(self, limit: int = 200, *, since_ns: int | None = None) -> list[dict]:
+    async def list_tracks(
+        self,
+        limit: int = 200,
+        *,
+        since_ns: int | None = None,
+        statuses: list[str] | None = None,
+    ) -> list[dict]:
+        """List tracks, newest first.
+
+        ``statuses`` restricts to the given track statuses (e.g. the active set,
+        excluding ``dropped``). Filtering in SQL rather than after the fact matters:
+        applied post-query the LIMIT is consumed by dropped rows, so an active track
+        can be pushed out of the result entirely.
+        """
         db = self._require_db()
-        if since_ns is None:
-            rows = await (
-                await db.execute("SELECT * FROM tracks ORDER BY last_seen_ns DESC LIMIT ?", (limit,))
-            ).fetchall()
-        else:
-            rows = await (
-                await db.execute(
-                    "SELECT * FROM tracks WHERE last_seen_ns >= ? ORDER BY last_seen_ns DESC LIMIT ?",
-                    (int(since_ns), limit),
-                )
-            ).fetchall()
+        clauses: list[str] = []
+        params: list[object] = []
+        if since_ns is not None:
+            clauses.append("last_seen_ns >= ?")
+            params.append(int(since_ns))
+        if statuses is not None:
+            if not statuses:
+                return []
+            clauses.append(f"status IN ({','.join('?' for _ in statuses)})")
+            params.extend(str(status) for status in statuses)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        rows = await (
+            await db.execute(
+                f"SELECT * FROM tracks{where} ORDER BY last_seen_ns DESC LIMIT ?",
+                tuple(params),
+            )
+        ).fetchall()
         tracks = [self._row_to_track(row).model_dump(mode="json") for row in rows]
         return await self.enrich_tracks_with_contributor_summaries(tracks)
 
@@ -2738,7 +2781,7 @@ class Storage:
         ping_type: str,
         label: str | None,
         label_id: LabelId | None,
-        spl_db: float | None,
+        received_level_db: float | None,
         position_m: tuple[float, float, float] | None,
         position_geo: GeoPoint | None,
         source_detection_id: str | None,
@@ -2758,7 +2801,7 @@ class Storage:
                 """
                 INSERT INTO pings (
                     id, timestamp_ns, lat, lon, alt, x, y, z, ping_type,
-                    label_id, label, spl_db, source_detection_id, source_observation_id,
+                    label_id, label, received_level_db, source_detection_id, source_observation_id,
                     source_track_id, retention_tier, metadata_json
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -2775,7 +2818,7 @@ class Storage:
                     ping_type,
                     label_id,
                     label,
-                    spl_db,
+                    received_level_db,
                     source_detection_id,
                     source_observation_id,
                     source_track_id,
@@ -3930,7 +3973,7 @@ class Storage:
             label_category=row["label_category"] or "unknown",
             iff_category=row["iff_category"] or "unknown",
             label_confidence=float(row["label_confidence"]),
-            spl_db=row["spl_db"],
+            received_level_db=row["received_level_db"],
             track_id=row["track_id"],
             reference_sensor=row["reference_sensor"],
             source_sensors=_json_loads(row["source_sensors_json"], []),

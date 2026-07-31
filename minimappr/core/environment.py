@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from minimappr.interfaces import EnvironmentProvider, EnvironmentReading
+
+_logger = logging.getLogger(__name__)
+
+# Rate limit for the "running on assumed conditions" warning.
+_FALLBACK_LOG_INTERVAL_NS = 3_600 * 1_000_000_000
 
 
 def _speed_of_sound(temperature_c: float, humidity_fraction: float) -> float:
@@ -52,6 +58,7 @@ class LiveEnvironmentProvider(EnvironmentProvider):
     fallback_humidity_fraction: float
     max_reading_age_seconds: float = 300.0
     _samples_by_node: dict[str, EnvironmentSample] = field(default_factory=dict, init=False, repr=False)
+    _fallback_logged_ns: dict[str, int] = field(default_factory=dict, init=False, repr=False)
 
     def bootstrap(self, samples: list[dict[str, Any]]) -> None:
         for sample in samples:
@@ -136,7 +143,20 @@ class LiveEnvironmentProvider(EnvironmentProvider):
                 }
             )
         else:
+            # Falling back to configured constants substitutes an assumed speed of
+            # sound for a measured one. That is survivable but must not be silent:
+            # a deployment ran for weeks on static_fallback because its only live
+            # node reported no environment at all and the other's last reading had
+            # aged past max_reading_age_seconds, with nothing in the logs saying so.
             metadata["source"] = source
+            metadata["fallback_reason"] = (
+                "no_environment_samples"
+                if not self._samples_by_node
+                else "all_environment_samples_stale"
+            )
+            metadata["known_node_count"] = len(self._samples_by_node)
+            metadata["max_reading_age_seconds"] = self.max_reading_age_seconds
+            self._log_fallback(metadata["fallback_reason"], now_ns=now_ns)
 
         return EnvironmentReading(
             temperature_c=temperature_c,
@@ -145,6 +165,20 @@ class LiveEnvironmentProvider(EnvironmentProvider):
             wind_speed_mps=wind_speed_mps,
             wind_dir_deg=wind_dir_deg,
             metadata=metadata,
+        )
+
+    def _log_fallback(self, reason: str, *, now_ns: int) -> None:
+        """Warn that constants are standing in for measurements, at most hourly."""
+        last_ns = self._fallback_logged_ns.get(reason)
+        if last_ns is not None and (now_ns - last_ns) < _FALLBACK_LOG_INTERVAL_NS:
+            return
+        self._fallback_logged_ns[reason] = now_ns
+        _logger.warning(
+            "environment falling back to configured constants (%s): %d node(s) known, "
+            "max_reading_age_seconds=%s; speed of sound is assumed, not measured",
+            reason,
+            len(self._samples_by_node),
+            self.max_reading_age_seconds,
         )
 
     def _select_sample(

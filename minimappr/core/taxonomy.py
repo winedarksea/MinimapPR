@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
 from minimappr.interfaces import TaxonomyProvider
+
+_logger = logging.getLogger(__name__)
 
 
 DEFAULT_CATEGORY_TO_IFF = {
@@ -26,7 +29,9 @@ def _heuristic_category_for_name(label: str) -> str:
         return "human"
     if any(token in value for token in ("engine", "machine", "car", "truck", "vehicle", "drone", "aircraft")):
         return "vehicle"
-    if any(token in value for token in ("gun", "glass", "alarm", "fire", "explosion", "impulse", "sir")):
+    # "siren" spelled out: the former "sir" prefix matched any label containing
+    # those three letters (e.g. a node named "sirith") and mislabelled it security.
+    if any(token in value for token in ("gun", "glass", "alarm", "fire", "explosion", "impulse", "siren")):
         return "security"
     return "unknown"
 
@@ -57,16 +62,50 @@ class RuntimeTaxonomyProvider(TaxonomyProvider):
 
     @classmethod
     def from_config_file(cls, path: Path | None) -> "RuntimeTaxonomyProvider":
-        if path is None or not path.exists():
+        """Load the taxonomy map, degrading loudly rather than silently.
+
+        Every failure here downgrades the whole system's labels to ``unknown``
+        (and therefore ``iff_category="unknown"``), which is invisible in the
+        output — it looks exactly like a classifier that never recognises
+        anything. Each degradation path is logged at WARNING so the cause is
+        discoverable from the logs instead of by inspecting detections.
+        """
+        if path is None:
+            return cls()
+        if not path.exists():
+            _logger.warning(
+                "taxonomy config not found at %s; all labels will resolve to "
+                "category/IFF 'unknown' until it is created",
+                path,
+            )
             return cls()
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError) as exc:
+            _logger.warning(
+                "taxonomy config at %s could not be read (%s); all labels will "
+                "resolve to category/IFF 'unknown'",
+                path,
+                exc,
+            )
             return cls()
         if not isinstance(raw, dict):
+            _logger.warning(
+                "taxonomy config at %s must be a JSON object, got %s; all labels "
+                "will resolve to category/IFF 'unknown'",
+                path,
+                type(raw).__name__,
+            )
             return cls()
+        label_to_category = _extract_map(raw.get("label_to_category"))
+        if not label_to_category:
+            _logger.warning(
+                "taxonomy config at %s contains no usable 'label_to_category' "
+                "entries; labels will fall back to name heuristics",
+                path,
+            )
         return cls(
-            label_to_category=_extract_map(raw.get("label_to_category")),
+            label_to_category=label_to_category,
             category_to_iff=_extract_map(raw.get("category_to_iff")),
             label_aliases=_extract_map(raw.get("label_aliases")),
         )

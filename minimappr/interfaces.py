@@ -299,7 +299,7 @@ class StorageBackend(Protocol):
         ping_type: str,
         label: str | None,
         label_id: LabelId | None,
-        spl_db: float | None,
+        received_level_db: float | None,
         position_m: tuple[float, float, float] | None,
         position_geo: GeoPoint | None,
         source_detection_id: str | None,

@@ -31,24 +31,40 @@ from minimappr.models import LabelId
 logger = logging.getLogger(__name__)
 
 
-_BIRDNET_MODEL_CATEGORY = "birdnet_v2m4"
+_BIRDNET_MODEL_NAME = "birdnet_v2m4"
+
+# BirdNET's entire vocabulary is bird species, so any label it produces is
+# wildlife by construction. Models whose output vocabulary maps wholesale onto a
+# single taxonomy category are listed here.
+_MODEL_FALLBACK_CATEGORY = {
+    _BIRDNET_MODEL_NAME: "wildlife",
+}
 
 
 def _resolve_label_category(
     classification: ClassificationResult,
     taxonomy_provider: TaxonomyProvider,
 ) -> str:
-    """Resolve taxonomy first, retaining BirdNET provenance for unmapped species.
+    """Resolve taxonomy first, falling back to the model's own vocabulary category.
 
     BirdNET species labels are open-ended, so name-only taxonomy heuristics cannot
     reliably identify every result as BirdNET-derived.  A configured or heuristic
     category remains authoritative; model provenance is only the unknown fallback.
+
+    The fallback yields a real taxonomy category (``wildlife``), not the model id.
+    Emitting ``birdnet_v2m4`` as a *category* meant it was absent from
+    ``DEFAULT_CATEGORY_TO_IFF``, so every BirdNET detection still resolved to
+    ``iff_category="unknown"`` and no rule keyed on ``wildlife`` could ever match.
+    Model provenance already lives in ``classification.features["model"]``.
     """
     taxonomy_category = taxonomy_provider.category_for_label(classification.label)
     if taxonomy_category.strip().lower() != "unknown":
         return taxonomy_category
-    if classification.features.get("model") == _BIRDNET_MODEL_CATEGORY:
-        return _BIRDNET_MODEL_CATEGORY
+    model_name = classification.features.get("model")
+    if isinstance(model_name, str):
+        fallback = _MODEL_FALLBACK_CATEGORY.get(model_name.strip().lower())
+        if fallback is not None:
+            return fallback
     return taxonomy_category
 
 

@@ -26,7 +26,8 @@ import math
 # Reference RMS for the dBFS-style SPL proxy. Kept as a module constant so the
 # Python SPL proxy and the amplitude prior share one definition. ``received_level``
 # here is 20·log10(rms) + gain_offset_db, i.e. dB relative to full scale offset by
-# the per-node calibration gain — the same quantity assembly.py records as ``spl_db``.
+# the per-node calibration gain — the same quantity assembly.py records as
+# ``received_level_db`` (formerly, and misleadingly, named ``spl_db``).
 _MIN_RMS = 1e-9
 
 

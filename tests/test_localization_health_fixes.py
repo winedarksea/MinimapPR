@@ -225,3 +225,86 @@ def test_clamp_covariance_handles_missing_and_disabled() -> None:
     # maximum_std_m <= 0 disables the cap (returns input untouched).
     cov_list = [[1e9, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
     assert clamp_covariance_eigenvalues(cov_list, maximum_std_m=0.0) == cov_list
+
+
+# --------------------------------------------------------------------------- #
+# Fix 5: a 2D GPS fix does not carry a usable altitude
+# --------------------------------------------------------------------------- #
+
+
+def _node_with_fix(coordinate_frame: LocalCoordinateFrame, local_xyz, signal: str) -> NodeSpec:
+    return NodeSpec(
+        id="gps-fix-node",
+        node_type=NodeType.SIRITH_TETRA,
+        position_geo=coordinate_frame.local_to_geo(local_xyz),
+        sensor_offsets_m=[(0.0, 0.0, 0.0)],
+        capabilities=["audio"],
+        mobility="stationary",
+        metadata={"gps": {"signal": signal, "position_source": "gps_nmea_uart"}},
+    )
+
+
+def test_two_d_fix_holds_altitude_but_still_tracks_horizontally() -> None:
+    """A fix_2d reading must not move the node vertically.
+
+    Two co-sited production nodes reported altitudes 25 m apart because a 2D fix's
+    altitude — which the receiver never solved — was smoothed like a real
+    measurement and became the vertical baseline for every track.
+    """
+    frame = LocalCoordinateFrame(origin=GeoPoint(lat=44.98, lon=-93.26, alt_m=250.0), mode="flat")
+    processor = _make_processor(frame)
+
+    # A real 3D fix establishes the trusted altitude.
+    solved = _node_with_fix(frame, (0.0, 0.0, 25.0), "fix_3d")
+    normalized, _ = processor._normalize_node_spec(solved, position_filter="raw")
+    assert normalized.position_m[2] == pytest.approx(25.0, abs=1e-6)
+
+    # The receiver degrades to a 2D fix reporting a wildly different altitude.
+    degraded = _node_with_fix(frame, (0.0, 0.0, 0.7), "fix_2d")
+    held, geo = processor._normalize_node_spec(degraded, position_filter="raw")
+    assert held.position_m[2] == pytest.approx(25.0, abs=1e-6)
+    assert geo.alt_m == pytest.approx(275.0, abs=1e-3)
+
+    # Latitude/longitude ARE solved by a 2D fix and must still track.
+    moved = _node_with_fix(frame, (40.0, -15.0, 0.7), "fix_2d")
+    tracked, _ = processor._normalize_node_spec(moved, position_filter="raw")
+    assert tracked.position_m[0] == pytest.approx(40.0, abs=1e-3)
+    assert tracked.position_m[1] == pytest.approx(-15.0, abs=1e-3)
+    assert tracked.position_m[2] == pytest.approx(25.0, abs=1e-6)
+
+
+def test_two_d_fix_without_prior_three_d_fix_is_left_to_the_filters() -> None:
+    """With no trusted altitude ever recorded there is nothing better to substitute.
+
+    Freezing z at the first sample would throw away the averaging that at least
+    suppresses noise, so the reading passes through to the normal filters.
+    """
+    frame = LocalCoordinateFrame(origin=GeoPoint(lat=44.98, lon=-93.26, alt_m=250.0), mode="flat")
+    processor = _make_processor(frame)
+
+    only_2d = _node_with_fix(frame, (0.0, 0.0, 12.0), "fix_2d")
+    normalized, _ = processor._normalize_node_spec(only_2d, position_filter="raw")
+    assert normalized.position_m[2] == pytest.approx(12.0, abs=1e-6)
+
+
+def test_three_d_fix_refreshes_the_trusted_altitude() -> None:
+    """A recovered 3D fix replaces the held altitude rather than staying pinned."""
+    frame = LocalCoordinateFrame(origin=GeoPoint(lat=44.98, lon=-93.26, alt_m=250.0), mode="flat")
+    processor = _make_processor(frame)
+
+    processor._normalize_node_spec(
+        _node_with_fix(frame, (0.0, 0.0, 25.0), "fix_3d"), position_filter="raw"
+    )
+    processor._normalize_node_spec(
+        _node_with_fix(frame, (0.0, 0.0, 0.7), "fix_2d"), position_filter="raw"
+    )
+    recovered, _ = processor._normalize_node_spec(
+        _node_with_fix(frame, (0.0, 0.0, 31.0), "fix_3d"), position_filter="raw"
+    )
+    assert recovered.position_m[2] == pytest.approx(31.0, abs=1e-6)
+
+    # And the newly solved altitude becomes the one held on the next degradation.
+    degraded_again, _ = processor._normalize_node_spec(
+        _node_with_fix(frame, (0.0, 0.0, 0.7), "fix_2d"), position_filter="raw"
+    )
+    assert degraded_again.position_m[2] == pytest.approx(31.0, abs=1e-6)

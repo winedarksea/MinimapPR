@@ -164,14 +164,14 @@ def test_aggregator_rejects_a_nonpositive_window() -> None:
 
 def test_aggregator_ignores_missing_and_unparseable_spl() -> None:
     aggregator = ZoneSplAggregator(60.0)
-    aggregator.observe(zone_ids=["z"], spl_db=None, timestamp_ns=NOW_NS)
-    aggregator.observe(zone_ids=["z"], spl_db="loud", timestamp_ns=NOW_NS)  # type: ignore[arg-type]
+    aggregator.observe(zone_ids=["z"], received_level_db=None, timestamp_ns=NOW_NS)
+    aggregator.observe(zone_ids=["z"], received_level_db="loud", timestamp_ns=NOW_NS)  # type: ignore[arg-type]
     assert aggregator.max_for_zone("z", now_ns=NOW_NS) is None
 
 
 def test_aggregator_drops_fully_expired_zones() -> None:
     aggregator = ZoneSplAggregator(1.0)
-    aggregator.observe(zone_ids=["z"], spl_db=50.0, timestamp_ns=NOW_NS)
+    aggregator.observe(zone_ids=["z"], received_level_db=50.0, timestamp_ns=NOW_NS)
     assert aggregator.tracked_zone_count() == 1
     aggregator.prune(now_ns=NOW_NS + 10 * SECOND_NS)
     assert aggregator.tracked_zone_count() == 0

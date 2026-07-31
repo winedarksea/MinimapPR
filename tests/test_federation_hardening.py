@@ -22,7 +22,11 @@ from minimappr.core.federation import (
     _extract_covariance,
     _mahalanobis_distance,
 )
-from minimappr.models import FederationTrackSnapshot, TrackState
+from minimappr.models import (
+    FederationStatusResponse,
+    FederationTrackSnapshot,
+    TrackState,
+)
 
 
 def _track(
@@ -345,3 +349,55 @@ async def test_pair_owners_max_size_enforced() -> None:
     assert len(coordinator._pair_owners) <= _PAIR_OWNERS_MAX_SIZE
 
     await coordinator.stop()
+
+
+# -- Response-model serialization --
+
+
+@pytest.mark.asyncio
+async def test_status_payload_validates_against_response_model() -> None:
+    """status() must survive FederationStatusResponse validation.
+
+    Regression: metrics was declared ``dict[str, int]`` while status() nests
+    FederationMetrics.rates() (floats) under "rates", so every live call to
+    GET /api/v1/federation/status raised ResponseValidationError and returned
+    500. Existing tests read status()["metrics"] directly and never pushed the
+    payload through the response model, which is why this shipped.
+    """
+    async def _supplier(_: int) -> list[TrackState]:
+        return []
+
+    coordinator = FederationCoordinator(settings=_settings(), track_supplier=_supplier)
+    try:
+        payload = await coordinator.status()
+        validated = FederationStatusResponse.model_validate(payload)
+
+        # The float-valued rates block is the part that used to fail.
+        rates = validated.metrics["rates"]
+        assert isinstance(rates["elapsed_seconds"], float)
+        assert isinstance(rates["heartbeats_sent_per_s"], float)
+        # Integer counters must still round-trip intact alongside it.
+        assert validated.metrics["heartbeats_sent"] == 0
+    finally:
+        await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_status_response_model_serializes_to_json() -> None:
+    """The validated payload must also serialize, as FastAPI does on the way out."""
+    async def _supplier(_: int) -> list[TrackState]:
+        return []
+
+    coordinator = FederationCoordinator(settings=_settings(), track_supplier=_supplier)
+    try:
+        await coordinator.validate_inbound_auth(
+            peer_id="srv-b",
+            authorization_header="Bearer wrong",
+            token_header=None,
+        )
+        payload = await coordinator.status()
+        dumped = FederationStatusResponse.model_validate(payload).model_dump(mode="json")
+        assert dumped["metrics"]["auth_rejections"] == 1
+        assert dumped["metrics"]["rates"]["auth_rejections_per_s"] > 0.0
+    finally:
+        await coordinator.stop()

@@ -248,6 +248,57 @@ class LocalizationConfig:
     # range-proportional caps (Phase 1b) the effective ceiling scales with range up to
     # this hard cap, so tracks never carry σ beyond a physical 1 km bound.
     localization_max_position_std_m: float = 1000.0
+    # Quality gate: a solve below this confidence is not reportable as a *localized*
+    # detection and is demoted to omni evidence at its node. Set to 0 to disable.
+    #
+    # This is a backstop, not the primary defence. Range-mode handling already
+    # degrades gracefully on its own: spatial_display_mode_for_detection() renders
+    # range_asymptotic / range_boundary as "bearing_only" (a ray, not a point) and
+    # those solves do not create tracks. The gap it cannot cover is a solve that
+    # arrives with NO range-mode and NO range-observability metadata — e.g. from an
+    # un-rebuilt sidecar — which falls through to "localized" no matter how poor the
+    # geometry actually was. That is precisely what production was doing, publishing
+    # point fixes at confidence ~0.004.
+    #
+    # SHIPS DISABLED (0.0). Enable only with measured thresholds for your site.
+    #
+    # Measurement showed confidence cannot separate good geometry from bad, because
+    # it is not a measure of positional accuracy — unobservable range drives it down
+    # even when the position is exactly right:
+    #
+    #   0.00918  three-node solve through the full pipeline that recovers its
+    #            source to 0.000 m  (tests/test_integration_harness.py)
+    #   0.00897  a field detection published as a bogus localized point fix
+    #
+    # Those are the same number. Any threshold that rejects the second also rejects
+    # the first, which is why this is off rather than set to a plausible-looking
+    # value. The degenerate geometry it was meant to catch is already handled
+    # upstream: spatial_display_mode_for_detection() renders range_asymptotic /
+    # range_boundary solves as "bearing_only" rays rather than points, and those do
+    # not create tracks.
+    #
+    # Kept because it is the only backstop for a solve arriving with NO range-mode
+    # metadata at all (an un-rebuilt sidecar). Set it from observed values if that
+    # applies to your deployment; the localization_rejected_low_quality metric and
+    # the "low_localization_confidence" drop reason report what it catches.
+    localization_min_reportable_confidence: float = 0.0
+    # Optional absolute GDOP ceiling; 0 (default) disables it.
+    #
+    # Off by default because no single value suits both array geometries. Measured:
+    #
+    #     ~351    three-node site solve, 4 m baselines (accurate to 0.000 m)
+    #   4.5e7     single compact array, field detection published as a point fix
+    #   ~1.7e9    single compact array, HEALTHY 4-mic solve
+    #     inf     legitimate bearing-projected solve (range simply unobservable)
+    #
+    # GDOP separates multi-node geometry from single-array geometry cleanly, but
+    # NOT good from bad within a compact array — the healthy solve there scores
+    # worse than the bad one, because a ~5 cm aperture is near-singular in range
+    # regardless of signal quality. On a multi-node site a ceiling of ~1e4-1e6 is a
+    # reasonable way to reject solves that silently fell back to a single array;
+    # on a single-node site leave this disabled. When a ceiling IS configured, a
+    # non-finite GDOP counts as exceeding it.
+    localization_max_reportable_gdop: float = 0.0
     classification_window_seconds: float = 30.0
     localization_band_min_hz: float = 0.0
     localization_band_max_hz: float = 0.0
@@ -601,6 +652,10 @@ class Settings:
     localization_max_position_std_m: float = 1000.0
     localization_std_range_factor: float = 1.0
     localization_position_std_floor_m: float = 30.0
+    # Localization quality gate; see LocalizationConfig for the rationale behind
+    # these defaults.
+    localization_min_reportable_confidence: float = 0.0
+    localization_max_reportable_gdop: float = 0.0
     localization_amplitude_range_prior_enabled: bool = False
     localization_amplitude_reference_level_db: float = 100.0
     localization_amplitude_prior_min_range_m: float = 5.0
@@ -1080,6 +1135,12 @@ class Settings:
             raise ValueError(
                 "MINIMAPPR_LOCALIZATION_POSITION_STD_FLOOR_M must be <= MAX_POSITION_STD_M"
             )
+        if not (0.0 <= self.localization_min_reportable_confidence <= 1.0):
+            raise ValueError(
+                "MINIMAPPR_LOCALIZATION_MIN_REPORTABLE_CONFIDENCE must be in [0, 1]"
+            )
+        if self.localization_max_reportable_gdop < 0.0:
+            raise ValueError("MINIMAPPR_LOCALIZATION_MAX_REPORTABLE_GDOP must be >= 0")
         if self.localization_amplitude_prior_min_range_m < 0.0:
             raise ValueError("MINIMAPPR_LOCALIZATION_AMPLITUDE_PRIOR_MIN_RANGE_M must be >= 0")
         if self.localization_amplitude_prior_max_range_m < self.localization_amplitude_prior_min_range_m:
@@ -1588,6 +1649,14 @@ class Settings:
                 "MINIMAPPR_LOCALIZATION_POSITION_STD_FLOOR_M",
                 30.0,
             ),
+            localization_min_reportable_confidence=_env_float(
+                "MINIMAPPR_LOCALIZATION_MIN_REPORTABLE_CONFIDENCE",
+                0.0,
+            ),
+            localization_max_reportable_gdop=_env_float(
+                "MINIMAPPR_LOCALIZATION_MAX_REPORTABLE_GDOP",
+                0.0,
+            ),
             localization_amplitude_range_prior_enabled=_env_bool(
                 "MINIMAPPR_LOCALIZATION_AMPLITUDE_RANGE_PRIOR_ENABLED",
                 False,
@@ -1989,6 +2058,8 @@ class Settings:
             localization_max_position_std_m=self.localization_max_position_std_m,
             localization_std_range_factor=self.localization_std_range_factor,
             localization_position_std_floor_m=self.localization_position_std_floor_m,
+            localization_min_reportable_confidence=self.localization_min_reportable_confidence,
+            localization_max_reportable_gdop=self.localization_max_reportable_gdop,
             localization_amplitude_range_prior_enabled=self.localization_amplitude_range_prior_enabled,
             localization_amplitude_reference_level_db=self.localization_amplitude_reference_level_db,
             localization_amplitude_prior_min_range_m=self.localization_amplitude_prior_min_range_m,

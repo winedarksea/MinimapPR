@@ -106,7 +106,7 @@ async def test_storage_retention_cleanup_removes_expired_records(tmp_path: Path)
         ping_type="acoustic",
         label="bird_like",
         label_id=None,
-        spl_db=55.0,
+        received_level_db=55.0,
         position_m=(0.0, 0.0, 0.0),
         position_geo=None,
         source_detection_id="det-old",
@@ -708,3 +708,154 @@ def test_cleanup_policy_rule_priority_and_legacy_keep_labels_compatibility() -> 
     assert legacy_policy.snippet_max_age_seconds_for_label("gunshot") is None
     assert legacy_policy.artifact_max_age_seconds_for_label("gunshot") is None
     assert legacy_policy.snippet_max_age_seconds_for_label("ambient") == 90
+
+
+def _track_for_status(track_id: str, status: str, last_seen_ns: int) -> TrackState:
+    return TrackState(
+        id=track_id,
+        first_seen_ns=last_seen_ns - 1_000_000_000,
+        last_seen_ns=last_seen_ns,
+        position_m=(1.0, 2.0, 3.0),
+        velocity_mps=(0.0, 0.0, 0.0),
+        label="unknown",
+        label_category="unknown",
+        confidence=0.5,
+        update_count=3,
+        status=status,
+        tqi=0.5,
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_tracks_filters_by_status(tmp_path: Path) -> None:
+    """Dropped tracks must be excludable in the query, not after it.
+
+    A live deployment served 149 dropped tracks out of 150 because status was only
+    ever filtered on the federation merge path — with federation disabled nothing
+    filtered at all.
+    """
+    storage = Storage(tmp_path / "track-status.db")
+    await storage.initialize()
+    try:
+        now_ns = time.time_ns()
+        await storage.upsert_track(_track_for_status("trk-confirmed", "confirmed", now_ns))
+        await storage.upsert_track(_track_for_status("trk-coasting", "coasting", now_ns - 1))
+        await storage.upsert_track(_track_for_status("trk-tentative", "tentative", now_ns - 2))
+        await storage.upsert_track(_track_for_status("trk-dropped", "dropped", now_ns - 3))
+
+        assert len(await storage.list_tracks(limit=10)) == 4
+
+        active = await storage.list_tracks(
+            limit=10, statuses=["tentative", "confirmed", "coasting"]
+        )
+        assert {row["id"] for row in active} == {
+            "trk-confirmed",
+            "trk-coasting",
+            "trk-tentative",
+        }
+
+        dropped = await storage.list_tracks(limit=10, statuses=["dropped"])
+        assert [row["id"] for row in dropped] == ["trk-dropped"]
+        # An empty status set selects nothing rather than degrading to "all".
+        assert await storage.list_tracks(limit=10, statuses=[]) == []
+    finally:
+        await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_list_tracks_status_filter_does_not_lose_active_to_limit(tmp_path: Path) -> None:
+    """Filtering in SQL keeps dropped rows from consuming the LIMIT.
+
+    With post-query filtering, newer dropped tracks fill the limit and an older
+    active track vanishes from the result entirely.
+    """
+    storage = Storage(tmp_path / "track-status-limit.db")
+    await storage.initialize()
+    try:
+        now_ns = time.time_ns()
+        for index in range(5):
+            await storage.upsert_track(
+                _track_for_status(f"trk-dropped-{index}", "dropped", now_ns - index)
+            )
+        await storage.upsert_track(_track_for_status("trk-active", "confirmed", now_ns - 99))
+
+        rows = await storage.list_tracks(
+            limit=3, statuses=["tentative", "confirmed", "coasting"]
+        )
+        assert [row["id"] for row in rows] == ["trk-active"]
+    finally:
+        await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_spl_db_column_migrates_to_received_level_db(tmp_path: Path) -> None:
+    """The rename must carry existing rows across, not orphan them.
+
+    ``_ensure_columns`` only ADDs missing columns, so without an explicit rename an
+    upgraded deployment would get an empty ``received_level_db`` alongside a
+    populated ``spl_db`` and silently lose every recorded level.
+    """
+    db_path = tmp_path / "spl-rename.db"
+    storage = Storage(db_path)
+    await storage.initialize()
+    await storage.close()
+
+    # Simulate the deployed schema: column still under its legacy name, with data.
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("ALTER TABLE detections RENAME COLUMN received_level_db TO spl_db")
+        connection.execute("ALTER TABLE pings RENAME COLUMN received_level_db TO spl_db")
+        connection.execute(
+            "INSERT INTO detections (id, event_id, source_type, source_node_id, timestamp_ns,"
+            " toa_ns, tor_ns, time_quality, stale_ns, reporting_modality, x, y, z,"
+            " confidence, gdop, label, label_confidence, spl_db, reference_sensor,"
+            " source_sensors_json, tdoa_json, classifier_scores_json, feature_summary_json,"
+            " retention_tier)"
+            " VALUES ('det-legacy','det-legacy','raw_sensor','node-a',1,1,1,'gps_locked',2,"
+            " 'localized',0,0,0,0.72,1.0,'blue jay',0.45,-43.445955,'node-a:ch0',"
+            " '[]','{}','{}','{}','standard')"
+        )
+        connection.commit()
+
+    storage = Storage(db_path)
+    await storage.initialize()
+    try:
+        for table in ("detections", "pings"):
+            columns = await storage._table_columns(table)
+            assert "received_level_db" in columns
+            assert "spl_db" not in columns
+
+        rows = await (
+            await storage._require_db().execute(
+                "SELECT received_level_db FROM detections WHERE id = 'det-legacy'"
+            )
+        ).fetchall()
+        assert rows[0]["received_level_db"] == pytest.approx(-43.445955)
+    finally:
+        await storage.close()
+
+    # Re-running initialize on an already-migrated DB must be a no-op.
+    storage = Storage(db_path)
+    await storage.initialize()
+    await storage.close()
+
+
+def test_detection_exposes_legacy_spl_db_alias() -> None:
+    """Readers pinned to the old key keep working after the rename."""
+    detection = DetectionEvent(
+        id="det-alias",
+        timestamp_ns=1,
+        position_m=(0.0, 0.0, 0.0),
+        confidence=0.7,
+        gdop=1.8,
+        label="blue jay",
+        label_category="wildlife",
+        label_confidence=0.8,
+        reference_sensor="node-1:ch0",
+        received_level_db=-43.4,
+    )
+    assert detection.received_level_db == pytest.approx(-43.4)
+    assert detection.spl_db == pytest.approx(-43.4)
+
+    dumped = detection.model_dump(mode="json")
+    assert dumped["received_level_db"] == pytest.approx(-43.4)
+    assert dumped["spl_db"] == pytest.approx(-43.4)

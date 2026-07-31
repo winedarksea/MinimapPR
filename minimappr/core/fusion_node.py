@@ -236,6 +236,11 @@ class FusionMetrics:
     localization_cross_node_wait_timeout_count: int = 0
     last_cross_node_pair_count: int = 0
     localization_rejected_out_of_range_count: int = 0
+    # Solves demoted to omni by the quality gate because their geometry could not
+    # support a point fix (see _localization_quality_is_reportable).
+    localization_rejected_low_quality_count: int = 0
+    # 2D-tier solves whose falsely-tight vertical variance had to be widened.
+    localization_vertical_variance_floored_count: int = 0
     localization_stage_total_time_ms: float = 0.0
     localization_stage_max_time_ms: float = 0.0
     # Ingest-to-DSP-result latency, split into queue wait vs. compute time so
@@ -890,22 +895,47 @@ class FusionNode:
             confidence=localization_confidence,
             range_observability=localization_range_observability,
         )
+        # Same quality gate the solver path applies in _build_localization_branch,
+        # judged on the post-haircut confidence. Both seams must gate: this one
+        # carries precomputed positions from the Rust sidecar and is the path a
+        # production deployment actually uses, so gating only the solver path
+        # would look correct in tests and change nothing in the field.
+        localization_rejected_low_quality: str | None = None
+        if reporting_modality == "localized":
+            localization_rejected_low_quality = self._localization_quality_is_reportable(
+                confidence=localization_confidence,
+                gdop=localization_gdop,
+            )
+            if localization_rejected_low_quality is not None:
+                self._metrics.localization_rejected_low_quality_count += 1
+                self._record_silent_drop(
+                    stage="localization",
+                    reason=localization_rejected_low_quality,
+                    source_node_id=node.id,
+                    range_projection_mode=localization_range_projection_mode,
+                    localization_confidence=localization_confidence,
+                    gdop=localization_gdop,
+                )
+                reporting_modality = "omni"
+        # Resolved before the covariance clamp so the clamp knows whether altitude
+        # was actually observable on this solve.
+        capability_tier = (
+            "full_3d"
+            if reporting_modality == "localized"
+            and len(selected_sensor_ids) >= self.settings.min_sensors_for_3d
+            else "classification_only"
+        )
         localization_position_covariance_m2 = self._clamp_localization_covariance(
             localization_position_covariance_m2,
             position_m=localization_position_m,
             contributing_centroid_m=rust_contributing_centroid_m,
+            capability_tier=capability_tier,
         )
 
         rust_audio_quality = (
             {reference_sensor: payload.audio_quality}
             if payload.audio_quality is not None
             else {}
-        )
-        capability_tier = (
-            "full_3d"
-            if reporting_modality == "localized"
-            and len(selected_sensor_ids) >= self.settings.min_sensors_for_3d
-            else "classification_only"
         )
         candidate = EventCandidate(
             id=f"rust-{payload.manifest_id}",
@@ -927,10 +957,12 @@ class FusionNode:
             rust_extra_features["rust_fallback_reason"] = payload.fallback_reason
         if localization_rejected_out_of_range:
             rust_extra_features["localization_rejected_reason"] = "position_out_of_range"
+        elif localization_rejected_low_quality is not None:
+            rust_extra_features["localization_rejected_reason"] = localization_rejected_low_quality
         if reporting_modality == "omni":
             # A render that arrived as "localized" can be degraded to omni above
-            # (out-of-range rejection); it needs the same node-position guard as a
-            # render that arrived omni.
+            # (out-of-range rejection, or the quality gate); it needs the same
+            # node-position guard as a render that arrived omni.
             if node.position_m is None:
                 raise ValueError("Omni classifier render requires node.position_m")
             # Keep the raw sidecar localization only as provenance above; an omni
@@ -2045,12 +2077,47 @@ class FusionNode:
             environment=environment_summary,
         )
 
+    def _floor_unobservable_vertical_variance(self, covariance_m2):
+        """Widen the vertical axis when altitude was never actually solved.
+
+        A 2D-tier solve has fewer contributing sensors than ``min_sensors_for_3d``,
+        so z is not observable — the solver leaves it at (or near) the array's own
+        altitude. The covariance nevertheless came back tight on that axis: field
+        data showed σ_z ≈ 9 cm alongside σ_xy = 250 m, i.e. an altitude asserted to
+        centimetre precision that was really just the node's own z copied through.
+        Downstream consumers read that as authoritative, which is how tracks ended
+        up rendered tens of metres below ground with no visible uncertainty.
+
+        The eigenvalue clamp cannot fix this: it applies a ceiling only
+        (``np.minimum``), so a falsely *small* variance passes straight through.
+        Uses the same additive-outer-product widening the solver already applies to
+        the radial axis in cartesian_tdoa, which keeps the matrix symmetric and
+        positive semi-definite.
+        """
+        if covariance_m2 is None:
+            return covariance_m2
+        floor_std_m = self.localization_config.localization_position_std_floor_m
+        if floor_std_m <= 0.0:
+            return covariance_m2
+        covariance = np.asarray(covariance_m2, dtype=np.float64)
+        if covariance.shape != (3, 3) or not np.all(np.isfinite(covariance)):
+            return covariance_m2
+        vertical_axis = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        vertical_variance_m2 = float(vertical_axis @ covariance @ vertical_axis)
+        deficit_m2 = (floor_std_m**2) - vertical_variance_m2
+        if deficit_m2 <= 0.0:
+            return covariance_m2
+        widened = covariance + deficit_m2 * np.outer(vertical_axis, vertical_axis)
+        self._metrics.localization_vertical_variance_floored_count += 1
+        return [[float(value) for value in row] for row in widened]
+
     def _clamp_localization_covariance(
         self,
         covariance_m2,
         *,
         position_m,
         contributing_centroid_m,
+        capability_tier: str | None = None,
     ):
         """Range-proportional covariance clamp shared by both ingest seams.
 
@@ -2058,8 +2125,13 @@ class FusionNode:
         sensors, so a 1 m near-field solve stays tight while a 1 km bearing cone can
         carry honest uncertainty (up to the absolute ceiling). ``std_factor <= 0``
         reproduces the legacy fixed clamp exactly.
+
+        When ``capability_tier`` says altitude was not solved, the vertical axis is
+        widened first so the ceiling clamp below still applies to the honest value.
         """
         cfg = self.localization_config
+        if capability_tier is not None and capability_tier not in {"full_3d", "3d"}:
+            covariance_m2 = self._floor_unobservable_vertical_variance(covariance_m2)
         range_m = 0.0
         if contributing_centroid_m is not None and position_m is not None:
             pos = np.asarray(position_m, dtype=np.float64).reshape(-1)
@@ -2222,6 +2294,52 @@ class FusionNode:
         )
         return centroid.size != 3 or float(np.linalg.norm(position - centroid)) <= max_range_m
 
+    def _localization_quality_is_reportable(
+        self,
+        *,
+        confidence: float | None,
+        gdop: float | None,
+    ) -> str | None:
+        """Decide whether a solve's geometry can support a *localized* report.
+
+        Returns ``None`` when reportable, else a short reason string for the drop
+        record. Shared by both ingest seams so a solve is judged identically
+        whether it came from the Python solver or a precomputed Rust TDOA result.
+
+        Rejection here is not a discard: the candidate falls back to omni evidence
+        at its node, which is the honest representation of "we heard it but cannot
+        say where". Without this, an ill-conditioned solve was published as a point
+        fix with a real lat/lon, spawning tracks the operator could not distinguish
+        from genuine ones.
+
+        Deliberately narrow. Range-mode handling already degrades poor geometry
+        gracefully (``range_asymptotic``/``range_boundary`` render as bearing rays
+        and create no tracks, and ``range_bearing_projected`` is a *supported*
+        "good bearing, unknown range" result that legitimately has an unbounded
+        GDOP). This gate exists for the case that machinery cannot see: a solve
+        arriving with no range-mode metadata at all, where confidence is the only
+        remaining evidence that the geometry was bad.
+
+        Both thresholds ship disabled — measurement found no value that separates
+        good geometry from bad on either signal (see the config field comments for
+        the numbers). Opt in per deployment.
+        """
+        cfg = self.localization_config
+
+        # Off by default (0). When an operator does set a ceiling, a non-finite
+        # GDOP counts as exceeding it. GDOP is NOT checked otherwise: a compact
+        # array yields astronomically large — often infinite — GDOP even for
+        # perfectly good bearing solves, so it cannot gate on its own.
+        max_gdop = cfg.localization_max_reportable_gdop
+        if max_gdop > 0.0 and gdop is not None and not (gdop <= max_gdop):
+            return "gdop_above_ceiling"
+
+        min_confidence = cfg.localization_min_reportable_confidence
+        if min_confidence > 0.0 and confidence is not None and confidence < min_confidence:
+            return "low_localization_confidence"
+
+        return None
+
     def _build_localization_branch(
         self,
         *,
@@ -2269,6 +2387,23 @@ class FusionNode:
             confidence=localization.confidence,
             range_observability=localization.range_observability,
         )
+        # Judged on the post-haircut confidence: the haircut is what encodes
+        # "range (and possibly bearing) is unobservable" into a single comparable
+        # number, so gating before it would let capped solves through.
+        quality_reason = self._localization_quality_is_reportable(
+            confidence=localization_confidence,
+            gdop=localization.gdop,
+        )
+        if quality_reason is not None:
+            self._metrics.localization_rejected_low_quality_count += 1
+            self._record_silent_drop(
+                stage="localization",
+                reason=quality_reason,
+                range_projection_mode=range_projection_mode,
+                localization_confidence=localization_confidence,
+                gdop=localization.gdop,
+            )
+            return None
         # Cap covariance so unobservable-range / cone solves can't carry km-scale
         # ellipses into tracking. Catches every covariance path (jacobian + cone).
         # The ceiling scales with distance from the contributing sensors so honest
@@ -2277,6 +2412,7 @@ class FusionNode:
             localization.position_covariance_m2,
             position_m=localization.position_m,
             contributing_centroid_m=contributing_centroid_m,
+            capability_tier=capability_tier,
         )
         return LocalizationBranch(
             localization_position_m=localization.position_m,

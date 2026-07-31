@@ -15,6 +15,7 @@ from minimappr.core.fusion_node import FusionNode
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.localization import LocalizationEngine
 from minimappr.core.node_registry import NodeRegistry
+from minimappr.core.taxonomy import DEFAULT_CATEGORY_TO_IFF
 from minimappr.core.tracking import TrackManager
 from minimappr.core.zones import ZoneMatcher
 from minimappr.models import ClassificationResult, GeoPoint, IngestFrameRequest, NodeSpec, NodeType
@@ -83,13 +84,19 @@ class _StorageStub:
 
 
 class _TaxonomyStub:
+    """Unmapped-label taxonomy that still resolves IFF the way production does.
+
+    ``iff_for_category`` delegates to the real DEFAULT_CATEGORY_TO_IFF map rather
+    than returning a constant, so a category that is not a real taxonomy category
+    surfaces as an ``unknown`` IFF here exactly as it would in production.
+    """
+
     def category_for_label(self, label: str) -> str:
         del label
         return "unknown"
 
     def iff_for_category(self, category: str) -> str:
-        del category
-        return "unknown"
+        return DEFAULT_CATEGORY_TO_IFF.get(category.strip().lower(), "unknown")
 
 
 class _EnvironmentStub:
@@ -160,11 +167,19 @@ async def test_classifier_exception_degrades_to_unknown() -> None:
 
 
 @pytest.mark.asyncio
-async def test_birdnet_unmapped_species_uses_model_category() -> None:
+async def test_birdnet_unmapped_species_falls_back_to_wildlife() -> None:
+    """An unmapped BirdNET species resolves to a real category, not the model id.
+
+    BirdNET's vocabulary is entirely bird species, so the fallback is
+    ``wildlife``. Emitting the model id ``birdnet_v2m4`` as the category left it
+    absent from DEFAULT_CATEGORY_TO_IFF, so IFF still came out ``unknown`` and
+    rules keyed on ``wildlife`` never matched.
+    """
+    taxonomy = _TaxonomyStub()
     orchestrator = ClassificationOrchestrator(
         classifier=_BirdNETClassifierWithUnmappedSpecies(),
         storage=_StorageStub(),
-        taxonomy_provider=_TaxonomyStub(),
+        taxonomy_provider=taxonomy,
         environment_provider=_EnvironmentStub(),
     )
 
@@ -174,7 +189,11 @@ async def test_birdnet_unmapped_species_uses_model_category() -> None:
         event_time_ns=123,
     )
 
-    assert result.label_category == "birdnet_v2m4"
+    assert result.label_category == "wildlife"
+    # The category must map to a real IFF value rather than falling through.
+    assert result.iff_category == "friendly"
+    # Model provenance is retained in features, not smuggled through category.
+    assert result.classification.features["model"] == "birdnet_v2m4"
 
 
 @pytest.mark.asyncio

@@ -336,6 +336,16 @@ def build_pipeline_graph(
             _param("Min sensors 3D", settings.min_sensors_for_3d, "min_sensors_for_3d"),
             _param("Min sensors 2D", settings.min_sensors_for_2d, "min_sensors_for_2d"),
             _param("Wavelength gating", bool(settings.wavelength_gating_enabled), "wavelength_gating_enabled"),
+            _param(
+                "Min reportable conf",
+                float(settings.localization_min_reportable_confidence),
+                "localization_min_reportable_confidence",
+            ),
+            _param(
+                "Max reportable GDOP",
+                float(settings.localization_max_reportable_gdop),
+                "localization_max_reportable_gdop",
+            ),
         ],
         status=_solve_status(metrics, fusion_available),
         link="/settings/config#localization",

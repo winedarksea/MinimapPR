@@ -13,7 +13,7 @@ from minimappr.classifiers.base import AudioClassifier, ClassificationResult
 from minimappr.classifiers.heuristic import HeuristicClassifier
 from minimappr.config import Settings
 from minimappr.core.audio_buffer import MultiSensorBuffer
-from minimappr.core.fusion_node import FusionNode
+from minimappr.core.fusion_node import FusionMetrics, FusionNode
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.localization import LocalizationEngine, LocalizationResult
 from minimappr.core.node_registry import NodeRegistry
@@ -1525,6 +1525,234 @@ async def test_fusion_ingests_rust_localized_render_directly(tmp_path: Path) -> 
     assert summary["age_seconds"] is not None
     assert summary["age_seconds"] <= 1.0
     assert summary["rms"] is not None
+
+    await fusion.stop()
+    await storage.close()
+
+
+class _QualityGateStub:
+    """Minimal carrier for the localization_config the gate predicate reads."""
+
+    def __init__(self, config) -> None:
+        self.localization_config = config
+
+
+def test_localization_quality_gate_ships_disabled() -> None:
+    """The confidence gate is off by default, and that is deliberate.
+
+    Confidence is not a measure of positional accuracy — unobservable range drives
+    it down even when the position is exact. Measured through the full pipeline:
+
+        0.00918  three-node solve that recovers its source to 0.000 m
+        0.00897  a field detection published as a bogus localized point fix
+
+    Any threshold rejecting the second also rejects the first, so no default can be
+    both safe and useful. This test pins that decision so a plausible-looking value
+    is not reintroduced without re-measuring.
+    """
+    config = Settings().localization_config()
+    assert config.localization_min_reportable_confidence == 0.0
+
+    node = _QualityGateStub(config)
+    check = FusionNode._localization_quality_is_reportable
+
+    # Nothing is rejected on confidence while the gate is disabled — including the
+    # accurate multi-node solve, which is the case a naive threshold would break.
+    for confidence in (0.00918, 0.00897, 0.0846, 0.20, 0.85):
+        assert check(node, confidence=confidence, gdop=float("inf")) is None
+
+    # Missing telemetry must not synthesize a rejection.
+    assert check(node, confidence=None, gdop=None) is None
+
+
+def test_localization_quality_gate_rejects_below_configured_confidence() -> None:
+    """When an operator does set a floor, solves below it demote to omni."""
+    node = _QualityGateStub(
+        Settings(localization_min_reportable_confidence=0.05).localization_config()
+    )
+    check = FusionNode._localization_quality_is_reportable
+
+    assert check(node, confidence=0.004, gdop=1e6) == "low_localization_confidence"
+    assert check(node, confidence=0.049, gdop=1e6) == "low_localization_confidence"
+    assert check(node, confidence=0.05, gdop=1e6) is None
+    # A healthy compact-array bearing cone passes despite GDOP of 1.7e9, since the
+    # GDOP ceiling is independently disabled.
+    assert check(node, confidence=0.85, gdop=1.7e9) is None
+
+
+def test_localization_quality_gate_gdop_ceiling_is_opt_in() -> None:
+    """GDOP is only consulted when an operator sets a ceiling; 0 disables it."""
+    disabled = _QualityGateStub(Settings().localization_config())
+    assert disabled.localization_config.localization_max_reportable_gdop == 0.0
+    assert FusionNode._localization_quality_is_reportable(
+        disabled, confidence=0.9, gdop=float("inf")
+    ) is None
+
+    enabled = _QualityGateStub(
+        Settings(localization_max_reportable_gdop=1000.0).localization_config()
+    )
+    check = FusionNode._localization_quality_is_reportable
+    assert check(enabled, confidence=0.9, gdop=500.0) is None
+    assert check(enabled, confidence=0.9, gdop=5000.0) == "gdop_above_ceiling"
+    # Non-finite GDOP counts as exceeding any configured ceiling.
+    assert check(enabled, confidence=0.9, gdop=float("inf")) == "gdop_above_ceiling"
+
+
+class _CovarianceStub:
+    """Borrows the real covariance methods; only config and metrics are stubbed."""
+
+    _floor_unobservable_vertical_variance = FusionNode._floor_unobservable_vertical_variance
+    _clamp_localization_covariance = FusionNode._clamp_localization_covariance
+
+    def __init__(self, config) -> None:
+        self.localization_config = config
+        self._metrics = FusionMetrics()
+
+
+def test_two_d_tier_solve_gets_honest_vertical_variance() -> None:
+    """A 2D-tier solve must not claim centimetre altitude precision.
+
+    Reproduces the covariance served live: σ_xy = 250 m alongside σ_z = 9 cm, where
+    z was really just the node's own altitude copied through. The eigenvalue clamp
+    applies a ceiling only, so a falsely *small* variance survived it untouched.
+    """
+    node = _CovarianceStub(Settings().localization_config())
+    live_covariance = [
+        [62500.00000000002, -1.435662593764212e-12, 0.0],
+        [-1.435662593764212e-12, 62500.00000000002, 0.0],
+        [0.0, 0.0, 0.008281983354985508],
+    ]
+    assert np.sqrt(live_covariance[2][2]) < 0.1  # 9 cm as shipped
+
+    widened = node._clamp_localization_covariance(
+        live_covariance,
+        position_m=(0.0, 0.0, 13.88),
+        contributing_centroid_m=(0.0, 0.0, 13.88),
+        capability_tier="2d",
+    )
+    result = np.asarray(widened, dtype=np.float64)
+
+    vertical_std_m = float(np.sqrt(result[2][2]))
+    assert vertical_std_m == pytest.approx(
+        Settings().localization_config().localization_position_std_floor_m
+    )
+    # Must remain a usable covariance: symmetric and positive semi-definite.
+    assert np.allclose(result, result.T)
+    assert np.all(np.linalg.eigvalsh(result) >= -1e-9)
+    assert node._metrics.localization_vertical_variance_floored_count == 1
+
+
+def test_full_3d_tier_vertical_variance_untouched() -> None:
+    """A genuine 3D solve keeps its solved altitude precision."""
+    node = _CovarianceStub(Settings().localization_config())
+    tight = [[4.0, 0.0, 0.0], [0.0, 4.0, 0.0], [0.0, 0.0, 4.0]]
+
+    result = np.asarray(
+        node._clamp_localization_covariance(
+            tight,
+            position_m=(1.0, 1.0, 1.0),
+            contributing_centroid_m=(0.0, 0.0, 0.0),
+            capability_tier="full_3d",
+        ),
+        dtype=np.float64,
+    )
+
+    assert float(np.sqrt(result[2][2])) == pytest.approx(2.0)
+    assert node._metrics.localization_vertical_variance_floored_count == 0
+
+
+@pytest.mark.asyncio
+async def test_rust_render_below_confidence_floor_demotes_to_omni(tmp_path: Path) -> None:
+    """A sub-threshold Rust render is reported as omni, not a localized point fix.
+
+    Exercises the seam a real deployment uses: a render arriving with no
+    range-projection metadata (an un-rebuilt sidecar) otherwise falls through to
+    spatial_display_mode "localized" no matter how poor the geometry was.
+
+    The floor is set explicitly because it ships disabled — see
+    test_localization_quality_gate_ships_disabled for why there is no safe default.
+    """
+    settings = Settings(
+        db_path=tmp_path / "fusion_rust_low_conf.db",
+        snippet_dir=tmp_path / "snippets",
+        snippet_retention_seconds=0,
+        fusion_worker_count=1,
+        fusion_event_queue_size=8,
+        localization_min_reportable_confidence=0.05,
+    )
+    settings.db_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.snippet_dir.mkdir(parents=True, exist_ok=True)
+
+    storage = Storage(settings.db_path)
+    await storage.initialize()
+
+    buffer = MultiSensorBuffer(max_duration_seconds=settings.max_sensor_buffer_seconds)
+    fusion = FusionNode(
+        settings=settings,
+        registry=NodeRegistry(),
+        buffer=buffer,
+        localizer=LocalizationEngine(max_tau_s=0.03),
+        classifier=HeuristicClassifier(),
+        tracker=TrackManager(settings),
+        storage=storage,
+        live_callback=lambda payload: asyncio.sleep(0, result=None),
+        coordinate_frame=LocalCoordinateFrame(
+            origin=GeoPoint(lat=37.0, lon=-122.0, alt_m=0.0), mode="flat"
+        ),
+        zone_matcher=ZoneMatcher(storage=storage),
+    )
+    await fusion.start()
+
+    node = NodeSpec(
+        id="sirith-low-conf",
+        node_type=NodeType.SIRITH_TETRA,
+        position_m=(7.0, -3.0, 2.0),
+        sensor_offsets_m=[
+            (0.0, 0.05, 0.0),
+            (0.0433, 0.025, 0.0),
+            (0.0, 0.0, 0.0),
+            (0.02165, 0.025, 0.04082),
+        ],
+        capabilities=["audio"],
+        metadata={},
+    )
+    audio = np.random.default_rng(902).normal(0.0, 0.3, size=48_000).astype(np.float32)
+
+    await fusion.ingest_localized_render(
+        LocalizedClassifierRenderRequest(
+            manifest_id="manifest-low-confidence",
+            node=node,
+            event_time_ns=1_739_950_000_000_000_000,
+            sample_rate_hz=48_000,
+            decoded_audio=audio,
+            localization_position_m=(120.0, 45.0, 0.0),
+            # The production value: a "localized" fix at 0.4% confidence.
+            localization_confidence=0.004,
+            localization_gdop=4.5e7,
+            localization_position_covariance_m2=None,
+            # No range-projection metadata, as an un-rebuilt sidecar sends.
+            localization_range_projection_mode=None,
+            localization_method="rust_srp_phat",
+            render_kind="birdnet_hybrid_spatial_blend",
+        )
+    )
+
+    detections = await storage.list_detections(limit=10)
+    assert len(detections) == 1
+    detection = detections[0]
+
+    assert detection["reporting_modality"] == "omni"
+    assert detection["spatial_display_mode"] == "node_only"
+    # Demoted detections sit at their node, not at the rejected solve position.
+    assert tuple(detection["position_m"]) == pytest.approx((7.0, -3.0, 2.0))
+    assert detection["feature_summary"]["localization_rejected_reason"] == (
+        "low_localization_confidence"
+    )
+    # An omni observation must not become a track.
+    assert detection["track_id"] is None
+    assert await storage.list_tracks(limit=10) == []
+
+    assert fusion._metrics.localization_rejected_low_quality_count == 1
 
     await fusion.stop()
     await storage.close()

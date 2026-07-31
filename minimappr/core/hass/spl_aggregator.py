@@ -1,8 +1,15 @@
-"""Per-zone rolling sound-pressure-level window.
+"""Per-zone rolling received-level window.
 
-``spl_db`` exists on the system only per-``DetectionEvent`` (models.py). There is
-no aggregate zone SPL anywhere, so this is a new derived concept, built from the
-detection events tee'd off ``LiveEventHub``.
+``received_level_db`` exists on the system only per-``DetectionEvent``
+(models.py). There is no aggregate zone level anywhere, so this is a new derived
+concept, built from the detection events tee'd off ``LiveEventHub``.
+
+Despite the module and entity names, the quantity is NOT sound pressure level:
+it is 20*log10(rms) plus the node's calibration gain offset, i.e. relative to
+digital full scale, so values are normally negative. The MQTT topic and Home
+Assistant entity ids keep the ``spl`` spelling deliberately — renaming them would
+orphan entities in existing HA installations — but any threshold configured
+against these values must be read as dBFS-relative, not as real SPL.
 
 The window reports its **max**, not its mean: a mean over a 60 s window buries a
 gunshot under 59 s of quiet, which is the opposite of what an operator wants a
@@ -27,16 +34,18 @@ class ZoneSplAggregator:
         # zone_id -> samples ordered oldest-first, so expiry is a popleft loop.
         self._samples: dict[str, deque[tuple[int, float]]] = defaultdict(deque)
 
-    def observe(self, *, zone_ids: list[str], spl_db: float | None, timestamp_ns: int) -> None:
+    def observe(
+        self, *, zone_ids: list[str], received_level_db: float | None, timestamp_ns: int
+    ) -> None:
         """Record one detection's SPL against every zone it fell inside.
 
         A detection with no zones contributes nothing: there is no "site SPL"
         entity, and attributing it to an arbitrary zone would be a fabrication.
         """
-        if spl_db is None:
+        if received_level_db is None:
             return
         try:
-            value = float(spl_db)
+            value = float(received_level_db)
         except (TypeError, ValueError):
             return
         for zone_id in zone_ids:

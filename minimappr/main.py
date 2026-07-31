@@ -113,7 +113,7 @@ from minimappr.core.cluster_registry import ClusterRegistry
 from minimappr.core.effectors.registry import EffectorManager
 from minimappr.core.node_registry import NodeRegistry
 from minimappr.core.environment import LiveEnvironmentProvider
-from minimappr.core.federation import FederationCoordinator
+from minimappr.core.federation import ACTIVE_TRACK_STATUSES, FederationCoordinator
 from minimappr.core.hass.state_mapper import (
     HassStateSnapshot,
     NodeStateInput,
@@ -2197,6 +2197,13 @@ async def list_nodes(
                 "recent_coverage_ratio": audio_summary["recent_coverage_ratio"],
                 "recent_missing_ratio": audio_summary["recent_missing_ratio"],
                 "recent_max_gap_seconds": audio_summary["recent_max_gap_seconds"],
+                # Window and per-sensor breakdown: the recent_* aggregates are
+                # short-window means and hid a failed microphone for weeks.
+                "recent_coverage_window_seconds": audio_summary.get(
+                    "recent_coverage_window_seconds"
+                ),
+                "recent_min_coverage_ratio": audio_summary.get("recent_min_coverage_ratio"),
+                "per_sensor": audio_summary.get("per_sensor"),
                 "max_buffer_samples": audio_summary["max_buffer_samples"],
                 "max_buffer_seconds": audio_summary["max_buffer_seconds"],
                 "status": audio_status,
@@ -2806,6 +2813,7 @@ async def list_tracks(
     request: Request,
     limit: int = Query(default=200, ge=1, le=1000),
     include_standby: bool = Query(default=False),
+    include_dropped: bool = Query(default=False),
 ) -> list[dict]:
     state = _require_state(request)
     now_ns = time.time_ns()
@@ -2813,7 +2821,16 @@ async def list_tracks(
         _ = await state.tracker.snapshot(now_ns=now_ns)
     effective_limit = min(limit, state.settings.cop_tracks_max_items)
     cutoff_ns = now_ns - int(state.settings.cop_tracks_max_age_seconds * 1_000_000_000)
-    tracks = await state.storage.list_tracks(limit=effective_limit, since_ns=cutoff_ns)
+    # Dropped tracks were previously filtered ONLY by the federation merge path
+    # below, so a deployment with federation disabled served every dead track it
+    # had — 149 of 150 rows in one live sample. Filtering in the query keeps the
+    # endpoint consistent regardless of federation state, and keeps the LIMIT from
+    # being consumed by dropped rows.
+    tracks = await state.storage.list_tracks(
+        limit=effective_limit,
+        since_ns=cutoff_ns,
+        statuses=None if include_dropped else sorted(ACTIVE_TRACK_STATUSES),
+    )
     for track in tracks:
         if track.get("position_geo") is None and track.get("position_m"):
             local = track["position_m"]
@@ -2885,6 +2902,8 @@ async def get_config(request: Request) -> dict:
         "localization_subspace_freq_min_hz": settings.localization_subspace_freq_min_hz,
         "localization_subspace_freq_max_hz": settings.localization_subspace_freq_max_hz,
         "localization_refine_confidence_threshold": settings.localization_refine_confidence_threshold,
+        "localization_min_reportable_confidence": settings.localization_min_reportable_confidence,
+        "localization_max_reportable_gdop": settings.localization_max_reportable_gdop,
         "classifier_routing_config_path": str(settings.classifier_routing_config_path),
         "birdnet_enabled": settings.birdnet_enabled,
         "drone_head_enabled": settings.drone_head_enabled,
@@ -3271,6 +3290,12 @@ async def patch_config(request: Request) -> dict:
                 value = v
         elif key == "min_localization_confidence" and not (0.0 <= value <= 1.0):  # type: ignore[operator]
             errors.append("min_localization_confidence: must be in [0, 1]")
+        elif key == "localization_min_reportable_confidence" and not (
+            0.0 <= value <= 1.0  # type: ignore[operator]
+        ):
+            errors.append("localization_min_reportable_confidence: must be in [0, 1]")
+        elif key == "localization_max_reportable_gdop" and value < 0.0:  # type: ignore[operator]
+            errors.append("localization_max_reportable_gdop: must be >= 0 (0 disables the gate)")
         elif key in {"birdnet_trigger_min_confidence", "birdnet_geo_min_confidence"} and not (
             0.0 <= value <= 1.0  # type: ignore[operator]
         ):
