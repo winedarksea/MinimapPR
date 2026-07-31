@@ -40,6 +40,26 @@
 .audio-meta-dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; margin: 0; font-size: var(--md-sys-typescale-body-medium-size); }
 .audio-meta-dl dt { color: color-mix(in srgb, var(--md-sys-color-on-surface) 60%, transparent); }
 .audio-meta-dl dd { margin: 0; font-variant-numeric: tabular-nums; }
+.transcript-review-card {
+  margin-bottom: 12px;
+  background: var(--md-sys-color-surface-container);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-md);
+  padding: 12px 14px;
+}
+.transcript-review-card h2 { margin: 0 0 8px 0; font-size: var(--md-sys-typescale-title-large-size); }
+.transcript-review-meta { margin-bottom: 12px; }
+.transcript-review-text {
+  margin: 0;
+  padding: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+  background: var(--md-sys-color-surface-container-low);
+  border-radius: var(--md-sys-shape-corner-sm);
+  font: var(--md-sys-typescale-body-large);
+  line-height: 1.5;
+}
 .audio-hits { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .audio-hit-row { display: flex; justify-content: space-between; font-size: var(--md-sys-typescale-body-medium-size); }
 .audio-hit-conf { font-variant-numeric: tabular-nums; color: color-mix(in srgb, var(--md-sys-color-on-surface) 70%, transparent); }
@@ -207,4 +227,3 @@ a.btn-sm {
   color: var(--md-sys-color-on-surface-variant);
   border-color: var(--md-sys-color-outline-variant);
 }
-

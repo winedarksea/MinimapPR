@@ -353,3 +353,241 @@
   font-weight: 600;
 }
 
+
+/* ---------------------------------------------------------------------------
+   Pipeline Flow DAG (/settings/pipeline)
+   --------------------------------------------------------------------------- */
+
+.pipeline-dag-page {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.pipeline-dag-workspace {
+  min-width: 0;
+}
+
+.pipeline-dag-controls {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.35rem;
+  margin: 0 0 0.45rem;
+}
+.pipeline-dag-controls button,
+.pipeline-dag-detail-close {
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-sm);
+  background: var(--md-sys-color-surface-container-high);
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  padding: 0.3rem 0.55rem;
+}
+
+.pipeline-dag-viewport {
+  position: relative;
+  height: clamp(28rem, 62vh, 48rem);
+  overflow: hidden;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-medium);
+  background: var(--md-sys-color-surface);
+  cursor: grab;
+  touch-action: none;
+}
+.pipeline-dag-viewport:active { cursor: grabbing; }
+.pipeline-dag-surface {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: top left;
+  will-change: transform;
+}
+
+.pipeline-dag-column-headers {
+  position: relative;
+  height: 1.6rem;
+  min-width: max-content;
+}
+
+.pipeline-dag-column-header {
+  position: absolute;
+  top: 0;
+  font-size: var(--md-sys-typescale-label-medium-size);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.pipeline-dag-canvas {
+  position: relative;
+  min-width: max-content;
+}
+
+.pipeline-dag-svg {
+  overflow: visible;
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+}
+
+.pipeline-dag-edge {
+  stroke: var(--md-sys-color-outline);
+  stroke-width: 1.5px;
+  opacity: 0.65;
+}
+.pipeline-dag-edge.kind-embedding,
+.pipeline-dag-edge.kind-trigger,
+.pipeline-dag-edge.kind-metadata {
+  stroke-dasharray: 4 3;
+}
+.pipeline-dag-edge.kind-alert {
+  stroke: var(--mmp-sys-color-warn);
+  opacity: 0.85;
+}
+.pipeline-dag-edge.inactive {
+  opacity: 0.25;
+  stroke-dasharray: 2 4;
+}
+.pipeline-dag-edge-label {
+  fill: var(--md-sys-color-on-surface-variant);
+  font-size: 10px;
+  font-weight: 600;
+  paint-order: stroke;
+  stroke: var(--md-sys-color-surface);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+.pipeline-dag-edge-label.inactive { opacity: 0.4; }
+
+.pipeline-dag-card {
+  position: absolute;
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) 10px;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-sm);
+  background: color-mix(in srgb, var(--md-sys-color-surface-container-high) 85%, transparent);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+}
+
+.pipeline-dag-card.selected {
+  border-color: var(--md-sys-color-primary);
+  box-shadow: 0 0 0 1.5px var(--md-sys-color-primary);
+}
+
+.pipeline-dag-card.disabled {
+  opacity: 0.45;
+}
+
+.pipeline-dag-card-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--md-sys-color-primary);
+}
+
+.pipeline-dag-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+  overflow: hidden;
+}
+.pipeline-dag-card-body strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--md-sys-typescale-label-large-size);
+}
+.pipeline-dag-card-subtitle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--md-sys-typescale-body-small-size);
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.pipeline-dag-health-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  justify-self: end;
+}
+.pipeline-dag-health-dot.ok { background: var(--mmp-sys-color-ok); }
+.pipeline-dag-health-dot.warn { background: var(--mmp-sys-color-warn); }
+.pipeline-dag-health-dot.danger { background: var(--mmp-sys-color-danger); }
+.pipeline-dag-health-dot.idle,
+.pipeline-dag-health-dot.off { background: var(--md-sys-color-outline); }
+.pipeline-dag-health-dot.unknown { background: var(--md-sys-color-outline-variant); }
+
+.health-chip.idle,
+.health-chip.off { background: var(--md-sys-color-surface-container-high); color: var(--md-sys-color-on-surface-variant); }
+.health-chip.ok { background: var(--mmp-sys-color-ok-container); color: var(--mmp-sys-color-on-ok-container); }
+.health-chip.warn { background: var(--mmp-sys-color-warn-container); color: var(--mmp-sys-color-on-warn-container); }
+.health-chip.danger { background: var(--mmp-sys-color-danger-container); color: var(--mmp-sys-color-on-danger-container); }
+
+.pipeline-dag-detail {
+  padding: 1rem;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-medium);
+  background: var(--md-sys-color-surface-container);
+  max-width: 52rem;
+}
+.pipeline-dag-detail-drawer {
+  position: sticky;
+  bottom: 0.5rem;
+  z-index: 2;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+  padding: 0.5rem;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-medium);
+  background: color-mix(in srgb, var(--md-sys-color-surface-container) 96%, transparent);
+  box-shadow: 0 -4px 16px color-mix(in srgb, #000 12%, transparent);
+}
+.pipeline-dag-detail-drawer .pipeline-dag-detail {
+  flex: 1;
+  max-height: min(42vh, 28rem);
+  overflow: auto;
+}
+.pipeline-dag-detail-close { flex: 0 0 auto; }
+.pipeline-dag-detail-header {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.25rem;
+}
+.pipeline-dag-detail-summary {
+  color: var(--md-sys-color-on-surface-variant);
+}
+.pipeline-dag-param-list {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.2rem 0.75rem;
+  margin: 0.4rem 0 0.8rem;
+}
+.pipeline-dag-param-list dt {
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: var(--md-sys-typescale-body-small-size);
+}
+.pipeline-dag-param-list dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+.pipeline-dag-deep-link {
+  text-decoration: none;
+}
+.pipeline-dag-deep-link-primary {
+  display: inline-block;
+  margin-top: 0.4rem;
+}

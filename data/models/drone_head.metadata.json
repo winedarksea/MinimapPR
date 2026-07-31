@@ -14,13 +14,15 @@
   "opset": 13,
   "preprocessing": {
     "version": "yamnet-prep-v1",
+    "profile": "yamnet",
+    "fingerprint": "1a9b0fade7b0a19b",
     "target_rms": 0.1,
     "max_input_gain": 32.0
   },
   "thresholds": {
     "drone": {
-      "alert": 0.8,
-      "detect": 0.85
+      "alert": 0.25,
+      "detect": 0.6
     },
     "coyote": {
       "alert": 0.95,
@@ -29,19 +31,19 @@
   },
   "metrics": {
     "drone": {
-      "frame_auc": 0.9871,
-      "clip_auc": 0.9912
+      "frame_auc": 0.9879,
+      "clip_auc": 0.9968
     },
     "coyote": {
-      "frame_auc": 0.962,
-      "clip_auc": 1.0
+      "frame_auc": 0.9251,
+      "clip_auc": 0.9988
     }
   },
   "dataset_counts": {
     "ambient": {
-      "files": 16735,
-      "real": 381494,
-      "aug": 381494,
+      "files": 16766,
+      "real": 383534,
+      "aug": 383534,
       "synth": 8000,
       "promoted": 0
     },
@@ -53,12 +55,17 @@
       "promoted": 0
     },
     "coyote": {
-      "files": 4,
-      "real": 618,
-      "aug": 126690,
+      "files": 8,
+      "real": 1312,
+      "aug": 127264,
       "synth": 0,
       "promoted": 0
     }
+  },
+  "training_frame_counts": {
+    "ambient": 621060,
+    "drone": 138978,
+    "coyote": 100842
   },
   "weak_classes": [
     "coyote"
@@ -66,7 +73,7 @@
   "augmentation": {
     "aug_copies": 1,
     "aug_copies_per_label": {
-      "coyote": 205,
+      "coyote": 97,
       "drone": 2
     },
     "auto_balance_ratio": 3.0,
@@ -75,17 +82,17 @@
     "segment_overlap": 0.5
   },
   "quantized_model_quality": {
-    "max_probability_difference": 0.2079,
-    "mean_probability_difference": 0.0115,
-    "prediction_agreement": 0.9812,
-    "float_accuracy": 0.9303,
-    "int8_accuracy": 0.9443,
-    "accuracy_drop": -0.014
+    "max_probability_difference": 0.1308,
+    "mean_probability_difference": 0.0038,
+    "prediction_agreement": 0.9979,
+    "float_accuracy": 0.9656,
+    "int8_accuracy": 0.9657,
+    "accuracy_drop": -0.0001
   },
   "quantization": {
     "method": "static_qdq",
     "preprocessed": true,
-    "calibration_frames": 1066143,
+    "calibration_frames": 1071491,
     "calibration_dataset": "all_embedded_frames",
     "calibration_batch_size": 256
   }
