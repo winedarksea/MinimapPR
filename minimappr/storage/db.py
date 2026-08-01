@@ -1022,23 +1022,70 @@ class Storage:
         if self._batch_depth == 0:
             await db.commit()
 
+    @staticmethod
+    def _in_transaction(db: aiosqlite.Connection) -> bool:
+        try:
+            return bool(db.in_transaction)
+        except (ValueError, AttributeError):
+            # The connection was closed underneath us; there is no transaction
+            # to reason about and the caller's next statement will say so.
+            return False
+
+    @staticmethod
+    async def _rollback_quietly(db: aiosqlite.Connection) -> None:
+        try:
+            await db.rollback()
+        except Exception:
+            # A rollback that fails leaves the transaction open, which the next
+            # batch clears. It must never mask the error that prompted it.
+            logger.exception("SQLite rollback failed")
+
+    async def _discard_stale_transaction(self, db: aiosqlite.Connection) -> None:
+        """Clear a transaction left open by a failed or interrupted commit.
+
+        sqlite3 keeps its implicit DML transaction open when the commit that
+        should have closed it raises -- ``database is locked`` is the usual
+        cause once a second process shares the file. ``BEGIN`` on top of that
+        raises "cannot start a transaction within a transaction" for every
+        batch that follows, so one transient lock wedges the connection for the
+        life of the process. Whatever was pending is already unrecoverable, so
+        drop it loudly and let the caller start clean.
+        """
+        if not self._in_transaction(db):
+            return
+        logger.warning(
+            "Discarding a SQLite transaction left open by an earlier failed commit; "
+            "uncommitted writes from that batch are lost",
+            extra={"db_path": str(self.db_path)},
+        )
+        await self._rollback_quietly(db)
+
     @asynccontextmanager
     async def begin_batch(self):
         db = self._require_db()
         async with self._write_guard():
-            if self._batch_depth == 0:
-                await db.execute("BEGIN")
+            owns_transaction = self._batch_depth == 0
+            if owns_transaction:
+                await self._discard_stale_transaction(db)
+                # If the rollback above could not clear it either, join the open
+                # transaction rather than raising: a batch that commits someone
+                # else's orphaned writes beats a connection that never works again.
+                if not self._in_transaction(db):
+                    await db.execute("BEGIN")
             self._batch_depth += 1
             try:
                 yield
-            except Exception:
+            except BaseException:
+                # BaseException, not Exception: a cancelled batch used to skip
+                # this branch entirely, pinning _batch_depth above zero so
+                # _commit_if_needed silently dropped every later write.
                 self._batch_depth = max(0, self._batch_depth - 1)
-                if self._batch_depth == 0:
-                    await db.rollback()
+                if owns_transaction:
+                    await self._rollback_quietly(db)
                 raise
             else:
                 self._batch_depth = max(0, self._batch_depth - 1)
-                if self._batch_depth == 0:
+                if owns_transaction:
                     await db.commit()
 
     async def close(self) -> None:
