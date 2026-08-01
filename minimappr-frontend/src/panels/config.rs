@@ -48,6 +48,7 @@ pub fn ConfigPane() -> impl IntoView {
                             birdnet_enabled=c.birdnet_enabled
                             drone_head_enabled=c.drone_head_enabled
                             drone_head_min_confidence=c.drone_head_min_confidence
+                            drone_head_min_frame_fraction=c.drone_head_min_frame_fraction
                             stt_enabled=c.stt_enabled
                             stt_trigger_min_confidence=c.stt_trigger_min_confidence
                             transcript_retention_seconds=c.transcript_retention_seconds
@@ -390,6 +391,7 @@ fn ClassificationGroup(
     birdnet_enabled: bool,
     drone_head_enabled: bool,
     drone_head_min_confidence: f64,
+    drone_head_min_frame_fraction: f64,
     stt_enabled: bool,
     stt_trigger_min_confidence: f64,
     transcript_retention_seconds: f64,
@@ -415,6 +417,7 @@ fn ClassificationGroup(
     let birdnet = RwSignal::new(birdnet_enabled);
     let drone_head = RwSignal::new(drone_head_enabled);
     let drone_confidence = RwSignal::new(drone_head_min_confidence.to_string());
+    let drone_frame_fraction = RwSignal::new(drone_head_min_frame_fraction.to_string());
     let stt = RwSignal::new(stt_enabled);
     let stt_confidence = RwSignal::new(stt_trigger_min_confidence.to_string());
     let transcript_retention_days = RwSignal::new((transcript_retention_seconds / 86_400.0).to_string());
@@ -444,6 +447,7 @@ fn ClassificationGroup(
             "birdnet_enabled": birdnet.get(),
             "drone_head_enabled": drone_head.get(),
             "drone_head_min_confidence": drone_confidence.get().parse::<f64>().unwrap_or(0.50),
+            "drone_head_min_frame_fraction": drone_frame_fraction.get().parse::<f64>().unwrap_or(0.20),
             "stt_enabled": stt.get(),
             "stt_trigger_min_confidence": stt_confidence.get().parse::<f64>().unwrap_or(0.50),
             "transcript_retention_seconds": transcript_retention_days.get().parse::<f64>().unwrap_or(7.0) * 86_400.0,
@@ -505,6 +509,7 @@ fn ClassificationGroup(
                 {bool_input("Run BirdNET", birdnet, gs)}
                 {bool_input("Run drone detector", drone_head, gs)}
                 {num_input("Drone alert confidence", drone_confidence, gs, 0.0, 1.0, 0.01)}
+                {num_input("Drone min frame fraction", drone_frame_fraction, gs, 0.0, 1.0, 0.05)}
                 <div class="config-subsection">"Speech capture"</div>
                 {bool_input("Transcribe YAMNet speech", stt, gs)}
                 {num_input("Speech trigger confidence", stt_confidence, gs, 0.0, 1.0, 0.01)}

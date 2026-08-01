@@ -737,6 +737,7 @@ class Settings:
     drone_head_enabled: bool = True
     drone_head_model_path: Path = Path("data/models/drone_head.onnx")
     drone_head_min_confidence: float = 0.5
+    drone_head_min_frame_fraction: float = 0.2
     stt_enabled: bool = True
     stt_model_id: str = "onnx-community/moonshine-base-ONNX"
     stt_model_cache_dir: Path = Path("data/models/huggingface")
@@ -1204,6 +1205,8 @@ class Settings:
             raise ValueError("MINIMAPPR_CLASSIFIER_STAGE_TIMEOUT_SECONDS must be > 0")
         if not (0.0 <= self.drone_head_min_confidence <= 1.0):
             raise ValueError("MINIMAPPR_DRONE_HEAD_MIN_CONFIDENCE must be in [0, 1]")
+        if not (0.0 <= self.drone_head_min_frame_fraction <= 1.0):
+            raise ValueError("MINIMAPPR_DRONE_HEAD_MIN_FRAME_FRACTION must be in [0, 1]")
         if not (0.0 <= self.stt_trigger_min_confidence <= 1.0):
             raise ValueError("MINIMAPPR_STT_TRIGGER_MIN_CONFIDENCE must be in [0, 1]")
         if not self.stt_model_id.strip():
@@ -1807,6 +1810,9 @@ class Settings:
                 _env_str("MINIMAPPR_DRONE_HEAD_MODEL_PATH", "data/models/drone_head.onnx")
             ),
             drone_head_min_confidence=_env_float("MINIMAPPR_DRONE_HEAD_MIN_CONFIDENCE", 0.5),
+            drone_head_min_frame_fraction=_env_float(
+                "MINIMAPPR_DRONE_HEAD_MIN_FRAME_FRACTION", 0.2
+            ),
             stt_enabled=_env_bool("MINIMAPPR_STT_ENABLED", True),
             stt_model_id=_env_str("MINIMAPPR_STT_MODEL_ID", "onnx-community/moonshine-base-ONNX"),
             stt_model_cache_dir=Path(

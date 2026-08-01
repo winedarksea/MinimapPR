@@ -41,15 +41,17 @@ class StubClassifier(AudioClassifier):
 
 
 class StubEmbeddingHead(EmbeddingClassifier):
-    def __init__(self) -> None:
+    def __init__(self, label: str = "drone", confidence: float = 0.9) -> None:
         self.received: list[np.ndarray] = []
+        self._label = label
+        self._confidence = confidence
 
     def classify_embedding(self, frames: np.ndarray) -> ClassificationResult:
         self.received.append(np.asarray(frames))
         return ClassificationResult(
-            label="drone",
-            confidence=0.9,
-            scores={"drone": 0.9, "no_drone": 0.1},
+            label=self._label,
+            confidence=self._confidence,
+            scores={"drone": self._confidence, "no_drone": 1.0 - self._confidence},
             features={"model": "stub_head"},
         )
 
@@ -104,6 +106,41 @@ def test_unknown_backend_raises(tmp_path: Path) -> None:
         load_routing_file(path)
 
 
+def test_min_frame_fraction_round_trips(tmp_path: Path) -> None:
+    from minimappr.classifiers.routing import routing_to_dict
+
+    path = tmp_path / "routing.json"
+    path.write_text(
+        json.dumps(
+            {
+                "classifiers": {
+                    "drone_head": {"backend": "drone_head", "min_frame_fraction": 0.3}
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    routing = load_routing_file(path)
+    assert routing.classifiers["drone_head"].min_frame_fraction == 0.3
+    assert routing_to_dict(routing)["classifiers"]["drone_head"]["min_frame_fraction"] == 0.3
+
+
+def test_min_frame_fraction_out_of_range_raises(tmp_path: Path) -> None:
+    path = tmp_path / "routing.json"
+    path.write_text(
+        json.dumps(
+            {
+                "classifiers": {
+                    "drone_head": {"backend": "drone_head", "min_frame_fraction": 1.5}
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="min_frame_fraction"):
+        load_routing_file(path)
+
+
 def test_kill_switches_strip_members_chains_triggers() -> None:
     settings = Settings(
         birdnet_enabled=False, drone_head_enabled=False, stt_enabled=False, t3t4_enabled=False
@@ -130,6 +167,7 @@ def test_t3t4_threshold_override() -> None:
 def test_settings_override_thresholds_and_omni_params() -> None:
     settings = Settings(
         drone_head_min_confidence=0.7,
+        drone_head_min_frame_fraction=0.35,
         stt_trigger_min_confidence=0.9,
         omni_scan_interval_seconds=60.0,
         omni_scan_window_seconds=10.0,
@@ -137,6 +175,7 @@ def test_settings_override_thresholds_and_omni_params() -> None:
     )
     routing = apply_settings(default_routing(), settings)
     assert routing.classifiers["drone_head"].min_confidence == 0.7
+    assert routing.classifiers["drone_head"].min_frame_fraction == 0.35
     assert routing.triggers[0].min_confidence == 0.9
     omni = routing.context(CONTEXT_OMNI_CONTINUOUS)
     assert omni.interval_seconds == 60.0
@@ -270,8 +309,60 @@ def test_embedding_chain_stage_consumes_frames() -> None:
     assert head.received and head.received[0].shape == (3, 1024)
     assert result.scores["drone_head:drone"] == pytest.approx(0.9)
     assert result.label == "drone"  # 0.9 beats 0.6
+    assert result.features["winner_member"] == "drone_head"
     json.dumps(result.features)
     assert "embedding_frames" not in result.features
+
+
+def test_unknown_chain_stage_does_not_clobber_base_label() -> None:
+    # A sub-threshold head reports unknown; the base's real label must stand
+    # even when the stage's raw confidence is numerically higher.
+    frames = np.ones((2, 1024), dtype=np.float32)
+    base = StubClassifier("engine", 0.6, features={"embedding_frames": frames})
+    head = StubEmbeddingHead(label="unknown", confidence=0.7)
+    chained = ChainedClassifier(
+        base_classifier=base,
+        stages=[ChainStage(stage_id="drone_head", classifier=head, input_kind="embedding")],
+    )
+    result = chained.classify(np.zeros(16000, dtype=np.float32), 16000)
+    assert result.label == "engine"
+    assert result.confidence == pytest.approx(0.6)
+    assert "winner_member" not in result.features
+    # The stage's evidence is still merged for observability.
+    assert result.scores["drone_head:drone"] == pytest.approx(0.7)
+
+
+def test_composite_preserves_chain_stage_attribution() -> None:
+    # yamnet member whose drone_head chain stage wins -> composite must report
+    # winner_member="drone_head" so classifier_source/audio retention key off it.
+    frames = np.ones((2, 1024), dtype=np.float32)
+    base = StubClassifier("engine", 0.6, features={"embedding_frames": frames})
+    chained = ChainedClassifier(
+        base_classifier=base,
+        stages=[
+            ChainStage(stage_id="drone_head", classifier=StubEmbeddingHead(), input_kind="embedding")
+        ],
+    )
+    composite = CompositeClassifier(
+        [
+            CompositeMember("yamnet", chained),
+            CompositeMember("birdnet", StubClassifier("robin", 0.4)),
+        ]
+    )
+    result = composite.classify(np.zeros(16000, dtype=np.float32), 16000)
+    assert result.label == "drone"
+    assert result.features["winner_member"] == "drone_head"
+
+    # When another member outscores the chained one, its own id is reported.
+    composite_birdnet_wins = CompositeClassifier(
+        [
+            CompositeMember("yamnet", chained),
+            CompositeMember("birdnet", StubClassifier("robin", 0.95)),
+        ]
+    )
+    result = composite_birdnet_wins.classify(np.zeros(16000, dtype=np.float32), 16000)
+    assert result.label == "robin"
+    assert result.features["winner_member"] == "birdnet"
 
 
 def test_embedding_chain_falls_back_to_mean_embedding() -> None:

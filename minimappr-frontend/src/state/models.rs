@@ -409,6 +409,8 @@ pub struct ConfigSnapshot {
     #[serde(default)]
     pub drone_head_min_confidence: f64,
     #[serde(default)]
+    pub drone_head_min_frame_fraction: f64,
+    #[serde(default)]
     pub stt_enabled: bool,
     #[serde(default)]
     pub stt_trigger_min_confidence: f64,

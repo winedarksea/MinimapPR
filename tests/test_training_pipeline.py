@@ -399,3 +399,21 @@ def test_per_class_split_gives_coyote_val_and_test():
     # With 6 groups the coyote class should land >=1 group in both val and test.
     assert is_va[coy].any()
     assert is_te[coy].any()
+
+
+def test_clip_stats_by_group_mean_and_fraction_vote():
+    from scripts.train_drone_head import _fraction_metrics, clip_stats_by_group
+
+    # Two clips: "a" = 1 hot frame of 4 (fraction 0.25), "b" = all-cold negatives.
+    frame_scores = np.asarray([0.9, 0.1, 0.1, 0.1, 0.2, 0.2], dtype=np.float64)
+    groups = np.asarray(["a", "a", "a", "a", "b", "b"], dtype=object)
+    y_pos = np.asarray([1, 1, 1, 1, 0, 0])
+    clip_means, clip_frames, clip_labels = clip_stats_by_group(frame_scores, groups, y_pos)
+    assert clip_means == pytest.approx([0.3, 0.2])
+    assert list(clip_labels) == [1, 0]
+
+    # At fraction floor 0.2 the hot clip is predicted positive; at 0.5 it is not.
+    loose = _fraction_metrics(clip_frames, clip_labels, threshold=0.5, min_frame_fraction=0.2)
+    assert loose["tp"] == 1 and loose["fp"] == 0
+    strict = _fraction_metrics(clip_frames, clip_labels, threshold=0.5, min_frame_fraction=0.5)
+    assert strict["tp"] == 0 and strict["fn"] == 1

@@ -6,6 +6,15 @@ with a dedicated *negative* class (``ambient``/``no_drone``) that maps to the
 runtime ``"unknown"`` label. Embedding-only: it runs as a routing chain stage
 with ``input: "embedding"``, never on raw audio.
 
+Clip-level decision: a positive class qualifies only when at least one frame
+reaches ``min_confidence`` AND the fraction of such frames meets
+``min_frame_fraction``; the winner among qualified classes is the one with the
+highest clip-mean probability, reported with that mean as the confidence. A
+single noisy frame in a long clip therefore cannot flip the label, and on
+single-frame clips the fraction degenerates to 0/1 so one confident frame
+still qualifies. Per-class clip maxes stay in ``scores``/``features`` for
+observability.
+
 Legacy binary ``no_drone``/``drone`` models remain supported: labels default to
 ``_DEFAULT_LABELS`` and the negative class is inferred when metadata is absent.
 """
@@ -39,6 +48,7 @@ class DroneHeadClassifier(EmbeddingClassifier):
         model_path: str | Path = "data/models/drone_head.onnx",
         *,
         min_confidence: float = 0.5,
+        min_frame_fraction: float = 0.2,
         expected_preprocessing_fingerprint: str | None = None,
     ) -> None:
         try:
@@ -59,6 +69,7 @@ class DroneHeadClassifier(EmbeddingClassifier):
         )
         self._input_name = self._session.get_inputs()[0].name
         self._min_confidence = float(min_confidence)
+        self._min_frame_fraction = float(np.clip(min_frame_fraction, 0.0, 1.0))
         self._labels = _DEFAULT_LABELS
         self._metadata: dict = {}
         self._negative_label: str | None = None
@@ -115,16 +126,29 @@ class DroneHeadClassifier(EmbeddingClassifier):
             frame_prob_rows.append(probs)
         frame_matrix = np.stack(frame_prob_rows)  # [n_frames, n_labels]
 
-        # Clip-level score per class: max over frames (a class audible in any
-        # single ~1s frame counts).
         clip_max = frame_matrix.max(axis=0)
         clip_mean = frame_matrix.mean(axis=0)
+        n_frames = frame_matrix.shape[0]
 
-        # Winner = argmax over the positive classes only.
-        best_pos_index = max(self._positive_indices, key=lambda i: float(clip_max[i]))
-        best_score = float(clip_max[best_pos_index])
-        best_label = str(self._labels[best_pos_index])
-        label = best_label if best_score >= self._min_confidence else "unknown"
+        # A positive class qualifies only when at least one frame reaches the
+        # per-frame threshold AND the fraction of such frames meets
+        # min_frame_fraction; winner = qualified class with highest clip mean.
+        frame_fractions = {
+            i: float((frame_matrix[:, i] >= self._min_confidence).sum()) / n_frames
+            for i in self._positive_indices
+        }
+        qualified = [
+            i
+            for i in self._positive_indices
+            if frame_fractions[i] > 0.0 and frame_fractions[i] >= self._min_frame_fraction
+        ]
+        if qualified:
+            winner = max(qualified, key=lambda i: (float(clip_mean[i]), -i))
+            label = str(self._labels[winner])
+            best_score = float(clip_mean[winner])
+        else:
+            label = "unknown"
+            best_score = 0.0
 
         # scores = per-class clip maxes for every label (drop the 1-p construction).
         scores = {str(self._labels[i]): float(clip_max[i]) for i in range(len(self._labels))}
@@ -132,6 +156,7 @@ class DroneHeadClassifier(EmbeddingClassifier):
         features: dict = {
             "model": "drone_head",
             "frame_count": float(len(frame_prob_rows)),
+            "min_frame_fraction": self._min_frame_fraction,
         }
         # Back-compat drone_prob_* keys (fall back to 0.0 if no drone class).
         if "drone" in [name.lower() for name in self._labels]:
@@ -141,11 +166,12 @@ class DroneHeadClassifier(EmbeddingClassifier):
         else:
             features["drone_prob_max"] = 0.0
             features["drone_prob_mean"] = 0.0
-        # Per positive class max/mean feature keys.
+        # Per positive class max/mean/fraction feature keys.
         for i in self._positive_indices:
             name = str(self._labels[i])
             features[f"{name}_prob_max"] = float(clip_max[i])
             features[f"{name}_prob_mean"] = float(clip_mean[i])
+            features[f"{name}_frame_fraction"] = frame_fractions[i]
 
         return ClassificationResult(
             label=label,

@@ -111,6 +111,8 @@ def test_three_class_ambient_dominant_is_unknown(tmp_path):
     result = clf.classify_embedding(_slice_embedding(0, 3))  # ambient slice
     # Negative class wins => never emitted; falls back to unknown.
     assert result.label == "unknown"
+    # Unknown must report zero confidence so it can never win a chain merge.
+    assert result.confidence == 0.0
 
 
 def test_three_class_per_class_max_across_frames(tmp_path):
@@ -159,13 +161,65 @@ def test_classify_embedding_negative_is_unknown(tmp_path):
     assert result.scores["drone"] < 0.5
 
 
-def test_clip_prob_is_max_over_frames(tmp_path):
+def test_minority_frame_fraction_still_qualifies(tmp_path):
     model = _write_tiny_head(tmp_path / "drone_head.onnx")
     clf = DroneHeadClassifier(model, min_confidence=0.5)
     frames = np.stack([-np.ones(EMBEDDING_DIM), np.ones(EMBEDDING_DIM)]).astype(np.float32)
     result = clf.classify_embedding(frames)
-    assert result.label == "drone"  # any drone-audible frame counts
+    assert result.label == "drone"  # 1 of 2 frames >= threshold: fraction 0.5 >= 0.2
+    # Reported confidence is the clip-mean probability, not the frame max.
+    assert result.confidence == pytest.approx(0.5, abs=0.02)
     assert result.features["frame_count"] == 2.0
+
+
+def test_single_noisy_frame_does_not_relabel_clip(tmp_path):
+    """Production regression: one drone-ish frame in a long ambient clip must
+    not flip the label (previously max-over-frames labeled the clip drone)."""
+    model = _write_tiny_head(tmp_path / "drone_head.onnx")
+    clf = DroneHeadClassifier(model, min_confidence=0.5)
+    frames = np.vstack(
+        [-np.ones((61, EMBEDDING_DIM)), np.ones((1, EMBEDDING_DIM))]
+    ).astype(np.float32)
+    result = clf.classify_embedding(frames)
+    assert result.label == "unknown"
+    assert result.confidence == 0.0
+    # Observability retained: the noisy frame is still visible in scores/features.
+    assert result.scores["drone"] > 0.5
+    assert result.features["drone_prob_max"] > 0.5
+    assert result.features["drone_frame_fraction"] < 0.2
+
+
+def test_frame_fraction_boundary(tmp_path):
+    model = _write_tiny_head(tmp_path / "drone_head.onnx")
+    clf = DroneHeadClassifier(model, min_confidence=0.5, min_frame_fraction=0.2)
+    hot = np.ones((1, EMBEDDING_DIM))
+    # 1 of 5 frames = fraction 0.2 -> qualifies at the boundary.
+    frames_5 = np.vstack([-np.ones((4, EMBEDDING_DIM)), hot]).astype(np.float32)
+    assert clf.classify_embedding(frames_5).label == "drone"
+    # 1 of 6 frames = fraction ~0.167 -> below the floor.
+    frames_6 = np.vstack([-np.ones((5, EMBEDDING_DIM)), hot]).astype(np.float32)
+    assert clf.classify_embedding(frames_6).label == "unknown"
+
+
+def test_confidence_is_clip_mean(tmp_path):
+    model = _write_tiny_head(tmp_path / "drone_head.onnx")
+    clf = DroneHeadClassifier(model, min_confidence=0.5)
+    frames = np.vstack(
+        [-np.ones((2, EMBEDDING_DIM)), np.ones((2, EMBEDDING_DIM))]
+    ).astype(np.float32)
+    result = clf.classify_embedding(frames)
+    assert result.label == "drone"
+    assert result.confidence == pytest.approx(result.features["drone_prob_mean"])
+    assert result.confidence < result.features["drone_prob_max"]
+
+
+def test_zero_fraction_still_requires_one_hit(tmp_path):
+    model = _write_tiny_head(tmp_path / "drone_head.onnx")
+    clf = DroneHeadClassifier(model, min_confidence=0.5, min_frame_fraction=0.0)
+    frames = -np.ones((4, EMBEDDING_DIM), dtype=np.float32)
+    result = clf.classify_embedding(frames)
+    assert result.label == "unknown"
+    assert result.confidence == 0.0
 
 
 def test_missing_model_raises_filenotfound(tmp_path):
@@ -217,6 +271,8 @@ def test_chain_stage_feeds_embedding_frames_and_strips_ndarrays(tmp_path):
     )
     result = chained.classify(np.zeros(16000, dtype=np.float32), 16000)
 
+    assert result.label == "drone"
+    assert result.features["winner_member"] == "drone_head"
     assert result.scores["drone_head:drone"] > 0.5
     # ndarrays must never survive into the feature summary (JSON hygiene).
     assert "embedding" not in result.features

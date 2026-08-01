@@ -170,6 +170,9 @@ def _build_backend(
             return DroneHeadClassifier(
                 model_path=spec.model_path or settings.drone_head_model_path,
                 min_confidence=spec.min_confidence,
+                min_frame_fraction=(
+                    spec.min_frame_fraction if spec.min_frame_fraction is not None else 0.2
+                ),
                 expected_preprocessing_fingerprint=profile_fingerprint(yamnet_profile),
             )
         except PreprocessingProfileMismatchError:

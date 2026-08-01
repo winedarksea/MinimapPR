@@ -48,6 +48,7 @@ class ClassifierSpec:
     member_id: str
     backend: str
     min_confidence: float = 0.0
+    min_frame_fraction: float | None = None
     keep_embeddings: bool = False
     model_path: str | None = None
     preprocess_profile: str | None = None
@@ -117,6 +118,7 @@ def default_routing() -> RoutingConfig:
                 member_id="drone_head",
                 backend="drone_head",
                 min_confidence=0.50,
+                min_frame_fraction=0.2,
                 model_path="data/models/drone_head.onnx",
             ),
             "stt": ClassifierSpec(member_id="stt", backend="moonshine_stt"),
@@ -183,10 +185,18 @@ def _parse_routing(raw: dict[str, Any], source: str) -> RoutingConfig:
             raise ValueError(
                 f"{source}: classifiers[{member_id!r}].min_confidence must be in [0, 1]"
             )
+        min_frame_fraction: float | None = None
+        if spec.get("min_frame_fraction") is not None:
+            min_frame_fraction = float(spec["min_frame_fraction"])
+            if not 0.0 <= min_frame_fraction <= 1.0:
+                raise ValueError(
+                    f"{source}: classifiers[{member_id!r}].min_frame_fraction must be in [0, 1]"
+                )
         classifiers[normalized_member_id] = ClassifierSpec(
             member_id=normalized_member_id,
             backend=backend,
             min_confidence=min_confidence,
+            min_frame_fraction=min_frame_fraction,
             keep_embeddings=bool(spec.get("keep_embeddings", False)),
             model_path=(str(spec["model_path"]) if spec.get("model_path") else None),
             preprocess_profile=(
@@ -326,6 +336,8 @@ def routing_to_dict(routing: RoutingConfig) -> dict[str, Any]:
             "min_confidence": spec.min_confidence,
             "keep_embeddings": spec.keep_embeddings,
         }
+        if spec.min_frame_fraction is not None:
+            value["min_frame_fraction"] = spec.min_frame_fraction
         if spec.model_path is not None:
             value["model_path"] = spec.model_path
         if spec.preprocess_profile is not None:
@@ -446,6 +458,13 @@ def apply_settings(routing: RoutingConfig, settings: Any) -> RoutingConfig:
                 spec,
                 min_confidence=float(
                     getattr(settings, "drone_head_min_confidence", spec.min_confidence)
+                ),
+                min_frame_fraction=float(
+                    getattr(
+                        settings,
+                        "drone_head_min_frame_fraction",
+                        spec.min_frame_fraction if spec.min_frame_fraction is not None else 0.2,
+                    )
                 ),
                 model_path=str(
                     getattr(settings, "drone_head_model_path", spec.model_path or "")

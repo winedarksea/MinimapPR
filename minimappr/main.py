@@ -2995,6 +2995,7 @@ async def get_config(request: Request) -> dict:
         "drone_head_enabled": settings.drone_head_enabled,
         "drone_head_model_path": str(settings.drone_head_model_path),
         "drone_head_min_confidence": settings.drone_head_min_confidence,
+        "drone_head_min_frame_fraction": settings.drone_head_min_frame_fraction,
         "stt_enabled": settings.stt_enabled,
         "stt_model_id": settings.stt_model_id,
         "stt_model_cache_dir": str(settings.stt_model_cache_dir),
@@ -3392,7 +3393,11 @@ async def patch_config(request: Request) -> dict:
             0.0 <= value <= 1.0  # type: ignore[operator]
         ):
             errors.append(f"{key}: must be in [0, 1]")
-        elif key in {"drone_head_min_confidence", "stt_trigger_min_confidence"} and not (
+        elif key in {
+            "drone_head_min_confidence",
+            "drone_head_min_frame_fraction",
+            "stt_trigger_min_confidence",
+        } and not (
             0.0 <= value <= 1.0  # type: ignore[operator]
         ):
             errors.append(f"{key}: must be in [0, 1]")

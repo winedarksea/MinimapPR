@@ -733,6 +733,8 @@ def _rule_condition_summary(rule: RuleDef) -> str:
         parts.append("cats: " + ",".join(sorted(c.label_categories)))
     if c.zone_ids:
         parts.append("zones: " + ",".join(sorted(c.zone_ids)))
+    if c.reporting_modalities:
+        parts.append("modality: " + ",".join(sorted(c.reporting_modalities)))
     if c.min_confidence is not None:
         parts.append(f"conf≥{c.min_confidence:g}")
     summary = "; ".join(parts) if parts else "any"

@@ -484,8 +484,7 @@ def _roc_auc(scores: np.ndarray, y: np.ndarray) -> float:
     return float((r_pos - len(pos) * (len(pos) + 1) / 2) / (len(pos) * len(neg)))
 
 
-def _binary_metrics(scores: np.ndarray, y: np.ndarray, threshold: float) -> dict:
-    pred = (scores >= threshold).astype(np.int64)
+def _prediction_metrics(pred: np.ndarray, y: np.ndarray, threshold: float) -> dict:
     tp = int(np.sum((pred == 1) & (y == 1)))
     fp = int(np.sum((pred == 1) & (y == 0)))
     fn = int(np.sum((pred == 0) & (y == 1)))
@@ -502,23 +501,61 @@ def _binary_metrics(scores: np.ndarray, y: np.ndarray, threshold: float) -> dict
     }
 
 
-def sweep_thresholds(scores: np.ndarray, y: np.ndarray, min_precision: float = 0.95):
-    sweep = [_binary_metrics(scores, y, t) for t in np.linspace(0.05, 0.95, 19)]
+def _fraction_metrics(
+    clip_frame_scores: list[np.ndarray],
+    y: np.ndarray,
+    threshold: float,
+    min_frame_fraction: float,
+) -> dict:
+    """Clip metrics under the runtime frame-fraction vote: a clip is positive
+    iff at least one frame reaches ``threshold`` AND the fraction of such
+    frames meets ``min_frame_fraction`` (mirrors DroneHeadClassifier)."""
+    pred = np.asarray(
+        [
+            1
+            if (hits := int((fs >= threshold).sum())) >= 1
+            and hits / len(fs) >= min_frame_fraction
+            else 0
+            for fs in clip_frame_scores
+        ],
+        dtype=np.int64,
+    )
+    return _prediction_metrics(pred, y, threshold)
+
+
+def sweep_fraction_thresholds(
+    clip_frame_scores: list[np.ndarray],
+    y: np.ndarray,
+    min_frame_fraction: float,
+    min_precision: float = 0.95,
+):
+    """Sweep per-frame thresholds under the frame-fraction clip vote."""
+    sweep = [
+        _fraction_metrics(clip_frame_scores, y, t, min_frame_fraction)
+        for t in np.linspace(0.05, 0.95, 19)
+    ]
     passing = [m for m in sweep if m["precision"] >= min_precision]
     alert = min(passing, key=lambda m: m["threshold"]) if passing else max(sweep, key=lambda m: m["precision"])
     detect = max(sweep, key=lambda m: m["f1"])
     return alert, detect, sweep
 
 
-def clip_max_by_group(frame_scores: np.ndarray, groups: np.ndarray, y_pos: np.ndarray):
-    """Aggregate per-frame scores to clip level via group max; label = any-positive."""
-    clip_scores: list[float] = []
+def clip_stats_by_group(frame_scores: np.ndarray, groups: np.ndarray, y_pos: np.ndarray):
+    """Aggregate per-frame scores to clip level; label = any-positive.
+
+    Returns (clip_means, clip_frame_scores, clip_labels): the mean score per
+    clip (the confidence runtime reports), each clip's raw frame scores (for
+    frame-fraction threshold sweeps), and the clip label.
+    """
+    clip_means: list[float] = []
+    clip_frame_scores: list[np.ndarray] = []
     clip_labels: list[int] = []
     for g in np.unique(groups):
         mask = groups == g
-        clip_scores.append(float(frame_scores[mask].max()))
+        clip_means.append(float(frame_scores[mask].mean()))
+        clip_frame_scores.append(frame_scores[mask])
         clip_labels.append(int(y_pos[mask].max()))
-    return np.asarray(clip_scores), np.asarray(clip_labels, dtype=np.int64)
+    return np.asarray(clip_means), clip_frame_scores, np.asarray(clip_labels, dtype=np.int64)
 
 
 def quantized_model_quality_metrics(
@@ -740,6 +777,10 @@ def main(argv: Iterable[str] | None = None) -> int:
         default=Path("data/audio_processing.json"),
     )
     parser.add_argument("--labels", default=",".join(DEFAULT_LABELS))
+    # Mirrors runtime drone_head_min_frame_fraction: threshold sweeps score a
+    # clip positive only when this fraction of frames passes the per-frame
+    # threshold, so exported thresholds match deployed aggregation semantics.
+    parser.add_argument("--min-frame-fraction", type=float, default=0.2)
     parser.add_argument("--epochs", type=int, default=40)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--seed", type=int, default=1234)
@@ -865,9 +906,13 @@ def main(argv: Iterable[str] | None = None) -> int:
         pos = (test_y == li).astype(np.int64)
         frame_scores = probs[:, li]
         frame_auc = _roc_auc(frame_scores, pos)
-        clip_scores, clip_labels = clip_max_by_group(frame_scores, test_groups, pos)
-        clip_auc = _roc_auc(clip_scores, clip_labels)
-        alert, detect, sweep = sweep_thresholds(clip_scores, clip_labels)
+        clip_means, clip_frame_scores, clip_labels = clip_stats_by_group(
+            frame_scores, test_groups, pos
+        )
+        clip_auc = _roc_auc(clip_means, clip_labels)
+        alert, detect, sweep = sweep_fraction_thresholds(
+            clip_frame_scores, clip_labels, args.min_frame_fraction
+        )
         n_pos_groups = int(len(np.unique(test_groups[pos == 1]))) if pos.any() else 0
         n_pos_frames = int(pos.sum())
         reliable = n_pos_groups >= _RELIABLE_MIN_GROUPS and n_pos_frames >= _RELIABLE_MIN_FRAMES
@@ -953,6 +998,12 @@ def main(argv: Iterable[str] | None = None) -> int:
             "max_input_gain": YAMNET_MAX_INPUT_GAIN,
         },
         "thresholds": thresholds,
+        "aggregation": {
+            "type": "frame_fraction",
+            "min_frame_fraction": args.min_frame_fraction,
+            "clip_confidence": "mean",
+            "per_frame_threshold": "min_confidence",
+        },
         "metrics": {name: {"frame_auc": v.get("frame_auc"), "clip_auc": v.get("clip_auc")}
                     for name, v in per_class.items()},
         "dataset_counts": counts,

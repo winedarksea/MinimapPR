@@ -46,6 +46,7 @@ CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     "birdnet_enabled": bool,
     "drone_head_enabled": bool,
     "drone_head_min_confidence": float,
+    "drone_head_min_frame_fraction": float,
     "stt_enabled": bool,
     "stt_trigger_min_confidence": float,
     "transcript_retention_seconds": float,

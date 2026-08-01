@@ -24,7 +24,15 @@ class ChainStage:
 
 
 class ChainedClassifier(AudioClassifier):
-    """Runs a base classifier and optional downstream stages."""
+    """Runs a base classifier and optional downstream stages.
+
+    Merge semantics: the base provides the initial label/confidence; every
+    triggered stage merges ``stage_id:``-namespaced scores/features and a
+    ``chain`` meta entry. A stage replaces the winner only when its label is
+    real (not ``""``/``"unknown"``) and its weighted confidence strictly
+    exceeds the current winner. ``winner_member`` names the winning stage when
+    one won; the key is absent when the base label stands.
+    """
 
     def __init__(
         self,
@@ -54,6 +62,7 @@ class ChainedClassifier(AudioClassifier):
         chain_meta: list[dict[str, object]] = []
         winner_label = base.label
         winner_conf = float(base.confidence)
+        winner_stage_id: str | None = None
 
         base_category = str(self._category_for_label(base.label)).strip().lower()
         for stage in self._stages:
@@ -87,9 +96,10 @@ class ChainedClassifier(AudioClassifier):
                 combined_scores[f"{stage.stage_id}:{key}"] = float(value) * stage.score_weight
 
             weighted_conf = float(result.confidence) * stage.score_weight
-            if weighted_conf > winner_conf:
+            if result.label not in ("", "unknown") and weighted_conf > winner_conf:
                 winner_conf = weighted_conf
                 winner_label = result.label
+                winner_stage_id = stage.stage_id
             for key, value in result.features.items():
                 feature_summary[f"{stage.stage_id}:{key}"] = float(value) if isinstance(value, (int, float)) else value
 
@@ -101,6 +111,8 @@ class ChainedClassifier(AudioClassifier):
         feature_summary["chain_stage_count"] = float(len(chain_meta))
         if chain_meta:
             feature_summary["chain"] = chain_meta
+        if winner_stage_id is not None:
+            feature_summary["winner_member"] = winner_stage_id
         return ClassificationResult(
             label=winner_label,
             confidence=float(np.clip(winner_conf, 0.0, 1.0)),

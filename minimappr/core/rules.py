@@ -478,7 +478,11 @@ def default_rules() -> list[RuleDef]:
             rule_id="drone_alert",
             enabled=True,
             scope="detection",
-            condition=RuleCondition(labels={"drone"}, min_confidence=0.5),
+            condition=RuleCondition(
+                labels={"drone"},
+                reporting_modalities={"localized"},
+                min_confidence=0.5,
+            ),
             actions=[
                 ActionDescriptor(
                     action_type="alert",

@@ -69,7 +69,9 @@ class CompositeClassifier(AudioClassifier):
         winner_label: str | None = None
         winner_conf = 0.0
         winner_member = primary_id
-        priority_best: tuple[float, str, str] | None = None  # (conf, label, member_id)
+        winner_result: ClassificationResult | None = None
+        # (conf, label, member_id, result)
+        priority_best: tuple[float, str, str, ClassificationResult] | None = None
 
         for member in self._members:
             try:
@@ -99,27 +101,33 @@ class CompositeClassifier(AudioClassifier):
                 winner_conf = weighted_conf
                 winner_label = result.label
                 winner_member = member.member_id
+                winner_result = result
             if result.label in self._priority_labels and (
                 priority_best is None or float(result.confidence) > priority_best[0]
             ):
-                priority_best = (float(result.confidence), result.label, member.member_id)
+                priority_best = (float(result.confidence), result.label, member.member_id, result)
 
         if priority_best is not None:
             # A safety-critical label was detected: surface it regardless of a
             # higher-scoring non-priority member (see _priority_labels).
-            winner_conf, winner_label, winner_member = priority_best
+            winner_conf, winner_label, winner_member, winner_result = priority_best
         elif winner_label is None:
             # All-unknown ensemble: report the first successful member's result.
             winner_label = first_result.label if first_result is not None else "unknown"
             winner_conf = float(first_result.confidence) if first_result is not None else 0.0
             winner_member = first_member_id
+            winner_result = first_result
 
         # ndarrays (embeddings) must never reach feature_summary_json.
         for key in [k for k in feature_summary if k.endswith(("embedding", "embedding_frames"))]:
             feature_summary.pop(key, None)
 
         feature_summary["ensemble"] = ensemble
-        feature_summary["winner_member"] = winner_member
+        # A chained member that won via one of its stages carries the stage id
+        # in its own winner_member feature; that attribution must survive so
+        # classifier_source (and e.g. drone-head audio retention) is correct.
+        nested_winner = winner_result.features.get("winner_member") if winner_result else None
+        feature_summary["winner_member"] = str(nested_winner or winner_member)
         return ClassificationResult(
             label=winner_label,
             confidence=float(np.clip(winner_conf, 0.0, 1.0)),

@@ -129,6 +129,26 @@ async def test_default_drone_rule_alerts_at_head_acceptance_threshold(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_default_drone_rule_ignores_omni_detections(tmp_path: Path) -> None:
+    engine = ConfigRuleEngine(tmp_path / "missing-rules.json")
+    detection = DetectionEvent(
+        id="det-drone-omni",
+        timestamp_ns=1_700_000_000_000_000_000,
+        position_m=(0.0, 0.0, 0.0),
+        confidence=0.5,
+        gdop=1.2,
+        label="drone",
+        label_category="security",
+        label_confidence=0.9,
+        reporting_modality="omni",
+        reference_sensor="node-a:ch0",
+    )
+    evaluations = await engine.evaluate(detection=detection, track=None)
+    drone = next(item for item in evaluations if item.rule_id == "drone_alert")
+    assert drone.matched is False
+
+
+@pytest.mark.asyncio
 async def test_transcript_rule_matches_text(tmp_path: Path) -> None:
     engine = ConfigRuleEngine(tmp_path / "missing-rules.json")
     transcript = TranscriptRecord(
