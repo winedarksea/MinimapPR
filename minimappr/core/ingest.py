@@ -339,8 +339,9 @@ class IngestProcessor:
 
         # -- persist bounded metadata after reserving buffer insertion ---------
         observation_ids: list[str] = []
-        persist_node_registration = await self._live_ingest_state.should_persist_node_registration(
-            normalized_node
+        persist_node_registration = await self._live_ingest_state.should_persist_node_row(
+            normalized_node,
+            now_ns=server_received_ns,
         )
         persist_environment_sample = environment_sample is not None and await self._live_ingest_state.should_persist_environment_sample(
             node_id=normalized_node.id,

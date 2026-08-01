@@ -66,15 +66,22 @@ class LiveIngestState:
         frame_dedup_window_seconds: float = 120.0,
         frame_dedup_max_entries_per_node: int = 4_096,
         environment_persistence_interval_seconds: float = 60.0,
+        node_liveness_persistence_interval_seconds: float = 5.0,
     ) -> None:
         self._frame_dedup_window_ns = int(frame_dedup_window_seconds * 1_000_000_000)
         self._frame_dedup_max_entries_per_node = frame_dedup_max_entries_per_node
         self._environment_persistence_interval_ns = int(
             environment_persistence_interval_seconds * 1_000_000_000
         )
+        # Comfortably below the smallest sensible node_degraded_after_seconds so a
+        # healthy node never drifts into "degraded" between heartbeat writes.
+        self._node_liveness_persistence_interval_ns = int(
+            node_liveness_persistence_interval_seconds * 1_000_000_000
+        )
         self._completed_frame_keys_by_node: dict[str, OrderedDict[FrameIdentity, int]] = {}
         self._reserved_frame_keys_by_node: dict[str, set[FrameIdentity]] = {}
         self._node_fingerprints: dict[str, str] = {}
+        self._last_node_liveness_persist_ns: dict[str, int] = {}
         self._last_environment_bucket_by_node: dict[str, int] = {}
         self._audio_summaries_by_node: dict[str, dict[str, Any]] = {}
         self._lock = asyncio.Lock()
@@ -126,14 +133,33 @@ class LiveIngestState:
         await self.commit_reserved_frame(identity)
         return True
 
-    async def should_persist_node_registration(self, node: NodeSpec) -> bool:
-        """Persist only a new or materially reconfigured node registration."""
+    async def should_persist_node_row(self, node: NodeSpec, *, now_ns: int) -> bool:
+        """Persist a changed registration, or refresh a stale persisted heartbeat.
+
+        The static fingerprint deliberately ignores position and metadata so
+        per-frame telemetry does not churn the row.  On its own that freezes the
+        stored ``last_seen_ns`` at the node's very first frame.  In a combined
+        process nothing notices, because ``/api/v1/nodes`` overlays the live
+        in-memory registry; but when the API runs as its own process
+        (``process_role="api"``) that overlay is skipped and the frozen column is
+        the only liveness signal there is, so every healthy node reads "offline"
+        forever.  A bounded heartbeat write keeps the persisted row honest at a
+        cost of one small UPDATE per node per interval.
+        """
         fingerprint = _static_node_fingerprint(node)
         async with self._lock:
-            previous = self._node_fingerprints.get(node.id)
-            if previous == fingerprint:
+            previous_fingerprint = self._node_fingerprints.get(node.id)
+            if previous_fingerprint != fingerprint:
+                self._node_fingerprints[node.id] = fingerprint
+                self._last_node_liveness_persist_ns[node.id] = now_ns
+                return True
+            last_persist_ns = self._last_node_liveness_persist_ns.get(node.id)
+            if (
+                last_persist_ns is not None
+                and now_ns - last_persist_ns < self._node_liveness_persistence_interval_ns
+            ):
                 return False
-            self._node_fingerprints[node.id] = fingerprint
+            self._last_node_liveness_persist_ns[node.id] = now_ns
             return True
 
     async def should_persist_environment_sample(self, *, node_id: str, timestamp_ns: int) -> bool:

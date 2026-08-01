@@ -687,7 +687,7 @@ class FusionNode:
         last_seen_ns: int,
         position_geo: GeoPoint | None,
     ) -> None:
-        if not await self._live_ingest_state.should_persist_node_registration(node):
+        if not await self._live_ingest_state.should_persist_node_row(node, now_ns=last_seen_ns):
             return
         await self.storage.upsert_node(
             spec=node,

@@ -162,11 +162,20 @@ class CleanupService:
         if self._storage is not None:
             with contextlib.suppress(Exception):
                 await self._storage.close()
-        db_removed = False
-        if self._settings.db_path.exists():
-            if not dry_run:
-                await asyncio.to_thread(self._settings.db_path.unlink, missing_ok=True)
-            db_removed = True
+        db_path = self._settings.db_path
+        # SQLite runs in WAL mode (`PRAGMA journal_mode=WAL`), so the database is
+        # three files on disk. Unlinking only the main file leaves `-wal`/`-shm`
+        # behind for whatever opens the path next, which is not what "full
+        # cleanup" promises. Remove the whole set.
+        db_files = list(
+            await asyncio.gather(
+                *[
+                    _remove_path_async(candidate, dry_run=dry_run)
+                    for candidate in _sqlite_database_paths(db_path)
+                ]
+            )
+        )
+        db_removed = bool(db_files[0]["removed"])
         snippet_summary, speech_summary, artifact_summary, training_dataset_summary, spool_summary, cache_summaries = await asyncio.gather(
             _remove_tree_async(self._settings.snippet_dir, dry_run=dry_run),
             _remove_tree_async(self._settings.speech_audio_dir, dry_run=dry_run),
@@ -178,7 +187,12 @@ class CleanupService:
         return {
             "mode": "full",
             "dry_run": dry_run,
+            # The configured path is usually relative ("data/minimappr.db"), so a
+            # cleanup run from the wrong working directory silently targets a
+            # database that does not exist. Report what was actually resolved.
+            "db_path": str(_resolved(db_path)),
             "db_removed": db_removed,
+            "db_files": db_files,
             "snippet_dir": snippet_summary,
             "speech_audio_dir": speech_summary,
             "artifact_dir": artifact_summary,
@@ -194,6 +208,20 @@ class CleanupService:
             return True
         interval_ns = int(self._settings.sqlite_maintenance_interval_seconds * 1_000_000_000)
         return now_ns - self._last_sqlite_maintenance_ns >= interval_ns
+
+
+def _sqlite_database_paths(db_path: Path) -> tuple[Path, ...]:
+    """The main database file first, then its journal sidecars."""
+    return (
+        db_path,
+        *(db_path.with_name(f"{db_path.name}{suffix}") for suffix in ("-wal", "-shm", "-journal")),
+    )
+
+
+def _resolved(path: Path) -> Path:
+    with contextlib.suppress(OSError):
+        return path.resolve()
+    return path.absolute()
 
 
 async def _remove_known_runtime_cache_paths(*, dry_run: bool) -> list[dict[str, Any]]:

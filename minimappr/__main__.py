@@ -251,6 +251,16 @@ async def _run_cleanup(*, args: argparse.Namespace, settings: Settings, parser: 
         )
         summary = await cleanup_service.run_full_cleanup(dry_run=bool(args.dry_run))
         print(json.dumps(summary, indent=2, sort_keys=True))
+        if not summary["db_removed"]:
+            # db_path is relative by default, so the overwhelmingly likely cause
+            # is a wrong working directory or a MINIMAPPR_DB_PATH that the server
+            # has and this shell does not. Silently reporting success there leaves
+            # the operator believing a live database was wiped when it was not.
+            print(
+                f"warning: no database found at {summary['db_path']} - nothing was wiped there. "
+                "Re-run from the server's working directory or pass --db-path.",
+                file=sys.stderr,
+            )
         return
 
     if args.cleanup_mode == "partial":

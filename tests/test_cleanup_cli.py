@@ -74,6 +74,50 @@ def test_cleanup_full_yes_removes_db_and_managed_directories(
     assert artifact_dir.exists() is False
 
 
+def test_cleanup_full_removes_the_wal_and_shm_sidecars(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A WAL-mode database is three files; leaving two behind is not a full wipe."""
+    db_path = tmp_path / "minimappr.db"
+    db_path.write_bytes(b"sqlite")
+    wal_path = tmp_path / "minimappr.db-wal"
+    wal_path.write_bytes(b"wal")
+    shm_path = tmp_path / "minimappr.db-shm"
+    shm_path.write_bytes(b"shm")
+
+    monkeypatch.setattr("minimappr.__main__.uvicorn.run", lambda *args, **kwargs: None)
+    main(["cleanup", "full", "--yes", "--db-path", str(db_path)])
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["db_removed"] is True
+    assert db_path.exists() is False
+    assert wal_path.exists() is False
+    assert shm_path.exists() is False
+    removed_by_path = {row["path"]: row["removed"] for row in output["db_files"]}
+    assert removed_by_path[str(wal_path)] is True
+    assert removed_by_path[str(shm_path)] is True
+
+
+def test_cleanup_full_warns_when_no_database_exists_at_the_resolved_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The default db_path is relative, so a wrong CWD silently wipes nothing."""
+    monkeypatch.setattr("minimappr.__main__.uvicorn.run", lambda *args, **kwargs: None)
+    monkeypatch.chdir(tmp_path)
+    main(["cleanup", "full", "--yes"])
+
+    captured = capsys.readouterr()
+    output = json.loads(captured.out)
+    assert output["db_removed"] is False
+    assert output["db_path"] == str((tmp_path / "data" / "minimappr.db").resolve())
+    assert "no database found at" in captured.err
+    assert output["db_path"] in captured.err
+
+
 def test_cleanup_full_yes_removes_known_runtime_cache_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
