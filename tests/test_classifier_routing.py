@@ -411,3 +411,25 @@ def test_three_label_head_namespaces_all_class_scores() -> None:
     assert result.scores["drone_head:coyote"] == 0.8
     assert result.scores["drone_head:drone"] == 0.3
     assert result.scores["drone_head:ambient"] == 0.1
+
+
+def test_factory_threads_birdnet_pool_size(monkeypatch) -> None:
+    """pool_size=1 is a de-facto lock across fusion workers; the factory must
+    pass the configured pool size through to the BirdNET constructor."""
+    import minimappr.classifiers.birdnet as birdnet_module
+    from minimappr.classifiers.factory import _build_backend
+    from minimappr.classifiers.routing import ClassifierSpec
+
+    captured: dict[str, object] = {}
+
+    class _CapturingBirdNET:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(birdnet_module, "BirdNETClassifier", _CapturingBirdNET)
+
+    settings = Settings(birdnet_pool_size=3)
+    spec = ClassifierSpec(member_id="birdnet", backend="birdnet", min_confidence=0.4)
+    _build_backend(spec=spec, settings=settings, needs_embeddings=False)
+
+    assert captured["pool_size"] == 3

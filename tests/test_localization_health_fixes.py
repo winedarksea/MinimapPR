@@ -273,18 +273,64 @@ def test_two_d_fix_holds_altitude_but_still_tracks_horizontally() -> None:
     assert tracked.position_m[2] == pytest.approx(25.0, abs=1e-6)
 
 
-def test_two_d_fix_without_prior_three_d_fix_is_left_to_the_filters() -> None:
-    """With no trusted altitude ever recorded there is nothing better to substitute.
+def test_two_d_fix_without_prior_three_d_fix_pins_to_site_datum() -> None:
+    """A node that has NEVER had a 3D fix has no measured altitude at all.
 
-    Freezing z at the first sample would throw away the averaging that at least
-    suppresses noise, so the reading passes through to the normal filters.
+    Receivers emit a GGA altitude even under a GSA 2D fix; passing it through
+    fabricated a 5.7 m vertical spread between two co-sited nodes on the
+    2026-08-01 live box. Default mode pins ENU z to the site datum instead.
     """
     frame = LocalCoordinateFrame(origin=GeoPoint(lat=44.98, lon=-93.26, alt_m=250.0), mode="flat")
     processor = _make_processor(frame)
 
     only_2d = _node_with_fix(frame, (0.0, 0.0, 12.0), "fix_2d")
+    normalized, geo = processor._normalize_node_spec(only_2d, position_filter="raw")
+    assert normalized.position_m[2] == pytest.approx(0.0, abs=1e-6)
+    assert geo.alt_m == pytest.approx(250.0, abs=1e-3)
+
+
+def test_two_d_fix_without_prior_three_d_fix_raw_mode_passthrough() -> None:
+    """gps_2d_altitude_mode="raw" restores the legacy passthrough-to-filters."""
+    frame = LocalCoordinateFrame(origin=GeoPoint(lat=44.98, lon=-93.26, alt_m=250.0), mode="flat")
+    processor = _make_processor(frame, gps_2d_altitude_mode="raw")
+
+    only_2d = _node_with_fix(frame, (0.0, 0.0, 12.0), "fix_2d")
     normalized, _ = processor._normalize_node_spec(only_2d, position_filter="raw")
     assert normalized.position_m[2] == pytest.approx(12.0, abs=1e-6)
+
+
+def test_datum_hold_releases_once_three_d_fix_arrives() -> None:
+    """The datum pin is only a stand-in: a later real 3D fix replaces it, and a
+    subsequent 2D degradation holds the measured altitude, not the datum."""
+    frame = LocalCoordinateFrame(origin=GeoPoint(lat=44.98, lon=-93.26, alt_m=250.0), mode="flat")
+    processor = _make_processor(frame)
+
+    pinned, _ = processor._normalize_node_spec(
+        _node_with_fix(frame, (0.0, 0.0, 12.0), "fix_2d"), position_filter="raw"
+    )
+    assert pinned.position_m[2] == pytest.approx(0.0, abs=1e-6)
+    solved, _ = processor._normalize_node_spec(
+        _node_with_fix(frame, (0.0, 0.0, 25.0), "fix_3d"), position_filter="raw"
+    )
+    assert solved.position_m[2] == pytest.approx(25.0, abs=1e-6)
+    held, _ = processor._normalize_node_spec(
+        _node_with_fix(frame, (0.0, 0.0, 0.7), "fix_2d"), position_filter="raw"
+    )
+    assert held.position_m[2] == pytest.approx(25.0, abs=1e-6)
+
+
+def test_datum_pin_keeps_kde_z_at_datum_on_two_d_only_input() -> None:
+    """The KDE filter must never advance z off the datum while only 2D fixes
+    arrive — the substituted value reaches the estimator, not the raw GGA z."""
+    frame = LocalCoordinateFrame(origin=GeoPoint(lat=44.98, lon=-93.26, alt_m=250.0), mode="flat")
+    processor = _make_processor(frame, node_position_kde_warmup_fixes=5)
+
+    normalized = None
+    for i in range(30):
+        node = _node_with_fix(frame, (0.0, 0.0, 10.0 + (i % 3)), "fix_2d")
+        normalized, _ = processor._normalize_node_spec(node, position_filter="kde")
+    assert normalized is not None
+    assert normalized.position_m[2] == pytest.approx(0.0, abs=1e-6)
 
 
 def test_three_d_fix_refreshes_the_trusted_altitude() -> None:

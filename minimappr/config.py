@@ -236,6 +236,9 @@ class LocalizationConfig:
     gcc_phat_interp_factor: int
     localization_node_bearing_strength: float = 1.0
     localization_amplitude_ratio_strength: float = 0.15
+    # obs_factor floor for bearing-observed Cartesian solves (see
+    # cartesian_tdoa.BEARING_OBSERVED_OBS_FACTOR_FLOOR). 0.0 = legacy crushing.
+    localization_obs_factor_bearing_floor: float = 1.0
     # The default seeds unbounded radial search; max is retained but never limits results.
     localization_far_field_default_range_m: float = 50.0
     # Phase 2: envelope extended to 1 km for long-range cross-node localization.
@@ -446,6 +449,13 @@ class FusionConfig:
     retention_long_security_confidence: float
     classification_audio_source: str = "beamformed"
     min_localization_confidence: float = 0.20
+    # Pre-render report-window gate (0 = off). When >0, a localized candidate is
+    # skipped BEFORE the beamform render + classifier inference once this many
+    # localized detections were already emitted for its (node, reporting window).
+    # The storage-level dedupe in ReportingFusionPolicy made the same call
+    # anyway — but only after paying for the render, which on the 2026-08-01
+    # live box was ~89% of all classification-lane CPU.
+    report_window_localized_emission_cap: int = 0
 
 
 @dataclass(slots=True)
@@ -691,6 +701,11 @@ class Settings:
     localization_single_node_solver: str = "python_cartesian"
     localization_node_bearing_strength: float = 1.0
     localization_amplitude_ratio_strength: float = 0.15
+    # obs_factor floor for bearing-observed Cartesian solves: a compact array's
+    # covariance conditioning crushed healthy solves to ~0.002 confidence on the
+    # 2026-08-01 live box. 1.0 = full escape (confidence = peak × fit quality);
+    # 0.0 restores the legacy behavior.
+    localization_obs_factor_bearing_floor: float = 1.0
     wavelength_gating_enabled: bool = True
     wavelength_penalty_floor: float = 0.25
     skip_localization_for_classification: bool = False
@@ -739,6 +754,11 @@ class Settings:
     drone_head_model_path: Path = Path("data/models/drone_head.onnx")
     drone_head_min_confidence: float = 0.5
     drone_head_min_frame_fraction: float = 0.2
+    # Extra drone-head qualification gates (0.0 = off, today's behavior): a
+    # positive class must beat ambient's clip mean by the margin, and the
+    # reported clip mean must clear the floor to label at all.
+    drone_head_ambient_margin: float = 0.0
+    drone_head_min_mean_confidence: float = 0.0
     stt_enabled: bool = True
     stt_model_id: str = "onnx-community/moonshine-base-ONNX"
     stt_model_cache_dir: Path = Path("data/models/huggingface")
@@ -765,6 +785,10 @@ class Settings:
     yamnet_max_input_gain: float = 32.0
     birdnet_trigger_min_confidence: float = 0.40
     birdnet_geo_min_confidence: float = 0.03
+    # Concurrent BirdNET predict-sessions. 1 serializes all fusion workers
+    # through a single session (each extra session costs ~125 MB RSS and one
+    # TFLite subprocess); raise to ~fusion_worker_count on multi-core boxes.
+    birdnet_pool_size: int = 1
     detection_min_confidence: float = 0.4
     cop_detections_max_items: int = 150
     cop_tracks_max_items: int = 150
@@ -806,7 +830,13 @@ class Settings:
     fusion_worker_count: int = 2
     fusion_event_queue_size: int = 512
     fusion_localization_queue_size: int = 1024
-    fusion_classification_queue_size: int = 1024
+    # Queue depth is a latency floor, not just headroom: with drop-oldest
+    # eviction the worker always dequeues the head — i.e. the oldest of
+    # <depth> items — so a deep queue converts overload into silent staleness.
+    # At the observed live throughput (~0.7 items/s) 1024 was ~23 minutes of
+    # built-in lag while the drop volume stayed identical. 64 bounds
+    # queue-induced staleness to ~90 s at that rate.
+    fusion_classification_queue_size: int = 64
     fusion_rules_queue_size: int = 512
     birdnet_chunked_dispatch_enabled: bool = False
     birdnet_chunk_overlap_seconds: float = 2.0
@@ -819,6 +849,9 @@ class Settings:
     # depth; "newest" rejects the arriving item, which pins the pipeline at
     # max-depth staleness forever once a queue fills (observed: 24 min behind).
     fusion_backpressure_drop_policy: str = "oldest"
+    # Pre-render report-window gate (0 = off). See
+    # FusionConfig.report_window_localized_emission_cap for semantics.
+    fusion_report_window_localized_emission_cap: int = 0
     fusion_offline_replay_mode: bool = False
     sensor_energy_threshold_multiplier: float = 0.45
     fallback_localization_confidence: float = 0.25
@@ -875,6 +908,11 @@ class Settings:
     # per node this is ~2 s of sustained disagreement — far longer than a multipath
     # burst, far shorter than never.
     node_position_kde_rejection_streak_reset: int = 60
+    # Altitude handling for nodes that have NEVER produced a 3D fix but report a
+    # GGA altitude under a 2D fix (receivers emit one regardless). "site_origin"
+    # (default) pins ENU z to the site datum (0.0) until a real 3D fix arrives;
+    # "raw" restores the legacy passthrough of the unmeasured altitude.
+    gps_2d_altitude_mode: str = "site_origin"
     # Local position stamped onto binary-ingest frames from legacy firmware that
     # reports neither position_geo nor position_m (pre static-fallback-geo
     # descriptor builds). Lets those nodes register instead of 400-ing on every
@@ -1177,6 +1215,8 @@ class Settings:
             raise ValueError(
                 "MINIMAPPR_LOCALIZATION_SINGLE_NODE_SOLVER must be 'rust' or 'python_cartesian'"
             )
+        if not (0.0 <= self.localization_obs_factor_bearing_floor <= 1.0):
+            raise ValueError("MINIMAPPR_LOCALIZATION_OBS_FACTOR_BEARING_FLOOR must be in [0, 1]")
         if self.localization_node_bearing_strength < 0.0:
             raise ValueError("MINIMAPPR_LOCALIZATION_NODE_BEARING_STRENGTH must be >= 0")
         if self.localization_amplitude_ratio_strength < 0.0:
@@ -1216,6 +1256,10 @@ class Settings:
             raise ValueError("MINIMAPPR_DRONE_HEAD_MIN_CONFIDENCE must be in [0, 1]")
         if not (0.0 <= self.drone_head_min_frame_fraction <= 1.0):
             raise ValueError("MINIMAPPR_DRONE_HEAD_MIN_FRAME_FRACTION must be in [0, 1]")
+        if not (0.0 <= self.drone_head_ambient_margin <= 1.0):
+            raise ValueError("MINIMAPPR_DRONE_HEAD_AMBIENT_MARGIN must be in [0, 1]")
+        if not (0.0 <= self.drone_head_min_mean_confidence <= 1.0):
+            raise ValueError("MINIMAPPR_DRONE_HEAD_MIN_MEAN_CONFIDENCE must be in [0, 1]")
         if not (0.0 <= self.stt_trigger_min_confidence <= 1.0):
             raise ValueError("MINIMAPPR_STT_TRIGGER_MIN_CONFIDENCE must be in [0, 1]")
         if not self.stt_model_id.strip():
@@ -1285,6 +1329,12 @@ class Settings:
         ):
             if getattr(self, field_name) < 1:
                 raise ValueError(f"{field_name} must be >= 1")
+        if self.fusion_report_window_localized_emission_cap < 0:
+            raise ValueError("MINIMAPPR_FUSION_REPORT_WINDOW_LOCALIZED_EMISSION_CAP must be >= 0 (0 disables)")
+        normalized_alt_mode = str(self.gps_2d_altitude_mode).strip().lower()
+        if normalized_alt_mode not in ("site_origin", "raw"):
+            raise ValueError("MINIMAPPR_GPS_2D_ALTITUDE_MODE must be 'site_origin' or 'raw'")
+        self.gps_2d_altitude_mode = normalized_alt_mode
         if self.pre_classification_highpass_hz < 0.0:
             raise ValueError("MINIMAPPR_PRE_CLASSIFICATION_HIGHPASS_HZ must be >= 0")
         if self.pre_classification_lowpass_hz < 0.0:
@@ -1354,6 +1404,8 @@ class Settings:
             raise ValueError("MINIMAPPR_BIRDNET_TRIGGER_MIN_CONFIDENCE must be in [0,1]")
         if self.birdnet_geo_min_confidence < 0.0 or self.birdnet_geo_min_confidence > 1.0:
             raise ValueError("MINIMAPPR_BIRDNET_GEO_MIN_CONFIDENCE must be in [0,1]")
+        if self.birdnet_pool_size < 1:
+            raise ValueError("MINIMAPPR_BIRDNET_POOL_SIZE must be >= 1")
         if self.detection_min_confidence < 0.0 or self.detection_min_confidence > 1.0:
             raise ValueError("MINIMAPPR_DETECTION_MIN_CONFIDENCE must be in [0,1]")
         if self.cop_detections_max_items < 1:
@@ -1753,6 +1805,10 @@ class Settings:
                 "MINIMAPPR_LOCALIZATION_NODE_BEARING_STRENGTH",
                 1.0,
             ),
+            localization_obs_factor_bearing_floor=_env_float(
+                "MINIMAPPR_LOCALIZATION_OBS_FACTOR_BEARING_FLOOR",
+                1.0,
+            ),
             localization_amplitude_ratio_strength=_env_float(
                 "MINIMAPPR_LOCALIZATION_AMPLITUDE_RATIO_STRENGTH",
                 0.15,
@@ -1822,6 +1878,10 @@ class Settings:
             drone_head_min_frame_fraction=_env_float(
                 "MINIMAPPR_DRONE_HEAD_MIN_FRAME_FRACTION", 0.2
             ),
+            drone_head_ambient_margin=_env_float("MINIMAPPR_DRONE_HEAD_AMBIENT_MARGIN", 0.0),
+            drone_head_min_mean_confidence=_env_float(
+                "MINIMAPPR_DRONE_HEAD_MIN_MEAN_CONFIDENCE", 0.0
+            ),
             stt_enabled=_env_bool("MINIMAPPR_STT_ENABLED", True),
             stt_model_id=_env_str("MINIMAPPR_STT_MODEL_ID", "onnx-community/moonshine-base-ONNX"),
             stt_model_cache_dir=Path(
@@ -1852,6 +1912,7 @@ class Settings:
             yamnet_max_input_gain=_env_float("MINIMAPPR_YAMNET_MAX_INPUT_GAIN", 32.0),
             birdnet_trigger_min_confidence=_env_float("MINIMAPPR_BIRDNET_TRIGGER_MIN_CONFIDENCE", 0.40),
             birdnet_geo_min_confidence=_env_float("MINIMAPPR_BIRDNET_GEO_MIN_CONFIDENCE", 0.03),
+            birdnet_pool_size=_env_int("MINIMAPPR_BIRDNET_POOL_SIZE", 1),
             detection_min_confidence=_env_float("MINIMAPPR_DETECTION_MIN_CONFIDENCE", 0.4),
             cop_detections_max_items=_env_int("MINIMAPPR_COP_DETECTIONS_MAX_ITEMS", 150),
             cop_tracks_max_items=_env_int("MINIMAPPR_COP_TRACKS_MAX_ITEMS", 150),
@@ -1900,7 +1961,7 @@ class Settings:
             fusion_worker_count=_env_int("MINIMAPPR_FUSION_WORKER_COUNT", 2),
             fusion_event_queue_size=_env_int("MINIMAPPR_FUSION_EVENT_QUEUE_SIZE", 512),
             fusion_localization_queue_size=_env_int("MINIMAPPR_FUSION_LOCALIZATION_QUEUE_SIZE", 1024),
-            fusion_classification_queue_size=_env_int("MINIMAPPR_FUSION_CLASSIFICATION_QUEUE_SIZE", 1024),
+            fusion_classification_queue_size=_env_int("MINIMAPPR_FUSION_CLASSIFICATION_QUEUE_SIZE", 64),
             fusion_rules_queue_size=_env_int("MINIMAPPR_FUSION_RULES_QUEUE_SIZE", 512),
             birdnet_chunked_dispatch_enabled=_env_bool("MINIMAPPR_BIRDNET_CHUNKED_DISPATCH_ENABLED", False),
             birdnet_chunk_overlap_seconds=_env_float("MINIMAPPR_BIRDNET_CHUNK_OVERLAP_SECONDS", 2.0),
@@ -1919,6 +1980,11 @@ class Settings:
                 "MINIMAPPR_FUSION_BACKPRESSURE_DROP_POLICY",
                 "oldest",
             ),
+            fusion_report_window_localized_emission_cap=_env_int(
+                "MINIMAPPR_FUSION_REPORT_WINDOW_LOCALIZED_EMISSION_CAP",
+                0,
+            ),
+            gps_2d_altitude_mode=_env_str("MINIMAPPR_GPS_2D_ALTITUDE_MODE", "site_origin"),
             fusion_offline_replay_mode=_env_bool("MINIMAPPR_FUSION_OFFLINE_REPLAY_MODE", False),
             sensor_energy_threshold_multiplier=_env_float("MINIMAPPR_SENSOR_ENERGY_THRESHOLD_MULTIPLIER", 0.45),
             fallback_localization_confidence=_env_float("MINIMAPPR_FALLBACK_LOCALIZATION_CONFIDENCE", 0.25),
@@ -2092,6 +2158,7 @@ class Settings:
             localization_refine_confidence_threshold=self.localization_refine_confidence_threshold,
             localization_node_bearing_strength=self.localization_node_bearing_strength,
             localization_amplitude_ratio_strength=self.localization_amplitude_ratio_strength,
+            localization_obs_factor_bearing_floor=self.localization_obs_factor_bearing_floor,
             wavelength_gating_enabled=self.wavelength_gating_enabled,
             wavelength_penalty_floor=self.wavelength_penalty_floor,
             skip_localization_for_classification=self.skip_localization_for_classification,
@@ -2210,6 +2277,7 @@ class Settings:
             retention_long_security_confidence=self.retention_long_security_confidence,
             classification_audio_source=self.classification_audio_source,
             min_localization_confidence=self.min_localization_confidence,
+            report_window_localized_emission_cap=self.fusion_report_window_localized_emission_cap,
         )
 
     def ingest_sidecar_startup_config(self) -> IngestSidecarStartupConfig:

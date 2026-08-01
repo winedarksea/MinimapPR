@@ -149,6 +149,11 @@ def _build_backend(
                 latitude=settings.site_origin_lat,
                 longitude=settings.site_origin_lon,
                 geo_min_confidence=settings.birdnet_geo_min_confidence,
+                # pool_size=1 is a de-facto lock: with N fusion workers, N-1
+                # park in queue.get() for the whole inference (the 2026-08-01
+                # live-box serialization root cause). Each extra session costs
+                # ~125 MB + one TFLite subprocess, so the default stays 1.
+                pool_size=max(1, int(getattr(settings, "birdnet_pool_size", 1))),
             )
         except Exception as exc:  # pragma: no cover - optional runtime backend
             logger.info(
@@ -172,6 +177,12 @@ def _build_backend(
                 min_confidence=spec.min_confidence,
                 min_frame_fraction=(
                     spec.min_frame_fraction if spec.min_frame_fraction is not None else 0.2
+                ),
+                ambient_margin=(
+                    spec.ambient_margin if spec.ambient_margin is not None else 0.0
+                ),
+                min_mean_confidence=(
+                    spec.min_mean_confidence if spec.min_mean_confidence is not None else 0.0
                 ),
                 expected_preprocessing_fingerprint=profile_fingerprint(yamnet_profile),
             )

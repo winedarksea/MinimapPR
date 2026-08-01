@@ -239,3 +239,34 @@ class TestGraphEndpoint:
             graph = PipelineGraph.model_validate(resp.json())
             assert graph.active_pipeline == "python"
             assert any(c.id == "sources" for c in graph.columns)
+
+
+class TestClassifyLaneStatus:
+    def test_localized_render_runs_yamnet_and_birdnet_unconditionally(self):
+        """The DAG must reflect the real routing: BirdNET is a run member on
+        every triggered (localized_render) inference, not a gated chain."""
+        graph = _build()
+        localized_edges = [
+            e for e in graph.edges if (e.label or "").lower() == "localized render"
+        ]
+        targets = {e.target for e in localized_edges}
+        assert "cls:member:yamnet" in targets
+        assert "cls:member:birdnet" in targets
+
+    def test_classifier_members_surface_lane_timing_metrics(self):
+        fusion_status = {
+            "metrics": {
+                "classification_stage_in": 10,
+                "classification_stage_out": 4,
+                "classification_stage_total_time_ms": 500.0,
+                "classification_stage_max_time_ms": 120.0,
+            }
+        }
+        graph = _build(fusion_status=fusion_status)
+        member = next(n for n in graph.nodes if n.id == "cls:member:yamnet")
+        by_label = {p.label: p.value for p in (member.status.metrics or [])}
+        assert {"Lane in", "Lane out", "Avg ms", "Max ms"} <= set(by_label)
+        assert by_label["Lane in"] == "10"
+        # _fmt renders whole-valued floats without the trailing ".0"
+        assert by_label["Avg ms"] == "50"
+        assert by_label["Max ms"] == "120"

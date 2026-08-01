@@ -152,6 +152,7 @@ class IngestProcessor:
         node_position_kde_checkpoint_seconds: float = 60.0,
         node_position_kde_acceptance_radius_m: float = 100.0,
         node_position_kde_rejection_streak_reset: int = 60,
+        gps_2d_altitude_mode: str = "site_origin",
     ) -> None:
         self._localization_config = localization_config
         self._fusion_config = fusion_config
@@ -175,6 +176,11 @@ class IngestProcessor:
         self._kde_checkpoint_seconds = max(1.0, node_position_kde_checkpoint_seconds)
         self._kde_acceptance_radius_m = max(0.0, node_position_kde_acceptance_radius_m)
         self._kde_rejection_streak_reset = max(1, node_position_kde_rejection_streak_reset)
+        # "site_origin" (default): a node that has NEVER produced a 3D fix has
+        # its unmeasured 2D-fix altitude replaced with the site datum (ENU z=0)
+        # instead of feeding fabricated GGA altitude into the filters.
+        # "raw" restores the legacy passthrough.
+        self._gps_2d_altitude_mode = str(gps_2d_altitude_mode).strip().lower()
 
         self._last_trigger_ns = 0
         self._accepted_frame_count = 0
@@ -742,19 +748,23 @@ class IngestProcessor:
                 # any filtering, so the horizontal axes still track normally and the
                 # vertical filter state is never advanced by an unmeasured value.
                 #
-                # Only a genuine 3D fix qualifies. A node that has never had one has
-                # no better altitude available, so its readings are left to the normal
-                # filters — freezing z at the first sample would discard the averaging
-                # that at least suppresses noise. The warning below is the signal that
-                # such a node's altitude should not be trusted.
+                # A node that has NEVER produced a 3D fix has no measured altitude
+                # at all; in "site_origin" mode (default) it is pinned to the site
+                # datum (ENU z = 0) rather than feeding raw GGA altitude — which a
+                # receiver emits even under a GSA 2D fix — into the filters. On the
+                # 2026-08-01 live box that passthrough fabricated a 5.7 m vertical
+                # spread between two co-sited nodes on a 7.9 m baseline. "raw" mode
+                # restores the legacy passthrough for sites that prefer it.
                 retained_altitude_m = self._last_trusted_altitude_m.get(spec.id)
+                if retained_altitude_m is None and self._gps_2d_altitude_mode == "site_origin":
+                    retained_altitude_m = 0.0
                 if retained_altitude_m is not None:
                     raw_local = (raw_local[0], raw_local[1], retained_altitude_m)
                 if spec.id not in self._untrusted_altitude_warned_node_ids:
                     self._untrusted_altitude_warned_node_ids.add(spec.id)
                     _logger.warning(
                         "node %s reports GPS signal %r; altitude is not solved by a 2D fix "
-                        "and will be held rather than tracked",
+                        "and will be held (site datum until a 3D fix is seen) rather than tracked",
                         spec.id,
                         gps_signal,
                     )

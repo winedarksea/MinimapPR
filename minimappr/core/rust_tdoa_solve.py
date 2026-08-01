@@ -77,6 +77,7 @@ def solve_localization_from_rust_tdoas(
     far_field_default_range_m: float,
     far_field_prior_radial_std_m: float | None = None,
     bearing_strength: float = 1.0,
+    bearing_observed_obs_floor: float | None = None,
 ) -> LocalizationResult | None:
     """Return a Python Cartesian solve from Rust TDOAs, or None if not solvable.
 
@@ -153,6 +154,11 @@ def solve_localization_from_rust_tdoas(
             far_field_initial_range_m=far_field_default_range_m,
             far_field_prior_radial_std_m=far_field_prior_radial_std_m,
             radial_refinement_enabled=True,
+            **(
+                {"bearing_observed_obs_floor": bearing_observed_obs_floor}
+                if bearing_observed_obs_floor is not None
+                else {}
+            ),
         )
     except (ValueError, np.linalg.LinAlgError):
         return None

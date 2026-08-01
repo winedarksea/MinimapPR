@@ -49,6 +49,8 @@ class DroneHeadClassifier(EmbeddingClassifier):
         *,
         min_confidence: float = 0.5,
         min_frame_fraction: float = 0.2,
+        ambient_margin: float = 0.0,
+        min_mean_confidence: float = 0.0,
         expected_preprocessing_fingerprint: str | None = None,
     ) -> None:
         try:
@@ -70,6 +72,11 @@ class DroneHeadClassifier(EmbeddingClassifier):
         self._input_name = self._session.get_inputs()[0].name
         self._min_confidence = float(min_confidence)
         self._min_frame_fraction = float(np.clip(min_frame_fraction, 0.0, 1.0))
+        # Extra qualification gates on top of the frame vote (both default off):
+        # a positive class must beat the negative class's clip mean by this
+        # margin, and the reported clip mean must clear the floor to label.
+        self._ambient_margin = float(np.clip(ambient_margin, 0.0, 1.0))
+        self._min_mean_confidence = float(np.clip(min_mean_confidence, 0.0, 1.0))
         self._labels = _DEFAULT_LABELS
         self._metadata: dict = {}
         self._negative_label: str | None = None
@@ -110,6 +117,7 @@ class DroneHeadClassifier(EmbeddingClassifier):
         self._positive_indices = [
             i for i, name in enumerate(lowered) if name != self._negative_label
         ]
+        self._negative_index = lowered.index(self._negative_label)
 
     def classify_embedding(self, frames: np.ndarray) -> ClassificationResult:
         frames = np.asarray(frames, dtype=np.float32)
@@ -130,22 +138,46 @@ class DroneHeadClassifier(EmbeddingClassifier):
         clip_mean = frame_matrix.mean(axis=0)
         n_frames = frame_matrix.shape[0]
 
-        # A positive class qualifies only when at least one frame reaches the
-        # per-frame threshold AND the fraction of such frames meets
-        # min_frame_fraction; winner = qualified class with highest clip mean.
+        # A positive class qualifies only when the fraction of frames it WINS
+        # (argmax across all classes, negative included) while also reaching the
+        # per-frame threshold meets min_frame_fraction; winner = qualified class
+        # with highest clip mean. The argmax condition is what keeps an
+        # ambient-dominant clip from relabeling: a 2026-08-01 live clip with
+        # ambient 0.969 AND drone 0.835 (maxes over different frames) was
+        # labeled "drone" because the old vote counted any frame with
+        # P(drone) >= threshold, never asking whether ambient won that frame.
+        frame_argmax = frame_matrix.argmax(axis=1)
         frame_fractions = {
-            i: float((frame_matrix[:, i] >= self._min_confidence).sum()) / n_frames
+            i: float(
+                ((frame_argmax == i) & (frame_matrix[:, i] >= self._min_confidence)).sum()
+            )
+            / n_frames
             for i in self._positive_indices
         }
+        # Optional ambient-margin gate: only engages when a margin is set (0.0 =
+        # off). A qualified minority burst — e.g. 1 hot frame of 5 — is a
+        # legitimate label even though the clip MEAN is ambient-dominated, so
+        # mean-vs-mean comparison must stay opt-in.
+        negative_mean = float(clip_mean[self._negative_index])
         qualified = [
             i
             for i in self._positive_indices
-            if frame_fractions[i] > 0.0 and frame_fractions[i] >= self._min_frame_fraction
+            if frame_fractions[i] > 0.0
+            and frame_fractions[i] >= self._min_frame_fraction
+            and (
+                self._ambient_margin <= 0.0
+                or float(clip_mean[i]) >= negative_mean + self._ambient_margin
+            )
         ]
         if qualified:
             winner = max(qualified, key=lambda i: (float(clip_mean[i]), -i))
             label = str(self._labels[winner])
             best_score = float(clip_mean[winner])
+            # Optional floor: today best_score (a clip MEAN) can sit below the
+            # per-frame min_confidence with no recourse; 0.0 keeps legacy shape.
+            if best_score < self._min_mean_confidence:
+                label = "unknown"
+                best_score = 0.0
         else:
             label = "unknown"
             best_score = 0.0

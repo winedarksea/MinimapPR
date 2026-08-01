@@ -338,3 +338,76 @@ def test_cartesian_solver_accepts_successful_retry(
 
     assert call_count >= 2
     assert np.all(np.isfinite(result.position_m))
+
+
+def test_bearing_observed_obs_floor_rescues_compact_range_refined_confidence() -> None:
+    """2026-08-01 live regression: a compact array's covariance conditioning
+    crushed healthy RANGE_REFINED solves to ~0.002 confidence, excluding every
+    track from IAMF rendering. With the floor (default 1.0), confidence for a
+    bearing-observed solve is peak_quality × fit_quality; floor 0.0 reproduces
+    the legacy crushing exactly."""
+    from minimappr.core.tdoa_measurements import reference_tdoas
+
+    sample_rate_hz = 48_000
+    temperature_c = 20.0
+    sound_speed = speed_of_sound_mps(temperature_c=temperature_c, humidity_fraction=0.0)
+    offsets = [(0.0, 0.0, 0.0), (0.5, 0.0, 0.0), (0.0, 0.5, 0.0), (0.0, 0.0, 0.5)]
+    mic = np.asarray(offsets, dtype=np.float64)
+    centroid = mic.mean(axis=0)
+    direction = np.array([2.0, 1.0, 0.4])
+    direction /= np.linalg.norm(direction)
+    source = centroid + direction * 5.0
+
+    rng = np.random.default_rng(7)
+    mono = rng.normal(0.0, 0.3, size=8192).astype(np.float32)
+    channels = synthesize_delayed_array_channels(
+        mono,
+        sample_rate_hz,
+        source_position_m=tuple(source),
+        sensor_offsets_m=offsets,
+        sound_speed_mps=sound_speed,
+    )
+    sensor_positions = {f"ch{i}": mic[i] for i in range(4)}
+    sensor_windows = {f"ch{i}": channels[i].astype(np.float32) for i in range(4)}
+    from minimappr.core.localization import gcc_phat
+
+    measurements = measure_pair_tdoas(
+        sensor_positions=sensor_positions,
+        sensor_windows=sensor_windows,
+        sensor_ids=sorted(sensor_positions),
+        sample_rate_hz=sample_rate_hz,
+        sound_speed_mps=sound_speed,
+        max_tau_s=0.02,
+        interpolation_factor=4,
+        sensor_weights=None,
+        gcc_phat_function=gcc_phat,
+    )
+    reference_sensor, reference_tdoa_s = reference_tdoas(
+        measurements=measurements,
+        sensor_windows=sensor_windows,
+        sensor_ids=sorted(sensor_positions),
+    )
+
+    def _solve(floor: float):
+        return solve_cartesian_tdoa(
+            sensor_positions=sensor_positions,
+            measurements=measurements,
+            sound_speed_mps=sound_speed,
+            sample_rate_hz=sample_rate_hz,
+            interpolation_factor=4,
+            reference_sensor=reference_sensor,
+            reference_tdoa_s=reference_tdoa_s,
+            radial_refinement_enabled=False,
+            bearing_observed_obs_floor=floor,
+        )
+
+    floored = _solve(1.0)
+    legacy = _solve(0.0)
+
+    assert floored.range_projection_mode == "range_refined"
+    assert legacy.range_projection_mode == "range_refined"
+    # Same geometry, same solve — only the confidence formula differs.
+    np.testing.assert_allclose(floored.position_m, legacy.position_m)
+    assert legacy.confidence < 0.1  # the legacy crushing
+    assert floored.confidence > 0.2
+    assert floored.confidence >= legacy.confidence

@@ -44,7 +44,10 @@ def test_settings_from_env_populates_subconfigs_with_cleanup_defaults(monkeypatc
     assert classifier.stage_timeout_seconds == 30.0
     assert fusion.event_queue_size == 512
     assert fusion.localization_queue_size == 1024
-    assert fusion.classification_queue_size == 1024
+    # 64, not 1024: with drop-oldest eviction the classification queue depth is
+    # a latency floor (workers always dequeue the oldest of <depth> items), so
+    # the deep default was itself the 16-minute-lag mechanism on the live box.
+    assert fusion.classification_queue_size == 64
     assert fusion.rules_queue_size == 512
     assert sidecar_process.sidecar_port == 8081
     assert sidecar_process.storage_mode == "spool"

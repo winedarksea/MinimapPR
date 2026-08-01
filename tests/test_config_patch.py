@@ -466,3 +466,40 @@ def test_patch_reports_pipeline_in_separate_process_flag(monkeypatch, tmp_path: 
         resp = client.patch("/api/v1/config", json={"trigger_rms": 0.02})
         assert resp.status_code == 200
         assert resp.json()["pipeline_in_separate_process"] is False
+
+
+def test_patch_classification_backpressure_keys(monkeypatch, tmp_path: Path) -> None:
+    """The 2026-08-01 live-box lag review exposed these as env-only; they must be
+    PATCHable (restart-required) so a wedged deployment can be tuned in place."""
+    _configure_env(monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        resp = client.patch(
+            "/api/v1/config",
+            json={
+                "fusion_classification_queue_size": 32,
+                "classification_window_seconds": 15.0,
+                "drop_on_backpressure": True,
+                "fusion_backpressure_drop_policy": "OLDEST",
+            },
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["fusion_classification_queue_size"] == 32
+        assert body["classification_window_seconds"] == 15.0
+        # policy normalises to lowercase
+        assert body["fusion_backpressure_drop_policy"] == "oldest"
+        for key in (
+            "fusion_classification_queue_size",
+            "classification_window_seconds",
+            "drop_on_backpressure",
+            "fusion_backpressure_drop_policy",
+        ):
+            assert key in body["restart_required"], key
+
+
+def test_patch_classification_backpressure_keys_validation(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        assert client.patch("/api/v1/config", json={"fusion_classification_queue_size": 0}).status_code == 422
+        assert client.patch("/api/v1/config", json={"classification_window_seconds": 0.0}).status_code == 422
+        assert client.patch("/api/v1/config", json={"fusion_backpressure_drop_policy": "sideways"}).status_code == 422

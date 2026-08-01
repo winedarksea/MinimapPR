@@ -1278,6 +1278,15 @@ async def test_single_sensor_triggered_audio_yields_no_detection_or_track(tmp_pa
     status = await fusion.status()
     assert status["metrics"]["classification_drops_by_reason"].get("empty_classification") == 1
 
+    # Stage timing twins (added with the 2026-08-01 lag review): every item that
+    # reaches _classify_and_assemble — including this empty-classification drop —
+    # must record per-item cost so lane slowness is measurable.
+    total_ms = status["metrics"]["classification_stage_total_time_ms"]
+    max_ms = status["metrics"]["classification_stage_max_time_ms"]
+    assert total_ms > 0.0
+    assert max_ms > 0.0
+    assert max_ms <= total_ms
+
     await fusion.stop()
     await storage.close()
 

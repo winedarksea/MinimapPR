@@ -49,6 +49,11 @@ class ClassifierSpec:
     backend: str
     min_confidence: float = 0.0
     min_frame_fraction: float | None = None
+    # Drone-head qualification gates (None = backend default of 0.0 = off):
+    # a positive class must beat the negative class's clip mean by
+    # ambient_margin, and the reported clip mean must clear min_mean_confidence.
+    ambient_margin: float | None = None
+    min_mean_confidence: float | None = None
     keep_embeddings: bool = False
     model_path: str | None = None
     preprocess_profile: str | None = None
@@ -192,11 +197,23 @@ def _parse_routing(raw: dict[str, Any], source: str) -> RoutingConfig:
                 raise ValueError(
                     f"{source}: classifiers[{member_id!r}].min_frame_fraction must be in [0, 1]"
                 )
+        optional_unit_fields: dict[str, float | None] = {}
+        for field_name in ("ambient_margin", "min_mean_confidence"):
+            optional_unit_fields[field_name] = None
+            if spec.get(field_name) is not None:
+                parsed = float(spec[field_name])
+                if not 0.0 <= parsed <= 1.0:
+                    raise ValueError(
+                        f"{source}: classifiers[{member_id!r}].{field_name} must be in [0, 1]"
+                    )
+                optional_unit_fields[field_name] = parsed
         classifiers[normalized_member_id] = ClassifierSpec(
             member_id=normalized_member_id,
             backend=backend,
             min_confidence=min_confidence,
             min_frame_fraction=min_frame_fraction,
+            ambient_margin=optional_unit_fields["ambient_margin"],
+            min_mean_confidence=optional_unit_fields["min_mean_confidence"],
             keep_embeddings=bool(spec.get("keep_embeddings", False)),
             model_path=(str(spec["model_path"]) if spec.get("model_path") else None),
             preprocess_profile=(
@@ -338,6 +355,10 @@ def routing_to_dict(routing: RoutingConfig) -> dict[str, Any]:
         }
         if spec.min_frame_fraction is not None:
             value["min_frame_fraction"] = spec.min_frame_fraction
+        if spec.ambient_margin is not None:
+            value["ambient_margin"] = spec.ambient_margin
+        if spec.min_mean_confidence is not None:
+            value["min_mean_confidence"] = spec.min_mean_confidence
         if spec.model_path is not None:
             value["model_path"] = spec.model_path
         if spec.preprocess_profile is not None:
@@ -464,6 +485,20 @@ def apply_settings(routing: RoutingConfig, settings: Any) -> RoutingConfig:
                         settings,
                         "drone_head_min_frame_fraction",
                         spec.min_frame_fraction if spec.min_frame_fraction is not None else 0.2,
+                    )
+                ),
+                ambient_margin=float(
+                    getattr(
+                        settings,
+                        "drone_head_ambient_margin",
+                        spec.ambient_margin if spec.ambient_margin is not None else 0.0,
+                    )
+                ),
+                min_mean_confidence=float(
+                    getattr(
+                        settings,
+                        "drone_head_min_mean_confidence",
+                        spec.min_mean_confidence if spec.min_mean_confidence is not None else 0.0,
                     )
                 ),
                 model_path=str(

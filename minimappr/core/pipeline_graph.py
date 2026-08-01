@@ -548,7 +548,7 @@ def _add_classifiers(*, routing, settings, gate_ids, beam_id, add_node, add_edge
                 modality="audio",
                 enabled=True,
                 params=params,
-                status=PipelineStageStatus(health=health),
+                status=_classify_lane_status(metrics, fusion_available),
                 link="/settings/config#classification",
             )
 
@@ -646,6 +646,29 @@ def _node_audio_status(node_id: str, sidecar_dsp_status: dict | None, fusion_ava
     if not fusion_available:
         return PipelineStageStatus(health="unknown")
     return PipelineStageStatus(health="ok")
+
+
+def _classify_lane_status(metrics: dict, fusion_available: bool) -> PipelineStageStatus:
+    """Lane-wide classification throughput + per-item cost, shown on each run
+    member. The timing twins were added after the 2026-08-01 live-box review:
+    the lane ran 16 minutes behind realtime with no per-item cost metric."""
+    if not fusion_available:
+        return PipelineStageStatus(health="unknown")
+    stage_in = int(metrics.get("classification_stage_in") or 0)
+    stage_out = int(metrics.get("classification_stage_out") or 0)
+    total_ms = float(metrics.get("classification_stage_total_time_ms") or 0.0)
+    max_ms = float(metrics.get("classification_stage_max_time_ms") or 0.0)
+    avg_ms = (total_ms / stage_in) if stage_in > 0 else 0.0
+    return PipelineStageStatus(
+        health="ok",
+        summary=f"in {stage_in} → out {stage_out}",
+        metrics=[
+            _param("Lane in", stage_in),
+            _param("Lane out", stage_out),
+            _param("Avg ms", round(avg_ms, 1)),
+            _param("Max ms", round(max_ms, 1)),
+        ],
+    )
 
 
 def _tdoa_status(metrics: dict, fusion_available: bool) -> PipelineStageStatus:

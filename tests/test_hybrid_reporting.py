@@ -79,6 +79,7 @@ async def _start_fusion(
     localizer,
     reporting_window_seconds: float = 30.0,
     classification_window_seconds: float = 0.04,
+    report_window_localized_emission_cap: int = 0,
 ) -> tuple[FusionNode, Storage]:
     settings = Settings(
         db_path=tmp_path / "hybrid.db",
@@ -97,6 +98,7 @@ async def _start_fusion(
         localization_band_min_hz=300.0,
         localization_band_max_hz=1500.0,
         reporting_window_seconds=reporting_window_seconds,
+        fusion_report_window_localized_emission_cap=report_window_localized_emission_cap,
         site_origin_lat=37.0,
         site_origin_lon=-122.0,
         site_origin_alt_m=0.0,
@@ -306,6 +308,117 @@ async def test_coyote_alert_cooldown_avoids_repeat_flood(tmp_path: Path) -> None
     assert len(detections) >= 2
     alerts = await storage.list_alerts(limit=20)
     assert len(alerts) == 2
+
+    await fusion.stop()
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_report_window_pregate_skips_render_after_cap(tmp_path: Path) -> None:
+    """cap=1: after one localized emission in a (node, window), further localized
+    candidates in the same window are dropped BEFORE the beamform render +
+    inference — even with a different label, which the storage-level dedupe
+    would have admitted. That precision loss is the documented cost of the gate."""
+    localizer = RecordingLocalizer(reference_sensor="hybrid-node:ch1")
+    classifier = RecordingClassifier(label_for_positive="robin", label_for_negative="wren")
+    fusion, storage = await _start_fusion(
+        tmp_path,
+        classifier=classifier,
+        localizer=localizer,
+        report_window_localized_emission_cap=1,
+    )
+
+    positive = np.full((4, 1024), 0.25, dtype=np.float32)
+    negative = np.full((4, 1024), -0.25, dtype=np.float32)
+
+    # Window-aligned base (divisible by 30 s) so both ingests share one window.
+    base_ns = 1_739_810_700_000_000_000
+    await _ingest(fusion, start_time_ns=base_ns, channels=positive)
+    await asyncio.sleep(0.25)
+    # Second candidate, same window, would classify as "wren" — pre-gated.
+    await _ingest(fusion, start_time_ns=base_ns + 2_000_000_000, channels=negative)
+    await asyncio.sleep(0.25)
+
+    detections = await storage.list_detections(limit=10)
+    assert len(detections) == 1
+    assert detections[0]["label"] == "robin"
+    # The second candidate never reached the classifier.
+    assert len(classifier.recorded_frequencies_hz) == 1
+    status = await fusion.status()
+    assert status["metrics"]["classification_pregate_skipped_count"] == 1
+    assert status["metrics"]["classification_drops_by_reason"].get("report_window_saturated") == 1
+
+    # Next reporting window classifies normally again.
+    await _ingest(fusion, start_time_ns=base_ns + 31_000_000_000, channels=negative)
+    await asyncio.sleep(0.25)
+    detections = await storage.list_detections(limit=10)
+    assert len(detections) == 2
+    assert len(classifier.recorded_frequencies_hz) == 2
+    status = await fusion.status()
+    assert status["metrics"]["classification_pregate_skipped_count"] == 1
+
+    await fusion.stop()
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_report_window_pregate_off_by_default(tmp_path: Path) -> None:
+    """cap=0 (shipped default): both distinct-label candidates in one window
+    classify and emit — today's behavior is preserved."""
+    localizer = RecordingLocalizer(reference_sensor="hybrid-node:ch1")
+    classifier = RecordingClassifier(label_for_positive="robin", label_for_negative="wren")
+    fusion, storage = await _start_fusion(tmp_path, classifier=classifier, localizer=localizer)
+
+    positive = np.full((4, 1024), 0.25, dtype=np.float32)
+    negative = np.full((4, 1024), -0.25, dtype=np.float32)
+    base_ns = 1_739_810_700_000_000_000
+    await _ingest(fusion, start_time_ns=base_ns, channels=positive)
+    await asyncio.sleep(0.25)
+    await _ingest(fusion, start_time_ns=base_ns + 2_000_000_000, channels=negative)
+    await asyncio.sleep(0.25)
+
+    detections = await storage.list_detections(limit=10)
+    assert len(detections) == 2
+    assert len(classifier.recorded_frequencies_hz) == 2
+    status = await fusion.status()
+    assert status["metrics"]["classification_pregate_skipped_count"] == 0
+    assert "report_window_saturated" not in status["metrics"]["classification_drops_by_reason"]
+
+    await fusion.stop()
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_report_window_pregate_suppress_does_not_count_toward_cap(tmp_path: Path) -> None:
+    """A same-label duplicate suppressed by the storage-level dedupe performs no
+    emission, so it must not advance the gate counter: with cap=2, a suppressed
+    duplicate still leaves room for a second distinct label in the window."""
+    localizer = RecordingLocalizer(reference_sensor="hybrid-node:ch1")
+    classifier = RecordingClassifier(label_for_positive="robin", label_for_negative="wren")
+    fusion, storage = await _start_fusion(
+        tmp_path,
+        classifier=classifier,
+        localizer=localizer,
+        report_window_localized_emission_cap=2,
+    )
+
+    positive = np.full((4, 1024), 0.25, dtype=np.float32)
+    negative = np.full((4, 1024), -0.25, dtype=np.float32)
+    base_ns = 1_739_810_700_000_000_000
+    # 1st: emits "robin". 2nd: same label — storage dedupe suppresses (no
+    # emission, counter stays 1). 3rd: "wren" — must still classify and emit.
+    await _ingest(fusion, start_time_ns=base_ns, channels=positive)
+    await asyncio.sleep(0.25)
+    await _ingest(fusion, start_time_ns=base_ns + 2_000_000_000, channels=positive)
+    await asyncio.sleep(0.25)
+    await _ingest(fusion, start_time_ns=base_ns + 4_000_000_000, channels=negative)
+    await asyncio.sleep(0.25)
+
+    detections = await storage.list_detections(limit=10)
+    assert sorted(d["label"] for d in detections) == ["robin", "wren"]
+    status = await fusion.status()
+    assert status["metrics"]["classification_pregate_skipped_count"] == 0
+    assert status["metrics"]["classification_drops_by_reason"].get("empty_classification") == 1
 
     await fusion.stop()
     await storage.close()

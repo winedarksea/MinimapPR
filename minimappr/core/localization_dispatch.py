@@ -662,6 +662,9 @@ def build_localizer_from_settings(settings: Settings | LocalizationConfig) -> Lo
             if cross_node_enabled
             else None
         ),
+        bearing_observed_obs_floor=getattr(
+            cfg, "localization_obs_factor_bearing_floor", 1.0
+        ),
     )
     algorithms: dict[str, Localizer] = {
         "gcc_phat": gcc,

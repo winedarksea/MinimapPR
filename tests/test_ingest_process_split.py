@@ -883,3 +883,65 @@ def test_split_api_role_patch_config_flags_pipeline_in_separate_process(
     body = response.json()
     assert body["pipeline_in_separate_process"] is True
     assert "trigger_cooldown_seconds" in body["restart_required"]
+
+
+def test_ingest_path_prefixes_cover_proxied_diagnostics_endpoints() -> None:
+    """Every diagnostics endpoint the API role proxies to the ingest worker must
+    be admitted by the ingest role's route guard. Before the prefixes were added
+    these endpoints 404ed on ingest and 503ed (or proxied into that 404) on api —
+    dead in both roles of a split deployment."""
+    from minimappr.main import _INGEST_PATH_PREFIXES
+
+    for path in (
+        "/api/v1/diagnostics/summary",
+        "/api/v1/debug/config",
+        "/api/v1/debug/selftest",
+        "/api/v1/debug/event/evt-123",
+    ):
+        assert path.startswith(_INGEST_PATH_PREFIXES), path
+
+
+def test_python_ingest_role_serves_debug_config(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("MINIMAPPR_PROCESS_ROLE", "ingest")
+    monkeypatch.setenv("MINIMAPPR_INGEST_BACKEND", "python")
+    monkeypatch.setenv("MINIMAPPR_DIRECT_INGEST_ENABLED", "true")
+    monkeypatch.setenv("MINIMAPPR_INGEST_SIDECAR_ENABLED", "false")
+    monkeypatch.setenv("MINIMAPPR_DB_PATH", str(tmp_path / "ingest-debug.db"))
+    monkeypatch.setenv("MINIMAPPR_SNIPPET_DIR", str(tmp_path / "snippets"))
+    monkeypatch.setenv("MINIMAPPR_LARGE_ARTIFACT_DIR", str(tmp_path / "artifacts"))
+    monkeypatch.setenv("MINIMAPPR_FEDERATION_ENABLED", "false")
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/debug/config")
+
+    assert response.status_code == 200
+
+
+def test_split_api_role_proxies_debug_endpoints_to_ingest_worker(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _configure_split_api_role(monkeypatch, tmp_path, "debug-proxy")
+    observed = _fake_ingest_worker(monkeypatch, {"settings": {"process_role": "ingest"}})
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/debug/config")
+
+    assert response.status_code == 200
+    assert response.json()["settings"]["process_role"] == "ingest"
+    assert observed["url"] == "http://127.0.0.1:19091/api/v1/debug/config"
+    assert observed["method"] == "GET"
+
+
+def test_split_api_role_proxies_debug_event_with_encoded_id(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _configure_split_api_role(monkeypatch, tmp_path, "debug-event-proxy")
+    observed = _fake_ingest_worker(monkeypatch, {"event_id": "evt-00018168"})
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/debug/event/evt-00018168")
+
+    assert response.status_code == 200
+    assert observed["url"] == "http://127.0.0.1:19091/api/v1/debug/event/evt-00018168"

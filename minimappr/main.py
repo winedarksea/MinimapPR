@@ -17,6 +17,7 @@ from dataclasses import fields as dataclass_fields, replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal
 import urllib.error
+import urllib.parse
 import urllib.request
 
 import numpy as np
@@ -220,6 +221,12 @@ _INGEST_PATH_PREFIXES = (
     "/api/v1/fusion/status",
     "/api/v1/system/diagnostics",
     "/api/v1/system/logs",
+    # Diagnostics that need the DSP runtime live in the ingest process; the API
+    # process proxies them here (see diagnostics_summary / debug_* handlers).
+    # Omitting them made these endpoints 404 on ingest AND 503 on api — dead in
+    # both roles of a split deployment.
+    "/api/v1/diagnostics",
+    "/api/v1/debug",
 )
 
 
@@ -3002,6 +3009,8 @@ async def get_config(request: Request) -> dict:
         "drone_head_model_path": str(settings.drone_head_model_path),
         "drone_head_min_confidence": settings.drone_head_min_confidence,
         "drone_head_min_frame_fraction": settings.drone_head_min_frame_fraction,
+        "drone_head_ambient_margin": settings.drone_head_ambient_margin,
+        "drone_head_min_mean_confidence": settings.drone_head_min_mean_confidence,
         "stt_enabled": settings.stt_enabled,
         "stt_model_id": settings.stt_model_id,
         "stt_model_cache_dir": str(settings.stt_model_cache_dir),
@@ -3033,6 +3042,7 @@ async def get_config(request: Request) -> dict:
         "birdnet_chunked_dispatch_enabled": settings.birdnet_chunked_dispatch_enabled,
         "birdnet_trigger_min_confidence": settings.birdnet_trigger_min_confidence,
         "birdnet_geo_min_confidence": settings.birdnet_geo_min_confidence,
+        "birdnet_pool_size": settings.birdnet_pool_size,
         "persisted_override_keys": sorted(load_overrides(settings.config_overrides_path)),
         "beamformer_type": settings.beamformer_type,
         "beamformed_classification_min_sensor_count": settings.beamformed_classification_min_sensor_count,
@@ -3057,7 +3067,10 @@ async def get_config(request: Request) -> dict:
         "fusion_localization_queue_size": settings.fusion_localization_queue_size,
         "fusion_classification_queue_size": settings.fusion_classification_queue_size,
         "fusion_rules_queue_size": settings.fusion_rules_queue_size,
+        "classification_window_seconds": settings.classification_window_seconds,
         "drop_on_backpressure": settings.drop_on_backpressure,
+        "fusion_backpressure_drop_policy": settings.fusion_backpressure_drop_policy,
+        "fusion_report_window_localized_emission_cap": settings.fusion_report_window_localized_emission_cap,
         "fusion_drop_on_backpressure": settings.fusion_drop_on_backpressure,
         "fusion_offline_replay_mode": settings.fusion_offline_replay_mode,
         "rules_config_path": str(settings.rules_config_path),
@@ -3181,6 +3194,14 @@ def _startup_snapshot_restart_required_keys() -> frozenset[str]:
     # Not a FusionConfig field name (it maps to ``worker_count``), and the worker
     # tasks are created in FusionNode.start().
     keys.add("fusion_worker_count")
+    # Same renamed-field situation: these map to ``classification_queue_size``,
+    # ``backpressure_drop_policy``, and ``report_window_localized_emission_cap``
+    # on FusionConfig, and the queues are created in FusionNode.__init__.
+    keys.add("fusion_classification_queue_size")
+    keys.add("fusion_backpressure_drop_policy")
+    keys.add("fusion_report_window_localized_emission_cap")
+    # The classifier (and its BirdNET session pool) is built once at startup.
+    keys.add("birdnet_pool_size")
     return frozenset(keys)
 
 
@@ -3390,6 +3411,20 @@ async def patch_config(request: Request) -> dict:
             errors.append(f"{key}: must be > 0")
         elif key == "fusion_worker_count" and value < 1:  # type: ignore[operator]
             errors.append("fusion_worker_count: must be >= 1")
+        elif key == "fusion_classification_queue_size" and value < 1:  # type: ignore[operator]
+            errors.append("fusion_classification_queue_size: must be >= 1")
+        elif key == "fusion_report_window_localized_emission_cap" and value < 0:  # type: ignore[operator]
+            errors.append("fusion_report_window_localized_emission_cap: must be >= 0 (0 disables)")
+        elif key == "birdnet_pool_size" and value < 1:  # type: ignore[operator]
+            errors.append("birdnet_pool_size: must be >= 1")
+        elif key == "classification_window_seconds" and value <= 0.0:  # type: ignore[operator]
+            errors.append("classification_window_seconds: must be > 0")
+        elif key == "fusion_backpressure_drop_policy":
+            v = str(value).strip().lower()
+            if v not in {"oldest", "newest"}:
+                errors.append("fusion_backpressure_drop_policy: must be one of ['newest', 'oldest']")
+            else:
+                value = v
         elif key == "localization_algorithm" and value not in _LOCALIZATION_ALGORITHMS:
             errors.append(f"localization_algorithm: must be one of {sorted(_LOCALIZATION_ALGORITHMS)}")
         elif key == "localization_strategy" and value not in _LOCALIZATION_STRATEGIES:
@@ -3425,6 +3460,8 @@ async def patch_config(request: Request) -> dict:
         elif key in {
             "drone_head_min_confidence",
             "drone_head_min_frame_fraction",
+            "drone_head_ambient_margin",
+            "drone_head_min_mean_confidence",
             "stt_trigger_min_confidence",
         } and not (
             0.0 <= value <= 1.0  # type: ignore[operator]
@@ -4177,6 +4214,12 @@ async def patch_node_audio(node_id: str, body: NodeAudioOverride, request: Reque
 async def debug_config(request: Request) -> dict:
     state = _require_state(request)
     if not hasattr(state, "diagnostics"):
+        if _should_proxy_ingest_to_python_worker(state):
+            return await _proxy_json_to_python_worker(
+                state,
+                method="GET",
+                endpoint_path="/api/v1/debug/config",
+            )
         raise HTTPException(status_code=503, detail="Diagnostics requiring DSP runtime run in the ingest process")
     return await state.diagnostics.config_snapshot()
 
@@ -4185,6 +4228,12 @@ async def debug_config(request: Request) -> dict:
 async def debug_event_snapshot(event_id: str, request: Request) -> dict:
     state = _require_state(request)
     if not hasattr(state, "diagnostics"):
+        if _should_proxy_ingest_to_python_worker(state):
+            return await _proxy_json_to_python_worker(
+                state,
+                method="GET",
+                endpoint_path=f"/api/v1/debug/event/{urllib.parse.quote(event_id, safe='')}",
+            )
         raise HTTPException(status_code=503, detail="Diagnostics requiring DSP runtime run in the ingest process")
     snapshot = await state.diagnostics.event_snapshot(event_id)
     if snapshot is None:
@@ -4196,6 +4245,12 @@ async def debug_event_snapshot(event_id: str, request: Request) -> dict:
 async def debug_selftest(request: Request) -> dict:
     state = _require_state(request)
     if not hasattr(state, "diagnostics"):
+        if _should_proxy_ingest_to_python_worker(state):
+            return await _proxy_json_to_python_worker(
+                state,
+                method="GET",
+                endpoint_path="/api/v1/debug/selftest",
+            )
         raise HTTPException(status_code=503, detail="Diagnostics requiring DSP runtime run in the ingest process")
     return await state.diagnostics.selftest()
 

@@ -44,6 +44,18 @@ from minimappr.models import LocalizationResult
 
 
 EPSILON = 1.0e-12
+
+# Default obs_factor floor for solves with TDOA measurements whose bearing is
+# well-conditioned (Jacobian cond < 1e8). condition_observability compares the
+# covariance's extreme eigenvalues, which for a compact (~5 cm) array is
+# ~1e-5..1e-3 even on a perfectly healthy bearing solve — on the 2026-08-01
+# live box it crushed every detection's confidence to ~0.002, excluding all
+# compact-array tracks from IAMF spatial rendering (0.30 slot threshold).
+# RANGE_BEARING_PROJECTED already escapes via obs_factor=1.0 for exactly this
+# reason; the floor extends that reasoning to bearing-observed RANGE_REFINED
+# solves. 1.0 = full escape (confidence = peak_quality × fit_quality);
+# 0.0 = legacy behavior. The per-mode confidence caps still apply after it.
+BEARING_OBSERVED_OBS_FACTOR_FLOOR = 1.0
 MAX_REFINEMENT_START_COUNT = 4
 MAX_REFINEMENT_EVALUATIONS = 100
 MAX_RETRY_REFINEMENT_EVALUATIONS = 500
@@ -215,6 +227,7 @@ def solve_cartesian_tdoa(
     far_field_initial_range_m: float = 50.0,
     far_field_prior_radial_std_m: float | None = None,
     radial_refinement_enabled: bool = True,
+    bearing_observed_obs_floor: float = BEARING_OBSERVED_OBS_FACTOR_FLOOR,
 ) -> CartesianTdoaSolve:
     bearing_constraints = bearing_constraints or []
     amplitude_constraints = amplitude_constraints or []
@@ -475,11 +488,11 @@ def solve_cartesian_tdoa(
     # RANGE_BEARING_PROJECTED and replace the covariance with an explicit
     # "cone of uncertainty" — tight laterally (from GCC-PHAT angular precision),
     # very large radially (4× solved range or 200 m, whichever is greater).
+    try:
+        bearing_cond = float(np.linalg.cond(preliminary_jacobian))
+    except np.linalg.LinAlgError:
+        bearing_cond = float("inf")
     if range_projection_mode == RANGE_ASYMPTOTIC and has_tdoa_measurements:
-        try:
-            bearing_cond = float(np.linalg.cond(preliminary_jacobian))
-        except np.linalg.LinAlgError:
-            bearing_cond = float("inf")
         if bearing_cond < 1e8:
             range_projection_mode = RANGE_BEARING_PROJECTED
             # Cone radial (range) std: loosest of 4× the solved range, the amplitude
@@ -536,6 +549,13 @@ def solve_cartesian_tdoa(
         obs_factor = 1.0
     else:
         obs_factor = math.sqrt(max(condition_observability, radial_observability * 0.25))
+        # Same reasoning as the branch above, extended to bearing-observed
+        # solves that kept a range estimate (RANGE_REFINED and friends): a
+        # compact array's covariance conditioning penalises a perfectly good
+        # bearing solve by orders of magnitude. The per-mode caps below still
+        # bound ASYMPTOTIC/BOUNDARY at UNOBSERVABLE_CONFIDENCE_CAP.
+        if has_tdoa_measurements and bearing_cond < 1e8:
+            obs_factor = max(obs_factor, bearing_observed_obs_floor)
     confidence = float(np.clip(peak_quality * fit_quality * obs_factor, 0.0, 1.0))
     if _norm_mode in {RANGE_ASYMPTOTIC, RANGE_BOUNDARY}:
         confidence = min(confidence, UNOBSERVABLE_CONFIDENCE_CAP)

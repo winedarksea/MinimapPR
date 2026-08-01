@@ -75,6 +75,20 @@ def node_has_trusted_gps_position(metadata: object) -> bool:
     )
 
 
+def _node_reports_3d_fix(metadata: object) -> bool:
+    """Whether a node's GPS metadata reports a genuine 3D fix.
+
+    Mirrors the altitude gate in `IngestProcessor._normalize_node_spec`: only a
+    3D fix carries a solved altitude — receivers emit a GGA altitude even under
+    a GSA 2D fix.
+    """
+    if not isinstance(metadata, dict):
+        return False
+    gps_metadata = metadata.get("gps")
+    signal = gps_metadata.get("signal") if isinstance(gps_metadata, dict) else None
+    return isinstance(signal, str) and signal.strip().lower() == "fix_3d"
+
+
 def _geo_from_node(node: dict) -> GeoPoint | None:
     geo_payload = node.get("position_geo")
     if not isinstance(geo_payload, dict):
@@ -139,6 +153,23 @@ def resolve_site_origin_from_nodes(
 
     if gps_points:
         origin, contributing = _midpoint(gps_points)
+        # A 2D fix may anchor lat/lon, but its alt_m is not a measurement. When
+        # any contributor has a real 3D fix, take the origin altitude from those
+        # nodes only, so 2D-fix GGA altitudes cannot skew the site datum.
+        three_d_alts = [
+            point.alt_m
+            for node in nodes
+            if (point := _geo_from_node(node)) is not None
+            and node_has_trusted_gps_position(node.get("metadata"))
+            and _node_reports_3d_fix(node.get("metadata"))
+            and str(node.get("id") or "") in set(contributing)
+        ]
+        if three_d_alts:
+            origin = GeoPoint(
+                lat=origin.lat,
+                lon=origin.lon,
+                alt_m=sum(three_d_alts) / float(len(three_d_alts)),
+            )
         return SiteOriginResolution(
             origin=origin, source=SOURCE_GPS_ANCHOR, contributing_node_ids=contributing
         )

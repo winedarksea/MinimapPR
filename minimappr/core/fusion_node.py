@@ -243,6 +243,11 @@ class FusionMetrics:
     localization_vertical_variance_floored_count: int = 0
     localization_stage_total_time_ms: float = 0.0
     localization_stage_max_time_ms: float = 0.0
+    # Classification-lane twins of the localization timings above. Added after
+    # the 2026-08-01 live-box review: the lane was 16 minutes behind realtime
+    # and there was no per-item cost metric to prove where the time went.
+    classification_stage_total_time_ms: float = 0.0
+    classification_stage_max_time_ms: float = 0.0
     # Ingest-to-DSP-result latency, split into queue wait vs. compute time so
     # "slow because of load" and "slow because of compute" are distinguishable.
     # Mirrors the Rust sidecar's `IngestDiagnostics` (`diagnostics.rs`) —
@@ -260,6 +265,10 @@ class FusionMetrics:
     beamform_renders: int = 0
     beamform_failures: int = 0
     birdnet_chunk_dispatches_suppressed: int = 0
+    # Localized candidates skipped BEFORE the beamform render because their
+    # (node, reporting window) already emitted the configured cap of localized
+    # detections (report_window_localized_emission_cap; 0 = gate off).
+    classification_pregate_skipped_count: int = 0
     # Silent-drop visibility: each pipeline stage may return without emitting a
     # downstream item (e.g. localization buffer miss, classifier suppression).
     # These dicts make the previously-invisible drops countable per reason.
@@ -386,6 +395,7 @@ class FusionNode:
             node_position_kde_checkpoint_seconds=settings.node_position_kde_checkpoint_seconds,
             node_position_kde_acceptance_radius_m=settings.node_position_kde_acceptance_radius_m,
             node_position_kde_rejection_streak_reset=settings.node_position_kde_rejection_streak_reset,
+            gps_2d_altitude_mode=getattr(settings, "gps_2d_altitude_mode", "site_origin"),
         )
         self._classification_orchestrator = ClassificationOrchestrator(
             classifier=classifier,
@@ -419,6 +429,13 @@ class FusionNode:
         self._candidate_counter = itertools.count(1)
         self._taxonomy_refresh_ns = 0
         self._per_node_frame_metrics: dict[str, dict[str, int]] = {}
+        # Pre-render report-window gate state: localized insert/upgrade emissions
+        # per (source_node_id, report_window_start_ns). Consulted by
+        # _should_skip_saturated_report_window before the beamform render;
+        # pruned opportunistically so it stays ~a few windows × node count.
+        # In-memory only: a restart forgets open windows, worst case costing one
+        # redundant render per window — the storage-level dedupe still holds.
+        self._localized_window_emissions: dict[tuple[str | None, int], int] = {}
 
         self._localization_queue: asyncio.Queue[EventCandidate | None] = asyncio.Queue(
             maxsize=max(1, self.fusion_config.localization_queue_size)
@@ -825,6 +842,9 @@ class FusionNode:
                 far_field_default_range_m=far_field_range_m,
                 far_field_prior_radial_std_m=far_field_prior_radial_std_m,
                 bearing_strength=cfg.localization_node_bearing_strength,
+                bearing_observed_obs_floor=getattr(
+                    cfg, "localization_obs_factor_bearing_floor", None
+                ),
             )
             if solved is not None:
                 localization_position_m = solved.position_m
@@ -1429,9 +1449,28 @@ class FusionNode:
                         source_node_id=product.candidate.source_node_id,
                     )
                     continue
+                if self._should_skip_saturated_report_window(product):
+                    self._metrics.classification_pregate_skipped_count += 1
+                    self._record_silent_drop(
+                        stage="classification",
+                        reason="report_window_saturated",
+                        candidate_id=product.candidate.id,
+                        event_time_ns=product.candidate.event_time_ns,
+                        source_node_id=product.candidate.source_node_id,
+                    )
+                    continue
+                classification_started_ns = time.perf_counter_ns()
                 detection_products = await asyncio.wait_for(
                     self._classify_and_assemble(product),
                     timeout=timeout_s,
+                )
+                classification_elapsed_ms = (
+                    time.perf_counter_ns() - classification_started_ns
+                ) / 1_000_000.0
+                self._metrics.classification_stage_total_time_ms += classification_elapsed_ms
+                self._metrics.classification_stage_max_time_ms = max(
+                    self._metrics.classification_stage_max_time_ms,
+                    classification_elapsed_ms,
                 )
                 classification_failed = self._detection_products_had_backend_failure(detection_products)
                 self._record_chunk_dispatch_outcome(
@@ -2535,6 +2574,18 @@ class FusionNode:
             )
             return None
 
+        if reporting_modality == "localized":
+            # Feed the pre-render report-window gate. Keyed on the candidate's
+            # source node (same key _should_skip_saturated_report_window uses),
+            # not the registry-derived reference-sensor node — identical for
+            # single-node solves, and consistency is what the gate needs.
+            # A later IntegrityError on insert still means the window has a
+            # detection, so counting here stays semantically correct.
+            self._note_localized_window_emission(
+                source_node_id=product.candidate.source_node_id,
+                report_window_start_ns=decision.report_window_start_ns,
+            )
+
         persist_mode = "update" if decision.action == "upgrade_existing" else "insert"
         try:
             classification_features = self._classification_features_for_reporting(
@@ -2853,6 +2904,47 @@ class FusionNode:
             source_node_id=product.candidate.source_node_id,
             event_time_ns=product.candidate.event_time_ns,
         )
+
+    def _should_skip_saturated_report_window(self, product: LocalizedCandidate) -> bool:
+        """Pre-render report-window gate (cap = 0 disables).
+
+        ``ReportingFusionPolicy.decide`` dedupes per (node, label, window) — but
+        only AFTER the beamform render + classifier inference have been paid
+        for. The label isn't knowable pre-render, so this gate is coarser: once
+        a (node, window) has emitted ``cap`` localized detections, further
+        localized candidates in that window are skipped outright. Omni-lane
+        emissions never count toward the cap, so the omni→localized
+        ``upgrade_existing`` path stays reachable. What the gate costs is the
+        (cap+1)-th *distinct label* in one node+window.
+        """
+        cap = self.fusion_config.report_window_localized_emission_cap
+        if cap <= 0:
+            return False
+        # Only candidates that would classify on the localized branch are gated;
+        # everything else (omni fallback) is the reporting policy's business.
+        if product.localization_branch is None:
+            return False
+        window_start_ns, _ = self.reporting_policy.report_window_bounds(
+            product.candidate.event_time_ns
+        )
+        key = (product.candidate.source_node_id, window_start_ns)
+        return self._localized_window_emissions.get(key, 0) >= cap
+
+    def _note_localized_window_emission(
+        self,
+        *,
+        source_node_id: str | None,
+        report_window_start_ns: int,
+    ) -> None:
+        key = (source_node_id, report_window_start_ns)
+        self._localized_window_emissions[key] = self._localized_window_emissions.get(key, 0) + 1
+        # Opportunistic prune: drop windows more than ~10 reporting windows old
+        # so the dict stays at a few windows × node count.
+        horizon_ns = report_window_start_ns - 10 * self.reporting_policy.reporting_window_ns
+        if len(self._localized_window_emissions) > 64:
+            self._localized_window_emissions = {
+                k: v for k, v in self._localized_window_emissions.items() if k[1] >= horizon_ns
+            }
 
     @staticmethod
     def _detection_products_had_backend_failure(detection_products: list[DetectionProduct]) -> bool:

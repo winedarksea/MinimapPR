@@ -278,3 +278,54 @@ def test_chain_stage_feeds_embedding_frames_and_strips_ndarrays(tmp_path):
     assert "embedding" not in result.features
     assert "embedding_frames" not in result.features
     json.dumps(result.features)  # must not raise
+
+
+def test_ambient_dominant_frames_with_subthreshold_drone_do_not_relabel(tmp_path):
+    """2026-08-01 live regression shape: every frame carries a drone probability
+    above the per-class threshold, but ambient WINS every frame. The old vote
+    counted any frame with P(drone) >= threshold — never asking whether ambient
+    won it — so the clip was labeled drone. The argmax vote must say unknown."""
+    model = _write_tiny_head(
+        tmp_path / "drone_head.onnx", labels=LABELS_3, metadata={"negative_label": "ambient"}
+    )
+    clf = DroneHeadClassifier(model, min_confidence=0.3, min_frame_fraction=0.2)
+    # Blend: mostly ambient slice with a real drone-slice component on EVERY
+    # frame -> P(ambient) ≈ 0.57 > P(drone) ≈ 0.38 > 0.3 per frame.
+    blended = (0.6 * _slice_embedding(0, 3) + 0.5 * _slice_embedding(1, 3)).astype(np.float32)
+    frames = np.stack([blended] * 5)
+    probs_check = clf.classify_embedding(frames)
+    assert probs_check.features["drone_prob_max"] >= 0.3  # would have qualified before
+    assert probs_check.label == "unknown"
+    assert probs_check.confidence == 0.0
+
+
+def test_ambient_margin_gate_requires_mean_lead(tmp_path):
+    """With ambient_margin set, a legitimate minority burst must also beat the
+    ambient clip mean by the margin; without the margin it labels as before."""
+    model = _write_tiny_head(tmp_path / "drone_head.onnx")
+    frames = np.vstack([-np.ones((4, EMBEDDING_DIM)), np.ones((1, EMBEDDING_DIM))]).astype(
+        np.float32
+    )
+    permissive = DroneHeadClassifier(model, min_confidence=0.5, min_frame_fraction=0.2)
+    assert permissive.classify_embedding(frames).label == "drone"
+    strict = DroneHeadClassifier(
+        model, min_confidence=0.5, min_frame_fraction=0.2, ambient_margin=0.1
+    )
+    result = strict.classify_embedding(frames)
+    assert result.label == "unknown"
+    assert result.confidence == 0.0
+
+
+def test_min_mean_confidence_floor(tmp_path):
+    """min_mean_confidence floors the reported clip mean: a winner whose mean
+    sits below it collapses to unknown/0.0 instead of labeling at e.g. 0.4."""
+    model = _write_tiny_head(tmp_path / "drone_head.onnx")
+    frames = np.vstack([-np.ones((1, EMBEDDING_DIM)), np.ones((1, EMBEDDING_DIM))]).astype(
+        np.float32
+    )
+    floored = DroneHeadClassifier(model, min_confidence=0.5, min_mean_confidence=0.6)
+    result = floored.classify_embedding(frames)
+    assert result.label == "unknown"
+    assert result.confidence == 0.0
+    # Observability retained even when floored.
+    assert result.scores["drone"] > 0.5

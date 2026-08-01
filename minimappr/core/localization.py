@@ -160,6 +160,9 @@ class LocalizationEngine:
     # tau ceiling and honour the configured sync gate. None → tier-c disabled.
     cross_node_max_tau_s: float | None = None
     cross_node_min_sync_weight: float | None = None
+    # obs_factor floor for bearing-observed solves (see cartesian_tdoa.py
+    # BEARING_OBSERVED_OBS_FACTOR_FLOOR). 0.0 = legacy confidence crushing.
+    bearing_observed_obs_floor: float = 1.0
 
     def _validate_inputs(
         self,
@@ -271,6 +274,7 @@ class LocalizationEngine:
                 amplitude_constraints=amplitude_constraints,
                 far_field_initial_range_m=self.far_field_default_range_m,
                 radial_refinement_enabled=True,
+                bearing_observed_obs_floor=self.bearing_observed_obs_floor,
             )
         except (ValueError, np.linalg.LinAlgError) as exc:
             raise LocalizationError(str(exc)) from exc

@@ -243,3 +243,35 @@ def test_origins_differ_tolerates_float_noise() -> None:
     a = GeoPoint(lat=44.39053726, lon=-92.08418655, alt_m=237.85)
     assert not origins_differ(a, GeoPoint(lat=44.39053726, lon=-92.08418655, alt_m=237.85))
     assert origins_differ(a, GeoPoint(lat=44.39053726, lon=-92.08418000, alt_m=237.85))
+
+
+def test_gps_anchor_altitude_prefers_three_d_fix_contributors() -> None:
+    """2D fixes may anchor lat/lon, but the origin's alt_m must come from 3D-fix
+    contributors when any exist — GGA altitude under a 2D fix is not a measurement."""
+    settings = Settings()
+    node_2d = _node("n2d", 44.0, -93.0, 999.0, gps=True)
+    node_3d = _node("n3d", 44.0002, -93.0002, 250.0, gps=True)
+    node_3d["metadata"] = {"gps": {"position_source": "gps_nmea_uart", "signal": "fix_3d"}}
+
+    resolution = resolve_site_origin_from_nodes(
+        settings, now_ns=time.time_ns(), nodes=[node_2d, node_3d]
+    )
+
+    assert resolution.source == SOURCE_GPS_ANCHOR
+    # lat/lon midpoint over BOTH nodes; altitude from the 3D node only.
+    assert resolution.origin.lat == pytest.approx((44.0 + 44.0002) / 2)
+    assert resolution.origin.alt_m == pytest.approx(250.0)
+    assert set(resolution.contributing_node_ids) == {"n2d", "n3d"}
+
+
+def test_gps_anchor_altitude_falls_back_to_midpoint_when_all_two_d() -> None:
+    """With only 2D contributors there is nothing better than the midpoint —
+    the pre-existing behavior pinned by test_site_origin_anchoring stays."""
+    settings = Settings()
+    a = _node("a", 44.0, -93.0, 240.0, gps=True)
+    b = _node("b", 44.0002, -93.0002, 260.0, gps=True)
+
+    resolution = resolve_site_origin_from_nodes(settings, now_ns=time.time_ns(), nodes=[a, b])
+
+    assert resolution.source == SOURCE_GPS_ANCHOR
+    assert resolution.origin.alt_m == pytest.approx(250.0)

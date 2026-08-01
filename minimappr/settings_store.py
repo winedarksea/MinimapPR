@@ -47,6 +47,8 @@ CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     "drone_head_enabled": bool,
     "drone_head_min_confidence": float,
     "drone_head_min_frame_fraction": float,
+    "drone_head_ambient_margin": float,
+    "drone_head_min_mean_confidence": float,
     "stt_enabled": bool,
     "stt_trigger_min_confidence": float,
     "transcript_retention_seconds": float,
@@ -73,6 +75,10 @@ CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     "birdnet_chunked_dispatch_enabled": bool,
     "birdnet_trigger_min_confidence": float,
     "birdnet_geo_min_confidence": float,
+    # Restart-required: the classifier (and its session pool) is built once at
+    # startup. pool_size=1 serializes every fusion worker through one BirdNET
+    # session (2026-08-01 live-box throughput root cause).
+    "birdnet_pool_size": int,
     "tracking_filter": str,
     "fusion_worker_count": int,
     "coordinate_mode": str,
@@ -126,6 +132,20 @@ CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     "multi_node_bearing_min_separation_deg": float,
     "multi_node_bearing_ttl_seconds": float,
     "multi_node_bearing_max_condition": float,
+    # Classification-lane backpressure knobs (see core/fusion_node.py). All
+    # restart-required — the queues and the FusionConfig snapshot are built at
+    # FusionNode.start(). Exposed after the 2026-08-01 live-box review found the
+    # 1024-deep classification queue was itself the 16-minute-lag mechanism and
+    # none of these could be tuned without an env change + redeploy.
+    "fusion_classification_queue_size": int,
+    "classification_window_seconds": float,
+    "drop_on_backpressure": bool,
+    "fusion_backpressure_drop_policy": str,
+    # Pre-render report-window gate (0 = off): skip the beamform render +
+    # inference once a (node, reporting window) already emitted this many
+    # localized detections. The storage-level dedupe made the same call after
+    # the render — ~89% of classification-lane CPU on the 2026-08-01 live box.
+    "fusion_report_window_localized_emission_cap": int,
 }
 
 

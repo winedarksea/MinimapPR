@@ -60,6 +60,10 @@ class ReportingFusionPolicy:
             return str(resolver(label))
         return label
 
+    @property
+    def reporting_window_ns(self) -> int:
+        return self._reporting_window_ns
+
     def report_window_bounds(self, event_time_ns: int) -> tuple[int, int]:
         start_ns = (event_time_ns // self._reporting_window_ns) * self._reporting_window_ns
         return start_ns, start_ns + self._reporting_window_ns
