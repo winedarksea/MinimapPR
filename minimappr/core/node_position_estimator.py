@@ -13,7 +13,33 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.models import GeoPoint
+
+#: Discriminator for the persisted checkpoint format. Present only on geodetic
+#: checkpoints; its absence marks an ENU-era row that cannot be reprojected.
+_SNAPSHOT_FORMAT_GEODETIC = "geodetic_v1"
+#: 9 decimal degrees is ~0.1 mm, far finer than GNSS, and bounds the JSON size of
+#: a full reservoir. Altitude is metres, so 3 decimals is the same scale.
+_GEO_LAT_LON_DECIMALS = 9
+_GEO_ALT_DECIMALS = 3
+
+
+def _geo_to_payload(geo: GeoPoint) -> list[float]:
+    return [
+        round(geo.lat, _GEO_LAT_LON_DECIMALS),
+        round(geo.lon, _GEO_LAT_LON_DECIMALS),
+        round(geo.alt_m, _GEO_ALT_DECIMALS),
+    ]
+
+
+def _payload_to_geo(entry: object) -> GeoPoint | None:
+    if not isinstance(entry, (list, tuple)) or len(entry) < 3:
+        return None
+    try:
+        return GeoPoint(lat=float(entry[0]), lon=float(entry[1]), alt_m=float(entry[2]))
+    except (TypeError, ValueError):
+        return None
 
 
 @dataclass(slots=True)
@@ -26,55 +52,51 @@ class StationaryKdeState:
     last_evaluated_monotonic_s: float = 0.0
     last_checkpoint_monotonic_s: float = 0.0
 
-    def snapshot(self, origin: "GeoPoint | None" = None) -> dict:
-        """Serialize for persistence, stamped with the origin the samples use.
+    def snapshot(self, coordinate_frame: "LocalCoordinateFrame") -> dict:
+        """Serialize for persistence in geodetic coordinates.
 
-        Every coordinate here is ENU metres relative to the site origin, so the
-        stamp is what lets hydration tell a reusable checkpoint from one written
-        under a different origin. Restoring a mismatched checkpoint pins the node
-        at its old-frame coordinates, because the acceptance radius then rejects
-        every correct fix as an outlier.
+        Samples are held in ENU metres for the KDE maths, but persisting them
+        that way binds the checkpoint to the site origin in force when it was
+        written: restore it under a different origin and the acceptance radius
+        rejects every correct fix as an outlier, pinning the node at its
+        old-frame position forever. Geodetic coordinates are what the fixes
+        actually were, so a checkpoint stays valid across any origin change and
+        hours of GNSS averaging survive a re-anchor.
         """
-        payload = {
-            "samples": [list(sample) for sample in self.samples],
+        return {
+            "format": _SNAPSHOT_FORMAT_GEODETIC,
+            "samples": [
+                _geo_to_payload(coordinate_frame.local_to_geo(sample)) for sample in self.samples
+            ],
             "seen_count": self.seen_count,
-            "estimate": list(self.estimate) if self.estimate else None,
+            "estimate": (
+                _geo_to_payload(coordinate_frame.local_to_geo(self.estimate)) if self.estimate else None
+            ),
             "horizontal_std_m": self.horizontal_std_m,
             "last_evaluated_seen_count": self.last_evaluated_seen_count,
         }
-        if origin is not None:
-            payload["origin"] = {"lat": origin.lat, "lon": origin.lon, "alt_m": origin.alt_m}
-        return payload
-
-    @staticmethod
-    def snapshot_matches_origin(value: dict, origin: "GeoPoint | None") -> bool:
-        """Whether a persisted snapshot was accumulated under `origin`.
-
-        Unstamped snapshots predate the stamp and cannot be shown to match, so
-        they are treated as mismatched and rebuilt from live fixes.
-        """
-        if origin is None:
-            return False
-        stamped = value.get("origin")
-        if not isinstance(stamped, dict):
-            return False
-        try:
-            return (
-                abs(float(stamped["lat"]) - origin.lat) <= 1e-9
-                and abs(float(stamped["lon"]) - origin.lon) <= 1e-9
-                and abs(float(stamped.get("alt_m") or 0.0) - origin.alt_m) <= 1e-6
-            )
-        except (KeyError, TypeError, ValueError):
-            return False
 
     @classmethod
-    def from_snapshot(cls, value: dict) -> "StationaryKdeState":
-        samples = [tuple(map(float, sample[:3])) for sample in value.get("samples", []) if len(sample) >= 3]
-        estimate = value.get("estimate")
+    def from_snapshot(cls, value: dict, coordinate_frame: "LocalCoordinateFrame") -> "StationaryKdeState | None":
+        """Rebuild from a geodetic checkpoint, projected into the current frame.
+
+        Returns None for a checkpoint this build cannot interpret — in practice a
+        pre-geodetic one holding raw ENU, whose origin is unrecoverable. Those are
+        rebuilt from live fixes rather than guessed at, since a wrong restore is
+        far more damaging than a cold start (about a second of warmup).
+        """
+        if value.get("format") != _SNAPSHOT_FORMAT_GEODETIC:
+            return None
+        samples = [
+            coordinate_frame.geo_to_local(geo)
+            for geo in (_payload_to_geo(entry) for entry in value.get("samples", []))
+            if geo is not None
+        ]
+        estimate_geo = _payload_to_geo(value.get("estimate"))
         return cls(
             samples=samples,
             seen_count=max(int(value.get("seen_count", len(samples))), len(samples)),
-            estimate=tuple(map(float, estimate[:3])) if isinstance(estimate, list) and len(estimate) >= 3 else None,
+            estimate=coordinate_frame.geo_to_local(estimate_geo) if estimate_geo is not None else None,
             horizontal_std_m=value.get("horizontal_std_m"),
             last_evaluated_seen_count=int(value.get("last_evaluated_seen_count", 0)),
         )

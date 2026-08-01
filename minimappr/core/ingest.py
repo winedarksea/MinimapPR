@@ -21,11 +21,6 @@ _AUDIO_SUMMARY_PUBLISH_INTERVAL_NS = 500_000_000
 # Receipt time is metadata for freshness. GPS/NTP packet timestamps remain the
 # audio processing timeline even when transport latency is high.
 _MAX_TRUSTED_NODE_CLOCK_SKEW_NS = 300_000_000_000
-# Consecutive acceptance-radius rejections after which a stationary node's position
-# estimate is treated as wrong rather than the incoming fixes. Large enough that
-# a burst of multipath noise cannot trip it, small enough that a genuinely moved
-# (or wrongly restored) node re-converges in seconds rather than never.
-_KDE_REJECTION_STREAK_RESET = 60
 
 import numpy as np
 
@@ -156,6 +151,7 @@ class IngestProcessor:
         node_position_kde_recompute_seconds: float = 30.0,
         node_position_kde_checkpoint_seconds: float = 60.0,
         node_position_kde_acceptance_radius_m: float = 100.0,
+        node_position_kde_rejection_streak_reset: int = 60,
     ) -> None:
         self._localization_config = localization_config
         self._fusion_config = fusion_config
@@ -178,6 +174,7 @@ class IngestProcessor:
         self._kde_recompute_seconds = max(0.1, node_position_kde_recompute_seconds)
         self._kde_checkpoint_seconds = max(1.0, node_position_kde_checkpoint_seconds)
         self._kde_acceptance_radius_m = max(0.0, node_position_kde_acceptance_radius_m)
+        self._kde_rejection_streak_reset = max(1, node_position_kde_rejection_streak_reset)
 
         self._last_trigger_ns = 0
         self._accepted_frame_count = 0
@@ -186,6 +183,9 @@ class IngestProcessor:
         self._position_kalman: dict[str, _NodePositionKalman] = {}
         self._position_kde: dict[str, StationaryKdeState] = {}
         self._kde_rejection_streak: dict[str, int] = {}
+        # Nodes whose row is known to exist, so a checkpoint write cannot violate
+        # node_position_estimator_states' foreign key.
+        self._persisted_node_ids: set[str] = set()
         self._position_filter_by_node: dict[str, str] = {}
         # Last altitude that came from an actual 3D fix, held so a later 2D fix
         # (which does not solve altitude at all) cannot move the node vertically.
@@ -222,18 +222,47 @@ class IngestProcessor:
         """
         self._site_origin_anchor = anchor
 
-    def reset_position_estimators(self) -> None:
-        """Discard all in-memory node position estimator state.
+    def reproject_position_estimators(self, previous_frame: LocalCoordinateFrame) -> None:
+        """Move in-memory estimator state from `previous_frame` into the current one.
 
-        Kalman/KDE state is accumulated in ENU metres and is therefore only valid
-        against the origin it was built under. Re-anchoring must drop it rather
-        than smooth old-frame coordinates into the new frame.
+        Estimator state is ENU metres, so an origin change invalidates it as
+        written — but the underlying fixes are geodetic and origin-independent, so
+        it can be reprojected instead of discarded. That keeps however many hours
+        of GNSS averaging a stationary node has accumulated, which is the entire
+        reason the state is durable. Call after replace_coordinate_frame().
         """
-        self._position_kalman.clear()
-        self._position_kde.clear()
+        for node_id, state in list(self._position_kde.items()):
+            reprojected = StationaryKdeState.from_snapshot(
+                state.snapshot(previous_frame), self._coordinate_frame
+            )
+            if reprojected is None:  # unreachable: we just wrote the current format
+                self._position_kde.pop(node_id, None)
+                continue
+            reprojected.last_checkpoint_monotonic_s = state.last_checkpoint_monotonic_s
+            reprojected.last_evaluated_monotonic_s = state.last_evaluated_monotonic_s
+            self._position_kde[node_id] = reprojected
+
+        for node_id, kalman in list(self._position_kalman.items()):
+            if not kalman.initialized:
+                continue
+            east, north, up = self._coordinate_frame.geo_to_local(
+                previous_frame.local_to_geo((kalman.x, kalman.y, kalman.z))
+            )
+            # Variances are unchanged: both frames are local ENU tangent planes and
+            # the rotation between two origins at one site is negligible.
+            self._position_kalman[node_id] = _NodePositionKalman(
+                x=east, y=north, z=up,
+                px=kalman.px, py=kalman.py, pz=kalman.pz,
+                initialized=True,
+            )
+
+        # Held altitudes are ENU up-metres, so they move with the origin too.
+        for node_id, altitude_m in list(self._last_trusted_altitude_m.items()):
+            self._last_trusted_altitude_m[node_id] = self._coordinate_frame.geo_to_local(
+                previous_frame.local_to_geo((0.0, 0.0, altitude_m))
+            )[2]
+
         self._kde_rejection_streak.clear()
-        self._last_trusted_altitude_m.clear()
-        self._untrusted_altitude_warned_node_ids.clear()
 
     async def _maybe_anchor_site_origin(self, spec: NodeSpec) -> None:
         anchor = self._site_origin_anchor
@@ -247,27 +276,26 @@ class IngestProcessor:
         loader = getattr(self._storage, "list_node_position_estimator_states", None)
         if not callable(loader):
             return
-        origin = getattr(self._coordinate_frame, "origin", None)
         deleter = getattr(self._storage, "delete_node_position_estimator_state", None)
         for node_id, row in (await loader()).items():
             state = row.get("state") if isinstance(row, dict) else None
             if not isinstance(state, dict):
                 continue
-            # A checkpoint from a different origin holds ENU coordinates that are
-            # arbitrarily far from where the node now projects. Restoring it would
-            # make the acceptance radius reject every real fix as an outlier and
-            # pin the node at its old-frame position permanently.
-            if not StationaryKdeState.snapshot_matches_origin(state, origin):
+            restored = StationaryKdeState.from_snapshot(state, self._coordinate_frame)
+            if restored is None:
                 _logger.warning(
-                    "Discarding node %s position estimator checkpoint: it was built under a "
-                    "different site origin and cannot be reused in the current frame",
+                    "Discarding node %s position estimator checkpoint written in the "
+                    "pre-geodetic format; it will re-converge from live GPS fixes",
                     node_id,
                 )
                 if callable(deleter):
                     await deleter(node_id)
                 continue
-            self._position_kde[node_id] = StationaryKdeState.from_snapshot(state)
+            self._position_kde[node_id] = restored
             self._position_filter_by_node[node_id] = "kde"
+            # The node row already exists for anything we just hydrated, so its
+            # checkpoints can be written without re-checking the FK dependency.
+            self._persisted_node_ids.add(node_id)
 
     async def reset_position_estimator(self, node_id: str) -> None:
         self._position_kde.pop(node_id, None)
@@ -422,6 +450,9 @@ class IngestProcessor:
                         last_seen_ns=server_received_ns,
                         position_geo=geo_position,
                     )
+                    # Unblocks position-estimator checkpointing for this node; see
+                    # _maybe_checkpoint_kde for why the FK ordering matters.
+                    self._persisted_node_ids.add(normalized_node.id)
                 sequence_gap_count = await self._registry.record_frame_sequence(
                     node_id=normalized_node.id,
                     boot_session=boot_session,
@@ -790,7 +821,7 @@ class IngestProcessor:
                 # recover: every correct fix looks like the outlier. A sustained
                 # run of rejections is evidence the estimate is wrong, not the fix.
                 streak = self._kde_rejection_streak.get(node_id, 0) + 1
-                if streak < _KDE_REJECTION_STREAK_RESET:
+                if streak < self._kde_rejection_streak_reset:
                     self._kde_rejection_streak[node_id] = streak
                     return state.estimate
                 _logger.warning(
@@ -838,13 +869,40 @@ class IngestProcessor:
             self._kde_evaluation_tasks.pop(node_id, None)
 
     def _maybe_checkpoint_kde(self, node_id: str, state: StationaryKdeState, now: float, *, force: bool = False) -> None:
+        # node_position_estimator_states has a FK onto nodes(id), but the position
+        # estimator runs during spec normalization — before the frame's node row is
+        # written. Checkpointing a node we have not yet persisted raised
+        # IntegrityError inside a storage batch, and a failed commit there leaves
+        # the transaction open and stalls every later write.
+        if node_id not in self._persisted_node_ids:
+            return
         if not force and now - state.last_checkpoint_monotonic_s < self._kde_checkpoint_seconds:
             return
         writer = getattr(self._storage, "upsert_node_position_estimator_state", None)
-        if callable(writer):
-            state.last_checkpoint_monotonic_s = now
-            origin = getattr(self._coordinate_frame, "origin", None)
-            asyncio.create_task(writer(node_id, state.snapshot(origin)))
+        if not callable(writer):
+            return
+        state.last_checkpoint_monotonic_s = now
+        # Serializing converts every reservoir sample to geodetic — up to 2048
+        # projections, far too much to run inline on the frame path. Copy the
+        # reservoir cheaply (a shallow list of tuples) so the conversion can run
+        # in a worker thread without racing the appends this path keeps making.
+        detached = StationaryKdeState(
+            samples=list(state.samples),
+            seen_count=state.seen_count,
+            estimate=state.estimate,
+            horizontal_std_m=state.horizontal_std_m,
+            last_evaluated_seen_count=state.last_evaluated_seen_count,
+        )
+        asyncio.create_task(self._write_position_checkpoint(node_id, detached, writer))
+
+    async def _write_position_checkpoint(self, node_id: str, state: StationaryKdeState, writer) -> None:
+        try:
+            payload = await asyncio.to_thread(state.snapshot, self._coordinate_frame)
+            await writer(node_id, payload)
+        except Exception as exc:  # noqa: BLE001
+            # A dropped checkpoint costs averaging history, never correctness: the
+            # estimator keeps running in memory and the next tick retries.
+            _logger.warning("Position estimator checkpoint failed for node %s: %s", node_id, exc)
 
 
 # (Supporting dataclasses are defined at the top of the module.)

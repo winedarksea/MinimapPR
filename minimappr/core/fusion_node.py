@@ -385,6 +385,7 @@ class FusionNode:
             node_position_kde_recompute_seconds=settings.node_position_kde_recompute_seconds,
             node_position_kde_checkpoint_seconds=settings.node_position_kde_checkpoint_seconds,
             node_position_kde_acceptance_radius_m=settings.node_position_kde_acceptance_radius_m,
+            node_position_kde_rejection_streak_reset=settings.node_position_kde_rejection_streak_reset,
         )
         self._classification_orchestrator = ClassificationOrchestrator(
             classifier=classifier,
@@ -542,9 +543,9 @@ class FusionNode:
         """Arm/disarm GPS-based site-origin anchoring on the ingest path."""
         self._ingest_processor.set_site_origin_anchor(anchor)
 
-    def reset_position_estimators(self) -> None:
-        """Drop node position estimator state that is tied to the previous origin."""
-        self._ingest_processor.reset_position_estimators()
+    def reproject_position_estimators(self, previous_frame: LocalCoordinateFrame) -> None:
+        """Carry node position estimator state across a site-origin change."""
+        self._ingest_processor.reproject_position_estimators(previous_frame)
 
     def set_action_handler(self, destination: str, handler: RuleActionHandler) -> None:
         """Register (or replace) a rule-action handler for a destination.

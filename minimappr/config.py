@@ -861,6 +861,13 @@ class Settings:
     node_position_kde_recompute_seconds: float = 30.0
     node_position_kde_checkpoint_seconds: float = 60.0
     node_position_kde_acceptance_radius_m: float = 100.0
+    # Consecutive acceptance-radius rejections after which the estimate itself is
+    # treated as wrong and rebuilt from live fixes. Without this, an estimate that
+    # is wrong (node relocated, or state restored against a different site origin)
+    # rejects every correct fix as an outlier and can never recover. At ~30 fixes/s
+    # per node this is ~2 s of sustained disagreement — far longer than a multipath
+    # burst, far shorter than never.
+    node_position_kde_rejection_streak_reset: int = 60
     # Local position stamped onto binary-ingest frames from legacy firmware that
     # reports neither position_geo nor position_m (pre static-fallback-geo
     # descriptor builds). Lets those nodes register instead of 400-ing on every

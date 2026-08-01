@@ -517,12 +517,12 @@ def _warn_when_direct_ingest_falls_back(settings: Settings, sidecar_state: _Side
 
 
 async def _rebind_site_origin(app: FastAPI, resolved_site_origin) -> None:
-    """Swap the process onto a new site origin and drop everything tied to the old one.
+    """Swap the process onto a new site origin.
 
-    Node position estimators hold ENU metres, so they are meaningless in the new
-    frame and are cleared rather than carried across. Historical rows are left
-    alone: they are only reinterpreted if the origin moves, which is why an
-    anchored origin is never re-derived.
+    In-memory node position estimators hold ENU metres and are reprojected into
+    the new frame rather than reset, so a stationary node keeps however many
+    hours of GNSS averaging it has accumulated. Persisted checkpoints are stored
+    geodetically and need no migration at all.
     """
     state = app.state
     settings: Settings = state.settings
@@ -537,6 +537,7 @@ async def _rebind_site_origin(app: FastAPI, resolved_site_origin) -> None:
         origin=resolved_site_origin.origin,
         mode=settings.coordinate_mode,
     )
+    previous_coordinate_frame = state.coordinate_frame
     previous_classifier = state.classifier
     fusion_node = getattr(state, "fusion_node", None)
     if fusion_node is not None:
@@ -544,18 +545,11 @@ async def _rebind_site_origin(app: FastAPI, resolved_site_origin) -> None:
             classifier=new_classifier,
             coordinate_frame=new_coordinate_frame,
         )
-        fusion_node.reset_position_estimators()
+        fusion_node.reproject_position_estimators(previous_coordinate_frame)
     state.classifier = new_classifier
     state.coordinate_frame = new_coordinate_frame
     state.diagnostics.replace_classifier(new_classifier)
     _apply_site_origin_resolution(state, resolved_site_origin)
-
-    clear_states = getattr(state.storage, "clear_node_position_estimator_states", None)
-    if callable(clear_states):
-        try:
-            await clear_states()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Clearing node position estimator states after re-anchor failed: %s", exc)
 
     if previous_classifier is not None and previous_classifier is not new_classifier:
         try:

@@ -24,6 +24,23 @@ HEURISTIC_ROUTING_JSON = """{
 """
 
 
+@pytest.fixture
+async def temp_storage(tmp_path):
+    """An initialized `Storage` on a per-test SQLite file, closed on teardown.
+
+    Building this by hand is repeated across many test modules; new tests should
+    take this fixture rather than add another copy.
+    """
+    from minimappr.storage.db import Storage
+
+    store = Storage(tmp_path / "test.db")
+    await store.initialize()
+    try:
+        yield store
+    finally:
+        await store.close()
+
+
 @pytest.fixture(autouse=True)
 def _isolate_config_overrides(monkeypatch, tmp_path):
     """Point the persisted-overrides file at a per-test tmp path.

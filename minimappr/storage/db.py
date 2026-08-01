@@ -1822,19 +1822,6 @@ class Storage:
             await db.execute("DELETE FROM node_position_estimator_states WHERE node_id = ?", (node_id,))
             await self._commit_if_needed(db)
 
-    async def clear_node_position_estimator_states(self) -> None:
-        """Drop every persisted node position estimator state.
-
-        Estimator state is stored in ENU metres, so it is only meaningful against
-        the origin it was accumulated under. Re-anchoring the site origin must
-        discard it rather than let a stale frame's coordinates be smoothed into
-        the new one.
-        """
-        db = self._require_db()
-        async with self._write_guard():
-            await db.execute("DELETE FROM node_position_estimator_states")
-            await self._commit_if_needed(db)
-
     async def get_site_origin(self) -> dict[str, Any] | None:
         db = self._require_db()
         row = await (await db.execute(
