@@ -229,7 +229,12 @@ fn group_footer(gs: RwSignal<GroupState>, on_save: impl Fn() + 'static) -> impl 
             {move || {
                 let rr = gs.get().restart_required;
                 (!rr.is_empty()).then(|| view! {
-                    <span class="muted">{format!("Sidecar restart required: {}", rr.join(", "))}</span>
+                    // Backend-neutral: the python pipeline reads these from a
+                    // startup snapshot too, so "sidecar" was wrong (and silently
+                    // absent) on every python deployment.
+                    <span class="muted">
+                        {format!("Restart required to apply: {}", rr.join(", "))}
+                    </span>
                 })
             }}
         </div>

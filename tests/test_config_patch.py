@@ -415,3 +415,54 @@ def test_multiple_node_overrides_are_independent(monkeypatch, tmp_path: Path) ->
     nodes_by_id = {n["node_id"]: n for n in pipeline["nodes"]}
     assert abs(nodes_by_id["node-x"]["mics"][0]["hp_hz"] - 100.0) < 1e-6
     assert abs(nodes_by_id["node-y"]["mics"][0]["hp_hz"] - 800.0) < 1e-6
+
+
+def test_patch_reports_restart_required_for_startup_snapshot_keys(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """A key baked into the startup LocalizationConfig snapshot cannot hot-apply.
+
+    Reporting success with an empty ``restart_required`` is how a config change
+    appears to do nothing and then lands all at once on the next restart.
+    """
+    _configure_env(monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        resp = client.patch(
+            "/api/v1/config",
+            json={"trigger_rms": 0.05, "trigger_cooldown_seconds": 5.0},
+        )
+        assert resp.status_code == 200
+        restart_required = resp.json()["restart_required"]
+
+    assert "trigger_rms" in restart_required
+    assert "trigger_cooldown_seconds" in restart_required
+
+
+def test_patch_reports_restart_required_for_fusion_worker_count(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Worker tasks are created in FusionNode.start(); a live patch cannot add any."""
+    _configure_env(monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        resp = client.patch("/api/v1/config", json={"fusion_worker_count": 2})
+        assert resp.status_code == 200
+        assert resp.json()["fusion_worker_count"] == 2
+        assert "fusion_worker_count" in resp.json()["restart_required"]
+
+
+def test_patch_hot_appliable_key_is_not_restart_required(monkeypatch, tmp_path: Path) -> None:
+    """Retention knobs are re-read from Settings, so they must not be flagged."""
+    _configure_env(monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        resp = client.patch("/api/v1/config", json={"retention_yamnet_audio_seconds": 12345})
+        assert resp.status_code == 200
+        assert resp.json()["restart_required"] == []
+
+
+def test_patch_reports_pipeline_in_separate_process_flag(monkeypatch, tmp_path: Path) -> None:
+    """Combined-role deployments own their pipeline, so the flag stays false."""
+    _configure_env(monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        resp = client.patch("/api/v1/config", json={"trigger_rms": 0.02})
+        assert resp.status_code == 200
+        assert resp.json()["pipeline_in_separate_process"] is False

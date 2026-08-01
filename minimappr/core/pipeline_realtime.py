@@ -34,6 +34,15 @@ class PipelineRealtimeTracker:
     def mark_enqueued(self, *, stage_name: str, item_id: str, event_time_ns: int) -> None:
         self._stages[stage_name].queued_event_times_ns[item_id] = int(event_time_ns)
 
+    def mark_dropped(self, *, stage_name: str, item_id: str) -> None:
+        """Retire an item that was enqueued but will never be processed.
+
+        Without this, a shed item stays in ``queued_event_times_ns`` forever and
+        pins ``oldest_queued_event_time_ns``, so the pipeline reports a lag that
+        only grows — the exact symptom load shedding exists to prevent.
+        """
+        self._stages[stage_name].queued_event_times_ns.pop(item_id, None)
+
     def mark_started(self, *, stage_name: str, item_id: str) -> None:
         stage = self._stages[stage_name]
         event_time_ns = stage.queued_event_times_ns.pop(item_id, None)

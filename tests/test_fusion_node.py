@@ -13,7 +13,7 @@ from minimappr.classifiers.base import AudioClassifier, ClassificationResult
 from minimappr.classifiers.heuristic import HeuristicClassifier
 from minimappr.config import Settings
 from minimappr.core.audio_buffer import MultiSensorBuffer
-from minimappr.core.fusion_node import FusionMetrics, FusionNode
+from minimappr.core.fusion_node import EventCandidate, FusionMetrics, FusionNode
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.localization import LocalizationEngine, LocalizationResult
 from minimappr.core.node_registry import NodeRegistry
@@ -21,7 +21,14 @@ from minimappr.core.omni_scanner import OmniScanResult
 from minimappr.core.tracking import TrackManager
 from minimappr.core.zones import ZoneMatcher
 from minimappr.core.multi_node_bearing_fusion import BearingObservation
-from minimappr.models import DetectionEvent, GeoPoint, IngestFrameRequest, NodeSpec, NodeType
+from minimappr.models import (
+    DetectionEvent,
+    GeoPoint,
+    IngestFrameRequest,
+    NodeSpec,
+    NodeType,
+    TimeQuality,
+)
 from minimappr.storage.db import Storage
 from minimappr.utils.audio import encode_pcm16le_b64, mono_mix, rms
 
@@ -507,14 +514,136 @@ async def test_fusion_backpressure_drops_when_queue_full(tmp_path: Path) -> None
         )
     )
 
+    # Under the default drop-oldest policy a full queue sheds the *stale* head,
+    # so a fresh trigger is still accepted rather than reported as untriggered.
     assert first.triggered is True
-    assert second.triggered is False
-    assert third.triggered is False
+    assert second.triggered is True
+    assert third.triggered is True
 
     status = await fusion.status()
-    assert status["metrics"]["triggers_dropped_queue_full"] >= 1
+    assert status["metrics"]["triggers_dropped_queue_full"] == 0
     assert status["metrics"]["stage_drops_backpressure"] >= 1
     assert status["realtime"]["stages"]["localization"]["queued_items"] >= 0
+
+    await storage.close()
+
+
+def _backpressure_settings(tmp_path: Path, **overrides) -> Settings:
+    settings = Settings(
+        db_path=tmp_path / "fusion_policy.db",
+        snippet_dir=tmp_path / "snippets",
+        snippet_retention_seconds=0,
+        trigger_rms=0.001,
+        trigger_cooldown_seconds=0.0,
+        localization_window_seconds=0.04,
+        classification_window_seconds=0.0,
+        max_sensor_buffer_seconds=2.0,
+        fusion_worker_count=1,
+        fusion_localization_queue_size=2,
+        fusion_classification_queue_size=2,
+        fusion_rules_queue_size=2,
+        drop_on_backpressure=True,
+        **overrides,
+    )
+    settings.db_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.snippet_dir.mkdir(parents=True, exist_ok=True)
+    return settings
+
+
+async def _make_fusion(settings: Settings) -> tuple[FusionNode, Storage]:
+    storage = Storage(settings.db_path)
+    await storage.initialize()
+    fusion = FusionNode(
+        settings=settings,
+        registry=NodeRegistry(),
+        buffer=MultiSensorBuffer(max_duration_seconds=settings.max_sensor_buffer_seconds),
+        localizer=LocalizationEngine(max_tau_s=0.03),
+        classifier=HeuristicClassifier(),
+        tracker=TrackManager(settings),
+        storage=storage,
+        live_callback=lambda payload: asyncio.sleep(0, result=None),
+        coordinate_frame=LocalCoordinateFrame(origin=GeoPoint(lat=37.0, lon=-122.0, alt_m=0.0), mode="flat"),
+        zone_matcher=ZoneMatcher(storage=storage),
+    )
+    return fusion, storage
+
+
+def _candidate(index: int) -> EventCandidate:
+    return EventCandidate(
+        id=f"evt-{index:08d}",
+        source_node_id="node-a",
+        event_time_ns=1_739_810_100_000_000_000 + index * 1_000_000_000,
+        sample_rate_hz=16000,
+        source_type="raw_sensor",
+        time_quality=TimeQuality.GPS_LOCKED,
+        source_observation_ids=[],
+        enqueued_ns=index,
+    )
+
+
+@pytest.mark.asyncio
+async def test_enqueue_stage_drop_oldest_keeps_newest_and_retires_evicted(tmp_path: Path) -> None:
+    """A full queue must shed its head, not the arrival.
+
+    Rejecting the arrival keeps ``maxsize`` stale items forever, so the stage
+    only ever processes audio from ``depth / throughput`` ago — the production
+    failure this policy exists to prevent (observed: pinned 24 minutes behind).
+    """
+    settings = _backpressure_settings(tmp_path)
+    fusion, storage = await _make_fusion(settings)
+    queue = fusion._localization_queue
+
+    for index in range(4):
+        assert await fusion._enqueue_stage(queue, _candidate(index)) is True
+
+    # maxsize=2, so the two newest survive and the two oldest were evicted.
+    assert [item.id for item in list(queue._queue)] == ["evt-00000002", "evt-00000003"]
+    assert fusion._metrics.stage_drops_backpressure == 2
+
+    # The evicted items must not linger in the realtime tracker: a leaked entry
+    # pins oldest_queued_event_time_ns and reports an ever-growing lag for work
+    # that no longer exists.
+    localization = fusion._realtime_tracker.snapshot()["stages"]["localization"]
+    assert localization["queued_items"] == 2
+
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_enqueue_stage_drop_newest_policy_rejects_arrival(tmp_path: Path) -> None:
+    settings = _backpressure_settings(tmp_path, fusion_backpressure_drop_policy="newest")
+    fusion, storage = await _make_fusion(settings)
+    queue = fusion._localization_queue
+
+    assert await fusion._enqueue_stage(queue, _candidate(0)) is True
+    assert await fusion._enqueue_stage(queue, _candidate(1)) is True
+    assert await fusion._enqueue_stage(queue, _candidate(2)) is False
+
+    assert [item.id for item in list(queue._queue)] == ["evt-00000000", "evt-00000001"]
+    assert fusion._metrics.stage_drops_backpressure == 1
+
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_enqueue_stage_offline_replay_never_drops(tmp_path: Path) -> None:
+    """Replay must process every event; shedding would silently alter results.
+
+    A full queue therefore applies real backpressure — the producer waits for a
+    consumer instead of evicting anything.
+    """
+    settings = _backpressure_settings(tmp_path, fusion_offline_replay_mode=True)
+    fusion, storage = await _make_fusion(settings)
+    queue = fusion._localization_queue
+
+    for index in range(2):  # maxsize=2
+        assert await fusion._enqueue_stage(queue, _candidate(index)) is True
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(fusion._enqueue_stage(queue, _candidate(2)), timeout=0.1)
+
+    assert [item.id for item in list(queue._queue)] == ["evt-00000000", "evt-00000001"]
+    assert fusion._metrics.stage_drops_backpressure == 0
 
     await storage.close()
 

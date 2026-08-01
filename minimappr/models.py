@@ -752,6 +752,7 @@ class FusionStatusResponse(BaseModel):
     realtime: dict[str, Any]
     offline_replay_mode: bool
     drop_on_backpressure: bool
+    backpressure_drop_policy: str = "oldest"
 
 
 class FederationStatusResponse(BaseModel):

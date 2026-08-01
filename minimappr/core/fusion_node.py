@@ -1267,6 +1267,7 @@ class FusionNode:
             "realtime": realtime,
             "offline_replay_mode": self.fusion_config.offline_replay_mode,
             "drop_on_backpressure": self.fusion_config.drop_on_backpressure,
+            "backpressure_drop_policy": self.fusion_config.backpressure_drop_policy,
             "buffer_state": buffer_state,
             "health": health,
             "omni_scanner": self._omni_scanner.stats() if self._omni_scanner is not None else {"enabled": bool(self.settings.omni_scan_enabled), "running": False},
@@ -3098,13 +3099,71 @@ class FusionNode:
             )
             return True
         except asyncio.QueueFull:
-            self._record_stage_backpressure_drop(
-                event_time_ns=tracker_event_time_ns,
-                item_id=tracker_item_id,
-                queue=queue,
-                stage_name=tracker_stage_name,
-            )
-            return False
+            pass
+
+        # Queue full. Shedding the *arriving* item keeps the oldest work and
+        # permanently pins the stage at max-depth staleness: it then only ever
+        # processes audio from `depth / throughput` ago, and every fresh event is
+        # rejected. Evicting the head instead bounds latency and keeps the
+        # freshest audio flowing, which is what an operator actually wants.
+        if self.fusion_config.backpressure_drop_policy == "oldest":
+            evicted = self._evict_oldest_queued(queue=queue, stage_name=tracker_stage_name)
+            if evicted is not None:
+                try:
+                    queue.put_nowait(item)
+                except asyncio.QueueFull:
+                    # A concurrent producer refilled the slot. Shed the arriving
+                    # item rather than loop; the next enqueue will evict again.
+                    self._record_stage_backpressure_drop(
+                        event_time_ns=tracker_event_time_ns,
+                        item_id=tracker_item_id,
+                        queue=queue,
+                        stage_name=tracker_stage_name,
+                    )
+                    return False
+                self._record_stage_enqueue(
+                    stage_name=tracker_stage_name,
+                    item_id=tracker_item_id,
+                    event_time_ns=tracker_event_time_ns,
+                )
+                return True
+
+        self._record_stage_backpressure_drop(
+            event_time_ns=tracker_event_time_ns,
+            item_id=tracker_item_id,
+            queue=queue,
+            stage_name=tracker_stage_name,
+        )
+        return False
+
+    def _evict_oldest_queued(self, *, queue: asyncio.Queue, stage_name: str) -> Any | None:
+        """Remove and account for the head of a full stage queue.
+
+        The evicted item is retired through the same drop accounting as a
+        rejected arrival, and must also be removed from the realtime tracker —
+        otherwise it stays in ``queued_event_times_ns`` forever and reports an
+        ever-growing lag for work that no longer exists.
+        """
+        try:
+            evicted = queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return None
+        # Balance the get_nowait() so queue.join() cannot deadlock on shutdown.
+        queue.task_done()
+        if evicted is None:
+            # A shutdown sentinel: never drop it, or the worker never exits.
+            # Put it back and let the arriving item be shed instead.
+            queue.put_nowait(evicted)
+            return None
+        evicted_id = self._stage_item_id(evicted)
+        self._record_stage_backpressure_drop(
+            event_time_ns=self._stage_item_event_time_ns(evicted),
+            item_id=evicted_id,
+            queue=queue,
+            stage_name=stage_name,
+        )
+        self._realtime_tracker.mark_dropped(stage_name=stage_name, item_id=evicted_id)
+        return evicted
 
     def _queue_stage_name(self, queue: asyncio.Queue) -> str:
         stage_map: dict[asyncio.Queue, str] = {

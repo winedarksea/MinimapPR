@@ -39,3 +39,22 @@ def test_coyote_heuristic_maps_to_wildlife() -> None:
     provider = RuntimeTaxonomyProvider()
     assert provider.category_for_label("coyote") == "wildlife"
     assert provider.iff_for_category("wildlife") == "friendly"
+
+
+def test_missing_taxonomy_file_still_resolves_categories(tmp_path: Path, caplog) -> None:
+    """A missing config is not the same degradation as a malformed one.
+
+    The old WARNING claimed every label would resolve to 'unknown', which sent a
+    production investigation down the wrong path: built-in name heuristics and
+    DEFAULT_CATEGORY_TO_IFF still resolve real categories without the file.
+    """
+    import logging
+
+    missing = tmp_path / "absent-taxonomy.json"
+    with caplog.at_level(logging.WARNING, logger="minimappr.core.taxonomy"):
+        provider = RuntimeTaxonomyProvider.from_config_file(missing)
+
+    assert provider.category_for_label("coyote") == "wildlife"
+    assert provider.iff_for_category("wildlife") == "friendly"
+    # Absence of the optional override file is not a warning-level condition.
+    assert caplog.records == []

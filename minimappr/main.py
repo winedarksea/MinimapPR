@@ -13,7 +13,7 @@ import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
-from dataclasses import replace
+from dataclasses import fields as dataclass_fields, replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal
 import urllib.error
@@ -42,7 +42,13 @@ from minimappr.classifiers.routing import (
 )
 from minimappr.core.config_groups import group_flat_config
 from minimappr.core.pipeline_graph import build_pipeline_graph
-from minimappr.config import IngestSidecarProcessConfig, IngestSidecarStartupConfig, Settings
+from minimappr.config import (
+    FusionConfig,
+    IngestSidecarProcessConfig,
+    IngestSidecarStartupConfig,
+    LocalizationConfig,
+    Settings,
+)
 from minimappr.settings_store import CONFIG_PATCH_ALLOWLIST, load_overrides, save_overrides
 from minimappr.ingest_sidecar_runtime import (
     IngestSidecarRuntimeState as _RuntimeSidecarState,
@@ -3157,6 +3163,29 @@ _SIDECAR_RESTART_REQUIRED_KEYS = {
     "trigger_cooldown_seconds",
 }
 
+
+def _startup_snapshot_restart_required_keys() -> frozenset[str]:
+    """Allowlisted keys the *python* pipeline cannot pick up without a restart.
+
+    ``LocalizationConfig`` and ``FusionConfig`` are built once from ``Settings``
+    during startup (see the single ``settings.localization_config()`` call in
+    ``create_app``) and handed to the ingest/fusion components. Patching the
+    underlying ``Settings`` attribute afterwards changes nothing in the running
+    pipeline, so a PATCH that reports success is actively misleading. Derived by
+    intersection rather than hand-listed so new snapshot fields cannot silently
+    drift out of this set.
+    """
+    snapshot_fields = {field.name for field in dataclass_fields(LocalizationConfig)}
+    snapshot_fields |= {field.name for field in dataclass_fields(FusionConfig)}
+    keys = set(CONFIG_PATCH_ALLOWLIST) & snapshot_fields
+    # Not a FusionConfig field name (it maps to ``worker_count``), and the worker
+    # tasks are created in FusionNode.start().
+    keys.add("fusion_worker_count")
+    return frozenset(keys)
+
+
+_STARTUP_SNAPSHOT_RESTART_REQUIRED_KEYS = _startup_snapshot_restart_required_keys()
+
 _LOCALIZATION_ALGORITHMS = {"gcc_phat", "srp_phat", "music", "esprit"}
 _LOCALIZATION_STRATEGIES = {"fixed", "geometry_aware", "cascade"}
 _BEAMFORMER_TYPES = {
@@ -3512,21 +3541,43 @@ async def patch_config(request: Request) -> dict:
     persisted.update(coerced)
     save_overrides(settings.config_overrides_path, persisted)
 
-    restart_required = sorted(
-        key
-        for key in coerced
-        if key in _SIDECAR_RESTART_REQUIRED_KEYS and settings.ingest_backend == "rust"
-    )
+    # A patched key only takes effect immediately if something re-reads it from
+    # Settings on the hot path. Keys baked into a startup snapshot do not, and
+    # reporting success for those is how a config change appears to "do nothing"
+    # and then land all at once on the next restart.
+    if settings.ingest_backend == "rust":
+        needs_restart = {key for key in coerced if key in _SIDECAR_RESTART_REQUIRED_KEYS}
+    else:
+        needs_restart = {key for key in coerced if key in _STARTUP_SNAPSHOT_RESTART_REQUIRED_KEYS}
+
+    # Split-process deployment: this handler mutates *this* process's Settings,
+    # but the pipeline lives in a separate ingest worker that never sees it. The
+    # persisted override file is the only channel, and it is read at startup, so
+    # every pipeline-affecting key is restart-required here regardless.
+    pipeline_in_other_process = _should_proxy_ingest_to_python_worker(state)
 
     snapshot = await get_config(request)
     await state.live_hub.broadcast({"type": "config_updated", "config": snapshot})
-    return {**snapshot, "restart_required": restart_required}
+    return {
+        **snapshot,
+        "restart_required": sorted(needs_restart),
+        "pipeline_in_separate_process": pipeline_in_other_process,
+    }
 
 
 @app.get("/api/v1/fusion/status", response_model=FusionStatusResponse)
 async def fusion_status(request: Request) -> dict:
     state = _require_state(request)
     if not hasattr(state, "fusion_node"):
+        # The UI only ever talks to the API process, so 503-ing here hid the
+        # pipeline's own backlog signal (``realtime.pipeline_seconds_behind_realtime``)
+        # from the only client that needed it.
+        if _should_proxy_ingest_to_python_worker(state):
+            return await _proxy_json_to_python_worker(
+                state,
+                method="GET",
+                endpoint_path="/api/v1/fusion/status",
+            )
         raise HTTPException(status_code=503, detail="Fusion pipeline runs in the ingest process")
     return await state.fusion_node.status()
 
@@ -3541,6 +3592,12 @@ async def diagnostics_summary(request: Request) -> dict:
     """
     state = _require_state(request)
     if not hasattr(state, "fusion_node"):
+        if _should_proxy_ingest_to_python_worker(state):
+            return await _proxy_json_to_python_worker(
+                state,
+                method="GET",
+                endpoint_path="/api/v1/diagnostics/summary",
+            )
         raise HTTPException(status_code=503, detail="Fusion pipeline runs in the ingest process")
     fusion_status_snapshot = await state.fusion_node.status()
     metrics = fusion_status_snapshot["metrics"]

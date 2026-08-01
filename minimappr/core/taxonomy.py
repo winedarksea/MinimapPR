@@ -73,9 +73,14 @@ class RuntimeTaxonomyProvider(TaxonomyProvider):
         if path is None:
             return cls()
         if not path.exists():
-            _logger.warning(
-                "taxonomy config not found at %s; all labels will resolve to "
-                "category/IFF 'unknown' until it is created",
+            # Not the same degradation as the malformed cases below: with no
+            # explicit map, categories still resolve through the built-in name
+            # heuristics and DEFAULT_CATEGORY_TO_IFF, which is why live
+            # detections still carry real categories (e.g. "wildlife" ->
+            # "friendly"). Only site-specific overrides are missing.
+            _logger.info(
+                "taxonomy config not found at %s; using built-in category "
+                "defaults and name heuristics. Create it to override them",
                 path,
             )
             return cls()

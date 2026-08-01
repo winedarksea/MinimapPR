@@ -434,6 +434,7 @@ class FusionConfig:
     birdnet_chunk_min_retry_progress_seconds: float
     birdnet_chunk_retry_on_classifier_error: bool
     drop_on_backpressure: bool
+    backpressure_drop_policy: str
     offline_replay_mode: bool
     sensor_energy_threshold_multiplier: float
     fallback_localization_confidence: float
@@ -802,7 +803,7 @@ class Settings:
     track_drop_multiplier: float = 3.0
     track_reap_multiplier: float = 5.0
 
-    fusion_worker_count: int = 1
+    fusion_worker_count: int = 2
     fusion_event_queue_size: int = 512
     fusion_localization_queue_size: int = 1024
     fusion_classification_queue_size: int = 1024
@@ -813,6 +814,11 @@ class Settings:
     birdnet_chunk_min_retry_progress_seconds: float = 8.0
     birdnet_chunk_retry_on_classifier_error: bool = False
     drop_on_backpressure: bool = True
+    # Which end of a full stage queue to shed. "oldest" evicts the head so the
+    # freshest audio always gets processed and latency stays bounded by queue
+    # depth; "newest" rejects the arriving item, which pins the pipeline at
+    # max-depth staleness forever once a queue fills (observed: 24 min behind).
+    fusion_backpressure_drop_policy: str = "oldest"
     fusion_offline_replay_mode: bool = False
     sensor_energy_threshold_multiplier: float = 0.45
     fallback_localization_confidence: float = 0.25
@@ -1047,6 +1053,9 @@ class Settings:
             raise ValueError("MINIMAPPR_INGEST_SPOOL_POLL_INTERVAL_SECONDS must be > 0")
         if self.ingest_spool_worker_count < 1:
             raise ValueError("MINIMAPPR_INGEST_SPOOL_WORKER_COUNT must be >= 1")
+        self.fusion_backpressure_drop_policy = str(self.fusion_backpressure_drop_policy).strip().lower()
+        if self.fusion_backpressure_drop_policy not in {"oldest", "newest"}:
+            raise ValueError("MINIMAPPR_FUSION_BACKPRESSURE_DROP_POLICY must be 'oldest' or 'newest'")
         if not self.ingest_consumer_name.strip():
             raise ValueError("MINIMAPPR_INGEST_CONSUMER_NAME must not be blank")
         if self.process_role == "ingest" and self.ingest_backend == "rust":
@@ -1888,7 +1897,7 @@ class Settings:
             tqi_weight_sensor=_env_float("MINIMAPPR_TQI_WEIGHT_SENSOR", 0.2),
             track_drop_multiplier=_env_float("MINIMAPPR_TRACK_DROP_MULTIPLIER", 3.0),
             track_reap_multiplier=_env_float("MINIMAPPR_TRACK_REAP_MULTIPLIER", 5.0),
-            fusion_worker_count=_env_int("MINIMAPPR_FUSION_WORKER_COUNT", 1),
+            fusion_worker_count=_env_int("MINIMAPPR_FUSION_WORKER_COUNT", 2),
             fusion_event_queue_size=_env_int("MINIMAPPR_FUSION_EVENT_QUEUE_SIZE", 512),
             fusion_localization_queue_size=_env_int("MINIMAPPR_FUSION_LOCALIZATION_QUEUE_SIZE", 1024),
             fusion_classification_queue_size=_env_int("MINIMAPPR_FUSION_CLASSIFICATION_QUEUE_SIZE", 1024),
@@ -1906,6 +1915,10 @@ class Settings:
             ),
             cluster_aware_localization=_env_bool("MINIMAPPR_CLUSTER_AWARE_LOCALIZATION", True),
             drop_on_backpressure=_env_bool("MINIMAPPR_FUSION_DROP_ON_BACKPRESSURE", True),
+            fusion_backpressure_drop_policy=_env_str(
+                "MINIMAPPR_FUSION_BACKPRESSURE_DROP_POLICY",
+                "oldest",
+            ),
             fusion_offline_replay_mode=_env_bool("MINIMAPPR_FUSION_OFFLINE_REPLAY_MODE", False),
             sensor_energy_threshold_multiplier=_env_float("MINIMAPPR_SENSOR_ENERGY_THRESHOLD_MULTIPLIER", 0.45),
             fallback_localization_confidence=_env_float("MINIMAPPR_FALLBACK_LOCALIZATION_CONFIDENCE", 0.25),
@@ -2185,6 +2198,7 @@ class Settings:
             birdnet_chunk_min_retry_progress_seconds=self.birdnet_chunk_min_retry_progress_seconds,
             birdnet_chunk_retry_on_classifier_error=self.birdnet_chunk_retry_on_classifier_error,
             drop_on_backpressure=self.drop_on_backpressure,
+            backpressure_drop_policy=self.fusion_backpressure_drop_policy,
             offline_replay_mode=self.fusion_offline_replay_mode,
             sensor_energy_threshold_multiplier=self.sensor_energy_threshold_multiplier,
             fallback_localization_confidence=self.fallback_localization_confidence,

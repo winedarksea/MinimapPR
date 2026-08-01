@@ -780,3 +780,106 @@ def test_split_api_role_does_not_use_sqlite_audio_heartbeat_summaries(monkeypatc
     node = response.json()[0]
     assert node["audio_debug"]["status"] == "external_ingest_process"
     assert "runner_stats" not in node["audio_debug"]
+
+
+def _fake_ingest_worker(monkeypatch, payload: dict) -> dict:
+    """Route main.py's proxy urlopen at a canned ingest-worker response."""
+    observed: dict[str, object] = {}
+
+    class _FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(payload).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        observed["url"] = request.full_url
+        observed["method"] = request.get_method()
+        return _FakeResponse()
+
+    monkeypatch.setattr("minimappr.main.urllib.request.urlopen", fake_urlopen)
+    return observed
+
+
+def _configure_split_api_role(monkeypatch, tmp_path: Path, name: str) -> None:
+    monkeypatch.setenv("MINIMAPPR_PROCESS_ROLE", "api")
+    monkeypatch.setenv("MINIMAPPR_INGEST_BACKEND", "python")
+    monkeypatch.setenv("MINIMAPPR_INGEST_PORT", "19091")
+    monkeypatch.setenv("MINIMAPPR_PORT", "18080")
+    monkeypatch.setenv("MINIMAPPR_DB_PATH", str(tmp_path / f"{name}.db"))
+    monkeypatch.setenv("MINIMAPPR_SNIPPET_DIR", str(tmp_path / "snippets"))
+    monkeypatch.setenv("MINIMAPPR_LARGE_ARTIFACT_DIR", str(tmp_path / "artifacts"))
+
+
+def test_split_api_role_proxies_fusion_status_to_ingest_worker(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """The UI only talks to the API process.
+
+    503-ing here hid ``pipeline_seconds_behind_realtime`` from the only client
+    that consumes it, so a pipeline running 10 minutes behind looked identical
+    to a healthy one.
+    """
+    _configure_split_api_role(monkeypatch, tmp_path, "fusion-status-proxy")
+    observed = _fake_ingest_worker(
+        monkeypatch,
+        {
+            "started": True,
+            "queue": {"classification_depth": 727},
+            "workers": {"configured": 2},
+            "last_trigger_ns": 1,
+            "last_error": None,
+            "registered_nodes": 2,
+            "metrics": {"stage_drops_backpressure": 3},
+            "realtime": {"pipeline_seconds_behind_realtime": 638.25},
+            "offline_replay_mode": False,
+            "drop_on_backpressure": True,
+            "backpressure_drop_policy": "oldest",
+        },
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/fusion/status")
+
+    assert response.status_code == 200
+    assert response.json()["realtime"]["pipeline_seconds_behind_realtime"] == 638.25
+    assert observed["url"] == "http://127.0.0.1:19091/api/v1/fusion/status"
+    assert observed["method"] == "GET"
+
+
+def test_split_api_role_proxies_diagnostics_summary_to_ingest_worker(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _configure_split_api_role(monkeypatch, tmp_path, "diagnostics-proxy")
+    observed = _fake_ingest_worker(monkeypatch, {"backend": "python", "frames_received": 138611})
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/diagnostics/summary")
+
+    assert response.status_code == 200
+    assert response.json()["frames_received"] == 138611
+    assert observed["url"] == "http://127.0.0.1:19091/api/v1/diagnostics/summary"
+
+
+def test_split_api_role_patch_config_flags_pipeline_in_separate_process(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """A PATCH here mutates this process's Settings; the pipeline never sees it."""
+    _configure_split_api_role(monkeypatch, tmp_path, "patch-split-flag")
+
+    with TestClient(app) as client:
+        response = client.patch("/api/v1/config", json={"trigger_cooldown_seconds": 5.0})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["pipeline_in_separate_process"] is True
+    assert "trigger_cooldown_seconds" in body["restart_required"]
