@@ -68,20 +68,29 @@ async def test_detection_triggers_alert_actions_and_lifecycle_updates(tmp_path: 
 
     response = await fusion.ingest(
         IngestFrameRequest(
+            # Detections only come from the beamformed localized path now, so a
+            # multi-sensor array is required for the alert to fire.
             node=NodeSpec(
-                id="point-alert-test",
-                node_type=NodeType.POINT,
+                id="tetra-alert-test",
+                node_type=NodeType.SIRITH_TETRA,
                 position_m=(0.0, 0.0, 0.0),
-                sensor_offsets_m=[(0.0, 0.0, 0.0)],
+                sensor_offsets_m=[
+                    (0.0, 0.0, 0.0),
+                    (0.05, 0.0, 0.0),
+                    (0.0, 0.05, 0.0),
+                    (0.0, 0.0, 0.05),
+                ],
                 capabilities=["audio"],
             ),
             frame={
                 "start_time_ns": 1_739_810_300_000_000_000,
                 "sample_rate_hz": 16_000,
-                "channels": 1,
+                "channels": 4,
                 "encoding": "pcm16le",
                 "samples_b64": encode_pcm16le_b64(
-                    np.random.default_rng(1234).normal(0.0, 0.25, size=(1, 1024)).astype(np.float32)
+                    np.vstack(
+                        [np.random.default_rng(1234).normal(0.0, 0.25, size=1024).astype(np.float32)] * 4
+                    )
                 ),
                 "sequence": 1,
             },

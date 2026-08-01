@@ -91,7 +91,9 @@ async def _start_fusion(
         max_sensor_buffer_seconds=max(2.0, classification_window_seconds + 0.5),
         fusion_worker_count=1,
         preprocess_enabled=False,
-        classification_audio_source="omni",
+        # Triggered classification is beamformed-only; an "omni" source would
+        # leave the orchestrator without a beamformer and classify nothing.
+        classification_audio_source="beamformed",
         localization_band_min_hz=300.0,
         localization_band_max_hz=1500.0,
         reporting_window_seconds=reporting_window_seconds,
@@ -192,16 +194,20 @@ async def test_reporting_window_prefers_localized_detection_over_same_label_omni
     assert len(detections) == 1
     detection = detections[0]
     assert detection["reporting_modality"] == "localized"
+    # The omni branch no longer exists in triggered work: the evidence map
+    # carries only the localized (beamformed) branch.
     evidence = detection["feature_summary"]["branch_evidence"]
-    assert set(evidence.keys()) == {"localized", "omni"}
-    assert evidence["omni"]["suppressed"] is True
+    assert set(evidence.keys()) == {"localized"}
+    assert evidence["localized"]["suppressed"] is False
 
     await fusion.stop()
     await storage.close()
 
 
 @pytest.mark.asyncio
-async def test_reporting_window_keeps_distinct_labels_for_localized_and_omni(tmp_path: Path) -> None:
+async def test_reporting_window_emits_no_omni_branch_detection(tmp_path: Path) -> None:
+    """The old hybrid contract emitted a second raw-omni detection per event;
+    post-dedupe only the beamformed localized detection remains."""
     localizer = RecordingLocalizer(reference_sensor="hybrid-node:ch1")
     classifier = RecordingClassifier(label_for_positive="robin", label_for_negative="wren")
     fusion, storage = await _start_fusion(tmp_path, classifier=classifier, localizer=localizer)
@@ -213,16 +219,19 @@ async def test_reporting_window_keeps_distinct_labels_for_localized_and_omni(tmp
 
     await asyncio.sleep(0.25)
     detections = await storage.list_detections(limit=10)
-    labels = {(row["label"], row["reporting_modality"]) for row in detections}
-    assert ("wren", "localized") in labels
-    assert ("robin", "omni") in labels
+    assert len(detections) == 1
+    assert detections[0]["reporting_modality"] == "localized"
+    assert classifier.recorded_frequencies_hz  # exactly one beamformed inference
+    assert len(classifier.recorded_frequencies_hz) == 1
 
     await fusion.stop()
     await storage.close()
 
 
 @pytest.mark.asyncio
-async def test_localization_miss_persists_omni_detection_only(tmp_path: Path) -> None:
+async def test_localization_miss_yields_no_detection(tmp_path: Path) -> None:
+    """A failed solve used to fall back to a raw-omni detection; post-dedupe the
+    candidate is dropped and continuous omni scanning owns ambient coverage."""
     localizer = RecordingLocalizer(fail=True)
     classifier = RecordingClassifier(label_for_positive="warbler", label_for_negative="warbler")
     fusion, storage = await _start_fusion(tmp_path, classifier=classifier, localizer=localizer)
@@ -231,11 +240,10 @@ async def test_localization_miss_persists_omni_detection_only(tmp_path: Path) ->
     await _ingest(fusion, start_time_ns=1_739_810_630_000_000_000, channels=channels)
 
     await asyncio.sleep(0.25)
-    detections = await storage.list_detections(limit=10)
-    assert len(detections) == 1
-    detection = detections[0]
-    assert detection["reporting_modality"] == "omni"
-    assert detection["feature_summary"]["capability_tier"] == "classification_only"
+    assert await storage.list_detections(limit=10) == []
+    status = await fusion.status()
+    assert status["metrics"]["localization_failures"] == 1
+    assert status["metrics"]["classification_drops_by_reason"].get("empty_classification") == 1
 
     await fusion.stop()
     await storage.close()
@@ -259,7 +267,9 @@ async def test_localized_coyote_detection_triggers_alert(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_omni_only_coyote_detection_does_not_alert(tmp_path: Path) -> None:
+async def test_unlocalized_coyote_audio_does_not_alert(tmp_path: Path) -> None:
+    """Without a solve there is no detection at all now (no omni fallback), so
+    nothing can alert."""
     localizer = RecordingLocalizer(fail=True)
     classifier = RecordingClassifier(label_for_positive="coyote", label_for_negative="coyote")
     fusion, storage = await _start_fusion(tmp_path, classifier=classifier, localizer=localizer)
@@ -268,8 +278,7 @@ async def test_omni_only_coyote_detection_does_not_alert(tmp_path: Path) -> None
     await _ingest(fusion, start_time_ns=1_739_810_650_000_000_000, channels=channels)
 
     await asyncio.sleep(0.25)
-    detections = await storage.list_detections(limit=10)
-    assert detections[0]["reporting_modality"] == "omni"
+    assert await storage.list_detections(limit=10) == []
     alerts = await storage.list_alerts(limit=20)
     assert alerts == []
 

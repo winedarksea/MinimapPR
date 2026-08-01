@@ -230,15 +230,23 @@ async def test_fusion_stage_timeout_drops_stalled_candidate_and_recovers(tmp_pat
     )
     await fusion.start()
 
+    # The classifier only runs on the beamformed localized path, so the stall
+    # (and recovery) must be driven through a multi-sensor array.
     node = NodeSpec(
         id="timeout-recovery-node",
-        node_type=NodeType.POINT,
+        node_type=NodeType.SIRITH_TETRA,
         position_m=(0.0, 0.0, 0.0),
-        sensor_offsets_m=[(0.0, 0.0, 0.0)],
+        sensor_offsets_m=[
+            (0.0, 0.0, 0.0),
+            (0.05, 0.0, 0.0),
+            (0.0, 0.05, 0.0),
+            (0.0, 0.0, 0.05),
+        ],
         capabilities=["audio"],
         metadata={},
     )
-    samples = np.random.default_rng(55).normal(0.0, 0.2, size=(1, 1024)).astype(np.float32)
+    base = np.random.default_rng(55).normal(0.0, 0.2, size=1024).astype(np.float32)
+    samples = np.vstack([base, base, base, base])
     start_time_ns = 1_739_810_600_000_000_000
     frame_duration_ns = int(round((1024 / 16_000) * 1_000_000_000))
 
@@ -249,7 +257,7 @@ async def test_fusion_stage_timeout_drops_stalled_candidate_and_recovers(tmp_pat
                 frame={
                     "start_time_ns": start_time_ns + (offset * frame_duration_ns),
                     "sample_rate_hz": 16_000,
-                    "channels": 1,
+                    "channels": 4,
                     "encoding": "pcm16le",
                     "samples_b64": encode_pcm16le_b64(samples),
                     "sequence": offset + 1,

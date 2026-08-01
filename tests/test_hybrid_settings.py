@@ -29,7 +29,8 @@ except Exception as exc:  # pragma: no cover - environment-dependent optional de
 
 from tests.hybrid_settings import hybrid_production_settings
 from minimappr.classifiers.birdnet import BirdNETClassifier
-from minimappr.classifiers.factory import create_classifier
+from minimappr.classifiers.factory import create_context_classifier
+from minimappr.classifiers.routing import CONTEXT_LOCALIZED_RENDER
 from minimappr.config import Settings
 from minimappr.core.audio_buffer import MultiSensorBuffer
 from minimappr.core.beamforming import create_beamformer
@@ -239,7 +240,7 @@ async def _start_fusion_with_profile(
         registry=NodeRegistry(),
         buffer=MultiSensorBuffer(max_duration_seconds=settings.max_sensor_buffer_seconds),
         localizer=build_localizer_from_settings(settings),
-        classifier=create_classifier(settings),
+        classifier=create_context_classifier(settings, CONTEXT_LOCALIZED_RENDER),
         tracker=TrackManager(settings),
         storage=storage,
         live_callback=lambda payload: asyncio.sleep(0, result=None),
@@ -1178,7 +1179,10 @@ def test_birdnet_hybrid_production_rust_sidecar_uses_reported_environment(
         assert localization["resolved_algorithm"] == "srp_phat"
         assert localization["sound_speed_mps"] == pytest.approx(expected_sound_speed_mps, rel=1e-4)
         assert localization["position_m"] is not None
-        assert localization["range_projection_mode"] == "range_bearing_projected"
+        # Near-field source (~0.4 m from the array): range is genuinely
+        # observable, so the canonical mode is range_refined (matches the
+        # Python solver on the same fixture post range-projection parity).
+        assert localization["range_projection_mode"] == "range_refined"
         assert _bearing_error_deg(localization["position_m"]) < TIGHT_BEARING_MAX_ERROR_DEG
         assert localization_manifest["classifier_render"] is not None
         assert localization_manifest["classifier_render"]["sample_count"] > 0
@@ -1441,7 +1445,7 @@ async def test_birdnet_hybrid_production_ingest_not_blocked_by_slow_live_callbac
         registry=NodeRegistry(),
         buffer=MultiSensorBuffer(max_duration_seconds=settings.max_sensor_buffer_seconds),
         localizer=build_localizer_from_settings(settings),
-        classifier=create_classifier(settings),
+        classifier=create_context_classifier(settings, CONTEXT_LOCALIZED_RENDER),
         tracker=TrackManager(settings),
         storage=storage,
         live_callback=slow_callback,

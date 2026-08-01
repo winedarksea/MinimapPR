@@ -82,20 +82,29 @@ async def test_zone_suppressed_detection_does_not_emit_tracks_or_alerts(tmp_path
     await fusion.start()
 
     request = IngestFrameRequest(
+        # Detections only come from the beamformed localized path now, so a
+        # multi-sensor array is required to produce the suppressible detection.
         node=NodeSpec(
-            id="point-zone-test",
-            node_type=NodeType.POINT,
+            id="tetra-zone-test",
+            node_type=NodeType.SIRITH_TETRA,
             position_m=(0.0, 0.0, 0.0),
-            sensor_offsets_m=[(0.0, 0.0, 0.0)],
+            sensor_offsets_m=[
+                (0.0, 0.0, 0.0),
+                (0.05, 0.0, 0.0),
+                (0.0, 0.05, 0.0),
+                (0.0, 0.0, 0.05),
+            ],
             capabilities=["audio"],
         ),
         frame={
             "start_time_ns": 1_739_810_000_000_000_000,
             "sample_rate_hz": 16_000,
-            "channels": 1,
+            "channels": 4,
             "encoding": "pcm16le",
             "samples_b64": encode_pcm16le_b64(
-                np.random.default_rng(444).normal(0.0, 0.2, size=(1, 1024)).astype(np.float32)
+                np.vstack(
+                    [np.random.default_rng(444).normal(0.0, 0.2, size=1024).astype(np.float32)] * 4
+                )
             ),
             "sequence": 1,
         },

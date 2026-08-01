@@ -927,16 +927,24 @@ async def test_birdnet_chunked_dispatch_limits_same_chunk_retries(tmp_path: Path
     )
     await fusion.start()
 
+    # Chunked dispatch only applies where classification actually runs — the
+    # beamformed localized path — so this needs a multi-sensor array, not a
+    # single-sensor point node.
     node = NodeSpec(
         id="chunk-retry-limit-node",
-        node_type=NodeType.POINT,
+        node_type=NodeType.SIRITH_TETRA,
         position_m=(0.0, 0.0, 0.0),
-        sensor_offsets_m=[(0.0, 0.0, 0.0)],
+        sensor_offsets_m=[
+            (0.0, 0.0, 0.0),
+            (0.05, 0.0, 0.0),
+            (0.0, 0.05, 0.0),
+            (0.0, 0.0, 0.05),
+        ],
         capabilities=["audio"],
         metadata={},
     )
-    t = np.arange(1024, dtype=np.float32) / 16000.0
-    samples = (0.4 * np.sin(2.0 * np.pi * 800.0 * t)).reshape(1, -1).astype(np.float32)
+    base = np.random.default_rng(808).normal(0.0, 0.2, size=1024).astype(np.float32)
+    samples = np.vstack([base, base, base, base])
     stride_ns = int((settings.classification_window_seconds - settings.birdnet_chunk_overlap_seconds) * 1_000_000_000)
     aligned_start_ns = 1_739_810_700_000_000_000
     aligned_start_ns -= aligned_start_ns % stride_ns
@@ -955,7 +963,7 @@ async def test_birdnet_chunked_dispatch_limits_same_chunk_retries(tmp_path: Path
                 frame={
                     "start_time_ns": start_time_ns,
                     "sample_rate_hz": 16000,
-                    "channels": 1,
+                    "channels": 4,
                     "encoding": "pcm16le",
                     "samples_b64": encode_pcm16le_b64(samples),
                     "sequence": sequence,
@@ -1013,16 +1021,23 @@ async def test_birdnet_chunked_dispatch_does_not_retry_after_classifier_error(tm
     )
     await fusion.start()
 
+    # Classification (and therefore chunk retry accounting) only runs on the
+    # beamformed localized path, so use a multi-sensor array.
     node = NodeSpec(
         id="chunk-error-no-retry-node",
-        node_type=NodeType.POINT,
+        node_type=NodeType.SIRITH_TETRA,
         position_m=(0.0, 0.0, 0.0),
-        sensor_offsets_m=[(0.0, 0.0, 0.0)],
+        sensor_offsets_m=[
+            (0.0, 0.0, 0.0),
+            (0.05, 0.0, 0.0),
+            (0.0, 0.05, 0.0),
+            (0.0, 0.0, 0.05),
+        ],
         capabilities=["audio"],
         metadata={},
     )
-    t = np.arange(1024, dtype=np.float32) / 16000.0
-    samples = (0.4 * np.sin(2.0 * np.pi * 1000.0 * t)).reshape(1, -1).astype(np.float32)
+    base = np.random.default_rng(1010).normal(0.0, 0.2, size=1024).astype(np.float32)
+    samples = np.vstack([base, base, base, base])
     stride_ns = int((settings.classification_window_seconds - settings.birdnet_chunk_overlap_seconds) * 1_000_000_000)
     aligned_start_ns = 1_739_810_800_000_000_000
     aligned_start_ns -= aligned_start_ns % stride_ns
@@ -1040,7 +1055,7 @@ async def test_birdnet_chunked_dispatch_does_not_retry_after_classifier_error(tm
                 frame={
                     "start_time_ns": start_time_ns,
                     "sample_rate_hz": 16000,
-                    "channels": 1,
+                    "channels": 4,
                     "encoding": "pcm16le",
                     "samples_b64": encode_pcm16le_b64(samples),
                     "sequence": sequence,
@@ -1061,7 +1076,7 @@ async def test_birdnet_chunked_dispatch_does_not_retry_after_classifier_error(tm
 
 
 @pytest.mark.asyncio
-async def test_single_sensor_classification_only_detection_does_not_create_track(tmp_path: Path) -> None:
+async def test_single_sensor_triggered_audio_yields_no_detection_or_track(tmp_path: Path) -> None:
     settings = Settings(
         db_path=tmp_path / "fusion_single_sensor.db",
         snippet_dir=tmp_path / "snippets",
@@ -1122,13 +1137,17 @@ async def test_single_sensor_classification_only_detection_does_not_create_track
 
     await asyncio.sleep(0.15)
 
+    # A single-sensor point node cannot beamform; triggered classification is
+    # beamformed-only (raw omni inference belongs to ContinuousOmniScanner),
+    # so the candidate is dropped as an empty classification.
     detections = await storage.list_detections(limit=10)
-    assert len(detections) == 1
-    assert detections[0]["track_id"] is None
-    assert detections[0]["feature_summary"]["capability_tier"] == "classification_only"
+    assert detections == []
 
     tracks = await storage.list_tracks(limit=10)
     assert tracks == []
+
+    status = await fusion.status()
+    assert status["metrics"]["classification_drops_by_reason"].get("empty_classification") == 1
 
     await fusion.stop()
     await storage.close()
@@ -1167,11 +1186,18 @@ async def test_detection_feature_summary_flags_reconstructed_audio_gap(tmp_path:
     )
     await fusion.start()
 
+    # Detections only come from the beamformed localized path, so the gap must
+    # be observed through a multi-sensor array's classification window.
     node = NodeSpec(
-        id="point-audio-gap",
-        node_type=NodeType.POINT,
+        id="tetra-audio-gap",
+        node_type=NodeType.SIRITH_TETRA,
         position_m=(0.0, 0.0, 0.0),
-        sensor_offsets_m=[(0.0, 0.0, 0.0)],
+        sensor_offsets_m=[
+            (0.0, 0.0, 0.0),
+            (0.05, 0.0, 0.0),
+            (0.0, 0.05, 0.0),
+            (0.0, 0.0, 0.05),
+        ],
         capabilities=["audio"],
         metadata={},
     )
@@ -1187,9 +1213,9 @@ async def test_detection_feature_summary_flags_reconstructed_audio_gap(tmp_path:
             frame={
                 "start_time_ns": start_time_ns,
                 "sample_rate_hz": sample_rate_hz,
-                "channels": 1,
+                "channels": 4,
                 "encoding": "pcm16le",
-                "samples_b64": encode_pcm16le_b64(np.zeros((1, frame_samples), dtype=np.float32)),
+                "samples_b64": encode_pcm16le_b64(np.zeros((4, frame_samples), dtype=np.float32)),
                 "sequence": 1,
                 "start_sample_index": 0,
                 "end_sample_index": frame_samples,
@@ -1204,10 +1230,12 @@ async def test_detection_feature_summary_flags_reconstructed_audio_gap(tmp_path:
             frame={
                 "start_time_ns": second_start_ns,
                 "sample_rate_hz": sample_rate_hz,
-                "channels": 1,
+                "channels": 4,
                 "encoding": "pcm16le",
                 "samples_b64": encode_pcm16le_b64(
-                    np.random.default_rng(991).normal(0.0, 0.2, size=(1, frame_samples)).astype(np.float32)
+                    np.vstack(
+                        [np.random.default_rng(991).normal(0.0, 0.2, size=frame_samples).astype(np.float32)] * 4
+                    )
                 ),
                 "sequence": 2,
                 "start_sample_index": gap_start_index,

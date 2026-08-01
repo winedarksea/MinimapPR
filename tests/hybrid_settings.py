@@ -24,9 +24,11 @@ def hybrid_production_kwargs(**overrides) -> dict:
         birdnet_enabled=True,
         localization_algorithm="srp_phat",
         localization_strategy="fixed",
-        # The old profile forced omni (Python beamformer off); allow tests to vary
+        # The old profile forced omni (Python beamformer off), but triggered
+        # classification is now beamformed-only — with no beamformer the trigger
+        # path classifies nothing. Default to beamformed; tests can still vary
         # this to exercise the Rust hybrid-render path.
-        classification_audio_source=overrides.get("classification_audio_source", "omni"),
+        classification_audio_source=overrides.get("classification_audio_source", "beamformed"),
         skip_localization_for_classification=False,
         birdnet_chunked_dispatch_enabled=True,
         birdnet_chunk_overlap_seconds=min(

@@ -29,7 +29,10 @@ def test_hybrid_settings_reproduce_profile_fields() -> None:
     assert s.birdnet_enabled is True
     assert s.localization_algorithm == "srp_phat"
     assert s.localization_strategy == "fixed"
-    assert s.classification_audio_source == "omni"
+    # The helper diverges from the removed profile here on purpose: triggered
+    # classification is beamformed-only now, so the profile defaults to the
+    # beamformed source (an "omni" source would classify nothing).
+    assert s.classification_audio_source == "beamformed"
     assert s.birdnet_chunked_dispatch_enabled is True
     assert s.classification_window_seconds >= 30.0
     assert s.max_sensor_buffer_seconds >= 32.0
@@ -41,10 +44,10 @@ def test_hybrid_settings_reproduce_profile_fields() -> None:
 def test_hybrid_render_flag_requires_beamformed_source() -> None:
     # Old profile classified from the Rust hybrid render. Under the new formula the
     # hybrid render flag needs birdnet active AND audio_source=beamformed.
-    omni = hybrid_production_settings()  # audio_source="omni"
+    omni = hybrid_production_settings(classification_audio_source="omni")
     assert _sidecar_hybrid_render_enabled(omni) is False
 
-    beamformed = hybrid_production_settings(classification_audio_source="beamformed")
+    beamformed = hybrid_production_settings()  # defaults to beamformed now
     assert _sidecar_hybrid_render_enabled(beamformed) is True
 
 

@@ -825,7 +825,9 @@ async def test_rust_memory_only_sidecar_does_not_persist_raw_replay(tmp_path: Pa
 def test_http_app_in_production_mode_consumes_memory_only_rust_sidecar(monkeypatch, tmp_path: Path) -> None:
     sidecar_port = _pick_free_tcp_port()
     spool_dir = _configure_http_app_sidecar_env(monkeypatch, tmp_path, sidecar_port=sidecar_port)
-    monkeypatch.setattr("minimappr.main.create_classifier", lambda settings: _ConstantBirdClassifier())
+    monkeypatch.setattr(
+        "minimappr.main._build_runtime_classifier", lambda settings: _ConstantBirdClassifier()
+    )
     sample_rate_hz = 16_000
     node_id = "sirith-rust-http-app"
     start_time_ns = time.time_ns()

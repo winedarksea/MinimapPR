@@ -140,6 +140,10 @@ def _configure_env(
     monkeypatch.setenv("MINIMAPPR_FUSION_WORKER_COUNT", "1")
     monkeypatch.setenv("MINIMAPPR_SNIPPET_RETENTION_SECONDS", str(snippet_retention_seconds))
     monkeypatch.setenv("MINIMAPPR_REPORTING_WINDOW_SECONDS", "1.0")
+    # Triggered classification is beamformed-only (post detection/omni dedupe):
+    # noise renders classify as low-confidence "unknown", so don't let the
+    # listing endpoints' confidence floor hide the pipeline's output.
+    monkeypatch.setenv("MINIMAPPR_DETECTION_MIN_CONFIDENCE", "0")
     return db_path
 
 
@@ -152,13 +156,21 @@ def _ingest_single_frame(
     frame_updates: dict | None = None,
     capabilities: list[str] | None = None,
 ) -> dict:
-    samples = np.random.default_rng(1234).normal(0.0, 0.5, size=(1, 1024)).astype(np.float32)
+    # A 4-sensor tetra array with a coherent signal: triggered classification is
+    # beamformed-only, so a single-sensor point node would never yield detections.
+    base = np.random.default_rng(1234).normal(0.0, 0.5, size=1024).astype(np.float32)
+    samples = np.vstack([base, base, base, base])
     payload = {
         "node": {
             "id": "http-node-1",
-            "node_type": "point",
+            "node_type": "sirith_tetra",
             "position_m": [0.0, 0.0, 0.0],
-            "sensor_offsets_m": [[0.0, 0.0, 0.0]],
+            "sensor_offsets_m": [
+                [0.0, 0.0, 0.0],
+                [0.05, 0.0, 0.0],
+                [0.0, 0.05, 0.0],
+                [0.0, 0.0, 0.05],
+            ],
             "capabilities": capabilities or ["audio"],
             "metadata": metadata or {},
             "properties": {},
@@ -166,7 +178,7 @@ def _ingest_single_frame(
         "frame": {
             "start_time_ns": start_time_ns,
             "sample_rate_hz": 16000,
-            "channels": 1,
+            "channels": 4,
             "encoding": "pcm16le",
             "samples_b64": encode_pcm16le_b64(samples),
             "sequence": 1,
@@ -1577,6 +1589,9 @@ def test_track_audio_endpoint_returns_latest_detection_snippet(monkeypatch, tmp_
 
 def test_config_exposes_updated_detection_threshold_and_cop_defaults(monkeypatch, tmp_path: Path) -> None:
     _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    # _configure_env zeroes the confidence floor for pipeline tests; this test
+    # verifies the endpoint reflects settings, so pin an explicit value.
+    monkeypatch.setenv("MINIMAPPR_DETECTION_MIN_CONFIDENCE", "0.4")
 
     with TestClient(app) as client:
         response = client.get("/api/v1/config")
@@ -1639,7 +1654,10 @@ def test_classifier_routing_api_returns_defaults_when_file_is_missing(monkeypatc
     assert body["source"] == "default"
     assert body["path"] == str(routing_path)
     assert body["restart_required"] is False
-    assert body["routing"]["contexts"]["detection_trigger"]["run"] == ["yamnet", "birdnet"]
+    # Post-dedupe default: detection_trigger is an admission gate only; model
+    # inference runs on localized_render (and omni_continuous for BirdNET).
+    assert body["routing"]["contexts"]["detection_trigger"]["run"] == []
+    assert body["routing"]["contexts"]["localized_render"]["run"] == ["yamnet", "birdnet"]
 
 
 def test_classifier_routing_api_put_validates_writes_and_round_trips(monkeypatch, tmp_path: Path) -> None:

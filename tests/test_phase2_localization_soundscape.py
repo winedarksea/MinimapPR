@@ -569,7 +569,7 @@ class _BoostingBeamformer:
 
 
 @pytest.mark.asyncio
-async def test_fusion_node_beamformed_classification_selects_higher_confidence(tmp_path: Path) -> None:
+async def test_fusion_node_beamformed_classification_is_authoritative(tmp_path: Path) -> None:
     settings = Settings(
         db_path=tmp_path / "phase2_fusion.db",
         snippet_dir=tmp_path / "snippets",
@@ -638,8 +638,11 @@ async def test_fusion_node_beamformed_classification_selects_higher_confidence(t
     latest = detections[0]
     assert latest["label"] == "bird_like"
     assert latest["feature_summary"]["classification_path"].startswith("beamformed:")
-    assert float(latest["feature_summary"]["beamformed_confidence"]) > float(
-        latest["feature_summary"]["omni_confidence"]
+    # Triggered classification is beamformed-only; the omni_confidence field
+    # mirrors the beamformed result rather than a separate raw-omni inference.
+    assert float(latest["feature_summary"]["beamformed_confidence"]) == pytest.approx(0.94)
+    assert float(latest["feature_summary"]["omni_confidence"]) == pytest.approx(
+        float(latest["feature_summary"]["beamformed_confidence"])
     )
 
     await fusion.stop()
