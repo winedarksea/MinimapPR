@@ -21,6 +21,11 @@ _AUDIO_SUMMARY_PUBLISH_INTERVAL_NS = 500_000_000
 # Receipt time is metadata for freshness. GPS/NTP packet timestamps remain the
 # audio processing timeline even when transport latency is high.
 _MAX_TRUSTED_NODE_CLOCK_SKEW_NS = 300_000_000_000
+# Consecutive acceptance-radius rejections after which a stationary node's position
+# estimate is treated as wrong rather than the incoming fixes. Large enough that
+# a burst of multipath noise cannot trip it, small enough that a genuinely moved
+# (or wrongly restored) node re-converges in seconds rather than never.
+_KDE_REJECTION_STREAK_RESET = 60
 
 import numpy as np
 
@@ -180,6 +185,7 @@ class IngestProcessor:
         self._preprocess_locks_by_node: dict[str, asyncio.Lock] = {}
         self._position_kalman: dict[str, _NodePositionKalman] = {}
         self._position_kde: dict[str, StationaryKdeState] = {}
+        self._kde_rejection_streak: dict[str, int] = {}
         self._position_filter_by_node: dict[str, str] = {}
         # Last altitude that came from an actual 3D fix, held so a later 2D fix
         # (which does not solve altitude at all) cannot move the node vertically.
@@ -225,6 +231,7 @@ class IngestProcessor:
         """
         self._position_kalman.clear()
         self._position_kde.clear()
+        self._kde_rejection_streak.clear()
         self._last_trusted_altitude_m.clear()
         self._untrusted_altitude_warned_node_ids.clear()
 
@@ -240,14 +247,31 @@ class IngestProcessor:
         loader = getattr(self._storage, "list_node_position_estimator_states", None)
         if not callable(loader):
             return
+        origin = getattr(self._coordinate_frame, "origin", None)
+        deleter = getattr(self._storage, "delete_node_position_estimator_state", None)
         for node_id, row in (await loader()).items():
             state = row.get("state") if isinstance(row, dict) else None
-            if isinstance(state, dict):
-                self._position_kde[node_id] = StationaryKdeState.from_snapshot(state)
-                self._position_filter_by_node[node_id] = "kde"
+            if not isinstance(state, dict):
+                continue
+            # A checkpoint from a different origin holds ENU coordinates that are
+            # arbitrarily far from where the node now projects. Restoring it would
+            # make the acceptance radius reject every real fix as an outlier and
+            # pin the node at its old-frame position permanently.
+            if not StationaryKdeState.snapshot_matches_origin(state, origin):
+                _logger.warning(
+                    "Discarding node %s position estimator checkpoint: it was built under a "
+                    "different site origin and cannot be reused in the current frame",
+                    node_id,
+                )
+                if callable(deleter):
+                    await deleter(node_id)
+                continue
+            self._position_kde[node_id] = StationaryKdeState.from_snapshot(state)
+            self._position_filter_by_node[node_id] = "kde"
 
     async def reset_position_estimator(self, node_id: str) -> None:
         self._position_kde.pop(node_id, None)
+        self._kde_rejection_streak.pop(node_id, None)
         self._position_kalman.pop(node_id, None)
         self._position_filter_by_node.pop(node_id, None)
         task = self._kde_evaluation_tasks.pop(node_id, None)
@@ -713,6 +737,7 @@ class IngestProcessor:
                     # Returning a relocated node to fixed operation must not blend
                     # its former installation into the new geometry.
                     self._position_kde.pop(spec.id, None)
+                    self._kde_rejection_streak.pop(spec.id, None)
                     deleter = getattr(self._storage, "delete_node_position_estimator_state", None)
                     if callable(deleter):
                         asyncio.create_task(deleter(spec.id))
@@ -760,7 +785,24 @@ class IngestProcessor:
         if state.estimate is not None and self._kde_acceptance_radius_m > 0:
             distance = float(np.linalg.norm(np.asarray(raw_local[:2]) - np.asarray(state.estimate[:2])))
             if distance > self._kde_acceptance_radius_m:
-                return state.estimate
+                # Rejecting outliers indefinitely means a node whose estimate is
+                # wrong — relocated, or restored from a stale frame — can never
+                # recover: every correct fix looks like the outlier. A sustained
+                # run of rejections is evidence the estimate is wrong, not the fix.
+                streak = self._kde_rejection_streak.get(node_id, 0) + 1
+                if streak < _KDE_REJECTION_STREAK_RESET:
+                    self._kde_rejection_streak[node_id] = streak
+                    return state.estimate
+                _logger.warning(
+                    "node %s position estimate rejected %d consecutive fixes (last %.1f m away); "
+                    "resetting the estimator and re-converging on live GPS",
+                    node_id,
+                    streak,
+                    distance,
+                )
+                state = StationaryKdeState()
+                self._position_kde[node_id] = state
+        self._kde_rejection_streak.pop(node_id, None)
         state.add(raw_local, self._kde_reservoir_capacity)
         now = time.monotonic()
         due = (state.seen_count >= self._kde_warmup_fixes and (
@@ -801,7 +843,8 @@ class IngestProcessor:
         writer = getattr(self._storage, "upsert_node_position_estimator_state", None)
         if callable(writer):
             state.last_checkpoint_monotonic_s = now
-            asyncio.create_task(writer(node_id, state.snapshot()))
+            origin = getattr(self._coordinate_frame, "origin", None)
+            asyncio.create_task(writer(node_id, state.snapshot(origin)))
 
 
 # (Supporting dataclasses are defined at the top of the module.)

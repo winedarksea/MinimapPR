@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from minimappr.models import GeoPoint
+
 
 @dataclass(slots=True)
 class StationaryKdeState:
@@ -24,14 +26,46 @@ class StationaryKdeState:
     last_evaluated_monotonic_s: float = 0.0
     last_checkpoint_monotonic_s: float = 0.0
 
-    def snapshot(self) -> dict:
-        return {
+    def snapshot(self, origin: "GeoPoint | None" = None) -> dict:
+        """Serialize for persistence, stamped with the origin the samples use.
+
+        Every coordinate here is ENU metres relative to the site origin, so the
+        stamp is what lets hydration tell a reusable checkpoint from one written
+        under a different origin. Restoring a mismatched checkpoint pins the node
+        at its old-frame coordinates, because the acceptance radius then rejects
+        every correct fix as an outlier.
+        """
+        payload = {
             "samples": [list(sample) for sample in self.samples],
             "seen_count": self.seen_count,
             "estimate": list(self.estimate) if self.estimate else None,
             "horizontal_std_m": self.horizontal_std_m,
             "last_evaluated_seen_count": self.last_evaluated_seen_count,
         }
+        if origin is not None:
+            payload["origin"] = {"lat": origin.lat, "lon": origin.lon, "alt_m": origin.alt_m}
+        return payload
+
+    @staticmethod
+    def snapshot_matches_origin(value: dict, origin: "GeoPoint | None") -> bool:
+        """Whether a persisted snapshot was accumulated under `origin`.
+
+        Unstamped snapshots predate the stamp and cannot be shown to match, so
+        they are treated as mismatched and rebuilt from live fixes.
+        """
+        if origin is None:
+            return False
+        stamped = value.get("origin")
+        if not isinstance(stamped, dict):
+            return False
+        try:
+            return (
+                abs(float(stamped["lat"]) - origin.lat) <= 1e-9
+                and abs(float(stamped["lon"]) - origin.lon) <= 1e-9
+                and abs(float(stamped.get("alt_m") or 0.0) - origin.alt_m) <= 1e-6
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
 
     @classmethod
     def from_snapshot(cls, value: dict) -> "StationaryKdeState":
