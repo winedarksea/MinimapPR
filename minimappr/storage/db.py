@@ -155,6 +155,21 @@ class Storage:
                 updated_ns INTEGER NOT NULL
             );
 
+            -- The resolved site origin, anchored once from a trusted GPS fix and then
+            -- held. Single row (id=1). This is deliberately persisted rather than
+            -- re-derived per process: every stored `position_m` is ENU relative to it,
+            -- so two processes resolving it independently silently disagree about where
+            -- every node and track is. See core/site_origin.py.
+            CREATE TABLE IF NOT EXISTS site_origin (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                lat REAL NOT NULL,
+                lon REAL NOT NULL,
+                alt_m REAL NOT NULL,
+                source TEXT NOT NULL,
+                contributing_node_ids_json TEXT NOT NULL DEFAULT '[]',
+                resolved_ns INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS observations (
                 id TEXT PRIMARY KEY,
                 event_id TEXT NOT NULL,
@@ -1805,6 +1820,72 @@ class Storage:
         db = self._require_db()
         async with self._write_guard():
             await db.execute("DELETE FROM node_position_estimator_states WHERE node_id = ?", (node_id,))
+            await self._commit_if_needed(db)
+
+    async def clear_node_position_estimator_states(self) -> None:
+        """Drop every persisted node position estimator state.
+
+        Estimator state is stored in ENU metres, so it is only meaningful against
+        the origin it was accumulated under. Re-anchoring the site origin must
+        discard it rather than let a stale frame's coordinates be smoothed into
+        the new one.
+        """
+        db = self._require_db()
+        async with self._write_guard():
+            await db.execute("DELETE FROM node_position_estimator_states")
+            await self._commit_if_needed(db)
+
+    async def get_site_origin(self) -> dict[str, Any] | None:
+        db = self._require_db()
+        row = await (await db.execute(
+            """SELECT lat, lon, alt_m, source, contributing_node_ids_json, resolved_ns
+               FROM site_origin WHERE id = 1"""
+        )).fetchone()
+        if row is None:
+            return None
+        return {
+            "lat": row["lat"],
+            "lon": row["lon"],
+            "alt_m": row["alt_m"],
+            "source": row["source"],
+            "contributing_node_ids": _json_loads(row["contributing_node_ids_json"], []),
+            "resolved_ns": row["resolved_ns"],
+        }
+
+    async def upsert_site_origin(
+        self,
+        *,
+        lat: float,
+        lon: float,
+        alt_m: float,
+        source: str,
+        contributing_node_ids: list[str] | tuple[str, ...] = (),
+    ) -> None:
+        db = self._require_db()
+        async with self._write_guard():
+            await db.execute(
+                """INSERT INTO site_origin(id, lat, lon, alt_m, source, contributing_node_ids_json, resolved_ns)
+                   VALUES (1, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET lat=excluded.lat, lon=excluded.lon,
+                       alt_m=excluded.alt_m, source=excluded.source,
+                       contributing_node_ids_json=excluded.contributing_node_ids_json,
+                       resolved_ns=excluded.resolved_ns""",
+                (
+                    float(lat),
+                    float(lon),
+                    float(alt_m),
+                    source,
+                    _json_dumps(list(contributing_node_ids)),
+                    time.time_ns(),
+                ),
+            )
+            await self._commit_if_needed(db)
+
+    async def clear_site_origin(self) -> None:
+        """Un-anchor the site so the next trusted GPS fix re-resolves the origin."""
+        db = self._require_db()
+        async with self._write_guard():
+            await db.execute("DELETE FROM site_origin WHERE id = 1")
             await self._commit_if_needed(db)
 
     async def list_nodes(self, limit: int | None = None) -> list[dict]:

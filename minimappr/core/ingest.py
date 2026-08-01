@@ -11,7 +11,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 _logger = logging.getLogger(__name__)
 
@@ -32,6 +32,7 @@ from minimappr.core.live_ingest_state import FrameIdentity, LiveIngestState
 from minimappr.core.node_registry import NodeRegistry
 from minimappr.core.node_position_estimator import StationaryKdeState, compute_stationary_kde
 from minimappr.core.preprocessing import NodePreprocessorFactory
+from minimappr.core.site_origin import node_has_trusted_gps_position
 from minimappr.interfaces import AudioPreprocessor, StorageBackend
 from minimappr.models import (
     EnvironmentSampleIn,
@@ -43,6 +44,10 @@ from minimappr.models import (
     sync_grade_from_time_quality,
 )
 from minimappr.utils.audio import decode_pcm16le_b64, trigger_rms
+
+#: Called with (node_id, geo) for each trusted GPS fix while the site is
+#: un-anchored, so the runtime can adopt it as the site origin.
+SiteOriginAnchorCallback = Callable[[str, GeoPoint], Awaitable[None]]
 
 
 # Firmware NodeRunner telemetry counters carried in frame timing_diagnostics.
@@ -187,6 +192,9 @@ class IngestProcessor:
         self._seq_gap_warning_interval_seconds = 10.0
         self._unknown_capability_warning_node_ids: set[str] = set()
         self._ingest_health = IngestHealthClassifier()
+        # Set by the runtime when the site origin is still un-anchored; see
+        # set_site_origin_anchor(). None once the site has a real origin.
+        self._site_origin_anchor: SiteOriginAnchorCallback | None = None
 
     @property
     def last_trigger_ns(self) -> int:
@@ -198,6 +206,35 @@ class IngestProcessor:
 
     def replace_coordinate_frame(self, coordinate_frame: LocalCoordinateFrame) -> None:
         self._coordinate_frame = coordinate_frame
+
+    def set_site_origin_anchor(self, anchor: SiteOriginAnchorCallback | None) -> None:
+        """Install (or clear) the callback that anchors the site origin on GPS.
+
+        While set, every frame from a node with a trusted GPS fix is offered to
+        the callback before its position is projected. The runtime clears it once
+        the site is anchored, so the steady-state cost is a single None check.
+        """
+        self._site_origin_anchor = anchor
+
+    def reset_position_estimators(self) -> None:
+        """Discard all in-memory node position estimator state.
+
+        Kalman/KDE state is accumulated in ENU metres and is therefore only valid
+        against the origin it was built under. Re-anchoring must drop it rather
+        than smooth old-frame coordinates into the new frame.
+        """
+        self._position_kalman.clear()
+        self._position_kde.clear()
+        self._last_trusted_altitude_m.clear()
+        self._untrusted_altitude_warned_node_ids.clear()
+
+    async def _maybe_anchor_site_origin(self, spec: NodeSpec) -> None:
+        anchor = self._site_origin_anchor
+        if anchor is None or spec.position_geo is None:
+            return
+        if not node_has_trusted_gps_position(spec.metadata):
+            return
+        await anchor(spec.id, spec.position_geo)
 
     async def hydrate_position_estimator_states(self) -> None:
         loader = getattr(self._storage, "list_node_position_estimator_states", None)
@@ -253,6 +290,10 @@ class IngestProcessor:
         raw_node = request.node
         mobility, position_filter = self._registry.position_policy_for(raw_node.id, raw_node.mobility)
         raw_node = raw_node.model_copy(update={"mobility": mobility})
+        # Anchor before projecting: _normalize_node_spec converts geo to ENU against
+        # the current frame, so adopting the origin afterwards would bake one frame's
+        # worth of pre-anchor coordinates into the estimators.
+        await self._maybe_anchor_site_origin(raw_node)
         normalized_node, geo_position = self._normalize_node_spec(raw_node, position_filter=position_filter)
         server_received_ns = time.time_ns()
         runtime = await self._registry.upsert(normalized_node, server_received_ns)

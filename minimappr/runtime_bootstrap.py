@@ -36,7 +36,7 @@ from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.calibration.pipeline import CalibrationPipeline
 from minimappr.core.iamf_pipeline import IamfPipeline
 from minimappr.core.localization_dispatch import build_localizer_from_settings
-from minimappr.core.site_origin import resolve_site_origin_from_nodes
+from minimappr.core.site_origin import load_or_resolve_site_origin
 from minimappr.core.cluster_registry import ClusterRegistry
 from minimappr.core.node_registry import NodeRegistry
 from minimappr.core.tracking import TrackManager
@@ -82,7 +82,6 @@ class _CombinedRuntimeCoreServices:
 @dataclass
 class _CombinedRuntimeTaskHandles:
     cleanup_task: asyncio.Task | None = None
-    site_origin_reconcile_task: asyncio.Task | None = None
     ingest_spool_tasks: list[asyncio.Task] = field(default_factory=list)
     ingest_stream_consumer_watchdog_task: asyncio.Task | None = None
     ble_tracking_task: asyncio.Task | None = None
@@ -414,16 +413,19 @@ async def _initialize_storage_and_resolve_site_origin(
 ):
     storage = Storage(settings.storage_config().db_path)
     await storage.initialize()
-    resolved_site_origin = resolve_site_origin_from_nodes(
+    # Reads the persisted origin when one exists, so the api and ingest processes
+    # boot into the same coordinate frame instead of each deriving its own.
+    resolved_site_origin = await load_or_resolve_site_origin(
         settings,
-        nodes=await storage.list_nodes(limit=4096),
+        storage=storage,
         now_ns=time.time_ns(),
     )
     _apply_settings_site_origin_resolution(settings, resolved_site_origin)
     if log_resolution:
         logger.info(
-            "Resolved site origin via %s: lat=%.6f lon=%.6f alt=%.2f nodes=%s",
+            "Resolved site origin via %s (anchored=%s): lat=%.6f lon=%.6f alt=%.2f nodes=%s",
             resolved_site_origin.source,
+            resolved_site_origin.is_anchored,
             settings.site_origin_lat,
             settings.site_origin_lon,
             settings.site_origin_alt_m,
@@ -481,11 +483,9 @@ async def _start_combined_runtime_background_tasks(
     fusion_node: FusionNode,
     ingest_spool_consumer: IngestSpoolConsumer,
     ingest_stream_consumer_enabled: bool,
-    initial_resolution_source: str,
+    install_site_origin_anchor,
     maintain_ingest_stream_consumer,
-    reconcile_site_origin_after_startup,
     settings: Settings,
-    should_schedule_site_origin_reconciliation,
     storage: Storage,
 ) -> _CombinedRuntimeTaskHandles:
     task_handles = _CombinedRuntimeTaskHandles()
@@ -511,14 +511,10 @@ async def _start_combined_runtime_background_tasks(
             for index in range(settings.ingest_spool_worker_count)
         ]
         app.state.ingest_spool_tasks = task_handles.ingest_spool_tasks
-    if should_schedule_site_origin_reconciliation(
-        settings,
-        initial_resolution_source=initial_resolution_source,
-    ):
-        task_handles.site_origin_reconcile_task = asyncio.create_task(
-            reconcile_site_origin_after_startup(app)
-        )
-    app.state.site_origin_reconcile_task = task_handles.site_origin_reconcile_task
+    # Arms GPS anchoring when the site has no persisted origin yet. Unlike the
+    # deferred reconciliation this replaces, it is event-driven, so it still fires
+    # on a box where nodes only come online after ingest has started.
+    install_site_origin_anchor(app)
     return task_handles
 
 
@@ -530,13 +526,6 @@ async def _stop_combined_runtime_background_tasks(
     shutdown_timeout_seconds: float,
 ) -> None:
     await _cancel_task(task_handles.ble_tracking_task, timeout_seconds=shutdown_timeout_seconds)
-    if task_handles.site_origin_reconcile_task is not None:
-        task_handles.site_origin_reconcile_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
-            await asyncio.wait_for(
-                task_handles.site_origin_reconcile_task,
-                timeout=shutdown_timeout_seconds,
-            )
     if task_handles.cleanup_task is not None:
         task_handles.cleanup_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):

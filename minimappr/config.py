@@ -724,7 +724,6 @@ class Settings:
     default_humidity: float = 0.5
     environment_reading_max_age_seconds: float = 300.0
     site_origin_source: str = "auto"
-    site_origin_reconcile_delay_seconds: float = 30.0
     site_origin_lat: float = 44.98698840878797
     site_origin_lon: float = -93.2579197515542
     site_origin_alt_m: float = 0.0
@@ -1075,8 +1074,6 @@ class Settings:
         self.site_origin_source = self.site_origin_source.strip().lower() or "auto"
         if self.site_origin_source not in {"auto", "manual"}:
             raise ValueError("MINIMAPPR_SITE_ORIGIN_SOURCE must be 'auto' or 'manual'")
-        if self.site_origin_reconcile_delay_seconds < 0.0:
-            raise ValueError("MINIMAPPR_SITE_ORIGIN_RECONCILE_DELAY_SECONDS must be >= 0")
         if not math.isfinite(self.ingest_gain_multiplier) or self.ingest_gain_multiplier <= 0.0:
             raise ValueError("MINIMAPPR_INGEST_GAIN_MULTIPLIER must be finite and > 0")
 
@@ -1787,10 +1784,6 @@ class Settings:
             default_humidity=_env_float("MINIMAPPR_DEFAULT_HUMIDITY", 0.5),
             environment_reading_max_age_seconds=_env_float("MINIMAPPR_ENVIRONMENT_READING_MAX_AGE_SECONDS", 300.0),
             site_origin_source=_env_str("MINIMAPPR_SITE_ORIGIN_SOURCE", "auto"),
-            site_origin_reconcile_delay_seconds=_env_float(
-                "MINIMAPPR_SITE_ORIGIN_RECONCILE_DELAY_SECONDS",
-                30.0,
-            ),
             site_origin_lat=_env_float("MINIMAPPR_SITE_ORIGIN_LAT", 44.98698840878797),
             site_origin_lon=_env_float("MINIMAPPR_SITE_ORIGIN_LON", -93.2579197515542),
             site_origin_alt_m=_env_float("MINIMAPPR_SITE_ORIGIN_ALT_M", 0.0),

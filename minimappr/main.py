@@ -128,8 +128,11 @@ from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.logging_ring import install_global as install_log_ring, process_start_ns
 from minimappr.core.rules import ConfigRuleEngine, RuleDef, default_rules_as_dicts
 from minimappr.core.site_origin import (
-    resolve_site_origin_from_nodes,
-    should_schedule_deferred_site_origin_reconciliation,
+    SOURCE_GPS_ANCHOR,
+    SOURCE_PERSISTED,
+    SiteOriginResolution,
+    origins_differ,
+    persist_site_origin,
 )
 from minimappr.core.zones import ZoneMatcher
 from minimappr.core import system_info
@@ -422,6 +425,7 @@ def _apply_site_origin_resolution(state, resolved_site_origin) -> None:
     _apply_settings_site_origin_resolution(settings, resolved_site_origin)
     state.site_origin_resolution_source = resolved_site_origin.source
     state.site_origin_contributing_node_ids = resolved_site_origin.contributing_node_ids
+    state.site_origin_anchored = resolved_site_origin.is_anchored
 
 
 def _clear_transient_ingest_runtime_state(state) -> None:
@@ -512,44 +516,16 @@ def _warn_when_direct_ingest_falls_back(settings: Settings, sidecar_state: _Side
     )
 
 
-async def _reconcile_site_origin_after_startup(app: FastAPI) -> None:
+async def _rebind_site_origin(app: FastAPI, resolved_site_origin) -> None:
+    """Swap the process onto a new site origin and drop everything tied to the old one.
+
+    Node position estimators hold ENU metres, so they are meaningless in the new
+    frame and are cleared rather than carried across. Historical rows are left
+    alone: they are only reinterpreted if the origin moves, which is why an
+    anchored origin is never re-derived.
+    """
     state = app.state
     settings: Settings = state.settings
-    delay_seconds = settings.site_origin_reconcile_delay_seconds
-    if delay_seconds <= 0.0:
-        return
-
-    await asyncio.sleep(delay_seconds)
-
-    if state.fusion_node.accepted_frame_count > 0:
-        logger.info(
-            "Skipping delayed site-origin reconciliation after %.1fs because ingest already accepted %d frames",
-            delay_seconds,
-            state.fusion_node.accepted_frame_count,
-        )
-        return
-
-    resolved_site_origin = resolve_site_origin_from_nodes(
-        settings,
-        nodes=await state.storage.list_nodes(limit=4096),
-        now_ns=time.time_ns(),
-    )
-    current_origin = (
-        settings.site_origin_lat,
-        settings.site_origin_lon,
-        settings.site_origin_alt_m,
-        getattr(state, "site_origin_resolution_source", settings.site_origin_source),
-    )
-    next_origin = (
-        resolved_site_origin.origin.lat,
-        resolved_site_origin.origin.lon,
-        resolved_site_origin.origin.alt_m,
-        resolved_site_origin.source,
-    )
-    if next_origin == current_origin:
-        logger.info("Delayed site-origin reconciliation after %.1fs found no change", delay_seconds)
-        return
-
     candidate_settings = replace(
         settings,
         site_origin_lat=resolved_site_origin.origin.lat,
@@ -562,27 +538,143 @@ async def _reconcile_site_origin_after_startup(app: FastAPI) -> None:
         mode=settings.coordinate_mode,
     )
     previous_classifier = state.classifier
-    state.fusion_node.rebind_runtime_dependencies(
-        classifier=new_classifier,
-        coordinate_frame=new_coordinate_frame,
-    )
+    fusion_node = getattr(state, "fusion_node", None)
+    if fusion_node is not None:
+        fusion_node.rebind_runtime_dependencies(
+            classifier=new_classifier,
+            coordinate_frame=new_coordinate_frame,
+        )
+        fusion_node.reset_position_estimators()
     state.classifier = new_classifier
     state.coordinate_frame = new_coordinate_frame
     state.diagnostics.replace_classifier(new_classifier)
     _apply_site_origin_resolution(state, resolved_site_origin)
+
+    clear_states = getattr(state.storage, "clear_node_position_estimator_states", None)
+    if callable(clear_states):
+        try:
+            await clear_states()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Clearing node position estimator states after re-anchor failed: %s", exc)
+
+    if previous_classifier is not None and previous_classifier is not new_classifier:
+        try:
+            previous_classifier.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Previous classifier close failed after site-origin change: %s", exc)
+
+
+def _make_site_origin_anchor(app: FastAPI):
+    """Build the ingest callback that anchors the site origin on a trusted GPS fix.
+
+    Anchoring is one-shot per site: the first node to report a real fix defines
+    the origin, it is persisted so every process and every restart agrees, and
+    the callback uninstalls itself. Sites with no GPS simply never anchor and
+    keep running on the configured fallback.
+    """
+    lock = asyncio.Lock()
+
+    async def anchor(node_id: str, geo: GeoPoint) -> None:
+        state = app.state
+        async with lock:
+            if getattr(state, "site_origin_anchored", False):
+                return
+            resolution = SiteOriginResolution(
+                origin=geo,
+                source=SOURCE_GPS_ANCHOR,
+                contributing_node_ids=(node_id,),
+            )
+            # Persist before adopting. This runs on the ingest frame path, so a
+            # storage failure must neither reject the frame nor latch the anchor
+            # shut — leaving it armed lets the next frame retry.
+            try:
+                await persist_site_origin(state.storage, resolution)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Persisting GPS-anchored site origin from node %s failed; "
+                    "will retry on the next frame: %s",
+                    node_id,
+                    exc,
+                )
+                return
+            state.site_origin_anchored = True
+            previous = GeoPoint(
+                lat=state.settings.site_origin_lat,
+                lon=state.settings.site_origin_lon,
+                alt_m=state.settings.site_origin_alt_m,
+            )
+            if origins_differ(previous, geo):
+                await _rebind_site_origin(app, resolution)
+            else:
+                _apply_site_origin_resolution(state, resolution)
+            _install_site_origin_anchor(app)
+            logger.info(
+                "Anchored site origin from node %s GPS fix: lat=%.6f lon=%.6f alt=%.2f "
+                "(was lat=%.6f lon=%.6f)",
+                node_id,
+                geo.lat,
+                geo.lon,
+                geo.alt_m,
+                previous.lat,
+                previous.lon,
+            )
+
+    return anchor
+
+
+def _install_site_origin_anchor(app: FastAPI) -> None:
+    """Arm or disarm GPS anchoring to match the current anchored state."""
+    state = app.state
+    fusion_node = getattr(state, "fusion_node", None)
+    if fusion_node is None:
+        return
+    if getattr(state, "site_origin_anchored", False):
+        fusion_node.set_site_origin_anchor(None)
+        return
+    fusion_node.set_site_origin_anchor(_make_site_origin_anchor(app))
     logger.info(
-        "Reconciled site origin after %.1fs via %s: lat=%.6f lon=%.6f alt=%.2f nodes=%s",
-        delay_seconds,
-        resolved_site_origin.source,
-        resolved_site_origin.origin.lat,
-        resolved_site_origin.origin.lon,
-        resolved_site_origin.origin.alt_m,
-        list(resolved_site_origin.contributing_node_ids),
+        "Site origin is un-anchored (source=%s); awaiting a trusted GPS fix from any node",
+        getattr(state, "site_origin_resolution_source", "unknown"),
     )
-    try:
-        previous_classifier.close()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Previous classifier close failed after site-origin reconciliation: %s", exc)
+
+
+async def _sync_site_origin_from_storage(app: FastAPI) -> None:
+    """Adopt an origin anchored by the ingest process.
+
+    Only the ingest process sees frames, so it is the one that anchors. The api
+    process reads the persisted result and rebinds, which is what keeps the two
+    from drifting into disagreeing coordinate frames.
+    """
+    state = app.state
+    settings: Settings = state.settings
+    if settings.site_origin_source == "manual":
+        return
+    persisted = await state.storage.get_site_origin()
+    if persisted is None:
+        return
+    origin = GeoPoint(
+        lat=float(persisted["lat"]),
+        lon=float(persisted["lon"]),
+        alt_m=float(persisted["alt_m"]),
+    )
+    current = GeoPoint(
+        lat=settings.site_origin_lat,
+        lon=settings.site_origin_lon,
+        alt_m=settings.site_origin_alt_m,
+    )
+    if not origins_differ(current, origin) and getattr(state, "site_origin_anchored", False):
+        return
+    await _rebind_site_origin(
+        app,
+        SiteOriginResolution(
+            origin=origin,
+            source=SOURCE_PERSISTED,
+            contributing_node_ids=tuple(persisted.get("contributing_node_ids") or ()),
+        ),
+    )
+    logger.info(
+        "Adopted persisted site origin: lat=%.6f lon=%.6f alt=%.2f", origin.lat, origin.lon, origin.alt_m
+    )
 
 
 async def _api_live_db_poll_loop(app: FastAPI) -> None:
@@ -596,6 +688,8 @@ async def _api_live_db_poll_loop(app: FastAPI) -> None:
     seen_track_ids: set[str] = set()
     while True:
         try:
+            await _sync_site_origin_from_storage(app)
+
             detections = await state.storage.list_detections(
                 limit=100,
                 since_ns=last_detection_ts,
@@ -1499,11 +1593,9 @@ async def lifespan(app: FastAPI):
             fusion_node=combined_runtime_core_services.fusion_node,
             ingest_spool_consumer=combined_runtime_core_services.ingest_spool_consumer,
             ingest_stream_consumer_enabled=ingest_stream_consumer_enabled,
-            initial_resolution_source=resolved_site_origin.source,
+            install_site_origin_anchor=_install_site_origin_anchor,
             maintain_ingest_stream_consumer=_maintain_ingest_stream_consumer,
-            reconcile_site_origin_after_startup=_reconcile_site_origin_after_startup,
             settings=settings,
-            should_schedule_site_origin_reconciliation=should_schedule_deferred_site_origin_reconciliation,
             storage=storage,
         )
         if settings.effectors_enabled:
@@ -2973,9 +3065,15 @@ async def get_config(request: Request) -> dict:
             "lat": settings.site_origin_lat,
             "lon": settings.site_origin_lon,
             "alt_m": settings.site_origin_alt_m,
-            "reconcile_delay_seconds": settings.site_origin_reconcile_delay_seconds,
             "mode": settings.site_origin_source,
             "source": site_origin_resolution_source,
+            # False means the site is still on the configured fallback and is
+            # waiting for a trusted GPS fix. Surfaced because an un-anchored origin
+            # silently rejects every localization once nodes are far from it.
+            "anchored": bool(getattr(state, "site_origin_anchored", False)),
+            "contributing_node_ids": list(
+                getattr(state, "site_origin_contributing_node_ids", ()) or ()
+            ),
         },
         "coordinate_mode": settings.coordinate_mode,
         "node_degraded_after_seconds": settings.node_degraded_after_seconds,

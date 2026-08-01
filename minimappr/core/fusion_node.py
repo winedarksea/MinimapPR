@@ -538,6 +538,14 @@ class FusionNode:
         self._classification_orchestrator.replace_classifier(classifier)
         self._detection_assembler.replace_coordinate_frame(coordinate_frame)
 
+    def set_site_origin_anchor(self, anchor) -> None:
+        """Arm/disarm GPS-based site-origin anchoring on the ingest path."""
+        self._ingest_processor.set_site_origin_anchor(anchor)
+
+    def reset_position_estimators(self) -> None:
+        """Drop node position estimator state that is tied to the previous origin."""
+        self._ingest_processor.reset_position_estimators()
+
     def set_action_handler(self, destination: str, handler: RuleActionHandler) -> None:
         """Register (or replace) a rule-action handler for a destination.
 
