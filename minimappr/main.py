@@ -3074,6 +3074,8 @@ async def get_config(request: Request) -> dict:
         "birdnet_trigger_min_confidence": settings.birdnet_trigger_min_confidence,
         "birdnet_geo_min_confidence": settings.birdnet_geo_min_confidence,
         "birdnet_pool_size": settings.birdnet_pool_size,
+        "birdnet_batch_max_wait_seconds": settings.birdnet_batch_max_wait_seconds,
+        "birdnet_batch_max_size": settings.birdnet_batch_max_size,
         "persisted_override_keys": sorted(load_overrides(settings.config_overrides_path)),
         "beamformer_type": settings.beamformer_type,
         "beamformed_classification_min_sensor_count": settings.beamformed_classification_min_sensor_count,
@@ -3236,6 +3238,8 @@ def _startup_snapshot_restart_required_keys() -> frozenset[str]:
     keys.add("fusion_report_window_localized_emission_cap")
     # The classifier (and its BirdNET session pool) is built once at startup.
     keys.add("birdnet_pool_size")
+    keys.add("birdnet_batch_max_wait_seconds")
+    keys.add("birdnet_batch_max_size")
     keys.add("yamnet_max_input_gain")
     # Classification-priority knobs are read into FusionNode.__init__ (the queue
     # type itself is chosen there), so a live PATCH cannot reorder a queue that
@@ -3480,6 +3484,12 @@ async def patch_config(request: Request) -> dict:
             errors.append("fusion_report_window_localized_emission_cap: must be >= 0 (0 disables)")
         elif key == "birdnet_pool_size" and value < 1:  # type: ignore[operator]
             errors.append("birdnet_pool_size: must be >= 1")
+        elif key == "birdnet_batch_max_size" and value < 1:  # type: ignore[operator]
+            errors.append("birdnet_batch_max_size: must be >= 1")
+        elif key == "birdnet_batch_max_wait_seconds" and not (
+            math.isfinite(value) and value >= 0.0  # type: ignore[arg-type,operator]
+        ):
+            errors.append("birdnet_batch_max_wait_seconds: must be finite and >= 0")
         elif key == "localization_cross_node_relative_energy_floor" and not (
             0.0 <= value <= 1.0  # type: ignore[operator]
         ):

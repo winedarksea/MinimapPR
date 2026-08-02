@@ -164,6 +164,20 @@ def _build_backend(
                 birdnet_kwargs["pool_size"] = max(
                     1, int(getattr(settings, "birdnet_pool_size", 1))
                 )
+            # Request coalescing. A run_arrays() call costs ~1.0s of fixed
+            # barrier synchronization whatever the payload, so batching
+            # concurrent callers into one call is worth 3-4x. Same signature
+            # probe as pool_size so stubs stay usable.
+            if "batch_max_wait_seconds" in birdnet_parameters or any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in birdnet_parameters.values()
+            ):
+                birdnet_kwargs["batch_max_wait_seconds"] = float(
+                    getattr(settings, "birdnet_batch_max_wait_seconds", 0.0)
+                )
+                birdnet_kwargs["batch_max_size"] = int(
+                    getattr(settings, "birdnet_batch_max_size", 16)
+                )
             return BirdNETClassifier(**birdnet_kwargs)
         except Exception as exc:  # pragma: no cover - optional runtime backend
             logger.info(

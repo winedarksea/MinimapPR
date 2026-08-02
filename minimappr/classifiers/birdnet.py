@@ -23,6 +23,45 @@ _BIRDNET_SAMPLE_RATE_HZ = 48_000
 # Number of top species to include in the returned scores map.
 _SCORES_MAP_TOP_K = 5
 
+# A `run_arrays()` call costs ~1.0 s of fixed producer/worker/analyzer barrier
+# synchronization regardless of payload — measured 1048 ms for 0.25 s of audio
+# and 1349 ms for 30 s. The marginal cost is only ~10 ms per second of audio, so
+# the number of *calls* is what dominates, not their size. Coalescing concurrent
+# callers into one call is worth 3-4x:
+#
+#   clips/call (30 s each)   1      2      4      8     16     32     64
+#   ms per clip           1344    824    561    442    383    351    333
+#   payload MiB              6     12     23     46     92    184    369
+#
+# Returns flatten past ~16 while the payload keeps growing linearly, and every
+# byte is serialized to a worker subprocess — 64x30 s is 369 MB in flight, which
+# a Pi-class box cannot absorb. 16 captures 3.5x of the available 4.0x.
+_DEFAULT_MAX_BATCH_SIZE = 16
+# The `input` column that attributes a result row back to its clip is uint8.
+_MAX_ADDRESSABLE_BATCH = 256
+
+
+class _BatchRequest:
+    """One caller's clip waiting to ride along in a coalesced BirdNET call."""
+
+    __slots__ = ("audio", "done", "result", "error")
+
+    def __init__(self, audio: np.ndarray) -> None:
+        self.audio = audio
+        self.done = threading.Event()
+        self.result: ClassificationResult | None = None
+        self.error: BaseException | None = None
+
+    def settle(
+        self,
+        *,
+        result: ClassificationResult | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        self.result = result
+        self.error = error
+        self.done.set()
+
 
 class BirdNETClassifier(AudioClassifier):
     """Wraps the BirdNET V2.4 Protobuf model for bird species identification.
@@ -35,6 +74,17 @@ class BirdNETClassifier(AudioClassifier):
     The model files are downloaded on first instantiation (~125 MB).
     """
 
+    # Class-level defaults so instances built via ``__new__`` with hand-set
+    # attributes — the established pattern for testing this class without the
+    # optional birdnet package — behave as un-batched rather than raising
+    # AttributeError from classify()/close().
+    _batching_enabled: bool = False
+    _batch_max_size: int = 1
+    _batch_max_wait_seconds: float = 0.0
+    _batch_thread: threading.Thread | None = None
+    batches_dispatched: int = 0
+    clips_batched: int = 0
+
     def __init__(
         self,
         min_confidence: float = 0.1,
@@ -43,6 +93,8 @@ class BirdNETClassifier(AudioClassifier):
         latitude: float | None = None,
         longitude: float | None = None,
         geo_min_confidence: float = 0.03,
+        batch_max_size: int = _DEFAULT_MAX_BATCH_SIZE,
+        batch_max_wait_seconds: float = 0.0,
     ) -> None:
         try:
             from birdnet import model_loader
@@ -89,10 +141,42 @@ class BirdNETClassifier(AudioClassifier):
             proc for proc in multiprocessing.active_children() if proc not in children_before
         ]
 
+        # Request coalescing. `batch_max_wait_seconds <= 0` disables it entirely
+        # and every call goes straight through, preserving the original path.
+        self._batch_max_size = max(1, min(int(batch_max_size), _MAX_ADDRESSABLE_BATCH))
+        self._batch_max_wait_seconds = max(0.0, float(batch_max_wait_seconds))
+        self._batching_enabled = self._batch_max_wait_seconds > 0.0
+        self._batch_lock = threading.Lock()
+        self._batch_pending: list[_BatchRequest] = []
+        self._batch_ready = threading.Condition(self._batch_lock)
+        self._batch_thread: threading.Thread | None = None
+        self.batches_dispatched = 0
+        self.clips_batched = 0
+        if self._batching_enabled:
+            self._batch_thread = threading.Thread(
+                target=self._batch_loop,
+                name="birdnet-batcher",
+                daemon=True,
+            )
+            self._batch_thread.start()
+
+    @property
+    def mean_batch_size(self) -> float:
+        """Clips per dispatched call — the whole point of the coalescer."""
+        if self.batches_dispatched == 0:
+            return 0.0
+        return self.clips_batched / self.batches_dispatched
+
     def classify(self, samples: np.ndarray, sample_rate_hz: int) -> ClassificationResult:
         if self._closed:
             raise RuntimeError("BirdNETClassifier has been closed")
 
+        audio = self._to_model_rate(samples, sample_rate_hz)
+        if self._batching_enabled:
+            return self._classify_batched(audio)
+        return self._run_single(audio)
+
+    def _to_model_rate(self, samples: np.ndarray, sample_rate_hz: int) -> np.ndarray:
         audio = samples.astype(np.float32)
         if sample_rate_hz != _BIRDNET_SAMPLE_RATE_HZ:
             audio = resample_poly(
@@ -100,7 +184,124 @@ class BirdNETClassifier(AudioClassifier):
                 up=_BIRDNET_SAMPLE_RATE_HZ,
                 down=sample_rate_hz,
             ).astype(np.float32)
+        return audio
 
+    def _classify_batched(self, audio: np.ndarray) -> ClassificationResult:
+        """Hand the clip to the batcher and block until its result comes back.
+
+        Resampling already happened on the caller's thread, so the batch worker
+        only pays for the shared inference call.
+        """
+        request = _BatchRequest(audio)
+        with self._batch_ready:
+            self._batch_pending.append(request)
+            self._batch_ready.notify()
+        # No timeout here on purpose: the classification stage already bounds
+        # this via asyncio.wait_for, and close() settles every pending request.
+        request.done.wait()
+        if request.error is not None:
+            raise request.error
+        if request.result is None:  # pragma: no cover - settle() always sets one
+            raise RuntimeError("BirdNET batch produced no result")
+        return request.result
+
+    def _batch_loop(self) -> None:
+        """Collect concurrent callers into one `run_arrays()` call.
+
+        A batch closes as soon as it is full *or* the collection window expires —
+        whichever comes first. Under the load this exists for, the queue is
+        already saturated, so batches fill instantly and the window never
+        binds; the window only matters when traffic is light, where it trades a
+        bounded wait for far fewer fixed-cost calls.
+        """
+        while not self._closed:
+            with self._batch_ready:
+                while not self._batch_pending and not self._closed:
+                    self._batch_ready.wait(timeout=0.5)
+                if self._closed:
+                    break
+                # First request opens the window; keep collecting until the batch
+                # is full or the window closes.
+                window_closes_at = time.monotonic() + self._batch_max_wait_seconds
+                while (
+                    len(self._batch_pending) < self._batch_max_size
+                    and not self._closed
+                ):
+                    remaining = window_closes_at - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    self._batch_ready.wait(timeout=remaining)
+                batch = self._batch_pending[: self._batch_max_size]
+                del self._batch_pending[: len(batch)]
+            if not batch:
+                continue
+            self._dispatch_batch(batch)
+
+        # Drain on shutdown so no caller is left blocked forever.
+        with self._batch_ready:
+            pending, self._batch_pending = self._batch_pending, []
+        for request in pending:
+            request.settle(error=RuntimeError("BirdNETClassifier has been closed"))
+
+    def _dispatch_batch(self, batch: list[_BatchRequest]) -> None:
+        try:
+            session = self._acquire_session()
+        except BaseException as exc:  # noqa: BLE001 - propagate to every waiter
+            for request in batch:
+                request.settle(error=exc)
+            return
+        try:
+            with self._session_lock:
+                self._inflight_sessions.add(session)
+            try:
+                result = session.run_arrays(
+                    [(request.audio, _BIRDNET_SAMPLE_RATE_HZ) for request in batch]
+                )
+            finally:
+                with self._session_lock:
+                    self._inflight_sessions.discard(session)
+                if not self._closed:
+                    self._session_pool.put(session)
+            self.batches_dispatched += 1
+            self.clips_batched += len(batch)
+            rows_by_input = self._rows_by_input(result, len(batch))
+            for index, request in enumerate(batch):
+                request.settle(result=self._build_result(rows_by_input[index]))
+        except BaseException as exc:  # noqa: BLE001 - one bad batch must not hang callers
+            logger.warning("BirdNET batch of %d failed: %s", len(batch), exc)
+            for request in batch:
+                if not request.done.is_set():
+                    request.settle(error=exc)
+
+    @staticmethod
+    def _rows_by_input(result: Any, batch_size: int) -> list[list[Any]]:
+        """Split a batched structured array back out per input clip.
+
+        ``to_structured_array()`` returns one flat table for the whole call; the
+        ``input`` column is the index of the clip each row came from.
+        """
+        grouped: list[list[Any]] = [[] for _ in range(batch_size)]
+        detections = result.to_structured_array()
+        for row in detections:
+            index = int(row["input"])
+            if 0 <= index < batch_size:
+                grouped[index].append(row)
+        return grouped
+
+    def _run_single(self, audio: np.ndarray) -> ClassificationResult:
+        session = self._acquire_session()
+        with self._session_lock:
+            self._inflight_sessions.add(session)
+        try:
+            result = session.run_arrays([(audio, _BIRDNET_SAMPLE_RATE_HZ)])
+        finally:
+            with self._session_lock:
+                self._inflight_sessions.discard(session)
+            if not self._closed:
+                self._session_pool.put(session)
+        return self._build_result(list(result.to_structured_array()))
+
+    def _acquire_session(self) -> Any:
         # Acquire a pooled session with a short-poll loop (bounded by an overall
         # 120s deadline) so close() can unblock us promptly via a None sentinel
         # instead of us waiting out a single long queue.get().
@@ -117,22 +318,15 @@ class BirdNETClassifier(AudioClassifier):
                 continue
             if session is None:
                 raise RuntimeError("BirdNETClassifier has been closed")
-            break
+            return session
 
-        with self._session_lock:
-            self._inflight_sessions.add(session)
-        try:
-            result = session.run_arrays([(audio, _BIRDNET_SAMPLE_RATE_HZ)])
-        finally:
-            with self._session_lock:
-                self._inflight_sessions.discard(session)
-            if not self._closed:
-                self._session_pool.put(session)
+    def _build_result(self, detections: list[Any]) -> ClassificationResult:
+        """Turn one clip's result rows into a ClassificationResult.
 
-        # to_structured_array() yields rows with fields: species_name, confidence,
-        # start_time, end_time — sorted by confidence descending, above-threshold only.
-        detections = result.to_structured_array()  # type: ignore[union-attr]
-
+        Rows carry fields: input, start_time, end_time, species_name, confidence
+        — above-threshold only. Shared by the single and batched paths so both
+        produce byte-identical results.
+        """
         if len(detections) == 0:
             return ClassificationResult(
                 label="unknown",
@@ -182,6 +376,17 @@ class BirdNETClassifier(AudioClassifier):
         if self._closed:
             return
         self._closed = True
+
+        # Wake the batch collector and settle everything already queued, or those
+        # callers block forever on their _BatchRequest event. Absent entirely on
+        # __new__-built instances that never enabled batching.
+        batch_ready = getattr(self, "_batch_ready", None)
+        if batch_ready is not None:
+            with batch_ready:
+                pending, self._batch_pending = self._batch_pending, []
+                batch_ready.notify_all()
+            for request in pending:
+                request.settle(error=RuntimeError("BirdNETClassifier has been closed"))
 
         # Wake any thread parked in classify()'s session_pool.get() immediately.
         for _ in self._session_ctxs:

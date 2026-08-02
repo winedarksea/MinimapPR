@@ -830,6 +830,17 @@ class Settings:
     # through a single session (each extra session costs ~125 MB RSS and one
     # TFLite subprocess); raise to ~fusion_worker_count on multi-core boxes.
     birdnet_pool_size: int = 1
+    # BirdNET request coalescing. A `run_arrays()` call costs ~1.0 s of fixed
+    # barrier synchronization whatever the payload (measured: 1048 ms for 0.25 s
+    # of audio, 1349 ms for 30 s), so the number of calls dominates cost.
+    # IMPORTANT: a batch can only contain callers that are *concurrently* inside
+    # classify(), which is capped by `fusion_worker_count`. Raising the wait
+    # window does not gather more clips than there are classification workers —
+    # raise `fusion_worker_count` (and this size) together to get bigger batches.
+    # The window must stay well under `classifier_stage_timeout_seconds`, since
+    # waiting counts against the stage timeout. 0 disables batching entirely.
+    birdnet_batch_max_wait_seconds: float = 0.5
+    birdnet_batch_max_size: int = 16
     detection_min_confidence: float = 0.4
     cop_detections_max_items: int = 150
     cop_tracks_max_items: int = 150
@@ -1482,6 +1493,28 @@ class Settings:
             raise ValueError("MINIMAPPR_BIRDNET_GEO_MIN_CONFIDENCE must be in [0,1]")
         if self.birdnet_pool_size < 1:
             raise ValueError("MINIMAPPR_BIRDNET_POOL_SIZE must be >= 1")
+        if (
+            not math.isfinite(self.birdnet_batch_max_wait_seconds)
+            or self.birdnet_batch_max_wait_seconds < 0.0
+        ):
+            raise ValueError("MINIMAPPR_BIRDNET_BATCH_MAX_WAIT_SECONDS must be finite and >= 0")
+        if self.birdnet_batch_max_size < 1:
+            raise ValueError("MINIMAPPR_BIRDNET_BATCH_MAX_SIZE must be >= 1")
+        # Batch collection happens inside the classification stage timeout, so a
+        # window near it starves the inference that follows and times out every
+        # batched item. Clamp rather than raise (mirroring the STT clamp above):
+        # the default window must stay valid under any stage timeout, including
+        # the very short ones tests and low-latency deployments use.
+        _max_safe_batch_wait = 0.5 * self.classifier_stage_timeout_seconds
+        if self.birdnet_batch_max_wait_seconds > _max_safe_batch_wait:
+            _config_logger.warning(
+                "birdnet_batch_max_wait_seconds (%.3fs) leaves too little of "
+                "classifier_stage_timeout_seconds (%.3fs) for inference; clamping to %.3fs",
+                self.birdnet_batch_max_wait_seconds,
+                self.classifier_stage_timeout_seconds,
+                _max_safe_batch_wait,
+            )
+            self.birdnet_batch_max_wait_seconds = _max_safe_batch_wait
         if self.detection_min_confidence < 0.0 or self.detection_min_confidence > 1.0:
             raise ValueError("MINIMAPPR_DETECTION_MIN_CONFIDENCE must be in [0,1]")
         if self.cop_detections_max_items < 1:
@@ -2045,6 +2078,11 @@ class Settings:
             birdnet_trigger_min_confidence=_env_float("MINIMAPPR_BIRDNET_TRIGGER_MIN_CONFIDENCE", 0.40),
             birdnet_geo_min_confidence=_env_float("MINIMAPPR_BIRDNET_GEO_MIN_CONFIDENCE", 0.03),
             birdnet_pool_size=_env_int("MINIMAPPR_BIRDNET_POOL_SIZE", 1),
+            birdnet_batch_max_wait_seconds=_env_float(
+                "MINIMAPPR_BIRDNET_BATCH_MAX_WAIT_SECONDS",
+                0.5,
+            ),
+            birdnet_batch_max_size=_env_int("MINIMAPPR_BIRDNET_BATCH_MAX_SIZE", 16),
             detection_min_confidence=_env_float("MINIMAPPR_DETECTION_MIN_CONFIDENCE", 0.4),
             cop_detections_max_items=_env_int("MINIMAPPR_COP_DETECTIONS_MAX_ITEMS", 150),
             cop_tracks_max_items=_env_int("MINIMAPPR_COP_TRACKS_MAX_ITEMS", 150),

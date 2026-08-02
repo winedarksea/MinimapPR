@@ -100,6 +100,9 @@ CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     # startup. pool_size=1 serializes every fusion worker through one BirdNET
     # session (2026-08-01 live-box throughput root cause).
     "birdnet_pool_size": int,
+    # Restart-required alongside pool_size: the classifier is built at startup.
+    "birdnet_batch_max_wait_seconds": float,
+    "birdnet_batch_max_size": int,
     "tracking_filter": str,
     "fusion_worker_count": int,
     "coordinate_mode": str,
