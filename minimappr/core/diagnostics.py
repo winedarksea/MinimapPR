@@ -95,6 +95,12 @@ class DiagnosticsService:
                 "yamnet_min_confidence": self._settings.yamnet_min_confidence,
                 "yamnet_input_target_rms": self._settings.yamnet_input_target_rms,
                 "yamnet_max_input_gain": self._settings.yamnet_max_input_gain,
+                "classification_texture_gate_enabled": self._settings.classification_texture_gate_enabled,
+                "classification_texture_gate_contrast_db": self._settings.classification_texture_gate_contrast_db,
+                "classification_texture_gate_flatness_min": self._settings.classification_texture_gate_flatness_min,
+                "classification_texture_gate_confidence_factor": (
+                    self._settings.classification_texture_gate_confidence_factor
+                ),
                 "birdnet_trigger_min_confidence": self._settings.birdnet_trigger_min_confidence,
             },
             "queues": {

@@ -503,3 +503,46 @@ def test_patch_classification_backpressure_keys_validation(monkeypatch, tmp_path
         assert client.patch("/api/v1/config", json={"fusion_classification_queue_size": 0}).status_code == 422
         assert client.patch("/api/v1/config", json={"classification_window_seconds": 0.0}).status_code == 422
         assert client.patch("/api/v1/config", json={"fusion_backpressure_drop_policy": "sideways"}).status_code == 422
+
+
+def test_patch_texture_gate_keys(monkeypatch, tmp_path: Path) -> None:
+    """The annotate-only → demote flip is a live PATCH, not a redeploy."""
+    _configure_env(monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        resp = client.patch(
+            "/api/v1/config",
+            json={
+                "classification_texture_gate_enabled": True,
+                "classification_texture_gate_contrast_db": 6.5,
+                "classification_texture_gate_flatness_min": 0.3,
+                "classification_texture_gate_confidence_factor": 0.25,
+            },
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["classification_texture_gate_enabled"] is True
+        assert body["classification_texture_gate_contrast_db"] == pytest.approx(6.5)
+        assert body["classification_texture_gate_flatness_min"] == pytest.approx(0.3)
+        assert body["classification_texture_gate_confidence_factor"] == pytest.approx(0.25)
+
+        get_body = client.get("/api/v1/config").json()
+        assert get_body["classification_texture_gate_confidence_factor"] == pytest.approx(0.25)
+
+
+@pytest.mark.parametrize(
+    "patch_body",
+    [
+        {"classification_texture_gate_contrast_db": -1.0},
+        {"classification_texture_gate_flatness_min": 1.5},
+        {"classification_texture_gate_flatness_min": -0.1},
+        {"classification_texture_gate_confidence_factor": 1.5},
+        {"classification_texture_gate_confidence_factor": -0.1},
+        {"yamnet_max_input_gain": 0.0},
+        {"yamnet_max_input_gain": -4.0},
+    ],
+)
+def test_patch_texture_gate_validation(monkeypatch, tmp_path: Path, patch_body: dict) -> None:
+    _configure_env(monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        resp = client.patch("/api/v1/config", json=patch_body)
+        assert resp.status_code == 422

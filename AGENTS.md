@@ -45,3 +45,4 @@ This document provides guidelines for agents working on the MinimapPR codebase.
 * Cleanup policies automatically cleaning up old data should cover all data.
 * The preferred format for nn models is quantized onnx runtimes, although others may be used where practical.
 * IAMF audio and ambisonic audio should be able to be recorded and export, with the localized and tracked audio passed in as proper objects to the IAMF (Atmos style) audio format.
+* Make sure long range detections (which are faint, quieter) are not blocked by aggressive RMS gates or other checks.

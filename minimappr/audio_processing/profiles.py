@@ -61,7 +61,7 @@ _DEFAULT_DOCUMENT = {
                 {
                     "type": "bounded_rms_gain",
                     "target_rms_dbfs": -20.0,
-                    "max_gain_db": 20.0 * math.log10(32.0),
+                    "max_gain_db": 20.0 * math.log10(64.0),
                     "peak_ceiling_dbfs": 20.0 * math.log10(0.98),
                     "boost_only": True,
                 },

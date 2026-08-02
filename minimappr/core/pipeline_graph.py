@@ -59,6 +59,9 @@ COLUMNS: tuple[tuple[str, str, int], ...] = (
 
 _HealthT = str  # "ok" | "warn" | "danger" | "idle" | "off" | "unknown"
 
+# Post-classification noise-floor texture gate (see ClassificationOrchestrator).
+TEXTURE_GATE_NODE_ID = "cls:texture_gate"
+
 
 def _fmt(value: Any, *, suffix: str = "", digits: int | None = None) -> str:
     if isinstance(value, bool):
@@ -412,10 +415,8 @@ def build_pipeline_graph(
         status=_track_status(metrics, fusion_available),
         link="/settings/config#tracking",
     )
-    # Members feed tracking.
-    for n in graph_nodes:
-        if n.id.startswith("cls:member:"):
-            add_edge(n.id, track_id, kind="metadata", label="detection")
+    # Classification feeds tracking through the texture gate.
+    add_edge(TEXTURE_GATE_NODE_ID, track_id, kind="metadata", label="detection")
 
     if ble_present:
         ble_track_id = "ble:site:tracking"
@@ -639,6 +640,45 @@ def _add_classifiers(*, routing, settings, gate_ids, beam_id, add_node, add_edge
                 link="/settings/config#classification",
             )
         add_edge(parent, target, kind="trigger", label=trig.action.replace("_", " "))
+
+    # Post-classification noise-floor texture gate. Every member's result funnels
+    # through it (ClassificationOrchestrator._build_result), so it is drawn in
+    # series between the members and everything downstream.
+    gate_enabled = bool(settings.classification_texture_gate_enabled)
+    factor = float(settings.classification_texture_gate_confidence_factor)
+    add_node(
+        id=TEXTURE_GATE_NODE_ID,
+        stage=PipelineStageKind.CLASSIFIER,
+        column="classify",
+        lane="site",
+        title="Texture Gate",
+        subtitle="annotate only" if factor >= 1.0 else f"demote ×{factor:g}",
+        modality="audio",
+        enabled=gate_enabled,
+        params=[
+            _param("Enabled", gate_enabled, "classification_texture_gate_enabled"),
+            _param(
+                "Contrast <",
+                float(settings.classification_texture_gate_contrast_db),
+                "classification_texture_gate_contrast_db",
+                suffix=" dB",
+            ),
+            _param(
+                "Flatness >",
+                float(settings.classification_texture_gate_flatness_min),
+                "classification_texture_gate_flatness_min",
+            ),
+            _param("Confidence ×", factor, "classification_texture_gate_confidence_factor"),
+        ],
+        status=(
+            PipelineStageStatus(health="ok" if fusion_available else "unknown")
+            if gate_enabled
+            else PipelineStageStatus(health="off", summary="texture gate disabled")
+        ),
+        link="/settings/config#classification",
+    )
+    for member_id in sorted(seen_members):
+        add_edge(f"cls:member:{member_id}", TEXTURE_GATE_NODE_ID, kind="metadata", label="result")
 
 
 # ── Status helpers ──────────────────────────────────────────────────────────

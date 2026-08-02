@@ -26,12 +26,12 @@ from minimappr.classifiers.yamnet_model import (
 logger = logging.getLogger(__name__)
 
 _YAMNET_TARGET_RMS = 0.10
-_YAMNET_MAX_INPUT_GAIN = 32.0
+_YAMNET_MAX_INPUT_GAIN = 64.0
 _EPSILON = 1e-12
 
 # Bumped whenever `_prepare_waveform_for_yamnet` changes so embedding caches and
 # model metadata can invalidate on preprocessing drift (train/serve consistency).
-YAMNET_PREPROCESS_VERSION = "yamnet-prep-v1"
+YAMNET_PREPROCESS_VERSION = "yamnet-prep-v2"
 def yamnet_preprocess_fingerprint(
     target_rms: float = _YAMNET_TARGET_RMS,
     max_input_gain: float = _YAMNET_MAX_INPUT_GAIN,

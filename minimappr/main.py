@@ -7,6 +7,7 @@ import contextvars
 import contextlib
 import json
 import logging
+import math
 import os
 import sys
 import threading
@@ -3039,6 +3040,12 @@ async def get_config(request: Request) -> dict:
         },
         "yamnet_input_target_rms": settings.yamnet_input_target_rms,
         "yamnet_max_input_gain": settings.yamnet_max_input_gain,
+        "classification_texture_gate_enabled": settings.classification_texture_gate_enabled,
+        "classification_texture_gate_contrast_db": settings.classification_texture_gate_contrast_db,
+        "classification_texture_gate_flatness_min": settings.classification_texture_gate_flatness_min,
+        "classification_texture_gate_confidence_factor": (
+            settings.classification_texture_gate_confidence_factor
+        ),
         "classification_audio_source": settings.classification_audio_source,
         "min_localization_confidence": settings.min_localization_confidence,
         "skip_localization_for_classification": settings.skip_localization_for_classification,
@@ -3417,6 +3424,18 @@ async def patch_config(request: Request) -> dict:
             errors.append("yamnet_min_confidence: must be in [0, 1]")
         elif key == "detection_min_confidence" and not (0.0 <= value <= 1.0):  # type: ignore[operator]
             errors.append("detection_min_confidence: must be in [0, 1]")
+        elif key == "yamnet_max_input_gain" and not (
+            math.isfinite(value) and value > 0.0  # type: ignore[arg-type,operator]
+        ):
+            errors.append("yamnet_max_input_gain: must be finite and > 0")
+        elif key == "classification_texture_gate_contrast_db" and not (
+            math.isfinite(value) and value >= 0.0  # type: ignore[arg-type,operator]
+        ):
+            errors.append("classification_texture_gate_contrast_db: must be finite and >= 0")
+        elif key == "classification_texture_gate_flatness_min" and not (0.0 <= value <= 1.0):  # type: ignore[operator]
+            errors.append("classification_texture_gate_flatness_min: must be in [0, 1]")
+        elif key == "classification_texture_gate_confidence_factor" and not (0.0 <= value <= 1.0):  # type: ignore[operator]
+            errors.append("classification_texture_gate_confidence_factor: must be in [0, 1]")
         elif key in {"cop_detections_max_items", "cop_tracks_max_items"} and value < 1:  # type: ignore[operator]
             errors.append(f"{key}: must be >= 1")
         elif key in {"cop_detections_max_age_seconds", "cop_tracks_max_age_seconds"} and value <= 0.0:  # type: ignore[operator]

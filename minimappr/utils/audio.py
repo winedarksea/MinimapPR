@@ -101,6 +101,83 @@ def spectral_features(samples: np.ndarray, sample_rate_hz: int) -> dict[str, flo
     }
 
 
+def framed_rms_db(
+    samples: np.ndarray,
+    sample_rate_hz: int,
+    frame_ms: float = 100.0,
+) -> np.ndarray:
+    """Per-frame RMS in dBFS.
+
+    Frames are non-overlapping and the trailing partial frame is dropped so every
+    frame carries the same energy weight. Returns an empty array when the window
+    is too short to hold a single frame.
+    """
+    if sample_rate_hz <= 0 or frame_ms <= 0.0 or samples.size == 0:
+        return np.zeros(0, dtype=np.float32)
+    frame_len = int(sample_rate_hz * frame_ms / 1000.0)
+    if frame_len <= 0:
+        return np.zeros(0, dtype=np.float32)
+    frame_count = samples.size // frame_len
+    if frame_count == 0:
+        return np.zeros(0, dtype=np.float32)
+    frames = samples[: frame_count * frame_len].astype(np.float32).reshape(frame_count, frame_len)
+    frame_rms = np.sqrt(np.mean(np.square(frames), axis=1))
+    return (20.0 * np.log10(frame_rms + EPSILON)).astype(np.float32)
+
+
+# Fewer frames than this (~400 ms at the 100 ms default) makes the percentile
+# spread meaningless, so the texture metrics fail open with ``None``.
+_MIN_TEXTURE_FRAMES = 4
+
+
+def energy_contrast_db(
+    samples: np.ndarray,
+    sample_rate_hz: int,
+    frame_ms: float = 100.0,
+) -> float | None:
+    """Level-invariant spread between loud and typical frames (p95 - p50, dB).
+
+    A real acoustic event punches well above its own noise floor no matter how
+    faint it is overall; featureless hiss stays flat. Returns ``None`` when the
+    window is too short to measure.
+    """
+    frames_db = framed_rms_db(samples, sample_rate_hz, frame_ms=frame_ms)
+    if frames_db.size < _MIN_TEXTURE_FRAMES:
+        return None
+    return float(np.percentile(frames_db, 95.0) - np.percentile(frames_db, 50.0))
+
+
+def framed_spectral_flatness_median(
+    samples: np.ndarray,
+    sample_rate_hz: int,
+    frame_ms: float = 100.0,
+) -> float | None:
+    """Median per-frame spectral flatness (geometric / arithmetic mean).
+
+    Complements :func:`energy_contrast_db`: a steady tonal source (a distant
+    hovering drone) has little energy contrast but very low flatness, so it is
+    not mistaken for noise. Returns ``None`` when the window is too short.
+    """
+    if sample_rate_hz <= 0 or frame_ms <= 0.0 or samples.size == 0:
+        return None
+    frame_len = int(sample_rate_hz * frame_ms / 1000.0)
+    if frame_len <= 0:
+        return None
+    frame_count = samples.size // frame_len
+    if frame_count < _MIN_TEXTURE_FRAMES:
+        return None
+    frames = samples[: frame_count * frame_len].astype(np.float32).reshape(frame_count, frame_len)
+    # Hann-windowed, unlike the whole-clip `spectral_features`: rectangular
+    # framing leaks a tone across neighbouring bins and inflates the flatness of
+    # exactly the tonal sources this metric exists to protect.
+    frames = frames * np.hanning(frame_len).astype(np.float32)
+    spectrum = np.abs(np.fft.rfft(frames, axis=1)) + EPSILON
+    geometric_mean = np.exp(np.mean(np.log(spectrum), axis=1))
+    arithmetic_mean = np.mean(spectrum, axis=1)
+    flatness = geometric_mean / (arithmetic_mean + EPSILON)
+    return float(np.median(flatness))
+
+
 def write_wav_mono(path: Path, samples: np.ndarray, sample_rate_hz: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     data = np.clip(samples, -1.0, 1.0)

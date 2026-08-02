@@ -66,6 +66,15 @@ CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     "localization_max_reportable_gdop": float,
     "skip_localization_for_classification": bool,
     "yamnet_min_confidence": float,
+    # Restart-required: the classifier is built once at startup with this gain.
+    "yamnet_max_input_gain": float,
+    # Noise-floor texture gate. Live-tunable on purpose: the rollout ships in
+    # annotate-only mode (confidence_factor = 1.0) and flips to demotion via
+    # PATCH once the flagged population has been reviewed.
+    "classification_texture_gate_enabled": bool,
+    "classification_texture_gate_contrast_db": float,
+    "classification_texture_gate_flatness_min": float,
+    "classification_texture_gate_confidence_factor": float,
     "detection_min_confidence": float,
     "cop_detections_max_items": int,
     "cop_tracks_max_items": int,

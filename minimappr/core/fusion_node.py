@@ -413,6 +413,17 @@ class FusionNode:
             beamformed_classification_confidence_margin=settings.beamformed_classification_confidence_margin,
             stage_timeout_seconds=self.classifier_config.stage_timeout_seconds,
             on_beamform_error=self._record_beamform_failure,
+            texture_gate_enabled=settings.classification_texture_gate_enabled,
+            texture_gate_contrast_db=settings.classification_texture_gate_contrast_db,
+            texture_gate_flatness_min=settings.classification_texture_gate_flatness_min,
+            texture_gate_confidence_factor=settings.classification_texture_gate_confidence_factor,
+            # The detection still persists — this is a flag counter, not a drop.
+            # It counts what demotion would suppress while the gate runs in
+            # annotate-only mode (confidence_factor = 1.0).
+            on_texture_gate_demotion=lambda: self._record_silent_drop(
+                stage="classification",
+                reason="texture_gate_flagged",
+            ),
         )
         self._detection_assembler = DetectionAssembler(
             storage=storage,
@@ -1086,6 +1097,7 @@ class FusionNode:
                 classification=payload.authoritative_classification,
                 event_time_ns=payload.event_time_ns,
                 classification_signal=normalized_audio,
+                sample_rate_hz=payload.sample_rate_hz,
             )
             classified.classification.features["rust_classification_authoritative"] = True
         else:
@@ -1198,6 +1210,7 @@ class FusionNode:
             classification=scan.classification,
             event_time_ns=scan.end_time_ns,
             classification_signal=audio,
+            sample_rate_hz=scan.sample_rate_hz,
             classification_path="omni_continuous",
         )
         classified.classification.features["omni_continuous_scan"] = True

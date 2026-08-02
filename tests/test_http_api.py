@@ -1235,6 +1235,13 @@ def test_debug_config_reports_routing_config_path(monkeypatch, tmp_path: Path) -
         assert "routing_config_path" in config_body["runtime"]["classifier"]
         assert "yamnet_input_target_rms" in config_body["thresholds"]
         assert "yamnet_max_input_gain" in config_body["thresholds"]
+        for key in (
+            "classification_texture_gate_enabled",
+            "classification_texture_gate_contrast_db",
+            "classification_texture_gate_flatness_min",
+            "classification_texture_gate_confidence_factor",
+        ):
+            assert key in config_body["thresholds"]
         assert "python_version" in config_body["runtime"]
 
 

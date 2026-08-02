@@ -800,7 +800,17 @@ class Settings:
     t3t4_hysteresis_lo_ratio: float = 2.5
     yamnet_min_confidence: float = 0.25
     yamnet_input_target_rms: float = 0.10
-    yamnet_max_input_gain: float = 32.0
+    yamnet_max_input_gain: float = 64.0
+    # Noise-floor texture gate. Classification windows that contain only the
+    # node's noise floor are boosted ~30 dB by the bounded-RMS AGC and confidently
+    # mislabeled ("Zipper (clothing)", "Fireworks", ...). Flat, featureless hiss
+    # is separated from real events by low energy contrast AND high spectral
+    # flatness. ``confidence_factor`` defaults to 1.0 = annotate-only; set it
+    # below 1.0 to actually demote flagged results.
+    classification_texture_gate_enabled: bool = True
+    classification_texture_gate_contrast_db: float = 8.0
+    classification_texture_gate_flatness_min: float = 0.2
+    classification_texture_gate_confidence_factor: float = 1.0
     birdnet_trigger_min_confidence: float = 0.40
     birdnet_geo_min_confidence: float = 0.03
     # Concurrent BirdNET predict-sessions. 1 serializes all fusion workers
@@ -1418,6 +1428,25 @@ class Settings:
             raise ValueError("MINIMAPPR_YAMNET_INPUT_TARGET_RMS must be finite and > 0")
         if not math.isfinite(self.yamnet_max_input_gain) or self.yamnet_max_input_gain <= 0.0:
             raise ValueError("MINIMAPPR_YAMNET_MAX_INPUT_GAIN must be finite and > 0")
+        if (
+            not math.isfinite(self.classification_texture_gate_contrast_db)
+            or self.classification_texture_gate_contrast_db < 0.0
+        ):
+            raise ValueError(
+                "MINIMAPPR_CLASSIFICATION_TEXTURE_GATE_CONTRAST_DB must be finite and >= 0"
+            )
+        if (
+            self.classification_texture_gate_flatness_min < 0.0
+            or self.classification_texture_gate_flatness_min > 1.0
+        ):
+            raise ValueError("MINIMAPPR_CLASSIFICATION_TEXTURE_GATE_FLATNESS_MIN must be in [0,1]")
+        if (
+            self.classification_texture_gate_confidence_factor < 0.0
+            or self.classification_texture_gate_confidence_factor > 1.0
+        ):
+            raise ValueError(
+                "MINIMAPPR_CLASSIFICATION_TEXTURE_GATE_CONFIDENCE_FACTOR must be in [0,1]"
+            )
         if self.birdnet_trigger_min_confidence < 0.0 or self.birdnet_trigger_min_confidence > 1.0:
             raise ValueError("MINIMAPPR_BIRDNET_TRIGGER_MIN_CONFIDENCE must be in [0,1]")
         if self.birdnet_geo_min_confidence < 0.0 or self.birdnet_geo_min_confidence > 1.0:
@@ -1931,7 +1960,23 @@ class Settings:
             t3t4_hysteresis_lo_ratio=_env_float("MINIMAPPR_T3T4_HYSTERESIS_LO_RATIO", 2.5),
             yamnet_min_confidence=_env_float("MINIMAPPR_YAMNET_MIN_CONFIDENCE", 0.25),
             yamnet_input_target_rms=_env_float("MINIMAPPR_YAMNET_INPUT_TARGET_RMS", 0.10),
-            yamnet_max_input_gain=_env_float("MINIMAPPR_YAMNET_MAX_INPUT_GAIN", 32.0),
+            yamnet_max_input_gain=_env_float("MINIMAPPR_YAMNET_MAX_INPUT_GAIN", 64.0),
+            classification_texture_gate_enabled=_env_bool(
+                "MINIMAPPR_CLASSIFICATION_TEXTURE_GATE_ENABLED",
+                True,
+            ),
+            classification_texture_gate_contrast_db=_env_float(
+                "MINIMAPPR_CLASSIFICATION_TEXTURE_GATE_CONTRAST_DB",
+                8.0,
+            ),
+            classification_texture_gate_flatness_min=_env_float(
+                "MINIMAPPR_CLASSIFICATION_TEXTURE_GATE_FLATNESS_MIN",
+                0.2,
+            ),
+            classification_texture_gate_confidence_factor=_env_float(
+                "MINIMAPPR_CLASSIFICATION_TEXTURE_GATE_CONFIDENCE_FACTOR",
+                1.0,
+            ),
             birdnet_trigger_min_confidence=_env_float("MINIMAPPR_BIRDNET_TRIGGER_MIN_CONFIDENCE", 0.40),
             birdnet_geo_min_confidence=_env_float("MINIMAPPR_BIRDNET_GEO_MIN_CONFIDENCE", 0.03),
             birdnet_pool_size=_env_int("MINIMAPPR_BIRDNET_POOL_SIZE", 1),

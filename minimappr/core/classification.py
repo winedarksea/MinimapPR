@@ -27,6 +27,7 @@ from minimappr.interfaces import (
     TaxonomyProvider,
 )
 from minimappr.models import LabelId
+from minimappr.utils.audio import energy_contrast_db, framed_spectral_flatness_median
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +132,11 @@ class ClassificationOrchestrator:
         stage_timeout_seconds: float = 30.0,
         classifier_backend_name: str = "routing",
         on_beamform_error: Callable[[str], None] | None = None,
+        texture_gate_enabled: bool = True,
+        texture_gate_contrast_db: float = 8.0,
+        texture_gate_flatness_min: float = 0.2,
+        texture_gate_confidence_factor: float = 1.0,
+        on_texture_gate_demotion: Callable[[], None] | None = None,
     ) -> None:
         self._classifier = classifier
         self._storage = storage
@@ -143,6 +149,11 @@ class ClassificationOrchestrator:
         self._stage_timeout_seconds = max(0.001, float(stage_timeout_seconds))
         self._classifier_backend_name = classifier_backend_name
         self._on_beamform_error = on_beamform_error
+        self._texture_gate_enabled = bool(texture_gate_enabled)
+        self._texture_gate_contrast_db = float(texture_gate_contrast_db)
+        self._texture_gate_flatness_min = float(texture_gate_flatness_min)
+        self._texture_gate_confidence_factor = float(texture_gate_confidence_factor)
+        self._on_texture_gate_demotion = on_texture_gate_demotion
 
     def replace_classifier(self, classifier: AudioClassifier) -> None:
         self._classifier = classifier
@@ -191,6 +202,7 @@ class ClassificationOrchestrator:
             beamformed_classification=beamformed_classification,
             classification_path=winning_candidate.path,
             classification_signal=winning_candidate.signal,
+            sample_rate_hz=sample_rate_hz,
             beamforming_error=beamformed_attempt.error,
             event_time_ns=event_time_ns,
             backend_failed=backend_failed,
@@ -220,6 +232,7 @@ class ClassificationOrchestrator:
             beamformed_classification=None,
             classification_path=path,
             classification_signal=omni_candidate.signal,
+            sample_rate_hz=sample_rate_hz,
             beamforming_error=None,
             event_time_ns=event_time_ns,
             backend_failed=backend_failed,
@@ -264,6 +277,7 @@ class ClassificationOrchestrator:
             beamformed_classification=candidate.classification,
             classification_path=candidate.path,
             classification_signal=candidate.signal,
+            sample_rate_hz=sample_rate_hz,
             beamforming_error=beamformed_attempt.error,
             event_time_ns=event_time_ns,
             backend_failed=backend_failed,
@@ -275,6 +289,7 @@ class ClassificationOrchestrator:
         classification: ClassificationResult,
         event_time_ns: int,
         classification_signal: np.ndarray,
+        sample_rate_hz: int,
         classification_path: str = "rust_manifest",
     ) -> ClassifiedResult:
         """Adopt a precomputed classification result without re-running inference."""
@@ -285,6 +300,7 @@ class ClassificationOrchestrator:
             beamformed_classification=None,
             classification_path=classification_path,
             classification_signal=classification_signal,
+            sample_rate_hz=sample_rate_hz,
             beamforming_error=None,
             event_time_ns=event_time_ns,
         )
@@ -485,6 +501,78 @@ class ClassificationOrchestrator:
             },
         )
 
+    def _apply_texture_gate(
+        self,
+        *,
+        classification: ClassificationResult,
+        signal: np.ndarray | None,
+        sample_rate_hz: int,
+    ) -> ClassificationResult:
+        """Flag (and optionally demote) results drawn from featureless noise.
+
+        A classification window holding nothing but the node's noise floor is
+        boosted ~30 dB by the bounded-RMS AGC, and YAMNet labels the resulting
+        hiss confidently ("Zipper (clothing)", "Fireworks", ...). Two
+        level-invariant discriminators separate that from a real event, however
+        faint: energy contrast (a real event punches above its own floor) and
+        spectral flatness (a steady tonal source such as a distant drone is
+        strongly non-flat even without contrast). Both must indicate noise.
+
+        This runs after the winner is selected, so it can never change which
+        path wins, and it never rewrites ``label`` or ``scores`` — a demoted
+        detection is still persisted, just below the alerting and default-UI
+        confidence floors.
+        """
+        if not self._texture_gate_enabled:
+            return classification
+        if classification.features.get("reason") in {
+            "classification_timeout",
+            "classification_error",
+        }:
+            return classification
+        if signal is None or sample_rate_hz <= 0:
+            return classification
+        samples = np.asarray(signal, dtype=np.float32)
+        if samples.ndim > 1:
+            samples = np.mean(samples, axis=0, dtype=np.float32)
+        if samples.size == 0:
+            return classification
+
+        contrast_db = energy_contrast_db(samples, int(sample_rate_hz))
+        flatness = framed_spectral_flatness_median(samples, int(sample_rate_hz))
+        if contrast_db is None or flatness is None:
+            classification.features["texture_gate"] = {"skipped": "short_window"}
+            return classification
+
+        gated = (
+            contrast_db < self._texture_gate_contrast_db
+            and flatness > self._texture_gate_flatness_min
+        )
+        annotation: dict[str, Any] = {
+            "contrast_db": round(float(contrast_db), 3),
+            "flatness": round(float(flatness), 4),
+            "gated": bool(gated),
+        }
+        if not gated:
+            classification.features["texture_gate"] = annotation
+            return classification
+
+        if self._texture_gate_confidence_factor < 1.0:
+            # `classify_omni_only` passes the same object as both the winner and
+            # the omni result; copy so the raw omni confidence stays intact for
+            # assembly reporting.
+            classification = classification.model_copy(deep=True)
+            annotation["original_confidence"] = float(classification.confidence)
+            classification.confidence = float(
+                classification.confidence * self._texture_gate_confidence_factor
+            )
+        classification.features["texture_gate"] = annotation
+        # Fired even in annotate-only mode so the counter measures what demotion
+        # would do. The detection is still persisted — this flags, never drops.
+        if self._on_texture_gate_demotion is not None:
+            self._on_texture_gate_demotion()
+        return classification
+
     async def _build_result(
         self,
         *,
@@ -493,10 +581,16 @@ class ClassificationOrchestrator:
         beamformed_classification: ClassificationResult | None,
         classification_path: str,
         classification_signal: np.ndarray,
+        sample_rate_hz: int,
         beamforming_error: str | None,
         event_time_ns: int,
         backend_failed: bool = False,
     ) -> ClassifiedResult:
+        classification = self._apply_texture_gate(
+            classification=classification,
+            signal=classification_signal,
+            sample_rate_hz=sample_rate_hz,
+        )
         label_category = _resolve_label_category(classification, self._taxonomy_provider)
         iff_category = self._taxonomy_provider.iff_for_category(label_category)
         # Provenance: the winning ensemble member (set by CompositeClassifier)
