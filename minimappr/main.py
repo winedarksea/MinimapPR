@@ -3046,6 +3046,21 @@ async def get_config(request: Request) -> dict:
         "classification_texture_gate_confidence_factor": (
             settings.classification_texture_gate_confidence_factor
         ),
+        "classification_priority_enabled": settings.classification_priority_enabled,
+        "classification_priority_track_radius_m": settings.classification_priority_track_radius_m,
+        "classification_priority_track_cache_seconds": (
+            settings.classification_priority_track_cache_seconds
+        ),
+        "classification_priority_buckets": settings.classification_priority_buckets,
+        "classification_priority_track_weight": settings.classification_priority_track_weight,
+        "classification_priority_confidence_weight": (
+            settings.classification_priority_confidence_weight
+        ),
+        "classification_priority_tier_weight": settings.classification_priority_tier_weight,
+        "classification_priority_signal_weight": settings.classification_priority_signal_weight,
+        "classification_priority_corroboration_weight": (
+            settings.classification_priority_corroboration_weight
+        ),
         "classification_audio_source": settings.classification_audio_source,
         "min_localization_confidence": settings.min_localization_confidence,
         "skip_localization_for_classification": settings.skip_localization_for_classification,
@@ -3221,6 +3236,13 @@ def _startup_snapshot_restart_required_keys() -> frozenset[str]:
     keys.add("fusion_report_window_localized_emission_cap")
     # The classifier (and its BirdNET session pool) is built once at startup.
     keys.add("birdnet_pool_size")
+    keys.add("yamnet_max_input_gain")
+    # Classification-priority knobs are read into FusionNode.__init__ (the queue
+    # type itself is chosen there), so a live PATCH cannot reorder a queue that
+    # already exists.
+    keys.update(
+        key for key in CONFIG_PATCH_ALLOWLIST if key.startswith("classification_priority_")
+    )
     return frozenset(keys)
 
 
@@ -3436,6 +3458,16 @@ async def patch_config(request: Request) -> dict:
             errors.append("classification_texture_gate_flatness_min: must be in [0, 1]")
         elif key == "classification_texture_gate_confidence_factor" and not (0.0 <= value <= 1.0):  # type: ignore[operator]
             errors.append("classification_texture_gate_confidence_factor: must be in [0, 1]")
+        elif key == "classification_priority_track_radius_m" and value <= 0.0:  # type: ignore[operator]
+            errors.append("classification_priority_track_radius_m: must be > 0")
+        elif key == "classification_priority_track_cache_seconds" and value < 0.0:  # type: ignore[operator]
+            errors.append("classification_priority_track_cache_seconds: must be >= 0")
+        elif key == "classification_priority_buckets" and value < 1:  # type: ignore[operator]
+            errors.append("classification_priority_buckets: must be >= 1")
+        elif key.startswith("classification_priority_") and key.endswith("_weight") and not (
+            math.isfinite(value) and value >= 0.0  # type: ignore[arg-type,operator]
+        ):
+            errors.append(f"{key}: must be finite and >= 0")
         elif key in {"cop_detections_max_items", "cop_tracks_max_items"} and value < 1:  # type: ignore[operator]
             errors.append(f"{key}: must be >= 1")
         elif key in {"cop_detections_max_age_seconds", "cop_tracks_max_age_seconds"} and value <= 0.0:  # type: ignore[operator]

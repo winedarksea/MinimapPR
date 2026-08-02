@@ -341,6 +341,11 @@ fn NodeCard(node: NodeStatus) -> impl IntoView {
     let rms = node.rms_history.clone().unwrap_or_default();
     let path = sparkline_path(&rms, 180.0, 24.0);
 
+    // Only `no_audio` means "this node is not delivering audio". Under a
+    // split-process deployment the API process does not own the audio buffer,
+    // so it reports `external_ingest_process` — freshness is unmeasured here,
+    // not zero. Falling that through to "Audio offline" made a healthy,
+    // actively-ingesting node read as dead.
     let audio_status_label: Option<&'static str> = node
         .audio_debug
         .as_ref()
@@ -348,7 +353,9 @@ fn NodeCard(node: NodeStatus) -> impl IntoView {
         .map(|s| match s {
             "recent" => "Audio ✓",
             "stale" => "Audio stale",
-            _ => "Audio offline",
+            "no_audio" => "Audio offline",
+            "external_ingest_process" => "Audio → ingest proc",
+            _ => "Audio unknown",
         });
 
     let id_clone = node_id.clone();

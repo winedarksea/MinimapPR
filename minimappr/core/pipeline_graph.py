@@ -61,6 +61,8 @@ _HealthT = str  # "ok" | "warn" | "danger" | "idle" | "off" | "unknown"
 
 # Post-classification noise-floor texture gate (see ClassificationOrchestrator).
 TEXTURE_GATE_NODE_ID = "cls:texture_gate"
+# Pre-classification admission ordering (see core/classification_priority.py).
+PRIORITY_QUEUE_NODE_ID = "cls:priority_queue"
 
 
 def _fmt(value: Any, *, suffix: str = "", digits: int | None = None) -> str:
@@ -89,6 +91,14 @@ def _metrics(fusion_status: dict | None) -> dict[str, Any]:
     return m if isinstance(m, dict) else {}
 
 
+def _queues(fusion_status: dict | None) -> dict[str, Any]:
+    """Queue depths live beside ``metrics`` in the fusion status, not inside it."""
+    if not isinstance(fusion_status, dict):
+        return {}
+    q = fusion_status.get("queue")
+    return q if isinstance(q, dict) else {}
+
+
 def _capabilities(node: NodeSpec) -> set[str]:
     return {c.value if isinstance(c, NodeCapability) else str(c) for c in (node.capabilities or [])}
 
@@ -108,6 +118,7 @@ def build_pipeline_graph(
     rules = list(rules)
     fusion_available = fusion_status is not None
     metrics = _metrics(fusion_status)
+    queues = _queues(fusion_status)
     unknown_health: _HealthT = "unknown" if not fusion_available else "ok"
 
     graph_nodes: list[PipelineGraphNode] = []
@@ -393,6 +404,7 @@ def build_pipeline_graph(
         add_edge=add_edge,
         fusion_available=fusion_available,
         metrics=metrics,
+        queues=queues,
     )
 
     # ── Tracking ────────────────────────────────────────────────────────────
@@ -514,7 +526,7 @@ def build_pipeline_graph(
 
 
 # ── Classifiers helper ──────────────────────────────────────────────────────
-def _add_classifiers(*, routing, settings, gate_ids, beam_id, add_node, add_edge, fusion_available, metrics) -> None:
+def _add_classifiers(*, routing, settings, gate_ids, beam_id, add_node, add_edge, fusion_available, metrics, queues) -> None:
     health = "ok" if fusion_available else "unknown"
     source_label = settings.classification_audio_source
 
@@ -680,6 +692,67 @@ def _add_classifiers(*, routing, settings, gate_ids, beam_id, add_node, add_edge
     for member_id in sorted(seen_members):
         add_edge(f"cls:member:{member_id}", TEXTURE_GATE_NODE_ID, kind="metadata", label="result")
 
+    # Admission ordering sits *in front of* the members: it decides which queued
+    # work reaches them at all when the lane cannot drain.
+    priority_enabled = bool(settings.classification_priority_enabled)
+    add_node(
+        id=PRIORITY_QUEUE_NODE_ID,
+        stage=PipelineStageKind.CLASSIFIER,
+        column="classify",
+        lane="site",
+        title="Priority Queue",
+        subtitle="significance + recency" if priority_enabled else "FIFO",
+        modality="audio",
+        enabled=priority_enabled,
+        params=[
+            _param("Ordering", priority_enabled, "classification_priority_enabled"),
+            _param(
+                "Track radius",
+                float(settings.classification_priority_track_radius_m),
+                "classification_priority_track_radius_m",
+                suffix=" m",
+            ),
+            _param(
+                "Buckets",
+                int(settings.classification_priority_buckets),
+                "classification_priority_buckets",
+            ),
+            _param(
+                "w track",
+                float(settings.classification_priority_track_weight),
+                "classification_priority_track_weight",
+            ),
+            _param(
+                "w confidence",
+                float(settings.classification_priority_confidence_weight),
+                "classification_priority_confidence_weight",
+            ),
+            _param(
+                "w tier",
+                float(settings.classification_priority_tier_weight),
+                "classification_priority_tier_weight",
+            ),
+            _param(
+                "w signal",
+                float(settings.classification_priority_signal_weight),
+                "classification_priority_signal_weight",
+            ),
+            _param(
+                "w corroboration",
+                float(settings.classification_priority_corroboration_weight),
+                "classification_priority_corroboration_weight",
+            ),
+        ],
+        status=(
+            _classify_queue_status(queues, metrics, fusion_available)
+            if priority_enabled
+            else PipelineStageStatus(health="off", summary="plain FIFO ordering")
+        ),
+        link="/settings/config#classification",
+    )
+    for member_id in sorted(seen_members):
+        add_edge(PRIORITY_QUEUE_NODE_ID, f"cls:member:{member_id}", kind="audio", label="admit")
+
 
 # ── Status helpers ──────────────────────────────────────────────────────────
 def _node_audio_status(node_id: str, sidecar_dsp_status: dict | None, fusion_available: bool) -> PipelineStageStatus:
@@ -707,6 +780,26 @@ def _classify_lane_status(metrics: dict, fusion_available: bool) -> PipelineStag
             _param("Lane out", stage_out),
             _param("Avg ms", round(avg_ms, 1)),
             _param("Max ms", round(max_ms, 1)),
+        ],
+    )
+
+
+def _classify_queue_status(queues: dict, metrics: dict, fusion_available: bool) -> PipelineStageStatus:
+    """Queue saturation + what admission ordering had to shed to stay bounded."""
+    if not fusion_available:
+        return PipelineStageStatus(health="unknown")
+    depth = int(queues.get("classification_depth") or 0)
+    capacity = int(queues.get("classification_max") or 0)
+    shed = int(metrics.get("stage_drops_backpressure") or 0)
+    saturation = (depth / capacity) if capacity > 0 else 0.0
+    health = "danger" if saturation >= 0.9 else ("warn" if saturation >= 0.5 else "ok")
+    return PipelineStageStatus(
+        health=health,
+        summary=f"{depth}/{capacity} queued" if capacity else "queue idle",
+        metrics=[
+            _param("Depth", depth),
+            _param("Capacity", capacity),
+            _param("Shed (backpressure)", shed),
         ],
     )
 

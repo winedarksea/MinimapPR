@@ -811,6 +811,19 @@ class Settings:
     classification_texture_gate_contrast_db: float = 8.0
     classification_texture_gate_flatness_min: float = 0.2
     classification_texture_gate_confidence_factor: float = 1.0
+    # Classification-stage admission ordering (see core/classification_priority.py).
+    # The lane is the pipeline bottleneck; when it cannot drain, these decide
+    # which queued work runs and which is shed. Ordering only — never affects
+    # what a classifier returns. Disable to fall back to plain FIFO.
+    classification_priority_enabled: bool = True
+    classification_priority_track_radius_m: float = 50.0
+    classification_priority_track_cache_seconds: float = 1.0
+    classification_priority_buckets: int = 10
+    classification_priority_track_weight: float = 0.35
+    classification_priority_confidence_weight: float = 0.25
+    classification_priority_tier_weight: float = 0.15
+    classification_priority_signal_weight: float = 0.15
+    classification_priority_corroboration_weight: float = 0.10
     birdnet_trigger_min_confidence: float = 0.40
     birdnet_geo_min_confidence: float = 0.03
     # Concurrent BirdNET predict-sessions. 1 serializes all fusion workers
@@ -1447,6 +1460,22 @@ class Settings:
             raise ValueError(
                 "MINIMAPPR_CLASSIFICATION_TEXTURE_GATE_CONFIDENCE_FACTOR must be in [0,1]"
             )
+        if self.classification_priority_track_radius_m <= 0.0:
+            raise ValueError("MINIMAPPR_CLASSIFICATION_PRIORITY_TRACK_RADIUS_M must be > 0")
+        if self.classification_priority_track_cache_seconds < 0.0:
+            raise ValueError("MINIMAPPR_CLASSIFICATION_PRIORITY_TRACK_CACHE_SECONDS must be >= 0")
+        if self.classification_priority_buckets < 1:
+            raise ValueError("MINIMAPPR_CLASSIFICATION_PRIORITY_BUCKETS must be >= 1")
+        for _weight_name in (
+            "classification_priority_track_weight",
+            "classification_priority_confidence_weight",
+            "classification_priority_tier_weight",
+            "classification_priority_signal_weight",
+            "classification_priority_corroboration_weight",
+        ):
+            _weight = getattr(self, _weight_name)
+            if not math.isfinite(_weight) or _weight < 0.0:
+                raise ValueError(f"MINIMAPPR_{_weight_name.upper()} must be finite and >= 0")
         if self.birdnet_trigger_min_confidence < 0.0 or self.birdnet_trigger_min_confidence > 1.0:
             raise ValueError("MINIMAPPR_BIRDNET_TRIGGER_MIN_CONFIDENCE must be in [0,1]")
         if self.birdnet_geo_min_confidence < 0.0 or self.birdnet_geo_min_confidence > 1.0:
@@ -1976,6 +2005,42 @@ class Settings:
             classification_texture_gate_confidence_factor=_env_float(
                 "MINIMAPPR_CLASSIFICATION_TEXTURE_GATE_CONFIDENCE_FACTOR",
                 1.0,
+            ),
+            classification_priority_enabled=_env_bool(
+                "MINIMAPPR_CLASSIFICATION_PRIORITY_ENABLED",
+                True,
+            ),
+            classification_priority_track_radius_m=_env_float(
+                "MINIMAPPR_CLASSIFICATION_PRIORITY_TRACK_RADIUS_M",
+                50.0,
+            ),
+            classification_priority_track_cache_seconds=_env_float(
+                "MINIMAPPR_CLASSIFICATION_PRIORITY_TRACK_CACHE_SECONDS",
+                1.0,
+            ),
+            classification_priority_buckets=_env_int(
+                "MINIMAPPR_CLASSIFICATION_PRIORITY_BUCKETS",
+                10,
+            ),
+            classification_priority_track_weight=_env_float(
+                "MINIMAPPR_CLASSIFICATION_PRIORITY_TRACK_WEIGHT",
+                0.35,
+            ),
+            classification_priority_confidence_weight=_env_float(
+                "MINIMAPPR_CLASSIFICATION_PRIORITY_CONFIDENCE_WEIGHT",
+                0.25,
+            ),
+            classification_priority_tier_weight=_env_float(
+                "MINIMAPPR_CLASSIFICATION_PRIORITY_TIER_WEIGHT",
+                0.15,
+            ),
+            classification_priority_signal_weight=_env_float(
+                "MINIMAPPR_CLASSIFICATION_PRIORITY_SIGNAL_WEIGHT",
+                0.15,
+            ),
+            classification_priority_corroboration_weight=_env_float(
+                "MINIMAPPR_CLASSIFICATION_PRIORITY_CORROBORATION_WEIGHT",
+                0.10,
             ),
             birdnet_trigger_min_confidence=_env_float("MINIMAPPR_BIRDNET_TRIGGER_MIN_CONFIDENCE", 0.40),
             birdnet_geo_min_confidence=_env_float("MINIMAPPR_BIRDNET_GEO_MIN_CONFIDENCE", 0.03),

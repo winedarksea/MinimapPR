@@ -201,7 +201,12 @@ fn audio_status_chip(status: &str) -> &'static str {
     match status {
         "recent" => "health-chip online",
         "stale" => "health-chip degraded",
-        _ => "health-chip offline",
+        // Only `no_audio` is a real failure. `external_ingest_process` means the
+        // audio buffer lives in a separate ingest process, so this view cannot
+        // measure freshness — that is unknown, not offline.
+        "no_audio" => "health-chip offline",
+        "external_ingest_process" => "health-chip unknown",
+        _ => "health-chip unknown",
     }
 }
 

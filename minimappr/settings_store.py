@@ -75,6 +75,18 @@ CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     "classification_texture_gate_contrast_db": float,
     "classification_texture_gate_flatness_min": float,
     "classification_texture_gate_confidence_factor": float,
+    # Classification-stage admission ordering. Restart-required (the queue is
+    # built in FusionNode.__init__), but allowlisted so the weighting can be
+    # tuned from a deployment without editing env/YAML by hand.
+    "classification_priority_enabled": bool,
+    "classification_priority_track_radius_m": float,
+    "classification_priority_track_cache_seconds": float,
+    "classification_priority_buckets": int,
+    "classification_priority_track_weight": float,
+    "classification_priority_confidence_weight": float,
+    "classification_priority_tier_weight": float,
+    "classification_priority_signal_weight": float,
+    "classification_priority_corroboration_weight": float,
     "detection_min_confidence": float,
     "cop_detections_max_items": int,
     "cop_tracks_max_items": int,

@@ -43,6 +43,12 @@ from minimappr.core.audio_buffer import AudioCoverageStats, MultiSensorBuffer
 from minimappr.core.beamforming import create_beamformer
 from minimappr.core.classification_chunking import ClassificationChunkingPolicy
 from minimappr.core.classification import ClassificationOrchestrator
+from minimappr.core.classification_priority import (
+    PriorityStageQueue,
+    PriorityWeights,
+    priority_key,
+    score_significance,
+)
 from minimappr.core.degradation import CapabilityDegradationModel
 from minimappr.core.environment import StaticEnvironmentProvider
 from minimappr.core.geo import LocalCoordinateFrame
@@ -151,6 +157,9 @@ class LocalizedCandidate:
     classification_audio_quality_source: str
     environment: dict[str, Any]
     extra_classification_features: dict[str, Any] = field(default_factory=dict)
+    # Admission score in [0,1] computed once at classification-enqueue time (see
+    # core/classification_priority.py). Ordering only; never affects inference.
+    classification_significance: float = 0.0
 
 
 @dataclass(slots=True)
@@ -456,9 +465,38 @@ class FusionNode:
         self._localization_queue: asyncio.Queue[EventCandidate | None] = asyncio.Queue(
             maxsize=max(1, self.fusion_config.localization_queue_size)
         )
-        self._classification_queue: asyncio.Queue[LocalizedCandidate | None] = asyncio.Queue(
-            maxsize=max(1, self.fusion_config.classification_queue_size)
+        # The classification lane is the pipeline's bottleneck and routinely runs
+        # oversubscribed, so *which* queued item runs next materially changes what
+        # the system detects. Ordering by significance keeps continuing evidence
+        # for live tracks and strong, well-localized events ahead of isolated
+        # low-confidence blips; recency still orders items of similar merit.
+        self._classification_priority_weights = PriorityWeights(
+            track_affinity=settings.classification_priority_track_weight,
+            localization_confidence=settings.classification_priority_confidence_weight,
+            capability_tier=settings.classification_priority_tier_weight,
+            signal_excess=settings.classification_priority_signal_weight,
+            corroboration=settings.classification_priority_corroboration_weight,
         )
+        self._classification_priority_enabled = settings.classification_priority_enabled
+        self._classification_priority_track_radius_m = settings.classification_priority_track_radius_m
+        self._classification_priority_buckets = settings.classification_priority_buckets
+        self._classification_priority_track_cache_seconds = (
+            settings.classification_priority_track_cache_seconds
+        )
+        self._classification_queue: asyncio.Queue[LocalizedCandidate | None]
+        if self._classification_priority_enabled:
+            self._classification_queue = PriorityStageQueue(
+                maxsize=max(1, self.fusion_config.classification_queue_size),
+                key=self._classification_priority_key,
+            )
+        else:
+            self._classification_queue = asyncio.Queue(
+                maxsize=max(1, self.fusion_config.classification_queue_size)
+            )
+        # Cached active-track positions for the track-affinity term, refreshed on
+        # a TTL so scoring never contends on the TrackManager lock per enqueue.
+        self._priority_track_positions_m: list[tuple[float, float, float]] = []
+        self._priority_track_positions_refreshed_s: float = 0.0
         self._rules_queue: asyncio.Queue[DetectionProduct | None] = asyncio.Queue(
             maxsize=max(1, self.fusion_config.rules_queue_size)
         )
@@ -1422,6 +1460,10 @@ class FusionNode:
                 )
                 self._metrics.ingest_processing_count += 1
                 if product is not None:
+                    if self._classification_priority_enabled:
+                        product.classification_significance = (
+                            await self._score_classification_significance(product)
+                        )
                     if await self._enqueue_stage(self._classification_queue, product):
                         self._metrics.localization_stage_out += 1
             except asyncio.TimeoutError:
@@ -3158,6 +3200,60 @@ class FusionNode:
             event_time_ns=event_time_ns,
         )
 
+    def _classification_priority_key(self, product: LocalizedCandidate) -> tuple[int, int]:
+        return priority_key(
+            significance=product.classification_significance,
+            event_time_ns=product.candidate.event_time_ns,
+            buckets=self._classification_priority_buckets,
+        )
+
+    async def _refresh_priority_track_positions(self) -> list[tuple[float, float, float]]:
+        """TTL-cached active-track positions for the track-affinity term.
+
+        Snapshotting the TrackManager takes its lock, so doing it per enqueue
+        would put the classification producer in contention with the tracker on
+        exactly the busy path this feature exists to protect.
+        """
+        now_s = time.monotonic()
+        if (
+            now_s - self._priority_track_positions_refreshed_s
+            < self._classification_priority_track_cache_seconds
+        ):
+            return self._priority_track_positions_m
+        try:
+            tracks = await self.tracker.snapshot()
+        except Exception:  # pragma: no cover - scoring must never break ingest
+            return self._priority_track_positions_m
+        self._priority_track_positions_m = [
+            (float(t.position_m[0]), float(t.position_m[1]), float(t.position_m[2]))
+            for t in tracks
+            if t.position_m is not None and len(t.position_m) >= 3
+        ]
+        self._priority_track_positions_refreshed_s = now_s
+        return self._priority_track_positions_m
+
+    async def _score_classification_significance(self, product: LocalizedCandidate) -> float:
+        branch = product.localization_branch
+        signal = product.omni_classification_reference_signal
+        signal_rms: float | None = None
+        if signal is not None and getattr(signal, "size", 0) > 0:
+            signal_rms = rms(np.asarray(signal, dtype=np.float32))
+        audio_degraded = any(
+            stats.degraded for stats in product.classification_audio_quality.values()
+        )
+        return score_significance(
+            localization_confidence=(None if branch is None else branch.localization_confidence),
+            capability_tier=(None if branch is None else branch.capability_tier),
+            sensor_count=len(product.selected_sensor_ids),
+            signal_rms=signal_rms,
+            trigger_rms=self.localization_config.trigger_rms,
+            position_m=(None if branch is None else branch.localization_position_m),
+            track_positions_m=await self._refresh_priority_track_positions(),
+            track_radius_m=self._classification_priority_track_radius_m,
+            audio_degraded=audio_degraded,
+            weights=self._classification_priority_weights,
+        )
+
     def _record_stage_backpressure_drop(
         self,
         *,
@@ -3297,6 +3393,8 @@ class FusionNode:
         # processes audio from `depth / throughput` ago, and every fresh event is
         # rejected. Evicting the head instead bounds latency and keeps the
         # freshest audio flowing, which is what an operator actually wants.
+        # On a priority queue the head is the *best* item, so eviction there
+        # sheds the tail instead (see _evict_oldest_queued).
         if self.fusion_config.backpressure_drop_policy == "oldest":
             evicted = self._evict_oldest_queued(queue=queue, stage_name=tracker_stage_name)
             if evicted is not None:
@@ -3328,24 +3426,36 @@ class FusionNode:
         return False
 
     def _evict_oldest_queued(self, *, queue: asyncio.Queue, stage_name: str) -> Any | None:
-        """Remove and account for the head of a full stage queue.
+        """Remove and account for one item from a full stage queue.
+
+        FIFO stages shed the head — the stalest work. A priority stage sheds its
+        least significant item instead, because its head is the item admission
+        control just ranked most worth doing.
 
         The evicted item is retired through the same drop accounting as a
         rejected arrival, and must also be removed from the realtime tracker —
         otherwise it stays in ``queued_event_times_ns`` forever and reports an
         ever-growing lag for work that no longer exists.
         """
-        try:
-            evicted = queue.get_nowait()
-        except asyncio.QueueEmpty:
-            return None
-        # Balance the get_nowait() so queue.join() cannot deadlock on shutdown.
-        queue.task_done()
-        if evicted is None:
-            # A shutdown sentinel: never drop it, or the worker never exits.
-            # Put it back and let the arriving item be shed instead.
-            queue.put_nowait(evicted)
-            return None
+        if isinstance(queue, PriorityStageQueue):
+            evicted = queue.evict_least_significant()
+            if evicted is None:
+                # Empty, or only the shutdown sentinel remains (never dropped,
+                # or the worker would never exit).
+                return None
+            queue.task_done()
+        else:
+            try:
+                evicted = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return None
+            # Balance the get_nowait() so queue.join() cannot deadlock on shutdown.
+            queue.task_done()
+            if evicted is None:
+                # A shutdown sentinel: never drop it, or the worker never exits.
+                # Put it back and let the arriving item be shed instead.
+                queue.put_nowait(evicted)
+                return None
         evicted_id = self._stage_item_id(evicted)
         self._record_stage_backpressure_drop(
             event_time_ns=self._stage_item_event_time_ns(evicted),
