@@ -472,7 +472,7 @@ class FusionConfig:
     # The storage-level dedupe in ReportingFusionPolicy made the same call
     # anyway — but only after paying for the render, which on the 2026-08-01
     # live box was ~89% of all classification-lane CPU.
-    report_window_localized_emission_cap: int = 0
+    report_window_localized_emission_cap: int = 3
 
 
 @dataclass(slots=True)
@@ -829,7 +829,7 @@ class Settings:
     # Concurrent BirdNET predict-sessions. 1 serializes all fusion workers
     # through a single session (each extra session costs ~125 MB RSS and one
     # TFLite subprocess); raise to ~fusion_worker_count on multi-core boxes.
-    birdnet_pool_size: int = 1
+    birdnet_pool_size: int = 2
     # BirdNET request coalescing. A `run_arrays()` call costs ~1.0 s of fixed
     # barrier synchronization whatever the payload (measured: 1048 ms for 0.25 s
     # of audio, 1349 ms for 30 s), so the number of calls dominates cost.
@@ -903,7 +903,7 @@ class Settings:
     fusion_backpressure_drop_policy: str = "oldest"
     # Pre-render report-window gate (0 = off). See
     # FusionConfig.report_window_localized_emission_cap for semantics.
-    fusion_report_window_localized_emission_cap: int = 0
+    fusion_report_window_localized_emission_cap: int = 3
     fusion_offline_replay_mode: bool = False
     sensor_energy_threshold_multiplier: float = 0.45
     fallback_localization_confidence: float = 0.25
@@ -2077,7 +2077,7 @@ class Settings:
             ),
             birdnet_trigger_min_confidence=_env_float("MINIMAPPR_BIRDNET_TRIGGER_MIN_CONFIDENCE", 0.40),
             birdnet_geo_min_confidence=_env_float("MINIMAPPR_BIRDNET_GEO_MIN_CONFIDENCE", 0.03),
-            birdnet_pool_size=_env_int("MINIMAPPR_BIRDNET_POOL_SIZE", 1),
+            birdnet_pool_size=_env_int("MINIMAPPR_BIRDNET_POOL_SIZE", 2),
             birdnet_batch_max_wait_seconds=_env_float(
                 "MINIMAPPR_BIRDNET_BATCH_MAX_WAIT_SECONDS",
                 0.5,
@@ -2152,7 +2152,7 @@ class Settings:
             ),
             fusion_report_window_localized_emission_cap=_env_int(
                 "MINIMAPPR_FUSION_REPORT_WINDOW_LOCALIZED_EMISSION_CAP",
-                0,
+                3,
             ),
             gps_2d_altitude_mode=_env_str("MINIMAPPR_GPS_2D_ALTITUDE_MODE", "site_origin"),
             fusion_offline_replay_mode=_env_bool("MINIMAPPR_FUSION_OFFLINE_REPLAY_MODE", False),
