@@ -1,3 +1,32 @@
+/* ═══ Classifier filter (Analysis, shared across Daily/Labels/Heatmap) ══ */
+.classifier-filter-row {
+  display: flex;
+  align-items: center;
+  gap: var(--mmp-density-gap-sm);
+  flex-wrap: wrap;
+  padding: var(--mmp-density-gap-xs) 0;
+  margin-bottom: var(--mmp-density-gap-xs);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+}
+.classifier-filter-label {
+  font-size: var(--md-sys-typescale-label-medium-size);
+  color: var(--md-sys-color-on-surface-variant);
+  font-weight: 600;
+}
+.classifier-chip {
+  padding-left: 10px;
+}
+.classifier-chip.active {
+  background: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+  border-color: transparent;
+}
+.classifier-chip.active::before {
+  content: "✓";
+  margin-right: 4px;
+  font-weight: 700;
+}
+
 /* ═══ Daily detections matrix (Analysis → Daily) ═══════════════ */
 .daily-view {
   display: flex;
