@@ -121,29 +121,68 @@ def _run_concurrently(c: BirdNETClassifier, count: int, sr: int = 48_000) -> lis
 
 
 class TestBatching:
-    def test_concurrent_callers_share_one_call(self) -> None:
-        session = _FakeSession(delay_s=0.15)
+    def test_callers_arriving_during_a_dispatch_share_the_next_call(self) -> None:
+        """The coalescing that actually happens in production.
+
+        Concurrency into classify() is capped by the fusion classification
+        worker count, so a batch is never assembled from a cold burst — it is
+        assembled from the callers that pile up while the previous inference
+        call is in flight. Those must ride together in one call.
+        """
+        session = _FakeSession(delay_s=0.5)
         c = _classifier(session, batch_max_wait_seconds=1.0, batch_max_size=8)
         try:
-            results = _run_concurrently(c, 6)
+            first: list = [None]
+            lead = threading.Thread(target=lambda: first.__setitem__(0, c.classify(_clip(), 48_000)))
+            lead.start()
+            # Let the lead caller's dispatch get under way, then pile on.
+            time.sleep(0.15)
+            results = _run_concurrently(c, 5)
+            lead.join(timeout=10.0)
         finally:
             c.close()
 
+        assert first[0] is not None
         assert all(r is not None for r in results)
-        # Six callers, one underlying inference call.
+        # The lead clip went alone; the five that queued behind it shared a call.
         assert sum(session.calls) == 6
-        assert len(session.calls) == 1
-        assert c.mean_batch_size == pytest.approx(6.0)
+        assert session.calls == [1, 5]
+
+    def test_lone_caller_does_not_wait_out_the_window(self) -> None:
+        """A caller with nobody behind it must dispatch immediately.
+
+        Waiting only pays while another caller is mid-arrival. Sitting out the
+        full window for a batch of one is pure added latency on the pipeline's
+        tightest stage — the regression this guard exists to catch.
+        """
+        session = _FakeSession()
+        c = _classifier(session, batch_max_wait_seconds=5.0, batch_max_size=16)
+        try:
+            started = time.monotonic()
+            result = c.classify(_clip(), 48_000)
+            elapsed = time.monotonic() - started
+        finally:
+            c.close()
+
+        assert result.label == "species 0"
+        assert elapsed < 1.0, f"lone caller sat in the window for {elapsed:.2f}s"
 
     def test_each_caller_gets_its_own_clips_result(self) -> None:
         """Rows are attributed back per clip via the `input` column."""
-        session = _FakeSession(delay_s=0.1)
+        session = _FakeSession(delay_s=0.5)
         c = _classifier(session, batch_max_wait_seconds=1.0, batch_max_size=8)
         try:
+            # Park a lead caller in run_arrays so the four below it are
+            # guaranteed to be assembled into a single batch.
+            lead = threading.Thread(target=lambda: c.classify(_clip(), 48_000))
+            lead.start()
+            time.sleep(0.15)
             results = _run_concurrently(c, 4)
+            lead.join(timeout=10.0)
         finally:
             c.close()
 
+        assert session.calls == [1, 4]
         labels = sorted(r.label for r in results)
         assert labels == ["species 0", "species 1", "species 2", "species 3"]
         by_label = {r.label: r for r in results}
@@ -222,7 +261,7 @@ class TestBatching:
 
     def test_close_releases_callers_waiting_on_a_batch(self) -> None:
         """close() must settle pending requests or shutdown deadlocks."""
-        session = _FakeSession(delay_s=0.05)
+        session = _FakeSession(delay_s=1.0)
         c = _classifier(session, batch_max_wait_seconds=30.0, batch_max_size=16)
         failures: list = [None]
 
@@ -232,11 +271,17 @@ class TestBatching:
             except Exception as exc:  # noqa: BLE001
                 failures[0] = exc
 
+        # The lead caller occupies the batcher inside run_arrays; the caller we
+        # care about then parks in _batch_pending with no dispatch to settle it.
+        lead = threading.Thread(target=lambda: c.classify(_clip(), 48_000))
+        lead.start()
+        time.sleep(0.2)
         thread = threading.Thread(target=call)
         thread.start()
-        time.sleep(0.2)  # let it enter the batch window
+        time.sleep(0.2)  # let it park in the pending queue
         c.close()
         thread.join(timeout=10.0)
+        lead.join(timeout=10.0)
 
         assert not thread.is_alive(), "close() left a caller blocked in the batcher"
         assert isinstance(failures[0], RuntimeError)

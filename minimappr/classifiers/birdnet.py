@@ -81,6 +81,7 @@ class BirdNETClassifier(AudioClassifier):
     _batching_enabled: bool = False
     _batch_max_size: int = 1
     _batch_max_wait_seconds: float = 0.0
+    _batch_arriving: int = 0
     _batch_thread: threading.Thread | None = None
     batches_dispatched: int = 0
     clips_batched: int = 0
@@ -148,6 +149,9 @@ class BirdNETClassifier(AudioClassifier):
         self._batching_enabled = self._batch_max_wait_seconds > 0.0
         self._batch_lock = threading.Lock()
         self._batch_pending: list[_BatchRequest] = []
+        # Callers that have entered classify() but not yet appended their
+        # request — see _batch_loop for why the window keys off this.
+        self._batch_arriving = 0
         self._batch_ready = threading.Condition(self._batch_lock)
         self._batch_thread: threading.Thread | None = None
         self.batches_dispatched = 0
@@ -171,10 +175,22 @@ class BirdNETClassifier(AudioClassifier):
         if self._closed:
             raise RuntimeError("BirdNETClassifier has been closed")
 
-        audio = self._to_model_rate(samples, sample_rate_hz)
-        if self._batching_enabled:
-            return self._classify_batched(audio)
-        return self._run_single(audio)
+        if not self._batching_enabled:
+            return self._run_single(self._to_model_rate(samples, sample_rate_hz))
+
+        # Register as an arriving caller *before* resampling so the batcher
+        # holds its window open for us; _classify_batched clears the
+        # registration as it appends the request.
+        with self._batch_ready:
+            self._batch_arriving += 1
+        try:
+            audio = self._to_model_rate(samples, sample_rate_hz)
+        except BaseException:
+            with self._batch_ready:
+                self._batch_arriving -= 1
+                self._batch_ready.notify()
+            raise
+        return self._classify_batched(audio)
 
     def _to_model_rate(self, samples: np.ndarray, sample_rate_hz: int) -> np.ndarray:
         audio = samples.astype(np.float32)
@@ -195,6 +211,7 @@ class BirdNETClassifier(AudioClassifier):
         request = _BatchRequest(audio)
         with self._batch_ready:
             self._batch_pending.append(request)
+            self._batch_arriving -= 1
             self._batch_ready.notify()
         # No timeout here on purpose: the classification stage already bounds
         # this via asyncio.wait_for, and close() settles every pending request.
@@ -208,11 +225,20 @@ class BirdNETClassifier(AudioClassifier):
     def _batch_loop(self) -> None:
         """Collect concurrent callers into one `run_arrays()` call.
 
-        A batch closes as soon as it is full *or* the collection window expires —
-        whichever comes first. Under the load this exists for, the queue is
-        already saturated, so batches fill instantly and the window never
-        binds; the window only matters when traffic is light, where it trades a
-        bounded wait for far fewer fixed-cost calls.
+        A batch closes as soon as it is full, *or* no further caller is still on
+        its way in, *or* the collection window expires — whichever comes first.
+
+        That middle condition is what keeps the window honest. Concurrency here
+        is capped by the number of fusion classification workers, not by the
+        depth of the classification queue: a worker calls classify() for one
+        item at a time, so at most `workers` requests can ever be pending at
+        once. With the deployed 2 workers against a `batch_max_size` of 16 the
+        batch can never fill, and keying the close purely off `batch_max_size`
+        made every dispatch sit out the entire window for a batch of 1-2 —
+        pure added latency on the pipeline's tightest stage, which is the
+        opposite of the point. Waiting only pays when a caller has entered
+        classify() and has not appended yet; once `_batch_arriving` hits zero
+        nothing more can arrive until this dispatch frees a worker, so we go.
         """
         while not self._closed:
             with self._batch_ready:
@@ -225,6 +251,7 @@ class BirdNETClassifier(AudioClassifier):
                 window_closes_at = time.monotonic() + self._batch_max_wait_seconds
                 while (
                     len(self._batch_pending) < self._batch_max_size
+                    and self._batch_arriving > 0
                     and not self._closed
                 ):
                     remaining = window_closes_at - time.monotonic()
