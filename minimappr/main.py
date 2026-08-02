@@ -4784,6 +4784,7 @@ async def get_analytics_daily(
     hours: int = Query(default=24, ge=1, le=168),
     tz: str = Query(default="UTC", description="IANA tz for bucket edges and 'calendar' mode"),
     max_labels: int = Query(default=64, ge=1, le=256),
+    classifier: str | None = Query(default=None, description="restrict to this classifier's winning detections"),
 ) -> dict:
     """Daily detection activity matrix.
 
@@ -4840,6 +4841,7 @@ async def get_analytics_daily(
         bucket_ns=bucket_ns,
         min_label_confidence=settings.detection_min_confidence,
         max_labels=max_labels,
+        classifier=classifier,
     )
 
     # Back-fill empty matrix shape when there's nothing to show, so the client
@@ -4890,6 +4892,7 @@ async def list_known_labels(request: Request) -> dict:
 async def get_analytics_labels(
     request: Request,
     window: str = Query(default="30d", description="Window: e.g. 1h, 24h, 7d, 30d, 365d"),
+    classifier: str | None = Query(default=None, description="restrict to this classifier's winning detections"),
 ) -> dict:
     """List of labels seen within `window`, with counts + first/last-seen."""
     state = _require_state(request)
@@ -4900,8 +4903,17 @@ async def get_analytics_labels(
         now_ns=now_ns,
         window_ns=window_ns,
         min_label_confidence=settings.detection_min_confidence,
+        classifier=classifier,
     )
     return {"window": window, "now_ns": now_ns, "labels": rows}
+
+
+@app.get("/api/v1/analytics/classifiers")
+async def get_analytics_classifiers(request: Request) -> dict:
+    """Distinct classifiers that have produced detections, with counts — powers the analysis-page filter."""
+    state = _require_state(request)
+    rows = await state.storage.list_classifiers()
+    return {"classifiers": rows}
 
 
 @app.get("/api/v1/analytics/labels/{label}")
@@ -4932,6 +4944,7 @@ async def get_analytics_heatmap(
     labels: str | None = Query(default=None, description="comma-separated label list"),
     bin: float = Query(default=0.0001, ge=0.00001, le=0.1, description="lat/lon rounding resolution in deg"),
     max_bins: int = Query(default=5000, ge=1, le=20000),
+    classifier: str | None = Query(default=None, description="restrict to this classifier's winning detections"),
 ) -> dict:
     """Pre-binned geo density for the heatmap view — `[lat, lon, weight]` triplets."""
     state = _require_state(request)
@@ -4946,6 +4959,7 @@ async def get_analytics_heatmap(
         labels=label_list,
         min_label_confidence=settings.detection_min_confidence,
         max_bins=max_bins,
+        classifier=classifier,
     )
     return {"window": window, "bin_deg": float(bin), "now_ns": now_ns, "bins": bins}
 

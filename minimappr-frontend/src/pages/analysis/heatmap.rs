@@ -1,4 +1,5 @@
 use crate::map::bindings as lfi;
+use crate::pages::analysis::AnalysisFilters;
 use gloo_net::http::Request;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -24,6 +25,9 @@ pub fn GeoHeatmapView() -> impl IntoView {
     let window = RwSignal::new("1h".to_string());
     let error: RwSignal<Option<String>> = RwSignal::new(None);
     let count = RwSignal::new(0usize);
+    let classifier = use_context::<AnalysisFilters>()
+        .expect("AnalysisFilters context provided by AnalysisLayout")
+        .classifier;
 
     // Init the MapLibre map then invalidate size so flex layout dimensions settle.
     Effect::new(move |init_done: Option<bool>| {
@@ -39,9 +43,12 @@ pub fn GeoHeatmapView() -> impl IntoView {
     });
 
     let reload = {
-        move |w: String| {
+        move |w: String, cls: Option<String>| {
             error.set(None);
-            let url = format!("/api/v1/analytics/heatmap?window={w}&bin=0.0001&max_bins=5000");
+            let mut url = format!("/api/v1/analytics/heatmap?window={w}&bin=0.0001&max_bins=5000");
+            if let Some(c) = cls {
+                url.push_str(&format!("&classifier={}", js_sys::encode_uri_component(&c)));
+            }
             spawn_local(async move {
                 match Request::get(&url).send().await {
                     Ok(resp) if resp.ok() => match resp.json::<HeatmapResponse>().await {
@@ -80,7 +87,8 @@ pub fn GeoHeatmapView() -> impl IntoView {
 
     Effect::new(move |_| {
         let w = window.get();
-        reload(w);
+        let cls = classifier.get();
+        reload(w, cls);
     });
 
     // Clean up heatmap when view unmounts to avoid leftover layers on COP map.

@@ -2273,13 +2273,17 @@ class Storage:
         bucket_ns: int,
         min_label_confidence: float | None = None,
         max_labels: int = 64,
+        classifier: str | None = None,
     ) -> tuple[list[str], list[list[int]], list[int]]:
         """Aggregate detections into a (label × hour-bucket) count matrix.
 
         Returns (labels, counts[label_idx][bucket_idx], bucket_totals[bucket_idx]).
         Buckets are [start_ns, end_ns) divided into fixed-width intervals of
         `bucket_ns` — typically 3600 * 1e9 ns (one hour). Labels are selected
-        from the top `max_labels` by total count in the window.
+        from the top `max_labels` by total count in the window. `classifier`
+        restricts to detections whose winning classifier member matches
+        (see `feature_summary_json.winner_member`, defaults to "yamnet" —
+        mirrors `core/assembly.py`'s fallback for older rows without it).
         """
         db = self._require_db()
         if bucket_ns <= 0 or end_ns <= start_ns:
@@ -2291,6 +2295,9 @@ class Storage:
         if min_label_confidence is not None:
             clauses.append("label_confidence >= ?")
             params.append(float(min_label_confidence))
+        if classifier:
+            clauses.append("COALESCE(json_extract(feature_summary_json, '$.winner_member'), 'yamnet') = ?")
+            params.append(classifier)
         where = " AND ".join(clauses)
 
         # Pick top-N labels by count in window — keeps payload small for "noisy" days.
@@ -2348,11 +2355,13 @@ class Storage:
         now_ns: int,
         window_ns: int,
         min_label_confidence: float | None = None,
+        classifier: str | None = None,
     ) -> list[dict]:
         """Return one row per label: count, first_seen, last_seen, distinct-node count.
 
         Window = `[now_ns - window_ns, now_ns]`. Cheap aggregate query — one pass
-        over the timestamp index; no heavy joins.
+        over the timestamp index; no heavy joins. `classifier` restricts to
+        detections whose winning classifier member matches (see `detection_matrix`).
         """
         db = self._require_db()
         start_ns = int(now_ns - window_ns)
@@ -2361,6 +2370,9 @@ class Storage:
         if min_label_confidence is not None:
             clauses.append("label_confidence >= ?")
             params.append(float(min_label_confidence))
+        if classifier:
+            clauses.append("COALESCE(json_extract(feature_summary_json, '$.winner_member'), 'yamnet') = ?")
+            params.append(classifier)
         where = " AND ".join(clauses)
         rows = await (
             await db.execute(
@@ -2502,11 +2514,14 @@ class Storage:
         labels: list[str] | None = None,
         min_label_confidence: float | None = None,
         max_bins: int = 5000,
+        classifier: str | None = None,
     ) -> list[dict]:
         """Pre-binned lat/lon/weight triplets for the geo heatmap view.
 
         `bin_deg` = rounding resolution in degrees (0.0001 ≈ 11 m at the equator).
         Hard `max_bins` cap on the payload — we fall back to larger bins if needed.
+        `classifier` restricts to detections whose winning classifier member
+        matches (see `detection_matrix`).
         """
         db = self._require_db()
         start_ns = int(now_ns - window_ns)
@@ -2524,6 +2539,9 @@ class Storage:
             placeholders = ",".join("?" for _ in labels)
             clauses.append(f"label IN ({placeholders})")
             params.extend(labels)
+        if classifier:
+            clauses.append("COALESCE(json_extract(feature_summary_json, '$.winner_member'), 'yamnet') = ?")
+            params.append(classifier)
         where = " AND ".join(clauses)
 
         # Single grouped query; SQLite handles ROUND efficiently.
@@ -2544,6 +2562,37 @@ class Storage:
             )
         ).fetchall()
         return [{"lat": float(row["lat"]), "lon": float(row["lon"]), "weight": int(row["weight"])} for row in rows]
+
+    async def list_classifiers(self, *, window_ns: int | None = None, now_ns: int | None = None) -> list[dict]:
+        """Distinct classifier members that produced detections, with counts.
+
+        Sourced from `feature_summary_json.winner_member` (falls back to
+        "yamnet" for older rows without it, matching `core/assembly.py`).
+        Optionally scoped to `[now_ns - window_ns, now_ns]`; unscoped by
+        default so the analysis-page filter offers every classifier ever seen.
+        """
+        db = self._require_db()
+        clauses: list[str] = []
+        params: list[object] = []
+        if window_ns is not None and now_ns is not None:
+            clauses.append("timestamp_ns >= ?")
+            params.append(int(now_ns - window_ns))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = await (
+            await db.execute(
+                f"""
+                SELECT
+                    COALESCE(json_extract(feature_summary_json, '$.winner_member'), 'yamnet') AS classifier,
+                    COUNT(*) AS count
+                FROM detections
+                {where}
+                GROUP BY classifier
+                ORDER BY count DESC
+                """,
+                tuple(params),
+            )
+        ).fetchall()
+        return [{"name": row["classifier"], "count": int(row["count"])} for row in rows]
 
     async def list_tracks(
         self,

@@ -1,4 +1,5 @@
 use crate::audio::detection_actions::DetectionAudioActions;
+use crate::pages::analysis::AnalysisFilters;
 use gloo_net::http::Request;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -45,9 +46,15 @@ pub fn LabelSummaryView() -> impl IntoView {
     let data: RwSignal<Option<LabelsResponse>> = RwSignal::new(None);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
     let window = RwSignal::new("30d".to_string());
+    let classifier = use_context::<AnalysisFilters>()
+        .expect("AnalysisFilters context provided by AnalysisLayout")
+        .classifier;
 
-    let reload = move |w: String| {
-        let url = format!("/api/v1/analytics/labels?window={}", w);
+    let reload = move |w: String, cls: Option<String>| {
+        let mut url = format!("/api/v1/analytics/labels?window={}", w);
+        if let Some(c) = cls {
+            url.push_str(&format!("&classifier={}", js_sys::encode_uri_component(&c)));
+        }
         spawn_local(async move {
             match Request::get(&url).send().await {
                 Ok(resp) if resp.ok() => match resp.json::<LabelsResponse>().await {
@@ -62,7 +69,8 @@ pub fn LabelSummaryView() -> impl IntoView {
 
     Effect::new(move |_| {
         let w = window.get();
-        reload(w);
+        let cls = classifier.get();
+        reload(w, cls);
     });
 
     view! {

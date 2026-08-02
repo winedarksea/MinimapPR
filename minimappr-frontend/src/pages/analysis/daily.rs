@@ -1,3 +1,4 @@
+use crate::pages::analysis::AnalysisFilters;
 use gloo_net::http::Request;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -28,21 +29,27 @@ pub fn DailyDetectionsView() -> impl IntoView {
     let data: RwSignal<Option<DailyResponse>> = RwSignal::new(None);
     let loading = RwSignal::new(false);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
+    let classifier = use_context::<AnalysisFilters>()
+        .expect("AnalysisFilters context provided by AnalysisLayout")
+        .classifier;
 
     // Use browser's detected tz (falls back to UTC if Intl is unavailable).
     let tz = detect_tz();
 
     let fetch_data = {
         let tz = tz.clone();
-        move |offset: i64| {
+        move |offset: i64, cls: Option<String>| {
             loading.set(true);
             error.set(None);
             let end_iso = iso_hour_offset(-offset * 24);
-            let url = format!(
+            let mut url = format!(
                 "/api/v1/analytics/daily?end={}&hours=24&tz={}",
                 js_sys::encode_uri_component(&end_iso),
                 js_sys::encode_uri_component(&tz),
             );
+            if let Some(c) = cls {
+                url.push_str(&format!("&classifier={}", js_sys::encode_uri_component(&c)));
+            }
             spawn_local(async move {
                 match Request::get(&url).send().await {
                     Ok(resp) if resp.ok() => match resp.json::<DailyResponse>().await {
@@ -60,10 +67,11 @@ pub fn DailyDetectionsView() -> impl IntoView {
         }
     };
 
-    // Initial fetch + refetch when offset changes.
+    // Initial fetch + refetch when offset or classifier filter changes.
     Effect::new(move |_| {
         let offset = day_offset.get();
-        fetch_data(offset);
+        let cls = classifier.get();
+        fetch_data(offset, cls);
     });
 
     let on_prev = move |_| day_offset.update(|v| *v += 1);

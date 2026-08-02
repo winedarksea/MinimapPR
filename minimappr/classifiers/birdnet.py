@@ -64,7 +64,7 @@ class _BatchRequest:
 
 
 class BirdNETClassifier(AudioClassifier):
-    """Wraps the BirdNET V2.4 Protobuf model for bird species identification.
+    """Wraps the BirdNET V2.4 TFLite model for bird species identification.
 
     Intended as a downstream ChainStage triggered when a base classifier
     (e.g. YAMNet) returns a bird-related label, providing species-level
