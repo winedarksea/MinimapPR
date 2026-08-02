@@ -395,11 +395,20 @@ async def _cleanup_loop(app: FastAPI) -> None:
     while True:
         state = app.state
         settings: Settings = state.settings
-        now_ns = time.time_ns()
-        cleanup_summary = await state.cleanup_service.run_housekeeping_cycle(now_ns=now_ns)
-        if any(cleanup_summary["partial_cleanup"].values()) or any(cleanup_summary["retention_cleanup"].values()):
-            logger.info("Cleanup cycle removed data: %s", cleanup_summary)
-        await state.fusion_node.housekeeping_tick(now_ns=now_ns)
+        # Supervised: this loop is the only thing that persists track aging
+        # (housekeeping_tick → tracker.snapshot → upsert_track). One uncaught
+        # exception used to kill it silently for the life of the process, after
+        # which no track was ever aged into storage again.
+        try:
+            now_ns = time.time_ns()
+            cleanup_summary = await state.cleanup_service.run_housekeeping_cycle(now_ns=now_ns)
+            if any(cleanup_summary["partial_cleanup"].values()) or any(cleanup_summary["retention_cleanup"].values()):
+                logger.info("Cleanup cycle removed data: %s", cleanup_summary)
+            await state.fusion_node.housekeeping_tick(now_ns=now_ns)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Cleanup cycle failed; continuing")
         await asyncio.sleep(settings.cleanup_interval_seconds)
 
 
@@ -3060,6 +3069,9 @@ async def get_config(request: Request) -> dict:
         "multi_node_bearing_min_separation_deg": settings.multi_node_bearing_min_separation_deg,
         "multi_node_bearing_ttl_seconds": settings.multi_node_bearing_ttl_seconds,
         "multi_node_bearing_max_condition": settings.multi_node_bearing_max_condition,
+        "multi_node_bearing_fusion_enabled": settings.multi_node_bearing_fusion_enabled,
+        "localization_cross_node_admission_enabled": settings.localization_cross_node_admission_enabled,
+        "localization_cross_node_relative_energy_floor": settings.localization_cross_node_relative_energy_floor,
         "classifier_stage_timeout_seconds": settings.classifier_stage_timeout_seconds,
         "classification_stage_timeout_seconds": settings.classification_stage_timeout_seconds,
         "fusion_worker_count": settings.fusion_worker_count,
@@ -3417,6 +3429,10 @@ async def patch_config(request: Request) -> dict:
             errors.append("fusion_report_window_localized_emission_cap: must be >= 0 (0 disables)")
         elif key == "birdnet_pool_size" and value < 1:  # type: ignore[operator]
             errors.append("birdnet_pool_size: must be >= 1")
+        elif key == "localization_cross_node_relative_energy_floor" and not (
+            0.0 <= value <= 1.0  # type: ignore[operator]
+        ):
+            errors.append("localization_cross_node_relative_energy_floor: must be in [0, 1]")
         elif key == "classification_window_seconds" and value <= 0.0:  # type: ignore[operator]
             errors.append("classification_window_seconds: must be > 0")
         elif key == "fusion_backpressure_drop_policy":
@@ -4382,7 +4398,13 @@ async def cop_status(request: Request) -> CopStatusResponse:
     state = _require_state(request)
     now_ns = time.time_ns()
     node_counts = await _runtime_node_health_counts(state, now_ns=now_ns)
-    active_tracks = await state.storage.count_active_tracks()
+    # Recency cutoff at the drop threshold so cop/status agrees with the
+    # tracker's own aging (and with /api/v1/tracks + context/current) instead
+    # of counting restart-orphaned rows as active forever.
+    settings: Settings = state.settings
+    active_tracks = await state.storage.count_active_tracks(
+        max_age_seconds=settings.track_stale_seconds * settings.track_drop_multiplier,
+    )
     recent_window_ns = now_ns - 300_000_000_000
     recent_alert_count = await state.storage.recent_alert_count(since_ns=recent_window_ns)
     return CopStatusResponse(

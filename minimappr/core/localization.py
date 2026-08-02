@@ -12,6 +12,7 @@ from minimappr.core.localization_uncertainty import (
     covariance_to_nested_list,
     embed_planar_covariance_m2,
 )
+from minimappr.core.tdoa_measurements import PairMeasurementStats
 from minimappr.models import LocalizationResult
 from minimappr.utils.audio import rms
 
@@ -211,6 +212,7 @@ class LocalizationEngine:
             temperature_c=temperature_c,
             humidity_fraction=humidity_fraction,
         )
+        pair_stats = PairMeasurementStats()
         measurements = measure_pair_tdoas(
             sensor_positions=sensor_positions,
             sensor_windows=sensor_windows,
@@ -225,6 +227,7 @@ class LocalizationEngine:
             cross_node_max_tau_s=self.cross_node_max_tau_s,
             cross_node_min_sync_weight=self.cross_node_min_sync_weight,
             node_position_std_m=node_position_std_m,
+            stats=pair_stats,
         )
         array_aperture_m = max(
             (
@@ -308,6 +311,13 @@ class LocalizationEngine:
         )
         if half_space in ("upper", "lower"):
             result = result.model_copy(update={"half_space_applied": True})
+        if sensor_node_ids is not None:
+            result = result.model_copy(
+                update={
+                    "cross_node_pairs_measured": pair_stats.cross_node_pairs_measured,
+                    "cross_node_pairs_rejected_sync": pair_stats.cross_node_pairs_rejected_sync,
+                }
+            )
         return result
 
     def localize_2d(
@@ -319,6 +329,7 @@ class LocalizationEngine:
         humidity_fraction: float,
         fixed_z_m: float | None = None,
         sensor_weights: dict[str, float] | None = None,
+        sensor_node_ids: dict[str, str] | None = None,
     ) -> LocalizationResult:
         if len(sensor_windows) < 3:
             raise LocalizationError("Need at least 3 active sensors for 2D TDOA localization")
@@ -331,7 +342,11 @@ class LocalizationEngine:
         reference_signal = sensor_windows[reference_sensor]
         ref_pos = sensor_positions[reference_sensor]
         ref_weight = w.get(reference_sensor, 1.0)
+        reference_node_id = (
+            sensor_node_ids.get(reference_sensor) if sensor_node_ids is not None else None
+        )
 
+        pair_stats = PairMeasurementStats()
         tdoa_s: dict[str, float] = {}
         pair_weights: dict[str, float] = {}
         peaks: list[float] = []
@@ -340,16 +355,38 @@ class LocalizationEngine:
         for sensor_id in sensor_ids:
             if sensor_id == reference_sensor:
                 continue
+            # Phase 5 (mirrors measure_pair_tdoas): a pair spanning two nodes may
+            # correlate over the wider cross-node tau ceiling, and is dropped when
+            # its sync weight is below the cross-node gate — an unsynchronized
+            # cross-node lag is noise, not measurement.
+            is_cross_node = (
+                sensor_node_ids is not None
+                and reference_node_id is not None
+                and sensor_node_ids.get(sensor_id) is not None
+                and sensor_node_ids.get(sensor_id) != reference_node_id
+            )
+            pw = min(ref_weight, w.get(sensor_id, 1.0))
+            if (
+                is_cross_node
+                and self.cross_node_min_sync_weight is not None
+                and pw < self.cross_node_min_sync_weight
+            ):
+                pair_stats.cross_node_pairs_rejected_sync += 1
+                continue
+            effective_max_tau_s = self.max_tau_s
+            if is_cross_node and self.cross_node_max_tau_s is not None:
+                effective_max_tau_s = max(self.max_tau_s, float(self.cross_node_max_tau_s))
             tau_s, peak = gcc_phat(
                 signal=sensor_windows[sensor_id],
                 reference_signal=reference_signal,
                 sample_rate_hz=sample_rate_hz,
-                max_tau_s=self.max_tau_s,
+                max_tau_s=effective_max_tau_s,
                 interp=max(1, self.interp_factor),
             )
             if not np.isfinite(tau_s) or not np.isfinite(peak):
                 raise LocalizationError(f"Non-finite GCC-PHAT output for sensor {sensor_id}")
-            pw = min(ref_weight, w.get(sensor_id, 1.0))
+            if is_cross_node:
+                pair_stats.cross_node_pairs_measured += 1
             tdoa_s[sensor_id] = tau_s
             pair_weights[sensor_id] = pw
             peaks.append(peak * pw)
@@ -416,7 +453,32 @@ class LocalizationEngine:
             vertical_std_m=minimum_position_std_m,
             minimum_std_m=minimum_position_std_m,
         )
-        return LocalizationResult(
+        # Range-mode provenance (Phase 5): the 2D solver historically returned
+        # mode=None, which bearing-fusion gate G3 treats as "not fuseable" — so
+        # 2D-tier solves (~98% of a compact-array site's output) could never
+        # participate in multi-node bearing fusion. RANGE_REFINED renders
+        # localized exactly like None did (no haircut applies), so display
+        # semantics are unchanged.
+        centroid = np.mean(np.vstack([sensor_positions[sid] for sid in sensor_ids]), axis=0)
+        radial_offset = position - centroid
+        radial_norm = float(np.linalg.norm(radial_offset))
+        if radial_norm > 1e-9:
+            radial_axis = radial_offset / radial_norm
+            radial_variance_m2 = float(radial_axis @ position_covariance_m2 @ radial_axis)
+            lateral_variance_m2 = max(
+                (float(np.trace(position_covariance_m2)) - radial_variance_m2) / 2.0,
+                minimum_position_std_m**2,
+            )
+            range_observability = float(
+                np.clip(
+                    np.sqrt(lateral_variance_m2 / max(radial_variance_m2, lateral_variance_m2)),
+                    0.0,
+                    1.0,
+                )
+            )
+        else:
+            range_observability = 0.0
+        result = LocalizationResult(
             position_m=(float(position[0]), float(position[1]), float(position[2])),
             confidence=float(np.clip(confidence, 0.0, 1.0)),
             gdop=gdop,
@@ -424,7 +486,17 @@ class LocalizationEngine:
             tdoa_s=tdoa_s,
             position_covariance_m2=covariance_to_nested_list(position_covariance_m2),
             residual_rms_seconds=rmse_s,
+            range_projection_mode="range_refined",
+            range_observability=range_observability,
         )
+        if sensor_node_ids is not None:
+            result = result.model_copy(
+                update={
+                    "cross_node_pairs_measured": pair_stats.cross_node_pairs_measured,
+                    "cross_node_pairs_rejected_sync": pair_stats.cross_node_pairs_rejected_sync,
+                }
+            )
+        return result
 
     @staticmethod
     def _gdop(

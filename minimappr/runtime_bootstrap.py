@@ -413,6 +413,17 @@ async def _initialize_storage_and_resolve_site_origin(
 ):
     storage = Storage(settings.storage_config().db_path)
     await storage.initialize()
+    # Boot reconciliation: the in-memory TrackManager never rehydrates from
+    # storage, so tracks persisted as active before a restart are never re-aged
+    # by anyone and read as "confirmed" forever (a live box served 7.5 h-old
+    # rows as its active tracks). Anything past the drop threshold was already
+    # dead; mark it so. Idempotent, both roles.
+    stale_cutoff_ns = time.time_ns() - int(
+        settings.track_stale_seconds * settings.track_drop_multiplier * 1_000_000_000
+    )
+    reconciled = await storage.mark_stale_active_tracks_dropped(cutoff_ns=stale_cutoff_ns)
+    if reconciled:
+        logger.info("Boot reconciliation dropped %d stale active tracks", reconciled)
     # Reads the persisted origin when one exists, so the api and ingest processes
     # boot into the same coordinate frame instead of each deriving its own.
     resolved_site_origin = await load_or_resolve_site_origin(

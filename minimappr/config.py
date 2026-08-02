@@ -239,6 +239,23 @@ class LocalizationConfig:
     # obs_factor floor for bearing-observed Cartesian solves (see
     # cartesian_tdoa.BEARING_OBSERVED_OBS_FACTOR_FLOOR). 0.0 = legacy crushing.
     localization_obs_factor_bearing_floor: float = 1.0
+    # Cross-node TDOA (Phase 5). These previously lived only on Settings, and
+    # production builds the localizer from a LocalizationConfig
+    # (runtime_bootstrap → build_localizer_from_settings), whose getattr
+    # fallbacks silently returned None — the tau lift never reached the live
+    # engine, so a 7.9 m baseline was clipped by the 0.02 s (~6.9 m) cap.
+    localization_cross_node_tdoa_enabled: bool = True
+    localization_cross_node_max_tau_seconds: float = 0.35
+    localization_cross_node_min_sync_weight: float = 0.25
+    # Cross-node sensor admission (default off = today's behavior). Selection
+    # historically pinned to the top-3 RMS sensors — always one node's mics —
+    # so a cross-node pair could never exist. When enabled and the
+    # energy-selected set is single-node, other nodes' sensors are admitted if
+    # they clear a floor RELATIVE to the loudest selected sensor and pass the
+    # cross-node sync gate, letting 3+4 sensors reach full-3D geometry.
+    localization_cross_node_admission_enabled: bool = False
+    localization_cross_node_relative_energy_floor: float = 0.25
+    localization_cross_node_max_extra_sensors: int = 4
     # The default seeds unbounded radial search; max is retained but never limits results.
     localization_far_field_default_range_m: float = 50.0
     # Phase 2: envelope extended to 1 km for long-range cross-node localization.
@@ -683,10 +700,11 @@ class Settings:
     # cross-node pairs, so it retains the normal per-node behavior.
     localization_cross_node_tdoa_enabled: bool = True
     localization_cross_node_max_tau_seconds: float = 0.35
-    localization_cross_node_window_seconds: float = 1.0
     localization_cross_node_max_baseline_m: float = 150.0
-    localization_cross_node_wait_seconds: float = 0.6
     localization_cross_node_min_sync_weight: float = 0.25
+    localization_cross_node_admission_enabled: bool = False
+    localization_cross_node_relative_energy_floor: float = 0.25
+    localization_cross_node_max_extra_sensors: int = 4
     localization_music_azimuth_step_deg: float = 6.0
     localization_music_elevation_step_deg: float = 8.0
     localization_subspace_freq_min_hz: float = 300.0
@@ -1773,21 +1791,25 @@ class Settings:
                 "MINIMAPPR_LOCALIZATION_CROSS_NODE_MAX_TAU_SECONDS",
                 0.35,
             ),
-            localization_cross_node_window_seconds=_env_float(
-                "MINIMAPPR_LOCALIZATION_CROSS_NODE_WINDOW_SECONDS",
-                1.0,
-            ),
             localization_cross_node_max_baseline_m=_env_float(
                 "MINIMAPPR_LOCALIZATION_CROSS_NODE_MAX_BASELINE_M",
                 150.0,
             ),
-            localization_cross_node_wait_seconds=_env_float(
-                "MINIMAPPR_LOCALIZATION_CROSS_NODE_WAIT_SECONDS",
-                0.6,
-            ),
             localization_cross_node_min_sync_weight=_env_float(
                 "MINIMAPPR_LOCALIZATION_CROSS_NODE_MIN_SYNC_WEIGHT",
                 0.25,
+            ),
+            localization_cross_node_admission_enabled=_env_bool(
+                "MINIMAPPR_LOCALIZATION_CROSS_NODE_ADMISSION_ENABLED",
+                False,
+            ),
+            localization_cross_node_relative_energy_floor=_env_float(
+                "MINIMAPPR_LOCALIZATION_CROSS_NODE_RELATIVE_ENERGY_FLOOR",
+                0.25,
+            ),
+            localization_cross_node_max_extra_sensors=_env_int(
+                "MINIMAPPR_LOCALIZATION_CROSS_NODE_MAX_EXTRA_SENSORS",
+                4,
             ),
             localization_music_azimuth_step_deg=_env_float("MINIMAPPR_LOCALIZATION_MUSIC_AZ_STEP_DEG", 6.0),
             localization_music_elevation_step_deg=_env_float("MINIMAPPR_LOCALIZATION_MUSIC_EL_STEP_DEG", 8.0),
@@ -2159,6 +2181,12 @@ class Settings:
             localization_node_bearing_strength=self.localization_node_bearing_strength,
             localization_amplitude_ratio_strength=self.localization_amplitude_ratio_strength,
             localization_obs_factor_bearing_floor=self.localization_obs_factor_bearing_floor,
+            localization_cross_node_tdoa_enabled=self.localization_cross_node_tdoa_enabled,
+            localization_cross_node_max_tau_seconds=self.localization_cross_node_max_tau_seconds,
+            localization_cross_node_min_sync_weight=self.localization_cross_node_min_sync_weight,
+            localization_cross_node_admission_enabled=self.localization_cross_node_admission_enabled,
+            localization_cross_node_relative_energy_floor=self.localization_cross_node_relative_energy_floor,
+            localization_cross_node_max_extra_sensors=self.localization_cross_node_max_extra_sensors,
             wavelength_gating_enabled=self.wavelength_gating_enabled,
             wavelength_penalty_floor=self.wavelength_penalty_floor,
             skip_localization_for_classification=self.skip_localization_for_classification,

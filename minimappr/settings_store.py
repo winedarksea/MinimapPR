@@ -128,10 +128,16 @@ CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     # DOA/TDOA solve blend + cross-node bearing-fusion "greediness" knobs (see
     # core/cartesian_tdoa.py, core/multi_node_bearing_fusion.py).
     "localization_node_bearing_strength": float,
+    # The enable flag itself was oddly absent while every tuning knob below was
+    # PATCHable; a 2-node site could tune bearing fusion but never turn it on.
+    "multi_node_bearing_fusion_enabled": bool,
     "multi_node_bearing_window_seconds": float,
     "multi_node_bearing_min_separation_deg": float,
     "multi_node_bearing_ttl_seconds": float,
     "multi_node_bearing_max_condition": float,
+    # Phase 5 cross-node sensor admission (see FusionNode._admit_cross_node_sensors).
+    "localization_cross_node_admission_enabled": bool,
+    "localization_cross_node_relative_energy_floor": float,
     # Classification-lane backpressure knobs (see core/fusion_node.py). All
     # restart-required — the queues and the FusionConfig snapshot are built at
     # FusionNode.start(). Exposed after the 2026-08-01 live-box review found the

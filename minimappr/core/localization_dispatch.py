@@ -153,6 +153,7 @@ class LocalizationDispatcher:
         humidity_fraction: float,
         fixed_z_m: float | None = None,
         sensor_weights: dict[str, float] | None = None,
+        sensor_node_ids: dict[str, str] | None = None,
     ) -> LocalizationResult:
         fallback = self._fallback
         if not hasattr(fallback, "localize_2d"):
@@ -174,28 +175,30 @@ class LocalizationDispatcher:
                     "Fix the position/geometry before treating this as the correct algorithm.",
                     self.default_algorithm,
                 )
+        optional_kwargs: dict[str, object] = {}
         if sensor_weights is not None and self._localizer_supports_sensor_weights(
             fallback,
             method_name="localize_2d",
         ):
-            result = fallback.localize_2d(
-                sensor_positions=sensor_positions,
-                sensor_windows=sensor_windows,
-                sample_rate_hz=sample_rate_hz,
-                temperature_c=temperature_c,
-                humidity_fraction=humidity_fraction,
-                fixed_z_m=fixed_z_m,
-                sensor_weights=sensor_weights,
-            )
-        else:
-            result = fallback.localize_2d(
-                sensor_positions=sensor_positions,
-                sensor_windows=sensor_windows,
-                sample_rate_hz=sample_rate_hz,
-                temperature_c=temperature_c,
-                humidity_fraction=humidity_fraction,
-                fixed_z_m=fixed_z_m,
-            )
+            optional_kwargs["sensor_weights"] = sensor_weights
+        # Phase 5: node identity lets the engine's 2D path lift the cross-node
+        # tau ceiling and apply the sync gate. Signature-probed so lightweight
+        # test/downstream localizer stubs stay usable.
+        if sensor_node_ids is not None and self._localizer_supports_parameter(
+            fallback,
+            parameter_name="sensor_node_ids",
+            method_name="localize_2d",
+        ):
+            optional_kwargs["sensor_node_ids"] = sensor_node_ids
+        result = fallback.localize_2d(
+            sensor_positions=sensor_positions,
+            sensor_windows=sensor_windows,
+            sample_rate_hz=sample_rate_hz,
+            temperature_c=temperature_c,
+            humidity_fraction=humidity_fraction,
+            fixed_z_m=fixed_z_m,
+            **optional_kwargs,
+        )
         self._record_algorithm_provenance(
             result,
             attempted_algorithm="gcc_phat",

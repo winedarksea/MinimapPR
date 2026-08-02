@@ -144,17 +144,27 @@ def _build_backend(
         try:
             from minimappr.classifiers.birdnet import BirdNETClassifier  # noqa: PLC0415
 
-            return BirdNETClassifier(
-                min_confidence=spec.min_confidence or settings.birdnet_trigger_min_confidence,
-                latitude=settings.site_origin_lat,
-                longitude=settings.site_origin_lon,
-                geo_min_confidence=settings.birdnet_geo_min_confidence,
-                # pool_size=1 is a de-facto lock: with N fusion workers, N-1
-                # park in queue.get() for the whole inference (the 2026-08-01
-                # live-box serialization root cause). Each extra session costs
-                # ~125 MB + one TFLite subprocess, so the default stays 1.
-                pool_size=max(1, int(getattr(settings, "birdnet_pool_size", 1))),
+            birdnet_kwargs = {
+                "min_confidence": spec.min_confidence or settings.birdnet_trigger_min_confidence,
+                "latitude": settings.site_origin_lat,
+                "longitude": settings.site_origin_lon,
+                "geo_min_confidence": settings.birdnet_geo_min_confidence,
+            }
+            # pool_size=1 is a de-facto lock: with N fusion workers, N-1 park
+            # in queue.get() for the whole inference (the 2026-08-01 live-box
+            # serialization root cause). Each extra session costs ~125 MB + one
+            # TFLite subprocess, so the default stays 1. Signature-probed so
+            # lightweight test/downstream stubs stay usable.
+            birdnet_parameters = inspect.signature(BirdNETClassifier).parameters
+            accepts_pool_size = "pool_size" in birdnet_parameters or any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in birdnet_parameters.values()
             )
+            if accepts_pool_size:
+                birdnet_kwargs["pool_size"] = max(
+                    1, int(getattr(settings, "birdnet_pool_size", 1))
+                )
+            return BirdNETClassifier(**birdnet_kwargs)
         except Exception as exc:  # pragma: no cover - optional runtime backend
             logger.info(
                 "BirdNET unavailable (%s); dropping routing member %r. Install with: pip install birdnet",

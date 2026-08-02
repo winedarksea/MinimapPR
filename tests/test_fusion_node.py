@@ -3568,3 +3568,87 @@ def test_localizer_signature_parameters_cached_per_instance(tmp_path: Path) -> N
     assert "custom_kw" in swapped
     assert "sensor_weights" not in swapped
     assert swapped_2d is None
+
+
+@pytest.mark.asyncio
+async def test_cross_node_sensor_admission_default_off_and_enabled() -> None:
+    """Phase 5 admission: default-off preserves the historical single-node
+    selection exactly; enabled, other-node sensors clearing the relative energy
+    floor + sync gate are admitted so a solve can span nodes."""
+    from types import SimpleNamespace
+
+    from minimappr.core.fusion_node import FusionMetrics, FusionNode
+
+    registry = NodeRegistry()
+    for node_id, origin in (("node-a", (0.0, 0.0, 0.0)), ("node-b", (8.0, 0.0, 0.0))):
+        await registry.upsert(
+            NodeSpec(
+                id=node_id,
+                node_type=NodeType.SIRITH_TETRA,
+                position_m=origin,
+                sensor_offsets_m=[
+                    (-0.02, -0.01, 0.0),
+                    (0.02, -0.01, 0.0),
+                    (0.0, 0.02, 0.0),
+                    (0.0, 0.0, 0.03),
+                ],
+                capabilities=["audio", "array_localization"],
+            ),
+            last_seen_ns=1_739_900_000_000_000_000,
+        )
+
+    energies = {f"node-a:ch{i}": 1.0 for i in range(4)}
+    energies.update({f"node-b:ch{i}": 0.5 for i in range(4)})
+    selected = [f"node-a:ch{i}" for i in range(3)]
+
+    def _fake(enabled: bool, floor: float = 0.25, max_extra: int = 4) -> SimpleNamespace:
+        settings = Settings(
+            localization_cross_node_admission_enabled=enabled,
+            localization_cross_node_relative_energy_floor=floor,
+            localization_cross_node_max_extra_sensors=max_extra,
+        )
+        return SimpleNamespace(
+            localization_config=settings.localization_config(),
+            registry=registry,
+            _metrics=FusionMetrics(),
+        )
+
+    # Default off: selection unchanged, counter untouched.
+    off = _fake(False)
+    result = await FusionNode._admit_cross_node_sensors(
+        off, selected_ids=selected, energies=energies, sensor_weights=None
+    )
+    assert result == selected
+    assert off._metrics.localization_cross_node_admitted_sensor_count == 0
+
+    # Enabled: node-b sensors (0.5 >= 0.25 × 1.0) are admitted, capped.
+    on = _fake(True)
+    result = await FusionNode._admit_cross_node_sensors(
+        on, selected_ids=selected, energies=energies, sensor_weights=None
+    )
+    assert set(result) >= set(selected)
+    admitted = [sid for sid in result if sid.startswith("node-b:")]
+    assert len(admitted) == 4
+    assert on._metrics.localization_cross_node_admitted_sensor_count == 4
+
+    # Relative floor gates quiet nodes out.
+    high_floor = _fake(True, floor=0.75)
+    result = await FusionNode._admit_cross_node_sensors(
+        high_floor, selected_ids=selected, energies=energies, sensor_weights=None
+    )
+    assert result == selected
+
+    # Sub-gate sync weights exclude unsynchronized nodes.
+    gated = _fake(True)
+    weights = {sid: (0.05 if sid.startswith("node-b:") else 1.0) for sid in energies}
+    result = await FusionNode._admit_cross_node_sensors(
+        gated, selected_ids=selected, energies=energies, sensor_weights=weights
+    )
+    assert result == selected
+
+    # max_extra_sensors caps the admitted set.
+    capped = _fake(True, max_extra=2)
+    result = await FusionNode._admit_cross_node_sensors(
+        capped, selected_ids=selected, energies=energies, sensor_weights=None
+    )
+    assert len([sid for sid in result if sid.startswith("node-b:")]) == 2

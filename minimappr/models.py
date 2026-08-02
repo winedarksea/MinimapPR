@@ -523,6 +523,11 @@ class LocalizationResult(BaseModel):
     alias_cutoff_hz: float | None = Field(default=None, ge=0.0)
     condition_number: float | None = Field(default=None, ge=0.0)
     half_space_applied: bool = False
+    # Cross-node pair activity for this solve (None = the solve path does not
+    # measure pairs, e.g. Rust-manifest passthrough). Folded into FusionMetrics
+    # so a dead cross-node path is distinguishable from a working one.
+    cross_node_pairs_measured: int | None = Field(default=None, ge=0)
+    cross_node_pairs_rejected_sync: int | None = Field(default=None, ge=0)
 
 
 class ContributorSummary(BaseModel):

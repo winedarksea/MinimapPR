@@ -3693,18 +3693,45 @@ class Storage:
             "offline_nodes": int(row["offline_nodes"] or 0),
         }
 
-    async def count_active_tracks(self) -> int:
+    async def count_active_tracks(self, *, max_age_seconds: float | None = None) -> int:
+        """Count tracks in an active status.
+
+        ``max_age_seconds`` adds a recency cutoff on ``last_seen_ns``. Without
+        it, rows orphaned as 'confirmed' by a restart (the in-memory tracker
+        starts empty and nothing re-ages persisted rows) count as active
+        forever — a live box reported 9 "active" tracks that were 7.5 h old.
+        """
         db = self._require_db()
-        row = await (
-            await db.execute(
-                """
-                SELECT COUNT(1) AS c
-                FROM tracks
-                WHERE status IN ('tentative', 'confirmed', 'coasting')
-                """,
-            )
-        ).fetchone()
+        query = """
+            SELECT COUNT(1) AS c
+            FROM tracks
+            WHERE status IN ('tentative', 'confirmed', 'coasting')
+        """
+        params: tuple = ()
+        if max_age_seconds is not None:
+            query += " AND last_seen_ns >= ?"
+            params = (time.time_ns() - int(max_age_seconds * 1_000_000_000),)
+        row = await (await db.execute(query, params)).fetchone()
         return int(row["c"] if row is not None else 0)
+
+    async def mark_stale_active_tracks_dropped(self, *, cutoff_ns: int) -> int:
+        """Transition active-status tracks with ``last_seen_ns`` before the
+        cutoff to 'dropped'. Boot-time reconciliation: the in-memory
+        TrackManager never rehydrates from storage, so tracks persisted as
+        active before a restart are otherwise never re-aged by anyone (and
+        retention only deletes rows already marked 'dropped')."""
+        db = self._require_db()
+        cursor = await db.execute(
+            """
+            UPDATE tracks
+            SET status = 'dropped'
+            WHERE status IN ('tentative', 'confirmed', 'coasting')
+              AND last_seen_ns < ?
+            """,
+            (int(cutoff_ns),),
+        )
+        await db.commit()
+        return int(cursor.rowcount or 0)
 
     async def get_detection(self, detection_id: str) -> dict | None:
         db = self._require_db()

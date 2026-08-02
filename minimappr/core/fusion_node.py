@@ -230,11 +230,16 @@ class FusionMetrics:
     localization_bearing_fusion_degenerate_count: int = 0
     localization_bearing_fusion_stale_count: int = 0
     last_bearing_fusion_contributor_count: int = 0
+    # Wired from PairMeasurementStats via the localization result (Phase 5).
+    # (`candidates_coalesced` / `cross_node_wait_timeout` were removed: they
+    # described a coalescing/wait stage that was never implemented — no writer
+    # existed, so they read 0 forever and masqueraded as runtime signals.)
     localization_cross_node_pairs_measured_count: int = 0
     localization_cross_node_pairs_rejected_sync_count: int = 0
-    localization_candidates_coalesced_count: int = 0
-    localization_cross_node_wait_timeout_count: int = 0
     last_cross_node_pair_count: int = 0
+    # Other-node sensors admitted past the top-N energy selection (Phase 5
+    # cross-node admission; 0 unless localization_cross_node_admission_enabled).
+    localization_cross_node_admitted_sensor_count: int = 0
     localization_rejected_out_of_range_count: int = 0
     # Solves demoted to omni by the quality gate because their geometry could not
     # support a point fix (see _localization_quality_is_reportable).
@@ -1757,6 +1762,12 @@ class FusionNode:
             )
             return None
 
+        selected_ids = await self._admit_cross_node_sensors(
+            selected_ids=selected_ids,
+            energies=energies,
+            sensor_weights=sensor_weights,
+        )
+
         tier = self.degradation_model.tier_for_sensor_count(len(selected_ids))
         selected_windows = {sensor_id: windows[sensor_id] for sensor_id in selected_ids}
         selected_positions = {sensor_id: sensor_positions[sensor_id] for sensor_id in selected_ids}
@@ -1846,6 +1857,10 @@ class FusionNode:
                     sensor_id: sensor_weights.get(sensor_id, 1.0)
                     for sensor_id in selected_ids
                 }
+            # Phase 5: the 2D tier (~98% of compact-array solves) was node-blind —
+            # no cross-node tau lift or sync gate could ever apply to it.
+            if "sensor_node_ids" in localize_2d_parameters:
+                localization_2d_kwargs["sensor_node_ids"] = selected_sensor_node_ids
         localization_branch: LocalizationBranch | None = None
         contributing_centroid_m = (
             np.mean(
@@ -1869,6 +1884,7 @@ class FusionNode:
                     conditions.humidity_fraction,
                     **localization_kwargs,
                 )
+                self._record_cross_node_pair_stats(localization)
                 localization_branch = self._build_localization_branch(
                     localization=localization,
                     selected_windows=selected_windows,
@@ -1896,6 +1912,7 @@ class FusionNode:
                     mean_z,
                     **localization_2d_kwargs,
                 )
+                self._record_cross_node_pair_stats(localization)
                 localization_branch = self._build_localization_branch(
                     localization=localization,
                     selected_windows=selected_windows,
@@ -2904,6 +2921,75 @@ class FusionNode:
             source_node_id=product.candidate.source_node_id,
             event_time_ns=product.candidate.event_time_ns,
         )
+
+    async def _admit_cross_node_sensors(
+        self,
+        *,
+        selected_ids: list[str],
+        energies: dict[str, float],
+        sensor_weights: dict[str, float] | None,
+    ) -> list[str]:
+        """Admit other nodes' sensors past the top-N energy selection (Phase 5).
+
+        Energy selection pins to the loudest sensors — in practice one node's
+        mics (the 2026-08-01 live box: 18991 single-node 2D solves, 0 cross-node
+        pairs measured). When enabled and the selection is single-node, sensors
+        from OTHER nodes are admitted if they clear a relative energy floor and
+        the cross-node sync gate, so the solve can span nodes. Default off.
+        """
+        cfg = self.localization_config
+        if not getattr(cfg, "localization_cross_node_admission_enabled", False):
+            return selected_ids
+        if not selected_ids:
+            return selected_ids
+        node_ids_by_sensor = await self.registry.sensor_node_ids(sorted(energies))
+        selected_nodes = {
+            node_ids_by_sensor.get(sensor_id)
+            for sensor_id in selected_ids
+            if node_ids_by_sensor.get(sensor_id) is not None
+        }
+        if len(selected_nodes) != 1:
+            # Already multi-node (or node-less stubs): nothing to admit.
+            return selected_ids
+        max_selected_energy = max(energies[sensor_id] for sensor_id in selected_ids)
+        energy_floor = (
+            cfg.localization_cross_node_relative_energy_floor * max_selected_energy
+        )
+        sync_gate = getattr(cfg, "localization_cross_node_min_sync_weight", 0.25) or 0.0
+        weights = sensor_weights or {}
+        admissible = sorted(
+            (
+                (energies[sensor_id], sensor_id)
+                for sensor_id in energies
+                if sensor_id not in selected_ids
+                and node_ids_by_sensor.get(sensor_id) is not None
+                and node_ids_by_sensor[sensor_id] not in selected_nodes
+                and energies[sensor_id] >= energy_floor
+                and weights.get(sensor_id, 1.0) >= sync_gate
+            ),
+            reverse=True,
+        )
+        extra = [
+            sensor_id
+            for _, sensor_id in admissible[
+                : max(0, int(cfg.localization_cross_node_max_extra_sensors))
+            ]
+        ]
+        if not extra:
+            return selected_ids
+        self._metrics.localization_cross_node_admitted_sensor_count += len(extra)
+        return [*selected_ids, *extra]
+
+    def _record_cross_node_pair_stats(self, localization) -> None:
+        """Fold a solve's cross-node pair stats into FusionMetrics. None fields
+        (solve path measures no pairs) leave the counters untouched."""
+        measured = getattr(localization, "cross_node_pairs_measured", None)
+        rejected = getattr(localization, "cross_node_pairs_rejected_sync", None)
+        if measured is not None:
+            self._metrics.localization_cross_node_pairs_measured_count += int(measured)
+            self._metrics.last_cross_node_pair_count = int(measured)
+        if rejected is not None:
+            self._metrics.localization_cross_node_pairs_rejected_sync_count += int(rejected)
 
     def _should_skip_saturated_report_window(self, product: LocalizedCandidate) -> bool:
         """Pre-render report-window gate (cap = 0 disables).

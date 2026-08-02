@@ -24,6 +24,17 @@ class PairTdoaMeasurement:
     weight: float
 
 
+@dataclass(slots=True)
+class PairMeasurementStats:
+    """Mutable counters filled in by ``measure_pair_tdoas`` so callers can
+    surface cross-node activity. Until these were wired, the corresponding
+    FusionMetrics counters read 0 forever and a dead cross-node path was
+    indistinguishable from a working one."""
+
+    cross_node_pairs_measured: int = 0
+    cross_node_pairs_rejected_sync: int = 0
+
+
 def normalized_pair_quality(correlation_peak: float) -> float:
     if not np.isfinite(correlation_peak):
         return 0.0
@@ -45,6 +56,7 @@ def measure_pair_tdoas(
     cross_node_max_tau_s: float | None = None,
     cross_node_min_sync_weight: float | None = None,
     node_position_std_m: dict[str, float] | None = None,
+    stats: PairMeasurementStats | None = None,
 ) -> list[PairTdoaMeasurement]:
     """Measure pairwise TDOAs, optionally enabling true cross-node correlation.
 
@@ -83,6 +95,8 @@ def measure_pair_tdoas(
             and not same_node
             and synchronization_weight < cross_node_sync_gate
         ):
+            if stats is not None:
+                stats.cross_node_pairs_rejected_sync += 1
             continue
         # Phase 5: geometry weighting — a wide baseline surveyed with small position
         # std is far more informative than a short/uncertain one.
@@ -144,6 +158,8 @@ def measure_pair_tdoas(
         )
         if not np.isfinite(tdoa_seconds) or not np.isfinite(correlation_peak):
             continue
+        if stats is not None and sensor_node_ids is not None and not same_node:
+            stats.cross_node_pairs_measured += 1
         measurements.append(
             PairTdoaMeasurement(
                 sensor_a=sensor_a,

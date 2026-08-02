@@ -20,6 +20,7 @@ from minimappr.api.stream_consumer import SidecarNodeSnapshot
 from minimappr.config import Settings
 from minimappr.main import app
 from minimappr.models import DetectionEvent, GeoPoint, NodeSpec, NodeType, TrackState
+from minimappr.storage.db import Storage
 from minimappr.core.live_ingest_state import frame_identity_key
 from minimappr.utils.audio import encode_pcm16le_b64
 
@@ -2602,3 +2603,90 @@ def test_ingest_spool_consumer_rejects_manifest_path_traversal(monkeypatch, tmp_
             time.sleep(0.05)
         assert failed_manifest.exists()
         assert (spool_dir / "evil.body").read_bytes() == b"must-not-move"
+
+
+def test_cop_status_excludes_restart_orphaned_tracks(monkeypatch, tmp_path: Path) -> None:
+    """Rows persisted as 'confirmed' before a restart must not count as active:
+    boot reconciliation drops past-drop-age rows, and cop/status applies a
+    recency cutoff (a live box reported 9 'active' tracks 7.5 h old)."""
+    db_path = _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+
+    async def seed() -> None:
+        storage = Storage(db_path)
+        await storage.initialize()
+        try:
+            stale_ns = time.time_ns() - int(7.5 * 3600 * 1_000_000_000)
+            await storage.upsert_track(
+                TrackState(
+                    id="trk-orphan",
+                    first_seen_ns=stale_ns,
+                    last_seen_ns=stale_ns,
+                    position_m=(0.0, 0.0, 0.0),
+                    velocity_mps=(0.0, 0.0, 0.0),
+                    label="bird_like",
+                    label_category="wildlife",
+                    confidence=0.8,
+                    update_count=3,
+                    status="confirmed",
+                    tqi=0.6,
+                )
+            )
+        finally:
+            await storage.close()
+
+    asyncio.run(seed())
+
+    with TestClient(app) as client:
+        cop_response = client.get("/api/v1/cop/status")
+        tracks_response = client.get("/api/v1/tracks")
+
+    assert cop_response.status_code == 200
+    assert cop_response.json()["active_tracks"] == 0
+    # /api/v1/tracks filters to active statuses; the reconciled row is gone.
+    assert tracks_response.status_code == 200
+    assert tracks_response.json() == []
+
+
+@pytest.mark.asyncio
+async def test_cleanup_loop_survives_housekeeping_exception() -> None:
+    """One bad housekeeping cycle must not kill the loop — it is the only thing
+    that persists track aging, so its death silently froze track status forever."""
+    from types import SimpleNamespace
+
+    from minimappr.main import _cleanup_loop
+
+    calls = {"cleanup": 0, "tick": 0}
+
+    class _FlakyCleanup:
+        async def run_housekeeping_cycle(self, *, now_ns: int):
+            calls["cleanup"] += 1
+            if calls["cleanup"] == 1:
+                raise RuntimeError("planned failure")
+            return {"partial_cleanup": {}, "retention_cleanup": {}}
+
+    class _Fusion:
+        async def housekeeping_tick(self, *, now_ns: int):
+            calls["tick"] += 1
+
+    fake_app = SimpleNamespace(
+        state=SimpleNamespace(
+            settings=SimpleNamespace(cleanup_interval_seconds=0.01),
+            cleanup_service=_FlakyCleanup(),
+            fusion_node=_Fusion(),
+        )
+    )
+
+    task = asyncio.create_task(_cleanup_loop(fake_app))
+    try:
+        for _ in range(200):
+            if calls["cleanup"] >= 2 and calls["tick"] >= 1:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    # The first cycle raised; the loop kept going and later cycles completed.
+    assert calls["cleanup"] >= 2
+    assert calls["tick"] >= 1

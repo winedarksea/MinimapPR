@@ -859,3 +859,64 @@ def test_detection_exposes_legacy_spl_db_alias() -> None:
     dumped = detection.model_dump(mode="json")
     assert dumped["received_level_db"] == pytest.approx(-43.4)
     assert dumped["spl_db"] == pytest.approx(-43.4)
+
+
+def _track(track_id: str, *, status: str, last_seen_ns: int) -> TrackState:
+    return TrackState(
+        id=track_id,
+        first_seen_ns=last_seen_ns - 1_000_000_000,
+        last_seen_ns=last_seen_ns,
+        position_m=(0.0, 0.0, 0.0),
+        velocity_mps=(0.0, 0.0, 0.0),
+        label="bird_like",
+        label_category="wildlife",
+        confidence=0.8,
+        update_count=2,
+        status=status,
+        tqi=0.6,
+    )
+
+
+@pytest.mark.asyncio
+async def test_mark_stale_active_tracks_dropped(tmp_path: Path) -> None:
+    """Boot reconciliation: active-status rows past the cutoff transition to
+    'dropped'; recent actives and already-dropped rows are untouched."""
+    storage = Storage(tmp_path / "reconcile.db")
+    await storage.initialize()
+    try:
+        now_ns = time.time_ns()
+        stale_ns = now_ns - 7 * 3600 * 1_000_000_000  # the live-box 7.5h orphans
+        await storage.upsert_track(_track("trk-stale-confirmed", status="confirmed", last_seen_ns=stale_ns))
+        await storage.upsert_track(_track("trk-stale-tentative", status="tentative", last_seen_ns=stale_ns))
+        await storage.upsert_track(_track("trk-fresh", status="confirmed", last_seen_ns=now_ns))
+        await storage.upsert_track(_track("trk-already-dropped", status="dropped", last_seen_ns=stale_ns))
+
+        cutoff_ns = now_ns - 60 * 1_000_000_000
+        changed = await storage.mark_stale_active_tracks_dropped(cutoff_ns=cutoff_ns)
+        assert changed == 2
+
+        rows = await storage.list_tracks(limit=10)
+        by_id = {row["id"]: row["status"] for row in rows}
+        assert by_id["trk-stale-confirmed"] == "dropped"
+        assert by_id["trk-stale-tentative"] == "dropped"
+        assert by_id["trk-fresh"] == "confirmed"
+        # Idempotent.
+        assert await storage.mark_stale_active_tracks_dropped(cutoff_ns=cutoff_ns) == 0
+    finally:
+        await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_count_active_tracks_recency_cutoff(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "count-active.db")
+    await storage.initialize()
+    try:
+        now_ns = time.time_ns()
+        await storage.upsert_track(_track("trk-old", status="confirmed", last_seen_ns=now_ns - 3600 * 1_000_000_000))
+        await storage.upsert_track(_track("trk-new", status="confirmed", last_seen_ns=now_ns))
+        # Legacy call counts everything active regardless of age.
+        assert await storage.count_active_tracks() == 2
+        # Cutoff excludes the restart orphan.
+        assert await storage.count_active_tracks(max_age_seconds=60.0) == 1
+    finally:
+        await storage.close()

@@ -199,3 +199,178 @@ def test_node_position_std_inflates_downweights_cross_node_pair() -> None:
     surveyed = _cross_pair_weight({sid: 0.0 for sid in positions})
     uncertain = _cross_pair_weight({sid: 5.0 for sid in positions})
     assert uncertain < surveyed
+
+
+def test_build_localizer_from_localization_config_carries_cross_node_settings() -> None:
+    """Regression for the silent config drop: production builds the localizer
+    from a LocalizationConfig (runtime_bootstrap), and until these fields were
+    carried onto it, getattr fallbacks returned None — the cross-node tau lift
+    never reached the live engine, so a 7.9 m baseline was clipped by the
+    0.02 s (~6.9 m) same-node cap."""
+    from minimappr.config import Settings
+    from minimappr.core.localization_dispatch import build_localizer_from_settings
+
+    cfg = Settings().localization_config()
+    assert cfg.localization_cross_node_tdoa_enabled is True
+    dispatcher = build_localizer_from_settings(cfg)
+    engine = dispatcher.algorithms["gcc_phat"] if hasattr(dispatcher, "algorithms") else dispatcher
+    gcc = getattr(dispatcher, "_algorithms", None)
+    # Locate the gcc engine regardless of dispatcher internals.
+    candidates = [engine]
+    if isinstance(gcc, dict):
+        candidates.append(gcc.get("gcc_phat"))
+    resolved = next(
+        (c for c in candidates if isinstance(c, LocalizationEngine)),
+        None,
+    )
+    assert resolved is not None, "gcc_phat LocalizationEngine not found on dispatcher"
+    assert resolved.cross_node_max_tau_s == pytest.approx(0.35)
+    assert resolved.cross_node_min_sync_weight == pytest.approx(0.25)
+
+
+def test_pair_measurement_stats_count_cross_node_activity() -> None:
+    """PairMeasurementStats must count measured cross-node pairs and sync-gate
+    rejections — the FusionMetrics counters these feed read 0 forever before."""
+    from minimappr.core.tdoa_measurements import PairMeasurementStats
+
+    positions, windows, node_ids = synthesize_multinode_windows(
+        _broadband(11),
+        SAMPLE_RATE_HZ,
+        source_position_m=(6.0, 3.0, 1.0),
+        node_origins_m={"node-a": (0.0, 0.0, 0.0), "node-b": (12.0, 0.0, 0.0)},
+        tetra_node_ids=("node-a", "node-b"),
+        sound_speed_mps=SOUND_SPEED_MPS,
+    )
+    stats = PairMeasurementStats()
+    measurements = measure_pair_tdoas(
+        sensor_positions=positions,
+        sensor_windows=windows,
+        sensor_ids=sorted(positions),
+        sample_rate_hz=SAMPLE_RATE_HZ,
+        sound_speed_mps=SOUND_SPEED_MPS,
+        max_tau_s=0.02,
+        interpolation_factor=4,
+        sensor_weights=None,
+        gcc_phat_function=gcc_phat,
+        sensor_node_ids=node_ids,
+        cross_node_max_tau_s=0.35,
+        stats=stats,
+    )
+    assert measurements
+    assert stats.cross_node_pairs_measured > 0
+    assert stats.cross_node_pairs_rejected_sync == 0
+
+    # Sub-gate sync weights on one node reject every cross-node pair.
+    gated_stats = PairMeasurementStats()
+    weights = {sid: (0.05 if node_ids[sid] == "node-b" else 1.0) for sid in positions}
+    measure_pair_tdoas(
+        sensor_positions=positions,
+        sensor_windows=windows,
+        sensor_ids=sorted(positions),
+        sample_rate_hz=SAMPLE_RATE_HZ,
+        sound_speed_mps=SOUND_SPEED_MPS,
+        max_tau_s=0.02,
+        interpolation_factor=4,
+        sensor_weights=weights,
+        gcc_phat_function=gcc_phat,
+        sensor_node_ids=node_ids,
+        cross_node_max_tau_s=0.35,
+        cross_node_min_sync_weight=0.25,
+        stats=gated_stats,
+    )
+    assert gated_stats.cross_node_pairs_rejected_sync > 0
+    assert gated_stats.cross_node_pairs_measured == 0
+
+
+def test_engine_localize_surfaces_cross_node_pair_stats() -> None:
+    """LocalizationResult carries the pair stats when node ids are supplied."""
+    positions, windows, node_ids = synthesize_multinode_windows(
+        _broadband(13),
+        SAMPLE_RATE_HZ,
+        source_position_m=(6.0, 3.0, 1.0),
+        node_origins_m={"node-a": (0.0, 0.0, 0.0), "node-b": (12.0, 0.0, 0.0)},
+        tetra_node_ids=("node-a", "node-b"),
+        sound_speed_mps=SOUND_SPEED_MPS,
+    )
+    engine = LocalizationEngine(max_tau_s=0.02, interp_factor=8, cross_node_max_tau_s=0.35)
+    result = engine.localize(
+        positions,
+        windows,
+        SAMPLE_RATE_HZ,
+        20.0,
+        0.5,
+        sensor_node_ids=node_ids,
+    )
+    assert result.cross_node_pairs_measured is not None
+    assert result.cross_node_pairs_measured > 0
+    assert result.cross_node_pairs_rejected_sync == 0
+
+
+def test_localize_2d_is_node_aware() -> None:
+    """Phase 5: the 2D tier — ~98% of a compact-array site's solves — was
+    node-blind. It must (a) lift the tau ceiling for cross-node pairs so a wide
+    baseline isn't clipped by the same-node cap, (b) apply the cross-node sync
+    gate, and (c) stamp range-mode provenance so bearing-fusion gate G3 can
+    engage on 2D solves."""
+    positions, windows, node_ids = synthesize_multinode_windows(
+        _broadband(17),
+        SAMPLE_RATE_HZ,
+        source_position_m=(6.0, 5.0, 0.0),
+        node_origins_m={"node-a": (0.0, 0.0, 0.0), "node-b": (12.0, 0.0, 0.0)},
+        tetra_node_ids=("node-a", "node-b"),
+        sound_speed_mps=SOUND_SPEED_MPS,
+    )
+    engine = LocalizationEngine(
+        max_tau_s=0.002,  # ~0.7 m same-node cap: would clip the 12 m baseline
+        interp_factor=8,
+        cross_node_max_tau_s=0.35,
+        cross_node_min_sync_weight=0.25,
+    )
+    result = engine.localize_2d(
+        positions,
+        windows,
+        SAMPLE_RATE_HZ,
+        20.0,
+        0.5,
+        sensor_node_ids=node_ids,
+    )
+    assert result.cross_node_pairs_measured is not None
+    assert result.cross_node_pairs_measured > 0
+    # (c) range-mode provenance for bearing-fusion gate G3.
+    assert result.range_projection_mode == "range_refined"
+    assert result.range_observability is not None
+    assert 0.0 <= result.range_observability <= 1.0
+
+
+def test_localize_2d_sync_gate_excludes_unsynchronized_cross_node_sensors() -> None:
+    positions, windows, node_ids = synthesize_multinode_windows(
+        _broadband(19),
+        SAMPLE_RATE_HZ,
+        source_position_m=(6.0, 5.0, 0.0),
+        node_origins_m={"node-a": (0.0, 0.0, 0.0), "node-b": (12.0, 0.0, 0.0)},
+        tetra_node_ids=("node-a", "node-b"),
+        sound_speed_mps=SOUND_SPEED_MPS,
+    )
+    engine = LocalizationEngine(
+        max_tau_s=0.02,
+        interp_factor=8,
+        cross_node_max_tau_s=0.35,
+        cross_node_min_sync_weight=0.25,
+    )
+    # node-b sensors carry a free-running-clock sync weight below the gate.
+    weights = {sid: (0.05 if node_ids[sid] == "node-b" else 1.0) for sid in positions}
+    result = engine.localize_2d(
+        positions,
+        windows,
+        SAMPLE_RATE_HZ,
+        20.0,
+        0.5,
+        sensor_weights=weights,
+        sensor_node_ids=node_ids,
+    )
+    assert result.cross_node_pairs_rejected_sync is not None
+    assert result.cross_node_pairs_rejected_sync > 0
+    assert result.cross_node_pairs_measured == 0
+    # Only node-a sensors contribute measurements (reference is on node-a: it
+    # has the higher weights and identical RMS).
+    assert all(node_ids[sid] == node_ids[result.reference_sensor] for sid in result.tdoa_s)
