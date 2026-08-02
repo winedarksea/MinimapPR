@@ -96,6 +96,7 @@ class BirdNETClassifier(AudioClassifier):
         geo_min_confidence: float = 0.03,
         batch_max_size: int = _DEFAULT_MAX_BATCH_SIZE,
         batch_max_wait_seconds: float = 0.0,
+        overlap_duration_s: float = 0.0,
     ) -> None:
         try:
             from birdnet import model_loader
@@ -132,6 +133,7 @@ class BirdNETClassifier(AudioClassifier):
                 apply_sigmoid=True,
                 n_workers=1,
                 custom_species_list=self._custom_species_list,
+                overlap_duration_s=overlap_duration_s,
             )
             self._session_ctxs.append(ctx)
             session = ctx.__enter__()

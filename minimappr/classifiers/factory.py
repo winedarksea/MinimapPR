@@ -164,6 +164,17 @@ def _build_backend(
                 birdnet_kwargs["pool_size"] = max(
                     1, int(getattr(settings, "birdnet_pool_size", 1))
                 )
+            # Overlap between BirdNET's internal 3s inference segments — without
+            # it, a call spanning a segment boundary in one of this pipeline's
+            # multi-second clips is split and weakened in both halves. Same
+            # signature probe as pool_size so stubs stay usable.
+            if "overlap_duration_s" in birdnet_parameters or any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in birdnet_parameters.values()
+            ):
+                birdnet_kwargs["overlap_duration_s"] = float(
+                    getattr(settings, "birdnet_session_overlap_seconds", 0.0)
+                )
             # Request coalescing. A run_arrays() call costs ~1.0s of fixed
             # barrier synchronization whatever the payload, so batching
             # concurrent callers into one call is worth 3-4x. Same signature

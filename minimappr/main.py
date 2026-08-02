@@ -3074,6 +3074,7 @@ async def get_config(request: Request) -> dict:
         "birdnet_trigger_min_confidence": settings.birdnet_trigger_min_confidence,
         "birdnet_geo_min_confidence": settings.birdnet_geo_min_confidence,
         "birdnet_pool_size": settings.birdnet_pool_size,
+        "birdnet_session_overlap_seconds": settings.birdnet_session_overlap_seconds,
         "birdnet_batch_max_wait_seconds": settings.birdnet_batch_max_wait_seconds,
         "birdnet_batch_max_size": settings.birdnet_batch_max_size,
         "persisted_override_keys": sorted(load_overrides(settings.config_overrides_path)),
@@ -3238,6 +3239,7 @@ def _startup_snapshot_restart_required_keys() -> frozenset[str]:
     keys.add("fusion_report_window_localized_emission_cap")
     # The classifier (and its BirdNET session pool) is built once at startup.
     keys.add("birdnet_pool_size")
+    keys.add("birdnet_session_overlap_seconds")
     keys.add("birdnet_batch_max_wait_seconds")
     keys.add("birdnet_batch_max_size")
     keys.add("yamnet_max_input_gain")

@@ -100,6 +100,9 @@ CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     # startup. pool_size=1 serializes every fusion worker through one BirdNET
     # session (2026-08-01 live-box throughput root cause).
     "birdnet_pool_size": int,
+    # Restart-required alongside pool_size: the classifier's predict_session()
+    # is built once at startup, so overlap can't be re-tuned without a restart.
+    "birdnet_session_overlap_seconds": float,
     # Restart-required alongside pool_size: the classifier is built at startup.
     "birdnet_batch_max_wait_seconds": float,
     "birdnet_batch_max_size": int,

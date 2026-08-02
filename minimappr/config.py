@@ -825,11 +825,25 @@ class Settings:
     classification_priority_signal_weight: float = 0.15
     classification_priority_corroboration_weight: float = 0.10
     birdnet_trigger_min_confidence: float = 0.40
-    birdnet_geo_min_confidence: float = 0.03
+    # eBird range-probability floor for the site's BirdNET species vocabulary
+    # (birdnet.model_loader "geo" model). This is a hard vocabulary cut, not a
+    # score down-weight: a species below this threshold cannot be classified
+    # at all, regardless of how confident the acoustic model is. 0.03 excluded
+    # rare/edge-of-range/nocturnal-migrant species outright; 0.01 keeps a
+    # meaningfully wider vocabulary while still filtering the geo model's
+    # long tail of near-zero-probability species.
+    birdnet_geo_min_confidence: float = 0.01
     # Concurrent BirdNET predict-sessions. 1 serializes all fusion workers
     # through a single session (each extra session costs ~125 MB RSS and one
     # TFLite subprocess); raise to ~fusion_worker_count on multi-core boxes.
     birdnet_pool_size: int = 2
+    # Overlap between BirdNET's internal 3 s inference segments when a clip
+    # longer than 3 s (the 21-30 s windows this pipeline actually sends) is
+    # classified in one predict_session() call. At the default 0 s, a call
+    # spanning a segment boundary is split and weakened in both fragments;
+    # ~1-2 s of overlap gives boundary-straddling calls a second, unsplit look
+    # at the cost of re-scoring the shared tail. Must be in [0, 3.0).
+    birdnet_session_overlap_seconds: float = 1.5
     # BirdNET request coalescing. A `run_arrays()` call costs ~1.0 s of fixed
     # barrier synchronization whatever the payload (measured: 1048 ms for 0.25 s
     # of audio, 1349 ms for 30 s), so the number of calls dominates cost.
@@ -1493,6 +1507,8 @@ class Settings:
             raise ValueError("MINIMAPPR_BIRDNET_GEO_MIN_CONFIDENCE must be in [0,1]")
         if self.birdnet_pool_size < 1:
             raise ValueError("MINIMAPPR_BIRDNET_POOL_SIZE must be >= 1")
+        if not 0.0 <= self.birdnet_session_overlap_seconds < 3.0:
+            raise ValueError("MINIMAPPR_BIRDNET_SESSION_OVERLAP_SECONDS must be in [0, 3.0)")
         if (
             not math.isfinite(self.birdnet_batch_max_wait_seconds)
             or self.birdnet_batch_max_wait_seconds < 0.0
@@ -2076,8 +2092,12 @@ class Settings:
                 0.10,
             ),
             birdnet_trigger_min_confidence=_env_float("MINIMAPPR_BIRDNET_TRIGGER_MIN_CONFIDENCE", 0.40),
-            birdnet_geo_min_confidence=_env_float("MINIMAPPR_BIRDNET_GEO_MIN_CONFIDENCE", 0.03),
+            birdnet_geo_min_confidence=_env_float("MINIMAPPR_BIRDNET_GEO_MIN_CONFIDENCE", 0.01),
             birdnet_pool_size=_env_int("MINIMAPPR_BIRDNET_POOL_SIZE", 2),
+            birdnet_session_overlap_seconds=_env_float(
+                "MINIMAPPR_BIRDNET_SESSION_OVERLAP_SECONDS",
+                1.5,
+            ),
             birdnet_batch_max_wait_seconds=_env_float(
                 "MINIMAPPR_BIRDNET_BATCH_MAX_WAIT_SECONDS",
                 0.5,
