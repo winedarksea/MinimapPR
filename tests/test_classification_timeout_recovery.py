@@ -69,11 +69,15 @@ class _FirstCallHangsThenRecoversClassifier(AudioClassifier):
     def __init__(self) -> None:
         self.calls = 0
 
+    # Must stay well above the stage timeout so the first call reliably trips it
+    # even on a loaded machine — see the margin note at the settings below.
+    STALL_SECONDS = 0.5
+
     def classify(self, samples: np.ndarray, sample_rate_hz: int) -> ClassificationResult:
         del samples, sample_rate_hz
         self.calls += 1
         if self.calls == 1:
-            time.sleep(0.2)
+            time.sleep(self.STALL_SECONDS)
         return ClassificationResult(label="warbler", confidence=0.74, scores={"warbler": 0.74}, features={})
 
 
@@ -208,7 +212,14 @@ async def test_fusion_stage_timeout_drops_stalled_candidate_and_recovers(tmp_pat
         classification_window_seconds=0.0,
         max_sensor_buffer_seconds=2.0,
         fusion_worker_count=1,
-        classifier_stage_timeout_seconds=0.01,
+        # The stage timeout is shared by localization and classification, so it
+        # has to sit between them: comfortably *above* a real localization solve
+        # (~10ms here) and comfortably *below* the classifier's deliberate stall
+        # (0.5s). At the previous 0.01s it straddled localization instead —
+        # the solve overran by 0.3ms, the first candidate died before it ever
+        # reached the classifier, and the recovery this test exists to prove
+        # never happened. 0.1s leaves ~10x margin on both sides.
+        classifier_stage_timeout_seconds=0.1,
     )
     settings.db_path.parent.mkdir(parents=True, exist_ok=True)
     settings.snippet_dir.mkdir(parents=True, exist_ok=True)
