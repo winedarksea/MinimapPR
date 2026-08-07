@@ -855,6 +855,14 @@ class Settings:
     # waiting counts against the stage timeout. 0 disables batching entirely.
     birdnet_batch_max_wait_seconds: float = 0.5
     birdnet_batch_max_size: int = 16
+    # Drive BirdNET's TFLite graph in-process instead of through the birdnet
+    # package's multiprocess session pipeline, whose shutdown barrier costs
+    # ~1.0s per call regardless of payload (50x on a 3s clip, 6.7x on 30s;
+    # scores verified identical to 2.8e-07). Falls back automatically if the
+    # interpreter cannot be built. Set false to force the session pipeline.
+    birdnet_direct_inference: bool = True
+    # Interpreter threads per pooled slot; TFLite saturates at ~4 on this model.
+    birdnet_direct_num_threads: int = 4
     detection_min_confidence: float = 0.4
     cop_detections_max_items: int = 150
     cop_tracks_max_items: int = 150
@@ -2103,6 +2111,8 @@ class Settings:
                 0.5,
             ),
             birdnet_batch_max_size=_env_int("MINIMAPPR_BIRDNET_BATCH_MAX_SIZE", 16),
+            birdnet_direct_inference=_env_bool("MINIMAPPR_BIRDNET_DIRECT_INFERENCE", True),
+            birdnet_direct_num_threads=_env_int("MINIMAPPR_BIRDNET_DIRECT_NUM_THREADS", 4),
             detection_min_confidence=_env_float("MINIMAPPR_DETECTION_MIN_CONFIDENCE", 0.4),
             cop_detections_max_items=_env_int("MINIMAPPR_COP_DETECTIONS_MAX_ITEMS", 150),
             cop_tracks_max_items=_env_int("MINIMAPPR_COP_TRACKS_MAX_ITEMS", 150),

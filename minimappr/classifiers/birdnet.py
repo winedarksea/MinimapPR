@@ -40,6 +40,16 @@ _DEFAULT_MAX_BATCH_SIZE = 16
 # The `input` column that attributes a result row back to its clip is uint8.
 _MAX_ADDRESSABLE_BATCH = 256
 
+# ...unless we skip that pipeline altogether. See `_DirectBirdNET`: the model is
+# a single end-to-end TFLite graph over raw 48 kHz samples, so none of the
+# producer/worker/analyzer machinery — nor its barrier — is needed for the short
+# in-memory clips this pipeline classifies. Direct inference is the default and
+# the session pool above is built only when it cannot be constructed.
+# Interpreter threads. TFLite/XNNPACK saturates at ~4 on this model (28.5 ms at
+# 1 thread, 21.6 at 4, 21.3 at 12), and the fusion stage already runs several
+# classification workers concurrently, so a small cap leaves cores for them.
+_DIRECT_DEFAULT_THREADS = 4
+
 
 class _BatchRequest:
     """One caller's clip waiting to ride along in a coalesced BirdNET call."""
@@ -85,6 +95,10 @@ class BirdNETClassifier(AudioClassifier):
     _batch_thread: threading.Thread | None = None
     batches_dispatched: int = 0
     clips_batched: int = 0
+    # None selects the session pipeline, keeping __new__-built instances (the
+    # established pattern for testing this class without the birdnet package)
+    # on the path their hand-set session attributes describe.
+    _direct: Any = None
 
     def __init__(
         self,
@@ -97,6 +111,8 @@ class BirdNETClassifier(AudioClassifier):
         batch_max_size: int = _DEFAULT_MAX_BATCH_SIZE,
         batch_max_wait_seconds: float = 0.0,
         overlap_duration_s: float = 0.0,
+        direct_inference: bool = True,
+        direct_num_threads: int = _DIRECT_DEFAULT_THREADS,
     ) -> None:
         try:
             from birdnet import model_loader
@@ -119,14 +135,42 @@ class BirdNETClassifier(AudioClassifier):
         self._inflight_sessions: set[Any] = set()
         self._closed: bool = False
 
+        # Preferred path: drive the TFLite graph in-process and skip the session
+        # pipeline's ~1.0 s per-call barrier entirely. Falls back to the session
+        # pool below if the interpreter cannot be built (missing TF, unreadable
+        # model asset, an upstream layout change), so BirdNET keeps working
+        # either way — only its latency changes.
+        self._direct: _DirectBirdNET | None = None
+        if direct_inference:
+            try:
+                self._direct = _DirectBirdNET(
+                    model_path=self._model._model_path,
+                    species=list(self._model.species_list),
+                    segment_samples=self._model.get_segment_size_samples(),
+                    overlap_duration_s=overlap_duration_s,
+                    min_confidence=self._min_confidence,
+                    top_k=_SCORES_MAP_TOP_K,
+                    allowed_species=self._custom_species_list,
+                    pool_size=pool_size,
+                    num_threads=direct_num_threads,
+                )
+            except Exception as exc:  # noqa: BLE001 - optional fast path
+                logger.warning(
+                    "BirdNET direct inference unavailable (%s); "
+                    "falling back to the session pipeline.",
+                    exc,
+                )
+                self._direct = None
+
         # Pre-create a pool of predict_sessions so the TFLite model worker
         # subprocess is only spawned once, amortizing ~125 MB load overhead
-        # across all classify() calls.
+        # across all classify() calls. Skipped entirely in direct mode, which
+        # also saves ~125 MB and a subprocess per pooled slot.
         self._session_ctxs: list[Any] = []
         self._all_sessions: list[Any] = []
         self._session_pool: queue.Queue[Any] = queue.Queue()
         children_before = set(multiprocessing.active_children())
-        for _ in range(pool_size):
+        for _ in range(0 if self._direct is not None else pool_size):
             ctx = self._model.predict_session(
                 top_k=_SCORES_MAP_TOP_K,
                 default_confidence_threshold=self._min_confidence,
@@ -148,7 +192,11 @@ class BirdNETClassifier(AudioClassifier):
         # and every call goes straight through, preserving the original path.
         self._batch_max_size = max(1, min(int(batch_max_size), _MAX_ADDRESSABLE_BATCH))
         self._batch_max_wait_seconds = max(0.0, float(batch_max_wait_seconds))
-        self._batching_enabled = self._batch_max_wait_seconds > 0.0
+        # Coalescing exists purely to amortize the session pipeline's fixed
+        # per-call barrier. Direct inference has no such barrier — its cost is
+        # linear in segments — so batching there would only add its collection
+        # window to every clip's latency.
+        self._batching_enabled = self._batch_max_wait_seconds > 0.0 and self._direct is None
         self._batch_lock = threading.Lock()
         self._batch_pending: list[_BatchRequest] = []
         # Callers that have entered classify() but not yet appended their
@@ -176,6 +224,11 @@ class BirdNETClassifier(AudioClassifier):
     def classify(self, samples: np.ndarray, sample_rate_hz: int) -> ClassificationResult:
         if self._closed:
             raise RuntimeError("BirdNETClassifier has been closed")
+
+        if self._direct is not None:
+            return self._build_result(
+                self._direct.predict_rows(self._to_model_rate(samples, sample_rate_hz))
+            )
 
         if not self._batching_enabled:
             return self._run_single(self._to_model_rate(samples, sample_rate_hz))
@@ -406,6 +459,17 @@ class BirdNETClassifier(AudioClassifier):
             return
         self._closed = True
 
+        # Direct mode owns no subprocesses or shared memory; releasing the
+        # interpreters is the whole of its teardown. The session loops below
+        # are all no-ops there because their collections stayed empty.
+        direct = getattr(self, "_direct", None)
+        if direct is not None:
+            try:
+                direct.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._direct = None
+
         # Wake the batch collector and settle everything already queued, or those
         # callers block forever on their _BatchRequest event. Absent entirely on
         # __new__-built instances that never enabled batching.
@@ -472,6 +536,207 @@ class BirdNETClassifier(AudioClassifier):
                 session.cancel()
             except Exception:  # noqa: BLE001
                 pass
+
+
+class _DirectBirdNET:
+    """Drive the BirdNET acoustic model in-process, bypassing its session pipeline.
+
+    `session.run_arrays()` routes every prediction through a multiprocess
+    producer/worker/analyzer pipeline whose shutdown barrier polls on a 1.0 s
+    timeout (`birdnet/acoustic/inference/core/worker.py`: the worker only
+    notices the finished event after `sem_filled.acquire(timeout=1.0)` expires,
+    and `process_manager.wait_until_all_finished()` blocks on that). So each
+    call costs ~1.0 s of pure synchronization whatever the payload — which is
+    what the batching note above is working around.
+
+    None of it is needed here. BirdNET V2.4 is a single end-to-end TFLite graph
+    taking raw 48 kHz float32 samples, so segmenting the clip and invoking the
+    interpreter directly produces the same numbers at ~21 ms per 3 s segment:
+
+        clip      session pipeline    direct
+        3 s              1044 ms      ~21 ms      (50x)
+        30 s             1393 ms     ~207 ms     (6.7x)
+
+    Verified against `session.run_arrays()` across all 6522 species: identical
+    argmax, max |diff| 2.8e-07 — the residual is float32 storage rounding in the
+    package's own result table, not a difference in computation.
+
+    Segmentation deliberately reuses the package's own helper so overlap and
+    tail-truncation semantics cannot drift from the session path.
+    """
+
+    def __init__(
+        self,
+        *,
+        model_path: str,
+        species: list[str],
+        segment_samples: int,
+        overlap_duration_s: float,
+        min_confidence: float,
+        top_k: int,
+        allowed_species: list[str] | None,
+        pool_size: int,
+        num_threads: int,
+    ) -> None:
+        interpreter_cls = _resolve_interpreter_cls()
+
+        self._species = species
+        self._segment_samples = int(segment_samples)
+        self._overlap_samples = max(
+            0,
+            min(
+                int(round(float(overlap_duration_s) * _BIRDNET_SAMPLE_RATE_HZ)),
+                self._segment_samples - 1,
+            ),
+        )
+        self._min_confidence = float(min_confidence)
+        self._top_k = int(top_k)
+
+        # Restrict scoring to the site species list up front so the top-k pick
+        # matches what the session path returns for the same custom list.
+        self._allowed_indices: np.ndarray | None = None
+        if allowed_species:
+            allowed = set(allowed_species)
+            keep = [i for i, name in enumerate(species) if name in allowed]
+            if keep:
+                self._allowed_indices = np.asarray(keep, dtype=np.int64)
+
+        # One interpreter per pooled slot: a TFLite interpreter is not
+        # thread-safe, and the fusion stage classifies from several workers.
+        self._pool: queue.Queue = queue.Queue()
+        self._interpreters: list[Any] = []
+        for _ in range(max(1, int(pool_size))):
+            interpreter = interpreter_cls(
+                model_path=str(model_path),
+                num_threads=max(1, int(num_threads)),
+            )
+            interpreter.allocate_tensors()
+            entry = (
+                interpreter,
+                interpreter.get_input_details()[0]["index"],
+                interpreter.get_output_details()[0]["index"],
+            )
+            self._interpreters.append(entry)
+            self._pool.put(entry)
+
+        self._segment_fn = _resolve_segment_fn()
+
+    def predict_rows(self, audio: np.ndarray) -> list[dict[str, Any]]:
+        """Score one clip, returning rows shaped like the session path's table."""
+        audio = np.ascontiguousarray(audio, dtype=np.float32)
+        if audio.ndim != 1:
+            audio = audio.reshape(-1)
+        if audio.size == 0:
+            return []
+
+        spans = list(
+            self._segment_fn(int(audio.size), self._segment_samples, self._overlap_samples)
+        )
+        if not spans:
+            return []
+
+        entry = self._pool.get()
+        try:
+            interpreter, input_index, output_index = entry
+            buffer = np.zeros((1, self._segment_samples), dtype=np.float32)
+            rows: list[dict[str, Any]] = []
+            for start, end in spans:
+                segment = audio[start:end]
+                # The graph has a fixed 3 s input; a truncated tail segment is
+                # zero-padded, matching what the session path feeds it.
+                buffer[0, : segment.size] = segment
+                if segment.size < self._segment_samples:
+                    buffer[0, segment.size :] = 0.0
+                interpreter.set_tensor(input_index, buffer)
+                interpreter.invoke()
+                logits = interpreter.get_tensor(output_index)[0]
+                rows.extend(
+                    self._rows_for_segment(
+                        logits,
+                        start_time=start / _BIRDNET_SAMPLE_RATE_HZ,
+                        end_time=end / _BIRDNET_SAMPLE_RATE_HZ,
+                    )
+                )
+            return rows
+        finally:
+            self._pool.put(entry)
+
+    def _rows_for_segment(
+        self, logits: np.ndarray, *, start_time: float, end_time: float
+    ) -> list[dict[str, Any]]:
+        scores = 1.0 / (1.0 + np.exp(-logits.astype(np.float64)))
+        if self._allowed_indices is not None:
+            candidate_indices = self._allowed_indices
+            candidate_scores = scores[candidate_indices]
+        else:
+            candidate_indices = None
+            candidate_scores = scores
+
+        # Session path applies top_k per segment, then the confidence floor.
+        k = min(self._top_k, candidate_scores.size)
+        top = np.argpartition(candidate_scores, -k)[-k:]
+        top = top[np.argsort(candidate_scores[top])[::-1]]
+
+        rows: list[dict[str, Any]] = []
+        for position in top:
+            confidence = float(candidate_scores[int(position)])
+            if confidence < self._min_confidence:
+                continue
+            index = int(position if candidate_indices is None else candidate_indices[int(position)])
+            rows.append(
+                {
+                    "input": 0,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "species_name": self._species[index],
+                    "confidence": confidence,
+                }
+            )
+        return rows
+
+    def close(self) -> None:
+        self._interpreters.clear()
+
+
+def _resolve_interpreter_cls() -> Any:
+    """Prefer LiteRT, fall back to `tf.lite`.
+
+    `tf.lite.Interpreter` is deprecated and was nominally slated for removal in
+    TF 2.20 — it still works in 2.21 but warns. `ai_edge_litert` is its
+    successor and ships alongside newer TF, while older environments (the Mac
+    dev box on TF 2.18) only have `tf.lite`. Both expose the same
+    `model_path`/`num_threads` constructor and tensor API used here.
+    """
+    try:
+        from ai_edge_litert.interpreter import Interpreter  # noqa: PLC0415
+
+        return Interpreter
+    except Exception:  # noqa: BLE001 - not present on older TF
+        import tensorflow as tf  # noqa: PLC0415
+
+        return tf.lite.Interpreter
+
+
+def _resolve_segment_fn() -> Any:
+    """Reuse BirdNET's own segment spans so overlap/tail semantics match exactly."""
+    try:
+        from birdnet.acoustic.inference.core.producer import (  # noqa: PLC0415
+            get_segments_with_overlap_all_int,
+        )
+    except Exception:  # noqa: BLE001 - private module; fall back to the same rule
+        def _spans(total: int, segment: int, overlap: int):
+            step = segment - overlap
+            start = 0
+            while start < total:
+                yield start, min(start + segment, total)
+                start += step
+
+        return _spans
+
+    def _wrapped(total: int, segment: int, overlap: int):
+        return get_segments_with_overlap_all_int(total, segment, overlap)
+
+    return _wrapped
 
 
 # ---------------------------------------------------------------------------

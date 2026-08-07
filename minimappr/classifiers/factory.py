@@ -189,6 +189,19 @@ def _build_backend(
                 birdnet_kwargs["batch_max_size"] = int(
                     getattr(settings, "birdnet_batch_max_size", 16)
                 )
+            # In-process TFLite inference, which skips that fixed barrier
+            # altogether and makes the coalescing above moot. Same signature
+            # probe as pool_size so stubs stay usable.
+            if "direct_inference" in birdnet_parameters or any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in birdnet_parameters.values()
+            ):
+                birdnet_kwargs["direct_inference"] = bool(
+                    getattr(settings, "birdnet_direct_inference", True)
+                )
+                birdnet_kwargs["direct_num_threads"] = int(
+                    getattr(settings, "birdnet_direct_num_threads", 4)
+                )
             return BirdNETClassifier(**birdnet_kwargs)
         except Exception as exc:  # pragma: no cover - optional runtime backend
             logger.info(
