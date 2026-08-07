@@ -76,3 +76,36 @@ def test_group_flat_config_pure():
     gates = next(g for g in out["groups"] if g["id"] == "gates")
     assert {"key": "trigger_rms", "value": 0.01} in gates["entries"]
     assert "classifier_backends_available" in out["ungrouped"]
+
+
+def test_shipped_stt_defaults_do_not_trip_the_buffer_clamp(monkeypatch, caplog) -> None:
+    """Settings.from_env() must agree with the dataclass defaults.
+
+    ``from_env`` supplies a value for every field, so its hard-coded fallback --
+    not the dataclass default -- is what a real deployment gets. The two had
+    drifted (27.0 vs 30.0), so every boot logged a WARNING and silently clamped
+    the STT window even though the shipped default was already correct.
+    """
+    import logging
+
+    from minimappr.config import Settings
+
+    for var in (
+        "MINIMAPPR_STT_MAX_UTTERANCE_SECONDS",
+        "MINIMAPPR_STT_PRE_ROLL_SECONDS",
+        "MINIMAPPR_STT_HANGOVER_SECONDS",
+        "MINIMAPPR_MAX_SENSOR_BUFFER_SECONDS",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    with caplog.at_level(logging.WARNING, logger="minimappr.config"):
+        settings = Settings.from_env()
+
+    assert settings.stt_max_utterance_seconds == Settings().stt_max_utterance_seconds
+    span = (
+        settings.stt_pre_roll_seconds
+        + settings.stt_max_utterance_seconds
+        + settings.stt_hangover_seconds
+    )
+    assert span <= settings.max_sensor_buffer_seconds
+    assert not [r for r in caplog.records if "clamping stt_max_utterance_seconds" in r.message]

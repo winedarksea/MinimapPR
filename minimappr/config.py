@@ -27,6 +27,10 @@ _config_logger = logging.getLogger(__name__)
 DEFAULT_RULES_CONFIG_PATH = Path("data/rules.json")
 DEFAULT_BIRDNET_HYBRID_RULES_CONFIG_PATH = Path("data/rules_birdnet_hybrid_production.json")
 
+# Shared by the dataclass default and the from_env() fallback: those two had
+# drifted, and from_env() always wins in a real deployment.
+DEFAULT_STT_MAX_UTTERANCE_SECONDS = 27.0
+
 
 def _env_bool(key: str, default: bool) -> bool:
     raw = os.getenv(key)
@@ -786,7 +790,9 @@ class Settings:
     # 3s pre-roll + 27s utterance + 2s hangover == the 32s sensor ring buffer.
     # The clamp below still guards operator overrides, but shipping 30.0 here
     # meant every boot logged a WARNING and silently clamped to this value.
-    stt_max_utterance_seconds: float = 27.0
+    # Settings is slots=True, so from_env() cannot read this default off the
+    # class — both spellings must reference the shared constant.
+    stt_max_utterance_seconds: float = DEFAULT_STT_MAX_UTTERANCE_SECONDS
     speech_audio_dir: Path = Path("data/speech")
     transcript_retention_seconds: float = 604_800.0
     omni_scan_enabled: bool = True
@@ -2033,7 +2039,9 @@ class Settings:
             stt_trigger_min_confidence=_env_float("MINIMAPPR_STT_TRIGGER_MIN_CONFIDENCE", 0.5),
             stt_pre_roll_seconds=_env_float("MINIMAPPR_STT_PRE_ROLL_SECONDS", 3.0),
             stt_hangover_seconds=_env_float("MINIMAPPR_STT_HANGOVER_SECONDS", 2.0),
-            stt_max_utterance_seconds=_env_float("MINIMAPPR_STT_MAX_UTTERANCE_SECONDS", 30.0),
+            stt_max_utterance_seconds=_env_float(
+                "MINIMAPPR_STT_MAX_UTTERANCE_SECONDS", DEFAULT_STT_MAX_UTTERANCE_SECONDS
+            ),
             speech_audio_dir=Path(_env_str("MINIMAPPR_SPEECH_AUDIO_DIR", "data/speech")),
             transcript_retention_seconds=_env_float(
                 "MINIMAPPR_TRANSCRIPT_RETENTION_SECONDS", 604_800.0
