@@ -514,3 +514,36 @@ def test_confident_member_still_beats_an_abstention_recovery() -> None:
 
     assert result.label == "great horned owl"
     assert "abstention_recovered_from" not in result.features
+
+
+def test_abstention_recovery_ignores_chained_stage_scores() -> None:
+    """A chained stage's scores are not labels for the sound.
+
+    ChainedClassifier merges its stages under "{stage_id}:", so the drone head
+    chained after YAMNet contributes "drone_head:ambient" -- its *negative*
+    class, meaning "no drone". Recovering that as the label produced detections
+    labelled "drone_head:ambient" at 0.996 confidence, which the name heuristic
+    then filed under category "vehicle" because it contains "drone".
+    """
+    composite = CompositeClassifier(
+        [
+            CompositeMember(
+                "yamnet",
+                AbstainingClassifier(
+                    {
+                        "Insect": 0.11,
+                        "Silence": 0.04,
+                        "drone_head:ambient": 0.996,
+                        "drone_head:drone": 0.004,
+                    },
+                    "yamnet",
+                ),
+            ),
+        ]
+    )
+
+    result = composite.classify(np.zeros(1600, dtype=np.float32), 16000)
+
+    assert result.label == "Insect"
+    assert result.confidence == pytest.approx(0.11)
+    assert result.features["abstention_recovered_from"] == "yamnet"

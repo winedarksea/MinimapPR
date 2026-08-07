@@ -54,6 +54,12 @@ def _recover_abstained_label(
         for label, score in result.scores.items():
             if label.strip().lower() in _ABSTENTION_LABELS:
                 continue
+            # ChainedClassifier merges its stages' scores under "{stage_id}:",
+            # so a chained member's dict also carries e.g. "drone_head:ambient"
+            # -- an internal negative class, not a description of the sound.
+            # Only the base model's own (unprefixed) vocabulary is a label.
+            if ":" in label:
+                continue
             if best is None or float(score) > best[0]:
                 best = (float(score), label, member_id, result)
     return best
