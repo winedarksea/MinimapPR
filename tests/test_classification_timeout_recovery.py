@@ -65,6 +65,19 @@ class _BirdNETClassifierWithUnmappedSpecies(AudioClassifier):
         )
 
 
+class _BirdNETAbstainingClassifier(AudioClassifier):
+    """BirdNET reporting its "nothing recognised" sentinel."""
+
+    def classify(self, samples: np.ndarray, sample_rate_hz: int) -> ClassificationResult:
+        del samples, sample_rate_hz
+        return ClassificationResult(
+            label="unknown",
+            confidence=0.12,
+            scores={"unknown": 0.12},
+            features={"model": "birdnet_v2m4"},
+        )
+
+
 class _FirstCallHangsThenRecoversClassifier(AudioClassifier):
     def __init__(self) -> None:
         self.calls = 0
@@ -289,3 +302,32 @@ async def test_fusion_stage_timeout_drops_stalled_candidate_and_recovers(tmp_pat
 
     await fusion.stop()
     await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_birdnet_abstention_does_not_resolve_to_wildlife() -> None:
+    """The model-vocabulary fallback must not apply to the "unknown" sentinel.
+
+    "unknown" is the *absence* of a label, not a BirdNET vocabulary entry. When
+    the fallback applied to it, abstentions resolved to ``wildlife`` and were
+    then registered against the label name, so every later abstention from any
+    model inherited the category — 84% of a live site's detections came out as
+    low-confidence "wildlife".
+    """
+    taxonomy = _TaxonomyStub()
+    orchestrator = ClassificationOrchestrator(
+        classifier=_BirdNETAbstainingClassifier(),
+        storage=_StorageStub(),
+        taxonomy_provider=taxonomy,
+        environment_provider=_EnvironmentStub(),
+    )
+
+    result = await orchestrator.classify_omni_only(
+        reference_signal=np.zeros(1024, dtype=np.float32),
+        sample_rate_hz=16_000,
+        event_time_ns=123,
+    )
+
+    assert result.classification.label == "unknown"
+    assert result.label_category == "unknown"
+    assert result.iff_category == "unknown"

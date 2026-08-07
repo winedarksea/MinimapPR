@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import re
 import sqlite3
 import time
@@ -32,8 +33,28 @@ from minimappr.models import (
 logger = logging.getLogger(__name__)
 
 
+def _finite_only(value: Any) -> Any:
+    """Replace non-finite floats with None so the result is valid JSON.
+
+    ``json.dumps`` emits bare ``Infinity``/``NaN`` tokens, which are a Python
+    extension and not JSON: ``serde_json`` (the Rust frontend and sidecar) and
+    ``JSON.parse`` both reject them. Omni detections carry ``gdop=inf`` by
+    design, so this reached the great majority of stored feature summaries.
+    ``null`` is the honest encoding — the value is not a finite number.
+    """
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _finite_only(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_finite_only(item) for item in value]
+    return value
+
+
 def _json_dumps(value: Any) -> str:
-    return json.dumps(value, separators=(",", ":"), sort_keys=True)
+    return json.dumps(
+        _finite_only(value), separators=(",", ":"), sort_keys=True, allow_nan=False
+    )
 
 
 def _json_loads(raw: str | None, fallback: Any) -> Any:

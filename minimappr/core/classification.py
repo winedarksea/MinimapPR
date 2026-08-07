@@ -19,6 +19,7 @@ import numpy as np
 from minimappr.classifiers.base import AudioClassifier, ClassificationResult
 from minimappr.config import LocalizationConfig
 from minimappr.core.preprocessing import create_classification_preprocessor
+from minimappr.core.taxonomy import ABSTENTION_LABELS
 from minimappr.interfaces import (
     AudioPreprocessor,
     Beamformer,
@@ -52,6 +53,9 @@ def _resolve_label_category(
     reliably identify every result as BirdNET-derived.  A configured or heuristic
     category remains authoritative; model provenance is only the unknown fallback.
 
+    The fallback applies only to real vocabulary labels; abstentions
+    (``ABSTENTION_LABELS``) keep the taxonomy's own answer.
+
     The fallback yields a real taxonomy category (``wildlife``), not the model id.
     Emitting ``birdnet_v2m4`` as a *category* meant it was absent from
     ``DEFAULT_CATEGORY_TO_IFF``, so every BirdNET detection still resolved to
@@ -60,6 +64,13 @@ def _resolve_label_category(
     """
     taxonomy_category = taxonomy_provider.category_for_label(classification.label)
     if taxonomy_category.strip().lower() != "unknown":
+        return taxonomy_category
+    if classification.label.strip().lower() in ABSTENTION_LABELS:
+        # "unknown" is the *absence* of a label, not a vocabulary entry, so the
+        # model's wholesale category must not apply to it. Without this guard a
+        # BirdNET abstention resolved to "wildlife", which was then registered
+        # against the label name and persisted — after which every abstention
+        # from every model read as wildlife.
         return taxonomy_category
     model_name = classification.features.get("model")
     if isinstance(model_name, str):

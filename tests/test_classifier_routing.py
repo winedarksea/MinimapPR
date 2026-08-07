@@ -433,3 +433,84 @@ def test_factory_threads_birdnet_pool_size(monkeypatch) -> None:
     _build_backend(spec=spec, settings=settings, needs_embeddings=False)
 
     assert captured["pool_size"] == 3
+
+
+class AbstainingClassifier(AudioClassifier):
+    """A member that reports "unknown" while still ranking the sound space."""
+
+    def __init__(self, scores: dict[str, float], model: str) -> None:
+        self._scores = dict(scores)
+        self._model = model
+
+    def classify(self, samples, sample_rate_hz):
+        return ClassificationResult(
+            label="unknown",
+            confidence=max(self._scores.values()),
+            scores=dict(self._scores),
+            features={"model": self._model},
+        )
+
+
+def test_all_unknown_ensemble_recovers_yamnet_top_class() -> None:
+    """An all-abstaining ensemble still says what the sound most resembled.
+
+    YAMNet reports "unknown" only because its top AudioSet class fell under the
+    threshold, so that class is the best available description.
+    """
+    composite = CompositeClassifier(
+        [
+            CompositeMember(
+                "yamnet",
+                AbstainingClassifier({"Insect": 0.11, "Silence": 0.04}, "yamnet"),
+            ),
+            CompositeMember("birdnet", StubClassifier("unknown", 0.0)),
+        ]
+    )
+
+    result = composite.classify(np.zeros(1600, dtype=np.float32), 16000)
+
+    assert result.label == "Insect"
+    # The recovered confidence is the member's own score, so downstream
+    # confidence gates still see how weak this is.
+    assert result.confidence == pytest.approx(0.11)
+    assert result.features["abstention_recovered_from"] == "yamnet"
+    assert result.features["winner_member"] == "yamnet"
+
+
+def test_all_unknown_ensemble_does_not_recover_birdnet_species() -> None:
+    """BirdNET's sub-threshold ranking is noise, not a weaker answer.
+
+    Its vocabulary is species-only, so promoting a low-scoring entry would
+    invent wildlife out of ambient audio.
+    """
+    composite = CompositeClassifier(
+        [
+            CompositeMember(
+                "birdnet",
+                AbstainingClassifier({"house finch": 0.03}, "birdnet_v2m4"),
+            ),
+        ]
+    )
+
+    result = composite.classify(np.zeros(1600, dtype=np.float32), 16000)
+
+    assert result.label == "unknown"
+    assert "abstention_recovered_from" not in result.features
+
+
+def test_confident_member_still_beats_an_abstention_recovery() -> None:
+    """Recovery is a last resort — a member that cleared its threshold wins."""
+    composite = CompositeClassifier(
+        [
+            CompositeMember(
+                "yamnet",
+                AbstainingClassifier({"Insect": 0.11}, "yamnet"),
+            ),
+            CompositeMember("birdnet", StubClassifier("great horned owl", 0.7)),
+        ]
+    )
+
+    result = composite.classify(np.zeros(1600, dtype=np.float32), 16000)
+
+    assert result.label == "great horned owl"
+    assert "abstention_recovered_from" not in result.features

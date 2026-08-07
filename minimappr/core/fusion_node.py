@@ -3106,6 +3106,13 @@ class FusionNode:
         produced_actionable_detection = any(
             detection_product.detection.label != "unknown"
             and detection_product.detection.label_confidence > 0.0
+            # A label recovered from an abstaining member's sub-threshold
+            # ranking is a description, not a positive identification. Counting
+            # it as actionable would cancel the chunked re-dispatch that exists
+            # to find the real species.
+            and not detection_product.detection.feature_summary.get(
+                "abstention_recovered_from"
+            )
             for detection_product in detection_products
         )
         self._classification_chunking_policy.record_dispatch_outcome(
@@ -3307,8 +3314,11 @@ class FusionNode:
 
         rate_key = (stage, reason)
         now_s = time.monotonic()
-        last_logged_s = self._drop_warning_last_logged_s.get(rate_key, 0.0)
-        if now_s - last_logged_s < self._drop_warning_interval_seconds:
+        # Absent means "never logged" — a 0.0 default would instead compare
+        # against the monotonic epoch, so on a host whose uptime is still below
+        # the throttle interval the *first* occurrence is silently swallowed.
+        last_logged_s = self._drop_warning_last_logged_s.get(rate_key)
+        if last_logged_s is not None and now_s - last_logged_s < self._drop_warning_interval_seconds:
             return
         self._drop_warning_last_logged_s[rate_key] = now_s
         log_extra: dict[str, Any] = {
@@ -3349,8 +3359,9 @@ class FusionNode:
 
         rate_key = ("exception", stage, exc_type)
         now_s = time.monotonic()
-        last_logged_s = self._drop_warning_last_logged_s.get(rate_key, 0.0)
-        if now_s - last_logged_s < self._drop_warning_interval_seconds:
+        # See _record_silent_drop: absent must mean "never logged", not t=0.
+        last_logged_s = self._drop_warning_last_logged_s.get(rate_key)
+        if last_logged_s is not None and now_s - last_logged_s < self._drop_warning_interval_seconds:
             return
         self._drop_warning_last_logged_s[rate_key] = now_s
         logger.warning(

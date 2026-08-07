@@ -783,7 +783,10 @@ class Settings:
     stt_trigger_min_confidence: float = 0.5
     stt_pre_roll_seconds: float = 3.0
     stt_hangover_seconds: float = 2.0
-    stt_max_utterance_seconds: float = 30.0
+    # 3s pre-roll + 27s utterance + 2s hangover == the 32s sensor ring buffer.
+    # The clamp below still guards operator overrides, but shipping 30.0 here
+    # meant every boot logged a WARNING and silently clamped to this value.
+    stt_max_utterance_seconds: float = 27.0
     speech_audio_dir: Path = Path("data/speech")
     transcript_retention_seconds: float = 604_800.0
     omni_scan_enabled: bool = True
@@ -1376,8 +1379,11 @@ class Settings:
                 "MINIMAPPR_T3T4_HYSTERESIS_LO_RATIO must be in [1, MINIMAPPR_T3T4_HYSTERESIS_HI_RATIO]"
             )
         # An utterance capture needs pre-roll + utterance + hangover of audio to
-        # still be resident in the ring buffers when it closes. Clamp (rather
-        # than raise: the defaults 3+30+2 slightly exceed the 32s buffer).
+        # still be resident in the ring buffers when it closes. Clamp rather
+        # than raise, so an operator who widens one of these gets a working
+        # capture and a warning instead of a refused start. The shipped
+        # defaults sum to exactly max_sensor_buffer_seconds, so this never
+        # fires unless something was overridden.
         stt_span = self.stt_pre_roll_seconds + self.stt_max_utterance_seconds + self.stt_hangover_seconds
         if self.stt_enabled and stt_span > self.max_sensor_buffer_seconds:
             clamped = max(

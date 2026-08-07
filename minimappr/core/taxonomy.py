@@ -12,6 +12,16 @@ from minimappr.interfaces import TaxonomyProvider
 _logger = logging.getLogger(__name__)
 
 
+# Sentinels a classifier emits to mean "nothing was recognised". They are not
+# vocabulary entries, so nothing *learned* at runtime may pin them to a real
+# category. Doing so once poisons every later abstention, because the pinned
+# mapping then wins the ``category_for_label`` lookup ahead of the name
+# heuristics — and, once written to the labels table, it is reloaded by
+# ``merge_labels`` on every subsequent run. Explicit operator configuration
+# passed to ``__init__`` is deliberately still honoured.
+ABSTENTION_LABELS = frozenset({"unknown"})
+
+
 DEFAULT_CATEGORY_TO_IFF = {
     "wildlife": "friendly",
     "security": "hostile",
@@ -119,14 +129,15 @@ class RuntimeTaxonomyProvider(TaxonomyProvider):
         for row in rows:
             name = str(row.get("name") or "").strip().lower()
             category = str(row.get("category") or "").strip().lower()
-            if not name or not category:
+            if not name or not category or name in ABSTENTION_LABELS:
                 continue
             self._label_to_category[name] = category
 
     def register_label(self, label: str, category: str) -> None:
-        if not label.strip():
+        key = label.strip().lower()
+        if not key or key in ABSTENTION_LABELS:
             return
-        self._label_to_category[label.strip().lower()] = category.strip().lower() or "unknown"
+        self._label_to_category[key] = category.strip().lower() or "unknown"
 
     def canonical_label(self, label: str) -> str:
         """Resolve alias labels to their canonical form (identity when unmapped).

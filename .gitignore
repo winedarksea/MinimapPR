@@ -210,3 +210,10 @@ drone_dataset/*
 data/models/drone_head.float.onnx
 data/models/drone_head.tflite
 data/models/eval_report.json
+
+# SQLite databases and their WAL/SHM sidecars. The default db_path is
+# data/minimappr.db; an empty minimappr.db had been committed at the repo
+# root, so any run with a relative override wrote into a tracked file.
+*.db
+*.db-wal
+*.db-shm

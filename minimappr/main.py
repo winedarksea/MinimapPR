@@ -3077,6 +3077,8 @@ async def get_config(request: Request) -> dict:
         "birdnet_session_overlap_seconds": settings.birdnet_session_overlap_seconds,
         "birdnet_batch_max_wait_seconds": settings.birdnet_batch_max_wait_seconds,
         "birdnet_batch_max_size": settings.birdnet_batch_max_size,
+        "birdnet_direct_inference": settings.birdnet_direct_inference,
+        "birdnet_direct_num_threads": settings.birdnet_direct_num_threads,
         "persisted_override_keys": sorted(load_overrides(settings.config_overrides_path)),
         "beamformer_type": settings.beamformer_type,
         "beamformed_classification_min_sensor_count": settings.beamformed_classification_min_sensor_count,

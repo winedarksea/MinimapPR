@@ -22,6 +22,43 @@ from minimappr.models import ClassificationResult
 logger = logging.getLogger(__name__)
 
 
+# Labels that mean "nothing recognised" rather than naming a class.
+_ABSTENTION_LABELS = frozenset({"", "unknown"})
+
+# Models whose abstention still carries a usable ranking. YAMNet scores the
+# whole AudioSet ontology and reports "unknown" only because its top class fell
+# under the configured threshold, so that top class remains the best available
+# description of the sound. BirdNET's vocabulary is species-only, so its
+# sub-threshold ranking is noise about which bird it *isn't*, not a weaker
+# answer — surfacing it would invent wildlife out of ambient audio.
+_ABSTENTION_RANKING_MODELS = frozenset({"yamnet"})
+
+
+def _recover_abstained_label(
+    abstained: list[tuple[str, ClassificationResult]],
+) -> tuple[float, str, str, ClassificationResult] | None:
+    """Best sub-threshold label from a member that ranks the whole sound space.
+
+    Returns ``(confidence, label, member_id, result)`` matching the winner
+    tuple, or ``None`` when no abstaining member qualifies. The recovered
+    confidence is the member's own score for that class, so it stays honestly
+    low and downstream confidence gates still apply.
+    """
+    best: tuple[float, str, str, ClassificationResult] | None = None
+    for member_id, result in abstained:
+        model = result.features.get("model")
+        if not isinstance(model, str):
+            continue
+        if model.strip().lower() not in _ABSTENTION_RANKING_MODELS:
+            continue
+        for label, score in result.scores.items():
+            if label.strip().lower() in _ABSTENTION_LABELS:
+                continue
+            if best is None or float(score) > best[0]:
+                best = (float(score), label, member_id, result)
+    return best
+
+
 @dataclass(slots=True)
 class CompositeMember:
     member_id: str
@@ -72,6 +109,7 @@ class CompositeClassifier(AudioClassifier):
         winner_result: ClassificationResult | None = None
         # (conf, label, member_id, result)
         priority_best: tuple[float, str, str, ClassificationResult] | None = None
+        abstained: list[tuple[str, ClassificationResult]] = []
 
         for member in self._members:
             try:
@@ -94,8 +132,10 @@ class CompositeClassifier(AudioClassifier):
             if first_result is None:
                 first_result = result
                 first_member_id = member.member_id
+            if result.label in _ABSTENTION_LABELS:
+                abstained.append((member.member_id, result))
             weighted_conf = float(result.confidence) * member.score_weight
-            if result.label not in ("", "unknown") and (
+            if result.label not in _ABSTENTION_LABELS and (
                 winner_label is None or weighted_conf > winner_conf
             ):
                 winner_conf = weighted_conf
@@ -112,11 +152,22 @@ class CompositeClassifier(AudioClassifier):
             # higher-scoring non-priority member (see _priority_labels).
             winner_conf, winner_label, winner_member, winner_result = priority_best
         elif winner_label is None:
-            # All-unknown ensemble: report the first successful member's result.
-            winner_label = first_result.label if first_result is not None else "unknown"
-            winner_conf = float(first_result.confidence) if first_result is not None else 0.0
-            winner_member = first_member_id
-            winner_result = first_result
+            # All-unknown ensemble. Prefer a sub-threshold label from a member
+            # that ranks the whole sound space (see _ABSTENTION_RANKING_MODELS)
+            # over the bare "unknown" sentinel, so a detection still says what
+            # the sound most resembled. Falls back to the first successful
+            # member's result when no such member abstained.
+            recovered = _recover_abstained_label(abstained)
+            if recovered is not None:
+                winner_conf, winner_label, winner_member, winner_result = recovered
+                # Provenance: consumers must be able to tell a recovered guess
+                # from a member that actually cleared its threshold.
+                feature_summary["abstention_recovered_from"] = winner_member
+            else:
+                winner_label = first_result.label if first_result is not None else "unknown"
+                winner_conf = float(first_result.confidence) if first_result is not None else 0.0
+                winner_member = first_member_id
+                winner_result = first_result
 
         # ndarrays (embeddings) must never reach feature_summary_json.
         for key in [k for k in feature_summary if k.endswith(("embedding", "embedding_frames"))]:

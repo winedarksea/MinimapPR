@@ -2697,3 +2697,63 @@ async def test_cleanup_loop_survives_housekeeping_exception() -> None:
     # The first cycle raised; the loop kept going and later cycles completed.
     assert calls["cleanup"] >= 2
     assert calls["tick"] >= 1
+
+
+def test_list_detections_serialises_infinite_gdop(monkeypatch, tmp_path: Path) -> None:
+    """Omni detections carry ``gdop=inf``; the listing must stay valid JSON.
+
+    Pydantic's JSON serializer encodes non-finite floats as ``null``, which is
+    what keeps this endpoint working — but only while the response goes through
+    it. Returning these dicts through a plain ``JSONResponse`` instead would
+    raise ``ValueError: Out of range float values are not JSON compliant``, and
+    97% of a live site's detections are omni, so the regression would take the
+    whole COP feed down rather than degrade one field.
+    """
+    _configure_env(monkeypatch, tmp_path, snippet_retention_seconds=0)
+    now_ns = time.time_ns()
+
+    with TestClient(app) as client:
+        storage = client.app.state.storage
+
+        async def insert_fixture_data() -> None:
+            await storage.upsert_node(
+                NodeSpec(
+                    id="inf-gdop-node",
+                    node_type=NodeType.POINT,
+                    position_m=(0.0, 0.0, 0.0),
+                    position_geo=GeoPoint(lat=44.987, lon=-93.258, alt_m=0.0),
+                ),
+                last_seen_ns=now_ns,
+                position_geo=GeoPoint(lat=44.987, lon=-93.258, alt_m=0.0),
+            )
+            await storage.insert_detection(
+                detection=DetectionEvent(
+                    id="det-inf-gdop",
+                    event_id="det-inf-gdop",
+                    source_node_id="inf-gdop-node",
+                    timestamp_ns=now_ns,
+                    reporting_modality="omni",
+                    position_m=(0.0, 0.0, 0.0),
+                    position_geo=GeoPoint(lat=44.987, lon=-93.258, alt_m=0.0),
+                    confidence=0.9,
+                    gdop=float("inf"),
+                    label="Speech",
+                    label_category="human",
+                    label_confidence=0.9,
+                    reference_sensor="inf-gdop-node:mic0",
+                    source_sensors=["inf-gdop-node:mic0"],
+                ),
+                snippet_path=None,
+                snippet_expires_ns=None,
+                retention_tier="short",
+            )
+
+        client.portal.call(insert_fixture_data)
+
+        response = client.get("/api/v1/detections", params={"limit": 10})
+        assert response.status_code == 200
+        payload = response.json()
+        entry = next(item for item in payload if item["id"] == "det-inf-gdop")
+        # null is the honest encoding: there is no finite GDOP for an omni
+        # detection, and it survives a strict JSON parse.
+        assert entry["gdop"] is None
