@@ -196,7 +196,8 @@ instances, says which of them run for each audio context, and wires chained stag
 The three contexts are `detection_trigger` (the cheap RMS/cooldown admission gate — empty by
 default, not an inference context), `localized_render` (the beamformed track render), and
 `omni_continuous` (a normalized sum of each node's synchronized mic windows). Shipped default:
-YAMNet and BirdNET on `localized_render`, BirdNET also on `omni_continuous`.
+YAMNet and BirdNET on `localized_render`, BirdNET and `t3t4_alarm` on `omni_continuous`, the drone
+head chained off YAMNet's embeddings, and STT triggered on speech labels.
 
 Available backends:
 
