@@ -668,11 +668,14 @@ class Settings:
     snippet_dir: Path = Path("data/snippets")
     training_dataset_dir: Path = Path("data/training")
     # Precedence: retention_policy_path overrides this default per label.
-    snippet_retention_seconds: int = 3600
+    # Fallback bucket for classifiers without an explicit retention setting.
+    # Matches the cleanup-side default (``retention_short_seconds``) so the
+    # write-time expiry and the policy pass agree.
+    snippet_retention_seconds: int = 86_400
     # Bulky detection audio is governed independently from the lightweight
     # detection record.  These defaults intentionally mirror the classifier
     # routing members, not the legacy retention tiers.
-    retention_yamnet_audio_seconds: int = 259_200
+    retention_yamnet_audio_seconds: int = 86_400
     retention_birdnet_audio_seconds: int = 2_592_000
     retention_drone_audio_seconds: int = 2_592_000
     retention_alert_audio_seconds: int = 2_592_000
@@ -728,7 +731,10 @@ class Settings:
     localization_max_tau_seconds: float = 0.02
     localization_algorithm: str = "gcc_phat"
     localization_strategy: str = "fixed"
-    localization_band_min_hz: float = 0.0
+    # A min-only band is a pure high-pass: ``max_hz = 0`` means "up to Nyquist"
+    # in both the Python chain and the Rust sidecar. 50 Hz keeps wind rumble and
+    # DC drift out of the TDOA estimate without capping any real signal.
+    localization_band_min_hz: float = 50.0
     localization_band_max_hz: float = 0.0
     localization_srp_grid_resolution_m: float = 0.5
     localization_search_padding_m: float = 2.0
@@ -818,7 +824,11 @@ class Settings:
     site_origin_source: str = "auto"
     site_origin_lat: float = 44.98698840878797
     site_origin_lon: float = -93.2579197515542
-    site_origin_alt_m: float = 0.0
+    # Site-specific fallback altitude (metres, WGS-84 ellipsoid) used only when
+    # no contributing node reports a real 3D GNSS fix. A 3D fix is always
+    # preferred; this exists so a 2D-fix-only anchor does not pin the ENU frame
+    # at 0 m and turn every ``z`` into a raw GPS altitude.
+    site_origin_alt_m: float = 285.75
     coordinate_mode: str = "flat"
 
     # Per-context classifier routing (see minimappr/classifiers/routing.py).
@@ -887,7 +897,7 @@ class Settings:
     classification_priority_tier_weight: float = 0.15
     classification_priority_signal_weight: float = 0.15
     classification_priority_corroboration_weight: float = 0.10
-    birdnet_trigger_min_confidence: float = 0.40
+    birdnet_trigger_min_confidence: float = 0.50
     # eBird range-probability floor for the site's BirdNET species vocabulary
     # (birdnet.model_loader "geo" model). This is a hard vocabulary cut, not a
     # score down-weight: a species below this threshold cannot be classified
@@ -1828,8 +1838,8 @@ class Settings:
             db_path=Path(_env_str("MINIMAPPR_DB_PATH", "data/minimappr.db")),
             snippet_dir=Path(_env_str("MINIMAPPR_SNIPPET_DIR", "data/snippets")),
             training_dataset_dir=Path(_env_str("MINIMAPPR_TRAINING_DATASET_DIR", "data/training")),
-            snippet_retention_seconds=_env_int("MINIMAPPR_SNIPPET_RETENTION_SECONDS", 3600),
-            retention_yamnet_audio_seconds=_env_int("MINIMAPPR_RETENTION_YAMNET_AUDIO_SECONDS", 259_200),
+            snippet_retention_seconds=_env_int("MINIMAPPR_SNIPPET_RETENTION_SECONDS", 86_400),
+            retention_yamnet_audio_seconds=_env_int("MINIMAPPR_RETENTION_YAMNET_AUDIO_SECONDS", 86_400),
             retention_birdnet_audio_seconds=_env_int("MINIMAPPR_RETENTION_BIRDNET_AUDIO_SECONDS", 2_592_000),
             retention_drone_audio_seconds=_env_int("MINIMAPPR_RETENTION_DRONE_AUDIO_SECONDS", 2_592_000),
             retention_alert_audio_seconds=_env_int("MINIMAPPR_RETENTION_ALERT_AUDIO_SECONDS", 2_592_000),
@@ -1913,7 +1923,7 @@ class Settings:
             ),
             localization_algorithm=_env_str("MINIMAPPR_LOCALIZATION_ALGORITHM", "gcc_phat"),
             localization_strategy=_env_str("MINIMAPPR_LOCALIZATION_STRATEGY", "geometry_aware"),
-            localization_band_min_hz=_env_float("MINIMAPPR_LOCALIZATION_BAND_MIN_HZ", 0.0),
+            localization_band_min_hz=_env_float("MINIMAPPR_LOCALIZATION_BAND_MIN_HZ", 50.0),
             localization_band_max_hz=_env_float("MINIMAPPR_LOCALIZATION_BAND_MAX_HZ", 0.0),
             localization_srp_grid_resolution_m=_env_float("MINIMAPPR_LOCALIZATION_SRP_GRID_RESOLUTION_M", 0.5),
             localization_search_padding_m=_env_float("MINIMAPPR_LOCALIZATION_SEARCH_PADDING_M", 2.0),
@@ -2086,7 +2096,7 @@ class Settings:
             site_origin_source=_env_str("MINIMAPPR_SITE_ORIGIN_SOURCE", "auto"),
             site_origin_lat=_env_float("MINIMAPPR_SITE_ORIGIN_LAT", 44.98698840878797),
             site_origin_lon=_env_float("MINIMAPPR_SITE_ORIGIN_LON", -93.2579197515542),
-            site_origin_alt_m=_env_float("MINIMAPPR_SITE_ORIGIN_ALT_M", 0.0),
+            site_origin_alt_m=_env_float("MINIMAPPR_SITE_ORIGIN_ALT_M", 285.75),
             coordinate_mode=_env_str("MINIMAPPR_COORDINATE_MODE", "flat"),
             classifier_routing_config_path=Path(
                 _env_str("MINIMAPPR_CLASSIFIER_ROUTING_CONFIG_PATH", "data/classifier_routing.json")
@@ -2189,7 +2199,7 @@ class Settings:
                 "MINIMAPPR_CLASSIFICATION_PRIORITY_CORROBORATION_WEIGHT",
                 0.10,
             ),
-            birdnet_trigger_min_confidence=_env_float("MINIMAPPR_BIRDNET_TRIGGER_MIN_CONFIDENCE", 0.40),
+            birdnet_trigger_min_confidence=_env_float("MINIMAPPR_BIRDNET_TRIGGER_MIN_CONFIDENCE", 0.50),
             birdnet_geo_min_confidence=_env_float("MINIMAPPR_BIRDNET_GEO_MIN_CONFIDENCE", 0.01),
             birdnet_pool_size=_env_int("MINIMAPPR_BIRDNET_POOL_SIZE", 2),
             birdnet_session_overlap_seconds=_env_float(

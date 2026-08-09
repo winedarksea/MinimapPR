@@ -12,6 +12,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -112,20 +113,38 @@ def _collapse_long_exact_zero_runs(
     return compacted
 
 
-# Drone-head labels that represent a non-detection: audio is never materialized
-# for these. Positive classes (drone, coyote, ...) keep their snippet.
-_DRONE_HEAD_NEGATIVE_LABELS = {"unknown", "ambient", "no_drone"}
+# Per-classifier labels that represent a non-detection: audio is never
+# materialized for these. Positive classes (drone, coyote, house sparrow, ...)
+# keep their snippet. BirdNET's "unknown" is exactly parallel to the drone
+# head's negatives -- it means "no bird here" and accounted for 82% of BirdNET
+# snippets on the live box.
+_NEGATIVE_LABELS_BY_CLASSIFIER: dict[str, frozenset[str]] = {
+    "drone_head": frozenset({"unknown", "ambient", "no_drone"}),
+    "birdnet": frozenset({"unknown"}),
+}
 
 
-def _drone_head_retains_audio(classifier_source: str, label: str) -> bool:
-    """Whether a drone-head result should keep its audio snippet.
+def _classifier_retains_audio(classifier_source: str, label: str) -> bool:
+    """Whether a classification result should keep its audio snippet.
 
-    Only negative labels (unknown/ambient/no_drone) are discarded; every positive
-    class is retained. Non-drone-head sources are unaffected (always True here).
+    Only per-classifier negative labels are discarded; every positive class is
+    retained, including sub-threshold but genuinely labelled results (they are
+    the review corpus). Classifiers without a negative-label set always retain.
+
+    A chained head can attribute the result to the upstream member -- e.g. a
+    ``drone_head:ambient`` label with ``winner_member == "yamnet"``. The label
+    prefix names the classifier that actually produced the label, so it takes
+    precedence over the winner when the two disagree.
     """
-    if classifier_source != "drone_head":
+    normalized = label.strip().lower()
+    prefix, _, suffix = normalized.partition(":")
+    negatives = _NEGATIVE_LABELS_BY_CLASSIFIER.get(prefix)
+    if suffix and negatives is not None:
+        return suffix.strip() not in negatives
+    negatives = _NEGATIVE_LABELS_BY_CLASSIFIER.get(classifier_source)
+    if negatives is None:
         return True
-    return label.strip().lower() not in _DRONE_HEAD_NEGATIVE_LABELS
+    return normalized not in negatives
 
 
 class DetectionAssembler:
@@ -153,6 +172,7 @@ class DetectionAssembler:
         snippet_dir: Path | str,
         snippet_retention_seconds: float,
         classifier_audio_retention_seconds: dict[str, float] | None = None,
+        snippet_max_age_resolver: Callable[[dict[str, Any]], int | None] | None = None,
         event_stale_seconds: float,
     ) -> None:
         self._storage = storage
@@ -164,7 +184,39 @@ class DetectionAssembler:
         self._snippet_dir = Path(snippet_dir)
         self._snippet_retention_seconds = snippet_retention_seconds
         self._classifier_audio_retention_seconds = classifier_audio_retention_seconds or {}
+        self._snippet_max_age_resolver = snippet_max_age_resolver
         self._event_stale_seconds = event_stale_seconds
+
+    def _resolve_audio_retention_seconds(
+        self,
+        *,
+        classifier_source: str,
+        label: str,
+        confidence: float,
+        retention_tier: str,
+    ) -> float | None:
+        """Snippet lifetime in seconds; ``None`` means keep indefinitely.
+
+        Prefers the shared retention policy so the ``snippet_expires_ns`` shown
+        in the UI matches what the cleanup pass will actually enforce. The one
+        thing it cannot know is alert promotion -- alerts are raised downstream
+        of assembly -- so an alerting detection's recorded expiry is a floor:
+        the cleanup pass will extend it to the alert bucket.
+        """
+
+        if self._snippet_max_age_resolver is None:
+            return self._classifier_audio_retention_seconds.get(
+                classifier_source, self._snippet_retention_seconds
+            )
+        return self._snippet_max_age_resolver({
+            "label": label,
+            "classifier": classifier_source,
+            "retention_tier": retention_tier,
+            "confidence": confidence,
+            "trigger_source": None,
+            "review_state": "unreviewed",
+            "label_source": None,
+        })
 
     def replace_coordinate_frame(self, coordinate_frame: LocalCoordinateFrame) -> None:
         self._coordinate_frame = coordinate_frame
@@ -380,16 +432,23 @@ class DetectionAssembler:
         classifier_audio_retention_seconds = (
             0
             if self._snippet_retention_seconds <= 0
-            else self._classifier_audio_retention_seconds.get(
-                classifier_source, self._snippet_retention_seconds
+            else self._resolve_audio_retention_seconds(
+                classifier_source=classifier_source,
+                label=classification_label,
+                confidence=classification_confidence,
+                retention_tier=retention_tier,
             )
         )
-        # The drone head reports a negative label ("unknown"/"ambient"/"no_drone")
+        # Classifiers report a negative label ("unknown"/"ambient"/"no_drone")
         # for non-detections. Never materialize an audio file for those; positive
         # classes (drone, coyote, ...) keep their audio. Metadata remains available.
-        if not _drone_head_retains_audio(classifier_source, classification_label):
+        if not _classifier_retains_audio(classifier_source, classification_label):
             classifier_audio_retention_seconds = 0
-        if classifier_audio_retention_seconds > 0 and retention_tier not in {"ephemeral", "experiment"}:
+        keeps_audio = (
+            classifier_audio_retention_seconds is None
+            or classifier_audio_retention_seconds > 0
+        )
+        if keeps_audio and retention_tier not in {"ephemeral", "experiment"}:
             snippet_signal = classification_signal
             if isinstance(audio_quality, dict):
                 missing_ratio = float(audio_quality.get("missing_ratio") or 0.0)
@@ -403,8 +462,10 @@ class DetectionAssembler:
                 write_wav_mono, snippet_file, snippet_signal, sample_rate_hz
             )
             snippet_path = str(snippet_file)
-            snippet_expires_ns = event_time_ns + int(
-                classifier_audio_retention_seconds * 1_000_000_000
+            snippet_expires_ns = (
+                None
+                if classifier_audio_retention_seconds is None
+                else event_time_ns + int(classifier_audio_retention_seconds * 1_000_000_000)
             )
             detection.snippet_path = snippet_path
 

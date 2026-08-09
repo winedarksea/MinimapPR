@@ -164,12 +164,19 @@ def resolve_site_origin_from_nodes(
             and _node_reports_3d_fix(node.get("metadata"))
             and str(node.get("id") or "") in set(contributing)
         ]
-        if three_d_alts:
-            origin = GeoPoint(
-                lat=origin.lat,
-                lon=origin.lon,
-                alt_m=sum(three_d_alts) / float(len(three_d_alts)),
-            )
+        # With no 3D contributor at all the midpoint altitude is meaningless, so
+        # fall back to the configured site altitude rather than letting a 2D-fix
+        # GGA value (often 0.0) pin the ENU frame at sea level and turn every
+        # local z into a raw GPS altitude.
+        origin = GeoPoint(
+            lat=origin.lat,
+            lon=origin.lon,
+            alt_m=(
+                sum(three_d_alts) / float(len(three_d_alts))
+                if three_d_alts
+                else settings.site_origin_alt_m
+            ),
+        )
         return SiteOriginResolution(
             origin=origin, source=SOURCE_GPS_ANCHOR, contributing_node_ids=contributing
         )

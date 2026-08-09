@@ -123,7 +123,7 @@ impl Default for DspWorkerConfig {
             max_buffer_seconds: DEFAULT_BIRDNET_CLASSIFICATION_WINDOW_SECONDS
                 + DEFAULT_CLASSIFIER_RENDER_OVERLAP_SECONDS,
             min_coverage_ratio: 0.85,
-            localization_band_hz: [300.0, 3500.0],
+            localization_band_hz: [50.0, 0.0],
             gcc_phat_interp_factor: 4,
             localization_srp_grid_resolution_m: 0.5,
             localization_search_padding_m: 2.0,

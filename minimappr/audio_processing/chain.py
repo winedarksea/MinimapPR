@@ -316,7 +316,14 @@ def create_classification_preprocessor(config: LocalizationConfig, *, extra_stag
 
 def create_localization_preprocessor(config: LocalizationConfig, *, extra_stages=None):
     stages: list[AudioPreprocessor] = []
-    if config.localization_band_min_hz > 0.0 and config.localization_band_max_hz > config.localization_band_min_hz:
-        stages.append(BandpassFilterStage(low_hz=config.localization_band_min_hz, high_hz=config.localization_band_max_hz))
+    if config.localization_band_min_hz > 0.0:
+        if config.localization_band_max_hz > config.localization_band_min_hz:
+            stages.append(BandpassFilterStage(low_hz=config.localization_band_min_hz, high_hz=config.localization_band_max_hz))
+        elif config.localization_band_max_hz <= 0.0:
+            # A disabled maximum means "up to Nyquist", so a min-only band is a
+            # pure high-pass rather than a silently disabled filter. Same
+            # Butterworth base and order as the bandpass, so this stays
+            # parity-equivalent with the Rust bin mask.
+            stages.append(HighpassFilterStage(cutoff_hz=config.localization_band_min_hz))
     stages.extend(extra_stages or [])
     return AudioProcessingChain(stages) if stages else None

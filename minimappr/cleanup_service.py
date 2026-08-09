@@ -20,6 +20,94 @@ _KNOWN_RUNTIME_CACHE_PATHS: tuple[Path, ...] = (
 )
 
 
+def builtin_retention_rules(settings: Settings) -> list[RetentionRule]:
+    """Classifier retention defaults, expressed as policy rules.
+
+    They are rules rather than hard-coded branches so user-managed label rules
+    in ``retention_policy.json`` remain an additive, backwards-compatible escape
+    hatch.  Rules are applied in ascending priority with last-write-wins, so the
+    alert rule is deliberately the highest: alert evidence always wins.
+
+    BirdNET is split in two.  The base rule gives every BirdNET result the short
+    bucket; the ``-confident`` rule promotes only results at or above the trigger
+    threshold to the long bucket.  Without the split, 30 days of storage went to
+    sub-threshold noise (82% of live BirdNET snippets were the ``unknown``
+    negative label).
+    """
+
+    return [
+        RetentionRule(
+            "builtin-yamnet",
+            -100,
+            RetentionMatchCriteria(classifier="yamnet"),
+            RetentionActions(
+                snippet_max_age_seconds=settings.retention_yamnet_audio_seconds,
+                artifact_max_age_seconds=settings.retention_yamnet_audio_seconds,
+            ),
+        ),
+        RetentionRule(
+            "builtin-birdnet",
+            -100,
+            RetentionMatchCriteria(classifier="birdnet"),
+            RetentionActions(
+                snippet_max_age_seconds=settings.retention_short_seconds,
+                artifact_max_age_seconds=settings.retention_short_seconds,
+            ),
+        ),
+        RetentionRule(
+            "builtin-birdnet-confident",
+            -99,
+            RetentionMatchCriteria(
+                classifier="birdnet",
+                confidence_min=settings.birdnet_trigger_min_confidence,
+            ),
+            RetentionActions(
+                snippet_max_age_seconds=settings.retention_birdnet_audio_seconds,
+                artifact_max_age_seconds=settings.retention_birdnet_audio_seconds,
+            ),
+        ),
+        RetentionRule(
+            "builtin-drone",
+            -100,
+            RetentionMatchCriteria(classifier="drone_head"),
+            RetentionActions(
+                snippet_max_age_seconds=settings.retention_drone_audio_seconds,
+                artifact_max_age_seconds=settings.retention_drone_audio_seconds,
+            ),
+        ),
+        RetentionRule(
+            "builtin-alert",
+            10_000,
+            RetentionMatchCriteria(trigger_source="alert"),
+            RetentionActions(
+                snippet_max_age_seconds=settings.retention_alert_audio_seconds,
+                artifact_max_age_seconds=settings.retention_alert_audio_seconds,
+            ),
+        ),
+    ]
+
+
+def load_cleanup_policy(settings: Settings, policy_path: Path | None = None) -> CleanupPolicy:
+    """Merge the builtin classifier rules with the user policy file.
+
+    Shared by the cleanup pass and by ``DetectionAssembler`` so the
+    ``snippet_expires_ns`` written at detection time reflects the same decision
+    the deleter will later make.
+    """
+
+    path = policy_path or settings.retention_policy_path
+    policy = CleanupPolicy.from_file(
+        path,
+        default_snippet_max_age_seconds=settings.retention_short_seconds,
+        default_artifact_max_age_seconds=settings.retention_experiment_seconds,
+    )
+    return CleanupPolicy(
+        version=policy.version,
+        defaults=policy.defaults,
+        rules=[*builtin_retention_rules(settings), *policy.rules],
+    )
+
+
 class CleanupService:
     """Coordinates destructive and policy-driven cleanup operations."""
 
@@ -54,22 +142,10 @@ class CleanupService:
         )
 
     def load_policy(self, policy_path: Path | None = None) -> CleanupPolicy:
-        path = policy_path or self._settings.retention_policy_path
-        policy = CleanupPolicy.from_file(
-            path,
-            default_snippet_max_age_seconds=self._settings.retention_short_seconds,
-            default_artifact_max_age_seconds=self._settings.retention_experiment_seconds,
+        return load_cleanup_policy(
+            self._settings,
+            policy_path or self._settings.retention_policy_path,
         )
-        # Classifier defaults are policy rules so user-managed label rules in
-        # retention_policy.json remain an additive, backwards-compatible escape
-        # hatch.  The alert rule is deliberately last: alert evidence wins.
-        defaults = [
-            RetentionRule("builtin-yamnet", -100, RetentionMatchCriteria(classifier="yamnet"), RetentionActions(snippet_max_age_seconds=self._settings.retention_yamnet_audio_seconds, artifact_max_age_seconds=self._settings.retention_yamnet_audio_seconds)),
-            RetentionRule("builtin-birdnet", -100, RetentionMatchCriteria(classifier="birdnet"), RetentionActions(snippet_max_age_seconds=self._settings.retention_birdnet_audio_seconds, artifact_max_age_seconds=self._settings.retention_birdnet_audio_seconds)),
-            RetentionRule("builtin-drone", -100, RetentionMatchCriteria(classifier="drone_head"), RetentionActions(snippet_max_age_seconds=self._settings.retention_drone_audio_seconds, artifact_max_age_seconds=self._settings.retention_drone_audio_seconds)),
-            RetentionRule("builtin-alert", 10_000, RetentionMatchCriteria(trigger_source="alert"), RetentionActions(snippet_max_age_seconds=self._settings.retention_alert_audio_seconds, artifact_max_age_seconds=self._settings.retention_alert_audio_seconds)),
-        ]
-        return CleanupPolicy(version=policy.version, defaults=policy.defaults, rules=[*defaults, *policy.rules])
 
     async def run_partial_cleanup(
         self,

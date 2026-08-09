@@ -301,6 +301,30 @@ class FusionMetrics:
     last_trigger_enqueue_ns: int = 0
 
 
+def _build_snippet_max_age_resolver(settings):
+    """Resolve snippet lifetime from the same policy the cleanup pass uses.
+
+    Loaded once at construction; a retention_policy.json edit takes effect for
+    newly written snippets after a restart, while the cleanup pass — which
+    reloads on every run — governs actual deletion either way.  Falls back to
+    ``None`` (per-classifier defaults in DetectionAssembler) if the policy file
+    is malformed, so a bad edit cannot stop detections from being written.
+    """
+
+    from minimappr.cleanup_service import load_cleanup_policy
+
+    try:
+        policy = load_cleanup_policy(settings)
+    except (OSError, ValueError) as exc:  # pragma: no cover - defensive
+        logger.warning("retention policy load failed, using classifier defaults: %s", exc)
+        return None
+
+    def _resolve(context: dict) -> int | None:
+        return policy.resolve_for_context(context).snippet_max_age_seconds
+
+    return _resolve
+
+
 # ---------------------------------------------------------------------------
 # FusionNode — thin coordinator
 # ---------------------------------------------------------------------------
@@ -449,6 +473,7 @@ class FusionNode:
                 "birdnet": settings.retention_birdnet_audio_seconds,
                 "drone_head": settings.retention_drone_audio_seconds,
             },
+            snippet_max_age_resolver=_build_snippet_max_age_resolver(settings),
             event_stale_seconds=settings.event_stale_seconds,
         )
 

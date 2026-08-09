@@ -3,23 +3,39 @@ import numpy as np
 from minimappr.core.assembly import _collapse_long_exact_zero_runs
 
 
-from minimappr.core.assembly import _drone_head_retains_audio
+from minimappr.core.assembly import _classifier_retains_audio
 
 
 def test_drone_head_retains_audio_for_positive_classes() -> None:
-    assert _drone_head_retains_audio("drone_head", "drone")
-    assert _drone_head_retains_audio("drone_head", "coyote")
-    assert _drone_head_retains_audio("drone_head", "Coyote")
+    assert _classifier_retains_audio("drone_head", "drone")
+    assert _classifier_retains_audio("drone_head", "coyote")
+    assert _classifier_retains_audio("drone_head", "Coyote")
 
 
 def test_drone_head_discards_audio_for_negative_labels() -> None:
-    assert not _drone_head_retains_audio("drone_head", "unknown")
-    assert not _drone_head_retains_audio("drone_head", "ambient")
-    assert not _drone_head_retains_audio("drone_head", "no_drone")
+    assert not _classifier_retains_audio("drone_head", "unknown")
+    assert not _classifier_retains_audio("drone_head", "ambient")
+    assert not _classifier_retains_audio("drone_head", "no_drone")
 
 
-def test_non_drone_head_source_always_retains() -> None:
-    assert _drone_head_retains_audio("yamnet", "unknown")
+def test_classifier_without_negative_labels_always_retains() -> None:
+    assert _classifier_retains_audio("yamnet", "unknown")
+    assert _classifier_retains_audio("yamnet", "Silence")
+
+
+def test_birdnet_discards_only_the_unknown_negative() -> None:
+    assert not _classifier_retains_audio("birdnet", "unknown")
+    assert not _classifier_retains_audio("birdnet", "Unknown")
+    # Sub-threshold but genuinely labelled results are the review corpus.
+    assert _classifier_retains_audio("birdnet", "house sparrow")
+
+
+def test_label_prefix_wins_over_a_mismatched_winner_member() -> None:
+    # A chained drone-head result can be attributed to the upstream member.
+    assert not _classifier_retains_audio("yamnet", "drone_head:ambient")
+    assert not _classifier_retains_audio("yamnet", "drone_head:unknown")
+    assert _classifier_retains_audio("yamnet", "drone_head:coyote")
+    assert not _classifier_retains_audio("yamnet", "birdnet:unknown")
 
 
 def test_collapse_long_exact_zero_runs_removes_only_long_gaps() -> None:

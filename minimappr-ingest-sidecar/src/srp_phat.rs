@@ -64,7 +64,7 @@ pub struct SrpPhatConfig {
 impl Default for SrpPhatConfig {
     fn default() -> Self {
         Self {
-            localization_band_hz: [300.0, 3500.0],
+            localization_band_hz: [50.0, 0.0],
             grid_resolution_m: 0.5,
             search_padding_m: 2.0,
             interp_factor: 4,

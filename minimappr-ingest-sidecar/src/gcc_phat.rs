@@ -429,7 +429,14 @@ fn normalize_band_hz(band_hz: Option<[f32; 2]>, sample_rate_hz: u32) -> Option<[
     let [low_hz, high_hz] = band_hz?;
     let nyquist_hz = sample_rate_hz as f32 * 0.5;
     let clamped_low_hz = low_hz.max(0.0).min(nyquist_hz);
-    let clamped_high_hz = high_hz.max(0.0).min(nyquist_hz);
+    // A non-positive maximum means "no ceiling", i.e. up to Nyquist, so a
+    // min-only band becomes a pure high-pass instead of disabling the mask
+    // entirely. Mirrors create_localization_preprocessor on the Python side.
+    let clamped_high_hz = if high_hz <= 0.0 {
+        nyquist_hz
+    } else {
+        high_hz.min(nyquist_hz)
+    };
     (clamped_high_hz > clamped_low_hz).then_some([clamped_low_hz, clamped_high_hz])
 }
 

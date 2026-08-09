@@ -3877,7 +3877,7 @@ class Storage:
                 await db.execute(
                     """
                     SELECT d.id, d.snippet_path, d.timestamp_ns, d.label, d.retention_tier,
-                           d.feature_summary_json,
+                           d.feature_summary_json, d.label_confidence, d.review_state,
                            EXISTS(SELECT 1 FROM alerts a WHERE a.detection_id = d.id) AS has_alert
                     FROM detections d
                     WHERE d.snippet_path IS NOT NULL
@@ -3894,6 +3894,12 @@ class Storage:
                     "classifier": features.get("winner_member"),
                     "retention_tier": row["retention_tier"],
                     "trigger_source": "alert" if row["has_alert"] else None,
+                    # Without these, any rule carrying a confidence/label_source/
+                    # review_state criterion can never match (see
+                    # RetentionMatchCriteria.matches).
+                    "confidence": row["label_confidence"],
+                    "label_source": features.get("label_source"),
+                    "review_state": row["review_state"],
                 }).snippet_max_age_seconds
                 if max_age_seconds is None:
                     continue
@@ -3921,7 +3927,7 @@ class Storage:
                     """
                     SELECT la.id, la.path, la.created_ns, la.retention_tier,
                            COALESCE(d.label, t.label) AS label,
-                           d.feature_summary_json,
+                           d.feature_summary_json, d.label_confidence, d.review_state,
                            EXISTS(SELECT 1 FROM alerts a WHERE a.detection_id = d.id) AS has_alert
                     FROM large_artifacts la
                     LEFT JOIN detections d ON d.id = la.source_detection_id
@@ -3939,6 +3945,12 @@ class Storage:
                     "classifier": features.get("winner_member"),
                     "retention_tier": row["retention_tier"],
                     "trigger_source": "alert" if row["has_alert"] else None,
+                    # Without these, any rule carrying a confidence/label_source/
+                    # review_state criterion can never match (see
+                    # RetentionMatchCriteria.matches).
+                    "confidence": row["label_confidence"],
+                    "label_source": features.get("label_source"),
+                    "review_state": row["review_state"],
                 }).artifact_max_age_seconds
                 if max_age_seconds is None:
                     continue
