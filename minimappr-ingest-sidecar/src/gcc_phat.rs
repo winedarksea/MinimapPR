@@ -472,6 +472,34 @@ mod tests {
     }
 
     #[test]
+    fn min_only_band_becomes_a_highpass_up_to_nyquist() {
+        // A non-positive maximum means "no ceiling", not "no filter": the mask
+        // must run from the minimum up to Nyquist.
+        let normalized = normalize_band_hz(Some([50.0, 0.0]), 16_000);
+        assert_eq!(normalized, Some([50.0, 8_000.0]));
+
+        let fft_len = 1_024;
+        assert!(!bin_in_band(1, fft_len, 16_000, normalized), "15.6 Hz is below the high-pass");
+        assert!(bin_in_band(64, fft_len, 16_000, normalized), "1 kHz must pass");
+        assert!(bin_in_band(400, fft_len, 16_000, normalized), "6.25 kHz has no ceiling");
+    }
+
+    #[test]
+    fn fully_disabled_band_masks_nothing() {
+        assert_eq!(normalize_band_hz(Some([0.0, 0.0]), 16_000), Some([0.0, 8_000.0]));
+        assert!(bin_in_band(1, 1_024, 16_000, normalize_band_hz(Some([0.0, 0.0]), 16_000)));
+        assert!(bin_in_band(0, 1_024, 16_000, None));
+    }
+
+    #[test]
+    fn both_bounds_still_build_a_bandpass() {
+        let normalized = normalize_band_hz(Some([300.0, 3_500.0]), 16_000);
+        assert_eq!(normalized, Some([300.0, 3_500.0]));
+        assert!(!bin_in_band(400, 1_024, 16_000, normalized), "6.25 kHz is above the ceiling");
+        assert!(bin_in_band(64, 1_024, 16_000, normalized));
+    }
+
+    #[test]
     fn zero_delay_gives_zero_lag() {
         let sr = 16_000;
         let signal = pseudo_random(512);

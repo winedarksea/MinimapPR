@@ -920,3 +920,185 @@ async def test_count_active_tracks_recency_cutoff(tmp_path: Path) -> None:
         assert await storage.count_active_tracks(max_age_seconds=60.0) == 1
     finally:
         await storage.close()
+
+
+# ---------------------------------------------------------------------------
+# BirdNET confidence-gated retention (regression: confidence criteria could
+# never match because the cleanup match context omitted "confidence")
+# ---------------------------------------------------------------------------
+
+
+async def _insert_birdnet_detection(
+    storage: Storage,
+    *,
+    detection_id: str,
+    timestamp_ns: int,
+    confidence: float,
+    snippet_path: Path,
+) -> None:
+    snippet_path.write_bytes(b"wav")
+    await storage.insert_detection(
+        detection=DetectionEvent(
+            id=detection_id,
+            timestamp_ns=timestamp_ns,
+            position_m=(0.0, 0.0, 0.0),
+            confidence=confidence,
+            gdop=1.5,
+            label="house sparrow",
+            label_category="wildlife",
+            label_confidence=confidence,
+            reference_sensor="birdnet-node:ch0",
+            feature_summary={"winner_member": "birdnet"},
+        ),
+        snippet_path=str(snippet_path),
+        snippet_expires_ns=None,
+        retention_tier="short",
+    )
+
+
+@pytest.mark.asyncio
+async def test_birdnet_snippet_retention_is_gated_on_the_trigger_threshold(tmp_path: Path) -> None:
+    """Sub-threshold BirdNET audio lives 1 day; confident audio keeps 30 days;
+    an alert promotes even a sub-threshold result back to the alert bucket."""
+    settings = Settings(
+        db_path=tmp_path / "birdnet-retention.db",
+        snippet_dir=tmp_path,
+        large_artifact_dir=tmp_path / "artifacts",
+        retention_policy_path=tmp_path / "missing-policy.json",
+    )
+    storage = Storage(settings.db_path)
+    await storage.initialize()
+    try:
+        now_ns = 5_000_000_000_000_000_000
+        # Older than the short bucket (1 day), well inside the long one (30 days).
+        old_ns = now_ns - int(2 * 86_400 * 1_000_000_000)
+
+        await storage.upsert_node(
+            NodeSpec(
+                id="birdnet-node",
+                node_type=NodeType.POINT,
+                position_m=(0.0, 0.0, 0.0),
+                sensor_offsets_m=[(0.0, 0.0, 0.0)],
+                capabilities=["audio"],
+            ),
+            last_seen_ns=old_ns,
+        )
+
+        weak = tmp_path / "det-weak.wav"
+        strong = tmp_path / "det-strong.wav"
+        alerting = tmp_path / "det-alerting.wav"
+        await _insert_birdnet_detection(
+            storage, detection_id="det-weak", timestamp_ns=old_ns, confidence=0.3, snippet_path=weak
+        )
+        await _insert_birdnet_detection(
+            storage, detection_id="det-strong", timestamp_ns=old_ns, confidence=0.6, snippet_path=strong
+        )
+        await _insert_birdnet_detection(
+            storage,
+            detection_id="det-alerting",
+            timestamp_ns=old_ns,
+            confidence=0.3,
+            snippet_path=alerting,
+        )
+        await storage.insert_alert(
+            timestamp_ns=old_ns,
+            rule_id="test_rule",
+            detection_id="det-alerting",
+            track_id=None,
+            destination="log",
+            priority="high",
+            status="sent",
+        )
+
+        service = CleanupService(settings=settings, storage=storage)
+        await service.run_partial_cleanup(now_ns=now_ns)
+
+        assert not weak.exists(), "sub-threshold BirdNET audio should expire at 1 day"
+        assert strong.exists(), "BirdNET audio at/above the trigger threshold keeps 30 days"
+        assert alerting.exists(), "alert evidence outranks the confidence gate"
+
+        rows = {row["id"]: row for row in await storage.list_detections(limit=10)}
+        # Metadata survives regardless — only the audio is reclaimed.
+        assert set(rows) == {"det-weak", "det-strong", "det-alerting"}
+        assert rows["det-weak"]["snippet_path"] is None
+        assert rows["det-strong"]["snippet_path"] is not None
+    finally:
+        await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_match_context_exposes_confidence_and_review_state(tmp_path: Path) -> None:
+    """A user rule keyed on confidence must actually fire (it silently never did
+    while the match context omitted the key)."""
+    policy_path = tmp_path / "retention_policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "rules": [
+                    {
+                        "rule_id": "drop-low-confidence",
+                        "priority": 500,
+                        "match": {"confidence_max": 0.2},
+                        "actions": {"snippet_max_age_seconds": 1},
+                    }
+                ],
+            }
+        )
+    )
+    settings = Settings(
+        db_path=tmp_path / "confidence-rule.db",
+        snippet_dir=tmp_path,
+        large_artifact_dir=tmp_path / "artifacts",
+        retention_policy_path=policy_path,
+    )
+    storage = Storage(settings.db_path)
+    await storage.initialize()
+    try:
+        now_ns = 5_000_000_000_000_000_000
+        recent_ns = now_ns - 10_000_000_000  # 10 s old: inside every builtin bucket
+
+        await storage.upsert_node(
+            NodeSpec(
+                id="yamnet-node",
+                node_type=NodeType.POINT,
+                position_m=(0.0, 0.0, 0.0),
+                sensor_offsets_m=[(0.0, 0.0, 0.0)],
+                capabilities=["audio"],
+            ),
+            last_seen_ns=recent_ns,
+        )
+
+        noisy = tmp_path / "det-noisy.wav"
+        noisy.write_bytes(b"wav")
+        clear = tmp_path / "det-clear.wav"
+        clear.write_bytes(b"wav")
+        for detection_id, confidence, path in (
+            ("det-noisy", 0.1, noisy),
+            ("det-clear", 0.8, clear),
+        ):
+            await storage.insert_detection(
+                detection=DetectionEvent(
+                    id=detection_id,
+                    timestamp_ns=recent_ns,
+                    position_m=(0.0, 0.0, 0.0),
+                    confidence=confidence,
+                    gdop=1.5,
+                    label="Vehicle",
+                    label_category="vehicle",
+                    label_confidence=confidence,
+                    reference_sensor="yamnet-node:ch0",
+                    feature_summary={"winner_member": "yamnet"},
+                ),
+                snippet_path=str(path),
+                snippet_expires_ns=None,
+                retention_tier="short",
+            )
+
+        service = CleanupService(settings=settings, storage=storage)
+        await service.run_partial_cleanup(now_ns=now_ns)
+
+        assert not noisy.exists(), "confidence_max rule must match and expire the snippet"
+        assert clear.exists()
+    finally:
+        await storage.close()

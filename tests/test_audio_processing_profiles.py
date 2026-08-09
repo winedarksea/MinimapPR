@@ -15,7 +15,14 @@ from minimappr.audio_processing.profiles import (
     profile_fingerprint,
 )
 from minimappr.audio_processing.wav_serving import listening_wav_bytes
-from minimappr.audio_processing.chain import NodePreprocessorFactory
+from minimappr.audio_processing.chain import (
+    NodePreprocessorFactory,
+    create_localization_preprocessor,
+)
+from minimappr.audio_processing.stages import (
+    BandpassFilterStage,
+    HighpassFilterStage,
+)
 from minimappr.config import Settings
 from minimappr.utils.audio import read_wav_mono, write_wav_mono
 
@@ -105,3 +112,68 @@ def test_listening_wav_is_in_memory_and_does_not_modify_canonical_file(tmp_path:
     assert hashlib.sha256(canonical_path.read_bytes()).hexdigest() == before_hash
     canonical, _ = read_wav_mono(canonical_path)
     assert float(np.max(np.abs(canonical))) < 0.01
+
+
+# ---------------------------------------------------------------------------
+# Localization band: a min-only band must build a real high-pass, not nothing
+# ---------------------------------------------------------------------------
+
+
+def _localization_stages(*, min_hz: float, max_hz: float) -> list:
+    config = Settings(
+        localization_band_min_hz=min_hz,
+        localization_band_max_hz=max_hz,
+    ).localization_config()
+    preprocessor = create_localization_preprocessor(config)
+    return [] if preprocessor is None else list(preprocessor.stages)
+
+
+def test_min_only_localization_band_builds_a_highpass() -> None:
+    """A disabled maximum means "up to Nyquist"; setting only the minimum used
+    to silently build no filter at all."""
+    stages = _localization_stages(min_hz=50.0, max_hz=0.0)
+
+    assert len(stages) == 1
+    assert isinstance(stages[0], HighpassFilterStage)
+    assert stages[0].cutoff_hz == pytest.approx(50.0)
+
+
+def test_both_bounds_still_build_a_bandpass() -> None:
+    stages = _localization_stages(min_hz=300.0, max_hz=3500.0)
+
+    assert len(stages) == 1
+    assert isinstance(stages[0], BandpassFilterStage)
+    assert stages[0].low_hz == pytest.approx(300.0)
+    assert stages[0].high_hz == pytest.approx(3500.0)
+
+
+def test_fully_disabled_localization_band_builds_nothing() -> None:
+    assert _localization_stages(min_hz=0.0, max_hz=0.0) == []
+
+
+def test_default_localization_band_high_passes_rumble_and_keeps_speech() -> None:
+    sample_rate_hz = 16_000
+    config = Settings().localization_config()
+    preprocessor = create_localization_preprocessor(config)
+    assert preprocessor is not None
+
+    t = np.linspace(0.0, 0.5, int(0.5 * sample_rate_hz), endpoint=False, dtype=np.float32)
+    rumble = np.sin(2.0 * np.pi * 10.0 * t).astype(np.float32)
+    speech = np.sin(2.0 * np.pi * 1_000.0 * t).astype(np.float32)
+    # Above the old 3500 Hz ceiling: the shipped default has no ceiling, so this
+    # must survive.
+    high = np.sin(2.0 * np.pi * 6_000.0 * t).astype(np.float32)
+
+    filtered_rumble = np.asarray(preprocessor.process(rumble, sample_rate_hz), dtype=np.float32)
+    filtered_speech = np.asarray(preprocessor.process(speech, sample_rate_hz), dtype=np.float32)
+    filtered_high = np.asarray(preprocessor.process(high, sample_rate_hz), dtype=np.float32)
+
+    assert float(np.sqrt(np.mean(filtered_rumble ** 2))) < 0.10 * float(
+        np.sqrt(np.mean(rumble ** 2))
+    )
+    assert float(np.sqrt(np.mean(filtered_speech ** 2))) > 0.70 * float(
+        np.sqrt(np.mean(speech ** 2))
+    )
+    assert float(np.sqrt(np.mean(filtered_high ** 2))) > 0.70 * float(
+        np.sqrt(np.mean(high ** 2))
+    )

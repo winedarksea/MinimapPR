@@ -264,9 +264,11 @@ def test_gps_anchor_altitude_prefers_three_d_fix_contributors() -> None:
     assert set(resolution.contributing_node_ids) == {"n2d", "n3d"}
 
 
-def test_gps_anchor_altitude_falls_back_to_midpoint_when_all_two_d() -> None:
-    """With only 2D contributors there is nothing better than the midpoint —
-    the pre-existing behavior pinned by test_site_origin_anchoring stays."""
+def test_gps_anchor_altitude_falls_back_to_configured_alt_when_all_two_d() -> None:
+    """A 2D-fix GGA altitude is not a measurement, so with no 3D contributor the
+    origin takes the configured site altitude rather than a meaningless midpoint.
+    Pinning the frame at the 2D midpoint (often 0.0 m) turns every local z into a
+    raw GPS altitude."""
     settings = Settings()
     a = _node("a", 44.0, -93.0, 240.0, gps=True)
     b = _node("b", 44.0002, -93.0002, 260.0, gps=True)
@@ -274,4 +276,15 @@ def test_gps_anchor_altitude_falls_back_to_midpoint_when_all_two_d() -> None:
     resolution = resolve_site_origin_from_nodes(settings, now_ns=time.time_ns(), nodes=[a, b])
 
     assert resolution.source == SOURCE_GPS_ANCHOR
-    assert resolution.origin.alt_m == pytest.approx(250.0)
+    assert resolution.origin.alt_m == pytest.approx(settings.site_origin_alt_m)
+    assert resolution.origin.alt_m != pytest.approx(250.0)
+
+
+def test_gps_anchor_altitude_honours_an_overridden_site_origin_alt() -> None:
+    settings = Settings(site_origin_alt_m=123.5)
+    a = _node("a", 44.0, -93.0, 240.0, gps=True)
+    b = _node("b", 44.0002, -93.0002, 260.0, gps=True)
+
+    resolution = resolve_site_origin_from_nodes(settings, now_ns=time.time_ns(), nodes=[a, b])
+
+    assert resolution.origin.alt_m == pytest.approx(123.5)

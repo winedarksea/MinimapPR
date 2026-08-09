@@ -524,6 +524,14 @@ def _running_rust_sidecar(
         "MINIMAPPR_SIDECAR_STORAGE_MODE": "journal",
         "MINIMAPPR_SIDECAR_ALLOW_NON_TMPFS_JOURNAL": "true",
         "MINIMAPPR_RUNTIME_PROFILE": "birdnet_hybrid_production",
+        # The sidecar does not read MINIMAPPR_RUNTIME_PROFILE, so the profile's
+        # band has to be passed explicitly — matching hybrid_production_kwargs on
+        # the Python side. It matters: the 3500 Hz ceiling is the spatial
+        # aliasing limit for this array (c/2d = 343/0.105 ~ 3.4 kHz), and the
+        # 2-7 kHz house-finch fixture aliases badly without it. The shipped
+        # default is a min-only 50 Hz high-pass with no ceiling.
+        "MINIMAPPR_LOCALIZATION_BAND_MIN_HZ": "300.0",
+        "MINIMAPPR_LOCALIZATION_BAND_MAX_HZ": "3500.0",
         "MINIMAPPR_LOCALIZATION_SRP_GRID_RESOLUTION_M": str(TIGHT_SRP_GRID_RESOLUTION_M),
         "MINIMAPPR_LOCALIZATION_SEARCH_PADDING_M": str(TIGHT_SRP_SEARCH_PADDING_M),
         "MINIMAPPR_DEFAULT_TEMPERATURE_C": str(default_temperature_c),
