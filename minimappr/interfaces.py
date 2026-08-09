@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, AsyncContextManager, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, AsyncContextManager, Mapping, Protocol, runtime_checkable
 
 import numpy as np
 
@@ -73,6 +73,22 @@ class Localizer(Protocol):
         ...
 
 
+@dataclass(frozen=True, slots=True)
+class AssociationContext:
+    """Non-positional detection context available to an associator.
+
+    Passed only to associators whose ``associate`` signature accepts a fifth
+    parameter — 3- and 4-argument custom strategies keep working unchanged.
+    ``track_fingerprints`` maps track id -> L2-normalised classifier-score
+    fingerprint (see ``TrackManager``); it is read-only for the associator.
+    """
+
+    label: str = "unknown"
+    label_category: str = "unknown"
+    classifier_scores: dict[str, float] | None = None
+    track_fingerprints: Mapping[str, dict[str, float]] = field(default_factory=dict)
+
+
 @runtime_checkable
 class TrackAssociator(Protocol):
     def associate(
@@ -81,6 +97,7 @@ class TrackAssociator(Protocol):
         position_m: tuple[float, float, float],
         existing_tracks: list[TrackState],
         measurement_covariance_m2: list[list[float]] | None = None,
+        context: "AssociationContext | None" = None,
     ) -> str | None:
         ...
 

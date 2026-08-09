@@ -292,6 +292,7 @@ class DetectionAssembler:
                 sensor_count=len(selected_sensor_ids),
                 capability_tier=capability_tier,
                 source_node_id=source_node_id,
+                classifier_scores=classification_scores,
             )
             track.position_geo = self._coordinate_frame.local_to_geo(track.position_m)
 

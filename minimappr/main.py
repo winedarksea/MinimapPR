@@ -3091,6 +3091,26 @@ async def get_config(request: Request) -> dict:
         "kalman_process_noise": settings.kalman_process_noise,
         "kalman_measurement_noise": settings.kalman_measurement_noise,
         "track_stale_seconds": settings.track_stale_seconds,
+        "track_stale_seconds_wildlife": settings.track_stale_seconds_wildlife,
+        "track_stale_seconds_vehicle": settings.track_stale_seconds_vehicle,
+        "track_stale_seconds_human": settings.track_stale_seconds_human,
+        "track_stale_seconds_security": settings.track_stale_seconds_security,
+        "kalman_process_noise_wildlife": settings.kalman_process_noise_wildlife,
+        "kalman_process_noise_vehicle": settings.kalman_process_noise_vehicle,
+        "kalman_process_noise_human": settings.kalman_process_noise_human,
+        "kalman_process_noise_security": settings.kalman_process_noise_security,
+        "kalman_max_coast_process_seconds": settings.kalman_max_coast_process_seconds,
+        "kalman_coast_velocity_half_life_seconds": settings.kalman_coast_velocity_half_life_seconds,
+        "association_category_gate_enabled": settings.association_category_gate_enabled,
+        "association_fingerprint_weight": settings.association_fingerprint_weight,
+        "track_fingerprint_alpha": settings.track_fingerprint_alpha,
+        "track_fingerprint_top_k": settings.track_fingerprint_top_k,
+        "dormant_reacquire_enabled": settings.dormant_reacquire_enabled,
+        "dormant_ttl_seconds": settings.dormant_ttl_seconds,
+        "dormant_reacquire_radius_m": settings.dormant_reacquire_radius_m,
+        "dormant_fingerprint_min_similarity": settings.dormant_fingerprint_min_similarity,
+        "dormant_confidence_half_life_seconds": settings.dormant_confidence_half_life_seconds,
+        "dormant_max_records": settings.dormant_max_records,
         "localization_node_bearing_strength": settings.localization_node_bearing_strength,
         "multi_node_bearing_window_seconds": settings.multi_node_bearing_window_seconds,
         "multi_node_bearing_min_separation_deg": settings.multi_node_bearing_min_separation_deg,
@@ -3578,6 +3598,32 @@ async def patch_config(request: Request) -> dict:
             errors.append("kalman_measurement_noise: must be > 0")
         elif key == "track_stale_seconds" and value <= 0.0:  # type: ignore[operator]
             errors.append("track_stale_seconds: must be > 0")
+        # Per-category lifecycle / process noise: 0.0 is meaningful (inherit the
+        # base value), so these are >= 0 rather than > 0.
+        elif key in {
+            "track_stale_seconds_wildlife",
+            "track_stale_seconds_vehicle",
+            "track_stale_seconds_human",
+            "track_stale_seconds_security",
+            "kalman_process_noise_wildlife",
+            "kalman_process_noise_vehicle",
+            "kalman_process_noise_human",
+            "kalman_process_noise_security",
+            "kalman_max_coast_process_seconds",
+            "kalman_coast_velocity_half_life_seconds",
+            "association_fingerprint_weight",
+            "dormant_reacquire_radius_m",
+            "dormant_confidence_half_life_seconds",
+        } and value < 0.0:  # type: ignore[operator]
+            errors.append(f"{key}: must be >= 0")
+        elif key == "track_fingerprint_alpha" and not (0.0 <= value <= 1.0):  # type: ignore[operator]
+            errors.append("track_fingerprint_alpha: must be in [0, 1]")
+        elif key == "dormant_fingerprint_min_similarity" and not (0.0 <= value <= 1.0):  # type: ignore[operator]
+            errors.append("dormant_fingerprint_min_similarity: must be in [0, 1]")
+        elif key in {"track_fingerprint_top_k", "dormant_max_records"} and value < 1:  # type: ignore[operator]
+            errors.append(f"{key}: must be >= 1")
+        elif key == "dormant_ttl_seconds" and value <= 0.0:  # type: ignore[operator]
+            errors.append("dormant_ttl_seconds: must be > 0")
         elif key == "localization_node_bearing_strength" and value < 0.0:  # type: ignore[operator]
             errors.append("localization_node_bearing_strength: must be >= 0")
         elif key == "multi_node_bearing_window_seconds" and value <= 0.0:  # type: ignore[operator]

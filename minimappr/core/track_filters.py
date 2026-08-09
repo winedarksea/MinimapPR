@@ -25,6 +25,9 @@ class _KalmanInternalState:
 
     mean: np.ndarray       # shape (6,): [x, y, z, vx, vy, vz]
     covariance: np.ndarray  # shape (6, 6)
+    # Per-track process-noise override (set from the track's label category).
+    # ``None`` means "use the filter-wide default".
+    process_noise: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +159,9 @@ class KalmanTrackFilter:
         measurement_noise: float,
         initial_position_variance: float,
         initial_velocity_variance: float,
+        *,
+        max_coast_process_seconds: float = 10.0,
+        coast_velocity_half_life_seconds: float = 10.0,
     ) -> None:
         if process_noise < 0.0:
             raise ValueError("process_noise must be >= 0.0")
@@ -167,6 +173,13 @@ class KalmanTrackFilter:
             raise ValueError("initial_velocity_variance must be > 0.0")
 
         self._process_noise = process_noise
+        # Coast guards. Detections for a single real source can be minutes
+        # apart; without these a 60 s gap gives Q_pos ~ 0.25*60^4*q (~6.5e6 m^2)
+        # and extrapolates a junk velocity 60 s forward, so the predicted mean
+        # lands far outside the association gate and the re-detection spawns a
+        # new track. ``<= 0`` disables the corresponding guard.
+        self._max_coast_process_seconds = float(max_coast_process_seconds)
+        self._coast_velocity_half_life_seconds = float(coast_velocity_half_life_seconds)
         self._measurement_noise = measurement_noise
         self._initial_position_variance = initial_position_variance
         self._initial_velocity_variance = initial_velocity_variance
@@ -199,7 +212,9 @@ class KalmanTrackFilter:
             return state
         dt_safe = max(dt_s, 1e-3)
         transition = self._build_transition_matrix(dt_safe)
-        process_covariance = self._build_process_covariance(dt_safe)
+        process_covariance = self._build_process_covariance(
+            self._process_dt(dt_safe), self._q_for(internal),
+        )
         predicted_mean = transition @ internal.mean
         predicted_covariance = (
             transition @ internal.covariance @ transition.T
@@ -257,7 +272,9 @@ class KalmanTrackFilter:
 
         # --- Predict (time update) ---
         transition = self._build_transition_matrix(dt_safe)
-        process_cov = self._build_process_covariance(dt_safe)
+        process_cov = self._build_process_covariance(
+            self._process_dt(dt_safe), self._q_for(internal),
+        )
         prior_mean = transition @ internal.mean
         prior_covariance = (transition @ internal.covariance @ transition.T) + process_cov
 
@@ -312,9 +329,30 @@ class KalmanTrackFilter:
                 self._initial_velocity_variance,
             ]
         ).astype(np.float64)
+        previous = self._states.get(track_id)
         self._states[track_id] = _KalmanInternalState(
-            mean=mean, covariance=covariance,
+            mean=mean,
+            covariance=covariance,
+            # A re-initialised track (dormant reacquisition) keeps whatever
+            # category-derived q it already had; TrackManager re-applies it
+            # anyway, but this keeps the filter correct on its own.
+            process_noise=previous.process_noise if previous is not None else None,
         )
+
+    def set_track_process_noise(self, track_id: str, process_noise: float | None) -> None:
+        """Override the process noise used for one track.
+
+        Duck-typed hook (deliberately not part of the ``TrackFilter`` Protocol)
+        so injected and test filters without it keep working. No-op for unknown
+        track ids — TrackManager always initialises the track first.
+        """
+        internal = self._states.get(track_id)
+        if internal is None:
+            return
+        if process_noise is None or process_noise < 0.0:
+            internal.process_noise = None
+        else:
+            internal.process_noise = float(process_noise)
 
     def remove_track(self, track_id: str) -> None:
         """Clean up internal state for a dropped or reaped track."""
@@ -343,18 +381,43 @@ class KalmanTrackFilter:
             },
         )
 
+    def _q_for(self, internal: _KalmanInternalState) -> float:
+        q = internal.process_noise
+        return self._process_noise if q is None else q
+
+    def _process_dt(self, dt_s: float) -> float:
+        """dt used for process-noise growth only (position/velocity still use
+        the real dt through the transition matrix)."""
+        cap = self._max_coast_process_seconds
+        return min(dt_s, cap) if cap > 0.0 else dt_s
+
     def _build_transition_matrix(self, dt_s: float) -> np.ndarray:
         transition = np.eye(6, dtype=np.float64)
+        half_life = self._coast_velocity_half_life_seconds
+        if half_life > 0.0 and dt_s > 0.5 * half_life:
+            # Long coast: an Ornstein-Uhlenbeck-style transition that decays the
+            # velocity estimate toward zero instead of extrapolating it linearly
+            # forever. Displacement is bounded by (half_life / ln2) * |v|.
+            decay = float(np.exp(-dt_s * np.log(2.0) / half_life))
+            effective_dt = (half_life / np.log(2.0)) * (1.0 - decay)
+            transition[0, 3] = effective_dt
+            transition[1, 4] = effective_dt
+            transition[2, 5] = effective_dt
+            transition[3, 3] = decay
+            transition[4, 4] = decay
+            transition[5, 5] = decay
+            return transition
+        # Short gaps keep the exact constant-velocity transition.
         transition[0, 3] = dt_s
         transition[1, 4] = dt_s
         transition[2, 5] = dt_s
         return transition
 
-    def _build_process_covariance(self, dt_s: float) -> np.ndarray:
+    def _build_process_covariance(self, dt_s: float, process_noise: float | None = None) -> np.ndarray:
         dt2 = dt_s * dt_s
         dt3 = dt2 * dt_s
         dt4 = dt2 * dt2
-        q = self._process_noise
+        q = self._process_noise if process_noise is None else process_noise
 
         block = np.array(
             [

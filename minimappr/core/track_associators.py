@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from minimappr.interfaces import AssociationContext
 from minimappr.models import TrackState, TrackStatus
 
 
@@ -29,6 +30,8 @@ class NearestNeighborAssociator:
         *,
         max_gate_m: float | None = None,
         chi2_gate: float = 9.0,
+        category_gate_enabled: bool = True,
+        fingerprint_weight: float = 3.0,
     ) -> None:
         if association_distance_m <= 0.0:
             raise ValueError("association_distance_m must be > 0")
@@ -44,6 +47,12 @@ class NearestNeighborAssociator:
         # Never let the configured max fall below the Euclidean shortcut radius.
         self._max_gate_m = max(self._max_gate_m, association_distance_m)
         self._chi2_gate = float(chi2_gate) if chi2_gate > 0.0 else 9.0
+        # Class-aware association (Phase 2). The category gate is a hard reject
+        # applied before any distance math; the fingerprint term only re-ranks
+        # candidates that already passed the positional gate, so it can never
+        # admit a match the geometry rejected nor widen a gate radius.
+        self._category_gate_enabled = bool(category_gate_enabled)
+        self._fingerprint_weight = max(0.0, float(fingerprint_weight))
 
     def associate(
         self,
@@ -51,6 +60,7 @@ class NearestNeighborAssociator:
         position_m: tuple[float, float, float],
         existing_tracks: list[TrackState],
         measurement_covariance_m2: list[list[float]] | None = None,
+        context: AssociationContext | None = None,
     ) -> str | None:
         """Return the track ID of the closest active track within the
         association gate, or ``None`` if no track is close enough (meaning
@@ -70,6 +80,14 @@ class NearestNeighborAssociator:
         candidate track in this call, instead of mixing raw meters with
         chi-squared numbers when both a close plain-distance match and a
         farther covariance-gated match are both in play.
+
+        ``context`` carries the detection's label category and classifier
+        scores.  A detection and a track whose categories are both *real*
+        (non-``unknown``, non-empty) and different are never associated —
+        ``unknown`` stays a wildcard so BLE tracks and low-confidence
+        classifications behave exactly as before.  Classifier-score similarity
+        against the track's running fingerprint is folded into the score (in
+        chi-squared units) purely as a tie-break among gate-passers.
         """
         measurement = np.asarray(position_m, dtype=np.float64)
         best_track_id: str | None = None
@@ -80,15 +98,28 @@ class NearestNeighborAssociator:
         # association_distance_m.
         fallback_variance = (self._association_distance_m**2) / self._chi2_gate
 
+        detection_category = _real_category(
+            context.label_category if context is not None else None
+        )
+        detection_scores = context.classifier_scores if context is not None else None
+        track_fingerprints = context.track_fingerprints if context is not None else {}
+
         for track in existing_tracks:
             if track.status == TrackStatus.DROPPED.value:
                 continue
+            if self._category_gate_enabled and detection_category is not None:
+                track_category = _real_category(track.label_category)
+                if track_category is not None and track_category != detection_category:
+                    continue
             track_position = np.asarray(track.position_m, dtype=np.float64)
             residual = measurement - track_position
             distance = float(np.linalg.norm(residual))
 
             if distance < self._association_distance_m:
                 score = (distance * distance) / fallback_variance
+                score += self._fingerprint_penalty(
+                    detection_scores, track_fingerprints.get(track.id)
+                )
                 if score < best_score:
                     best_score = score
                     best_track_id = track.id
@@ -106,7 +137,13 @@ class NearestNeighborAssociator:
             score = self._mahalanobis_distance_squared(residual, covariance)
             if score is None:
                 continue
-            if score <= self._chi2_gate and score < best_score:
+            if score > self._chi2_gate:
+                continue
+            # Fingerprint is added only after the positional gate has passed.
+            score += self._fingerprint_penalty(
+                detection_scores, track_fingerprints.get(track.id)
+            )
+            if score < best_score:
                 best_score = score
                 best_track_id = track.id
 
@@ -117,6 +154,23 @@ class NearestNeighborAssociator:
         # matrix, the way core/federation.py already does for peer-track
         # deconfliction.
         return best_track_id
+
+    def _fingerprint_penalty(
+        self,
+        detection_scores: dict[str, float] | None,
+        track_fingerprint: dict[str, float] | None,
+    ) -> float:
+        """Chi-squared-unit penalty for classifier-score dissimilarity.
+
+        Zero when either side is missing, so a track with no fingerprint yet is
+        never disadvantaged against one that has one.
+        """
+        if self._fingerprint_weight <= 0.0:
+            return 0.0
+        if not detection_scores or not track_fingerprint:
+            return 0.0
+        similarity = cosine_similarity(detection_scores, track_fingerprint)
+        return self._fingerprint_weight * (1.0 - similarity)
 
     def _association_gate(
         self,
@@ -181,3 +235,37 @@ class NearestNeighborAssociator:
             return self._positive_definite_covariance(covariance)
         except np.linalg.LinAlgError:
             return None
+
+
+def _real_category(value: str | None) -> str | None:
+    """Normalised category, or ``None`` when it carries no information."""
+    if not value:
+        return None
+    normalised = value.strip().lower()
+    if not normalised or normalised == "unknown":
+        return None
+    return normalised
+
+
+def cosine_similarity(left: dict[str, float], right: dict[str, float]) -> float:
+    """Cosine similarity over two sparse score dicts, clamped to [0, 1].
+
+    Classifier scores are non-negative, so the raw cosine is already in [0, 1];
+    the clamp only guards against floating-point overshoot.
+    """
+    if not left or not right:
+        return 0.0
+    if len(right) < len(left):
+        left, right = right, left
+    dot = 0.0
+    for key, value in left.items():
+        other = right.get(key)
+        if other is not None:
+            dot += float(value) * float(other)
+    if dot <= 0.0:
+        return 0.0
+    left_norm = float(np.sqrt(sum(float(v) * float(v) for v in left.values())))
+    right_norm = float(np.sqrt(sum(float(v) * float(v) for v in right.values())))
+    if left_norm <= 0.0 or right_norm <= 0.0:
+        return 0.0
+    return float(min(1.0, dot / (left_norm * right_norm)))

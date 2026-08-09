@@ -173,11 +173,16 @@ class TestBuilderStatus:
         g = _build(fusion_status={"metrics": {
             "track_multi_node_association_count": 7,
             "tracks_multi_node_active": 2,
+            "track_dormant_reacquired_count": 3,
             "classification_stage_out": 999,
         }})
         track = next(n for n in g.nodes if n.id == "track:site")
         metrics = {p.label: p.value for p in track.status.metrics}
-        assert metrics == {"Multi-node associations": "7", "Active multi-node tracks": "2"}
+        assert metrics == {
+            "Multi-node associations": "7",
+            "Active multi-node tracks": "2",
+            "Dormant reacquisitions": "3",
+        }
 
 
 class TestHassBridgeStage:

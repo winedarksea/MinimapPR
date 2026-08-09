@@ -234,6 +234,7 @@ class FusionMetrics:
     localization_amplitude_prior_clamped_count: int = 0
     track_multi_node_association_count: int = 0
     tracks_multi_node_active: int = 0
+    track_dormant_reacquired_count: int = 0
     localization_bearing_fusion_attempt_count: int = 0
     localization_bearing_fusion_fused_count: int = 0
     localization_bearing_fusion_degenerate_count: int = 0
@@ -1320,6 +1321,12 @@ class FusionNode:
             )
         if hasattr(self.tracker, "multi_node_active_count"):
             self._metrics.tracks_multi_node_active = self.tracker.multi_node_active_count()
+        # Dormant reacquisition: how often a dropped identity was revived rather
+        # than fragmenting into a fresh track id.
+        if hasattr(self.tracker, "dormant_reacquired_count"):
+            self._metrics.track_dormant_reacquired_count = (
+                self.tracker.dormant_reacquired_count()
+            )
         return {
             "started": self._started,
             "queue": {

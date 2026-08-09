@@ -423,6 +423,46 @@ def build_pipeline_graph(
             _param("Filter", tc.tracking_filter, "tracking_filter"),
             _param("Assoc dist", float(tc.association_distance_m), "association_distance_m", suffix=" m"),
             _param("Stale after", float(tc.track_stale_seconds), "track_stale_seconds", suffix=" s"),
+            _param(
+                "Stale (wildlife)",
+                float(tc.track_stale_seconds_wildlife),
+                "track_stale_seconds_wildlife",
+                suffix=" s",
+            ),
+            _param(
+                "Stale (vehicle)",
+                float(tc.track_stale_seconds_vehicle),
+                "track_stale_seconds_vehicle",
+                suffix=" s",
+            ),
+            _param(
+                "Coast q cap",
+                float(tc.kalman_max_coast_process_seconds),
+                "kalman_max_coast_process_seconds",
+                suffix=" s",
+            ),
+            _param(
+                "Velocity half-life",
+                float(tc.kalman_coast_velocity_half_life_seconds),
+                "kalman_coast_velocity_half_life_seconds",
+                suffix=" s",
+            ),
+            _param(
+                "Category gate",
+                bool(tc.association_category_gate_enabled),
+                "association_category_gate_enabled",
+            ),
+            _param(
+                "Reacquire dormant",
+                bool(tc.dormant_reacquire_enabled),
+                "dormant_reacquire_enabled",
+            ),
+            _param(
+                "Reacquire radius",
+                float(tc.dormant_reacquire_radius_m),
+                "dormant_reacquire_radius_m",
+                suffix=" m",
+            ),
         ],
         status=_track_status(metrics, fusion_available),
         link="/settings/config#tracking",
@@ -861,12 +901,14 @@ def _track_status(metrics: dict, fusion_available: bool) -> PipelineStageStatus:
         return PipelineStageStatus(health="unknown")
     associations = int(metrics.get("track_multi_node_association_count") or 0)
     active_tracks = int(metrics.get("tracks_multi_node_active") or 0)
+    reacquired = int(metrics.get("track_dormant_reacquired_count") or 0)
     return PipelineStageStatus(
         health="ok",
         summary=(f"{active_tracks} active multi-node tracks" if active_tracks else "configured; no active tracks"),
         metrics=[
             _param("Multi-node associations", associations),
             _param("Active multi-node tracks", active_tracks),
+            _param("Dormant reacquisitions", reacquired),
         ],
     )
 

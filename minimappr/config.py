@@ -398,6 +398,60 @@ class TrackingConfig:
     association_max_gate_m: float = 32.0
     # Chi-squared gate on the Mahalanobis association score (3 DoF; 9.0 ≈ ~97%).
     association_chi2_gate: float = 9.0
+    # --- Per-category lifecycle (track continuity overhaul, Phase 1) ---
+    # Stale window (seconds) before a track of a given label category starts
+    # COASTING. ``0.0`` means "inherit ``track_stale_seconds``". Drop and reap
+    # thresholds stay derived from the per-category window via the existing
+    # multipliers. Detections are sparse by design (per-node trigger cooldown +
+    # reporting-policy dedupe), so a single global 20 s window fragmented every
+    # recurrent source into a new track id per re-detection.
+    track_stale_seconds_wildlife: float = 120.0
+    track_stale_seconds_vehicle: float = 60.0
+    track_stale_seconds_human: float = 60.0
+    track_stale_seconds_security: float = 20.0
+    # Per-category Kalman process noise ``q``. ``0.0`` means "inherit
+    # ``kalman_process_noise``".
+    kalman_process_noise_wildlife: float = 0.5
+    kalman_process_noise_vehicle: float = 4.0
+    kalman_process_noise_human: float = 1.0
+    kalman_process_noise_security: float = 2.0
+    # Coast guards: cap the dt used to grow Q, and bleed off the velocity
+    # estimate over long silences so a stale velocity can't fling the predicted
+    # mean out of the association gate.
+    kalman_max_coast_process_seconds: float = 10.0
+    kalman_coast_velocity_half_life_seconds: float = 10.0
+    # --- Class-aware association (Phase 2) ---
+    association_category_gate_enabled: bool = True
+    association_fingerprint_weight: float = 3.0
+    track_fingerprint_alpha: float = 0.3
+    track_fingerprint_top_k: int = 8
+    # --- Dormant reacquisition (Phase 3) ---
+    dormant_reacquire_enabled: bool = True
+    dormant_ttl_seconds: float = 1800.0
+    dormant_reacquire_radius_m: float = 20.0
+    dormant_fingerprint_min_similarity: float = 0.4
+    dormant_confidence_half_life_seconds: float = 300.0
+    dormant_max_records: int = 64
+
+    def stale_seconds_for(self, label_category: str) -> float:
+        """Stale window for *label_category*, falling back to the base window."""
+        override = {
+            "wildlife": self.track_stale_seconds_wildlife,
+            "vehicle": self.track_stale_seconds_vehicle,
+            "human": self.track_stale_seconds_human,
+            "security": self.track_stale_seconds_security,
+        }.get((label_category or "").strip().lower(), 0.0)
+        return float(override) if override > 0.0 else float(self.track_stale_seconds)
+
+    def process_noise_for(self, label_category: str) -> float:
+        """Kalman ``q`` for *label_category*, falling back to the base value."""
+        override = {
+            "wildlife": self.kalman_process_noise_wildlife,
+            "vehicle": self.kalman_process_noise_vehicle,
+            "human": self.kalman_process_noise_human,
+            "security": self.kalman_process_noise_security,
+        }.get((label_category or "").strip().lower(), 0.0)
+        return float(override) if override > 0.0 else float(self.kalman_process_noise)
 
 
 @dataclass(slots=True)
@@ -909,6 +963,28 @@ class Settings:
     tqi_weight_sensor: float = 0.2
     track_drop_multiplier: float = 3.0
     track_reap_multiplier: float = 5.0
+    # Per-category track lifecycle / process noise. 0.0 = inherit the base
+    # ``track_stale_seconds`` / ``kalman_process_noise`` above.
+    track_stale_seconds_wildlife: float = 120.0
+    track_stale_seconds_vehicle: float = 60.0
+    track_stale_seconds_human: float = 60.0
+    track_stale_seconds_security: float = 20.0
+    kalman_process_noise_wildlife: float = 0.5
+    kalman_process_noise_vehicle: float = 4.0
+    kalman_process_noise_human: float = 1.0
+    kalman_process_noise_security: float = 2.0
+    kalman_max_coast_process_seconds: float = 10.0
+    kalman_coast_velocity_half_life_seconds: float = 10.0
+    association_category_gate_enabled: bool = True
+    association_fingerprint_weight: float = 3.0
+    track_fingerprint_alpha: float = 0.3
+    track_fingerprint_top_k: int = 8
+    dormant_reacquire_enabled: bool = True
+    dormant_ttl_seconds: float = 1800.0
+    dormant_reacquire_radius_m: float = 20.0
+    dormant_fingerprint_min_similarity: float = 0.4
+    dormant_confidence_half_life_seconds: float = 300.0
+    dormant_max_records: int = 64
 
     fusion_worker_count: int = 2
     fusion_event_queue_size: int = 512
@@ -2415,6 +2491,26 @@ class Settings:
             tqi_weight_sensor=self.tqi_weight_sensor,
             track_drop_multiplier=self.track_drop_multiplier,
             track_reap_multiplier=self.track_reap_multiplier,
+            track_stale_seconds_wildlife=self.track_stale_seconds_wildlife,
+            track_stale_seconds_vehicle=self.track_stale_seconds_vehicle,
+            track_stale_seconds_human=self.track_stale_seconds_human,
+            track_stale_seconds_security=self.track_stale_seconds_security,
+            kalman_process_noise_wildlife=self.kalman_process_noise_wildlife,
+            kalman_process_noise_vehicle=self.kalman_process_noise_vehicle,
+            kalman_process_noise_human=self.kalman_process_noise_human,
+            kalman_process_noise_security=self.kalman_process_noise_security,
+            kalman_max_coast_process_seconds=self.kalman_max_coast_process_seconds,
+            kalman_coast_velocity_half_life_seconds=self.kalman_coast_velocity_half_life_seconds,
+            association_category_gate_enabled=self.association_category_gate_enabled,
+            association_fingerprint_weight=self.association_fingerprint_weight,
+            track_fingerprint_alpha=self.track_fingerprint_alpha,
+            track_fingerprint_top_k=self.track_fingerprint_top_k,
+            dormant_reacquire_enabled=self.dormant_reacquire_enabled,
+            dormant_ttl_seconds=self.dormant_ttl_seconds,
+            dormant_reacquire_radius_m=self.dormant_reacquire_radius_m,
+            dormant_fingerprint_min_similarity=self.dormant_fingerprint_min_similarity,
+            dormant_confidence_half_life_seconds=self.dormant_confidence_half_life_seconds,
+            dormant_max_records=self.dormant_max_records,
         )
 
     def ble_tracking_config(self) -> TrackingConfig:

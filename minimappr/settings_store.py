@@ -152,6 +152,31 @@ CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     "kalman_process_noise": float,
     "kalman_measurement_noise": float,
     "track_stale_seconds": float,
+    # Track-continuity overhaul: per-category lifecycle windows, per-category
+    # Kalman q, Kalman coast guards, class-aware association and dormant
+    # reacquisition. All live-tunable — the two semantic changes
+    # (association_category_gate_enabled, dormant_reacquire_enabled) double as
+    # kill switches since the new behaviour ships on by default.
+    "track_stale_seconds_wildlife": float,
+    "track_stale_seconds_vehicle": float,
+    "track_stale_seconds_human": float,
+    "track_stale_seconds_security": float,
+    "kalman_process_noise_wildlife": float,
+    "kalman_process_noise_vehicle": float,
+    "kalman_process_noise_human": float,
+    "kalman_process_noise_security": float,
+    "kalman_max_coast_process_seconds": float,
+    "kalman_coast_velocity_half_life_seconds": float,
+    "association_category_gate_enabled": bool,
+    "association_fingerprint_weight": float,
+    "track_fingerprint_alpha": float,
+    "track_fingerprint_top_k": int,
+    "dormant_reacquire_enabled": bool,
+    "dormant_ttl_seconds": float,
+    "dormant_reacquire_radius_m": float,
+    "dormant_fingerprint_min_similarity": float,
+    "dormant_confidence_half_life_seconds": float,
+    "dormant_max_records": int,
     # DOA/TDOA solve blend + cross-node bearing-fusion "greediness" knobs (see
     # core/cartesian_tdoa.py, core/multi_node_bearing_fusion.py).
     "localization_node_bearing_strength": float,
