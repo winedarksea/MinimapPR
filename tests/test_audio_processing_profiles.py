@@ -151,29 +151,27 @@ def test_fully_disabled_localization_band_builds_nothing() -> None:
     assert _localization_stages(min_hz=0.0, max_hz=0.0) == []
 
 
-def test_default_localization_band_high_passes_rumble_and_keeps_speech() -> None:
+def test_default_localization_band_rejects_rumble_and_aliasing_frequencies() -> None:
+    """The shipped default is a 50 Hz high-pass capped at the array's spatial
+    aliasing limit (c / 2d = 343 / 0.1 = 3430 Hz). Both edges matter: GCC-PHAT
+    whitens every bin, so passing bins above the aliasing limit amplifies noise
+    into the TDOA estimate."""
     sample_rate_hz = 16_000
-    config = Settings().localization_config()
-    preprocessor = create_localization_preprocessor(config)
+    settings = Settings()
+    assert settings.localization_band_min_hz == pytest.approx(50.0)
+    assert settings.localization_band_max_hz == pytest.approx(3430.0)
+
+    preprocessor = create_localization_preprocessor(settings.localization_config())
     assert preprocessor is not None
 
     t = np.linspace(0.0, 0.5, int(0.5 * sample_rate_hz), endpoint=False, dtype=np.float32)
     rumble = np.sin(2.0 * np.pi * 10.0 * t).astype(np.float32)
-    speech = np.sin(2.0 * np.pi * 1_000.0 * t).astype(np.float32)
-    # Above the old 3500 Hz ceiling: the shipped default has no ceiling, so this
-    # must survive.
-    high = np.sin(2.0 * np.pi * 6_000.0 * t).astype(np.float32)
+    in_band = np.sin(2.0 * np.pi * 1_000.0 * t).astype(np.float32)
+    aliasing = np.sin(2.0 * np.pi * 6_000.0 * t).astype(np.float32)
 
-    filtered_rumble = np.asarray(preprocessor.process(rumble, sample_rate_hz), dtype=np.float32)
-    filtered_speech = np.asarray(preprocessor.process(speech, sample_rate_hz), dtype=np.float32)
-    filtered_high = np.asarray(preprocessor.process(high, sample_rate_hz), dtype=np.float32)
+    def _rms(signal: np.ndarray) -> float:
+        return float(np.sqrt(np.mean(np.asarray(signal, dtype=np.float32) ** 2)))
 
-    assert float(np.sqrt(np.mean(filtered_rumble ** 2))) < 0.10 * float(
-        np.sqrt(np.mean(rumble ** 2))
-    )
-    assert float(np.sqrt(np.mean(filtered_speech ** 2))) > 0.70 * float(
-        np.sqrt(np.mean(speech ** 2))
-    )
-    assert float(np.sqrt(np.mean(filtered_high ** 2))) > 0.70 * float(
-        np.sqrt(np.mean(high ** 2))
-    )
+    assert _rms(preprocessor.process(rumble, sample_rate_hz)) < 0.10 * _rms(rumble)
+    assert _rms(preprocessor.process(in_band, sample_rate_hz)) > 0.70 * _rms(in_band)
+    assert _rms(preprocessor.process(aliasing, sample_rate_hz)) < 0.10 * _rms(aliasing)

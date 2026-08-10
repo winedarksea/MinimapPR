@@ -64,7 +64,7 @@ pub struct SrpPhatConfig {
 impl Default for SrpPhatConfig {
     fn default() -> Self {
         Self {
-            localization_band_hz: [50.0, 0.0],
+            localization_band_hz: [50.0, 3430.0],
             grid_resolution_m: 0.5,
             search_padding_m: 2.0,
             interp_factor: 4,
@@ -1647,6 +1647,12 @@ mod tests {
                 search_padding_m: 0.3,
                 far_field_default_range_m: 60.0,
                 far_field_max_range_m: 250.0,
+                // Pinned, like the geometry above: this fixture reproduces a
+                // Python capture taken at 300-3500 Hz.  It sits right on the
+                // near/far-field decision boundary and flips to the far-field
+                // candidate under small band changes, so it measures parity
+                // with that capture, not the quality of the shipped default.
+                localization_band_hz: [300.0, 3500.0],
                 ..SrpPhatConfig::default()
             },
         );
@@ -1655,6 +1661,7 @@ mod tests {
             search_padding_m: 0.3,
             far_field_default_range_m: 60.0,
             far_field_max_range_m: 250.0,
+            localization_band_hz: [300.0, 3500.0],
             ..SrpPhatConfig::default()
         };
         let pair_observations = build_pair_observations(

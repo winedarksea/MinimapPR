@@ -198,13 +198,13 @@ def build_ingest_sidecar_environment(
         "MINIMAPPR_TRIGGER_COOLDOWN_SECONDS": str(
             getattr(settings, "trigger_cooldown_seconds", 0.8)
         ),
-        # Fallbacks track the Settings defaults: a 50 Hz high-pass with no
-        # ceiling (0.0 == up to Nyquist), not the retired 300-3500 Hz profile.
+        # Fallbacks track the Settings defaults: a 50 Hz high-pass capped at the
+        # array's spatial aliasing limit, not the retired 300-3500 Hz profile.
         "MINIMAPPR_LOCALIZATION_BAND_MIN_HZ": str(
             getattr(settings, "localization_band_min_hz", 50.0)
         ),
         "MINIMAPPR_LOCALIZATION_BAND_MAX_HZ": str(
-            getattr(settings, "localization_band_max_hz", 0.0)
+            getattr(settings, "localization_band_max_hz", 3430.0)
         ),
         # Phase 2: propagate the localization range envelope so the sidecar's
         # far-field search matches the Python solver (default 1 km).

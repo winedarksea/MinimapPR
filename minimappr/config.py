@@ -731,11 +731,16 @@ class Settings:
     localization_max_tau_seconds: float = 0.02
     localization_algorithm: str = "gcc_phat"
     localization_strategy: str = "fixed"
-    # A min-only band is a pure high-pass: ``max_hz = 0`` means "up to Nyquist"
-    # in both the Python chain and the Rust sidecar. 50 Hz keeps wind rumble and
-    # DC drift out of the TDOA estimate without capping any real signal.
+    # 50 Hz keeps wind rumble and DC drift out of the TDOA estimate. The 3430 Hz
+    # ceiling is the array's spatial aliasing limit (c / 2d = 343 / 0.1 for the
+    # ~50 mm SIRITH spacing) and is not optional: GCC-PHAT whitens every bin, so
+    # passing bins that carry no signal amplifies pure noise to unit magnitude
+    # with random phase. Measured on the tetra fixtures, removing the ceiling
+    # takes a 1500 Hz source from bearing-dot > 0.85 to -0.83 (reversed).
+    # Setting ``max_hz = 0`` disables the ceiling -- the band then runs to
+    # Nyquist as a pure high-pass, in both the Python chain and the Rust sidecar.
     localization_band_min_hz: float = 50.0
-    localization_band_max_hz: float = 0.0
+    localization_band_max_hz: float = 3430.0
     localization_srp_grid_resolution_m: float = 0.5
     localization_search_padding_m: float = 2.0
     localization_far_field_default_range_m: float = 50.0
@@ -1924,7 +1929,7 @@ class Settings:
             localization_algorithm=_env_str("MINIMAPPR_LOCALIZATION_ALGORITHM", "gcc_phat"),
             localization_strategy=_env_str("MINIMAPPR_LOCALIZATION_STRATEGY", "geometry_aware"),
             localization_band_min_hz=_env_float("MINIMAPPR_LOCALIZATION_BAND_MIN_HZ", 50.0),
-            localization_band_max_hz=_env_float("MINIMAPPR_LOCALIZATION_BAND_MAX_HZ", 0.0),
+            localization_band_max_hz=_env_float("MINIMAPPR_LOCALIZATION_BAND_MAX_HZ", 3430.0),
             localization_srp_grid_resolution_m=_env_float("MINIMAPPR_LOCALIZATION_SRP_GRID_RESOLUTION_M", 0.5),
             localization_search_padding_m=_env_float("MINIMAPPR_LOCALIZATION_SEARCH_PADDING_M", 2.0),
             localization_far_field_default_range_m=_env_float(

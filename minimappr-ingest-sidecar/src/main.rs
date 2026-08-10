@@ -289,7 +289,7 @@ struct Args {
     #[arg(
         long,
         env = "MINIMAPPR_LOCALIZATION_BAND_MAX_HZ",
-        default_value_t = 0.0
+        default_value_t = 3430.0
     )]
     localization_band_max_hz: f32,
 
