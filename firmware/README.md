@@ -4,27 +4,39 @@ Embedded firmware projects and shared libraries for MinimapPR nodes.
 
 ## Layout
 
-Two runtime families live here. Which one a node uses follows from its MCU and build system:
+Three runtime families live here. Which one a node uses follows from its MCU and build system:
 
 | Library | Build system | Purpose |
 |---|---|---|
-| `lib/minimap_node_runtime` | CMake (Pico SDK) | node runtime for the RP2350 Sirith nodes — clock discipline, GPS/PPS capture, transport QoS, sensor interfaces |
+| `lib/minimap_node_runtime` | CMake (Pico SDK + ESP-IDF) | node runtime — protocol, runner, clock discipline, GPS/PPS capture, transport QoS, sensor interfaces. The portable subset builds for both platforms; the GPS/sensor half is RP2350-only |
 | `lib/minimap_node_core` | PlatformIO | original Arduino/ESP32 runtime — protocol builder, HTTP publisher, WiFi helpers |
 | `lib/minimap_audio_pico` | CMake + PlatformIO | RP2040/RP2350 PIO audio sources (TDM-4, PDM, mono I2S) and the PDM CIC/halfband decimator |
-| `lib/minimap_audio_esp32` | PlatformIO | ESP32 I2S audio source drivers |
-| `lib/minimap_transport_cyw43` | CMake | Pico W / Pico 2 W CYW43 WiFi uplink |
-| `lib/minimap_transport_espc5` | CMake | ESP32-C5 companion-radio uplink (for non-W Pico boards) |
+| `lib/minimap_audio_esp32` | PlatformIO | ESP32 I2S audio source drivers (Arduino `driver/i2s.h`, for `point_single_mic`) |
+| `lib/minimap_audio_esp32s3` | CMake (ESP-IDF) | ESP32-S3 I2S/TDM capture + internal loopback self-test |
+| `lib/minimap_transport_cyw43` | CMake (Pico SDK) | Pico W / Pico 2 W CYW43 WiFi uplink |
+| `lib/minimap_transport_espc5` | CMake (Pico SDK) | ESP32-C5 companion-radio uplink (for non-W Pico boards) |
+| `lib/minimap_transport_esp_wifi` | CMake (ESP-IDF) | ESP-IDF station WiFi, blocking-socket HTTP uplink, SNTP, node stats server |
+| `lib/minimap_ui_tft_st7789` | CMake (ESP-IDF) | 240x135 ST7789 status page |
 | `lib/cmake/mmpr_nodecfg.cmake` | CMake | forwards a node's `node_config.h` settings into the shared libraries |
 
 | Node target | Board | Audio | Uplink |
 |---|---|---|---|
 | `nodes/sirith_tetrahedral` | `pico2_w` (RP2350) | 4-mic TDM via ADAU7112, 32 kHz | CYW43 WiFi |
+| `nodes/sirith_tetra_s3` | Adafruit ESP32-S3 TFT Feather | 4-mic TDM via ADAU7112, 32 kHz (synthetic by default) | ESP32-S3 integrated WiFi |
 | `nodes/sirith_planar` | `pico2` (RP2350) | 5-mic PDM planar array, 48 kHz | ESP32-C5 companion |
 | `nodes/point_single_mic` | `esp32dev` | single I2S mic | ESP32 WiFi |
 
+`minimap_node_runtime` builds for both the Pico SDK and ESP-IDF: its `CMakeLists.txt` registers the
+platform-portable subset (`NodeProtocol`, `NodeRunner`, `NodeClock`, `Base64`, the synthetic/silence
+audio sources) as an IDF component when `ESP_PLATFORM` is set, and the pico-sdk `INTERFACE` library
+otherwise. The only platform-specific calls in that subset live behind
+[`mmpr/PlatformTime.h`](lib/minimap_node_runtime/include/mmpr/PlatformTime.h) — a monotonic clock,
+two delays, and a free-heap reading. Adding a third platform means adding a branch there, not forking
+the protocol or runner code.
+
 ## Shared Runtime (`minimap_node_runtime`)
 
-Used by every Pico-SDK node:
+Used by every Sirith node, on either platform:
 
 - node protocol payload builder (`POST /api/v1/ingest/frame`) and base64 PCM encoding
 - `NodeClock` frame timestamping, `GpsPpsTimerCapture` PPS discipline, and `ClockHoldoverModel`
@@ -76,6 +88,24 @@ cd firmware/nodes/sirith_tetrahedral
 
 Adjust the version directories to match what your `~/.pico-sdk/` actually contains — the extension
 pins them per install.
+
+## Sirith Tetra S3 (`nodes/sirith_tetra_s3`)
+
+The same tetrahedral node on an ESP32-S3 instead of a Pico 2 W: same node type (`sirith_tetra`), same
+4-sensor geometry, same MMB3 wire format, same 32 kHz / 4 ch / 512-sample audio parameters. It exists
+to answer one question — the live deployment measures ~45 % audio frame loss on the Pico node with
+firmware reporting `PUBLISH_QUEUE_OVERFLOW`, and the prime suspect is the CYW43439 gSPI uplink
+against a never-measured 1.5 Mbit/s goodput floor. Swapping the radio for an integrated WiFi MAC and
+re-running the same measurement is the cheapest way to test that.
+
+Because the audio parameters and the counters are identical, the existing tooling does the comparison
+unmodified — see [nodes/sirith_tetra_s3/README.md](nodes/sirith_tetra_s3/README.md) for build, flash,
+loopback and measurement procedure.
+
+Defaults to **synthetic** audio (`MMPR_NODECFG_AUDIO_INPUT_MODE=3`), so a bare Feather with nothing
+attached streams valid MMB3 at the real data rate; build with `-DMMPR_NODECFG_AUDIO_INPUT_MODE=0` for
+real TDM capture. The server needs no changes: there is no registration handshake, and the full
+`NodeDescriptor` rides in every batch.
 
 ## Sirith Planar (`nodes/sirith_planar`)
 
@@ -129,8 +159,10 @@ Nodes timestamp frames from `NodeClock`, disciplined in order of preference:
    supplies absolute time from the UART sentences. Reports `time_quality: gps_locked`.
 2. **Holdover** — when PPS drops out, `ClockHoldoverModel` extrapolates from the measured drift rate
    rather than falling straight back to free-running.
-3. **NTP sync at startup** (ESP32 targets), then monotonic frame stepping. Reports `ntp_sync` or
-   `free_running`.
+3. **NTP/SNTP** (ESP32 targets) — `EspSntpClient` latches each sync and the runner feeds it to
+   `NodeClock::applyNtpObservation`, so frames report `ntp_disciplined` rather than `free_running`
+   (which the server down-weights in fusion). Without any of the above, frames are anchored to the
+   build timestamp and report `free_running`.
 
 Time quality is sent per frame and used by the server to weight fusion.
 
@@ -144,6 +176,18 @@ Time quality is sent per frame and used by the server to weight fusion.
    `lib/cmake/mmpr_nodecfg.cmake` to forward your `node_config.h` settings.
 3. Implement an `IAudioSource` for the hardware in `lib/minimap_audio_pico` or a new hardware lib.
 4. Reuse `NodeRunner`, `NodeClock`, and the `IUplinkTransport` implementations.
+
+**ESP-IDF (CMake) family** — copy `nodes/sirith_tetra_s3` as the template:
+
+1. Create `nodes/<new_node>/` with `CMakeLists.txt`, `sdkconfig.defaults`, `include/node_config.h`,
+   and `main/{CMakeLists.txt,<new_node>.cpp}`.
+2. List the shared libraries in `EXTRA_COMPONENT_DIRS`. A directory named there that contains its own
+   `CMakeLists.txt` registers as one component named after the directory, so only the libraries you
+   name are ever scanned — that is what keeps the pico-only libraries out of an IDF build.
+3. `CONFIG_COMPILER_CXX_EXCEPTIONS=y` is mandatory, not a preference: `NodeRunner` catches
+   `std::bad_alloc` around its publish-batch vector growth. `CONFIG_FREERTOS_HZ=1000` matters too —
+   at the IDF default of 100 Hz the runner's 1 ms idle nap becomes a 10 ms stall.
+4. Implement an `IAudioSource` for the hardware and an `IUplinkTransport` if the uplink is new.
 
 **PlatformIO family** — copy `nodes/point_single_mic`:
 

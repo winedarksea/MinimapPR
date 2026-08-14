@@ -7,7 +7,7 @@
 #include <vector>
 
 #include "mmpr/AudioTransportQos.h"
-#include "pico/time.h"
+#include "mmpr/PlatformTime.h"
 
 namespace mmpr {
 namespace {
@@ -81,7 +81,7 @@ bool NodeRunner::begin(bool syncNtp, const char* ntpServer, long gmtOffsetSecond
       ntpServer,
       gmtOffsetSeconds,
       daylightOffsetSeconds);
-  stats_.bootId = static_cast<uint32_t>(time_us_64() ^ (reinterpret_cast<uintptr_t>(this) >> 2));
+  stats_.bootId = static_cast<uint32_t>(nowMonotonicUs() ^ (reinterpret_cast<uintptr_t>(this) >> 2));
 
   if (environmentalSource_ != nullptr) {
     environmentalSourceReady_ = environmentalSource_->begin();
@@ -425,13 +425,19 @@ void NodeRunner::refreshSlowTelemetry(uint32_t nowMs) {
   // Holdover maintenance runs at this slow cadence (never per loop iteration).
   // maintain() fast-exits on a couple of integer compares while PPS is fresh.
   if (enableClockHoldoverMaintenance_) {
-    const uint64_t startedUs = time_us_64();
-    clock_.maintain(time_us_64());
-    stats_.lastHoldoverMaintenanceDurationUs = static_cast<uint32_t>(time_us_64() - startedUs);
+    const uint64_t startedUs = nowMonotonicUs();
+    clock_.maintain(nowMonotonicUs());
+    stats_.lastHoldoverMaintenanceDurationUs = static_cast<uint32_t>(nowMonotonicUs() - startedUs);
   }
-  // cyw43_wifi_get_rssi() is a blocking SPI ioctl that can stall long enough
-  // to overrun the DMA capture ring. Keep Wi-Fi RSSI at its last known value
-  // until a non-audio telemetry path can sample it safely.
+  // Transport-health telemetry, sampled here and nowhere else. Both are cheap
+  // on transports that implement them and free on those that do not:
+  // IUplinkTransport::linkRssiDbm() defaults to 0, and HttpFramePublisher
+  // deliberately does not override it -- cyw43_wifi_get_rssi() is a blocking SPI
+  // ioctl that can stall long enough to overrun the DMA capture ring, so the
+  // CYW43 node still reports 0 rather than risking the audio path. The ESP
+  // transport reads a cached association record and answers immediately.
+  stats_.wifiRssiDbm = publisher_.linkRssiDbm();
+  stats_.heapFreeBytes = freeHeapBytes();
 }
 
 void NodeRunner::onPublishSuccess() {
@@ -520,7 +526,7 @@ void NodeRunner::pumpPublisher() {
     if (result.ok) {
       onPublishSuccess();
     } else {
-      onPublishFailure(result, to_ms_since_boot(get_absolute_time()));
+      onPublishFailure(result, nowMonotonicMs());
     }
   }
   startNextPublishIfPossible();
@@ -530,7 +536,7 @@ void NodeRunner::startNextPublishIfPossible() {
   if (publisher_.publishInProgress()) {
     return;
   }
-  const uint32_t nowMs = to_ms_since_boot(get_absolute_time());
+  const uint32_t nowMs = nowMonotonicMs();
   if (nextPublishAttemptMs_ > 0 && !deadlineReached(nowMs, nextPublishAttemptMs_)) {
     stats_.lastPublishStatus = kPublishSkippedForBackoffStatus;
     stats_.queueDepth = effectiveQueueDepth();
@@ -541,7 +547,7 @@ void NodeRunner::startNextPublishIfPossible() {
     stats_.queueDepth = effectiveQueueDepth();
     return;
   }
-  const uint64_t publishMonotonicUs = time_us_64();
+  const uint64_t publishMonotonicUs = nowMonotonicUs();
   try {
     publishFrameScratch_.clear();
     publishEnvironmentScratch_.clear();
@@ -703,14 +709,14 @@ void NodeRunner::drainAvailableAudioFrames() {
       if (environmental.hasTemperatureC) {
         // Feed the shadow temperature model (3 field stores, no math).
         clock_.observeTemperature(
-            static_cast<double>(environmental.temperatureC), time_us_64());
+            static_cast<double>(environmental.temperatureC), nowMonotonicUs());
       }
     }
     processCapturedFrame(captureTimestamp, environmentalPtr);
   }
 
   if (!drainedAnyFrame) {
-    sleep_ms(1);
+    sleepMs(1);
   }
 }
 
@@ -719,13 +725,13 @@ void NodeRunner::loopOnce() {
     return;
   }
 
-  const uint32_t nowMs = to_ms_since_boot(get_absolute_time());
-  const uint64_t drainStartedUs = time_us_64();
+  const uint32_t nowMs = nowMonotonicMs();
+  const uint64_t drainStartedUs = nowMonotonicUs();
   drainAvailableAudioFrames();
-  stats_.lastAudioDrainDurationUs = static_cast<uint32_t>(time_us_64() - drainStartedUs);
-  const uint64_t publisherStartedUs = time_us_64();
+  stats_.lastAudioDrainDurationUs = static_cast<uint32_t>(nowMonotonicUs() - drainStartedUs);
+  const uint64_t publisherStartedUs = nowMonotonicUs();
   pumpPublisher();
-  stats_.lastPublisherPumpDurationUs = static_cast<uint32_t>(time_us_64() - publisherStartedUs);
+  stats_.lastPublisherPumpDurationUs = static_cast<uint32_t>(nowMonotonicUs() - publisherStartedUs);
   refreshSlowTelemetry(nowMs);
 
   if (logEveryFrames_ > 0 &&

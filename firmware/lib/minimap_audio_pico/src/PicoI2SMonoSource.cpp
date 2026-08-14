@@ -29,6 +29,8 @@
 
 #include "mmpr_audio_rx.pio.h"
 
+#include "mmpr/PcmSlotDecode.h"
+
 namespace mmpr {
 namespace {
 
@@ -54,35 +56,8 @@ void applyDataPinBias(uint8_t pin, PicoSerialDataPinBias dataPinBias) {
   }
 }
 
-uint32_t applyCaptureBitOffset(uint32_t rawWord, int8_t captureBitOffset) {
-  if (captureBitOffset > 0) {
-    return rawWord << static_cast<uint8_t>(captureBitOffset);
-  }
-  if (captureBitOffset < 0) {
-    return rawWord >> static_cast<uint8_t>(-captureBitOffset);
-  }
-  return rawWord;
-}
-
-int16_t decodeLeftJustifiedSlotToPcm16(uint32_t rawWord, uint8_t slotBits, uint8_t validBits, int8_t captureBitOffset) {
-  rawWord = applyCaptureBitOffset(rawWord, captureBitOffset);
-  const uint8_t paddingBits = static_cast<uint8_t>(slotBits - validBits);
-  // ICS-43434 drives 24 valid I2S bits then releases SD for the remaining pad
-  // clocks in the 32-bit slot. Force the pad region low so decode does not
-  // depend on board-level pull state or line float during the tri-stated tail.
-  const uint32_t maskedWord =
-      paddingBits == 0 ? rawWord : (rawWord & (~((1u << paddingBits) - 1u)));
-  int32_t signedPayload = static_cast<int32_t>(maskedWord) >> paddingBits;
-
-  const int shiftToPcm16 = static_cast<int>(validBits) - 16;
-  int32_t pcm16 = shiftToPcm16 > 0 ? (signedPayload >> shiftToPcm16) : (signedPayload << (-shiftToPcm16));
-  if (pcm16 > 32767) {
-    pcm16 = 32767;
-  } else if (pcm16 < -32768) {
-    pcm16 = -32768;
-  }
-  return static_cast<int16_t>(pcm16);
-}
+// applyCaptureBitOffset / decodeLeftJustifiedSlotToPcm16 now live in
+// mmpr/PcmSlotDecode.h so the ESP32-S3 I2S capture path decodes identically.
 
 void logI2sWordDiagnostics(const uint32_t* frameWords, const PicoI2SMonoConfig& config) {
   static uint32_t sDiagFrameCount = 0;

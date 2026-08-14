@@ -4,7 +4,7 @@
 #include <cmath>
 #include <cstdio>
 
-#include "pico/time.h"
+#include "mmpr/PlatformTime.h"
 
 #include "mmpr/BuildTimestamp.h"
 
@@ -82,7 +82,7 @@ void NodeClock::begin(
 
   sampleRateHz_ = sampleRateHz;
   captureBlockSamples_ = captureBlockSamples;
-  bootMonotonicUs_ = time_us_64();
+  bootMonotonicUs_ = nowMonotonicUs();
   nominalSamplePeriodNs_ = kNsPerSecond / static_cast<double>(sampleRateHz_);
   nominalSamplePeriodUs_ = kUsPerSecond / static_cast<double>(sampleRateHz_);
   effectiveSamplePeriodNs_ = nominalSamplePeriodNs_;
@@ -169,7 +169,7 @@ uint64_t NodeClock::sampleIndexAtUtcNs(uint64_t utcNs) const {
 }
 
 uint64_t NodeClock::nowUtcNs() const {
-  return utcAtMonotonicUs(time_us_64());
+  return utcAtMonotonicUs(nowMonotonicUs());
 }
 
 uint64_t NodeClock::utcAtMonotonicUs(uint64_t monotonicUs) const {
@@ -183,7 +183,7 @@ uint64_t NodeClock::utcAtMonotonicUs(uint64_t monotonicUs) const {
 }
 
 TimeQuality NodeClock::timeQuality() const {
-  const uint64_t nowUs = time_us_64();
+  const uint64_t nowUs = nowMonotonicUs();
   if (gpsDisciplineAvailable(nowUs)) {
     const uint64_t gpsAgeUs = nowUs - lastGpsSyncMonotonicUs_;
     if (gpsAgeUs <= kGpsFreshUs) {
@@ -622,7 +622,7 @@ void NodeClock::setWallReference(uint64_t utcNs, uint64_t monotonicUs, const cha
   wallReferenceUtcNs_ = utcNs;
   wallReferenceMonotonicUs_ = monotonicUs;
   if (source != nullptr) {
-    const uint64_t nowUs = time_us_64();
+    const uint64_t nowUs = nowMonotonicUs();
     std::printf(
         "[node] wall reference source=%s utc=%llu mono=%llu now_us=%llu scale=%.9f now_utc=%llu\n",
         source,
@@ -658,7 +658,7 @@ bool NodeClock::gpsDisciplineAvailable(uint64_t monotonicUs) const {
 }
 
 bool NodeClock::currentPacketTimingDiagnostics(PacketTimingDiagnostics& outDiagnostics) const {
-  const uint64_t nowUs = time_us_64();
+  const uint64_t nowUs = nowMonotonicUs();
   outDiagnostics.hasGpsAnchor = gpsDisciplineAvailable(nowUs);
   outDiagnostics.ppsEdgeCount = latestPpsEdgeCount_;
   outDiagnostics.dmaRingSlotIndex = lastObservedDmaRingSlotIndex_;

@@ -1,0 +1,51 @@
+# sirith_tetra_s3 — ESP-IDF project defaults.
+#
+# Regenerate sdkconfig after editing:  rm -f sdkconfig && idf.py set-target esp32s3
+
+CONFIG_IDF_TARGET="esp32s3"
+
+# --- MANDATORY, not a preference ---
+# NodeRunner::startNextPublishIfPossible wraps its std::vector growth in
+# `try { ... } catch (const std::bad_alloc&)`. ESP-IDF disables C++ exceptions by
+# default, which would turn that into a link/abort failure. The shared runtime is
+# not forked for this platform, so the platform accommodates the runtime.
+CONFIG_COMPILER_CXX_EXCEPTIONS=y
+
+# 1 kHz tick. The IDF default is 100 Hz, at which mmpr::sleepMs(1) -- the
+# runner's idle nap when no audio is ready -- rounds up to a 10 ms stall and the
+# publish loop loses most of its responsiveness. See PlatformTime.h.
+CONFIG_FREERTOS_HZ=1000
+
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# 2 MB QSPI PSRAM is present on this board; enabled so the general heap can use
+# it. Audio buffers are explicitly allocated MALLOC_CAP_INTERNAL and stay in
+# SRAM -- the capture and publish hot paths must not sit behind a QSPI bus.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_QUAD=y
+CONFIG_SPIRAM_SPEED_80M=y
+
+# Native USB-CDC; the Feather has no USB-serial bridge chip.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# --- Uplink headroom: the whole point of this node ---
+# Large TCP send buffer and window so a ~28 KB publish batch fits in flight
+# without stalling on ACKs, plus enough Wi-Fi TX buffers and TX aggregation to
+# keep the radio busy.
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=65534
+CONFIG_LWIP_TCP_WND_DEFAULT=65534
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=32
+CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=16
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=64
+CONFIG_ESP_WIFI_AMPDU_TX_ENABLED=y
+CONFIG_ESP_WIFI_TX_BA_WIN=32
+
+# Room for the four long-lived tasks plus lwIP; the default 4 KB main stack is
+# not enough for the boot-time wiring in app_main.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# The Feather ESP32-S3 TFT carries 4 MB flash. Without this the build targets the
+# 2 MB default and the 1 MB factory partition is ~88 % full before any of the
+# deferred work (GPS, sensors, higher sample rates) lands.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y

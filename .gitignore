@@ -204,6 +204,13 @@ tests/data/calibration/*.zip
 .piolibdeps/
 firmware/nodes/sirith_tetrahedral/build-test/
 
+# ESP-IDF generated project config. sdkconfig.defaults is the checked-in source
+# of truth; sdkconfig is regenerated from it by `idf.py set-target`/`build`.
+firmware/nodes/*/sdkconfig
+firmware/nodes/*/sdkconfig.old
+firmware/nodes/*/dependencies.lock
+firmware/nodes/*/managed_components/
+
 drone_dataset/*
 
 # Drone-head training artifacts — commit int8 drone_head.onnx + metadata only.

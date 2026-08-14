@@ -6,6 +6,36 @@
 # no node_config.h — configuration flows in via structs supplied by each node
 # main. Sources are compiled into the consuming executable target.
 
+# --- ESP-IDF (ESP32-S3 / future C5) ---------------------------------------
+# When this directory is named in an IDF project's EXTRA_COMPONENT_DIRS it is
+# registered as a single component (tools/cmake/project.cmake), so the ESP build
+# takes this branch and never sees the pico-sdk INTERFACE library below.
+#
+# Only the platform-portable subset is registered: the MMB3 serializer, the
+# capture->publish runner, the clock/holdover model, and the synthetic/silence
+# audio sources. Everything excluded here is RP2040/RP2350 hardware (PIO, DMA,
+# hardware_i2c/uart/pwm/watchdog): GpsPpsTimerCapture, NmeaGpsSource,
+# FailureSnapshot, Lis2mdlMagnetometer, Lsm6TemperatureSensor,
+# Sht4xEnvironmentalSource, MagAutoOrientation, PiezoBuzzer,
+# FallbackEnvironmentalSource, TemperatureEnvironmentalSource.
+#
+# NodeClock.h includes GpsPpsTimerCapture.h, but that header is pure structs
+# (<cstdint> + IAudioSource.h) and NodeClock.cpp only takes GpsPpsCaptureEvent by
+# const reference, so the GPS/PPS clock-discipline entry points link fine without
+# the RP2350 capture implementation behind them.
+if(ESP_PLATFORM)
+    idf_component_register(
+        SRCS ${CMAKE_CURRENT_LIST_DIR}/src/Base64.cpp
+             ${CMAKE_CURRENT_LIST_DIR}/src/NodeProtocol.cpp
+             ${CMAKE_CURRENT_LIST_DIR}/src/NodeRunner.cpp
+             ${CMAKE_CURRENT_LIST_DIR}/src/NodeClock.cpp
+             ${CMAKE_CURRENT_LIST_DIR}/src/SilenceAudioSource.cpp
+             ${CMAKE_CURRENT_LIST_DIR}/src/SyntheticAudioSource.cpp
+        INCLUDE_DIRS ${CMAKE_CURRENT_LIST_DIR}/include
+        REQUIRES esp_timer)
+    return()
+endif()
+
 add_library(minimap_node_runtime INTERFACE)
 
 target_sources(minimap_node_runtime INTERFACE

@@ -2,7 +2,7 @@
 
 #include <cstdio>
 
-#include "pico/time.h"
+#include "mmpr/PlatformTime.h"
 
 namespace mmpr {
 
@@ -17,7 +17,7 @@ bool SyntheticAudioSource::begin() {
 
   frameDurationUs_ =
       static_cast<uint64_t>((static_cast<double>(frameSamples_) * 1000000.0) / static_cast<double>(sampleRateHz_));
-  nextFrameAtUs_ = time_us_64();
+  nextFrameAtUs_ = nowMonotonicUs();
   nextSampleIndex_ = 0;
   std::printf(
       "[node] synthetic audio source enabled channels=%u sample_rate=%lu frame_samples=%u\n",
@@ -35,9 +35,9 @@ bool SyntheticAudioSource::readFrame(
     return false;
   }
 
-  const int64_t nowUs = static_cast<int64_t>(time_us_64());
+  const int64_t nowUs = static_cast<int64_t>(nowMonotonicUs());
   if (nextFrameAtUs_ > nowUs) {
-    sleep_us(static_cast<uint64_t>(nextFrameAtUs_ - nowUs));
+    sleepUs(static_cast<uint64_t>(nextFrameAtUs_ - nowUs));
   } else if ((nowUs - nextFrameAtUs_) > static_cast<int64_t>(frameDurationUs_ * 4u)) {
     nextFrameAtUs_ = nowUs;
   }
@@ -67,7 +67,7 @@ bool SyntheticAudioSource::readFrame(
 }
 
 uint32_t SyntheticAudioSource::availableFrames() const {
-  const int64_t nowUs = static_cast<int64_t>(time_us_64());
+  const int64_t nowUs = static_cast<int64_t>(nowMonotonicUs());
   return nowUs >= nextFrameAtUs_ ? 1u : 0u;
 }
 
