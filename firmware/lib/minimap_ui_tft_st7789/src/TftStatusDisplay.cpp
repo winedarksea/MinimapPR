@@ -24,9 +24,9 @@ constexpr const char* kTag = "mmpr-tft";
 
 constexpr int kGlyphHeight = 8;
 constexpr int kGlyphWidth = 8;
-constexpr int kRowPitch = 13;
-constexpr int kTopMargin = 2;
-constexpr int kStatusRows = 10;
+constexpr int kRowPitch = 16;
+constexpr int kTopMargin = 4;
+constexpr int kStatusRows = 8;
 constexpr size_t kMaxColumns = 30;  // 240 px / 8 px per glyph
 
 // The panel is configured for MSB-first RGB565 (LCD_RGB_DATA_ENDIAN_BIG) while
@@ -240,7 +240,13 @@ void TftStatusDisplay::renderFrame() {
                 static_cast<unsigned>(uptimeSeconds % 60u));
   drawTextRow(0, line);
 
-  std::snprintf(line, sizeof(line), "wifi %-9s %4d dBm", model_.ssid, static_cast<int>(stats.wifiRssiDbm));
+  // Free heap rides along with the radio line. Both answer "is the node
+  // healthy", and folding it here is what pays for dropping the audio-format
+  // row, whose values never change after boot.
+  std::snprintf(line, sizeof(line), "wifi %-8s %4ddB %luk",
+                model_.ssid,
+                static_cast<int>(stats.wifiRssiDbm),
+                static_cast<unsigned long>(stats.heapFreeBytes / 1024u));
   drawTextRow(1, line);
 
   std::snprintf(line, sizeof(line), "ip   %s", model_.ipAddress);
@@ -251,18 +257,13 @@ void TftStatusDisplay::renderFrame() {
   // page that prints "f" instead of a drift figure is worse than useless.
   const int32_t ppmTenths = static_cast<int32_t>(model_.estimatedPpm * 10.0);
   const int32_t ppmAbsTenths = ppmTenths < 0 ? -ppmTenths : ppmTenths;
-  std::snprintf(line, sizeof(line), "clk  %-9s %c%ld.%luppm",
+  std::snprintf(line, sizeof(line), "clk %-6s %c%ld.%luppm n%u",
                 model_.clockQuality,
                 ppmTenths < 0 ? '-' : '+',
                 static_cast<long>(ppmAbsTenths / 10),
-                static_cast<unsigned long>(ppmAbsTenths % 10));
+                static_cast<unsigned long>(ppmAbsTenths % 10),
+                static_cast<unsigned>(model_.ntpSyncCount));
   drawTextRow(3, line);
-
-  std::snprintf(line, sizeof(line), "aud %5uHz/%uch %-9s",
-                static_cast<unsigned>(model_.sampleRateHz),
-                static_cast<unsigned>(model_.channels),
-                model_.audioMode);
-  drawTextRow(4, line);
 
   std::snprintf(line, sizeof(line), "ring %2u/%-2u  q %2u/%-2u  hw%2u",
                 static_cast<unsigned>(model_.ringFramesAvailable),
@@ -270,13 +271,13 @@ void TftStatusDisplay::renderFrame() {
                 static_cast<unsigned>(stats.queueDepth),
                 static_cast<unsigned>(stats.queueSlotsCapacity),
                 static_cast<unsigned>(stats.ringFramesHighWater));
-  drawTextRow(5, line);
+  drawTextRow(4, line);
 
   std::snprintf(line, sizeof(line), "pub %5u lat%4u ewma%4u",
                 static_cast<unsigned>(stats.framesPublished % 100000u),
                 static_cast<unsigned>(stats.publishLatencyLastMs),
                 static_cast<unsigned>(stats.publishLatencyEwmaMs));
-  drawTextRow(6, line);
+  drawTextRow(5, line);
 
   // The counters the whole exercise is about. A '!' anywhere on the line turns
   // it red (see drawTextRow), so "no loss" is a colour, not a reading exercise.
@@ -287,22 +288,16 @@ void TftStatusDisplay::renderFrame() {
                 static_cast<unsigned long long>(stats.framesDropped),
                 static_cast<unsigned long long>(stats.queueOverflows),
                 static_cast<unsigned long long>(stats.packetContinuityViolations));
-  drawTextRow(7, line);
+  drawTextRow(6, line);
 
   std::snprintf(line, sizeof(line), "%shttp %4d fail %u/%u",
                 stats.consecutivePublishFailures > 0 ? "!" : " ",
                 stats.lastPublishStatus,
                 static_cast<unsigned>(stats.consecutivePublishFailures),
                 static_cast<unsigned>(stats.publishErrors % 1000u));
-  drawTextRow(8, line);
+  drawTextRow(7, line);
 
-  std::snprintf(line, sizeof(line), "cap%llu heap%luk ntp%u",
-                static_cast<unsigned long long>(stats.framesCaptured),
-                static_cast<unsigned long>(stats.heapFreeBytes / 1024u),
-                static_cast<unsigned>(model_.ntpSyncCount));
-  drawTextRow(9, line);
-
-  static_assert(kStatusRows == 10, "renderFrame draws exactly kStatusRows lines");
+  static_assert(kStatusRows == 8, "renderFrame draws exactly kStatusRows lines");
 }
 
 }  // namespace mmpr
