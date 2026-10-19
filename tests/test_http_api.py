@@ -2757,3 +2757,7 @@ def test_list_detections_serialises_infinite_gdop(monkeypatch, tmp_path: Path) -
         # null is the honest encoding: there is no finite GDOP for an omni
         # detection, and it survives a strict JSON parse.
         assert entry["gdop"] is None
+        restored = DetectionEvent.model_validate(entry)
+        assert restored.gdop == float("inf")
+        assert restored.reporting_modality == "omni"
+        assert "spl_db" not in entry

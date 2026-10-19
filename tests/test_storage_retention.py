@@ -839,26 +839,39 @@ async def test_spl_db_column_migrates_to_received_level_db(tmp_path: Path) -> No
     await storage.close()
 
 
-def test_detection_exposes_legacy_spl_db_alias() -> None:
-    """Readers pinned to the old key keep working after the rename."""
+@pytest.mark.asyncio
+async def test_detection_with_unavailable_gdop_survives_read_validate_update(temp_storage) -> None:
     detection = DetectionEvent(
-        id="det-alias",
+        id="det-roundtrip",
         timestamp_ns=1,
+        reporting_modality="omni",
         position_m=(0.0, 0.0, 0.0),
         confidence=0.7,
-        gdop=1.8,
+        gdop=float("inf"),
         label="blue jay",
         label_category="wildlife",
         label_confidence=0.8,
         reference_sensor="node-1:ch0",
         received_level_db=-43.4,
     )
-    assert detection.received_level_db == pytest.approx(-43.4)
-    assert detection.spl_db == pytest.approx(-43.4)
+    await temp_storage.insert_detection(detection, snippet_path=None, snippet_expires_ns=None)
 
-    dumped = detection.model_dump(mode="json")
-    assert dumped["received_level_db"] == pytest.approx(-43.4)
-    assert dumped["spl_db"] == pytest.approx(-43.4)
+    stored = await temp_storage.get_detection_by_event_id(detection.id)
+    assert stored is not None
+    assert stored["gdop"] is None
+    restored = DetectionEvent.model_validate(stored)
+    assert restored.gdop == float("inf")
+    assert restored.received_level_db == pytest.approx(-43.4)
+    restored.feature_summary["roundtrip_updated"] = True
+
+    assert await temp_storage.update_detection(restored, snippet_path=None, snippet_expires_ns=None)
+    updated = await temp_storage.get_detection_by_event_id(detection.id)
+    assert updated is not None
+    assert updated["gdop"] is None
+    assert updated["received_level_db"] == pytest.approx(-43.4)
+    assert updated["feature_summary"]["roundtrip_updated"] is True
+    assert "spl_db" not in updated
+    assert DetectionEvent.model_validate(updated).gdop == float("inf")
 
 
 def _track(track_id: str, *, status: str, last_seen_ns: int) -> TrackState:

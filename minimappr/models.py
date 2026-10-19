@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from enum import Enum
+from math import isfinite
 from typing import Any, Literal, TypeAlias
 
-from pydantic import BaseModel, Field, model_serializer, model_validator
+from pydantic import AliasChoices, BaseModel, Field, field_serializer, field_validator, model_validator
 
 
 Vec3 = tuple[float, float, float]
@@ -577,8 +578,10 @@ class DetectionEvent(BaseModel):
     # offset, i.e. a level relative to digital full scale, so values are normally
     # negative (field data: -40 to -59). It was called ``spl_db`` for a long time,
     # which silently invited rules written against real SPL thresholds — those can
-    # never match. ``spl_db`` remains readable as a deprecated alias.
-    received_level_db: float | None = None
+    # never match. Accept ``spl_db`` only on input when the canonical key is absent.
+    received_level_db: float | None = Field(
+        default=None, validation_alias=AliasChoices("received_level_db", "spl_db")
+    )
     track_id: str | None = None
     source_sensors: list[str] = Field(default_factory=list)
     source_observation_ids: list[str] = Field(default_factory=list)
@@ -599,6 +602,18 @@ class DetectionEvent(BaseModel):
     snippet_path: str | None = None
     contributors: list[ContributorSummary] = Field(default_factory=list)
 
+    @field_validator("gdop", mode="before")
+    @classmethod
+    def _restore_unavailable_gdop(cls, value: Any) -> Any:
+        # JSON encodes unavailable GDOP (infinity) as null; restore the numeric
+        # sentinel used by localization consumers and the NOT NULL storage column.
+        return float("inf") if value is None else value
+
+    @field_serializer("gdop", when_used="json")
+    def _serialize_unavailable_gdop(self, value: float) -> float | None:
+        # JSON-mode dictionaries must also be safe for strict JSON encoders.
+        return value if isfinite(value) else None
+
     @model_validator(mode="after")
     def _defaults(self) -> "DetectionEvent":
         if self.event_id is None:
@@ -618,23 +633,6 @@ class DetectionEvent(BaseModel):
                 feature_summary=self.feature_summary,
             )
         return self
-
-    @property
-    def spl_db(self) -> float | None:
-        """Deprecated alias for :attr:`received_level_db`.
-
-        The value was never sound pressure level; see the field comment. Retained
-        so existing readers keep working across the rename.
-        """
-        return self.received_level_db
-
-    @model_serializer(mode="wrap")
-    def _serialize_with_legacy_alias(self, handler):  # type: ignore[no-untyped-def]
-        data = handler(self)
-        # Emit both names so API consumers pinned to the old key keep working.
-        if isinstance(data, dict) and "received_level_db" in data:
-            data["spl_db"] = data["received_level_db"]
-        return data
 
 
 class DetectionReviewUpdateRequest(BaseModel):
