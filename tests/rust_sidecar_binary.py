@@ -38,10 +38,16 @@ def build_rust_sidecar_binary() -> Path:
             SIDECAR_BINARY_NAME,
         ],
         cwd=str(REPOSITORY_ROOT),
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
     )
+    # stdout is captured for the JSON messages, so surface compiler errors here
+    # instead of an opaque CalledProcessError.
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"cargo build of {SIDECAR_BINARY_NAME!r} failed (exit {completed.returncode}); stderr:\n{completed.stderr}"
+        )
     for line in completed.stdout.splitlines():
         try:
             message = json.loads(line)

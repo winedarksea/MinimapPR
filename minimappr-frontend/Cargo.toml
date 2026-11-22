@@ -3,6 +3,12 @@ name = "minimappr-frontend"
 version = "0.1.0"
 edition = "2021"
 
+# Own workspace root. The repo-root workspace `exclude`s this crate, but Cargo
+# keeps walking up past an exclude, so a checkout nested under another
+# MinimapPR checkout (e.g. .claude/worktrees/*) would otherwise be claimed by
+# the outer workspace and fail to build.
+[workspace]
+
 [[bin]]
 name = "minimappr-frontend"
 path = "src/main.rs"
