@@ -220,6 +220,9 @@ async def test_synthetic_bundle_full_replay_loop(tmp_path: Path) -> None:
     assert report.event_recall == 1.0
     assert report.label_accuracy == 1.0
     assert report.median_position_error_m is not None
+    # Entity view of the same loop: one bird, one entity, localized and classified.
+    assert report.entity_metrics.localized_and_classified_recall == 1.0
+    assert report.entity_metrics.duplicate_entities == 0
     assert report.passed, "\n".join(report.errors)
 
 
