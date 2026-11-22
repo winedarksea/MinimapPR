@@ -7,7 +7,13 @@ import itertools
 import numpy as np
 import pytest
 
-from minimappr.core.range_projection import range_mode_is_unobservable
+from minimappr.core.range_projection import (
+    BEARING_PROJECTED_CONFIDENCE_CAP,
+    RANGE_BEARING_PROJECTED,
+    UNOBSERVABLE_CONFIDENCE_CAP,
+    normalize_range_mode,
+    range_mode_is_unobservable,
+)
 from minimappr.core.rust_tdoa_solve import solve_localization_from_rust_tdoas
 
 
@@ -127,9 +133,20 @@ def test_bridge_applies_confidence_cap_when_range_unobservable() -> None:
     )
 
     assert result is not None
-    if range_mode_is_unobservable(result.range_projection_mode):
-        assert result.confidence <= 0.20
-        assert result.range_observability is None or result.range_observability <= 0.05
+    # A 400 m source seen by a 5 cm array has no observable range. Before the
+    # far-field model-selection fix this collapsed to a 6 cm "range_refined" fix
+    # (observability 1.0) and the cap assertions below never ran.
+    assert range_mode_is_unobservable(result.range_projection_mode)
+    mode = normalize_range_mode(result.range_projection_mode)
+    confidence_cap = (
+        BEARING_PROJECTED_CONFIDENCE_CAP
+        if mode == RANGE_BEARING_PROJECTED
+        else UNOBSERVABLE_CONFIDENCE_CAP
+    )
+    assert result.confidence <= confidence_cap
+    assert result.range_observability is None or result.range_observability <= 0.05
+    recovered_bearing = _bearing(centroid, np.asarray(result.position_m))
+    assert float(np.dot(recovered_bearing, _bearing(centroid, source_m))) > 0.99
 
 
 @pytest.mark.parametrize(

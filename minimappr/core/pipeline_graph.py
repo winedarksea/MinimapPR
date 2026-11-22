@@ -368,6 +368,33 @@ def build_pipeline_graph(
         add_edge(doa_id, solve_id, kind="audio", label="bearing")
     if tdoa_enabled:
         add_edge("loc:site:tdoa", solve_id, kind="audio", label="TDOA")
+    # --- Field Mode W2-onset-srp ---
+    onset_id = "loc:site:onset_srp"
+    add_node(
+        id=onset_id,
+        stage=PipelineStageKind.LOCALIZATION,
+        column="localize",
+        lane="site",
+        title="Onset SRP clustering",
+        subtitle="per-note frames → SRP peaks → clusters → LM",
+        modality="audio",
+        enabled=bool(settings.localization_onset_clustering_enabled),
+        params=[
+            _param("Enabled", bool(settings.localization_onset_clustering_enabled), "localization_onset_clustering_enabled"),
+            _param("Frame", float(settings.onset_frame_seconds), "onset_frame_seconds", suffix=" s"),
+            _param("Post-trigger span", float(settings.onset_analysis_post_trigger_seconds), "onset_analysis_post_trigger_seconds", suffix=" s"),
+            _param("Sub-bands", int(settings.onset_subband_count), "onset_subband_count"),
+            _param("Narrowband → envelope", float(settings.onset_narrowband_bandwidth_hz), "onset_narrowband_bandwidth_hz", suffix=" Hz"),
+            _param("Cluster radius", float(settings.onset_cluster_radius_m), "onset_cluster_radius_m", suffix=" m"),
+            _param("Max clusters", int(settings.onset_cluster_max_count), "onset_cluster_max_count"),
+        ],
+        status=_onset_srp_status(metrics, fusion_available, bool(settings.localization_onset_clustering_enabled)),
+        link="/settings/config#localization",
+    )
+    for gate_id in gate_ids:
+        add_edge(gate_id, onset_id, kind="audio", label="onset frames")
+    add_edge(onset_id, solve_id, kind="metadata", label="clusters")
+    # --- end Field Mode W2-onset-srp ---
 
     # ── Site: beamform ──────────────────────────────────────────────────────
     beam_id = "beam:site"
@@ -463,6 +490,7 @@ def build_pipeline_graph(
                 "dormant_reacquire_radius_m",
                 suffix=" m",
             ),
+            *_field_mode_tracker_params(tc),
         ],
         status=_track_status(metrics, fusion_available),
         link="/settings/config#tracking",
@@ -565,6 +593,53 @@ def build_pipeline_graph(
     )
 
 
+# --- Field Mode W2-tracker ---
+def _field_mode_tracker_params(tc) -> list[PipelineParam]:
+    """Perched filter / species log-odds / partial binding switches + key knobs."""
+    params = [
+        _param("Perched filter", bool(tc.tracking_perched_filter_enabled), "tracking_perched_filter_enabled"),
+        _param("Species log-odds", bool(tc.tracking_species_log_odds_enabled), "tracking_species_log_odds_enabled"),
+        _param(
+            "Partial binding",
+            bool(tc.tracking_partial_constraint_binding_enabled),
+            "tracking_partial_constraint_binding_enabled",
+        ),
+    ]
+    if tc.tracking_perched_filter_enabled:
+        params.append(
+            _param(
+                "Relocation gate",
+                float(tc.tracking_perched_relocation_gate_max_m),
+                "tracking_perched_relocation_gate_max_m",
+                suffix=" m",
+            )
+        )
+    if tc.tracking_species_log_odds_enabled:
+        params.append(
+            _param(
+                "Display belief",
+                float(tc.tracking_species_display_min_belief),
+                "tracking_species_display_min_belief",
+            )
+        )
+    return params
+
+
+def _birdnet_two_threshold_params(settings) -> list[PipelineParam]:
+    enabled = bool(getattr(settings, "birdnet_two_threshold_enabled", False))
+    params = [_param("Two thresholds", enabled, config_key="birdnet_two_threshold_enabled")]
+    if enabled:
+        params.append(
+            _param(
+                "Localize-to-track",
+                float(settings.birdnet_localize_to_track_min_confidence),
+                config_key="birdnet_localize_to_track_min_confidence",
+            )
+        )
+    return params
+# --- end Field Mode W2-tracker ---
+
+
 # ── BirdNET+ V3.0 (Field Mode W1-birdnet-v3) ────────────────────────────────
 def _birdnet_version_params(settings) -> list[PipelineParam]:
     version = str(getattr(settings, "birdnet_model_version", "2.4"))
@@ -619,6 +694,10 @@ def _add_classifiers(*, routing, settings, gate_ids, beam_id, add_node, add_edge
                 if spec.backend == "birdnet":
                     params.extend(_birdnet_version_params(settings))
                 # ── end BirdNET+ V3.0 ──
+                # --- Field Mode W2-tracker ---
+                if spec.backend == "birdnet":
+                    params.extend(_birdnet_two_threshold_params(settings))
+                # --- end Field Mode W2-tracker ---
             add_node(
                 id=member_node_id,
                 stage=PipelineStageKind.CLASSIFIER,
@@ -870,6 +949,27 @@ def _classify_queue_status(queues: dict, metrics: dict, fusion_available: bool) 
             _param("Shed (backpressure)", shed),
         ],
     )
+
+
+# --- Field Mode W2-onset-srp ---
+def _onset_srp_status(metrics: dict, fusion_available: bool, enabled: bool) -> PipelineStageStatus:
+    if not enabled:
+        return PipelineStageStatus(health="idle", summary="disabled (legacy single-window solve)")
+    if not fusion_available:
+        return PipelineStageStatus(health="unknown")
+    windows = int(metrics.get("onset_clustering_window_count") or 0)
+    accepted = int(metrics.get("onset_clustering_accepted_cluster_count") or 0)
+    return PipelineStageStatus(
+        health="ok",
+        summary=(f"{accepted} birds from {windows} windows" if windows else "enabled; no windows yet"),
+        metrics=[
+            _param("Windows", windows),
+            _param("Accepted clusters", accepted),
+            _param("Tentative clusters", int(metrics.get("onset_clustering_tentative_cluster_count") or 0)),
+            _param("Echo clusters", int(metrics.get("onset_clustering_echo_cluster_count") or 0)),
+        ],
+    )
+# --- end Field Mode W2-onset-srp ---
 
 
 def _tdoa_status(metrics: dict, fusion_available: bool) -> PipelineStageStatus:

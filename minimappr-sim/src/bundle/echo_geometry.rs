@@ -1,5 +1,8 @@
-//! Apparent (image) source positions of reflections, as seen from the array
-//! centroid, for ground-truth echo events. A localizer that promotes a
+//! Apparent source positions of reflections for ground-truth echo events.
+//! A trunk is a point scatterer: it re-radiates from its own position (delayed
+//! by r₁/c), so every receiver — compact array or distributed mesh — sees the
+//! echo coming from the trunk itself. The ground is a mirror: its image source
+//! (z' = 2h − z) is consistent for all receivers. A localizer that promotes a
 //! reflection to its own source puts it here, so scoring can tell an echo
 //! promotion from an unrelated false positive.
 
@@ -18,7 +21,8 @@ pub struct EchoImage {
     pub kind: &'static str,
     /// Reflecting point (trunk position, or the specular point on the ground).
     pub reflecting_point_m: Vec3,
-    /// Apparent source position (what a localizer would report).
+    /// Apparent source position (what a localizer would report): the trunk
+    /// itself, or the ground image source.
     pub image_position_m: Vec3,
     /// Reflected minus direct path delay at the centroid.
     pub extra_delay_s: f64,
@@ -52,10 +56,7 @@ pub fn echo_images(plan: &WorldPlan, source_m: Vec3, centroid_m: Vec3) -> Vec<Ec
                 reflector_id: reflector.reflector_id.clone(),
                 kind: "trunk",
                 reflecting_point_m: reflector.position_m,
-                image_position_m: add(
-                    centroid_m,
-                    scale(toward_reflector, echo_length_m / reflector_range_m),
-                ),
+                image_position_m: reflector.position_m,
                 extra_delay_s: (echo_length_m - direct_length_m) / plan.speed_of_sound_mps,
                 attenuation_db: attenuation_db(
                     direct_length_m,

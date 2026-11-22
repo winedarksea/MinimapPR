@@ -24,6 +24,7 @@ mod render_mvdr;
 mod runtime;
 mod spatial_audio;
 mod storage_class;
+mod tdoa_solver_oracle;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -693,6 +694,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
     if raw_args.get(1).map(String::as_str) == Some("beamform-oracle") {
         return run_beamform_oracle();
+    }
+    if raw_args.get(1).map(String::as_str) == Some("tdoa-solver-oracle") {
+        return tdoa_solver_oracle::run_tdoa_solver_oracle();
     }
     if raw_args.get(1).map(String::as_str) == Some("preprocess-oracle") {
         return run_preprocess_oracle();

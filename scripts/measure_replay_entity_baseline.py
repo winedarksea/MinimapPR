@@ -6,6 +6,7 @@ frequency stub classifier, Python ingest), and prints per-scenario metrics.
 Results are recorded in docs/field_mode_progress/server_baseline.md.
 
     python scripts/measure_replay_entity_baseline.py [--seeds 0 1 2] [--radii-m 15 5] [--json out.json]
+        [--set localization_onset_clustering_enabled=true ...]
 
 Each replay is scored once per association radius (entity metrics are only as
 strict as the spatial gate; a generous radius can hide collapsed fixes).
@@ -77,13 +78,15 @@ def _entity_metrics_at_radius(detections, bundle, association_radius_m: float) -
     return {key: entity[key] for key in ENTITY_METRIC_KEYS}
 
 
-async def measure_scenario(scenario, seed: int, work_dir: Path, radii_m: list[float]) -> dict:
+async def measure_scenario(
+    scenario, seed: int, work_dir: Path, radii_m: list[float], extra_overrides: dict | None = None
+) -> dict:
     bundle_path = render_scenario_bundle(scenario, work_dir / f"{scenario.name}-{seed}.zip", seed=seed)
     bundle = load_bundle(bundle_path)
     fusion, storage, _ = await build_fusion_for_bundle(
         bundle,
         work_dir / f"replay-{scenario.name}-{seed}",
-        overrides=REPLAY_SETTINGS_OVERRIDES,
+        overrides={**REPLAY_SETTINGS_OVERRIDES, **(extra_overrides or {})},
         classifier=DominantFrequencySpeciesClassifier(species_bands_for(scenario)),
     )
     try:
@@ -114,12 +117,12 @@ async def measure_scenario(scenario, seed: int, work_dir: Path, radii_m: list[fl
     }
 
 
-async def main_async(seeds: list[int], radii_m: list[float]) -> list[dict]:
+async def main_async(seeds: list[int], radii_m: list[float], extra_overrides: dict | None = None) -> list[dict]:
     results = []
     with tempfile.TemporaryDirectory(prefix="entity-baseline-") as tmp:
         for scenario in SYNTHETIC_ENTITY_SCENARIOS:
             for seed in seeds:
-                result = await measure_scenario(scenario, seed, Path(tmp), radii_m)
+                result = await measure_scenario(scenario, seed, Path(tmp), radii_m, extra_overrides)
                 print(json.dumps(result), flush=True)
                 results.append(result)
     return results
@@ -130,8 +133,13 @@ def main() -> None:
     parser.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     parser.add_argument("--radii-m", type=float, nargs="+", default=[15.0, 5.0])
     parser.add_argument("--json", type=Path, default=None)
+    parser.add_argument(
+        "--set", action="append", default=[], metavar="KEY=JSON",
+        help="extra Settings override, value parsed as JSON (e.g. localization_onset_clustering_enabled=true)",
+    )
     args = parser.parse_args()
-    results = asyncio.run(main_async(args.seeds, args.radii_m))
+    extra = {key: json.loads(value) for key, value in (item.split("=", 1) for item in args.set)}
+    results = asyncio.run(main_async(args.seeds, args.radii_m, extra))
     if args.json:
         args.json.write_text(json.dumps(results, indent=2))
 

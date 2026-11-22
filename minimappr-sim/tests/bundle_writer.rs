@@ -166,16 +166,10 @@ fn echo_images_follow_the_rendered_path_geometry() {
     assert_eq!(images.len(), plan.reflectors.len() + 1);
     let direct = distance(source, centroid);
     for (image, reflector) in images.iter().zip(&plan.reflectors) {
-        // Point scatterer: apparent source lies along centroid→trunk at r₁ + r₂.
+        // Point scatterer: the echo re-radiates from the trunk itself.
         let echo_length =
             distance(source, reflector.position_m) + distance(reflector.position_m, centroid);
-        assert!((distance(image.image_position_m, centroid) - echo_length).abs() < 1e-9);
-        let along = distance(image.image_position_m, reflector.position_m)
-            + distance(reflector.position_m, centroid);
-        assert!(
-            (along - echo_length).abs() < 1e-9,
-            "image not on the trunk ray"
-        );
+        assert_eq!(image.image_position_m, reflector.position_m);
         let expected_delay = (echo_length - direct) / plan.speed_of_sound_mps;
         assert!((image.extra_delay_s - expected_delay).abs() < 1e-12);
         let expected_db =

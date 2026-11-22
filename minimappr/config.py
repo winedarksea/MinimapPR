@@ -432,6 +432,41 @@ class TrackingConfig:
     dormant_fingerprint_min_similarity: float = 0.4
     dormant_confidence_half_life_seconds: float = 300.0
     dormant_max_records: int = 64
+    # --- Field Mode W2-tracker ---
+    # Perched random-walk filter for these label categories (birds sit, then hop);
+    # other categories keep the 6D constant-velocity Kalman.
+    tracking_perched_filter_enabled: bool = False
+    tracking_perched_label_categories: str = "wildlife"
+    tracking_perched_position_diffusion_m2_per_second: float = 0.05
+    # A fix this far from the perch restarts the filter there instead of
+    # averaging two perches. Relocation gate: a same-species hop up to
+    # relocation_gate_max_m after >= min_silence keeps the track identity.
+    tracking_perched_relocation_snap_distance_m: float = 6.0
+    tracking_perched_relocation_gate_max_m: float = 30.0
+    tracking_perched_relocation_min_silence_seconds: float = 2.0
+    tracking_perched_relocation_ghost_seconds: float = 30.0
+    # Per-track species belief (capped log-odds) replaces the single-label
+    # overwrite for these categories; tracks below display_min_belief are hidden.
+    tracking_species_log_odds_enabled: bool = False
+    tracking_species_log_odds_label_categories: str = "wildlife"
+    tracking_species_log_odds_prior_probability: float = 0.1
+    tracking_species_log_odds_per_update_cap: float = 3.0
+    tracking_species_log_odds_total_cap: float = 6.0
+    tracking_species_log_odds_evidence_top_k: int = 3
+    tracking_species_display_min_belief: float = 0.5
+    tracking_species_belief_exposed_top_n: int = 5
+    # Bind unpositioned (omni / bearing-only) detections to recent tracks via
+    # DOA bearing, cross-node TDOA hyperbola or node-level ranking.
+    tracking_partial_constraint_binding_enabled: bool = False
+    tracking_partial_binding_window_seconds: float = 25.0
+    tracking_partial_binding_bearing_sigma_deg: float = 10.0
+    tracking_partial_binding_hyperbola_sigma_m: float = 2.0
+    tracking_partial_binding_snr_level_margin_db: float = 7.0
+    tracking_partial_binding_max_normalized_residual: float = 3.0
+    tracking_partial_binding_species_top_k: int = 3
+    tracking_partial_binding_soft_update_gain: float = 0.3
+    tracking_partial_binding_ambiguity_score_ratio: float = 0.5
+    # --- end Field Mode W2-tracker ---
 
     def stale_seconds_for(self, label_category: str) -> float:
         """Stale window for *label_category*, falling back to the base window."""
@@ -478,6 +513,54 @@ class ClassifierConfig:
     heuristic_unknown_score: float
 
 
+# --- Field Mode W2-tracker ---
+def field_mode_tracker_setting_errors(values) -> list[str]:
+    """Errors for the W2-tracker keys on *values* (Settings or a merged view)."""
+    errors: list[str] = []
+    for key in (
+        "tracking_perched_position_diffusion_m2_per_second",
+        "tracking_perched_relocation_snap_distance_m",
+        "tracking_perched_relocation_gate_max_m",
+        "tracking_perched_relocation_min_silence_seconds",
+        "tracking_perched_relocation_ghost_seconds",
+        "tracking_partial_binding_window_seconds",
+        "tracking_partial_binding_soft_update_gain",
+    ):
+        if float(getattr(values, key)) < 0.0:
+            errors.append(f"{key}: must be >= 0")
+    for key in (
+        "tracking_species_log_odds_per_update_cap",
+        "tracking_species_log_odds_total_cap",
+        "tracking_partial_binding_bearing_sigma_deg",
+        "tracking_partial_binding_hyperbola_sigma_m",
+        "tracking_partial_binding_snr_level_margin_db",
+        "tracking_partial_binding_max_normalized_residual",
+        "tracking_partial_binding_ambiguity_score_ratio",
+    ):
+        if float(getattr(values, key)) <= 0.0:
+            errors.append(f"{key}: must be > 0")
+    for key in (
+        "tracking_species_log_odds_evidence_top_k",
+        "tracking_species_belief_exposed_top_n",
+        "tracking_partial_binding_species_top_k",
+    ):
+        if int(getattr(values, key)) < 1:
+            errors.append(f"{key}: must be >= 1")
+    if not 0.0 < float(values.tracking_species_log_odds_prior_probability) < 1.0:
+        errors.append("tracking_species_log_odds_prior_probability: must be in (0, 1)")
+    for key in ("tracking_species_display_min_belief", "birdnet_localize_to_track_min_confidence"):
+        if not 0.0 <= float(getattr(values, key)) <= 1.0:
+            errors.append(f"{key}: must be in [0, 1]")
+    return errors
+
+
+def _validate_field_mode_tracker_settings(settings) -> None:
+    errors = field_mode_tracker_setting_errors(settings)
+    if errors:
+        raise ValueError("; ".join(errors))
+# --- end Field Mode W2-tracker ---
+
+
 # ── BirdNET+ V3.0 (Field Mode W1-birdnet-v3) ─────────────────────────────
 BIRDNET_MODEL_VERSIONS: tuple[str, ...] = ("2.4", "3.0")
 DEFAULT_BIRDNET_V3_MODEL_PATH = Path("data/models/birdnet_v3/BirdNET+_V3.0_Global_12K_FP16_pruned.onnx")
@@ -498,6 +581,48 @@ class BirdNETV3Config:
     pad_noise_floor_percentile: float
     num_threads: int
 # ── end BirdNET+ V3.0 ──────────────────────────────────────────────────────
+
+
+# --- Field Mode W2-onset-srp ---
+@dataclass(slots=True)
+class OnsetSrpClusteringConfig:
+    """Onset-weighted short-frame SRP + spatial clustering; built by
+    ``Settings.onset_srp_clustering_config()`` (docs/field_mode_progress/onset_srp.md)."""
+
+    enabled: bool
+    analysis_pre_trigger_seconds: float
+    analysis_post_trigger_seconds: float
+    buffer_wait_max_seconds: float
+    subband_count: int
+    hop_seconds: float
+    band_min_hz: float
+    band_max_hz: float
+    flux_threshold_mad_multiplier: float
+    min_separation_seconds: float
+    max_onsets_per_window: int
+    frame_seconds: float
+    frame_pre_roll_seconds: float
+    active_band_snr_db: float
+    narrowband_bandwidth_hz: float
+    srp_azimuth_step_deg: float
+    srp_elevation_step_deg: float
+    srp_grid_min_range_m: float
+    srp_grid_max_range_m: float
+    srp_grid_ring_count: int
+    srp_peaks_per_frame: int
+    srp_peak_min_relative_height: float
+    cluster_radius_m: float
+    cluster_range_fraction: float
+    cluster_angle_deg: float
+    cluster_min_weight_fraction: float
+    cluster_max_count: int
+    echo_min_lag_seconds: float
+    echo_max_lag_seconds: float
+    echo_min_independent_fraction: float
+    level_consistency_margin_db: float
+    persistence_min_independent_onsets: int
+    dedupe_ttl_seconds: float
+# --- end Field Mode W2-onset-srp ---
 
 
 @dataclass(slots=True)
@@ -987,6 +1112,74 @@ class Settings:
     birdnet_v3_pad_noise_floor_percentile: float = 10.0
     birdnet_v3_num_threads: int = 4
     # ── end BirdNET+ V3.0 ──────────────────────────────────────────────────────
+    # --- Field Mode W2-onset-srp ---
+    # Master flag: onset-weighted short-frame SRP + spatial clustering replaces the single-window solve.
+    localization_onset_clustering_enabled: bool = False
+    # Audio kept before the trigger's window centre (onsets lead the trigger frame).
+    onset_analysis_pre_trigger_seconds: float = 0.3
+    # Audio after the trigger; the plan's shared 1.0-1.5 s active window.
+    onset_analysis_post_trigger_seconds: float = 1.2
+    # Max wait for every node's buffer to cover the analysis span (non-blocking poll).
+    onset_buffer_wait_max_seconds: float = 3.0
+    # Log-spaced sub-bands in the onset history (plan: 32-48).
+    onset_subband_count: int = 32
+    # Spectral-flux history hop.
+    onset_hop_seconds: float = 0.01
+    # Lowest analysed frequency (wind/rumble below).
+    onset_band_min_hz: float = 500.0
+    # Highest analysed frequency (clamped to Nyquist).
+    onset_band_max_hz: float = 12000.0
+    # Onset = flux peak above median + k*MAD of the window's own flux (noise-relative, no level gate).
+    onset_flux_threshold_mad_multiplier: float = 4.0
+    # Minimum spacing between onsets on one node.
+    onset_min_separation_seconds: float = 0.04
+    # Strongest onsets kept per node per window (compute cap).
+    onset_max_onsets_per_window: int = 16
+    # Template frame length after each onset (plan: 60-100 ms).
+    onset_frame_seconds: float = 0.08
+    # Template start before the onset hop (hop quantisation).
+    onset_frame_pre_roll_seconds: float = 0.01
+    # Sub-band is active when this far above its own noise floor.
+    onset_active_band_snr_db: float = 6.0
+    # Frames with RMS bandwidth below this correlate envelopes (pure tones cycle-skip).
+    onset_narrowband_bandwidth_hz: float = 300.0
+    # SRP grid azimuth step.
+    onset_srp_azimuth_step_deg: float = 2.0
+    # SRP direction-grid elevation step.
+    onset_srp_elevation_step_deg: float = 10.0
+    # Nearest SRP ring around the layout centroid.
+    onset_srp_grid_min_range_m: float = 1.0
+    # Farthest finite SRP ring (a far-field ring is added).
+    onset_srp_grid_max_range_m: float = 300.0
+    # Log-spaced SRP rings between min and max range.
+    onset_srp_grid_ring_count: int = 40
+    # SRP peaks kept per onset frame.
+    onset_srp_peaks_per_frame: int = 3
+    # Secondary frame peaks must reach this fraction of the frame's best peak.
+    onset_srp_peak_min_relative_height: float = 0.6
+    # Spatial clustering radius near the layout.
+    onset_cluster_radius_m: float = 3.0
+    # Radius grows with range (TDOA posteriors stretch radially).
+    onset_cluster_range_fraction: float = 0.2
+    # Clustering radius for direction-only (single-array) peaks.
+    onset_cluster_angle_deg: float = 10.0
+    # Clusters lighter than this fraction of the heaviest are dropped as noise.
+    onset_cluster_min_weight_fraction: float = 0.15
+    # Most candidate birds reported per window.
+    onset_cluster_max_count: int = 4
+    # Shortest reflection lag treated as an echo.
+    onset_echo_min_lag_seconds: float = 0.003
+    # Longest reflection lag treated as an echo.
+    onset_echo_max_lag_seconds: float = 0.03
+    # A secondary cluster needs this fraction of its frames led by its own onsets, else echo.
+    onset_echo_min_independent_fraction: float = 0.5
+    # Multi-node: nearer node may read this much below a farther one before the cluster is held tentative.
+    onset_level_consistency_margin_db: float = 8.0
+    # A secondary cluster needs this many independent onsets to be accepted (else tentative).
+    onset_persistence_min_independent_onsets: int = 2
+    # Onsets already localized are remembered this long so overlapping windows do not duplicate birds.
+    onset_dedupe_ttl_seconds: float = 6.0
+    # --- end Field Mode W2-onset-srp ---
     detection_min_confidence: float = 0.4
     cop_detections_max_items: int = 150
     cop_tracks_max_items: int = 150
@@ -1046,6 +1239,45 @@ class Settings:
     dormant_fingerprint_min_similarity: float = 0.4
     dormant_confidence_half_life_seconds: float = 300.0
     dormant_max_records: int = 64
+    # --- Field Mode W2-tracker ---
+    # Perched random-walk filter for these label categories (birds sit, then hop);
+    # other categories keep the 6D constant-velocity Kalman.
+    tracking_perched_filter_enabled: bool = False
+    tracking_perched_label_categories: str = "wildlife"
+    tracking_perched_position_diffusion_m2_per_second: float = 0.05
+    # A fix this far from the perch restarts the filter there instead of
+    # averaging two perches. Relocation gate: a same-species hop up to
+    # relocation_gate_max_m after >= min_silence keeps the track identity.
+    tracking_perched_relocation_snap_distance_m: float = 6.0
+    tracking_perched_relocation_gate_max_m: float = 30.0
+    tracking_perched_relocation_min_silence_seconds: float = 2.0
+    tracking_perched_relocation_ghost_seconds: float = 30.0
+    # Per-track species belief (capped log-odds) replaces the single-label
+    # overwrite for these categories; tracks below display_min_belief are hidden.
+    tracking_species_log_odds_enabled: bool = False
+    tracking_species_log_odds_label_categories: str = "wildlife"
+    tracking_species_log_odds_prior_probability: float = 0.1
+    tracking_species_log_odds_per_update_cap: float = 3.0
+    tracking_species_log_odds_total_cap: float = 6.0
+    tracking_species_log_odds_evidence_top_k: int = 3
+    tracking_species_display_min_belief: float = 0.5
+    tracking_species_belief_exposed_top_n: int = 5
+    # Bind unpositioned (omni / bearing-only) detections to recent tracks via
+    # DOA bearing, cross-node TDOA hyperbola or node-level ranking.
+    tracking_partial_constraint_binding_enabled: bool = False
+    tracking_partial_binding_window_seconds: float = 25.0
+    tracking_partial_binding_bearing_sigma_deg: float = 10.0
+    tracking_partial_binding_hyperbola_sigma_m: float = 2.0
+    tracking_partial_binding_snr_level_margin_db: float = 7.0
+    tracking_partial_binding_max_normalized_residual: float = 3.0
+    tracking_partial_binding_species_top_k: int = 3
+    tracking_partial_binding_soft_update_gain: float = 0.3
+    tracking_partial_binding_ambiguity_score_ratio: float = 0.5
+    # Two thresholds: BirdNET keeps results down to localize_to_track (they feed
+    # track belief, flagged below_display_threshold); only the display floor shows alone.
+    birdnet_two_threshold_enabled: bool = False
+    birdnet_localize_to_track_min_confidence: float = 0.15
+    # --- end Field Mode W2-tracker ---
 
     fusion_worker_count: int = 2
     fusion_event_queue_size: int = 512
@@ -1706,6 +1938,38 @@ class Settings:
         if self.birdnet_v3_num_threads < 1:
             raise ValueError("MINIMAPPR_BIRDNET_V3_NUM_THREADS must be >= 1")
         # ── end BirdNET+ V3.0 ──
+        # --- Field Mode W2-tracker ---
+        _validate_field_mode_tracker_settings(self)
+        # --- end Field Mode W2-tracker ---
+        # --- Field Mode W2-onset-srp ---
+        if self.onset_analysis_pre_trigger_seconds < 0.0 or self.onset_analysis_post_trigger_seconds <= 0.0:
+            raise ValueError("onset analysis span needs pre >= 0 and post > 0 seconds")
+        if not 0.0 < self.onset_band_min_hz < self.onset_band_max_hz:
+            raise ValueError("onset band needs 0 < onset_band_min_hz < onset_band_max_hz")
+        if not 0.0 < self.onset_echo_min_lag_seconds < self.onset_echo_max_lag_seconds:
+            raise ValueError("onset echo lags need 0 < min < max")
+        for _onset_key in (
+            "onset_subband_count", "onset_max_onsets_per_window", "onset_srp_grid_ring_count",
+            "onset_srp_peaks_per_frame", "onset_cluster_max_count",
+        ):
+            if getattr(self, _onset_key) < 1:
+                raise ValueError(f"{_onset_key} must be >= 1")
+        for _onset_key in (
+            "onset_hop_seconds", "onset_frame_seconds", "onset_srp_azimuth_step_deg",
+            "onset_srp_elevation_step_deg", "onset_srp_grid_min_range_m", "onset_cluster_radius_m",
+            "onset_cluster_angle_deg",
+        ):
+            if getattr(self, _onset_key) <= 0.0:
+                raise ValueError(f"{_onset_key} must be > 0")
+        if self.onset_srp_grid_max_range_m <= self.onset_srp_grid_min_range_m:
+            raise ValueError("onset_srp_grid_max_range_m must exceed onset_srp_grid_min_range_m")
+        for _onset_key in (
+            "onset_srp_peak_min_relative_height", "onset_cluster_min_weight_fraction",
+            "onset_echo_min_independent_fraction",
+        ):
+            if not 0.0 <= getattr(self, _onset_key) <= 1.0:
+                raise ValueError(f"{_onset_key} must be in [0, 1]")
+        # --- end Field Mode W2-onset-srp ---
         if self.detection_min_confidence < 0.0 or self.detection_min_confidence > 1.0:
             raise ValueError("MINIMAPPR_DETECTION_MIN_CONFIDENCE must be in [0,1]")
         if self.cop_detections_max_items < 1:
@@ -2302,6 +2566,41 @@ class Settings:
             ),
             birdnet_v3_num_threads=_env_int("MINIMAPPR_BIRDNET_V3_NUM_THREADS", 4),
             # ── end BirdNET+ V3.0 ──
+            # --- Field Mode W2-onset-srp ---
+            localization_onset_clustering_enabled=_env_bool("MINIMAPPR_LOCALIZATION_ONSET_CLUSTERING_ENABLED", False),
+            onset_analysis_pre_trigger_seconds=_env_float("MINIMAPPR_ONSET_ANALYSIS_PRE_TRIGGER_SECONDS", 0.3),
+            onset_analysis_post_trigger_seconds=_env_float("MINIMAPPR_ONSET_ANALYSIS_POST_TRIGGER_SECONDS", 1.2),
+            onset_buffer_wait_max_seconds=_env_float("MINIMAPPR_ONSET_BUFFER_WAIT_MAX_SECONDS", 3.0),
+            onset_subband_count=_env_int("MINIMAPPR_ONSET_SUBBAND_COUNT", 32),
+            onset_hop_seconds=_env_float("MINIMAPPR_ONSET_HOP_SECONDS", 0.01),
+            onset_band_min_hz=_env_float("MINIMAPPR_ONSET_BAND_MIN_HZ", 500.0),
+            onset_band_max_hz=_env_float("MINIMAPPR_ONSET_BAND_MAX_HZ", 12000.0),
+            onset_flux_threshold_mad_multiplier=_env_float("MINIMAPPR_ONSET_FLUX_THRESHOLD_MAD_MULTIPLIER", 4.0),
+            onset_min_separation_seconds=_env_float("MINIMAPPR_ONSET_MIN_SEPARATION_SECONDS", 0.04),
+            onset_max_onsets_per_window=_env_int("MINIMAPPR_ONSET_MAX_ONSETS_PER_WINDOW", 16),
+            onset_frame_seconds=_env_float("MINIMAPPR_ONSET_FRAME_SECONDS", 0.08),
+            onset_frame_pre_roll_seconds=_env_float("MINIMAPPR_ONSET_FRAME_PRE_ROLL_SECONDS", 0.01),
+            onset_active_band_snr_db=_env_float("MINIMAPPR_ONSET_ACTIVE_BAND_SNR_DB", 6.0),
+            onset_narrowband_bandwidth_hz=_env_float("MINIMAPPR_ONSET_NARROWBAND_BANDWIDTH_HZ", 300.0),
+            onset_srp_azimuth_step_deg=_env_float("MINIMAPPR_ONSET_SRP_AZIMUTH_STEP_DEG", 2.0),
+            onset_srp_elevation_step_deg=_env_float("MINIMAPPR_ONSET_SRP_ELEVATION_STEP_DEG", 10.0),
+            onset_srp_grid_min_range_m=_env_float("MINIMAPPR_ONSET_SRP_GRID_MIN_RANGE_M", 1.0),
+            onset_srp_grid_max_range_m=_env_float("MINIMAPPR_ONSET_SRP_GRID_MAX_RANGE_M", 300.0),
+            onset_srp_grid_ring_count=_env_int("MINIMAPPR_ONSET_SRP_GRID_RING_COUNT", 40),
+            onset_srp_peaks_per_frame=_env_int("MINIMAPPR_ONSET_SRP_PEAKS_PER_FRAME", 3),
+            onset_srp_peak_min_relative_height=_env_float("MINIMAPPR_ONSET_SRP_PEAK_MIN_RELATIVE_HEIGHT", 0.6),
+            onset_cluster_radius_m=_env_float("MINIMAPPR_ONSET_CLUSTER_RADIUS_M", 3.0),
+            onset_cluster_range_fraction=_env_float("MINIMAPPR_ONSET_CLUSTER_RANGE_FRACTION", 0.2),
+            onset_cluster_angle_deg=_env_float("MINIMAPPR_ONSET_CLUSTER_ANGLE_DEG", 10.0),
+            onset_cluster_min_weight_fraction=_env_float("MINIMAPPR_ONSET_CLUSTER_MIN_WEIGHT_FRACTION", 0.15),
+            onset_cluster_max_count=_env_int("MINIMAPPR_ONSET_CLUSTER_MAX_COUNT", 4),
+            onset_echo_min_lag_seconds=_env_float("MINIMAPPR_ONSET_ECHO_MIN_LAG_SECONDS", 0.003),
+            onset_echo_max_lag_seconds=_env_float("MINIMAPPR_ONSET_ECHO_MAX_LAG_SECONDS", 0.03),
+            onset_echo_min_independent_fraction=_env_float("MINIMAPPR_ONSET_ECHO_MIN_INDEPENDENT_FRACTION", 0.5),
+            onset_level_consistency_margin_db=_env_float("MINIMAPPR_ONSET_LEVEL_CONSISTENCY_MARGIN_DB", 8.0),
+            onset_persistence_min_independent_onsets=_env_int("MINIMAPPR_ONSET_PERSISTENCE_MIN_INDEPENDENT_ONSETS", 2),
+            onset_dedupe_ttl_seconds=_env_float("MINIMAPPR_ONSET_DEDUPE_TTL_SECONDS", 6.0),
+            # --- end Field Mode W2-onset-srp ---
             detection_min_confidence=_env_float("MINIMAPPR_DETECTION_MIN_CONFIDENCE", 0.4),
             cop_detections_max_items=_env_int("MINIMAPPR_COP_DETECTIONS_MAX_ITEMS", 150),
             cop_tracks_max_items=_env_int("MINIMAPPR_COP_TRACKS_MAX_ITEMS", 150),
@@ -2347,6 +2646,34 @@ class Settings:
             tqi_weight_sensor=_env_float("MINIMAPPR_TQI_WEIGHT_SENSOR", 0.2),
             track_drop_multiplier=_env_float("MINIMAPPR_TRACK_DROP_MULTIPLIER", 3.0),
             track_reap_multiplier=_env_float("MINIMAPPR_TRACK_REAP_MULTIPLIER", 5.0),
+            # --- Field Mode W2-tracker ---
+            tracking_perched_filter_enabled=_env_bool("MINIMAPPR_TRACKING_PERCHED_FILTER_ENABLED", False),
+            tracking_perched_label_categories=_env_str("MINIMAPPR_TRACKING_PERCHED_LABEL_CATEGORIES", "wildlife"),
+            tracking_perched_position_diffusion_m2_per_second=_env_float("MINIMAPPR_TRACKING_PERCHED_POSITION_DIFFUSION_M2_PER_SECOND", 0.05),
+            tracking_perched_relocation_snap_distance_m=_env_float("MINIMAPPR_TRACKING_PERCHED_RELOCATION_SNAP_DISTANCE_M", 6.0),
+            tracking_perched_relocation_gate_max_m=_env_float("MINIMAPPR_TRACKING_PERCHED_RELOCATION_GATE_MAX_M", 30.0),
+            tracking_perched_relocation_min_silence_seconds=_env_float("MINIMAPPR_TRACKING_PERCHED_RELOCATION_MIN_SILENCE_SECONDS", 2.0),
+            tracking_perched_relocation_ghost_seconds=_env_float("MINIMAPPR_TRACKING_PERCHED_RELOCATION_GHOST_SECONDS", 30.0),
+            tracking_species_log_odds_enabled=_env_bool("MINIMAPPR_TRACKING_SPECIES_LOG_ODDS_ENABLED", False),
+            tracking_species_log_odds_label_categories=_env_str("MINIMAPPR_TRACKING_SPECIES_LOG_ODDS_LABEL_CATEGORIES", "wildlife"),
+            tracking_species_log_odds_prior_probability=_env_float("MINIMAPPR_TRACKING_SPECIES_LOG_ODDS_PRIOR_PROBABILITY", 0.1),
+            tracking_species_log_odds_per_update_cap=_env_float("MINIMAPPR_TRACKING_SPECIES_LOG_ODDS_PER_UPDATE_CAP", 3.0),
+            tracking_species_log_odds_total_cap=_env_float("MINIMAPPR_TRACKING_SPECIES_LOG_ODDS_TOTAL_CAP", 6.0),
+            tracking_species_log_odds_evidence_top_k=_env_int("MINIMAPPR_TRACKING_SPECIES_LOG_ODDS_EVIDENCE_TOP_K", 3),
+            tracking_species_display_min_belief=_env_float("MINIMAPPR_TRACKING_SPECIES_DISPLAY_MIN_BELIEF", 0.5),
+            tracking_species_belief_exposed_top_n=_env_int("MINIMAPPR_TRACKING_SPECIES_BELIEF_EXPOSED_TOP_N", 5),
+            tracking_partial_constraint_binding_enabled=_env_bool("MINIMAPPR_TRACKING_PARTIAL_CONSTRAINT_BINDING_ENABLED", False),
+            tracking_partial_binding_window_seconds=_env_float("MINIMAPPR_TRACKING_PARTIAL_BINDING_WINDOW_SECONDS", 25.0),
+            tracking_partial_binding_bearing_sigma_deg=_env_float("MINIMAPPR_TRACKING_PARTIAL_BINDING_BEARING_SIGMA_DEG", 10.0),
+            tracking_partial_binding_hyperbola_sigma_m=_env_float("MINIMAPPR_TRACKING_PARTIAL_BINDING_HYPERBOLA_SIGMA_M", 2.0),
+            tracking_partial_binding_snr_level_margin_db=_env_float("MINIMAPPR_TRACKING_PARTIAL_BINDING_SNR_LEVEL_MARGIN_DB", 7.0),
+            tracking_partial_binding_max_normalized_residual=_env_float("MINIMAPPR_TRACKING_PARTIAL_BINDING_MAX_NORMALIZED_RESIDUAL", 3.0),
+            tracking_partial_binding_species_top_k=_env_int("MINIMAPPR_TRACKING_PARTIAL_BINDING_SPECIES_TOP_K", 3),
+            tracking_partial_binding_soft_update_gain=_env_float("MINIMAPPR_TRACKING_PARTIAL_BINDING_SOFT_UPDATE_GAIN", 0.3),
+            tracking_partial_binding_ambiguity_score_ratio=_env_float("MINIMAPPR_TRACKING_PARTIAL_BINDING_AMBIGUITY_SCORE_RATIO", 0.5),
+            birdnet_two_threshold_enabled=_env_bool("MINIMAPPR_BIRDNET_TWO_THRESHOLD_ENABLED", False),
+            birdnet_localize_to_track_min_confidence=_env_float("MINIMAPPR_BIRDNET_LOCALIZE_TO_TRACK_MIN_CONFIDENCE", 0.15),
+            # --- end Field Mode W2-tracker ---
             fusion_worker_count=_env_int("MINIMAPPR_FUSION_WORKER_COUNT", 2),
             fusion_event_queue_size=_env_int("MINIMAPPR_FUSION_EVENT_QUEUE_SIZE", 512),
             fusion_localization_queue_size=_env_int("MINIMAPPR_FUSION_LOCALIZATION_QUEUE_SIZE", 1024),
@@ -2610,6 +2937,32 @@ class Settings:
             dormant_fingerprint_min_similarity=self.dormant_fingerprint_min_similarity,
             dormant_confidence_half_life_seconds=self.dormant_confidence_half_life_seconds,
             dormant_max_records=self.dormant_max_records,
+            # --- Field Mode W2-tracker ---
+            tracking_perched_filter_enabled=self.tracking_perched_filter_enabled,
+            tracking_perched_label_categories=self.tracking_perched_label_categories,
+            tracking_perched_position_diffusion_m2_per_second=self.tracking_perched_position_diffusion_m2_per_second,
+            tracking_perched_relocation_snap_distance_m=self.tracking_perched_relocation_snap_distance_m,
+            tracking_perched_relocation_gate_max_m=self.tracking_perched_relocation_gate_max_m,
+            tracking_perched_relocation_min_silence_seconds=self.tracking_perched_relocation_min_silence_seconds,
+            tracking_perched_relocation_ghost_seconds=self.tracking_perched_relocation_ghost_seconds,
+            tracking_species_log_odds_enabled=self.tracking_species_log_odds_enabled,
+            tracking_species_log_odds_label_categories=self.tracking_species_log_odds_label_categories,
+            tracking_species_log_odds_prior_probability=self.tracking_species_log_odds_prior_probability,
+            tracking_species_log_odds_per_update_cap=self.tracking_species_log_odds_per_update_cap,
+            tracking_species_log_odds_total_cap=self.tracking_species_log_odds_total_cap,
+            tracking_species_log_odds_evidence_top_k=self.tracking_species_log_odds_evidence_top_k,
+            tracking_species_display_min_belief=self.tracking_species_display_min_belief,
+            tracking_species_belief_exposed_top_n=self.tracking_species_belief_exposed_top_n,
+            tracking_partial_constraint_binding_enabled=self.tracking_partial_constraint_binding_enabled,
+            tracking_partial_binding_window_seconds=self.tracking_partial_binding_window_seconds,
+            tracking_partial_binding_bearing_sigma_deg=self.tracking_partial_binding_bearing_sigma_deg,
+            tracking_partial_binding_hyperbola_sigma_m=self.tracking_partial_binding_hyperbola_sigma_m,
+            tracking_partial_binding_snr_level_margin_db=self.tracking_partial_binding_snr_level_margin_db,
+            tracking_partial_binding_max_normalized_residual=self.tracking_partial_binding_max_normalized_residual,
+            tracking_partial_binding_species_top_k=self.tracking_partial_binding_species_top_k,
+            tracking_partial_binding_soft_update_gain=self.tracking_partial_binding_soft_update_gain,
+            tracking_partial_binding_ambiguity_score_ratio=self.tracking_partial_binding_ambiguity_score_ratio,
+            # --- end Field Mode W2-tracker ---
         )
 
     def ble_tracking_config(self) -> TrackingConfig:
@@ -2662,6 +3015,45 @@ class Settings:
             num_threads=self.birdnet_v3_num_threads,
         )
     # ── end BirdNET+ V3.0 ──
+
+    # --- Field Mode W2-onset-srp ---
+    def onset_srp_clustering_config(self) -> OnsetSrpClusteringConfig:
+        return OnsetSrpClusteringConfig(
+            enabled=self.localization_onset_clustering_enabled,
+            analysis_pre_trigger_seconds=self.onset_analysis_pre_trigger_seconds,
+            analysis_post_trigger_seconds=self.onset_analysis_post_trigger_seconds,
+            buffer_wait_max_seconds=self.onset_buffer_wait_max_seconds,
+            subband_count=self.onset_subband_count,
+            hop_seconds=self.onset_hop_seconds,
+            band_min_hz=self.onset_band_min_hz,
+            band_max_hz=self.onset_band_max_hz,
+            flux_threshold_mad_multiplier=self.onset_flux_threshold_mad_multiplier,
+            min_separation_seconds=self.onset_min_separation_seconds,
+            max_onsets_per_window=self.onset_max_onsets_per_window,
+            frame_seconds=self.onset_frame_seconds,
+            frame_pre_roll_seconds=self.onset_frame_pre_roll_seconds,
+            active_band_snr_db=self.onset_active_band_snr_db,
+            narrowband_bandwidth_hz=self.onset_narrowband_bandwidth_hz,
+            srp_azimuth_step_deg=self.onset_srp_azimuth_step_deg,
+            srp_elevation_step_deg=self.onset_srp_elevation_step_deg,
+            srp_grid_min_range_m=self.onset_srp_grid_min_range_m,
+            srp_grid_max_range_m=self.onset_srp_grid_max_range_m,
+            srp_grid_ring_count=self.onset_srp_grid_ring_count,
+            srp_peaks_per_frame=self.onset_srp_peaks_per_frame,
+            srp_peak_min_relative_height=self.onset_srp_peak_min_relative_height,
+            cluster_radius_m=self.onset_cluster_radius_m,
+            cluster_range_fraction=self.onset_cluster_range_fraction,
+            cluster_angle_deg=self.onset_cluster_angle_deg,
+            cluster_min_weight_fraction=self.onset_cluster_min_weight_fraction,
+            cluster_max_count=self.onset_cluster_max_count,
+            echo_min_lag_seconds=self.onset_echo_min_lag_seconds,
+            echo_max_lag_seconds=self.onset_echo_max_lag_seconds,
+            echo_min_independent_fraction=self.onset_echo_min_independent_fraction,
+            level_consistency_margin_db=self.onset_level_consistency_margin_db,
+            persistence_min_independent_onsets=self.onset_persistence_min_independent_onsets,
+            dedupe_ttl_seconds=self.onset_dedupe_ttl_seconds,
+        )
+    # --- end Field Mode W2-onset-srp ---
 
     def storage_config(self) -> StorageConfig:
         return StorageConfig(

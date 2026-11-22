@@ -723,6 +723,12 @@ class TrackState(BaseModel):
     # track (bounded, insertion-ordered). A track corroborated by ≥2 nodes is a
     # cross-node fusion and carries higher confidence than a single-array cone.
     contributor_node_ids: list[str] = Field(default_factory=list)
+    # --- Field Mode W2-tracker --- per-track species belief (top-N label ->
+    # probability, capped log-odds fusion). None unless
+    # tracking_species_log_odds_enabled; memory-only (not a DB column).
+    species_belief: dict[str, float] | None = None
+    species_top_label: str | None = None
+    species_top_probability: float | None = None
 
 
 class FederationHeartbeat(BaseModel):
