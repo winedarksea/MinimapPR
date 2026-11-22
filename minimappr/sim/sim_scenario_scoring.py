@@ -6,10 +6,11 @@ the simulator's point reflectors, build a frequency-oracle classifier from the
 scene's call generators, replay through a full FusionNode and score with
 `evaluate_bundle` (entity metrics included).
 
-Echo events: the simulator lists trunks as reflector metadata only. For a
-multi-node layout a point scatterer re-radiates from its own position (delayed
-by source->trunk / c), so the apparent source of the echo is the trunk itself;
-one echo event per (call, point reflector) is added with that geometry.
+Echo events: a point scatterer re-radiates from its own position (delayed by
+source->trunk / c), so the apparent source of the echo is the trunk itself.
+Current simulator bundles already carry those echo events (trunk + ground);
+for older bundles that list trunks as reflector metadata only, one echo event
+per (call, point reflector) is added here with that geometry.
 """
 
 from __future__ import annotations
@@ -99,15 +100,19 @@ def species_bands_from_scenario(scenario_path: Path) -> dict[str, tuple[float, f
 
 def echo_events_from_reflectors(ground_truth: dict[str, Any]) -> list[dict[str, Any]]:
     echoes = []
+    existing_event_ids = {event["event_id"] for event in ground_truth.get("events", [])}
     reflectors = [r for r in ground_truth.get("reflectors", []) if r.get("kind") == "point"]
     for event in ground_truth.get("events", []):
         if event.get("is_echo_source"):
             continue
         for reflector in reflectors:
             reflector_id = reflector.get("reflector_id") or "reflector"
+            echo_event_id = f"{event['event_id']}-echo-{reflector_id}"
+            if echo_event_id in existing_event_ids:
+                continue
             echo = copy.deepcopy(event)
             echo.update(
-                event_id=f"{event['event_id']}-echo-{reflector_id}",
+                event_id=echo_event_id,
                 individual_id=f"{event.get('individual_id', event['event_id'])}-echo-{reflector_id}",
                 is_echo_source=True,
                 echo_of_event_id=event["event_id"],
