@@ -3,19 +3,20 @@
 //! replay-metrics: overlapping events, `individual_id`, echo metadata,
 //! per-event species lists) is a one-file change.
 //!
-//! Current (schema v1) keys per event are written exactly as
-//! `build_ground_truth_payload` in `minimappr/calibration/bundle.py` does.
-//! Everything else is additive: v1 readers ignore unknown keys (only
-//! `geometry.type == "static"` is enforced), so moving sources are written
-//! as their mid-call position with the full path under `trajectory_m`.
+//! Targets ground-truth schema v2 (`docs/field_mode_progress/bundle_format_v2.md`):
+//! `species` entries, `individual_id`, and `trajectory` geometry for moving
+//! sources (waypoints on the shared ns epoch). Extra simulator keys
+//! (`position_m`, `trajectory_m`, `chirps`, …) are ignored by the loader.
 
 use serde_json::{json, Value};
 
 use super::geo::FlatLocalFrame;
-use super::BUNDLE_SCHEMA_VERSION;
 use crate::physics::constants::NANOSECONDS_PER_SECOND;
 use crate::scenario::Scenario;
 use crate::world::{EmissionRecord, PlannedDevice, PlannedEmission, WorldPlan};
+
+/// Ground-truth file schema (independent of the manifest's schema version).
+const GROUND_TRUTH_SCHEMA_VERSION: u32 = 2;
 
 /// Bird calls are scored; their sound source is "manual" (no reference node).
 const GROUND_TRUTH_SOURCE_KIND: &str = "manual";
@@ -48,22 +49,40 @@ fn bird_event(
     let (start_s, end_s) = emission_window_s(plan, emission);
     let position = emission.trajectory.midpoint_position(start_s, end_s);
     let moving = !emission.trajectory.is_stationary();
+    let geometry = if moving {
+        let waypoints: Vec<Value> = emission
+            .trajectory
+            .to_rows()
+            .iter()
+            .map(|[time_s, x, y, z]| {
+                json!({"t_ns": true_time_ns(scenario, *time_s), "position_m": [x, y, z]})
+            })
+            .collect();
+        json!({"type": "trajectory", "waypoints": waypoints})
+    } else {
+        json!({"type": "static", "position_m": position, "position_geo": geo_json(frame, position)})
+    };
+    let species: Vec<Value> = record
+        .species
+        .iter()
+        .map(|label| json!({"label": label, "label_category": record.label_category, "status": "true"}))
+        .collect();
     Some(json!({
-        // --- schema v1 keys (bundle.py build_ground_truth_payload) ---
+        // --- ground-truth schema v2 keys ---
         "event_id": record.event_id,
         "label": record.label,
         "label_category": record.label_category,
         "source": GROUND_TRUTH_SOURCE_KIND,
-        "geometry": {"type": "static", "position_geo": geo_json(frame, position)},
+        "geometry": geometry,
         "start_ns": true_time_ns(scenario, start_s),
         "end_ns": true_time_ns(scenario, end_s),
         "notes": format!("minimappr-sim {} ({})", record.generator_kind, record.origin),
-        // --- additive keys (extended format; ignored by v1 readers) ---
         "individual_id": record.individual_id,
-        "species": record.species,
+        "species": species,
+        "is_echo_source": false,
+        // --- simulator extras (ignored by the loader) ---
         "position_m": position,
         "trajectory_m": if moving { json!(emission.trajectory.to_rows()) } else { Value::Null },
-        "is_echo_source": false,
         "level_db_spl_at_1m": record.level_db_spl_at_1m,
         "generator": record.generator_kind,
         "origin": record.origin,
@@ -146,7 +165,7 @@ pub fn build_ground_truth(plan: &WorldPlan, scenario: &Scenario, frame: &FlatLoc
         reflectors.push(json!({"reflector_id": "ground", "kind": "ground_plane", "height_m": height_m, "reflection_coefficient": coefficient}));
     }
     json!({
-        "schema_version": BUNDLE_SCHEMA_VERSION,
+        "schema_version": GROUND_TRUTH_SCHEMA_VERSION,
         "events": events,
         "reflectors": reflectors,
         "chirps": chirps,
