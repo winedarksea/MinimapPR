@@ -10,7 +10,9 @@ detection of a new entity is held for ``grace_seconds``:
 - the window ends with no fix -> rules fire on the held detection;
 - the entity expires first -> nothing fires.
 
-Timers are asyncio tasks off the ingest hot path; ``stop`` cancels them.
+Timers are asyncio tasks off the ingest hot path. ``stop`` (FusionNode
+shutdown, after the rules workers drained) fires every still-held
+notification at once rather than dropping it, and waits for in-flight fires.
 """
 
 from __future__ import annotations
@@ -39,8 +41,11 @@ class NotificationGraceWindow:
         self._held_by_entity_id: dict[str, _HeldNotification] = {}
         # Entities whose rules already fired: later bouts never re-notify.
         self._notified_entity_ids: set[str] = set()
+        # Every live timer task (held or mid-fire), so ``stop`` can await them.
+        self._timer_tasks: set[asyncio.Task] = set()
         self.fired_after_grace_count = 0
         self.fired_on_localization_count = 0
+        self.fired_on_shutdown_count = 0
 
     @property
     def grace_seconds(self) -> float:
@@ -67,9 +72,10 @@ class NotificationGraceWindow:
             return
         held = _HeldNotification(detection=detection, track=track)
         self._held_by_entity_id[entity_id] = held
-        held.timer_task = asyncio.create_task(
-            self._fire_after_grace(entity_id), name=f"entity-grace-{entity_id}"
-        )
+        timer_task = asyncio.create_task(self._fire_after_grace(entity_id), name=f"entity-grace-{entity_id}")
+        held.timer_task = timer_task
+        self._timer_tasks.add(timer_task)
+        timer_task.add_done_callback(self._timer_tasks.discard)
 
     async def release_for_spatial(self, entity_id: str, detection: Any, track: Any) -> bool:
         """The entity got a fix inside its window: fire once, on this detection."""
@@ -96,12 +102,21 @@ class NotificationGraceWindow:
         self._notified_entity_ids &= live_entity_ids
 
     async def stop(self) -> None:
-        tasks = [held.timer_task for held in self._held_by_entity_id.values() if held.timer_task is not None]
+        """Shutdown: fire every still-held notification now (no lost alerts), then
+        wait for timers that were already firing."""
+        held_items = list(self._held_by_entity_id.items())
         self._held_by_entity_id.clear()
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        for _, held in held_items:
+            if held.timer_task is not None:
+                held.timer_task.cancel()
+        for entity_id, held in held_items:
+            self.fired_on_shutdown_count += 1
+            try:
+                await self.notify_now(entity_id, held.detection, held.track)
+            except Exception:  # noqa: BLE001 - one failing rule must not drop the others
+                _logger.exception("grace-window shutdown flush failed for entity %s", entity_id)
+        if self._timer_tasks:
+            await asyncio.gather(*list(self._timer_tasks), return_exceptions=True)
 
     async def _fire_after_grace(self, entity_id: str) -> None:
         try:

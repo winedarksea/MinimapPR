@@ -5,13 +5,12 @@
 //! Heard-nearby entities are never drawn (they live in the tray), so an omni
 //! detection can never read as "the bird is on top of that node".
 
-use crate::map::bindings::{ensure_layer, remove_layer, set_layer_data};
+use crate::map::bindings::{ensure_layer, json_value_to_js, remove_layer, set_layer_data};
 use crate::state::entities::{BirdEntity, ENTITY_STATE_DIRECTION_KNOWN, ENTITY_STATE_PINPOINTED};
 use crate::state::AppState;
 use leptos::prelude::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use wasm_bindgen::JsValue;
 
 const AREA_LAYER_ID: &str = "bird-entity-areas";
 const POINT_LAYER_ID: &str = "bird-entity-points";
@@ -207,10 +206,8 @@ fn publish(layer_id: &str, spec: serde_json::Value, features: Vec<serde_json::Va
         return;
     }
     let collection = serde_json::json!({ "type": "FeatureCollection", "features": features });
-    // Hand JSON text across: serde_wasm_bindgen turns serde_json objects into
-    // JS `Map`s, which MapLibre cannot read (the interop JSON.parses strings).
-    ensure_layer(layer_id, &JsValue::from_str(&spec.to_string()));
-    set_layer_data(layer_id, &JsValue::from_str(&collection.to_string()));
+    ensure_layer(layer_id, &json_value_to_js(&spec));
+    set_layer_data(layer_id, &json_value_to_js(&collection));
 }
 
 pub fn mount(state: &AppState) {

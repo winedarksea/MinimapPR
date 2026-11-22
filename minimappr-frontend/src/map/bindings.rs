@@ -1,5 +1,12 @@
 use wasm_bindgen::prelude::*;
 
+/// GeoJSON / layer specs cross to the interop as JSON text (it `JSON.parse`s
+/// strings). `serde_wasm_bindgen::to_value` turns `serde_json` objects into JS
+/// `Map`s, which MapLibre and the interop's `data.type` checks cannot read.
+pub fn json_value_to_js(value: &serde_json::Value) -> JsValue {
+    JsValue::from_str(&value.to_string())
+}
+
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = ["globalThis", "mapInterop"], js_name = "init")]
