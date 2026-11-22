@@ -55,6 +55,7 @@ from minimappr.core.environment import StaticEnvironmentProvider
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.cluster_registry import ClusterRegistry
 from minimappr.core.onset_srp_localization_stage import OnsetSrpLocalizationStage
+from minimappr.core.sensor_span_coverage_wait import SensorStreamActivityTracker, await_sensor_span_coverage
 from minimappr.core.onset_cluster_attribution_stage import OnsetClusterAttributor  # Field Mode W3-attribution
 from minimappr.core.ingest_relative_trigger import NoiseFloorRelativeTrigger  # Field Mode W3-attribution
 from minimappr.core.ingest import EnvironmentUpdater, IngestProcessor
@@ -305,6 +306,9 @@ class FusionMetrics:
     # downstream item (e.g. localization buffer miss, classifier suppression).
     # These dicts make the previously-invisible drops countable per reason.
     localization_drops_by_reason: dict[str, int] = field(default_factory=dict)
+    # --- coverage race fix --- why each window-coverage wait returned (see sensor_span_coverage_wait).
+    localization_coverage_wait_stop_reasons: dict[str, int] = field(default_factory=dict)
+    localization_coverage_wait_max_ms: float = 0.0
     classification_drops_by_reason: dict[str, int] = field(default_factory=dict)
     rules_drops_by_reason: dict[str, int] = field(default_factory=dict)
     # Worker exception visibility: unexpected exceptions caught by each worker loop.
@@ -435,6 +439,8 @@ class FusionNode:
         self.beamformer = beamformer or self._create_beamformer()
         self.classification_preprocessor = create_classification_preprocessor(self.localization_config)
         self.localization_preprocessor = create_localization_preprocessor(self.localization_config)
+        # --- coverage race fix --- remembers per-sensor buffer progress across coverage waits.
+        self._sensor_stream_activity = SensorStreamActivityTracker()
         # --- Field Mode W2-onset-srp ---
         onset_config = settings.onset_srp_clustering_config()
         # Field Mode W3-attribution: the stage attaches attribution evidence when its flag is on.
@@ -1748,48 +1754,36 @@ class FusionNode:
         timeout_s: float,
         poll_interval_s: float = 0.005,
     ) -> tuple[bool, list[dict[str, Any]]]:
-        """Yield until at least min_sensors_for_2d sensors have audio covering
-        [center − window/2, center + window/2], or the deadline expires.
+        """Yield until the sensor buffers cover [center ± window/2].
 
-        Returns (ready, last_snapshot). Replaces the legacy fixed 40 ms
-        grace-sleep retry which dropped 96 % of triggers under typical
-        per-sensor ingest jitter (see plan: valiant-launching-whale).
+        ready = at least min(len(sensor_ids), min_sensors_for_2d) sensors covered
+        within `timeout_s`. With the coverage race fix on, the wait then also
+        holds for every other still-streaming node (stall budget + total cap),
+        so a fast tetra no longer wins the race and excludes later nodes.
         """
+        cfg = self.localization_config
         half_window_ns = int(window_seconds / 2 * 1_000_000_000)
-        target_end_ns = center_time_ns + half_window_ns
-        target_start_ns = center_time_ns - half_window_ns
-        # Wait until we have coverage for the smaller of (sensors registered
-        # on this node) and min_sensors_for_2d. Capping at the registered
-        # count preserves the single-sensor / classification-only path that
-        # the legacy code allowed through with whatever window was present.
-        min_needed = max(
-            1,
-            min(len(sensor_ids), int(self.localization_config.min_sensors_for_2d)),
+        min_needed = max(1, min(len(sensor_ids), int(cfg.min_sensors_for_2d)))
+        wait_for_all = bool(cfg.localization_coverage_wait_all_streaming_nodes_enabled)
+        result = await await_sensor_span_coverage(
+            buffer=self.buffer,
+            sensor_ids=sensor_ids,
+            span_start_ns=center_time_ns - half_window_ns,
+            span_end_ns=center_time_ns + half_window_ns,
+            # Stall budget 0 = return as soon as min_needed are covered (pre-fix behaviour).
+            stall_budget_seconds=cfg.localization_coverage_stall_budget_seconds if wait_for_all else 0.0,
+            total_cap_seconds=max(timeout_s, cfg.localization_coverage_total_cap_seconds if wait_for_all else 0.0),
+            poll_interval_seconds=poll_interval_s,
+            activity_tracker=self._sensor_stream_activity,
+            required_covered_count=min_needed,
+            required_coverage_deadline_seconds=timeout_s,
         )
-        deadline = time.monotonic() + max(0.0, timeout_s)
-        snapshot: list[dict[str, Any]] = []
-        while True:
-            snapshot = await self.buffer.snapshot_state(sensor_ids=sensor_ids)
-            covered = 0
-            min_start_ns: int | None = None
-            for state in snapshot:
-                start_ns = state.get("start_time_ns")
-                end_ns = state.get("end_time_ns")
-                if state.get("present") and start_ns is not None and end_ns is not None:
-                    if start_ns <= target_start_ns and end_ns >= target_end_ns:
-                        covered += 1
-                    if min_start_ns is None or start_ns < min_start_ns:
-                        min_start_ns = start_ns
-            if covered >= min_needed:
-                return True, snapshot
-            # If the event's trailing edge sits before the oldest buffered
-            # sample, waiting can't recover it — exit immediately so the
-            # caller can drop with `event_too_old` instead of stalling.
-            if min_start_ns is not None and target_end_ns < min_start_ns:
-                return False, snapshot
-            if time.monotonic() >= deadline:
-                return False, snapshot
-            await asyncio.sleep(poll_interval_s)
+        reasons = self._metrics.localization_coverage_wait_stop_reasons
+        reasons[result.stop_reason] = reasons.get(result.stop_reason, 0) + 1
+        self._metrics.localization_coverage_wait_max_ms = max(
+            self._metrics.localization_coverage_wait_max_ms, result.waited_seconds * 1000.0
+        )
+        return len(result.covered_sensor_ids) >= min_needed, result.snapshot
 
     def _localizer_signature_parameters(self):
         """Cached ``inspect.signature`` parameters for the bound localizer.

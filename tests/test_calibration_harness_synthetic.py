@@ -189,8 +189,13 @@ async def _build_synthetic_bundle(tmp_path: Path) -> Path:
     )
 
 
-@pytest.mark.asyncio
-async def test_synthetic_bundle_full_replay_loop(tmp_path: Path) -> None:
+async def _replay_synthetic_bundle(tmp_path: Path, *, slowed_node_ingest_delay_s: float = 0.0):
+    """Build + replay the synthetic bundle; returns (detections, bundle).
+
+    `slowed_node_ingest_delay_s` sleeps before every node-b frame so the
+    localization worker runs while node-b's matching frame is still missing:
+    the coverage race made deterministic.
+    """
     bundle_path = await _build_synthetic_bundle(tmp_path)
     bundle = load_bundle(bundle_path)
     assert len(bundle.manifest["nodes"]) == 2
@@ -201,6 +206,15 @@ async def test_synthetic_bundle_full_replay_loop(tmp_path: Path) -> None:
         overrides={"trigger_rms": 0.006, "classification_window_seconds": 1.0},
         classifier=_StubToneClassifier(),
     )
+    if slowed_node_ingest_delay_s > 0.0:
+        unslowed_ingest = fusion.ingest
+
+        async def _slowed_ingest(request):
+            if request.node.id == "node-b":
+                await asyncio.sleep(slowed_node_ingest_delay_s)
+            return await unslowed_ingest(request)
+
+        fusion.ingest = _slowed_ingest  # type: ignore[method-assign]
     try:
         accepted = await replay_bundle(fusion, bundle)
         assert accepted > 0
@@ -212,7 +226,10 @@ async def test_synthetic_bundle_full_replay_loop(tmp_path: Path) -> None:
     finally:
         await fusion.stop()
         await storage.close()
+    return detections, bundle
 
+
+def _assert_one_localized_classified_entity(detections, bundle) -> None:
     assert detections, "replay produced no detections"
     report = evaluate_bundle(detections, bundle, EXPECTATIONS)
     assert report.event_recall == 1.0
@@ -222,6 +239,22 @@ async def test_synthetic_bundle_full_replay_loop(tmp_path: Path) -> None:
     assert report.entity_metrics.localized_and_classified_recall == 1.0
     assert report.entity_metrics.duplicate_entities == 0
     assert report.passed, "\n".join(report.errors)
+
+
+@pytest.mark.asyncio
+async def test_synthetic_bundle_full_replay_loop(tmp_path: Path) -> None:
+    detections, bundle = await _replay_synthetic_bundle(tmp_path)
+    _assert_one_localized_classified_entity(detections, bundle)
+
+
+@pytest.mark.asyncio
+async def test_synthetic_bundle_replay_with_slowed_node_keeps_both_nodes(tmp_path: Path) -> None:
+    """Coverage race regression: a node whose frames land after the trigger
+    node's must still be in the solve. Pre-fix, node-a alone satisfied
+    min_sensors_for_2d, and the single-tetra solve was projected to a ~50 m
+    bearing (outside the 15 m entity radius)."""
+    detections, bundle = await _replay_synthetic_bundle(tmp_path, slowed_node_ingest_delay_s=0.03)
+    _assert_one_localized_classified_entity(detections, bundle)
 
 
 def test_evaluate_bundle_flags_failures(tmp_path: Path) -> None:
