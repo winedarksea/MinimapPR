@@ -312,8 +312,9 @@ def localize_onset_clusters(
             far_field_default_range_m=far_field_default_range_m,
             frame_samples=frame_samples,
             minimum_std_m=minimum_std_m,
+            is_window_strongest=rank == 0,
         )
-        for cluster in clusters
+        for rank, cluster in enumerate(clusters)
     ]
     return OnsetClusteringResult(tuple(localized), onset_count, len(frames), consumed_now)
 
@@ -334,6 +335,7 @@ def _finalize_cluster(
     far_field_default_range_m,
     frame_samples,
     minimum_std_m,
+    is_window_strongest: bool,
 ) -> LocalizedOnsetCluster:
     bearing_only = grid.is_direction_grid or all(peak.range_m >= grid.ranges_m.max() for peak in cluster.peaks)
     seed = (
@@ -356,6 +358,9 @@ def _finalize_cluster(
     )
     led = sorted(cluster.led_frame_indices) or sorted(cluster.frame_indices)
     led_frames = [frames[index] for index in led]
+    # Level is a hint, not a gate: the window's strongest cluster stays accepted
+    # (only annotated) so a faint or mislocated real bird is never suppressed;
+    # tentative clusters produce no detection downstream.
     if (
         cluster.status == CLUSTER_STATUS_ACCEPTED
         and len(nodes) > 1
@@ -370,8 +375,9 @@ def _finalize_cluster(
             margin_db=config.level_consistency_margin_db,
         )
     ):
-        cluster.status = CLUSTER_STATUS_TENTATIVE
         cluster.status_reasons.append("level_inconsistent")
+        if not is_window_strongest:
+            cluster.status = CLUSTER_STATUS_TENTATIVE
     contributing = sorted({frame.template_node_id for frame in led_frames})
     loudest = _classification_node_for_cluster(led_frames, node_centroids, refined.position_m, bearing_only)
     envelope_curves = [curve.used_envelope for index in cluster.frame_indices for curve in frames[index].curves]

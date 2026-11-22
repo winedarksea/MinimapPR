@@ -18,6 +18,14 @@ projection unless it beats that projection by more than the timing noise floor
 (`CURVATURE_EVIDENCE_NOISE_MULTIPLIER` interpolated sample periods, RMS).
 Genuine near-field fixtures outside the zone (e.g. 0.27 m from a 5 cm array at
 48 kHz) and all multi-node layouts keep the legacy answer.
+
+Known limits (review 2026-11-22): sources 1-10 m from a lone tetra still
+occasionally (~5% at 2 us TDOA noise) settle at 4-6 apertures as RANGE_REFINED
+with low radial observability, just outside the zone; and a real source inside
+the zone (< ~20 cm, below MinimapPR's 1 m floor) is reported as a bearing,
+since the evidence threshold is the interpolated sample period, not the measured
+TDOA noise. Widening the zone removes the former but also discards correct
+~1 m refined fixes at 48 kHz, so it is left at 4 pending the gtol/LM fix.
 """
 
 from __future__ import annotations

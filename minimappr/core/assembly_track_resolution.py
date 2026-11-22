@@ -36,6 +36,17 @@ class TrackResolution:
     below_display_threshold: bool = False
     partially_bound: bool = False
 
+    @property
+    def persists_detection(self) -> bool:
+        """Whether the detection row may be stored.
+
+        A sub-display result that no visible track surfaces is never stored: a
+        row would leak it through the detections API, and as the canonical
+        (node, label, window) row it would make the reporting policy suppress a
+        later display-level detection of the same species in that window.
+        """
+        return not (self.below_display_threshold and self.track is None)
+
 
 async def resolve_detection_track(
     *,

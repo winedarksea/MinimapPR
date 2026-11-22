@@ -118,3 +118,20 @@ async def test_sub_display_detections_build_hidden_track_until_belief_passes():
     # 0.20 + 0.20 (belief 0.36, hidden) + 0.35 fused -> 0.73: the track surfaces, never alone before.
     assert third.track is not None and third.track.id == first.hidden_track_id
     assert third.track.species_top_probability > 0.5
+
+
+
+async def test_sub_display_detection_is_only_persisted_when_a_visible_track_surfaces_it():
+    """An unsurfaced sub-display row would leak via the API and, as the canonical
+    reporting-window row, suppress a later display-level detection."""
+    manager = TrackManager(Settings(tracking_species_log_odds_enabled=True))
+    hidden = await _resolve_localized(manager, confidence=0.2, features={"below_display_threshold": True})
+    assert hidden.hidden_track_id is not None and not hidden.persists_detection
+    visible = await _resolve_localized(manager, confidence=0.6, timestamp_ns=T0 + 5 * SECOND,
+                                       features={"below_display_threshold": False})
+    assert visible.track is not None and visible.persists_detection
+    weak_on_visible = await _resolve_localized(manager, confidence=0.2, timestamp_ns=T0 + 10 * SECOND,
+                                               features={"below_display_threshold": True})
+    assert weak_on_visible.track is not None and weak_on_visible.persists_detection
+    legacy = await _resolve_localized(TrackManager(Settings()), confidence=0.6, features={})
+    assert legacy.persists_detection

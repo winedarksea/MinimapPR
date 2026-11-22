@@ -134,13 +134,26 @@ def load_bundle_with_echo_truth(bundle_path: Path) -> CalibrationBundle:
     return dataclasses.replace(bundle, events=validate_ground_truth_payload(ground_truth))
 
 
-async def collect_settled_detections(storage) -> list[dict]:
+def _fusion_pipeline_busy(fusion) -> bool:
+    """True while any stage queue still holds unfinished work.
+
+    A count-only settle check stopped collecting after the first detection when
+    the next onset window took longer than the settle time (seen under full-suite
+    CPU load), scoring a real second bird as missed.
+    """
+    if fusion is None:
+        return False
+    queues = (fusion._localization_queue, fusion._classification_queue, fusion._rules_queue)
+    return any(getattr(queue, "_unfinished_tasks", 0) > 0 for queue in queues)
+
+
+async def collect_settled_detections(storage, fusion=None) -> list[dict]:
     deadline = time.monotonic() + DETECTION_DEADLINE_SECONDS
     last_count, last_change = -1, time.monotonic()
     detections: list[dict] = []
     while time.monotonic() < deadline:
         detections = await storage.list_detections(limit=10_000)
-        if len(detections) != last_count:
+        if len(detections) != last_count or _fusion_pipeline_busy(fusion):
             last_count, last_change = len(detections), time.monotonic()
         elif detections and time.monotonic() - last_change >= DETECTION_SETTLE_SECONDS:
             break
@@ -167,7 +180,7 @@ async def replay_and_score_scenario(
     )
     try:
         await replay_bundle(fusion, bundle)
-        detections = await collect_settled_detections(storage)
+        detections = await collect_settled_detections(storage, fusion)
     finally:
         await fusion.stop()
         await storage.close()

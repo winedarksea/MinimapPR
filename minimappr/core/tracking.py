@@ -262,7 +262,7 @@ class TrackManager(TrackManagerFieldModeMethods):
                 label_category=label_category,
                 evidence=evidence,
             )
-            if ghost is not None and ghost.track_id in self._tracks:
+            if ghost is not None:
                 self._revert_relocation(ghost, timestamp_ns)
 
             # Predict existing tracks forward for association gating.
@@ -348,6 +348,7 @@ class TrackManager(TrackManagerFieldModeMethods):
                         classifier_scores=classifier_scores,
                         can_confirm=can_confirm,
                         below_display_threshold=below_display_threshold,
+                        species_evidence=evidence,
                     )
 
                 # --- New track ---
@@ -670,6 +671,7 @@ class TrackManager(TrackManagerFieldModeMethods):
         classifier_scores: dict[str, float] | None,
         can_confirm: bool,
         below_display_threshold: bool = False,
+        species_evidence: dict[str, float] | None = None,
     ) -> TrackState:
         """Resurrect a dormant identity onto this detection."""
         track_id = record.track_id
@@ -762,14 +764,7 @@ class TrackManager(TrackManagerFieldModeMethods):
         self._apply_process_noise(track_id, label_category)
         if self._field_mode.belief_applies(label_category):
             self._field_mode.apply_belief(
-                revived,
-                self._field_mode.detection_evidence(
-                    label=label,
-                    confidence=confidence,
-                    classifier_scores=classifier_scores,
-                    species_evidence=None,
-                ),
-                display_level=not below_display_threshold,
+                revived, species_evidence or {}, display_level=not below_display_threshold
             )
         if record.fingerprint:
             self._fingerprints[track_id] = dict(record.fingerprint)
@@ -853,4 +848,5 @@ class TrackManager(TrackManagerFieldModeMethods):
             for track in self._tracks.values()
             if track.status in (TrackStatus.TENTATIVE.value, TrackStatus.CONFIRMED.value)
             and len(track.contributor_node_ids) >= 2
+            and not self._field_mode.is_hidden(track.id)
         )

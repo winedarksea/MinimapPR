@@ -130,3 +130,47 @@ async def test_display_level_detection_reveals_track_even_with_weak_belief():
                                  label_category="wildlife", confidence=0.6)
     assert not manager.is_track_hidden(track.id)
     assert len(await manager.snapshot()) == 1
+
+
+
+def test_non_evidence_labels_ignored_case_insensitively():
+    """YAMNet reports "Silence"; it must never become a track's species."""
+    belief = SpeciesLogOddsBelief(SpeciesBeliefConfig())
+    belief.update({"Silence": 0.9, "Unknown": 0.9, "robin": 0.3})
+    assert belief.top_labels(5) == ["robin"]
+
+
+async def test_surfaced_track_stays_visible_after_contradicting_weak_bout():
+    """Once a hidden track surfaces it was persisted and shown; it must not flicker off."""
+    manager = _manager(tracking_species_log_odds_enabled=True, tracking_species_display_min_belief=0.5)
+    track = None
+    for index, confidence in enumerate((0.3, 0.45, 0.4)):
+        track = await manager.update(timestamp_ns=T0 + index * 4 * SECOND, position_m=(5, 5, 1),
+                                     label="robin", label_category="wildlife",
+                                     confidence=confidence, below_display_threshold=True)
+    assert not manager.is_track_hidden(track.id)
+    for offset_s in (16, 20):
+        await manager.update(timestamp_ns=T0 + offset_s * SECOND, position_m=(5, 5, 1), label="robin",
+                             label_category="wildlife", confidence=0.001, below_display_threshold=True,
+                             species_evidence={"robin": 0.001})
+    assert manager.field_mode._beliefs[track.id].probability_for("robin") < 0.5
+    assert not manager.is_track_hidden(track.id)
+    assert [t.id for t in await manager.snapshot()] == [track.id]
+
+
+async def test_hidden_track_not_counted_in_multi_node_metric():
+    manager = _manager(tracking_species_log_odds_enabled=True)
+    for index, node_id in enumerate(("node-a", "node-b")):
+        await manager.update(timestamp_ns=T0 + index * SECOND, position_m=(5, 5, 1), label="robin",
+                             label_category="wildlife", confidence=0.2, source_node_id=node_id,
+                             below_display_threshold=True)
+    assert len(await manager.snapshot(include_hidden=True)) == 1
+    assert manager.multi_node_active_count() == 0
+
+
+def test_flags_off_skips_evidence_work():
+    manager = _manager()
+    evidence = manager.field_mode.detection_evidence(
+        label="robin", confidence=0.8, classifier_scores={"robin": 0.8}, species_evidence=None
+    )
+    assert evidence == {}

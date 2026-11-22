@@ -60,3 +60,11 @@ Dependencies: **nalgebra 0.33** (`default-features = false, features = ["std"]`)
 - The layout uses the true heights and the anchor fit uses synthetic GPS. The end-to-end barometer → layout → anchor → anchor-filter chain is exercised only in unit tests.
 - Mixed-model receive group delays (absorbed into the clock offsets, which is consistent for TDOA): confirm in Phase 1.
 - Coordinate nalgebra with the parallel streams (core-solver may add it too); the version and feature set here are `0.33`, `std` only.
+
+## Review fixes (2026-11-22, promotion review)
+
+- `first_arrival`: the self-recording "precursor became strongest" search picked the *latest* comparable peak up to one lead window after the strongest, so a close hand/table reflection (−3 dB, 0.4 ms late, d_ii 5 cm) was taken as the airborne path (≈ 450 µs error). It now runs only when no earlier precursor was already rejected, starts at the known body/air lead, is skipped when that lead is under half a main lobe (the precursor cannot form its own peak), and takes the first qualifying peak. `lead_before_strongest_samples` is now signed (it underflowed `usize` on that path, a debug-build panic). Pre-study tables reproduce unchanged with the fix.
+- `clock_graph`: constraints in components not connected to the reference were judged against the unsolved zero placeholders and reported as rejected outliers; they are now skipped (residual NaN).
+- `acoustic_islands`: a fragment that left island A and joined island B reported A as "absorbed" although A's main body survives; only unclaimed islands are absorbed now.
+- `chirp_round`: a short `self_path_lengths_m` skips pairs instead of panicking. `robust_layout_refine`: non-finite ranges are inactive. `first_arrival`: a leading-edge fraction > 1 no longer panics.
+- `anchor_filter`: documented that every fit must share one local layout frame (align each new MDS layout to the last one first).

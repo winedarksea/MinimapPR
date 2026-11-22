@@ -8,8 +8,9 @@ Three invariants, cheapest first (plan: "Telling a second bird from an echo"):
    an echo.
 2. Level consistency (multi-node only). Nodes nearer a candidate must hold more
    noise-floor-normalised in-band energy than farther ones, within a loose
-   margin; a failure only holds the cluster as tentative (never deletes it),
-   so a faint distant bird is never rejected on level.
+   margin; a failure holds a secondary cluster as tentative and only annotates
+   the window's strongest cluster, so a faint distant bird is never rejected
+   on level.
 3. Persistence (single compact array only). A secondary cluster needs several
    independent onsets; the strongest cluster in a window is always accepted,
    so a single faint note still surfaces.

@@ -1133,7 +1133,7 @@ class Settings:
     onset_analysis_pre_trigger_seconds: float = 0.3
     # Audio after the trigger; the plan's shared 1.0-1.5 s active window.
     onset_analysis_post_trigger_seconds: float = 1.2
-    # Max wait for every node's buffer to cover the analysis span (non-blocking poll).
+    # Max wait without buffer progress for every node to cover the analysis span (non-blocking poll).
     onset_buffer_wait_max_seconds: float = 3.0
     # Log-spaced sub-bands in the onset history (plan: 32-48).
     onset_subband_count: int = 32

@@ -258,7 +258,8 @@ pub fn scipy_trf_least_squares(
         if gradient.amax() < settings.gtol {
             status = Some(1);
         }
-        if status.is_some() || function_evaluations == settings.max_function_evaluations {
+        // `>=` (not SciPy's `==`) so a zero budget cannot spin forever.
+        if status.is_some() || function_evaluations >= settings.max_function_evaluations {
             break;
         }
         let decomposition = sorted_singular_value_decomposition(&jacobian).ok()?;

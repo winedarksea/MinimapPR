@@ -184,3 +184,43 @@ async def test_flock_hop_back_to_ghost_perch_reverts_relocation():
         track = await manager.update(timestamp_ns=timestamp, position_m=position, label="robin",
                                      label_category="wildlife", confidence=0.7)
         assert track.id == (a1.id if step % 2 == 0 else b2.id)
+
+
+
+def test_noisy_far_fix_inside_its_own_uncertainty_is_fused_not_snapped():
+    """A distant bird's fix with ~10 m sigma, 8 m off the perch, is noise, not a hop."""
+    flt = _perched()
+    state = _state()
+    flt.initialize_track("t1", (0.0, 0.0, 0.0))
+    noisy_covariance = [[100.0, 0.0, 0.0], [0.0, 100.0, 0.0], [0.0, 0.0, 100.0]]
+    state = flt.update(state, (8.0, 0.0, 0.0), 8.0, noisy_covariance)
+    assert flt.relocation_count == 0
+    assert 0.0 < state.position_m[0] < 2.0
+
+
+def test_routing_filter_soft_update_only_moves_perched_tracks():
+    cv = KalmanTrackFilter(process_noise=2.0, measurement_noise=1.5,
+                           initial_position_variance=4.0, initial_velocity_variance=16.0)
+    routing = MotionModelRoutingTrackFilter(
+        constant_velocity_filter=cv, perched_filter=_perched(),
+        perched_label_categories=frozenset({"wildlife"}),
+    )
+    routing.initialize_track("bird", (0.0, 0.0, 0.0))
+    routing.set_track_motion_category("bird", "wildlife", (0.0, 0.0, 0.0))
+    routing.initialize_track("drone", (0.0, 0.0, 0.0))
+    assert routing.soft_position_update("bird", (1.0, 0.0, 0.0))
+    assert routing.predict(_state("bird"), 1.0).position_m == (1.0, 0.0, 0.0)
+    assert not routing.soft_position_update("drone", (1.0, 0.0, 0.0))
+
+
+async def test_ghost_of_dropped_track_is_not_reverted():
+    manager = TrackManager(Settings(tracking_perched_filter_enabled=True))
+    ids = await _intermittent_bird(manager, [(10.0, 5.0, 2.0), (25.0, 5.0, 2.0)], [0.0, 8.0])
+    assert len(set(ids)) == 1
+    track = (await manager.snapshot())[0]
+    track.status = "dropped"
+    await manager.update(timestamp_ns=T0 + 10 * SECOND, position_m=(10.0, 5.0, 2.0), label="robin",
+                         label_category="wildlife", confidence=0.7)
+    snapshot = await manager.snapshot()
+    assert manager.field_mode.relocation_gate.relocations_reverted == 0
+    assert next(t for t in snapshot if t.id == track.id).status == "dropped"

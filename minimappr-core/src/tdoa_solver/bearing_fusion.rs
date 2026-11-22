@@ -158,8 +158,9 @@ pub fn fuse_bearings(
         for second in &selected[index + 1..] {
             let baseline_m = (vector(&first.origin_m) - vector(&second.origin_m)).norm();
             let allowed_s = config.window_seconds + baseline_m / speed;
+            // abs_diff: `(a - b).abs()` overflows (panics in debug) on extreme stamps.
             let separation_s =
-                (first.event_time_ns - second.event_time_ns).abs() as f64 / NANOSECONDS_PER_SECOND;
+                first.event_time_ns.abs_diff(second.event_time_ns) as f64 / NANOSECONDS_PER_SECOND;
             if separation_s > allowed_s {
                 return Err(BearingFusionRejection::Stale);
             }
