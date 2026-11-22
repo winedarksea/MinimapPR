@@ -52,6 +52,18 @@ impl Default for NetworkSpec {
     }
 }
 
+/// One encoded frame on its way from one device to another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutgoingFrame {
+    pub from: usize,
+    pub to: usize,
+    pub frame_bytes: usize,
+    pub kind: u16,
+    /// Clips: serialised on the sender's uplink below control messages.
+    pub bulk: bool,
+    pub is_clip: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ActiveTransport {
     Relay,
@@ -176,7 +188,8 @@ impl SimulatedNetwork {
     }
 
     /// Returns the delivery time, or `None` if unreachable or lost.
-    pub fn send(&mut self, from: usize, to: usize, frame_bytes: usize, kind: u16, bulk: bool, is_clip: bool, world: &AcousticWorld, time_s: f64) -> Option<f64> {
+    pub fn send(&mut self, frame: &OutgoingFrame, world: &AcousticWorld, time_s: f64) -> Option<f64> {
+        let OutgoingFrame { from, to, frame_bytes, kind, bulk, is_clip } = *frame;
         self.stats.messages_sent += 1;
         if from == to {
             if !self.alive[from] {

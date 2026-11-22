@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::protocol::detection_messages::{ClipPayload, ReadinessAnswer};
+use crate::protocol::detection_messages::{ClipPayload, ReadinessAnswer, ReadinessQuery};
 use crate::protocol::wire_codes::SpeciesScore;
 use crate::protocol::NodeId;
 
@@ -72,7 +72,10 @@ pub struct RequestedClip {
 pub enum PendingStage {
     AwaitingReadiness {
         deadline_ms: MeshMilliseconds,
-        queries: BTreeMap<NodeId, u32>,
+        /// When unanswered queries are re-sent once (a 20 B query is cheap;
+        /// a lost one would otherwise silently drop that node from the call).
+        retry_at_ms: Option<MeshMilliseconds>,
+        queries: BTreeMap<NodeId, ReadinessQuery>,
         answers: BTreeMap<NodeId, ReadinessAnswer>,
     },
     FetchingClips {

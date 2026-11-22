@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::layout::robust_layout_refine::{solve_layout, RangeMeasurement};
+use crate::layout::robust_layout_refine::{solve_layout, LayoutSolution, RangeMeasurement};
 use crate::protocol::session_messages::ChirpArrivalReport;
 use crate::protocol::wire_codes::MotionState;
 use crate::protocol::NodeId;
@@ -23,6 +23,9 @@ use super::config::{IslandSyncConfig, DEVICE_SAMPLE_RATE_HZ};
 const WALKING_MOTION_ENERGY: f64 = 10.0;
 /// Ranges a node needs for a unique 2D position (also the triangle size).
 const MINIMUM_RANGES_FOR_UNIQUE_PLACEMENT: usize = 3;
+/// Rejected ranges that mark one node's whole round as suspect.
+const SUSPECT_NODE_REJECTED_RANGES: usize = 2;
+const MAXIMUM_SUSPECT_NODE_DROPS: usize = 2;
 
 #[derive(Debug, Clone)]
 pub struct IslandRoundInput<'round> {
@@ -224,8 +227,37 @@ pub fn solve_island_round(
         }
         placeable.remove(&weakest);
     }
-    if placeable.len() >= 2 {
-        let heights = vec![config.assumed_phone_height_m; participants.len()];
+    if let Some((subset, layout)) = solve_placeable_layout(placeable, &ranges, config) {
+        for (position_in_subset, &participant) in subset.iter().enumerate() {
+            let node = participants[participant];
+            layout_positions_m.insert(node, layout.positions_m[position_in_subset]);
+            layout_sigmas_m.insert(node, layout.horizontal_sigmas_m[position_in_subset]);
+        }
+    }
+    Some(IslandRoundSolution {
+        reference_node,
+        reference_time_s,
+        clock_offsets,
+        ranged_pairs,
+        layout_positions_m,
+        layout_sigmas_m,
+        walking_nodes: walking.iter().map(|&index| participants[index]).collect(),
+    })
+}
+
+/// Solve the layout over the placeable participants. A node with several
+/// rejected ranges had them all biased together (a capture stall inside its
+/// round shifts every interval it measured), so it is dropped and the
+/// layout re-solved; it keeps its previous position via the engine.
+fn solve_placeable_layout(
+    mut placeable: BTreeSet<usize>,
+    ranges: &[RangeMeasurement],
+    config: &IslandSyncConfig,
+) -> Option<(Vec<usize>, LayoutSolution)> {
+    for _attempt in 0..=MAXIMUM_SUSPECT_NODE_DROPS {
+        if placeable.len() < 2 {
+            return None;
+        }
         // Unranged participants would leave the MDS graph disconnected, so
         // the layout is solved over the placeable subset only.
         let subset: Vec<usize> = placeable.iter().copied().collect();
@@ -240,22 +272,24 @@ pub fn solve_island_round(
                 })
             })
             .collect();
-        let solved = solve_layout(subset.len(), &heights[..subset.len()], &subset_ranges, &config.layout_refine);
-        if let Some(layout) = solved.ok().filter(|layout| layout.is_rigid) {
-            for (position_in_subset, &participant) in subset.iter().enumerate() {
-                let node = participants[participant];
-                layout_positions_m.insert(node, layout.positions_m[position_in_subset]);
-                layout_sigmas_m.insert(node, layout.horizontal_sigmas_m[position_in_subset]);
+        let heights = vec![config.assumed_phone_height_m; subset.len()];
+        let layout = solve_layout(subset.len(), &heights, &subset_ranges, &config.layout_refine)
+            .ok()
+            .filter(|layout| layout.is_rigid)?;
+        let mut rejected_per_node = vec![0usize; subset.len()];
+        for &index in &layout.rejected_measurements {
+            rejected_per_node[subset_ranges[index].node_i] += 1;
+            rejected_per_node[subset_ranges[index].node_j] += 1;
+        }
+        let suspect = (0..subset.len())
+            .max_by_key(|&k| rejected_per_node[k])
+            .filter(|&k| rejected_per_node[k] >= SUSPECT_NODE_REJECTED_RANGES && subset.len() > MINIMUM_RANGES_FOR_UNIQUE_PLACEMENT);
+        match suspect {
+            Some(k) => {
+                placeable.remove(&subset[k]);
             }
+            None => return Some((subset, layout)),
         }
     }
-    Some(IslandRoundSolution {
-        reference_node,
-        reference_time_s,
-        clock_offsets,
-        ranged_pairs,
-        layout_positions_m,
-        layout_sigmas_m,
-        walking_nodes: walking.iter().map(|&index| participants[index]).collect(),
-    })
+    None
 }

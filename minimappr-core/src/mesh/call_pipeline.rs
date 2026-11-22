@@ -20,6 +20,9 @@ use super::{MeshMilliseconds, MessageRecipient, OutboundMessage};
 
 pub use super::call_pipeline_types::*;
 
+/// Unanswered readiness queries are re-sent once at timeout / this.
+const READINESS_RETRY_FRACTION_DIVISOR: u64 = 2;
+
 #[derive(Debug, Clone, Default)]
 pub struct CallPipeline {
     pending: VecDeque<PendingCall>,
@@ -109,18 +112,16 @@ impl CallPipeline {
                     }
                     let Some(node_mapping) = ctx.engine.clock_mapping(node) else { continue };
                     let query_id = self.allocate_message_id();
-                    queries.insert(node, query_id);
+                    let query = ReadinessQuery {
+                        query_id,
+                        target_node_id: node,
+                        centre_device_sample_index: node_mapping.node_sample_index_from_reference_seconds(centre_reference_s),
+                        half_window_samples: (half_window_s * DEVICE_SAMPLE_RATE_HZ) as u32,
+                        band,
+                    };
+                    queries.insert(node, query.clone());
                     self.counters.readiness_queries_sent += 1;
-                    messages.push(OutboundMessage::control(
-                        MessageRecipient::Node(node),
-                        FieldMessage::ReadinessQuery(ReadinessQuery {
-                            query_id,
-                            target_node_id: node,
-                            centre_device_sample_index: node_mapping.node_sample_index_from_reference_seconds(centre_reference_s),
-                            half_window_samples: (half_window_s * DEVICE_SAMPLE_RATE_HZ) as u32,
-                            band,
-                        }),
-                    ));
+                    messages.push(OutboundMessage::control(MessageRecipient::Node(node), FieldMessage::ReadinessQuery(query)));
                 }
                 let mut species_belief: Vec<SpeciesScore> = Vec::new();
                 merge_species(&mut species_belief, &detection.species_scores);
@@ -136,6 +137,7 @@ impl CallPipeline {
                     detections: vec![(detection.node_id, detection.local_sequence)],
                     stage: PendingStage::AwaitingReadiness {
                         deadline_ms: now_ms + config.readiness_answer_timeout_ms,
+                        retry_at_ms: Some(now_ms + config.readiness_answer_timeout_ms / READINESS_RETRY_FRACTION_DIVISOR),
                         queries,
                         answers: BTreeMap::new(),
                     },
@@ -173,7 +175,7 @@ impl CallPipeline {
         self.counters.readiness_answers_received += 1;
         for call in self.pending.iter_mut() {
             if let PendingStage::AwaitingReadiness { queries, answers, .. } = &mut call.stage {
-                if queries.get(&answer.node_id) == Some(&answer.query_id) {
+                if queries.get(&answer.node_id).map(|query| query.query_id) == Some(answer.query_id) {
                     answers.insert(answer.node_id, answer.clone());
                     return;
                 }
@@ -347,9 +349,22 @@ impl CallPipeline {
         while index < self.pending.len() {
             let before = self.pending.len();
             match &self.pending[index].stage {
-                PendingStage::AwaitingReadiness { deadline_ms, queries, answers } => {
+                PendingStage::AwaitingReadiness { deadline_ms, queries, answers, retry_at_ms } => {
                     if now_ms >= *deadline_ms || answers.len() == queries.len() {
                         messages.extend(self.request_clips(index, ctx, now_ms));
+                    } else if retry_at_ms.is_some_and(|retry| now_ms >= retry) {
+                        let unanswered: Vec<ReadinessQuery> = queries
+                            .iter()
+                            .filter(|(node, _)| !answers.contains_key(node))
+                            .map(|(_, query)| query.clone())
+                            .collect();
+                        if let PendingStage::AwaitingReadiness { retry_at_ms, .. } = &mut self.pending[index].stage {
+                            *retry_at_ms = None;
+                        }
+                        self.counters.readiness_queries_sent += unanswered.len() as u64;
+                        messages.extend(unanswered.into_iter().map(|query| {
+                            OutboundMessage::control(MessageRecipient::Node(query.target_node_id), FieldMessage::ReadinessQuery(query))
+                        }));
                     }
                 }
                 PendingStage::FetchingClips { deadline_ms, requests, received, .. } => {

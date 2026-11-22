@@ -29,6 +29,17 @@ const CONTOUR_SIGMA_MULTIPLIER: f64 = 2.0;
 /// A successor's call ids start at `term << 32`.
 const CALL_ID_TERM_SHIFT_BITS: u32 = 32;
 
+/// What a node knows when it becomes host.
+#[derive(Debug, Clone, Copy)]
+pub struct HostTakeover<'mirror> {
+    pub host_node_id: NodeId,
+    pub mirror_entries: &'mirror [EventLogEntry],
+    pub host_term: u32,
+    pub reason: SessionChangeReasonCode,
+    pub preference: SessionTransportPreference,
+    pub cell: CellLinkQuality,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum HostInput {
     Tick,
@@ -121,17 +132,9 @@ impl FieldHostStateMachine {
         (host, actions)
     }
 
-    /// Take over from a mirror at `host_term` (handover or host death).
-    pub fn take_over(
-        host_node_id: NodeId,
-        mirror_entries: &[EventLogEntry],
-        host_term: u32,
-        reason: SessionChangeReasonCode,
-        config: MeshConfig,
-        preference: SessionTransportPreference,
-        cell: CellLinkQuality,
-        now_ms: MeshMilliseconds,
-    ) -> (Self, Vec<HostAction>) {
+    /// Take over from a mirror (handover or host death).
+    pub fn take_over(takeover: HostTakeover<'_>, config: MeshConfig, now_ms: MeshMilliseconds) -> (Self, Vec<HostAction>) {
+        let HostTakeover { host_node_id, mirror_entries, host_term, reason, preference, cell } = takeover;
         let restored = restore_from_mirror(mirror_entries);
         let inherited = restored.active_transport.unwrap_or(SessionTransportCode::CloudRelay);
         let transport = HostTransportPolicy::inherit(preference, cell, inherited);

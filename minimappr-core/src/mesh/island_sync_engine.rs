@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::layout::gps_anchor_fit::{fit_layout_to_gps, weighted_kabsch_2d, AnchorFit, ChiralityCue, GpsFix, RigidTransform2d};
+use crate::layout::gps_anchor_fit::{fit_layout_to_gps, AnchorFit, ChiralityCue, GpsFix};
 use crate::protocol::mesh_messages::ChirpDirectionReport;
 use crate::protocol::session_messages::ChirpArrivalReport;
 use crate::protocol::NodeId;
@@ -19,6 +19,7 @@ use crate::sync::clock_filter::{ClockUpdateOutcome, PhoneClockFilter};
 
 use super::chirality_cue::chirality_from_bearing_pair;
 use super::clock_mapping::NodeClockMapping;
+use super::layout_frames::{layouts_are_reflected, previous_to_new_frame};
 use super::config::IslandSyncConfig;
 use super::island_round_solver::IslandRoundSolution;
 use super::MeshMilliseconds;
@@ -40,59 +41,6 @@ pub struct IslandLayout {
 const DECISIVE_CUE_SIGMA_MULTIPLIER: f64 = 3.0;
 /// Bearings kept to pair with the next one from the same reporter.
 const REMEMBERED_DIRECTION_REPORTS: usize = 32;
-/// Common nodes needed to carry positions between two layout frames.
-const MINIMUM_COMMON_NODES_FOR_FRAME_CHANGE: usize = 2;
-/// Minimum common nodes for a reflection test between two layouts.
-const MINIMUM_COMMON_NODES_FOR_REFLECTION_TEST: usize = 3;
-/// Cross-covariance determinants below this (m⁴) mean a degenerate overlap.
-const REFLECTION_TEST_DETERMINANT_FLOOR_M4: f64 = 1e-6;
-
-/// Whether `new` is a mirror image of `old` over their common nodes
-/// (sign of the 2×2 cross-covariance determinant); `None` if degenerate.
-pub fn layouts_are_reflected(old: &IslandLayout, new: &IslandLayout) -> Option<bool> {
-    let common: Vec<([f64; 3], [f64; 3])> = old
-        .local_positions_m
-        .iter()
-        .filter_map(|(node, a)| new.local_positions_m.get(node).map(|b| (*a, *b)))
-        .collect();
-    if common.len() < MINIMUM_COMMON_NODES_FOR_REFLECTION_TEST {
-        return None;
-    }
-    let count = common.len() as f64;
-    let mean = |pick: fn(&([f64; 3], [f64; 3])) -> [f64; 3]| {
-        let sum = common.iter().map(pick).fold([0.0; 2], |acc, p| [acc[0] + p[0], acc[1] + p[1]]);
-        [sum[0] / count, sum[1] / count]
-    };
-    let (old_mean, new_mean) = (mean(|pair| pair.0), mean(|pair| pair.1));
-    let mut h = [[0.0; 2]; 2];
-    for (a, b) in &common {
-        let (da, db) = ([a[0] - old_mean[0], a[1] - old_mean[1]], [b[0] - new_mean[0], b[1] - new_mean[1]]);
-        for row in 0..2 {
-            for column in 0..2 {
-                h[row][column] += da[row] * db[column];
-            }
-        }
-    }
-    let determinant = h[0][0] * h[1][1] - h[0][1] * h[1][0];
-    (determinant.abs() > REFLECTION_TEST_DETERMINANT_FLOOR_M4).then_some(determinant < 0.0)
-}
-
-/// Rigid map from the previous layout's frame into a new solve's frame over
-/// their common nodes (reflection allowed); `None` with fewer than two.
-fn previous_to_new_frame(previous: &IslandLayout, new: &IslandLayout) -> Option<RigidTransform2d> {
-    let common: Vec<([f64; 2], [f64; 2])> = previous
-        .local_positions_m
-        .iter()
-        .filter_map(|(node, a)| new.local_positions_m.get(node).map(|b| ([a[0], a[1]], [b[0], b[1]])))
-        .collect();
-    if common.len() < MINIMUM_COMMON_NODES_FOR_FRAME_CHANGE {
-        return None;
-    }
-    let mirrored = layouts_are_reflected(previous, new) == Some(true);
-    let (source, target): (Vec<[f64; 2]>, Vec<[f64; 2]>) = common.into_iter().unzip();
-    Some(weighted_kabsch_2d(&source, &target, &vec![1.0; source.len()], mirrored))
-}
-
 #[derive(Debug, Clone)]
 pub struct IslandState {
     pub island_id: u32,

@@ -2,7 +2,7 @@
 //! state machines and carries out their actions (network sends, chirps,
 //! listen windows, takeover, transport switches, step-down).
 
-use minimappr_core::mesh::host_state_machine::{FieldHostStateMachine, HostAction, HostInput};
+use minimappr_core::mesh::host_state_machine::{FieldHostStateMachine, HostAction, HostInput, HostTakeover};
 use minimappr_core::mesh::node_state_machine::{DeviceStatusChange, LocalClassification, NodeAction, NodeInput};
 use minimappr_core::mesh::{MessageRecipient, OutboundMessage, TrafficClass};
 use minimappr_core::protocol::mesh_messages::ChirpDirectionReport;
@@ -15,7 +15,7 @@ use crate::device_harness::DeviceAudioView;
 use crate::run_metrics::HostTenure;
 use crate::scenario_runner::{EventPayload, ScenarioRun, MILLISECONDS_PER_SECOND};
 use crate::seeded_random::hashed_gaussian;
-use crate::simulated_network::ActiveTransport;
+use crate::simulated_network::{ActiveTransport, OutgoingFrame};
 
 /// Headroom changes smaller than this are not re-reported.
 const HEADROOM_REPORT_STEP: f64 = 0.02;
@@ -56,7 +56,8 @@ impl ScenarioRun {
             if to >= self.devices.len() {
                 continue;
             }
-            if let Some(arrival) = self.network.send(from, to, frame.len(), kind, bulk, is_clip, &self.world, self.now_s) {
+            let outgoing = OutgoingFrame { from, to, frame_bytes: frame.len(), kind, bulk, is_clip };
+            if let Some(arrival) = self.network.send(&outgoing, &self.world, self.now_s) {
                 self.schedule(arrival, EventPayload::Deliver { to, from: NodeId(from as u32), frame: frame.clone() });
             }
         }
@@ -106,16 +107,15 @@ impl ScenarioRun {
                         continue;
                     }
                     let entries = self.devices[device].node.mirror.entries().to_vec();
-                    let (host, host_actions) = FieldHostStateMachine::take_over(
-                        NodeId(device as u32),
-                        &entries,
+                    let takeover = HostTakeover {
+                        host_node_id: NodeId(device as u32),
+                        mirror_entries: &entries,
                         host_term,
                         reason,
-                        self.spec.mesh.clone(),
-                        self.spec.transport_preference,
-                        self.network.cell[device],
-                        self.now_ms(),
-                    );
+                        preference: self.spec.transport_preference,
+                        cell: self.network.cell[device],
+                    };
+                    let (host, host_actions) = FieldHostStateMachine::take_over(takeover, self.spec.mesh.clone(), self.now_ms());
                     self.metrics.host_tenures.push(HostTenure { device, host_term: host.host_term, started_s: self.now_s });
                     self.devices[device].host = Some(host);
                     self.apply_host_actions(device, host_actions);

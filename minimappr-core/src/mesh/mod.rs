@@ -38,6 +38,7 @@ pub mod host_sync_pipeline;
 pub mod host_transport_policy;
 pub mod island_round_solver;
 pub mod island_sync_engine;
+pub mod layout_frames;
 pub mod local_tangent_plane;
 pub mod node_host_link;
 pub mod node_message_handling;

@@ -193,7 +193,7 @@ impl AcousticWorld {
                             stalls.push(CaptureStall {
                                 time_s,
                                 duration_s: uniform_in(seed, "stall_length", index, stall_index, config.stall_duration_range_s),
-                                reported: stall_index % 2 == 0,
+                                reported: stall_index.is_multiple_of(2),
                             });
                         }
                         stall_index += 1;
