@@ -150,10 +150,27 @@ impl MirroredEventLog {
         self.entries.split_off(keep)
     }
 
+    /// Drop every entry written in `host_term` or later. Two hosts that
+    /// claimed one term at once write entries with equal `(sequence, term)`,
+    /// so once the tie is decided the contested term cannot be told apart
+    /// and is re-fetched from the winner.
+    pub fn truncate_from_term(&mut self, host_term: u32) -> Vec<EventLogEntry> {
+        let keep = self
+            .entries
+            .iter()
+            .position(|entry| entry.host_term >= host_term)
+            .unwrap_or(self.entries.len());
+        self.entries.split_off(keep)
+    }
+
     pub fn apply(&mut self, append: &EventLogAppend) -> MirrorApplyOutcome {
         let mut outcome = MirrorApplyOutcome::default();
         for entry in &append.entries {
             let head = self.head_sequence();
+            // Sequences start at 1; a 0 is malformed and would underflow below.
+            if entry.sequence == 0 {
+                continue;
+            }
             if entry.sequence <= head {
                 let index = (entry.sequence - 1) as usize;
                 let conflicting = self
@@ -253,5 +270,32 @@ mod tests {
         let outcome = mirror.apply(&append);
         assert_eq!(outcome.discarded_entries.len(), 1);
         assert_eq!(mirror.entries(), successor.entries());
+    }
+
+    #[test]
+    fn malformed_zero_sequence_is_ignored() {
+        let mut log = SessionEventLog::default();
+        log.append_detection_if_new(1, &detection(1, 1));
+        let mut mirror = MirroredEventLog::default();
+        mirror.apply(&append_of(&log, 0));
+        let mut bogus = append_of(&log, 0);
+        bogus.entries[0].sequence = 0;
+        bogus.entries[0].host_term = 9;
+        let outcome = mirror.apply(&bogus);
+        assert!(outcome.applied_records.is_empty() && outcome.discarded_entries.is_empty());
+        assert_eq!(mirror.entries(), log.entries());
+    }
+
+    #[test]
+    fn contested_term_is_dropped_from_the_mirror() {
+        let mut log = SessionEventLog::default();
+        log.append_detection_if_new(1, &detection(1, 1));
+        log.append_detection_if_new(2, &detection(1, 2));
+        log.append_detection_if_new(2, &detection(1, 3));
+        let mut mirror = MirroredEventLog::default();
+        mirror.apply(&append_of(&log, 0));
+        let discarded = mirror.truncate_from_term(2);
+        assert_eq!(discarded.len(), 2);
+        assert_eq!(mirror.head_sequence(), 1);
     }
 }

@@ -193,7 +193,9 @@ impl TdoaSeedRefiner for JointLmSeedRefiner {
                 height_prior,
             };
             let outcome = refine_position_with_retry(&model, position, 1.0);
-            if !outcome.position_m.iter().all(|value| value.is_finite()) {
+            // Like the core solvers: an unconverged LM point is not a fix,
+            // and its (JᵀJ)⁻¹ would be an ellipse around the wrong place.
+            if !outcome.converged {
                 return Err(TdoaSolverError::RefinementDidNotConverge);
             }
             position = outcome.position_m;
@@ -253,5 +255,86 @@ impl TdoaSeedRefiner for JointLmSeedRefiner {
                 rejected_observation_indices: rejected,
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SOUND_SPEED_MPS: f64 = 343.0;
+    const TIMING_STD_S: f64 = 2e-5;
+
+    fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
+        ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+    }
+
+    /// Pairs against node 0, exact TDOAs plus `bias_s` on pair `biased_pair`.
+    fn seed_for(source: [f64; 3], nodes: &[[f64; 3]], start: [f64; 3], biased_pair: Option<(usize, f64)>) -> LmSeed {
+        let observations = (1..nodes.len())
+            .map(|index| {
+                let bias = biased_pair.filter(|(pair, _)| *pair == index - 1).map_or(0.0, |(_, bias)| bias);
+                PairTdoaObservation {
+                    sensor_a_position_m: nodes[0],
+                    sensor_b_position_m: nodes[index],
+                    sensor_a_node: 0,
+                    sensor_b_node: index,
+                    measured_tdoa_s: (distance(source, nodes[0]) - distance(source, nodes[index])) / SOUND_SPEED_MPS + bias,
+                    relative_peak_coherence: 1.0,
+                    weight: 1.0,
+                    lag_resolution_s: TIMING_STD_S,
+                }
+            })
+            .collect();
+        LmSeed {
+            initial_position_m: start,
+            far_field_direction: None,
+            observations,
+            sound_speed_mps: SOUND_SPEED_MPS,
+            source_height_bounds_m: [0.0, 10.0],
+            huber_knee: 1.0,
+            srp_score: 0.0,
+        }
+    }
+
+    fn refiner(node_count: usize) -> JointLmSeedRefiner {
+        JointLmSeedRefiner { config: SeedRefinerConfig::default(), node_position_std_m: vec![0.05; node_count] }
+    }
+
+    fn spread_layout() -> Vec<[f64; 3]> {
+        vec![[0.0, 0.0, 1.0], [12.0, 0.0, 1.5], [0.0, 11.0, 0.5], [-10.0, -3.0, 2.0], [7.0, -9.0, 1.0], [-4.0, 9.0, 3.0]]
+    }
+
+    #[test]
+    fn recovers_source_with_region_that_covers_it() {
+        let nodes = spread_layout();
+        let source = [3.0, 4.0, 5.0];
+        let fix = refiner(nodes.len()).refine(&seed_for(source, &nodes, [4.0, 2.0, 4.0], None)).expect("fix");
+        let horizontal_error = (fix.position_m[0] - source[0]).hypot(fix.position_m[1] - source[1]);
+        assert!(horizontal_error < 0.5, "error {horizontal_error}");
+        assert!(horizontal_error <= 4.0 * fix.horizontal_major_sigma_m(), "σ {}", fix.horizontal_major_sigma_m());
+        assert!(fix.rejected_observation_indices.is_empty());
+        assert_eq!(fix.degrees_of_freedom, nodes.len() - 1 + 1 - POSITION_DIMENSIONS);
+    }
+
+    /// Needs redundancy: with five pairs a 1.4 m bias can be absorbed by the
+    /// fit and the wrong pair rejected (worst-first is not a robust loss).
+    #[test]
+    fn rejects_one_grossly_biased_pair() {
+        let mut nodes = spread_layout();
+        nodes.extend([[9.0, 8.0, 1.0], [-8.0, -10.0, 1.5], [14.0, -2.0, 0.5]]);
+        let source = [3.0, 4.0, 5.0];
+        let bias_s = 4.0e-3;
+        let fix = refiner(nodes.len()).refine(&seed_for(source, &nodes, [4.0, 2.0, 4.0], Some((2, bias_s)))).expect("fix");
+        assert_eq!(fix.rejected_observation_indices, vec![2]);
+        let horizontal_error = (fix.position_m[0] - source[0]).hypot(fix.position_m[1] - source[1]);
+        assert!(horizontal_error < 0.5, "error {horizontal_error}");
+    }
+
+    #[test]
+    fn too_few_pairs_is_an_error() {
+        let nodes = &spread_layout()[..2];
+        let result = refiner(2).refine(&seed_for([3.0, 4.0, 5.0], nodes, [4.0, 2.0, 4.0], None));
+        assert!(matches!(result, Err(TdoaSolverError::InsufficientMeasurements { .. })));
     }
 }

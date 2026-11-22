@@ -84,8 +84,13 @@ impl FieldNodeStateMachine {
                 if !outcome.accepted {
                     return actions;
                 }
-                if announcement.event_log_head_sequence < self.mirror.head_sequence() && outcome.host_changed {
-                    let discarded = self.mirror.truncate_to(announcement.event_log_head_sequence);
+                if outcome.host_changed {
+                    // Entries of the new host's term may be a same-term
+                    // rival's (simultaneous takeover); the winner resends them.
+                    let mut discarded = self.mirror.truncate_from_term(announcement.host_term);
+                    if announcement.event_log_head_sequence < self.mirror.head_sequence() {
+                        discarded.extend(self.mirror.truncate_to(announcement.event_log_head_sequence));
+                    }
                     self.requeue_discarded(&discarded);
                 }
                 if outcome.rejoined_from_solo {
@@ -106,7 +111,10 @@ impl FieldNodeStateMachine {
                 vec![NodeAction::BecomeHost { host_term: handover.host_term, reason: handover.reason }]
             }
             FieldMessage::EventLogAppend(append) => {
-                if append.host_term < self.link.host_term {
+                // A same-term append from a host we do not follow is a tie
+                // loser's: its `(sequence, term)` pairs would pass as ours.
+                let from_same_term_rival = append.host_term == self.link.host_term && append.host_node_id != self.link.host_node_id;
+                if append.host_term < self.link.host_term || from_same_term_rival {
                     return Vec::new();
                 }
                 self.link.host_head_sequence = self.link.host_head_sequence.max(append.host_head_sequence);
