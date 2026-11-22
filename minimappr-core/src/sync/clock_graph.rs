@@ -70,7 +70,8 @@ pub struct ClockGraphSolution {
     /// local_node − local_reference; `None` when not connected to the reference.
     pub offsets_s: Vec<Option<f64>>,
     pub offset_sigmas_s: Vec<Option<f64>>,
-    /// Final residual / σ per constraint (input order).
+    /// Final residual / σ per constraint (input order); NaN for constraints
+    /// outside the reference node's component, ∞ for out-of-range nodes.
     pub normalized_residuals: Vec<f64>,
     /// Indices of constraints rejected as outliers.
     pub rejected_constraints: Vec<usize>,
@@ -178,7 +179,7 @@ pub fn solve_clock_graph(
             }
             let mut changed = false;
             for (index, constraint) in constraints.iter().enumerate() {
-                if !active[index] {
+                if !active[index] || !reached[constraint.node_i] {
                     continue;
                 }
                 let residual = offsets[constraint.node_j]
@@ -198,10 +199,12 @@ pub fn solve_clock_graph(
             }
         }
         // Reject the single worst constraint beyond the threshold, if any, and re-solve.
+        // Constraints in components not connected to the reference were not
+        // solved (their nodes sit at 0), so they are never judged.
         let worst = constraints
             .iter()
             .enumerate()
-            .filter(|(index, _)| active[*index])
+            .filter(|(index, c)| active[*index] && reached[c.node_i])
             .map(|(index, c)| {
                 let residual = offsets[c.node_j] - offsets[c.node_i] - c.offset_j_minus_i_s;
                 (index, (residual / sigmas[index]).abs())
@@ -224,6 +227,10 @@ pub fn solve_clock_graph(
         .map(|(index, c)| {
             if c.node_i >= node_count || c.node_j >= node_count {
                 return f64::INFINITY;
+            }
+            if !reached[c.node_i] || !reached[c.node_j] {
+                // Not part of the reference component: no residual to report.
+                return f64::NAN;
             }
             (offsets[c.node_j] - offsets[c.node_i] - c.offset_j_minus_i_s) / sigmas[index]
         })
@@ -321,5 +328,16 @@ mod tests {
         let solution = solve_clock_graph(4, 0, &constraints, &ClockGraphConfig::default()).unwrap();
         assert!(solution.offsets_s[1].is_some());
         assert!(solution.offsets_s[2].is_none() && solution.offsets_s[3].is_none());
+        // The 2–3 edge belongs to another component: never solved, so it
+        // must not be reported as an outlier against the zero placeholder.
+        assert!(solution.rejected_constraints.is_empty(), "{solution:?}");
+        assert!(solution.normalized_residuals[1].is_nan());
+    }
+
+    #[test]
+    fn no_constraints_leaves_only_the_reference() {
+        let solution = solve_clock_graph(3, 1, &[], &ClockGraphConfig::default()).unwrap();
+        assert_eq!(solution.offsets_s, vec![None, Some(0.0), None]);
+        assert!(solution.rejected_constraints.is_empty());
     }
 }

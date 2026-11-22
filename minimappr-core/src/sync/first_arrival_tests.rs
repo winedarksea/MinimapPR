@@ -159,3 +159,48 @@ fn raw_threshold_onset_finds_first_large_sample() {
     assert_eq!(raw_threshold_onset(&signal, 0..100, 0.25), Some(40));
     assert_eq!(raw_threshold_onset(&signal, 0..100, 0.5), Some(60));
 }
+
+#[test]
+fn self_pick_ignores_a_close_reflection_after_the_airborne_peak() {
+    // Near mic (d_ii 5 cm); a hand or table reflection 0.4 ms after the
+    // airborne path at −3 dB must not be mistaken for the airborne path.
+    let chirp = template();
+    let airborne_start = 3_000;
+    let reflection_delay_samples = 19;
+    let mut signal = noise(12_000, 0.005, 4);
+    add_copy(&mut signal, &chirp, airborne_start, 1.0);
+    add_copy(
+        &mut signal,
+        &chirp,
+        airborne_start + reflection_delay_samples,
+        0.7,
+    );
+    let arrival = detector()
+        .detect(
+            &signal,
+            0..8_000,
+            ArrivalContext::SelfRecording {
+                self_path_length_m: Some(0.05),
+            },
+        )
+        .unwrap();
+    assert!(
+        (arrival.sample_index - airborne_start as f64).abs() < 3.0,
+        "{arrival:?}"
+    );
+}
+
+#[test]
+fn leading_edge_fraction_above_one_falls_back_to_the_peak() {
+    let chirp = template();
+    let mut signal = noise(12_000, 0.01, 5);
+    add_copy(&mut signal, &chirp, 2_000, 1.0);
+    let config = FirstArrivalConfig {
+        timing: ArrivalTiming::LeadingEdge { fraction: 1.5 },
+        ..FirstArrivalConfig::default()
+    };
+    let arrival = FirstArrivalDetector::new(&chirp, config, SAMPLE_RATE_HZ)
+        .detect(&signal, 0..8_000, ArrivalContext::RemoteEmitter)
+        .unwrap();
+    assert!((arrival.sample_index - 2_000.0).abs() < 1.0, "{arrival:?}");
+}

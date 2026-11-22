@@ -213,7 +213,9 @@ impl AcousticIslandTracker {
                     }
                 }
                 (_, Some(&&(_, surviving_island_id, _))) if overlaps.len() > 1 => {
-                    let absorbed: Vec<u64> = overlaps
+                    // Only islands no larger fragment kept are absorbed; an island
+                    // whose main body survives elsewhere merely lost members here.
+                    let absorbed: Vec<u64> = unclaimed
                         .iter()
                         .map(|o| o.1)
                         .filter(|id| *id != surviving_island_id)
@@ -365,6 +367,37 @@ mod tests {
             merged_epoch != original_epoch,
             "merge must not reuse a pre-merge clock model"
         );
+    }
+
+    #[test]
+    fn fragment_joining_another_island_does_not_report_its_old_island_absorbed() {
+        let mut tracker = AcousticIslandTracker::default();
+        tracker.update(vec![
+            [1, 2, 3, 4].into_iter().collect(),
+            [7, 8].into_iter().collect(),
+        ]);
+        let big = tracker.island_of(1).unwrap().island_id;
+        let small = tracker.island_of(7).unwrap().island_id;
+        // Node 4 walks off from the big island and joins 7–8.
+        let events = tracker.update(vec![
+            [1, 2, 3].into_iter().collect(),
+            [4, 7, 8].into_iter().collect(),
+        ]);
+        assert_eq!(tracker.island_of(1).unwrap().island_id, big);
+        assert_eq!(tracker.island_of(4).unwrap().island_id, small);
+        for event in &events {
+            if let IslandEvent::Merged {
+                absorbed_island_ids,
+                ..
+            } = event
+            {
+                assert!(
+                    !absorbed_island_ids.contains(&big),
+                    "big island still exists: {events:?}"
+                );
+            }
+        }
+        assert!(!tracker.share_clock_domain(1, 4));
     }
 
     #[test]

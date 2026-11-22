@@ -175,10 +175,15 @@ impl ChirpRoundObservation {
                 else {
                     continue;
                 };
-                let self_paths = SelfPathLengths {
-                    a_m: self.self_path_lengths_m[first],
-                    b_m: self.self_path_lengths_m[second],
+                // A malformed observation (fewer d_ii than receivers) skips the
+                // pair instead of panicking.
+                let (Some(&a_m), Some(&b_m)) = (
+                    self.self_path_lengths_m.get(first),
+                    self.self_path_lengths_m.get(second),
+                ) else {
+                    continue;
                 };
+                let self_paths = SelfPathLengths { a_m, b_m };
                 match range_pair(&arrivals, self_paths, speed_of_sound_mps, pair_compensation) {
                     Ok(result) => measurements.push(PairwiseRangingMeasurement {
                         first_participant: first,
@@ -361,6 +366,22 @@ mod tests {
         assert!(measurements
             .iter()
             .all(|m| !(m.first_participant == 1 && m.second_participant == 2)));
+    }
+
+    #[test]
+    fn missing_self_path_lengths_skip_pairs_without_panicking() {
+        let mut round = synthetic_round(false);
+        round.self_path_lengths_m.truncate(2);
+        let (measurements, _) =
+            round.pairwise_measurements(SPEED_OF_SOUND_MPS, &RoundRateCompensation::None);
+        assert_eq!(measurements.len(), 1);
+        assert_eq!(
+            (
+                measurements[0].first_participant,
+                measurements[0].second_participant
+            ),
+            (0, 1)
+        );
     }
 
     #[test]
