@@ -1,0 +1,40 @@
+[package]
+name = "minimappr-sim"
+version = "0.1.0"
+edition = "2021"
+description = "Layer 1 acoustic world simulator for MinimapPR Field Mode: renders sample-accurate multi-device audio and calibration bundles."
+publish = false
+
+[lib]
+name = "minimappr_sim"
+path = "src/lib.rs"
+
+[[bin]]
+name = "minimappr-sim"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+hound = "3"
+rand = "0.9"
+rand_chacha = "0.9"
+rayon = "1.10"
+rustfft = "6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# NOTE: Cargo ignores profiles declared in workspace members. When this crate
+# joins the root Cargo workspace these tables must move to the root
+# Cargo.toml (as `[profile.test.package.minimappr-sim] opt-level = 3` if the
+# rest of the workspace should keep fast-compiling debug test builds).
+# Debug builds of the renderer are 10-50x slower, which makes physics tests
+# and scenario renders crawl.
+[profile.test]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

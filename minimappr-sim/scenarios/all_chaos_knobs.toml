@@ -1,0 +1,103 @@
+# Every chaos knob switched on (with its defaults unless noted) — a smoke
+# scenario and a copy-paste reference. Each knob is documented on its
+# struct in src/scenario/chaos.rs; all are off unless their table exists.
+name = "all_chaos_knobs"
+seed = 42
+duration_s = 30.0
+sample_rate_hz = 48000
+
+[reflectors.random_trunks]
+
+[chirps]
+round_start_times_s = [1.0, 12.0, 24.0]
+waveform = { band_low_hz = 18000.0, band_high_hz = 20000.0, waveform = "linear_fm" }
+
+[[devices]]
+device_id = "array-1"
+kind = "sirith_tetra"
+position_m = [0.0, 0.0, 1.5]
+
+[[devices]]
+device_id = "phone-1"
+kind = "phone"
+position_m = [6.0, 2.0, 1.2]
+second_mic = {}
+speaker = { grip = "hard_table", speaker_to_mic_distance_m = 0.12 }
+
+[[devices]]
+device_id = "phone-2"
+kind = "phone"
+position_m = [-4.0, 5.0, 1.3]
+
+[[devices]]
+device_id = "phone-3"
+kind = "phone"
+position_m = [2.0, -7.0, 1.1]
+speaker = { grip = "foam" }
+
+[[devices]]
+device_id = "phone-4"
+kind = "phone"
+position_m = [-6.0, -3.0, 1.4]
+mic_response = { lowpass_hz = 16000.0, lowpass_order = 8 }
+
+[[sources]]
+individual_id = "wtsp-1"
+species = "White-throated Sparrow"
+position_m = [20.0, 25.0, 8.0]
+calls = [{ start_s = 3.0, generator = { kind = "tonal_whistle" } }]
+
+[[sources]]
+individual_id = "flyover-1"
+species = "Common Raven"
+position_m = [-60.0, 10.0, 25.0]
+# Moving source: 12 m/s fly-over (Doppler).
+trajectory = [[0.0, -60.0, 10.0, 25.0], [10.0, 60.0, 10.0, 25.0]]
+calls = [{ start_s = 4.0, level_db_spl_at_1m = 100.0, generator = { kind = "harsh" } }]
+
+[chaos.sample_drops]
+device_ids = ["phone-2", "phone-3"]
+
+[chaos.walking]
+device_ids = ["phone-2"]
+start_s = 5.0
+
+[chaos.pocket]
+device_ids = ["phone-3"]
+start_s = 15.0
+end_s = 22.0
+
+[chaos.canopy_gps]
+
+[chaos.route_change]
+device_ids = ["phone-4"]
+at_s = 18.0
+
+[chaos.thermal_stall]
+device_ids = ["phone-1"]
+ramp_start_s = 0.0
+ramp_end_s = 15.0
+
+[chaos.micro_motion]
+device_ids = ["phone-1"]
+start_s = 11.0
+end_s = 13.0
+
+[chaos.muted_speaker]
+device_ids = ["phone-4"]
+
+[chaos.speech]
+near_device_ids = ["phone-1", "phone-2"]
+start_s = 6.0
+
+[chaos.clap]
+times_s = [9.0]
+
+[chaos.intermittent_flock]
+bird_count = 3
+
+[chaos.same_band_pair]
+start_s = 20.0
+
+[chaos.two_speaker_emission]
+device_ids = ["phone-1"]

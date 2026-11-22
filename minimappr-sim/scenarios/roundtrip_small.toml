@@ -1,0 +1,84 @@
+# Small fixed-seed scene used by tests/test_sim_bundle_roundtrip.py:
+# two Sirith tetra nodes + one phone, one tonal whistle and one trill.
+name = "roundtrip_small"
+seed = 20261121
+duration_s = 4.0
+sample_rate_hz = 48000
+
+[site]
+origin_lat = 45.0
+origin_lon = -93.0
+origin_alt_m = 250.0
+start_time_ns = 1763700000000000000
+
+[environment]
+temperature_c = 18.0
+humidity_fraction = 0.6
+
+[ground]
+enabled = true
+reflection_coefficient = 0.6
+
+[reflectors.random_trunks]
+count_range = [3, 4]
+
+[ambient_noise]
+level_db_spl = 30.0
+
+[[devices]]
+device_id = "tetra-a"
+kind = "sirith_tetra"
+position_m = [0.0, 0.0, 1.5]
+
+[[devices]]
+device_id = "tetra-b"
+kind = "sirith_tetra"
+position_m = [12.0, 4.0, 1.5]
+
+[[devices]]
+device_id = "phone-1"
+kind = "phone"
+position_m = [5.0, -6.0, 1.2]
+# Nearly disciplined so the server-side TDOA stays meaningful in replay.
+clock = { mode = "fixed", offset_s = 0.0, drift_ppm = 3.0 }
+
+[[sources]]
+individual_id = "wtsp-1"
+species = "White-throated Sparrow"
+position_m = [6.0, 8.0, 3.0]
+
+[[sources.calls]]
+start_s = 0.8
+level_db_spl_at_1m = 100.0
+generator = { kind = "tonal_whistle", note_count = 3, note_duration_s = 0.5 }
+
+[[sources]]
+individual_id = "chsp-1"
+species = "Chipping Sparrow"
+position_m = [-4.0, 9.0, 4.0]
+
+[[sources.calls]]
+start_s = 2.6
+level_db_spl_at_1m = 98.0
+generator = { kind = "trill", duration_s = 1.0 }
+
+[expectations]
+schema_version = 1
+
+[expectations.runtime]
+classifier_backend = "stub"
+replay_reference_nodes = false
+
+[expectations.runtime.settings_overrides]
+trigger_rms = 0.003
+classification_window_seconds = 1.0
+
+[expectations.classification]
+min_label_accuracy = 0.0
+match = "exact"
+
+[expectations.localization]
+min_event_recall = 0.5
+max_median_position_error_m = 50.0
+max_p90_position_error_m = 75.0
+far_field_distance_m = 120.0
