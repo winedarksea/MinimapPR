@@ -3427,6 +3427,10 @@ _SIDECAR_RESTART_REQUIRED_KEYS = {
     "birdnet_geo_min_confidence",
     "trigger_rms",
     "trigger_cooldown_seconds",
+    # Coverage race fix: also read by the sidecar's DSP worker at spawn.
+    "localization_coverage_wait_all_streaming_nodes_enabled",
+    "localization_coverage_stall_budget_seconds",
+    "localization_coverage_total_cap_seconds",
     # ── BirdNET+ V3.0 (Field Mode W1-birdnet-v3) ── the sidecar's Python
     # classifier subprocess reads these once at spawn.
     *(key for key in CONFIG_PATCH_ALLOWLIST if key == "birdnet_model_version" or key.startswith("birdnet_v3_")),

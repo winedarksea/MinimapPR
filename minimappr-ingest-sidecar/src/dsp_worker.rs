@@ -11,12 +11,16 @@ use crate::{
     actors::{classification::ClassificationWorker, environment::EnvironmentCache},
     audio_payload::{decode_audio_payload_segments, DecodedAudioPayload},
     classifier_helper::ManifestClassificationAnnotator,
+    deferred_localization::{localization_only_template, DeferredLocalizationScheduler},
     derived_cache::DerivedCache,
     diagnostics::IngestDiagnostics,
     dsp::{coverage_stats, AudioCoverageStats, SensorStreamBuffer},
     dsp_events::DspEventPublisher,
     ingest_backend::QueuedRawManifest,
     journal_reader::JournalPayloadHandle,
+    localization_coverage_wait::{
+        CoverageWaitDecision, LocalizationCoverageWaitConfig, LocalizationWindowSpan,
+    },
     manifests::{DspManifest, ManifestStore},
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -35,6 +39,11 @@ const MAX_SPATIAL_CHANNELS: usize = 8;
 /// Minimum out-of-collinearity span (in meters) required for an array's
 /// geometry to be usable by the spatial pipeline.
 const SPATIAL_GEOMETRY_MIN_SPAN_M: f32 = 0.005;
+/// SRP-PHAT needs at least this many channels in the localization buffer.
+pub(crate) const MIN_SRP_CHANNEL_COUNT: usize = 4;
+const NANOSECONDS_PER_MILLISECOND_F64: f64 = 1_000_000.0;
+/// Shared multi-node buffers are keyed `cluster::<cluster_id>::<stream_id>`.
+const CLUSTER_BUFFER_KEY_PREFIX: &str = "cluster::";
 
 pub(crate) use minimappr_core::sirith_array_geometry::SIRITH_MIC_POSITIONS_M;
 
@@ -99,6 +108,12 @@ pub struct DspWorkerConfig {
     /// Maximum trusted node clock skew in seconds before falling back to
     /// receipt-time alignment. Matching Python's _MAX_TRUSTED_NODE_CLOCK_SKEW_NS.
     pub max_trusted_node_clock_skew_seconds: f64,
+    /// Coverage race fix (`localization_coverage_wait.rs`): hold a cluster
+    /// localization until every streaming member channel covers the window.
+    /// Same keys/meaning as the Python `localization_coverage_*` settings.
+    pub localization_coverage_wait_all_streaming_nodes_enabled: bool,
+    pub localization_coverage_stall_budget_seconds: f64,
+    pub localization_coverage_total_cap_seconds: f64,
 }
 
 impl Default for DspWorkerConfig {
@@ -148,6 +163,9 @@ impl Default for DspWorkerConfig {
             trigger_cooldown_seconds: 0.8,
             query_persisted_raw_manifests: true,
             max_trusted_node_clock_skew_seconds: 300.0,
+            localization_coverage_wait_all_streaming_nodes_enabled: true,
+            localization_coverage_stall_budget_seconds: 0.5,
+            localization_coverage_total_cap_seconds: 1.0,
         }
     }
 }
@@ -274,6 +292,11 @@ pub struct DspWorkerState {
     /// canonical "pipeline is silently dropping" signal.
     pub total_window_underrun_drops: u64,
     pub total_stale_streams_evicted: u64,
+    /// Coverage-wait counters, same names as the Python `FusionMetrics`
+    /// fields: one stop reason per cadence-triggered localization candidate
+    /// (>= 4-channel buffer), and the longest wall-clock deferral.
+    pub localization_coverage_wait_stop_reasons: HashMap<String, u64>,
+    pub localization_coverage_wait_max_ms: f64,
     pub pending_count: usize,
     pub recent_results: Vec<DspManifest>,
     /// Per-node audio overrides applied during ingest (set via POST /api/v1/dsp/config).
@@ -368,10 +391,12 @@ struct OwnedManifestAudio {
 struct BufferedManifestAudio {
     audio_end_ns: u128,
     end_ns: i128,
+    localization_center_time_ns: i128,
     channel_states: Vec<LocalizationChannelState>,
 }
 
 struct BufferedManifestTimingGates {
+    on_localization_cadence: bool,
     on_heartbeat_cadence: bool,
     run_classifier_render: bool,
     run_srp: bool,
@@ -486,6 +511,9 @@ pub struct DspWorker {
     /// Lock-free queue-wait/processing-latency + overload counters, mirrored
     /// against the Python `FusionMetrics` equivalents. See `diagnostics.rs`.
     diagnostics: Option<Arc<IngestDiagnostics>>,
+    /// Localizations held until every streaming cluster member covers the
+    /// window (coverage race fix). At most one pending per buffer key.
+    deferred_localizations: DeferredLocalizationScheduler,
 }
 
 impl DspWorker {
@@ -504,6 +532,12 @@ impl DspWorker {
                 None
             }
         };
+        let deferred_localizations =
+            DeferredLocalizationScheduler::new(LocalizationCoverageWaitConfig::from_seconds(
+                config.localization_coverage_wait_all_streaming_nodes_enabled,
+                config.localization_coverage_stall_budget_seconds,
+                config.localization_coverage_total_cap_seconds,
+            ));
         Self {
             manifest_store,
             derived_cache,
@@ -527,7 +561,17 @@ impl DspWorker {
             env_cache: None,
             dsp_event_publisher: None,
             diagnostics: None,
+            deferred_localizations,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_coverage_wait_clock(
+        mut self,
+        clock: crate::localization_coverage_wait::CoverageWaitClock,
+    ) -> Self {
+        self.deferred_localizations.set_clock(clock);
+        self
     }
 
     /// Wires the ManifestClassificationAnnotator to a dedicated `ClassificationWorker`
@@ -678,7 +722,10 @@ impl DspWorker {
         let handle = tokio::runtime::Handle::current();
 
         for manifest in pending {
-            if let Some(payload) = self.ingest_one(manifest, pending_backlog_depth).await {
+            let ingested_payload = self.ingest_one(manifest, pending_backlog_depth).await;
+            // A manifest can also complete an earlier deferred localization.
+            let ready_payloads = self.take_ready_deferred_localizations(false).await;
+            for payload in ingested_payload.into_iter().chain(ready_payloads) {
                 self.note_stage_attempts(&payload).await;
                 let h = handle.clone();
                 // Dispatch to the dedicated DSP rayon pool. run_compute is sync:
@@ -689,6 +736,14 @@ impl DspWorker {
                     crate::actors::dsp_compute::run_compute(payload, h);
                 });
             }
+        }
+        // Poll tick: release pendings whose members all went quiet.
+        for payload in self.take_ready_deferred_localizations(true).await {
+            self.note_stage_attempts(&payload).await;
+            let h = handle.clone();
+            crate::runtime::dsp_pool().spawn_fifo(move || {
+                crate::actors::dsp_compute::run_compute(payload, h);
+            });
         }
 
         self.flush_deferred_source_manifest_consumptions().await;
@@ -1116,8 +1171,18 @@ impl DspWorker {
             owned.sr,
             reference_buffer_index,
         );
+        // With the coverage wait on, clamp against the arriving node's own
+        // channel: the window must end at the trigger frame and the wait then
+        // brings the other members in. Legacy clamps against channel 0, which
+        // in a cluster buffer is whichever node joined first.
+        let center_clamp_buffer_index = if self.deferred_localizations.is_enabled() {
+            reference_buffer_index
+        } else {
+            0
+        };
         let center_time_ns = resolve_localization_center_time_ns(
             buffers,
+            center_clamp_buffer_index,
             buffer_start_time_ns,
             end_ns,
             self.config.window_seconds,
@@ -1135,6 +1200,7 @@ impl DspWorker {
         Some(BufferedManifestAudio {
             audio_end_ns: end_ns.max(0) as u128,
             end_ns,
+            localization_center_time_ns: center_time_ns,
             channel_states,
         })
     }
@@ -1212,10 +1278,12 @@ impl DspWorker {
             self.should_run_localization(stream_key, audio_end_ns, windows);
         let run_classifier_render =
             self.should_publish_classifier_render(stream_key, audio_end_ns, pending_backlog_depth);
-        let run_srp = channel_count >= 4 && (on_localization_cadence || run_classifier_render);
+        let run_srp = channel_count >= MIN_SRP_CHANNEL_COUNT
+            && (on_localization_cadence || run_classifier_render);
         let on_heartbeat_cadence =
             on_localization_cadence || self.should_emit_heartbeat(stream_key, audio_end_ns);
         BufferedManifestTimingGates {
+            on_localization_cadence,
             on_heartbeat_cadence,
             run_classifier_render,
             run_srp,
@@ -1228,6 +1296,10 @@ impl DspWorker {
         buffered: BufferedManifestAudio,
         pending_backlog_depth: usize,
     ) -> Option<ComputePayload> {
+        if let Some(buffers) = self.buffers.get(&owned.buffer_key) {
+            self.deferred_localizations
+                .observe_channel_progress(&owned.buffer_key, buffers);
+        }
         if buffered
             .channel_states
             .iter()
@@ -1338,13 +1410,25 @@ impl DspWorker {
             .iter()
             .map(|state| state.window.clone())
             .collect();
-        let timing_gates = self.resolve_buffered_manifest_timing_gates(
+        let mut timing_gates = self.resolve_buffered_manifest_timing_gates(
             &owned.buffer_key,
             owned.buffer_channel_count,
             buffered.audio_end_ns,
             pending_backlog_depth,
             &windows,
         );
+        let coverage_deferral_span = self.coverage_deferral_span(
+            &owned.buffer_key,
+            buffered.localization_center_time_ns,
+            timing_gates.on_localization_cadence,
+            owned.buffer_channel_count,
+        );
+        if coverage_deferral_span.is_some() {
+            // The cadence-triggered solve moves to the deferred payload; this
+            // frame still emits its heartbeat and (if due) its classifier render.
+            timing_gates.run_srp = timing_gates.run_classifier_render
+                && owned.buffer_channel_count >= MIN_SRP_CHANNEL_COUNT;
+        }
 
         if !timing_gates.on_heartbeat_cadence && !timing_gates.run_classifier_render {
             // Parity with Python's localization "no_window" silent-drop reason:
@@ -1405,7 +1489,7 @@ impl DspWorker {
                 (None, None)
             };
 
-        Some(ComputePayload {
+        let payload = ComputePayload {
             manifest: owned.manifest,
             stream_key: owned.buffer_key,
             channel_states: buffered.channel_states,
@@ -1439,7 +1523,77 @@ impl DspWorker {
             config: self.config.clone(),
             consumed_since_prune: self.consumed_manifests_since_prune.clone(),
             diagnostics: self.diagnostics.clone(),
-        })
+        };
+        if let (Some(span), Some(buffers)) = (
+            coverage_deferral_span,
+            self.buffers.get(&payload.stream_key),
+        ) {
+            let template = localization_only_template(&payload);
+            self.deferred_localizations
+                .defer(&payload.stream_key, buffers, span, template);
+        }
+        Some(payload)
+    }
+
+    /// `Some(span)` when this cadence-triggered localization must wait for
+    /// streaming cluster members that have not yet delivered the window.
+    fn coverage_deferral_span(
+        &mut self,
+        buffer_key: &str,
+        localization_center_time_ns: i128,
+        on_localization_cadence: bool,
+        buffer_channel_count: usize,
+    ) -> Option<LocalizationWindowSpan> {
+        if !on_localization_cadence
+            || !self.deferred_localizations.is_enabled()
+            || buffer_channel_count < MIN_SRP_CHANNEL_COUNT
+        {
+            return None;
+        }
+        let buffers = self.buffers.get(buffer_key)?;
+        let span = LocalizationWindowSpan {
+            center_time_ns: localization_center_time_ns,
+            window_seconds: self.config.window_seconds,
+            min_coverage_ratio: self.config.min_coverage_ratio,
+        };
+        // Cluster buffers always park until the batch boundary: mid-batch a
+        // member may show holes that later frames in the same (newest-first)
+        // batch backfill. Costs no wall time; released at the end of the cycle.
+        if buffer_key.starts_with(CLUSTER_BUFFER_KEY_PREFIX) {
+            return Some(span);
+        }
+        match self
+            .deferred_localizations
+            .evaluate_new_candidate(buffer_key, buffers, span)
+        {
+            CoverageWaitDecision::Wait => Some(span),
+            CoverageWaitDecision::Ready { stop_reason } => {
+                self.deferred_localizations
+                    .record_immediate_outcome(stop_reason);
+                None
+            }
+        }
+    }
+
+    /// Drain localizations released by the coverage wait. `poll_tick` also
+    /// re-evaluates every pending buffer (covers members that all went quiet).
+    async fn take_ready_deferred_localizations(&mut self, poll_tick: bool) -> Vec<ComputePayload> {
+        if poll_tick {
+            self.deferred_localizations.service_all(&self.buffers);
+        }
+        let outcomes = self.deferred_localizations.take_outcomes();
+        if !outcomes.is_empty() {
+            let mut st = self.state.write().await;
+            for outcome in outcomes {
+                *st.localization_coverage_wait_stop_reasons
+                    .entry(outcome.stop_reason.to_string())
+                    .or_insert(0) += 1;
+                let waited_ms = outcome.waited_ns as f64 / NANOSECONDS_PER_MILLISECOND_F64;
+                st.localization_coverage_wait_max_ms =
+                    st.localization_coverage_wait_max_ms.max(waited_ms);
+            }
+        }
+        self.deferred_localizations.take_ready_payloads()
     }
 
     #[cfg(test)]
@@ -1448,12 +1602,28 @@ impl DspWorker {
         manifest: DspManifest,
         pending_backlog_depth: usize,
     ) {
-        if let Some(payload) = self.ingest_one(manifest, pending_backlog_depth).await {
+        // A test delivery is a batch of one, so it ends at a batch boundary.
+        let ingested_payload = self.ingest_one(manifest, pending_backlog_depth).await;
+        let ready_payloads = self.take_ready_deferred_localizations(true).await;
+        for payload in ingested_payload.into_iter().chain(ready_payloads) {
             self.note_stage_attempts(&payload).await;
             let result = crate::actors::dsp_compute::run_math(payload);
             crate::actors::dsp_compute::run_io(result).await;
         }
         self.flush_deferred_source_manifest_consumptions().await;
+    }
+
+    /// Test seam for the poll-tick release path of `process_pending`.
+    #[cfg(test)]
+    pub(crate) async fn run_poll_tick_deferred_localizations(&mut self) -> usize {
+        let ready_payloads = self.take_ready_deferred_localizations(true).await;
+        let released_count = ready_payloads.len();
+        for payload in ready_payloads {
+            self.note_stage_attempts(&payload).await;
+            let result = crate::actors::dsp_compute::run_math(payload);
+            crate::actors::dsp_compute::run_io(result).await;
+        }
+        released_count
     }
 
     fn defer_source_manifest_consumption(&mut self, manifest: &DspManifest) {
@@ -1580,6 +1750,7 @@ impl DspWorker {
         }
         for key in &stale {
             self.buffers.remove(key);
+            self.deferred_localizations.forget(key);
             self.last_classifier_render_ns_by_stream.remove(key);
             self.last_localization_ns_by_stream.remove(key);
             self.last_trigger_ns_by_stream.remove(key);
@@ -1959,7 +2130,7 @@ fn localization_channel_states(
 /// Build localization channel states using centered windows (matching Python's
 /// `get_window(center_time_ns, window_seconds)`). TDOA is computed relative to
 /// the window center, so centering on the frame midpoint gives symmetric coverage.
-fn localization_channel_states_centered(
+pub(crate) fn localization_channel_states_centered(
     buffers: &[SensorStreamBuffer],
     center_time_ns: i128,
     window_seconds: f64,
@@ -1977,18 +2148,18 @@ fn localization_channel_states_centered(
 
 fn resolve_localization_center_time_ns(
     buffers: &[SensorStreamBuffer],
+    clamp_buffer_index: usize,
     buffer_start_time_ns: i128,
     end_ns: i128,
     window_seconds: f64,
 ) -> i128 {
     let window_duration_ns = (window_seconds * 1_000_000_000.0).round() as i128;
     let half_window_duration_ns = window_duration_ns / 2;
-    let buffered_range_start_ns = buffers
-        .first()
+    let clamp_buffer = buffers.get(clamp_buffer_index).or_else(|| buffers.first());
+    let buffered_range_start_ns = clamp_buffer
         .and_then(|buffer| buffer.start_time_ns())
         .unwrap_or(buffer_start_time_ns);
-    let buffered_range_end_ns = buffers
-        .first()
+    let buffered_range_end_ns = clamp_buffer
         .and_then(|buffer| buffer.end_time_ns())
         .unwrap_or(end_ns);
     let unclamped_center_time_ns = end_ns.saturating_sub(half_window_duration_ns);
@@ -2059,7 +2230,7 @@ fn classifier_render_bounds_from_windows(
     (Some(render_start_ns as u128), Some(render_end_ns as u128))
 }
 
-fn eligible_localization_channels(
+pub(crate) fn eligible_localization_channels(
     channel_states: &[LocalizationChannelState],
     min_coverage_ratio: f64,
 ) -> Vec<usize> {
@@ -2256,7 +2427,7 @@ fn resolve_cluster_buffer_routing(
         })
         .collect::<Option<Vec<_>>>()?;
     Some(ManifestBufferRouting {
-        buffer_key: format!("cluster::{cluster_id}::{stream_id}"),
+        buffer_key: format!("{CLUSTER_BUFFER_KEY_PREFIX}{cluster_id}::{stream_id}"),
         buffer_channel_count: cluster_sensor_positions.len(),
         buffer_channel_indices,
     })
@@ -2644,3 +2815,7 @@ pub(crate) fn system_now_ns() -> u128 {
 #[cfg(test)]
 #[path = "dsp_worker_tests.rs"]
 mod dsp_worker_tests;
+
+#[cfg(test)]
+#[path = "dsp_worker_coverage_race_tests.rs"]
+mod dsp_worker_coverage_race_tests;

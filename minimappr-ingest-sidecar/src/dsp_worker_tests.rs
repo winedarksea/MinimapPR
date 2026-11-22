@@ -1660,7 +1660,7 @@ async fn raw_manifest_for_payload(
     .await
 }
 
-async fn raw_manifest_for_payload_with_metadata(
+pub(super) async fn raw_manifest_for_payload_with_metadata(
     root: &std::path::Path,
     manifest_id: &str,
     segment_id: &str,
@@ -1759,7 +1759,7 @@ fn store_forward_payload_with_timing_jitter(
     .to_string()
 }
 
-fn store_forward_payload_with_channel_count(
+pub(super) fn store_forward_payload_with_channel_count(
     start_time_ns: u64,
     start_sample_index: u64,
     sequence: u64,
@@ -1868,7 +1868,7 @@ fn store_forward_payload_with_internal_gap() -> String {
     .to_string()
 }
 
-fn drain_published_manifests(
+pub(super) fn drain_published_manifests(
     rx: &mut tokio::sync::broadcast::Receiver<ReplayableDspEvent>,
 ) -> Vec<DspManifest> {
     let mut events = Vec::new();
@@ -1955,8 +1955,13 @@ fn resolve_localization_center_time_skips_invalid_clamp_when_buffer_is_shorter_t
             .unwrap();
     }
 
-    let center_time_ns =
-        resolve_localization_center_time_ns(&buffers, start_time_ns, end_time_ns, window_seconds);
+    let center_time_ns = resolve_localization_center_time_ns(
+        &buffers,
+        0,
+        start_time_ns,
+        end_time_ns,
+        window_seconds,
+    );
     assert_eq!(center_time_ns, start_time_ns);
 
     let channel_states =

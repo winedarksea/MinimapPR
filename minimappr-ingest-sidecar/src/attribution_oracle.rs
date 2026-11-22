@@ -6,13 +6,18 @@
 use std::collections::BTreeMap;
 
 use minimappr_core::onset_clustering::attribution_cascade::{
-    attribute_cluster, AttributionCascadeConfig, AttributionTier, ClusterAttributionContext, LocoRerunBudget, LocoRerunHost,
+    attribute_cluster, AttributionCascadeConfig, AttributionTier, ClusterAttributionContext,
+    LocoRerunBudget, LocoRerunHost,
 };
 use minimappr_core::onset_clustering::attribution_decision::{
     loco_decision, AttributionThresholds, ClassificationWindow, ClassifierAnswer, InterfererOnset,
 };
-use minimappr_core::onset_clustering::attribution_evidence::{ClusterAttributionEvidence, ClusterOnsetArrival};
-use minimappr_core::stage1::noise_floor_relative_trigger::{NoiseFloorRelativeTrigger, RelativeTriggerConfig};
+use minimappr_core::onset_clustering::attribution_evidence::{
+    ClusterAttributionEvidence, ClusterOnsetArrival,
+};
+use minimappr_core::stage1::noise_floor_relative_trigger::{
+    NoiseFloorRelativeTrigger, RelativeTriggerConfig,
+};
 use minimappr_core::wildlife_tracking::species_log_odds::round_decimal;
 use serde_json::{json, Value};
 
@@ -33,15 +38,24 @@ fn run_relative_trigger_case(case: &Value, with_probes: bool) -> OracleResult {
     if !with_probes {
         return Ok(json!({ "steps": steps }));
     }
-    let probe_floors: Vec<Option<f64>> =
-        case["probes"].as_array().ok_or("probes")?.iter().map(|probe| probe.as_str().and_then(|node| trigger.floor_rms(node))).collect();
+    let probe_floors: Vec<Option<f64>> = case["probes"]
+        .as_array()
+        .ok_or("probes")?
+        .iter()
+        .map(|probe| probe.as_str().and_then(|node| trigger.floor_rms(node)))
+        .collect();
     Ok(json!({ "tracked": trigger.tracked_node_count(), "probe_floors": probe_floors }))
 }
 
 fn classifier_answer(value: &Value) -> ClassifierAnswer {
     let scores = value["scores"]
         .as_array()
-        .map(|pairs| pairs.iter().filter_map(|pair| Some((pair[0].as_str()?.to_string(), pair[1].as_f64()?))).collect())
+        .map(|pairs| {
+            pairs
+                .iter()
+                .filter_map(|pair| Some((pair[0].as_str()?.to_string(), pair[1].as_f64()?)))
+                .collect()
+        })
         .unwrap_or_default();
     ClassifierAnswer {
         label: value["label"].as_str().unwrap_or_default().to_string(),
@@ -51,7 +65,14 @@ fn classifier_answer(value: &Value) -> ClassifierAnswer {
 }
 
 fn float_map(value: &Value) -> BTreeMap<String, f64> {
-    value.as_object().map(|map| map.iter().filter_map(|(key, v)| Some((key.clone(), v.as_f64()?))).collect()).unwrap_or_default()
+    value
+        .as_object()
+        .map(|map| {
+            map.iter()
+                .filter_map(|(key, v)| Some((key.clone(), v.as_f64()?)))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn evidence_from(raw: &Value) -> ClusterAttributionEvidence {
@@ -66,7 +87,11 @@ fn evidence_from(raw: &Value) -> ClusterAttributionEvidence {
                         .into_iter()
                         .flatten()
                         .filter_map(|a| {
-                            Some(ClusterOnsetArrival { span_sample: a[0].as_i64()?, band_min_hz: a[1].as_f64()?, band_max_hz: a[2].as_f64()? })
+                            Some(ClusterOnsetArrival {
+                                span_sample: a[0].as_i64()?,
+                                band_min_hz: a[1].as_f64()?,
+                                band_max_hz: a[2].as_f64()?,
+                            })
                         })
                         .collect();
                     (node.clone(), parsed)
@@ -111,7 +136,10 @@ fn run_attribution_batch(case: &Value) -> OracleResult {
     let mut budget = LocoRerunBudget::default();
     let mut results = Vec::new();
     for case in case["cases"].as_array().ok_or("cases")? {
-        let config = AttributionCascadeConfig { loco_enabled: case["loco_enabled"].as_bool().unwrap_or(true), ..AttributionCascadeConfig::default() };
+        let config = AttributionCascadeConfig {
+            loco_enabled: case["loco_enabled"].as_bool().unwrap_or(true),
+            ..AttributionCascadeConfig::default()
+        };
         let cluster_evidence: BTreeMap<usize, ClusterAttributionEvidence> = case["clusters"]
             .as_object()
             .ok_or("clusters")?
@@ -123,9 +151,15 @@ fn run_attribution_batch(case: &Value) -> OracleResult {
             target_index: case["target_index"].as_u64().ok_or("target_index")? as usize,
             cluster_evidence,
             window: ClassificationWindow {
-                classifying_node_id: case["classifying_node_id"].as_str().ok_or("classifying_node_id")?,
-                start_sample: case["window_start_sample"].as_i64().ok_or("window_start_sample")?,
-                end_sample: case["window_end_sample"].as_i64().ok_or("window_end_sample")?,
+                classifying_node_id: case["classifying_node_id"]
+                    .as_str()
+                    .ok_or("classifying_node_id")?,
+                start_sample: case["window_start_sample"]
+                    .as_i64()
+                    .ok_or("window_start_sample")?,
+                end_sample: case["window_end_sample"]
+                    .as_i64()
+                    .ok_or("window_end_sample")?,
                 sample_rate_hz: case["sample_rate_hz"].as_u64().ok_or("sample_rate_hz")? as u32,
                 shared_onset_max_lag_samples: case["shared_onset_max_lag_samples"].as_i64(),
             },
@@ -134,11 +168,25 @@ fn run_attribution_batch(case: &Value) -> OracleResult {
             masked_cell_fraction: case["masked_cell_fraction"].as_f64().unwrap_or_default(),
             masked_answer: classifier_answer(&case["masked"]),
         };
-        let outcome = attribute_cluster(&classifier_answer(&case["original"]), &context, &config, &mut budget, &mut host);
+        let outcome = attribute_cluster(
+            &classifier_answer(&case["original"]),
+            &context,
+            &config,
+            &mut budget,
+            &mut host,
+        );
         let dominance: BTreeMap<String, f64> = outcome
             .gradient
             .as_ref()
-            .map(|gradient| gradient.dominance_db.iter().map(|(index, value)| (index.to_string(), round_decimal(*value, DOMINANCE_DECIMALS))).collect())
+            .map(|gradient| {
+                gradient
+                    .dominance_db
+                    .iter()
+                    .map(|(index, value)| {
+                        (index.to_string(), round_decimal(*value, DOMINANCE_DECIMALS))
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
         results.push(json!({
             "tier": tier_name(outcome.tier),
@@ -161,8 +209,18 @@ fn run_loco_decision_case(case: &Value) -> OracleResult {
         .ok_or("pairs")?
         .iter()
         .map(|pair| {
-            let decision = loco_decision(&classifier_answer(&pair["original"]), &classifier_answer(&pair["masked"]), &thresholds);
-            json!([decision.settled, decision.reason, decision.label, decision.confidence, decision.collapsed_labels])
+            let decision = loco_decision(
+                &classifier_answer(&pair["original"]),
+                &classifier_answer(&pair["masked"]),
+                &thresholds,
+            );
+            json!([
+                decision.settled,
+                decision.reason,
+                decision.label,
+                decision.confidence,
+                decision.collapsed_labels
+            ])
         })
         .collect();
     Ok(json!({ "decisions": decisions }))

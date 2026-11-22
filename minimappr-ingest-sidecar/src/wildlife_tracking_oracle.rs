@@ -8,10 +8,13 @@
 #[path = "wildlife_pipeline_oracle.rs"]
 mod wildlife_pipeline_oracle;
 
-use minimappr_core::bird_entity::absorption_geometry::{covariance_gated_fix_score, fixes_are_two_birds};
+use minimappr_core::bird_entity::absorption_geometry::{
+    covariance_gated_fix_score, fixes_are_two_birds,
+};
 use minimappr_core::bird_entity::config::BirdEntityConfig;
 use minimappr_core::bird_entity::model::{
-    bearing_estimate_toward, horizontal_major_sigma_m, uncertainty_ellipse, BearingFanLimits, EntityFixSample,
+    bearing_estimate_toward, horizontal_major_sigma_m, uncertainty_ellipse, BearingFanLimits,
+    EntityFixSample,
 };
 use minimappr_core::wildlife_tracking::nearest_neighbor_association::{
     associate_nearest_neighbor, AssociationCandidate, NearestNeighborAssociationConfig,
@@ -19,9 +22,13 @@ use minimappr_core::wildlife_tracking::nearest_neighbor_association::{
 use minimappr_core::wildlife_tracking::perched_concurrency::{
     concurrently_active_perch_conflicts, ConcurrentPerchGuardConfig, PerchGuardTrack,
 };
-use minimappr_core::wildlife_tracking::perched_filter::{PerchedFilterConfig, PerchedRandomWalkFilter};
+use minimappr_core::wildlife_tracking::perched_filter::{
+    PerchedFilterConfig, PerchedRandomWalkFilter,
+};
 use minimappr_core::wildlife_tracking::species_association_gate::species_claims_contradict;
-use minimappr_core::wildlife_tracking::species_log_odds::{LabelScores, SpeciesBeliefConfig, SpeciesLogOddsBelief};
+use minimappr_core::wildlife_tracking::species_log_odds::{
+    LabelScores, SpeciesBeliefConfig, SpeciesLogOddsBelief,
+};
 use minimappr_core::wildlife_tracking::{Covariance3, Position3};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -40,7 +47,9 @@ pub(crate) fn label_scores(value: &Value) -> LabelScores {
         .map(|pairs| {
             pairs
                 .iter()
-                .filter_map(|pair| Some((pair.get(0)?.as_str()?.to_string(), pair.get(1)?.as_f64()?)))
+                .filter_map(|pair| {
+                    Some((pair.get(0)?.as_str()?.to_string(), pair.get(1)?.as_f64()?))
+                })
                 .collect()
         })
         .unwrap_or_default()
@@ -82,9 +91,17 @@ fn run_perched_filter_case(case: &Value) -> Result<Value, serde_json::Error> {
     let mut outputs = Vec::new();
     for step in steps {
         let before = filter.relocation_count;
-        let estimate = filter.update(ORACLE_TRACK_ID, &current, &step.measurement_m, step.dt_s, step.covariance_m2.as_ref());
+        let estimate = filter.update(
+            ORACLE_TRACK_ID,
+            &current,
+            &step.measurement_m,
+            step.dt_s,
+            step.covariance_m2.as_ref(),
+        );
         current = estimate.position_m;
-        let predicted = filter.predict(ORACLE_TRACK_ID, PREDICTION_HORIZON_SECONDS).expect("track initialized");
+        let predicted = filter
+            .predict(ORACLE_TRACK_ID, PREDICTION_HORIZON_SECONDS)
+            .expect("track initialized");
         outputs.push(json!({
             "position_m": estimate.position_m,
             "covariance_m2": estimate.covariance_m2,
@@ -112,9 +129,18 @@ fn run_association_case(case: &Value) -> Result<Value, serde_json::Error> {
     let tracks: Vec<OracleTrack> = serde_json::from_value(case["tracks"].clone())?;
     let candidates: Vec<AssociationCandidate> = tracks
         .iter()
-        .map(|track| AssociationCandidate { track_id: track.track_id, position_m: track.position_m, covariance_m2: track.covariance_m2 })
+        .map(|track| AssociationCandidate {
+            track_id: track.track_id,
+            position_m: track.position_m,
+            covariance_m2: track.covariance_m2,
+        })
         .collect();
-    let matched = associate_nearest_neighbor(&position, covariance.as_ref(), &candidates, &NearestNeighborAssociationConfig::default());
+    let matched = associate_nearest_neighbor(
+        &position,
+        covariance.as_ref(),
+        &candidates,
+        &NearestNeighborAssociationConfig::default(),
+    );
     Ok(json!({ "matched_track_id": matched }))
 }
 
