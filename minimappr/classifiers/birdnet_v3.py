@@ -7,11 +7,14 @@ probabilities (``predictions [batch, 11725]``, sigmoid already applied in the
 graph) plus ``embeddings [batch, 1280]``.
 
 Results use the same shape as the v2.4 wrapper so the existing BirdNET result
-path (composite routing, taxonomy, rules, retention) needs no changes: the
-label is the lower-cased English common name, ``scores`` holds the top-k, and
+path (composite routing, taxonomy, rules, retention) needs no code changes:
+the label is the lower-cased English common name, ``scores`` holds the top-k, and
 ``features["raw_species"]`` is ``Scientific_Common``. ``features["model"]`` is
 ``birdnet_v3``; ``features["taxon_group"]`` lets the taxonomy fallback treat
 only animal classes as wildlife (V3 also has Gun, Siren, Engine, ...).
+Caveat: ~1,150 v2.4 species carry a different English name in V3 (Gray ->
+Grey, redpoll lumps, ...), so label-keyed rules/retention entries need the
+``assets/birdnet/v24_to_v3_label_map.csv`` migration before switching.
 
 Threading: ``classify`` is synchronous and CPU-bound; the fusion stage already
 calls classifiers from worker threads (never on the asyncio loop). One ORT
@@ -137,8 +140,13 @@ class BirdNETV3Classifier(AudioClassifier):
             if len(lengths) == 1
             else [audio[np.newaxis, :] for audio in window_audio]
         )
+        # Local reference: close() on another thread must not turn an in-flight
+        # call into an AttributeError on None.
+        session = self._session
+        if session is None:
+            raise RuntimeError("BirdNETV3Classifier has been closed")
         for batch in groups:
-            output = self._session.run(
+            output = session.run(
                 [_PREDICTIONS_OUTPUT_NAME], {self._input_name: batch.astype(np.float32, copy=False)}
             )[0]
             rows.append(np.asarray(output, dtype=np.float64).reshape(batch.shape[0], -1))

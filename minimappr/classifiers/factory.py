@@ -113,7 +113,7 @@ def _build_birdnet_v3(spec: ClassifierSpec, settings: Settings) -> AudioClassifi
             num_threads=v3_config.num_threads,
         )
     except FileNotFoundError as exc:
-        logger.warning("BirdNET V3 model missing; dropping member %r: %s", spec.member_id, exc)
+        logger.warning("BirdNET V3 file missing; dropping member %r: %s", spec.member_id, exc)
         return None
     except Exception as exc:  # noqa: BLE001 - optional runtime backend, same policy as v2.4
         logger.warning("BirdNET V3 unavailable (%s); dropping member %r.", exc, spec.member_id)

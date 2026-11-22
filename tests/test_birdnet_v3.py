@@ -346,3 +346,21 @@ def test_real_model_identifies_house_finch_including_faint_copy(real_v3_classifi
 def test_real_model_accepts_all_lengths(real_v3_classifier, seconds):
     result = real_v3_classifier.classify(_noise(seconds, 0.005), BIRDNET_V3_SAMPLE_RATE_HZ)
     assert 0.0 <= result.confidence <= 1.0
+
+
+# ── review follow-ups ────────────────────────────────────────────────────────
+
+
+def test_window_policy_defaults_mirror_settings_defaults():
+    settings_policy = Settings().birdnet_v3_config()
+    default_policy = BirdNETV3WindowPolicy()
+    assert default_policy.min_window_seconds == settings_policy.min_window_seconds
+    assert default_policy.max_window_seconds == settings_policy.max_window_seconds
+    assert default_policy.window_overlap_seconds == settings_policy.window_overlap_seconds
+
+
+def test_predict_after_close_raises_runtime_error_not_attribute_error(tmp_path):
+    classifier = _classifier(tmp_path, _FakeSession())
+    classifier.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        classifier.predict_window_probabilities([_noise(3.0, 0.01)])

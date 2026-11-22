@@ -34,7 +34,7 @@ Zenodo record [24362980](https://zenodo.org/records/24362980), "BirdNET+ V3.0 mo
 
   MinimapPR is a surveillance COP, so **someone should read that section against the intended deployments.**
 
-Files go to `data/models/birdnet_v3/`, which is gitignored. `scripts/fetch_birdnet_v3.py` downloads each file to a `.part` file and renames it only after the MD5 and size match. Model files are only loaded as data.
+Files go to `data/models/birdnet_v3/`, which is gitignored. `scripts/fetch_birdnet_v3.py` downloads each file to a `.part` file and renames it only after the size, MD5 (published by Zenodo) and a pinned SHA-256 all match. Model files are only loaded as data.
 
 ## Model I/O (measured)
 
@@ -267,7 +267,7 @@ python scripts/compare_birdnet_versions.py --audio <other half of the snippet di
 ## Open issues
 
 - **Thresholds.** V3 and v2.4 confidences are on different scales. W3-birdnet-cutover must re-tune `birdnet_trigger_min_confidence` and the routing `min_confidence` before the default changes.
-- **Not yet migrated.** Rules, snippet-retention buckets and stored labels still use v2.4 labels. The map table is ready, but nothing applies it yet.
+- **Not yet migrated.** Rules, snippet-retention buckets and stored labels still use v2.4 labels. The map table is ready, but nothing applies it yet. About 1,150 mapped v2.4 species have a different English name in V3 (Gray → Grey, redpoll lumps, Domestic Dog, Human), so a label-keyed rule silently stops matching after switching to `"3.0"` until this migration runs.
 - **Backend availability.** `classifier_backends_available` still reports `birdnet` as needing the `birdnet` package, even when V3 only needs `onnxruntime`. This only affects the status display.
 - **Rust sidecar.** It passes `MINIMAPPR_*` env to its Python classifier subprocess by inheriting the environment. V3 keys set only through PATCH reach it through `config.yml` on restart. This has not been tested with the sidecar running.
 - **Acceptable use.** The military-surveillance clause in `ACCEPTABLE_USE.txt` needs a human decision for MinimapPR deployments.

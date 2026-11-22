@@ -38,9 +38,10 @@ SILENCE_GUARD_REASON_EMPTY = "empty_input"
 class BirdNETV3WindowPolicy:
     """Window/guard tuning; every field is a Settings key (see config.py)."""
 
+    # Defaults mirror the Settings defaults (birdnet_v3_*_seconds).
     min_window_seconds: float = 2.0
-    max_window_seconds: float = 12.0
-    window_overlap_seconds: float = 1.5
+    max_window_seconds: float = 6.0
+    window_overlap_seconds: float = 3.0
     # Fraction of NaN/inf samples tolerated (replaced by noise fill) before the
     # whole clip is rejected as corrupt.
     max_nonfinite_sample_fraction: float = 0.01
