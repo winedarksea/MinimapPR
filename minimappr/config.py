@@ -478,6 +478,28 @@ class ClassifierConfig:
     heuristic_unknown_score: float
 
 
+# ── BirdNET+ V3.0 (Field Mode W1-birdnet-v3) ─────────────────────────────
+BIRDNET_MODEL_VERSIONS: tuple[str, ...] = ("2.4", "3.0")
+DEFAULT_BIRDNET_V3_MODEL_PATH = Path("data/models/birdnet_v3/BirdNET+_V3.0_Global_12K_FP16_pruned.onnx")
+DEFAULT_BIRDNET_V3_LABELS_PATH = Path("data/models/birdnet_v3/BirdNET+_V3.0_Global_12K_Labels.csv")
+
+
+@dataclass(slots=True)
+class BirdNETV3Config:
+    """Everything ``BirdNETV3Classifier`` needs; built by ``Settings.birdnet_v3_config()``."""
+
+    model_path: Path
+    labels_path: Path
+    species_list_path: Path | None
+    min_window_seconds: float
+    max_window_seconds: float
+    window_overlap_seconds: float
+    max_nonfinite_sample_fraction: float
+    pad_noise_floor_percentile: float
+    num_threads: int
+# ── end BirdNET+ V3.0 ──────────────────────────────────────────────────────
+
+
 @dataclass(slots=True)
 class StorageConfig:
     db_path: Path
@@ -941,6 +963,30 @@ class Settings:
     birdnet_direct_inference: bool = True
     # Interpreter threads per pooled slot; TFLite saturates at ~4 on this model.
     birdnet_direct_num_threads: int = 4
+    # ── BirdNET+ V3.0 (Field Mode W1-birdnet-v3) ──────────────────────────────
+    # "2.4" = TFLite v2.4 (birdnet package, unchanged behaviour); "3.0" =
+    # BirdNET+ V3.0.1 ONNX (scripts/fetch_birdnet_v3.py). Restart-required.
+    # V3 confidences are on a different scale: re-tune thresholds before
+    # switching (docs/field_mode_progress/birdnet_v3.md).
+    birdnet_model_version: str = "2.4"
+    birdnet_v3_model_path: Path = DEFAULT_BIRDNET_V3_MODEL_PATH
+    birdnet_v3_labels_path: Path = DEFAULT_BIRDNET_V3_LABELS_PATH
+    # Regional label subset: one scientific/common name or BirdNET id per line.
+    # Empty = all 11,725 classes.
+    birdnet_v3_species_list_path: str = ""
+    # Shorter clips are padded with noise at their own floor (never zeros).
+    birdnet_v3_min_window_seconds: float = 2.0
+    # V3 pools over the whole window, so a short call is diluted by long
+    # windows (house finch in noise: 0.92 at 3 s, 0.83 at 6 s, 0.48 at 12 s).
+    # 6 s with 50% overlap keeps every <=3 s call whole in some window.
+    birdnet_v3_max_window_seconds: float = 6.0
+    birdnet_v3_window_overlap_seconds: float = 3.0
+    # Silence guard: tolerated NaN/inf sample fraction before a clip is
+    # rejected; there is deliberately no level threshold (faint birds pass).
+    birdnet_v3_max_nonfinite_sample_fraction: float = 0.01
+    birdnet_v3_pad_noise_floor_percentile: float = 10.0
+    birdnet_v3_num_threads: int = 4
+    # ── end BirdNET+ V3.0 ──────────────────────────────────────────────────────
     detection_min_confidence: float = 0.4
     cop_detections_max_items: int = 150
     cop_tracks_max_items: int = 150
@@ -1192,6 +1238,10 @@ class Settings:
         self.classifier_routing_config_path = Path(self.classifier_routing_config_path)
         self.audio_processing_config_path = Path(self.audio_processing_config_path)
         self.drone_head_model_path = Path(self.drone_head_model_path)
+        # BirdNET+ V3.0 (Field Mode W1-birdnet-v3)
+        self.birdnet_v3_model_path = Path(self.birdnet_v3_model_path)
+        self.birdnet_v3_labels_path = Path(self.birdnet_v3_labels_path)
+        self.birdnet_model_version = str(self.birdnet_model_version).strip()
         self.speech_audio_dir = Path(self.speech_audio_dir)
         self.effector_snapshot_dir = Path(self.effector_snapshot_dir)
         self.large_artifact_dir = Path(self.large_artifact_dir)
@@ -1642,6 +1692,20 @@ class Settings:
                 _max_safe_batch_wait,
             )
             self.birdnet_batch_max_wait_seconds = _max_safe_batch_wait
+        # ── BirdNET+ V3.0 (Field Mode W1-birdnet-v3) ──
+        if self.birdnet_model_version not in BIRDNET_MODEL_VERSIONS:
+            raise ValueError(f"MINIMAPPR_BIRDNET_MODEL_VERSION must be one of {BIRDNET_MODEL_VERSIONS}")
+        if not 0.0 < self.birdnet_v3_min_window_seconds <= self.birdnet_v3_max_window_seconds:
+            raise ValueError("BirdNET V3 windows need 0 < min_window_seconds <= max_window_seconds")
+        if not 0.0 <= self.birdnet_v3_window_overlap_seconds < self.birdnet_v3_max_window_seconds:
+            raise ValueError("MINIMAPPR_BIRDNET_V3_WINDOW_OVERLAP_SECONDS must be in [0, max_window_seconds)")
+        if not 0.0 <= self.birdnet_v3_max_nonfinite_sample_fraction <= 1.0:
+            raise ValueError("MINIMAPPR_BIRDNET_V3_MAX_NONFINITE_SAMPLE_FRACTION must be in [0,1]")
+        if not 0.0 <= self.birdnet_v3_pad_noise_floor_percentile <= 100.0:
+            raise ValueError("MINIMAPPR_BIRDNET_V3_PAD_NOISE_FLOOR_PERCENTILE must be in [0,100]")
+        if self.birdnet_v3_num_threads < 1:
+            raise ValueError("MINIMAPPR_BIRDNET_V3_NUM_THREADS must be >= 1")
+        # ── end BirdNET+ V3.0 ──
         if self.detection_min_confidence < 0.0 or self.detection_min_confidence > 1.0:
             raise ValueError("MINIMAPPR_DETECTION_MIN_CONFIDENCE must be in [0,1]")
         if self.cop_detections_max_items < 1:
@@ -2218,6 +2282,26 @@ class Settings:
             birdnet_batch_max_size=_env_int("MINIMAPPR_BIRDNET_BATCH_MAX_SIZE", 16),
             birdnet_direct_inference=_env_bool("MINIMAPPR_BIRDNET_DIRECT_INFERENCE", True),
             birdnet_direct_num_threads=_env_int("MINIMAPPR_BIRDNET_DIRECT_NUM_THREADS", 4),
+            # ── BirdNET+ V3.0 (Field Mode W1-birdnet-v3) ──
+            birdnet_model_version=_env_str("MINIMAPPR_BIRDNET_MODEL_VERSION", "2.4"),
+            birdnet_v3_model_path=Path(
+                _env_str("MINIMAPPR_BIRDNET_V3_MODEL_PATH", str(DEFAULT_BIRDNET_V3_MODEL_PATH))
+            ),
+            birdnet_v3_labels_path=Path(
+                _env_str("MINIMAPPR_BIRDNET_V3_LABELS_PATH", str(DEFAULT_BIRDNET_V3_LABELS_PATH))
+            ),
+            birdnet_v3_species_list_path=_env_str("MINIMAPPR_BIRDNET_V3_SPECIES_LIST_PATH", ""),
+            birdnet_v3_min_window_seconds=_env_float("MINIMAPPR_BIRDNET_V3_MIN_WINDOW_SECONDS", 2.0),
+            birdnet_v3_max_window_seconds=_env_float("MINIMAPPR_BIRDNET_V3_MAX_WINDOW_SECONDS", 6.0),
+            birdnet_v3_window_overlap_seconds=_env_float("MINIMAPPR_BIRDNET_V3_WINDOW_OVERLAP_SECONDS", 3.0),
+            birdnet_v3_max_nonfinite_sample_fraction=_env_float(
+                "MINIMAPPR_BIRDNET_V3_MAX_NONFINITE_SAMPLE_FRACTION", 0.01
+            ),
+            birdnet_v3_pad_noise_floor_percentile=_env_float(
+                "MINIMAPPR_BIRDNET_V3_PAD_NOISE_FLOOR_PERCENTILE", 10.0
+            ),
+            birdnet_v3_num_threads=_env_int("MINIMAPPR_BIRDNET_V3_NUM_THREADS", 4),
+            # ── end BirdNET+ V3.0 ──
             detection_min_confidence=_env_float("MINIMAPPR_DETECTION_MIN_CONFIDENCE", 0.4),
             cop_detections_max_items=_env_int("MINIMAPPR_COP_DETECTIONS_MAX_ITEMS", 150),
             cop_tracks_max_items=_env_int("MINIMAPPR_COP_TRACKS_MAX_ITEMS", 150),
@@ -2562,6 +2646,22 @@ class Settings:
             heuristic_unknown_min_score=self.heuristic_unknown_min_score,
             heuristic_unknown_score=self.heuristic_unknown_score,
         )
+
+    # ── BirdNET+ V3.0 (Field Mode W1-birdnet-v3) ──
+    def birdnet_v3_config(self) -> BirdNETV3Config:
+        species_list = str(self.birdnet_v3_species_list_path or "").strip()
+        return BirdNETV3Config(
+            model_path=Path(self.birdnet_v3_model_path),
+            labels_path=Path(self.birdnet_v3_labels_path),
+            species_list_path=Path(species_list) if species_list else None,
+            min_window_seconds=self.birdnet_v3_min_window_seconds,
+            max_window_seconds=self.birdnet_v3_max_window_seconds,
+            window_overlap_seconds=self.birdnet_v3_window_overlap_seconds,
+            max_nonfinite_sample_fraction=self.birdnet_v3_max_nonfinite_sample_fraction,
+            pad_noise_floor_percentile=self.birdnet_v3_pad_noise_floor_percentile,
+            num_threads=self.birdnet_v3_num_threads,
+        )
+    # ── end BirdNET+ V3.0 ──
 
     def storage_config(self) -> StorageConfig:
         return StorageConfig(

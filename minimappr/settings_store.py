@@ -106,6 +106,18 @@ CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     # Restart-required alongside pool_size: the classifier is built at startup.
     "birdnet_batch_max_wait_seconds": float,
     "birdnet_batch_max_size": int,
+    # ── BirdNET+ V3.0 (Field Mode W1-birdnet-v3) ── restart-required: the
+    # classifier is built once at startup. Model/labels paths stay env-only,
+    # like drone_head_model_path.
+    "birdnet_model_version": str,
+    "birdnet_v3_species_list_path": str,
+    "birdnet_v3_min_window_seconds": float,
+    "birdnet_v3_max_window_seconds": float,
+    "birdnet_v3_window_overlap_seconds": float,
+    "birdnet_v3_max_nonfinite_sample_fraction": float,
+    "birdnet_v3_pad_noise_floor_percentile": float,
+    "birdnet_v3_num_threads": int,
+    # ── end BirdNET+ V3.0 ──
     "tracking_filter": str,
     "fusion_worker_count": int,
     "coordinate_mode": str,

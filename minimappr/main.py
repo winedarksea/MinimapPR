@@ -45,6 +45,7 @@ from minimappr.classifiers.routing import (
 from minimappr.core.config_groups import group_flat_config
 from minimappr.core.pipeline_graph import build_pipeline_graph
 from minimappr.config import (
+    BIRDNET_MODEL_VERSIONS,
     FusionConfig,
     IngestSidecarProcessConfig,
     IngestSidecarStartupConfig,
@@ -3079,6 +3080,18 @@ async def get_config(request: Request) -> dict:
         "birdnet_batch_max_size": settings.birdnet_batch_max_size,
         "birdnet_direct_inference": settings.birdnet_direct_inference,
         "birdnet_direct_num_threads": settings.birdnet_direct_num_threads,
+        # ── BirdNET+ V3.0 (Field Mode W1-birdnet-v3) ──
+        "birdnet_model_version": settings.birdnet_model_version,
+        "birdnet_v3_model_path": str(settings.birdnet_v3_model_path),
+        "birdnet_v3_labels_path": str(settings.birdnet_v3_labels_path),
+        "birdnet_v3_species_list_path": settings.birdnet_v3_species_list_path,
+        "birdnet_v3_min_window_seconds": settings.birdnet_v3_min_window_seconds,
+        "birdnet_v3_max_window_seconds": settings.birdnet_v3_max_window_seconds,
+        "birdnet_v3_window_overlap_seconds": settings.birdnet_v3_window_overlap_seconds,
+        "birdnet_v3_max_nonfinite_sample_fraction": settings.birdnet_v3_max_nonfinite_sample_fraction,
+        "birdnet_v3_pad_noise_floor_percentile": settings.birdnet_v3_pad_noise_floor_percentile,
+        "birdnet_v3_num_threads": settings.birdnet_v3_num_threads,
+        # ── end BirdNET+ V3.0 ──
         "persisted_override_keys": sorted(load_overrides(settings.config_overrides_path)),
         "beamformer_type": settings.beamformer_type,
         "beamformed_classification_min_sensor_count": settings.beamformed_classification_min_sensor_count,
@@ -3233,6 +3246,10 @@ _SIDECAR_RESTART_REQUIRED_KEYS = {
     "birdnet_geo_min_confidence",
     "trigger_rms",
     "trigger_cooldown_seconds",
+    # ── BirdNET+ V3.0 (Field Mode W1-birdnet-v3) ── the sidecar's Python
+    # classifier subprocess reads these once at spawn.
+    *(key for key in CONFIG_PATCH_ALLOWLIST if key == "birdnet_model_version" or key.startswith("birdnet_v3_")),
+    # ── end BirdNET+ V3.0 ──
 }
 
 
@@ -3265,6 +3282,11 @@ def _startup_snapshot_restart_required_keys() -> frozenset[str]:
     keys.add("birdnet_batch_max_wait_seconds")
     keys.add("birdnet_batch_max_size")
     keys.add("yamnet_max_input_gain")
+    # ── BirdNET+ V3.0 (Field Mode W1-birdnet-v3) ── classifier built at startup.
+    keys.update(
+        key for key in CONFIG_PATCH_ALLOWLIST if key == "birdnet_model_version" or key.startswith("birdnet_v3_")
+    )
+    # ── end BirdNET+ V3.0 ──
     # Classification-priority knobs are read into FusionNode.__init__ (the queue
     # type itself is chosen there), so a live PATCH cannot reorder a queue that
     # already exists.
@@ -3424,6 +3446,35 @@ async def put_rules_config(payload: RulesConfigUpdate, request: Request) -> Rule
 
     await state.live_hub.broadcast({"type": "rules_updated"})
     return _rules_response(settings)
+
+
+# ── BirdNET+ V3.0 (Field Mode W1-birdnet-v3) ──
+def _birdnet_v3_patch_errors(coerced: dict[str, object], settings: Settings) -> list[str]:
+    def merged(key: str) -> Any:
+        return coerced.get(key, getattr(settings, key))
+
+    errors: list[str] = []
+    if "birdnet_model_version" in coerced:
+        version = str(coerced["birdnet_model_version"]).strip()
+        if version not in BIRDNET_MODEL_VERSIONS:
+            errors.append(f"birdnet_model_version: must be one of {list(BIRDNET_MODEL_VERSIONS)}")
+        else:
+            coerced["birdnet_model_version"] = version
+    min_window = float(merged("birdnet_v3_min_window_seconds"))
+    max_window = float(merged("birdnet_v3_max_window_seconds"))
+    overlap = float(merged("birdnet_v3_window_overlap_seconds"))
+    if not (math.isfinite(min_window) and math.isfinite(max_window) and 0.0 < min_window <= max_window):
+        errors.append("birdnet_v3_min_window_seconds: need 0 < min <= birdnet_v3_max_window_seconds")
+    if not (math.isfinite(overlap) and 0.0 <= overlap < max_window):
+        errors.append("birdnet_v3_window_overlap_seconds: must be in [0, birdnet_v3_max_window_seconds)")
+    if not 0.0 <= float(merged("birdnet_v3_max_nonfinite_sample_fraction")) <= 1.0:
+        errors.append("birdnet_v3_max_nonfinite_sample_fraction: must be in [0, 1]")
+    if not 0.0 <= float(merged("birdnet_v3_pad_noise_floor_percentile")) <= 100.0:
+        errors.append("birdnet_v3_pad_noise_floor_percentile: must be in [0, 100]")
+    if int(merged("birdnet_v3_num_threads")) < 1:
+        errors.append("birdnet_v3_num_threads: must be >= 1")
+    return errors
+# ── end BirdNET+ V3.0 ──
 
 
 @app.patch("/api/v1/config")
@@ -3689,6 +3740,11 @@ async def patch_config(request: Request) -> dict:
         errors.append(
             "hass_reconnect_backoff_max_seconds: must be >= hass_reconnect_backoff_initial_seconds"
         )
+    # ── BirdNET+ V3.0 (Field Mode W1-birdnet-v3) ── checked on the merged
+    # values so a persisted override can never fail Settings validation at the
+    # next startup.
+    errors.extend(_birdnet_v3_patch_errors(coerced, settings))
+    # ── end BirdNET+ V3.0 ──
     hass_enabled = bool(coerced.get("hass_enabled", settings.hass_enabled))
     hass_host = str(coerced.get("hass_mqtt_host", settings.hass_mqtt_host)).strip()
     if hass_enabled and not hass_host:
