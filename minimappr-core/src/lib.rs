@@ -22,3 +22,6 @@ pub mod session_crypto;
 pub mod stage1;
 // W2-core-solver
 pub mod tdoa_solver;
+// W2-core-sync: chirp sync, clock model, acoustic islands, layout + GPS anchor.
+pub mod layout;
+pub mod sync;

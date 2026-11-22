@@ -41,6 +41,8 @@ rand_chacha = { version = "0.3", default-features = false }
 # builds; minimappr-sim does not depend on minimappr-core (no cycle).
 minimappr-sim = { path = "../minimappr-sim" }
 # --- end W2-core-srp
+# W2-core-sync also uses nalgebra (declared in the W2-core-solver block below)
+# and minimappr-sim as a dev-dependency (declared below).
 
 [[bench]]
 name = "capture_plane"
