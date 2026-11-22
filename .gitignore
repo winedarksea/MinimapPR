@@ -76,6 +76,8 @@ docs/_build/
 # PyBuilder
 .pybuilder/
 target/
+# Alternate Cargo target dirs (e.g. CARGO_TARGET_DIR=target-review-foo during reviews)
+/target-*/
 
 # Jupyter Notebook
 .ipynb_checkpoints
