@@ -5,6 +5,8 @@ from __future__ import annotations
 import numpy as np
 
 from minimappr.core.onset_classification_node import classification_capable_cluster
+from minimappr.core.onset_cluster_attribution import AttributionThresholds, interferers_in_window, snr_gradient_decision
+from minimappr.core.onset_cluster_attribution_evidence import ClusterAttributionEvidence, ClusterOnsetArrival
 from minimappr.core.onset_cluster_geometry_resolution import (
     SAME_SOURCE_RANGE_AMBIGUOUS_REASON,
     TDOA_EQUIVALENT_DUPLICATE_REASON,
@@ -186,3 +188,28 @@ def test_planar_ridge_twins_with_equal_cross_node_tdoas_are_one_source() -> None
     )
     assert result[1].status == CLUSTER_STATUS_TENTATIVE and TDOA_EQUIVALENT_DUPLICATE_REASON in result[1].status_reasons
     assert result[2].status == CLUSTER_STATUS_ACCEPTED
+
+
+def test_snr_gradient_refuses_same_band_dominance_that_geometry_cannot_explain() -> None:
+    nodes = {"a": np.array([0.0, 0.0, 1.5]), "b": np.array([20.0, 0.0, 1.5]), "c": np.array([40.0, 0.0, 1.5])}
+
+    def evidence(source, level_db, band):
+        distances = {n: float(np.linalg.norm(np.asarray(source) - p)) for n, p in nodes.items()}
+        return ClusterAttributionEvidence(
+            node_band_snr_db={n: level_db - 20 * np.log10(d) for n, d in distances.items()},
+            node_distances_m=distances,
+            node_onset_arrivals={n: (ClusterOnsetArrival(1000, *band),) for n in nodes},
+            fitted_source_level_db=level_db,
+            spreading_residual_db=0.0,
+        )
+
+    # Collinear trail: the thrush cluster's band reached the vireo's trill, so its "level" is the trill's.
+    thrush = evidence([12.0, 9.0, 4.0], 75.0, (2424.0, 5893.0))
+    vireo = evidence([28.0, -8.0, 5.0], 62.0, (500.0, 5893.0))
+    thresholds = AttributionThresholds(3.0, 10.0, 6.0, 0.3, 0.1, 0.5)
+    interferers = interferers_in_window(
+        target_index=0, cluster_evidence={0: thrush, 1: vireo}, classifying_node_id="b",
+        window_start_sample=0, window_end_sample=24000, sample_rate_hz=24000, audible_snr_db=3.0,
+    )
+    decision = snr_gradient_decision(target=thrush, interferers=interferers, classifying_node_id="b", thresholds=thresholds)
+    assert not decision.settled and decision.reason == "bands_overlap_not_geometric"
