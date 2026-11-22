@@ -231,6 +231,10 @@ impl DeferredLocalizationScheduler {
 
 /// Re-read the (now fuller) buffers at the original window centre, so the
 /// solve uses the trigger frame's span with every channel that arrived.
+///
+/// Only the channels the parked geometry describes are re-read: a cluster
+/// buffer grows (never reorders) when a member joins, and a channel index
+/// past `mic_positions_m` would panic SRP on the rayon pool (process abort).
 fn finalize_pending_payload(
     pending: PendingLocalization,
     buffers: &[SensorStreamBuffer],
@@ -240,8 +244,12 @@ fn finalize_pending_payload(
         payload_template: mut payload,
         ..
     } = pending;
-    payload.channel_states =
-        localization_channel_states_centered(buffers, span.center_time_ns, span.window_seconds);
+    let parked_geometry_channel_count = payload.mic_positions_m.len().min(buffers.len());
+    payload.channel_states = localization_channel_states_centered(
+        &buffers[..parked_geometry_channel_count],
+        span.center_time_ns,
+        span.window_seconds,
+    );
     payload.active_channels =
         eligible_localization_channels(&payload.channel_states, span.min_coverage_ratio);
     payload
