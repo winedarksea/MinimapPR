@@ -1,0 +1,12 @@
+[package]
+name = "minimappr-relay-wire"
+version = "0.1.0"
+edition.workspace = true
+description = "Field Mode relay wire contract shared by the Cloudflare relay Worker and minimappr-transport: relay frame header, routing policy, session caps, control notices, HTTP API bodies."
+
+# Deliberately tiny (serde only) so the wasm Worker bundle stays small and
+# the relay's routing/cap policy is unit-tested natively by
+# `cargo test --workspace`, not only through wrangler.
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

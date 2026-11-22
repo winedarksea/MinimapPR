@@ -1,0 +1,39 @@
+[package]
+name = "minimappr-transport"
+version = "0.1.0"
+edition.workspace = true
+description = "Field Mode session transport: sans-IO relay client (sealed messages, clip chunking below control traffic, late-clip abandonment, reconnect with resume) plus a native WebSocket adapter."
+
+# The core (everything outside `native_websocket`) is sans-IO: no tokio, no
+# clock, no OS randomness; time and a CSPRNG are injected. It builds for
+# wasm32 with `default-features = false` (a web-sys WebSocket adapter for the
+# PWA is W4-pwa's job and drives the same state machine).
+[dependencies]
+minimappr-core = { path = "../minimappr-core", default-features = false, features = ["session-crypto"] }
+minimappr-relay-wire = { path = "../minimappr-relay-wire" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rand_core = { version = "0.6", default-features = false }
+
+# --- native-websocket adapter (default on so `cargo test --workspace`
+# covers it; wasm/mobile consumers opt out) ---
+tokio = { version = "1", default-features = false, features = ["net", "time", "rt", "macros"], optional = true }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"], optional = true }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+url = { version = "2", optional = true }
+
+[features]
+default = ["native-websocket"]
+native-websocket = [
+    "dep:tokio",
+    "dep:tokio-tungstenite",
+    "dep:futures-util",
+    "dep:reqwest",
+    "dep:url",
+    "rand_core/getrandom",
+]
+
+[dev-dependencies]
+rand_chacha = { version = "0.3", default-features = false }
+tokio = { version = "1", default-features = false, features = ["net", "time", "rt-multi-thread", "macros", "process"] }
