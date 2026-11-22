@@ -75,7 +75,9 @@ def horizontal_mahalanobis_squared(
         value = float(residual @ np.linalg.solve(combined, residual))
     except np.linalg.LinAlgError:
         return None
-    return value if math.isfinite(value) else None
+    # A non-PSD covariance (bad upstream Jacobian) can give a negative "distance" that would
+    # pass every gate and win absorption with a negative score: treat it as no usable covariance.
+    return value if math.isfinite(value) and value >= 0.0 else None
 
 
 def fix_is_bearing_evidence(

@@ -127,3 +127,28 @@ def concurrently_active_perch_conflicts(
         if sang_too_recently or neighbour_sang_since:
             conflicts.add(track.id)
     return conflicts
+
+
+def weak_claim_sits_on_track_perch(
+    *,
+    position_m: tuple[float, float, float],
+    measurement_covariance_m2: list[list[float]] | None,
+    track: TrackState,
+    snap_distance_m: float,
+) -> bool:
+    """May a weak contradicting species claim join *track* as one confused bout of that bird?
+
+    Only when the fix is geometrically on the track's perch (within the snap distance) and
+    not a new perch. Statistical consistency alone is not enough: a fix whose covariance
+    spans tens of metres is "consistent" with every perch in the layout, so it would let a
+    neighbour's weak bout join any confident track (review/s-fixes: a White-throated
+    Sparrow bout labelled Harris's Sparrow 0.46, fix sd ~45-445 m, joined the robin's track
+    12.9 m away and its canonical row was drawn at the robin's perch).
+    """
+    if snap_distance_m <= 0.0:
+        return not fix_lands_on_another_perch(
+            position_m=position_m, measurement_covariance_m2=measurement_covariance_m2,
+            track=track, snap_distance_m=snap_distance_m,
+        )
+    offset = np.asarray(position_m, dtype=np.float64) - np.asarray(track.position_m, dtype=np.float64)
+    return bool(np.linalg.norm(offset) <= snap_distance_m)

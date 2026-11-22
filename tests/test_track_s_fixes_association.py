@@ -148,3 +148,21 @@ def test_guard_ignores_fixes_consistent_with_a_noisy_perch() -> None:
         is_perched=lambda track_id: True, config=config,
     )
     assert conflicts == set()
+
+
+async def test_weak_claim_with_an_uninformative_fix_does_not_join_a_distant_confident_track() -> None:
+    # review/s-fixes (real-audio robin row labelled Harris's Sparrow): a weak contradicting
+    # claim whose fix covariance spans tens of metres is statistically "on" every perch;
+    # it must be geometrically on the track's perch to count as that bird's confused bout.
+    manager = TrackManager(Settings(**ALL_TRACKER_FLAGS))
+    for bout in range(3):
+        robin = await manager.update(
+            timestamp_ns=T0 + bout * SECOND, position_m=(6.0, 6.0, 3.0), label=ROBIN, label_category="wildlife",
+            confidence=0.9, measurement_covariance_m2=TIGHT_FIX_COVARIANCE_M2,
+        )
+    huge_fix_covariance_m2 = [[2025.0, 0.0, 0.0], [0.0, 41000.0, 0.0], [0.0, 0.0, 198000.0]]
+    sparrow = await manager.update(
+        timestamp_ns=T0 + 20 * SECOND, position_m=(-5.8, 4.2, 3.2), label="harris's sparrow",
+        label_category="wildlife", confidence=0.46, measurement_covariance_m2=huge_fix_covariance_m2,
+    )
+    assert sparrow.id != robin.id

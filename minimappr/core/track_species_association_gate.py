@@ -14,8 +14,8 @@ detection gives the track's species less than ``detection_claim_probability``.
 A *confident* contradicting claim (at least ``confident_probability``) is
 always refused. A *weak* one (between the two floors: sub-display
 two-threshold evidence, a confused bout) may still join when it sits on the
-track's own perch (``weak_claim_fits_track``: not a fix the perched filter
-would snap to), so one misclassified bout from a known bird feeds that bird's
+track's own perch (``weak_claim_fits_track``: within the perched snap
+distance, however wide the fix covariance), so one misclassified bout from a known bird feeds that bird's
 belief instead of spawning a track. Off the perch it is refused: on the S
 gate's real-audio scene, sub-display tanager bouts joined the grosbeak's
 track 7 m away, built a tanager belief inside it, and then let the confident

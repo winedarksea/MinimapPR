@@ -233,3 +233,30 @@ the merged branches, not from this fix.
   a 9 m same-species fix after 2.4 s of silence looks like one bird hopping. Bearing-evidence bouts
   absorbed into an entity do not count as track activity for `min_silence` or the concurrent-perch
   guard. That is a candidate refinement, but it needs its own gate run (robin hop scenarios).
+
+## Review (`review/s-fixes`)
+
+**Real-audio robin "Harris's Sparrow" row: tracker defect, fixed.** Traced bout by bout (serial
+replays are deterministic; parallel replays under load are not, so compare serial runs only):
+
+- At 23.83 s a White-throated Sparrow bout is fixed correctly at (-5.8, 4.2) but its LM covariance is
+  huge in every axis (sd 45 / 203 / 445 m, still `range_refined`). BirdNET calls it Harris's Sparrow
+  0.46 / WTSP 0.45 (a genuine model confusion).
+- The species gate's weak-claim exception let it join the robin's confident track 12.9 m away: "on
+  the track's perch" was tested as *not snap-worthy*, and a fix that wide is statistically consistent
+  with every perch. The fused canonical row (fix 3) then drew the sparrow label at the robin's perch.
+- Fix: a weak contradicting claim must lie within the perched snap distance of the track
+  (`weak_claim_sits_on_track_perch`). Test: `test_weak_claim_with_an_uninformative_fix_...`.
+- Result (serial, 2 replays each): before 0.60 / 0.60 (the 0.80 in the table above was a loaded
+  run); after 0.80 / 0.80, individual recall 1.00, 0 swaps / dup / merged. The one remaining wrong
+  label is the WTSP bout itself, now at the WTSP's perch, labelled Harris's Sparrow 0.46 vs WTSP
+  0.45: model noise. With the onset S-fixes knobs reverted the same bout scores WTSP 0.46 (different
+  beam steer), so 1.00 vs 0.80 there is not a localization regression.
+- Not fixed (pre-existing, logged): the bout reaches the *tanager's* track, which an `unknown` fix
+  (sd 4.7 / 30 m) dragged 22 m onto the sparrow's perch at 22.51 s. Unknown labels are association
+  wildcards and the CV filter follows them; and LM covariances that span hundreds of metres are still
+  labelled `range_refined` (the range profile only ever inflates them).
+
+Also fixed: non-PSD fix covariance could give a negative Mahalanobis distance that passed every
+absorption gate; the two new onset count keys are `int` in the PATCH allowlist (a float count
+crashed `np.geomspace`). Sim matrix after review: identical to "merged, after" above (PASS).
