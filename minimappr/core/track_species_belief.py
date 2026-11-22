@@ -43,7 +43,7 @@ class SpeciesBeliefConfig:
     """Tuning for ``SpeciesLogOddsBelief`` (all from ``TrackingConfig``)."""
 
     prior_probability: float = 0.1
-    per_update_log_odds_cap: float = 2.0
+    per_update_log_odds_cap: float = 3.0
     total_log_odds_cap: float = 6.0
     evidence_top_k: int = 3
     display_min_belief: float = 0.5

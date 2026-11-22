@@ -113,11 +113,20 @@ async def test_belief_only_for_configured_categories():
 async def test_hidden_tentative_track_never_in_snapshot_until_belief_passes():
     manager = _manager(tracking_species_log_odds_enabled=True, tracking_species_display_min_belief=0.5)
     track = await manager.update(timestamp_ns=T0, position_m=(5, 5, 1), label="robin",
-                                 label_category="wildlife", confidence=0.3)
+                                 label_category="wildlife", confidence=0.3, below_display_threshold=True)
     assert manager.is_track_hidden(track.id)
     assert await manager.snapshot() == []
     assert len(await manager.snapshot(include_hidden=True)) == 1
     await manager.update(timestamp_ns=T0 + 4 * SECOND, position_m=(5.5, 5, 1), label="robin",
-                         label_category="wildlife", confidence=0.45)
+                         label_category="wildlife", confidence=0.45, below_display_threshold=True)
     visible = await manager.snapshot()
     assert [t.id for t in visible] == [track.id]
+
+
+async def test_display_level_detection_reveals_track_even_with_weak_belief():
+    """Nothing that surfaces today is hidden: a display-level hit reveals the track."""
+    manager = _manager(tracking_species_log_odds_enabled=True, tracking_species_display_min_belief=0.9)
+    track = await manager.update(timestamp_ns=T0, position_m=(5, 5, 1), label="robin",
+                                 label_category="wildlife", confidence=0.6)
+    assert not manager.is_track_hidden(track.id)
+    assert len(await manager.snapshot()) == 1

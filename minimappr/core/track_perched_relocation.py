@@ -13,6 +13,9 @@ before it expires, the hop was really a second bird: the relocation is
 reverted (the track returns to its old perch, the new perch gets its own new
 track) and both tracks are barred from relocating while the ghost window lasts.
 One mistake per pair instead of ping-ponging identities across the flock.
+A track may hop at most once per ghost window, so a chain of same-species
+perches (A->B->C) cannot overwrite the ghost that tells the flock apart; the
+cost is that a real second hop inside the window starts a new track.
 """
 
 from __future__ import annotations
@@ -67,6 +70,7 @@ class PerchedRelocationGate:
         top_species_for: Callable[[TrackState], list[str]],
         is_perched: Callable[[str], bool],
     ) -> str | None:
+        self._expire(timestamp_ns)
         species = _normalised(detection_species)
         measurement = np.asarray(position_m, dtype=np.float64)
         same_species: list[tuple[float, TrackState]] = []
@@ -89,6 +93,10 @@ class PerchedRelocationGate:
         if timestamp_ns - nearest.last_seen_ns < self._min_silence_ns:
             return None
         if self._relocation_blocked_until_ns.get(nearest.id, 0) > timestamp_ns:
+            return None
+        # One hop per ghost window: chaining hops would erase the ghost that
+        # lets a flock be told apart from one bird.
+        if nearest.id in self._ghosts:
             return None
         self.relocations_accepted += 1
         if self._ghost_ns > 0:

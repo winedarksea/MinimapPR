@@ -85,6 +85,7 @@ async def resolve_detection_track(
         update_kwargs: dict[str, Any] = {}
         if species_evidence is not None:
             update_kwargs["species_evidence"] = species_evidence
+            update_kwargs["below_display_threshold"] = below_display
         track = await tracker.update(
             timestamp_ns=event_time_ns,
             position_m=localization_position_m,
@@ -120,6 +121,7 @@ async def resolve_detection_track(
             species_evidence=species_evidence,
             classifier_scores=classification_scores,
             source_node_id=source_node_id,
+            below_display_threshold=below_display,
         )
         resolution.partially_bound = track is not None
 

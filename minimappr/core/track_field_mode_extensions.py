@@ -14,7 +14,6 @@ the manager behaves exactly as before.
 
 from __future__ import annotations
 
-import math
 from typing import Iterable
 
 import numpy as np
@@ -78,7 +77,7 @@ class FieldModeTrackExtensions:
         )
         self._belief_config = SpeciesBeliefConfig(
             prior_probability=float(getattr(cfg, "tracking_species_log_odds_prior_probability", 0.1)),
-            per_update_log_odds_cap=float(getattr(cfg, "tracking_species_log_odds_per_update_cap", 2.0)),
+            per_update_log_odds_cap=float(getattr(cfg, "tracking_species_log_odds_per_update_cap", 3.0)),
             total_log_odds_cap=float(getattr(cfg, "tracking_species_log_odds_total_cap", 6.0)),
             evidence_top_k=int(getattr(cfg, "tracking_species_log_odds_evidence_top_k", 3)),
             display_min_belief=float(getattr(cfg, "tracking_species_display_min_belief", 0.5)),
@@ -101,6 +100,10 @@ class FieldModeTrackExtensions:
             snr_level_margin_db=float(getattr(cfg, "tracking_partial_binding_snr_level_margin_db", 7.0)),
         )
         self._beliefs: dict[str, SpeciesLogOddsBelief] = {}
+        # Tracks that received at least one display-level detection. Only tracks
+        # built purely from sub-display (two-threshold) evidence can be hidden, so
+        # nothing that surfaces today is ever hidden by turning these flags on.
+        self._revealed_track_ids: set[str] = set()
         self.partial_bindings_accepted = 0
         self.partial_bindings_unbound = 0
 
@@ -152,8 +155,12 @@ class FieldModeTrackExtensions:
             top_k=self._belief_config.evidence_top_k,
         )
 
-    def apply_belief(self, track: TrackState, evidence: dict[str, float]) -> None:
+    def apply_belief(
+        self, track: TrackState, evidence: dict[str, float], *, display_level: bool = True
+    ) -> None:
         """Fuse *evidence* and project top label/probability onto *track*."""
+        if display_level:
+            self._revealed_track_ids.add(track.id)
         belief = self._beliefs.get(track.id)
         if belief is None:
             belief = SpeciesLogOddsBelief(self._belief_config)
@@ -175,12 +182,15 @@ class FieldModeTrackExtensions:
         return [track.label] if label and label != "unknown" else []
 
     def is_hidden(self, track_id: str) -> bool:
-        """A belief-carrying track below the display threshold never surfaces."""
+        """A sub-display-only track whose belief is below the display threshold."""
+        if track_id in self._revealed_track_ids:
+            return False
         belief = self._beliefs.get(track_id)
         return belief is not None and not belief.passes_display_threshold()
 
     def forget(self, track_id: str) -> None:
         self._beliefs.pop(track_id, None)
+        self._revealed_track_ids.discard(track_id)
         self.relocation_gate.forget(track_id)
 
     # -- perched relocation gate ------------------------------------------------
@@ -230,6 +240,8 @@ class FieldModeTrackExtensions:
         belief = self._beliefs.get(source_track_id)
         if belief is not None:
             self._beliefs[target_track_id] = belief.copy()
+        if source_track_id in self._revealed_track_ids:
+            self._revealed_track_ids.add(target_track_id)
 
     # -- partial-constraint binding -------------------------------------------
 
@@ -267,8 +279,3 @@ class FieldModeTrackExtensions:
         else:
             self.partial_bindings_accepted += 1
         return decision
-
-
-def finite_position(position_m: np.ndarray) -> tuple[float, float, float] | None:
-    values = tuple(float(value) for value in np.asarray(position_m, dtype=np.float64).reshape(3))
-    return values if all(math.isfinite(value) for value in values) else None  # type: ignore[return-value]

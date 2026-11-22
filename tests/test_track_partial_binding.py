@@ -135,7 +135,8 @@ async def test_omni_detection_binds_by_snr_ranking_and_updates_belief():
     manager = TrackManager(Settings(tracking_partial_constraint_binding_enabled=True,
                                     tracking_species_log_odds_enabled=True))
     localized = await manager.update(timestamp_ns=T0, position_m=(6.0, 12.0, 2.0), label="robin",
-                                     label_category="wildlife", confidence=0.35)
+                                     label_category="wildlife", confidence=0.35,
+                                     below_display_threshold=True)
     assert manager.is_track_hidden(localized.id)
     resolution = await _resolve_omni(manager, registry, label="robin", confidence=0.6,
                                      timestamp_ns=T0 + 6 * SECOND)

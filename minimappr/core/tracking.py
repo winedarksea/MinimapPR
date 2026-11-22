@@ -36,7 +36,7 @@ from minimappr.core.track_associators import (
 )
 from minimappr.core.track_field_mode_extensions import FieldModeTrackExtensions
 from minimappr.core.track_filters import KalmanTrackFilter, LinearTrackFilter
-from minimappr.core.track_partial_binding import PartialConstraint
+from minimappr.core.tracking_field_mode_methods import TrackManagerFieldModeMethods
 from minimappr.interfaces import AssociationContext, TrackAssociator, TrackFilter
 from minimappr.models import LabelId, TrackState, TrackStatus
 
@@ -81,7 +81,7 @@ class _DormantRecord:
     capability_tier: str = "full_3d"
 
 
-class TrackManager:
+class TrackManager(TrackManagerFieldModeMethods):
     CONFIRM_THRESHOLD: int = 2  # detections needed to confirm a track
     _MAX_CONTRIBUTOR_NODE_IDS: int = 16  # bound on the per-track contributor set
 
@@ -246,6 +246,7 @@ class TrackManager:
         source_node_id: str | None = None,
         classifier_scores: dict[str, float] | None = None,
         species_evidence: dict[str, float] | None = None,
+        below_display_threshold: bool = False,
     ) -> TrackState:
         async with self._lock:
             self._age_tracks(timestamp_ns)
@@ -346,6 +347,7 @@ class TrackManager:
                         source_node_id=source_node_id,
                         classifier_scores=classifier_scores,
                         can_confirm=can_confirm,
+                        below_display_threshold=below_display_threshold,
                     )
 
                 # --- New track ---
@@ -384,7 +386,9 @@ class TrackManager:
                 self._apply_process_noise(track_id, label_category)
                 self._update_fingerprint(track_id, classifier_scores)
                 if self._field_mode.belief_applies(label_category):
-                    self._field_mode.apply_belief(created, evidence)
+                    self._field_mode.apply_belief(
+                        created, evidence, display_level=not below_display_threshold
+                    )
                 return created
 
             # --- Update matched track ---
@@ -425,7 +429,9 @@ class TrackManager:
             )
             if self._field_mode.belief_applies(label_category):
                 # Capped log-odds fusion replaces the single-label overwrite.
-                self._field_mode.apply_belief(best_track, evidence)
+                self._field_mode.apply_belief(
+                    best_track, evidence, display_level=not below_display_threshold
+                )
             elif label_changed:
                 best_track.confidence = float(confidence)
             else:
@@ -480,69 +486,6 @@ class TrackManager:
                 if include_hidden or not self._field_mode.is_hidden(track.id)
             ]
 
-    def is_track_hidden(self, track_id: str) -> bool:
-        return self._field_mode.is_hidden(track_id)
-
-    @property
-    def field_mode(self) -> FieldModeTrackExtensions:
-        return self._field_mode
-
-    async def bind_partial_constraints(
-        self,
-        *,
-        timestamp_ns: int,
-        label: str,
-        confidence: float,
-        label_category: str,
-        constraints: list[PartialConstraint],
-        species_evidence: dict[str, float] | None = None,
-        classifier_scores: dict[str, float] | None = None,
-        source_node_id: str | None = None,
-    ) -> TrackState | None:
-        """Bind an unpositioned detection to a recent track, or return ``None``.
-
-        On a bind the track's species belief and recency update and its position
-        gets a soft nudge toward the constraint (see ``track_partial_binding``).
-        """
-        if not self._field_mode.partial_binding_enabled:
-            return None
-        async with self._lock:
-            self._age_tracks(timestamp_ns)
-            evidence = self._field_mode.detection_evidence(
-                label=label,
-                confidence=confidence,
-                classifier_scores=classifier_scores,
-                species_evidence=species_evidence,
-            )
-            decision = self._field_mode.choose_partial_binding(
-                timestamp_ns=timestamp_ns,
-                evidence=evidence,
-                constraints=constraints,
-                tracks=list(self._tracks.values()),
-            )
-            if decision is None:
-                return None
-            track = self._tracks[decision.track_id]
-            if decision.corrected_position_m is not None:
-                corrected = tuple(float(value) for value in decision.corrected_position_m)
-                track.position_m = corrected  # type: ignore[assignment]
-                soft_update = getattr(self._filter, "soft_position_update", None)
-                if callable(soft_update):
-                    soft_update(track.id, corrected)
-            track.last_seen_ns = max(track.last_seen_ns, timestamp_ns)
-            track.update_count += 1
-            if self._field_mode.belief_applies(track.label_category or label_category):
-                self._field_mode.apply_belief(track, evidence)
-            elif label == track.label:
-                track.confidence = float(max(track.confidence, confidence))
-            if source_node_id and source_node_id not in track.contributor_node_ids:
-                track.contributor_node_ids.append(source_node_id)
-                track.contributor_node_ids = track.contributor_node_ids[-self._MAX_CONTRIBUTOR_NODE_IDS :]
-            if track.status == TrackStatus.COASTING.value:
-                track.status = TrackStatus.CONFIRMED.value
-            self._update_fingerprint(track.id, classifier_scores)
-            return track
-
     def _lifecycle_ns(self, label_category: str) -> tuple[int, int, int]:
         """(stale, drop, reap) thresholds in ns for *label_category*.
 
@@ -567,31 +510,6 @@ class TrackManager:
         )
         self._lifecycle_ns_cache[key] = thresholds
         return thresholds
-
-    def _revert_relocation(self, ghost, timestamp_ns: int) -> None:
-        """A fix landed back on the perch a track just left: it was two birds.
-
-        The track returns to its old perch; whatever it picked up at the new
-        perch continues as a new track (see ``track_perched_relocation``).
-        """
-        relocated = self._tracks[ghost.track_id]
-        split_id = f"{self._track_id_prefix}{next(self._id_counter):05d}"
-        split = relocated.model_copy(
-            update={
-                "id": split_id,
-                "first_seen_ns": ghost.left_at_ns,
-                "update_count": 1,
-                "status": TrackStatus.TENTATIVE.value,
-                "contributor_node_ids": list(relocated.contributor_node_ids),
-            }
-        )
-        self._tracks[split_id] = split
-        self._filter.initialize_track(split_id, split.position_m)
-        self._apply_motion_model(split_id, split.label_category, split.position_m)
-        self._field_mode.clone_belief(relocated.id, split_id)
-        relocated.position_m = ghost.perch_position_m
-        self._filter.initialize_track(relocated.id, ghost.perch_position_m)
-        self._field_mode.relocation_gate.mark_reverted(ghost, split_id, timestamp_ns)
 
     def _apply_motion_model(
         self, track_id: str, label_category: str, position_m: tuple[float, float, float]
@@ -751,6 +669,7 @@ class TrackManager:
         source_node_id: str | None,
         classifier_scores: dict[str, float] | None,
         can_confirm: bool,
+        below_display_threshold: bool = False,
     ) -> TrackState:
         """Resurrect a dormant identity onto this detection."""
         track_id = record.track_id
@@ -850,6 +769,7 @@ class TrackManager:
                     classifier_scores=classifier_scores,
                     species_evidence=None,
                 ),
+                display_level=not below_display_threshold,
             )
         if record.fingerprint:
             self._fingerprints[track_id] = dict(record.fingerprint)

@@ -450,7 +450,7 @@ class TrackingConfig:
     tracking_species_log_odds_enabled: bool = False
     tracking_species_log_odds_label_categories: str = "wildlife"
     tracking_species_log_odds_prior_probability: float = 0.1
-    tracking_species_log_odds_per_update_cap: float = 2.0
+    tracking_species_log_odds_per_update_cap: float = 3.0
     tracking_species_log_odds_total_cap: float = 6.0
     tracking_species_log_odds_evidence_top_k: int = 3
     tracking_species_display_min_belief: float = 0.5
@@ -1147,7 +1147,7 @@ class Settings:
     tracking_species_log_odds_enabled: bool = False
     tracking_species_log_odds_label_categories: str = "wildlife"
     tracking_species_log_odds_prior_probability: float = 0.1
-    tracking_species_log_odds_per_update_cap: float = 2.0
+    tracking_species_log_odds_per_update_cap: float = 3.0
     tracking_species_log_odds_total_cap: float = 6.0
     tracking_species_log_odds_evidence_top_k: int = 3
     tracking_species_display_min_belief: float = 0.5
@@ -2483,7 +2483,7 @@ class Settings:
             tracking_species_log_odds_enabled=_env_bool("MINIMAPPR_TRACKING_SPECIES_LOG_ODDS_ENABLED", False),
             tracking_species_log_odds_label_categories=_env_str("MINIMAPPR_TRACKING_SPECIES_LOG_ODDS_LABEL_CATEGORIES", "wildlife"),
             tracking_species_log_odds_prior_probability=_env_float("MINIMAPPR_TRACKING_SPECIES_LOG_ODDS_PRIOR_PROBABILITY", 0.1),
-            tracking_species_log_odds_per_update_cap=_env_float("MINIMAPPR_TRACKING_SPECIES_LOG_ODDS_PER_UPDATE_CAP", 2.0),
+            tracking_species_log_odds_per_update_cap=_env_float("MINIMAPPR_TRACKING_SPECIES_LOG_ODDS_PER_UPDATE_CAP", 3.0),
             tracking_species_log_odds_total_cap=_env_float("MINIMAPPR_TRACKING_SPECIES_LOG_ODDS_TOTAL_CAP", 6.0),
             tracking_species_log_odds_evidence_top_k=_env_int("MINIMAPPR_TRACKING_SPECIES_LOG_ODDS_EVIDENCE_TOP_K", 3),
             tracking_species_display_min_belief=_env_float("MINIMAPPR_TRACKING_SPECIES_DISPLAY_MIN_BELIEF", 0.5),
