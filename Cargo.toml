@@ -26,6 +26,7 @@ members = [
     "minimappr-core",
     "minimappr-ingest-sidecar",
     "minimappr-mesh-sim",
+    "minimappr-sim-gates",
     "minimappr-sim",
     "minimappr-relay-wire",
     "minimappr-transport",
@@ -69,4 +70,12 @@ opt-level = 3
 # times per PR run; unoptimised it dominates the 5 s budget. This also
 # speeds up minimappr-core's own slow debug tests (stage1_trigger ~16 s).
 [profile.test.package.minimappr-core]
+opt-level = 3
+
+# W4-sim-gates: Monte Carlo gates run hundreds of solves per `cargo test`;
+# the heavy code is already optimised above, this keeps the gate loops too.
+[profile.test.package.minimappr-sim-gates]
+opt-level = 3
+
+[profile.dev.package.minimappr-sim-gates]
 opt-level = 3

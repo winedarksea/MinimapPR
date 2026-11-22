@@ -88,8 +88,15 @@ pub struct RobustScoringConfig {
     /// tetra node's 6 short-baseline pairs from outvoting inter-node pairs.
     pub intra_node_pair_group_weight: f64,
     /// Likelihood temperature, in units of mean per-pair robust loss:
-    /// L ∝ exp(score / (temperature · Σw)). Fit on golden bundles so the
-    /// reported region's coverage matches `contour_coverage_fraction`.
+    /// L ∝ exp(score / (temperature · Σw)). NOT calibrated: the W4-sim-gates
+    /// fit (`minimappr-sim-gates` example `calibrate_region_parameters`,
+    /// realistic ±10 cm / ±10 µs residuals) found no usable value. Coverage
+    /// is 23 % at 0.002, and the 95 % fit (0.0126) only reaches it because the
+    /// region collapses from a sub-m² dot into a whole-grid bearing fan
+    /// (10⁴–10⁵ m² inside the layout): the Huber score's background floor
+    /// swamps the peak once T is large enough to cover residual-shifted
+    /// peaks. Kept at 0.002 (compact) until the scoring accounts for layout
+    /// and clock σ; see docs/field_mode_progress/sim_gates.md.
     pub likelihood_temperature: f64,
     /// A pair reaches full weight when its peak z-score (peak·√K) is this
     /// many times the noise-only expected maximum √(2 ln L); at 1× it gets 0.
