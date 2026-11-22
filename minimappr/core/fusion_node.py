@@ -54,6 +54,7 @@ from minimappr.core.degradation import CapabilityDegradationModel
 from minimappr.core.environment import StaticEnvironmentProvider
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.cluster_registry import ClusterRegistry
+from minimappr.core.onset_srp_localization_stage import LOCALIZATION_METHOD_NAME as ONSET_SRP_LOCALIZATION_METHOD
 from minimappr.core.onset_srp_localization_stage import OnsetSrpLocalizationStage
 from minimappr.core.sensor_span_coverage_wait import SensorStreamActivityTracker, await_sensor_span_coverage
 from minimappr.core.onset_cluster_attribution_stage import OnsetClusterAttributor  # Field Mode W3-attribution
@@ -3251,6 +3252,14 @@ class FusionNode:
         # Only candidates that would classify on the localized branch are gated;
         # everything else (omni fallback) is the reporting policy's business.
         if product.localization_branch is None:
+            return False
+        # Field Mode S gate: onset-SRP products are one per accepted cluster (a
+        # distinct bird; the stage's consumed-onset memory stops re-surfacing), so
+        # the cap's "one trigger, many candidates" premise does not hold. Capping
+        # them skipped real birds before classification (12-37 per replay on the
+        # four-bird fixture scene), and in entity mode the cap is also keyed on
+        # legacy buckets that wildlife emissions are never noted under.
+        if product.localization_branch.localization_method == ONSET_SRP_LOCALIZATION_METHOD:
             return False
         window_start_ns, _ = self.reporting_policy.report_window_bounds(
             product.candidate.event_time_ns
