@@ -213,6 +213,12 @@ firmware/nodes/*/managed_components/
 
 drone_dataset/*
 
+# BirdNET+ V3.0 model files (Apache 2.0, ~72-174 MB each): fetched by
+# scripts/fetch_birdnet_v3.py and quantized by scripts/quantize_birdnet_v3.py.
+# Already covered by data/models/* above; explicit so a future re-include of
+# data/models/ cannot start committing them.
+data/models/birdnet_v3/
+
 # Drone-head training artifacts — commit int8 drone_head.onnx + metadata only.
 data/models/drone_head.float.onnx
 data/models/drone_head.tflite

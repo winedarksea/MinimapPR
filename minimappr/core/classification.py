@@ -17,6 +17,7 @@ from typing import Any, Callable
 import numpy as np
 
 from minimappr.classifiers.base import AudioClassifier, ClassificationResult
+from minimappr.classifiers.birdnet_v3_labels import BIRDNET_V3_ANIMAL_TAXON_GROUPS
 from minimappr.config import LocalizationConfig
 from minimappr.core.preprocessing import create_classification_preprocessor
 from minimappr.core.taxonomy import ABSTENTION_LABELS
@@ -34,6 +35,9 @@ logger = logging.getLogger(__name__)
 
 
 _BIRDNET_MODEL_NAME = "birdnet_v2m4"
+# BirdNET+ V3.0 (Field Mode W1-birdnet-v3); mirrors birdnet_v3.BIRDNET_V3_MODEL_NAME
+# without importing the classifier module into the hot path.
+_BIRDNET_V3_MODEL_NAME = "birdnet_v3"
 
 # BirdNET's entire vocabulary is bird species, so any label it produces is
 # wildlife by construction. Models whose output vocabulary maps wholesale onto a
@@ -73,6 +77,13 @@ def _resolve_label_category(
         # from every model read as wildlife.
         return taxonomy_category
     model_name = classification.features.get("model")
+    # ── BirdNET+ V3.0 (Field Mode W1-birdnet-v3) ── V3's vocabulary also holds
+    # sound sources (Gun, Siren, Engine, ...), so only its animal classes take
+    # the wholesale wildlife fallback.
+    if model_name == _BIRDNET_V3_MODEL_NAME:
+        taxon_group = classification.features.get("taxon_group")
+        return "wildlife" if taxon_group in BIRDNET_V3_ANIMAL_TAXON_GROUPS else taxonomy_category
+    # ── end BirdNET+ V3.0 ──
     if isinstance(model_name, str):
         fallback = _MODEL_FALLBACK_CATEGORY.get(model_name.strip().lower())
         if fallback is not None:

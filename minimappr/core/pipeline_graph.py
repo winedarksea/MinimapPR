@@ -565,6 +565,30 @@ def build_pipeline_graph(
     )
 
 
+# ── BirdNET+ V3.0 (Field Mode W1-birdnet-v3) ────────────────────────────────
+def _birdnet_version_params(settings) -> list[PipelineParam]:
+    version = str(getattr(settings, "birdnet_model_version", "2.4"))
+    params = [_param("BirdNET model", version, config_key="birdnet_model_version")]
+    if version == "3.0":
+        params.append(
+            _param(
+                "V3 window max",
+                float(settings.birdnet_v3_max_window_seconds),
+                config_key="birdnet_v3_max_window_seconds",
+                suffix=" s",
+            )
+        )
+        params.append(
+            _param(
+                "V3 species list",
+                settings.birdnet_v3_species_list_path or "all",
+                config_key="birdnet_v3_species_list_path",
+            )
+        )
+    return params
+# ── end BirdNET+ V3.0 ───────────────────────────────────────────────────────
+
+
 # ── Classifiers helper ──────────────────────────────────────────────────────
 def _add_classifiers(*, routing, settings, gate_ids, beam_id, add_node, add_edge, fusion_available, metrics, queues) -> None:
     health = "ok" if fusion_available else "unknown"
@@ -591,6 +615,10 @@ def _add_classifiers(*, routing, settings, gate_ids, beam_id, add_node, add_edge
                     params.append(_param("Model", spec.model_path))
                 if spec.preprocess_profile:
                     params.append(_param("Preprocess", spec.preprocess_profile))
+                # ── BirdNET+ V3.0 (Field Mode W1-birdnet-v3) ──
+                if spec.backend == "birdnet":
+                    params.extend(_birdnet_version_params(settings))
+                # ── end BirdNET+ V3.0 ──
             add_node(
                 id=member_node_id,
                 stage=PipelineStageKind.CLASSIFIER,
