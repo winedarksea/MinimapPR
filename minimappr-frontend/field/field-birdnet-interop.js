@@ -12,7 +12,7 @@
  * (sigmoid applied in-graph) and `embeddings` [batch, 1280]. INT8 was
  * rejected there (quantized conv stack broke the scores), hence FP16 pruned.
  *
- * Exposes window.mmpFieldBirdnet = { load, classify, isLoaded }.
+ * Exposes window.mmpFieldBirdnet = { load, classify, isLoaded, release }.
  */
 (function () {
   "use strict";
@@ -79,39 +79,87 @@
     return Math.max(1, Math.min(MAXIMUM_INTRA_OP_THREADS_WHEN_ISOLATED, navigator.hardwareConcurrency || 1));
   }
 
+  // Asks the browser not to evict the ~80 MB model under storage pressure
+  // (iOS/Chrome otherwise treat Cache Storage as best-effort).
+  async function requestPersistentStorage() {
+    if (!navigator.storage || !navigator.storage.persist) return false;
+    try {
+      return (await navigator.storage.persisted()) || (await navigator.storage.persist());
+    } catch (_unsupported) {
+      return false;
+    }
+  }
+
   // Cache-first through the Cache API; `fromCache` feeds the load report.
+  // A failed store (QuotaExceededError on a full phone) is not fatal: the
+  // model still runs from the network copy, just not offline next time.
   async function fetchThroughModelCache(url) {
     const cache = self.caches ? await caches.open(MODEL_CACHE_NAME) : null;
     const cached = cache ? await cache.match(url) : undefined;
-    if (cached) return { response: cached, fromCache: true };
+    if (cached) return { response: cached, fromCache: true, storedForOffline: true };
     const response = await fetch(url);
     if (!response.ok) throw new Error(`fetch ${url} -> HTTP ${response.status}`);
-    if (cache) await cache.put(url, response.clone());
-    return { response, fromCache: false };
+    if (!cache) return { response, fromCache: false, storedForOffline: false };
+    try {
+      await cache.put(url, response.clone());
+      return { response, fromCache: false, storedForOffline: true };
+    } catch (storeError) {
+      console.warn(`model cache store failed for ${url}:`, storeError);
+      return { response, fromCache: false, storedForOffline: false };
+    }
   }
 
-  async function load(options) {
-    if (typeof ort === "undefined") throw new Error("onnxruntime-web (ort) failed to load");
-    const threadCount = chooseIntraOpThreadCount();
-    ort.env.wasm.numThreads = threadCount;
-    ort.env.wasm.wasmPaths = options.ortWasmBaseUrl;
-    const fetchStarted = performance.now();
+  async function forgetCachedModelFiles(urls) {
+    if (!self.caches) return;
+    const cache = await caches.open(MODEL_CACHE_NAME);
+    await Promise.all(urls.map((url) => cache.delete(url)));
+  }
+
+  async function fetchModelAndLabels(options) {
     const [model, labels] = await Promise.all([
       fetchThroughModelCache(options.modelUrl),
       fetchThroughModelCache(options.labelsUrl),
     ]);
     const [modelBytes, labelText] = await Promise.all([model.response.arrayBuffer(), labels.response.text()]);
+    return { model, labels, modelBytes, labelText };
+  }
+
+  function createSession(modelBytes) {
+    return ort.InferenceSession.create(modelBytes, { executionProviders: ["wasm"], graphOptimizationLevel: "all" });
+  }
+
+  async function load(options) {
+    if (typeof ort === "undefined") throw new Error("onnxruntime-web (ort) failed to load");
+    // One session per page: a second load would leave the first session's
+    // wasm heap (hundreds of MB) unreleased.
+    if (inferenceSession) await releaseSession();
+    const threadCount = chooseIntraOpThreadCount();
+    ort.env.wasm.numThreads = threadCount;
+    ort.env.wasm.wasmPaths = options.ortWasmBaseUrl;
+    const storagePersisted = await requestPersistentStorage();
+    const fetchStarted = performance.now();
+    let fetched = await fetchModelAndLabels(options);
     const fetchMilliseconds = performance.now() - fetchStarted;
     const createStarted = performance.now();
-    inferenceSession = await ort.InferenceSession.create(modelBytes, {
-      executionProviders: ["wasm"],
-      graphOptimizationLevel: "all",
-    });
+    try {
+      inferenceSession = await createSession(fetched.modelBytes);
+    } catch (createError) {
+      // A truncated/corrupt cached copy would otherwise fail every launch
+      // forever; refetch once. A network copy that fails is a real error.
+      if (!fetched.model.fromCache) throw createError;
+      console.warn("cached BirdNET model rejected; refetching", createError);
+      await forgetCachedModelFiles([options.modelUrl, options.labelsUrl]);
+      fetched = await fetchModelAndLabels(options);
+      inferenceSession = await createSession(fetched.modelBytes);
+    }
     const sessionCreateMilliseconds = performance.now() - createStarted;
+    const { model, labels, modelBytes, labelText } = fetched;
     labelTable = parseLabelCsv(labelText);
     return {
       modelBytes: modelBytes.byteLength,
       modelFromCache: model.fromCache,
+      modelStoredForOffline: model.storedForOffline && labels.storedForOffline,
+      storagePersisted,
       labelCount: labelTable.length,
       fetchMilliseconds,
       sessionCreateMilliseconds,
@@ -123,6 +171,12 @@
 
   function isLoaded() {
     return inferenceSession !== null;
+  }
+
+  async function releaseSession() {
+    const session = inferenceSession;
+    inferenceSession = null;
+    if (session) await session.release();
   }
 
   // samples: Float32Array at 32 kHz. Returns the top-k classes for one window.
@@ -158,5 +212,5 @@
     };
   }
 
-  window.mmpFieldBirdnet = { load, classify, isLoaded };
+  window.mmpFieldBirdnet = { load, classify, isLoaded, release: releaseSession };
 })();

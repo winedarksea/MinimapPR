@@ -53,6 +53,9 @@ pub struct BirdnetLoadOptions {
 pub struct BirdnetLoadReport {
     pub model_bytes: f64,
     pub model_from_cache: bool,
+    /// False when Cache Storage refused the model (quota): online-only.
+    pub model_stored_for_offline: bool,
+    pub storage_persisted: bool,
     pub label_count: u32,
     pub fetch_milliseconds: f64,
     pub session_create_milliseconds: f64,
@@ -129,8 +132,14 @@ pub async fn classify_with_birdnet(samples_32_khz: &[f32], top_count: u32) -> Re
 /// Registers the offline-shell service worker (no-op where unsupported).
 pub fn register_service_worker(script_url: &str) {
     let Some(window) = web_sys::window() else { return };
-    let container = window.navigator().service_worker();
-    let _ = container.register(script_url);
+    let navigator = window.navigator();
+    // `navigator.serviceWorker` is undefined in insecure contexts (plain-http
+    // LAN address); calling `register` on it would throw and abort the mount.
+    let has_service_worker = js_sys::Reflect::has(&navigator, &JsValue::from_str("serviceWorker")).unwrap_or(false);
+    if !has_service_worker {
+        return;
+    }
+    let _ = navigator.service_worker().register(script_url);
 }
 
 /// `window.mmpFieldDiagnostics[key] = value`: measurements for the browser
