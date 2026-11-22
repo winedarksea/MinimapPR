@@ -13,7 +13,7 @@ use minimappr_core::srp_layout::LayoutSrpConfig;
 use super::GateRun;
 use crate::gate_config::CoverageGateConfig;
 use crate::gate_seeds::{run_trials_in_parallel, GateOutcome};
-use crate::mesh_region_trials::{run_contour_session, MeshSessionConfig};
+use crate::mesh_region_trials::{run_contour_session, MeshFixScore, MeshSessionConfig};
 use crate::srp_trials::{render_srp_trial, SrpTrialConfig};
 use crate::statistics::{median, percentile, wilson_interval};
 
@@ -37,32 +37,70 @@ pub fn check_coverage(outcome: &mut GateOutcome, label: &str, covered: usize, tr
     }
 }
 
-/// End-to-end Layer 2 fixes against the published polygon.
-pub fn mesh_contour_coverage(run: &GateRun) -> GateOutcome {
-    let contour = EntityContourConfig::default();
+type SessionScores = Vec<(u64, Vec<MeshFixScore>)>;
+
+/// Every session's fixes, the non-exempt fixes pooled, and a summary line
+/// on the mirror exemption.
+fn mesh_contour_scores(run: &GateRun, contour: &EntityContourConfig) -> (SessionScores, Vec<MeshFixScore>, String) {
     let session = MeshSessionConfig::default();
-    let results = run_trials_in_parallel(&run.seeds, run.threads, |seed| run_contour_session(seed, &contour, &session));
+    let results = run_trials_in_parallel(&run.seeds, run.threads, |seed| run_contour_session(seed, contour, &session));
     let all_scores: Vec<_> = results.iter().flat_map(|(_, s)| s.iter().cloned()).collect();
     // A flagged mirror (low reported chirality confidence) is exempt, as in
     // the mesh invariants; an unflagged mirror counts as a miss.
     let flagged = all_scores.iter().filter(|s| s.is_flagged_mirror).count();
     let unflagged_mirrors = all_scores.iter().filter(|s| s.layout_mirrored && !s.is_flagged_mirror).count();
     let scores: Vec<_> = all_scores.into_iter().filter(|s| !s.is_flagged_mirror).collect();
-    let mut outcome = GateOutcome::new("mesh_contour_coverage", scores.len());
-    outcome.summary(format!("{flagged} flagged-mirror fixes exempt, {unflagged_mirrors} unflagged mirrored fixes counted"));
+    (results, scores, format!("{flagged} flagged-mirror fixes exempt, {unflagged_mirrors} unflagged mirrored fixes counted"))
+}
+
+/// (covered, total) at `multiplier` over inside calls, outside calls or both.
+fn covered_fixes(scores: &[MeshFixScore], multiplier: f64, inside: Option<bool>) -> (usize, usize) {
+    let selected: Vec<_> = scores.iter().filter(|s| inside.is_none_or(|i| s.is_inside_call == i)).collect();
+    (selected.iter().filter(|s| s.relative_frame_minimum_multiplier <= multiplier).count(), selected.len())
+}
+
+/// The strategy's coverage row asks for 90–98 % "inside and outside the
+/// layout", each on its own: one class over-covering must not pay for the
+/// other under-covering. Kept apart from the pooled gate so a failure here
+/// (one scalar σ multiplier cannot calibrate both classes) stays visible
+/// without masking the pooled check.
+pub fn mesh_contour_coverage_by_class(run: &GateRun) -> GateOutcome {
+    let contour = EntityContourConfig::default();
+    let (results, scores, exemption) = mesh_contour_scores(run, &contour);
+    let mut outcome = GateOutcome::new("mesh_contour_coverage_by_class", scores.len());
+    outcome.summary(exemption);
     let multiplier = contour.contour_sigma_multiplier;
-    let covered = |inside: Option<bool>| {
-        let selected: Vec<_> = scores.iter().filter(|s| inside.is_none_or(|i| s.is_inside_call == i)).collect();
-        (selected.iter().filter(|s| s.relative_frame_minimum_multiplier <= multiplier).count(), selected.len())
-    };
+    for (label, inside) in [("inside calls", true), ("outside calls", false)] {
+        let (covered, total) = covered_fixes(&scores, multiplier, Some(inside));
+        check_coverage(&mut outcome, &format!("{label}, σ multiplier {multiplier}"), covered, total, &run.config.coverage);
+    }
+    outcome.contributing_seeds = results
+        .iter()
+        .filter(|(_, s)| s.iter().any(|f| !f.is_flagged_mirror && f.relative_frame_minimum_multiplier > multiplier))
+        .map(|(seed, _)| *seed)
+        .collect();
+    outcome
+}
+
+/// End-to-end Layer 2 fixes against the published polygon.
+pub fn mesh_contour_coverage(run: &GateRun) -> GateOutcome {
+    let contour = EntityContourConfig::default();
+    let (results, scores, exemption) = mesh_contour_scores(run, &contour);
+    let mut outcome = GateOutcome::new("mesh_contour_coverage", scores.len());
+    outcome.summary(exemption);
+    let multiplier = contour.contour_sigma_multiplier;
+    let covered = |inside: Option<bool>| covered_fixes(&scores, multiplier, inside);
     let (all_covered, all) = covered(None);
     check_coverage(&mut outcome, &format!("all fixes, σ multiplier {multiplier}"), all_covered, all, &run.config.coverage);
     for (label, inside) in [("inside calls", true), ("outside calls", false)] {
         let (c, n) = covered(Some(inside));
-        outcome.summary(format!("{label}: {c}/{n} = {:.3} (reported, not gated separately)", c as f64 / n.max(1) as f64));
+        outcome.summary(format!("{label}: {c}/{n} = {:.3} (gated by mesh_contour_coverage_by_class)", c as f64 / n.max(1) as f64));
     }
     let world_covered = scores.iter().filter(|s| s.world_frame_minimum_multiplier <= multiplier).count();
-    outcome.summary(format!("world frame (anchor error charged, diagnostic): {world_covered}/{all}"));
+    // Not gated: the polygon is drawn in the anchored map frame, which moves
+    // phones and birds together. Read against a basemap or a raw GPS dot the
+    // anchor's error (metres) is not in the polygon at all.
+    outcome.summary(format!("world frame (anchor error charged, NOT in the drawn polygon; diagnostic): {world_covered}/{all}"));
     let errors: Vec<f64> = scores.iter().map(|s| s.relative_frame_error_m).collect();
     outcome.summary(format!("relative-frame error median {:.2} m, P95 {:.2} m", median(&errors), percentile(&errors, 0.95)));
     let fixes_per_session = all as f64 / results.len().max(1) as f64;
