@@ -9,6 +9,9 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.optimize import least_squares
 
+from minimappr.core.far_field_model_selection import (
+    far_field_alternative_if_curvature_unsupported,
+)
 from minimappr.core.localization_uncertainty import covariance_to_nested_list
 from minimappr.core.radial_range_refinement import (
     adaptive_radial_refinement,
@@ -418,6 +421,30 @@ def solve_cartesian_tdoa(
             best_position = radial_refinement.position_m
             radial_refinement_std_m = radial_refinement.radial_std_m
             range_projection_mode = radial_refinement.projection_mode
+            residual = combined_residual_seconds(best_position)
+            residual_rms_s = float(np.sqrt(np.mean(np.square(residual))))
+            effective_time_std_s = max(residual_rms_s, sample_time_std_s)
+    if (
+        has_tdoa_measurements
+        and radial_refinement_enabled
+        and range_projection_mode == RANGE_REFINED
+    ):
+        # A near-field basin that only beats a plane wave by noise is not a
+        # range measurement (compact-array collapse onto the node).
+        far_field_alternative = far_field_alternative_if_curvature_unsupported(
+            centroid_m=centroid_m,
+            near_field_position_m=best_position,
+            plane_wave_direction=direction,
+            residual_function=combined_residual_seconds,
+            near_field_residual_rms_seconds=residual_rms_s,
+            timing_noise_std_seconds=sample_time_std_s,
+            far_field_radius_m=max(far_field_initial_range_m, aperture_m, minimum_position_std_m),
+            array_aperture_m=aperture_m,
+        )
+        if far_field_alternative is not None:
+            best_position = far_field_alternative.position_m
+            range_projection_mode = RANGE_ASYMPTOTIC
+            radial_refinement_std_m = float(np.linalg.norm(best_position - centroid_m))
             residual = combined_residual_seconds(best_position)
             residual_rms_s = float(np.sqrt(np.mean(np.square(residual))))
             effective_time_std_s = max(residual_rms_s, sample_time_std_s)

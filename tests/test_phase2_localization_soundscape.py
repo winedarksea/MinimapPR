@@ -18,6 +18,7 @@ from minimappr.core.fusion_node import FusionNode
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.localization_dispatch import LocalizationDispatcher, build_localizer_from_settings
 from minimappr.core.node_registry import NodeRegistry
+from minimappr.core.range_projection import range_mode_is_unobservable
 from minimappr.core.tracking import TrackManager
 from minimappr.core.zones import ZoneMatcher
 from minimappr.models import ClassificationResult, GeoPoint, IngestFrameRequest, LocalizationResult, NodeSpec, NodeType
@@ -271,9 +272,17 @@ def test_tight_array_srp_near_field_regression_keeps_bearing_and_covariance(
     estimated_direction = estimate - centroid
     estimated_direction /= np.linalg.norm(estimated_direction)
     assert float(np.dot(estimated_direction, expected_direction)) > 0.95
-    assert position_error_m <= max_position_error_m
-    assert result.range_projection_mode == "range_refined"
     assert result.position_covariance_m2 is not None
+    if result.range_projection_mode == "range_refined":
+        assert position_error_m <= max_position_error_m
+    else:
+        # Beyond ~4 apertures a 5 cm array's wavefront curvature (2 us at 1.6 m,
+        # 0.7 us at 4.6 m) is below one interpolated sample, so an honest
+        # unobservable-range answer is as valid as a refined one. The tolerances
+        # above (≈ source range) used to pass only because the solve collapsed
+        # onto the array (far_field_model_selection.py).
+        assert range_mode_is_unobservable(result.range_projection_mode)
+        assert float(np.linalg.norm(estimate - centroid)) > max_position_error_m
 
 
 def test_birdnet_hybrid_profile_uses_fixed_srp_for_tight_array_near_field() -> None:
