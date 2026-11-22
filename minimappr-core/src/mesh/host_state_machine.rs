@@ -17,6 +17,7 @@ use super::classification_rota::clumps_from_layout;
 use super::config::{MeshConfig, DEVICE_SAMPLE_RATE_HZ};
 use super::event_log::SessionEventLog;
 use super::fix_contour::horizontal_covariance_contour;
+use super::host_entity_tracking::{node_set_is_collinear, EntityUpdateContext, HostEntityTracking};
 use super::host_membership::SessionMembership;
 use super::host_restoration::restore_from_mirror;
 use super::host_sync_pipeline::{HostSyncPipeline, SyncRecord};
@@ -72,6 +73,8 @@ pub struct FieldHostStateMachine {
     pub calls: CallPipeline,
     pub transport: HostTransportPolicy,
     pub(super) next_bird_entity_id: u64,
+    /// Server-track tracker + entity registry per island (W4-port-server-track).
+    pub entities: HostEntityTracking,
     last_announcement_ms: Option<MeshMilliseconds>,
     published_call_records: usize,
     pub stepped_down: bool,
@@ -94,6 +97,7 @@ impl FieldHostStateMachine {
             calls: CallPipeline::default(),
             transport,
             next_bird_entity_id: 0,
+            entities: HostEntityTracking::default(),
             last_announcement_ms: None,
             published_call_records: 0,
             stepped_down: false,
@@ -293,6 +297,43 @@ impl FieldHostStateMachine {
         }
     }
 
+    /// Server-track path: the call joins its bird's entity (or starts one).
+    fn track_entity_for(&mut self, record: &LocalizedCallRecord, now_ms: MeshMilliseconds) {
+        let reporting_position = self
+            .sync
+            .engine
+            .node_position_for_solve(record.classifying_node, record.received_ms, false, &self.config.island_sync)
+            .map(|position| position.position_m);
+        let mirror_ambiguous: Vec<bool> = record
+            .clusters
+            .iter()
+            .map(|cluster| {
+                let used: Vec<[f64; 3]> = cluster
+                    .fix
+                    .used_nodes
+                    .iter()
+                    .filter_map(|node| self.sync.engine.node_position_for_solve(*node, record.received_ms, false, &self.config.island_sync))
+                    .map(|position| position.position_m)
+                    .collect();
+                node_set_is_collinear(&used, self.config.entity_tracking.collinear_mirror_max_aspect_ratio)
+            })
+            .collect();
+        let context = EntityUpdateContext { contour: &self.config.entity_contour, next_event_log_sequence: self.event_log.head_sequence() + 1 };
+        let updates = self.entities.on_call_record(
+            record,
+            reporting_position,
+            &mirror_ambiguous,
+            &self.config.entity_tracking,
+            &context,
+            &mut self.next_bird_entity_id,
+            now_ms,
+        );
+        for mut update in updates {
+            update.event_log_sequence = self.event_log.head_sequence() + 1;
+            self.append(&FieldMessage::BirdEntityUpdate(update));
+        }
+    }
+
     fn thermal_relief(&mut self, now_ms: MeshMilliseconds) -> Vec<HostAction> {
         if self.own_thermal_headroom >= self.config.thermal.host_relief_below_headroom {
             return Vec::new();
@@ -363,8 +404,20 @@ impl FieldHostStateMachine {
         let fresh: Vec<LocalizedCallRecord> = self.calls.completed[self.published_call_records..].to_vec();
         self.published_call_records = self.calls.completed.len();
         for record in &fresh {
-            let update = self.entity_update_for(record);
-            self.append(&FieldMessage::BirdEntityUpdate(update));
+            if self.config.entity_tracking.enabled {
+                self.track_entity_for(record, now_ms);
+            } else {
+                let update = self.entity_update_for(record);
+                self.append(&FieldMessage::BirdEntityUpdate(update));
+            }
+        }
+        if self.config.entity_tracking.enabled {
+            let context = EntityUpdateContext { contour: &self.config.entity_contour, next_event_log_sequence: self.event_log.head_sequence() + 1 };
+            let updates = self.entities.maintain(now_ms, &self.config.entity_tracking, &context);
+            for mut update in updates {
+                update.event_log_sequence = self.event_log.head_sequence() + 1;
+                self.append(&FieldMessage::BirdEntityUpdate(update));
+            }
         }
         actions.extend(self.thermal_relief(now_ms));
         if self.stepped_down {

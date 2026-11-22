@@ -2,21 +2,28 @@
 //!
 //! A simulated clip carries, instead of FLAC audio, the arrivals inside the
 //! requested window (call id, arrival on the device's own sample clock with
-//! SNR-dependent timing noise, SNR), padded to the size a real 24 kHz FLAC
-//! clip of that window would have, so traffic accounting stays realistic.
-//! The localizer stands in for clip SRP: it picks the call most clips share,
-//! maps each arrival through the host's clock model, and runs the core
-//! `ArrivalTimeLocalizer` (grid seed + `TdoaSeedRefiner` LM).
+//! SNR-dependent timing noise, SNR, and the call's species/band so the
+//! classifier stand-in can score a window), padded to the size a real 24 kHz
+//! FLAC clip of that window would have, so traffic accounting stays
+//! realistic. The localizer stands in for clip SRP + onset clustering: every
+//! call several clips share is a source cluster (echoes rejected by the S2
+//! independent-onset rule), each solved by the core `ArrivalTimeLocalizer`
+//! (see [`crate::synthetic_clusters`]).
 
 use std::cell::RefCell;
 
-use minimappr_core::mesh::arrival_time_localizer::{ArrivalTimeLocalizer, NodeArrival};
-use minimappr_core::mesh::call_pipeline::{CallFix, CallLocalizationRequest, ClipSetLocalizer};
+use minimappr_core::mesh::arrival_time_localizer::ArrivalTimeLocalizer;
+use minimappr_core::mesh::call_pipeline::{CallFix, CallLocalizationRequest, ClipSetLocalizer, LocalizedCluster};
+use minimappr_core::onset_clustering::attribution_decision::{ClassifierAnswer, InterfererOnset};
 use minimappr_core::protocol::NodeId;
 
+use crate::synthetic_clusters::{classify_window, decode_request_clips, localize_window_clusters};
+
 const SYNTHETIC_CLIP_MAGIC: &[u8; 4] = b"MSIM";
-const ENTRY_BYTES: usize = 4 + 8 + 4 + 4;
+const ENTRY_BYTES: usize = 4 + 8 + 4 + 4 + 4 + 4 + 4;
 const HEADER_BYTES: usize = 4 + 2;
+/// The classifier stand-in's detection threshold when the runner sets none.
+const DEFAULT_CLASSIFIER_DETECTION_SNR_DB: f64 = 15.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SyntheticArrival {
@@ -24,6 +31,9 @@ pub struct SyntheticArrival {
     pub arrival_device_sample: f64,
     pub snr_db: f32,
     pub timing_std_s: f32,
+    pub species_label: u32,
+    pub classifier_score: f32,
+    pub centre_frequency_hz: f32,
 }
 
 pub fn encode_synthetic_clip(arrivals: &[SyntheticArrival], padded_size_bytes: usize) -> Vec<u8> {
@@ -35,6 +45,9 @@ pub fn encode_synthetic_clip(arrivals: &[SyntheticArrival], padded_size_bytes: u
         bytes.extend_from_slice(&arrival.arrival_device_sample.to_le_bytes());
         bytes.extend_from_slice(&arrival.snr_db.to_le_bytes());
         bytes.extend_from_slice(&arrival.timing_std_s.to_le_bytes());
+        bytes.extend_from_slice(&arrival.species_label.to_le_bytes());
+        bytes.extend_from_slice(&arrival.classifier_score.to_le_bytes());
+        bytes.extend_from_slice(&arrival.centre_frequency_hz.to_le_bytes());
     }
     if bytes.len() < padded_size_bytes {
         bytes.resize(padded_size_bytes, 0);
@@ -48,20 +61,24 @@ pub fn decode_synthetic_clip(bytes: &[u8]) -> Option<Vec<SyntheticArrival>> {
     }
     let count = u16::from_le_bytes([bytes[4], bytes[5]]) as usize;
     let mut arrivals = Vec::with_capacity(count);
+    let f32_at = |entry: &[u8], offset: usize| entry[offset..offset + 4].try_into().ok().map(f32::from_le_bytes);
     for index in 0..count {
         let start = HEADER_BYTES + index * ENTRY_BYTES;
         let entry = bytes.get(start..start + ENTRY_BYTES)?;
         arrivals.push(SyntheticArrival {
             call_index: u32::from_le_bytes(entry[0..4].try_into().ok()?),
             arrival_device_sample: f64::from_le_bytes(entry[4..12].try_into().ok()?),
-            snr_db: f32::from_le_bytes(entry[12..16].try_into().ok()?),
-            timing_std_s: f32::from_le_bytes(entry[16..20].try_into().ok()?),
+            snr_db: f32_at(entry, 12)?,
+            timing_std_s: f32_at(entry, 16)?,
+            species_label: u32::from_le_bytes(entry[20..24].try_into().ok()?),
+            classifier_score: f32_at(entry, 24)?,
+            centre_frequency_hz: f32_at(entry, 28)?,
         });
     }
     Some(arrivals)
 }
 
-/// What the localizer saw for one call (scored against truth later).
+/// What the localizer saw for one source cluster (scored against truth later).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SolveTrace {
     pub host_call_id: u64,
@@ -73,68 +90,44 @@ pub struct SolveTrace {
     pub chirality_locked: bool,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ArrivalClipLocalizer {
     pub localizer: ArrivalTimeLocalizer,
     pub traces: RefCell<Vec<SolveTrace>>,
+    /// The classifier stand-in reports calls above this in-band SNR.
+    pub classifier_detection_snr_db: f64,
+}
+
+impl Default for ArrivalClipLocalizer {
+    fn default() -> Self {
+        Self {
+            localizer: ArrivalTimeLocalizer::default(),
+            traces: RefCell::new(Vec::new()),
+            classifier_detection_snr_db: DEFAULT_CLASSIFIER_DETECTION_SNR_DB,
+        }
+    }
 }
 
 impl ClipSetLocalizer for ArrivalClipLocalizer {
     fn localize(&self, request: &CallLocalizationRequest) -> Result<CallFix, String> {
-        let decoded: Vec<(usize, Vec<SyntheticArrival>)> = request
-            .clips
-            .iter()
-            .enumerate()
-            .filter_map(|(index, clip)| Some((index, decode_synthetic_clip(&clip.payload.clip_container)?)))
-            .collect();
-        let mut votes: std::collections::BTreeMap<u32, (usize, f32)> = std::collections::BTreeMap::new();
-        for (_, arrivals) in &decoded {
-            for arrival in arrivals {
-                let vote = votes.entry(arrival.call_index).or_insert((0, 0.0));
-                vote.0 += 1;
-                vote.1 += arrival.snr_db;
-            }
-        }
-        let call_index = votes
-            .iter()
-            .max_by(|a, b| a.1 .0.cmp(&b.1 .0).then(a.1 .1.total_cmp(&b.1 .1)))
-            .map(|(call, _)| *call)
-            .ok_or_else(|| "no correlatable arrival in any clip".to_string())?;
-        let mut node_ids = Vec::new();
-        let mut arrivals = Vec::new();
-        for (index, clip_arrivals) in &decoded {
-            let clip = &request.clips[*index];
-            let Some(arrival) = clip_arrivals.iter().find(|a| a.call_index == call_index) else { continue };
-            node_ids.push(clip.node_id);
-            arrivals.push(NodeArrival {
-                position_m: clip.position.position_m,
-                position_std_m: clip.position.std_m,
-                reference_arrival_s: clip.clock.reference_seconds_from_node_sample(arrival.arrival_device_sample),
-                timing_std_s: (arrival.timing_std_s as f64).hypot(clip.clock.offset_sigma_s),
-            });
-        }
-        let mut trace = SolveTrace {
-            host_call_id: request.call_id,
-            true_call_index: call_index,
-            node_ids: node_ids.clone(),
-            estimated_node_positions_m: arrivals.iter().map(|a| a.position_m).collect(),
-            fix: None,
-            chirality_confidence: request.chirality_confidence,
-            chirality_locked: request.chirality_locked,
-        };
-        let result = self.localizer.localize(&arrivals).map_err(|error| format!("{error:?}"));
-        let outcome = result.map(|solved| {
-            let used_nodes: Vec<NodeId> = solved.used_arrival_indices.iter().map(|&index| node_ids[index]).collect();
-            CallFix {
-                horizontal_major_sigma_m: solved.fix.horizontal_major_sigma_m(),
-                position_m: solved.fix.position_m,
-                covariance_m2: solved.fix.covariance_m2,
-                rejected_nodes: node_ids.iter().copied().filter(|n| !used_nodes.contains(n)).collect(),
-                used_nodes,
-            }
-        });
-        trace.fix = outcome.as_ref().ok().cloned();
-        self.traces.borrow_mut().push(trace);
-        outcome
+        self.localize_clusters(request).and_then(|clusters| {
+            clusters.into_iter().next().map(|cluster| cluster.fix).ok_or_else(|| "no source cluster".to_string())
+        })
+    }
+
+    fn localize_clusters(&self, request: &CallLocalizationRequest) -> Result<Vec<LocalizedCluster>, String> {
+        let decoded = decode_request_clips(request);
+        let (clusters, traces) = localize_window_clusters(&self.localizer, request, &decoded);
+        self.traces.borrow_mut().extend(traces);
+        clusters
+    }
+
+    fn classify_cluster_window(
+        &self,
+        request: &CallLocalizationRequest,
+        cluster: &LocalizedCluster,
+        masked: &[InterfererOnset],
+    ) -> Option<(ClassifierAnswer, f64)> {
+        classify_window(request, &decode_request_clips(request), cluster.classifying_node, masked, self.classifier_detection_snr_db)
     }
 }

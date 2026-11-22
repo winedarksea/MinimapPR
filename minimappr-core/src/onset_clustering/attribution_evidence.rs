@@ -52,7 +52,8 @@ impl ClusterAttributionEvidence {
     }
 }
 
-fn spreading_fit(
+/// 1/r source-level fit and its RMS residual (audible nodes fit, censored ones penalised).
+pub fn spreading_fit(
     snr_by_node: &BTreeMap<String, f64>,
     distances_m: &BTreeMap<String, f64>,
     audible_snr_db: f64,

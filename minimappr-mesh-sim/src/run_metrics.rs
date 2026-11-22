@@ -19,6 +19,8 @@ pub struct HostTenure {
 pub struct RunMetrics {
     /// Every detection a node produced, with the device and time.
     pub generated_detections: Vec<(DetectionKey, usize, f64)>,
+    /// Which scripted call each detection came from (entity scoring).
+    pub call_index_by_detection: BTreeMap<DetectionKey, usize>,
     /// Per call: devices whose Stage-1 triggered / whose classifier ran /
     /// that produced a detection.
     pub stage1_triggers: BTreeMap<usize, Vec<usize>>,

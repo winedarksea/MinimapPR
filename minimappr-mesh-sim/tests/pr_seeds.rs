@@ -40,9 +40,16 @@ scenario_tests!(
     earbuds,
     constrained_link,
     faint_bird_one_classifier,
+    countersinging_pair,
+    flock_echo,
+    asymmetric_bouts,
+    same_band_two_species,
+    omni_to_localized_dedup,
+    collinear_trail,
+    couples,
 );
 
 #[test]
 fn every_catalogued_scenario_has_a_test() {
-    assert_eq!(minimappr_mesh_sim::SCENARIO_NAMES.len(), 16);
+    assert_eq!(minimappr_mesh_sim::SCENARIO_NAMES.len(), 23);
 }

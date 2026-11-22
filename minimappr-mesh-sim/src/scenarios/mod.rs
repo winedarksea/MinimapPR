@@ -3,6 +3,7 @@
 //! assertions from the test strategy's Layer 2 table.
 
 pub mod call_scenarios;
+pub mod entity_scenarios;
 pub mod host_scenarios;
 pub mod network_scenarios;
 pub mod sync_scenarios;
@@ -38,10 +39,17 @@ pub const SCENARIOS: &[(&str, ScenarioFunction)] = &[
     ("earbuds", sync_scenarios::earbuds),
     ("constrained_link", network_scenarios::constrained_link),
     ("faint_bird_one_classifier", call_scenarios::faint_bird_one_classifier),
+    ("countersinging_pair", entity_scenarios::countersinging_pair),
+    ("flock_echo", entity_scenarios::flock_echo),
+    ("asymmetric_bouts", entity_scenarios::asymmetric_bouts),
+    ("same_band_two_species", entity_scenarios::same_band_two_species),
+    ("omni_to_localized_dedup", entity_scenarios::omni_to_localized_dedup),
+    ("collinear_trail", entity_scenarios::collinear_trail),
+    ("couples", entity_scenarios::couples),
 ];
 
-pub const SCENARIO_NAMES: [&str; 16] = {
-    let mut names = [""; 16];
+pub const SCENARIO_NAMES: [&str; 23] = {
+    let mut names = [""; 23];
     let mut index = 0;
     while index < SCENARIOS.len() {
         names[index] = SCENARIOS[index].0;
