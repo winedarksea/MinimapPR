@@ -54,6 +54,7 @@ from minimappr.core.degradation import CapabilityDegradationModel
 from minimappr.core.environment import StaticEnvironmentProvider
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.cluster_registry import ClusterRegistry
+from minimappr.core.onset_srp_localization_stage import OnsetSrpLocalizationStage
 from minimappr.core.ingest import EnvironmentUpdater, IngestProcessor
 from minimappr.core.live_ingest_state import LiveIngestState
 from minimappr.core.ambi_atob import alias_cutoff_from_positions
@@ -300,6 +301,12 @@ class FusionMetrics:
     # while detections stall. Both default to 0 so status() can detect "never".
     last_detection_emission_ns: int = 0
     last_trigger_enqueue_ns: int = 0
+    # --- Field Mode W2-onset-srp ---
+    onset_clustering_window_count: int = 0
+    onset_clustering_accepted_cluster_count: int = 0
+    onset_clustering_tentative_cluster_count: int = 0
+    onset_clustering_echo_cluster_count: int = 0
+    # --- end Field Mode W2-onset-srp ---
 
 
 def _build_snippet_max_age_resolver(settings):
@@ -394,6 +401,10 @@ class FusionNode:
         self.beamformer = beamformer or self._create_beamformer()
         self.classification_preprocessor = create_classification_preprocessor(self.localization_config)
         self.localization_preprocessor = create_localization_preprocessor(self.localization_config)
+        # --- Field Mode W2-onset-srp ---
+        onset_config = settings.onset_srp_clustering_config()
+        self._onset_srp_stage = OnsetSrpLocalizationStage(onset_config) if onset_config.enabled else None
+        # --- end Field Mode W2-onset-srp ---
         self.retention_policy = RetentionPolicy(
             permanent_labels=set(self.fusion_config.retention_permanent_labels),
             security_long_confidence=self.fusion_config.retention_long_security_confidence,
@@ -1492,7 +1503,10 @@ class FusionNode:
                     elapsed_ms,
                 )
                 self._metrics.ingest_processing_count += 1
-                if product is not None:
+                products = product if isinstance(product, list) else [product]
+                for product in products:
+                    if product is None:
+                        continue
                     if self._classification_priority_enabled:
                         product.classification_significance = (
                             await self._score_classification_significance(product)
@@ -1728,7 +1742,13 @@ class FusionNode:
         self._localizer_signature_cache = (localizer, localize_parameters, localize_2d_parameters)
         return localize_parameters, localize_2d_parameters
 
-    async def _localize_candidate(self, candidate: EventCandidate) -> LocalizedCandidate | None:
+    async def _localize_candidate(
+        self, candidate: EventCandidate
+    ) -> LocalizedCandidate | list[LocalizedCandidate] | None:
+        # --- Field Mode W2-onset-srp --- one product per accepted onset cluster.
+        if self._onset_srp_stage is not None:
+            return await self._onset_srp_stage.localize_candidate(self, candidate)
+        # --- end Field Mode W2-onset-srp ---
         sensor_positions = await self.registry.sensor_positions()
         sensor_grades = await self.registry.sensor_sync_grades()
         sensor_weights: dict[str, float] | None = {

@@ -1,0 +1,93 @@
+# W2-onset-srp: two species in different bands overlapping by ~0.2 s, two bouts
+# each, inside a 3-tetra layout (per-onset frames, clustering, label coupling).
+name = "onset_overlap_two_species"
+seed = 20261122
+duration_s = 10.0
+sample_rate_hz = 24000
+
+[site]
+origin_lat = 45.0
+origin_lon = -93.0
+origin_alt_m = 250.0
+start_time_ns = 1763700000000000000
+
+[environment]
+temperature_c = 18.0
+humidity_fraction = 0.6
+
+[ground]
+enabled = true
+reflection_coefficient = 0.5
+
+[ambient_noise]
+level_db_spl = 30.0
+
+[[devices]]
+device_id = "tetra-a"
+kind = "sirith_tetra"
+position_m = [0.0, 0.0, 1.5]
+
+[[devices]]
+device_id = "tetra-b"
+kind = "sirith_tetra"
+position_m = [20.0, 0.0, 1.5]
+
+[[devices]]
+device_id = "tetra-c"
+kind = "sirith_tetra"
+position_m = [10.0, 18.0, 1.5]
+
+[[sources]]
+individual_id = "robin-1"
+species = "American Robin"
+position_m = [6.0, 12.0, 4.0]
+
+[[sources.calls]]
+start_s = 1.0
+level_db_spl_at_1m = 90.0
+generator = { kind = "fm_sweep", start_frequency_hz = 2000.0, end_frequency_hz = 2600.0, duration_s = 0.5 }
+
+[[sources.calls]]
+start_s = 6.0
+level_db_spl_at_1m = 90.0
+generator = { kind = "fm_sweep", start_frequency_hz = 2000.0, end_frequency_hz = 2600.0, duration_s = 0.5 }
+
+[[sources]]
+individual_id = "tanager-1"
+species = "Scarlet Tanager"
+position_m = [17.0, 9.0, 5.0]
+
+[[sources.calls]]
+start_s = 1.3
+level_db_spl_at_1m = 90.0
+generator = { kind = "trill", carrier_frequency_hz = 4200.0, element_sweep_hz = 600.0, element_rate_hz = 14.0, duration_s = 0.6 }
+
+[[sources.calls]]
+start_s = 6.3
+level_db_spl_at_1m = 90.0
+generator = { kind = "trill", carrier_frequency_hz = 4200.0, element_sweep_hz = 600.0, element_rate_hz = 14.0, duration_s = 0.6 }
+
+[expectations]
+schema_version = 2
+
+[expectations.runtime]
+classifier_backend = "stub"
+replay_reference_nodes = false
+
+[expectations.runtime.settings_overrides]
+trigger_rms = 0.003
+classification_window_seconds = 1.0
+
+[expectations.classification]
+min_label_accuracy = 0.0
+match = "exact"
+
+[expectations.localization]
+min_event_recall = 0.0
+max_median_position_error_m = 1000.0
+max_p90_position_error_m = 1000.0
+far_field_distance_m = 120.0
+
+[expectations.entities]
+association_radius_m = 5.0
+association_time_slop_s = 2.0

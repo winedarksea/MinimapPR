@@ -1,0 +1,93 @@
+# W2-onset-srp: a faint bird 80 m outside the layout (no level gate may drop it)
+# plus a near bird in another band calling between its bouts.
+name = "onset_faint_far_bird"
+seed = 20261122
+duration_s = 10.0
+sample_rate_hz = 24000
+
+[site]
+origin_lat = 45.0
+origin_lon = -93.0
+origin_alt_m = 250.0
+start_time_ns = 1763700000000000000
+
+[environment]
+temperature_c = 18.0
+humidity_fraction = 0.6
+
+[ground]
+enabled = true
+reflection_coefficient = 0.5
+
+[ambient_noise]
+level_db_spl = 30.0
+
+[[devices]]
+device_id = "tetra-a"
+kind = "sirith_tetra"
+position_m = [0.0, 0.0, 1.5]
+
+[[devices]]
+device_id = "tetra-b"
+kind = "sirith_tetra"
+position_m = [20.0, 0.0, 1.5]
+
+[[devices]]
+device_id = "tetra-c"
+kind = "sirith_tetra"
+position_m = [10.0, 18.0, 1.5]
+
+[[sources]]
+individual_id = "far-1"
+species = "Eastern Wood-Pewee"
+position_m = [70.0, 40.0, 8.0]
+
+[[sources.calls]]
+start_s = 2.0
+level_db_spl_at_1m = 84.0
+generator = { kind = "fm_sweep", start_frequency_hz = 3000.0, end_frequency_hz = 4200.0, duration_s = 0.5 }
+
+[[sources.calls]]
+start_s = 7.0
+level_db_spl_at_1m = 84.0
+generator = { kind = "fm_sweep", start_frequency_hz = 3000.0, end_frequency_hz = 4200.0, duration_s = 0.5 }
+
+[[sources]]
+individual_id = "near-1"
+species = "Northern Cardinal"
+position_m = [9.0, 7.0, 3.0]
+
+[[sources.calls]]
+start_s = 4.5
+level_db_spl_at_1m = 90.0
+generator = { kind = "fm_sweep", start_frequency_hz = 1600.0, end_frequency_hz = 1200.0, duration_s = 0.4 }
+
+
+[expectations]
+schema_version = 2
+
+[expectations.runtime]
+classifier_backend = "stub"
+replay_reference_nodes = false
+
+[expectations.runtime.settings_overrides]
+# The ingest trigger is an absolute RMS gate (pre-existing); set it ~3x the
+# rendered noise floor so the faint bird opens a window at all.
+trigger_rms = 0.00015
+classification_window_seconds = 1.0
+
+[expectations.classification]
+min_label_accuracy = 0.0
+match = "exact"
+
+[expectations.localization]
+min_event_recall = 0.0
+max_median_position_error_m = 1000.0
+max_p90_position_error_m = 1000.0
+# The far bird (~70 m from the nearest node, outside the layout) is scored on
+# bearing (entities.far_field_bearing_gate_deg), as the plan prescribes.
+far_field_distance_m = 50.0
+
+[expectations.entities]
+association_radius_m = 5.0
+association_time_slop_s = 2.0
