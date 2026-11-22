@@ -39,6 +39,14 @@ CONFIG_STAGE_GROUPS: tuple[tuple[str, str, PipelineStageKind | None, tuple[str, 
         PipelineStageKind.GATE,
         (
             "trigger_rms",
+            # --- Field Mode W3-attribution --- noise-floor-relative trigger
+            "trigger_noise_floor_relative_enabled",
+            "trigger_noise_floor_relative_snr_db",
+            "trigger_noise_floor_rise_seconds",
+            "trigger_noise_floor_fall_seconds",
+            "trigger_noise_floor_warmup_seconds",
+            "trigger_noise_floor_minimum_rms",
+            # --- end Field Mode W3-attribution ---
             "trigger_cooldown_seconds",
             "omni_scan_enabled",
             "omni_scan_interval_seconds",

@@ -284,6 +284,12 @@ CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     "onset_attribution_loco_mask_max_seconds": float,
     "onset_attribution_loco_mask_band_padding_hz": float,
     "onset_attribution_promote_band_distinct_tentative": bool,
+    "trigger_noise_floor_relative_enabled": bool,
+    "trigger_noise_floor_relative_snr_db": float,
+    "trigger_noise_floor_rise_seconds": float,
+    "trigger_noise_floor_fall_seconds": float,
+    "trigger_noise_floor_warmup_seconds": float,
+    "trigger_noise_floor_minimum_rms": float,
     # --- end Field Mode W3-attribution ---
     # Classification-lane backpressure knobs (see core/fusion_node.py). All
     # restart-required — the queues and the FusionConfig snapshot are built at

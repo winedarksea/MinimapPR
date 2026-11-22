@@ -235,6 +235,17 @@ def build_pipeline_graph(
             gate_id = f"gate:{node_id}"
             omni_min_rms = routing.context(CONTEXT_OMNI_CONTINUOUS).min_rms
             gate_params = [_param("Trigger RMS", float(settings.trigger_rms), "trigger_rms")]
+            # --- Field Mode W3-attribution --- noise-floor-relative trigger (OR'd with the RMS gate)
+            if settings.trigger_noise_floor_relative_enabled:
+                gate_params.append(
+                    _param(
+                        "Relative trigger",
+                        float(settings.trigger_noise_floor_relative_snr_db),
+                        "trigger_noise_floor_relative_snr_db",
+                        suffix=" dB over floor",
+                    )
+                )
+            # --- end Field Mode W3-attribution ---
             if omni_min_rms is not None:
                 gate_params.append(_param("Omni min RMS", float(omni_min_rms)))
             add_node(

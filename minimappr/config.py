@@ -648,6 +648,18 @@ class OnsetClusterAttributionConfig:
     loco_mask_band_padding_hz: float
     promote_band_distinct_tentative: bool
     mask_pre_roll_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class RelativeTriggerConfig:
+    """Noise-floor-relative ingest trigger (core/ingest_relative_trigger.py)."""
+
+    enabled: bool
+    snr_db: float
+    rise_seconds: float
+    fall_seconds: float
+    warmup_seconds: float
+    minimum_rms: float
 # --- end Field Mode W3-attribution ---
 
 
@@ -1240,6 +1252,18 @@ class Settings:
     # Single array: a cluster held only by persistence whose band differs from every accepted
     # cluster (so not an echo/sidelobe) gets its own product for attribution to label.
     onset_attribution_promote_band_distinct_tentative: bool = True
+    # Ingest: also trigger when a frame stands this far above the node's own tracked floor
+    # (OR with the absolute trigger_rms gate), so faint distant birds open windows.
+    trigger_noise_floor_relative_enabled: bool = False
+    trigger_noise_floor_relative_snr_db: float = 8.0
+    # Floor tracker: slow rise (a call barely lifts it) ...
+    trigger_noise_floor_rise_seconds: float = 20.0
+    # ... fast fall into quiet gaps.
+    trigger_noise_floor_fall_seconds: float = 0.5
+    # No relative trigger until a node's floor has seen this much audio.
+    trigger_noise_floor_warmup_seconds: float = 1.0
+    # Floor/level clamp so digital silence cannot make bit noise "loud".
+    trigger_noise_floor_minimum_rms: float = 1e-5
     # --- end Field Mode W3-attribution ---
     detection_min_confidence: float = 0.4
     cop_detections_max_items: int = 150
@@ -2051,6 +2075,14 @@ class Settings:
             raise ValueError("onset_attribution_loco_noise_floor_percentile must be in (0, 100)")
         if self.onset_attribution_loco_mask_band_padding_hz < 0.0:
             raise ValueError("onset_attribution_loco_mask_band_padding_hz must be >= 0")
+        for _trigger_key in (
+            "trigger_noise_floor_relative_snr_db", "trigger_noise_floor_rise_seconds",
+            "trigger_noise_floor_fall_seconds", "trigger_noise_floor_minimum_rms",
+        ):
+            if getattr(self, _trigger_key) <= 0.0:
+                raise ValueError(f"{_trigger_key} must be > 0")
+        if self.trigger_noise_floor_warmup_seconds < 0.0:
+            raise ValueError("trigger_noise_floor_warmup_seconds must be >= 0")
         # --- end Field Mode W3-attribution ---
         if self.detection_min_confidence < 0.0 or self.detection_min_confidence > 1.0:
             raise ValueError("MINIMAPPR_DETECTION_MIN_CONFIDENCE must be in [0,1]")
@@ -2716,6 +2748,12 @@ class Settings:
             onset_attribution_promote_band_distinct_tentative=_env_bool(
                 "MINIMAPPR_ONSET_ATTRIBUTION_PROMOTE_BAND_DISTINCT_TENTATIVE", True
             ),
+            trigger_noise_floor_relative_enabled=_env_bool("MINIMAPPR_TRIGGER_NOISE_FLOOR_RELATIVE_ENABLED", False),
+            trigger_noise_floor_relative_snr_db=_env_float("MINIMAPPR_TRIGGER_NOISE_FLOOR_RELATIVE_SNR_DB", 8.0),
+            trigger_noise_floor_rise_seconds=_env_float("MINIMAPPR_TRIGGER_NOISE_FLOOR_RISE_SECONDS", 20.0),
+            trigger_noise_floor_fall_seconds=_env_float("MINIMAPPR_TRIGGER_NOISE_FLOOR_FALL_SECONDS", 0.5),
+            trigger_noise_floor_warmup_seconds=_env_float("MINIMAPPR_TRIGGER_NOISE_FLOOR_WARMUP_SECONDS", 1.0),
+            trigger_noise_floor_minimum_rms=_env_float("MINIMAPPR_TRIGGER_NOISE_FLOOR_MINIMUM_RMS", 1e-5),
             # --- end Field Mode W3-attribution ---
             detection_min_confidence=_env_float("MINIMAPPR_DETECTION_MIN_CONFIDENCE", 0.4),
             cop_detections_max_items=_env_int("MINIMAPPR_COP_DETECTIONS_MAX_ITEMS", 150),
@@ -3191,6 +3229,16 @@ class Settings:
             loco_mask_band_padding_hz=self.onset_attribution_loco_mask_band_padding_hz,
             promote_band_distinct_tentative=self.onset_attribution_promote_band_distinct_tentative,
             mask_pre_roll_seconds=self.onset_frame_pre_roll_seconds,
+        )
+
+    def relative_trigger_config(self) -> RelativeTriggerConfig:
+        return RelativeTriggerConfig(
+            enabled=self.trigger_noise_floor_relative_enabled,
+            snr_db=self.trigger_noise_floor_relative_snr_db,
+            rise_seconds=self.trigger_noise_floor_rise_seconds,
+            fall_seconds=self.trigger_noise_floor_fall_seconds,
+            warmup_seconds=self.trigger_noise_floor_warmup_seconds,
+            minimum_rms=self.trigger_noise_floor_minimum_rms,
         )
     # --- end Field Mode W3-attribution ---
 

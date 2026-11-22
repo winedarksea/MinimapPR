@@ -56,6 +56,7 @@ from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.cluster_registry import ClusterRegistry
 from minimappr.core.onset_srp_localization_stage import OnsetSrpLocalizationStage
 from minimappr.core.onset_cluster_attribution_stage import OnsetClusterAttributor  # Field Mode W3-attribution
+from minimappr.core.ingest_relative_trigger import NoiseFloorRelativeTrigger  # Field Mode W3-attribution
 from minimappr.core.ingest import EnvironmentUpdater, IngestProcessor
 from minimappr.core.live_ingest_state import LiveIngestState
 from minimappr.core.ambi_atob import alias_cutoff_from_positions
@@ -466,6 +467,12 @@ class FusionNode:
             node_position_kde_acceptance_radius_m=settings.node_position_kde_acceptance_radius_m,
             node_position_kde_rejection_streak_reset=settings.node_position_kde_rejection_streak_reset,
             gps_2d_altitude_mode=getattr(settings, "gps_2d_altitude_mode", "site_origin"),
+            # Field Mode W3-attribution: noise-floor-relative trigger (None = absolute gate only).
+            relative_trigger=(
+                NoiseFloorRelativeTrigger(settings.relative_trigger_config())
+                if settings.trigger_noise_floor_relative_enabled
+                else None
+            ),
         )
         self._classification_orchestrator = ClassificationOrchestrator(
             classifier=classifier,

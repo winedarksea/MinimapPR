@@ -3213,6 +3213,12 @@ async def get_config(request: Request) -> dict:
         "onset_attribution_loco_mask_max_seconds": settings.onset_attribution_loco_mask_max_seconds,
         "onset_attribution_loco_mask_band_padding_hz": settings.onset_attribution_loco_mask_band_padding_hz,
         "onset_attribution_promote_band_distinct_tentative": settings.onset_attribution_promote_band_distinct_tentative,
+        "trigger_noise_floor_relative_enabled": settings.trigger_noise_floor_relative_enabled,
+        "trigger_noise_floor_relative_snr_db": settings.trigger_noise_floor_relative_snr_db,
+        "trigger_noise_floor_rise_seconds": settings.trigger_noise_floor_rise_seconds,
+        "trigger_noise_floor_fall_seconds": settings.trigger_noise_floor_fall_seconds,
+        "trigger_noise_floor_warmup_seconds": settings.trigger_noise_floor_warmup_seconds,
+        "trigger_noise_floor_minimum_rms": settings.trigger_noise_floor_minimum_rms,
         # --- end Field Mode W3-attribution ---
         "classifier_stage_timeout_seconds": settings.classifier_stage_timeout_seconds,
         "classification_stage_timeout_seconds": settings.classification_stage_timeout_seconds,
