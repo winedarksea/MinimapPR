@@ -9,11 +9,19 @@ const PCM_FORMAT_TAG: u16 = 1;
 const FMT_CHUNK_BYTES: u32 = 16;
 
 /// Encode channels-first full-scale f32 audio as a PCM16 WAV. Channels of
-/// unequal length (silent dropouts) are zero-padded to the longest.
-pub fn encode_pcm16_wav(channels: &[Vec<f32>], sample_rate_hz: u32) -> Vec<u8> {
-    let channel_count = channels.len().max(1) as u16;
+/// unequal length (silent dropouts) are zero-padded to the longest. Errors
+/// when the RIFF 32-bit size fields would overflow (long multichannel
+/// sessions) instead of silently writing a corrupt header.
+pub fn encode_pcm16_wav(channels: &[Vec<f32>], sample_rate_hz: u32) -> Result<Vec<u8>, String> {
+    let channel_count = u16::try_from(channels.len().max(1))
+        .map_err(|_| format!("{} channels exceed the WAV limit", channels.len()))?;
     let frames = channels.iter().map(Vec::len).max().unwrap_or(0);
     let data_bytes = frames * channel_count as usize * BYTES_PER_SAMPLE as usize;
+    if data_bytes + RIFF_HEADER_BYTES > u32::MAX as usize {
+        return Err(format!(
+            "{data_bytes} bytes of PCM exceed the 4 GiB RIFF limit; shorten the scenario"
+        ));
+    }
     let block_align = channel_count * BYTES_PER_SAMPLE;
     let mut out = Vec::with_capacity(RIFF_HEADER_BYTES + data_bytes);
     out.extend_from_slice(b"RIFF");
@@ -35,5 +43,5 @@ pub fn encode_pcm16_wav(channels: &[Vec<f32>], sample_rate_hz: u32) -> Vec<u8> {
             out.extend_from_slice(&quantized.to_le_bytes());
         }
     }
-    out
+    Ok(out)
 }

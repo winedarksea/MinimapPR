@@ -192,12 +192,31 @@ pub struct WorldPlan {
     pub render: RenderConfig,
 }
 
+/// Ground-truth loaders reject duplicate `event_id`s; catch them before a
+/// full render (two sources sharing an `individual_id` generate the same
+/// default ids, and explicit `event_id`s may collide with generated ones).
+fn ensure_unique_event_ids(emissions: &[PlannedEmission]) -> Result<(), String> {
+    let mut seen = std::collections::HashSet::new();
+    for emission in emissions {
+        if let EmissionRecord::BirdCall(record) = &emission.record {
+            if !seen.insert(record.event_id.as_str()) {
+                return Err(format!(
+                    "duplicate ground-truth event_id {}",
+                    record.event_id
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Resolve every random draw and knob of `scenario` into a `WorldPlan`.
 pub fn plan_world(scenario: &Scenario) -> Result<WorldPlan, String> {
     scenario.validate()?;
     let devices = device_planning::plan_devices(scenario)?;
     let reflectors = device_planning::plan_reflectors(scenario, &devices);
     let emissions = emission_planning::plan_emissions(scenario, &devices)?;
+    ensure_unique_event_ids(&emissions)?;
     let ambient = &scenario.ambient_noise;
     Ok(WorldPlan {
         scenario_name: scenario.name.clone(),

@@ -6,6 +6,7 @@
 //! audio/{node_id}.wav               reference_audio/README.txt
 //! ```
 
+pub mod echo_geometry;
 pub mod geo;
 pub mod ground_truth;
 pub mod manifest;
@@ -109,7 +110,8 @@ pub fn write_bundle(
         put("expectations.json", &pretty(&expectations)?)?;
     }
     for device in rendered {
-        let wav_bytes = wav::encode_pcm16_wav(&device.channels, scenario.sample_rate_hz);
+        let wav_bytes = wav::encode_pcm16_wav(&device.channels, scenario.sample_rate_hz)
+            .map_err(|e| format!("{}: {e}", device.device_id))?;
         put(&manifest::audio_file_name(&device.device_id), &wav_bytes)?;
     }
     put(

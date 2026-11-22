@@ -27,6 +27,52 @@ pub struct ChaosConfig {
     pub two_speaker_emission: Option<TwoSpeakerEmissionKnob>,
 }
 
+/// Finer GPS error tracks only bloat ground truth (GPS reports at ≤ 10 Hz).
+const MINIMUM_GPS_TRACK_STEP_S: f64 = 0.01;
+
+fn is_positive_finite(value: f64) -> bool {
+    value.is_finite() && value > 0.0
+}
+
+impl ChaosConfig {
+    /// Reject knob settings whose planning loops could never advance in time
+    /// (zero-length walk legs, stall intervals or bout gaps would hang
+    /// `plan_world` while it grows a waypoint/dropout/emission list forever).
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(walking) = &self.walking {
+            let [leg_min, leg_max] = walking.leg_duration_range_s;
+            if leg_min < 0.0 || leg_max < 0.0 || walking.stop_duration_s < 0.0 {
+                return Err("chaos.walking durations must be non-negative".into());
+            }
+            if leg_min + walking.stop_duration_s <= 0.0 {
+                return Err(
+                    "chaos.walking needs leg_duration_range_s[0] + stop_duration_s > 0".into(),
+                );
+            }
+        }
+        if let Some(stall) = &self.thermal_stall {
+            if !is_positive_finite(stall.mean_stall_interval_s) {
+                return Err("chaos.thermal_stall.mean_stall_interval_s must be positive".into());
+            }
+        }
+        if let Some(flock) = &self.intermittent_flock {
+            if !is_positive_finite(flock.bout_gap_range_s[0]) {
+                return Err("chaos.intermittent_flock.bout_gap_range_s[0] must be positive".into());
+            }
+        }
+        if let Some(canopy) = &self.canopy_gps {
+            if !(canopy.gps_track_step_s.is_finite()
+                && canopy.gps_track_step_s >= MINIMUM_GPS_TRACK_STEP_S)
+            {
+                return Err(format!(
+                    "chaos.canopy_gps.gps_track_step_s must be >= {MINIMUM_GPS_TRACK_STEP_S} s"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Delete `drops_per_device` runs of 256–4096 samples from each selected
 /// stream. A *reported* gap is zero-filled (timing preserved, like a counted
 /// overrun); a *silent* gap is removed, shifting every later sample earlier.

@@ -270,8 +270,8 @@ impl Scenario {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.duration_s <= 0.0 {
-            return Err("duration_s must be positive".into());
+        if !(self.duration_s.is_finite() && self.duration_s > 0.0) {
+            return Err("duration_s must be positive and finite".into());
         }
         if self.sample_rate_hz == 0 {
             return Err("sample_rate_hz must be positive".into());
@@ -291,8 +291,18 @@ impl Scenario {
                 ));
             }
         }
-        if self.render.control_point_spacing_samples == 0 || self.render.kernel_phase_count == 0 {
-            return Err("render spacing/phase count must be positive".into());
+        if self.render.control_point_spacing_samples == 0
+            || self.render.kernel_phase_count == 0
+            || self.render.kernel_half_width_taps == 0
+        {
+            return Err(
+                "render spacing, kernel phase count and kernel width must be positive".into(),
+            );
+        }
+        self.chaos.validate()?;
+        let cutoff = self.render.kernel_cutoff_fraction_of_nyquist;
+        if !(cutoff > 0.0 && cutoff <= 1.0) {
+            return Err("render.kernel_cutoff_fraction_of_nyquist must be in (0, 1]".into());
         }
         Ok(())
     }

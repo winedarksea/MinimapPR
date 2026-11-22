@@ -109,13 +109,47 @@ def test_rendered_bundle_loads_with_extended_ground_truth(rendered_bundle: Path)
         assert np.all(np.isfinite(audio))
         assert float(np.abs(audio).max()) > 0.0
 
-    assert [event["individual_id"] for event in bundle.events] == ["wtsp-1", "chsp-1"]
-    for event in bundle.events:
+    call_events = [event for event in bundle.events if not event["is_echo_source"]]
+    echo_events = [event for event in bundle.events if event["is_echo_source"]]
+    assert [event["individual_id"] for event in call_events] == ["wtsp-1", "chsp-1"]
+    for event in call_events:
         assert event["geometry"]["type"] == "static"
-        assert event["species"] and event["is_echo_source"] is False
+        assert event["species"]
         assert event["end_ns"] > event["start_ns"]
+    call_ids = {event["event_id"] for event in call_events}
+    assert echo_events, "trunk/ground reflections should be listed as echo events"
+    assert {event["echo_of_event_id"] for event in echo_events} == call_ids
     assert bundle.expectations is not None
     assert bundle.expectations["runtime"]["classifier_backend"] == "stub"
+
+
+def test_label_override_and_moving_source_load_as_v2(sim_binary: Path, tmp_path: Path) -> None:
+    """A `label` that differs from `species`, and a source `trajectory`, must
+    still pass the v2 loader's validation (label in species, sorted waypoints)."""
+    scenario_text = SCENARIO_PATH.read_text()
+    scenario_text = scenario_text.replace(
+        'species = "White-throated Sparrow"',
+        'species = "White-throated Sparrow"\nlabel = "WTSP"',
+    ).replace(
+        'position_m = [-4.0, 9.0, 4.0]',
+        'position_m = [-4.0, 9.0, 4.0]\ntrajectory = [[2.0, -4.0, 9.0, 4.0], [4.0, 6.0, 9.0, 4.0]]',
+    )
+    variant_path = tmp_path / "variant.toml"
+    variant_path.write_text(scenario_text)
+    out_path = tmp_path / "variant.zip"
+    subprocess.run(
+        [str(sim_binary), "render-bundle", "--scenario", str(variant_path), "--out", str(out_path)],
+        check=True,
+        timeout=RENDER_TIMEOUT_S,
+    )
+    bundle = load_bundle(out_path)
+    by_individual = {event["individual_id"]: event for event in bundle.events if not event["is_echo_source"]}
+    assert by_individual["wtsp-1"]["label"] == "WTSP"
+    assert {entry["label"] for entry in by_individual["wtsp-1"]["species"]} == {"WTSP", "White-throated Sparrow"}
+    geometry = by_individual["chsp-1"]["geometry"]
+    assert geometry["type"] == "trajectory"
+    start_ns = bundle.manifest["time_window"]["start_ns"]
+    assert [waypoint["t_ns"] for waypoint in geometry["waypoints"]] == [start_ns + 2_000_000_000, start_ns + 4_000_000_000]
 
 
 @pytest.mark.asyncio
@@ -139,6 +173,8 @@ async def test_rendered_bundle_replays_through_fusion(rendered_bundle: Path, tmp
         await storage.close()
 
     report = evaluate_bundle(detections, bundle)
-    assert len(report.event_results) == len(bundle.events)
+    # Echo events are excluded from per-event results.
+    assert len(report.event_results) == sum(not event["is_echo_source"] for event in bundle.events)
+    assert report.entity_metrics is not None and report.entity_metrics.echo_event_count > 0
     assert detections, "replay of the simulated bundle produced no detections"
     assert report.event_recall > 0.0

@@ -230,3 +230,58 @@ fn route_change_band_limits_to_headset_rate() {
     eprintln!("route change at 12 kHz: {before:.1} dB → {after:.1} dB");
     assert!(before - after > 40.0);
 }
+
+#[test]
+fn degenerate_render_and_duration_settings_are_rejected() {
+    let base = || {
+        clean_scenario(
+            1.0,
+            vec![ideal_receiver("rx", [0.0; 3], ClockConfig::Disciplined)],
+        )
+    };
+    assert!(base().validate().is_ok());
+    let mut zero_width_kernel = base();
+    zero_width_kernel.render.kernel_half_width_taps = 0;
+    assert!(zero_width_kernel.validate().is_err());
+    let mut bad_cutoff = base();
+    bad_cutoff.render.kernel_cutoff_fraction_of_nyquist = 1.5;
+    assert!(bad_cutoff.validate().is_err());
+    let mut nan_duration = base();
+    nan_duration.duration_s = f64::NAN;
+    assert!(nan_duration.validate().is_err());
+}
+
+#[test]
+fn knobs_that_would_never_advance_time_are_rejected() {
+    use minimappr_sim::scenario::chaos::{IntermittentFlockKnob, ThermalStallKnob, WalkingKnob};
+    let base = || {
+        clean_scenario(
+            1.0,
+            vec![ideal_receiver("rx", [0.0; 3], ClockConfig::Disciplined)],
+        )
+    };
+    let mut walking = base();
+    walking.chaos.walking = Some(WalkingKnob {
+        leg_duration_range_s: [0.0, 0.0],
+        stop_duration_s: 0.0,
+        ..WalkingKnob::default()
+    });
+    assert!(walking.validate().is_err());
+    let mut stall = base();
+    stall.chaos.thermal_stall = Some(ThermalStallKnob {
+        mean_stall_interval_s: 0.0,
+        ..ThermalStallKnob::default()
+    });
+    assert!(stall.validate().is_err());
+    let mut flock = base();
+    flock.chaos.intermittent_flock = Some(IntermittentFlockKnob {
+        bout_gap_range_s: [0.0, 0.0],
+        ..IntermittentFlockKnob::default()
+    });
+    assert!(flock.validate().is_err());
+    let mut defaults = base();
+    defaults.chaos.walking = Some(WalkingKnob::default());
+    defaults.chaos.thermal_stall = Some(ThermalStallKnob::default());
+    defaults.chaos.intermittent_flock = Some(IntermittentFlockKnob::default());
+    assert!(defaults.validate().is_ok());
+}
