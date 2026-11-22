@@ -425,6 +425,14 @@ def build_pipeline_graph(
             _param("Narrowband → envelope", float(settings.onset_narrowband_bandwidth_hz), "onset_narrowband_bandwidth_hz", suffix=" Hz"),
             _param("Cluster radius", float(settings.onset_cluster_radius_m), "onset_cluster_radius_m", suffix=" m"),
             _param("Max clusters", int(settings.onset_cluster_max_count), "onset_cluster_max_count"),
+            # --- Field Mode S-fixes onset ---
+            _param("Max intra-node weight share", float(settings.onset_frame_max_intra_node_weight_share), "onset_frame_max_intra_node_weight_share"),
+            _param("Node near-field shells", int(settings.onset_srp_node_grid_ring_count), "onset_srp_node_grid_ring_count"),
+            _param("Ground/canopy prior", bool(settings.onset_ground_prior_enabled), "onset_ground_prior_enabled"),
+            _param("Canopy ceiling", float(settings.onset_source_max_height_above_ground_m), "onset_source_max_height_above_ground_m", suffix=" m"),
+            _param("Range profile", bool(settings.onset_range_profile_enabled), "onset_range_profile_enabled"),
+            _param("Max range interval ratio", float(settings.onset_range_observable_max_interval_ratio), "onset_range_observable_max_interval_ratio"),
+            # --- end Field Mode S-fixes onset ---
         ],
         status=_onset_srp_status(metrics, fusion_available, bool(settings.localization_onset_clustering_enabled)),
         link="/settings/config#localization",

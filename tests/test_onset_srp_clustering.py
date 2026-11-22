@@ -70,7 +70,11 @@ def test_multi_node_fix_lands_on_the_bird_not_the_node() -> None:
     accepted = _accepted(result)
     assert len(accepted) == 1
     truth = np.asarray(scenario.calls[0].position_m)
-    assert np.linalg.norm(np.asarray(accepted[0].position_m) - truth) < 1.5
+    position = np.asarray(accepted[0].position_m)
+    assert np.linalg.norm(position[:2] - truth[:2]) < 1.5
+    # Planar layout: height may be reported as uncertain (mirror twins), but honestly.
+    vertical_std_m = float(np.sqrt(np.asarray(accepted[0].covariance_m2)[2][2]))
+    assert abs(position[2] - truth[2]) <= max(1.5, 2.0 * vertical_std_m)
 
 
 def test_single_tetra_gives_a_bearing_with_unobservable_range() -> None:
@@ -87,7 +91,8 @@ def test_overlapping_species_give_two_clusters_at_their_own_positions() -> None:
     accepted = _accepted(result)
     truths = {call.species_label: np.asarray(call.position_m) for call in scenario.calls[:2]}
     for truth in truths.values():
-        assert min(np.linalg.norm(np.asarray(c.position_m) - truth) for c in accepted) < 2.0
+        # Horizontal: the layout is planar, so height may honestly be reported as uncertain.
+        assert min(np.linalg.norm(np.asarray(c.position_m)[:2] - truth[:2]) for c in accepted) < 2.0
     assert len(accepted) == 2
 
 

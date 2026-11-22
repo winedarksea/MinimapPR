@@ -43,6 +43,8 @@ MIN_MEASUREMENT_WEIGHT = 0.05
 # Fit quality = exp(-residual / (this many interpolated sample periods)), as in
 # cartesian_tdoa's confidence.
 FIT_QUALITY_SAMPLE_PERIODS = 4.0
+# A bounded LM needs a strictly interior start; keep the seed this far inside.
+BOUNDED_SEED_MARGIN_M = 1.0e-3
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +83,32 @@ def cluster_srp_score(
             lag = _predicted_lag_s(position_m, sensor_positions, curve.sensor_a, curve.sensor_b, sound_speed_mps)
             score += peak.weight * float(curve.value_at(np.asarray([lag]))[0]) * curve.weight_sum / total
     return score
+
+
+def cluster_srp_scores(
+    points_m: np.ndarray,
+    cluster: OnsetCluster,
+    frames: dict[int, OnsetFrame],
+    sensor_positions: dict[str, np.ndarray],
+    sound_speed_mps: float,
+) -> np.ndarray:
+    """Vectorised `cluster_srp_score` over many candidate points (N, 3) -> (N,)."""
+    points = np.atleast_2d(np.asarray(points_m, dtype=np.float64))
+    distances: dict[str, np.ndarray] = {}
+
+    def distance_to(sensor_id: str) -> np.ndarray:
+        if sensor_id not in distances:
+            distances[sensor_id] = np.linalg.norm(points - sensor_positions[sensor_id], axis=1)
+        return distances[sensor_id]
+
+    scores = np.zeros(points.shape[0])
+    for peak in cluster.peaks:
+        frame = frames[peak.frame_index]
+        total = sum(curve.weight_sum for curve in frame.curves) or 1.0
+        for curve in frame.curves:
+            lags = (distance_to(curve.sensor_b) - distance_to(curve.sensor_a)) / sound_speed_mps
+            scores += peak.weight * curve.value_at(lags) * curve.weight_sum / total
+    return scores
 
 
 def _weighted_median(values: np.ndarray, weights: np.ndarray) -> float:
@@ -178,7 +206,10 @@ def refine_cluster_position(
     interpolation_factor: int,
     far_field_default_range_m: float,
     minimum_position_std_m: float,
+    vertical_bounds_m: tuple[float, float] | None = None,
 ) -> RefinedClusterPosition:
+    """`vertical_bounds_m` (Field Mode S-fixes) bounds the multi-node LM's z to the
+    ground..canopy slab; only passed for non-planar layouts, where no mirror twin exists."""
     reference_counts = Counter(frames[index].reference_sensor for index in cluster.frame_indices)
     reference_sensor = reference_counts.most_common(1)[0][0]
     measurements = vote_pair_tdoas(
@@ -220,6 +251,7 @@ def refine_cluster_position(
             sample_rate_hz=sample_rate_hz,
             interpolation_factor=interpolation_factor,
             minimum_position_std_m=minimum_position_std_m,
+            vertical_bounds_m=vertical_bounds_m,
         )
     if refined is None:
         return seed_result
@@ -296,6 +328,7 @@ def _refine_position_from_seed(
     sample_rate_hz,
     interpolation_factor,
     minimum_position_std_m,
+    vertical_bounds_m=None,
 ) -> RefinedClusterPosition | None:
     """Local LM from the cluster's SRP seed (multi-node: range observable).
 
@@ -316,10 +349,16 @@ def _refine_position_from_seed(
             ]
         )
 
+    seed = np.asarray(seed_position_m, dtype=np.float64)
+    bounds = (-np.inf, np.inf)
+    if vertical_bounds_m is not None and vertical_bounds_m[1] > vertical_bounds_m[0]:
+        lower_z, upper_z = vertical_bounds_m
+        bounds = ([-np.inf, -np.inf, lower_z], [np.inf, np.inf, upper_z])
+        seed = seed.copy()
+        seed[2] = float(np.clip(seed[2], lower_z + BOUNDED_SEED_MARGIN_M, upper_z - BOUNDED_SEED_MARGIN_M))
     try:
         solved = least_squares(
-            residuals, x0=np.asarray(seed_position_m, dtype=np.float64), method="trf", loss="soft_l1",
-            f_scale=sample_time_s,
+            residuals, x0=seed, method="trf", loss="soft_l1", f_scale=sample_time_s, bounds=bounds,
         )
     except (ValueError, np.linalg.LinAlgError):
         return None

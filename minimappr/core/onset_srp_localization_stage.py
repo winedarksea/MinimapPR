@@ -28,6 +28,7 @@ from minimappr.config import OnsetClusterAttributionConfig, OnsetSrpClusteringCo
 from minimappr.core.localization import speed_of_sound_mps
 from minimappr.core.onset_cluster_attribution import ClusterAttributionContext, is_band_distinct_persistence_hold
 from minimappr.core.onset_cluster_echo_checks import SAME_BAND_MIN_OVERLAP_FRACTION
+from minimappr.core.onset_classification_node import classification_capable_cluster
 from minimappr.core.onset_srp_clustering import localize_onset_clusters
 from minimappr.core.onset_srp_grid import spatial_cluster_radius_m
 from minimappr.core.onset_srp_types import (
@@ -177,7 +178,11 @@ class OnsetSrpLocalizationStage:
         }
         accepted = [(i, c) for i, c in enumerate(result.clusters) if c.status == CLUSTER_STATUS_ACCEPTED]
         accepted += self._band_distinct_tentative_clusters(result, accepted, metrics)
+        min_classification_sensors = fusion.localization_config.beamformed_classification_min_sensor_count
+        window_clusters = list(result.clusters)
         for index, (window_cluster_index, cluster) in enumerate(accepted):
+            cluster = classification_capable_cluster(cluster, node_ids, sensor_positions, min_classification_sensors)
+            window_clusters[window_cluster_index] = cluster
             product = await self._product_for_cluster(
                 fusion,
                 candidate=candidate,
@@ -191,7 +196,7 @@ class OnsetSrpLocalizationStage:
             )
             if product is not None:
                 self._attach_attribution_context(
-                    product, candidate.id, result.clusters, window_cluster_index, np.mean(points, axis=0),
+                    product, candidate.id, window_clusters, window_cluster_index, np.mean(points, axis=0),
                     start_ns, end_ns, fusion.localization_config.classification_window_seconds,
                 )
                 products.append(product)

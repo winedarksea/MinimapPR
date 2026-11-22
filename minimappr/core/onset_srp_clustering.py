@@ -23,12 +23,24 @@ import numpy as np
 
 from minimappr.config import OnsetSrpClusteringConfig
 from minimappr.core.far_field_model_selection import COMPACT_ARRAY_MAX_APERTURE_M
+from minimappr.core.onset_cluster_geometry_resolution import (
+    build_window_spatial_grid,
+    peak_twin_folds,
+    apply_window_level_holds,
+    cap_intra_node_weight_share,
+    resolve_cluster_geometry,
+    window_ground_prior,
+)
 from minimappr.core.onset_cluster_attribution_evidence import build_cluster_attribution_evidence
 from minimappr.core.onset_cluster_echo_checks import (
     apply_onset_echo_and_persistence_checks,
     level_consistency_holds,
 )
 from minimappr.core.onset_cluster_refinement import refine_cluster_position
+from minimappr.core.onset_near_node_level_check import (
+    near_node_fix_led_only_by_that_node,
+    near_node_level_gradient_holds,
+)
 from minimappr.core.onset_detection import SubbandHistory, build_subband_history, detect_onsets
 from minimappr.core.onset_frame_correlation import (
     SensorNoiseSpectrum,
@@ -40,11 +52,11 @@ from minimappr.core.onset_srp_grid import (
     LagCache,
     angular_separation_deg,
     build_direction_grid,
-    build_spatial_grid,
     pick_frame_peaks,
     spatial_cluster_radius_m,
     steered_response_power,
 )
+from minimappr.core.range_projection import range_mode_is_unobservable
 from minimappr.core.onset_srp_types import (
     CLUSTER_STATUS_ACCEPTED,
     CLUSTER_STATUS_ECHO,
@@ -128,7 +140,7 @@ def _build_frame(
         strength=onset.strength,
         band_min_hz=onset.band_min_hz,
         band_max_hz=onset.band_max_hz,
-        curves=curves,
+        curves=cap_intra_node_weight_share(curves, set(node_sensors), config.frame_max_intra_node_weight_share),
     )
 
 
@@ -242,6 +254,7 @@ def localize_onset_clusters(
     node_centroids = {node: np.mean(np.vstack([positions[s] for s in members]), axis=0) for node, members in nodes.items()}
     layout_centroid = np.mean(np.vstack(list(node_centroids.values())), axis=0)
     compact = _array_aperture_m(positions, sensor_ids) <= COMPACT_ARRAY_MAX_APERTURE_M
+    prior = window_ground_prior(node_centroids, config)
     if compact:
         grid = build_direction_grid(
             layout_centroid,
@@ -250,15 +263,11 @@ def localize_onset_clusters(
             far_range_m=far_field_default_range_m,
         )
     else:
-        grid = build_spatial_grid(
-            layout_centroid,
-            azimuth_step_deg=config.srp_azimuth_step_deg,
-            elevation_step_deg=config.srp_elevation_step_deg,
-            min_range_m=config.srp_grid_min_range_m,
-            max_range_m=config.srp_grid_max_range_m,
-            ring_count=config.srp_grid_ring_count,
-        )
+        grid = build_window_spatial_grid(layout_centroid, node_centroids, config)
     lag_cache = LagCache(grid, positions, sound_speed_mps)
+    # Planar layout: a peak and its node-plane twin fit the cross-node lags equally, so peaks
+    # are clustered above the plane (twins merge); LM + height resolution pick z afterwards.
+    fold, fold_direction = peak_twin_folds(prior, grid)
     max_strength = max(frame.strength for frame in frames.values())
     peaks: list[FramePeak] = []
     for frame in frames.values():
@@ -278,8 +287,8 @@ def localize_onset_clusters(
             peaks.append(
                 FramePeak(
                     frame_index=frame.frame_index,
-                    position_m=grid.points_m[grid_peak.point_index],
-                    direction=grid.directions[grid_peak.point_index],
+                    position_m=fold(grid.points_m[grid_peak.point_index]),
+                    direction=fold_direction(grid.directions[grid_peak.point_index]),
                     range_m=float(grid.ranges_m[grid_peak.point_index]),
                     value=grid_peak.value,
                     weight=frame.weight * grid_peak.value * grid_peak.contrast,
@@ -317,9 +326,12 @@ def localize_onset_clusters(
             minimum_std_m=minimum_std_m,
             is_window_strongest=rank == 0,
             attribution_audible_snr_db=attribution_audible_snr_db,
+            prior=prior,
         )
         for rank, cluster in enumerate(clusters)
     ]
+    localized = apply_window_level_holds(localized, grid=grid, node_centroids=node_centroids,
+                                         sound_speed_mps=sound_speed_mps, config=config)
     return OnsetClusteringResult(tuple(localized), onset_count, len(frames), consumed_now)
 
 
@@ -341,6 +353,7 @@ def _finalize_cluster(
     minimum_std_m,
     is_window_strongest: bool,
     attribution_audible_snr_db=None,
+    prior=None,
 ) -> LocalizedOnsetCluster:
     bearing_only = grid.is_direction_grid or all(peak.range_m >= grid.ranges_m.max() for peak in cluster.peaks)
     seed = (
@@ -360,7 +373,13 @@ def _finalize_cluster(
         interpolation_factor=interpolation_factor,
         far_field_default_range_m=far_field_default_range_m,
         minimum_position_std_m=minimum_std_m,
+        vertical_bounds_m=None if prior.is_planar else prior.vertical_bounds_m(seed),
     )
+    geometry = resolve_cluster_geometry(
+        refined, cluster=cluster, frames=frames, sensor_positions=positions, sound_speed_mps=sound_speed_mps,
+        grid=grid, prior=prior, config=config,
+    )
+    range_unobservable = bearing_only or range_mode_is_unobservable(geometry.range_projection_mode)
     led = sorted(cluster.led_frame_indices) or sorted(cluster.frame_indices)
     led_frames = [frames[index] for index in led]
     # Level is a hint, not a gate: the window's strongest cluster stays accepted
@@ -370,7 +389,7 @@ def _finalize_cluster(
         cluster.status == CLUSTER_STATUS_ACCEPTED
         and len(nodes) > 1
         and not level_consistency_holds(
-            position_m=refined.position_m,
+            position_m=geometry.position_m,
             led_frames=led_frames,
             node_histories=histories,
             node_positions_m=node_centroids,
@@ -383,13 +402,37 @@ def _finalize_cluster(
         cluster.status_reasons.append("level_inconsistent")
         if not is_window_strongest:
             cluster.status = CLUSTER_STATUS_TENTATIVE
+    if (
+        cluster.status == CLUSTER_STATUS_ACCEPTED
+        and not grid.is_direction_grid
+        and not near_node_level_gradient_holds(
+            position_m=geometry.position_m, led_frames=led_frames, node_histories=histories,
+            node_positions_m=node_centroids, near_field_radius_m=config.srp_node_grid_max_range_m,
+            tolerance_db=config.near_node_level_tolerance_db, sound_speed_mps=sound_speed_mps,
+            sample_rate_hz=sample_rate_hz, frame_samples=frame_samples,
+        )
+    ):
+        cluster.status_reasons.append("near_node_level_inconsistent")
+        if not is_window_strongest:
+            cluster.status = CLUSTER_STATUS_TENTATIVE
+    if (
+        cluster.status == CLUSTER_STATUS_ACCEPTED
+        and not grid.is_direction_grid
+        and near_node_fix_led_only_by_that_node(
+            position_m=geometry.position_m, led_frames=led_frames, node_positions_m=node_centroids,
+            near_field_radius_m=config.srp_node_grid_max_range_m,
+        )
+    ):
+        cluster.status_reasons.append("near_node_single_template_node")
+        if not is_window_strongest:
+            cluster.status = CLUSTER_STATUS_TENTATIVE
     contributing = sorted({frame.template_node_id for frame in led_frames})
-    loudest = _classification_node_for_cluster(led_frames, node_centroids, refined.position_m, bearing_only)
+    loudest = _classification_node_for_cluster(led_frames, node_centroids, geometry.position_m, range_unobservable)
     attribution_evidence = (
         None
         if attribution_audible_snr_db is None
         else build_cluster_attribution_evidence(
-            position_m=refined.position_m,
+            position_m=geometry.position_m,
             led_frames=led_frames,
             node_histories=histories,
             node_positions_m=node_centroids,
@@ -401,12 +444,12 @@ def _finalize_cluster(
     )
     envelope_curves = [curve.used_envelope for index in cluster.frame_indices for curve in frames[index].curves]
     return LocalizedOnsetCluster(
-        position_m=tuple(float(v) for v in refined.position_m),
-        covariance_m2=refined.covariance_m2,
+        position_m=tuple(float(v) for v in geometry.position_m),
+        covariance_m2=geometry.covariance_m2,
         confidence=refined.confidence,
         gdop=refined.gdop,
-        range_projection_mode=refined.range_projection_mode,
-        range_observability=refined.range_observability,
+        range_projection_mode=geometry.range_projection_mode,
+        range_observability=geometry.range_observability,
         residual_rms_seconds=refined.residual_rms_seconds,
         reference_sensor=refined.reference_sensor,
         tdoa_s=refined.tdoa_s,
@@ -424,6 +467,8 @@ def _finalize_cluster(
         contributing_node_ids=tuple(contributing),
         loudest_node_id=loudest,
         attribution_evidence=attribution_evidence,
+        height_resolution=geometry.height_resolution,
+        range_interval_m=geometry.range_interval_m,
     )
 
 
