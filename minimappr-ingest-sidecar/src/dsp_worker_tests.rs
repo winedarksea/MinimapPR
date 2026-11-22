@@ -1888,7 +1888,7 @@ fn pseudo_random(n: usize) -> Vec<f32> {
         .collect()
 }
 
-fn encode_pcm16le_b64(channels: &[Vec<f32>]) -> String {
+pub(super) fn encode_pcm16le_b64(channels: &[Vec<f32>]) -> String {
     let frame_count = channels.iter().map(Vec::len).min().unwrap_or(0);
     let mut bytes = Vec::with_capacity(frame_count * channels.len() * 2);
     for sample_index in 0..frame_count {

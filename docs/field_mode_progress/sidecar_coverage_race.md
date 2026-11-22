@@ -138,13 +138,20 @@ Rust:
   stall release, dead node free on later windows, total cap while advancing, lagging beyond
   the cap, never-streamed channels ignored, intra-window gap not waited on, disabled flag,
   and config clamping.
-- `dsp_worker_coverage_race_tests` (6 tests, deterministic manual clock):
+- `dsp_worker_coverage_race_tests` (9 tests, deterministic manual clock):
   - legacy repro (single-node)
   - late node included in every solve
   - all present adds no wait
   - stalled node released within budget, then free
   - total cap releases while the node is still advancing
   - poll tick releases when every member goes quiet
+  - (review) a newest-first backlog batch is decided only after the backfill,
+    through the real batch loop (`ingest_batch_and_dispatch`)
+  - (review) a cluster that grows while a window is parked solves with the
+    parked geometry (was an SRP index panic that aborts the rayon pool)
+  - (review) a ~45%-lossy late node costs one frame gap, never the stall budget
+
+See `review_sidecar_coverage_race.md` for the promotion review.
 
 Python:
 

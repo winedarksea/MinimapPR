@@ -720,34 +720,46 @@ impl DspWorker {
         // Capture the Tokio handle once so each rayon closure can call
         // `handle.spawn(run_io(...))` after the sync math phase completes.
         let handle = tokio::runtime::Handle::current();
-
-        for manifest in pending {
-            let ingested_payload = self.ingest_one(manifest, pending_backlog_depth).await;
-            // A manifest can also complete an earlier deferred localization.
-            let ready_payloads = self.take_ready_deferred_localizations(false).await;
-            for payload in ingested_payload.into_iter().chain(ready_payloads) {
-                self.note_stage_attempts(&payload).await;
-                let h = handle.clone();
-                // Dispatch to the dedicated DSP rayon pool. run_compute is sync:
-                // it runs CPU math on the Rayon thread, then calls handle.spawn(run_io(...))
-                // which queues async I/O onto Tokio and returns immediately. The Rayon
-                // thread is free for the next frame without waiting on disk or DB.
-                crate::runtime::dsp_pool().spawn_fifo(move || {
-                    crate::actors::dsp_compute::run_compute(payload, h);
-                });
-            }
-        }
-        // Poll tick: release pendings whose members all went quiet.
-        for payload in self.take_ready_deferred_localizations(true).await {
-            self.note_stage_attempts(&payload).await;
+        // Dispatch to the dedicated DSP rayon pool. run_compute is sync: it
+        // runs CPU math on the Rayon thread, then calls handle.spawn(run_io(...))
+        // which queues async I/O onto Tokio and returns immediately. The Rayon
+        // thread is free for the next frame without waiting on disk or DB.
+        let mut dispatch_to_dsp_pool = |payload: ComputePayload| {
             let h = handle.clone();
             crate::runtime::dsp_pool().spawn_fifo(move || {
                 crate::actors::dsp_compute::run_compute(payload, h);
             });
-        }
+        };
+        self.ingest_batch_and_dispatch(pending, pending_backlog_depth, &mut dispatch_to_dsp_pool)
+            .await;
 
         self.flush_deferred_source_manifest_consumptions().await;
         pending_backlog_depth
+    }
+
+    /// One poll cycle's batch: every payload is dispatched as soon as it is
+    /// built (compute overlaps ingest), and the end of the batch is the only
+    /// point where parked coverage-wait localizations are decided.
+    async fn ingest_batch_and_dispatch(
+        &mut self,
+        pending: Vec<DspManifest>,
+        pending_backlog_depth: usize,
+        dispatch: &mut (dyn FnMut(ComputePayload) + Send),
+    ) {
+        for manifest in pending {
+            let ingested_payload = self.ingest_one(manifest, pending_backlog_depth).await;
+            // A newer candidate can supersede (and so release) a parked one.
+            let ready_payloads = self.take_ready_deferred_localizations(false).await;
+            for payload in ingested_payload.into_iter().chain(ready_payloads) {
+                self.note_stage_attempts(&payload).await;
+                dispatch(payload);
+            }
+        }
+        // Batch boundary (also the idle poll tick): decide parked windows.
+        for payload in self.take_ready_deferred_localizations(true).await {
+            self.note_stage_attempts(&payload).await;
+            dispatch(payload);
+        }
     }
 
     async fn ingest_one(
@@ -1607,6 +1619,23 @@ impl DspWorker {
         let ready_payloads = self.take_ready_deferred_localizations(true).await;
         for payload in ingested_payload.into_iter().chain(ready_payloads) {
             self.note_stage_attempts(&payload).await;
+            let result = crate::actors::dsp_compute::run_math(payload);
+            crate::actors::dsp_compute::run_io(result).await;
+        }
+        self.flush_deferred_source_manifest_consumptions().await;
+    }
+
+    /// Test seam for one `process_pending` batch, newest-first as production
+    /// orders it, with compute run inline instead of on the rayon pool.
+    #[cfg(test)]
+    pub(crate) async fn process_batch_inline(&mut self, manifests: Vec<DspManifest>) {
+        let pending = merge_pending_manifests_for_batch(manifests, Vec::new(), usize::MAX);
+        let pending_backlog_depth = pending.len();
+        let mut dispatched_payloads = Vec::new();
+        let mut collect_payload = |payload: ComputePayload| dispatched_payloads.push(payload);
+        self.ingest_batch_and_dispatch(pending, pending_backlog_depth, &mut collect_payload)
+            .await;
+        for payload in dispatched_payloads {
             let result = crate::actors::dsp_compute::run_math(payload);
             crate::actors::dsp_compute::run_io(result).await;
         }

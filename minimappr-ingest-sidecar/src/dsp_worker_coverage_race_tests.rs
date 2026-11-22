@@ -2,7 +2,7 @@
 //! buffer and node b delivers each frame after node a's next frame.
 
 use super::dsp_worker_tests::{
-    drain_published_manifests, raw_manifest_for_payload_with_metadata,
+    drain_published_manifests, encode_pcm16le_b64, raw_manifest_for_payload_with_metadata,
     store_forward_payload_with_channel_count,
 };
 use super::*;
@@ -83,24 +83,49 @@ impl RaceHarness {
     }
 
     async fn deliver(&mut self, node_id: &str, frame_index: usize) {
+        self.deliver_with_cluster_positions(node_id, frame_index, two_tetra_cluster_positions())
+            .await;
+    }
+
+    async fn deliver_with_cluster_positions(
+        &mut self,
+        node_id: &str,
+        frame_index: usize,
+        cluster_sensor_positions: Vec<(String, [f32; 3])>,
+    ) {
+        let manifest = self
+            .frame_manifest(node_id, frame_index, cluster_sensor_positions, false)
+            .await;
+        self.worker.process_one(manifest, 1).await;
+    }
+
+    async fn frame_manifest(
+        &self,
+        node_id: &str,
+        frame_index: usize,
+        cluster_sensor_positions: Vec<(String, [f32; 3])>,
+        silent: bool,
+    ) -> DspManifest {
         let frame_index_u64 = frame_index as u64;
-        let payload = store_forward_payload_with_channel_count(
+        let mut payload = store_forward_payload_with_channel_count(
             STREAM_START_NS + frame_index_u64 * FRAME_DURATION_NS,
             frame_index_u64 * FRAME_SAMPLES,
             frame_index_u64 + 1,
             TETRA_CHANNEL_COUNT,
         );
-        let manifest = raw_manifest_for_payload_with_metadata(
+        if silent {
+            payload = silence_payload_samples(&payload);
+        }
+        raw_manifest_for_payload_with_metadata(
             self._tmp.path(),
             &format!("manifest-{node_id}-{frame_index}"),
             &format!("seg-{node_id}-{frame_index}"),
             &format!("{node_id}__audio_main__0001"),
             payload,
             Some(CLUSTER_ID.to_string()),
-            Some(two_tetra_cluster_positions()),
+            Some(cluster_sensor_positions),
         )
-        .await;
-        self.worker.process_one(manifest, 1).await;
+        .await
     }
 
     /// Active-channel count of every cadence-triggered localization. Frame
@@ -140,8 +165,20 @@ impl RaceHarness {
     }
 }
 
+fn silence_payload_samples(payload: &str) -> String {
+    let mut payload_json: serde_json::Value = serde_json::from_str(payload).unwrap();
+    let silent_channels = vec![vec![0.0_f32; FRAME_SAMPLES as usize]; TETRA_CHANNEL_COUNT];
+    payload_json["buffered_frames"][0]["frame"]["samples_b64"] =
+        serde_json::Value::String(encode_pcm16le_b64(&silent_channels));
+    payload_json.to_string()
+}
+
 fn two_tetra_cluster_positions() -> Vec<(String, [f32; 3])> {
-    [(NODE_A, 0.0_f32), (NODE_B, NODE_SEPARATION_M)]
+    tetra_cluster_positions(&[(NODE_A, 0.0), (NODE_B, NODE_SEPARATION_M)])
+}
+
+fn tetra_cluster_positions(nodes: &[(&str, f32)]) -> Vec<(String, [f32; 3])> {
+    nodes
         .iter()
         .flat_map(|(node_id, east_m)| {
             SIRITH_MIC_POSITIONS_M
@@ -342,4 +379,120 @@ async fn poll_tick_releases_a_pending_window_when_every_member_goes_quiet() {
         .has_pending(CLUSTER_BUFFER_KEY));
     let channel_counts = harness.solved_localization_channel_counts();
     assert_eq!(channel_counts.last(), Some(&TETRA_CHANNEL_COUNT));
+}
+
+#[tokio::test]
+async fn cluster_growth_while_pending_solves_with_the_parked_geometry() {
+    // A third node joins the cluster (buffer grows 8 -> 12 channels) while a
+    // window is parked. The parked payload carries the 8-sensor geometry, so
+    // the release must not hand SRP channel indices it has no positions for
+    // (an out-of-bounds index panics the rayon pool and aborts the sidecar).
+    const TRIGGER_FRAME: usize = 25;
+    const NODE_C: &str = "node-c";
+    let mut harness = RaceHarness::new(race_config(true)).await;
+    for frame_index in 0..=TRIGGER_FRAME {
+        harness.advance_clock_ms(FRAME_DURATION_NS / 1_000_000);
+        harness.deliver(NODE_A, frame_index).await;
+        if frame_index > 0 {
+            harness.deliver(NODE_B, frame_index - 1).await;
+        }
+    }
+    assert!(harness
+        .worker
+        .deferred_localizations
+        .has_pending(CLUSTER_BUFFER_KEY));
+    let three_tetra_positions = tetra_cluster_positions(&[
+        (NODE_A, 0.0),
+        (NODE_B, NODE_SEPARATION_M),
+        (NODE_C, 2.0 * NODE_SEPARATION_M),
+    ]);
+    for frame_index in TRIGGER_FRAME - 1..=TRIGGER_FRAME {
+        harness
+            .deliver_with_cluster_positions(NODE_C, frame_index, three_tetra_positions.clone())
+            .await;
+    }
+    harness.deliver(NODE_B, TRIGGER_FRAME).await;
+    assert!(!harness
+        .worker
+        .deferred_localizations
+        .has_pending(CLUSTER_BUFFER_KEY));
+    let channel_counts = harness.solved_localization_channel_counts();
+    assert_eq!(channel_counts.last(), Some(&CLUSTER_CHANNEL_COUNT));
+}
+
+#[tokio::test]
+async fn backlog_batch_decides_only_after_newest_first_backfill() {
+    // One poll batch holds node b's frames 25 and 26 and node a's trigger
+    // frame 25. Production processes it newest-first: b26 (silent, so it does
+    // not trigger), then a25 (triggers), then b25. Mid-batch, b's buffer end is
+    // already past the window while frame 25 is still a hole; deciding there
+    // solved on node a alone. The decision must wait for the batch boundary.
+    const TRIGGER_FRAME: usize = 25;
+    const BELOW_SIGNAL_RMS_GATE: f32 = 0.01;
+    let config = DspWorkerConfig {
+        localization_rms_gate: BELOW_SIGNAL_RMS_GATE,
+        ..race_config(true)
+    };
+    let mut harness = RaceHarness::new(config).await;
+    for frame_index in 0..TRIGGER_FRAME {
+        harness.advance_clock_ms(FRAME_DURATION_NS / 1_000_000);
+        harness.deliver(NODE_A, frame_index).await;
+        harness.deliver(NODE_B, frame_index).await;
+    }
+    harness.advance_clock_ms(FRAME_DURATION_NS / 1_000_000);
+    let positions = two_tetra_cluster_positions();
+    let batch_received_ns = system_now_ns();
+    let mut batch = Vec::new();
+    for (arrival_rank, node_id, frame_index, silent) in [
+        (1, NODE_B, TRIGGER_FRAME, false),
+        (2, NODE_A, TRIGGER_FRAME, false),
+        (3, NODE_B, TRIGGER_FRAME + 1, true),
+    ] {
+        let mut manifest = harness
+            .frame_manifest(node_id, frame_index, positions.clone(), silent)
+            .await;
+        manifest.created_ns = batch_received_ns + arrival_rank;
+        batch.push(manifest);
+    }
+    harness.worker.process_batch_inline(batch).await;
+    let channel_counts = harness.solved_localization_channel_counts();
+    assert_eq!(
+        channel_counts.last(),
+        Some(&CLUSTER_CHANNEL_COUNT),
+        "trigger-frame solve must include node b's backfilled frame: {channel_counts:?}"
+    );
+    assert!(!harness
+        .worker
+        .deferred_localizations
+        .has_pending(CLUSTER_BUFFER_KEY));
+}
+
+#[tokio::test]
+async fn lossy_late_node_costs_one_frame_gap_not_the_stall_budget() {
+    // Pico nodes lose ~45% of frames. Node b runs one frame late and drops
+    // 5 of every 11 frames, including both trigger frames (25 and 50). A lost
+    // frame must not hold the window for the stall budget: b's next arriving
+    // frame advances its buffer end past the window and releases it.
+    const LOST_FRAME_RESIDUES_MOD_11: [usize; 5] = [3, 5, 6, 8, 10];
+    const MAX_FRAME_GAPS_WAITED: u64 = 2;
+    let mut harness = RaceHarness::new(race_config(true)).await;
+    for frame_index in 0..FRAMES_PER_RUN {
+        harness.advance_clock_ms(FRAME_DURATION_NS / 1_000_000);
+        harness.deliver(NODE_A, frame_index).await;
+        let node_b_frame_index = frame_index.wrapping_sub(1);
+        if frame_index > 0 && !LOST_FRAME_RESIDUES_MOD_11.contains(&(node_b_frame_index % 11)) {
+            harness.deliver(NODE_B, node_b_frame_index).await;
+        }
+    }
+    let channel_counts = harness.solved_localization_channel_counts();
+    assert!(channel_counts.len() >= 2, "{channel_counts:?}");
+    assert_eq!(harness.stop_reason_count(STOP_REASON_STALLED).await, 0);
+    assert_eq!(harness.stop_reason_count(STOP_REASON_TOTAL_CAP).await, 0);
+    let max_wait_ms = harness.max_wait_ms().await;
+    let frame_gap_ms =
+        (MAX_FRAME_GAPS_WAITED * FRAME_DURATION_NS) as f64 / NANOSECONDS_PER_MILLISECOND_F64;
+    assert!(
+        max_wait_ms > 0.0 && max_wait_ms <= frame_gap_ms,
+        "a lost frame must cost at most the gap to the next arriving frame: {max_wait_ms} ms"
+    );
 }
