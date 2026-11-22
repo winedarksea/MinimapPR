@@ -112,13 +112,34 @@ def site_frame_from_manifest(manifest: dict) -> LocalCoordinateFrame:
     )
 
 
-def _validate_point(container: dict, where: str) -> None:
-    has_geo = isinstance(container.get("position_geo"), dict)
-    has_local = container.get("position_m") is not None
-    if not (has_geo or has_local):
+def _is_finite_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and bool(np.isfinite(value))
+
+
+def _validate_point(container: Any, where: str) -> None:
+    if not isinstance(container, dict):
+        raise ValueError(f"ground-truth geometry {where} must be an object")
+    position_m = container.get("position_m")
+    if position_m is not None:
+        # position_m wins over position_geo, so only it needs to be well-formed.
+        if not isinstance(position_m, (list, tuple)) or len(position_m) != 3 or not all(
+            _is_finite_number(value) for value in position_m
+        ):
+            raise ValueError(f"ground-truth geometry {where} position_m must be [x, y, z] numbers")
+        return
+    position_geo = container.get("position_geo")
+    if not isinstance(position_geo, dict):
         raise ValueError(f"ground-truth geometry {where} needs position_geo or position_m")
-    if has_local and len(container["position_m"]) != 3:
-        raise ValueError(f"ground-truth geometry {where} position_m must be [x, y, z]")
+    # Exported manual rows can carry lat/lon = null; fail at load, not mid-scoring.
+    if not (_is_finite_number(position_geo.get("lat")) and _is_finite_number(position_geo.get("lon"))):
+        raise ValueError(f"ground-truth geometry {where} position_geo needs numeric lat and lon")
+
+
+def _int_ns(container: dict, key: str, event_id: Any) -> int:
+    try:
+        return int(container[key])
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"ground-truth event {event_id} {key} must be an integer") from exc
 
 
 def validate_raw_ground_truth_event(event: dict) -> None:
@@ -128,7 +149,7 @@ def validate_raw_ground_truth_event(event: dict) -> None:
         raise ValueError("ground-truth event missing event_id")
     if "start_ns" not in event or "end_ns" not in event:
         raise ValueError(f"ground-truth event {event_id} missing start_ns/end_ns")
-    if int(event["end_ns"]) < int(event["start_ns"]):
+    if _int_ns(event, "end_ns", event_id) < _int_ns(event, "start_ns", event_id):
         raise ValueError(f"ground-truth event {event_id} ends before it starts")
     species = event.get("species")
     if species is not None:
@@ -141,6 +162,12 @@ def validate_raw_ground_truth_event(event: dict) -> None:
                 raise ValueError(
                     f"ground-truth event {event_id} species status {entry.get('status')!r} unsupported"
                 )
+        species_labels = {entry["label"] for entry in species}
+        if event.get("label") and event["label"] not in species_labels:
+            # Otherwise exact-mode scoring would silently reject the event's own label.
+            raise ValueError(
+                f"ground-truth event {event_id} label {event['label']!r} is not in its species list"
+            )
     elif not event.get("label"):
         raise ValueError(f"ground-truth event {event_id} needs label or species")
     if event.get("is_echo_source") and not event.get("echo_of_event_id"):
@@ -158,10 +185,10 @@ def validate_raw_ground_truth_event(event: dict) -> None:
         raise ValueError(f"ground-truth trajectory geometry of event {event_id} has no waypoints")
     previous_t_ns: int | None = None
     for waypoint in waypoints:
-        if "t_ns" not in waypoint:
+        if not isinstance(waypoint, dict) or "t_ns" not in waypoint:
             raise ValueError(f"ground-truth trajectory geometry of event {event_id}: waypoint missing t_ns")
         _validate_point(waypoint, f"waypoint of event {event_id}")
-        t_ns = int(waypoint["t_ns"])
+        t_ns = _int_ns(waypoint, "t_ns", event_id)
         if previous_t_ns is not None and t_ns < previous_t_ns:
             raise ValueError(
                 f"ground-truth trajectory geometry of event {event_id}: waypoints not time-sorted"
@@ -181,11 +208,20 @@ def validate_ground_truth_payload(ground_truth: dict) -> list[dict]:
         if event["event_id"] in event_ids:
             raise ValueError(f"duplicate ground-truth event_id {event['event_id']!r}")
         event_ids.add(event["event_id"])
+    echo_event_ids = {event["event_id"] for event in events if event.get("is_echo_source")}
     for event in events:
+        if not event.get("is_echo_source"):
+            continue
         echo_of = event.get("echo_of_event_id")
-        if event.get("is_echo_source") and echo_of not in event_ids:
+        if echo_of not in event_ids:
             raise ValueError(
                 f"ground-truth echo event {event['event_id']} references unknown event {echo_of!r}"
+            )
+        if echo_of in echo_event_ids:
+            # Also rejects self-references: an echo must point at a real (call) event.
+            raise ValueError(
+                f"ground-truth echo event {event['event_id']} must reference a real event, "
+                f"not echo {echo_of!r}"
             )
     return events
 
@@ -204,17 +240,15 @@ def _point_to_local(container: dict, frame: LocalCoordinateFrame) -> np.ndarray:
 
 def _species_from_raw(event: dict) -> list[GroundTruthSpecies]:
     raw_species = event.get("species")
+    event_label_category = event.get("label_category") or UNKNOWN_LABEL_CATEGORY
     if not raw_species:
-        return [
-            GroundTruthSpecies(
-                label=event["label"],
-                label_category=event.get("label_category") or UNKNOWN_LABEL_CATEGORY,
-            )
-        ]
+        return [GroundTruthSpecies(label=event["label"], label_category=event_label_category)]
+    # Entries inherit the event-level category; defaulting them to "unknown" made
+    # category-mode scoring reject every detection of a correctly labelled event.
     return [
         GroundTruthSpecies(
             label=entry["label"],
-            label_category=entry.get("label_category") or UNKNOWN_LABEL_CATEGORY,
+            label_category=entry.get("label_category") or event_label_category,
             status=entry.get("status", SPECIES_STATUS_TRUE),
         )
         for entry in raw_species

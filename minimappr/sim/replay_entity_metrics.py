@@ -47,6 +47,9 @@ DEFAULT_ENTITY_EXPECTATIONS: dict[str, Any] = {
     "max_label_swap_rate": None,
     "max_duplicate_entities": None,
     "max_echo_promotions": None,
+    # Dual of duplicates: one entity (track) absorbing several birds. Without it a
+    # single site-wide track would satisfy recall with zero duplicates.
+    "max_entities_spanning_multiple_individuals": None,
 }
 
 
@@ -69,12 +72,21 @@ class EntityAssociationConfig:
         array_centroid_m: np.ndarray,
     ) -> "EntityAssociationConfig":
         merged = {**DEFAULT_ENTITY_EXPECTATIONS, **(entity_expectations or {})}
+        association_time_slop_s = float(merged["association_time_slop_s"])
+        association_radius_m = float(merged["association_radius_m"])
+        far_field_bearing_gate_deg = float(merged["far_field_bearing_gate_deg"])
+        # Gate ratios divide by these; a zero/negative gate would make every
+        # association fail (or pass) silently rather than flag a bad bundle.
+        if not association_time_slop_s >= 0.0:
+            raise ValueError("entities.association_time_slop_s must be >= 0")
+        if not association_radius_m > 0.0:
+            raise ValueError("entities.association_radius_m must be > 0")
+        if not far_field_bearing_gate_deg > 0.0:
+            raise ValueError("entities.far_field_bearing_gate_deg must be > 0")
         return cls(
-            association_time_slop_ns=int(
-                float(merged["association_time_slop_s"]) * NANOSECONDS_PER_SECOND
-            ),
-            association_radius_m=float(merged["association_radius_m"]),
-            far_field_bearing_gate_deg=float(merged["far_field_bearing_gate_deg"]),
+            association_time_slop_ns=int(association_time_slop_s * NANOSECONDS_PER_SECOND),
+            association_radius_m=association_radius_m,
+            far_field_bearing_gate_deg=far_field_bearing_gate_deg,
             far_field_distance_m=float(far_field_distance_m),
             match_mode=match_mode,
             array_centroid_m=np.asarray(array_centroid_m, dtype=np.float64),
@@ -126,7 +138,13 @@ class EntityMetrics:
 
 
 def _is_localized(detection: dict) -> bool:
-    return bool(detection.get("position_m")) and detection.get("reporting_modality") != "omni"
+    # Length check instead of truthiness: position_m may be a numpy array.
+    position_m = detection.get("position_m")
+    return (
+        position_m is not None
+        and len(position_m) >= 3
+        and detection.get("reporting_modality") != "omni"
+    )
 
 
 def entity_key_for_detection(detection: dict, detection_index: int) -> tuple:
@@ -135,7 +153,13 @@ def entity_key_for_detection(detection: dict, detection_index: int) -> tuple:
         return ("track", str(track_id))
     if not _is_localized(detection):
         return ("omni", str(detection.get("source_node_id") or ""), str(detection.get("label") or ""))
-    return ("detection", str(detection.get("id") or detection.get("event_id") or detection_index))
+    detection_id = detection.get("id")
+    if detection_id is None or detection_id == "":
+        detection_id = detection.get("event_id")
+    if detection_id is None or detection_id == "":
+        # Separate namespace so an index never collides with another row's id.
+        return ("detection_index", detection_index)
+    return ("detection", str(detection_id))
 
 
 def bearing_deg(origin: np.ndarray, target: np.ndarray) -> float:
@@ -157,8 +181,8 @@ def _spatial_gate_ratio(
         bearing_error = angular_difference_deg(
             bearing_deg(centroid, position_m), bearing_deg(centroid, truth_m)
         )
-        return bearing_error / max(config.far_field_bearing_gate_deg, 1e-9)
-    return float(np.linalg.norm(position_m - truth_m)) / max(config.association_radius_m, 1e-9)
+        return bearing_error / config.far_field_bearing_gate_deg
+    return float(np.linalg.norm(position_m - truth_m)) / config.association_radius_m
 
 
 def _best_spatial_match(
@@ -374,4 +398,10 @@ def entity_threshold_errors(metrics: EntityMetrics, entity_expectations: dict[st
     max_echoes = merged.get("max_echo_promotions")
     if max_echoes is not None and metrics.echo_promotions > int(max_echoes):
         errors.append(f"echo promotions {metrics.echo_promotions} above {max_echoes}")
+    max_merged = merged.get("max_entities_spanning_multiple_individuals")
+    if max_merged is not None and metrics.entities_spanning_multiple_individuals > int(max_merged):
+        errors.append(
+            f"entities spanning multiple individuals "
+            f"{metrics.entities_spanning_multiple_individuals} above {max_merged}"
+        )
     return errors

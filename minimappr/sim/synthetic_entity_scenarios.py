@@ -264,17 +264,31 @@ def render_scenario_bundle(
     return out_path
 
 
+SYNTHETIC_CALL_DURATION_S = 0.5
+# Non-overlapping sweep bands so the dominant-frequency stub can tell species apart.
+ROBIN_SWEEP_HZ = (2000.0, 2600.0)
+TANAGER_SWEEP_HZ = (2900.0, 3500.0)
+DEFAULT_SOURCE_AMPLITUDE = SyntheticCall.__dataclass_fields__["source_amplitude"].default
+
+
 def _robin(event_id, individual_id, position_m, start_s, **extra) -> SyntheticCall:
-    return SyntheticCall(event_id, individual_id, "robin", position_m, start_s, 0.5, 2000.0, 2600.0, **extra)
+    return SyntheticCall(
+        event_id, individual_id, "robin", position_m, start_s, SYNTHETIC_CALL_DURATION_S,
+        *ROBIN_SWEEP_HZ, **extra,
+    )
 
 
 def _tanager(event_id, individual_id, position_m, start_s, **extra) -> SyntheticCall:
-    return SyntheticCall(event_id, individual_id, "tanager", position_m, start_s, 0.5, 2900.0, 3500.0, **extra)
+    return SyntheticCall(
+        event_id, individual_id, "tanager", position_m, start_s, SYNTHETIC_CALL_DURATION_S,
+        *TANAGER_SWEEP_HZ, **extra,
+    )
 
 
 ROBIN_PERCH_M = (6.0, 12.0, 2.0)
 TANAGER_PERCH_M = (18.0, 9.0, 3.0)
 TRUNK_IMAGE_M = (-8.0, 24.0, 2.0)
+TRUNK_REFLECTOR_POSITION_M = [-1.0, 18.0, 2.0]
 TRUNK_ECHO_AMPLITUDE_FRACTION = 0.4  # ≈ −8 dB, inside the test strategy's 6–18 dB range
 
 SYNTHETIC_ENTITY_SCENARIOS: tuple[SyntheticEntityScenario, ...] = (
@@ -305,9 +319,10 @@ SYNTHETIC_ENTITY_SCENARIOS: tuple[SyntheticEntityScenario, ...] = (
                 _robin(f"bout-{index + 1}", "robin-1", ROBIN_PERCH_M, start_s),
                 _robin(
                     f"bout-{index + 1}-echo", f"echo-{index + 1}", TRUNK_IMAGE_M, start_s,
-                    source_amplitude=2.0 * TRUNK_ECHO_AMPLITUDE_FRACTION, is_echo_source=True,
+                    source_amplitude=DEFAULT_SOURCE_AMPLITUDE * TRUNK_ECHO_AMPLITUDE_FRACTION,
+                    is_echo_source=True,
                     echo_of_event_id=f"bout-{index + 1}",
-                    reflector={"kind": "trunk", "position_m": [-1.0, 18.0, 2.0]},
+                    reflector={"kind": "trunk", "position_m": list(TRUNK_REFLECTOR_POSITION_M)},
                 ),
             )
         ),
