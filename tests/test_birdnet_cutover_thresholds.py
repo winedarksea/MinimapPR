@@ -68,6 +68,18 @@ def test_tracker_display_belief_swaps_with_version():
     assert v3.tracking_config().tracking_species_display_min_belief == v3.birdnet_v3_species_display_min_belief
 
 
+def test_pipeline_graph_display_belief_edits_the_live_key():
+    from minimappr.core.pipeline_graph import _field_mode_tracker_params
+
+    def display_key(settings: Settings) -> str:
+        params = _field_mode_tracker_params(settings.tracking_config(), settings)
+        return next(param.config_key for param in params if param.label == "Display belief")
+
+    log_odds_on = {"tracking_species_log_odds_enabled": True}
+    assert display_key(Settings(**log_odds_on)) == "tracking_species_display_min_belief"
+    assert display_key(Settings(**V3, **log_odds_on)) == "birdnet_v3_species_display_min_belief"
+
+
 class _FixedClassifier(AudioClassifier):
     def __init__(self, min_confidence: float) -> None:
         self.min_confidence = min_confidence

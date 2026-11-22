@@ -17,6 +17,7 @@ from typing import Any
 import aiosqlite
 from pydantic import ValidationError
 
+from minimappr.classifiers.birdnet_threshold_set import birdnet_model_version_for_classification_features
 from minimappr.cleanup_policy import CleanupPolicy
 from minimappr.models import (
     ContributorSummary,
@@ -3900,6 +3901,9 @@ class Storage:
                     "confidence": row["label_confidence"],
                     "label_source": features.get("label_source"),
                     "review_state": row["review_state"],
+                    # W3-birdnet-cutover: judge BirdNET confidence on the
+                    # scale of the model that scored this row.
+                    "birdnet_model_version": birdnet_model_version_for_classification_features(features),
                 }).snippet_max_age_seconds
                 if max_age_seconds is None:
                     continue
@@ -3951,6 +3955,9 @@ class Storage:
                     "confidence": row["label_confidence"],
                     "label_source": features.get("label_source"),
                     "review_state": row["review_state"],
+                    # W3-birdnet-cutover: judge BirdNET confidence on the
+                    # scale of the model that scored this row.
+                    "birdnet_model_version": birdnet_model_version_for_classification_features(features),
                 }).artifact_max_age_seconds
                 if max_age_seconds is None:
                     continue

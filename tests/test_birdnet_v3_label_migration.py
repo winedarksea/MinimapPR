@@ -137,18 +137,22 @@ def test_retention_label_rule_cloned_and_birdnet_bounds_mapped(tmp_path, transla
         {"id": "birdnet-weak", "priority": 6, "match": {"classifier": "birdnet", "confidence_max": 0.2},
          "actions": {"snippet_max_age_seconds": 60}},
     ]}))
-    v3_context = {"label": V3_CATBIRD, "classifier": "birdnet", "confidence": 0.8}
+    v3_context = {"label": V3_CATBIRD, "classifier": "birdnet", "confidence": 0.8, "birdnet_model_version": "3.0"}
 
     legacy = load_cleanup_policy(Settings(), policy_path)
     assert legacy.resolve_for_context(v3_context).snippet_max_age_seconds is not None
 
     migrated = load_cleanup_policy(Settings(**V3), policy_path)
     assert migrated.resolve_for_context(v3_context).snippet_max_age_seconds is None  # kept forever
+    # The original keeps judging v2.4 rows on the v2.4 scale; a V3-scoped clone carries the mapped bound.
     weak = next(rule for rule in migrated.rules if rule.rule_id == "birdnet-weak")
-    assert weak.match.confidence_max == pytest.approx(translator.map_confidence(0.2))
-    # Builtin confident bucket uses the V3 trigger floor, not a double-mapped one.
-    confident = next(rule for rule in migrated.rules if rule.rule_id == "builtin-birdnet-confident")
-    assert confident.match.confidence_min == Settings(**V3).birdnet_v3_trigger_min_confidence
+    assert weak.match.confidence_max == 0.2 and weak.match.birdnet_model_version == "2.4"
+    weak_v3 = next(rule for rule in migrated.rules if rule.rule_id == "birdnet-weak@birdnet-v3")
+    assert weak_v3.match.confidence_max == pytest.approx(translator.map_confidence(0.2))
+    # Builtin confident buckets: one per scale, not double-mapped.
+    confident = {rule.rule_id: rule for rule in migrated.rules if rule.rule_id.endswith("-confident")}
+    assert confident["builtin-birdnet-confident"].match.confidence_min == Settings().birdnet_trigger_min_confidence
+    assert confident["builtin-birdnet-v3-confident"].match.confidence_min == Settings(**V3).birdnet_v3_trigger_min_confidence
 
 
 def test_permanent_labels_gain_v3_names():
