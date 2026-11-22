@@ -25,6 +25,7 @@ import time
 from typing import Any, Awaitable, Callable
 
 from minimappr.core.assembly_track_resolution import resolve_detection_track
+from minimappr.core.bird_entity_absorption_geometry import forget_fixes_since
 from minimappr.core.bird_entity_model import Vec3
 from minimappr.core.bird_entity_projection import bird_entity_event_payload, bird_entity_to_model
 from minimappr.core.bird_entity_registry import (
@@ -36,6 +37,7 @@ from minimappr.core.entity_reporting_config import EntityReportingConfig
 from minimappr.core.entity_reporting_policy import EntityReportingPolicy
 from minimappr.core.notification_grace_window import FireRulesCallback, NotificationGraceWindow
 from minimappr.core.reporting_fusion import ReportingDecision
+from minimappr.core.track_perched_relocation import RelocationRevert
 from minimappr.models import BirdEntityListResponse, DetectionEvent, TrackState
 
 _logger = logging.getLogger(__name__)
@@ -76,6 +78,12 @@ class EntityReportingCoordinator:
         self._wall_ns_at_last_event: int = 0
         self._maintenance_task: asyncio.Task | None = None
         self.event_counts: dict[str, int] = {}
+        self.relocation_revert_fixes_released = 0
+        # Field Mode S-fixes integration: the entity follows its bound track's
+        # perched hops, so it must also hear when the tracker undoes one.
+        add_listener = getattr(tracker, "add_relocation_revert_listener", None)
+        if config.absorption_covariance_gate_enabled and callable(add_listener):
+            add_listener(self._on_relocation_reverted)
 
     @property
     def config(self) -> EntityReportingConfig:
@@ -234,6 +242,13 @@ class EntityReportingCoordinator:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _on_relocation_reverted(self, revert: RelocationRevert) -> None:
+        """The track's post-hop fixes were another bird: release them from its entity
+        so they no longer contradict this bird's own fixes (concurrency check)."""
+        entity = self.registry.entity_for_track(revert.track_id)
+        if entity is not None:
+            self.relocation_revert_fixes_released += forget_fixes_since(entity, revert.hop_time_ns)
 
     def _note_event_time(self, event_time_ns: int) -> None:
         if self._last_event_time_ns is None or event_time_ns >= self._last_event_time_ns:

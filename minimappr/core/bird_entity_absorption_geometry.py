@@ -166,3 +166,17 @@ def remember_fix(entity: BirdEntityRecord, sample: EntityFixSample, config: Enti
     entity.recent_fixes = [
         fix for fix in [*entity.recent_fixes, sample] if newest_ns - fix.event_time_ns <= keep_ns
     ]
+
+
+def forget_fixes_since(entity: BirdEntityRecord, since_ns: int) -> int:
+    """Drop the entity's recent fixes at or after *since_ns*; returns how many.
+
+    Used when the tracker undoes a perched hop the entity followed (Field Mode
+    S-fixes integration): the fixes taken at the new perch were another bird's,
+    and keeping them would make this bird's next fix at its own perch look
+    concurrent-inconsistent ("two birds") and split it into a duplicate entity.
+    """
+    kept = [fix for fix in entity.recent_fixes if fix.event_time_ns < since_ns]
+    dropped = len(entity.recent_fixes) - len(kept)
+    entity.recent_fixes = kept
+    return dropped
