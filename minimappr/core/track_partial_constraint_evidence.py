@@ -8,6 +8,8 @@ reach the tracker as a localized fix. Uses whatever the detection carries:
   centre through the projected position;
 - cross-node TDOA entries: one hyperbola per sensor on a different node from
   the reference sensor;
+- otherwise, with measured per-node band SNRs (W3-attribution): the level
+  gradient across nodes must fit 1/r spreading from the track position;
 - otherwise (omni): the reporting node should rank loudest, i.e. be about the
   nearest node, within a loose level margin.
 
@@ -25,6 +27,7 @@ import numpy as np
 
 from minimappr.core.localization import speed_of_sound_mps
 from minimappr.core.node_registry import NodeRegistry
+from minimappr.core.track_level_gradient_constraint import measured_level_constraint
 from minimappr.core.track_partial_binding import (
     BearingConstraint,
     HyperbolaConstraint,
@@ -76,6 +79,8 @@ async def build_partial_constraints(
     tdoa_s: dict[str, float] | None,
     environment: dict[str, Any] | None,
     sigmas: PartialConstraintSigmas,
+    measured_node_band_snr_db: dict[str, float] | None = None,
+    measured_level_audible_snr_db: float | None = None,
 ) -> list[PartialConstraint]:
     centres, sensor_node_ids = await _node_centres_m(registry)
     constraints: list[PartialConstraint] = []
@@ -116,7 +121,16 @@ async def build_partial_constraints(
                 )
             )
 
-    if not constraints and reporting_centre is not None:
+    # Field Mode W3-attribution: real per-node levels replace the nearest-node stand-in.
+    measured = measured_level_constraint(
+        node_band_snr_db=measured_node_band_snr_db,
+        node_centres_m=centres,
+        audible_snr_db=measured_level_audible_snr_db,
+        level_margin_db=sigmas.snr_level_margin_db,
+    )
+    if not constraints and measured is not None:
+        constraints.append(measured)
+    elif not constraints and reporting_centre is not None:
         others = tuple(centre for node_id, centre in centres.items() if node_id != source_node_id)
         if others:
             constraints.append(

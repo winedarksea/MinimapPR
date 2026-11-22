@@ -55,6 +55,7 @@ from minimappr.core.environment import StaticEnvironmentProvider
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.cluster_registry import ClusterRegistry
 from minimappr.core.onset_srp_localization_stage import OnsetSrpLocalizationStage
+from minimappr.core.onset_cluster_attribution_stage import OnsetClusterAttributor  # Field Mode W3-attribution
 from minimappr.core.ingest import EnvironmentUpdater, IngestProcessor
 from minimappr.core.live_ingest_state import LiveIngestState
 from minimappr.core.ambi_atob import alias_cutoff_from_positions
@@ -162,6 +163,8 @@ class LocalizedCandidate:
     # Admission score in [0,1] computed once at classification-enqueue time (see
     # core/classification_priority.py). Ordering only; never affects inference.
     classification_significance: float = 0.0
+    # Field Mode W3-attribution: ClusterAttributionContext from the onset stage (None = no attribution).
+    onset_attribution_context: Any = None
 
 
 @dataclass(slots=True)
@@ -307,6 +310,18 @@ class FusionMetrics:
     onset_clustering_tentative_cluster_count: int = 0
     onset_clustering_echo_cluster_count: int = 0
     # --- end Field Mode W2-onset-srp ---
+    # --- Field Mode W3-attribution ---
+    onset_attribution_window_count: int = 0
+    onset_attribution_single_cluster_count: int = 0
+    onset_attribution_snr_gradient_settled_count: int = 0
+    onset_attribution_loco_settled_count: int = 0
+    onset_attribution_unlabelled_count: int = 0
+    onset_attribution_loco_rerun_count: int = 0
+    onset_attribution_loco_rerun_cap_hit_count: int = 0
+    onset_attribution_loco_rerun_total_ms: float = 0.0
+    onset_attribution_loco_rerun_max_ms: float = 0.0
+    onset_attribution_promoted_tentative_count: int = 0
+    # --- end Field Mode W3-attribution ---
 
 
 def _build_snippet_max_age_resolver(settings):
@@ -403,7 +418,11 @@ class FusionNode:
         self.localization_preprocessor = create_localization_preprocessor(self.localization_config)
         # --- Field Mode W2-onset-srp ---
         onset_config = settings.onset_srp_clustering_config()
-        self._onset_srp_stage = OnsetSrpLocalizationStage(onset_config) if onset_config.enabled else None
+        # Field Mode W3-attribution: the stage attaches attribution evidence when its flag is on.
+        attribution_config = settings.onset_cluster_attribution_config()
+        self._onset_srp_stage = (
+            OnsetSrpLocalizationStage(onset_config, attribution_config) if onset_config.enabled else None
+        )
         # --- end Field Mode W2-onset-srp ---
         self.retention_policy = RetentionPolicy(
             permanent_labels=set(self.fusion_config.retention_permanent_labels),
@@ -471,6 +490,13 @@ class FusionNode:
                 reason="texture_gate_flagged",
             ),
         )
+        # --- Field Mode W3-attribution ---
+        self._onset_attributor = (
+            OnsetClusterAttributor(attribution_config, self._classification_orchestrator, lambda: self._metrics)
+            if attribution_config.enabled and self._onset_srp_stage is not None
+            else None
+        )
+        # --- end Field Mode W3-attribution ---
         self._detection_assembler = DetectionAssembler(
             storage=storage,
             coordinate_frame=coordinate_frame,
@@ -2085,6 +2111,10 @@ class FusionNode:
             if localized is None:
                 return detection_products
             self._metrics.beamform_renders += 1
+            if self._onset_attributor is not None and product.onset_attribution_context is not None:
+                localized = await self._onset_attributor.attribute(  # Field Mode W3-attribution
+                    localized, product.onset_attribution_context, event_time_ns=product.candidate.event_time_ns
+                )
             if extra_features:
                 localized.classification.features.update(extra_features)
             await self._maybe_trigger_speech_capture(

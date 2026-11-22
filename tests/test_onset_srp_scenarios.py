@@ -10,16 +10,11 @@ the same scenes are in docs/field_mode_progress/onset_srp.md
 
 from __future__ import annotations
 
-import os
-import shutil
-import subprocess
-import warnings
-
 import pytest
 
 from minimappr.sim import sim_scenario_scoring as scoring
+from tests.sim_scenario_binary import ensure_sim_binary
 
-CARGO_BUILD_TIMEOUT_S = 1800
 FLAG_ON = {"localization_onset_clustering_enabled": True, "reporting_window_seconds": 1.0}
 FLAG_OFF = {"localization_onset_clustering_enabled": False, "reporting_window_seconds": 1.0}
 MIN_RECALL = 0.75
@@ -27,19 +22,7 @@ MIN_RECALL = 0.75
 
 @pytest.fixture(scope="module", autouse=True)
 def sim_binary() -> None:
-    if os.environ.get(scoring.SIM_BINARY_ENV) or scoring.DEFAULT_SIM_BINARY.exists():
-        return
-    cargo = shutil.which("cargo")
-    if cargo is None:
-        message = "cargo not found: W2-onset-srp simulator scenario gate SKIPPED"
-        warnings.warn(message)
-        pytest.skip(message)
-    subprocess.run(
-        [cargo, "build", "--release", "--quiet", "-p", "minimappr-sim"],
-        cwd=scoring.REPO_ROOT,
-        check=True,
-        timeout=CARGO_BUILD_TIMEOUT_S,
-    )
+    ensure_sim_binary("W2-onset-srp")
 
 
 async def _score(name: str, tmp_path, overrides):

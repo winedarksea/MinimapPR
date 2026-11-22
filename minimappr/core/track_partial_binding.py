@@ -119,6 +119,8 @@ class SnrRankingConstraint:
         return None
 
 
+# Field Mode W3-attribution adds MeasuredLevelGradientConstraint (track_level_gradient_constraint),
+# which honours the same protocol (kind, maximum_normalized_residual, normalized_residual, corrected_position).
 PartialConstraint = BearingConstraint | HyperbolaConstraint | SnrRankingConstraint
 
 

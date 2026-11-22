@@ -23,6 +23,7 @@ import numpy as np
 
 from minimappr.config import OnsetSrpClusteringConfig
 from minimappr.core.far_field_model_selection import COMPACT_ARRAY_MAX_APERTURE_M
+from minimappr.core.onset_cluster_attribution_evidence import build_cluster_attribution_evidence
 from minimappr.core.onset_cluster_echo_checks import (
     apply_onset_echo_and_persistence_checks,
     level_consistency_holds,
@@ -174,7 +175,9 @@ def localize_onset_clusters(
     interpolation_factor: int,
     far_field_default_range_m: float,
     consumed_onset_samples_by_node: dict[str, tuple[int, ...]] | None = None,
+    attribution_audible_snr_db: float | None = None,
 ) -> OnsetClusteringResult:
+    """`attribution_audible_snr_db` set (W3-attribution on) attaches per-node level evidence to every cluster."""
     sensor_ids = sorted(sensor_signals)
     signals = {sid: np.asarray(sensor_signals[sid], dtype=np.float64) for sid in sensor_ids}
     positions = {sid: np.asarray(sensor_positions[sid], dtype=np.float64) for sid in sensor_ids}
@@ -312,6 +315,7 @@ def localize_onset_clusters(
             far_field_default_range_m=far_field_default_range_m,
             frame_samples=frame_samples,
             minimum_std_m=minimum_std_m,
+            attribution_audible_snr_db=attribution_audible_snr_db,
         )
         for cluster in clusters
     ]
@@ -334,6 +338,7 @@ def _finalize_cluster(
     far_field_default_range_m,
     frame_samples,
     minimum_std_m,
+    attribution_audible_snr_db=None,
 ) -> LocalizedOnsetCluster:
     bearing_only = grid.is_direction_grid or all(peak.range_m >= grid.ranges_m.max() for peak in cluster.peaks)
     seed = (
@@ -374,6 +379,20 @@ def _finalize_cluster(
         cluster.status_reasons.append("level_inconsistent")
     contributing = sorted({frame.template_node_id for frame in led_frames})
     loudest = _classification_node_for_cluster(led_frames, node_centroids, refined.position_m, bearing_only)
+    attribution_evidence = (
+        None
+        if attribution_audible_snr_db is None
+        else build_cluster_attribution_evidence(
+            position_m=refined.position_m,
+            led_frames=led_frames,
+            node_histories=histories,
+            node_positions_m=node_centroids,
+            sound_speed_mps=sound_speed_mps,
+            sample_rate_hz=sample_rate_hz,
+            frame_samples=frame_samples,
+            audible_snr_db=attribution_audible_snr_db,
+        )
+    )
     envelope_curves = [curve.used_envelope for index in cluster.frame_indices for curve in frames[index].curves]
     return LocalizedOnsetCluster(
         position_m=tuple(float(v) for v in refined.position_m),
@@ -398,6 +417,7 @@ def _finalize_cluster(
         used_envelope_fraction=float(np.mean(envelope_curves)) if envelope_curves else 0.0,
         contributing_node_ids=tuple(contributing),
         loudest_node_id=loudest,
+        attribution_evidence=attribution_evidence,
     )
 
 

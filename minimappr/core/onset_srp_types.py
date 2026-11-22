@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from minimappr.core.onset_frame_correlation import PairCorrelationCurve
+
+if TYPE_CHECKING:  # pragma: no cover - import cycle guard
+    from minimappr.core.onset_cluster_attribution_evidence import ClusterAttributionEvidence
 
 CLUSTER_STATUS_ACCEPTED = "accepted"
 CLUSTER_STATUS_TENTATIVE = "tentative"
@@ -95,6 +99,8 @@ class LocalizedOnsetCluster:
     used_envelope_fraction: float
     contributing_node_ids: tuple[str, ...]
     loudest_node_id: str
+    # Field Mode W3-attribution: per-node levels/arrivals; None unless attribution is on.
+    attribution_evidence: ClusterAttributionEvidence | None = None
 
 
 @dataclass(frozen=True, slots=True)
