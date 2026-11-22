@@ -380,6 +380,24 @@ def build_pipeline_graph(
                 float(settings.localization_max_reportable_gdop),
                 "localization_max_reportable_gdop",
             ),
+            # --- coverage race fix ---
+            _param(
+                "Wait for all streaming nodes",
+                bool(settings.localization_coverage_wait_all_streaming_nodes_enabled),
+                "localization_coverage_wait_all_streaming_nodes_enabled",
+            ),
+            _param(
+                "Coverage stall budget",
+                float(settings.localization_coverage_stall_budget_seconds),
+                "localization_coverage_stall_budget_seconds",
+                suffix=" s",
+            ),
+            _param(
+                "Coverage wait cap",
+                float(settings.localization_coverage_total_cap_seconds),
+                "localization_coverage_total_cap_seconds",
+                suffix=" s",
+            ),
         ],
         status=_solve_status(metrics, fusion_available),
         link="/settings/config#localization",

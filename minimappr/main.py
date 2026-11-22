@@ -3196,6 +3196,10 @@ async def get_config(request: Request) -> dict:
         "multi_node_bearing_fusion_enabled": settings.multi_node_bearing_fusion_enabled,
         "localization_cross_node_admission_enabled": settings.localization_cross_node_admission_enabled,
         "localization_cross_node_relative_energy_floor": settings.localization_cross_node_relative_energy_floor,
+        # --- coverage race fix ---
+        "localization_coverage_wait_all_streaming_nodes_enabled": settings.localization_coverage_wait_all_streaming_nodes_enabled,
+        "localization_coverage_stall_budget_seconds": settings.localization_coverage_stall_budget_seconds,
+        "localization_coverage_total_cap_seconds": settings.localization_coverage_total_cap_seconds,
         # --- Field Mode W2-onset-srp ---
         "localization_onset_clustering_enabled": settings.localization_onset_clustering_enabled,
         "onset_analysis_pre_trigger_seconds": settings.onset_analysis_pre_trigger_seconds,

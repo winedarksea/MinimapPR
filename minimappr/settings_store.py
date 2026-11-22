@@ -258,6 +258,10 @@ CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     # Phase 5 cross-node sensor admission (see FusionNode._admit_cross_node_sensors).
     "localization_cross_node_admission_enabled": bool,
     "localization_cross_node_relative_energy_floor": float,
+    # --- coverage race fix ---
+    "localization_coverage_wait_all_streaming_nodes_enabled": bool,
+    "localization_coverage_stall_budget_seconds": float,
+    "localization_coverage_total_cap_seconds": float,
     # --- Field Mode W2-onset-srp ---
     "localization_onset_clustering_enabled": float,
     "onset_analysis_pre_trigger_seconds": float,
