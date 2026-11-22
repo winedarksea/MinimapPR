@@ -11,7 +11,7 @@ Two tiers:
 
 from __future__ import annotations
 
-import hashlib
+import importlib.util
 import os
 import tomllib
 from dataclasses import dataclass
@@ -25,9 +25,9 @@ FIELD_AUDIO_DIR = FIXTURES_DIR / "field_audio"
 FIELD_AUDIO_MANIFEST_PATH = FIELD_AUDIO_DIR / "manifest.toml"
 FIELD_AUDIO_ATTRIBUTION_PATH = FIELD_AUDIO_DIR / "ATTRIBUTION"
 FIELD_BUNDLES_MANIFEST_PATH = FIXTURES_DIR / "field_bundles.toml"
-FIELD_FIXTURE_CACHE_ENV = "MINIMAPPR_FIELD_FIXTURE_CACHE"
-DEFAULT_FIELD_FIXTURE_CACHE = Path.home() / ".cache" / "minimappr" / "field_fixtures"
+FETCH_SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "fetch_field_fixtures.py"
 FETCH_COMMAND_HINT = "python scripts/fetch_field_fixtures.py"
+CI_FALSE_VALUES = ("", "0", "false", "no")
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,43 +98,63 @@ def load_field_audio_clip(clip: FieldAudioClip | str) -> tuple[np.ndarray, int]:
 # -- remote / cached bundles ---------------------------------------------------------------
 
 
+def load_fetch_script_module():
+    """scripts/ is not a package; load the fetch script so manifest validation (cache_path
+    traversal, sha256 format, archive suffix) and verification have one implementation."""
+    spec = importlib.util.spec_from_file_location("fetch_field_fixtures", FETCH_SCRIPT_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_fetch_script = load_fetch_script_module()
+FIELD_FIXTURE_CACHE_ENV = _fetch_script.CACHE_ENV
+DEFAULT_FIELD_FIXTURE_CACHE = _fetch_script.DEFAULT_CACHE
+sha256_of_file = _fetch_script.sha256_of_file
+
+
 def field_fixture_cache_dir() -> Path:
-    return Path(os.environ.get(FIELD_FIXTURE_CACHE_ENV, DEFAULT_FIELD_FIXTURE_CACHE))
+    return _fetch_script.resolve_cache_dir()
 
 
-def load_field_bundles_manifest() -> dict:
-    return tomllib.loads(FIELD_BUNDLES_MANIFEST_PATH.read_text(encoding="utf-8"))
+def load_field_bundles_manifest() -> list[dict]:
+    """Validated ``[[bundle]]`` entries from field_bundles.toml."""
+    return _fetch_script.load_bundles(FIELD_BUNDLES_MANIFEST_PATH)
 
 
-def sha256_of_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(block)
-    return digest.hexdigest()
+def _running_under_ci() -> bool:
+    return os.environ.get("CI", "").strip().lower() not in CI_FALSE_VALUES
 
 
 def require_field_bundle(name: str) -> Path:
-    """Path to a verified cached bundle, else skip loudly (``pytest.fail`` when ``CI`` is set)."""
+    """Verified cached bundle path (the extracted directory for ``extract = true`` bundles),
+    else skip loudly — ``pytest.fail`` under CI, where a silent skip would hide regressions."""
     import pytest
 
-    bundles = {b["name"]: b for b in load_field_bundles_manifest().get("bundle", [])}
+    bundles = {bundle["name"]: bundle for bundle in load_field_bundles_manifest()}
     if name not in bundles:
         raise KeyError(f"{name!r} is not listed in {FIELD_BUNDLES_MANIFEST_PATH}")
     entry = bundles[name]
     local_path = field_fixture_cache_dir() / entry["cache_path"]
+    result_path = local_path
     problem = None
     if not local_path.exists():
         problem = "is not in the local cache"
-    elif sha256_of_file(local_path) != entry["sha256"]:
-        problem = "is in the cache but its sha256 does not match field_bundles.toml"
+    else:
+        mismatch = _fetch_script.verify(local_path, entry)
+        if mismatch:
+            problem = f"is in the cache but does not match field_bundles.toml ({mismatch})"
+        elif entry.get("extract"):
+            result_path = _fetch_script.extracted_dir_for(local_path)
+            if not result_path.is_dir():
+                problem = f"is cached but not extracted to {result_path}"
     if problem is None:
-        return local_path
+        return result_path
     message = (
         f"\n\n*** FIELD FIXTURE MISSING: bundle {name!r} {problem} ({local_path}).\n"
         f"*** Fetch it with:  {FETCH_COMMAND_HINT} --only {name}\n"
         f"*** (cache dir: ${FIELD_FIXTURE_CACHE_ENV} or {DEFAULT_FIELD_FIXTURE_CACHE})\n"
     )
-    if os.environ.get("CI"):
+    if _running_under_ci():
         pytest.fail(message)
     pytest.skip(message)

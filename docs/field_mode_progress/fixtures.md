@@ -12,12 +12,12 @@ helpers are in place so the pull is a mechanical follow-up (commands below).
 | `tests/fixtures/field_audio/manifest.toml` | machine-readable list: file, species, call type, `band_hz`, licence, XC id, source offset, `same_band_group`, `needs_listen_check` |
 | `tests/fixtures/field_audio/ATTRIBUTION` | per-clip XC id, species, recordist, licence + URL, trim offsets, processing |
 | `tests/field_audio_fixtures.py` | loader (`field_audio_clips(role=)`, `field_audio_clip("tonal_whistle")`, `load_field_audio_clip`) + `require_field_bundle(name)` (verified cache path, else loud `pytest.skip`; `pytest.fail` when `CI` is set) |
-| `tests/test_field_audio_fixtures.py` | 32 tests: format/duration/level per clip, in-band energy ≥ 75 % for birds, attribution row per clip, size budget, bundle fetch/verify/skip |
+| `tests/test_field_audio_fixtures.py` | 49 tests: format/duration/level per clip, in-band energy ≥ 75 % for birds, attribution row per clip, size budget, bundle fetch/verify/skip |
 | `tests/fixtures/field_bundles.toml` | schema for out-of-git bundles (name, sha256, size_bytes, source, cache_path, description, licence, optional extract/speech_checked); empty for now |
 | `scripts/fetch_field_fixtures.py` | `fetch [--only]`, `list`, `register FILE ...` (prints a ready `[[bundle]]` table). Sources: https (generic UA), `ssh://user@host:port/path` (rsync), `file://`. Size + sha256 verified before the atomic move into the cache |
 | `scripts/build_field_audio_fixtures.py` | rebuilds the committed WAVs from xeno-canto using the manifest offsets (reproducibility) |
 
-Run: `python -m pytest tests/test_field_audio_fixtures.py -q` → 32 passed.
+Run: `python -m pytest tests/test_field_audio_fixtures.py -q` → 49 passed.
 
 ## Clip set
 
