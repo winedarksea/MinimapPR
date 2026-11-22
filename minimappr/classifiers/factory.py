@@ -86,6 +86,41 @@ def create_context_classifier(
     return CompositeClassifier(members, priority_labels=priority_labels)
 
 
+# ── BirdNET+ V3.0 (Field Mode W1-birdnet-v3) ──
+def _build_birdnet_v3(spec: ClassifierSpec, settings: Settings) -> AudioClassifier | None:
+    """V3 ONNX backend; a missing model file drops the member loudly (WARNING).
+
+    The member keeps backend ``birdnet`` so routing, kill switch
+    (``birdnet_enabled``) and the BirdNET result path are unchanged.
+    """
+    try:
+        from minimappr.classifiers.birdnet_v3 import BirdNETV3Classifier  # noqa: PLC0415
+        from minimappr.classifiers.birdnet_v3_audio import BirdNETV3WindowPolicy  # noqa: PLC0415
+
+        v3_config = settings.birdnet_v3_config()
+        return BirdNETV3Classifier(
+            model_path=v3_config.model_path,
+            labels_path=v3_config.labels_path,
+            min_confidence=spec.min_confidence or settings.birdnet_trigger_min_confidence,
+            window_policy=BirdNETV3WindowPolicy(
+                min_window_seconds=v3_config.min_window_seconds,
+                max_window_seconds=v3_config.max_window_seconds,
+                window_overlap_seconds=v3_config.window_overlap_seconds,
+                max_nonfinite_sample_fraction=v3_config.max_nonfinite_sample_fraction,
+                pad_noise_floor_percentile=v3_config.pad_noise_floor_percentile,
+            ),
+            species_list_path=v3_config.species_list_path,
+            num_threads=v3_config.num_threads,
+        )
+    except FileNotFoundError as exc:
+        logger.warning("BirdNET V3 model missing; dropping member %r: %s", spec.member_id, exc)
+        return None
+    except Exception as exc:  # noqa: BLE001 - optional runtime backend, same policy as v2.4
+        logger.warning("BirdNET V3 unavailable (%s); dropping member %r.", exc, spec.member_id)
+        return None
+# ── end BirdNET+ V3.0 ──
+
+
 def _build_member(
     spec: ClassifierSpec,
     settings: Settings,
@@ -141,6 +176,10 @@ def _build_backend(
             constructor_kwargs["preprocess_profile"] = preprocess_profile
         return YAMNetClassifier(**constructor_kwargs)
     if backend == "birdnet":
+        # ── BirdNET+ V3.0 (Field Mode W1-birdnet-v3) ──
+        if str(getattr(settings, "birdnet_model_version", "2.4")) == "3.0":
+            return _build_birdnet_v3(spec, settings)
+        # ── end BirdNET+ V3.0 ──
         try:
             from minimappr.classifiers.birdnet import BirdNETClassifier  # noqa: PLC0415
 

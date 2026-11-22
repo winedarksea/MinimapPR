@@ -99,6 +99,7 @@ include = ["minimappr*"]
 minimappr = [
     "frontend/*.html", "frontend/*.css", "frontend/*.js", "frontend/*.wasm", "frontend/*.ts",
     "assets/yamnet/**",
+    "assets/birdnet/*.csv",
 ]
 
 [tool.pytest.ini_options]
