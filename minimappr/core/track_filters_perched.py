@@ -28,6 +28,11 @@ from minimappr.models import TrackState
 
 # Smallest dt (s) used for variance growth; matches the Kalman filter's guard.
 _MINIMUM_DT_SECONDS = 1e-3
+# A jump past the snap distance only counts as a new perch when it is also
+# statistically inconsistent with the perch: chi-square 99% quantile, 3 dof.
+# Without this, a distant bird whose fixes carry tens of metres of error would
+# "relocate" on every noisy fix and never be averaged.
+DEFAULT_RELOCATION_SNAP_MIN_MAHALANOBIS_SQUARED = 11.34
 
 
 @dataclass(slots=True)
@@ -46,6 +51,7 @@ class PerchedRandomWalkTrackFilter:
         measurement_noise_m2: float,
         initial_position_variance_m2: float,
         relocation_snap_distance_m: float,
+        relocation_snap_min_mahalanobis_squared: float = DEFAULT_RELOCATION_SNAP_MIN_MAHALANOBIS_SQUARED,
     ) -> None:
         if position_diffusion_m2_per_second < 0.0:
             raise ValueError("position_diffusion_m2_per_second must be >= 0")
@@ -56,6 +62,7 @@ class PerchedRandomWalkTrackFilter:
         self._initial_position_variance_m2 = float(initial_position_variance_m2)
         # <= 0 disables snapping (every fix is fused).
         self._relocation_snap_distance_m = float(relocation_snap_distance_m)
+        self._relocation_snap_min_mahalanobis_squared = float(relocation_snap_min_mahalanobis_squared)
         self._states: dict[str, _PerchedInternalState] = {}
         self.relocation_count = 0
 
@@ -82,16 +89,16 @@ class PerchedRandomWalkTrackFilter:
         measured = np.asarray(measurement_m, dtype=np.float64)
         measurement_covariance = self._measurement_covariance(measurement_covariance_m2)
 
-        jump_m = float(np.linalg.norm(measured - internal.position_m))
-        if 0.0 < self._relocation_snap_distance_m < jump_m:
+        innovation = measured - internal.position_m
+        prior_covariance = internal.covariance_m2 + self._diffusion(dt_s)
+        innovation_covariance = prior_covariance + measurement_covariance
+        if self._is_relocation(innovation, innovation_covariance):
             # New perch: restart at the fix rather than averaging two perches.
             self.relocation_count += 1
             internal.position_m = measured.copy()
             internal.covariance_m2 = measurement_covariance.copy()
             return self._to_track_state(state, internal.position_m, internal.covariance_m2)
 
-        prior_covariance = internal.covariance_m2 + self._diffusion(dt_s)
-        innovation_covariance = prior_covariance + measurement_covariance
         try:
             gain = np.linalg.solve(innovation_covariance.T, prior_covariance.T).T
         except np.linalg.LinAlgError:
@@ -100,7 +107,7 @@ class PerchedRandomWalkTrackFilter:
             return self._to_track_state(state, internal.position_m, internal.covariance_m2)
         identity = np.eye(3, dtype=np.float64)
         residual_projection = identity - gain
-        internal.position_m = internal.position_m + gain @ (measured - internal.position_m)
+        internal.position_m = internal.position_m + gain @ innovation
         posterior = (
             residual_projection @ prior_covariance @ residual_projection.T
             + gain @ measurement_covariance @ gain.T
@@ -119,13 +126,27 @@ class PerchedRandomWalkTrackFilter:
 
     def soft_position_update(
         self, track_id: str, corrected_position_m: tuple[float, float, float]
-    ) -> None:
-        """Overwrite the stored perch after a partial-constraint nudge."""
+    ) -> bool:
+        """Overwrite the stored perch after a partial-constraint nudge.
+
+        Returns whether the track had perched state to update.
+        """
         internal = self._states.get(track_id)
-        if internal is not None:
-            internal.position_m = np.asarray(corrected_position_m, dtype=np.float64).copy()
+        if internal is None:
+            return False
+        internal.position_m = np.asarray(corrected_position_m, dtype=np.float64).copy()
+        return True
 
     # -- Internals ----------------------------------------------------------
+
+    def _is_relocation(self, innovation: np.ndarray, innovation_covariance: np.ndarray) -> bool:
+        if not 0.0 < self._relocation_snap_distance_m < float(np.linalg.norm(innovation)):
+            return False
+        try:
+            mahalanobis_squared = float(innovation @ np.linalg.solve(innovation_covariance, innovation))
+        except np.linalg.LinAlgError:
+            return True
+        return mahalanobis_squared > self._relocation_snap_min_mahalanobis_squared
 
     def _diffusion(self, dt_s: float) -> np.ndarray:
         dt = max(float(dt_s), _MINIMUM_DT_SECONDS)
@@ -234,6 +255,15 @@ class MotionModelRoutingTrackFilter:
         self._constant_velocity_filter.remove_track(track_id)
         self._perched_filter.remove_track(track_id)
         self._perched_track_ids.discard(track_id)
+
+    def soft_position_update(
+        self, track_id: str, corrected_position_m: tuple[float, float, float]
+    ) -> bool:
+        """Partial-constraint nudge; only perched tracks take one (a CV track's
+        velocity state would contradict a bare position jump)."""
+        if track_id not in self._perched_track_ids:
+            return False
+        return self._perched_filter.soft_position_update(track_id, corrected_position_m)
 
     def set_track_process_noise(self, track_id: str, process_noise: float | None) -> None:
         hook = getattr(self._constant_velocity_filter, "set_track_process_noise", None)

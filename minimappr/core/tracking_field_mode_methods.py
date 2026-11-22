@@ -62,10 +62,11 @@ class TrackManagerFieldModeMethods:
             track = self._tracks[decision.track_id]
             if decision.corrected_position_m is not None:
                 corrected = tuple(float(value) for value in decision.corrected_position_m)
-                track.position_m = corrected  # type: ignore[assignment]
+                # Nudge only when the filter takes it too; otherwise its next
+                # predict would silently overwrite the corrected position.
                 soft_update = getattr(self._filter, "soft_position_update", None)
-                if callable(soft_update):
-                    soft_update(track.id, corrected)
+                if callable(soft_update) and soft_update(track.id, corrected):
+                    track.position_m = corrected  # type: ignore[assignment]
             track.last_seen_ns = max(track.last_seen_ns, timestamp_ns)
             track.update_count += 1
             if self._field_mode.belief_applies(track.label_category or label_category):
@@ -88,7 +89,11 @@ class TrackManagerFieldModeMethods:
         The track returns to its old perch; whatever it picked up at the new
         perch continues as a new track (see ``track_perched_relocation``).
         """
-        relocated = self._tracks[ghost.track_id]
+        relocated = self._tracks.get(ghost.track_id)
+        if relocated is None or relocated.status == TrackStatus.DROPPED.value:
+            # The filter state is gone; reviving it here would resurrect a dead track.
+            self._field_mode.relocation_gate.forget(ghost.track_id)
+            return
         split_id = f"{self._track_id_prefix}{next(self._id_counter):05d}"
         split = relocated.model_copy(
             update={
