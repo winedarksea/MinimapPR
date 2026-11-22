@@ -1,0 +1,103 @@
+"""Per-model-version BirdNET threshold set + the two-threshold tracker constraint.
+
+v2.4 and V3.0 confidences are on different scales, so each model version owns
+its own threshold set; ``birdnet_model_version`` picks which one is live.
+The v2.4 set is the long-standing keys (``birdnet_trigger_min_confidence``,
+``birdnet_localize_to_track_min_confidence``,
+``tracking_species_display_min_belief``); the V3 set is the
+``birdnet_v3_*`` keys whose defaults were derived by quantile matching
+(``scripts/calibrate_birdnet_v3_thresholds.py``, see
+``docs/field_mode_progress/birdnet_cutover.md``). Consumers read
+``Settings.birdnet_threshold_set()`` instead of the raw keys, so switching the
+version swaps every threshold at once.
+
+Constraint (W2-tracker measurements): two-threshold BirdNET without the
+perched filter and species log-odds lands weak, confused detections on the
+wrong constant-velocity track (swap rate 0.27 vs 0). It is warned about at
+startup, and becomes a validation error with
+``birdnet_two_threshold_require_tracker_companions``.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
+
+BIRDNET_V3_MODEL_VERSION = "3.0"
+UNIT_INTERVAL_V3_THRESHOLD_KEYS: tuple[str, ...] = (
+    "birdnet_v3_trigger_min_confidence",
+    "birdnet_v3_localize_to_track_min_confidence",
+    "birdnet_v3_species_display_min_belief",
+)
+TWO_THRESHOLD_COMPANION_KEYS: tuple[str, ...] = (
+    "tracking_perched_filter_enabled",
+    "tracking_species_log_odds_enabled",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class BirdNETThresholdSet:
+    """The thresholds that move with the BirdNET model version."""
+
+    model_version: str
+    # Display / trigger floor: results below are "unknown" (or, with two
+    # thresholds, below_display_threshold). Also the retention confident bucket.
+    trigger_min_confidence: float
+    # Two-threshold low floor: results down to here feed track belief.
+    localize_to_track_min_confidence: float
+    # Track species belief needed before a sub-display-only track is shown.
+    species_display_min_belief: float
+
+
+def birdnet_threshold_set_for(values) -> BirdNETThresholdSet:
+    """Threshold set for ``values`` (Settings or a merged PATCH view)."""
+    version = str(getattr(values, "birdnet_model_version", "2.4")).strip()
+    if version == BIRDNET_V3_MODEL_VERSION:
+        return BirdNETThresholdSet(
+            model_version=version,
+            trigger_min_confidence=float(values.birdnet_v3_trigger_min_confidence),
+            localize_to_track_min_confidence=float(values.birdnet_v3_localize_to_track_min_confidence),
+            species_display_min_belief=float(values.birdnet_v3_species_display_min_belief),
+        )
+    return BirdNETThresholdSet(
+        model_version=version,
+        trigger_min_confidence=float(values.birdnet_trigger_min_confidence),
+        localize_to_track_min_confidence=float(values.birdnet_localize_to_track_min_confidence),
+        species_display_min_belief=float(values.tracking_species_display_min_belief),
+    )
+
+
+def two_threshold_missing_companions(values) -> list[str]:
+    """Companion flags that are off while two-threshold BirdNET is on."""
+    if not bool(getattr(values, "birdnet_two_threshold_enabled", False)):
+        return []
+    return [key for key in TWO_THRESHOLD_COMPANION_KEYS if not bool(getattr(values, key, False))]
+
+
+def two_threshold_companion_message(missing: list[str]) -> str:
+    return (
+        "birdnet_two_threshold_enabled without "
+        + " and ".join(missing)
+        + ": weak detections land on the wrong track (W2-tracker: swap rate 0.27 vs 0 with both on)"
+    )
+
+
+def birdnet_cutover_setting_errors(values) -> list[str]:
+    """Validation errors for the W3-birdnet-cutover keys."""
+    errors: list[str] = []
+    for key in UNIT_INTERVAL_V3_THRESHOLD_KEYS:
+        if not 0.0 <= float(getattr(values, key)) <= 1.0:
+            errors.append(f"{key}: must be in [0, 1]")
+    if bool(getattr(values, "birdnet_two_threshold_require_tracker_companions", False)):
+        missing = two_threshold_missing_companions(values)
+        if missing:
+            errors.append(two_threshold_companion_message(missing))
+    return errors
+
+
+def warn_on_two_threshold_without_companions(values) -> None:
+    missing = two_threshold_missing_companions(values)
+    if missing:
+        logger.warning("%s; enable them or set birdnet_two_threshold_enabled=false", two_threshold_companion_message(missing))

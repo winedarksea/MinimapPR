@@ -637,6 +637,43 @@ def _birdnet_version_params(settings) -> list[PipelineParam]:
 # ── end BirdNET+ V3.0 ───────────────────────────────────────────────────────
 
 
+# --- Field Mode W3-birdnet-cutover ---
+def _birdnet_cutover_params(settings) -> list[PipelineParam]:
+    """Live per-version thresholds (V3 only) and the two-threshold companion check."""
+    from minimappr.classifiers.birdnet_threshold_set import (  # noqa: PLC0415
+        BIRDNET_V3_MODEL_VERSION,
+        birdnet_threshold_set_for,
+        two_threshold_missing_companions,
+    )
+
+    params: list[PipelineParam] = []
+    if str(getattr(settings, "birdnet_model_version", "2.4")) == BIRDNET_V3_MODEL_VERSION:
+        thresholds = birdnet_threshold_set_for(settings)
+        params.append(
+            _param("V3 trigger", thresholds.trigger_min_confidence, config_key="birdnet_v3_trigger_min_confidence")
+        )
+        if bool(getattr(settings, "birdnet_two_threshold_enabled", False)):
+            params.append(
+                _param(
+                    "V3 localize-to-track",
+                    thresholds.localize_to_track_min_confidence,
+                    config_key="birdnet_v3_localize_to_track_min_confidence",
+                )
+            )
+        params.append(
+            _param(
+                "V3 label migration",
+                bool(getattr(settings, "birdnet_v3_label_migration_enabled", True)),
+                config_key="birdnet_v3_label_migration_enabled",
+            )
+        )
+    missing = two_threshold_missing_companions(settings)
+    if missing:
+        params.append(_param("Two-threshold warning", "needs " + " + ".join(missing)))
+    return params
+# --- end Field Mode W3-birdnet-cutover ---
+
+
 # ── Classifiers helper ──────────────────────────────────────────────────────
 def _add_classifiers(*, routing, settings, gate_ids, beam_id, add_node, add_edge, fusion_available, metrics, queues) -> None:
     health = "ok" if fusion_available else "unknown"
@@ -671,6 +708,10 @@ def _add_classifiers(*, routing, settings, gate_ids, beam_id, add_node, add_edge
                 if spec.backend == "birdnet":
                     params.extend(_birdnet_two_threshold_params(settings))
                 # --- end Field Mode W2-tracker ---
+                # --- Field Mode W3-birdnet-cutover ---
+                if spec.backend == "birdnet":
+                    params.extend(_birdnet_cutover_params(settings))
+                # --- end Field Mode W3-birdnet-cutover ---
             add_node(
                 id=member_node_id,
                 stage=PipelineStageKind.CLASSIFIER,

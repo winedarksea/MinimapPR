@@ -88,6 +88,18 @@ def create_context_classifier(
     return CompositeClassifier(members, priority_labels=priority_labels)
 
 
+# --- Field Mode W3-birdnet-cutover ---
+def _birdnet_thresholds(settings: Settings):
+    """Live per-version threshold set; plain test doubles fall back to the v2.4 keys."""
+    threshold_set = getattr(settings, "birdnet_threshold_set", None)
+    if callable(threshold_set):
+        return threshold_set()
+    from minimappr.classifiers.birdnet_threshold_set import birdnet_threshold_set_for  # noqa: PLC0415
+
+    return birdnet_threshold_set_for(settings)
+# --- end Field Mode W3-birdnet-cutover ---
+
+
 # ── BirdNET+ V3.0 (Field Mode W1-birdnet-v3) ──
 def _build_birdnet_v3(spec: ClassifierSpec, settings: Settings) -> AudioClassifier | None:
     """V3 ONNX backend; a missing model file drops the member loudly (WARNING).
@@ -103,7 +115,8 @@ def _build_birdnet_v3(spec: ClassifierSpec, settings: Settings) -> AudioClassifi
         return BirdNETV3Classifier(
             model_path=v3_config.model_path,
             labels_path=v3_config.labels_path,
-            min_confidence=spec.min_confidence or settings.birdnet_trigger_min_confidence,
+            # --- Field Mode W3-birdnet-cutover --- V3 threshold set.
+            min_confidence=spec.min_confidence or _birdnet_thresholds(settings).trigger_min_confidence,
             window_policy=BirdNETV3WindowPolicy(
                 min_window_seconds=v3_config.min_window_seconds,
                 max_window_seconds=v3_config.max_window_seconds,
@@ -133,13 +146,16 @@ def _build_member(
     # localize-to-track floor, then mark results under the display floor.
     two_threshold_display_floor: float | None = None
     if spec.backend == "birdnet" and bool(getattr(settings, "birdnet_two_threshold_enabled", False)):
-        two_threshold_display_floor = float(spec.min_confidence or settings.birdnet_trigger_min_confidence)
+        # --- Field Mode W3-birdnet-cutover --- floors follow the model version.
+        birdnet_thresholds = _birdnet_thresholds(settings)
+        two_threshold_display_floor = float(spec.min_confidence or birdnet_thresholds.trigger_min_confidence)
         spec = dataclasses.replace(
             spec,
             min_confidence=min(
-                float(settings.birdnet_localize_to_track_min_confidence), two_threshold_display_floor
+                float(birdnet_thresholds.localize_to_track_min_confidence), two_threshold_display_floor
             ),
         )
+        # --- end Field Mode W3-birdnet-cutover ---
     base = _build_backend(spec, settings, needs_embeddings=any(c.input == "embedding" for c in chains))
     if base is None:
         return None

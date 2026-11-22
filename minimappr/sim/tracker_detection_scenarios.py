@@ -119,9 +119,10 @@ def ground_truth_events(scenario: TrackerScenario) -> list[GroundTruthEvent]:
 
 def _emulated_birdnet(scores: dict[str, float], settings: Settings) -> tuple[str, float, dict, bool]:
     label, confidence = max(scores.items(), key=lambda item: item[1])
-    display_floor = settings.birdnet_trigger_min_confidence
+    birdnet_thresholds = settings.birdnet_threshold_set()  # W3-birdnet-cutover: per model version
+    display_floor = birdnet_thresholds.trigger_min_confidence
     if settings.birdnet_two_threshold_enabled:
-        if confidence < settings.birdnet_localize_to_track_min_confidence:
+        if confidence < birdnet_thresholds.localize_to_track_min_confidence:
             return "unknown", 0.0, {}, False
         return label, confidence, dict(scores), confidence < display_floor
     if confidence < display_floor:

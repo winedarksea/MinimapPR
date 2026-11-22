@@ -583,6 +583,15 @@ class BirdNETV3Config:
 # ── end BirdNET+ V3.0 ──────────────────────────────────────────────────────
 
 
+# --- Field Mode W3-birdnet-cutover ---
+# Quantile-matched V3 equivalents of the v2.4 defaults 0.50 / 0.15 / 0.50
+# (scripts/calibrate_birdnet_v3_thresholds.py; birdnet_cutover.md).
+BIRDNET_V3_DEFAULT_TRIGGER_MIN_CONFIDENCE = 0.65
+BIRDNET_V3_DEFAULT_LOCALIZE_TO_TRACK_MIN_CONFIDENCE = 0.17
+BIRDNET_V3_DEFAULT_SPECIES_DISPLAY_MIN_BELIEF = 0.65
+# --- end Field Mode W3-birdnet-cutover ---
+
+
 @dataclass(slots=True)
 class StorageConfig:
     db_path: Path
@@ -1168,6 +1177,20 @@ class Settings:
     birdnet_two_threshold_enabled: bool = False
     birdnet_localize_to_track_min_confidence: float = 0.15
     # --- end Field Mode W2-tracker ---
+    # --- Field Mode W3-birdnet-cutover ---
+    # V3.0 threshold set, live only with birdnet_model_version="3.0" (the
+    # v2.4 set is the three keys it replaces). Defaults: quantile-matched to
+    # the v2.4 values on the same audio (birdnet_cutover.md); V3 scores sit on
+    # another scale, so 0.5 in v2.4 is not 0.5 in V3.
+    birdnet_v3_trigger_min_confidence: float = BIRDNET_V3_DEFAULT_TRIGGER_MIN_CONFIDENCE
+    birdnet_v3_localize_to_track_min_confidence: float = BIRDNET_V3_DEFAULT_LOCALIZE_TO_TRACK_MIN_CONFIDENCE
+    birdnet_v3_species_display_min_belief: float = BIRDNET_V3_DEFAULT_SPECIES_DISPLAY_MIN_BELIEF
+    # Under V3, rewrite v2.4-keyed rules / retention / routing labels and
+    # thresholds in memory at load (files untouched).
+    birdnet_v3_label_migration_enabled: bool = True
+    # Turn the two-threshold-without-perched+log-odds warning into an error.
+    birdnet_two_threshold_require_tracker_companions: bool = False
+    # --- end Field Mode W3-birdnet-cutover ---
 
     fusion_worker_count: int = 2
     fusion_event_queue_size: int = 512
@@ -1831,6 +1854,13 @@ class Settings:
         # --- Field Mode W2-tracker ---
         _validate_field_mode_tracker_settings(self)
         # --- end Field Mode W2-tracker ---
+        # --- Field Mode W3-birdnet-cutover ---
+        from minimappr.classifiers.birdnet_threshold_set import birdnet_cutover_setting_errors  # noqa: PLC0415
+
+        _birdnet_cutover_errors = birdnet_cutover_setting_errors(self)
+        if _birdnet_cutover_errors:
+            raise ValueError("; ".join(_birdnet_cutover_errors))
+        # --- end Field Mode W3-birdnet-cutover ---
         if self.detection_min_confidence < 0.0 or self.detection_min_confidence > 1.0:
             raise ValueError("MINIMAPPR_DETECTION_MIN_CONFIDENCE must be in [0,1]")
         if self.cop_detections_max_items < 1:
@@ -2500,6 +2530,21 @@ class Settings:
             birdnet_two_threshold_enabled=_env_bool("MINIMAPPR_BIRDNET_TWO_THRESHOLD_ENABLED", False),
             birdnet_localize_to_track_min_confidence=_env_float("MINIMAPPR_BIRDNET_LOCALIZE_TO_TRACK_MIN_CONFIDENCE", 0.15),
             # --- end Field Mode W2-tracker ---
+            # --- Field Mode W3-birdnet-cutover ---
+            birdnet_v3_trigger_min_confidence=_env_float(
+                "MINIMAPPR_BIRDNET_V3_TRIGGER_MIN_CONFIDENCE", BIRDNET_V3_DEFAULT_TRIGGER_MIN_CONFIDENCE
+            ),
+            birdnet_v3_localize_to_track_min_confidence=_env_float(
+                "MINIMAPPR_BIRDNET_V3_LOCALIZE_TO_TRACK_MIN_CONFIDENCE", BIRDNET_V3_DEFAULT_LOCALIZE_TO_TRACK_MIN_CONFIDENCE
+            ),
+            birdnet_v3_species_display_min_belief=_env_float(
+                "MINIMAPPR_BIRDNET_V3_SPECIES_DISPLAY_MIN_BELIEF", BIRDNET_V3_DEFAULT_SPECIES_DISPLAY_MIN_BELIEF
+            ),
+            birdnet_v3_label_migration_enabled=_env_bool("MINIMAPPR_BIRDNET_V3_LABEL_MIGRATION_ENABLED", True),
+            birdnet_two_threshold_require_tracker_companions=_env_bool(
+                "MINIMAPPR_BIRDNET_TWO_THRESHOLD_REQUIRE_TRACKER_COMPANIONS", False
+            ),
+            # --- end Field Mode W3-birdnet-cutover ---
             fusion_worker_count=_env_int("MINIMAPPR_FUSION_WORKER_COUNT", 2),
             fusion_event_queue_size=_env_int("MINIMAPPR_FUSION_EVENT_QUEUE_SIZE", 512),
             fusion_localization_queue_size=_env_int("MINIMAPPR_FUSION_LOCALIZATION_QUEUE_SIZE", 1024),
@@ -2777,7 +2822,9 @@ class Settings:
             tracking_species_log_odds_per_update_cap=self.tracking_species_log_odds_per_update_cap,
             tracking_species_log_odds_total_cap=self.tracking_species_log_odds_total_cap,
             tracking_species_log_odds_evidence_top_k=self.tracking_species_log_odds_evidence_top_k,
-            tracking_species_display_min_belief=self.tracking_species_display_min_belief,
+            # --- Field Mode W3-birdnet-cutover --- follows the BirdNET model version.
+            tracking_species_display_min_belief=self.birdnet_threshold_set().species_display_min_belief,
+            # --- end Field Mode W3-birdnet-cutover ---
             tracking_species_belief_exposed_top_n=self.tracking_species_belief_exposed_top_n,
             tracking_partial_constraint_binding_enabled=self.tracking_partial_constraint_binding_enabled,
             tracking_partial_binding_window_seconds=self.tracking_partial_binding_window_seconds,
@@ -2841,6 +2888,14 @@ class Settings:
             num_threads=self.birdnet_v3_num_threads,
         )
     # ── end BirdNET+ V3.0 ──
+
+    # --- Field Mode W3-birdnet-cutover ---
+    def birdnet_threshold_set(self):
+        """Thresholds of the live BirdNET model version (``BirdNETThresholdSet``)."""
+        from minimappr.classifiers.birdnet_threshold_set import birdnet_threshold_set_for  # noqa: PLC0415
+
+        return birdnet_threshold_set_for(self)
+    # --- end Field Mode W3-birdnet-cutover ---
 
     def storage_config(self) -> StorageConfig:
         return StorageConfig(

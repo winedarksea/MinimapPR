@@ -215,6 +215,13 @@ CONFIG_STAGE_GROUPS: tuple[tuple[str, str, PipelineStageKind | None, tuple[str, 
             "birdnet_two_threshold_enabled",
             "birdnet_localize_to_track_min_confidence",
             # --- end Field Mode W2-tracker ---
+            # --- Field Mode W3-birdnet-cutover ---
+            "birdnet_v3_trigger_min_confidence",
+            "birdnet_v3_localize_to_track_min_confidence",
+            "birdnet_v3_species_display_min_belief",
+            "birdnet_v3_label_migration_enabled",
+            "birdnet_two_threshold_require_tracker_companions",
+            # --- end Field Mode W3-birdnet-cutover ---
         ),
     ),
     (

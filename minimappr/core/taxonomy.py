@@ -139,6 +139,12 @@ class RuntimeTaxonomyProvider(TaxonomyProvider):
             return
         self._label_to_category[key] = category.strip().lower() or "unknown"
 
+    # --- Field Mode W3-birdnet-cutover ---
+    def label_category_items(self) -> list[tuple[str, str]]:
+        """Configured (label, category) pairs; used to migrate them to V3 names."""
+        return list(self._label_to_category.items())
+    # --- end Field Mode W3-birdnet-cutover ---
+
     def canonical_label(self, label: str) -> str:
         """Resolve alias labels to their canonical form (identity when unmapped).
 

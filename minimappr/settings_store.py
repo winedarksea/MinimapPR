@@ -218,6 +218,14 @@ CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     "birdnet_two_threshold_enabled": bool,
     "birdnet_localize_to_track_min_confidence": float,
     # --- end Field Mode W2-tracker ---
+    # --- Field Mode W3-birdnet-cutover --- restart-required: the classifier,
+    # rule engine, retention policy and TrackManager read these at startup.
+    "birdnet_v3_trigger_min_confidence": float,
+    "birdnet_v3_localize_to_track_min_confidence": float,
+    "birdnet_v3_species_display_min_belief": float,
+    "birdnet_v3_label_migration_enabled": bool,
+    "birdnet_two_threshold_require_tracker_companions": bool,
+    # --- end Field Mode W3-birdnet-cutover ---
     # DOA/TDOA solve blend + cross-node bearing-fusion "greediness" knobs (see
     # core/cartesian_tdoa.py, core/multi_node_bearing_fusion.py).
     "localization_node_bearing_strength": float,

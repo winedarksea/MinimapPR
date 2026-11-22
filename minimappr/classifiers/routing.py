@@ -539,13 +539,19 @@ def apply_settings(routing: RoutingConfig, settings: Any) -> RoutingConfig:
             min_rms=float(getattr(settings, "omni_scan_min_rms", omni.min_rms or 0.0)),
         )
 
-    return RoutingConfig(
+    migrated = RoutingConfig(
         version=routing.version,
         classifiers=classifiers,
         contexts=contexts,
         chains=chains,
         triggers=triggers,
     )
+    # --- Field Mode W3-birdnet-cutover --- carry BirdNET thresholds/labels to
+    # V3 (in memory; the routing file stays v2.4). No-op under v2.4.
+    from minimappr.classifiers.birdnet_v3_label_migration import migrate_routing_for_birdnet_v3  # noqa: PLC0415
+
+    return migrate_routing_for_birdnet_v3(migrated, settings)
+    # --- end Field Mode W3-birdnet-cutover ---
 
 
 def load_routing(settings: Any) -> RoutingConfig:

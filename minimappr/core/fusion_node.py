@@ -83,6 +83,14 @@ from minimappr.core.preprocessing import (
 )
 from minimappr.core.reporting_fusion import ReportingFusionPolicy
 from minimappr.core.retention import RetentionPolicy
+# --- Field Mode W3-birdnet-cutover ---
+from minimappr.classifiers.birdnet_threshold_set import warn_on_two_threshold_without_companions
+from minimappr.classifiers.birdnet_v3_label_migration import (
+    birdnet_v3_rule_transform,
+    migrate_permanent_labels_for_birdnet_v3,
+    migrate_taxonomy_for_birdnet_v3,
+)
+# --- end Field Mode W3-birdnet-cutover ---
 from minimappr.core.rules import ConfigRuleEngine, LoggingRuleActionHandler, WebsocketRuleActionHandler
 from minimappr.core.taxonomy import RuntimeTaxonomyProvider
 from minimappr.core.tracking import TrackManager
@@ -381,7 +389,14 @@ class FusionNode:
         self.coordinate_frame = coordinate_frame
         self.zone_matcher = zone_matcher
         self.taxonomy_provider = taxonomy_provider or RuntimeTaxonomyProvider.from_config_file(settings.taxonomy_config_path)
-        self.rules_engine = rules_engine or ConfigRuleEngine(settings.rules_config_path)
+        # --- Field Mode W3-birdnet-cutover --- v2.4-keyed config keeps
+        # matching under V3 (in-memory migration; no-op under v2.4).
+        self.rules_engine = rules_engine or ConfigRuleEngine(
+            settings.rules_config_path, rule_transform=birdnet_v3_rule_transform(settings)
+        )
+        migrate_taxonomy_for_birdnet_v3(self.taxonomy_provider, settings)
+        warn_on_two_threshold_without_companions(settings)
+        # --- end Field Mode W3-birdnet-cutover ---
         self.environment_provider = environment_provider or StaticEnvironmentProvider(
             temperature_c=settings.default_temperature_c,
             humidity_fraction=settings.default_humidity,
@@ -395,7 +410,11 @@ class FusionNode:
         self.classification_preprocessor = create_classification_preprocessor(self.localization_config)
         self.localization_preprocessor = create_localization_preprocessor(self.localization_config)
         self.retention_policy = RetentionPolicy(
-            permanent_labels=set(self.fusion_config.retention_permanent_labels),
+            # --- Field Mode W3-birdnet-cutover ---
+            permanent_labels=set(
+                migrate_permanent_labels_for_birdnet_v3(self.fusion_config.retention_permanent_labels, settings)
+            ),
+            # --- end Field Mode W3-birdnet-cutover ---
             security_long_confidence=self.fusion_config.retention_long_security_confidence,
         )
         self.reporting_policy = ReportingFusionPolicy(
