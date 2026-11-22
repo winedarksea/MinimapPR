@@ -326,3 +326,90 @@ def test_synthetic_entity_scenarios_render_loadable_v2_bundles(tmp_path):
         start = int(first_call.start_s * sample_rate_hz)
         window = channels[0, start : start + sample_rate_hz]
         assert classifier.classify(window, sample_rate_hz).label == first_call.species_label
+
+
+def test_species_entries_inherit_event_category_and_require_primary_label(tmp_path):
+    # Entries without a category used to default to "unknown", so category-mode
+    # scoring rejected every correctly labelled detection.
+    species = [{"label": "robin"}, {"label": "thrush", "status": "candidate"}]
+    bundle = load_bundle(_write_bundle(
+        tmp_path, [_static_event("a", "robin", ROBIN_POSITION_M, 0, 2, species=species)]))
+    (parsed,) = parse_ground_truth_events(bundle.events, site_frame_from_manifest(MANIFEST))
+    assert parsed.accepted_label_categories == {"bird"}
+    category_mode = {**STRICT_EXPECTATIONS, "classification": {"min_label_accuracy": 1.0}}
+    report = evaluate_bundle([_detection(1.0, "robin", ROBIN_POSITION_M, track_id="T1")],
+                             bundle, category_mode)
+    assert report.label_accuracy == 1.0
+    assert report.passed, report.errors
+
+    mismatched = _static_event("b", "robin", ROBIN_POSITION_M, 0, 2, species=[{"label": "thrush"}])
+    with pytest.raises(ValueError, match="not in its species list"):
+        load_bundle(_write_bundle(tmp_path, [mismatched], name="mismatch.zip"))
+
+
+def test_validation_rejects_echo_chains_and_unusable_points(tmp_path):
+    call = _static_event("call", "robin", ROBIN_POSITION_M, 0, 1)
+    echo = _static_event("echo", "robin", REFLECTOR_IMAGE_POSITION_M, 0, 1,
+                         is_echo_source=True, echo_of_event_id="call")
+    echo_of_echo = _static_event("echo2", "robin", REFLECTOR_IMAGE_POSITION_M, 0, 1,
+                                 is_echo_source=True, echo_of_event_id="echo")
+    self_echo = _static_event("self", "robin", REFLECTOR_IMAGE_POSITION_M, 0, 1,
+                              is_echo_source=True, echo_of_event_id="self")
+    for index, events in enumerate([[call, echo, echo_of_echo], [call, self_echo]]):
+        with pytest.raises(ValueError, match="must reference a real event"):
+            load_bundle(_write_bundle(tmp_path, events, name=f"chain{index}.zip"))
+
+    bad_geometries = [
+        {"type": "static", "position_geo": {"lat": None, "lon": None}},
+        {"type": "static", "position_m": [0.0, "north", 0.0]},
+        {"type": "trajectory", "waypoints": ["not-a-waypoint"]},
+        {"type": "trajectory", "waypoints": [{"t_ns": None, "position_m": [0, 0, 0]}]},
+    ]
+    for index, geometry in enumerate(bad_geometries):
+        event = {**_static_event("e", "robin", ROBIN_POSITION_M, 0, 1), "geometry": geometry}
+        with pytest.raises(ValueError):
+            load_bundle(_write_bundle(tmp_path, [event], name=f"point{index}.zip"))
+    with pytest.raises(ValueError, match="start_ns"):
+        load_bundle(_write_bundle(tmp_path, [{**call, "start_ns": "soon"}], name="bad-start.zip"))
+
+
+def test_non_positive_association_gates_are_rejected(tmp_path):
+    bundle = load_bundle(_write_bundle(
+        tmp_path, [_static_event("a", "robin", ROBIN_POSITION_M, 0, 1)]))
+    detections = [_detection(0.5, "robin", ROBIN_POSITION_M, track_id="T1")]
+    for key, value in [("association_radius_m", 0.0), ("far_field_bearing_gate_deg", -1.0),
+                       ("association_time_slop_s", -0.5)]:
+        expectations = {**STRICT_EXPECTATIONS,
+                        "entities": {**STRICT_EXPECTATIONS["entities"], key: value}}
+        with pytest.raises(ValueError, match=key):
+            evaluate_bundle(detections, bundle, expectations)
+
+
+def test_single_track_absorbing_two_birds_is_gateable(tmp_path):
+    # Same species at two perches: one track covering both satisfies recall with zero
+    # duplicates, so only the merge gate catches it.
+    events = [_static_event("a", "robin", ROBIN_POSITION_M, 0, 2),
+              _static_event("b", "robin", TANAGER_POSITION_M, 0, 2)]
+    bundle = load_bundle(_write_bundle(tmp_path, events))
+    detections = [_detection(1.0, "robin", ROBIN_POSITION_M, track_id="T-all"),
+                  _detection(1.1, "robin", TANAGER_POSITION_M, track_id="T-all")]
+    report = evaluate_bundle(detections, bundle, STRICT_EXPECTATIONS)
+    assert report.entity_metrics.localized_and_classified_recall == 1.0
+    assert report.entity_metrics.duplicate_entities == 0
+    assert report.entity_metrics.entities_spanning_multiple_individuals == 1
+    assert report.passed, report.errors  # report-only by default
+
+    gated = {**STRICT_EXPECTATIONS, "entities": {
+        **STRICT_EXPECTATIONS["entities"], "max_entities_spanning_multiple_individuals": 0}}
+    report = evaluate_bundle(detections, bundle, gated)
+    assert any("spanning multiple individuals 1" in error for error in report.errors)
+
+
+def test_untracked_detection_keys_never_collide_with_row_ids():
+    from minimappr.sim.replay_entity_metrics import entity_key_for_detection
+
+    with_id = _detection(1.0, "robin", ROBIN_POSITION_M, detection_id="1")
+    without_id = {**_detection(1.0, "robin", ROBIN_POSITION_M), "id": None}
+    assert entity_key_for_detection(with_id, 0) != entity_key_for_detection(without_id, 1)
+    numpy_position = {**with_id, "position_m": np.asarray(ROBIN_POSITION_M)}
+    assert entity_key_for_detection(numpy_position, 0) == ("detection", "1")

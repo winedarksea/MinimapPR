@@ -136,7 +136,8 @@ Scoring evaluates a trajectory at each **detection's** `timestamp_ns`.
 ]
 ```
 
-- `label` required; `label_category` default `"unknown"`; `status` ∈
+- `label` required; `label_category` defaults to the event's `label_category`
+  (then `"unknown"`); `status` ∈
   `{"true", "candidate"}`, default `"true"`.
 - `true`: a species actually present (several `true` entries = a genuinely
   mixed source, e.g. two speakers at one point). `candidate`: an acceptable
@@ -144,7 +145,8 @@ Scoring evaluates a trajectory at each **detection's** `timestamp_ns`.
 - A detection label is **correct** for the event if it equals any entry's
   `label` (match mode `exact`) or any entry's `label_category` (match mode
   `category`, the default). `true` vs `candidate` is informational for now.
-- If `label` is omitted, it is taken from the first `true` entry.
+- If `label` is omitted, it is taken from the first `true` entry. If both are
+  given, `label` must appear among the entries' labels.
 
 ### 3.4 Full example (two birds overlapping, two bouts of one, one echo, one walker)
 
@@ -180,13 +182,15 @@ Scoring evaluates a trajectory at each **detection's** `timestamp_ns`.
 
 ### 3.5 Validation (load_bundle raises `ValueError`)
 
-Unsupported `ground_truth.schema_version`; missing `event_id`/`start_ns`/`end_ns`;
-`end_ns < start_ns`; duplicate `event_id`; neither `label` nor `species`; empty
-`species` list, entry without `label`, or unknown `status`; geometry type other
-than `static`/`trajectory`; point without `position_geo`/`position_m`;
-`position_m` not length 3; trajectory with no waypoints, a waypoint without
+Unsupported `ground_truth.schema_version`; missing or non-integer
+`event_id`/`start_ns`/`end_ns`; `end_ns < start_ns`; duplicate `event_id`;
+neither `label` nor `species`; empty `species` list, entry without `label`,
+unknown `status`, or a `label` not among the `species` labels; geometry type
+other than `static`/`trajectory`; point without `position_geo`/`position_m`;
+`position_m` not three finite numbers; `position_geo` (when used) without
+numeric `lat`/`lon`; trajectory with no waypoints, a waypoint without integer
 `t_ns`, or unsorted waypoints; `is_echo_source` without an existing
-`echo_of_event_id`.
+`echo_of_event_id`, or one that names an echo event (including itself).
 
 ## 4. Detections consumed by scoring
 
@@ -212,7 +216,8 @@ Scoring reads replay detections as dicts (`Storage.list_detections` rows): `time
     "min_localized_and_classified_recall": null,
     "max_label_swap_rate": null,
     "max_duplicate_entities": null,
-    "max_echo_promotions": null
+    "max_echo_promotions": null,
+    "max_entities_spanning_multiple_individuals": null
   }
 }
 ```
@@ -260,13 +265,20 @@ highest `label_confidence` (ties → latest `timestamp_ns`), over the whole repl
 | `label_swap_rate` | `max_label_swap_rate` | Over spatially gated detections with a label: a detection of individual `I` is *swap-eligible* if another individual whose accepted species set is not a subset of `I`'s is active (temporal gate) at its timestamp. It is a *swap* if its label is wrong for `I` and correct for one of those concurrent individuals. Rate = swaps ÷ eligible; `null` if none eligible. |
 | `duplicate_entities` | `max_duplicate_entities` | Σ over individuals of `max(0, distinct entity keys among detections call-associated with that individual − 1)`. A track + an omni row for the same bird = 1; a bird split into two tracks = 1. |
 | `echo_promotions` | `max_echo_promotions` | Number of entities with ≥ 1 echo-associated detection and no call-associated detection (a ghost surfaced as its own bird). |
+| `entities_spanning_multiple_individuals` | `max_entities_spanning_multiple_individuals` | Number of entities whose call-associated detections cover ≥ 2 individuals (one track absorbing two birds). The dual of `duplicate_entities`: without it, one site-wide track can satisfy recall with zero duplicates. |
+
+`association_radius_m` and `far_field_bearing_gate_deg` must be > 0 and
+`association_time_slop_s` ≥ 0 (`ValueError` otherwise).
+
+Label comparisons follow `classification.match`. In the default `category` mode two
+birds share the category `"bird"`, so bird-vs-bird swaps are never eligible
+(`label_swap_rate` stays `null`); use `"match": "exact"` for species-level swap gating.
 
 Report-only diagnostics on `EntityMetrics`: `call_event_count`, `echo_event_count`,
 `individual_count`, `localized_and_classified_event_count`, `label_swap_count`,
 `swap_eligible_detection_count`, `entity_count_by_individual`,
 `unassociated_localized_entities` (localized entities matching no real or echo event —
-false positives, or echoes in bundles without echo metadata),
-`entities_spanning_multiple_individuals` (one track covering two birds).
+false positives, or echoes in bundles without echo metadata).
 
 Choice of radius matters: the gate is what turns "a fix" into "a fix of this bird".
 Keep `association_radius_m` well below the inter-bird spacing in the scenario and
