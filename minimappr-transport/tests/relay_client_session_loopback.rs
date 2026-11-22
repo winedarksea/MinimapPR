@@ -133,6 +133,38 @@ fn wrong_codes_are_rejected_and_the_code_retires_after_its_guess_budget() {
 }
 
 #[test]
+fn abandoned_first_flights_cannot_lock_a_join_code_for_good() {
+    let session_key = SessionKey::generate(&mut seeded_random_source(1));
+    let maximum_pending = 4;
+    let mut responder = HostRelayJoinCodeResponder::new(b"731904", TEST_SESSION_ID, 2, maximum_pending);
+    let mut random_source = seeded_random_source(11);
+    // An attacker opens many attempts (one peer re-sending, then many
+    // peers) and never confirms: no guess is spent, so `is_exhausted` never
+    // fires and the host would not reissue the code.
+    for attacker_attempt in 0..3 * maximum_pending as u32 {
+        let attacker_peer = 0x8000_0300 + attacker_attempt % 2 * attacker_attempt;
+        let (_, flight) = JoinerRelayKeyExchange::start(b"000000", TEST_SESSION_ID, &mut random_source);
+        let reply = responder.on_joiner_flight(attacker_peer, &flight, &session_key, &mut random_source);
+        assert!(reply.failure.is_none());
+        assert!(responder.pending_exchange_count() <= maximum_pending);
+    }
+    assert_eq!(responder.failed_confirmations(), 0);
+    // The real joiner still completes.
+    let legit_peer = 0x8000_0400;
+    let (mut joiner, flight) = JoinerRelayKeyExchange::start(b"731904", TEST_SESSION_ID, &mut random_source);
+    let host_message = responder.on_joiner_flight(legit_peer, &flight, &session_key, &mut random_source);
+    let JoinerExchangeStep::SendToHost(confirmation) = joiner.on_host_flight(&host_message.reply_flight).unwrap() else {
+        panic!("expected a confirmation flight");
+    };
+    let sealed_key = responder.on_joiner_flight(legit_peer, &confirmation, &session_key, &mut random_source);
+    assert!(sealed_key.joiner_received_session_key);
+    let JoinerExchangeStep::SessionKeyObtained(obtained) = joiner.on_host_flight(&sealed_key.reply_flight).unwrap() else {
+        panic!("expected the session key");
+    };
+    assert!(obtained == session_key);
+}
+
+#[test]
 fn clip_arrives_whole_while_control_messages_interleave() {
     let (mut relay, _key) = host_and_node(GENEROUS_LIMITS);
     let clip = clip_payload(77, NodeId(NODE_PEER), 30_000);
@@ -245,6 +277,13 @@ fn tampered_replayed_and_misaddressed_frames_are_dropped() {
         &readiness_query(3).encode_frame().unwrap(),
     );
     receiver.on_binary_frame(&injected, 0);
+    // A relay reflecting the sender's own broadcast back to it is refused
+    // (the sender's replay window has never seen its own sequences).
+    sender.send_message(NodeId(BROADCAST_PEER_ID), &readiness_query(4)).unwrap();
+    let own_broadcast = sender.poll_transmit(0, &mut random_source).unwrap().unwrap();
+    sender.on_binary_frame(&own_broadcast, 0);
+    assert!(received_messages(&mut sender).is_empty());
+    assert_eq!(sender.inbound_statistics().reflected_own_envelopes, 1);
 
     assert_eq!(received_messages(&mut receiver).len(), 1);
     let statistics = receiver.inbound_statistics();

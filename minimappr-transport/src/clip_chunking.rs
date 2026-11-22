@@ -5,7 +5,7 @@
 //! decode with the ordinary `decode_field_message_frame` and the clip keeps
 //! every field (onsets, sensor frames) without a second format.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use minimappr_core::protocol::detection_messages::ClipPayloadChunk;
 use minimappr_core::protocol::NodeId;
@@ -57,6 +57,9 @@ pub enum ClipReassemblyRejection {
     ChunkCountChangedMidClip,
     ReassembledClipTooLarge,
     ZeroChunkCount,
+    /// The splitter never emits an empty chunk; accepting them would let a
+    /// peer park up to 65535 map entries per clip at zero byte cost.
+    EmptyChunk,
 }
 
 /// What one received chunk did.
@@ -73,8 +76,9 @@ type ClipKey = (NodeId, u32);
 
 struct PartialClip {
     chunk_count: u16,
-    received_chunks: Vec<Option<Vec<u8>>>,
-    received_chunk_count: u16,
+    /// Keyed by chunk index and filled as chunks arrive: a peer-declared
+    /// `chunk_count` (up to 65535) must not size an allocation up front.
+    received_chunks: BTreeMap<u16, Vec<u8>>,
     received_bytes: usize,
     first_chunk_received_at_milliseconds: u64,
 }
@@ -140,6 +144,9 @@ impl ClipReassembler {
         if chunk.chunk_index >= chunk.chunk_count {
             return Err(ClipReassemblyRejection::ChunkIndexOutOfRange);
         }
+        if chunk.chunk_bytes.is_empty() {
+            return Err(ClipReassemblyRejection::EmptyChunk);
+        }
         let key = (authenticated_sender, chunk.request_id);
         if self.completed_clip_keys.contains(&key) {
             return Ok(ClipReassemblyProgress::IgnoredDuplicate);
@@ -150,8 +157,7 @@ impl ClipReassembler {
                 key,
                 PartialClip {
                     chunk_count: chunk.chunk_count,
-                    received_chunks: vec![None; chunk.chunk_count as usize],
-                    received_chunk_count: 0,
+                    received_chunks: BTreeMap::new(),
                     received_bytes: 0,
                     first_chunk_received_at_milliseconds: now_milliseconds,
                 },
@@ -162,8 +168,7 @@ impl ClipReassembler {
             self.drop_partial(&key);
             return Err(ClipReassemblyRejection::ChunkCountChangedMidClip);
         }
-        let slot = &mut partial.received_chunks[chunk.chunk_index as usize];
-        if slot.is_some() {
+        if partial.received_chunks.contains_key(&chunk.chunk_index) {
             return Ok(ClipReassemblyProgress::IgnoredDuplicate);
         }
         partial.received_bytes += chunk.chunk_bytes.len();
@@ -171,15 +176,14 @@ impl ClipReassembler {
             self.drop_partial(&key);
             return Err(ClipReassemblyRejection::ReassembledClipTooLarge);
         }
-        *slot = Some(chunk.chunk_bytes);
-        partial.received_chunk_count += 1;
-        if partial.received_chunk_count < partial.chunk_count {
+        partial.received_chunks.insert(chunk.chunk_index, chunk.chunk_bytes);
+        if partial.received_chunks.len() < partial.chunk_count as usize {
             return Ok(ClipReassemblyProgress::Incomplete);
         }
         let complete = self.partial_clips.remove(&key).expect("present");
         self.remember_completed(key);
         let mut payload_frame = Vec::with_capacity(complete.received_bytes);
-        for chunk_bytes in complete.received_chunks.into_iter().flatten() {
+        for chunk_bytes in complete.received_chunks.into_values() {
             payload_frame.extend_from_slice(&chunk_bytes);
         }
         Ok(ClipReassemblyProgress::Complete(payload_frame))

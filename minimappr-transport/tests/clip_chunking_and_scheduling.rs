@@ -95,6 +95,15 @@ fn reassembly_rejects_forged_and_inconsistent_chunks_and_abandons_stale_ones() {
         reassembler.accept_chunk(SENDER, wrong_count, 1),
         Err(ClipReassemblyRejection::ChunkCountChangedMidClip)
     );
+    // A maximal declared chunk count with empty bodies is refused outright.
+    let mut empty_chunk = chunks[0].clone();
+    empty_chunk.request_id = 77;
+    empty_chunk.chunk_count = u16::MAX;
+    empty_chunk.chunk_bytes.clear();
+    assert_eq!(
+        reassembler.accept_chunk(SENDER, empty_chunk, 1),
+        Err(ClipReassemblyRejection::EmptyChunk)
+    );
     // Too large in total.
     let big = split_payload_frame_into_chunks(2, SENDER, &encoded_clip(2, 12_000), 4_000).unwrap();
     let mut outcome = Ok(ClipReassemblyProgress::Incomplete);

@@ -6,7 +6,7 @@
 //! id at or above it for the exchange, then reconnects with the node id the
 //! host gives it in the sealed `JoinAccepted`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use minimappr_core::protocol::session_messages::JoinCodeKeyExchange;
 use minimappr_core::protocol::wire_codes::KeyExchangeFlight;
@@ -34,7 +34,6 @@ pub enum RelayJoinExchangeError {
     UnexpectedFlight(KeyExchangeFlight),
     /// The host refused: wrong code, or the code's guess budget is spent.
     RejectedByHost,
-    TooManyPendingExchanges,
     ExchangeAlreadyFinished,
 }
 
@@ -124,10 +123,20 @@ impl JoinerRelayKeyExchange {
 
 /// Host side: one responder per live join code, many concurrent attempts
 /// keyed by (relay sender peer id, joiner attempt id).
+///
+/// Pending attempts cost the attacker nothing from the guess budget (only a
+/// wrong confirmation does), so the table must never fill up for good: each
+/// relay peer holds at most one pending attempt (a new flight 1 replaces its
+/// older one) and a full table evicts its oldest attempt. A legitimate joiner
+/// finishes within one round trip, so an attacker must flood continuously
+/// (burning the session's relay caps) rather than send a handful of flight 1s
+/// once and lock the code without ever tripping `is_exhausted`.
 pub struct HostRelayJoinCodeResponder {
     responder: HostJoinCodeResponder,
     session_id: SessionId,
     pending_exchanges: HashMap<(u32, u32), HostPendingJoin>,
+    /// Pending attempt keys, oldest first.
+    pending_exchange_order: VecDeque<(u32, u32)>,
     maximum_pending_exchanges: usize,
 }
 
@@ -156,7 +165,8 @@ impl HostRelayJoinCodeResponder {
             ),
             session_id,
             pending_exchanges: HashMap::new(),
-            maximum_pending_exchanges,
+            pending_exchange_order: VecDeque::new(),
+            maximum_pending_exchanges: maximum_pending_exchanges.max(1),
         }
     }
 
@@ -166,6 +176,36 @@ impl HostRelayJoinCodeResponder {
 
     pub fn is_exhausted(&self) -> bool {
         self.responder.is_exhausted()
+    }
+
+    pub fn pending_exchange_count(&self) -> usize {
+        self.pending_exchanges.len()
+    }
+
+    fn remove_pending(&mut self, attempt_key: &(u32, u32)) -> Option<HostPendingJoin> {
+        self.pending_exchange_order.retain(|queued| queued != attempt_key);
+        self.pending_exchanges.remove(attempt_key)
+    }
+
+    fn insert_pending(&mut self, attempt_key: (u32, u32), pending: HostPendingJoin) {
+        let sender_peer_id = attempt_key.0;
+        let superseded: Vec<(u32, u32)> = self
+            .pending_exchange_order
+            .iter()
+            .copied()
+            .filter(|queued| queued.0 == sender_peer_id)
+            .collect();
+        for key in superseded {
+            self.remove_pending(&key);
+        }
+        while self.pending_exchanges.len() >= self.maximum_pending_exchanges {
+            let Some(oldest) = self.pending_exchange_order.pop_front() else {
+                break;
+            };
+            self.pending_exchanges.remove(&oldest);
+        }
+        self.pending_exchanges.insert(attempt_key, pending);
+        self.pending_exchange_order.push_back(attempt_key);
     }
 
     pub fn on_joiner_flight(
@@ -183,7 +223,7 @@ impl HostRelayJoinCodeResponder {
                 (flight, payload, done, None)
             }
             Err(error) => {
-                self.pending_exchanges.remove(&attempt_key);
+                self.remove_pending(&attempt_key);
                 (KeyExchangeFlight::Rejected, Vec::new(), false, Some(error))
             }
         };
@@ -211,21 +251,15 @@ impl HostRelayJoinCodeResponder {
         }
         match joiner_flight.flight {
             KeyExchangeFlight::JoinerSpakeMessage => {
-                if self.pending_exchanges.len() >= self.maximum_pending_exchanges
-                    && !self.pending_exchanges.contains_key(&attempt_key)
-                {
-                    return Err(RelayJoinExchangeError::TooManyPendingExchanges);
-                }
                 let (pending, host_spake_message) = self
                     .responder
                     .respond_to_joiner(&joiner_flight.payload, random_source)?;
-                self.pending_exchanges.insert(attempt_key, pending);
+                self.insert_pending(attempt_key, pending);
                 Ok((KeyExchangeFlight::HostSpakeMessage, host_spake_message))
             }
             KeyExchangeFlight::JoinerConfirmation => {
                 let pending = self
-                    .pending_exchanges
-                    .remove(&attempt_key)
+                    .remove_pending(&attempt_key)
                     .ok_or(RelayJoinExchangeError::WrongAttempt)?;
                 let sealed_session_key = self.responder.on_joiner_confirmation(
                     pending,

@@ -26,7 +26,8 @@ pub struct RelayTransportConfig {
     /// Completed (sender, request id) pairs remembered so chunks resent
     /// after a reconnect do not deliver a clip twice.
     pub remembered_completed_clip_count: usize,
-    /// Concurrent join-code key exchanges a host keeps state for.
+    /// Concurrent join-code key exchanges a host keeps state for (one per
+    /// relay peer; the oldest is evicted when full, never refused).
     pub maximum_pending_join_code_exchanges: usize,
     pub reconnect_initial_backoff_milliseconds: u64,
     pub reconnect_maximum_backoff_milliseconds: u64,
