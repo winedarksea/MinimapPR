@@ -135,6 +135,20 @@ impl PositionResidualModel for SeedResidualModel {
     }
 }
 
+/// Largest believable height-band drift: max(sensor aperture, horizontal
+/// range of the fix from the sensor centroid). A canopy-height change can
+/// slide a fix along its range, but not past the scale of the geometry.
+fn horizontal_drift_bound_m(terms: &[PairTerm], position_m: &Vector3<f64>) -> f64 {
+    let sensors: Vec<&Vector3<f64>> = terms.iter().flat_map(|term| [&term.sensor_a_m, &term.sensor_b_m]).collect();
+    let count = sensors.len().max(1) as f64;
+    let centroid = sensors.iter().fold([0.0; 2], |acc, p| [acc[0] + p[0] / count, acc[1] + p[1] / count]);
+    let aperture = sensors
+        .iter()
+        .flat_map(|a| sensors.iter().map(move |b| (a[0] - b[0]).hypot(a[1] - b[1])))
+        .fold(0.0, f64::max);
+    aperture.max((position_m[0] - centroid[0]).hypot(position_m[1] - centroid[1]))
+}
+
 /// LM refiner over an `LmSeed`; `node_position_std_m[i]` is layout node i's σ.
 #[derive(Debug, Clone)]
 pub struct JointLmSeedRefiner {
@@ -230,15 +244,22 @@ impl TdoaSeedRefiner for JointLmSeedRefiner {
                     outcome.converged.then_some(outcome.position_m)
                 };
                 let [band_low, band_high] = seed.source_height_bounds_m;
-                if let (Some(low), Some(high)) = (pinned_at(band_low), pinned_at(band_high)) {
+                let drift_bound = horizontal_drift_bound_m(&model.terms, &position);
+                let pinned_pair = (pinned_at(band_low), pinned_at(band_high));
+                if let (Some(low), Some(high)) = pinned_pair {
                     // Unknown height across the band, taken as uniform: the
                     // horizontal drift along it adds (Δ Δᵀ)/12. On a flat phone
                     // layout this, not the linearized σ, dominates (a fix near
                     // the phones' plane has almost no z gradient to show it).
                     let drift = [high[0] - low[0], high[1] - low[1]];
-                    for row in 0..2 {
-                        for column in 0..2 {
-                            covariance[(row, column)] += drift[row] * drift[column] / UNIFORM_VARIANCE_DIVISOR;
+                    // A pinned solve that ran off along an unobservable range
+                    // direction (seen: 3e8 m, W4-sim-gates) is not a height
+                    // effect; the linearized σ already shows that weakness.
+                    if drift[0].hypot(drift[1]) <= drift_bound {
+                        for row in 0..2 {
+                            for column in 0..2 {
+                                covariance[(row, column)] += drift[row] * drift[column] / UNIFORM_VARIANCE_DIVISOR;
+                            }
                         }
                     }
                 }

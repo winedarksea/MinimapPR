@@ -275,6 +275,28 @@ impl Default for ClassificationRotaConfig {
     }
 }
 
+/// The likelihood contour sent with a pinpointed entity: a polygon on the
+/// fix's horizontal covariance ellipse scaled by `contour_sigma_multiplier`.
+/// The multiplier is *fitted*, not the Gaussian 95 % value (2.45): the
+/// W4-sim-gates calibration (`minimappr-sim-gates`, example
+/// `calibrate_region_parameters`) picks it so the drawn polygon covers the
+/// truth in ~95 % of end-to-end Layer 2 fixes (gate band 90–98 %), which
+/// absorbs LM linearization, layout-σ and clock-σ misstatement.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntityContourConfig {
+    pub contour_sigma_multiplier: f64,
+    pub contour_point_count: usize,
+}
+
+impl Default for EntityContourConfig {
+    fn default() -> Self {
+        Self {
+            contour_sigma_multiplier: 0.52,
+            contour_point_count: 12,
+        }
+    }
+}
+
 /// Everything a node or host needs.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct MeshConfig {
@@ -286,4 +308,5 @@ pub struct MeshConfig {
     pub island_sync: IslandSyncConfig,
     pub thermal: ThermalConfig,
     pub rota: ClassificationRotaConfig,
+    pub entity_contour: EntityContourConfig,
 }

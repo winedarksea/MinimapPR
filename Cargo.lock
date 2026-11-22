@@ -1561,6 +1561,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "minimappr-sim-gates"
+version = "0.1.0"
+dependencies = [
+ "minimappr-core",
+ "minimappr-mesh-sim",
+ "minimappr-sim",
+]
+
+[[package]]
 name = "minimappr-transport"
 version = "0.1.0"
 dependencies = [

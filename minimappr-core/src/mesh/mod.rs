@@ -30,6 +30,7 @@ pub mod config;
 pub mod detection_outbox;
 pub mod event_log;
 pub mod event_matcher;
+pub mod fix_contour;
 pub mod host_membership;
 pub mod host_message_handling;
 pub mod host_restoration;

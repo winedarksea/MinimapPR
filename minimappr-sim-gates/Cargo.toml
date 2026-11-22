@@ -1,0 +1,13 @@
+[package]
+name = "minimappr-sim-gates"
+version = "0.1.0"
+edition.workspace = true
+description = "W4-sim-gates: statistical Field Mode gates (Monte Carlo accuracy, likelihood-contour coverage calibration, invariance, chirality, island isolation, loop consistency, degradation, anchor stability, resource bounds) over minimappr-core, minimappr-sim and minimappr-mesh-sim."
+publish = false
+
+# Test-and-tooling crate only: nothing depends on it, so core keeps building
+# for wasm32 / android untouched.
+[dependencies]
+minimappr-core = { workspace = true }
+minimappr-sim = { path = "../minimappr-sim" }
+minimappr-mesh-sim = { path = "../minimappr-mesh-sim" }
