@@ -124,6 +124,8 @@ class EntityReportingCoordinator:
         branch_details: dict[str, Any],
         localization_position_m: Vec3 | None,
         below_display_threshold: bool,
+        localization_position_covariance_m2: list[list[float]] | None = None,
+        localization_range_projection_mode: str | None = None,
     ) -> ReportingDecision:
         self._note_event_time(event_time_ns)
         node_positions = await self._node_positions()
@@ -137,6 +139,8 @@ class EntityReportingCoordinator:
             branch_details=branch_details,
             localization_position_m=localization_position_m,
             below_display_threshold=below_display_threshold,
+            localization_position_covariance_m2=localization_position_covariance_m2,
+            localization_range_projection_mode=localization_range_projection_mode,
         )
         if change is not None:
             await self._emit(change)

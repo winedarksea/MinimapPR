@@ -274,6 +274,16 @@ class TrackManager(TrackManagerFieldModeMethods):
                     (timestamp_ns - track.last_seen_ns) / 1_000_000_000.0, 0.0,
                 )
                 predicted_tracks.append(self._filter.predict(track, dt_s))
+            # Field Mode S-fixes tracking: no cross-species or concurrent-perch merges.
+            predicted_tracks = self._field_mode.association_candidates(
+                timestamp_ns=timestamp_ns,
+                position_m=position_m,
+                measurement_covariance_m2=measurement_covariance_m2,
+                label_category=label_category,
+                evidence=evidence,
+                tracks=predicted_tracks,
+                track_filter=self._filter,
+            )
 
             # Tracks at non-localizable tiers are capped at tentative — the
             # position is just the sensor location so "confirmed" would be
