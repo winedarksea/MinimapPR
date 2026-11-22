@@ -5,12 +5,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from minimappr.config import Settings
 from minimappr.core.entity_canonical_row_position import (
     RAW_FIX_POSITION_FEATURE_KEY,
     persisted_row_position,
 )
+from minimappr.core.entity_reporting_coordinator import EntityReportingCoordinator
 from minimappr.core.entity_reporting_policy import EntityReportingPolicy
 from minimappr.core.range_projection import RANGE_BEARING_PROJECTED
+from minimappr.core.tracking import TrackManager
 from minimappr.models import DetectionEvent, NodeSpec, NodeType
 from minimappr.storage.db import Storage
 from tests.bird_entity_helpers import (
@@ -154,3 +157,46 @@ def test_canonical_row_carries_the_fused_track_position() -> None:
             raw_covariance_m2=TIGHT_COVARIANCE_M2,
         )
         assert legacy.position_m == raw and legacy.raw_fix_features == {}
+
+
+# --- Field Mode S-fixes integration: tracker relocation revert -> entity ---
+# Two chickadee perches 12.5 m apart: beyond the plain association gate, inside the relocation gate.
+REVERT_FIRST_PERCH_M = (0.0, 0.0, 3.0)
+REVERT_SECOND_PERCH_M = (7.5, 10.0, 3.0)
+
+
+async def _noop(*_args) -> None:
+    return None
+
+
+async def _hop_then_back(*, with_coordinator: bool) -> list[str]:
+    """Bird A sings, bird B's first fix 2.4 s later reads as A hopping (nobody else
+    sang), then A sings on its old perch 1.2 s after that: the tracker reverts the hop."""
+    manager = TrackManager(Settings(tracking_perched_filter_enabled=True, tracking_species_log_odds_enabled=True))
+    registry = sequential_registry()
+    if with_coordinator:
+        registry = EntityReportingCoordinator(
+            config=registry.config, storage=None, node_registry=None, tracker=manager, live_callback=_noop,
+            coordinate_frame_getter=lambda: None, fire_rules=_noop, registry=registry,
+        ).registry
+    entity_ids = []
+    for at_s, perch in ((0.0, REVERT_FIRST_PERCH_M), (2.4, REVERT_SECOND_PERCH_M), (3.6, REVERT_FIRST_PERCH_M)):
+        track = await manager.update(
+            timestamp_ns=seconds(at_s), position_m=perch, label=CHICKADEE, label_category="wildlife",
+            confidence=0.9, measurement_covariance_m2=TIGHT_COVARIANCE_M2,
+        )
+        entity_ids.append(registry.observe(observation(at_s=at_s, label=CHICKADEE, position_m=perch, track=track))
+                          .entity.entity_id)
+    assert manager.field_mode.relocation_gate.relocations_reverted == 1
+    return entity_ids
+
+
+async def test_tracker_revert_releases_the_hop_fix_so_the_bird_keeps_its_entity() -> None:
+    first, hop, back = await _hop_then_back(with_coordinator=True)
+    assert hop == first  # the entity followed the (wrong) hop with its track
+    assert back == first  # ...and after the revert the bird's own fix is not "another bird"
+
+
+async def test_without_the_revert_listener_the_bird_splits_into_a_duplicate() -> None:
+    first, hop, back = await _hop_then_back(with_coordinator=False)
+    assert hop == first and back != first  # the S-fixes integration failure on gate_flock_echo
