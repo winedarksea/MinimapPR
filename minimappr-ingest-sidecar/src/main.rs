@@ -4,6 +4,7 @@ mod actors;
 use minimappr_core::{
     audio_payload, dsp_math, range_projection, sensor_stream_buffer as dsp, srp_phat,
 };
+mod attribution_oracle;
 mod birdnet_render;
 mod classifier_helper;
 mod deferred_localization;
@@ -22,13 +23,12 @@ mod journal_reader;
 mod leases;
 mod localization_coverage_wait;
 mod manifests;
+mod onset_clustering_oracle;
 mod render_mvdr;
 mod runtime;
 mod spatial_audio;
-mod onset_clustering_oracle;
 mod storage_class;
 mod tdoa_solver_oracle;
-mod attribution_oracle;
 mod wildlife_tracking_oracle;
 
 use std::collections::HashMap;

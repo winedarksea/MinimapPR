@@ -75,31 +75,29 @@ impl DeferredLocalizationScheduler {
             .is_some_and(|state| state.pending.is_some())
     }
 
-    /// Record channel progress for `buffer_key` and dispatch its pending
-    /// localization if coverage is now complete, stalled, or capped. Called
-    /// after every append to that buffer.
-    pub(crate) fn observe_and_service(&mut self, buffer_key: &str, buffers: &[SensorStreamBuffer]) {
+    /// Record channel progress for `buffer_key` (stall accounting). Called
+    /// after every append to that buffer; never dispatches mid-batch.
+    pub(crate) fn observe_channel_progress(
+        &mut self,
+        buffer_key: &str,
+        buffers: &[SensorStreamBuffer],
+    ) {
         if !self.config.enabled {
             return;
         }
         let now_ns = self.clock.now_ns();
-        let state = self
-            .states_by_buffer_key
+        self.states_by_buffer_key
             .entry(buffer_key.to_string())
-            .or_default();
-        state.tracker.observe(buffers, now_ns);
-        Self::service_state(
-            state,
-            buffers,
-            self.config,
-            now_ns,
-            &mut self.ready_payloads,
-            &mut self.outcomes,
-        );
+            .or_default()
+            .tracker
+            .observe(buffers, now_ns);
     }
 
-    /// Poll-tick path: releases pendings whose buffers stopped receiving
-    /// manifests entirely (every member went quiet), bounded by the cap.
+    /// Batch-boundary path (end of every DSP poll cycle): re-evaluates every
+    /// pending window. Deciding only here, never mid-batch, matters because
+    /// `merge_pending_manifests_for_batch` processes a backlog newest-first:
+    /// mid-batch a member can show frame k+1 with frame k still a hole that
+    /// the same batch backfills a moment later.
     pub(crate) fn service_all(
         &mut self,
         buffers_by_key: &HashMap<String, Vec<SensorStreamBuffer>>,

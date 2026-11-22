@@ -42,6 +42,8 @@ const SPATIAL_GEOMETRY_MIN_SPAN_M: f32 = 0.005;
 /// SRP-PHAT needs at least this many channels in the localization buffer.
 pub(crate) const MIN_SRP_CHANNEL_COUNT: usize = 4;
 const NANOSECONDS_PER_MILLISECOND_F64: f64 = 1_000_000.0;
+/// Shared multi-node buffers are keyed `cluster::<cluster_id>::<stream_id>`.
+const CLUSTER_BUFFER_KEY_PREFIX: &str = "cluster::";
 
 pub(crate) use minimappr_core::sirith_array_geometry::SIRITH_MIC_POSITIONS_M;
 
@@ -1296,7 +1298,7 @@ impl DspWorker {
     ) -> Option<ComputePayload> {
         if let Some(buffers) = self.buffers.get(&owned.buffer_key) {
             self.deferred_localizations
-                .observe_and_service(&owned.buffer_key, buffers);
+                .observe_channel_progress(&owned.buffer_key, buffers);
         }
         if buffered
             .channel_states
@@ -1554,6 +1556,12 @@ impl DspWorker {
             window_seconds: self.config.window_seconds,
             min_coverage_ratio: self.config.min_coverage_ratio,
         };
+        // Cluster buffers always park until the batch boundary: mid-batch a
+        // member may show holes that later frames in the same (newest-first)
+        // batch backfill. Costs no wall time; released at the end of the cycle.
+        if buffer_key.starts_with(CLUSTER_BUFFER_KEY_PREFIX) {
+            return Some(span);
+        }
         match self
             .deferred_localizations
             .evaluate_new_candidate(buffer_key, buffers, span)
@@ -1594,8 +1602,9 @@ impl DspWorker {
         manifest: DspManifest,
         pending_backlog_depth: usize,
     ) {
+        // A test delivery is a batch of one, so it ends at a batch boundary.
         let ingested_payload = self.ingest_one(manifest, pending_backlog_depth).await;
-        let ready_payloads = self.take_ready_deferred_localizations(false).await;
+        let ready_payloads = self.take_ready_deferred_localizations(true).await;
         for payload in ingested_payload.into_iter().chain(ready_payloads) {
             self.note_stage_attempts(&payload).await;
             let result = crate::actors::dsp_compute::run_math(payload);
@@ -2418,7 +2427,7 @@ fn resolve_cluster_buffer_routing(
         })
         .collect::<Option<Vec<_>>>()?;
     Some(ManifestBufferRouting {
-        buffer_key: format!("cluster::{cluster_id}::{stream_id}"),
+        buffer_key: format!("{CLUSTER_BUFFER_KEY_PREFIX}{cluster_id}::{stream_id}"),
         buffer_channel_count: cluster_sensor_positions.len(),
         buffer_channel_indices,
     })

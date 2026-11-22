@@ -52,8 +52,17 @@ The fix defers the dispatch and never sleeps, so the ingest/audio hot path never
   - At most one pending localization per buffer key. A newer candidate dispatches the older
     one first (stop reason `superseded`).
   - Pending entries are dropped with the stream buffers in `purge_stale_streams`.
-  - Pendings are re-evaluated after every append to that buffer, and on every DSP poll tick
-    (20 ms when idle). The tick covers the case where every member goes quiet.
+  - Pendings are re-evaluated only at batch boundaries: at the end of every DSP poll cycle,
+    which repeats every 20 ms when idle. Channel progress is still observed on every
+    append. A cadence solve on a cluster buffer is always parked until the batch boundary,
+    even when it already looks covered.
+  - Batch boundaries matter because `merge_pending_manifests_for_batch` processes a backlog
+    **newest-first**. Mid-batch, a member can show frame k+1 while frame k is still a hole
+    that the same batch backfills a moment later. Deciding mid-batch made the first e2e
+    version flaky: about 1 in 5 runs dispatched a 4-channel solve because node b's hole
+    looked "settled". On the live box, where backlog was the norm, newest-first ordering
+    was probably a second contributor to single-node solves.
+  - Parking costs no wall time. Single-node buffers keep the immediate path.
   - When released, the pending payload re-reads the buffers at the **original window
     centre**. The solve therefore covers the trigger frame's span, using every channel that
     arrived, and keeps each node's own packet-GPS timeline (TDOA precision is unchanged).
@@ -72,8 +81,10 @@ The fix defers the dispatch and never sleeps, so the ingest/audio hot path never
     stalled.
   - Rust has no `required_covered_count` drop contract, because Rust never dropped
     under-covered candidates. It solves with whatever is covered, as before.
-  - A gap inside an already-delivered window is not waited on, because gaps are never
-    backfilled. The coverage ratio still gates the channel at solve time.
+  - A gap inside an already-delivered window is not waited on past the batch boundary.
+    Within a batch, newest-first ordering backfills it. After the boundary, the gap is a
+    lost packet, and waiting on it would burn the cap on every loss (the Pico nodes lose
+    ~45% of frames). The coverage ratio still gates the channel at solve time.
 - The classifier render is unchanged. A render due on a trigger frame (about every 28 s)
   still steers with that frame's coverage.
 
@@ -139,4 +150,7 @@ Python:
 
 - `tests/test_rust_sidecar_coverage_race_e2e.py` (2 tests, real sidecar binary): with the
   coverage wait on, every cluster solve contains cross-node pairs. With it off, none do.
+  The test widens the stall budget and cap through env. It checks inclusion, not timing,
+  and under full-suite CPU load sequential HTTP posts can be more than 0.5 s apart.
+  Passed 10/10 consecutive runs.
 - `tests/test_http_api.py`: the spawn env asserts the three new env keys.

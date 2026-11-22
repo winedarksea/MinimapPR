@@ -3,7 +3,9 @@
 //! shape as `tests/wildlife_pipeline_reference.py`.
 
 use minimappr_core::bird_entity::config::BirdEntityConfig;
-use minimappr_core::bird_entity::entity_pipeline::{EntityPipelineDetection, WildlifeEntityPipeline};
+use minimappr_core::bird_entity::entity_pipeline::{
+    EntityPipelineDetection, WildlifeEntityPipeline,
+};
 use minimappr_core::bird_entity::model::{BirdEntityRecord, SpatialDisplayMode};
 use minimappr_core::bird_entity::registry::BirdEntityChangeKind;
 use minimappr_core::bird_entity::reporting_decision::EntityReportingAction;
@@ -50,11 +52,18 @@ fn spatial_mode(name: &str) -> Result<SpatialDisplayMode, String> {
     }
 }
 
-fn detection_from(step: &Value) -> Result<EntityPipelineDetection, Box<dyn std::error::Error + Send + Sync>> {
-    let optional_position = |key: &str| -> Result<Option<Position3>, serde_json::Error> { serde_json::from_value(step[key].clone()) };
+fn detection_from(
+    step: &Value,
+) -> Result<EntityPipelineDetection, Box<dyn std::error::Error + Send + Sync>> {
+    let optional_position = |key: &str| -> Result<Option<Position3>, serde_json::Error> {
+        serde_json::from_value(step[key].clone())
+    };
     let covariance: Option<Covariance3> = serde_json::from_value(step["covariance_m2"].clone())?;
     Ok(EntityPipelineDetection {
-        detection_id: step["detection_id"].as_str().ok_or("detection_id")?.to_string(),
+        detection_id: step["detection_id"]
+            .as_str()
+            .ok_or("detection_id")?
+            .to_string(),
         event_time_ns: step["event_time_ns"].as_i64().ok_or("event_time_ns")?,
         label: step["label"].as_str().ok_or("label")?.to_string(),
         confidence: step["confidence"].as_f64().ok_or("confidence")?,
@@ -86,18 +95,29 @@ fn entity_summary(entity: &BirdEntityRecord) -> Value {
 }
 
 pub fn run_pipeline_case(case: &Value) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    let mut pipeline = WildlifeEntityPipeline::new(PerchedTrackerConfig::default(), BirdEntityConfig::default());
+    let mut pipeline =
+        WildlifeEntityPipeline::new(PerchedTrackerConfig::default(), BirdEntityConfig::default());
     let mut outputs = Vec::new();
     for step in case["steps"].as_array().ok_or("steps")? {
         if step["type"].as_str() == Some("maintain") {
             let changes = pipeline.maintain(step["now_ns"].as_i64().ok_or("now_ns")?);
-            let changes: Vec<Value> =
-                changes.iter().map(|change| json!([change_kind_name(change.kind), change.entity_id, change.state.as_str()])).collect();
+            let changes: Vec<Value> = changes
+                .iter()
+                .map(|change| {
+                    json!([
+                        change_kind_name(change.kind),
+                        change.entity_id,
+                        change.state.as_str()
+                    ])
+                })
+                .collect();
             outputs.push(json!({ "changes": changes }));
             continue;
         }
         let outcome = pipeline.process(&detection_from(step)?);
-        let revert = outcome.track_update.and_then(|update| update.relocation_revert);
+        let revert = outcome
+            .track_update
+            .and_then(|update| update.relocation_revert);
         outputs.push(json!({
             "action": action_name(outcome.decision.action),
             "decision_entity_id": outcome.decision.entity_id,

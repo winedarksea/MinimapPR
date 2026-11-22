@@ -32,6 +32,8 @@ const EVENT_CHANNEL_CAPACITY: usize = 4096;
 /// Frames spanning two trigger cooldowns (0.8 s default) after the first.
 const FRAMES_PER_RUN: usize = 60;
 const NANOSECONDS_PER_MILLISECOND_F64: f64 = 1_000_000.0;
+/// Segment ids are `seg-<node>-<frame>`; frame 0 precedes node b's stream.
+const FIRST_FRAME_SEGMENT_SUFFIX: &str = "-0";
 
 struct RaceHarness {
     _tmp: tempfile::TempDir,
@@ -102,12 +104,18 @@ impl RaceHarness {
     }
 
     /// Active-channel count of every cadence-triggered localization. Frame
-    /// 0's solve rides the (only) classifier render and is excluded, so every
-    /// counted solve happens after both nodes started streaming.
+    /// 0's solve (node b not streaming yet) is excluded, so every counted
+    /// solve happens after both nodes started streaming.
     fn solved_localization_channel_counts(&mut self) -> Vec<usize> {
         drain_published_manifests(&mut self.events)
             .iter()
             .filter(|manifest| manifest.manifest_type == "localization_result")
+            .filter(|manifest| {
+                !manifest
+                    .source_handles
+                    .iter()
+                    .any(|handle| handle.segment_id.ends_with(FIRST_FRAME_SEGMENT_SUFFIX))
+            })
             .filter(|manifest| {
                 manifest.localization.as_ref().is_some_and(|localization| {
                     localization.resolved_algorithm != "localization_cadence_skipped"
