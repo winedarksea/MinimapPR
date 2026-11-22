@@ -113,7 +113,9 @@ impl SpeciesLogOddsBelief {
         let floor = self.prior_log_odds - self.config.total_log_odds_cap;
         let ceiling = self.prior_log_odds + self.config.total_log_odds_cap;
         for (label, probability) in evidence_probability_by_label {
-            if is_non_evidence_label(label) {
+            // A NaN score would poison the label's log-odds for good
+            // (the Python reference has this latent bug; see the review notes).
+            if is_non_evidence_label(label) || probability.is_nan() {
                 continue;
             }
             let delta = (probability_to_log_odds(*probability) - self.prior_log_odds).clamp(-cap, cap);
@@ -210,6 +212,15 @@ mod tests {
         belief.update(&evidence(&[("tanager", 0.9), ("unknown", 0.99)]));
         assert_eq!(belief.top_label().unwrap().0, "robin");
         assert_eq!(belief.exposed_probabilities().len(), 2);
+    }
+
+    #[test]
+    fn nan_scores_are_ignored_rather_than_poisoning_the_belief() {
+        let mut belief = SpeciesLogOddsBelief::new(SpeciesBeliefConfig::default());
+        belief.update(&evidence(&[("robin", 0.6)]));
+        belief.update(&evidence(&[("robin", f64::NAN), ("wren", f64::NAN)]));
+        assert!((belief.probability_for("robin") - 0.6).abs() < 1e-12);
+        assert_eq!(belief.exposed_probabilities().len(), 1);
     }
 
     #[test]

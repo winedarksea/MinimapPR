@@ -103,6 +103,15 @@ pub trait ClipSetLocalizer {
     ) -> Option<(ClassifierAnswer, f64)> {
         None
     }
+
+    /// The share of the cluster's classification window that masking these
+    /// onset regions removes (0 = the interferers are silent in the window).
+    /// LOCO asks this *before* its rerun budget admits a rerun, so a host
+    /// with a costly classifier should override it with the masking alone;
+    /// the default runs the classifier to learn it.
+    fn masked_cell_fraction(&self, request: &CallLocalizationRequest, cluster: &LocalizedCluster, masked: &[InterfererOnset]) -> f64 {
+        self.classify_cluster_window(request, cluster, masked).map_or(0.0, |(_, fraction)| fraction)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

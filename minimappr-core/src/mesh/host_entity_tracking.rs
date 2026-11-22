@@ -8,7 +8,7 @@
 //! latest event and the session millisecond it arrived at, and extrapolates
 //! (the server coordinator does the same with wall time).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use crate::bird_entity::entity_pipeline::{EntityPipelineDetection, EntityPipelineOutcome, WildlifeEntityPipeline};
 use crate::bird_entity::model::{BirdEntityRecord, BirdEntitySpatialState, EntityId, SpatialDisplayMode};
@@ -58,7 +58,15 @@ pub struct HostEntityTracking {
     /// Per island: (latest event ns on the reference clock, session ms it arrived).
     clock_anchors: BTreeMap<u32, (i64, MeshMilliseconds)>,
     last_maintenance_ms: Option<MeshMilliseconds>,
-    pub call_outcomes: Vec<HostEntityCallOutcome>,
+    /// Newest last; capped at `EntityTrackingConfig::max_retained_call_outcomes`.
+    pub call_outcomes: VecDeque<HostEntityCallOutcome>,
+}
+
+/// Where a cluster's detection is reported from: its own loudest node.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClusterReportingNode {
+    pub node_id: NodeId,
+    pub position_m: Option<Position3>,
 }
 
 fn species_evidence(scores: &[SpeciesScore]) -> LabelScores {
@@ -113,6 +121,10 @@ pub fn node_set_is_collinear(positions_m: &[Position3], max_aspect_ratio: f64) -
     major <= 0.0 || (minor / major).sqrt() < max_aspect_ratio
 }
 
+fn fix_is_finite(fix: &CallFix) -> bool {
+    fix.position_m.iter().chain(fix.covariance_m2.iter().flatten()).all(|value| value.is_finite())
+}
+
 fn wire_state(state: BirdEntitySpatialState) -> BirdEntityState {
     match state {
         BirdEntitySpatialState::HeardNearby => BirdEntityState::HeardNearby,
@@ -132,6 +144,7 @@ impl HostEntityTracking {
         &mut self,
         record: &LocalizedCallRecord,
         reporting_node_position_m: Option<Position3>,
+        cluster_reporting_nodes: &[ClusterReportingNode],
         mirror_ambiguous_clusters: &[bool],
         config: &EntityTrackingConfig,
         update_context: &EntityUpdateContext<'_>,
@@ -154,15 +167,23 @@ impl HostEntityTracking {
                 .enumerate()
                 .map(|(index, cluster)| {
                     let species = cluster.attributed_species.as_deref().unwrap_or(&record.species_belief);
-                    // A mirror-ambiguous fix places the bird on one of two sides: heard, not placed.
-                    let placed = !mirror_ambiguous_clusters.get(index).copied().unwrap_or(false);
+                    // A mirror-ambiguous fix places the bird on one of two sides, and a
+                    // non-finite one would poison the tracker's filter: heard, not placed.
+                    let placed = !mirror_ambiguous_clusters.get(index).copied().unwrap_or(false) && fix_is_finite(&cluster.fix);
+                    // Each cluster is reported from its own loudest node (the server's
+                    // `loudest_node_id`), which anchors its bearing fan on step-back.
+                    let (cluster_node_id, cluster_node_position_m) = cluster_reporting_nodes
+                        .get(index)
+                        .map_or((reporting_node_id.clone(), reporting_node_position_m), |node| {
+                            (Some(node.node_id.0.to_string()), node.position_m)
+                        });
                     detection_for(
                         format!("call-{}-{index}", record.call_id),
                         event_time_ns,
                         species_evidence(species),
                         placed.then_some(&cluster.fix),
-                        reporting_node_id.clone(),
-                        reporting_node_position_m,
+                        cluster_node_id,
+                        cluster_node_position_m,
                     )
                 })
                 .collect()
@@ -199,7 +220,12 @@ impl HostEntityTracking {
         if let (Some(track_id), Some(wire_id)) = (track_id, wire_id) {
             self.resolve_repointed_calls(record.island_id, track_id, wire_id);
         }
-        self.call_outcomes.push(HostEntityCallOutcome {
+        // Bounded history: revert re-pointing only needs calls since a hop
+        // (the ghost window), and the shell persists outcomes it wants to keep.
+        while !self.call_outcomes.is_empty() && self.call_outcomes.len() >= config.max_retained_call_outcomes {
+            self.call_outcomes.pop_front();
+        }
+        self.call_outcomes.push_back(HostEntityCallOutcome {
             call_id: record.call_id,
             cluster_index,
             island_id: record.island_id,
@@ -248,6 +274,12 @@ impl HostEntityTracking {
                 }
             }
         }
+        // Entities the registry evicted at capacity (LRU) never expire: drop
+        // their wire ids too, or the map grows with every evicted bird.
+        let pipelines = &self.pipelines;
+        self.wire_ids.retain(|(island_id, entity_id), _| {
+            pipelines.get(island_id).is_some_and(|pipeline| pipeline.registry.get(*entity_id).is_some())
+        });
         updates
     }
 
@@ -324,7 +356,46 @@ impl HostEntityTracking {
 
 #[cfg(test)]
 mod tests {
-    use super::node_set_is_collinear;
+    use super::*;
+    use crate::mesh::call_pipeline::LocalizedCluster;
+
+    fn record(call_id: u64, centre_reference_s: f64, position_m: [f64; 3]) -> LocalizedCallRecord {
+        let fix = CallFix {
+            position_m,
+            covariance_m2: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 4.0]],
+            horizontal_major_sigma_m: 1.0,
+            used_nodes: Vec::new(),
+            rejected_nodes: Vec::new(),
+        };
+        LocalizedCallRecord {
+            call_id,
+            centre_reference_s,
+            classifying_node: NodeId(1),
+            species_belief: vec![SpeciesScore { label_id: 7, score: 0.9 }],
+            fix: Some(fix.clone()),
+            clusters: vec![LocalizedCluster::single(fix, NodeId(1))],
+            ..LocalizedCallRecord::default()
+        }
+    }
+
+    #[test]
+    fn call_outcome_history_is_capped_and_non_finite_fixes_are_not_placed() {
+        let config = EntityTrackingConfig { max_retained_call_outcomes: 3, ..EntityTrackingConfig::default() };
+        let contour = EntityContourConfig::default();
+        let context = EntityUpdateContext { contour: &contour, next_event_log_sequence: 1 };
+        let mut tracking = HostEntityTracking::default();
+        let mut next_id = 0;
+        for call_id in 0..5 {
+            tracking.on_call_record(&record(call_id, 10.0 * call_id as f64, [5.0, 5.0, 3.0]), None, &[], &[], &config, &context, &mut next_id, 0);
+        }
+        assert_eq!(tracking.call_outcomes.iter().map(|call| call.call_id).collect::<Vec<_>>(), vec![2, 3, 4]);
+        assert!(tracking.call_outcomes.iter().all(|call| call.bird_entity_id == Some(1)), "one bird, one entity");
+
+        let poisoned = record(9, 60.0, [f64::NAN, 5.0, 3.0]);
+        let updates = tracking.on_call_record(&poisoned, None, &[], &[], &config, &context, &mut next_id, 0);
+        assert!(updates.iter().all(|update| update.position_east_north_up_m.is_none_or(|p| p.iter().all(|v| v.is_finite()))));
+        assert!(tracking.pipelines[&0].tracker.tracks().all(|track| track.position_m.iter().all(|v| v.is_finite())));
+    }
 
     #[test]
     fn single_file_nodes_are_collinear_and_a_ring_is_not() {

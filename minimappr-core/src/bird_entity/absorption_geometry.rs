@@ -40,7 +40,9 @@ pub fn horizontal_mahalanobis_squared(
     let residual = Vector2::new(first_m[0] - second_m[0], first_m[1] - second_m[1]);
     let solved = combined.lu().solve(&residual)?;
     let value = residual.dot(&solved);
-    value.is_finite().then_some(value)
+    // An indefinite covariance (bad upstream Jacobian) can give a negative
+    // "distance" that would pass every gate and win absorption: unusable, as in the reference.
+    (value.is_finite() && value >= 0.0).then_some(value)
 }
 
 /// A fix that could not pinpoint a bird on its own (range unobserved or too uncertain).
@@ -132,4 +134,18 @@ pub fn forget_fixes_since(entity: &mut BirdEntityRecord, since_ns: i64) -> usize
     let before = entity.recent_fixes.len();
     entity.recent_fixes.retain(|fix| fix.event_time_ns < since_ns);
     before - entity.recent_fixes.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::horizontal_mahalanobis_squared;
+
+    #[test]
+    fn indefinite_covariance_gives_no_distance_instead_of_a_negative_one() {
+        let indefinite = [[4.0, 0.0, 0.0], [0.0, -9.0, 0.0], [0.0, 0.0, 1.0]];
+        let value = horizontal_mahalanobis_squared(&[10.0, 4.0, 0.0], Some(&indefinite), &[12.0, 9.0, 0.0], Some(&indefinite));
+        assert_eq!(value, None);
+        let nan = [[f64::NAN; 3]; 3];
+        assert_eq!(horizontal_mahalanobis_squared(&[0.0; 3], Some(&nan), &[1.0, 0.0, 0.0], None), None);
+    }
 }
