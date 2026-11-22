@@ -500,6 +500,48 @@ class BirdNETV3Config:
 # ── end BirdNET+ V3.0 ──────────────────────────────────────────────────────
 
 
+# --- Field Mode W2-onset-srp ---
+@dataclass(slots=True)
+class OnsetSrpClusteringConfig:
+    """Onset-weighted short-frame SRP + spatial clustering; built by
+    ``Settings.onset_srp_clustering_config()`` (docs/field_mode_progress/onset_srp.md)."""
+
+    enabled: bool
+    analysis_pre_trigger_seconds: float
+    analysis_post_trigger_seconds: float
+    buffer_wait_max_seconds: float
+    subband_count: int
+    hop_seconds: float
+    band_min_hz: float
+    band_max_hz: float
+    flux_threshold_mad_multiplier: float
+    min_separation_seconds: float
+    max_onsets_per_window: int
+    frame_seconds: float
+    frame_pre_roll_seconds: float
+    active_band_snr_db: float
+    narrowband_bandwidth_hz: float
+    srp_azimuth_step_deg: float
+    srp_elevation_step_deg: float
+    srp_grid_min_range_m: float
+    srp_grid_max_range_m: float
+    srp_grid_ring_count: int
+    srp_peaks_per_frame: int
+    srp_peak_min_relative_height: float
+    cluster_radius_m: float
+    cluster_range_fraction: float
+    cluster_angle_deg: float
+    cluster_min_weight_fraction: float
+    cluster_max_count: int
+    echo_min_lag_seconds: float
+    echo_max_lag_seconds: float
+    echo_min_independent_fraction: float
+    level_consistency_margin_db: float
+    persistence_min_independent_onsets: int
+    dedupe_ttl_seconds: float
+# --- end Field Mode W2-onset-srp ---
+
+
 @dataclass(slots=True)
 class StorageConfig:
     db_path: Path
@@ -987,6 +1029,74 @@ class Settings:
     birdnet_v3_pad_noise_floor_percentile: float = 10.0
     birdnet_v3_num_threads: int = 4
     # ── end BirdNET+ V3.0 ──────────────────────────────────────────────────────
+    # --- Field Mode W2-onset-srp ---
+    # Master flag: onset-weighted short-frame SRP + spatial clustering replaces the single-window solve.
+    localization_onset_clustering_enabled: bool = False
+    # Audio kept before the trigger's window centre (onsets lead the trigger frame).
+    onset_analysis_pre_trigger_seconds: float = 0.3
+    # Audio after the trigger; the plan's shared 1.0-1.5 s active window.
+    onset_analysis_post_trigger_seconds: float = 1.2
+    # Max wait for every node's buffer to cover the analysis span (non-blocking poll).
+    onset_buffer_wait_max_seconds: float = 3.0
+    # Log-spaced sub-bands in the onset history (plan: 32-48).
+    onset_subband_count: int = 32
+    # Spectral-flux history hop.
+    onset_hop_seconds: float = 0.01
+    # Lowest analysed frequency (wind/rumble below).
+    onset_band_min_hz: float = 500.0
+    # Highest analysed frequency (clamped to Nyquist).
+    onset_band_max_hz: float = 12000.0
+    # Onset = flux peak above median + k*MAD of the window's own flux (noise-relative, no level gate).
+    onset_flux_threshold_mad_multiplier: float = 4.0
+    # Minimum spacing between onsets on one node.
+    onset_min_separation_seconds: float = 0.04
+    # Strongest onsets kept per node per window (compute cap).
+    onset_max_onsets_per_window: int = 16
+    # Template frame length after each onset (plan: 60-100 ms).
+    onset_frame_seconds: float = 0.08
+    # Template start before the onset hop (hop quantisation).
+    onset_frame_pre_roll_seconds: float = 0.01
+    # Sub-band is active when this far above its own noise floor.
+    onset_active_band_snr_db: float = 6.0
+    # Frames with RMS bandwidth below this correlate envelopes (pure tones cycle-skip).
+    onset_narrowband_bandwidth_hz: float = 300.0
+    # SRP grid azimuth step.
+    onset_srp_azimuth_step_deg: float = 2.0
+    # SRP direction-grid elevation step.
+    onset_srp_elevation_step_deg: float = 10.0
+    # Nearest SRP ring around the layout centroid.
+    onset_srp_grid_min_range_m: float = 1.0
+    # Farthest finite SRP ring (a far-field ring is added).
+    onset_srp_grid_max_range_m: float = 300.0
+    # Log-spaced SRP rings between min and max range.
+    onset_srp_grid_ring_count: int = 40
+    # SRP peaks kept per onset frame.
+    onset_srp_peaks_per_frame: int = 3
+    # Secondary frame peaks must reach this fraction of the frame's best peak.
+    onset_srp_peak_min_relative_height: float = 0.6
+    # Spatial clustering radius near the layout.
+    onset_cluster_radius_m: float = 3.0
+    # Radius grows with range (TDOA posteriors stretch radially).
+    onset_cluster_range_fraction: float = 0.2
+    # Clustering radius for direction-only (single-array) peaks.
+    onset_cluster_angle_deg: float = 10.0
+    # Clusters lighter than this fraction of the heaviest are dropped as noise.
+    onset_cluster_min_weight_fraction: float = 0.15
+    # Most candidate birds reported per window.
+    onset_cluster_max_count: int = 4
+    # Shortest reflection lag treated as an echo.
+    onset_echo_min_lag_seconds: float = 0.003
+    # Longest reflection lag treated as an echo.
+    onset_echo_max_lag_seconds: float = 0.03
+    # A secondary cluster needs this fraction of its frames led by its own onsets, else echo.
+    onset_echo_min_independent_fraction: float = 0.5
+    # Multi-node: nearer node may read this much below a farther one before the cluster is held tentative.
+    onset_level_consistency_margin_db: float = 8.0
+    # A secondary cluster needs this many independent onsets to be accepted (else tentative).
+    onset_persistence_min_independent_onsets: int = 2
+    # Onsets already localized are remembered this long so overlapping windows do not duplicate birds.
+    onset_dedupe_ttl_seconds: float = 6.0
+    # --- end Field Mode W2-onset-srp ---
     detection_min_confidence: float = 0.4
     cop_detections_max_items: int = 150
     cop_tracks_max_items: int = 150
@@ -1706,6 +1816,35 @@ class Settings:
         if self.birdnet_v3_num_threads < 1:
             raise ValueError("MINIMAPPR_BIRDNET_V3_NUM_THREADS must be >= 1")
         # ── end BirdNET+ V3.0 ──
+        # --- Field Mode W2-onset-srp ---
+        if self.onset_analysis_pre_trigger_seconds < 0.0 or self.onset_analysis_post_trigger_seconds <= 0.0:
+            raise ValueError("onset analysis span needs pre >= 0 and post > 0 seconds")
+        if not 0.0 < self.onset_band_min_hz < self.onset_band_max_hz:
+            raise ValueError("onset band needs 0 < onset_band_min_hz < onset_band_max_hz")
+        if not 0.0 < self.onset_echo_min_lag_seconds < self.onset_echo_max_lag_seconds:
+            raise ValueError("onset echo lags need 0 < min < max")
+        for _onset_key in (
+            "onset_subband_count", "onset_max_onsets_per_window", "onset_srp_grid_ring_count",
+            "onset_srp_peaks_per_frame", "onset_cluster_max_count",
+        ):
+            if getattr(self, _onset_key) < 1:
+                raise ValueError(f"{_onset_key} must be >= 1")
+        for _onset_key in (
+            "onset_hop_seconds", "onset_frame_seconds", "onset_srp_azimuth_step_deg",
+            "onset_srp_elevation_step_deg", "onset_srp_grid_min_range_m", "onset_cluster_radius_m",
+            "onset_cluster_angle_deg",
+        ):
+            if getattr(self, _onset_key) <= 0.0:
+                raise ValueError(f"{_onset_key} must be > 0")
+        if self.onset_srp_grid_max_range_m <= self.onset_srp_grid_min_range_m:
+            raise ValueError("onset_srp_grid_max_range_m must exceed onset_srp_grid_min_range_m")
+        for _onset_key in (
+            "onset_srp_peak_min_relative_height", "onset_cluster_min_weight_fraction",
+            "onset_echo_min_independent_fraction",
+        ):
+            if not 0.0 <= getattr(self, _onset_key) <= 1.0:
+                raise ValueError(f"{_onset_key} must be in [0, 1]")
+        # --- end Field Mode W2-onset-srp ---
         if self.detection_min_confidence < 0.0 or self.detection_min_confidence > 1.0:
             raise ValueError("MINIMAPPR_DETECTION_MIN_CONFIDENCE must be in [0,1]")
         if self.cop_detections_max_items < 1:
@@ -2302,6 +2441,41 @@ class Settings:
             ),
             birdnet_v3_num_threads=_env_int("MINIMAPPR_BIRDNET_V3_NUM_THREADS", 4),
             # ── end BirdNET+ V3.0 ──
+            # --- Field Mode W2-onset-srp ---
+            localization_onset_clustering_enabled=_env_bool("MINIMAPPR_LOCALIZATION_ONSET_CLUSTERING_ENABLED", False),
+            onset_analysis_pre_trigger_seconds=_env_float("MINIMAPPR_ONSET_ANALYSIS_PRE_TRIGGER_SECONDS", 0.3),
+            onset_analysis_post_trigger_seconds=_env_float("MINIMAPPR_ONSET_ANALYSIS_POST_TRIGGER_SECONDS", 1.2),
+            onset_buffer_wait_max_seconds=_env_float("MINIMAPPR_ONSET_BUFFER_WAIT_MAX_SECONDS", 3.0),
+            onset_subband_count=_env_int("MINIMAPPR_ONSET_SUBBAND_COUNT", 32),
+            onset_hop_seconds=_env_float("MINIMAPPR_ONSET_HOP_SECONDS", 0.01),
+            onset_band_min_hz=_env_float("MINIMAPPR_ONSET_BAND_MIN_HZ", 500.0),
+            onset_band_max_hz=_env_float("MINIMAPPR_ONSET_BAND_MAX_HZ", 12000.0),
+            onset_flux_threshold_mad_multiplier=_env_float("MINIMAPPR_ONSET_FLUX_THRESHOLD_MAD_MULTIPLIER", 4.0),
+            onset_min_separation_seconds=_env_float("MINIMAPPR_ONSET_MIN_SEPARATION_SECONDS", 0.04),
+            onset_max_onsets_per_window=_env_int("MINIMAPPR_ONSET_MAX_ONSETS_PER_WINDOW", 16),
+            onset_frame_seconds=_env_float("MINIMAPPR_ONSET_FRAME_SECONDS", 0.08),
+            onset_frame_pre_roll_seconds=_env_float("MINIMAPPR_ONSET_FRAME_PRE_ROLL_SECONDS", 0.01),
+            onset_active_band_snr_db=_env_float("MINIMAPPR_ONSET_ACTIVE_BAND_SNR_DB", 6.0),
+            onset_narrowband_bandwidth_hz=_env_float("MINIMAPPR_ONSET_NARROWBAND_BANDWIDTH_HZ", 300.0),
+            onset_srp_azimuth_step_deg=_env_float("MINIMAPPR_ONSET_SRP_AZIMUTH_STEP_DEG", 2.0),
+            onset_srp_elevation_step_deg=_env_float("MINIMAPPR_ONSET_SRP_ELEVATION_STEP_DEG", 10.0),
+            onset_srp_grid_min_range_m=_env_float("MINIMAPPR_ONSET_SRP_GRID_MIN_RANGE_M", 1.0),
+            onset_srp_grid_max_range_m=_env_float("MINIMAPPR_ONSET_SRP_GRID_MAX_RANGE_M", 300.0),
+            onset_srp_grid_ring_count=_env_int("MINIMAPPR_ONSET_SRP_GRID_RING_COUNT", 40),
+            onset_srp_peaks_per_frame=_env_int("MINIMAPPR_ONSET_SRP_PEAKS_PER_FRAME", 3),
+            onset_srp_peak_min_relative_height=_env_float("MINIMAPPR_ONSET_SRP_PEAK_MIN_RELATIVE_HEIGHT", 0.6),
+            onset_cluster_radius_m=_env_float("MINIMAPPR_ONSET_CLUSTER_RADIUS_M", 3.0),
+            onset_cluster_range_fraction=_env_float("MINIMAPPR_ONSET_CLUSTER_RANGE_FRACTION", 0.2),
+            onset_cluster_angle_deg=_env_float("MINIMAPPR_ONSET_CLUSTER_ANGLE_DEG", 10.0),
+            onset_cluster_min_weight_fraction=_env_float("MINIMAPPR_ONSET_CLUSTER_MIN_WEIGHT_FRACTION", 0.15),
+            onset_cluster_max_count=_env_int("MINIMAPPR_ONSET_CLUSTER_MAX_COUNT", 4),
+            onset_echo_min_lag_seconds=_env_float("MINIMAPPR_ONSET_ECHO_MIN_LAG_SECONDS", 0.003),
+            onset_echo_max_lag_seconds=_env_float("MINIMAPPR_ONSET_ECHO_MAX_LAG_SECONDS", 0.03),
+            onset_echo_min_independent_fraction=_env_float("MINIMAPPR_ONSET_ECHO_MIN_INDEPENDENT_FRACTION", 0.5),
+            onset_level_consistency_margin_db=_env_float("MINIMAPPR_ONSET_LEVEL_CONSISTENCY_MARGIN_DB", 8.0),
+            onset_persistence_min_independent_onsets=_env_int("MINIMAPPR_ONSET_PERSISTENCE_MIN_INDEPENDENT_ONSETS", 2),
+            onset_dedupe_ttl_seconds=_env_float("MINIMAPPR_ONSET_DEDUPE_TTL_SECONDS", 6.0),
+            # --- end Field Mode W2-onset-srp ---
             detection_min_confidence=_env_float("MINIMAPPR_DETECTION_MIN_CONFIDENCE", 0.4),
             cop_detections_max_items=_env_int("MINIMAPPR_COP_DETECTIONS_MAX_ITEMS", 150),
             cop_tracks_max_items=_env_int("MINIMAPPR_COP_TRACKS_MAX_ITEMS", 150),
@@ -2662,6 +2836,45 @@ class Settings:
             num_threads=self.birdnet_v3_num_threads,
         )
     # ── end BirdNET+ V3.0 ──
+
+    # --- Field Mode W2-onset-srp ---
+    def onset_srp_clustering_config(self) -> OnsetSrpClusteringConfig:
+        return OnsetSrpClusteringConfig(
+            enabled=self.localization_onset_clustering_enabled,
+            analysis_pre_trigger_seconds=self.onset_analysis_pre_trigger_seconds,
+            analysis_post_trigger_seconds=self.onset_analysis_post_trigger_seconds,
+            buffer_wait_max_seconds=self.onset_buffer_wait_max_seconds,
+            subband_count=self.onset_subband_count,
+            hop_seconds=self.onset_hop_seconds,
+            band_min_hz=self.onset_band_min_hz,
+            band_max_hz=self.onset_band_max_hz,
+            flux_threshold_mad_multiplier=self.onset_flux_threshold_mad_multiplier,
+            min_separation_seconds=self.onset_min_separation_seconds,
+            max_onsets_per_window=self.onset_max_onsets_per_window,
+            frame_seconds=self.onset_frame_seconds,
+            frame_pre_roll_seconds=self.onset_frame_pre_roll_seconds,
+            active_band_snr_db=self.onset_active_band_snr_db,
+            narrowband_bandwidth_hz=self.onset_narrowband_bandwidth_hz,
+            srp_azimuth_step_deg=self.onset_srp_azimuth_step_deg,
+            srp_elevation_step_deg=self.onset_srp_elevation_step_deg,
+            srp_grid_min_range_m=self.onset_srp_grid_min_range_m,
+            srp_grid_max_range_m=self.onset_srp_grid_max_range_m,
+            srp_grid_ring_count=self.onset_srp_grid_ring_count,
+            srp_peaks_per_frame=self.onset_srp_peaks_per_frame,
+            srp_peak_min_relative_height=self.onset_srp_peak_min_relative_height,
+            cluster_radius_m=self.onset_cluster_radius_m,
+            cluster_range_fraction=self.onset_cluster_range_fraction,
+            cluster_angle_deg=self.onset_cluster_angle_deg,
+            cluster_min_weight_fraction=self.onset_cluster_min_weight_fraction,
+            cluster_max_count=self.onset_cluster_max_count,
+            echo_min_lag_seconds=self.onset_echo_min_lag_seconds,
+            echo_max_lag_seconds=self.onset_echo_max_lag_seconds,
+            echo_min_independent_fraction=self.onset_echo_min_independent_fraction,
+            level_consistency_margin_db=self.onset_level_consistency_margin_db,
+            persistence_min_independent_onsets=self.onset_persistence_min_independent_onsets,
+            dedupe_ttl_seconds=self.onset_dedupe_ttl_seconds,
+        )
+    # --- end Field Mode W2-onset-srp ---
 
     def storage_config(self) -> StorageConfig:
         return StorageConfig(

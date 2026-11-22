@@ -368,6 +368,33 @@ def build_pipeline_graph(
         add_edge(doa_id, solve_id, kind="audio", label="bearing")
     if tdoa_enabled:
         add_edge("loc:site:tdoa", solve_id, kind="audio", label="TDOA")
+    # --- Field Mode W2-onset-srp ---
+    onset_id = "loc:site:onset_srp"
+    add_node(
+        id=onset_id,
+        stage=PipelineStageKind.LOCALIZATION,
+        column="localize",
+        lane="site",
+        title="Onset SRP clustering",
+        subtitle="per-note frames → SRP peaks → clusters → LM",
+        modality="audio",
+        enabled=bool(settings.localization_onset_clustering_enabled),
+        params=[
+            _param("Enabled", bool(settings.localization_onset_clustering_enabled), "localization_onset_clustering_enabled"),
+            _param("Frame", float(settings.onset_frame_seconds), "onset_frame_seconds", suffix=" s"),
+            _param("Post-trigger span", float(settings.onset_analysis_post_trigger_seconds), "onset_analysis_post_trigger_seconds", suffix=" s"),
+            _param("Sub-bands", int(settings.onset_subband_count), "onset_subband_count"),
+            _param("Narrowband → envelope", float(settings.onset_narrowband_bandwidth_hz), "onset_narrowband_bandwidth_hz", suffix=" Hz"),
+            _param("Cluster radius", float(settings.onset_cluster_radius_m), "onset_cluster_radius_m", suffix=" m"),
+            _param("Max clusters", int(settings.onset_cluster_max_count), "onset_cluster_max_count"),
+        ],
+        status=_onset_srp_status(metrics, fusion_available, bool(settings.localization_onset_clustering_enabled)),
+        link="/settings/config#localization",
+    )
+    for gate_id in gate_ids:
+        add_edge(gate_id, onset_id, kind="audio", label="onset frames")
+    add_edge(onset_id, solve_id, kind="metadata", label="clusters")
+    # --- end Field Mode W2-onset-srp ---
 
     # ── Site: beamform ──────────────────────────────────────────────────────
     beam_id = "beam:site"
@@ -870,6 +897,27 @@ def _classify_queue_status(queues: dict, metrics: dict, fusion_available: bool) 
             _param("Shed (backpressure)", shed),
         ],
     )
+
+
+# --- Field Mode W2-onset-srp ---
+def _onset_srp_status(metrics: dict, fusion_available: bool, enabled: bool) -> PipelineStageStatus:
+    if not enabled:
+        return PipelineStageStatus(health="idle", summary="disabled (legacy single-window solve)")
+    if not fusion_available:
+        return PipelineStageStatus(health="unknown")
+    windows = int(metrics.get("onset_clustering_window_count") or 0)
+    accepted = int(metrics.get("onset_clustering_accepted_cluster_count") or 0)
+    return PipelineStageStatus(
+        health="ok",
+        summary=(f"{accepted} birds from {windows} windows" if windows else "enabled; no windows yet"),
+        metrics=[
+            _param("Windows", windows),
+            _param("Accepted clusters", accepted),
+            _param("Tentative clusters", int(metrics.get("onset_clustering_tentative_cluster_count") or 0)),
+            _param("Echo clusters", int(metrics.get("onset_clustering_echo_cluster_count") or 0)),
+        ],
+    )
+# --- end Field Mode W2-onset-srp ---
 
 
 def _tdoa_status(metrics: dict, fusion_available: bool) -> PipelineStageStatus:
