@@ -59,14 +59,17 @@ RENDERS = {
     "one_bird_non_planar": ("one_bird_two_bouts", NON_PLANAR_NODE_ORIGINS_M),
 }
 
-# (render, node subset or None, use the first case's consumed onsets)
+# Attribution level evidence (S5) at the server default audibility floor.
+ATTRIBUTION_AUDIBLE_SNR_DB = 3.0
+
+# (render, node subset or None, consume the onsets of an earlier case, attach attribution evidence)
 CASE_DESCRIPTORS = (
-    {"render": "one_bird", "nodes": None, "consume_from_case": None},
-    {"render": "one_bird", "nodes": ["node-a"], "consume_from_case": None},
-    {"render": "overlap", "nodes": None, "consume_from_case": None},
-    {"render": "trunk_echo", "nodes": None, "consume_from_case": None},
-    {"render": "one_bird_non_planar", "nodes": None, "consume_from_case": None},
-    {"render": "one_bird", "nodes": None, "consume_from_case": 0},
+    {"render": "one_bird", "nodes": None, "consume_from_case": None, "attribution": False},
+    {"render": "one_bird", "nodes": ["node-a"], "consume_from_case": None, "attribution": False},
+    {"render": "overlap", "nodes": None, "consume_from_case": None, "attribution": True},
+    {"render": "trunk_echo", "nodes": None, "consume_from_case": None, "attribution": False},
+    {"render": "one_bird_non_planar", "nodes": None, "consume_from_case": None, "attribution": True},
+    {"render": "one_bird", "nodes": None, "consume_from_case": 0, "attribution": False},
 )
 
 
@@ -103,8 +106,9 @@ def _b64(values) -> str:
     return base64.b64encode(np.asarray(values, dtype="<f8").tobytes()).decode("ascii")
 
 
-def oracle_case(signals, positions, node_ids, consumed) -> dict:
+def oracle_case(signals, positions, node_ids, consumed, attribution_audible_snr_db=None) -> dict:
     return {
+        "attribution_audible_snr_db": attribution_audible_snr_db,
         "kind": "window",
         "sample_rate_hz": SAMPLE_RATE_HZ,
         "sound_speed_mps": SOUND_SPEED_MPS,
@@ -199,7 +203,22 @@ def _finite_or_none(value):
     return None if value is None or not np.isfinite(value) else float(value)
 
 
-def run_python_window(signals, positions, node_ids, consumed) -> dict:
+def _evidence_json(evidence) -> dict | None:
+    if evidence is None:
+        return None
+    return {
+        "node_band_snr_db": {node: float(v) for node, v in evidence.node_band_snr_db.items()},
+        "node_distances_m": {node: float(v) for node, v in evidence.node_distances_m.items()},
+        "node_onset_arrivals": {
+            node: [[int(a.span_sample), float(a.band_min_hz), float(a.band_max_hz)] for a in arrivals]
+            for node, arrivals in evidence.node_onset_arrivals.items()
+        },
+        "fitted_source_level_db": _finite_or_none(evidence.fitted_source_level_db),
+        "spreading_residual_db": _finite_or_none(evidence.spreading_residual_db),
+    }
+
+
+def run_python_window(signals, positions, node_ids, consumed, attribution_audible_snr_db=None) -> dict:
     record = {"onsets": [], "frames": [], "peaks": [], "cluster_summaries": [], "grid": None}
     with _traced_stages(record):
         result = onset_module.localize_onset_clusters(
@@ -212,6 +231,7 @@ def run_python_window(signals, positions, node_ids, consumed) -> dict:
             interpolation_factor=INTERPOLATION_FACTOR,
             far_field_default_range_m=FAR_FIELD_DEFAULT_RANGE_M,
             consumed_onset_samples_by_node={node: tuple(samples) for node, samples in consumed.items()},
+            attribution_audible_snr_db=attribution_audible_snr_db,
         )
     nodes = sorted(set(node_ids.values()))
     grid = record["grid"]
@@ -272,6 +292,7 @@ def run_python_window(signals, positions, node_ids, consumed) -> dict:
             "loudest_node_id": cluster.loudest_node_id,
             "height_resolution": cluster.height_resolution,
             "range_interval_m": list(cluster.range_interval_m) if cluster.range_interval_m is not None else None,
+            "attribution_evidence": _evidence_json(cluster.attribution_evidence),
         }
         for cluster in result.clusters
     ]
@@ -285,14 +306,15 @@ def run_python_window(signals, positions, node_ids, consumed) -> dict:
 
 
 def case_inputs(descriptors, audio_by_render, sensors_by_render, results):
-    """Yield (descriptor, signals, positions, node_ids, consumed) per case."""
+    """Yield (descriptor, signals, positions, node_ids, consumed, attribution floor) per case."""
     for descriptor in descriptors:
         signals, positions, node_ids = window_inputs(
             audio_by_render[descriptor["render"]], sensors_by_render[descriptor["render"]], descriptor["nodes"]
         )
         source = descriptor["consume_from_case"]
         consumed = {} if source is None else results[source]["consumed_onset_samples_by_node"]
-        yield descriptor, signals, positions, node_ids, consumed
+        audible = ATTRIBUTION_AUDIBLE_SNR_DB if descriptor["attribution"] else None
+        yield descriptor, signals, positions, node_ids, consumed, audible
 
 
 def build_goldens() -> dict[str, np.ndarray]:
@@ -303,8 +325,8 @@ def build_goldens() -> dict[str, np.ndarray]:
         arrays[f"audio_{render}"] = audio[render]
         arrays[f"audio_{render}_sensors"] = np.asarray(json.dumps(sensors[render]))
     results: list[dict] = []
-    for index, (_, signals, positions, node_ids, consumed) in enumerate(case_inputs(CASE_DESCRIPTORS, audio, sensors, results)):
-        results.append(run_python_window(signals, positions, node_ids, consumed))
+    for index, (_, signals, positions, node_ids, consumed, audible) in enumerate(case_inputs(CASE_DESCRIPTORS, audio, sensors, results)):
+        results.append(run_python_window(signals, positions, node_ids, consumed, audible))
         arrays[f"case{index}_result_json"] = np.asarray(json.dumps(results[-1]))
     return arrays
 

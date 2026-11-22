@@ -119,6 +119,27 @@ def _compare_trace(actual: dict, expected: dict, label: str) -> None:
         _close(cluster_actual["weight"], cluster_expected["weight"], SPECTRAL_RELATIVE_TOLERANCE, cluster_label)
 
 
+def _compare_evidence(actual: dict | None, expected: dict | None, label: str) -> None:
+    """Attribution level evidence: arrivals exact, SNRs spectral, geometry-derived values at 1e-5."""
+    if expected is None:
+        assert actual is None, f"{label}: unexpected attribution evidence"
+        return
+    label = f"{label} attribution evidence"
+    assert actual is not None, label
+    for key in ("node_band_snr_db", "node_distances_m", "node_onset_arrivals"):
+        assert sorted(actual[key]) == sorted(expected[key]), f"{label} {key} nodes"
+    for node, arrivals in expected["node_onset_arrivals"].items():
+        assert [a[0] for a in actual["node_onset_arrivals"][node]] == [a[0] for a in arrivals], f"{label} arrivals {node}"
+    snr_nodes = sorted(expected["node_band_snr_db"])
+    _close([actual["node_band_snr_db"][n] for n in snr_nodes], [expected["node_band_snr_db"][n] for n in snr_nodes],
+           SPECTRAL_RELATIVE_TOLERANCE, f"{label} band SNR")
+    distance_nodes = sorted(expected["node_distances_m"])
+    _close([actual["node_distances_m"][n] for n in distance_nodes], [expected["node_distances_m"][n] for n in distance_nodes],
+           GEOMETRY_RELATIVE_TOLERANCE, f"{label} distances")
+    for key in ("fitted_source_level_db", "spreading_residual_db"):
+        _close(actual[key], expected[key], GEOMETRY_RELATIVE_TOLERANCE, f"{label} {key}")
+
+
 def _negative_log(value):
     return None if value is None else -np.log(max(float(value), np.finfo(float).tiny))
 
@@ -147,6 +168,7 @@ def _compare_result(index: int, actual: dict, expected: dict) -> None:
             GEOMETRY_RELATIVE_TOLERANCE,
             f"{cluster_label} tdoa_s",
         )
+        _compare_evidence(cluster_actual["attribution_evidence"], cluster_expected["attribution_evidence"], cluster_label)
         _close(
             _negative_log(cluster_actual["confidence"]),
             _negative_log(cluster_expected["confidence"]),
@@ -158,7 +180,7 @@ def _compare_result(index: int, actual: dict, expected: dict) -> None:
 @pytest.mark.skipif(not cargo_is_available(), reason="cargo toolchain required to build the Rust sidecar oracle")
 def test_rust_onset_clustering_matches_python_goldens() -> None:
     inputs, goldens = _load_goldens()
-    cases = [oracle_case(signals, positions, node_ids, consumed) for _, signals, positions, node_ids, consumed in inputs]
+    cases = [oracle_case(*case[1:]) for case in inputs]
     completed = subprocess.run(
         [str(build_rust_sidecar_binary()), "onset-clustering-oracle"],
         input=json.dumps({"cases": cases}),
@@ -174,5 +196,5 @@ def test_rust_onset_clustering_matches_python_goldens() -> None:
 
 def test_python_onset_clustering_still_matches_goldens() -> None:
     inputs, goldens = _load_goldens()
-    for index, ((_, signals, positions, node_ids, consumed), golden) in enumerate(zip(inputs, goldens)):
-        _compare_result(index, run_python_window(signals, positions, node_ids, consumed), golden)
+    for index, (case, golden) in enumerate(zip(inputs, goldens)):
+        _compare_result(index, run_python_window(*case[1:]), golden)

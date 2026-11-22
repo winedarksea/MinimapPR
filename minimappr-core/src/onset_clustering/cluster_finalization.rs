@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 
+use super::attribution_evidence::{build_cluster_attribution_evidence, AttributionEvidenceContext};
 use super::config::OnsetClusteringConfig;
 use super::echo_checks::{
     level_consistency_holds, near_node_fix_led_only_by_that_node, near_node_level_gradient_holds,
@@ -164,6 +165,20 @@ pub(super) fn finalize_cluster(
         &position,
         range_unobservable,
     );
+    let attribution_evidence = input.attribution_audible_snr_db.map(|audible_snr_db| {
+        build_cluster_attribution_evidence(
+            &position,
+            &led_frames,
+            &AttributionEvidenceContext {
+                node_histories: &context.histories,
+                node_positions_m: &context.node_centroids,
+                sound_speed_mps: input.sound_speed_mps,
+                sample_rate_hz: input.sample_rate_hz,
+                frame_samples: context.frame_samples,
+                audible_snr_db,
+            },
+        )
+    });
     let frame_indices = cluster.frame_indices();
     let envelope_flags: Vec<bool> = frame_indices
         .iter()
@@ -215,6 +230,7 @@ pub(super) fn finalize_cluster(
         loudest_node_id: loudest,
         height_resolution: Some(resolved.height_resolution.to_string()),
         range_interval_m: resolved.range_interval_m,
+        attribution_evidence,
     }
 }
 

@@ -13,6 +13,7 @@
 //! `onset-clustering-oracle` subcommand (see
 //! `docs/field_mode_progress/port_server_track_onset.md`).
 
+pub mod attribution_evidence;
 pub mod bounded_trf;
 mod bounded_trf_step;
 mod cluster_finalization;

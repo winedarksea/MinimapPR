@@ -47,6 +47,8 @@ pub struct OnsetClusteringInput {
     pub far_field_default_range_m: f64,
     /// Onsets already localized by an overlapping earlier window, per node.
     pub consumed_onset_samples_by_node: BTreeMap<String, Vec<usize>>,
+    /// Set (attribution on) to attach per-node level evidence to every cluster.
+    pub attribution_audible_snr_db: Option<f64>,
 }
 
 /// Localize every onset cluster in one window. The window's strongest cluster

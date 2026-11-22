@@ -94,6 +94,7 @@ fn window(nodes: &[(&str, Point3)], bird_m: Point3) -> OnsetClusteringInput {
         interpolation_factor: 4,
         far_field_default_range_m: 50.0,
         consumed_onset_samples_by_node: BTreeMap::new(),
+        attribution_audible_snr_db: None,
     };
     for (node, origin) in nodes {
         for (channel, offset) in tetra_offsets().iter().enumerate() {

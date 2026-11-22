@@ -11,6 +11,7 @@
 use std::collections::BTreeMap;
 
 use base64::Engine;
+use minimappr_core::onset_clustering::attribution_evidence::ClusterAttributionEvidence;
 use minimappr_core::onset_clustering::trace::OnsetClusteringTrace;
 use minimappr_core::onset_clustering::{
     localize_onset_clusters_traced, OnsetClusteringConfig, OnsetClusteringInput,
@@ -37,6 +38,8 @@ struct WindowCase {
     consumed_onset_samples_by_node: BTreeMap<String, Vec<usize>>,
     #[serde(default)]
     config: Value,
+    #[serde(default)]
+    attribution_audible_snr_db: Option<f64>,
 }
 
 fn decode_f64s(encoded: &str) -> Result<Vec<f64>, String> {
@@ -55,6 +58,18 @@ fn finite(value: f64) -> Value {
     } else {
         Value::Null
     }
+}
+
+fn evidence_json(evidence: &ClusterAttributionEvidence) -> Value {
+    json!({
+        "node_band_snr_db": evidence.node_band_snr_db,
+        "node_distances_m": evidence.node_distances_m,
+        "node_onset_arrivals": evidence.node_onset_arrivals.iter().map(|(node, arrivals)| {
+            (node.clone(), arrivals.iter().map(|a| json!([a.span_sample, a.band_min_hz, a.band_max_hz])).collect::<Vec<_>>())
+        }).collect::<BTreeMap<_, _>>(),
+        "fitted_source_level_db": evidence.fitted_source_level_db,
+        "spreading_residual_db": evidence.spreading_residual_db,
+    })
 }
 
 fn trace_json(trace: &OnsetClusteringTrace) -> Value {
@@ -115,6 +130,7 @@ fn run_window(case: WindowCase) -> Result<Value, String> {
         interpolation_factor: case.interpolation_factor,
         far_field_default_range_m: case.far_field_default_range_m,
         consumed_onset_samples_by_node: case.consumed_onset_samples_by_node,
+        attribution_audible_snr_db: case.attribution_audible_snr_db,
     };
     for sensor in case.sensors {
         let position = decode_f64s(&sensor.position_b64)?;
@@ -160,6 +176,7 @@ fn run_window(case: WindowCase) -> Result<Value, String> {
                 "loudest_node_id": c.loudest_node_id,
                 "height_resolution": c.height_resolution,
                 "range_interval_m": c.range_interval_m.map(|(near, far)| [near, far]),
+                "attribution_evidence": c.attribution_evidence.as_ref().map(evidence_json),
             })
         })
         .collect();

@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 
+use super::attribution_evidence::ClusterAttributionEvidence;
 use super::frame_correlation::PairCorrelationCurve;
 use super::srp_grid::{norm, Point3};
 
@@ -163,6 +164,8 @@ pub struct LocalizedOnsetCluster {
     pub height_resolution: Option<String>,
     /// SRP-supported range interval (m from the layout centroid); None = not judged.
     pub range_interval_m: Option<(f64, f64)>,
+    /// Per-node level evidence for attribution (S5); None unless requested.
+    pub attribution_evidence: Option<ClusterAttributionEvidence>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
