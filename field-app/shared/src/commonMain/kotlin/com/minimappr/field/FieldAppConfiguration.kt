@@ -14,6 +14,13 @@ data class FieldCaptureConfiguration(
      * capture thread without an overrun (which would be a TDOA gap).
      */
     val audioRecordBufferBlockCount: Int = 16,
+    /**
+     * How long stopping capture waits for the read thread to exit before
+     * releasing the recorder anyway. AudioRecord.stop() unblocks a blocking
+     * read, so this is normally one 20 ms block; the bound keeps a wedged
+     * audio HAL from hanging the main thread into an ANR.
+     */
+    val captureStopJoinTimeoutMilliseconds: Long = 500,
 )
 
 data class FieldNodeConfiguration(
@@ -21,8 +28,6 @@ data class FieldNodeConfiguration(
     val rollingBufferSeconds: Int = 30,
     /** Coarse session-clock tick driving heartbeats, joins and liveness. */
     val stateMachineTickIntervalMilliseconds: Long = 250,
-    /** Recent frames kept for the status UI (debug only, bounded). */
-    val recentOutboundFrameHistoryLimit: Int = 32,
 )
 
 data class FieldAppConfiguration(
