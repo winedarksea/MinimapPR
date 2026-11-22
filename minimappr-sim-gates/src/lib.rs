@@ -19,6 +19,7 @@ pub mod mesh_region_trials;
 pub mod srp_scene;
 pub mod srp_trials;
 pub mod statistics;
+pub mod thread_cpu_time;
 pub mod trial_geometry;
 pub mod gates;
 pub mod layout_chain;

@@ -88,6 +88,8 @@ impl GateOutcome {
     }
 
     /// Full report, including the exact command reproducing each failing seed.
+    /// `--include-ignored` because known-failure gates are `#[ignore]`d in
+    /// the PR subset, and a plain `cargo test` would silently skip them.
     pub fn report(&self, repro_test_target: &str) -> String {
         let mut lines = vec![format!(
             "gate {} over {} trials: {}",
@@ -104,7 +106,7 @@ impl GateOutcome {
         }
         for failure in &self.seed_failures {
             lines.push(format!(
-                "  SEED FAILURE {}: {}\n    reproduce: {GATE_SEED_ENVIRONMENT_VARIABLE}={} cargo test --release -p minimappr-sim-gates --test {repro_test_target} {} -- --nocapture",
+                "  SEED FAILURE {}: {}\n    reproduce: {GATE_SEED_ENVIRONMENT_VARIABLE}={} cargo test --release -p minimappr-sim-gates --test {repro_test_target} {} -- --exact --include-ignored --nocapture",
                 failure.seed, failure.message, failure.seed, self.gate_name
             ));
         }
@@ -136,4 +138,20 @@ where
     });
     let collected = results.into_inner().expect("trial results lock");
     seeds.iter().copied().zip(collected.into_iter().map(|value| value.expect("every trial ran"))).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Known-failure gates are `#[ignore]`d in the PR subset; a nightly
+    /// repro that omitted `--include-ignored` would run zero tests and pass.
+    #[test]
+    fn seed_repro_command_runs_ignored_gates() {
+        let mut outcome = GateOutcome::new("graceful_degradation", 1);
+        outcome.fail_seed(42, "example");
+        let report = outcome.report("statistical_accuracy");
+        let expected = "MINIMAPPR_SIM_GATES_SEED=42 cargo test --release -p minimappr-sim-gates --test statistical_accuracy graceful_degradation -- --exact --include-ignored";
+        assert!(report.contains(expected), "{report}");
+    }
 }
