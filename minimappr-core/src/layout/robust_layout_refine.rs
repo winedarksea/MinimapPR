@@ -122,6 +122,8 @@ pub fn solve_layout(
                 && m.node_j < node_count
                 && m.node_i != m.node_j
                 && m.sigma_m > 0.0
+                && m.distance_m.is_finite()
+                && m.sigma_m.is_finite()
         })
         .collect();
     let mut rejected = Vec::new();

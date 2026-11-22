@@ -106,7 +106,8 @@ pub struct ChirpArrival {
     pub picked_amplitude: f32,
     pub strongest_amplitude: f32,
     pub snr_db: f64,
-    /// Samples between the pick and the strongest peak (≥ 0).
+    /// Strongest peak minus pick, samples (negative when the strongest peak
+    /// was a limiter-boosted self-recording precursor before the pick).
     pub lead_before_strongest_samples: f64,
     pub precursor_rejected: bool,
     pub double_arrival_suspected: bool,
@@ -187,14 +188,46 @@ impl FirstArrivalDetector {
             * strongest
     }
 
-    fn precursor_lead_window_samples(&self, self_path_length_m: Option<f64>) -> f64 {
+    /// Body-path lead of the precursor over the airborne self path, samples.
+    fn body_air_lead_samples(&self, self_path_length_m: Option<f64>) -> f64 {
         let length = self_path_length_m.unwrap_or(DEFAULT_MAXIMUM_SELF_PATH_LENGTH_M);
-        let lead_s =
-            length / self.config.air_sound_speed_mps - length / SOUND_SPEED_IN_PHONE_BODY_MPS;
+        (length / self.config.air_sound_speed_mps - length / SOUND_SPEED_IN_PHONE_BODY_MPS)
+            * self.sample_rate_hz
+    }
+
+    fn precursor_lead_window_samples(&self, self_path_length_m: Option<f64>) -> f64 {
         // Interference with the airborne main lobe can move the apparent
         // precursor peak up to a main-lobe width earlier than its true lead.
-        (lead_s + self.config.precursor_lead_tolerance_s) * self.sample_rate_hz
+        self.body_air_lead_samples(self_path_length_m)
+            + self.config.precursor_lead_tolerance_s * self.sample_rate_hz
             + self.main_lobe_width_samples() as f64
+    }
+
+    /// Lags after the strongest peak where the airborne path must sit if the
+    /// strongest peak is a limiter-boosted precursor. `None` when that cannot
+    /// happen: with a known d_ii whose lead is under half a main lobe the
+    /// precursor merges into the airborne peak instead of forming its own.
+    /// Starting at the known lead keeps close hand/table reflections (which
+    /// follow the airborne peak by an arbitrary delay) out of the window.
+    fn airborne_after_precursor_lags(
+        &self,
+        self_path_length_m: Option<f64>,
+    ) -> Option<Range<usize>> {
+        let main_lobe = self.main_lobe_width_samples() as f64;
+        let tolerance = self.config.precursor_lead_tolerance_s * self.sample_rate_hz;
+        let window_end = self
+            .precursor_lead_window_samples(self_path_length_m)
+            .ceil() as usize
+            + 1;
+        if self_path_length_m.is_none() {
+            return Some(1..window_end);
+        }
+        let lead = self.body_air_lead_samples(self_path_length_m);
+        if lead < 0.5 * main_lobe {
+            return None;
+        }
+        let window_start = ((lead - tolerance).floor().max(1.0)) as usize;
+        Some(window_start..window_end)
     }
 
     /// Lag of the template autocorrelation's first minimum (≈ 1 / bandwidth).
@@ -280,11 +313,20 @@ impl FirstArrivalDetector {
             break;
         }
         // Self-recording: if limiting made the precursor the strongest peak,
-        // the airborne path is a comparable peak just after it (inside the
-        // lead window); room reflections at d_ii scale are far weaker.
-        if let Some(window) = precursor_window {
-            let window_end = (strongest_index + window.ceil() as usize + 1).min(end);
-            let later_airborne = ((strongest_index + 1)..window_end).rev().find(|&index| {
+        // the airborne path is the first comparable peak one body/air lead
+        // after it. Skipped when an earlier peak was already rejected as the
+        // precursor: then the strongest peak *is* the airborne path, and a
+        // later peak is a reflection.
+        let later_lags = match context {
+            ArrivalContext::SelfRecording { self_path_length_m } if !precursor_rejected => {
+                self.airborne_after_precursor_lags(self_path_length_m)
+            }
+            _ => None,
+        };
+        if let Some(lags) = later_lags {
+            let window_start = (strongest_index + lags.start).min(end);
+            let window_end = (strongest_index + lags.end).min(end);
+            let later_airborne = (window_start..window_end).find(|&index| {
                 let value = envelope[index];
                 value >= acceptance
                     && is_local_peak(envelope, index)
@@ -316,7 +358,8 @@ impl FirstArrivalDetector {
             picked_amplitude: envelope[picked_index],
             strongest_amplitude: strongest,
             snr_db,
-            lead_before_strongest_samples: (strongest_index - picked_index) as f64,
+            // Negative when the pick follows a limiter-boosted precursor.
+            lead_before_strongest_samples: strongest_index as f64 - picked_index as f64,
             precursor_rejected,
             double_arrival_suspected,
         })
@@ -328,7 +371,8 @@ impl FirstArrivalDetector {
         let lag = self
             .autocorrelation_envelope
             .iter()
-            .position(|v| *v < fraction)?;
+            .position(|v| *v < fraction)
+            .filter(|lag| *lag > 0)?; // fraction > 1 would put the crossing before lag 0
         let (inside, outside) = (
             self.autocorrelation_envelope[lag - 1],
             self.autocorrelation_envelope[lag],

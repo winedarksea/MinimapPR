@@ -6,6 +6,13 @@
 //! and a sudden GPS jump cannot drag the map; fixes taken in clearings
 //! tighten the anchor and the group coasts on them through dense woods.
 //! When the group walks, process noise opens up so the anchor follows.
+//!
+//! Contract: every fit must use the *same* local layout frame. A fresh
+//! `solve_layout` comes out of MDS in an arbitrary rotation and handedness,
+//! so align each new layout onto the previous one first (e.g.
+//! `weighted_kabsch_2d` against the last layout, mirror allowed); otherwise
+//! frame changes look like anchor rotations and chirality flips, and a
+//! still group's near-zero process noise would refuse to follow them.
 
 use std::f64::consts::{PI, TAU};
 
