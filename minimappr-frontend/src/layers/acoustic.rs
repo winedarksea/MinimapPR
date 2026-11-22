@@ -1,4 +1,4 @@
-use crate::map::bindings::{ensure_layer, remove_layer, set_layer_data};
+use crate::map::bindings::{ensure_layer, json_value_to_js, remove_layer, set_layer_data};
 use crate::state::AppState;
 use leptos::prelude::*;
 
@@ -76,12 +76,7 @@ pub fn mount(state: &AppState) {
             "type": "FeatureCollection",
             "features": features,
         });
-        if let (Ok(spec), Ok(data)) = (
-            serde_wasm_bindgen::to_value(&acoustic_layer_spec()),
-            serde_wasm_bindgen::to_value(&collection),
-        ) {
-            ensure_layer(ACOUSTIC_MAP_LAYER_ID, &spec);
-            set_layer_data(ACOUSTIC_MAP_LAYER_ID, &data);
-        }
+        ensure_layer(ACOUSTIC_MAP_LAYER_ID, &json_value_to_js(&acoustic_layer_spec()));
+        set_layer_data(ACOUSTIC_MAP_LAYER_ID, &json_value_to_js(&collection));
     });
 }

@@ -31,8 +31,13 @@
   const _pendingLayerData = {};
   // isStyleLoaded() is false while *any* source loads, after the one-shot "load"
   // event has fired; waiting on "load" then never retries (a second layer added
-  // right after a first one was silently dropped). Poll instead.
+  // right after a first one was silently dropped). Poll instead, but coalesce:
+  // one pending upsert per layer (latest wins) and one shared timer, so repeated
+  // calls never stack timer chains that replay stale/empty data out of order,
+  // and removeLayer() cancels a queued upsert instead of it resurrecting the layer.
   const STYLE_RETRY_DELAY_MS = 100;
+  const _pendingUpsertsByLayerId = {};
+  let _pendingUpsertTimer = null;
   const _trackRemoveTimers = {};
   const _detectionRemoveTimers = {};
   const DETECTION_SOURCE_ID = "detections";
@@ -1003,20 +1008,45 @@
     if (!bounds.isEmpty()) map.fitBounds(bounds, { padding: 48, duration: 500 });
   }
 
+  function schedulePendingUpsertFlush() {
+    if (_pendingUpsertTimer !== null) return;
+    _pendingUpsertTimer = setTimeout(function () {
+      _pendingUpsertTimer = null;
+      const queued = Object.keys(_pendingUpsertsByLayerId).map(function (layerId) {
+        const entry = _pendingUpsertsByLayerId[layerId];
+        delete _pendingUpsertsByLayerId[layerId];
+        return entry;
+      });
+      // Entries that still find the style loading re-queue and re-arm the timer.
+      queued.forEach(function (entry) {
+        upsertGeojsonLayer(entry.sourceId, entry.layerId, entry.data, entry.spec);
+      });
+    }, STYLE_RETRY_DELAY_MS);
+  }
+
+  // data === null (ensureLayer) keeps an existing source's data; a new source
+  // takes data queued by setLayerData, else an empty collection.
   function upsertGeojsonLayer(sourceId, layerId, data, spec) {
     const map = ensureMap();
-    if (!map || !map.isStyleLoaded()) {
-      if (map) setTimeout(function () { upsertGeojsonLayer(sourceId, layerId, data, spec); }, STYLE_RETRY_DELAY_MS);
+    if (!map) return;
+    if (!map.isStyleLoaded()) {
+      const previous = _pendingUpsertsByLayerId[layerId];
+      _pendingUpsertsByLayerId[layerId] = {
+        sourceId: sourceId,
+        layerId: layerId,
+        data: data === null && previous ? previous.data : data,
+        spec: spec,
+      };
+      schedulePendingUpsertFlush();
       return;
     }
-    if (_pendingLayerData[sourceId]) {
-      data = _pendingLayerData[sourceId];
-      delete _pendingLayerData[sourceId];
-    }
-    if (map.getSource(sourceId)) {
-      map.getSource(sourceId).setData(data);
+    if (data === null && _pendingLayerData[sourceId]) data = _pendingLayerData[sourceId];
+    delete _pendingLayerData[sourceId];
+    const source = map.getSource(sourceId);
+    if (source) {
+      if (data !== null) source.setData(data);
     } else {
-      map.addSource(sourceId, { type: "geojson", data });
+      map.addSource(sourceId, { type: "geojson", data: data !== null ? data : { type: "FeatureCollection", features: [] } });
     }
     if (!map.getLayer(layerId)) {
       map.addLayer(Object.assign({ id: layerId, source: sourceId }, spec));
@@ -1026,13 +1056,18 @@
   function ensureLayer(layerId, specJson) {
     const spec = typeof specJson === "string" ? JSON.parse(specJson) : specJson;
     if (!spec || spec.type !== "geojson") return;
-    upsertGeojsonLayer(layerId, layerId, { type: "FeatureCollection", features: [] }, spec.layer || { type: "circle", paint: {} });
+    upsertGeojsonLayer(layerId, layerId, null, spec.layer || { type: "circle", paint: {} });
   }
 
   function setLayerData(layerId, dataJson) {
     const map = ensureMap();
     const data = typeof dataJson === "string" ? JSON.parse(dataJson) : dataJson;
-    if (map && map.getSource(layerId)) map.getSource(layerId).setData(data);
+    if (map && map.getSource(layerId)) {
+      map.getSource(layerId).setData(data);
+      return;
+    }
+    const queued = _pendingUpsertsByLayerId[layerId];
+    if (queued && queued.sourceId === layerId) queued.data = data;
     else _pendingLayerData[layerId] = data;
   }
 
@@ -1043,6 +1078,7 @@
 
   function removeLayer(layerId) {
     delete _pendingLayerData[layerId];
+    delete _pendingUpsertsByLayerId[layerId];
     const map = ensureMap();
     if (!map || !map.isStyleLoaded()) return;
     if (map.getLayer(layerId)) map.removeLayer(layerId);
@@ -1331,6 +1367,8 @@
       basemapPaintForTheme,
       canReuseExistingMap,
       canReattachParkedMap,
+      // Lets node tests drive the generic-layer path with a stub map.
+      useMapForTest: function (map) { _map = map; },
     },
   };
 }());

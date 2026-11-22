@@ -169,3 +169,46 @@ test("parked map is not reattached to the wrong container id", () => {
     false,
   );
 });
+
+function stubMap() {
+  const sources = {};
+  const layers = {};
+  return {
+    styleLoaded: false,
+    isStyleLoaded() { return this.styleLoaded; },
+    getSource(id) { return sources[id]; },
+    addSource(id, spec) {
+      sources[id] = { data: spec.data, setData(data) { this.data = data; } };
+    },
+    getLayer(id) { return layers[id]; },
+    addLayer(spec) { layers[spec.id] = spec; },
+    removeLayer(id) { delete layers[id]; },
+    removeSource(id) { delete sources[id]; },
+  };
+}
+
+test("generic layer upserts while the style loads coalesce and keep the latest data", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const interop = globalThis.mapInterop;
+  const map = stubMap();
+  interop._test.useMapForTest(map);
+  const spec = JSON.stringify({ type: "geojson", layer: { type: "circle", paint: {} } });
+  const first = { type: "FeatureCollection", features: [{ id: 1 }] };
+  const second = { type: "FeatureCollection", features: [{ id: 2 }] };
+  interop.ensureLayer("entity-a", spec);
+  interop.setLayerData("entity-a", JSON.stringify(first));
+  interop.ensureLayer("entity-a", spec);
+  interop.setLayerData("entity-a", JSON.stringify(second));
+  interop.ensureLayer("entity-b", spec);
+  interop.removeLayer("entity-b");
+  t.mock.timers.tick(500);
+  assert.equal(map.getSource("entity-a"), undefined); // still loading: nothing added yet
+  map.styleLoaded = true;
+  t.mock.timers.tick(500);
+  assert.deepEqual(map.getSource("entity-a").data, second); // latest wins, not reset to empty
+  assert.ok(map.getLayer("entity-a"));
+  assert.equal(map.getSource("entity-b"), undefined); // removal cancelled the queued add
+  interop.ensureLayer("entity-a", spec); // an existing source keeps its data
+  assert.deepEqual(map.getSource("entity-a").data, second);
+  interop._test.useMapForTest(null);
+});

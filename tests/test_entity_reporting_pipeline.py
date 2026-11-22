@@ -267,3 +267,41 @@ async def test_maintenance_emits_state_changes_and_expiry(tmp_path: Path) -> Non
         assert listing.enabled is True and listing.entities == []
     finally:
         await storage.close()
+
+
+async def test_grace_window_stop_flushes_held_notifications_exactly_once() -> None:
+    fired: list[str] = []
+
+    async def fire(detection, track):
+        fired.append(detection)
+
+    window = NotificationGraceWindow(grace_seconds=60.0, fire_rules=fire)
+    await window.hold_or_fire("ent-held", "det-held", None)
+    assert fired == [] and window.is_pending("ent-held")
+    await window.stop()  # shutdown must not drop the pending alert
+    assert fired == ["det-held"]
+    assert not window.is_pending("ent-held") and window.fired_on_shutdown_count == 1
+    await window.hold_or_fire("ent-held", "det-later", None)
+    assert fired == ["det-held"]  # already notified: never twice
+    assert window._timer_tasks == set()
+
+
+async def test_grace_window_stop_waits_for_in_flight_fire() -> None:
+    fire_started = asyncio.Event()
+    release_fire = asyncio.Event()
+    fired: list[str] = []
+
+    async def slow_fire(detection, track):
+        fire_started.set()
+        await release_fire.wait()
+        fired.append(detection)
+
+    window = NotificationGraceWindow(grace_seconds=GRACE_SECONDS, fire_rules=slow_fire)
+    await window.hold_or_fire("ent-slow", "det-slow", None)
+    await asyncio.wait_for(fire_started.wait(), timeout=2.0)
+    stop_task = asyncio.create_task(window.stop())
+    await asyncio.sleep(0)
+    assert not stop_task.done()
+    release_fire.set()
+    await asyncio.wait_for(stop_task, timeout=2.0)
+    assert fired == ["det-slow"] and window.fired_on_shutdown_count == 0
