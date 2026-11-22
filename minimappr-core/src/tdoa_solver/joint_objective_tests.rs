@@ -167,6 +167,8 @@ fn tetra_doa_plus_two_mono_phones_fixes_a_canopy_bird() {
     assert!(result.covariance_m2.trace().is_finite() && result.covariance_m2.trace() > 0.0);
     // 3 inter-node TDOAs + 3 DOA rows + 1 canopy row.
     assert_eq!(result.residual_count, 3 + 3 + 1);
+    // 3 TDOAs + 2 angular dof for the DOA, minus 3 position unknowns.
+    assert_eq!(result.degrees_of_freedom, 3 + 2 - 3);
 }
 
 #[test]

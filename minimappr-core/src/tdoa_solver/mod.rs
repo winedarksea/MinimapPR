@@ -23,8 +23,10 @@
 pub mod bearing_fusion;
 pub mod bounded_scalar_minimizer;
 pub mod canopy_height_prior;
+pub mod cartesian_initial_positions;
 pub mod cartesian_solve_quality;
 pub mod cartesian_tdoa_solve;
+pub mod far_field_model_selection;
 pub mod joint_objective;
 pub mod joint_residual_terms;
 pub mod levenberg_marquardt_driver;
@@ -38,6 +40,8 @@ pub mod spatial_constraint_terms;
 
 #[cfg(test)]
 mod cartesian_solver_tests;
+#[cfg(test)]
+mod degenerate_input_tests;
 #[cfg(test)]
 mod joint_objective_tests;
 #[cfg(test)]

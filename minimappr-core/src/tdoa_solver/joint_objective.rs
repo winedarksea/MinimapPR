@@ -64,7 +64,9 @@ pub struct JointSolveResult {
     pub covariance_m2: Matrix3<f64>,
     /// Σ of squared whitened residuals at the fix.
     pub chi_square: f64,
+    /// Rows in the objective (3 per bearing, 1 for the canopy prior).
     pub residual_count: usize,
+    /// Independent measurements − 3 (2 per bearing, canopy prior excluded).
     pub degrees_of_freedom: usize,
     pub converged_start_count: usize,
     /// Another basin within the χ² margin (mirror ambiguity), if any.
@@ -236,7 +238,9 @@ pub fn solve_joint_position(
         covariance_m2,
         chi_square: best.cost,
         residual_count,
-        degrees_of_freedom: residual_count.saturating_sub(POSITION_DIMENSIONS),
+        degrees_of_freedom: model
+            .independent_measurement_count()
+            .saturating_sub(POSITION_DIMENSIONS),
         converged_start_count: converged.len(),
         ambiguous_alternate_position_m,
     })
