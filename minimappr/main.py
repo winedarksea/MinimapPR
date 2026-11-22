@@ -31,6 +31,11 @@ from starlette.requests import ClientDisconnect
 
 from minimappr.api.binary_ingest import parse_binary_ingest_payload
 from minimappr.api.live import LiveEventHub
+from minimappr.api.entity_routes import (  # Field Mode W3-entity
+    entity_reporting_patch_errors,
+    entity_router,
+    is_entity_reporting_setting_key,
+)
 from minimappr.api.spool_consumer import IngestSpoolConsumer
 from minimappr.api.stream_consumer import IngestStreamConsumer, StreamConsumerConfig
 from minimappr.classifiers.availability import probe_backends
@@ -43,6 +48,10 @@ from minimappr.classifiers.routing import (
     routing_to_dict,
 )
 from minimappr.classifiers.birdnet_v3_patch_validation import birdnet_v3_patch_errors
+# --- Field Mode W3-birdnet-cutover ---
+from minimappr.classifiers.birdnet_threshold_set import birdnet_cutover_setting_errors
+from minimappr.classifiers.birdnet_v3_label_migration import birdnet_v3_rule_transform
+# --- end Field Mode W3-birdnet-cutover ---
 from minimappr.core.config_groups import group_flat_config
 from minimappr.core.pipeline_graph import build_pipeline_graph
 from minimappr.config import (
@@ -1678,6 +1687,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="MinimapPR", version="0.1.0", lifespan=lifespan)
+app.include_router(entity_router)  # Field Mode W3-entity: GET /api/v1/entities
 
 
 @app.middleware("http")
@@ -3153,6 +3163,31 @@ async def get_config(request: Request) -> dict:
         "birdnet_two_threshold_enabled": settings.birdnet_two_threshold_enabled,
         "birdnet_localize_to_track_min_confidence": settings.birdnet_localize_to_track_min_confidence,
         # --- end Field Mode W2-tracker ---
+        # --- Field Mode W3-birdnet-cutover ---
+        "birdnet_v3_trigger_min_confidence": settings.birdnet_v3_trigger_min_confidence,
+        "birdnet_v3_localize_to_track_min_confidence": settings.birdnet_v3_localize_to_track_min_confidence,
+        "birdnet_v3_species_display_min_belief": settings.birdnet_v3_species_display_min_belief,
+        "birdnet_v3_label_migration_enabled": settings.birdnet_v3_label_migration_enabled,
+        "birdnet_two_threshold_require_tracker_companions": settings.birdnet_two_threshold_require_tracker_companions,
+        # --- end Field Mode W3-birdnet-cutover ---
+        # --- Field Mode W3-entity ---
+        "entity_reporting_enabled": settings.entity_reporting_enabled,
+        "entity_reporting_label_categories": settings.entity_reporting_label_categories,
+        "entity_absorption_window_seconds": settings.entity_absorption_window_seconds,
+        "entity_absorption_max_fix_distance_m": settings.entity_absorption_max_fix_distance_m,
+        "entity_absorption_max_node_distance_m": settings.entity_absorption_max_node_distance_m,
+        "entity_absorption_max_bearing_difference_deg": settings.entity_absorption_max_bearing_difference_deg,
+        "entity_pinpointed_max_horizontal_uncertainty_m": settings.entity_pinpointed_max_horizontal_uncertainty_m,
+        "entity_spatial_state_hold_seconds": settings.entity_spatial_state_hold_seconds,
+        "entity_expiry_seconds": settings.entity_expiry_seconds,
+        "entity_bearing_default_half_width_deg": settings.entity_bearing_default_half_width_deg,
+        "entity_bearing_min_half_width_deg": settings.entity_bearing_min_half_width_deg,
+        "entity_bearing_max_half_width_deg": settings.entity_bearing_max_half_width_deg,
+        "entity_uncertainty_sigma_multiplier": settings.entity_uncertainty_sigma_multiplier,
+        "entity_notification_grace_seconds": settings.entity_notification_grace_seconds,
+        "entity_maintenance_interval_seconds": settings.entity_maintenance_interval_seconds,
+        "entity_max_tracked_entities": settings.entity_max_tracked_entities,
+        # --- end Field Mode W3-entity ---
         "localization_node_bearing_strength": settings.localization_node_bearing_strength,
         "multi_node_bearing_window_seconds": settings.multi_node_bearing_window_seconds,
         "multi_node_bearing_min_separation_deg": settings.multi_node_bearing_min_separation_deg,
@@ -3196,6 +3231,30 @@ async def get_config(request: Request) -> dict:
         "onset_persistence_min_independent_onsets": settings.onset_persistence_min_independent_onsets,
         "onset_dedupe_ttl_seconds": settings.onset_dedupe_ttl_seconds,
         # --- end Field Mode W2-onset-srp ---
+        # --- Field Mode W3-attribution ---
+        "onset_attribution_enabled": settings.onset_attribution_enabled,
+        "onset_attribution_audible_snr_db": settings.onset_attribution_audible_snr_db,
+        "onset_attribution_dominance_margin_db": settings.onset_attribution_dominance_margin_db,
+        "onset_attribution_spreading_tolerance_db": settings.onset_attribution_spreading_tolerance_db,
+        "onset_attribution_loco_enabled": settings.onset_attribution_loco_enabled,
+        "onset_attribution_loco_max_reruns_per_window": settings.onset_attribution_loco_max_reruns_per_window,
+        "onset_attribution_loco_min_confidence": settings.onset_attribution_loco_min_confidence,
+        "onset_attribution_loco_label_margin": settings.onset_attribution_loco_label_margin,
+        "onset_attribution_loco_collapse_ratio": settings.onset_attribution_loco_collapse_ratio,
+        "onset_attribution_loco_stft_frame_seconds": settings.onset_attribution_loco_stft_frame_seconds,
+        "onset_attribution_loco_noise_floor_percentile": settings.onset_attribution_loco_noise_floor_percentile,
+        "onset_attribution_loco_mask_active_snr_db": settings.onset_attribution_loco_mask_active_snr_db,
+        "onset_attribution_loco_mask_release_seconds": settings.onset_attribution_loco_mask_release_seconds,
+        "onset_attribution_loco_mask_max_seconds": settings.onset_attribution_loco_mask_max_seconds,
+        "onset_attribution_loco_mask_band_padding_hz": settings.onset_attribution_loco_mask_band_padding_hz,
+        "onset_attribution_promote_band_distinct_tentative": settings.onset_attribution_promote_band_distinct_tentative,
+        "trigger_noise_floor_relative_enabled": settings.trigger_noise_floor_relative_enabled,
+        "trigger_noise_floor_relative_snr_db": settings.trigger_noise_floor_relative_snr_db,
+        "trigger_noise_floor_rise_seconds": settings.trigger_noise_floor_rise_seconds,
+        "trigger_noise_floor_fall_seconds": settings.trigger_noise_floor_fall_seconds,
+        "trigger_noise_floor_warmup_seconds": settings.trigger_noise_floor_warmup_seconds,
+        "trigger_noise_floor_minimum_rms": settings.trigger_noise_floor_minimum_rms,
+        # --- end Field Mode W3-attribution ---
         "classifier_stage_timeout_seconds": settings.classifier_stage_timeout_seconds,
         "classification_stage_timeout_seconds": settings.classification_stage_timeout_seconds,
         "fusion_worker_count": settings.fusion_worker_count,
@@ -3332,6 +3391,8 @@ _SIDECAR_RESTART_REQUIRED_KEYS = {
     # --- Field Mode W2-tracker --- Python TrackManager is built once even in rust mode.
     *(key for key in CONFIG_PATCH_ALLOWLIST if _is_field_mode_tracker_key(key)),
     # --- end Field Mode W2-tracker ---
+    # Field Mode W3-entity: the entity coordinator is built with FusionNode.
+    *(key for key in CONFIG_PATCH_ALLOWLIST if is_entity_reporting_setting_key(key)),
 }
 
 
@@ -3372,6 +3433,8 @@ def _startup_snapshot_restart_required_keys() -> frozenset[str]:
     # --- Field Mode W2-tracker --- TrackManager / classifier built at startup.
     keys.update(key for key in CONFIG_PATCH_ALLOWLIST if _is_field_mode_tracker_key(key))
     # --- end Field Mode W2-tracker ---
+    # Field Mode W3-entity: entity coordinator built at startup.
+    keys.update(key for key in CONFIG_PATCH_ALLOWLIST if is_entity_reporting_setting_key(key))
     # Classification-priority knobs are read into FusionNode.__init__ (the queue
     # type itself is chosen there), so a live PATCH cannot reorder a queue that
     # already exists.
@@ -3547,6 +3610,36 @@ def _field_mode_tracker_patch_errors(coerced: dict[str, object], settings: Setti
     except (TypeError, ValueError) as exc:
         return [f"field mode tracker settings: {exc}"]
 # --- end Field Mode W2-tracker ---
+
+
+# --- Field Mode W3-birdnet-cutover ---
+_BIRDNET_CUTOVER_KEYS = frozenset(
+    {
+        "birdnet_v3_trigger_min_confidence",
+        "birdnet_v3_localize_to_track_min_confidence",
+        "birdnet_v3_species_display_min_belief",
+        "birdnet_v3_label_migration_enabled",
+        "birdnet_two_threshold_require_tracker_companions",
+        "birdnet_two_threshold_enabled",
+        "tracking_perched_filter_enabled",
+        "tracking_species_log_odds_enabled",
+    }
+)
+
+
+def _birdnet_cutover_patch_errors(coerced: dict[str, object], settings: Settings) -> list[str]:
+    if not _BIRDNET_CUTOVER_KEYS.intersection(coerced):
+        return []
+
+    class _MergedView:
+        def __getattr__(self, key: str) -> Any:
+            return coerced.get(key, getattr(settings, key))
+
+    try:
+        return birdnet_cutover_setting_errors(_MergedView())
+    except (TypeError, ValueError) as exc:
+        return [f"birdnet cutover settings: {exc}"]
+# --- end Field Mode W3-birdnet-cutover ---
 
 
 @app.patch("/api/v1/config")
@@ -3820,6 +3913,11 @@ async def patch_config(request: Request) -> dict:
     # --- Field Mode W2-tracker --- validated on the merged view.
     errors.extend(_field_mode_tracker_patch_errors(coerced, settings))
     # --- end Field Mode W2-tracker ---
+    # --- Field Mode W3-birdnet-cutover --- per-version thresholds + the
+    # two-threshold companion constraint, on the merged view.
+    errors.extend(_birdnet_cutover_patch_errors(coerced, settings))
+    # --- end Field Mode W3-birdnet-cutover ---
+    errors.extend(entity_reporting_patch_errors(coerced, settings))  # Field Mode W3-entity
     hass_enabled = bool(coerced.get("hass_enabled", settings.hass_enabled))
     hass_host = str(coerced.get("hass_mqtt_host", settings.hass_mqtt_host)).strip()
     if hass_enabled and not hass_host:
@@ -4214,7 +4312,11 @@ async def get_pipeline_graph(request: Request) -> PipelineGraph:
         fusion_status = await fusion_node.status()
         rules_engine = fusion_node.rules_engine
     if rules_engine is None:
-        rules_engine = ConfigRuleEngine(settings.rules_config_path)
+        # --- Field Mode W3-birdnet-cutover ---
+        rules_engine = ConfigRuleEngine(
+            settings.rules_config_path, rule_transform=birdnet_v3_rule_transform(settings)
+        )
+        # --- end Field Mode W3-birdnet-cutover ---
     rules = rules_engine.rules()
 
     sidecar_dsp_status: dict | None = None

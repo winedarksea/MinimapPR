@@ -1,0 +1,96 @@
+# W3-attribution: the test strategy's same-band pair. A loud robin and a quieter
+# tanager, both inside 2-5 kHz, 25 m apart, each near a different node, the
+# tanager starting 0.25 s into the robin's note so both sit in one 1 s
+# classification window, two bouts. Attribution must label robin at A and
+# tanager at B with no swaps.
+name = "onset_same_band_two_species"
+seed = 20261122
+duration_s = 10.0
+sample_rate_hz = 24000
+
+[site]
+origin_lat = 45.0
+origin_lon = -93.0
+origin_alt_m = 250.0
+start_time_ns = 1763700000000000000
+
+[environment]
+temperature_c = 18.0
+humidity_fraction = 0.6
+
+[ground]
+enabled = true
+reflection_coefficient = 0.5
+
+[ambient_noise]
+level_db_spl = 30.0
+
+[[devices]]
+device_id = "tetra-a"
+kind = "sirith_tetra"
+position_m = [0.0, 0.0, 1.5]
+
+[[devices]]
+device_id = "tetra-b"
+kind = "sirith_tetra"
+position_m = [20.0, 0.0, 1.5]
+
+[[devices]]
+device_id = "tetra-c"
+kind = "sirith_tetra"
+position_m = [10.0, 18.0, 1.5]
+
+[[sources]]
+individual_id = "robin-1"
+species = "American Robin"
+position_m = [4.0, 10.0, 4.0]
+
+[[sources.calls]]
+start_s = 1.0
+level_db_spl_at_1m = 90.0
+generator = { kind = "fm_sweep", start_frequency_hz = 2200.0, end_frequency_hz = 2800.0, duration_s = 0.6 }
+
+[[sources.calls]]
+start_s = 6.0
+level_db_spl_at_1m = 90.0
+generator = { kind = "fm_sweep", start_frequency_hz = 2200.0, end_frequency_hz = 2800.0, duration_s = 0.6 }
+
+[[sources]]
+individual_id = "tanager-1"
+species = "Scarlet Tanager"
+position_m = [23.0, -3.0, 4.0]
+
+[[sources.calls]]
+start_s = 1.25
+level_db_spl_at_1m = 86.0
+generator = { kind = "trill", carrier_frequency_hz = 4100.0, element_sweep_hz = 600.0, element_rate_hz = 14.0, duration_s = 0.6 }
+
+[[sources.calls]]
+start_s = 6.25
+level_db_spl_at_1m = 86.0
+generator = { kind = "trill", carrier_frequency_hz = 4100.0, element_sweep_hz = 600.0, element_rate_hz = 14.0, duration_s = 0.6 }
+
+[expectations]
+schema_version = 2
+
+[expectations.runtime]
+classifier_backend = "stub"
+replay_reference_nodes = false
+
+[expectations.runtime.settings_overrides]
+trigger_rms = 0.003
+classification_window_seconds = 1.0
+
+[expectations.classification]
+min_label_accuracy = 0.0
+match = "exact"
+
+[expectations.localization]
+min_event_recall = 0.0
+max_median_position_error_m = 1000.0
+max_p90_position_error_m = 1000.0
+far_field_distance_m = 120.0
+
+[expectations.entities]
+association_radius_m = 5.0
+association_time_slop_s = 2.0

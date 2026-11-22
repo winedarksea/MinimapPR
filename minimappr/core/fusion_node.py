@@ -55,6 +55,8 @@ from minimappr.core.environment import StaticEnvironmentProvider
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.cluster_registry import ClusterRegistry
 from minimappr.core.onset_srp_localization_stage import OnsetSrpLocalizationStage
+from minimappr.core.onset_cluster_attribution_stage import OnsetClusterAttributor  # Field Mode W3-attribution
+from minimappr.core.ingest_relative_trigger import NoiseFloorRelativeTrigger  # Field Mode W3-attribution
 from minimappr.core.ingest import EnvironmentUpdater, IngestProcessor
 from minimappr.core.live_ingest_state import LiveIngestState
 from minimappr.core.ambi_atob import alias_cutoff_from_positions
@@ -83,7 +85,16 @@ from minimappr.core.preprocessing import (
     create_localization_preprocessor,
 )
 from minimappr.core.reporting_fusion import ReportingFusionPolicy
+from minimappr.core.entity_reporting_coordinator import build_entity_reporting_coordinator  # Field Mode W3-entity
 from minimappr.core.retention import RetentionPolicy
+# --- Field Mode W3-birdnet-cutover ---
+from minimappr.classifiers.birdnet_threshold_set import warn_on_two_threshold_without_companions
+from minimappr.classifiers.birdnet_v3_label_migration import (
+    birdnet_v3_rule_transform,
+    migrate_permanent_labels_for_birdnet_v3,
+    migrate_taxonomy_for_birdnet_v3,
+)
+# --- end Field Mode W3-birdnet-cutover ---
 from minimappr.core.rules import ConfigRuleEngine, LoggingRuleActionHandler, WebsocketRuleActionHandler
 from minimappr.core.taxonomy import RuntimeTaxonomyProvider
 from minimappr.core.tracking import TrackManager
@@ -109,6 +120,7 @@ from minimappr.models import (
     TimeQuality,
     TrackState,
     TranscriptRecord,
+    spatial_display_mode_for_detection,
 )
 from minimappr.utils.audio import rms
 
@@ -162,6 +174,8 @@ class LocalizedCandidate:
     # Admission score in [0,1] computed once at classification-enqueue time (see
     # core/classification_priority.py). Ordering only; never affects inference.
     classification_significance: float = 0.0
+    # Field Mode W3-attribution: ClusterAttributionContext from the onset stage (None = no attribution).
+    onset_attribution_context: Any = None
 
 
 @dataclass(slots=True)
@@ -172,6 +186,7 @@ class DetectionProduct:
     suppression_reasons: list[str]
     pipeline_item_id: str
     event_time_ns: int
+    entity_id: str | None = None  # Field Mode W3-entity
 
 
 @dataclass(slots=True)
@@ -307,6 +322,18 @@ class FusionMetrics:
     onset_clustering_tentative_cluster_count: int = 0
     onset_clustering_echo_cluster_count: int = 0
     # --- end Field Mode W2-onset-srp ---
+    # --- Field Mode W3-attribution ---
+    onset_attribution_window_count: int = 0
+    onset_attribution_single_cluster_count: int = 0
+    onset_attribution_snr_gradient_settled_count: int = 0
+    onset_attribution_loco_settled_count: int = 0
+    onset_attribution_unlabelled_count: int = 0
+    onset_attribution_loco_rerun_count: int = 0
+    onset_attribution_loco_rerun_cap_hit_count: int = 0
+    onset_attribution_loco_rerun_total_ms: float = 0.0
+    onset_attribution_loco_rerun_max_ms: float = 0.0
+    onset_attribution_promoted_tentative_count: int = 0
+    # --- end Field Mode W3-attribution ---
 
 
 def _build_snippet_max_age_resolver(settings):
@@ -388,7 +415,14 @@ class FusionNode:
         self.coordinate_frame = coordinate_frame
         self.zone_matcher = zone_matcher
         self.taxonomy_provider = taxonomy_provider or RuntimeTaxonomyProvider.from_config_file(settings.taxonomy_config_path)
-        self.rules_engine = rules_engine or ConfigRuleEngine(settings.rules_config_path)
+        # --- Field Mode W3-birdnet-cutover --- v2.4-keyed config keeps
+        # matching under V3 (in-memory migration; no-op under v2.4).
+        self.rules_engine = rules_engine or ConfigRuleEngine(
+            settings.rules_config_path, rule_transform=birdnet_v3_rule_transform(settings)
+        )
+        migrate_taxonomy_for_birdnet_v3(self.taxonomy_provider, settings)
+        warn_on_two_threshold_without_companions(settings)
+        # --- end Field Mode W3-birdnet-cutover ---
         self.environment_provider = environment_provider or StaticEnvironmentProvider(
             temperature_c=settings.default_temperature_c,
             humidity_fraction=settings.default_humidity,
@@ -403,10 +437,18 @@ class FusionNode:
         self.localization_preprocessor = create_localization_preprocessor(self.localization_config)
         # --- Field Mode W2-onset-srp ---
         onset_config = settings.onset_srp_clustering_config()
-        self._onset_srp_stage = OnsetSrpLocalizationStage(onset_config) if onset_config.enabled else None
+        # Field Mode W3-attribution: the stage attaches attribution evidence when its flag is on.
+        attribution_config = settings.onset_cluster_attribution_config()
+        self._onset_srp_stage = (
+            OnsetSrpLocalizationStage(onset_config, attribution_config) if onset_config.enabled else None
+        )
         # --- end Field Mode W2-onset-srp ---
         self.retention_policy = RetentionPolicy(
-            permanent_labels=set(self.fusion_config.retention_permanent_labels),
+            # --- Field Mode W3-birdnet-cutover ---
+            permanent_labels=set(
+                migrate_permanent_labels_for_birdnet_v3(self.fusion_config.retention_permanent_labels, settings)
+            ),
+            # --- end Field Mode W3-birdnet-cutover ---
             security_long_confidence=self.fusion_config.retention_long_security_confidence,
         )
         self.reporting_policy = ReportingFusionPolicy(
@@ -416,6 +458,18 @@ class FusionNode:
             omni_suppression_max_distance_m=self.fusion_config.omni_suppression_max_distance_m,
             taxonomy_provider=self.taxonomy_provider,
         )
+        # --- Field Mode W3-entity --- None unless entity_reporting_enabled.
+        self.entity_reporting = build_entity_reporting_coordinator(
+            settings=settings,
+            storage=storage,
+            node_registry=registry,
+            tracker=tracker,
+            live_callback=live_callback,
+            coordinate_frame_getter=lambda: self.coordinate_frame,
+            fire_rules=self._evaluate_and_dispatch_rules,
+            taxonomy_provider=self.taxonomy_provider,
+        )
+        # --- end Field Mode W3-entity ---
         self._action_handlers = action_handlers or {
             "cop": WebsocketRuleActionHandler(live_callback),
             "log": LoggingRuleActionHandler(),
@@ -447,6 +501,12 @@ class FusionNode:
             node_position_kde_acceptance_radius_m=settings.node_position_kde_acceptance_radius_m,
             node_position_kde_rejection_streak_reset=settings.node_position_kde_rejection_streak_reset,
             gps_2d_altitude_mode=getattr(settings, "gps_2d_altitude_mode", "site_origin"),
+            # Field Mode W3-attribution: noise-floor-relative trigger (None = absolute gate only).
+            relative_trigger=(
+                NoiseFloorRelativeTrigger(settings.relative_trigger_config())
+                if settings.trigger_noise_floor_relative_enabled
+                else None
+            ),
         )
         self._classification_orchestrator = ClassificationOrchestrator(
             classifier=classifier,
@@ -471,6 +531,13 @@ class FusionNode:
                 reason="texture_gate_flagged",
             ),
         )
+        # --- Field Mode W3-attribution ---
+        self._onset_attributor = (
+            OnsetClusterAttributor(attribution_config, self._classification_orchestrator, lambda: self._metrics)
+            if attribution_config.enabled and self._onset_srp_stage is not None
+            else None
+        )
+        # --- end Field Mode W3-attribution ---
         self._detection_assembler = DetectionAssembler(
             storage=storage,
             coordinate_frame=coordinate_frame,
@@ -608,6 +675,8 @@ class FusionNode:
             for index in range(1)
         ]
         await self._start_omni_scanner()
+        if self.entity_reporting is not None:  # Field Mode W3-entity
+            await self.entity_reporting.start()
         self._started = True
 
     async def _start_omni_scanner(self) -> None:
@@ -725,6 +794,8 @@ class FusionNode:
         self._localization_workers.clear()
         self._classification_workers.clear()
         self._rules_workers.clear()
+        if self.entity_reporting is not None:  # Field Mode W3-entity
+            await self.entity_reporting.stop()
         self._stopping = False
 
     # ------------------------------------------------------------------
@@ -2085,6 +2156,10 @@ class FusionNode:
             if localized is None:
                 return detection_products
             self._metrics.beamform_renders += 1
+            if self._onset_attributor is not None and product.onset_attribution_context is not None:
+                localized = await self._onset_attributor.attribute(  # Field Mode W3-attribution
+                    localized, product.onset_attribution_context, event_time_ns=product.candidate.event_time_ns
+                )
             if extra_features:
                 localized.classification.features.update(extra_features)
             await self._maybe_trigger_speech_capture(
@@ -2672,14 +2747,34 @@ class FusionNode:
             "gdop": localization_gdop,
             "suppressed": False,
         }
-        decision = await self.reporting_policy.decide(
-            event_time_ns=product.candidate.event_time_ns,
-            source_node_id=source_node_id,
-            label=classified.classification.label,
-            reporting_modality=reporting_modality,
-            branch_details=branch_details,
-            source_position_m=product.omni_position_m,
-        )
+        # --- Field Mode W3-entity --- entity-keyed sliding window for its categories.
+        if self.entity_reporting is not None and self.entity_reporting.applies_to(classified.label_category):
+            decision = await self.entity_reporting.decide(
+                event_time_ns=product.candidate.event_time_ns,
+                source_node_id=source_node_id,
+                label=classified.classification.label,
+                reporting_modality=reporting_modality,
+                spatial_display_mode=spatial_display_mode_for_detection(
+                    reporting_modality=reporting_modality,
+                    feature_summary={
+                        "localization_range_projection_mode": localization_range_projection_mode,
+                        "localization_range_observability": localization_range_observability,
+                    },
+                ),
+                branch_details=branch_details,
+                localization_position_m=localization_position_m,
+                below_display_threshold=detection_is_below_display_threshold(classified.classification.features),
+            )
+        else:
+            decision = await self.reporting_policy.decide(
+                event_time_ns=product.candidate.event_time_ns,
+                source_node_id=source_node_id,
+                label=classified.classification.label,
+                reporting_modality=reporting_modality,
+                branch_details=branch_details,
+                source_position_m=product.omni_position_m,
+            )
+        # --- end Field Mode W3-entity ---
         if decision.action == "suppress":
             return None
         if decision.action == "enrich_existing":
@@ -2697,6 +2792,27 @@ class FusionNode:
                 snippet_expires_ns=None,
                 retention_tier=existing_detection.retention_tier.value,
             )
+            if decision.entity_id is not None and self.entity_reporting is not None:
+                # Field Mode W3-entity: absorbed bout still feeds partial binding.
+                await self.entity_reporting.feed_absorbed_bout_to_tracker(
+                    entity_id=decision.entity_id,
+                    capability_tier=capability_tier,
+                    event_time_ns=product.candidate.event_time_ns,
+                    localization_position_m=localization_position_m,
+                    localization_position_covariance_m2=localization_position_covariance_m2,
+                    classification_label=classified.classification.label,
+                    classification_confidence=classified.classification.confidence,
+                    classification_scores=classified.classification.scores,
+                    classification_features=dict(classified.classification.features),
+                    label_category=classified.label_category,
+                    iff_category=classified.iff_category,
+                    label_id=classified.label_id,
+                    selected_sensor_ids=product.selected_sensor_ids,
+                    source_node_id=source_node_id,
+                    reference_sensor=reference_sensor,
+                    tdoa_s=tdoa_s,
+                    environment=product.environment,
+                )
             return None
 
         if reporting_modality == "localized":
@@ -2783,6 +2899,7 @@ class FusionNode:
             suppression_reasons=assembly.suppression_reasons,
             pipeline_item_id=assembly.detection.id,
             event_time_ns=assembly.detection.timestamp_ns,
+            entity_id=decision.entity_id,
         )
 
     @staticmethod
@@ -2879,6 +2996,16 @@ class FusionNode:
         self._metrics.last_detection_emission_ns = time.time_ns()
         self._realtime_tracker.record_completed(event_time_ns=product.event_time_ns)
 
+        # --- Field Mode W3-entity --- rules fire once per entity (grace-aware).
+        if self.entity_reporting is not None and self.entity_reporting.applies_to(detection.label_category):
+            await self.entity_reporting.on_detection_surfaced(
+                detection=detection, track=track, entity_id=product.entity_id
+            )
+            return
+        # --- end Field Mode W3-entity ---
+        await self._evaluate_and_dispatch_rules(detection, track)
+
+    async def _evaluate_and_dispatch_rules(self, detection: DetectionEvent, track: TrackState | None) -> None:
         evaluations = await self.rules_engine.evaluate(detection=detection, track=track)
         for evaluation in evaluations:
             if not evaluation.matched:

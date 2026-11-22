@@ -277,6 +277,12 @@ async fn poll_once(state: AppState) {
     {
         state.zone_occupancy.set(occupancy);
     }
+    if let Some(listing) =
+        fetch_json::<crate::state::entities::BirdEntityListResponse>("/api/v1/entities").await
+    {
+        state.bird_entities_enabled.set(listing.enabled);
+        state.bird_entities.set(listing.entities);
+    }
     state
         .live_heatmap_refresh_tick
         .update(|tick| *tick = tick.wrapping_add(1));

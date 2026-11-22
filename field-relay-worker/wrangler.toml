@@ -1,0 +1,45 @@
+# Field Mode relay Worker. LOCAL DEVELOPMENT ONLY so far: there is no
+# deployed instance and no Cloudflare account wiring in this file. Run with
+#   npm install && npx wrangler d1 migrations apply JOIN_CODES_DB --local
+#   npx wrangler dev --local
+# Deploying needs a real D1 database id (`wrangler d1 create`) and a route;
+# both are deliberately absent.
+name = "minimappr-field-relay"
+main = "build/worker/shim.mjs"
+compatibility_date = "2026-10-01"
+
+[build]
+command = "worker-build --release"
+
+[[d1_databases]]
+binding = "JOIN_CODES_DB"
+database_name = "minimappr-field-relay"
+# Placeholder: local (miniflare) D1 ignores it. Replace before any deploy.
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"
+
+[durable_objects]
+bindings = [{ name = "SESSION_RELAY", class_name = "SessionRelayObject" }]
+
+# SQLite-backed objects (required on the free plan; the KV storage API used
+# here works on them unchanged).
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SessionRelayObject"]
+
+# Join-code / session row cleanup. Codes are also refused at read time once
+# expired, so the cron cadence only bounds how long dead rows linger.
+[triggers]
+crons = ["*/15 * * * *"]
+
+# Relay knobs (see src/worker_config.rs). Sized for a 3 h session of
+# ~20-50k messages (plan §Online relay, Cost) with headroom.
+[vars]
+JOIN_CODE_TTL_SECONDS = "900"
+SESSION_TTL_SECONDS = "86400"
+JOIN_CODE_MAXIMUM_RESOLVES = "32"
+SESSION_MAXIMUM_INBOUND_MESSAGES = "100000"
+SESSION_MAXIMUM_INBOUND_BYTES = "268435456"
+MAXIMUM_FRAME_BYTES = "65536"
+SESSION_MAXIMUM_CONNECTIONS = "64"
+USAGE_COUNTER_PERSIST_EVERY_MESSAGES = "16"

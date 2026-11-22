@@ -67,10 +67,21 @@ pub fn mount(state: &AppState) {
     let nodes = state.nodes;
     let map_layers = state.map_layers;
     let theme = state.theme;
+    let bird_entities = state.bird_entities;
+    let bird_entities_enabled = state.bird_entities_enabled;
 
     Effect::new(move |previous_bearing_wedge_ids: Option<HashSet<String>>| {
         let _ = theme.get();
         let visible = map_layers.get().detections;
+        // Entity mode: a species the entity layer already draws is not drawn
+        // again as a raw detection (one bird, one thing on screen).
+        let entity_species: std::collections::HashSet<String> = if bird_entities_enabled.get() {
+            bird_entities.with(|entities| {
+                entities.iter().map(|e| e.species_top_label.to_lowercase()).collect()
+            })
+        } else {
+            std::collections::HashSet::new()
+        };
         detections.with(|ds| {
             let mut current_bearing_wedge_ids = HashSet::new();
             let mut features = Vec::new();
@@ -86,7 +97,11 @@ pub fn mount(state: &AppState) {
             });
             if visible {
                 for d in ds {
-                    if d.track_id.is_some() || d.spatial_display_mode() == "node_only" {
+                    let drawn_as_entity = d
+                        .label
+                        .as_deref()
+                        .is_some_and(|label| entity_species.contains(&label.to_lowercase()));
+                    if d.track_id.is_some() || d.spatial_display_mode() == "node_only" || drawn_as_entity {
                         continue;
                     }
                     if let Some(geo) = &d.position_geo {

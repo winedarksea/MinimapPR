@@ -28,6 +28,7 @@ from minimappr.config import FusionConfig, LocalizationConfig
 from minimappr.core.audio_buffer import MultiSensorBuffer
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.ingest_health import IngestHealthClassifier, runner_stats_from_timing_diagnostics
+from minimappr.core.ingest_relative_trigger import NoiseFloorRelativeTrigger
 from minimappr.core.live_ingest_state import FrameIdentity, LiveIngestState
 from minimappr.core.node_registry import NodeRegistry
 from minimappr.core.node_position_estimator import StationaryKdeState, compute_stationary_kde
@@ -153,8 +154,11 @@ class IngestProcessor:
         node_position_kde_acceptance_radius_m: float = 100.0,
         node_position_kde_rejection_streak_reset: int = 60,
         gps_2d_altitude_mode: str = "site_origin",
+        relative_trigger: NoiseFloorRelativeTrigger | None = None,
     ) -> None:
         self._localization_config = localization_config
+        # Field Mode W3-attribution: optional noise-floor-relative trigger, OR'd with trigger_rms.
+        self._relative_trigger = relative_trigger
         self._fusion_config = fusion_config
         self._registry = registry
         self._buffer = buffer
@@ -596,10 +600,13 @@ class IngestProcessor:
             center_time_ns = frame.start_time_ns + max(0, frame_duration_ns - half_window_ns)
         cooldown_ns = int(self._localization_config.trigger_cooldown_seconds * 1_000_000_000)
 
+        relatively_loud = self._relative_trigger is not None and self._relative_trigger.observe(
+            normalized_node.id, frame_energy, processed.shape[1] / frame.sample_rate_hz
+        )
         triggered = False
         if (
             not buffer_uses_receipt_time
-            and frame_energy >= self._localization_config.trigger_rms
+            and (frame_energy >= self._localization_config.trigger_rms or relatively_loud)
             and center_time_ns - self._last_trigger_ns >= cooldown_ns
         ):
             # Don't update _last_trigger_ns here — the caller decides whether

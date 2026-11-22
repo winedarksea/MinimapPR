@@ -7,7 +7,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from minimappr.interfaces import ActionDescriptor, RuleActionHandler, RuleEngine, RuleEvaluationResult
 from minimappr.models import DetectionEvent, TrackState, TranscriptRecord
@@ -140,9 +140,20 @@ class RuleDef:
 
 
 class ConfigRuleEngine(RuleEngine):
-    def __init__(self, config_path: Path, *, reload_ttl_seconds: float = 1.0) -> None:
+    def __init__(
+        self,
+        config_path: Path,
+        *,
+        reload_ttl_seconds: float = 1.0,
+        rule_transform: Callable[[list[RuleDef]], list[RuleDef]] | None = None,
+    ) -> None:
         self._config_path = config_path
         self._reload_ttl_s = max(0.0, float(reload_ttl_seconds))
+        # --- Field Mode W3-birdnet-cutover --- applied to every parsed rule
+        # set (file or defaults) in memory; the file is never rewritten. Used
+        # to migrate v2.4 BirdNET labels/thresholds under V3.
+        self._rule_transform = rule_transform
+        # --- end Field Mode W3-birdnet-cutover ---
         self._rules: list[RuleDef] = []
         self._last_mtime_ns: int | None = None
         self._last_fire_ns: dict[str, int] = {}
@@ -165,7 +176,7 @@ class ConfigRuleEngine(RuleEngine):
         if not self._config_path.exists():
             self._last_mtime_ns = None
             if self._default_rules is None:
-                self._default_rules = default_rules()
+                self._default_rules = self._transformed(default_rules())
             self._rules = self._default_rules
             return
         try:
@@ -183,11 +194,14 @@ class ConfigRuleEngine(RuleEngine):
                 rule = RuleDef.from_dict(item)
                 if rule is not None:
                     parsed.append(rule)
-            self._rules = parsed or default_rules()
+            self._rules = self._transformed(parsed or default_rules())
             self._last_mtime_ns = mtime_ns
         except Exception as exc:
             logger.warning("Failed to read rules config %s: %s", self._config_path, exc)
-            self._rules = default_rules()
+            self._rules = self._transformed(default_rules())
+
+    def _transformed(self, rules: list[RuleDef]) -> list[RuleDef]:
+        return self._rule_transform(rules) if self._rule_transform is not None else rules
 
     async def evaluate(
         self,

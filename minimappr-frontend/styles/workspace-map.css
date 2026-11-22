@@ -309,3 +309,108 @@
   font-family: var(--md-sys-typescale-mono);
   font-size: var(--md-sys-typescale-label-small-size);
 }
+
+/* ═══ Field Mode: "Heard nearby" tray (unlocalized bird entities) ═══
+   Listed, never pinned: the map stays spatial-only. Top-centre under the
+   status ribbon so neither dock can cover it. */
+.heard-nearby-tray {
+  position: absolute;
+  z-index: var(--mmp-z-toolbar);
+  top: calc(var(--mmp-density-gap-md) * 4.5);
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(360px, calc(100% - 32px));
+  border: 1px solid var(--mmp-glass-border);
+  border-radius: var(--md-sys-shape-corner-md);
+  background: var(--mmp-glass-bg);
+  backdrop-filter: blur(12px);
+  box-shadow: var(--md-sys-elevation-2);
+  color: var(--md-sys-color-on-surface);
+  pointer-events: auto;
+}
+
+.heard-nearby-header {
+  display: flex;
+  align-items: center;
+  gap: var(--mmp-density-gap-sm);
+  width: 100%;
+  padding: 0.45rem 0.7rem;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.heard-nearby-title {
+  font-weight: 600;
+}
+
+.heard-nearby-badge {
+  min-width: 1.4rem;
+  padding: 0 0.4rem;
+  border-radius: var(--md-sys-shape-corner-full);
+  background: var(--mmp-sys-color-warn-container);
+  color: var(--mmp-sys-color-on-warn-container);
+  font-size: 0.8rem;
+  text-align: center;
+}
+
+.heard-nearby-spatial {
+  margin-left: auto;
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: 0.8rem;
+}
+
+.heard-nearby-list {
+  display: grid;
+  gap: 2px;
+  max-height: 40vh;
+  margin: 0;
+  padding: 0 0.4rem 0.4rem;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.heard-nearby-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--mmp-density-gap-sm);
+  padding: 0.35rem 0.4rem;
+  border-radius: var(--md-sys-shape-corner-sm, 8px);
+  background: color-mix(in srgb, var(--md-sys-color-surface-container-high) 70%, transparent);
+}
+
+.heard-nearby-icon {
+  color: var(--mmp-sys-color-warn);
+  font-size: 1.1rem;
+}
+
+.heard-nearby-text {
+  min-width: 0;
+  flex: 1;
+}
+
+.heard-nearby-species {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--mmp-density-gap-sm);
+  font-weight: 500;
+  text-transform: capitalize;
+}
+
+.heard-nearby-probability {
+  color: var(--md-sys-color-on-surface-variant);
+  font-variant-numeric: tabular-nums;
+}
+
+.heard-nearby-meta,
+.heard-nearby-empty {
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: 0.78rem;
+}
+
+.heard-nearby-empty {
+  margin: 0;
+  padding: 0 0.8rem 0.6rem;
+}

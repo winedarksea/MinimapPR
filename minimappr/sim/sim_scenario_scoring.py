@@ -40,6 +40,7 @@ RENDER_TIMEOUT_SECONDS = 120
 DETECTION_SETTLE_SECONDS = 3.0
 DETECTION_DEADLINE_SECONDS = 60.0
 POLL_INTERVAL_SECONDS = 0.25
+QUEUE_DRAIN_TIMEOUT_SECONDS = 120.0
 # Simulator defaults for generators whose TOML omits a frequency key.
 GENERATOR_DEFAULT_BANDS_HZ = {
     "fm_sweep": (2500.0, 6500.0),
@@ -161,6 +162,17 @@ async def collect_settled_detections(storage, fusion=None) -> list[dict]:
     return detections
 
 
+async def drain_fusion_queues(fusion, timeout_seconds: float = QUEUE_DRAIN_TIMEOUT_SECONDS) -> None:
+    """Wait until every stage queue has finished its work (W3-attribution harness fix).
+
+    The settle poll alone (and FusionNode.stop's 5 s joins) ended runs while a late
+    window was still localizing or classifying, so scores depended on machine speed.
+    Replay is the only caller, so it reaches into the stage queues directly.
+    """
+    for queue in (fusion._localization_queue, fusion._classification_queue, fusion._rules_queue):
+        await asyncio.wait_for(queue.join(), timeout=timeout_seconds)
+
+
 async def replay_and_score_scenario(
     scenario_path: Path,
     work_dir: Path,
@@ -180,6 +192,7 @@ async def replay_and_score_scenario(
     )
     try:
         await replay_bundle(fusion, bundle)
+        await drain_fusion_queues(fusion)
         detections = await collect_settled_detections(storage, fusion)
     finally:
         await fusion.stop()

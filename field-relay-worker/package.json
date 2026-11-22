@@ -1,0 +1,8 @@
+{
+  "name": "field-relay-worker",
+  "private": true,
+  "description": "Local-only tooling for the Field Mode relay Worker (wrangler dev --local). No deploy scripts on purpose.",
+  "devDependencies": {
+    "wrangler": "4.158.0"
+  }
+}
