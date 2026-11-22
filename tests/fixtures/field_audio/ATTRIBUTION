@@ -1,0 +1,47 @@
+Field-mode audio fixtures — attribution and processing
+=====================================================
+
+All recordings come from xeno-canto (https://xeno-canto.org) and are redistributed here under
+their original Creative Commons licences. Each WAV is a trimmed, resampled, level-normalized
+excerpt of the original; under CC BY-SA / BY-NC-SA these excerpts are adaptations and are
+shared under the same licence as their source. No ND-licensed recording was used.
+These WAV files are NOT covered by the repository's GPLv3 licence: each is licensed only
+under the CC licence in its row below, and is distributed alongside (not as part of) the
+GPL code as separate test data. Copyright in each recording remains with its recordist.
+Licences, recordists and species were re-checked against each xeno-canto page on 2026-11-22.
+Machine-readable copy of this table: manifest.toml (same directory).
+
+Common processing (scripts/build_field_audio_fixtures.py reproduces every file):
+  - excerpt [source start, source start + duration) from the original upload;
+  - one source channel kept (channel 0; channels never summed — spaced stereo pairs can be
+    anti-correlated, which would comb-filter a mix; XC795439 and XC980972 are stereo sources);
+  - DC removed; resampled to 48 kHz with scipy.signal.resample_poly (polyphase, Kaiser FIR);
+  - 10 ms raised-cosine fade in/out at both edges;
+  - bird clips scaled to a -3 dBFS sample peak; the ambience clip scaled to -30 dBFS RMS;
+  - written as 48 kHz mono 16-bit PCM WAV (round-to-nearest, no dither).
+  No filtering, denoising or EQ was applied beyond what the recordist did (noted below).
+
+file                                 | XC id    | species (scientific)                         | recordist        | licence         | source start s | dur s | notes
+-------------------------------------|----------|----------------------------------------------|------------------|-----------------|----------------|-------|------
+wtsp_whistle_xc569523.wav            | XC569523 | White-throated Sparrow (Zonotrichia albicollis) | Doug Hynes    | CC BY-SA 4.0    | 4.33           | 6.0   | one full song, Canada; quality A
+chsp_trill_xc320440.wav              | XC320440 | Chipping Sparrow (Spizella passerina)        | Jonathon Jongsma | CC BY-SA 4.0    | 24.61          | 3.5   | one dry trill, United States; faint other birds before trill; quality A
+deju_trill_xc569535.wav              | XC569535 | Dark-eyed Junco (Junco hyemalis)             | Doug Hynes       | CC BY-SA 4.0    | 7.93           | 5.0   | one musical trill, Canada; quality A
+blja_call_xc935610.wav               | XC935610 | Blue Jay (Cyanocitta cristata)               | Doug Hynes       | CC BY-SA 4.0    | 3.76           | 4.0   | two pairs of harmonic-rich "jay" calls, Canada; quality A
+amcr_caw_xc682428.wav                | XC682428 | American Crow (Corvus brachyrhynchos)        | Doug Hynes       | CC BY-SA 4.0    | 1.44           | 4.0   | three caws, autonomous recorder, coastal Canada; quality A
+amro_song_xc132864.wav               | XC132864 | American Robin (Turdus migratorius)          | Jonathon Jongsma | CC BY-SA 3.0    | 151.67         | 6.0   | caroled song phrases, United States; quality A
+scta_song_xc795439.wav               | XC795439 | Scarlet Tanager (Piranga olivacea)           | steve            | CC BY-SA 4.0    | 0.00           | 6.0   | one song, United States; recordist filtered below 2 kHz; quality A
+rbgr_song_xc133913.wav               | XC133913 | Rose-breasted Grosbeak (Pheucticus ludovicianus) | Jonathon Jongsma | CC BY-SA 3.0 | 21.34          | 4.5   | one song, United States; quality A
+ambience_forest_breeze_xc980972.wav  | XC980972 | Soundscape (mixed forest, low wind/breeze)   | Vladimír Nemček  | CC BY-NC-SA 4.0 | 156.91         | 30.0  | Slovakia; quietest 30 s (least 2-10 kHz energy) of a 7 min take; sparse distant birds remain; quality B
+
+Source pages:   https://xeno-canto.org/<XC id without "XC">  (e.g. https://xeno-canto.org/569523)
+Licence texts:  CC BY-SA 4.0     https://creativecommons.org/licenses/by-sa/4.0/
+                CC BY-SA 3.0     https://creativecommons.org/licenses/by-sa/3.0/
+                CC BY-NC-SA 4.0  https://creativecommons.org/licenses/by-nc-sa/4.0/
+
+Licence note: the ambience clip is NonCommercial. If MinimapPR is ever distributed
+commercially, replace ambience_forest_breeze_xc980972.wav (no BY/BY-SA forest-wind
+soundscape of usable quality was found on xeno-canto at fetch time, 2026-11-21).
+
+Privacy: clips were screened for human speech spectrally only (no listening was possible
+during curation). amcr_caw_xc682428.wav and ambience_forest_breeze_xc980972.wav are marked
+needs_listen_check in manifest.toml and should be auditioned by a person.
