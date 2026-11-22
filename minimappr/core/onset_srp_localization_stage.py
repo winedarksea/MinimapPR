@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-import time
 from collections import deque
 from typing import TYPE_CHECKING, Any
 
@@ -38,6 +37,7 @@ from minimappr.core.onset_srp_types import (
     LocalizedOnsetCluster,
     OnsetClusteringResult,
 )
+from minimappr.core.sensor_span_coverage_wait import await_sensor_span_coverage
 from minimappr.models import LocalizationResult
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle guard
@@ -94,33 +94,18 @@ class OnsetSrpLocalizationStage:
         capped below the localization stage timeout.
         """
         stall_budget_s = max(0.0, self.config.buffer_wait_max_seconds)
-        started = time.monotonic()
-        hard_deadline = started + max(
-            stall_budget_s, SPAN_WAIT_STAGE_TIMEOUT_FRACTION * fusion.classifier_config.stage_timeout_seconds
+        result = await await_sensor_span_coverage(
+            buffer=fusion.buffer,
+            sensor_ids=sensor_ids,
+            span_start_ns=start_ns,
+            span_end_ns=end_ns,
+            stall_budget_seconds=stall_budget_s,
+            total_cap_seconds=max(
+                stall_budget_s, SPAN_WAIT_STAGE_TIMEOUT_FRACTION * fusion.classifier_config.stage_timeout_seconds
+            ),
+            poll_interval_seconds=BUFFER_POLL_INTERVAL_SECONDS,
         )
-        last_progress = started
-        last_end_ns_by_sensor: dict[str, int] = {}
-        while True:
-            snapshot = await fusion.buffer.snapshot_state(sensor_ids=sensor_ids)
-            covered = [
-                state["sensor_id"]
-                for state in snapshot
-                if state.get("present")
-                and state.get("start_time_ns") is not None
-                and state["start_time_ns"] <= start_ns
-                and (state.get("end_time_ns") or 0) >= end_ns
-            ]
-            if len(covered) == len(sensor_ids):
-                return covered
-            now = time.monotonic()
-            for state in snapshot:
-                sensor_end_ns = int(state.get("end_time_ns") or 0)
-                if sensor_end_ns > last_end_ns_by_sensor.get(state["sensor_id"], sensor_end_ns):
-                    last_progress = now
-                last_end_ns_by_sensor[state["sensor_id"]] = sensor_end_ns
-            if now - last_progress >= stall_budget_s or now >= hard_deadline:
-                return covered
-            await asyncio.sleep(BUFFER_POLL_INTERVAL_SECONDS)
+        return result.covered_sensor_ids
 
     # ------------------------------------------------------------------- stage
     async def localize_candidate(self, fusion: FusionNode, candidate: EventCandidate) -> list[LocalizedCandidate]:

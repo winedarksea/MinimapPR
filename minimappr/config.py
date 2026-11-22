@@ -353,6 +353,15 @@ class LocalizationConfig:
     # legacy fixed-grace-sleep retry; 300 ms restores headroom for typical
     # per-sensor ingest jitter (see plan: valiant-launching-whale).
     localization_buffer_wait_max_seconds: float = 0.30
+    # --- coverage race fix ---
+    # After min_sensors_for_2d sensors cover the window, keep waiting for every
+    # other node that is still streaming (see core/sensor_span_coverage_wait.py).
+    localization_coverage_wait_all_streaming_nodes_enabled: bool = True
+    # A sensor whose buffer has not advanced for this long is released.
+    localization_coverage_stall_budget_seconds: float = 0.5
+    # Hard cap on the whole coverage wait (dead/lagging nodes cannot stall past it).
+    localization_coverage_total_cap_seconds: float = 1.0
+    # --- end coverage race fix ---
     # Range-proportional covariance caps (Phase 1b). The effective per-axis std
     # ceiling scales with distance from the contributing sensors:
     #   min(max(std_range_factor * range_m, position_std_floor_m), max_position_std_m)
@@ -1022,6 +1031,11 @@ class Settings:
     pre_classification_lowpass_hz: float = 0.0
     gcc_phat_interp_factor: int = 4
     localization_buffer_wait_max_seconds: float = 0.30
+    # --- coverage race fix ---
+    localization_coverage_wait_all_streaming_nodes_enabled: bool = True
+    localization_coverage_stall_budget_seconds: float = 0.5
+    localization_coverage_total_cap_seconds: float = 1.0
+    # --- end coverage race fix ---
 
     default_temperature_c: float = 20.0
     default_humidity: float = 0.5
@@ -1821,6 +1835,12 @@ class Settings:
             raise ValueError("MINIMAPPR_GCC_PHAT_INTERP_FACTOR must be >= 1")
         if self.localization_buffer_wait_max_seconds < 0.0:
             raise ValueError("MINIMAPPR_LOCALIZATION_BUFFER_WAIT_MAX_SECONDS must be >= 0")
+        # --- coverage race fix ---
+        if self.localization_coverage_stall_budget_seconds < 0.0:
+            raise ValueError("MINIMAPPR_LOCALIZATION_COVERAGE_STALL_BUDGET_SECONDS must be >= 0")
+        if self.localization_coverage_total_cap_seconds < 0.0:
+            raise ValueError("MINIMAPPR_LOCALIZATION_COVERAGE_TOTAL_CAP_SECONDS must be >= 0")
+        # --- end coverage race fix ---
         self.beamformer_type = self.beamformer_type.strip().lower()
         if self.beamformer_type == "das":
             # Preserve the more descriptive config name internally while
@@ -2604,6 +2624,17 @@ class Settings:
             localization_buffer_wait_max_seconds=_env_float(
                 "MINIMAPPR_LOCALIZATION_BUFFER_WAIT_MAX_SECONDS", 0.30
             ),
+            # --- coverage race fix ---
+            localization_coverage_wait_all_streaming_nodes_enabled=_env_bool(
+                "MINIMAPPR_LOCALIZATION_COVERAGE_WAIT_ALL_STREAMING_NODES_ENABLED", True
+            ),
+            localization_coverage_stall_budget_seconds=_env_float(
+                "MINIMAPPR_LOCALIZATION_COVERAGE_STALL_BUDGET_SECONDS", 0.5
+            ),
+            localization_coverage_total_cap_seconds=_env_float(
+                "MINIMAPPR_LOCALIZATION_COVERAGE_TOTAL_CAP_SECONDS", 1.0
+            ),
+            # --- end coverage race fix ---
             default_temperature_c=_env_float("MINIMAPPR_DEFAULT_TEMPERATURE_C", 20.0),
             default_humidity=_env_float("MINIMAPPR_DEFAULT_HUMIDITY", 0.5),
             environment_reading_max_age_seconds=_env_float("MINIMAPPR_ENVIRONMENT_READING_MAX_AGE_SECONDS", 300.0),
@@ -3153,6 +3184,11 @@ class Settings:
             pre_classification_lowpass_hz=self.pre_classification_lowpass_hz,
             gcc_phat_interp_factor=self.gcc_phat_interp_factor,
             localization_buffer_wait_max_seconds=self.localization_buffer_wait_max_seconds,
+            # --- coverage race fix ---
+            localization_coverage_wait_all_streaming_nodes_enabled=self.localization_coverage_wait_all_streaming_nodes_enabled,
+            localization_coverage_stall_budget_seconds=self.localization_coverage_stall_budget_seconds,
+            localization_coverage_total_cap_seconds=self.localization_coverage_total_cap_seconds,
+            # --- end coverage race fix ---
         )
 
     def tracking_config(self) -> TrackingConfig:
