@@ -101,6 +101,15 @@ impl ScenarioSpec {
         self
     }
 
+    /// A call with its own species, classifier score and level.
+    pub fn call_bird(mut self, time_s: f64, position_m: [f64; 3], species_label: u32, classifier_score: f32, level_db_spl_at_1m: f64) -> Self {
+        self = self.call_with_level(time_s, position_m, level_db_spl_at_1m);
+        let call = self.calls.last_mut().expect("just pushed");
+        call.species_label = species_label;
+        call.classifier_score = classifier_score;
+        self
+    }
+
     pub fn at(mut self, at_s: f64, action: ScriptAction) -> Self {
         self.script.push(ScriptedEvent { at_s, action });
         self

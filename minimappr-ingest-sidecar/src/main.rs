@@ -23,8 +23,11 @@ mod manifests;
 mod render_mvdr;
 mod runtime;
 mod spatial_audio;
+mod onset_clustering_oracle;
 mod storage_class;
 mod tdoa_solver_oracle;
+mod attribution_oracle;
+mod wildlife_tracking_oracle;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -697,6 +700,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
     if raw_args.get(1).map(String::as_str) == Some("tdoa-solver-oracle") {
         return tdoa_solver_oracle::run_tdoa_solver_oracle();
+    }
+    if raw_args.get(1).map(String::as_str) == Some("onset-clustering-oracle") {
+        return onset_clustering_oracle::run_onset_clustering_oracle();
+    }
+    if raw_args.get(1).map(String::as_str) == Some("attribution-oracle") {
+        return attribution_oracle::run_attribution_oracle();
+    }
+    if raw_args.get(1).map(String::as_str) == Some("wildlife-tracking-oracle") {
+        return wildlife_tracking_oracle::run_wildlife_tracking_oracle();
     }
     if raw_args.get(1).map(String::as_str) == Some("preprocess-oracle") {
         return run_preprocess_oracle();

@@ -22,8 +22,8 @@ const HEADROOM_REPORT_STEP: f64 = 0.02;
 /// Per-fix GNSS jitter on top of the device's slowly varying bias.
 const GNSS_FIX_JITTER_M: f64 = 0.5;
 const CLASSIFIER_MODEL_ID: u16 = 3;
-const CALL_BAND_LOW_FRACTION: f64 = 0.5;
-const CALL_BAND_HIGH_FRACTION: f64 = 2.0;
+pub(crate) const CALL_BAND_LOW_FRACTION: f64 = 0.5;
+pub(crate) const CALL_BAND_HIGH_FRACTION: f64 = 2.0;
 
 fn is_host_bound(message: &FieldMessage) -> bool {
     matches!(
@@ -268,6 +268,7 @@ impl ScenarioRun {
         self.deliver_node_input(device, NodeInput::ClassifierFired(classification));
         let key = (NodeId(device as u32), self.devices[device].node.counters.detections_made);
         self.metrics.generated_detections.push((key, device, self.now_s));
+        self.metrics.call_index_by_detection.insert(key, call);
     }
 
     pub(crate) fn emit_chirp(&mut self, emitter: usize, round_id: u32) {

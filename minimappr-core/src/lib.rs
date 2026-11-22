@@ -27,3 +27,8 @@ pub mod layout;
 pub mod sync;
 // W3-mesh-sim: sans-IO node/host state machines.
 pub mod mesh;
+// W4-port-server-track (S2): onset-frame SRP clustering + echo checks.
+pub mod onset_clustering;
+// W4-port-server-track: perched tracker + species log-odds (S3), bird entities (S6).
+pub mod wildlife_tracking;
+pub mod bird_entity;

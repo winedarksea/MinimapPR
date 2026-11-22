@@ -122,6 +122,9 @@ impl NodeAudioWindowSource for DeviceAudioView<'_> {
                     arrival_device_sample: truth.sample_index_at(arrival_s) + noise * timing_std_s * DEVICE_SAMPLE_RATE_HZ,
                     snr_db: snr as f32,
                     timing_std_s: timing_std_s as f32,
+                    species_label: self.world.calls[call].species_label,
+                    classifier_score: self.world.calls[call].classifier_score,
+                    centre_frequency_hz: self.world.calls[call].centre_frequency_hz as f32,
                 }
             })
             .collect();
