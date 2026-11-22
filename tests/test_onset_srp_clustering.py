@@ -183,3 +183,52 @@ def test_stage_consumed_onset_memory_expires_and_drops_idle_nodes() -> None:
     assert "node-a" in stage._consumed_onset_ns_by_node
     stage._remember(OnsetClusteringResult((), 0, 0, {}), 0, SAMPLE_RATE_HZ, now_ns=ttl_ns * 2)
     assert stage._consumed_onset_ns_by_node == {}
+
+
+class _SlowBuffer:
+    """Buffer whose end time advances `step_ns` per poll for `advancing` sensors."""
+
+    def __init__(self, advancing: set[str], stalled: set[str], step_ns: int) -> None:
+        self.end_ns = {sensor: 0 for sensor in advancing | stalled}
+        self.advancing = advancing
+        self.step_ns = step_ns
+
+    async def snapshot_state(self, sensor_ids):
+        for sensor in self.advancing:
+            self.end_ns[sensor] += self.step_ns
+        return [
+            {"sensor_id": s, "present": True, "start_time_ns": 0, "end_time_ns": self.end_ns[s]} for s in sensor_ids
+        ]
+
+
+def _fusion_with_buffer(buffer):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(buffer=buffer, classifier_config=SimpleNamespace(stage_timeout_seconds=30.0))
+
+
+async def test_span_wait_follows_slow_ingest_instead_of_a_wall_clock_deadline() -> None:
+    # Ingest slower than real time (loaded replay) must not drop the window:
+    # total wait far exceeds the stall budget while the buffer keeps advancing.
+    import dataclasses
+
+    from minimappr.core.onset_srp_localization_stage import OnsetSrpLocalizationStage
+
+    config = dataclasses.replace(Settings().onset_srp_clustering_config(), buffer_wait_max_seconds=0.05)
+    stage = OnsetSrpLocalizationStage(config)
+    buffer = _SlowBuffer(advancing={"a", "b"}, stalled=set(), step_ns=1_000_000)
+    covered = await stage._await_span(_fusion_with_buffer(buffer), ["a", "b"], 0, 30_000_000)
+    assert covered == ["a", "b"]
+
+
+async def test_span_wait_releases_a_stalled_sensor_after_the_budget() -> None:
+    import dataclasses
+
+    from minimappr.core.onset_srp_localization_stage import OnsetSrpLocalizationStage
+
+    config = dataclasses.replace(Settings().onset_srp_clustering_config(), buffer_wait_max_seconds=0.05)
+    stage = OnsetSrpLocalizationStage(config)
+    buffer = _SlowBuffer(advancing=set(), stalled={"a"}, step_ns=0)
+    buffer.end_ns["b"] = 10**12
+    covered = await stage._await_span(_fusion_with_buffer(buffer), ["a", "b"], 0, 1_000_000)
+    assert covered == ["b"]
