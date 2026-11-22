@@ -24,12 +24,12 @@ shows up here rather than as a mysterious Rust failure.
 from __future__ import annotations
 
 import json
-import math
 import subprocess
 
 import numpy as np
 import pytest
 
+from tests.parity_json_comparison import assert_json_matches
 from tests.rust_sidecar_binary import build_rust_sidecar_binary, cargo_is_available
 from tests.wildlife_pipeline_reference import run_pipeline_case
 from tests.wildlife_tracking_parity_cases import GOLDEN_PATH, all_cases
@@ -42,39 +42,6 @@ def _load_goldens() -> tuple[list[dict], list[dict]]:
         cases = [json.loads(str(raw)) for raw in archive["case_inputs_json"]]
         expected = [json.loads(str(raw)) for raw in archive["expected_outputs_json"]]
     return cases, expected
-
-
-def _largest_magnitude(value) -> float:
-    if isinstance(value, bool) or value is None or isinstance(value, str):
-        return 0.0
-    if isinstance(value, (int, float)):
-        return abs(float(value)) if math.isfinite(float(value)) else 0.0
-    if isinstance(value, list):
-        return max((_largest_magnitude(item) for item in value), default=0.0)
-    return 0.0
-
-
-def _assert_matches(actual, expected, label: str, scale: float | None = None) -> None:
-    if isinstance(expected, dict):
-        assert isinstance(actual, dict) and set(actual) == set(expected), f"{label}: keys {actual!r} vs {expected!r}"
-        for key in expected:
-            _assert_matches(actual[key], expected[key], f"{label}.{key}")
-        return
-    if isinstance(expected, list):
-        assert isinstance(actual, list) and len(actual) == len(expected), f"{label}: {actual!r} vs {expected!r}"
-        scale = _largest_magnitude(expected) if scale is None else scale
-        for index, (left, right) in enumerate(zip(actual, expected)):
-            _assert_matches(left, right, f"{label}[{index}]", scale)
-        return
-    if isinstance(expected, float) and not isinstance(expected, bool):
-        assert isinstance(actual, (int, float)) and not isinstance(actual, bool), f"{label}: {actual!r} vs {expected!r}"
-        tolerance = RELATIVE_TOLERANCE * max(abs(expected), scale or 0.0)
-        assert abs(float(actual) - expected) <= tolerance, f"{label}: {actual!r} vs {expected!r}"
-        return
-    if isinstance(expected, int) and not isinstance(expected, bool) and isinstance(actual, float):
-        assert actual == expected, f"{label}: {actual!r} vs {expected!r}"
-        return
-    assert actual == expected, f"{label}: {actual!r} vs {expected!r}"
 
 
 def _case_label(index: int, case: dict) -> str:
@@ -94,7 +61,7 @@ def test_rust_wildlife_tracking_matches_python_goldens() -> None:
     results = json.loads(completed.stdout)["results"]
     assert len(results) == len(cases)
     for index, (case, result, golden) in enumerate(zip(cases, results, expected)):
-        _assert_matches(result, golden, _case_label(index, case))
+        assert_json_matches(result, golden, _case_label(index, case), RELATIVE_TOLERANCE)
 
 
 def test_python_reference_still_matches_goldens() -> None:
@@ -104,7 +71,7 @@ def test_python_reference_still_matches_goldens() -> None:
         json.dumps(case, sort_keys=True) for case in cases
     ], "golden inputs drifted: rerun python -m tests.wildlife_tracking_parity_cases"
     for index, ((case, fresh), golden) in enumerate(zip(regenerated, expected)):
-        _assert_matches(json.loads(json.dumps(fresh)), golden, _case_label(index, case))
+        assert_json_matches(json.loads(json.dumps(fresh)), golden, _case_label(index, case), RELATIVE_TOLERANCE)
 
 
 def test_pipeline_scenarios_keep_one_entity_per_bird() -> None:

@@ -26,6 +26,7 @@ mod spatial_audio;
 mod onset_clustering_oracle;
 mod storage_class;
 mod tdoa_solver_oracle;
+mod attribution_oracle;
 mod wildlife_tracking_oracle;
 
 use std::collections::HashMap;
@@ -702,6 +703,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
     if raw_args.get(1).map(String::as_str) == Some("onset-clustering-oracle") {
         return onset_clustering_oracle::run_onset_clustering_oracle();
+    }
+    if raw_args.get(1).map(String::as_str) == Some("attribution-oracle") {
+        return attribution_oracle::run_attribution_oracle();
     }
     if raw_args.get(1).map(String::as_str) == Some("wildlife-tracking-oracle") {
         return wildlife_tracking_oracle::run_wildlife_tracking_oracle();
