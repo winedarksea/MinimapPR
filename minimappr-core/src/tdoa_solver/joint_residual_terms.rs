@@ -92,6 +92,9 @@ pub struct ResolvedBearingTerm {
     pub total_std_rad: f64,
 }
 
+/// A direction on the sphere has two angular degrees of freedom.
+pub const ANGULAR_DEGREES_OF_FREEDOM_PER_BEARING: usize = 2;
+
 pub struct JointResidualModel {
     pub range_difference_terms: Vec<ResolvedRangeDifferenceTerm>,
     pub bearing_terms: Vec<ResolvedBearingTerm>,
@@ -222,6 +225,14 @@ impl JointResidualModel {
         self.range_difference_terms.len()
             + 3 * self.bearing_terms.len()
             + usize::from(self.canopy_height_prior.is_some())
+    }
+
+    /// Independent measurement count for χ² degrees of freedom: a bearing's
+    /// three unit-vector rows carry only two angular dof (the radial row is
+    /// second order), and the canopy hinge is a prior, not a measurement.
+    pub fn independent_measurement_count(&self) -> usize {
+        self.range_difference_terms.len()
+            + ANGULAR_DEGREES_OF_FREEDOM_PER_BEARING * self.bearing_terms.len()
     }
 }
 

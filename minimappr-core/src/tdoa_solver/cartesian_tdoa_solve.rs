@@ -14,7 +14,11 @@ use std::collections::BTreeMap;
 use nalgebra::{DMatrix, DVector, Vector3};
 
 use super::canopy_height_prior::CanopyHeightPrior;
+use super::cartesian_initial_positions::{array_aperture_m, initial_positions};
 use super::cartesian_solve_quality::{finalize_cartesian_solution, CartesianFinalizationInputs};
+use super::far_field_model_selection::{
+    far_field_alternative_if_curvature_unsupported, FarFieldGuardInputs,
+};
 use super::levenberg_marquardt_driver::{
     refine_position_with_retry, residual_cost, PositionResidualModel,
 };
@@ -25,32 +29,28 @@ use super::measurement_types::{
 use super::radial_range_refinement::{
     adaptive_radial_refinement, radial_standard_deviation, RadialRefinementRequest,
 };
-use super::robust_linear_algebra::minimum_norm_least_squares;
 use super::scipy_trf_compatible::{scipy_trf_least_squares, TrfSettings};
 use super::spatial_constraint_terms::{
     append_bearing_jacobian, append_bearing_residual, append_spatial_constraint_jacobian,
     append_spatial_constraint_residuals, append_tdoa_jacobian, append_tdoa_residuals,
-    bearing_intersection_initial_position, broadband_direction_from_tdoas, sensor_position,
     stack_jacobian_rows, validate_measurement_sensors, EPSILON,
 };
 use super::TdoaSolverError;
-use crate::range_projection::RANGE_REFINED;
+use crate::range_projection::{RANGE_ASYMPTOTIC, RANGE_REFINED};
 
+pub use super::cartesian_initial_positions::{
+    FAR_START_APERTURE_MULTIPLIER, FAR_START_MINIMUM_RANGE_M, MAX_REFINEMENT_START_COUNT,
+};
 pub use super::cartesian_solve_quality::CartesianTdoaSolve;
 
 /// Python `BEARING_OBSERVED_OBS_FACTOR_FLOOR`.
 pub const BEARING_OBSERVED_OBS_FACTOR_FLOOR: f64 = 1.0;
-pub const MAX_REFINEMENT_START_COUNT: usize = 4;
 pub const COMPACT_ARRAY_RADIAL_REFINEMENT_APERTURE_MULTIPLIER: f64 = 2.0;
 pub const PRIOR_DOMINATED_ASYMPTOTIC_RADIAL_STD_FRACTION: f64 = 0.9;
 pub const DEFAULT_ASYMPTOTIC_RADIAL_STD_FRACTION: f64 = 5.0;
 pub const DEFAULT_FAR_FIELD_INITIAL_RANGE_M: f64 = 50.0;
 /// Position-std floor (metres) regardless of sample rate.
 pub const MINIMUM_POSITION_STD_FLOOR_M: f64 = 0.05;
-/// Third TDOA start: this many apertures out along the plane-wave bearing…
-pub const FAR_START_APERTURE_MULTIPLIER: f64 = 10.0;
-/// …but at least this far (metres).
-pub const FAR_START_MINIMUM_RANGE_M: f64 = 1.0;
 /// Minimum radius of the radial search as a fraction of the aperture.
 pub const RADIAL_SEARCH_MINIMUM_APERTURE_FRACTION: f64 = 0.5;
 /// Radial refinement must improve the RMS by at least this fraction to be kept.
@@ -226,98 +226,8 @@ pub fn observability_jacobian(
     stack_jacobian_rows(&rows)
 }
 
-fn array_aperture_m(sensor_positions: &SensorPositions) -> f64 {
-    let positions: Vec<&Vector3<f64>> = sensor_positions.values().collect();
-    let mut aperture_m = 0.0_f64;
-    for (index, first) in positions.iter().enumerate() {
-        for second in &positions[index + 1..] {
-            aperture_m = aperture_m.max((*first - *second).norm());
-        }
-    }
-    aperture_m
-}
-
-/// Linearised spherical-intersection start (`_algebraic_initial_position`).
-fn algebraic_initial_position(
-    request: &CartesianTdoaSolveRequest,
-) -> Result<Option<Vector3<f64>>, TdoaSolverError> {
-    let reference_position =
-        *sensor_position(&request.sensor_positions, &request.reference_sensor)?;
-    let row_count = request.reference_tdoa_s.len();
-    const LINEARISED_UNKNOWN_COUNT: usize = 4;
-    const MINIMUM_ALGEBRAIC_ROW_COUNT: usize = 3;
-    if row_count < MINIMUM_ALGEBRAIC_ROW_COUNT {
-        return Ok(None);
-    }
-    let mut rows = DMatrix::zeros(row_count, LINEARISED_UNKNOWN_COUNT);
-    let mut targets = DVector::zeros(row_count);
-    for (index, (sensor_id, tdoa_seconds)) in request.reference_tdoa_s.iter().enumerate() {
-        let range_difference_m = request.sound_speed_mps * tdoa_seconds;
-        let position = *sensor_position(&request.sensor_positions, sensor_id)?;
-        let baseline = 2.0 * (position - reference_position);
-        rows[(index, 0)] = baseline.x;
-        rows[(index, 1)] = baseline.y;
-        rows[(index, 2)] = baseline.z;
-        rows[(index, 3)] = 2.0 * range_difference_m;
-        targets[index] = position.dot(&position)
-            - reference_position.dot(&reference_position)
-            - range_difference_m * range_difference_m;
-    }
-    Ok(minimum_norm_least_squares(&rows, &targets)
-        .ok()
-        .map(|solution| Vector3::new(solution[0], solution[1], solution[2]))
-        .filter(|position| position.iter().all(|value| value.is_finite())))
-}
-
 fn root_mean_square(values: &DVector<f64>) -> f64 {
     (values.dot(values) / values.len().max(1) as f64).sqrt()
-}
-
-fn initial_positions(
-    request: &CartesianTdoaSolveRequest,
-    centroid_m: &Vector3<f64>,
-    aperture_m: f64,
-    minimum_position_std_m: f64,
-) -> Result<Vec<Vector3<f64>>, TdoaSolverError> {
-    let mut starts = if request.measurements.is_empty() {
-        let search_scale_m = aperture_m.max(minimum_position_std_m);
-        vec![
-            *centroid_m,
-            centroid_m + Vector3::x() * search_scale_m,
-            centroid_m + Vector3::y() * search_scale_m,
-            centroid_m + Vector3::z() * search_scale_m,
-        ]
-    } else {
-        let direction = broadband_direction_from_tdoas(
-            &request.sensor_positions,
-            &request.measurements,
-            request.sound_speed_mps,
-        )?;
-        vec![
-            *centroid_m,
-            centroid_m + direction * aperture_m.max(minimum_position_std_m),
-            centroid_m
-                + direction
-                    * (aperture_m * FAR_START_APERTURE_MULTIPLIER).max(FAR_START_MINIMUM_RANGE_M),
-        ]
-    };
-    if let Some(intersection) = bearing_intersection_initial_position(&request.bearing_constraints)
-    {
-        starts.insert(0, intersection);
-    }
-    if let Some(prior) = &request.bearing_prior {
-        starts.insert(
-            0,
-            centroid_m + prior.direction * aperture_m.max(minimum_position_std_m),
-        );
-    }
-    if !request.measurements.is_empty() {
-        if let Some(algebraic) = algebraic_initial_position(request)? {
-            starts.insert(0, algebraic);
-        }
-    }
-    starts.truncate(MAX_REFINEMENT_START_COUNT);
-    Ok(starts)
 }
 
 /// SciPy `least_squares` settings used by the Python solver: first pass…
@@ -386,7 +296,8 @@ pub fn solve_cartesian_tdoa(
         centroid_m,
         sample_time_std_s,
     };
-    let starts = initial_positions(request, &centroid_m, aperture_m, minimum_position_std_m)?;
+    let (starts, plane_wave_direction) =
+        initial_positions(request, &centroid_m, aperture_m, minimum_position_std_m)?;
     let residual_scale = 1.0 / sample_time_std_s;
     let mut best: Option<(f64, Vector3<f64>)> = None;
     let consider = |start: Vector3<f64>, best: &mut Option<(f64, Vector3<f64>)>| {
@@ -455,6 +366,34 @@ pub fn solve_cartesian_tdoa(
             best_position = refinement.position_m;
             radial_refinement_std_m = Some(refinement.radial_std_m);
             range_projection_mode = refinement.projection_mode;
+            residual_rms_s = root_mean_square(&model.residuals(&best_position));
+            effective_time_std_s = residual_rms_s.max(sample_time_std_s);
+        }
+    }
+    if has_tdoa_measurements
+        && request.radial_refinement_enabled
+        && range_projection_mode == RANGE_REFINED
+    {
+        // A near-field basin that only beats a plane wave by noise is not a
+        // range measurement (compact-array collapse onto the node).
+        if let Some(alternative) =
+            far_field_alternative_if_curvature_unsupported(&FarFieldGuardInputs {
+                centroid_m,
+                near_field_position_m: best_position,
+                plane_wave_direction,
+                residual_model: &model,
+                near_field_residual_rms_seconds: residual_rms_s,
+                timing_noise_std_seconds: sample_time_std_s,
+                far_field_radius_m: request
+                    .far_field_initial_range_m
+                    .max(aperture_m)
+                    .max(minimum_position_std_m),
+                array_aperture_m: aperture_m,
+            })
+        {
+            best_position = alternative.position_m;
+            range_projection_mode = RANGE_ASYMPTOTIC;
+            radial_refinement_std_m = Some((best_position - centroid_m).norm());
             residual_rms_s = root_mean_square(&model.residuals(&best_position));
             effective_time_std_s = residual_rms_s.max(sample_time_std_s);
         }

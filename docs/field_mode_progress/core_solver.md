@@ -39,6 +39,14 @@ radial refinement off + far-field prior), 2 fusion successes, 3 fusion rejection
 (near_parallel, stale, out_of_range). Gate: 1e-5 relative, with an absolute floor of 1e-5 × the
 array's largest magnitude.
 
+**Review addendum (promotion review):** the onset-srp stream's compact-array collapse guard
+(`minimappr/core/far_field_model_selection.py`, hooked into `solve_cartesian_tdoa`) is ported as
+`tdoa_solver/far_field_model_selection.rs` with the same constants. None of the original 9 cases
+triggered it, so 3 tetra cases were added (17 cases total): the guard fires for a 400 m source and a
+1 m source, and declines for a refined solve just outside the 4-aperture collapse zone. With the
+Rust guard disabled, case 9 fails parity. Start-point construction moved to
+`cartesian_initial_positions.rs` to keep `cartesian_tdoa_solve.rs` under 500 lines.
+
 Measured worst relative error, Rust vs Python goldens: position 4.9e-8, covariance 1.4e-7,
 scalars (confidence, GDOP, residual RMS, radial observability, condition number) 3.2e-7.
 Range-projection mode and fusion rejection reasons match exactly.

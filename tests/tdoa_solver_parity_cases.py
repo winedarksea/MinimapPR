@@ -149,6 +149,12 @@ def build_cases() -> list[dict]:
             sensor_positions=distributed, source_m=(7.0, 9.0, 6.0), noise_std_s=2 * one_sample_s, seed=9,
             radial_refinement_enabled=False, far_field_initial_range_m=80.0, far_field_prior_radial_std_m=120.0,
         ),
+        # Compact-array near-field collapse guard (far_field_model_selection):
+        # fires for a 400 m source and a 1 m source (solve collapsed to within
+        # 4 apertures); declines for a refined solve outside the collapse zone.
+        _cartesian_case(sensor_positions=_tetra("t", (0.0, 0.0, 1.5)), source_m=(400.0, 100.0, 30.0), noise_std_s=0.2 * one_sample_s, seed=100),
+        _cartesian_case(sensor_positions=_tetra("t", (0.0, 0.0, 1.5)), source_m=(1.0, 0.2, 1.6), noise_std_s=one_sample_s, seed=102),
+        _cartesian_case(sensor_positions=_tetra("t", (0.0, 0.0, 1.5)), source_m=(80.0, -40.0, 10.0), noise_std_s=0.2 * one_sample_s, seed=105),
         {"kind": "bearing_fusion", "observations": [
             _fusion_observation("a", (0.0, 0.0, 1.5), (20.0, 30.0, 6.0)),
             _fusion_observation("b", (40.0, 0.0, 1.5), (20.5, 29.0, 5.0), lateral_std_m=1.2, confidence=0.6, event_time_ns=200_000_000),
