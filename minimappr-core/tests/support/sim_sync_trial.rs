@@ -155,9 +155,11 @@ fn build_scenario(config: &SyncTrialConfig) -> Scenario {
                     velocity[2] * duration_s,
                 ],
             );
-            let mut mic_response = minimappr_sim::scenario::devices::MicResponseConfig::default();
-            mic_response.lowpass_hz = config.mic_lowpass_hz;
-            mic_response.lowpass_order = config.mic_lowpass_order;
+            let mic_response = minimappr_sim::scenario::devices::MicResponseConfig {
+                lowpass_hz: config.mic_lowpass_hz,
+                lowpass_order: config.mic_lowpass_order,
+                ..Default::default()
+            };
             DeviceConfig {
                 device_id: format!("phone{index}"),
                 kind: DeviceKind::Phone,
