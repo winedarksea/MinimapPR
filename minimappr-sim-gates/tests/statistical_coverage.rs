@@ -9,6 +9,18 @@ fn mesh_contour_coverage() {
     assert_pull_request_gate("mesh_contour_coverage");
 }
 
+/// KNOWN FAILURE (W4-sim-gates review finding, not loosened): the strategy
+/// asks for 90–98 % coverage inside *and* outside the layout. The single
+/// fitted σ multiplier (0.52) under-covers inside calls near the floor
+/// (~0.90–0.92) and over-covers outside calls (~0.99 > 0.98); the pooled
+/// gate passes only by averaging the two. Needs a per-geometry (or
+/// range-dependent) calibration or a correctly scaled covariance.
+#[test]
+#[ignore = "known failure: one σ multiplier cannot calibrate inside and outside calls (docs/field_mode_progress/sim_gates.md)"]
+fn mesh_contour_coverage_by_class() {
+    assert_pull_request_gate("mesh_contour_coverage_by_class");
+}
+
 /// KNOWN FAILURE (W4-sim-gates finding, not loosened): with realistic
 /// ±10 cm / ±10 µs residuals no scalar likelihood temperature gives a
 /// calibrated *and* sharp SRP region (23 % coverage at the shipped 0.002;

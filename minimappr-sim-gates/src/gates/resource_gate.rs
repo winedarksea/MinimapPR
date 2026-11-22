@@ -1,12 +1,14 @@
-//! Resource bounds: wall time and peak heap per solve (arrival LM, layout
+//! Resource bounds: time and peak heap per solve (arrival LM, layout
 //! solve, audio SRP) and per session (a dense "dawn chorus" Layer 2 session
 //! at two lengths: doubling the length may not more than double peak heap,
 //! the pending-call queue stays within capacity and no detection is lost
 //! silently). Budgets are ~5× measured M2 costs (see `ResourceGateConfig`).
-//! Wall-time checks are skipped in unoptimised builds, where they mean
+//! Times are thread CPU seconds (`thread_cpu_time`: wall time on a loaded
+//! machine failed seeds that take half the budget idle). Time checks are
+//! skipped in builds with debug assertions, where they mean
 //! nothing; heap checks need `heap_accounting::CountingAllocator` installed.
 
-use std::time::Instant;
+use crate::thread_cpu_time::ThreadCpuStopwatch;
 
 use minimappr_core::mesh::arrival_time_localizer::ArrivalTimeLocalizer;
 use minimappr_mesh_sim::invariants::no_silent_detection_loss;
@@ -52,7 +54,8 @@ pub fn resource_bounds(run: &GateRun) -> GateOutcome {
     let timing_meaningful = !cfg!(debug_assertions);
     let heap_measured = is_installed();
     let mut outcome = GateOutcome::new("resource_bounds", run.seeds.len());
-    outcome.summary(format!("wall-time checks {}, heap checks {}", if timing_meaningful { "on" } else { "off (debug build)" }, if heap_measured { "on" } else { "off (CountingAllocator not installed)" }));
+    let clock = if ThreadCpuStopwatch::measures_cpu_time() { "thread CPU time" } else { "wall time" };
+    outcome.summary(format!("time checks ({clock}) {}, heap checks {}", if timing_meaningful { "on" } else { "off (debug build)" }, if heap_measured { "on" } else { "off (CountingAllocator not installed)" }));
     let check = |outcome: &mut GateOutcome, seed: u64, label: &str, seconds: f64, max_seconds: f64, heap: usize, max_heap: usize| {
         outcome.summary(format!("seed {seed} {label}: {:.4} s (budget {max_seconds} s), peak heap {:.1} KiB (budget {})", seconds, heap as f64 / 1024.0, if max_heap == usize::MAX { "none".to_string() } else { format!("{} KiB", max_heap / 1024) }));
         if timing_meaningful && seconds > max_seconds {
@@ -66,20 +69,20 @@ pub fn resource_bounds(run: &GateRun) -> GateOutcome {
     for &seed in &run.seeds {
         let layout = random_phone_layout(seed, ARRIVAL_NODE_COUNT, ARRIVAL_APERTURE_M, &config.geometry);
         let trial = ArrivalTrial::new(seed, layout.clone(), inside_source(seed, &layout, ARRIVAL_APERTURE_M, &config.geometry));
-        let started = Instant::now();
+        let started = ThreadCpuStopwatch::start();
         let (_, heap) = measure_peak_heap(|| solve_trial(&trial, &trial.all_node_indices(), &localizer, &config.perturbation));
-        check(&mut outcome, seed, "arrival LM solve (7 phones)", started.elapsed().as_secs_f64(), budget.maximum_arrival_solve_s, heap, budget.maximum_arrival_peak_heap_bytes);
+        check(&mut outcome, seed, "arrival LM solve (7 phones)", started.elapsed_seconds(), budget.maximum_arrival_solve_s, heap, budget.maximum_arrival_peak_heap_bytes);
 
-        let started = Instant::now();
+        let started = ThreadCpuStopwatch::start();
         let _ = solve_layout_from_truth(seed, "resource_ranges", &layout, config.chirality.chirp_range_std_m);
-        check(&mut outcome, seed, "layout solve (7 phones)", started.elapsed().as_secs_f64(), budget.maximum_layout_solve_s, 0, usize::MAX);
+        check(&mut outcome, seed, "layout solve (7 phones)", started.elapsed_seconds(), budget.maximum_layout_solve_s, 0, usize::MAX);
 
         match render_srp_trial(seed, &SrpTrialConfig::default(), &config.geometry, &config.perturbation) {
             Ok(srp) => {
                 let base = srp.base_config();
-                let started = Instant::now();
+                let started = ThreadCpuStopwatch::start();
                 let (result, heap) = measure_peak_heap(|| srp.localize(&base));
-                check(&mut outcome, seed, "SRP localize (5 phones, contour)", started.elapsed().as_secs_f64(), budget.maximum_srp_solve_s, heap, budget.maximum_srp_peak_heap_bytes);
+                check(&mut outcome, seed, "SRP localize (5 phones, contour)", started.elapsed_seconds(), budget.maximum_srp_solve_s, heap, budget.maximum_srp_peak_heap_bytes);
                 if let Err(error) = result {
                     outcome.fail_seed(seed, format!("SRP localize failed: {error}"));
                 }
@@ -90,10 +93,10 @@ pub fn resource_bounds(run: &GateRun) -> GateOutcome {
         let mut session_peaks = Vec::new();
         for multiple in [1.0, 2.0] {
             let duration = CHORUS_BASE_DURATION_S * multiple;
-            let started = Instant::now();
+            let started = ThreadCpuStopwatch::start();
             let (session, heap) = measure_peak_heap(|| ScenarioRun::new(chorus_spec(seed, duration), seed).run());
             let label = format!("dawn chorus session {duration:.0} s");
-            check(&mut outcome, seed, &label, started.elapsed().as_secs_f64(), budget.maximum_session_wall_s * multiple, heap, budget.maximum_session_peak_heap_bytes);
+            check(&mut outcome, seed, &label, started.elapsed_seconds(), budget.maximum_session_wall_s * multiple, heap, budget.maximum_session_peak_heap_bytes);
             session_peaks.push(heap);
             if let Err(message) = no_silent_detection_loss(&session) {
                 outcome.fail_seed(seed, format!("{label}: {message}"));
