@@ -29,6 +29,7 @@ from ..classifiers.routing import (
     CONTEXT_OMNI_CONTINUOUS,
     RoutingConfig,
 )
+from ..classifiers.birdnet_threshold_set import BIRDNET_V3_MODEL_VERSION
 from ..config import Settings, TrackingConfig
 from ..core.config_groups import EXPOSED_CONFIG_KEYS
 from ..core.rules import RuleDef
@@ -525,7 +526,7 @@ def build_pipeline_graph(
                 "dormant_reacquire_radius_m",
                 suffix=" m",
             ),
-            *_field_mode_tracker_params(tc),
+            *_field_mode_tracker_params(tc, settings),
             *_field_mode_entity_params(settings),  # Field Mode W3-entity
         ],
         status=_track_status(metrics, fusion_available),
@@ -630,7 +631,7 @@ def build_pipeline_graph(
 
 
 # --- Field Mode W2-tracker ---
-def _field_mode_tracker_params(tc) -> list[PipelineParam]:
+def _field_mode_tracker_params(tc, settings) -> list[PipelineParam]:
     """Perched filter / species log-odds / partial binding switches + key knobs."""
     params = [
         _param("Perched filter", bool(tc.tracking_perched_filter_enabled), "tracking_perched_filter_enabled"),
@@ -655,7 +656,11 @@ def _field_mode_tracker_params(tc) -> list[PipelineParam]:
             _param(
                 "Display belief",
                 float(tc.tracking_species_display_min_belief),
-                "tracking_species_display_min_belief",
+                # W3-birdnet-cutover: the live value comes from the per-version
+                # set, so point the editor at the key that actually drives it.
+                "birdnet_v3_species_display_min_belief"
+                if str(getattr(settings, "birdnet_model_version", "2.4")) == BIRDNET_V3_MODEL_VERSION
+                else "tracking_species_display_min_belief",
             )
         )
     return params

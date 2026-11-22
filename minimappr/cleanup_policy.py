@@ -8,6 +8,11 @@ from pathlib import Path
 from typing import Any
 
 
+# A cleanup context without BirdNET provenance (rows written before the V3
+# cutover, label-only lookups) was scored by v2.4, the only model before V3.
+RETENTION_CONTEXT_DEFAULT_BIRDNET_MODEL_VERSION = "2.4"
+
+
 def _normalize_text(value: str | None) -> str:
     return (value or "").strip().lower()
 
@@ -73,8 +78,14 @@ class RetentionMatchCriteria:
     review_state: str | None = None
     confidence_min: float | None = None
     confidence_max: float | None = None
+    # BirdNET model version that scored the row ("2.4" / "3.0"). v2.4 and V3
+    # confidences sit on different scales, so a confidence-gated BirdNET rule
+    # must only judge rows scored on its own scale (W3-birdnet-cutover).
+    birdnet_model_version: str | None = None
 
     def __post_init__(self) -> None:
+        if self.birdnet_model_version is not None:
+            self.birdnet_model_version = _normalize_text(self.birdnet_model_version)
         if self.label is not None:
             self.label = _normalize_text(self.label)
         if self.classifier is not None:
@@ -102,6 +113,9 @@ class RetentionMatchCriteria:
             review_state=payload.get("review_state"),
             confidence_min=float(payload["confidence_min"]) if payload.get("confidence_min") is not None else None,
             confidence_max=float(payload["confidence_max"]) if payload.get("confidence_max") is not None else None,
+            birdnet_model_version=(
+                str(payload["birdnet_model_version"]) if payload.get("birdnet_model_version") is not None else None
+            ),
         )
 
     def matches(self, context: dict[str, Any]) -> bool:
@@ -117,6 +131,12 @@ class RetentionMatchCriteria:
             return False
         if self.review_state is not None and _normalize_text(str(context.get("review_state"))) != self.review_state:
             return False
+        if self.birdnet_model_version is not None:
+            context_model_version = _normalize_text(
+                str(context.get("birdnet_model_version") or RETENTION_CONTEXT_DEFAULT_BIRDNET_MODEL_VERSION)
+            )
+            if context_model_version != self.birdnet_model_version:
+                return False
         confidence = context.get("confidence")
         if self.confidence_min is not None:
             if confidence is None or float(confidence) < self.confidence_min:

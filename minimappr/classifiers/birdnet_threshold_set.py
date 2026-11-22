@@ -26,6 +26,10 @@ from dataclasses import dataclass
 logger = logging.getLogger(__name__)
 
 BIRDNET_V3_MODEL_VERSION = "3.0"
+BIRDNET_V24_MODEL_VERSION = "2.4"
+# ``features["model"]`` written by the V3 backend (mirrors
+# birdnet_v3.BIRDNET_V3_MODEL_NAME without importing onnxruntime here).
+BIRDNET_V3_MODEL_FEATURE_VALUE = "birdnet_v3"
 UNIT_INTERVAL_V3_THRESHOLD_KEYS: tuple[str, ...] = (
     "birdnet_v3_trigger_min_confidence",
     "birdnet_v3_localize_to_track_min_confidence",
@@ -67,6 +71,27 @@ def birdnet_threshold_set_for(values) -> BirdNETThresholdSet:
         localize_to_track_min_confidence=float(values.birdnet_localize_to_track_min_confidence),
         species_display_min_belief=float(values.tracking_species_display_min_belief),
     )
+
+
+def birdnet_model_version_for_classification_features(features: dict | None) -> str:
+    """Which BirdNET model scored a stored/assembled detection ("2.4" or "3.0").
+
+    Retention re-judges every stored row on each cleanup pass, so a
+    confidence-gated BirdNET rule must use the row's own scale, not the
+    currently configured model: switching to V3 must not re-bucket (and
+    delete) rows v2.4 scored, nor the reverse. The composite classifier
+    prefixes non-primary member features with ``<member_id>:``; rows without
+    V3 provenance (incl. every pre-V3 row) are v2.4.
+    """
+    if not features:
+        return BIRDNET_V24_MODEL_VERSION
+    winner_member = features.get("winner_member")
+    model_name = features.get(f"{winner_member}:model") if winner_member else None
+    if model_name is None:
+        model_name = features.get("model")
+    if str(model_name or "").strip().lower() == BIRDNET_V3_MODEL_FEATURE_VALUE:
+        return BIRDNET_V3_MODEL_VERSION
+    return BIRDNET_V24_MODEL_VERSION
 
 
 def two_threshold_missing_companions(values) -> list[str]:
