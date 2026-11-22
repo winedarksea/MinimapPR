@@ -4,7 +4,10 @@ Pure functions shared by the API export endpoint and the pytest replay
 harness. A bundle is a zip per field scenario:
 
     manifest.json          session + nodes + environment
-    ground_truth.json      operator-entered events
+    ground_truth.json      ground-truth events (schema v1 or v2; v2 adds
+                           individual_id, species lists, echo sources and
+                           trajectories — see calibration/ground_truth_events.py
+                           and docs/field_mode_progress/bundle_format_v2.md)
     detections.json        live system outputs during the window (reference)
     expectations.json      optional pass thresholds (harness defaults if absent)
     audio/{node_id}.wav    per-node multichannel PCM16; channel i == channel_sensor_ids[i]
@@ -27,6 +30,13 @@ from typing import Any
 
 import numpy as np
 
+from minimappr.calibration.ground_truth_events import (
+    GROUND_TRUTH_SCHEMA_VERSION,
+    validate_ground_truth_payload,
+)
+
+# Manifest / detections container version. The manifest layout is unchanged by
+# ground-truth v2, so it stays at 1; ground_truth.json carries its own version.
 SCHEMA_VERSION = 1
 
 _REFERENCE_AUDIO_README = (
@@ -64,7 +74,7 @@ def build_ground_truth_payload(rows: list[dict]) -> dict:
             event["source_node_id"] = source_node_id
             event["reference_audio"] = f"reference_audio/{row['id']}.wav"
         events.append(event)
-    return {"schema_version": SCHEMA_VERSION, "events": events}
+    return {"schema_version": GROUND_TRUTH_SCHEMA_VERSION, "events": events}
 
 
 def _slice_reference_audio(
@@ -230,14 +240,7 @@ def load_bundle(zip_path: Path) -> CalibrationBundle:
     if int(manifest.get("schema_version", 0)) != SCHEMA_VERSION:
         raise ValueError(f"unsupported bundle schema_version: {manifest.get('schema_version')}")
 
-    events = list(ground_truth.get("events", []))
-    for event in events:
-        geometry = event.get("geometry") or {}
-        # v1 readers reject unknown geometry types (trajectory import comes later).
-        if geometry.get("type") != "static":
-            raise ValueError(
-                f"unsupported ground-truth geometry type: {geometry.get('type')!r}"
-            )
+    events = validate_ground_truth_payload(ground_truth)
 
     return CalibrationBundle(
         zip_path=zip_path,
