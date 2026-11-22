@@ -17,6 +17,8 @@ pub enum RoundTrigger {
     PostDetection,
     GroupStopped,
     ClockInvalid,
+    /// A joiner, returning or lone node has not chirped in a round yet.
+    NewMember,
 }
 
 #[derive(Debug, Clone, Default)]

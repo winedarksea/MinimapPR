@@ -51,6 +51,13 @@ impl Default for ArrivalGridConfig {
     }
 }
 
+/// A fix plus which arrivals it kept (indices into the input).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ArrivalFix {
+    pub fix: RefinedTdoaFix,
+    pub used_arrival_indices: Vec<usize>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ArrivalLocalizationError {
     TooFewArrivals { available: usize, needed: usize },
@@ -63,6 +70,8 @@ pub struct ArrivalTimeLocalizer {
     pub refiner: SeedRefinerConfig,
     pub sound_speed_mps: f64,
     pub minimum_arrivals: usize,
+    /// χ²/dof above which a leave-one-out retry runs (≈ 3σ per residual).
+    pub maximum_reduced_chi_square: f64,
 }
 
 impl Default for ArrivalTimeLocalizer {
@@ -72,6 +81,7 @@ impl Default for ArrivalTimeLocalizer {
             refiner: SeedRefinerConfig::default(),
             sound_speed_mps: 343.0,
             minimum_arrivals: 3,
+            maximum_reduced_chi_square: 9.0,
         }
     }
 }
@@ -155,19 +165,13 @@ impl ArrivalTimeLocalizer {
         best.0
     }
 
-    pub fn localize(&self, arrivals: &[NodeArrival]) -> Result<RefinedTdoaFix, ArrivalLocalizationError> {
-        if arrivals.len() < self.minimum_arrivals {
-            return Err(ArrivalLocalizationError::TooFewArrivals {
-                available: arrivals.len(),
-                needed: self.minimum_arrivals,
-            });
-        }
-        let count = arrivals.len() as f64;
-        let centroid = std::array::from_fn(|axis| {
-            arrivals.iter().map(|arrival| arrival.position_m[axis]).sum::<f64>() / count
-        });
+    fn solve_subset(&self, arrivals: &[NodeArrival], subset: &[usize]) -> Result<ArrivalFix, ArrivalLocalizationError> {
+        let chosen: Vec<NodeArrival> = subset.iter().map(|&index| arrivals[index].clone()).collect();
+        let count = chosen.len() as f64;
+        let centroid = std::array::from_fn(|axis| chosen.iter().map(|arrival| arrival.position_m[axis]).sum::<f64>() / count);
         let ground_z = centroid[2] - self.grid.assumed_node_height_above_ground_m;
-        let observations = self.pair_observations(arrivals);
+        let observations = self.pair_observations(&chosen);
+        let reference = observations.first().map_or(0, |observation| observation.sensor_a_node);
         let seed_position = self.grid_seed(&observations, centroid, ground_z);
         let [band_low, band_high] = self.grid.source_height_band_above_ground_m;
         let seed = LmSeed {
@@ -181,9 +185,53 @@ impl ArrivalTimeLocalizer {
         };
         let refiner = JointLmSeedRefiner {
             config: self.refiner.clone(),
-            node_position_std_m: arrivals.iter().map(|arrival| arrival.position_std_m).collect(),
+            node_position_std_m: chosen.iter().map(|arrival| arrival.position_std_m).collect(),
         };
-        refiner.refine(&seed).map_err(ArrivalLocalizationError::Solver)
+        let fix = refiner.refine(&seed).map_err(ArrivalLocalizationError::Solver)?;
+        // Pair k is (reference, k-th other node); a rejected pair drops that node.
+        let rejected: Vec<usize> = fix
+            .rejected_observation_indices
+            .iter()
+            .map(|&pair| if pair < reference { pair } else { pair + 1 })
+            .collect();
+        let used_arrival_indices = (0..chosen.len()).filter(|k| !rejected.contains(k)).map(|k| subset[k]).collect();
+        Ok(ArrivalFix { fix, used_arrival_indices })
+    }
+
+    fn reduced_chi_square(fix: &ArrivalFix) -> f64 {
+        fix.fix.chi_square / fix.fix.degrees_of_freedom.max(1) as f64
+    }
+
+    /// Solve with every arrival; if the fit is inconsistent (e.g. the
+    /// best-timed node, which anchors every pair, carries a stale clock),
+    /// retry leaving each node out and keep the most consistent subset.
+    pub fn localize(&self, arrivals: &[NodeArrival]) -> Result<ArrivalFix, ArrivalLocalizationError> {
+        if arrivals.len() < self.minimum_arrivals {
+            return Err(ArrivalLocalizationError::TooFewArrivals {
+                available: arrivals.len(),
+                needed: self.minimum_arrivals,
+            });
+        }
+        let all: Vec<usize> = (0..arrivals.len()).collect();
+        let full = self.solve_subset(arrivals, &all);
+        let consistent = full
+            .as_ref()
+            .is_ok_and(|fix| Self::reduced_chi_square(fix) <= self.maximum_reduced_chi_square);
+        if consistent || arrivals.len() <= self.minimum_arrivals {
+            return full;
+        }
+        let best_subset = (0..arrivals.len())
+            .filter_map(|left_out| {
+                let subset: Vec<usize> = all.iter().copied().filter(|index| *index != left_out).collect();
+                self.solve_subset(arrivals, &subset).ok()
+            })
+            .min_by(|a, b| Self::reduced_chi_square(a).total_cmp(&Self::reduced_chi_square(b)));
+        match (full, best_subset) {
+            (Ok(full), Some(subset)) if Self::reduced_chi_square(&subset) < Self::reduced_chi_square(&full) => Ok(subset),
+            (Ok(full), _) => Ok(full),
+            (Err(_), Some(subset)) => Ok(subset),
+            (Err(error), None) => Err(error),
+        }
     }
 }
 
@@ -214,7 +262,7 @@ mod tests {
         ];
         let localizer = ArrivalTimeLocalizer::default();
         for source in [[4.0, 3.0, 6.0], [40.0, 25.0, 9.0], [-30.0, -60.0, 12.0]] {
-            let fix = localizer.localize(&arrivals_for(source, &nodes, 12.5)).expect("solves");
+            let fix = localizer.localize(&arrivals_for(source, &nodes, 12.5)).expect("solves").fix;
             let horizontal_error =
                 ((fix.position_m[0] - source[0]).powi(2) + (fix.position_m[1] - source[1]).powi(2)).sqrt();
             let range = (source[0].powi(2) + source[1].powi(2)).sqrt();
@@ -236,9 +284,16 @@ mod tests {
         let source = [5.0, 4.0, 5.0];
         let mut arrivals = arrivals_for(source, &nodes, 3.0);
         arrivals[3].reference_arrival_s += 0.004;
-        let fix = ArrivalTimeLocalizer::default().localize(&arrivals).expect("solves");
-        assert_eq!(fix.rejected_observation_indices.len(), 1);
+        let solved = ArrivalTimeLocalizer::default().localize(&arrivals).expect("solves");
+        assert_eq!(solved.used_arrival_indices, vec![0, 1, 2, 4, 5]);
+        let fix = solved.fix;
         let error = ((fix.position_m[0] - source[0]).powi(2) + (fix.position_m[1] - source[1]).powi(2)).sqrt();
         assert!(error < 0.5, "{:?}", fix.position_m);
+        // A stale clock on the best-timed node (the pair reference) is caught too.
+        let mut arrivals = arrivals_for(source, &nodes, 3.0);
+        arrivals[2].timing_std_s = 1e-6;
+        arrivals[2].reference_arrival_s += 0.08;
+        let solved = ArrivalTimeLocalizer::default().localize(&arrivals).expect("solves");
+        assert!(!solved.used_arrival_indices.contains(&2), "{:?}", solved.used_arrival_indices);
     }
 }

@@ -27,6 +27,8 @@ pub struct MemberRecord {
     pub muted: bool,
     pub latest_gnss_fix: Option<GnssFix>,
     pub last_overrun_count: u32,
+    /// Device sample of the latest reported capture gap.
+    pub last_capture_gap_device_sample: Option<u64>,
 }
 
 /// A PWA can never host (plan §Host handover).
@@ -80,6 +82,7 @@ impl SessionMembership {
             muted: false,
             latest_gnss_fix: None,
             last_overrun_count: 0,
+            last_capture_gap_device_sample: None,
         });
     }
 

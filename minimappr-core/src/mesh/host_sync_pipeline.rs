@@ -23,6 +23,7 @@ use super::{MeshMilliseconds, MessageRecipient, OutboundMessage};
 
 /// Scheduler key for present nodes not yet in any island.
 const PROVISIONAL_ISLAND_KEY: u32 = 0;
+const MINIMUM_ROUND_EMITTERS: usize = 2;
 const SAMPLES_PER_MILLISECOND: u64 = (DEVICE_SAMPLE_RATE_HZ as u64) / 1_000;
 
 #[derive(Debug, Clone)]
@@ -60,11 +61,16 @@ pub struct HostSyncPipeline {
     next_round_id: u32,
     pub rounds_started: Vec<RoundStartRecord>,
     pub rounds_completed: u32,
+    pub round_completion_ms: Vec<MeshMilliseconds>,
     pub muted_nodes: BTreeSet<NodeId>,
     /// Must stay 0: a muted emitter never enters a ranged pair.
     pub ranged_pairs_involving_muted: u64,
     pub local_plane: Option<LocalTangentPlane>,
     last_published_islands: Vec<IslandMembership>,
+    /// Provisional nodes already included in a round (a lone node that
+    /// stays lone must not trigger a round every tick).
+    surveyed_provisional_nodes: BTreeSet<NodeId>,
+    last_new_member_round_ms: Option<MeshMilliseconds>,
 }
 
 impl HostSyncPipeline {
@@ -72,8 +78,13 @@ impl HostSyncPipeline {
         self.in_flight.is_some()
     }
 
+    /// Nodes in a multi-member island schedule with it; lone or new nodes
+    /// are provisional and chirp in every round until they join an island.
     fn scheduler_key_of(&self, node: NodeId) -> u32 {
-        self.engine.island_of(node).map_or(PROVISIONAL_ISLAND_KEY, |island| island.island_id)
+        self.engine
+            .island_of(node)
+            .filter(|island| island.members.len() >= MINIMUM_ROUND_EMITTERS)
+            .map_or(PROVISIONAL_ISLAND_KEY, |island| island.island_id)
     }
 
     pub fn note_detection(&mut self, node: NodeId, now_ms: MeshMilliseconds, config: &MeshConfig) {
@@ -124,6 +135,18 @@ impl HostSyncPipeline {
             .collect()
     }
 
+    /// Emitters of a round for `key`: its members plus every provisional node.
+    fn round_participants(&self, key: u32, present: &[NodeId]) -> Vec<NodeId> {
+        present
+            .iter()
+            .copied()
+            .filter(|node| {
+                let node_key = self.scheduler_key_of(*node);
+                node_key == key || node_key == PROVISIONAL_ISLAND_KEY
+            })
+            .collect()
+    }
+
     fn start_round(
         &mut self,
         key: u32,
@@ -134,11 +157,14 @@ impl HostSyncPipeline {
         config: &MeshConfig,
     ) -> Option<OutboundMessage> {
         let emitters: Vec<NodeId> = self
-            .group_members(key, present)
+            .round_participants(key, present)
             .into_iter()
             .filter(|node| membership.members.get(node).is_some_and(|member| !member.listen_only))
             .collect();
-        if emitters.len() < 2 {
+        for node in &emitters {
+            self.surveyed_provisional_nodes.insert(*node);
+        }
+        if emitters.len() < MINIMUM_ROUND_EMITTERS {
             self.schedulers.entry(key).or_default().mark_round_started(now_ms, trigger);
             return None;
         }
@@ -198,6 +224,7 @@ impl HostSyncPipeline {
     ) -> Vec<SyncRecord> {
         let mut records = Vec::new();
         self.rounds_completed += 1;
+        self.round_completion_ms.push(now_ms);
         let sync = &config.island_sync;
         self.engine.record_hearing(&round.reports, &round.emission_order, now_ms);
         for report in round.reports.values() {
@@ -224,15 +251,51 @@ impl HostSyncPipeline {
             if island.members.len() < 2 {
                 continue;
             }
-            let input = IslandRoundInput {
-                members: island.members.iter().copied().collect(),
-                reports: &round.reports,
-                emission_order: &round.emission_order,
-                self_path_lengths_m: &self_paths,
-                muted_emitters: &self.muted_nodes,
-                preferred_reference: island.reference_node,
+            // A reported capture gap inside a node's arrival span corrupts
+            // its ranges too, not only its clock: leave it out of this round.
+            let gapped: BTreeSet<NodeId> = round
+                .reports
+                .values()
+                .filter(|report| {
+                    let gap = membership.members.get(&report.reporting_node_id).and_then(|m| m.last_capture_gap_device_sample);
+                    let span = report.arrivals.iter().map(|a| a.arrival_device_sample_index);
+                    match (gap, span.clone().min(), span.max()) {
+                        (Some(gap), Some(first), Some(last)) => gap >= first && gap <= last,
+                        _ => false,
+                    }
+                })
+                .map(|report| report.reporting_node_id)
+                .collect();
+            let mut members: Vec<NodeId> = island.members.iter().copied().filter(|node| !gapped.contains(node)).collect();
+            let preferred_reference = island.reference_node;
+            let solve = |members: Vec<NodeId>| {
+                solve_island_round(
+                    &IslandRoundInput {
+                        members,
+                        reports: &round.reports,
+                        emission_order: &round.emission_order,
+                        self_path_lengths_m: &self_paths,
+                        muted_emitters: &self.muted_nodes,
+                        preferred_reference,
+                    },
+                    sync,
+                )
             };
-            let Some(solution) = solve_island_round(&input, sync) else { continue };
+            let Some(mut solution) = solve(members.clone()) else { continue };
+            // A silent stall shows as a clock-offset jump; that node's ranges
+            // in this round are suspect, so re-solve without it and rebuild
+            // its clock model from scratch (caught within one round).
+            let stalled = self.engine.nodes_with_silent_gap(island_id, &solution, sync);
+            if !stalled.is_empty() {
+                members.retain(|node| !stalled.contains(node));
+                for node in &stalled {
+                    self.engine.invalidate_node_clock(*node);
+                }
+                match solve(members) {
+                    Some(resolved) => solution = resolved,
+                    None => continue,
+                }
+            }
             self.ranged_pairs_involving_muted += solution
                 .ranged_pairs
                 .iter()
@@ -334,8 +397,36 @@ impl HostSyncPipeline {
                 });
             self.schedulers.entry(*key).or_default().note_group_motion(group_is_still);
         }
+        let surveyed = &self.surveyed_provisional_nodes;
+        self.surveyed_provisional_nodes = surveyed
+            .iter()
+            .copied()
+            .filter(|node| self.scheduler_key_of(*node) == PROVISIONAL_ISLAND_KEY)
+            .collect();
+        let has_new_member = present.iter().any(|node| {
+            self.scheduler_key_of(*node) == PROVISIONAL_ISLAND_KEY && !self.surveyed_provisional_nodes.contains(node)
+        });
+        let new_member_gap_elapsed = self
+            .last_new_member_round_ms
+            .is_none_or(|last| now_ms.saturating_sub(last) >= config.scheduler.new_member_round_minimum_gap_ms);
+        if has_new_member && new_member_gap_elapsed {
+            // Survey joiners with the largest island so hearing is measured both ways.
+            let key = self
+                .engine
+                .islands
+                .values()
+                .filter(|island| island.members.len() >= MINIMUM_ROUND_EMITTERS)
+                .max_by_key(|island| island.members.len())
+                .map_or(PROVISIONAL_ISLAND_KEY, |island| island.island_id);
+            if self.round_participants(key, present).len() >= MINIMUM_ROUND_EMITTERS {
+                self.last_new_member_round_ms = Some(now_ms);
+                if let Some(message) = self.start_round(key, RoundTrigger::NewMember, present, membership, now_ms, config) {
+                    return (vec![message], Vec::new());
+                }
+            }
+        }
         for key in keys {
-            if self.group_members(key, present).len() < 2 {
+            if self.round_participants(key, present).len() < MINIMUM_ROUND_EMITTERS {
                 continue;
             }
             let due = self.schedulers.entry(key).or_default().due(now_ms, &config.scheduler);

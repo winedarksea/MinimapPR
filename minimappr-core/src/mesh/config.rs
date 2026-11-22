@@ -151,6 +151,8 @@ pub struct ChirpSchedulerConfig {
     pub post_detection_round_delay_ms: MeshMilliseconds,
     /// Rounds triggered by stillness or invalid clocks are spaced at least this.
     pub triggered_round_minimum_gap_ms: MeshMilliseconds,
+    /// Joiners arriving together share one survey round.
+    pub new_member_round_minimum_gap_ms: MeshMilliseconds,
     /// Plan: 0.20–0.25 s slots.
     pub slot_duration_ms: MeshMilliseconds,
     /// Lead time between sending the schedule and the first slot.
@@ -170,6 +172,7 @@ impl Default for ChirpSchedulerConfig {
             periodic_round_interval_ms: 15_000,
             post_detection_round_delay_ms: 500,
             triggered_round_minimum_gap_ms: 8_000,
+            new_member_round_minimum_gap_ms: 1_500,
             slot_duration_ms: 220,
             schedule_lead_time_ms: 400,
             round_listen_tail_ms: 300,

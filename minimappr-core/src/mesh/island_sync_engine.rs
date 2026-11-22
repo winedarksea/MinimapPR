@@ -33,6 +33,9 @@ pub struct IslandLayout {
     pub sigmas_m: BTreeMap<NodeId, f64>,
 }
 
+/// A chirp bearing locks chirality only if the two chiralities' predicted
+/// bearings differ by more than this many reported σ.
+const DECISIVE_CUE_SIGMA_MULTIPLIER: f64 = 3.0;
 /// Minimum common nodes for a reflection test between two layouts.
 const MINIMUM_COMMON_NODES_FOR_REFLECTION_TEST: usize = 3;
 /// Cross-covariance determinants below this (m⁴) mean a degenerate overlap.
@@ -236,6 +239,27 @@ impl IslandSyncEngine {
         self.bump_epoch(node);
     }
 
+    /// Nodes whose round offset jumps past the filter's silent-gap
+    /// threshold relative to its prediction (lost or gained samples).
+    pub fn nodes_with_silent_gap(&self, island_id: u32, solution: &IslandRoundSolution, config: &IslandSyncConfig) -> Vec<NodeId> {
+        let Some(island) = self.islands.get(&island_id) else { return Vec::new() };
+        if island.reference_node.is_some_and(|reference| reference != solution.reference_node) {
+            return Vec::new();
+        }
+        solution
+            .clock_offsets
+            .iter()
+            .filter(|(node, (offset_s, _))| {
+                island
+                    .filters
+                    .get(node)
+                    .and_then(|filter| filter.predict(solution.reference_time_s))
+                    .is_some_and(|prediction| (offset_s - prediction.offset_s).abs() > config.clock_filter.silent_gap_jump_threshold_s)
+            })
+            .map(|(node, _)| *node)
+            .collect()
+    }
+
     /// Feed one island's round solution into its filters and layout.
     pub fn apply_round_solution(
         &mut self,
@@ -347,14 +371,20 @@ impl IslandSyncEngine {
             fit_layout_to_gps(&layout_xy, &node_fixes, ChiralityCue::Locked { mirrored }, &config.anchor_fit).ok()
         };
         let (Some(proper), Some(mirror)) = (fit(false), fit(true)) else { return false };
-        let cue = chirality_from_bearing(
-            &layout_xy,
-            from,
-            to,
-            (report.world_azimuth_deg as f64).to_radians(),
-            &proper.transform,
-            &mirror.transform,
-        );
+        let bearing = (report.world_azimuth_deg as f64).to_radians();
+        let angular_error = |transform: &crate::layout::gps_anchor_fit::RigidTransform2d| {
+            let (a, b) = (transform.apply(layout_xy[from]), transform.apply(layout_xy[to]));
+            let difference = ((b[1] - a[1]).atan2(b[0] - a[0]) - bearing).rem_euclid(std::f64::consts::TAU);
+            difference.min(std::f64::consts::TAU - difference)
+        };
+        // Only a decisive cue locks: near the mirror axis both chiralities
+        // predict almost the same bearing and heading error could pick wrong.
+        let separation = (angular_error(&proper.transform) - angular_error(&mirror.transform)).abs();
+        let decisive = separation > DECISIVE_CUE_SIGMA_MULTIPLIER * (report.azimuth_standard_deviation_deg as f64).to_radians();
+        if !decisive {
+            return false;
+        }
+        let cue = chirality_from_bearing(&layout_xy, from, to, bearing, &proper.transform, &mirror.transform);
         if let Some(island) = self.islands.get_mut(&island_id) {
             island.chirality_cue = cue;
         }

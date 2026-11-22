@@ -89,7 +89,12 @@ impl FieldHostStateMachine {
                 match change.change {
                     NodeStatusChangeCode::InputRouteChanged
                     | NodeStatusChangeCode::CaptureGapReported
-                    | NodeStatusChangeCode::AudioSessionInterrupted => self.sync.note_clock_invalid(change.node_id),
+                    | NodeStatusChangeCode::AudioSessionInterrupted => {
+                        if let Some(member) = self.membership.members.get_mut(&change.node_id) {
+                            member.last_capture_gap_device_sample = Some(change.device_sample_index);
+                        }
+                        self.sync.note_clock_invalid(change.node_id)
+                    }
                     NodeStatusChangeCode::OutputRouteChangedListenOnly => {
                         if let Some(member) = self.membership.members.get_mut(&change.node_id) {
                             member.listen_only = true;
