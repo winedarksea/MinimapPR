@@ -77,13 +77,13 @@ pub fn mount(state: &AppState) {
                                                 if let Some(collection) =
                                                     normalize_geojson_overlay(value)
                                                 {
-                                                    if let Ok(js_value) =
-                                                        serde_wasm_bindgen::to_value(&collection)
-                                                    {
-                                                        set_geojson_overlay(
-                                                            &layer_id, &js_value, opacity,
-                                                        );
-                                                    }
+                                                    set_geojson_overlay(
+                                                        &layer_id,
+                                                        &crate::map::bindings::json_value_to_js(
+                                                            &collection,
+                                                        ),
+                                                        opacity,
+                                                    );
                                                 }
                                             }
                                             Err(error) => {

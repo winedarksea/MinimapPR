@@ -169,9 +169,7 @@ pub fn mount(state: &AppState) {
                     "type": "FeatureCollection",
                     "features": features,
                 });
-                if let Ok(data) = serde_wasm_bindgen::to_value(&collection) {
-                    set_detection_layer_data(&data);
-                }
+                set_detection_layer_data(&crate::map::bindings::json_value_to_js(&collection));
             }
 
             if let Some(ref previous) = previous_bearing_wedge_ids {
