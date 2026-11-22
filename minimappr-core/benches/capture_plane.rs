@@ -1,15 +1,7 @@
-// Include only the self-contained modules needed for these benchmarks.
-// Both dsp.rs and gcc_phat.rs have no intra-crate dependencies.
-#[path = "../src/dsp.rs"]
-#[allow(dead_code, unused_imports)]
-mod dsp;
-#[path = "../src/gcc_phat.rs"]
-#[allow(dead_code, unused_imports)]
-mod gcc_phat;
-
+// Capture-plane hot paths that live in minimappr-core.
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use dsp::SensorStreamBuffer;
-use gcc_phat::tetrahedral_gcc_phat;
+use minimappr_core::gcc_phat::{self, tetrahedral_gcc_phat};
+use minimappr_core::sensor_stream_buffer::SensorStreamBuffer;
 
 /// Hot path inside the DSP worker: append a 512-sample frame then query coverage.
 fn bench_buffer_append_and_coverage(c: &mut Criterion) {

@@ -59,9 +59,11 @@ pub fn confidence_cap_for_mode(mode: Option<&str>) -> Option<f32> {
 }
 
 /// Amplitude/SNR-informed range prior (Phase 1c). Derives a projection distance
-/// from the received level via inverse-square spreading::
+/// from the received level via inverse-square spreading:
 ///
-///     r = 10 ^ ((L_ref - L_recv) / 20)
+/// ```text
+/// r = 10 ^ ((L_ref - L_recv) / 20)
+/// ```
 ///
 /// clamped to `[min_range_m, max_range_m]`. Mirrors the Python
 /// `minimappr/core/amplitude_range.py::amplitude_range_prior_m`. Returns
