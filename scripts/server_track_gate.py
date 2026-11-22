@@ -38,7 +38,9 @@ TABLE_COLUMNS = (
 )
 
 
-async def run(scenes: list[str], configurations: list[str], work_dir: Path, json_path: Path | None) -> list[dict]:
+async def run(
+    scenes: list[str], configurations: list[str], work_dir: Path, json_path: Path | None, extra: dict | None = None
+) -> list[dict]:
     # Resume: keep rows already in the output file and skip their (scene, config).
     rows: list[dict] = json.loads(json_path.read_text()) if json_path and json_path.exists() else []
     done = {(r["scene"], r["configuration"]) for r in rows}
@@ -46,7 +48,9 @@ async def run(scenes: list[str], configurations: list[str], work_dir: Path, json
         for configuration in configurations:
             if (scene, configuration) in done:
                 continue
-            row = await gate.replay_scene_configuration(scene, configuration, work_dir)
+            row = await gate.replay_scene_configuration(scene, configuration, work_dir, extra_overrides=extra)
+            if extra:
+                row["extra_overrides"] = extra
             printable = {k: v for k, v in row.items() if k not in ("onset_clustering_s", "raw")}
             print(json.dumps(printable), flush=True)
             rows.append(row)
@@ -162,6 +166,7 @@ def main() -> int:
     run_parser.add_argument("--configs", nargs="+", default=gate.all_configuration_names())
     run_parser.add_argument("--work-dir", type=Path, default=None)
     run_parser.add_argument("--json", type=Path, default=None)
+    run_parser.add_argument("--settings", default="{}", help="extra settings overrides (JSON) on every configuration")
     summary_parser = sub.add_parser("summarize")
     summary_parser.add_argument("paths", nargs="+", type=Path)
     summary_parser.add_argument("--markdown", type=Path, default=None)
@@ -172,10 +177,10 @@ def main() -> int:
     for configuration in args.configs:
         gate.configuration_flags(configuration)  # fail fast on a typo
     if args.work_dir is not None:
-        asyncio.run(run(args.scenes, args.configs, args.work_dir, args.json))
+        asyncio.run(run(args.scenes, args.configs, args.work_dir, args.json, json.loads(args.settings)))
     else:
         with tempfile.TemporaryDirectory(prefix="server-track-gate-") as tmp:
-            asyncio.run(run(args.scenes, args.configs, Path(tmp), args.json))
+            asyncio.run(run(args.scenes, args.configs, Path(tmp), args.json, json.loads(args.settings)))
     return 0
 
 
