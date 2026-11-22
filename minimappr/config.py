@@ -674,6 +674,7 @@ class RelativeTriggerConfig:
     fall_seconds: float
     warmup_seconds: float
     minimum_rms: float
+    fluctuation_multiplier: float
 # --- end Field Mode W3-attribution ---
 
 
@@ -1278,6 +1279,9 @@ class Settings:
     trigger_noise_floor_warmup_seconds: float = 1.0
     # Floor/level clamp so digital silence cannot make bit noise "loud".
     trigger_noise_floor_minimum_rms: float = 1e-5
+    # Raise the relative bar by this x the slow mean excess of non-triggering frames over the
+    # floor, so gusty wind/rain peaks do not trigger every cooldown (0 = bare snr_db bar).
+    trigger_noise_floor_fluctuation_multiplier: float = 1.5
     # --- end Field Mode W3-attribution ---
     detection_min_confidence: float = 0.4
     cop_detections_max_items: int = 150
@@ -2144,6 +2148,8 @@ class Settings:
                 raise ValueError(f"{_trigger_key} must be > 0")
         if self.trigger_noise_floor_warmup_seconds < 0.0:
             raise ValueError("trigger_noise_floor_warmup_seconds must be >= 0")
+        if self.trigger_noise_floor_fluctuation_multiplier < 0.0:
+            raise ValueError("trigger_noise_floor_fluctuation_multiplier must be >= 0")
         # --- end Field Mode W3-attribution ---
         if self.detection_min_confidence < 0.0 or self.detection_min_confidence > 1.0:
             raise ValueError("MINIMAPPR_DETECTION_MIN_CONFIDENCE must be in [0,1]")
@@ -2815,6 +2821,9 @@ class Settings:
             trigger_noise_floor_fall_seconds=_env_float("MINIMAPPR_TRIGGER_NOISE_FLOOR_FALL_SECONDS", 0.5),
             trigger_noise_floor_warmup_seconds=_env_float("MINIMAPPR_TRIGGER_NOISE_FLOOR_WARMUP_SECONDS", 1.0),
             trigger_noise_floor_minimum_rms=_env_float("MINIMAPPR_TRIGGER_NOISE_FLOOR_MINIMUM_RMS", 1e-5),
+            trigger_noise_floor_fluctuation_multiplier=_env_float(
+                "MINIMAPPR_TRIGGER_NOISE_FLOOR_FLUCTUATION_MULTIPLIER", 1.5
+            ),
             # --- end Field Mode W3-attribution ---
             detection_min_confidence=_env_float("MINIMAPPR_DETECTION_MIN_CONFIDENCE", 0.4),
             cop_detections_max_items=_env_int("MINIMAPPR_COP_DETECTIONS_MAX_ITEMS", 150),
@@ -3342,6 +3351,7 @@ class Settings:
             fall_seconds=self.trigger_noise_floor_fall_seconds,
             warmup_seconds=self.trigger_noise_floor_warmup_seconds,
             minimum_rms=self.trigger_noise_floor_minimum_rms,
+            fluctuation_multiplier=self.trigger_noise_floor_fluctuation_multiplier,
         )
     # --- end Field Mode W3-attribution ---
 

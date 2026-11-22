@@ -46,6 +46,7 @@ CONFIG_STAGE_GROUPS: tuple[tuple[str, str, PipelineStageKind | None, tuple[str, 
             "trigger_noise_floor_fall_seconds",
             "trigger_noise_floor_warmup_seconds",
             "trigger_noise_floor_minimum_rms",
+            "trigger_noise_floor_fluctuation_multiplier",
             # --- end Field Mode W3-attribution ---
             "trigger_cooldown_seconds",
             "omni_scan_enabled",
