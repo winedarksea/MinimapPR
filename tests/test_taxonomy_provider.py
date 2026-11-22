@@ -106,3 +106,41 @@ def test_explicit_config_may_still_map_the_abstention_label(tmp_path: Path) -> N
     provider = RuntimeTaxonomyProvider.from_config_file(config)
 
     assert provider.category_for_label("unknown") == "security"
+
+
+# --- Field Mode S gate: species-model provenance beats substring heuristics ---
+
+
+def _birdnet_result(label: str, raw_species: str):
+    from minimappr.classifiers.base import ClassificationResult
+
+    return ClassificationResult(
+        label=label, confidence=0.9, features={"model": "birdnet_v2m4", "raw_species": raw_species}
+    )
+
+
+def test_birdnet_species_with_vehicle_or_security_substrings_resolve_to_wildlife() -> None:
+    from minimappr.core.classification import _resolve_label_category
+
+    provider = RuntimeTaxonomyProvider()
+    # "car" / "fire" substrings made these vehicle / security, keeping the birds
+    # out of the wildlife-scoped tracker, entity and rule stages.
+    assert provider.category_for_label("northern cardinal") == "vehicle"
+    for label, raw in (
+        ("northern cardinal", "Cardinalis cardinalis_Northern Cardinal"),
+        ("scarlet tanager", "Piranga olivacea_Scarlet Tanager"),
+        ("common firecrest", "Regulus ignicapilla_Common Firecrest"),
+    ):
+        assert _resolve_label_category(_birdnet_result(label, raw), provider) == "wildlife"
+
+
+def test_birdnet_non_species_classes_and_configured_categories_keep_taxonomy() -> None:
+    from minimappr.core.classification import _resolve_label_category
+
+    provider = RuntimeTaxonomyProvider(label_to_category={"northern cardinal": "security"})
+    assert _resolve_label_category(_birdnet_result("gun", "Gun_Gun"), provider) == "security"
+    assert _resolve_label_category(_birdnet_result("engine", "Engine_Engine"), provider) == "vehicle"
+    assert _resolve_label_category(_birdnet_result("unknown", ""), provider) == "unknown"
+    # Operator configuration still wins over provenance.
+    cardinal = _birdnet_result("northern cardinal", "Cardinalis cardinalis_Northern Cardinal")
+    assert _resolve_label_category(cardinal, provider) == "security"
