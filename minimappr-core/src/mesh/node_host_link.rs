@@ -13,6 +13,7 @@
 //! exactly the offline federation the plan rules out.
 
 use crate::protocol::mesh_messages::HostAnnouncement;
+use crate::protocol::wire_codes::SessionTransportCode;
 use crate::protocol::NodeId;
 
 use super::config::LivenessConfig;
@@ -40,6 +41,10 @@ pub struct HostLink {
     pub solo: bool,
     pub host_head_sequence: u64,
     takeover_claimed_term: Option<u32>,
+    /// Transport the host last announced. Only on the relay can a live link
+    /// coexist with a dead host; on the hotspot the link dies with its host,
+    /// so a silent host on a live hotspot link means loss, not death.
+    pub session_transport: SessionTransportCode,
     /// When the link last came up: a node that just reconnected has not
     /// had a chance to hear the host yet, so silence counts from here.
     link_up_since_ms: MeshMilliseconds,
@@ -55,6 +60,7 @@ impl HostLink {
             solo: false,
             host_head_sequence: 0,
             takeover_claimed_term: None,
+            session_transport: SessionTransportCode::CloudRelay,
             link_up_since_ms: now_ms,
         }
     }
@@ -90,6 +96,7 @@ impl HostLink {
         let host_changed = announcement.host_node_id != self.host_node_id;
         self.host_node_id = announcement.host_node_id;
         self.host_term = announcement.host_term;
+        self.session_transport = announcement.transport;
         self.host_head_sequence = self.host_head_sequence.max(announcement.event_log_head_sequence);
         self.last_heard_from_host_ms = now_ms;
         let rejoined_from_solo = self.solo && self.link_up;
@@ -112,7 +119,7 @@ impl HostLink {
     pub fn tick(&mut self, now_ms: MeshMilliseconds, succession_rank: Option<usize>, config: &LivenessConfig) -> Option<HostLinkEvent> {
         let silent_ms = now_ms.saturating_sub(self.last_heard_from_host_ms);
         let silent_while_linked_ms = now_ms.saturating_sub(self.last_heard_from_host_ms.max(self.link_up_since_ms));
-        if self.link_up {
+        if self.link_up && self.session_transport == SessionTransportCode::CloudRelay {
             if let Some(rank) = succession_rank {
                 let wait = config.host_silence_takeover_timeout_ms + rank as u64 * config.takeover_stagger_per_rank_ms;
                 let next_term = self.host_term + 1;
@@ -127,5 +134,60 @@ impl HostLink {
             return Some(HostLinkEvent::EnteredSolo);
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::wire_codes::{SessionChangeReasonCode, SessionTransportCode};
+
+    fn announcement(host: u32, term: u32) -> HostAnnouncement {
+        HostAnnouncement {
+            host_node_id: NodeId(host),
+            host_term: term,
+            event_log_head_sequence: 0,
+            transport: SessionTransportCode::CloudRelay,
+            reason: SessionChangeReasonCode::SessionStarted,
+        }
+    }
+
+    #[test]
+    fn rank_zero_takes_over_only_after_silence_on_a_live_link() {
+        let config = LivenessConfig::default();
+        let mut link = HostLink::new(NodeId(0), 0);
+        link.on_announcement(&announcement(0, 1), false, 0);
+        assert_eq!(link.tick(config.host_silence_takeover_timeout_ms - 1, Some(0), &config), None);
+        assert_eq!(
+            link.tick(config.host_silence_takeover_timeout_ms, Some(0), &config),
+            Some(HostLinkEvent::TakeOver { host_term: 2 })
+        );
+        // Claimed once per term.
+        assert_eq!(link.tick(config.host_silence_takeover_timeout_ms + 1, Some(0), &config), None);
+    }
+
+    /// Regression (found by the mesh sim): a phone walking back into hotspot
+    /// range saw a long host silence and hijacked the session.
+    #[test]
+    fn reconnecting_node_waits_to_hear_the_host_before_any_takeover() {
+        let config = LivenessConfig::default();
+        let mut link = HostLink::new(NodeId(0), 0);
+        link.on_announcement(&announcement(0, 1), false, 0);
+        link.set_link_up(false, 1_000);
+        assert_eq!(link.tick(config.solo_fallback_timeout_ms, Some(0), &config), Some(HostLinkEvent::EnteredSolo));
+        let back_ms = 60_000;
+        link.set_link_up(true, back_ms);
+        assert_eq!(link.tick(back_ms + 100, Some(0), &config), None);
+        let outcome = link.on_announcement(&announcement(0, 1), false, back_ms + 500);
+        assert!(outcome.rejoined_from_solo && !link.solo);
+    }
+
+    #[test]
+    fn equal_term_rival_wins_only_with_earlier_join_order() {
+        let mut link = HostLink::new(NodeId(4), 0);
+        link.on_announcement(&announcement(4, 2), false, 0);
+        assert!(!link.on_announcement(&announcement(3, 2), false, 10).accepted);
+        let outcome = link.on_announcement(&announcement(3, 2), true, 20);
+        assert!(outcome.accepted && outcome.host_changed && link.host_node_id == NodeId(3));
     }
 }

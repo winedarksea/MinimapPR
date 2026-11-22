@@ -22,6 +22,10 @@ use crate::tdoa_solver::TdoaSolverError;
 
 const POSITION_DIMENSIONS: usize = 3;
 const DISTANCE_EPSILON_M: f64 = 1e-9;
+/// Height σ used to pin a solve at a band edge.
+const PINNED_HEIGHT_STD_M: f64 = 0.05;
+/// Variance of a uniform distribution over a range r is r² / 12.
+const UNIFORM_VARIANCE_DIVISOR: f64 = 12.0;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SeedRefinerConfig {
@@ -34,6 +38,9 @@ pub struct SeedRefinerConfig {
     /// Never reject below this many pair observations.
     pub minimum_observations_after_rejection: usize,
     pub maximum_covariance_condition_number: f64,
+    /// Inflate the horizontal covariance by the drift of the fix across the
+    /// seed's height band (height is barely observable from a flat layout).
+    pub marginalize_height_band: bool,
 }
 
 impl Default for SeedRefinerConfig {
@@ -45,6 +52,7 @@ impl Default for SeedRefinerConfig {
             maximum_outlier_rejections: 2,
             minimum_observations_after_rejection: 3,
             maximum_covariance_condition_number: 1.0e14,
+            marginalize_height_band: true,
         }
     }
 }
@@ -206,10 +214,35 @@ impl TdoaSeedRefiner for JointLmSeedRefiner {
             let jacobian = model.jacobian(&position);
             let information_dynamic = jacobian.transpose() * &jacobian;
             let information = Matrix3::from_fn(|row, column| information_dynamic[(row, column)]);
-            let covariance = invert_symmetric_positive_definite(
+            let mut covariance = invert_symmetric_positive_definite(
                 &information,
                 self.config.maximum_covariance_condition_number,
             )?;
+            if self.config.marginalize_height_band {
+                let pinned_at = |height_m: f64| {
+                    let pinned = SeedResidualModel {
+                        terms: model.terms.clone(),
+                        sound_speed_mps: model.sound_speed_mps,
+                        height_prior: Some((height_m, PINNED_HEIGHT_STD_M)),
+                    };
+                    let start = Vector3::new(position[0], position[1], height_m);
+                    let outcome = refine_position_with_retry(&pinned, start, 1.0);
+                    outcome.converged.then_some(outcome.position_m)
+                };
+                let [band_low, band_high] = seed.source_height_bounds_m;
+                if let (Some(low), Some(high)) = (pinned_at(band_low), pinned_at(band_high)) {
+                    // Unknown height across the band, taken as uniform: the
+                    // horizontal drift along it adds (Δ Δᵀ)/12. On a flat phone
+                    // layout this, not the linearized σ, dominates (a fix near
+                    // the phones' plane has almost no z gradient to show it).
+                    let drift = [high[0] - low[0], high[1] - low[1]];
+                    for row in 0..2 {
+                        for column in 0..2 {
+                            covariance[(row, column)] += drift[row] * drift[column] / UNIFORM_VARIANCE_DIVISOR;
+                        }
+                    }
+                }
+            }
             return Ok(RefinedTdoaFix {
                 position_m: [position[0], position[1], position[2]],
                 covariance_m2: std::array::from_fn(|row| {

@@ -336,13 +336,16 @@ impl ScenarioRun {
         for emitter in emitters {
             let (from, to) = (self.world.position(device, self.now_s), self.world.position(emitter, self.now_s));
             let true_azimuth = (to[1] - from[1]).atan2(to[0] - from[0]).to_degrees();
-            let error = self.world.config.chirp_direction_std_deg * hashed_gaussian(self.seed, "chirp_doa", round_id as u64, (device * 64 + emitter) as u64);
+            let config = &self.world.config;
+            let heading_error = config.chirp_direction_heading_std_deg * hashed_gaussian(self.seed, "chirp_heading", round_id as u64, device as u64);
+            let doa_noise = config.chirp_direction_noise_std_deg * hashed_gaussian(self.seed, "chirp_doa", round_id as u64, (device * 64 + emitter) as u64);
+            let error = heading_error + doa_noise;
             let report = ChirpDirectionReport {
                 round_id,
                 reporting_node_id: NodeId(device as u32),
                 emitter_node_id: NodeId(emitter as u32),
                 world_azimuth_deg: (true_azimuth + error) as f32,
-                azimuth_standard_deviation_deg: self.world.config.chirp_direction_std_deg as f32,
+                azimuth_standard_deviation_deg: self.world.config.chirp_direction_heading_std_deg.hypot(self.world.config.chirp_direction_noise_std_deg) as f32,
             };
             self.send_message(
                 device,

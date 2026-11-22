@@ -26,6 +26,8 @@ use crate::protocol::mesh_messages::EventLogEntry;
 /// Points on the 2σ likelihood ellipse sent with a pinpointed entity.
 const CONTOUR_POINT_COUNT: usize = 12;
 const CONTOUR_SIGMA_MULTIPLIER: f64 = 2.0;
+/// A successor's call ids start at `term << 32`.
+const CALL_ID_TERM_SHIFT_BITS: u32 = 32;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum HostInput {
@@ -137,6 +139,8 @@ impl FieldHostStateMachine {
         host.event_log = restored.event_log;
         host.membership = restored.membership;
         host.next_bird_entity_id = restored.highest_bird_entity_id;
+        // Call ids stay unique across terms (records outlive their host).
+        host.calls.matcher.reserve_call_ids_through(u64::from(host.host_term) << CALL_ID_TERM_SHIFT_BITS);
         for node in host.membership.members.keys().copied().collect::<Vec<_>>() {
             host.membership.note_heard(node, now_ms);
         }

@@ -21,6 +21,7 @@
 pub mod arrival_time_localizer;
 pub mod call_pipeline;
 pub mod call_pipeline_types;
+pub mod chirality_cue;
 pub mod chirp_scheduler;
 pub mod classification_rota;
 pub mod clip_budget;

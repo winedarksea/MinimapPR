@@ -323,6 +323,8 @@ impl CallPipeline {
                 classifying_node: call.classifying_node,
                 centre_reference_s: call.centre_reference_s,
                 clips,
+                chirality_confidence: record.chirality_confidence,
+                chirality_locked: record.chirality_locked,
             };
             match localizer.localize(&request) {
                 Ok(fix) => {

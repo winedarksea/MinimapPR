@@ -42,6 +42,9 @@ pub struct CallLocalizationRequest {
     pub classifying_node: NodeId,
     pub centre_reference_s: f64,
     pub clips: Vec<ClipLocalizationInput>,
+    /// Map chirality confidence of the island's anchor (None: unanchored).
+    pub chirality_confidence: Option<f64>,
+    pub chirality_locked: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

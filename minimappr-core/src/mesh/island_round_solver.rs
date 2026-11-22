@@ -133,10 +133,18 @@ pub fn solve_island_round(
     if measurements.is_empty() {
         return None;
     }
+    // Walking phones (plan: "down-weighted or skipped") stay in the clock
+    // graph as heavily down-weighted vertices, but neither their offsets nor
+    // their positions are taken from a round they walked through: at
+    // 1–3 m/s a round moves them metres, i.e. milliseconds of offset error.
+    let walking: BTreeSet<usize> = (0..participants.len())
+        .filter(|&index| matches!(input.reports[&participants[index]].motion_state, MotionState::Walking))
+        .collect();
+    let is_still = |node: &NodeId| index_of(*node).is_some_and(|index| !walking.contains(&index));
     let reference_node = input
         .preferred_reference
-        .filter(|node| distinct_emitters.contains(node))
-        .or_else(|| distinct_emitters.iter().next().copied())?;
+        .filter(|node| distinct_emitters.contains(node) && is_still(node))
+        .or_else(|| distinct_emitters.iter().copied().find(is_still))?;
     let reference_index = index_of(reference_node)?;
     let reference_emission = observation.first_emission_of(reference_index)?;
     let reference_time_s = observation.arrival_local_s[reference_index][reference_emission]?;
@@ -164,6 +172,7 @@ pub fn solve_island_round(
     let clock_offsets = participants
         .iter()
         .enumerate()
+        .filter(|(index, _)| !walking.contains(index))
         .filter_map(|(index, node)| {
             let offset = solution.offsets_s[index]?;
             let sigma = solution.offset_sigmas_s[index].unwrap_or(config.clock_graph.pick_offset_sigma_s);
@@ -185,9 +194,6 @@ pub fn solve_island_round(
         .collect();
     let mut layout_positions_m = BTreeMap::new();
     let mut layout_sigmas_m = BTreeMap::new();
-    let walking: BTreeSet<usize> = (0..participants.len())
-        .filter(|&index| matches!(input.reports[&participants[index]].motion_state, MotionState::Walking))
-        .collect();
     // Walking phones break the rigid-layout assumption (plan: skipped in a
     // round's geometry); their previous positions are carried forward.
     let ranged_nodes: BTreeSet<usize> = measurements

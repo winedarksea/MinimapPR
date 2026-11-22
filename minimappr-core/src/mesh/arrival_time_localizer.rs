@@ -230,7 +230,12 @@ impl ArrivalTimeLocalizer {
             })
             .min_by(|a, b| Self::reduced_chi_square(a).total_cmp(&Self::reduced_chi_square(b)));
         match (full, best_subset) {
-            (Ok(full), Some(subset)) if Self::reduced_chi_square(&subset) < Self::reduced_chi_square(&full) => Ok(subset),
+            (Ok(full), Some(subset))
+                if Self::reduced_chi_square(&subset) <= self.maximum_reduced_chi_square
+                    && Self::reduced_chi_square(&subset) < Self::reduced_chi_square(&full) =>
+            {
+                Ok(subset)
+            }
             (Ok(full), _) => Ok(full),
             (Err(_), Some(subset)) => Ok(subset),
             (Err(error), None) => Err(error),
@@ -298,5 +303,20 @@ mod tests {
         arrivals[2].reference_arrival_s += 0.08;
         let solved = ArrivalTimeLocalizer::default().localize(&arrivals).expect("solves");
         assert!(!solved.used_arrival_indices.contains(&2), "{:?}", solved.used_arrival_indices);
+    }
+
+    #[test]
+    fn three_nodes_fix_lies_inside_its_reported_region() {
+        let nodes = [[8.0, 0.5, 1.4], [3.5, 7.2, 1.3], [-4.0, 6.5, 1.5]];
+        let source = [2.0, 3.0, 5.0];
+        let mut arrivals = arrivals_for(source, &nodes, 7.0);
+        for arrival in &mut arrivals {
+            arrival.position_std_m = 0.25;
+        }
+        let fix = ArrivalTimeLocalizer::default().localize(&arrivals).expect("3 nodes solve").fix;
+        let error = ((fix.position_m[0] - source[0]).powi(2) + (fix.position_m[1] - source[1]).powi(2)).sqrt();
+        // Two TDOAs and unknown height: the height prior picks a point on the
+        // intersection curve, and the reported region must cover the truth.
+        assert!(error < 3.0 * fix.horizontal_major_sigma_m() + 0.5, "{:?} σ {}", fix.position_m, fix.horizontal_major_sigma_m());
     }
 }

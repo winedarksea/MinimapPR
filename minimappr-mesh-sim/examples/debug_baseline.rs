@@ -10,6 +10,8 @@ fn main() {
         "offline" => minimappr_mesh_sim::scenarios::network_scenarios::offline_host_loss_spec(seed),
         "faults" => minimappr_mesh_sim::scenarios::network_scenarios::network_faults_spec(seed),
         "cell" => minimappr_mesh_sim::scenarios::network_scenarios::host_cell_loss_spec(seed),
+        "mirror" => minimappr_mesh_sim::scenarios::sync_scenarios::mirrored_layout_spec(seed),
+        "split" => minimappr_mesh_sim::scenarios::sync_scenarios::island_split_merge_spec(seed),
         "relay" => minimappr_mesh_sim::scenarios::network_scenarios::relay_drop_and_cap_spec(seed),
         _ => panic!(),
     };
@@ -17,7 +19,8 @@ fn main() {
     for (d, h) in outcome.all_hosts() { println!("host {d} term {} counters {:?} rounds {:?}", h.host_term, h.calls.counters, h.sync.round_completion_ms); }
     println!("tenures {:?} stalls {:?}", outcome.metrics.host_tenures, outcome.metrics.stalls_applied);
     for r in outcome.call_records() { println!("call {} recv {} clips {:?} domains {:?} fail {:?}", r.call_id, r.received_ms, r.clip_nodes, r.clip_domains, r.failure); }
-    for (t, f) in outcome.traces.iter().zip(outcome.scored_fixes()) { println!("trace call {} true {} nodes {:?} est {:?} fix {:?} err {:.2} sigma {:.2}", t.host_call_id, t.true_call_index, t.node_ids, t.estimated_node_positions_m, t.fix.as_ref().map(|f| (f.position_m, f.used_nodes.clone())), f.horizontal_error_m, f.reported_major_sigma_m); }
+    for (t, f) in outcome.traces.iter().zip(outcome.scored_fixes()) { println!("trace call {} true {} nodes {:?} est {:?} fix {:?} err {:.2} sigma {:.2} mirrored {:?}", t.host_call_id, t.true_call_index, t.node_ids, t.estimated_node_positions_m, t.fix.as_ref().map(|f| (f.position_m, f.used_nodes.clone())), f.horizontal_error_m, f.reported_major_sigma_m, f.layout_mirrored); }
+    for r in outcome.call_records() { println!("rec {} locked {} conf {:?}", r.call_id, r.chirality_locked, r.chirality_confidence); }
     if let Some((_, h)) = outcome.active_host() {
         println!("final rounds {:?}", h.sync.rounds_started.iter().rev().take(4).collect::<Vec<_>>());
         for (id, island) in &h.sync.engine.islands { println!("island {id} members {:?} ref {:?} filters {:?}", island.members, island.reference_node, island.filters.iter().map(|(n, f)| (n.0, f.is_valid())).collect::<Vec<_>>()); }

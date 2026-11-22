@@ -98,9 +98,32 @@ pub fn no_stale_clip_used(outcome: &ScenarioOutcome) -> InvariantResult {
     Ok(())
 }
 
-/// "No fix worse than its reported region": error within k·σ plus a floor.
-pub fn fixes_within_reported_region(fixes: &[ScoredFix], sigma_multiplier: f64, floor_m: f64) -> InvariantResult {
+/// Below this reported chirality confidence a mirrored map is "flagged":
+/// the system said it might be the mirror image (test strategy: "or reports
+/// low chirality confidence"). Stricter than the UI's 0.9 so the gate also
+/// checks the confidence is roughly calibrated.
+pub const FLAGGED_CHIRALITY_CONFIDENCE: f64 = 0.99;
+
+fn mirror_was_flagged(fix: &ScoredFix) -> bool {
+    fix.layout_mirrored == Some(true) && !fix.chirality_locked && fix.chirality_confidence.is_none_or(|c| c < FLAGGED_CHIRALITY_CONFIDENCE)
+}
+
+/// Never a confident wrong side: a mirrored fix must come with low reported
+/// chirality confidence and never after chirality was locked by a cue.
+pub fn no_confident_mirror(fixes: &[ScoredFix]) -> InvariantResult {
     for fix in fixes {
+        ensure(fix.layout_mirrored != Some(true) || mirror_was_flagged(fix), || {
+            format!("call {} mirrored with confidence {:?} (locked {})", fix.call_index, fix.chirality_confidence, fix.chirality_locked)
+        })?;
+    }
+    Ok(())
+}
+
+/// "No fix worse than its reported region": error within k·σ plus a floor.
+/// A flagged mirror is exempt (its region is drawn on both sides).
+pub fn fixes_within_reported_region(fixes: &[ScoredFix], sigma_multiplier: f64, floor_m: f64) -> InvariantResult {
+    no_confident_mirror(fixes)?;
+    for fix in fixes.iter().filter(|fix| !mirror_was_flagged(fix)) {
         let allowed = sigma_multiplier * fix.reported_major_sigma_m + floor_m;
         ensure(fix.horizontal_error_m <= allowed, || {
             format!("call {} error {:.2} m outside reported region {:.2} m (σ {:.2})", fix.call_index, fix.horizontal_error_m, allowed, fix.reported_major_sigma_m)
@@ -110,7 +133,7 @@ pub fn fixes_within_reported_region(fixes: &[ScoredFix], sigma_multiplier: f64, 
 }
 
 pub fn fixes_within_gate(fixes: &[ScoredFix], gate_m: f64) -> InvariantResult {
-    for fix in fixes {
+    for fix in fixes.iter().filter(|fix| !mirror_was_flagged(fix)) {
         ensure(fix.horizontal_error_m <= gate_m, || format!("call {} error {:.2} m over gate {gate_m} m", fix.call_index, fix.horizontal_error_m))?;
     }
     Ok(())

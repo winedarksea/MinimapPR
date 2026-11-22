@@ -69,6 +69,8 @@ pub struct SolveTrace {
     pub node_ids: Vec<NodeId>,
     pub estimated_node_positions_m: Vec<[f64; 3]>,
     pub fix: Option<CallFix>,
+    pub chirality_confidence: Option<f64>,
+    pub chirality_locked: bool,
 }
 
 #[derive(Debug, Default)]
@@ -117,6 +119,8 @@ impl ClipSetLocalizer for ArrivalClipLocalizer {
             node_ids: node_ids.clone(),
             estimated_node_positions_m: arrivals.iter().map(|a| a.position_m).collect(),
             fix: None,
+            chirality_confidence: request.chirality_confidence,
+            chirality_locked: request.chirality_locked,
         };
         let result = self.localizer.localize(&arrivals).map_err(|error| format!("{error:?}"));
         let outcome = result.map(|solved| {

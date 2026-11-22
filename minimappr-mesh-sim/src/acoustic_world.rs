@@ -50,7 +50,10 @@ pub struct WorldConfig {
     pub sensor_frame_interval_s: f64,
     /// 24 kHz PCM16 after 1.75× FLAC ≈ 0.57 bytes per 48 kHz device sample.
     pub clip_bytes_per_device_sample: f64,
-    pub chirp_direction_std_deg: f64,
+    /// Stereo phone heading (compass) error, common to all its bearings in a round.
+    pub chirp_direction_heading_std_deg: f64,
+    /// Independent DOA noise per bearing.
+    pub chirp_direction_noise_std_deg: f64,
     /// Below this headroom the capture thread stalls now and then.
     pub stall_headroom_threshold: f64,
     pub stall_interval_range_s: [f64; 2],
@@ -84,7 +87,8 @@ impl Default for WorldConfig {
             gnss_fix_interval_s: 5.0,
             sensor_frame_interval_s: 0.25,
             clip_bytes_per_device_sample: 0.57,
-            chirp_direction_std_deg: 20.0,
+            chirp_direction_heading_std_deg: 20.0,
+            chirp_direction_noise_std_deg: 5.0,
             stall_headroom_threshold: 0.05,
             stall_interval_range_s: [8.0, 20.0],
             stall_duration_range_s: [0.05, 0.3],

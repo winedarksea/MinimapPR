@@ -201,6 +201,9 @@ pub struct IslandSyncConfig {
     pub walking_position_growth_mps: f64,
     /// Below this the GPS chirality choice is reported as low confidence.
     pub confident_chirality_threshold: f64,
+    /// Per-bearing DOA noise once the phone's common heading error cancels
+    /// (bearing pairs from one stereo phone or array node, one round).
+    pub relative_bearing_noise_std_deg: f64,
     /// Per-model d_ii table (plan: calibrated once per model), keyed by the
     /// join descriptor's `platform_name`; unknown models get the default.
     pub self_path_length_by_platform_m: BTreeMap<String, f64>,
@@ -223,6 +226,7 @@ impl Default for IslandSyncConfig {
             relative_position_growth_mps: 0.3,
             walking_position_growth_mps: 1.5,
             confident_chirality_threshold: 0.9,
+            relative_bearing_noise_std_deg: 8.0,
             self_path_length_by_platform_m: BTreeMap::new(),
             default_self_path_length_m: 0.02,
             clock_graph: ClockGraphConfig::default(),

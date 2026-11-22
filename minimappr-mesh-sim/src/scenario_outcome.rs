@@ -35,6 +35,8 @@ pub struct ScoredFix {
     pub reported_major_sigma_m: f64,
     pub layout_mirrored: Option<bool>,
     pub node_ids: Vec<NodeId>,
+    pub chirality_confidence: Option<f64>,
+    pub chirality_locked: bool,
 }
 
 pub struct ScenarioOutcome {
@@ -138,6 +140,8 @@ impl ScenarioOutcome {
                     reported_major_sigma_m: fix.horizontal_major_sigma_m,
                     layout_mirrored,
                     node_ids: trace.node_ids.clone(),
+                    chirality_confidence: trace.chirality_confidence,
+                    chirality_locked: trace.chirality_locked,
                 })
             })
             .collect()
