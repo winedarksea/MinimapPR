@@ -30,17 +30,42 @@
     return constraints;
   }
 
+  // Set synchronously on entry: a second tap while getUserMedia is pending
+  // must not build a second graph and orphan the first (mic left open).
+  let startInProgress = false;
+
   async function start(options, onChunk) {
-    if (activeCapture) throw new Error("capture already running");
+    if (activeCapture || startInProgress) throw new Error("capture already running");
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       throw new Error("This browser does not support microphone capture.");
     }
+    startInProgress = true;
+    let stream = null;
+    let context = null;
+    try {
+      return await buildCaptureGraph(options, onChunk, (createdStream, createdContext) => {
+        stream = createdStream;
+        context = createdContext;
+      });
+    } catch (error) {
+      // Release the mic and audio hardware on a half-built graph.
+      if (stream) stream.getTracks().forEach((track) => track.stop());
+      if (context) context.close().catch(() => undefined);
+      throw error;
+    } finally {
+      startInProgress = false;
+    }
+  }
+
+  async function buildCaptureGraph(options, onChunk, recordResources) {
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: captureConstraints(options.deviceId || ""),
       video: false,
     });
+    recordResources(stream, null);
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
     const context = new AudioContextClass({ sampleRate: options.requestedSampleRateHz });
+    recordResources(stream, context);
     // iOS Safari starts the context suspended; resume within the user gesture.
     if (context.state === "suspended" && context.resume) await context.resume();
     await context.audioWorklet.addModule(options.workletUrl);

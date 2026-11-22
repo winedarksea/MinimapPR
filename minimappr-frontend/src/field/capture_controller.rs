@@ -5,7 +5,7 @@
 //! so a slow inference only queues windows (bounded, oldest dropped and
 //! counted) and never stalls capture.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use leptos::prelude::{GetUntracked, Set, Update};
@@ -28,16 +28,20 @@ use crate::state::AppState;
 
 /// Node label for detections before this phone has a relay peer id.
 const UNJOINED_NODE_LABEL: &str = "this-phone";
+const BYTES_PER_MEGABYTE: f64 = 1.0e6;
 
 struct CaptureRuntime {
     pipeline: Stage1CapturePipeline,
     resampler: WindowedSincResampler,
-    classifier_busy: bool,
     next_detection_sequence: u64,
     app_state: AppState,
 }
 
 thread_local! {
+    /// Page-wide, not per capture runtime: a stop/start while a window is in
+    /// flight must not start a second concurrent `session.run` on the one
+    /// ORT session.
+    static CLASSIFIER_BUSY: Cell<bool> = const { Cell::new(false) };
     static CAPTURE_RUNTIME: RefCell<Option<Rc<RefCell<CaptureRuntime>>>> = const { RefCell::new(None) };
     static CHUNK_CALLBACK: RefCell<Option<Closure<dyn FnMut(f64, js_sys::Float32Array)>>> = const { RefCell::new(None) };
 }
@@ -63,9 +67,10 @@ pub async fn load_classifier(signals: FieldSignals) {
     };
     match load_birdnet(&options).await {
         Ok(report) => {
+            let offline_note = if report.model_stored_for_offline { "" } else { " (not stored offline: storage full)" };
             signals.birdnet_status.set(format!(
-                "Loaded: {:.0} MB, {} labels, session {:.0} ms, {} thread(s)",
-                report.model_bytes / 1.0e6,
+                "Loaded: {:.0} MB, {} labels, session {:.0} ms, {} thread(s){offline_note}",
+                report.model_bytes / BYTES_PER_MEGABYTE,
                 report.label_count,
                 report.session_create_milliseconds,
                 report.intra_op_thread_count
@@ -102,7 +107,6 @@ pub async fn start_microphone(signals: FieldSignals, app_state: AppState) {
             let runtime = Rc::new(RefCell::new(CaptureRuntime {
                 pipeline: Stage1CapturePipeline::new(sample_rate_hz),
                 resampler: WindowedSincResampler::new(sample_rate_hz, BIRDNET_INPUT_SAMPLE_RATE_HZ),
-                classifier_busy: false,
                 next_detection_sequence: 0,
                 app_state: app_state.clone(),
             }));
@@ -139,7 +143,7 @@ pub fn device_sample_index_now() -> u64 {
     CAPTURE_RUNTIME.with(|slot| {
         slot.borrow()
             .as_ref()
-            .map_or(0, |runtime| runtime.borrow().pipeline.counters().samples_received)
+            .map_or(0, |runtime| runtime.borrow().pipeline.next_expected_device_sample_index())
     })
 }
 
@@ -185,18 +189,14 @@ fn pump_classifier(signals: FieldSignals) {
         return;
     }
     let Some(runtime) = CAPTURE_RUNTIME.with(|slot| slot.borrow().clone()) else { return };
-    let window = {
-        let mut state = runtime.borrow_mut();
-        if state.classifier_busy {
-            return;
-        }
-        let Some(window) = state.pipeline.take_ready_window() else { return };
-        state.classifier_busy = true;
-        window
-    };
+    if CLASSIFIER_BUSY.with(Cell::get) {
+        return;
+    }
+    let Some(window) = runtime.borrow_mut().pipeline.take_ready_window() else { return };
+    CLASSIFIER_BUSY.with(|busy| busy.set(true));
     spawn_local(async move {
         classify_window(&runtime, window, signals).await;
-        runtime.borrow_mut().classifier_busy = false;
+        CLASSIFIER_BUSY.with(|busy| busy.set(false));
         pump_classifier(signals);
     });
 }

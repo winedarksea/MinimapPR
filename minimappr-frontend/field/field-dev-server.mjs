@@ -60,7 +60,12 @@ function parseListenPort() {
 
 // Resolves a URL path inside `rootDirectory`, refusing traversal outside it.
 function resolveInside(rootDirectory, urlPath) {
-  const decoded = decodeURIComponent(urlPath);
+  let decoded;
+  try {
+    decoded = decodeURIComponent(urlPath);
+  } catch (_malformedEscape) {
+    return null; // e.g. "/%E0": a URIError here would crash the server
+  }
   const candidate = path.resolve(rootDirectory, "." + path.posix.normalize("/" + decoded));
   if (candidate !== rootDirectory && !candidate.startsWith(rootDirectory + path.sep)) return null;
   return candidate;
