@@ -22,6 +22,11 @@ use crate::stage1_detector::{FieldStage1Event, FieldStage1Mode};
 const PHONE_CAPTURE_SAMPLE_RATE_HZ: u32 = 48_000;
 const PHONE_MICROPHONE_COUNT: u8 = 1;
 const SESSION_ID_LENGTH_BYTES: usize = 16;
+/// Upper bound on the Kotlin-provided rolling buffer span. The plan keeps
+/// about 30 s; the cap stops a bad setup value from asking Rust for an
+/// allocation that would abort the process (OOM aborts are not catchable
+/// panics). 120 s at 48 kHz PCM16 plus compaction slack is about 14 MB.
+const MAXIMUM_ROLLING_BUFFER_SECONDS: u32 = 120;
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct FieldNodeSetup {
@@ -132,6 +137,14 @@ impl FieldMeshNode {
             setup.session_id.as_slice().try_into().map_err(|_| FieldFfiError::InvalidArgument {
                 detail: format!("session id must be {SESSION_ID_LENGTH_BYTES} bytes, got {}", setup.session_id.len()),
             })?;
+        if setup.rolling_buffer_seconds == 0 || setup.rolling_buffer_seconds > MAXIMUM_ROLLING_BUFFER_SECONDS {
+            return Err(FieldFfiError::InvalidArgument {
+                detail: format!(
+                    "rolling buffer must be 1..={MAXIMUM_ROLLING_BUFFER_SECONDS} s, got {}",
+                    setup.rolling_buffer_seconds
+                ),
+            });
+        }
         let descriptor = NodeDescriptor {
             node_kind: NodeKind::Phone,
             platform_name: setup.platform_name,
@@ -257,6 +270,37 @@ mod tests {
             FieldMeshNode::new(phone_setup(vec![0; 3])),
             Err(FieldFfiError::InvalidArgument { .. })
         ));
+    }
+
+    #[test]
+    fn rolling_buffer_span_outside_bounds_is_rejected_before_allocating() {
+        for rolling_buffer_seconds in [0, MAXIMUM_ROLLING_BUFFER_SECONDS + 1, u32::MAX] {
+            let setup = FieldNodeSetup { rolling_buffer_seconds, ..phone_setup(vec![0; SESSION_ID_LENGTH_BYTES]) };
+            assert!(matches!(FieldMeshNode::new(setup), Err(FieldFfiError::InvalidArgument { .. })));
+        }
+    }
+
+    /// UniFFI objects are shared `Arc`s: the capture thread and the tick loop
+    /// call the same node concurrently. One lock per call, never nested.
+    #[test]
+    fn concurrent_capture_and_ticks_do_not_deadlock() {
+        let node = std::sync::Arc::new(FieldMeshNode::new(phone_setup(vec![0; SESSION_ID_LENGTH_BYTES])).expect("node"));
+        let block_samples: u64 = 960;
+        let block_count: u64 = 200;
+        let capture_node = node.clone();
+        let capture_thread = std::thread::spawn(move || {
+            for block_index in 0..block_count {
+                capture_node
+                    .push_capture_block(block_index * block_samples, vec![0_u8; block_samples as usize * 2])
+                    .expect("push");
+            }
+        });
+        for tick_index in 0..block_count {
+            node.tick(tick_index * 20).expect("tick");
+        }
+        capture_thread.join().expect("capture thread");
+        assert_eq!(node.next_device_sample_index(), block_count * block_samples);
+        assert_eq!(node.rolling_buffer_gap_count(), 0);
     }
 
     #[test]

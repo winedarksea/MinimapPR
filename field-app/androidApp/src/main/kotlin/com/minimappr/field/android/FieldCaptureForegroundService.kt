@@ -8,7 +8,9 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.Log
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
@@ -18,6 +20,7 @@ import com.minimappr.field.node.FieldCaptureServiceState
 import com.minimappr.field.node.FieldNodeRuntime
 import com.minimappr.field.node.FieldServiceStatusBoard
 import com.minimappr.field.node.skeletonSoloNodeSetup
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -41,6 +44,7 @@ class FieldCaptureForegroundService : Service() {
     private var serviceScope: CoroutineScope? = null
     private var nodeRuntime: FieldNodeRuntime? = null
     private var captureLoop: AndroidMicrophoneCaptureLoop? = null
+    private val mainThreadHandler = Handler(Looper.getMainLooper())
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -72,12 +76,29 @@ class FieldCaptureForegroundService : Service() {
     }
 
     private fun startNodeAndCapture() {
-        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        // A failed capture read, an FFI error (FieldFfiException, or the
+        // InternalException UniFFI raises for a caught Rust panic) or a tick
+        // failure must stop the service visibly, not crash the process via
+        // the default uncaught-exception handler of a worker thread.
+        lateinit var scope: CoroutineScope
+        val failureHandler = CoroutineExceptionHandler { _, failure ->
+            Log.e(LOG_TAG, "service coroutine failed", failure)
+            mainThreadHandler.post {
+                // Ignore late failures from a scope already torn down.
+                if (serviceScope === scope) failAndStop("capture pipeline failed: $failure")
+            }
+        }
+        scope = CoroutineScope(SupervisorJob() + Dispatchers.Default + failureHandler)
         serviceScope = scope
-        val runtime = FieldNodeRuntime(
-            skeletonSoloNodeSetup(appConfiguration.node, "android-${Build.MODEL}", BuildConfig.VERSION_NAME),
-            appConfiguration.node,
-        )
+        val runtime = try {
+            FieldNodeRuntime(
+                skeletonSoloNodeSetup(appConfiguration.node, "android-${Build.MODEL}", BuildConfig.VERSION_NAME),
+                appConfiguration.node,
+            )
+        } catch (nodeSetupFailure: RuntimeException) {
+            failAndStop("node setup rejected: ${nodeSetupFailure.message}")
+            return
+        }
         nodeRuntime = runtime
         scope.launch {
             runtime.status.collect { nodeStatus -> FieldServiceStatusBoard.update { it.copy(node = nodeStatus) } }
@@ -111,6 +132,8 @@ class FieldCaptureForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        // Order: stop() waits for the capture thread to leave read() and the
+        // sink, so no block reaches the node after close() below.
         captureLoop?.stop()
         captureLoop = null
         serviceScope?.cancel()

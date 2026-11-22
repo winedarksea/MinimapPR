@@ -39,6 +39,16 @@ class CaptureBackpressureTest {
     }
 
     @Test
+    fun readResultsDeliverFlagOrStopWithoutSpinningOnErrors() {
+        assertEquals(CaptureReadOutcome.DELIVER_BLOCK, classifyCaptureReadResult(960))
+        assertEquals(CaptureReadOutcome.FLAG_GAP_AND_CONTINUE, classifyCaptureReadResult(0))
+        // AudioRecord.ERROR_INVALID_OPERATION (-3) and ERROR_DEAD_OBJECT (-6)
+        // never clear on retry: the loop must stop, not spin.
+        assertEquals(CaptureReadOutcome.STOP_CAPTURE_WITH_FAILURE, classifyCaptureReadResult(-3))
+        assertEquals(CaptureReadOutcome.STOP_CAPTURE_WITH_FAILURE, classifyCaptureReadResult(-6))
+    }
+
+    @Test
     fun pcm16PackingRoundTripsExtremes() {
         val samples = shortArrayOf(Short.MIN_VALUE, -1, 0, 1, Short.MAX_VALUE)
         val packed = samples.toPcm16LittleEndianBytes()

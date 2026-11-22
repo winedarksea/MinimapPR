@@ -48,6 +48,28 @@ pub fn encode_clip_from_rolling_buffer(
     decimation_filter: FieldDecimationFilter,
 ) -> Result<Vec<u8>, FieldFfiError> {
     let rolling_buffer = pcm16_samples_from_little_endian_bytes(&rolling_buffer_pcm16_little_endian_bytes)?;
+    // The decimator accepts a window that merely overlaps the buffer and
+    // allocates per window sample, so an unchecked Kotlin `window_sample_count`
+    // (up to u32::MAX) could request gigabytes and abort on OOM. Requiring the
+    // window inside the buffer bounds the allocation by the bytes already
+    // passed in, and matches the mesh node's own `window_is_buffered` rule.
+    let rolling_buffer_end_exclusive = rolling_buffer_first_sample_index.checked_add(rolling_buffer.len() as u64);
+    let window_end_exclusive = window_first_sample_index.checked_add(u64::from(window_sample_count));
+    let window_is_inside_rolling_buffer = match (rolling_buffer_end_exclusive, window_end_exclusive) {
+        (Some(buffer_end), Some(window_end)) => {
+            window_sample_count > 0 && window_first_sample_index >= rolling_buffer_first_sample_index && window_end <= buffer_end
+        }
+        _ => false,
+    };
+    if !window_is_inside_rolling_buffer {
+        return Err(FieldFfiError::InvalidArgument {
+            detail: format!(
+                "clip window [{window_first_sample_index}, +{window_sample_count}) is not inside the rolling buffer \
+                 [{rolling_buffer_first_sample_index}, +{})",
+                rolling_buffer.len()
+            ),
+        });
+    }
     encode_clip_from_rolling_buffer_slice(
         &rolling_buffer,
         rolling_buffer_first_sample_index,
@@ -122,6 +144,17 @@ mod tests {
         assert_eq!(decoded.first_sample_index_device_clock, WINDOW_FIRST_SAMPLE_INDEX);
         assert_eq!(decoded.decimation_factor, 2);
         assert_eq!(decoded.pcm16_little_endian_bytes_output_rate.len(), WINDOW_SAMPLE_COUNT as usize);
+    }
+
+    #[test]
+    fn window_outside_or_overrunning_the_buffer_is_rejected_before_allocating() {
+        let filter = FieldDecimationFilter::BirdBandWithRumbleCut;
+        let oversized_window = encode_clip_from_rolling_buffer(tone_rolling_buffer(), 0, 0, u32::MAX, filter);
+        assert!(matches!(oversized_window, Err(FieldFfiError::InvalidArgument { .. })));
+        let overflowing_window = encode_clip_from_rolling_buffer(tone_rolling_buffer(), 0, u64::MAX, 1, filter);
+        assert!(matches!(overflowing_window, Err(FieldFfiError::InvalidArgument { .. })));
+        let empty_window = encode_clip_from_rolling_buffer(tone_rolling_buffer(), 0, 0, 0, filter);
+        assert!(matches!(empty_window, Err(FieldFfiError::InvalidArgument { .. })));
     }
 
     #[test]
