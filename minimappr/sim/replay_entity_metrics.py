@@ -43,6 +43,9 @@ DEFAULT_ENTITY_EXPECTATIONS: dict[str, Any] = {
     "association_time_slop_s": 2.0,
     "association_radius_m": 15.0,
     "far_field_bearing_gate_deg": 15.0,
+    # Spatial gate on horizontal (E, N) distance only: the map is 2-D, and a
+    # planar layout (every node at one height) barely constrains height.
+    "horizontal_only": False,
     # Gates are opt-in (None = report only) until a baseline exists per bundle family.
     "min_localized_and_classified_recall": None,
     "max_label_swap_rate": None,
@@ -62,6 +65,7 @@ class EntityAssociationConfig:
     far_field_distance_m: float
     match_mode: str
     array_centroid_m: np.ndarray
+    horizontal_only: bool = False
 
     @classmethod
     def from_expectations(
@@ -91,6 +95,7 @@ class EntityAssociationConfig:
             far_field_distance_m=float(far_field_distance_m),
             match_mode=match_mode,
             array_centroid_m=np.asarray(array_centroid_m, dtype=np.float64),
+            horizontal_only=bool(merged["horizontal_only"]),
         )
 
 
@@ -112,6 +117,9 @@ class EntityMetrics:
       which some detection associated with ``E`` belongs to an entity that (a) has
       at least one detection spatially gated to an event of ``E``'s individual and
       (b) whose entity label is correct for ``E``. ``None`` with no call events.
+    - ``localized_and_classified_individual_recall``: fraction of individuals with
+      at least one such event. Per-event recall undercounts designs that keep one
+      row per bird (entity reporting updates its canonical row in place).
     - ``label_swap_rate``: swaps / swap-eligible detections. A spatially gated
       detection of individual ``I`` is *swap-eligible* when another individual
       whose accepted species differ is active at the detection time; it is a
@@ -128,6 +136,8 @@ class EntityMetrics:
     individual_count: int = 0
     localized_and_classified_event_count: int = 0
     localized_and_classified_recall: float | None = None
+    localized_and_classified_individual_count: int = 0
+    localized_and_classified_individual_recall: float | None = None
     swap_eligible_detection_count: int = 0
     label_swap_count: int = 0
     label_swap_rate: float | None = None
@@ -187,7 +197,10 @@ def _spatial_gate_ratio(
             bearing_deg(centroid, position_m), bearing_deg(centroid, truth_m)
         )
         return bearing_error / config.far_field_bearing_gate_deg
-    return float(np.linalg.norm(position_m - truth_m)) / config.association_radius_m
+    delta = position_m - truth_m
+    if config.horizontal_only:
+        delta = delta[:2]
+    return float(np.linalg.norm(delta)) / config.association_radius_m
 
 
 def _best_spatial_match(
@@ -336,6 +349,9 @@ def compute_entity_metrics(
     metrics.localized_and_classified_event_count = len(satisfied_event_ids)
     if call_events:
         metrics.localized_and_classified_recall = len(satisfied_event_ids) / len(call_events)
+        satisfied_individuals = {e.individual_id for e in call_events if e.event_id in satisfied_event_ids}
+        metrics.localized_and_classified_individual_count = len(satisfied_individuals)
+        metrics.localized_and_classified_individual_recall = len(satisfied_individuals) / metrics.individual_count
 
     # Label swaps (per spatially gated detection).
     for association in associations:

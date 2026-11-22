@@ -54,6 +54,8 @@ from minimappr.core.degradation import CapabilityDegradationModel
 from minimappr.core.environment import StaticEnvironmentProvider
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.cluster_registry import ClusterRegistry
+from minimappr.core.birdnet_label_categories import correct_persisted_birdnet_species_label_categories
+from minimappr.core.onset_srp_localization_stage import LOCALIZATION_METHOD_NAME as ONSET_SRP_LOCALIZATION_METHOD
 from minimappr.core.onset_srp_localization_stage import OnsetSrpLocalizationStage
 from minimappr.core.sensor_span_coverage_wait import SensorStreamActivityTracker, await_sensor_span_coverage
 from minimappr.core.onset_cluster_attribution_stage import OnsetClusterAttributor  # Field Mode W3-attribution
@@ -666,6 +668,16 @@ class FusionNode:
 
         self._stopping = False
         await self._ingest_processor.hydrate_position_estimator_states()
+        corrected_label_names = await correct_persisted_birdnet_species_label_categories(
+            self.storage, self.taxonomy_provider
+        )
+        if corrected_label_names:
+            logger.info(
+                "re-filed %d BirdNET species labels as wildlife (name-heuristic categories persisted "
+                "before the S-gate fix): %s",
+                len(corrected_label_names),
+                ", ".join(corrected_label_names[:20]),
+            )
         await self._refresh_taxonomy(force=True)
         worker_count = max(1, self.fusion_config.worker_count)
         self._localization_workers = [
@@ -2742,7 +2754,10 @@ class FusionNode:
             "suppressed": False,
         }
         # --- Field Mode W3-entity --- entity-keyed sliding window for its categories.
-        if self.entity_reporting is not None and self.entity_reporting.applies_to(classified.label_category):
+        decision_is_entity_routed = self.entity_reporting is not None and self.entity_reporting.applies_to(
+            classified.label_category
+        )
+        if decision_is_entity_routed:
             decision = await self.entity_reporting.decide(
                 event_time_ns=product.candidate.event_time_ns,
                 source_node_id=source_node_id,
@@ -2809,16 +2824,23 @@ class FusionNode:
                 )
             return None
 
-        if reporting_modality == "localized":
+        if reporting_modality == "localized" and not decision_is_entity_routed:
             # Feed the pre-render report-window gate. Keyed on the candidate's
-            # source node (same key _should_skip_saturated_report_window uses),
-            # not the registry-derived reference-sensor node — identical for
-            # single-node solves, and consistency is what the gate needs.
+            # source node and the *legacy* bucket — exactly the key
+            # _should_skip_saturated_report_window reads — not the registry-derived
+            # reference-sensor node or the decision's window (an entity decision's
+            # sliding window never matches a bucket start). Entity-routed emissions
+            # are not counted: duplicates of one bird already end as
+            # enrich_existing above, so what reaches here is a distinct entity, and
+            # capping those caps distinct birds per node (S gate review).
             # A later IntegrityError on insert still means the window has a
             # detection, so counting here stays semantically correct.
+            legacy_report_window_start_ns, _ = self.reporting_policy.report_window_bounds(
+                product.candidate.event_time_ns
+            )
             self._note_localized_window_emission(
                 source_node_id=product.candidate.source_node_id,
-                report_window_start_ns=decision.report_window_start_ns,
+                report_window_start_ns=legacy_report_window_start_ns,
             )
 
         persist_mode = "update" if decision.action == "upgrade_existing" else "insert"
@@ -3251,6 +3273,14 @@ class FusionNode:
         # Only candidates that would classify on the localized branch are gated;
         # everything else (omni fallback) is the reporting policy's business.
         if product.localization_branch is None:
+            return False
+        # Field Mode S gate: onset-SRP products are one per accepted cluster (a
+        # distinct bird; the stage's consumed-onset memory stops re-surfacing), so
+        # the cap's "one trigger, many candidates" premise does not hold. Capping
+        # them skipped real birds before classification (12-37 per replay on the
+        # four-bird fixture scene), and in entity mode the cap is also keyed on
+        # legacy buckets that wildlife emissions are never noted under.
+        if product.localization_branch.localization_method == ONSET_SRP_LOCALIZATION_METHOD:
             return False
         window_start_ns, _ = self.reporting_policy.report_window_bounds(
             product.candidate.event_time_ns
