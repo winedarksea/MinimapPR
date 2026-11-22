@@ -1,0 +1,166 @@
+# Field-mode real-audio fixtures (dry-ish, close, high-SNR bird calls + one ambience bed).
+# Source of truth for tests/field_audio_fixtures.py and scripts/build_field_audio_fixtures.py.
+# All clips: 48 kHz, mono, 16-bit PCM WAV. See ATTRIBUTION for credits and processing.
+#
+# band_hz is a hand estimate of the clip's dominant energy band (from spectrograms), not a
+# measured -20 dB bandwidth; tests and sims use it for band-limited GCC/SRP checks.
+# same_band_group links clips whose energy overlaps enough to stress label swaps.
+# needs_listen_check = true marks clips a human should audition before wider sharing (speech
+# screening was spectral only).
+
+format_version = 1
+sample_rate_hz = 48000
+bird_peak_dbfs = -3.0
+ambience_rms_dbfs = -30.0
+
+[[clip]]
+file = "wtsp_whistle_xc569523.wav"
+species = "White-throated Sparrow"
+scientific_name = "Zonotrichia albicollis"
+call_type = "tonal_whistle"
+band_hz = [2500, 5500]
+xc_id = 569523
+recordist = "Doug Hynes"
+country = "Canada"
+licence = "CC BY-SA 4.0"
+licence_url = "https://creativecommons.org/licenses/by-sa/4.0/"
+source_start_s = 4.33
+duration_s = 6.0
+role = "bird"
+needs_listen_check = false
+
+[[clip]]
+file = "chsp_trill_xc320440.wav"
+species = "Chipping Sparrow"
+scientific_name = "Spizella passerina"
+call_type = "dry_trill"
+band_hz = [3500, 8000]
+same_band_group = "trill_chsp_deju"
+xc_id = 320440
+recordist = "Jonathon Jongsma"
+country = "United States"
+licence = "CC BY-SA 4.0"
+licence_url = "https://creativecommons.org/licenses/by-sa/4.0/"
+source_start_s = 24.61
+duration_s = 3.5
+role = "bird"
+needs_listen_check = false
+
+[[clip]]
+file = "deju_trill_xc569535.wav"
+species = "Dark-eyed Junco"
+scientific_name = "Junco hyemalis"
+call_type = "musical_trill"
+band_hz = [2500, 7000]
+same_band_group = "trill_chsp_deju"
+xc_id = 569535
+recordist = "Doug Hynes"
+country = "Canada"
+licence = "CC BY-SA 4.0"
+licence_url = "https://creativecommons.org/licenses/by-sa/4.0/"
+source_start_s = 7.93
+duration_s = 5.0
+role = "bird"
+needs_listen_check = false
+
+[[clip]]
+file = "blja_call_xc935610.wav"
+species = "Blue Jay"
+scientific_name = "Cyanocitta cristata"
+call_type = "broadband_call"
+band_hz = [1000, 6000]
+xc_id = 935610
+recordist = "Doug Hynes"
+country = "Canada"
+licence = "CC BY-SA 4.0"
+licence_url = "https://creativecommons.org/licenses/by-sa/4.0/"
+source_start_s = 3.76
+duration_s = 4.0
+role = "bird"
+needs_listen_check = false
+
+[[clip]]
+file = "amcr_caw_xc682428.wav"
+species = "American Crow"
+scientific_name = "Corvus brachyrhynchos"
+call_type = "harsh_call"
+band_hz = [300, 6000]
+xc_id = 682428
+recordist = "Doug Hynes"
+country = "Canada"
+licence = "CC BY-SA 4.0"
+licence_url = "https://creativecommons.org/licenses/by-sa/4.0/"
+source_start_s = 1.44
+duration_s = 4.0
+role = "bird"
+# Caw energy sits inside the speech band, so the spectral screen cannot fully clear it.
+needs_listen_check = true
+
+[[clip]]
+file = "amro_song_xc132864.wav"
+species = "American Robin"
+scientific_name = "Turdus migratorius"
+call_type = "caroled_song"
+band_hz = [1800, 4500]
+same_band_group = "robin_tanager_grosbeak"
+xc_id = 132864
+recordist = "Jonathon Jongsma"
+country = "United States"
+licence = "CC BY-SA 3.0"
+licence_url = "https://creativecommons.org/licenses/by-sa/3.0/"
+source_start_s = 151.67
+duration_s = 6.0
+role = "bird"
+needs_listen_check = false
+
+[[clip]]
+file = "scta_song_xc795439.wav"
+species = "Scarlet Tanager"
+scientific_name = "Piranga olivacea"
+call_type = "burry_song"
+band_hz = [1800, 5000]
+same_band_group = "robin_tanager_grosbeak"
+xc_id = 795439
+recordist = "steve"
+country = "United States"
+licence = "CC BY-SA 4.0"
+licence_url = "https://creativecommons.org/licenses/by-sa/4.0/"
+source_start_s = 0.0
+duration_s = 6.0
+source_channel = 0
+role = "bird"
+needs_listen_check = false
+
+[[clip]]
+file = "rbgr_song_xc133913.wav"
+species = "Rose-breasted Grosbeak"
+scientific_name = "Pheucticus ludovicianus"
+call_type = "caroled_song"
+band_hz = [1500, 4500]
+same_band_group = "robin_tanager_grosbeak"
+xc_id = 133913
+recordist = "Jonathon Jongsma"
+country = "United States"
+licence = "CC BY-SA 3.0"
+licence_url = "https://creativecommons.org/licenses/by-sa/3.0/"
+source_start_s = 21.34
+duration_s = 4.5
+role = "bird"
+needs_listen_check = false
+
+[[clip]]
+file = "ambience_forest_breeze_xc980972.wav"
+species = "Soundscape"
+scientific_name = ""
+call_type = "ambience"
+band_hz = [20, 2000]
+xc_id = 980972
+recordist = "Vladimír Nemček"
+country = "Slovakia"
+licence = "CC BY-NC-SA 4.0"
+licence_url = "https://creativecommons.org/licenses/by-nc-sa/4.0/"
+source_start_s = 156.91
+duration_s = 30.0
+role = "ambience"
+# Mixed forest, low wind; sparse distant birds remain. 30 s is long enough to hide a voice.
+needs_listen_check = true

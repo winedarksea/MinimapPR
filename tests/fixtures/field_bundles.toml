@@ -1,0 +1,40 @@
+# Larger field-mode fixtures that stay OUT of git (raw multitrack bundles, Bluefin snippet
+# sets, Phase 3 golden recordings). Content-addressed by sha256; pulled into a local cache by
+# scripts/fetch_field_fixtures.py and consumed through tests/field_audio_fixtures.py
+# `require_field_bundle(name)` (loud skip locally, fail under CI when missing).
+#
+# Cache dir: $MINIMAPPR_FIELD_FIXTURE_CACHE, default ~/.cache/minimappr/field_fixtures
+#
+# Schema (one [[bundle]] table per item; all keys required unless marked optional):
+#   name        unique id used by tests and `fetch_field_fixtures.py --only <name>`
+#   sha256      hex sha256 of the fetched file (the archive itself when extract = true)
+#   size_bytes  exact byte size, checked before hashing
+#   source      where to fetch from:
+#                 https://...                   plain download (generic User-Agent)
+#                 ssh://user@host:port/abs/path rsync over ssh (e.g. the Bluefin tunnel)
+#                 file:///abs/path              local copy (e.g. an attached drive)
+#   cache_path  path relative to the cache dir where the file is stored
+#   description what it is and which tests use it
+#   licence     licence / provenance ("private: own recordings, do not redistribute" etc.)
+#   extract     optional bool; when true and cache_path is a .tar/.tar.gz, it is unpacked
+#               into cache_path with ".tar*" stripped (tarfile "data" filter, no absolute
+#               paths or links out of the directory)
+#   speech_checked optional bool; true once a person has listened for passers-by
+#
+# Register a new item (prints a ready-to-paste table with sha256/size):
+#   python scripts/fetch_field_fixtures.py register <local file> --name <name> \
+#       --source <url> --description "..." --licence "..."
+#
+# Example (commented out until the Bluefin snippet set is pulled; see
+# docs/field_mode_progress/fixtures.md for the exact commands):
+#
+# [[bundle]]
+# name = "bluefin_bird_snippets_v1"
+# sha256 = "<fill from register>"
+# size_bytes = 0
+# source = "ssh://colin@127.0.0.1:2222/home/colin/field_fixture_export/bluefin_bird_snippets_v1.tar.gz"
+# cache_path = "bluefin_bird_snippets_v1.tar.gz"
+# extract = true
+# description = "~20 BirdNET-labelled detection snippets + 2 ambience clips from the Bluefin box, with snippets.csv metadata"
+# licence = "private: own site recordings, do not redistribute"
+# speech_checked = false
