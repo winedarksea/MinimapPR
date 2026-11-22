@@ -10,6 +10,8 @@ and enforces the pass thresholds from the bundle's `expectations.json`
 Bundles are gitignored (`.gitignore` re-includes only this README); tests
 skip when no bundles are present.
 
-Bundle schema (v1): see `minimappr/calibration/bundle.py` — manifest.json,
+Bundle schema: see `minimappr/calibration/bundle.py` — manifest.json,
 ground_truth.json, detections.json, optional expectations.json,
-audio/{node_id}.wav, and a reserved empty `reference_audio/` directory.
+audio/{node_id}.wav, and optional `reference_audio/`. Ground truth v2
+(individual_id, species lists, echo sources, trajectories) and the entity
+expectations are specified in `docs/field_mode_progress/bundle_format_v2.md`.
