@@ -14,10 +14,12 @@ with a WARNING (the artifact ships separately from the code).
 from __future__ import annotations
 
 import logging
+import dataclasses
 import inspect
 from pathlib import Path
 
 from minimappr.classifiers.base import AudioClassifier
+from minimappr.classifiers.birdnet_two_threshold import DisplayThresholdAnnotatingClassifier
 from minimappr.classifiers.chaining import ChainStage, ChainedClassifier
 from minimappr.classifiers.composite import CompositeClassifier, CompositeMember
 from minimappr.classifiers.heuristic import HeuristicClassifier
@@ -127,9 +129,25 @@ def _build_member(
     chains: tuple[ChainSpec, ...],
     routing: RoutingConfig,
 ) -> AudioClassifier | None:
+    # --- Field Mode W2-tracker --- two-threshold BirdNET: build with the low
+    # localize-to-track floor, then mark results under the display floor.
+    two_threshold_display_floor: float | None = None
+    if spec.backend == "birdnet" and bool(getattr(settings, "birdnet_two_threshold_enabled", False)):
+        two_threshold_display_floor = float(spec.min_confidence or settings.birdnet_trigger_min_confidence)
+        spec = dataclasses.replace(
+            spec,
+            min_confidence=min(
+                float(settings.birdnet_localize_to_track_min_confidence), two_threshold_display_floor
+            ),
+        )
     base = _build_backend(spec, settings, needs_embeddings=any(c.input == "embedding" for c in chains))
     if base is None:
         return None
+    if two_threshold_display_floor is not None:
+        base = DisplayThresholdAnnotatingClassifier(
+            classifier=base, display_min_confidence=two_threshold_display_floor
+        )
+    # --- end Field Mode W2-tracker ---
     base = _apply_member_preprocessor(base, spec, settings)
     stages = [
         stage

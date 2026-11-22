@@ -463,6 +463,7 @@ def build_pipeline_graph(
                 "dormant_reacquire_radius_m",
                 suffix=" m",
             ),
+            *_field_mode_tracker_params(tc),
         ],
         status=_track_status(metrics, fusion_available),
         link="/settings/config#tracking",
@@ -565,6 +566,53 @@ def build_pipeline_graph(
     )
 
 
+# --- Field Mode W2-tracker ---
+def _field_mode_tracker_params(tc) -> list[PipelineParam]:
+    """Perched filter / species log-odds / partial binding switches + key knobs."""
+    params = [
+        _param("Perched filter", bool(tc.tracking_perched_filter_enabled), "tracking_perched_filter_enabled"),
+        _param("Species log-odds", bool(tc.tracking_species_log_odds_enabled), "tracking_species_log_odds_enabled"),
+        _param(
+            "Partial binding",
+            bool(tc.tracking_partial_constraint_binding_enabled),
+            "tracking_partial_constraint_binding_enabled",
+        ),
+    ]
+    if tc.tracking_perched_filter_enabled:
+        params.append(
+            _param(
+                "Relocation gate",
+                float(tc.tracking_perched_relocation_gate_max_m),
+                "tracking_perched_relocation_gate_max_m",
+                suffix=" m",
+            )
+        )
+    if tc.tracking_species_log_odds_enabled:
+        params.append(
+            _param(
+                "Display belief",
+                float(tc.tracking_species_display_min_belief),
+                "tracking_species_display_min_belief",
+            )
+        )
+    return params
+
+
+def _birdnet_two_threshold_params(settings) -> list[PipelineParam]:
+    enabled = bool(getattr(settings, "birdnet_two_threshold_enabled", False))
+    params = [_param("Two thresholds", enabled, config_key="birdnet_two_threshold_enabled")]
+    if enabled:
+        params.append(
+            _param(
+                "Localize-to-track",
+                float(settings.birdnet_localize_to_track_min_confidence),
+                config_key="birdnet_localize_to_track_min_confidence",
+            )
+        )
+    return params
+# --- end Field Mode W2-tracker ---
+
+
 # ── BirdNET+ V3.0 (Field Mode W1-birdnet-v3) ────────────────────────────────
 def _birdnet_version_params(settings) -> list[PipelineParam]:
     version = str(getattr(settings, "birdnet_model_version", "2.4"))
@@ -619,6 +667,10 @@ def _add_classifiers(*, routing, settings, gate_ids, beam_id, add_node, add_edge
                 if spec.backend == "birdnet":
                     params.extend(_birdnet_version_params(settings))
                 # ── end BirdNET+ V3.0 ──
+                # --- Field Mode W2-tracker ---
+                if spec.backend == "birdnet":
+                    params.extend(_birdnet_two_threshold_params(settings))
+                # --- end Field Mode W2-tracker ---
             add_node(
                 id=member_node_id,
                 stage=PipelineStageKind.CLASSIFIER,

@@ -34,7 +34,9 @@ from minimappr.core.track_associators import (
     NearestNeighborAssociator,
     cosine_similarity,
 )
+from minimappr.core.track_field_mode_extensions import FieldModeTrackExtensions
 from minimappr.core.track_filters import KalmanTrackFilter, LinearTrackFilter
+from minimappr.core.track_partial_binding import PartialConstraint
 from minimappr.interfaces import AssociationContext, TrackAssociator, TrackFilter
 from minimappr.models import LabelId, TrackState, TrackStatus
 
@@ -193,6 +195,11 @@ class TrackManager:
                     f"Supported values: linear, kalman"
                 )
 
+        # Field Mode W2-tracker hooks (all flag-gated; defaults change nothing).
+        self._field_mode = FieldModeTrackExtensions(cfg)
+        if track_filter is None:
+            self._filter = self._field_mode.wrap_filter(self._filter, cfg)
+
         associator_signature = inspect.signature(self._associator.associate)
         self._associator_accepts_measurement_covariance = (
             len(associator_signature.parameters) >= 4
@@ -238,9 +245,24 @@ class TrackManager:
         measurement_covariance_m2: list[list[float]] | None = None,
         source_node_id: str | None = None,
         classifier_scores: dict[str, float] | None = None,
+        species_evidence: dict[str, float] | None = None,
     ) -> TrackState:
         async with self._lock:
             self._age_tracks(timestamp_ns)
+            evidence = self._field_mode.detection_evidence(
+                label=label,
+                confidence=confidence,
+                classifier_scores=classifier_scores,
+                species_evidence=species_evidence,
+            )
+            ghost = self._field_mode.find_relocation_ghost_hit(
+                timestamp_ns=timestamp_ns,
+                position_m=position_m,
+                label_category=label_category,
+                evidence=evidence,
+            )
+            if ghost is not None and ghost.track_id in self._tracks:
+                self._revert_relocation(ghost, timestamp_ns)
 
             # Predict existing tracks forward for association gating.
             predicted_tracks: list[TrackState] = []
@@ -284,6 +306,20 @@ class TrackManager:
                     position_m,
                     predicted_tracks,
                 )
+
+            if matched_id is None:
+                # Perched relocation gate: a hop to a new perch keeps the identity
+                # and restarts the filter there (no smeared velocity).
+                matched_id = self._field_mode.find_relocation_match(
+                    timestamp_ns=timestamp_ns,
+                    position_m=position_m,
+                    label_category=label_category,
+                    evidence=evidence,
+                    tracks=predicted_tracks,
+                    track_filter=self._filter,
+                )
+                if matched_id is not None:
+                    self._filter.initialize_track(matched_id, position_m)
 
             if matched_id is None:
                 # --- Reacquire a dormant identity before minting a new one ---
@@ -344,8 +380,11 @@ class TrackManager:
                 )
                 self._tracks[track_id] = created
                 self._filter.initialize_track(track_id, position_m)
+                self._apply_motion_model(track_id, label_category, position_m)
                 self._apply_process_noise(track_id, label_category)
                 self._update_fingerprint(track_id, classifier_scores)
+                if self._field_mode.belief_applies(label_category):
+                    self._field_mode.apply_belief(created, evidence)
                 return created
 
             # --- Update matched track ---
@@ -379,11 +418,15 @@ class TrackManager:
             best_track.label = label
             best_track.label_category = label_category
             if category_changed:
+                self._apply_motion_model(matched_id, label_category, best_track.position_m)
                 self._apply_process_noise(matched_id, label_category)
             best_track.iff_category = (
                 iff_category if iff_category in {"friendly", "unknown", "hostile"} else "unknown"
             )
-            if label_changed:
+            if self._field_mode.belief_applies(label_category):
+                # Capped log-odds fusion replaces the single-label overwrite.
+                self._field_mode.apply_belief(best_track, evidence)
+            elif label_changed:
                 best_track.confidence = float(confidence)
             else:
                 best_track.confidence = float(max(best_track.confidence, confidence))
@@ -422,11 +465,83 @@ class TrackManager:
             self._update_fingerprint(matched_id, classifier_scores)
             return best_track
 
-    async def snapshot(self, now_ns: int | None = None) -> list[TrackState]:
+    async def snapshot(
+        self, now_ns: int | None = None, *, include_hidden: bool = False
+    ) -> list[TrackState]:
+        """Current tracks. Hidden tentative tracks (species belief below the
+        display threshold) are left out unless *include_hidden*, so they never
+        reach the API, live hub, federation or rules."""
         async with self._lock:
             if now_ns is not None:
                 self._age_tracks(now_ns)
-            return list(self._tracks.values())
+            return [
+                track
+                for track in self._tracks.values()
+                if include_hidden or not self._field_mode.is_hidden(track.id)
+            ]
+
+    def is_track_hidden(self, track_id: str) -> bool:
+        return self._field_mode.is_hidden(track_id)
+
+    @property
+    def field_mode(self) -> FieldModeTrackExtensions:
+        return self._field_mode
+
+    async def bind_partial_constraints(
+        self,
+        *,
+        timestamp_ns: int,
+        label: str,
+        confidence: float,
+        label_category: str,
+        constraints: list[PartialConstraint],
+        species_evidence: dict[str, float] | None = None,
+        classifier_scores: dict[str, float] | None = None,
+        source_node_id: str | None = None,
+    ) -> TrackState | None:
+        """Bind an unpositioned detection to a recent track, or return ``None``.
+
+        On a bind the track's species belief and recency update and its position
+        gets a soft nudge toward the constraint (see ``track_partial_binding``).
+        """
+        if not self._field_mode.partial_binding_enabled:
+            return None
+        async with self._lock:
+            self._age_tracks(timestamp_ns)
+            evidence = self._field_mode.detection_evidence(
+                label=label,
+                confidence=confidence,
+                classifier_scores=classifier_scores,
+                species_evidence=species_evidence,
+            )
+            decision = self._field_mode.choose_partial_binding(
+                timestamp_ns=timestamp_ns,
+                evidence=evidence,
+                constraints=constraints,
+                tracks=list(self._tracks.values()),
+            )
+            if decision is None:
+                return None
+            track = self._tracks[decision.track_id]
+            if decision.corrected_position_m is not None:
+                corrected = tuple(float(value) for value in decision.corrected_position_m)
+                track.position_m = corrected  # type: ignore[assignment]
+                soft_update = getattr(self._filter, "soft_position_update", None)
+                if callable(soft_update):
+                    soft_update(track.id, corrected)
+            track.last_seen_ns = max(track.last_seen_ns, timestamp_ns)
+            track.update_count += 1
+            if self._field_mode.belief_applies(track.label_category or label_category):
+                self._field_mode.apply_belief(track, evidence)
+            elif label == track.label:
+                track.confidence = float(max(track.confidence, confidence))
+            if source_node_id and source_node_id not in track.contributor_node_ids:
+                track.contributor_node_ids.append(source_node_id)
+                track.contributor_node_ids = track.contributor_node_ids[-self._MAX_CONTRIBUTOR_NODE_IDS :]
+            if track.status == TrackStatus.COASTING.value:
+                track.status = TrackStatus.CONFIRMED.value
+            self._update_fingerprint(track.id, classifier_scores)
+            return track
 
     def _lifecycle_ns(self, label_category: str) -> tuple[int, int, int]:
         """(stale, drop, reap) thresholds in ns for *label_category*.
@@ -452,6 +567,39 @@ class TrackManager:
         )
         self._lifecycle_ns_cache[key] = thresholds
         return thresholds
+
+    def _revert_relocation(self, ghost, timestamp_ns: int) -> None:
+        """A fix landed back on the perch a track just left: it was two birds.
+
+        The track returns to its old perch; whatever it picked up at the new
+        perch continues as a new track (see ``track_perched_relocation``).
+        """
+        relocated = self._tracks[ghost.track_id]
+        split_id = f"{self._track_id_prefix}{next(self._id_counter):05d}"
+        split = relocated.model_copy(
+            update={
+                "id": split_id,
+                "first_seen_ns": ghost.left_at_ns,
+                "update_count": 1,
+                "status": TrackStatus.TENTATIVE.value,
+                "contributor_node_ids": list(relocated.contributor_node_ids),
+            }
+        )
+        self._tracks[split_id] = split
+        self._filter.initialize_track(split_id, split.position_m)
+        self._apply_motion_model(split_id, split.label_category, split.position_m)
+        self._field_mode.clone_belief(relocated.id, split_id)
+        relocated.position_m = ghost.perch_position_m
+        self._filter.initialize_track(relocated.id, ghost.perch_position_m)
+        self._field_mode.relocation_gate.mark_reverted(ghost, split_id, timestamp_ns)
+
+    def _apply_motion_model(
+        self, track_id: str, label_category: str, position_m: tuple[float, float, float]
+    ) -> None:
+        """Route the track to the perched or constant-velocity filter (duck-typed)."""
+        hook = getattr(self._filter, "set_track_motion_category", None)
+        if callable(hook):
+            hook(track_id, label_category, position_m)
 
     def _apply_process_noise(self, track_id: str, label_category: str) -> None:
         """Push the category's Kalman ``q`` onto the filter, if it supports it.
@@ -691,7 +839,18 @@ class TrackManager:
 
         # A velocity prior from minutes ago is worthless — start the filter fresh.
         self._filter.initialize_track(track_id, resolved_position)
+        self._apply_motion_model(track_id, label_category, resolved_position)
         self._apply_process_noise(track_id, label_category)
+        if self._field_mode.belief_applies(label_category):
+            self._field_mode.apply_belief(
+                revived,
+                self._field_mode.detection_evidence(
+                    label=label,
+                    confidence=confidence,
+                    classifier_scores=classifier_scores,
+                    species_evidence=None,
+                ),
+            )
         if record.fingerprint:
             self._fingerprints[track_id] = dict(record.fingerprint)
         self._update_fingerprint(track_id, classifier_scores)
@@ -719,6 +878,7 @@ class TrackManager:
             self._tracks.pop(track_id, None)
             self._filter.remove_track(track_id)
             self._fingerprints.pop(track_id, None)
+            self._field_mode.forget(track_id)
         self._purge_dormant(now_ns)
 
     async def active_ids(self, now_ns: int) -> Iterable[str]:

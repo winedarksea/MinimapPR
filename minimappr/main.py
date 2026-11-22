@@ -51,6 +51,7 @@ from minimappr.config import (
     IngestSidecarStartupConfig,
     LocalizationConfig,
     Settings,
+    field_mode_tracker_setting_errors,
 )
 from minimappr.settings_store import CONFIG_PATCH_ALLOWLIST, load_overrides, save_overrides
 from minimappr.ingest_sidecar_runtime import (
@@ -3124,6 +3125,34 @@ async def get_config(request: Request) -> dict:
         "dormant_fingerprint_min_similarity": settings.dormant_fingerprint_min_similarity,
         "dormant_confidence_half_life_seconds": settings.dormant_confidence_half_life_seconds,
         "dormant_max_records": settings.dormant_max_records,
+        # --- Field Mode W2-tracker ---
+        "tracking_perched_filter_enabled": settings.tracking_perched_filter_enabled,
+        "tracking_perched_label_categories": settings.tracking_perched_label_categories,
+        "tracking_perched_position_diffusion_m2_per_second": settings.tracking_perched_position_diffusion_m2_per_second,
+        "tracking_perched_relocation_snap_distance_m": settings.tracking_perched_relocation_snap_distance_m,
+        "tracking_perched_relocation_gate_max_m": settings.tracking_perched_relocation_gate_max_m,
+        "tracking_perched_relocation_min_silence_seconds": settings.tracking_perched_relocation_min_silence_seconds,
+        "tracking_perched_relocation_ghost_seconds": settings.tracking_perched_relocation_ghost_seconds,
+        "tracking_species_log_odds_enabled": settings.tracking_species_log_odds_enabled,
+        "tracking_species_log_odds_label_categories": settings.tracking_species_log_odds_label_categories,
+        "tracking_species_log_odds_prior_probability": settings.tracking_species_log_odds_prior_probability,
+        "tracking_species_log_odds_per_update_cap": settings.tracking_species_log_odds_per_update_cap,
+        "tracking_species_log_odds_total_cap": settings.tracking_species_log_odds_total_cap,
+        "tracking_species_log_odds_evidence_top_k": settings.tracking_species_log_odds_evidence_top_k,
+        "tracking_species_display_min_belief": settings.tracking_species_display_min_belief,
+        "tracking_species_belief_exposed_top_n": settings.tracking_species_belief_exposed_top_n,
+        "tracking_partial_constraint_binding_enabled": settings.tracking_partial_constraint_binding_enabled,
+        "tracking_partial_binding_window_seconds": settings.tracking_partial_binding_window_seconds,
+        "tracking_partial_binding_bearing_sigma_deg": settings.tracking_partial_binding_bearing_sigma_deg,
+        "tracking_partial_binding_hyperbola_sigma_m": settings.tracking_partial_binding_hyperbola_sigma_m,
+        "tracking_partial_binding_snr_level_margin_db": settings.tracking_partial_binding_snr_level_margin_db,
+        "tracking_partial_binding_max_normalized_residual": settings.tracking_partial_binding_max_normalized_residual,
+        "tracking_partial_binding_species_top_k": settings.tracking_partial_binding_species_top_k,
+        "tracking_partial_binding_soft_update_gain": settings.tracking_partial_binding_soft_update_gain,
+        "tracking_partial_binding_ambiguity_score_ratio": settings.tracking_partial_binding_ambiguity_score_ratio,
+        "birdnet_two_threshold_enabled": settings.birdnet_two_threshold_enabled,
+        "birdnet_localize_to_track_min_confidence": settings.birdnet_localize_to_track_min_confidence,
+        # --- end Field Mode W2-tracker ---
         "localization_node_bearing_strength": settings.localization_node_bearing_strength,
         "multi_node_bearing_window_seconds": settings.multi_node_bearing_window_seconds,
         "multi_node_bearing_min_separation_deg": settings.multi_node_bearing_min_separation_deg,
@@ -3233,6 +3262,21 @@ async def get_config_structured(request: Request) -> dict:
 # and this HTTP allowlist can never drift apart.
 _CONFIG_PATCH_ALLOWLIST = CONFIG_PATCH_ALLOWLIST
 
+# --- Field Mode W2-tracker ---
+_FIELD_MODE_TRACKER_KEY_PREFIXES = (
+    "tracking_perched_",
+    "tracking_species_",
+    "tracking_partial_",
+    "birdnet_two_threshold_",
+    "birdnet_localize_to_track_",
+)
+
+
+def _is_field_mode_tracker_key(key: str) -> bool:
+    return key.startswith(_FIELD_MODE_TRACKER_KEY_PREFIXES)
+# --- end Field Mode W2-tracker ---
+
+
 # Patched keys that only reach the Rust sidecar via spawn env — a running sidecar
 # must be restarted to pick them up (surfaced as ``restart_required`` in PATCH).
 _SIDECAR_RESTART_REQUIRED_KEYS = {
@@ -3250,6 +3294,9 @@ _SIDECAR_RESTART_REQUIRED_KEYS = {
     # classifier subprocess reads these once at spawn.
     *(key for key in CONFIG_PATCH_ALLOWLIST if key == "birdnet_model_version" or key.startswith("birdnet_v3_")),
     # ── end BirdNET+ V3.0 ──
+    # --- Field Mode W2-tracker --- Python TrackManager is built once even in rust mode.
+    *(key for key in CONFIG_PATCH_ALLOWLIST if _is_field_mode_tracker_key(key)),
+    # --- end Field Mode W2-tracker ---
 }
 
 
@@ -3287,6 +3334,9 @@ def _startup_snapshot_restart_required_keys() -> frozenset[str]:
         key for key in CONFIG_PATCH_ALLOWLIST if key == "birdnet_model_version" or key.startswith("birdnet_v3_")
     )
     # ── end BirdNET+ V3.0 ──
+    # --- Field Mode W2-tracker --- TrackManager / classifier built at startup.
+    keys.update(key for key in CONFIG_PATCH_ALLOWLIST if _is_field_mode_tracker_key(key))
+    # --- end Field Mode W2-tracker ---
     # Classification-priority knobs are read into FusionNode.__init__ (the queue
     # type itself is chosen there), so a live PATCH cannot reorder a queue that
     # already exists.
@@ -3449,6 +3499,22 @@ async def put_rules_config(payload: RulesConfigUpdate, request: Request) -> Rule
 
 
 # ── BirdNET+ V3.0 (Field Mode W1-birdnet-v3) ──
+# --- Field Mode W2-tracker ---
+def _field_mode_tracker_patch_errors(coerced: dict[str, object], settings: Settings) -> list[str]:
+    if not any(_is_field_mode_tracker_key(key) for key in coerced):
+        return []
+
+    class _MergedView:
+        def __getattr__(self, key: str) -> Any:
+            return coerced.get(key, getattr(settings, key))
+
+    try:
+        return field_mode_tracker_setting_errors(_MergedView())
+    except (TypeError, ValueError) as exc:
+        return [f"field mode tracker settings: {exc}"]
+# --- end Field Mode W2-tracker ---
+
+
 def _birdnet_v3_patch_errors(coerced: dict[str, object], settings: Settings) -> list[str]:
     def merged(key: str) -> Any:
         return coerced.get(key, getattr(settings, key))
@@ -3745,6 +3811,9 @@ async def patch_config(request: Request) -> dict:
     # next startup.
     errors.extend(_birdnet_v3_patch_errors(coerced, settings))
     # ── end BirdNET+ V3.0 ──
+    # --- Field Mode W2-tracker --- validated on the merged view.
+    errors.extend(_field_mode_tracker_patch_errors(coerced, settings))
+    # --- end Field Mode W2-tracker ---
     hass_enabled = bool(coerced.get("hass_enabled", settings.hass_enabled))
     hass_host = str(coerced.get("hass_mqtt_host", settings.hass_mqtt_host)).strip()
     if hass_enabled and not hass_host:
