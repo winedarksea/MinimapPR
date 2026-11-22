@@ -30,6 +30,7 @@ import numpy as np
 
 from minimappr.api.rust_dsp_manifests import LocalizedClassifierRenderRequest
 from minimappr.classifiers.base import AudioClassifier
+from minimappr.classifiers.birdnet_two_threshold import detection_is_below_display_threshold
 from minimappr.config import Settings
 from minimappr.core.amplitude_range import amplitude_range_prior_m
 from minimappr.core.assembly import DetectionAssembler
@@ -2803,6 +2804,19 @@ class FusionNode:
                 suppression_reasons=list(product.suppression_reasons or []),
             )
             return
+
+        # --- Field Mode W2-tracker --- a sub-display (two-threshold) result only
+        # surfaces through a visible track; alone it feeds track belief silently.
+        if track is None and detection_is_below_display_threshold(detection.feature_summary):
+            self._record_silent_drop(
+                stage="rules",
+                reason="below_display_threshold",
+                candidate_id=product.pipeline_item_id,
+                event_time_ns=product.event_time_ns,
+                source_node_id=detection.source_node_id,
+            )
+            return
+        # --- end Field Mode W2-tracker ---
 
         # Skip broadcasting unknown/0% confidence detections — they provide no
         # actionable information for the operator and clutter the live feed.

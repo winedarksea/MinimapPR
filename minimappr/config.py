@@ -432,6 +432,41 @@ class TrackingConfig:
     dormant_fingerprint_min_similarity: float = 0.4
     dormant_confidence_half_life_seconds: float = 300.0
     dormant_max_records: int = 64
+    # --- Field Mode W2-tracker ---
+    # Perched random-walk filter for these label categories (birds sit, then hop);
+    # other categories keep the 6D constant-velocity Kalman.
+    tracking_perched_filter_enabled: bool = False
+    tracking_perched_label_categories: str = "wildlife"
+    tracking_perched_position_diffusion_m2_per_second: float = 0.05
+    # A fix this far from the perch restarts the filter there instead of
+    # averaging two perches. Relocation gate: a same-species hop up to
+    # relocation_gate_max_m after >= min_silence keeps the track identity.
+    tracking_perched_relocation_snap_distance_m: float = 6.0
+    tracking_perched_relocation_gate_max_m: float = 30.0
+    tracking_perched_relocation_min_silence_seconds: float = 2.0
+    tracking_perched_relocation_ghost_seconds: float = 30.0
+    # Per-track species belief (capped log-odds) replaces the single-label
+    # overwrite for these categories; tracks below display_min_belief are hidden.
+    tracking_species_log_odds_enabled: bool = False
+    tracking_species_log_odds_label_categories: str = "wildlife"
+    tracking_species_log_odds_prior_probability: float = 0.1
+    tracking_species_log_odds_per_update_cap: float = 3.0
+    tracking_species_log_odds_total_cap: float = 6.0
+    tracking_species_log_odds_evidence_top_k: int = 3
+    tracking_species_display_min_belief: float = 0.5
+    tracking_species_belief_exposed_top_n: int = 5
+    # Bind unpositioned (omni / bearing-only) detections to recent tracks via
+    # DOA bearing, cross-node TDOA hyperbola or node-level ranking.
+    tracking_partial_constraint_binding_enabled: bool = False
+    tracking_partial_binding_window_seconds: float = 25.0
+    tracking_partial_binding_bearing_sigma_deg: float = 10.0
+    tracking_partial_binding_hyperbola_sigma_m: float = 2.0
+    tracking_partial_binding_snr_level_margin_db: float = 7.0
+    tracking_partial_binding_max_normalized_residual: float = 3.0
+    tracking_partial_binding_species_top_k: int = 3
+    tracking_partial_binding_soft_update_gain: float = 0.3
+    tracking_partial_binding_ambiguity_score_ratio: float = 0.5
+    # --- end Field Mode W2-tracker ---
 
     def stale_seconds_for(self, label_category: str) -> float:
         """Stale window for *label_category*, falling back to the base window."""
@@ -476,6 +511,54 @@ class ClassifierConfig:
     heuristic_machine_flatness_max: float
     heuristic_unknown_min_score: float
     heuristic_unknown_score: float
+
+
+# --- Field Mode W2-tracker ---
+def field_mode_tracker_setting_errors(values) -> list[str]:
+    """Errors for the W2-tracker keys on *values* (Settings or a merged view)."""
+    errors: list[str] = []
+    for key in (
+        "tracking_perched_position_diffusion_m2_per_second",
+        "tracking_perched_relocation_snap_distance_m",
+        "tracking_perched_relocation_gate_max_m",
+        "tracking_perched_relocation_min_silence_seconds",
+        "tracking_perched_relocation_ghost_seconds",
+        "tracking_partial_binding_window_seconds",
+        "tracking_partial_binding_soft_update_gain",
+    ):
+        if float(getattr(values, key)) < 0.0:
+            errors.append(f"{key}: must be >= 0")
+    for key in (
+        "tracking_species_log_odds_per_update_cap",
+        "tracking_species_log_odds_total_cap",
+        "tracking_partial_binding_bearing_sigma_deg",
+        "tracking_partial_binding_hyperbola_sigma_m",
+        "tracking_partial_binding_snr_level_margin_db",
+        "tracking_partial_binding_max_normalized_residual",
+        "tracking_partial_binding_ambiguity_score_ratio",
+    ):
+        if float(getattr(values, key)) <= 0.0:
+            errors.append(f"{key}: must be > 0")
+    for key in (
+        "tracking_species_log_odds_evidence_top_k",
+        "tracking_species_belief_exposed_top_n",
+        "tracking_partial_binding_species_top_k",
+    ):
+        if int(getattr(values, key)) < 1:
+            errors.append(f"{key}: must be >= 1")
+    if not 0.0 < float(values.tracking_species_log_odds_prior_probability) < 1.0:
+        errors.append("tracking_species_log_odds_prior_probability: must be in (0, 1)")
+    for key in ("tracking_species_display_min_belief", "birdnet_localize_to_track_min_confidence"):
+        if not 0.0 <= float(getattr(values, key)) <= 1.0:
+            errors.append(f"{key}: must be in [0, 1]")
+    return errors
+
+
+def _validate_field_mode_tracker_settings(settings) -> None:
+    errors = field_mode_tracker_setting_errors(settings)
+    if errors:
+        raise ValueError("; ".join(errors))
+# --- end Field Mode W2-tracker ---
 
 
 # ── BirdNET+ V3.0 (Field Mode W1-birdnet-v3) ─────────────────────────────
@@ -1046,6 +1129,45 @@ class Settings:
     dormant_fingerprint_min_similarity: float = 0.4
     dormant_confidence_half_life_seconds: float = 300.0
     dormant_max_records: int = 64
+    # --- Field Mode W2-tracker ---
+    # Perched random-walk filter for these label categories (birds sit, then hop);
+    # other categories keep the 6D constant-velocity Kalman.
+    tracking_perched_filter_enabled: bool = False
+    tracking_perched_label_categories: str = "wildlife"
+    tracking_perched_position_diffusion_m2_per_second: float = 0.05
+    # A fix this far from the perch restarts the filter there instead of
+    # averaging two perches. Relocation gate: a same-species hop up to
+    # relocation_gate_max_m after >= min_silence keeps the track identity.
+    tracking_perched_relocation_snap_distance_m: float = 6.0
+    tracking_perched_relocation_gate_max_m: float = 30.0
+    tracking_perched_relocation_min_silence_seconds: float = 2.0
+    tracking_perched_relocation_ghost_seconds: float = 30.0
+    # Per-track species belief (capped log-odds) replaces the single-label
+    # overwrite for these categories; tracks below display_min_belief are hidden.
+    tracking_species_log_odds_enabled: bool = False
+    tracking_species_log_odds_label_categories: str = "wildlife"
+    tracking_species_log_odds_prior_probability: float = 0.1
+    tracking_species_log_odds_per_update_cap: float = 3.0
+    tracking_species_log_odds_total_cap: float = 6.0
+    tracking_species_log_odds_evidence_top_k: int = 3
+    tracking_species_display_min_belief: float = 0.5
+    tracking_species_belief_exposed_top_n: int = 5
+    # Bind unpositioned (omni / bearing-only) detections to recent tracks via
+    # DOA bearing, cross-node TDOA hyperbola or node-level ranking.
+    tracking_partial_constraint_binding_enabled: bool = False
+    tracking_partial_binding_window_seconds: float = 25.0
+    tracking_partial_binding_bearing_sigma_deg: float = 10.0
+    tracking_partial_binding_hyperbola_sigma_m: float = 2.0
+    tracking_partial_binding_snr_level_margin_db: float = 7.0
+    tracking_partial_binding_max_normalized_residual: float = 3.0
+    tracking_partial_binding_species_top_k: int = 3
+    tracking_partial_binding_soft_update_gain: float = 0.3
+    tracking_partial_binding_ambiguity_score_ratio: float = 0.5
+    # Two thresholds: BirdNET keeps results down to localize_to_track (they feed
+    # track belief, flagged below_display_threshold); only the display floor shows alone.
+    birdnet_two_threshold_enabled: bool = False
+    birdnet_localize_to_track_min_confidence: float = 0.15
+    # --- end Field Mode W2-tracker ---
 
     fusion_worker_count: int = 2
     fusion_event_queue_size: int = 512
@@ -1706,6 +1828,9 @@ class Settings:
         if self.birdnet_v3_num_threads < 1:
             raise ValueError("MINIMAPPR_BIRDNET_V3_NUM_THREADS must be >= 1")
         # ── end BirdNET+ V3.0 ──
+        # --- Field Mode W2-tracker ---
+        _validate_field_mode_tracker_settings(self)
+        # --- end Field Mode W2-tracker ---
         if self.detection_min_confidence < 0.0 or self.detection_min_confidence > 1.0:
             raise ValueError("MINIMAPPR_DETECTION_MIN_CONFIDENCE must be in [0,1]")
         if self.cop_detections_max_items < 1:
@@ -2347,6 +2472,34 @@ class Settings:
             tqi_weight_sensor=_env_float("MINIMAPPR_TQI_WEIGHT_SENSOR", 0.2),
             track_drop_multiplier=_env_float("MINIMAPPR_TRACK_DROP_MULTIPLIER", 3.0),
             track_reap_multiplier=_env_float("MINIMAPPR_TRACK_REAP_MULTIPLIER", 5.0),
+            # --- Field Mode W2-tracker ---
+            tracking_perched_filter_enabled=_env_bool("MINIMAPPR_TRACKING_PERCHED_FILTER_ENABLED", False),
+            tracking_perched_label_categories=_env_str("MINIMAPPR_TRACKING_PERCHED_LABEL_CATEGORIES", "wildlife"),
+            tracking_perched_position_diffusion_m2_per_second=_env_float("MINIMAPPR_TRACKING_PERCHED_POSITION_DIFFUSION_M2_PER_SECOND", 0.05),
+            tracking_perched_relocation_snap_distance_m=_env_float("MINIMAPPR_TRACKING_PERCHED_RELOCATION_SNAP_DISTANCE_M", 6.0),
+            tracking_perched_relocation_gate_max_m=_env_float("MINIMAPPR_TRACKING_PERCHED_RELOCATION_GATE_MAX_M", 30.0),
+            tracking_perched_relocation_min_silence_seconds=_env_float("MINIMAPPR_TRACKING_PERCHED_RELOCATION_MIN_SILENCE_SECONDS", 2.0),
+            tracking_perched_relocation_ghost_seconds=_env_float("MINIMAPPR_TRACKING_PERCHED_RELOCATION_GHOST_SECONDS", 30.0),
+            tracking_species_log_odds_enabled=_env_bool("MINIMAPPR_TRACKING_SPECIES_LOG_ODDS_ENABLED", False),
+            tracking_species_log_odds_label_categories=_env_str("MINIMAPPR_TRACKING_SPECIES_LOG_ODDS_LABEL_CATEGORIES", "wildlife"),
+            tracking_species_log_odds_prior_probability=_env_float("MINIMAPPR_TRACKING_SPECIES_LOG_ODDS_PRIOR_PROBABILITY", 0.1),
+            tracking_species_log_odds_per_update_cap=_env_float("MINIMAPPR_TRACKING_SPECIES_LOG_ODDS_PER_UPDATE_CAP", 3.0),
+            tracking_species_log_odds_total_cap=_env_float("MINIMAPPR_TRACKING_SPECIES_LOG_ODDS_TOTAL_CAP", 6.0),
+            tracking_species_log_odds_evidence_top_k=_env_int("MINIMAPPR_TRACKING_SPECIES_LOG_ODDS_EVIDENCE_TOP_K", 3),
+            tracking_species_display_min_belief=_env_float("MINIMAPPR_TRACKING_SPECIES_DISPLAY_MIN_BELIEF", 0.5),
+            tracking_species_belief_exposed_top_n=_env_int("MINIMAPPR_TRACKING_SPECIES_BELIEF_EXPOSED_TOP_N", 5),
+            tracking_partial_constraint_binding_enabled=_env_bool("MINIMAPPR_TRACKING_PARTIAL_CONSTRAINT_BINDING_ENABLED", False),
+            tracking_partial_binding_window_seconds=_env_float("MINIMAPPR_TRACKING_PARTIAL_BINDING_WINDOW_SECONDS", 25.0),
+            tracking_partial_binding_bearing_sigma_deg=_env_float("MINIMAPPR_TRACKING_PARTIAL_BINDING_BEARING_SIGMA_DEG", 10.0),
+            tracking_partial_binding_hyperbola_sigma_m=_env_float("MINIMAPPR_TRACKING_PARTIAL_BINDING_HYPERBOLA_SIGMA_M", 2.0),
+            tracking_partial_binding_snr_level_margin_db=_env_float("MINIMAPPR_TRACKING_PARTIAL_BINDING_SNR_LEVEL_MARGIN_DB", 7.0),
+            tracking_partial_binding_max_normalized_residual=_env_float("MINIMAPPR_TRACKING_PARTIAL_BINDING_MAX_NORMALIZED_RESIDUAL", 3.0),
+            tracking_partial_binding_species_top_k=_env_int("MINIMAPPR_TRACKING_PARTIAL_BINDING_SPECIES_TOP_K", 3),
+            tracking_partial_binding_soft_update_gain=_env_float("MINIMAPPR_TRACKING_PARTIAL_BINDING_SOFT_UPDATE_GAIN", 0.3),
+            tracking_partial_binding_ambiguity_score_ratio=_env_float("MINIMAPPR_TRACKING_PARTIAL_BINDING_AMBIGUITY_SCORE_RATIO", 0.5),
+            birdnet_two_threshold_enabled=_env_bool("MINIMAPPR_BIRDNET_TWO_THRESHOLD_ENABLED", False),
+            birdnet_localize_to_track_min_confidence=_env_float("MINIMAPPR_BIRDNET_LOCALIZE_TO_TRACK_MIN_CONFIDENCE", 0.15),
+            # --- end Field Mode W2-tracker ---
             fusion_worker_count=_env_int("MINIMAPPR_FUSION_WORKER_COUNT", 2),
             fusion_event_queue_size=_env_int("MINIMAPPR_FUSION_EVENT_QUEUE_SIZE", 512),
             fusion_localization_queue_size=_env_int("MINIMAPPR_FUSION_LOCALIZATION_QUEUE_SIZE", 1024),
@@ -2610,6 +2763,32 @@ class Settings:
             dormant_fingerprint_min_similarity=self.dormant_fingerprint_min_similarity,
             dormant_confidence_half_life_seconds=self.dormant_confidence_half_life_seconds,
             dormant_max_records=self.dormant_max_records,
+            # --- Field Mode W2-tracker ---
+            tracking_perched_filter_enabled=self.tracking_perched_filter_enabled,
+            tracking_perched_label_categories=self.tracking_perched_label_categories,
+            tracking_perched_position_diffusion_m2_per_second=self.tracking_perched_position_diffusion_m2_per_second,
+            tracking_perched_relocation_snap_distance_m=self.tracking_perched_relocation_snap_distance_m,
+            tracking_perched_relocation_gate_max_m=self.tracking_perched_relocation_gate_max_m,
+            tracking_perched_relocation_min_silence_seconds=self.tracking_perched_relocation_min_silence_seconds,
+            tracking_perched_relocation_ghost_seconds=self.tracking_perched_relocation_ghost_seconds,
+            tracking_species_log_odds_enabled=self.tracking_species_log_odds_enabled,
+            tracking_species_log_odds_label_categories=self.tracking_species_log_odds_label_categories,
+            tracking_species_log_odds_prior_probability=self.tracking_species_log_odds_prior_probability,
+            tracking_species_log_odds_per_update_cap=self.tracking_species_log_odds_per_update_cap,
+            tracking_species_log_odds_total_cap=self.tracking_species_log_odds_total_cap,
+            tracking_species_log_odds_evidence_top_k=self.tracking_species_log_odds_evidence_top_k,
+            tracking_species_display_min_belief=self.tracking_species_display_min_belief,
+            tracking_species_belief_exposed_top_n=self.tracking_species_belief_exposed_top_n,
+            tracking_partial_constraint_binding_enabled=self.tracking_partial_constraint_binding_enabled,
+            tracking_partial_binding_window_seconds=self.tracking_partial_binding_window_seconds,
+            tracking_partial_binding_bearing_sigma_deg=self.tracking_partial_binding_bearing_sigma_deg,
+            tracking_partial_binding_hyperbola_sigma_m=self.tracking_partial_binding_hyperbola_sigma_m,
+            tracking_partial_binding_snr_level_margin_db=self.tracking_partial_binding_snr_level_margin_db,
+            tracking_partial_binding_max_normalized_residual=self.tracking_partial_binding_max_normalized_residual,
+            tracking_partial_binding_species_top_k=self.tracking_partial_binding_species_top_k,
+            tracking_partial_binding_soft_update_gain=self.tracking_partial_binding_soft_update_gain,
+            tracking_partial_binding_ambiguity_score_ratio=self.tracking_partial_binding_ambiguity_score_ratio,
+            # --- end Field Mode W2-tracker ---
         )
 
     def ble_tracking_config(self) -> TrackingConfig:

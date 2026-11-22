@@ -18,6 +18,7 @@ from typing import Any
 import numpy as np
 
 from minimappr.core.amplitude_range import received_level_db_from_rms
+from minimappr.core.assembly_track_resolution import resolve_detection_track
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.node_registry import NodeRegistry
 from minimappr.audio_processing.chain import NodePreprocessorFactory
@@ -42,6 +43,9 @@ class AssemblyResult:
     track: TrackState | None
     suppressed_by_zone: bool
     suppression_reasons: list[str]
+    # Field Mode W2-tracker: sub-display result / hidden tentative track.
+    below_display_threshold: bool = False
+    hidden_track_id: str | None = None
 
 
 def _collapse_long_exact_zero_runs(
@@ -325,28 +329,33 @@ class DetectionAssembler:
 
         # -- track update ------------------------------------------------------
         source_node_id = await self._registry.node_id_for_sensor(reference_sensor)
-        track: TrackState | None = None
-        localizable_capability_tiers = {"2d", "full_3d"}
-        if (
-            spatial_display_mode == "localized"
-            and not suppressed_by_zone
-            and capability_tier in localizable_capability_tiers
-        ):
-            track = await tracker.update(
-                timestamp_ns=event_time_ns,
-                position_m=localization_position_m,
-                measurement_covariance_m2=localization_position_covariance_m2,
-                label=classification_label,
-                label_category=label_category,
-                iff_category=iff_category,
-                label_id=label_id,
-                confidence=classification_confidence,
-                sensor_count=len(selected_sensor_ids),
-                capability_tier=capability_tier,
-                source_node_id=source_node_id,
-                classifier_scores=classification_scores,
-            )
+        track_resolution = await resolve_detection_track(
+            tracker=tracker,
+            registry=self._registry,
+            spatial_display_mode=spatial_display_mode,
+            suppressed_by_zone=suppressed_by_zone,
+            capability_tier=capability_tier,
+            event_time_ns=event_time_ns,
+            localization_position_m=localization_position_m,
+            localization_position_covariance_m2=localization_position_covariance_m2,
+            classification_label=classification_label,
+            classification_confidence=classification_confidence,
+            classification_scores=classification_scores,
+            classification_features=classification_features,
+            label_category=label_category,
+            iff_category=iff_category,
+            label_id=label_id,
+            selected_sensor_ids=selected_sensor_ids,
+            source_node_id=source_node_id,
+            reference_sensor=reference_sensor,
+            tdoa_s=tdoa_s,
+            environment=environment,
+        )
+        track: TrackState | None = track_resolution.track
+        if track is not None:
             track.position_geo = self._coordinate_frame.local_to_geo(track.position_m)
+        if track_resolution.partially_bound:
+            feature_summary["partial_constraint_bound"] = True
 
         # -- observation ID resolution ----------------------------------------
         latest_observation_ids = await self._registry.latest_observation_ids(selected_sensor_ids)
@@ -444,6 +453,9 @@ class DetectionAssembler:
         # classes (drone, coyote, ...) keep their audio. Metadata remains available.
         if not _classifier_retains_audio(classifier_source, classification_label):
             classifier_audio_retention_seconds = 0
+        # A sub-display result is never shown alone, so its audio never lands.
+        if track_resolution.below_display_threshold:
+            classifier_audio_retention_seconds = 0
         keeps_audio = (
             classifier_audio_retention_seconds is None
             or classifier_audio_retention_seconds > 0
@@ -531,4 +543,6 @@ class DetectionAssembler:
             track=track,
             suppressed_by_zone=suppressed_by_zone,
             suppression_reasons=suppression_reasons,
+            below_display_threshold=track_resolution.below_display_threshold,
+            hidden_track_id=track_resolution.hidden_track_id,
         )
