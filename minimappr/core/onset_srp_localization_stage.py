@@ -63,9 +63,13 @@ class OnsetSrpLocalizationStage:
         for node, samples in result.consumed_onset_samples_by_node.items():
             remembered = self._consumed_onset_ns_by_node.setdefault(node, deque())
             remembered.extend(span_start_ns + int(s * NANOSECONDS_PER_SECOND / sample_rate_hz) for s in samples)
-        for remembered in self._consumed_onset_ns_by_node.values():
+        for node in list(self._consumed_onset_ns_by_node):
+            remembered = self._consumed_onset_ns_by_node[node]
             while remembered and remembered[0] < now_ns - ttl_ns:
                 remembered.popleft()
+            # Drop idle nodes too, so removed/renamed nodes do not linger forever.
+            if not remembered:
+                del self._consumed_onset_ns_by_node[node]
 
     # ------------------------------------------------------------------ buffer
     async def _await_span(self, fusion: FusionNode, sensor_ids: list[str], start_ns: int, end_ns: int) -> list[str]:
@@ -195,7 +199,9 @@ class OnsetSrpLocalizationStage:
             sample_rate_hz=sample_rate_hz,
         )
         if not windows:
-            fusion._record_silent_drop(stage="localization", reason="onset_classification_window_missing")
+            fusion._record_silent_drop(
+                stage="localization", reason="onset_classification_window_missing", candidate_id=candidate.id
+            )
             return None
         selected_ids = sorted(windows)
         reference_sensor = cluster.reference_sensor if cluster.reference_sensor in windows else selected_ids[0]

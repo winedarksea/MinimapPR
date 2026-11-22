@@ -156,3 +156,30 @@ def test_echo_and_persistence_checks() -> None:
     lone_note.status, lone_note.status_reasons = CLUSTER_STATUS_ACCEPTED, []
     apply_onset_echo_and_persistence_checks([bird, lone_note], frames, apply_persistence=False, **kwargs)
     assert lone_note.status == CLUSTER_STATUS_ACCEPTED
+
+
+def test_level_inconsistency_never_suppresses_the_strongest_cluster(monkeypatch) -> None:
+    # Tentative clusters produce no detection downstream, so a level failure on
+    # the window's strongest cluster would silently drop a real (faint) bird.
+    import minimappr.core.onset_srp_clustering as clustering
+
+    monkeypatch.setattr(clustering, "level_consistency_holds", lambda **_: False)
+    _, result = _run("one_bird_two_bouts")
+    strongest = result.clusters[0]
+    assert strongest.status == CLUSTER_STATUS_ACCEPTED
+    assert "level_inconsistent" in strongest.status_reasons
+    for secondary in result.clusters[1:]:
+        assert secondary.status != CLUSTER_STATUS_ACCEPTED
+
+
+def test_stage_consumed_onset_memory_expires_and_drops_idle_nodes() -> None:
+    from minimappr.core.onset_srp_localization_stage import OnsetSrpLocalizationStage
+    from minimappr.core.onset_srp_types import OnsetClusteringResult
+
+    config = Settings().onset_srp_clustering_config()
+    stage = OnsetSrpLocalizationStage(config)
+    ttl_ns = int(config.dedupe_ttl_seconds * 1e9)
+    stage._remember(OnsetClusteringResult((), 1, 1, {"node-a": (100,)}), 0, SAMPLE_RATE_HZ, now_ns=0)
+    assert "node-a" in stage._consumed_onset_ns_by_node
+    stage._remember(OnsetClusteringResult((), 0, 0, {}), 0, SAMPLE_RATE_HZ, now_ns=ttl_ns * 2)
+    assert stage._consumed_onset_ns_by_node == {}
