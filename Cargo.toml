@@ -29,6 +29,8 @@ members = [
     "minimappr-sim",
     "minimappr-relay-wire",
     "minimappr-transport",
+    # W4-android-skeleton: UniFFI surface for field-app/ (Gobley, KMP).
+    "minimappr-ffi",
 ]
 exclude = [
     "minimappr-frontend",
