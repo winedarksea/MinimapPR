@@ -176,7 +176,7 @@ pub fn same_band_two_species(seed: u64) -> Result<ScenarioReport, String> {
         let (outcome, metrics) = run_scene(scene, seed)?;
         entity_invariants(&metrics)?;
         ensure(metrics.pinpointed_birds == 2, || metrics.summary())?;
-        let cap = outcome.spec.mesh.attribution.loco_max_reruns_per_window;
+        let cap = outcome.spec.mesh.attribution.cascade.loco_max_reruns_per_window;
         let clusters_per_call = outcome.call_records().iter().map(|record| record.clusters.len()).max().unwrap_or(0);
         ensure(clusters_per_call >= 2, || "no window resolved two clusters".into())?;
         healthy_path_checks(&outcome, 4, Some(INSIDE_LAYOUT_GATE_M))?;

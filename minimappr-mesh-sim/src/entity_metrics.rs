@@ -41,6 +41,10 @@ pub struct EntityMetrics {
     pub label_swaps: usize,
     /// Entities built only from echoes.
     pub echo_promotions: usize,
+    /// Calls traced to an echo that reached the entity layer at all. An echo
+    /// absorbed into its own bird's entity forms no extra entity, so
+    /// `echo_promotions` alone misses broken echo rejection.
+    pub echo_calls_surfaced: usize,
     /// Birds whose entity was pinpointed at some point.
     pub pinpointed_birds: usize,
     pub calls_scored: usize,
@@ -76,6 +80,9 @@ pub fn entity_metrics(outcome: &ScenarioOutcome, truth: &EntityTruth) -> EntityM
             let Some(scripted_call) = scripted_call else { continue };
             let bird = truth.bird_of_call.get(scripted_call).copied().flatten();
             metrics.calls_scored += 1;
+            if bird.is_none() {
+                metrics.echo_calls_surfaced += 1;
+            }
             sources_by_entity.entry(entity).or_default().insert(bird);
             if let Some(bird) = bird {
                 metrics.entities_by_bird[bird].insert(entity);
@@ -116,23 +123,30 @@ pub fn entity_metrics(outcome: &ScenarioOutcome, truth: &EntityTruth) -> EntityM
     metrics
 }
 
-/// No duplicates, no merges (swaps between birds), no wrong labels, no echo promotions.
+/// Every bird reached an entity (so the checks below are not vacuous: a run
+/// whose calls never reach the entity layer scores zero of everything), no
+/// duplicates, no merges (swaps between birds), no wrong labels, no echoes.
 pub fn entity_invariants(metrics: &EntityMetrics) -> InvariantResult {
+    ensure(metrics.entities_by_bird.iter().all(|entities| !entities.is_empty()), || {
+        format!("a scripted bird reached no entity: {:?}", metrics.entities_by_bird)
+    })?;
     ensure(metrics.duplicate_entities == 0, || format!("{} duplicate entities: {:?}", metrics.duplicate_entities, metrics.entities_by_bird))?;
     ensure(metrics.merged_entities == 0, || format!("{} entities merged several birds: {:?}", metrics.merged_entities, metrics.entities_by_bird))?;
     ensure(metrics.label_swaps == 0, || format!("{} entities show another bird's species", metrics.label_swaps))?;
-    ensure(metrics.echo_promotions == 0, || format!("{} echoes promoted to entities", metrics.echo_promotions))
+    ensure(metrics.echo_promotions == 0, || format!("{} echoes promoted to entities", metrics.echo_promotions))?;
+    ensure(metrics.echo_calls_surfaced == 0, || format!("{} echo calls reached the entity layer", metrics.echo_calls_surfaced))
 }
 
 impl EntityMetrics {
     pub fn summary(&self) -> String {
         format!(
-            "entities/bird {:?}, dup {}, merged {}, swaps {}, echo {}, pinpointed birds {}",
+            "entities/bird {:?}, dup {}, merged {}, swaps {}, echo {} (surfaced {}), pinpointed birds {}",
             self.entities_by_bird.iter().map(BTreeSet::len).collect::<Vec<_>>(),
             self.duplicate_entities,
             self.merged_entities,
             self.label_swaps,
             self.echo_promotions,
+            self.echo_calls_surfaced,
             self.pinpointed_birds
         )
     }

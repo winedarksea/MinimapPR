@@ -159,19 +159,7 @@ def concurrency_case(seed: int) -> tuple[dict, dict]:
     return case, {"conflicts": sorted(int(track_id.split("-")[1]) for track_id in conflicts)}
 
 
-def entity_geometry_case(seed: int) -> tuple[dict, dict]:
-    rng = np.random.default_rng(seed)
-    config = entity_config()
-    samples = []
-    for _ in range(12):
-        node = rng.uniform(-30, 30, size=3).tolist()
-        target = (np.asarray(node) + rng.uniform(-80, 80, size=3)).tolist()
-        covariance = _random_covariance(rng, float(rng.uniform(0.2, 25.0))) if rng.uniform() < 0.8 else None
-        other = (np.asarray(target) + rng.normal(scale=float(rng.uniform(0.5, 15.0)), size=3)).tolist()
-        other_covariance = _random_covariance(rng, float(rng.uniform(0.2, 6.0))) if rng.uniform() < 0.8 else None
-        dt_ns = int(rng.uniform(0.0, 3.0) * SECOND_NS)
-        samples.append({"node_m": node, "target_m": target, "covariance_m2": covariance, "other_m": other,
-                        "other_covariance_m2": other_covariance, "dt_ns": dt_ns, "range_observable": bool(rng.uniform() < 0.5)})
+def _entity_geometry_outputs(samples: list[dict], config) -> list[dict]:
     outputs = []
     for sample in samples:
         bearing = bearing_estimate_toward(
@@ -196,7 +184,42 @@ def entity_geometry_case(seed: int) -> tuple[dict, dict]:
             "ellipse": list(ellipse) if ellipse is not None else None,
             "fix_score": score, "two_birds": two_birds,
         })
-    return {"kind": "entity_geometry", "samples": samples}, {"samples": outputs}
+    return outputs
+
+
+def entity_geometry_case(seed: int) -> tuple[dict, dict]:
+    rng = np.random.default_rng(seed)
+    config = entity_config()
+    samples = []
+    for _ in range(12):
+        node = rng.uniform(-30, 30, size=3).tolist()
+        target = (np.asarray(node) + rng.uniform(-80, 80, size=3)).tolist()
+        covariance = _random_covariance(rng, float(rng.uniform(0.2, 25.0))) if rng.uniform() < 0.8 else None
+        other = (np.asarray(target) + rng.normal(scale=float(rng.uniform(0.5, 15.0)), size=3)).tolist()
+        other_covariance = _random_covariance(rng, float(rng.uniform(0.2, 6.0))) if rng.uniform() < 0.8 else None
+        dt_ns = int(rng.uniform(0.0, 3.0) * SECOND_NS)
+        samples.append({"node_m": node, "target_m": target, "covariance_m2": covariance, "other_m": other,
+                        "other_covariance_m2": other_covariance, "dt_ns": dt_ns, "range_observable": bool(rng.uniform() < 0.5)})
+    return {"kind": "entity_geometry", "samples": samples}, {"samples": _entity_geometry_outputs(samples, config)}
+
+
+def entity_geometry_degenerate_case() -> tuple[dict, dict]:
+    """Covariances a bad upstream Jacobian can produce: indefinite (a negative
+    Mahalanobis "distance" must not pass every gate), zero and rank-deficient."""
+    config = entity_config()
+    indefinite = [[4.0, 0.0, 0.0], [0.0, -9.0, 0.0], [0.0, 0.0, 1.0]]
+    strongly_indefinite = [[1.0, 3.0, 0.0], [3.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    zero = [[0.0] * 3 for _ in range(3)]
+    rank_one = [[4.0, 4.0, 0.0], [4.0, 4.0, 0.0], [0.0, 0.0, 0.0]]
+    samples = []
+    for covariance, other_covariance in [
+        (indefinite, indefinite), (strongly_indefinite, None), (None, strongly_indefinite),
+        (zero, zero), (rank_one, rank_one), (rank_one, None),
+    ]:
+        samples.append({"node_m": [0.0, 0.0, 1.5], "target_m": [10.0, 4.0, 3.0], "covariance_m2": covariance,
+                        "other_m": [12.0, 9.0, 3.0], "other_covariance_m2": other_covariance, "dt_ns": SECOND_NS // 2,
+                        "range_observable": True})
+    return {"kind": "entity_geometry", "samples": samples}, {"samples": _entity_geometry_outputs(samples, config)}
 
 
 def all_cases() -> list[tuple[dict, dict]]:
@@ -206,6 +229,7 @@ def all_cases() -> list[tuple[dict, dict]]:
         cases.append(perched_filter_case(100 + seed))
         cases.append(species_gate_case(200 + seed))
         cases.append(entity_geometry_case(300 + seed))
+    cases.append(entity_geometry_degenerate_case())
     cases.extend(association_case(400 + seed) for seed in range(24))
     cases.extend(concurrency_case(500 + seed) for seed in range(16))
     for name, builder in SCENARIO_BUILDERS.items():

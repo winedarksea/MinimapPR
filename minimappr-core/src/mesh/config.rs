@@ -310,7 +310,14 @@ pub struct EntityTrackingConfig {
     pub maintenance_interval_ms: MeshMilliseconds,
     /// A fix whose used nodes' minor/major horizontal spread is below this is
     /// mirror-ambiguous (near-collinear nodes): it never places an entity.
+    /// The ratio is of standard deviations (sqrt of the eigenvalue ratio):
+    /// 0.2 flags a 5-phone single-file trail with GNSS jitter (~0.05) and a
+    /// 20 m triangle whose apex is < ~3.5 m off the baseline, not a ring (~1).
     pub collinear_mirror_max_aspect_ratio: f64,
+    /// Per-call entity outcomes kept for revert re-pointing and inspection
+    /// (oldest dropped first; at least one is kept). Must cover the calls of
+    /// one relocation ghost window.
+    pub max_retained_call_outcomes: usize,
 }
 
 impl Default for EntityTrackingConfig {
@@ -321,6 +328,35 @@ impl Default for EntityTrackingConfig {
             entity: Default::default(),
             maintenance_interval_ms: 1_000,
             collinear_mirror_max_aspect_ratio: 0.2,
+            max_retained_call_outcomes: 4_096,
+        }
+    }
+}
+
+/// S5 attribution as the host runs it: the cascade, plus how the host builds
+/// each cluster's window context (the server's onset-stage seam,
+/// `onset_srp_localization_stage._attach_attribution_context`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MeshAttributionConfig {
+    pub cascade: crate::onset_clustering::attribution_cascade::AttributionCascadeConfig,
+    /// Interferer onsets this close (same band) to a target onset are the
+    /// target's own note or echo and are never masked (server: `echo_max_lag_seconds`).
+    pub shared_onset_max_lag_seconds: f64,
+    /// Clusters within `radius + fraction × range` of the target are the same
+    /// source split in two, never interferers (server: `cluster_radius_m`,
+    /// `cluster_range_fraction`; range from the window's node centroid).
+    pub colocated_cluster_radius_m: f64,
+    pub colocated_cluster_range_fraction: f64,
+}
+
+impl Default for MeshAttributionConfig {
+    fn default() -> Self {
+        let onset = crate::onset_clustering::OnsetClusteringConfig::default();
+        Self {
+            cascade: Default::default(),
+            shared_onset_max_lag_seconds: onset.echo_max_lag_seconds,
+            colocated_cluster_radius_m: onset.cluster_radius_m,
+            colocated_cluster_range_fraction: onset.cluster_range_fraction,
         }
     }
 }
@@ -339,5 +375,5 @@ pub struct MeshConfig {
     pub entity_contour: EntityContourConfig,
     pub entity_tracking: EntityTrackingConfig,
     /// S5 species attribution for windows holding several source clusters.
-    pub attribution: crate::onset_clustering::attribution_cascade::AttributionCascadeConfig,
+    pub attribution: MeshAttributionConfig,
 }

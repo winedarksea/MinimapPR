@@ -21,6 +21,10 @@ use minimappr_core::stage1::noise_floor_relative_trigger::{
 use minimappr_core::wildlife_tracking::species_log_odds::round_decimal;
 use serde_json::{json, Value};
 
+/// Stop reasons the reference writes into its annotation's `reason` key (the
+/// others are implied by the tier and the gradient / LOCO reasons).
+const REFERENCE_ANNOTATED_REASONS: [&str; 3] = ["loco_disabled", "interferers_silent_in_window", "loco_rerun_cap"];
+
 /// The reference annotates dominance rounded to this many decimals.
 const DOMINANCE_DECIMALS: usize = 2;
 
@@ -112,10 +116,13 @@ fn evidence_from(raw: &Value) -> ClusterAttributionEvidence {
 struct ScriptedHost {
     masked_cell_fraction: f64,
     masked_answer: ClassifierAnswer,
+    /// What the cascade asked to mask (compared with the reference's seeds).
+    masked_seeds: Option<Vec<InterfererOnset>>,
 }
 
 impl LocoRerunHost for ScriptedHost {
-    fn mask_interferers(&mut self, _seeds: &[InterfererOnset]) -> f64 {
+    fn mask_interferers(&mut self, seeds: &[InterfererOnset]) -> f64 {
+        self.masked_seeds = Some(seeds.to_vec());
         self.masked_cell_fraction
     }
     fn rerun_masked(&mut self) -> ClassifierAnswer {
@@ -167,6 +174,7 @@ fn run_attribution_batch(case: &Value) -> OracleResult {
         let mut host = ScriptedHost {
             masked_cell_fraction: case["masked_cell_fraction"].as_f64().unwrap_or_default(),
             masked_answer: classifier_answer(&case["masked"]),
+            masked_seeds: None,
         };
         let outcome = attribute_cluster(
             &classifier_answer(&case["original"]),
@@ -197,6 +205,10 @@ fn run_attribution_batch(case: &Value) -> OracleResult {
             "confidence": outcome.confidence,
             "dominance_db": dominance,
             "collapsed": outcome.loco.as_ref().map(|loco| loco.collapsed_labels.clone()),
+            "reason": REFERENCE_ANNOTATED_REASONS.contains(&outcome.reason).then_some(outcome.reason),
+            "mask_seeds": host.masked_seeds.as_ref().map(|seeds| {
+                seeds.iter().map(|seed| json!([seed.onset_seconds, seed.band_min_hz, seed.band_max_hz])).collect::<Vec<_>>()
+            }),
         }));
     }
     Ok(json!({ "results": results }))

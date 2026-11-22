@@ -141,6 +141,43 @@ def attribution_case(seed: int) -> dict:
     }
 
 
+def attribution_band_overlap_case(seed: int) -> dict:
+    """Two clusters in one band, both near the classifying node, levels on the
+    spreading fit: dominance is measured and predicted, but only the band
+    overlap guard (geometry too weak to justify it) can refuse it. Five near
+    interferers (refused, then LOCO in one shared window: the rerun cap is hit)
+    and one far one (settled)."""
+    rng = np.random.default_rng(seed)
+    window_start = int(rng.integers(0, 4 * SAMPLE_RATE_HZ))
+    window_end = window_start + 3 * SAMPLE_RATE_HZ
+    band_min = float(rng.uniform(2000, 4000))
+    band = (band_min, band_min + float(rng.uniform(500, 2000)))
+    target_distance = float(rng.uniform(1.5, 2.5))
+    interferer_distance = target_distance * (6.0 if seed % 6 == 5 else 1.4)
+    target_level = float(rng.uniform(55, 65))
+    clusters = {}
+    for index, (distance, level) in enumerate(((target_distance, target_level), (interferer_distance, target_level - 14.0))):
+        distances = {"tetra-a": distance, "tetra-b": distance + 10.0, "tetra-c": distance + 20.0}
+        clusters[str(index)] = {
+            "node_band_snr_db": {node: level - 20 * math.log10(d) for node, d in distances.items()},
+            "node_distances_m": distances,
+            "node_onset_arrivals": {
+                node: [[int(rng.integers(window_start, window_end)), band[0], band[1]]] for node in distances
+            },
+            "fitted_source_level_db": level,
+            "spreading_residual_db": float(rng.uniform(0, 2)),
+        }
+    scores = {"american robin": 0.8, "scarlet tanager": 0.3}
+    return {
+        "kind": "attribution", "window_id": "overlap", "target_index": 0, "clusters": clusters,
+        "classifying_node_id": "tetra-a", "window_start_sample": window_start, "window_end_sample": window_end,
+        "sample_rate_hz": SAMPLE_RATE_HZ, "shared_onset_max_lag_samples": None,
+        "original": {"label": "american robin", "confidence": 0.8, "scores": list(map(list, scores.items()))},
+        "masked": {"label": "unknown", "confidence": 0.0, "scores": []},
+        "masked_cell_fraction": 0.2, "loco_enabled": True,
+    }
+
+
 class _ScriptedAttributor(OnsetClusterAttributor):
     """The real cascade with the host-owned masking scripted."""
 
@@ -151,6 +188,7 @@ class _ScriptedAttributor(OnsetClusterAttributor):
     async def _mask_interferers(self, classified, context, interferers) -> MaskedSignal:
         seeds = [onset for interferer in interferers for onset in interferer.onset_seconds_in_window]
         self.last_seed_count = len(seeds)
+        self.last_seeds = [[onset, band_min, band_max] for onset, band_min, band_max in seeds]
         return MaskedSignal(samples=np.zeros(4), masked_cell_fraction=self._masked_fractions.pop(0), region_seconds=())
 
 
@@ -207,6 +245,7 @@ async def _run_attribution_cases(cases: list[dict]) -> list[dict]:
             classification_end_sample=case["window_end_sample"], sample_rate_hz=case["sample_rate_hz"],
             shared_onset_max_lag_samples=case["shared_onset_max_lag_samples"],
         )
+        attributor.last_seeds = None
         result = await attributor.attribute(classified, context, event_time_ns=0)
         annotation = result.classification.features.get(ATTRIBUTION_FEATURE_KEY, {})
         outputs.append({
@@ -215,6 +254,10 @@ async def _run_attribution_cases(cases: list[dict]) -> list[dict]:
             "label": result.classification.label, "confidence": float(result.classification.confidence),
             "dominance_db": {key: value for key, value in annotation.get("dominance_db", {}).items()},
             "collapsed": annotation.get("loco_collapsed_labels"),
+            # Why the cascade stopped short of a decision (loco_disabled /
+            # interferers_silent_in_window / loco_rerun_cap), and what was masked.
+            "reason": annotation.get("reason"),
+            "mask_seeds": attributor.last_seeds,
         })
         fractions.clear()
         orchestrator.masked_answers.clear()
@@ -251,6 +294,7 @@ def all_cases() -> list[tuple[dict, dict]]:
     cases.append(relative_trigger_lru_case())
     cases.extend(loco_decision_case(700 + seed) for seed in range(2))
     attribution_inputs = [attribution_case(seed) for seed in range(160)]
+    attribution_inputs += [attribution_band_overlap_case(900 + seed) for seed in range(6)]
     batch = {"kind": "attribution_batch", "cases": attribution_inputs}
     cases.append((batch, {"results": asyncio.run(_run_attribution_cases(attribution_inputs))}))
     return cases

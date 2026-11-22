@@ -17,7 +17,7 @@ use super::classification_rota::clumps_from_layout;
 use super::config::{MeshConfig, DEVICE_SAMPLE_RATE_HZ};
 use super::event_log::SessionEventLog;
 use super::fix_contour::horizontal_covariance_contour;
-use super::host_entity_tracking::{node_set_is_collinear, EntityUpdateContext, HostEntityTracking};
+use super::host_entity_tracking::{node_set_is_collinear, ClusterReportingNode, EntityUpdateContext, HostEntityTracking};
 use super::host_membership::SessionMembership;
 use super::host_restoration::restore_from_mirror;
 use super::host_sync_pipeline::{HostSyncPipeline, SyncRecord};
@@ -318,10 +318,29 @@ impl FieldHostStateMachine {
                 node_set_is_collinear(&used, self.config.entity_tracking.collinear_mirror_max_aspect_ratio)
             })
             .collect();
+        // In a multi-cluster window each cluster's species came from its own
+        // loudest node (attribution), so that node reports it; a lone cluster
+        // keeps the call's classifying node, which keeps heard-nearby matching
+        // (keyed on the reporting node) stable across bouts.
+        let multi_cluster = record.clusters.len() > 1;
+        let cluster_reporting_nodes: Vec<ClusterReportingNode> = record
+            .clusters
+            .iter()
+            .filter(|_| multi_cluster)
+            .map(|cluster| ClusterReportingNode {
+                node_id: cluster.classifying_node,
+                position_m: self
+                    .sync
+                    .engine
+                    .node_position_for_solve(cluster.classifying_node, record.received_ms, false, &self.config.island_sync)
+                    .map(|position| position.position_m),
+            })
+            .collect();
         let context = EntityUpdateContext { contour: &self.config.entity_contour, next_event_log_sequence: self.event_log.head_sequence() + 1 };
         let updates = self.entities.on_call_record(
             record,
             reporting_position,
+            &cluster_reporting_nodes,
             &mirror_ambiguous,
             &self.config.entity_tracking,
             &context,
