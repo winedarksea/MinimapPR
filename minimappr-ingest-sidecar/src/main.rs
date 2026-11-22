@@ -6,6 +6,7 @@ use minimappr_core::{
 };
 mod birdnet_render;
 mod classifier_helper;
+mod deferred_localization;
 mod derived_cache;
 mod diagnostics;
 mod dsp_events;
@@ -19,6 +20,7 @@ mod iamf_writer;
 mod ingest_backend;
 mod journal_reader;
 mod leases;
+mod localization_coverage_wait;
 mod manifests;
 mod render_mvdr;
 mod runtime;
@@ -379,6 +381,30 @@ struct Args {
         default_value_t = -1.0
     )]
     trigger_cooldown_seconds: f64,
+
+    /// Coverage race fix: hold a cluster localization until every streaming
+    /// member node covers the window (Python `localization_coverage_*` keys).
+    #[arg(
+        long,
+        env = "MINIMAPPR_LOCALIZATION_COVERAGE_WAIT_ALL_STREAMING_NODES_ENABLED",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    localization_coverage_wait_all_streaming_nodes_enabled: bool,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_LOCALIZATION_COVERAGE_STALL_BUDGET_SECONDS",
+        default_value_t = 0.5
+    )]
+    localization_coverage_stall_budget_seconds: f64,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_LOCALIZATION_COVERAGE_TOTAL_CAP_SECONDS",
+        default_value_t = 1.0
+    )]
+    localization_coverage_total_cap_seconds: f64,
 
     /// Legacy override: clamps the top of the steered band. The band-split
     /// render derives its top from array geometry (alias cutoff); when set,
@@ -858,6 +884,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 localization_cadence_ms: args.dsp_localization_cadence_ms,
                 localization_rms_gate: args.dsp_localization_rms_gate,
                 trigger_cooldown_seconds,
+                localization_coverage_wait_all_streaming_nodes_enabled: args
+                    .localization_coverage_wait_all_streaming_nodes_enabled,
+                localization_coverage_stall_budget_seconds: args
+                    .localization_coverage_stall_budget_seconds,
+                localization_coverage_total_cap_seconds: args
+                    .localization_coverage_total_cap_seconds,
                 classification_audio_source: args.classification_audio_source.clone(),
                 min_localization_confidence: args.min_localization_confidence as f32,
                 query_persisted_raw_manifests: false,
@@ -1321,6 +1353,9 @@ struct DspStatusResponse {
     total_buffer_reanchors: u64,
     total_window_underrun_drops: u64,
     total_stale_streams_evicted: u64,
+    // Same names as the Python FusionMetrics coverage-wait counters.
+    localization_coverage_wait_stop_reasons: HashMap<String, u64>,
+    localization_coverage_wait_max_ms: f64,
     dsp_worker_running: bool,
 }
 
@@ -1349,6 +1384,8 @@ async fn dsp_status(State(state): State<AppState>) -> Response {
         total_buffer_reanchors: st.total_buffer_reanchors,
         total_window_underrun_drops: st.total_window_underrun_drops,
         total_stale_streams_evicted: st.total_stale_streams_evicted,
+        localization_coverage_wait_stop_reasons: st.localization_coverage_wait_stop_reasons.clone(),
+        localization_coverage_wait_max_ms: st.localization_coverage_wait_max_ms,
         dsp_worker_running: st.worker_running,
     })
     .into_response()

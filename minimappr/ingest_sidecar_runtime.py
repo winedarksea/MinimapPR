@@ -126,6 +126,22 @@ def sidecar_classifier_render_min_interval_seconds(
     return 0.0
 
 
+def sidecar_coverage_wait_environment(settings) -> dict[str, str]:
+    """Env handoff for the sidecar's cross-node coverage wait (Rust
+    `localization_coverage_wait.rs`). Fallbacks track the Settings defaults."""
+    return {
+        "MINIMAPPR_LOCALIZATION_COVERAGE_WAIT_ALL_STREAMING_NODES_ENABLED": str(
+            bool(getattr(settings, "localization_coverage_wait_all_streaming_nodes_enabled", True))
+        ).lower(),
+        "MINIMAPPR_LOCALIZATION_COVERAGE_STALL_BUDGET_SECONDS": str(
+            float(getattr(settings, "localization_coverage_stall_budget_seconds", 0.5))
+        ),
+        "MINIMAPPR_LOCALIZATION_COVERAGE_TOTAL_CAP_SECONDS": str(
+            float(getattr(settings, "localization_coverage_total_cap_seconds", 1.0))
+        ),
+    }
+
+
 def _sidecar_classifier_command_json(
     settings,
     *,
@@ -198,6 +214,10 @@ def build_ingest_sidecar_environment(
         "MINIMAPPR_TRIGGER_COOLDOWN_SECONDS": str(
             getattr(settings, "trigger_cooldown_seconds", 0.8)
         ),
+        # Coverage race fix: the sidecar holds a cluster localization until
+        # every streaming member node covers the window, with the same
+        # stall-budget / total-cap meaning as sensor_span_coverage_wait.py.
+        **sidecar_coverage_wait_environment(settings),
         # Fallbacks track the Settings defaults: a 50 Hz high-pass capped at the
         # array's spatial aliasing limit, not the retired 300-3500 Hz profile.
         "MINIMAPPR_LOCALIZATION_BAND_MIN_HZ": str(
