@@ -101,6 +101,31 @@ def build_spatial_grid(
     )
 
 
+def augment_spatial_grid(grid: CandidateGrid, *, extra_points_m: np.ndarray) -> CandidateGrid:
+    """Field Mode S-fixes: add node near-field shells to a spatial grid.
+
+    The ground/canopy prior deliberately does not trim the grid: in a planar
+    layout a frame whose best match is a bird's below-ground mirror twin would
+    then peak somewhere else entirely and split the bird into a second cluster
+    (measured on two_species_overlap). Twins are folded after LM instead
+    (``onset_height_resolution``)."""
+    centroid = grid.centroid_m
+    extra = np.asarray(extra_points_m, dtype=np.float64).reshape(-1, 3)
+    offsets = extra - centroid
+    extra_ranges = np.linalg.norm(offsets, axis=1)
+    extra_directions = offsets / np.maximum(extra_ranges, EPSILON)[:, None]
+    points = np.vstack([grid.points_m, extra])
+    directions = np.vstack([grid.directions, extra_directions])
+    ranges = np.concatenate([grid.ranges_m, extra_ranges])
+    return CandidateGrid(
+        points_m=points,
+        directions=directions,
+        ranges_m=ranges,
+        centroid_m=centroid,
+        is_direction_grid=False,
+    )
+
+
 def predicted_lags_s(
     grid: CandidateGrid,
     sensor_positions: dict[str, np.ndarray],

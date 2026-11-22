@@ -20,9 +20,15 @@ Pure decision functions; the async glue lives in onset_cluster_attribution_stage
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
-from minimappr.core.onset_cluster_attribution_evidence import ClusterAttributionEvidence
+from minimappr.core.onset_cluster_attribution_evidence import (
+    DECIBELS_PER_AMPLITUDE_DECADE,
+    MINIMUM_SPREADING_DISTANCE_M,
+    ClusterAttributionEvidence,
+)
+from minimappr.core.onset_cluster_echo_checks import SAME_BAND_MIN_OVERLAP_FRACTION
 from minimappr.core.taxonomy import ABSTENTION_LABELS
 
 ATTRIBUTION_TIER_SINGLE_CLUSTER = "single_cluster"
@@ -147,6 +153,7 @@ def snr_gradient_decision(
     if target_snr is None:
         return GradientDecision(False, "target_level_missing")
     dominance: dict[int, float] = {}
+    target_band = _arrival_band_hz(target.node_onset_arrivals.get(classifying_node_id, ()))
     for interferer in interferers:
         interferer_snr = interferer.evidence.node_band_snr_db[classifying_node_id]
         measured = target_snr - interferer_snr
@@ -169,7 +176,38 @@ def snr_gradient_decision(
             return GradientDecision(False, "spreading_inconsistent", dominance)
         if abs(measured - (target_predicted - interferer_predicted)) > thresholds.spreading_tolerance_db:
             return GradientDecision(False, "dominance_not_predicted", dominance)
+        # Field Mode S-fixes: band SNR is measured over each cluster's band, so when the
+        # target's band covers the interferer's onsets the target "level" (and its fitted
+        # source level) includes the interferer (collinear trail: a thrush cluster whose band
+        # reached the vireo's trill read 13 dB "dominant" and took the vireo's label). Then
+        # only geometry can justify dominance: the interferer must be far enough away.
+        if _bands_overlap(target_band, interferer) and _geometric_dominance_db(
+            target, interferer.evidence, classifying_node_id
+        ) < thresholds.dominance_margin_db - thresholds.spreading_tolerance_db:
+            return GradientDecision(False, "bands_overlap_not_geometric", dominance)
     return GradientDecision(True, "dominant_and_consistent", dominance)
+
+
+def _bands_overlap(target_band: tuple[float, float] | None, interferer: WindowInterferer) -> bool:
+    return target_band is not None and any(
+        _band_overlap_fraction(target_band, (band_min, band_max)) >= SAME_BAND_MIN_OVERLAP_FRACTION
+        for _, band_min, band_max in interferer.onset_seconds_in_window
+    )
+
+
+def _geometric_dominance_db(
+    target: ClusterAttributionEvidence, interferer: ClusterAttributionEvidence, node_id: str
+) -> float:
+    """Spreading-only level advantage of the target at a node (equal source levels)."""
+    target_distance = max(target.node_distances_m.get(node_id, 0.0), MINIMUM_SPREADING_DISTANCE_M)
+    interferer_distance = max(interferer.node_distances_m.get(node_id, 0.0), MINIMUM_SPREADING_DISTANCE_M)
+    return DECIBELS_PER_AMPLITUDE_DECADE * math.log10(interferer_distance / target_distance)
+
+
+def _arrival_band_hz(arrivals) -> tuple[float, float] | None:
+    if not arrivals:
+        return None
+    return min(arrival.band_min_hz for arrival in arrivals), max(arrival.band_max_hz for arrival in arrivals)
 
 
 def _band_overlap_fraction(band_a: tuple[float, float], band_b: tuple[float, float]) -> float:

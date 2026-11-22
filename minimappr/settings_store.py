@@ -310,6 +310,30 @@ CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     "onset_level_consistency_margin_db": float,
     "onset_persistence_min_independent_onsets": float,
     "onset_dedupe_ttl_seconds": float,
+    # --- Field Mode S-fixes onset ---
+    "onset_frame_max_intra_node_weight_share": float,
+    "onset_srp_node_grid_ring_count": float,
+    "onset_srp_node_grid_min_range_m": float,
+    "onset_srp_node_grid_max_range_m": float,
+    "onset_srp_node_grid_azimuth_step_deg": float,
+    "onset_srp_node_grid_elevation_step_deg": float,
+    "onset_ground_prior_enabled": bool,
+    "onset_node_height_above_ground_m": float,
+    "onset_source_max_height_above_ground_m": float,
+    "onset_planar_layout_max_flatness_ratio": float,
+    "onset_height_mirror_min_score_ratio": float,
+    "onset_range_profile_enabled": bool,
+    "onset_range_profile_min_range_m": float,
+    "onset_range_profile_max_range_m": float,
+    "onset_range_profile_sample_count": float,
+    "onset_range_profile_cone_half_angle_deg": float,
+    "onset_range_profile_cone_step_deg": float,
+    "onset_range_profile_support_ratio": float,
+    "onset_range_observable_max_interval_ratio": float,
+    "onset_range_observable_interval_floor_aperture_fraction": float,
+    "onset_near_node_level_tolerance_db": float,
+    "onset_same_source_max_tdoa_difference_seconds": float,
+    # --- end Field Mode S-fixes onset ---
     # --- end Field Mode W2-onset-srp ---
     # --- Field Mode W3-attribution --- restart-required: FusionNode builds the
     # onset stage and the attributor once at construction.

@@ -101,6 +101,10 @@ class LocalizedOnsetCluster:
     loudest_node_id: str
     # Field Mode W3-attribution: per-node levels/arrivals; None unless attribution is on.
     attribution_evidence: ClusterAttributionEvidence | None = None
+    # Field Mode S-fixes: node-plane mirror verdict and the SRP-supported range interval (m from
+    # the layout centroid); None interval = range not judged (single array or profile off).
+    height_resolution: str | None = None
+    range_interval_m: tuple[float, float] | None = None
 
 
 @dataclass(frozen=True, slots=True)
