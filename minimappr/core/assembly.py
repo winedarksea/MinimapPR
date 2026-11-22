@@ -482,18 +482,19 @@ class DetectionAssembler:
             detection.snippet_path = snippet_path
 
         # -- storage persistence -----------------------------------------------
+        persists_detection = track_resolution.persists_detection
         async with storage_batch_ctx():
             if track is not None and not suppressed_by_zone:
                 await self._storage.upsert_track(track)
 
-            if persist_mode == "update":
+            if persists_detection and persist_mode == "update":
                 await self._storage.update_detection(
                     detection=detection,
                     snippet_path=snippet_path,
                     snippet_expires_ns=snippet_expires_ns,
                     retention_tier=retention_tier,
                 )
-            else:
+            elif persists_detection:
                 await self._storage.insert_detection(
                     detection=detection,
                     snippet_path=snippet_path,

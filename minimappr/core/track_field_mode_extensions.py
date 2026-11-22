@@ -145,6 +145,9 @@ class FieldModeTrackExtensions:
         species_evidence: dict[str, float] | None,
         winner_member: str | None = None,
     ) -> dict[str, float]:
+        if not (self.species_log_odds_enabled or self.perched_filter_enabled or self.partial_binding_enabled):
+            # Nothing consumes evidence with every flag off; skip the work.
+            return {}
         if species_evidence is not None:
             return dict(species_evidence)
         return species_evidence_from_detection(
@@ -166,6 +169,10 @@ class FieldModeTrackExtensions:
             belief = SpeciesLogOddsBelief(self._belief_config)
             self._beliefs[track.id] = belief
         belief.update(evidence)
+        if belief.passes_display_threshold():
+            # Once shown (and persisted), a track stays visible: hiding it again
+            # on a later weak bout would make it flicker off the map.
+            self._revealed_track_ids.add(track.id)
         top_label, top_probability = belief.top_label()
         if top_label is not None:
             track.label = top_label
@@ -182,11 +189,8 @@ class FieldModeTrackExtensions:
         return [track.label] if label and label != "unknown" else []
 
     def is_hidden(self, track_id: str) -> bool:
-        """A sub-display-only track whose belief is below the display threshold."""
-        if track_id in self._revealed_track_ids:
-            return False
-        belief = self._beliefs.get(track_id)
-        return belief is not None and not belief.passes_display_threshold()
+        """A sub-display-only track whose belief never reached the display threshold."""
+        return track_id in self._beliefs and track_id not in self._revealed_track_ids
 
     def forget(self, track_id: str) -> None:
         self._beliefs.pop(track_id, None)
