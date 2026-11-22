@@ -114,22 +114,6 @@ impl GateOutcome {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Known-failure gates are `#[ignore]`d in the PR subset; a nightly
-    /// repro that omitted `--include-ignored` would run zero tests and pass.
-    #[test]
-    fn seed_repro_command_runs_ignored_gates() {
-        let mut outcome = GateOutcome::new("graceful_degradation", 1);
-        outcome.fail_seed(42, "example");
-        let report = outcome.report("statistical_accuracy");
-        let expected = "MINIMAPPR_SIM_GATES_SEED=42 cargo test --release -p minimappr-sim-gates --test statistical_accuracy graceful_degradation -- --exact --include-ignored";
-        assert!(report.contains(expected), "{report}");
-    }
-}
-
 pub fn default_thread_count() -> usize {
     std::thread::available_parallelism().map_or(DEFAULT_THREAD_COUNT, |count| count.get())
 }
@@ -154,4 +138,20 @@ where
     });
     let collected = results.into_inner().expect("trial results lock");
     seeds.iter().copied().zip(collected.into_iter().map(|value| value.expect("every trial ran"))).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Known-failure gates are `#[ignore]`d in the PR subset; a nightly
+    /// repro that omitted `--include-ignored` would run zero tests and pass.
+    #[test]
+    fn seed_repro_command_runs_ignored_gates() {
+        let mut outcome = GateOutcome::new("graceful_degradation", 1);
+        outcome.fail_seed(42, "example");
+        let report = outcome.report("statistical_accuracy");
+        let expected = "MINIMAPPR_SIM_GATES_SEED=42 cargo test --release -p minimappr-sim-gates --test statistical_accuracy graceful_degradation -- --exact --include-ignored";
+        assert!(report.contains(expected), "{report}");
+    }
 }
