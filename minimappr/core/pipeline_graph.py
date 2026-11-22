@@ -689,6 +689,23 @@ def _field_mode_tracker_params(tc, settings) -> list[PipelineParam]:
                 else "tracking_species_display_min_belief",
             )
         )
+        # --- Field Mode S-fixes tracking ---
+        params.append(
+            _param(
+                "Species association gate",
+                bool(getattr(tc, "tracking_species_association_gate_enabled", True)),
+                "tracking_species_association_gate_enabled",
+            )
+        )
+    if tc.tracking_perched_filter_enabled:
+        params.append(
+            _param(
+                "Concurrent-perch guard",
+                bool(getattr(tc, "tracking_perched_concurrent_perch_guard_enabled", True)),
+                "tracking_perched_concurrent_perch_guard_enabled",
+            )
+        )
+        # --- end Field Mode S-fixes tracking ---
     return params
 
 
@@ -733,6 +750,18 @@ def _field_mode_entity_params(settings) -> list[PipelineParam]:
                     "entity_notification_grace_seconds",
                     suffix=" s",
                 ),
+                # --- Field Mode S-fixes tracking ---
+                _param(
+                    "Covariance absorption",
+                    bool(settings.entity_absorption_covariance_gate_enabled),
+                    "entity_absorption_covariance_gate_enabled",
+                ),
+                _param(
+                    "Fused canonical row",
+                    bool(settings.entity_canonical_row_fused_position_enabled),
+                    "entity_canonical_row_fused_position_enabled",
+                ),
+                # --- end Field Mode S-fixes tracking ---
             ]
         )
     return params

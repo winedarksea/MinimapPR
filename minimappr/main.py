@@ -3188,6 +3188,20 @@ async def get_config(request: Request) -> dict:
         "entity_maintenance_interval_seconds": settings.entity_maintenance_interval_seconds,
         "entity_max_tracked_entities": settings.entity_max_tracked_entities,
         # --- end Field Mode W3-entity ---
+        # --- Field Mode S-fixes tracking ---
+        "tracking_species_association_gate_enabled": settings.tracking_species_association_gate_enabled,
+        "tracking_species_association_confident_probability": settings.tracking_species_association_confident_probability,
+        "tracking_species_association_detection_claim_probability": settings.tracking_species_association_detection_claim_probability,
+        "tracking_perched_concurrent_perch_guard_enabled": settings.tracking_perched_concurrent_perch_guard_enabled,
+        "tracking_perched_concurrent_activity_seconds": settings.tracking_perched_concurrent_activity_seconds,
+        "entity_absorption_min_species_belief": settings.entity_absorption_min_species_belief,
+        "entity_absorption_covariance_gate_enabled": settings.entity_absorption_covariance_gate_enabled,
+        "entity_absorption_chi2_gate": settings.entity_absorption_chi2_gate,
+        "entity_absorption_min_fix_distance_m": settings.entity_absorption_min_fix_distance_m,
+        "entity_concurrent_fix_window_seconds": settings.entity_concurrent_fix_window_seconds,
+        "entity_bearing_evidence_absorption_enabled": settings.entity_bearing_evidence_absorption_enabled,
+        "entity_canonical_row_fused_position_enabled": settings.entity_canonical_row_fused_position_enabled,
+        # --- end Field Mode S-fixes tracking ---
         "localization_node_bearing_strength": settings.localization_node_bearing_strength,
         "multi_node_bearing_window_seconds": settings.multi_node_bearing_window_seconds,
         "multi_node_bearing_min_separation_deg": settings.multi_node_bearing_min_separation_deg,

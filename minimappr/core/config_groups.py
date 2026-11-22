@@ -281,6 +281,13 @@ CONFIG_STAGE_GROUPS: tuple[tuple[str, str, PipelineStageKind | None, tuple[str, 
             "birdnet_two_threshold_enabled",
             "birdnet_localize_to_track_min_confidence",
             # --- end Field Mode W2-tracker ---
+            # --- Field Mode S-fixes tracking ---
+            "tracking_species_association_gate_enabled",
+            "tracking_species_association_confident_probability",
+            "tracking_species_association_detection_claim_probability",
+            "tracking_perched_concurrent_perch_guard_enabled",
+            "tracking_perched_concurrent_activity_seconds",
+            # --- end Field Mode S-fixes tracking ---
             # --- Field Mode W3-birdnet-cutover ---
             "birdnet_v3_trigger_min_confidence",
             "birdnet_v3_localize_to_track_min_confidence",
@@ -329,6 +336,15 @@ CONFIG_STAGE_GROUPS: tuple[tuple[str, str, PipelineStageKind | None, tuple[str, 
             "entity_notification_grace_seconds",
             "entity_maintenance_interval_seconds",
             "entity_max_tracked_entities",
+            # --- Field Mode S-fixes tracking ---
+            "entity_absorption_min_species_belief",
+            "entity_absorption_covariance_gate_enabled",
+            "entity_absorption_chi2_gate",
+            "entity_absorption_min_fix_distance_m",
+            "entity_concurrent_fix_window_seconds",
+            "entity_bearing_evidence_absorption_enabled",
+            "entity_canonical_row_fused_position_enabled",
+            # --- end Field Mode S-fixes tracking ---
         ),
     ),
     # --- end Field Mode W3-entity ---

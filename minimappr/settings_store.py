@@ -245,6 +245,20 @@ CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     "entity_maintenance_interval_seconds": float,
     "entity_max_tracked_entities": int,
     # --- end Field Mode W3-entity ---
+    # --- Field Mode S-fixes tracking --- restart-required (TrackManager / entity coordinator).
+    "tracking_species_association_gate_enabled": bool,
+    "tracking_species_association_confident_probability": float,
+    "tracking_species_association_detection_claim_probability": float,
+    "tracking_perched_concurrent_perch_guard_enabled": bool,
+    "tracking_perched_concurrent_activity_seconds": float,
+    "entity_absorption_min_species_belief": float,
+    "entity_absorption_covariance_gate_enabled": bool,
+    "entity_absorption_chi2_gate": float,
+    "entity_absorption_min_fix_distance_m": float,
+    "entity_concurrent_fix_window_seconds": float,
+    "entity_bearing_evidence_absorption_enabled": bool,
+    "entity_canonical_row_fused_position_enabled": bool,
+    # --- end Field Mode S-fixes tracking ---
     # DOA/TDOA solve blend + cross-node bearing-fusion "greediness" knobs (see
     # core/cartesian_tdoa.py, core/multi_node_bearing_fusion.py).
     "localization_node_bearing_strength": float,

@@ -44,6 +44,27 @@ class EntityReportingConfig:
     notification_grace_seconds: float
     maintenance_interval_seconds: float
     max_tracked_entities: int
+    # --- Field Mode S-fixes tracking ---
+    # A label absorbs into an entity only when it is the entity's top species or
+    # its belief is at least this (prior-level secondary scores are not "believed").
+    absorption_min_species_belief: float = 0.3
+    # A fix absorbs into a spatial entity when its horizontal Mahalanobis distance
+    # (fix + entity covariance) is within the chi-square gate (2 dof; 9.21 = 99 %),
+    # or it lies within the min distance (jitter floor for overconfident covariances).
+    # Without a fix covariance the fixed ``absorption_max_fix_distance_m`` applies.
+    absorption_covariance_gate_enabled: bool = True
+    absorption_chi2_gate: float = 9.21
+    absorption_min_fix_distance_m: float = 3.0
+    # Two fixes of one species this close in time and inconsistent beyond their
+    # covariance are two birds (one bird cannot sing from both perches).
+    concurrent_fix_window_seconds: float = 2.0
+    # A positioned fix whose own horizontal uncertainty exceeds the pinpoint limit
+    # (or a bearing-projected range) is bearing evidence: it absorbs into a
+    # better-located entity without moving it or rewriting its row.
+    bearing_evidence_absorption_enabled: bool = True
+    # The canonical row carries the entity's fused (tracked) position, not the raw fix.
+    canonical_row_fused_position_enabled: bool = True
+    # --- end Field Mode S-fixes tracking ---
 
     def applies_to(self, label_category: str | None) -> bool:
         return self.enabled and (label_category or "").strip().lower() in self.label_categories
@@ -69,11 +90,19 @@ def entity_reporting_setting_errors(values) -> list[str]:
         "entity_bearing_max_half_width_deg",
         "entity_uncertainty_sigma_multiplier",
         "entity_maintenance_interval_seconds",
+        "entity_absorption_chi2_gate",  # Field Mode S-fixes tracking
     ):
         if float(getattr(values, key)) <= 0.0:
             errors.append(f"{key}: must be > 0")
     if float(values.entity_notification_grace_seconds) < 0.0:
         errors.append("entity_notification_grace_seconds: must be >= 0")
+    # --- Field Mode S-fixes tracking ---
+    for key in ("entity_absorption_min_fix_distance_m", "entity_concurrent_fix_window_seconds"):
+        if float(getattr(values, key)) < 0.0:
+            errors.append(f"{key}: must be >= 0")
+    if not 0.0 <= float(values.entity_absorption_min_species_belief) <= 1.0:
+        errors.append("entity_absorption_min_species_belief: must be in [0, 1]")
+    # --- end Field Mode S-fixes tracking ---
     if int(values.entity_max_tracked_entities) < 1:
         errors.append("entity_max_tracked_entities: must be >= 1")
     if float(values.entity_bearing_min_half_width_deg) > float(values.entity_bearing_max_half_width_deg):
@@ -103,4 +132,13 @@ def entity_reporting_config_from_settings(settings) -> EntityReportingConfig:
         notification_grace_seconds=float(settings.entity_notification_grace_seconds),
         maintenance_interval_seconds=float(settings.entity_maintenance_interval_seconds),
         max_tracked_entities=int(settings.entity_max_tracked_entities),
+        # --- Field Mode S-fixes tracking ---
+        absorption_min_species_belief=float(settings.entity_absorption_min_species_belief),
+        absorption_covariance_gate_enabled=bool(settings.entity_absorption_covariance_gate_enabled),
+        absorption_chi2_gate=float(settings.entity_absorption_chi2_gate),
+        absorption_min_fix_distance_m=float(settings.entity_absorption_min_fix_distance_m),
+        concurrent_fix_window_seconds=float(settings.entity_concurrent_fix_window_seconds),
+        bearing_evidence_absorption_enabled=bool(settings.entity_bearing_evidence_absorption_enabled),
+        canonical_row_fused_position_enabled=bool(settings.entity_canonical_row_fused_position_enabled),
+        # --- end Field Mode S-fixes tracking ---
     )

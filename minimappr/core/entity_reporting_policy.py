@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from minimappr.core.bird_entity_absorption_geometry import should_absorb_as_bearing_evidence
 from minimappr.core.bird_entity_model import Vec3
 from minimappr.core.bird_entity_registry import BirdEntityChange, BirdEntityRegistry
 from minimappr.core.reporting_fusion import ReportingDecision, ReportingFusionPolicy
@@ -44,6 +45,7 @@ class EntityReportingPolicy:
         self._absorption_window_ns = int(registry.config.absorption_window_seconds * NANOSECONDS_PER_SECOND)
         self.absorbed_unlocalized_count = 0
         self.upgraded_existing_count = 0
+        self.absorbed_bearing_evidence_count = 0
 
     async def decide(
         self,
@@ -57,6 +59,8 @@ class EntityReportingPolicy:
         branch_details: dict[str, Any],
         localization_position_m: Vec3 | None,
         below_display_threshold: bool,
+        localization_position_covariance_m2: list[list[float]] | None = None,
+        localization_range_projection_mode: str | None = None,
     ) -> tuple[ReportingDecision, BirdEntityChange | None]:
         window_start_ns = int(event_time_ns)
         window_end_ns = window_start_ns + self._absorption_window_ns
@@ -78,9 +82,17 @@ class EntityReportingPolicy:
             reporting_node_id=source_node_id,
             reporting_node_position_m=reporting_node_position_m,
             detection_position_m=localization_position_m if positioned else None,
+            detection_covariance_m2=localization_position_covariance_m2 if positioned else None,
         )
         if entity is None:
             return insert, None
+        # Field Mode S-fixes tracking: a fix too uncertain to pinpoint anything
+        # (e.g. a far bird's unobservable range) joins a better-located entity as
+        # bearing evidence: absorbed like an unpositioned bout, so it neither
+        # starts a far-off track nor rewrites the entity's row.
+        bearing_evidence = positioned and should_absorb_as_bearing_evidence(
+            entity, localization_position_covariance_m2, localization_range_projection_mode, self._registry.config
+        )
         insert.entity_id = entity.entity_id
         existing = None
         if entity.canonical_detection_id:
@@ -95,7 +107,8 @@ class EntityReportingPolicy:
         )
         existing_window_start_ns = existing.get("report_window_start_ns") or window_start_ns
         existing_window_end_ns = existing.get("report_window_end_ns") or window_end_ns
-        if not positioned:
+        if not positioned or bearing_evidence:
+            self.absorbed_bearing_evidence_count += int(bearing_evidence)
             change = self._registry.absorb_unlocalized(
                 entity.entity_id,
                 event_time_ns=event_time_ns,

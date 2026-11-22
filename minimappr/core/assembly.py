@@ -20,6 +20,7 @@ import numpy as np
 from minimappr.classifiers.birdnet_threshold_set import birdnet_model_version_for_classification_features
 from minimappr.core.amplitude_range import received_level_db_from_rms
 from minimappr.core.assembly_track_resolution import resolve_detection_track
+from minimappr.core.entity_canonical_row_position import persisted_row_position
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.node_registry import NodeRegistry
 from minimappr.audio_processing.chain import NodePreprocessorFactory
@@ -273,6 +274,8 @@ class DetectionAssembler:
         audio_quality: dict[str, Any] | None = None,
         existing_detection: dict[str, Any] | None = None,
         persist_mode: str = "insert",
+        # Field Mode S-fixes tracking: entity rows carry the track's fused position.
+        persist_fused_track_position: bool = False,
         # Tracker
         tracker,
         # Storage batch context
@@ -359,6 +362,18 @@ class DetectionAssembler:
             track.position_geo = self._coordinate_frame.local_to_geo(track.position_m)
         if track_resolution.partially_bound:
             feature_summary["partial_constraint_bound"] = True
+        row_position = persisted_row_position(
+            use_fused_track_position=persist_fused_track_position and not suppressed_by_zone,
+            track=track,
+            raw_position_m=localization_position_m,
+            raw_covariance_m2=localization_position_covariance_m2,
+        )
+        if row_position.raw_fix_features:
+            feature_summary.update(row_position.raw_fix_features)
+            detection_geo = self._coordinate_frame.local_to_geo(row_position.position_m)
+            fused_geo_uncertainty = self._coordinate_frame.local_covariance_to_geo_uncertainty(row_position.covariance_m2)
+            if fused_geo_uncertainty is not None:
+                feature_summary["position_geo_uncertainty"] = fused_geo_uncertainty
 
         # -- observation ID resolution ----------------------------------------
         latest_observation_ids = await self._registry.latest_observation_ids(selected_sensor_ids)
@@ -406,11 +421,11 @@ class DetectionAssembler:
             report_window_end_ns=report_window_end_ns,
             reporting_modality=reporting_modality,
             spatial_display_mode=spatial_display_mode,
-            position_m=localization_position_m,
+            position_m=row_position.position_m,
             position_geo=detection_geo,
             position_covariance_m2=(
-                localization_position_covariance_m2
-                if localization_position_covariance_m2 is not None
+                row_position.covariance_m2
+                if row_position.covariance_m2 is not None
                 else (track.position_covariance_m2 if track is not None else None)
             ),
             confidence=localization_confidence,
