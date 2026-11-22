@@ -131,11 +131,28 @@ impl ArrivalTimeLocalizer {
             .sum()
     }
 
+    /// Principal horizontal axis of the nodes (radians). The polar grid is
+    /// laid out from it so the seed, and with it the LM basin, does not
+    /// depend on how the layout happens to be oriented in the world
+    /// (W4-sim-gates invariance gate: an east-aligned grid sent rotated
+    /// twins of one scene into different basins, metres apart).
+    fn principal_axis_rad(arrivals: &[NodeArrival], centroid: [f64; 3]) -> f64 {
+        let (mut xx, mut xy, mut yy) = (0.0, 0.0, 0.0);
+        for arrival in arrivals {
+            let (dx, dy) = (arrival.position_m[0] - centroid[0], arrival.position_m[1] - centroid[1]);
+            xx += dx * dx;
+            xy += dx * dy;
+            yy += dy * dy;
+        }
+        0.5 * (2.0 * xy).atan2(xx - yy)
+    }
+
     fn grid_seed(
         &self,
         observations: &[PairTdoaObservation],
         centroid: [f64; 3],
         ground_z: f64,
+        azimuth_origin_rad: f64,
     ) -> [f64; 3] {
         let grid = &self.grid;
         let ring_ratio = (grid.maximum_range_m / grid.minimum_range_m)
@@ -151,7 +168,7 @@ impl ArrivalTimeLocalizer {
             let mut range = grid.minimum_range_m;
             for _ring in 0..grid.range_ring_count {
                 for step in 0..grid.azimuth_step_count {
-                    let azimuth = std::f64::consts::TAU * step as f64 / grid.azimuth_step_count as f64;
+                    let azimuth = azimuth_origin_rad + std::f64::consts::TAU * step as f64 / grid.azimuth_step_count as f64;
                     let candidate = [
                         centroid[0] + range * azimuth.cos(),
                         centroid[1] + range * azimuth.sin(),
@@ -175,7 +192,7 @@ impl ArrivalTimeLocalizer {
         let ground_z = centroid[2] - self.grid.assumed_node_height_above_ground_m;
         let observations = self.pair_observations(&chosen);
         let reference = observations.first().map_or(0, |observation| observation.sensor_a_node);
-        let seed_position = self.grid_seed(&observations, centroid, ground_z);
+        let seed_position = self.grid_seed(&observations, centroid, ground_z, Self::principal_axis_rad(&chosen, centroid));
         let [band_low, band_high] = self.grid.source_height_band_above_ground_m;
         let seed = LmSeed {
             initial_position_m: seed_position,

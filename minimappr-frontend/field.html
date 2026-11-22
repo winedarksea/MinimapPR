@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f1418" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="MMP Field" />
+  <title>MinimapPR Field</title>
+  <!-- Field Mode PWA target (W4-pwa): trunk build --config Trunk.field.toml -->
+  <link rel="manifest" href="/field.webmanifest" />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="apple-touch-icon" href="/favicon.svg" />
+
+  <link data-trunk rel="css" href="styles/tokens.css" />
+  <link data-trunk rel="css" href="field/field.css" />
+  <link data-trunk rel="copy-file" href="favicon.svg" />
+  <link data-trunk rel="copy-file" href="field/field.webmanifest" />
+  <link data-trunk rel="copy-file" href="field/field-sw.js" />
+  <link data-trunk rel="copy-file" href="field/field-mic-worklet.js" />
+  <link data-trunk rel="copy-file" href="field/field-capture-interop.js" />
+  <link data-trunk rel="copy-file" href="field/field-birdnet-interop.js" />
+  <!-- onnxruntime-web 1.31.1 (npm devDependency, `npm ci` first): WASM EP only. -->
+  <link data-trunk rel="copy-file" href="node_modules/onnxruntime-web/dist/ort.wasm.min.js" />
+  <link data-trunk rel="copy-file" href="node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.mjs" />
+  <link data-trunk rel="copy-file" href="node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.wasm" />
+  <link data-trunk rel="rust" data-bin="minimappr-frontend" data-cargo-features="field-pwa" data-cargo-no-default-features data-wasm-opt="s" />
+</head>
+<body>
+  <script src="/ort.wasm.min.js"></script>
+  <script src="/field-capture-interop.js"></script>
+  <script src="/field-birdnet-interop.js"></script>
+</body>
+</html>

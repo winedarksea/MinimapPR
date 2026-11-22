@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="field_app_name">MinimapPR Field</string>
+    <string name="field_capture_notification_channel_name">Field capture</string>
+    <string name="field_capture_notification_channel_description">Shown while Field Mode is listening</string>
+    <string name="field_capture_notification_title">Field Mode is listening</string>
+    <string name="field_capture_notification_text">Audio stays on this phone until a clip is requested</string>
+    <string name="field_capture_notification_stop_action">Stop</string>
+</resources>

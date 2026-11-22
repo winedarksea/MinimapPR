@@ -3,9 +3,12 @@
   "private": true,
   "scripts": {
     "test": "node --test tests/test-audio-interop.js tests/test-map-interop.js",
-    "test:smoke": "playwright test tests/smoke-cop.spec.js --reporter=line"
+    "test:smoke": "playwright test tests/smoke-cop.spec.js --reporter=line",
+    "build:field": "trunk build --release --config Trunk.field.toml",
+    "test:field": "playwright test tests/field-pwa.spec.js tests/field-pwa-webkit.spec.js --reporter=line --workers=1"
   },
   "devDependencies": {
-    "@playwright/test": "^1.61.1"
+    "@playwright/test": "^1.61.1",
+    "onnxruntime-web": "1.31.1"
   }
 }

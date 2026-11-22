@@ -1,0 +1,22 @@
+[package]
+name = "minimappr-ffi"
+version = "0.1.0"
+edition.workspace = true
+description = "Thin UniFFI surface over minimappr-core for the Field Mode KMP app (field-app/)."
+
+# Kept deliberately small: Stage-1 detector, clip codec, protocol frame
+# encode/decode and the sans-IO mesh node state machine. Everything else stays
+# Rust-internal so the Kotlin surface does not churn with core refactors.
+#
+# cdylib: Android (JNA via Gobley) and the host JVM used by unit tests.
+# staticlib: Kotlin/Native (iOS) links it through cinterop.
+# lib: lets `cargo test` exercise the wrappers on the host.
+[lib]
+crate-type = ["lib", "cdylib", "staticlib"]
+name = "minimappr_ffi"
+
+[dependencies]
+minimappr-core = { workspace = true }
+# Pinned exactly: Gobley 0.3.7's bindgen is built against uniffi 0.29.4 and
+# the scaffolding contract version must match the generated Kotlin.
+uniffi = "=0.29.4"

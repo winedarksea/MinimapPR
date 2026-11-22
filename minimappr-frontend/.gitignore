@@ -1,0 +1,4 @@
+# Field PWA build output and npm deps (W4-pwa)
+/dist-field/
+/node_modules/
+/test-results/

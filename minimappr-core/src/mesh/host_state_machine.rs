@@ -16,6 +16,7 @@ use super::call_pipeline::{CallContext, CallPipeline, ClipSetLocalizer, Localize
 use super::classification_rota::clumps_from_layout;
 use super::config::{MeshConfig, DEVICE_SAMPLE_RATE_HZ};
 use super::event_log::SessionEventLog;
+use super::fix_contour::horizontal_covariance_contour;
 use super::host_membership::SessionMembership;
 use super::host_restoration::restore_from_mirror;
 use super::host_sync_pipeline::{HostSyncPipeline, SyncRecord};
@@ -23,9 +24,6 @@ use super::host_transport_policy::{CellLinkQuality, HostTransportPolicy, Session
 use super::{MeshMilliseconds, MessageRecipient, OutboundMessage};
 use crate::protocol::mesh_messages::EventLogEntry;
 
-/// Points on the 2σ likelihood ellipse sent with a pinpointed entity.
-const CONTOUR_POINT_COUNT: usize = 12;
-const CONTOUR_SIGMA_MULTIPLIER: f64 = 2.0;
 /// A successor's call and bird entity ids start at `term << 32`.
 const CALL_ID_TERM_SHIFT_BITS: u32 = 32;
 /// A successor's round, readiness-query and clip-request ids (`u32` on the
@@ -279,21 +277,7 @@ impl FieldHostStateMachine {
     fn entity_update_for(&mut self, record: &LocalizedCallRecord) -> BirdEntityUpdate {
         self.next_bird_entity_id += 1;
         let contour = record.fix.as_ref().map_or_else(Vec::new, |fix| {
-            let [[a, b, _], [_, d, _], _] = fix.covariance_m2;
-            let half_trace = 0.5 * (a + d);
-            let spread = (0.25 * (a - d).powi(2) + b * b).sqrt();
-            let (major, minor) = ((half_trace + spread).max(0.0).sqrt(), (half_trace - spread).max(0.0).sqrt());
-            let angle = 0.5 * (2.0 * b).atan2(a - d);
-            (0..CONTOUR_POINT_COUNT)
-                .map(|k| {
-                    let t = std::f64::consts::TAU * k as f64 / CONTOUR_POINT_COUNT as f64;
-                    let (u, v) = (CONTOUR_SIGMA_MULTIPLIER * major * t.cos(), CONTOUR_SIGMA_MULTIPLIER * minor * t.sin());
-                    [
-                        (fix.position_m[0] + u * angle.cos() - v * angle.sin()) as f32,
-                        (fix.position_m[1] + u * angle.sin() + v * angle.cos()) as f32,
-                    ]
-                })
-                .collect()
+            horizontal_covariance_contour(fix.position_m, &fix.covariance_m2, &self.config.entity_contour)
         });
         BirdEntityUpdate {
             bird_entity_id: self.next_bird_entity_id,

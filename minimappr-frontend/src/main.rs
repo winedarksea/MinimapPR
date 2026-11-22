@@ -1,6 +1,12 @@
+// The Field PWA build mounts `field::FieldApp` instead of the COP `App`, so
+// most COP modules are unreferenced there; that is expected, not dead code.
+#![cfg_attr(feature = "field-pwa", allow(dead_code, unused_imports))]
+
 mod api;
 mod audio;
 mod components;
+#[cfg(feature = "field-pwa")]
+mod field;
 mod inspector;
 mod layers;
 mod map;
@@ -23,6 +29,9 @@ use state::AppState;
 fn main() {
     console_error_panic_hook::set_once();
     console_log::init_with_level(log::Level::Debug).ok();
+    #[cfg(feature = "field-pwa")]
+    mount_to_body(field::FieldApp);
+    #[cfg(not(feature = "field-pwa"))]
     mount_to_body(App);
 }
 
