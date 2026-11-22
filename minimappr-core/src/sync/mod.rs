@@ -19,4 +19,5 @@ pub mod clock_filter;
 pub mod clock_graph;
 pub mod first_arrival;
 pub mod matched_filter;
+pub mod split_part_detector;
 pub mod two_way_ranging;

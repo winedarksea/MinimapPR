@@ -66,7 +66,9 @@ pub struct TwoWayRangingResult {
     pub distance_m: f64,
     /// local_B − local_A at the same instant, around the exchange midpoint.
     pub clock_offset_b_minus_a_s: f64,
-    /// A-clock time the offset refers to (midpoint of the two emissions).
+    /// A-clock time the offset refers to: the emission midpoint plus half a
+    /// flight time (the four arrivals' centre). Under a rate offset Δk the
+    /// offset at the bare emission midpoint differs by Δk · d / 2c.
     pub offset_reference_time_on_a_s: f64,
     /// Rate ratio implied by the double-sided exchange, when available.
     pub measured_b_ticks_per_a_tick: Option<f64>,
@@ -165,17 +167,89 @@ pub fn range_pair(
         + (self_paths.a_m - self_paths.b_m) / (2.0 * speed_of_sound_mps);
     let a_emits_on_a = times.a_hears_a_s - self_paths.a_m / speed_of_sound_mps;
     let b_emits_on_a = times.a_hears_b_s - distance_m / speed_of_sound_mps;
+    let half_flight_s = 0.5 * distance_m / speed_of_sound_mps;
     Ok(TwoWayRangingResult {
         distance_m,
         clock_offset_b_minus_a_s,
-        offset_reference_time_on_a_s: 0.5 * (a_emits_on_a + b_emits_on_a),
+        offset_reference_time_on_a_s: 0.5 * (a_emits_on_a + b_emits_on_a) + half_flight_s,
         measured_b_ticks_per_a_tick: measured_ratio,
     })
+}
+
+fn vector_distance(a: [f64; 3], b: [f64; 3]) -> f64 {
+    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+}
+
+/// Remove the speaker–mic geometry bias from one exchange.
+///
+/// The exchange measures the flights speaker_A → mic_B and speaker_B →
+/// mic_A. They are equal only if each speaker sits on its mic: with
+/// speaker offsets v_A, v_B the clock offset is biased by
+/// (L_AB − L_BA)/(2c) ≈ −(v_A + v_B)·û/(2c) — up to d_ii/c (≈ 440 µs for an
+/// earpiece 15 cm from the mic, ≈ 30–60 µs for a bottom speaker) — and the
+/// distance is the mean flight, not the mic-to-mic distance. Given the
+/// layout's mic positions and each phone's speaker offset in the world
+/// frame (per-model speaker vector rotated by the phone's attitude), this
+/// returns the result referred to the mics. Exact, not linearised.
+pub fn correct_for_speaker_mic_offsets(
+    result: &TwoWayRangingResult,
+    mic_a_m: [f64; 3],
+    mic_b_m: [f64; 3],
+    speaker_offset_a_world_m: [f64; 3],
+    speaker_offset_b_world_m: [f64; 3],
+    speed_of_sound_mps: f64,
+) -> TwoWayRangingResult {
+    let speaker_a = [
+        mic_a_m[0] + speaker_offset_a_world_m[0],
+        mic_a_m[1] + speaker_offset_a_world_m[1],
+        mic_a_m[2] + speaker_offset_a_world_m[2],
+    ];
+    let speaker_b = [
+        mic_b_m[0] + speaker_offset_b_world_m[0],
+        mic_b_m[1] + speaker_offset_b_world_m[1],
+        mic_b_m[2] + speaker_offset_b_world_m[2],
+    ];
+    let flight_a_to_b = vector_distance(speaker_a, mic_b_m);
+    let flight_b_to_a = vector_distance(speaker_b, mic_a_m);
+    let mic_to_mic = vector_distance(mic_a_m, mic_b_m);
+    TwoWayRangingResult {
+        distance_m: result.distance_m - (0.5 * (flight_a_to_b + flight_b_to_a) - mic_to_mic),
+        clock_offset_b_minus_a_s: result.clock_offset_b_minus_a_s
+            - (flight_a_to_b - flight_b_to_a) / (2.0 * speed_of_sound_mps),
+        ..*result
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn speaker_offsets_bias_offset_and_correction_removes_it() {
+        // Both phones face north with the speaker 12 cm south of the mic;
+        // B is 10 m north of A: flights 10.12 m and 9.88 m.
+        let c = SPEED_OF_SOUND_MPS;
+        let (mic_a, mic_b) = ([0.0, 0.0, 1.0], [0.0, 10.0, 1.0]);
+        let speaker = [0.0, -0.12, 0.0];
+        let (flight_ab, flight_ba) = (10.12, 9.88);
+        let true_offset = 0.0042;
+        let self_path = 0.12;
+        let times = PairArrivalTimes {
+            a_hears_a_s: 1.0 + self_path / c,
+            a_hears_b_s: 1.3 + flight_ba / c,
+            b_hears_a_s: true_offset + 1.0 + flight_ab / c,
+            b_hears_b_s: true_offset + 1.3 + self_path / c,
+        };
+        let paths = SelfPathLengths {
+            a_m: self_path,
+            b_m: self_path,
+        };
+        let raw = range_pair(&times, paths, c, RateCompensation::None).unwrap();
+        assert!((raw.clock_offset_b_minus_a_s - true_offset - 0.24 / (2.0 * c)).abs() < 1e-9);
+        let corrected = correct_for_speaker_mic_offsets(&raw, mic_a, mic_b, speaker, speaker, c);
+        assert!((corrected.clock_offset_b_minus_a_s - true_offset).abs() < 1e-9);
+        assert!((corrected.distance_m - 10.0).abs() < 1e-9);
+    }
 
     const SPEED_OF_SOUND_MPS: f64 = 343.0;
 

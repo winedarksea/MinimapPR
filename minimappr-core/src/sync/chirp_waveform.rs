@@ -168,9 +168,13 @@ pub fn generate_segmented_sweep(
 pub enum ChirpWaveformKind {
     LinearFm,
     HyperbolicFm,
-    /// Frequency-hopped segments with per-phone hop order and sweep
-    /// directions (see `chirp_codes::SessionChirpCodebook`).
-    SessionCodedHopping,
+    /// Up-sweep then down-sweep of the whole band (a "V" chirp). Picked as
+    /// two parts whose range–Doppler couplings have opposite signs, so
+    /// their mean arrival cancels the walking-Doppler bias.
+    UpDownHyperbolic,
+    /// Up/down halves made of hopped sub-band segments with a per-phone hop
+    /// order (see `chirp_codes::SessionChirpCodebook`).
+    SessionCodedUpDown,
 }
 
 impl ChirpWaveformKind {
@@ -178,9 +182,74 @@ impl ChirpWaveformKind {
         match self {
             Self::LinearFm => "lfm",
             Self::HyperbolicFm => "hfm",
-            Self::SessionCodedHopping => "coded_hfm_hop",
+            Self::UpDownHyperbolic => "updown_hfm",
+            Self::SessionCodedUpDown => "coded_updown_hfm",
         }
     }
+}
+
+/// A slice of a waveform detected on its own (one sweep direction).
+#[derive(Clone, Debug, PartialEq)]
+pub struct WaveformPart {
+    /// Offset of this part from the waveform's first sample.
+    pub start_sample: usize,
+    pub samples: Vec<f32>,
+}
+
+/// A playable waveform plus the parts it is picked by. Single-sweep
+/// waveforms have one part covering everything.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChirpWaveform {
+    pub samples: Vec<f32>,
+    pub parts: Vec<WaveformPart>,
+}
+
+impl ChirpWaveform {
+    pub fn single_part(samples: Vec<f32>) -> Self {
+        Self {
+            parts: vec![WaveformPart {
+                start_sample: 0,
+                samples: samples.clone(),
+            }],
+            samples,
+        }
+    }
+
+    /// Concatenate parts back to back.
+    pub fn from_parts(part_samples: Vec<Vec<f32>>) -> Self {
+        let mut samples = Vec::new();
+        let mut parts = Vec::new();
+        for part in part_samples {
+            parts.push(WaveformPart {
+                start_sample: samples.len(),
+                samples: part.clone(),
+            });
+            samples.extend(part);
+        }
+        Self { samples, parts }
+    }
+}
+
+/// Up-sweep then down-sweep, each half the duration, as two parts.
+pub fn generate_up_down_chirp(
+    band: ChirpBand,
+    total_duration_s: f64,
+    law: SweepLaw,
+    sample_rate_hz: f64,
+) -> ChirpWaveform {
+    let half = |direction| {
+        generate_sweep(
+            &SweepSpecification {
+                band,
+                duration_s: 0.5 * total_duration_s,
+                law,
+                direction,
+            },
+            DEFAULT_CHIRP_TAPER_FRACTION,
+            sample_rate_hz,
+        )
+    };
+    ChirpWaveform::from_parts(vec![half(SweepDirection::Up), half(SweepDirection::Down)])
 }
 
 /// Plain (uncoded) up-sweep of the whole band.

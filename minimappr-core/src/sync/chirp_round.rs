@@ -7,6 +7,7 @@
 //! chirp), which gives every phone's rate relative to the opener from the
 //! same round — the double-sided alternative to tracked rates.
 
+use super::clock_graph::ClockOffsetConstraint;
 use super::two_way_ranging::{
     range_pair, PairArrivalTimes, RangingError, RateCompensation, SelfPathLengths,
     TwoWayRangingResult,
@@ -198,6 +199,47 @@ impl ChirpRoundObservation {
     }
 }
 
+/// Turn pairwise offsets into clock-graph constraints at one common
+/// reference time. Each pair's offset refers to its own exchange midpoint;
+/// with ±60 ppm crystals the offset moves ~60 µs across a 0.5 s spread, so
+/// each is carried to `reference_time_s` with the participants' rates
+/// (ticks per reference tick). Without rates the offsets are used as-is.
+/// Pair times are on the first phone's clock; `coarse_offsets_s[p]`
+/// (local − reference; millisecond accuracy is plenty, 1 ms × 100 ppm =
+/// 0.1 µs) moves them onto the reference clock — from the clock filters,
+/// or from a first uncorrected graph solve. Missing entries count as 0.
+/// `motion_energy[p]` is participant p's linear-acceleration energy over
+/// the round; a constraint carries the sum of its two phones'.
+pub fn clock_offset_constraints(
+    measurements: &[PairwiseRangingMeasurement],
+    reference_time_s: f64,
+    ticks_per_reference_tick: Option<&[f64]>,
+    coarse_offsets_s: &[f64],
+    motion_energy: &[f64],
+) -> Vec<ClockOffsetConstraint> {
+    measurements
+        .iter()
+        .map(|m| {
+            let (i, j) = (m.first_participant, m.second_participant);
+            let pair_time_on_reference = m.result.offset_reference_time_on_a_s
+                - coarse_offsets_s.get(i).copied().unwrap_or(0.0);
+            let drift_correction = ticks_per_reference_tick
+                .and_then(|rates| Some((rates.get(i)?, rates.get(j)?)))
+                .map_or(0.0, |(rate_i, rate_j)| {
+                    (rate_j - rate_i) * (reference_time_s - pair_time_on_reference)
+                });
+            ClockOffsetConstraint {
+                node_i: i,
+                node_j: j,
+                offset_j_minus_i_s: m.result.clock_offset_b_minus_a_s + drift_correction,
+                slot_gap_s: m.slot_gap_s,
+                motion_energy: motion_energy.get(i).copied().unwrap_or(0.0)
+                    + motion_energy.get(j).copied().unwrap_or(0.0),
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,5 +361,31 @@ mod tests {
         assert!(measurements
             .iter()
             .all(|m| !(m.first_participant == 1 && m.second_participant == 2)));
+    }
+
+    #[test]
+    fn offset_constraints_are_carried_to_the_reference_time() {
+        let round = synthetic_round(false);
+        let (measurements, _) =
+            round.pairwise_measurements(SPEED_OF_SOUND_MPS, &RoundRateCompensation::None);
+        let rates = [1.0, 1.0 + 50e-6, 1.0 - 40e-6];
+        let offsets = [0.0, 0.013, -0.007];
+        let reference_time_s = 1.25;
+        let constraints = clock_offset_constraints(
+            &measurements,
+            reference_time_s,
+            Some(&rates),
+            &offsets,
+            &[0.0, 0.5, 0.0],
+        );
+        for constraint in &constraints {
+            let local = |p: usize| offsets[p] + rates[p] * reference_time_s;
+            let truth = local(constraint.node_j) - local(constraint.node_i);
+            assert!(
+                (constraint.offset_j_minus_i_s - truth).abs() < 1e-7,
+                "{constraint:?}"
+            );
+        }
+        assert_eq!(constraints[0].motion_energy, 0.5);
     }
 }
