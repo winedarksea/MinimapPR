@@ -19,3 +19,5 @@ pub mod protocol;
 #[cfg(feature = "session-crypto")]
 pub mod session_crypto;
 pub mod stage1;
+// W2-core-solver
+pub mod tdoa_solver;

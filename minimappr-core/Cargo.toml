@@ -49,3 +49,16 @@ flac-codec = ["dep:flacenc", "dep:claxon"]
 session-crypto = ["dep:chacha20poly1305", "dep:spake2", "dep:hkdf", "dep:hmac", "dep:sha2", "dep:rand_core"]
 # Emit SensorStreamBuffer re-anchor warnings through `tracing`.
 tracing = ["dep:tracing"]
+
+# --- W2-core-solver: Cartesian TDOA / joint TDOA+DOA solver --------------
+# nalgebra for small dense linear algebra (SVD, symmetric eigen); the
+# MINPACK-derived `levenberg-marquardt` crate drives the nonlinear refine.
+# Both are pure Rust and build for wasm32 / aarch64-linux-android.
+[dependencies.nalgebra]
+version = "0.33"
+default-features = false
+features = ["std"]
+
+[dependencies.levenberg-marquardt]
+version = "0.14"
+default-features = false
