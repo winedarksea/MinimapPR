@@ -75,6 +75,12 @@ pub struct HostSyncPipeline {
 }
 
 impl HostSyncPipeline {
+    /// A successor host numbers rounds from here, so a late arrival report
+    /// for the dead host's round never matches one of its own.
+    pub fn reserve_round_ids_from(&mut self, first_round_id: u32) {
+        self.next_round_id = self.next_round_id.max(first_round_id);
+    }
+
     pub fn round_in_flight(&self) -> bool {
         self.in_flight.is_some()
     }

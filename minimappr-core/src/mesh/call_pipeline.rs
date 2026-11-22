@@ -61,6 +61,13 @@ fn walked_at_call(payload: &ClipPayload, threshold: f32) -> bool {
 }
 
 impl CallPipeline {
+    /// A successor host numbers readiness queries and clip requests from
+    /// here, so a late answer or clip addressed to the dead host's id space
+    /// never matches one of its own requests.
+    pub fn reserve_message_ids_from(&mut self, first_message_id: u32) {
+        self.next_message_id = self.next_message_id.max(first_message_id);
+    }
+
     fn allocate_message_id(&mut self) -> u32 {
         self.next_message_id = self.next_message_id.wrapping_add(1);
         self.next_message_id

@@ -43,6 +43,8 @@ pub mod local_tangent_plane;
 pub mod node_host_link;
 pub mod node_message_handling;
 pub mod node_state_machine;
+#[cfg(test)]
+mod node_split_brain_tests;
 pub mod readiness_selection;
 pub mod srp_seed_refiner;
 

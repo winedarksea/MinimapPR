@@ -26,8 +26,12 @@ use crate::protocol::mesh_messages::EventLogEntry;
 /// Points on the 2σ likelihood ellipse sent with a pinpointed entity.
 const CONTOUR_POINT_COUNT: usize = 12;
 const CONTOUR_SIGMA_MULTIPLIER: f64 = 2.0;
-/// A successor's call ids start at `term << 32`.
+/// A successor's call and bird entity ids start at `term << 32`.
 const CALL_ID_TERM_SHIFT_BITS: u32 = 32;
+/// A successor's round, readiness-query and clip-request ids (`u32` on the
+/// wire) start at `term << 20`: room for 2^20 per term, and the high bits
+/// keep terms apart for 4096 terms before wrapping.
+const MESSAGE_ID_TERM_SHIFT_BITS: u32 = 20;
 
 /// What a node knows when it becomes host.
 #[derive(Debug, Clone, Copy)]
@@ -141,9 +145,14 @@ impl FieldHostStateMachine {
         let mut host = Self::with_parts(host_node_id, host_term.max(restored.highest_host_term + 1), config, transport);
         host.event_log = restored.event_log;
         host.membership = restored.membership;
-        host.next_bird_entity_id = restored.highest_bird_entity_id;
-        // Call ids stay unique across terms (records outlive their host).
-        host.calls.matcher.reserve_call_ids_through(u64::from(host.host_term) << CALL_ID_TERM_SHIFT_BITS);
+        // Call and entity ids stay unique across terms (records outlive their
+        // host, and the dead host may have published entities no mirror has).
+        let term_id_floor = u64::from(host.host_term) << CALL_ID_TERM_SHIFT_BITS;
+        host.next_bird_entity_id = restored.highest_bird_entity_id.max(term_id_floor);
+        host.calls.matcher.reserve_call_ids_through(term_id_floor);
+        let term_message_id_floor = host.host_term.wrapping_shl(MESSAGE_ID_TERM_SHIFT_BITS);
+        host.sync.reserve_round_ids_from(term_message_id_floor);
+        host.calls.reserve_message_ids_from(term_message_id_floor);
         for node in host.membership.members.keys().copied().collect::<Vec<_>>() {
             host.membership.note_heard(node, now_ms);
         }
