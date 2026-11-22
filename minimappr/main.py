@@ -3254,6 +3254,7 @@ async def get_config(request: Request) -> dict:
         "trigger_noise_floor_fall_seconds": settings.trigger_noise_floor_fall_seconds,
         "trigger_noise_floor_warmup_seconds": settings.trigger_noise_floor_warmup_seconds,
         "trigger_noise_floor_minimum_rms": settings.trigger_noise_floor_minimum_rms,
+        "trigger_noise_floor_fluctuation_multiplier": settings.trigger_noise_floor_fluctuation_multiplier,
         # --- end Field Mode W3-attribution ---
         "classifier_stage_timeout_seconds": settings.classifier_stage_timeout_seconds,
         "classification_stage_timeout_seconds": settings.classification_stage_timeout_seconds,

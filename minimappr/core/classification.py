@@ -348,9 +348,21 @@ class ClassificationOrchestrator:
             source=str(winner_member) if winner_member else self._classifier_backend_name,
             created_ns=event_time_ns,
         )
+        # The beamformed-only path aliases one result into all three slots; keep the
+        # aliases in step so no feature (e.g. ``beamformed_label``) still reports the
+        # unattributed label that attribution just rejected.
+        original = classified.classification
         return replace(
             classified,
             classification=classification,
+            omni_classification=(
+                classification if classified.omni_classification is original else classified.omni_classification
+            ),
+            beamformed_classification=(
+                classification
+                if classified.beamformed_classification is original
+                else classified.beamformed_classification
+            ),
             label_category=label_category,
             iff_category=self._taxonomy_provider.iff_for_category(label_category),
             label_id=label_id,
