@@ -5,21 +5,26 @@
 //!
 //! Targets ground-truth schema v2 (`docs/field_mode_progress/bundle_format_v2.md`):
 //! `species` entries, `individual_id`, and `trajectory` geometry for moving
-//! sources (waypoints on the shared ns epoch). Extra simulator keys
-//! (`position_m`, `trajectory_m`, `chirps`, …) are ignored by the loader.
+//! sources (waypoints on the shared ns epoch), plus one echo event
+//! (`is_echo_source`) per bird call × reflector at the image position seen
+//! from the array centroid. Extra simulator keys (`position_m`,
+//! `trajectory_m`, `chirps`, …) are ignored by the loader.
 
 use serde_json::{json, Value};
 
+use super::echo_geometry::{array_centroid_m, echo_images};
 use super::geo::FlatLocalFrame;
 use crate::physics::constants::NANOSECONDS_PER_SECOND;
 use crate::scenario::Scenario;
-use crate::world::{EmissionRecord, PlannedDevice, PlannedEmission, WorldPlan};
+use crate::world::{BirdCallRecord, EmissionRecord, PlannedDevice, PlannedEmission, WorldPlan};
 
 /// Ground-truth file schema (independent of the manifest's schema version).
 const GROUND_TRUTH_SCHEMA_VERSION: u32 = 2;
 
 /// Bird calls are scored; their sound source is "manual" (no reference node).
 const GROUND_TRUTH_SOURCE_KIND: &str = "manual";
+
+const MILLISECONDS_PER_SECOND: f64 = 1e3;
 
 fn true_time_ns(scenario: &Scenario, time_s: f64) -> i64 {
     scenario.site.start_time_ns + (time_s * NANOSECONDS_PER_SECOND).round() as i64
@@ -37,14 +42,69 @@ fn emission_window_s(plan: &WorldPlan, emission: &PlannedEmission) -> (f64, f64)
     )
 }
 
-fn bird_event(
+/// v2 `species` entries. The loader rejects an event whose `label` is not
+/// among its species labels, so a scenario `label` override that differs
+/// from the species name becomes the `true` entry and the species name(s)
+/// become acceptable `candidate` answers.
+pub fn species_entries(record: &BirdCallRecord) -> Vec<Value> {
+    let entry = |label: &str, status: &str| json!({"label": label, "label_category": record.label_category, "status": status});
+    if record.species.iter().any(|s| s == &record.label) {
+        return record.species.iter().map(|s| entry(s, "true")).collect();
+    }
+    std::iter::once(entry(&record.label, "true"))
+        .chain(record.species.iter().map(|s| entry(s, "candidate")))
+        .collect()
+}
+
+/// Echo events for one call: same label/species/window, apparent position.
+/// Moving sources use the mid-call position (echo gates are coarse).
+fn echo_events(
+    plan: &WorldPlan,
+    record: &BirdCallRecord,
+    window_ns: (i64, i64),
+    source_m: [f64; 3],
+    centroid_m: [f64; 3],
+) -> Vec<Value> {
+    echo_images(plan, source_m, centroid_m)
+        .into_iter()
+        .map(|image| {
+            json!({
+                "event_id": format!("{}-echo-{}", record.event_id, image.reflector_id),
+                "individual_id": format!("{}-echo-{}", record.individual_id, image.reflector_id),
+                "label": record.label,
+                "label_category": record.label_category,
+                "species": species_entries(record),
+                "source": GROUND_TRUTH_SOURCE_KIND,
+                "start_ns": window_ns.0,
+                "end_ns": window_ns.1,
+                "is_echo_source": true,
+                "echo_of_event_id": record.event_id,
+                "reflector": {
+                    "kind": image.kind,
+                    "reflector_id": image.reflector_id,
+                    "position_m": image.reflecting_point_m,
+                    "extra_delay_ms": image.extra_delay_s * MILLISECONDS_PER_SECOND,
+                    // JSON has no infinity: a zero-coefficient reflector is silent.
+                    "attenuation_db": image.attenuation_db.is_finite().then_some(image.attenuation_db),
+                },
+                "geometry": {"type": "static", "position_m": image.image_position_m},
+                "notes": format!("minimappr-sim echo via {}", image.reflector_id),
+                "origin": "echo",
+            })
+        })
+        .collect()
+}
+
+/// The call's event followed by its echo events (empty for non-bird emissions).
+fn bird_events(
     plan: &WorldPlan,
     scenario: &Scenario,
     frame: &FlatLocalFrame,
     emission: &PlannedEmission,
-) -> Option<Value> {
+    centroid_m: [f64; 3],
+) -> Vec<Value> {
     let EmissionRecord::BirdCall(record) = &emission.record else {
-        return None;
+        return Vec::new();
     };
     let (start_s, end_s) = emission_window_s(plan, emission);
     let position = emission.trajectory.midpoint_position(start_s, end_s);
@@ -62,20 +122,20 @@ fn bird_event(
     } else {
         json!({"type": "static", "position_m": position, "position_geo": geo_json(frame, position)})
     };
-    let species: Vec<Value> = record
-        .species
-        .iter()
-        .map(|label| json!({"label": label, "label_category": record.label_category, "status": "true"}))
-        .collect();
-    Some(json!({
+    let species = species_entries(record);
+    let window_ns = (
+        true_time_ns(scenario, start_s),
+        true_time_ns(scenario, end_s),
+    );
+    let mut events = vec![json!({
         // --- ground-truth schema v2 keys ---
         "event_id": record.event_id,
         "label": record.label,
         "label_category": record.label_category,
         "source": GROUND_TRUTH_SOURCE_KIND,
         "geometry": geometry,
-        "start_ns": true_time_ns(scenario, start_s),
-        "end_ns": true_time_ns(scenario, end_s),
+        "start_ns": window_ns.0,
+        "end_ns": window_ns.1,
         "notes": format!("minimappr-sim {} ({})", record.generator_kind, record.origin),
         "individual_id": record.individual_id,
         "species": species,
@@ -86,7 +146,9 @@ fn bird_event(
         "level_db_spl_at_1m": record.level_db_spl_at_1m,
         "generator": record.generator_kind,
         "origin": record.origin,
-    }))
+    })];
+    events.extend(echo_events(plan, record, window_ns, position, centroid_m));
+    events
 }
 
 fn device_truth(device: &PlannedDevice) -> Value {
@@ -150,10 +212,11 @@ fn non_bird_emissions(plan: &WorldPlan, scenario: &Scenario) -> (Vec<Value>, Vec
 }
 
 pub fn build_ground_truth(plan: &WorldPlan, scenario: &Scenario, frame: &FlatLocalFrame) -> Value {
+    let centroid_m = array_centroid_m(plan);
     let events: Vec<Value> = plan
         .emissions
         .iter()
-        .filter_map(|e| bird_event(plan, scenario, frame, e))
+        .flat_map(|e| bird_events(plan, scenario, frame, e, centroid_m))
         .collect();
     let (chirps, distractors) = non_bird_emissions(plan, scenario);
     let mut reflectors: Vec<Value> = plan

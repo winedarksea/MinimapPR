@@ -145,10 +145,13 @@ pub fn render_world(plan: &WorldPlan) -> Vec<RenderedDevice> {
         control_point_spacing_samples: plan.render.control_point_spacing_samples,
         minimum_path_length_m: plan.render.minimum_path_length_m,
     };
+    // Propagation evaluates source positions up to one kernel half-width
+    // outside the emission, and each evaluation reads another half-width of
+    // taps beyond that: the padding must cover both or edge taps read as 0.
     let guard = plan
         .render
         .absorption_guard_samples
-        .max(kernel.half_width_taps() + 2);
+        .max(2 * kernel.half_width_taps() + 2);
     let prepared: Vec<PreparedEmission> = plan
         .emissions
         .par_iter()

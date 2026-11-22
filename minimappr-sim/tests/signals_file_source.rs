@@ -44,8 +44,12 @@ fn stereo_44k1_int_wav_loads_as_resampled_unit_rms_mono() {
     let expected_length = (FILE_DURATION_S * SAMPLE_RATE_HZ) as usize;
     assert!((samples.len() as i64 - expected_length as i64).abs() <= 1);
     let middle = &samples[samples.len() / 4..3 * samples.len() / 4];
-    let rms = (middle.iter().map(|s| (*s as f64).powi(2)).sum::<f64>() / middle.len() as f64).sqrt();
+    let rms =
+        (middle.iter().map(|s| (*s as f64).powi(2)).sum::<f64>() / middle.len() as f64).sqrt();
     assert!((rms - 1.0).abs() < 0.01, "unit RMS, got {rms}");
     let frequency = dominant_frequency_hz(middle, TONE_HZ, 20.0, SAMPLE_RATE_HZ);
-    assert!((frequency - TONE_HZ).abs() < 0.05, "tone preserved, got {frequency}");
+    assert!(
+        (frequency - TONE_HZ).abs() < 0.05,
+        "tone preserved, got {frequency}"
+    );
 }

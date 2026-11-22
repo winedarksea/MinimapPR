@@ -104,8 +104,8 @@ impl Trajectory {
         }
     }
 
-    /// Mean of the start/end-of-window positions — the static summary used in
-    /// ground truth (bundle v1 accepts only static geometry).
+    /// Position at the middle of the window — the static summary used for
+    /// echo images and the `position_m` simulator extra in ground truth.
     pub fn midpoint_position(&self, start_s: f64, end_s: f64) -> Vec3 {
         self.position_at(0.5 * (start_s + end_s))
     }
