@@ -1143,6 +1143,7 @@ dependencies = [
  "hmac",
  "hound",
  "levenberg-marquardt",
+ "minimappr-sim",
  "nalgebra",
  "num-complex",
  "postcard",

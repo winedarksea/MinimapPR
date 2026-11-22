@@ -36,9 +36,19 @@ criterion = { version = "0.5", features = ["html_reports"] }
 # W2-core-codec-proto tests: fixture WAV loading and a seedable CSPRNG.
 hound = "3.5"
 rand_chacha = { version = "0.3", default-features = false }
+# --- W2-core-srp: layout-SRP scenario tests render audio with the Layer 1
+# simulator. Dev-only, so the sim's rayon/zip never reach wasm/android lib
+# builds; minimappr-sim does not depend on minimappr-core (no cycle).
+minimappr-sim = { path = "../minimappr-sim" }
+# --- end W2-core-srp
 
 [[bench]]
 name = "capture_plane"
+harness = false
+
+# W2-core-srp: per-solve runtime of layout SRP (release).
+[[bench]]
+name = "layout_srp"
 harness = false
 
 [features]
