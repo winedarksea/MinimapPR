@@ -890,6 +890,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "criterion",
+ "minimappr-sim",
  "num-complex",
  "rustfft",
  "serde",
