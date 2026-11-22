@@ -1,0 +1,77 @@
+# S-fixes onset: a loud wren 2.0 m from tetra-c (Core: localize from 1 m out). The S gate saw
+# such a source placed ~52 m out along tetra-c's bearing.
+name = "sfix_loud_bird_near_node"
+seed = 20261122
+duration_s = 8.0
+sample_rate_hz = 24000
+
+[site]
+origin_lat = 45.0
+origin_lon = -93.0
+origin_alt_m = 250.0
+start_time_ns = 1763700000000000000
+
+[environment]
+temperature_c = 18.0
+humidity_fraction = 0.6
+
+[ground]
+enabled = true
+reflection_coefficient = 0.5
+
+[ambient_noise]
+level_db_spl = 30.0
+
+[[devices]]
+device_id = "tetra-a"
+kind = "sirith_tetra"
+position_m = [0.0, 0.0, 1.5]
+
+[[devices]]
+device_id = "tetra-b"
+kind = "sirith_tetra"
+position_m = [20.0, 0.0, 1.5]
+
+[[devices]]
+device_id = "tetra-c"
+kind = "sirith_tetra"
+position_m = [10.0, 18.0, 1.5]
+
+[[sources]]
+individual_id = "wren-1"
+species = "House Wren"
+position_m = [11.5, 19.3, 2.2]
+
+[[sources.calls]]
+start_s = 1.0
+level_db_spl_at_1m = 88.0
+generator = { kind = "trill", carrier_frequency_hz = 3400.0, element_sweep_hz = 700.0, element_rate_hz = 12.0, duration_s = 0.6 }
+
+[[sources.calls]]
+start_s = 4.5
+level_db_spl_at_1m = 88.0
+generator = { kind = "trill", carrier_frequency_hz = 3400.0, element_sweep_hz = 700.0, element_rate_hz = 12.0, duration_s = 0.6 }
+
+[expectations]
+schema_version = 2
+
+[expectations.runtime]
+classifier_backend = "stub"
+replay_reference_nodes = false
+
+[expectations.runtime.settings_overrides]
+classification_window_seconds = 1.0
+
+[expectations.classification]
+min_label_accuracy = 0.0
+match = "exact"
+
+[expectations.localization]
+min_event_recall = 0.0
+max_median_position_error_m = 1000.0
+max_p90_position_error_m = 1000.0
+far_field_distance_m = 120.0
+
+[expectations.entities]
+association_radius_m = 5.0
+association_time_slop_s = 2.0

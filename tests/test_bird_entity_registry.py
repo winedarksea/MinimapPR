@@ -172,11 +172,18 @@ def test_species_belief_follows_track_log_odds() -> None:
                                           track=track_state(belief=belief))).entity
     assert entity.species_top_label == ROBIN
     assert entity.species_top_probability == pytest.approx(0.9)
-    # A tanager detection is still matched (tanager is inside the belief).
-    assert registry.find_absorbing_entity(
+    # Field Mode S-fixes tracking: a prior-level secondary score (0.05) is not
+    # belief, so a tanager detection no longer absorbs into the robin entity...
+    tanager_query = dict(
         label=TANAGER, event_time_ns=seconds(3), spatial_display_mode="node_only", reporting_node_id="node-a",
         reporting_node_position_m=NODE_POSITIONS_M["node-a"], detection_position_m=None,
-    ) is entity
+    )
+    assert registry.find_absorbing_entity(**tanager_query) is None
+    # ...while a zero floor restores the W3 "anywhere in the belief" rule.
+    permissive = sequential_registry(absorption_min_species_belief=0.0)
+    permissive_entity = permissive.observe(observation(at_s=0, label=TANAGER, confidence=0.4,
+                                                       track=track_state(belief=belief))).entity
+    assert permissive.find_absorbing_entity(**tanager_query) is permissive_entity
 
 
 def test_max_entities_evicts_least_recently_heard() -> None:

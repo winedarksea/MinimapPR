@@ -8,6 +8,7 @@ bouts prefer an entity already on the map. None = inconsistent.
 
 from __future__ import annotations
 
+from minimappr.core.bird_entity_absorption_geometry import covariance_gated_fix_score
 from minimappr.core.bird_entity_model import (
     ENTITY_STATE_PINPOINTED,
     BirdEntityRecord,
@@ -33,6 +34,7 @@ def spatial_mismatch_score(
     reporting_node_id: str | None,
     reporting_node_position_m: Vec3 | None,
     detection_position_m: Vec3 | None,
+    detection_covariance_m2: list[list[float]] | None = None,
 ) -> float | None:
     """Normalised mismatch in [0, 1] (+ penalty for heard-nearby), None = inconsistent."""
     if not entity.is_spatial:
@@ -53,6 +55,15 @@ def spatial_mismatch_score(
     if entity_position_m is None:
         return None
     if spatial_display_mode == SPATIAL_DISPLAY_LOCALIZED and detection_position_m is not None:
+        if entity.state == ENTITY_STATE_PINPOINTED and config.absorption_covariance_gate_enabled:
+            # Field Mode S-fixes tracking: the fix's own covariance, not a fixed radius.
+            return covariance_gated_fix_score(
+                entity_position_m,
+                entity.position_covariance_m2,
+                detection_position_m,
+                detection_covariance_m2,
+                config,
+            )
         if entity.state == ENTITY_STATE_PINPOINTED:
             distance_m = horizontal_distance_m(detection_position_m, entity_position_m)
             if distance_m > config.absorption_max_fix_distance_m:

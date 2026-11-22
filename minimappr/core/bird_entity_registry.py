@@ -14,10 +14,12 @@ needed. Only detections that already passed the surfacing filters reach
 
 from __future__ import annotations
 
+import dataclasses
 import uuid
 from dataclasses import dataclass
 from typing import Callable, Literal
 
+from minimappr.core.bird_entity_absorption_geometry import concurrent_fix_conflict, remember_fix
 from minimappr.core.bird_entity_model import (
     ENTITY_STATE_DIRECTION_KNOWN,
     ENTITY_STATE_HEARD_NEARBY,
@@ -27,6 +29,7 @@ from minimappr.core.bird_entity_model import (
     BirdEntityBearingEstimate,
     BirdEntityRecord,
     BirdEntitySpatialState,
+    EntityFixSample,
     Vec3,
     bearing_estimate_toward,
     horizontal_major_sigma_m,
@@ -122,23 +125,29 @@ class BirdEntityRegistry:
         reporting_node_position_m: Vec3 | None,
         detection_position_m: Vec3 | None,
         track_id: str | None = None,
+        detection_covariance_m2: list[list[float]] | None = None,
     ) -> BirdEntityRecord | None:
         """The entity this detection belongs to, or None (a new entity).
 
         A track already bound to an entity wins outright (the tracker has said
-        it is the same bird). Otherwise: same species (top label or anywhere in
-        the entity's belief), last heard within the window, and spatially
-        consistent; the lowest normalised mismatch wins.
+        it is the same bird). Otherwise: same species (top label, or a belief
+        of at least ``absorption_min_species_belief``), last heard within the
+        window, spatially consistent (covariance-gated for fixes), and not
+        contradicted by a concurrent fix of the entity; the lowest normalised
+        mismatch wins.
         """
         bound = self.entity_for_track(track_id)
         if bound is not None:
             return bound
+        fix_sample = self._fix_sample(event_time_ns, spatial_display_mode, detection_position_m, detection_covariance_m2)
         best_entity: BirdEntityRecord | None = None
         best_score = float("inf")
         for entity in self._entities.values():
-            if not entity.believes_label(label):
+            if not entity.believes_label(label, self._config.absorption_min_species_belief):
                 continue
             if event_time_ns - entity.last_heard_ns > self._absorption_window_ns:
+                continue
+            if concurrent_fix_conflict(entity, fix_sample, self._config):
                 continue
             score = spatial_mismatch_score(
                 entity,
@@ -147,6 +156,7 @@ class BirdEntityRegistry:
                 reporting_node_id=reporting_node_id,
                 reporting_node_position_m=reporting_node_position_m,
                 detection_position_m=detection_position_m,
+                detection_covariance_m2=detection_covariance_m2,
             )
             if score is not None and score < best_score:
                 best_entity, best_score = entity, score
@@ -181,7 +191,19 @@ class BirdEntityRegistry:
         self, observation: BirdEntityObservation, *, preferred_entity_id: str | None = None
     ) -> BirdEntityChange:
         track = observation.track
-        entity = self.get(preferred_entity_id) or self._entity_for_track_if_same_species(observation)
+        fix_sample = self._fix_sample(
+            observation.event_time_ns,
+            observation.spatial_display_mode,
+            observation.detection_position_m,
+            observation.detection_covariance_m2,
+        )
+        entity = self.get(preferred_entity_id)
+        if entity is None:
+            entity, refused_concurrently = self._entity_for_track_if_same_species(observation, fix_sample)
+            if refused_concurrently:
+                # The track carries another bird: this one stands on its own fix.
+                observation = dataclasses.replace(observation, track=None)
+                track = None
         if entity is None:
             entity = self.find_absorbing_entity(
                 label=observation.label,
@@ -190,10 +212,16 @@ class BirdEntityRegistry:
                 reporting_node_id=observation.reporting_node_id,
                 reporting_node_position_m=observation.reporting_node_position_m,
                 detection_position_m=observation.detection_position_m,
+                detection_covariance_m2=observation.detection_covariance_m2,
             )
         estimate = self._observed_estimate(observation)
         if entity is None:
-            return BirdEntityChange(kind="created", entity=self._create(observation, estimate))
+            created = self._create(observation, estimate)
+            if fix_sample is not None:
+                remember_fix(created, fix_sample, self._config)
+            return BirdEntityChange(kind="created", entity=created)
+        if fix_sample is not None:
+            remember_fix(entity, fix_sample, self._config)
         previous_state = entity.state
         entity.last_heard_ns = max(entity.last_heard_ns, observation.event_time_ns)
         entity.last_pulse_ns = max(entity.last_pulse_ns, observation.event_time_ns)
@@ -213,18 +241,43 @@ class BirdEntityRegistry:
             return BirdEntityChange(kind="state_changed", entity=entity, previous_state=previous_state)
         return BirdEntityChange(kind="updated", entity=entity, previous_state=previous_state)
 
-    def _entity_for_track_if_same_species(self, observation: BirdEntityObservation) -> BirdEntityRecord | None:
-        """The track's entity, unless the label contradicts it on a belief-less track.
+    def _entity_for_track_if_same_species(
+        self, observation: BirdEntityObservation, fix_sample: EntityFixSample | None
+    ) -> tuple[BirdEntityRecord | None, bool]:
+        """(the track's entity or None, refused-for-a-concurrent-fix).
 
-        Without species log-odds the legacy CV tracker can merge two nearby
-        birds of different species into one track whose label flips per
-        detection; following that binding would swap the entity's species.
+        A track that merged two birds (legacy CV tracker across species, any
+        tracker across a flock) must not drag the entity: follow it when the
+        entity believes the label or the log-odds track's top species (at the
+        floor), never when a moments-old entity fix contradicts this one.
         """
         track = observation.track
         entity = self.entity_for_track(track.id if track else None)
-        if entity is None or track.species_belief or entity.believes_label(observation.label):
-            return entity
-        return None
+        if entity is None:
+            return None, False
+        if concurrent_fix_conflict(entity, fix_sample, self._config):
+            return None, True
+        floor = self._config.absorption_min_species_belief
+        if entity.believes_label(observation.label, floor):
+            return entity, False
+        if track.species_belief and entity.believes_label(track.species_top_label or track.label, floor):
+            return entity, False
+        return None, False
+
+    @staticmethod
+    def _fix_sample(
+        event_time_ns: int,
+        spatial_display_mode: str,
+        position_m: Vec3 | None,
+        covariance_m2: list[list[float]] | None,
+    ) -> EntityFixSample | None:
+        if spatial_display_mode != SPATIAL_DISPLAY_LOCALIZED or position_m is None:
+            return None
+        return EntityFixSample(
+            event_time_ns=int(event_time_ns),
+            position_m=tuple(float(v) for v in position_m[:3]),  # type: ignore[arg-type]
+            covariance_m2=covariance_m2,
+        )
 
     def maintain(
         self, now_ns: int, visible_tracks_by_id: dict[str, TrackState] | None

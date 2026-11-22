@@ -16,10 +16,15 @@ One mistake per pair instead of ping-ponging identities across the flock.
 A track may hop at most once per ghost window, so a chain of same-species
 perches (A->B->C) cannot overwrite the ghost that tells the flock apart; the
 cost is that a real second hop inside the window starts a new track.
+
+Revert listeners (Field Mode S-fixes integration): layers that followed the
+hop (the bird-entity registry moves with its bound track) are told when it is
+undone, so the post-hop fixes they took are re-read as the other bird's.
 """
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Callable, Iterable
 
@@ -28,6 +33,7 @@ import numpy as np
 from minimappr.models import TrackState, TrackStatus
 
 _NANOSECONDS_PER_SECOND = 1_000_000_000
+_logger = logging.getLogger(__name__)
 
 
 def _normalised(label: str | None) -> str:
@@ -40,6 +46,20 @@ class RelocationGhost:
     perch_position_m: tuple[float, float, float]
     left_at_ns: int
     species: str
+
+
+@dataclass(frozen=True, slots=True)
+class RelocationRevert:
+    """A relocation undone: *track_id* went back to its old perch; whatever it
+    picked up since *hop_time_ns* belongs to *split_track_id* (another bird)."""
+
+    track_id: str
+    split_track_id: str
+    hop_time_ns: int
+    reverted_at_ns: int
+
+
+RelocationRevertListener = Callable[[RelocationRevert], None]
 
 
 class PerchedRelocationGate:
@@ -59,6 +79,10 @@ class PerchedRelocationGate:
         self._relocation_blocked_until_ns: dict[str, int] = {}
         self.relocations_accepted = 0
         self.relocations_reverted = 0
+        self._revert_listeners: list[RelocationRevertListener] = []
+
+    def add_revert_listener(self, listener: RelocationRevertListener) -> None:
+        self._revert_listeners.append(listener)
 
     def find_relocation_match(
         self,
@@ -128,6 +152,17 @@ class PerchedRelocationGate:
         self._relocation_blocked_until_ns[ghost.track_id] = blocked_until
         self._relocation_blocked_until_ns[new_track_id] = blocked_until
         self.relocations_reverted += 1
+        revert = RelocationRevert(
+            track_id=ghost.track_id,
+            split_track_id=new_track_id,
+            hop_time_ns=int(ghost.left_at_ns),
+            reverted_at_ns=int(timestamp_ns),
+        )
+        for listener in self._revert_listeners:
+            try:
+                listener(revert)
+            except Exception:  # noqa: BLE001 - a listener bug must not break the tracker update
+                _logger.exception("relocation revert listener failed")
 
     def forget(self, track_id: str) -> None:
         self._ghosts.pop(track_id, None)

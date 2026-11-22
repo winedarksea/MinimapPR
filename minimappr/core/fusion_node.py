@@ -2773,6 +2773,9 @@ class FusionNode:
                 branch_details=branch_details,
                 localization_position_m=localization_position_m,
                 below_display_threshold=detection_is_below_display_threshold(classified.classification.features),
+                # Field Mode S-fixes tracking: covariance-gated / bearing-evidence absorption.
+                localization_position_covariance_m2=localization_position_covariance_m2,
+                localization_range_projection_mode=localization_range_projection_mode,
             )
         else:
             decision = await self.reporting_policy.decide(
@@ -2898,6 +2901,7 @@ class FusionNode:
                 audio_quality=audio_quality,
                 existing_detection=decision.existing_detection,
                 persist_mode=persist_mode,
+                persist_fused_track_position=self._persists_fused_entity_position(classified.label_category),
                 tracker=self.tracker,
                 storage_batch_ctx=self._storage_batch,
             )
@@ -2916,6 +2920,15 @@ class FusionNode:
             pipeline_item_id=assembly.detection.id,
             event_time_ns=assembly.detection.timestamp_ns,
             entity_id=decision.entity_id,
+        )
+
+    def _persists_fused_entity_position(self, label_category: str | None) -> bool:
+        """Field Mode S-fixes tracking: entity rows store the fused track position."""
+        coordinator = self.entity_reporting
+        return (
+            coordinator is not None
+            and coordinator.applies_to(label_category)
+            and coordinator.config.canonical_row_fused_position_enabled
         )
 
     @staticmethod
