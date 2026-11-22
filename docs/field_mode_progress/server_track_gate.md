@@ -491,3 +491,14 @@ backpressure sheds windows.
 - The sim scenes use a synthetic oracle, not BirdNET. Only one real-audio scene, one seed.
 - Planar layouts only; no moving birds; no clock error (all tetras disciplined).
 - Some of the matrix's S6-on rows predate entity-position capture (noted per table).
+
+## S-fixes tracking (follow-up, branch `fm/s-fixes-tracking`)
+
+Reported items 1-3 and the plan-gate near-miss are fixed behind the existing flags. Details,
+tables and tests are in `s_fixes_tracking.md`. In summary:
+
+- **Plan gate on the sim matrix: FAIL → PASS.** Individual recall sum 8.83 → 9.50, duplicates
+  1 → 0, swaps / echoes / merges 0, unassociated 1 → 0, median of scene medians 0.62 → 0.43 m.
+- **Real audio: 0.75 → 1.00 individual recall.** The Scarlet Tanager is recovered (3 of 3 replays)
+  and label accuracy is 1.00.
+- **S6 now only helps:** all-on − minus-S6 is 0 recall, −1 duplicate, −1 merged (it was −1.67 recall).
