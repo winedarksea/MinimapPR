@@ -27,3 +27,5 @@ pub mod layout;
 pub mod sync;
 // W3-mesh-sim: sans-IO node/host state machines.
 pub mod mesh;
+// W4-port-server-track (S2): onset-frame SRP clustering + echo checks.
+pub mod onset_clustering;
