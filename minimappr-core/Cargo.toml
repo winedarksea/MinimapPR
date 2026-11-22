@@ -14,14 +14,38 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true, optional = true }
 
+# --- W2-core-codec-proto: clip codec, Stage-1, message protocol, sealing ---
+# All pure Rust (no C toolchain, no getrandom): builds for wasm32, Android, iOS.
+# postcard is tiny and always on (message protocol). FLAC and the session
+# crypto stack are default-on features so `cargo test --workspace` covers them;
+# a consumer that only needs DSP can opt out with `default-features = false`.
+postcard = { version = "1.1", default-features = false, features = ["alloc"] }
+flacenc = { version = "0.5.1", default-features = false, optional = true }
+claxon = { version = "0.4.3", optional = true }
+chacha20poly1305 = { version = "0.10.1", default-features = false, features = ["alloc"], optional = true }
+spake2 = { version = "0.4.0", default-features = false, optional = true }
+hkdf = { version = "0.12", optional = true }
+hmac = { version = "0.12", optional = true }
+sha2 = { version = "0.10", default-features = false, optional = true }
+# Randomness is injected by the caller (sans-IO); rand_core 0.6 matches spake2/aead.
+rand_core = { version = "0.6", default-features = false, optional = true }
+# --- end W2-core-codec-proto ---
+
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
+# W2-core-codec-proto tests: fixture WAV loading and a seedable CSPRNG.
+hound = "3.5"
+rand_chacha = { version = "0.3", default-features = false }
 
 [[bench]]
 name = "capture_plane"
 harness = false
 
 [features]
-default = []
+default = ["flac-codec", "session-crypto"]
+# Pure-Rust FLAC encode (flacenc) + decode (claxon) for 24 kHz clips.
+flac-codec = ["dep:flacenc", "dep:claxon"]
+# XChaCha20-Poly1305 message sealing + SPAKE2 join-code key exchange.
+session-crypto = ["dep:chacha20poly1305", "dep:spake2", "dep:hkdf", "dep:hmac", "dep:sha2", "dep:rand_core"]
 # Emit SensorStreamBuffer re-anchor warnings through `tracing`.
 tracing = ["dep:tracing"]

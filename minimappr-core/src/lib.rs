@@ -13,3 +13,9 @@ pub mod range_projection;
 pub mod sensor_stream_buffer;
 pub mod sirith_array_geometry;
 pub mod srp_phat;
+// W2-core-codec-proto
+pub mod clip_codec;
+pub mod protocol;
+#[cfg(feature = "session-crypto")]
+pub mod session_crypto;
+pub mod stage1;
