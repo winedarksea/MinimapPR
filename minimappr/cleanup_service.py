@@ -12,6 +12,13 @@ from typing import Any
 
 from minimappr.cleanup_policy import CleanupPolicy, RetentionActions, RetentionMatchCriteria, RetentionRule
 from minimappr.config import Settings
+# --- Field Mode W3-birdnet-cutover ---
+from minimappr.classifiers.birdnet_v3_label_migration import (
+    birdnet_v3_label_migration_active,
+    load_birdnet_v24_to_v3_translator,
+    migrate_retention_rules_for_birdnet_v3,
+)
+# --- end Field Mode W3-birdnet-cutover ---
 from minimappr.interfaces import StorageBackend
 
 
@@ -59,7 +66,8 @@ def builtin_retention_rules(settings: Settings) -> list[RetentionRule]:
             -99,
             RetentionMatchCriteria(
                 classifier="birdnet",
-                confidence_min=settings.birdnet_trigger_min_confidence,
+                # --- Field Mode W3-birdnet-cutover --- per-model-version floor.
+                confidence_min=settings.birdnet_threshold_set().trigger_min_confidence,
             ),
             RetentionActions(
                 snippet_max_age_seconds=settings.retention_birdnet_audio_seconds,
@@ -101,10 +109,17 @@ def load_cleanup_policy(settings: Settings, policy_path: Path | None = None) -> 
         default_snippet_max_age_seconds=settings.retention_short_seconds,
         default_artifact_max_age_seconds=settings.retention_experiment_seconds,
     )
+    user_rules = list(policy.rules)
+    # --- Field Mode W3-birdnet-cutover --- v2.4-keyed user rules keep matching
+    # under V3 (in memory; builtins already use the V3 threshold set).
+    if birdnet_v3_label_migration_active(settings):
+        user_rules, report = migrate_retention_rules_for_birdnet_v3(user_rules, load_birdnet_v24_to_v3_translator())
+        report.log_unmapped("retention rule")
+    # --- end Field Mode W3-birdnet-cutover ---
     return CleanupPolicy(
         version=policy.version,
         defaults=policy.defaults,
-        rules=[*builtin_retention_rules(settings), *policy.rules],
+        rules=[*builtin_retention_rules(settings), *user_rules],
     )
 
 

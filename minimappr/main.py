@@ -43,6 +43,10 @@ from minimappr.classifiers.routing import (
     routing_to_dict,
 )
 from minimappr.classifiers.birdnet_v3_patch_validation import birdnet_v3_patch_errors
+# --- Field Mode W3-birdnet-cutover ---
+from minimappr.classifiers.birdnet_threshold_set import birdnet_cutover_setting_errors
+from minimappr.classifiers.birdnet_v3_label_migration import birdnet_v3_rule_transform
+# --- end Field Mode W3-birdnet-cutover ---
 from minimappr.core.config_groups import group_flat_config
 from minimappr.core.pipeline_graph import build_pipeline_graph
 from minimappr.config import (
@@ -3153,6 +3157,13 @@ async def get_config(request: Request) -> dict:
         "birdnet_two_threshold_enabled": settings.birdnet_two_threshold_enabled,
         "birdnet_localize_to_track_min_confidence": settings.birdnet_localize_to_track_min_confidence,
         # --- end Field Mode W2-tracker ---
+        # --- Field Mode W3-birdnet-cutover ---
+        "birdnet_v3_trigger_min_confidence": settings.birdnet_v3_trigger_min_confidence,
+        "birdnet_v3_localize_to_track_min_confidence": settings.birdnet_v3_localize_to_track_min_confidence,
+        "birdnet_v3_species_display_min_belief": settings.birdnet_v3_species_display_min_belief,
+        "birdnet_v3_label_migration_enabled": settings.birdnet_v3_label_migration_enabled,
+        "birdnet_two_threshold_require_tracker_companions": settings.birdnet_two_threshold_require_tracker_companions,
+        # --- end Field Mode W3-birdnet-cutover ---
         "localization_node_bearing_strength": settings.localization_node_bearing_strength,
         "multi_node_bearing_window_seconds": settings.multi_node_bearing_window_seconds,
         "multi_node_bearing_min_separation_deg": settings.multi_node_bearing_min_separation_deg,
@@ -3549,6 +3560,36 @@ def _field_mode_tracker_patch_errors(coerced: dict[str, object], settings: Setti
 # --- end Field Mode W2-tracker ---
 
 
+# --- Field Mode W3-birdnet-cutover ---
+_BIRDNET_CUTOVER_KEYS = frozenset(
+    {
+        "birdnet_v3_trigger_min_confidence",
+        "birdnet_v3_localize_to_track_min_confidence",
+        "birdnet_v3_species_display_min_belief",
+        "birdnet_v3_label_migration_enabled",
+        "birdnet_two_threshold_require_tracker_companions",
+        "birdnet_two_threshold_enabled",
+        "tracking_perched_filter_enabled",
+        "tracking_species_log_odds_enabled",
+    }
+)
+
+
+def _birdnet_cutover_patch_errors(coerced: dict[str, object], settings: Settings) -> list[str]:
+    if not _BIRDNET_CUTOVER_KEYS.intersection(coerced):
+        return []
+
+    class _MergedView:
+        def __getattr__(self, key: str) -> Any:
+            return coerced.get(key, getattr(settings, key))
+
+    try:
+        return birdnet_cutover_setting_errors(_MergedView())
+    except (TypeError, ValueError) as exc:
+        return [f"birdnet cutover settings: {exc}"]
+# --- end Field Mode W3-birdnet-cutover ---
+
+
 @app.patch("/api/v1/config")
 async def patch_config(request: Request) -> dict:
     state = _require_state(request)
@@ -3820,6 +3861,10 @@ async def patch_config(request: Request) -> dict:
     # --- Field Mode W2-tracker --- validated on the merged view.
     errors.extend(_field_mode_tracker_patch_errors(coerced, settings))
     # --- end Field Mode W2-tracker ---
+    # --- Field Mode W3-birdnet-cutover --- per-version thresholds + the
+    # two-threshold companion constraint, on the merged view.
+    errors.extend(_birdnet_cutover_patch_errors(coerced, settings))
+    # --- end Field Mode W3-birdnet-cutover ---
     hass_enabled = bool(coerced.get("hass_enabled", settings.hass_enabled))
     hass_host = str(coerced.get("hass_mqtt_host", settings.hass_mqtt_host)).strip()
     if hass_enabled and not hass_host:
@@ -4214,7 +4259,11 @@ async def get_pipeline_graph(request: Request) -> PipelineGraph:
         fusion_status = await fusion_node.status()
         rules_engine = fusion_node.rules_engine
     if rules_engine is None:
-        rules_engine = ConfigRuleEngine(settings.rules_config_path)
+        # --- Field Mode W3-birdnet-cutover ---
+        rules_engine = ConfigRuleEngine(
+            settings.rules_config_path, rule_transform=birdnet_v3_rule_transform(settings)
+        )
+        # --- end Field Mode W3-birdnet-cutover ---
     rules = rules_engine.rules()
 
     sidecar_dsp_status: dict | None = None
