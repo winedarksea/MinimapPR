@@ -154,6 +154,7 @@ impl SensorStreamBuffer {
                 self.max_samples as i128 * 1_000_000_000_i128 / i128::from(self.sample_rate_hz);
             if timestamp_correction_ns > reset_threshold_ns {
                 self.reanchor_count = self.reanchor_count.saturating_add(1);
+                #[cfg(feature = "tracing")]
                 tracing::warn!(
                     sample_rate_hz = self.sample_rate_hz,
                     timestamp_correction_ns = %timestamp_correction_ns,
@@ -171,6 +172,7 @@ impl SensorStreamBuffer {
             || incoming_start < current_start - self.max_samples
         {
             self.reanchor_count = self.reanchor_count.saturating_add(1);
+            #[cfg(feature = "tracing")]
             tracing::warn!(
                 sample_rate_hz = self.sample_rate_hz,
                 incoming_start_sample_index = incoming_start,

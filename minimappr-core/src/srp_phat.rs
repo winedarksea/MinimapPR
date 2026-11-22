@@ -3,8 +3,9 @@ use std::cmp::Ordering;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    dsp_worker::PairTdoa,
-    gcc_phat::{dominant_frequency_hz, pair_max_tau_s, phat_correlation, GccPhatCorrelation},
+    gcc_phat::{
+        dominant_frequency_hz, pair_max_tau_s, phat_correlation, GccPhatCorrelation, PairTdoa,
+    },
     range_projection::{
         confidence_cap_for_mode, range_observability_cap_for_mode, RANGE_ASYMPTOTIC,
         RANGE_BEARING_PROJECTED, RANGE_BOUNDARY, RANGE_REFINED,

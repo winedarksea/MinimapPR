@@ -1,13 +1,15 @@
 [package]
 name = "minimappr-ingest-sidecar"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
 
 [[bin]]
 name = "minimappr-ingest-sidecar"
 path = "src/main.rs"
 
 [dependencies]
+# Shared DSP/localization math; `tracing` keeps buffer re-anchor warnings in sidecar logs.
+minimappr-core = { workspace = true, features = ["tracing"] }
 axum = "0.7"
 base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
@@ -32,9 +34,4 @@ uuid = { version = "1", features = ["v4", "serde"] }
 tempfile = "3"
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
 tower = { version = "0.5", features = ["util"] }
-
-[[bench]]
-name = "capture_plane"
-harness = false

@@ -17,6 +17,14 @@ pub struct TdoaResult {
     pub peak_value: f32,
 }
 
+/// Per-pair TDOA result with mic pair indices.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct PairTdoa {
+    pub ch_a: usize,
+    pub ch_b: usize,
+    pub tdoa: TdoaResult,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct GccPhatCorrelation {
     pub lags_seconds: Vec<f32>,
