@@ -91,7 +91,9 @@ pub fn encode_hex(bytes: &[u8]) -> String {
 }
 
 pub fn decode_hex(text: &str) -> Option<Vec<u8>> {
-    if !text.len().is_multiple_of(2) {
+    // `from_str_radix` alone accepts a leading `+` ("+f" -> 15), which would
+    // let non-canonical ids through validation and into D1.
+    if !text.len().is_multiple_of(2) || !text.bytes().all(|symbol| symbol.is_ascii_hexdigit()) {
         return None;
     }
     (0..text.len())
@@ -111,5 +113,6 @@ mod tests {
         assert_eq!(decode_hex("005aff10").unwrap(), bytes);
         assert_eq!(decode_hex("abc"), None);
         assert_eq!(decode_hex("zz"), None);
+        assert_eq!(decode_hex("+f"), None);
     }
 }

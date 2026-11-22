@@ -20,4 +20,4 @@ pub use relay_frame::{
 pub use relay_routing_policy::{
     decide_relay_delivery, FrameRejectionReason, RelayDelivery, RelayRole,
 };
-pub use session_usage_caps::{SessionRelayLimits, SessionUsageCounters};
+pub use session_usage_caps::{ConnectionRefusalReason, SessionRelayLimits, SessionUsageCounters};

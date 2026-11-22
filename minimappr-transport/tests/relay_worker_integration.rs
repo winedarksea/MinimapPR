@@ -11,7 +11,11 @@ use std::time::Duration;
 use common::{clip_payload, readiness_query, TEST_SESSION_ID};
 use minimappr_core::protocol::{FieldMessage, NodeId};
 use minimappr_core::session_crypto::{SessionKey, DEFAULT_MAXIMUM_FAILED_CONFIRMATIONS};
-use minimappr_relay_wire::relay_http_api::{encode_hex, CreateRelaySessionRequest, CreateRelaySessionResponse};
+use futures_util::{SinkExt, StreamExt};
+use minimappr_relay_wire::relay_http_api::{
+    connect_path, encode_hex, CreateRelaySessionRequest, CreateRelaySessionResponse, CONNECT_QUERY_PEER_ID,
+    CONNECT_QUERY_ROLE_TOKEN,
+};
 use minimappr_relay_wire::{FrameRejectionReason, RelayRole, BROADCAST_PEER_ID};
 use minimappr_transport::join_code_exchange_over_relay::{
     random_provisional_joiner_peer_id, HostRelayJoinCodeResponder, JoinerExchangeStep, JoinerRelayKeyExchange,
@@ -19,6 +23,7 @@ use minimappr_transport::join_code_exchange_over_relay::{
 use minimappr_transport::native_websocket::{NativeRelayDriver, NativeRelayError, RelayHttpClient};
 use minimappr_transport::{FieldJoinCode, RelayClientEvent, RelayClientSession, RelayTransportConfig};
 use rand_core::OsRng;
+use tokio_tungstenite::tungstenite::Message;
 use wrangler_local_harness::{start_local_relay_worker, trigger_scheduled_cleanup};
 
 const HOST_PEER: u32 = 1;
@@ -26,6 +31,8 @@ const JOIN_CODE_TTL_SECONDS: u64 = 4;
 const MESSAGE_CAP: u64 = 120;
 const BYTE_CAP: u64 = 256 * 1024;
 const FRAME_CAP: u64 = 32 * 1024;
+/// Main scenario binds host, joiner and viewer; the cap step fills the rest.
+const PEER_BINDING_CAP: u32 = 6;
 const EVENT_TIMEOUT: Duration = Duration::from_secs(15);
 const PUMP_SLICE: Duration = Duration::from_millis(20);
 
@@ -125,12 +132,14 @@ async fn two_clients_join_exchange_and_hit_caps_through_local_relay_worker() {
     let byte_cap = BYTE_CAP.to_string();
     let frame_cap = FRAME_CAP.to_string();
     let ttl = JOIN_CODE_TTL_SECONDS.to_string();
+    let peer_binding_cap = PEER_BINDING_CAP.to_string();
     let Some(worker) = start_local_relay_worker(&[
         ("JOIN_CODE_TTL_SECONDS", &ttl),
         ("SESSION_MAXIMUM_INBOUND_MESSAGES", &message_cap),
         ("SESSION_MAXIMUM_INBOUND_BYTES", &byte_cap),
         ("MAXIMUM_FRAME_BYTES", &frame_cap),
         ("USAGE_COUNTER_PERSIST_EVERY_MESSAGES", "1"),
+        ("SESSION_MAXIMUM_PEER_BINDINGS", &peer_binding_cap),
     ])
     .await
     else {
@@ -237,6 +246,28 @@ async fn two_clients_join_exchange_and_hit_caps_through_local_relay_worker() {
     let revoked = api.resolve_join_code(&reissued.lookup_code, RelayRole::Node).await;
     assert!(matches!(revoked, Err(NativeRelayError::Status { status_code: 404, .. })));
 
+    // --- caps: peer bindings outlive sockets, so fresh peer ids run out ---
+    eprintln!("relay integration step: caps: distinct peer bindings per session");
+    let churned = api.create_session(&create_request()).await.unwrap();
+    let mut churn_host =
+        connected_driver(&base_url, &churned.relay_session_name, &churned.host_token, HOST_PEER, None).await;
+    for churn_peer in 200..(200 + PEER_BINDING_CAP - 1) {
+        let mut churner = connected_driver(&base_url, &churned.relay_session_name, &churned.node_token, churn_peer, None).await;
+        churner.close_gracefully().await;
+    }
+    let mut over_cap = NativeRelayDriver::new(
+        RelayClientSession::new(RelayTransportConfig::default(), 300, None, 1),
+        &base_url,
+        &churned.relay_session_name,
+        &churned.node_token,
+    )
+    .unwrap();
+    // tungstenite drops the refusal body; the 429 can only be the binding
+    // cap here (one live socket, a handful of messages spent).
+    let refused = over_cap.connect().await;
+    assert!(matches!(&refused, Err(NativeRelayError::Status { status_code: 429, .. })), "{refused:?}");
+    churn_host.close_gracefully().await;
+
     // --- caps: message cap on a fresh session ---
     eprintln!("relay integration step: caps: message cap on a fresh session");
     let flooded = api.create_session(&create_request()).await.unwrap();
@@ -248,6 +279,33 @@ async fn two_clients_join_exchange_and_hit_caps_through_local_relay_worker() {
     }
     flooder.flush_outbound().await.unwrap();
     wait_for_rejection(&mut flooder, FrameRejectionReason::SessionMessageCapReached).await;
+
+    // --- caps: text frames are rejected but still spend the message cap ---
+    eprintln!("relay integration step: caps: text frames spend the message cap");
+    let texted = api.create_session(&create_request()).await.unwrap();
+    let raw_url = format!(
+        "{}{}?{CONNECT_QUERY_PEER_ID}={HOST_PEER}&{CONNECT_QUERY_ROLE_TOKEN}={}",
+        base_url.replacen("http://", "ws://", 1),
+        connect_path(&texted.relay_session_name),
+        texted.host_token
+    );
+    let (mut raw_socket, _) = tokio_tungstenite::connect_async(raw_url.as_str()).await.expect("raw connect");
+    for _ in 0..(MESSAGE_CAP + 1) {
+        raw_socket.send(Message::Text("not a relay frame".into())).await.unwrap();
+    }
+    let cap_notice = tokio::time::timeout(EVENT_TIMEOUT, async {
+        while let Some(Ok(message)) = raw_socket.next().await {
+            if let Message::Text(text) = message {
+                if text.contains("session_message_cap_reached") {
+                    return true;
+                }
+            }
+        }
+        false
+    })
+    .await;
+    assert_eq!(cap_notice, Ok(true), "text frames must count against the message cap");
+    let _ = raw_socket.close(None).await;
 
     // --- caps: frame size and byte cap on another fresh session ---
     eprintln!("relay integration step: caps: frame size and byte cap on another fresh session");
