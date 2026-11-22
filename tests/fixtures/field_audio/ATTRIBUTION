@@ -5,6 +5,10 @@ All recordings come from xeno-canto (https://xeno-canto.org) and are redistribut
 their original Creative Commons licences. Each WAV is a trimmed, resampled, level-normalized
 excerpt of the original; under CC BY-SA / BY-NC-SA these excerpts are adaptations and are
 shared under the same licence as their source. No ND-licensed recording was used.
+These WAV files are NOT covered by the repository's GPLv3 licence: each is licensed only
+under the CC licence in its row below, and is distributed alongside (not as part of) the
+GPL code as separate test data. Copyright in each recording remains with its recordist.
+Licences, recordists and species were re-checked against each xeno-canto page on 2026-11-22.
 Machine-readable copy of this table: manifest.toml (same directory).
 
 Common processing (scripts/build_field_audio_fixtures.py reproduces every file):

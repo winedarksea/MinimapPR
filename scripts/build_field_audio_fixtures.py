@@ -45,6 +45,7 @@ SPEECH_BAND_HZ = (100.0, 1000.0)
 SPEECH_FRAME_SECONDS = 0.020
 SPEECH_ACTIVE_ABOVE_FLOOR_DB = 10.0
 DOWNLOAD_PAUSE_SECONDS = 1.0
+DOWNLOAD_TIMEOUT_SECONDS = 120
 
 
 def download_source(xc_id: int, cache_dir: Path) -> Path:
@@ -54,7 +55,7 @@ def download_source(xc_id: int, cache_dir: Path) -> Path:
     request = urllib.request.Request(
         f"https://xeno-canto.org/{xc_id}/download", headers={"User-Agent": USER_AGENT}
     )
-    with urllib.request.urlopen(request, timeout=120) as response:
+    with urllib.request.urlopen(request, timeout=DOWNLOAD_TIMEOUT_SECONDS) as response:
         destination.write_bytes(response.read())
     time.sleep(DOWNLOAD_PAUSE_SECONDS)
     return destination

@@ -32,7 +32,7 @@
 # name = "bluefin_bird_snippets_v1"
 # sha256 = "<fill from register>"
 # size_bytes = 0
-# source = "ssh://colin@127.0.0.1:2222/home/colin/field_fixture_export/bluefin_bird_snippets_v1.tar.gz"
+# source = "ssh://<user>@127.0.0.1:2222/home/<user>/field_fixture_export/bluefin_bird_snippets_v1.tar.gz"
 # cache_path = "bluefin_bird_snippets_v1.tar.gz"
 # extract = true
 # description = "~20 BirdNET-labelled detection snippets + 2 ambience clips from the Bluefin box, with snippets.csv metadata"
