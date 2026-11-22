@@ -130,6 +130,11 @@ async function startLocalFieldStack() {
   return {
     pageOrigin: server.origin,
     relayOrigin: relay.origin,
+    // Real offline (connection refused), for engines whose offline
+    // emulation does not cover service workers (Playwright WebKit).
+    stopPageServer() {
+      killProcessGroup(server.child);
+    },
     stop() {
       killProcessGroup(server.child);
       killProcessGroup(relay.child);
