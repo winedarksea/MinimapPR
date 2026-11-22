@@ -61,6 +61,7 @@ from minimappr.sim.fixture_audio_scenarios import (  # noqa: E402
     render_scenario_bundle,
 )
 from minimappr.sim.replay import build_fusion_for_bundle, evaluate_bundle, replay_bundle  # noqa: E402
+from minimappr.sim.sim_scenario_scoring import drain_fusion_queues  # noqa: E402
 
 # Variant -> (birdnet_model_version, use a regional species list for V3).
 # Production v2.4 always runs its geo filter (site lat/lon), so the gated V3
@@ -84,6 +85,7 @@ EXPECTATIONS = {
     "localization": {"min_event_recall": 0.0, "far_field_distance_m": 120.0},
 }
 MAX_EVENT_RECALL_DROP = 0.05
+QUEUE_DRAIN_TIMEOUT_SECONDS = 900.0
 MIN_BLUEFIN_CONFIDENT_AGREEMENT = 0.8
 
 
@@ -117,9 +119,14 @@ def _site_overrides(bundle) -> dict:
     return {"site_origin_lat": origin["lat"], "site_origin_lon": origin["lon"]}
 
 
-async def replay_one(bundle, variant: str, work_directory: Path) -> dict:
+async def replay_one(bundle, variant: str, work_directory: Path, extra_settings: dict | None = None) -> dict:
     version, regional = MODEL_VARIANTS[variant]
-    overrides = {**REPLAY_SETTINGS_OVERRIDES, **_site_overrides(bundle), "birdnet_model_version": version}
+    overrides = {
+        **REPLAY_SETTINGS_OVERRIDES,
+        **(extra_settings or {}),
+        **_site_overrides(bundle),
+        "birdnet_model_version": version,
+    }
     if regional:
         work_directory.mkdir(parents=True, exist_ok=True)
         species_list_path = work_directory / "v3_regional_species.txt"
@@ -134,6 +141,8 @@ async def replay_one(bundle, variant: str, work_directory: Path) -> dict:
     )
     try:
         await replay_bundle(fusion, bundle)
+        # Late windows (onset clustering, BirdNET under load) outlive the settle poll.
+        await drain_fusion_queues(fusion, timeout_seconds=QUEUE_DRAIN_TIMEOUT_SECONDS)
         detections = await _collect_settled_detections(storage)
     finally:
         await fusion.stop()
@@ -191,14 +200,16 @@ def gate_verdict(results: dict[str, list[dict]], bluefin_report: dict | None) ->
     return "PASS (switch default to 3.0 may be proposed)", []
 
 
-async def main_async(seeds: list[int]) -> dict[str, list[dict]]:
-    results: dict[str, list[dict]] = {variant: [] for variant in MODEL_VARIANTS}
+async def main_async(
+    seeds: list[int], variants: list[str] | None = None, extra_settings: dict | None = None
+) -> dict[str, list[dict]]:
+    results: dict[str, list[dict]] = {variant: [] for variant in (variants or MODEL_VARIANTS)}
     clips = load_fixture_bird_clips()
     with tempfile.TemporaryDirectory(prefix="birdnet-gate-") as work:
         for seed in seeds:
             bundle = load_bundle(render_scenario_bundle(build_species_gate_scenario(clips, seed=seed), Path(work) / f"gate-{seed}.zip"))
-            for variant in MODEL_VARIANTS:
-                row = await replay_one(bundle, variant, Path(work) / f"seed-{seed}")
+            for variant in results:
+                row = await replay_one(bundle, variant, Path(work) / f"seed-{seed}", extra_settings)
                 row["seed"] = seed
                 print(json.dumps({k: v for k, v in row.items() if k != "entity_metrics_by_radius_m"}), flush=True)
                 results[variant].append(row)
@@ -210,8 +221,12 @@ def main() -> int:
     parser.add_argument("--seeds", type=int, nargs="+", default=[0, 1])
     parser.add_argument("--bluefin-report", type=Path, default=None, help="compare_birdnet_versions.py --output-json")
     parser.add_argument("--json", type=Path, default=None)
+    parser.add_argument("--variants", nargs="+", default=None, choices=list(MODEL_VARIANTS))
+    parser.add_argument(
+        "--settings", default="{}", help="extra settings overrides as JSON, e.g. the Field Mode server-track flags"
+    )
     args = parser.parse_args()
-    results = asyncio.run(main_async(args.seeds))
+    results = asyncio.run(main_async(args.seeds, args.variants, json.loads(args.settings)))
     bluefin = json.loads(args.bluefin_report.read_text()) if args.bluefin_report else None
     verdict, reasons = gate_verdict(results, bluefin)
     print("VERDICT:", verdict)

@@ -154,6 +154,10 @@ class RuntimeTaxonomyProvider(TaxonomyProvider):
         """
         return self._label_aliases.get(label.strip().lower(), label)
 
+    def configured_category_for_label(self, label: str) -> str | None:
+        """Explicitly configured/learned category, or None (no name heuristics)."""
+        return self._label_to_category.get(label.strip().lower())
+
     def category_for_label(self, label: str) -> str:
         key = label.strip().lower()
         if key in self._label_to_category:

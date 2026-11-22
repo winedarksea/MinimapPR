@@ -51,6 +51,8 @@ DEFAULT_EXPECTATIONS: dict[str, Any] = {
         "max_median_position_error_m": 20.0,
         "max_p90_position_error_m": 40.0,
         "far_field_distance_m": 120.0,
+        # Position error on (E, N) only (see entities.horizontal_only).
+        "horizontal_position_error": False,
         "far_field": {"max_median_bearing_error_deg": 10.0},
         "per_algorithm": {},
     },
@@ -199,6 +201,7 @@ def evaluate_bundle(
     report = CalibrationReport()
     far_field_distance_m = float(localization_cfg["far_field_distance_m"])
     match_mode = classification_cfg.get("match", "category")
+    error_axes = slice(0, 2) if bool(localization_cfg.get("horizontal_position_error")) else slice(0, 3)
 
     position_errors: list[float] = []
     bearing_errors: list[float] = []
@@ -227,7 +230,7 @@ def evaluate_bundle(
                 if not position:
                     continue
                 truth_m = event.position_at(int(det.get("timestamp_ns") or 0))
-                error = float(np.linalg.norm(np.asarray(position, dtype=np.float64) - truth_m))
+                error = float(np.linalg.norm((np.asarray(position, dtype=np.float64) - truth_m)[error_axes]))
                 if best_error is None or error < best_error:
                     best_error, best_det, best_truth = error, det, truth_m
             if best_det is not None:

@@ -413,3 +413,24 @@ def test_untracked_detection_keys_never_collide_with_row_ids():
     assert entity_key_for_detection(with_id, 0) != entity_key_for_detection(without_id, 1)
     numpy_position = {**with_id, "position_m": np.asarray(ROBIN_POSITION_M)}
     assert entity_key_for_detection(numpy_position, 0) == ("detection", "1")
+
+
+def test_individual_recall_and_horizontal_only_gate(tmp_path):
+    """S gate scoring: one row per bird counts the bird; height error can be ignored."""
+    events = [
+        _static_event("bout-1", "robin", ROBIN_POSITION_M, 0, 1, individual_id="robin-1"),
+        _static_event("bout-2", "robin", ROBIN_POSITION_M, 8, 9, individual_id="robin-1"),
+    ]
+    bundle = load_bundle(_write_bundle(tmp_path, events))
+    # One canonical row (bout 2's fix), 7 m too low: a planar layout's height error.
+    low_fix_m = [ROBIN_POSITION_M[0], ROBIN_POSITION_M[1], ROBIN_POSITION_M[2] - 7.0]
+    detections = [_detection(8.5, "robin", low_fix_m, track_id="T1")]
+    full_3d = evaluate_bundle(detections, bundle, STRICT_EXPECTATIONS)
+    assert full_3d.entity_metrics.localized_and_classified_individual_recall == 0.0
+    horizontal = json.loads(json.dumps(STRICT_EXPECTATIONS))
+    horizontal["entities"]["horizontal_only"] = True
+    horizontal["localization"]["horizontal_position_error"] = True
+    report = evaluate_bundle(detections, bundle, horizontal)
+    assert report.entity_metrics.localized_and_classified_recall == pytest.approx(0.5)
+    assert report.entity_metrics.localized_and_classified_individual_recall == pytest.approx(1.0)
+    assert report.median_position_error_m == pytest.approx(0.0)

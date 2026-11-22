@@ -54,8 +54,9 @@ def _resolve_label_category(
     """Resolve taxonomy first, falling back to the model's own vocabulary category.
 
     BirdNET species labels are open-ended, so name-only taxonomy heuristics cannot
-    reliably identify every result as BirdNET-derived.  A configured or heuristic
-    category remains authoritative; model provenance is only the unknown fallback.
+    reliably identify every result as BirdNET-derived.  A configured category
+    remains authoritative; for a species model's species labels, provenance beats
+    the substring name heuristics (otherwise the heuristic answer stands).
 
     The fallback applies only to real vocabulary labels; abstentions
     (``ABSTENTION_LABELS``) keep the taxonomy's own answer.
@@ -67,8 +68,56 @@ def _resolve_label_category(
     Model provenance already lives in ``classification.features["model"]``.
     """
     taxonomy_category = taxonomy_provider.category_for_label(classification.label)
-    if taxonomy_category.strip().lower() != "unknown":
+    if classification.label.strip().lower() in ABSTENTION_LABELS:
+        # "unknown" is the *absence* of a label, not a vocabulary entry, so the
+        # model's wholesale category must not apply to it. Without this guard a
+        # BirdNET abstention resolved to "wildlife", which was then registered
+        # against the label name and persisted — after which every abstention
+        # from every model read as wildlife.
         return taxonomy_category
+    model_category = _model_vocabulary_category(classification)
+    if model_category is None:
+        return taxonomy_category
+    # Field Mode S gate: an operator-configured category still wins, but the
+    # *name heuristics* must not override a species model's provenance. They are
+    # substring matches, so "scarlet tanager" / "northern cardinal" / "canada
+    # warbler" ("car") read as vehicle and "common firecrest" ("fire") as
+    # security — which silently kept those birds out of every wildlife-scoped
+    # stage (perched tracker, species log-odds, entity reporting, rules).
+    configured_category_for_label = getattr(taxonomy_provider, "configured_category_for_label", None)
+    if callable(configured_category_for_label):
+        configured = configured_category_for_label(classification.label)
+        if configured is not None:
+            return configured
+    elif taxonomy_category.strip().lower() != "unknown":
+        return taxonomy_category
+    return model_category
+
+
+def _model_vocabulary_category(classification: ClassificationResult) -> str | None:
+    """Category implied by the producing model's vocabulary, or None when it implies none."""
+    model_name = classification.features.get("model")
+    if not isinstance(model_name, str):
+        return None
+    # ── BirdNET+ V3.0 (Field Mode W1-birdnet-v3) ── V3's vocabulary also holds
+    # sound sources (Gun, Siren, Engine, ...), so only its animal classes take
+    # the wholesale wildlife fallback.
+    if model_name == _BIRDNET_V3_MODEL_NAME:
+        taxon_group = classification.features.get("taxon_group")
+        return "wildlife" if taxon_group in BIRDNET_V3_ANIMAL_TAXON_GROUPS else None
+    # ── end BirdNET+ V3.0 ──
+    fallback = _MODEL_FALLBACK_CATEGORY.get(model_name.strip().lower())
+    if fallback is None:
+        return None
+    # v2.4's few non-species classes ("Gun_Gun", "Engine_Engine", "Siren_Siren",
+    # "Human vocal_Human vocal", ...) repeat the class name where a species has
+    # "Scientific_Common"; they keep the taxonomy's own answer.
+    raw_species = classification.features.get("raw_species")
+    if isinstance(raw_species, str) and "_" in raw_species:
+        scientific, common = raw_species.split("_", 1)
+        if scientific.strip().lower() == common.strip().lower():
+            return None
+    return fallback
     if classification.label.strip().lower() in ABSTENTION_LABELS:
         # "unknown" is the *absence* of a label, not a vocabulary entry, so the
         # model's wholesale category must not apply to it. Without this guard a

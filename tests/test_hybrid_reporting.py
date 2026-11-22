@@ -422,3 +422,27 @@ async def test_report_window_pregate_suppress_does_not_count_toward_cap(tmp_path
 
     await fusion.stop()
     await storage.close()
+
+
+def test_pre_render_report_window_cap_never_skips_onset_srp_products() -> None:
+    """S gate: onset-SRP products are one per cluster (distinct birds); the cap must not drop them."""
+    from types import SimpleNamespace
+
+    from minimappr.core.onset_srp_localization_stage import LOCALIZATION_METHOD_NAME
+
+    window_ns = 30 * 1_000_000_000
+    fake_fusion = SimpleNamespace(
+        fusion_config=SimpleNamespace(report_window_localized_emission_cap=1),
+        reporting_policy=SimpleNamespace(report_window_bounds=lambda t: ((t // window_ns) * window_ns, 0)),
+        _localized_window_emissions={("node-a", 0): 5},
+    )
+
+    def candidate_product(method: str):
+        return SimpleNamespace(
+            localization_branch=SimpleNamespace(localization_method=method),
+            candidate=SimpleNamespace(source_node_id="node-a", event_time_ns=1_000_000_000),
+        )
+
+    skip = FusionNode._should_skip_saturated_report_window
+    assert skip(fake_fusion, candidate_product("gcc_phat")) is True
+    assert skip(fake_fusion, candidate_product(LOCALIZATION_METHOD_NAME)) is False
