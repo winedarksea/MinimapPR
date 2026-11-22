@@ -2,6 +2,9 @@
 
 use std::collections::BTreeMap;
 
+use crate::onset_clustering::attribution_cascade::AttributionTier;
+use crate::onset_clustering::attribution_decision::{ClassifierAnswer, InterfererOnset};
+use crate::onset_clustering::attribution_evidence::ClusterAttributionEvidence;
 use crate::protocol::detection_messages::{ClipPayload, ReadinessAnswer, ReadinessQuery};
 use crate::protocol::wire_codes::SpeciesScore;
 use crate::protocol::NodeId;
@@ -41,6 +44,8 @@ pub struct CallLocalizationRequest {
     pub island_id: u32,
     pub classifying_node: NodeId,
     pub centre_reference_s: f64,
+    /// Half the shared window on the island reference clock.
+    pub half_window_s: f64,
     pub clips: Vec<ClipLocalizationInput>,
     /// Map chirality confidence of the island's anchor (None: unanchored).
     pub chirality_confidence: Option<f64>,
@@ -56,10 +61,48 @@ pub struct CallFix {
     pub rejected_nodes: Vec<NodeId>,
 }
 
+/// One source in a call's shared window (W4-port-server-track): onset
+/// clustering finds every bird in the clips, not only the strongest.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LocalizedCluster {
+    pub fix: CallFix,
+    /// The node that hears this cluster best (its classification window).
+    pub classifying_node: NodeId,
+    /// Per-node levels for S5 attribution; None = no attribution possible.
+    pub attribution_evidence: Option<ClusterAttributionEvidence>,
+    /// Species after attribution; None = the call's merged belief applies.
+    pub attributed_species: Option<Vec<SpeciesScore>>,
+    pub attribution_tier: Option<AttributionTier>,
+}
+
+impl LocalizedCluster {
+    pub fn single(fix: CallFix, classifying_node: NodeId) -> Self {
+        Self { fix, classifying_node, attribution_evidence: None, attributed_species: None, attribution_tier: None }
+    }
+}
+
 /// Seam between the call pipeline and a solver: clip SRP + LM on phones,
 /// arrival-time abstraction in the Layer 2 simulator.
 pub trait ClipSetLocalizer {
     fn localize(&self, request: &CallLocalizationRequest) -> Result<CallFix, String>;
+
+    /// Every accepted source cluster in the window, strongest first (echoes
+    /// and sidelobes already rejected). Default: the single strongest fix.
+    fn localize_clusters(&self, request: &CallLocalizationRequest) -> Result<Vec<LocalizedCluster>, String> {
+        self.localize(request).map(|fix| vec![LocalizedCluster::single(fix, request.classifying_node)])
+    }
+
+    /// The classifier on a cluster's classification window with the given
+    /// onset regions masked: (answer, masked cell fraction). None = the host
+    /// cannot classify windows here (attribution is skipped).
+    fn classify_cluster_window(
+        &self,
+        _request: &CallLocalizationRequest,
+        _cluster: &LocalizedCluster,
+        _masked: &[InterfererOnset],
+    ) -> Option<(ClassifierAnswer, f64)> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -120,6 +163,8 @@ pub struct LocalizedCallRecord {
     pub chirality_confidence: Option<f64>,
     pub chirality_locked: bool,
     pub fix: Option<CallFix>,
+    /// Every localized source (the first is `fix`), with attributed species.
+    pub clusters: Vec<LocalizedCluster>,
     pub failure: Option<String>,
 }
 

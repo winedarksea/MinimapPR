@@ -11,3 +11,6 @@ publish = false
 minimappr-core = { workspace = true }
 minimappr-sim = { path = "../minimappr-sim" }
 minimappr-mesh-sim = { path = "../minimappr-mesh-sim" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

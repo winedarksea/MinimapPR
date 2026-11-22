@@ -30,7 +30,16 @@ from minimappr.core.track_partial_binding import (
     choose_track_for_partial_constraints,
 )
 from minimappr.core.track_partial_constraint_evidence import PartialConstraintSigmas
+from minimappr.core.track_perched_concurrency import (
+    ConcurrentPerchGuardConfig,
+    concurrently_active_perch_conflicts,
+    weak_claim_sits_on_track_perch,
+)
 from minimappr.core.track_perched_relocation import PerchedRelocationGate, RelocationGhost
+from minimappr.core.track_species_association_gate import (
+    SpeciesAssociationGateConfig,
+    species_compatible_tracks,
+)
 from minimappr.core.track_species_belief import (
     SpeciesBeliefConfig,
     SpeciesLogOddsBelief,
@@ -99,6 +108,27 @@ class FieldModeTrackExtensions:
             hyperbola_sigma_m=float(getattr(cfg, "tracking_partial_binding_hyperbola_sigma_m", 2.0)),
             snr_level_margin_db=float(getattr(cfg, "tracking_partial_binding_snr_level_margin_db", 7.0)),
         )
+        # --- Field Mode S-fixes tracking ---
+        self._species_association_gate = SpeciesAssociationGateConfig(
+            enabled=self.species_log_odds_enabled
+            and bool(getattr(cfg, "tracking_species_association_gate_enabled", True)),
+            confident_probability=float(
+                getattr(cfg, "tracking_species_association_confident_probability", 0.5)
+            ),
+            detection_claim_probability=float(
+                getattr(cfg, "tracking_species_association_detection_claim_probability", 0.15)
+            ),
+        )
+        self._concurrent_perch_guard = ConcurrentPerchGuardConfig(
+            enabled=self.perched_filter_enabled
+            and bool(getattr(cfg, "tracking_perched_concurrent_perch_guard_enabled", True)),
+            snap_distance_m=float(getattr(cfg, "tracking_perched_relocation_snap_distance_m", 6.0)),
+            min_silence_seconds=float(getattr(cfg, "tracking_perched_relocation_min_silence_seconds", 2.0)),
+            concurrent_activity_seconds=float(
+                getattr(cfg, "tracking_perched_concurrent_activity_seconds", 30.0)
+            ),
+        )
+        # --- end Field Mode S-fixes tracking ---
         self._beliefs: dict[str, SpeciesLogOddsBelief] = {}
         # Tracks that received at least one display-level detection. Only tracks
         # built purely from sub-display (two-threshold) evidence can be hidden, so
@@ -187,6 +217,57 @@ class FieldModeTrackExtensions:
             return belief.top_labels(count)
         label = _normalised_label(track.label)
         return [track.label] if label and label != "unknown" else []
+
+    def belief_probabilities(self, track_id: str) -> dict[str, float]:
+        belief = self._beliefs.get(track_id)
+        return belief.exposed_probabilities() if belief is not None else {}
+
+    # --- Field Mode S-fixes tracking ---
+    def association_candidates(
+        self,
+        *,
+        timestamp_ns: int,
+        position_m: tuple[float, float, float],
+        measurement_covariance_m2: list[list[float]] | None,
+        label_category: str,
+        evidence: dict[str, float],
+        tracks: list[TrackState],
+        track_filter: TrackFilter,
+    ) -> list[TrackState]:
+        """Tracks the associator may consider: species-compatible, and not a
+        perch another concurrently singing bird of the species would be merged into."""
+        candidates = tracks
+        if self.belief_applies(label_category):
+            candidates = species_compatible_tracks(
+                candidates,
+                detection_evidence=evidence,
+                belief_for_track=self.belief_probabilities,
+                weak_claim_fits_track=lambda track: weak_claim_sits_on_track_perch(
+                    position_m=position_m,
+                    measurement_covariance_m2=measurement_covariance_m2,
+                    track=track,
+                    snap_distance_m=self._concurrent_perch_guard.snap_distance_m,
+                ),
+                config=self._species_association_gate,
+            )
+        if (
+            self._concurrent_perch_guard.enabled
+            and isinstance(track_filter, MotionModelRoutingTrackFilter)
+            and track_filter.category_is_perched(label_category)
+        ):
+            conflicts = concurrently_active_perch_conflicts(
+                timestamp_ns=timestamp_ns,
+                position_m=position_m,
+                measurement_covariance_m2=measurement_covariance_m2,
+                detection_species=max(evidence.items(), key=lambda item: item[1])[0] if evidence else None,
+                tracks=candidates,
+                top_species_for=lambda track: self.track_top_species(track, 1),
+                is_perched=track_filter.is_perched,
+                config=self._concurrent_perch_guard,
+            )
+            candidates = [track for track in candidates if track.id not in conflicts]
+        return candidates
+    # --- end Field Mode S-fixes tracking ---
 
     def is_hidden(self, track_id: str) -> bool:
         """A sub-display-only track whose belief never reached the display threshold."""

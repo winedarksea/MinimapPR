@@ -109,6 +109,12 @@ impl Stage1CapturePipeline {
         self.detector.last_frame_diagnostics().contrast_db
     }
 
+    /// Device-clock index just past the newest sample. Not `samples_received`:
+    /// that excludes gap frames and would drift from the device clock.
+    pub fn next_expected_device_sample_index(&self) -> u64 {
+        self.rolling_buffer_first_index + self.rolling_buffer.len() as u64
+    }
+
     pub fn clips_supported(&self) -> bool {
         self.clip_decimator.is_some()
     }
@@ -196,7 +202,7 @@ impl Stage1CapturePipeline {
     }
 
     fn append_to_rolling_buffer(&mut self, first_device_sample_index: u64, samples: &[f32]) {
-        let expected_index = self.rolling_buffer_first_index + self.rolling_buffer.len() as u64;
+        let expected_index = self.next_expected_device_sample_index();
         if self.rolling_buffer.is_empty() || first_device_sample_index != expected_index {
             if !self.rolling_buffer.is_empty() {
                 self.counters.capture_gaps += 1;

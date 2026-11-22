@@ -10,6 +10,8 @@ pub mod configuration;
 pub mod detector;
 pub mod noise_fill;
 pub mod noise_floor;
+// W4-port-server-track (S5): per-node noise-floor-relative trigger.
+pub mod noise_floor_relative_trigger;
 
 pub use configuration::{Stage1Configuration, Stage1DetectionMode};
 pub use detector::{

@@ -51,6 +51,15 @@ class BirdEntityBearingEstimate:
     range_max_m: float | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class EntityFixSample:
+    """One raw localized fix observed into an entity (Field Mode S-fixes tracking)."""
+
+    event_time_ns: int
+    position_m: Vec3
+    covariance_m2: list[list[float]] | None = None
+
+
 @dataclass(slots=True)
 class BirdEntityRecord:
     entity_id: str
@@ -77,13 +86,20 @@ class BirdEntityRecord:
     absorbed_detection_count: int = 0
     # Last "just sang" pulse (any absorbed or observed bout).
     last_pulse_ns: int = 0
+    # Field Mode S-fixes tracking: recent raw fixes, for the concurrency check.
+    recent_fixes: list[EntityFixSample] = field(default_factory=list)
 
     @property
     def is_spatial(self) -> bool:
         return self.state != ENTITY_STATE_HEARD_NEARBY
 
-    def believes_label(self, label: str) -> bool:
-        return label == self.species_top_label or label in self.species_belief
+    def believes_label(self, label: str, min_probability: float = 0.0) -> bool:
+        """Top species, or a belief of at least *min_probability* (0 = merely present)."""
+        if label == self.species_top_label:
+            return True
+        if label not in self.species_belief:
+            return False
+        return self.species_belief[label] >= min_probability
 
     def anchor_position_m(self) -> Vec3 | None:
         """Where the entity is for matching: its position, else its reporting node."""

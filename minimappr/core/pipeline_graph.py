@@ -425,6 +425,14 @@ def build_pipeline_graph(
             _param("Narrowband → envelope", float(settings.onset_narrowband_bandwidth_hz), "onset_narrowband_bandwidth_hz", suffix=" Hz"),
             _param("Cluster radius", float(settings.onset_cluster_radius_m), "onset_cluster_radius_m", suffix=" m"),
             _param("Max clusters", int(settings.onset_cluster_max_count), "onset_cluster_max_count"),
+            # --- Field Mode S-fixes onset ---
+            _param("Max intra-node weight share", float(settings.onset_frame_max_intra_node_weight_share), "onset_frame_max_intra_node_weight_share"),
+            _param("Node near-field shells", int(settings.onset_srp_node_grid_ring_count), "onset_srp_node_grid_ring_count"),
+            _param("Ground/canopy prior", bool(settings.onset_ground_prior_enabled), "onset_ground_prior_enabled"),
+            _param("Canopy ceiling", float(settings.onset_source_max_height_above_ground_m), "onset_source_max_height_above_ground_m", suffix=" m"),
+            _param("Range profile", bool(settings.onset_range_profile_enabled), "onset_range_profile_enabled"),
+            _param("Max range interval ratio", float(settings.onset_range_observable_max_interval_ratio), "onset_range_observable_max_interval_ratio"),
+            # --- end Field Mode S-fixes onset ---
         ],
         status=_onset_srp_status(metrics, fusion_available, bool(settings.localization_onset_clustering_enabled)),
         link="/settings/config#localization",
@@ -689,6 +697,23 @@ def _field_mode_tracker_params(tc, settings) -> list[PipelineParam]:
                 else "tracking_species_display_min_belief",
             )
         )
+        # --- Field Mode S-fixes tracking ---
+        params.append(
+            _param(
+                "Species association gate",
+                bool(getattr(tc, "tracking_species_association_gate_enabled", True)),
+                "tracking_species_association_gate_enabled",
+            )
+        )
+    if tc.tracking_perched_filter_enabled:
+        params.append(
+            _param(
+                "Concurrent-perch guard",
+                bool(getattr(tc, "tracking_perched_concurrent_perch_guard_enabled", True)),
+                "tracking_perched_concurrent_perch_guard_enabled",
+            )
+        )
+        # --- end Field Mode S-fixes tracking ---
     return params
 
 
@@ -733,6 +758,18 @@ def _field_mode_entity_params(settings) -> list[PipelineParam]:
                     "entity_notification_grace_seconds",
                     suffix=" s",
                 ),
+                # --- Field Mode S-fixes tracking ---
+                _param(
+                    "Covariance absorption",
+                    bool(settings.entity_absorption_covariance_gate_enabled),
+                    "entity_absorption_covariance_gate_enabled",
+                ),
+                _param(
+                    "Fused canonical row",
+                    bool(settings.entity_canonical_row_fused_position_enabled),
+                    "entity_canonical_row_fused_position_enabled",
+                ),
+                # --- end Field Mode S-fixes tracking ---
             ]
         )
     return params

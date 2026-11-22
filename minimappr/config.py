@@ -483,6 +483,18 @@ class TrackingConfig:
     tracking_partial_binding_soft_update_gain: float = 0.3
     tracking_partial_binding_ambiguity_score_ratio: float = 0.5
     # --- end Field Mode W2-tracker ---
+    # --- Field Mode S-fixes tracking --- (core/track_species_association_gate.py,
+    # core/track_perched_concurrency.py). Active only with their parent flags.
+    # With species log-odds: a detection claiming one species (score >= the
+    # claim floor) never associates to a track confident in another species.
+    tracking_species_association_gate_enabled: bool = True
+    tracking_species_association_confident_probability: float = 0.5
+    tracking_species_association_detection_claim_probability: float = 0.15
+    # With the perched filter: a fix on another perch never snaps a track that
+    # sang < min_silence ago or has a same-species neighbour active this recently.
+    tracking_perched_concurrent_perch_guard_enabled: bool = True
+    tracking_perched_concurrent_activity_seconds: float = 30.0
+    # --- end Field Mode S-fixes tracking ---
 
     def stale_seconds_for(self, label_category: str) -> float:
         """Stale window for *label_category*, falling back to the base window."""
@@ -541,6 +553,7 @@ def field_mode_tracker_setting_errors(values) -> list[str]:
         "tracking_perched_relocation_ghost_seconds",
         "tracking_partial_binding_window_seconds",
         "tracking_partial_binding_soft_update_gain",
+        "tracking_perched_concurrent_activity_seconds",  # Field Mode S-fixes tracking
     ):
         if float(getattr(values, key)) < 0.0:
             errors.append(f"{key}: must be >= 0")
@@ -564,7 +577,12 @@ def field_mode_tracker_setting_errors(values) -> list[str]:
             errors.append(f"{key}: must be >= 1")
     if not 0.0 < float(values.tracking_species_log_odds_prior_probability) < 1.0:
         errors.append("tracking_species_log_odds_prior_probability: must be in (0, 1)")
-    for key in ("tracking_species_display_min_belief", "birdnet_localize_to_track_min_confidence"):
+    for key in (
+        "tracking_species_display_min_belief",
+        "birdnet_localize_to_track_min_confidence",
+        "tracking_species_association_confident_probability",  # Field Mode S-fixes tracking
+        "tracking_species_association_detection_claim_probability",  # Field Mode S-fixes tracking
+    ):
         if not 0.0 <= float(getattr(values, key)) <= 1.0:
             errors.append(f"{key}: must be in [0, 1]")
     return errors
@@ -638,6 +656,30 @@ class OnsetSrpClusteringConfig:
     level_consistency_margin_db: float
     persistence_min_independent_onsets: int
     dedupe_ttl_seconds: float
+    # --- Field Mode S-fixes onset ---
+    frame_max_intra_node_weight_share: float
+    srp_node_grid_ring_count: int
+    srp_node_grid_min_range_m: float
+    srp_node_grid_max_range_m: float
+    srp_node_grid_azimuth_step_deg: float
+    srp_node_grid_elevation_step_deg: float
+    ground_prior_enabled: bool
+    node_height_above_ground_m: float
+    source_max_height_above_ground_m: float
+    planar_layout_max_flatness_ratio: float
+    height_mirror_min_score_ratio: float
+    range_profile_enabled: bool
+    range_profile_min_range_m: float
+    range_profile_max_range_m: float
+    range_profile_sample_count: int
+    range_profile_cone_half_angle_deg: float
+    range_profile_cone_step_deg: float
+    range_profile_support_ratio: float
+    range_observable_max_interval_ratio: float
+    range_observable_interval_floor_aperture_fraction: float
+    near_node_level_tolerance_db: float
+    same_source_max_tdoa_difference_seconds: float
+    # --- end Field Mode S-fixes onset ---
 # --- end Field Mode W2-onset-srp ---
 # --- Field Mode W3-birdnet-cutover ---
 # Quantile-matched V3 equivalents of the v2.4 defaults 0.50 / 0.15 / 0.50
@@ -685,6 +727,44 @@ class RelativeTriggerConfig:
     minimum_rms: float
     fluctuation_multiplier: float
 # --- end Field Mode W3-attribution ---
+
+
+# --- Field Mode S-fixes onset ---
+def _validate_onset_s_fixes_settings(settings) -> None:
+    positive = (
+        "onset_srp_node_grid_min_range_m", "onset_srp_node_grid_azimuth_step_deg",
+        "onset_srp_node_grid_elevation_step_deg", "onset_source_max_height_above_ground_m",
+        "onset_range_profile_min_range_m", "onset_range_profile_cone_step_deg",
+    )
+    for key in positive:
+        if getattr(settings, key) <= 0.0:
+            raise ValueError(f"{key} must be > 0")
+    for key in ("onset_srp_node_grid_ring_count", "onset_node_height_above_ground_m", "onset_range_profile_cone_half_angle_deg"):
+        if getattr(settings, key) < 0:
+            raise ValueError(f"{key} must be >= 0")
+    if settings.onset_srp_node_grid_max_range_m < settings.onset_srp_node_grid_min_range_m:
+        raise ValueError("onset_srp_node_grid_max_range_m must be >= onset_srp_node_grid_min_range_m")
+    if settings.onset_range_profile_max_range_m <= settings.onset_range_profile_min_range_m:
+        raise ValueError("onset_range_profile_max_range_m must exceed onset_range_profile_min_range_m")
+    if settings.onset_range_profile_sample_count < 2:
+        raise ValueError("onset_range_profile_sample_count must be >= 2")
+    if not 0.0 < settings.onset_range_profile_support_ratio < 1.0:
+        raise ValueError("onset_range_profile_support_ratio must be in (0, 1)")
+    if settings.onset_range_observable_max_interval_ratio <= 1.0:
+        raise ValueError("onset_range_observable_max_interval_ratio must be > 1")
+    if not 0.0 < settings.onset_frame_max_intra_node_weight_share <= 1.0:
+        raise ValueError("onset_frame_max_intra_node_weight_share must be in (0, 1]")
+    if settings.onset_same_source_max_tdoa_difference_seconds < 0.0:
+        raise ValueError("onset_same_source_max_tdoa_difference_seconds must be >= 0")
+    if settings.onset_near_node_level_tolerance_db < 0.0:
+        raise ValueError("onset_near_node_level_tolerance_db must be >= 0")
+    if settings.onset_range_observable_interval_floor_aperture_fraction < 0.0:
+        raise ValueError("onset_range_observable_interval_floor_aperture_fraction must be >= 0")
+    if settings.onset_height_mirror_min_score_ratio < 1.0:
+        raise ValueError("onset_height_mirror_min_score_ratio must be >= 1")
+    if settings.onset_planar_layout_max_flatness_ratio < 0.0:
+        raise ValueError("onset_planar_layout_max_flatness_ratio must be >= 0")
+# --- end Field Mode S-fixes onset ---
 
 
 @dataclass(slots=True)
@@ -1246,6 +1326,55 @@ class Settings:
     onset_persistence_min_independent_onsets: int = 2
     # Onsets already localized are remembered this long so overlapping windows do not duplicate birds.
     onset_dedupe_ttl_seconds: float = 6.0
+    # --- Field Mode S-fixes onset ---
+    # Multi-node windows: one node's own (range-blind) compact pairs carry at most this share of
+    # a frame's SRP weight, so a source next to that node is still placed by cross-node pairs.
+    onset_frame_max_intra_node_weight_share: float = 0.35
+    # Polar shells around each node so a source ~1-8 m from one node is sampled finely (0 = off).
+    onset_srp_node_grid_ring_count: int = 8
+    # Innermost node shell radius.
+    onset_srp_node_grid_min_range_m: float = 0.5
+    # Outermost node shell radius.
+    onset_srp_node_grid_max_range_m: float = 8.0
+    # Node-shell azimuth step.
+    onset_srp_node_grid_azimuth_step_deg: float = 5.0
+    # Node-shell elevation step.
+    onset_srp_node_grid_elevation_step_deg: float = 10.0
+    # Sources lie between the ground and the canopy ceiling (grid + LM bounds + mirror choice).
+    onset_ground_prior_enabled: bool = True
+    # Ground lies this far below the node plane (fitted through node centroids).
+    onset_node_height_above_ground_m: float = 1.5
+    # Canopy ceiling: highest plausible source above ground.
+    onset_source_max_height_above_ground_m: float = 50.0
+    # Node centroids flatter than this (out-of-plane / in-plane spread) are planar: height has a mirror twin.
+    onset_planar_layout_max_flatness_ratio: float = 0.1
+    # A height and its node-plane mirror are told apart only if one's SRP beats the other's by this ratio.
+    onset_height_mirror_min_score_ratio: float = 1.05
+    # Judge range observability from the cluster's SRP profile along its bearing.
+    onset_range_profile_enabled: bool = True
+    # Nearest range sampled by the profile (from the layout centroid).
+    onset_range_profile_min_range_m: float = 0.5
+    # Farthest range sampled by the profile.
+    onset_range_profile_max_range_m: float = 1000.0
+    # Log-spaced ranges in the profile.
+    onset_range_profile_sample_count: int = 96
+    # Profile follows the SRP ridge within this cone around the bearing.
+    onset_range_profile_cone_half_angle_deg: float = 3.0
+    # Angular step inside that cone.
+    onset_range_profile_cone_step_deg: float = 1.0
+    # Ranges whose SRP is at least this fraction of the profile peak are supported.
+    onset_range_profile_support_ratio: float = 0.9
+    # Supported range interval wider than this (far / near) => range_bearing_projected.
+    onset_range_observable_max_interval_ratio: float = 2.0
+    # ... or narrower than this fraction of the layout aperture (inside the layout any ratio is large).
+    onset_range_observable_interval_floor_aperture_fraction: float = 0.5
+    # A fix in a node's near field must be louder there than at the farthest node by the
+    # spreading prediction minus this (else a weaker cluster is tentative).
+    onset_near_node_level_tolerance_db: float = 10.0
+    # Two accepted clusters whose fixes predict cross-node TDOAs this close are one source
+    # (planar layouts leave a ridge of TDOA-equivalent 3-D points); the weaker is held.
+    onset_same_source_max_tdoa_difference_seconds: float = 0.0015
+    # --- end Field Mode S-fixes onset ---
     # --- end Field Mode W2-onset-srp ---
     # --- Field Mode W3-attribution ---
     # Master flag: attribute classifier labels to onset clusters sharing a window (SNR gradient, then LOCO).
@@ -1430,6 +1559,28 @@ class Settings:
     entity_maintenance_interval_seconds: float = 1.0
     entity_max_tracked_entities: int = 512
     # --- end Field Mode W3-entity ---
+    # --- Field Mode S-fixes tracking --- (core/track_species_association_gate.py,
+    # core/track_perched_concurrency.py). Active only with their parent flags.
+    # With species log-odds: a detection claiming one species (score >= the
+    # claim floor) never associates to a track confident in another species.
+    tracking_species_association_gate_enabled: bool = True
+    tracking_species_association_confident_probability: float = 0.5
+    tracking_species_association_detection_claim_probability: float = 0.15
+    # With the perched filter: a fix on another perch never snaps a track that
+    # sang < min_silence ago or has a same-species neighbour active this recently.
+    tracking_perched_concurrent_perch_guard_enabled: bool = True
+    tracking_perched_concurrent_activity_seconds: float = 30.0
+    # --- end Field Mode S-fixes tracking ---
+    # --- Field Mode S-fixes tracking --- entity absorption (knob meanings:
+    # core/entity_reporting_config.py) + the tracker keys above.
+    entity_absorption_min_species_belief: float = 0.3
+    entity_absorption_covariance_gate_enabled: bool = True
+    entity_absorption_chi2_gate: float = 9.21
+    entity_absorption_min_fix_distance_m: float = 3.0
+    entity_concurrent_fix_window_seconds: float = 2.0
+    entity_bearing_evidence_absorption_enabled: bool = True
+    entity_canonical_row_fused_position_enabled: bool = True
+    # --- end Field Mode S-fixes tracking ---
 
     fusion_worker_count: int = 2
     fusion_event_queue_size: int = 512
@@ -2127,6 +2278,9 @@ class Settings:
         ):
             if not 0.0 <= getattr(self, _onset_key) <= 1.0:
                 raise ValueError(f"{_onset_key} must be in [0, 1]")
+        # --- Field Mode S-fixes onset ---
+        _validate_onset_s_fixes_settings(self)
+        # --- end Field Mode S-fixes onset ---
         # --- end Field Mode W2-onset-srp ---
         # --- Field Mode W3-birdnet-cutover ---
         from minimappr.classifiers.birdnet_threshold_set import birdnet_cutover_setting_errors  # noqa: PLC0415
@@ -2812,6 +2966,32 @@ class Settings:
             onset_level_consistency_margin_db=_env_float("MINIMAPPR_ONSET_LEVEL_CONSISTENCY_MARGIN_DB", 8.0),
             onset_persistence_min_independent_onsets=_env_int("MINIMAPPR_ONSET_PERSISTENCE_MIN_INDEPENDENT_ONSETS", 2),
             onset_dedupe_ttl_seconds=_env_float("MINIMAPPR_ONSET_DEDUPE_TTL_SECONDS", 6.0),
+            # --- Field Mode S-fixes onset ---
+            onset_frame_max_intra_node_weight_share=_env_float("MINIMAPPR_ONSET_FRAME_MAX_INTRA_NODE_WEIGHT_SHARE", 0.35),
+            onset_srp_node_grid_ring_count=_env_int("MINIMAPPR_ONSET_SRP_NODE_GRID_RING_COUNT", 8),
+            onset_srp_node_grid_min_range_m=_env_float("MINIMAPPR_ONSET_SRP_NODE_GRID_MIN_RANGE_M", 0.5),
+            onset_srp_node_grid_max_range_m=_env_float("MINIMAPPR_ONSET_SRP_NODE_GRID_MAX_RANGE_M", 8.0),
+            onset_srp_node_grid_azimuth_step_deg=_env_float("MINIMAPPR_ONSET_SRP_NODE_GRID_AZIMUTH_STEP_DEG", 5.0),
+            onset_srp_node_grid_elevation_step_deg=_env_float("MINIMAPPR_ONSET_SRP_NODE_GRID_ELEVATION_STEP_DEG", 10.0),
+            onset_ground_prior_enabled=_env_bool("MINIMAPPR_ONSET_GROUND_PRIOR_ENABLED", True),
+            onset_node_height_above_ground_m=_env_float("MINIMAPPR_ONSET_NODE_HEIGHT_ABOVE_GROUND_M", 1.5),
+            onset_source_max_height_above_ground_m=_env_float("MINIMAPPR_ONSET_SOURCE_MAX_HEIGHT_ABOVE_GROUND_M", 50.0),
+            onset_planar_layout_max_flatness_ratio=_env_float("MINIMAPPR_ONSET_PLANAR_LAYOUT_MAX_FLATNESS_RATIO", 0.1),
+            onset_height_mirror_min_score_ratio=_env_float("MINIMAPPR_ONSET_HEIGHT_MIRROR_MIN_SCORE_RATIO", 1.05),
+            onset_range_profile_enabled=_env_bool("MINIMAPPR_ONSET_RANGE_PROFILE_ENABLED", True),
+            onset_range_profile_min_range_m=_env_float("MINIMAPPR_ONSET_RANGE_PROFILE_MIN_RANGE_M", 0.5),
+            onset_range_profile_max_range_m=_env_float("MINIMAPPR_ONSET_RANGE_PROFILE_MAX_RANGE_M", 1000.0),
+            onset_range_profile_sample_count=_env_int("MINIMAPPR_ONSET_RANGE_PROFILE_SAMPLE_COUNT", 96),
+            onset_range_profile_cone_half_angle_deg=_env_float("MINIMAPPR_ONSET_RANGE_PROFILE_CONE_HALF_ANGLE_DEG", 3.0),
+            onset_range_profile_cone_step_deg=_env_float("MINIMAPPR_ONSET_RANGE_PROFILE_CONE_STEP_DEG", 1.0),
+            onset_range_profile_support_ratio=_env_float("MINIMAPPR_ONSET_RANGE_PROFILE_SUPPORT_RATIO", 0.9),
+            onset_range_observable_max_interval_ratio=_env_float("MINIMAPPR_ONSET_RANGE_OBSERVABLE_MAX_INTERVAL_RATIO", 2.0),
+            onset_range_observable_interval_floor_aperture_fraction=_env_float("MINIMAPPR_ONSET_RANGE_OBSERVABLE_INTERVAL_FLOOR_APERTURE_FRACTION", 0.5),
+            onset_near_node_level_tolerance_db=_env_float("MINIMAPPR_ONSET_NEAR_NODE_LEVEL_TOLERANCE_DB", 10.0),
+            onset_same_source_max_tdoa_difference_seconds=_env_float(
+                "MINIMAPPR_ONSET_SAME_SOURCE_MAX_TDOA_DIFFERENCE_SECONDS", 0.0015
+            ),
+            # --- end Field Mode S-fixes onset ---
             # --- end Field Mode W2-onset-srp ---
             # --- Field Mode W3-attribution ---
             onset_attribution_enabled=_env_bool("MINIMAPPR_ONSET_ATTRIBUTION_ENABLED", False),
@@ -2962,6 +3142,30 @@ class Settings:
             entity_maintenance_interval_seconds=_env_float("MINIMAPPR_ENTITY_MAINTENANCE_INTERVAL_SECONDS", 1.0),
             entity_max_tracked_entities=_env_int("MINIMAPPR_ENTITY_MAX_TRACKED_ENTITIES", 512),
             # --- end Field Mode W3-entity ---
+            # --- Field Mode S-fixes tracking ---
+            tracking_species_association_gate_enabled=_env_bool("MINIMAPPR_TRACKING_SPECIES_ASSOCIATION_GATE_ENABLED", True),
+            tracking_species_association_confident_probability=_env_float(
+                "MINIMAPPR_TRACKING_SPECIES_ASSOCIATION_CONFIDENT_PROBABILITY", 0.5
+            ),
+            tracking_species_association_detection_claim_probability=_env_float(
+                "MINIMAPPR_TRACKING_SPECIES_ASSOCIATION_DETECTION_CLAIM_PROBABILITY", 0.15
+            ),
+            tracking_perched_concurrent_perch_guard_enabled=_env_bool(
+                "MINIMAPPR_TRACKING_PERCHED_CONCURRENT_PERCH_GUARD_ENABLED", True
+            ),
+            tracking_perched_concurrent_activity_seconds=_env_float(
+                "MINIMAPPR_TRACKING_PERCHED_CONCURRENT_ACTIVITY_SECONDS", 30.0
+            ),
+            entity_absorption_min_species_belief=_env_float("MINIMAPPR_ENTITY_ABSORPTION_MIN_SPECIES_BELIEF", 0.3),
+            entity_absorption_covariance_gate_enabled=_env_bool("MINIMAPPR_ENTITY_ABSORPTION_COVARIANCE_GATE_ENABLED", True),
+            entity_absorption_chi2_gate=_env_float("MINIMAPPR_ENTITY_ABSORPTION_CHI2_GATE", 9.21),
+            entity_absorption_min_fix_distance_m=_env_float("MINIMAPPR_ENTITY_ABSORPTION_MIN_FIX_DISTANCE_M", 3.0),
+            entity_concurrent_fix_window_seconds=_env_float("MINIMAPPR_ENTITY_CONCURRENT_FIX_WINDOW_SECONDS", 2.0),
+            entity_bearing_evidence_absorption_enabled=_env_bool("MINIMAPPR_ENTITY_BEARING_EVIDENCE_ABSORPTION_ENABLED", True),
+            entity_canonical_row_fused_position_enabled=_env_bool(
+                "MINIMAPPR_ENTITY_CANONICAL_ROW_FUSED_POSITION_ENABLED", True
+            ),
+            # --- end Field Mode S-fixes tracking ---
             fusion_worker_count=_env_int("MINIMAPPR_FUSION_WORKER_COUNT", 2),
             fusion_event_queue_size=_env_int("MINIMAPPR_FUSION_EVENT_QUEUE_SIZE", 512),
             fusion_localization_queue_size=_env_int("MINIMAPPR_FUSION_LOCALIZATION_QUEUE_SIZE", 1024),
@@ -3258,6 +3462,15 @@ class Settings:
             tracking_partial_binding_soft_update_gain=self.tracking_partial_binding_soft_update_gain,
             tracking_partial_binding_ambiguity_score_ratio=self.tracking_partial_binding_ambiguity_score_ratio,
             # --- end Field Mode W2-tracker ---
+            # --- Field Mode S-fixes tracking ---
+            tracking_species_association_gate_enabled=self.tracking_species_association_gate_enabled,
+            tracking_species_association_confident_probability=self.tracking_species_association_confident_probability,
+            tracking_species_association_detection_claim_probability=(
+                self.tracking_species_association_detection_claim_probability
+            ),
+            tracking_perched_concurrent_perch_guard_enabled=self.tracking_perched_concurrent_perch_guard_enabled,
+            tracking_perched_concurrent_activity_seconds=self.tracking_perched_concurrent_activity_seconds,
+            # --- end Field Mode S-fixes tracking ---
         )
 
     def ble_tracking_config(self) -> TrackingConfig:
@@ -3347,6 +3560,30 @@ class Settings:
             level_consistency_margin_db=self.onset_level_consistency_margin_db,
             persistence_min_independent_onsets=self.onset_persistence_min_independent_onsets,
             dedupe_ttl_seconds=self.onset_dedupe_ttl_seconds,
+            # --- Field Mode S-fixes onset ---
+            frame_max_intra_node_weight_share=self.onset_frame_max_intra_node_weight_share,
+            srp_node_grid_ring_count=self.onset_srp_node_grid_ring_count,
+            srp_node_grid_min_range_m=self.onset_srp_node_grid_min_range_m,
+            srp_node_grid_max_range_m=self.onset_srp_node_grid_max_range_m,
+            srp_node_grid_azimuth_step_deg=self.onset_srp_node_grid_azimuth_step_deg,
+            srp_node_grid_elevation_step_deg=self.onset_srp_node_grid_elevation_step_deg,
+            ground_prior_enabled=self.onset_ground_prior_enabled,
+            node_height_above_ground_m=self.onset_node_height_above_ground_m,
+            source_max_height_above_ground_m=self.onset_source_max_height_above_ground_m,
+            planar_layout_max_flatness_ratio=self.onset_planar_layout_max_flatness_ratio,
+            height_mirror_min_score_ratio=self.onset_height_mirror_min_score_ratio,
+            range_profile_enabled=self.onset_range_profile_enabled,
+            range_profile_min_range_m=self.onset_range_profile_min_range_m,
+            range_profile_max_range_m=self.onset_range_profile_max_range_m,
+            range_profile_sample_count=self.onset_range_profile_sample_count,
+            range_profile_cone_half_angle_deg=self.onset_range_profile_cone_half_angle_deg,
+            range_profile_cone_step_deg=self.onset_range_profile_cone_step_deg,
+            range_profile_support_ratio=self.onset_range_profile_support_ratio,
+            range_observable_max_interval_ratio=self.onset_range_observable_max_interval_ratio,
+            range_observable_interval_floor_aperture_fraction=self.onset_range_observable_interval_floor_aperture_fraction,
+            near_node_level_tolerance_db=self.onset_near_node_level_tolerance_db,
+            same_source_max_tdoa_difference_seconds=self.onset_same_source_max_tdoa_difference_seconds,
+            # --- end Field Mode S-fixes onset ---
         )
     # --- end Field Mode W2-onset-srp ---
     # --- Field Mode W3-birdnet-cutover ---

@@ -187,6 +187,15 @@ impl WebRelayDriver {
     pub fn shut_down(&self) {
         self.state.borrow_mut().shut_down = true;
         self.drop_socket(None);
+        // The socket closures and the application sink hold driver clones
+        // (Rc cycles), and the app stops calling `tick()` once shut down, so
+        // free them here. Deferred to a later task because shut_down may be
+        // running inside one of those closures.
+        let driver = self.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            driver.state.borrow_mut().retired_socket_callbacks.clear();
+            driver.event_sink.borrow_mut().take();
+        });
     }
 
     /// Writes ready frames until the queue empties or `bufferedAmount`

@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from minimappr.core.track_partial_binding import PartialConstraint
+from minimappr.core.track_perched_relocation import RelocationRevertListener
 from minimappr.models import TrackState, TrackStatus
 
 if TYPE_CHECKING:
@@ -22,6 +23,10 @@ class TrackManagerFieldModeMethods:
     @property
     def field_mode(self) -> FieldModeTrackExtensions:
         return self._field_mode
+
+    def add_relocation_revert_listener(self, listener: RelocationRevertListener) -> None:
+        """Called (under the tracker lock, synchronously) when a perched hop is undone."""
+        self._field_mode.relocation_gate.add_revert_listener(listener)
 
     async def bind_partial_constraints(
         self,

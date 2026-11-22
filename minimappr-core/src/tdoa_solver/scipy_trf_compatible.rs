@@ -41,6 +41,9 @@ pub struct TrfOutcome {
     /// SciPy's candidate filter also requires a finite final Jacobian.
     pub jacobian_finite: bool,
     pub function_evaluations: usize,
+    /// SciPy's `result.jac`: the robust-loss-scaled Jacobian at `position_m`
+    /// (in the model's residual units), the input to Jacobian covariances.
+    pub scaled_jacobian: DMatrix<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -52,7 +55,7 @@ pub struct TrfSettings {
 }
 
 /// soft_l1 with `f_scale = 1`: returns `(Σ ρ₀ / 2, ρ₁, ρ₂)`.
-fn soft_l1(residuals: &DVector<f64>) -> (f64, DVector<f64>, DVector<f64>) {
+pub(crate) fn soft_l1(residuals: &DVector<f64>) -> (f64, DVector<f64>, DVector<f64>) {
     let mut half_cost = 0.0;
     let mut first = DVector::zeros(residuals.len());
     let mut second = DVector::zeros(residuals.len());
@@ -65,7 +68,7 @@ fn soft_l1(residuals: &DVector<f64>) -> (f64, DVector<f64>, DVector<f64>) {
     (0.5 * half_cost, first, second)
 }
 
-fn soft_l1_cost(residuals: &DVector<f64>) -> f64 {
+pub(crate) fn soft_l1_cost(residuals: &DVector<f64>) -> f64 {
     0.5 * residuals
         .iter()
         .map(|residual| 2.0 * ((1.0 + residual * residual).sqrt() - 1.0))
@@ -73,7 +76,7 @@ fn soft_l1_cost(residuals: &DVector<f64>) -> f64 {
 }
 
 /// `scale_for_robust_loss_function`: row-scale J and rescale f.
-fn robust_scaled_system(
+pub(crate) fn robust_scaled_system(
     jacobian: &DMatrix<f64>,
     residuals: &DVector<f64>,
 ) -> (DMatrix<f64>, DVector<f64>) {
@@ -113,7 +116,7 @@ fn forward_difference_jacobian(
 }
 
 /// `solve_lsq_trust_region`: returns `(step, alpha)`.
-fn solve_trust_region_step(
+pub(crate) fn solve_trust_region_step(
     residual_count: usize,
     projected_residuals: &DVector<f64>,
     singular_values: &DVector<f64>,
@@ -182,7 +185,7 @@ fn solve_trust_region_step(
     (step, alpha)
 }
 
-fn update_trust_radius(
+pub(crate) fn update_trust_radius(
     radius: f64,
     actual: f64,
     predicted: f64,
@@ -206,7 +209,7 @@ fn update_trust_radius(
     (new_radius, ratio)
 }
 
-fn check_termination(
+pub(crate) fn check_termination(
     actual: f64,
     cost: f64,
     step_norm: f64,
@@ -329,5 +332,6 @@ pub fn scipy_trf_least_squares(
         success: status > 0,
         jacobian_finite: all_finite(jacobian.as_slice()),
         function_evaluations,
+        scaled_jacobian: jacobian,
     })
 }

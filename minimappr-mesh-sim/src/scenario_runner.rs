@@ -96,7 +96,7 @@ impl ScenarioRun {
             world,
             network,
             devices,
-            localizer: ArrivalClipLocalizer::default(),
+            localizer: ArrivalClipLocalizer { classifier_detection_snr_db: spec.world.classifier_detection_snr_db, ..ArrivalClipLocalizer::default() },
             metrics: RunMetrics::default(),
             site_plane,
             now_s: 0.0,

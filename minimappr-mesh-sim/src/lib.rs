@@ -13,6 +13,7 @@
 pub mod acoustic_world;
 pub mod device_harness;
 pub mod device_spec;
+pub mod entity_metrics;
 pub mod invariants;
 pub mod run_metrics;
 pub mod runner_actions;
@@ -23,6 +24,7 @@ pub mod scenarios;
 pub mod seeded_random;
 pub mod simulated_network;
 pub mod synthetic_clip;
+pub mod synthetic_clusters;
 
 pub use scenario_outcome::ScenarioOutcome;
 pub use scenario_runner::ScenarioRun;

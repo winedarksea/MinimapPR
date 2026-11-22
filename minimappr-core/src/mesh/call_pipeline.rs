@@ -12,7 +12,9 @@ use crate::protocol::detection_messages::{ClipPayload, ClipRequest, DetectionEve
 use crate::protocol::wire_codes::{FrequencyBandHz, SpeciesScore};
 use crate::protocol::{FieldMessage, NodeId};
 
+use super::call_attribution::attribute_window_clusters;
 use super::clip_budget::IslandClipBudget;
+use crate::onset_clustering::attribution_cascade::LocoRerunBudget;
 use super::config::DEVICE_SAMPLE_RATE_HZ;
 use super::event_matcher::{merge_species, EventMatcher, MatchDecision};
 use super::readiness_selection::{select_clip_nodes, ReadinessCandidate};
@@ -31,6 +33,8 @@ pub struct CallPipeline {
     next_message_id: u32,
     pub completed: Vec<LocalizedCallRecord>,
     pub counters: CallPipelineCounters,
+    /// S5 LOCO reruns per window (a call's clusters share one budget).
+    loco_budget: LocoRerunBudget,
 }
 
 fn island_aperture_m(ctx: &CallContext<'_>, island_id: u32) -> f64 {
@@ -331,14 +335,21 @@ impl CallPipeline {
                 island_id: call.island_id,
                 classifying_node: call.classifying_node,
                 centre_reference_s: call.centre_reference_s,
+                half_window_s: call.half_window_s,
                 clips,
                 chirality_confidence: record.chirality_confidence,
                 chirality_locked: record.chirality_locked,
             };
-            match localizer.localize(&request) {
-                Ok(fix) => {
+            match localizer.localize_clusters(&request) {
+                Ok(mut clusters) if !clusters.is_empty() => {
                     self.counters.calls_localized += 1;
-                    record.fix = Some(fix);
+                    attribute_window_clusters(&request, &mut clusters, localizer, &ctx.config.attribution, &mut self.loco_budget);
+                    record.fix = Some(clusters[0].fix.clone());
+                    record.clusters = clusters;
+                }
+                Ok(_) => {
+                    self.counters.calls_abandoned += 1;
+                    record.failure = Some("no source cluster".to_string());
                 }
                 Err(reason) => {
                     self.counters.calls_abandoned += 1;

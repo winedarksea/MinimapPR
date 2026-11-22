@@ -1564,6 +1564,7 @@ dependencies = [
 name = "minimappr-sim-gates"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "minimappr-core",
  "minimappr-mesh-sim",
  "minimappr-sim",

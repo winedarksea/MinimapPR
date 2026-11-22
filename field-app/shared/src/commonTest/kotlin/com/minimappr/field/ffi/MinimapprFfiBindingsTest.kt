@@ -63,6 +63,18 @@ class MinimapprFfiBindingsTest {
     }
 
     @Test
+    fun outOfRangeSizesFromKotlinAreTypedErrorsNotAllocations() {
+        val zeroSecondBuffer = FieldNodeConfiguration(rollingBufferSeconds = 0)
+        assertFailsWith<FieldFfiException.InvalidArgument> {
+            FieldMeshNode(skeletonSoloNodeSetup(zeroSecondBuffer, "jvm-test", "0"))
+        }
+        val tinyRollingBuffer = ShortArray(captureBlockSamples).toPcm16LittleEndianBytes()
+        assertFailsWith<FieldFfiException.InvalidArgument> {
+            encodeClipFromRollingBuffer(tinyRollingBuffer, 0uL, 0uL, UInt.MAX_VALUE, FieldDecimationFilter.BIRD_BAND_WITH_RUMBLE_CUT)
+        }
+    }
+
+    @Test
     fun runtimeFirstTickSendsAJoinRequestThroughTheTransport() {
         val sentKinds = mutableListOf<Int>()
         val transport = FieldOutboundFrameTransport { _, frame, _ ->

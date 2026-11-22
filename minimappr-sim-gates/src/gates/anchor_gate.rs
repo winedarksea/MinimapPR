@@ -2,9 +2,12 @@
 //! round re-solves the layout (new MDS frame, aligned onto the previous one
 //! as `MapAnchorFilter`'s contract requires), the layout is fitted to GPS
 //! (6 m σ: a slowly varying multipath bias plus jitter) and fed to the
-//! stillness-clamped filter. Gates: after settling the anchored phones
-//! drift < 1 m, and a persistent 20 m jump on one phone moves them < 1 m.
-//! The unfiltered per-round fit (what `mesh::island_sync_engine` publishes
+//! stillness-clamped filter. `anchor_stability` gates: after settling the
+//! anchored phones drift < 1 m, and a *transient* (30 s) 20 m jump on one
+//! phone moves them < 1 m. `anchor_persistent_jump` gates the strategy
+//! row read literally: a 20 m jump that *stays* (a phone settled under a
+//! hemlock keeps its multipath offset) also moves them < 1 m. The
+//! unfiltered per-round fit (what `mesh::island_sync_engine` publishes
 //! today) is measured alongside as a diagnostic.
 
 use minimappr_core::layout::anchor_filter::{AnchorFilterConfig, MapAnchorFilter};
@@ -176,5 +179,38 @@ pub fn anchor_stability(run: &GateRun) -> GateOutcome {
     outcome.summary(format!("20 m jump for {} s vs no-jump twin, filtered: median {:.3} m, max {:.3} m", anchor.jump_duration_s, median(&jump), percentile(&jump, 1.0)));
     outcome.summary(format!("same jump, unfiltered per-round fit (what the mesh publishes today): median {:.2} m, max {:.2} m", median(&unfiltered), percentile(&unfiltered, 1.0)));
     outcome.summary(format!("persistent 20 m jump (reported, not gated): filtered median {:.2} m, max {:.2} m", median(&persistent), percentile(&persistent, 1.0)));
+    outcome
+}
+
+/// A 20 m jump that persists while the group stays still, against the
+/// same seed's no-jump twin (filtered anchor). Per-seed rule: < 1 m.
+pub fn anchor_persistent_jump(run: &GateRun) -> GateOutcome {
+    let config = &run.config.anchor;
+    let results = run_trials_in_parallel(&run.seeds, run.threads, |seed| {
+        match (run_track(seed, run, JumpVariant::None), run_track(seed, run, JumpVariant::Persistent)) {
+            (Ok(still), Ok(persistent)) => Ok(largest_track_difference(&persistent, &still, config.jump_time_s, true)),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        }
+    });
+    let mut outcome = GateOutcome::new("anchor_persistent_jump", results.len());
+    let mut responses = Vec::new();
+    for (seed, result) in &results {
+        match result {
+            Ok(response) => {
+                responses.push(*response);
+                if *response > config.maximum_jump_response_m {
+                    outcome.fail_seed(*seed, format!("persistent {} m GPS jump moved the still anchor {response:.2} m", config.jump_distance_m));
+                }
+            }
+            Err(error) => outcome.fail_seed(*seed, format!("layout / anchor chain failed: {error}")),
+        }
+    }
+    outcome.summary(format!(
+        "persistent {} m jump vs no-jump twin, filtered: median {:.2} m, max {:.2} m (gate {} m)",
+        config.jump_distance_m,
+        median(&responses),
+        percentile(&responses, 1.0),
+        config.maximum_jump_response_m
+    ));
     outcome
 }

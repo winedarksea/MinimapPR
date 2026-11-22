@@ -297,6 +297,34 @@ impl Default for EntityContourConfig {
     }
 }
 
+/// Server-track entity tracking on the host (W4-port-server-track): every
+/// localized or unlocalized call goes through the perched tracker and the
+/// bird-entity registry, so one bird keeps one entity id across bouts.
+/// Disabled = one entity update per call (the W3 behaviour).
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntityTrackingConfig {
+    pub enabled: bool,
+    pub tracker: crate::wildlife_tracking::tracker_config::PerchedTrackerConfig,
+    pub entity: crate::bird_entity::config::BirdEntityConfig,
+    /// How often entities follow their tracks, step back and expire.
+    pub maintenance_interval_ms: MeshMilliseconds,
+    /// A fix whose used nodes' minor/major horizontal spread is below this is
+    /// mirror-ambiguous (near-collinear nodes): it never places an entity.
+    pub collinear_mirror_max_aspect_ratio: f64,
+}
+
+impl Default for EntityTrackingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            tracker: Default::default(),
+            entity: Default::default(),
+            maintenance_interval_ms: 1_000,
+            collinear_mirror_max_aspect_ratio: 0.2,
+        }
+    }
+}
+
 /// Everything a node or host needs.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct MeshConfig {
@@ -309,4 +337,7 @@ pub struct MeshConfig {
     pub thermal: ThermalConfig,
     pub rota: ClassificationRotaConfig,
     pub entity_contour: EntityContourConfig,
+    pub entity_tracking: EntityTrackingConfig,
+    /// S5 species attribution for windows holding several source clusters.
+    pub attribution: crate::onset_clustering::attribution_cascade::AttributionCascadeConfig,
 }

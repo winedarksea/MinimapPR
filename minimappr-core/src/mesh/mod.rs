@@ -19,6 +19,7 @@
 //! and as the state a successor host restores from ([`host_restoration`]).
 
 pub mod arrival_time_localizer;
+pub mod call_attribution;
 pub mod call_pipeline;
 pub mod call_pipeline_types;
 pub mod chirality_cue;
@@ -31,6 +32,7 @@ pub mod detection_outbox;
 pub mod event_log;
 pub mod event_matcher;
 pub mod fix_contour;
+pub mod host_entity_tracking;
 pub mod host_membership;
 pub mod host_message_handling;
 pub mod host_restoration;
