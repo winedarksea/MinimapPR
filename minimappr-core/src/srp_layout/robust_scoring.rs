@@ -28,7 +28,9 @@ pub fn pair_significance(curve: &PairCoherenceCurve, upsample_factor: usize, ful
     let independent_lag_count = (curve.values.len() / upsample_factor.max(1)).max(2) as f64;
     let noise_peak_z = (2.0 * independent_lag_count.ln()).sqrt();
     let peak_z = curve.peak_coherence as f64 * (curve.in_band_bin_count.max(1) as f64).sqrt();
-    ((peak_z - noise_peak_z) / (noise_peak_z * (full_weight_significance_ratio - 1.0))).clamp(0.0, 1.0)
+    // Ratio ≤ 1 would divide by zero (NaN weights); treat it as a hard step.
+    let ramp_width_z = noise_peak_z * (full_weight_significance_ratio - 1.0).max(f64::EPSILON);
+    ((peak_z - noise_peak_z) / ramp_width_z).clamp(0.0, 1.0)
 }
 
 /// A coherence curve plus its sensor positions and final weight.

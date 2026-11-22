@@ -41,6 +41,32 @@ pub enum LayoutSrpError {
     EmptyAnalysisWindow,
     /// Every pair's peak is at its noise-only level: nothing to localize.
     NoCoherentPairs,
+    /// A node position, mic offset, clock or pair weight is non-finite, or
+    /// the sample rate / sound speed is not positive. Rejected up front:
+    /// NaN geometry would otherwise silently burn the whole search budget.
+    InvalidInput { node_index: Option<usize> },
+}
+
+/// Reject inputs that would make every interval bound NaN.
+pub fn validate_layout_inputs(nodes: &[LayoutNode], config: &LayoutSrpConfig) -> Result<(), LayoutSrpError> {
+    if config.sample_rate_hz == 0 || !(config.sound_speed_mps.is_finite() && config.sound_speed_mps > 0.0) {
+        return Err(LayoutSrpError::InvalidInput { node_index: None });
+    }
+    for (node_index, node) in nodes.iter().enumerate() {
+        let clock = &node.clock;
+        let is_finite = node.position_m.iter().all(|value| value.is_finite())
+            && node.mic_offsets_m.iter().flatten().all(|value| value.is_finite())
+            && clock.anchor_sample_index.is_finite()
+            && clock.anchor_island_time_s.is_finite()
+            && clock.rate_ratio.is_finite()
+            && clock.rate_ratio > 0.0
+            && node.pair_weight.is_finite()
+            && node.pair_weight >= 0.0;
+        if !is_finite {
+            return Err(LayoutSrpError::InvalidInput { node_index: Some(node_index) });
+        }
+    }
+    Ok(())
 }
 
 impl std::fmt::Display for LayoutSrpError {

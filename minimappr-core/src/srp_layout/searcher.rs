@@ -6,8 +6,8 @@ use std::f64::consts::PI;
 use super::config::LayoutSrpConfig;
 use super::layout_geometry::{horizontal_dilution, horizontal_scatter, HorizontalScatter};
 use super::layout_input::{
-    align_clips_to_island_window, layout_sensors, plan_sensor_pairs, IslandAnalysisWindow, LayoutNode, LayoutSensor,
-    LayoutSrpError, NodeClip, PlannedPair,
+    align_clips_to_island_window, layout_sensors, plan_sensor_pairs, validate_layout_inputs, IslandAnalysisWindow,
+    LayoutNode, LayoutSensor, LayoutSrpError, NodeClip, PlannedPair,
 };
 use super::likelihood_region::{build_likelihood_region, choose_uncertainty_display};
 use super::lm_handoff::build_lm_seed;
@@ -17,6 +17,60 @@ use super::polar_grid::{CoarsePolarGrid, LayoutFrame, SearchCell};
 use super::refinement::{refine_branch_and_bound, RefinedEstimate, ScoredCell};
 use super::robust_scoring::{pair_significance, CellScore, PairSubset, RobustPairScorer, WeightedPair};
 use super::{LayoutGeometryDiagnostics, LayoutSrpResult, MirrorCandidates, SourceEstimate};
+
+/// The side chosen as primary plus its gaps over the other side.
+struct OrderedMirrorWinner {
+    estimate: RefinedEstimate,
+    score_gap_temperatures: f64,
+    array_score_gap_temperatures: f64,
+}
+
+/// Pick the primary side of a collinear layout.
+///
+/// Only rigid-array pairs may break the tie: on a near-line the inter-node
+/// cross-trail aperture (tens of cm) is within the layout solve's own
+/// position error, so its preference is not trustworthy even when the score
+/// gap is large. So when the array pairs decisively favour one side, that
+/// side is primary even if the all-pair score (driven by phone-position
+/// jitter) prefers the other; otherwise the all-pair winner is primary and
+/// the result stays unresolved. The array gap is measured in the array
+/// pairs' own temperature (T · Σw_array) so the threshold does not depend on
+/// how many phones are present.
+fn order_mirror_candidates(
+    left: RefinedEstimate,
+    right: RefinedEstimate,
+    scorer: &RobustPairScorer,
+    frame: &LayoutFrame,
+    config: &LayoutSrpConfig,
+) -> (OrderedMirrorWinner, RefinedEstimate) {
+    let scale = scorer.likelihood_scale();
+    let array_weight: f64 =
+        scorer.pairs.iter().filter(|pair| pair.sensor_a_node == pair.sensor_b_node).map(|pair| pair.weight).sum();
+    let array_gap_of = |primary: &RefinedEstimate, other: &RefinedEstimate| {
+        if array_weight > 0.0 {
+            (scorer.exact_cell_score_for(&primary.cell, frame, PairSubset::IntraNodeOnly)
+                - scorer.exact_cell_score_for(&other.cell, frame, PairSubset::IntraNodeOnly))
+                / (scorer.likelihood_temperature * array_weight)
+        } else {
+            0.0
+        }
+    };
+    let left_array_gap = array_gap_of(&left, &right);
+    let resolution_gap = config.uncertainty.mirror_resolution_score_gap_temperatures;
+    let left_is_primary = if left_array_gap.abs() > resolution_gap {
+        left_array_gap > 0.0
+    } else {
+        left.exact_score >= right.exact_score
+    };
+    let (primary, other, array_gap) =
+        if left_is_primary { (left, right, left_array_gap) } else { (right, left, -left_array_gap) };
+    let winner = OrderedMirrorWinner {
+        estimate: primary,
+        score_gap_temperatures: (primary.exact_score - other.exact_score) / scale,
+        array_score_gap_temperatures: array_gap,
+    };
+    (winner, other)
+}
 
 pub struct LayoutSrpSearcher {
     nodes: Vec<LayoutNode>,
@@ -32,6 +86,7 @@ pub struct LayoutSrpSearcher {
 
 impl LayoutSrpSearcher {
     pub fn new(nodes: &[LayoutNode], config: &LayoutSrpConfig) -> Result<Self, LayoutSrpError> {
+        validate_layout_inputs(nodes, config)?;
         let sensors = layout_sensors(nodes);
         let pairs = plan_sensor_pairs(nodes, &sensors, config);
         if sensors.len() < 2 || pairs.is_empty() {
@@ -186,31 +241,16 @@ impl LayoutSrpSearcher {
             let right = refine(&|cell| !is_left_of_axis(cell));
             match (left, right) {
                 (Some(left), Some(right)) => {
-                    let (winner, loser) = if left.exact_score >= right.exact_score { (left, right) } else { (right, left) };
-                    let scale = scorer.likelihood_scale();
-                    let gap = (winner.exact_score - loser.exact_score) / scale;
-                    // Only rigid-array pairs may break the tie: on a near-line the
-                    // inter-node cross-trail aperture (tens of cm) is within the
-                    // layout solve's own position error, so its preference is not
-                    // trustworthy even when the score gap is large.
-                    // Measured in the array pairs' own temperature (T · Σw_array) so
-                    // the threshold does not depend on how many phones are present.
-                    let array_weight: f64 = scorer.pairs.iter().filter(|pair| pair.sensor_a_node == pair.sensor_b_node).map(|pair| pair.weight).sum();
-                    let array_gap = if array_weight > 0.0 {
-                        (scorer.exact_cell_score_for(&winner.cell, &self.frame, PairSubset::IntraNodeOnly)
-                            - scorer.exact_cell_score_for(&loser.cell, &self.frame, PairSubset::IntraNodeOnly))
-                            / (scorer.likelihood_temperature * array_weight)
-                    } else {
-                        0.0
-                    };
+                    let (winner, loser) = order_mirror_candidates(left, right, &scorer, &self.frame, &self.config);
                     let mirror = MirrorCandidates {
-                        primary: self.source_estimate(&winner, &scorer),
+                        primary: self.source_estimate(&winner.estimate, &scorer),
                         mirror: self.source_estimate(&loser, &scorer),
-                        score_gap_temperatures: gap,
-                        array_score_gap_temperatures: array_gap,
-                        is_resolved: array_gap > self.config.uncertainty.mirror_resolution_score_gap_temperatures,
+                        score_gap_temperatures: winner.score_gap_temperatures,
+                        array_score_gap_temperatures: winner.array_score_gap_temperatures,
+                        is_resolved: winner.array_score_gap_temperatures
+                            > self.config.uncertainty.mirror_resolution_score_gap_temperatures,
                     };
-                    (winner, Some(mirror))
+                    (winner.estimate, Some(mirror))
                 }
                 (Some(only), None) | (None, Some(only)) => (only, None),
                 (None, None) => return Err(LayoutSrpError::NoCoherentPairs),
