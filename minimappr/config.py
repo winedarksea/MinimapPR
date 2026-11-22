@@ -639,6 +639,44 @@ BIRDNET_V3_DEFAULT_SPECIES_DISPLAY_MIN_BELIEF = 0.65
 # --- end Field Mode W3-birdnet-cutover ---
 
 
+# --- Field Mode W3-attribution ---
+@dataclass(slots=True)
+class OnsetClusterAttributionConfig:
+    """SNR-gradient + LOCO species attribution for onset clusters; built by
+    ``Settings.onset_cluster_attribution_config()`` (docs/field_mode_progress/attribution.md)."""
+
+    enabled: bool
+    audible_snr_db: float
+    dominance_margin_db: float
+    spreading_tolerance_db: float
+    loco_enabled: bool
+    loco_max_reruns_per_window: int
+    loco_min_confidence: float
+    loco_label_margin: float
+    loco_collapse_ratio: float
+    loco_stft_frame_seconds: float
+    loco_noise_floor_percentile: float
+    loco_mask_active_snr_db: float
+    loco_mask_release_seconds: float
+    loco_mask_max_seconds: float
+    loco_mask_band_padding_hz: float
+    promote_band_distinct_tentative: bool
+    mask_pre_roll_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class RelativeTriggerConfig:
+    """Noise-floor-relative ingest trigger (core/ingest_relative_trigger.py)."""
+
+    enabled: bool
+    snr_db: float
+    rise_seconds: float
+    fall_seconds: float
+    warmup_seconds: float
+    minimum_rms: float
+# --- end Field Mode W3-attribution ---
+
+
 @dataclass(slots=True)
 class StorageConfig:
     db_path: Path
@@ -1194,6 +1232,53 @@ class Settings:
     # Onsets already localized are remembered this long so overlapping windows do not duplicate birds.
     onset_dedupe_ttl_seconds: float = 6.0
     # --- end Field Mode W2-onset-srp ---
+    # --- Field Mode W3-attribution ---
+    # Master flag: attribute classifier labels to onset clusters sharing a window (SNR gradient, then LOCO).
+    onset_attribution_enabled: bool = False
+    # A cluster counts as heard on a node from this band SNR (dB above that node's floor).
+    onset_attribution_audible_snr_db: float = 3.0
+    # Gradient tier: target must out-read every in-window interferer on the classifying node by this much.
+    onset_attribution_dominance_margin_db: float = 10.0
+    # Gradient tier: max spreading-model residual / dominance misprediction before it falls to LOCO.
+    onset_attribution_spreading_tolerance_db: float = 6.0
+    # LOCO: mask other clusters with noise at the floor and rerun the classifier (in-memory only).
+    onset_attribution_loco_enabled: bool = True
+    # LOCO classifier reruns allowed per analysis window (shared by its clusters); beyond -> unlabelled.
+    onset_attribution_loco_max_reruns_per_window: int = 4
+    # LOCO rerun's top species must reach this confidence to settle the label.
+    onset_attribution_loco_min_confidence: float = 0.3
+    # ... and lead the runner-up species by this much.
+    onset_attribution_loco_label_margin: float = 0.1
+    # A label "collapsed" (belonged to a masked cluster) when its rerun score <= ratio x original.
+    onset_attribution_loco_collapse_ratio: float = 0.5
+    # STFT frame used for the time-frequency mask.
+    onset_attribution_loco_stft_frame_seconds: float = 0.02
+    # Per-bin noise floor = this percentile of the window's magnitudes (Rayleigh-corrected).
+    onset_attribution_loco_noise_floor_percentile: float = 20.0
+    # A masked region runs while its band stays this far above the floor ...
+    onset_attribution_loco_mask_active_snr_db: float = 6.0
+    # ... until quiet for this long ...
+    onset_attribution_loco_mask_release_seconds: float = 0.05
+    # ... capped at this duration.
+    onset_attribution_loco_mask_max_seconds: float = 1.0
+    # Masked band = the onset's rising band widened by this on each side.
+    onset_attribution_loco_mask_band_padding_hz: float = 150.0
+    # Single array: a cluster held only by persistence whose band differs from every accepted
+    # cluster (so not an echo/sidelobe) gets its own product for attribution to label.
+    onset_attribution_promote_band_distinct_tentative: bool = True
+    # Ingest: also trigger when a frame stands this far above the node's own tracked floor
+    # (OR with the absolute trigger_rms gate), so faint distant birds open windows.
+    trigger_noise_floor_relative_enabled: bool = False
+    trigger_noise_floor_relative_snr_db: float = 8.0
+    # Floor tracker: slow rise (a call barely lifts it) ...
+    trigger_noise_floor_rise_seconds: float = 20.0
+    # ... fast fall into quiet gaps.
+    trigger_noise_floor_fall_seconds: float = 0.5
+    # No relative trigger until a node's floor has seen this much audio.
+    trigger_noise_floor_warmup_seconds: float = 1.0
+    # Floor/level clamp so digital silence cannot make bit noise "loud".
+    trigger_noise_floor_minimum_rms: float = 1e-5
+    # --- end Field Mode W3-attribution ---
     detection_min_confidence: float = 0.4
     cop_detections_max_items: int = 150
     cop_tracks_max_items: int = 150
@@ -2031,6 +2116,35 @@ class Settings:
         if entity_reporting_errors:
             raise ValueError("; ".join(entity_reporting_errors))
         # --- end Field Mode W3-entity ---
+        # --- Field Mode W3-attribution ---
+        if self.onset_attribution_loco_max_reruns_per_window < 0:
+            raise ValueError("onset_attribution_loco_max_reruns_per_window must be >= 0")
+        for _attribution_key in (
+            "onset_attribution_dominance_margin_db", "onset_attribution_spreading_tolerance_db",
+            "onset_attribution_loco_stft_frame_seconds", "onset_attribution_loco_mask_release_seconds",
+            "onset_attribution_loco_mask_max_seconds",
+        ):
+            if getattr(self, _attribution_key) <= 0.0:
+                raise ValueError(f"{_attribution_key} must be > 0")
+        for _attribution_key in (
+            "onset_attribution_loco_min_confidence", "onset_attribution_loco_label_margin",
+            "onset_attribution_loco_collapse_ratio",
+        ):
+            if not 0.0 <= getattr(self, _attribution_key) <= 1.0:
+                raise ValueError(f"{_attribution_key} must be in [0, 1]")
+        if not 0.0 < self.onset_attribution_loco_noise_floor_percentile < 100.0:
+            raise ValueError("onset_attribution_loco_noise_floor_percentile must be in (0, 100)")
+        if self.onset_attribution_loco_mask_band_padding_hz < 0.0:
+            raise ValueError("onset_attribution_loco_mask_band_padding_hz must be >= 0")
+        for _trigger_key in (
+            "trigger_noise_floor_relative_snr_db", "trigger_noise_floor_rise_seconds",
+            "trigger_noise_floor_fall_seconds", "trigger_noise_floor_minimum_rms",
+        ):
+            if getattr(self, _trigger_key) <= 0.0:
+                raise ValueError(f"{_trigger_key} must be > 0")
+        if self.trigger_noise_floor_warmup_seconds < 0.0:
+            raise ValueError("trigger_noise_floor_warmup_seconds must be >= 0")
+        # --- end Field Mode W3-attribution ---
         if self.detection_min_confidence < 0.0 or self.detection_min_confidence > 1.0:
             raise ValueError("MINIMAPPR_DETECTION_MIN_CONFIDENCE must be in [0,1]")
         if self.cop_detections_max_items < 1:
@@ -2662,6 +2776,46 @@ class Settings:
             onset_persistence_min_independent_onsets=_env_int("MINIMAPPR_ONSET_PERSISTENCE_MIN_INDEPENDENT_ONSETS", 2),
             onset_dedupe_ttl_seconds=_env_float("MINIMAPPR_ONSET_DEDUPE_TTL_SECONDS", 6.0),
             # --- end Field Mode W2-onset-srp ---
+            # --- Field Mode W3-attribution ---
+            onset_attribution_enabled=_env_bool("MINIMAPPR_ONSET_ATTRIBUTION_ENABLED", False),
+            onset_attribution_audible_snr_db=_env_float("MINIMAPPR_ONSET_ATTRIBUTION_AUDIBLE_SNR_DB", 3.0),
+            onset_attribution_dominance_margin_db=_env_float("MINIMAPPR_ONSET_ATTRIBUTION_DOMINANCE_MARGIN_DB", 10.0),
+            onset_attribution_spreading_tolerance_db=_env_float(
+                "MINIMAPPR_ONSET_ATTRIBUTION_SPREADING_TOLERANCE_DB", 6.0
+            ),
+            onset_attribution_loco_enabled=_env_bool("MINIMAPPR_ONSET_ATTRIBUTION_LOCO_ENABLED", True),
+            onset_attribution_loco_max_reruns_per_window=_env_int(
+                "MINIMAPPR_ONSET_ATTRIBUTION_LOCO_MAX_RERUNS_PER_WINDOW", 4
+            ),
+            onset_attribution_loco_min_confidence=_env_float("MINIMAPPR_ONSET_ATTRIBUTION_LOCO_MIN_CONFIDENCE", 0.3),
+            onset_attribution_loco_label_margin=_env_float("MINIMAPPR_ONSET_ATTRIBUTION_LOCO_LABEL_MARGIN", 0.1),
+            onset_attribution_loco_collapse_ratio=_env_float("MINIMAPPR_ONSET_ATTRIBUTION_LOCO_COLLAPSE_RATIO", 0.5),
+            onset_attribution_loco_stft_frame_seconds=_env_float(
+                "MINIMAPPR_ONSET_ATTRIBUTION_LOCO_STFT_FRAME_SECONDS", 0.02
+            ),
+            onset_attribution_loco_noise_floor_percentile=_env_float(
+                "MINIMAPPR_ONSET_ATTRIBUTION_LOCO_NOISE_FLOOR_PERCENTILE", 20.0
+            ),
+            onset_attribution_loco_mask_active_snr_db=_env_float(
+                "MINIMAPPR_ONSET_ATTRIBUTION_LOCO_MASK_ACTIVE_SNR_DB", 6.0
+            ),
+            onset_attribution_loco_mask_release_seconds=_env_float(
+                "MINIMAPPR_ONSET_ATTRIBUTION_LOCO_MASK_RELEASE_SECONDS", 0.05
+            ),
+            onset_attribution_loco_mask_max_seconds=_env_float("MINIMAPPR_ONSET_ATTRIBUTION_LOCO_MASK_MAX_SECONDS", 1.0),
+            onset_attribution_loco_mask_band_padding_hz=_env_float(
+                "MINIMAPPR_ONSET_ATTRIBUTION_LOCO_MASK_BAND_PADDING_HZ", 150.0
+            ),
+            onset_attribution_promote_band_distinct_tentative=_env_bool(
+                "MINIMAPPR_ONSET_ATTRIBUTION_PROMOTE_BAND_DISTINCT_TENTATIVE", True
+            ),
+            trigger_noise_floor_relative_enabled=_env_bool("MINIMAPPR_TRIGGER_NOISE_FLOOR_RELATIVE_ENABLED", False),
+            trigger_noise_floor_relative_snr_db=_env_float("MINIMAPPR_TRIGGER_NOISE_FLOOR_RELATIVE_SNR_DB", 8.0),
+            trigger_noise_floor_rise_seconds=_env_float("MINIMAPPR_TRIGGER_NOISE_FLOOR_RISE_SECONDS", 20.0),
+            trigger_noise_floor_fall_seconds=_env_float("MINIMAPPR_TRIGGER_NOISE_FLOOR_FALL_SECONDS", 0.5),
+            trigger_noise_floor_warmup_seconds=_env_float("MINIMAPPR_TRIGGER_NOISE_FLOOR_WARMUP_SECONDS", 1.0),
+            trigger_noise_floor_minimum_rms=_env_float("MINIMAPPR_TRIGGER_NOISE_FLOOR_MINIMUM_RMS", 1e-5),
+            # --- end Field Mode W3-attribution ---
             detection_min_confidence=_env_float("MINIMAPPR_DETECTION_MIN_CONFIDENCE", 0.4),
             cop_detections_max_items=_env_int("MINIMAPPR_COP_DETECTIONS_MAX_ITEMS", 150),
             cop_tracks_max_items=_env_int("MINIMAPPR_COP_TRACKS_MAX_ITEMS", 150),
@@ -3157,6 +3311,39 @@ class Settings:
 
         return birdnet_threshold_set_for(self)
     # --- end Field Mode W3-birdnet-cutover ---
+
+    # --- Field Mode W3-attribution ---
+    def onset_cluster_attribution_config(self) -> OnsetClusterAttributionConfig:
+        return OnsetClusterAttributionConfig(
+            enabled=self.onset_attribution_enabled,
+            audible_snr_db=self.onset_attribution_audible_snr_db,
+            dominance_margin_db=self.onset_attribution_dominance_margin_db,
+            spreading_tolerance_db=self.onset_attribution_spreading_tolerance_db,
+            loco_enabled=self.onset_attribution_loco_enabled,
+            loco_max_reruns_per_window=self.onset_attribution_loco_max_reruns_per_window,
+            loco_min_confidence=self.onset_attribution_loco_min_confidence,
+            loco_label_margin=self.onset_attribution_loco_label_margin,
+            loco_collapse_ratio=self.onset_attribution_loco_collapse_ratio,
+            loco_stft_frame_seconds=self.onset_attribution_loco_stft_frame_seconds,
+            loco_noise_floor_percentile=self.onset_attribution_loco_noise_floor_percentile,
+            loco_mask_active_snr_db=self.onset_attribution_loco_mask_active_snr_db,
+            loco_mask_release_seconds=self.onset_attribution_loco_mask_release_seconds,
+            loco_mask_max_seconds=self.onset_attribution_loco_mask_max_seconds,
+            loco_mask_band_padding_hz=self.onset_attribution_loco_mask_band_padding_hz,
+            promote_band_distinct_tentative=self.onset_attribution_promote_band_distinct_tentative,
+            mask_pre_roll_seconds=self.onset_frame_pre_roll_seconds,
+        )
+
+    def relative_trigger_config(self) -> RelativeTriggerConfig:
+        return RelativeTriggerConfig(
+            enabled=self.trigger_noise_floor_relative_enabled,
+            snr_db=self.trigger_noise_floor_relative_snr_db,
+            rise_seconds=self.trigger_noise_floor_rise_seconds,
+            fall_seconds=self.trigger_noise_floor_fall_seconds,
+            warmup_seconds=self.trigger_noise_floor_warmup_seconds,
+            minimum_rms=self.trigger_noise_floor_minimum_rms,
+        )
+    # --- end Field Mode W3-attribution ---
 
     def storage_config(self) -> StorageConfig:
         return StorageConfig(

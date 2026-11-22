@@ -27,6 +27,9 @@ from minimappr.core.track_partial_constraint_evidence import build_partial_const
 from minimappr.models import LabelId, TrackState
 
 _LOCALIZABLE_CAPABILITY_TIERS = frozenset({"2d", "full_3d"})
+# Written into classification features by the onset stage (Field Mode W3-attribution).
+NODE_BAND_SNR_FEATURE_KEY = "onset_cluster_node_band_snr_db"
+AUDIBLE_SNR_FEATURE_KEY = "onset_cluster_audible_snr_db"
 
 
 @dataclass(slots=True)
@@ -122,6 +125,9 @@ async def resolve_detection_track(
             tdoa_s=tdoa_s,
             environment=environment,
             sigmas=field_mode.partial_constraint_sigmas,
+            # Field Mode W3-attribution: per-node levels from the onset stage, when present.
+            measured_node_band_snr_db=classification_features.get(NODE_BAND_SNR_FEATURE_KEY),
+            measured_level_audible_snr_db=classification_features.get(AUDIBLE_SNR_FEATURE_KEY),
         )
         track = await tracker.bind_partial_constraints(
             timestamp_ns=event_time_ns,

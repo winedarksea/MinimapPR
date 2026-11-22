@@ -327,6 +327,36 @@ class ClassificationOrchestrator:
             event_time_ns=event_time_ns,
         )
 
+    # --- Field Mode W3-attribution ---
+    async def rerun_classifier_on_prepared_signal(
+        self, signal: np.ndarray, sample_rate_hz: int
+    ) -> ClassificationResult:
+        """Classifier only, on an already rendered + preprocessed in-memory signal
+        (LOCO reruns): worker thread, same timeout/degradation as the main pass."""
+        return await self._classify_with_timeout(signal, sample_rate_hz)
+
+    async def relabel_classified_result(
+        self, classified: ClassifiedResult, classification: ClassificationResult, *, event_time_ns: int
+    ) -> ClassifiedResult:
+        """Swap in an attributed classification, re-resolving taxonomy and label id
+        (the texture gate already ran on the original window)."""
+        label_category = _resolve_label_category(classification, self._taxonomy_provider)
+        winner_member = classification.features.get("winner_member")
+        label_id = await self._storage.upsert_label(
+            name=classification.label,
+            category=label_category,
+            source=str(winner_member) if winner_member else self._classifier_backend_name,
+            created_ns=event_time_ns,
+        )
+        return replace(
+            classified,
+            classification=classification,
+            label_category=label_category,
+            iff_category=self._taxonomy_provider.iff_for_category(label_category),
+            label_id=label_id,
+        )
+    # --- end Field Mode W3-attribution ---
+
     def _prepare_signal_for_classification(
         self,
         signal: np.ndarray,

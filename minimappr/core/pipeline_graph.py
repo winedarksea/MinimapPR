@@ -235,6 +235,17 @@ def build_pipeline_graph(
             gate_id = f"gate:{node_id}"
             omni_min_rms = routing.context(CONTEXT_OMNI_CONTINUOUS).min_rms
             gate_params = [_param("Trigger RMS", float(settings.trigger_rms), "trigger_rms")]
+            # --- Field Mode W3-attribution --- noise-floor-relative trigger (OR'd with the RMS gate)
+            if settings.trigger_noise_floor_relative_enabled:
+                gate_params.append(
+                    _param(
+                        "Relative trigger",
+                        float(settings.trigger_noise_floor_relative_snr_db),
+                        "trigger_noise_floor_relative_snr_db",
+                        suffix=" dB over floor",
+                    )
+                )
+            # --- end Field Mode W3-attribution ---
             if omni_min_rms is not None:
                 gate_params.append(_param("Omni min RMS", float(omni_min_rms)))
             add_node(
@@ -395,6 +406,30 @@ def build_pipeline_graph(
         add_edge(gate_id, onset_id, kind="audio", label="onset frames")
     add_edge(onset_id, solve_id, kind="metadata", label="clusters")
     # --- end Field Mode W2-onset-srp ---
+    # --- Field Mode W3-attribution ---
+    attribution_id = "cls:site:onset_attribution"
+    attribution_enabled = bool(settings.onset_attribution_enabled and settings.localization_onset_clustering_enabled)
+    add_node(
+        id=attribution_id,
+        stage=PipelineStageKind.CLASSIFIER,
+        column="classify",
+        lane="site",
+        title="Cluster attribution",
+        subtitle="SNR gradient → LOCO rerun → else unlabelled",
+        modality="audio",
+        enabled=attribution_enabled,
+        params=[
+            _param("Enabled", bool(settings.onset_attribution_enabled), "onset_attribution_enabled"),
+            _param("Dominance margin", float(settings.onset_attribution_dominance_margin_db), "onset_attribution_dominance_margin_db", suffix=" dB"),
+            _param("LOCO", bool(settings.onset_attribution_loco_enabled), "onset_attribution_loco_enabled"),
+            _param("Reruns / window", int(settings.onset_attribution_loco_max_reruns_per_window), "onset_attribution_loco_max_reruns_per_window"),
+            _param("LOCO min confidence", float(settings.onset_attribution_loco_min_confidence), "onset_attribution_loco_min_confidence"),
+        ],
+        status=_onset_attribution_status(metrics, fusion_available, attribution_enabled),
+        link="/settings/config#localization",
+    )
+    add_edge(onset_id, attribution_id, kind="metadata", label="cluster levels + masks")
+    # --- end Field Mode W3-attribution ---
 
     # ── Site: beamform ──────────────────────────────────────────────────────
     beam_id = "beam:site"
@@ -1044,6 +1079,31 @@ def _onset_srp_status(metrics: dict, fusion_available: bool, enabled: bool) -> P
         ],
     )
 # --- end Field Mode W2-onset-srp ---
+
+
+# --- Field Mode W3-attribution ---
+def _onset_attribution_status(metrics: dict, fusion_available: bool, enabled: bool) -> PipelineStageStatus:
+    if not enabled:
+        return PipelineStageStatus(health="idle", summary="disabled (window label goes to every cluster)")
+    if not fusion_available:
+        return PipelineStageStatus(health="unknown")
+    windows = int(metrics.get("onset_attribution_window_count") or 0)
+    reruns = int(metrics.get("onset_attribution_loco_rerun_count") or 0)
+    rerun_ms = float(metrics.get("onset_attribution_loco_rerun_total_ms") or 0.0)
+    return PipelineStageStatus(
+        health="ok",
+        summary=(f"{windows} cluster windows, {reruns} LOCO reruns" if windows else "enabled; no windows yet"),
+        metrics=[
+            _param("Single cluster", int(metrics.get("onset_attribution_single_cluster_count") or 0)),
+            _param("SNR gradient", int(metrics.get("onset_attribution_snr_gradient_settled_count") or 0)),
+            _param("LOCO settled", int(metrics.get("onset_attribution_loco_settled_count") or 0)),
+            _param("Unlabelled", int(metrics.get("onset_attribution_unlabelled_count") or 0)),
+            _param("Rerun cap hits", int(metrics.get("onset_attribution_loco_rerun_cap_hit_count") or 0)),
+            _param("Mean rerun", round(rerun_ms / reruns, 1) if reruns else 0.0, suffix=" ms"),
+            _param("Promoted tentative", int(metrics.get("onset_attribution_promoted_tentative_count") or 0)),
+        ],
+    )
+# --- end Field Mode W3-attribution ---
 
 
 def _tdoa_status(metrics: dict, fusion_available: bool) -> PipelineStageStatus:

@@ -293,6 +293,31 @@ CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     "onset_persistence_min_independent_onsets": float,
     "onset_dedupe_ttl_seconds": float,
     # --- end Field Mode W2-onset-srp ---
+    # --- Field Mode W3-attribution --- restart-required: FusionNode builds the
+    # onset stage and the attributor once at construction.
+    "onset_attribution_enabled": bool,
+    "onset_attribution_audible_snr_db": float,
+    "onset_attribution_dominance_margin_db": float,
+    "onset_attribution_spreading_tolerance_db": float,
+    "onset_attribution_loco_enabled": bool,
+    "onset_attribution_loco_max_reruns_per_window": int,
+    "onset_attribution_loco_min_confidence": float,
+    "onset_attribution_loco_label_margin": float,
+    "onset_attribution_loco_collapse_ratio": float,
+    "onset_attribution_loco_stft_frame_seconds": float,
+    "onset_attribution_loco_noise_floor_percentile": float,
+    "onset_attribution_loco_mask_active_snr_db": float,
+    "onset_attribution_loco_mask_release_seconds": float,
+    "onset_attribution_loco_mask_max_seconds": float,
+    "onset_attribution_loco_mask_band_padding_hz": float,
+    "onset_attribution_promote_band_distinct_tentative": bool,
+    "trigger_noise_floor_relative_enabled": bool,
+    "trigger_noise_floor_relative_snr_db": float,
+    "trigger_noise_floor_rise_seconds": float,
+    "trigger_noise_floor_fall_seconds": float,
+    "trigger_noise_floor_warmup_seconds": float,
+    "trigger_noise_floor_minimum_rms": float,
+    # --- end Field Mode W3-attribution ---
     # Classification-lane backpressure knobs (see core/fusion_node.py). All
     # restart-required — the queues and the FusionConfig snapshot are built at
     # FusionNode.start(). Exposed after the 2026-08-01 live-box review found the
