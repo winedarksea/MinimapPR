@@ -200,3 +200,49 @@ async def test_tracker_revert_releases_the_hop_fix_so_the_bird_keeps_its_entity(
 async def test_without_the_revert_listener_the_bird_splits_into_a_duplicate() -> None:
     first, hop, back = await _hop_then_back(with_coordinator=False)
     assert hop == first and back != first  # the S-fixes integration failure on gate_flock_echo
+
+
+# --- review/s-fixes: numerical robustness + listener isolation ---
+NON_PSD_COVARIANCE_M2 = [[1.0, 0.0, 0.0], [0.0, -4.0, 0.0], [0.0, 0.0, 1.0]]
+
+
+def test_non_psd_fix_covariance_never_absorbs_with_a_negative_distance() -> None:
+    from minimappr.core.bird_entity_absorption_geometry import horizontal_mahalanobis_squared
+
+    # Residual along the negative-variance axis: the raw quadratic form is negative.
+    assert horizontal_mahalanobis_squared((0.0, 8.0, 0.0), NON_PSD_COVARIANCE_M2, (0.0, 0.0, 0.0), None) is None
+    registry = sequential_registry()
+    registry.observe(observation(at_s=0, label=CHICKADEE, position_m=FIRST_PERCH_M))
+    far_on_bad_axis = (FIRST_PERCH_M[0], FIRST_PERCH_M[1] + 8.0, FIRST_PERCH_M[2])
+    assert registry.find_absorbing_entity(**_query(far_on_bad_axis, at_s=1.2, covariance_m2=NON_PSD_COVARIANCE_M2)) is None
+
+
+def test_nan_fix_neither_absorbs_nor_counts_as_a_concurrent_bird() -> None:
+    from minimappr.core.bird_entity_absorption_geometry import fixes_are_two_birds
+    from minimappr.core.bird_entity_model import EntityFixSample
+
+    registry = sequential_registry()
+    registry.observe(observation(at_s=0, label=CHICKADEE, position_m=FIRST_PERCH_M))
+    nan_fix = (float("nan"), 5.0, 4.0)
+    assert registry.find_absorbing_entity(**_query(nan_fix, at_s=1.2)) is None
+    first = EntityFixSample(event_time_ns=seconds(0), position_m=FIRST_PERCH_M, covariance_m2=TIGHT_COVARIANCE_M2)
+    second = EntityFixSample(event_time_ns=seconds(0.5), position_m=nan_fix, covariance_m2=TIGHT_COVARIANCE_M2)
+    assert not fixes_are_two_birds(first, second, registry.config)
+
+
+async def test_a_failing_revert_listener_does_not_break_the_tracker_update() -> None:
+    manager = TrackManager(Settings(tracking_perched_filter_enabled=True, tracking_species_log_odds_enabled=True))
+    heard = []
+
+    def broken_listener(_revert) -> None:
+        raise RuntimeError("listener bug")
+
+    manager.add_relocation_revert_listener(broken_listener)
+    manager.add_relocation_revert_listener(heard.append)
+    for at_s, perch in ((0.0, REVERT_FIRST_PERCH_M), (2.4, REVERT_SECOND_PERCH_M), (3.6, REVERT_FIRST_PERCH_M)):
+        await manager.update(
+            timestamp_ns=seconds(at_s), position_m=perch, label=CHICKADEE, label_category="wildlife",
+            confidence=0.9, measurement_covariance_m2=TIGHT_COVARIANCE_M2,
+        )
+    assert manager.field_mode.relocation_gate.relocations_reverted == 1
+    assert len(heard) == 1 and heard[0].hop_time_ns == seconds(2.4)

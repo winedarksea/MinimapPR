@@ -312,7 +312,7 @@ CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     "onset_dedupe_ttl_seconds": float,
     # --- Field Mode S-fixes onset ---
     "onset_frame_max_intra_node_weight_share": float,
-    "onset_srp_node_grid_ring_count": float,
+    "onset_srp_node_grid_ring_count": int,  # numpy counts reject floats (geomspace)
     "onset_srp_node_grid_min_range_m": float,
     "onset_srp_node_grid_max_range_m": float,
     "onset_srp_node_grid_azimuth_step_deg": float,
@@ -325,7 +325,7 @@ CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     "onset_range_profile_enabled": bool,
     "onset_range_profile_min_range_m": float,
     "onset_range_profile_max_range_m": float,
-    "onset_range_profile_sample_count": float,
+    "onset_range_profile_sample_count": int,  # numpy counts reject floats (geomspace/linspace)
     "onset_range_profile_cone_half_angle_deg": float,
     "onset_range_profile_cone_step_deg": float,
     "onset_range_profile_support_ratio": float,
