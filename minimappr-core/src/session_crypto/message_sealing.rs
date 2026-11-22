@@ -7,7 +7,8 @@
 //! ```
 //! The 17-byte routing prefix is cleartext so the untrusted relay can route
 //! by node id, and it is bound as AEAD associated data so the relay cannot
-//! re-address or renumber a message. The nonce is random per message
+//! re-address or renumber a message (receivers still check the recipient:
+//! `open_addressed_to_local_node`). The nonce is random per message
 //! (XChaCha's 192-bit nonce makes random nonces collision-safe). The cipher
 //! key is HKDF-derived from the QR session key with the session id as salt,
 //! so a message from one session never opens in another.
@@ -54,7 +55,9 @@ impl SessionKey {
 pub struct EnvelopeRouting {
     pub sender_node_id: NodeId,
     pub recipient_node_id: NodeId,
-    /// Strictly increasing per sender; checked by `ReplayWindow`.
+    /// Strictly increasing per sender for the session's lifetime; checked by
+    /// `ReplayWindow`. A sender that restarts must resume above its last
+    /// value (persist it), or peers drop it as a replay until it catches up.
     pub sender_sequence: u64,
 }
 
@@ -65,6 +68,10 @@ pub enum SealingError {
     /// Wrong key, wrong session, or the envelope was modified.
     AuthenticationFailed,
     EncryptionFailed,
+    /// Authentic, but addressed to another node (relay mis-delivery).
+    NotAddressedToLocalNode,
+    /// Authentic, but claims the local node as sender (relay reflection).
+    ReflectedOwnMessage,
 }
 
 impl std::fmt::Display for SealingError {
@@ -141,6 +148,27 @@ impl MessageSealer {
                 },
             )
             .map_err(|_| SealingError::AuthenticationFailed)?;
+        Ok((routing, plaintext))
+    }
+
+    /// `open` plus the receiver-side routing checks every node must make.
+    /// The AAD only stops the relay *editing* routing; it can still deliver
+    /// node B's sealed message to node C, or reflect a node's own message
+    /// back to it, and both open under the shared session key.
+    pub fn open_addressed_to_local_node(
+        &self,
+        envelope: &[u8],
+        local_node_id: NodeId,
+    ) -> Result<(EnvelopeRouting, Vec<u8>), SealingError> {
+        let (routing, plaintext) = self.open(envelope)?;
+        if routing.recipient_node_id != local_node_id
+            && routing.recipient_node_id != NodeId::BROADCAST
+        {
+            return Err(SealingError::NotAddressedToLocalNode);
+        }
+        if routing.sender_node_id == local_node_id {
+            return Err(SealingError::ReflectedOwnMessage);
+        }
         Ok((routing, plaintext))
     }
 }

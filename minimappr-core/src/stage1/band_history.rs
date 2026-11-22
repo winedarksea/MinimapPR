@@ -61,7 +61,7 @@ impl QuantizedBandHistory {
             self.next_frame_index += 1;
             return;
         }
-        let row_start = (self.next_frame_index as usize % self.capacity_frames) * self.band_count;
+        let row_start = self.row_slot(self.next_frame_index) * self.band_count;
         for (band_index, &energy) in band_energies.iter().enumerate() {
             let level_dbfs = 10.0 * energy.max(f64::MIN_POSITIVE).log10();
             self.levels[row_start + band_index] = self.quantize_dbfs(level_dbfs);
@@ -69,12 +69,18 @@ impl QuantizedBandHistory {
         self.next_frame_index += 1;
     }
 
+    /// Ring slot of an absolute frame index. Reduce in u64 first: on wasm32
+    /// `usize` is 32 bits and a truncating cast would jump slots at 2^32.
+    fn row_slot(&self, frame_index: u64) -> usize {
+        (frame_index % self.capacity_frames as u64) as usize
+    }
+
     /// Quantized row for an absolute frame index, if still held.
     pub fn frame_levels(&self, frame_index: u64) -> Option<&[u8]> {
         if frame_index >= self.next_frame_index || frame_index < self.oldest_frame_index() {
             return None;
         }
-        let row_start = (frame_index as usize % self.capacity_frames) * self.band_count;
+        let row_start = self.row_slot(frame_index) * self.band_count;
         Some(&self.levels[row_start..row_start + self.band_count])
     }
 }

@@ -6,7 +6,9 @@ mod common;
 use minimappr_core::clip_codec::clip_container::{
     ClipContainerError, FieldClipContainer, FieldClipHeader, Pcm16IntegritySection,
 };
-use minimappr_core::clip_codec::field_clip::{decode_field_clip, encode_field_clip};
+use minimappr_core::clip_codec::field_clip::{
+    decode_field_clip, encode_field_clip, FieldClipError, FIELD_CLIP_MAXIMUM_SAMPLES_PER_CHANNEL,
+};
 use minimappr_core::clip_codec::flac_clip_codec::{
     decode_flac_to_pcm16, encode_pcm16_to_flac, FlacClipCodecError,
 };
@@ -17,7 +19,7 @@ const CLIP_SAMPLE_RATE_HZ: u32 = 24_000;
 fn assert_flac_round_trip(samples: &[i16], channel_count: u8) -> usize {
     let encoded =
         encode_pcm16_to_flac(samples, channel_count, CLIP_SAMPLE_RATE_HZ).expect("encodes");
-    let decoded = decode_flac_to_pcm16(&encoded).expect("decodes");
+    let decoded = decode_flac_to_pcm16(&encoded, samples.len()).expect("decodes");
     assert_eq!(decoded.sample_rate_hz, CLIP_SAMPLE_RATE_HZ);
     assert_eq!(decoded.channel_count, channel_count);
     assert_eq!(
@@ -88,7 +90,7 @@ fn flac_rejects_empty_and_ragged_input() {
         encode_pcm16_to_flac(&[1, 2, 3], 2, CLIP_SAMPLE_RATE_HZ),
         Err(FlacClipCodecError::SampleCountNotMultipleOfChannels)
     );
-    assert!(decode_flac_to_pcm16(b"not flac").is_err());
+    assert!(decode_flac_to_pcm16(b"not flac", usize::MAX).is_err());
 }
 
 fn sample_header() -> FieldClipHeader {
@@ -253,4 +255,96 @@ fn compression_ratio_on_field_audio_fixtures() {
         ratio_vs_24k > 1.2,
         "FLAC should beat raw PCM on outdoor audio ({ratio_vs_24k:.2}x)"
     );
+}
+
+/// Wraps `encoded_audio` in a container whose header claims `samples`.
+fn hostile_clip_bytes(codec: ClipCodecId, samples: u32, encoded_audio: Vec<u8>) -> Vec<u8> {
+    FieldClipContainer {
+        header: FieldClipHeader {
+            codec_id: codec.wire_byte(),
+            output_samples_per_channel: samples,
+            first_sample_index_device_clock: 0,
+            ..sample_header()
+        },
+        encoded_audio,
+    }
+    .to_bytes()
+    .expect("serializes")
+}
+
+#[test]
+fn flac_decompression_bomb_is_bounded_by_the_header_sample_count() {
+    // CONSTANT subframes compress silence ~10^4x: 2 M samples in a few KB.
+    let silent_samples = vec![0_i16; 2_000_000];
+    let bomb = encode_pcm16_to_flac(&silent_samples, 1, CLIP_SAMPLE_RATE_HZ).expect("encodes");
+    assert!(bomb.len() < 64 * 1024, "bomb is {} B", bomb.len());
+    assert_eq!(
+        decode_flac_to_pcm16(&bomb, 1_000),
+        Err(FlacClipCodecError::DecodedSampleLimitExceeded)
+    );
+    // A clip that lies about its length is rejected before decoding past it.
+    let lying_clip = hostile_clip_bytes(ClipCodecId::Flac, 1_000, bomb.clone());
+    assert!(matches!(
+        decode_field_clip(&lying_clip),
+        Err(FieldClipError::Flac(
+            FlacClipCodecError::DecodedSampleLimitExceeded
+        ))
+    ));
+    // A clip that claims more than the rolling buffer never reaches FLAC.
+    let oversized_clip = hostile_clip_bytes(
+        ClipCodecId::Flac,
+        FIELD_CLIP_MAXIMUM_SAMPLES_PER_CHANNEL + 1,
+        bomb,
+    );
+    assert!(matches!(
+        decode_field_clip(&oversized_clip),
+        Err(FieldClipError::ImplausibleHeader(_))
+    ));
+}
+
+#[test]
+fn flac_metadata_blocks_that_claxon_preallocates_from_are_rejected() {
+    let mut flac = encode_pcm16_to_flac(&[7_i16; 64], 1, CLIP_SAMPLE_RATE_HZ).expect("encodes");
+    // Our encoder's metadata must still decode.
+    assert!(decode_flac_to_pcm16(&flac, 64).is_ok());
+    // Clear STREAMINFO's last-block flag and splice in a VORBIS_COMMENT
+    // header whose 24-bit length points far past the input.
+    const STREAMINFO_HEADER_OFFSET: usize = 4;
+    const STREAMINFO_BODY_LENGTH: usize = 34;
+    flac[STREAMINFO_HEADER_OFFSET] &= 0x7F;
+    let insert_at = STREAMINFO_HEADER_OFFSET + 4 + STREAMINFO_BODY_LENGTH;
+    flac.splice(insert_at..insert_at, [0x84_u8, 0x9F, 0xFF, 0xFF]);
+    assert!(matches!(
+        decode_flac_to_pcm16(&flac, usize::MAX),
+        Err(FlacClipCodecError::Decode(_))
+    ));
+}
+
+#[test]
+fn hostile_container_headers_are_rejected_without_panicking() {
+    // Odd raw PCM16 byte count that would otherwise floor to the header count.
+    let odd_raw = hostile_clip_bytes(ClipCodecId::Pcm16LittleEndian, 2, vec![1, 0, 2, 0, 3]);
+    assert!(matches!(
+        decode_field_clip(&odd_raw),
+        Err(FieldClipError::HeaderAudioMismatch(_))
+    ));
+    let mut overflowing_anchor = FieldClipContainer::from_bytes(&hostile_clip_bytes(
+        ClipCodecId::Pcm16LittleEndian,
+        2,
+        vec![1, 0, 2, 0],
+    ))
+    .expect("parses");
+    overflowing_anchor.header.first_sample_index_device_clock = u64::MAX;
+    assert!(matches!(
+        decode_field_clip(&overflowing_anchor.to_bytes().expect("serializes")),
+        Err(FieldClipError::ImplausibleHeader(_))
+    ));
+    // Every truncation of a valid clip is an error, never a panic.
+    let window = FieldClipDecimator::for_filter(DecimationFilterId::BirdBandWithRumbleCut)
+        .decimate_window_from_rolling_buffer(&[100_i16; 4_000], 0, 1_000, 2_000)
+        .expect("inside");
+    let clip_bytes = encode_field_clip(&window).expect("encodes");
+    for truncated_length in 0..clip_bytes.len() {
+        assert!(decode_field_clip(&clip_bytes[..truncated_length]).is_err());
+    }
 }

@@ -14,6 +14,13 @@ use super::linear_phase_decimator::DecimatedClipWindow;
 use super::{ClipCodecId, DecimationFilterId};
 
 const FIELD_CLIP_MONO_CHANNEL_COUNT: u8 = 1;
+/// Longest clip a peer may send: the phone's rolling buffer (plan: 30 s), so
+/// no legitimate clip is longer. Bounds decode memory for untrusted input.
+pub const FIELD_CLIP_MAXIMUM_DURATION_SECONDS: u32 = 30;
+/// FLAC's channel ceiling; clips are mono today.
+pub const FIELD_CLIP_MAXIMUM_CHANNEL_COUNT: u8 = 8;
+pub const FIELD_CLIP_MAXIMUM_SAMPLES_PER_CHANNEL: u32 =
+    FIELD_CLIP_MAXIMUM_DURATION_SECONDS * FIELD_CLIP_OUTPUT_SAMPLE_RATE_HZ;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldClipError {
@@ -21,6 +28,8 @@ pub enum FieldClipError {
     Flac(FlacClipCodecError),
     UnsupportedCodec(u8),
     ClipTooLong,
+    /// Header declares a shape no legitimate clip has (checked before decode).
+    ImplausibleHeader(&'static str),
     /// Decoded audio disagrees with the header (rate, channels or length).
     HeaderAudioMismatch(&'static str),
 }
@@ -65,8 +74,10 @@ impl DecodedFieldClip {
 /// Windows under FLAC's 16-sample minimum block go as raw PCM16 (exact; at
 /// that size compression is irrelevant).
 pub fn encode_field_clip(window: &DecimatedClipWindow) -> Result<Vec<u8>, FieldClipError> {
-    let output_samples_per_channel =
-        u32::try_from(window.samples_output_rate.len()).map_err(|_| FieldClipError::ClipTooLong)?;
+    let output_samples_per_channel = u32::try_from(window.samples_output_rate.len())
+        .ok()
+        .filter(|&samples| samples <= FIELD_CLIP_MAXIMUM_SAMPLES_PER_CHANNEL)
+        .ok_or(FieldClipError::ClipTooLong)?;
     let (codec, encoded_audio) =
         if window.samples_output_rate.len() < FLAC_MINIMUM_BLOCK_SAMPLES_PER_CHANNEL {
             let raw_little_endian = window
@@ -104,14 +115,43 @@ pub fn encode_field_clip(window: &DecimatedClipWindow) -> Result<Vec<u8>, FieldC
     Ok(container.to_bytes()?)
 }
 
+/// Bounds-checks the header before any decode so a hostile clip cannot ask
+/// for an unbounded buffer or an index that overflows the device clock.
+fn validated_total_sample_count(header: &FieldClipHeader) -> Result<usize, FieldClipError> {
+    if header.channel_count == 0 || header.channel_count > FIELD_CLIP_MAXIMUM_CHANNEL_COUNT {
+        return Err(FieldClipError::ImplausibleHeader("channel count"));
+    }
+    if header.output_samples_per_channel > FIELD_CLIP_MAXIMUM_SAMPLES_PER_CHANNEL {
+        return Err(FieldClipError::ImplausibleHeader(
+            "clip longer than rolling buffer",
+        ));
+    }
+    if header.decimation_factor == 0 {
+        return Err(FieldClipError::ImplausibleHeader("decimation factor"));
+    }
+    let device_clock_span =
+        u64::from(header.output_samples_per_channel) * u64::from(header.decimation_factor);
+    if header
+        .first_sample_index_device_clock
+        .checked_add(device_clock_span)
+        .is_none()
+    {
+        return Err(FieldClipError::ImplausibleHeader(
+            "device-clock index overflow",
+        ));
+    }
+    Ok(header.output_samples_per_channel as usize * usize::from(header.channel_count))
+}
+
 /// Parses an MMCL container and decodes its audio, checking it against the
 /// header so a corrupted or mislabelled clip never reaches the solver.
 pub fn decode_field_clip(clip_bytes: &[u8]) -> Result<DecodedFieldClip, FieldClipError> {
     let container = FieldClipContainer::from_bytes(clip_bytes)?;
     let header = container.header;
+    let expected_total_samples = validated_total_sample_count(&header)?;
     let samples_output_rate = match ClipCodecId::from_wire_byte(header.codec_id) {
         Some(ClipCodecId::Flac) => {
-            let decoded = decode_flac_to_pcm16(&container.encoded_audio)?;
+            let decoded = decode_flac_to_pcm16(&container.encoded_audio, expected_total_samples)?;
             if decoded.sample_rate_hz != header.output_sample_rate_hz {
                 return Err(FieldClipError::HeaderAudioMismatch("sample rate"));
             }
@@ -120,15 +160,18 @@ pub fn decode_field_clip(clip_bytes: &[u8]) -> Result<DecodedFieldClip, FieldCli
             }
             decoded.interleaved_samples
         }
-        Some(ClipCodecId::Pcm16LittleEndian) => container
-            .encoded_audio
-            .chunks_exact(std::mem::size_of::<i16>())
-            .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
-            .collect(),
+        Some(ClipCodecId::Pcm16LittleEndian) => {
+            let raw_audio = &container.encoded_audio;
+            if raw_audio.len() != expected_total_samples * std::mem::size_of::<i16>() {
+                return Err(FieldClipError::HeaderAudioMismatch("raw PCM16 byte length"));
+            }
+            raw_audio
+                .chunks_exact(std::mem::size_of::<i16>())
+                .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
+                .collect()
+        }
         None => return Err(FieldClipError::UnsupportedCodec(header.codec_id)),
     };
-    let expected_total_samples =
-        header.output_samples_per_channel as usize * usize::from(header.channel_count);
     if samples_output_rate.len() != expected_total_samples {
         return Err(FieldClipError::HeaderAudioMismatch("sample count"));
     }
