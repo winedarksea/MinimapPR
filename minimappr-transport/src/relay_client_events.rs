@@ -96,6 +96,8 @@ pub struct RelayClientInboundStatistics {
     pub sender_mismatches: u64,
     /// Envelope addressed to another node (relay misrouting).
     pub misaddressed_envelopes: u64,
+    /// Authentic envelope claiming this node as sender (relay reflection).
+    pub reflected_own_envelopes: u64,
     pub replays_dropped: u64,
     pub undecodable_field_frames: u64,
     pub clip_chunks_rejected: u64,

@@ -13,7 +13,7 @@ use minimappr_relay_wire::relay_http_api::{
     CONNECT_QUERY_PEER_ID, CONNECT_QUERY_RESUME_TOKEN, CONNECT_QUERY_ROLE_TOKEN,
 };
 use minimappr_relay_wire::{
-    decide_relay_delivery, FrameRejectionReason, RelayControlNotice, RelayDelivery,
+    decide_relay_delivery, ConnectionRefusalReason, FrameRejectionReason, RelayControlNotice, RelayDelivery,
     RelayFrameHeader, RelayRole, SessionUsageCounters, BROADCAST_PEER_ID,
 };
 use worker::*;
@@ -72,8 +72,12 @@ impl DurableObject for SessionRelayObject {
             return Ok(());
         };
         match message {
-            WebSocketIncomingMessage::String(_) => {
-                self.reject(&socket, FrameRejectionReason::TextFramesNotAccepted, None);
+            WebSocketIncomingMessage::String(text) => {
+                // Text frames are billed like binary ones, so they spend the
+                // caps too; otherwise they would be an uncapped flood channel.
+                if self.admit_inbound_frame(&socket, text.len() as u64).await? {
+                    self.reject(&socket, FrameRejectionReason::TextFramesNotAccepted, None);
+                }
                 Ok(())
             }
             WebSocketIncomingMessage::Binary(frame) => self.relay_frame(&socket, &attachment, &frame).await,
@@ -175,9 +179,6 @@ impl SessionRelayObject {
             return Response::error("invalid role token", 403);
         };
         let config = RelayWorkerConfig::from_env(&self.env)?;
-        if self.state.get_websockets().len() as u32 >= config.limits.maximum_connections_per_session {
-            return Response::error("session connection cap reached", 429);
-        }
         if role == RelayRole::Host {
             if let Some(existing_host_peer_id) = self.host_peer_id() {
                 if existing_host_peer_id != peer_id {
@@ -199,12 +200,34 @@ impl SessionRelayObject {
                 true
             }
         };
+        let peer_tag = peer_socket_tag(peer_id);
+        // A resume replaces its own stale socket, so that one does not count.
+        let live_socket_count = self
+            .state
+            .get_websockets()
+            .iter()
+            .filter(|socket| !(rebinding && self.state.get_tags(socket).contains(&peer_tag)))
+            .count();
+        if live_socket_count as u32 >= config.limits.maximum_connections_per_session {
+            return Response::error("session connection cap reached", 429);
+        }
+        let mut usage = self.load_usage().await?;
+        match usage.try_admit_connection(!rebinding, &config.limits) {
+            Ok(()) => {}
+            Err(ConnectionRefusalReason::PeerBindingCapReached) => {
+                return Response::error("session peer binding cap reached", 429);
+            }
+            Err(ConnectionRefusalReason::SessionMessageCapReached) => {
+                return Response::error("session message cap reached", 429);
+            }
+        }
+        *self.cached_usage.borrow_mut() = Some(usage);
+        self.persist_usage().await?;
         // Rotate the resume token on every accepted connect.
         let resume_token = mint_secret_token()?;
         storage
             .put(&peer_key, PeerBinding { role, resume_token_sha256_hex: sha256_hex(&resume_token) })
             .await?;
-        let peer_tag = peer_socket_tag(peer_id);
         if rebinding {
             for stale_socket in self.state.get_websockets_with_tag(&peer_tag) {
                 let _ = stale_socket.close(
@@ -224,7 +247,6 @@ impl SessionRelayObject {
             role,
             connection_serial: mint_secret_token()?,
         })?;
-        let usage = self.load_usage().await?;
         send_notice(
             &server_socket,
             &RelayControlNotice::Welcome {
@@ -272,19 +294,28 @@ impl SessionRelayObject {
         Ok(())
     }
 
-    async fn relay_frame(&self, socket: &WebSocket, attachment: &SocketAttachment, frame: &[u8]) -> Result<()> {
+    /// Counts one inbound message against the session caps (every inbound
+    /// message is billed, so this runs before any parsing). `false`: the
+    /// frame broke a cap and the sender was told.
+    async fn admit_inbound_frame(&self, socket: &WebSocket, frame_length_bytes: u64) -> Result<bool> {
         let config = RelayWorkerConfig::from_env(&self.env)?;
-        // Every inbound message is billed, so caps apply before parsing.
         let mut usage = self.load_usage().await?;
-        if let Err(reason) = usage.try_admit_frame(frame.len() as u64, &config.limits) {
+        if let Err(reason) = usage.try_admit_frame(frame_length_bytes, &config.limits) {
             self.reject(socket, reason, None);
-            return Ok(());
+            return Ok(false);
         }
         *self.cached_usage.borrow_mut() = Some(usage);
         let admitted = self.admitted_since_last_persist.get() + 1;
         self.admitted_since_last_persist.set(admitted);
         if admitted >= config.usage_counter_persist_every_messages {
             self.persist_usage().await?;
+        }
+        Ok(true)
+    }
+
+    async fn relay_frame(&self, socket: &WebSocket, attachment: &SocketAttachment, frame: &[u8]) -> Result<()> {
+        if !self.admit_inbound_frame(socket, frame.len() as u64).await? {
+            return Ok(());
         }
 
         let Ok(header) = RelayFrameHeader::decode(frame) else {

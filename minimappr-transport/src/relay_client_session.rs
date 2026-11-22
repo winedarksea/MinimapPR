@@ -19,10 +19,11 @@ use minimappr_core::protocol::session_messages::JoinCodeKeyExchange;
 use minimappr_core::protocol::{
     decode_field_message_frame, DecodedFrame, FieldMessage, NodeId, SessionId,
 };
-use minimappr_core::session_crypto::{EnvelopeRouting, MessageSealer, ReplayWindow, SessionKey};
+use minimappr_core::session_crypto::{
+    EnvelopeRouting, MessageSealer, ReplayWindow, SealingError, SessionKey,
+};
 use minimappr_relay_wire::{
     decode_relay_frame, encode_relay_frame, RelayControlNotice, RelayFrameHeader, RelayFrameKind,
-    BROADCAST_PEER_ID,
 };
 use rand_core::{CryptoRng, RngCore};
 
@@ -361,17 +362,26 @@ impl RelayClientSession {
             self.inbound_statistics.sealed_frames_before_session_key += 1;
             return;
         };
-        let Ok((routing, plaintext)) = sealer.open(body) else {
-            self.inbound_statistics.authentication_failures += 1;
-            return;
-        };
+        // The AAD stops the relay editing routing, not mis-delivering or
+        // reflecting authentic envelopes; the core check covers both.
+        let (routing, plaintext) =
+            match sealer.open_addressed_to_local_node(body, NodeId(self.local_peer_id)) {
+                Ok(opened) => opened,
+                Err(SealingError::NotAddressedToLocalNode) => {
+                    self.inbound_statistics.misaddressed_envelopes += 1;
+                    return;
+                }
+                Err(SealingError::ReflectedOwnMessage) => {
+                    self.inbound_statistics.reflected_own_envelopes += 1;
+                    return;
+                }
+                Err(_) => {
+                    self.inbound_statistics.authentication_failures += 1;
+                    return;
+                }
+            };
         if routing.sender_node_id.0 != header.sender_peer_id {
             self.inbound_statistics.sender_mismatches += 1;
-            return;
-        }
-        let recipient = routing.recipient_node_id.0;
-        if recipient != self.local_peer_id && recipient != BROADCAST_PEER_ID {
-            self.inbound_statistics.misaddressed_envelopes += 1;
             return;
         }
         if !self
