@@ -17,6 +17,7 @@ from typing import Any
 
 import numpy as np
 
+from minimappr.classifiers.birdnet_threshold_set import birdnet_model_version_for_classification_features
 from minimappr.core.amplitude_range import received_level_db_from_rms
 from minimappr.core.assembly_track_resolution import resolve_detection_track
 from minimappr.core.geo import LocalCoordinateFrame
@@ -198,6 +199,7 @@ class DetectionAssembler:
         label: str,
         confidence: float,
         retention_tier: str,
+        birdnet_model_version: str,
     ) -> float | None:
         """Snippet lifetime in seconds; ``None`` means keep indefinitely.
 
@@ -220,6 +222,7 @@ class DetectionAssembler:
             "trigger_source": None,
             "review_state": "unreviewed",
             "label_source": None,
+            "birdnet_model_version": birdnet_model_version,
         })
 
     def replace_coordinate_frame(self, coordinate_frame: LocalCoordinateFrame) -> None:
@@ -446,6 +449,7 @@ class DetectionAssembler:
                 label=classification_label,
                 confidence=classification_confidence,
                 retention_tier=retention_tier,
+                birdnet_model_version=birdnet_model_version_for_classification_features(classification_features),
             )
         )
         # Classifiers report a negative label ("unknown"/"ambient"/"no_drone")

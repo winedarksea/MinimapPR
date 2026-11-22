@@ -34,6 +34,10 @@ from minimappr.classifiers.birdnet_confidence_calibration import (
     ConfidenceQuantileMap,
     load_confidence_quantile_map,
 )
+from minimappr.classifiers.birdnet_threshold_set import (
+    BIRDNET_V24_MODEL_VERSION,
+    BIRDNET_V3_MODEL_VERSION,
+)
 from minimappr.classifiers.birdnet_v3_labels import (
     DEFAULT_V24_TO_V3_LABEL_MAP_PATH,
     load_v24_to_v3_label_map,
@@ -41,7 +45,6 @@ from minimappr.classifiers.birdnet_v3_labels import (
 
 logger = logging.getLogger(__name__)
 
-BIRDNET_V3_MODEL_VERSION = "3.0"
 BIRDNET_BACKEND_NAME = "birdnet"
 YAMNET_CLASS_MAP_PATH = (
     Path(__file__).resolve().parent.parent / "assets" / "yamnet" / "assets" / "yamnet_class_map.csv"
@@ -117,6 +120,8 @@ class LabelMigrationReport:
     remapped_confidences: dict[str, tuple[float, float]] = field(default_factory=dict)
     unmapped_labels: dict[str, list[str]] = field(default_factory=dict)
     confidence_not_remapped: list[str] = field(default_factory=list)
+    # V3 names not cloned onto because a user rule already keys on them.
+    skipped_explicit_v3_labels: dict[str, list[str]] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -124,6 +129,7 @@ class LabelMigrationReport:
             "remapped_confidences": {key: list(value) for key, value in self.remapped_confidences.items()},
             "unmapped_labels": self.unmapped_labels,
             "confidence_not_remapped": self.confidence_not_remapped,
+            "skipped_explicit_v3_labels": self.skipped_explicit_v3_labels,
         }
 
     def log_unmapped(self, subject: str) -> None:
@@ -208,43 +214,110 @@ def birdnet_v3_rule_transform(settings):
 
 # ── retention ──────────────────────────────────────────────────────────────
 
-def migrate_retention_rules_for_birdnet_v3(rules: list, translator: BirdNETV24ToV3LabelTranslator) -> tuple[list, LabelMigrationReport]:
-    """Clone label rules for V3 names; carry ``classifier: birdnet`` confidence bounds."""
+def _has_confidence_bounds(criteria) -> bool:
+    return criteria.confidence_min is not None or criteria.confidence_max is not None
+
+
+def _map_optional_confidence(value: float | None, translator: BirdNETV24ToV3LabelTranslator) -> float | None:
+    return None if value is None else translator.map_confidence(value)
+
+
+def _birdnet_scale_bound(criteria, translator: BirdNETV24ToV3LabelTranslator) -> bool:
+    """Confidence bounds that can only ever judge BirdNET scores."""
+    if not _has_confidence_bounds(criteria):
+        return False
+    if criteria.classifier == BIRDNET_BACKEND_NAME:
+        return True
+    return criteria.classifier is None and criteria.label is not None and translator.is_birdnet_only_label(criteria.label)
+
+
+def migrate_retention_rules_for_birdnet_v3(
+    rules: list,
+    translator: BirdNETV24ToV3LabelTranslator,
+    *,
+    skip_rule_ids: frozenset[str] = frozenset(),
+) -> tuple[list, LabelMigrationReport]:
+    """Add V3-scoped clones of v2.4-keyed retention rules; order is preserved.
+
+    Every clone matches only rows the V3 model scored (``birdnet_model_version
+    = "3.0"``), so its bounds go through the confidence map and a V3 name that
+    another classifier also emits (YAMNet "power tool") never re-buckets that
+    classifier's rows. A BirdNET-only confidence-bounded original is scoped to
+    v2.4 rows, so V3 rows of the same spelling are not judged on the v2.4
+    scale. Clones directly follow their original (same priority), keeping
+    last-write-wins identical to what the original decides for v2.4 rows. A
+    V3 name some user rule already keys on explicitly is not cloned onto, and
+    rules that already pin ``birdnet_model_version`` are left alone.
+    """
     report = LabelMigrationReport()
+    explicitly_keyed_labels = {
+        rule.match.label for rule in rules if rule.rule_id not in skip_rule_ids and rule.match.label is not None
+    }
     migrated = []
     for rule in rules:
         criteria = rule.match
-        if criteria.classifier == BIRDNET_BACKEND_NAME and (
-            criteria.confidence_min is not None or criteria.confidence_max is not None
-        ):
-            new_min = None if criteria.confidence_min is None else translator.map_confidence(criteria.confidence_min)
-            new_max = None if criteria.confidence_max is None else translator.map_confidence(criteria.confidence_max)
-            report.remapped_confidences[rule.rule_id] = (
-                criteria.confidence_min if criteria.confidence_min is not None else criteria.confidence_max,
-                new_min if new_min is not None else new_max,
-            )
-            rule = replace(rule, match=replace(criteria, confidence_min=new_min, confidence_max=new_max))
-            criteria = rule.match
-        migrated.append(rule)
-        if criteria.label is None:
+        targets_other_classifier = criteria.classifier not in (None, BIRDNET_BACKEND_NAME)
+        if rule.rule_id in skip_rule_ids or criteria.birdnet_model_version is not None or targets_other_classifier:
+            migrated.append(rule)
             continue
-        _, added, unmapped = expand_labels_for_v3({criteria.label}, translator)
-        if unmapped:
-            report.unmapped_labels[rule.rule_id] = unmapped
-        for v3_label in added:
-            clone_id = f"{rule.rule_id}{V3_RETENTION_RULE_ID_SUFFIX}:{v3_label}"
-            migrated.append(replace(rule, rule_id=clone_id, match=replace(criteria, label=v3_label)))
-            report.added_labels.setdefault(rule.rule_id, []).append(v3_label)
+        scale_bound = _birdnet_scale_bound(criteria, translator)
+        if criteria.label is None:
+            v3_clone_labels: list[str | None] = [None] if scale_bound else []
+        else:
+            _, added, unmapped = expand_labels_for_v3({criteria.label}, translator)
+            if unmapped:
+                report.unmapped_labels[rule.rule_id] = unmapped
+            v3_clone_labels = sorted(translator.v3_labels_for(criteria.label)) if scale_bound else list(added)
+            for v3_label in [label for label in v3_clone_labels if label != criteria.label]:
+                if v3_label in explicitly_keyed_labels:
+                    v3_clone_labels.remove(v3_label)
+                    report.skipped_explicit_v3_labels.setdefault(rule.rule_id, []).append(v3_label)
+        if scale_bound:
+            rule = replace(rule, match=replace(criteria, birdnet_model_version=BIRDNET_V24_MODEL_VERSION))
+        migrated.append(rule)
+        for v3_label in v3_clone_labels:
+            clone_label = criteria.label if v3_label is None else v3_label
+            clone_id = rule.rule_id + V3_RETENTION_RULE_ID_SUFFIX
+            if clone_label != criteria.label:
+                clone_id += f":{clone_label}"
+            clone_criteria = replace(
+                criteria,
+                label=clone_label,
+                confidence_min=_map_optional_confidence(criteria.confidence_min, translator),
+                confidence_max=_map_optional_confidence(criteria.confidence_max, translator),
+                birdnet_model_version=BIRDNET_V3_MODEL_VERSION,
+            )
+            migrated.append(replace(rule, rule_id=clone_id, match=clone_criteria))
+            if clone_label != criteria.label:
+                report.added_labels.setdefault(rule.rule_id, []).append(clone_label)
+            if _has_confidence_bounds(criteria):
+                report.remapped_confidences[clone_id] = (
+                    criteria.confidence_min if criteria.confidence_min is not None else criteria.confidence_max,
+                    clone_criteria.confidence_min if clone_criteria.confidence_min is not None else clone_criteria.confidence_max,
+                )
     return migrated, report
 
 
 def migrate_permanent_labels_for_birdnet_v3(labels, settings) -> tuple[str, ...]:
+    """Add V3 names; a V3 name another classifier also emits is not added.
+
+    The permanent tier is keep-forever and is decided on the label alone, so
+    adding e.g. "power tool" (V3 name of v2.4 "power tools") would make every
+    YAMNet "power tool" snippet permanent.
+    """
     if not birdnet_v3_label_migration_active(settings):
         return tuple(labels)
-    expanded, _, unmapped = expand_labels_for_v3(set(labels), load_birdnet_v24_to_v3_translator())
+    translator = load_birdnet_v24_to_v3_translator()
+    expanded, added, unmapped = expand_labels_for_v3(set(labels), translator)
+    shared_with_other_classifiers = sorted(set(added) & translator.non_birdnet_vocabulary)
     if unmapped:
         logger.warning("BirdNET V3 migration: retention_permanent_labels with no V3 class %s", unmapped)
-    return tuple(sorted(expanded))
+    if shared_with_other_classifiers:
+        logger.warning(
+            "BirdNET V3 migration: not adding V3 name(s) %s to retention_permanent_labels; other "
+            "classifiers emit them too (add explicitly to keep them forever)", shared_with_other_classifiers,
+        )
+    return tuple(sorted(expanded - set(shared_with_other_classifiers)))
 
 
 # ── taxonomy ───────────────────────────────────────────────────────────────
