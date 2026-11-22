@@ -29,6 +29,7 @@ from minimappr.core.environment import StaticEnvironmentProvider
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.models import ClassificationResult, GeoPoint
 from minimappr.sim.replay import build_fusion_for_bundle, evaluate_bundle, replay_bundle
+from minimappr.sim.sim_scenario_scoring import collect_settled_detections, drain_fusion_queues
 from tests.helpers import synthesize_multinode_windows
 
 SAMPLE_RATE = 16_000
@@ -204,13 +205,10 @@ async def test_synthetic_bundle_full_replay_loop(tmp_path: Path) -> None:
         accepted = await replay_bundle(fusion, bundle)
         assert accepted > 0
 
-        detections: list[dict] = []
-        deadline = time.monotonic() + 15.0
-        while time.monotonic() < deadline:
-            detections = await storage.list_detections(limit=10_000)
-            if detections:
-                break
-            await asyncio.sleep(0.2)
+        # Drain the stage queues, then wait for the rows to stop changing: the
+        # first row can land before its label/position upserts (load-dependent).
+        await drain_fusion_queues(fusion)
+        detections = await collect_settled_detections(storage, fusion)
     finally:
         await fusion.stop()
         await storage.close()
