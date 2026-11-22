@@ -8,10 +8,12 @@ pub fn mount(state: &AppState) {
     let omni_detection_summaries = state.omni_detection_summaries;
     let map_layers = state.map_layers;
     let theme = state.theme;
+    let bird_entities_enabled = state.bird_entities_enabled;
 
     Effect::new(move |prev_ids: Option<HashSet<String>>| {
         let _ = theme.get();
-        let visible = map_layers.get().omni;
+        // Entity mode keeps the map spatial-only: no omni halo pinned on a node.
+        let visible = map_layers.get().omni && !bird_entities_enabled.get();
         let node_positions = nodes.with(|ns| {
             ns.iter()
                 .filter_map(|node| {

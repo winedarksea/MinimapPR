@@ -226,6 +226,25 @@ CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     "birdnet_v3_label_migration_enabled": bool,
     "birdnet_two_threshold_require_tracker_companions": bool,
     # --- end Field Mode W3-birdnet-cutover ---
+    # --- Field Mode W3-entity --- restart-required: the entity coordinator is
+    # built with FusionNode at startup.
+    "entity_reporting_enabled": bool,
+    "entity_reporting_label_categories": str,
+    "entity_absorption_window_seconds": float,
+    "entity_absorption_max_fix_distance_m": float,
+    "entity_absorption_max_node_distance_m": float,
+    "entity_absorption_max_bearing_difference_deg": float,
+    "entity_pinpointed_max_horizontal_uncertainty_m": float,
+    "entity_spatial_state_hold_seconds": float,
+    "entity_expiry_seconds": float,
+    "entity_bearing_default_half_width_deg": float,
+    "entity_bearing_min_half_width_deg": float,
+    "entity_bearing_max_half_width_deg": float,
+    "entity_uncertainty_sigma_multiplier": float,
+    "entity_notification_grace_seconds": float,
+    "entity_maintenance_interval_seconds": float,
+    "entity_max_tracked_entities": int,
+    # --- end Field Mode W3-entity ---
     # DOA/TDOA solve blend + cross-node bearing-fusion "greediness" knobs (see
     # core/cartesian_tdoa.py, core/multi_node_bearing_fusion.py).
     "localization_node_bearing_strength": float,

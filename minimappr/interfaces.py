@@ -359,6 +359,10 @@ class StorageBackend(Protocol):
     async def get_detection_by_event_id(self, event_id: str) -> dict[str, Any] | None:
         ...
 
+    # --- Field Mode W3-entity --- canonical-row lookup for entity absorption.
+    async def get_detection(self, detection_id: str) -> dict[str, Any] | None:
+        ...
+
     async def list_observations_by_ids(self, observation_ids: list[str]) -> list[dict[str, Any]]:
         ...
 

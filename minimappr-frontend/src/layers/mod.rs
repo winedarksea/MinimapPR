@@ -1,4 +1,5 @@
 pub mod acoustic;
+pub mod bird_entities;
 pub mod detections;
 pub mod heatmap;
 pub mod nodes;
@@ -71,6 +72,14 @@ pub const LAYER_DEFS: &[LayerDef] = &[
         set_visible: |layers, visible| layers.omni = visible,
     },
     LayerDef {
+        id: "bird_entities",
+        title: "Bird entities",
+        group: LayerGroup::Entities,
+        default_visible: true,
+        get_visible: |layers| layers.bird_entities,
+        set_visible: |layers, visible| layers.bird_entities = visible,
+    },
+    LayerDef {
         id: "zones",
         title: "Zones",
         group: LayerGroup::Context,
@@ -110,4 +119,5 @@ pub fn mount_core_marker_layers(state: &AppState) {
     overlays::mount(state);
     acoustic::mount(state);
     uncertainty::mount(state);
+    bird_entities::mount(state);
 }

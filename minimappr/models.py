@@ -731,6 +731,73 @@ class TrackState(BaseModel):
     species_top_probability: float | None = None
 
 
+# --- Field Mode W3-entity --- one bird = one entity across spatial states
+# (core/bird_entity_registry.py). Served by GET /api/v1/entities and as
+# {"type": "entity"} events on /ws/live.
+class BirdEntityBearing(BaseModel):
+    """Bearing fan from a node; compass degrees clockwise from north."""
+
+    origin_node_id: str
+    origin_position_m: Vec3
+    origin_geo: GeoPoint | None = None
+    bearing_deg: float
+    half_width_deg: float
+    # None = range unobservable (bearing-only solve); draw a default-length fan.
+    range_min_m: float | None = None
+    range_max_m: float | None = None
+
+
+class BirdEntityUncertaintyEllipse(BaseModel):
+    semi_major_m: float
+    semi_minor_m: float
+    # Compass bearing of the major axis, in [0, 180).
+    orientation_deg: float
+    sigma_multiplier: float
+
+
+class BirdEntity(BaseModel):
+    id: str
+    state: Literal["heard_nearby", "direction_known", "pinpointed"]
+    label_category: str
+    species_top_label: str
+    species_top_probability: float
+    species_belief: dict[str, float] = Field(default_factory=dict)
+    # Heard nearby: the node that heard it (the tray shows "near <node>").
+    reporting_node_id: str | None = None
+    reporting_node_ids: list[str] = Field(default_factory=list)
+    position_m: Vec3 | None = None
+    position_geo: GeoPoint | None = None
+    horizontal_uncertainty_m: float | None = None
+    uncertainty_ellipse: BirdEntityUncertaintyEllipse | None = None
+    # Reserved for the SRP likelihood contour (W2-onset-srp); None until a
+    # localizer reports one.
+    contour_geo: list[GeoPoint] | None = None
+    bearing: BirdEntityBearing | None = None
+    track_id: str | None = None
+    canonical_detection_id: str | None = None
+    first_heard_ns: int
+    last_heard_ns: int
+    last_spatial_update_ns: int | None = None
+    last_pulse_ns: int
+    detection_count: int = 0
+    absorbed_detection_count: int = 0
+
+
+class BirdEntityEvent(BaseModel):
+    type: Literal["entity"] = "entity"
+    event: Literal["created", "updated", "absorbed", "state_changed", "expired"]
+    previous_state: Literal["heard_nearby", "direction_known", "pinpointed"] | None = None
+    entity: BirdEntity
+    server_time_ns: int
+
+
+class BirdEntityListResponse(BaseModel):
+    enabled: bool
+    generated_ns: int
+    entities: list[BirdEntity] = Field(default_factory=list)
+# --- end Field Mode W3-entity ---
+
+
 class FederationHeartbeat(BaseModel):
     server_id: str = Field(min_length=1)
     sent_ns: int = Field(gt=0)

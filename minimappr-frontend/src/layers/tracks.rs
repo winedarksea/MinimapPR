@@ -20,13 +20,21 @@ pub fn mount(state: &AppState) {
     let tracks = state.tracks;
     let map_layers = state.map_layers;
     let theme = state.theme;
+    let bird_entities = state.bird_entities;
 
     Effect::new(move |prev_ids: Option<HashSet<String>>| {
         let _ = theme.get();
         let visible = map_layers.get().tracks;
+        // One bird, one thing on screen: a track bound to a bird entity is drawn
+        // by the entity layer instead.
+        let entity_track_ids: HashSet<String> = bird_entities
+            .with(|entities| entities.iter().filter_map(|e| e.track_id.clone()).collect());
         tracks.with(|ts| {
             let current_ids: HashSet<String> = if visible {
-                ts.iter().map(|t| t.track_id.clone()).collect()
+                ts.iter()
+                    .filter(|t| !entity_track_ids.contains(&t.track_id))
+                    .map(|t| t.track_id.clone())
+                    .collect()
             } else {
                 HashSet::new()
             };
@@ -38,7 +46,7 @@ pub fn mount(state: &AppState) {
             }
 
             if visible {
-                for t in ts {
+                for t in ts.iter().filter(|t| current_ids.contains(&t.track_id)) {
                     let Some(geo) = &t.position_geo else {
                         continue;
                     };

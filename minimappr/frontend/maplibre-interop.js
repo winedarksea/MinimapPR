@@ -27,6 +27,12 @@
   const _bearingWedges = {};
   const _heatmapSources = {};
   const _imageOverlays = {};
+  // Latest data for generic geojson layers whose source is not on the map yet.
+  const _pendingLayerData = {};
+  // isStyleLoaded() is false while *any* source loads, after the one-shot "load"
+  // event has fired; waiting on "load" then never retries (a second layer added
+  // right after a first one was silently dropped). Poll instead.
+  const STYLE_RETRY_DELAY_MS = 100;
   const _trackRemoveTimers = {};
   const _detectionRemoveTimers = {};
   const DETECTION_SOURCE_ID = "detections";
@@ -1000,8 +1006,12 @@
   function upsertGeojsonLayer(sourceId, layerId, data, spec) {
     const map = ensureMap();
     if (!map || !map.isStyleLoaded()) {
-      if (map) map.once("load", function () { upsertGeojsonLayer(sourceId, layerId, data, spec); });
+      if (map) setTimeout(function () { upsertGeojsonLayer(sourceId, layerId, data, spec); }, STYLE_RETRY_DELAY_MS);
       return;
+    }
+    if (_pendingLayerData[sourceId]) {
+      data = _pendingLayerData[sourceId];
+      delete _pendingLayerData[sourceId];
     }
     if (map.getSource(sourceId)) {
       map.getSource(sourceId).setData(data);
@@ -1023,6 +1033,7 @@
     const map = ensureMap();
     const data = typeof dataJson === "string" ? JSON.parse(dataJson) : dataJson;
     if (map && map.getSource(layerId)) map.getSource(layerId).setData(data);
+    else _pendingLayerData[layerId] = data;
   }
 
   function setLayerVisible(layerId, visible) {
@@ -1031,6 +1042,7 @@
   }
 
   function removeLayer(layerId) {
+    delete _pendingLayerData[layerId];
     const map = ensureMap();
     if (!map || !map.isStyleLoaded()) return;
     if (map.getLayer(layerId)) map.removeLayer(layerId);

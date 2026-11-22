@@ -74,7 +74,8 @@ fn handle_message(state: &AppState, text: &str) {
                     pulse_track_marker(track_id);
                 }
             }
-            if det.spatial_display_mode() == "node_only" {
+            // Spatial-only map in entity mode: no omni ripple on a node.
+            if det.spatial_display_mode() == "node_only" && !state.bird_entities_enabled.get_untracked() {
                 if let Some(node_id) = det.node_id.as_deref() {
                     let node_geo = state.nodes.with(|nodes| {
                         nodes
@@ -187,6 +188,21 @@ fn handle_message(state: &AppState, text: &str) {
         }
         LiveEvent::HassStatus { status } => {
             state.hass_status.set(Some(status));
+        }
+        LiveEvent::Entity(event) => {
+            if event.event == "absorbed" {
+                // "Just sang": the mapped bird pulses instead of a new card.
+                crate::layers::bird_entities::note_bird_entity_pulse(&event.entity.id);
+                let entities = state.bird_entities;
+                spawn_local(async move {
+                    TimeoutFuture::new(crate::layers::bird_entities::PULSE_DURATION_MS as u32).await;
+                    entities.update(|_| {});
+                });
+            }
+            state.bird_entities_enabled.set(true);
+            state
+                .bird_entities
+                .update(|entities| crate::state::entities::apply_bird_entity_event(entities, event));
         }
         LiveEvent::RulesUpdated
         | LiveEvent::SetFilter

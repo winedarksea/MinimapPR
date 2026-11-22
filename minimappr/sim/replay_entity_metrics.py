@@ -17,7 +17,8 @@ Association rule (every detection is assigned at most one ground-truth event):
    label-matching candidate with the nearest window midpoint; with no
    label-matching candidate they associate only if exactly one candidate exists.
 
-Entity key (what the UI would surface as one thing): ``("track", track_id)``
+Entity key (what the UI would surface as one thing): ``("entity", entity_id)``
+when the detection carries a bird-entity id (W3 entity reporting); else ``("track", track_id)``
 when the detection has a track; ``("omni", source_node_id, label)`` for omni
 detections (one "heard nearby" row per node and species); otherwise
 ``("detection", id)``. An entity's label is that of its highest
@@ -148,6 +149,10 @@ def _is_localized(detection: dict) -> bool:
 
 
 def entity_key_for_detection(detection: dict, detection_index: int) -> tuple:
+    # Field Mode W3-entity: a bird-entity id (entity reporting on) is the UI unit.
+    entity_id = detection.get("entity_id")
+    if entity_id:
+        return ("entity", str(entity_id))
     track_id = detection.get("track_id")
     if track_id:
         return ("track", str(track_id))

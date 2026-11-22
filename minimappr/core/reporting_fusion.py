@@ -30,6 +30,10 @@ class ReportingDecision:
     branch_evidence: dict[str, Any]
     existing_detection: dict[str, Any] | None = None
     suppression_reason: str | None = None
+    # --- Field Mode W3-entity --- the bird entity this decision belongs to
+    # (EntityReportingPolicy only; None on the legacy bucketed path).
+    entity_id: str | None = None
+    # --- end Field Mode W3-entity ---
 
 
 class ReportingFusionPolicy:
