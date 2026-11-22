@@ -77,7 +77,9 @@ impl FieldNodeStateMachine {
                 Vec::new()
             }
             FieldMessage::HostAnnouncement(announcement) => {
-                let outcome = self.link.on_announcement(&announcement, now_ms);
+                let order = |node: NodeId| self.succession.iter().position(|n| *n == node).unwrap_or(usize::MAX);
+                let announcer_wins_tie = order(announcement.host_node_id) < order(self.link.host_node_id);
+                let outcome = self.link.on_announcement(&announcement, announcer_wins_tie, now_ms);
                 let mut actions = Vec::new();
                 if !outcome.accepted {
                     return actions;

@@ -29,6 +29,7 @@ pub struct IslandChirpScheduler {
     group_stopped_pending: bool,
     clock_invalid_pending: bool,
     group_was_still: bool,
+    fresh_clock_domain_pending: bool,
 }
 
 impl IslandChirpScheduler {
@@ -49,6 +50,12 @@ impl IslandChirpScheduler {
         self.clock_invalid_pending = true;
     }
 
+    /// A merge or split started a fresh clock domain with no models yet:
+    /// survey it at once rather than waiting for the next heartbeat.
+    pub fn note_fresh_clock_domain(&mut self) {
+        self.fresh_clock_domain_pending = true;
+    }
+
     fn triggered_gap_elapsed(&self, now_ms: MeshMilliseconds, config: &ChirpSchedulerConfig) -> bool {
         self.last_triggered_round_ms
             .is_none_or(|last| now_ms.saturating_sub(last) >= config.triggered_round_minimum_gap_ms)
@@ -60,6 +67,9 @@ impl IslandChirpScheduler {
             return Some(RoundTrigger::FirstRound);
         };
         let since_last = now_ms.saturating_sub(last);
+        if self.fresh_clock_domain_pending {
+            return Some(RoundTrigger::ClockInvalid);
+        }
         if self.post_detection_due_ms.is_some_and(|due| now_ms >= due) {
             return Some(RoundTrigger::PostDetection);
         }
@@ -98,6 +108,7 @@ impl IslandChirpScheduler {
             self.post_detection_due_ms = None;
         }
         self.clock_invalid_pending = false;
+        self.fresh_clock_domain_pending = false;
     }
 }
 

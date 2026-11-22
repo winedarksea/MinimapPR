@@ -71,6 +71,7 @@ pub struct HostSyncPipeline {
     /// stays lone must not trigger a round every tick).
     surveyed_provisional_nodes: BTreeSet<NodeId>,
     last_new_member_round_ms: Option<MeshMilliseconds>,
+    previously_present: BTreeSet<NodeId>,
 }
 
 impl HostSyncPipeline {
@@ -283,18 +284,22 @@ impl HostSyncPipeline {
             };
             let Some(mut solution) = solve(members.clone()) else { continue };
             // A silent stall shows as a clock-offset jump; that node's ranges
-            // in this round are suspect, so re-solve without it and rebuild
-            // its clock model from scratch (caught within one round).
+            // in this round are suspect, so the layout is re-solved without
+            // it, while its own offset still re-seeds its clock filter (the
+            // filter flags the jump and bumps the clock epoch): caught and
+            // rebuilt within this round.
             let stalled = self.engine.nodes_with_silent_gap(island_id, &solution, sync);
             if !stalled.is_empty() {
                 members.retain(|node| !stalled.contains(node));
-                for node in &stalled {
-                    self.engine.invalidate_node_clock(*node);
+                let Some(mut resolved) = solve(members) else { continue };
+                if resolved.reference_node == solution.reference_node {
+                    for node in &stalled {
+                        if let Some(offset) = solution.clock_offsets.get(node) {
+                            resolved.clock_offsets.insert(*node, *offset);
+                        }
+                    }
                 }
-                match solve(members) {
-                    Some(resolved) => solution = resolved,
-                    None => continue,
-                }
+                solution = resolved;
             }
             self.ranged_pairs_involving_muted += solution
                 .ranged_pairs
@@ -304,6 +309,11 @@ impl HostSyncPipeline {
             self.engine.apply_round_solution(island_id, &solution, now_ms, sync);
             self.engine.refresh_anchor(island_id, &fixes, sync);
             records.extend(self.island_model_records(island_id, now_ms, sync));
+        }
+        for island in self.engine.islands.values() {
+            if island.members.len() >= MINIMUM_ROUND_EMITTERS && island.reference_node.is_none() {
+                self.schedulers.entry(island.island_id).or_default().note_fresh_clock_domain();
+            }
         }
         let islands: Vec<IslandMembership> = self
             .engine
@@ -387,6 +397,12 @@ impl HostSyncPipeline {
             }
             return (Vec::new(), Vec::new());
         }
+        let now_present: BTreeSet<NodeId> = present.iter().copied().collect();
+        for node in now_present.difference(&self.previously_present).copied().collect::<Vec<_>>() {
+            self.engine.forget_node(node);
+            self.surveyed_provisional_nodes.remove(&node);
+        }
+        self.previously_present = now_present;
         let mut keys: BTreeSet<u32> = present.iter().map(|node| self.scheduler_key_of(*node)).collect();
         keys.retain(|key| *key == PROVISIONAL_ISLAND_KEY || self.engine.islands.contains_key(key));
         for key in &keys {

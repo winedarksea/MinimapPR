@@ -40,6 +40,9 @@ pub struct HostLink {
     pub solo: bool,
     pub host_head_sequence: u64,
     takeover_claimed_term: Option<u32>,
+    /// When the link last came up: a node that just reconnected has not
+    /// had a chance to hear the host yet, so silence counts from here.
+    link_up_since_ms: MeshMilliseconds,
 }
 
 impl HostLink {
@@ -52,7 +55,15 @@ impl HostLink {
             solo: false,
             host_head_sequence: 0,
             takeover_claimed_term: None,
+            link_up_since_ms: now_ms,
         }
+    }
+
+    pub fn set_link_up(&mut self, link_up: bool, now_ms: MeshMilliseconds) {
+        if link_up && !self.link_up {
+            self.link_up_since_ms = now_ms;
+        }
+        self.link_up = link_up;
     }
 
     pub fn connected(&self) -> bool {
@@ -66,10 +77,14 @@ impl HostLink {
     }
 
     /// Follow the newest term; an equal term from the current host refreshes.
-    pub fn on_announcement(&mut self, announcement: &HostAnnouncement, now_ms: MeshMilliseconds) -> AnnouncementOutcome {
+    /// Two hosts claiming one term (simultaneous takeover) are resolved by
+    /// join order: `announcer_wins_tie` says the announcer joined earlier.
+    pub fn on_announcement(&mut self, announcement: &HostAnnouncement, announcer_wins_tie: bool, now_ms: MeshMilliseconds) -> AnnouncementOutcome {
         let newer = announcement.host_term > self.host_term;
-        let same_host = announcement.host_term == self.host_term && announcement.host_node_id == self.host_node_id;
-        if !(newer || same_host) {
+        let same_term = announcement.host_term == self.host_term;
+        let same_host = same_term && announcement.host_node_id == self.host_node_id;
+        let wins_tie = same_term && announcement.host_node_id != self.host_node_id && announcer_wins_tie;
+        if !(newer || same_host || wins_tie) {
             return AnnouncementOutcome { accepted: false, host_changed: false, rejoined_from_solo: false };
         }
         let host_changed = announcement.host_node_id != self.host_node_id;
@@ -96,11 +111,12 @@ impl HostLink {
     /// (current host excluded), `None` if not eligible.
     pub fn tick(&mut self, now_ms: MeshMilliseconds, succession_rank: Option<usize>, config: &LivenessConfig) -> Option<HostLinkEvent> {
         let silent_ms = now_ms.saturating_sub(self.last_heard_from_host_ms);
+        let silent_while_linked_ms = now_ms.saturating_sub(self.last_heard_from_host_ms.max(self.link_up_since_ms));
         if self.link_up {
             if let Some(rank) = succession_rank {
                 let wait = config.host_silence_takeover_timeout_ms + rank as u64 * config.takeover_stagger_per_rank_ms;
                 let next_term = self.host_term + 1;
-                if silent_ms >= wait && self.takeover_claimed_term.is_none_or(|claimed| claimed < next_term) {
+                if silent_while_linked_ms >= wait && self.takeover_claimed_term.is_none_or(|claimed| claimed < next_term) {
                     self.takeover_claimed_term = Some(next_term);
                     return Some(HostLinkEvent::TakeOver { host_term: next_term });
                 }

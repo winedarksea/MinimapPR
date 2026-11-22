@@ -17,9 +17,12 @@ use crate::sync::clock_graph::solve_clock_graph;
 
 use super::config::{IslandSyncConfig, DEVICE_SAMPLE_RATE_HZ};
 
-/// Linear-acceleration energy assigned to a phone reported walking, so the
-/// clock graph down-weights its constraints (plan: motion weighting).
-const WALKING_MOTION_ENERGY: f64 = 1.0;
+/// Linear-acceleration energy assigned to a phone reported walking. With
+/// the clock graph's 0.1 m per unit this models ~1 m of displacement over a
+/// round (1.2–1.5 m/s across a 1–1.5 s round), so its offsets carry ~1.5 ms σ.
+const WALKING_MOTION_ENERGY: f64 = 10.0;
+/// Ranges a node needs for a unique 2D position (also the triangle size).
+const MINIMUM_RANGES_FOR_UNIQUE_PLACEMENT: usize = 3;
 
 #[derive(Debug, Clone)]
 pub struct IslandRoundInput<'round> {
@@ -43,6 +46,8 @@ pub struct IslandRoundSolution {
     pub ranged_pairs: Vec<(NodeId, NodeId, f64)>,
     pub layout_positions_m: BTreeMap<NodeId, [f64; 3]>,
     pub layout_sigmas_m: BTreeMap<NodeId, f64>,
+    /// Participants reported walking: in the clock graph, not in the layout.
+    pub walking_nodes: BTreeSet<NodeId>,
 }
 
 fn local_seconds(index: u64, fraction: f32) -> f64 {
@@ -180,15 +185,44 @@ pub fn solve_island_round(
         .collect();
     let mut layout_positions_m = BTreeMap::new();
     let mut layout_sigmas_m = BTreeMap::new();
+    let walking: BTreeSet<usize> = (0..participants.len())
+        .filter(|&index| matches!(input.reports[&participants[index]].motion_state, MotionState::Walking))
+        .collect();
+    // Walking phones break the rigid-layout assumption (plan: skipped in a
+    // round's geometry); their previous positions are carried forward.
     let ranged_nodes: BTreeSet<usize> = measurements
         .iter()
         .flat_map(|m| [m.first_participant, m.second_participant])
+        .filter(|node| !walking.contains(node))
         .collect();
-    if ranged_nodes.len() >= 2 {
+    // A node ranged to fewer than three others has a flip ambiguity (two
+    // circle intersections) that refinement cannot resolve, so it keeps its
+    // previous layout position this round (carried forward by the engine).
+    let mut placeable = ranged_nodes.clone();
+    loop {
+        let degree = |node: usize| {
+            measurements
+                .iter()
+                .filter(|m| {
+                    (m.first_participant == node && placeable.contains(&m.second_participant))
+                        || (m.second_participant == node && placeable.contains(&m.first_participant))
+                })
+                .count()
+        };
+        if placeable.len() <= MINIMUM_RANGES_FOR_UNIQUE_PLACEMENT {
+            break;
+        }
+        let Some(weakest) = placeable.iter().copied().min_by_key(|node| degree(*node)) else { break };
+        if degree(weakest) >= MINIMUM_RANGES_FOR_UNIQUE_PLACEMENT {
+            break;
+        }
+        placeable.remove(&weakest);
+    }
+    if placeable.len() >= 2 {
         let heights = vec![config.assumed_phone_height_m; participants.len()];
         // Unranged participants would leave the MDS graph disconnected, so
-        // the layout is solved over the ranged subset only.
-        let subset: Vec<usize> = ranged_nodes.iter().copied().collect();
+        // the layout is solved over the placeable subset only.
+        let subset: Vec<usize> = placeable.iter().copied().collect();
         let subset_index = |index: usize| subset.iter().position(|s| *s == index);
         let subset_ranges: Vec<RangeMeasurement> = ranges
             .iter()
@@ -200,7 +234,8 @@ pub fn solve_island_round(
                 })
             })
             .collect();
-        if let Ok(layout) = solve_layout(subset.len(), &heights[..subset.len()], &subset_ranges, &config.layout_refine) {
+        let solved = solve_layout(subset.len(), &heights[..subset.len()], &subset_ranges, &config.layout_refine);
+        if let Some(layout) = solved.ok().filter(|layout| layout.is_rigid) {
             for (position_in_subset, &participant) in subset.iter().enumerate() {
                 let node = participants[participant];
                 layout_positions_m.insert(node, layout.positions_m[position_in_subset]);
@@ -215,5 +250,6 @@ pub fn solve_island_round(
         ranged_pairs,
         layout_positions_m,
         layout_sigmas_m,
+        walking_nodes: walking.iter().map(|&index| participants[index]).collect(),
     })
 }

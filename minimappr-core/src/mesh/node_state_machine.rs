@@ -406,7 +406,7 @@ impl FieldNodeStateMachine {
             NodeInput::Tick => self.on_tick(now_ms, device_sample_index_now),
             NodeInput::MessageReceived { from, message } => self.on_message(from, message, now_ms, audio),
             NodeInput::TransportLinkChanged { link_up } => {
-                self.link.link_up = link_up;
+                self.link.set_link_up(link_up, now_ms);
                 Vec::new()
             }
             NodeInput::ClassifierFired(classification) => self.on_classification(classification, now_ms),

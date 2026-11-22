@@ -193,8 +193,12 @@ pub struct IslandSyncConfig {
     pub range_sigma_m: f64,
     /// Heights are not solved; phones are assumed handheld at this height.
     pub assumed_phone_height_m: f64,
+    /// Unknown true phone heights (held 1.0–1.8 m): part of every node σ.
+    pub assumed_phone_height_sigma_m: f64,
     /// Growth of a carried-forward layout position's σ while unranged.
     pub relative_position_growth_mps: f64,
+    /// Same, for a phone reported walking (absolute walking speed).
+    pub walking_position_growth_mps: f64,
     /// Below this the GPS chirality choice is reported as low confidence.
     pub confident_chirality_threshold: f64,
     /// Per-model d_ii table (plan: calibrated once per model), keyed by the
@@ -215,7 +219,9 @@ impl Default for IslandSyncConfig {
             hearing_memory_ms: 200_000,
             range_sigma_m: 0.05,
             assumed_phone_height_m: 1.4,
+            assumed_phone_height_sigma_m: 0.25,
             relative_position_growth_mps: 0.3,
+            walking_position_growth_mps: 1.5,
             confident_chirality_threshold: 0.9,
             self_path_length_by_platform_m: BTreeMap::new(),
             default_self_path_length_m: 0.02,

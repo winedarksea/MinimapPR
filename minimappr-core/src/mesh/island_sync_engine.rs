@@ -11,7 +11,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::layout::gps_anchor_fit::{
-    chirality_from_bearing, fit_layout_to_gps, AnchorFit, ChiralityCue, GpsFix,
+    chirality_from_bearing, fit_layout_to_gps, weighted_kabsch_2d, AnchorFit, ChiralityCue, GpsFix,
+    RigidTransform2d,
 };
 use crate::protocol::mesh_messages::ChirpDirectionReport;
 use crate::protocol::session_messages::ChirpArrivalReport;
@@ -36,6 +37,8 @@ pub struct IslandLayout {
 /// A chirp bearing locks chirality only if the two chiralities' predicted
 /// bearings differ by more than this many reported σ.
 const DECISIVE_CUE_SIGMA_MULTIPLIER: f64 = 3.0;
+/// Common nodes needed to carry positions between two layout frames.
+const MINIMUM_COMMON_NODES_FOR_FRAME_CHANGE: usize = 2;
 /// Minimum common nodes for a reflection test between two layouts.
 const MINIMUM_COMMON_NODES_FOR_REFLECTION_TEST: usize = 3;
 /// Cross-covariance determinants below this (m⁴) mean a degenerate overlap.
@@ -69,6 +72,22 @@ pub fn layouts_are_reflected(old: &IslandLayout, new: &IslandLayout) -> Option<b
     }
     let determinant = h[0][0] * h[1][1] - h[0][1] * h[1][0];
     (determinant.abs() > REFLECTION_TEST_DETERMINANT_FLOOR_M4).then_some(determinant < 0.0)
+}
+
+/// Rigid map from the previous layout's frame into a new solve's frame over
+/// their common nodes (reflection allowed); `None` with fewer than two.
+fn previous_to_new_frame(previous: &IslandLayout, new: &IslandLayout) -> Option<RigidTransform2d> {
+    let common: Vec<([f64; 2], [f64; 2])> = previous
+        .local_positions_m
+        .iter()
+        .filter_map(|(node, a)| new.local_positions_m.get(node).map(|b| ([a[0], a[1]], [b[0], b[1]])))
+        .collect();
+    if common.len() < MINIMUM_COMMON_NODES_FOR_FRAME_CHANGE {
+        return None;
+    }
+    let mirrored = layouts_are_reflected(previous, new) == Some(true);
+    let (source, target): (Vec<[f64; 2]>, Vec<[f64; 2]>) = common.into_iter().unzip();
+    Some(weighted_kabsch_2d(&source, &target, &vec![1.0; source.len()], mirrored))
 }
 
 #[derive(Debug, Clone)]
@@ -124,8 +143,13 @@ impl IslandSyncEngine {
     ) {
         for report in reports.values() {
             for emitter in emission_order {
+                // Only an emitter known to have chirped audibly can be "not
+                // heard"; a lost schedule or report must not split an island.
+                let emitted_audibly = reports.get(emitter).is_some_and(|own| {
+                    own.own_emission_device_sample_index.is_some() && !own.own_chirp_inaudible
+                });
                 let heard = report.arrivals.iter().any(|arrival| arrival.emitter_node_id == *emitter);
-                if !heard {
+                if emitted_audibly && !heard {
                     self.hearing.remove(&(report.reporting_node_id, *emitter));
                 }
             }
@@ -220,6 +244,20 @@ impl IslandSyncEngine {
         }
     }
 
+    /// A node that was absent rejoins as a provisional node: it is surveyed
+    /// afresh in the next round instead of reusing a pre-absence model.
+    pub fn forget_node(&mut self, node: NodeId) {
+        for island in self.islands.values_mut() {
+            island.members.remove(&node);
+            island.filters.remove(&node);
+            if island.reference_node == Some(node) {
+                island.reference_node = None;
+                island.filters.clear();
+            }
+        }
+        self.bump_epoch(node);
+    }
+
     /// Reported gap, input route change, interruption.
     pub fn invalidate_node_clock(&mut self, node: NodeId) {
         if let Some(island) = self.island_of_mut(node) {
@@ -249,12 +287,16 @@ impl IslandSyncEngine {
         solution
             .clock_offsets
             .iter()
-            .filter(|(node, (offset_s, _))| {
+            .filter(|(node, (offset_s, sigma_s))| {
                 island
                     .filters
                     .get(node)
                     .and_then(|filter| filter.predict(solution.reference_time_s))
-                    .is_some_and(|prediction| (offset_s - prediction.offset_s).abs() > config.clock_filter.silent_gap_jump_threshold_s)
+                    .is_some_and(|prediction| {
+                        let jump = (offset_s - prediction.offset_s).abs();
+                        let sigma = prediction.offset_sigma_s.hypot(*sigma_s);
+                        jump > config.clock_filter.silent_gap_jump_threshold_s && jump > config.clock_filter.outlier_gate_sigma * sigma
+                    })
             })
             .map(|(node, _)| *node)
             .collect()
@@ -295,15 +337,24 @@ impl IslandSyncEngine {
         if !solution.layout_positions_m.is_empty() {
             let mut local_positions_m = solution.layout_positions_m.clone();
             let mut sigmas_m = solution.layout_sigmas_m.clone();
-            if let Some(previous) = &island.layout {
-                // Members not ranged this round keep their last position with a
+            let fresh = IslandLayout { captured_ms: now_ms, local_positions_m: local_positions_m.clone(), sigmas_m: sigmas_m.clone() };
+            let frame_change = island.layout.as_ref().and_then(|previous| previous_to_new_frame(previous, &fresh));
+            if let (Some(previous), Some(frame_change)) = (&island.layout, frame_change) {
+                // Members not placed this round keep their last position, moved
+                // into this solve's frame (MDS frames differ per solve), with a
                 // σ that grows with the time they could have moved.
                 let elapsed_s = now_ms.saturating_sub(previous.captured_ms) as f64 / MILLISECONDS_PER_SECOND;
                 for (node, position) in &previous.local_positions_m {
                     if island.members.contains(node) && !local_positions_m.contains_key(node) {
-                        local_positions_m.insert(*node, *position);
+                        let moved = frame_change.apply([position[0], position[1]]);
+                        local_positions_m.insert(*node, [moved[0], moved[1], position[2]]);
                         let sigma = previous.sigmas_m.get(node).copied().unwrap_or(config.range_sigma_m);
-                        sigmas_m.insert(*node, sigma + config.relative_position_growth_mps * elapsed_s);
+                        let growth_mps = if solution.walking_nodes.contains(node) {
+                            config.walking_position_growth_mps
+                        } else {
+                            config.relative_position_growth_mps
+                        };
+                        sigmas_m.insert(*node, sigma + growth_mps * elapsed_s);
                     }
                 }
             }
@@ -372,7 +423,7 @@ impl IslandSyncEngine {
         };
         let (Some(proper), Some(mirror)) = (fit(false), fit(true)) else { return false };
         let bearing = (report.world_azimuth_deg as f64).to_radians();
-        let angular_error = |transform: &crate::layout::gps_anchor_fit::RigidTransform2d| {
+        let angular_error = |transform: &RigidTransform2d| {
             let (a, b) = (transform.apply(layout_xy[from]), transform.apply(layout_xy[to]));
             let difference = ((b[1] - a[1]).atan2(b[0] - a[0]) - bearing).rem_euclid(std::f64::consts::TAU);
             difference.min(std::f64::consts::TAU - difference)
@@ -442,7 +493,7 @@ impl IslandSyncEngine {
         };
         Some(NodePositionForSolve {
             position_m: Self::anchored(island, local),
-            std_m: sigma.max(config.range_sigma_m),
+            std_m: sigma.max(config.range_sigma_m).hypot(config.assumed_phone_height_sigma_m),
         })
     }
 

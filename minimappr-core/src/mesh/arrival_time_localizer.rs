@@ -92,8 +92,11 @@ fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
 
 impl ArrivalTimeLocalizer {
     fn pair_observations(&self, arrivals: &[NodeArrival]) -> Vec<PairTdoaObservation> {
+        // Every pair shares the reference's error, so pick the node whose
+        // timing *and* position are best known.
+        let total_std = |arrival: &NodeArrival| arrival.timing_std_s.hypot(arrival.position_std_m / self.sound_speed_mps);
         let reference = (0..arrivals.len())
-            .min_by(|&a, &b| arrivals[a].timing_std_s.total_cmp(&arrivals[b].timing_std_s))
+            .min_by(|&a, &b| total_std(&arrivals[a]).total_cmp(&total_std(&arrivals[b])))
             .unwrap_or(0);
         (0..arrivals.len())
             .filter(|&index| index != reference)
