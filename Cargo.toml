@@ -25,6 +25,7 @@ resolver = "2"
 members = [
     "minimappr-core",
     "minimappr-ingest-sidecar",
+    "minimappr-mesh-sim",
     "minimappr-sim",
     "minimappr-relay-wire",
     "minimappr-transport",
@@ -55,3 +56,17 @@ opt-level = 3
 [profile.release.package.minimappr-sim]
 opt-level = 3
 codegen-units = 1
+
+# W3-mesh-sim: the Layer 2 suite has a 5 s budget for 10 seeds, so the
+# simulator and the core solver it drives run optimised under test.
+[profile.test.package.minimappr-mesh-sim]
+opt-level = 3
+
+[profile.dev.package.minimappr-mesh-sim]
+opt-level = 3
+
+# The mesh simulator drives the core solver (arrival grid + LM) hundreds of
+# times per PR run; unoptimised it dominates the 5 s budget. This also
+# speeds up minimappr-core's own slow debug tests (stage1_trigger ~16 s).
+[profile.test.package.minimappr-core]
+opt-level = 3

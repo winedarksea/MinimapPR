@@ -1404,6 +1404,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "minimappr-mesh-sim"
+version = "0.1.0"
+dependencies = [
+ "minimappr-core",
+ "minimappr-sim",
+ "rand 0.9.5",
+ "rand_chacha 0.9.0",
+]
+
+[[package]]
 name = "minimappr-relay-wire"
 version = "0.1.0"
 dependencies = [

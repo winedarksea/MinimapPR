@@ -3,6 +3,7 @@
 
 pub mod detection_messages;
 pub mod field_message;
+pub mod mesh_messages;
 pub mod session_messages;
 pub mod wire_codes;
 

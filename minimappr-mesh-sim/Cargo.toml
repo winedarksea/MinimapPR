@@ -1,0 +1,17 @@
+[package]
+name = "minimappr-mesh-sim"
+version = "0.1.0"
+edition.workspace = true
+description = "Layer 2 deterministic mesh simulator: Field Mode node/host state machines from minimappr-core over a seeded simulated network and an arrival-time acoustic world."
+publish = false
+
+# Depends on both minimappr-core (state machines, solver) and minimappr-sim
+# (physical constants, ISO 9613-1 absorption); neither depends on this crate.
+[dependencies]
+minimappr-core = { workspace = true }
+minimappr-sim = { path = "../minimappr-sim" }
+rand = "0.9"
+rand_chacha = "0.9"
+
+[[example]]
+name = "nightly_mesh_seeds"

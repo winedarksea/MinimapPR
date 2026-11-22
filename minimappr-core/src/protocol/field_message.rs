@@ -19,6 +19,10 @@ use super::detection_messages::{
     LocoOcclusionRequest, LocoRescoredSpecies, QueuedDetectionUpload, ReadinessAnswer,
     ReadinessQuery, TapToHearPayload, TapToHearRequest,
 };
+use super::mesh_messages::{
+    ChirpDirectionReport, ClassificationRota, EventLogAppend, EventLogCatchUpRequest,
+    HostAnnouncement, HostHandover, NodeStatusChange, SessionMemberRecord, TransportNotice,
+};
 use super::session_messages::{
     ChirpArrivalReport, ChirpSchedule, ClockModel, GroupStatus, Heartbeat, IslandMembership,
     JoinAccepted, JoinCodeKeyExchange, JoinRequest, LayoutModel, PeopleNearbySummary,
@@ -142,6 +146,16 @@ field_messages! {
     23 => PeopleNearbySummary(PeopleNearbySummary),
     // Reserved in Phase 2 so the status UI can land without a wire change.
     24 => GroupStatus(GroupStatus),
+    // W3-mesh-sim: replicated event log, host term/handover, status, rota.
+    25 => EventLogAppend(EventLogAppend),
+    26 => EventLogCatchUpRequest(EventLogCatchUpRequest),
+    27 => HostAnnouncement(HostAnnouncement),
+    28 => HostHandover(HostHandover),
+    29 => SessionMemberRecord(SessionMemberRecord),
+    30 => NodeStatusChange(NodeStatusChange),
+    31 => ChirpDirectionReport(ChirpDirectionReport),
+    32 => ClassificationRota(ClassificationRota),
+    33 => TransportNotice(TransportNotice),
 }
 
 impl FieldMessage {

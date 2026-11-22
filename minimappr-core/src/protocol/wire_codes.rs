@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Session-scoped node id assigned by the host at join.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub struct NodeId(pub u32);
 
 impl NodeId {
@@ -130,6 +130,51 @@ wire_code_enum! {
         SealedSessionKey = 4,
         /// Host -> joiner: attempt rejected (code wrong or attempts exhausted).
         Rejected = 5,
+    }
+}
+
+wire_code_enum! {
+    /// W3-mesh-sim: why a node's audio or clock status changed.
+    NodeStatusChangeCode {
+        /// Input route changed (e.g. Bluetooth HFP mic): hard clock invalidation.
+        InputRouteChanged = 1,
+        /// Output-only route change; chirps stay on the built-in speaker.
+        OutputRouteChangedSpeakerPinned = 2,
+        /// Output route moved chirps off the speaker: node becomes listen-only.
+        OutputRouteChangedListenOnly = 3,
+        /// Capture gap or overrun reported by the OS: hard clock invalidation.
+        CaptureGapReported = 4,
+        /// Own chirp missing from the self-recording: excluded from ranging.
+        MediaVolumeMuted = 5,
+        /// Low thermal headroom: node stopped classifying (Mic-only).
+        ThermalMicOnly = 6,
+        /// Audio session interrupted (call, another recorder).
+        AudioSessionInterrupted = 7,
+    }
+}
+
+wire_code_enum! {
+    /// W3-mesh-sim: which transport carries the session right now.
+    SessionTransportCode {
+        CloudRelay = 1,
+        LocalHotspot = 2,
+        /// No shared transport: every node runs solo, detection-only.
+        SoloDetectionOnly = 3,
+    }
+}
+
+wire_code_enum! {
+    /// W3-mesh-sim: why the transport or the host changed.
+    SessionChangeReasonCode {
+        SessionStarted = 1,
+        RelayMessageCapReached = 2,
+        HostCellLinkLost = 3,
+        /// Satellite or bandwidth-constrained cell link: treated as no signal.
+        HostCellLinkConstrained = 4,
+        HostSilent = 5,
+        HostThermalHeadroomLow = 6,
+        HostLeftSession = 7,
+        HostCellLinkRestored = 8,
     }
 }
 
