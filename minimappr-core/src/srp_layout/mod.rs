@@ -25,6 +25,9 @@ pub mod region_refinement;
 pub mod robust_scoring;
 pub mod searcher;
 
+#[cfg(test)]
+mod edge_case_tests;
+
 pub use clock_resampling::NodeClockModel;
 pub use config::LayoutSrpConfig;
 pub use layout_geometry::HorizontalDilution;

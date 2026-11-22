@@ -27,16 +27,46 @@ pub struct PairCoherenceCurve {
     /// Index of zero lag in `values`.
     pub zero_lag_index: usize,
     pub values: Vec<f32>,
-    /// `pyramid[k−1]` is level k: stride 2^(k−1), window half-width 2^k − 1
-    /// full-resolution steps.
-    pyramid: Vec<Vec<f32>>,
+    /// `segment_maxima[i]`: max of the interpolant over [i, i + 1] steps.
+    segment_maxima: Vec<f32>,
+    /// `segment_maxima_pyramid[k−1]` is level k: stride 2^(k−1), window
+    /// half-width 2^k − 1 segments.
+    segment_maxima_pyramid: Vec<Vec<f32>>,
     /// Whitened in-band bin count K (both spectrum halves).
     pub in_band_bin_count: usize,
     /// Peak coherence over the lag range.
     pub peak_coherence: f32,
 }
 
+/// Intervals spanning fewer segments than this are scanned directly; a
+/// pyramid lookup only pays off for wider ones.
+const DIRECT_SCAN_SEGMENT_COUNT: usize = 8;
+
 impl PairCoherenceCurve {
+    /// Build a curve (and its envelope tables) from sampled coherence values.
+    pub fn from_values(
+        sensor_a: usize,
+        sensor_b: usize,
+        lag_step_s: f64,
+        zero_lag_index: usize,
+        values: Vec<f32>,
+        in_band_bin_count: usize,
+    ) -> Self {
+        let peak_coherence = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let segment_maxima = catmull_rom_segment_maxima(&values);
+        Self {
+            sensor_a,
+            sensor_b,
+            lag_step_s,
+            zero_lag_index,
+            segment_maxima_pyramid: build_max_pyramid(&segment_maxima),
+            segment_maxima,
+            values,
+            in_band_bin_count,
+            peak_coherence,
+        }
+    }
+
     fn full_resolution_position(&self, lag_s: f64) -> f64 {
         lag_s / self.lag_step_s + self.zero_lag_index as f64
     }
@@ -60,31 +90,41 @@ impl PairCoherenceCurve {
             + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3)
     }
 
-    /// Upper envelope: max coherence over [center − half_width, center + half_width].
+    /// Upper envelope: max of the interpolated curve (`coherence_at`) over
+    /// [center − half_width, center + half_width]. Exact up to f32 rounding:
+    /// it pools per-segment maxima of the Catmull-Rom cubic, which can
+    /// overshoot the stored samples near a peak. Bounding raw samples instead
+    /// would let a cell's envelope fall below its own exact score, so
+    /// branch-and-bound could prune the cell holding the true source.
     pub fn max_coherence_over_interval(&self, center_lag_s: f64, half_width_s: f64) -> f32 {
-        let center = self.full_resolution_position(center_lag_s);
-        let half_width_steps = half_width_s / self.lag_step_s;
-        if half_width_steps < 1.0 {
-            let step_s = half_width_s.max(0.0);
-            return self
-                .coherence_at(center_lag_s - step_s)
-                .max(self.coherence_at(center_lag_s))
-                .max(self.coherence_at(center_lag_s + step_s));
+        let half_width_s = half_width_s.max(0.0);
+        let last_segment = self.segment_maxima.len() - 1;
+        let segment_of = |lag_s: f64| {
+            let position = self.full_resolution_position(lag_s);
+            if position.is_nan() {
+                return 0;
+            }
+            position.floor().clamp(0.0, last_segment as f64) as usize
+        };
+        let low = segment_of(center_lag_s - half_width_s);
+        let high = segment_of(center_lag_s + half_width_s).max(low);
+        if high - low < DIRECT_SCAN_SEGMENT_COUNT {
+            return self.segment_maxima[low..=high].iter().copied().fold(f32::NEG_INFINITY, f32::max);
         }
-        // Level k (stride s, half-width 2^k − 1) covers [c − h, c + h] from the
-        // nearest stored sample iff h + s/2 ≤ 2^k − 1; one extra step keeps the
-        // sampled maximum honest against the continuous curve.
-        let needed_steps = half_width_steps + 1.0;
-        for (level_offset, level) in self.pyramid.iter().enumerate() {
+        // Level k (stride s = 2^(k−1)) stores, at index j, the max over
+        // segments [j·s − (2^k − 1), j·s + (2^k − 1)].
+        let middle = (low + high) / 2;
+        for (level_offset, level) in self.segment_maxima_pyramid.iter().enumerate() {
             let level_number = level_offset + 1;
-            let stride = (1_usize << (level_number - 1)) as f64;
-            let half_window = ((1_usize << level_number) - 1) as f64;
-            if needed_steps + 0.5 * stride <= half_window || level_offset + 1 == self.pyramid.len() {
-                let index = (center / stride).round().clamp(0.0, (level.len() - 1) as f64) as usize;
+            let stride = 1_usize << (level_number - 1);
+            let half_window = (1_usize << level_number) - 1;
+            let index = ((middle + stride / 2) / stride).min(level.len() - 1);
+            let covered_center = index * stride;
+            if covered_center.saturating_sub(half_window) <= low && covered_center + half_window >= high {
                 return level[index];
             }
         }
-        self.peak_coherence
+        self.segment_maxima.iter().copied().fold(f32::NEG_INFINITY, f32::max)
     }
 
     /// Strongest local peak within `half_window_s` of `predicted_lag_s`,
@@ -210,20 +250,62 @@ pub fn compute_pair_coherence_curves(
                     whitened[wrapped].re * normalizer
                 })
                 .collect();
-            let peak_coherence = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-            PairCoherenceCurve {
-                sensor_a: pair.sensor_a,
-                sensor_b: pair.sensor_b,
+            PairCoherenceCurve::from_values(
+                pair.sensor_a,
+                pair.sensor_b,
                 lag_step_s,
-                zero_lag_index: lag_steps,
-                pyramid: build_max_pyramid(&values),
+                lag_steps,
                 values,
                 in_band_bin_count,
-                peak_coherence,
-            }
+            )
         })
         .collect()
 }
+
+/// Max of the Catmull-Rom cubic `coherence_at` uses on each segment
+/// [i, i + 1] (endpoints plus interior stationary points), clamping the
+/// neighbour samples at the curve ends exactly as `coherence_at` does.
+fn catmull_rom_segment_maxima(values: &[f32]) -> Vec<f32> {
+    if values.len() < 2 {
+        return values.to_vec();
+    }
+    let last = values.len() - 1;
+    let sample = |index: isize| values[index.clamp(0, last as isize) as usize] as f64;
+    (0..last)
+        .map(|segment| {
+            let base = segment as isize;
+            let (p0, p1, p2, p3) = (sample(base - 1), sample(base), sample(base + 1), sample(base + 2));
+            // f(t) = 0.5 (2 p1 + c1 t + c2 t² + c3 t³), same form as `coherence_at`.
+            let (c1, c2, c3) = (p2 - p0, 2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3, -p0 + 3.0 * p1 - 3.0 * p2 + p3);
+            let cubic = |t: f64| 0.5 * (2.0 * p1 + c1 * t + c2 * t * t + c3 * t * t * t);
+            let mut best = p1.max(p2);
+            // f'(t) ∝ c1 + 2 c2 t + 3 c3 t².
+            let (a, b, c) = (3.0 * c3, 2.0 * c2, c1);
+            let mut consider = |t: f64| {
+                if t > 0.0 && t < 1.0 {
+                    best = best.max(cubic(t));
+                }
+            };
+            if a.abs() > f64::EPSILON {
+                let discriminant = b * b - 4.0 * a * c;
+                if discriminant >= 0.0 {
+                    let root = discriminant.sqrt();
+                    consider((-b + root) / (2.0 * a));
+                    consider((-b - root) / (2.0 * a));
+                }
+            } else if b.abs() > f64::EPSILON {
+                consider(-c / b);
+            }
+            // Pad by a few f32 ulps: `coherence_at` evaluates in f32, so
+            // its rounding can sit slightly above the f64 maximum.
+            let stored = best as f32;
+            stored + ENVELOPE_ROUNDING_PAD_ULPS * f32::EPSILON * stored.abs().max(1.0)
+        })
+        .collect()
+}
+
+/// f32 ulps added to each segment maximum (see `catmull_rom_segment_maxima`).
+const ENVELOPE_ROUNDING_PAD_ULPS: f32 = 8.0;
 
 /// Dyadic max-pool levels until one window spans the whole curve.
 fn build_max_pyramid(values: &[f32]) -> Vec<Vec<f32>> {
@@ -290,26 +372,42 @@ mod tests {
         assert!(peak > 0.8, "peak coherence {peak}");
     }
 
-    #[test]
-    fn pyramid_interval_max_never_undercuts_true_interval_max() {
-        let values = deterministic_noise(4_001, 3);
-        let curve = PairCoherenceCurve {
-            sensor_a: 0,
-            sensor_b: 1,
-            lag_step_s: 1.0,
-            zero_lag_index: 2_000,
-            pyramid: build_max_pyramid(&values),
-            peak_coherence: values.iter().copied().fold(f32::NEG_INFINITY, f32::max),
-            values: values.clone(),
-            in_band_bin_count: 1,
-        };
-        for (center, half_width) in [(0.0_f64, 3.0_f64), (100.4, 17.2), (-1500.0, 300.0), (900.7, 1.5)] {
-            let index = center + 2_000.0;
-            let low = (index - half_width).ceil() as usize;
-            let high = (index + half_width).floor() as usize;
-            let truth = values[low..=high].iter().copied().fold(f32::NEG_INFINITY, f32::max);
-            let envelope = curve.max_coherence_over_interval(center, half_width);
-            assert!(envelope >= truth, "center {center} hw {half_width}: {envelope} < {truth}");
+
+    /// Dense probes of `coherence_at` across the interval: the envelope must
+    /// bound every one (admissibility of branch-and-bound pruning).
+    fn assert_envelope_bounds_interpolant(curve: &PairCoherenceCurve, center: f64, half_width: f64) {
+        let envelope = curve.max_coherence_over_interval(center, half_width);
+        let probe_count = 64 + (8.0 * half_width) as usize;
+        for probe in 0..=probe_count {
+            let lag = center - half_width + 2.0 * half_width * probe as f64 / probe_count as f64;
+            let exact = curve.coherence_at(lag);
+            assert!(envelope >= exact, "center {center} hw {half_width} lag {lag}: {envelope} < {exact}");
         }
+    }
+
+    #[test]
+    fn interval_envelope_never_undercuts_interpolated_curve() {
+        let noise = PairCoherenceCurve::from_values(0, 1, 1.0, 2_000, deterministic_noise(4_001, 3), 1);
+        for (center, half_width) in [(0.0_f64, 3.0_f64), (100.4, 17.2), (-1500.0, 300.0), (900.7, 1.5), (3.3, 0.2)] {
+            assert_envelope_bounds_interpolant(&noise, center, half_width);
+        }
+        // A sharp peak between samples: Catmull-Rom overshoots both stored
+        // neighbours, so a sample-only bound (the old one) undercut it.
+        let peak_values: Vec<f32> = (0..41).map(|index| (-((index as f32 - 20.3) / 1.2).powi(2)).exp()).collect();
+        let peak = PairCoherenceCurve::from_values(0, 1, 1.0, 20, peak_values, 1);
+        for center_tenths in -30..=30 {
+            for half_width in [0.0_f64, 0.05, 0.3, 0.6, 0.95, 4.0, 12.5] {
+                assert_envelope_bounds_interpolant(&peak, center_tenths as f64 * 0.1, half_width);
+            }
+        }
+    }
+
+    #[test]
+    fn interval_envelope_is_tight_on_a_wide_interval_away_from_the_peak() {
+        let values: Vec<f32> = (0..201).map(|index| (-((index as f32 - 150.0) / 2.0).powi(2)).exp()).collect();
+        let curve = PairCoherenceCurve::from_values(0, 1, 1.0, 100, values, 1);
+        // Interval [-80, -20] relative to zero lag never reaches the peak at +50.
+        assert!(curve.max_coherence_over_interval(-50.0, 30.0) < 1.0e-3);
+        assert!(curve.max_coherence_over_interval(50.0, 30.0) > 0.99);
     }
 }
