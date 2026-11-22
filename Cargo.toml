@@ -8,7 +8,10 @@
 # so the sim's former `lto = "thin"` is dropped; codegen-units = 1 recovers
 # most of it).
 #
-# Planned members (added when their streams merge): minimappr-transport.
+# minimappr-transport (relay client) and minimappr-relay-wire (the relay
+# wire contract it shares with the Cloudflare Worker) landed with W3-relay.
+# field-relay-worker/ is NOT a member: it is a wasm32 Worker with its own
+# empty [workspace] table and lockfile, built by worker-build/wrangler.
 #
 # minimappr-frontend is excluded: it is a wasm32-only Leptos/trunk app with
 # its own [profile.release] (opt-level = "s", lto) that would otherwise have
@@ -23,9 +26,12 @@ members = [
     "minimappr-core",
     "minimappr-ingest-sidecar",
     "minimappr-sim",
+    "minimappr-relay-wire",
+    "minimappr-transport",
 ]
 exclude = [
     "minimappr-frontend",
+    "field-relay-worker",
 ]
 
 [workspace.package]
