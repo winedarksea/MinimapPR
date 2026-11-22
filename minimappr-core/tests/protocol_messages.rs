@@ -298,6 +298,49 @@ fn every_message_kind_round_trips() {
 }
 
 #[test]
+fn hostile_frames_never_panic_or_allocate_from_length_prefixes() {
+    // Every truncation and every single-byte corruption of every kind must
+    // decode to Ok or Err, never panic.
+    for message in one_of_every_message() {
+        let frame = message.encode_frame().expect("encodes");
+        for truncated_length in 0..frame.len() {
+            let _ = decode_field_message_frame(&frame[..truncated_length]);
+        }
+        for byte_index in 0..frame.len() {
+            for corruption in [0x01_u8, 0x80, 0xFF] {
+                let mut corrupted = frame.clone();
+                corrupted[byte_index] ^= corruption;
+                let _ = decode_field_message_frame(&corrupted);
+            }
+        }
+    }
+    // A varint length prefix of ~2^63 for a Vec<u8> (ClipPayload.clip_container)
+    // and for a Vec<struct> (ClipPayload.onsets) must fail on the missing
+    // bytes rather than pre-allocate: postcard reads from the slice and serde
+    // caps size hints, so these return promptly.
+    let header = WireHeader {
+        major_version: FIELD_PROTOCOL_MAJOR_VERSION,
+        minor_version: 0,
+        message_kind_id: 12,
+    };
+    let request_id_and_node_id: &[u8] = &[0x01, 0x02];
+    let empty_clip_container: &[u8] = &[0x00];
+    for fields_before_hostile_length in [
+        request_id_and_node_id.to_vec(),
+        [request_id_and_node_id, empty_clip_container].concat(),
+    ] {
+        let mut frame = postcard::to_allocvec(&header).unwrap();
+        frame.extend_from_slice(&fields_before_hostile_length);
+        frame.extend_from_slice(&[0xFF; 8]);
+        frame.push(0x7F);
+        assert!(matches!(
+            decode_field_message_frame(&frame),
+            Err(FieldMessageDecodeError::MalformedBody { .. })
+        ));
+    }
+}
+
+#[test]
 fn group_status_is_reserved_at_a_stable_kind_id() {
     let status = FieldMessage::GroupStatus(GroupStatus {
         node_id: NodeId(1),

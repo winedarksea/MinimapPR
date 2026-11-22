@@ -116,6 +116,52 @@ fn wrong_key_or_wrong_session_cannot_open() {
 }
 
 #[test]
+fn relay_misdelivery_and_reflection_are_rejected_by_the_receiver() {
+    let mut random_source = ChaCha20Rng::seed_from_u64(9);
+    let sealer = MessageSealer::new(&SessionKey::generate(&mut random_source), &SESSION);
+    let to_node_one = sealer
+        .seal(routing(5), b"for node 1", &mut random_source)
+        .unwrap();
+    assert!(sealer
+        .open_addressed_to_local_node(&to_node_one, NodeId(1))
+        .is_ok());
+    // The relay hands node 1's message to node 2: authentic, but not for it.
+    assert_eq!(
+        sealer.open_addressed_to_local_node(&to_node_one, NodeId(2)),
+        Err(SealingError::NotAddressedToLocalNode)
+    );
+    // The relay reflects node 3's own message back to node 3 as a broadcast.
+    let broadcast_from_three = sealer
+        .seal(
+            EnvelopeRouting {
+                recipient_node_id: NodeId::BROADCAST,
+                ..routing(6)
+            },
+            b"broadcast",
+            &mut random_source,
+        )
+        .unwrap();
+    assert!(sealer
+        .open_addressed_to_local_node(&broadcast_from_three, NodeId(2))
+        .is_ok());
+    assert_eq!(
+        sealer.open_addressed_to_local_node(&broadcast_from_three, NodeId(3)),
+        Err(SealingError::ReflectedOwnMessage)
+    );
+}
+
+#[test]
+fn joiner_rejects_its_own_spake_message_reflected_as_the_host_flight() {
+    let mut random_source = ChaCha20Rng::seed_from_u64(10);
+    let (joiner, flight_one) =
+        JoinerAwaitingHostMessage::start(JOIN_CODE_SECRET, SESSION, &mut random_source);
+    assert!(matches!(
+        joiner.on_host_spake_message(&flight_one),
+        Err(JoinCodeExchangeError::MalformedSpakeMessage)
+    ));
+}
+
+#[test]
 fn replay_window_rejects_duplicates_and_stale_but_allows_reordering() {
     let mut window = ReplayWindow::default();
     let sender = NodeId(3);

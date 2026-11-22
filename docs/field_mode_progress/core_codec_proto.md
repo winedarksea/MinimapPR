@@ -120,7 +120,21 @@ New in `minimappr-core`:
 
 `tests/common/mod.rs` holds the fixture loader and seeded Gaussian noise.
 
+## Promotion review fixes (review/core-codec-proto)
+
+- `decode_flac_to_pcm16` now takes a mandatory `maximum_interleaved_samples` bound. Before, a few KB of FLAC CONSTANT subframes from a peer could decode to gigabytes. `decode_field_clip` bounds it by the header's sample count and rejects headers over the 30 s rolling buffer (`FIELD_CLIP_MAXIMUM_SAMPLES_PER_CHANNEL`), with more than 8 channels, a zero decimation factor, or a device-clock index that overflows.
+- FLAC metadata other than STREAMINFO and PADDING is rejected before claxon sees it, because claxon pre-allocates from VORBIS_COMMENT and APPLICATION length fields (about 80 MB from a few dozen bytes).
+- A raw PCM16 clip with an odd byte length is rejected instead of being truncated silently.
+- New `MessageSealer::open_addressed_to_local_node` rejects authentic envelopes that were addressed to another node or that reflect the receiver's own messages. The AAD stops the relay from editing routing but not from mis-delivering.
+- The band-history ring slot is reduced in u64 (a wasm32 truncation at 2^32 frames).
+- Tests cover a FLAC bomb, hostile metadata, hostile container headers, every truncation of a clip, every truncation and corruption of every message kind, huge postcard length prefixes, relay mis-delivery and reflection, and a reflected SPAKE2 flight.
+
 ## Open issues / follow-ups
+
+- **Sender sequence across restarts (W3):** the replay window keys on `(sender, sequence)` only. A sender that restarts with sequence 0 is dropped until it passes its old high-water mark. A receiver that restarts accepts replays of older envelopes. The shell must persist the sequence per session (or the envelope needs a sender epoch).
+- **Group key:** every member holds the same message key, so a member (not the relay) can forge any sender id. This is acceptable under the relay-only threat model, but per-sender keys or signatures are needed before members are untrusted.
+- **Backward compatibility of appended fields:** a newer decoder that reads an older peer's shorter body fails (postcard has no defaults on EOF). Handle this when the first field is appended.
+- **Host join DoS (W3):** cap the pending-attempt map. Anyone who can reach the host can spend the code's 5-guess budget with garbage confirmations. That is a denial of service, not a key compromise.
 
 - The Stage-1 thresholds are set from synthetic white noise and one fixture. Real outdoor noise (wind gusts, insects) needs the Phase 5 sampled-miss audit. Pink and wind noise were not tested.
 - `stage1_trigger` takes about 16 s in debug builds (drone mode runs 8192-point FFTs at 50 Hz). A `[profile.test.package.minimappr-core] opt-level` override in the root `Cargo.toml` would fix it. I did not touch the root manifest because parallel streams edit it.
