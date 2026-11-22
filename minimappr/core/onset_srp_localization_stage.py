@@ -44,6 +44,9 @@ NANOSECONDS_PER_SECOND = 1_000_000_000
 BUFFER_POLL_INTERVAL_SECONDS = 0.01
 LOCALIZATION_METHOD_NAME = "onset_srp"
 MIN_SENSORS_FOR_FULL_3D_TIER = 4
+# The span wait may use at most this share of the localization stage timeout,
+# leaving the rest for clustering before asyncio.wait_for cancels the stage.
+SPAN_WAIT_STAGE_TIMEOUT_FRACTION = 0.5
 
 
 class OnsetSrpLocalizationStage:
@@ -63,15 +66,33 @@ class OnsetSrpLocalizationStage:
         for node, samples in result.consumed_onset_samples_by_node.items():
             remembered = self._consumed_onset_ns_by_node.setdefault(node, deque())
             remembered.extend(span_start_ns + int(s * NANOSECONDS_PER_SECOND / sample_rate_hz) for s in samples)
-        for remembered in self._consumed_onset_ns_by_node.values():
+        for node in list(self._consumed_onset_ns_by_node):
+            remembered = self._consumed_onset_ns_by_node[node]
             while remembered and remembered[0] < now_ns - ttl_ns:
                 remembered.popleft()
+            # Drop idle nodes too, so removed/renamed nodes do not linger forever.
+            if not remembered:
+                del self._consumed_onset_ns_by_node[node]
 
     # ------------------------------------------------------------------ buffer
     async def _await_span(self, fusion: FusionNode, sensor_ids: list[str], start_ns: int, end_ns: int) -> list[str]:
-        """Poll until every sensor covers the span or the wait budget runs out;
-        returns the sensors that do cover it."""
-        deadline = time.monotonic() + max(0.0, self.config.buffer_wait_max_seconds)
+        """Poll until every sensor covers the span; returns the sensors that do.
+
+        The budget is a *stall* budget: waiting continues while some uncovered
+        sensor's buffer is still advancing and stops after
+        `buffer_wait_max_seconds` without progress. A fixed wall-clock deadline
+        dropped whole windows ("onset_span_uncovered") whenever ingest ran slower
+        than real time (CPU-starved replay), making results load-dependent. A
+        stalled node still releases the wait after the budget, and the total is
+        capped below the localization stage timeout.
+        """
+        stall_budget_s = max(0.0, self.config.buffer_wait_max_seconds)
+        started = time.monotonic()
+        hard_deadline = started + max(
+            stall_budget_s, SPAN_WAIT_STAGE_TIMEOUT_FRACTION * fusion.classifier_config.stage_timeout_seconds
+        )
+        last_progress = started
+        last_end_ns_by_sensor: dict[str, int] = {}
         while True:
             snapshot = await fusion.buffer.snapshot_state(sensor_ids=sensor_ids)
             covered = [
@@ -82,7 +103,15 @@ class OnsetSrpLocalizationStage:
                 and state["start_time_ns"] <= start_ns
                 and (state.get("end_time_ns") or 0) >= end_ns
             ]
-            if len(covered) == len(sensor_ids) or time.monotonic() >= deadline:
+            if len(covered) == len(sensor_ids):
+                return covered
+            now = time.monotonic()
+            for state in snapshot:
+                sensor_end_ns = int(state.get("end_time_ns") or 0)
+                if sensor_end_ns > last_end_ns_by_sensor.get(state["sensor_id"], sensor_end_ns):
+                    last_progress = now
+                last_end_ns_by_sensor[state["sensor_id"]] = sensor_end_ns
+            if now - last_progress >= stall_budget_s or now >= hard_deadline:
                 return covered
             await asyncio.sleep(BUFFER_POLL_INTERVAL_SECONDS)
 
@@ -195,7 +224,9 @@ class OnsetSrpLocalizationStage:
             sample_rate_hz=sample_rate_hz,
         )
         if not windows:
-            fusion._record_silent_drop(stage="localization", reason="onset_classification_window_missing")
+            fusion._record_silent_drop(
+                stage="localization", reason="onset_classification_window_missing", candidate_id=candidate.id
+            )
             return None
         selected_ids = sorted(windows)
         reference_sensor = cluster.reference_sensor if cluster.reference_sensor in windows else selected_ids[0]

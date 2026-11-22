@@ -275,6 +275,10 @@ def test_tight_array_srp_near_field_regression_keeps_bearing_and_covariance(
     assert result.position_covariance_m2 is not None
     if result.range_projection_mode == "range_refined":
         assert position_error_m <= max_position_error_m
+        # A refined range must not be the collapse onto the array (which also
+        # satisfies the range-sized tolerance above).
+        source_range_m = float(np.linalg.norm(source - centroid))
+        assert float(np.linalg.norm(estimate - centroid)) >= 0.5 * source_range_m
     else:
         # Beyond ~4 apertures a 5 cm array's wavefront curvature (2 us at 1.6 m,
         # 0.7 us at 4.6 m) is below one interpolated sample, so an honest
