@@ -11,6 +11,11 @@ description = "Thin UniFFI surface over minimappr-core for the Field Mode KMP ap
 # cdylib: Android (JNA via Gobley) and the host JVM used by unit tests.
 # staticlib: Kotlin/Native (iOS) links it through cinterop.
 # lib: lets `cargo test` exercise the wrappers on the host.
+#
+# Panic contract: UniFFI wraps every export in catch_unwind and raises a
+# Kotlin InternalException, which the app maps to a failed service. That only
+# holds with panic = "unwind" (the default): never set panic = "abort" in a
+# workspace profile this crate builds under, or any panic kills the app.
 [lib]
 crate-type = ["lib", "cdylib", "staticlib"]
 name = "minimappr_ffi"
