@@ -34,12 +34,15 @@ def test_contradiction_needs_two_confident_disagreeing_claims() -> None:
     assert not species_claims_contradict({GROSBEAK: 0.9, TANAGER: 0.6}, {TANAGER: 0.8}, 0.5, 0.15)  # multi-label support
 
 
-async def _tanager_then_grosbeak(settings: Settings, grosbeak_confidence: float, grosbeak_label: str = GROSBEAK):
+async def _tanager_then_grosbeak(
+    settings: Settings, grosbeak_confidence: float, grosbeak_label: str = GROSBEAK, *, tanager_bouts: int = 1
+):
     manager = TrackManager(settings)
-    tanager = await manager.update(
-        timestamp_ns=T0, position_m=TANAGER_PERCH_M, label=TANAGER, label_category="wildlife", confidence=0.9,
-        measurement_covariance_m2=TIGHT_FIX_COVARIANCE_M2,
-    )
+    for bout in range(tanager_bouts):
+        tanager = await manager.update(
+            timestamp_ns=T0 + bout * SECOND // 2, position_m=TANAGER_PERCH_M, label=TANAGER,
+            label_category="wildlife", confidence=0.9, measurement_covariance_m2=TIGHT_FIX_COVARIANCE_M2,
+        )
     grosbeak = await manager.update(
         timestamp_ns=T0 + int(2.5 * SECOND), position_m=GROSBEAK_PERCH_M, label=grosbeak_label, label_category="wildlife",
         confidence=grosbeak_confidence, measurement_covariance_m2=TIGHT_FIX_COVARIANCE_M2,
@@ -63,9 +66,25 @@ async def test_unknown_label_may_still_associate() -> None:
 async def test_sub_display_other_species_builds_its_own_track() -> None:
     # The real-audio failure: weak grosbeak bouts must not seed a grosbeak belief
     # inside the tanager's track (which would later let confident ones in).
-    tanager, weak_grosbeak = await _tanager_then_grosbeak(Settings(**ALL_TRACKER_FLAGS), grosbeak_confidence=0.3)
+    tanager, weak_grosbeak = await _tanager_then_grosbeak(
+        Settings(**ALL_TRACKER_FLAGS), grosbeak_confidence=0.3, tanager_bouts=3
+    )
     assert weak_grosbeak.id != tanager.id
     assert GROSBEAK not in (tanager.species_belief or {})
+
+
+async def test_weak_misclassified_bout_on_the_same_perch_joins_the_bird() -> None:
+    manager = TrackManager(Settings(**ALL_TRACKER_FLAGS))
+    for bout in range(3):
+        tanager = await manager.update(
+            timestamp_ns=T0 + bout * SECOND, position_m=TANAGER_PERCH_M, label=TANAGER, label_category="wildlife",
+            confidence=0.9, measurement_covariance_m2=TIGHT_FIX_COVARIANCE_M2,
+        )
+    confused = await manager.update(
+        timestamp_ns=T0 + 4 * SECOND, position_m=(14.5, 7.3, 3.0), label=GROSBEAK, label_category="wildlife",
+        confidence=0.3, measurement_covariance_m2=TIGHT_FIX_COVARIANCE_M2,
+    )
+    assert confused.id == tanager.id and confused.species_top_label == TANAGER
 
 
 async def test_species_gate_off_or_log_odds_off_keeps_legacy_merge() -> None:

@@ -33,6 +33,7 @@ from minimappr.core.track_partial_constraint_evidence import PartialConstraintSi
 from minimappr.core.track_perched_concurrency import (
     ConcurrentPerchGuardConfig,
     concurrently_active_perch_conflicts,
+    fix_lands_on_another_perch,
 )
 from minimappr.core.track_perched_relocation import PerchedRelocationGate, RelocationGhost
 from minimappr.core.track_species_association_gate import (
@@ -241,6 +242,12 @@ class FieldModeTrackExtensions:
                 candidates,
                 detection_evidence=evidence,
                 belief_for_track=self.belief_probabilities,
+                weak_claim_fits_track=lambda track: not fix_lands_on_another_perch(
+                    position_m=position_m,
+                    measurement_covariance_m2=measurement_covariance_m2,
+                    track=track,
+                    snap_distance_m=self._concurrent_perch_guard.snap_distance_m,
+                ),
                 config=self._species_association_gate,
             )
         if (

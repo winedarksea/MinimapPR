@@ -21,6 +21,10 @@ ALL_ON_SCENE_EXPECTATIONS = {
     "onset_same_band_two_species": (1.0, 1.0),
     "gate_countersinging_pair": (1.0, 1.0),
     "gate_collinear_trail": (1.0, 1.0),
+    # Field Mode S-fixes tracking: the flock no longer collapses into one entity
+    # and the far bird's 391 m fix no longer starts a duplicate.
+    "gate_flock_echo": (1.0, 1.0),
+    "onset_faint_far_bird": (1.0, 1.0),
 }
 BASELINE_COMPARISON_SCENE = "onset_same_band_two_species"
 

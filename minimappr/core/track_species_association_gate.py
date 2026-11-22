@@ -11,13 +11,17 @@ detection's top species claims at least ``detection_claim_probability``, the
 track's belief gives that species less than ``confident_probability``, and the
 detection gives the track's species less than ``detection_claim_probability``.
 
-The detection-side floor is deliberately lower than the display floor. On the
-S gate's real-audio scene, sub-display (two-threshold) tanager bouts joined
-the grosbeak's track 7 m away, built a tanager belief inside it, and then
-let the confident tanager bouts in too. Refused, they start (and fill) the
-tanager's own, initially hidden, track. Labels with no species claim at all
-(unknown, abstentions, scores under the claim floor) stay wildcards, and a
-track that is not yet confident accepts anything the geometry picks.
+A *confident* contradicting claim (at least ``confident_probability``) is
+always refused. A *weak* one (between the two floors: sub-display
+two-threshold evidence, a confused bout) may still join when it sits on the
+track's own perch (``weak_claim_fits_track``: not a fix the perched filter
+would snap to), so one misclassified bout from a known bird feeds that bird's
+belief instead of spawning a track. Off the perch it is refused: on the S
+gate's real-audio scene, sub-display tanager bouts joined the grosbeak's
+track 7 m away, built a tanager belief inside it, and then let the confident
+tanager bouts in too. Labels with no species claim at all (unknown,
+abstentions, scores under the claim floor) stay wildcards, and a track that
+is not yet confident accepts anything the geometry picks.
 """
 
 from __future__ import annotations
@@ -66,19 +70,22 @@ def species_compatible_tracks(
     *,
     detection_evidence: dict[str, float],
     belief_for_track: Callable[[str], dict[str, float]],
+    weak_claim_fits_track: Callable[[TrackState], bool],
     config: SpeciesAssociationGateConfig,
 ) -> list[TrackState]:
-    """*tracks* minus those whose confident belief contradicts the detection."""
+    """*tracks* minus those whose confident belief the detection contradicts."""
     candidates = list(tracks)
     if not config.enabled or not detection_evidence:
         return candidates
-    return [
-        track
-        for track in candidates
-        if not species_claims_contradict(
+    claim_is_confident = max(detection_evidence.values()) >= config.confident_probability
+    compatible = []
+    for track in candidates:
+        contradicts = species_claims_contradict(
             detection_evidence,
             belief_for_track(track.id),
             config.confident_probability,
             config.detection_claim_probability,
         )
-    ]
+        if not contradicts or (not claim_is_confident and weak_claim_fits_track(track)):
+            compatible.append(track)
+    return compatible
