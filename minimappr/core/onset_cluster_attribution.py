@@ -60,6 +60,8 @@ class ClusterAttributionContext:
     classification_start_sample: int
     classification_end_sample: int
     sample_rate_hz: int
+    # Onsets this close to a target onset (same band) are the target's own note or echo.
+    shared_onset_max_lag_samples: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,9 +97,28 @@ def interferers_in_window(
     sample_rate_hz: int,
     audible_snr_db: float,
     lookback_samples: int = 0,
+    shared_onset_max_lag_samples: int | None = None,
+    same_band_min_overlap_fraction: float = 1.0,
 ) -> list[WindowInterferer]:
     """Other clusters audible on the classifying node with an onset arriving inside the
-    window, or up to ``lookback_samples`` before it (a note still sounding at the start)."""
+    window, or up to ``lookback_samples`` before it (a note still sounding at the start).
+
+    An interferer onset within ``shared_onset_max_lag_samples`` of one of the target's
+    own onsets, in the same band, is the target's note (or its reflection) seen again:
+    masking it would erase the target, so it is not masked and does not count.
+    """
+    target_arrivals = cluster_evidence[target_index].node_onset_arrivals.get(classifying_node_id, ())
+
+    def shared_with_target(arrival) -> bool:
+        if shared_onset_max_lag_samples is None:
+            return False
+        return any(
+            abs(arrival.span_sample - own.span_sample) <= shared_onset_max_lag_samples
+            and _band_overlap_fraction((arrival.band_min_hz, arrival.band_max_hz), (own.band_min_hz, own.band_max_hz))
+            >= same_band_min_overlap_fraction
+            for own in target_arrivals
+        )
+
     interferers = []
     for index, evidence in sorted(cluster_evidence.items()):
         if index == target_index:
@@ -108,6 +129,7 @@ def interferers_in_window(
             ((arrival.span_sample - window_start_sample) / sample_rate_hz, arrival.band_min_hz, arrival.band_max_hz)
             for arrival in evidence.node_onset_arrivals.get(classifying_node_id, ())
             if window_start_sample - lookback_samples <= arrival.span_sample < window_end_sample
+            and not shared_with_target(arrival)
         )
         if onsets:
             interferers.append(WindowInterferer(index, evidence, onsets))

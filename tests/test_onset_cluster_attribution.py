@@ -113,6 +113,20 @@ def test_interferer_must_be_audible_and_inside_the_window() -> None:
     assert _interferers(target, late) == []
 
 
+def test_interferer_onsets_shared_with_the_target_note_are_not_masked() -> None:
+    # A ground/trunk image of the target: same band, onset 10 ms behind the target's.
+    target = _evidence([2.0, 2.0, 2.0], 60.0, onset_sample=1000)
+    image = _evidence([2.5, 2.5, 0.3], 50.0, onset_sample=1240)
+    common = dict(
+        target_index=0, cluster_evidence={0: target, 1: image}, classifying_node_id="a", window_start_sample=0,
+        window_end_sample=SAMPLE_RATE_HZ, sample_rate_hz=SAMPLE_RATE_HZ, audible_snr_db=3.0,
+    )
+    assert len(interferers_in_window(**common)) == 1  # legacy view: masks the target's own note
+    assert interferers_in_window(
+        **common, shared_onset_max_lag_samples=int(0.03 * SAMPLE_RATE_HZ), same_band_min_overlap_fraction=0.5
+    ) == []
+
+
 def test_loco_settles_target_label_and_reports_the_collapsed_interferer_label() -> None:
     decision = loco_decision(
         original_label="Scarlet Tanager",

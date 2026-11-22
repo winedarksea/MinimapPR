@@ -38,6 +38,7 @@ from minimappr.core.onset_cluster_attribution import (
     loco_decision,
     snr_gradient_decision,
 )
+from minimappr.core.onset_cluster_echo_checks import SAME_BAND_MIN_OVERLAP_FRACTION
 from minimappr.core.onset_cluster_masking import (
     MaskedSignal,
     MaskingParameters,
@@ -124,6 +125,8 @@ class OnsetClusterAttributor:
             sample_rate_hz=context.sample_rate_hz,
             audible_snr_db=self._thresholds.audible_snr_db,
             lookback_samples=int(round(self.config.loco_mask_max_seconds * context.sample_rate_hz)),
+            shared_onset_max_lag_samples=context.shared_onset_max_lag_samples,
+            same_band_min_overlap_fraction=SAME_BAND_MIN_OVERLAP_FRACTION,
         )
         annotation: dict[str, Any] = {"interferers": len(interferers), "original_label": original.label}
         if not interferers:

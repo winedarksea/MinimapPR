@@ -244,6 +244,7 @@ class OnsetSrpLocalizationStage:
             classification_start_sample=end_sample - classification_signal_samples,
             classification_end_sample=end_sample,
             sample_rate_hz=sample_rate_hz,
+            shared_onset_max_lag_samples=int(round(self.config.echo_max_lag_seconds * sample_rate_hz)),
         )
         # Read by partial binding (assembly_track_resolution) as measured per-node levels.
         product.extra_classification_features["onset_cluster_node_band_snr_db"] = {
