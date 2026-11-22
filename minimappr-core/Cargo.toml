@@ -14,8 +14,18 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true, optional = true }
 
+# --- W2-core-sync (chirp sync, clock model, layout) ---
+# nalgebra: symmetric eigen (MDS), SVD (Kabsch/pseudo-inverse), dense solves.
+# default-features off keeps nalgebra-macros out; std is enough for wasm32
+# and aarch64-linux-android.
+nalgebra = { version = "0.33", default-features = false, features = ["std"] }
+# --- end W2-core-sync ---
+
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
+# W2-core-sync: Layer 1 simulator for sync scenario tests and the Phase 1
+# pre-study example. Dev-only; the sim never depends on core.
+minimappr-sim = { path = "../minimappr-sim" }
 
 [[bench]]
 name = "capture_plane"
