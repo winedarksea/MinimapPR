@@ -54,6 +54,7 @@ pub const GENEROUS_LIMITS: SessionRelayLimits = SessionRelayLimits {
     maximum_inbound_bytes_per_session: 64 * 1024 * 1024,
     maximum_frame_bytes: 64 * 1024,
     maximum_connections_per_session: 16,
+    maximum_peer_bindings_per_session: 64,
 };
 
 struct LoopbackPeer {

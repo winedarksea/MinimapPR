@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 /// First `wrangler dev` runs `worker-build --release` (~30-90 s cold).
 const WORKER_STARTUP_TIMEOUT: Duration = Duration::from_secs(300);
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const PROCESS_GROUP_TERMINATE_GRACE: Duration = Duration::from_millis(500);
 
 pub struct LocalRelayWorker {
     pub http_base_url: String,
@@ -24,9 +25,11 @@ pub struct LocalRelayWorker {
 impl Drop for LocalRelayWorker {
     fn drop(&mut self) {
         // wrangler runs workerd as a child; kill the whole process group.
-        let _ = Command::new("kill")
-            .args(["-TERM", &format!("-{}", self.child.id())])
-            .status();
+        let process_group = format!("-{}", self.child.id());
+        let _ = Command::new("kill").args(["-TERM", &process_group]).status();
+        std::thread::sleep(PROCESS_GROUP_TERMINATE_GRACE);
+        // workerd can outlive SIGTERM to wrangler; make sure nothing lingers.
+        let _ = Command::new("kill").args(["-KILL", &process_group]).status();
         let _ = self.child.kill();
         let _ = self.child.wait();
         if !std::thread::panicking() {
@@ -64,9 +67,15 @@ fn wrangler_command(worker_directory: &Path) -> Command {
         .current_dir(worker_directory)
         // No telemetry, no interactive prompts, no account lookups.
         .env("WRANGLER_SEND_METRICS", "false")
-        .env("CI", "1")
-        .env_remove("CLOUDFLARE_API_TOKEN")
-        .env_remove("CLOUDFLARE_ACCOUNT_ID");
+        .env("CI", "1");
+    // Strip every credential wrangler reads (CLOUDFLARE_API_TOKEN/_KEY/_EMAIL/
+    // _ACCOUNT_ID and the legacy CF_* names) so nothing can reach an account.
+    for (name, _) in std::env::vars_os() {
+        let name_text = name.to_string_lossy();
+        if name_text.starts_with("CLOUDFLARE_") || name_text.starts_with("CF_") {
+            command.env_remove(&name);
+        }
+    }
     command
 }
 

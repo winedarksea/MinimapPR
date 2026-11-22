@@ -39,6 +39,11 @@ fn read_number_var(env: &Env, name: &str) -> Result<u64> {
         .map_err(|_| Error::RustError(format!("wrangler var {name} is not an unsigned integer: {text}")))
 }
 
+fn read_u32_var(env: &Env, name: &str) -> Result<u32> {
+    u32::try_from(read_number_var(env, name)?)
+        .map_err(|_| Error::RustError(format!("wrangler var {name} does not fit in u32")))
+}
+
 impl RelayWorkerConfig {
     pub fn from_env(env: &Env) -> Result<Self> {
         Ok(Self {
@@ -55,8 +60,8 @@ impl RelayWorkerConfig {
                     "SESSION_MAXIMUM_INBOUND_BYTES",
                 )?,
                 maximum_frame_bytes: read_number_var(env, "MAXIMUM_FRAME_BYTES")?,
-                maximum_connections_per_session: read_number_var(env, "SESSION_MAXIMUM_CONNECTIONS")?
-                    as u32,
+                maximum_connections_per_session: read_u32_var(env, "SESSION_MAXIMUM_CONNECTIONS")?,
+                maximum_peer_bindings_per_session: read_u32_var(env, "SESSION_MAXIMUM_PEER_BINDINGS")?,
             },
             usage_counter_persist_every_messages: read_number_var(
                 env,

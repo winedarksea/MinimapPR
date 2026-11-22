@@ -39,7 +39,7 @@ A spoken code looks like `K7QX-731904`.
   - The first connect to a peer id stores a resume-token digest. A later claim of that peer id must present the matching resume token and the same role, or it gets 409. A test checks this: a thief holding a valid node token cannot take over the peer id after the real peer drops.
   - The resume token is rotated on every accepted connect, and a resumed connection closes the stale socket with code 4000.
 - **One host at a time:** a second host-role socket on a different peer id gets 409.
-- **Caps** (`SessionUsageCounters::try_admit_frame`, checked before parsing because every inbound message is billed): per-session inbound messages, inbound bytes, frame size, and connection count, all from wrangler `[vars]`. A rejected frame is dropped, and the sender gets a `frame_rejected` text notice. Counters are persisted every `USAGE_COUNTER_PERSIST_EVERY_MESSAGES` admitted frames and on every close, so an eviction can lose at most N-1 counts.
+- **Caps** (`SessionUsageCounters::try_admit_frame`, checked before parsing because every inbound message is billed, text frames included): per-session inbound messages, inbound bytes, frame size, connection count and distinct peer bindings (`SESSION_MAXIMUM_PEER_BINDINGS`), all from wrangler `[vars]`. Each accepted connect spends one inbound message (`try_admit_connection`), and one that binds a new peer id spends a binding, because bindings outlive their sockets and would otherwise grow object storage without bound. A resume's own stale socket does not count against the connection cap. A rejected frame is dropped, and the sender gets a `frame_rejected` text notice. Counters are persisted every `USAGE_COUNTER_PERSIST_EVERY_MESSAGES` admitted frames and on every close, so an eviction can lose at most N-1 counts.
 - **Control notices:** `welcome`, `peer_joined`, `peer_left` and `frame_rejected` are sent as text frames, so they can never be confused with binary relay frames.
 
 ## Transport client
@@ -47,7 +47,7 @@ A spoken code looks like `K7QX-731904`.
 - **Sans-IO:** time (`now_milliseconds`) and the CSPRNG are passed in, and there is no tokio. The crate builds for `wasm32-unknown-unknown` with `--no-default-features`. The adapter loop is `poll_transmit` → write → `on_binary_frame`/`on_text_frame` → `poll_event`.
 - **Sealing:**
   - Frames are sealed at dequeue time, so sender sequence numbers follow the actual send order.
-  - The receiver checks AEAD, envelope sender against header sender, recipient (self or broadcast), and then the replay window. Drops are counted in `RelayClientInboundStatistics`, never surfaced one by one.
+  - The receiver opens with `MessageSealer::open_addressed_to_local_node` (AEAD, recipient is self or broadcast, sender is not self, so a relay reflecting our own broadcast is dropped), checks envelope sender against header sender, and then the replay window. Drops are counted in `RelayClientInboundStatistics`, never surfaced one by one.
   - A non-key-exchange message arriving in the unsealed lane is refused.
 - **Priority:**
   - `OutboundScheduler` always sends control frames first. Clip chunks go earliest-deadline-first.
@@ -56,14 +56,14 @@ A spoken code looks like `K7QX-731904`.
   - The control queue and the clip byte budget are bounded and return errors (backpressure).
 - **Late-clip abandonment:**
   - The sender drops a clip whole once `abandon_at` passes, mid-transfer included. The deadline comes from `ClipRequest::abandon_after_milliseconds` or the config default of 5 s.
-  - The receiver drops partial clips after 8 s. It also caps concurrent partial clips (evicting the oldest) and total reassembled size.
+  - The receiver drops partial clips after 8 s. It also caps concurrent partial clips (evicting the oldest) and each clip's reassembled size, stores chunks as they arrive (never preallocating by the peer-declared `chunk_count`), and refuses empty chunks.
 - **Reconnect with resume:**
   - The client uses exponential backoff (250 ms → 15 s).
   - The welcome carries the resume token.
   - On a resumed welcome, every clip still inside its deadline restarts from chunk 0. Fully written clips are kept until their deadline for this purpose, because the dead socket may have swallowed their tail chunks. The receiver remembers completed (sender, request id) pairs, so a clip is never delivered twice.
   - Control frames are at-most-once per connection. The relay does not buffer for absent peers, and durable state belongs to the host event log.
 - **Join over relay:**
-  - `JoinerRelayKeyExchange` and `HostRelayJoinCodeResponder` wrap the core SPAKE2 states and key concurrent attempts by (relay peer id, attempt id), with a bounded pending table.
+  - `JoinerRelayKeyExchange` and `HostRelayJoinCodeResponder` wrap the core SPAKE2 states and key concurrent attempts by (relay peer id, attempt id), with a bounded pending table: one pending attempt per relay peer, and the oldest is evicted when full (never refused), since abandoned flight 1s spend no guess budget and would otherwise lock the code for good.
   - The host always answers with a flight. A failure returns `Rejected` and `failure`, and `JoinCodeAttemptsExhausted` signals that the code should be re-issued.
   - Code joiners bind a provisional peer id ≥ `0x8000_0000`, since host-assigned node ids stay below that, and reconnect with their assigned id after the sealed `JoinAccepted`.
 
@@ -118,6 +118,8 @@ Rewriting a header sender or recipient fails the envelope checks. A test covers 
 
 - **Head-of-line blocking in kernel buffers.** The scheduler orders frames correctly, but on a slow uplink the OS socket buffer can still hold several chunks. Native shells could shrink `SO_SNDBUF`; the browser adapter should gate on `WebSocket.bufferedAmount`.
 - **No web-sys WebSocket adapter yet.** That belongs to W4-pwa, which drives the same `RelayClientSession`.
+- **Relay usage counters can under-count across hibernation.** Counters persist every `USAGE_COUNTER_PERSIST_EVERY_MESSAGES` frames, so each hibernation can forget up to N-1 messages (and their bytes). A patient sender idling between bursts can exceed the caps by roughly that much per wake. Lower N, or reserve counts ahead (persist `usage + N` before admitting), if Phase 3 shows abuse.
+- **A brute-forced lookup code grants relay access before any PAKE.** `POST /v1/join` mints a node or viewer token from the lookup half alone (by design: the PAKE runs over the relay). A stranger who finds a live code (about 1 in 1M / live codes per guess) can connect, spend the session's caps, squat unused peer ids (a later legitimate connect on that id gets 409), and spend the code's resolve budget. `POST /v1/sessions` is also unauthenticated. Cloudflare rate-limiting rules on `/v1/join` and `/v1/sessions` are a deploy prerequisite.
 - **Join-code endpoints are not rate-limited per IP.** Only the per-code resolve budget and the host's 5-guess retirement apply. Consider Cloudflare rate-limiting rules at deploy time.
 - **No host handover on the relay.** The "one host socket" rule means a new host needs a host token. Handover (W4/Phase 4) needs either a host-token transfer inside the sealed session or a DO endpoint to promote a peer.
 - **Clip keys can collide.** `ClipPayload` and `TapToHearPayload` from the same node share the `(sender, request_id)` reassembly key, so callers must keep request ids distinct across both.
