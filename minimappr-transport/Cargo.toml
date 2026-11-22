@@ -2,12 +2,12 @@
 name = "minimappr-transport"
 version = "0.1.0"
 edition.workspace = true
-description = "Field Mode session transport: sans-IO relay client (sealed messages, clip chunking below control traffic, late-clip abandonment, reconnect with resume) plus a native WebSocket adapter."
+description = "Field Mode session transport: sans-IO relay client (sealed messages, clip chunking below control traffic, late-clip abandonment, reconnect with resume) plus native and browser WebSocket adapters."
 
 # The core (everything outside `native_websocket`) is sans-IO: no tokio, no
 # clock, no OS randomness; time and a CSPRNG are injected. It builds for
-# wasm32 with `default-features = false` (a web-sys WebSocket adapter for the
-# PWA is W4-pwa's job and drives the same state machine).
+# wasm32 with `default-features = false`; the `web-websocket` feature adds
+# the browser adapter the Field PWA uses (same state machine).
 [dependencies]
 minimappr-core = { path = "../minimappr-core", default-features = false, features = ["session-crypto"] }
 minimappr-relay-wire = { path = "../minimappr-relay-wire" }
@@ -23,8 +23,36 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 url = { version = "2", optional = true }
 
+# --- web-websocket adapter (W4-pwa): browser WebSocket + fetch + WebCrypto
+# randomness for the Field PWA (wasm32 only; enable with
+# `default-features = false, features = ["web-websocket"]`) ---
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+js-sys = { version = "0.3", optional = true }
+web-sys = { version = "0.3", optional = true, features = [
+    "BinaryType",
+    "CloseEvent",
+    "Crypto",
+    "Headers",
+    "Location",
+    "MessageEvent",
+    "Request",
+    "RequestInit",
+    "Response",
+    "WebSocket",
+    "Window",
+    "WorkerGlobalScope",
+] }
+# --- end web-websocket ---
+
 [features]
 default = ["native-websocket"]
+web-websocket = [
+    "dep:wasm-bindgen",
+    "dep:wasm-bindgen-futures",
+    "dep:js-sys",
+    "dep:web-sys",
+]
 native-websocket = [
     "dep:tokio",
     "dep:tokio-tungstenite",

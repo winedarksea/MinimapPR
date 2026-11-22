@@ -1,0 +1,10 @@
+# Field Mode PWA build (W4-pwa). Separate config so the COP build
+# (Trunk.toml -> ../minimappr/frontend) is untouched:
+#   npm ci && trunk build --release --config Trunk.field.toml
+# Serve locally (model mount + /v1 relay proxy):
+#   FIELD_RELAY_ORIGIN=http://127.0.0.1:8787 node field/field-dev-server.mjs
+[build]
+target = "field.html"
+html_output = "index.html"
+dist = "dist-field"
+public_url = "/"

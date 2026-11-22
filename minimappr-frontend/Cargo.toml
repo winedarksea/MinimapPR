@@ -55,6 +55,8 @@ web-sys = { version = "0.3", features = [
     "AudioContext",
     "AudioBuffer",
     "DomRect",
+    "ServiceWorkerContainer",
+    "ServiceWorkerRegistration",
 ] }
 gloo-net = { version = "0.6", features = ["http", "websocket"] }
 gloo-timers = { version = "0.3", features = ["futures"] }
@@ -63,8 +65,24 @@ log = "0.4"
 console_log = "1"
 futures = "0.3"
 
+# --- Field Mode PWA (W4-pwa): only built with `--features field-pwa`
+# (Trunk.field.toml / field.html), so the server-backed COP build is
+# unaffected. minimappr-core: Stage-1, clip codec, protocol, sealing;
+# minimappr-transport: the sans-IO relay client + browser adapter. ---
+minimappr-core = { path = "../minimappr-core", optional = true }
+minimappr-transport = { path = "../minimappr-transport", optional = true, default-features = false, features = ["web-websocket"] }
+minimappr-relay-wire = { path = "../minimappr-relay-wire", optional = true }
+rand_core = { version = "0.6", default-features = false, optional = true }
+# --- end Field Mode PWA ---
+
 [features]
 default = []
+field-pwa = [
+    "dep:minimappr-core",
+    "dep:minimappr-transport",
+    "dep:minimappr-relay-wire",
+    "dep:rand_core",
+]
 
 [profile.release]
 opt-level = "s"

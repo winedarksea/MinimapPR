@@ -1,3 +1,6 @@
+#[cfg(feature = "field-pwa")]
+pub mod field_shim;
+
 use crate::state::{
     AcousticMapLayer, AcousticMapSample, AppState, NodeStatus, RfEmitterEstimate, RfSpectrumFrame,
     SeismicTrace,
