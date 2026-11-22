@@ -309,14 +309,23 @@ All rows, sim matrix (seed 0). Indiv. = individual recall; errors horizontal.
    resolved to `vehicle` ("car"), 19 (e.g. "common firecrest") to `security` ("fire",
    "gun") and 4 ("screamer") to `human`. Every
    wildlife-scoped stage then skipped them: the perched tracker, species log-odds, entity
-   reporting and wildlife rules. Now a configured category still wins, a species label from
-   BirdNET v2.4 or V3 (animal taxa) is wildlife, and v2.4's non-species classes (`Gun_Gun`,
-   `Engine_Engine`, ...) keep the taxonomy answer. Tests: `tests/test_taxonomy_provider.py`
-   (2 new).
-   **Caveat for existing deployments:** categories already learned into the `labels` table
-   (for example "scarlet tanager" → vehicle) are reloaded by `merge_labels` as configured and
-   still win. A one-off `UPDATE labels SET category='wildlife'` for BirdNET species is needed
-   on the box.
+   reporting and wildlife rules. Now an operator-configured category (taxonomy config file)
+   still wins and every other BirdNET label takes BirdNET's own vocabulary category
+   (`core/birdnet_label_categories.py`): species are wildlife; v2.4's and V3's sound classes
+   have an explicit table (Gun/Siren/Fireworks/Explosion/Fire → security, Engine/Aircraft/
+   Motor vehicle/Boat/Train/Vehicle horn → vehicle, Human vocal/non-vocal/whistle, Power
+   tool(s)/Chainsaw/Hammer/Sawing/Music → human, Noise/Environmental → unknown, Dog →
+   wildlife); V3's `Homo sapiens` (filed under Mammalia) → human. Tests:
+   `tests/test_birdnet_label_categories.py` (exhaustive over all 6522 v2.4 labels, the V3
+   names in the v2.4→V3 map, the 16 V3 sound classes and all 521 YAMNet labels; the
+   full-file V3 check runs when the labels CSV is provisioned or
+   `MINIMAPPR_TEST_BIRDNET_V3_LABELS_CSV` points at it), `tests/test_taxonomy_provider.py`.
+   **Existing deployments (review fix):** learned label rows (`register_label`,
+   `merge_labels` from the `labels` table) no longer count as configured, so persisted wrong
+   rows cannot re-impose the heuristic answer. `FusionNode.start` also re-files `labels` rows
+   whose name is a known v2.4/mapped-V3 animal species and whose category is not wildlife
+   (skipping operator-configured labels; idempotent; logged). Historical
+   `detections.label_category` values are left as recorded.
 2. **The pre-render report-window cap skipped real birds once onset clustering was on**
    (`core/fusion_node.py` `_should_skip_saturated_report_window`; commit 94e3226). The cap
    (`fusion_report_window_localized_emission_cap` = 3 per node per 30 s bucket) assumes one
@@ -452,7 +461,7 @@ missing.
 ```bash
 nc -z -G 2 127.0.0.1 2222 && ssh -p 2222 colin@127.0.0.1
 cd ~/MinimapPR && git fetch && git checkout fm/s-gate
-# 0. labels learned before the category fix keep e.g. "scarlet tanager" -> vehicle
+# 0. labels persisted before the category fix are re-filed at startup; check what is left
 sqlite3 data/minimappr.db "SELECT name, category FROM labels WHERE category IN ('vehicle','security','human') ORDER BY name;"
 # 1. snippet stability: same snippets, same labels, before vs after the flag set
 python scripts/compare_birdnet_versions.py --audio data/snippets --max-clips 500 --output-json data/birdnet_v3_compare.json

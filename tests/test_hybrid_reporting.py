@@ -80,6 +80,7 @@ async def _start_fusion(
     reporting_window_seconds: float = 30.0,
     classification_window_seconds: float = 0.04,
     report_window_localized_emission_cap: int = 0,
+    **extra_settings,
 ) -> tuple[FusionNode, Storage]:
     settings = Settings(
         db_path=tmp_path / "hybrid.db",
@@ -102,6 +103,7 @@ async def _start_fusion(
         site_origin_lat=37.0,
         site_origin_lon=-122.0,
         site_origin_alt_m=0.0,
+        **extra_settings,
     )
     settings.db_path.parent.mkdir(parents=True, exist_ok=True)
     settings.snippet_dir.mkdir(parents=True, exist_ok=True)
@@ -446,3 +448,37 @@ def test_pre_render_report_window_cap_never_skips_onset_srp_products() -> None:
     skip = FusionNode._should_skip_saturated_report_window
     assert skip(fake_fusion, candidate_product("gcc_phat")) is True
     assert skip(fake_fusion, candidate_product(LOCALIZATION_METHOD_NAME)) is False
+
+
+@pytest.mark.asyncio
+async def test_report_window_pregate_does_not_cap_entity_routed_emissions(tmp_path: Path) -> None:
+    """Entity mode: wildlife emissions are distinct entities (duplicates end as
+    enrich_existing), so they must not count toward the legacy (node, bucket) cap.
+    Before the S-gate review they were noted under the entity decision's window,
+    a key the gate only matched by coincidence (here: a bucket-aligned bout)."""
+    localizer = RecordingLocalizer(reference_sensor="hybrid-node:ch1")
+    # Both labels resolve to wildlife via the name heuristics ("bird", "wild").
+    classifier = RecordingClassifier(label_for_positive="songbird", label_for_negative="wild turkey")
+    fusion, storage = await _start_fusion(
+        tmp_path,
+        classifier=classifier,
+        localizer=localizer,
+        report_window_localized_emission_cap=1,
+        entity_reporting_enabled=True,
+    )
+
+    positive = np.full((4, 1024), 0.25, dtype=np.float32)
+    negative = np.full((4, 1024), -0.25, dtype=np.float32)
+    base_ns = 1_739_810_700_000_000_000
+    await _ingest(fusion, start_time_ns=base_ns, channels=positive)
+    await asyncio.sleep(0.25)
+    await _ingest(fusion, start_time_ns=base_ns + 2_000_000_000, channels=negative)
+    await asyncio.sleep(0.25)
+
+    assert len(classifier.recorded_frequencies_hz) == 2
+    status = await fusion.status()
+    assert status["metrics"]["classification_pregate_skipped_count"] == 0
+    assert fusion._localized_window_emissions == {}
+
+    await fusion.stop()
+    await storage.close()
