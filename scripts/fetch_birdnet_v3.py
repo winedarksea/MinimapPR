@@ -7,8 +7,8 @@ ACCEPTABLE_USE.txt asks derived apps not to use BirdNET branding and not to be
 used for covert surveillance of people (guidance, not a licence term).
 
 Files land in a gitignored directory (default ``data/models/birdnet_v3/``).
-Downloads are streamed to ``<name>.part`` and only renamed after the MD5 in the
-pinned manifest below matches, so a truncated or tampered file never reaches the
+Downloads are streamed to ``<name>.part`` and only renamed after the size, MD5 and
+SHA-256 in the pinned manifest below match, so a truncated or tampered file never reaches the
 classifier path. Model files are treated as data: nothing in them is executed.
 
 Usage::
@@ -42,19 +42,22 @@ DOWNLOAD_TIMEOUT_SECONDS = 120
 class PinnedZenodoFile:
     name: str
     md5_hex: str
+    # MD5 is what Zenodo publishes (integrity only); SHA-256 was computed from
+    # MD5-verified downloads so a collision-crafted substitute is also refused.
+    sha256_hex: str
     size_bytes: int
     always_fetched: bool
 
 
 # Pinned from the Zenodo API listing of record 24362980 (fetched 2026-11-21).
 PINNED_FILES: tuple[PinnedZenodoFile, ...] = (
-    PinnedZenodoFile("BirdNET+_V3.0_Global_12K_FP16_pruned.onnx", "6b42d8905f25f856fb8ad91544138914", 72317224, True),
-    PinnedZenodoFile("BirdNET+_V3.0_Global_12K_Labels.csv", "bb25847af8a581e1382081382f01e762", 8007144, True),
-    PinnedZenodoFile("MODEL_LICENSE.txt", "77b299ba50d3119cd28c5a2b6fc0ff4b", 11836, True),
-    PinnedZenodoFile("ACCEPTABLE_USE.txt", "92f52349d7a08f74167f096702bac26a", 2986, True),
-    PinnedZenodoFile("BirdNET+_V3.0_Global_12K_FP16.onnx", "3f284bdeae7ffb38718c391839b58b60", 173871766, False),
+    PinnedZenodoFile("BirdNET+_V3.0_Global_12K_FP16_pruned.onnx", "6b42d8905f25f856fb8ad91544138914", "feadeccc84feb021aeb9c51ec5288f6f5bd7065fe3773e2d48a69ea8a26b412a", 72317224, True),
+    PinnedZenodoFile("BirdNET+_V3.0_Global_12K_Labels.csv", "bb25847af8a581e1382081382f01e762", "88d976477fac81127ac8ac4c215c37749d0a6537944112ea606d321317cb7640", 8007144, True),
+    PinnedZenodoFile("MODEL_LICENSE.txt", "77b299ba50d3119cd28c5a2b6fc0ff4b", "42ee5f54ac7992463b34c9b4676923f955a3ce86c187fcf35ec8f009cc278dbc", 11836, True),
+    PinnedZenodoFile("ACCEPTABLE_USE.txt", "92f52349d7a08f74167f096702bac26a", "4495ebf9a088a83f902bbbef95ec17f635b51c94ade5d95b5d248646ea70a04e", 2986, True),
+    PinnedZenodoFile("BirdNET+_V3.0_Global_12K_FP16.onnx", "3f284bdeae7ffb38718c391839b58b60", "ae9c42ae50e39f4d70fb1e5a90549456f8357a183450b60afb88d3f1061f8928", 173871766, False),
     # Taxonomy v0.5 (synonyms) - only needed to rebuild the v2.4 -> V3 label map.
-    PinnedZenodoFile("BirdNET+_Taxonomy_v0.5-Nov2026.zip", "0310312e852326e17e45e5b2dcf64655", 69831066, False),
+    PinnedZenodoFile("BirdNET+_Taxonomy_v0.5-Nov2026.zip", "0310312e852326e17e45e5b2dcf64655", "433f0d19aabdd5c67a26501d05b8826ad23af4c33149771b5d908c7efa7e4fd1", 69831066, False),
 )
 OPTIONAL_FILE_FLAGS: dict[str, str] = {
     "BirdNET+_V3.0_Global_12K_FP16.onnx": "include_full_fp16",
@@ -62,16 +65,21 @@ OPTIONAL_FILE_FLAGS: dict[str, str] = {
 }
 
 
-def compute_file_md5_hex(path: Path) -> str:
-    digest = hashlib.md5(usedforsecurity=False)
+def compute_file_digests_hex(path: Path) -> tuple[str, str]:
+    """(md5, sha256) in one pass over the file."""
+    md5_digest = hashlib.md5(usedforsecurity=False)
+    sha256_digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(DOWNLOAD_CHUNK_BYTES), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+            md5_digest.update(chunk)
+            sha256_digest.update(chunk)
+    return md5_digest.hexdigest(), sha256_digest.hexdigest()
 
 
 def file_matches_pin(path: Path, pinned: PinnedZenodoFile) -> bool:
-    return path.is_file() and path.stat().st_size == pinned.size_bytes and compute_file_md5_hex(path) == pinned.md5_hex
+    if not (path.is_file() and path.stat().st_size == pinned.size_bytes):
+        return False
+    return compute_file_digests_hex(path) == (pinned.md5_hex, pinned.sha256_hex)
 
 
 def download_pinned_file(pinned: PinnedZenodoFile, output_directory: Path) -> None:
@@ -87,11 +95,14 @@ def download_pinned_file(pinned: PinnedZenodoFile, output_directory: Path) -> No
         for chunk in iter(lambda: response.read(DOWNLOAD_CHUNK_BYTES), b""):
             out.write(chunk)
     if not file_matches_pin(partial_path, pinned):
-        actual = compute_file_md5_hex(partial_path)
+        actual_md5, actual_sha256 = compute_file_digests_hex(partial_path)
         partial_path.unlink(missing_ok=True)
-        raise RuntimeError(f"checksum mismatch for {pinned.name}: expected {pinned.md5_hex}, got {actual}")
+        raise RuntimeError(
+            f"checksum mismatch for {pinned.name}: expected md5={pinned.md5_hex} sha256={pinned.sha256_hex}, "
+            f"got md5={actual_md5} sha256={actual_sha256}"
+        )
     partial_path.replace(destination)
-    logger.info("ok (verified) %s md5=%s", pinned.name, pinned.md5_hex)
+    logger.info("ok (verified) %s sha256=%s", pinned.name, pinned.sha256_hex)
 
 
 def main(argv: list[str] | None = None) -> int:
