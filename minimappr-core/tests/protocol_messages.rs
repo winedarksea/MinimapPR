@@ -1,6 +1,7 @@
 //! Message enum round trips and forward-compatibility handling.
 
 use minimappr_core::protocol::detection_messages::*;
+use minimappr_core::protocol::mesh_messages::*;
 use minimappr_core::protocol::session_messages::*;
 use minimappr_core::protocol::wire_codes::*;
 use minimappr_core::protocol::{
@@ -62,7 +63,7 @@ fn one_of_every_message() -> Vec<FieldMessage> {
             session_id: SESSION,
             join_token: [9; 16],
             requested_role: SessionRole::Joiner,
-            node_descriptor: descriptor,
+            node_descriptor: descriptor.clone(),
         }),
         FieldMessage::JoinAccepted(JoinAccepted {
             session_id: SESSION,
@@ -269,6 +270,67 @@ fn one_of_every_message() -> Vec<FieldMessage> {
             node_id: NodeId(3),
             status: GroupStatusCode::HeadingHome,
             note: Some("back at trailhead".into()),
+        }),
+        FieldMessage::EventLogAppend(EventLogAppend {
+            host_node_id: NodeId(1),
+            host_term: 2,
+            host_head_sequence: 41,
+            entries: vec![EventLogEntry {
+                sequence: 40,
+                host_term: 2,
+                field_message_frame: vec![1, 0, 7, 9, 9],
+            }],
+        }),
+        FieldMessage::EventLogCatchUpRequest(EventLogCatchUpRequest {
+            node_id: NodeId(3),
+            since_sequence: 39,
+        }),
+        FieldMessage::HostAnnouncement(HostAnnouncement {
+            host_node_id: NodeId(1),
+            host_term: 2,
+            event_log_head_sequence: 41,
+            transport: SessionTransportCode::CloudRelay,
+            reason: SessionChangeReasonCode::HostSilent,
+        }),
+        FieldMessage::HostHandover(HostHandover {
+            from_host_node_id: NodeId(1),
+            to_node_id: NodeId(2),
+            host_term: 3,
+            reason: SessionChangeReasonCode::HostThermalHeadroomLow,
+            event_log_head_sequence: 41,
+        }),
+        FieldMessage::SessionMemberRecord(SessionMemberRecord {
+            node_id: NodeId(3),
+            join_order: 2,
+            node_descriptor: descriptor.clone(),
+            self_path_length_m: 0.02,
+        }),
+        FieldMessage::NodeStatusChange(NodeStatusChange {
+            node_id: NodeId(3),
+            local_sequence: 7,
+            change: NodeStatusChangeCode::InputRouteChanged,
+            device_sample_index: 123_456,
+        }),
+        FieldMessage::ChirpDirectionReport(ChirpDirectionReport {
+            round_id: 9,
+            reporting_node_id: NodeId(4),
+            emitter_node_id: NodeId(3),
+            world_azimuth_deg: 37.5,
+            azimuth_standard_deviation_deg: 4.0,
+        }),
+        FieldMessage::ClassificationRota(ClassificationRota {
+            island_id: 1,
+            rota_epoch: 3,
+            slot_duration_milliseconds: 1_500,
+            clumps: vec![ClassificationClump {
+                member_node_ids: vec![NodeId(2), NodeId(3), NodeId(5)],
+            }],
+        }),
+        FieldMessage::TransportNotice(TransportNotice {
+            host_node_id: NodeId(1),
+            transport: SessionTransportCode::LocalHotspot,
+            reason: SessionChangeReasonCode::RelayMessageCapReached,
+            clip_fetch_enabled: true,
         }),
     ]
 }
