@@ -9,7 +9,7 @@ everywhere else. "A bit too much audio" always beats "too little".
 
 Canonical implementations live in mirrored files; **keep them in sync**:
 
-- Rust: [`src/dsp_math.rs`](src/dsp_math.rs) (shared DSP helpers) and
+- Rust: [`minimappr-core/src/dsp_math.rs`](../minimappr-core/src/dsp_math.rs) (shared DSP helpers) and
   [`src/birdnet_render.rs`](src/birdnet_render.rs) (`render_band_split`)
 - Python: [`minimappr/core/beamforming.py`](../minimappr/core/beamforming.py)
   (`BandSplitDasRenderer`, `raised_cosine_band_weights`)

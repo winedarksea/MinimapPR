@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import functools
 import json
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -12,23 +10,15 @@ import numpy as np
 import pytest
 
 from minimappr.audio_processing.chain import build_chain_from_rust_stages
+from tests.rust_sidecar_binary import build_rust_sidecar_binary, cargo_is_available
 
-ROOT = Path(__file__).resolve().parents[1]
-SIDECAR = ROOT / "minimappr-ingest-sidecar"
-BINARY = SIDECAR / "target" / "debug" / "minimappr-ingest-sidecar"
 SAMPLE_RATE_HZ = 16_000
 
-pytestmark = pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo is required")
+pytestmark = pytest.mark.skipif(not cargo_is_available(), reason="cargo is required")
 
 
-@functools.lru_cache(maxsize=1)
 def _binary() -> Path:
-    subprocess.run(
-        ["cargo", "build", "--quiet", "--bin", "minimappr-ingest-sidecar"],
-        cwd=SIDECAR,
-        check=True,
-    )
-    return BINARY
+    return build_rust_sidecar_binary()
 
 
 def _rust(frames: list[np.ndarray], stages: list[dict]) -> list[np.ndarray]:

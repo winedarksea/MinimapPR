@@ -35,10 +35,13 @@ if [[ "$BUILD_FRONTEND" -eq 1 ]]; then
 fi
 
 if [[ "$BUILD_SIDECAR" -eq 1 ]]; then
-  cd "$REPO_ROOT/minimappr-ingest-sidecar"
-  cargo build --release
+  # The sidecar is a root-workspace member; its binary lands in the workspace
+  # target dir (honours CARGO_TARGET_DIR), so ask cargo rather than assume.
+  cd "$REPO_ROOT"
+  cargo build --release --package minimappr-ingest-sidecar --bin minimappr-ingest-sidecar
+  TARGET_DIR="$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
   mkdir -p "$REPO_ROOT/dist"
-  cp "target/release/minimappr-ingest-sidecar" "$REPO_ROOT/dist/minimappr-ingest-sidecar"
+  cp "$TARGET_DIR/release/minimappr-ingest-sidecar" "$REPO_ROOT/dist/minimappr-ingest-sidecar"
   echo "Ingest sidecar built -> $REPO_ROOT/dist/minimappr-ingest-sidecar"
   ls -lh "$REPO_ROOT/dist/minimappr-ingest-sidecar"
 fi

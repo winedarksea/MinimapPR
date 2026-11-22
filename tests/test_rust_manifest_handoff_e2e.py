@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import functools
 import json
 import os
-import shutil
 import socket
 import sqlite3
 import struct
@@ -37,10 +35,10 @@ from minimappr.models import GeoPoint, NodeSpec, NodeType
 from minimappr.storage.db import Storage
 from minimappr.utils.audio import encode_pcm16le_b64
 from tests.helpers import SIRITH_TETRA_SENSOR_OFFSETS_M, prepend_noise_padding, synthesize_delayed_array_channels
+from tests.rust_sidecar_binary import build_rust_sidecar_binary, cargo_is_available
 
 
 MINIMAPPR_ROOT = Path(__file__).resolve().parents[1]
-SIDECAR_BINARY_PATH = MINIMAPPR_ROOT / "minimappr-ingest-sidecar" / "target" / "debug" / "minimappr-ingest-sidecar"
 TEST_SOURCE_POSITION_M = (0.35, 0.18, 0.07)
 
 
@@ -192,17 +190,10 @@ def _sidecar_output(process: subprocess.Popen[str]) -> str:
         return ""
 
 
-@functools.lru_cache(maxsize=1)
 def _ensure_sidecar_binary() -> Path:
-    if shutil.which("cargo") is None:
+    if not cargo_is_available():
         pytest.skip("cargo toolchain not available; cannot build the Rust sidecar")
-    sidecar_dir = MINIMAPPR_ROOT / "minimappr-ingest-sidecar"
-    subprocess.run(
-        ["cargo", "build", "--quiet", "--bin", "minimappr-ingest-sidecar"],
-        cwd=str(sidecar_dir),
-        check=True,
-    )
-    return SIDECAR_BINARY_PATH
+    return build_rust_sidecar_binary()
 
 
 def _wait_for_sidecar_ready(process: subprocess.Popen[str], *, port: int, timeout_s: float = 15.0) -> None:

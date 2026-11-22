@@ -51,7 +51,7 @@ def test_received_level_db_from_rms_matches_spl_formula() -> None:
 
 def test_amplitude_prior_matches_rust_helper_constants() -> None:
     # Cross-language parity: identical formula/clamps to
-    # minimappr-ingest-sidecar/src/range_projection.rs::amplitude_range_prior_m.
+    # minimappr-core/src/range_projection.rs::amplitude_range_prior_m.
     for received_db in (95.0, 80.0, 55.0, 30.0):
         r, _ = amplitude_range_prior_m(
             received_db,

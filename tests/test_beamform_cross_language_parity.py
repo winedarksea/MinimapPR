@@ -8,9 +8,7 @@ and spectral magnitude agreement within 0.5 dB on occupied bins.
 
 from __future__ import annotations
 
-import functools
 import json
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -20,29 +18,21 @@ import pytest
 from minimappr.core.ambi_atob import SIRITH_MIC_POSITIONS_M
 from minimappr.core.beamforming import BandSplitDasRenderer, BandSplitRenderConfig
 from minimappr.spatial_audio.geometry import alias_cutoff_from_positions
+from tests.rust_sidecar_binary import build_rust_sidecar_binary, cargo_is_available
 
-MINIMAPPR_ROOT = Path(__file__).resolve().parents[1]
-SIDECAR_DIR = MINIMAPPR_ROOT / "minimappr-ingest-sidecar"
-SIDECAR_BINARY_PATH = SIDECAR_DIR / "target" / "debug" / "minimappr-ingest-sidecar"
 
 SAMPLE_RATE_HZ = 16_000
 SOUND_SPEED_MPS = 343.2
 
 
 pytestmark = pytest.mark.skipif(
-    shutil.which("cargo") is None,
+    not cargo_is_available(),
     reason="cargo toolchain required to build the Rust sidecar oracle",
 )
 
 
-@functools.lru_cache(maxsize=1)
 def _sidecar_binary() -> Path:
-    subprocess.run(
-        ["cargo", "build", "--quiet", "--bin", "minimappr-ingest-sidecar"],
-        cwd=str(SIDECAR_DIR),
-        check=True,
-    )
-    return SIDECAR_BINARY_PATH
+    return build_rust_sidecar_binary()
 
 
 def _run_rust_beamform_oracle(

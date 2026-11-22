@@ -5,7 +5,7 @@ localization result with a ``range_projection_mode`` describing how the radial
 (range) axis was resolved. Historically the two estimators emitted divergent
 strings for the same semantic state, so downstream confidence/observability
 capping only fired for one path. These constants are the single source of truth
-for the Python side; the Rust side mirrors them in ``src/range_projection.rs``
+for the Python side; the Rust side mirrors them in ``minimappr-core/src/range_projection.rs``
 and the shared contract is documented in
 ``minimappr-ingest-sidecar/RANGE_PROJECTION_CONTRACT.md``.
 """

@@ -94,7 +94,7 @@ def test_rust_python_cap_constants_match() -> None:
 
     rust_src = (
         Path(__file__).resolve().parents[1]
-        / "minimappr-ingest-sidecar"
+        / "minimappr-core"
         / "src"
         / "range_projection.rs"
     ).read_text()

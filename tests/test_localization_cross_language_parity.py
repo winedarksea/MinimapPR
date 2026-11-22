@@ -12,9 +12,7 @@ The Rust estimate is obtained via the sidecar's hidden ``srp-oracle`` subcommand
 
 from __future__ import annotations
 
-import functools
 import json
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -24,29 +22,20 @@ import pytest
 from minimappr.core.localization import LocalizationEngine, speed_of_sound_mps
 from minimappr.core.range_projection import normalize_range_mode, range_mode_is_unobservable
 from tests.helpers import SIRITH_TETRA_SENSOR_OFFSETS_M, synthesize_delayed_array_channels
+from tests.rust_sidecar_binary import build_rust_sidecar_binary, cargo_is_available
 
-
-MINIMAPPR_ROOT = Path(__file__).resolve().parents[1]
-SIDECAR_DIR = MINIMAPPR_ROOT / "minimappr-ingest-sidecar"
-SIDECAR_BINARY_PATH = SIDECAR_DIR / "target" / "debug" / "minimappr-ingest-sidecar"
 
 SAMPLE_RATE_HZ = 48_000
 
 
 pytestmark = pytest.mark.skipif(
-    shutil.which("cargo") is None,
+    not cargo_is_available(),
     reason="cargo toolchain required to build the Rust sidecar oracle",
 )
 
 
-@functools.lru_cache(maxsize=1)
 def _sidecar_binary() -> Path:
-    subprocess.run(
-        ["cargo", "build", "--quiet", "--bin", "minimappr-ingest-sidecar"],
-        cwd=str(SIDECAR_DIR),
-        check=True,
-    )
-    return SIDECAR_BINARY_PATH
+    return build_rust_sidecar_binary()
 
 
 def _run_rust_oracle(

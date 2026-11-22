@@ -15,7 +15,7 @@ level. A source 10 dB quieter than reference is ~3.16× farther; 20 dB → 10× 
 The prior only substitutes the *projection distance* for unobservable-range modes
 (RANGE_ASYMPTOTIC / RANGE_BEARING_PROJECTED / RANGE_BOUNDARY). It never overrides a
 ``range_refined`` solve, where the data resolved range directly. The Rust sidecar
-mirrors this formula in ``src/srp_phat.rs`` and the shared contract lives in
+mirrors this formula in ``minimappr-core/src/srp_phat.rs`` and the shared contract lives in
 ``minimappr-ingest-sidecar/RANGE_PROJECTION_CONTRACT.md``.
 """
 

@@ -1,0 +1,37 @@
+# MinimapPR Rust workspace.
+#
+# Members share one Cargo.lock and one target/ directory at the repo root.
+# Profiles must live here: Cargo ignores [profile.*] in member manifests.
+# (The sidecar defined none, so none are declared yet.)
+#
+# Planned members (added when their streams merge): minimappr-sim,
+# minimappr-transport.
+#
+# minimappr-frontend is excluded: it is a wasm32-only Leptos/trunk app with
+# its own [profile.release] (opt-level = "s", lto) that would otherwise have
+# to be hoisted here and applied to the native sidecar, and
+# `cargo test --workspace` on the host would try to build its
+# web-sys/wasm-bindgen graph natively. It keeps its own Cargo.lock and is
+# built with trunk from its directory; it can still path-depend on
+# minimappr-core.
+[workspace]
+resolver = "2"
+members = [
+    "minimappr-core",
+    "minimappr-ingest-sidecar",
+]
+exclude = [
+    "minimappr-frontend",
+]
+
+[workspace.package]
+edition = "2021"
+
+[workspace.dependencies]
+minimappr-core = { path = "minimappr-core" }
+base64 = "0.22"
+num-complex = "0.4"
+rustfft = "6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"

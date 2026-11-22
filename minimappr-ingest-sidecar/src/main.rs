@@ -1,17 +1,18 @@
 mod actors;
-mod audio_payload;
+// Modules re-homed into `minimappr-core`; re-imported at the crate root so
+// existing `crate::<module>::...` paths keep resolving.
+use minimappr_core::{
+    audio_payload, dsp_math, range_projection, sensor_stream_buffer as dsp, srp_phat,
+};
 mod birdnet_render;
 mod classifier_helper;
 mod derived_cache;
 mod diagnostics;
-mod dsp;
 mod dsp_events;
-mod dsp_math;
 mod dsp_render_output;
 mod dsp_worker;
 mod env_payload;
 mod envelope;
-mod gcc_phat;
 mod geo_restriction;
 #[allow(dead_code)]
 mod iamf_writer;
@@ -19,11 +20,9 @@ mod ingest_backend;
 mod journal_reader;
 mod leases;
 mod manifests;
-mod range_projection;
 mod render_mvdr;
 mod runtime;
 mod spatial_audio;
-mod srp_phat;
 mod storage_class;
 
 use std::collections::HashMap;

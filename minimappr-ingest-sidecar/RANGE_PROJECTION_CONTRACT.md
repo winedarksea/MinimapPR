@@ -8,7 +8,7 @@ estimate.
 
 Canonical definitions live in two mirrored files; **keep them in sync**:
 
-- Rust: [`src/range_projection.rs`](src/range_projection.rs)
+- Rust: [`minimappr-core/src/range_projection.rs`](../minimappr-core/src/range_projection.rs)
 - Python: [`minimappr/core/range_projection.py`](../minimappr/core/range_projection.py)
 
 ## Canonical modes
@@ -79,7 +79,7 @@ r = 10 ^ ((L_ref − L_recv) / 20)     clamped to [min_range_m, max_range_m]
 - `L_ref` = assumed source level at 1 m (`localization_amplitude_reference_level_db`,
   default 100 dB). Clamp band default `[5 m, 1000 m]`.
 - Implemented identically in `minimappr/core/amplitude_range.py::amplitude_range_prior_m`
-  and `src/range_projection.rs::amplitude_range_prior_m`.
+  and `minimappr-core/src/range_projection.rs::amplitude_range_prior_m`.
 - **Rule:** the prior only substitutes the projection distance for the
   unobservable-range modes (`range_asymptotic` / `range_bearing_projected` /
   `range_boundary`). It never overrides a `range_refined` solve, where the data
@@ -104,7 +104,7 @@ but compatible criteria:
     number exceeds `1e6` (`_RANGE_PROJECTION_CONDITION_THRESHOLD`).
   - Upgrades `range_asymptotic → range_bearing_projected` when the preliminary
     (bearing) Jacobian is well-conditioned (`cond < 1e8`).
-- **Rust** (`src/srp_phat.rs`):
+- **Rust** (`minimappr-core/src/srp_phat.rs`):
   - `far_field_candidate` emits `range_bearing_projected` (instead of
     `range_asymptotic`) when the far-field direction-fit residual is low
     (`direction_fit_residual < 0.5`).
@@ -131,7 +131,7 @@ otherwise) disambiguates which side is physically valid, and both engines report
 whether the constraint was actually applied to this estimate via
 `half_space_applied`:
 
-- **Rust** (`src/srp_phat.rs`): `SrpPhatConfig::half_space` clamps the near-field
+- **Rust** (`minimappr-core/src/srp_phat.rs`): `SrpPhatConfig::half_space` clamps the near-field
   grid's z-bound to the array's own mean-z plane in `grid_from_bounds` before the
   search runs (`HalfSpace::Upper`/`Lower` restrict; `HalfSpace::None`, the tetra
   default, is a no-op). `half_space_applied` on `LocalizationManifestPayload` is set
