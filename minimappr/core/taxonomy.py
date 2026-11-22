@@ -64,6 +64,11 @@ class RuntimeTaxonomyProvider(TaxonomyProvider):
             for key, value in (label_to_category or {}).items()
             if str(key).strip() and str(value).strip()
         }
+        # Operator configuration only. ``_label_to_category`` also accumulates
+        # *learned* entries (``register_label`` / ``merge_labels`` from the labels
+        # table), which are past resolutions — including ones the name heuristics
+        # got wrong — so they must not outrank a species model's provenance.
+        self._configured_label_to_category = dict(self._label_to_category)
         self._category_to_iff = {
             str(key).strip().lower(): str(value).strip().lower()
             for key, value in (category_to_iff or DEFAULT_CATEGORY_TO_IFF).items()
@@ -155,8 +160,8 @@ class RuntimeTaxonomyProvider(TaxonomyProvider):
         return self._label_aliases.get(label.strip().lower(), label)
 
     def configured_category_for_label(self, label: str) -> str | None:
-        """Explicitly configured/learned category, or None (no name heuristics)."""
-        return self._label_to_category.get(label.strip().lower())
+        """Operator-configured category, or None (ignores learned rows and heuristics)."""
+        return self._configured_label_to_category.get(label.strip().lower())
 
     def category_for_label(self, label: str) -> str:
         key = label.strip().lower()

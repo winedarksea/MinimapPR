@@ -17,8 +17,8 @@ from typing import Any, Callable
 import numpy as np
 
 from minimappr.classifiers.base import AudioClassifier, ClassificationResult
-from minimappr.classifiers.birdnet_v3_labels import BIRDNET_V3_ANIMAL_TAXON_GROUPS
 from minimappr.config import LocalizationConfig
+from minimappr.core.birdnet_label_categories import birdnet_vocabulary_category
 from minimappr.core.preprocessing import create_classification_preprocessor
 from minimappr.core.taxonomy import ABSTENTION_LABELS
 from minimappr.interfaces import (
@@ -34,110 +34,47 @@ from minimappr.utils.audio import energy_contrast_db, framed_spectral_flatness_m
 logger = logging.getLogger(__name__)
 
 
-_BIRDNET_MODEL_NAME = "birdnet_v2m4"
-# BirdNET+ V3.0 (Field Mode W1-birdnet-v3); mirrors birdnet_v3.BIRDNET_V3_MODEL_NAME
-# without importing the classifier module into the hot path.
-_BIRDNET_V3_MODEL_NAME = "birdnet_v3"
-
-# BirdNET's entire vocabulary is bird species, so any label it produces is
-# wildlife by construction. Models whose output vocabulary maps wholesale onto a
-# single taxonomy category are listed here.
-_MODEL_FALLBACK_CATEGORY = {
-    _BIRDNET_MODEL_NAME: "wildlife",
-}
-
-
 def _resolve_label_category(
     classification: ClassificationResult,
     taxonomy_provider: TaxonomyProvider,
 ) -> str:
-    """Resolve taxonomy first, falling back to the model's own vocabulary category.
+    """Resolve a label's taxonomy category, letting species-model provenance beat name heuristics.
 
-    BirdNET species labels are open-ended, so name-only taxonomy heuristics cannot
-    reliably identify every result as BirdNET-derived.  A configured category
-    remains authoritative; for a species model's species labels, provenance beats
-    the substring name heuristics (otherwise the heuristic answer stands).
+    Order: abstentions (``ABSTENTION_LABELS``) keep the taxonomy's answer; a
+    non-BirdNET result keeps the taxonomy's answer; a BirdNET result takes an
+    operator-configured category if one exists, else BirdNET's own vocabulary
+    category (``core/birdnet_label_categories.py``).
 
-    The fallback applies only to real vocabulary labels; abstentions
-    (``ABSTENTION_LABELS``) keep the taxonomy's own answer.
+    Why provenance wins (Field Mode S gate): the name heuristics are substring
+    matches, so "scarlet tanager" / "northern cardinal" ("car") read as vehicle
+    and "common firecrest" ("fire") as security, silently keeping those birds out
+    of every wildlife-scoped stage (perched tracker, species log-odds, entity
+    reporting, rules). Learned label rows are not "configured": they persist past
+    heuristic answers and would re-impose them on every start.
 
-    The fallback yields a real taxonomy category (``wildlife``), not the model id.
-    Emitting ``birdnet_v2m4`` as a *category* meant it was absent from
-    ``DEFAULT_CATEGORY_TO_IFF``, so every BirdNET detection still resolved to
-    ``iff_category="unknown"`` and no rule keyed on ``wildlife`` could ever match.
-    Model provenance already lives in ``classification.features["model"]``.
+    The category is a real taxonomy category (``wildlife``), never the model id:
+    a model id is absent from ``DEFAULT_CATEGORY_TO_IFF`` and resolves to
+    ``iff_category="unknown"``, so no rule keyed on ``wildlife`` could match.
     """
     taxonomy_category = taxonomy_provider.category_for_label(classification.label)
     if classification.label.strip().lower() in ABSTENTION_LABELS:
         # "unknown" is the *absence* of a label, not a vocabulary entry, so the
-        # model's wholesale category must not apply to it. Without this guard a
-        # BirdNET abstention resolved to "wildlife", which was then registered
-        # against the label name and persisted — after which every abstention
-        # from every model read as wildlife.
+        # model's category must not apply to it. Without this guard a BirdNET
+        # abstention resolved to "wildlife", which was then registered against the
+        # label name and persisted — after which every abstention read as wildlife.
         return taxonomy_category
-    model_category = _model_vocabulary_category(classification)
+    model_category = birdnet_vocabulary_category(classification)
     if model_category is None:
         return taxonomy_category
-    # Field Mode S gate: an operator-configured category still wins, but the
-    # *name heuristics* must not override a species model's provenance. They are
-    # substring matches, so "scarlet tanager" / "northern cardinal" / "canada
-    # warbler" ("car") read as vehicle and "common firecrest" ("fire") as
-    # security — which silently kept those birds out of every wildlife-scoped
-    # stage (perched tracker, species log-odds, entity reporting, rules).
     configured_category_for_label = getattr(taxonomy_provider, "configured_category_for_label", None)
     if callable(configured_category_for_label):
-        configured = configured_category_for_label(classification.label)
-        if configured is not None:
-            return configured
+        configured_category = configured_category_for_label(classification.label)
+        if configured_category is not None:
+            return configured_category
     elif taxonomy_category.strip().lower() != "unknown":
+        # Providers without the configured/learned split: their answer stands.
         return taxonomy_category
     return model_category
-
-
-def _model_vocabulary_category(classification: ClassificationResult) -> str | None:
-    """Category implied by the producing model's vocabulary, or None when it implies none."""
-    model_name = classification.features.get("model")
-    if not isinstance(model_name, str):
-        return None
-    # ── BirdNET+ V3.0 (Field Mode W1-birdnet-v3) ── V3's vocabulary also holds
-    # sound sources (Gun, Siren, Engine, ...), so only its animal classes take
-    # the wholesale wildlife fallback.
-    if model_name == _BIRDNET_V3_MODEL_NAME:
-        taxon_group = classification.features.get("taxon_group")
-        return "wildlife" if taxon_group in BIRDNET_V3_ANIMAL_TAXON_GROUPS else None
-    # ── end BirdNET+ V3.0 ──
-    fallback = _MODEL_FALLBACK_CATEGORY.get(model_name.strip().lower())
-    if fallback is None:
-        return None
-    # v2.4's few non-species classes ("Gun_Gun", "Engine_Engine", "Siren_Siren",
-    # "Human vocal_Human vocal", ...) repeat the class name where a species has
-    # "Scientific_Common"; they keep the taxonomy's own answer.
-    raw_species = classification.features.get("raw_species")
-    if isinstance(raw_species, str) and "_" in raw_species:
-        scientific, common = raw_species.split("_", 1)
-        if scientific.strip().lower() == common.strip().lower():
-            return None
-    return fallback
-    if classification.label.strip().lower() in ABSTENTION_LABELS:
-        # "unknown" is the *absence* of a label, not a vocabulary entry, so the
-        # model's wholesale category must not apply to it. Without this guard a
-        # BirdNET abstention resolved to "wildlife", which was then registered
-        # against the label name and persisted — after which every abstention
-        # from every model read as wildlife.
-        return taxonomy_category
-    model_name = classification.features.get("model")
-    # ── BirdNET+ V3.0 (Field Mode W1-birdnet-v3) ── V3's vocabulary also holds
-    # sound sources (Gun, Siren, Engine, ...), so only its animal classes take
-    # the wholesale wildlife fallback.
-    if model_name == _BIRDNET_V3_MODEL_NAME:
-        taxon_group = classification.features.get("taxon_group")
-        return "wildlife" if taxon_group in BIRDNET_V3_ANIMAL_TAXON_GROUPS else taxonomy_category
-    # ── end BirdNET+ V3.0 ──
-    if isinstance(model_name, str):
-        fallback = _MODEL_FALLBACK_CATEGORY.get(model_name.strip().lower())
-        if fallback is not None:
-            return fallback
-    return taxonomy_category
 
 
 @dataclass(slots=True)
