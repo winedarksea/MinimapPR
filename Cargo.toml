@@ -2,10 +2,13 @@
 #
 # Members share one Cargo.lock and one target/ directory at the repo root.
 # Profiles must live here: Cargo ignores [profile.*] in member manifests.
-# (The sidecar defined none, so none are declared yet.)
+# minimappr-sim gets per-package overrides: its renderer is 10-50x slower
+# unoptimised, which makes physics tests crawl. Per-package overrides keep
+# the rest of the workspace on default profiles (lto cannot be per-package,
+# so the sim's former `lto = "thin"` is dropped; codegen-units = 1 recovers
+# most of it).
 #
-# Planned members (added when their streams merge): minimappr-sim,
-# minimappr-transport.
+# Planned members (added when their streams merge): minimappr-transport.
 #
 # minimappr-frontend is excluded: it is a wasm32-only Leptos/trunk app with
 # its own [profile.release] (opt-level = "s", lto) that would otherwise have
@@ -19,6 +22,7 @@ resolver = "2"
 members = [
     "minimappr-core",
     "minimappr-ingest-sidecar",
+    "minimappr-sim",
 ]
 exclude = [
     "minimappr-frontend",
@@ -35,3 +39,13 @@ rustfft = "6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
+
+[profile.test.package.minimappr-sim]
+opt-level = 3
+
+[profile.dev.package.minimappr-sim]
+opt-level = 3
+
+[profile.release.package.minimappr-sim]
+opt-level = 3
+codegen-units = 1
