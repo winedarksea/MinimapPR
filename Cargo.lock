@@ -1442,6 +1442,7 @@ name = "minimappr-transport"
 version = "0.1.0"
 dependencies = [
  "futures-util",
+ "js-sys",
  "minimappr-core",
  "minimappr-relay-wire",
  "rand_chacha 0.3.1",
@@ -1452,6 +1453,9 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

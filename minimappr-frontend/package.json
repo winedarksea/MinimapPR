@@ -6,6 +6,7 @@
     "test:smoke": "playwright test tests/smoke-cop.spec.js --reporter=line"
   },
   "devDependencies": {
-    "@playwright/test": "^1.61.1"
+    "@playwright/test": "^1.61.1",
+    "onnxruntime-web": "1.31.1"
   }
 }

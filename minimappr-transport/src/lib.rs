@@ -9,7 +9,9 @@
 //!   and the SPAKE2 exchange carried as relay flights.
 //!
 //! `native_websocket` (feature `native-websocket`) adapts it to
-//! tokio-tungstenite and the relay's HTTP API.
+//! tokio-tungstenite and the relay's HTTP API. `web_websocket` (feature
+//! `web-websocket`, wasm32) adapts it to the browser WebSocket, `fetch` and
+//! WebCrypto randomness for the Field PWA.
 
 pub mod clip_chunking;
 pub mod join_code;
@@ -22,6 +24,9 @@ pub mod transport_config;
 
 #[cfg(feature = "native-websocket")]
 pub mod native_websocket;
+
+#[cfg(all(feature = "web-websocket", target_arch = "wasm32"))]
+pub mod web_websocket;
 
 pub use join_code::FieldJoinCode;
 pub use relay_client_events::{RelayClientError, RelayClientEvent, RelayClientInboundStatistics};

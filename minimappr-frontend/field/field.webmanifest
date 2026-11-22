@@ -1,0 +1,20 @@
+{
+  "name": "MinimapPR Field",
+  "short_name": "MMP Field",
+  "description": "Field Mode node: on-device bird detection, sealed relay sessions.",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0f1418",
+  "theme_color": "#0f1418",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

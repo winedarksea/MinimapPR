@@ -1,0 +1,87 @@
+/* Field PWA layout: phone-first single column on the shared MD3 tokens. */
+body {
+  background: var(--md-sys-color-surface, #0f1418);
+  color: var(--md-sys-color-on-surface, #e1e2e8);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.field-app {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 12px 16px calc(24px + env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.field-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.field-header h1 {
+  font-size: 1.25rem;
+}
+
+.field-badge {
+  font-size: 0.8rem;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--md-sys-color-outline, #8d9199);
+}
+
+.field-card {
+  border: 1px solid var(--md-sys-color-outline-variant, #43474e);
+  border-radius: 12px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.field-card h2 {
+  font-size: 1rem;
+}
+
+.field-card button {
+  min-height: 44px;
+  padding: 0 16px;
+  border-radius: 22px;
+  border: none;
+  background: var(--md-sys-color-primary, #9ecaff);
+  color: var(--md-sys-color-on-primary, #003260);
+  font-weight: 600;
+}
+
+.field-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.field-row input {
+  flex: 1 1 140px;
+  min-height: 44px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid var(--md-sys-color-outline, #8d9199);
+  background: transparent;
+  color: inherit;
+  font-size: 1rem;
+}
+
+.field-stats {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.field-log {
+  list-style: none;
+  font-size: 0.85rem;
+  max-height: 220px;
+  overflow-y: auto;
+  font-variant-numeric: tabular-nums;
+}
