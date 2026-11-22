@@ -317,6 +317,7 @@ CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     "trigger_noise_floor_fall_seconds": float,
     "trigger_noise_floor_warmup_seconds": float,
     "trigger_noise_floor_minimum_rms": float,
+    "trigger_noise_floor_fluctuation_multiplier": float,
     # --- end Field Mode W3-attribution ---
     # Classification-lane backpressure knobs (see core/fusion_node.py). All
     # restart-required — the queues and the FusionConfig snapshot are built at

@@ -245,6 +245,14 @@ def build_pipeline_graph(
                         suffix=" dB over floor",
                     )
                 )
+                gate_params.append(
+                    _param(
+                        "Fluctuation allowance",
+                        float(settings.trigger_noise_floor_fluctuation_multiplier),
+                        "trigger_noise_floor_fluctuation_multiplier",
+                        suffix=" x mean excess",
+                    )
+                )
             # --- end Field Mode W3-attribution ---
             if omni_min_rms is not None:
                 gate_params.append(_param("Omni min RMS", float(omni_min_rms)))

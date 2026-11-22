@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import builtins
 import dataclasses
+import io
 import os
 
 import numpy as np
@@ -138,13 +139,68 @@ async def test_loco_never_touches_disk(monkeypatch) -> None:
         return real_open(file, mode, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "open", guarded_open)
+    # pathlib / soundfile-style writers go through io.open, which is a separate binding.
+    monkeypatch.setattr(io, "open", guarded_open)
     monkeypatch.setattr(os, "open", refuse)
     monkeypatch.setattr(np, "save", refuse)
     monkeypatch.setattr(np, "savez", refuse)
-    attributor, metrics, _ = _attributor()
-    result = await attributor.attribute(_classified(_signal()), _single_array_context(), event_time_ns=0)
+    # The real orchestrator's rerun path (worker thread + timeout), not just the fake.
+    orchestrator = _real_orchestrator()
+    metrics = FusionMetrics()
+    settings = Settings(onset_attribution_enabled=True)
+    attributor = OnsetClusterAttributor(settings.onset_cluster_attribution_config(), orchestrator, lambda: metrics)
+    signal = _signal()
+    result = await attributor.attribute(_classified(signal), _single_array_context(), event_time_ns=0)
     assert result.classification.label == "American Robin"
     assert metrics.onset_attribution_loco_rerun_count == 1
+    assert result.classification_signal is signal  # the snippet source stays the unmasked window
+
+
+class _LabelStorageStub:
+    async def upsert_label(self, *, name, category, source, created_ns):
+        return f"label-{name}"
+
+
+class _TaxonomyStub:
+    def category_for_label(self, label):
+        return "wildlife"
+
+    def iff_for_category(self, category):
+        return "friendly"
+
+
+class _OracleClassifier:
+    def __init__(self) -> None:
+        self._oracle = DominantFrequencySpeciesClassifier(BANDS)
+
+    def classify(self, samples, sample_rate_hz):
+        return self._oracle.classify(samples, sample_rate_hz)
+
+
+def _real_orchestrator():
+    from minimappr.core.classification import ClassificationOrchestrator
+
+    return ClassificationOrchestrator(
+        classifier=_OracleClassifier(),
+        storage=_LabelStorageStub(),
+        taxonomy_provider=_TaxonomyStub(),
+        environment_provider=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_relabel_keeps_beamformed_alias_in_step_with_the_attributed_label() -> None:
+    orchestrator = _real_orchestrator()
+    metrics = FusionMetrics()
+    attributor = OnsetClusterAttributor(
+        Settings(onset_attribution_enabled=True).onset_cluster_attribution_config(), orchestrator, lambda: metrics
+    )
+    classified = _classified(_signal())
+    result = await attributor.attribute(classified, _single_array_context(), event_time_ns=0)
+    assert result.classification.label == "American Robin" and result.label_id == "label-American Robin"
+    # beamformed_label / omni fields must not keep reporting the rejected interferer label.
+    assert result.beamformed_classification is result.classification
+    assert result.omni_classification is result.classification
 
 
 @pytest.mark.asyncio
