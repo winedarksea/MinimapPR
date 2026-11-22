@@ -4,8 +4,10 @@ use leptos::prelude::{Get, Memo, RwSignal};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
+pub mod entities;
 pub mod feeds;
 pub mod models;
+pub use entities::{BirdEntity, BirdEntityEvent};
 pub use feeds::*;
 pub use models::*;
 
@@ -121,6 +123,14 @@ pub struct MapLayerVisibility {
     pub zones: bool,
     pub overlays: bool,
     pub acoustic: bool,
+    /// Field Mode bird entities (fans + points). Defaulted so saved prefs from
+    /// before the layer existed still load.
+    #[serde(default = "default_layer_visible")]
+    pub bird_entities: bool,
+}
+
+fn default_layer_visible() -> bool {
+    true
 }
 
 impl Default for MapLayerVisibility {
@@ -133,6 +143,7 @@ impl Default for MapLayerVisibility {
             zones: true,
             overlays: true,
             acoustic: true,
+            bird_entities: true,
         }
     }
 }
@@ -196,6 +207,10 @@ pub struct AppState {
     /// the Settings page also polls while mounted so it stays correct with the
     /// websocket down.
     pub hass_status: RwSignal<Option<HassBridgeStatus>>,
+    /// Field Mode bird entities, newest first; `bird_entities_enabled` mirrors
+    /// the server's `entity_reporting_enabled` (tray + spatial-only map).
+    pub bird_entities: RwSignal<Vec<BirdEntity>>,
+    pub bird_entities_enabled: RwSignal<bool>,
 }
 
 impl AppState {
@@ -241,6 +256,8 @@ impl AppState {
             map_context_menu: RwSignal::new(None),
             zone_draft: RwSignal::new(None),
             hass_status: RwSignal::new(None),
+            bird_entities: RwSignal::new(vec![]),
+            bird_entities_enabled: RwSignal::new(false),
         }
     }
 }
@@ -277,6 +294,7 @@ pub enum LiveEvent {
     HassStatus {
         status: HassBridgeStatus,
     },
+    Entity(BirdEntityEvent),
     /// Catch-all for server events this build does not know about.
     ///
     /// Without it, every unrecognized `type` fails the whole enum's

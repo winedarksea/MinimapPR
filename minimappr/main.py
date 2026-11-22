@@ -31,6 +31,11 @@ from starlette.requests import ClientDisconnect
 
 from minimappr.api.binary_ingest import parse_binary_ingest_payload
 from minimappr.api.live import LiveEventHub
+from minimappr.api.entity_routes import (  # Field Mode W3-entity
+    entity_reporting_patch_errors,
+    entity_router,
+    is_entity_reporting_setting_key,
+)
 from minimappr.api.spool_consumer import IngestSpoolConsumer
 from minimappr.api.stream_consumer import IngestStreamConsumer, StreamConsumerConfig
 from minimappr.classifiers.availability import probe_backends
@@ -1678,6 +1683,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="MinimapPR", version="0.1.0", lifespan=lifespan)
+app.include_router(entity_router)  # Field Mode W3-entity: GET /api/v1/entities
 
 
 @app.middleware("http")
@@ -3153,6 +3159,24 @@ async def get_config(request: Request) -> dict:
         "birdnet_two_threshold_enabled": settings.birdnet_two_threshold_enabled,
         "birdnet_localize_to_track_min_confidence": settings.birdnet_localize_to_track_min_confidence,
         # --- end Field Mode W2-tracker ---
+        # --- Field Mode W3-entity ---
+        "entity_reporting_enabled": settings.entity_reporting_enabled,
+        "entity_reporting_label_categories": settings.entity_reporting_label_categories,
+        "entity_absorption_window_seconds": settings.entity_absorption_window_seconds,
+        "entity_absorption_max_fix_distance_m": settings.entity_absorption_max_fix_distance_m,
+        "entity_absorption_max_node_distance_m": settings.entity_absorption_max_node_distance_m,
+        "entity_absorption_max_bearing_difference_deg": settings.entity_absorption_max_bearing_difference_deg,
+        "entity_pinpointed_max_horizontal_uncertainty_m": settings.entity_pinpointed_max_horizontal_uncertainty_m,
+        "entity_spatial_state_hold_seconds": settings.entity_spatial_state_hold_seconds,
+        "entity_expiry_seconds": settings.entity_expiry_seconds,
+        "entity_bearing_default_half_width_deg": settings.entity_bearing_default_half_width_deg,
+        "entity_bearing_min_half_width_deg": settings.entity_bearing_min_half_width_deg,
+        "entity_bearing_max_half_width_deg": settings.entity_bearing_max_half_width_deg,
+        "entity_uncertainty_sigma_multiplier": settings.entity_uncertainty_sigma_multiplier,
+        "entity_notification_grace_seconds": settings.entity_notification_grace_seconds,
+        "entity_maintenance_interval_seconds": settings.entity_maintenance_interval_seconds,
+        "entity_max_tracked_entities": settings.entity_max_tracked_entities,
+        # --- end Field Mode W3-entity ---
         "localization_node_bearing_strength": settings.localization_node_bearing_strength,
         "multi_node_bearing_window_seconds": settings.multi_node_bearing_window_seconds,
         "multi_node_bearing_min_separation_deg": settings.multi_node_bearing_min_separation_deg,
@@ -3297,6 +3321,8 @@ _SIDECAR_RESTART_REQUIRED_KEYS = {
     # --- Field Mode W2-tracker --- Python TrackManager is built once even in rust mode.
     *(key for key in CONFIG_PATCH_ALLOWLIST if _is_field_mode_tracker_key(key)),
     # --- end Field Mode W2-tracker ---
+    # Field Mode W3-entity: the entity coordinator is built with FusionNode.
+    *(key for key in CONFIG_PATCH_ALLOWLIST if is_entity_reporting_setting_key(key)),
 }
 
 
@@ -3337,6 +3363,8 @@ def _startup_snapshot_restart_required_keys() -> frozenset[str]:
     # --- Field Mode W2-tracker --- TrackManager / classifier built at startup.
     keys.update(key for key in CONFIG_PATCH_ALLOWLIST if _is_field_mode_tracker_key(key))
     # --- end Field Mode W2-tracker ---
+    # Field Mode W3-entity: entity coordinator built at startup.
+    keys.update(key for key in CONFIG_PATCH_ALLOWLIST if is_entity_reporting_setting_key(key))
     # Classification-priority knobs are read into FusionNode.__init__ (the queue
     # type itself is chosen there), so a live PATCH cannot reorder a queue that
     # already exists.
@@ -3785,6 +3813,7 @@ async def patch_config(request: Request) -> dict:
     # --- Field Mode W2-tracker --- validated on the merged view.
     errors.extend(_field_mode_tracker_patch_errors(coerced, settings))
     # --- end Field Mode W2-tracker ---
+    errors.extend(entity_reporting_patch_errors(coerced, settings))  # Field Mode W3-entity
     hass_enabled = bool(coerced.get("hass_enabled", settings.hass_enabled))
     hass_host = str(coerced.get("hass_mqtt_host", settings.hass_mqtt_host)).strip()
     if hass_enabled and not hass_host:

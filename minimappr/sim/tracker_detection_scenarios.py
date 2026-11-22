@@ -17,6 +17,12 @@ floor are kept and flagged ``below_display_threshold``. A detection *surfaces*
 (both are silent drops in ``FusionNode._process_rules_and_delivery``). Each
 surfaced detection carries its visible track's label, i.e. what the UI shows
 for that entity.
+
+With ``entity_reporting_enabled`` the W3 bird-entity registry runs on top, as
+in ``FusionNode``: an unpositioned bout matching an entity is absorbed before
+assembly (it still feeds partial binding), every other surfaced bout is
+observed into its entity, and each detection carries ``entity_id`` plus the
+entity's label, so ``replay_entity_metrics`` scores entities instead of tracks.
 """
 
 from __future__ import annotations
@@ -28,6 +34,7 @@ import numpy as np
 from minimappr.calibration.ground_truth_events import GroundTruthEvent, GroundTruthSpecies
 from minimappr.config import Settings
 from minimappr.core.assembly_track_resolution import resolve_detection_track
+from minimappr.core.bird_entity_registry import BirdEntityObservation, BirdEntityRegistry
 from minimappr.core.node_registry import NodeRegistry
 from minimappr.core.tracking import TrackManager
 from minimappr.models import NodeSpec, NodeType
@@ -81,6 +88,7 @@ class TrackerScenarioResult:
     scenario: str
     surfaced_detections: int
     distinct_visible_tracks: int
+    distinct_entities: int
     # Fraction of call-associated surfaced detections showing the true label.
     surfaced_label_accuracy: float | None
     metrics: EntityMetrics
@@ -138,6 +146,11 @@ async def run_tracker_scenario(
     registry = await _registry_for(scenario)
     rng = np.random.default_rng(seed)
     detections: list[dict] = []
+    entity_registry = (
+        BirdEntityRegistry(settings.entity_reporting_config(), entity_id_factory=_sequential_entity_ids())
+        if settings.entity_reporting_enabled
+        else None
+    )
     for index, bout in enumerate(scenario.bouts):
         timestamp_ns = SCENARIO_START_NS + int((bout.time_s + BOUT_DURATION_S / 2) * NANOSECONDS_PER_SECOND)
         label, confidence, scores, below_display = _emulated_birdnet(bout.scores, settings)
@@ -152,6 +165,13 @@ async def run_tracker_scenario(
             spatial_mode, tier, modality = "localized", "full_3d", "localized"
         else:
             position, spatial_mode, tier, modality = node_position, "node_only", "classification_only", "omni"
+        absorbing_entity = None
+        if entity_registry is not None and modality == "omni" and not below_display and label != "unknown":
+            absorbing_entity = entity_registry.find_absorbing_entity(
+                label=label, event_time_ns=timestamp_ns, spatial_display_mode=spatial_mode,
+                reporting_node_id=bout.reporting_node_id, reporting_node_position_m=node_position,
+                detection_position_m=None,
+            )
         resolution = await resolve_detection_track(
             tracker=manager, registry=registry, spatial_display_mode=spatial_mode,
             suppressed_by_zone=False, capability_tier=tier, event_time_ns=timestamp_ns,
@@ -164,8 +184,33 @@ async def run_tracker_scenario(
             reference_sensor=sensor_id, tdoa_s={}, environment={},
         )
         track = resolution.track
+        entity = None
+        if absorbing_entity is not None:
+            entity_registry.absorb_unlocalized(
+                absorbing_entity.entity_id, event_time_ns=timestamp_ns, label=label,
+                confidence=confidence, reporting_node_id=bout.reporting_node_id,
+            )
+            if track is not None and track.id == absorbing_entity.track_id:
+                entity_registry.refresh_species_from_track(absorbing_entity, track)
+            entity = absorbing_entity
         surfaced = not (label == "unknown" and confidence == 0.0) and not (below_display and track is None)
-        if not surfaced:
+        if not surfaced and entity is None:
+            continue
+        if entity_registry is not None and entity is None and label_category_is_entity(settings):
+            entity = entity_registry.observe(BirdEntityObservation(
+                event_time_ns=timestamp_ns, label=label, confidence=confidence, label_category=WILDLIFE,
+                spatial_display_mode=spatial_mode, reporting_node_id=bout.reporting_node_id,
+                reporting_node_position_m=node_position, detection_position_m=position,
+                detection_id=f"det-{index}", track=track,
+            )).entity
+        if entity is not None:
+            detections.append({
+                "id": f"det-{index}", "timestamp_ns": timestamp_ns, "position_m": list(position),
+                "reporting_modality": modality, "source_node_id": bout.reporting_node_id,
+                "track_id": track.id if track is not None else None, "entity_id": entity.entity_id,
+                "entity_state": entity.state, "label": entity.species_top_label,
+                "label_confidence": float(entity.species_top_probability), "label_category": WILDLIFE,
+            })
             continue
         detections.append({
             "id": f"det-{index}",
@@ -179,6 +224,15 @@ async def run_tracker_scenario(
             "label_category": WILDLIFE,
         })
     return detections, manager
+
+
+def _sequential_entity_ids():
+    counter = iter(range(1, 1_000_000))
+    return lambda: f"ent-{next(counter)}"
+
+
+def label_category_is_entity(settings: Settings) -> bool:
+    return settings.entity_reporting_config().applies_to(WILDLIFE)
 
 
 async def score_tracker_scenario(
@@ -205,6 +259,7 @@ async def score_tracker_scenario(
         scenario=scenario.name,
         surfaced_detections=len(detections),
         distinct_visible_tracks=len({d["track_id"] for d in detections if d["track_id"]}),
+        distinct_entities=len({d["entity_id"] for d in detections if d.get("entity_id")}),
         surfaced_label_accuracy=correct / len(call_associations) if call_associations else None,
         metrics=metrics,
     )

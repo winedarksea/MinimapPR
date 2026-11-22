@@ -16,6 +16,13 @@ from minimappr.settings_store import (
     config_overrides_path,
     load_overrides,
 )
+# --- Field Mode W3-entity ---
+from minimappr.core.entity_reporting_config import (
+    EntityReportingConfig,
+    entity_reporting_config_from_settings,
+    entity_reporting_setting_errors,
+)
+# --- end Field Mode W3-entity ---
 
 if TYPE_CHECKING:
     from minimappr.core.effectors.registry import EffectorManagerConfig
@@ -1168,6 +1175,27 @@ class Settings:
     birdnet_two_threshold_enabled: bool = False
     birdnet_localize_to_track_min_confidence: float = 0.15
     # --- end Field Mode W2-tracker ---
+    # --- Field Mode W3-entity --- bird-entity reporting (Heard nearby ->
+    # Direction known -> Pinpointed) replacing the bucketed ReportingFusionPolicy
+    # for entity_reporting_label_categories, plus a rules grace window for
+    # unlocalized entities. Knob meanings: core/entity_reporting_config.py.
+    entity_reporting_enabled: bool = False
+    entity_reporting_label_categories: str = "wildlife"
+    entity_absorption_window_seconds: float = 60.0
+    entity_absorption_max_fix_distance_m: float = 12.0
+    entity_absorption_max_node_distance_m: float = 50.0
+    entity_absorption_max_bearing_difference_deg: float = 20.0
+    entity_pinpointed_max_horizontal_uncertainty_m: float = 15.0
+    entity_spatial_state_hold_seconds: float = 120.0
+    entity_expiry_seconds: float = 300.0
+    entity_bearing_default_half_width_deg: float = 15.0
+    entity_bearing_min_half_width_deg: float = 5.0
+    entity_bearing_max_half_width_deg: float = 45.0
+    entity_uncertainty_sigma_multiplier: float = 2.0
+    entity_notification_grace_seconds: float = 4.0
+    entity_maintenance_interval_seconds: float = 1.0
+    entity_max_tracked_entities: int = 512
+    # --- end Field Mode W3-entity ---
 
     fusion_worker_count: int = 2
     fusion_event_queue_size: int = 512
@@ -1831,6 +1859,11 @@ class Settings:
         # --- Field Mode W2-tracker ---
         _validate_field_mode_tracker_settings(self)
         # --- end Field Mode W2-tracker ---
+        # --- Field Mode W3-entity ---
+        entity_reporting_errors = entity_reporting_setting_errors(self)
+        if entity_reporting_errors:
+            raise ValueError("; ".join(entity_reporting_errors))
+        # --- end Field Mode W3-entity ---
         if self.detection_min_confidence < 0.0 or self.detection_min_confidence > 1.0:
             raise ValueError("MINIMAPPR_DETECTION_MIN_CONFIDENCE must be in [0,1]")
         if self.cop_detections_max_items < 1:
@@ -2500,6 +2533,24 @@ class Settings:
             birdnet_two_threshold_enabled=_env_bool("MINIMAPPR_BIRDNET_TWO_THRESHOLD_ENABLED", False),
             birdnet_localize_to_track_min_confidence=_env_float("MINIMAPPR_BIRDNET_LOCALIZE_TO_TRACK_MIN_CONFIDENCE", 0.15),
             # --- end Field Mode W2-tracker ---
+            # --- Field Mode W3-entity ---
+            entity_reporting_enabled=_env_bool("MINIMAPPR_ENTITY_REPORTING_ENABLED", False),
+            entity_reporting_label_categories=_env_str("MINIMAPPR_ENTITY_REPORTING_LABEL_CATEGORIES", "wildlife"),
+            entity_absorption_window_seconds=_env_float("MINIMAPPR_ENTITY_ABSORPTION_WINDOW_SECONDS", 60.0),
+            entity_absorption_max_fix_distance_m=_env_float("MINIMAPPR_ENTITY_ABSORPTION_MAX_FIX_DISTANCE_M", 12.0),
+            entity_absorption_max_node_distance_m=_env_float("MINIMAPPR_ENTITY_ABSORPTION_MAX_NODE_DISTANCE_M", 50.0),
+            entity_absorption_max_bearing_difference_deg=_env_float("MINIMAPPR_ENTITY_ABSORPTION_MAX_BEARING_DIFFERENCE_DEG", 20.0),
+            entity_pinpointed_max_horizontal_uncertainty_m=_env_float("MINIMAPPR_ENTITY_PINPOINTED_MAX_HORIZONTAL_UNCERTAINTY_M", 15.0),
+            entity_spatial_state_hold_seconds=_env_float("MINIMAPPR_ENTITY_SPATIAL_STATE_HOLD_SECONDS", 120.0),
+            entity_expiry_seconds=_env_float("MINIMAPPR_ENTITY_EXPIRY_SECONDS", 300.0),
+            entity_bearing_default_half_width_deg=_env_float("MINIMAPPR_ENTITY_BEARING_DEFAULT_HALF_WIDTH_DEG", 15.0),
+            entity_bearing_min_half_width_deg=_env_float("MINIMAPPR_ENTITY_BEARING_MIN_HALF_WIDTH_DEG", 5.0),
+            entity_bearing_max_half_width_deg=_env_float("MINIMAPPR_ENTITY_BEARING_MAX_HALF_WIDTH_DEG", 45.0),
+            entity_uncertainty_sigma_multiplier=_env_float("MINIMAPPR_ENTITY_UNCERTAINTY_SIGMA_MULTIPLIER", 2.0),
+            entity_notification_grace_seconds=_env_float("MINIMAPPR_ENTITY_NOTIFICATION_GRACE_SECONDS", 4.0),
+            entity_maintenance_interval_seconds=_env_float("MINIMAPPR_ENTITY_MAINTENANCE_INTERVAL_SECONDS", 1.0),
+            entity_max_tracked_entities=_env_int("MINIMAPPR_ENTITY_MAX_TRACKED_ENTITIES", 512),
+            # --- end Field Mode W3-entity ---
             fusion_worker_count=_env_int("MINIMAPPR_FUSION_WORKER_COUNT", 2),
             fusion_event_queue_size=_env_int("MINIMAPPR_FUSION_EVENT_QUEUE_SIZE", 512),
             fusion_localization_queue_size=_env_int("MINIMAPPR_FUSION_LOCALIZATION_QUEUE_SIZE", 1024),
@@ -2861,6 +2912,11 @@ class Settings:
             retention_dropped_tracks_seconds=self.retention_dropped_tracks_seconds,
             large_artifact_dir=self.large_artifact_dir,
         )
+
+    # --- Field Mode W3-entity ---
+    def entity_reporting_config(self) -> EntityReportingConfig:
+        return entity_reporting_config_from_settings(self)
+    # --- end Field Mode W3-entity ---
 
     def fusion_config(self) -> FusionConfig:
         return FusionConfig(

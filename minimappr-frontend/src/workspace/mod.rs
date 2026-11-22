@@ -86,6 +86,7 @@ pub fn MapWorkspace() -> impl IntoView {
         <main class="cop-workspace">
             <div class="cop-workspace-map">
                 <MapPanel />
+                <crate::panels::heard_nearby_tray::HeardNearbyTray />
             </div>
 
             <status_ribbon::StatusRibbon />

@@ -464,6 +464,7 @@ def build_pipeline_graph(
                 suffix=" m",
             ),
             *_field_mode_tracker_params(tc),
+            *_field_mode_entity_params(settings),  # Field Mode W3-entity
         ],
         status=_track_status(metrics, fusion_available),
         link="/settings/config#tracking",
@@ -611,6 +612,38 @@ def _birdnet_two_threshold_params(settings) -> list[PipelineParam]:
         )
     return params
 # --- end Field Mode W2-tracker ---
+
+
+# --- Field Mode W3-entity ---
+def _field_mode_entity_params(settings) -> list[PipelineParam]:
+    """Bird-entity reporting (replaces bucketed reporting for its categories) + grace window."""
+    enabled = bool(getattr(settings, "entity_reporting_enabled", False))
+    params = [_param("Bird entities", enabled, "entity_reporting_enabled")]
+    if enabled:
+        params.extend(
+            [
+                _param(
+                    "Absorption window",
+                    float(settings.entity_absorption_window_seconds),
+                    "entity_absorption_window_seconds",
+                    suffix=" s",
+                ),
+                _param(
+                    "Pinpoint max σ",
+                    float(settings.entity_pinpointed_max_horizontal_uncertainty_m),
+                    "entity_pinpointed_max_horizontal_uncertainty_m",
+                    suffix=" m",
+                ),
+                _param(
+                    "Rules grace",
+                    float(settings.entity_notification_grace_seconds),
+                    "entity_notification_grace_seconds",
+                    suffix=" s",
+                ),
+            ]
+        )
+    return params
+# --- end Field Mode W3-entity ---
 
 
 # ── BirdNET+ V3.0 (Field Mode W1-birdnet-v3) ────────────────────────────────
