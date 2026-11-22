@@ -168,6 +168,11 @@ Deviations from the test strategy rows:
   - the relative trigger (Layer 2 Stage-1 is an SNR threshold);
   - bearing-only, far-field entities from the mesh, because the arrival-time localizer reports no
     range-projection mode. They are covered by the parity scenarios.
+- **S2 on real clips is not yet behind the host seam.** `onset_clustering::localize_onset_clusters`
+  is ported and parity-gated, but no `ClipSetLocalizer` decodes FLAC clips, aligns them on the
+  island clock and calls it. That is the production phone localizer that `mesh_sim.md` lists as
+  still to write. Layer 2 exercises the same seam (`localize_clusters`, `classify_cluster_window`,
+  per-cluster `ClusterAttributionEvidence`) through the arrival-time stand-in.
 - **The successor host restarts entity tracking.** After a takeover, ids continue above the
   restored highest id, but the tracker and registry start empty, so a bird heard before and after
   a host change gets a second entity.
@@ -185,3 +190,5 @@ CARGO_TARGET_DIR=<repo>/target python -m pytest tests/ -k parity -q -p no:cachep
 cargo build -p minimappr-core --lib --target {wasm32-unknown-unknown,aarch64-linux-android,aarch64-apple-ios}
 MINIMAPPR_SIM_ENTITY_DEBUG=1 MINIMAPPR_SIM_SEED=<seed> cargo test -p minimappr-mesh-sim <scenario> -- --nocapture  # per-call clusters/entities
 ```
+
+Full Python suite (`--ignore=tests/test_soak_harness.py`): 2050 passed, 18 skipped. One earlier `-x` run under heavy load failed `test_onset_attribution_scenarios.py::test_single_tetra_overlap_labels_both_birds` with "Event loop is closed". It passes alone, and the full rerun was green.
