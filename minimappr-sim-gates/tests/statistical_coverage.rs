@@ -29,6 +29,8 @@ fn mesh_contour_world_coverage() {
 /// Drawn SRP region (contour or fan) coverage plus sharpness and accuracy.
 /// Passes since closeout D3: pairs are max-pooled over ±k·σ_pair of their
 /// declared layout/clock σ, and the temperature refitted on that surface.
+/// Closeout F2 widened its coverage ceiling and inside-P95 bound to the
+/// measured run spread (`CoverageGateConfig::srp_*`).
 #[test]
 fn srp_contour_coverage() {
     assert_pull_request_gate("srp_contour_coverage");

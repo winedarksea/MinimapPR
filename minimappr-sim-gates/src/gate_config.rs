@@ -113,6 +113,22 @@ pub struct CoverageGateConfig {
     pub maximum_inside_fan_fraction: f64,
     /// ...and its median area stay below a disk of the P95 accuracy gate.
     pub maximum_inside_median_region_area_m2: f64,
+    /// `srp_contour_coverage` ceiling. Its coverage is set by the σ pooling
+    /// (k = 1.25), not the temperature: on 2000 training trials 0.955 is
+    /// covered already at the ladder floor T = 1e-4 and 0.963 at the shipped
+    /// 0.0013, so the 0.945 target is out of the temperature's reach (D3's
+    /// 400-trial fit read 0.9375 at the floor by chance). Measured over 100
+    /// default nightly runs (200 trials each): mean 0.961, sd 0.012, max
+    /// 0.995; at 0.98, 5 of 100 runs failed. Smearing is still caught by the
+    /// sharpness rules above (T = 0.05: 100 % inside fans, ~1.2e5 m² median
+    /// area) and by 200/200 exceeding this (closeout F2).
+    pub srp_maximum_coverage: f64,
+    /// `srp_contour_coverage` inside-P95 bound. The P95 of 100 inside trials
+    /// is a noisy order statistic: over the same 100 runs it measured mean
+    /// 1.90 m, sd 0.53 m, max 3.42 m (median error 0.375 m, sd 0.047 m), and
+    /// the strategy's 3 m failed 5 of 100 runs. 3.5 m sits ~3 run sd above
+    /// the mean (closeout F2); `monte_carlo_accuracy` keeps 3 m.
+    pub srp_inside_p95_error_m: f64,
 }
 
 impl Default for CoverageGateConfig {
@@ -124,6 +140,8 @@ impl Default for CoverageGateConfig {
             minimum_trials_for_aggregate_gate: 20,
             maximum_inside_fan_fraction: 0.10,
             maximum_inside_median_region_area_m2: std::f64::consts::PI * 3.0 * 3.0,
+            srp_maximum_coverage: 0.995,
+            srp_inside_p95_error_m: 3.5,
         }
     }
 }

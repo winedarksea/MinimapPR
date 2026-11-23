@@ -24,7 +24,10 @@ use minimappr_sim_gates::statistics::{coverage_at, fit_parameter_for_coverage, m
 
 const TEMPERATURE_LADDER_LOW: f64 = 0.0001;
 const TEMPERATURE_LADDER_HIGH: f64 = 1.0;
-const TEMPERATURE_LADDER_STEPS: usize = 41;
+/// 2.5 % per rung (161 rungs over four decades). The old 41 rungs were 26 %
+/// apart, so the fitted rung and the rounded value shipped from it could sit
+/// a coverage point or two off the target (closeout F2).
+const TEMPERATURE_LADDER_STEPS: usize = 161;
 const GAUSSIAN_95_TWELVE_GON_MULTIPLIER: f64 = 2.534;
 
 struct Options {
@@ -152,7 +155,7 @@ fn calibrate_srp(options: &Options, target: f64) {
     let fitted = fit_parameter_for_coverage(&minimums, target);
     println!("srp temperature: {} training trials in {:.1} s", minimums.len(), started.elapsed().as_secs_f64());
     println!("  training coverage at shipped T {shipped}: {:.3}", coverage_at(&minimums, shipped));
-    println!("  FITTED likelihood_temperature for {target:.3}: {fitted:.4} (training coverage {:.3})", coverage_at(&minimums, fitted));
+    println!("  FITTED likelihood_temperature for {target:.3}: {fitted:.6} (training coverage {:.3})", coverage_at(&minimums, fitted));
     let held_out = run_trials_in_parallel(&pull_request_seeds(options.held_out_srp, &[]), options.threads, |seed| {
         let trial = render_srp_trial(seed, &trial_config, &gate_config.geometry, &gate_config.perturbation)?;
         trial.evaluate_at_temperature(fitted)
