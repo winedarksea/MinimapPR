@@ -236,3 +236,28 @@ These match the November 22 run in `birdnet_cutover.md`: V3 has better recall an
 - The snippet deletion above. If more real-site audio is wanted for BirdNET work, export it before any
   restart that runs housekeeping, or raise the retention for a capture window.
 - Return the box to `main` after merge: see `~/MINIMAPPR_DEPLOY_STATE.txt` or the closeout report.
+
+## 2026-11-23 follow-up: A3 baseline and B4 check with live nodes
+
+Setup: indoors, `sirith-tetra-07b5` (192.168.8.126 or .188) and `sirith-tetra-1a15` about 4 m apart, the
+speaker playing native birdsong roughly between them, and no GPS fix. `1a15` joined partway through the
+window. Baseline launcher (`~/run_minimappr.sh`, all flags at defaults), sidecar at 802079a.
+
+| Metric (14:49–15:50 UTC, 1.01 h) | Baseline (flags off) |
+| --- | --- |
+| Detections emitted | 67, all omni from `07b5`; 0 localized |
+| Bird detections | 2 (eastern phoebe 0.76, evening grosbeak 0.40) |
+| Other labels | Explosion 25, Crackle 21, Rain 9, Sound effect 6 (room tone at -62 to -69 dB) |
+| Localization attempts / results | 4,124 / 4,124 |
+| Coverage wait stop reasons | all_covered 4,431, stalled 109 (max 999 ms), superseded 1 |
+| Sidecar failures (dropped frames) | 57, all after `1a15` joined; cause not visible because `server.log` stops growing |
+| Tracks | 0 |
+
+- **B4: passes.** Exactly one `localization_result` per trigger (1.0, down from about 1.03).
+- **The speaker was too quiet.** A render's spectrum was flat from 50 Hz to 16 kHz at about -42 dBFS.
+  BirdNET labelled only 2 calls in an hour of continuous playback.
+- **Both nodes report the same position** (-1.8, 2.97, 0). Operator pins through `PATCH /api/v1/nodes`
+  are stored but have no effect in Rust ingest (TODO.md). So nothing between the two nodes localizes.
+- After the window the sidecar was rebuilt at 26d13e0 (F1 never-streamed-member render fix) and
+  installed with `cp --remove-destination`. The previous binary is `~/minimappr-ingest-sidecar.closeout-802079a`.
+- A4 (trial flags) not yet run.

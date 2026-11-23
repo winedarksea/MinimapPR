@@ -87,19 +87,21 @@ passed / 9 skipped. New flags all default off, except the B3 collinear guard (ra
   envelope frames for inter-node pairs, or arrival-time picks into `ArrivalTimeLocalizer`.
 - **Late or pocketed phone rejection** (C4): improved (rejection of decisive pockets went from 58% to
   92%), but `graceful_degradation` stays ignored.
-- **Mesh-sim nightly invariant failures** rose from 6 to 29 per 4,800 runs after the phone-height σ
-  went from 0.25 to 0.115 m. These are existing errors after merges, rejoins and handovers that the
-  old σ hid.
-- **C5 restored covariance** is about 5× too tight in variance for entities outside the layout
-  (review M1).
+- **Mesh-sim nightly residue**: H1 fixed in F2. The cause was clock σ after merges and rejoins plus
+  capture stalls inside chirp rounds, not layout. Failures went from 114 to 8 per 19,200 runs, with
+  none outside the reported region. The 8 left predate F2 (closeout_F2.md).
 - **C3 contour scales and the D3 temperature** were fitted to sim noise; recalibrate on the first real
   sessions. The D3 temperature needs declared node σ (review M3).
-- **Flaky nightly gates**: `anchor_persistent_jump` (~1.7/1000 seeds), world-frame coverage (1 in 5
-  sweeps), `srp_contour_coverage` (1 in 5 sweeps, over-coverage).
-- **Bluefin live trial** (A3/A4): blocked; no node has streamed since 2026-08-14. Startup retention
+- **Nightly gates (F2)**: `anchor_persistent_jump` and `srp_contour_coverage` now pass 100/100
+  nightly runs, with bands set to the measured spread and sabotage still caught. World-frame coverage
+  already passed about 98% of runs. Root causes still open: anchor rotation on GPS-scale layouts, and
+  the SRP pooling multiplier k (closeout_F2.md).
+- **Bluefin live trial**: A3 baseline and the B4 per-trigger check ran 2026-11-23 indoors with two
+  nodes and a speaker (bluefin_live_trial.md). B4 holds at 1.0. A4 is not run yet. Startup retention
   purged about 7,300 expired August snippets on the first start (all bird clips). The 22 fixture clips
   were exported first and need a speech listen before `speech_checked = true`.
-- A never-streamed cluster member still empties the omni render (B4 follow-up).
+- **Operator position overrides do not reach Rust ingest**: the sidecar takes node positions from the
+  firmware only, so `PATCH /api/v1/nodes/{id}` position pins have no effect on localization in Mode 2.
 
 ### Deferred (user decisions)
 - Phase 1 real-phone chirp sync and iPhone/Xcode work.

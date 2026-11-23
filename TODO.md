@@ -11,7 +11,8 @@ Status and detail in [docs/field_mode_progress/summary.md](docs/field_mode_progr
 - [ ] **Anchor rotation under GPS-scale layouts** — `anchor_persistent_jump` now bands the 1 m as an aggregate (F2). The underlying cause, a near-unobservable rotation (10 m layout, 6 m GPS) fitted per round, is open; fitting time-averaged fixes was tried and is bistable (11 m still-window excursion). Needs rotation-information weighting or a prior (closeout_F2.md).
 - [ ] **SRP coverage is set by the pooling multiplier** — at k = 1.25 coverage is 0.955–0.963 whatever the temperature, so the 0.945 target is unreachable and the gate ceiling was widened (F2). Refit k (with T) on ≥ 2000 training trials when `srp_layout` gets a production caller.
 - [ ] **World-frame coverage sits low in band** — mean 0.928 (sd 0.013), fails ~2 % of nightly runs; heavier-than-Gaussian anchor tail (closeout C3/F2). Revisit with real-session recalibration.
-- [ ] **Bluefin live trial** — A3 baseline, A4 trial flags and the B4 per-trigger check once nodes stream again (bluefin_live_trial.md).
+- [ ] **Bluefin live trial** — A3 baseline and B4 per-trigger check done 2026-11-23 (indoor, speaker too quiet: 2 bird detections/h); A4 trial-flags window still to run (bluefin_live_trial.md).
+- [ ] **Operator position overrides ignored in Rust ingest** — the sidecar uses firmware-reported node positions only; `PATCH /api/v1/nodes/{id}` `overrides.position_m` is stored but never reaches sidecar localization or the live registry (seen on Bluefin 2026-11-23, both GPS-less nodes at one point). Push overrides to the sidecar like `node_audio_overrides`.
 - [ ] **Fixture speech check** — listen to the 22 `bluefin_bird_snippets_v1` clips, then set `speech_checked = true`.
 - [ ] **Phase 1 chirp sync, relay rate limiting and deploy, replay-window persistence, speaker→mic clock bias** — deferred.
 
