@@ -555,26 +555,36 @@ def _running_rust_sidecar(
 
 def _wait_for_rust_localization_manifest(port: int, *, timeout_s: float = 15.0) -> dict:
     deadline = time.monotonic() + timeout_s
+    """The localization_result paired with its classifier render.
+
+    Pairs by ``derived_handle``, as Python's render bundle loader does: a
+    trigger frame also publishes a heartbeat localization_result (no render,
+    ``localization_cadence_skipped``) that must not be mistaken for the solve.
+    """
     last_results: list[dict] = []
-    latest_localization_result: dict | None = None
-    latest_classifier_render: dict | None = None
     while time.monotonic() < deadline:
         results = _http_json(port, "/api/v1/dsp/results?limit=20")
         assert isinstance(results, list)
         last_results = results
+        classifier_render_by_handle_id = {
+            result["derived_handle"]["segment_id"]: result["classifier_render"]
+            for result in results
+            if result.get("manifest_type") == "classifier_render"
+            and isinstance(result.get("classifier_render"), dict)
+            and isinstance(result.get("derived_handle"), dict)
+        }
         for result in results:
-            classifier_render = result.get("classifier_render")
-            if result.get("manifest_type") == "classifier_render" and isinstance(classifier_render, dict):
-                latest_classifier_render = classifier_render
-            localization = result.get("localization")
-            if result.get("manifest_type") == "localization_result" and isinstance(localization, dict):
-                if isinstance(classifier_render, dict):
-                    return result
-                latest_localization_result = result
-        if latest_localization_result is not None and latest_classifier_render is not None:
-            merged_result = dict(latest_localization_result)
-            merged_result["classifier_render"] = latest_classifier_render
-            return merged_result
+            if result.get("manifest_type") != "localization_result":
+                continue
+            if not isinstance(result.get("localization"), dict):
+                continue
+            if isinstance(result.get("classifier_render"), dict):
+                return result
+            handle = result.get("derived_handle")
+            if isinstance(handle, dict) and handle.get("segment_id") in classifier_render_by_handle_id:
+                merged_result = dict(result)
+                merged_result["classifier_render"] = classifier_render_by_handle_id[handle["segment_id"]]
+                return merged_result
         time.sleep(0.05)
     raise AssertionError(
         "Timed out waiting for a Rust localization manifest. "
