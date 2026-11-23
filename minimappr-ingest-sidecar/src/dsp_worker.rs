@@ -571,3 +571,7 @@ mod dsp_worker_tests;
 #[cfg(test)]
 #[path = "dsp_worker_coverage_race_tests.rs"]
 mod dsp_worker_coverage_race_tests;
+
+#[cfg(test)]
+#[path = "dsp_worker_never_streamed_member_tests.rs"]
+mod dsp_worker_never_streamed_member_tests;

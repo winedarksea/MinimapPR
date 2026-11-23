@@ -11,7 +11,6 @@ Status and detail in [docs/field_mode_progress/summary.md](docs/field_mode_progr
 - [ ] **Flaky nightly gates** — `anchor_persistent_jump`, world-frame coverage, `srp_contour_coverage`.
 - [ ] **Bluefin live trial** — A3 baseline, A4 trial flags and the B4 per-trigger check once nodes stream again (bluefin_live_trial.md).
 - [ ] **Fixture speech check** — listen to the 22 `bluefin_bird_snippets_v1` clips, then set `speech_checked = true`.
-- [ ] **Omni render with a never-streamed cluster member** — mix only channels that have data (closeout_B1.md).
 - [ ] **Phase 1 chirp sync, relay rate limiting and deploy, replay-window persistence, speaker→mic clock bias** — deferred.
 
 ### 🟡 Phase 2: Distributed, Multi-Method, Multi-Consumer Platform

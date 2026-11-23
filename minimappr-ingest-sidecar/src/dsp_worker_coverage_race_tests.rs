@@ -19,32 +19,32 @@ use tokio::sync::{broadcast, RwLock};
 
 const CLUSTER_ID: &str = "coverage-race";
 const CLUSTER_BUFFER_KEY: &str = "cluster::coverage-race::audio_main";
-const NODE_A: &str = "node-a";
-const NODE_B: &str = "node-b";
+pub(super) const NODE_A: &str = "node-a";
+pub(super) const NODE_B: &str = "node-b";
 const TETRA_CHANNEL_COUNT: usize = 4;
 const CLUSTER_CHANNEL_COUNT: usize = 2 * TETRA_CHANNEL_COUNT;
 const FRAME_SAMPLES: u64 = 512;
-const FRAME_DURATION_NS: u64 = 32_000_000;
+pub(super) const FRAME_DURATION_NS: u64 = 32_000_000;
 const STREAM_START_NS: u64 = 1_000_000_000;
 const NODE_SEPARATION_M: f32 = 20.0;
 const NODE_HEIGHT_M: f32 = 1.5;
 const EVENT_CHANNEL_CAPACITY: usize = 4096;
 /// Frames spanning two trigger cooldowns (0.8 s default) after the first.
-const FRAMES_PER_RUN: usize = 60;
+pub(super) const FRAMES_PER_RUN: usize = 60;
 const NANOSECONDS_PER_MILLISECOND_F64: f64 = 1_000_000.0;
 /// Segment ids are `seg-<node>-<frame>`; frame 0 precedes node b's stream.
 const FIRST_FRAME_SEGMENT_SUFFIX: &str = "-0";
 
-struct RaceHarness {
+pub(super) struct RaceHarness {
     _tmp: tempfile::TempDir,
     worker: DspWorker,
-    state: SharedDspState,
-    events: broadcast::Receiver<ReplayableDspEvent>,
+    pub(super) state: SharedDspState,
+    pub(super) events: broadcast::Receiver<ReplayableDspEvent>,
     clock_now_ns: Arc<AtomicU64>,
 }
 
 impl RaceHarness {
-    async fn new(config: DspWorkerConfig) -> Self {
+    pub(super) async fn new(config: DspWorkerConfig) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let manifest_store = ManifestStore::new(tmp.path());
         manifest_store.ensure_initialized().await.unwrap();
@@ -77,12 +77,12 @@ impl RaceHarness {
         }
     }
 
-    fn advance_clock_ms(&self, milliseconds: u64) {
+    pub(super) fn advance_clock_ms(&self, milliseconds: u64) {
         self.clock_now_ns
             .fetch_add(milliseconds * 1_000_000, Ordering::AcqRel);
     }
 
-    async fn deliver(&mut self, node_id: &str, frame_index: usize) {
+    pub(super) async fn deliver(&mut self, node_id: &str, frame_index: usize) {
         self.deliver_with_cluster_positions(node_id, frame_index, two_tetra_cluster_positions())
             .await;
     }
@@ -200,7 +200,7 @@ fn tetra_cluster_positions(nodes: &[(&str, f32)]) -> Vec<(String, [f32; 3])> {
 
 /// Production cadence/cooldown defaults; renders disabled after the first
 /// frame so every later result carries localization coverage.
-fn race_config(coverage_wait_enabled: bool) -> DspWorkerConfig {
+pub(super) fn race_config(coverage_wait_enabled: bool) -> DspWorkerConfig {
     DspWorkerConfig {
         classifier_render_min_interval_seconds: 1.0e6,
         localization_rms_gate: 0.0,
@@ -536,11 +536,7 @@ async fn render_on_a_parked_trigger_frame_publishes_one_result_carrying_the_rend
     assert!(render_count >= trigger_segments, "renders: {render_count}");
     for (segment_id, results) in &real_results_by_segment {
         assert_eq!(results.len(), 1, "duplicate results for {segment_id}");
-        // Frame 0 precedes node b's stream: its empty channels make the omni
-        // mix empty, so that render is skipped regardless of deferral.
-        if segment_id.ends_with(FIRST_FRAME_SEGMENT_SUFFIX) {
-            continue;
-        }
+        // Frame 0 precedes node b's stream; its render mixes node a alone.
         assert!(
             results[0].derived_handle.is_some(),
             "trigger result for {segment_id} lost the render handle"

@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use tracing::warn;
 use uuid::Uuid;
 
@@ -47,6 +49,36 @@ pub struct RenderComputeRequest<'a> {
     pub render_end_ns: Option<u128>,
 }
 
+/// The channels (and their mic positions, index for index) that hold samples
+/// for the render window. A cluster member that has not streamed yet gives
+/// empty channels, and both the omni mix and the band split truncate to the
+/// shortest channel, so one silent member would empty the whole render.
+/// Partial channels stay in (and still truncate), as do channels past the
+/// mic geometry. With no channel holding data, the inputs pass through and
+/// the render stays empty, as before.
+fn channels_with_data<'a>(
+    channels: &'a [Vec<f32>],
+    mic_positions_m: &'a [[f32; 3]],
+) -> (Cow<'a, [Vec<f32>]>, Cow<'a, [[f32; 3]]>) {
+    let any_empty = channels.iter().any(Vec::is_empty);
+    let any_with_data = channels.iter().any(|channel| !channel.is_empty());
+    if !(any_empty && any_with_data) {
+        return (Cow::Borrowed(channels), Cow::Borrowed(mic_positions_m));
+    }
+    let kept_indices: Vec<usize> = (0..channels.len())
+        .filter(|index| !channels[*index].is_empty())
+        .collect();
+    let kept_channels = kept_indices
+        .iter()
+        .map(|index| channels[*index].clone())
+        .collect();
+    let kept_mic_positions = kept_indices
+        .iter()
+        .filter_map(|index| mic_positions_m.get(*index).copied())
+        .collect();
+    (Cow::Owned(kept_channels), Cow::Owned(kept_mic_positions))
+}
+
 /// Compute PCM render bytes and metadata synchronously.
 /// Safe to call directly from a Rayon thread — no async I/O, no spawn_blocking.
 pub fn compute_render_bytes(request: RenderComputeRequest<'_>) -> (Vec<u8>, RenderMeta) {
@@ -61,6 +93,8 @@ pub fn compute_render_bytes(request: RenderComputeRequest<'_>) -> (Vec<u8>, Rend
         render_start_ns,
         render_end_ns,
     } = request;
+    let (channels, mic_positions_m) = channels_with_data(channels, mic_positions_m);
+    let (channels, mic_positions_m) = (channels.as_ref(), mic_positions_m.as_ref());
     let source_channel_count = channels.len();
 
     // Nearest-node omni source: always render the raw omni mix (no beamforming),
@@ -351,5 +385,21 @@ mod tests {
             render_end_ns: None,
         });
         assert_eq!(meta.render_kind, "birdnet_omni_fallback");
+    }
+
+    #[test]
+    fn empty_channels_drop_out_with_their_mic_positions() {
+        let channels = vec![vec![0.1_f32, 0.2], Vec::new(), vec![0.3_f32]];
+        let mic_positions_m = [[0.0_f32, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]];
+        let (kept_channels, kept_mic_positions) = channels_with_data(&channels, &mic_positions_m);
+        assert_eq!(kept_channels.as_ref(), &[vec![0.1_f32, 0.2], vec![0.3_f32]]);
+        assert_eq!(
+            kept_mic_positions.as_ref(),
+            &[[0.0_f32, 0.0, 0.0], [2.0, 0.0, 0.0]]
+        );
+        let all_empty = vec![Vec::new(), Vec::new()];
+        let (passed_channels, passed_mic_positions) =
+            channels_with_data(&all_empty, &mic_positions_m[..2]);
+        assert!(matches!(passed_channels, Cow::Borrowed(_)) && passed_mic_positions.len() == 2);
     }
 }
