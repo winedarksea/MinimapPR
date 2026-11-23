@@ -15,6 +15,7 @@ use crate::bird_entity::model::{BirdEntityRecord, BirdEntitySpatialState, Entity
 use crate::bird_entity::registry::{BirdEntityChange, BirdEntityChangeKind};
 use crate::bird_entity::reporting_decision::EntityReportingAction;
 use crate::protocol::detection_messages::{BirdEntityUpdate, EntityBearing};
+use crate::protocol::session_messages::ClockModel;
 use crate::wildlife_tracking::perched_relocation::RelocationRevert;
 use crate::protocol::wire_codes::{BirdEntityState, SpeciesScore};
 use crate::protocol::NodeId;
@@ -75,9 +76,13 @@ impl<'host> EntityUpdateContext<'host> {
 #[derive(Debug, Clone, Default)]
 pub struct HostEntityTracking {
     pub pipelines: BTreeMap<u32, WildlifeEntityPipeline>,
-    wire_ids: BTreeMap<(u32, EntityId), u64>,
+    pub(super) wire_ids: BTreeMap<(u32, EntityId), u64>,
     /// Per island: (latest event ns on the reference clock, session ms it arrived).
-    clock_anchors: BTreeMap<u32, (i64, MeshMilliseconds)>,
+    pub(super) clock_anchors: BTreeMap<u32, (i64, MeshMilliseconds)>,
+    /// Islands seeded from a dead host's mirror, with that host's last clock
+    /// model: their entity times move onto this host's reference clock at
+    /// the island's first call (`host_entity_restoration`).
+    pub(super) pending_clock_rebases: BTreeMap<u32, ClockModel>,
     last_maintenance_ms: Option<MeshMilliseconds>,
     /// Newest last; capped at `EntityTrackingConfig::max_retained_call_outcomes`.
     pub call_outcomes: VecDeque<HostEntityCallOutcome>,

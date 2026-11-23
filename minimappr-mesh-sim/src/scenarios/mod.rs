@@ -25,6 +25,7 @@ pub type ScenarioFunction = fn(u64) -> Result<ScenarioReport, String>;
 pub const SCENARIOS: &[(&str, ScenarioFunction)] = &[
     ("baseline_localization", call_scenarios::baseline_localization),
     ("host_death", host_scenarios::host_death),
+    ("successor_restores_entities", host_scenarios::successor_restores_entities),
     ("network_faults", network_scenarios::network_faults),
     ("route_change", sync_scenarios::route_change),
     ("island_split_merge", sync_scenarios::island_split_merge),
@@ -48,8 +49,8 @@ pub const SCENARIOS: &[(&str, ScenarioFunction)] = &[
     ("couples", entity_scenarios::couples),
 ];
 
-pub const SCENARIO_NAMES: [&str; 23] = {
-    let mut names = [""; 23];
+pub const SCENARIO_NAMES: [&str; 24] = {
+    let mut names = [""; 24];
     let mut index = 0;
     while index < SCENARIOS.len() {
         names[index] = SCENARIOS[index].0;

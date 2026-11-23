@@ -1,5 +1,6 @@
 //! Host lifecycle scenarios: host death (mid chirp round, then mid clip
-//! fetch) and thermal shedding (online handover vs hotspot shedding).
+//! fetch), a successor restoring entities from its mirror, and thermal
+//! shedding (online handover vs hotspot shedding).
 //! Arrival-time abstraction throughout.
 
 use minimappr_core::mesh::config::ChirpScheduleMode;
@@ -8,8 +9,9 @@ use minimappr_core::mesh::node_state_machine::NodeUserNotice;
 use minimappr_core::protocol::NodeId;
 
 use crate::device_spec::ThermalRamp;
+use crate::entity_metrics::{entity_invariants, entity_metrics, EntityTruth};
 use crate::invariants::ensure;
-use crate::scenario::{ring_of_phones, ScenarioSpec, ScriptAction};
+use crate::scenario::{ring_of_phones, ScenarioSpec, ScriptAction, DEFAULT_CALL_LEVEL_DB_SPL};
 use crate::scenario_outcome::ScenarioOutcome;
 
 use super::call_scenarios::healthy_path_checks;
@@ -72,6 +74,45 @@ pub fn host_death(seed: u64) -> Result<ScenarioReport, String> {
         }
         let worst = healthy_path_checks(&outcome, 2, None)?;
         Ok(format!("succession {tenures:?}, post-takeover fixes ok, worst {worst:.2} m"))
+    })())
+}
+
+const RESTORED_BIRD_SPECIES: u32 = 103;
+const RESTORED_BIRD_SCORE: f32 = 0.85;
+const RESTORED_BIRD_PERCH_M: [f64; 3] = [3.0, 2.0, 6.0];
+
+/// One bird calls before and after the host dies mid chirp round. The
+/// successor seeds its entity layer from the mirror's latest entity
+/// updates, so the bird keeps its entity id instead of gaining a duplicate.
+pub fn successor_entities_spec(seed: u64) -> (ScenarioSpec, EntityTruth) {
+    let mut truth = EntityTruth::default();
+    let bird = truth.add_bird(RESTORED_BIRD_SPECIES);
+    let mut spec = ScenarioSpec::new("successor_restores_entities", 70.0, ring_of_phones(5, [0.0, 0.0], 12.0, seed));
+    // Kill lands in the post-detection round after the second call; the
+    // successor has re-surveyed well before the third.
+    for time_s in [14.0, 20.0, 50.0, 60.0] {
+        spec = spec.call_bird(time_s, RESTORED_BIRD_PERCH_M, RESTORED_BIRD_SPECIES, RESTORED_BIRD_SCORE, DEFAULT_CALL_LEVEL_DB_SPL);
+        truth.note_call(Some(bird));
+    }
+    (spec.at(21.0, ScriptAction::KillHostDuringRound), truth)
+}
+
+pub fn successor_restores_entities(seed: u64) -> Result<ScenarioReport, String> {
+    let (spec, truth) = successor_entities_spec(seed);
+    report("successor_restores_entities", seed, (|| {
+        let outcome = run_checked(spec, seed)?;
+        ensure(outcome.metrics.host_tenures.len() == 2, || format!("tenures {:?}", outcome.metrics.host_tenures))?;
+        let metrics = entity_metrics(&outcome, &truth);
+        // Not vacuous: the bird reached an entity under both hosts.
+        let terms_with_entity = outcome
+            .all_hosts()
+            .into_iter()
+            .filter(|(_, host)| host.entities.call_outcomes.iter().any(|call| call.bird_entity_id.is_some()))
+            .count();
+        ensure(terms_with_entity == 2, || format!("entity outcomes under {terms_with_entity} of 2 hosts: {}", metrics.summary()))?;
+        entity_invariants(&metrics)?;
+        ensure(metrics.duplicate_entities == 0, || metrics.summary())?;
+        Ok(metrics.summary())
     })())
 }
 

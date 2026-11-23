@@ -17,6 +17,7 @@ use super::absorption_geometry::forget_fixes_since;
 use super::config::BirdEntityConfig;
 use super::model::{EntityId, SpatialDisplayMode};
 use super::registry::{BirdEntityChange, BirdEntityObservation, BirdEntityRegistry};
+use super::registry_seed::SeededBirdEntity;
 use super::reporting_decision::{decide_entity_reporting, EntityDecisionInput, EntityReportingAction, EntityReportingDecision};
 use crate::wildlife_tracking::perched_tracker::{PerchedWildlifeTracker, TrackUpdateOutcome, WildlifeFix};
 use crate::wildlife_tracking::species_log_odds::{LabelScores, UNKNOWN_LABEL};
@@ -66,6 +67,12 @@ pub struct WildlifeEntityPipeline {
 impl WildlifeEntityPipeline {
     pub fn new(tracker_config: PerchedTrackerConfig, entity_config: BirdEntityConfig) -> Self {
         Self { tracker: PerchedWildlifeTracker::new(tracker_config), registry: BirdEntityRegistry::new(entity_config) }
+    }
+
+    /// Restore an entity a previous host published (successor takeover);
+    /// the tracker is untouched and binds a track on the next fix.
+    pub fn seed_entity(&mut self, seed: &SeededBirdEntity) -> EntityId {
+        self.registry.seed_entity(seed)
     }
 
     pub fn process(&mut self, detection: &EntityPipelineDetection) -> EntityPipelineOutcome {

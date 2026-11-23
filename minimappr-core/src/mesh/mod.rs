@@ -32,6 +32,7 @@ pub mod detection_outbox;
 pub mod event_log;
 pub mod event_matcher;
 pub mod fix_contour;
+pub mod host_entity_restoration;
 pub mod host_entity_tracking;
 pub mod host_membership;
 pub mod host_message_handling;

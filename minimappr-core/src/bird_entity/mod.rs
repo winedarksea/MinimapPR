@@ -16,5 +16,6 @@ pub mod entity_pipeline;
 pub mod matching;
 pub mod model;
 pub mod registry;
+pub mod registry_seed;
 pub mod registry_spatial;
 pub mod reporting_decision;

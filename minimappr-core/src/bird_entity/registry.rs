@@ -65,7 +65,7 @@ impl BirdEntityObservation<'_> {
 pub struct BirdEntityRegistry {
     pub(super) config: BirdEntityConfig,
     pub(super) entities: BTreeMap<EntityId, BirdEntityRecord>,
-    last_entity_id: EntityId,
+    pub(super) last_entity_id: EntityId,
     absorption_window_ns: i64,
     pub(super) expiry_ns: i64,
     pub(super) spatial_hold_ns: i64,

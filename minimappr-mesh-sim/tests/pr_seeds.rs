@@ -26,6 +26,7 @@ macro_rules! scenario_tests {
 scenario_tests!(
     baseline_localization,
     host_death,
+    successor_restores_entities,
     network_faults,
     route_change,
     island_split_merge,
@@ -51,5 +52,5 @@ scenario_tests!(
 
 #[test]
 fn every_catalogued_scenario_has_a_test() {
-    assert_eq!(minimappr_mesh_sim::SCENARIO_NAMES.len(), 23);
+    assert_eq!(minimappr_mesh_sim::SCENARIO_NAMES.len(), 24);
 }

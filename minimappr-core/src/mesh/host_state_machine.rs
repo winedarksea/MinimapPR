@@ -22,6 +22,7 @@ use super::host_membership::SessionMembership;
 use super::host_restoration::restore_from_mirror;
 use super::host_sync_pipeline::{HostSyncPipeline, SyncRecord};
 use super::host_transport_policy::{CellLinkQuality, HostTransportPolicy, SessionTransportPreference, TransportDecision};
+use super::local_tangent_plane::LocalTangentPlane;
 use super::{MeshMilliseconds, MessageRecipient, OutboundMessage};
 use crate::protocol::mesh_messages::EventLogEntry;
 
@@ -147,6 +148,13 @@ impl FieldHostStateMachine {
         let mut host = Self::with_parts(host_node_id, host_term.max(restored.highest_host_term + 1), config, transport);
         host.event_log = restored.event_log;
         host.membership = restored.membership;
+        // Same ENU origin as the dead host, so restored entities, published
+        // positions and new fixes share one map frame.
+        host.sync.local_plane = restored.local_plane_origin_deg.map(|(latitude, longitude)| LocalTangentPlane::new(latitude, longitude));
+        if host.config.entity_tracking.enabled {
+            let config = &host.config;
+            host.entities.restore_entities(&restored.entities, &restored.clock_models, &config.entity_tracking, &config.entity_contour, &config.fix_covariance_calibration, now_ms);
+        }
         // Call and entity ids stay unique across terms (records outlive their
         // host, and the dead host may have published entities no mirror has).
         let term_id_floor = u64::from(host.host_term) << CALL_ID_TERM_SHIFT_BITS;
@@ -299,6 +307,8 @@ impl FieldHostStateMachine {
 
     /// Server-track path: the call joins its bird's entity (or starts one).
     fn track_entity_for(&mut self, record: &LocalizedCallRecord, now_ms: MeshMilliseconds) {
+        let reference_node = self.sync.engine.islands.get(&record.island_id).and_then(|island| island.reference_node);
+        self.entities.rebase_restored_island(record.island_id, reference_node);
         let reporting_position = self
             .sync
             .engine
