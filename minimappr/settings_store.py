@@ -353,6 +353,8 @@ CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     "onset_attribution_loco_mask_max_seconds": float,
     "onset_attribution_loco_mask_band_padding_hz": float,
     "onset_attribution_promote_band_distinct_tentative": bool,
+    "onset_window_label_reconciliation_enabled": bool,
+    "onset_window_label_reconciliation_timeout_seconds": float,
     "trigger_noise_floor_relative_enabled": bool,
     "trigger_noise_floor_relative_snr_db": float,
     "trigger_noise_floor_rise_seconds": float,

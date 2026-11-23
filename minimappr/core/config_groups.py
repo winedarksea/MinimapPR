@@ -169,6 +169,8 @@ CONFIG_STAGE_GROUPS: tuple[tuple[str, str, PipelineStageKind | None, tuple[str, 
             "onset_attribution_loco_mask_max_seconds",
             "onset_attribution_loco_mask_band_padding_hz",
             "onset_attribution_promote_band_distinct_tentative",
+            "onset_window_label_reconciliation_enabled",
+            "onset_window_label_reconciliation_timeout_seconds",
             # --- end Field Mode W3-attribution ---
         ),
     ),

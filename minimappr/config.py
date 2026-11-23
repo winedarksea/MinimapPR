@@ -1410,6 +1410,12 @@ class Settings:
     # Single array: a cluster held only by persistence whose band differs from every accepted
     # cluster (so not an echo/sidelobe) gets its own product for attribution to label.
     onset_attribution_promote_band_distinct_tentative: bool = True
+    # Closeout B2: once a window's sibling clusters are classified, a gradient-settled cluster
+    # drops labels another settled (gradient/LOCO) sibling claims as its top label.
+    onset_window_label_reconciliation_enabled: bool = False
+    # Max wait for the rest of a window's siblings (dropped/failed siblings never arrive);
+    # held products are then reconciled with whatever arrived.
+    onset_window_label_reconciliation_timeout_seconds: float = 2.0
     # Ingest: also trigger when a frame stands this far above the node's own tracked floor
     # (OR with the absolute trigger_rms gate), so faint distant birds open windows.
     trigger_noise_floor_relative_enabled: bool = False
@@ -2314,6 +2320,8 @@ class Settings:
             raise ValueError("onset_attribution_loco_noise_floor_percentile must be in (0, 100)")
         if self.onset_attribution_loco_mask_band_padding_hz < 0.0:
             raise ValueError("onset_attribution_loco_mask_band_padding_hz must be >= 0")
+        if self.onset_window_label_reconciliation_timeout_seconds <= 0.0:
+            raise ValueError("onset_window_label_reconciliation_timeout_seconds must be > 0")
         for _trigger_key in (
             "trigger_noise_floor_relative_snr_db", "trigger_noise_floor_rise_seconds",
             "trigger_noise_floor_fall_seconds", "trigger_noise_floor_minimum_rms",
@@ -3025,6 +3033,12 @@ class Settings:
             ),
             onset_attribution_promote_band_distinct_tentative=_env_bool(
                 "MINIMAPPR_ONSET_ATTRIBUTION_PROMOTE_BAND_DISTINCT_TENTATIVE", True
+            ),
+            onset_window_label_reconciliation_enabled=_env_bool(
+                "MINIMAPPR_ONSET_WINDOW_LABEL_RECONCILIATION_ENABLED", False
+            ),
+            onset_window_label_reconciliation_timeout_seconds=_env_float(
+                "MINIMAPPR_ONSET_WINDOW_LABEL_RECONCILIATION_TIMEOUT_SECONDS", 2.0
             ),
             trigger_noise_floor_relative_enabled=_env_bool("MINIMAPPR_TRIGGER_NOISE_FLOOR_RELATIVE_ENABLED", False),
             trigger_noise_floor_relative_snr_db=_env_float("MINIMAPPR_TRIGGER_NOISE_FLOOR_RELATIVE_SNR_DB", 8.0),

@@ -15,6 +15,8 @@ use minimappr_core::onset_clustering::attribution_decision::{
 use minimappr_core::onset_clustering::attribution_evidence::{
     ClusterAttributionEvidence, ClusterOnsetArrival,
 };
+use minimappr_core::mesh::call_attribution::reconcile_window_labels;
+use minimappr_core::protocol::wire_codes::SpeciesScore;
 use minimappr_core::stage1::noise_floor_relative_trigger::{
     NoiseFloorRelativeTrigger, RelativeTriggerConfig,
 };
@@ -214,6 +216,45 @@ fn run_attribution_batch(case: &Value) -> OracleResult {
     Ok(json!({ "results": results }))
 }
 
+fn tier_from_name(name: &str) -> Result<AttributionTier, String> {
+    match name {
+        "single_cluster" => Ok(AttributionTier::SingleCluster),
+        "snr_gradient" => Ok(AttributionTier::SnrGradient),
+        "loco" => Ok(AttributionTier::Loco),
+        "unsettled" => Ok(AttributionTier::Unsettled),
+        other => Err(format!("unknown tier {other:?}")),
+    }
+}
+
+/// The mesh host's reconcile on numeric label ids; returns each cluster's kept labels in order.
+fn run_window_label_reconciliation_case(case: &Value) -> OracleResult {
+    let mut kept = Vec::new();
+    for window in case["windows"].as_array().ok_or("windows")? {
+        let mut decisions = Vec::new();
+        for (index, cluster) in window.as_array().ok_or("window")?.iter().enumerate() {
+            let tier = tier_from_name(cluster["tier"].as_str().ok_or("tier")?)?;
+            let species = cluster["scores"]
+                .as_array()
+                .ok_or("scores")?
+                .iter()
+                .map(|pair| -> Result<SpeciesScore, String> {
+                    let label_id = pair[0].as_str().and_then(|label| label.parse().ok()).ok_or("label id")?;
+                    Ok(SpeciesScore { label_id, score: pair[1].as_f64().ok_or("score")? as f32 })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            decisions.push((index, tier, species));
+        }
+        reconcile_window_labels(&mut decisions);
+        kept.push(
+            decisions
+                .iter()
+                .map(|(_, _, species)| species.iter().map(|entry| entry.label_id.to_string()).collect::<Vec<_>>())
+                .collect::<Vec<_>>(),
+        );
+    }
+    Ok(json!({ "kept_labels": kept }))
+}
+
 fn run_loco_decision_case(case: &Value) -> OracleResult {
     let thresholds = AttributionThresholds::default();
     let decisions: Vec<Value> = case["pairs"]
@@ -251,6 +292,7 @@ pub fn run_attribution_oracle() -> Result<(), Box<dyn std::error::Error + Send +
             "relative_trigger_lru" => run_relative_trigger_case(case, true)?,
             "attribution_batch" => run_attribution_batch(case)?,
             "loco_decision" => run_loco_decision_case(case)?,
+            "window_label_reconciliation" => run_window_label_reconciliation_case(case)?,
             other => return Err(format!("unknown case kind {other:?}").into()),
         });
     }

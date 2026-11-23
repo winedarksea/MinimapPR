@@ -38,6 +38,7 @@ pub mod tdoa_votes;
 pub mod trace;
 pub mod types;
 pub mod uncertainty;
+pub mod window_label_reconciliation;
 
 pub use config::OnsetClusteringConfig;
 pub use pipeline::{localize_onset_clusters, localize_onset_clusters_traced, OnsetClusteringInput};

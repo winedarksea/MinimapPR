@@ -459,6 +459,8 @@ def build_pipeline_graph(
             _param("LOCO", bool(settings.onset_attribution_loco_enabled), "onset_attribution_loco_enabled"),
             _param("Reruns / window", int(settings.onset_attribution_loco_max_reruns_per_window), "onset_attribution_loco_max_reruns_per_window"),
             _param("LOCO min confidence", float(settings.onset_attribution_loco_min_confidence), "onset_attribution_loco_min_confidence"),
+            _param("Window label reconcile", bool(settings.onset_window_label_reconciliation_enabled), "onset_window_label_reconciliation_enabled"),
+            _param("Reconcile timeout", float(settings.onset_window_label_reconciliation_timeout_seconds), "onset_window_label_reconciliation_timeout_seconds", suffix=" s"),
         ],
         status=_onset_attribution_status(metrics, fusion_available, attribution_enabled),
         link="/settings/config#localization",
@@ -1169,6 +1171,8 @@ def _onset_attribution_status(metrics: dict, fusion_available: bool, enabled: bo
             _param("Rerun cap hits", int(metrics.get("onset_attribution_loco_rerun_cap_hit_count") or 0)),
             _param("Mean rerun", round(rerun_ms / reruns, 1) if reruns else 0.0, suffix=" ms"),
             _param("Promoted tentative", int(metrics.get("onset_attribution_promoted_tentative_count") or 0)),
+            _param("Window labels dropped", int(metrics.get("onset_window_reconciliation_dropped_label_count") or 0)),
+            _param("Window reconcile timeouts", int(metrics.get("onset_window_reconciliation_timeout_count") or 0)),
         ],
     )
 # --- end Field Mode W3-attribution ---

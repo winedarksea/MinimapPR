@@ -18,6 +18,7 @@ use crate::onset_clustering::attribution_cascade::{
 use crate::onset_clustering::attribution_decision::{ClassificationWindow, ClassifierAnswer, InterfererOnset};
 use crate::onset_clustering::numeric::python_round_to_i64;
 use crate::onset_clustering::srp_grid::spatial_cluster_radius_m;
+use crate::onset_clustering::window_label_reconciliation::{labels_to_drop_by_cluster, top_scoring_label};
 use crate::protocol::wire_codes::SpeciesScore;
 
 use super::call_pipeline_types::{CallLocalizationRequest, ClipSetLocalizer, LocalizedCluster};
@@ -80,6 +81,22 @@ fn colocated(first: &[f64; 3], second: &[f64; 3], centroid_m: &[f64; 3], config:
     distance_m(first, second) <= radius_m
 }
 
+/// Gradient-settled clusters drop labels another settled sibling claims as its
+/// top label (closeout B2; server: `onset_window_label_reconciliation.py`).
+/// Each entry is `(cluster index, tier, attributed species)`.
+pub fn reconcile_window_labels(decisions: &mut [(usize, AttributionTier, Vec<SpeciesScore>)]) {
+    let tiers_and_tops: Vec<(AttributionTier, Option<u32>)> = decisions
+        .iter()
+        .map(|(_, tier, species)| {
+            let scores: Vec<(u32, f64)> = species.iter().map(|entry| (entry.label_id, f64::from(entry.score))).collect();
+            (*tier, top_scoring_label(&scores))
+        })
+        .collect();
+    for ((_, _, species), dropped) in decisions.iter_mut().zip(labels_to_drop_by_cluster(&tiers_and_tops)) {
+        species.retain(|entry| !dropped.contains(&entry.label_id));
+    }
+}
+
 pub fn attribute_window_clusters(
     request: &CallLocalizationRequest,
     clusters: &mut [LocalizedCluster],
@@ -128,6 +145,9 @@ pub fn attribute_window_clusters(
             AttributionTier::Unsettled => Vec::new(),
         };
         decisions.push((index, outcome.tier, species));
+    }
+    if config.window_label_reconciliation_enabled {
+        reconcile_window_labels(&mut decisions);
     }
     for (index, tier, species) in decisions {
         clusters[index].attribution_tier = Some(tier);

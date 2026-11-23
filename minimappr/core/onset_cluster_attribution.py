@@ -68,6 +68,8 @@ class ClusterAttributionContext:
     sample_rate_hz: int
     # Onsets this close to a target onset (same band) are the target's own note or echo.
     shared_onset_max_lag_samples: int | None = None
+    # Products of this window carrying a context (window label reconciliation waits for them).
+    sibling_product_count: int = 1
 
 
 @dataclass(frozen=True, slots=True)

@@ -347,6 +347,10 @@ pub struct MeshAttributionConfig {
     /// `cluster_range_fraction`; range from the window's node centroid).
     pub colocated_cluster_radius_m: f64,
     pub colocated_cluster_range_fraction: f64,
+    /// Post-window label reconciliation (server: `onset_window_label_reconciliation_enabled`,
+    /// default off there too): a gradient-settled cluster drops labels that are
+    /// another settled cluster's top label in the same window.
+    pub window_label_reconciliation_enabled: bool,
 }
 
 impl Default for MeshAttributionConfig {
@@ -357,6 +361,7 @@ impl Default for MeshAttributionConfig {
             shared_onset_max_lag_seconds: onset.echo_max_lag_seconds,
             colocated_cluster_radius_m: onset.cluster_radius_m,
             colocated_cluster_range_fraction: onset.cluster_range_fraction,
+            window_label_reconciliation_enabled: false,
         }
     }
 }

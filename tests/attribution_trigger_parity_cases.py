@@ -7,7 +7,10 @@ Python is the reference:
 - the real ``OnsetClusterAttributor.attribute`` cascade on random cluster
   evidence, with the host-owned signal work scripted: masking returns a given
   masked-cell fraction and the classifier rerun a given answer (the Rust port
-  leaves both to its ``LocoRerunHost`` callback).
+  leaves both to its ``LocoRerunHost`` callback);
+- window label reconciliation (closeout B2) on random sibling windows: the
+  server's ``reconcile_window_classifications`` vs the mesh host's
+  ``reconcile_window_labels`` (numeric label ids, as on the mesh wire).
 
 ``python -m tests.attribution_trigger_parity_cases`` writes
 ``tests/fixtures/attribution_trigger_parity_goldens.npz`` (``case_inputs_json``,
@@ -26,11 +29,13 @@ from types import SimpleNamespace
 import numpy as np
 
 from minimappr.config import Settings
+from minimappr.core.classification import ClassifiedResult
 from minimappr.core.ingest_relative_trigger import NoiseFloorRelativeTrigger
 from minimappr.core.onset_cluster_attribution import AttributionThresholds, ClusterAttributionContext, loco_decision
 from minimappr.core.onset_cluster_attribution_evidence import ClusterAttributionEvidence, ClusterOnsetArrival
 from minimappr.core.onset_cluster_attribution_stage import ATTRIBUTION_FEATURE_KEY, OnsetClusterAttributor
 from minimappr.core.onset_cluster_masking import MaskedSignal
+from minimappr.core.onset_window_label_reconciliation import reconcile_window_classifications
 from minimappr.models import ClassificationResult
 
 GOLDEN_PATH = Path(__file__).resolve().parent / "fixtures" / "attribution_trigger_parity_goldens.npz"
@@ -289,6 +294,45 @@ def loco_decision_case(seed: int) -> tuple[dict, dict]:
     return {"kind": "loco_decision", "pairs": pairs}, {"decisions": decisions}
 
 
+RECONCILIATION_TIERS = ("single_cluster", "snr_gradient", "loco", "unsettled")
+RECONCILIATION_LABEL_IDS = ("101", "102", "103", "104")
+
+
+def window_label_reconciliation_case(seed: int) -> tuple[dict, dict]:
+    """Sibling windows of 2-4 clusters; half force a shared label so drops happen often."""
+    rng = np.random.default_rng(seed)
+    windows = []
+    for _ in range(120):
+        clusters = []
+        shared = str(rng.choice(RECONCILIATION_LABEL_IDS))
+        for _ in range(int(rng.integers(2, 5))):
+            tier = str(rng.choice(RECONCILIATION_TIERS))
+            picks = rng.choice(len(RECONCILIATION_LABEL_IDS), size=int(rng.integers(1, 4)), replace=False)
+            scores = {RECONCILIATION_LABEL_IDS[i]: float(np.round(rng.uniform(0.05, 0.95), 3)) for i in picks}
+            if rng.uniform() < 0.5:
+                scores[shared] = float(np.round(rng.uniform(0.05, 0.95), 3))
+            clusters.append({"tier": tier, "scores": [] if tier == "unsettled" else list(map(list, scores.items()))})
+        windows.append(clusters)
+    kept = []
+    for clusters in windows:
+        classified = []
+        for cluster in clusters:
+            scores = dict(map(tuple, cluster["scores"]))
+            label, confidence = _top(scores)
+            result = ClassificationResult(
+                label=label, confidence=confidence, scores=scores,
+                features={ATTRIBUTION_FEATURE_KEY: {"tier": cluster["tier"]}},
+            )
+            classified.append(ClassifiedResult(
+                classification=result, omni_classification=result, beamformed_classification=result,
+                classification_path="beamformed", classification_signal=np.zeros(1), beamforming_error=None,
+                label_category="bird", iff_category="neutral", label_id=None,
+            ))
+        reconciled, _ = reconcile_window_classifications(classified)
+        kept.append([list(c.classification.scores) for c in reconciled])
+    return {"kind": "window_label_reconciliation", "windows": windows}, {"kept_labels": kept}
+
+
 def all_cases() -> list[tuple[dict, dict]]:
     cases = [relative_trigger_case(seed) for seed in range(4)]
     cases.append(relative_trigger_lru_case())
@@ -297,6 +341,7 @@ def all_cases() -> list[tuple[dict, dict]]:
     attribution_inputs += [attribution_band_overlap_case(900 + seed) for seed in range(6)]
     batch = {"kind": "attribution_batch", "cases": attribution_inputs}
     cases.append((batch, {"results": asyncio.run(_run_attribution_cases(attribution_inputs))}))
+    cases.extend(window_label_reconciliation_case(1100 + seed) for seed in range(2))
     return cases
 
 

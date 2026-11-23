@@ -200,7 +200,17 @@ class OnsetSrpLocalizationStage:
                     start_ns, end_ns, fusion.localization_config.classification_window_seconds,
                 )
                 products.append(product)
+        self._attach_sibling_count(products)
         return products
+
+    @staticmethod
+    def _attach_sibling_count(products: list[LocalizedCandidate]) -> None:
+        """Closeout B2: how many classified siblings window label reconciliation waits for."""
+        siblings = [p for p in products if p.onset_attribution_context is not None]
+        for product in siblings:
+            product.onset_attribution_context = dataclasses.replace(
+                product.onset_attribution_context, sibling_product_count=len(siblings)
+            )
 
     def _band_distinct_tentative_clusters(self, result, accepted, metrics) -> list[tuple[int, LocalizedOnsetCluster]]:
         """Field Mode W3-attribution: persistence-held single-array clusters that cannot be an echo."""

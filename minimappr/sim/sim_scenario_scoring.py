@@ -169,8 +169,11 @@ async def drain_fusion_queues(fusion, timeout_seconds: float = QUEUE_DRAIN_TIMEO
     window was still localizing or classifying, so scores depended on machine speed.
     Replay is the only caller, so it reaches into the stage queues directly.
     """
-    for queue in (fusion._localization_queue, fusion._classification_queue, fusion._rules_queue):
+    for queue in (fusion._localization_queue, fusion._classification_queue):
         await asyncio.wait_for(queue.join(), timeout=timeout_seconds)
+    # Closeout B2: siblings parked for window label reconciliation reach rules only on release.
+    await asyncio.wait_for(fusion.release_pending_window_reconciliation(), timeout=timeout_seconds)
+    await asyncio.wait_for(fusion._rules_queue.join(), timeout=timeout_seconds)
 
 
 async def replay_and_score_scenario(

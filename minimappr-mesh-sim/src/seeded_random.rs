@@ -12,8 +12,10 @@ pub const SEED_ENVIRONMENT_VARIABLE: &str = "MINIMAPPR_SIM_SEED";
 
 /// The fixed PR list (test strategy: 10 seeds per PR, regression seeds
 /// from failed nightly runs are appended here after the fix).
-pub const PULL_REQUEST_SEEDS: [u64; 10] = [
+pub const PULL_REQUEST_SEEDS: [u64; 13] = [
     1, 7, 42, 1_234, 9_001, 31_337, 271_828, 314_159, 8_675_309, 20_261_122,
+    // same_band_two_species merges (closeout B2: window label reconciliation).
+    5_007, 10_015, 10_187,
 ];
 
 /// Seeds a test should run: the env override alone, else the PR list.

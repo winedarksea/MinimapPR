@@ -43,7 +43,7 @@ from minimappr.core.multi_node_bearing_fusion import (
 from minimappr.core.audio_buffer import AudioCoverageStats, MultiSensorBuffer
 from minimappr.core.beamforming import create_beamformer
 from minimappr.core.classification_chunking import ClassificationChunkingPolicy
-from minimappr.core.classification import ClassificationOrchestrator
+from minimappr.core.classification import ClassificationOrchestrator, ClassifiedResult
 from minimappr.core.classification_priority import (
     PriorityStageQueue,
     PriorityWeights,
@@ -59,6 +59,7 @@ from minimappr.core.onset_srp_localization_stage import LOCALIZATION_METHOD_NAME
 from minimappr.core.onset_srp_localization_stage import OnsetSrpLocalizationStage
 from minimappr.core.sensor_span_coverage_wait import SensorStreamActivityTracker, await_sensor_span_coverage
 from minimappr.core.onset_cluster_attribution_stage import OnsetClusterAttributor  # Field Mode W3-attribution
+from minimappr.core.onset_window_label_reconciliation import OnsetWindowLabelReconciler, WindowSibling
 from minimappr.core.ingest_relative_trigger import NoiseFloorRelativeTrigger  # Field Mode W3-attribution
 from minimappr.core.ingest import EnvironmentUpdater, IngestProcessor
 from minimappr.core.live_ingest_state import LiveIngestState
@@ -179,6 +180,8 @@ class LocalizedCandidate:
     classification_significance: float = 0.0
     # Field Mode W3-attribution: ClusterAttributionContext from the onset stage (None = no attribution).
     onset_attribution_context: Any = None
+    # Closeout B2: parked by window label reconciliation; a sibling or the timeout emits it.
+    held_for_window_label_reconciliation: bool = False
 
 
 @dataclass(slots=True)
@@ -340,6 +343,12 @@ class FusionMetrics:
     onset_attribution_loco_rerun_max_ms: float = 0.0
     onset_attribution_promoted_tentative_count: int = 0
     # --- end Field Mode W3-attribution ---
+    # --- closeout B2: window label reconciliation ---
+    onset_window_reconciled_count: int = 0
+    onset_window_reconciliation_timeout_count: int = 0
+    onset_window_reconciliation_dropped_label_count: int = 0
+    onset_window_reconciliation_late_sibling_count: int = 0
+    # --- end closeout B2 ---
 
 
 def _build_snippet_max_age_resolver(settings):
@@ -543,6 +552,15 @@ class FusionNode:
         self._onset_attributor = (
             OnsetClusterAttributor(attribution_config, self._classification_orchestrator, lambda: self._metrics)
             if attribution_config.enabled and self._onset_srp_stage is not None
+            else None
+        )
+        # Closeout B2: reconciles labels across a window's attributed siblings.
+        self._window_label_reconciler = (
+            OnsetWindowLabelReconciler(
+                timeout_seconds=settings.onset_window_label_reconciliation_timeout_seconds,
+                emit_released_window=self._emit_released_reconciliation_window,
+            )
+            if self._onset_attributor is not None and settings.onset_window_label_reconciliation_enabled
             else None
         )
         # --- end Field Mode W3-attribution ---
@@ -773,6 +791,7 @@ class FusionNode:
         try:
             await asyncio.wait_for(self._localization_queue.join(), timeout=join_timeout_s)
             await asyncio.wait_for(self._classification_queue.join(), timeout=join_timeout_s)
+            await asyncio.wait_for(self.release_pending_window_reconciliation(), timeout=join_timeout_s)
             await asyncio.wait_for(self._rules_queue.join(), timeout=join_timeout_s)
         except asyncio.TimeoutError:
             self._last_error = "Timeout waiting for pipeline queues to drain during shutdown"
@@ -1637,6 +1656,7 @@ class FusionNode:
             try:
                 if self._should_suppress_chunked_classification(product):
                     self._metrics.birdnet_chunk_dispatches_suppressed += 1
+                    self._withdraw_from_window_reconciliation(product)
                     self._record_silent_drop(
                         stage="classification",
                         reason="chunk_suppressed",
@@ -1647,6 +1667,7 @@ class FusionNode:
                     continue
                 if self._should_skip_saturated_report_window(product):
                     self._metrics.classification_pregate_skipped_count += 1
+                    self._withdraw_from_window_reconciliation(product)
                     self._record_silent_drop(
                         stage="classification",
                         reason="report_window_saturated",
@@ -1668,6 +1689,9 @@ class FusionNode:
                     self._metrics.classification_stage_max_time_ms,
                     classification_elapsed_ms,
                 )
+                if product.held_for_window_label_reconciliation:
+                    # Parked for its window (closeout B2): a sibling or the timeout emits it.
+                    continue
                 classification_failed = self._detection_products_had_backend_failure(detection_products)
                 self._record_chunk_dispatch_outcome(
                     product=product,
@@ -1696,6 +1720,7 @@ class FusionNode:
                         if await self._enqueue_stage(self._rules_queue, detection_product):
                             self._metrics.classification_stage_out += 1
             except asyncio.TimeoutError:
+                self._withdraw_from_window_reconciliation(product)
                 self._record_chunk_dispatch_outcome(
                     product=product,
                     detection_products=[],
@@ -1712,6 +1737,7 @@ class FusionNode:
                     },
                 )
             except Exception as exc:
+                self._withdraw_from_window_reconciliation(product)
                 self._record_chunk_dispatch_outcome(
                     product=product,
                     detection_products=[],
@@ -2144,56 +2170,139 @@ class FusionNode:
         Raw omni inference is intentionally reserved for ContinuousOmniScanner.
         This keeps triggered work spatially meaningful and avoids re-running
         BirdNET/YAMNet over the same ambient window.
-        """
-        detection_products: list[DetectionProduct] = []
-        extra_features = product.extra_classification_features
 
-        if product.localization_branch is not None:
-            localized = await self._classification_orchestrator.classify_beamformed_only(
-                sample_rate_hz=product.candidate.sample_rate_hz,
-                capability_tier=product.localization_branch.capability_tier,
-                selected_sensor_ids=product.selected_sensor_ids,
-                selected_positions=product.selected_positions,
-                selected_windows=product.classification_selected_windows,
-                localization_position_m=product.localization_branch.localization_position_m,
-                event_time_ns=product.candidate.event_time_ns,
-                alias_cutoff_hz=product.localization_branch.alias_cutoff_hz,
-            )
-            if localized is None:
-                return detection_products
-            self._metrics.beamform_renders += 1
-            if self._onset_attributor is not None and product.onset_attribution_context is not None:
-                localized = await self._onset_attributor.attribute(  # Field Mode W3-attribution
-                    localized, product.onset_attribution_context, event_time_ns=product.candidate.event_time_ns
-                )
-            if extra_features:
-                localized.classification.features.update(extra_features)
-            await self._maybe_trigger_speech_capture(
-                node_id=product.candidate.source_node_id,
-                sensor_id=product.localization_branch.reference_sensor,
-                event_time_ns=product.candidate.event_time_ns,
-                scores=localized.classification.scores,
-            )
-            maybe_detection = await self._assemble_reporting_branch(
-                product=product,
-                classified=localized,
-                reporting_modality="localized",
-                localization_position_m=product.localization_branch.localization_position_m,
-                localization_confidence=product.localization_branch.localization_confidence,
-                localization_gdop=product.localization_branch.localization_gdop,
-                localization_position_covariance_m2=product.localization_branch.localization_position_covariance_m2,
-                localization_range_observability=product.localization_branch.localization_range_observability,
-                localization_residual_rms_seconds=product.localization_branch.localization_residual_rms_seconds,
-                localization_range_projection_mode=product.localization_branch.localization_range_projection_mode,
-                reference_sensor=product.localization_branch.reference_sensor,
-                reference_signal=product.localization_branch.reference_signal,
-                tdoa_s=product.localization_branch.tdoa_s,
-                capability_tier=product.localization_branch.capability_tier,
-                localization_method=product.localization_branch.localization_method,
-            )
-            if maybe_detection is not None:
-                detection_products.append(maybe_detection)
+        With window label reconciliation on, an attributed sibling is parked
+        (empty return, product flagged) until its window completes; the last
+        sibling to arrive returns the whole window's detections.
+        """
+        if product.localization_branch is None:
+            return []
+        localized = await self._classify_and_attribute_localized(product)
+        if localized is None:
+            self._withdraw_from_window_reconciliation(product)
+            return []
+        if self._window_label_reconciler is None or product.onset_attribution_context is None:
+            return await self._assemble_localized_classification(product, localized)
+        context = product.onset_attribution_context
+        ready = self._window_label_reconciler.submit(
+            window_id=context.window_id,
+            sibling_count=context.sibling_product_count,
+            candidate_id=product.candidate.id,
+            sibling=WindowSibling(product=product, classified=localized),
+        )
+        self._sync_window_reconciliation_metrics()
+        if not ready:
+            product.held_for_window_label_reconciliation = True
+            return []
+        detection_products: list[DetectionProduct] = []
+        for sibling in ready:
+            assembled = await self._assemble_localized_classification(sibling.product, sibling.classified)
+            if not assembled and sibling.product is not product:
+                # The worker only sees this product's outcome; account for parked siblings here.
+                self._record_empty_reconciled_sibling(sibling.product)
+            detection_products.extend(assembled)
         return detection_products
+
+    async def _classify_and_attribute_localized(self, product: LocalizedCandidate) -> ClassifiedResult | None:
+        """Beamformed classification of one localized product, then onset attribution."""
+        branch = product.localization_branch
+        localized = await self._classification_orchestrator.classify_beamformed_only(
+            sample_rate_hz=product.candidate.sample_rate_hz,
+            capability_tier=branch.capability_tier,
+            selected_sensor_ids=product.selected_sensor_ids,
+            selected_positions=product.selected_positions,
+            selected_windows=product.classification_selected_windows,
+            localization_position_m=branch.localization_position_m,
+            event_time_ns=product.candidate.event_time_ns,
+            alias_cutoff_hz=branch.alias_cutoff_hz,
+        )
+        if localized is None:
+            return None
+        self._metrics.beamform_renders += 1
+        if self._onset_attributor is not None and product.onset_attribution_context is not None:
+            localized = await self._onset_attributor.attribute(  # Field Mode W3-attribution
+                localized, product.onset_attribution_context, event_time_ns=product.candidate.event_time_ns
+            )
+        if product.extra_classification_features:
+            localized.classification.features.update(product.extra_classification_features)
+        return localized
+
+    async def _assemble_localized_classification(
+        self, product: LocalizedCandidate, localized: ClassifiedResult
+    ) -> list[DetectionProduct]:
+        branch = product.localization_branch
+        await self._maybe_trigger_speech_capture(
+            node_id=product.candidate.source_node_id,
+            sensor_id=branch.reference_sensor,
+            event_time_ns=product.candidate.event_time_ns,
+            scores=localized.classification.scores,
+        )
+        maybe_detection = await self._assemble_reporting_branch(
+            product=product,
+            classified=localized,
+            reporting_modality="localized",
+            localization_position_m=branch.localization_position_m,
+            localization_confidence=branch.localization_confidence,
+            localization_gdop=branch.localization_gdop,
+            localization_position_covariance_m2=branch.localization_position_covariance_m2,
+            localization_range_observability=branch.localization_range_observability,
+            localization_residual_rms_seconds=branch.localization_residual_rms_seconds,
+            localization_range_projection_mode=branch.localization_range_projection_mode,
+            reference_sensor=branch.reference_sensor,
+            reference_signal=branch.reference_signal,
+            tdoa_s=branch.tdoa_s,
+            capability_tier=branch.capability_tier,
+            localization_method=branch.localization_method,
+        )
+        return [maybe_detection] if maybe_detection is not None else []
+
+    # --- closeout B2: window label reconciliation ---
+    def _withdraw_from_window_reconciliation(self, product: LocalizedCandidate) -> None:
+        """A sibling that will never be classified must not hold its window until the timeout."""
+        context = product.onset_attribution_context
+        if self._window_label_reconciler is None or context is None:
+            return
+        self._window_label_reconciler.withdraw(
+            window_id=context.window_id, sibling_count=context.sibling_product_count, candidate_id=product.candidate.id
+        )
+
+    def _sync_window_reconciliation_metrics(self) -> None:
+        counters = self._window_label_reconciler.counters
+        self._metrics.onset_window_reconciled_count = counters.windows_reconciled
+        self._metrics.onset_window_reconciliation_timeout_count = counters.windows_timed_out
+        self._metrics.onset_window_reconciliation_dropped_label_count = counters.labels_dropped
+        self._metrics.onset_window_reconciliation_late_sibling_count = counters.late_siblings
+
+    async def _emit_released_reconciliation_window(self, siblings: list[WindowSibling]) -> None:
+        """Assemble a window released off the worker path (timeout, eviction, withdrawal)."""
+        self._sync_window_reconciliation_metrics()
+        for sibling in siblings:
+            try:
+                assembled = await self._assemble_localized_classification(sibling.product, sibling.classified)
+                if not assembled:
+                    self._record_empty_reconciled_sibling(sibling.product)
+                for detection_product in assembled:
+                    if await self._enqueue_stage(self._rules_queue, detection_product):
+                        self._metrics.classification_stage_out += 1
+            except Exception as exc:  # pragma: no cover - resilience path
+                self._metrics.classification_failures += 1
+                self._record_worker_exception(stage="classification", exc=exc, candidate_id=sibling.product.candidate.id)
+
+    def _record_empty_reconciled_sibling(self, product: LocalizedCandidate) -> None:
+        self._record_silent_drop(
+            stage="classification",
+            reason="empty_classification",
+            candidate_id=product.candidate.id,
+            event_time_ns=product.candidate.event_time_ns,
+            source_node_id=product.candidate.source_node_id,
+        )
+
+    async def release_pending_window_reconciliation(self) -> None:
+        """Emit every parked sibling now (drain and shutdown: no more siblings will come)."""
+        if self._window_label_reconciler is not None:
+            await self._window_label_reconciler.release_all()
+            self._sync_window_reconciliation_metrics()
+    # --- end closeout B2 ---
 
     async def _classification_windows_for_event(
         self,

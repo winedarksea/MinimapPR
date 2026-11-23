@@ -85,7 +85,9 @@ fn debug_dump(outcome: &ScenarioOutcome) {
 }
 
 fn run_scene(scene: EntityScene, seed: u64) -> Result<(ScenarioOutcome, EntityMetrics), String> {
-    let EntityScene { spec, truth } = scene;
+    let EntityScene { mut spec, truth } = scene;
+    // The server flag defaults off; the entity scenarios gate the reconciled path.
+    spec.mesh.attribution.window_label_reconciliation_enabled = true;
     let outcome = run_checked(spec, seed)?;
     debug_dump(&outcome);
     let metrics = entity_metrics(&outcome, &truth);
