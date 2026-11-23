@@ -12,8 +12,10 @@ android {
         applicationId = "com.minimappr.field"
         minSdk = libs.versions.android.minSdk.get().toInt()
         targetSdk = libs.versions.android.targetSdk.get().toInt()
-        versionCode = 1
-        versionName = "0.1.0"
+        // CI stamps these from the shared Python/Android release tag
+        // (.github/workflows/field-app.yml); local builds use the defaults.
+        versionCode = providers.gradleProperty("fieldAppVersionCode").map(String::toInt).getOrElse(1)
+        versionName = providers.gradleProperty("fieldAppVersionName").getOrElse("0.0.0-dev")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Must match :shared so the APK carries the Rust library for both.
         ndk.abiFilters += setOf("arm64-v8a", "x86_64")

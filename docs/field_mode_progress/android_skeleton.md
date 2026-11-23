@@ -103,3 +103,16 @@ Emulator: `sdkmanager` installed `emulator` 37.3.10 (1.3 GB) and `system-images;
 
 - `allTests` covers the host-JVM target rather than the Android unit tests, because KMP's `allTests` does not include AGP unit-test tasks. The Android unit tests run through `:shared:testDebugUnitTest` (both pass, same 9 tests).
 - The iOS framework could not be built: there is no Xcode, as described in the iOS section above.
+
+## CI / releases
+
+`.github/workflows/field-app.yml` builds the app on GitHub Actions. It does not run on pushes or PRs.
+
+- **Publishing a GitHub Release** (tag `X.Y.Z`, optional leading `v`) triggers both the PyPI publish (`workflow.yml`) and this workflow. Python and Android share one version.
+  - The tag sets `versionName`. `versionCode` is `major*1_000_000 + minor*1_000 + patch`.
+  - Both reach Gradle as `-PfieldAppVersionName` / `-PfieldAppVersionCode`. Local builds default to `0.0.0-dev` / 1.
+  - The APK `minimappr-field-<version>-debug.apk` is attached to that release.
+- **`workflow_dispatch`** (Actions tab or `gh workflow run field-app.yml --ref <branch>`) builds `0.0.0-ci.<run>` and uploads the APK only as a workflow artifact.
+- The job runs `cargo test -p minimappr-ffi`, `:shared:jvmTest`, `:shared:testDebugUnitTest`, compiles the androidTest APK (the emulator smoke test is not run in CI), and builds `:androidApp:assembleDebug`.
+- The shipped APK is the **debug** build so it installs without a signing key. Release signing and R8 are still open (issue 5 above).
+- A cold run takes about 20+ min: the `gobley-uniffi-bindgen` install plus Rust builds for two ABIs and the host.

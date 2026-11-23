@@ -1,0 +1,120 @@
+name: Field app (Android)
+
+# Builds the Field Mode KMP app (field-app/) and attaches the APK to the same
+# GitHub Release that workflow.yml publishes to PyPI: one tag versions both.
+# Kept separate from workflow.yml so a failed Android build never blocks the
+# PyPI publish, and vice versa.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+concurrency:
+  group: field-app-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # One job: the Rust FFI build for two Android ABIs plus the host dominates
+  # runtime, and separate test/build jobs would each redo it from cold.
+  build-field-app:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      # Must match android-ndk in field-app/gradle/libs.versions.toml.
+      FIELD_APP_ANDROID_NDK_VERSION: "27.0.12077973"
+    steps:
+      - uses: actions/checkout@v6
+
+      # Gradle 8.14.x needs JDK 17-24; 21 matches scripts/fetch_local_jdk.sh.
+      - name: Set up JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+
+      # cache-bin keeps the gobley-uniffi-bindgen install (several minutes).
+      # Tag-ref caches are not shared between releases, so this mostly pays
+      # off for manual dispatch runs from main.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          cache-bin: "true"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v5
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install Android NDK
+        run: sdkmanager "ndk;${FIELD_APP_ANDROID_NDK_VERSION}"
+
+      - name: Resolve app version
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          if [[ "$EVENT_NAME" == "release" ]]; then
+            VERSION_NAME="${RELEASE_TAG#v}"
+            if [[ ! "$VERSION_NAME" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+              echo "release tag '$RELEASE_TAG' is not X.Y.Z (optional leading v)" >&2
+              exit 1
+            fi
+            # Monotonic across releases as long as minor/patch stay < 1000.
+            VERSION_CODE=$(( BASH_REMATCH[1] * 1000000 + BASH_REMATCH[2] * 1000 + BASH_REMATCH[3] ))
+          else
+            VERSION_NAME="0.0.0-ci.${RUN_NUMBER}"
+            VERSION_CODE="${RUN_NUMBER}"
+          fi
+          echo "name=${VERSION_NAME}" >> "$GITHUB_OUTPUT"
+          echo "code=${VERSION_CODE}" >> "$GITHUB_OUTPUT"
+          echo "field app version ${VERSION_NAME} (code ${VERSION_CODE})"
+
+      - name: Rust FFI tests
+        run: cargo test -p minimappr-ffi
+
+      # assembleDebugAndroidTest keeps the emulator smoke test compiling
+      # without running it (no emulator in CI yet).
+      - name: Gradle tests and debug APK
+        working-directory: field-app
+        run: >
+          ./gradlew
+          -PfieldAppVersionName=${{ steps.version.outputs.name }}
+          -PfieldAppVersionCode=${{ steps.version.outputs.code }}
+          :shared:jvmTest
+          :shared:testDebugUnitTest
+          :androidApp:assembleDebugAndroidTest
+          :androidApp:assembleDebug
+
+      - name: Name the APK
+        id: apk
+        env:
+          VERSION_NAME: ${{ steps.version.outputs.name }}
+        run: |
+          APK_PATH="minimappr-field-${VERSION_NAME}-debug.apk"
+          cp field-app/androidApp/build/outputs/apk/debug/androidApp-debug.apk "$APK_PATH"
+          echo "path=${APK_PATH}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimappr-field-debug-apk
+          path: ${{ steps.apk.outputs.path }}
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Attach APK to the release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          APK_PATH: ${{ steps.apk.outputs.path }}
+        run: gh release upload "$RELEASE_TAG" "$APK_PATH" --clobber
