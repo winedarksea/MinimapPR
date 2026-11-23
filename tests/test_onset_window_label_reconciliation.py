@@ -7,8 +7,10 @@ import asyncio
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from minimappr.core.classification import ClassifiedResult
+from minimappr.core.fusion_node import FusionNode
 from minimappr.core.onset_cluster_attribution import ClusterAttributionContext
 from minimappr.core.onset_srp_localization_stage import OnsetSrpLocalizationStage
 from minimappr.core.onset_window_label_reconciliation import (
@@ -19,6 +21,8 @@ from minimappr.core.onset_window_label_reconciliation import (
     reconcile_window_classifications,
 )
 from minimappr.models import ClassificationResult
+from minimappr.sim import server_track_gate as gate
+from tests.sim_scenario_binary import ensure_sim_binary
 
 ROBIN, TANAGER, WREN = "american robin", "scarlet tanager", "house wren"
 
@@ -184,3 +188,37 @@ def test_onset_stage_attaches_the_sibling_count_to_attributed_products_only():
     OnsetSrpLocalizationStage._attach_sibling_count(products)
     assert [p.onset_attribution_context.sibling_product_count for p in products[:3]] == [3, 3, 3]
     assert products[3].onset_attribution_context is None
+
+
+# Gradient-settled siblings share window 1 here (closeout_B2.md), so siblings are held.
+HELD_SIBLING_SCENE = "onset_overlap_two_species"
+
+
+@pytest.mark.asyncio
+async def test_fusion_node_assembles_every_parked_sibling(tmp_path, monkeypatch):
+    """The FusionNode seam end to end: a held sibling's worker moves on, and the
+    last sibling, the timeout or the drain must still assemble it."""
+    ensure_sim_binary("window label reconciliation")
+    held_candidate_ids: list[str] = []
+    assembled_candidate_ids: list[str] = []
+    original_submit = OnsetWindowLabelReconciler.submit
+    original_assemble = FusionNode._assemble_localized_classification
+
+    def recording_submit(self, **kwargs):
+        ready = original_submit(self, **kwargs)
+        if not ready:
+            held_candidate_ids.append(kwargs["candidate_id"])
+        return ready
+
+    async def recording_assemble(self, product, localized):
+        assembled_candidate_ids.append(product.candidate.id)
+        return await original_assemble(self, product, localized)
+
+    monkeypatch.setattr(OnsetWindowLabelReconciler, "submit", recording_submit)
+    monkeypatch.setattr(FusionNode, "_assemble_localized_classification", recording_assemble)
+    row = await gate.replay_scene_configuration(
+        HELD_SIBLING_SCENE, gate.ALL_ON, tmp_path, extra_overrides={"onset_window_label_reconciliation_enabled": True}
+    )
+    assert held_candidate_ids, "the scene no longer parks a sibling; pick one with gradient-settled siblings"
+    assert set(held_candidate_ids) <= set(assembled_candidate_ids)
+    assert row["raw"]["rows"]
