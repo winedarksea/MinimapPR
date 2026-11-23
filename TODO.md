@@ -6,9 +6,11 @@ Status and detail in [docs/field_mode_progress/summary.md](docs/field_mode_progr
 
 - [ ] **Phone localizer choice** — the real `OnsetClipSetLocalizer` fails most multi-bird rendered-audio scenes on single-mic meshes (closeout_D.md). Choose: clip SRP per window, wideband or envelope inter-node frames, or arrival-time picks into `ArrivalTimeLocalizer`.
 - [ ] **Late or pocketed phone rejection** — `graceful_degradation` is still ignored (closeout_C.md, C4).
-- [ ] **Post-merge, rejoin and handover layout errors** — mesh-sim nightly invariant failures went from 6 to 29 per 4,800 runs once the phone-height σ became realistic (review H1).
+- [ ] **Mesh-sim nightly residue** — H1 fixed in closeout F2 (clock σ at the call, post-change round hold, mid-round stall rejection): 114 → 8 failures per 19,200 runs, none outside the reported region. The 8 left predate F2: `network_faults` detection loss, a `flock_echo` echo, an unflagged mirror, a successor duplicate, a 3-node singular solve (closeout_F2.md).
 - [ ] **Recalibrate on real sessions** — C3 contour scales and the D3 SRP temperature; make declared node σ mandatory when `srp_layout` is wired in (review M2/M3).
-- [ ] **Flaky nightly gates** — `anchor_persistent_jump`, world-frame coverage, `srp_contour_coverage`.
+- [ ] **Anchor rotation under GPS-scale layouts** — `anchor_persistent_jump` now bands the 1 m as an aggregate (F2). The underlying cause, a near-unobservable rotation (10 m layout, 6 m GPS) fitted per round, is open; fitting time-averaged fixes was tried and is bistable (11 m still-window excursion). Needs rotation-information weighting or a prior (closeout_F2.md).
+- [ ] **SRP coverage is set by the pooling multiplier** — at k = 1.25 coverage is 0.955–0.963 whatever the temperature, so the 0.945 target is unreachable and the gate ceiling was widened (F2). Refit k (with T) on ≥ 2000 training trials when `srp_layout` gets a production caller.
+- [ ] **World-frame coverage sits low in band** — mean 0.928 (sd 0.013), fails ~2 % of nightly runs; heavier-than-Gaussian anchor tail (closeout C3/F2). Revisit with real-session recalibration.
 - [ ] **Bluefin live trial** — A3 baseline, A4 trial flags and the B4 per-trigger check once nodes stream again (bluefin_live_trial.md).
 - [ ] **Fixture speech check** — listen to the 22 `bluefin_bird_snippets_v1` clips, then set `speech_checked = true`.
 - [ ] **Phase 1 chirp sync, relay rate limiting and deploy, replay-window persistence, speaker→mic clock bias** — deferred.
