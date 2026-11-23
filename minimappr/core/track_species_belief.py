@@ -75,7 +75,9 @@ class SpeciesLogOddsBelief:
         floor = self._prior_log_odds - self._config.total_log_odds_cap
         ceiling = self._prior_log_odds + self._config.total_log_odds_cap
         for label, probability in evidence_probability_by_label.items():
-            if label.strip().lower() in _NON_EVIDENCE_LABELS:
+            # isnan (not isfinite) for parity with the Rust port: a NaN score
+            # would otherwise poison this label's log-odds permanently.
+            if label.strip().lower() in _NON_EVIDENCE_LABELS or math.isnan(probability):
                 continue
             delta = probability_to_log_odds(probability) - self._prior_log_odds
             delta = min(max(delta, -cap), cap)

@@ -63,6 +63,16 @@ def test_non_evidence_labels_ignored():
     assert belief.top_label() == (None, 0.0)
 
 
+def test_nan_score_skipped_without_poisoning_label():
+    belief = SpeciesLogOddsBelief(SpeciesBeliefConfig())
+    belief.update({"robin": 0.3})
+    belief.update({"robin": float("nan"), "tanager": float("nan")})
+    assert belief.top_labels(5) == ["robin"]
+    assert belief.probability_for("robin") == pytest.approx(0.3, abs=1e-6)
+    belief.update({"robin": 0.45})
+    assert belief.probability_for("robin") > 0.3
+
+
 def test_evidence_uses_winner_member_scores_only():
     scores = {"Bird": 0.9, "Animal": 0.8, "birdnet:robin": 0.4, "birdnet:wren": 0.2}
     evidence = species_evidence_from_detection(
