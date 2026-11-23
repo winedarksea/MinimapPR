@@ -8,6 +8,9 @@ pub mod host_scenarios;
 pub mod network_scenarios;
 pub mod sync_scenarios;
 
+use std::cell::Cell;
+
+use crate::audio_world::{AcousticMode, AudioModeConfig};
 use crate::invariants::common_invariants;
 use crate::scenario::ScenarioSpec;
 use crate::scenario_outcome::ScenarioOutcome;
@@ -67,8 +70,38 @@ pub fn run_scenario_by_name(name: &str, seed: u64) -> Result<ScenarioReport, Str
     function(seed)
 }
 
+thread_local! {
+    static ACOUSTIC_MODE_OVERRIDE: Cell<Option<AcousticMode>> = const { Cell::new(None) };
+    static AUDIO_CONFIG_OVERRIDE: std::cell::RefCell<Option<AudioModeConfig>> = const { std::cell::RefCell::new(None) };
+}
+
+/// [`run_scenario_by_name_in_mode`] in rendered-audio mode with `audio` settings.
+pub fn run_scenario_by_name_with_audio(name: &str, seed: u64, audio: AudioModeConfig) -> Result<ScenarioReport, String> {
+    let previous = AUDIO_CONFIG_OVERRIDE.with(|cell| cell.replace(Some(audio)));
+    let result = run_scenario_by_name_in_mode(name, seed, AcousticMode::RenderedAudio);
+    AUDIO_CONFIG_OVERRIDE.with(|cell| *cell.borrow_mut() = previous);
+    result
+}
+
+/// Run a catalogued scenario with every run on this thread in `mode`
+/// (closeout D2: the entity scenarios through rendered audio and the real
+/// localizer). Scenarios build their specs internally; one override at the
+/// single `run_checked` funnel avoids threading a mode through all 24.
+pub fn run_scenario_by_name_in_mode(name: &str, seed: u64, mode: AcousticMode) -> Result<ScenarioReport, String> {
+    let previous = ACOUSTIC_MODE_OVERRIDE.with(|cell| cell.replace(Some(mode)));
+    let result = run_scenario_by_name(name, seed);
+    ACOUSTIC_MODE_OVERRIDE.with(|cell| cell.set(previous));
+    result
+}
+
 /// Run a spec and apply the common invariants.
-pub(crate) fn run_checked(spec: ScenarioSpec, seed: u64) -> Result<ScenarioOutcome, String> {
+pub(crate) fn run_checked(mut spec: ScenarioSpec, seed: u64) -> Result<ScenarioOutcome, String> {
+    if let Some(mode) = ACOUSTIC_MODE_OVERRIDE.with(Cell::get) {
+        spec.acoustic_mode = mode;
+    }
+    if let Some(audio) = AUDIO_CONFIG_OVERRIDE.with(|cell| cell.borrow().clone()) {
+        spec.audio = audio;
+    }
     let outcome = ScenarioRun::new(spec, seed).run();
     common_invariants(&outcome)?;
     Ok(outcome)

@@ -12,6 +12,7 @@
 use minimappr_sim::physics::atmosphere::AtmosphericConditions;
 use minimappr_sim::physics::constants::speed_of_sound_mps;
 
+use crate::audio_world::RenderedSessionAudio;
 use crate::device_spec::DeviceSpec;
 use crate::seeded_random::{hashed_gaussian, hashed_uniform};
 
@@ -165,6 +166,8 @@ pub struct AcousticWorld {
     pub calls: Vec<ScriptedCall>,
     pub noise_intervals: Vec<NoiseInterval>,
     pub sound_speed_mps: f64,
+    /// Set in rendered-audio mode: clips are cut from these streams.
+    pub rendered_audio: Option<std::sync::Arc<RenderedSessionAudio>>,
 }
 
 pub fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -218,7 +221,20 @@ impl AcousticWorld {
             devices,
             calls,
             noise_intervals,
+            rendered_audio: None,
         }
+    }
+
+    /// (call, true arrival, in-band SNR) of every call reaching `device`
+    /// between the true times `start_s` and `end_s`.
+    pub fn calls_arriving_between(&self, device: usize, start_s: f64, end_s: f64) -> Vec<(usize, f64, f64)> {
+        (0..self.calls.len())
+            .filter_map(|call| {
+                let spec = &self.calls[call];
+                let arrival = self.arrival_time(spec.time_s, spec.position_m, device);
+                (arrival >= start_s && arrival <= end_s).then(|| (call, arrival, self.call_snr_db(call, device)))
+            })
+            .collect()
     }
 
     pub fn position(&self, device: usize, time_s: f64) -> [f64; 3] {

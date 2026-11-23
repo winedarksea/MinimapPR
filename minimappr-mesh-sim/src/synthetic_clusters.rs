@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 
 use minimappr_core::mesh::arrival_time_localizer::{ArrivalTimeLocalizer, NodeArrival};
 use minimappr_core::mesh::call_pipeline::{CallFix, CallLocalizationRequest, LocalizedCluster};
+use minimappr_core::mesh::clock_mapping::NodeClockMapping;
 use minimappr_core::mesh::config::DEVICE_SAMPLE_RATE_HZ;
 use minimappr_core::onset_clustering::attribution_decision::{band_overlap_fraction, AttributionThresholds, ClassifierAnswer, InterfererOnset};
 use minimappr_core::onset_clustering::attribution_evidence::{spreading_fit, ClusterAttributionEvidence, ClusterOnsetArrival};
@@ -216,14 +217,28 @@ pub fn classify_window(
     let (_, arrivals) = decoded.iter().find(|(index, _)| request.clips[*index].node_id == node)?;
     let clip = request.clips.iter().find(|clip| clip.node_id == node)?;
     let window_start_s = request.centre_reference_s - request.half_window_s;
+    classify_arrivals(arrivals, &clip.clock, window_start_s, masked, detection_snr_db, MASK_MATCH_TOLERANCE_S)
+}
+
+/// The SNR-graded classifier stand-in over the calls a node's window holds;
+/// a call is masked when a masked onset (seconds after `window_start_s` on
+/// the reference clock) lies within `mask_tolerance_s` of it in a shared band.
+pub fn classify_arrivals(
+    arrivals: &[SyntheticArrival],
+    clock: &NodeClockMapping,
+    window_start_s: f64,
+    masked: &[InterfererOnset],
+    detection_snr_db: f64,
+    mask_tolerance_s: f64,
+) -> Option<(ClassifierAnswer, f64)> {
     let audible: Vec<&SyntheticArrival> = arrivals.iter().filter(|arrival| f64::from(arrival.snr_db) >= detection_snr_db).collect();
     if audible.is_empty() {
         return None;
     }
     let is_masked = |arrival: &SyntheticArrival| {
-        let onset_s = clip.clock.reference_seconds_from_node_sample(arrival.arrival_device_sample) - window_start_s;
+        let onset_s = clock.reference_seconds_from_node_sample(arrival.arrival_device_sample) - window_start_s;
         masked.iter().any(|seed| {
-            (seed.onset_seconds - onset_s).abs() <= MASK_MATCH_TOLERANCE_S
+            (seed.onset_seconds - onset_s).abs() <= mask_tolerance_s
                 && band_overlap_fraction(arrival_band(arrival), (seed.band_min_hz, seed.band_max_hz)) >= SAME_BAND_MIN_OVERLAP_FRACTION
         })
     };

@@ -5,6 +5,7 @@ use minimappr_core::mesh::config::MeshConfig;
 use minimappr_core::mesh::host_transport_policy::{CellLinkQuality, SessionTransportPreference};
 
 use crate::acoustic_world::{NoiseInterval, ScriptedCall, WorldConfig};
+use crate::audio_world::{AcousticMode, AudioModeConfig};
 use crate::device_spec::DeviceSpec;
 use crate::simulated_network::NetworkSpec;
 
@@ -55,6 +56,8 @@ pub struct ScenarioSpec {
     pub mesh: MeshConfig,
     pub world: WorldConfig,
     pub site_origin_deg: (f64, f64),
+    pub acoustic_mode: AcousticMode,
+    pub audio: AudioModeConfig,
 }
 
 impl ScenarioSpec {
@@ -80,6 +83,8 @@ impl ScenarioSpec {
             mesh,
             world: WorldConfig::default(),
             site_origin_deg: (47.6, -122.3),
+            acoustic_mode: AcousticMode::default(),
+            audio: AudioModeConfig::default(),
         }
     }
 

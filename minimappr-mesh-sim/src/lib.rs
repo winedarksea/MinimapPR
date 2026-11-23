@@ -11,6 +11,8 @@
 //! <scenario>` reproduces any failure exactly.
 
 pub mod acoustic_world;
+pub mod audio_clip_localizer;
+pub mod audio_world;
 pub mod device_harness;
 pub mod device_spec;
 pub mod entity_metrics;
@@ -28,4 +30,4 @@ pub mod synthetic_clusters;
 
 pub use scenario_outcome::ScenarioOutcome;
 pub use scenario_runner::ScenarioRun;
-pub use scenarios::{run_scenario_by_name, ScenarioReport, SCENARIO_NAMES};
+pub use scenarios::{run_scenario_by_name, run_scenario_by_name_in_mode, run_scenario_by_name_with_audio, ScenarioReport, SCENARIO_NAMES};

@@ -5,6 +5,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use minimappr_core::clip_codec::field_clip::encode_field_clip;
+use minimappr_core::clip_codec::{DecimationFilterId, FieldClipDecimator};
 use minimappr_core::mesh::host_state_machine::FieldHostStateMachine;
 use minimappr_core::mesh::node_state_machine::{EncodedLocalClip, FieldNodeStateMachine, LocalAudioReadiness, NodeAudioWindowSource};
 use minimappr_core::protocol::detection_messages::SensorFrameSample;
@@ -73,41 +75,11 @@ impl DeviceAudioView<'_> {
     }
 
     fn calls_in_window(&self, start_s: f64, end_s: f64) -> Vec<(usize, f64, f64)> {
-        (0..self.world.calls.len())
-            .filter_map(|call| {
-                let spec = &self.world.calls[call];
-                let arrival = self.world.arrival_time(spec.time_s, spec.position_m, self.device);
-                (arrival >= start_s && arrival <= end_s).then(|| (call, arrival, self.world.call_snr_db(call, self.device)))
-            })
-            .collect()
-    }
-}
-
-impl NodeAudioWindowSource for DeviceAudioView<'_> {
-    fn readiness(&self, centre_device_sample_index: u64, half_window_samples: u32, _band: FrequencyBandHz) -> LocalAudioReadiness {
-        let centre = centre_device_sample_index as f64;
-        let half = half_window_samples as f64;
-        let (start_s, end_s) = self.window_true_times(centre - half, centre + half);
-        let level = self
-            .calls_in_window(start_s, end_s)
-            .iter()
-            .map(|(_, _, snr)| *snr as f32)
-            .fold(EMPTY_WINDOW_LEVEL_DB, f32::max);
-        LocalAudioReadiness {
-            audio_still_buffered: self.buffered(start_s, end_s),
-            speech_free: !self.world.noise_overlaps(self.device, start_s, end_s, NoiseKind::Speech),
-            handling_noise_free: !self.world.noise_overlaps(self.device, start_s, end_s, NoiseKind::Handling),
-            in_band_level_over_floor_db: level,
-        }
+        self.world.calls_arriving_between(self.device, start_s, end_s)
     }
 
-    fn encode_clip(&self, window_first_device_sample_index: u64, window_sample_count: u32, _decimation_filter_id: u8) -> Option<EncodedLocalClip> {
-        let first = window_first_device_sample_index as f64;
-        let last = first + window_sample_count as f64;
-        let (start_s, end_s) = self.window_true_times(first, last);
-        if !self.buffered(start_s, end_s) {
-            return None;
-        }
+    /// Arrival-time mode: the arrivals in the window, padded to a real clip's size.
+    fn synthetic_clip(&self, start_s: f64, end_s: f64, window_sample_count: u32) -> Vec<u8> {
         let truth = &self.world.devices[self.device];
         let config = &self.world.config;
         let arrivals: Vec<SyntheticArrival> = self
@@ -129,6 +101,51 @@ impl NodeAudioWindowSource for DeviceAudioView<'_> {
             })
             .collect();
         let padded_size = (window_sample_count as f64 * config.clip_bytes_per_device_sample) as usize;
+        encode_synthetic_clip(&arrivals, padded_size)
+    }
+
+    /// Rendered-audio mode: the window decimated and FLAC-encoded exactly as
+    /// a phone does (`clip_codec`), from the Layer 1 stream.
+    fn audio_clip(&self, stream: &[i16], window_first: u64, window_sample_count: u32, decimation_filter_id: u8) -> Option<Vec<u8>> {
+        let filter = DecimationFilterId::from_wire_byte(decimation_filter_id).unwrap_or(DecimationFilterId::BirdBandWithRumbleCut);
+        let window = FieldClipDecimator::for_filter(filter)
+            .decimate_window_from_rolling_buffer(stream, 0, window_first, window_sample_count as usize)
+            .ok()?;
+        encode_field_clip(&window).ok()
+    }
+}
+
+impl NodeAudioWindowSource for DeviceAudioView<'_> {
+    fn readiness(&self, centre_device_sample_index: u64, half_window_samples: u32, _band: FrequencyBandHz) -> LocalAudioReadiness {
+        let centre = centre_device_sample_index as f64;
+        let half = half_window_samples as f64;
+        let (start_s, end_s) = self.window_true_times(centre - half, centre + half);
+        let level = self
+            .calls_in_window(start_s, end_s)
+            .iter()
+            .map(|(_, _, snr)| *snr as f32)
+            .fold(EMPTY_WINDOW_LEVEL_DB, f32::max);
+        LocalAudioReadiness {
+            audio_still_buffered: self.buffered(start_s, end_s),
+            speech_free: !self.world.noise_overlaps(self.device, start_s, end_s, NoiseKind::Speech),
+            handling_noise_free: !self.world.noise_overlaps(self.device, start_s, end_s, NoiseKind::Handling),
+            in_band_level_over_floor_db: level,
+        }
+    }
+
+    fn encode_clip(&self, window_first_device_sample_index: u64, window_sample_count: u32, decimation_filter_id: u8) -> Option<EncodedLocalClip> {
+        let first = window_first_device_sample_index as f64;
+        let last = first + window_sample_count as f64;
+        let (start_s, end_s) = self.window_true_times(first, last);
+        if !self.buffered(start_s, end_s) {
+            return None;
+        }
+        let clip_container = match &self.world.rendered_audio {
+            Some(audio) => self.audio_clip(&audio.device_streams[self.device], window_first_device_sample_index, window_sample_count, decimation_filter_id)?,
+            None => self.synthetic_clip(start_s, end_s, window_sample_count),
+        };
+        let truth = &self.world.devices[self.device];
+        let config = &self.world.config;
         let mut sensor_frames = Vec::new();
         let mut frame_time = start_s;
         while frame_time <= end_s {
@@ -146,7 +163,7 @@ impl NodeAudioWindowSource for DeviceAudioView<'_> {
             frame_time += config.sensor_frame_interval_s;
         }
         Some(EncodedLocalClip {
-            clip_container: encode_synthetic_clip(&arrivals, padded_size),
+            clip_container,
             onsets: Vec::new(),
             sensor_frames,
         })

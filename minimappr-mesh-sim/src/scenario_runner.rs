@@ -17,7 +17,10 @@ use crate::run_metrics::{HostTenure, RunMetrics};
 use crate::scenario::{ScenarioSpec, ScriptAction};
 use crate::scenario_outcome::ScenarioOutcome;
 use crate::simulated_network::SimulatedNetwork;
+use crate::audio_clip_localizer::{AudioClipLocalizer, SimulatedClipLocalizer};
+use crate::audio_world::{render_session_audio, AcousticMode};
 use crate::synthetic_clip::ArrivalClipLocalizer;
+use minimappr_core::mesh::onset_clip_set_localizer::OnsetClipLocalizerConfig;
 
 const MICROSECONDS_PER_SECOND: f64 = 1e6;
 pub(crate) const MILLISECONDS_PER_SECOND: f64 = 1_000.0;
@@ -45,7 +48,7 @@ pub struct ScenarioRun {
     pub world: AcousticWorld,
     pub network: SimulatedNetwork,
     pub devices: Vec<SimulatedDevice>,
-    pub localizer: ArrivalClipLocalizer,
+    pub localizer: SimulatedClipLocalizer,
     pub metrics: RunMetrics,
     pub site_plane: LocalTangentPlane,
     pub now_s: f64,
@@ -63,7 +66,7 @@ impl ScenarioRun {
                 .self_path_length_by_platform_m
                 .insert(device.platform_name(), device.self_path_length_m);
         }
-        let world = AcousticWorld::new(
+        let mut world = AcousticWorld::new(
             seed,
             spec.world.clone(),
             spec.devices.clone(),
@@ -71,6 +74,20 @@ impl ScenarioRun {
             spec.noise_intervals.clone(),
             spec.duration_s,
         );
+        let localizer = match spec.acoustic_mode {
+            AcousticMode::ArrivalTimes => SimulatedClipLocalizer::Arrival(ArrivalClipLocalizer {
+                classifier_detection_snr_db: spec.world.classifier_detection_snr_db,
+                ..ArrivalClipLocalizer::default()
+            }),
+            AcousticMode::RenderedAudio => {
+                // An opt-in mode: a scene it cannot render is a harness error, not a result.
+                let audio = render_session_audio(&world, spec.duration_s, &spec.audio)
+                    .unwrap_or_else(|error| panic!("{} seed {seed}: audio mode cannot render: {error}", spec.name));
+                world.rendered_audio = Some(audio);
+                let config = OnsetClipLocalizerConfig { sound_speed_mps: spec.mesh.island_sync.sound_speed_mps, ..OnsetClipLocalizerConfig::default() };
+                SimulatedClipLocalizer::Audio(Box::new(AudioClipLocalizer::new(std::sync::Arc::new(world.clone()), config, &spec.audio)))
+            }
+        };
         let mut network = SimulatedNetwork::new(seed, spec.network.clone(), spec.devices.len());
         network.cell = vec![spec.initial_cell; spec.devices.len()];
         let host_node = NodeId(spec.initial_host_device as u32);
@@ -96,7 +113,7 @@ impl ScenarioRun {
             world,
             network,
             devices,
-            localizer: ArrivalClipLocalizer { classifier_detection_snr_db: spec.world.classifier_detection_snr_db, ..ArrivalClipLocalizer::default() },
+            localizer,
             metrics: RunMetrics::default(),
             site_plane,
             now_s: 0.0,

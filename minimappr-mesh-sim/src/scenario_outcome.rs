@@ -66,7 +66,7 @@ fn rms_residual(source: &[[f64; 2]], target: &[[f64; 2]], mirrored: bool) -> f64
 
 impl ScenarioOutcome {
     pub fn from_run(run: ScenarioRun) -> Self {
-        let traces = run.localizer.traces.take();
+        let traces = run.localizer.take_traces();
         Self {
             seed: run.seed,
             end_s: run.now_s,

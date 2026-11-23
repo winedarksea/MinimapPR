@@ -28,6 +28,8 @@ use super::srp_seed_refiner::{JointLmSeedRefiner, RefinedTdoaFix, SeedRefinerCon
 
 /// Field clips are decimated 48 → 24 kHz (`clip_codec`).
 pub const FIELD_CLIP_SAMPLE_RATE_HZ: u32 = 24_000;
+/// `range_projection_mode` of a cluster with a full 3-D position (onset refinement).
+const RANGE_REFINED_MODE: &str = "range_refined";
 /// Huber knee recorded on seeds built here (unused by the refiner's loss).
 const SEED_HUBER_KNEE: f64 = 1.0;
 
@@ -172,9 +174,10 @@ impl OnsetClipSetLocalizer {
         input
     }
 
-    /// Every accepted cluster, strongest first, with LM-refined fixes. The
-    /// strongest failing to refine fails the window (it is the call the
-    /// detection was about); weaker ones that fail are dropped.
+    /// Every accepted cluster that yields a fix, strongest first. The window
+    /// fails only when none does: unlike the stand-in, the strongest onset
+    /// cluster is not necessarily the detected call (it can be a bearing-only
+    /// or two-node cluster while a full-layout one follows).
     pub fn localize_window(&self, request: &CallLocalizationRequest) -> Result<Vec<OnsetLocalizedCluster>, String> {
         let window = self.aligned_window(request);
         if window.nodes.len() < self.config.minimum_contributing_nodes {
@@ -186,11 +189,20 @@ impl OnsetClipSetLocalizer {
             .iter()
             .filter(|cluster| cluster.status == ClusterStatus::Accepted && self.audible_somewhere(cluster))
             .collect();
-        let Some(primary) = accepted.first() else {
+        if accepted.is_empty() {
             return Err(format!("no accepted onset cluster ({} onsets, {} frames)", result.onset_count, result.frame_count));
-        };
-        let mut clusters = vec![self.refine_cluster(request, &window, primary)?];
-        clusters.extend(accepted.iter().skip(1).filter_map(|cluster| self.refine_cluster(request, &window, cluster).ok()));
+        }
+        let mut failures = Vec::new();
+        let mut clusters = Vec::new();
+        for cluster in accepted {
+            match self.refine_cluster(request, &window, cluster) {
+                Ok(localized) => clusters.push(localized),
+                Err(reason) => failures.push(reason),
+            }
+        }
+        if clusters.is_empty() {
+            return Err(failures.join("; "));
+        }
         Ok(clusters)
     }
 
@@ -213,7 +225,8 @@ impl OnsetClipSetLocalizer {
         let measured: Vec<(usize, f64)> =
             cluster.tdoa_s.iter().filter_map(|(sensor, tdoa)| Some((node_index(sensor)?, *tdoa))).filter(|(index, _)| *index != reference_index).collect();
         if measured.len() + 1 < self.config.minimum_contributing_nodes {
-            return Err(format!("cluster has {} nodes with a TDOA", measured.len() + 1));
+            let fix = self.seed_only_fix(request, &nodes, cluster).ok_or_else(|| format!("cluster has {} nodes with a TDOA", measured.len() + 1))?;
+            return Ok(self.localized(request, window, cluster, fix));
         }
         let clip_of = |index: usize| &request.clips[nodes[index].clip_index];
         let observations: Vec<PairTdoaObservation> = measured
@@ -251,6 +264,40 @@ impl OnsetClipSetLocalizer {
         };
         let refined = refiner.refine(&seed).map_err(|error| format!("{error:?}"))?;
         let fix = self.call_fix(&refined, &seed, &nodes, reference_index);
+        Ok(self.localized(request, window, cluster, fix))
+    }
+
+    /// Onset refinement keeps the SRP seed (and no TDOAs) when its LM point
+    /// scores worse than the seed. Such a cluster still has a full-layout
+    /// position; publish it with the pipeline's own covariance (resolution
+    /// floor + spread of its frame peaks) plus the layout σ, which moves a
+    /// fix about one-for-one. A bearing-only seed is not a fix.
+    fn seed_only_fix(&self, request: &CallLocalizationRequest, nodes: &[&AlignedNodeWindow], cluster: &LocalizedOnsetCluster) -> Option<CallFix> {
+        let full_layout = cluster.range_projection_mode.as_deref() == Some(RANGE_REFINED_MODE);
+        let covariance = cluster.covariance_m2.filter(|_| full_layout && nodes.len() >= self.config.minimum_contributing_nodes)?;
+        let layout_variance =
+            nodes.iter().map(|node| request.clips[node.clip_index].position.std_m.powi(2)).sum::<f64>() / nodes.len() as f64;
+        let covariance_m2: [[f64; 3]; 3] =
+            std::array::from_fn(|row| std::array::from_fn(|column| covariance[row][column] + if row == column { layout_variance } else { 0.0 }));
+        let mut used_nodes: Vec<NodeId> = nodes.iter().map(|node| node.node_id).collect();
+        used_nodes.sort();
+        let as_refined = RefinedTdoaFix {
+            position_m: cluster.position_m,
+            covariance_m2,
+            chi_square: 0.0,
+            degrees_of_freedom: 0,
+            rejected_observation_indices: Vec::new(),
+        };
+        Some(CallFix {
+            position_m: cluster.position_m,
+            covariance_m2,
+            horizontal_major_sigma_m: as_refined.horizontal_major_sigma_m(),
+            used_nodes,
+            rejected_nodes: Vec::new(),
+        })
+    }
+
+    fn localized(&self, request: &CallLocalizationRequest, window: &AlignedCallWindow, cluster: &LocalizedOnsetCluster, fix: CallFix) -> OnsetLocalizedCluster {
         let classifying_node = parse_node_id(&cluster.loudest_node_id).unwrap_or(request.classifying_node);
         let led_onsets_reference_s = cluster
             .template_node_ids
@@ -258,7 +305,7 @@ impl OnsetClipSetLocalizer {
             .zip(&cluster.onset_samples)
             .filter_map(|(node, sample)| Some((parse_node_id(node)?, window.reference_seconds_of_sample(*sample as f64))))
             .collect();
-        Ok(OnsetLocalizedCluster {
+        OnsetLocalizedCluster {
             cluster: LocalizedCluster {
                 attribution_evidence: cluster.attribution_evidence.as_ref().map(|evidence| reference_clock_evidence(evidence, window)),
                 fix,
@@ -267,7 +314,7 @@ impl OnsetClipSetLocalizer {
                 attribution_tier: None,
             },
             led_onsets_reference_s,
-        })
+        }
     }
 
     fn call_fix(&self, refined: &RefinedTdoaFix, seed: &LmSeed, nodes: &[&AlignedNodeWindow], reference_index: usize) -> CallFix {
