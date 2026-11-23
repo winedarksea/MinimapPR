@@ -114,7 +114,32 @@ pub struct OnsetClipSetLocalizer {
     pub config: OnsetClipLocalizerConfig,
     classifier: Option<Box<ClusterWindowClassifier>>,
     /// The last call's aligned window, so attribution reruns do not decode again.
-    aligned_cache: RefCell<Option<(u64, AlignedCallWindow)>>,
+    aligned_cache: RefCell<Option<(AlignedWindowKey, AlignedCallWindow)>>,
+}
+
+/// What an aligned window depends on. Keyed on the request's window and clip
+/// set, not the call id alone: a localizer can outlive a host tenure (the
+/// mesh sim shares one across hosts), and call-id uniqueness across terms is
+/// the host's invariant, not this cache's.
+#[derive(Debug, Clone, PartialEq)]
+struct AlignedWindowKey {
+    call_id: u64,
+    island_id: u32,
+    centre_reference_s_bits: u64,
+    half_window_s_bits: u64,
+    clip_nodes: Vec<NodeId>,
+}
+
+impl AlignedWindowKey {
+    fn of(request: &CallLocalizationRequest) -> Self {
+        Self {
+            call_id: request.call_id,
+            island_id: request.island_id,
+            centre_reference_s_bits: request.centre_reference_s.to_bits(),
+            half_window_s_bits: request.half_window_s.to_bits(),
+            clip_nodes: request.clips.iter().map(|clip| clip.node_id).collect(),
+        }
+    }
 }
 
 impl std::fmt::Debug for OnsetClipSetLocalizer {
@@ -142,13 +167,14 @@ impl OnsetClipSetLocalizer {
     }
 
     fn aligned_window(&self, request: &CallLocalizationRequest) -> AlignedCallWindow {
-        if let Some((call_id, window)) = self.aligned_cache.borrow().as_ref() {
-            if *call_id == request.call_id {
+        let key = AlignedWindowKey::of(request);
+        if let Some((cached_key, window)) = self.aligned_cache.borrow().as_ref() {
+            if *cached_key == key {
                 return window.clone();
             }
         }
         let window = align_call_clips(request, FIELD_CLIP_SAMPLE_RATE_HZ, self.config.minimum_clip_coverage_fraction);
-        *self.aligned_cache.borrow_mut() = Some((request.call_id, window.clone()));
+        *self.aligned_cache.borrow_mut() = Some((key, window.clone()));
         window
     }
 
