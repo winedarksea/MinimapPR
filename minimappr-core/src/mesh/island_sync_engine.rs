@@ -352,6 +352,28 @@ impl IslandSyncEngine {
         Some(NodeClockMapping::from_prediction(epoch, island.last_reference_time_s, &prediction))
     }
 
+    /// Time of the island's last round on its reference clock.
+    pub fn last_round_reference_s(&self, node: NodeId) -> Option<f64> {
+        self.island_of(node).map(|island| island.last_reference_time_s)
+    }
+
+    /// `clock_mapping` for audio at `reference_time_s`: the same line, but
+    /// anchored there, so its σ is the filter's prediction σ at that time,
+    /// rate uncertainty included. Why: right after a merge or rejoin a
+    /// model rests on one round with no rate yet (prior ±100 ppm); a call
+    /// 80 s later is then mapped milliseconds off while the round-time σ
+    /// still claimed ~15 µs, and the fix came out confidently wrong (H1).
+    pub fn clock_mapping_at(&self, node: NodeId, reference_time_s: f64) -> Option<NodeClockMapping> {
+        let island = self.island_of(node)?;
+        let epoch = self.node_clock_epoch(node);
+        if island.reference_node == Some(node) {
+            return Some(NodeClockMapping::identity(epoch, reference_time_s));
+        }
+        island.reference_node?;
+        let prediction = island.filters.get(&node)?.predict(reference_time_s)?;
+        Some(NodeClockMapping::from_prediction(epoch, reference_time_s, &prediction))
+    }
+
     /// Position for a solve. A node that walked at call time gets the layout
     /// captured before the call, never a later one (plan: geometry goes
     /// backward only for phones that were still).

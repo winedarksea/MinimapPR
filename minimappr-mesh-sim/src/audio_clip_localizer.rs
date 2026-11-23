@@ -133,17 +133,20 @@ impl ClipSetLocalizer for AudioClipLocalizer {
         let clusters = self.localizer.localize_window(request)?;
         for cluster in &clusters {
             let fix = &cluster.cluster.fix;
-            let node_positions: Vec<[f64; 3]> = fix
+            let used_clips: Vec<_> = fix
                 .used_nodes
                 .iter()
-                .filter_map(|node| request.clips.iter().find(|clip| clip.node_id == *node).map(|clip| clip.position.position_m))
+                .filter_map(|node| request.clips.iter().find(|clip| clip.node_id == *node))
                 .collect();
+            let node_positions: Vec<[f64; 3]> = used_clips.iter().map(|clip| clip.position.position_m).collect();
             let true_call_index = self.scripted_call_of(request, cluster, &node_positions);
             self.traces.borrow_mut().push(SolveTrace {
                 host_call_id: request.call_id,
                 true_call_index,
                 node_ids: fix.used_nodes.clone(),
                 estimated_node_positions_m: node_positions,
+                estimated_node_std_m: used_clips.iter().map(|clip| clip.position.std_m).collect(),
+                localizer_inputs: Vec::new(),
                 fix: Some(fix.clone()),
                 chirality_confidence: request.chirality_confidence,
                 chirality_locked: request.chirality_locked,

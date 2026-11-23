@@ -117,6 +117,8 @@ fn solve_call(
         true_call_index: call_index,
         node_ids: node_ids.clone(),
         estimated_node_positions_m: arrivals.iter().map(|a| a.position_m).collect(),
+        estimated_node_std_m: arrivals.iter().map(|a| a.position_std_m).collect(),
+        localizer_inputs: arrivals.clone(),
         fix: None,
         chirality_confidence: request.chirality_confidence,
         chirality_locked: request.chirality_locked,

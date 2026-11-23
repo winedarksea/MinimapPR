@@ -132,7 +132,18 @@ pub fn solve_island_round(
     } else {
         RoundRateCompensation::None
     };
-    let (measurements, _failures) = observation.pairwise_measurements(config.sound_speed_mps, &compensation);
+    let (mut measurements, _failures) = observation.pairwise_measurements(config.sound_speed_mps, &compensation);
+    // A stall inside the round biases every interval the stalled phone
+    // measured: its ranges drag the whole layout (closeout F2-H1, thermal:
+    // one stalled phone put 9.5 m off and the rest 2–2.6 m, at σ 0.13 m) and
+    // its offset jumps, yet the clock filter only notices at the next round.
+    // Its closing-chirp rate gives it away within this round.
+    let stalled = participants_with_implausible_round_rate(&observation, config);
+    if stalled.len() * 2 > participants.len() {
+        // Most rates look wrong together: the opener's own span is broken.
+        return None;
+    }
+    measurements.retain(|m| !stalled.contains(&m.first_participant) && !stalled.contains(&m.second_participant));
     if measurements.is_empty() {
         return None;
     }
@@ -143,7 +154,7 @@ pub fn solve_island_round(
     let walking: BTreeSet<usize> = (0..participants.len())
         .filter(|&index| matches!(input.reports[&participants[index]].motion_state, MotionState::Walking))
         .collect();
-    let is_still = |node: &NodeId| index_of(*node).is_some_and(|index| !walking.contains(&index));
+    let is_still = |node: &NodeId| index_of(*node).is_some_and(|index| !walking.contains(&index) && !stalled.contains(&index));
     let reference_node = input
         .preferred_reference
         .filter(|node| distinct_emitters.contains(node) && is_still(node))
@@ -245,6 +256,22 @@ pub fn solve_island_round(
     })
 }
 
+/// Participants (indices) whose closing-chirp rate ratio is physically
+/// implausible for a crystal, i.e. samples were lost or gained mid-round.
+fn participants_with_implausible_round_rate(observation: &ChirpRoundObservation, config: &IslandSyncConfig) -> BTreeSet<usize> {
+    observation
+        .closing_chirp_rate_ratios()
+        .map(|ratios| {
+            ratios
+                .iter()
+                .enumerate()
+                .filter(|(_, ratio)| ratio.is_some_and(|r| (r - 1.0).abs() > config.maximum_plausible_round_rate_offset))
+                .map(|(index, _)| index)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Solve the layout over the placeable participants. A node with several
 /// rejected ranges had them all biased together (a capture stall inside its
 /// round shifts every interval it measured), so it is dropped and the
@@ -293,3 +320,7 @@ fn solve_placeable_layout(
     }
     None
 }
+
+#[cfg(test)]
+#[path = "island_round_solver_tests.rs"]
+mod tests;

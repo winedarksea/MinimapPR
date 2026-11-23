@@ -113,6 +113,21 @@ pub struct ClipFetchConfig {
     /// RMS linear acceleration in a clip's sensor slice above which the
     /// phone counts as walking at call time.
     pub walking_linear_acceleration_threshold_m_per_s2: f32,
+    /// A call with its clips in is held for the next round while any clip's
+    /// clock σ predicted at the call exceeds this multiple of one round's
+    /// pick σ (`ClockGraphConfig::pick_offset_sigma_s`, 15 µs): beyond it the
+    /// clock model, not the call's own arrival picks, dominates the TDOA
+    /// error. That happens after a merge or rejoin, when a model rests on
+    /// one round with no rate (±100 ppm prior, ms after a minute). A steady
+    /// model a full 90 s heartbeat from its last round sits at 2.0× (filter
+    /// covariance with the default `ClockFilterConfig`), so it is never held.
+    pub clock_hold_sigma_pick_multiple: f64,
+    /// Longest a held call waits after it was received. The post-detection
+    /// round is due 0.5 s after the detection and an 8-phone round lands
+    /// about 3–3.5 s after the call is received (measured, closeout F2-H1);
+    /// 6 s leaves a lost-report margin without stalling a call whose round
+    /// never comes.
+    pub clock_hold_maximum_wait_ms: MeshMilliseconds,
 }
 
 impl Default for ClipFetchConfig {
@@ -131,6 +146,8 @@ impl Default for ClipFetchConfig {
             island_clip_budget_refill_per_s: 4.0,
             default_query_band_hz: [1_500.0, 10_000.0],
             walking_linear_acceleration_threshold_m_per_s2: 0.8,
+            clock_hold_sigma_pick_multiple: 3.0,
+            clock_hold_maximum_wait_ms: 6_000,
         }
     }
 }
@@ -203,6 +220,13 @@ pub struct IslandSyncConfig {
     pub relative_position_growth_mps: f64,
     /// Same, for a phone reported walking (absolute walking speed).
     pub walking_position_growth_mps: f64,
+    /// A participant whose closing-chirp rate (its ticks per opener tick
+    /// across the round) is further than this from 1 lost or gained samples
+    /// inside the round: crystals are ±100 ppm and 10 cm of handling motion
+    /// over a 1.4 s round is ~200 ppm, while a stall (≥ 5 ms dropped buffer)
+    /// inside a ≤ 2.5 s round is ≥ 2000 ppm. Its intervals are biased, so
+    /// its ranges and offsets are left out of that round (closeout F2-H1).
+    pub maximum_plausible_round_rate_offset: f64,
     /// Below this the GPS chirality choice is reported as low confidence.
     pub confident_chirality_threshold: f64,
     /// Per-bearing DOA noise once the phone's common heading error cancels
@@ -230,6 +254,7 @@ impl Default for IslandSyncConfig {
             assumed_phone_height_m: 1.4,
             assumed_phone_height_sigma_m: 0.115,
             relative_position_growth_mps: 0.3,
+            maximum_plausible_round_rate_offset: 2e-3,
             walking_position_growth_mps: 1.5,
             confident_chirality_threshold: 0.9,
             relative_bearing_noise_std_deg: 8.0,

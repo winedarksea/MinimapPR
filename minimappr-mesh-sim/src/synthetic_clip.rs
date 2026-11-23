@@ -85,6 +85,10 @@ pub struct SolveTrace {
     pub true_call_index: u32,
     pub node_ids: Vec<NodeId>,
     pub estimated_node_positions_m: Vec<[f64; 3]>,
+    /// Declared layout σ of each estimated position (diagnostics).
+    pub estimated_node_std_m: Vec<f64>,
+    /// What the arrival-time stand-in solved from (empty in audio mode).
+    pub localizer_inputs: Vec<minimappr_core::mesh::arrival_time_localizer::NodeArrival>,
     pub fix: Option<CallFix>,
     pub chirality_confidence: Option<f64>,
     pub chirality_locked: bool,

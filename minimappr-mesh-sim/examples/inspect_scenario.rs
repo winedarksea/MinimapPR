@@ -7,6 +7,7 @@
 //! Specs: host_death, thermal, network_faults, offline_host_loss,
 //! transport_relay, transport_cell, mirrored_layout, island_split_merge.
 
+use minimappr_core::layout::gps_anchor_fit::weighted_kabsch_2d;
 use minimappr_core::mesh::host_transport_policy::SessionTransportPreference;
 use minimappr_mesh_sim::scenario::ScenarioSpec;
 use minimappr_mesh_sim::scenarios::{host_scenarios, network_scenarios, sync_scenarios};
@@ -50,6 +51,35 @@ fn main() {
             "fix call {} nodes {:?} error {:.2} m σ {:.2} m mirrored {:?}",
             fix.call_index, fix.node_ids, fix.horizontal_error_m, fix.reported_major_sigma_m, fix.layout_mirrored
         );
+    }
+    // Layout residual per used node after a proper rigid fit onto truth at
+    // the call: separates a wrong layout from an overconfident solve.
+    for trace in &outcome.traces {
+        let call = &outcome.world.calls[trace.true_call_index as usize];
+        let estimated: Vec<[f64; 2]> = trace.estimated_node_positions_m.iter().map(|p| [p[0], p[1]]).collect();
+        let truth: Vec<[f64; 2]> = trace
+            .node_ids
+            .iter()
+            .map(|node| {
+                let p = outcome.world.position(node.0 as usize, call.time_s);
+                [p[0], p[1]]
+            })
+            .collect();
+        if estimated.len() < 2 {
+            continue;
+        }
+        let transform = weighted_kabsch_2d(&estimated, &truth, &vec![1.0; estimated.len()], false);
+        let residuals: Vec<String> = estimated
+            .iter()
+            .zip(&truth)
+            .zip(&trace.node_ids)
+            .zip(&trace.estimated_node_std_m)
+            .map(|(((e, t), node), std)| {
+                let a = transform.apply(*e);
+                format!("n{} {:.2}m(σ{:.2})", node.0, (a[0] - t[0]).hypot(a[1] - t[1]), std)
+            })
+            .collect();
+        println!("layout residual call {} host call {}: {}", trace.true_call_index, trace.host_call_id, residuals.join(" "));
     }
     if let Some((_, host)) = outcome.active_host() {
         for (id, island) in &host.sync.engine.islands {

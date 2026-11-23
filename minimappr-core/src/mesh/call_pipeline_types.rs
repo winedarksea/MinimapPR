@@ -153,6 +153,8 @@ pub struct PendingCall {
     pub species_belief: Vec<SpeciesScore>,
     pub detections: Vec<DetectionKey>,
     pub stage: PendingStage,
+    /// Counted once in `calls_held_for_clock_model`.
+    pub held_for_clock_model: bool,
 }
 
 /// Outcome of one call, kept for the entity update and for assertions.
@@ -224,4 +226,9 @@ pub struct CallPipelineCounters {
     pub calls_localized: u64,
     pub calls_abandoned: u64,
     pub detections_merged_into_calls: u64,
+    /// Calls held for a round because a clip's clock σ at the call was
+    /// far above a round's pick σ (a one-round model after a membership change).
+    pub calls_held_for_clock_model: u64,
+    /// Of those, calls localized when the wait ran out with no round.
+    pub clock_model_waits_expired: u64,
 }

@@ -146,6 +146,7 @@ impl CallPipeline {
                     received_ms: now_ms,
                     species_belief,
                     detections: vec![(detection.node_id, detection.local_sequence)],
+                    held_for_clock_model: false,
                     stage: PendingStage::AwaitingReadiness {
                         deadline_ms: now_ms + config.readiness_answer_timeout_ms,
                         retry_at_ms: Some(now_ms + config.readiness_answer_timeout_ms / READINESS_RETRY_FRACTION_DIVISOR),
@@ -295,7 +296,7 @@ impl CallPipeline {
         let PendingStage::FetchingClips { requests, received, readiness_excluded_by_cap, .. } = &call.stage else { return };
         let mut clips = Vec::new();
         for (node, payload) in received {
-            let Some(mapping) = ctx.engine.clock_mapping(*node) else {
+            let Some(mapping) = ctx.engine.clock_mapping_at(*node, call.centre_reference_s) else {
                 self.counters.stale_clips_discarded += 1;
                 continue;
             };
@@ -362,6 +363,41 @@ impl CallPipeline {
         self.completed.push(record);
     }
 
+    /// Hold a call whose clips are in while a clip's clock σ at the call
+    /// (`clock_mapping_at`) is far above one round's pick σ and no round has
+    /// landed after the call. That is a model resting on a single round with
+    /// no rate yet, as after a merge or rejoin; solving now extrapolates a
+    /// ±100 ppm prior over the time since that round (ms after a minute).
+    /// The post-detection round, already scheduled, pins those offsets next
+    /// to the call and gives the rate a baseline. The clock σ is honest
+    /// either way; this keeps the fix precise too. Bounded in time.
+    fn hold_for_clock_model(&mut self, index: usize, ctx: &CallContext<'_>, now_ms: MeshMilliseconds) -> bool {
+        let config = &ctx.config.clip_fetch;
+        let hold_sigma_s = config.clock_hold_sigma_pick_multiple * ctx.config.island_sync.clock_graph.pick_offset_sigma_s;
+        let call = &self.pending[index];
+        let PendingStage::FetchingClips { received, .. } = &call.stage else { return false };
+        let waiting_on_round = received.keys().any(|node| {
+            let no_round_since_call = ctx.engine.last_round_reference_s(*node).is_some_and(|last_s| last_s < call.centre_reference_s);
+            no_round_since_call
+                && ctx
+                    .engine
+                    .clock_mapping_at(*node, call.centre_reference_s)
+                    .is_some_and(|mapping| mapping.offset_sigma_s > hold_sigma_s)
+        });
+        if !waiting_on_round {
+            return false;
+        }
+        if !call.held_for_clock_model {
+            self.counters.calls_held_for_clock_model += 1;
+            self.pending[index].held_for_clock_model = true;
+        }
+        let expired = now_ms >= self.pending[index].received_ms + config.clock_hold_maximum_wait_ms;
+        if expired {
+            self.counters.clock_model_waits_expired += 1;
+        }
+        !expired
+    }
+
     /// Advance timeouts. Returns messages and how many calls completed.
     pub fn tick(&mut self, ctx: &CallContext<'_>, localizer: &dyn ClipSetLocalizer, now_ms: MeshMilliseconds) -> Vec<OutboundMessage> {
         let mut messages = Vec::new();
@@ -388,7 +424,8 @@ impl CallPipeline {
                     }
                 }
                 PendingStage::FetchingClips { deadline_ms, requests, received, .. } => {
-                    if now_ms >= *deadline_ms || received.len() == requests.len() {
+                    let clips_settled = now_ms >= *deadline_ms || received.len() == requests.len();
+                    if clips_settled && !self.hold_for_clock_model(index, ctx, now_ms) {
                         self.localize(index, ctx, localizer, now_ms);
                     }
                 }
@@ -404,3 +441,7 @@ impl CallPipeline {
         self.pending.len()
     }
 }
+
+#[cfg(test)]
+#[path = "call_pipeline_clock_model_tests.rs"]
+mod clock_model_tests;
