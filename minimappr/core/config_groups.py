@@ -150,6 +150,7 @@ CONFIG_STAGE_GROUPS: tuple[tuple[str, str, PipelineStageKind | None, tuple[str, 
             "onset_range_observable_interval_floor_aperture_fraction",
             "onset_near_node_level_tolerance_db",
             "onset_same_source_max_tdoa_difference_seconds",
+            "localization_collinear_mirror_max_aspect_ratio",
             # --- end Field Mode S-fixes onset ---
             # --- end Field Mode W2-onset-srp ---
             # --- Field Mode W3-attribution ---

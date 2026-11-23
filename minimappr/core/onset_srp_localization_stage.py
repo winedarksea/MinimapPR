@@ -25,12 +25,14 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from minimappr.config import OnsetClusterAttributionConfig, OnsetSrpClusteringConfig
+from minimappr.core.collinear_node_mirror_guard import fix_is_collinear_mirror_ambiguous
 from minimappr.core.localization import speed_of_sound_mps
 from minimappr.core.onset_cluster_attribution import ClusterAttributionContext, is_band_distinct_persistence_hold
 from minimappr.core.onset_cluster_echo_checks import SAME_BAND_MIN_OVERLAP_FRACTION
 from minimappr.core.onset_classification_node import classification_capable_cluster
 from minimappr.core.onset_srp_clustering import localize_onset_clusters
 from minimappr.core.onset_srp_grid import spatial_cluster_radius_m
+from minimappr.core.range_projection import RANGE_ASYMPTOTIC
 from minimappr.core.onset_srp_types import (
     CLUSTER_STATUS_ACCEPTED,
     CLUSTER_STATUS_ECHO,
@@ -326,6 +328,13 @@ class OnsetSrpLocalizationStage:
             environment_summary=environment_summary,
         )
         gdop = cluster.gdop if np.isfinite(cluster.gdop) else float("inf")
+        # Closeout B3: point nodes on one line cannot tell the fix from its mirror twin.
+        mirror_ambiguous = fix_is_collinear_mirror_ambiguous(
+            cluster.contributing_node_ids,
+            node_ids,
+            sensor_positions,
+            fusion.settings.localization_collinear_mirror_max_aspect_ratio,
+        )
         localization = LocalizationResult(
             position_m=cluster.position_m,
             confidence=float(np.clip(cluster.confidence, 0.0, 1.0)),
@@ -334,7 +343,8 @@ class OnsetSrpLocalizationStage:
             tdoa_s=cluster.tdoa_s,
             position_covariance_m2=cluster.covariance_m2,
             residual_rms_seconds=cluster.residual_rms_seconds,
-            range_projection_mode=cluster.range_projection_mode,
+            # range_asymptotic is the existing "not placed" representation: a bearing ray, no track.
+            range_projection_mode=RANGE_ASYMPTOTIC if mirror_ambiguous else cluster.range_projection_mode,
             range_observability=cluster.range_observability,
             attempted_algorithm=LOCALIZATION_METHOD_NAME,
             resolved_algorithm=LOCALIZATION_METHOD_NAME,
@@ -359,5 +369,6 @@ class OnsetSrpLocalizationStage:
             "onset_cluster_contributing_nodes": list(cluster.contributing_node_ids),
             "onset_cluster_refined_by_least_squares": cluster.refined_by_least_squares,
             "onset_cluster_envelope_fraction": cluster.used_envelope_fraction,
+            "onset_cluster_collinear_mirror_ambiguous": mirror_ambiguous,
         }
         return product

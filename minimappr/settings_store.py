@@ -355,6 +355,7 @@ CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     "onset_attribution_promote_band_distinct_tentative": bool,
     "onset_window_label_reconciliation_enabled": bool,
     "onset_window_label_reconciliation_timeout_seconds": float,
+    "localization_collinear_mirror_max_aspect_ratio": float,
     "trigger_noise_floor_relative_enabled": bool,
     "trigger_noise_floor_relative_snr_db": float,
     "trigger_noise_floor_rise_seconds": float,

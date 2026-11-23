@@ -3292,6 +3292,7 @@ async def get_config(request: Request) -> dict:
         "onset_attribution_promote_band_distinct_tentative": settings.onset_attribution_promote_band_distinct_tentative,
         "onset_window_label_reconciliation_enabled": settings.onset_window_label_reconciliation_enabled,
         "onset_window_label_reconciliation_timeout_seconds": settings.onset_window_label_reconciliation_timeout_seconds,
+        "localization_collinear_mirror_max_aspect_ratio": settings.localization_collinear_mirror_max_aspect_ratio,
         "trigger_noise_floor_relative_enabled": settings.trigger_noise_floor_relative_enabled,
         "trigger_noise_floor_relative_snr_db": settings.trigger_noise_floor_relative_snr_db,
         "trigger_noise_floor_rise_seconds": settings.trigger_noise_floor_rise_seconds,

@@ -1416,6 +1416,11 @@ class Settings:
     # Max wait for the rest of a window's siblings (dropped/failed siblings never arrive);
     # held products are then reconciled with whatever arrived.
     onset_window_label_reconciliation_timeout_seconds: float = 2.0
+    # Closeout B3: when only single-mic (POINT) nodes contribute to an onset fix and their
+    # horizontal minor/major spread (std ratio) is below this, the fix may be the mirror
+    # image across the node line: report it as range_asymptotic (bearing ray, no track).
+    # 0 disables. Rigid multi-mic arrays resolve the side themselves and are never guarded.
+    localization_collinear_mirror_max_aspect_ratio: float = 0.2
     # Ingest: also trigger when a frame stands this far above the node's own tracked floor
     # (OR with the absolute trigger_rms gate), so faint distant birds open windows.
     trigger_noise_floor_relative_enabled: bool = False
@@ -2322,6 +2327,8 @@ class Settings:
             raise ValueError("onset_attribution_loco_mask_band_padding_hz must be >= 0")
         if self.onset_window_label_reconciliation_timeout_seconds <= 0.0:
             raise ValueError("onset_window_label_reconciliation_timeout_seconds must be > 0")
+        if not 0.0 <= self.localization_collinear_mirror_max_aspect_ratio <= 1.0:
+            raise ValueError("localization_collinear_mirror_max_aspect_ratio must be in [0, 1]")
         for _trigger_key in (
             "trigger_noise_floor_relative_snr_db", "trigger_noise_floor_rise_seconds",
             "trigger_noise_floor_fall_seconds", "trigger_noise_floor_minimum_rms",
@@ -3039,6 +3046,9 @@ class Settings:
             ),
             onset_window_label_reconciliation_timeout_seconds=_env_float(
                 "MINIMAPPR_ONSET_WINDOW_LABEL_RECONCILIATION_TIMEOUT_SECONDS", 2.0
+            ),
+            localization_collinear_mirror_max_aspect_ratio=_env_float(
+                "MINIMAPPR_LOCALIZATION_COLLINEAR_MIRROR_MAX_ASPECT_RATIO", 0.2
             ),
             trigger_noise_floor_relative_enabled=_env_bool("MINIMAPPR_TRIGGER_NOISE_FLOOR_RELATIVE_ENABLED", False),
             trigger_noise_floor_relative_snr_db=_env_float("MINIMAPPR_TRIGGER_NOISE_FLOOR_RELATIVE_SNR_DB", 8.0),

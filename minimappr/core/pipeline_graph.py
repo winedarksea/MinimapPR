@@ -433,6 +433,7 @@ def build_pipeline_graph(
             _param("Range profile", bool(settings.onset_range_profile_enabled), "onset_range_profile_enabled"),
             _param("Max range interval ratio", float(settings.onset_range_observable_max_interval_ratio), "onset_range_observable_max_interval_ratio"),
             # --- end Field Mode S-fixes onset ---
+            _param("Collinear mirror max aspect", float(settings.localization_collinear_mirror_max_aspect_ratio), "localization_collinear_mirror_max_aspect_ratio"),
         ],
         status=_onset_srp_status(metrics, fusion_available, bool(settings.localization_onset_clustering_enabled)),
         link="/settings/config#localization",
