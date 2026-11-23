@@ -11,7 +11,7 @@ use crate::protocol::NodeId;
 
 use super::clock_mapping::NodeClockMapping;
 use super::config::MeshConfig;
-use super::fix_contour::AnchorUncertainty;
+use super::fix_contour::RegionContext;
 use super::host_membership::SessionMembership;
 use super::island_sync_engine::{IslandSyncEngine, NodePositionForSolve};
 use super::{DetectionKey, MeshMilliseconds};
@@ -51,8 +51,8 @@ pub struct CallLocalizationRequest {
     /// Map chirality confidence of the island's anchor (None: unanchored).
     pub chirality_confidence: Option<f64>,
     pub chirality_locked: bool,
-    /// The island's filtered map anchor error at solve time (None: unanchored).
-    pub anchor_uncertainty: Option<AnchorUncertainty>,
+    /// The island's layout extent and map anchor error at solve time.
+    pub region_context: Option<RegionContext>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -174,8 +174,9 @@ pub struct LocalizedCallRecord {
     pub clip_domains: Vec<(NodeId, u32, u64, u32, u32)>,
     pub chirality_confidence: Option<f64>,
     pub chirality_locked: bool,
-    /// Map anchor error at solve time, charged to the published region.
-    pub anchor_uncertainty: Option<AnchorUncertainty>,
+    /// Layout extent and map anchor error at solve time: what the published
+    /// region is calibrated and widened with (`fix_contour`).
+    pub region_context: Option<RegionContext>,
     pub fix: Option<CallFix>,
     /// Every localized source (the first is `fix`), with attributed species.
     pub clusters: Vec<LocalizedCluster>,

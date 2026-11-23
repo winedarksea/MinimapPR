@@ -281,7 +281,7 @@ impl FieldHostStateMachine {
     fn entity_update_for(&mut self, record: &LocalizedCallRecord) -> BirdEntityUpdate {
         self.next_bird_entity_id += 1;
         let contour = record.fix.as_ref().map_or_else(Vec::new, |fix| {
-            published_contour(fix.position_m, &fix.covariance_m2, record.anchor_uncertainty.as_ref(), &self.config.entity_contour)
+            published_contour(fix.position_m, &fix.covariance_m2, record.region_context.as_ref(), &self.config.entity_contour, &self.config.fix_covariance_calibration)
         });
         BirdEntityUpdate {
             bird_entity_id: self.next_bird_entity_id,
@@ -336,7 +336,7 @@ impl FieldHostStateMachine {
                     .map(|position| position.position_m),
             })
             .collect();
-        let context = EntityUpdateContext::for_islands(&self.config.entity_contour, self.event_log.head_sequence() + 1, &self.sync.engine);
+        let context = EntityUpdateContext::for_islands(&self.config.entity_contour, &self.config.fix_covariance_calibration, self.event_log.head_sequence() + 1, &self.sync.engine);
         let updates = self.entities.on_call_record(
             record,
             reporting_position,
@@ -431,7 +431,7 @@ impl FieldHostStateMachine {
             }
         }
         if self.config.entity_tracking.enabled {
-            let context = EntityUpdateContext::for_islands(&self.config.entity_contour, self.event_log.head_sequence() + 1, &self.sync.engine);
+            let context = EntityUpdateContext::for_islands(&self.config.entity_contour, &self.config.fix_covariance_calibration, self.event_log.head_sequence() + 1, &self.sync.engine);
             let updates = self.entities.maintain(now_ms, &self.config.entity_tracking, &context);
             for mut update in updates {
                 update.event_log_sequence = self.event_log.head_sequence() + 1;

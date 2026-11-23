@@ -13,11 +13,11 @@
 //! Copy the printed fitted values into those core configs; the gate tests
 //! then check held-out coverage against the shipped defaults.
 
-use minimappr_core::mesh::config::EntityContourConfig;
+use minimappr_core::mesh::config::{EntityContourConfig, FixCovarianceCalibrationConfig};
 use minimappr_core::srp_layout::LayoutSrpConfig;
 use minimappr_sim_gates::gate_config::SimGateConfig;
 use minimappr_sim_gates::gate_seeds::{default_thread_count, pull_request_seeds, run_trials_in_parallel, training_seeds};
-use minimappr_sim_gates::mesh_region_trials::{run_contour_session, MeshSessionConfig};
+use minimappr_sim_gates::mesh_region_trials::{run_contour_session, MeshFixScore, MeshSessionConfig};
 use minimappr_sim_gates::srp_trials::{render_srp_trial, temperature_ladder, SrpTrialConfig};
 use minimappr_sim_gates::statistics::{coverage_at, fit_parameter_for_coverage, median, percentile};
 
@@ -54,7 +54,8 @@ fn parse_options() -> Options {
     options
 }
 
-fn mesh_multipliers(seeds: &[u64], threads: usize, world_frame: bool) -> (Vec<f64>, Vec<f64>) {
+/// Non-exempt fixes scored with the shipped contour config.
+fn mesh_scores(seeds: &[u64], threads: usize) -> Vec<MeshFixScore> {
     let contour = EntityContourConfig::default();
     let session = MeshSessionConfig::default();
     let scores: Vec<_> = run_trials_in_parallel(seeds, threads, |seed| run_contour_session(seed, &contour, &session))
@@ -62,34 +63,62 @@ fn mesh_multipliers(seeds: &[u64], threads: usize, world_frame: bool) -> (Vec<f6
         .flat_map(|(_, s)| s)
         .filter(|s| !s.is_flagged_mirror)
         .collect();
-    let pick = |score: &minimappr_sim_gates::mesh_region_trials::MeshFixScore| {
-        if world_frame { score.world_frame_minimum_multiplier } else { score.relative_frame_minimum_multiplier }
-    };
     if std::env::var("SIM_GATES_VERBOSE").is_ok() {
-        for score in scores.iter().filter(|s| pick(s) > 1.0) {
-            println!("    miss@1: mirrored {} flagged {} seed {} call {} inside {} range {:.1} m err {:.2} m σmaj {:.2} m nodes {} mult {:.2}", score.layout_mirrored, score.is_flagged_mirror, score.seed, score.call_index, score.is_inside_call, score.true_range_from_centroid_m, score.relative_frame_error_m, score.reported_major_sigma_m, score.used_node_count, pick(score));
+        for score in scores.iter().filter(|s| s.relative_frame_minimum_multiplier > 1.0) {
+            println!("    miss@1: mirrored {} flagged {} seed {} call {} inside {} range {:.1} m err {:.2} m σmaj {:.2} m nodes {} mult {:.2}", score.layout_mirrored, score.is_flagged_mirror, score.seed, score.call_index, score.is_inside_call, score.true_range_from_centroid_m, score.relative_frame_error_m, score.reported_major_sigma_m, score.used_node_count, score.relative_frame_minimum_multiplier);
         }
     }
-    let multipliers = scores.iter().map(pick).collect();
-    let errors = scores.iter().map(|s| s.relative_frame_error_m).collect();
-    (multipliers, errors)
+    scores
+}
+
+fn gauges(scores: &[MeshFixScore], inside: Option<bool>, world_frame: bool) -> Vec<f64> {
+    scores
+        .iter()
+        .filter(|s| inside.is_none_or(|i| s.is_inside_call == i))
+        .map(|s| if world_frame { s.world_frame_minimum_multiplier } else { s.relative_frame_minimum_multiplier })
+        .collect()
 }
 
 fn calibrate_mesh(options: &Options, target: f64) {
     let shipped = EntityContourConfig::default().contour_sigma_multiplier;
     let training = training_seeds(options.mesh_sessions);
     let started = std::time::Instant::now();
-    let (train, train_errors) = mesh_multipliers(&training, options.threads, false);
-    let (world, _) = mesh_multipliers(&training, options.threads, true);
+    let scores = mesh_scores(&training, options.threads);
+    let train = gauges(&scores, None, false);
+    let train_errors: Vec<f64> = scores.iter().map(|s| s.relative_frame_error_m).collect();
     let fitted = fit_parameter_for_coverage(&train, target);
     println!("mesh contour: {} training fixes from {} sessions in {:.1} s", train.len(), training.len(), started.elapsed().as_secs_f64());
     println!("  relative-frame error median {:.2} m, P95 {:.2} m", median(&train_errors), percentile(&train_errors, 0.95));
     println!("  minimum covering multiplier: median {:.2}, P90 {:.2}, P95 {:.2}, P98 {:.2}", median(&train), percentile(&train, 0.9), percentile(&train, 0.95), percentile(&train, 0.98));
     println!("  training coverage: shipped {shipped:.3} -> {:.3}; Gaussian 95% 12-gon {GAUSSIAN_95_TWELVE_GON_MULTIPLIER} -> {:.3}", coverage_at(&train, shipped), coverage_at(&train, GAUSSIAN_95_TWELVE_GON_MULTIPLIER));
-    println!("  FITTED contour_sigma_multiplier for {target:.3}: {fitted:.3} (training coverage {:.3})", coverage_at(&train, fitted));
-    println!("  world-frame coverage at fitted (anchor error charged, diagnostic): {:.3}", coverage_at(&world, fitted));
-    let (held_out, _) = mesh_multipliers(&pull_request_seeds(options.held_out_mesh, &[]), options.threads, false);
-    println!("  held-out ({} fixes): coverage at fitted {:.3}, at shipped {:.3}", held_out.len(), coverage_at(&held_out, fitted), coverage_at(&held_out, shipped));
+    println!("  (reference) one pooled multiplier for {target:.3} would be {fitted:.3}; the shipped multiplier is the Gaussian one and the per-class scales below carry the fit");
+    let shipped_scales = FixCovarianceCalibrationConfig::default();
+    for (label, inside, shipped_scale) in
+        [("inside", true, shipped_scales.inside_layout_sigma_scale), ("outside", false, shipped_scales.outside_layout_sigma_scale)]
+    {
+        // Split by the host's own classification: that decides which scale applies.
+        let class: Vec<f64> = scores.iter().filter(|s| s.host_classified_inside == inside).map(|s| s.relative_frame_minimum_multiplier).collect();
+        let own_fit = fit_parameter_for_coverage(&class, target);
+        println!(
+            "    {label}: {} fixes, gauge median {:.2}, P95 {:.2}; coverage at shipped {shipped:.3}: {:.3}",
+            class.len(),
+            median(&class),
+            percentile(&class, 0.95),
+            coverage_at(&class, shipped),
+        );
+        // Gauges scale with 1/scale, so the scale that puts this class's
+        // target quantile on the shipped Gaussian multiplier is:
+        println!("    FITTED {label}_layout_sigma_scale: {:.3}", shipped_scale * own_fit / shipped);
+    }
+    let world = gauges(&scores, None, true);
+    println!("  world frame (published polygon): gauge median {:.2}, P95 {:.2}; coverage at shipped {:.3}", median(&world), percentile(&world, 0.95), coverage_at(&world, shipped));
+    let held_out = mesh_scores(&pull_request_seeds(options.held_out_mesh, &[]), options.threads);
+    for (label, inside) in [("all", None), ("inside", Some(true)), ("outside", Some(false))] {
+        let class = gauges(&held_out, inside, false);
+        println!("  held-out {label} ({} fixes): coverage at shipped {:.3}", class.len(), coverage_at(&class, shipped));
+    }
+    let held_world = gauges(&held_out, None, true);
+    println!("  held-out world frame: coverage at shipped {:.3}", coverage_at(&held_world, shipped));
 }
 
 fn calibrate_srp(options: &Options, target: f64) {

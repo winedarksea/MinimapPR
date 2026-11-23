@@ -149,6 +149,37 @@ fn horizontal_drift_bound_m(terms: &[PairTerm], position_m: &Vector3<f64>) -> f6
     aperture.max((position_m[0] - centroid[0]).hypot(position_m[1] - centroid[1]))
 }
 
+/// Horizontal covariance with the source height marginalized over its
+/// band: Σ_h = (I_hh)⁻¹ + g gᵀ·Var(z), g = drift / band the horizontal
+/// shift per metre of height, Var(z) the height variance the *data* leave
+/// once combined with the band taken as uniform (variance band²/12).
+///
+/// Why not (JᵀJ)⁻¹ + ΔΔᵀ/12 (the original term): that charged the whole
+/// band's drift even when the TDOAs pin the height down, and added it to a
+/// block that already spread the weak height prior into x, y. Under
+/// correctly declared noise it overstated inside-the-layout σ ~1.5× (NEES
+/// median 0.42 vs 1.39 expected; closeout C3). Where height is truly
+/// unobservable (data information ≈ 0) this reduces to the original term
+/// (apart from the conditional base block).
+fn height_band_horizontal_covariance(
+    information: &Matrix3<f64>,
+    height_prior_information: f64,
+    band_span_m: f64,
+    drift_m: [f64; 2],
+) -> Option<nalgebra::Matrix2<f64>> {
+    let horizontal_information = information.fixed_view::<2, 2>(0, 0).into_owned();
+    let conditional = horizontal_information.try_inverse()?;
+    let cross = information.fixed_view::<2, 1>(0, 2).into_owned();
+    // Schur complement: information on z after x, y are solved for, minus
+    // the weak prior's own share.
+    let height_information = information[(2, 2)] - (cross.transpose() * conditional * cross)[(0, 0)];
+    let data_height_information = (height_information - height_prior_information).max(0.0);
+    let band_variance = band_span_m.powi(2) / UNIFORM_VARIANCE_DIVISOR;
+    let height_variance = 1.0 / (data_height_information + 1.0 / band_variance.max(f64::MIN_POSITIVE));
+    let per_metre = nalgebra::Vector2::new(drift_m[0], drift_m[1]) / band_span_m.max(f64::MIN_POSITIVE);
+    Some(conditional + per_metre * per_metre.transpose() * height_variance)
+}
+
 /// LM refiner over an `LmSeed`; `node_position_std_m[i]` is layout node i's σ.
 #[derive(Debug, Clone)]
 pub struct JointLmSeedRefiner {
@@ -249,18 +280,33 @@ impl TdoaSeedRefiner for JointLmSeedRefiner {
                 let drift_bound = horizontal_drift_bound_m(&model.terms, &position);
                 let pinned_pair = (pinned_at(band_low), pinned_at(band_high));
                 if let (Some(low), Some(high)) = pinned_pair {
-                    // Unknown height across the band, taken as uniform: the
-                    // horizontal drift along it adds (Δ Δᵀ)/12. On a flat phone
-                    // layout this, not the linearized σ, dominates (a fix near
-                    // the phones' plane has almost no z gradient to show it).
-                    let drift = [high[0] - low[0], high[1] - low[1]];
-                    // A pinned solve that ran off along an unobservable range
-                    // direction (seen: 3e8 m, W4-sim-gates) is not a height
-                    // effect; the linearized σ already shows that weakness.
-                    if drift[0].hypot(drift[1]) <= drift_bound {
+                    // A pinned solve can run off along an unobservable range
+                    // direction (seen: 3e8 m, W4-sim-gates), which is not a
+                    // height effect. Clamp its length at the geometric bound
+                    // rather than dropping it: dropping made σ jump down as
+                    // the drift crossed the bound (σ non-monotone in the
+                    // node set). The clamp is continuous and frame-invariant.
+                    let raw_drift = [high[0] - low[0], high[1] - low[1]];
+                    let drift_length = raw_drift[0].hypot(raw_drift[1]);
+                    let scale = if drift_length > drift_bound { drift_bound / drift_length } else { 1.0 };
+                    let drift = [raw_drift[0] * scale, raw_drift[1] * scale];
+                    let prior_information = model.height_prior.map_or(0.0, |(_, std)| std.powi(-2));
+                    // A solved height outside the band means the data contradict
+                    // the model (seen: a misplaced node manufacturing a 22 m
+                    // height, mesh offline_host_loss): keep the original,
+                    // conservative term, the weak-prior marginal plus the full
+                    // band's drift, rather than credit the data with height.
+                    let height_in_band = (band_low..=band_high).contains(&position[2]);
+                    let horizontal = if height_in_band {
+                        height_band_horizontal_covariance(&information, prior_information, band_high - band_low, drift)
+                    } else {
+                        let band_drift = nalgebra::Vector2::new(drift[0], drift[1]);
+                        Some(covariance.fixed_view::<2, 2>(0, 0).into_owned() + band_drift * band_drift.transpose() / UNIFORM_VARIANCE_DIVISOR)
+                    };
+                    if let Some(horizontal) = horizontal {
                         for row in 0..2 {
                             for column in 0..2 {
-                                covariance[(row, column)] += drift[row] * drift[column] / UNIFORM_VARIANCE_DIVISOR;
+                                covariance[(row, column)] = horizontal[(row, column)];
                             }
                         }
                     }

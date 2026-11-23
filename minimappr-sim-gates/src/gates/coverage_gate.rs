@@ -61,9 +61,9 @@ fn covered_fixes(scores: &[MeshFixScore], multiplier: f64, inside: Option<bool>)
 
 /// The strategy's coverage row asks for 90–98 % "inside and outside the
 /// layout", each on its own: one class over-covering must not pay for the
-/// other under-covering. Kept apart from the pooled gate so a failure here
-/// (one scalar σ multiplier cannot calibrate both classes) stays visible
-/// without masking the pooled check.
+/// other under-covering. Kept apart from the pooled gate so a per-class
+/// miscalibration stays visible without masking the pooled check (one
+/// scalar could not calibrate both; closeout C3 fits a σ scale per class).
 pub fn mesh_contour_coverage_by_class(run: &GateRun) -> GateOutcome {
     let contour = EntityContourConfig::default();
     let (results, scores, exemption) = mesh_contour_scores(run, &contour);

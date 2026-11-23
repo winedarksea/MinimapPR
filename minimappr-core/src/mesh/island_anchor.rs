@@ -13,7 +13,7 @@ use crate::protocol::NodeId;
 
 use super::chirality_cue::chirality_from_bearing_pair;
 use super::config::IslandSyncConfig;
-use super::fix_contour::AnchorUncertainty;
+use super::fix_contour::{AnchorUncertainty, RegionContext};
 use super::island_sync_engine::{IslandLayout, IslandState, IslandSyncEngine, MILLISECONDS_PER_SECOND};
 use super::MeshMilliseconds;
 
@@ -119,20 +119,26 @@ impl IslandSyncEngine {
         }
     }
 
-    /// The filtered anchor's error for `node`'s island, for world-frame
-    /// regions (`fix_contour::world_frame_covariance`).
-    pub fn anchor_uncertainty(&self, node: NodeId) -> Option<AnchorUncertainty> {
-        self.island_of(node).and_then(Self::island_anchor_uncertainty)
+    /// `node`'s island extent and filtered anchor error, for published
+    /// regions (`fix_contour::published_covariance`).
+    pub fn region_context(&self, node: NodeId) -> Option<RegionContext> {
+        self.island_of(node).and_then(Self::island_region_context)
     }
 
-    pub fn island_anchor_uncertainty(island: &IslandState) -> Option<AnchorUncertainty> {
-        let (anchor, layout) = (island.anchor.as_ref()?, island.layout.as_ref()?);
-        let count = layout.local_positions_m.len().max(1) as f64;
-        let rotation_centre_m = layout.local_positions_m.values().fold([0.0; 2], |centre, local| {
-            let anchored = anchor.transform.apply([local[0], local[1]]);
-            [centre[0] + anchored[0] / count, centre[1] + anchored[1] / count]
+    /// Centroid and circumradius of the island's layout in the frame fixes
+    /// are solved in (anchored when an anchor exists), plus the anchor error.
+    pub fn island_region_context(island: &IslandState) -> Option<RegionContext> {
+        let layout = island.layout.as_ref()?;
+        let positions: Vec<[f64; 3]> = layout.local_positions_m.values().map(|local| Self::anchored(layout, *local)).collect();
+        let count = positions.len().max(1) as f64;
+        let centre = positions.iter().fold([0.0; 2], |acc, p| [acc[0] + p[0] / count, acc[1] + p[1] / count]);
+        let radius = positions.iter().map(|p| (p[0] - centre[0]).hypot(p[1] - centre[1])).fold(0.0, f64::max);
+        let anchor = layout.anchor.as_ref().map(|anchor| AnchorUncertainty {
+            translation_sigma_m: anchor.translation_sigma_m,
+            rotation_sigma_rad: anchor.rotation_sigma_rad,
+            rotation_centre_m: centre,
         });
-        Some(AnchorUncertainty { translation_sigma_m: anchor.translation_sigma_m, rotation_sigma_rad: anchor.rotation_sigma_rad, rotation_centre_m })
+        Some(RegionContext { layout_centre_m: centre, layout_radius_m: radius, anchor })
     }
 
     pub fn chirality_confidence(&self, node: NodeId) -> Option<f64> {

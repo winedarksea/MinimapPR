@@ -7,13 +7,15 @@
 //! Two frames. Relative: the host's node positions are aligned to the true
 //! ones with a proper rigid fit (as `ScenarioOutcome::scored_fixes` does),
 //! the anchor's GPS offset is not charged, and the truth is scored against
-//! the fix's own Σ_fix polygon (what the fix knows relative to the phones).
+//! the calibrated Σ_fix polygon (what the fix knows relative to the phones).
 //! World: the raw truth is scored against the *published* polygon, which
-//! adds the filtered map anchor's error (Σ_world, `mesh::fix_contour`).
+//! adds the filtered map anchor's error (`mesh::fix_contour`).
+
+use std::collections::BTreeMap;
 
 use minimappr_core::layout::gps_anchor_fit::weighted_kabsch_2d;
-use minimappr_core::mesh::config::EntityContourConfig;
-use minimappr_core::mesh::fix_contour::world_frame_covariance;
+use minimappr_core::mesh::config::{EntityContourConfig, FixCovarianceCalibrationConfig};
+use minimappr_core::mesh::fix_contour::published_covariance;
 use minimappr_core::mesh::local_tangent_plane::LocalTangentPlane;
 use minimappr_mesh_sim::invariants::FLAGGED_CHIRALITY_CONFIDENCE;
 use minimappr_mesh_sim::scenario::{ring_of_phones, ScenarioSpec};
@@ -60,12 +62,16 @@ pub struct MeshFixScore {
     pub seed: u64,
     pub call_index: usize,
     pub is_inside_call: bool,
+    /// The host's own inside/outside call (`RegionContext::contains`): which
+    /// calibration scale it applied.
+    pub host_classified_inside: bool,
     pub relative_frame_error_m: f64,
     pub reported_major_sigma_m: f64,
     pub used_node_count: usize,
     pub true_range_from_centroid_m: f64,
-    /// Smallest `contour_sigma_multiplier` whose Σ_fix polygon holds the
-    /// truth carried into the host's layout frame.
+    /// Smallest `contour_sigma_multiplier` whose calibrated-Σ_fix polygon
+    /// (the published one minus the anchor terms) holds the truth carried
+    /// into the host's layout frame.
     pub relative_frame_minimum_multiplier: f64,
     /// Same for the published (Σ_world) polygon and the raw world truth.
     pub world_frame_minimum_multiplier: f64,
@@ -130,6 +136,7 @@ pub fn minimum_contour_multiplier(
 pub fn score_session(outcome: &ScenarioOutcome, contour: &EntityContourConfig) -> Vec<MeshFixScore> {
     // Same traces, same order: `scored_fixes` also keeps traces with a fix.
     let mesh_scored = outcome.scored_fixes();
+    let records: BTreeMap<u64, _> = outcome.call_records().into_iter().map(|record| (record.call_id, record)).collect();
     // The host's ENU plane is centred on the first GPS fix it saw (a phone
     // plus its multipath bias), not on the simulator's site origin: carry
     // the world truth into it through geodetic coordinates.
@@ -145,7 +152,14 @@ pub fn score_session(outcome: &ScenarioOutcome, contour: &EntityContourConfig) -
         .filter(|trace| trace.fix.is_some())
         .zip(mesh_scored)
         .filter_map(|(trace, mesh_fix)| {
+            // The host's record carries the region context the published
+            // polygon was drawn with (layout extent, anchor error).
             let fix = trace.fix.as_ref()?;
+            let record = records.get(&trace.host_call_id)?;
+            let context = record.region_context;
+            let calibration = FixCovarianceCalibrationConfig::default();
+            let relative_covariance = published_covariance(fix.position_m, &fix.covariance_m2, context.map(|c| c.without_anchor()).as_ref(), &calibration);
+            let world_covariance = published_covariance(fix.position_m, &fix.covariance_m2, context.as_ref(), &calibration);
             let call_index = trace.true_call_index as usize;
             let call = &outcome.world.calls[call_index];
             let estimated: Vec<[f64; 2]> = trace.estimated_node_positions_m.iter().map(|p| [p[0], p[1]]).collect();
@@ -167,6 +181,7 @@ pub fn score_session(outcome: &ScenarioOutcome, contour: &EntityContourConfig) -
                 seed: outcome.seed,
                 call_index,
                 is_inside_call: call_index.is_multiple_of(2),
+                host_classified_inside: context.is_none_or(|context| context.contains(fix.position_m)),
                 relative_frame_error_m: error,
                 reported_major_sigma_m: fix.horizontal_major_sigma_m,
                 used_node_count: fix.used_nodes.len(),
@@ -175,14 +190,14 @@ pub fn score_session(outcome: &ScenarioOutcome, contour: &EntityContourConfig) -
                     let centre = truth.iter().fold([0.0; 2], |acc, p| [acc[0] + p[0] / count, acc[1] + p[1] / count]);
                     (call.position_m[0] - centre[0]).hypot(call.position_m[1] - centre[1])
                 },
-                relative_frame_minimum_multiplier: minimum_contour_multiplier(truth_in_host_frame, fix.position_m, &fix.covariance_m2, contour),
+                relative_frame_minimum_multiplier: minimum_contour_multiplier(truth_in_host_frame, fix.position_m, &relative_covariance, contour),
                 world_frame_minimum_multiplier: minimum_contour_multiplier(
                     to_host_plane([call.position_m[0], call.position_m[1]]),
                     fix.position_m,
-                    &trace.anchor_uncertainty.map_or(fix.covariance_m2, |anchor| world_frame_covariance(fix.position_m, &fix.covariance_m2, &anchor)),
+                    &world_covariance,
                     contour,
                 ),
-                anchor_translation_sigma_m: trace.anchor_uncertainty.map(|anchor| anchor.translation_sigma_m),
+                anchor_translation_sigma_m: context.and_then(|c| c.anchor).map(|anchor| anchor.translation_sigma_m),
                 chirality_confidence: trace.chirality_confidence,
                 layout_mirrored: mesh_fix.layout_mirrored == Some(true),
                 is_flagged_mirror: mesh_fix.layout_mirrored == Some(true)

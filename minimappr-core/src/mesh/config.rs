@@ -194,7 +194,10 @@ pub struct IslandSyncConfig {
     pub range_sigma_m: f64,
     /// Heights are not solved; phones are assumed handheld at this height.
     pub assumed_phone_height_m: f64,
-    /// Unknown true phone heights (held 1.0–1.8 m): part of every node σ.
+    /// Unknown true phone heights: part of every node σ. Handheld phones sit
+    /// within about ±0.2 m of the assumed height, so a uniform spread gives
+    /// σ = 0.4/√12 ≈ 0.115 m (the old 0.25 m overstated every node σ and,
+    /// with it, the LM covariance; closeout C3).
     pub assumed_phone_height_sigma_m: f64,
     /// Growth of a carried-forward layout position's σ while unranged.
     pub relative_position_growth_mps: f64,
@@ -225,7 +228,7 @@ impl Default for IslandSyncConfig {
             hearing_memory_ms: 200_000,
             range_sigma_m: 0.05,
             assumed_phone_height_m: 1.4,
-            assumed_phone_height_sigma_m: 0.25,
+            assumed_phone_height_sigma_m: 0.115,
             relative_position_growth_mps: 0.3,
             walking_position_growth_mps: 1.5,
             confident_chirality_threshold: 0.9,
@@ -280,12 +283,13 @@ impl Default for ClassificationRotaConfig {
 }
 
 /// The likelihood contour sent with a pinpointed entity: a polygon on the
-/// fix's horizontal covariance ellipse scaled by `contour_sigma_multiplier`.
-/// The multiplier is *fitted*, not the Gaussian 95 % value (2.45): the
-/// W4-sim-gates calibration (`minimappr-sim-gates`, example
-/// `calibrate_region_parameters`) picks it so the drawn polygon covers the
-/// truth in ~95 % of end-to-end Layer 2 fixes (gate band 90–98 %), which
-/// absorbs LM linearization, layout-σ and clock-σ misstatement.
+/// published horizontal covariance (the calibrated fix covariance plus the
+/// map anchor's error, `fix_contour`) at `contour_sigma_multiplier`.
+/// The multiplier is the Gaussian one, not a fit: a regular 12-gon at 2.465σ
+/// holds 94.5 % of a 2-D Gaussian (the calibration target inside the
+/// 90–98 % gate band). What was fitted (0.52 until closeout C3) absorbed an
+/// overstated LM covariance and so also shrank the honest anchor term; that
+/// misstatement now lives in [`FixCovarianceCalibrationConfig`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct EntityContourConfig {
     pub contour_sigma_multiplier: f64,
@@ -295,9 +299,28 @@ pub struct EntityContourConfig {
 impl Default for EntityContourConfig {
     fn default() -> Self {
         Self {
-            contour_sigma_multiplier: 0.52,
+            contour_sigma_multiplier: 2.465,
             contour_point_count: 12,
         }
+    }
+}
+
+/// σ scale applied to every mesh `CallFix` covariance (variance × scale²),
+/// fitted by `minimappr-sim-gates`' `calibrate_region_parameters` so end-to-end
+/// Layer 2 fixes are covered ~94.5 % by the Gaussian contour. Split by
+/// geometry because one scalar cannot do both (closeout C3: inside the
+/// layout the LM σ is ~1.5× the error, outside ~3×, from conservative node
+/// σ and the full source-height band on long baselines). A fix is "inside"
+/// when it lies within the circumradius of its contributing nodes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FixCovarianceCalibrationConfig {
+    pub inside_layout_sigma_scale: f64,
+    pub outside_layout_sigma_scale: f64,
+}
+
+impl Default for FixCovarianceCalibrationConfig {
+    fn default() -> Self {
+        Self { inside_layout_sigma_scale: 0.695, outside_layout_sigma_scale: 0.315 }
     }
 }
 
@@ -382,6 +405,7 @@ pub struct MeshConfig {
     pub thermal: ThermalConfig,
     pub rota: ClassificationRotaConfig,
     pub entity_contour: EntityContourConfig,
+    pub fix_covariance_calibration: FixCovarianceCalibrationConfig,
     pub entity_tracking: EntityTrackingConfig,
     /// S5 species attribution for windows holding several source clusters.
     pub attribution: MeshAttributionConfig,

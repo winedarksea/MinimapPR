@@ -44,8 +44,10 @@ pub struct FilteredMapAnchorConfig {
     /// Fraction of GPS error that is multipath bias, correlated across
     /// rounds (it does not average down while phones stand still). The
     /// filter treats fits as independent, so its σ shrinks as 1/√n; the
-    /// published σ keeps this share of a single fit's σ. 0.8 matches the
-    /// still-phone model the anchor gate uses.
+    /// published σ keeps this share of a single fit's σ. 1.0 is the
+    /// conservative bound (never below one fit's σ): with 0.8 the published
+    /// polygon covered the world truth in only 0.88 of Layer 2 fixes, whose
+    /// GPS model, like canopy multipath, is almost all bias (closeout C2/C3).
     pub correlated_gps_error_fraction: f64,
 }
 
@@ -57,7 +59,7 @@ impl Default for FilteredMapAnchorConfig {
             still_jump_release_threshold_sigma: 1.0,
             minimum_history_fits: 6,
             history_smoothing_weight: 0.05,
-            correlated_gps_error_fraction: 0.8,
+            correlated_gps_error_fraction: 1.0,
         }
     }
 }

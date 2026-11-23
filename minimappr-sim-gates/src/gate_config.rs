@@ -2,7 +2,7 @@
 //! Gate values come from `docs/field_mode_test_strategy.md` §What to assert;
 //! where the strategy gives no number, the comment says where it came from.
 //! Calibrated *production* parameters (SRP likelihood temperature, mesh
-//! contour σ multiplier) live in minimappr-core's own configs, so these
+//! fix-covariance σ scales) live in minimappr-core's own configs, so these
 //! gates test what ships.
 
 /// Realistic residual errors a converged field session leaves behind.
@@ -73,6 +73,14 @@ pub struct AccuracyGateConfig {
     pub outside_p95_bearing_error_deg: f64,
     /// Further ranges are reported (not gated): bearing only.
     pub reported_outside_ranges_m: [f64; 2],
+    /// Band on the *median* inside NEES (2 dof; a calibrated Σ gives
+    /// 2·ln 2 = 1.386). 1.386 ± 3 standard errors of a χ²₂ sample median at
+    /// the 200-seed PR count (SE = 2/√n = 0.14): σ mis-scaled by more than
+    /// ~0.83×–1.16× fails. The old mean band (0.2–3) passed a Σ overstated
+    /// 1.8× in σ (median 0.42).
+    pub nees_median_band: [f64; 2],
+    /// Mean NEES above this flags an overconfident tail (gated).
+    pub maximum_mean_nees: f64,
 }
 
 impl Default for AccuracyGateConfig {
@@ -83,6 +91,8 @@ impl Default for AccuracyGateConfig {
             outside_gate_range_m: 50.0,
             outside_p95_bearing_error_deg: 5.0,
             reported_outside_ranges_m: [100.0, 200.0],
+            nees_median_band: [0.95, 1.85],
+            maximum_mean_nees: 3.0,
         }
     }
 }

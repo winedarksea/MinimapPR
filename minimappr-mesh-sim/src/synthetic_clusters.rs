@@ -119,7 +119,6 @@ fn solve_call(
         fix: None,
         chirality_confidence: request.chirality_confidence,
         chirality_locked: request.chirality_locked,
-        anchor_uncertainty: request.anchor_uncertainty,
     };
     let band = decoded.iter().find_map(|(_, clip)| arrival_of(clip, call_index)).map(arrival_band).unwrap_or_default();
     let result = localizer.localize(&arrivals).map_err(|error| format!("{error:?}")).map(|solved| {

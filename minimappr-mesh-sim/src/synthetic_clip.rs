@@ -14,7 +14,6 @@ use std::cell::RefCell;
 
 use minimappr_core::mesh::arrival_time_localizer::ArrivalTimeLocalizer;
 use minimappr_core::mesh::call_pipeline::{CallFix, CallLocalizationRequest, ClipSetLocalizer, LocalizedCluster};
-use minimappr_core::mesh::fix_contour::AnchorUncertainty;
 use minimappr_core::onset_clustering::attribution_decision::{ClassifierAnswer, InterfererOnset};
 use minimappr_core::protocol::NodeId;
 
@@ -89,7 +88,6 @@ pub struct SolveTrace {
     pub fix: Option<CallFix>,
     pub chirality_confidence: Option<f64>,
     pub chirality_locked: bool,
-    pub anchor_uncertainty: Option<AnchorUncertainty>,
 }
 
 #[derive(Debug)]
