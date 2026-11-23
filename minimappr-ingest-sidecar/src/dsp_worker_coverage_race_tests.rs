@@ -496,3 +496,59 @@ async fn lossy_late_node_costs_one_frame_gap_not_the_stall_budget() {
         "a lost frame must cost at most the gap to the next arriving frame: {max_wait_ms} ms"
     );
 }
+
+#[tokio::test]
+async fn render_on_a_parked_trigger_frame_publishes_one_result_carrying_the_render_handle() {
+    // Renders share the trigger cooldown, so every cadence trigger also has a
+    // classifier render due. The render must ride the deferred payload: one
+    // real localization_result per trigger, and that one carries the
+    // derived_handle Python needs to load the render bundle.
+    let base_config = race_config(true);
+    let config = DspWorkerConfig {
+        classifier_render_min_interval_seconds: base_config.trigger_cooldown_seconds,
+        ..base_config
+    };
+    let mut harness = RaceHarness::new(config).await;
+    deliver_with_node_b_one_frame_late(&mut harness, FRAMES_PER_RUN).await;
+    let published = drain_published_manifests(&mut harness.events);
+    let render_count = published
+        .iter()
+        .filter(|manifest| manifest.manifest_type == "classifier_render")
+        .count();
+    let mut real_results_by_segment: HashMap<String, Vec<&DspManifest>> = HashMap::new();
+    for manifest in published.iter().filter(|manifest| {
+        manifest.manifest_type == "localization_result"
+            && manifest.localization.as_ref().is_some_and(|localization| {
+                localization.resolved_algorithm != "localization_cadence_skipped"
+            })
+    }) {
+        let segment_id = manifest.source_handles[0].segment_id.clone();
+        real_results_by_segment
+            .entry(segment_id)
+            .or_default()
+            .push(manifest);
+    }
+    let trigger_segments = real_results_by_segment
+        .keys()
+        .filter(|segment_id| !segment_id.ends_with(FIRST_FRAME_SEGMENT_SUFFIX))
+        .count();
+    assert!(trigger_segments >= 2, "{real_results_by_segment:?}");
+    assert!(render_count >= trigger_segments, "renders: {render_count}");
+    for (segment_id, results) in &real_results_by_segment {
+        assert_eq!(results.len(), 1, "duplicate results for {segment_id}");
+        // Frame 0 precedes node b's stream: its empty channels make the omni
+        // mix empty, so that render is skipped regardless of deferral.
+        if segment_id.ends_with(FIRST_FRAME_SEGMENT_SUFFIX) {
+            continue;
+        }
+        assert!(
+            results[0].derived_handle.is_some(),
+            "trigger result for {segment_id} lost the render handle"
+        );
+    }
+    let total_localization_results = harness.state.read().await.total_localization_results;
+    assert_eq!(
+        total_localization_results,
+        real_results_by_segment.len() as u64
+    );
+}

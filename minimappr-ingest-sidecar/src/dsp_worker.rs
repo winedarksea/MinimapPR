@@ -11,7 +11,9 @@ use crate::{
     actors::{classification::ClassificationWorker, environment::EnvironmentCache},
     audio_payload::{decode_audio_payload_segments, DecodedAudioPayload},
     classifier_helper::ManifestClassificationAnnotator,
-    deferred_localization::{localization_only_template, DeferredLocalizationScheduler},
+    deferred_localization::{
+        localization_only_template, DeferredClassifierRender, DeferredLocalizationScheduler,
+    },
     derived_cache::DerivedCache,
     diagnostics::IngestDiagnostics,
     dsp::{coverage_stats, AudioCoverageStats, SensorStreamBuffer},
@@ -1435,11 +1437,21 @@ impl DspWorker {
             timing_gates.on_localization_cadence,
             owned.buffer_channel_count,
         );
+        let mut deferred_classifier_render = None;
         if coverage_deferral_span.is_some() {
-            // The cadence-triggered solve moves to the deferred payload; this
-            // frame still emits its heartbeat and (if due) its classifier render.
-            timing_gates.run_srp = timing_gates.run_classifier_render
-                && owned.buffer_channel_count >= MIN_SRP_CHANNEL_COUNT;
+            // The cadence-triggered solve and any classifier render due on this
+            // frame move to the deferred payload, so the trigger publishes one
+            // localization_result (carrying the render handle). This frame
+            // still emits its heartbeat.
+            deferred_classifier_render =
+                timing_gates
+                    .run_classifier_render
+                    .then_some(DeferredClassifierRender {
+                        end_ns: buffered.end_ns,
+                        window_seconds: owned.classification_window_sec,
+                    });
+            timing_gates.run_srp = false;
+            timing_gates.run_classifier_render = false;
         }
 
         if !timing_gates.on_heartbeat_cadence && !timing_gates.run_classifier_render {
@@ -1541,8 +1553,13 @@ impl DspWorker {
             self.buffers.get(&payload.stream_key),
         ) {
             let template = localization_only_template(&payload);
-            self.deferred_localizations
-                .defer(&payload.stream_key, buffers, span, template);
+            self.deferred_localizations.defer(
+                &payload.stream_key,
+                buffers,
+                span,
+                template,
+                deferred_classifier_render,
+            );
         }
         Some(payload)
     }
@@ -2204,7 +2221,7 @@ fn resolve_localization_center_time_ns(
     }
 }
 
-fn channel_windows_ending_at(
+pub(crate) fn channel_windows_ending_at(
     buffers: &[SensorStreamBuffer],
     end_ns: i128,
     window_seconds: f64,
@@ -2218,7 +2235,7 @@ fn channel_windows_ending_at(
         .collect()
 }
 
-fn channel_windows_ending_at_with_gap_concealment(
+pub(crate) fn channel_windows_ending_at_with_gap_concealment(
     buffers: &[SensorStreamBuffer],
     end_ns: i128,
     window_seconds: f64,
@@ -2232,7 +2249,7 @@ fn channel_windows_ending_at_with_gap_concealment(
         .collect()
 }
 
-fn channel_coverage_ending_at(
+pub(crate) fn channel_coverage_ending_at(
     buffers: &[SensorStreamBuffer],
     end_ns: i128,
     window_seconds: f64,
@@ -2243,7 +2260,7 @@ fn channel_coverage_ending_at(
         .collect()
 }
 
-fn classifier_render_bounds_from_windows(
+pub(crate) fn classifier_render_bounds_from_windows(
     end_ns: i128,
     windows: &[Vec<f32>],
     sample_rate_hz: u32,

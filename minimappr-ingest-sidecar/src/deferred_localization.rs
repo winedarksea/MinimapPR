@@ -11,6 +11,8 @@ use std::collections::HashMap;
 use crate::{
     dsp::SensorStreamBuffer,
     dsp_worker::{
+        channel_coverage_ending_at, channel_windows_ending_at,
+        channel_windows_ending_at_with_gap_concealment, classifier_render_bounds_from_windows,
         eligible_localization_channels, localization_channel_states_centered, ComputePayload,
     },
     localization_coverage_wait::{
@@ -28,10 +30,21 @@ pub(crate) struct CoverageWaitOutcome {
     pub(crate) waited_ns: u128,
 }
 
+/// A classifier render that fell due on a parked trigger frame. It rides the
+/// deferred payload (review M3): rendering on the trigger frame published a
+/// second, poorer `localization_result`, and the render's `derived_handle`
+/// must reach Python on the single cross-node result instead.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct DeferredClassifierRender {
+    pub(crate) end_ns: i128,
+    pub(crate) window_seconds: f64,
+}
+
 struct PendingLocalization {
     span: LocalizationWindowSpan,
     first_deferred_ns: u128,
     payload_template: ComputePayload,
+    classifier_render: Option<DeferredClassifierRender>,
 }
 
 #[derive(Default)]
@@ -148,14 +161,16 @@ impl DeferredLocalizationScheduler {
         )
     }
 
-    /// Park a localization-only payload until `span` is covered. An older
-    /// pending localization for the same buffer is dispatched first.
+    /// Park a localization-only payload (plus any classifier render due on
+    /// the same frame) until `span` is covered. An older pending localization
+    /// for the same buffer is dispatched first.
     pub(crate) fn defer(
         &mut self,
         buffer_key: &str,
         buffers: &[SensorStreamBuffer],
         span: LocalizationWindowSpan,
         payload_template: ComputePayload,
+        classifier_render: Option<DeferredClassifierRender>,
     ) {
         let now_ns = self.clock.now_ns();
         let state = self
@@ -175,6 +190,7 @@ impl DeferredLocalizationScheduler {
             span,
             first_deferred_ns: now_ns,
             payload_template,
+            classifier_render,
         });
     }
 
@@ -242,21 +258,52 @@ fn finalize_pending_payload(
     let PendingLocalization {
         span,
         payload_template: mut payload,
+        classifier_render,
         ..
     } = pending;
     let parked_geometry_channel_count = payload.mic_positions_m.len().min(buffers.len());
+    let parked_buffers = &buffers[..parked_geometry_channel_count];
     payload.channel_states = localization_channel_states_centered(
-        &buffers[..parked_geometry_channel_count],
+        parked_buffers,
         span.center_time_ns,
         span.window_seconds,
     );
     payload.active_channels =
         eligible_localization_channels(&payload.channel_states, span.min_coverage_ratio);
+    if let Some(render) = classifier_render {
+        attach_classifier_render_windows(&mut payload, parked_buffers, render);
+    }
     payload
 }
 
+/// Re-extract the trigger frame's trailing render windows from the fuller
+/// buffers, so the render includes the late members too.
+fn attach_classifier_render_windows(
+    payload: &mut ComputePayload,
+    parked_buffers: &[SensorStreamBuffer],
+    render: DeferredClassifierRender,
+) {
+    payload.classification_windows =
+        channel_windows_ending_at(parked_buffers, render.end_ns, render.window_seconds);
+    payload.listenable_classification_windows = channel_windows_ending_at_with_gap_concealment(
+        parked_buffers,
+        render.end_ns,
+        render.window_seconds,
+    );
+    payload.classification_coverage =
+        channel_coverage_ending_at(parked_buffers, render.end_ns, render.window_seconds);
+    let (render_start_ns, render_end_ns) = classifier_render_bounds_from_windows(
+        render.end_ns,
+        &payload.classification_windows,
+        payload.sr,
+    );
+    payload.classifier_render_start_ns = render_start_ns;
+    payload.classifier_render_end_ns = render_end_ns;
+    payload.run_classifier_render = true;
+}
+
 /// Localization-only copy of a buffered-manifest payload: SRP on, no
-/// classifier render, and the source manifest marked memory-path so the
+/// classifier render (release attaches a deferred one), and the source manifest marked memory-path so the
 /// original payload stays the only one that consumes a persisted manifest.
 pub(crate) fn localization_only_template(payload: &ComputePayload) -> ComputePayload {
     let mut manifest = payload.manifest.clone();
