@@ -220,6 +220,24 @@ pub struct AnchorGateConfig {
     /// `anchor_persistent_jump` gates one that never recovers.
     pub jump_duration_s: f64,
     pub maximum_jump_response_m: f64,
+    /// `anchor_persistent_jump` per-seed cap. A persistent jump is held, but
+    /// the per-round fit's rotation on a 10 m layout under 6 m GPS is close
+    /// to chaotic, so the no-jump twin's filtered rotation wanders and the
+    /// twins drift apart through it (closeout C1). Measured at `26d13e0`
+    /// over 100 nightly runs × 200 seeds: per-run maximum p50 0.84 m, p95
+    /// 1.54 m, max 1.90 m; at the old 1 m cap 23 of 100 runs failed. 2.5 m
+    /// clears that spread; without jump holding the median response is
+    /// ~1.9 m and the maximum ~10 m, which this cap and the fraction rule
+    /// below both still fail (closeout F2 sabotage).
+    pub persistent_jump_maximum_response_m: f64,
+    /// The strategy's 1 m (`maximum_jump_response_m`) stays as an aggregate:
+    /// at most this fraction of seeds may exceed it. Measured ≈ 0.0017
+    /// (5 of 3000, closeout C1); at 200 seeds 1 % allows 2, which a Poisson
+    /// mean of 0.34 exceeds in ~0.5 % of runs.
+    pub persistent_jump_maximum_fraction_over_response: f64,
+    /// Below this many seeds the fraction rule is printed, not gated (one
+    /// seed over 1 m is already 3 % of the 32 PR seeds).
+    pub persistent_jump_minimum_trials_for_fraction: usize,
     /// Stillness clamp: anchor movement from `settle_time_s` to the jump
     /// (strategy gives 1 m for the jump; same bound here). Earlier movement
     /// is the filter converging (≈ σ_fit·√(1/n₁ − 1/n₂)), not drift.
@@ -243,6 +261,9 @@ impl Default for AnchorGateConfig {
             jump_distance_m: 20.0,
             jump_duration_s: 30.0,
             maximum_jump_response_m: 1.0,
+            persistent_jump_maximum_response_m: 2.5,
+            persistent_jump_maximum_fraction_over_response: 0.01,
+            persistent_jump_minimum_trials_for_fraction: 100,
             maximum_still_drift_m: 1.0,
             settle_time_s: 150.0,
             still_drift_reported_sigma_multiple: 3.0,

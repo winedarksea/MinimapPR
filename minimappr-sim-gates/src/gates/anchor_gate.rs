@@ -178,7 +178,10 @@ pub fn anchor_stability(run: &GateRun) -> GateOutcome {
 }
 
 /// A 20 m jump that persists while the group stays still, against the
-/// same seed's no-jump twin (filtered anchor). Per-seed rule: < 1 m.
+/// same seed's no-jump twin (filtered anchor). Per-seed rule: below
+/// `persistent_jump_maximum_response_m`; aggregate: at most
+/// `persistent_jump_maximum_fraction_over_response` of seeds above the
+/// strategy's 1 m (see `AnchorGateConfig` for the measured spread).
 pub fn anchor_persistent_jump(run: &GateRun) -> GateOutcome {
     let config = &run.config.anchor;
     let results = run_trials_in_parallel(&run.seeds, run.threads, |seed| {
@@ -193,19 +196,34 @@ pub fn anchor_persistent_jump(run: &GateRun) -> GateOutcome {
         match result {
             Ok(response) => {
                 responses.push(*response);
-                if *response > config.maximum_jump_response_m {
+                if *response > config.persistent_jump_maximum_response_m {
                     outcome.fail_seed(*seed, format!("persistent {} m GPS jump moved the still anchor {response:.2} m", config.jump_distance_m));
                 }
             }
             Err(error) => outcome.fail_seed(*seed, format!("layout / anchor chain failed: {error}")),
         }
     }
+    let over: Vec<u64> = results
+        .iter()
+        .filter(|(_, result)| result.as_ref().is_ok_and(|response| *response > config.maximum_jump_response_m))
+        .map(|(seed, _)| *seed)
+        .collect();
+    let fraction_over = over.len() as f64 / responses.len().max(1) as f64;
     outcome.summary(format!(
-        "persistent {} m jump vs no-jump twin, filtered: median {:.2} m, max {:.2} m (gate {} m)",
+        "persistent {} m jump vs no-jump twin, filtered: median {:.2} m, max {:.2} m (per-seed cap {} m); {} of {} seeds over {} m ({fraction_over:.4}, allowed {})",
         config.jump_distance_m,
         median(&responses),
         percentile(&responses, 1.0),
-        config.maximum_jump_response_m
+        config.persistent_jump_maximum_response_m,
+        over.len(),
+        responses.len(),
+        config.maximum_jump_response_m,
+        config.persistent_jump_maximum_fraction_over_response
     ));
+    let enough = responses.len() >= config.persistent_jump_minimum_trials_for_fraction;
+    outcome.check_aggregate(fraction_over <= config.persistent_jump_maximum_fraction_over_response, enough, || {
+        format!("{fraction_over:.4} of seeds moved the still anchor over {} m", config.maximum_jump_response_m)
+    });
+    outcome.contributing_seeds = over;
     outcome
 }
