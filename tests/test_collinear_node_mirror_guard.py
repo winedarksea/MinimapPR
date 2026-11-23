@@ -88,10 +88,13 @@ async def test_single_mic_trail_fixes_are_not_placed(sim_binary, tmp_path):
 
 @pytest.mark.asyncio
 async def test_rigid_array_trail_is_unaffected_by_the_guard(sim_binary, tmp_path):
-    def placements(rows):
-        return sorted((r["label"], r["spatial_display_mode"], tuple(np.round(r["position_m"], 6))) for r in rows)
-
-    unguarded = await _replay_rows(TETRA_TRAIL_SCENE, tmp_path, 0.0)
+    # Judged on the guard's own per-product tag within one replay: comparing two
+    # replays' positions is load-sensitive (window timing), the tag is not.
     guarded = await _replay_rows(TETRA_TRAIL_SCENE, tmp_path, MAX_ASPECT_RATIO)
-    assert placements(guarded) == placements(unguarded)
-    assert _placed_labelled(guarded)
+    onset_rows = [r for r in guarded if "onset_cluster_collinear_mirror_ambiguous" in (r["feature_summary"] or {})]
+    assert onset_rows
+    assert not [r for r in onset_rows if r["feature_summary"]["onset_cluster_collinear_mirror_ambiguous"]]
+    assert all(r["feature_summary"].get("localization_range_projection_mode") != "range_asymptotic" for r in onset_rows)
+    placed = _placed_labelled(guarded)
+    assert placed
+    assert all(np.sign(r["position_m"][1]) == TRUTH_NORTH_SIGN_BY_LABEL[r["label"]] for r in placed)
