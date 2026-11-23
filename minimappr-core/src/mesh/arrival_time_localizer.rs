@@ -70,8 +70,10 @@ pub struct ArrivalTimeLocalizer {
     pub refiner: SeedRefinerConfig,
     pub sound_speed_mps: f64,
     pub minimum_arrivals: usize,
-    /// χ²/dof above which a leave-one-out retry runs (≈ 3σ per residual).
-    pub maximum_reduced_chi_square: f64,
+    /// χ² must fall by more than this per node a solve does without: the
+    /// 99.9 % point of χ²₁, so with 7 clean phones a good one is dropped in
+    /// < 1 % of calls.
+    pub node_rejection_chi_square_drop: f64,
 }
 
 impl Default for ArrivalTimeLocalizer {
@@ -81,7 +83,7 @@ impl Default for ArrivalTimeLocalizer {
             refiner: SeedRefinerConfig::default(),
             sound_speed_mps: 343.0,
             minimum_arrivals: 3,
-            maximum_reduced_chi_square: 9.0,
+            node_rejection_chi_square_drop: 10.83,
         }
     }
 }
@@ -218,13 +220,23 @@ impl ArrivalTimeLocalizer {
         Ok(ArrivalFix { fix, used_arrival_indices })
     }
 
-    fn reduced_chi_square(fix: &ArrivalFix) -> f64 {
-        fix.fix.chi_square / fix.fix.degrees_of_freedom.max(1) as f64
-    }
-
-    /// Solve with every arrival; if the fit is inconsistent (e.g. the
-    /// best-timed node, which anchors every pair, carries a stale clock),
-    /// retry leaving each node out and keep the most consistent subset.
+    /// Solve with every arrival and with each node left out in turn, and
+    /// keep the solve with the lowest χ² + `node_rejection_chi_square_drop`
+    /// × (nodes it does without, whether left out here or rejected by the
+    /// refiner). A node is therefore dropped only when χ² falls by more than
+    /// that per node (the one-outlier likelihood-ratio test; for a clean node
+    /// the fall is ≈ χ²₁), and a subset that kept the bad node by rejecting
+    /// two good ones pays for both.
+    ///
+    /// Why not the old χ²/dof > 9 trigger on the full fit, or a residual
+    /// test on its pairs: pairs share one reference, so a late reference
+    /// shifts every pair alike (and the refiner's worst-pair rejection then
+    /// drops good nodes), and over a flat phone layout a late node is largely
+    /// absorbed by moving the source up (closeout C4: a 4 ms pocket raised a
+    /// fix 8 m and left χ²/dof under 9). Leaving the node out removes both.
+    /// A good node whose removal lets the solve slip into another height
+    /// basin is kept: the full fit was already consistent, χ² has little to
+    /// lose.
     pub fn localize(&self, arrivals: &[NodeArrival]) -> Result<ArrivalFix, ArrivalLocalizationError> {
         if arrivals.len() < self.minimum_arrivals {
             return Err(ArrivalLocalizationError::TooFewArrivals {
@@ -234,27 +246,23 @@ impl ArrivalTimeLocalizer {
         }
         let all: Vec<usize> = (0..arrivals.len()).collect();
         let full = self.solve_subset(arrivals, &all);
-        let consistent = full
-            .as_ref()
-            .is_ok_and(|fix| Self::reduced_chi_square(fix) <= self.maximum_reduced_chi_square);
-        if consistent || arrivals.len() <= self.minimum_arrivals {
+        if arrivals.len() <= self.minimum_arrivals {
             return full;
         }
-        let best_subset = (0..arrivals.len())
-            .filter_map(|left_out| {
-                let subset: Vec<usize> = all.iter().copied().filter(|index| *index != left_out).collect();
-                self.solve_subset(arrivals, &subset).ok()
+        let penalized = |fix: &ArrivalFix| {
+            fix.fix.chi_square + self.node_rejection_chi_square_drop * (arrivals.len() - fix.used_arrival_indices.len()) as f64
+        };
+        let best_without_one = all
+            .iter()
+            .filter_map(|&left_out| {
+                let others: Vec<usize> = all.iter().copied().filter(|index| *index != left_out).collect();
+                self.solve_subset(arrivals, &others).ok()
             })
-            .min_by(|a, b| Self::reduced_chi_square(a).total_cmp(&Self::reduced_chi_square(b)));
-        match (full, best_subset) {
-            (Ok(full), Some(subset))
-                if Self::reduced_chi_square(&subset) <= self.maximum_reduced_chi_square
-                    && Self::reduced_chi_square(&subset) < Self::reduced_chi_square(&full) =>
-            {
-                Ok(subset)
-            }
+            .min_by(|a, b| penalized(a).total_cmp(&penalized(b)));
+        match (full, best_without_one) {
+            (Ok(full), Some(without)) if penalized(&without) < penalized(&full) => Ok(without),
             (Ok(full), _) => Ok(full),
-            (Err(_), Some(subset)) => Ok(subset),
+            (Err(_), Some(without)) => Ok(without),
             (Err(error), None) => Err(error),
         }
     }
@@ -320,6 +328,34 @@ mod tests {
         arrivals[2].reference_arrival_s += 0.08;
         let solved = ArrivalTimeLocalizer::default().localize(&arrivals).expect("solves");
         assert!(!solved.used_arrival_indices.contains(&2), "{:?}", solved.used_arrival_indices);
+    }
+
+    /// The best-timed node is the pair reference, so a 3 ms pocket on it
+    /// shifts every pair alike (the old χ²/dof > 9 trigger kept it). It sits
+    /// at the layout's edge: a late node near the centre is absorbed exactly
+    /// by a higher source and no TDOA test can see it.
+    #[test]
+    fn a_pocketed_pair_reference_is_rejected() {
+        let nodes = [
+            [0.0, 0.0, 1.4],
+            [14.0, 2.0, 1.5],
+            [6.0, 12.0, 1.3],
+            [-5.0, 9.0, 1.4],
+            [3.0, -8.0, 1.6],
+            [10.0, -6.0, 1.4],
+            [-7.0, -3.0, 1.5],
+        ];
+        let source = [4.0, 2.0, 7.0];
+        let mut arrivals = arrivals_for(source, &nodes, 3.0);
+        for arrival in &mut arrivals {
+            arrival.position_std_m = 0.1;
+        }
+        arrivals[1].timing_std_s = 1.9e-5;
+        arrivals[1].reference_arrival_s += 0.003;
+        let solved = ArrivalTimeLocalizer::default().localize(&arrivals).expect("solves");
+        assert!(!solved.used_arrival_indices.contains(&1), "{:?}", solved.used_arrival_indices);
+        let error = (solved.fix.position_m[0] - source[0]).hypot(solved.fix.position_m[1] - source[1]);
+        assert!(error < 0.5, "{:?}", solved.fix.position_m);
     }
 
     #[test]

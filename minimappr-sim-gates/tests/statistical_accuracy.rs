@@ -9,15 +9,20 @@ fn monte_carlo_accuracy() {
     assert_pull_request_gate("monte_carlo_accuracy");
 }
 
-/// KNOWN FAILURE (W4-sim-gates finding, not loosened): the arrival
-/// localizer does not reject a decisively late (≥ 8 pair σ, 3.5–4.8 ms)
-/// pocketed phone in ~40 % of cases, worst when it is the pair reference
-/// (estimate dragged 5–24σ); σ shrinks > 10 % on ~16 % of node removals
-/// (height-band drift term is not information-monotone). Muting checks
-/// pass. Nightly still runs it. Run here with
+/// KNOWN FAILURE (not loosened; closeout C4 improved, did not fix):
+/// leave-one-out with a χ²-drop test now rejects 92 % of decisive pockets
+/// (was 58 %), including a late pair reference (repro seed 26: rejected,
+/// was dragged 22σ). Still failing on nightly 100000+400: pocketed estimate
+/// outside the clean 95 % region 63/400 (limit 10 %; delays of 1–3 pair σ
+/// are indistinguishable from layout error and move the now-honest σ
+/// region); 13 decisive pockets kept (the delay trades against source
+/// height over a flat layout); a correctly rejected critical node can still
+/// leave the 6-phone fix > 4σ of the 7-phone one (seed 26: 4.6σ); σ shrinks
+/// > 10 % on 5.7 % of removals (limit 5 %); 17 few-node fixes miss by > 4σ.
+/// Run here with
 /// `cargo test --release -p minimappr-sim-gates --test statistical_accuracy graceful_degradation -- --ignored --nocapture`.
 #[test]
-#[ignore = "known failure: pocketed-phone outlier rejection and σ monotonicity (docs/field_mode_progress/sim_gates.md)"]
+#[ignore = "known failure: pocketed-phone aggregate, σ monotonicity and few-node tails (docs/field_mode_progress/closeout_C.md)"]
 fn graceful_degradation() {
     assert_pull_request_gate("graceful_degradation");
 }

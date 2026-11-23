@@ -291,13 +291,19 @@ impl TdoaSeedRefiner for JointLmSeedRefiner {
                     let scale = if drift_length > drift_bound { drift_bound / drift_length } else { 1.0 };
                     let drift = [raw_drift[0] * scale, raw_drift[1] * scale];
                     let prior_information = model.height_prior.map_or(0.0, |(_, std)| std.powi(-2));
-                    // A solved height outside the band means the data contradict
-                    // the model (seen: a misplaced node manufacturing a 22 m
-                    // height, mesh offline_host_loss): keep the original,
-                    // conservative term, the weak-prior marginal plus the full
-                    // band's drift, rather than credit the data with height.
+                    // The data are credited with height information only when
+                    // they can vouch for it: a solved height inside the band
+                    // (outside, they contradict the model; seen: a misplaced
+                    // node manufacturing a 22 m height, mesh offline_host_loss)
+                    // and enough pairs to pin three coordinates (with two, a
+                    // 3-phone solve, any height on the intersection curve fits
+                    // exactly; such fixes landed 5–10σ out when credited,
+                    // closeout C4). Otherwise keep the
+                    // original conservative term: weak-prior marginal plus the
+                    // full band's drift.
                     let height_in_band = (band_low..=band_high).contains(&position[2]);
-                    let horizontal = if height_in_band {
+                    let pins_every_coordinate = model.terms.len() >= POSITION_DIMENSIONS;
+                    let horizontal = if height_in_band && pins_every_coordinate {
                         height_band_horizontal_covariance(&information, prior_information, band_high - band_low, drift)
                     } else {
                         let band_drift = nalgebra::Vector2::new(drift[0], drift[1]);
