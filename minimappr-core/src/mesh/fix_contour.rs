@@ -33,6 +33,16 @@ pub struct RegionContext {
 }
 
 impl RegionContext {
+    /// Centroid and circumradius of node positions (in the frame fixes are
+    /// solved in), unanchored. The one place the layout extent is computed,
+    /// so a restoring successor classifies exactly as the publisher did.
+    pub fn from_layout_positions(positions_m: &[[f64; 3]]) -> Self {
+        let count = positions_m.len().max(1) as f64;
+        let centre = positions_m.iter().fold([0.0; 2], |acc, p| [acc[0] + p[0] / count, acc[1] + p[1] / count]);
+        let radius = positions_m.iter().map(|p| (p[0] - centre[0]).hypot(p[1] - centre[1])).fold(0.0, f64::max);
+        Self { layout_centre_m: centre, layout_radius_m: radius, anchor: None }
+    }
+
     /// Inside = within the layout's circumradius of its centroid (the
     /// geometry split the calibration is fitted on).
     pub fn contains(&self, position_m: [f64; 3]) -> bool {
@@ -61,19 +71,24 @@ pub fn world_frame_covariance(position_m: [f64; 3], covariance_m2: &[[f64; 3]; 3
     world
 }
 
+/// The calibration σ scale a fix at `position_m` is published with. Without
+/// a context (no layout) the inside scale, the larger one, applies.
+pub fn published_sigma_scale(position_m: [f64; 3], context: Option<&RegionContext>, calibration: &FixCovarianceCalibrationConfig) -> f64 {
+    match context {
+        Some(context) if !context.contains(position_m) => calibration.outside_layout_sigma_scale,
+        _ => calibration.inside_layout_sigma_scale,
+    }
+}
+
 /// The covariance the host draws: calibrated Σ_fix, plus the anchor terms
-/// when the island is anchored. Without a context (no layout) the inside
-/// scale, the larger one, applies.
+/// when the island is anchored.
 pub fn published_covariance(
     position_m: [f64; 3],
     covariance_m2: &[[f64; 3]; 3],
     context: Option<&RegionContext>,
     calibration: &FixCovarianceCalibrationConfig,
 ) -> [[f64; 3]; 3] {
-    let scale = match context {
-        Some(context) if !context.contains(position_m) => calibration.outside_layout_sigma_scale,
-        _ => calibration.inside_layout_sigma_scale,
-    };
+    let scale = published_sigma_scale(position_m, context, calibration);
     let calibrated = covariance_m2.map(|row| row.map(|value| value * scale * scale));
     match context.and_then(|context| context.anchor.as_ref()) {
         Some(anchor) => world_frame_covariance(position_m, &calibrated, anchor),

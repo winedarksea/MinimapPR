@@ -153,7 +153,7 @@ impl FieldHostStateMachine {
         host.sync.local_plane = restored.local_plane_origin_deg.map(|(latitude, longitude)| LocalTangentPlane::new(latitude, longitude));
         if host.config.entity_tracking.enabled {
             let config = &host.config;
-            host.entities.restore_entities(&restored.entities, &restored.clock_models, &config.entity_tracking, &config.entity_contour, &config.fix_covariance_calibration, now_ms);
+            host.entities.restore_entities(&restored.entities, &restored.clock_models, &restored.layouts, &config.entity_tracking, &config.entity_contour, &config.fix_covariance_calibration, now_ms);
         }
         // Call and entity ids stay unique across terms (records outlive their
         // host, and the dead host may have published entities no mirror has).

@@ -5,7 +5,9 @@
 //! stay idempotent), membership and join order, the entity id counter, the
 //! active transport, the previous term, the session's ENU origin, and every
 //! live bird entity's latest update (with each island's last clock model, to
-//! carry entity times onto the successor's reference clock). Not restored:
+//! carry entity times onto the successor's reference clock), plus each
+//! island's last published layout, only to tell which calibration scale a
+//! restored entity's contour was drawn with. Not restored as live state:
 //! clock filters and layouts. The successor runs a chirp round at once (its scheduler starts
 //! fresh), which re-surveys every island within one round; reusing a dead
 //! host's clock models would risk a stale model on the first new fix.
@@ -14,7 +16,7 @@ use std::collections::BTreeMap;
 
 use crate::protocol::detection_messages::BirdEntityUpdate;
 use crate::protocol::mesh_messages::EventLogEntry;
-use crate::protocol::session_messages::ClockModel;
+use crate::protocol::session_messages::{ClockModel, LayoutModel};
 use crate::protocol::wire_codes::{BirdEntityState, SessionTransportCode};
 use crate::protocol::FieldMessage;
 
@@ -34,6 +36,8 @@ pub struct RestoredHostState {
     pub clock_models: BTreeMap<u32, ClockModel>,
     /// (latitude, longitude) of the ENU origin the log's positions use.
     pub local_plane_origin_deg: Option<(f64, f64)>,
+    /// Latest published layout per island (node positions in the fix frame).
+    pub layouts: BTreeMap<u32, LayoutModel>,
 }
 
 pub fn restore_from_mirror(entries: &[EventLogEntry]) -> RestoredHostState {
@@ -58,8 +62,11 @@ pub fn restore_from_mirror(entries: &[EventLogEntry]) -> RestoredHostState {
                 restored.clock_models.insert(model.island_id, model);
             }
             // An unset plane is published as (0, 0) (`island_model_records`).
-            Some(FieldMessage::LayoutModel(layout)) if layout.origin_latitude_deg != 0.0 || layout.origin_longitude_deg != 0.0 => {
-                restored.local_plane_origin_deg = Some((layout.origin_latitude_deg, layout.origin_longitude_deg));
+            Some(FieldMessage::LayoutModel(layout)) => {
+                if layout.origin_latitude_deg != 0.0 || layout.origin_longitude_deg != 0.0 {
+                    restored.local_plane_origin_deg = Some((layout.origin_latitude_deg, layout.origin_longitude_deg));
+                }
+                restored.layouts.insert(layout.island_id, layout);
             }
             Some(FieldMessage::TransportNotice(notice)) => restored.active_transport = Some(notice.transport),
             Some(FieldMessage::HostAnnouncement(announcement)) => {

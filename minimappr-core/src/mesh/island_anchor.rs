@@ -130,15 +130,13 @@ impl IslandSyncEngine {
     pub fn island_region_context(island: &IslandState) -> Option<RegionContext> {
         let layout = island.layout.as_ref()?;
         let positions: Vec<[f64; 3]> = layout.local_positions_m.values().map(|local| Self::anchored(layout, *local)).collect();
-        let count = positions.len().max(1) as f64;
-        let centre = positions.iter().fold([0.0; 2], |acc, p| [acc[0] + p[0] / count, acc[1] + p[1] / count]);
-        let radius = positions.iter().map(|p| (p[0] - centre[0]).hypot(p[1] - centre[1])).fold(0.0, f64::max);
+        let extent = RegionContext::from_layout_positions(&positions);
         let anchor = layout.anchor.as_ref().map(|anchor| AnchorUncertainty {
             translation_sigma_m: anchor.translation_sigma_m,
             rotation_sigma_rad: anchor.rotation_sigma_rad,
-            rotation_centre_m: centre,
+            rotation_centre_m: extent.layout_centre_m,
         });
-        Some(RegionContext { layout_centre_m: centre, layout_radius_m: radius, anchor })
+        Some(RegionContext { anchor, ..extent })
     }
 
     pub fn chirality_confidence(&self, node: NodeId) -> Option<f64> {
