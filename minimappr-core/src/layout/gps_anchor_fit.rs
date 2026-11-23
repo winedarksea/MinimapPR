@@ -30,6 +30,25 @@ impl RigidTransform2d {
             sin * local[0] + cos * local[1] + self.translation_m[1],
         ]
     }
+
+    /// `self ∘ inner`: apply `inner` first. A mirror on the outer map flips
+    /// the sense of the inner rotation (M·R(α) = R(−α)·M).
+    pub fn compose(&self, inner: &RigidTransform2d) -> RigidTransform2d {
+        let inner_rotation = if self.mirrored { -inner.rotation_rad } else { inner.rotation_rad };
+        RigidTransform2d {
+            rotation_rad: self.rotation_rad + inner_rotation,
+            translation_m: self.apply(inner.translation_m),
+            mirrored: self.mirrored != inner.mirrored,
+        }
+    }
+
+    pub fn inverse(&self) -> RigidTransform2d {
+        // p = R·M·q + t ⇒ q = M·R(−θ)·(p − t) = R(±θ)·M·(p − t).
+        let rotation_rad = if self.mirrored { self.rotation_rad } else { -self.rotation_rad };
+        let linear = RigidTransform2d { rotation_rad, translation_m: [0.0, 0.0], mirrored: self.mirrored };
+        let moved = linear.apply(self.translation_m);
+        RigidTransform2d { rotation_rad, translation_m: [-moved[0], -moved[1]], mirrored: self.mirrored }
+    }
 }
 
 /// Weighted least-squares rigid fit source → target (closed-form 2D Kabsch).

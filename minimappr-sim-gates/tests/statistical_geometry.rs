@@ -24,13 +24,10 @@ fn anchor_stability() {
     assert_pull_request_gate("anchor_stability");
 }
 
-/// KNOWN FAILURE (W4-sim-gates review finding, not loosened): the strategy
-/// row "a 20 m GPS jump on one phone while the group is still moves the
-/// anchor less than 1 m" fails when the jump persists: `MapAnchorFilter`
-/// plus the Huber fit still follow a 3.3σ offset by ~2 m median, up to ~7 m.
-/// `anchor_stability` gates only a 30 s transient jump. Nightly runs this.
+/// Strategy row read literally: a 20 m jump that persists while the group
+/// is still moves the anchor < 1 m. Passes since closeout C1
+/// (`FilteredMapAnchor` subtracts a still phone's jump from its own fixes).
 #[test]
-#[ignore = "known failure: persistent GPS jump moves the still anchor > 1 m (docs/field_mode_progress/sim_gates.md)"]
 fn anchor_persistent_jump() {
     assert_pull_request_gate("anchor_persistent_jump");
 }

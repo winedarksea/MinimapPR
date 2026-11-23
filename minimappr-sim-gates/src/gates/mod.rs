@@ -36,22 +36,29 @@ pub struct GateEntry {
     pub pull_request_seed_count: usize,
     /// Default nightly seeds per requested "seed" unit (expensive gates run fewer).
     pub nightly_seed_fraction: f64,
+    /// Seeds outside the fixed PR range that once failed, run in every PR
+    /// subset after their fix (strategy seed policy).
+    pub regression_seeds: &'static [u64],
 }
 
+/// Anchor jump seeds (closeout C1): 20 m jump moved the filtered anchor
+/// > 1 m before `FilteredMapAnchor`'s per-phone jump holding.
+const ANCHOR_REGRESSION_SEEDS: &[u64] = &[38, 100_105];
+
 pub const GATES: &[GateEntry] = &[
-    GateEntry { name: "monte_carlo_accuracy", test_target: "statistical_accuracy", function: accuracy_gate::monte_carlo_accuracy, pull_request_seed_count: 200, nightly_seed_fraction: 2.0 },
-    GateEntry { name: "graceful_degradation", test_target: "statistical_accuracy", function: degradation_gate::graceful_degradation, pull_request_seed_count: 100, nightly_seed_fraction: 2.0 },
-    GateEntry { name: "mesh_contour_coverage", test_target: "statistical_coverage", function: coverage_gate::mesh_contour_coverage, pull_request_seed_count: 100, nightly_seed_fraction: 1.0 },
-    GateEntry { name: "mesh_contour_coverage_by_class", test_target: "statistical_coverage", function: coverage_gate::mesh_contour_coverage_by_class, pull_request_seed_count: 100, nightly_seed_fraction: 1.0 },
-    GateEntry { name: "srp_contour_coverage", test_target: "statistical_coverage", function: coverage_gate::srp_contour_coverage, pull_request_seed_count: 24, nightly_seed_fraction: 1.0 },
-    GateEntry { name: "geometric_invariance", test_target: "statistical_geometry", function: invariance_gate::geometric_invariance, pull_request_seed_count: 100, nightly_seed_fraction: 2.0 },
-    GateEntry { name: "srp_lm_invariance", test_target: "statistical_geometry", function: srp_invariance_gate::srp_lm_invariance, pull_request_seed_count: 4, nightly_seed_fraction: 0.1 },
-    GateEntry { name: "chirality", test_target: "statistical_geometry", function: chirality_gate::chirality, pull_request_seed_count: 400, nightly_seed_fraction: 10.0 },
-    GateEntry { name: "anchor_stability", test_target: "statistical_geometry", function: anchor_gate::anchor_stability, pull_request_seed_count: 30, nightly_seed_fraction: 1.0 },
-    GateEntry { name: "anchor_persistent_jump", test_target: "statistical_geometry", function: anchor_gate::anchor_persistent_jump, pull_request_seed_count: 30, nightly_seed_fraction: 1.0 },
-    GateEntry { name: "island_isolation", test_target: "statistical_mesh", function: island_isolation_gate::island_isolation, pull_request_seed_count: 20, nightly_seed_fraction: 0.5 },
-    GateEntry { name: "loop_consistency", test_target: "statistical_mesh", function: loop_consistency_gate::loop_consistency, pull_request_seed_count: 300, nightly_seed_fraction: 10.0 },
-    GateEntry { name: "resource_bounds", test_target: "statistical_resources", function: resource_gate::resource_bounds, pull_request_seed_count: 1, nightly_seed_fraction: 0.02 },
+    GateEntry { name: "monte_carlo_accuracy", test_target: "statistical_accuracy", function: accuracy_gate::monte_carlo_accuracy, pull_request_seed_count: 200, nightly_seed_fraction: 2.0, regression_seeds: &[] },
+    GateEntry { name: "graceful_degradation", test_target: "statistical_accuracy", function: degradation_gate::graceful_degradation, pull_request_seed_count: 100, nightly_seed_fraction: 2.0, regression_seeds: &[] },
+    GateEntry { name: "mesh_contour_coverage", test_target: "statistical_coverage", function: coverage_gate::mesh_contour_coverage, pull_request_seed_count: 100, nightly_seed_fraction: 1.0, regression_seeds: &[] },
+    GateEntry { name: "mesh_contour_coverage_by_class", test_target: "statistical_coverage", function: coverage_gate::mesh_contour_coverage_by_class, pull_request_seed_count: 100, nightly_seed_fraction: 1.0, regression_seeds: &[] },
+    GateEntry { name: "srp_contour_coverage", test_target: "statistical_coverage", function: coverage_gate::srp_contour_coverage, pull_request_seed_count: 24, nightly_seed_fraction: 1.0, regression_seeds: &[] },
+    GateEntry { name: "geometric_invariance", test_target: "statistical_geometry", function: invariance_gate::geometric_invariance, pull_request_seed_count: 100, nightly_seed_fraction: 2.0, regression_seeds: &[] },
+    GateEntry { name: "srp_lm_invariance", test_target: "statistical_geometry", function: srp_invariance_gate::srp_lm_invariance, pull_request_seed_count: 4, nightly_seed_fraction: 0.1, regression_seeds: &[] },
+    GateEntry { name: "chirality", test_target: "statistical_geometry", function: chirality_gate::chirality, pull_request_seed_count: 400, nightly_seed_fraction: 10.0, regression_seeds: &[] },
+    GateEntry { name: "anchor_stability", test_target: "statistical_geometry", function: anchor_gate::anchor_stability, pull_request_seed_count: 30, nightly_seed_fraction: 1.0, regression_seeds: ANCHOR_REGRESSION_SEEDS },
+    GateEntry { name: "anchor_persistent_jump", test_target: "statistical_geometry", function: anchor_gate::anchor_persistent_jump, pull_request_seed_count: 30, nightly_seed_fraction: 1.0, regression_seeds: ANCHOR_REGRESSION_SEEDS },
+    GateEntry { name: "island_isolation", test_target: "statistical_mesh", function: island_isolation_gate::island_isolation, pull_request_seed_count: 20, nightly_seed_fraction: 0.5, regression_seeds: &[] },
+    GateEntry { name: "loop_consistency", test_target: "statistical_mesh", function: loop_consistency_gate::loop_consistency, pull_request_seed_count: 300, nightly_seed_fraction: 10.0, regression_seeds: &[] },
+    GateEntry { name: "resource_bounds", test_target: "statistical_resources", function: resource_gate::resource_bounds, pull_request_seed_count: 1, nightly_seed_fraction: 0.02, regression_seeds: &[] },
 ];
 
 pub fn gate_by_name(name: &str) -> Option<&'static GateEntry> {
@@ -63,7 +70,7 @@ pub fn gate_by_name(name: &str) -> Option<&'static GateEntry> {
 pub fn assert_pull_request_gate(name: &str) {
     let gate = gate_by_name(name).unwrap_or_else(|| panic!("unknown gate {name}"));
     let run = GateRun {
-        seeds: crate::gate_seeds::pull_request_seeds(gate.pull_request_seed_count),
+        seeds: crate::gate_seeds::pull_request_seeds(gate.pull_request_seed_count, gate.regression_seeds),
         threads: crate::gate_seeds::default_thread_count(),
         config: SimGateConfig::default(),
     };

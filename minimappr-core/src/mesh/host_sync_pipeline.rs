@@ -313,7 +313,10 @@ impl HostSyncPipeline {
                 .filter(|(a, b, _)| self.muted_nodes.contains(a) || self.muted_nodes.contains(b))
                 .count() as u64;
             self.engine.apply_round_solution(island_id, &solution, now_ms, sync);
-            self.engine.refresh_anchor(island_id, &fixes, sync);
+            let group_is_still = self.engine.islands[&island_id].members.iter().all(|node| {
+                membership.members.get(node).is_some_and(|member| member.motion_state == MotionState::Still)
+            });
+            self.engine.refresh_anchor(island_id, &fixes, now_ms, group_is_still, sync);
             records.extend(self.island_model_records(island_id, now_ms, sync));
         }
         for island in self.engine.islands.values() {

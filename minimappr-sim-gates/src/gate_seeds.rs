@@ -20,11 +20,17 @@ pub const NIGHTLY_SEED_MODULUS: u64 = CALIBRATION_TRAINING_SEED_START;
 const DEFAULT_THREAD_COUNT: usize = 8;
 
 /// Seeds a `cargo test` gate runs: the env override alone, else `count`
-/// fixed seeds from the PR start.
-pub fn pull_request_seeds(count: usize) -> Vec<u64> {
+/// fixed seeds from the PR start plus the gate's regression seeds (seeds
+/// a nightly run once failed on, kept after the fix; strategy seed policy).
+pub fn pull_request_seeds(count: usize, regression_seeds: &[u64]) -> Vec<u64> {
     match std::env::var(GATE_SEED_ENVIRONMENT_VARIABLE) {
         Ok(value) => vec![value.trim().parse().expect("MINIMAPPR_SIM_GATES_SEED must be an unsigned integer")],
-        Err(_) => (PULL_REQUEST_SEED_START..PULL_REQUEST_SEED_START + count as u64).collect(),
+        Err(_) => {
+            let mut seeds: Vec<u64> = (PULL_REQUEST_SEED_START..PULL_REQUEST_SEED_START + count as u64).collect();
+            let extra: Vec<u64> = regression_seeds.iter().copied().filter(|seed| !seeds.contains(seed)).collect();
+            seeds.extend(extra);
+            seeds
+        }
     }
 }
 

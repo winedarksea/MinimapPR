@@ -39,6 +39,7 @@ pub mod host_restoration;
 pub mod host_state_machine;
 pub mod host_sync_pipeline;
 pub mod host_transport_policy;
+pub mod island_anchor;
 pub mod island_round_solver;
 pub mod island_sync_engine;
 pub mod layout_frames;

@@ -207,7 +207,7 @@ pub struct AnchorGateConfig {
     pub jump_time_s: f64,
     pub jump_distance_m: f64,
     /// A multipath jump lasts this long (then the phone's fix recovers);
-    /// a persistent jump is measured too and reported, not gated.
+    /// `anchor_persistent_jump` gates one that never recovers.
     pub jump_duration_s: f64,
     pub maximum_jump_response_m: f64,
     /// Stillness clamp: anchor movement from `settle_time_s` to the jump

@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::layout::filtered_map_anchor::FilteredMapAnchorConfig;
 use crate::layout::gps_anchor_fit::AnchorFitConfig;
 use crate::layout::robust_layout_refine::LayoutRefineConfig;
 use crate::sync::clock_filter::ClockFilterConfig;
@@ -212,6 +213,8 @@ pub struct IslandSyncConfig {
     pub clock_filter: ClockFilterConfig,
     pub layout_refine: LayoutRefineConfig,
     pub anchor_fit: AnchorFitConfig,
+    /// Per-island anchor filter and still-phone jump holding.
+    pub anchor_tracking: FilteredMapAnchorConfig,
 }
 
 impl Default for IslandSyncConfig {
@@ -233,6 +236,7 @@ impl Default for IslandSyncConfig {
             clock_filter: ClockFilterConfig::default(),
             layout_refine: LayoutRefineConfig::default(),
             anchor_fit: AnchorFitConfig::default(),
+            anchor_tracking: FilteredMapAnchorConfig::default(),
         }
     }
 }

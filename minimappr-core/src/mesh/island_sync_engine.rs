@@ -10,37 +10,32 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::layout::gps_anchor_fit::{fit_layout_to_gps, AnchorFit, ChiralityCue, GpsFix};
+use crate::layout::filtered_map_anchor::FilteredMapAnchor;
+use crate::layout::gps_anchor_fit::{AnchorFit, ChiralityCue};
 use crate::protocol::mesh_messages::ChirpDirectionReport;
 use crate::protocol::session_messages::ChirpArrivalReport;
 use crate::protocol::NodeId;
 use crate::sync::acoustic_islands::{acoustic_components, AcousticIslandTracker, HearingObservation, IslandEvent};
 use crate::sync::clock_filter::{ClockUpdateOutcome, PhoneClockFilter};
 
-use super::chirality_cue::chirality_from_bearing_pair;
 use super::clock_mapping::NodeClockMapping;
 use super::layout_frames::{layouts_are_reflected, previous_to_new_frame};
 use super::config::IslandSyncConfig;
 use super::island_round_solver::IslandRoundSolution;
 use super::MeshMilliseconds;
 
-const MILLISECONDS_PER_SECOND: f64 = 1_000.0;
+pub(super) const MILLISECONDS_PER_SECOND: f64 = 1_000.0;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct IslandLayout {
     pub captured_ms: MeshMilliseconds,
     pub local_positions_m: BTreeMap<NodeId, [f64; 3]>,
     pub sigmas_m: BTreeMap<NodeId, f64>,
-    /// Map anchor fitted to this layout's own frame (each solve has its
-    /// own MDS frame, so an anchor never transfers between layouts).
+    /// Filtered map anchor expressed in this layout's own frame (each solve
+    /// has its own MDS frame; the island's filter is re-framed per solve).
     pub anchor: Option<AnchorFit>,
 }
 
-/// A bearing pair locks chirality only if the two chiralities' predicted
-/// turn angles differ by more than this many σ.
-const DECISIVE_CUE_SIGMA_MULTIPLIER: f64 = 3.0;
-/// Bearings kept to pair with the next one from the same reporter.
-const REMEMBERED_DIRECTION_REPORTS: usize = 32;
 #[derive(Debug, Clone)]
 pub struct IslandState {
     pub island_id: u32,
@@ -53,7 +48,11 @@ pub struct IslandState {
     pub previous_layout: Option<IslandLayout>,
     pub layout_epoch: u32,
     pub chirality_cue: ChiralityCue,
+    /// The filtered anchor (`anchor_tracker`'s), what positions are drawn with.
     pub anchor: Option<AnchorFit>,
+    pub anchor_tracker: FilteredMapAnchor<NodeId>,
+    /// Every member reported still at the last round (anchor filter clamp).
+    pub group_is_still: bool,
 }
 
 /// A node's position for a solve, in the anchored (or layout) frame.
@@ -71,7 +70,7 @@ pub struct IslandSyncEngine {
     node_clock_epochs: BTreeMap<NodeId, u32>,
     next_clock_epoch: u32,
     pub listen_only_nodes: BTreeSet<NodeId>,
-    recent_direction_reports: Vec<ChirpDirectionReport>,
+    pub(super) recent_direction_reports: Vec<ChirpDirectionReport>,
 }
 
 impl IslandSyncEngine {
@@ -171,6 +170,8 @@ impl IslandSyncEngine {
                         layout_epoch: 0,
                         chirality_cue: ChiralityCue::Unknown,
                         anchor: None,
+                        anchor_tracker: FilteredMapAnchor::new(config.anchor_tracking.clone()),
+                        group_is_still: false,
                     }
                 }
             };
@@ -296,6 +297,9 @@ impl IslandSyncEngine {
                 anchor: None,
             };
             let frame_change = island.layout.as_ref().and_then(|previous| previous_to_new_frame(previous, &fresh));
+            if island.layout.is_some() {
+                island.anchor_tracker.reframe(frame_change.as_ref());
+            }
             if let (Some(previous), Some(frame_change)) = (&island.layout, frame_change) {
                 // Members not placed this round keep their last position, moved
                 // into this solve's frame (MDS frames differ per solve), with a
@@ -335,54 +339,6 @@ impl IslandSyncEngine {
         }
     }
 
-    /// Fit the island's layout to the GPS fixes (both chiralities tried).
-    pub fn refresh_anchor(&mut self, island_id: u32, fixes: &BTreeMap<NodeId, GpsFix>, config: &IslandSyncConfig) {
-        let Some(island) = self.islands.get_mut(&island_id) else { return };
-        let Some(layout) = &island.layout else { return };
-        let nodes: Vec<NodeId> = layout.local_positions_m.keys().copied().collect();
-        let layout_xy: Vec<[f64; 2]> = nodes
-            .iter()
-            .map(|node| {
-                let p = layout.local_positions_m[node];
-                [p[0], p[1]]
-            })
-            .collect();
-        let node_fixes: Vec<Option<GpsFix>> = nodes.iter().map(|node| fixes.get(node).copied()).collect();
-        island.anchor = fit_layout_to_gps(&layout_xy, &node_fixes, island.chirality_cue, &config.anchor_fit).ok();
-        if let Some(layout) = island.layout.as_mut() {
-            layout.anchor = island.anchor.clone();
-        }
-    }
-
-    /// Chirp bearings from one stereo phone or array node lock chirality
-    /// once two of them in one round form a decisive pair ([`chirality_cue`]).
-    pub fn apply_direction_report(
-        &mut self,
-        report: &ChirpDirectionReport,
-        fixes: &BTreeMap<NodeId, GpsFix>,
-        config: &IslandSyncConfig,
-    ) -> bool {
-        let Some(island) = self.island_of(report.reporting_node_id) else { return false };
-        let island_id = island.island_id;
-        let Some(layout) = &island.layout else { return false };
-        let noise = config.relative_bearing_noise_std_deg.to_radians();
-        let cue = self
-            .recent_direction_reports
-            .iter()
-            .rev()
-            .find_map(|earlier| chirality_from_bearing_pair(&layout.local_positions_m, earlier, report, noise, DECISIVE_CUE_SIGMA_MULTIPLIER));
-        self.recent_direction_reports.push(report.clone());
-        if self.recent_direction_reports.len() > REMEMBERED_DIRECTION_REPORTS {
-            self.recent_direction_reports.remove(0);
-        }
-        let Some(cue) = cue else { return false };
-        if let Some(island) = self.islands.get_mut(&island_id) {
-            island.chirality_cue = cue;
-        }
-        self.refresh_anchor(island_id, fixes, config);
-        true
-    }
-
     /// Device clock → island reference clock for `node`, if its model is valid.
     pub fn clock_mapping(&self, node: NodeId) -> Option<NodeClockMapping> {
         let island = self.island_of(node)?;
@@ -394,16 +350,6 @@ impl IslandSyncEngine {
         let filter = island.filters.get(&node)?;
         let prediction = filter.predict(island.last_reference_time_s)?;
         Some(NodeClockMapping::from_prediction(epoch, island.last_reference_time_s, &prediction))
-    }
-
-    fn anchored(layout: &IslandLayout, local: [f64; 3]) -> [f64; 3] {
-        match &layout.anchor {
-            Some(anchor) => {
-                let xy = anchor.transform.apply([local[0], local[1]]);
-                [xy[0], xy[1], local[2]]
-            }
-            None => local,
-        }
     }
 
     /// Position for a solve. A node that walked at call time gets the layout
@@ -435,14 +381,5 @@ impl IslandSyncEngine {
             position_m: Self::anchored(layout, local),
             std_m: sigma.max(config.range_sigma_m).hypot(config.assumed_phone_height_sigma_m),
         })
-    }
-
-    pub fn chirality_confidence(&self, node: NodeId) -> Option<f64> {
-        self.island_of(node)?.anchor.as_ref().map(|anchor| anchor.chirality_confidence)
-    }
-
-    pub fn chirality_locked(&self, node: NodeId) -> bool {
-        self.island_of(node)
-            .is_some_and(|island| matches!(island.chirality_cue, ChiralityCue::Locked { .. }))
     }
 }

@@ -1,39 +1,29 @@
 //! Map anchor stability for a still group: every GPS interval a fresh chirp
-//! round re-solves the layout (new MDS frame, aligned onto the previous one
-//! as `MapAnchorFilter`'s contract requires), the layout is fitted to GPS
-//! (6 m σ: a slowly varying multipath bias plus jitter) and fed to the
-//! stillness-clamped filter. `anchor_stability` gates: after settling the
-//! anchored phones drift < 1 m, and a *transient* (30 s) 20 m jump on one
-//! phone moves them < 1 m. `anchor_persistent_jump` gates the strategy
+//! round re-solves the layout (new MDS frame; the anchor is re-framed into
+//! it), the layout is fitted to GPS (6 m σ: a slowly varying multipath bias
+//! plus jitter) and fed to `FilteredMapAnchor`, the stillness-clamped
+//! filter with per-phone jump holding the mesh publishes.
+//! `anchor_stability` gates: after settling the anchored phones drift
+//! < 1 m, and a *transient* (30 s) 20 m jump on one phone moves them < 1 m. `anchor_persistent_jump` gates the strategy
 //! row read literally: a 20 m jump that *stays* (a phone settled under a
 //! hemlock keeps its multipath offset) also moves them < 1 m. The
-//! unfiltered per-round fit (what `mesh::island_sync_engine` publishes
-//! today) is measured alongside as a diagnostic.
+//! unfiltered per-round fit (what the mesh published before closeout C1)
+//! is measured alongside as a diagnostic.
 
-use minimappr_core::layout::anchor_filter::{AnchorFilterConfig, MapAnchorFilter};
-use minimappr_core::layout::gps_anchor_fit::{weighted_kabsch_2d, ChiralityCue, GpsFix, RigidTransform2d};
+use minimappr_core::layout::filtered_map_anchor::{AnchorRound, FilteredMapAnchor, FilteredMapAnchorConfig};
+use minimappr_core::layout::gps_anchor_fit::{weighted_kabsch_2d, AnchorFitConfig, ChiralityCue, GpsFix, RigidTransform2d};
 
 use super::GateRun;
 use crate::gate_seeds::{run_trials_in_parallel, GateOutcome};
-use crate::layout_chain::{apply_all, fit_to_gps, horizontal, is_reflection_of, solve_layout_from_truth};
+use crate::layout_chain::{apply_all, horizontal, is_reflection_of, solve_layout_from_truth};
 use crate::statistics::{median, percentile};
 use crate::trial_geometry::{gaussian, random_phone_layout};
 
-fn rms_residual(transform: &RigidTransform2d, source: &[[f64; 2]], target: &[[f64; 2]]) -> f64 {
-    let sum: f64 = source.iter().zip(target).map(|(s, t)| {
-        let p = transform.apply(*s);
-        (p[0] - t[0]).powi(2) + (p[1] - t[1]).powi(2)
-    }).sum();
-    (sum / source.len().max(1) as f64).sqrt()
-}
-
-/// Map a fresh layout into the previous layout's frame (reflection allowed).
-fn align_onto(previous: &[[f64; 2]], fresh: &[[f64; 2]]) -> Vec<[f64; 2]> {
-    let weights = vec![1.0; fresh.len()];
-    let proper = weighted_kabsch_2d(fresh, previous, &weights, false);
-    let mirrored = weighted_kabsch_2d(fresh, previous, &weights, true);
-    let best = if rms_residual(&proper, fresh, previous) <= rms_residual(&mirrored, fresh, previous) { proper } else { mirrored };
-    apply_all(&best, fresh)
+/// Map from the previous solve's frame into a fresh one over all phones
+/// (mirror decided by the cross-covariance sign, as
+/// `mesh::layout_frames::previous_to_new_frame` does).
+fn previous_to_fresh_frame(previous: &[[f64; 2]], fresh: &[[f64; 2]]) -> RigidTransform2d {
+    weighted_kabsch_2d(previous, fresh, &vec![1.0; fresh.len()], is_reflection_of(fresh, previous))
 }
 
 fn largest_displacement(a: &[[f64; 2]], b: &[[f64; 2]]) -> f64 {
@@ -58,7 +48,8 @@ fn run_track(seed: u64, run: &GateRun, variant: JumpVariant) -> Result<AnchorTra
     let truth_xy = horizontal(&truth);
     let bias_std = config.gps_bias_fraction_of_error * gps_std;
     let jitter_std = (gps_std.powi(2) - bias_std.powi(2)).max(0.0).sqrt();
-    let mut filter = MapAnchorFilter::new(AnchorFilterConfig::default());
+    let mut anchor = FilteredMapAnchor::new(FilteredMapAnchorConfig::default());
+    let nodes: Vec<usize> = (0..truth.len()).collect();
     let mut frame: Option<Vec<[f64; 2]>> = None;
     let mut track = Vec::new();
     let epochs = (config.session_duration_s / config.gps_fix_interval_s) as u64;
@@ -66,9 +57,13 @@ fn run_track(seed: u64, run: &GateRun, variant: JumpVariant) -> Result<AnchorTra
         let time = epoch as f64 * config.gps_fix_interval_s;
         let layout = solve_layout_from_truth(seed ^ epoch.wrapping_mul(0x9e37_79b9), "anchor_ranges", &truth, run.config.chirality.chirp_range_std_m)
             .map_err(|error| format!("layout solve failed at {time} s: {error:?}"))?;
+        // Each solve keeps its own MDS frame; the anchor follows it the way
+        // the mesh's island engine does (`FilteredMapAnchor::reframe`).
         let fresh = horizontal(&layout.positions_m);
-        let aligned = frame.as_ref().map_or(fresh.clone(), |previous| align_onto(previous, &fresh));
-        frame = Some(aligned.clone());
+        if let Some(previous) = &frame {
+            anchor.reframe(Some(&previous_to_fresh_frame(previous, &fresh)));
+        }
+        frame = Some(fresh.clone());
         let jumped = time >= config.jump_time_s
             && match variant {
                 JumpVariant::None => false,
@@ -89,16 +84,16 @@ fn run_track(seed: u64, run: &GateRun, variant: JumpVariant) -> Result<AnchorTra
             })
             .collect();
         // Chirality is the chirality gate's business: lock it to the truth here.
-        let cue = ChiralityCue::Locked { mirrored: is_reflection_of(&aligned, &truth_xy) };
-        let fit = fit_to_gps(&aligned, &fixes, cue).map_err(|error| format!("anchor fit failed at {time} s: {error:?}"))?;
-        filter.update(time, &fit, true);
-        if let Some(estimate) = filter.estimate() {
-            let anchored = apply_all(&estimate.transform, &aligned);
+        let cue = ChiralityCue::Locked { mirrored: is_reflection_of(&fresh, &truth_xy) };
+        let round = AnchorRound { time_s: time, nodes: &nodes, layout_xy: &fresh, fixes: &fixes, cue, group_is_still: true };
+        let fit = anchor.update(&round, &AnchorFitConfig::default()).map_err(|error| format!("anchor fit failed at {time} s: {error:?}"))?;
+        if let Some(estimate) = anchor.estimate() {
+            let anchored = apply_all(&estimate.transform, &fresh);
             let centre = anchored.iter().fold([0.0; 2], |acc, p| [acc[0] + p[0] / anchored.len() as f64, acc[1] + p[1] / anchored.len() as f64]);
             let lever = anchored.iter().map(|p| (p[0] - centre[0]).hypot(p[1] - centre[1])).fold(0.0, f64::max);
             let translation_sigma = estimate.translation_sigma_m[0].max(estimate.translation_sigma_m[1]);
             let reported_sigma = translation_sigma.hypot(estimate.rotation_sigma_rad * lever);
-            track.push((time, anchored, apply_all(&fit.transform, &aligned), reported_sigma));
+            track.push((time, anchored, apply_all(&fit.transform, &fresh), reported_sigma));
         }
     }
     Ok(track)
@@ -177,8 +172,8 @@ pub fn anchor_stability(run: &GateRun) -> GateOutcome {
         anchor.settle_time_s, anchor.jump_time_s, median(&drift), percentile(&drift, 1.0), median(&sigma)
     ));
     outcome.summary(format!("20 m jump for {} s vs no-jump twin, filtered: median {:.3} m, max {:.3} m", anchor.jump_duration_s, median(&jump), percentile(&jump, 1.0)));
-    outcome.summary(format!("same jump, unfiltered per-round fit (what the mesh publishes today): median {:.2} m, max {:.2} m", median(&unfiltered), percentile(&unfiltered, 1.0)));
-    outcome.summary(format!("persistent 20 m jump (reported, not gated): filtered median {:.2} m, max {:.2} m", median(&persistent), percentile(&persistent, 1.0)));
+    outcome.summary(format!("same jump, unfiltered per-round fit (diagnostic): median {:.2} m, max {:.2} m", median(&unfiltered), percentile(&unfiltered, 1.0)));
+    outcome.summary(format!("persistent 20 m jump (gated by anchor_persistent_jump): filtered median {:.2} m, max {:.2} m", median(&persistent), percentile(&persistent, 1.0)));
     outcome
 }
 

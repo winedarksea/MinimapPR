@@ -171,6 +171,21 @@ impl MapAnchorFilter {
         *last_time = time_s;
     }
 
+    /// Carry the state into a fresh layout frame (`previous_to_new` maps
+    /// old-frame points to new-frame points): T_new = T_old ∘ F⁻¹. The
+    /// variances are kept: MDS frames are centred on the layout, so the
+    /// origin shift that would couple rotation into translation is small.
+    pub fn reframe(&mut self, previous_to_new: &RigidTransform2d) {
+        let Some(estimate) = self.estimate() else { return };
+        let moved = estimate.transform.compose(&previous_to_new.inverse());
+        if let Some((east, north, rotation, mirrored, _)) = self.state.as_mut() {
+            east.value = moved.translation_m[0];
+            north.value = moved.translation_m[1];
+            rotation.value = wrap_angle(moved.rotation_rad);
+            *mirrored = moved.mirrored;
+        }
+    }
+
     pub fn estimate(&self) -> Option<AnchorEstimate> {
         let (east, north, rotation, mirrored, _) = self.state.as_ref()?;
         Some(AnchorEstimate {

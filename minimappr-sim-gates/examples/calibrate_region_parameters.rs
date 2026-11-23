@@ -88,7 +88,7 @@ fn calibrate_mesh(options: &Options, target: f64) {
     println!("  training coverage: shipped {shipped:.3} -> {:.3}; Gaussian 95% 12-gon {GAUSSIAN_95_TWELVE_GON_MULTIPLIER} -> {:.3}", coverage_at(&train, shipped), coverage_at(&train, GAUSSIAN_95_TWELVE_GON_MULTIPLIER));
     println!("  FITTED contour_sigma_multiplier for {target:.3}: {fitted:.3} (training coverage {:.3})", coverage_at(&train, fitted));
     println!("  world-frame coverage at fitted (anchor error charged, diagnostic): {:.3}", coverage_at(&world, fitted));
-    let (held_out, _) = mesh_multipliers(&pull_request_seeds(options.held_out_mesh), options.threads, false);
+    let (held_out, _) = mesh_multipliers(&pull_request_seeds(options.held_out_mesh, &[]), options.threads, false);
     println!("  held-out ({} fixes): coverage at fitted {:.3}, at shipped {:.3}", held_out.len(), coverage_at(&held_out, fitted), coverage_at(&held_out, shipped));
 }
 
@@ -123,7 +123,7 @@ fn calibrate_srp(options: &Options, target: f64) {
     println!("srp temperature: {} training trials in {:.1} s", minimums.len(), started.elapsed().as_secs_f64());
     println!("  training coverage at shipped T {shipped}: {:.3}", coverage_at(&minimums, shipped));
     println!("  FITTED likelihood_temperature for {target:.3}: {fitted:.4} (training coverage {:.3})", coverage_at(&minimums, fitted));
-    let held_out = run_trials_in_parallel(&pull_request_seeds(options.held_out_srp), options.threads, |seed| {
+    let held_out = run_trials_in_parallel(&pull_request_seeds(options.held_out_srp, &[]), options.threads, |seed| {
         let trial = render_srp_trial(seed, &trial_config, &gate_config.geometry, &gate_config.perturbation)?;
         trial.evaluate_at_temperature(fitted)
     });

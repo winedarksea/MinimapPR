@@ -163,3 +163,22 @@ fn quality_score_inflates_sigma_and_missing_fixes_are_skipped() {
         Err(AnchorFitError::TooFewFixes)
     );
 }
+
+#[test]
+fn compose_and_inverse_agree_with_point_application_including_mirrors() {
+    let maps = [
+        RigidTransform2d { rotation_rad: 0.7, translation_m: [3.0, -2.0], mirrored: false },
+        RigidTransform2d { rotation_rad: -2.1, translation_m: [-11.0, 5.5], mirrored: true },
+        RigidTransform2d { rotation_rad: 3.0, translation_m: [0.4, 9.0], mirrored: true },
+    ];
+    let point = [4.0, -7.5];
+    for outer in &maps {
+        let back = outer.inverse().apply(outer.apply(point));
+        assert!((back[0] - point[0]).abs() < 1e-9 && (back[1] - point[1]).abs() < 1e-9, "{outer:?}");
+        for inner in &maps {
+            let composed = outer.compose(inner).apply(point);
+            let stepwise = outer.apply(inner.apply(point));
+            assert!((composed[0] - stepwise[0]).abs() < 1e-9 && (composed[1] - stepwise[1]).abs() < 1e-9);
+        }
+    }
+}
