@@ -13,9 +13,10 @@ is classified and attributed, a gradient-settled cluster drops each label that
 another settled (gradient or LOCO) sibling claims as its top label. Its own top
 label is always kept, so two same-species birds in one window stay labelled.
 
-Holding never blocks a worker. A sibling that arrives before the rest is parked
-here and its worker moves on; the last sibling to arrive takes the whole window
-and assembles it. A window whose missing siblings never arrive (dropped by
+Holding never blocks a worker, and only gradient-settled siblings (the only
+ones that can lose labels) are held: the others go on at once and leave their
+top-label claim behind. A held sibling is parked here and its worker moves on;
+the last sibling to arrive takes the held ones and assembles them. A window whose missing siblings never arrive (dropped by
 backpressure, failed classification) is released after a bounded timeout
 through an emit callback. Windows with a single product pass straight through.
 """
@@ -93,9 +94,16 @@ def _without_labels(classified: Any, dropped: list[str]) -> Any:
     )
 
 
-def reconcile_window_classifications(classified_results: Sequence[Any]) -> tuple[list[Any], int]:
-    """Apply the window rule to sibling ClassifiedResults; returns them and the dropped-label count."""
-    dropped_by_cluster = labels_to_drop_by_cluster([_tier_and_top_label(c) for c in classified_results])
+def reconcile_window_classifications(
+    classified_results: Sequence[Any], other_sibling_claims: Sequence[tuple[str | None, str | None]] = ()
+) -> tuple[list[Any], int]:
+    """Apply the window rule to sibling ClassifiedResults; returns them and the dropped-label count.
+
+    `other_sibling_claims` are `(tier, top label)` of siblings already released
+    unchanged (they could never lose a label), still claiming their top labels.
+    """
+    claims = [_tier_and_top_label(c) for c in classified_results] + list(other_sibling_claims)
+    dropped_by_cluster = labels_to_drop_by_cluster(claims)[: len(classified_results)]
     reconciled: list[Any] = []
     dropped_count = 0
     for classified, dropped in zip(classified_results, dropped_by_cluster):
@@ -116,7 +124,8 @@ class WindowSibling:
 @dataclass(slots=True)
 class _PendingWindow:
     expected_sibling_count: int
-    arrived: list[WindowSibling] = field(default_factory=list)
+    arrived: list[WindowSibling] = field(default_factory=list)  # held: gradient-settled only
+    released_sibling_claims: list[tuple[str | None, str | None]] = field(default_factory=list)
     resolved_candidate_ids: set[str] = field(default_factory=set)
     timeout_handle: asyncio.TimerHandle | None = None
 
@@ -170,10 +179,15 @@ class OnsetWindowLabelReconciler:
         if candidate_id in window.resolved_candidate_ids:
             return [sibling]
         window.resolved_candidate_ids.add(candidate_id)
+        complete = len(window.resolved_candidate_ids) >= window.expected_sibling_count
+        claim = _tier_and_top_label(sibling.classified)
+        if claim[0] != ATTRIBUTION_TIER_SNR_GRADIENT:
+            # Only gradient-settled clusters can lose labels: the rest go on now
+            # and only leave their top-label claim behind.
+            window.released_sibling_claims.append(claim)
+            return [sibling, *self._finish(window_id, timed_out=False)] if complete else [sibling]
         window.arrived.append(sibling)
-        if len(window.resolved_candidate_ids) < window.expected_sibling_count:
-            return []
-        return self._finish(window_id, timed_out=False)
+        return self._finish(window_id, timed_out=False) if complete else []
 
     def withdraw(self, *, window_id: str, sibling_count: int, candidate_id: str) -> None:
         """A sibling will never arrive (skipped, failed): stop waiting for it."""
@@ -219,7 +233,9 @@ class OnsetWindowLabelReconciler:
             self.counters.windows_timed_out += 1
         if not window.arrived:
             return []
-        reconciled, dropped_count = reconcile_window_classifications([s.classified for s in window.arrived])
+        reconciled, dropped_count = reconcile_window_classifications(
+            [s.classified for s in window.arrived], window.released_sibling_claims
+        )
         self.counters.windows_reconciled += 1
         self.counters.labels_dropped += dropped_count
         return [WindowSibling(product=s.product, classified=c) for s, c in zip(window.arrived, reconciled)]

@@ -104,10 +104,23 @@ def test_last_sibling_releases_the_reconciled_window():
         tanager = _sibling(TANAGER, {TANAGER: 0.85}, "loco")
         assert reconciler.submit(window_id="w", sibling_count=2, candidate_id="a", sibling=robin) == []
         ready = reconciler.submit(window_id="w", sibling_count=2, candidate_id="b", sibling=tanager)
-        assert [s.product.label for s in ready] == [ROBIN, TANAGER]
-        assert ready[0].classified.classification.scores == {ROBIN: 0.85}
+        assert [s.product.label for s in ready] == [TANAGER, ROBIN]
+        assert ready[1].classified.classification.scores == {ROBIN: 0.85}
         assert reconciler.pending_window_count() == 0 and not emitted.windows
         assert reconciler.counters.labels_dropped == 1
+
+    asyncio.run(scenario())
+
+
+def test_non_gradient_sibling_goes_on_at_once_and_still_claims_its_top_label():
+    async def scenario():
+        reconciler = _reconciler(_Emitted())
+        tanager = _sibling(TANAGER, {TANAGER: 0.85}, "loco")
+        robin = _sibling(ROBIN, {ROBIN: 0.85, TANAGER: 0.83}, "snr_gradient")
+        assert reconciler.submit(window_id="w", sibling_count=2, candidate_id="b", sibling=tanager) == [tanager]
+        ready = reconciler.submit(window_id="w", sibling_count=2, candidate_id="a", sibling=robin)
+        assert [s.product.label for s in ready] == [ROBIN]
+        assert ready[0].classified.classification.scores == {ROBIN: 0.85}
 
     asyncio.run(scenario())
 
