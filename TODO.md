@@ -1,5 +1,20 @@
 ## Implementation Status & Roadmap (TODO)
 
+### Field Mode (phone mesh) — open after closeout 2026-11-23
+
+Status and detail in [docs/field_mode_progress/summary.md](docs/field_mode_progress/summary.md).
+
+- [ ] **Phone localizer choice** — the real `OnsetClipSetLocalizer` fails most multi-bird rendered-audio scenes on single-mic meshes (closeout_D.md). Choose: clip SRP per window, wideband or envelope inter-node frames, or arrival-time picks into `ArrivalTimeLocalizer`.
+- [ ] **Late or pocketed phone rejection** — `graceful_degradation` is still ignored (closeout_C.md, C4).
+- [ ] **Post-merge, rejoin and handover layout errors** — mesh-sim nightly invariant failures went from 6 to 29 per 4,800 runs once the phone-height σ became realistic (review H1).
+- [ ] **C5 outside-layout restore covariance** — about 5× too tight in variance (review M1, `host_entity_restoration.rs`).
+- [ ] **Recalibrate on real sessions** — C3 contour scales and the D3 SRP temperature; make declared node σ mandatory when `srp_layout` is wired in (review M2/M3).
+- [ ] **Flaky nightly gates** — `anchor_persistent_jump`, world-frame coverage, `srp_contour_coverage`.
+- [ ] **Bluefin live trial** — A3 baseline, A4 trial flags and the B4 per-trigger check once nodes stream again (bluefin_live_trial.md).
+- [ ] **Fixture speech check** — listen to the 22 `bluefin_bird_snippets_v1` clips, then set `speech_checked = true`.
+- [ ] **Omni render with a never-streamed cluster member** — mix only channels that have data (closeout_B1.md).
+- [ ] **Phase 1 chirp sync, relay rate limiting and deploy, replay-window persistence, speaker→mic clock bias** — deferred.
+
 ### 🟡 Phase 2: Distributed, Multi-Method, Multi-Consumer Platform
 
 > **Phase 2 critical path**: Federation and advanced localization algorithms depend on the Phase 1 interface contracts (`Localizer`, `IngestTransport`, `StorageBackend`). Identity/fingerprinting depends on taxonomy externalization and the user annotation path. HA integration depends on Phase 1 rules engine and MQTT publish client. All subsections can progress in parallel once their Phase 1 prerequisites are satisfied. The core theme of Phase 2 is extending a single-server, single-algorithm system into a distributed, multi-method, multi-consumer platform — without breaking the Phase 1 pipeline.

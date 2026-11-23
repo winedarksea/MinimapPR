@@ -25,16 +25,18 @@
 #   python scripts/fetch_field_fixtures.py register <local file> --name <name> \
 #       --source <url> --description "..." --licence "..."
 #
-# Example (commented out until the Bluefin snippet set is pulled; see
-# docs/field_mode_progress/fixtures.md for the exact commands):
-#
-# [[bundle]]
-# name = "bluefin_bird_snippets_v1"
-# sha256 = "<fill from register>"
-# size_bytes = 0
-# source = "ssh://<user>@127.0.0.1:2222/home/<user>/field_fixture_export/bluefin_bird_snippets_v1.tar.gz"
-# cache_path = "bluefin_bird_snippets_v1.tar.gz"
-# extract = true
-# description = "~20 BirdNET-labelled detection snippets + 2 ambience clips from the Bluefin box, with snippets.csv metadata"
-# licence = "private: own site recordings, do not redistribute"
-# speech_checked = false
+# Bluefin snippet set: pulled 2026-11-22 (docs/field_mode_progress/fixtures.md,
+# docs/field_mode_progress/bluefin_live_trial.md). Source host "bluefin" is the ~/.ssh/config alias for
+# 192.168.8.103 (supplies the key). Private site audio: speech_checked stays false
+# until a person has listened to every clip for passers-by.
+
+[[bundle]]
+name = "bluefin_bird_snippets_v1"
+sha256 = "5cb0da6f46d33547d2ac109316974b33b19b78ab9f2a3defe544abe5efc9637c"
+size_bytes = 11425076
+source = "ssh://colin@bluefin:22/var/home/colin/field_fixture_export/bluefin_bird_snippets_v1.tar.gz"
+cache_path = "bluefin_bird_snippets_v1.tar.gz"
+extract = true
+description = "20 BirdNET-labelled detection snippets (one per species, highest confidence) + 2 ambience clips (Wind, Rain) from the Bluefin box, with snippets.csv metadata"
+licence = "private: own site recordings, do not redistribute"
+speech_checked = false

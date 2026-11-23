@@ -52,26 +52,60 @@ are NEEDS-WORK.
    - localization results should carry cross-node `pair_tdoas`.
 5. To roll back, set `localization_coverage_wait_all_streaming_nodes_enabled=false` and restart.
 
-## Open issues carried forward
+## Closeout (branch `field-mode-closeout`, 2026-11-23)
 
-**Needs a decision or hardware**
-- Phase 1 real-phone chirp sync. This still gates the phone app; iPhone is untested and the iOS build needs Xcode.
-- Same-band two-species merges, at seeds 5007, 10015 and 10187 in Layer 2. Server and Rust behave the same. The reviewer recommends the attribution-side fix: a gradient-settled cluster drops labels that are another settled cluster's top label in the same window. It needs a server gate run.
-- The relay needs Cloudflare rate limiting before any deploy.
-- The Bluefin tunnel was down, so the snippet pull and the real-data BirdNET V3 vs 2.4 comparison were not run.
+The open issues below were worked by the closeout plan. Per-phase notes: `closeout_A.md`,
+`bluefin_live_trial.md`, `closeout_B1.md`, `closeout_B2.md`, `closeout_C.md`, `closeout_D.md`, and the
+independent review in `review_closeout.md`. Final suites: Rust 581 passed / 8 ignored, Python 2084
+passed / 9 skipped. New flags all default off, except the B3 collinear guard (ratio key only, 0 disables).
 
-**Engineering**
-- No `ClipSetLocalizer` yet decodes real clips and calls `localize_onset_clusters`. The Layer 2 stand-in groups arrivals by their true call, so it cannot fail on clustering mistakes.
-- The collinear-node mirror guard exists only in the mesh host. A server site with collinear nodes would pinpoint mirror fixes.
-- When a classifier render falls on a parked trigger frame, the sidecar publishes two `localization_result`s for it, about 1 trigger in 35.
-- Map uncertainty polygons don't include the GPS anchor error, and the SRP contour cannot be calibrated.
-- Mesh LM covariance is 4–7× too large.
-- Late-phone rejection is weak, and an anchor jump moves the anchor too far.
-- Clock offsets have a speaker→mic vector bias.
-- Replay-window state is lost across restarts, and a successor mesh host starts entity tracking empty.
-- S6 issues: absorption distance (12 m) is above flock perch spacing, the DB row is overwritten with each bout's raw fix, and entities follow cross-species track merges.
-- NaN classifier scores poison species log-odds in Python. This is fixed in Rust only.
-- `dsp_worker.rs` is about 2,850 lines and should be split.
+### Resolved
+- **Same-band two-species merges** (B2): post-window label reconcile in Python and Rust behind
+  `onset_window_label_reconciliation_enabled` (default off). Seeds 5007, 10015, 10187 pass; server
+  gate unchanged with the flag (the drop never fires in a server scene).
+- **Collinear mirror guard on the server** (B3): point-node-only collinear fixes become bearing rays.
+  Rigid-array sites are exempt.
+- **Duplicate `localization_result` on parked trigger frames** (B4): the render rides the deferred
+  payload. Deployed to Bluefin; the live 1.0-per-trigger check waits for node traffic.
+- **`dsp_worker.rs` split** (B5): 573 lines plus eight child modules.
+- **NaN species log-odds in Python** (B1).
+- **S6 items** (12 m absorption, raw-fix row overwrite, following cross-species merges): already fixed
+  behind default-on flags by `fm/s-fixes-tracking` (see `s_fixes_tracking.md`); this list was stale.
+  Remaining minor S6 items: perched tracks start overconfident, and reverted-hop rows keep the old
+  track id.
+- **Anchor jumps** (C1), **anchor error in map polygons** (C2), **mesh LM covariance** (C3, NEES median
+  now about 1.1–1.3), **successor host restores entities** (C5).
+- **SRP contour calibration** (D3): `srp_contour_coverage` un-ignored and passing.
+- **Real `ClipSetLocalizer`** (D1) and a rendered-audio Layer 2 mode (D2) now exist.
+- **BirdNET V3 vs 2.4 on real data** (A5): V3 fails again (5 label swaps, mapped top-1 agreement
+  0.455). Default stays `2.4`.
+
+### Still open
+- **Phone localizer choice** (D2): the real onset localizer fails most multi-bird scenes on single-mic
+  meshes (e.g. same_band_two_species 3/50, countersinging_pair 9/50). Server tetra sites are not
+  affected, because intra-node pairs anchor the fringe. Options: clip SRP per window, wideband or
+  envelope frames for inter-node pairs, or arrival-time picks into `ArrivalTimeLocalizer`.
+- **Late or pocketed phone rejection** (C4): improved (rejection of decisive pockets went from 58% to
+  92%), but `graceful_degradation` stays ignored.
+- **Mesh-sim nightly invariant failures** rose from 6 to 29 per 4,800 runs after the phone-height σ
+  went from 0.25 to 0.115 m. These are existing errors after merges, rejoins and handovers that the
+  old σ hid.
+- **C5 restored covariance** is about 5× too tight in variance for entities outside the layout
+  (review M1).
+- **C3 contour scales and the D3 temperature** were fitted to sim noise; recalibrate on the first real
+  sessions. The D3 temperature needs declared node σ (review M3).
+- **Flaky nightly gates**: `anchor_persistent_jump` (~1.7/1000 seeds), world-frame coverage (1 in 5
+  sweeps), `srp_contour_coverage` (1 in 5 sweeps, over-coverage).
+- **Bluefin live trial** (A3/A4): blocked; no node has streamed since 2026-08-14. Startup retention
+  purged about 7,300 expired August snippets on the first start (all bird clips). The 22 fixture clips
+  were exported first and need a speech listen before `speech_checked = true`.
+- A never-streamed cluster member still empties the omni render (B4 follow-up).
+
+### Deferred (user decisions)
+- Phase 1 real-phone chirp sync and iPhone/Xcode work.
+- Relay rate limiting and deploy.
+- Replay-window persistence: no shell constructs `RelayClientSession` yet.
+- Speaker→mic clock bias: needs per-model vectors calibrated in Phase 1 and a wire change.
 
 ## Machine changes made during the build-out
 

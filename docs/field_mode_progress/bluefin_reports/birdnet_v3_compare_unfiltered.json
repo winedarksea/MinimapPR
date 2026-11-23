@@ -1,0 +1,28 @@
+{
+  "clips": 500,
+  "audio_seconds": 14978.97625,
+  "confident_score": 0.5,
+  "latency": {
+    "fp16_pruned": {
+      "median_ms_per_clip": 1212.796624051407,
+      "median_ms_per_audio_second": 40.4265541350469
+    },
+    "v2.4_tflite": {
+      "median_ms_per_clip": 882.5326454825699,
+      "median_ms_per_audio_second": 29.426021901114535
+    }
+  },
+  "v3_pairs": {},
+  "gate": {
+    "min_confident_top1_agreement": 0.95,
+    "min_median_spearman": 0.9,
+    "min_latency_speedup": 1.2,
+    "min_confident_clips_for_final_verdict": 30
+  },
+  "v24_vs_v3": {
+    "both_confident_clips": 1,
+    "top1_agreement_mapped": 0.0,
+    "v24_confident_clips": 1.0,
+    "v3_confident_clips": 3.0
+  }
+}
