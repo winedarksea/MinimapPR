@@ -21,6 +21,19 @@ fn mesh_contour_coverage_by_class() {
     assert_pull_request_gate("mesh_contour_coverage_by_class");
 }
 
+/// World-frame coverage of the *published* polygon (Σ_fix plus the filtered
+/// map anchor's error, closeout C2) against the raw world truth.
+/// PENDING C3: the world gauge is already Gaussian-shaped (median 1.06,
+/// P95 2.47 on nightly seeds 100000+200), but the shipped σ multiplier 0.52
+/// was fitted to absorb the 4–7× overstated mesh LM covariance, so it
+/// draws ~0.5σ of the honest anchor term (coverage 0.19). Un-ignored once
+/// C3 makes Σ_fix realistic and refits the multiplier.
+#[test]
+#[ignore = "pending closeout C3: σ multiplier 0.52 compensates an overstated Σ_fix and under-draws the anchor term"]
+fn mesh_contour_world_coverage() {
+    assert_pull_request_gate("mesh_contour_world_coverage");
+}
+
 /// KNOWN FAILURE (W4-sim-gates finding, not loosened): with realistic
 /// ±10 cm / ±10 µs residuals no scalar likelihood temperature gives a
 /// calibrated *and* sharp SRP region (23 % coverage at the shipped 0.002;

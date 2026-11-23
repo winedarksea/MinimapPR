@@ -4,14 +4,17 @@
 //! `minimappr-mesh-sim`. Each fix is scored against the *published polygon*
 //! (`mesh::fix_contour`), as its minimum covering σ multiplier.
 //!
-//! Scoring frame: the host's node positions are aligned to the true ones
-//! with a proper rigid fit (as `ScenarioOutcome::scored_fixes` does), so the
-//! map anchor's GPS offset is not charged to the contour (it moves phones
-//! and birds together on the map). World-frame multipliers are kept too, as
-//! a diagnostic of what the anchor's uncertainty would add.
+//! Two frames. Relative: the host's node positions are aligned to the true
+//! ones with a proper rigid fit (as `ScenarioOutcome::scored_fixes` does),
+//! the anchor's GPS offset is not charged, and the truth is scored against
+//! the fix's own Σ_fix polygon (what the fix knows relative to the phones).
+//! World: the raw truth is scored against the *published* polygon, which
+//! adds the filtered map anchor's error (Σ_world, `mesh::fix_contour`).
 
 use minimappr_core::layout::gps_anchor_fit::weighted_kabsch_2d;
 use minimappr_core::mesh::config::EntityContourConfig;
+use minimappr_core::mesh::fix_contour::world_frame_covariance;
+use minimappr_core::mesh::local_tangent_plane::LocalTangentPlane;
 use minimappr_mesh_sim::invariants::FLAGGED_CHIRALITY_CONFIDENCE;
 use minimappr_mesh_sim::scenario::{ring_of_phones, ScenarioSpec};
 use minimappr_mesh_sim::{ScenarioOutcome, ScenarioRun};
@@ -61,9 +64,12 @@ pub struct MeshFixScore {
     pub reported_major_sigma_m: f64,
     pub used_node_count: usize,
     pub true_range_from_centroid_m: f64,
-    /// Smallest `contour_sigma_multiplier` whose polygon holds the truth.
+    /// Smallest `contour_sigma_multiplier` whose Σ_fix polygon holds the
+    /// truth carried into the host's layout frame.
     pub relative_frame_minimum_multiplier: f64,
+    /// Same for the published (Σ_world) polygon and the raw world truth.
     pub world_frame_minimum_multiplier: f64,
+    pub anchor_translation_sigma_m: Option<f64>,
     pub chirality_confidence: Option<f64>,
     /// Layout came out mirrored (proper fit to truth fails).
     pub layout_mirrored: bool,
@@ -124,6 +130,15 @@ pub fn minimum_contour_multiplier(
 pub fn score_session(outcome: &ScenarioOutcome, contour: &EntityContourConfig) -> Vec<MeshFixScore> {
     // Same traces, same order: `scored_fixes` also keeps traces with a fix.
     let mesh_scored = outcome.scored_fixes();
+    // The host's ENU plane is centred on the first GPS fix it saw (a phone
+    // plus its multipath bias), not on the simulator's site origin: carry
+    // the world truth into it through geodetic coordinates.
+    let site_plane = LocalTangentPlane::new(outcome.spec.site_origin_deg.0, outcome.spec.site_origin_deg.1);
+    let host_plane = outcome.devices.iter().find_map(|device| device.host.as_ref()?.sync.local_plane).unwrap_or(site_plane);
+    let to_host_plane = |site_east_north: [f64; 2]| {
+        let (latitude_deg, longitude_deg) = site_plane.geodetic_from_east_north(site_east_north);
+        host_plane.east_north_from_geodetic(latitude_deg, longitude_deg)
+    };
     outcome
         .traces
         .iter()
@@ -162,11 +177,12 @@ pub fn score_session(outcome: &ScenarioOutcome, contour: &EntityContourConfig) -
                 },
                 relative_frame_minimum_multiplier: minimum_contour_multiplier(truth_in_host_frame, fix.position_m, &fix.covariance_m2, contour),
                 world_frame_minimum_multiplier: minimum_contour_multiplier(
-                    [call.position_m[0], call.position_m[1]],
+                    to_host_plane([call.position_m[0], call.position_m[1]]),
                     fix.position_m,
-                    &fix.covariance_m2,
+                    &trace.anchor_uncertainty.map_or(fix.covariance_m2, |anchor| world_frame_covariance(fix.position_m, &fix.covariance_m2, &anchor)),
                     contour,
                 ),
+                anchor_translation_sigma_m: trace.anchor_uncertainty.map(|anchor| anchor.translation_sigma_m),
                 chirality_confidence: trace.chirality_confidence,
                 layout_mirrored: mesh_fix.layout_mirrored == Some(true),
                 is_flagged_mirror: mesh_fix.layout_mirrored == Some(true)

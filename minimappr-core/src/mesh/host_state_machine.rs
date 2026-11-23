@@ -16,7 +16,7 @@ use super::call_pipeline::{CallContext, CallPipeline, ClipSetLocalizer, Localize
 use super::classification_rota::clumps_from_layout;
 use super::config::{MeshConfig, DEVICE_SAMPLE_RATE_HZ};
 use super::event_log::SessionEventLog;
-use super::fix_contour::horizontal_covariance_contour;
+use super::fix_contour::published_contour;
 use super::host_entity_tracking::{node_set_is_collinear, ClusterReportingNode, EntityUpdateContext, HostEntityTracking};
 use super::host_membership::SessionMembership;
 use super::host_restoration::restore_from_mirror;
@@ -281,7 +281,7 @@ impl FieldHostStateMachine {
     fn entity_update_for(&mut self, record: &LocalizedCallRecord) -> BirdEntityUpdate {
         self.next_bird_entity_id += 1;
         let contour = record.fix.as_ref().map_or_else(Vec::new, |fix| {
-            horizontal_covariance_contour(fix.position_m, &fix.covariance_m2, &self.config.entity_contour)
+            published_contour(fix.position_m, &fix.covariance_m2, record.anchor_uncertainty.as_ref(), &self.config.entity_contour)
         });
         BirdEntityUpdate {
             bird_entity_id: self.next_bird_entity_id,
@@ -336,7 +336,7 @@ impl FieldHostStateMachine {
                     .map(|position| position.position_m),
             })
             .collect();
-        let context = EntityUpdateContext { contour: &self.config.entity_contour, next_event_log_sequence: self.event_log.head_sequence() + 1 };
+        let context = EntityUpdateContext::for_islands(&self.config.entity_contour, self.event_log.head_sequence() + 1, &self.sync.engine);
         let updates = self.entities.on_call_record(
             record,
             reporting_position,
@@ -431,7 +431,7 @@ impl FieldHostStateMachine {
             }
         }
         if self.config.entity_tracking.enabled {
-            let context = EntityUpdateContext { contour: &self.config.entity_contour, next_event_log_sequence: self.event_log.head_sequence() + 1 };
+            let context = EntityUpdateContext::for_islands(&self.config.entity_contour, self.event_log.head_sequence() + 1, &self.sync.engine);
             let updates = self.entities.maintain(now_ms, &self.config.entity_tracking, &context);
             for mut update in updates {
                 update.event_log_sequence = self.event_log.head_sequence() + 1;

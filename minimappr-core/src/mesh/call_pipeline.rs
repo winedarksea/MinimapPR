@@ -322,6 +322,7 @@ impl CallPipeline {
         record.walked_nodes = clips.iter().filter(|clip| clip.walked_at_call).map(|clip| clip.node_id).collect();
         record.chirality_confidence = ctx.engine.chirality_confidence(call.classifying_node);
         record.chirality_locked = ctx.engine.chirality_locked(call.classifying_node);
+        record.anchor_uncertainty = ctx.engine.anchor_uncertainty(call.classifying_node);
         record.clip_domains = clips
             .iter()
             .map(|clip| (clip.node_id, clip.island_id, clip.island_epoch, clip.clock_epoch_at_request, clip.clock.clock_epoch))
@@ -339,6 +340,7 @@ impl CallPipeline {
                 clips,
                 chirality_confidence: record.chirality_confidence,
                 chirality_locked: record.chirality_locked,
+                anchor_uncertainty: record.anchor_uncertainty,
             };
             match localizer.localize_clusters(&request) {
                 Ok(mut clusters) if !clusters.is_empty() => {

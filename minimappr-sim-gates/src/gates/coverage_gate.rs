@@ -97,10 +97,7 @@ pub fn mesh_contour_coverage(run: &GateRun) -> GateOutcome {
         outcome.summary(format!("{label}: {c}/{n} = {:.3} (gated by mesh_contour_coverage_by_class)", c as f64 / n.max(1) as f64));
     }
     let world_covered = scores.iter().filter(|s| s.world_frame_minimum_multiplier <= multiplier).count();
-    // Not gated: the polygon is drawn in the anchored map frame, which moves
-    // phones and birds together. Read against a basemap or a raw GPS dot the
-    // anchor's error (metres) is not in the polygon at all.
-    outcome.summary(format!("world frame (anchor error charged, NOT in the drawn polygon; diagnostic): {world_covered}/{all}"));
+    outcome.summary(format!("world frame, published Σ_world polygon: {world_covered}/{all} (gated by mesh_contour_world_coverage)"));
     let errors: Vec<f64> = scores.iter().map(|s| s.relative_frame_error_m).collect();
     outcome.summary(format!("relative-frame error median {:.2} m, P95 {:.2} m", median(&errors), percentile(&errors, 0.95)));
     let fixes_per_session = all as f64 / results.len().max(1) as f64;
@@ -108,6 +105,38 @@ pub fn mesh_contour_coverage(run: &GateRun) -> GateOutcome {
     outcome.contributing_seeds = results
         .iter()
         .filter(|(_, s)| s.iter().any(|f| f.relative_frame_minimum_multiplier > multiplier))
+        .map(|(seed, _)| *seed)
+        .collect();
+    outcome
+}
+
+/// The published polygon (Σ_fix plus the filtered anchor's translation and
+/// rotation error) against the raw world truth: what a basemap, an export
+/// or another island reads. Same 90–98 % band as the relative frame.
+pub fn mesh_contour_world_coverage(run: &GateRun) -> GateOutcome {
+    let contour = EntityContourConfig::default();
+    let (results, scores, exemption) = mesh_contour_scores(run, &contour);
+    let mut outcome = GateOutcome::new("mesh_contour_world_coverage", scores.len());
+    outcome.summary(exemption);
+    let multiplier = contour.contour_sigma_multiplier;
+    let anchored: Vec<_> = scores.iter().filter(|s| s.anchor_translation_sigma_m.is_some()).collect();
+    outcome.summary(format!("{} of {} fixes carried an anchor error (others are unanchored layout frames)", anchored.len(), scores.len()));
+    for (label, inside) in [("all fixes", None), ("inside calls", Some(true)), ("outside calls", Some(false))] {
+        let selected: Vec<_> = scores.iter().filter(|s| inside.is_none_or(|i| s.is_inside_call == i)).collect();
+        let covered = selected.iter().filter(|s| s.world_frame_minimum_multiplier <= multiplier).count();
+        let label = format!("world frame {label}, σ multiplier {multiplier}");
+        if inside.is_none() {
+            check_coverage(&mut outcome, &label, covered, selected.len(), &run.config.coverage);
+        } else {
+            outcome.summary(format!("{label}: {covered}/{} = {:.3}", selected.len(), covered as f64 / selected.len().max(1) as f64));
+        }
+    }
+    let sigmas: Vec<f64> = anchored.iter().filter_map(|s| s.anchor_translation_sigma_m).collect();
+    let gauges: Vec<f64> = scores.iter().map(|s| s.world_frame_minimum_multiplier).collect();
+    outcome.summary(format!("anchor translation σ median {:.2} m; world gauge median {:.2}, P95 {:.2}", median(&sigmas), median(&gauges), percentile(&gauges, 0.95)));
+    outcome.contributing_seeds = results
+        .iter()
+        .filter(|(_, s)| s.iter().any(|f| !f.is_flagged_mirror && f.world_frame_minimum_multiplier > multiplier))
         .map(|(seed, _)| *seed)
         .collect();
     outcome

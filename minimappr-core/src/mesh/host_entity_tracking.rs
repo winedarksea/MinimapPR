@@ -23,7 +23,8 @@ use crate::wildlife_tracking::{Position3, NANOSECONDS_PER_SECOND};
 
 use super::call_pipeline::{CallFix, LocalizedCallRecord};
 use super::config::{EntityContourConfig, EntityTrackingConfig, DEVICE_SAMPLE_RATE_HZ};
-use super::fix_contour::horizontal_covariance_contour;
+use super::fix_contour::{published_contour, AnchorUncertainty};
+use super::island_sync_engine::IslandSyncEngine;
 use super::MeshMilliseconds;
 
 const NANOSECONDS_PER_MILLISECOND: i64 = 1_000_000;
@@ -49,6 +50,19 @@ pub struct HostEntityCallOutcome {
 pub struct EntityUpdateContext<'host> {
     pub contour: &'host EntityContourConfig,
     pub next_event_log_sequence: u64,
+    /// Each island's current map anchor error, charged to its contours.
+    pub anchor_uncertainty_by_island: BTreeMap<u32, AnchorUncertainty>,
+}
+
+impl<'host> EntityUpdateContext<'host> {
+    pub fn for_islands(contour: &'host EntityContourConfig, next_event_log_sequence: u64, engine: &IslandSyncEngine) -> Self {
+        let anchor_uncertainty_by_island = engine
+            .islands
+            .iter()
+            .filter_map(|(island_id, island)| Some((*island_id, IslandSyncEngine::island_anchor_uncertainty(island)?)))
+            .collect();
+        Self { contour, next_event_log_sequence, anchor_uncertainty_by_island }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -324,7 +338,7 @@ impl HostEntityTracking {
     ) -> BirdEntityUpdate {
         let contour = match (entity.state, entity.position_m, entity.position_covariance_m2) {
             (BirdEntitySpatialState::Pinpointed, Some(position), Some(covariance)) => {
-                horizontal_covariance_contour(position, &covariance, update_context.contour)
+                published_contour(position, &covariance, update_context.anchor_uncertainty_by_island.get(&island_id), update_context.contour)
             }
             _ => Vec::new(),
         };
@@ -382,7 +396,7 @@ mod tests {
     fn call_outcome_history_is_capped_and_non_finite_fixes_are_not_placed() {
         let config = EntityTrackingConfig { max_retained_call_outcomes: 3, ..EntityTrackingConfig::default() };
         let contour = EntityContourConfig::default();
-        let context = EntityUpdateContext { contour: &contour, next_event_log_sequence: 1 };
+        let context = EntityUpdateContext { contour: &contour, next_event_log_sequence: 1, anchor_uncertainty_by_island: BTreeMap::new() };
         let mut tracking = HostEntityTracking::default();
         let mut next_id = 0;
         for call_id in 0..5 {

@@ -41,6 +41,12 @@ pub struct FilteredMapAnchorConfig {
     pub minimum_history_fits: u32,
     /// Weight of a new fix in a phone's running mean (EWMA, ~1/weight fits).
     pub history_smoothing_weight: f64,
+    /// Fraction of GPS error that is multipath bias, correlated across
+    /// rounds (it does not average down while phones stand still). The
+    /// filter treats fits as independent, so its σ shrinks as 1/√n; the
+    /// published σ keeps this share of a single fit's σ. 0.8 matches the
+    /// still-phone model the anchor gate uses.
+    pub correlated_gps_error_fraction: f64,
 }
 
 impl Default for FilteredMapAnchorConfig {
@@ -51,6 +57,7 @@ impl Default for FilteredMapAnchorConfig {
             still_jump_release_threshold_sigma: 1.0,
             minimum_history_fits: 6,
             history_smoothing_weight: 0.05,
+            correlated_gps_error_fraction: 0.8,
         }
     }
 }
@@ -197,15 +204,18 @@ impl<Key: Ord + Copy> FilteredMapAnchor<Key> {
         &self.held_last_update
     }
 
-    /// The last round's fit with its transform and σ replaced by the
-    /// filter's: what the map should draw with (chirality confidence and
-    /// residuals stay the round's own).
+    /// The last round's fit with its transform replaced by the filter's:
+    /// what the map should draw with (chirality confidence and residuals
+    /// stay the round's own). σ² = ρ²·σ_fit² + (1 − ρ²)·σ_filter²: averaging
+    /// rounds removes only the uncorrelated share of the GPS error.
     pub fn filtered_fit(&self) -> Option<AnchorFit> {
         let estimate = self.filter.estimate()?;
         let mut fit = self.last_fit.clone()?;
+        let correlated = self.config.correlated_gps_error_fraction.clamp(0.0, 1.0).powi(2);
+        let blend = |single: f64, filtered: f64| (correlated * single.powi(2) + (1.0 - correlated) * filtered.powi(2)).sqrt();
         fit.transform = estimate.transform;
-        fit.translation_sigma_m = estimate.translation_sigma_m[0].max(estimate.translation_sigma_m[1]);
-        fit.rotation_sigma_rad = estimate.rotation_sigma_rad;
+        fit.translation_sigma_m = blend(fit.translation_sigma_m, estimate.translation_sigma_m[0].max(estimate.translation_sigma_m[1]));
+        fit.rotation_sigma_rad = blend(fit.rotation_sigma_rad, estimate.rotation_sigma_rad);
         Some(fit)
     }
 }

@@ -50,6 +50,7 @@ pub const GATES: &[GateEntry] = &[
     GateEntry { name: "graceful_degradation", test_target: "statistical_accuracy", function: degradation_gate::graceful_degradation, pull_request_seed_count: 100, nightly_seed_fraction: 2.0, regression_seeds: &[] },
     GateEntry { name: "mesh_contour_coverage", test_target: "statistical_coverage", function: coverage_gate::mesh_contour_coverage, pull_request_seed_count: 100, nightly_seed_fraction: 1.0, regression_seeds: &[] },
     GateEntry { name: "mesh_contour_coverage_by_class", test_target: "statistical_coverage", function: coverage_gate::mesh_contour_coverage_by_class, pull_request_seed_count: 100, nightly_seed_fraction: 1.0, regression_seeds: &[] },
+    GateEntry { name: "mesh_contour_world_coverage", test_target: "statistical_coverage", function: coverage_gate::mesh_contour_world_coverage, pull_request_seed_count: 100, nightly_seed_fraction: 1.0, regression_seeds: &[] },
     GateEntry { name: "srp_contour_coverage", test_target: "statistical_coverage", function: coverage_gate::srp_contour_coverage, pull_request_seed_count: 24, nightly_seed_fraction: 1.0, regression_seeds: &[] },
     GateEntry { name: "geometric_invariance", test_target: "statistical_geometry", function: invariance_gate::geometric_invariance, pull_request_seed_count: 100, nightly_seed_fraction: 2.0, regression_seeds: &[] },
     GateEntry { name: "srp_lm_invariance", test_target: "statistical_geometry", function: srp_invariance_gate::srp_lm_invariance, pull_request_seed_count: 4, nightly_seed_fraction: 0.1, regression_seeds: &[] },

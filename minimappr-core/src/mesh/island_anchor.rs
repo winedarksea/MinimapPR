@@ -13,7 +13,8 @@ use crate::protocol::NodeId;
 
 use super::chirality_cue::chirality_from_bearing_pair;
 use super::config::IslandSyncConfig;
-use super::island_sync_engine::{IslandLayout, IslandSyncEngine, MILLISECONDS_PER_SECOND};
+use super::fix_contour::AnchorUncertainty;
+use super::island_sync_engine::{IslandLayout, IslandState, IslandSyncEngine, MILLISECONDS_PER_SECOND};
 use super::MeshMilliseconds;
 
 /// A bearing pair locks chirality only if the two chiralities' predicted
@@ -118,6 +119,22 @@ impl IslandSyncEngine {
         }
     }
 
+    /// The filtered anchor's error for `node`'s island, for world-frame
+    /// regions (`fix_contour::world_frame_covariance`).
+    pub fn anchor_uncertainty(&self, node: NodeId) -> Option<AnchorUncertainty> {
+        self.island_of(node).and_then(Self::island_anchor_uncertainty)
+    }
+
+    pub fn island_anchor_uncertainty(island: &IslandState) -> Option<AnchorUncertainty> {
+        let (anchor, layout) = (island.anchor.as_ref()?, island.layout.as_ref()?);
+        let count = layout.local_positions_m.len().max(1) as f64;
+        let rotation_centre_m = layout.local_positions_m.values().fold([0.0; 2], |centre, local| {
+            let anchored = anchor.transform.apply([local[0], local[1]]);
+            [centre[0] + anchored[0] / count, centre[1] + anchored[1] / count]
+        });
+        Some(AnchorUncertainty { translation_sigma_m: anchor.translation_sigma_m, rotation_sigma_rad: anchor.rotation_sigma_rad, rotation_centre_m })
+    }
+
     pub fn chirality_confidence(&self, node: NodeId) -> Option<f64> {
         self.island_of(node)?.anchor.as_ref().map(|anchor| anchor.chirality_confidence)
     }
@@ -134,7 +151,6 @@ mod tests {
 
     use super::*;
     use crate::layout::filtered_map_anchor::FilteredMapAnchor;
-    use crate::mesh::island_sync_engine::IslandState;
 
     const LAYOUT: [[f64; 2]; 5] = [[0.0, 0.0], [14.0, 2.0], [6.0, 11.0], [-5.0, 8.0], [9.0, -9.0]];
     const ROUND_INTERVAL_MS: u64 = 5_000;
