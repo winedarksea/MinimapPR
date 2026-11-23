@@ -32,9 +32,13 @@ const MINIMUM_CONTOUR_VERTICES: usize = 3;
 
 /// The published horizontal covariance, back out of its contour polygon,
 /// returned in raw fix units: divided by the inside-layout calibration
-/// scale² and with the map anchor's share left in. Both err wide, which is
-/// right here: the successor's fresh anchor puts new fixes metres off the
-/// dead host's frame. Height variance takes the horizontal major axis.
+/// scale² and with the map anchor's share left in. For an inside-layout
+/// entity both err wide, which is right here: the successor's fresh anchor
+/// puts new fixes metres off the dead host's frame. An outside-layout entity
+/// was published at the smaller outside scale, so its fix share comes back
+/// at (outside / inside)² ≈ 0.2× the raw variance (too tight; only the
+/// anchor share widens it). The wire does not say which scale was used.
+/// Height variance takes the horizontal major axis.
 fn covariance_from_contour(
     centre_m: [f64; 2],
     contour_m: &[[f32; 2]],
