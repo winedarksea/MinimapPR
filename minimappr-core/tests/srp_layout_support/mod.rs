@@ -126,6 +126,8 @@ pub fn layout_nodes(plan: &WorldPlan) -> Vec<LayoutNode> {
                 rate_ratio: 1.0 + device.clock.drift_ppm / PARTS_PER_MILLION,
             },
             pair_weight: 1.0,
+            position_std_m: 0.0,
+            clock_offset_std_s: 0.0,
         })
         .collect()
 }

@@ -15,6 +15,22 @@ pub struct LayoutNode {
     /// Relative trust in this node (e.g. from readiness SNR rank); pair
     /// weights multiply both nodes' values. 1.0 when unknown.
     pub pair_weight: f64,
+    /// Declared σ of the node position along any direction (layout solve),
+    /// and of its clock offset after the sync model. They widen each
+    /// inter-node pair's lag tolerance in scoring (`RobustScoringConfig::
+    /// declared_sigma_pooling_multiplier`); 0 = exactly known.
+    pub position_std_m: f64,
+    pub clock_offset_std_s: f64,
+}
+
+impl LayoutNode {
+    /// σ of an inter-node pair's lag from both nodes' declared errors: a
+    /// node off by δ moves its range by up to δ, a clock off by ε moves the
+    /// lag by ε. Rigid intra-node pairs share both errors exactly (0).
+    pub fn pair_lag_std_s(&self, other: &LayoutNode, sound_speed_mps: f64) -> f64 {
+        let position_variance = (self.position_std_m.powi(2) + other.position_std_m.powi(2)) / sound_speed_mps.powi(2);
+        (position_variance + self.clock_offset_std_s.powi(2) + other.clock_offset_std_s.powi(2)).sqrt()
+    }
 }
 
 /// A node's clip: one slice per mic, all starting at local sample

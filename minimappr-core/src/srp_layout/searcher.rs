@@ -149,12 +149,20 @@ impl LayoutSrpSearcher {
                     self.config.correlation.upsample_factor,
                     self.config.scoring.full_weight_significance_ratio,
                 );
+                let (node_a, node_b) = (self.sensors[planned.spec.sensor_a].node_index, self.sensors[planned.spec.sensor_b].node_index);
+                let declared_lag_tolerance_s = if node_a == node_b {
+                    0.0
+                } else {
+                    self.config.scoring.declared_sigma_pooling_multiplier
+                        * self.nodes[node_a].pair_lag_std_s(&self.nodes[node_b], self.config.sound_speed_mps)
+                };
                 WeightedPair {
                     sensor_a_position_m: self.sensors[planned.spec.sensor_a].position_m,
                     sensor_b_position_m: self.sensors[planned.spec.sensor_b].position_m,
-                    sensor_a_node: self.sensors[planned.spec.sensor_a].node_index,
-                    sensor_b_node: self.sensors[planned.spec.sensor_b].node_index,
+                    sensor_a_node: node_a,
+                    sensor_b_node: node_b,
                     weight: planned.base_weight * significance,
+                    declared_lag_tolerance_s,
                     curve,
                 }
             })

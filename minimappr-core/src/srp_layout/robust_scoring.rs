@@ -42,9 +42,21 @@ pub struct WeightedPair {
     pub sensor_a_node: usize,
     pub sensor_b_node: usize,
     pub weight: f64,
+    /// Half-width the curve is max-pooled over around any predicted lag:
+    /// k·σ_pair from the nodes' declared errors (0 = exact lookup).
+    pub declared_lag_tolerance_s: f64,
 }
 
 impl WeightedPair {
+    /// Coherence at `lag_s`, max-pooled over the declared lag tolerance.
+    fn pooled_coherence_at(&self, lag_s: f64) -> f32 {
+        if self.declared_lag_tolerance_s > 0.0 {
+            self.curve.max_coherence_over_interval(lag_s, self.declared_lag_tolerance_s)
+        } else {
+            self.curve.coherence_at(lag_s)
+        }
+    }
+
     fn normalized_residual(&self, coherence: f32) -> f64 {
         let peak = self.curve.peak_coherence.max(f32::MIN_POSITIVE) as f64;
         (1.0 - coherence as f64 / peak).max(0.0)
@@ -134,7 +146,7 @@ impl RobustPairScorer {
             .iter()
             .filter(|pair| subset.includes(pair))
             .map(|pair| {
-                let coherence = pair.curve.coherence_at(lag_of_pair(pair));
+                let coherence = pair.pooled_coherence_at(lag_of_pair(pair));
                 pair.weight * huber_loss(pair.normalized_residual(coherence), self.huber_knee)
             })
             .sum::<f64>()
@@ -145,7 +157,7 @@ impl RobustPairScorer {
         let mut loss = 0.0;
         let mut widest: f64 = 0.0;
         for (pair, (center_lag_s, half_width_s)) in self.pairs.iter().zip(intervals) {
-            let coherence = pair.curve.max_coherence_over_interval(center_lag_s, half_width_s);
+            let coherence = pair.curve.max_coherence_over_interval(center_lag_s, half_width_s + pair.declared_lag_tolerance_s);
             loss += pair.weight * huber_loss(pair.normalized_residual(coherence), self.huber_knee);
             widest = widest.max(half_width_s);
         }
@@ -189,5 +201,33 @@ mod tests {
         let slope = huber_loss(0.9, knee) - huber_loss(0.8, knee);
         assert!((slope - knee * 0.1).abs() < 1e-12);
         assert_eq!(huber_loss(0.0, knee), 0.0);
+    }
+
+    /// A pair whose peak sits within its declared tolerance of the predicted
+    /// lag costs nothing; without tolerance the same offset is penalised.
+    #[test]
+    fn declared_tolerance_max_pools_the_curve_around_the_predicted_lag() {
+        let lag_step_s = 1e-5;
+        let zero_lag_index = 200;
+        let peak_index = zero_lag_index + 30;
+        let values: Vec<f32> =
+            (0..401).map(|index| (-((index as f64 - peak_index as f64) / 5.0).powi(2)).exp() as f32).collect();
+        let curve = PairCoherenceCurve::from_values(0, 1, lag_step_s, zero_lag_index, values, 1);
+        let pair = |declared_lag_tolerance_s: f64| WeightedPair {
+            curve: curve.clone(),
+            sensor_a_position_m: [0.0; 3],
+            sensor_b_position_m: [1.0, 0.0, 0.0],
+            sensor_a_node: 0,
+            sensor_b_node: 1,
+            weight: 1.0,
+            declared_lag_tolerance_s,
+        };
+        // The peak is 30 steps (0.3 ms) from zero lag.
+        let exact = pair(0.0).normalized_residual(pair(0.0).pooled_coherence_at(0.0));
+        let pooled = pair(4e-4).normalized_residual(pair(4e-4).pooled_coherence_at(0.0));
+        let short = pair(1e-4).normalized_residual(pair(1e-4).pooled_coherence_at(0.0));
+        assert!(exact > 0.9, "exact residual {exact}");
+        assert!(pooled < 1e-3, "pooled residual {pooled}");
+        assert!(short > 0.5, "a tolerance short of the peak still pays: {short}");
     }
 }

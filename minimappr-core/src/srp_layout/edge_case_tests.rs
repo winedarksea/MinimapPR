@@ -13,6 +13,8 @@ fn phone_at(position_m: [f64; 3]) -> LayoutNode {
         mic_offsets_m: vec![[0.0, 0.0, 0.0]],
         clock: NodeClockModel::disciplined(),
         pair_weight: 1.0,
+        position_std_m: 0.0,
+        clock_offset_std_s: 0.0,
     }
 }
 

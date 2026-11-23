@@ -72,6 +72,9 @@ pub fn render_srp_trial(
             reported.position_m[1] += perturbation.layout_position_std_m * gaussian(seed, "srp_layout_error", key, 1);
             reported.position_m[2] += perturbation.phone_height_std_m * gaussian(seed, "srp_layout_error", key, 2);
             reported.clock.anchor_island_time_s += perturbation.clock_residual_std_s * gaussian(seed, "srp_clock_residual", key, 0);
+            // The searcher is told the σ it suffers, as a host is told its layout and clock σ.
+            reported.position_std_m = perturbation.layout_position_std_m.max(perturbation.phone_height_std_m);
+            reported.clock_offset_std_s = perturbation.clock_residual_std_s;
             reported
         })
         .collect();

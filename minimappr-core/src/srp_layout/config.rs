@@ -102,6 +102,17 @@ pub struct RobustScoringConfig {
     /// many times the noise-only expected maximum √(2 ln L); at 1× it gets 0.
     /// Coherence-based, not level-based: faint but coherent pairs keep weight.
     pub full_weight_significance_ratio: f64,
+    /// k in σ-aware scoring: each inter-node pair's curve is max-pooled over
+    /// ±k·σ_pair (σ_pair from both nodes' declared layout and clock σ,
+    /// `LayoutNode::pair_lag_std_s`) before the Huber loss. Under real
+    /// residuals no single point puts every pair on its peak; pooling makes
+    /// "within the declared error of its peak" cost nothing, so the score's
+    /// peak plateau, not the temperature, absorbs layout/clock error
+    /// (closeout D3). No effect when nodes declare σ = 0. 1.25 was chosen on
+    /// the calibration training seeds from {1, 1.25, 1.5, 2}: at the
+    /// temperature floor it alone covers 83 / 93 / 97 / 99 % of trials, and
+    /// 1.25 is the one that leaves the temperature a real job.
+    pub declared_sigma_pooling_multiplier: f64,
 }
 
 impl Default for RobustScoringConfig {
@@ -111,6 +122,7 @@ impl Default for RobustScoringConfig {
             intra_node_pair_group_weight: 1.0,
             likelihood_temperature: 0.002,
             full_weight_significance_ratio: 3.0,
+            declared_sigma_pooling_multiplier: 1.25,
         }
     }
 }
