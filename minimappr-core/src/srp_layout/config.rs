@@ -88,15 +88,12 @@ pub struct RobustScoringConfig {
     /// tetra node's 6 short-baseline pairs from outvoting inter-node pairs.
     pub intra_node_pair_group_weight: f64,
     /// Likelihood temperature, in units of mean per-pair robust loss:
-    /// L ∝ exp(score / (temperature · Σw)). NOT calibrated: the W4-sim-gates
-    /// fit (`minimappr-sim-gates` example `calibrate_region_parameters`,
-    /// realistic ±10 cm / ±10 µs residuals) found no usable value. Coverage
-    /// is 23 % at 0.002, and the 95 % fit (0.0126) only reaches it because the
-    /// region collapses from a sub-m² dot into a whole-grid bearing fan
-    /// (10⁴–10⁵ m² inside the layout): the Huber score's background floor
-    /// swamps the peak once T is large enough to cover residual-shifted
-    /// peaks. Kept at 0.002 (compact) until the scoring accounts for layout
-    /// and clock σ; see docs/field_mode_progress/sim_gates.md.
+    /// L ∝ exp(score / (temperature · Σw)). Calibrated with σ-aware scoring
+    /// (closeout D3): `calibrate_region_parameters --only srp --srp-trials
+    /// 400` fits 0.0013 for 0.945 coverage (training 0.945, held-out 0.917,
+    /// inside median region ≈ 1 m²). Without the pooling no value worked: 23 %
+    /// coverage at 0.002, whole-grid fans at the 95 % fit (sim_gates.md).
+    /// Refit whenever the pooling multiplier or the declared σ change.
     pub likelihood_temperature: f64,
     /// A pair reaches full weight when its peak z-score (peak·√K) is this
     /// many times the noise-only expected maximum √(2 ln L); at 1× it gets 0.
@@ -120,7 +117,7 @@ impl Default for RobustScoringConfig {
         Self {
             huber_knee: 0.3,
             intra_node_pair_group_weight: 1.0,
-            likelihood_temperature: 0.002,
+            likelihood_temperature: 0.0013,
             full_weight_significance_ratio: 3.0,
             declared_sigma_pooling_multiplier: 1.25,
         }

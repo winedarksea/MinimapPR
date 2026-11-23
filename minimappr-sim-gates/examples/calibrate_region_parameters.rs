@@ -8,7 +8,8 @@
 //!   each end-to-end Layer 2 fix's minimum covering multiplier is exact (the
 //!   polygon gauge), so the fit is the target-quantile order statistic.
 //! - SRP likelihood temperature (`RobustScoringConfig::likelihood_temperature`):
-//!   each rendered trial's smallest covering temperature on a log ladder.
+//!   each rendered trial's smallest covering temperature on a log ladder
+//!   (down to 1e-4: with σ-aware pooling most trials cover near T = 0).
 //!
 //! Copy the printed fitted values into those core configs; the gate tests
 //! then check held-out coverage against the shipped defaults.
@@ -21,9 +22,9 @@ use minimappr_sim_gates::mesh_region_trials::{run_contour_session, MeshFixScore,
 use minimappr_sim_gates::srp_trials::{render_srp_trial, temperature_ladder, SrpTrialConfig};
 use minimappr_sim_gates::statistics::{coverage_at, fit_parameter_for_coverage, median, percentile};
 
-const TEMPERATURE_LADDER_LOW: f64 = 0.001;
+const TEMPERATURE_LADDER_LOW: f64 = 0.0001;
 const TEMPERATURE_LADDER_HIGH: f64 = 1.0;
-const TEMPERATURE_LADDER_STEPS: usize = 31;
+const TEMPERATURE_LADDER_STEPS: usize = 41;
 const GAUSSIAN_95_TWELVE_GON_MULTIPLIER: f64 = 2.534;
 
 struct Options {

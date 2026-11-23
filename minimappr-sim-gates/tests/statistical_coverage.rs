@@ -26,14 +26,10 @@ fn mesh_contour_world_coverage() {
     assert_pull_request_gate("mesh_contour_world_coverage");
 }
 
-/// KNOWN FAILURE (W4-sim-gates finding, not loosened): with realistic
-/// ±10 cm / ±10 µs residuals no scalar likelihood temperature gives a
-/// calibrated *and* sharp SRP region (23 % coverage at the shipped 0.002;
-/// 95 % only at 0.0126, where inside regions become whole-grid fans). The
-/// nightly runner still runs and reports it. Run it here with
-/// `cargo test --release -p minimappr-sim-gates --test statistical_coverage srp_contour_coverage -- --ignored --nocapture`.
+/// Drawn SRP region (contour or fan) coverage plus sharpness and accuracy.
+/// Passes since closeout D3: pairs are max-pooled over ±k·σ_pair of their
+/// declared layout/clock σ, and the temperature refitted on that surface.
 #[test]
-#[ignore = "known failure: SRP likelihood region not calibratable by temperature (docs/field_mode_progress/sim_gates.md)"]
 fn srp_contour_coverage() {
     assert_pull_request_gate("srp_contour_coverage");
 }
