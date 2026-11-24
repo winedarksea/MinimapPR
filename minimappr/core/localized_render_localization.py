@@ -88,12 +88,47 @@ def resolve_default_handoff_estimate(
     """
     estimate = HandoffLocalizationEstimate.from_render_payload(payload)
     if not (
-        host.settings.localization_single_node_solver == "python_cartesian"
-        and reporting_modality == "localized"
+        python_cartesian_resolve_requested(host, payload, reporting_modality)
         and payload.localization_pair_tdoas
-        and payload.localization_sound_speed_mps is not None
     ):
         return estimate
+    solved = python_cartesian_estimate_from_rust_tdoas(
+        host,
+        payload,
+        ordered_sensor_ids=geometry.ordered_pair_sensor_ids(),
+        sensor_positions=geometry.ordered_pair_sensor_positions(),
+        pair_tdoas=payload.localization_pair_tdoas,
+        steering_direction=payload.localization_steering_direction,
+    )
+    return estimate if solved is None else solved
+
+
+def python_cartesian_resolve_requested(
+    host: "FusionNode",
+    payload: LocalizedClassifierRenderRequest,
+    reporting_modality: str,
+) -> bool:
+    return (
+        host.settings.localization_single_node_solver == "python_cartesian"
+        and reporting_modality == "localized"
+        and payload.localization_sound_speed_mps is not None
+    )
+
+
+def python_cartesian_estimate_from_rust_tdoas(
+    host: "FusionNode",
+    payload: LocalizedClassifierRenderRequest,
+    *,
+    ordered_sensor_ids: list[str],
+    sensor_positions: dict[str, Any],
+    pair_tdoas: list[dict],
+    steering_direction: tuple[float, float, float] | None,
+) -> HandoffLocalizationEstimate | None:
+    """Python Cartesian solve of the sidecar's pair TDOAs; ``None`` when unsolvable.
+
+    ``ordered_sensor_ids`` must be the complete list the pair indices index,
+    with a site position for every entry.
+    """
     # Amplitude/SNR-informed range prior: only affects unobservable-range
     # projection; a range_refined solve ignores far_field_initial_range_m.
     far_field_range_m = host.settings.localization_far_field_default_range_m
@@ -112,10 +147,10 @@ def resolve_default_handoff_estimate(
         if prior_clamped:
             host._metrics.localization_amplitude_prior_clamped_count += 1
     solved = solve_localization_from_rust_tdoas(
-        sensor_positions=geometry.selected_positions,
-        ordered_sensor_ids=geometry.selected_sensor_ids,
-        pair_tdoas=payload.localization_pair_tdoas,
-        steering_direction=payload.localization_steering_direction,
+        sensor_positions=sensor_positions,
+        ordered_sensor_ids=ordered_sensor_ids,
+        pair_tdoas=pair_tdoas,
+        steering_direction=steering_direction,
         sound_speed_mps=payload.localization_sound_speed_mps,
         sample_rate_hz=payload.sample_rate_hz,
         interpolation_factor=host.settings.gcc_phat_interp_factor,
@@ -126,7 +161,7 @@ def resolve_default_handoff_estimate(
     )
     if solved is None:
         host._metrics.localization_single_node_python_fallback_count += 1
-        return estimate
+        return None
     host._metrics.localization_single_node_python_solved_count += 1
     return HandoffLocalizationEstimate(
         position_m=solved.position_m,

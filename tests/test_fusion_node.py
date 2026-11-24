@@ -1680,17 +1680,17 @@ async def test_fusion_ingests_rust_localized_render_directly(tmp_path: Path) -> 
     last_seen_ns = int(nodes[0]["last_seen_ns"])
     assert ingest_before_ns <= last_seen_ns <= ingest_after_ns
 
+    # The mono render is a derived product: it must never land in the raw
+    # per-sensor buffers, which the sidecar's raw_audio_frame events fill with
+    # the real per-channel audio at packet time.
     sensor_descriptors = await fusion.registry.sensors_for_node(node.id)
+    assert len(sensor_descriptors) == 4
     summary = await buffer.summarize_sensors(
         sensor_ids=[descriptor.sensor_id for descriptor in sensor_descriptors],
         now_ns=ingest_after_ns,
     )
-    assert summary["active_sensor_count"] == len(sensor_descriptors)
-    assert summary["sample_rate_hz"] == 48_000
-    assert summary["last_sample_time_ns"] is not None
-    assert summary["age_seconds"] is not None
-    assert summary["age_seconds"] <= 1.0
-    assert summary["rms"] is not None
+    assert summary["active_sensor_count"] == 0
+    assert summary["last_sample_time_ns"] is None
 
     await fusion.stop()
     await storage.close()
@@ -3486,12 +3486,12 @@ async def test_omni_suppression_distance_gate_still_enriches_near(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_localized_render_degraded_to_omni_without_node_position_raises(tmp_path: Path) -> None:
-    """A render arriving as "localized" that is degraded to omni by the
-    out-of-range rejection must fail with the same clean ValueError as an
-    arriving-omni render when the node has no position_m (not a TypeError)."""
+async def test_localized_render_degraded_to_omni_lands_at_the_operator_override_position(tmp_path: Path) -> None:
+    """A render degraded to omni (here: out of range) is placed at the node's
+    registry spec, so an operator position override wins over the position the
+    node reported in its packet."""
     settings = Settings(
-        db_path=tmp_path / "degrade_guard.db",
+        db_path=tmp_path / "degrade_override.db",
         snippet_dir=tmp_path / "snippets",
         snippet_retention_seconds=0,
     )
@@ -3500,38 +3500,28 @@ async def test_localized_render_degraded_to_omni_without_node_position_raises(tm
     storage = Storage(settings.db_path)
     await storage.initialize()
     fusion = _make_fusion_node(settings, storage)
+    await fusion.start()
+    await fusion.registry.set_overrides("node-overridden", {"position_m": (12.0, -7.0, 2.0)})
 
-    # The node itself reports no position; a registry override supplies one so
-    # runtime registration succeeds, but the payload node keeps position_m=None.
-    # NodeSpec validation normally requires position_m or position_geo, so use a
-    # non-validating model_copy to simulate a malformed payload reaching ingest.
-    valid = _tetra_node_spec("node-no-pos", (0.0, 0.0, 0.0))
-    node = valid.model_copy(update={"position_m": None, "position_geo": None})
-    await fusion.registry.set_overrides("node-no-pos", {"position_m": (0.0, 0.0, 0.0)})
-
-    audio = np.random.default_rng(23).normal(0.0, 0.3, size=48_000).astype(np.float32)
-
-    def _payload(manifest_id: str) -> LocalizedClassifierRenderRequest:
-        return LocalizedClassifierRenderRequest(
-            manifest_id=manifest_id,
-            node=node,
+    await fusion.ingest_localized_render(
+        LocalizedClassifierRenderRequest(
+            manifest_id="manifest-degrade-override",
+            node=_tetra_node_spec("node-overridden", (0.0, 0.0, 0.0)),
             event_time_ns=1_739_950_000_000_000_000,
             sample_rate_hz=48_000,
-            decoded_audio=audio,
+            decoded_audio=np.random.default_rng(23).normal(0.0, 0.3, size=48_000).astype(np.float32),
             # Beyond the 5 km origin backstop: rejected out of range, degraded to omni.
             localization_position_m=(50_000.0, 0.0, 0.0),
             localization_confidence=0.8,
         )
+    )
 
-    # First ingest dies earlier, at node persistence — but it records the node
-    # fingerprint, so the second identical render skips persistence and reaches
-    # the out-of-range degrade path.
-    with pytest.raises(ValueError, match="required for persistence"):
-        await fusion.ingest_localized_render(_payload("manifest-degrade-guard-1"))
-    with pytest.raises(ValueError, match="Omni classifier render requires node.position_m"):
-        await fusion.ingest_localized_render(_payload("manifest-degrade-guard-2"))
     assert fusion._metrics.localization_rejected_out_of_range_count == 1
-
+    detections = await storage.list_detections(limit=10)
+    assert len(detections) == 1
+    assert detections[0]["reporting_modality"] == "omni"
+    assert tuple(detections[0]["position_m"]) == pytest.approx((12.0, -7.0, 2.0))
+    await fusion.stop()
     await storage.close()
 
 

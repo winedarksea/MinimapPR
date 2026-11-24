@@ -1,7 +1,8 @@
 """Collaborator seams around the Rust classifier-render handoff (plan P0).
 
-The defaults must be no-ops; the hooks must fire once per solve, in the order
-later milestones rely on (observation before classification/reporting).
+The default seams must leave a legacy (provenance-less) render on the
+pre-overhaul path; the hooks must fire once per solve, in the order later
+milestones rely on (observation before classification/reporting).
 """
 
 from __future__ import annotations
@@ -21,13 +22,13 @@ from minimappr.core.localization import LocalizationEngine
 from minimappr.core.localized_render_handoff_hooks import (
     SOLVE_ORIGIN_PYTHON_INGEST,
     SOLVE_ORIGIN_RUST_CLASSIFIER_RENDER,
-    DefaultPathSolutionResolver,
     HandoffSolveGeometry,
     LocalizationSeamCollaborators,
-    NoOpLocalizationProvenanceRecorder,
     NoOpPositionObservationSink,
-    RegistryGeometryResolver,
 )
+from minimappr.core.localization_provenance import ManifestLocalizationProvenanceRecorder
+from minimappr.core.localized_handoff_geometry import ManifestSolveGeometryResolver
+from minimappr.core.localized_handoff_solution import SnapshotGeometrySolutionResolver
 from minimappr.core.localized_render_localization import HandoffLocalizationEstimate
 from minimappr.core.node_registry import NodeRegistry
 from minimappr.core.tracking import TrackManager
@@ -147,12 +148,12 @@ def _install(fusion: FusionNode, seams: _RecordingSeams) -> None:
     fusion._localized_render_handoff.collaborators = collaborators
 
 
-async def test_default_seams_are_no_ops(tmp_path: Path) -> None:
+async def test_default_seams_keep_the_legacy_path_for_renders_without_provenance(tmp_path: Path) -> None:
     fusion, storage = await _started_fusion(tmp_path)
     collaborators = fusion._localization_seam_collaborators
-    assert isinstance(collaborators.geometry_resolver, RegistryGeometryResolver)
-    assert isinstance(collaborators.solution_resolver, DefaultPathSolutionResolver)
-    assert isinstance(collaborators.provenance_recorder, NoOpLocalizationProvenanceRecorder)
+    assert isinstance(collaborators.geometry_resolver, ManifestSolveGeometryResolver)
+    assert isinstance(collaborators.solution_resolver, SnapshotGeometrySolutionResolver)
+    assert isinstance(collaborators.provenance_recorder, ManifestLocalizationProvenanceRecorder)
     assert isinstance(collaborators.position_observation_sink, NoOpPositionObservationSink)
     assert fusion._localized_render_handoff.collaborators is collaborators
 
@@ -161,6 +162,7 @@ async def test_default_seams_are_no_ops(tmp_path: Path) -> None:
     assert len(detections) == 1
     assert detections[0]["feature_summary"]["localization_method"] == "rust_srp_phat"
     assert tuple(detections[0]["position_m"]) == (3.0, 4.0, 0.5)
+    assert "localization_solve" not in detections[0]["feature_summary"]
     await fusion.stop()
     await storage.close()
 

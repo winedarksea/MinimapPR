@@ -25,7 +25,10 @@ from typing import Any, Mapping
 import numpy as np
 
 from minimappr.core.geo import LocalCoordinateFrame
-from minimappr.core.localization_provenance import site_frame_id_for
+from minimappr.core.localization_provenance import (
+    contract_projection_for_coordinate_frame_mode,
+    site_frame_id_for_coordinate_frame,
+)
 from minimappr.core.node_position_estimator import checkpointed_stationary_estimate
 from minimappr.core.node_registry import operator_override_position_m
 from minimappr.core.sensor_world_position import body_to_world_quaternion_wxyz
@@ -36,12 +39,6 @@ logger = logging.getLogger(__name__)
 PLACEMENT_SOURCE_OPERATOR_OVERRIDE = "operator_override"
 PLACEMENT_SOURCE_STATIONARY_ESTIMATE = "stationary_estimate"
 
-PROJECTION_FLAT_WGS84_SERIES = "flat_wgs84_series"
-PROJECTION_GEODETIC_ECEF_ENU = "geodetic_ecef_enu"
-_CONTRACT_PROJECTION_BY_COORDINATE_MODE = {
-    "flat": PROJECTION_FLAT_WGS84_SERIES,
-    "geodetic": PROJECTION_GEODETIC_ECEF_ENU,
-}
 
 # Accuracy assumed for an operator-entered position with no stated accuracy: a
 # tape- or laser-measured placement is good to about a decimetre. Operators
@@ -51,11 +48,7 @@ DEFAULT_OPERATOR_PLACEMENT_POSITION_STD_M = 0.1
 
 def contract_projection_for(coordinate_frame: LocalCoordinateFrame) -> str:
     """Contract projection name of the frame Python actually uses."""
-    return _CONTRACT_PROJECTION_BY_COORDINATE_MODE[coordinate_frame.mode]
-
-
-def site_frame_id_for_coordinate_frame(coordinate_frame: LocalCoordinateFrame) -> str:
-    return site_frame_id_for(coordinate_frame.origin, contract_projection_for(coordinate_frame))
+    return str(contract_projection_for_coordinate_frame_mode(coordinate_frame.mode))
 
 
 @dataclass(frozen=True, slots=True)
