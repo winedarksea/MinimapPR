@@ -35,12 +35,6 @@ const DEFAULT_BIRDNET_CLASSIFICATION_WINDOW_SECONDS: f64 = 30.0;
 const DEFAULT_CLASSIFIER_RENDER_OVERLAP_SECONDS: f64 = 2.0;
 const AUTOMATIC_GPS_CLUSTER_ID: &str = "auto-gps";
 const EARTH_RADIUS_M: f64 = 6_371_000.0;
-/// Largest mic array the spatial pipeline (SRP-PHAT / GCC-PHAT / render_mvdr_n)
-/// will run on. Sirith Planar (5 mics) fits; anything larger falls back to omni.
-const MAX_SPATIAL_CHANNELS: usize = 8;
-/// Minimum out-of-collinearity span (in meters) required for an array's
-/// geometry to be usable by the spatial pipeline.
-const SPATIAL_GEOMETRY_MIN_SPAN_M: f32 = 0.005;
 /// SRP-PHAT needs at least this many channels in the localization buffer.
 pub(crate) const MIN_SRP_CHANNEL_COUNT: usize = 4;
 const NANOSECONDS_PER_MILLISECOND_F64: f64 = 1_000_000.0;
@@ -51,6 +45,12 @@ pub(crate) use minimappr_core::sirith_array_geometry::SIRITH_MIC_POSITIONS_M;
 
 #[path = "dsp_array_geometry.rs"]
 mod dsp_array_geometry;
+#[path = "dsp_buffer_channel_reconcile.rs"]
+mod dsp_buffer_channel_reconcile;
+#[path = "dsp_buffer_sensor_set.rs"]
+mod dsp_buffer_sensor_set;
+#[path = "dsp_cluster_sensor_registry.rs"]
+mod dsp_cluster_sensor_registry;
 #[path = "dsp_compute_payload.rs"]
 mod dsp_compute_payload;
 #[path = "dsp_coverage_integration.rs"]
@@ -61,6 +61,8 @@ mod dsp_dispatch_gates;
 mod dsp_manifest_buffering;
 #[path = "dsp_manifest_publish.rs"]
 mod dsp_manifest_publish;
+#[path = "dsp_node_array_geometry_gate.rs"]
+mod dsp_node_array_geometry_gate;
 #[path = "dsp_preprocess.rs"]
 mod dsp_preprocess;
 #[path = "dsp_solve_pair_admission.rs"]
@@ -69,15 +71,22 @@ mod dsp_solve_pair_admission;
 mod dsp_solve_sensor_layout;
 #[path = "dsp_window_geometry.rs"]
 mod dsp_window_geometry;
+#[path = "explicit_cluster_sensor_list.rs"]
+mod explicit_cluster_sensor_list;
 
-pub(crate) use self::dsp_array_geometry::*;
+use self::dsp_array_geometry::*;
+pub(crate) use self::dsp_buffer_channel_reconcile::*;
+pub(crate) use self::dsp_buffer_sensor_set::*;
+pub(crate) use self::dsp_cluster_sensor_registry::*;
 pub(crate) use self::dsp_compute_payload::*;
 use self::dsp_manifest_buffering::*;
 pub(crate) use self::dsp_manifest_publish::*;
+pub(crate) use self::dsp_node_array_geometry_gate::*;
 pub(crate) use self::dsp_preprocess::*;
 pub(crate) use self::dsp_solve_pair_admission::*;
 pub(crate) use self::dsp_solve_sensor_layout::*;
 pub(crate) use self::dsp_window_geometry::*;
+pub(crate) use self::explicit_cluster_sensor_list::*;
 
 pub use minimappr_core::gcc_phat::PairTdoa;
 
@@ -133,10 +142,11 @@ pub struct DspWorker {
     raw_manifest_rx: Option<mpsc::Receiver<QueuedRawManifest>>,
     shutdown_requested: Option<Arc<AtomicBool>>,
     buffers: HashMap<String, Vec<SensorStreamBuffer>>,
-    /// Geometry synthesized from live node GPS reports when no explicit cluster
-    /// topology accompanies a manifest. This is the Rust counterpart of the
-    /// Python server's coordinate-frame-backed NodeRegistry geometry.
-    automatic_gps_geometry: AutomaticGpsGeometry,
+    /// Sensor id behind each channel of `buffers[key]`, so a registry
+    /// reorder (join / eviction) can move the audio with its sensor.
+    buffer_channel_sensor_ids: HashMap<String, Arc<Vec<String>>>,
+    /// Which sensors back each buffer, their order, positions and rates.
+    sensor_registry: ClusterSensorRegistry,
     /// Per-node preprocessing state (biquad memory etc.). Keyed by `node_id`
     /// extracted from the stream_key prefix, matching how `node_audio_overrides`
     /// is keyed in [`DspWorkerState`]. Lives outside the shared RwLock so frame
@@ -187,6 +197,7 @@ impl DspWorker {
                 config.localization_coverage_stall_budget_seconds,
                 config.localization_coverage_total_cap_seconds,
             ));
+        let sensor_registry = ClusterSensorRegistry::new(&config.localization_solve);
         Self {
             manifest_store,
             derived_cache,
@@ -197,7 +208,8 @@ impl DspWorker {
             raw_manifest_rx: None,
             shutdown_requested: None,
             buffers: HashMap::new(),
-            automatic_gps_geometry: AutomaticGpsGeometry::default(),
+            buffer_channel_sensor_ids: HashMap::new(),
+            sensor_registry,
             node_audio_state: HashMap::new(),
             last_classifier_render_ns_by_stream: HashMap::new(),
             last_localization_ns_by_stream: HashMap::new(),
@@ -434,39 +446,15 @@ impl DspWorker {
             return None;
         }
 
-        // Arrays with up to MAX_SPATIAL_CHANNELS mics run the full spatial
-        // pipeline (SRP-PHAT / GCC-PHAT / render_mvdr_n are all N-mic). This is
-        // what lets the 5-mic planar array localize rather than fall straight to
-        // omni. Arrays beyond that cap, or whose geometry is missing/degenerate
-        // (wrong offset count, single sensor, or collinear mics), take the
-        // large-array omni fallback with a specific reason. Behaviour for the
-        // 1-4 channel tetra/point path is unchanged (never enters this block).
-        {
-            let last = owned_segments.last()?;
-            if last.channel_count > 4 {
-                let geometry_usable = last.channel_count <= MAX_SPATIAL_CHANNELS
-                    && last.sensor_layout.sensor_count() == last.channel_count
-                    && crate::dsp_math::array_spans_at_least_2d(
-                        &last.sensor_layout.positions_m,
-                        SPATIAL_GEOMETRY_MIN_SPAN_M,
-                    );
-                if !geometry_usable {
-                    let reason = if last.channel_count > MAX_SPATIAL_CHANNELS {
-                        "array_exceeds_max_spatial_channels"
-                    } else {
-                        "non_tetrahedral_array_geometry_unusable"
-                    };
-                    // Large-array fallback rendering bypasses the rolling buffer.
-                    // Use only the newest contiguous segment rather than falsely
-                    // joining audio across an explicit capture gap.
-                    return self.dispatch_large_array_manifest(
-                        owned_segments.into_iter().last()?,
-                        pending_backlog_depth,
-                        reason,
-                    );
-                }
-                // else: fall through to the normal spatial buffered path.
-            }
+        // The node's own array failed the geometry gate (too many mics, or
+        // missing / collinear offsets): omni-render only the newest contiguous
+        // segment rather than falsely joining audio across a capture gap.
+        if let Some(reason) = owned_segments.last()?.large_array_omni_fallback_reason {
+            return self.dispatch_large_array_manifest(
+                owned_segments.into_iter().last()?,
+                pending_backlog_depth,
+                reason,
+            );
         }
 
         let mut final_owned_and_buffered = None;
@@ -511,6 +499,7 @@ impl DspWorker {
         let ttl_ns = (self.config.stream_inactivity_evict_seconds as u128) * 1_000_000_000;
         let now_ns = system_now_ns();
         let cutoff = now_ns.saturating_sub(ttl_ns);
+        self.sensor_registry.evict_stale_sensors(now_ns);
         let stale: Vec<String> = self
             .last_heartbeat_ns_by_stream
             .iter()
@@ -522,6 +511,8 @@ impl DspWorker {
         }
         for key in &stale {
             self.buffers.remove(key);
+            self.buffer_channel_sensor_ids.remove(key);
+            self.sensor_registry.forget_buffer(key);
             self.deferred_localizations.forget(key);
             self.last_classifier_render_ns_by_stream.remove(key);
             self.last_localization_ns_by_stream.remove(key);
@@ -598,3 +589,7 @@ mod dsp_worker_solve_manifest_inspection;
 #[cfg(test)]
 #[path = "dsp_worker_mixed_cluster_solve_tests.rs"]
 mod dsp_worker_mixed_cluster_solve_tests;
+
+#[cfg(test)]
+#[path = "dsp_worker_sample_rate_guard_tests.rs"]
+mod dsp_worker_sample_rate_guard_tests;

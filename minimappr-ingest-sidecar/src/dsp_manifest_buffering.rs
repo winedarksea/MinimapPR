@@ -1,6 +1,7 @@
 //! Manifest ingest: decode, geometry/clock resolution and buffer append.
 
 use super::*;
+use minimappr_core::localization_sensor_entry::SolveBufferScope;
 
 pub(super) struct OwnedManifestAudio {
     pub(super) manifest: DspManifest,
@@ -10,11 +11,14 @@ pub(super) struct OwnedManifestAudio {
     pub(super) source_ids: Vec<String>,
     pub(super) sr: u32,
     pub(super) now_ns: u128,
-    pub(super) channel_count: usize,
     pub(super) buffer_channel_count: usize,
     pub(super) buffer_channel_indices: Vec<usize>,
+    /// Sensor id behind every buffer channel (the registry's current order).
+    pub(super) buffer_sensor_ids: Arc<Vec<String>>,
     pub(super) classification_window_sec: f64,
     pub(super) sensor_layout: Arc<SolveSensorLayout>,
+    /// Set when the node's own array failed the geometry gate.
+    pub(super) large_array_omni_fallback_reason: Option<&'static str>,
     pub(super) effective_sound_speed_mps: f32,
     pub(super) buffer_start_time_ns: i128,
     pub(super) buffer_end_time_ns: i128,
@@ -30,12 +34,6 @@ pub(super) struct BufferedManifestAudio {
     pub(super) end_ns: i128,
     pub(super) localization_center_time_ns: i128,
     pub(super) channel_states: Vec<LocalizationChannelState>,
-}
-
-pub(super) struct ManifestBufferRouting {
-    pub(super) buffer_key: String,
-    pub(super) buffer_channel_count: usize,
-    pub(super) buffer_channel_indices: Vec<usize>,
 }
 
 impl DspWorker {
@@ -95,7 +93,20 @@ impl DspWorker {
         }
 
         let channel_count = decoded_segments[0].channels.len();
-        self.apply_automatic_gps_geometry(&mut manifest, &stream_key, channel_count);
+        let routing = self.sensor_registry.route_node(&NodeRoutingRequest {
+            stream_key: &stream_key,
+            manifest: &manifest,
+            channel_count,
+            sample_rate_hz: decoded_segments[0].sample_rate_hz.max(1),
+            now_ns,
+        });
+        let route = routing.route;
+        if route.layout.buffer_scope != SolveBufferScope::NodeLocal {
+            // Published results carry the buffer-ordered list, so a legacy
+            // reader indexing `cluster_sensor_positions` by channel stays right.
+            manifest.cluster_id = route.layout.cluster_id.clone();
+            manifest.cluster_sensor_positions = Some(route.layout.cluster_sensor_positions());
+        }
         let source_ids = manifest
             .source_handles
             .iter()
@@ -106,28 +117,7 @@ impl DspWorker {
             .classification_window_seconds
             .max(MIN_BIRDNET_CLASSIFICATION_WINDOW_SECONDS)
             .max(self.config.window_seconds);
-        let sensor_layout = Arc::new(solve_sensor_layout_from_manifest(
-            &manifest,
-            stream_key_node_id(&stream_key),
-            decoded_segments[0].sample_rate_hz.max(1),
-            self.automatic_gps_geometry.origin_as_geodetic(),
-        ));
-        let buffer_routing = resolve_cluster_buffer_routing(&manifest, &stream_key, channel_count);
-        let (buffer_key, buffer_channel_count, buffer_channel_indices) = buffer_routing
-            .map(|routing| {
-                (
-                    routing.buffer_key,
-                    routing.buffer_channel_count,
-                    routing.buffer_channel_indices,
-                )
-            })
-            .unwrap_or_else(|| {
-                (
-                    stream_key.clone(),
-                    channel_count,
-                    (0..channel_count).collect(),
-                )
-            });
+        let buffer_channel_count = route.buffer_sensor_ids.len();
         let segment_count = decoded_segments.len();
         let mut manifest_for_final_segment = Some(manifest);
         let mut owned_segments = Vec::with_capacity(segment_count);
@@ -214,16 +204,17 @@ impl DspWorker {
             owned_segments.push(OwnedManifestAudio {
                 manifest: segment_manifest,
                 stream_key: stream_key.clone(),
-                buffer_key: buffer_key.clone(),
+                buffer_key: route.buffer_key.clone(),
                 decoded,
                 source_ids: source_ids.clone(),
                 sr,
                 now_ns,
-                channel_count,
                 buffer_channel_count,
-                buffer_channel_indices: buffer_channel_indices.clone(),
+                buffer_channel_indices: route.buffer_channel_indices.clone(),
+                buffer_sensor_ids: route.buffer_sensor_ids.clone(),
                 classification_window_sec,
-                sensor_layout: sensor_layout.clone(),
+                sensor_layout: route.layout.clone(),
+                large_array_omni_fallback_reason: routing.large_array_omni_fallback_reason,
                 effective_sound_speed_mps,
                 buffer_start_time_ns,
                 buffer_end_time_ns,
@@ -235,29 +226,6 @@ impl DspWorker {
             });
         }
         Some(owned_segments)
-    }
-
-    pub(super) fn apply_automatic_gps_geometry(
-        &mut self,
-        manifest: &mut DspManifest,
-        stream_key: &str,
-        channel_count: usize,
-    ) {
-        // Explicit cluster geometry is still an operator-directed boundary.
-        // Otherwise every GPS-reporting node on the same audio stream joins the
-        // automatic array, exactly as the Python global sensor pool does.
-        if manifest.cluster_id.is_some() || manifest.cluster_sensor_positions.is_some() {
-            return;
-        }
-        let node_id = stream_key_node_id(stream_key);
-        let Some(sensor_positions) =
-            self.automatic_gps_geometry
-                .update_from_manifest(manifest, node_id, channel_count)
-        else {
-            return;
-        };
-        manifest.cluster_id = Some(AUTOMATIC_GPS_CLUSTER_ID.to_string());
-        manifest.cluster_sensor_positions = Some(sensor_positions);
     }
 
     pub(super) async fn publish_raw_audio_frame_for_owned_manifest(
@@ -311,19 +279,21 @@ impl DspWorker {
         &mut self,
         owned: &OwnedManifestAudio,
     ) -> Option<BufferedManifestAudio> {
+        self.reconcile_buffer_channels(owned);
+        let max_buffer_seconds = self.config.max_buffer_seconds;
         let buffers = self
             .buffers
-            .entry(owned.buffer_key.clone())
-            .or_insert_with(|| {
-                (0..owned.buffer_channel_count)
-                    .map(|_| SensorStreamBuffer::new(owned.sr, self.config.max_buffer_seconds))
-                    .collect()
-            });
-        while buffers.len() < owned.buffer_channel_count {
-            buffers.push(SensorStreamBuffer::new(
-                owned.sr,
-                self.config.max_buffer_seconds,
-            ));
+            .get_mut(&owned.buffer_key)
+            .expect("reconcile_buffer_channels creates the buffer set");
+        for &buffer_channel_index in &owned.buffer_channel_indices {
+            // A buffer runs at its own sensor's rate. A placeholder created by
+            // another member (or a node that changed rate) is replaced, never
+            // written at the wrong rate.
+            if let Some(buffer) = buffers.get_mut(buffer_channel_index) {
+                if buffer.sample_rate_hz_value() != owned.sr {
+                    *buffer = SensorStreamBuffer::new(owned.sr, max_buffer_seconds);
+                }
+            }
         }
         let reference_buffer_index = owned.buffer_channel_indices.first().copied().unwrap_or(0);
 
@@ -411,11 +381,14 @@ impl DspWorker {
             end_ns,
             self.config.window_seconds,
         );
-        let channel_states = localization_channel_states_centered(
+        let mut channel_states = localization_channel_states_centered(
             buffers,
             center_time_ns,
             self.config.window_seconds,
         );
+        owned
+            .sensor_layout
+            .clear_solve_excluded_channels(&mut channel_states);
         // `buffers` borrow ends here; safe to take &self again for the
         // shared-state write.
         if reanchor_delta > 0 {
@@ -427,5 +400,53 @@ impl DspWorker {
             localization_center_time_ns: center_time_ns,
             channel_states,
         })
+    }
+
+    /// Brings `buffers[owned.buffer_key]` to the registry's sensor order. A
+    /// reorder first releases any parked solve against the old order, since
+    /// its layout snapshot indexes the channels as they were.
+    fn reconcile_buffer_channels(&mut self, owned: &OwnedManifestAudio) {
+        let current_sensor_ids = self
+            .buffer_channel_sensor_ids
+            .get(&owned.buffer_key)
+            .filter(|_| self.buffers.contains_key(&owned.buffer_key))
+            .cloned()
+            .unwrap_or_default();
+        let max_buffer_seconds = self.config.max_buffer_seconds;
+        let new_buffer = || SensorStreamBuffer::new(owned.sr, max_buffer_seconds);
+        match plan_buffer_channel_reconcile(&current_sensor_ids, &owned.buffer_sensor_ids) {
+            BufferChannelReconcile::Unchanged => {}
+            BufferChannelReconcile::AppendChannels => {
+                let buffers = self.buffers.entry(owned.buffer_key.clone()).or_default();
+                buffers.resize_with(owned.buffer_channel_count, new_buffer);
+            }
+            BufferChannelReconcile::Reorder {
+                source_channel_by_new_channel,
+            } => {
+                if let Some(buffers) = self.buffers.get(&owned.buffer_key) {
+                    self.deferred_localizations
+                        .release_pending_and_forget(&owned.buffer_key, buffers);
+                }
+                let mut previous: Vec<Option<SensorStreamBuffer>> = self
+                    .buffers
+                    .remove(&owned.buffer_key)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(Some)
+                    .collect();
+                let reordered = source_channel_by_new_channel
+                    .into_iter()
+                    .map(|source| {
+                        source
+                            .and_then(|index| previous.get_mut(index)?.take())
+                            .unwrap_or_else(new_buffer)
+                    })
+                    .collect();
+                self.buffers.insert(owned.buffer_key.clone(), reordered);
+            }
+        }
+        self.buffers.entry(owned.buffer_key.clone()).or_default();
+        self.buffer_channel_sensor_ids
+            .insert(owned.buffer_key.clone(), owned.buffer_sensor_ids.clone());
     }
 }

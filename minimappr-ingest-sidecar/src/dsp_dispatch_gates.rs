@@ -60,6 +60,8 @@ impl DspWorker {
             classification_coverage: (0..owned.buffer_channel_count).map(|_| None).collect(),
             classifier_render_start_ns: Some(owned.buffer_start_time_ns.max(0) as u128),
             classifier_render_end_ns: Some(owned.buffer_end_time_ns.max(0) as u128),
+            localization_window_center_time_ns: owned.buffer_start_time_ns
+                + (owned.buffer_end_time_ns - owned.buffer_start_time_ns) / 2,
             sensor_layout: owned.sensor_layout,
             attempt_kind: SolveAttemptKind::NotAttempted,
             pair_admission: SolvePairAdmission::admit_all(),
@@ -151,11 +153,17 @@ impl DspWorker {
                         buffered.end_ns,
                         owned.classification_window_sec,
                     );
-                let fallback_render_coverage = channel_coverage_ending_at(
+                let mut fallback_render_coverage = channel_coverage_ending_at(
                     buffers,
                     buffered.end_ns,
                     owned.classification_window_sec,
                 );
+                let layout = &owned.sensor_layout;
+                let mut fallback_render_windows = fallback_render_windows;
+                let mut listenable_fallback_render_windows = listenable_fallback_render_windows;
+                layout.clear_solve_excluded_channels(&mut fallback_render_windows);
+                layout.clear_solve_excluded_channels(&mut listenable_fallback_render_windows);
+                layout.clear_solve_excluded_channels(&mut fallback_render_coverage);
                 let fallback_render_channels = if fallback_render_windows
                     .iter()
                     .any(|window| !window.is_empty())
@@ -195,6 +203,7 @@ impl DspWorker {
                     classification_coverage: fallback_render_coverage,
                     classifier_render_start_ns,
                     classifier_render_end_ns,
+                    localization_window_center_time_ns: buffered.localization_center_time_ns,
                     sensor_layout: owned.sensor_layout,
                     attempt_kind: SolveAttemptKind::NotAttempted,
                     pair_admission: SolvePairAdmission::admit_all(),
@@ -283,36 +292,43 @@ impl DspWorker {
             return None;
         }
 
-        let (classification_windows, listenable_classification_windows, classification_coverage) =
-            if timing_gates.run_classifier_render {
-                let Some(buffers) = self.buffers.get(&owned.buffer_key) else {
-                    error!(stream_key = %owned.stream_key, buffer_key = %owned.buffer_key, "stream buffers missing after append in classifier render path — skipping");
-                    return None;
-                };
-                (
-                    channel_windows_ending_at(
-                        buffers,
-                        buffered.end_ns,
-                        owned.classification_window_sec,
-                    ),
-                    channel_windows_ending_at_with_gap_concealment(
-                        buffers,
-                        buffered.end_ns,
-                        owned.classification_window_sec,
-                    ),
-                    channel_coverage_ending_at(
-                        buffers,
-                        buffered.end_ns,
-                        owned.classification_window_sec,
-                    ),
-                )
-            } else {
-                (
-                    buffered.channel_states.iter().map(|_| Vec::new()).collect(),
-                    buffered.channel_states.iter().map(|_| Vec::new()).collect(),
-                    buffered.channel_states.iter().map(|_| None).collect(),
-                )
+        let (
+            mut classification_windows,
+            mut listenable_classification_windows,
+            mut classification_coverage,
+        ) = if timing_gates.run_classifier_render {
+            let Some(buffers) = self.buffers.get(&owned.buffer_key) else {
+                error!(stream_key = %owned.stream_key, buffer_key = %owned.buffer_key, "stream buffers missing after append in classifier render path — skipping");
+                return None;
             };
+            (
+                channel_windows_ending_at(
+                    buffers,
+                    buffered.end_ns,
+                    owned.classification_window_sec,
+                ),
+                channel_windows_ending_at_with_gap_concealment(
+                    buffers,
+                    buffered.end_ns,
+                    owned.classification_window_sec,
+                ),
+                channel_coverage_ending_at(
+                    buffers,
+                    buffered.end_ns,
+                    owned.classification_window_sec,
+                ),
+            )
+        } else {
+            (
+                buffered.channel_states.iter().map(|_| Vec::new()).collect(),
+                buffered.channel_states.iter().map(|_| Vec::new()).collect(),
+                buffered.channel_states.iter().map(|_| None).collect(),
+            )
+        };
+        let layout = &owned.sensor_layout;
+        layout.clear_solve_excluded_channels(&mut classification_windows);
+        layout.clear_solve_excluded_channels(&mut listenable_classification_windows);
+        layout.clear_solve_excluded_channels(&mut classification_coverage);
         let (classifier_render_start_ns, classifier_render_end_ns) =
             if timing_gates.run_classifier_render {
                 classifier_render_bounds_from_windows(
@@ -334,6 +350,7 @@ impl DspWorker {
             classification_coverage,
             classifier_render_start_ns,
             classifier_render_end_ns,
+            localization_window_center_time_ns: buffered.localization_center_time_ns,
             sensor_layout: owned.sensor_layout,
             attempt_kind: if timing_gates.run_srp {
                 trigger_attempt_kind

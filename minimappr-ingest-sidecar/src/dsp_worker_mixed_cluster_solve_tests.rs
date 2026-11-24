@@ -96,7 +96,6 @@ fn first_or_second_point<'a>(first: &'a FixtureNode, second: &'a FixtureNode) ->
 }
 
 #[tokio::test]
-#[ignore = "localization overhaul milestone 1: planar node is dropped from a mixed automatic cluster (R1)"]
 async fn planar_and_point_nodes_share_one_fifteen_pair_solve_in_either_arrival_order() {
     let planar = FixtureNode::planar("planar-a", [0.0, 0.0, 1.5], 30.0);
     let point = FixtureNode::point("point-b", [3.0, 1.0, 1.8]);
@@ -389,5 +388,75 @@ async fn geometry_push_while_a_solve_is_parked_applies_only_to_later_solves() {
         sensor_position_m(later, &tetra_b.sensor_id(0)),
         tetra_b_overridden.sensor_world_positions_m()[0].1,
         "later solve uses the pushed placement",
+    );
+}
+
+#[tokio::test]
+async fn gps_move_while_a_solve_is_parked_applies_only_to_later_solves() {
+    const MOVE_EAST_M: f64 = 5.0;
+    let tetra_a = FixtureNode::tetra("tetra-a", [0.0, 0.0, 0.0]);
+    let tetra_b = FixtureNode::tetra("tetra-b", [20.0, 0.0, 0.0]);
+    let tetra_b_moved = FixtureNode::tetra("tetra-b", [20.0 + MOVE_EAST_M, 0.0, 0.0]);
+    let source = CoherentPointSource::new([10.0, 8.0, 2.0], FRAMES_PER_RUN);
+    let mut harness = RaceHarness::new(race_config(true)).await;
+
+    deliver_with_late_node(
+        &mut harness,
+        &tetra_a,
+        &tetra_b,
+        &source,
+        0..=FIRST_SHARED_TRIGGER_FRAME,
+    )
+    .await;
+    assert!(harness.has_pending_localization(AUTOMATIC_CLUSTER_BUFFER_KEY));
+    drain_published_manifests(&mut harness.events);
+
+    // Node b's releasing packet already reports the new GPS fix.
+    deliver_late_frame(
+        &mut harness,
+        &tetra_b_moved,
+        &source,
+        FIRST_SHARED_TRIGGER_FRAME,
+    )
+    .await;
+    assert!(!harness.has_pending_localization(AUTOMATIC_CLUSTER_BUFFER_KEY));
+    let published = drain_published_manifests(&mut harness.events);
+    let parked_solve = *attempted_localization_results(&published)
+        .last()
+        .expect("node b's late packet releases the parked solve");
+    let parked = solve_provenance(parked_solve);
+    assert_eq!(parked.active_sensor_indices.len(), 8);
+    assert_position_near(
+        sensor_position_m(parked, &tetra_b.sensor_id(0)),
+        tetra_b.sensor_world_positions_m()[0].1,
+        "parked solve keeps the trigger-time geometry",
+    );
+
+    deliver_with_late_node(
+        &mut harness,
+        &tetra_a,
+        &tetra_b_moved,
+        &source,
+        FIRST_SHARED_TRIGGER_FRAME + 1..=SECOND_SHARED_TRIGGER_FRAME,
+    )
+    .await;
+    deliver_late_frame(
+        &mut harness,
+        &tetra_b_moved,
+        &source,
+        SECOND_SHARED_TRIGGER_FRAME,
+    )
+    .await;
+    let published = drain_published_manifests(&mut harness.events);
+    let later = solve_provenance(
+        attempted_localization_results(&published)
+            .last()
+            .expect("a solve after the move"),
+    );
+    assert!(later.layout_revision > parked.layout_revision);
+    assert_position_near(
+        sensor_position_m(later, &tetra_b.sensor_id(0)),
+        tetra_b_moved.sensor_world_positions_m()[0].1,
+        "later solve uses the moved position",
     );
 }

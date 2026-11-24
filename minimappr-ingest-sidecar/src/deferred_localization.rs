@@ -22,6 +22,10 @@ use crate::{
     },
 };
 
+/// A join or eviction reordered the buffer's channels; the parked solve is
+/// dispatched against the old order its layout snapshot indexes.
+pub(crate) const STOP_REASON_LAYOUT_REORDERED: &str = "layout_reordered";
+
 /// One finished coverage decision, for the `/api/v1/dsp/status` counters that
 /// mirror Python's `localization_coverage_wait_stop_reasons` / `_max_ms`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -209,6 +213,30 @@ impl DeferredLocalizationScheduler {
         std::mem::take(&mut self.outcomes)
     }
 
+    /// Dispatch any parked solve now, against `buffers` as they are, and drop
+    /// the buffer's state (its channel order is about to change).
+    pub(crate) fn release_pending_and_forget(
+        &mut self,
+        buffer_key: &str,
+        buffers: &[SensorStreamBuffer],
+    ) {
+        let Some(state) = self.states_by_buffer_key.remove(buffer_key) else {
+            return;
+        };
+        if let Some(pending) = state.pending {
+            let waited_ns = self
+                .clock
+                .now_ns()
+                .saturating_sub(pending.first_deferred_ns);
+            self.ready_payloads
+                .push(finalize_pending_payload(pending, buffers));
+            self.outcomes.push(CoverageWaitOutcome {
+                stop_reason: STOP_REASON_LAYOUT_REORDERED,
+                waited_ns,
+            });
+        }
+    }
+
     /// Drop all state for an evicted buffer (stale-stream purge).
     pub(crate) fn forget(&mut self, buffer_key: &str) {
         self.states_by_buffer_key.remove(buffer_key);
@@ -248,9 +276,10 @@ impl DeferredLocalizationScheduler {
 /// Re-read the (now fuller) buffers at the original window centre, so the
 /// solve uses the trigger frame's span with every channel that arrived.
 ///
-/// Only the channels the parked geometry describes are re-read: a cluster
-/// buffer grows (never reorders) when a member joins, and a channel index
-/// past the parked `sensor_layout` would panic SRP on the rayon pool (process abort).
+/// Only the channels the parked geometry describes are re-read: while a solve
+/// is parked a cluster buffer only grows (a reorder releases it first), and a
+/// channel index past the parked `sensor_layout` would panic SRP on the rayon
+/// pool (process abort). The parked layout's exclusions (rate, cap) still apply.
 fn finalize_pending_payload(
     pending: PendingLocalization,
     buffers: &[SensorStreamBuffer],
@@ -268,6 +297,10 @@ fn finalize_pending_payload(
         span.center_time_ns,
         span.window_seconds,
     );
+    payload
+        .sensor_layout
+        .clear_solve_excluded_channels(&mut payload.channel_states);
+    payload.localization_window_center_time_ns = span.center_time_ns;
     payload.active_channels =
         eligible_localization_channels(&payload.channel_states, span.min_coverage_ratio);
     if let Some(render) = classifier_render {
@@ -292,6 +325,10 @@ fn attach_classifier_render_windows(
     );
     payload.classification_coverage =
         channel_coverage_ending_at(parked_buffers, render.end_ns, render.window_seconds);
+    let layout = &payload.sensor_layout;
+    layout.clear_solve_excluded_channels(&mut payload.classification_windows);
+    layout.clear_solve_excluded_channels(&mut payload.listenable_classification_windows);
+    layout.clear_solve_excluded_channels(&mut payload.classification_coverage);
     let (render_start_ns, render_end_ns) = classifier_render_bounds_from_windows(
         render.end_ns,
         &payload.classification_windows,
@@ -322,6 +359,7 @@ pub(crate) fn localization_only_template(
         classification_coverage: vec![None; channel_count],
         classifier_render_start_ns: None,
         classifier_render_end_ns: None,
+        localization_window_center_time_ns: payload.localization_window_center_time_ns,
         sensor_layout: payload.sensor_layout.clone(),
         attempt_kind: trigger_attempt_kind,
         pair_admission: payload.pair_admission.clone(),

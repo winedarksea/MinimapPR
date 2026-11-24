@@ -83,7 +83,9 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
             far_field_max_range_m: payload.config.localization_far_field_max_range_m,
             range_prior_m,
             range_prior_std_m,
-            half_space: payload.sensor_layout.solve_half_space(),
+            half_space: payload
+                .sensor_layout
+                .solve_half_space(&payload.active_channels),
             ..SrpPhatConfig::default()
         };
         estimate_tetrahedral_steering(
@@ -123,7 +125,14 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
     let pair_diagnostics = localization_evaluation
         .pair_tdoas
         .iter()
-        .map(pair_tdoa_diagnostic)
+        .map(|pair| PairTdoaDiagnostic {
+            is_cross_node: Some(
+                payload
+                    .sensor_layout
+                    .is_cross_node_pair(pair.ch_a, pair.ch_b),
+            ),
+            ..pair_tdoa_diagnostic(pair)
+        })
         .collect::<Vec<_>>();
     let localization = localization_evaluation.localization;
 
@@ -258,13 +267,22 @@ pub async fn run_io(result: ComputeMathResult) {
     let received_level_dbfs = max_window_rms(&payload.channel_states)
         .map(|rms| 20.0 * (rms.max(1.0e-9)).log10())
         .map(|db| db as f32);
-    let localization_payload = localization_manifest_payload(
+    let mut localization_payload = localization_manifest_payload(
         &localization,
         payload.config.localization_band_hz,
         pair_diagnostics,
         received_level_dbfs,
-        payload.sensor_layout.solve_half_space() != crate::srp_phat::HalfSpace::None,
+        payload
+            .sensor_layout
+            .solve_half_space(&payload.active_channels)
+            != crate::srp_phat::HalfSpace::None,
     );
+    localization_payload.solve_provenance = Some(payload.sensor_layout.solve_provenance(
+        payload.attempt_kind,
+        &payload.active_channels,
+        payload.localization_window_center_time_ns,
+        payload.config.window_seconds,
+    ));
 
     let has_classifier_render = render_result
         .as_ref()
