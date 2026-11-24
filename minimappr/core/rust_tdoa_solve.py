@@ -7,10 +7,16 @@ handling). This module re-homes the *solve* to Python: feed Rust's TDOAs + beari
 into :func:`solve_cartesian_tdoa` so the production single-node path and the Python
 multi-node fuser share one estimator. The sidecar keeps its TDOA front-end.
 
-Channel indices in the Rust ``pair_tdoas`` are positional and align with the node's
-ordered sensors (channel ``i`` -> ``ordered_sensor_ids[i]``); the sign/order of the
-lag matches the Python GCC-PHAT convention (guarded by the Rust oracle test
+Channel indices in the Rust ``pair_tdoas`` are positional and index the solve's
+ordered sensors (channel ``i`` -> ``ordered_sensor_ids[i]``; for a solve with
+provenance that is ``solve_provenance.sensors``, not the reporting node's
+channels); the sign/order of the lag matches the Python GCC-PHAT convention
+(guarded by the Rust oracle test
 ``sirith_fixture_pair_tdoas_match_python_oracle_signs_and_order``).
+
+The id map must be complete: an index outside ``ordered_sensor_ids`` or a
+sensor without a position raises ``ValueError``. Silently skipping such a pair
+used to turn a mis-mapped cluster solve into a plausible wrong position.
 """
 
 from __future__ import annotations
@@ -65,6 +71,25 @@ def _bearing_prior_from_direction(
     )
 
 
+def _require_complete_sensor_map(
+    *,
+    sensor_positions: dict[str, np.ndarray],
+    ordered_sensor_ids: list[str],
+    pair_tdoas: list[dict],
+) -> None:
+    missing_positions = [sensor_id for sensor_id in ordered_sensor_ids if sensor_id not in sensor_positions]
+    if missing_positions:
+        raise ValueError(f"Rust TDOA solve has no position for sensors {missing_positions}")
+    sensor_count = len(ordered_sensor_ids)
+    for pair in pair_tdoas:
+        for channel_key in ("ch_a", "ch_b"):
+            channel_index = int(pair[channel_key])
+            if not 0 <= channel_index < sensor_count:
+                raise ValueError(
+                    f"Rust TDOA pair {channel_key}={channel_index} is outside the {sensor_count} ordered solve sensors"
+                )
+
+
 def solve_localization_from_rust_tdoas(
     *,
     sensor_positions: dict[str, np.ndarray],
@@ -88,9 +113,14 @@ def solve_localization_from_rust_tdoas(
     so this single-node path honours the same operator-configured DOA-vs-TDOA
     trust dial as the multi-node dispatch path in ``core/localization_dispatch.py``.
     """
+    sensor_count = len(ordered_sensor_ids)
+    _require_complete_sensor_map(
+        sensor_positions=sensor_positions,
+        ordered_sensor_ids=ordered_sensor_ids,
+        pair_tdoas=pair_tdoas,
+    )
     if sample_rate_hz <= 0 or sound_speed_mps <= 0.0:
         return None
-    sensor_count = len(ordered_sensor_ids)
     if sensor_count < 4:
         return None
 
@@ -103,8 +133,6 @@ def solve_localization_from_rust_tdoas(
             lag_seconds = float(pair["lag_seconds"])
             confidence = float(pair.get("confidence", 0.0))
         except (KeyError, TypeError, ValueError):
-            continue
-        if not (0 <= channel_a < sensor_count and 0 <= channel_b < sensor_count):
             continue
         if channel_a == channel_b or not np.isfinite(lag_seconds):
             continue

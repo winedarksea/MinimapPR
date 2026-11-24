@@ -10,6 +10,20 @@ from typing import Any, Literal
 import numpy as np
 
 from minimappr.api.journal_reader import JournalPayloadHandle
+from minimappr.api.rust_localization_solve_contract import (
+    RustLocalizationSolve,
+    parse_rust_localization_solve,
+)
+from minimappr.api.rust_manifest_value_coercion import (
+    coerce_covariance_matrix,
+    coerce_pair_tdoas,
+    coerce_vec3,
+    optional_bounded_float,
+    optional_finite_float,
+    optional_int,
+    optional_nonempty_string,
+    optional_nonnegative_float,
+)
 from minimappr.core.audio_buffer import AudioCoverageStats
 from minimappr.models import (
     ClassificationResult,
@@ -59,6 +73,22 @@ class LocalizedClassifierRenderRequest:
     fallback_reason: str | None = None
     audio_quality: AudioCoverageStats | None = None
     authoritative_classification: ClassificationResult | None = None
+    # The solve this render covers (``localization.solve_provenance`` + admitted
+    # pairs). ``None`` for a legacy sidecar that emits no provenance.
+    localization_solve: RustLocalizationSolve | None = None
+
+    def __post_init__(self) -> None:
+        # The stored observation time is the solve's packet-derived window
+        # centre; a request carrying a solve with any other time would store a
+        # detection at a time the solve never observed.
+        if (
+            self.localization_solve is not None
+            and self.event_time_ns != self.localization_solve.provenance.window_center_time_ns
+        ):
+            raise ValueError(
+                "LocalizedClassifierRenderRequest.event_time_ns must equal the solve's window_center_time_ns "
+                f"({self.event_time_ns} != {self.localization_solve.provenance.window_center_time_ns})"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,8 +151,8 @@ def load_localized_render_manifest_bundle(
     if birdnet_payload is None and paired_classifier_manifest_payload is not None:
         birdnet_payload = paired_classifier_manifest_payload.get("birdnet")
     birdnet_payload = birdnet_payload if isinstance(birdnet_payload, dict) else {}
-    render_kind = _optional_nonempty_string(classifier_render_payload.get("render_kind"))
-    fallback_reason = _optional_nonempty_string(
+    render_kind = optional_nonempty_string(classifier_render_payload.get("render_kind"))
+    fallback_reason = optional_nonempty_string(
         birdnet_payload.get("fallback_reason")
         or classifier_render_payload.get("fallback_reason")
     )
@@ -131,12 +161,11 @@ def load_localized_render_manifest_bundle(
     if not manifest_id and paired_classifier_manifest_payload is not None:
         manifest_id = str(paired_classifier_manifest_payload.get("manifest_id") or "")
 
-    source_handle = JournalPayloadHandle.from_mapping(source_handles_payload[0], journal_streams_dir=journal_streams_dir)
     node_context_payload = manifest_payload.get("node_context")
     if not isinstance(node_context_payload, dict):
         raise ValueError("Rust DSP manifest omitted in-memory source node_context")
     node, event_time_ns, source_type, time_quality, environment = \
-        _load_source_context_from_channel_manifest(node_context_payload, source_handle)
+        _load_source_context_from_channel_manifest(node_context_payload)
     derived_handle = JournalPayloadHandle.from_mapping(derived_handle_payload, journal_streams_dir=journal_streams_dir)
     # Prefer inline base64 PCM from the SSE manifest (memory-only path, no disk read).
     # Fall back to reading the derived_handle segment_path for disk-backed (spool) consumers.
@@ -152,19 +181,22 @@ def load_localized_render_manifest_bundle(
     audio_quality = _load_audio_coverage_stats(coverage_payload)
 
     localization_payload = manifest_payload.get("localization")
+    localization_solve = parse_rust_localization_solve(localization_payload)
+    if localization_solve is not None:
+        event_time_ns = localization_solve.provenance.window_center_time_ns
     if isinstance(localization_payload, dict) and isinstance(localization_payload.get("position_m"), list):
         localization_position_m = tuple(float(value) for value in localization_payload["position_m"])
         localization_confidence = float(localization_payload.get("confidence") or 0.0)
-        localization_position_covariance_m2 = _coerce_covariance_matrix(
+        localization_position_covariance_m2 = coerce_covariance_matrix(
             localization_payload.get("position_covariance_m2")
         )
-        localization_range_observability = _optional_bounded_float(
+        localization_range_observability = optional_bounded_float(
             localization_payload.get("range_observability")
         )
-        localization_residual_rms_seconds = _optional_nonnegative_float(
+        localization_residual_rms_seconds = optional_nonnegative_float(
             localization_payload.get("residual_rms_seconds")
         )
-        localization_range_projection_mode = _optional_nonempty_string(
+        localization_range_projection_mode = optional_nonempty_string(
             localization_payload.get("range_projection_mode")
         )
         localization_method = str(
@@ -172,17 +204,17 @@ def load_localized_render_manifest_bundle(
             or localization_payload.get("attempted_algorithm")
             or "rust_dsp_worker"
         )
-        localization_pair_tdoas = _coerce_pair_tdoas(localization_payload.get("pair_tdoas"))
-        localization_steering_direction = _coerce_vec3(
+        localization_pair_tdoas = coerce_pair_tdoas(localization_payload.get("pair_tdoas"))
+        localization_steering_direction = coerce_vec3(
             localization_payload.get("steering_direction")
         )
-        localization_sound_speed_mps = _optional_nonnegative_float(
+        localization_sound_speed_mps = optional_nonnegative_float(
             localization_payload.get("sound_speed_mps")
         )
-        localization_dominant_frequency_hz = _optional_nonnegative_float(
+        localization_dominant_frequency_hz = optional_nonnegative_float(
             localization_payload.get("dominant_frequency_hz")
         )
-        localization_received_level_dbfs = _optional_finite_float(
+        localization_received_level_dbfs = optional_finite_float(
             localization_payload.get("received_level_dbfs")
         )
         # The classifier render's fallback contract overrides the retained solver
@@ -234,14 +266,15 @@ def load_localized_render_manifest_bundle(
             reporting_modality=reporting_modality,
             time_quality=time_quality,
             environment=environment,
-            render_kind=render_kind or _optional_nonempty_string(
+            render_kind=render_kind or optional_nonempty_string(
                 birdnet_payload.get("spatial_blend_mode")
             ),
-            render_start_ns=_optional_int(classifier_render_payload.get("render_start_ns")),
-            render_end_ns=_optional_int(classifier_render_payload.get("render_end_ns")),
+            render_start_ns=optional_int(classifier_render_payload.get("render_start_ns")),
+            render_end_ns=optional_int(classifier_render_payload.get("render_end_ns")),
             fallback_reason=fallback_reason,
             audio_quality=audio_quality,
             authoritative_classification=authoritative_classification,
+            localization_solve=localization_solve,
         ),
         cursor_updates=cursor_updates,
     )
@@ -261,104 +294,6 @@ def _load_audio_coverage_stats(payload: Any) -> AudioCoverageStats | None:
         if stats:
             return max(stats, key=lambda item: (item.missing_ratio, item.max_gap_seconds))
     return _audio_coverage_stats_from_mapping(payload)
-
-
-def _optional_int(value: Any) -> int | None:
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _optional_nonempty_string(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
-
-
-def _optional_nonnegative_float(value: Any) -> float | None:
-    if value is None:
-        return None
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not np.isfinite(parsed) or parsed < 0.0:
-        return None
-    return parsed
-
-
-def _optional_finite_float(value: Any) -> float | None:
-    """Coerce to a finite float allowing negatives (e.g. dBFS received levels)."""
-    if value is None:
-        return None
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not np.isfinite(parsed):
-        return None
-    return parsed
-
-
-def _optional_bounded_float(value: Any) -> float | None:
-    parsed = _optional_nonnegative_float(value)
-    if parsed is None or parsed > 1.0:
-        return None
-    return parsed
-
-
-def _coerce_covariance_matrix(value: Any) -> list[list[float]] | None:
-    if not isinstance(value, list) or len(value) != 3:
-        return None
-    matrix: list[list[float]] = []
-    for row in value:
-        if not isinstance(row, list) or len(row) != 3:
-            return None
-        try:
-            parsed_row = [float(cell) for cell in row]
-        except (TypeError, ValueError):
-            return None
-        if any(not np.isfinite(cell) for cell in parsed_row):
-            return None
-        matrix.append(parsed_row)
-    return matrix
-
-
-def _coerce_vec3(value: Any) -> tuple[float, float, float] | None:
-    if not isinstance(value, (list, tuple)) or len(value) != 3:
-        return None
-    try:
-        parsed = tuple(float(component) for component in value)
-    except (TypeError, ValueError):
-        return None
-    if any(not np.isfinite(component) for component in parsed):
-        return None
-    return parsed  # type: ignore[return-value]
-
-
-def _coerce_pair_tdoas(value: Any) -> list[dict] | None:
-    if not isinstance(value, list) or not value:
-        return None
-    pairs: list[dict] = []
-    for entry in value:
-        if not isinstance(entry, dict):
-            continue
-        try:
-            pairs.append(
-                {
-                    "ch_a": int(entry["ch_a"]),
-                    "ch_b": int(entry["ch_b"]),
-                    "lag_seconds": float(entry["lag_seconds"]),
-                    "confidence": float(entry.get("confidence", 0.0)),
-                }
-            )
-        except (KeyError, TypeError, ValueError):
-            continue
-    return pairs or None
 
 
 def _audio_coverage_stats_from_mapping(payload: dict[str, Any]) -> AudioCoverageStats | None:
@@ -428,11 +363,16 @@ def _load_authoritative_classification(
 
 def _load_source_context_from_channel_manifest(
     node_context: dict[str, Any],
-    source_handle: JournalPayloadHandle,
 ) -> tuple[NodeSpec, int, str, TimeQuality, dict[str, Any]]:
-    """Reconstruct source context from node_context embedded in memory-path manifests."""
+    """Reconstruct source context from node_context embedded in memory-path manifests.
+
+    The event time is packet-derived only (``toa_ns``). Receipt time (``tor_ns``)
+    is never substituted: it can sit seconds away from when the sound arrived.
+    """
     node = NodeSpec.model_validate(node_context["node"])
-    toa_ns = node_context.get("toa_ns") or source_handle.toa_ns or source_handle.tor_ns or 0
+    toa_ns = node_context.get("toa_ns")
+    if not toa_ns:
+        raise ValueError("Rust DSP manifest carries no packet-derived time (node_context.toa_ns)")
     source_type = str(node_context.get("source_type") or "raw_sensor")
     time_quality_str = str(node_context.get("time_quality") or "free_running")
     try:

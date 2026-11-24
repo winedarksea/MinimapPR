@@ -3,8 +3,9 @@
 FusionNode builds its seam collaborators through
 ``build_localization_seam_collaborators`` and never constructs them itself, so
 later work plugs real implementations in here without editing
-``fusion_node.py``. Every default below is a no-op: with these defaults the
-Rust render handoff and the Python ingest path behave exactly as before.
+``fusion_node.py``. The P2 seams (geometry, solution, provenance) are live and
+act only on renders whose solve carries provenance; a legacy render keeps the
+pre-overhaul path. The observation sink stays a no-op until P5 lands.
 
 Seams and their contracts:
 
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
     from minimappr.api.rust_dsp_manifests import LocalizedClassifierRenderRequest
     from minimappr.core.fusion_node import FusionNode
     from minimappr.core.fusion_stage_carriers import LocalizedCandidate
+    from minimappr.core.localized_handoff_geometry import SolveFrameToSiteTransform
     from minimappr.core.localized_render_localization import HandoffLocalizationEstimate
     from minimappr.models import NodeSpec
 
@@ -44,11 +46,32 @@ SOLVE_ORIGIN_PYTHON_INGEST = "python_ingest"
 
 @dataclass(frozen=True, slots=True)
 class HandoffSolveGeometry:
-    """Sensors a render's solve used, in solve order, with their positions."""
+    """Sensors a render's solve used, in solve order, with their site positions.
+
+    ``selected_*`` are the contributing sensors: selection, centroid, range
+    gate and capability tier follow them. ``pair_index_sensor_ids`` /
+    ``pair_index_positions`` are the solve's full ordered sensor list (pair
+    channel ``i`` is entry ``i``) when it differs from the selection; ``None``
+    means the selection itself is that list (legacy registry geometry).
+    ``solve_frame_to_site`` maps the sidecar's solve-frame outputs (position,
+    covariance, steering) into the site frame; ``None`` means they already are.
+    ``rejected_reason`` set means the solve cannot be placed in the site frame
+    and the render must be reported omni with that reason.
+    """
 
     selected_sensor_ids: list[str]
     selected_positions: dict[str, Any]
     reference_sensor: str
+    pair_index_sensor_ids: list[str] | None = None
+    pair_index_positions: dict[str, Any] | None = None
+    solve_frame_to_site: "SolveFrameToSiteTransform | None" = None
+    rejected_reason: str | None = None
+
+    def ordered_pair_sensor_ids(self) -> list[str]:
+        return self.selected_sensor_ids if self.pair_index_sensor_ids is None else self.pair_index_sensor_ids
+
+    def ordered_pair_sensor_positions(self) -> dict[str, Any]:
+        return self.selected_positions if self.pair_index_positions is None else self.pair_index_positions
 
 
 class HandoffGeometryResolver(Protocol):
@@ -92,25 +115,6 @@ class PositionObservationSink(Protocol):
     ) -> None: ...
 
 
-class RegistryGeometryResolver:
-    """Default: the registry geometry stands."""
-
-    def resolve_handoff_geometry(self, *, payload, node, registry_geometry) -> HandoffSolveGeometry | None:
-        return None
-
-
-class DefaultPathSolutionResolver:
-    """Default: the handoff's built-in estimate path stands."""
-
-    def resolve_handoff_solution(self, *, payload, geometry, reporting_modality):
-        return None
-
-
-class NoOpLocalizationProvenanceRecorder:
-    def record_handoff_provenance(self, *, payload, geometry, localized_product, reporting_modality) -> None:
-        return None
-
-
 class NoOpPositionObservationSink:
     async def observe_localized_solve(self, *, localized_product, reporting_modality, solve_origin) -> None:
         return None
@@ -128,12 +132,21 @@ def build_localization_seam_collaborators(host: "FusionNode") -> LocalizationSea
     """Seam factory FusionNode calls once at construction.
 
     ``host`` is passed so real implementations can reach settings, the tracker
-    and the coordinate frame; the no-op defaults ignore it.
+    and the coordinate frame (read per call, so an origin rebind applies).
     """
-    del host
+    # Imported here: these modules import this one for the seam carriers.
+    from minimappr.core.localization_provenance import (
+        ManifestLocalizationProvenanceRecorder,
+        site_frame_id_for_coordinate_frame,
+    )
+    from minimappr.core.localized_handoff_geometry import ManifestSolveGeometryResolver
+    from minimappr.core.localized_handoff_solution import SnapshotGeometrySolutionResolver
+
     return LocalizationSeamCollaborators(
-        geometry_resolver=RegistryGeometryResolver(),
-        solution_resolver=DefaultPathSolutionResolver(),
-        provenance_recorder=NoOpLocalizationProvenanceRecorder(),
+        geometry_resolver=ManifestSolveGeometryResolver(
+            site_frame_id_provider=lambda: site_frame_id_for_coordinate_frame(host.coordinate_frame)
+        ),
+        solution_resolver=SnapshotGeometrySolutionResolver(host),
+        provenance_recorder=ManifestLocalizationProvenanceRecorder(),
         position_observation_sink=NoOpPositionObservationSink(),
     )
