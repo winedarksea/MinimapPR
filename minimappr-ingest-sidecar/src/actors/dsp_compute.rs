@@ -83,13 +83,13 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
             far_field_max_range_m: payload.config.localization_far_field_max_range_m,
             range_prior_m,
             range_prior_std_m,
-            half_space: payload.half_space,
+            half_space: payload.sensor_layout.solve_half_space(),
             ..SrpPhatConfig::default()
         };
         estimate_tetrahedral_steering(
             windows.as_slice(),
             &payload.active_channels,
-            payload.mic_positions_m.as_slice(),
+            payload.sensor_layout.positions_m.as_slice(),
             payload.sr,
             payload.effective_sound_speed_mps,
             srp_config,
@@ -159,7 +159,7 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
                 config: &payload.config,
                 sound_speed_mps: payload.effective_sound_speed_mps,
                 channels: render_channels,
-                mic_positions_m: payload.mic_positions_m.as_slice(),
+                mic_positions_m: payload.sensor_layout.positions_m.as_slice(),
                 sample_rate_hz: payload.sr,
                 localization: Some(&localization),
                 fallback_reason: fallback_reason.clone(),
@@ -170,7 +170,7 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
                 config: &payload.config,
                 sound_speed_mps: payload.effective_sound_speed_mps,
                 channels: listenable_render_channels,
-                mic_positions_m: payload.mic_positions_m.as_slice(),
+                mic_positions_m: payload.sensor_layout.positions_m.as_slice(),
                 sample_rate_hz: payload.sr,
                 localization: Some(&localization),
                 fallback_reason: fallback_reason.clone(),
@@ -263,7 +263,7 @@ pub async fn run_io(result: ComputeMathResult) {
         payload.config.localization_band_hz,
         pair_diagnostics,
         received_level_dbfs,
-        payload.half_space != crate::srp_phat::HalfSpace::None,
+        payload.sensor_layout.solve_half_space() != crate::srp_phat::HalfSpace::None,
     );
 
     let has_classifier_render = render_result
@@ -499,6 +499,8 @@ fn pair_tdoa_diagnostic(pair: &PairTdoa) -> PairTdoaDiagnostic {
         delay_samples: pair.tdoa.delay_samples,
         lag_seconds: pair.tdoa.lag_seconds,
         confidence: pair.tdoa.confidence,
+        is_cross_node: None,
+        timing_uncertainty_seconds: None,
     }
 }
 
@@ -529,6 +531,7 @@ fn localization_manifest_payload(
         received_level_dbfs,
         half_space_applied,
         pair_tdoas,
+        solve_provenance: None,
     }
 }
 

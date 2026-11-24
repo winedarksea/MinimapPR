@@ -14,8 +14,7 @@ pub(super) struct OwnedManifestAudio {
     pub(super) buffer_channel_count: usize,
     pub(super) buffer_channel_indices: Vec<usize>,
     pub(super) classification_window_sec: f64,
-    pub(super) mic_positions_m: Vec<[f32; 3]>,
-    pub(super) half_space: crate::srp_phat::HalfSpace,
+    pub(super) sensor_layout: Arc<SolveSensorLayout>,
     pub(super) effective_sound_speed_mps: f32,
     pub(super) buffer_start_time_ns: i128,
     pub(super) buffer_end_time_ns: i128,
@@ -107,8 +106,12 @@ impl DspWorker {
             .classification_window_seconds
             .max(MIN_BIRDNET_CLASSIFICATION_WINDOW_SECONDS)
             .max(self.config.window_seconds);
-        let mic_positions_m = mic_positions_from_manifest(&manifest);
-        let half_space = half_space_from_node_context(&manifest.node_context);
+        let sensor_layout = Arc::new(solve_sensor_layout_from_manifest(
+            &manifest,
+            stream_key_node_id(&stream_key),
+            decoded_segments[0].sample_rate_hz.max(1),
+            self.automatic_gps_geometry.origin_as_geodetic(),
+        ));
         let buffer_routing = resolve_cluster_buffer_routing(&manifest, &stream_key, channel_count);
         let (buffer_key, buffer_channel_count, buffer_channel_indices) = buffer_routing
             .map(|routing| {
@@ -220,8 +223,7 @@ impl DspWorker {
                 buffer_channel_count,
                 buffer_channel_indices: buffer_channel_indices.clone(),
                 classification_window_sec,
-                mic_positions_m: mic_positions_m.clone(),
-                half_space,
+                sensor_layout: sensor_layout.clone(),
                 effective_sound_speed_mps,
                 buffer_start_time_ns,
                 buffer_end_time_ns,

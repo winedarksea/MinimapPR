@@ -250,7 +250,7 @@ impl DeferredLocalizationScheduler {
 ///
 /// Only the channels the parked geometry describes are re-read: a cluster
 /// buffer grows (never reorders) when a member joins, and a channel index
-/// past `mic_positions_m` would panic SRP on the rayon pool (process abort).
+/// past the parked `sensor_layout` would panic SRP on the rayon pool (process abort).
 fn finalize_pending_payload(
     pending: PendingLocalization,
     buffers: &[SensorStreamBuffer],
@@ -261,7 +261,7 @@ fn finalize_pending_payload(
         classifier_render,
         ..
     } = pending;
-    let parked_geometry_channel_count = payload.mic_positions_m.len().min(buffers.len());
+    let parked_geometry_channel_count = payload.sensor_layout.sensor_count().min(buffers.len());
     let parked_buffers = &buffers[..parked_geometry_channel_count];
     payload.channel_states = localization_channel_states_centered(
         parked_buffers,
@@ -305,7 +305,10 @@ fn attach_classifier_render_windows(
 /// Localization-only copy of a buffered-manifest payload: SRP on, no
 /// classifier render (release attaches a deferred one), and the source manifest marked memory-path so the
 /// original payload stays the only one that consumes a persisted manifest.
-pub(crate) fn localization_only_template(payload: &ComputePayload) -> ComputePayload {
+pub(crate) fn localization_only_template(
+    payload: &ComputePayload,
+    trigger_attempt_kind: crate::dsp_worker::SolveAttemptKind,
+) -> ComputePayload {
     let mut manifest = payload.manifest.clone();
     manifest.raw_payload = Some(Vec::new());
     let channel_count = payload.channel_states.len();
@@ -319,8 +322,9 @@ pub(crate) fn localization_only_template(payload: &ComputePayload) -> ComputePay
         classification_coverage: vec![None; channel_count],
         classifier_render_start_ns: None,
         classifier_render_end_ns: None,
-        mic_positions_m: payload.mic_positions_m.clone(),
-        half_space: payload.half_space,
+        sensor_layout: payload.sensor_layout.clone(),
+        attempt_kind: trigger_attempt_kind,
+        pair_admission: payload.pair_admission.clone(),
         source_ids: payload.source_ids.clone(),
         sr: payload.sr,
         now_ns: payload.now_ns,

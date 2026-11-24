@@ -10,6 +10,20 @@ pub(super) struct BufferedManifestTimingGates {
     pub(super) run_srp: bool,
 }
 
+impl BufferedManifestTimingGates {
+    /// Today's only live trigger is the absolute-RMS gate; a solve forced by a
+    /// due classifier render between cadence ticks is a scheduled render.
+    fn solve_attempt_kind(&self) -> SolveAttemptKind {
+        if !self.run_srp {
+            SolveAttemptKind::NotAttempted
+        } else if self.on_localization_cadence {
+            SolveAttemptKind::EventTriggerAbsoluteRms
+        } else {
+            SolveAttemptKind::ScheduledClassifierRender
+        }
+    }
+}
+
 impl DspWorker {
     pub(super) fn dispatch_large_array_manifest(
         &mut self,
@@ -46,8 +60,9 @@ impl DspWorker {
             classification_coverage: (0..owned.buffer_channel_count).map(|_| None).collect(),
             classifier_render_start_ns: Some(owned.buffer_start_time_ns.max(0) as u128),
             classifier_render_end_ns: Some(owned.buffer_end_time_ns.max(0) as u128),
-            mic_positions_m: owned.mic_positions_m,
-            half_space: owned.half_space,
+            sensor_layout: owned.sensor_layout,
+            attempt_kind: SolveAttemptKind::NotAttempted,
+            pair_admission: SolvePairAdmission::admit_all(),
             source_ids: owned.source_ids,
             sr: owned.sr,
             now_ns: owned.now_ns,
@@ -180,8 +195,9 @@ impl DspWorker {
                     classification_coverage: fallback_render_coverage,
                     classifier_render_start_ns,
                     classifier_render_end_ns,
-                    mic_positions_m: owned.mic_positions_m,
-                    half_space: owned.half_space,
+                    sensor_layout: owned.sensor_layout,
+                    attempt_kind: SolveAttemptKind::NotAttempted,
+                    pair_admission: SolvePairAdmission::admit_all(),
                     source_ids: owned.source_ids,
                     sr: owned.sr,
                     now_ns: owned.now_ns,
@@ -223,6 +239,9 @@ impl DspWorker {
             pending_backlog_depth,
             &windows,
         );
+        // Taken before a coverage deferral clears `run_srp`: the parked
+        // template solves for this same trigger.
+        let trigger_attempt_kind = timing_gates.solve_attempt_kind();
         let coverage_deferral_span = self.coverage_deferral_span(
             &owned.buffer_key,
             buffered.localization_center_time_ns,
@@ -315,8 +334,13 @@ impl DspWorker {
             classification_coverage,
             classifier_render_start_ns,
             classifier_render_end_ns,
-            mic_positions_m: owned.mic_positions_m,
-            half_space: owned.half_space,
+            sensor_layout: owned.sensor_layout,
+            attempt_kind: if timing_gates.run_srp {
+                trigger_attempt_kind
+            } else {
+                SolveAttemptKind::NotAttempted
+            },
+            pair_admission: SolvePairAdmission::admit_all(),
             source_ids: owned.source_ids,
             sr: owned.sr,
             now_ns: owned.now_ns,
@@ -344,7 +368,7 @@ impl DspWorker {
             coverage_deferral_span,
             self.buffers.get(&payload.stream_key),
         ) {
-            let template = localization_only_template(&payload);
+            let template = localization_only_template(&payload, trigger_attempt_kind);
             self.deferred_localizations.defer(
                 &payload.stream_key,
                 buffers,

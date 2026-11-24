@@ -2,6 +2,7 @@
 //! solve, render and publish one manifest.
 
 use super::*;
+pub(crate) use minimappr_core::localization_sensor_entry::SolveAttemptKind;
 
 #[derive(Clone, Debug)]
 pub(crate) struct LocalizationChannelState {
@@ -31,10 +32,13 @@ pub(crate) struct ComputePayload {
     pub(crate) classification_coverage: Vec<Option<AudioCoverageStats>>,
     pub(crate) classifier_render_start_ns: Option<u128>,
     pub(crate) classifier_render_end_ns: Option<u128>,
-    /// Per-channel mic positions extracted from node_context.sensor_offsets_m.
-    pub(crate) mic_positions_m: Vec<[f32; 3]>,
-    /// Coplanar array up/down constraint extracted from node_context.node.half_space.
-    pub(crate) half_space: crate::srp_phat::HalfSpace,
+    /// Ordered sensors + positions snapshot taken at ingest; index = buffer channel.
+    pub(crate) sensor_layout: Arc<SolveSensorLayout>,
+    /// Why this payload solves (or `not_attempted`); published by R6.
+    #[expect(dead_code, reason = "emitted in solve_provenance by milestone 1 (R6)")]
+    pub(crate) attempt_kind: SolveAttemptKind,
+    /// Pairs SRP/covariance/render may use (admit-all until milestone 2, R7).
+    pub(crate) pair_admission: SolvePairAdmission,
     pub(crate) source_ids: Vec<String>,
     pub(crate) sr: u32,
     pub(crate) now_ns: u128,

@@ -22,6 +22,18 @@ pub(super) struct ReportedGpsPosition {
 }
 
 impl AutomaticGpsGeometry {
+    pub(super) fn origin_as_geodetic(
+        &self,
+    ) -> Option<minimappr_core::localization_sensor_entry::GeodeticOrigin> {
+        self.origin.map(
+            |origin| minimappr_core::localization_sensor_entry::GeodeticOrigin {
+                lat: origin.lat_deg,
+                lon: origin.lon_deg,
+                alt_m: origin.alt_m,
+            },
+        )
+    }
+
     pub(super) fn update_from_manifest(
         &mut self,
         manifest: &DspManifest,
