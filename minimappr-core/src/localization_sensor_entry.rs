@@ -303,6 +303,98 @@ mod tests {
         );
     }
 
+    /// Same JSON as the example in `docs/localization_solve_contract.md`.
+    fn contract_doc_solve_provenance_example() -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 1,
+            "solve_id": "solve-3f2a",
+            "attempt_kind": "event_trigger_absolute_rms",
+            "buffer_scope": "automatic_site_cluster",
+            "cluster_id": "auto-gps",
+            "reporting_node_id": "planar-a",
+            "coordinate_frame": {
+                "frame_id": "site-7",
+                "kind": "site_enu",
+                "origin": {"lat": 45.0, "lon": -93.0, "alt_m": 250.0},
+                "projection": "flat_wgs84_series"
+            },
+            "layout_revision": 12,
+            "geometry_push_revision": 3,
+            "sensors": [
+                {
+                    "sensor_id": "planar-a:ch0",
+                    "node_id": "planar-a",
+                    "node_channel_index": 0,
+                    "position_m": [1.0177, 2.0177, 1.5],
+                    "sample_rate_hz": 16000,
+                    "position_source": "operator_override",
+                    "position_std_m": 0.05,
+                    "clock_source": "gps_locked",
+                    "clock_domain": "utc",
+                    "clock_offset_std_s": 1e-6
+                },
+                {
+                    "sensor_id": "planar-a:ch4",
+                    "node_id": "planar-a",
+                    "node_channel_index": 4,
+                    "position_m": [1.0, 2.0, 1.5],
+                    "sample_rate_hz": 16000,
+                    "position_source": "operator_override",
+                    "position_std_m": 0.05,
+                    "clock_source": "gps_locked",
+                    "clock_domain": "utc",
+                    "clock_offset_std_s": 1e-6
+                },
+                {
+                    "sensor_id": "point-b:ch0",
+                    "node_id": "point-b",
+                    "node_channel_index": 0,
+                    "position_m": [6.0, 0.0, 1.5],
+                    "sample_rate_hz": 16000,
+                    "position_source": "reported_gps",
+                    "position_std_m": null,
+                    "clock_source": "ntp_disciplined",
+                    "clock_domain": "utc",
+                    "clock_offset_std_s": 0.002
+                }
+            ],
+            "active_sensor_indices": [0, 1, 2],
+            "excluded_sensors": [],
+            "excluded_pairs": [
+                {"sensor_index_a": 0, "sensor_index_b": 2, "reason": "timeline_residual_over_limit"},
+                {"sensor_index_a": 1, "sensor_index_b": 2, "reason": "timeline_residual_over_limit"}
+            ],
+            "node_timing": [
+                {
+                    "node_id": "planar-a",
+                    "time_quality": "gps_locked",
+                    "clock_offset_std_s": 1e-6,
+                    "timeline_residual_ns": 1200,
+                    "last_timestamp_step_ns": null,
+                    "timestamp_step_count": 0
+                },
+                {
+                    "node_id": "point-b",
+                    "time_quality": "ntp_disciplined",
+                    "clock_offset_std_s": 0.002,
+                    "timeline_residual_ns": 15000000,
+                    "last_timestamp_step_ns": -21000000,
+                    "timestamp_step_count": 1
+                }
+            ],
+            "window_center_time_ns": 1764000000016000000_i64,
+            "window_seconds": 0.032,
+            "solve_sample_rate_hz": 16000
+        })
+    }
+
+    #[test]
+    fn contract_doc_example_round_trips_field_for_field() {
+        let example = contract_doc_solve_provenance_example();
+        let parsed: SolveProvenance = serde_json::from_value(example.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), example);
+    }
+
     #[test]
     fn unrecognised_time_quality_parses_as_unknown() {
         let parsed: NodeTimeQuality = serde_json::from_str("\"ntp_sync\"").unwrap();
