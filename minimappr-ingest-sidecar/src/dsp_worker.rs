@@ -117,7 +117,7 @@ pub struct DspWorkerState {
     /// Latest full-snapshot site geometry (launch env or
     /// `POST /api/v1/dsp/geometry`). Applied by milestone 1 (R2); a solve
     /// already parked keeps the layout it triggered with.
-    #[expect(dead_code, reason = "applied by milestone 1 (R2)")]
+    #[cfg_attr(not(test), expect(dead_code, reason = "applied by milestone 1 (R2)"))]
     pub site_geometry: Option<Arc<minimappr_core::localization_sensor_entry::SiteGeometryPush>>,
 }
 
@@ -586,3 +586,15 @@ mod dsp_worker_coverage_race_tests;
 #[cfg(test)]
 #[path = "dsp_worker_never_streamed_member_tests.rs"]
 mod dsp_worker_never_streamed_member_tests;
+
+#[cfg(test)]
+#[path = "dsp_worker_test_node_fixtures.rs"]
+mod dsp_worker_test_node_fixtures;
+
+#[cfg(test)]
+#[path = "dsp_worker_solve_manifest_inspection.rs"]
+mod dsp_worker_solve_manifest_inspection;
+
+#[cfg(test)]
+#[path = "dsp_worker_mixed_cluster_solve_tests.rs"]
+mod dsp_worker_mixed_cluster_solve_tests;

@@ -82,6 +82,19 @@ impl RaceHarness {
             .fetch_add(milliseconds * 1_000_000, Ordering::AcqRel);
     }
 
+    /// Delivers a caller-built manifest (fixture nodes, custom geometry).
+    pub(super) async fn deliver_manifest(&mut self, manifest: DspManifest) {
+        self.worker.process_one(manifest, 1).await;
+    }
+
+    pub(super) fn storage_root(&self) -> &std::path::Path {
+        self._tmp.path()
+    }
+
+    pub(super) fn has_pending_localization(&self, buffer_key: &str) -> bool {
+        self.worker.deferred_localizations.has_pending(buffer_key)
+    }
+
     pub(super) async fn deliver(&mut self, node_id: &str, frame_index: usize) {
         self.deliver_with_cluster_positions(node_id, frame_index, two_tetra_cluster_positions())
             .await;
