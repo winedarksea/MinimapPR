@@ -133,6 +133,12 @@ class HotPathMetricTolerance:
     max_absolute_increase: float = 0.0
     absolute_ceiling: float | None = None
     gated: bool = True
+    # Zero-tolerance counters take the worst run: a packet gap or disk write in
+    # one of N repeats is a real regression that a median would hide.
+    aggregate_worst_case_across_runs: bool = False
+    # Wall-clock and allocator metrics only compare on the same hardware; on a
+    # different machine they are reported but not gated.
+    depends_on_machine: bool = False
 
     def allowed_maximum(self, baseline_value: float) -> float:
         allowed = baseline_value * (1.0 + self.max_relative_increase) + self.max_absolute_increase
@@ -145,22 +151,24 @@ def _default_hot_path_tolerances() -> dict[str, HotPathMetricTolerance]:
     # Counters that should be zero on a healthy box get no or tiny absolute
     # slack. Latency and RSS are wall-clock / allocator noisy on a shared dev
     # machine (debug sidecar build, other builds running), so they get relative
-    # headroom plus an absolute floor; the harness also takes the median of
-    # repeated runs.
+    # headroom plus an absolute floor and the median of repeated runs; counters
+    # take the worst run.
+    counter = {"aggregate_worst_case_across_runs": True}
+    timing = {"depends_on_machine": True}
     return {
-        "packet_gap_count": HotPathMetricTolerance(),
-        "app_stream_reconnect_count": HotPathMetricTolerance(),
-        "ingest_rejected_post_count": HotPathMetricTolerance(),
-        "ingest_queue_drop_count": HotPathMetricTolerance(max_absolute_increase=2.0),
-        "buffer_discontinuity_count": HotPathMetricTolerance(max_absolute_increase=2.0),
-        "solve_latency_p50_ms": HotPathMetricTolerance(max_relative_increase=0.30, max_absolute_increase=75.0),
-        "solve_latency_p95_ms": HotPathMetricTolerance(max_relative_increase=0.50, max_absolute_increase=250.0),
-        "ingest_post_round_trip_p50_ms": HotPathMetricTolerance(max_relative_increase=0.50, max_absolute_increase=5.0),
-        "ingest_post_round_trip_p95_ms": HotPathMetricTolerance(max_relative_increase=0.50, max_absolute_increase=20.0),
-        "sidecar_peak_rss_mb": HotPathMetricTolerance(max_relative_increase=0.25, max_absolute_increase=32.0),
-        "app_peak_rss_mb": HotPathMetricTolerance(max_relative_increase=0.25, max_absolute_increase=64.0),
-        "raw_audio_disk_bytes_written": HotPathMetricTolerance(absolute_ceiling=0.0),
-        "raw_audio_disk_files_written": HotPathMetricTolerance(absolute_ceiling=0.0),
+        "packet_gap_count": HotPathMetricTolerance(**counter),
+        "app_stream_reconnect_count": HotPathMetricTolerance(**counter),
+        "ingest_rejected_post_count": HotPathMetricTolerance(**counter),
+        "ingest_queue_drop_count": HotPathMetricTolerance(max_absolute_increase=2.0, **counter),
+        "buffer_discontinuity_count": HotPathMetricTolerance(max_absolute_increase=2.0, **counter),
+        "solve_latency_p50_ms": HotPathMetricTolerance(max_relative_increase=0.30, max_absolute_increase=75.0, **timing),
+        "solve_latency_p95_ms": HotPathMetricTolerance(max_relative_increase=0.50, max_absolute_increase=250.0, **timing),
+        "ingest_post_round_trip_p50_ms": HotPathMetricTolerance(max_relative_increase=0.50, max_absolute_increase=5.0, **timing),
+        "ingest_post_round_trip_p95_ms": HotPathMetricTolerance(max_relative_increase=0.50, max_absolute_increase=20.0, **timing),
+        "sidecar_peak_rss_mb": HotPathMetricTolerance(max_relative_increase=0.25, max_absolute_increase=32.0, **timing),
+        "app_peak_rss_mb": HotPathMetricTolerance(max_relative_increase=0.25, max_absolute_increase=64.0, **timing),
+        "raw_audio_disk_bytes_written": HotPathMetricTolerance(absolute_ceiling=0.0, **counter),
+        "raw_audio_disk_files_written": HotPathMetricTolerance(absolute_ceiling=0.0, **counter),
         "raw_audio_out_of_order_span_count": HotPathMetricTolerance(gated=False),
         "solve_count": HotPathMetricTolerance(gated=False),
         "detection_count": HotPathMetricTolerance(gated=False),

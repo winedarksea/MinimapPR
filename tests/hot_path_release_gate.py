@@ -37,11 +37,12 @@ import threading
 import time
 from pathlib import Path
 
+from minimappr.sim.replay_gate_config import HotPathGateConfig
 from tests.hot_path_release_gate_metrics import (
     NANOSECONDS_PER_MILLISECOND,
     GateRunCapture,
     assemble_gate_metrics,
-    median_metrics,
+    aggregate_repeated_run_metrics,
     observer_was_complete,
 )
 from tests.hot_path_release_gate_probes import (
@@ -119,13 +120,13 @@ def machine_identity() -> dict:
         ).stdout.strip() or cpu_model
     import psutil
 
+    # Only hardware identity: an OS point update or Python patch release must not
+    # make the baseline "another machine" and silently un-gate latency/RSS.
     return {
-        "platform": platform.platform(),
         "machine": platform.machine(),
         "cpu_model": cpu_model,
         "logical_cpu_count": os.cpu_count(),
         "memory_gib": round(psutil.virtual_memory().total / 1024**3, 1),
-        "python": platform.python_version(),
     }
 
 
@@ -356,7 +357,9 @@ def run_hot_path_release_gate(
         "scenario": scenario.to_json_dict(),
         "repeat_count": repeat_count,
         "observer_complete": all(observer_was_complete(run["components"]) for run in runs),
-        "metrics": median_metrics([run["metrics"] for run in runs]),
+        "metrics": aggregate_repeated_run_metrics(
+            [run["metrics"] for run in runs], HotPathGateConfig().metric_tolerances
+        ),
         "runs": runs,
     }
 

@@ -107,8 +107,8 @@ Precedence, highest first: pushed placement, then GPS, then the rest.
 ### 3.6 `clock_source` and `node_timing[].time_quality`
 
 `gps_locked`, `gps_holdover`, `ntp_disciplined`, `free_running`, `unknown`.
-Firmware / Python `TimeQuality` spellings; any other value (including legacy
-`ntp_sync`) is reported as `unknown`.
+Firmware / Python `TimeQuality` spellings; legacy `ntp_sync` is read as
+`ntp_disciplined` (as Python converts it on load); any other value is reported as `unknown`.
 
 ## 4. `coordinate_frame`
 
@@ -303,7 +303,7 @@ must equal the Python `Settings` defaults.
 | `MINIMAPPR_LOCALIZATION_MAX_SOLVE_SENSORS` | integer | `16` |
 | `MINIMAPPR_LOCALIZATION_MIN_PAIR_BASELINE_M` | float | `0.02` |
 | `MINIMAPPR_LOCALIZATION_CROSS_NODE_MAX_TIMELINE_RESIDUAL_SECONDS` | float | `0.010` |
-| `MINIMAPPR_LOCALIZATION_CLOCK_CLASS_UNCERTAINTY_SECONDS` | JSON object `{time_quality: seconds}` | `{"gps_locked":1e-6,"gps_holdover":1e-4,"ntp_disciplined":0.002,"ntp_sync":0.002,"free_running":0.05}` |
+| `MINIMAPPR_LOCALIZATION_CLOCK_CLASS_UNCERTAINTY_SECONDS` | JSON object `{time_quality: seconds}` | `{"gps_locked":1e-6,"gps_holdover":1e-4,"ntp_disciplined":0.002,"free_running":0.05}` |
 | `MINIMAPPR_LOCALIZATION_CLOCK_UNKNOWN_UNCERTAINTY_SECONDS` | float | `0.005` |
 | `MINIMAPPR_LOCALIZATION_TIMESTAMP_STEP_THRESHOLD_SECONDS` | float | `0.002` |
 | `MINIMAPPR_LOCALIZATION_TIMESTAMP_STEP_RECOVERY_HOLDOFF_SECONDS` | float | `30.0` |

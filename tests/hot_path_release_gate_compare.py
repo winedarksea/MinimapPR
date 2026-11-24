@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from minimappr.sim.replay_gate_config import HotPathGateConfig, HotPathMetricTolerance
 
@@ -44,6 +44,15 @@ class HotPathComparison:
         return "\n".join(lines)
 
 
+_HARDWARE_IDENTITY_FIELDS = ("machine", "cpu_model", "logical_cpu_count", "memory_gib")
+
+
+def _hardware_identity(machine: dict | None) -> tuple:
+    # Older results also carry OS/Python strings; only hardware decides comparability.
+    machine = machine or {}
+    return tuple(machine.get(field_name) for field_name in _HARDWARE_IDENTITY_FIELDS)
+
+
 def _format(value: float | None) -> str:
     return "-" if value is None else f"{value:.2f}"
 
@@ -78,8 +87,11 @@ def compare_hot_path_results(baseline: dict, candidate: dict, config: HotPathGat
     for label, result in (("baseline", baseline), ("candidate", candidate)):
         if not result.get("observer_complete", False):
             comparison.errors.append(f"{label} run's stream observer missed events; its counts are not trustworthy")
-    if baseline.get("machine") != candidate.get("machine"):
-        comparison.warnings.append("baseline and candidate ran on different machines; latency and RSS are not comparable")
+    same_machine = _hardware_identity(baseline.get("machine")) == _hardware_identity(candidate.get("machine"))
+    if not same_machine:
+        comparison.warnings.append(
+            "baseline and candidate ran on different machines; latency and RSS are reported but not gated"
+        )
     if baseline.get("sidecar_build_profile") != candidate.get("sidecar_build_profile"):
         comparison.warnings.append("sidecar build profiles differ")
 
@@ -96,6 +108,8 @@ def compare_hot_path_results(baseline: dict, candidate: dict, config: HotPathGat
     )
     for metric_name in metric_names:
         tolerance = config.metric_tolerances.get(metric_name, HotPathMetricTolerance(gated=False))
+        if tolerance.depends_on_machine and not same_machine:
+            tolerance = replace(tolerance, gated=False)
         row, error = _compare_metric(
             metric_name, baseline_metrics.get(metric_name), candidate_metrics.get(metric_name), tolerance
         )

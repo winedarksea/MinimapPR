@@ -45,7 +45,8 @@ def test_defaults_match_the_shared_contract() -> None:
 
 def test_clock_class_defaults_cover_every_time_quality() -> None:
     uncertainty_by_class = Settings().localization_clock_class_uncertainty_seconds
-    assert set(uncertainty_by_class) == {quality.value for quality in TimeQuality}
+    # Legacy ntp_sync is converted to ntp_disciplined on load, so it needs no entry.
+    assert set(uncertainty_by_class) == {quality.value for quality in TimeQuality if quality is not TimeQuality.NTP_SYNC}
     assert uncertainty_by_class["gps_locked"] < uncertainty_by_class["ntp_disciplined"]
 
 

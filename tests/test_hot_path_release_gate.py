@@ -18,7 +18,7 @@ import pytest
 from minimappr.sim.replay_gate_config import HotPathGateConfig
 from tests.hot_path_release_gate import run_hot_path_release_gate
 from tests.hot_path_release_gate_compare import compare_hot_path_results
-from tests.hot_path_release_gate_metrics import classify_disk_writes, median_metrics
+from tests.hot_path_release_gate_metrics import aggregate_repeated_run_metrics, classify_disk_writes
 from tests.hot_path_release_gate_probes import account_raw_audio_forwarding, written_files
 from tests.hot_path_release_gate_scenario import FULL_SCENARIO, SMOKE_SCENARIO, build_post_schedule
 from tests.rust_sidecar_binary import REPOSITORY_ROOT, cargo_is_available
@@ -134,9 +134,22 @@ def test_disk_write_classification_excludes_db_and_reports_snippets_apart():
     assert snippets == {"/d/snippets/a.wav": 7}
 
 
-def test_median_metrics_ignores_missing_values():
-    merged = median_metrics([{"a": 1, "b": None}, {"a": 3, "b": 2.0}, {"a": 2, "b": None}])
+def test_aggregate_metrics_ignores_missing_values():
+    merged = aggregate_repeated_run_metrics([{"a": 1, "b": None}, {"a": 3, "b": 2.0}, {"a": 2, "b": None}])
     assert merged == {"a": 2.0, "b": 2.0}
+
+
+def test_aggregate_metrics_takes_worst_run_for_zero_tolerance_counters():
+    tolerances = HotPathGateConfig().metric_tolerances
+    runs = [
+        {"packet_gap_count": 0, "raw_audio_disk_bytes_written": 0, "solve_latency_p95_ms": 900.0},
+        {"packet_gap_count": 3, "raw_audio_disk_bytes_written": 4096, "solve_latency_p95_ms": 5000.0},
+        {"packet_gap_count": 0, "raw_audio_disk_bytes_written": 0, "solve_latency_p95_ms": 1000.0},
+    ]
+    merged = aggregate_repeated_run_metrics(runs, tolerances)
+    assert merged["packet_gap_count"] == 3.0
+    assert merged["raw_audio_disk_bytes_written"] == 4096.0
+    assert merged["solve_latency_p95_ms"] == 1000.0
 
 
 def test_post_schedule_is_deterministic_and_follows_membership():

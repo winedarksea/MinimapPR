@@ -293,6 +293,15 @@ def test_lone_rotated_planar_node_localizes_and_stores_a_detection(monkeypatch, 
     ), [{f"{a}|{b}": round(error_s * 1e6, 1) for (a, b), error_s in errors.items()} for errors in lag_errors_by_solve]
 
 
+class StoredDetectionContractViolation(AssertionError):
+    """Raised only by the stored-detection contract check.
+
+    The strict xfail below names this type so that a harness failure (rejected
+    upload, registration error, app start-up) fails the test outright instead of
+    passing as the expected pipeline defect.
+    """
+
+
 ARRIVAL_ORDERS = {
     "planar_first": (PLANAR_NODE_ID, POINT_NODE_ID),
     "point_first": (POINT_NODE_ID, PLANAR_NODE_ID),
@@ -301,6 +310,7 @@ ARRIVAL_ORDERS = {
 
 @pytest.mark.xfail(
     strict=True,
+    raises=StoredDetectionContractViolation,
     reason=(
         "localization overhaul milestone 1: Rust drops the planar node from the mixed auto-GPS cluster, "
         "Python maps cluster pair indices onto the reporter's channels, stored event time is not the "
@@ -321,4 +331,5 @@ def test_mixed_planar_and_point_cluster_stores_an_exact_detection(
         localization_solver=localization_solver,
     )
     violations = stored_detection_contract_violations(result)
-    assert not violations, "\n".join(violations)
+    if violations:
+        raise StoredDetectionContractViolation("\n".join(violations))

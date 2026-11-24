@@ -108,12 +108,14 @@ pub enum SensorPositionSource {
 }
 
 /// Node timing class; spellings match firmware / Python `TimeQuality`.
-/// Any other value (including legacy `ntp_sync`) deserializes as `unknown`.
+/// Legacy `ntp_sync` is NTP-disciplined (Python converts it the same way on
+/// load); any other value deserializes as `unknown`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeTimeQuality {
     GpsLocked,
     GpsHoldover,
+    #[serde(alias = "ntp_sync")]
     NtpDisciplined,
     FreeRunning,
     #[serde(other)]
@@ -397,8 +399,14 @@ mod tests {
 
     #[test]
     fn unrecognised_time_quality_parses_as_unknown() {
-        let parsed: NodeTimeQuality = serde_json::from_str("\"ntp_sync\"").unwrap();
+        let parsed: NodeTimeQuality = serde_json::from_str("\"sundial\"").unwrap();
         assert_eq!(parsed, NodeTimeQuality::Unknown);
+    }
+
+    #[test]
+    fn legacy_ntp_sync_parses_as_ntp_disciplined() {
+        let parsed: NodeTimeQuality = serde_json::from_str("\"ntp_sync\"").unwrap();
+        assert_eq!(parsed, NodeTimeQuality::NtpDisciplined);
     }
 
     #[test]

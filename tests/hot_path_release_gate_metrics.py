@@ -179,10 +179,20 @@ def observer_was_complete(components: dict) -> bool:
     )
 
 
-def median_metrics(per_run_metrics: list[dict]) -> dict:
-    """Per-metric median over repeated runs; damps shared-machine timing noise."""
+def aggregate_repeated_run_metrics(per_run_metrics: list[dict], tolerances: dict | None = None) -> dict:
+    """Per-metric aggregate over repeated runs.
+
+    Median damps shared-machine timing noise; metrics whose tolerance asks for
+    the worst case (zero-tolerance counters) take the max so one bad run fails.
+    """
+    tolerances = tolerances or {}
     merged: dict = {}
     for metric_name in per_run_metrics[0]:
         values = [run[metric_name] for run in per_run_metrics if run.get(metric_name) is not None]
-        merged[metric_name] = float(statistics.median(values)) if values else None
+        if not values:
+            merged[metric_name] = None
+            continue
+        tolerance = tolerances.get(metric_name)
+        worst_case = tolerance is not None and tolerance.aggregate_worst_case_across_runs
+        merged[metric_name] = float(max(values)) if worst_case else float(statistics.median(values))
     return merged

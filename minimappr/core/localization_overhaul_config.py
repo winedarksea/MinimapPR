@@ -45,7 +45,6 @@ _CLOCK_CLASS_UNCERTAINTY_SECONDS_BY_TIME_QUALITY: dict[TimeQuality, float] = {
     TimeQuality.GPS_LOCKED: 1.0e-6,
     TimeQuality.GPS_HOLDOVER: 1.0e-4,
     TimeQuality.NTP_DISCIPLINED: 2.0e-3,
-    TimeQuality.NTP_SYNC: 2.0e-3,
     TimeQuality.FREE_RUNNING: 5.0e-2,
 }
 
