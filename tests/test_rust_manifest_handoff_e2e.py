@@ -1,16 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import os
-import socket
-import sqlite3
-import struct
-import subprocess
 import sys
 import time
-import urllib.request
-from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -19,10 +11,7 @@ from fastapi.testclient import TestClient
 
 from tests.hybrid_settings import hybrid_production_settings
 from minimappr.api.rust_dsp_manifests import LocalizedClassifierRenderRequest
-from minimappr.api.spool_consumer import IngestSpoolConfig, IngestSpoolConsumer
-from minimappr.api.transports import HttpIngestTransport
 from minimappr.classifiers.base import AudioClassifier, ClassificationResult
-from minimappr.config import Settings
 from minimappr.main import app
 from minimappr.core.audio_buffer import AudioCoverageStats, MultiSensorBuffer
 from minimappr.core.fusion_node import FusionNode
@@ -32,14 +21,32 @@ from minimappr.core.node_registry import NodeRegistry
 from minimappr.core.tracking import TrackManager
 from minimappr.core.zones import ZoneMatcher
 from minimappr.models import GeoPoint, NodeSpec, NodeType
+from minimappr.sim.binary_ingest_encoder import (
+    BinaryIngestFrame,
+    BinaryIngestNodeHeader,
+    encode_binary_ingest_payload,
+)
 from minimappr.storage.db import Storage
-from minimappr.utils.audio import encode_pcm16le_b64
 from tests.helpers import SIRITH_TETRA_SENSOR_OFFSETS_M, prepend_noise_padding, synthesize_delayed_array_channels
-from tests.rust_sidecar_binary import build_rust_sidecar_binary, cargo_is_available
+from tests.rust_sidecar_e2e_helpers import (
+    FAKE_CLASSIFIER_CONFIDENCE,
+    FAKE_CLASSIFIER_LABEL,
+    configure_full_app_with_rust_sidecar,
+    fake_sidecar_classifier_command_json,
+    http_json,
+    pick_free_tcp_port,
+    post_binary_ingest,
+    post_store_forward_ingest,
+    running_rust_sidecar,
+    store_forward_payload,
+    wait_for_detection_from_node,
+    wait_for_live_dsp_results,
+    write_fake_sidecar_classifier_helper,
+)
 
 
-MINIMAPPR_ROOT = Path(__file__).resolve().parents[1]
 TEST_SOURCE_POSITION_M = (0.35, 0.18, 0.07)
+TEST_NODE_GEO = GeoPoint(lat=44.987, lon=-93.258, alt_m=281.5)
 
 
 class _ConstantBirdClassifier(AudioClassifier):
@@ -59,46 +66,34 @@ class _UnexpectedClassifier(AudioClassifier):
         raise AssertionError("Python classifier should not run when Rust classification is authoritative")
 
 
-class _RecordingHttpIngestTransport(HttpIngestTransport):
-    def __init__(self, fusion_node: FusionNode) -> None:
-        super().__init__(fusion_node)
-        self.binary_deliveries = 0
-        self.localized_render_deliveries = 0
-
-    async def deliver_binary(self, payload) -> object:
-        self.binary_deliveries += 1
-        return await super().deliver_binary(payload)
-
-    async def deliver_localized_render(self, payload) -> None:
-        self.localized_render_deliveries += 1
-        await super().deliver_localized_render(payload)
-
-
-def _binary_string(value: str) -> bytes:
-    encoded = value.encode("utf-8")
-    assert len(encoded) <= 255
-    return struct.pack("<B", len(encoded)) + encoded
-
-
-def _binary_node(*, node_id: str) -> bytes:
-    payload = bytearray()
-    payload += _binary_string(node_id)
-    payload += struct.pack("<B", 0)
-    payload += struct.pack("<B", 1)  # has_geo_position = true
-    payload += struct.pack("<fff", 44.987, -93.258, 281.5)
-    payload += struct.pack("<B", len(SIRITH_TETRA_SENSOR_OFFSETS_M))
-    for offset_x, offset_y, offset_z in SIRITH_TETRA_SENSOR_OFFSETS_M:
-        payload += struct.pack("<fff", offset_x, offset_y, offset_z)
-    capabilities = ["audio", "array_localization"]
-    payload += struct.pack("<B", len(capabilities))
-    for capability in capabilities:
-        payload += _binary_string(capability)
-    payload += _binary_string("sirith-test-hardware")
-    payload += _binary_string("sirith-test-firmware")
-    payload += _binary_string("gps_locked")
-    payload += _binary_string("test")
-    payload += struct.pack("<I", 1)
-    return bytes(payload)
+def _binary_ingest_payload(
+    *,
+    node_id: str,
+    samples: np.ndarray,
+    start_time_ns: int,
+    sequence: int,
+    sample_rate_hz: int,
+) -> bytes:
+    """One single-frame tetra upload, as the legacy firmware header describes it."""
+    node = BinaryIngestNodeHeader(
+        node_id=node_id,
+        node_type=NodeType.SIRITH_TETRA,
+        sensor_offsets_m=list(SIRITH_TETRA_SENSOR_OFFSETS_M),
+        position_geo=TEST_NODE_GEO,
+        hardware="sirith-test-hardware",
+        firmware="sirith-test-firmware",
+        gps_signal="gps_locked",
+        position_source="test",
+    )
+    frame = BinaryIngestFrame(
+        channels_first_samples=samples,
+        start_time_ns=start_time_ns,
+        sample_rate_hz=sample_rate_hz,
+        start_sample_index=0,
+        sequence=sequence,
+        tor_ns=start_time_ns + 1_000_000,
+    )
+    return encode_binary_ingest_payload(node, [frame])
 
 
 def _node_spec(node_id: str) -> NodeSpec:
@@ -112,386 +107,31 @@ def _node_spec(node_id: str) -> NodeSpec:
     )
 
 
-def _binary_frame(
-    samples: np.ndarray,
-    *,
-    start_time_ns: int,
-    sequence: int,
-    start_sample_index: int,
-    sample_rate_hz: int,
-) -> bytes:
-    channels, samples_per_channel = samples.shape
-    end_sample_index = start_sample_index + samples_per_channel
-    end_time_ns = start_time_ns + int(round(samples_per_channel / sample_rate_hz * 1_000_000_000))
-    pcm = np.clip(samples.T, -1.0, 0.9999695)
-    pcm16 = (pcm * 32768.0).astype("<i2").tobytes()
-    payload = bytearray()
-    payload += struct.pack(
-        "<QQQQIBQQQB",
-        start_time_ns,
-        end_time_ns,
-        start_sample_index,
-        end_sample_index,
-        sample_rate_hz,
-        channels,
-        sequence,
-        start_time_ns,
-        start_time_ns + 1_000_000,
-        0,
-    )
-    payload += struct.pack("<B", 0)
-    payload += struct.pack("<B", 0)
-    payload += struct.pack("<I", samples_per_channel)
-    payload += pcm16
-    return bytes(payload)
-
-
-def _binary_ingest_payload(*, node_id: str, frames: list[bytes]) -> bytes:
-    payload = bytearray()
-    payload += b"MMB2"
-    payload += struct.pack("<BBH", 2, 0, len(frames))
-    payload += _binary_node(node_id=node_id)
-    for frame in frames:
-        payload += frame
-    return bytes(payload)
-
-
-def _pick_free_tcp_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
-def _http_json(
-    port: int,
-    path: str,
-    *,
-    method: str = "GET",
-    body: bytes | None = None,
-    headers: dict[str, str] | None = None,
-) -> dict | list:
-    request = urllib.request.Request(
-        f"http://127.0.0.1:{port}{path}",
-        data=body,
-        method=method,
-        headers=headers or {},
-    )
-    with urllib.request.urlopen(request, timeout=5.0) as response:
-        payload = response.read().decode("utf-8")
-    return json.loads(payload) if payload else {}
-
-
-def _sidecar_output(process: subprocess.Popen[str]) -> str:
-    if process.stdout is None:
-        return ""
-    try:
-        return process.stdout.read()
-    except Exception:
-        return ""
-
-
-def _ensure_sidecar_binary() -> Path:
-    if not cargo_is_available():
-        pytest.skip("cargo toolchain not available; cannot build the Rust sidecar")
-    return build_rust_sidecar_binary()
-
-
-def _wait_for_sidecar_ready(process: subprocess.Popen[str], *, port: int, timeout_s: float = 15.0) -> None:
-    deadline = time.monotonic() + timeout_s
-    last_error: Exception | None = None
-    while time.monotonic() < deadline:
-        if process.poll() is not None:
-            raise AssertionError(
-                "Rust sidecar exited before becoming ready.\n"
-                f"Captured output:\n{_sidecar_output(process)}"
-            )
-        try:
-            payload = _http_json(port, "/healthz")
-            if payload.get("status") == "ok":
-                return
-        except Exception as exc:  # pragma: no cover - transient startup race
-            last_error = exc
-        time.sleep(0.05)
-    raise AssertionError(
-        "Timed out waiting for the Rust sidecar health endpoint.\n"
-        f"Last error: {last_error}\n"
-        f"Captured output:\n{_sidecar_output(process)}"
-    )
-
-
-@contextmanager
-def _running_rust_sidecar(tmp_path: Path, *, extra_env: dict[str, str] | None = None):
-    binary_path = _ensure_sidecar_binary()
-    if not binary_path.exists():
-        pytest.skip(f"Rust sidecar binary not found at {binary_path}")
-
-    port = _pick_free_tcp_port()
-    spool_dir = tmp_path / "sidecar_spool"
-    env = {
-        **os.environ,
-        "MINIMAPPR_SIDECAR_PORT": str(port),
-        "MINIMAPPR_INGEST_SPOOL_DIR": str(spool_dir),
-        "MINIMAPPR_SIDECAR_STORAGE_MODE": "journal",
-        "MINIMAPPR_SIDECAR_ALLOW_NON_TMPFS_JOURNAL": "true",
-        "MINIMAPPR_SIDECAR_HYBRID_RENDER_ENABLED": "true",
-        "MINIMAPPR_CLASSIFICATION_AUDIO_SOURCE": "beamformed",
-        "MINIMAPPR_LOCALIZATION_BAND_MIN_HZ": "300.0",
-        "MINIMAPPR_LOCALIZATION_BAND_MAX_HZ": "3500.0",
-        "MINIMAPPR_CLASSIFICATION_WINDOW_SECONDS": "30.0",
-        "MINIMAPPR_LOCALIZATION_SRP_GRID_RESOLUTION_M": "0.05",
-        "MINIMAPPR_LOCALIZATION_SEARCH_PADDING_M": "0.3",
-        "MINIMAPPR_DEFAULT_TEMPERATURE_C": "20.0",
-        "MINIMAPPR_DEFAULT_HUMIDITY": "0.5",
-        "MINIMAPPR_SIDECAR_TOTAL_JOURNAL_BUDGET_BYTES": str(32 * 1024 * 1024),
-        "MINIMAPPR_SIDECAR_ADMISSION_RESERVE_BYTES": str(4 * 1024 * 1024),
-        "MINIMAPPR_SIDECAR_DERIVED_CACHE_BUDGET_BYTES": str(16 * 1024 * 1024),
-        "MINIMAPPR_SIDECAR_DERIVED_CACHE_ADMISSION_RESERVE_BYTES": str(2 * 1024 * 1024),
-    }
-    if extra_env is not None:
-        env.update(extra_env)
-    process = subprocess.Popen(
-        [str(binary_path)],
-        cwd=str(MINIMAPPR_ROOT),
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-    try:
-        _wait_for_sidecar_ready(process, port=port)
-        yield port, spool_dir
-    finally:
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=5.0)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5.0)
-
-
-def _wait_for_manifest_pair(spool_dir: Path, *, timeout_s: float = 15.0) -> list[dict]:
-    deadline = time.monotonic() + timeout_s
-    manifest_dir = spool_dir / "journal" / "manifests"
-    last_manifest_types: list[str] = []
-    while time.monotonic() < deadline:
-        payloads: list[dict] = []
-        # Manifests live in pending/ or consumed/ subdirectories.
-        if manifest_dir.exists():
-            for path in sorted(manifest_dir.rglob("*.json")):
-                payloads.append(json.loads(path.read_text(encoding="utf-8")))
-        last_manifest_types = [str(payload.get("manifest_type")) for payload in payloads]
-        manifest_types = set(last_manifest_types)
-        if {"localization_result", "classifier_render"}.issubset(manifest_types):
-            return payloads
-        time.sleep(0.05)
-    raise AssertionError(
-        "Timed out waiting for Rust DSP manifest pair. "
-        f"Last manifest types: {last_manifest_types}"
-    )
-
-
-def _wait_for_live_dsp_results(
-    port: int,
-    *,
-    predicate,
-    timeout_s: float = 15.0,
-    description: str,
-) -> list[dict]:
-    deadline = time.monotonic() + timeout_s
-    last_manifest_types: list[str] = []
-    while time.monotonic() < deadline:
-        payloads = _http_json(port, "/api/v1/dsp/results?limit=200")
-        assert isinstance(payloads, list)
-        last_manifest_types = [str(payload.get("manifest_type")) for payload in payloads]
-        if predicate(payloads):
-            return payloads
-        time.sleep(0.05)
-    status = _http_json(port, "/api/v1/dsp/status")
-    raise AssertionError(
-        f"Timed out waiting for live Rust DSP results matching {description}. "
-        f"Last manifest types: {last_manifest_types}. "
-        f"Status snapshot: {status}"
-    )
-
-
-def _write_fake_sidecar_classifier_helper(tmp_path: Path) -> Path:
-    helper_path = tmp_path / "fake_sidecar_classifier_helper.py"
-    helper_path.write_text(
-        """
-from __future__ import annotations
-
-import json
-import sys
-
-for line in sys.stdin:
-    if not line.strip():
-        continue
-    request = json.loads(line)
-    response = {
-        "request_id": request["request_id"],
-        "label": "winter wren",
-        "label_confidence": 0.91,
-        "scores": {
-            "winter wren": 0.91,
-            "sparrow": 0.04,
-        },
-    }
-    sys.stdout.write(json.dumps(response) + "\\n")
-    sys.stdout.flush()
-""".strip()
-        + "\n",
-        encoding="utf-8",
-    )
-    return helper_path
-
-
-def _configure_http_app_sidecar_env(monkeypatch, tmp_path: Path, *, sidecar_port: int) -> Path:
-    binary_path = _ensure_sidecar_binary()
-    db_path = tmp_path / "http_app_sidecar.db"
-    snippet_dir = tmp_path / "snippets"
-    artifact_dir = tmp_path / "artifacts"
-    spool_dir = tmp_path / "spool"
-    monkeypatch.setenv("MINIMAPPR_DB_PATH", str(db_path))
-    monkeypatch.setenv("MINIMAPPR_SNIPPET_DIR", str(snippet_dir))
-    monkeypatch.setenv("MINIMAPPR_LARGE_ARTIFACT_DIR", str(artifact_dir))
-    monkeypatch.setenv("MINIMAPPR_INGEST_SPOOL_DIR", str(spool_dir))
-    monkeypatch.setenv("MINIMAPPR_INGEST_STORAGE_MODE", "journal")
-    monkeypatch.setenv("MINIMAPPR_DIRECT_INGEST_ENABLED", "false")
-    monkeypatch.setenv("MINIMAPPR_INGEST_SIDECAR_ENABLED", "true")
-    monkeypatch.setenv("MINIMAPPR_INGEST_SIDECAR_BINARY_PATH", str(binary_path))
-    monkeypatch.setenv("MINIMAPPR_SIDECAR_PORT", str(sidecar_port))
-    monkeypatch.setenv("MINIMAPPR_SIDECAR_ALLOW_NON_TMPFS_JOURNAL", "true")
-    monkeypatch.setenv("MINIMAPPR_BIRDNET_ENABLED", "true")
-    monkeypatch.setenv("MINIMAPPR_CLASSIFICATION_AUDIO_SOURCE", "beamformed")
-    monkeypatch.setenv("MINIMAPPR_LOCALIZATION_ALGORITHM", "srp_phat")
-    monkeypatch.setenv("MINIMAPPR_LOCALIZATION_STRATEGY", "fixed")
-    monkeypatch.setenv("MINIMAPPR_LOCALIZATION_BAND_MIN_HZ", "300.0")
-    monkeypatch.setenv("MINIMAPPR_LOCALIZATION_BAND_MAX_HZ", "3500.0")
-    monkeypatch.setenv("MINIMAPPR_BIRDNET_CHUNKED_DISPATCH_ENABLED", "true")
-    monkeypatch.setenv("MINIMAPPR_CLASSIFICATION_WINDOW_SECONDS", "30.0")
-    monkeypatch.setenv("MINIMAPPR_MAX_SENSOR_BUFFER_SECONDS", "32.0")
-    monkeypatch.setenv("MINIMAPPR_LOCALIZATION_SRP_GRID_RESOLUTION_M", "0.05")
-    monkeypatch.setenv("MINIMAPPR_LOCALIZATION_SEARCH_PADDING_M", "0.3")
-    monkeypatch.setenv("MINIMAPPR_DEFAULT_TEMPERATURE_C", "20.0")
-    monkeypatch.setenv("MINIMAPPR_DEFAULT_HUMIDITY", "0.5")
-    monkeypatch.setenv("MINIMAPPR_INGEST_SPOOL_POLL_INTERVAL_SECONDS", "0.05")
-    monkeypatch.setenv("MINIMAPPR_TRIGGER_RMS", "0.000001")
-    monkeypatch.setenv("MINIMAPPR_TRIGGER_COOLDOWN_SECONDS", "0")
-    monkeypatch.setenv("MINIMAPPR_LOCALIZATION_WINDOW_SECONDS", "0.02")
-    monkeypatch.setenv("MINIMAPPR_FUSION_WORKER_COUNT", "1")
-    monkeypatch.setenv("MINIMAPPR_SNIPPET_RETENTION_SECONDS", "0")
-    monkeypatch.setenv("MINIMAPPR_REPORTING_WINDOW_SECONDS", "1.0")
-    monkeypatch.setenv("MINIMAPPR_SIDECAR_TOTAL_JOURNAL_BUDGET_BYTES", str(32 * 1024 * 1024))
-    monkeypatch.setenv("MINIMAPPR_SIDECAR_ADMISSION_RESERVE_BYTES", str(4 * 1024 * 1024))
-    monkeypatch.setenv("MINIMAPPR_SIDECAR_DERIVED_CACHE_BUDGET_BYTES", str(16 * 1024 * 1024))
-    monkeypatch.setenv("MINIMAPPR_SIDECAR_DERIVED_CACHE_ADMISSION_RESERVE_BYTES", str(2 * 1024 * 1024))
-    monkeypatch.setenv("MINIMAPPR_SIDECAR_CLASSIFIER_COMMAND_JSON", "")
-    return spool_dir
-
-
-def _wait_for_detection_from_node(client: TestClient, *, node_id: str, timeout_s: float = 20.0) -> dict:
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        response = client.get("/api/v1/detections", params={"limit": 20})
-        assert response.status_code == 200
-        detections = response.json()
-        for detection in detections:
-            if detection.get("source_node_id") == node_id:
-                return detection
-        time.sleep(0.05)
-    raise AssertionError(f"Timed out waiting for detection from node {node_id}")
-
-
-def _load_first_journal_entry(spool_dir: Path) -> dict:
-    index_paths = sorted((spool_dir / "journal" / "streams").glob("*/segments/*.index.jsonl"))
-    for index_path in index_paths:
-        for line in index_path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                return json.loads(line)
-
-    # Channel-only ingest does not persist segment index files; reconstruct a
-    # minimal entry from seg-mem source handles in manifests.
-    manifest_dir = spool_dir / "journal" / "manifests"
-    manifest_paths = sorted(manifest_dir.rglob("*.json")) if manifest_dir.exists() else []
-    for manifest_path in manifest_paths:
-        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-        source_handles = payload.get("source_handles") or []
-        if not source_handles:
-            continue
-        first_handle = source_handles[0]
-        segment_id = str(first_handle.get("segment_id") or "")
-        stream_key = str(first_handle.get("stream_key") or "")
-        if not stream_key or not segment_id.startswith("seg-mem-"):
-            continue
-        parts = segment_id.split("-")
-        if len(parts) < 4:
-            continue
-        try:
-            journal_epoch = int(parts[2])
-            journal_sequence = int(parts[3])
-        except ValueError:
-            continue
-        return {
-            "stream_key": stream_key,
-            "journal_epoch": journal_epoch,
-            "journal_sequence": journal_sequence,
-        }
-
-    raise AssertionError("expected at least one journal entry")
-
-
-def _load_cursor_row(spool_dir: Path, stream_key: str, *, consumer_name: str = "python-ingest") -> sqlite3.Row:
-    connection = sqlite3.connect(spool_dir / "journal" / "consumer_state.sqlite3")
-    connection.row_factory = sqlite3.Row
-    try:
-        row = connection.execute(
-            """
-            SELECT journal_epoch, last_fully_processed_journal_sequence
-            FROM consumer_cursors
-            WHERE consumer_name = ? AND stream_key = ?
-            """,
-            (consumer_name, stream_key),
-        ).fetchone()
-        assert row is not None
-        return row
-    finally:
-        connection.close()
-
-
-def _synthesized_localizable_channels(sample_rate_hz: int) -> np.ndarray:
+def _padded_chirp_and_tone_signal(sample_rate_hz: int, *, noise_seed: int) -> np.ndarray:
     duration_seconds = 0.8
     timestamps_s = np.linspace(0.0, duration_seconds, int(round(duration_seconds * sample_rate_hz)), endpoint=False)
     chirp = np.sin(2.0 * np.pi * (700.0 * timestamps_s + 850.0 * np.square(timestamps_s)))
     tone = 0.35 * np.sin(2.0 * np.pi * 1700.0 * timestamps_s)
     mono_signal = (0.65 * chirp + tone).astype(np.float32)
     mono_signal *= np.hanning(mono_signal.size).astype(np.float32)
-    padded_signal = prepend_noise_padding(
+    return prepend_noise_padding(
         mono_signal,
         pad_samples=max(1, int(round(0.25 * sample_rate_hz))),
         noise_rms=0.002,
-        seed=sample_rate_hz,
+        seed=noise_seed,
     )
+
+
+def _synthesized_localizable_channels(sample_rate_hz: int) -> np.ndarray:
     return synthesize_delayed_array_channels(
-        padded_signal,
+        _padded_chirp_and_tone_signal(sample_rate_hz, noise_seed=sample_rate_hz),
         sample_rate_hz,
         source_position_m=TEST_SOURCE_POSITION_M,
     )
 
 
 def _synthesized_mixed_cluster_channels(sample_rate_hz: int) -> tuple[np.ndarray, np.ndarray]:
-    duration_seconds = 0.8
-    timestamps_s = np.linspace(0.0, duration_seconds, int(round(duration_seconds * sample_rate_hz)), endpoint=False)
-    chirp = np.sin(2.0 * np.pi * (700.0 * timestamps_s + 850.0 * np.square(timestamps_s)))
-    tone = 0.35 * np.sin(2.0 * np.pi * 1700.0 * timestamps_s)
-    mono_signal = (0.65 * chirp + tone).astype(np.float32)
-    mono_signal *= np.hanning(mono_signal.size).astype(np.float32)
-    padded_signal = prepend_noise_padding(
-        mono_signal,
-        pad_samples=max(1, int(round(0.25 * sample_rate_hz))),
-        noise_rms=0.002,
-        seed=sample_rate_hz + 101,
-    )
+    padded_signal = _padded_chirp_and_tone_signal(sample_rate_hz, noise_seed=sample_rate_hz + 101)
     tetra_channels = synthesize_delayed_array_channels(
         padded_signal,
         sample_rate_hz,
@@ -504,58 +144,6 @@ def _synthesized_mixed_cluster_channels(sample_rate_hz: int) -> tuple[np.ndarray
         sensor_offsets_m=((0.8, 0.6, 0.4),),
     )
     return tetra_channels, point_channel
-
-
-def _store_forward_payload(
-    *,
-    node_id: str,
-    node_type: str,
-    sensor_offsets_m: list[list[float]],
-    channels: np.ndarray,
-    start_time_ns: int,
-    sequence: int,
-    cluster_id: str,
-    cluster_sensor_positions: dict[str, list[float]],
-    sample_rate_hz: int,
-) -> dict:
-    samples_per_channel = int(channels.shape[1])
-    end_time_ns = start_time_ns + int(round(samples_per_channel / sample_rate_hz * 1_000_000_000))
-    return {
-        "node": {
-            "id": node_id,
-            "node_type": node_type,
-            "position_m": [0.0, 0.0, 0.0],
-            "sensor_offsets_m": sensor_offsets_m,
-            "capabilities": ["audio", "array_localization"],
-            "metadata": {},
-            "properties": {
-                "cluster_sensor_positions": cluster_sensor_positions,
-            },
-            "cluster_id": cluster_id,
-        },
-        "sort_by_toa": True,
-        "buffered_frames": [
-            {
-                "frame": {
-                    "start_time_ns": start_time_ns,
-                    "utc_start_ns": start_time_ns,
-                    "utc_end_ns": end_time_ns,
-                    "start_sample_index": 0,
-                    "end_sample_index": samples_per_channel,
-                    "sample_rate_hz": sample_rate_hz,
-                    "channels": int(channels.shape[0]),
-                    "encoding": "pcm16le",
-                    "samples_per_channel": samples_per_channel,
-                    "samples_b64": encode_pcm16le_b64(channels),
-                    "sequence": sequence,
-                    "time_quality": "gps_locked",
-                    "toa_ns": start_time_ns,
-                    "tor_ns": start_time_ns + 1_000_000,
-                    "source_type": "raw_sensor",
-                }
-            }
-        ],
-    }
 
 
 @pytest.mark.asyncio
@@ -731,42 +319,35 @@ async def test_fusion_classifies_non_authoritative_rust_render_immediately_in_pr
 async def test_live_rust_sidecar_emits_authoritative_classification_fields(monkeypatch, tmp_path: Path) -> None:
     sample_rate_hz = 16_000
     node_id = "sirith-rust-authoritative-live"
-    helper_path = _write_fake_sidecar_classifier_helper(tmp_path)
-    sidecar_port = _pick_free_tcp_port()
-    _configure_http_app_sidecar_env(monkeypatch, tmp_path, sidecar_port=sidecar_port)
-    monkeypatch.setenv(
-        "MINIMAPPR_SIDECAR_CLASSIFIER_COMMAND_JSON",
-        json.dumps([sys.executable, str(helper_path)]),
+    helper_path = write_fake_sidecar_classifier_helper(tmp_path)
+    sidecar_port = pick_free_tcp_port()
+    configure_full_app_with_rust_sidecar(
+        monkeypatch,
+        tmp_path,
+        sidecar_port=sidecar_port,
+        extra_env={
+            "MINIMAPPR_SIDECAR_CLASSIFIER_COMMAND_JSON": fake_sidecar_classifier_command_json(
+                helper_path, sys.executable
+            )
+        },
     )
     # Classification window / buffer inherit the hybrid defaults (30s/32s) from
-    # _configure_http_app_sidecar_env: with birdnet + chunked dispatch enabled,
+    # configure_full_app_with_rust_sidecar: with birdnet + chunked dispatch enabled,
     # the chunk overlap (2.0s) must stay below the classification window.
     payload = _binary_ingest_payload(
         node_id=node_id,
-        frames=[
-            _binary_frame(
-                _synthesized_localizable_channels(sample_rate_hz),
-                start_time_ns=time.time_ns(),
-                sequence=7,
-                start_sample_index=0,
-                sample_rate_hz=sample_rate_hz,
-            )
-        ],
+        samples=_synthesized_localizable_channels(sample_rate_hz),
+        start_time_ns=time.time_ns(),
+        sequence=7,
+        sample_rate_hz=sample_rate_hz,
     )
 
     with TestClient(app) as client:
-        response = _http_json(
-            sidecar_port,
-            "/api/v1/ingest/binary",
-            method="POST",
-            body=payload,
-            headers={"Content-Type": "application/octet-stream"},
-        )
-        assert response["accepted"] is True
+        post_binary_ingest(sidecar_port, payload)
 
-        detection = _wait_for_detection_from_node(client, node_id=node_id)
-        assert detection["label"] == "winter wren"
-        assert detection["label_confidence"] == pytest.approx(0.91)
+        detection = wait_for_detection_from_node(client, node_id=node_id)
+        assert detection["label"] == FAKE_CLASSIFIER_LABEL
+        assert detection["label_confidence"] == pytest.approx(FAKE_CLASSIFIER_CONFIDENCE)
         assert detection["feature_summary"]["classification_path"] == "rust_manifest"
         assert detection["feature_summary"]["rust_classification_authoritative"] is True
         assert detection["feature_summary"]["rust_manifest_id"]
@@ -779,31 +360,19 @@ async def test_rust_memory_only_sidecar_does_not_persist_raw_replay(tmp_path: Pa
     start_time_ns = 1_739_970_000_000_000_000
     payload = _binary_ingest_payload(
         node_id=node_id,
-        frames=[
-            _binary_frame(
-                _synthesized_localizable_channels(sample_rate_hz),
-                start_time_ns=start_time_ns,
-                sequence=1,
-                start_sample_index=0,
-                sample_rate_hz=sample_rate_hz,
-            )
-        ],
+        samples=_synthesized_localizable_channels(sample_rate_hz),
+        start_time_ns=start_time_ns,
+        sequence=1,
+        sample_rate_hz=sample_rate_hz,
     )
 
-    with _running_rust_sidecar(
+    with running_rust_sidecar(
         tmp_path,
         extra_env={"MINIMAPPR_SIDECAR_MEMORY_ONLY_LIVE_PATH": "true"},
     ) as (port, spool_dir):
-        response = _http_json(
-            port,
-            "/api/v1/ingest/binary",
-            method="POST",
-            body=payload,
-            headers={"Content-Type": "application/octet-stream"},
-        )
-        assert response["accepted"] is True
+        post_binary_ingest(port, payload)
 
-        health = _http_json(port, "/healthz")
+        health = http_json(port, "/healthz")
         assert health["backend"]["storage_mode"] == "memory_only_live_path"
         time.sleep(0.2)
         journal_dir = spool_dir / "journal"
@@ -814,8 +383,8 @@ async def test_rust_memory_only_sidecar_does_not_persist_raw_replay(tmp_path: Pa
 
 
 def test_http_app_in_production_mode_consumes_memory_only_rust_sidecar(monkeypatch, tmp_path: Path) -> None:
-    sidecar_port = _pick_free_tcp_port()
-    spool_dir = _configure_http_app_sidecar_env(monkeypatch, tmp_path, sidecar_port=sidecar_port)
+    sidecar_port = pick_free_tcp_port()
+    spool_dir = configure_full_app_with_rust_sidecar(monkeypatch, tmp_path, sidecar_port=sidecar_port)
     monkeypatch.setattr(
         "minimappr.main._build_runtime_classifier", lambda settings: _ConstantBirdClassifier()
     )
@@ -824,15 +393,10 @@ def test_http_app_in_production_mode_consumes_memory_only_rust_sidecar(monkeypat
     start_time_ns = time.time_ns()
     payload = _binary_ingest_payload(
         node_id=node_id,
-        frames=[
-            _binary_frame(
-                _synthesized_localizable_channels(sample_rate_hz),
-                start_time_ns=start_time_ns,
-                sequence=2,
-                start_sample_index=0,
-                sample_rate_hz=sample_rate_hz,
-            )
-        ],
+        samples=_synthesized_localizable_channels(sample_rate_hz),
+        start_time_ns=start_time_ns,
+        sequence=2,
+        sample_rate_hz=sample_rate_hz,
     )
 
     with TestClient(app) as client:
@@ -852,16 +416,9 @@ def test_http_app_in_production_mode_consumes_memory_only_rust_sidecar(monkeypat
         assert blocked_response.status_code == 410
         assert "sidecar" in blocked_response.json()["detail"]
 
-        sidecar_response = _http_json(
-            sidecar_port,
-            "/api/v1/ingest/binary",
-            method="POST",
-            body=payload,
-            headers={"Content-Type": "application/octet-stream"},
-        )
-        assert sidecar_response["accepted"] is True
+        post_binary_ingest(sidecar_port, payload)
 
-        detection = _wait_for_detection_from_node(client, node_id=node_id)
+        detection = wait_for_detection_from_node(client, node_id=node_id)
         assert detection["label"] == "sparrow"
         assert detection["source_node_id"] == node_id
         assert detection["reporting_modality"] == "localized"
@@ -890,7 +447,7 @@ def test_live_rust_sidecar_localizes_mixed_cluster_store_forward_payloads(tmp_pa
         "point-node:ch0": [0.8, 0.6, 0.4],
     }
 
-    tetra_payload = _store_forward_payload(
+    tetra_payload = store_forward_payload(
         node_id="tetra-node",
         node_type="sirith_tetra",
         sensor_offsets_m=[[float(axis) for axis in offset] for offset in SIRITH_TETRA_SENSOR_OFFSETS_M],
@@ -901,7 +458,7 @@ def test_live_rust_sidecar_localizes_mixed_cluster_store_forward_payloads(tmp_pa
         cluster_sensor_positions=cluster_sensor_positions,
         sample_rate_hz=sample_rate_hz,
     )
-    point_payload = _store_forward_payload(
+    point_payload = store_forward_payload(
         node_id="point-node",
         node_type="point",
         sensor_offsets_m=[[0.0, 0.0, 0.0]],
@@ -913,33 +470,18 @@ def test_live_rust_sidecar_localizes_mixed_cluster_store_forward_payloads(tmp_pa
         sample_rate_hz=sample_rate_hz,
     )
 
-    with _running_rust_sidecar(
+    with running_rust_sidecar(
         tmp_path,
         extra_env={
             "MINIMAPPR_CLASSIFICATION_WINDOW_SECONDS": "15.0",
             "MINIMAPPR_CLASSIFIER_RENDER_MIN_INTERVAL_SECONDS": "0.0",
             "MINIMAPPR_DSP_LOCALIZATION_CADENCE_MS": "0",
         },
-    ) as (port, spool_dir):
-        tetra_response = _http_json(
-            port,
-            "/api/v1/ingest/store-forward",
-            method="POST",
-            body=json.dumps(tetra_payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-        )
-        assert tetra_response["accepted"] is True
+    ) as (port, _spool_dir):
+        post_store_forward_ingest(port, tetra_payload)
+        post_store_forward_ingest(port, point_payload)
 
-        point_response = _http_json(
-            port,
-            "/api/v1/ingest/store-forward",
-            method="POST",
-            body=json.dumps(point_payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-        )
-        assert point_response["accepted"] is True
-
-        manifests = _wait_for_live_dsp_results(
+        manifests = wait_for_live_dsp_results(
             port,
             description="mixed-cluster localization and classifier render",
             predicate=lambda payloads: any(
